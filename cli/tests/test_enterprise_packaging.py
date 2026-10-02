@@ -742,11 +742,25 @@ def test_linux_postinstall_reports_a_lifecycle_problem_and_restores_the_trigger(
 
 # GAP-1744: dnf printed only "run verify"; the cause (a missing protected
 # credential) was only in last-package-result.json.
-def test_linux_postinstall_names_the_lifecycle_error_and_the_finish_step(tmp_path: Path) -> None:
-    result_line = (
-        '{"schema_version":2,"ok":false,"action":"ensure","errors":[{"code":"config_invalid","message":'
-        '"protected credential \\"galileo-api-key\\" is not stored; store it with `enterprise secret set --name galileo-api-key`"}]}'
-    )
+# `ensure --json` writes indented JSON (Go SetIndent), so the
+# cause must be found in the multi-line form too, not only a compact line.
+@pytest.mark.parametrize("indent", [None, 2])
+def test_linux_postinstall_names_the_lifecycle_error_and_the_finish_step(tmp_path: Path, indent: int | None) -> None:
+    document = {
+        "schema_version": 2,
+        "ok": False,
+        "action": "ensure",
+        "errors": [
+            {
+                "code": "config_invalid",
+                "message": 'protected credential "galileo-api-key" is not stored; '
+                "store it with `enterprise secret set --name galileo-api-key`",
+            }
+        ],
+        "warnings": [{"code": "unmanaged_leftovers", "message": "not the cause"}],
+    }
+    separators = (",", ":") if indent is None else None
+    result_line = json.dumps(document, indent=indent, separators=separators)
     host = _Host(tmp_path, gateway_rc=1, gateway_out=result_line)
     result = host.run(_linux_scriptlet(host, "postinstall.sh"), "configure")
     assert result.returncode == 0

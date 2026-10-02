@@ -63,8 +63,11 @@ case "$status" in
         echo "defenseclaw-enterprise: installed, but the lifecycle reported a problem, so no deployment is active." >&2
         # Name the cause (the first error of the JSON result, one line) so
         # the administrator does not have to open the file (GAP-1744).
-        cause=$(sed -n 's/.*"errors":\[{"code":"\([^"]*\)","message":"\(\([^"\\]\|\\.\)*\)".*/\1: \2/p' \
-            "$state/last-package-result.json" 2>/dev/null | head -n 1 |
+        # ensure --json writes indented JSON, so join the lines first and
+        # allow whitespace between the tokens.
+        cause=$(tr '\n' ' ' 2>/dev/null <"$state/last-package-result.json" |
+            sed -n 's/.*"errors":[[:space:]]*\[[[:space:]]*{[[:space:]]*"code":[[:space:]]*"\([^"]*\)",[[:space:]]*"message":[[:space:]]*"\(\([^"\\]\|\\.\)*\)".*/\1: \2/p' |
+            head -n 1 |
             sed 's/\\"/"/g; s/\\u003c/</g; s/\\u003e/>/g; s/\\u0026/\&/g')
         if [ -n "$cause" ]; then
             echo "  $cause" >&2
