@@ -1958,6 +1958,7 @@ type purgedUserDetail struct {
 	Data     bool `json:"data"`
 	Binaries bool `json:"binaries"`
 	Gateway  bool `json:"gateway"`
+	UVCache  bool `json:"uv_cache"`
 }
 
 // purgedUserChange names what the purge removed for user: only what it
@@ -1977,8 +1978,15 @@ func purgedUserChange(user string, detail *purgedUserDetail) string {
 		text = fmt.Sprintf("removed "+data, user)
 	case detail.Binaries:
 		text = fmt.Sprintf("removed the DefenseClaw per-user binaries and launcher links of user %s in ~/.local/bin", user)
+	case detail.UVCache:
+		text = fmt.Sprintf("removed DefenseClaw's entries in the uv cache (~/.cache/uv) of user %s", user)
 	default:
 		text = fmt.Sprintf("found no DefenseClaw per-user data or binaries of user %s to remove", user)
+	}
+	// Earlier per-user installers left a DefenseClaw wheel in the account's
+	// uv cache per install; the purge removes those too (GAP-1947).
+	if detail.UVCache && (detail.Data || detail.Binaries) {
+		text += ", and DefenseClaw's entries in its uv cache (~/.cache/uv)"
 	}
 	if detail.Gateway {
 		text += ", after stopping its per-user gateway"

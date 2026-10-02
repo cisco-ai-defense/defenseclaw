@@ -111,7 +111,8 @@ func removeUserHooksAs(ctx context.Context, conn connector.Connector, setupOpts 
 // ~/.defenseclaw goes, including the hook scripts and the account's own
 // hooks the foreign-hook policy moved aside (see connector.PurgeUserState),
 // and so do the binaries and launcher links the per-user install put in
-// ~/.local/bin (see RemoveUserBinaries). The caller stops the account's
+// ~/.local/bin (see RemoveUserBinaries) and DefenseClaw's entries in the
+// account's uv cache (see RemoveUserUVCacheEntries). The caller stops the account's
 // per-user gateway first. A home that no longer exists is not an error.
 func PurgeUserState(ctx context.Context, opts InstallOptions) error {
 	_, err := PurgeUserStateSummary(ctx, opts)
@@ -126,6 +127,19 @@ type PurgeSummary struct {
 	// Binaries reports that per-user binaries or launcher links in
 	// ~/.local/bin were removed.
 	Binaries bool
+	// UVCache reports that DefenseClaw's entries in ~/.cache/uv were
+	// removed (GAP-1947).
+	UVCache bool
+}
+
+// purgeUserFiles removes the per-user binaries and DefenseClaw's uv cache
+// entries of the account, as the account, and records them in summary.
+func purgeUserFiles(home, dataDir string, uid int, summary *PurgeSummary) error {
+	removed, binErr := RemoveUserBinaries(home, dataDir, uid)
+	summary.Binaries = len(removed) > 0
+	cached, cacheErr := RemoveUserUVCacheEntries(home, uid)
+	summary.UVCache = len(cached) > 0
+	return errors.Join(binErr, cacheErr)
 }
 
 // PurgeUserStateSummary is PurgeUserState that also reports what it removed.
@@ -167,9 +181,7 @@ func PurgeUserStateSummary(ctx context.Context, opts InstallOptions) (PurgeSumma
 	if _, err := os.Lstat(dataDir); errors.Is(err, os.ErrNotExist) {
 		// A rerun after the state went still removes the binaries.
 		err := withOwnerCredentials(uid, gid, func() error {
-			removed, err := RemoveUserBinaries(home, dataDir, uid)
-			summary.Binaries = len(removed) > 0
-			return err
+			return purgeUserFiles(home, dataDir, uid, &summary)
 		})
 		return summary, err
 	}
@@ -205,9 +217,7 @@ func PurgeUserStateSummary(ctx context.Context, opts InstallOptions) (PurgeSumma
 			}
 			summary.Data = true
 			removeStaleHookTempEntries(uid, os.TempDir(), filepath.Join(home, ".hermes", "cache", "scratch"))
-			removed, err := RemoveUserBinaries(home, dataDir, uid)
-			summary.Binaries = len(removed) > 0
-			return err
+			return purgeUserFiles(home, dataDir, uid, &summary)
 		})
 	})
 	return summary, err

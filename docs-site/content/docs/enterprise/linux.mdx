@@ -471,7 +471,8 @@ names the accounts that still have `~/.defenseclaw` or per-user binaries in
 `~/.local/bin`. With `--purge` it also
 stops each enrolled user's per-user gateway and removes all of that user's
 `~/.defenseclaw`, the empty agent folders DefenseClaw created in that home,
-and the per-user binaries and launcher links in `~/.local/bin`, and the
+the per-user binaries and launcher links in `~/.local/bin`, and the
+DefenseClaw wheels earlier per-user installs left in `~/.cache/uv`, and the
 result names every user it purged or left alone. If uninstall reports an
 error, it keeps the deployment record, the config and the state, so you can
 fix the cause and rerun it.

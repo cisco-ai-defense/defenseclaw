@@ -61,7 +61,7 @@ func init() {
 	enterpriseHooksRemoveAllCmd.Flags().StringVar(&enterpriseHooksRemoveAllManifest, "manifest", defaultEnterpriseHookManifest,
 		"YAML manifest of per-user hook targets")
 	enterpriseHooksRemoveAllCmd.Flags().BoolVar(&enterpriseHooksRemoveAllPurge, "purge", false,
-		"Also remove each enrolled user's ~/.defenseclaw and per-user binaries in ~/.local/bin, after stopping its per-user gateway")
+		"Also remove each enrolled user's ~/.defenseclaw, per-user binaries in ~/.local/bin and DefenseClaw's entries in ~/.cache/uv, after stopping its per-user gateway")
 	enterpriseHooksRemoveAllCmd.Flags().BoolVar(&enterpriseHookJSON, "json", false, "Emit machine-readable JSON")
 	enterpriseHooksCmd.AddCommand(enterpriseHooksRemoveAllCmd)
 }
