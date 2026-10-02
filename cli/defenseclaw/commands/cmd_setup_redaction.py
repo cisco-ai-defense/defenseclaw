@@ -56,7 +56,7 @@ from defenseclaw.observability.v8_redaction_policy import (
     route_upsert_mutations,
     source_destination,
 )
-from defenseclaw.observability.v8_status import inspect_v8_operator_status
+from defenseclaw.observability.v8_status import inspect_v8_operator_status, local_collector_opt_in_destination
 from defenseclaw.observability.v8_writer import mutate_v8_config
 from defenseclaw.observability.v8_yaml import V8YAMLMutation
 
@@ -996,7 +996,8 @@ def _interactive_advanced(app: AppContext, draft: _WizardDraft) -> None:
                 _render_related_controls(draft.source)
             elif choice == "6":
                 _render_preview(
-                    preview_redaction_mutations(_config_path(app), draft.mutations, data_dir=app.cfg.data_dir)
+                    preview_redaction_mutations(_config_path(app), draft.mutations, data_dir=app.cfg.data_dir),
+                    _status_destinations(app),
                 )
             elif choice == "7":
                 if click.confirm("Discard every staged change?", default=False):
@@ -1331,7 +1332,7 @@ def _execute_mutations(
     except (ValueError, OSError, RuntimeError, ConfigInspectError) as exc:
         raise click.ClickException(str(exc)) from exc
     if not emit_json:
-        _render_preview(preview)
+        _render_preview(preview, _status_destinations(app))
     if not preview.changed:
         if emit_json:
             click.echo(json.dumps(_preview_json(preview, dry_run=dry_run), indent=2, sort_keys=True))
@@ -1468,8 +1469,34 @@ def _render_status(status, *, compact: bool = False) -> None:
             "\nEvery bucket uses profile 'none', so collected telemetry is sent unredacted.\n"
             "Redact it with: defenseclaw setup redaction apply --scope all-configurable --profile sensitive"
         )
+    deliberate: dict[str, list[str]] = {}
     for code, path, summary in status.warnings:
+        local = local_collector_opt_in_destination(code, path, status.destinations)
+        if local:
+            flags = deliberate.setdefault(local, [])
+            if _LOCAL_COLLECTOR_FLAGS[code] not in flags:
+                flags.append(_LOCAL_COLLECTOR_FLAGS[code])
+            continue
         click.echo(f"warning: {code}: {path}: {summary}", err=True)
+    for name, flags in deliberate.items():
+        # One info line, worded like doctor (GAP-1577).
+        click.echo(
+            f"note: {name}: {' and '.join(flags)} set on purpose for a collector on this machine; no action needed"
+        )
+
+
+_LOCAL_COLLECTOR_FLAGS = {
+    "tls_verification_disabled": "--plaintext",
+    "private_export_network_allowed": "--allow-private-networks",
+}
+
+
+def _status_destinations(app: AppContext) -> tuple:
+    """Destinations of the current config, used to recognise deliberate local-collector options."""
+    try:
+        return _operator_status(app).destinations
+    except click.ClickException:
+        return ()
 
 
 def _render_buckets(buckets) -> None:
@@ -1478,7 +1505,7 @@ def _render_buckets(buckets) -> None:
         click.echo(f"  {bucket.name:<24} {','.join(bucket.collected_signals) or '-':<22} {bucket.redaction_profile}")
 
 
-def _render_preview(preview) -> None:
+def _render_preview(preview, destinations: Sequence = ()) -> None:
     click.echo("\nRedaction policy preview")
     click.echo("  Scope: configurable observability log/trace projections only")
     click.echo("  OS notifications and agent hook responses retain separate safety redaction")
@@ -1494,6 +1521,10 @@ def _render_preview(preview) -> None:
     for destination, profiles in preview.locked_profiles:
         click.echo(f"  Managed policy remains locked: {destination} ({', '.join(profiles)})")
     for code, path, summary in preview.warnings:
+        # 'setup redaction status' and doctor already report a deliberate
+        # local-collector option once (GAP-1577).
+        if local_collector_opt_in_destination(code, path, destinations):
+            continue
         click.echo(f"  warning: {code}: {path}: {summary}", err=True)
 
 

@@ -988,9 +988,11 @@ def test_rego(app: AppContext, rego_dir: str | None, verbose: bool) -> None:
 def edit() -> None:
     """Edit policy sections (guardrail, firewall, scanner, actions).
 
-    Editing the active policy also syncs OPA data.json and, by default, asks
-    the running gateway to reload it (``--no-reload`` to skip). Editing any
-    other policy only saves the draft.
+    Each edit changes the active policy unless --policy-name (-p) names
+    another one; the result line names the policy it changed. Editing the
+    active policy also syncs OPA data.json and, by default, asks the running
+    gateway to reload it (``--no-reload`` to skip). Editing any other policy
+    only saves the draft.
     """
 
 
@@ -1046,7 +1048,7 @@ def edit_actions(app: AppContext, severity: str, runtime: str | None, file_actio
         # updates them the same way. A draft edit leaves them alone.
         app.cfg.skill_actions = _skill_actions_from_policy(data)
         app.cfg.save()
-    ux.ok(f"Updated {severity.upper()}: {', '.join(changed)}")
+    ux.ok(f"Updated {severity.upper()} actions of {_edited_policy_label(app, name)}: {', '.join(changed)}")
     _reload_after_edit(
         app,
         name,
@@ -1086,7 +1088,7 @@ def edit_scanner(app: AppContext, scanner_type: str, severity: str, runtime: str
             if not scanner_ovr:
                 del overrides[scanner_type]
             synced = _save_and_maybe_sync(app, path, data, name)
-            ux.ok(f"Removed {scanner_type}/{severity.upper()} override.")
+            ux.ok(f"Removed {scanner_type}/{severity.upper()} override from {_edited_policy_label(app, name)}.")
             _reload_after_edit(app, name, synced=synced, reload_gateway=reload_gateway)
         else:
             click.echo(f"No override found for {scanner_type}/{severity.upper()}.")
@@ -1111,7 +1113,10 @@ def edit_scanner(app: AppContext, scanner_type: str, severity: str, runtime: str
         return
 
     synced = _save_and_maybe_sync(app, path, data, name)
-    ux.ok(f"Updated scanner override {scanner_type}/{severity.upper()}: {', '.join(changed)}")
+    ux.ok(
+        f"Updated scanner override {scanner_type}/{severity.upper()} in {_edited_policy_label(app, name)}: "
+        f"{', '.join(changed)}"
+    )
     _reload_after_edit(app, name, synced=synced, reload_gateway=reload_gateway)
 
 
@@ -1140,6 +1145,8 @@ def edit_guardrail(app: AppContext, block_threshold: int | None, alert_threshold
     They govern LLM traffic through the guardrail proxy only. Tool calls
     from hook connectors (Claude Code, Codex, ...) are blocked at the level
     set with 'defenseclaw guardrail block-at' / 'alert-at' instead.
+
+    Edits the active policy unless --policy-name names another one.
     """
     path, data, name = _resolve_editable_policy(app, policy_name)
 
@@ -1148,10 +1155,10 @@ def edit_guardrail(app: AppContext, block_threshold: int | None, alert_threshold
 
     if block_threshold is not None:
         guardrail["block_threshold"] = block_threshold
-        changed.append(f"block_threshold={block_threshold}")
+        changed.append(f"block_threshold={_severity_rank_label(block_threshold)}")
     if alert_threshold is not None:
         guardrail["alert_threshold"] = alert_threshold
-        changed.append(f"alert_threshold={alert_threshold}")
+        changed.append(f"alert_threshold={_severity_rank_label(alert_threshold)}")
     if cisco_trust_level is not None:
         guardrail["cisco_trust_level"] = cisco_trust_level
         changed.append(f"cisco_trust_level={cisco_trust_level}")
@@ -1183,7 +1190,7 @@ def edit_guardrail(app: AppContext, block_threshold: int | None, alert_threshold
         return
 
     synced = _save_and_maybe_sync(app, path, data, name)
-    ux.ok(f"Guardrail updated: {', '.join(changed)}")
+    ux.ok(f"Guardrail of {_edited_policy_label(app, name)} updated: {', '.join(changed)}")
     if block_threshold is not None or alert_threshold is not None:
         click.echo(
             "  Note: these thresholds apply to LLM traffic through the guardrail proxy. "
@@ -1253,7 +1260,7 @@ def edit_firewall(app: AppContext, default_action: str | None, add_domain: tuple
         return
 
     synced = _save_and_maybe_sync(app, path, data, name)
-    ux.ok(f"Firewall updated: {', '.join(changed)}")
+    ux.ok(f"Firewall of {_edited_policy_label(app, name)} updated: {', '.join(changed)}")
     _reload_after_edit(app, name, synced=synced, reload_gateway=reload_gateway)
 
 
@@ -1442,6 +1449,12 @@ def _reload_after_edit(
     """After editing the active policy, reload it like ``policy activate``."""
     if synced and reload_gateway:
         _reload_and_report(app, name, needs_restart=needs_restart)
+
+
+def _edited_policy_label(app: AppContext, name: str) -> str:
+    """"policy 'strict' (active)": the result line of an edit names the policy it changed (GAP-1667)."""
+    state = "active" if name == _get_active_policy_name(app) else "draft"
+    return f"policy '{name}' ({state})"
 
 
 def _opa_runtime_action(runtime: str) -> str:
