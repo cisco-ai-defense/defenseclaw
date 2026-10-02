@@ -32,6 +32,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1065,7 +1066,17 @@ func inspectConfiguredListener(d daemonState, cfg *config.Config, client *http.C
 		return false, 0, fmt.Errorf("inspect configured gateway listener: %w", err)
 	}
 	if !running || managedPID != ownerPID {
-		return false, 0, fmt.Errorf("configured gateway port %d is occupied by foreign process PID %d (often another account's gateway); choose a free port with: defenseclaw setup gateway --api-port <free port> --non-interactive", cfg.Gateway.APIPort, ownerPID)
+		// GAP-1345: name the holder's program (and account when Windows shows
+		// it) and a port that is free right now, as Linux and macOS do.
+		holder := fmt.Sprintf("PID %d", ownerPID)
+		if label := listenerProcessLabel(ownerPID); label != "" {
+			holder += " (" + label + ")"
+		}
+		port := "<free port>"
+		if free := freeGatewayAPIPort(gatewayClientHost(cfg), cfg.Gateway.APIPort); free > 0 {
+			port = strconv.Itoa(free)
+		}
+		return false, 0, fmt.Errorf("configured gateway port %d is held by %s, not by this account's gateway; move this account's gateway to a free port with: defenseclaw setup gateway --api-port %s --non-interactive, then run: defenseclaw-gateway start", cfg.Gateway.APIPort, holder, port)
 	}
 	authenticatedMigration := false
 	if identity, ok := d.(managedProcessIdentity); ok && !identity.HasManagedProcessIdentity(managedPID) {

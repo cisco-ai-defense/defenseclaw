@@ -303,7 +303,7 @@ class TestStackSummary(unittest.TestCase):
         self.assertIn("/resolved/stack/.grafana-admin-password", rendered)
         self.assertNotIn("anonymous Admin", rendered)
         self.assertNotIn("admin / admin", rendered)
-        self.assertIn("hot-reloads", rendered)
+        self.assertIn("applies the destination itself", rendered)
         self.assertNotIn("defenseclaw-gateway restart", rendered)
 
     def test_no_password_summary_is_explicit_and_warns(self):
@@ -378,6 +378,48 @@ class TestV8LocalDestinationWriter(unittest.TestCase):
         self.assertEqual(status, "PER DESTINATION (defaults are unredacted)")
         self.assertIn("destination redaction", label)
         self.assertEqual(command, "defenseclaw setup redaction status")
+
+
+class TestStatusAndDownSayWhatHappened(unittest.TestCase):
+    # GAP-1335: status exited 0 with every probe failing, and down printed nothing.
+    def _invoke(self, controller, args, destinations=()):
+        from defenseclaw.commands.cmd_setup_local_observability import local_observability
+
+        app = AppContext()
+        app.cfg = SimpleNamespace(data_dir="/tmp/defenseclaw-test")
+        app.logger = None
+        with (
+            patch(
+                "defenseclaw.commands.cmd_setup_local_observability._resolve_controller",
+                return_value=controller,
+            ),
+            patch(
+                "defenseclaw.commands.cmd_setup_observability._v8_authored_destinations",
+                return_value=list(destinations),
+            ),
+        ):
+            return CliRunner().invoke(local_observability, args, obj=app)
+
+    def test_status_exits_1_when_the_stack_is_not_ready(self):
+        controller = MagicMock()
+        controller.status.return_value = "Readiness:\n  grafana    fail    http://127.0.0.1:3000\n"
+        controller.status_ready = False
+        result = self._invoke(controller, ["status"])
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("defenseclaw setup local-observability up", result.output)
+
+        controller.status_ready = True
+        self.assertEqual(self._invoke(controller, ["status"]).exit_code, 0)
+
+    def test_down_confirms_the_stop_and_names_the_still_enabled_destination(self):
+        result = self._invoke(MagicMock(), ["down"], [{"name": "local-observability", "enabled": True}])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Stopped:", result.output)
+        self.assertIn("down --disable-config", result.output)
+
+        quiet = self._invoke(MagicMock(), ["down"], [])
+        self.assertIn("Stopped:", quiet.output)
+        self.assertNotIn("--disable-config", quiet.output)
 
 
 if __name__ == "__main__":

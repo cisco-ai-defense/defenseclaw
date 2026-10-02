@@ -585,8 +585,12 @@ function Get-ProcessesUnder([string[]]$Prefixes) {
     # user signed in over the network (an SSH session). Get-Process then still
     # reads the image of this account's own processes, the only ones that can
     # run from this install.
-    $all = try { @(Get-CimInstance Win32_Process -ErrorAction Stop) } catch {
-        @(Get-Process | ForEach-Object {
+    # The refusal is expected: SilentlyContinue keeps it out of the run log,
+    # where a caught -ErrorAction Stop error reads as a TerminatingError (GAP-1347).
+    $cimError = $null
+    try { $all = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue -ErrorVariable cimError) } catch { $cimError = $_; $all = @() }
+    if ($cimError -or -not $all.Count) {
+        $all = @(Get-Process | ForEach-Object {
             [pscustomobject]@{ ProcessId = $_.Id; Name = "$($_.ProcessName).exe"; ExecutablePath = $_.Path }
         })
     }
@@ -1122,6 +1126,8 @@ function Save-Installer {
 function Complete-Swap {
     # The new install is live: a run killed from here on must not restore the old one.
     Remove-Item -LiteralPath (Join-Path $Snap "COMPLETE") -Force
+    # Deleting the old venv and staging copies takes a minute or two on Windows (GAP-1347).
+    Write-Info "Cleaning up the previous install's files (this can take a minute or two)"
     Invoke-Quietly {
         if ($Snap -eq (Join-Path $DataDir "previous.new") -and $PrevVersion) {
             Save-RolledBackData

@@ -878,7 +878,9 @@ func TestUnreachable(t *testing.T) {
 		if r.code != 2 {
 			t.Fatalf("code = %d, want 2", r.code)
 		}
-		if r.stdout != `{"decision":"deny","reason":"DefenseClaw hook failed closed"}`+"\n" {
+		// GAP-1337: the denial names the stopped gateway and the start command.
+		if !strings.HasPrefix(r.stdout, `{"decision":"deny","reason":"DefenseClaw blocked this `) ||
+			!strings.Contains(r.stdout, "defenseclaw-gateway start") {
 			t.Errorf("stdout = %q", r.stdout)
 		}
 	})
@@ -2195,6 +2197,11 @@ func TestCodexSessionEndDeadlineCancelsBlockingTransport(t *testing.T) {
 	}
 }
 
+// gatewayDownReason is the per-user denial text of an unreachable gateway (GAP-1337).
+func gatewayDownReason(event string) string {
+	return mustJSONString(perUserGatewayDownText(Options{Event: event}, "gateway unreachable"))
+}
+
 func TestCodexFailClosedUsesEventSpecificControlSchema(t *testing.T) {
 	tests := []struct {
 		event      string
@@ -2202,19 +2209,24 @@ func TestCodexFailClosedUsesEventSpecificControlSchema(t *testing.T) {
 	}{
 		{
 			event:      "SessionStart",
-			wantStdout: `{"continue":false,"stopReason":"DefenseClaw hook failed closed"}` + "\n",
+			wantStdout: `{"continue":false,"stopReason":` + gatewayDownReason("SessionStart") + "}\n",
 		},
 		{
 			event:      "PreCompact",
-			wantStdout: `{"continue":false,"stopReason":"DefenseClaw hook failed closed"}` + "\n",
+			wantStdout: `{"continue":false,"stopReason":` + gatewayDownReason("PreCompact") + "}\n",
 		},
 		{
 			event:      "PostCompact",
-			wantStdout: `{"continue":false,"stopReason":"DefenseClaw hook failed closed"}` + "\n",
+			wantStdout: `{"continue":false,"stopReason":` + gatewayDownReason("PostCompact") + "}\n",
 		},
 		{
 			event:      "SubagentStop",
-			wantStdout: `{"decision":"block","reason":"DefenseClaw hook failed closed"}` + "\n",
+			wantStdout: `{"decision":"block","reason":` + gatewayDownReason("SubagentStop") + "}\n",
+		},
+		{
+			event: "PreToolUse",
+			wantStdout: `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny",` +
+				`"permissionDecisionReason":` + gatewayDownReason("PreToolUse") + "}}\n",
 		},
 		{
 			event:      "SessionEnd",
@@ -2246,7 +2258,7 @@ func TestCodexV3GenericFailClosedUsesLifecycleControl(t *testing.T) {
 		opts.FailMode = "closed"
 		opts.StrictAvailability = true
 	})
-	wantStdout := `{"continue":false,"stopReason":"DefenseClaw hook failed closed"}` + "\n"
+	wantStdout := `{"continue":false,"stopReason":` + gatewayDownReason("SessionStart") + "}\n"
 	if result.code != 0 || result.stdout != wantStdout {
 		t.Fatalf("code=%d stdout=%q want %q stderr=%q", result.code, result.stdout, wantStdout, result.stderr)
 	}

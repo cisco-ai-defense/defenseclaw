@@ -305,6 +305,18 @@ def _api_port_available(host: str, port: int) -> bool:
     return _api_port_free(host, port) and not _api_port_claimed_by_other_account(port)
 
 
+def suggest_free_api_port(host: str, port: int) -> int:
+    """A port after ``port``, in the first-run steps, this account can use now; 0 if none."""
+    host = (host or "127.0.0.1").strip("[]")
+    if host in {"", "localhost"}:
+        host = "127.0.0.1"
+    for step in range(1, _FIRST_RUN_API_PORT_TRIES + 1):
+        candidate = port + step * _FIRST_RUN_API_PORT_STEP
+        if candidate + 2 <= 65535 and _api_port_available(host, candidate):
+            return candidate
+    return 0
+
+
 def choose_first_run_api_port(cfg: Config) -> str:
     """Move a new config off the default API port when something holds it.
 

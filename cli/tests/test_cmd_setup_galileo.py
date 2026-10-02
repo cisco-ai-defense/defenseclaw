@@ -332,6 +332,34 @@ def test_destination_test_fails_safely_when_runtime_does_not_acknowledge(tmp_pat
     assert "--deployment self-hosted --trace-endpoint" in result.output
 
 
+def test_destination_test_names_the_delivery_failure_the_gateway_recorded(tmp_path, monkeypatch) -> None:
+    # GAP-1318: a DNS failure was reported with the API-key hint.
+    from datetime import datetime, timedelta, timezone
+
+    app = _app(tmp_path, monkeypatch)
+    now = datetime.now(timezone.utc)
+    app.store = SimpleNamespace(
+        list_alerts=lambda _limit: [
+            SimpleNamespace(details="observability_runtime failed: reload_initialization_failed", timestamp=now),
+            SimpleNamespace(details="galileo/traces failed: resolution_failed", timestamp=now),
+            SimpleNamespace(details="galileo/traces failed: http_authentication", timestamp=now - timedelta(hours=2)),
+        ]
+    )
+    with (
+        patch("defenseclaw.commands.cmd_setup_galileo._require_v8_operator_status", return_value=_status(configured=True)),
+        patch(
+            "defenseclaw.commands.cmd_setup_galileo.run_trace_canary",
+            side_effect=TraceCanaryError("gateway_rejected"),
+        ),
+    ):
+        result = CliRunner().invoke(galileo, ["test"], obj=app)
+
+    assert result.exit_code != 0
+    assert "export failure" in result.output and "resolution_failed" in result.output
+    assert "check the endpoint and DNS" in result.output
+    assert "API key" not in result.output
+
+
 def test_destination_test_refuses_disabled_galileo_before_canary(tmp_path, monkeypatch) -> None:
     app = _app(tmp_path, monkeypatch)
     with (

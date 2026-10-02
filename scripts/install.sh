@@ -552,8 +552,22 @@ WHEEL="defenseclaw-${VERSION}-py3-none-any.whl"
 REQUIREMENTS="defenseclaw-${VERSION}-requirements.txt"
 APP_ZIP="DefenseClawMac-${VERSION}-macos-arm64.zip"
 
+# A copy or download that fails removes what it staged. When the filesystem
+# filled up meanwhile (other writers, a free-space figure the preflight could
+# not read), say so instead of "Could not get" (GAP-1307).
+fetch_failed() {
+    local asset="$1" free_kb need_kb="${space_needed_kb:-$((400 * 1024))}"
+    rm -rf "${STAGING}"
+    free_kb="$(df -Pk "${DEFENSECLAW_HOME}" 2>/dev/null | awk 'NR==2{print $4}')"
+    if [[ "${free_kb}" =~ ^[0-9]+$ && "${free_kb}" -lt "${need_kb}" ]]; then
+        err "Ran out of disk space next to ${DEFENSECLAW_HOME} while staging ${asset}: the install needs about $((need_kb / 1024)) MB and $((free_kb / 1024)) MB is free"
+        die "Free at least $(((need_kb - free_kb + 1023) / 1024)) MB on that filesystem (df -h ${DEFENSECLAW_HOME}), then rerun; nothing was changed"
+    fi
+    die "Could not get ${asset} for ${VERSION}; nothing was changed"
+}
+
 info "Downloading and verifying release assets"
-fetch checksums.txt "${STAGING}/checksums.txt" || die "Could not get checksums.txt for ${VERSION}"
+fetch checksums.txt "${STAGING}/checksums.txt" || fetch_failed checksums.txt
 checksum_ok() {
     local file="$1" name expected
     name="${2:-$(basename "${file}")}"
@@ -583,11 +597,11 @@ elif [[ -z "${LOCAL_DIR}" ]]; then
     info "cosign 2.0 or later is not installed; downloads are checked against checksums.txt only"
 fi
 for asset in "${ARCHIVE}" "${WHEEL}" "${REQUIREMENTS}"; do
-    fetch "${asset}" "${STAGING}/${asset}" || die "Could not get ${asset} for ${VERSION}"
+    fetch "${asset}" "${STAGING}/${asset}" || fetch_failed "${asset}"
     verify "${STAGING}/${asset}"
 done
 if [[ -n "${APP_PATH}" ]]; then
-    fetch "${APP_ZIP}" "${STAGING}/${APP_ZIP}" || die "Could not get ${APP_ZIP} for ${VERSION}"
+    fetch "${APP_ZIP}" "${STAGING}/${APP_ZIP}" || fetch_failed "${APP_ZIP}"
     verify "${STAGING}/${APP_ZIP}"
 fi
 ok "Assets match checksums.txt"

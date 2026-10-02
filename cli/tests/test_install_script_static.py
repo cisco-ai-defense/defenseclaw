@@ -134,8 +134,19 @@ def test_windows_process_listing_survives_a_wmi_refusal() -> None:
     windows = (ROOT / "scripts" / "install.ps1").read_text(encoding="utf-8")
     body = windows[windows.index("function Get-ProcessesUnder") :]
     body = body[: body.index("\n}\n")]
-    assert "try { @(Get-CimInstance Win32_Process -ErrorAction Stop) } catch {" in body
+    assert "Get-CimInstance Win32_Process -ErrorAction SilentlyContinue -ErrorVariable cimError" in body
+    assert "if ($cimError -or -not $all.Count) {" in body
     assert "Get-Process" in body
+    # GAP-1347: an expected refusal must not land in the run log as a TerminatingError.
+    assert "Win32_Process -ErrorAction Stop" not in body
+
+
+def test_windows_upgrade_says_it_is_cleaning_up_before_the_long_deletes() -> None:
+    # GAP-1347: nothing was printed for about two minutes before "+ Installed".
+    windows = (ROOT / "scripts" / "install.ps1").read_text(encoding="utf-8")
+    body = windows[windows.index("function Complete-Swap") :]
+    body = body[: body.index("\n}\n")]
+    assert body.index('Write-Info "Cleaning up') < body.index("Remove-Tree $Previous")
 
 
 def test_installer_never_uses_retired_asset_names() -> None:
@@ -548,7 +559,7 @@ def _uv_bootstrap(tmp_path: Path, free_kb: int) -> subprocess.CompletedProcess[s
     install_uv = text[text.index("install_uv() {") : text.index("\n}\n", text.index("install_uv() {")) + 3]
     home = tmp_path / "home"
     data_dir = home / ".defenseclaw"
-    data_dir.mkdir(parents=True)
+    data_dir.mkdir(parents=True, exist_ok=True)
     bin_dir = home / ".local" / "bin"
     fake = tmp_path / "fake"
     fake.mkdir()
@@ -621,6 +632,44 @@ def test_a_first_install_without_room_refuses_before_writing(tmp_path: Path) -> 
     assert "Free at least 800 MB" in proc.stdout and "nothing was changed" in proc.stdout
     assert "Installing uv" not in proc.stdout
     assert not (tmp_path / "home" / ".defenseclaw" / ".uv").exists()
+
+
+def test_an_upgrade_without_room_refuses_before_staging(tmp_path: Path) -> None:
+    # GAP-1307: an upgrade with 8 MB free failed at staging with a raw cp ENOSPC.
+    (tmp_path / "home" / ".defenseclaw" / ".uv" / "cache").mkdir(parents=True)
+    proc = _uv_bootstrap(tmp_path, free_kb=8 * 1024)
+
+    assert proc.returncode == 1, proc.stdout
+    assert "the install needs about 400 MB and 8 MB is free" in proc.stdout
+    assert "nothing was changed" in proc.stdout
+    assert not (tmp_path / "home" / ".defenseclaw" / ".staging").exists()
+
+
+def test_a_staging_copy_that_fails_on_a_full_disk_says_so_and_cleans_up(tmp_path: Path) -> None:
+    # GAP-1307: "Could not get <asset>" and partial .staging files that used the last free space.
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    helper = text[text.index("fetch_failed() {") : text.index("\n}\n", text.index("fetch_failed() {")) + 3]
+    staging = tmp_path / ".staging"
+    (staging / "bin").mkdir(parents=True)
+    (staging / "partial.tar.gz").write_bytes(b"x" * 1024)
+    fake = tmp_path / "fake"
+    fake.mkdir()
+    (fake / "df").write_text("#!/bin/sh\necho head\necho fs 1 1 15360 1% /\n", encoding="utf-8")
+    (fake / "df").chmod(0o755)
+    script = tmp_path / "fetch.sh"
+    script.write_text(
+        'set -euo pipefail\nerr() { echo "err: $*"; }\ndie() { err "$@"; exit 1; }\n'
+        f'DEFENSECLAW_HOME="{tmp_path}" STAGING="{staging}" VERSION=1.0.1 space_needed_kb=409600\n'
+        f'PATH="{fake}:/usr/bin:/bin"\n' + helper + "false || fetch_failed defenseclaw-1.0.1-linux-amd64.tar.gz\n",
+        encoding="utf-8",
+    )
+
+    out = _run([str(script)], tmp_path).stdout
+
+    assert "Ran out of disk space" in out and "15 MB is free" in out, out
+    assert "Free at least 385 MB" in out and "nothing was changed" in out
+    assert "Could not get" not in out
+    assert not staging.exists()
 
 
 def test_a_failed_python_build_removes_what_it_wrote() -> None:

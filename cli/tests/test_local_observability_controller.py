@@ -598,6 +598,7 @@ def test_every_lifecycle_action_uses_the_same_controller(controller) -> None:
     assert up.readiness_verified is True
     assert "Readiness:" in status
     assert "ready" in status
+    assert subject.status_ready is True
     assert _compose_call(runner, "up")[-2:] == ("up", "--detach")
     assert _compose_call(runner, "logs")[-5:] == (
         "logs",
@@ -808,8 +809,18 @@ def test_docker_cli_compose_daemon_and_linux_mode_failures(stack: Path, docker: 
 
     daemon_runner = FakeRunner()
     daemon_runner.add((str(docker.resolve()), "info"), returncode=1, stderr="daemon unavailable")
-    with pytest.raises(LocalStackError, match="daemon is not reachable"):
+    with pytest.raises(LocalStackError, match="daemon is not reachable. Start it"):
         LocalStackController(stack, docker_path=docker, runner=daemon_runner, os_name="linux").preflight()
+    # GAP-1335: a socket permission error on Linux is not "start Docker Desktop".
+    socket_runner = FakeRunner()
+    socket_runner.add(
+        (str(docker.resolve()), "info"),
+        returncode=1,
+        stderr="permission denied while trying to connect to the docker API at unix:///var/run/docker.sock",
+    )
+    with pytest.raises(LocalStackError, match="docker group") as raised:
+        LocalStackController(stack, docker_path=docker, runner=socket_runner, os_name="linux").preflight()
+    assert "Docker Desktop" not in str(raised.value)
 
     mode_runner = FakeRunner()
     mode_runner.info["OSType"] = "windows"
@@ -994,8 +1005,13 @@ def test_owned_container_requires_exact_project_service_and_paths(controller) ->
     subject.verify_container_ownership()
 
     labels_by_name["defenseclaw-grafana"]["com.docker.compose.project.working_dir"] = str(subject.stack_dir.parent)
-    with pytest.raises(LocalStackError, match="collision"):
+    # GAP-1335: a copy started from another directory is named as such.
+    with pytest.raises(LocalStackError, match="collision") as raised:
         subject.verify_container_ownership()
+    assert f"another copy of the {COMPOSE_PROJECT} stack, started from {subject.stack_dir.parent}" in str(raised.value)
+    with patch.object(subject, "probe_all", return_value=[ProbeResult("all", "local", True)]):
+        status = subject.status()
+    assert subject.status_ready is False and "Note: container name collision" in status
 
 
 def test_reset_rejects_foreign_volume_and_requires_confirmation(controller) -> None:

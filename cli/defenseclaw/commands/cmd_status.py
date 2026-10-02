@@ -412,7 +412,7 @@ def status(app: AppContext, as_json: bool) -> None:
         )
     else:
         try:
-            from defenseclaw.commands.cmd_doctor import _foreign_gateway_port_holder
+            from defenseclaw.commands.cmd_doctor import _foreign_gateway_port_holder, _free_api_port_hint
 
             holder = _foreign_gateway_port_holder(cfg)
         except Exception:  # noqa: BLE001 - status stays best effort
@@ -434,7 +434,8 @@ def status(app: AppContext, as_json: bool) -> None:
         _print_semantic_routing(cfg)
         _print_hook_guardian(cfg)
         hint(
-            "Free the port:  stop that process, or run: defenseclaw setup gateway --api-port <free port>"
+            "Free the port:  stop that process, or run: defenseclaw setup gateway --api-port "
+            f"{_free_api_port_hint(cfg)} --non-interactive"
             if holder
             else "Start sidecar:  defenseclaw-gateway start",
             "Operator overview: defenseclaw status | Sidecar subsystems: defenseclaw-gateway status",

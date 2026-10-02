@@ -1127,6 +1127,9 @@ func failUnreachable(opts Options, sp spec, failMode, reason string) int {
 		} else {
 			fmt.Fprintf(opts.Stderr,
 				"defenseclaw: gateway unreachable, blocking %s (fail mode closed): %s\n", sp.subject, unreachableDetail(opts, reason))
+			if text := perUserGatewayDownText(opts, reason); text != "" {
+				return emitPerUserGatewayDown(opts, sp, text)
+			}
 		}
 		return emitHookResult(opts, sp, sp.unreachableStrict)
 	}
@@ -1143,6 +1146,45 @@ func unreachableDetail(opts Options, reason string) string {
 		return reason
 	}
 	return "check `defenseclaw-gateway status`, or run `defenseclaw-gateway restart`"
+}
+
+// perUserGatewayDownText is what a per-user hook that fails closed because
+// this account's gateway is not running shows in the agent: the agents that
+// display the structured denial (Codex, OpenCode, Cursor and the JSON-bodied
+// hooks) never show stderr, so they showed only "DefenseClaw hook failed
+// closed" with no cause or next step (GAP-1337). Managed hooks keep their own
+// text (managedStandaloneFailClosedText).
+func perUserGatewayDownText(opts Options, reason string) string {
+	if reason != "gateway unreachable" || opts.ManagedEnterprise || opts.ManagedUnixSocket != "" {
+		return ""
+	}
+	return "DefenseClaw blocked this " + hookEventSubject(opts.Event) + ": the DefenseClaw gateway is not running or " +
+		"not answering (fail mode closed). Check it with `defenseclaw-gateway status`, start it with " +
+		"`defenseclaw-gateway start`, then try again."
+}
+
+// emitPerUserGatewayDown renders perUserGatewayDownText in each connector's
+// fail-closed shape; connectors without a structured body keep theirs.
+func emitPerUserGatewayDown(opts Options, sp spec, text string) int {
+	result := sp.unreachableStrict
+	if sp.connector == "codex" {
+		if result.exit == 0 {
+			return emit(opts.Stdout, result)
+		}
+		return emitCodexBlock(opts, text)
+	}
+	if sp.connector == "devin" {
+		result.body = strings.ReplaceAll(result.body, failedClosed, devinBlockText(text))
+	} else if strings.Contains(result.body, failedClosed) {
+		// The body is JSON for every other connector that has one; keep it valid.
+		encoded := mustJSONString(text)
+		if strings.Contains(result.body, `"`+failedClosed+`"`) {
+			result.body = strings.ReplaceAll(result.body, `"`+failedClosed+`"`, encoded)
+		} else {
+			result.body = strings.ReplaceAll(result.body, failedClosed, text)
+		}
+	}
+	return emitHookResult(opts, sp, result)
 }
 
 // managedSIDUnregisteredReason is enterprisehooks'

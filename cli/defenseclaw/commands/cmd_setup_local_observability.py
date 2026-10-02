@@ -271,6 +271,7 @@ def down_cmd(app: AppContext, disable_config: bool) -> None:
     """Stop the stack (volumes preserved)."""
     controller = _resolve_controller(app.cfg.data_dir)
     _run_native_controller(controller.down, "Docker Compose down")
+    click.echo(f"  {ux.bold('Stopped:')} local observability stack (data volumes kept)")
 
     if disable_config:
         from defenseclaw.commands.cmd_setup_observability import (
@@ -281,6 +282,12 @@ def down_cmd(app: AppContext, disable_config: bool) -> None:
         _require_v8_operator_status(app.cfg.data_dir)
         _set_v8_destination_enabled(app.cfg.data_dir, "local-observability", False, "")
         click.echo(f"  {ux.bold('Config updated:')} observability.destinations[local-observability].enabled=false")
+    elif _local_destination_enabled(app.cfg.data_dir):
+        click.echo(
+            "  The local-observability destination stays configured, so the gateway keeps trying to "
+            "send to the stopped stack. Start it again with 'defenseclaw setup local-observability up', "
+            "or turn the destination off with 'defenseclaw setup local-observability down --disable-config'."
+        )
 
     if app.logger:
         app.logger.log_action(
@@ -332,6 +339,14 @@ def status_cmd(app: AppContext) -> None:
     controller = _resolve_controller(app.cfg.data_dir)
     output = _run_native_controller(controller.status, "Docker Compose status")
     click.echo(output, nl=False)
+    # GAP-1335: a stack that is down or failing is not a success.
+    if not getattr(controller, "status_ready", True):
+        click.echo(
+            "  The local observability stack is not ready. Start it with: "
+            "defenseclaw setup local-observability up",
+            err=True,
+        )
+        raise SystemExit(1)
 
 
 @local_observability.command("logs")
@@ -400,6 +415,17 @@ def _warn_if_docker_missing() -> None:
         "These are the addresses it uses once 'defenseclaw setup local-observability up' succeeds.",
         err=True,
     )
+
+
+def _local_destination_enabled(data_dir: str) -> bool:
+    """Whether config.yaml still sends to the local stack (best effort)."""
+    from defenseclaw.commands.cmd_setup_observability import _v8_authored_destinations
+
+    try:
+        destinations = _v8_authored_destinations(data_dir)
+    except Exception:  # noqa: BLE001 - only decides whether to print a note
+        return False
+    return any(d.get("name") == "local-observability" and d.get("enabled", True) is not False for d in destinations)
 
 
 def _run_native_controller(operation: Callable[[], T], description: str) -> T:
@@ -632,7 +658,7 @@ def _print_stack_summary(
     print_redaction_status_hint(cfg)
     click.echo()
     ux.section("Next steps")
-    click.echo("    # The gateway hot-reloads the observability destination; no restart is needed.")
+    click.echo("    # DefenseClaw applies the destination itself (it restarts the gateway when needed).")
     click.echo("    defenseclaw setup local-observability status")
     click.echo("    defenseclaw setup local-observability down   # stop (keeps data)")
     click.echo("    defenseclaw setup local-observability reset  # stop + wipe data")
