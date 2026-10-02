@@ -8,15 +8,18 @@ package cli
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
-// Keep the package's gateway start tests from leaving claims in /var/tmp.
+// Keep the package's gateway start tests from leaving claims in /var/tmp. One
+// fixed directory per account, so test runs do not leave one each.
 func init() {
-	if dir, err := os.MkdirTemp("", "dc-port-claims-"); err == nil {
+	dir := filepath.Join(os.TempDir(), "defenseclaw-test-port-claims-"+strconv.Itoa(os.Getuid()))
+	if err := os.MkdirAll(dir, 0o700); err == nil {
 		gatewayPortClaimDir = dir
 	}
 }
