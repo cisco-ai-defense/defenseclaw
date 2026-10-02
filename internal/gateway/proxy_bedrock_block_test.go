@@ -19,7 +19,10 @@ package gateway
 import (
 	"bytes"
 	"encoding/json"
+	"net"
+	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	eventstream "github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream"
@@ -227,5 +230,28 @@ func TestWriteBlockedPassthroughBedrockRoutes(t *testing.T) {
 				t.Fatalf("X-DefenseClaw-Blocked = %q; want true", got)
 			}
 		})
+	}
+}
+
+// GAP-1406: a refused private upstream names the CLI fix, and a Bedrock
+// client gets an error it can parse instead of "UnknownError".
+func TestPrivateUpstreamHintAndBedrockError(t *testing.T) {
+	host := "bedrock-runtime.us-east-1.amazonaws.com"
+	if hint := privateUpstreamHint(host, net.ParseIP("10.0.2.169")); !strings.Contains(hint, "defenseclaw guardrail allow-private-upstream "+host) {
+		t.Fatalf("private address hint = %q", hint)
+	}
+	for _, ip := range []string{"127.0.0.1", "169.254.169.254"} {
+		if hint := privateUpstreamHint(host, net.ParseIP(ip)); hint != "" {
+			t.Fatalf("%s must get no allow hint, got %q", ip, hint)
+		}
+	}
+	rec := httptest.NewRecorder()
+	writeBedrockUpstreamError(rec, "upstream error: refused")
+	if rec.Code != http.StatusBadGateway || rec.Header().Get("X-Amzn-ErrorType") != "ServiceUnavailableException" {
+		t.Fatalf("status=%d header=%q", rec.Code, rec.Header().Get("X-Amzn-ErrorType"))
+	}
+	var body map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || body["message"] != "upstream error: refused" {
+		t.Fatalf("body = %s (%v)", rec.Body.String(), err)
 	}
 }

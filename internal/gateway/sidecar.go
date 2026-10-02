@@ -3116,6 +3116,9 @@ func (s *Sidecar) runWatcher(ctx context.Context) error {
 		w.SetManagedArtifacts(connector.ManagedPluginArtifacts(conn, connector.SetupOpts{
 			WorkspaceDir: s.currentConfig().ConnectorWorkspaceDir(),
 		}))
+		if bundled, ok := conn.(connector.BundledPluginChecker); ok {
+			w.SetBundledPluginCheck(bundled.IsBundledPlugin)
+		}
 	}
 	watcherRuntime, _ := s.observabilityV8LifecycleRuntime().(watcher.ObservabilityV8Runtime)
 	w.BindObservabilityV8(watcherRuntime)

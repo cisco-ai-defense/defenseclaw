@@ -2839,7 +2839,17 @@ def _check_openclaw_gateway(cfg, r: _DoctorResult) -> None:
     if code == 200:
         _emit("pass", "OpenClaw gateway", f"{cfg.gateway.host}:{cfg.gateway.port}", r=r)
     else:
-        _emit("fail", "OpenClaw gateway", f"not reachable at {cfg.gateway.host}:{cfg.gateway.port}", r=r)
+        detail = f"not reachable at {cfg.gateway.host}:{cfg.gateway.port}"
+        from defenseclaw.commands.cmd_setup import _openclaw_json_gateway_port
+
+        oc_port = _openclaw_json_gateway_port(cfg.claw.config_file)
+        if oc_port is not None and oc_port != cfg.gateway.port:
+            # GAP-1524: OpenClaw was onboarded on another port.
+            detail += (
+                f"; openclaw.json sets gateway.port {oc_port}, "
+                f"run: defenseclaw setup gateway --port {oc_port}"
+            )
+        _emit("fail", "OpenClaw gateway", detail, r=r)
 
 
 def _openclaw_active(cfg) -> bool:

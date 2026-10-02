@@ -328,6 +328,8 @@ def _finding_facts(e, hook_details: dict[str, list[str]]) -> dict[str, str] | No
         "connector": _event_connector(e),
         "rule": f"{rule_id}: {title}" if title else rule_id,
         "scanner": str(structured.get("defenseclaw.scan.scanner") or "").strip(),
+        # GAP-1525: the file (and line) inside the scanned plugin or skill.
+        "location": str(structured.get("defenseclaw.finding.location") or "").strip(),
     }
     return facts
 
@@ -617,7 +619,8 @@ def _alerts_default(
             click.echo(f"  {label('Target')} {target}")
         if facts:
             for key, name in (("decision", "Decision"), ("connector", "Connector"),
-                              ("rule", "Rule"), ("scanner", "Scanner"), ("sandbox", "Sandbox")):
+                              ("rule", "Rule"), ("scanner", "Scanner"), ("location", "Location"),
+                              ("sandbox", "Sandbox")):
                 if facts.get(key):
                     click.echo(f"  {label(name)} {facts[key]}")
         elif e.details:

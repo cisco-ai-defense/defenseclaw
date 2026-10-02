@@ -28,6 +28,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
+	"github.com/defenseclaw/defenseclaw/internal/scanner"
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
@@ -981,5 +982,25 @@ func TestEnforceBlockForMCPWritesNoSandboxPolicy(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Fatalf("MCP block wrote %d entries under the data dir: %v", len(entries), entries)
+	}
+}
+
+func TestAdmission_BundledPluginIsNotScanned(t *testing.T) {
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	pluginDir := filepath.Join(filepath.Dir(skillDir), "plugins")
+	if err := os.MkdirAll(pluginDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	own := filepath.Join(pluginDir, "defenseclaw")
+	w := New(cfg, nil, []string{pluginDir}, store, logger, nil, nil)
+	scanned := false
+	w.scannerFactory = func(InstallEvent) scanner.Scanner { scanned = true; return nil }
+	w.SetBundledPluginCheck(func(path string) bool { return path == own })
+
+	result := w.runAdmission(context.Background(), InstallEvent{
+		Type: InstallPlugin, Name: "defenseclaw", Path: own, Timestamp: time.Now(),
+	})
+	if result.Verdict != VerdictAllowed || scanned {
+		t.Fatalf("bundled plugin admission = %+v, scanned=%v", result, scanned)
 	}
 }
