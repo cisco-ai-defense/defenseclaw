@@ -63,6 +63,46 @@ from defenseclaw.config import (
 )
 
 
+class DoctorVirusTotalTests(unittest.TestCase):
+    """GAP-1936: the VirusTotal row agrees with the credential row."""
+
+    def _cfg(self, use_virustotal: bool, key_env: str = ""):
+        from defenseclaw.config import SkillScannerConfig
+
+        sc = SkillScannerConfig(use_virustotal=use_virustotal, virustotal_api_key_env=key_env)
+        return SimpleNamespace(scanners=SimpleNamespace(skill_scanner=sc))
+
+    def test_disabled_is_skipped(self):
+        from defenseclaw.commands.cmd_doctor import _check_virustotal
+
+        result = _DoctorResult()
+        with patch.dict(os.environ, {}, clear=True):
+            _check_virustotal(self._cfg(False), result)
+        self.assertEqual(result.checks[0]["status"], "skip")
+        self.assertEqual(result.checks[0]["detail"], "not enabled")
+
+    def test_enabled_without_key_warns_with_next_step(self):
+        from defenseclaw.commands.cmd_doctor import _check_virustotal
+
+        result = _DoctorResult()
+        with patch.dict(os.environ, {}, clear=True):
+            _check_virustotal(self._cfg(True), result)
+        check = result.checks[0]
+        self.assertEqual(check["status"], "warn")
+        self.assertIn("enabled, but VIRUSTOTAL_API_KEY is not set", check["detail"])
+        self.assertIn("defenseclaw keys set VIRUSTOTAL_API_KEY", check["remediation"])
+
+    @patch("defenseclaw.commands.cmd_doctor._http_probe", return_value=(200, "ok"))
+    def test_default_env_name_key_is_probed(self, probe):
+        from defenseclaw.commands.cmd_doctor import _check_virustotal
+
+        result = _DoctorResult()
+        with patch.dict(os.environ, {"VIRUSTOTAL_API_KEY": "dummy"}, clear=True):
+            _check_virustotal(self._cfg(True), result)
+        self.assertEqual(result.checks[0]["status"], "pass")
+        self.assertEqual(probe.call_args.kwargs["headers"], {"x-apikey": "dummy"})
+
+
 class DoctorSecurityOverrideTests(unittest.TestCase):
     def test_private_upstream_config_entries_are_visible(self):
         cfg = SimpleNamespace(guardrail=SimpleNamespace(allow_private_upstreams=["10.50.2.100", "172.16.0.5"]))
