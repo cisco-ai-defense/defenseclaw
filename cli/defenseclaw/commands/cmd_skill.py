@@ -1695,7 +1695,10 @@ def _skill_scan_would_install_block(
 @skill.command()
 @click.argument("target", required=False)
 @click.option("--json", "as_json", is_flag=True, help="Output scan results as JSON")
-@click.option("--path", "scan_path", default="", help="Override skill directory path")
+@click.option(
+    "--path", "scan_path", default="", metavar="DIR",
+    help="Scan this skill folder (TARGET is optional with --path)",
+)
 @click.option("--remote", is_flag=True, help="Scan via sidecar API (for skills on a remote host)")
 @click.option("--all", "scan_all", is_flag=True, help="Scan all configured skills (also the default with no TARGET)")
 @click.option(
@@ -1737,21 +1740,29 @@ def scan(
     single connector. ``--all`` remains an explicit/backward-compatible alias
     for the no-TARGET bulk scan.
 
+    A TARGET that is a folder path (./my-skill, ~/stage/my-skill) scans that
+    folder; --path DIR does the same without a TARGET.
+
     Uses the native cisco-ai-skill-scanner SDK for local scans.
 
+    \b
     Remote scanning (--remote):
       When the sidecar runs on a remote host (e.g. via SSM port-forward),
-      pass --remote to send the scan request to the sidecar API instead of
-      running the scanner locally.
+      pass --remote to send the scan request to the sidecar API instead
+      of running the scanner locally.
 
-    URL targets (fetch-to-temp):
+    \b
+    URL targets:
       Pass an https:// URL or clawhub:// URI to download a skill package
       to a temp directory, scan it locally, then clean up. This lets you
       pre-screen skills before installing them.
 
-      Examples:
-        defenseclaw skill scan https://example.com/skills/my-skill.tar.gz
-        defenseclaw skill scan clawhub://my-skill@1.2.3
+    \b
+    Examples:
+      defenseclaw skill scan
+      defenseclaw skill scan ./my-skill
+      defenseclaw skill scan https://example.com/skills/my-skill.tar.gz
+      defenseclaw skill scan clawhub://my-skill@1.2.3
     """
     if action and remote:
         click.echo(
@@ -1785,6 +1796,23 @@ def scan(
     )
     if folder_target:
         scan_path = os.path.expanduser(target)
+
+    # A folder that is not there is named as such, rather than "could not
+    # resolve skill ... use --path" (GAP-1771). --remote paths live on the
+    # sidecar's host, so they are not checked here.
+    if not remote:
+        wanted = scan_path or (
+            target if target and target != "all" and _is_explicit_path(target) else ""
+        )
+        local = os.path.expanduser(wanted) if wanted else ""
+        if local and not os.path.isdir(local):
+            problem = "is not a folder" if os.path.exists(local) else "does not exist"
+            click.echo(
+                f"error: {wanted} {problem}; pass the path of a skill folder "
+                "(or a skill name, or an https:// or clawhub:// URL)",
+                err=True,
+            )
+            raise SystemExit(1)
 
     # Connector-scoped parity with MCP/list: a missing TARGET means "scan
     # configured skills" (all configured connectors by default, or the selected
@@ -1883,7 +1911,7 @@ def scan(
             raise SystemExit(1)
         return
 
-    if not target:
+    if not target and not scan_path:
         raise click.UsageError("Missing argument 'TARGET'.")
 
     # Resolve scan directory
@@ -2035,7 +2063,11 @@ def scan(
                     raise SystemExit(1)
 
     if not scan_dir and not remote:
-        click.echo(f"error: could not resolve skill {target!r} — use --path to specify manually", err=True)
+        click.echo(
+            f"error: no skill named {target!r} was found in the configured skill folders. "
+            "Run 'defenseclaw skill list' to see them, or pass the skill's folder path.",
+            err=True,
+        )
         raise SystemExit(1)
 
     # --remote: delegate scan to sidecar API — skip local policy checks
@@ -2067,6 +2099,15 @@ def scan(
         action=action,
         connector=connector,
         adhoc=adhoc,
+    )
+
+
+def _is_explicit_path(target: str) -> bool:
+    """True when TARGET can only be a path (absolute, ./, ../ or ~), never a skill name."""
+    return (
+        target in (".", "..")
+        or target.startswith(("./", "../", ".\\", "..\\", "~"))
+        or os.path.isabs(target)
     )
 
 

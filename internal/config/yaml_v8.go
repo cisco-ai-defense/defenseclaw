@@ -89,6 +89,15 @@ func (e *V8YAMLError) Error() string {
 			source += ":" + strconv.Itoa(e.Column)
 		}
 	}
+	if e.Code == V8YAMLErrorSyntax && e.Path == "$" {
+		// The whole file does not parse: the line and the parser's reason are
+		// the useful part, not the code or the root path (GAP-1767).
+		message := source + ": " + e.Summary
+		if e.Action != "" {
+			message += "; " + e.Action
+		}
+		return message
+	}
 	path := ""
 	if e.Path != "" {
 		path = " " + e.Path + ":"
@@ -494,8 +503,25 @@ var v8YAMLSyntaxLine = regexp.MustCompile(`(?:^|[ :])line ([0-9]+)(?:[ :]|$)`)
 var v8YAMLParserError = regexp.MustCompile(
 	`did not find expected (?:<document start>|node content|key|'-' indicator|',' or '\]'|',' or '\}')`)
 
+// v8YAMLSyntaxReasonPrefix strips the "yaml: line N: " lead from a yaml.v3
+// error so only the parser's reason is left.
+var v8YAMLSyntaxReasonPrefix = regexp.MustCompile(`^(?:yaml: )?(?:line [0-9]+: )?`)
+
+// v8YAMLSyntaxReason returns the parser's fixed-text reason, or "" when the
+// reason could quote the file (anchor or tag names) or is not a short phrase.
+func v8YAMLSyntaxReason(cause error) string {
+	reason := strings.TrimSpace(v8YAMLSyntaxReasonPrefix.ReplaceAllString(cause.Error(), ""))
+	lower := strings.ToLower(reason)
+	if reason == "" || len(reason) > 80 || strings.ContainsAny(reason, "\"`\n") ||
+		strings.Contains(lower, "anchor") || strings.Contains(lower, "tag") {
+		return ""
+	}
+	return reason
+}
+
 func v8SyntaxError(source string, cause error) error {
 	line := 0
+	summary := "invalid YAML"
 	if cause != nil {
 		if match := v8YAMLSyntaxLine.FindStringSubmatch(cause.Error()); len(match) == 2 {
 			line, _ = strconv.Atoi(match[1])
@@ -503,9 +529,12 @@ func v8SyntaxError(source string, cause error) error {
 				line++
 			}
 		}
+		if reason := v8YAMLSyntaxReason(cause); reason != "" {
+			summary += " (" + reason + ")"
+		}
 	}
 	return &V8YAMLError{
 		Code: V8YAMLErrorSyntax, Source: source, Path: "$", Line: line,
-		Summary: "configuration source is not valid YAML", Action: "correct the YAML syntax and retry",
+		Summary: summary, Action: "fix that line",
 	}
 }

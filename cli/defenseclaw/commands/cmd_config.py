@@ -436,7 +436,7 @@ def _yaml_syntax_detail(raw: bytes) -> str | None:
         mark = yaml_error_mark(exc)
         where = f"line {mark.line + 1}, column {mark.column + 1}: " if mark is not None else ""
         problem = str(getattr(exc, "problem", "") or "") or "malformed YAML"
-        return f"{where}invalid YAML ({problem}). Fix that line, or restore a backup of config.yaml"
+        return f"{where}invalid YAML ({problem}). Fix that line in config.yaml, then run this check again"
     except Exception:  # noqa: BLE001 - anything else is the mirror's to explain.
         return None
     return None

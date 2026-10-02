@@ -6226,21 +6226,22 @@ def setup_guardrail(
     verify: bool,
     non_interactive: bool,
 ) -> None:
-    """Configure the LLM guardrail (routes LLM traffic through the Go proxy for inspection).
+    """Configure the LLM guardrail that inspects your agent's prompts and responses.
 
-    Routes all LLM traffic through the built-in Go guardrail proxy.
     Every prompt and response is inspected for prompt injection, secrets,
-    PII, and data exfiltration patterns.
+    PII, and data exfiltration patterns, through the agent's hooks or the
+    DefenseClaw gateway, depending on the connector.
 
     Use --connector (alias: --agent) to pick the agent connector. It
     decides how LLM traffic is intercepted, how tool calls are inspected
     and which subprocess policy applies. When omitted, it is the connector
-    an earlier run saved, then the one picked at install time; with neither
-    it falls back to OpenClaw, so pass --connector on hosts without OpenClaw.
+    an earlier run saved, then the one picked at install time. If neither
+    is set, pass --connector with the agent you use.
 
+    \b
     Two modes:
-      observe — log findings, never block (default, recommended to start)
-      action  — block prompts/responses that match security policies
+      observe - log findings, never block (default, recommended to start)
+      action  - block prompts/responses that match security policies
 
     Use --disable to turn off the guardrail and restore direct LLM access.
     """

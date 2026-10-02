@@ -178,13 +178,16 @@ def _unreadable_config_message(cfg_file: str, exc: BaseException) -> str:
         mark = yaml_error_mark(exc)
         where = f" at line {mark.line + 1}, column {mark.column + 1}" if mark is not None else ""
         detail = f"invalid YAML{where} ({problem})"
+        fix = "Fix that line"
     elif isinstance(exc, UnicodeError):
         detail = "the file is not valid UTF-8 text"
     else:
         detail = getattr(exc, "strerror", None) or type(exc).__name__
+    if not isinstance(exc, yaml.YAMLError):
+        fix = "Fix the file"
     return (
         f"Cannot read the DefenseClaw configuration {cfg_file}: {detail}. "
-        "Run 'defenseclaw config validate' for details, then fix the file or restore a backup "
+        f"{fix}, then check it with 'defenseclaw config validate' "
         "('defenseclaw doctor' also reports it)."
     )
 

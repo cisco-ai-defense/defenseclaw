@@ -51,8 +51,8 @@ def test_help_has_no_rst_markup_internals_or_undocumented_options() -> None:
     # GAP-1171 / GAP-1123: help is for users, not for the code. GAP-1515 /
     # GAP-1557: no internal finding ids or implementation remarks either.
     internals = re.compile(
-        r"``|/api/v1/|P\d-#\d|Round-\d|fu/[a-z]|Go wiring|\b(?:F|GAP)-\d{3,4}\b"
-        r"|parity with the TUI|CLI parity|Textual|Go provenance"
+        r"``|/api/v1/|P\d-#\d|Round-\d|fu/[a-z]|Go wiring|\b(?:F|GAP)-\d{3,4}\b|\bOTHER-\d+\b"
+        r"|parity with the TUI|CLI parity|Textual|Go provenance|Go (?:guardrail )?proxy"
     )
     problems = []
     for command, ctx in _walk(cli, click.Context(cli, info_name="defenseclaw")):
@@ -67,6 +67,20 @@ def test_help_has_no_rst_markup_internals_or_undocumented_options() -> None:
         if bare:
             problems.append(f"{ctx.command_path}: no help for {bare}")
     assert problems == []
+
+
+def test_help_lists_and_examples_keep_their_lines() -> None:
+    # GAP-1770: mode lists and examples were reflowed into one paragraph.
+    def page(group: str, name: str) -> str:
+        command = cli.commands[group].commands[name]
+        return command.get_help(click.Context(command, info_name=name, terminal_width=100))
+
+    scan = page("skill", "scan")
+    assert "\n  Examples:\n    defenseclaw skill scan\n" in scan
+    assert "\n    defenseclaw skill scan clawhub://my-skill@1.2.3\n" in scan
+    guard = page("setup", "guardrail")
+    assert "\n  Two modes:\n    observe - " in guard
+    assert "OpenClaw" not in guard.split("Options:")[0]
 
 
 def _signal(name: str, version: str = "1.0.0") -> agent_discovery.AgentSignal:
