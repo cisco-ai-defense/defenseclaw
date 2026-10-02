@@ -387,6 +387,24 @@ func windowsEnterpriseStandaloneNextStep(
 	}
 }
 
+// windowsEnterpriseStoppedServiceNextStep names what starts the stopped
+// DefenseClaw services again when status or verify fails on them
+// (GAP-1072: verify named the stopped guardian but no next step). It is
+// empty when every required service runs.
+func windowsEnterpriseStoppedServiceNextStep(services []enterprisestatus.Service) string {
+	var stopped []string
+	for _, service := range services {
+		if service.Required && strings.EqualFold(strings.TrimSpace(service.State), "stopped") {
+			stopped = append(stopped, service.Name)
+		}
+	}
+	if len(stopped) == 0 {
+		return ""
+	}
+	return ". Next step: run `defenseclaw enterprise windows repair --profile standalone` from an elevated prompt, or " +
+		windowsEnterpriseStandaloneSetupName + " /repair JSON=1, to start " + strings.Join(stopped, ", ") + " again"
+}
+
 // windowsEnterpriseStandaloneLifecycleAction reports whether a standalone
 // result is a lifecycle mutation whose failure gets administrator guidance.
 // Status and verify report deployment state and keep their full detail.

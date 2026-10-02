@@ -81,6 +81,18 @@ type Enrollment struct {
 	Pending int `json:"pending"`
 	Failed  int `json:"failed"`
 	Exempt  int `json:"exempt"`
+	// Accounts names each enrolled account and its connectors' states, where
+	// the platform reports them (Windows standalone).
+	Accounts []EnrollmentAccount `json:"accounts,omitempty"`
+}
+
+// EnrollmentAccount is one enrolled account and the state of each of its
+// connectors in the guardian's last reconcile: enrolled, pending (waiting
+// for the account's session) or failed.
+type EnrollmentAccount struct {
+	Account    string            `json:"account"`
+	SID        string            `json:"sid,omitempty"`
+	Connectors map[string]string `json:"connectors"`
 }
 
 // PortHolder is a process, other than the DefenseClaw gateway, listening

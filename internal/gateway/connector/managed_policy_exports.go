@@ -142,6 +142,21 @@ func CopilotVSCodeLocalManagedHookCommand(goos, hookBinary, event string) string
 		shellSingleQuote(event) + " --hook-surface " + CopilotHookSurfaceVSCodeLocal
 }
 
+// CopilotVSCodeLocalLegacyManagedHookCommand is the Windows Start-Process
+// bridge that builds before the awaited Process.Start statements rendered
+// for event (see legacyStartProcessWindowsNativePowerShellHookCommand). It is
+// never generated, but the hook file and plugin an earlier build wrote still
+// carry it, so it stays DefenseClaw's own: setup rewrites it and uninstall
+// removes it instead of the foreign-hook guard blocking it. It is empty
+// elsewhere, where the command did not change.
+func CopilotVSCodeLocalLegacyManagedHookCommand(goos, hookBinary, event string) string {
+	if goos != "windows" {
+		return ""
+	}
+	return legacyStartProcessWindowsNativePowerShellHookCommand("copilot", event, "", hookBinary,
+		"--enterprise-managed", "--hook-surface", CopilotHookSurfaceVSCodeLocal)
+}
+
 // WindowsAwaitedHookStatements returns the PowerShell statements that start
 // the GUI-subsystem hook launcher, wait for it and exit with its status,
 // keeping the process handle from the start so a launcher that exits at once

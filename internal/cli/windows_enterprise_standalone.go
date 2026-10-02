@@ -497,6 +497,9 @@ func applyWindowsEnterpriseInstallerReport(
 			result.Errors[firstError].Message += " " + next
 		}
 	}
+	if !lifecycle && !report.OK && !report.TransactionPending && len(result.Errors) > firstError {
+		result.Errors[firstError].Message += windowsEnterpriseStoppedServiceNextStep(result.Services)
+	}
 	if !lifecycle && report.TransactionPending {
 		configPath := ""
 		if opts != nil {
@@ -1046,6 +1049,9 @@ func writeWindowsEnterpriseStandaloneSummary(output io.Writer, result *enterpris
 	for _, service := range result.Services {
 		fmt.Fprintf(output, "  %s (%s): %s\n", service.Name, service.Kind, service.State)
 	}
+	if result.Action == "status" || result.Action == "verify" {
+		writeWindowsEnterpriseEnrollmentAccounts(output, result.Enrollment.Accounts)
+	}
 	for _, message := range result.Errors {
 		fmt.Fprintf(output, "  error %s: %s\n", message.Code, message.Message)
 	}
@@ -1201,6 +1207,7 @@ func readWindowsEnterpriseStandaloneEnrollmentAt(manifestPath, runtimeDir string
 	}
 	if state, exists, err := loadEnterpriseHookGuardianState(runtimeDir); err == nil && exists {
 		enrollment.Pending = state.PendingCount
+		enrollment.Accounts = windowsEnterpriseEnrollmentAccounts(state.Results)
 	}
 	return enrollment, nil
 }

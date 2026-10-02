@@ -1431,3 +1431,65 @@ func TestWindowsFirstInstallRollbackLeftoverNamesTheElevatedPrompt(t *testing.T)
 		t.Fatalf("warnings = %+v", warnings)
 	}
 }
+
+// GAP-1049: an uninstall reports security_incomplete only while a
+// deployment is still installed or a transaction is pending. Once nothing
+// is installed and nothing is pending (a completed uninstall, or a failed
+// first install that rolled back) there is nothing left to secure.
+func TestWindowsEnterpriseUninstallSecurityIncompleteOnlyWhileInstalled(t *testing.T) {
+	stubWindowsUnprotectedAgents(t, nil, os.ErrNotExist)
+	previousAmp := windowsEnterpriseAmpMachineFolderProblems
+	t.Cleanup(func() { windowsEnterpriseAmpMachineFolderProblems = previousAmp })
+	windowsEnterpriseAmpMachineFolderProblems = func() []string { return nil }
+	incomplete := func(action, line string) (string, []enterprisestatus.Message) {
+		t.Helper()
+		report, err := parseWindowsEnterpriseInstallerReport([]byte(line))
+		if err != nil {
+			t.Fatalf("parse %s: %v", line, err)
+		}
+		result := enterprisestatus.New(action, "standalone", "windows", "test")
+		applyWindowsEnterpriseInstallerReport(result, nil, report, windowsEnterpriseStandaloneRun{})
+		for _, warning := range result.Warnings {
+			if warning.Code == "security_incomplete" {
+				return warning.Message, result.Errors
+			}
+		}
+		return "", result.Errors
+	}
+	if got, _ := incomplete("uninstall", `{"schema_version":1,"ok":true,"action":"Uninstall","installed":false,"transaction_pending":false}`); got != "" {
+		t.Fatalf("a completed uninstall reported security_incomplete: %q", got)
+	}
+	got, errs := incomplete("install", `{"schema_version":1,"ok":false,"action":"Install","installed":false,"transaction_pending":false,"error":"install failed and rolled back"}`)
+	if got != "" || len(errs) == 0 {
+		t.Fatalf("a rolled-back install: security_incomplete %q, errors %+v", got, errs)
+	}
+	if got, _ := incomplete("uninstall", `{"schema_version":1,"ok":true,"action":"Uninstall","installed":false,"transaction_pending":true}`); !strings.Contains(got, "a lifecycle transaction is pending") {
+		t.Fatalf("a pending uninstall: security_incomplete %q", got)
+	}
+	if got, _ := incomplete("uninstall", `{"schema_version":1,"ok":true,"action":"Uninstall","installed":true,"transaction_pending":false}`); got == "" {
+		t.Fatal("an uninstall that left the deployment installed did not report security_incomplete")
+	}
+}
+
+// GAP-1073: status and verify help list only the flags they read; the
+// install-only flags stay accepted.
+func TestWindowsEnterpriseInspectionHelpHidesInstallFlags(t *testing.T) {
+	for _, action := range []string{"status", "verify", "install"} {
+		cmd := newWindowsEnterpriseLifecycleCommand(action)
+		usage := cmd.UsageString()
+		hidden := action != "install"
+		for _, name := range []string{"gateway-binary", "purge", "certification-codex-home", "mode", "install-root"} {
+			if cmd.Flags().Lookup(name) == nil {
+				t.Fatalf("%s: --%s is no longer accepted", action, name)
+			}
+			if strings.Contains(usage, "--"+name+" ") == hidden {
+				t.Fatalf("%s help: --%s shown=%v\n%s", action, name, !hidden, usage)
+			}
+		}
+		for _, name := range []string{"--json", "--profile", "--config"} {
+			if !strings.Contains(usage, name+" ") {
+				t.Fatalf("%s help lacks %s\n%s", action, name, usage)
+			}
+		}
+	}
+}

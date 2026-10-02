@@ -17653,8 +17653,24 @@ function Assert-DefenseClawEnterpriseDeployment {
             $sensorHelperService.Status -ne [ServiceProcess.ServiceControllerStatus]::Running) {
             throw 'sensor helper SCM process is not running'
         }
+        # A stopped gateway or guardian is named as such, like the other
+        # services: the readiness messages below assume its process runs.
+        $gatewayService = Microsoft.PowerShell.Management\Get-Service `
+            -Name $GatewayServiceName `
+            -ErrorAction SilentlyContinue
+        if ($null -eq $gatewayService -or
+            $gatewayService.Status -ne [ServiceProcess.ServiceControllerStatus]::Running) {
+            throw 'gateway SCM process is not running'
+        }
         if (-not (Test-DefenseClawGatewayReady -Layout $Layout -GatewayServiceName $GatewayServiceName)) {
             throw 'gateway SCM process is running but authenticated health is not ready'
+        }
+        $guardianService = Microsoft.PowerShell.Management\Get-Service `
+            -Name $GuardianServiceName `
+            -ErrorAction SilentlyContinue
+        if ($null -eq $guardianService -or
+            $guardianService.Status -ne [ServiceProcess.ServiceControllerStatus]::Running) {
+            throw 'guardian SCM process is not running'
         }
         $guardianReadiness = Get-DefenseClawGuardianReadinessProbe `
             -Layout $Layout `
