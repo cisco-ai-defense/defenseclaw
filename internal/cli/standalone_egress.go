@@ -28,8 +28,17 @@ import (
 // gateway.SetEnterpriseEgress; the AI Defense client uses
 // EgressProxy().Transport(); clients on Go's default transport (and the
 // Bedrock SDK transport) take it from the process environment.
+//
+// In every profile the instance-metadata endpoints are added to NO_PROXY
+// when a proxy variable is set, so a Bedrock instance-role credential lookup
+// never goes through the proxy (GAP-1655), and the telemetry exporters take
+// HTTPS_PROXY/NO_PROXY from the environment when no enterprise proxy is set
+// (GAP-1465).
 func applyStandaloneEgress(cfg *config.Config) error {
 	if err := applyStandaloneEgressEnvironment(cfg, os.Setenv); err != nil {
+		return err
+	}
+	if err := netguard.ExemptInstanceMetadataFromProxy(os.Getenv, os.Setenv); err != nil {
 		return err
 	}
 	return gateway.SetEnterpriseEgress(cfg)

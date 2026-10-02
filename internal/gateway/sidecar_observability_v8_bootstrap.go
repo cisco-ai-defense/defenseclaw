@@ -294,8 +294,9 @@ func (s *Sidecar) prepareObservabilityV8Runtime(
 		Secrets:  sidecarObservabilityV8SecretResolver{credentialsDir: s.currentConfig().ObservabilityCredentialsDir()},
 		CALoader: destinations.CAFileLoaderFunc(sidecarLoadObservabilityV8CA),
 		// Exporters check each destination, then connect through the
-		// standalone enterprise.network proxy when one is set.
-		Resolver: net.DefaultResolver, Dialer: enterpriseEgressDialer{direct: &net.Dialer{}},
+		// standalone enterprise.network proxy when one is set, otherwise
+		// through HTTPS_PROXY (NO_PROXY and loopback connect directly).
+		Resolver: net.DefaultResolver, Dialer: telemetryEgressDialer{direct: &net.Dialer{}},
 		Warnings: push.WarningObserverFunc(func(warning push.Warning) {
 			s.observeObservabilityV8Warning(warning)
 		}),

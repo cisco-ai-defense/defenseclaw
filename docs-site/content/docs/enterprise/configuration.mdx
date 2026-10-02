@@ -353,8 +353,13 @@ end. The gateway's other HTTPS clients take the proxy from `HTTPS_PROXY`,
   reload that changes it is reported as restart-required, and the gateway
   keeps the previous proxy until it restarts. On Linux and macOS, a
   lifecycle run that applies the changed config restarts the services.
-- When `https_proxy` is empty, the AI Defense client uses the process
-  environment's proxy variables, if any.
+- When `https_proxy` is empty, the AI Defense client and the telemetry
+  exporters use the process environment's proxy variables (`HTTPS_PROXY`,
+  `NO_PROXY`), if any.
+- Whenever a proxy variable is set, the CLI and the gateway add the
+  instance-metadata endpoints (`169.254.169.254`, `169.254.170.2`,
+  `fd00:ec2::254`) to `NO_PROXY`, so a Bedrock `instance_role` credential
+  lookup never goes through the proxy.
 - The MDM wrapper's `--https-proxy` (Linux and macOS) is used only to
   download the package. It does not configure the gateway.
 

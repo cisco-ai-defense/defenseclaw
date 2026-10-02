@@ -13,8 +13,10 @@ package gateway
 import (
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"net/url"
+	"os"
 	"strings"
 	"sync/atomic"
 
@@ -41,8 +43,13 @@ var enterpriseEgress atomic.Pointer[netguard.EgressRoute]
 // destination is reached. The AI Defense client takes the same proxy from
 // its own transport, and clients on Go's default transport take it from the
 // process environment. Outside the standalone profile, or without a proxy,
-// the route is cleared and every client connects as before.
+// the route is cleared and every client connects as before, except the
+// telemetry exporters, which then follow HTTPS_PROXY and NO_PROXY.
 func SetEnterpriseEgress(cfg *config.Config) error {
+	return setGatewayEgress(cfg, os.Getenv)
+}
+
+func setGatewayEgress(cfg *config.Config, getenv func(string) string) error {
 	var route *netguard.EgressRoute
 	if cfg != nil && cfg.StandaloneEnterprise() {
 		compiled, err := cfg.Enterprise.EgressProxy().Route()
@@ -52,6 +59,11 @@ func SetEnterpriseEgress(cfg *config.Config) error {
 		route = compiled
 	}
 	enterpriseEgress.Store(route)
+	telemetry := route
+	if telemetry == nil {
+		telemetry = environmentEgressRoute(getenv, os.Stderr)
+	}
+	telemetryEgress.Store(telemetry)
 	return nil
 }
 
@@ -59,9 +71,53 @@ func currentEnterpriseEgress() *netguard.EgressRoute {
 	return enterpriseEgress.Load()
 }
 
+// telemetryEgress is the route below the telemetry exporters' destination
+// check: the enterprise route when one is set, otherwise the proxy that
+// HTTPS_PROXY (with NO_PROXY) names in the gateway's environment. The
+// exporters dial with their own checked dialer, so without this they
+// connected directly even when every other client of the process used the
+// proxy (GAP-1465).
+var telemetryEgress atomic.Pointer[netguard.EgressRoute]
+
+// environmentEgressRoute compiles HTTPS_PROXY/https_proxy and
+// NO_PROXY/no_proxy into a route; nil when no proxy is set. A proxy URL the
+// route cannot use (credentials, a path, another scheme) is reported on
+// warn without its value, and the exporters connect directly as before.
+func environmentEgressRoute(getenv func(string) string, warn io.Writer) *netguard.EgressRoute {
+	proxy := strings.TrimSpace(getenv("HTTPS_PROXY"))
+	if proxy == "" {
+		proxy = strings.TrimSpace(getenv("https_proxy"))
+	}
+	if proxy == "" {
+		return nil
+	}
+	noProxy := strings.TrimSpace(getenv("NO_PROXY"))
+	if noProxy == "" {
+		noProxy = strings.TrimSpace(getenv("no_proxy"))
+	}
+	route, err := netguard.EgressProxy{HTTPSProxy: proxy, NoProxy: noProxy}.Route()
+	if err != nil {
+		if warn != nil {
+			fmt.Fprintln(warn, "[gateway] WARNING: telemetry exporters connect directly: HTTPS_PROXY is not a plain http(s)://host[:port] URL (a user name or password is not supported)")
+		}
+		return nil
+	}
+	return route
+}
+
+// telemetryEgressDialer connects through the current telemetry route over
+// direct.
+type telemetryEgressDialer struct {
+	direct netguard.V8Dialer
+}
+
+func (d telemetryEgressDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	return telemetryEgress.Load().Dial(ctx, d.direct, network, address)
+}
+
 // enterpriseEgressDialer connects through the current enterprise route over
-// direct. It is the dialer below the telemetry exporters' destination check,
-// and the whole connection layer of clients that have no check of their own.
+// direct. It is the whole connection layer of clients that have no
+// destination check of their own (the remote model router).
 type enterpriseEgressDialer struct {
 	direct netguard.V8Dialer
 }

@@ -790,7 +790,10 @@ def _effective_status_fail_mode(cfg, connector: str) -> dict:
     try:
         from defenseclaw.fail_mode import connector_fail_mode_report
 
-        return connector_fail_mode_report(cfg, connector)
+        # Passive: the effective-policy check starts the Codex app-server,
+        # which calls OpenAI and the model provider; that belongs to doctor
+        # (GAP-1466).
+        return connector_fail_mode_report(cfg, connector, inspect_effective_policy=False)
     except Exception:  # noqa: BLE001 - status must survive incomplete runtime state.
         guardrail = getattr(cfg, "guardrail", None)
         resolver = getattr(guardrail, "effective_hook_fail_mode", None)

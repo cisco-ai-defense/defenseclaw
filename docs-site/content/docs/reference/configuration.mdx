@@ -995,6 +995,16 @@ data directory. Configure the sidecar API listener with `gateway.api_bind` and
 upstream agent-gateway address. Set log verbosity through the sidecar's
 `--log-level` flag (see `defenseclaw-gateway start --help`).
 
+**Proxy variables.** The gateway's telemetry exporters (OTLP, Galileo, Splunk
+HEC, HTTP JSONL) follow `HTTPS_PROXY` and `NO_PROXY` from the gateway's
+environment (an `enterprise.network.https_proxy` takes precedence); loopback
+destinations always connect directly. The proxy URL must be
+`http(s)://host[:port]`: with a user name or password the gateway logs a
+warning and the exporters connect directly. Restart the gateway from a shell
+that has the variables set after changing them. Whenever a proxy variable is
+set, the CLI and the gateway add the instance-metadata endpoints
+(`169.254.169.254`, `169.254.170.2`, `fd00:ec2::254`) to `NO_PROXY`.
+
 ## Per-connector source-of-truth files
 
 | Connector | File DefenseClaw mutates |
