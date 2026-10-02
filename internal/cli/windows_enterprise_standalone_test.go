@@ -1249,10 +1249,21 @@ func TestWindowsEnterpriseUninstallReportsTheUserRegistrationsItLeft(t *testing.
 	if len(got) != 2 || got[0].Code != "user_registrations_pending" || got[1].Code != "user_registrations_failed" {
 		t.Fatalf("warnings = %+v", got)
 	}
-	if !strings.Contains(got[0].Message, "2 user connector registration(s)") ||
-		!strings.Contains(got[0].Message, "devin/"+sid+"; hermes/"+sid) ||
+	// GAP-1074: the warning groups the registrations by account, says the
+	// run was not LocalSystem, and names the next step.
+	if !strings.Contains(got[0].Message, "2 user connector registration(s) because this uninstall did not run as LocalSystem") ||
+		!strings.Contains(got[0].Message, sid+": devin, hermes") ||
+		!strings.Contains(got[0].Message, "Setup /ensure and then /uninstall, both as LocalSystem") ||
 		!strings.Contains(got[1].Message, "requires the LocalSystem guardian service") {
 		t.Fatalf("warnings = %+v", got)
+	}
+	signedOut := warnings(base + `,"user_registrations_pending":["amp/` + sid + `"],"user_registrations_failed":[]}`)
+	if len(signedOut) != 1 || !strings.Contains(signedOut[0].Message, "because those accounts were signed out") {
+		t.Fatalf("signed-out warnings = %+v", signedOut)
+	}
+	if labels := windowsEnterpriseRegistrationsByAccount([]string{"amp/S-1-5-18", "kiro/S-1-5-18", "orphan"}); len(labels) != 2 ||
+		!strings.HasSuffix(labels[0], "SYSTEM (S-1-5-18): amp, kiro") || labels[1] != "orphan" {
+		t.Fatalf("labels by account = %q", labels)
 	}
 
 	if got := warnings(base + `,"user_registrations_removed":2,"user_registrations_pending":[],"user_registrations_failed":[]}`); len(got) != 0 {
@@ -1268,6 +1279,23 @@ func TestWindowsEnterpriseUninstallReportsTheUserRegistrationsItLeft(t *testing.
 	if len(purge.Warnings) != 1 || purge.Warnings[0].Code != "per_user_state_remaining" ||
 		!strings.Contains(purge.Warnings[0].Message, `alice (`+sid+`): C:\Users\alice\.defenseclaw`) {
 		t.Fatalf("purge warnings = %+v", purge.Warnings)
+	}
+	// GAP-1111: a purge that did not run as LocalSystem left every enrolled
+	// account's data, so it fails and names the LocalSystem rerun.
+	notSystem, err := parseWindowsEnterpriseInstallerReport([]byte(base + `,"user_state_remaining":["alice (` + sid + `): C:\\Users\\alice\\.defenseclaw: the uninstall did not run as LocalSystem"]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed := enterprisestatus.New("uninstall", "standalone", "windows", "test")
+	applyWindowsEnterpriseInstallerReport(failed, &windowsEnterpriseLifecycleOptions{purge: true}, notSystem, windowsEnterpriseStandaloneRun{})
+	if len(failed.Errors) != 1 || failed.Errors[0].Code != "per_user_state_remaining" || len(failed.Warnings) != 0 ||
+		!strings.Contains(failed.Errors[0].Message, "--purge did not run as LocalSystem") ||
+		!strings.Contains(failed.Errors[0].Message, "/uninstall PURGE=1, both as LocalSystem") ||
+		!strings.HasSuffix(failed.Errors[0].Message, `Accounts: alice (`+sid+`): C:\Users\alice\.defenseclaw`) {
+		t.Fatalf("not-LocalSystem purge: errors %+v warnings %+v", failed.Errors, failed.Warnings)
+	}
+	if code := failed.Finish("windows", windowsEnterpriseFailureCodeFor(failed)); failed.OK || code == 0 {
+		t.Fatalf("not-LocalSystem purge finished ok=%t exit %d", failed.OK, code)
 	}
 	// A purge names each account whose data and binaries went.
 	gone, err := parseWindowsEnterpriseInstallerReport([]byte(base + `,"user_state_purged":["bob (` + sid + `): C:\\Users\\bob\\.defenseclaw"]}`))

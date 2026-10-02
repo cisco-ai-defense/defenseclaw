@@ -260,6 +260,10 @@ func windowsManagedHooksStandaloneUserCleanups(
 	return planEnterpriseHookUserCleanups(pending, rows, nobody, windowsStandalonePerUserCleanupConnector, now), problems
 }
 
+// windowsManagedHooksRegistrationsNotRemovedPrefix starts the failure an
+// uninstall that is not LocalSystem records for every user registration.
+const windowsManagedHooksRegistrationsNotRemovedPrefix = "per-user registrations were not removed: "
+
 // removeWindowsManagedHooksStandalonePerUserRegistrations runs, after a
 // committed uninstall, each per-user connector's teardown as the user for
 // every registration DefenseClaw made. It is best effort: the uninstall has
@@ -284,7 +288,7 @@ func removeWindowsManagedHooksStandalonePerUserRegistrations(
 			result.Pending = append(result.Pending, enterpriseHookUserCleanupLabel(entry))
 		}
 		result.Failed = append(result.Failed,
-			"per-user registrations were not removed: "+boundedEnterpriseHookUserCleanupText(err.Error()))
+			windowsManagedHooksRegistrationsNotRemovedPrefix+boundedEnterpriseHookUserCleanupText(err.Error()))
 		return result
 	}
 	_, attempted := runEnterpriseHookUserCleanups(ctx, entries, enterpriseHookWindowsUserCleanupAttempt, now)

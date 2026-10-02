@@ -650,7 +650,7 @@ Add/Remove Programs, cannot act as other users, so it removes no per-user
 registrations. Users who are signed out during the uninstall keep theirs as
 well: no guardian is left to clean them at their next sign-in. The uninstall
 result names what stays: the `user_registrations_pending` warning lists each
-connector and user SID it could not act as, and `user_registrations_failed`
+account and its connectors it could not act as, and `user_registrations_failed`
 lists removals that failed, including a registration that a connector's
 removal left in the user's agent configuration (the message names the file).
 To clean every user, run the uninstall as LocalSystem while they are signed
@@ -673,7 +673,10 @@ each account whose data the purge removed. The `per_user_state_remaining` warnin
 folder the purge could not remove and why: the uninstall did not run as
 LocalSystem, a file in it could not be removed, or the account's roaming or
 container profile is not on the computer while it is signed out. Remove
-what it names as LocalSystem.
+what it names as LocalSystem. A purge that did not run as LocalSystem
+removes the machine deployment but none of these folders, so it fails
+(non-zero exit) and names each account: run Setup `/ensure` and then
+`/uninstall PURGE=1`, both as LocalSystem while the accounts are signed in.
 
 The agents' shared machine folders stay while they hold anything else,
 because another product can use them. Setup removes its own files from them.

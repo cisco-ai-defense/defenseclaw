@@ -143,6 +143,11 @@ func completeWindowsManagedHooksTeardownUserCleanup(
 	}
 }
 
+// windowsManagedHooksNotLocalSystemReason ends a user_state_remaining entry
+// whose folder a purge left because it did not run as LocalSystem; the
+// lifecycle result fails on it.
+const windowsManagedHooksNotLocalSystemReason = "the uninstall did not run as LocalSystem"
+
 // windowsManagedHooksPurgeUserStateEnv is set to 1 by the lifecycle for an
 // uninstall with purge (Setup PURGE=1, --purge). A flag would fail the
 // finalize of an installed helper from before it; that helper ignores the
@@ -236,7 +241,7 @@ func windowsManagedHooksStandaloneUserState(
 			}
 			reason = "the account's profile folder is not on this computer while it is signed out"
 		case identityErr != nil:
-			reason = "the uninstall did not run as LocalSystem"
+			reason = windowsManagedHooksNotLocalSystemReason
 		case keepsRegistrations(sid):
 			reason = "kept: the account's agent registrations were not all removed, and its connector_backups restore them"
 		default:
