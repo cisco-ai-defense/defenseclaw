@@ -217,6 +217,8 @@ def _client_contract_snapshots(data_dir: str, client: str, agent: str) -> list[t
 
 def _refresh_client_contract_digests(data_dir: str, client: str, client_path: Path) -> None:
     """Atomically re-pin every DefenseClaw entry sharing one editor file."""
+    if not client_path.is_file():
+        return
     digest = _sha256_file(str(client_path))
     for pair_client, pair_agent in sorted(_managed_pairs()):
         if pair_client != client:
@@ -260,13 +262,26 @@ def _set_client_entry(client: str, agent: str, command: str, args: list[str]) ->
     return path
 
 
+def _has_client_entry(client: str, agent: str) -> bool:
+    servers = _read_json_object(_client_path(client)).get("agent_servers")
+    return isinstance(servers, dict) and _managed_name(agent) in servers
+
+
 def _remove_client_entry(client: str, agent: str) -> Path:
     path = _client_path(client)
     document = _read_json_object(path)
     servers = document.get("agent_servers")
-    if isinstance(servers, dict):
-        servers.pop(_managed_name(agent), None)
-    _write_json(path, document)
+    if not isinstance(servers, dict) or _managed_name(agent) not in servers:
+        return path
+    servers.pop(_managed_name(agent))
+    if not servers:
+        # Don't leave an empty agent_servers object (or a file that setup
+        # created only for DefenseClaw) behind once the last entry is gone.
+        document.pop("agent_servers")
+    if document:
+        _write_json(path, document)
+    elif path.is_file() and not path.is_symlink():
+        path.unlink()
     return path
 
 
@@ -665,6 +680,11 @@ def remove_cmd(app: AppContext, client: str, agent: str, managed: bool, runtime_
         raise click.ClickException("--runtime-data-dir is a managed-enrollment option")
     lock_path = _contract_lock_path(data_dir, client, agent)
     lock_snapshots = _client_contract_snapshots(data_dir, client, agent)
+    had_entry = _has_client_entry(client, agent)
+    had_policy = not managed and app.cfg.acp.binding_key(client, agent) in app.cfg.acp.bindings
+    if not (had_entry or had_policy or lock_path.exists()):
+        click.echo(f"Nothing to remove: no DefenseClaw {agent} entry is configured for {client} ({path})")
+        return
     acp_snapshot = copy.deepcopy(app.cfg.acp)
     try:
         path = _remove_client_entry(client, agent)
@@ -702,7 +722,10 @@ def remove_cmd(app: AppContext, client: str, agent: str, managed: bool, runtime_
                 rollback_errors.append(f"{managed_path}: {type(rollback_exc).__name__}")
         suffix = f"; rollback problems: {', '.join(rollback_errors)}" if rollback_errors else ""
         raise click.ClickException(f"ACP removal was rolled back: {exc}{suffix}") from exc
-    click.echo(f"Removed the DefenseClaw {agent} entry from {path}")
+    if had_entry:
+        click.echo(f"Removed the DefenseClaw {agent} entry from {path}")
+    else:
+        click.echo(f"Removed leftover DefenseClaw {client}/{agent} state; {path} had no {agent} entry")
 
 
 @acp_cmd.command("status")
@@ -755,8 +778,18 @@ def status_cmd(app: AppContext, runtime_data_dir: Path | None) -> None:
 
 
 @acp_cmd.command("verify")
-@click.option("--client", type=click.Choice(sorted(_CLIENTS)), required=True, help="Editor that runs the agent.")
-@click.option("--agent", type=click.Choice(sorted(_AGENTS)), required=True, help="ACP agent to guard.")
+@click.option(
+    "--client",
+    type=click.Choice(sorted(_CLIENTS)),
+    default=None,
+    help="Editor that runs the agent (default: every configured binding).",
+)
+@click.option(
+    "--agent",
+    type=click.Choice(sorted(_AGENTS)),
+    default=None,
+    help="ACP agent to guard (default: every configured binding).",
+)
 @click.option(
     "--runtime-data-dir",
     default=None,
@@ -764,15 +797,37 @@ def status_cmd(app: AppContext, runtime_data_dir: Path | None) -> None:
     help="Per-user ACP runtime directory of a managed enrollment.",
 )
 @pass_ctx
-def verify_cmd(app: AppContext, client: str, agent: str, runtime_data_dir: Path | None) -> None:
-    """Fail if a managed editor entry or executable digest has drifted."""
+def verify_cmd(app: AppContext, client: str | None, agent: str | None, runtime_data_dir: Path | None) -> None:
+    """Fail if a managed editor entry or executable digest has drifted.
+
+    With no --client/--agent, every configured binding is verified.
+    """
     if not app.cfg:
         raise click.ClickException("configuration is unavailable")
     data_dir = str((runtime_data_dir or Path(app.cfg.data_dir)).expanduser().resolve())
-    problems = _verify_binding(data_dir, client, agent, app.cfg.acp)
-    if problems:
-        raise click.ClickException("ACP binding verification failed: " + "; ".join(problems))
-    click.echo(f"Verified {client}/{agent}: editor entry and executable digests match")
+    if client and agent:
+        pairs = [(client, agent)]
+    else:
+        pairs = sorted(
+            (pair_client, pair_agent)
+            for pair_client, pair_agent in _managed_pairs()
+            if (client is None or pair_client == client) and (agent is None or pair_agent == agent)
+        )
+        if not pairs:
+            raise click.ClickException(
+                "No DefenseClaw ACP bindings are configured"
+                + (f" for {client or agent}" if client or agent else "")
+                + "; run 'defenseclaw acp setup --client <editor> --agent <agent>' first"
+            )
+    failures: list[str] = []
+    for pair_client, pair_agent in pairs:
+        problems = _verify_binding(data_dir, pair_client, pair_agent, app.cfg.acp)
+        if problems:
+            failures.append(f"{pair_client}/{pair_agent}: " + "; ".join(problems))
+        else:
+            click.echo(f"Verified {pair_client}/{pair_agent}: editor entry and executable digests match")
+    if failures:
+        raise click.ClickException("ACP binding verification failed: " + " | ".join(failures))
 
 
 # --- ACP discovery and takeover -------------------------------------------
