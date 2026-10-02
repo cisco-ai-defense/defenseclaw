@@ -620,7 +620,7 @@ done
 "${STAGING}/bin/defenseclaw-gateway" --version 2>/dev/null | grep -qF "${VERSION}" \
     || die "The downloaded gateway does not report version ${VERSION}"
 
-info "Building the Python environment"
+info "Building the Python environment (a first install can take several minutes)"
 make_venv() {
     local venv="$1"
     rm -rf "${venv}"
