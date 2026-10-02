@@ -150,6 +150,29 @@ func TestScanV8FailureUsesFailedFamilyWithoutInventingFindingStatus(t *testing.T
 	if _, exists := body["defenseclaw.finding.status"]; exists {
 		t.Fatalf("failed scan invented finding status: %#v", body)
 	}
+	// GAP-1987: a scan that never ran is not clean on any signal.
+	if verdict, exists := body["defenseclaw.scan.verdict"]; exists {
+		t.Fatalf("failed scan log verdict=%v, want absent", verdict)
+	}
+	counted := false
+	for _, metric := range runtime.metricSnapshot() {
+		if metric.EventName() != observability.EventName(observability.TelemetryInstrumentDefenseClawScanCount) {
+			continue
+		}
+		counted = true
+		if got := metricAttributes(t, metric)["defenseclaw.metric.verdict"]; got != "error" {
+			t.Fatalf("failed scan count verdict=%v, want error (attributes %v)", got, metricAttributes(t, metric))
+		}
+	}
+	if !counted {
+		t.Fatal("failed scan emitted no scan.count metric")
+	}
+	if got := scanV8Verdict(result, "clean"); got != "error" {
+		t.Fatalf("explicit clean on a failed scan = %q, want error", got)
+	}
+	if _, present := scanV8VerdictEnum("error").Get(); present {
+		t.Fatal("error verdict reached the clean/warn/block enum")
+	}
 }
 
 func TestScanV8RepeatedAssetFindingOnlyEmitsLifecycleChanges(t *testing.T) {
