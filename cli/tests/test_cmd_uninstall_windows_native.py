@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import ntpath
 import os
 import re
 import shutil
@@ -17,6 +18,47 @@ import time
 import unittest
 import venv
 from pathlib import Path
+
+
+class DeferredInterpreterRemovalCommandTests(unittest.TestCase):
+    def test_after_exit_renames_the_uv_folder_before_removing_it(self) -> None:
+        # GAP-1647: rd /s of .uv in place ran for tens of seconds and deleted
+        # the uv Python and cache of an install started right afterwards.
+        from unittest.mock import patch
+
+        from defenseclaw.commands import windows_uninstall_helper
+
+        uv = r"C:\Users\u\.defenseclaw\.uv"
+        with (
+            patch.object(windows_uninstall_helper.subprocess, "Popen") as popen,
+            patch.object(windows_uninstall_helper.os, "path", ntpath),
+        ):
+            windows_uninstall_helper._remove_after_exit([uv], [r"C:\Users\u\.defenseclaw"])  # noqa: SLF001
+
+        command = popen.call_args.args[0]
+        self.assertNotIn(f'rd /s /q "{uv}" &', command.split("else", 1)[0])
+        match = re.search(r'ren "([^"]+)" "(\.uv\.dc-removed-[0-9a-f]{8})"', command)
+        self.assertIsNotNone(match, command)
+        self.assertEqual(match.group(1), uv)
+        tombstone = ntpath.join(ntpath.dirname(uv), match.group(2))
+        self.assertLess(command.index("ren "), command.index(f'rd /s /q "{tombstone}"'))
+        self.assertLess(command.index(f'rd /s /q "{tombstone}"'), command.index(r'rd "C:\Users\u\.defenseclaw"'))
+
+    @unittest.skipUnless(sys.platform == "win32", "runs cmd.exe")
+    def test_after_exit_command_removes_the_folder_on_windows(self) -> None:
+        from unittest.mock import patch
+
+        from defenseclaw.commands import windows_uninstall_helper
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "data"
+            uv = data_dir / ".uv"
+            (uv / "python").mkdir(parents=True)
+            (uv / "python" / "python.exe").write_bytes(b"MZ")
+            with patch.object(windows_uninstall_helper.subprocess, "Popen") as popen:
+                windows_uninstall_helper._remove_after_exit([str(uv)], [str(data_dir)])  # noqa: SLF001
+            subprocess.run(popen.call_args.args[0], timeout=60, check=False)
+            self.assertFalse(data_dir.exists(), list(Path(tmp).rglob("*")))
 
 
 @unittest.skipUnless(sys.platform == "win32", "Windows file locking regression")
