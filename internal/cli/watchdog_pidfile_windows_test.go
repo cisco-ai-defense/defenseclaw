@@ -1117,6 +1117,11 @@ func TestWindowsWatchdogControlEventRequestsGracefulStop(t *testing.T) {
 		cleanup()
 		t.Fatalf("control name is not a valid private capability: %q", name)
 	}
+	// SWEEP-17: a Local\ name is invisible from another Windows session.
+	if !strings.HasPrefix(name, watchdogControlPrefix) {
+		cleanup()
+		t.Fatalf("control name %q is not in the Global namespace", name)
+	}
 
 	proc, err := os.FindProcess(os.Getpid())
 	if err != nil {
@@ -1143,6 +1148,38 @@ func TestWindowsWatchdogControlEventRequestsGracefulStop(t *testing.T) {
 	if handle, openErr := windows.OpenEvent(windows.EVENT_MODIFY_STATE, false, namePtr); openErr == nil {
 		_ = windows.CloseHandle(handle)
 		t.Fatal("watchdog control event remained open after cleanup")
+	}
+}
+
+// SWEEP-17: `watchdog stop` from session 0 could not open the Local\ control
+// of a watchdog started in a desktop session ("The system cannot find the
+// file specified"), so the per-user uninstall failed. An unreachable control
+// now falls back to stopping the verified process.
+func TestWindowsWatchdogStopsAWatchdogWhoseControlIsNotVisible(t *testing.T) {
+	child := exec.Command(filepath.Join(os.Getenv("SystemRoot"), "System32", "ping.exe"), "-n", "60", "127.0.0.1")
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+	exited := make(chan struct{})
+	go func() {
+		_ = child.Wait()
+		close(exited)
+	}()
+	t.Cleanup(func() {
+		_ = child.Process.Kill()
+		<-exited
+	})
+	legacy := legacyWatchdogControlPrefix + strings.Repeat("0", 64)
+	if !validWatchdogControlName(legacy) {
+		t.Fatalf("legacy Local control name %q is rejected", legacy)
+	}
+	if err := watchdogTerminate(watchdogPIDInfo{PID: child.Process.Pid, ControlName: legacy}, child.Process); err != nil {
+		t.Fatalf("stop with an unreachable control = %v", err)
+	}
+	select {
+	case <-exited:
+	case <-time.After(5 * time.Second):
+		t.Fatal("watchdog process still runs after a stop with an unreachable control")
 	}
 }
 
