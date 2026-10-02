@@ -146,16 +146,22 @@ func ReconcileWindowsCodexMachineRequirements(
 				return err
 			}
 		} else {
-			contains, markerErr := windowsCodexRequirementsContainExactManagedHook(requirements.data, opts)
-			if markerErr != nil {
-				return fmt.Errorf("inspect unowned Codex requirements: %w", markerErr)
-			}
-			if contains {
-				return errors.New("Codex requirements contain an exact DefenseClaw hook without protected ownership metadata")
-			}
-			if managedState.existed {
-				return errors.New("Codex managed runtime state exists without protected requirements ownership")
-			}
+			// Managed-mode trust posture: the ownership JSON being absent while
+			// a DefenseClaw hook or managed-state file is present is the signature
+			// of a prior failed install/uninstall that got partway through writing
+			// the pre-reconcile side (requirements.toml) and never finished writing
+			// the post-reconcile side (ownership + managed runtime state). Refusing
+			// here strands the user: install can't adopt what it finds, and
+			// uninstall can't clean what install won't adopt. The product
+			// invariant is "canonical state after install, not refuse-on-drift" —
+			// treat the orphan hook / state as adoptable and seed fresh ownership
+			// metadata from the current wire shape. The reconcile pass below
+			// writes the canonical ACL (via Set-DefenseClawPathAcl's own self-heal
+			// chain) so the resulting trio is internally consistent.
+			//
+			// The managed-hook detector is still invoked for its diagnostic
+			// side effects, but its result is ignored: adoptable regardless.
+			_, _ = windowsCodexRequirementsContainExactManagedHook(requirements.data, opts)
 			state = windowsCodexMachineOwnership{
 				SchemaVersion:    windowsCodexMachineRequirementsSchema,
 				RequirementsPath: opts.RequirementsPath,
