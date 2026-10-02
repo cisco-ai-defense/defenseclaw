@@ -108,7 +108,7 @@ if ($RunAsFile -and $PSVersionTable.PSEdition -ne "Core" -and $env:PSModulePath)
     if ($modulePath -notcontains (Join-Path $PSHOME "Modules")) { $modulePath += Join-Path $PSHOME "Modules" }
     $env:PSModulePath = $modulePath -join ";"
 }
-$Run = @{ Lock = $false; Transcript = $false; Log = ""; Owner = [IntPtr]::Zero; QuickstartRerun = ""; QuickstartRc = 0 }
+$Run = @{ Lock = $false; Transcript = $false; Log = ""; Owner = [IntPtr]::Zero; QuickstartRerun = ""; QuickstartRc = 0; OldGatewayDown = $false }
 
 function Write-Info([string]$Message) { Write-Host "  > $Message" -ForegroundColor Blue }
 function Write-Ok([string]$Message) { Write-Host "  + $Message" -ForegroundColor Green }
@@ -577,7 +577,25 @@ function Start-Gateway {
     # Its readiness wait is the health check. Exit code 3: running, but a
     # connector refused admission (upgrading again would not change that).
     Write-Info "Starting the gateway"
-    return Invoke-Native (Join-Path $BinDir "defenseclaw-gateway.exe") @("start")
+    $gateway = Join-Path $BinDir "defenseclaw-gateway.exe"
+    $rc = Invoke-Native $gateway @("start")
+    if ($rc -in @(0, 3) -or -not (Get-GatewayProcess)) { return $rc }
+    # A first start over a large audit database can outlast start's own
+    # 60-second readiness wait while the gateway keeps starting (GAP-1348).
+    # Wall-clock wait; up once status answers twice in a row.
+    Write-Info "The gateway is still starting (a large audit database takes a while); waiting up to 3 minutes"
+    $deadline = (Get-Date).AddMinutes(3)
+    $up = 0
+    while ((Get-Date) -lt $deadline -and (Get-GatewayProcess)) {
+        Start-Sleep -Seconds 3
+        if ((Invoke-Native $gateway @("status") -Quiet) -eq 0) {
+            $up++
+            if ($up -ge 2) { Write-Ok "The gateway finished starting"; return 0 }
+        } else {
+            $up = 0
+        }
+    }
+    return $rc
 }
 
 function Get-ProcessesUnder([string[]]$Prefixes) {
@@ -940,10 +958,18 @@ function Install-New {
 }
 
 function Restart-Old {
-    if ($Setup) { Restore-SetupInstall; return }
-    if ($WasRunning -and (Start-Gateway) -notin @(0, 3)) {
-        Write-Warn "The gateway did not restart; run 'defenseclaw-gateway start'"
+    if ($Setup) { Restore-SetupInstall } elseif ($WasRunning) { [void](Start-Gateway) }
+    # Say plainly when the gateway that ran before is down now (GAP-1349).
+    $Run.OldGatewayDown = $WasRunning -and -not (Get-GatewayProcess)
+    if ($Run.OldGatewayDown) {
+        Write-Warn "The gateway that was running before did not start again, so agent hooks are not guarded until it runs (connectors in fail-closed mode block tool calls)"
+        Write-Info "Start it with: defenseclaw-gateway start (log: $(Join-Path $DataDir 'gateway.log')). On a large audit database its first start can take several minutes"
     }
+}
+
+function Get-RestoredNote {
+    if ($Run.OldGatewayDown) { return "Your previous install is back, but its gateway is not running (see above)." }
+    return "Your previous install is back."
 }
 
 function Get-ExternalConfig {
@@ -1004,15 +1030,24 @@ function Restore-Snapshot {
 }
 
 function Save-RolledBackData {
-    # A rollback parks the data written since the upgrade in previous\. Keep it
-    # when a later upgrade reuses the slot: it can hold audit history.
-    if (-not (Test-Path -LiteralPath (Join-Path $Previous "ROLLED_BACK")) -or -not (Test-Path -LiteralPath (Join-Path $Previous "data"))) { return }
+    # A rollback parks the data written since the upgrade in previous\, and a
+    # 0.x install kept there holds the only copy of the audit history 1.0 does
+    # not carry over (GAP-1360). Keep either when a later upgrade reuses the slot.
+    if (-not (Test-Path -LiteralPath (Join-Path $Previous "data"))) { return }
     $version = Read-Text (Join-Path $Previous "VERSION")
-    $kept = Join-Path $DataDir ("backups\rolled-back-$version-" + (Get-Date -Format "yyyyMMddTHHmmss"))
+    if (Test-Path -LiteralPath (Join-Path $Previous "ROLLED_BACK")) {
+        $label = "rolled-back"
+    } elseif ((Test-Version $version) -and [version]$version -lt [version]"1.0.0" -and (Test-Path -LiteralPath (Join-Path $Previous "data\audit.db"))) {
+        $label = "audit-history"
+    } else {
+        return
+    }
+    $kept = Join-Path $DataDir ("backups\$label-$version-" + (Get-Date -Format "yyyyMMddTHHmmss"))
     New-Item -ItemType Directory -Path (Join-Path $DataDir "backups") -Force | Out-Null
     Move-Path (Join-Path $Previous "data") $kept
     $bytes = (Get-ChildItem -LiteralPath $kept -Recurse -Force -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
-    Write-Info ("Kept the data from before the last rollback in $kept ({0:N1} MB)" -f ([double]$bytes / 1MB))
+    $what = if ($label -eq "rolled-back") { "the data from before the last rollback" } else { "the audit history DefenseClaw $version recorded" }
+    Write-Info ("Kept $what in $kept ({0:N1} MB)" -f ([double]$bytes / 1MB))
     Write-Info "It is not used again; once you no longer need its audit history, remove it with: Remove-Item -Recurse -Force '$kept'"
 }
 
@@ -1525,10 +1560,12 @@ function Invoke-Install {
     if ($PrevVersion -and $PrevVersion -eq $Ver) {
         if (-not (Confirm-Step "Reinstall DefenseClaw ${Ver}?")) { Die "Cancelled; nothing was changed" }
     } elseif ($PrevVersion) {
-        if ([version]$PrevVersion -lt [version]"1.0.0" -and (Test-Path -LiteralPath (Join-Path $DataDir "audit.db"))) {
+        $auditDb = Join-Path $DataDir "audit.db"
+        if ([version]$PrevVersion -lt [version]"1.0.0" -and (Test-Path -LiteralPath $auditDb)) {
             # Audit migration 33 (privacy cutover) empties the pre-1.0 history.
-            Write-Warn "DefenseClaw 1.0 starts a new audit history: the audit events, scan results and findings $PrevVersion recorded are deleted when DefenseClaw $Ver first opens its audit database"
-            Write-Info "A copy is kept in $(Join-Path $Previous 'data\audit.db') until the next upgrade; 'defenseclaw rollback' brings it back"
+            $auditMb = "{0:N0} MB" -f ((Get-Item -LiteralPath $auditDb).Length / 1MB)
+            Write-Warn "DefenseClaw 1.0 starts a new audit history: the audit events, scan results and findings $PrevVersion recorded ($auditDb, $auditMb) are deleted when DefenseClaw $Ver first opens its audit database"
+            Write-Info "A copy is kept in $(Join-Path $Previous 'data\audit.db'); 'defenseclaw rollback' brings it back, and later upgrades keep it in $(Join-Path $DataDir 'backups')"
         }
         if (-not (Confirm-Step "Upgrade DefenseClaw $PrevVersion -> ${Ver}?")) { Die "Cancelled; nothing was changed" }
     }
@@ -1564,7 +1601,7 @@ function Invoke-Install {
     if (-not $installed) {
         Write-Err "Installing $Ver failed; restoring $previousLabel"
         Restore-Snapshot
-        Die "DefenseClaw $Ver was not installed. Your previous install is back. Log: $($Run.Log)"
+        Die "DefenseClaw $Ver was not installed. $(Get-RestoredNote) Log: $($Run.Log)"
     }
     $startRc = 0
     # A 0.x import leaves the agent executables its connectors run in a receipt
@@ -1592,7 +1629,7 @@ function Invoke-Install {
             Write-Err "The $Ver gateway did not become healthy; restoring $previousLabel"
             [void](Stop-Gateway)
             Restore-Snapshot
-            Die "DefenseClaw $Ver was not installed. Your previous install is back. Log: $($Run.Log)"
+            Die "DefenseClaw $Ver was not installed. $(Get-RestoredNote) Log: $($Run.Log)"
         }
     }
     Complete-Swap

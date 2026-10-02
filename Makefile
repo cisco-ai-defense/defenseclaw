@@ -148,6 +148,9 @@ check-version-sync:
 # We also honour NO_QUICKSTART=1 and NO_PATH=1 as escape hatches for
 # CI jobs that only want the binaries.
 all: _source-install-dev-preflight
+	@# 1.0 deletes a 0.x audit history when its gateway first opens it; keep a
+	@# copy first, as the release installers do (GAP-1469).
+	@$(HOST_PYTHON) ./scripts/keep-pre-1.0-audit-history.py
 	@$(MAKE) --no-print-directory _source-dev-install
 	@$(MAKE) --no-print-directory path
 	@$(MAKE) --no-print-directory quickstart
