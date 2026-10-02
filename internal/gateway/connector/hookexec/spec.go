@@ -177,9 +177,11 @@ var specs = map[string]spec{
 		subject: "devin hook", endpoint: "/api/v1/devin/hook",
 		outputField: "hook_output", style: styleHookEchoDecision,
 		defaultBlockReason: "Blocked by DefenseClaw Devin policy.",
-		oversizedClosed:    failResult{body: `{"decision":"block","reason":"` + tooLarge + `"}`, exit: blockExit},
-		unreachableStrict:  failResult{body: `{"decision":"block","reason":"` + failedClosed + `"}`, exit: blockExit},
-		responseClosed:     failResult{body: `{"decision":"block","reason":"` + failedClosed + `"}`, exit: blockExit},
+		// Devin shows an exit-2 hook's stdout verbatim, so its closed
+		// failures print the plain reason (see devinBlockText).
+		oversizedClosed:   failResult{body: tooLarge, exit: blockExit},
+		unreachableStrict: failResult{body: failedClosed, exit: blockExit},
+		responseClosed:    failResult{body: failedClosed, exit: blockExit},
 	},
 	// Kiro blocks PreToolUse (every surface) and, in Kiro IDE,
 	// UserPromptSubmit with exit 2 and shows stderr (kiro-cli 2.24.1 --v3
