@@ -616,6 +616,23 @@ class DoctorGuardrailTests(unittest.TestCase):
         self.assertIn("held by PID 4343 (python3), not by this account's gateway", result.checks[0]["detail"])
         self.assertEqual(result.gateway_down, "foreign")
 
+    def test_foreign_port_fix_does_not_ask_to_stop_another_accounts_process(self):
+        # GAP-1706: the same command form as defenseclaw-gateway status/start,
+        # and another account's process is not this account's to stop.
+        from defenseclaw.commands import cmd_doctor
+
+        cfg = self._sidecar_alignment_cfg()
+        with patch.object(cmd_doctor, "_free_api_port_hint", return_value="18980"):
+            other = cmd_doctor._foreign_gateway_port_detail(
+                cfg, "PID 12964 (defenseclaw-gateway.exe, probably another account's DefenseClaw gateway)"
+            )
+            own = cmd_doctor._foreign_gateway_port_detail(cfg, "PID 4343 (python3)")
+        self.assertIn("That process belongs to another account, so move", other)
+        self.assertNotIn("Stop that process", other)
+        self.assertIn("Stop that process, or move", own)
+        for text in (other, own):
+            self.assertIn("`defenseclaw setup gateway --api-port 18980 --non-interactive`", text)
+
     def test_refused_token_send_is_not_a_transport_failure(self):
         from defenseclaw.commands import cmd_doctor
 

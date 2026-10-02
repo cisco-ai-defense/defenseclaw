@@ -455,6 +455,31 @@ func (pipeline *LocalLogPipeline) process(
 	return outcome, nil
 }
 
+// ProjectCommitted builds the optional-destination work for a record that its
+// producer already appended to the local store in its own transaction (alert
+// acknowledgement and dismissal). Process does the same after its own local
+// append; without it those compliance events never left SQLite (GAP-1635).
+// The local delivery is not repeated.
+func (pipeline *LocalLogPipeline) ProjectCommitted(
+	ctx context.Context,
+	record observability.Record,
+) LocalLogOutcome {
+	if pipeline == nil || pipeline.evaluator == nil || pipeline.projector == nil || ctx == nil {
+		return LocalLogOutcome{}
+	}
+	admission, deliveries, err := pipeline.evaluator.RouteCommitted(record)
+	if err != nil || admission != router.AdmissionOrdinary {
+		return LocalLogOutcome{}
+	}
+	_, optional, ok := splitLocalDelivery(deliveries, admission)
+	if !ok {
+		return LocalLogOutcome{}
+	}
+	outcome := LocalLogOutcome{admission: admission, localPersisted: true}
+	pipeline.projectOptional(&outcome, record, optional, legacyredaction.SinkPolicyFromContext(ctx), "")
+	return outcome
+}
+
 // projectOptional projects record for each optional destination, collecting
 // work items and bounded per-destination failures on outcome.
 func (pipeline *LocalLogPipeline) projectOptional(

@@ -325,6 +325,26 @@ def test_rollback_uses_the_saved_installer(home: Path, execs: list[list[str]]) -
     assert execs[0][1] != str(saved)
 
 
+def test_windows_rollback_to_the_setup_package_refuses_in_this_terminal(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (home / "installer").mkdir()
+    (home / "installer" / "install.ps1").write_text("", encoding="utf-8")
+    (home / "previous" / "legacy-setup").mkdir(parents=True)
+    (home / "previous" / "VERSION").write_text("0.8.10\n", encoding="utf-8")
+    monkeypatch.setattr(upgrade_shim.os, "name", "nt")
+    started: list[object] = []
+    monkeypatch.setattr(upgrade_shim.subprocess, "Popen", lambda *args, **kwargs: started.append(args))
+
+    assert upgrade_shim.run(["rollback", "--yes"]) == 1
+
+    assert started == []
+    err = capsys.readouterr().err
+    assert "DefenseClaw Setup 0.8.10, which cannot be restored automatically" in err
+    assert "defenseclaw uninstall" in err
+    assert "releases/tag/0.8.10" in err
+
+
 def test_rollback_without_a_saved_installer_explains(home: Path, execs: list[list[str]]) -> None:
     assert upgrade_shim.run(["rollback"]) == 1
     assert execs == []

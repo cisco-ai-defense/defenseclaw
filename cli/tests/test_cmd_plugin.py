@@ -779,6 +779,25 @@ class TestPluginListMultiConnectorDefault(PluginCommandTestBase):
         self.assertIn("matches several Hermes plugins", ambiguous.output)
 
     @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
+    def test_unblock_is_audited_as_registered_plugin_unblock(self, _mock_oc):
+        """GAP-1625: unblock exports as plugin-unblock (enforcement), not a generic action."""
+        from unittest.mock import MagicMock
+
+        from defenseclaw.audit_actions import is_known_action
+
+        rows = self._hermes_nested_rows()
+        with patch("defenseclaw.inventory.claw_inventory._enumerate_hermes_plugins", return_value=rows):
+            blocked = self.invoke(["block", "ddgs", "--connector", "hermes"])
+            self.assertEqual(blocked.exit_code, 0, blocked.output)
+            with patch.object(self.app, "logger", MagicMock()) as logger:
+                result = self.invoke(["unblock", "web/ddgs", "--connector", "hermes"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        actions = [c.args[0] for c in logger.log_action.call_args_list]
+        self.assertIn("plugin-unblock", actions)
+        self.assertNotIn("action", actions)
+        self.assertTrue(is_known_action("plugin-unblock"))
+
+    @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
     def test_table_title_counts_effectively_enabled_plugins(self, _mock_oc):
         codex_dir = os.path.join(self.tmp_dir, "codex-plugins")
         os.makedirs(os.path.join(codex_dir, "dc-plugin-alpha"))
