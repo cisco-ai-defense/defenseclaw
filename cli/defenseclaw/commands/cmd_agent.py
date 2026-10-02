@@ -3588,7 +3588,12 @@ def _emit_discovery_report(
         gateway_token_env=gateway_token_env,
     )
     if not token:
-        result["error"] = "gateway token unavailable"
+        # GAP-1553: the token is created the first time the gateway starts.
+        where = f" for {host}:{port}" if host and port else ""
+        result["error"] = (
+            f"no gateway token yet{where}; start the gateway with 'defenseclaw-gateway start' "
+            "(it creates the token), then re-run"
+        )
         return result
 
     try:

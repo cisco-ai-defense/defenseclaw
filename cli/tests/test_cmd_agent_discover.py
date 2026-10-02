@@ -254,6 +254,26 @@ class TestAgentDiscoverCommand(unittest.TestCase):
         self.assertNotIn("no sidecar", combined_output)
         self.assertIn("defenseclaw-gateway start", combined_output)
 
+    def test_missing_token_names_the_next_step(self):
+        # GAP-1553: a gateway that never started has no token yet.
+        app, tmp_dir, db_path = make_app_context()
+        try:
+            with patch(
+                "defenseclaw.commands.cmd_agent.agent_discovery.discover_agents",
+                return_value=_discovery(),
+            ), patch(
+                "defenseclaw.commands.cmd_agent._resolve_gateway_target",
+                return_value=("127.0.0.1", 18970, ""),
+            ):
+                result = self.runner.invoke(agent, ["discover"], obj=app, catch_exceptions=False)
+        finally:
+            cleanup_app(app, db_path, tmp_dir)
+
+        combined_output = result.output + result.stderr
+        self.assertEqual(result.exit_code, 0, combined_output)
+        self.assertIn("OTel: not emitted - no gateway token yet for 127.0.0.1:18970", combined_output)
+        self.assertIn("defenseclaw-gateway start", combined_output)
+
     def test_no_emit_skips_client(self):
         with patch(
             "defenseclaw.commands.cmd_agent.agent_discovery.discover_agents",
