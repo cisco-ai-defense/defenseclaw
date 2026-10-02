@@ -288,7 +288,9 @@ def inspect_v8_operator_status(config_path: str | Path) -> V8OperatorStatus:
         except ConfigInspectError as exc:
             # The helper names the private snapshot, which is deleted below;
             # point the diagnostic at the operator's own file instead.
-            raise ConfigInspectError(
+            # Keep the subclass: a helper timeout is a busy host, not a bad
+            # config (GAP-1621).
+            raise type(exc)(
                 str(exc).replace(str(snapshot_path), str(path.absolute())),
                 field_path=exc.field_path,
                 reason=exc.reason,
