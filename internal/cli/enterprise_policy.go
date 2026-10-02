@@ -145,6 +145,7 @@ var standaloneEnterprisePolicyOptions = func() (enterprisePolicyContext, error) 
 	if err != nil {
 		return enterprisePolicyContext{}, err
 	}
+	opts.CopilotUserHomes = standaloneEnrolledHomes(layout)
 	return enterprisePolicyContext{layout: layout, opts: opts, connectors: enterprisepolicy.StandaloneConnectors(cfg)}, nil
 }
 

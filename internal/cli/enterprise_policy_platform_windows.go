@@ -39,6 +39,10 @@ func pinStandaloneManagedEnv() error {
 	)
 }
 
+// standaloneEnrolledHomes is empty on Windows: the Copilot VS Code lock is
+// not written there.
+func standaloneEnrolledHomes(managed.StandaloneLayout) []string { return nil }
+
 // standaloneEnterprisePolicyLayout resolves the layout from the protected
 // HKLM machine roots, never from the caller's environment.
 func standaloneEnterprisePolicyLayout() (managed.StandaloneLayout, string, string, error) {
