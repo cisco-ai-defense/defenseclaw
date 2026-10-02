@@ -141,7 +141,7 @@ Each entry is run through the MCP scanner (transport probe + behavioral introspe
     },
     'remove <id>': {
       type: 'subcommand',
-      description: 'Delete the source AND any asset_policy rules it promoted (Reason="registry:<id>"). --keep-cache leaves the on-disk manifest behind.',
+      description: 'Delete the source AND any asset_policy rules it promoted (Reason="registry:<id>"). --keep-cache leaves the on-disk manifest behind; --yes (or --non-interactive) skips the confirmation prompt.',
     },
     'test <id>': {
       type: 'subcommand',

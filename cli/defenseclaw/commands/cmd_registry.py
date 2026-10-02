@@ -608,7 +608,8 @@ def show_cmd(app: AppContext, source_id: str, emit_json: bool) -> None:
 @click.argument("source_id")
 @click.option("--keep-cache", is_flag=True,
               help="Keep ~/.defenseclaw/registries/<id> on disk")
-@click.option("--non-interactive", is_flag=True, help="Never prompt; fail if a required value is missing.")
+@click.option("--non-interactive", "--yes", "-y", "non_interactive", is_flag=True,
+              help="Remove without the confirmation prompt (--yes and --non-interactive are the same).")
 @click.option("--json", "emit_json", is_flag=True, help="Print the result as JSON.")
 @pass_ctx
 def remove_cmd(

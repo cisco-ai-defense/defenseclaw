@@ -291,6 +291,11 @@ class TestRegistryRemove(RegistryCommandTestBase):
         ids = [s.id for s in self.app.cfg.registries.sources]
         self.assertNotIn("corp-skills", ids)
 
+    def test_remove_accepts_yes_like_other_confirm_commands(self):
+        result = self.invoke(["remove", "corp-skills", "--yes"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertNotIn("corp-skills", [s.id for s in self.app.cfg.registries.sources])
+
     def test_remove_clears_associated_asset_policy_rules(self):
         from defenseclaw.config import AssetPolicyRule
 
