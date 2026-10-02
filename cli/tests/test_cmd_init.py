@@ -516,6 +516,29 @@ class TestInitFirstRunBackend(unittest.TestCase):
             sidecar = [s for s in summary["setup"] if s["name"] == "Sidecar"]
             self.assertEqual([s["detail"] for s in sidecar], [want], summary["setup"])
 
+    def test_scripted_reinit_reconciles_a_running_gateway(self):
+        # GAP-1539: with the gateway already running, a scripted init that
+        # changes the roster restarts it instead of saying "not started".
+        from defenseclaw.bootstrap import StepResult
+
+        self.addCleanup(shutil.rmtree, self.tmp_dir, True)
+        self.tmp_dir = os.path.realpath(tempfile.mkdtemp(prefix="dclaw-init-running-gw-"))
+        with (
+            patch("defenseclaw.bootstrap._pid_file_running", return_value=True),
+            patch(
+                "defenseclaw.bootstrap._start_gateway_structured",
+                return_value=StepResult("Sidecar", "pass", "restarted (was claudecode, now codex)"),
+            ) as start,
+        ):
+            result = self._invoke([
+                "--non-interactive", "--yes", "--connector", "codex", "--scanner-mode", "local",
+                "--skip-install", "--no-verify", "--json-summary",
+            ])
+        summary = json.loads(result.output)
+        sidecar = [s["detail"] for s in summary["setup"] if s["name"] == "Sidecar"]
+        self.assertEqual(sidecar, ["restarted (was claudecode, now codex)"], summary["setup"])
+        start.assert_called_once()
+
     def test_wizard_trusted_path_survives_the_init_transaction(self):
         """GAP-1058: a directory trusted in the wizard is kept by init, so setup
         can run that agent in the same run."""
