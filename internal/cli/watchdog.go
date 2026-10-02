@@ -631,6 +631,11 @@ func runWatchdogStart(_ *cobra.Command, _ []string) error {
 	}
 	_ = logFile.Close()
 	if err := waitForWatchdogStart(pidPath, cmd.pid, watchdogSpawnReadyTimeout, watchdogStartInterval); err != nil {
+		if watchdogStillStarting(pidPath) {
+			Warn(fmt.Sprintf("Watchdog is still starting (PID %d holds its ownership lock and has not published its PID yet)", cmd.pid))
+			Subhead("Check it in a minute with: defenseclaw-gateway watchdog status")
+			return nil
+		}
 		return fmt.Errorf(
 			"watchdog: start readiness: %w (PID %d may still be starting; check with 'defenseclaw-gateway watchdog status')",
 			err, cmd.pid,
@@ -640,6 +645,15 @@ func runWatchdogStart(_ *cobra.Command, _ []string) error {
 	fmt.Printf("Watchdog %s (PID %d)\n", Style("started", "fg=green", "bold"), cmd.pid)
 	fmt.Printf("  %s %s\n", Style("Log file:", "fg=bright_black", "bold"), logPath)
 	return nil
+}
+
+// watchdogStillStarting reports a watchdog that took its ownership lock but
+// has not published its PID record yet. On a loaded Windows host that can
+// outlast the readiness wait; start then said it failed for a watchdog that
+// came up a minute later, and status read "PID 0 does not match" (GAP-1310).
+func watchdogStillStarting(pidPath string) bool {
+	locked, info, err := watchdogIsLocked(pidPath)
+	return locked && ((err == nil && info.PID == 0) || errors.Is(err, fs.ErrNotExist))
 }
 
 func waitForWatchdogOwnedRecord(pidPath string, timeout, interval time.Duration) (watchdogPIDInfo, error) {
@@ -863,6 +877,10 @@ func runWatchdogStatus(_ *cobra.Command, _ []string) error {
 		} else if info.PID == 0 && lockErr == nil {
 			Subhead("Enable in config: gateway.watchdog.enabled = true")
 		}
+		return nil
+	}
+	if watchdogStillStarting(pidPath) {
+		Warn("Watchdog: starting (it holds its ownership lock and has not published its PID yet); check again in a minute")
 		return nil
 	}
 	if lockErr != nil {
