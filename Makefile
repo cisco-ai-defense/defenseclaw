@@ -429,8 +429,9 @@ endif
 # `make plugin` runs. Forcing every gateway build to first run npm
 # would block non-OpenClaw operators (zeptoclaw, codex, claude code)
 # who don't need the plugin at all. Instead we drop a placeholder file
-# so //go:embed has at least one entry, and the OpenClaw connector
-# detects the placeholder at runtime and returns a clear error when
+# so //go:embed has at least one entry (the tracked .placeholder is kept
+# even after a sync, so a build leaves the checkout clean), and the
+# OpenClaw connector finds no package.json at runtime and returns a clear error when
 # `Setup` is called for OpenClaw without a built plugin. Operators who
 # actually want OpenClaw run `make extensions` (or `make plugin`) first.
 sync-openclaw-extension: _checkout-write-preflight
@@ -438,11 +439,10 @@ sync-openclaw-extension: _checkout-write-preflight
 	embed_dir=internal/gateway/connector/openclaw_extension; \
 	plugin_dist=$(PLUGIN_DIR)/dist; \
 	if [ ! -d "$$plugin_dist" ] || [ -z "$$(ls -A "$$plugin_dist" 2>/dev/null)" ]; then \
-	  if [ -f "$$embed_dir/.placeholder" ] || [ ! -d "$$embed_dir" ] \
-	      || [ -z "$$(ls -A "$$embed_dir" 2>/dev/null | grep -v '^\.placeholder$$' || true)" ]; then \
+	  if [ ! -f "$$embed_dir/package.json" ]; then \
 	    mkdir -p "$$embed_dir"; \
-	    printf '%s\n' "OpenClaw extension not built." \
-	      "Run 'make extensions' (or 'make plugin') to populate the embedded tree." \
+	    [ -f "$$embed_dir/.placeholder" ] || printf '%s\n' \
+	      "OpenClaw extension bundle is not present in this source checkout." \
 	      > "$$embed_dir/.placeholder"; \
 	    echo "  • OpenClaw extension dist/ missing — embedded a placeholder (run 'make extensions' to enable OpenClaw)"; \
 	  else \
@@ -450,7 +450,11 @@ sync-openclaw-extension: _checkout-write-preflight
 	  fi; \
 	  exit 0; \
 	fi; \
-	rm -rf "$$embed_dir"; \
+	mkdir -p "$$embed_dir"; \
+	for entry in "$$embed_dir"/* "$$embed_dir"/.[!.]*; do \
+	  [ -e "$$entry" ] || continue; \
+	  [ "$${entry##*/}" = .placeholder ] || rm -rf "$$entry"; \
+	done; \
 	mkdir -p "$$embed_dir/node_modules"; \
 	cp $(PLUGIN_DIR)/package.json "$$embed_dir/"; \
 	cp $(PLUGIN_DIR)/openclaw.plugin.json "$$embed_dir/"; \
