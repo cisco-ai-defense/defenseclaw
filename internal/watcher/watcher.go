@@ -355,6 +355,15 @@ func (w *InstallWatcher) processPending(ctx context.Context) {
 // the original category event so it fails open to scanning.
 func (w *InstallWatcher) pendingInstallEvents(path string) []InstallEvent {
 	fallback := w.classifyEvent(path)
+	if synced, ok := claudeSyncedSkillDirs(path); ok {
+		out := make([]InstallEvent, 0, len(synced))
+		for _, skill := range synced {
+			evt := w.classifyEvent(skill)
+			evt.Type = InstallSkill
+			out = append(out, evt)
+		}
+		return out
+	}
 	for _, root := range w.skillDirs {
 		if !hermesskills.IsRoot(root) || !watcherPathAtOrBelow(path, root) {
 			continue
