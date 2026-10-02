@@ -288,7 +288,7 @@ def list_policies(app: AppContext, json_out: bool) -> None:
         label = ux.bold(summary.name)
         tag = ""
         if summary.builtin:
-            tag += ux.dim(" [built-in]")
+            tag += ux.dim(" [built-in, edited]" if summary.edited else " [built-in]")
         if summary.active:
             tag += ux._style(" [active]", fg="green")
 
@@ -662,16 +662,16 @@ def _activate_policy(app: AppContext, name: str) -> str:
             # docs site emits; force the operator through `api_key_env`.
             app.cfg.cisco_ai_defense.api_key_env = aid_raw["api_key_env"]
 
-    # Apply webhook destinations into config.yaml. Webhooks are gateway
-    # config (sink destinations), not policy data, but the playground
-    # carries them through the policy YAML so the wizard's output is a
-    # single self-describing artifact. We replace the list wholesale on
-    # activate so the policy can drop a webhook the operator no longer
-    # wants. If the policy YAML omits the key entirely we leave the
-    # config alone — that's the "don't touch what you don't own" case.
+    # Webhooks are gateway config (notifier destinations), not policy data,
+    # but the playground carries them through the policy YAML so the
+    # wizard's output is one self-describing artifact. Activation only ADDS
+    # the policy's webhooks whose name (or URL) isn't configured yet; it
+    # never removes or rewrites the operator's own entries. The built-in
+    # policies carry ``webhooks: []``, and replacing the list wholesale
+    # silently deleted every webhook on each activate (GAP-1273).
     if "webhooks" in data:
         wh_raw = data.get("webhooks")
-        if isinstance(wh_raw, list):
+        if isinstance(wh_raw, list) and wh_raw:
             from defenseclaw.config import WebhookConfig
 
             new_webhooks: list[WebhookConfig] = []
@@ -696,7 +696,15 @@ def _activate_policy(app: AppContext, name: str) -> str:
                     for k, v in kwargs.items():
                         setattr(wh, k, v)
                     new_webhooks.append(wh)
-            app.cfg.webhooks = new_webhooks
+            merged = list(app.cfg.webhooks or [])
+            known = {str(getattr(w, "name", "") or "") for w in merged} - {""}
+            known |= {str(getattr(w, "url", "") or "") for w in merged} - {""}
+            for wh in new_webhooks:
+                keys = {str(getattr(wh, "name", "") or ""), str(getattr(wh, "url", "") or "")} - {""}
+                if keys and not keys & known:
+                    merged.append(wh)
+                    known |= keys
+            app.cfg.webhooks = merged
     app.cfg.save()
     click.echo(f"Config updated with policy '{name}'.")
 
@@ -714,7 +722,11 @@ def _activate_policy(app: AppContext, name: str) -> str:
               help="Delete even if active; re-activates 'default' afterward")
 @pass_ctx
 def delete(app: AppContext, name: str, force: bool) -> None:
-    """Delete a custom policy.
+    """Delete a custom policy, or your edited copy of a built-in.
+
+    For a built-in policy (default, strict, permissive) only the user copy
+    that ``policy edit`` saved is removed, which restores the built-in; an
+    active built-in is re-activated from the restored version.
 
     Deleting the policy that is currently active is refused unless
     ``--force`` is given (N1): otherwise the gateway's live data.json
@@ -725,12 +737,16 @@ def delete(app: AppContext, name: str, force: bool) -> None:
     """
     name = _sanitize_policy_name(name)
 
-    if name in BUILTIN_POLICIES:
-        click.echo(f"error: cannot delete built-in policy '{name}'", err=True)
-        raise SystemExit(1)
-
     user_dir = _policies_dir(app)
     path = os.path.join(user_dir, f"{name}.yaml")
+
+    builtin = name in BUILTIN_POLICIES
+    if builtin and (not os.path.lexists(path) or _is_bundled_path(path)):
+        click.echo(
+            f"error: cannot delete built-in policy '{name}' (it has no edited copy to remove)",
+            err=True,
+        )
+        raise SystemExit(1)
 
     if os.path.islink(path):
         click.echo(f"error: policy '{name}' is a symbolic link — refusing to delete", err=True)
@@ -747,6 +763,16 @@ def delete(app: AppContext, name: str, force: bool) -> None:
         raise SystemExit(1)
 
     is_active = name == _get_active_policy_name(app)
+    if builtin:
+        # GAP-1458: drop the user copy that shadowed the built-in.
+        os.remove(real_path)
+        ux.ok(f"Removed your edited copy of built-in policy '{name}'; the built-in version is back.")
+        if app.logger:
+            app.logger.log_action("policy-delete", name, "reverted edited built-in")
+        if is_active:
+            _activate_policy(app, name)
+        return
+
     if is_active and not force:
         click.echo(
             f"error: policy '{name}' is active — refusing to delete. "
@@ -1340,7 +1366,10 @@ def _resolve_editable_policy(app: AppContext, policy_name: str | None) -> tuple[
     # built-in (list/show already prefer the user dir).
     if _is_bundled_path(path):
         dest = _user_policy_dest(app, name)
-        click.echo(ux.dim(f"Editing built-in '{name}' as a user copy at {dest}"))
+        click.echo(ux.dim(
+            f"Editing built-in '{name}' as a user copy at {dest} "
+            f"(defenseclaw policy delete {name} restores the built-in)"
+        ))
         path = dest
 
     return path, data, name

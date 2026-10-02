@@ -237,6 +237,24 @@ class TestPolicyActivate(PolicyCommandTestBase):
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("not found", result.output)
 
+    def test_activate_keeps_configured_webhooks(self):
+        """GAP-1273: built-ins carry ``webhooks: []``; activation must keep the list."""
+        import yaml
+        from defenseclaw.config import WebhookConfig
+
+        self.app.cfg.webhooks = [
+            WebhookConfig(name="ops", url="https://hooks.example.com/ops", type="slack", enabled=True),
+        ]
+        self.app.cfg.save()
+        for name in ("strict", "default"):
+            result = self.invoke(["activate", name])
+            self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual([w.name for w in self.app.cfg.webhooks], ["ops"])
+        self.assertEqual(self.app.cfg.webhooks[0].type, "slack")
+        with open(os.path.join(self.tmp_dir, "config.yaml")) as f:
+            raw = yaml.safe_load(f)
+        self.assertEqual([w.get("name") for w in raw.get("webhooks") or []], ["ops"])
+
     def test_activate_logs_action(self):
         self.invoke(["activate", "default"])
         events = self.app.store.list_events(10)
@@ -258,6 +276,25 @@ class TestPolicyDelete(PolicyCommandTestBase):
         result = self.invoke(["delete", "default"])
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("cannot delete", result.output)
+
+    def test_delete_reverts_an_edited_builtin(self):
+        """GAP-1458: ``policy delete strict`` drops the user copy ``policy edit`` saved."""
+        result = self.invoke(["edit", "guardrail", "-p", "strict", "--block-threshold", "3", "--no-reload"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("policy delete strict", result.output)
+        user_copy = os.path.join(self.app.cfg.policy_dir, "strict.yaml")
+        self.assertTrue(os.path.isfile(user_copy))
+        self.assertIn("strict [built-in, edited]", self.invoke(["list"]).output)
+
+        result = self.invoke(["delete", "strict"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("built-in version is back", result.output)
+        self.assertFalse(os.path.exists(user_copy))
+        listed = self.invoke(["list"]).output
+        self.assertIn("strict [built-in]", listed)
+        self.assertNotIn("edited", listed)
+        # A second delete has nothing left to revert.
+        self.assertNotEqual(self.invoke(["delete", "strict"]).exit_code, 0)
 
     def test_delete_nonexistent(self):
         result = self.invoke(["delete", "nope"])

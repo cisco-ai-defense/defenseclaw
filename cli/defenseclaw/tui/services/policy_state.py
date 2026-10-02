@@ -577,8 +577,8 @@ def policy_comparison(old: object | None, new: object) -> tuple[tuple[str, str, 
 def policy_side_effects(new: object) -> tuple[str, ...]:
     """What activating ``new`` changes besides the thresholds."""
     effects: list[str] = []
-    if _attr(new, "replaces_webhooks", False):
-        effects.append("replaces your webhooks")
+    if _attr(new, "adds_webhooks", False):
+        effects.append("adds its webhooks to yours")
     if _attr(new, "sets_cisco", False):
         effects.append("changes Cisco AI Defense settings")
     overrides = int(_attr(new, "scanner_overrides", 0) or 0)

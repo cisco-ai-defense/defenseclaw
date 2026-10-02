@@ -52,7 +52,7 @@ def policy(
         firewall_default=firewall,
         hilt=hilt,
         scanner_overrides=0,
-        replaces_webhooks=False,
+        adds_webhooks=False,
         sets_cisco=False,
     )
 
