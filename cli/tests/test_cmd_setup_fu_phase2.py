@@ -3421,7 +3421,7 @@ class TestBareSetupBatch(_BaseSetup):
         with _stub_side_effects():
             res = _invoke(["-c", "codex", "--no-restart"], self.app)
         self.assertEqual(res.exit_code, 0, msg=res.output)
-        self.assertIn("canonical setup audit event was not recorded", res.output)
+        self.assertIn("setup audit event was not recorded", res.output)
 
     def test_batch_default_restart_does_not_inherit_internal_offline_mode(self):
         self.app.logger = MagicMock()
@@ -3431,7 +3431,7 @@ class TestBareSetupBatch(_BaseSetup):
 
         self.assertNotEqual(res.exit_code, 0, msg=res.output)
         self.app.logger.log_action.assert_called_once()
-        self.assertNotIn("canonical setup audit event was not recorded", res.output)
+        self.assertNotIn("setup audit event was not recorded", res.output)
         self.assertEqual(self.app.cfg.active_connectors(), ["openclaw"])
 
     def test_detected_filters_to_hook_connectors(self):

@@ -3401,7 +3401,7 @@ class TestSetupGuardrailRestart(unittest.TestCase):
             obj=self.app,
         )
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("canonical setup audit event was not recorded", result.output)
+        self.assertIn("setup audit event was not recorded", result.output)
 
     @patch("defenseclaw.commands.cmd_setup._restart_defense_gateway")
     @patch("defenseclaw.commands.cmd_setup._is_pid_alive", return_value=True)

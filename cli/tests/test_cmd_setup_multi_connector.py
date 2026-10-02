@@ -702,7 +702,9 @@ class TestAdditiveSetupCommand(unittest.TestCase):
                 self.app,
             )
         self.assertEqual(result.exit_code, 0, msg=result.output)
-        self.assertIn("--no-restart", result.output)
+        # One restart note, from the batch summary (GAP-1951).
+        self.assertEqual(result.output.count("takes effect once the gateway restarts"), 1, msg=result.output)
+        self.assertNotIn("--no-restart: config updated", result.output)
         restart.assert_not_called()
         generic.assert_not_called()
 
@@ -890,7 +892,7 @@ class TestAdditiveSetupCommand(unittest.TestCase):
             result = _invoke(["codex", "--yes", "--no-restart"], self.app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertEqual(self.app.cfg.guardrail.connector, "codex")
-        self.assertIn("canonical setup audit event was not recorded", result.output)
+        self.assertIn("setup audit event was not recorded", result.output)
 
     def test_offline_exception_is_not_suppressed_when_restart_was_requested(self):
         self.app.logger = MagicMock()
@@ -1373,7 +1375,7 @@ class TestRemoveConnector(unittest.TestCase):
             result = _invoke(["remove", "cursor", "--yes", "--no-restart"], self.app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertEqual(self.app.cfg.guardrail.connector, "codex")
-        self.assertIn("canonical setup audit event was not recorded", result.output)
+        self.assertIn("setup audit event was not recorded", result.output)
 
     # Declining the confirmation prompt is a no-op.
     def test_remove_declined_is_noop(self):
