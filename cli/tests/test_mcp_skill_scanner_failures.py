@@ -83,7 +83,11 @@ def test_successful_scan_payload_has_no_error_field():
 
 
 def test_registry_mcp_scan_failure_is_an_entry_error():
-    """GAP-1357: the sync engine sees the failure instead of a silent pending."""
+    """GAP-1357: the sync engine sees the failure instead of a silent pending.
+
+    GAP-1881 records registry MCP scans like `mcp scan`, so the failure is
+    also logged as a failed scan (GAP-1959: the test passed app=None).
+    """
     from defenseclaw.commands import cmd_registry
     from defenseclaw.registries.manifest import ManifestEntry
     from defenseclaw.scanner.mcp import MCPScannerWrapper
@@ -98,11 +102,18 @@ def test_registry_mcp_scan_failure_is_an_entry_error():
         effective_inspect_llm=lambda: None,
         cisco_ai_defense=None,
     )
+    recorder = _Recorder()
+    app = SimpleNamespace(logger=Logger(recorder))
     with patch.object(cmd_registry, "_registry_mcp_url_allowed", return_value=True), patch.object(
         MCPScannerWrapper, "__init__", return_value=None,
     ), patch.object(MCPScannerWrapper, "scan", side_effect=RuntimeError("was cancelled")):
         with pytest.raises(RuntimeError, match="MCP scan failed .*was cancelled"):
-            cmd_registry._run_mcp_scan(None, cfg, None, entry)
+            cmd_registry._run_mcp_scan(app, cfg, None, entry)
+
+    [payload] = recorder.payloads
+    assert payload["scan"]["scanner"] == "mcp-scanner"
+    assert payload["scan"]["target"] == "https://mcp.example.com/mcp"
+    assert "was cancelled" in payload["scan"]["error"]
 
 
 def test_skill_scan_flags_injection_in_frontmatter_description(tmp_path):
