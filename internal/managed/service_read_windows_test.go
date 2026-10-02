@@ -55,7 +55,10 @@ func TestValidateServiceCanReadTreeNamesAnUnreadableRulePack(t *testing.T) {
 	setDACL(readableParent, parent)
 	setDACL("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)", tree...)
 	err := ValidateServiceCanReadTree(root, "guardrail.rule_pack_dir", account)
-	if err == nil || !strings.Contains(err.Error(), "cannot read") || !strings.Contains(err.Error(), account) {
+	// The example icacls command is copyable as is: single backslashes
+	// (GAP-1477), not Go-quoted ones.
+	if err == nil || !strings.Contains(err.Error(), "cannot read") || !strings.Contains(err.Error(), account) ||
+		!strings.Contains(err.Error(), `icacls "`+root+`" /grant`) {
 		t.Fatalf("admin-only rule pack: %v", err)
 	}
 	setDACL("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)", tree...)
@@ -66,7 +69,8 @@ func TestValidateServiceCanReadTreeNamesAnUnreadableRulePack(t *testing.T) {
 	// control (RC,X) are not enough, the gateway lists the parent too.
 	setDACL("D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x20020;;;BU)", parent)
 	err = ValidateServiceCanReadTree(root, "guardrail.rule_pack_dir", account)
-	if err == nil || !strings.Contains(err.Error(), "parent folder "+parent) {
+	if err == nil || !strings.Contains(err.Error(), "parent folder "+parent) ||
+		!strings.Contains(err.Error(), `icacls "`+parent+`" /grant`) {
 		t.Fatalf("pack under a locked parent: %v", err)
 	}
 	setDACL(readableParent, parent)

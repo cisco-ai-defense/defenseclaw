@@ -86,7 +86,7 @@ func checkPayloadPath(path string, dir bool) error {
 		return fmt.Errorf("inspect payload %s: %w", path, err)
 	}
 	if mode&os.ModeSymlink != 0 {
-		return &payloadPathError{path: path, reason: "is a symlink"}
+		return &payloadPathError{path: path, reason: "is a symlink, so its target could be swapped after the check; replace it with the real file"}
 	}
 	if dir && !mode.IsDir() {
 		return &payloadPathError{path: path, reason: "is not a directory"}

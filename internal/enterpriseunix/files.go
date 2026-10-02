@@ -275,10 +275,16 @@ func removeDirIfEmpty(path string) error {
 // so must each of its folders, except a sticky one such as /tmp.
 func trustedInputFile(path, label string) error {
 	uid, _, mode, err := statOwnerMode(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("%s %s does not exist; check the path given to %s (the absolute path of the administrator config), then rerun", label, path, label)
+	}
 	if err != nil {
-		return err
+		return fmt.Errorf("%s %s cannot be read: %w", label, path, err)
 	}
 	owned := func(uid int) bool { return uid == 0 || uid == os.Geteuid() }
+	if mode&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s %s is a symlink, so its target could be swapped after the check; pass the real file path instead (root-owned, chmod 0600, in a folder only root can write), then rerun", label, path)
+	}
 	if mode.Perm()&0o022 != 0 {
 		return fmt.Errorf("%s %s is writable by group or other (%04o), so another account could have changed it; make it root-owned and not group- or world-writable (chmod 0600 %s), then rerun", label, path, mode.Perm(), path)
 	}
