@@ -977,6 +977,11 @@ def discover_agents(
     if use_cache and not refresh:
         cached = _read_cache(data_dir=data_dir)
         if cached is not None:
+            # Binary and version probes are what the cache saves; config
+            # files are re-checked so Configured/Config match the disk.
+            for agent_name, signal in cached.agents.items():
+                signal.config_path = _agent_config_path(agent_name, include_workspace_config=False)
+                signal.configured = bool(signal.config_path)
             return cached
 
     scanned_at = _format_rfc3339(_now_utc())
@@ -1157,13 +1162,13 @@ def render_discovery_table(disc: AgentDiscovery) -> str:
     return stream.getvalue()
 
 
-def _scan_agent(
-    name: str,
-    *,
-    data_dir: str | os.PathLike[str] | None = None,
-    require_trusted_binary_paths: bool = False,
-    include_workspace_config: bool = True,
-) -> AgentSignal:
+def _agent_config_path(name: str, *, include_workspace_config: bool = True) -> str:
+    """Return the first existing config/hook file for ``name``, or "".
+
+    It is a cheap file check, so a cached discovery recomputes it on every
+    read: setup and setup remove change these files after the cache was
+    written (GAP-1627).
+    """
     spec = _SPECS.get(name, _AgentSpec((), "", ("--version",)))
     config_candidates = spec.config_candidates
     if name == "codex":
@@ -1218,7 +1223,18 @@ def _scan_agent(
                 *connector_config_files("devin", workspace_dir=workspace),
             )
         )
-    config_path = _first_existing_file(config_candidates)
+    return _first_existing_file(config_candidates)
+
+
+def _scan_agent(
+    name: str,
+    *,
+    data_dir: str | os.PathLike[str] | None = None,
+    require_trusted_binary_paths: bool = False,
+    include_workspace_config: bool = True,
+) -> AgentSignal:
+    spec = _SPECS.get(name, _AgentSpec((), "", ("--version",)))
+    config_path = _agent_config_path(name, include_workspace_config=include_workspace_config)
     binary_candidates = _binary_candidates_for_agent(name, spec)
     binary_path = binary_candidates[0] if binary_candidates else ""
     version = ""
