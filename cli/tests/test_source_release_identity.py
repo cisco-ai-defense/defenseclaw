@@ -642,6 +642,8 @@ def test_unowned_acp_refuses_before_mutation(tmp_path: Path) -> None:
     assert "This step changed nothing" in completed.stdout + completed.stderr
     if os.name != "nt":
         assert "defenseclaw-gateway stop; defenseclaw uninstall --binaries --yes && make all" in completed.stderr
+        # GAP-2001: retrying the uninstall alone did not get past a 0.8.x timeout.
+        assert "defenseclaw-gateway connector teardown --connector <name> --data-dir" in completed.stderr
     assert installed_acp.read_bytes() == b"foreign acp\n"
 
 
