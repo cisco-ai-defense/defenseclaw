@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Any
 
 from defenseclaw.config import CONFIG_PATH_ENV, default_data_path
-from defenseclaw.config_inspect import inspect_v8_config
+from defenseclaw.config_inspect import ConfigInspectError, inspect_v8_config
 from defenseclaw.file_permissions import set_file_mode
 from defenseclaw.observability.display import redact_endpoint_for_display
 from defenseclaw.observability.v8_config import V8ConfigError, load_validate_v8
@@ -278,12 +278,21 @@ def inspect_v8_operator_status(config_path: str | Path) -> V8OperatorStatus:
         # a snapshot in TEMP is incorrectly treated as a different
         # installation (notably when native Windows setup records a data root
         # outside the runner's TEMP profile).
-        result = inspect_v8_config(
-            "effective",
-            config_path=str(snapshot_path),
-            data_dir=inspection_data_dir,
-            environment_overrides={CONFIG_PATH_ENV: str(snapshot_path)},
-        )
+        try:
+            result = inspect_v8_config(
+                "effective",
+                config_path=str(snapshot_path),
+                data_dir=inspection_data_dir,
+                environment_overrides={CONFIG_PATH_ENV: str(snapshot_path)},
+            )
+        except ConfigInspectError as exc:
+            # The helper names the private snapshot, which is deleted below;
+            # point the diagnostic at the operator's own file instead.
+            raise ConfigInspectError(
+                str(exc).replace(str(snapshot_path), str(path.absolute())),
+                field_path=exc.field_path,
+                reason=exc.reason,
+            ) from None
         try:
             inspected_source = snapshot_path.read_bytes()
         except OSError:
