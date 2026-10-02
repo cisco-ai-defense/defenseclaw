@@ -199,6 +199,7 @@ var shellCommandKeys = map[string]map[string]string{
 	"omnigent":    {"sys_os_shell": "command"},
 	"claudecode":  {"Bash": "command"},
 	"codex":       {"Bash": "command"},
+	"openclaw":    {"exec": "command"},
 }
 
 // ShellCommandArgs reduces a shell tool call to its command, in the shell
