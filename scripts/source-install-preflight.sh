@@ -91,8 +91,15 @@ refuse() {
     elif [[ "${FOREIGN_INSTALL}" -eq 1 ]]; then
         # Windows finishes removing binaries a moment after the CLI exits.
         echo "To develop from this checkout instead, remove the installed binaries (this keeps ~/.defenseclaw: config, audit log and secrets), wait a few seconds, then build again:" >&2
-        echo "  defenseclaw.cmd uninstall --binaries --yes" >&2
-        echo "  make all" >&2
+        if [[ -f "${INSTALL_DIR:-}/defenseclaw-uv.sha256" ]]; then
+            # As above: keep the uv install.ps1 recorded (GAP-1783, GAP-1843).
+            echo "  rm -f '${INSTALL_DIR}/defenseclaw-uv.sha256'; defenseclaw.cmd uninstall --binaries --yes" >&2
+            echo "  make all" >&2
+            echo "(Removing defenseclaw-uv.sha256 keeps the uv the release installer added; make all needs it.)" >&2
+        else
+            echo "  defenseclaw.cmd uninstall --binaries --yes" >&2
+            echo "  make all" >&2
+        fi
     else
         echo "Developer state already owned by this exact checkout may use 'make all'; otherwise keep the checkout and state unchanged, use an isolated fresh developer HOME/install directory, or contact DefenseClaw support." >&2
     fi

@@ -373,3 +373,64 @@ def test_the_install_log_can_time_a_failed_gateway_start() -> None:
     assert '"--- $Message  [$(Get-UtcClock)]"' in text
     assert 'Write-Info "Starting the gateway [$(Get-UtcClock)]"' in _ps1_function("Start-Gateway")
     assert "did not become healthy within {0:N0} s [{1}]" in text
+
+
+def test_the_previous_watchdog_is_stopped_even_when_the_gateway_is_down() -> None:
+    # GAP-1833: with the gateway down the old watchdog kept running from the
+    # renamed binary and held its ownership lock against the new one.
+    body = _ps1_function("Stop-Watchdog")
+    assert '$image = Join-Path $BinDir "defenseclaw-gateway.exe"' in body
+    assert "Get-ProcessesUnder @($image)" in body  # a prefix: .old-* too
+    assert 'Invoke-Native $image @("watchdog", "stop") -Quiet' in body
+    assert "Stop-Process -Id $_.ProcessId -Force" in body
+    # Rollback and recovery stop the gateway through Stop-Gateway, running or not.
+    stop_gateway = _ps1_function("Stop-Gateway")
+    assert "if (-not $process) { Stop-Watchdog; return $true }" in stop_gateway
+    assert stop_gateway.count("Stop-Watchdog") == 2
+    install = _ps1_function("Invoke-Install")
+    stop = install.index("    Stop-Watchdog\n")
+    assert install.index('Write-Info "Stopping the gateway') < stop < install.index("Save-Snapshot")
+    assert not install[install.index("if ($WasRunning) {") : stop].count("Stop-Watchdog")
+
+
+def test_disk_room_is_checked_before_staging_and_before_the_gateway_stops() -> None:
+    # GAP-1841: only the rollback copy was checked, after staging and after
+    # the gateway was stopped. GAP-1839: the staging and environment sizes
+    # were never counted.
+    text = _text()
+    room = text[text.index("function Assert-InstallRoom(") :][:1400]
+    assert "$data = Get-DataSize" in room
+    assert "$free -ge $data + $Extra + 100MB" in room
+    assert "nothing was changed" in room
+    install = _ps1_function("Invoke-Install")
+    first = install.index('Assert-InstallRoom $InstallRoom "the new version"')
+    assert first < install.index("New-InstallDirectory $Staging")
+    second = install.index('Assert-InstallRoom $FinalEnvRoom "the final Python environment"')
+    assert install.index("is staged and checked") < second < install.index('Write-Info "Stopping the gateway')
+
+
+def test_a_stopped_or_undone_install_frees_the_staged_release_first() -> None:
+    # GAP-1839/GAP-1841: the 873 MB .staging left no room for the restore or
+    # for the old gateway's restart.
+    clear = _ps1_function("Clear-StagedRelease")
+    assert 'Where-Object { $_.Name -ne "hook-runtime-state.json" }' in clear
+    restore = _ps1_function("Restore-Snapshot")
+    assert restore.index("Clear-StagedRelease") < restore.index("Restore-Slot $Snap")
+    assert "run the installer again to finish restoring it" in restore
+    install = _ps1_function("Invoke-Install")
+    failed = install[install.index("if (-not $saved) {") :][:500]
+    assert failed.index("Clear-StagedRelease") < failed.index("Restart-Old")
+    assert "it was not changed, but its gateway is not running" in failed
+    final = _text()[_text().index("if ($Run.Lock) {") :][:200]
+    assert "Invoke-Quietly { Clear-StagedRelease }" in final
+
+
+def test_an_interrupted_setup_upgrade_restarts_the_setup_gateway() -> None:
+    # GAP-1839: recovery ran ~\.local\bin\defenseclaw-gateway.exe, which a
+    # DefenseClaw Setup install never had ("is not recognized").
+    start = _ps1_function("Start-Gateway")
+    assert "if (-not (Test-Path -LiteralPath $gateway -PathType Leaf))" in start
+    assert start.index("Test-Path -LiteralPath $gateway") < start.index('Invoke-Native $gateway @("start")')
+    resume = _ps1_function("Resume-InterruptedRun")
+    assert "Start-SetupGateway $setupInstall.Root" in resume
+    assert "Start-SetupGateway $Setup.Root" in _ps1_function("Restore-SetupInstall")

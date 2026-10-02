@@ -670,6 +670,25 @@ def test_refusal_hint_keeps_the_release_installed_uv(tmp_path: Path) -> None:
     assert (install_dir / "defenseclaw-uv.sha256").exists()
 
 
+def test_windows_refusal_hint_keeps_the_release_installed_uv(tmp_path: Path) -> None:
+    # GAP-1843: the Windows hint kept 'uninstall --binaries', which removes
+    # the uv install.ps1 recorded, so the next 'make all' found no uv.
+    script = (ROOT / "scripts/source-install-preflight.sh").read_text(encoding="utf-8")
+    start = script.index("refuse() {")
+    refuse = script[start : script.index("\n}\n", start) + 3]
+    install_dir = tmp_path / "bin"
+    install_dir.mkdir()
+
+    def hint() -> str:
+        program = f"MODE=check; IS_WINDOWS=1; FOREIGN_INSTALL=1; INSTALL_DIR='{install_dir}'\n{refuse}refuse x"
+        return subprocess.run([BASH, "-c", program], capture_output=True, text=True, check=False).stderr
+
+    assert "  defenseclaw.cmd uninstall --binaries --yes\n  make all\n" in hint()
+    (install_dir / "defenseclaw-uv.sha256").write_text("0" * 64 + "  uv.exe\n", encoding="utf-8")
+    assert f"  rm -f '{install_dir}/defenseclaw-uv.sha256'; defenseclaw.cmd uninstall --binaries --yes\n  make all\n" in hint()
+    assert "keeps the uv the release installer added" in hint()
+
+
 @pytest.mark.skipif(os.name == "nt", reason="source ownership uses POSIX symlinks")
 def test_make_all_dev_reclaim_replaces_existing_acp(tmp_path: Path) -> None:
     repo, install_dir, source_gateway, installed_gateway = _source_install_fixture(tmp_path)
