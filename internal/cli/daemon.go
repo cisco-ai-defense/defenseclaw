@@ -354,6 +354,9 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 			return fmt.Errorf("cannot start the gateway: %s. %s", problem, foreignGatewayListenerFix(cfg))
 		}
 	}
+	if !coldStart {
+		upgradeAuditStoreBeforeStart(cfg, os.Stdout, os.Stderr)
+	}
 	claimGatewayAPIPort(cfg)
 
 	fmt.Print("Starting gateway sidecar daemon... ")
@@ -746,6 +749,7 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 	if problem := foreignGatewayListener(cfg); problem != "" {
 		return fmt.Errorf("cannot restart the gateway: %s. %s", problem, foreignGatewayListenerFix(cfg))
 	}
+	upgradeAuditStoreBeforeStart(cfg, os.Stdout, os.Stderr)
 	claimGatewayAPIPort(cfg)
 
 	fmt.Print("Starting gateway sidecar daemon... ")

@@ -192,9 +192,12 @@ _DEFENSE_GATEWAY_LIFECYCLE_TIMEOUT_SECONDS = 60
 # slow Windows start without its watchdog and raced the setup rollback against
 # a gateway that was still coming up (GAP-1206, GAP-1396, GAP-1659). Elsewhere
 # setup progress can extend the 60 s wait to 180 s; 30 s stopped a first start
-# that was still migrating a 2 GB 0.x audit database (GAP-1909).
-_DEFENSE_GATEWAY_LAUNCHER_TIMEOUT_SECONDS_WINDOWS = 660
-_DEFENSE_GATEWAY_LAUNCHER_TIMEOUT_SECONDS_POSIX = 220
+# that was still migrating a 2 GB 0.x audit database (GAP-1909). The launcher
+# now applies such a one-time audit upgrade itself before that wait starts, so
+# both bounds also allow for it.
+_GATEWAY_AUDIT_UPGRADE_ALLOWANCE_SECONDS = 600
+_DEFENSE_GATEWAY_LAUNCHER_TIMEOUT_SECONDS_WINDOWS = 660 + _GATEWAY_AUDIT_UPGRADE_ALLOWANCE_SECONDS
+_DEFENSE_GATEWAY_LAUNCHER_TIMEOUT_SECONDS_POSIX = 220 + _GATEWAY_AUDIT_UPGRADE_ALLOWANCE_SECONDS
 _DEFENSE_GATEWAY_LAUNCHER_TIMEOUT_SECONDS = (
     _DEFENSE_GATEWAY_LAUNCHER_TIMEOUT_SECONDS_WINDOWS
     if os.name == "nt"
