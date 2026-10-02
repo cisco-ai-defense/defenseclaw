@@ -333,6 +333,64 @@ def test_a_failed_first_run_quickstart_keeps_the_install_and_exits_4(tmp_path: P
     assert summary.index("exit 4") < summary.index("exit ${START_RC}")
 
 
+
+def _openclaw_install_run(tmp_path: Path, npm_rc: int) -> subprocess.CompletedProcess[str]:
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    start = text.index("ensure_openclaw() {")
+    funcs = text[start : text.index("\n}\n", text.index("npm_global_prefix_writable() {")) + 3]
+    prefix = tmp_path / "node"
+    (prefix / "lib" / "node_modules").mkdir(parents=True)
+    (prefix / "bin").mkdir()
+    fake = tmp_path / "fakebin"
+    fake.mkdir()
+    (fake / "npm").write_text(
+        "#!/bin/sh\n"
+        f'if [ "$1" = prefix ]; then echo "{prefix}"; exit 0; fi\n'
+        f'echo "$@" >> "{tmp_path / "npm.log"}"\nexit {npm_rc}\n',
+        encoding="utf-8",
+    )
+    (fake / "npm").chmod(0o755)
+    (prefix / "lib" / "node_modules").chmod(0o555)
+    (prefix / "bin").chmod(0o555)
+    script = tmp_path / "oc.sh"
+    script.write_text(
+        "set -euo pipefail\n"
+        'has() { command -v "$1" >/dev/null 2>&1; }\nask_yes_no() { return 0; }\n'
+        'warn() { echo "WARN $*"; }\nok() { :; }\nversion_lt() { return 1; }\n'
+        f'OPENCLAW_VERSION=2026.3.24 OPENCLAW_MISSING=false BIN_DIR="{tmp_path / "home" / ".local" / "bin"}"\n'
+        + funcs
+        + 'ensure_openclaw\necho "missing=${OPENCLAW_MISSING}"\n',
+        encoding="utf-8",
+    )
+    try:
+        return _run([str(script)], tmp_path, PATH=f"{fake}:/usr/bin:/bin")
+    finally:
+        (prefix / "lib" / "node_modules").chmod(0o755)
+        (prefix / "bin").chmod(0o755)
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root can write any prefix")
+def test_openclaw_installs_into_the_user_prefix_when_the_node_prefix_is_read_only(tmp_path: Path) -> None:
+    # GAP-1523: npm -g into a root-owned system Node failed with EACCES, the
+    # hint repeated the same failing command, and the installer exited 0.
+    done = _openclaw_install_run(tmp_path, 0)
+    assert done.returncode == 0, done.stdout + done.stderr
+    home = tmp_path / "home"
+    assert (tmp_path / "npm.log").read_text().split() == [
+        "install", "-g", "--prefix", f"{home}/.local", "openclaw@2026.3.24", "--loglevel=error"
+    ]
+    assert "missing=false" in done.stdout
+
+    failed_dir = tmp_path / "f"
+    failed_dir.mkdir()
+    failed = _openclaw_install_run(failed_dir, 1)
+    assert f"run: npm install -g --prefix {failed_dir / 'home'}/.local openclaw@2026.3.24" in failed.stdout
+    assert "missing=true" in failed.stdout
+    summary = INSTALL_SH.read_text(encoding="utf-8")
+    tail = summary[summary.index('if [[ "${OPENCLAW_MISSING}" == true ]]; then') :]
+    assert tail.index("exit 3") < tail.index("exit ${START_RC}")
+
+
 def test_a_carriage_return_answer_takes_the_default(tmp_path: Path) -> None:
     # MAC-U3-01: a terminal left in -icrnl sends Enter as a bare CR, which
     # used to read as "no" and cancel the install.
