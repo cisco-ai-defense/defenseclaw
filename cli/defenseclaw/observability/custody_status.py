@@ -32,7 +32,7 @@ import os
 import re
 import sqlite3
 import stat
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -49,11 +49,6 @@ _EVENT_NAMES = (
     "telemetry.records.dropped",
 )
 _WINDOW = timedelta(hours=24)
-# Native exporters (Claude Code, Codex) send many record types that no inbound
-# binding imports; the gateway drops and counts them as unsupported_identity
-# by design. Drop-only batches with only this class are not a delivery problem.
-_EXPECTED_DROP_REASONS = frozenset(("unsupported_identity",))
-_REASON_CLASS = re.compile(r"^[a-z0-9][a-z0-9_]{0,63}$")
 _MAX_EVENT_ROWS = 4096
 _MAX_INSTANCES = 256
 _MAX_BACKUPS = 32
@@ -79,7 +74,6 @@ class ConnectorCustodyStatus:
     last_native_activity: str = ""
     last_authentication_failure: str = ""
     drop_only_signals: tuple[str, ...] = ()
-    drop_only_reasons: tuple[str, ...] = ()
 
     def as_json(self) -> dict[str, Any]:
         return asdict(self)
@@ -177,27 +171,13 @@ def summarize_native_delivery(report: ConnectorCustodyReport) -> NativeDeliveryS
             detail = "no recent native delivery evidence"
         elif drop_only == normalized:
             state = "all_drop_only"
-            detail = (
-                f"drop-only native stream ({drop_only}/{normalized} batches"
-                + _drop_reason_suffix(item.drop_only_reasons)
-                + "); no accepted native delivery observed"
-            )
-        elif drop_only and item.drop_only_reasons and set(item.drop_only_reasons) <= _EXPECTED_DROP_REASONS:
-            # GAP-1165: these batches held only native record types DefenseClaw
-            # does not import. They are counted by design and need no action.
-            state = "accepted"
-            detail = (
-                f"accepted native delivery observed ({normalized} batches); "
-                f"{drop_only} held only native record types DefenseClaw does not import "
-                "(unsupported_identity), counted by design; no action needed"
-            )
+            detail = f"drop-only native stream ({drop_only}/{normalized} batches); no accepted native delivery observed"
         elif drop_only:
             state = "partial_drop_only"
             signals = ", ".join(item.drop_only_signals)
             detail = (
                 f"partial drop-only evidence ({drop_only}/{normalized} batches"
                 + (f"; dropped signals: {signals}" if signals else "")
-                + _drop_reason_suffix(item.drop_only_reasons)
                 + "); accepted native delivery observed in remaining batches"
             )
         else:
@@ -222,10 +202,6 @@ def summarize_native_delivery(report: ConnectorCustodyReport) -> NativeDeliveryS
     )
 
 
-def _drop_reason_suffix(reasons: tuple[str, ...]) -> str:
-    return f"; drop reasons: {', '.join(reasons)}" if reasons else ""
-
-
 @dataclass
 class _Evidence:
     normalized: dict[tuple[str, str, str], int]
@@ -236,7 +212,6 @@ class _Evidence:
     unattributed_auth_count: int = 0
     last_unattributed_auth: datetime | None = None
     truncated: bool = False
-    drop_reasons: dict[tuple[str, str, str], set[str]] = field(default_factory=dict)
 
 
 def inspect_connector_custody(
@@ -300,7 +275,6 @@ def inspect_connector_custody(
             evidence_connector = connector if is_default else ""
             normalized, drop_only = _batch_counts(evidence, evidence_connector)
             drop_signals = _drop_only_signals(evidence, evidence_connector)
-            drop_reasons = _drop_only_reasons(evidence, evidence_connector)
             last_native = evidence.last_native.get(evidence_connector)
             last_auth = evidence.last_auth.get(evidence_connector)
             instances.append(
@@ -315,7 +289,6 @@ def inspect_connector_custody(
                     normalized_batches=normalized,
                     drop_only_batches=drop_only,
                     drop_only_signals=drop_signals,
-                    drop_only_reasons=drop_reasons,
                     authentication_failures=evidence.auth_count.get(evidence_connector, 0),
                     credential_state=_credential_state(last_auth, last_native),
                     last_native_activity=_format_time(last_native),
@@ -426,9 +399,6 @@ def _load_recent_evidence(db: sqlite3.Connection, now: datetime) -> _Evidence:
             evidence.last_native[connector] = max(when, evidence.last_native.get(connector, when))
         elif event_name == "telemetry.records.dropped":
             evidence.dropped[key] = evidence.dropped.get(key, 0) + count
-            reason = facts.get("reason", "")
-            if reason:
-                evidence.drop_reasons.setdefault(key, set()).add(reason)
     return evidence
 
 
@@ -456,12 +426,7 @@ def _telemetry_facts(raw: Any) -> dict[str, Any]:
         count = 0
     else:
         count = int(count)
-    reason = attributes.get("defenseclaw.telemetry.rejection_reason_class")
-    return {
-        "record_count": count,
-        "signal": signal if isinstance(signal, str) else "",
-        "reason": reason if isinstance(reason, str) and _REASON_CLASS.fullmatch(reason) else "",
-    }
+    return {"record_count": count, "signal": signal if isinstance(signal, str) else ""}
 
 
 def _batch_counts(evidence: _Evidence, connector: str) -> tuple[int, int]:
@@ -484,15 +449,6 @@ def _drop_only_signals(evidence: _Evidence, connector: str) -> tuple[str, ...]:
         if key[0] == connector and count > 0 and evidence.dropped.get(key, 0) >= count
     }
     return tuple(sorted(signals))
-
-
-def _drop_only_reasons(evidence: _Evidence, connector: str) -> tuple[str, ...]:
-    """Name the rejection classes of the drop-only batches."""
-    reasons: set[str] = set()
-    for key, count in evidence.normalized.items():
-        if key[0] == connector and count > 0 and evidence.dropped.get(key, 0) >= count:
-            reasons |= evidence.drop_reasons.get(key, {"unknown"})
-    return tuple(sorted(reasons))
 
 
 def _credential_state(last_auth: datetime | None, last_native: datetime | None) -> str:

@@ -389,44 +389,6 @@ def test_native_delivery_summary_covers_all_states_and_doctor_status_parity(caps
         assert row.detail in doctor[f"Connector OTLP: {row.connector}"]
 
 
-def _dropped(signal: str, count: int, reason: str) -> str:
-    record = json.loads(_record(signal, count))
-    record["body"]["defenseclaw.telemetry.rejection_reason_class"] = reason
-    return json.dumps(record)
-
-
-def test_unimported_native_records_are_named_and_need_no_action(tmp_path: Path) -> None:
-    """GAP-1165: native records no binding imports are counted by design, not a delivery problem."""
-    db_path = tmp_path / "audit.db"
-    db = _database(db_path)
-    _instance(db, "019b0000-0000-7000-8000-000000000001", "codex", "defenseclaw")
-    _instance(db, "019b0000-0000-7000-8000-000000000002", "claudecode", "defenseclaw")
-    for request in ("r1", "r2", "r3"):
-        _event(db, f"n-{request}", "telemetry.batch.normalized", "codex", request, _record("logs", 3))
-        _event(db, f"c-{request}", "telemetry.batch.normalized", "claudecode", request, _record("metrics", 3))
-    for request in ("r1", "r2"):
-        dropped = _dropped("logs", 3, "unsupported_identity")
-        _event(db, f"d-{request}", "telemetry.records.dropped", "codex", request, dropped)
-    _event(db, "c-d-r1", "telemetry.records.dropped", "claudecode", "r1", _dropped("metrics", 3, "invalid_record"))
-    db.commit()
-    db.close()
-
-    report = inspect_connector_custody(db_path, tmp_path, now=NOW)
-    summary = {row.connector: row for row in summarize_native_delivery(report).connectors}
-
-    codex = summary["codex"]
-    assert (codex.state, codex.drop_only_batches) == ("accepted", 2)
-    assert "unsupported_identity" in codex.detail and "no action needed" in codex.detail
-    claude = summary["claudecode"]
-    assert claude.state == "partial_drop_only"
-    assert "drop reasons: invalid_record" in claude.detail
-    result = _DoctorResult()
-    _check_connector_export_custody(report, result)
-    tags = {item["label"]: item["status"] for item in result.checks}
-    assert tags["Connector OTLP: codex"] == "pass"
-    assert tags["Connector OTLP: claudecode"] == "warn"
-
-
 def test_native_delivery_missing_evidence_is_bounded_not_failed(capsys) -> None:
     summary = summarize_native_delivery(ConnectorCustodyReport("unavailable", "database_missing", 24))
 
