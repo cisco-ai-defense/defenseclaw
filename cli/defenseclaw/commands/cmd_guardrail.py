@@ -132,6 +132,22 @@ def _resolve_active_connector(cfg) -> str:
     return "openclaw"
 
 
+def _enabled_connectors_need_model(cfg, connector: str) -> bool:
+    """Report whether re-enabling routes LLM traffic through the proxy."""
+    from defenseclaw.platform_support import is_proxy_connector
+
+    names: list[str] = []
+    resolver = getattr(cfg, "active_connectors", None)
+    if callable(resolver):
+        try:
+            names = list(resolver() or [])
+        except Exception:
+            names = []
+    if not names:
+        names = [connector]
+    return any(is_proxy_connector(normalize_connector(name) or name) for name in names)
+
+
 def _connector_label(name: str) -> str:
     return _CONNECTOR_LABELS.get(name, name)
 
@@ -886,10 +902,12 @@ def enable_cmd(
         return
 
     # Sanity-check that there's enough config for re-enable to actually
-    # work. If model / api_key_env are empty the connector would
-    # silently route real traffic through an unconfigured upstream, so
-    # we fail fast with a remediation pointer to the full setup flow.
-    if not (gc.model or app.cfg.llm.model):
+    # work. A proxy connector (openclaw, zeptoclaw) routes LLM traffic
+    # through the guardrail, so with no model it would silently forward to
+    # an unconfigured upstream; fail fast with a pointer to the full setup.
+    # Hook connectors never need a model (init enables them without one),
+    # so enable stays the inverse of disable for them (GAP-1562).
+    if _enabled_connectors_need_model(app.cfg, connector) and not (gc.model or app.cfg.llm.model):
         ux.err("Cannot enable: guardrail.model is not set.", indent="  ")
         ux.subhead("Run 'defenseclaw setup guardrail' to configure first.", indent="    ")
         raise SystemExit(1)
