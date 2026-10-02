@@ -27,12 +27,19 @@ func CurrentProcessOwner() (name, uid string) {
 
 // perUserProcessOwners is the processOwners filter of a per-user install, or
 // nil when every visible process is in scope (managed and standalone
-// enterprise, per-user scans, Windows).
+// enterprise, per-user scans).
 func perUserProcessOwners(opts AIDiscoveryOptions) map[string]bool {
 	if opts.ManagedEnterprise || opts.StandaloneEnterprise || opts.UserScanDir != "" {
 		return nil
 	}
 	name, uid := CurrentProcessOwner()
+	if runtime.GOOS == "windows" {
+		// Windows process rows name their account DOMAIN\account, and a
+		// standard account cannot open another account's process, so those
+		// rows had no user and no start time ("Up 0s") and were listed as
+		// this account's (GAP-1296).
+		name = currentWindowsAccount()
+	}
 	owners := map[string]bool{}
 	for _, owner := range []string{name, uid} {
 		if owner != "" {
