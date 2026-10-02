@@ -7278,6 +7278,72 @@ def _check_llm_reachable(cfg, r: _DoctorResult) -> None:
         _emit("warn", "LLM reachable", msg, r=r)
 
 
+def _check_judge_calls(cfg, r: _DoctorResult) -> None:
+    """Report whether the LLM judge's calls since the gateway started worked.
+
+    The Detection rows only show what is configured, so a judge whose provider
+    rejects every call still looked active. The gateway records each judge call
+    as an ``llm-judge-response`` audit row; ``defenseclaw.judge.action`` is
+    ``error`` when the call failed, with the provider's ``error_summary``.
+    Rows from before the current gateway start (``gateway.pid`` mtime) are
+    ignored so a fixed configuration is not reported against old failures.
+    """
+    import sqlite3
+
+    label = "LLM judge calls"
+    judge = getattr(cfg.guardrail, "judge", None)
+    if not cfg.guardrail.enabled or not bool(getattr(judge, "enabled", False)):
+        _emit("skip", label, "judge disabled", r=r)
+        return
+    db_path = str(getattr(cfg, "audit_db", "") or "")
+    if not db_path or not os.path.isfile(db_path):
+        _emit("skip", label, "no audit database yet", r=r)
+        return
+    since = ""
+    try:
+        started = os.path.getmtime(os.path.join(cfg.data_dir, "gateway.pid"))
+        since = datetime.fromtimestamp(started, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+    except OSError:
+        pass
+    try:
+        uri = Path(os.path.abspath(db_path)).as_uri() + "?mode=ro"
+        with contextlib.closing(sqlite3.connect(uri, uri=True, timeout=0.5)) as db:
+            rows = db.execute(
+                "SELECT structured_json FROM audit_events WHERE action = ? AND timestamp >= ? "
+                "ORDER BY timestamp DESC, rowid DESC LIMIT 20",
+                ("llm-judge-response", since),
+            ).fetchall()
+    except sqlite3.Error as exc:
+        _emit("skip", label, f"audit database not readable: {exc}", r=r)
+        return
+    if not rows:
+        _emit("skip", label, "no judge calls since the gateway started", r=r)
+        return
+    errors: list[str] = []
+    for (raw,) in rows:
+        try:
+            payload = json.loads(raw or "{}")
+        except ValueError:
+            continue
+        if isinstance(payload, dict) and str(payload.get("defenseclaw.judge.action", "")).lower() == "error":
+            errors.append(str(payload.get("defenseclaw.judge.error_summary") or "no error summary"))
+    total = len(rows)
+    if not errors:
+        _emit("pass", label, f"last {total} judge call(s) completed", r=r)
+        return
+    latest = errors[0] if len(errors[0]) <= 240 else errors[0][:240] + "..."
+    if len(errors) == total:
+        _emit(
+            "fail",
+            label,
+            f"all {total} recent judge call(s) failed, so the judge decides nothing: {latest}",
+            r=r,
+            remediation="defenseclaw setup llm --role judge",
+        )
+    else:
+        _emit("warn", label, f"{len(errors)} of {total} recent judge call(s) failed: {latest}", r=r)
+
+
 def _check_regional_provider_config(cfg, r: _DoctorResult) -> None:
     """Sanity-check provider-typed sub-blocks on the resolved LLM.
 
@@ -8846,6 +8912,7 @@ def doctor(
     r.set_section("credentials")
     _check_llm_api_key(cfg, r)
     _check_llm_reachable(cfg, r)
+    _check_judge_calls(cfg, r)
     _check_regional_provider_config(cfg, r)
     _check_custom_provider_overlay(cfg, r)
     _check_cisco_ai_defense(cfg, r)

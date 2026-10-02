@@ -913,7 +913,18 @@ def targeted_readiness(cfg: Config, options: FirstRunOptions) -> list[StepResult
         else:
             steps.append(StepResult("Local LLM", "warn", "local provider set without base_url"))
     elif cfg.guardrail.enabled and (llm.model or options.llm_api_key or llm.api_key):
-        steps.append(_doctor_check("_check_llm_api_key", cfg, "LLM API key"))
+        key_step = _doctor_check("_check_llm_api_key", cfg, "LLM API key")
+        if key_step.status == "fail":
+            # The key is supplied afterwards; a missing or rejected key must not
+            # roll back the config and connectors this run just wrote.
+            env_name = llm.api_key_env or cfg.guardrail.api_key_env or "DEFENSECLAW_LLM_KEY"
+            key_step = StepResult(
+                "LLM API key",
+                "warn",
+                f"{key_step.detail}; the LLM judge stays inactive until the key is set",
+                f"defenseclaw keys set {env_name}",
+            )
+        steps.append(key_step)
     else:
         steps.append(StepResult("LLM API", "skip", "not configured"))
 
