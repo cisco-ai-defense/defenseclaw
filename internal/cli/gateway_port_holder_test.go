@@ -4,6 +4,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -112,5 +113,34 @@ func TestForeignGatewayListenerHolderWithoutUID(t *testing.T) {
 	c.DeploymentMode = "managed_enterprise"
 	if problem := foreignGatewayListener(c); problem != "" {
 		t.Fatalf("managed install reported a foreign listener: %q", problem)
+	}
+}
+
+// GAP-1285: another account's gateway took the port between the start check
+// and readiness; the readiness error names the holder and the next step.
+func TestReadinessIdentityMismatchNamesForeignHolder(t *testing.T) {
+	oldHolder, oldAnswers, oldState := gatewayPortHolder, gatewayPortAnswers, gatewayManagedState
+	oldOther := gatewayPortHeldByOtherAccount
+	t.Cleanup(func() {
+		gatewayPortHolder, gatewayPortAnswers, gatewayManagedState = oldHolder, oldAnswers, oldState
+		gatewayPortHeldByOtherAccount = oldOther
+	})
+	gatewayPortHolder = func(string, int) (daemon.PortHolder, error) { return daemon.PortHolder{PID: 13496, UID: -1}, nil }
+	gatewayPortAnswers = func(string) bool { return true }
+	gatewayManagedState = func() (bool, int) { return false, 0 }
+	gatewayPortHeldByOtherAccount = func(string, int) bool { return true }
+	c := config.DefaultConfig()
+	c.Gateway.APIBind = "127.0.0.1"
+	c.Gateway.APIPort = 18970
+
+	mismatch := fmt.Errorf("%w: authenticated status returned 401 Unauthorized", errGatewayIdentityMismatch)
+	got := explainForeignListenerAtReadiness(c, mismatch)
+	if !errors.Is(got, errGatewayIdentityMismatch) || !strings.Contains(got.Error(), "held by PID 13496") ||
+		!strings.Contains(got.Error(), "defenseclaw setup gateway --api-port ") {
+		t.Fatalf("readiness error = %v, want the holder and the setup gateway command", got)
+	}
+	other := errors.New("gateway did not become ready before timeout")
+	if got := explainForeignListenerAtReadiness(c, other); got != other {
+		t.Fatalf("unrelated readiness error changed: %v", got)
 	}
 }

@@ -4,6 +4,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -79,6 +80,21 @@ func foreignGatewayListenerAt(cfg *config.Config, host string, port int) string 
 		)
 	}
 	return ""
+}
+
+// explainForeignListenerAtReadiness names the holder when another listener
+// answered readiness on the API port. The start check passed, but another
+// account's gateway took the port before this one bound it, and start
+// reported only "gateway identity mismatch: authenticated status returned
+// 401 Unauthorized" (GAP-1285).
+func explainForeignListenerAtReadiness(cfg *config.Config, err error) error {
+	if cfg == nil || !errors.Is(err, errGatewayIdentityMismatch) {
+		return err
+	}
+	if problem := foreignGatewayListener(cfg); problem != "" {
+		return fmt.Errorf("%w: %s. %s", err, problem, foreignGatewayListenerFix(cfg))
+	}
+	return err
 }
 
 // foreignGatewayListenerFix is the next step for foreignGatewayListener. On a
