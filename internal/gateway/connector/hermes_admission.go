@@ -31,12 +31,18 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/processutil"
 )
 
-const (
-	hermesVersionProbeTimeout     = 10 * time.Second
-	hermesVersionProbeOutputLimit = int64(4 << 10)
-)
+const hermesVersionProbeOutputLimit = int64(4 << 10)
+
+// ErrAgentVersionProbeTimeout marks an agent version probe that ran out of
+// time. A slow probe says nothing about the agent, so a gateway start keeps
+// the connector's existing hooks instead of rolling them back (GAP-1587).
+var ErrAgentVersionProbeTimeout = errors.New("slow agent probe")
 
 var (
+	// hermesVersionProbeTimeout bounds 'hermes --version'. It takes about 4 s
+	// on an idle Windows host and passed 10 s on a busy one (GAP-1587).
+	hermesVersionProbeTimeout = 30 * time.Second
+
 	hermesManagedExecutablePathResolver = hermesManagedExecutablePath
 	hermesAgentVersionProbe             = probeHermesAgentVersion
 	hermesInstalledVersionReader        = hermespath.InstalledVersionForManagedExecutable
@@ -268,7 +274,7 @@ func probeHermesAgentVersion(ctx context.Context, executable string) (string, er
 	cmd.Stderr = stderr
 	if err := cmd.Run(); err != nil {
 		if errors.Is(probeCtx.Err(), context.DeadlineExceeded) {
-			return "", fmt.Errorf("probe timed out after %s: %w", hermesVersionProbeTimeout, context.DeadlineExceeded)
+			return "", fmt.Errorf("probe timed out after %s: %w (%w)", hermesVersionProbeTimeout, context.DeadlineExceeded, ErrAgentVersionProbeTimeout)
 		}
 		return "", fmt.Errorf("probe exited unsuccessfully: %w", err)
 	}

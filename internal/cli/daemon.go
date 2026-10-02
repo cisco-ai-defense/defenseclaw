@@ -18,6 +18,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
@@ -388,6 +389,8 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 	readinessTimeout := defaultStartReadinessTimeout
 	if coldStart {
 		readinessTimeout = hookColdStartReadinessTimeout
+	} else if !rotationTransaction {
+		requirements.reportProgress = (&startProgressPrinter{}).report
 	}
 	snap, _, err := waitForStartedDaemon(
 		d,
@@ -733,6 +736,7 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 	requirements := daemonReadinessRequirementsFromConfig(cfg, startAttemptedAt)
 	requirements.expectedPID = pid
 	requirements.token = func() string { return daemonGatewayToken(cfg) }
+	requirements.reportProgress = (&startProgressPrinter{}).report
 	snap, _, err := waitForStartedDaemon(
 		d,
 		pid,
@@ -899,6 +903,48 @@ type daemonReadinessRequirements struct {
 	// guardrail that stopped only because the hook-contract admission gate
 	// refused upstream agent drift. Every other subsystem must still be ready.
 	allowHookContractAdmissionRefusal bool
+
+	// reportProgress, when set, is told every startReadinessReportInterval
+	// what a slow start is still waiting for, and lets each connector setup
+	// step extend the readiness timeout up to startReadinessProgressCap.
+	reportProgress func(elapsed time.Duration, step string)
+}
+
+const startReadinessReportInterval = 30 * time.Second
+
+// readinessProgressFactor is startReadinessProgressFactor; tests change it.
+var readinessProgressFactor time.Duration = startReadinessProgressFactor
+
+func startReadinessProgressCap(timeout time.Duration) time.Duration {
+	return readinessProgressFactor * timeout
+}
+
+// connectorSetupStep describes the connector the gateway is setting up, from
+// the guardrail health it publishes before each one, or "" when it reports
+// no setup step.
+func connectorSetupStep(guardrail gateway.SubsystemHealth) string {
+	if guardrail.State != gateway.StateStarting {
+		return ""
+	}
+	name, _ := guardrail.Details["setup_connector"].(string)
+	step, _ := guardrail.Details["setup_step"].(float64)
+	total, _ := guardrail.Details["setup_total"].(float64)
+	if strings.TrimSpace(name) == "" || step < 1 || total < step {
+		return ""
+	}
+	return fmt.Sprintf("setting up connector %s (%d of %d)", name, int(step), int(total))
+}
+
+// startProgressPrinter prints a slow start's progress under the
+// "Starting gateway sidecar daemon... " line.
+type startProgressPrinter struct{ printed bool }
+
+func (p *startProgressPrinter) report(elapsed time.Duration, step string) {
+	if !p.printed {
+		fmt.Println()
+		p.printed = true
+	}
+	fmt.Printf("  still starting after %s: %s\n", elapsed.Round(time.Second), step)
 }
 
 // missingObservabilitySecretError explains a configuration that does not load
@@ -1106,14 +1152,55 @@ func inspectConfiguredListener(d daemonState, cfg *config.Config, client *http.C
 			)
 		}
 	}
-	status, err := fetchSidecarStatus(client, sidecarStatusURL(cfg), daemonGatewayToken(cfg))
+	status, err := fetchListenerIdentityStatus(client, sidecarStatusURL(cfg), daemonGatewayToken(cfg))
 	if err != nil {
+		if isHTTPTimeout(err) {
+			// GAP-1668: a busy host's gateway answered after the 1 s readiness
+			// poll timeout, and the slow answer was called an auth failure.
+			return false, 0, fmt.Errorf(
+				"gateway PID %d did not answer its status check within %s (%d tries); the host may be busy: retry, or check it with: defenseclaw-gateway status",
+				managedPID, listenerIdentityHTTPTimeout, listenerIdentityAttempts,
+			)
+		}
 		return false, 0, fmt.Errorf("managed gateway listener authentication failed: %w", err)
 	}
 	if err := verifyGatewayRuntimeIdentity(status, managedPID, cfg.DataDir); err != nil {
 		return false, 0, err
 	}
 	return true, managedPID, nil
+}
+
+const (
+	listenerIdentityHTTPTimeout = 10 * time.Second
+	listenerIdentityAttempts    = 3
+)
+
+// fetchListenerIdentityStatus reads a running gateway's authenticated status
+// before start or restart act on it. It allows a loaded host's gateway
+// longer than a readiness poll and retries only timeouts.
+func fetchListenerIdentityStatus(client *http.Client, addr, token string) (gatewayStatusEnvelope, error) {
+	probe := &http.Client{Timeout: listenerIdentityHTTPTimeout}
+	if client != nil {
+		copied := *client
+		if copied.Timeout > 0 && copied.Timeout < listenerIdentityHTTPTimeout {
+			copied.Timeout = listenerIdentityHTTPTimeout
+		}
+		probe = &copied
+	}
+	var status gatewayStatusEnvelope
+	var err error
+	for attempt := 0; attempt < listenerIdentityAttempts; attempt++ {
+		status, err = fetchSidecarStatus(probe, addr, token)
+		if err == nil || !isHTTPTimeout(err) {
+			return status, err
+		}
+	}
+	return status, err
+}
+
+func isHTTPTimeout(err error) bool {
+	var netErr net.Error
+	return errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout())
 }
 
 func waitForConfiguredPortFree(cfg *config.Config, stoppedPID int, timeout, pollInterval time.Duration) error {
@@ -1849,7 +1936,15 @@ func waitForGatewayReadiness(
 	if pollInterval <= 0 {
 		pollInterval = defaultReadinessPollInterval
 	}
-	deadline := time.Now().Add(timeout)
+	startedWaiting := time.Now()
+	deadline := startedWaiting.Add(timeout)
+	// GAP-1556: on a loaded Windows host connector setup alone took longer
+	// than the readiness timeout, so start stopped a gateway that was still
+	// making progress. Each finished setup step gives the gateway another
+	// timeout window, up to the cap; a stalled start still fails on time.
+	progressCap := startedWaiting.Add(startReadinessProgressCap(timeout))
+	lastStep := ""
+	nextReport := startedWaiting.Add(startReadinessReportInterval)
 	var lastSnap gateway.HealthSnapshot
 	var lastProbeErr error
 
@@ -1899,6 +1994,17 @@ func waitForGatewayReadiness(
 		if err == nil {
 			lastSnap = snap
 			lastProbeErr = nil
+			if step := connectorSetupStep(snap.Guardrail); step != "" && step != lastStep {
+				lastStep = step
+				// Only an interactive start or restart (it reports progress)
+				// waits longer; hook cold starts and rotation checks do not.
+				if extended := time.Now().Add(timeout); requirements.reportProgress != nil && extended.After(deadline) {
+					deadline = extended
+					if deadline.After(progressCap) {
+						deadline = progressCap
+					}
+				}
+			}
 			ready, readinessErr := gatewaySnapshotReady(snap, requirements)
 			if readinessErr != nil {
 				return snap, false, readinessErr
@@ -1928,7 +2034,24 @@ func waitForGatewayReadiness(
 					"gateway telemetry did not recover before the startup deadline: error (%s)", detail,
 				)
 			}
+			if lastStep != "" {
+				return lastSnap, false, fmt.Errorf(
+					"gateway remained STARTING through the %s readiness timeout (last step: %s)",
+					time.Since(startedWaiting).Round(time.Second), lastStep,
+				)
+			}
 			return lastSnap, false, fmt.Errorf("gateway remained STARTING through the %s readiness timeout", timeout)
+		}
+		if requirements.reportProgress != nil && !time.Now().Before(nextReport) {
+			nextReport = time.Now().Add(startReadinessReportInterval)
+			step := lastStep
+			if step == "" {
+				step = "waiting for the gateway to answer"
+				if lastProbeErr == nil && lastSnap.API.State == gateway.StateRunning {
+					step = "waiting for its subsystems"
+				}
+			}
+			requirements.reportProgress(time.Since(startedWaiting), step)
 		}
 		delay := pollInterval
 		if remaining < delay {

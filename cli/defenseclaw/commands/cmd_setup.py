@@ -187,7 +187,7 @@ _DEFENSE_GATEWAY_LIFECYCLE_TIMEOUT_SECONDS = 60
 # for the port (up to 10 s), then waits for READY itself (600 s on Windows,
 # 60 s elsewhere) and only then starts the watchdog. Killing it earlier left a
 # slow Windows start without its watchdog and raced the setup rollback against
-# a gateway that was still coming up (GAP-1206, GAP-1396).
+# a gateway that was still coming up (GAP-1206, GAP-1396, GAP-1659).
 _DEFENSE_GATEWAY_LAUNCHER_TIMEOUT_SECONDS_WINDOWS = 660
 _DEFENSE_GATEWAY_LAUNCHER_TIMEOUT_SECONDS = _DEFENSE_GATEWAY_LAUNCHER_TIMEOUT_SECONDS_WINDOWS if os.name == "nt" else 30
 _DEFENSE_GATEWAY_STATUS_TIMEOUT_SECONDS = 10

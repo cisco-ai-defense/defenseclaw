@@ -1330,7 +1330,7 @@ def test_init_waits_past_the_windows_gateway_readiness_wait():
     from defenseclaw import bootstrap
     from defenseclaw.commands import cmd_init
 
-    assert "_GATEWAY_START_TIMEOUT = 300 if os.name == \"nt\" else 90" in inspect.getsource(bootstrap)
+    assert "_GATEWAY_START_TIMEOUT = 660 if os.name == \"nt\" else 90" in inspect.getsource(bootstrap)
     for fn in (bootstrap._start_gateway_structured, cmd_init._start_gateway, cmd_init._restart_gateway_quiet):
         src = inspect.getsource(fn)
         assert "timeout=_GATEWAY_START_TIMEOUT" in src
