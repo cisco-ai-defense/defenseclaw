@@ -1224,6 +1224,29 @@ class FirstRunApiPortTests(unittest.TestCase):
         self.assertIn("configured by another account", note)
 
     @unittest.skipIf(os.name == "nt", "port claims are a Linux and macOS hint")
+    def test_new_config_skips_a_port_a_deleted_account_claimed(self):
+        # GAP-1704: nobody can replace a deleted account's claim, so a port
+        # it holds went to two accounts and the first one's gateway could not start.
+        import pwd
+        import tempfile
+
+        from defenseclaw import bootstrap
+        from defenseclaw.config import default_config
+
+        cfg = default_config()
+        with tempfile.TemporaryDirectory() as claims:
+            open(os.path.join(claims, "defenseclaw-api-port-18970"), "w").close()
+            with (
+                patch.object(bootstrap, "_API_PORT_CLAIM_DIR", claims),
+                patch.object(bootstrap, "_api_port_free", return_value=True),
+                patch.object(bootstrap.os, "getuid", return_value=os.getuid() + 1),
+                patch.object(pwd, "getpwuid", side_effect=KeyError("deleted account")),
+            ):
+                bootstrap.choose_first_run_api_port(cfg)
+
+        self.assertEqual(cfg.gateway.api_port, 18980)
+
+    @unittest.skipIf(os.name == "nt", "port claims are a Linux and macOS hint")
     def test_uninstall_all_removes_only_this_accounts_claims(self):
         import tempfile
 

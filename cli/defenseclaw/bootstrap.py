@@ -258,7 +258,7 @@ def _api_port_free(host: str, port: int) -> bool:
 # A per-user gateway start leaves an empty file owned by its account here for
 # its API port (internal/cli/gateway_port_claim_unix.go). A stopped or crashed
 # gateway frees its port, so init on another account checks these claims too
-# (GAP-1261). A claim by a deleted account is ignored.
+# (GAP-1261). A claim left by a deleted account counts too (GAP-1704).
 _API_PORT_CLAIM_DIR = "/var/tmp"
 _API_PORT_CLAIM_PREFIX = "defenseclaw-api-port-"
 
@@ -270,15 +270,11 @@ def _api_port_claimed_by_other_account(port: int) -> bool:
         info = os.lstat(os.path.join(_API_PORT_CLAIM_DIR, f"{_API_PORT_CLAIM_PREFIX}{port}"))
     except OSError:
         return False
-    if not stat.S_ISREG(info.st_mode) or info.st_uid == os.getuid():
-        return False
-    try:
-        import pwd
-
-        pwd.getpwuid(info.st_uid)
-    except (ImportError, KeyError):
-        return False
-    return True
+    # No standard account can remove or replace another uid's claim in the
+    # sticky /var/tmp, even a deleted account's. Skipping only live owners'
+    # claims let two accounts take the same port: the first one's gateway
+    # could not claim it, so the next init picked it again (GAP-1704).
+    return stat.S_ISREG(info.st_mode) and info.st_uid != os.getuid()
 
 
 def remove_own_api_port_claims() -> None:
