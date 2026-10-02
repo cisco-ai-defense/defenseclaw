@@ -385,3 +385,33 @@ func TestCopyFramesEvaluatorFailureIsClosedOnlyInActionMode(t *testing.T) {
 		}
 	}
 }
+
+func TestCopyFramesActionBlockedPromptDoesNotWedgeNextPrompt(t *testing.T) {
+	input := bytes.NewBufferString(
+		`{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":{"sessionId":"s","prompt":[]}}` + "\n" +
+			`{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":"s","prompt":[]}}` + "\n")
+	var forwarded, rejected bytes.Buffer
+	state := &proxyState{pendingClient: map[string]string{}, pendingAgent: map[string]string{}}
+	evaluator := contentBlockingEvaluator(`"id":1,`)
+	err := copyFrames(context.Background(), ProxyOptions{Mode: ModeAction, Evaluator: evaluator}, state, ClientToAgent, input, &forwarded, &rejected)
+	if err != nil {
+		t.Fatalf("second prompt after a block was refused: %v", err)
+	}
+	if !strings.Contains(forwarded.String(), `"id":2`) {
+		t.Fatalf("second prompt was not forwarded: %s", forwarded.String())
+	}
+	var resp struct {
+		Error struct {
+			Message string `json:"message"`
+			Data    struct {
+				Details string `json:"details"`
+			} `json:"data"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(rejected.Bytes()), &resp); err != nil {
+		t.Fatalf("block response %q: %v", rejected.String(), err)
+	}
+	if !strings.Contains(resp.Error.Message, "test content policy") || !strings.Contains(resp.Error.Data.Details, "test content policy") {
+		t.Fatalf("block response does not carry the policy reason: %s", rejected.String())
+	}
+}
