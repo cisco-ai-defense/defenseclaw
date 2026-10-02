@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -322,7 +323,7 @@ func (s *SkillScanner) Scan(ctx context.Context, target string) (*ScanResult, er
 	}
 
 	if stdout.Len() > 0 {
-		findings, parseErr := parseSkillOutput(stdout.Bytes())
+		findings, parseErr := parseSkillOutput(stdout.Bytes(), target)
 		if parseErr != nil {
 			scanErr = fmt.Errorf("scanner: failed to parse %s output: %w (stderr=%s)", s.Name(), parseErr, stderrStr)
 			return nil, scanErr
@@ -357,9 +358,16 @@ type skillFinding struct {
 	RuleID      string `json:"rule_id"`
 	Category    string `json:"category"`
 	Line        int    `json:"line"`
+	// The upstream skill-scanner JSON names the file and line as file_path
+	// and line_number (GAP-1848); location and line are the older names.
+	FilePath   string `json:"file_path"`
+	LineNumber int    `json:"line_number"`
+	Snippet    string `json:"snippet"`
 }
 
-func parseSkillOutput(data []byte) ([]Finding, error) {
+// parseSkillOutput reads the scanner JSON; target is the scanned skill
+// directory, used to correct SKILL.md line numbers ("" skips that).
+func parseSkillOutput(data []byte, target string) ([]Finding, error) {
 	clean := extractJSON(ansiRe.ReplaceAll(data, nil))
 	var out skillOutput
 	if err := json.Unmarshal(clean, &out); err != nil {
@@ -368,9 +376,22 @@ func parseSkillOutput(data []byte) ([]Finding, error) {
 
 	findings := make([]Finding, 0, len(out.Findings))
 	for _, f := range out.Findings {
+		line := f.Line
+		if line <= 0 {
+			line = f.LineNumber
+		}
+		if f.Location == "" && f.FilePath != "" {
+			// Same "helper.py:6" form as the Python skill scan, so watcher
+			// and path-scan alerts name the file and line alike (GAP-1848).
+			f.Location = f.FilePath
+			if line > 0 {
+				line = skillSnippetLine(target, f.FilePath, line, f.Snippet)
+				f.Location = fmt.Sprintf("%s:%d", f.FilePath, line)
+			}
+		}
 		var ln *int
-		if f.Line > 0 {
-			v := f.Line
+		if line > 0 {
+			v := line
 			ln = &v
 		}
 		findings = append(findings, Finding{
@@ -387,4 +408,42 @@ func parseSkillOutput(data []byte) ([]Finding, error) {
 		})
 	}
 	return findings, nil
+}
+
+// skillSnippetLine is the file line that holds snippet when the scanner's
+// line is off: the SDK counts SKILL.md lines from the end of the front
+// matter (GAP-1599, the same correction as the Python skill scan). It keeps
+// line when that line already holds the snippet or the snippet is not found.
+func skillSnippetLine(target, filePath string, line int, snippet string) int {
+	first := ""
+	for _, text := range strings.Split(snippet, "\n") {
+		if text = strings.TrimSpace(text); text != "" {
+			first = text
+			break
+		}
+	}
+	if first == "" || target == "" {
+		return line
+	}
+	path := filePath
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(target, filePath)
+	}
+	if info, err := os.Stat(path); err != nil || info.Size() > 2_000_000 {
+		return line
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return line
+	}
+	lines := strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n")
+	if line <= len(lines) && strings.Contains(lines[line-1], first) {
+		return line
+	}
+	for i, text := range lines {
+		if strings.Contains(text, first) {
+			return i + 1
+		}
+	}
+	return line
 }
