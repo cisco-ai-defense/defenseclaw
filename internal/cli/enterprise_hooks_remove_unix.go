@@ -76,6 +76,9 @@ type enterpriseHooksRemoveAllReport struct {
 	// StateFailed ("user: reason") the ones whose state stayed.
 	Purged      []string `json:"purged,omitempty"`
 	StateFailed []string `json:"state_failed,omitempty"`
+	// PurgedDetail is what the purge found and removed for each user in
+	// Purged, so the uninstall names only that.
+	PurgedDetail map[string]enterpriseHookPurgeDetail `json:"purged_detail,omitempty"`
 }
 
 func runEnterpriseHooksRemoveAll(cmd *cobra.Command, _ []string) error {
@@ -155,6 +158,12 @@ func removeAllEnterpriseHookTargets(cmd *cobra.Command) (enterpriseHooksRemoveAl
 				switch {
 				case ok && result.OK:
 					report.Purged = append(report.Purged, run.Job.Account.User)
+					if result.Purged != nil {
+						if report.PurgedDetail == nil {
+							report.PurgedDetail = map[string]enterpriseHookPurgeDetail{}
+						}
+						report.PurgedDetail[run.Job.Account.User] = *result.Purged
+					}
 				case ok && result.Pending:
 					report.StateFailed = append(report.StateFailed, run.Job.Account.User+": the home is not available")
 				case ok:

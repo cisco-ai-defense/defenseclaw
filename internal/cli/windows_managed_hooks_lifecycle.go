@@ -1930,10 +1930,15 @@ func garbageCollectWindowsManagedHooksLifecycleGenerations(
 				HookExecutable: target.hookExecutable,
 			},
 		); err != nil {
+			account := ""
+			if label := enterpriseHookWindowsAccountLabel(enterpriseHookReconcileRow{SID: target.sid}); label != target.sid {
+				account = " (" + strings.TrimSuffix(label, " ("+target.sid+")") + ")"
+			}
 			return fmt.Errorf(
-				"retire %s managed runtime generations for SID %s: %w",
+				"retire %s managed runtime generations for SID %s%s: %w",
 				target.connector,
 				target.sid,
+				account,
 				err,
 			)
 		}

@@ -222,3 +222,36 @@ func TestUninstallKeepsTheBinariesWhilePerUserHooksRemain(t *testing.T) {
 		})
 	}
 }
+
+// GAP-1444: uninstall --purge said every enrolled account lost per-user
+// binaries and a per-user gateway, also an account that never had a
+// per-user install. Each account's line now names only what was removed.
+func TestUninstallPurgeNamesOnlyWhatEachAccountHad(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	h.env.Runner = removeAllRunner{Runner: h.runner, answer: func(string) (CommandResult, error) {
+		return CommandResult{Stdout: []byte(`{"ok":true,"purged":["alice","bob"],` +
+			`"purged_detail":{"alice":{"data":true},"bob":{"data":true,"binaries":true,"gateway":true}}}`)}, nil
+	}}
+	done := h.run(Options{Action: ActionUninstall, Purge: true})
+	requireOK(t, done)
+	lines := map[string]string{}
+	for _, change := range done.Changes {
+		for _, user := range []string{"alice", "bob"} {
+			if strings.Contains(change, "of user "+user+" ") {
+				lines[user] = change
+			}
+		}
+	}
+	if alice := lines["alice"]; !strings.Contains(alice, "~/.defenseclaw") ||
+		strings.Contains(alice, "~/.local/bin") || strings.Contains(alice, "gateway") {
+		t.Fatalf("alice had only ~/.defenseclaw: %q", alice)
+	}
+	if bob := lines["bob"]; !strings.Contains(bob, "launcher links in ~/.local/bin") ||
+		!strings.HasSuffix(bob, "after stopping its per-user gateway") {
+		t.Fatalf("bob had a full per-user install: %q", bob)
+	}
+	if got := purgedUserChange("carol", &purgedUserDetail{}); got != "found no DefenseClaw per-user data or binaries of user carol to remove" {
+		t.Fatalf("an account with nothing to remove: %q", got)
+	}
+}

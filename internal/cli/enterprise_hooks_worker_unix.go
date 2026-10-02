@@ -212,6 +212,18 @@ type enterpriseHookWorkerTargetResult struct {
 	Pending  bool                           `json:"pending,omitempty"`
 	Error    string                         `json:"error,omitempty"`
 	Result   *enterprisehooks.InstallResult `json:"result,omitempty"`
+	// Purged is what a purge target found and removed (booleans only, so
+	// nothing the account controls reaches the administrator's output).
+	Purged *enterpriseHookPurgeDetail `json:"purged,omitempty"`
+}
+
+// enterpriseHookPurgeDetail is what uninstall --purge removed for one
+// account: its ~/.defenseclaw, its per-user binaries and launcher links in
+// ~/.local/bin, and whether it stopped a running per-user gateway first.
+type enterpriseHookPurgeDetail struct {
+	Data     bool `json:"data,omitempty"`
+	Binaries bool `json:"binaries,omitempty"`
+	Gateway  bool `json:"gateway,omitempty"`
 }
 
 type enterpriseHookWorkerResponse struct {
@@ -442,7 +454,7 @@ var (
 	enterpriseHookWorkerInstaller = enterprisehooks.Install
 	enterpriseHookWorkerVerifier  = enterprisehooks.Verify
 	enterpriseHookWorkerRemover   = enterprisehooks.RemoveUserHooks
-	enterpriseHookWorkerPurger    = enterprisehooks.PurgeUserState
+	enterpriseHookWorkerPurger    = enterprisehooks.PurgeUserStateSummary
 	// enterpriseHookWorkerStopPerUser stops the account's per-user gateway
 	// and watchdog before the purge removes the state they run from.
 	enterpriseHookWorkerStopPerUser = stopPerUserGatewayForPurge
@@ -493,10 +505,14 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 				err = errors.New("a DefenseClaw hook registration of this account was not removed")
 				break
 			}
-			if err = enterpriseHookWorkerStopPerUser(opts); err != nil {
+			var stopped bool
+			if stopped, err = enterpriseHookWorkerStopPerUser(opts); err != nil {
 				break
 			}
-			err = enterpriseHookWorkerPurger(ctx, opts)
+			var summary enterprisehooks.PurgeSummary
+			if summary, err = enterpriseHookWorkerPurger(ctx, opts); err == nil {
+				outcome.Purged = &enterpriseHookPurgeDetail{Data: summary.Data, Binaries: summary.Binaries, Gateway: stopped}
+			}
 		default:
 			err = fmt.Errorf("unknown worker mode %q", target.Mode)
 		}

@@ -262,6 +262,46 @@ func windowsEnterprisePerUserDataDirNextStep(original, text string) string {
 		" out of the profile, then run Setup again."
 }
 
+// windowsEnterpriseInvalidRuntimeBundleNextStep names the next step when a
+// lifecycle refused to collect a managed runtime bundle it cannot confirm
+// belongs to this deployment (GAP-1419): the error named no file, no reason
+// and no way forward. DefenseClaw keeps such a file rather than delete what
+// it cannot attribute, so support has to look at it.
+func windowsEnterpriseInvalidRuntimeBundleNextStep(original string) string {
+	if !strings.Contains(original, "refusing to collect") || !strings.Contains(original, "managed runtime bundle") {
+		return ""
+	}
+	file := "the managed runtime bundle named above"
+	if path := windowsEnterpriseFirstWindowsPath(original[strings.Index(original, "refusing to collect"):]); path != "" {
+		file = path
+	}
+	return ". DefenseClaw does not delete a managed runtime bundle it cannot attribute to this deployment, so the lifecycle stopped." +
+		" Next step: leave " + file + " in place and send it with the lifecycle log (" + windowsEnterpriseLifecycleLogPath +
+		") to DefenseClaw support"
+}
+
+// windowsEnterpriseLifecycleLogPath is the lifecycle log Setup and the CLI
+// write, as an administrator finds it.
+const windowsEnterpriseLifecycleLogPath = `C:\Windows\Logs\DefenseClaw\enterprise-lifecycle.log`
+
+// windowsEnterpriseInstallerBuildMismatchText rewrites the installer's
+// refusal of a module whose SHA-256 is not the one the installed deployment
+// recorded: the CLI that ran carries the installer of another DefenseClaw
+// build (GAP-1658). ok is false for any other message.
+func windowsEnterpriseInstallerBuildMismatchText(message, action string, purge bool) (text string, ok bool) {
+	if !strings.Contains(message, "installer module SHA-256 does not match the pinned payload manifest") {
+		return "", false
+	}
+	command := action
+	if action == "uninstall" && purge {
+		command += " --purge"
+	}
+	return "this CLI does not match the installed DefenseClaw: the enterprise installer module it carries is not the one the installed deployment recorded" +
+		" (a CLI from another DefenseClaw build, or a changed module file), so the " + action + " stopped before it changed anything." +
+		" Next step: run the installed CLI, " + windowsEnterpriseAdminCommand(command) +
+		", or the DefenseClaw Setup of the installed release; to move to another release, run that release's Setup", true
+}
+
 // windowsEnterprisePerUserGatewayHolder reports a listener that is a
 // per-user install's DefenseClaw gateway: the gateway binary running as an
 // account. A managed gateway runs as a service identity (NT SERVICE or NT

@@ -490,11 +490,16 @@ func applyWindowsEnterpriseInstallerReport(
 		}
 		if lifecycle {
 			original := message
+			if text, ok := windowsEnterpriseInstallerBuildMismatchText(message, result.Action, opts != nil && opts.purge); ok {
+				result.AddWarning("lifecycle_diagnostic", windowsEnterpriseBoundedDiagnostic(message))
+				message, code = text, "installer_build_mismatch"
+			}
 			if text, internal := windowsEnterpriseStandaloneErrorText(message); internal {
 				result.AddWarning("lifecycle_diagnostic", windowsEnterpriseBoundedDiagnostic(message))
 				message = text
 			}
 			message += windowsEnterprisePerUserDataDirNextStep(original, message)
+			message += windowsEnterpriseInvalidRuntimeBundleNextStep(original)
 		}
 		result.AddError(code, message)
 	}

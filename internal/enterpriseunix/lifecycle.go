@@ -1879,6 +1879,8 @@ func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 		StateFailed []string `json:"state_failed"`
 		Purged      []string `json:"purged"`
 		Removed     int      `json:"removed"`
+		// PurgedDetail is absent from an installed binary that predates it.
+		PurgedDetail map[string]purgedUserDetail `json:"purged_detail"`
 	}
 	if jsonErr := json.Unmarshal(out.Stdout, &report); jsonErr != nil && err == nil {
 		return false
@@ -1913,9 +1915,46 @@ func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 	// A purge deletes data an account created before the install; name each
 	// account, instead of a bare "done".
 	for _, user := range report.Purged {
-		r.Changes = append(r.Changes, fmt.Sprintf("removed all DefenseClaw per-user data of user %s (~/.defenseclaw, including its hook scripts and the foreign-hooks-backup folder) and its per-user binaries and launcher links in ~/.local/bin, after stopping its per-user gateway", user))
+		var detail *purgedUserDetail
+		if found, ok := report.PurgedDetail[user]; ok {
+			detail = &found
+		}
+		r.Changes = append(r.Changes, purgedUserChange(user, detail))
 	}
 	return left
+}
+
+// purgedUserDetail is what the purge found and removed for one account.
+type purgedUserDetail struct {
+	Data     bool `json:"data"`
+	Binaries bool `json:"binaries"`
+	Gateway  bool `json:"gateway"`
+}
+
+// purgedUserChange names what the purge removed for user: only what it
+// found, so an account that never had a per-user install is not said to
+// have lost per-user binaries and a gateway (GAP-1444). Without detail (an
+// installed binary from before it) it names everything the purge covers.
+func purgedUserChange(user string, detail *purgedUserDetail) string {
+	const data = "all DefenseClaw per-user data of user %s (~/.defenseclaw, including its hook scripts and the foreign-hooks-backup folder)"
+	if detail == nil {
+		return fmt.Sprintf("removed "+data+" and its per-user binaries and launcher links in ~/.local/bin, after stopping its per-user gateway", user)
+	}
+	var text string
+	switch {
+	case detail.Data && detail.Binaries:
+		text = fmt.Sprintf("removed "+data+" and its per-user binaries and launcher links in ~/.local/bin", user)
+	case detail.Data:
+		text = fmt.Sprintf("removed "+data, user)
+	case detail.Binaries:
+		text = fmt.Sprintf("removed the DefenseClaw per-user binaries and launcher links of user %s in ~/.local/bin", user)
+	default:
+		text = fmt.Sprintf("found no DefenseClaw per-user data or binaries of user %s to remove", user)
+	}
+	if detail.Gateway {
+		text += ", after stopping its per-user gateway"
+	}
+	return text
 }
 
 // uninstallCommand is this run's uninstall command line, for a rerun.
