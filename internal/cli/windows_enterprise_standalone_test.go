@@ -1674,3 +1674,77 @@ func TestWindowsEnterpriseResultNamesRemovedStaleLifecycleJournal(t *testing.T) 
 		t.Fatalf("warnings = %+v", result.Warnings)
 	}
 }
+
+// GAP-1961: a standard account's repair cannot read the protected installed
+// config; it gets the elevation_required refusal (exit 5) that status and
+// verify give, not a raw "Access is denied" with exit 1603. GAP-1962: an
+// unknown --profile exits 1639 (invalid arguments) like every other
+// argument error.
+func TestWindowsEnterpriseLifecycleCallerErrorsExitCodes(t *testing.T) {
+	stubWindowsEnterpriseDeployments(t, map[string]winpath.EnterpriseDeploymentState{"standalone": winpath.EnterpriseDeploymentInstalled})
+	originalObserver := windowsEnterpriseStandaloneObserver
+	originalElevated := windowsEnterpriseIsElevated
+	t.Cleanup(func() {
+		windowsEnterpriseStandaloneObserver = originalObserver
+		windowsEnterpriseIsElevated = originalElevated
+	})
+	windowsEnterpriseStandaloneObserver = func(*enterprisestatus.Result, *windowsEnterpriseLifecycleOptions) string { return "" }
+	windowsEnterpriseIsElevated = func() bool { return false }
+
+	// The installed config is readable only by administrators.
+	installed := `C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml`
+	originalReader := windowsEnterpriseTrustConfigReader
+	originalScriptFinder := windowsEnterpriseScriptFinder
+	t.Cleanup(func() {
+		windowsEnterpriseTrustConfigReader = originalReader
+		windowsEnterpriseScriptFinder = originalScriptFinder
+	})
+	windowsEnterpriseTrustConfigReader = func(path string, _ int64) ([]byte, error) {
+		return nil, &os.PathError{Op: "open", Path: path, Err: windows.ERROR_ACCESS_DENIED}
+	}
+	// Never reach a real lifecycle if the refusal regresses.
+	windowsEnterpriseScriptFinder = func(string) (string, error) { return "", errors.New("test: no installer") }
+	windowsEnterpriseInstalledConfigPath = func() (string, error) { return installed, nil }
+
+	for _, tc := range []struct {
+		action, profile, code, text string
+		exit                        int
+	}{
+		{"repair", "standalone", "elevation_required", "a standard account cannot repair the managed deployment", 5},
+		{"verify", "nope", "invalid_arguments", "--profile must be secure_client or standalone", 1639},
+	} {
+		for _, jsonOutput := range []bool{false, true} {
+			var stdout bytes.Buffer
+			command := &cobra.Command{}
+			command.SetOut(&stdout)
+			err := runWindowsEnterpriseLifecycle(context.Background(), command, tc.action,
+				&windowsEnterpriseLifecycleOptions{profile: tc.profile, jsonOutput: jsonOutput})
+			if got := commandExitCode(err); got != tc.exit {
+				t.Fatalf("%s --profile %s (json %t): exit %d, want %d (%v)", tc.action, tc.profile, jsonOutput, got, tc.exit, err)
+			}
+			if !jsonOutput {
+				if want := "error " + tc.code + ": "; !strings.Contains(stdout.String(), want+tc.text) && !strings.Contains(stdout.String(), want+"invalid arguments: "+tc.text) {
+					t.Fatalf("%s: output %q", tc.action, stdout.String())
+				}
+				if strings.Contains(stdout.String(), "Access is denied") {
+					t.Fatalf("%s: raw access error in %q", tc.action, stdout.String())
+				}
+				continue
+			}
+			var result enterprisestatus.Result
+			if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+				t.Fatal(err)
+			}
+			if result.OK || len(result.Errors) != 1 || result.Errors[0].Code != tc.code || result.ExitCode != tc.exit {
+				t.Fatalf("%s: result %+v", tc.action, result)
+			}
+		}
+	}
+
+	// An administrator who cannot read the config still sees the real error.
+	windowsEnterpriseIsElevated = func() bool { return true }
+	err := resolveWindowsEnterpriseLifecycleProfile("repair", &windowsEnterpriseLifecycleOptions{profile: "standalone"})
+	if err == nil || !strings.Contains(err.Error(), "read enterprise.trust from") {
+		t.Fatalf("elevated repair: %v", err)
+	}
+}

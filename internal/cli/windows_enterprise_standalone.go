@@ -142,6 +142,17 @@ func windowsEnterpriseStandaloneRequested(opts *windowsEnterpriseLifecycleOption
 		managed.IsStandaloneProfile(opts.profile))
 }
 
+// windowsEnterpriseUnknownProfileRequested reports a --profile that names
+// neither profile. Secure Client Setup never passes one, so the refusal uses
+// the standalone result and its invalid-arguments exit 1639 (GAP-1962).
+func windowsEnterpriseUnknownProfileRequested(opts *windowsEnterpriseLifecycleOptions) bool {
+	if opts == nil {
+		return false
+	}
+	profile := managed.NormalizeEnterpriseProfile(opts.profile)
+	return profile != "" && profile != managed.ProfileSecureClient && profile != managed.ProfileStandalone
+}
+
 // runWindowsEnterprisePowerShell7 runs the installer on the validated
 // PowerShell 7 engine and captures its schema-1 JSON document.
 func runWindowsEnterprisePowerShell7(
@@ -1134,6 +1145,8 @@ func windowsEnterpriseFailureCodeFor(result *enterprisestatus.Result) int {
 			return enterprisestatus.WindowsExitBusy
 		case "invalid_arguments":
 			return enterprisestatus.WindowsExitInvalidArgs
+		case "elevation_required":
+			return enterprisestatus.WindowsExitAccessDenied
 		}
 	}
 	return enterprisestatus.WindowsExitFailure
@@ -1231,7 +1244,11 @@ func writeWindowsEnterpriseStandalonePreflightFailure(
 	if errors.Is(cause, errPowerShell7Untrusted) {
 		code = "powershell7_untrusted"
 	}
-	result.AddError(code, cause.Error())
+	message := cause.Error()
+	if code == "elevation_required" {
+		message = strings.TrimPrefix(message, code+": ")
+	}
+	result.AddError(code, message)
 	return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 }
 

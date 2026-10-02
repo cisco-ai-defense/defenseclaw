@@ -333,7 +333,7 @@ func runWindowsEnterpriseLifecycle(
 		return failPreflight(errors.New("Windows enterprise lifecycle options are unavailable"))
 	}
 	if err := resolveWindowsEnterpriseLifecycleProfile(action, opts); err != nil {
-		if windowsEnterpriseStandaloneRequested(opts) {
+		if windowsEnterpriseStandaloneRequested(opts) || windowsEnterpriseUnknownProfileRequested(opts) {
 			return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts, err)
 		}
 		return failPreflight(err)
