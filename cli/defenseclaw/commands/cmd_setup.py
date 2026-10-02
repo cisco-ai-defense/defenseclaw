@@ -8721,6 +8721,16 @@ def _restore_setup_config_in_memory(app: AppContext, snapshot: _SetupConfigSnaps
 _ROLLBACK_RESTART_TITLE = "Restoring the previous configuration"
 
 
+def _guarded_connectors(cfg: Any, names: list[str]) -> list[str]:
+    """*names* minus the ones `guardrail disable --connector X` turned off.
+
+    The gateway leaves a disabled connector out of its roster, so waiting for
+    it to become active can only fail (GAP-1976).
+    """
+    resolver = getattr(getattr(cfg, "guardrail", None), "effective_enabled", None)
+    return [name for name in names if not callable(resolver) or resolver(name)]
+
+
 def _restart_restored_connector_runtime(
     app: AppContext,
     *,
@@ -8734,7 +8744,7 @@ def _restart_restored_connector_runtime(
     start error again (GAP-1808).
     """
     cfg = app.cfg
-    restored = list(cfg.active_connectors()) if hasattr(cfg, "active_connectors") else []
+    restored = _guarded_connectors(cfg, cfg.active_connectors()) if hasattr(cfg, "active_connectors") else []
     primary = normalize_connector(cfg.active_connector()) if hasattr(cfg, "active_connector") else "openclaw"
     if not restored:
         # The prior config guarded nothing (for example after `setup remove
@@ -9666,7 +9676,7 @@ def _apply_hook_connector_setup(
                 cfg.gateway.host,
                 cfg.gateway.port,
                 connector=connector,
-                connectors=_actives,
+                connectors=_guarded_connectors(cfg, _actives),
                 wait_for_connector_ready=True,
             )
         except Exception as exc:  # noqa: BLE001 — readiness failure triggers transaction rollback.
