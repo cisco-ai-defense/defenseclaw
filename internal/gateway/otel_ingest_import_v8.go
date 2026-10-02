@@ -344,6 +344,7 @@ func inboundCorrelationWithSnapshotV8(
 // record without that identity remains un-attributed rather than receiving a
 // guessed root agent.
 func (a *APIServer) enrichInboundWithHookLifecycleV8(
+	ctx context.Context,
 	leaf otlpDecodedLeaf,
 	target observability.InboundTarget,
 	authenticatedSource string,
@@ -362,19 +363,26 @@ func (a *APIServer) enrichInboundWithHookLifecycleV8(
 	if !found {
 		return fields, false, nil
 	}
-	mergeCorrelation := func(current *string, source string) bool {
+	// An agent or turn the native rail only inferred from the durable prompt
+	// cursor is not a sender report. The cursor carries the correlation
+	// ledger's agent, while the live hook snapshot carries the telemetry agent
+	// every hook record of this conversation uses, so the two differ by design.
+	// The exact conversation join makes the snapshot the authority: take it
+	// instead of dropping the record as invalid_mapped_field (GAP-1331).
+	derived := nativeOTLPCursorDerivedTargetsV8(ctx, authenticatedSource)
+	mergeCorrelation := func(current *string, source string, target connector.CorrelationTarget) bool {
 		if source == "" {
 			return true
 		}
-		if *current != "" && *current != source {
+		if *current != "" && *current != source && !derived[target] {
 			return false
 		}
 		*current = source
 		return true
 	}
-	if !mergeCorrelation(&correlation.SessionID, conversationID) ||
-		!mergeCorrelation(&correlation.AgentID, meta.AgentID) ||
-		!mergeCorrelation(&correlation.TurnID, meta.TurnID) {
+	if !mergeCorrelation(&correlation.SessionID, conversationID, connector.CorrelationTargetSession) ||
+		!mergeCorrelation(&correlation.AgentID, meta.AgentID, connector.CorrelationTargetAgent) ||
+		!mergeCorrelation(&correlation.TurnID, meta.TurnID, connector.CorrelationTargetTurn) {
 		return nil, false, errOTLPInboundMappingV8
 	}
 	if selected == nil {
@@ -1015,7 +1023,7 @@ func (a *APIServer) mapInboundLogV8(
 		}
 	}
 	fields, _, err = a.enrichInboundWithHookLifecycleV8(
-		leaf, target, authenticatedSource, &input.Correlation, fields, selected,
+		ctx, leaf, target, authenticatedSource, &input.Correlation, fields, selected,
 	)
 	if err != nil {
 		return observability.InboundImportedLogInput{}, err

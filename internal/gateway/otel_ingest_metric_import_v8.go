@@ -280,7 +280,7 @@ func (a *APIServer) mapInboundDerivedMetricV8(
 		return observability.InboundImportedMetricInput{}, unknown, false, false, err
 	}
 	fields, hookFound, err := a.inboundDerivedMetricFieldsV8(
-		leaf, match, target, authenticatedSource, variant, &correlation,
+		ctx, leaf, match, target, authenticatedSource, variant, &correlation,
 	)
 	if err != nil {
 		return observability.InboundImportedMetricInput{}, unknown, false, false, err
@@ -598,6 +598,7 @@ func inboundProjectedCumulativeSeriesV8(
 }
 
 func (a *APIServer) inboundDerivedMetricFieldsV8(
+	ctx context.Context,
 	leaf otlpDecodedLeaf,
 	match observability.InboundMatch,
 	target observability.InboundTarget,
@@ -612,7 +613,7 @@ func (a *APIServer) inboundDerivedMetricFieldsV8(
 			return nil, false, err
 		}
 		return a.enrichInboundWithHookLifecycleV8(
-			leaf, target, authenticatedSource, correlation, fields, selected,
+			ctx, leaf, target, authenticatedSource, correlation, fields, selected,
 		)
 	}
 	fields := inboundTargetFieldsByName(target)
@@ -686,7 +687,7 @@ func (a *APIServer) inboundDerivedMetricFieldsV8(
 		}
 	}
 	result, hookFound, err := a.enrichInboundWithHookLifecycleV8(
-		leaf, target, authenticatedSource, correlation, result, selected,
+		ctx, leaf, target, authenticatedSource, correlation, result, selected,
 	)
 	return result, hookFound, err
 }
