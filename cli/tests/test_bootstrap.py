@@ -1086,6 +1086,27 @@ def test_devin_readiness_uses_pinned_workspace_hook_not_ambient_home(
     assert result.status == "pass"
 
 
+
+def test_devin_readiness_without_workspace_checks_user_global_hooks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MAC-U3-08: init told every user to pin a Devin workspace, which
+    re-scopes all connectors; Devin is guarded by its user-global hooks."""
+    from defenseclaw import bootstrap
+
+    config = tmp_path / "config.json"
+    monkeypatch.setattr(bootstrap, "devin_user_config_path", lambda: str(config))
+    cfg = SimpleNamespace(claw=SimpleNamespace(workspace_dir=""))
+
+    config.write_text('{"theme": "dark"}', encoding="utf-8")
+    missing = _connector_readiness(cfg, "devin")
+    assert (missing.status, missing.next_command) == ("warn", "defenseclaw setup devin")
+
+    hook = '{"hooks": {"PreToolUse": [{"command": "~/.defenseclaw/hooks/devin-hook.sh"}]}}'
+    config.write_text(hook, encoding="utf-8")
+    assert _connector_readiness(cfg, "devin").status == "pass"
+
+
 if __name__ == "__main__":
     unittest.main()
 

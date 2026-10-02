@@ -839,6 +839,33 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
         self.assertEqual(self.app.cfg.claw.workspace_dir, os.path.realpath(workspace))
         self.assertIn("Workspace root pinned", result.output)
 
+    def test_workspace_refused_when_it_would_rescope_configured_peers(self):
+        """MAC-U3-08: one connector's --workspace pins the install-wide
+        workspace; with Copilot configured that moved Copilot's user-global
+        hooks into the project and left other folders unguarded."""
+        from defenseclaw.config import PerConnectorGuardrailConfig
+
+        workspace = os.path.join(self.tmp_dir, "repo")
+        os.makedirs(workspace)
+        self.app.cfg.claw.mode = "copilot"
+        self.app.cfg.guardrail.connector = "copilot"
+        self.app.cfg.guardrail.connectors = {
+            "copilot": PerConnectorGuardrailConfig(mode="action"),
+            "devin": PerConnectorGuardrailConfig(mode="action"),
+        }
+        with (
+            patch("defenseclaw.commands.cmd_setup._restart_services", return_value=None) as restart_mock,
+            patch("defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup", return_value=True),
+        ):
+            result = _invoke(["devin", "--yes", "--no-restart", "--workspace", workspace], self.app)
+
+        self.assertNotEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("would also move copilot", result.output)
+        self.assertIn("defenseclaw setup guardrail --workspace", result.output)
+        self.assertEqual(self.app.cfg.claw.workspace_dir, "")
+        self.assertFalse(os.path.exists(self.cfg_path))
+        restart_mock.assert_not_called()
+
     def test_antigravity_alias_rejects_workspace(self):
         """Antigravity is global-only by design: agy merges every hooks
         file it discovers, so a workspace-scoped install would silently

@@ -9558,6 +9558,32 @@ def _setup_observability_alias(
             "Re-run without --workspace."
         )
 
+    # claw.workspace_dir is one value for the whole install. Pinning it from
+    # one connector's setup re-scopes every configured peer too, and hooks
+    # that move into the workspace (Copilot's, for example) stop guarding
+    # other folders (MAC-U3-08). Refuse instead of doing that silently.
+    requested_workspace = _resolve_connector_workspace(workspace_dir)
+    if (
+        requested_workspace
+        and not replace
+        and requested_workspace != _resolve_connector_workspace(getattr(app.cfg.claw, "workspace_dir", ""))
+    ):
+        peers = [
+            name
+            for name in _configured_connector_set(app.cfg.guardrail)
+            if name != connector and name in _HOOK_ENFORCED_CONNECTORS
+        ]
+        if peers:
+            setup_slug = "claude-code" if connector == "claudecode" else connector
+            raise click.ClickException(
+                f"--workspace pins one workspace for the whole install, so it would also move "
+                f"{', '.join(peers)} to {requested_workspace}, and their hooks would stop guarding "
+                "other folders. No changes made. Run 'defenseclaw setup "
+                f"{setup_slug}' without --workspace to keep user-global hooks, or "
+                f"'defenseclaw setup guardrail --workspace {requested_workspace}' to scope every "
+                "connector to that folder."
+            )
+
     if mode is None:
         # Doctor's repair advice is `setup <connector> --yes`: leaving
         # --mode out must not turn an action install into observe.

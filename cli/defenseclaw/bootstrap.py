@@ -48,6 +48,7 @@ from defenseclaw.connector_paths import (
     connector_home,
     copilot_home,
     devin_hook_config_path,
+    devin_user_config_path,
     hermes_config_path,
     omnigent_config_path,
     opencode_writable_plugin_folder,
@@ -1570,6 +1571,14 @@ def _pid_looks_like_gateway(pid: int) -> bool:
     return process_is_gateway(pid)
 
 
+def _file_mentions_defenseclaw(path: str) -> bool:
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            return "defenseclaw" in fh.read(1 << 20).lower()
+    except OSError:
+        return False
+
+
 def _connector_readiness(cfg: Config, connector: str) -> StepResult:
     if connector == "none":
         return StepResult("Connector", "skip", "no connector requested")
@@ -1611,15 +1620,14 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
     if connector == "devin":
         claw_cfg = getattr(cfg, "claw", None)
         workspace = (getattr(claw_cfg, "workspace_dir", "") or "").strip()
-        path = devin_hook_config_path(workspace)
-        if path and os.path.isfile(path):
-            return StepResult("Connector", "pass", "Devin project hooks found")
-        return StepResult(
-            "Connector",
-            "warn",
-            "Devin project hooks not found; pin a workspace and run setup",
-            "defenseclaw setup devin --workspace <project>",
-        )
+        if workspace:
+            if os.path.isfile(devin_hook_config_path(workspace)):
+                return StepResult("Connector", "pass", "Devin project hooks found")
+        elif _file_mentions_defenseclaw(devin_user_config_path()):
+            # Devin reads user-global hooks from its config.json; only a pinned
+            # workspace moves them to <workspace>/.devin/hooks.v1.json.
+            return StepResult("Connector", "pass", "Devin hooks found")
+        return StepResult("Connector", "warn", "Devin hooks not found yet", "defenseclaw setup devin")
     if connector == "copilot":
         claw_cfg = getattr(cfg, "claw", None)
         workspace = (getattr(claw_cfg, "workspace_dir", "") or "").strip()

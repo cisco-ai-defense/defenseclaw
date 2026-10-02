@@ -2715,3 +2715,36 @@ def test_render_discovery_table_includes_connectors_and_cache_state():
     assert "cached" in rendered
     assert "codex" in rendered
     assert "yes" in rendered
+
+
+def test_timed_out_probe_keeps_version_of_unchanged_binary(monkeypatch, tmp_path):
+    """RHEL-U3-13: one slow --version on a busy host erased a peer's version,
+    so the gateway refused that peer in action mode and setup of another
+    connector did not converge."""
+    binary = tmp_path / "amp"
+    binary.write_text("#!/bin/sh\n", encoding="utf-8")
+    old = os.stat(binary).st_mtime - 600
+    os.utime(binary, (old, old))
+
+    def scan(version: str, error: str):
+        def fake(name: str, **_kwargs) -> ad.AgentSignal:
+            if name != "amp":
+                return _signal(name)
+            return ad.AgentSignal(
+                name=name, installed=True, config_path="", binary_path=str(binary),
+                version=version, error=error,
+            )
+        return fake
+
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: False)
+    monkeypatch.setattr(ad, "_scan_agent", scan("amp 0.0.1", ""))
+    ad.discover_agents(use_cache=False, refresh=True, data_dir=tmp_path)
+
+    monkeypatch.setattr(ad, "_scan_agent", scan("", f"{binary}: {ad.VERSION_PROBE_TIMED_OUT}"))
+    slow = ad.discover_agents(use_cache=False, refresh=True, data_dir=tmp_path)
+    assert (slow.agents["amp"].version, slow.agents["amp"].error) == ("amp 0.0.1", "")
+    assert ad._read_cache(data_dir=tmp_path).agents["amp"].version == "amp 0.0.1"
+
+    os.utime(binary, None)  # replaced after the earlier scan: no stale version
+    changed = ad.discover_agents(use_cache=False, refresh=True, data_dir=tmp_path)
+    assert changed.agents["amp"].version == ""
