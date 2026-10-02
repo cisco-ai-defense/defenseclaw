@@ -166,6 +166,14 @@ async def test_search_keeps_capitals_and_digits_leave_the_config_editor(tmp_path
         await pilot.press("slash", "K", "J", "K", "m")
         await pilot.pause()
         assert app.alerts_model.filter_text == "KJKm"
+        await pilot.press("escape")
+        await pilot.pause()
+
+        app.action_open_command()
+        await pilot.pause()
+        assert app.status_text.startswith("Command palette open")
+        app._close_command_palette()
+        assert not app.status_text.startswith("Command palette open")
 
         app.action_switch_panel("setup")
         await pilot.pause()
