@@ -210,11 +210,18 @@ func missingKiroScaffoldDirs() []string {
 }
 
 // RecordHookConfigParentDirs records the hook config folders an installer
-// created for the named connector before its Setup ran, so its teardown
-// removes them while they are still empty. Only Kiro keeps such a list; for
-// any other connector it does nothing. It is best effort.
+// created for the named connector before its Setup ran, so they are removed
+// while they are still empty: by the purge and a per-user uninstall --all
+// (the data directory's created-folder list), and for Kiro also by its
+// teardown (its own list). It is best effort.
 func RecordHookConfigParentDirs(name, dataDir string, dirs []string) {
-	if name != "kiro" || strings.TrimSpace(dataDir) == "" || len(dirs) == 0 {
+	if strings.TrimSpace(dataDir) == "" || len(dirs) == 0 {
+		return
+	}
+	// Every connector's go in the data directory's created-folder list,
+	// which the purge and a per-user uninstall --all clear.
+	_ = RecordWatcherCreatedDirs(dataDir, dirs)
+	if name != "kiro" {
 		return
 	}
 	_ = recordCreatedDirs(filepath.Join(dataDir, kiroCreatedDirsFile), dirs)

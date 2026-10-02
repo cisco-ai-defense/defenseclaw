@@ -585,6 +585,11 @@ func TestUninstallRemovesTheMachineStateUnlessKeepState(t *testing.T) {
 	if !again.Noop || again.NoopReason != "not_installed" || hasWarning(again, codeLeftovers) {
 		t.Fatalf("second uninstall should be a clean no-op: %+v", again)
 	}
+	// The rerun (the package preremove after an uninstall, say) leaves no
+	// lifecycle directory holding only its lock.
+	if exists(h.env.P(l.LifecycleDir)) {
+		t.Fatal("a no-op uninstall left the lifecycle directory behind")
+	}
 
 	// --keep-state keeps all of it, and the account.
 	install()
