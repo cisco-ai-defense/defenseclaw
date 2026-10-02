@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import ntpath
 import os
 import shutil
 import stat
@@ -52,7 +53,7 @@ import tempfile
 import time
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import click
@@ -1285,12 +1286,14 @@ def _validate_plan(plan: UninstallPlan) -> None:
 
 
 def _requires_deferred_cleanup(plan: UninstallPlan) -> bool:
-    if (
-        plan.platform_name != "win32"
-        or not plan.remove_data_dir
-        or not plan.managed_venv
-        or ".venv" in plan.preserve_data_entries
-    ):
+    if not plan.remove_data_dir or ".venv" in plan.preserve_data_entries:
+        return False
+    return _running_from_managed_venv(plan)
+
+
+def _running_from_managed_venv(plan: UninstallPlan) -> bool:
+    """Whether this Windows CLI runs from the plan's managed runtime (so its shim may be running)."""
+    if plan.platform_name != "win32" or not plan.managed_venv:
         return False
     executable = _normalized(sys.executable)
     runtime = _normalized(plan.managed_venv)
@@ -2015,7 +2018,19 @@ def _remove_binaries(plan: UninstallPlan | None = None) -> None:
     failures: list[str] = []
     targets = list(plan.binary_targets)
     if plan.platform_name == "win32":
-        targets.sort(key=lambda path: os.path.basename(path).lower() == "defenseclaw.cmd")
+        targets.sort(key=lambda path: ntpath.basename(path).lower() == "defenseclaw.cmd")
+    deferred_shim = ""
+    if targets and ntpath.basename(targets[-1]).lower() == "defenseclaw.cmd" and os.path.lexists(targets[-1]):
+        if _running_from_managed_venv(plan):
+            # cmd.exe reads defenseclaw.cmd again after this CLI exits, so
+            # deleting it now ends the command with "The batch file cannot be
+            # found." and exit 1. The helper removes it once cmd.exe is done.
+            try:
+                _schedule_deferred_cleanup(replace(plan, binary_targets=(targets[-1],), remove_data_dir=False))
+            except click.ClickException:
+                pass
+            else:
+                deferred_shim = targets.pop()
     for path in targets:
         if not os.path.lexists(path):
             # The plan lists only the launchers that exist; the owned-name
@@ -2043,6 +2058,8 @@ def _remove_binaries(plan: UninstallPlan | None = None) -> None:
 
     if failures:
         raise OSError("; ".join(failures))
+    if deferred_shim:
+        ux.ok(f"{deferred_shim} is removed right after this command exits")
 
     _remove_install_bookkeeping(plan.install_root, plan.data_dir)
 
@@ -2050,7 +2067,7 @@ def _remove_binaries(plan: UninstallPlan | None = None) -> None:
     # because we can't be sure which environment was used. Mention it only
     # when another defenseclaw is still on PATH.
     remaining = shutil.which("defenseclaw")
-    if remaining:
+    if remaining and not (deferred_shim and _normalized(remaining) == _normalized(deferred_shim)):
         ux.subhead(
             f"another defenseclaw remains at {remaining}; if you installed it with pip, run 'pip uninstall defenseclaw'"
         )

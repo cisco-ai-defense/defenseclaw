@@ -474,9 +474,10 @@ func applyWindowsEnterpriseInstallerReport(
 		}
 		result.AddError(code, fmt.Sprintf("the standalone deployment is not healthy (installer exit %d)", run.ExitCode))
 	}
-	// Only status and verify report the deployment's security state; after a
-	// lifecycle action such as uninstall the reason would read as a fault.
-	if result.Action == "status" || result.Action == "verify" {
+	// A completed uninstall leaves nothing to secure; only a deployment that is
+	// still installed (or a lifecycle stuck mid-transaction) reports why its
+	// security is not complete.
+	if report.Installed || report.TransactionPending {
 		addEnterpriseSecurityIncompleteReasons(result, report.TransactionPending)
 	}
 	if lifecycle && !report.OK && len(result.Errors) > firstError {
