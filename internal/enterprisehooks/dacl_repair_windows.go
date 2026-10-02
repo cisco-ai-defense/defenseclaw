@@ -8,6 +8,7 @@ package enterprisehooks
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -227,11 +228,16 @@ func repairWindowsTargetOwnedPathDACLNoFollow(
 	if err != nil {
 		return err
 	}
+	// Include OWNER_SECURITY_INFORMATION with the target SID so the bulldoze
+	// path above (which accepts admin ownership on the leaf) transfers the
+	// admin orphan ownership back to the target user. For files already
+	// owned by the target, this is idempotent. SeRestorePrivilege permits
+	// the owner write even when the DACL does not grant it.
 	if err := windows.SetSecurityInfo(
 		handle,
 		windows.SE_FILE_OBJECT,
-		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
-		nil,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		target,
 		nil,
 		acl,
 		nil,
@@ -291,7 +297,14 @@ func openWindowsGuardianACLChild(
 			windows.FILE_OPEN_FOR_BACKUP_INTENT,
 	)
 	if final {
-		access |= windows.WRITE_DAC | windows.FILE_READ_ATTRIBUTES
+		// WRITE_OWNER is included so the bulldoze path in the caller can
+		// transfer ownership from a trusted admin principal (SYSTEM /
+		// BUILTIN\Administrators / TrustedInstaller) to the target user SID
+		// when a prior install's elevated token left per-user runtime files
+		// Administrators-owned. SeRestorePrivilege (which the caller holds)
+		// permits the WRITE_OWNER acquisition even when the current DACL
+		// does not grant it.
+		access |= windows.WRITE_DAC | windows.WRITE_OWNER | windows.FILE_READ_ATTRIBUTES
 	} else {
 		access |= windows.FILE_READ_ATTRIBUTES | windows.FILE_LIST_DIRECTORY | windows.SYNCHRONIZE
 		options |= windows.FILE_DIRECTORY_FILE | windows.FILE_SYNCHRONOUS_IO_NONALERT
@@ -332,11 +345,27 @@ func validateWindowsGuardianACLHandle(
 		ownerOK = windowsEnterpriseProfileAnchorOwner(owner, target)
 	}
 	if !ownerOK {
-		return fmt.Errorf(
-			"owner SID %s is not trusted for target SID %s",
+		// Bulldoze: a prior unsigned certification install done under an
+		// elevated token (LocalSystem or BUILTIN\Administrators) can leave
+		// per-user runtime files owned by that admin principal instead of
+		// the target user SID. Those are the ONLY orphan owners that are
+		// trusted enough to transfer; a foreign user SID or a well-known
+		// group outside the admin set stays fatal. The caller's final
+		// SetSecurityInfo (with OWNER_SECURITY_INFORMATION added) transfers
+		// ownership to the target SID so subsequent reconciles see a
+		// canonical owner.
+		if !final || !windowsEnterpriseAdminIdentity(owner) {
+			return fmt.Errorf(
+				"owner SID %s is not trusted for target SID %s",
+				windowsSIDString(owner),
+				windowsSIDString(target),
+			)
+		}
+		fmt.Fprintf(os.Stderr,
+			"[enterprise-hooks] reclaiming admin-owned per-user runtime file "+
+				"(owner=%s, target=%s): transferring ownership to target SID\n",
 			windowsSIDString(owner),
-			windowsSIDString(target),
-		)
+			windowsSIDString(target))
 	}
 	if final {
 		// This query is bound to the exact no-follow handle that will receive
