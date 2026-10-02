@@ -2,10 +2,10 @@
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 # SPDX-License-Identifier: Apache-2.0
 #
-# defenseclaw-enterprise package: after removal, a deb purge also removes the
-# administrator config, protected credentials and state. The service account
-# is kept (removing it risks uid reuse); delete it deliberately if needed.
-# Only the machine directories go: each enrolled account's ~/.defenseclaw and
+# defenseclaw-enterprise package: the preremove uninstall already removed the
+# administrator config, protected credentials, state and the service
+# account; a deb purge also removes what a failed or skipped uninstall left
+# of the machine directories. Each enrolled account's ~/.defenseclaw and
 # per-user binaries stay, since the gateway that removes them as each account
 # is gone by now. Run `enterprise linux uninstall --purge` before the package
 # removal to remove those too.

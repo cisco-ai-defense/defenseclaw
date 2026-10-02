@@ -429,17 +429,21 @@ Add `--all` to also delete `~/.defenseclaw`. See
 
 | Goal | Command |
 | --- | --- |
-| Stop and remove the deployment. Keep the config, secrets, data and logs. | `defenseclaw-gateway enterprise linux uninstall --json` |
-| Also remove the config, secrets, data, logs and lifecycle state | `defenseclaw-gateway enterprise linux uninstall --purge --json` |
-| Also delete the `defenseclaw` account | `defenseclaw-gateway enterprise linux uninstall --purge --remove-service-account --json` |
+| Stop and remove the deployment, its config, secrets, data, logs, lifecycle state and the `defenseclaw` account. Each user keeps `~/.defenseclaw`. | `defenseclaw-gateway enterprise linux uninstall --json` |
+| Also remove each enrolled user's `~/.defenseclaw` and per-user binaries | `defenseclaw-gateway enterprise linux uninstall --purge --json` |
+| Keep the config, secrets, data and logs (and the account) for a reinstall | `defenseclaw-gateway enterprise linux uninstall --keep-state --json` |
+| Keep only the `defenseclaw` account | Add `--keep-service-account` |
 
 Run these as root from `/opt/defenseclaw/bin`. Uninstall removes each user's
 DefenseClaw hook registrations and DefenseClaw's own machine-policy entries
 first. Administrator entries in those files stay as they were.
 Each user keeps `~/.defenseclaw` unless you purge. With `--purge` it also
 stops each enrolled user's per-user gateway and removes all of that user's
-`~/.defenseclaw` and the per-user binaries and launcher links in
-`~/.local/bin`, and the result names every user it purged or left alone.
+`~/.defenseclaw`, the empty agent folders DefenseClaw created in that home,
+and the per-user binaries and launcher links in `~/.local/bin`, and the
+result names every user it purged or left alone. If uninstall reports an
+error, it keeps the deployment record, the config and the state, so you can
+fix the cause and rerun it.
 See [Uninstall](/docs/enterprise/lifecycle#uninstall).
 
 On a host installed from the package, `uninstall` leaves the package's
@@ -448,28 +452,26 @@ binaries and units in place, so dpkg or rpm still lists
 
 | Package command | Effect |
 | --- | --- |
-| `apt remove defenseclaw-enterprise` | Runs `uninstall`, then removes the package files. The config and state stay. |
-| `apt purge defenseclaw-enterprise` | Also deletes `/etc/defenseclaw`, `/var/lib/defenseclaw`, `/var/lib/defenseclaw-hook-guardian`, `/var/lib/defenseclaw-enterprise` and `/var/log/defenseclaw`. The `defenseclaw` account stays. |
-| `dnf remove defenseclaw-enterprise` | Runs `uninstall`, then removes the package files. RPM has no purge, so the config and state stay. |
+| `apt remove defenseclaw-enterprise` | Runs `uninstall`, then removes the package files. The config, state and the `defenseclaw` account go; each user keeps `~/.defenseclaw`. |
+| `apt purge defenseclaw-enterprise` | The same, and it also deletes what a failed uninstall left of `/etc/defenseclaw`, `/var/lib/defenseclaw`, `/var/lib/defenseclaw-hook-guardian`, `/var/lib/defenseclaw-enterprise` and `/var/log/defenseclaw`. |
+| `dnf remove defenseclaw-enterprise` | Runs `uninstall`, then removes the package files. The config, state and the `defenseclaw` account go; each user keeps `~/.defenseclaw`. |
 
-To remove everything from a package host, purge with the lifecycle first,
-while the binary still exists, then remove the package:
+If the package's `uninstall` reports a problem, its result stays in
+`/var/lib/defenseclaw-enterprise/last-package-result.json`.
+
+To remove everything from a package host, including each user's data,
+purge with the lifecycle first, while the binary still exists, then remove
+the package:
 
 ```bash
-sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux uninstall \
-  --purge --remove-service-account --json
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux uninstall --purge --json
 sudo apt purge defenseclaw-enterprise
 # RHEL and derivatives:
 # sudo dnf remove defenseclaw-enterprise
-# sudo rm -rf /var/lib/defenseclaw-enterprise
 ```
 
-On RHEL, the package's removal script writes its result to
-`/var/lib/defenseclaw-enterprise` again, and nothing removes it, so delete
-that folder last. On Debian and Ubuntu, `apt purge` removes it.
-
-On a tarball host, `uninstall --purge --remove-service-account` removes
-everything, including `/opt/defenseclaw`.
+On a tarball host, `uninstall --purge` removes everything, including
+`/opt/defenseclaw`.
 
 ## Upgrades and changes
 

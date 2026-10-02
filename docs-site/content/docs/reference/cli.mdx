@@ -546,8 +546,10 @@ Every mutating action is a transaction that rolls back on failure. See
 | `--adopt-existing` | install, ensure | Back up and take over an unmanaged DefenseClaw layout |
 | `--reason <text>` | ensure | Why `ensure` runs. Recorded in the result |
 | `--lock-wait <duration>` | install, upgrade, repair, reconcile, rotate-credentials, ensure, uninstall | Wait up to this long (default `5s`, at most `15m`) for another lifecycle run before exiting `75` |
-| `--purge` | uninstall | Also remove config, credentials, state, and logs, and each enrolled account's `~/.defenseclaw` and per-user binaries and launcher links in `~/.local/bin`, after stopping its per-user gateway and watchdog. The result names every account whose data it removed, and every account it left alone with the reason (home not trusted or not available, a hook removal that failed); fix the cause and rerun |
-| `--remove-service-account` | uninstall | With `--purge`, also delete the gateway service account |
+| `--purge` | uninstall | Also remove each enrolled account's `~/.defenseclaw`, the empty agent folders DefenseClaw created in its home, and its per-user binaries and launcher links in `~/.local/bin`, after stopping its per-user gateway and watchdog. The result names every account whose data it removed, and every account it left alone with the reason (home not trusted or not available, a hook removal that failed); fix the cause and rerun. Without `--purge`, uninstall already removes the config, credentials, state, logs and the service account |
+| `--keep-state` | uninstall | Keep the config, credentials, state, logs and the service account, so a reinstall resumes with them. Not with `--purge` |
+| `--keep-service-account` | uninstall | Keep the gateway service account, which uninstall deletes otherwise |
+| `--remove-service-account` | uninstall | Delete the gateway service account. This is the default now; the flag is kept for older scripts |
 | `--json` | all | Print the lifecycle result as JSON |
 
 Exit codes: `0` success or no-op, `1` failure (already rolled back), `2`

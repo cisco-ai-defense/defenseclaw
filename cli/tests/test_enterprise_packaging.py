@@ -883,3 +883,18 @@ cat "$DC_RESULT"
             continue
         validator = jsonschema.Draft202012Validator(json.loads(SCHEMA.read_text(encoding="utf-8")))
         assert not sorted(validator.iter_errors(document), key=str), shell
+
+
+# The removal script wrote its result into /var/lib/defenseclaw-enterprise
+# after the uninstall had removed it, so a clean package removal left that
+# folder behind. Only a removal that reports a problem keeps its result.
+@pytest.mark.parametrize("rc", [0, 1])
+def test_linux_preremove_keeps_its_result_only_when_the_uninstall_failed(tmp_path: Path, rc: int) -> None:
+    host = _Host(tmp_path, gateway_rc=rc)
+    result = host.run(_linux_scriptlet(host, "preremove.sh").replace("${TMPDIR:-/tmp}", str(tmp_path)), "remove")
+    assert result.returncode == 0, result.stderr
+    assert list(tmp_path.glob("defenseclaw-preremove.*")) == []
+    if rc:
+        assert (host.state / "last-package-result.json").is_file()
+    else:
+        assert not host.state.exists()

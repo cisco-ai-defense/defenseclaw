@@ -10,10 +10,16 @@
 # problem is reported and does not stop the package transaction.
 #
 # This uninstall never purges: dpkg passes "remove" here for both apt remove
-# and apt purge, and rpm has no purge. Each enrolled account keeps its
-# ~/.defenseclaw and per-user binaries. To remove those too, run
+# and apt purge, and rpm has no purge. It removes the machine state (config,
+# secrets, gateway and guardian state, logs, lifecycle state) and the
+# service account; each enrolled account keeps its ~/.defenseclaw and
+# per-user binaries. To remove those too, run
 # `defenseclaw-gateway enterprise linux uninstall --purge` before removing
 # the package; it names every account it purged or left alone.
+#
+# The result goes to a temporary file first: a removal that succeeds leaves
+# nothing behind, while one that reports a problem keeps its result in
+# /var/lib/defenseclaw-enterprise for the administrator.
 
 set -u
 case "${1:-}" in
@@ -25,9 +31,14 @@ gateway=/opt/defenseclaw/bin/defenseclaw-gateway
 state=/var/lib/defenseclaw-enterprise
 if [ -x "$gateway" ] && [ -d /run/systemd/system ]; then
     umask 077
-    mkdir -p "$state"
-    "$gateway" enterprise linux uninstall --json --lock-wait 10m >"$state/last-package-result.json" 2>"$state/last-package-result.log"
+    work=$(mktemp -d "${TMPDIR:-/tmp}/defenseclaw-preremove.XXXXXX") || exit 1
+    "$gateway" enterprise linux uninstall --json --lock-wait 10m >"$work/last-package-result.json" 2>"$work/last-package-result.log"
     status=$?
+    if [ "$status" != 0 ]; then
+        mkdir -p "$state" &&
+            mv -f "$work/last-package-result.json" "$work/last-package-result.log" "$state/"
+    fi
+    rm -rf "$work"
     if [ "$status" = 75 ]; then
         echo "defenseclaw-enterprise: another DefenseClaw lifecycle run held the lock for 10 minutes; nothing was removed. Retry the removal." >&2
         exit 1
