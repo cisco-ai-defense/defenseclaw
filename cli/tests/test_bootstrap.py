@@ -187,6 +187,31 @@ class BootstrapEnvTests(unittest.TestCase):
         self.assertEqual((missing.status, missing.detail), ("warn", "OpenClaw is not installed (openclaw is not on PATH)"))
         self.assertEqual(found.status, "pass")
 
+    def test_openclaw_first_run_adopts_openclaw_json_gateway_port(self):
+        # GAP-1778: init after `openclaw onboard --gateway-port 19347` kept
+        # gateway.port 18789, so the sidecar never reached OpenClaw.
+        from defenseclaw import bootstrap
+
+        cfg = _cfg_for(os.path.join(self._tmp.name, "dchome"))
+        cfg.claw.config_file = os.path.join(self._tmp.name, "oc", "openclaw.json")
+        os.makedirs(os.path.dirname(cfg.claw.config_file))
+        with open(cfg.claw.config_file, "w", encoding="utf-8") as fh:
+            json.dump({"gateway": {"mode": "local", "port": 19347}}, fh)
+        cfg.gateway.host = "127.0.0.1"
+        cfg.gateway.port = 18789
+        seen_ports = []
+
+        def fake_setup(app, save_config):
+            seen_ports.append(app.cfg.gateway.port)
+            return True, []
+
+        with patch("defenseclaw.commands.cmd_setup.execute_guardrail_setup", side_effect=fake_setup):
+            step = bootstrap._quiet_guardrail_setup(SimpleNamespace(cfg=cfg), "openclaw", verbose=False)
+        self.assertEqual(seen_ports, [19347], "the port must be adopted before setup saves the config")
+        self.assertEqual(cfg.gateway.port, 19347)
+        self.assertEqual(step.status, "pass", step.detail)
+        self.assertIn("OpenClaw gateway port 19347 from openclaw.json", step.detail)
+
     def test_opencode_readiness_honors_custom_config_dir(self):
         cfg = _cfg_for(os.path.join(self._tmp.name, "dchome"))
         config_home = os.path.join(self._tmp.name, "opencode-config")

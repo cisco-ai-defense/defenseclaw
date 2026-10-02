@@ -1575,6 +1575,19 @@ def _quiet_guardrail_setup(app, connector: str, *, verbose: bool) -> StepResult:
     # step used to skip with a warning that Readiness then contradicted (GAP-1523).
     buf = io.StringIO()
     sink = contextlib.nullcontext() if verbose else contextlib.redirect_stdout(buf)
+    port_note = ""
+    if connector == "openclaw":
+        # GAP-1778: first-run saved config.yaml before bootstrap_env ran, so
+        # its new-config port sync never applied and the sidecar dialed
+        # 18789 while OpenClaw listened where openclaw.json says. Adopt the
+        # port the same way `setup openclaw` does (GAP-1524).
+        from defenseclaw.commands.cmd_setup import _adopt_openclaw_gateway_port
+
+        port_before = app.cfg.gateway.port
+        with contextlib.redirect_stdout(io.StringIO()):
+            _adopt_openclaw_gateway_port(app)
+        if app.cfg.gateway.port != port_before:
+            port_note = f", OpenClaw gateway port {app.cfg.gateway.port} from openclaw.json"
     try:
         with sink:
             ok, warnings = execute_guardrail_setup(app, save_config=True)
@@ -1594,7 +1607,7 @@ def _quiet_guardrail_setup(app, connector: str, *, verbose: bool) -> StepResult:
             if hasattr(app.cfg.guardrail, "effective_hook_fail_mode")
             else app.cfg.guardrail.hook_fail_mode
         )
-        return StepResult("Guardrail", "pass", f"{connector}, mode={mode}, fail mode={fail_mode}")
+        return StepResult("Guardrail", "pass", f"{connector}, mode={mode}, fail mode={fail_mode}{port_note}")
     if ok:
         return StepResult("Guardrail", "warn", "; ".join(warnings), "defenseclaw doctor")
     return StepResult("Guardrail", "fail", "setup returned false", "defenseclaw setup guardrail")
