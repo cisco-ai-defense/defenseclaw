@@ -25,6 +25,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -115,6 +116,11 @@ type Service struct {
 	hostPlane *hostPlane
 	dnsCache  *dnscapture.Cache
 	dnsCap    dnscapture.Capturer
+
+	// hostPlaneTried and hostPlaneRetry belong to Run's goroutine: Run tried
+	// to start the host plane, and the last try could not reach the helper.
+	hostPlaneTried, hostPlaneRetry bool
+
 	// pollMu serializes Poll. The ticker and an operator-triggered scan can
 	// arrive together, and Poll mutates episodes and the lineage tracker
 	// without holding mu -- concurrent polls would race the map and can
@@ -292,14 +298,7 @@ func (s *Service) Run(ctx context.Context) error {
 		defer func() { _ = s.dnsCap.Close() }()
 	}
 	if s.hostPlane != nil {
-		// A host plane that cannot start is degraded coverage, not a fatal
-		// error: planes A and B still work, and the reason reaches the
-		// snapshot so an operator sees it rather than an empty row.
-		if err := s.hostPlane.start(ctx); err != nil {
-			s.mu.Lock()
-			s.hostPlaneStartErr = err.Error()
-			s.mu.Unlock()
-		}
+		s.startHostPlane(ctx)
 		defer func() { _ = s.hostPlane.close() }()
 	}
 	// Poll once immediately so a freshly enabled sensor has a snapshot before
@@ -313,9 +312,34 @@ func (s *Service) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
+			s.startHostPlane(ctx)
 			s.Poll(ctx)
 		}
 	}
+}
+
+// startHostPlane starts Plane C on Run's first pass and, while the sensor
+// helper could not be reached, on every later tick. A host plane that cannot
+// start is degraded coverage, not a fatal error: planes A and B still work,
+// and the reason reaches the snapshot so an operator sees it rather than an
+// empty row. During a package upgrade the gateway can start before the
+// sensor helper listens again; the first dial error then stayed until the
+// gateway restarted (GAP-1255). Other start failures (a refused local
+// source, a stream that ended later) are reported, not retried. Only Run
+// calls it, so the consumer runs on Run's context.
+func (s *Service) startHostPlane(ctx context.Context) {
+	if s.hostPlaneTried && !s.hostPlaneRetry {
+		return
+	}
+	s.hostPlaneTried = true
+	err := s.hostPlane.start(ctx)
+	s.hostPlaneRetry = errors.Is(err, acquire.ErrHelperUnreachable)
+	s.mu.Lock()
+	s.hostPlaneStartErr = ""
+	if err != nil {
+		s.hostPlaneStartErr = err.Error()
+	}
+	s.mu.Unlock()
 }
 
 // Poll runs one sampling cycle and replaces the snapshot.
