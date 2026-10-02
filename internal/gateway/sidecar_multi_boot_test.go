@@ -1639,6 +1639,86 @@ func TestSingleConnectorSwitchFailureRestoresExactPriorConnector(t *testing.T) {
 	}
 }
 
+// GAP-1803: after "setup remove cursor" leaves claudecode as the only
+// connector, claudecode is still the roster primary. The switch must tear
+// down every other previously active connector, not only a different
+// primary, or cursor keeps its hooks and lock entry and readiness fails with
+// "contract lock peer is not inactive".
+func TestSingleConnectorSwitchTearsDownRemovedPeerBesideSurvivingPrimary(t *testing.T) {
+	s := multiBootSidecar(t)
+	s.cfg.DataDir = testenv.PrivateTempDir(t)
+	s.cfg.Guardrail.Enabled = true
+	s.cfg.Guardrail.Mode = "observe"
+	s.cfg.Guardrail.Connector = "claudecode"
+	s.cfg.Guardrail.Connectors = nil
+	s.health = NewSidecarHealth()
+	removedArtifact := filepath.Join(testenv.PrivateTempDir(t), "removed-cursor-posture")
+	removed := &registrationPostureConnector{bootStubConnector: bootStubConnector{
+		stubConnector: stubConnector{name: "cursor"},
+		artifactPath:  removedArtifact,
+	}}
+	survivor := &registrationPostureConnector{bootStubConnector: bootStubConnector{
+		stubConnector: stubConnector{name: "claudecode"},
+		artifactPath:  filepath.Join(testenv.PrivateTempDir(t), "survivor-claude-posture"),
+	}}
+	registry := connector.NewRegistry()
+	registry.RegisterBuiltin(removed)
+	registry.RegisterBuiltin(survivor)
+
+	removedEntry := connector.NewHookContractLockEntry(connector.SetupOpts{
+		DataDir:        s.cfg.DataDir,
+		GuardrailMode:  "action",
+		HookFailMode:   "closed",
+		AgentVersion:   "cursor-agent 2026.07.23-e383d2b",
+		HookContractID: "cursor-hooks-v1",
+	}, removed, "prior-test-build")
+	if err := connector.SaveHookContractLockEntry(s.cfg.DataDir, removedEntry); err != nil {
+		t.Fatal(err)
+	}
+	survivorEntry := connector.NewHookContractLockEntry(connector.SetupOpts{DataDir: s.cfg.DataDir, GuardrailMode: "action"}, survivor, "prior-test-build")
+	if err := connector.SaveHookContractLockEntry(s.cfg.DataDir, survivorEntry); err != nil {
+		t.Fatal(err)
+	}
+	if err := connector.SaveActiveConnectors(s.cfg.DataDir, []string{"claudecode", "cursor"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := connector.LoadActiveConnector(s.cfg.DataDir); got != "claudecode" {
+		t.Fatalf("roster primary = %q, want the surviving claudecode", got)
+	}
+	if err := os.WriteFile(removedArtifact, []byte("action|hilt=false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	survivorOpts := mustConnectorSetupOpts(
+		t, s, survivor, "synthetic gateway token", "127.0.0.1:0", "127.0.0.1:0",
+	)
+	authority, err := captureSingleConnectorRollbackAuthority(survivorOpts, survivor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.teardownPreviousConnectorTransaction(
+		context.Background(), registry, survivor,
+		"synthetic gateway token", "127.0.0.1:0", "127.0.0.1:0", "synthetic master key",
+		&authority,
+	); err != nil {
+		t.Fatalf("transactional peer teardown: %v", err)
+	}
+	if len(authority.removed) != 1 || authority.removed[0].conn.Name() != "cursor" {
+		t.Fatalf("captured removed authority = %+v, want the removed Cursor peer", authority.removed)
+	}
+	if removed.teardownCalls != 1 || survivor.teardownCalls != 0 {
+		t.Fatalf("teardown calls cursor=%d claudecode=%d, want 1 and 0", removed.teardownCalls, survivor.teardownCalls)
+	}
+	if _, err := os.Stat(removedArtifact); !os.IsNotExist(err) {
+		t.Fatalf("removed Cursor kept its runtime artifact: %v", err)
+	}
+	if lock := connector.LoadHookContractLockEntry(s.cfg.DataDir, "cursor"); lock.Connector != "" {
+		t.Fatalf("removed Cursor kept its lock entry: %+v", lock)
+	}
+	if lock := connector.LoadHookContractLockEntry(s.cfg.DataDir, "claudecode"); lock.Connector == "" {
+		t.Fatal("surviving claudecode lost its lock entry")
+	}
+}
+
 func TestSingleConnectorSwitchOpenCodeSnapshotFailureLeavesPriorConnectorUntouched(t *testing.T) {
 	s := multiBootSidecar(t)
 	s.cfg.DataDir = testenv.PrivateTempDir(t)

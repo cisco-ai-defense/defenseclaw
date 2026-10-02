@@ -4933,28 +4933,40 @@ func (s *Sidecar) teardownPreviousConnectorTransaction(
 	if transaction == nil || transaction.hookLockState == nil {
 		return errors.New("single-connector switch requires captured rollback authority")
 	}
-	previousName := connector.LoadActiveConnector(s.currentConfig().DataDir)
-	if strings.TrimSpace(previousName) == "" ||
-		strings.EqualFold(strings.TrimSpace(previousName), strings.TrimSpace(requested.Name())) {
+	// Every connector of the previous roster that is not the requested one
+	// is removed by this switch, not only the primary: after a
+	// multi-connector install drops to one connector ("setup remove codex",
+	// "setup <connector> --replace") the primary is often the survivor, and
+	// the removed peers kept their hooks and lock entries (GAP-1803).
+	var previousNames []string
+	for _, name := range connector.LoadActiveConnectors(s.currentConfig().DataDir) {
+		name = strings.TrimSpace(name)
+		if name == "" || strings.EqualFold(name, strings.TrimSpace(requested.Name())) {
+			continue
+		}
+		if registry != nil {
+			if _, known := registry.Get(name); !known && connectorDroppable(registry, name) {
+				// The previous connector is not shipped by this build, so there
+				// is no prior registration this switch could restore. Drop its
+				// lock state; requested Setup then publishes the new active
+				// roster. A name a plugin may still provide falls through to the
+				// strict rollback-authority check below.
+				if err := retireOrDropUnregisteredConnector(ctx, registry, s.currentConfig().DataDir, name, "previous", nil); err != nil {
+					return err
+				}
+				s.auditDroppedConnectorState(name, "previous")
+				continue
+			}
+		}
+		previousNames = append(previousNames, name)
+	}
+	if len(previousNames) == 0 {
 		return nil
 	}
-	if registry != nil {
-		if _, known := registry.Get(strings.TrimSpace(previousName)); !known && connectorDroppable(registry, previousName) {
-			// The previous connector is not shipped by this build, so there is
-			// no prior registration this switch could restore. Drop its lock
-			// state; requested Setup then publishes the new active roster.
-			// A name a plugin may still provide falls through to the strict
-			// rollback-authority check below.
-			if err := retireOrDropUnregisteredConnector(ctx, registry, s.currentConfig().DataDir, strings.TrimSpace(previousName), "previous", nil); err != nil {
-				return err
-			}
-			s.auditDroppedConnectorState(strings.TrimSpace(previousName), "previous")
-			return nil
-		}
-	}
+	previousName := strings.Join(previousNames, ", ")
 	candidates, unavailable := s.removedConnectorRollbackCandidates(
 		registry,
-		[]string{previousName},
+		previousNames,
 		[]string{requested.Name()},
 		apiToken,
 		proxyAddr,
@@ -4962,7 +4974,7 @@ func (s *Sidecar) teardownPreviousConnectorTransaction(
 		masterKey,
 		transaction.hookLockState,
 	)
-	if len(unavailable) > 0 || len(candidates) != 1 {
+	if len(unavailable) > 0 || len(candidates) != len(previousNames) {
 		return fmt.Errorf(
 			"refuse connector switch %s to %s without complete prior-registration rollback authority",
 			previousName,
@@ -4970,7 +4982,7 @@ func (s *Sidecar) teardownPreviousConnectorTransaction(
 		)
 	}
 	removed, failed := teardownRemovedConnectorCandidates(candidates, ctx)
-	if len(failed) > 0 || len(removed) != 1 {
+	if len(failed) > 0 || len(removed) != len(previousNames) {
 		// Teardown may have partially changed the old registration. Reapply the
 		// captured candidate before returning, without touching the requested
 		// connector because its Setup has not run yet.
