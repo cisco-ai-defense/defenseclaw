@@ -478,6 +478,9 @@ if [[ "${ROLLBACK}" == true ]]; then
     restart="${was_running}"
     [[ "$(cat "${PREVIOUS}/GATEWAY_WAS_RUNNING" 2>/dev/null)" == true ]] && restart=true
     stop_gateway "${BIN_DIR}/defenseclaw-gateway" || die "The gateway did not stop; nothing was changed"
+    if [[ -n "${current}" ]] && version_lt "${back_to}" 1.0.0 && ! version_lt "${current}" 1.0.0; then
+        remove_connector_registrations_for_legacy
+    fi
     swapped=0
     swap_with_previous || swapped=$?
     if [[ "${swapped}" -ne 0 ]]; then
@@ -1400,6 +1403,34 @@ swap_with_previous() {
     date +%Y%m%dT%H%M%S > "${hold}/ROLLED_BACK"
     rm -rf "${PREVIOUS}"
     mv "${hold}" "${PREVIOUS}"
+}
+
+# A 0.x release does not know the agent-side registrations 1.0 writes (hook
+# entries with --event, the OpenCode plugin, the Hermes rendering), so its
+# gateway adds its own next to them and runs every hook twice (GAP-1521).
+# Remove them with this install's own teardown before the swap; the restored
+# gateway registers its own when it starts. active_connector.json is put back,
+# so the data kept for a roll forward still names the same connectors.
+remove_connector_registrations_for_legacy() {
+    local state="${DEFENSECLAW_HOME}/active_connector.json" gateway="${BIN_DIR}/defenseclaw-gateway" saved name names
+    [[ -f "${state}" && -x "${VENV}/bin/python" && -x "${gateway}" ]] || return 0
+    names="$("${VENV}/bin/python" -I - "${state}" <<'PY' 2>/dev/null
+import json, re, sys
+state = json.load(open(sys.argv[1], encoding="utf-8"))
+names = state.get("names") or [state.get("name")]
+print(" ".join(n for n in names if isinstance(n, str) and re.fullmatch(r"[a-z0-9_-]+", n) and n != "openclaw"))
+PY
+)" || return 0
+    [[ -n "${names}" ]] || return 0
+    saved="$(mktemp)" || return 0
+    cp -p "${state}" "${saved}" || { rm -f "${saved}"; return 0; }
+    info "Removing the connector registrations of DefenseClaw ${current}; ${back_to} writes its own when its gateway starts"
+    for name in ${names}; do
+        "${gateway}" connector teardown --connector "${name}" >>"${LOG}" 2>&1 \
+            || warn "Could not remove the ${name} registrations of DefenseClaw ${current}; ${back_to} may run its ${name} hooks twice until you run: defenseclaw setup ${name}"
+    done
+    cp -p "${saved}" "${state}" || warn "Could not restore ${state}; run 'defenseclaw init' if a roll forward leaves a connector unguarded"
+    rm -f "${saved}"
 }
 
 # The gateway writes the OpenClaw plugin when it starts; OpenClaw loads it only
