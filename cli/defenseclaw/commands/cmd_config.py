@@ -534,8 +534,8 @@ def _plain_v8_issue(raw: bytes | None, field_path: str, reason: str) -> str:
         save = env or "<NAME>"
         return (
             f"{where}{field} needs {needs}, which has no value in the environment or the DefenseClaw "
-            f".env file. Save it with: defenseclaw keys set {save} (setup commands check the whole "
-            "file, including the ones that remove this destination)"
+            f".env file. Save it with: defenseclaw keys set {save}. Until it is set, setup commands "
+            "refuse to run, including the one that removes this destination"
         )
 
     parts = [

@@ -200,6 +200,39 @@ class TestCodexOtelAlignment(unittest.TestCase):
         self.assertEqual(result.checks[1]["status"], "fail")
         self.assertIn("telemetry state is 'stopped'", result.checks[1]["detail"])
 
+    def test_audit_write_failure_is_not_a_codex_failure(self) -> None:
+        # GAP-1927: a full audit disk already FAILs its own rows.
+        payload = {
+            "runtime": {"environment": "linux"},
+            "health": {
+                "telemetry": {
+                    "state": "error",
+                    "details": {
+                        "event_history_failure": "sqlite_write_failed",
+                        "event_history_last_sqlite_class": "full",
+                    },
+                }
+            },
+        }
+        with tempfile.TemporaryDirectory() as home, patch.dict(
+            os.environ,
+            {"CODEX_HOME": home},
+            clear=False,
+        ), patch(
+            "defenseclaw.commands.cmd_doctor._http_probe",
+            return_value=(200, json.dumps(payload)),
+        ):
+            self._write_codex_config(home, '[otel]\nenvironment = "linux"\n')
+            result = _DoctorResult()
+            _check_codex_otel_alignment(self._cfg("linux"), result)
+
+        row = result.checks[1]
+        self.assertEqual(row["status"], "warn")
+        self.assertNotIn("but telemetry state is", row["detail"])
+        self.assertIn("settings are correct", row["detail"])
+        self.assertIn("disk holding the audit database is full", row["detail"])
+        self.assertIn("audit storage", row["remediation"])
+
 
 from defenseclaw.rulepack_validation import (
     RulePackValidationBridgeError,
