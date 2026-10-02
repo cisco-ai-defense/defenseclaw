@@ -225,6 +225,8 @@ func (adapter *ProjectedTraceAdapter) deliverHTTP(
 		return failedResult(delivery.OutcomeTransient, httpStatusFailureCode(response.StatusCode))
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		logHTTPRejection(adapter.destination, observability.SignalTraces, response, spanCount,
+			distinctSpanNames(projected.Request))
 		return failedResult(delivery.OutcomePermanentPayload, httpStatusFailureCode(response.StatusCode))
 	}
 	body, readErr := io.ReadAll(io.LimitReader(response.Body, maxTraceResponseBodyBytes+1))
