@@ -432,6 +432,9 @@ class TestClaudeCodeWrites:
         with pytest.raises(connector_paths.MCPServerNotRemovedError, match="claude mcp remove deepwiki -s user"):
             unset_mcp_server("claudecode", "deepwiki")
         assert "deepwiki" in json.loads(settings.read_text(encoding="utf-8"))["mcpServers"]
+        # A second unset (the entry is now released) must still say so.
+        with pytest.raises(connector_paths.MCPServerNotRemovedError, match="claude mcp remove deepwiki -s user"):
+            unset_mcp_server("claudecode", "deepwiki")
 
     @pytest.mark.parametrize("first_unset", ["first", "second"])
     def test_multiple_managed_servers_restore_only_after_last_unset(
@@ -713,7 +716,9 @@ class TestClaudeCodeWrites:
         unset_mcp_server("claudecode", "demo")
         assert settings.read_bytes() == original
         assert _claude_released_names(data_home) == {"demo"}
-        unset_mcp_server("claudecode", "demo")
+        # The operator's own entry stays, and a repeat unset says so (GAP-1400).
+        with pytest.raises(connector_paths.MCPServerNotRemovedError, match="no longer owns"):
+            unset_mcp_server("claudecode", "demo")
         assert settings.read_bytes() == original
         assert _claude_released_names(data_home) == {"demo"}
 
@@ -787,10 +792,14 @@ class TestClaudeCodeWrites:
             "_finalize_claude_mcp_transaction",
             finalize,
         )
-        unset_mcp_server("claudecode", "demo")
+        # Recovery restores the operator's entry; it stays, and unset says so
+        # rather than report it removed (GAP-1400).
+        with pytest.raises(connector_paths.MCPServerNotRemovedError, match="no longer owns"):
+            unset_mcp_server("claudecode", "demo")
         assert settings.read_bytes() == original
         assert _claude_released_names(data_home) == {"demo"}
-        unset_mcp_server("claudecode", "demo")
+        with pytest.raises(connector_paths.MCPServerNotRemovedError, match="no longer owns"):
+            unset_mcp_server("claudecode", "demo")
         assert settings.read_bytes() == original
 
     def test_native_publication_race_preserves_operator_bytes(self, tmp_path, monkeypatch):
@@ -1854,7 +1863,7 @@ class TestClaudeCodeWrites:
         os.replace(replacement, settings)
 
         # GAP-1400: the replaced file keeps the entry, and the unset says so.
-        with pytest.raises(connector_paths.MCPServerNotRemovedError, match="no longer owns the entry"):
+        with pytest.raises(connector_paths.MCPServerNotRemovedError, match="no longer owns"):
             unset_mcp_server("claudecode", "demo")
 
         assert settings.exists()

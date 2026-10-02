@@ -7740,6 +7740,16 @@ def _unset_claude_without_state(
     return True
 
 
+def _raise_claude_mcp_not_removed(path: str, name: str, data: dict[str, Any]) -> None:
+    servers = data.get("mcpServers")
+    if isinstance(servers, dict) and name in servers:
+        raise MCPServerNotRemovedError(
+            f"DefenseClaw no longer owns {name!r} in {path} (Claude Code rewrote the file as it ran, "
+            "or the entry was there before DefenseClaw wrote it), so it left the entry in place; "
+            f"remove it with: claude mcp remove {name} -s user"
+        )
+
+
 def _unset_claudecode_mcp_server(path: str, name: str) -> bool:
     with _locked_claude_mcp_mutation(path):
         state, released = _recover_claude_mcp_transaction(
@@ -7749,6 +7759,10 @@ def _unset_claudecode_mcp_server(path: str, name: str) -> bool:
         raw = _read_regular_bytes_if_present(path)
         data = _parse_claude_settings(path, raw)
         if name in released:
+            # DefenseClaw released this entry earlier (the file was rewritten,
+            # or it was the operator's before DefenseClaw wrote it). A repeat
+            # unset must not report it removed while it is still there (GAP-1400).
+            _raise_claude_mcp_not_removed(path, name, data)
             return False
         if state is None:
             return _unset_claude_without_state(path, name, raw, data, released)
@@ -7777,13 +7791,7 @@ def _unset_claudecode_mcp_server(path: str, name: str) -> bool:
                 # The file changed since DefenseClaw wrote the entry, so it
                 # is no longer DefenseClaw's to remove (GAP-1400): say so
                 # rather than let the caller report it removed.
-                servers = data.get("mcpServers")
-                if isinstance(servers, dict) and name in servers:
-                    raise MCPServerNotRemovedError(
-                        f"{path} changed after DefenseClaw added {name!r} (Claude Code rewrites it as it runs), "
-                        "so DefenseClaw no longer owns the entry and left it in place; "
-                        f"remove it with: claude mcp remove {name} -s user"
-                    )
+                _raise_claude_mcp_not_removed(path, name, data)
                 return False
             return _unset_claude_without_state(path, name, raw, data, released)
 
