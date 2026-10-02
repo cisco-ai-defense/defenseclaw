@@ -120,10 +120,23 @@ def inspect_doctor_config_load_failure(load_error: BaseException) -> DoctorStart
             f"config validate passes, but config.yaml still could not be loaded "
             f"({loader_detail}); nothing was changed. {remediation}"
         )
-    else:
-        detail = (
-            "config.yaml could not be loaded, so doctor stopped at the config "
-            f"checks; nothing was changed or repaired. {remediation}"
+        checks.append(DoctorStartupCheck("fail", "Config load", detail))
+        return DoctorStartupDiagnostics(tuple(checks), remediation)
+    if parse_error or getattr(validation, "errors", None):
+        # The rows above already name the problem and its fix; this row only
+        # says why the other checks did not run, and counts no second failure
+        # (GAP-1692).
+        checks.append(
+            DoctorStartupCheck(
+                "skip",
+                "Config load",
+                "not loaded, so doctor stopped at the config checks; nothing was changed or repaired",
+            )
         )
+        return DoctorStartupDiagnostics(tuple(checks), "Fix the config problem above, then rerun 'defenseclaw doctor'.")
+    detail = (
+        "config.yaml could not be loaded, so doctor stopped at the config "
+        f"checks; nothing was changed or repaired. {remediation}"
+    )
     checks.append(DoctorStartupCheck("fail", "Config load", detail))
     return DoctorStartupDiagnostics(tuple(checks), remediation)

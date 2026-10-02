@@ -1204,7 +1204,14 @@ def _check_config(cfg, r: _DoctorResult) -> None:
             r=r,
             check_id="doctor.config.canonical-v8",
             reason_code="canonical-validation-failed",
-            remediation="defenseclaw config validate",
+            # Not `config validate`: it prints the same line again (GAP-1662).
+            # A refusal outside the file (the validator could not run) keeps
+            # the step its detail names.
+            remediation=(
+                "correct config.yaml as shown, then rerun `defenseclaw doctor`"
+                if exc.field_path
+                else "do the step shown, then rerun `defenseclaw doctor`"
+            ),
         )
         return
     if validation.valid is not True:
@@ -5361,6 +5368,16 @@ def _cursor_health_row(document: str) -> dict[str, object] | None:
 
 
 
+def _opencode_runtime_remediation(status: str, runtime_detail: str) -> str:
+    """Next step for the OpenCode hooks row's runtime-load warning."""
+    if status != "warn":
+        return ""
+    if "the gateway is not running" in runtime_detail:
+        # Starting OpenCode cannot help until the gateway runs (GAP-1712).
+        return "start the gateway with `defenseclaw-gateway start`, then rerun `defenseclaw doctor`"
+    return "start OpenCode (restart it if it is open) so it loads the plugin, then rerun `defenseclaw doctor`"
+
+
 def _opencode_load_heartbeat_status(cfg) -> tuple[str, str]:
     """Report whether the managed OpenCode bridge actually loaded.
 
@@ -6919,12 +6936,7 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
                             label,
                             f"plugin installed at {path} (digest current); {runtime_detail}",
                             r=r,
-                            remediation=(
-                                "start OpenCode (restart it if it is open) so it loads the plugin, "
-                                "then rerun 'defenseclaw doctor'"
-                                if status == "warn"
-                                else ""
-                            ),
+                            remediation=_opencode_runtime_remediation(status, runtime_detail),
                         )
             elif connector == "hermes":
                 if not r.passive and _hermes_host_running() is False:
@@ -8678,6 +8690,14 @@ def _check_cisco_ai_defense(cfg, r: _DoctorResult) -> None:
         _emit_aid_hint(f"endpoint: {endpoint}")
 
 
+def _config_validation_failed(r: _DoctorResult) -> bool:
+    """True once this run's Config validation row reported a failure."""
+    return any(
+        check.get("check_id") == "doctor.config.canonical-v8" and check.get("status") == "fail"
+        for check in r.checks
+    )
+
+
 def _check_observability(cfg, r: _DoctorResult, *, live_health: dict | None = None) -> None:
     """Inspect v8 status and exercise each enabled Galileo runtime route."""
     from defenseclaw.config import config_path_for_data_dir
@@ -8694,6 +8714,16 @@ def _check_observability(cfg, r: _DoctorResult, *, live_health: dict | None = No
         _emit("warn", "Observability v8 effective plan", f"{exc}; re-run defenseclaw doctor", r=r)
         return
     except (ConfigInspectError, V8ConfigError, ValueError) as exc:
+        if _config_validation_failed(r):
+            # The Config validation row already names the field and its fix;
+            # one bad value is one failure (GAP-1662).
+            _emit(
+                "skip",
+                "Observability v8 effective plan",
+                "not evaluated until config.yaml validates (see the Config validation row above)",
+                r=r,
+            )
+            return
         _emit("fail", "Observability v8 effective plan", str(exc), r=r)
         return
     except OSError as exc:
@@ -11642,7 +11672,9 @@ def _check_connector_inventory(
         existing = sum(1 for d in sdirs if os.path.isdir(d))
         detail = f"{existing}/{len(sdirs)} present — " + ", ".join(sdirs)
         if existing == 0:
-            _emit("warn", "Skill paths", detail, r=r)
+            # The agent creates its skill folder with the first skill, so a
+            # missing folder is normal, not a warning (GAP-1814).
+            _emit("skip", "Skill paths", f"{detail} (no skills installed yet; nothing to do)", r=r)
         else:
             _emit("pass", "Skill paths", detail, r=r)
     else:
