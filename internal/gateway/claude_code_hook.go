@@ -914,7 +914,7 @@ func (a *APIServer) scanClaudeCodeEventFile(ctx context.Context, req claudeCodeH
 	return &ToolInspectVerdict{
 		Action:   action,
 		Severity: string(maxSeverity),
-		Reason:   fmt.Sprintf("CodeGuard found %d finding(s) in Claude Code %s file", len(findings), req.HookEventName),
+		Reason:   codeGuardHookReason(claudeCodeCodeGuardEventPlace(req.HookEventName), findings),
 		Findings: findings,
 	}
 }
@@ -968,7 +968,7 @@ func (a *APIServer) scanClaudeCodeChangedFiles(ctx context.Context, req claudeCo
 	return &ToolInspectVerdict{
 		Action:   action,
 		Severity: string(maxSeverity),
-		Reason:   fmt.Sprintf("CodeGuard found %d finding(s) in Claude Code changed files", len(findings)),
+		Reason:   codeGuardHookReason(codeGuardPlaceClaudeChanged, findings),
 		Findings: findings,
 	}
 }
