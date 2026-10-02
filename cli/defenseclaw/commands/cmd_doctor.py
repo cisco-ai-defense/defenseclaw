@@ -1153,10 +1153,14 @@ def _check_config(cfg, r: _DoctorResult) -> None:
     try:
         validation = inspect_v8_config("validate", config_path=cfg_path)
     except ConfigInspectError as exc:
+        from defenseclaw.commands.cmd_config import _v8_failure_detail
+
         _emit(
             "fail",
             "Config validation",
-            str(exc),
+            # The same plain line, field and next step as config validate
+            # (GAP-1499), not the wire record.
+            _v8_failure_detail(cfg_path, exc),
             r=r,
             check_id="doctor.config.canonical-v8",
             reason_code="canonical-validation-failed",

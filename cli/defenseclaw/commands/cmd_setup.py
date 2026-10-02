@@ -27,6 +27,7 @@ import http.client
 import json as _json
 import os
 import queue
+import re
 import secrets
 import shutil
 import socket
@@ -14127,8 +14128,11 @@ def _restart_openclaw_gateway() -> bool:
             text=True,
             timeout=60,
         )
-        output = f"{result.stdout or ''}\n{result.stderr or ''}"
-        if result.returncode == 0 and "service not loaded" in output.lower():
+        output = f"{result.stdout or ''}\n{result.stderr or ''}".lower()
+        if result.returncode == 0 and (
+            "openclaw gateway install" in output
+            or re.search(r"service (?:is )?not (?:loaded|enabled|installed|registered|found)", output)
+        ):
             # OpenClaw exits 0 but restarted nothing: there is no installed
             # gateway service (for example a foreground `openclaw gateway`).
             # Don't claim a restart happened (GAP-1408).

@@ -145,6 +145,13 @@ class TestRestartFailsClosed(unittest.TestCase):
             text = buf.getvalue()
         self.assertNotIn("✓", text)
         self.assertIn("no OpenClaw gateway service", text)
+        # Linux (systemd) words it differently (GAP-1408 on RHEL).
+        done.stdout = "Gateway service not enabled.\n"
+        with patch("defenseclaw.commands.cmd_setup.subprocess.run", return_value=done):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                _restart_openclaw_gateway()
+        self.assertNotIn("✓", buf.getvalue())
 
     def test_gap1470_rollback_to_empty_roster_skips_openclaw(self):
         from types import SimpleNamespace
