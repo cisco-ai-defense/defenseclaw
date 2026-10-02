@@ -778,6 +778,9 @@ func recordBinaries(env *Env, record *Deployment) map[string]string {
 func (l *lifecycle) configBytes() (data []byte, fromInstalled bool, err error) {
 	env := l.env
 	if l.opts.ConfigFile != "" {
+		if err := trustedInputFile(l.opts.ConfigFile, "--config"); err != nil {
+			return nil, false, err
+		}
 		data, err = readBounded(l.opts.ConfigFile, maxInputBytes)
 		return data, false, err
 	}
