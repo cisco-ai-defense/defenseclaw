@@ -920,7 +920,7 @@ func (rp *RulePack) validateRuleFiles() error {
 				}
 				program, code := compiler.Compile(rule.Expression)
 				if code != semantic.CompileOK {
-					return rulePackErr(rel, "semantic_"+string(code), semanticCompileReason(ruleIndex, code))
+					return rulePackErr(rel, "semantic_"+string(code), semanticCompileReason(ruleFieldLabel(ruleIndex, ruleID), code))
 				}
 				if rule.Enabled == nil || *rule.Enabled {
 					semanticCost += program.StaticCost()
@@ -1455,19 +1455,42 @@ func (rp *RulePack) String() string {
 const semanticRuleStaticCostLimit uint64 = 6_000_000
 
 // semanticCompileReason explains a refused semantic expression without
-// echoing it. The cost refusals name the limit and how to get under it; an
-// author otherwise saw only "rule N expression is invalid".
-func semanticCompileReason(ruleIndex int, code semantic.CompileCode) string {
+// echoing it. The cost refusals name the limit and how to get under it; the
+// other codes say what kind of problem it is. An author used to see only
+// "rule 0 expression is invalid" (GAP-1898). label names the rule by id and
+// entry (ruleFieldLabel).
+func semanticCompileReason(label string, code semantic.CompileCode) string {
 	switch code {
 	case semantic.CompileStaticCost:
-		return fmt.Sprintf("rule %d expression's estimated worst-case evaluation cost is above the per-rule limit of %d "+
+		return fmt.Sprintf("%s expression's estimated worst-case evaluation cost is above the per-rule limit of %d "+
 			"(lists and strings are costed at their maximum sizes); a list macro (exists, all, map, filter) nested inside "+
 			"another multiplies the cost, so test one list, prefer ==, in or startsWith over contains or matches inside "+
-			"a nested macro, or split the check into separate rules", ruleIndex, semanticRuleStaticCostLimit)
+			"a nested macro, or split the check into separate rules", label, semanticRuleStaticCostLimit)
 	case semantic.CompileStaticCostUnbounded:
-		return fmt.Sprintf("rule %d expression has no bounded worst-case evaluation cost (it uses a value whose size "+
-			"cannot be bounded); test the rule-pack fields directly", ruleIndex)
-	default:
-		return fmt.Sprintf("rule %d expression is invalid", ruleIndex)
+		return fmt.Sprintf("%s expression has no bounded worst-case evaluation cost (it uses a value whose size "+
+			"cannot be bounded); test the rule-pack fields directly", label)
 	}
+	if why, ok := semanticCompileProblems[code]; ok {
+		return fmt.Sprintf("%s expression is invalid: %s", label, why)
+	}
+	return fmt.Sprintf("%s expression is invalid", label)
+}
+
+// semanticCompileProblems describes each refused-expression code in words.
+var semanticCompileProblems = map[semantic.CompileCode]string{
+	semantic.CompileExpressionEncoding: "it is not valid UTF-8",
+	semantic.CompileExpressionSize:     "it is too long",
+	semantic.CompileSyntax:             "it has a syntax error",
+	semantic.CompileASTNodes:           "it has too many terms; split it into separate rules",
+	semantic.CompileASTDepth:           "it is nested too deeply; split it into separate rules",
+	semantic.CompileType: "it does not type-check: it names something that is not a rule-pack field or function, " +
+		"or compares values of different types (quote string literals, for example \"rm\")",
+	semantic.CompileResultType:         "it must evaluate to true or false",
+	semantic.CompileSurface:            "it uses a field or function that rule-pack expressions don't allow",
+	semantic.CompileEnumDomain:         "it compares a field with a value that field never has",
+	semantic.CompileComprehensionDepth: "it nests list macros (exists, all, map, filter) too deeply",
+	semantic.CompileRegexForm:          "call matches() on a string with one pattern argument",
+	semantic.CompileRegexDynamic:       "the matches() pattern must be a string literal",
+	semantic.CompileRegexSize:          "the matches() pattern is too long",
+	semantic.CompileRegexSyntax:        "the matches() pattern is not a valid RE2 regular expression",
 }

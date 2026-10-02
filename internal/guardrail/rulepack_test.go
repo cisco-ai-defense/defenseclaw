@@ -907,3 +907,18 @@ func TestRulePackDirectoryUnreadableNamesTheReason(t *testing.T) {
 		t.Fatalf("unknown error = %+v", other)
 	}
 }
+
+// GAP-1898: a refused expression names the rule by id and entry and says
+// what is wrong, without echoing the expression.
+func TestLoadRulePackNamesTheInvalidSemanticRule(t *testing.T) {
+	dir := t.TempDir()
+	body := strings.Replace(validRulesYAML("custom", "R4-MARKER-BLOCK"), "    title:",
+		"    tool_call_only: true\n    expression: 'f.commands.exists(c, dccert-block-marker in c.argv)'\n    title:", 1)
+	writeRulePackFile(t, dir, "rules/custom.yaml", body)
+	_, err := LoadRulePack(dir)
+	packErr := requireRulePackError(t, err, "semantic_type")
+	if !strings.HasPrefix(packErr.Reason, "rule R4-MARKER-BLOCK (entry 1) expression is invalid: it does not type-check") ||
+		!strings.Contains(packErr.Reason, "quote string literals") || strings.Contains(packErr.Reason, "dccert") {
+		t.Fatalf("reason = %q", packErr.Reason)
+	}
+}
