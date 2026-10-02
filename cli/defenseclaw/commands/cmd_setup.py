@@ -8576,6 +8576,7 @@ def _rollback_failed_connector_application(
                 f"failed-generation hook authority unavailable [{_setup_runtime_ref(type(exc).__name__)}]"
             )
     restore_complete = True
+    gateway_still_down = False
     try:
         _restore_setup_config_snapshot(
             app,
@@ -8653,7 +8654,11 @@ def _rollback_failed_connector_application(
                 secret_rollback_failed = True
             elif not isinstance(exc, Exception):
                 raise
-            if not _secret_safe:
+            if not _secret_safe and not exact_runtime and str(exc) == str(cause):
+                # GAP-1139: the restored config is in place; the gateway
+                # cannot start for the same reason the setup failed.
+                gateway_still_down = True
+            elif not _secret_safe:
                 detail = (
                     f"restore prior gateway lifecycle [{_setup_runtime_ref(type(exc).__name__)}]"
                     if exact_runtime
@@ -8695,11 +8700,15 @@ def _rollback_failed_connector_application(
         raise _GuardrailSecretFailure(failure_code) from None
 
     cause_text = f"[ref {_setup_runtime_ref(type(cause).__name__)}]" if exact_runtime else f"({cause})"
-    outcome = (
-        "rollback was incomplete: " + "; ".join(rollback_errors)
-        if rollback_errors
-        else "restored the prior connector configuration and runtime"
-    )
+    if rollback_errors:
+        outcome = "rollback was incomplete: " + "; ".join(rollback_errors)
+    elif gateway_still_down:
+        outcome = (
+            "restored the prior connector configuration, but the gateway still cannot start for the "
+            "same reason; fix that, then run `defenseclaw-gateway start`"
+        )
+    else:
+        outcome = "restored the prior connector configuration and runtime"
     failure = click.ClickException(
         f"connector setup did not converge {cause_text}; {outcome}. "
         "Check each connector's current mode with `defenseclaw status`, then run the same setup command again."
