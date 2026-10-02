@@ -1020,11 +1020,15 @@ class SkillScannerConfig:
     virustotal_api_key_env: str = ""
 
     def resolved_virustotal_api_key(self) -> str:
-        """Return VirusTotal key from env var (if set) or direct value."""
-        if self.virustotal_api_key_env:
-            val = os.environ.get(self.virustotal_api_key_env, "")
-            if val:
-                return val
+        """Return VirusTotal key from env var (if set) or direct value.
+
+        An empty ``virustotal_api_key_env`` falls back to
+        ``VIRUSTOTAL_API_KEY``, the gateway's default and the name
+        ``defenseclaw keys set`` stores (GAP-1936).
+        """
+        val = os.environ.get(self.virustotal_api_key_env or "VIRUSTOTAL_API_KEY", "")
+        if val:
+            return val
         return self.virustotal_api_key
 
 

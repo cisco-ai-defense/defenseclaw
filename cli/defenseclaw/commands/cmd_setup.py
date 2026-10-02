@@ -1243,6 +1243,8 @@ def setup_skill_scanner(
             sc.use_trigger = use_trigger
         if use_virustotal is not None:
             sc.use_virustotal = use_virustotal
+            if use_virustotal and not sc.virustotal_api_key_env:
+                sc.virustotal_api_key_env = "VIRUSTOTAL_API_KEY"
         if use_aidefense is not None:
             sc.use_aidefense = use_aidefense
         if llm_provider is not None:

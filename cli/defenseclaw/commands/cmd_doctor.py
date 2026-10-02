@@ -9455,9 +9455,20 @@ def _check_webhooks(cfg, r: _DoctorResult) -> None:
 
 def _check_virustotal(cfg, r: _DoctorResult) -> None:
     sc = cfg.scanners.skill_scanner
-    vt_key = sc.resolved_virustotal_api_key()
-    if not sc.use_virustotal or not vt_key:
+    if not sc.use_virustotal:
         _emit("skip", "VirusTotal API", "not enabled", r=r)
+        return
+    vt_key = sc.resolved_virustotal_api_key()
+    if not vt_key:
+        env_name = sc.virustotal_api_key_env or "VIRUSTOTAL_API_KEY"
+        _emit(
+            "warn",
+            "VirusTotal API",
+            f"enabled, but {env_name} is not set",
+            r=r,
+            remediation=f"run 'defenseclaw keys set {env_name}', or turn VirusTotal off in "
+            "'defenseclaw setup skill-scanner'",
+        )
         return
 
     code, _ = _http_probe(
