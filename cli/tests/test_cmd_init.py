@@ -444,6 +444,21 @@ class TestInitFirstRunBackend(unittest.TestCase):
                 cmd_init._render_first_run_report(report, renderer)
             self.assertEqual(any(hint in line for line in lines), shown, (host, lines))
 
+    def test_header_profile_says_mixed_when_connector_modes_differ(self):
+        # GAP-1224: one connector in action and the rest in observe is not "profile=observe".
+        from defenseclaw.commands import cmd_init
+
+        report = SimpleNamespace(profile="observe", data_dir="/nonexistent")
+        cfg = SimpleNamespace(
+            guardrail=SimpleNamespace(effective_mode=lambda n: "action" if n == "claudecode" else "observe")
+        )
+        with patch("defenseclaw.config.load", return_value=cfg):
+            self.assertEqual(
+                cmd_init._profile_label(report, ["codex", "claudecode", "hermes"]), "mixed (action 1, observe 2)"
+            )
+            self.assertEqual(cmd_init._profile_label(report, ["codex", "hermes"]), "observe")
+        self.assertEqual(cmd_init._profile_label(report, ["codex"]), "observe")
+
     def test_sidecar_step_names_how_the_start_was_declined(self):
         # Manual test R2-41: the Sidecar step names the answer given, not a
         # flag the operator never typed, and the Next list points at

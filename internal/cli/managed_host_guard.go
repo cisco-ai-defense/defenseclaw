@@ -49,7 +49,7 @@ func refusePerUserGatewayOnManagedHost() error {
 	}
 	if where, present := managedHostWindowsStandalone(); present {
 		return fmt.Errorf("this computer's DefenseClaw is managed by your organization (%s), so the per-user gateway is disabled; "+
-			"an administrator can check the managed deployment with `defenseclaw-gateway enterprise windows status --profile standalone`", where)
+			"an administrator can check the managed deployment %s", where, managedWindowsAdminStatusHint())
 	}
 	path, present := managedHostUnixRecord(os.Stderr)
 	if !present {
@@ -117,9 +117,90 @@ func addManagedWindowsSetupAnswer(root *cobra.Command) {
 // deployment status has no per-account detail.
 func managedWindowsAdminCommandAnswer(where, command string) error {
 	return fmt.Errorf("this computer's DefenseClaw is managed by your organization (%s), so `%s` has no per-user "+
-		"deployment to check; an administrator can check the managed deployment with "+
-		"`defenseclaw-gateway enterprise windows status --profile standalone`, and your account's agents with "+
-		"`defenseclaw-gateway enterprise policy show --user %s`. Nothing was changed", where, command, managedHostCurrentAccount())
+		"deployment to check and nothing for you to do; your administrator can check the managed deployment %s, "+
+		"and your account's agents with `& '%s' enterprise policy show --user %s`. Nothing was changed",
+		where, command, managedWindowsAdminStatusHint(), managedWindowsAdminCLI(), managedHostCurrentAccount())
+}
+
+// managedWindowsAdminCLI is the managed CLI an administrator runs on a
+// Windows standalone computer. Setup puts no DefenseClaw command on PATH and
+// the docs name this path, so a hint naming a bare `defenseclaw-gateway` was
+// "not recognized" (GAP-1183). A seam for tests.
+var managedWindowsAdminCLI = func() string {
+	root := strings.TrimRight(strings.TrimSpace(os.Getenv("ProgramFiles")), `\`)
+	if root == "" {
+		root = `C:\Program Files`
+	}
+	return root + `\Cisco\DefenseClaw\bin\defenseclaw.exe`
+}
+
+// managedWindowsAdminStatusHint is the administrator's status check on a
+// managed Windows computer, as a PowerShell command that runs as typed.
+func managedWindowsAdminStatusHint() string {
+	return "from an elevated PowerShell prompt with `& '" + managedWindowsAdminCLI() + "' enterprise windows status --profile standalone`"
+}
+
+// managedHostPerUserDaemonCommands are the per-user gateway commands a
+// managed computer refuses; its root help hides them.
+var managedHostPerUserDaemonCommands = map[string]bool{
+	"start": true, "stop": true, "restart": true, "watchdog": true, "sandbox": true,
+}
+
+// managedHostHelpInstalled keeps addManagedHostHelp from wrapping the help
+// function twice when the command tree is executed more than once.
+var managedHostHelpInstalled bool
+
+// addManagedHostHelp makes the root --help on a managed computer describe
+// the managed gateway. It described the per-user runtime ("Run without
+// arguments to start the sidecar daemon") and listed start, stop, restart,
+// watchdog and sandbox, all of which a managed computer refuses (GAP-1182,
+// GAP-1192). The managed-host check runs only when the root help is shown.
+func addManagedHostHelp(root *cobra.Command) {
+	if managedHostHelpInstalled {
+		return
+	}
+	managedHostHelpInstalled = true
+	defaultHelp := root.HelpFunc()
+	root.SetHelpFunc(func(cmd *cobra.Command, args []string) {
+		if cmd == root {
+			applyManagedHostHelp(root)
+		}
+		defaultHelp(cmd, args)
+	})
+}
+
+// applyManagedHostHelp rewrites root's description for a managed computer
+// and hides the per-user daemon commands. It reports whether it did. The
+// managed services themselves (the managed_enterprise pin) keep the
+// per-user text, which is never shown to anyone there.
+func applyManagedHostHelp(root *cobra.Command) bool {
+	if managed.IsManagedEnterprise(os.Getenv(managed.DeploymentModeEnv)) {
+		return false
+	}
+	admin := ""
+	where, present := managedHostWindowsStandalone()
+	if present {
+		admin = "& '" + managedWindowsAdminCLI() + "' enterprise windows status --profile standalone  (elevated PowerShell)"
+	} else if where, present = managedHostUnixRecord(nil); present {
+		admin = "sudo " + managedHostGatewayCommand() + " enterprise " + managedHostPlatform() + " status"
+	}
+	if !present {
+		return false
+	}
+	root.Short = "DefenseClaw managed gateway"
+	root.Long = fmt.Sprintf(`DefenseClaw managed gateway. Your organization manages DefenseClaw on this
+computer (%s): the gateway runs as a system service, answers the hooks of
+the enrolled agents and enforces the managed policy. The per-user daemon
+commands (start, stop, restart, watchdog, sandbox) are not available here.
+
+An administrator checks the deployment with:
+  %s`, where, admin)
+	for _, command := range root.Commands() {
+		if managedHostPerUserDaemonCommands[command.Name()] {
+			command.Hidden = true
+		}
+	}
+	return true
 }
 
 // managedHostCurrentAccount names the signed-in account for the answer above.

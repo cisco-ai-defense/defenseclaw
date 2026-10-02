@@ -94,3 +94,17 @@ class AlertFindingRowsTests(unittest.TestCase):
         self.assertIn("action=block", show.output)
         self.assertNotIn("details_json", show.output)
         self.assertNotIn("schema", show.output)
+
+
+def test_redacted_secret_title_uses_the_rule_pack_title():
+    # GAP-1223: C2-METADATA-AWS is tagged "credential", so the store keeps only
+    # "Secret finding"; the bundled pack's title is static text and safe to show.
+    from defenseclaw.commands import cmd_alerts
+
+    cmd_alerts._rule_pack_titles.cache_clear()
+    try:
+        assert cmd_alerts._finding_title("C2-METADATA-AWS", "Secret finding") == "AWS metadata endpoint (SSRF)"
+        assert cmd_alerts._finding_title("NO-SUCH-RULE", "Secret finding") == "Secret finding"
+        assert cmd_alerts._finding_title("C2-METADATA-AWS", "kept") == "kept"
+    finally:
+        cmd_alerts._rule_pack_titles.cache_clear()

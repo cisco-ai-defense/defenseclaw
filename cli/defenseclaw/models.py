@@ -203,6 +203,9 @@ class Event:
     severity: str = ""
     run_id: str = ""
     connector: str = ""
+    # audit_events.enforced: True when the gateway really blocked the call
+    # (None on rows that predate the column).
+    enforced: bool | None = None
 
 
 @dataclass

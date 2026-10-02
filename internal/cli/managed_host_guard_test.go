@@ -352,4 +352,58 @@ func TestManagedWindowsConfigOnlyAnswerNamesTheCommand(t *testing.T) {
 		!strings.Contains(err.Error(), "enterprise policy show --user HOST\\std1") {
 		t.Fatalf("status on a managed Windows computer: %v", err)
 	}
+	// GAP-1183: the hints run as typed (the installed CLI, not a bare
+	// defenseclaw-gateway that is not on PATH) and are an administrator's.
+	for _, want := range []string{"your administrator can check", "elevated PowerShell prompt",
+		"& '" + managedWindowsAdminCLI() + "' enterprise windows status --profile standalone"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("status answer lacks %q: %v", want, err)
+		}
+	}
+	if strings.Contains(err.Error(), "`defenseclaw-gateway ") {
+		t.Fatalf("status answer names a command that is not on PATH: %v", err)
+	}
+}
+
+// GAP-1182, GAP-1192: --help on a managed computer describes the managed
+// gateway and hides the per-user daemon commands it refuses.
+func TestManagedHostHelpDescribesTheManagedGateway(t *testing.T) {
+	restore := managedHostWindowsStandalone
+	t.Cleanup(func() { managedHostWindowsStandalone = restore })
+	t.Setenv(managed.DeploymentModeEnv, "")
+	newRoot := func() *cobra.Command {
+		root := &cobra.Command{Use: "defenseclaw-gateway", Long: "per-user sidecar"}
+		for _, name := range []string{"start", "stop", "restart", "watchdog", "sandbox", "status", "enterprise", "audit"} {
+			root.AddCommand(&cobra.Command{Use: name, Run: func(*cobra.Command, []string) {}})
+		}
+		return root
+	}
+
+	managedHostWindowsStandalone = func() (string, bool) { return "", false }
+	restoreDescriptor := managedHostDescriptorPath
+	t.Cleanup(func() { managedHostDescriptorPath = restoreDescriptor })
+	managedHostDescriptorPath = func() string { return filepath.Join(t.TempDir(), "absent.json") }
+	plain := newRoot()
+	if applyManagedHostHelp(plain) || plain.Long != "per-user sidecar" {
+		t.Fatalf("an unmanaged host changed the help: %q", plain.Long)
+	}
+
+	managedHostWindowsStandalone = func() (string, bool) { return `HKLM\SOFTWARE\Cisco\DefenseClaw\Enterprise`, true }
+	root := newRoot()
+	if !applyManagedHostHelp(root) {
+		t.Fatal("a managed host kept the per-user help")
+	}
+	for _, want := range []string{"managed gateway", "not available here", "enterprise windows status --profile standalone"} {
+		if !strings.Contains(root.Long, want) {
+			t.Fatalf("managed help lacks %q:\n%s", want, root.Long)
+		}
+	}
+	if strings.Contains(root.Long, "Run without arguments") || strings.Contains(root.Long, "Python CLI") {
+		t.Fatalf("managed help still describes the per-user daemon:\n%s", root.Long)
+	}
+	for _, command := range root.Commands() {
+		if command.Hidden != managedHostPerUserDaemonCommands[command.Name()] {
+			t.Fatalf("command %s hidden=%t", command.Name(), command.Hidden)
+		}
+	}
 }

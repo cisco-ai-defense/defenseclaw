@@ -67,7 +67,10 @@ var rulePackValidateCmd = &cobra.Command{
 	Long: `Validate a rule-pack directory the same way the gateway does when it loads
 one, including every regular and semantic expression, and print a summary or
 the first problem. Without --dir the embedded default pack is validated.
-Exit status 0 means the pack is valid.
+Exit status 0 means the pack is valid. On a host with a defenseclaw service
+account the text output also exits 1 when that account cannot read the pack
+(the gateway would refuse it); with --json the exit status reports validity
+only and that problem is printed on stderr.
 
 Example:
   defenseclaw-gateway rulepack validate --dir /etc/defenseclaw/policies/guardrail/custom`,
@@ -78,6 +81,9 @@ Example:
 var (
 	rulePackValidateDir  string
 	rulePackValidateJSON bool
+
+	// rulePackServiceReadProblemFn is replaced by tests.
+	rulePackServiceReadProblemFn = rulePackServiceReadProblem
 )
 
 func init() {
@@ -120,13 +126,22 @@ func runRulePackValidate(cmd *cobra.Command, _ []string) error {
 		Valid:       true,
 		Summary:     &summary,
 	}
+	problem := ""
+	if rulePackValidateDir != "" {
+		problem = rulePackServiceReadProblemFn(cmd.Context(), rulePackValidateDir)
+	}
+	if problem != "" && !rulePackValidateJSON {
+		// A script that checks only the exit status must not pass a pack the
+		// gateway will refuse (GAP-1274).
+		fmt.Fprintf(cmd.OutOrStdout(), "rule pack syntax is valid: %d files, %d rules, digest %s\n",
+			summary.RuleFileCount, summary.RuleCount, summary.Digest)
+		return fmt.Errorf("the gateway cannot load this pack: %s", problem)
+	}
 	if err := writeRulePackValidation(cmd.OutOrStdout(), response, rulePackValidateJSON); err != nil {
 		return err
 	}
-	if rulePackValidateDir != "" {
-		if problem := rulePackServiceReadProblem(cmd.Context(), rulePackValidateDir); problem != "" {
-			fmt.Fprintf(cmd.ErrOrStderr(), "warning: the gateway cannot load this pack: %s\n", problem)
-		}
+	if problem != "" {
+		fmt.Fprintf(cmd.ErrOrStderr(), "warning: the gateway cannot load this pack: %s\n", problem)
 	}
 	return nil
 }

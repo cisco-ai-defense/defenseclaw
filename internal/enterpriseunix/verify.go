@@ -52,6 +52,13 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 	}
 	record, err := env.loadDeployment()
 	if err != nil {
+		if errors.Is(err, os.ErrPermission) && env.Geteuid() != 0 {
+			// A standard user cannot read the root-only deployment record;
+			// the lstat error and installed=false read as a missing
+			// deployment (GAP-1201).
+			r.AddError(codeNotRoot, "run this command as root (sudo or the MDM agent); a standard user cannot read the deployment record")
+			return 0
+		}
 		r.AddError(codeState, err.Error())
 		return 0
 	}

@@ -45,7 +45,7 @@ one can appear.
 | `unsupported_platform` | Linux, macOS | The Linux or macOS lifecycle ran on another OS | Run the lifecycle for this OS |
 | `invalid_arguments` | all | The command line is wrong: conflicting flags, a relative `--config`, `install` or `upgrade` without `--payload` or `--from-package`, a first Windows `ensure` without a config, or a Windows `ensure` that must upgrade but was not given the payload files | Correct the command. On Windows, run the Setup, which supplies every payload file. Exit `2` or `1639` |
 | `lifecycle_busy` | all | Another lifecycle run holds the lock | Retry. Exit `75` or `1618` |
-| `not_root` | Linux, macOS | The action needs root | Run it with `sudo` or from the MDM agent |
+| `not_root` | Linux, macOS | The action needs root. `status` reports it too when a standard user cannot read the deployment record | Run it with `sudo` or from the MDM agent |
 | `service_manager_unavailable` | Linux | systemd is not the init system (containers, WSL), or it is older than 239 | Use a supported host. See [Requirements](/docs/enterprise/linux#requirements) |
 | `wsl_distribution` | Linux | The host is a WSL distribution. A new install is refused; an existing deployment gets this as a warning | Uninstall it and govern WSL from Windows. See [Agent sessions in WSL](/docs/enterprise/windows#agent-sessions-in-wsl) |
 | `state_unreadable` | Linux, macOS | The lifecycle state (`/var/lib/defenseclaw-enterprise` on Linux, `/opt/cisco/defenseclaw/lifecycle` on macOS) cannot be read | Check that directory and the disk |
@@ -75,7 +75,8 @@ one can appear.
 | `manifest_staging_failed` | Windows | `ensure` could not prepare the first target manifest from the config | Check the config |
 | `lifecycle_launch_failed` | Windows | The PowerShell 7 lifecycle did not start, or it printed no result | Read the message and `enterprise-lifecycle.log` |
 | `lifecycle_error` | Windows | The lifecycle reported a failure without a stable code | Read `errors[].message` and `enterprise-lifecycle.log` |
-| `not_ready` | Windows | The run finished, but the deployment is not healthy | Run `verify`, then read the gateway and guardian logs |
+| `rule_pack_unreadable` | Windows | The gateway service account (`NT SERVICE\DefenseClawGateway`) cannot read the folder `guardrail.rule_pack_dir` names. The message gives the `icacls` command that grants it; the enumerator's full output is in the `lifecycle_diagnostic` warning | Grant the service Read & execute on the folder, then run Setup again |
+| `not_ready` | Windows | The run finished, but the deployment is not healthy. The message names the stopped services | Start them with `repair --profile standalone` (or Setup `/repair JSON=1`) from an elevated prompt; otherwise run `verify`, then read the gateway and guardian logs |
 | `gateway_start_failed` | Windows | `status` or `verify` found the gateway service not running; the message gives the last error the service logged and the log path | Fix what the error names. If it says `Access is denied`, run `repair` from an elevated prompt |
 | `api_port_held` | Windows | The gateway service runs, but another process listens on `127.0.0.1:18970` or on the wildcard address of that port, so the gateway cannot bind its API and hooks fail closed. An install, upgrade or repair whose gateway never became ready reports it too. The message and `api_port_holders[]` name each process's PID, image and account, or say that this account cannot identify it | Stop that process. The gateway keeps retrying and takes the port back by itself, without a restart; after a failed install, run the install again |
 | `preflight_failed` | Windows | A check before the lifecycle started failed | Read the message |

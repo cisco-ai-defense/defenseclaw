@@ -26,7 +26,7 @@ from types import SimpleNamespace
 
 import pytest
 from defenseclaw.commands.cmd_doctor import _check_hook_runtime_integrity, _DoctorResult
-from defenseclaw.hook_integrity import hook_runtime_problems
+from defenseclaw.hook_integrity import hook_registration_problems, hook_runtime_problems
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="Unix hook scripts only")
 
@@ -74,3 +74,19 @@ def test_edited_script_and_missing_token_fail_doctor(tmp_path, monkeypatch):
     row = next(row for row in r.checks if row.get("label") == "Hook runtime files")
     assert row["status"] == "fail"
     assert "defenseclaw setup codex" in row["detail"]
+
+
+def test_removed_hook_registration_is_reported(tmp_path):
+    # GAP-1230: the hooks key deleted from the agent's settings file.
+    settings = tmp_path / "settings.json"
+    hook = {"command": "/x/defenseclaw/claude-code-hook.sh"}
+    settings.write_text(json.dumps({"hooks": {"PreToolUse": [{"hooks": [hook]}]}}))
+    lock = {"version": 2, "connectors": {"claudecode": {"locations": {"hook_config_paths": [str(settings)]}}}}
+    (tmp_path / "hook_contract_lock.json").write_text(json.dumps(lock))
+    cfg = SimpleNamespace(data_dir=str(tmp_path))
+    assert hook_registration_problems(cfg, "claudecode") == []
+
+    settings.write_text(json.dumps({"model": "x"}))
+    problems = hook_registration_problems(cfg, "claudecode")
+    assert problems and str(settings) in problems[0]
+    assert hook_registration_problems(cfg, "codex") == []

@@ -219,12 +219,16 @@ $env:DEFENSECLAW_CONFIG = 'C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml'
 - `policy verify --live` runs the real client as a user and proves that it
   loads DefenseClaw's hooks. It needs `--user`, exactly one `--connector`
   (`codex` or `claudecode`), and `--agent-binary` with the client's absolute
-  path. The default timeout is 90 seconds (`--timeout`). On Windows, run it
-  from the target user's own session.
+  path. For Codex, pass the native executable, not the npm `codex` launcher
+  (`codex.js` needs `node`, which is not on the probe's minimal `PATH`): for
+  a global npm install it is
+  `node_modules/@openai/codex/node_modules/@openai/codex-<platform>/vendor/<target>/bin/codex`.
+  The default timeout is 90 seconds (`--timeout`). On Windows, run it from
+  the target user's own session.
 
 ```bash title="Linux: live check for one user"
 sudo DEFENSECLAW_CONFIG=/etc/defenseclaw/config.yaml /opt/defenseclaw/bin/defenseclaw-gateway enterprise policy verify \
-  --live --user alice --connector codex --agent-binary /usr/local/bin/codex --json
+  --live --user alice --connector codex --agent-binary /usr/local/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex --json
 ```
 
 ## Per-user connector state

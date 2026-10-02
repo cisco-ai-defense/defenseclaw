@@ -26,7 +26,7 @@ from defenseclaw.alert_semantics import (
     ALERT_LEGACY_FINDING_ACTIONS,
     ALERT_NON_ALLOW_OUTCOMES,
 )
-from defenseclaw.hook_metrics import connector_hook_decision
+from defenseclaw.hook_metrics import connector_hook_decision, parse_detail_tokens
 from defenseclaw.tui.panels.audit import (
     parse_kv_details,
     split_connector_token,
@@ -905,6 +905,7 @@ class AlertsPanelModel:
                     label="alerts dismiss selected",
                     args=_alert_id_command_args("dismiss", [row.event.id]),
                     hint=f"Dismissing selected alert {row.event.id}.",
+                    consequence="Removes this alert from the active list. The audit trail keeps the event.",
                 ),
             )
         if key == "x":
@@ -916,6 +917,10 @@ class AlertsPanelModel:
                     label=f"alerts acknowledge {len(self.selected_ids)} selected",
                     args=_alert_id_command_args("acknowledge", self.selected_ids),
                     hint=f"Acknowledging {len(self.selected_ids)} selected alert(s).",
+                    consequence=(
+                        f"Marks {len(self.selected_ids)} alert(s) as handled and removes them from the "
+                        "active list. The audit trail keeps the events."
+                    ),
                 ),
             )
         if key == "c":
@@ -1177,6 +1182,12 @@ class AlertsPanelModel:
                 facts=event.facts,
             )
         event = hydrated or event
+        if event.action == "scan-finding" and not any(label == "Decision" for label, _value in event.facts):
+            # A hook-rule finding carries the rule, not the outcome; the
+            # connector-hook row of the same request says whether the call was
+            # blocked or only observed (GAP-1213).
+            if decision := _hook_decision_label(self.store, event.id):
+                event = replace(event, facts=(*event.facts, ("Decision", decision)))
         return AlertDetailInfo(
             event=event,
             findings=_list_findings_by_run_id(self.store, event.run_id),
@@ -1552,6 +1563,30 @@ def _list_events_by_target(store: object | None, target: str, limit: int) -> tup
         return tuple(_alert_event_from_row(row) for row in rows)
     except Exception:  # noqa: BLE001 - detail enrichment must not hide the selected row.
         return ()
+
+
+def _hook_decision_label(store: object | None, event_id: str) -> str:
+    """Outcome of the hook call behind a finding: blocked, would block, or allowed."""
+
+    lookup = getattr(store, "hook_details_for_alerts", None)
+    if lookup is None or not event_id or event_id.startswith("gw:"):
+        return ""
+    try:
+        rows = lookup([event_id]).get(event_id, [])
+    except Exception:  # noqa: BLE001 - an older or locked audit DB only loses the decision.
+        return ""
+    decision = ""
+    for raw in rows:
+        tokens = parse_detail_tokens((raw or "").split(" details_json=", 1)[0])
+        action = tokens.get("action", "").strip().lower()
+        mode = tokens.get("mode", "").strip().lower()
+        if action == "block":
+            return f"blocked ({mode} mode)" if mode else "blocked"
+        if tokens.get("would_block", "").strip().lower() == "true":
+            decision = "would block (observe mode, allowed)"
+        elif not decision and action:
+            decision = "allowed" if action == "allow" else action
+    return decision
 
 
 def _get_alert_event_by_id(store: object | None, event_id: str) -> AlertEvent | None:

@@ -241,6 +241,7 @@ defenseclaw sandbox image list --output json
 {/* AUTOGEN-BEGIN: sandbox-flags image list */}
 | Flag | Takes | Default | Description |
 | --- | --- | --- | --- |
+| `--json` | switch |  | Same as --output json. |
 | `-o`, `--output` | text | `text` | Output format: text or json. |
 {/* AUTOGEN-END: sandbox-flags */}
 
@@ -739,6 +740,7 @@ defenseclaw sandbox list
 {/* AUTOGEN-BEGIN: sandbox-flags list */}
 | Flag | Takes | Default | Description |
 | --- | --- | --- | --- |
+| `--json` | switch |  | Same as --output json. |
 | `-o`, `--output` | text | `text` | Output format: text or json. |
 {/* AUTOGEN-END: sandbox-flags */}
 
@@ -765,6 +767,7 @@ defenseclaw sandbox status myapp-7f3a --output json
 {/* AUTOGEN-BEGIN: sandbox-flags status */}
 | Flag | Takes | Default | Description |
 | --- | --- | --- | --- |
+| `--json` | switch |  | Same as --output json. |
 | `-o`, `--output` | text | `text` | Output format: text or json. |
 {/* AUTOGEN-END: sandbox-flags */}
 
@@ -879,6 +882,7 @@ defenseclaw sandbox activity --sandbox myapp-7f3a --output json
 | Flag | Takes | Default | Description |
 | --- | --- | --- | --- |
 | `-f`, `--follow` | switch |  | Keep following the feed. |
+| `--json` | switch |  | Same as --output json. |
 | `-o`, `--output` | text | `text` | Output format: text or json. |
 | `--sandbox` | text |  | Only this sandbox. |
 | `--since` | number | `0` | Start after this event sequence number. |
@@ -899,6 +903,7 @@ defenseclaw sandbox approvals --sandbox myapp-7f3a --watch
 {/* AUTOGEN-BEGIN: sandbox-flags approvals */}
 | Flag | Takes | Default | Description |
 | --- | --- | --- | --- |
+| `--json` | switch |  | Same as --output json. |
 | `-o`, `--output` | text | `text` | Output format: text or json. |
 | `--sandbox` | text |  | Only this sandbox. |
 | `--watch` | switch |  | Keep watching for new asks. |
@@ -1015,6 +1020,7 @@ defenseclaw sandbox review myapp-7f3a --diff
 | Flag | Takes | Default | Description |
 | --- | --- | --- | --- |
 | `--diff` | switch |  | Print the unified diff too. |
+| `--json` | switch |  | Same as --output json. |
 | `-o`, `--output` | text | `text` | Output format: text or json. |
 {/* AUTOGEN-END: sandbox-flags */}
 
@@ -1047,6 +1053,7 @@ defenseclaw sandbox undo myapp-7f3a --yes --restart
 {/* AUTOGEN-BEGIN: sandbox-flags undo */}
 | Flag | Takes | Default | Description |
 | --- | --- | --- | --- |
+| `--json` | switch |  | Same as --output json. |
 | `--keep-refs` | switch |  | Leave branches and tags as the session left them. |
 | `-o`, `--output` | text | `text` | Output format: text or json. |
 | `--preview` | switch |  | Only show what undo would change. |
@@ -1113,6 +1120,7 @@ defenseclaw sandbox pull fix-tests --patch-out fix-tests.patch
 | `--branch` | switch |  | Put the changes on branch `dc/<name>`. |
 | `--branch-name` | text |  | Put the changes on this branch. |
 | `--force` | switch |  | Override blocking review gates, an existing branch or patch file. |
+| `--json` | switch |  | Same as --output json. |
 | `-o`, `--output` | text | `text` | Output format: text or json. |
 | `--patch-out` | text |  | Write the changes to this patch file. |
 {/* AUTOGEN-END: sandbox-flags */}
@@ -1156,6 +1164,7 @@ defenseclaw sandbox policy show --harness codex --profile balanced --copy
 | --- | --- | --- | --- |
 | `--copy` | switch |  | Resolve for a copy-mode run. |
 | `--harness` | text |  | Resolve for this harness. |
+| `--json` | switch |  | Same as --output json. |
 | `-o`, `--output` | text | `text` | Output format: text or json. |
 | `--pack` | text |  | Resolve with this pack. |
 | `--profile` | text |  | Resolve with this profile. |
@@ -1181,6 +1190,7 @@ defenseclaw sandbox policy explain --sandbox myapp-7f3a --output json
 | --- | --- | --- | --- |
 | `--copy` | switch |  | Resolve for a copy-mode run. |
 | `--harness` | text |  | Resolve for this harness. |
+| `--json` | switch |  | Same as --output json. |
 | `-o`, `--output` | text | `text` | Output format: text or json. |
 | `--pack` | text |  | Resolve with this pack. |
 | `--profile` | text |  | Resolve with this profile. |
@@ -1204,6 +1214,7 @@ defenseclaw sandbox policy suggest --sandbox myapp-7f3a --output json
 {/* AUTOGEN-BEGIN: sandbox-flags policy suggest */}
 | Flag | Takes | Default | Description |
 | --- | --- | --- | --- |
+| `--json` | switch |  | Same as --output json. |
 | `-o`, `--output` | text | `text` | Output format: text or json. |
 | `--sandbox` | text |  | Only this sandbox's destinations. |
 {/* AUTOGEN-END: sandbox-flags */}
@@ -1275,6 +1286,7 @@ defenseclaw sandbox pack list
 {/* AUTOGEN-BEGIN: sandbox-flags pack list */}
 | Flag | Takes | Default | Description |
 | --- | --- | --- | --- |
+| `--json` | switch |  | Same as --output json. |
 | `-o`, `--output` | text | `text` | Output format: text or json. |
 {/* AUTOGEN-END: sandbox-flags */}
 
@@ -1292,6 +1304,7 @@ defenseclaw sandbox pack show ~/.defenseclaw/policies/sandbox/team-web
 {/* AUTOGEN-BEGIN: sandbox-flags pack show */}
 | Flag | Takes | Default | Description |
 | --- | --- | --- | --- |
+| `--json` | switch |  | Same as --output json. |
 | `-o`, `--output` | text | `text` | Output format: text or json. |
 {/* AUTOGEN-END: sandbox-flags */}
 

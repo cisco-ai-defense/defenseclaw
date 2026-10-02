@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
+from defenseclaw.hook_metrics import connector_hook_decision
 from defenseclaw.models import ActionEntry, Event
 from defenseclaw.tui.services.event_models import parse_timestamp, timestamp_label
 
@@ -591,10 +592,16 @@ class AuditPanelModel:
             ("Time", event.timestamp.isoformat()),
             ("Event ID", event.id),
             ("Action", event.action),
-            ("Target", event.target),
-            ("Severity", event.severity),
-            ("Actor", event.actor),
         ]
+        if event.target:
+            pairs.append(("Target", event.target))
+        pairs.extend((("Severity", event.severity), ("Actor", event.actor)))
+        if connector := event_connector(event):
+            pairs.append(("Connector", connector))
+        # Guardrail verdicts and judge rows keep their outcome in the
+        # structured record; the flat row only says "guardrail.evaluation.
+        # completed" (GAP-1215).
+        pairs.extend(_structured_fact_pairs(event.structured))
         if event.details:
             structured = _structured_detail_rows(event.details)
             if structured:
@@ -927,11 +934,30 @@ def _list_events_by_run_id(store: object | None, run_id: str, limit: int) -> tup
         return ()
 
 
+_RELATED_WINDOW_SECONDS = 120
+
+
+def _seconds_apart(first: datetime, second: datetime) -> float:
+    try:
+        return abs((first - second).total_seconds())
+    except TypeError:  # naive vs aware timestamps from mixed sources
+        return abs((first.replace(tzinfo=None) - second.replace(tzinfo=None)).total_seconds())
+
+
 def _list_related_events(store: object | None, event: Event, limit: int) -> tuple[Event, ...]:
     related: list[Event] = []
     seen: set[str] = set()
+    # A run id is the whole gateway session, so its newest rows (sidecar-stop
+    # minutes later) are not related to this event. Keep same-run rows close
+    # in time, nearest first (GAP-1215).
+    same_run = [
+        candidate
+        for candidate in _list_events_by_run_id(store, event.run_id, 200)
+        if _seconds_apart(candidate.timestamp, event.timestamp) <= _RELATED_WINDOW_SECONDS
+    ]
+    same_run.sort(key=lambda candidate: _seconds_apart(candidate.timestamp, event.timestamp))
     candidates = (
-        *_list_events_by_run_id(store, event.run_id, limit),
+        *same_run[:limit],
         *_list_events_by_target(store, event.target, limit),
     )
     for candidate in candidates:
@@ -988,6 +1014,16 @@ def _matches_common_filter(event: Event, preset: AuditCommonFilter) -> bool:
             for token in ("block", "deny", "quarantine", "fail", "error", "panic", "timeout")
         )
     if preset == "blocks":
+        # A hook or guardrail block is a ``connector-hook``/``guardrail-verdict``
+        # row whose decision is block; the action name alone never says so,
+        # and the filter showed 0 rows (GAP-1215). Observe-mode would-blocks
+        # are not blocks.
+        if event.enforced is True:
+            return True
+        if action == "connector-hook":
+            return connector_hook_decision(event.details, event.structured, event.enforced) == "block"
+        if _structured_text(event.structured, "defenseclaw.guardrail.effective_action") == "block":
+            return True
         return any(token in action for token in ("block", "deny", "quarantine", "reject"))
     if preset == "scans":
         return any(token in action for token in ("scan", "finding", "analyze"))
@@ -1361,7 +1397,45 @@ def event_connector(event: Event) -> str:
     which the CONNECTOR column renders as ``—``.
     """
 
-    return _parse_kv_details(event.details).get("connector", "").strip()
+    return (event.connector or _parse_kv_details(event.details).get("connector", "")).strip()
+
+
+_STRUCTURED_FACTS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "Decision",
+        ("defenseclaw.guardrail.decision", "defenseclaw.guardrail.effective_action", "defenseclaw.judge.action"),
+    ),
+    ("Mode", ("defenseclaw.guardrail.mode",)),
+    ("Would block", ("defenseclaw.guardrail.would_block",)),
+    ("Rules", ("defenseclaw.guardrail.rule_ids", "defenseclaw.finding.rule_id")),
+    ("Reason", ("defenseclaw.guardrail.reason", "defenseclaw.judge.error_summary")),
+    ("Judge", ("defenseclaw.judge.kind",)),
+    ("ACP method", ("defenseclaw.acp.method",)),
+    ("ACP client", ("defenseclaw.acp.client",)),
+    ("Hook", ("defenseclaw.hook.event",)),
+)
+
+
+def _structured_text(structured: object, key: str) -> str:
+    if not isinstance(structured, dict):
+        return ""
+    value = structured.get(key)
+    if isinstance(value, list):
+        return ", ".join(str(item) for item in value if str(item).strip())
+    if isinstance(value, bool):
+        return "yes" if value else ""
+    return str(value).strip().lower() if key.endswith(("decision", "effective_action")) else str(value or "").strip()
+
+
+def _structured_fact_pairs(structured: object) -> tuple[tuple[str, str], ...]:
+    """Labelled outcome fields from a v8 structured record, when present."""
+
+    pairs: list[tuple[str, str]] = []
+    for label, keys in _STRUCTURED_FACTS:
+        value = next((text for key in keys if (text := _structured_text(structured, key))), "")
+        if value:
+            pairs.append((label, value))
+    return tuple(pairs)
 
 
 parse_kv_details = _parse_kv_details

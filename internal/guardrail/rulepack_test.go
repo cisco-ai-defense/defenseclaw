@@ -340,6 +340,20 @@ func TestLoadRulePackRuleValidation(t *testing.T) {
 	}
 }
 
+func TestLoadRulePackInvalidRegexNamesRuleAndReason(t *testing.T) {
+	// GAP-1225: name the rule by id and give the RE2 reason, but never echo the pattern.
+	dir := t.TempDir()
+	writeRulePackFile(t, dir, "rules/custom.yaml", strings.Replace(validRulesYAML("custom", "R-1"), "pattern: 'a+'", "pattern: '(unclosed['", 1))
+	_, err := LoadRulePack(dir)
+	packErr := requireRulePackError(t, err, "regex")
+	if !strings.Contains(packErr.Reason, "rule R-1 (entry 1) pattern") || !strings.Contains(packErr.Reason, "missing closing ]") {
+		t.Fatalf("reason = %q, want the rule id and the RE2 reason", packErr.Reason)
+	}
+	if strings.Contains(packErr.Reason, "unclosed") {
+		t.Fatalf("reason echoes the pattern: %q", packErr.Reason)
+	}
+}
+
 func TestLoadRulePackSemanticExpressionPreservesRegexExposure(t *testing.T) {
 	dir := t.TempDir()
 	body := strings.Replace(

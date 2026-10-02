@@ -1195,6 +1195,7 @@ def test_stopped_gateway_takes_its_services_offline_and_drops_stale_notices() ->
     fresh = OverviewPanelModel(OverviewConfig(claw_mode="codex"), version="test")
     fresh.set_gateway_probe("offline", "sidecar API is unreachable")
     assert fresh.subsystem_state("gateway") == "offline"
+    assert fresh.subsystem_state("watcher") == "offline"
 
 
 def test_multi_connector_overview_has_no_false_drift_and_counts_modes() -> None:

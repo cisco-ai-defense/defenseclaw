@@ -142,3 +142,29 @@ func TestRunAuditFindingsValidatesDeltaFlags(t *testing.T) {
 		t.Fatalf("blank target error=%v", err)
 	}
 }
+
+// GAP-1232: --since takes the same forms as audit export, and a bad value
+// gets a plain message instead of Go's time-layout error.
+func TestParseAuditFindingsSinceAcceptsDurations(t *testing.T) {
+	before := time.Now().Add(-30 * time.Minute)
+	parsed, err := parseAuditFindingsSince("30m")
+	if err != nil || parsed == nil || parsed.Before(before.Add(-time.Minute)) || parsed.After(time.Now()) {
+		t.Fatalf("30m: parsed=%v err=%v", parsed, err)
+	}
+	if parsed, err := parseAuditFindingsSince("2026-09-27T18:30:00Z"); err != nil || parsed == nil {
+		t.Fatalf("RFC3339: parsed=%v err=%v", parsed, err)
+	}
+	_, err = parseAuditFindingsSince("yesterday")
+	if err == nil || strings.Contains(err.Error(), "2006-01-02") || !strings.Contains(err.Error(), "30m") {
+		t.Fatalf("bad value error = %v", err)
+	}
+}
+
+// GAP-1237: an unknown --connector says so on stderr instead of a silent empty export.
+func TestNoteUnmatchedAuditConnectorNamesKnownConnectors(t *testing.T) {
+	var buf bytes.Buffer
+	noteUnmatchedAuditConnector(&buf, "nosuch", map[string]struct{}{"codex": {}, "claudecode": {}})
+	if got := buf.String(); !strings.Contains(got, `"nosuch"`) || !strings.Contains(got, "claudecode, codex") {
+		t.Fatalf("note = %q", got)
+	}
+}
