@@ -1242,6 +1242,22 @@ class TestPluginRuntimeToggleConnectorGuard(PluginCommandTestBase):
         )
 
     @patch("defenseclaw.gateway.OrchestratorClient")
+    def test_enable_hermes_says_hermes_still_has_it_off(self, mock_cls):
+        # GAP-1878: clearing DefenseClaw's disable does not enable it in Hermes.
+        self.app.cfg.guardrail.connector = "hermes"
+        hermes_dir = os.path.join(self.tmp_dir, "hermes-plugins")
+        os.makedirs(os.path.join(hermes_dir, "any-plugin"))
+        self.app.cfg.plugin_dirs = lambda connector=None: [hermes_dir]  # type: ignore[method-assign]
+        target = "defenseclaw.inventory.claw_inventory._enumerate_hermes_plugins"
+        for enabled, expect in ((False, True), (True, False)):
+            rows = [{"id": "any-plugin", "name": "any-plugin", "enabled": enabled}]
+            with patch(target, return_value=rows):
+                result = self.invoke(["enable", "any-plugin", "--connector", "hermes"])
+            self.assertEqual(result.exit_code, 0, result.output)
+            self.assertIn("runtime disable cleared (connector=hermes)", result.output)
+            self.assertEqual("hermes plugins enable any-plugin" in result.output, expect, result.output)
+
+    @patch("defenseclaw.gateway.OrchestratorClient")
     def test_enable_bare_fans_out_across_matching_connector_copies(self, mock_cls):
         self.app.cfg.active_connectors = lambda: ["codex", "hermes"]  # type: ignore[method-assign]
         codex_dir = os.path.join(self.tmp_dir, "codex-plugins")
@@ -1778,6 +1794,17 @@ class TestPluginMultiConnectorSemantics(PluginCommandTestBase):
         self.assertFalse(os.path.isdir(os.path.join(self.codex_root, "narrow")))
         self.assertTrue(os.path.isdir(os.path.join(self.hermes_root, "narrow")))
         self.assertEqual(mock_scan.call_count, 1)
+
+    @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
+    def test_install_hermes_points_at_hermes_opt_in(self, mock_scan):
+        # GAP-1878: Hermes plugins are opt-in; say so and how to turn it on.
+        mock_scan.side_effect = lambda path, **_kwargs: self._clean_scan_result(path)
+        src = self._create_plugin_dir("optin")
+        rows = [{"id": "optin", "name": "optin", "enabled": False}]
+        with patch("defenseclaw.inventory.claw_inventory._enumerate_hermes_plugins", return_value=rows):
+            result = self.invoke(["install", src, "--connector", "hermes"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("hermes plugins enable optin", result.output)
 
     @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
     def test_install_antigravity_uses_documented_plugin_dir(self, mock_scan):

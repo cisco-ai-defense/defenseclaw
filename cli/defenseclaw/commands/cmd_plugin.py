@@ -1462,13 +1462,18 @@ def install(app: AppContext, name_or_path: str, force: bool, take_action: bool, 
             raise SystemExit(1)
 
         click.echo(f"Installed plugin: {plugin_name}")
+        installed_connectors = {_normalize_runtime_connector(c) for c, _root in targets}
+        if "hermes" in installed_connectors:
+            _echo_hermes_activation_note(plugin_name)
 
         from defenseclaw.commands import hint
 
-        hint(
-            "List plugins:      defenseclaw plugin list",
-            "Restart gateway:   defenseclaw-gateway restart",
-        )
+        # Only the OpenClaw gateway loads plugins at start; hook connectors
+        # pick a plugin up in their own next session (GAP-1878).
+        hints = ["List plugins:      defenseclaw plugin list"]
+        if "openclaw" in installed_connectors:
+            hints.append("Restart gateway:   defenseclaw-gateway restart")
+        hint(*hints)
 
     finally:
         if tmpdir:
@@ -2737,6 +2742,31 @@ def _scan_plugin_dir(
     return out
 
 
+def _hermes_plugin_off_id(plugin_name: str) -> str:
+    """Return the Hermes plugin id when Hermes itself has it off, else ''."""
+    try:
+        from defenseclaw.inventory.claw_inventory import _enumerate_hermes_plugins
+
+        rows = _enumerate_hermes_plugins()
+    except Exception:
+        return ""
+    for row in rows:
+        plugin_id = str(row.get("id") or "")
+        if plugin_name in (plugin_id, str(row.get("name") or "")):
+            return "" if row.get("enabled") else plugin_id
+    return ""
+
+
+def _echo_hermes_activation_note(plugin_name: str) -> None:
+    """Explain Hermes' own opt-in next to DefenseClaw's runtime state (GAP-1878)."""
+    plugin_id = _hermes_plugin_off_id(plugin_name)
+    if plugin_id:
+        click.echo(
+            f"  Hermes keeps {plugin_id!r} off until you enable it there, so plugin list shows "
+            f"it disabled. DefenseClaw does not change that setting; run: hermes plugins enable {plugin_id}"
+        )
+
+
 def _list_hermes_plugins() -> list[dict[str, Any]]:
     """Hermes plugins with the activation state Hermes itself applies.
 
@@ -3788,6 +3818,8 @@ def enable(app: AppContext, name: str, connector_flag: str) -> None:
             seen_connectors.add(target_connector)
             pe.enable_for_connector("plugin", plugin_name, target_connector)
             click.echo(f"[plugin] {plugin_name!r} runtime disable cleared (connector={target_connector})")
+            if target_connector == "hermes":
+                _echo_hermes_activation_note(plugin_name)
         pe.enable("plugin", plugin_name)
         if app.logger:
             saved_change_audit(app.logger).log_action(
@@ -3812,6 +3844,8 @@ def enable(app: AppContext, name: str, connector_flag: str) -> None:
         click.echo(f"[plugin] {plugin_name!r} enabled via gateway RPC")
     elif connector_flag:
         click.echo(f"[plugin] {plugin_name!r} runtime disable cleared (connector={connector})")
+        if connector == "hermes":
+            _echo_hermes_activation_note(plugin_name)
     else:
         click.echo(f"[plugin] {plugin_name!r} unscoped runtime disable cleared")
 
