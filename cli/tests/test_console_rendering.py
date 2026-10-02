@@ -215,6 +215,9 @@ def test_windows_output_piped_through_a_legacy_console_uses_ascii_glyphs() -> No
         assert ux.ascii_safe_redirected_stream(console) is console
     stream.write("restarting... ✓ — Málaga")
     assert piped.getvalue() == "restarting... OK - Málaga"
+    # The uninstall plan bullets and setup galileo's batch delay (WIN2-U3-13).
+    stream.write(" • wipe (≤1s, ≥2)")
+    assert piped.getvalue().endswith(" * wipe (<=1s, >=2)")
 
 
 def test_main_snapshots_capability_before_utf8_reconfigure() -> None:

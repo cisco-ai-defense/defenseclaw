@@ -84,6 +84,8 @@ _ASCII_PRESENTATION_TRANSLATION = str.maketrans(
         "←": "<-",
         "↪": "->",
         "…": "...",
+        "≤": "<=",
+        "≥": ">=",
         "•": "*",
         "·": "-",
         "●": "*",
