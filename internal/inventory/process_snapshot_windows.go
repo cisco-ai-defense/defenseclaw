@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 	"unsafe"
 
@@ -69,13 +70,15 @@ func (nativeWindowsSnapshotReader) List() ([]windowsProcessEntry, error) {
 }
 
 func (nativeWindowsSnapshotReader) Details(pid int) (windowsProcessDetails, error) {
+	// The image path needs no process handle, so it is known even for
+	// another account's process, which the gateway service cannot open.
+	details := windowsProcessDetails{Image: windowsProcessImagePath(uint32(pid))}
 	handle, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
 	if err != nil {
-		return windowsProcessDetails{}, err
+		return details, err
 	}
 	defer windows.CloseHandle(handle)
 
-	var details windowsProcessDetails
 	var creation, exit, kernel, user windows.Filetime
 	var errs []error
 	if err := windows.GetProcessTimes(handle, &creation, &exit, &kernel, &user); err == nil {
@@ -106,4 +109,83 @@ func (nativeWindowsSnapshotReader) Details(pid int) (windowsProcessDetails, erro
 		return details, fmt.Errorf("partial process metadata: %w", errors.Join(errs...))
 	}
 	return details, nil
+}
+
+// systemProcessIDInformation is SYSTEM_PROCESS_ID_INFORMATION, the
+// NtQuerySystemInformation class that names a process's image without a
+// handle to it.
+type systemProcessIDInformation struct {
+	ProcessID uintptr
+	ImageName windows.NTUnicodeString
+}
+
+const systemProcessIDInformationClass = 88
+
+// windowsProcessImagePath returns pid's executable as a drive path, or ""
+// when Windows does not report one.
+func windowsProcessImagePath(pid uint32) string {
+	if pid == 0 {
+		return ""
+	}
+	buf := make([]uint16, 4096)
+	info := systemProcessIDInformation{ProcessID: uintptr(pid)}
+	info.ImageName.MaximumLength = uint16(len(buf) * 2)
+	info.ImageName.Buffer = &buf[0]
+	if err := windows.NtQuerySystemInformation(systemProcessIDInformationClass, unsafe.Pointer(&info), uint32(unsafe.Sizeof(info)), nil); err != nil {
+		return ""
+	}
+	n := int(info.ImageName.Length / 2)
+	if n <= 0 || n > len(buf) {
+		return ""
+	}
+	return windowsDrivePathForDevicePath(windows.UTF16ToString(buf[:n]), windowsDeviceDrives())
+}
+
+// windowsDrivePathForDevicePath turns \Device\HarddiskVolume3\Users\a\x.exe into
+// C:\Users\a\x.exe with the drives' device names.
+func windowsDrivePathForDevicePath(path string, drives map[string]string) string {
+	for device, drive := range drives {
+		if len(path) > len(device) && path[len(device)] == '\\' && strings.EqualFold(path[:len(device)], device) {
+			return drive + path[len(device):]
+		}
+	}
+	return ""
+}
+
+var windowsDeviceDriveCache struct {
+	sync.Mutex
+	at     time.Time
+	drives map[string]string
+}
+
+// windowsDeviceDrives maps each drive's device name to its letter, refreshed
+// at most once a minute.
+func windowsDeviceDrives() map[string]string {
+	windowsDeviceDriveCache.Lock()
+	defer windowsDeviceDriveCache.Unlock()
+	if windowsDeviceDriveCache.drives != nil && time.Since(windowsDeviceDriveCache.at) < time.Minute {
+		return windowsDeviceDriveCache.drives
+	}
+	drives := map[string]string{}
+	mask, err := windows.GetLogicalDrives()
+	if err == nil {
+		target := make([]uint16, 512)
+		for i := 0; i < 26; i++ {
+			if mask&(1<<uint(i)) == 0 {
+				continue
+			}
+			drive := string(rune('A'+i)) + ":"
+			name, nameErr := windows.UTF16PtrFromString(drive)
+			if nameErr != nil {
+				continue
+			}
+			if n, qErr := windows.QueryDosDevice(name, &target[0], uint32(len(target))); qErr == nil && n > 0 {
+				if device := windows.UTF16ToString(target); device != "" {
+					drives[device] = drive
+				}
+			}
+		}
+	}
+	windowsDeviceDriveCache.drives, windowsDeviceDriveCache.at = drives, time.Now()
+	return drives
 }

@@ -38,6 +38,14 @@ var inventoryDACLDotdirs = append([]string{
 	".opencode",
 	".agents",
 	".config",
+	".kiro",
+	// Hermes keeps its home in %LOCALAPPDATA%\hermes on Windows. Only its
+	// skills and plugins folders are granted: the home also holds the
+	// agent's install (about 130,000 objects), which an inherited grant
+	// would rewrite on every account. Without them the scanner never found
+	// Hermes for any user.
+	`AppData\Local\hermes\skills`,
+	`AppData\Local\hermes\plugins`,
 }, legacyconnector.InventoryDotDirs...)
 
 // gatewayServiceNamePattern matches the certification-scoped gateway service

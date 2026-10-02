@@ -23,7 +23,9 @@ import (
 )
 
 // processInfo is deliberately data-minimized. In particular, it never holds a
-// command line, arguments, environment, or full executable path.
+// command line, arguments or environment. Image, the Windows executable path,
+// is read only to attribute a service-context scan's process to the profile
+// it runs from (attributeProcessOwners) and never leaves the detector.
 type processInfo struct {
 	PID       int
 	PPID      int
@@ -32,6 +34,11 @@ type processInfo struct {
 	StartedAt time.Time
 	Connector string
 	Windows   bool
+	Image     string
+	// OwnerID (a SID) and OwnerName name the account whose profile holds
+	// Image.
+	OwnerID   string
+	OwnerName string
 }
 
 type windowsProcessEntry struct {
@@ -43,6 +50,9 @@ type windowsProcessEntry struct {
 type windowsProcessDetails struct {
 	User      string
 	StartedAt time.Time
+	// Image is the executable's path, which Windows reports without opening
+	// the process, so it is known even where the token owner is not.
+	Image string
 }
 
 type windowsSnapshotReader interface {
@@ -67,7 +77,7 @@ func collectWindowsSnapshot(reader windowsSnapshotReader) ([]processInfo, error)
 		details, _ := reader.Details(entry.PID)
 		infos = append(infos, processInfo{
 			PID: entry.PID, PPID: entry.PPID, Comm: comm,
-			User: details.User, StartedAt: details.StartedAt, Windows: true,
+			User: details.User, StartedAt: details.StartedAt, Image: details.Image, Windows: true,
 		})
 	}
 	return infos, nil

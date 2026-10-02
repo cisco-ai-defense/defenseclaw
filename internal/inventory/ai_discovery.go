@@ -177,6 +177,10 @@ type AIDiscoveryOptions struct {
 	// When set, full scans ingest it and this service's own process
 	// detector, which its sandbox blinds, is left to those scans.
 	UserScanDir string
+	// homeOwners names the account of each profile in HomeDirs when the
+	// platform enumerated them for a service-context scan (managed Windows).
+	// Signals found under a profile carry its account.
+	homeOwners []discoveryHomeOwner
 }
 
 // AIEvidence is an internal normalized evidence record. RawPath is never
@@ -773,9 +777,14 @@ func normalizeAIDiscoveryOptions(opts AIDiscoveryOptions) AIDiscoveryOptions {
 	// developer running a local build does not silently start reading
 	// their coworkers' dotdirs on a shared workstation.
 	if opts.ManagedEnterprise && len(opts.HomeDirs) == 0 {
-		if platformHomes := platformDiscoveryHomeDirs(opts.StandaloneEnterprise); len(platformHomes) > 0 {
+		if owners := platformDiscoveryHomeOwners(opts.StandaloneEnterprise); len(owners) > 0 {
+			platformHomes := make([]string, 0, len(owners))
+			for _, owner := range owners {
+				platformHomes = append(platformHomes, owner.Home)
+			}
 			opts.HomeDirs = platformHomes
 			opts.HomeDir = platformHomes[0]
+			opts.homeOwners = owners
 		}
 	}
 	// Dedupe HomeDirs and ensure HomeDir participates so single-user
@@ -1829,6 +1838,7 @@ func (s *ContinuousDiscoveryService) signalFromMCPConfigPath(sig AISignature, pa
 		added++
 	}
 	out := s.signalFromEvidence(sig, SignalMCPServer, "mcp", evidence)
+	s.stampHomeOwner(&out, path)
 	out.Partial = partial
 	out.CoverageReason = coverageReason
 	if st, err := os.Stat(path); err == nil {
@@ -2087,6 +2097,7 @@ func (s *ContinuousDiscoveryService) signalFromDirectoryChildren(sig AISignature
 		}
 	}
 	out := s.signalFromEvidence(sig, category, detector, evidence)
+	s.stampHomeOwner(&out, path)
 	out.Partial = partial
 	out.CoverageReason = coverageReason
 	if statErr == nil {
@@ -2287,6 +2298,7 @@ func (s *ContinuousDiscoveryService) detectProcesses() ([]AISignal, error) {
 	windowsSnapshot := procs[0].Windows
 	if windowsSnapshot {
 		classifyWindowsProcesses(procs, s.catalog)
+		s.attributeProcessOwners(procs)
 	}
 	now := time.Now().UTC()
 	var out []AISignal
@@ -2402,6 +2414,12 @@ func (s *ContinuousDiscoveryService) signalFromProcess(sig AISignature, proc pro
 			runtimeInfo.UptimeSec = int64(uptime.Seconds())
 		}
 		signal.LastActiveAt = &started
+	}
+	if proc.OwnerID != "" {
+		signal.UserID, signal.UserName = proc.OwnerID, proc.OwnerName
+		if runtimeInfo.User == "" {
+			runtimeInfo.User = proc.OwnerName
+		}
 	}
 	signal.Runtime = runtimeInfo
 	return signal
@@ -2731,7 +2749,7 @@ func (s *ContinuousDiscoveryService) detectPackageManifests(ctx context.Context)
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return ctxErr
 			}
-			if err != nil && macOSPrivacyDenied(runtime.GOOS, err) {
+			if err != nil && s.discoveryAccessSkipped(err) {
 				// Skipped as the model scan does: macOS privacy
 				// protection keeps ~/.Trash and other apps' folders
 				// from a process without Full Disk Access, which is
@@ -3196,7 +3214,9 @@ func (s *ContinuousDiscoveryService) detectShellHistory() ([]AISignal, int, erro
 					Quality:   0.5,
 					MatchKind: MatchKindHeuristic,
 				}
-				out = append(out, s.signalFromEvidence(sig, SignalShellHistoryMatch, "shell_history", []AIEvidence{ev}))
+				historySignal := s.signalFromEvidence(sig, SignalShellHistoryMatch, "shell_history", []AIEvidence{ev})
+				s.stampHomeOwner(&historySignal, path)
+				out = append(out, historySignal)
 				break
 			}
 			if !s.opts.IncludeNetworkDomains {
@@ -3214,6 +3234,7 @@ func (s *ContinuousDiscoveryService) detectShellHistory() ([]AISignal, int, erro
 					ValueHash: hashValue(sig.ID + ":" + domain),
 				}
 				domainSignal := s.signalFromEvidence(sig, SignalProviderDomain, "shell_history", []AIEvidence{ev})
+				s.stampHomeOwner(&domainSignal, path)
 				// Carry the matched domain, not just the history file it was
 				// found in. Basenames is what a consumer joins on, and
 				// without this it holds ".zsh_history" while Name and
@@ -3237,6 +3258,7 @@ func (s *ContinuousDiscoveryService) signalFromPath(sig AISignature, category, d
 		ev.RawPath = path
 	}
 	out := s.signalFromEvidence(sig, category, detector, []AIEvidence{ev})
+	s.stampHomeOwner(&out, path)
 	// "Last active" for path-evidence detectors (config / binary /
 	// MCP / extension) defaults to the file's modification time when
 	// available. That's a meaningful liveness proxy: an `~/.codex/`
@@ -3362,6 +3384,9 @@ func (s *ContinuousDiscoveryService) expandCandidatePath(candidate string) []str
 	candidate = strings.TrimSpace(candidate)
 	if candidate == "" {
 		return nil
+	}
+	if rewritten, ok := s.profileRelativeCandidate(candidate); ok {
+		candidate = rewritten
 	}
 	missingEnv := false
 	candidate = os.Expand(candidate, func(name string) string {
