@@ -49,15 +49,41 @@ func RecordWatcherCreatedDirs(dataDir string, dirs []string) error {
 func SetupRecordingCreatedDirs(ctx context.Context, conn Connector, opts SetupOpts) error {
 	missing := missingConfigDirs(conn, opts)
 	err := conn.Setup(ctx, opts)
+	recordDirsNowPresent(opts.DataDir, missing)
+	return err
+}
+
+// recordDirsNowPresent adds to the data directory's list each of missing,
+// folders that did not exist before a DefenseClaw write, that is a folder
+// now. Best effort.
+func recordDirsNowPresent(dataDir string, missing []string) {
+	if strings.TrimSpace(dataDir) == "" {
+		return
+	}
 	var created []string
 	for _, dir := range missing {
 		if info, statErr := os.Lstat(dir); statErr == nil && info.Mode().Type() == fs.ModeDir {
 			created = append(created, dir)
 		}
 	}
-	if len(created) > 0 && strings.TrimSpace(opts.DataDir) != "" {
-		_ = recordCreatedDirs(filepath.Join(opts.DataDir, watcherCreatedDirsFile), created)
+	if len(created) > 0 {
+		_ = recordCreatedDirs(filepath.Join(dataDir, watcherCreatedDirsFile), created)
 	}
+}
+
+// prepareOpenCodePluginArtifactDestination creates the plugin folder of
+// path (~/.config/opencode/plugins) and records the folders below the home
+// it had to create, so uninstall removes them again once they are empty:
+// the folder is made before any connector Setup runs (the gateway's
+// registration snapshot), so SetupRecordingCreatedDirs never sees it
+// missing, and the plugin file is not one of the hook config paths.
+func prepareOpenCodePluginArtifactDestination(path, dataDir string) error {
+	var missing []string
+	if home := strings.TrimSpace(userHomeDir()); home != "" && filepath.IsAbs(path) {
+		missing = missingParentDirs(filepath.Clean(home), path)
+	}
+	err := createOpenCodePluginArtifactDestination(path)
+	recordDirsNowPresent(dataDir, missing)
 	return err
 }
 
@@ -101,12 +127,20 @@ func missingConfigDirs(conn Connector, opts SetupOpts) []string {
 		if !filepath.IsAbs(path) {
 			continue
 		}
-		for dir := filepath.Dir(filepath.Clean(path)); belowDir(home, dir); dir = filepath.Dir(dir) {
-			if _, statErr := os.Lstat(dir); !errors.Is(statErr, fs.ErrNotExist) {
-				break
-			}
-			missing = append(missing, dir)
+		missing = append(missing, missingParentDirs(home, path)...)
+	}
+	return missing
+}
+
+// missingParentDirs returns the missing folders between home and path,
+// deepest first.
+func missingParentDirs(home, path string) []string {
+	var missing []string
+	for dir := filepath.Dir(filepath.Clean(path)); belowDir(home, dir); dir = filepath.Dir(dir) {
+		if _, statErr := os.Lstat(dir); !errors.Is(statErr, fs.ErrNotExist) {
+			break
 		}
+		missing = append(missing, dir)
 	}
 	return missing
 }
