@@ -124,3 +124,33 @@ def test_skill_scan_flags_injection_in_frontmatter_description(tmp_path):
         f.severity == "CRITICAL" and "PROMPT INJECTION" in f.title.upper()
         for f in result.findings
     ), [(f.severity, f.title) for f in result.findings]
+
+
+def test_latest_scans_skip_failed_scans(tmp_path):
+    """GAP-1746: a failed scan (no findings, exit_code 1) is not a clean result."""
+    from datetime import datetime, timedelta, timezone
+
+    from defenseclaw.db import Store
+
+    store = Store(str(tmp_path / "audit.db"))
+    store.init()
+    # The gateway's migrations add these columns to the shared audit DB.
+    store.db.execute("ALTER TABLE scan_results ADD COLUMN exit_code INTEGER")
+    store.db.execute("ALTER TABLE scan_results ADD COLUMN error TEXT")
+    t0 = datetime(2026, 10, 2, 12, 0, tzinfo=timezone.utc)
+    rows = [
+        ("never-ok", "http://example.com/a", t0, 1, "connection cancelled"),
+        ("old-ok", "http://example.com/b", t0, 0, None),
+        ("new-failed", "http://example.com/b", t0 + timedelta(minutes=1), 1, "connection cancelled"),
+    ]
+    for scan_id, target, ts, exit_code, error in rows:
+        store.db.execute(
+            "INSERT INTO scan_results (id, scanner, target, timestamp, finding_count, max_severity,"
+            " exit_code, error) VALUES (?, 'mcp-scanner', ?, ?, 0, 'INFO', ?, ?)",
+            (scan_id, target, ts.isoformat(), exit_code, error),
+        )
+    store.db.commit()
+
+    latest = store.latest_scans_by_scanner("mcp-scanner")
+
+    assert [(r["id"], r["target"]) for r in latest] == [("old-ok", "http://example.com/b")]

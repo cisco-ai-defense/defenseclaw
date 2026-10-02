@@ -1278,17 +1278,26 @@ class Store:
         """Return the latest scan result per target for a given scanner.
 
         Each dict has keys: id, target, timestamp, finding_count, max_severity, raw_json.
-        Mirrors Go Store.LatestScansByScanner().
+        Mirrors Go Store.LatestScansByScanner(). A scan that failed (non-zero
+        exit code or an error) has no findings but is not a clean result, so
+        it is skipped: a target whose scans all failed stays unscanned
+        (GAP-1746).
         """
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(scan_results)").fetchall()}
+        succeeded = ""
+        if "exit_code" in columns:
+            succeeded += " AND COALESCE(candidate.exit_code, 0) = 0"
+        if "error" in columns:
+            succeeded += " AND COALESCE(candidate.error, '') = ''"
         cur = self.db.execute(
-            """SELECT sr.id, sr.target, sr.timestamp, sr.finding_count,
+            f"""SELECT sr.id, sr.target, sr.timestamp, sr.finding_count,
                       sr.max_severity, sr.raw_json
                FROM scan_results sr
                WHERE sr.scanner = ?
                  AND sr.rowid = (
                      SELECT candidate.rowid FROM scan_results candidate
                      WHERE candidate.scanner = sr.scanner
-                       AND candidate.target = sr.target
+                       AND candidate.target = sr.target{succeeded}
                      ORDER BY candidate.timestamp DESC, candidate.rowid DESC
                      LIMIT 1
                  )""",
