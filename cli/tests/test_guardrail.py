@@ -1667,6 +1667,36 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         # ...and the multi-only "manage via setup <connector>" steer is NOT.
         self.assertNotIn("Per-connector enforcement mode is managed via", result.output)
 
+    def test_interactive_mode_flag_preselects_mode_prompt(self):
+        """``setup guardrail --mode action`` without --non-interactive still
+        prompts, but the mode prompt defaults to the flag (SWEEP-18)."""
+        from defenseclaw.commands.cmd_setup import setup
+
+        self.app.cfg.claw.home_dir = self.tmp_dir
+        gc = self.app.cfg.guardrail
+        gc.enabled = True
+        gc.connectors = {}
+        gc.connector = "codex"
+        gc.mode = "observe"
+
+        with (
+            patch("defenseclaw.commands.cmd_setup.execute_guardrail_setup", return_value=(True, [])),
+            patch(
+                "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+                return_value=True,
+            ),
+        ):
+            result = self.runner.invoke(
+                setup,
+                ["guardrail", "--mode", "action", "--no-restart"],
+                obj=self.app,
+                input="\n" * 15,
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Select mode (1, 2) [2]", result.output)
+        self.assertEqual(self.app.cfg.guardrail.mode, "action")
+
     def test_interactive_multi_connector_uses_per_connector_mode_picker(self):
         """Two configured connectors: the connector picker and singular
         observe/action prompt are skipped, but the wizard offers a

@@ -544,6 +544,36 @@ def test_failed_gateway_install_does_not_claim_source_ownership(tmp_path: Path) 
     assert not (install_dir / ".defenseclaw-source-root").exists()
 
 
+def test_preflight_skips_a_python3_that_does_not_run(tmp_path: Path) -> None:
+    # WIN-R1-27: on Windows python3 is often the Store alias, which only prints
+    # a hint. The preflight must use the next working Python, or say plainly
+    # that none runs instead of blaming the checkout.
+    bash = shutil.which("bash")
+    python = shutil.which("python3")
+    assert bash and python
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    _write_executable(fake / "python3", "#!/bin/sh\necho 'Python was not found' >&2\nexit 9\n")
+    script = ROOT / "scripts" / "source-install-preflight.sh"
+    args = [bash, str(script), "no-such-mode", str(ROOT), str(tmp_path), str(tmp_path), "defenseclaw", "gw"]
+
+    none = subprocess.run(args, capture_output=True, text=True, check=False, env={"PATH": str(fake)})
+    assert none.returncode == 1
+    assert "no working Python 3 interpreter" in none.stderr
+    assert "identity" not in none.stderr
+
+    (fake / "python").symlink_to(python)
+    found = subprocess.run(args, capture_output=True, text=True, check=False, env={"PATH": str(fake)})
+    assert "no working Python 3 interpreter" not in found.stderr
+    assert found.returncode == 64, found.stderr  # detection passed; then the bad mode is refused
+
+
+def test_install_docs_cover_the_windows_source_build() -> None:
+    text = " ".join((ROOT / "docs-site/content/docs/get-started/install.mdx").read_text(encoding="utf-8").split())
+    assert "Build from source on Windows" in text
+    assert "Git Bash" in text and "py -3" in text and "core.autocrlf=false" in text
+
+
 def test_source_install_docs_are_developer_only_and_point_existing_hosts_to_resolver() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     install = (ROOT / "docs/INSTALL.md").read_text(encoding="utf-8")
