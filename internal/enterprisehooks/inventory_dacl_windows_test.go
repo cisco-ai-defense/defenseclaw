@@ -8,9 +8,11 @@ package enterprisehooks
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"unsafe"
 
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"golang.org/x/sys/windows"
 )
 
@@ -32,6 +34,53 @@ func TestInventoryDACLSkipsKiroWhereTheGuardianOwnsIt(t *testing.T) {
 		if _, ok := owned[home][".kiro"]; ok {
 			t.Fatalf("%s's .kiro is guardian-owned: %v", home, owned)
 		}
+	}
+}
+
+// GAP-1863: every inventory folder that holds an enrolled per-user
+// connector's hook config (Amp and OpenCode under .config, Antigravity under
+// .gemini) is guardian-owned for that user, so the enumerator does not grant
+// a folder the next ensure resets to its protected DACL.
+func TestInventoryDACLSkipsEveryPerUserHookPathFolder(t *testing.T) {
+	home := t.TempDir()
+	granted := map[string]bool{}
+	for _, dir := range inventoryDACLDotdirs {
+		granted[strings.ToLower(dir)] = true
+	}
+	reg := connector.NewDefaultRegistry()
+	for _, name := range WindowsStandalonePerUserConnectorNames() {
+		conn, ok := reg.Get(name)
+		if !ok {
+			t.Fatalf("connector %s is not registered", name)
+		}
+		var paths []string
+		if err := connector.WithUserHomeDir(home, func() error {
+			paths = connector.HookConfigPathsForConnector(conn, connector.SetupOpts{
+				DataDir:           filepath.Join(home, ".defenseclaw"),
+				ManagedEnterprise: true,
+			})
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		owned := inventoryDACLGuardianOwnedByHome(Manifest{Targets: []ManifestTarget{{UserHome: home, Connector: name}}})[strings.ToLower(home)]
+		for _, path := range paths {
+			rel, err := filepath.Rel(home, path)
+			if err != nil || strings.HasPrefix(rel, "..") {
+				continue
+			}
+			first := strings.Split(rel, string(filepath.Separator))[0]
+			if !granted[strings.ToLower(first)] {
+				continue
+			}
+			if _, ok := owned[first]; !ok {
+				t.Errorf("%s hook config %s is under granted folder %s, which is not guardian-owned for it", name, rel, first)
+			}
+		}
+	}
+	owned := inventoryDACLGuardianOwnedByHome(Manifest{Targets: []ManifestTarget{{UserHome: home, Connector: "codex"}}})
+	if len(owned) != 0 {
+		t.Fatalf("a codex-only home owns %v", owned)
 	}
 }
 
