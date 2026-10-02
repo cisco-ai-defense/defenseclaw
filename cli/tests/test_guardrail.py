@@ -3274,6 +3274,23 @@ class TestCheckOpenclawGateway(unittest.TestCase):
 
     @patch("time.sleep")
     @patch("time.monotonic")
+    @patch("defenseclaw.commands.cmd_setup._openclaw_gateway_healthy", return_value=False)
+    def test_not_running_names_the_openclaw_gateway_and_fails(self, mock_healthy, mock_monotonic, mock_sleep):
+        # GAP-1524: the hint was "defenseclaw-gateway start" and setup exited 0.
+        from defenseclaw.commands.cmd_setup import _check_openclaw_gateway
+
+        mock_monotonic.side_effect = self._fast_monotonic(step=5)
+        runner = CliRunner()
+        with runner.isolation() as (out, _err, *_):
+            ok = _check_openclaw_gateway("127.0.0.1", 19089)
+        text = out.getvalue().decode()
+        self.assertFalse(ok)
+        self.assertIn("OpenClaw gateway did not respond at 127.0.0.1:19089", text)
+        self.assertIn("openclaw gateway run", text)
+        self.assertNotIn("defenseclaw-gateway start", text)
+
+    @patch("time.sleep")
+    @patch("time.monotonic")
     @patch("defenseclaw.commands.cmd_setup._openclaw_gateway_healthy", side_effect=[False, False, True] + [True] * 20)
     def test_retries_until_healthy(self, mock_healthy, mock_monotonic, mock_sleep):
         from defenseclaw.commands.cmd_setup import _check_openclaw_gateway
