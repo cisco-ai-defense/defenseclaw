@@ -250,3 +250,44 @@ func TestJudgeHookConnectorEnabled(t *testing.T) {
 		}
 	}
 }
+
+// deadlineLLMProvider records the deadline left on each judge call.
+type deadlineLLMProvider struct {
+	mockLLMProvider
+	left []time.Duration
+}
+
+func (d *deadlineLLMProvider) ChatCompletion(ctx context.Context, req *ChatRequest) (*ChatResponse, error) {
+	if dl, ok := ctx.Deadline(); ok {
+		d.mu.Lock()
+		d.left = append(d.left, time.Until(dl))
+		d.mu.Unlock()
+	}
+	return d.mockLLMProvider.ChatCompletion(ctx, req)
+}
+
+// GAP-1475/GAP-1488: with hook_timeout unset the hook-lane judge must give
+// a Bedrock-class provider more than 5s (injection calls reach 5.0s), while
+// staying inside the 10s budget of the hook clients.
+func TestHookJudge_DefaultTimeoutFitsSlowProviders(t *testing.T) {
+	d := &deadlineLLMProvider{mockLLMProvider: mockLLMProvider{response: injectionHitProvider().response}}
+	cfg := &config.Config{}
+	cfg.Guardrail.Judge = config.JudgeConfig{Enabled: true, Injection: true, HookConnectors: []string{"claudecode"}}
+	cfg.Guardrail.DetectionStrategy = "judge_first"
+	a := &APIServer{scannerCfg: cfg}
+	a.SetHookJudge(&LLMJudge{cfg: &cfg.Guardrail.Judge, model: "test-model", provider: d, rp: &guardrail.RulePack{}})
+
+	a.inspectMessageContent(context.Background(), &ToolInspectRequest{
+		Tool: "message", Content: "list the files in this folder",
+		Direction: "prompt", Connector: "claudecode",
+	})
+
+	if len(d.left) == 0 {
+		t.Fatal("judge provider was never called with a deadline")
+	}
+	for _, left := range d.left {
+		if left <= 6*time.Second || left > 8*time.Second {
+			t.Fatalf("judge call deadline = %s, want (6s, 8s] so a 5s provider call completes inside the 10s hook budget", left)
+		}
+	}
+}

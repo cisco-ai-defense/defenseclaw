@@ -525,7 +525,7 @@ class JudgeListTests(unittest.TestCase):
     def test_list_default_timeout_labeled(self):
         app = make_ctx()
         result = invoke(app, ["list"])
-        self.assertIn("5s (gateway default)", result.output)
+        self.assertIn("8s (gateway default)", result.output)
 
     def test_list_custom_timeout_shown(self):
         app = make_ctx(hook_timeout=8.0)
