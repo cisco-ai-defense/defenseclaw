@@ -28,6 +28,7 @@ from defenseclaw.tui.app import (
     _DEFENSECLAW_LOGO,
     DefenseClawTUI,
     _activity_refresh_bucket,
+    _agents_summary,
     _enforcement_label,
     _event_histogram,
     _fetch_v8_operator_status,
@@ -811,9 +812,15 @@ def test_enforcement_label_multi_connector() -> None:
     multi = OverviewConfig(
         guardrail_connector="codex",
         guardrail_mode="action",
+        guardrail_enabled=True,
         connector_modes=(("codex", "action"), ("claudecode", "action")),
     )
     assert _enforcement_label(multi) == "2 connectors (per-connector modes)"
+    # GAP-1561: after "defenseclaw uninstall" turned the guardrail off.
+    off = OverviewConfig(connector_modes=multi.connector_modes)
+    assert _enforcement_label(off) == "off - guardrail disabled, nothing is guarded"
+    assert _agents_summary(off, 2) == "2 configured, guardrail off (nothing is guarded)"
+    assert _agents_summary(multi, 2) == "2 active"
 
     single = OverviewConfig(guardrail_connector="codex", guardrail_mode="action")
     assert _enforcement_label(single) == "codex hook enforcement (action)"

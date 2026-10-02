@@ -184,8 +184,9 @@ class HintEngine:
         if state.filter_active:
             return f"Alerts filtered to {state.filter_active}. Click All or press Esc to clear; / changes search."
         if state.critical_alerts > 0:
+            scope = f" for {state.connector_filter}" if state.connector_filter else ""
             return (
-                f"{state.critical_alerts} critical/high alert(s). Click severity chips or press 1-5, "
+                f"{state.critical_alerts} critical/high alert(s){scope}. Click severity chips or press 1-5, "
                 "Enter opens details, Dismiss filtered clears the view."
             )
         return (

@@ -16,7 +16,7 @@ import json
 import os
 import stat
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
 from datetime import datetime, timezone
 from enum import IntEnum
@@ -1001,7 +1001,8 @@ class SetupPanelModel:
             restart_hint = "Restart: queued on save when runtime settings change"
         saved_hint = ""
         if self.last_saved_at is not None:
-            saved_hint = "Saved at " + self.last_saved_at.astimezone(timezone.utc).isoformat()
+            # "Saved 12:08 UTC", not a microsecond ISO stamp (GAP-1554).
+            saved_hint = "Saved " + self.last_saved_at.astimezone(timezone.utc).strftime("%H:%M UTC")
             actions.append(saved_hint)
         return SetupSaveRestartHints(
             changes=changes,
@@ -1278,6 +1279,7 @@ class SetupPanelModel:
             base = list(self._sandbox_form_fields(presets))
         if self.active_goal is not None:
             base = list(_filter_fields_for_goal(base, self.active_goal))
+            base = list(_narrow_goal_connectors(base, self.active_goal, self.config))
         self.form_fields = base
         self.form_active = True
         self.goal_active = False
@@ -1378,6 +1380,7 @@ class SetupPanelModel:
             fields = list(rebuild(overrides, self.config))
         if self.active_goal is not None:
             fields = list(_filter_fields_for_goal(fields, self.active_goal))
+            fields = list(_narrow_goal_connectors(fields, self.active_goal, self.config))
         self.form_fields = fields
         if self.form_fields:
             self.form_cursor = _clamp(self.form_cursor, 0, len(self.form_fields) - 1)
@@ -5846,6 +5849,38 @@ def _prune_empty_sections(fields: Sequence[WizardFormField]) -> tuple[WizardForm
                 continue
         out.append(field)
     return tuple(out)
+
+
+# Goals that act on a connector that is already set up.
+_CONFIGURED_CONNECTOR_GOALS = frozenset({"rerun", "remove"})
+
+
+def _narrow_goal_connectors(
+    fields: Sequence[WizardFormField],
+    goal: WizardGoal | None,
+    cfg: object | Mapping[str, Any] | None,
+) -> tuple[WizardFormField, ...]:
+    """Offer only configured connectors to "Re-run setup" and "Remove".
+
+    The Connector row cycled through every supported connector, so one Right
+    press picked an agent that was not installed (GAP-1547). Configured
+    connectors are listed alphabetically and the row starts on the first one
+    unless it already holds a configured connector.
+    """
+
+    if goal is None or goal.id not in _CONFIGURED_CONNECTOR_GOALS:
+        return tuple(fields)
+    configured = tuple(sorted(dict.fromkeys(_active_connector_names_for_setup(cfg))))
+    if not configured:
+        return tuple(fields)
+    narrowed: list[WizardFormField] = []
+    for field in fields:
+        if field.label == "Connector" and field.kind == "choice":
+            value = field.value if field.value in configured else configured[0]
+            default = field.default if field.default in configured else configured[0]
+            field = replace(field, options=configured, value=value, default=default)
+        narrowed.append(field)
+    return tuple(narrowed)
 
 
 def _filter_fields_for_goal(fields: Sequence[WizardFormField], goal: WizardGoal | None) -> tuple[WizardFormField, ...]:

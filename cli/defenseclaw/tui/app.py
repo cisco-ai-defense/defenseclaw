@@ -13,7 +13,7 @@ import subprocess
 import textwrap
 import time
 import weakref
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
@@ -172,6 +172,7 @@ from defenseclaw.tui.widgets.native_metrics import MetricDatum, MetricTile, Over
 from defenseclaw.tui.widgets.panel_split import (
     ASIDE_MIN_WIDTH,
     NAV_MIN_WIDTH,
+    NAV_WIDTH,
     NavItem,
     NavSwitcher,
     PanelNav,
@@ -180,7 +181,13 @@ from defenseclaw.tui.widgets.panel_split import (
     split_layout,
 )
 from defenseclaw.tui.widgets.status_strip import render_status_strip
-from defenseclaw.tui.widgets.tab_fit import BADGE_RESERVE, fit_tab_labels, strip_width
+from defenseclaw.tui.widgets.tab_fit import (
+    BADGE_RESERVE,
+    SHORT_LABELS,
+    TINY_LABELS,
+    fit_tab_labels,
+    strip_width,
+)
 from defenseclaw.tui.widgets.toasts import ToastLevel, ToastManager, ToastStack
 from defenseclaw.tui.windows_clipboard import ClipboardError, copy_windows_clipboard
 
@@ -583,6 +590,13 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         padding: 0 2 1 2;
     }
 
+    /* ...and so do the blank rows under the header and each button bar, so
+       a list keeps its rows under an open detail (GAP-1380, GAP-1541). */
+    Screen.-short #body,
+    Screen.-short .panel-controls {
+        margin-bottom: 0;
+    }
+
     #body {
         height: auto;
         margin-bottom: 1;
@@ -696,8 +710,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
     #panel-table {
         height: 1fr;
         /* With a detail pane open at 80x24 the list kept only its header
-           (or nothing): keep the header and two rows (GAP-1380). */
-        min-height: 3;
+           (or nothing): keep the header and two rows, plus the sideways
+           scrollbar a wide table shows (GAP-1380). */
+        min-height: 4;
         border: none;
         background: TOKEN_SURFACE_BASE;
         color: TOKEN_TEXT_PRIMARY;
@@ -998,6 +1013,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         padding: 0 1;
         background: TOKEN_SURFACE_RAISED;
         color: TOKEN_TEXT_SECONDARY;
+        /* A cut status line ends with "…", not mid-word (GAP-1541). */
+        text-wrap: nowrap;
+        text-overflow: ellipsis;
     }
 
     #hint {
@@ -1165,6 +1183,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         self._last_aside_signature: tuple[object, ...] | None = None
         self.detail_text = ""
         self.status_text = ""
+        # The panel that was on screen when the status line was last set.
+        self._status_panel: str | None = None
         self.hint_text = ""
         self.command_running = False
         self.command_label = ""
@@ -2524,17 +2544,26 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if width >= 96:
             # The version is on Overview; its cells go to tab names, so a
             # 200-column screen names every tab instead of a bare "R"
-            # (GAP-1283).
+            # (GAP-1283). Around 160 columns the brand alone is what leaves
+            # tabs as bare key letters, so it goes too (GAP-1544).
+            if self._tabs_fit_next_to("", width, tiny=True) and not self._tabs_fit_next_to(
+                "DefenseClaw", width, tiny=True
+            ):
+                return ""
             return "DefenseClaw"
         # At 80 columns the brand would push tabs off screen; Overview still
         # shows the wordmark.
         return ""
 
-    def _tabs_fit_next_to(self, title: str, width: int) -> bool:
-        """True when every visible tab keeps its full name beside ``title``."""
+    def _tabs_fit_next_to(self, title: str, width: int, *, tiny: bool = False) -> bool:
+        """True when every visible tab keeps its full (or tiny) name beside ``title``."""
 
-        strip = max(0, width - 2 - (len(title) + 1) - 12)
-        labels = [f"{key} {label}" for name, key, label in PANELS if not self._panel_hidden(name)]
+        strip = max(0, width - 2 - (len(title) + 1 if title else 0) - 12)
+        labels = [
+            f"{key} {TINY_LABELS.get(name, SHORT_LABELS.get(name, label)) if tiny else label}"
+            for name, key, label in PANELS
+            if not self._panel_hidden(name)
+        ]
         return strip_width(labels) + BADGE_RESERVE <= strip
 
     def _sync_header_title(self) -> None:
@@ -2623,9 +2652,16 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             pass
         self._schedule_state_save()
 
-        # A load message from the panel we just left ("MCPs: 0 loaded." on
-        # Sandboxes) is about that panel, not this one (GAP-1166).
-        if _is_load_status(self.status_text) and not self.command_running:
+        # A load message or result from the panel we just left ("MCPs: 0
+        # loaded." or "Exported 17 audit row(s) ..." on Sandboxes) is about
+        # that panel, not this one (GAP-1166, GAP-1512, GAP-1541). Command
+        # results ("Done: ...") stay until the next action.
+        left = self._status_panel
+        if _is_load_status(self.status_text) or (
+            left not in (None, panel)
+            and not self.command_running
+            and not _is_command_result(self.status_text)
+        ):
             self._set_status(self._status_text())
 
         self._panel_render_generation += 1
@@ -6401,15 +6437,16 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
 
             call_detail_parts: list[str] = []
             if allow_count or alert_count or block_decisions:
+                # Words, not "recent a136 w1 b2" codes (GAP-1545).
                 call_detail_parts.append(
-                    f"recent [{TOKENS.accent_green}]a{allow_count}[/] "
-                    f"[{TOKENS.accent_amber}]w{alert_count}[/] "
-                    f"[{TOKENS.accent_red}]b{block_decisions}[/]"
+                    f"allowed [{TOKENS.accent_green}]{allow_count}[/] · "
+                    f"warned [{TOKENS.accent_amber}]{alert_count}[/] · "
+                    f"blocked [{TOKENS.accent_red}]{block_decisions}[/]"
                 )
                 if top_hook:
-                    call_detail_parts.append(f"top: [{TOKENS.accent_cyan}]{top_hook}[/]")
+                    call_detail_parts.append(f"top event: [{TOKENS.accent_cyan}]{top_hook}[/]")
                 if selected_connector:
-                    call_detail_parts.append(f"fleet {fleet_hook_calls}")
+                    call_detail_parts.append(f"all connectors {fleet_hook_calls}")
                 elif outside_roster_hook_calls:
                     call_detail_parts.append(f"outside roster {outside_roster_hook_calls}")
             elif inspections or errors:
@@ -6424,27 +6461,29 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             else:
                 call_detail_parts.append("agent active")
                 if selected_connector:
-                    call_detail_parts.append(f"fleet {fleet_hook_calls}")
+                    call_detail_parts.append(f"all connectors {fleet_hook_calls}")
             calls_detail = " · ".join(call_detail_parts)
 
             top_blocked_target, top_blocked_count = self._top_block_target_for_connectors(scope_connectors)
             block_detail_parts: list[str] = []
             if top_blocked_target:
                 short_target = top_blocked_target if len(top_blocked_target) <= 22 else top_blocked_target[:21] + "…"
-                block_detail_parts.append(f"top: [{TOKENS.accent_cyan}]{short_target}[/] x{top_blocked_count}")
+                block_detail_parts.append(
+                    f"most blocked: [{TOKENS.accent_cyan}]{short_target}[/] x{top_blocked_count}"
+                )
             if not block_detail_parts:
                 if blocks_value:
                     block_detail_parts.append(
-                        f"[{TOKENS.accent_red}]{blocks_value}[/] persisted"
+                        f"[{TOKENS.accent_red}]{blocks_value}[/] recorded"
                     )
                 elif not gateway_online:
                     block_detail_parts.append(
-                        f"[{TOKENS.text_muted}]0 persisted · {gateway_unavailable_label}[/]"
+                        f"[{TOKENS.text_muted}]none recorded · {gateway_unavailable_label}[/]"
                     )
                 else:
                     block_detail_parts.append("no blocks yet")
             if selected_connector:
-                block_detail_parts.append(f"fleet {fleet_blocks_value}")
+                block_detail_parts.append(f"all connectors {fleet_blocks_value}")
             elif outside_roster_blocks:
                 block_detail_parts.append(f"outside roster {outside_roster_blocks}")
             blocks_detail = " · ".join(block_detail_parts)
@@ -6490,7 +6529,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 connectors=scope_connectors,
             )
             if selected_connector:
-                findings_detail = f"{findings_detail} · fleet {fleet_findings}"
+                findings_detail = f"{findings_detail} · all connectors {fleet_findings}"
             elif outside_roster_findings:
                 findings_detail = f"{findings_detail} · outside roster {outside_roster_findings}"
 
@@ -7083,7 +7122,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # bracket characters; escape before Rich parses the markup.
         return (
             f"{breakdown} · top: [{TOKENS.accent_cyan}]"
-            f"{rich_escape(short_target)}[/] {sev_letter}"
+            f"{rich_escape(short_target)}[/] ({sev_letter})"
         )
 
     def _ai_agents_metric_detail(self, ai_box: Any) -> str:
@@ -7636,7 +7675,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         scored independently via the persisted grouped aggregate so the
         single tile row stays intact (D1=B) while the detail sub-line
         attributes complete activity to the right connector — e.g.
-        ``persisted codex a12 w0 b3 · cursor a8 w1 b1``. ``blocks_detail`` lists
+        ``codex 15 · cursor 10 · 2 idle``. ``blocks_detail`` lists
         only connectors that actually blocked something. Returns ``("", "")``
         when fewer than two connectors are active, leaving the
         single-connector detail lines unchanged.
@@ -7645,22 +7684,25 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         connectors = self._active_connector_names()
         if not connectors:
             return "", ""
-        call_parts: list[str] = []
+        # Busiest connectors first, with their hook-call totals; idle ones
+        # are counted, not listed ("persisted amp a0 w0 b0 · persist…" named
+        # only the first of nine connectors; GAP-1545).
+        calls: list[tuple[int, str]] = []
         block_parts: list[str] = []
         for connector in connectors:
             allow, alert, block, _newest = self._connector_hook_stats_for_connectors(
                 (connector,)
             )
-            call_parts.append(
-                f"[{TOKENS.text_secondary}]persisted[/] [{TOKENS.accent_cyan}]{connector}[/] "
-                f"[{TOKENS.accent_green}]a{allow}[/] "
-                f"[{TOKENS.accent_amber}]w{alert}[/] "
-                f"[{TOKENS.accent_red}]b{block}[/]"
-            )
+            calls.append((allow + alert + block, connector))
             if block:
                 block_parts.append(
                     f"[{TOKENS.accent_cyan}]{connector}[/] [{TOKENS.accent_red}]{block}[/]"
                 )
+        busy = sorted((item for item in calls if item[0]), key=lambda item: (-item[0], item[1]))
+        call_parts = [f"[{TOKENS.accent_cyan}]{name}[/] {total}" for total, name in busy]
+        idle = len(calls) - len(busy)
+        if idle:
+            call_parts.append(f"[{TOKENS.text_muted}]{idle} idle[/]")
         return " · ".join(call_parts), " · ".join(block_parts)
 
     def _connector_status_map(self) -> dict[str, str]:
@@ -8616,7 +8658,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if overview_connector_rows and not selected_connector:
             cfg_rows[0] = (
                 "Agents",
-                Text(f"{len(overview_connector_rows)} active", style=TOKENS.text_secondary),
+                Text(_agents_summary(cfg, len(overview_connector_rows)), style=TOKENS.text_secondary),
             )
         llm_provider = (cfg.llm_provider if cfg else "") or (cfg.inspect_llm_provider if cfg else "")
         llm_model = (cfg.llm_model if cfg else "") or (cfg.inspect_llm_model if cfg else "")
@@ -9564,7 +9606,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             # Multi: replace the redundant "Agent: <primary>" line (index 0)
             # with a unified "Agents: N active" header. The per-connector
             # detail lives in the CONNECTORS section appended below.
-            config_lines[0] = ("Agents", f"{len(overview_connector_rows)} active")
+            config_lines[0] = ("Agents", _agents_summary(cfg, len(overview_connector_rows)))
         config_text = "\n".join(f"  {key:<16} {value}" for key, value in config_lines)
 
         connectors_text = self._overview_connectors_text(overview_connector_rows)
@@ -9893,6 +9935,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
 
     def _set_status(self, text: str) -> None:
         self.status_text = text
+        self._status_panel = self.active_panel
         strip = render_status_strip(self._hint_status_model())
         rendered = f"{text}  [#444444]│[/]  {strip}"
         # ``text`` is operator-supplied via every ``_set_status`` caller —
@@ -10010,10 +10053,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         )
         critical_alerts = self.alerts_model.critical_count()
         hidden_critical = 0
-        connector_filter = self._connector_filter() if active_panel == "overview" else ""
+        connector_filter = self._connector_filter() if active_panel in {"overview", "alerts"} else ""
         if connector_filter:
             # Alerts opens filtered to the connector, so count what it will
             # show; an alert with no connector is outside the filter (GAP-1253).
+            # The Alerts hint counts the same rows as its list (GAP-1582).
             self._sync_signal_connector_filters()
             scoped = self.alerts_model.scope_severity_counts()
             scoped_critical = scoped["CRITICAL"] + scoped["HIGH"]
@@ -10125,7 +10169,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             redaction_label = _v8_redaction_summary(self.overview_model.observability_status)
             mode = (cfg.guardrail_mode or "").strip().lower()
             active_policy = self.policy_model.active_policy()
-            if active_policy is not None:
+            if not cfg.guardrail_enabled:
+                # "policy default · action" implied enforcement while the
+                # guardrail was off (GAP-1561).
+                policy_posture = "guardrail off"
+            elif active_policy is not None:
                 policy_posture = f"policy {active_policy.name}" + (f" · {mode}" if mode else "")
             elif mode:
                 policy_posture = f"policy {mode}"
@@ -11060,7 +11108,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 else:
                     self.tools_model.refresh()
             else:
-                self.run_worker(self._load_catalog_model(panel), exclusive=False, thread=False)
+                self.run_worker(self._load_catalog_model(panel, announce=True), exclusive=False, thread=False)
         elif action.intent is not None:
             self._run_catalog_intent(action.intent)
         self._render_chrome()
@@ -11132,7 +11180,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if getattr(action, "hint", ""):
             self._set_status(action.hint)
         if getattr(action, "intent", None) is not None:
-            self.run_worker(self._load_inventory_model(), exclusive=False, thread=False)
+            self.run_worker(self._load_inventory_model(announce=True), exclusive=False, thread=False)
         self._render_chrome()
         return True
 
@@ -11410,15 +11458,17 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             if self._setup_nav_shown():
                 # Next to the section nav the focused field's hint is in the
                 # body (or the aside), so the table keeps Field and Value room.
+                # Values longer than the room left end with "…": a path cut
+                # at the edge ("/Users/dcm-fc3/.defensecl") looked like a
+                # wrong path (GAP-1554).
+                labels = [_truncate_ellipsis(field.label, 34) for field in section.fields]
+                checks = [_truncate_ellipsis(_validation_label(field), 30) for field in section.fields]
+                value_room = self._setup_config_value_room(labels, checks)
                 return (
                     ("Field", "Value", "Validation"),
                     tuple(
-                        (
-                            _truncate_ellipsis(field.label, 34),
-                            _config_display_value(field),
-                            _truncate_ellipsis(_validation_label(field), 30),
-                        )
-                        for field in section.fields
+                        (label, _truncate_ellipsis(_config_display_value(field), value_room), check)
+                        for label, check, field in zip(labels, checks, section.fields, strict=True)
                     ),
                 )
             # Long group headers (".. PLUGIN ACTIONS (severity -> …) ..") would
@@ -11502,6 +11552,26 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
     def _setup_width(self) -> int:
         width = int(getattr(self.size, "width", 0) or 0)
         return width if width > 0 else 80
+
+    def _setup_config_value_room(self, labels: Sequence[str], checks: Sequence[str]) -> int:
+        """Cells the config editor's Value column has beside the section nav."""
+
+        try:
+            main = int(self.query_one("#panel-main").size.width)
+        except NoMatches:
+            main = 0
+        if main <= 0:
+            # Before the first layout: the body (margins and padding), the
+            # nav and, from ASIDE_MIN_WIDTH, the 38% aside.
+            split = self._setup_width() - 6
+            main = split - NAV_WIDTH - 1
+            if self._setup_width() >= ASIDE_MIN_WIDTH:
+                main -= int(split * 0.38) + 1
+        # Table border and scrollbar, then each column's text plus its
+        # two padding cells.
+        label_width = max((len(text) for text in labels), default=0)
+        check_width = max((len(text) for text in checks), default=0)
+        return max(12, main - 4 - (label_width + 2) - (check_width + 2) - 2)
 
     def _setup_line(self, text: str, *, style: str = "", indent: int = 7) -> str:
         """One body line: plain ``text`` cut to the body width, escaped, styled."""
@@ -11623,10 +11693,16 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         facts: list[str] = []
         if model.disk_change_pending:
             facts.append("Config changed on disk; your draft is kept (save merges edited fields, revert reloads)")
-        if hints.restart_pending:
-            facts.append(f"Gateway restart queued: {hints.restart_reason}" if hints.restart_reason else "Gateway restart queued")
+        # "Saved 12:08 UTC · Restart the gateway (G) to apply it" (GAP-1554).
         if hints.saved_hint:
             facts.append(hints.saved_hint)
+        if hints.restart_pending:
+            reason = hints.restart_reason
+            facts.append(
+                f"Restart the gateway (G) to apply: {reason}"
+                if reason and reason != "config saved in the TUI"
+                else "Restart the gateway (G) to apply it"
+            )
         # From the aside width up, the aside describes the focused field.
         lines = [head] if self._setup_width() >= ASIDE_MIN_WIDTH else [head, second]
         if facts:
@@ -11968,7 +12044,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             return SetupPanelAction(True, hint=reason or "This field is read-only.")
         return SetupPanelAction(False)
 
-    def _save_setup_config(self, restart_reason: str = "config saved from Textual TUI") -> SetupPanelAction:
+    def _save_setup_config(self, restart_reason: str = "config saved in the TUI") -> SetupPanelAction:
         # Only errors on fields the operator changed block the save; an
         # untouched questionable value is written back exactly as loaded.
         errors = self.setup_model.blocking_validation_errors()
@@ -12651,24 +12727,28 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         self.setup_model.set_credential_snapshot(rows)
         self._render_chrome()
 
-    async def _load_inventory_model(self) -> None:
+    async def _load_inventory_model(self, *, announce: bool | None = None) -> None:
+        if announce is None:
+            # Quiet background refreshes, as for the catalogs (GAP-1581).
+            announce = not getattr(self.inventory_model, "loaded", False)
         names = self._active_connector_names()
         # 8.13 pass 2: a multi-connector install inventories every connector and
         # merges the snapshots into one view with a CONNECTOR column. Single-
         # connector installs keep the original one-shot ``aibom scan``.
         if len(names) > 1:
             self.inventory_model.show_connector_column = True
-            await self._load_inventory_merged(names)
+            await self._load_inventory_merged(names, announce=announce)
             return
         self.inventory_model.show_connector_column = False
         intent = self.inventory_model.load_intent()
         loading = intent.hint or "Loading inventory..."
-        self._set_status(loading)
+        if announce and self.active_panel == "inventory":
+            self._set_status(loading)
         try:
             returncode, stdout, stderr = await _communicate_captured(intent.binary, intent.args)
         except OSError as exc:
             self.inventory_model.apply_loaded(None, exc)
-            self._finish_load_status(loading, self.inventory_model.message)
+            self._end_load("inventory", loading, announce, self.inventory_model.message, self.inventory_model.message)
             self._render_chrome()
             return
         if returncode != 0:
@@ -12676,17 +12756,17 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 None,
                 stderr.decode(errors="replace").strip() or f"exit {returncode}",
             )
-            self._finish_load_status(loading, self.inventory_model.message)
+            self._end_load("inventory", loading, announce, self.inventory_model.message, self.inventory_model.message)
             self._render_chrome()
             return
         try:
             self.inventory_model.apply_json(stdout.decode(errors="replace"))
         except Exception as exc:  # noqa: BLE001 - parser errors are panel state.
             self.inventory_model.apply_loaded(None, exc)
-        self._finish_load_status(loading, self.inventory_model.message or "Inventory updated.")
+        self._end_load("inventory", loading, announce, self.inventory_model.message, "Inventory updated.")
         self._render_chrome()
 
-    async def _load_inventory_merged(self, names: list[str]) -> None:
+    async def _load_inventory_merged(self, names: list[str], *, announce: bool = True) -> None:
         """Inventory every active connector and merge the snapshots.
 
         Each connector's ``aibom scan`` runs with ``--connector <name>`` so its
@@ -12698,7 +12778,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         loading = f"Loading inventory for {len(names)} connectors..."
         # A background load of another panel ("Loading plugins for 5
         # connectors..." on Tools) is not about the panel on screen (GAP-1402).
-        if self.active_panel == "inventory":
+        if announce and self.active_panel == "inventory":
             self._set_status(loading)
         results: list[tuple[str, str | None]] = []
         for name in names:
@@ -12716,7 +12796,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if not any(text for _name, text in results):
             self.inventory_model.message = "Could not load inventory for any connector."
         self.inventory_model.set_connector_filter(self._connector_filter())
-        self._finish_load_status(loading, self.inventory_model.message or "Inventory updated.")
+        self._end_load("inventory", loading, announce, self.inventory_model.message, "Inventory updated.")
         self._render_chrome()
 
     async def _load_runtime_model(self) -> None:
@@ -12934,8 +13014,18 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         else:
             self.run_worker(self._confirm_and_run_intent(intent), exclusive=False, thread=False)
 
-    async def _load_catalog_model(self, panel: str) -> None:
+    async def _load_catalog_model(self, panel: str, *, announce: bool | None = None) -> None:
+        """Load one catalog panel.
+
+        ``announce`` puts "Loading ..." on the status line. By default only a
+        first load does: the slow refresh and post-action reloads of a loaded
+        table are quiet, or the status line read "Loading plugins for 8
+        connectors..." for minutes and hid "Done: ..." (GAP-1581).
+        """
+
         model = self.catalog_models[panel]
+        if announce is None:
+            announce = not getattr(model, "loaded", False)
         model.loading = True
         names = self._active_connector_names()
         asset_panel = panel in {"skills", "mcps", "plugins"}
@@ -12945,18 +13035,18 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # the original one-shot load (no column, no per-connector fan-out).
         if len(names) > 1 and asset_panel:
             model.show_connector_column = True
-            await self._load_catalog_merged(panel, model, names)
+            await self._load_catalog_merged(panel, model, names, announce=announce)
             return
         model.show_connector_column = False
         intent = model.load_intent_for(names[0]) if asset_panel and names else model.load_intent()
         loading = intent.hint or f"Loading {panel}..."
-        if self.active_panel == panel:
+        if announce and self.active_panel == panel:
             self._set_status(loading)
         try:
             returncode, stdout, stderr = await _communicate_captured(intent.binary, intent.args)
         except OSError as exc:
             model.apply_loaded([], exc)
-            self._finish_load_status(loading, model.message)
+            self._end_load(panel, loading, announce, model.message, model.message)
             self._render_chrome()
             return
 
@@ -12967,8 +13057,16 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 model.apply_json(stdout.decode(errors="replace"))  # type: ignore[attr-defined]
             except Exception as exc:  # noqa: BLE001 - parser errors are panel state.
                 model.apply_loaded([], exc)
-        self._finish_load_status(loading, model.message or f"{_panel_label(panel)}: {len(model.items)} loaded.")
+        self._end_load(panel, loading, announce, model.message, f"{_panel_label(panel)}: {len(model.items)} loaded.")
         self._render_chrome()
+
+    def _end_load(self, panel: str, loading: str, announce: bool, error: str, done: str) -> None:
+        """Say how a load ended: always for a failure, else only if announced."""
+
+        if announce:
+            self._finish_load_status(loading, error or done)
+        elif error and self.active_panel == panel:
+            self._set_status(error)
 
     def _finish_load_status(self, loading: str, result: str) -> None:
         """Replace a "Loading ..." status with how the load ended.
@@ -12982,7 +13080,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             self._set_status(result)
 
     async def _load_catalog_merged(
-        self, panel: str, model: Any, names: list[str]
+        self, panel: str, model: Any, names: list[str], *, announce: bool = True
     ) -> None:
         """Load ``panel`` once per active connector and merge the rows.
 
@@ -12993,7 +13091,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         """
 
         loading = f"Loading {panel} for {len(names)} connectors..."
-        if self.active_panel == panel:
+        if announce and self.active_panel == panel:
             self._set_status(loading)
         results: list[tuple[str, str | None]] = []
         for name in names:
@@ -13011,7 +13109,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if not any(text for _name, text in results):
             model.message = f"Could not load {panel} for any connector."
         model.set_connector_filter(self._connector_filter())
-        self._finish_load_status(loading, model.message or f"{_panel_label(panel)}: {len(model.items)} loaded.")
+        self._end_load(panel, loading, announce, model.message, f"{_panel_label(panel)}: {len(model.items)} loaded.")
         self._render_chrome()
 
     async def _confirm_and_run_intent(self, intent: Any) -> int | None:
@@ -15408,6 +15506,16 @@ def _is_load_status(text: object) -> bool:
     return bool(_LOAD_STATUS_RE.match(str(text or "")))
 
 
+# How a command ended (``_report_command_result`` and the cancel paths).
+_COMMAND_RESULT_RE = re.compile(
+    r"^(Done: .+|Cancelled: .+|Command cancelled\.|.+ failed \(exit \d+\)\. Activity shows the output\.)$"
+)
+
+
+def _is_command_result(text: object) -> bool:
+    return bool(_COMMAND_RESULT_RE.match(str(text or "")))
+
+
 def _service_reported(state: str) -> bool:
     return (state or "").strip().lower() not in {"", "unknown"}
 
@@ -15501,26 +15609,25 @@ def _derive_command_label(binary: str, args: tuple[str, ...]) -> str:
 
 
 def _severity_breakdown_markup(critical: int, high: int, medium: int, low: int) -> str:
-    """Render a compact ``C0 H3 M5 L2`` breakdown in colored markup.
+    """Render a ``Critical 5 · High 2`` breakdown in colored markup.
 
     Used in metric-tile detail rows so users can see severity context at
-    a glance without opening the Alerts panel. Zero counts are dimmed so
-    only non-zero values draw the eye.
+    a glance without opening the Alerts panel. Only non-zero severities are
+    listed, in words: the old ``C5 H2 M0 L0`` codes were not explained
+    anywhere (GAP-1545).
     """
 
-    def cell(letter: str, count: int, accent: str) -> str:
-        if count <= 0:
-            return f"[{TOKENS.text_muted}]{letter}0[/]"
-        return f"[{accent} bold]{letter}{count}[/]"
-
-    return " ".join(
-        (
-            cell("C", critical, TOKENS.accent_red),
-            cell("H", high, TOKENS.accent_orange),
-            cell("M", medium, TOKENS.accent_amber),
-            cell("L", low, TOKENS.accent_blue),
+    cells = [
+        f"[{accent} bold]{word} {count}[/]"
+        for word, count, accent in (
+            ("Critical", critical, TOKENS.accent_red),
+            ("High", high, TOKENS.accent_orange),
+            ("Medium", medium, TOKENS.accent_amber),
+            ("Low", low, TOKENS.accent_blue),
         )
-    )
+        if count > 0
+    ]
+    return " · ".join(cells) if cells else f"[{TOKENS.text_muted}]none open[/]"
 
 
 def _metric_severity_bucket(severity: str) -> str:
@@ -15623,6 +15730,10 @@ def _policy_posture(cfg: OverviewConfig | None, active: object | None = None) ->
 def _enforcement_label(cfg: OverviewConfig | None) -> str:
     if cfg is None:
         return "not configured"
+    if not cfg.guardrail_enabled and cfg.connector_modes:
+        # After "defenseclaw uninstall" the connectors stay in the config
+        # but nothing is enforced (GAP-1561).
+        return "off - guardrail disabled, nothing is guarded"
     # Multi-connector: naming a single primary connector ("antigravity hook
     # observability") hides the other active connectors. Report the count
     # instead; the per-connector modes live in the roster below.
@@ -15638,6 +15749,14 @@ def _enforcement_label(cfg: OverviewConfig | None) -> str:
     surface = "policy plugin" if connector == "amp" else ("policy" if connector == "omnigent" else "hook")
     posture = "enforcement" if mode == "action" else "observability"
     return f"{connector} {surface} {posture} ({mode})"
+
+
+def _agents_summary(cfg: OverviewConfig | None, count: int) -> str:
+    """``"6 active"``, or the CLI status wording when the guardrail is off."""
+
+    if cfg is not None and not cfg.guardrail_enabled:
+        return f"{count} configured, guardrail off (nothing is guarded)"
+    return f"{count} active"
 
 
 def _cycle_value(current: str, options: tuple[str, ...], delta: int) -> str:

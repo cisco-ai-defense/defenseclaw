@@ -745,7 +745,15 @@ class OverviewPanelModel:
                 )
             )
         if self.cfg is not None and guardrail_off:
-            notices.append(OverviewNotice("warn", "LLM guardrail not configured - press [g] to set up"))
+            if self.cfg.connector_modes:
+                # Connectors are set up but the guardrail is off, as after
+                # "defenseclaw uninstall": say that nothing is guarded
+                # (GAP-1561).
+                notices.append(
+                    OverviewNotice("warn", "Guardrail is off - no connector is guarded; press [g] to set up")
+                )
+            else:
+                notices.append(OverviewNotice("warn", "LLM guardrail not configured - press [g] to set up"))
         if not self.skill_scanner_available:
             notices.append(
                 OverviewNotice(

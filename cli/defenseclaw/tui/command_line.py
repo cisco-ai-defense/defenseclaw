@@ -214,6 +214,10 @@ def infer_command_risk(category: str, args: tuple[str, ...]) -> str:
     if category in {"info", "scan"}:
         return "read-only"
     if category == "daemon":
+        # "watchdog status" only reads state, like "gateway status"
+        # (GAP-1584).
+        if lowered[-1] in {"status", "list-backups"}:
+            return "read-only"
         return "mutation"
     if category in {"setup", "install"}:
         return "setup"

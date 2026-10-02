@@ -1416,7 +1416,7 @@ def test_setup_review_save_action_and_saved_hint_are_model_level() -> None:
 
     model.mark_saved(datetime(2026, 5, 20, 12, 0, tzinfo=timezone.utc))
     hints = model.save_restart_hints()
-    assert hints.saved_hint == "Saved at 2026-05-20T12:00:00+00:00"
+    assert hints.saved_hint == "Saved 12:00 UTC"
     assert hints.saved_hint in hints.action_bar
 
 

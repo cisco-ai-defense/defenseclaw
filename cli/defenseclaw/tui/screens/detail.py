@@ -42,7 +42,10 @@ class DetailModalModel:
         """Render a no-truncation detail table."""
 
         table = Table.grid(padding=(0, 2), expand=True)
-        table.add_column(width=22, no_wrap=True)
+        # Long labels wrap instead of being cut: "Active Connector: cla…"
+        # and two "Active Connector: ope…" rows hid which connector was
+        # meant (GAP-1547).
+        table.add_column(width=22, overflow="fold")
         table.add_column(overflow="fold")
         for label, value in self.pairs:
             if not label and not value:

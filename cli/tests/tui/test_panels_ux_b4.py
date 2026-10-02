@@ -94,7 +94,7 @@ def test_active_tab_keeps_its_name_beside_large_windows_badges(monkeypatch) -> N
 
     monkeypatch.setattr(tab_fit, "_PLAIN_BADGE", True)
     unread = {"alerts": 8, "logs": 99, "audit": 99, "activity": 4, "ai": 2}
-    for active, label in (("inventory", "6 Inventory"), ("registries", "R Registry"), ("ai", "V AI (2)")):
+    for active, label in (("inventory", "6 Inventory"), ("registries", "R Registry\u2026"), ("ai", "V AI (2)")):
         labels = tab_fit.fit_tab_labels(PANELS, active, unread, 66)
         assert labels[active] == label
         assert tab_fit.strip_width(tuple(labels.values())) <= 66
