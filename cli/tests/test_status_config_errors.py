@@ -1,0 +1,98 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+# SPDX-License-Identifier: Apache-2.0
+
+"""CLI status and config error wording (final-cert UX batch 6)."""
+
+from __future__ import annotations
+
+import subprocess
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+from click.testing import CliRunner
+from defenseclaw import config as dcconfig
+from defenseclaw import config_inspect, ux
+from defenseclaw.commands import cmd_guardrail
+from defenseclaw.commands.cmd_migrate import migrate_cmd
+from defenseclaw.context import AppContext
+from defenseclaw.migrations import MigrationError, migrate
+
+from tests.test_fail_mode_runtime import _runtime_cfg
+
+
+@pytest.fixture()
+def data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    monkeypatch.delenv("DEFENSECLAW_CONFIG", raising=False)
+    root = tmp_path / "data"
+    root.mkdir()
+    return root
+
+
+@pytest.mark.parametrize("content", ["", "\n  \n", "# only a comment\n"])
+def test_empty_config_is_named_not_migrated(data_dir: Path, content: str) -> None:
+    # GAP-1633: an empty file is not a 0.x install to import.
+    path = data_dir / "config.yaml"
+    path.write_text(content, encoding="utf-8")
+    with pytest.raises(MigrationError, match="is empty") as raised:
+        migrate(str(data_dir))
+    assert "defenseclaw init" in str(raised.value)
+    with pytest.raises(dcconfig.ConfigVersionError, match="nothing was changed"):
+        dcconfig.require_v8_config(path=str(path))
+    assert path.read_text(encoding="utf-8") == content
+
+
+def test_unversioned_config_still_asks_for_migrate(data_dir: Path) -> None:
+    path = data_dir / "config.yaml"
+    path.write_text("gateway: {}\n", encoding="utf-8")
+    with pytest.raises(dcconfig.ConfigVersionError, match="defenseclaw migrate"):
+        dcconfig.require_v8_config(path=str(path))
+
+
+def test_from_version_newer_than_this_release_warns(data_dir: Path) -> None:
+    # GAP-1610
+    result = CliRunner().invoke(migrate_cmd, ["--data-dir", str(data_dir), "--from-version", "999.0.0"])
+    assert result.exit_code == 0, result.output
+    assert "newer than this DefenseClaw" in result.stderr
+    older = CliRunner().invoke(migrate_cmd, ["--data-dir", str(data_dir), "--from-version", "0.0.1"])
+    assert "newer than this DefenseClaw" not in older.stderr
+
+
+def test_helper_timeout_is_not_reported_as_invalid(monkeypatch: pytest.MonkeyPatch) -> None:
+    # GAP-1621
+    def slow(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired(cmd="defenseclaw-gateway", timeout=1)
+
+    monkeypatch.setattr(config_inspect, "run_pinned_executable", slow)
+    with pytest.raises(config_inspect.ConfigInspectTimeoutError, match="did not finish within 60 s"):
+        config_inspect._run(["defenseclaw-gateway", "config-v8", "validate"])
+
+
+def test_version_detail_arrow_has_ascii_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    # GAP-1601: '↳' came out as mojibake when piped in PowerShell.
+    monkeypatch.setattr(ux, "_configured_unicode_output", False)
+    assert ux.console_text("↳ (commit=abc)") == "-> (commit=abc)"
+
+
+def test_guardrail_status_disabled_has_no_drift_or_proxy_port(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # GAP-1648 and GAP-1649: hooks removed on purpose are not drift, and a
+    # hook-only install has no proxy port.
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "open"})
+    app = AppContext()
+    app.cfg = cfg
+    app.logger = MagicMock()
+    with (
+        patch("defenseclaw.fail_mode._is_windows", return_value=True),
+        patch("defenseclaw.fail_mode.Path.home", return_value=home),
+    ):
+        enabled = CliRunner().invoke(cmd_guardrail.status_cmd, [], obj=app)
+        cfg.guardrail.enabled = False
+        disabled = CliRunner().invoke(cmd_guardrail.status_cmd, [], obj=app)
+    assert enabled.exit_code == 0, enabled.output
+    assert "runtime fail-mode drift" in enabled.output
+    assert disabled.exit_code == 0, disabled.output
+    assert "disabled (guardrail off)" in disabled.output
+    assert "runtime fail-mode drift" not in disabled.output
+    assert "port:" not in enabled.output and "port:" not in disabled.output

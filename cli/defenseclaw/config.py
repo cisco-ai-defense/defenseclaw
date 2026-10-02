@@ -188,6 +188,39 @@ def _unreadable_config_message(cfg_file: str, exc: BaseException) -> str:
     )
 
 
+_EMPTY_CONFIG_PROBE_BYTES = 64 << 10
+
+
+def config_is_empty(path: str | None = None) -> bool:
+    """Whether config.yaml exists but holds no settings (0 bytes, blank or comments only)."""
+
+    cfg_file = path or str(config_path())
+    try:
+        with open(cfg_file, "rb") as stream:
+            raw = stream.read(_EMPTY_CONFIG_PROBE_BYTES + 1)
+    except OSError:
+        return False
+    if len(raw) > _EMPTY_CONFIG_PROBE_BYTES:
+        return False
+    try:
+        return yaml.compose(raw) is None
+    except yaml.YAMLError:
+        return False
+
+
+def empty_config_message(path: str | None = None) -> str:
+    """An empty config.yaml is not an older config: say so and name the repair (GAP-1633)."""
+
+    cfg_file = path or str(config_path())
+    home = os.path.dirname(cfg_file) or "."
+    return (
+        f"{cfg_file} is empty: it holds no settings (as after a crash or a full disk). "
+        "It is not an older configuration, and nothing was changed. Restore your copy of config.yaml "
+        f"(an upgrade keeps the previous one in {os.path.join(home, 'previous', 'data')}), "
+        "or remove the empty file and run 'defenseclaw init'."
+    )
+
+
 def require_current_config(*, path: str | None = None, allow_missing: bool = False) -> None:
     """Fail before full config loading unless the source is the current schema."""
 
@@ -202,6 +235,8 @@ def require_current_config(*, path: str | None = None, allow_missing: bool = Fal
             "run 'defenseclaw upgrade', or 'defenseclaw rollback' to restore the previous install."
         )
     if version != CURRENT_CONFIG_VERSION:
+        if version == 0 and config_is_empty(path):
+            raise ConfigVersionError(empty_config_message(path))
         raise ConfigVersionError("Configuration schema v8 is required — run 'defenseclaw migrate' first.")
 
 
