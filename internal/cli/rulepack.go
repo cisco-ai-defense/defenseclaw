@@ -113,8 +113,21 @@ func runRulePackValidate(cmd *cobra.Command, _ []string) error {
 			Valid:       false,
 			Error:       &diagnostic,
 		}
+		// A directory-level problem is reported at the pack root ("."); the
+		// text output names the directory the operator passed instead
+		// (GAP-1405). The JSON wire format keeps its path-free contract.
+		dirLevel := rulePackValidateDir != "" && diagnostic.Path == "." &&
+			(strings.HasPrefix(diagnostic.Code, "directory_") || diagnostic.Code == "not_directory")
+		if dirLevel && !rulePackValidateJSON {
+			textDiag := diagnostic
+			textDiag.Path = rulePackValidateDir
+			response.Error = &textDiag
+		}
 		if writeErr := writeRulePackValidation(cmd.OutOrStdout(), response, rulePackValidateJSON); writeErr != nil {
 			return errors.New("rule-pack validation failed and its safe diagnostic could not be written")
+		}
+		if dirLevel {
+			return fmt.Errorf("rule-pack validation failed [%s]: check --dir %s (omit --dir to validate the embedded default pack)", diagnostic.Code, rulePackValidateDir)
 		}
 		return fmt.Errorf("rule-pack validation failed [%s]", diagnostic.Code)
 	}

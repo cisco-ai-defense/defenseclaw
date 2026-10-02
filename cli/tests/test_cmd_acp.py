@@ -696,12 +696,19 @@ def test_verify_reports_profile_drift_after_a_hand_edit(tmp_path, monkeypatch):
 
         # status surfaces it too, so the operator does not need to guess which
         # binding to verify.
-        listed = CliRunner().invoke(acp_cmd, ["status"], obj=app)
+        listed = CliRunner().invoke(acp_cmd, ["status", "--json"], obj=app)
         assert listed.exit_code == 0, listed.output
         binding = json.loads(listed.output)["bindings"]["zed/kiro"]
         assert binding["healthy"] is False
         assert binding["profile"] == "watch"
         assert binding["profile_source"] == "binding"
+
+        # GAP-1501: without --json the posture is a readable summary.
+        human = CliRunner().invoke(acp_cmd, ["status"], obj=app)
+        assert human.exit_code == 0, human.output
+        assert human.output.startswith("ACP guard: ")
+        assert "zed/kiro" in human.output and "NEEDS ATTENTION" in human.output
+        assert "acp status --json" in human.output
     finally:
         cleanup_app(app, db_path, data_dir)
 

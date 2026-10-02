@@ -525,6 +525,20 @@ func TestPrintConnectorModesMarksADisabledConnectorAsNotEnforced(t *testing.T) {
 	}
 }
 
+// GAP-1386: with no connector configured the Connector Mode block names
+// "none" instead of a blank value and an "unconfigured" data path.
+func TestPrintConnectorModesNoConnectorSaysNone(t *testing.T) {
+	out := captureStdout(t, func() {
+		printConnectorModes([]connectorModeSummary{{Mode: "unconfigured"}})
+	})
+	if !strings.Contains(out, "none (no active connector)") {
+		t.Errorf("missing 'none' connector value:\n%s", out)
+	}
+	if strings.Contains(out, "unconfigured") {
+		t.Errorf("no-connector block still shows the unconfigured data path:\n%s", out)
+	}
+}
+
 // TestPrintSubsystemsHidesUnusedFleetUplink: a hook-only roster never uses the
 // OpenClaw fleet uplink, so status must not lead with its DISABLED state and
 // OpenClaw advice (MAC-U2-02); an OpenClaw roster still sees it.

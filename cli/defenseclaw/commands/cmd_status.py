@@ -844,9 +844,21 @@ def _print_application_protection(cfg, health: dict | None = None) -> None:
     enabled = bool(state.get("enabled", getattr(getattr(cfg, "application_protection", None), "enabled", False)))
     status_text = ux._style("enabled", fg="green") if enabled else ux._style("disabled", fg="yellow")
     health_state = str(state.get("health_state") or "").strip()
-    if health_state:
+    if health_state and health_state.lower() not in ("enabled", "disabled"):
         status_text += ux.dim(f" ({health_state})")
     _status_row("App protect", status_text)
+    if not enabled:
+        # GAP-1498: no "(disabled)" echo, no scan that will never run; say
+        # what the feature does and how to turn it on.
+        ux.echo(
+            "                "
+            + ux.dim(
+                "guards AI apps that discovery finds; to turn it on, set "
+                "application_protection.enabled: true in the config file "
+                "('defenseclaw config path') and restart the gateway"
+            )
+        )
+        return
     guardrail_mode = str(state.get("guardrail_mode") or "observe")
     asset_mode = str(state.get("asset_policy_mode") or "observe")
     trust_check = "on" if bool(state.get("require_trusted_binary_paths")) else "off"

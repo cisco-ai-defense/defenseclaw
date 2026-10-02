@@ -165,7 +165,7 @@ def discover(
         if otel_result["emitted"]:
             click.echo("  OTel: emitted agent discovery telemetry")
         elif otel_result["error"]:
-            click.echo(f"  OTel: not emitted ({otel_result['error']})", err=True)
+            click.echo(f"  OTel: not emitted - {otel_result['error']}", err=True)
 
 
 _AI_USAGE_STATES: tuple[str, ...] = ("new", "changed", "seen", "active", "gone")
@@ -299,7 +299,7 @@ def usage(
     try:
         payload = client.scan_ai_usage() if refresh else client.ai_usage()
     except requests.ConnectionError as exc:
-        raise click.ClickException(f"sidecar unavailable: {exc}") from exc
+        raise click.ClickException(_sidecar_unavailable(exc)) from exc
     except requests.HTTPError as exc:
         status = exc.response.status_code if exc.response is not None else "unknown"
         raise click.ClickException(f"sidecar rejected AI usage request: HTTP {status}") from exc
@@ -394,7 +394,7 @@ def processes(
     try:
         payload = client.scan_ai_usage() if refresh else client.ai_usage()
     except requests.ConnectionError as exc:
-        raise click.ClickException(f"sidecar unavailable: {exc}") from exc
+        raise click.ClickException(_sidecar_unavailable(exc)) from exc
     except requests.HTTPError as exc:
         status = exc.response.status_code if exc.response is not None else "unknown"
         raise click.ClickException(f"sidecar rejected AI usage request: HTTP {status}") from exc
@@ -556,7 +556,7 @@ def components_cmd(
             client.scan_ai_usage()
         payload = client.ai_usage_components()
     except requests.ConnectionError as exc:
-        raise click.ClickException(f"sidecar unavailable: {exc}") from exc
+        raise click.ClickException(_sidecar_unavailable(exc)) from exc
     except requests.HTTPError as exc:
         status = exc.response.status_code if exc.response is not None else "unknown"
         if status == 503:
@@ -626,7 +626,7 @@ def components_show(
     try:
         loc_payload = client.ai_usage_component_locations(eco, cname)
     except requests.ConnectionError as exc:
-        raise click.ClickException(f"sidecar unavailable: {exc}") from exc
+        raise click.ClickException(_sidecar_unavailable(exc)) from exc
     except requests.HTTPError as exc:
         status = exc.response.status_code if exc.response is not None else "unknown"
         raise click.ClickException(
@@ -686,7 +686,7 @@ def components_history(
     try:
         hist_payload = client.ai_usage_component_history(eco, cname)
     except requests.ConnectionError as exc:
-        raise click.ClickException(f"sidecar unavailable: {exc}") from exc
+        raise click.ClickException(_sidecar_unavailable(exc)) from exc
     except requests.HTTPError as exc:
         status = exc.response.status_code if exc.response is not None else "unknown"
         raise click.ClickException(
@@ -813,7 +813,7 @@ def confidence_policy_show(
     try:
         payload = client.ai_usage_confidence_policy(source=source)
     except requests.ConnectionError as exc:
-        raise click.ClickException(f"sidecar unavailable: {exc}") from exc
+        raise click.ClickException(_sidecar_unavailable(exc)) from exc
     except requests.HTTPError as exc:
         status = exc.response.status_code if exc.response is not None else "unknown"
         raise click.ClickException(
@@ -858,7 +858,7 @@ def confidence_policy_default(
     try:
         payload = client.ai_usage_confidence_policy(source="default")
     except requests.ConnectionError as exc:
-        raise click.ClickException(f"sidecar unavailable: {exc}") from exc
+        raise click.ClickException(_sidecar_unavailable(exc)) from exc
     except requests.HTTPError as exc:
         status = exc.response.status_code if exc.response is not None else "unknown"
         raise click.ClickException(
@@ -912,7 +912,7 @@ def confidence_policy_validate(
     try:
         payload = client.ai_usage_validate_confidence_policy(yaml_text)
     except requests.ConnectionError as exc:
-        raise click.ClickException(f"sidecar unavailable: {exc}") from exc
+        raise click.ClickException(_sidecar_unavailable(exc)) from exc
     except requests.HTTPError as exc:
         status = exc.response.status_code if exc.response is not None else "unknown"
         raise click.ClickException(
@@ -1424,7 +1424,7 @@ def discovery_status(
                 )
             live["summary"] = payload.get("summary") or {}
         except requests.ConnectionError as exc:
-            live["error"] = f"sidecar unavailable: {exc}"
+            live["error"] = _sidecar_unavailable(exc)
         except requests.HTTPError as exc:
             status = exc.response.status_code if exc.response is not None else "unknown"
             live["error"] = f"sidecar rejected request: HTTP {status}"
@@ -1832,7 +1832,7 @@ def discovery_scan(
     try:
         payload = client.scan_ai_usage()
     except requests.ConnectionError as exc:
-        raise click.ClickException(f"sidecar unavailable: {exc}") from exc
+        raise click.ClickException(_sidecar_unavailable(exc)) from exc
     except requests.HTTPError as exc:
         status = exc.response.status_code if exc.response is not None else "unknown"
         if status == 503:
@@ -1966,7 +1966,7 @@ def _runtime_snapshot(
     try:
         return client.scan_ai_runtime() if refresh else client.ai_runtime()
     except requests.ConnectionError as exc:
-        raise click.ClickException(f"sidecar unavailable: {exc}") from exc
+        raise click.ClickException(_sidecar_unavailable(exc)) from exc
     except requests.HTTPError as exc:
         status = exc.response.status_code if exc.response is not None else "unknown"
         if status == 503:
@@ -3314,7 +3314,7 @@ def _trigger_post_enable_scan(
             )
             return
         except (requests.ConnectionError, requests.Timeout) as exc:
-            last_err = f"sidecar unavailable: {exc}"
+            last_err = _sidecar_unavailable(exc)
         except requests.HTTPError as exc:
             status = exc.response.status_code if exc.response is not None else "unknown"
             last_err = f"sidecar rejected scan: HTTP {status}"
@@ -3592,13 +3592,27 @@ def _emit_discovery_report(
         client.emit_agent_discovery(report)
         result["emitted"] = True
     except (requests.ConnectionError, requests.Timeout) as exc:
-        result["error"] = f"sidecar unavailable: {exc}"
+        result["error"] = _sidecar_unavailable(exc, host, port)
     except requests.HTTPError as exc:
         status = exc.response.status_code if exc.response is not None else "unknown"
         result["error"] = f"sidecar rejected discovery telemetry: HTTP {status}"
     except requests.RequestException as exc:
         result["error"] = f"sidecar request failed: {exc}"
     return result
+
+
+def _sidecar_unavailable(exc: Exception, host: str | None = None, port: int | None = None) -> str:
+    """A plain hint for an unreachable gateway instead of urllib3's text (GAP-1471)."""
+    target = f"{host}:{port}" if host and port else ""
+    if not target:
+        url = getattr(getattr(exc, "request", None), "url", "") or ""
+        from urllib.parse import urlparse  # noqa: PLC0415
+
+        target = urlparse(url).netloc if url else ""
+    where = f" on {target}" if target else ""
+    if isinstance(exc, requests.Timeout) and not isinstance(exc, requests.ConnectTimeout):
+        return f"the gateway{where} did not answer in time; check it with 'defenseclaw-gateway status'"
+    return f"the gateway is not running{where}; start it with 'defenseclaw-gateway start'"
 
 
 def _is_loopback_host(host: str) -> bool:
@@ -4994,7 +5008,7 @@ def _resolve_component(
     try:
         payload = client.ai_usage_components()
     except requests.ConnectionError as exc:
-        return {}, f"sidecar unavailable: {exc}"
+        return {}, _sidecar_unavailable(exc)
     except requests.HTTPError as exc:
         status = exc.response.status_code if exc.response is not None else "unknown"
         return {}, f"sidecar rejected components request: HTTP {status}"

@@ -50,6 +50,20 @@ def _rego_dir() -> str:
     return str(bundled_rego_dir())
 
 
+def _default_rego_dir(app: AppContext) -> str:
+    """The Rego directory the gateway loads: <policy_dir>/rego when it exists.
+
+    Falls back to the bundled copy (a fresh install before init). The bundled
+    directory lives inside the package and is replaced on upgrade, so it is
+    the wrong place to point users at for their own tests (GAP-1459).
+    """
+    policy_dir = getattr(getattr(app, "cfg", None), "policy_dir", "") or ""
+    user_rego = os.path.join(policy_dir, "rego") if policy_dir else ""
+    if user_rego and os.path.isdir(user_rego):
+        return user_rego
+    return _rego_dir()
+
+
 def _ensure_policies_dir(app: AppContext) -> str:
     d = _policies_dir(app)
     os.makedirs(d, exist_ok=True)
@@ -716,13 +730,12 @@ def _activate_policy(app: AppContext, name: str) -> str:
 def delete(app: AppContext, name: str, force: bool) -> None:
     """Delete a custom policy.
 
-    Deleting the policy that is currently active is refused unless
-    ``--force`` is given (N1): otherwise the gateway's live data.json
-    keeps pointing at — and enforcing — a policy whose YAML no longer
-    exists, and ``policy list`` still marks it ``[active]``. With
-    ``--force`` the policy is removed and ``default`` is re-activated so
-    the live pointer is never left dangling.
+    The active policy is not deleted unless --force is given; activate
+    another policy first, or pass --force to delete it and switch back to
+    the built-in 'default' policy.
     """
+    # Without the guard the gateway would keep enforcing a policy whose YAML
+    # is gone and 'policy list' would still mark it [active].
     name = _sanitize_policy_name(name)
 
     if name in BUILTIN_POLICIES:
@@ -775,7 +788,9 @@ def delete(app: AppContext, name: str, force: bool) -> None:
 # ---------------------------------------------------------------------------
 
 @policy.command()
-@click.option("--rego-dir", default=None, help="Path to rego directory (default: bundled policies/rego)")
+@click.option("--rego-dir", default=None,
+              help="Path to rego directory (default: <policy_dir>/rego, e.g. "
+                   "~/.defenseclaw/policies/rego; the bundled copy before init)")
 @pass_ctx
 def validate(app: AppContext, rego_dir: str | None) -> None:
     """Validate OPA Rego modules and data.json schema.
@@ -785,7 +800,7 @@ def validate(app: AppContext, rego_dir: str | None) -> None:
       2. All severity levels in actions and scanner_overrides have valid fields\n
       3. Rego modules compile without errors ('opa' if installed, else defenseclaw-gateway)
     """
-    rd = rego_dir or _rego_dir()
+    rd = rego_dir or _default_rego_dir(app)
     errors: list[str] = []
 
     # 1. Validate data.json
@@ -859,7 +874,9 @@ def validate(app: AppContext, rego_dir: str | None) -> None:
 # ---------------------------------------------------------------------------
 
 @policy.command("test")
-@click.option("--rego-dir", default=None, help="Path to rego directory (default: bundled policies/rego)")
+@click.option("--rego-dir", default=None,
+              help="Path to rego directory (default: <policy_dir>/rego, e.g. "
+                   "~/.defenseclaw/policies/rego; the bundled copy before init)")
 @click.option("-v", "--verbose", is_flag=True, help="Verbose test output")
 @pass_ctx
 def test_rego(app: AppContext, rego_dir: str | None, verbose: bool) -> None:
@@ -868,7 +885,7 @@ def test_rego(app: AppContext, rego_dir: str | None, verbose: bool) -> None:
     Uses the 'opa' binary when it is on PATH, otherwise the OPA test runner
     built into defenseclaw-gateway (no separate install needed).
     """
-    rd = rego_dir or _rego_dir()
+    rd = rego_dir or _default_rego_dir(app)
 
     if not os.path.isdir(rd):
         ux.err(f"error: rego directory not found: {rd}")
@@ -876,7 +893,10 @@ def test_rego(app: AppContext, rego_dir: str | None, verbose: bool) -> None:
 
     if not _has_rego_tests(rd):
         # Installed policy directories ship no *_test.rego files, so this is
-        # the normal answer there, not a failure (GAP-1091).
+        # the normal answer there, not a failure (GAP-1091). The modules
+        # must still compile, as 'opa test' requires (GAP-1392).
+        if not _try_rego_compile(rd):
+            raise SystemExit(1)
         click.echo(
             f"No Rego unit tests (*_test.rego) in {rd}; nothing to run. "
             "Add <module>_test.rego files next to your policies to test them."

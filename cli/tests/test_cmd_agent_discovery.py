@@ -684,7 +684,7 @@ class DiscoveryStatusTests(unittest.TestCase):
                 catch_exceptions=False,
             )
         self.assertEqual(result.exit_code, 0, msg=result.output)
-        self.assertIn("sidecar unavailable", result.output)
+        self.assertIn("gateway is not running", result.output)
         # Unreachable means we cannot detect drift — the warning must
         # NOT fire (it would be noise when the operator already knows
         # the sidecar is down).
@@ -1379,7 +1379,7 @@ class DiscoveryScanTests(unittest.TestCase):
                 patch("defenseclaw.commands.cmd_agent.OrchestratorClient", FakeClient):
             result = runner.invoke(cmd_agent.discovery_scan, [], obj=app)
         self.assertNotEqual(result.exit_code, 0)
-        self.assertIn("sidecar unavailable", result.output)
+        self.assertIn("gateway is not running", result.output)
 
 
 class AgentProcessesTests(unittest.TestCase):

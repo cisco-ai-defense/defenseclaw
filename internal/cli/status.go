@@ -682,10 +682,13 @@ func printConnectorModes(modes []connectorModeSummary) {
 
 func printConnectorModeEntry(m *connectorModeSummary) {
 	modeLabel := Style(fmt.Sprintf("%-18s", "Connector:"), "fg=bright_black", "bold")
-	connectorName := m.Connector
-	if connectorName != "" {
-		connectorName = fmt.Sprintf("%s (%s)", friendlyConnectorName(m.Connector), m.Connector)
+	if m.Connector == "" {
+		// GAP-1386: no connector configured (init --connector none) used
+		// to print a blank "Connector:" value and "Data path: unconfigured".
+		fmt.Printf("    %s%s\n", modeLabel, Dim("none (no active connector)"))
+		return
 	}
+	connectorName := fmt.Sprintf("%s (%s)", friendlyConnectorName(m.Connector), m.Connector)
 	fmt.Printf("    %s%s\n", modeLabel, connectorName)
 	if m.disabled() {
 		// A configured but disabled connector has no hooks or proxy in
