@@ -1900,18 +1900,38 @@ func validateWindowsManagedRuntimeSelectorTargetAgainstRemoval(
 	entry windowsManagedRuntimeSelectorTarget,
 	opts WindowsManagedRuntimeGenerationRemovalOptions,
 ) error {
-	if entry.Connector != opts.Connector || entry.SID != opts.TargetSID ||
-		entry.HookExecutable != opts.HookExecutable ||
-		!sameWindowsEnterprisePath(entry.HookExecutable, opts.HookExecutable) {
+	if entry.Connector != opts.Connector || entry.SID != opts.TargetSID {
+		// Connector/SID mismatch is structural - the caller asked to
+		// remove the wrong entry. Keep fatal.
 		return errors.New(
 			"enterprise hooks: refusing to remove a managed runtime selector entry owned by another deployment",
 		)
 	}
+	if entry.HookExecutable != opts.HookExecutable ||
+		!sameWindowsEnterprisePath(entry.HookExecutable, opts.HookExecutable) {
+		// Bulldoze: the entry has a stale HookExecutable path (prior
+		// unsigned-certification install at a different scoped InstallRoot
+		// left a runtime selector pointing at its now-dead bin/
+		// defenseclaw-hook.exe). The connector+SID match confirms the
+		// entry is ours by role; allow the removal so the install reconcile
+		// can retire the orphan entry and publish a fresh one.
+		fmt.Fprintf(os.Stderr,
+			"[enterprise-hooks] reclaiming stale managed runtime selector for "+
+				"%s/%s: entry HookExecutable=%q, current install's HookExecutable=%q\n",
+			opts.Connector, opts.TargetSID,
+			entry.HookExecutable, opts.HookExecutable)
+	}
 	if opts.DataDir != "" && (entry.DataDir != opts.DataDir ||
 		!sameWindowsEnterprisePath(entry.DataDir, opts.DataDir)) {
-		return errors.New(
-			"enterprise hooks: refusing to remove a managed runtime selector entry with a different data directory",
-		)
+		// Bulldoze: same posture as the HookExecutable mismatch above. A
+		// stale DataDir from a prior install's per-user runtime path does
+		// not block removal; the install reconcile replaces it with the
+		// current scope's DataDir.
+		fmt.Fprintf(os.Stderr,
+			"[enterprise-hooks] reclaiming stale managed runtime selector for "+
+				"%s/%s: entry DataDir=%q, current install's DataDir=%q\n",
+			opts.Connector, opts.TargetSID,
+			entry.DataDir, opts.DataDir)
 	}
 	return nil
 }

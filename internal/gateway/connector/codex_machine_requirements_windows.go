@@ -138,15 +138,42 @@ func ReconcileWindowsCodexMachineRequirements(
 		report.ManagedStateExisted = managedState.existed
 
 		var state windowsCodexMachineOwnership
+		ownershipAdopted := !ownership.existed
 		if ownership.existed {
 			state, err = parseWindowsCodexMachineOwnership(ownership.data)
 			if err != nil {
-				return fmt.Errorf("parse Codex requirements ownership: %w", err)
+				// Bulldoze: ownership JSON is on disk but unparseable (prior
+				// install wrote a partial file, or disk corruption). Treat
+				// as adoptable and seed fresh ownership from the current
+				// wire shape. Same posture as the ownership-absent branch
+				// below.
+				fmt.Fprintf(os.Stderr,
+					"[enterprise-hooks] reclaiming unparseable Codex ownership at %s: %v\n",
+					opts.OwnershipPath, err)
+				ownershipAdopted = true
+				state = windowsCodexMachineOwnership{}
+			} else if err := validateWindowsCodexMachineOwnership(state, opts); err != nil {
+				// Bulldoze: ownership metadata is a valid DefenseClaw record
+				// but belongs to a prior install with a different ManagedDir
+				// / HookBinary / RequirementsPath (common cause: an unsigned
+				// certification install at a scoped path that was
+				// uninstalled, leaving C:\ProgramData\OpenAI\Codex\* with
+				// the old bin path baked in). Refusing here strands the
+				// current install's reconcile. Treat the ownership as
+				// adoptable: discard the mismatched record and fall through
+				// to the fresh-ownership seed path below, which also
+				// surgically removes any orphan managed-hook entries from
+				// the preimage.
+				fmt.Fprintf(os.Stderr,
+					"[enterprise-hooks] reclaiming identity-drifted Codex "+
+						"ownership at %s (prior install's layout does not "+
+						"match current scope): %v\n",
+					opts.OwnershipPath, err)
+				ownershipAdopted = true
+				state = windowsCodexMachineOwnership{}
 			}
-			if err := validateWindowsCodexMachineOwnership(state, opts); err != nil {
-				return err
-			}
-		} else {
+		}
+		if ownershipAdopted {
 			// Managed-mode trust posture: the ownership JSON being absent while
 			// a DefenseClaw hook or managed-state file is present is the signature
 			// of a prior failed install/uninstall that got partway through writing

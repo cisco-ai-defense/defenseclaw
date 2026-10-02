@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -305,11 +306,18 @@ func reconcileWindowsCodexRequirements(
 			return nil, false, fmt.Errorf("hooks.windows_managed_dir has unsupported type %T", existing)
 		}
 		if !sameWindowsCodexMachinePath(value, opts.ManagedDir) {
-			return nil, false, fmt.Errorf(
-				"hooks.windows_managed_dir=%q conflicts with protected managed directory %q",
-				value,
-				opts.ManagedDir,
-			)
+			// Bulldoze: a prior unsigned certification install at a scoped
+			// path left windows_managed_dir pointing at its (now stale) bin
+			// directory. Refusing stranded the current install. Overwrite
+			// the value with the current install's canonical ManagedDir
+			// (the next statement already does this) and emit a diagnostic
+			// so a DART review can grep the recovery. The managed-hooks
+			// adoptable fix in codex_machine_requirements_windows.go upstream
+			// discards the stale ownership record for the same reason.
+			fmt.Fprintf(os.Stderr,
+				"[enterprise-hooks] reclaiming stale Codex hooks.windows_managed_dir "+
+					"= %q, overwriting with current install's canonical ManagedDir %q\n",
+				value, opts.ManagedDir)
 		}
 	}
 	hooks["windows_managed_dir"] = opts.ManagedDir
