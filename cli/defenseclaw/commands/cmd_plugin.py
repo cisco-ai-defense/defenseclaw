@@ -4344,8 +4344,9 @@ def _build_plugin_scan_map_for_connector(app: AppContext, connector: str) -> dic
         click.echo(f"warning: failed to load plugin scan data: {exc}", err=True)
         return scan_map
     matches: dict[str, tuple[Any, dict[str, Any]]] = {}
+    ids_by_path = _host_plugin_ids_by_path(app, connector)
     for ls in latest:
-        name = _plugin_id_for_scan_target(app, connector, ls["target"])
+        name = _plugin_id_for_scan_target(app, connector, ls["target"], ids_by_path=ids_by_path)
         payload = _plugin_scan_payload_from_latest(ls)
         if connector and not _scan_entry_matches_plugin_connector(app, payload, connector):
             continue
@@ -4358,26 +4359,41 @@ def _build_plugin_scan_map_for_connector(app: AppContext, connector: str) -> dic
     return scan_map
 
 
+def _host_plugin_ids_by_path(app: AppContext, connector: str) -> dict[str, str]:
+    """Real host plugin path -> logical plugin ID; the first entry for a path wins.
+
+    Enumerating host plugins parses every manifest (59 Hermes plugins take
+    about half a second), so callers build this once per command instead of
+    once per cached scan (GAP-1626).
+    """
+    ids: dict[str, str] = {}
+    for plugin_entry in _list_host_plugins(connector, app.cfg):
+        plugin_path = str(plugin_entry.get("host_path") or "")
+        if not plugin_path:
+            continue
+        try:
+            real_path = os.path.normcase(os.path.realpath(plugin_path))
+        except (OSError, ValueError):
+            continue
+        ids.setdefault(real_path, str(plugin_entry.get("id") or ""))
+    return ids
+
+
 def _plugin_id_for_scan_target(
     app: AppContext,
     connector: str,
     target: str,
+    *,
+    ids_by_path: dict[str, str] | None = None,
 ) -> str:
     """Map a concrete cached version directory back to its logical plugin ID."""
     try:
         real_target = os.path.normcase(os.path.realpath(target))
     except (OSError, ValueError):
         return os.path.basename(target)
-    for plugin_entry in _list_host_plugins(connector, app.cfg):
-        plugin_path = str(plugin_entry.get("host_path") or "")
-        if not plugin_path:
-            continue
-        try:
-            if os.path.normcase(os.path.realpath(plugin_path)) == real_target:
-                return str(plugin_entry.get("id") or os.path.basename(target))
-        except (OSError, ValueError):
-            continue
-    return os.path.basename(target)
+    if ids_by_path is None:
+        ids_by_path = _host_plugin_ids_by_path(app, connector)
+    return ids_by_path.get(real_target) or os.path.basename(target)
 
 
 def _scan_entry_matches_plugin_connector(
@@ -4410,8 +4426,9 @@ def _latest_plugin_scan_for_connector(
     except Exception:
         return None
     matches: list[tuple[Any, dict[str, Any]]] = []
+    ids_by_path = _host_plugin_ids_by_path(app, connector)
     for ls in latest:
-        if _plugin_id_for_scan_target(app, connector, ls["target"]) != plugin_name:
+        if _plugin_id_for_scan_target(app, connector, ls["target"], ids_by_path=ids_by_path) != plugin_name:
             continue
         payload = _plugin_scan_payload_from_latest(ls)
         if connector and not _scan_entry_matches_plugin_connector(app, payload, connector):

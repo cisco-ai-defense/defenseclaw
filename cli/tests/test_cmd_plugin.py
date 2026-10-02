@@ -2877,5 +2877,29 @@ class MergeAllPluginsHostBranchTests(unittest.TestCase):
         self.assertNotIn("host-only-plugin", ids)
 
 
+class TestScanTargetIdsEnumerateOnce(unittest.TestCase):
+    def test_scan_lookups_enumerate_host_plugins_once(self):
+        """GAP-1626: one host-plugin enumeration per lookup, not one per cached scan."""
+        from defenseclaw.commands import cmd_plugin
+
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        paths = [os.path.join(tmp, f"p{i}") for i in range(5)]
+        for path in paths:
+            os.makedirs(path)
+        rows = [{"id": f"plugin-{i}", "host_path": path} for i, path in enumerate(paths)]
+        latest = [
+            {"target": path, "finding_count": 0, "max_severity": "", "timestamp": f"2026-10-02T00:00:0{i}Z"}
+            for i, path in enumerate(paths)
+        ]
+        app = SimpleNamespace(store=SimpleNamespace(latest_scans_by_scanner=lambda _s: latest), cfg=SimpleNamespace())
+        with patch.object(cmd_plugin, "_list_host_plugins", return_value=rows) as host_plugins:
+            found = cmd_plugin._latest_plugin_scan_for_connector(app, "plugin-3", "")
+            scan_map = cmd_plugin._build_plugin_scan_map_for_connector(app, "")
+        self.assertEqual(found["target"], paths[3])
+        self.assertEqual(sorted(scan_map), [f"plugin-{i}" for i in range(5)])
+        self.assertEqual(host_plugins.call_count, 2)
+
+
 if __name__ == "__main__":
     unittest.main()
