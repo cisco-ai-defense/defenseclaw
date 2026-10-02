@@ -11,10 +11,12 @@
 package otlp
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -501,5 +503,58 @@ func TestMetricObserverCanShutdownWithoutLockInversion(t *testing.T) {
 	if snapshot := exporter.deliveryHealthSnapshot(); snapshot.State != delivery.HealthStopped ||
 		snapshot.CircuitState != delivery.CircuitOpen {
 		t.Fatalf("post-observer shutdown health=%+v", snapshot)
+	}
+}
+
+// GAP-1870: a collector that refuses metrics with HTTP 400 gets the same
+// gateway.log line, failure code and health transition as logs and traces.
+func TestMetricHTTPRejectionIsLoggedCodedAndObserved(t *testing.T) {
+	var out bytes.Buffer
+	previous := rejectionLogWriter
+	rejectionLogWriter = &out
+	t.Cleanup(func() { rejectionLogWriter = previous })
+
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "text/plain")
+		writer.WriteHeader(http.StatusBadRequest)
+		_, _ = writer.Write([]byte("metric name is not valid"))
+	}))
+	defer server.Close()
+	transitions := make(chan delivery.HealthTransition, 4)
+	factory := prepareTestFactory(t, Config{
+		Destination: "metric-gap1870", Protocol: ProtocolHTTP, Endpoint: server.URL,
+		Selected: []observability.Signal{observability.SignalMetrics}, Timeout: time.Second,
+		TLS: TLSConfig{Insecure: true}, NetworkSafety: NetworkSafety{AllowPrivateNetworks: true},
+	}, Dependencies{HealthObserver: delivery.ObserverFunc(func(transition delivery.HealthTransition) {
+		transitions <- transition
+	})})
+	exporter, err := factory.NewMetricExporter(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = exporter.Shutdown(context.Background()) })
+	exporter.healthGeneration.Store(7)
+
+	if err := exporter.Export(t.Context(), testMetricData("defenseclaw.metric.gap1870")); !IsError(err, ErrorExport) {
+		t.Fatalf("refused export error=%v", err)
+	}
+	line := out.String()
+	for _, want := range []string{"metric-gap1870 metrics export rejected: HTTP 400 (", "metric name is not valid"} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("gateway.log line %q lacks %q", line, want)
+		}
+	}
+	if code := exporter.deliveryHealthSnapshot().LastFailureCode; code != delivery.FailureCodeHTTPRejected {
+		t.Fatalf("last_failure_code=%q", code)
+	}
+	select {
+	case transition := <-transitions:
+		if transition.Current != delivery.HealthFailing || transition.FailureCode != delivery.FailureCodeHTTPRejected ||
+			transition.Signal != string(observability.SignalMetrics) || transition.Generation != 7 ||
+			transition.Destination != "metric-gap1870" {
+			t.Fatalf("transition=%+v", transition)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no health transition for the refused metrics export")
 	}
 }
