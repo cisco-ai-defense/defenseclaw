@@ -931,8 +931,8 @@ class TestObservabilitySummaryDisplay(unittest.TestCase):
         out = self._capture_summary("claudecode", os_name="posix")
 
         self.assertIn("Watch decisions live: defenseclaw tui", out)
-        self.assertIn("defenseclaw alerts --limit 25", out)
-        self.assertIn("jq 'select(.connector == \"claudecode\")'", out)
+        self.assertIn("defenseclaw alerts --limit 25 --connector claudecode", out)
+        self.assertNotIn("jq", out)
         self.assertNotIn("gateway.jsonl", out)
         self.assertNotIn("Get-Content -LiteralPath", out)
 

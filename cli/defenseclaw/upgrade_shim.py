@@ -77,6 +77,14 @@ WINDOWS_MANAGED_MARKER_KEY = r"SOFTWARE\Cisco\DefenseClaw\Enterprise"
 class ShimError(RuntimeError):
     """A user-facing failure; nothing on the machine was changed."""
 
+    exit_code = 1
+
+
+class ShimUsageError(ShimError):
+    """A bad option or argument: exit 2, like every other Click command."""
+
+    exit_code = 2
+
 
 def managed_deployment() -> str | None:
     """Name the machine-wide managed deployment on this host, or None.
@@ -139,7 +147,7 @@ def run(argv: list[str]) -> int:
     except ShimError as exc:
         print(f"  ✗ {exc}", file=sys.stderr)
         print("    Nothing was changed.", file=sys.stderr)
-        return 1
+        return exc.exit_code
     except KeyboardInterrupt:
         return 130
 
@@ -172,13 +180,13 @@ def _parse(command: str, args: list[str]) -> dict[str, object] | None:
             # Hidden, kept for 0.8.x muscle memory and scripts: recovery is now automatic.
             print(RECOVER_CORRUPT_AUDIT_NOTE, file=sys.stderr)
         else:
-            raise ShimError(f"unknown option {arg!r} for 'defenseclaw {command}' (see --help)")
+            raise ShimUsageError(f"unknown option {arg!r} for 'defenseclaw {command}' (see --help)")
         index += 1
     version = options["version"]
     if version is not None:
         version = str(version).removeprefix("v")
         if not _VERSION.match(version):
-            raise ShimError(f"--version must look like 1.2.3, got {options['version']!r}")
+            raise ShimUsageError(f"--version must look like 1.2.3, got {options['version']!r}")
         options["version"] = version
     return options
 

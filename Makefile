@@ -4,7 +4,12 @@ ACP_GUARD   := defenseclaw-acp
 HOOK_LAUNCHER := defenseclaw-hook
 VERSION     := 0.8.10
 .DEFAULT_GOAL := help
-GOFLAGS     := -ldflags "-X main.version=$(VERSION)"
+# Stamp the source commit and build time so `defenseclaw version` names the
+# build (goreleaser does the same for releases).
+GIT_COMMIT  := $(or $(shell git rev-parse --short HEAD 2>/dev/null),unknown)
+BUILD_DATE  := $(or $(shell date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null),unknown)
+BUILD_INFO_LDFLAGS := -X main.commit=$(GIT_COMMIT) -X main.date=$(BUILD_DATE)
+GOFLAGS     := -ldflags "-X main.version=$(VERSION) $(BUILD_INFO_LDFLAGS)"
 VENV        := .venv
 GOBIN       := $(shell go env GOPATH)/bin
 PLUGIN_DIR  := extensions/defenseclaw
@@ -1302,12 +1307,12 @@ dist-gateway: _checkout-write-preflight sync-openclaw-extension
 		goos=$${pair%%/*}; goarch=$${pair##*/}; exe=""; [ "$$goos" = windows ] && exe=.exe; \
 		stage="$$(mktemp -d)"; \
 		echo "Building gateway $${goos}/$${goarch}..."; \
-		CGO_ENABLED=0 GOOS=$$goos GOARCH=$$goarch go build -trimpath -ldflags "-s -w -X main.version=$(VERSION)" \
+		CGO_ENABLED=0 GOOS=$$goos GOARCH=$$goarch go build -trimpath -ldflags "-s -w -X main.version=$(VERSION) $(BUILD_INFO_LDFLAGS)" \
 			-o "$$stage/defenseclaw-gateway$$exe" ./cmd/defenseclaw; \
-		CGO_ENABLED=0 GOOS=$$goos GOARCH=$$goarch go build -trimpath -ldflags "-s -w -X main.version=$(VERSION)" \
+		CGO_ENABLED=0 GOOS=$$goos GOARCH=$$goarch go build -trimpath -ldflags "-s -w -X main.version=$(VERSION) $(BUILD_INFO_LDFLAGS)" \
 			-o "$$stage/defenseclaw-acp$$exe" ./cmd/defenseclaw-acp; \
 		if [ "$$goos" = windows ]; then \
-			CGO_ENABLED=0 GOOS=$$goos GOARCH=$$goarch go build -trimpath -ldflags "-s -w -H=windowsgui -X main.version=$(VERSION)" \
+			CGO_ENABLED=0 GOOS=$$goos GOARCH=$$goarch go build -trimpath -ldflags "-s -w -H=windowsgui -X main.version=$(VERSION) $(BUILD_INFO_LDFLAGS)" \
 				-o "$$stage/defenseclaw-hook.exe" ./cmd/defenseclaw-hook; \
 			rm -f "$$out/defenseclaw-$(VERSION)-$$goos-$$goarch.zip"; \
 			(cd "$$stage" && zip -q "$$out/defenseclaw-$(VERSION)-$$goos-$$goarch.zip" ./*); \

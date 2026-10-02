@@ -80,7 +80,23 @@ def _policy_mutations(
 @click.group("redaction", invoke_without_command=True)
 @pass_ctx
 def redaction(app: AppContext) -> None:
-    """Configure centralized v8 redaction, collection, and routing policy."""
+    """Choose what telemetry DefenseClaw collects and how it is redacted.
+
+    Redaction is set per bucket (a group of events) and per destination with
+    a profile. Built-in profiles:
+
+    \b
+      none       no redaction: everything is sent as recorded (the default)
+      sensitive  removes credentials, hashes file paths, and masks PII,
+                 credentials and secrets found in content, reasons,
+                 evidence and errors
+      content    like sensitive, but replaces content, reasons, evidence
+                 and errors whole
+      strict     keeps only metadata and identifiers; removes everything else
+
+    With no subcommand it starts an interactive editor. 'status' shows what
+    is in effect now.
+    """
 
     if click.get_current_context().invoked_subcommand is None:
         _interactive_wizard(app)
@@ -137,7 +153,12 @@ def status_cmd(app: AppContext, emit_json: bool) -> None:
 @click.option("--yes", is_flag=True, help="Confirm unredacted output without prompting.")
 @click.option("--dry-run", is_flag=True, help="Preview without writing config.yaml.")
 @click.option("--json", "emit_json", is_flag=True, help="Emit machine-readable output.")
-@click.option("--restart/--no-restart", default=False, show_default=True)
+@click.option(
+    "--restart/--no-restart",
+    default=False,
+    show_default=True,
+    help="Restart the gateway afterwards so the change takes effect now.",
+)
 @pass_ctx
 def remove_all_cmd(
     app: AppContext,
@@ -166,12 +187,18 @@ def remove_all_cmd(
     "--scope",
     type=click.Choice(["all-configurable", "defaults"]),
     required=True,
+    help="all-configurable: every bucket and destination; defaults: only the global default.",
 )
-@click.option("--profile", required=True, help="Built-in or custom profile name.")
-@click.option("--yes", is_flag=True)
-@click.option("--dry-run", is_flag=True)
-@click.option("--json", "emit_json", is_flag=True)
-@click.option("--restart/--no-restart", default=False, show_default=True)
+@click.option("--profile", required=True, help="Built-in or custom profile name ('profile list' shows them).")
+@click.option("--yes", is_flag=True, help="Apply without asking for confirmation.")
+@click.option("--dry-run", is_flag=True, help="Preview the change without writing config.yaml.")
+@click.option("--json", "emit_json", is_flag=True, help="Print the result as JSON.")
+@click.option(
+    "--restart/--no-restart",
+    default=False,
+    show_default=True,
+    help="Restart the gateway afterwards so the change takes effect now.",
+)
 @pass_ctx
 def apply_cmd(
     app: AppContext,
@@ -182,7 +209,7 @@ def apply_cmd(
     emit_json: bool,
     restart: bool,
 ) -> None:
-    """Apply one profile to a broad v8 policy scope."""
+    """Apply one redaction profile everywhere, or as the global default."""
 
     _, source = _load_source(app)
     mutations = (
@@ -207,14 +234,19 @@ def defaults_group() -> None:
 
 
 @defaults_group.command("set")
-@click.option("--profile", default=None)
-@click.option("--logs/--no-logs", default=None)
-@click.option("--traces/--no-traces", default=None)
-@click.option("--metrics/--no-metrics", default=None)
-@click.option("--yes", is_flag=True)
-@click.option("--dry-run", is_flag=True)
-@click.option("--json", "emit_json", is_flag=True)
-@click.option("--restart/--no-restart", default=False, show_default=True)
+@click.option("--profile", default=None, help="Redaction profile name (built-in or custom).")
+@click.option("--logs/--no-logs", default=None, help="Collect logs.")
+@click.option("--traces/--no-traces", default=None, help="Collect traces.")
+@click.option("--metrics/--no-metrics", default=None, help="Collect metrics.")
+@click.option("--yes", is_flag=True, help="Apply without asking for confirmation.")
+@click.option("--dry-run", is_flag=True, help="Preview the change without writing config.yaml.")
+@click.option("--json", "emit_json", is_flag=True, help="Print the result as JSON.")
+@click.option(
+    "--restart/--no-restart",
+    default=False,
+    show_default=True,
+    help="Restart the gateway afterwards so the change takes effect now.",
+)
 @pass_ctx
 def defaults_set_cmd(
     app: AppContext,
@@ -249,10 +281,15 @@ def defaults_set_cmd(
 
 
 @defaults_group.command("reset")
-@click.option("--yes", is_flag=True)
-@click.option("--dry-run", is_flag=True)
-@click.option("--json", "emit_json", is_flag=True)
-@click.option("--restart/--no-restart", default=False, show_default=True)
+@click.option("--yes", is_flag=True, help="Apply without asking for confirmation.")
+@click.option("--dry-run", is_flag=True, help="Preview the change without writing config.yaml.")
+@click.option("--json", "emit_json", is_flag=True, help="Print the result as JSON.")
+@click.option(
+    "--restart/--no-restart",
+    default=False,
+    show_default=True,
+    help="Restart the gateway afterwards so the change takes effect now.",
+)
 @pass_ctx
 def defaults_reset_cmd(
     app: AppContext,
@@ -297,15 +334,20 @@ def bucket_list_cmd(app: AppContext) -> None:
 
 @bucket_group.command("set")
 @click.argument("bucket", type=click.Choice(BUCKETS))
-@click.option("--profile", default=None)
-@click.option("--inherit-profile", is_flag=True)
-@click.option("--logs/--no-logs", default=None)
-@click.option("--traces/--no-traces", default=None)
-@click.option("--metrics/--no-metrics", default=None)
-@click.option("--yes", is_flag=True)
-@click.option("--dry-run", is_flag=True)
-@click.option("--json", "emit_json", is_flag=True)
-@click.option("--restart/--no-restart", default=False, show_default=True)
+@click.option("--profile", default=None, help="Redaction profile name (built-in or custom).")
+@click.option("--inherit-profile", is_flag=True, help="Drop this bucket's own profile and use the default.")
+@click.option("--logs/--no-logs", default=None, help="Collect logs.")
+@click.option("--traces/--no-traces", default=None, help="Collect traces.")
+@click.option("--metrics/--no-metrics", default=None, help="Collect metrics.")
+@click.option("--yes", is_flag=True, help="Apply without asking for confirmation.")
+@click.option("--dry-run", is_flag=True, help="Preview the change without writing config.yaml.")
+@click.option("--json", "emit_json", is_flag=True, help="Print the result as JSON.")
+@click.option(
+    "--restart/--no-restart",
+    default=False,
+    show_default=True,
+    help="Restart the gateway afterwards so the change takes effect now.",
+)
 @pass_ctx
 def bucket_set_cmd(
     app: AppContext,
@@ -348,10 +390,15 @@ def bucket_set_cmd(
 
 @bucket_group.command("reset")
 @click.argument("bucket", type=click.Choice(BUCKETS))
-@click.option("--yes", is_flag=True)
-@click.option("--dry-run", is_flag=True)
-@click.option("--json", "emit_json", is_flag=True)
-@click.option("--restart/--no-restart", default=False, show_default=True)
+@click.option("--yes", is_flag=True, help="Apply without asking for confirmation.")
+@click.option("--dry-run", is_flag=True, help="Preview the change without writing config.yaml.")
+@click.option("--json", "emit_json", is_flag=True, help="Print the result as JSON.")
+@click.option(
+    "--restart/--no-restart",
+    default=False,
+    show_default=True,
+    help="Restart the gateway afterwards so the change takes effect now.",
+)
 @pass_ctx
 def bucket_reset_cmd(
     app: AppContext,
@@ -382,29 +429,39 @@ def bucket_reset_cmd(
     )
 
 
+_BUILT_IN_PROFILE_SUMMARIES = {
+    "none": "no redaction: everything is sent as recorded (the default)",
+    "sensitive": "removes credentials, hashes paths, masks PII/secrets found in content",
+    "content": "like sensitive, but replaces content, reasons, evidence and errors whole",
+    "strict": "keeps only metadata and identifiers",
+}
+
+
 @redaction.group("profile")
 def profile_group() -> None:
     """Inspect and manage custom redaction profiles."""
 
 
 @profile_group.command("list")
-@click.option("--json", "emit_json", is_flag=True)
+@click.option("--json", "emit_json", is_flag=True, help="Print the result as JSON.")
 @pass_ctx
 def profile_list_cmd(app: AppContext, emit_json: bool) -> None:
-    """List built-in and custom profile names."""
+    """List built-in and custom profiles with what each one does."""
 
     _, source = _load_source(app)
     profiles = redaction_profile_names(source)
     if emit_json:
         click.echo(json.dumps({"profiles": list(profiles)}, indent=2))
     else:
+        width = max((len(value) for value in profiles), default=0)
         for value in profiles:
-            click.echo(value)
+            about = _BUILT_IN_PROFILE_SUMMARIES.get(value, "custom profile ('profile show NAME' for details)")
+            click.echo(f"{value.ljust(width)}  {about}")
 
 
 @profile_group.command("show")
 @click.argument("name")
-@click.option("--json", "emit_json", is_flag=True)
+@click.option("--json", "emit_json", is_flag=True, help="Print the result as JSON.")
 @pass_ctx
 def profile_show_cmd(app: AppContext, name: str, emit_json: bool) -> None:
     """Show a compiled profile's detectors and field-class modes."""
@@ -432,13 +489,32 @@ def profile_show_cmd(app: AppContext, name: str, emit_json: bool) -> None:
 
 @profile_group.command("set")
 @click.argument("name")
-@click.option("--extends", type=click.Choice(CUSTOM_PROFILE_BASES), default=None)
-@click.option("--detector", "detectors", multiple=True, type=click.Choice(DETECTOR_GROUPS))
-@click.option("--field", "fields", multiple=True, metavar="CLASS=MODE")
-@click.option("--yes", is_flag=True)
-@click.option("--dry-run", is_flag=True)
-@click.option("--json", "emit_json", is_flag=True)
-@click.option("--restart/--no-restart", default=False, show_default=True)
+@click.option(
+    "--extends", type=click.Choice(CUSTOM_PROFILE_BASES), default=None, help="Built-in profile to start from."
+)
+@click.option(
+    "--detector",
+    "detectors",
+    multiple=True,
+    type=click.Choice(DETECTOR_GROUPS),
+    help="Detector group to use (repeatable).",
+)
+@click.option(
+    "--field",
+    "fields",
+    multiple=True,
+    metavar="CLASS=MODE",
+    help="Field class and its mode, for example path=hash (repeatable).",
+)
+@click.option("--yes", is_flag=True, help="Apply without asking for confirmation.")
+@click.option("--dry-run", is_flag=True, help="Preview the change without writing config.yaml.")
+@click.option("--json", "emit_json", is_flag=True, help="Print the result as JSON.")
+@click.option(
+    "--restart/--no-restart",
+    default=False,
+    show_default=True,
+    help="Restart the gateway afterwards so the change takes effect now.",
+)
 @pass_ctx
 def profile_set_cmd(
     app: AppContext,
@@ -476,11 +552,16 @@ def profile_set_cmd(
 
 @profile_group.command("remove")
 @click.argument("name")
-@click.option("--replace-with", default=None)
-@click.option("--yes", is_flag=True)
-@click.option("--dry-run", is_flag=True)
-@click.option("--json", "emit_json", is_flag=True)
-@click.option("--restart/--no-restart", default=False, show_default=True)
+@click.option("--replace-with", default=None, help="Profile that takes over where the removed one is used.")
+@click.option("--yes", is_flag=True, help="Apply without asking for confirmation.")
+@click.option("--dry-run", is_flag=True, help="Preview the change without writing config.yaml.")
+@click.option("--json", "emit_json", is_flag=True, help="Print the result as JSON.")
+@click.option(
+    "--restart/--no-restart",
+    default=False,
+    show_default=True,
+    help="Restart the gateway afterwards so the change takes effect now.",
+)
 @pass_ctx
 def profile_remove_cmd(
     app: AppContext,
@@ -532,13 +613,20 @@ def destination_show_cmd(app: AppContext, name: str) -> None:
 
 @destination_group.command("send")
 @click.argument("name")
-@click.option("--signal", "signals", multiple=True, type=click.Choice(SIGNALS), required=True)
-@click.option("--bucket", "buckets", multiple=True, required=True)
-@click.option("--profile", default=None)
-@click.option("--yes", is_flag=True)
-@click.option("--dry-run", is_flag=True)
-@click.option("--json", "emit_json", is_flag=True)
-@click.option("--restart/--no-restart", default=False, show_default=True)
+@click.option(
+    "--signal", "signals", multiple=True, type=click.Choice(SIGNALS), required=True, help="Signal to send (repeatable)."
+)
+@click.option("--bucket", "buckets", multiple=True, required=True, help="Bucket to send (repeatable).")
+@click.option("--profile", default=None, help="Redaction profile name (built-in or custom).")
+@click.option("--yes", is_flag=True, help="Apply without asking for confirmation.")
+@click.option("--dry-run", is_flag=True, help="Preview the change without writing config.yaml.")
+@click.option("--json", "emit_json", is_flag=True, help="Print the result as JSON.")
+@click.option(
+    "--restart/--no-restart",
+    default=False,
+    show_default=True,
+    help="Restart the gateway afterwards so the change takes effect now.",
+)
 @pass_ctx
 def destination_send_cmd(
     app: AppContext,
@@ -575,10 +663,15 @@ def destination_send_cmd(
 
 @destination_group.command("inherit")
 @click.argument("name")
-@click.option("--yes", is_flag=True)
-@click.option("--dry-run", is_flag=True)
-@click.option("--json", "emit_json", is_flag=True)
-@click.option("--restart/--no-restart", default=False, show_default=True)
+@click.option("--yes", is_flag=True, help="Apply without asking for confirmation.")
+@click.option("--dry-run", is_flag=True, help="Preview the change without writing config.yaml.")
+@click.option("--json", "emit_json", is_flag=True, help="Print the result as JSON.")
+@click.option(
+    "--restart/--no-restart",
+    default=False,
+    show_default=True,
+    help="Restart the gateway afterwards so the change takes effect now.",
+)
 @pass_ctx
 def destination_inherit_cmd(
     app: AppContext,
@@ -610,7 +703,7 @@ def route_group() -> None:
 
 @route_group.command("list")
 @click.argument("destination")
-@click.option("--json", "emit_json", is_flag=True)
+@click.option("--json", "emit_json", is_flag=True, help="Print the result as JSON.")
 @pass_ctx
 def route_list_cmd(app: AppContext, destination: str, emit_json: bool) -> None:
     """List source-authored routes in evaluation order."""
@@ -634,19 +727,44 @@ def route_list_cmd(app: AppContext, destination: str, emit_json: bool) -> None:
 
 def _route_options(command):
     options = (
-        click.option("--signal", "signals", multiple=True, type=click.Choice(SIGNALS), required=True),
-        click.option("--bucket", "buckets", multiple=True),
-        click.option("--source", "sources", multiple=True),
-        click.option("--connector", "connectors", multiple=True),
-        click.option("--producer-action", "producer_actions", multiple=True),
-        click.option("--event-name", "event_names", multiple=True),
-        click.option("--min-severity", type=click.Choice(SEVERITIES), default=None),
-        click.option("--route-action", type=click.Choice(["send", "drop"]), default="send", show_default=True),
-        click.option("--profile", default=None),
-        click.option("--yes", is_flag=True),
-        click.option("--dry-run", is_flag=True),
-        click.option("--json", "emit_json", is_flag=True),
-        click.option("--restart/--no-restart", default=False, show_default=True),
+        click.option(
+            "--signal",
+            "signals",
+            multiple=True,
+            type=click.Choice(SIGNALS),
+            required=True,
+            help="Signal to route (repeatable).",
+        ),
+        click.option("--bucket", "buckets", multiple=True, help="Match these buckets (repeatable)."),
+        click.option("--source", "sources", multiple=True, help="Match these event sources (repeatable)."),
+        click.option("--connector", "connectors", multiple=True, help="Match these connectors (repeatable)."),
+        click.option(
+            "--producer-action", "producer_actions", multiple=True, help="Match these producer actions (repeatable)."
+        ),
+        click.option("--event-name", "event_names", multiple=True, help="Match these event names (repeatable)."),
+        click.option(
+            "--min-severity",
+            type=click.Choice(SEVERITIES),
+            default=None,
+            help="Match events at or above this severity.",
+        ),
+        click.option(
+            "--route-action",
+            type=click.Choice(["send", "drop"]),
+            default="send",
+            show_default=True,
+            help="Send or drop the matched events.",
+        ),
+        click.option("--profile", default=None, help="Redaction profile for the matched events."),
+        click.option("--yes", is_flag=True, help="Apply without asking for confirmation."),
+        click.option("--dry-run", is_flag=True, help="Preview the change without writing config.yaml."),
+        click.option("--json", "emit_json", is_flag=True, help="Print the result as JSON."),
+        click.option(
+            "--restart/--no-restart",
+            default=False,
+            show_default=True,
+            help="Restart the gateway afterwards so the change takes effect now.",
+        ),
     )
     for option in reversed(options):
         command = option(command)
@@ -656,7 +774,9 @@ def _route_options(command):
 @route_group.command("add")
 @click.argument("destination")
 @click.argument("name")
-@click.option("--position", type=click.IntRange(min=1), default=None)
+@click.option(
+    "--position", type=click.IntRange(min=1), default=None, help="1-based position in the route list (default: last)."
+)
 @_route_options
 @pass_ctx
 def route_add_cmd(
@@ -698,11 +818,16 @@ def route_set_cmd(app: AppContext, destination: str, name: str, **options) -> No
 @route_group.command("move")
 @click.argument("destination")
 @click.argument("name")
-@click.option("--position", type=click.IntRange(min=1), required=True)
-@click.option("--yes", is_flag=True)
-@click.option("--dry-run", is_flag=True)
-@click.option("--json", "emit_json", is_flag=True)
-@click.option("--restart/--no-restart", default=False, show_default=True)
+@click.option("--position", type=click.IntRange(min=1), required=True, help="New 1-based position in the route list.")
+@click.option("--yes", is_flag=True, help="Apply without asking for confirmation.")
+@click.option("--dry-run", is_flag=True, help="Preview the change without writing config.yaml.")
+@click.option("--json", "emit_json", is_flag=True, help="Print the result as JSON.")
+@click.option(
+    "--restart/--no-restart",
+    default=False,
+    show_default=True,
+    help="Restart the gateway afterwards so the change takes effect now.",
+)
 @pass_ctx
 def route_move_cmd(
     app: AppContext,
@@ -732,10 +857,15 @@ def route_move_cmd(
 @route_group.command("remove")
 @click.argument("destination")
 @click.argument("name")
-@click.option("--yes", is_flag=True)
-@click.option("--dry-run", is_flag=True)
-@click.option("--json", "emit_json", is_flag=True)
-@click.option("--restart/--no-restart", default=False, show_default=True)
+@click.option("--yes", is_flag=True, help="Apply without asking for confirmation.")
+@click.option("--dry-run", is_flag=True, help="Preview the change without writing config.yaml.")
+@click.option("--json", "emit_json", is_flag=True, help="Print the result as JSON.")
+@click.option(
+    "--restart/--no-restart",
+    default=False,
+    show_default=True,
+    help="Restart the gateway afterwards so the change takes effect now.",
+)
 @pass_ctx
 def route_remove_cmd(
     app: AppContext,
@@ -1333,6 +1463,11 @@ def _render_status(status, *, compact: bool = False) -> None:
         return
     click.echo("\nBuckets")
     _render_buckets(status.buckets)
+    if status.buckets and all(bucket.redaction_profile == "none" for bucket in status.buckets):
+        click.echo(
+            "\nEvery bucket uses profile 'none', so collected telemetry is sent unredacted.\n"
+            "Redact it with: defenseclaw setup redaction apply --scope all-configurable --profile sensitive"
+        )
     for code, path, summary in status.warnings:
         click.echo(f"warning: {code}: {path}: {summary}", err=True)
 

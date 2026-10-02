@@ -348,20 +348,17 @@ def _render_table(alert_list: list, store, connector: str | None = None) -> None
     "connector",
     default=None,
     help=(
-        "Filter alerts by connector attribution (optional on any install). "
-        "Only show alerts attributed to this connector (e.g. codex, "
-        "claudecode, antigravity). Matches the per-event connector= field, "
-        "mirroring the TUI's `connector:` search token."
+        "Only show alerts from this connector (for example codex, claudecode, "
+        "antigravity); the same match as the TUI's connector: search."
     ),
 )
 @click.option(
     "--tui/--no-tui",
     default=False,
-    help=(
-        "Deprecated: the interactive TUI moved to `defenseclaw tui` in P3-#20. "
-        "This flag now prints a deprecation notice and falls back to the table."
-    ),
+    hidden=True,
+    help="Retired: use 'defenseclaw tui' (Alerts panel). Prints a notice and shows the table.",
 )
+@click.option("--json", "as_json", is_flag=True, help="Print the alerts as a JSON list.")
 @click.pass_context
 def alerts(
     ctx: click.Context,
@@ -369,6 +366,7 @@ def alerts(
     show_idx: int | None,
     connector: str | None,
     tui: bool,
+    as_json: bool,
 ) -> None:
     """View and manage security alerts."""
     if ctx.invoked_subcommand is not None:
@@ -376,6 +374,9 @@ def alerts(
     app = ctx.find_object(AppContext)
     if app is None:
         raise click.ClickException("internal error: AppContext missing")
+    if as_json:
+        _alerts_json(app, limit, connector)
+        return
     _alerts_default(app, limit, show_idx, tui, connector)
 
 
@@ -395,6 +396,33 @@ def _alert_next_step(event) -> str:
         "retries on its own). This alert records the failure and stays listed "
         f"after recovery; clear it with 'defenseclaw alerts dismiss {selector}'."
     )
+
+
+def _alerts_json(app: AppContext, limit: int, connector: str | None) -> None:
+    """``alerts --json``: the same rows as the table, newest first."""
+    import json  # noqa: PLC0415
+
+    if not app.store:
+        raise click.ClickException("No audit store available. Run 'defenseclaw init' first.")
+    needle = (connector or "").strip()
+    if needle:
+        alert_list = _filter_by_connector(app.store.list_alerts(max(limit, _CONNECTOR_SCAN_POOL)), needle)[:limit]
+    else:
+        alert_list = app.store.list_alerts(limit)
+    rows = [
+        {
+            "id": e.id,
+            "timestamp": e.timestamp.isoformat() if e.timestamp else "",
+            "severity": e.severity,
+            "action": e.action,
+            "target": e.target,
+            "actor": e.actor,
+            "connector": _event_connector(e),
+            "details": e.details,
+        }
+        for e in alert_list
+    ]
+    click.echo(json.dumps(rows, indent=2, sort_keys=True))
 
 
 def _alerts_default(

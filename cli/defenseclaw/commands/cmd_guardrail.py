@@ -514,6 +514,20 @@ def _render_connector_blocks(rows: list[dict[str, tuple[str, str]]]) -> None:
             )
 
 
+def _echo_status_json(gc, rows: list[dict[str, tuple[str, str]]], warnings: list[str]) -> None:
+    """Machine-readable ``guardrail status``: the same fields as the table."""
+    import json  # noqa: PLC0415
+
+    keys = ("state", "mode", "fail", "rule_pack", "levels", "hilt", "scan", "judge")
+    connectors = []
+    for row in rows:
+        item = {"connector": row["key"][0], "label": row["label"][0]}
+        item.update({("fail_mode" if key == "fail" else key): row[key][0] for key in keys})
+        connectors.append(item)
+    payload = {"enabled": bool(gc.enabled), "port": gc.port, "connectors": connectors, "warnings": warnings}
+    click.echo(json.dumps(payload, indent=2, sort_keys=True))
+
+
 @guardrail.command("status")
 @click.option(
     "--connector",
@@ -522,34 +536,26 @@ def _render_connector_blocks(rows: list[dict[str, tuple[str, str]]]) -> None:
     help="Scope the roster to a single active connector (multi-connector installs). "
     "Omit to show every active connector.",
 )
+@click.option("--json", "as_json", is_flag=True, help="Print the status as JSON.")
 @pass_ctx
-def status_cmd(app: AppContext, connector_flag: str | None) -> None:
-    """Show whether the guardrail is enabled and the active connector roster.
+def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = False) -> None:
+    """Show whether the guardrail is enabled and how each active connector is set.
 
-    The roster is rendered UNIFORMLY: one per-connector block for EACH
-    active connector, with that connector's own (possibly differing)
-    enabled state, mode, and fail mode. ``Config.active_connectors()``
-    returns one name on a single-connector install and N on a fan-out
-    install, so the exact same layout covers both — the operator never has
-    to reason about connector count. There is no separate single-vs-multi
-    rendering and no "primary" connector line.
-
-    The connector row is the source of truth for hook posture: enabled state,
-    mode, fail mode, rule pack, HILT, effective hook scan strategy, and judge
-    state are shown together so the scan strategy cannot contradict the judge
-    gate. ``--connector X`` narrows the roster to one active peer. When no
-    connector is set up, status renders an explicit "none configured" state
-    rather than a phantom ``openclaw``.
+    One block per active connector: enabled state, mode (observe or action),
+    fail mode, rule pack, block/alert levels, human approval (HILT), hook scan
+    strategy and judge. --connector NAME shows just that connector. With no
+    connector set up, status says so and names the setup command.
     """
     from defenseclaw import policy_catalog
 
     gc = app.cfg.guardrail
     connector = _resolve_active_connector(app.cfg)
     fail_mode = (getattr(gc, "hook_fail_mode", "") or "open").lower()
-    ux.section("Guardrail status", indent="  ")
-    enabled_txt = "yes" if gc.enabled else "no"
-    enabled_val = ux._style(enabled_txt, fg="green") if gc.enabled else ux._style(enabled_txt, fg="yellow")
-    click.echo(f"  • {ux._style('enabled:', fg='bright_black', bold=True)}    {enabled_val}")
+    if not as_json:
+        ux.section("Guardrail status", indent="  ")
+        enabled_txt = "yes" if gc.enabled else "no"
+        enabled_val = ux._style(enabled_txt, fg="green") if gc.enabled else ux._style(enabled_txt, fg="yellow")
+        click.echo(f"  • {ux._style('enabled:', fg='bright_black', bold=True)}    {enabled_val}")
 
     # Resolve the full active set and render exactly one coherent view: a
     # per-connector block for EACH active connector. active_connectors()
@@ -578,6 +584,9 @@ def status_cmd(app: AppContext, connector_flag: str | None) -> None:
         else True
     )
     if not actives and not configured:
+        if as_json:
+            _echo_status_json(gc, [], [])
+            return
         click.echo(
             f"  • {ux._style('connectors:', fg='bright_black', bold=True)} "
             f"{ux.dim('(none configured)')}"
@@ -700,6 +709,9 @@ def status_cmd(app: AppContext, connector_flag: str | None) -> None:
                 "judge": (judge_raw, _style_judge_value(judge_raw)),
             }
         )
+    if as_json:
+        _echo_status_json(gc, rows, runtime_drift_rows + runtime_limit_rows)
+        return
     _render_connector_table(rows)
     for drift_row in runtime_drift_rows:
         ux.warn("runtime fail-mode drift: " + drift_row, indent="  ")

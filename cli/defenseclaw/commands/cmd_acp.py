@@ -430,10 +430,17 @@ def catalog_cmd() -> None:
 
 
 @acp_cmd.command("setup")
-@click.option("--client", type=click.Choice(sorted(_CLIENTS)), required=True)
-@click.option("--agent", type=click.Choice(sorted(_AGENTS)), required=True)
-@click.option("--profile", default="default", show_default=True)
-@click.option("--guard-binary", default="defenseclaw-acp", show_default=True)
+@click.option("--client", type=click.Choice(sorted(_CLIENTS)), required=True, help="Editor that runs the agent.")
+@click.option("--agent", type=click.Choice(sorted(_AGENTS)), required=True, help="ACP agent to guard.")
+@click.option(
+    "--profile", default="default", show_default=True, help="ACP policy profile (acp.profiles) the guard enforces."
+)
+@click.option(
+    "--guard-binary",
+    default="defenseclaw-acp",
+    show_default=True,
+    help="DefenseClaw ACP guard executable the editor entry starts.",
+)
 @click.option("--agent-binary", default="", help="Override the catalog agent executable.")
 @click.option("--activate", is_flag=True, help="Enable action mode; setup otherwise observes only.")
 @click.option(
@@ -453,7 +460,7 @@ def catalog_cmd() -> None:
     type=click.Path(dir_okay=False, path_type=Path),
     help="Administrator-provisioned managed token; must equal <runtime-data-dir>/acp/<client>-<agent>.token.",
 )
-@click.option("--json-output", "json_output", is_flag=True)
+@click.option("--json-output", "--json", "json_output", is_flag=True, help="Print the result as JSON.")
 @pass_ctx
 def setup_cmd(
     app: AppContext,
@@ -635,10 +642,15 @@ def setup_cmd(
 
 
 @acp_cmd.command("remove")
-@click.option("--client", type=click.Choice(sorted(_CLIENTS)), required=True)
-@click.option("--agent", type=click.Choice(sorted(_AGENTS)), required=True)
+@click.option("--client", type=click.Choice(sorted(_CLIENTS)), required=True, help="Editor that runs the agent.")
+@click.option("--agent", type=click.Choice(sorted(_AGENTS)), required=True, help="ACP agent to guard.")
 @click.option("--managed", is_flag=True, help="Remove only user-side enterprise enrollment files.")
-@click.option("--runtime-data-dir", default=None, type=click.Path(file_okay=False, path_type=Path))
+@click.option(
+    "--runtime-data-dir",
+    default=None,
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Per-user ACP runtime directory of a managed enrollment.",
+)
 @pass_ctx
 def remove_cmd(app: AppContext, client: str, agent: str, managed: bool, runtime_data_dir: Path | None) -> None:
     """Remove one DefenseClaw-owned editor entry without touching foreign agents."""
@@ -694,7 +706,12 @@ def remove_cmd(app: AppContext, client: str, agent: str, managed: bool, runtime_
 
 
 @acp_cmd.command("status")
-@click.option("--runtime-data-dir", default=None, type=click.Path(file_okay=False, path_type=Path))
+@click.option(
+    "--runtime-data-dir",
+    default=None,
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Per-user ACP runtime directory of a managed enrollment.",
+)
 @pass_ctx
 def status_cmd(app: AppContext, runtime_data_dir: Path | None) -> None:
     """Show configured ACP posture and editor paths."""
@@ -738,9 +755,14 @@ def status_cmd(app: AppContext, runtime_data_dir: Path | None) -> None:
 
 
 @acp_cmd.command("verify")
-@click.option("--client", type=click.Choice(sorted(_CLIENTS)), required=True)
-@click.option("--agent", type=click.Choice(sorted(_AGENTS)), required=True)
-@click.option("--runtime-data-dir", default=None, type=click.Path(file_okay=False, path_type=Path))
+@click.option("--client", type=click.Choice(sorted(_CLIENTS)), required=True, help="Editor that runs the agent.")
+@click.option("--agent", type=click.Choice(sorted(_AGENTS)), required=True, help="ACP agent to guard.")
+@click.option(
+    "--runtime-data-dir",
+    default=None,
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Per-user ACP runtime directory of a managed enrollment.",
+)
 @pass_ctx
 def verify_cmd(app: AppContext, client: str, agent: str, runtime_data_dir: Path | None) -> None:
     """Fail if a managed editor entry or executable digest has drifted."""
@@ -905,7 +927,7 @@ def _point_entry_at_guard(client: str, entry_name: str, guard: str, args: list[s
 
 
 @acp_cmd.command("detect")
-@click.option("--json-output", "json_output", is_flag=True)
+@click.option("--json-output", "--json", "json_output", is_flag=True, help="Print the result as JSON.")
 def detect_cmd(json_output: bool) -> None:
     """Report which ACP clients are guarded, unguarded, or unconfigured."""
     findings = _detect_acp_clients()
@@ -940,11 +962,18 @@ def detect_cmd(json_output: bool) -> None:
 
 @acp_cmd.command("adopt")
 @click.option("--client", type=click.Choice(sorted(_CLIENTS)), default=None, help="Limit to one client.")
-@click.option("--profile", default="default", show_default=True)
-@click.option("--guard-binary", default="defenseclaw-acp", show_default=True)
+@click.option(
+    "--profile", default="default", show_default=True, help="ACP policy profile (acp.profiles) the guard enforces."
+)
+@click.option(
+    "--guard-binary",
+    default="defenseclaw-acp",
+    show_default=True,
+    help="DefenseClaw ACP guard executable the editor entry starts.",
+)
 @click.option("--activate", is_flag=True, help="Enable action mode; adoption otherwise observes only.")
 @click.option("--yes", "assume_yes", is_flag=True, help="Adopt without the confirmation prompt.")
-@click.option("--json-output", "json_output", is_flag=True)
+@click.option("--json-output", "--json", "json_output", is_flag=True, help="Print the result as JSON.")
 @click.pass_context
 def adopt_cmd(
     ctx: click.Context,

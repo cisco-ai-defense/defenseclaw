@@ -390,10 +390,10 @@ def add_cmd(  # noqa: PLR0913 - mirrors the prompt surface
 @registry.command("edit")
 @click.argument("source_id")
 @click.option("--kind", type=click.Choice(REGISTRY_KINDS, case_sensitive=False),
-              default=None)
-@click.option("--url", default=None)
+              default=None, help="Source kind (clawhub / smithery / http_yaml / ...)")
+@click.option("--url", default=None, help="Manifest URL or git repo URL")
 @click.option("--content", type=click.Choice(REGISTRY_CONTENT_TYPES, case_sensitive=False),
-              default=None)
+              default=None, help="What the source lists (skills, MCP servers, or both)")
 @click.option("--auth-env", default=None,
               help="Env var NAME (use --clear-auth-env to remove)")
 @click.option("--clear-auth-env", is_flag=True, help="Drop auth_env back to empty")
@@ -403,8 +403,8 @@ def add_cmd(  # noqa: PLR0913 - mirrors the prompt surface
               help="RESERVED: scheduled sync is not implemented yet.")
 @click.option("--sync-interval-hours", type=int, default=None,
               help="RESERVED: paired with --auto-sync; ignored today.")
-@click.option("--non-interactive", is_flag=True)
-@click.option("--json", "emit_json", is_flag=True)
+@click.option("--non-interactive", is_flag=True, help="Never prompt; fail if a required value is missing.")
+@click.option("--json", "emit_json", is_flag=True, help="Print the result as JSON.")
 @pass_ctx
 def edit_cmd(  # noqa: PLR0913
     app: AppContext,
@@ -499,7 +499,7 @@ def edit_cmd(  # noqa: PLR0913
 # ---------------------------------------------------------------------------
 
 @registry.command("list")
-@click.option("--json", "emit_json", is_flag=True)
+@click.option("--json", "emit_json", is_flag=True, help="Print the result as JSON.")
 @pass_ctx
 def list_cmd(app: AppContext, emit_json: bool) -> None:
     """List configured registry sources.
@@ -571,7 +571,7 @@ def list_cmd(app: AppContext, emit_json: bool) -> None:
 
 @registry.command("show")
 @click.argument("source_id")
-@click.option("--json", "emit_json", is_flag=True)
+@click.option("--json", "emit_json", is_flag=True, help="Print the result as JSON.")
 @pass_ctx
 def show_cmd(app: AppContext, source_id: str, emit_json: bool) -> None:
     """Pretty-print a single source plus a quick verdict summary."""
@@ -605,8 +605,8 @@ def show_cmd(app: AppContext, source_id: str, emit_json: bool) -> None:
 @click.argument("source_id")
 @click.option("--keep-cache", is_flag=True,
               help="Keep ~/.defenseclaw/registries/<id> on disk")
-@click.option("--non-interactive", is_flag=True)
-@click.option("--json", "emit_json", is_flag=True)
+@click.option("--non-interactive", is_flag=True, help="Never prompt; fail if a required value is missing.")
+@click.option("--json", "emit_json", is_flag=True, help="Print the result as JSON.")
 @pass_ctx
 def remove_cmd(
     app: AppContext,
@@ -665,7 +665,7 @@ def remove_cmd(
               help="Print every entry name + type instead of just summary")
 @click.option("--limit", type=int, default=20,
               help="With --show-entries, cap the row count (default 20)")
-@click.option("--json", "emit_json", is_flag=True)
+@click.option("--json", "emit_json", is_flag=True, help="Print the result as JSON.")
 @pass_ctx
 def test_cmd(
     app: AppContext,
@@ -785,7 +785,7 @@ def test_cmd(
               help="Permit RFC1918 / ULA destinations (off by default)")
 @click.option("--no-promote", is_flag=True,
               help="Don't append promoted rules to asset_policy")
-@click.option("--json", "emit_json", is_flag=True)
+@click.option("--json", "emit_json", is_flag=True, help="Print the result as JSON.")
 @pass_ctx
 def sync_cmd(  # noqa: PLR0913
     app: AppContext,
@@ -1191,16 +1191,16 @@ def _registry_mcp_url_allowed(url: str, *, allow_private: bool = False) -> bool:
 @click.argument("source_id")
 @click.option("--type", "entry_type",
               type=click.Choice(["skill", "mcp", "all"], case_sensitive=False),
-              default="all")
+              default="all", help="Show only skills or MCP servers")
 @click.option("--status",
               type=click.Choice(["pending", "clean", "warning", "blocked", "error", "all"],
                                 case_sensitive=False),
-              default="all")
+              default="all", help="Show only entries with this scan status")
 @click.option("--approved", is_flag=True,
               help="Show only operator-approved entries")
 @click.option("--rejected", is_flag=True,
               help="Show only operator-rejected entries")
-@click.option("--json", "emit_json", is_flag=True)
+@click.option("--json", "emit_json", is_flag=True, help="Print the result as JSON.")
 @pass_ctx
 def entries_cmd(
     app: AppContext,
@@ -1283,11 +1283,11 @@ def _filter_verdicts(
 @click.argument("entry_name")
 @click.option("--type", "entry_type",
               type=click.Choice(["skill", "mcp"], case_sensitive=False),
-              required=True)
+              required=True, help="Whether the entry is a skill or an MCP server")
 @click.option("--repromote/--no-repromote", default=True,
               help="Re-run asset_policy promotion against the cached "
                    "manifest immediately (no network call).")
-@click.option("--json", "emit_json", is_flag=True)
+@click.option("--json", "emit_json", is_flag=True, help="Print the result as JSON.")
 @pass_ctx
 def approve_cmd(
     app: AppContext,
@@ -1317,11 +1317,11 @@ def approve_cmd(
 @click.argument("entry_name")
 @click.option("--type", "entry_type",
               type=click.Choice(["skill", "mcp"], case_sensitive=False),
-              required=True)
+              required=True, help="Whether the entry is a skill or an MCP server")
 @click.option("--repromote/--no-repromote", default=True,
               help="Re-run asset_policy promotion against the cached "
                    "manifest immediately (no network call).")
-@click.option("--json", "emit_json", is_flag=True)
+@click.option("--json", "emit_json", is_flag=True, help="Print the result as JSON.")
 @pass_ctx
 def reject_cmd(
     app: AppContext,
@@ -1454,7 +1454,7 @@ def _registry_required_payload(result: RegistryRequiredResult) -> dict[str, Any]
               # round-trips through the loader; clearing it is the doctor
               # command's job (cmd_doctor.py), not this toggle.
               type=click.Choice(["skill", "mcp"], case_sensitive=False),
-              required=True)
+              required=True, help="Whether the entry is a skill or an MCP server")
 @click.option("--enabled/--disabled", required=True,
               help="Flip asset_policy.<type>.registry_required")
 @click.option(
@@ -1463,7 +1463,7 @@ def _registry_required_payload(result: RegistryRequiredResult) -> dict[str, Any]
          "registry_required (per-connector override, OTHER-7). Omit for the "
          "global asset_policy.<type>.registry_required.",
 )
-@click.option("--json", "emit_json", is_flag=True)
+@click.option("--json", "emit_json", is_flag=True, help="Print the result as JSON.")
 @pass_ctx
 def require_cmd(
     app: AppContext,

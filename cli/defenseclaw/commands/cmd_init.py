@@ -1072,6 +1072,31 @@ def _confirm_trusted_prefix_rows(
     return trusted_any, target_data_dir
 
 
+def _with_config_state(
+    disc: agent_discovery.AgentDiscovery,
+    data_dir: str | os.PathLike[str] | None,
+) -> agent_discovery.AgentDiscovery:
+    """Fill the table's Active / Mode column from an existing config.yaml.
+
+    Matches ``defenseclaw agent discover``. A first run (no config yet) or a
+    config that does not load leaves every connector shown as inactive.
+    """
+    from contextlib import redirect_stderr  # noqa: PLC0415
+    from io import StringIO  # noqa: PLC0415
+
+    from defenseclaw import config as cfg_mod  # noqa: PLC0415
+
+    target = data_dir if data_dir is not None else cfg_mod.default_data_path()
+    try:
+        if not cfg_mod.config_path_for_data_dir(str(target)).is_file():
+            return disc
+        with redirect_stderr(StringIO()):
+            cfg = cfg_mod.load(data_dir=target)
+    except Exception:
+        return disc
+    return agent_discovery.apply_config_state(disc, cfg)
+
+
 def _prompt_connector_selection(
     connector: str | None,
     rescan_agents: bool,
@@ -1114,7 +1139,7 @@ def _prompt_connector_selection(
         rescan_agents=rescan_agents,
         trusted_prompt_cache=trusted_prompt_cache,
     )
-    table = agent_discovery.render_discovery_table(disc).rstrip()
+    table = agent_discovery.render_discovery_table(_with_config_state(disc, data_dir)).rstrip()
     if table:
         click.echo(table)
         click.echo()

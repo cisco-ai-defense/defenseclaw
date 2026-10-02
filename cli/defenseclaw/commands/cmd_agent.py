@@ -481,12 +481,10 @@ def components_cmd(
 ) -> None:
     """Show the deduped AI components/SDK rollup with versions, install counts, and confidence.
 
-    Calls ``GET /api/v1/ai-usage/components`` so the sidecar does the
-    join across detectors and workspaces; the CLI just filters and
-    renders.
+    The running gateway (sidecar) combines what every detector found across
+    your workspaces; this command filters and prints it.
 
-    Subcommands ``show NAME`` and ``history NAME`` drill into a single
-    component using the same authoritative SQL inventory store.
+    'show NAME' and 'history NAME' drill into one component.
     """
     # Stash the listing options on click_ctx.meta (NOT click_ctx.obj)
     # so children (`components show`, `components history`) can re-use
@@ -565,13 +563,10 @@ def components_show(
     ecosystem: str | None,
     as_json: bool,
 ) -> None:
-    """Print the per-install location detail for one component.
+    """Print every place one component was detected.
 
-    Resolves ``NAME`` against the components rollup, then fetches
-    ``GET /api/v1/ai-usage/components/{ecosystem}/{name}/locations``
-    so an operator can see *every* place the SDK was detected (one
-    row per evidence record, including detector + match quality +
-    workspace + basename + raw path when redaction is off).
+    One row per detection: detector, match quality, workspace, file name,
+    and the full path when redaction is off.
     """
     app, host, port, token_env = _components_meta(click_ctx)
     client = _usage_client(
@@ -629,9 +624,7 @@ def components_history(
 ) -> None:
     """Print the confidence trend (last N scans) for one component.
 
-    Reads ``GET /api/v1/ai-usage/components/{ecosystem}/{name}/history``
-    so the rendering matches whatever
-    ``inventory.ComputeComponentConfidence`` produced at scan time.
+    The values are the confidence scores recorded at each scan.
     """
     if limit < 0:
         raise click.BadParameter("--limit must be >= 0", param_hint="--limit")
@@ -1085,19 +1078,14 @@ def discovery_enable(
     gateway_port: int | None,
     gateway_token_env: str | None,
 ) -> None:
-    """Enable the sidecar AI discovery service.
+    """Turn on AI discovery in the gateway (sidecar).
 
-    Sets ``ai_discovery.enabled = true`` in ``~/.defenseclaw/config.yaml``,
-    persists, and (when ``--restart`` is on) bounces the gateway so
-    ``inventory.NewContinuousDiscoveryService`` actually constructs
-    the service. With ``--scan`` (the default) this command also calls
-    ``POST /api/v1/ai-usage/scan`` once the sidecar is back up so the
-    operator gets the first inventory snapshot in the same flow.
+    Sets ai_discovery.enabled to true in ~/.defenseclaw/config.yaml and, with
+    --restart, restarts the gateway so discovery starts. With --scan (the
+    default) it then runs the first scan, so you get an inventory right away.
 
-    All ``ai_discovery.*`` knobs can be set inline as flags so this
-    command is fully scriptable; for an interactive walkthrough that
-    prompts for each value with the existing config as the default,
-    use ``defenseclaw agent discovery setup``.
+    Every ai_discovery setting is also a flag here, so this command can be
+    scripted. For a guided walkthrough use 'defenseclaw agent discovery setup'.
     """
     cfg = _require_loaded_config(app)
     ad = cfg.ai_discovery
@@ -1341,12 +1329,11 @@ def discovery_status(
     gateway_port: int | None,
     gateway_token_env: str | None,
 ) -> None:
-    """Show on-disk + live AI discovery status.
+    """Show AI discovery settings from config.yaml next to the running gateway's.
 
-    Reports values persisted in ``config.yaml`` alongside the fields
-    the running sidecar exposes via ``GET /api/v1/ai-usage``. Drift is
-    evaluated only for fields present in the live response; the JSON
-    comparison block identifies settings that could not be verified.
+    A setting that differs from what the gateway (sidecar) reports is shown
+    as drift. Settings the gateway does not report are listed as not
+    verified in the JSON output.
     """
     cfg = _require_loaded_config(app)
     ad = cfg.ai_discovery
@@ -1787,15 +1774,11 @@ def discovery_scan(
     gateway_port: int | None,
     gateway_token_env: str | None,
 ) -> None:
-    """Trigger one immediate AI discovery scan via the sidecar.
+    """Run one AI discovery scan now through the running gateway (sidecar).
 
-    Thin wrapper around ``POST /api/v1/ai-usage/scan`` that surfaces a
-    friendly summary line on success and an actionable hint on the
-    canonical failure mode (HTTP 503 = ai_discovery disabled in
-    config). Operators were previously typing ``defenseclaw agent
-    usage --refresh`` for this same effect; that command is still
-    around but its name implies "render the table" rather than
-    "trigger a scan", which is the cause of repeated confusion.
+    Prints a one-line summary. If AI discovery is turned off in the
+    config, it says so and shows how to turn it on
+    ('defenseclaw agent discovery enable').
     """
     from defenseclaw import ux
 

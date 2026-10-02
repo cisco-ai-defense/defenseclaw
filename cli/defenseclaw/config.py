@@ -153,7 +153,7 @@ def source_config_version(*, path: str | None = None) -> int | None:
     except FileNotFoundError:
         return None
     except (OSError, UnicodeError, yaml.YAMLError) as exc:
-        raise ConfigVersionError("unable to read configuration schema version") from exc
+        raise ConfigVersionError(_unreadable_config_message(cfg_file, exc)) from exc
     if not isinstance(root, yaml.MappingNode):
         return 0
     version_nodes = [
@@ -165,6 +165,25 @@ def source_config_version(*, path: str | None = None) -> int | None:
     if node.tag == "tag:yaml.org,2002:bool":
         return 0
     return _exact_config_version(node.value)
+
+
+def _unreadable_config_message(cfg_file: str, exc: BaseException) -> str:
+    """Name the file, the problem and its position, and the next step."""
+
+    if isinstance(exc, yaml.YAMLError):
+        problem = str(getattr(exc, "problem", "") or "") or "malformed YAML"
+        mark = getattr(exc, "problem_mark", None) or getattr(exc, "context_mark", None)
+        where = f" at line {mark.line + 1}, column {mark.column + 1}" if mark is not None else ""
+        detail = f"invalid YAML{where} ({problem})"
+    elif isinstance(exc, UnicodeError):
+        detail = "the file is not valid UTF-8 text"
+    else:
+        detail = getattr(exc, "strerror", None) or type(exc).__name__
+    return (
+        f"Cannot read the DefenseClaw configuration {cfg_file}: {detail}. "
+        "Run 'defenseclaw config validate' for details, then fix the file or restore a backup "
+        "('defenseclaw doctor' also reports it)."
+    )
 
 
 def require_current_config(*, path: str | None = None, allow_missing: bool = False) -> None:

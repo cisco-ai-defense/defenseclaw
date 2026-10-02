@@ -148,7 +148,7 @@ def test_v8_effective_view_is_go_owned_and_reveal_is_rejected(tmp_path: Path) ->
     assert result.exit_code == 0, result.output
     assert json.loads(result.output) == {"observability": effective}
     assert reveal.exit_code == 2
-    assert "--reveal is not supported" in reveal.output
+    assert "--reveal works only for pre-v8 configurations" in reveal.output
 
 
 def test_v8_provenance_view_exposes_only_canonical_go_annotations(tmp_path: Path) -> None:
