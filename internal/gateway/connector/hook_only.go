@@ -1172,7 +1172,7 @@ func (c *hookOnlyConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 func (c *hookOnlyConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	if c.name == "opencode" {
 		if err := validateOpenCodeWindowsSetupAdmission(opts); err != nil {
-			return err
+			return executableAdmissionRefused(err)
 		}
 	}
 	if c.name == "hermes" {
@@ -1184,7 +1184,7 @@ func (c *hookOnlyConnector) Setup(ctx context.Context, opts SetupOpts) error {
 			return err
 		}
 		if err := validateHermesWindowsSetupAdmission(ctx, opts); err != nil {
-			return err
+			return executableAdmissionRefused(err)
 		}
 		if err := prepareHermesLifecycleDataDir(opts); err != nil {
 			return fmt.Errorf("prepare Hermes lifecycle state: %w", err)
