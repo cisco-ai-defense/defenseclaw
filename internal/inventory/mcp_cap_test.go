@@ -166,3 +166,28 @@ func TestSignalFromMCPConfigPathHealthyIsComplete(t *testing.T) {
 		t.Fatalf("healthy config should have empty CoverageReason; got %q", signal.CoverageReason)
 	}
 }
+
+// GAP-1845: Hermes (and DefenseClaw, since GAP-1591) keeps MCP servers under
+// top-level mcp_servers; each one gets its own mcp_server evidence row.
+func TestSignalFromMCPConfigPathReadsHermesTopLevelMCPServers(t *testing.T) {
+	t.Parallel()
+
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	body := "mcp_servers:\n  vmb4-native:\n    url: https://mcp.example.test/mcp\n"
+	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	s := &ContinuousDiscoveryService{}
+	signal := s.signalFromMCPConfigPath(AISignature{ID: "hermes"}, cfgPath)
+
+	var names []string
+	for _, ev := range signal.Evidence {
+		if ev.Type == "mcp_server" {
+			names = append(names, ev.Basename)
+		}
+	}
+	if len(names) != 1 || names[0] != "vmb4-native" {
+		t.Fatalf("mcp_server evidence basenames = %v, want [vmb4-native]", names)
+	}
+}

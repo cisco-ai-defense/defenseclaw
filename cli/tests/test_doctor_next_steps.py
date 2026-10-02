@@ -495,6 +495,38 @@ def test_windows_hermes_check_reads_python_command_lines() -> None:
             assert cmd_doctor._hermes_host_running_windows(listing) is None
 
 
+def test_windows_command_lines_prefer_the_native_reader() -> None:
+    # GAP-1605: WMI answers "Access denied" for a standard user over SSH; the
+    # native reader does not, so WMI runs only for what it could not read.
+    native = ({"4400": "python.exe -m defenseclaw.main tui"}, {"4600"}, {"4700"})
+    with (
+        mock.patch.object(cmd_doctor, "_windows_native_command_lines", return_value=native),
+        mock.patch.object(cmd_doctor, "_windows_cim_command_lines", return_value=None) as cim,
+        mock.patch("shutil.which", return_value="pwsh"),
+    ):
+        assert cmd_doctor._windows_process_command_lines(["4400", "4600", "4700"]) == {
+            "4400": "python.exe -m defenseclaw.main tui",
+            "4600": None,
+        }
+        cim.assert_not_called()
+        lines = cmd_doctor._windows_process_command_lines(["4400", "4800"])
+        assert lines == {"4400": "python.exe -m defenseclaw.main tui", "4600": None, "4800": ""}
+
+
+def test_windows_hermes_check_skips_other_accounts_in_an_all_accounts_listing() -> None:
+    # Get-Process without -IncludeUserName lists every account: a process this
+    # account may not open is another account's, not a Hermes host of ours.
+    listing = '"python.exe","4400"\n"hermes.exe","4500"\n'
+    denied = {"4400": None, "4500": None}
+    with mock.patch.object(cmd_doctor, "_windows_process_command_lines", return_value=denied):
+        assert cmd_doctor._hermes_host_running_windows("#all-accounts\n" + listing) is False
+        assert cmd_doctor._hermes_host_running_windows(listing) is True
+    with mock.patch.object(cmd_doctor, "_windows_process_command_lines", return_value={"4400": None}):
+        assert cmd_doctor._hermes_host_running_windows('"python.exe","4400"\n') is None
+    with mock.patch.object(cmd_doctor, "_windows_process_command_lines", return_value={"4400": None, "4500": ""}):
+        assert cmd_doctor._hermes_host_running_windows("#all-accounts\n" + listing) is True
+
+
 def test_windows_hermes_check_falls_back_to_get_process(monkeypatch) -> None:
     # GAP-1298: tasklist prints "ERROR: Access denied" for a standard user over SSH.
     import subprocess

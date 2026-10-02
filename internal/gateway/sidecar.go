@@ -5123,11 +5123,12 @@ func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns 
 			// An agent executable that no longer matches its setup evidence is
 			// refused before Setup changes anything, so there is no lock to
 			// restore either: restoring it re-checks the same evidence and
-			// failed the whole gateway start (GAP-1856).
-			if errors.Is(err, ErrHookContractAdmission) || errors.Is(err, connector.ErrAgentVersionProbeTimeout) ||
-				errors.Is(err, connector.ErrExecutableAdmission) {
+			// failed the whole gateway start (GAP-1856). So is a Setup that
+			// refused before writing anything (GAP-1851).
+			unchanged := errors.Is(err, connector.ErrExecutableAdmission) || errors.Is(err, connector.ErrSetupRefusedUnchanged)
+			if errors.Is(err, ErrHookContractAdmission) || errors.Is(err, connector.ErrAgentVersionProbeTimeout) || unchanged {
 				var restoreErr error
-				if !errors.Is(err, connector.ErrExecutableAdmission) {
+				if !unchanged {
 					restoreErr = restoreFailedConnectorLock(registration.opts.DataDir, registration.conn.Name(), previousLock)
 				}
 				if restoreErr != nil {
@@ -5135,6 +5136,10 @@ func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns 
 					continue
 				}
 				fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s setup failed, skipping (other connectors unaffected): %v\n", registration.conn.Name(), err)
+				if errors.Is(err, connector.ErrSetupRefusedUnchanged) {
+					fmt.Fprintf(os.Stderr, "[guardrail] connector %s kept its earlier hook registration; it is not enforced by this gateway until the refusal is fixed\n", registration.conn.Name())
+					continue
+				}
 				transaction.admissionRefused = append(transaction.admissionRefused, registration.conn.Name())
 				if errors.Is(err, errReleaseContractRefusal) {
 					transaction.releaseRefused = true
@@ -6504,7 +6509,9 @@ func (s *Sidecar) failGuardrailWithRollback(ctx context.Context, opts connector.
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "[guardrail] connector %s %s failed: %v\n", conn.Name(), surface, err)
-	recordAndRollbackFailedConnectorSetup(conn, opts, ctx)
+	if !errors.Is(err, connector.ErrSetupRefusedUnchanged) {
+		recordAndRollbackFailedConnectorSetup(conn, opts, ctx)
+	}
 	if s != nil && s.health != nil {
 		s.health.SetGuardrail(StateError, err.Error(), nil)
 	}

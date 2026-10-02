@@ -13,6 +13,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -306,7 +307,9 @@ func (c *applicationProtectionController) ensureAutoConnectorLocked(ctx context.
 		return err
 	}
 	if err := c.sidecar.setupOneConnector(ctx, conn, opts, c.masterKey, c.cache); err != nil {
-		recordAndRollbackFailedConnectorSetup(conn, opts, ctx)
+		if !errors.Is(err, connector.ErrSetupRefusedUnchanged) {
+			recordAndRollbackFailedConnectorSetup(conn, opts, ctx)
+		}
 		return err
 	}
 	c.activeAuto[name] = applicationProtectionActiveRow{

@@ -1181,7 +1181,7 @@ func (c *hookOnlyConnector) Setup(ctx context.Context, opts SetupOpts) error {
 			return err
 		}
 		if err := validateHermesSingleProfile(configPath); err != nil {
-			return err
+			return setupRefusedUnchanged{err: err}
 		}
 		if err := validateHermesWindowsSetupAdmission(ctx, opts); err != nil {
 			return executableAdmissionRefused(err)
@@ -4004,7 +4004,7 @@ func writeHermesDirectNativeState(opts SetupOpts, command, status string) error 
 func validateHermesSingleProfile(configPath string) error {
 	home := filepath.Clean(filepath.Dir(configPath))
 	if strings.EqualFold(filepath.Base(filepath.Dir(home)), "profiles") {
-		return fmt.Errorf("Hermes named profiles are unsupported by the single-HERMES_HOME connector; no changes made")
+		return fmt.Errorf("Hermes named profiles are unsupported by the single-HERMES_HOME connector; point HERMES_HOME at the default profile (run 'hermes profile use default') and retry; no changes made")
 	}
 	activeProfile := filepath.Join(home, "active_profile")
 	if info, err := os.Lstat(activeProfile); err == nil {
@@ -4019,7 +4019,7 @@ func validateHermesSingleProfile(configPath string) error {
 			return fmt.Errorf("inspect Hermes active_profile: %w", readErr)
 		}
 		if profile := strings.TrimSpace(string(data)); profile != "" && !strings.EqualFold(profile, "default") {
-			return fmt.Errorf("Hermes active named profile %q is unsupported by the single-HERMES_HOME connector; no changes made", profile)
+			return fmt.Errorf("Hermes active named profile %q is unsupported by the single-HERMES_HOME connector; switch back with 'hermes profile use default' and retry; no changes made", profile)
 		}
 	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("inspect Hermes active_profile: %w", err)
@@ -4035,7 +4035,8 @@ func validateHermesSingleProfile(configPath string) error {
 		}
 		entries, readErr := directory.ReadDir(257)
 		closeErr := directory.Close()
-		if readErr != nil {
+		// ReadDir(n > 0) reports an empty directory as io.EOF.
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
 			return fmt.Errorf("inspect Hermes profiles directory: %w", readErr)
 		}
 		if closeErr != nil {
@@ -4046,31 +4047,16 @@ func validateHermesSingleProfile(configPath string) error {
 		}
 		for _, entry := range entries {
 			if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
-				return fmt.Errorf("Hermes named profile %q is unsupported by the single-HERMES_HOME connector; no changes made", entry.Name())
+				return fmt.Errorf("Hermes named profile %q is unsupported by the single-HERMES_HOME connector; remove it with 'hermes profile delete %s' (or move it out of %s) and retry; no changes made", entry.Name(), entry.Name(), profilesDir)
 			}
 		}
 	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("inspect Hermes profiles directory: %w", err)
 	}
-	cfg, err := readHermesBoundedConfig(configPath)
-	if err != nil {
-		return err
-	}
-	configMultiplex := hermesBool(cfg["multiplex_profiles"])
-	if gateway, ok := cfg["gateway"].(map[string]interface{}); ok && cfg["multiplex_profiles"] == nil {
-		configMultiplex = hermesBool(gateway["multiplex_profiles"])
-	}
-	if raw, present := os.LookupEnv("GATEWAY_MULTIPLEX_PROFILES"); present {
-		switch strings.ToLower(strings.TrimSpace(raw)) {
-		case "1", "true", "yes", "on":
-			configMultiplex = true
-		case "0", "false", "no", "off":
-			configMultiplex = false
-		}
-	}
-	if configMultiplex {
-		return fmt.Errorf("Hermes multiplex profiles are unsupported by the single-HERMES_HOME connector; no changes made")
-	}
+	// gateway.multiplex_profiles is not checked: Hermes writes its default
+	// (true) into config.yaml on its own, and a multiplexing gateway serves
+	// the default profile plus the named profiles under profiles/, which are
+	// refused above. With none, it serves only this HERMES_HOME (GAP-1844).
 	return nil
 }
 
@@ -4089,19 +4075,6 @@ func readHermesBoundedConfig(path string) (map[string]interface{}, error) {
 		return nil, fmt.Errorf("Hermes config exceeds the %d-byte inspection limit", hermesInventoryConfigMaxBytes)
 	}
 	return readYAMLObject(path)
-}
-
-func hermesBool(value interface{}) bool {
-	if boolean, ok := value.(bool); ok {
-		return boolean
-	}
-	if text, ok := value.(string); ok {
-		switch strings.ToLower(strings.TrimSpace(text)) {
-		case "1", "true", "yes", "on":
-			return true
-		}
-	}
-	return false
 }
 
 func hermesSkillPaths(configPath string) []string {

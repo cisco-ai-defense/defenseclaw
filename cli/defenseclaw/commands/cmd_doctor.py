@@ -6403,16 +6403,61 @@ def _hermes_argv_verdict(args, basename=os.path.basename) -> bool | None:
     program = name(args[0])
     if program in _HERMES_HOST_EXECUTABLES:
         return True
-    if not (program.startswith("python") or program in _HERMES_LAUNCHERS):
+    if program.startswith("python"):
+        return _hermes_python_argv_verdict(args, name)
+    if program not in _HERMES_LAUNCHERS:
         return False
-    # A script launcher puts the interpreter first: python .../bin/hermes.
     if len(args) > 1 and name(args[1]) in _HERMES_HOST_EXECUTABLES:
-        return True
-    # A wrapper (uv run hermes, python -m hermes_cli) may be a host too:
-    # that is not proof of absence.
+        return True  # uvx hermes-agent, env hermes
+    # A wrapper (uv run hermes) may be a host too: that is not proof of absence.
     if any(name(arg) in _HERMES_HOST_EXECUTABLES or arg.lower().startswith("hermes_cli") for arg in args[2:]):
         return None
     return False
+
+
+def _hermes_python_argv_verdict(args, name) -> bool | None:
+    """Classify ``python [options] (-m module | -c code | script) [args]``.
+
+    Only the program Python runs decides: arguments passed to it are that
+    program's own (``python -m defenseclaw.main plugin list --connector
+    hermes`` is DefenseClaw's TUI refresh, not a Hermes host; GAP-1804).
+    """
+    interpreter = args[0].replace("\\", "/").lower()
+    if "/hermes-agent/" in interpreter or "/hermes_cli/" in interpreter:
+        return None  # Hermes' own environment may run a host under any name
+    index = 1
+    while index < len(args):
+        arg = args[index]
+        if arg == "--" or not arg.startswith("-") or arg == "-":
+            break
+        if arg.startswith("--"):
+            index += 2 if arg == "--check-hash-based-pycs" else 1
+            continue
+        for position, flag in enumerate(arg[1:], start=1):
+            if flag not in "mcWX":
+                continue
+            value = arg[position + 1 :]
+            if not value:
+                index += 1
+                value = args[index] if index < len(args) else ""
+            if flag == "m":
+                module = value.lower()
+                if module in _HERMES_HOST_EXECUTABLES or module.split(".")[0] in {"hermes_cli", "hermes_agent"}:
+                    return None  # python -m hermes_cli may be a host
+                return False
+            if flag == "c":
+                return None if "hermes" in value.lower() else False
+            break  # -W / -X take one value
+        index += 1
+    if index < len(args) and args[index] == "--":
+        index += 1
+    if index >= len(args) or args[index] == "-":
+        return False
+    script = args[index]
+    if name(script) in _HERMES_HOST_EXECUTABLES:
+        return True  # a script launcher: python .../bin/hermes
+    lowered = script.replace("\\", "/").lower()
+    return None if "/hermes_cli/" in lowered or "/hermes-agent/" in lowered else False
 
 
 def _hermes_host_running() -> bool | None:
@@ -6457,23 +6502,105 @@ _WINDOWS_PROCESS_LISTING_PS = (
     # USERDOMAIN reads WORKGROUP in an SSH session; the token name does not.
     "$u = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name; "
     "try { $p = Get-Process -IncludeUserName -ErrorAction Stop | Where-Object { $_.UserName -eq $u } } "
-    "catch { $p = Get-Process }; "
+    "catch { $p = Get-Process; '#all-accounts' }; "
     "$q = [char]34; $p | ForEach-Object { $q + $_.ProcessName + $q + ',' + $q + $_.Id + $q }"
 )
 
 
-def _windows_process_command_lines(pids: list[str]) -> dict[str, str] | None:
+def _windows_native_command_lines(pids: list[str]) -> tuple[dict[str, str], set[str], set[str]]:
+    """Read command lines with NtQueryInformationProcess; ``(lines, denied, gone)``.
+
+    Unlike WMI (Win32_Process, which PowerShell's CommandLine uses too), this
+    works for a standard user in an SSH (network) logon, where Get-CimInstance
+    answers "Access denied" (GAP-1605). ``denied`` holds the PIDs this account
+    may not open at all and ``gone`` the ones that exited.
+    """
+    lines: dict[str, str] = {}
+    denied: set[str] = set()
+    gone: set[str] = set()
+    try:  # pragma: no cover - native Windows API, callers test via seams
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        ntdll = ctypes.WinDLL("ntdll")
+        open_process = kernel32.OpenProcess
+        open_process.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        open_process.restype = wintypes.HANDLE
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = (wintypes.HANDLE,)
+        query = ntdll.NtQueryInformationProcess
+        query.argtypes = (
+            wintypes.HANDLE,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            wintypes.ULONG,
+            ctypes.POINTER(wintypes.ULONG),
+        )
+        query.restype = ctypes.c_long
+
+        class _UnicodeString(ctypes.Structure):
+            _fields_ = [("Length", wintypes.USHORT), ("MaximumLength", wintypes.USHORT), ("Buffer", ctypes.c_void_p)]
+
+        process_query_limited_information = 0x1000
+        process_command_line_information = 60
+        for pid in pids:
+            handle = open_process(process_query_limited_information, False, int(pid))
+            if not handle:
+                error = ctypes.get_last_error()
+                if error == 5:  # ERROR_ACCESS_DENIED
+                    denied.add(pid)
+                elif error == 87:  # ERROR_INVALID_PARAMETER: no such process
+                    gone.add(pid)
+                continue
+            try:
+                needed = wintypes.ULONG(0)
+                query(handle, process_command_line_information, None, 0, ctypes.byref(needed))
+                if not ctypes.sizeof(_UnicodeString) <= needed.value <= 128 * 1024:
+                    continue
+                buffer = ctypes.create_string_buffer(needed.value)
+                if query(handle, process_command_line_information, buffer, needed.value, ctypes.byref(needed)) < 0:
+                    continue
+                text = _UnicodeString.from_buffer(buffer)
+                if text.Buffer:
+                    lines[pid] = ctypes.wstring_at(text.Buffer, text.Length // 2)
+            finally:
+                close_handle(handle)
+    except (AttributeError, OSError, ValueError):
+        pass
+    return lines, denied, gone
+
+
+def _windows_process_command_lines(pids: list[str]) -> dict[str, str | None] | None:
     """Command lines of these PIDs as ``{pid: command line}``; None when unknown.
 
     A PID that is gone is left out; one whose command line cannot be read maps
-    to an empty string.
+    to an empty string, and one this account may not open maps to None.
     """
     import shutil
 
-    shell = shutil.which("pwsh") or shutil.which("powershell")
     ids = [pid for pid in pids if pid.isdigit()]
-    if not shell or not ids:
+    if not ids:
         return None
+    native, denied, gone = _windows_native_command_lines(ids)
+    result: dict[str, str | None] = dict(native)
+    result.update({pid: None for pid in denied})
+    rest = [pid for pid in ids if pid not in result and pid not in gone]
+    if not rest:
+        return result
+    shell = shutil.which("pwsh") or shutil.which("powershell")
+    cim = _windows_cim_command_lines(shell, rest) if shell else None
+    if cim is None:
+        if not result and not gone:
+            return None
+        result.update({pid: "" for pid in rest})
+        return result
+    result.update(cim)
+    return result
+
+
+def _windows_cim_command_lines(shell: str, ids: list[str]) -> dict[str, str] | None:
+    """Command lines of these PIDs through WMI; None when WMI is refused."""
     script = (
         f"$ids = @({','.join(ids)}); "
         "Get-CimInstance -ClassName Win32_Process | Where-Object { $ids -contains [int]$_.ProcessId } | "
@@ -6503,9 +6630,11 @@ def _windows_process_command_lines(pids: list[str]) -> dict[str, str] | None:
 def _windows_process_listing_powershell() -> str | None:
     """List this account's processes as tasklist-style CSV through PowerShell.
 
-    Falls back to every process (names only) when -IncludeUserName is refused;
-    a Hermes or Python process of another account then reads as "maybe a
-    host", which keeps the pending-reload state rather than hiding one.
+    Falls back to every process (names only) when -IncludeUserName is refused
+    and then prints a ``#all-accounts`` line first. A hermes.exe of another
+    account still reads as a host, which keeps the pending-reload state rather
+    than hiding one; an interpreter this account may not open is another
+    account's and is left out.
     """
     import shutil
 
@@ -6566,7 +6695,9 @@ def _hermes_host_running_windows(tasklist_output: str | None = None) -> bool | N
 
     own = {str(os.getpid()), str(os.getppid())}
     candidates: list[str] = []
+    hosts: set[str] = set()
     listed = False
+    all_accounts = "#all-accounts" in tasklist_output.splitlines()
     for fields in csv.reader(tasklist_output.splitlines()):
         if len(fields) < 2 or not fields[1].strip().isdigit():
             continue
@@ -6576,8 +6707,11 @@ def _hermes_host_running_windows(tasklist_output: str | None = None) -> bool | N
             continue
         program = fields[0].strip().lower().removesuffix(".exe")
         if program in _HERMES_HOST_EXECUTABLES:
-            return True
-        if program.startswith("python") or program in _HERMES_LAUNCHERS:
+            if not all_accounts:
+                return True
+            hosts.add(pid)  # ours unless this account may not open it
+            candidates.append(pid)
+        elif program.startswith("python") or program in _HERMES_LAUNCHERS:
             candidates.append(pid)
     if not listed:
         return None  # tasklist printed only an "INFO: no tasks" line or nothing usable
@@ -6590,6 +6724,14 @@ def _hermes_host_running_windows(tasklist_output: str | None = None) -> bool | N
     for pid in candidates:
         if pid not in command_lines:
             continue  # exited since the listing
+        if command_lines[pid] is None:
+            # This account may not open it: another account's process in an
+            # all-accounts listing, else one of ours running elevated.
+            if not all_accounts:
+                wrapped = True
+            continue
+        if pid in hosts:
+            return True
         argv = _windows_command_line_argv(command_lines[pid])
         verdict = _hermes_argv_verdict(argv, ntpath.basename) if argv else None
         if verdict is True:

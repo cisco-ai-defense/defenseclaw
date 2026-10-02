@@ -1423,12 +1423,6 @@ def _read_hermes_config_bounded(path: str | None = None) -> tuple[dict[str, Any]
     return document, ""
 
 
-def _hermes_truthy(value: Any) -> bool:
-    if isinstance(value, bool):
-        return value
-    return isinstance(value, str) and value.strip().lower() in {"1", "true", "yes", "on"}
-
-
 def hermes_profile_unsupported_reason(config_path: str | None = None) -> str:
     """Return why a selected Hermes home is outside the single-profile contract."""
 
@@ -1437,7 +1431,8 @@ def hermes_profile_unsupported_reason(config_path: str | None = None) -> str:
     if os.path.basename(os.path.dirname(home)).casefold() == "profiles":
         return (
             "Hermes named profiles are unsupported by the single-HERMES_HOME "
-            "connector; select the default profile and retry"
+            "connector; point HERMES_HOME at the default profile (run "
+            "'hermes profile use default') and retry"
         )
 
     active_profile = os.path.join(home, "active_profile")
@@ -1451,7 +1446,8 @@ def hermes_profile_unsupported_reason(config_path: str | None = None) -> str:
         if profile and profile.casefold() != "default":
             return (
                 f"Hermes active named profile {profile!r} is unsupported by the "
-                "single-HERMES_HOME connector"
+                "single-HERMES_HOME connector; switch back with "
+                "'hermes profile use default' and retry"
             )
     except FileNotFoundError:
         pass
@@ -1472,29 +1468,16 @@ def hermes_profile_unsupported_reason(config_path: str | None = None) -> str:
             if entry.is_dir(follow_symlinks=False):
                 return (
                     f"Hermes named profile {entry.name!r} is unsupported by the "
-                    "single-HERMES_HOME connector"
+                    f"single-HERMES_HOME connector; remove it with 'hermes profile "
+                    f"delete {entry.name}' (or move it out of {profiles_dir}) and retry"
                 )
         except OSError as exc:
             return f"Hermes profile entry cannot be safely inspected: {exc}"
 
-    document, error = _read_hermes_config_bounded(target)
-    if error:
-        return f"Hermes profile topology is unverified: {error}"
-    multiplex = document.get("multiplex_profiles")
-    if multiplex is None and isinstance(document.get("gateway"), dict):
-        multiplex = document["gateway"].get("multiplex_profiles")
-    raw_override = os.environ.get("GATEWAY_MULTIPLEX_PROFILES")
-    if raw_override is not None:
-        token = raw_override.strip().lower()
-        if token in {"1", "true", "yes", "on"}:
-            multiplex = True
-        elif token in {"0", "false", "no", "off"}:
-            multiplex = False
-    if _hermes_truthy(multiplex):
-        return (
-            "Hermes multiplex profiles are unsupported by the single-HERMES_HOME "
-            "connector"
-        )
+    # gateway.multiplex_profiles is not checked: Hermes writes its default
+    # (true) into config.yaml on its own, and a multiplexing gateway serves the
+    # default profile plus the named profiles under profiles/, refused above.
+    # With none, it serves only this HERMES_HOME (GAP-1844).
     return ""
 
 
