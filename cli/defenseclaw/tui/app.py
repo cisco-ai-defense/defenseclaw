@@ -13968,9 +13968,14 @@ def _fetch_gateway_health(config: object | None) -> GatewayHealthResult:
 
         trust = _trusted_gateway_listener(config)
     except Exception:  # noqa: BLE001 - trust discovery failures remain probe errors.
-        return GatewayHealthResult("error", "managed sidecar listener identity is unavailable")
+        return GatewayHealthResult("error", "gateway listener identity is unavailable")
     if not trust.trusted:
-        return GatewayHealthResult("error", f"managed sidecar listener identity is unverified: {trust.detail}")
+        if getattr(trust, "code", "") == "missing":
+            # No PID file: the gateway was never started or was stopped.
+            # Report it as offline so the Overview gives the start command
+            # instead of an identity error (GAP-1110).
+            return GatewayHealthResult("offline", "the gateway is not running")
+        return GatewayHealthResult("error", f"gateway listener identity is unverified: {trust.detail}")
 
     try:
         document = client.status()

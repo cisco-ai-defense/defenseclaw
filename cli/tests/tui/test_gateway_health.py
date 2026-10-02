@@ -549,3 +549,24 @@ def test_overview_metrics_do_not_label_health_errors_offline() -> None:
 
     assert "gateway health error" in metrics["hook_calls"].detail
     assert "gateway offline" not in metrics["hook_calls"].detail
+
+
+def test_missing_pid_file_reads_as_not_running_with_start_hint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GAP-1110: a stopped per-user gateway is 'not running', not an identity error."""
+
+    monkeypatch.setattr(
+        "defenseclaw.commands.cmd_doctor._trusted_gateway_listener",
+        lambda _config: SimpleNamespace(
+            trusted=False, pid=0, code="missing", detail="the gateway is not running (no PID file)"
+        ),
+    )
+    result = _fetch_gateway_health(_config())
+
+    assert result.state == "offline"
+    assert "managed" not in result.detail
+    model = OverviewPanelModel()
+    model.set_gateway_probe(result.state, result.detail)
+    messages = [notice.message for notice in model.build_notices()]
+    assert any("not running" in m and "start" in m for m in messages), messages

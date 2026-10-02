@@ -159,7 +159,7 @@ def test_overview_standalone_hint_and_notices() -> None:
     assert model.subsystem_state("gateway") == "running"
     assert "OpenClaw" not in model.service_detail("gateway")
     notices = model.build_notices()
-    assert not any(notice.level == "error" and "Gateway is offline" in notice.message for notice in notices)
+    assert not any(notice.level == "error" and "Gateway is not running" in notice.message for notice in notices)
     assert not any("set gateway.host" in notice.message for notice in notices)
 
     openclaw = OverviewPanelModel(OverviewConfig(data_dir="/tmp/dc", claw_mode="openclaw"), version="test")

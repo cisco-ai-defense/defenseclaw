@@ -649,7 +649,12 @@ class OverviewPanelModel:
             elif gateway_state == "unknown":
                 notices.append(OverviewNotice("warn", "Gateway status is not available yet"))
             else:
-                notices.append(OverviewNotice("error", 'Gateway is offline - press : then "start" to launch'))
+                notices.append(
+                    OverviewNotice(
+                        "error",
+                        'Gateway is not running - press : and run "start" (or run defenseclaw-gateway start)',
+                    )
+                )
         elif gateway_state in {"starting", "reconnecting"}:
             notices.append(OverviewNotice("info", "Gateway is starting - health checks will retry automatically"))
         elif gateway_standalone:
