@@ -1303,3 +1303,18 @@ def test_a_gateway_start_that_outlasts_init_says_it_is_still_starting(tmp_path, 
     assert step.status == "warn"
     assert step.detail.startswith("still starting")
     assert step.next_command == "defenseclaw-gateway status"
+
+
+def test_init_waits_past_the_windows_gateway_readiness_wait():
+    # GAP-1346: init killed `defenseclaw-gateway start` before its own Windows
+    # readiness wait (240 s) ended, so the watchdog never started.
+    import inspect
+
+    from defenseclaw import bootstrap
+    from defenseclaw.commands import cmd_init
+
+    assert "_GATEWAY_START_TIMEOUT = 300 if os.name == \"nt\" else 90" in inspect.getsource(bootstrap)
+    for fn in (bootstrap._start_gateway_structured, cmd_init._start_gateway, cmd_init._restart_gateway_quiet):
+        src = inspect.getsource(fn)
+        assert "timeout=_GATEWAY_START_TIMEOUT" in src
+        assert "timeout=15" not in src and "timeout=30" not in src
