@@ -183,6 +183,7 @@ from defenseclaw.tui.widgets.panel_split import (
     NavItem,
     NavSwitcher,
     PanelNav,
+    fit_rows,
     nav_switcher,
     split_aside,
     split_layout,
@@ -1190,6 +1191,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # terminal, and the last aside drawn on the right.
         self._nav_switcher_hit: tuple[str, int, NavSwitcher] | None = None
         self._panel_aside_below: RenderableType | None = None
+        self._detail_max_height: int | None = None
         self._last_aside_signature: tuple[object, ...] | None = None
         self.detail_text = ""
         self.status_text = ""
@@ -10832,6 +10834,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # aside here (see _render_panel_split).
         below = None if detail else self._panel_aside_below
         panel.set_class(below is not None, "aside-below")
+        height, rows, width = self._aside_below_box() if below is not None else (0, 0, 0)
+        if self._detail_max_height != (height or None):
+            # Inline beats the CSS cap; None hands the cap back to the CSS.
+            panel.styles.max_height = height or None
+            self._detail_max_height = height or None
         if not detail and below is None:
             if not panel.has_class("hidden"):
                 panel.add_class("hidden")
@@ -10842,6 +10849,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         panel.remove_class("hidden")
         if below is not None:
             title, content = split_aside(below)
+            more = getattr(below, "more", "")
+            if more and rows > 0 and isinstance(content, Text):
+                content = fit_rows(content, self.console, width, rows, more)
             signature = (self.active_panel, "aside", title, content)
             if signature != self._last_detail_signature:
                 panel.border_title = rich_escape(title) if title else None
@@ -10876,6 +10886,44 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             # Discovery showed Codex while OpenCode's detail was open
             # (GAP-1596).
             self.call_after_refresh(self._keep_table_cursor_visible)
+
+    def _aside_below_box(self) -> tuple[int, int, int]:
+        """``(height, rows, width)`` of ``#detail-panel`` showing an aside.
+
+        The CSS caps the pane at 5 rows on a short terminal (16 on a tall
+        one). At 80x24 that cut every Setup task detail mid-sentence while the
+        short task lists left rows empty above it (GAP-1999), so the pane
+        takes every row the table's own rows don't need. ``rows`` and
+        ``width`` are the text area inside the border and padding; all three
+        are 0 before the first layout.
+        """
+
+        try:
+            main = self.query_one("#panel-main")
+            split = self.query_one("#panel-split", Horizontal)
+            table = self.query_one("#panel-table", DataTable)
+            panel = self.query_one("#detail-panel", VerticalScroll)
+        except NoMatches:
+            return 0, 0, 0
+        main_height = int(main.content_size.height or 0)
+        if main_height <= 0:
+            return 0, 0, 0
+        # Header row, the rows, a border with a nav, a sideways scrollbar; the
+        # CSS keeps at least 4 (and at most 60% with a nav).
+        table_rows = table.row_count + 1 + table.styles.gutter.height
+        if table.show_horizontal_scrollbar:
+            table_rows += 1
+        table_rows = max(4, table_rows)
+        margin = panel.styles.margin.top
+        if split.has_class("with-nav"):
+            # The boxed table keeps its height (up to 60%), so the pane gets
+            # only what is left or its bottom border falls off the screen.
+            height = max(3, main_height - min(table_rows, main_height * 60 // 100) - margin)
+        else:
+            # The plain table gives up rows (down to 4) for the CSS cap.
+            height = max(5 if panel.has_class("compact") else 16, main_height - table_rows - margin)
+        gutter = panel.styles.gutter
+        return height, height - gutter.height, int(main.content_size.width or 0) - gutter.width
 
     def _keep_table_cursor_visible(self) -> None:
         try:

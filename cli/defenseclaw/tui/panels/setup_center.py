@@ -298,7 +298,8 @@ def task_detail(model: Any, wizard: SetupWizard, status: TaskStatus) -> Text:
 
 def task_aside(model: Any, statuses: Mapping[SetupWizard, TaskStatus]) -> Aside:
     wizard = model.active_wizard
-    return Aside(setup_catalog.wizard_label(wizard), task_detail(model, wizard, statuses[wizard]))
+    detail = task_detail(model, wizard, statuses[wizard])
+    return Aside(setup_catalog.wizard_label(wizard), detail, more="i details")
 
 
 def _secret(field: Any, value: str) -> bool:
