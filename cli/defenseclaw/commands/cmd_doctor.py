@@ -4516,6 +4516,20 @@ def _check_claudecode_hooks(
         )
 
 
+# The marker line of the placeholder a connector teardown writes over its
+# hook script (disabledHookTombstone in internal/gateway/connector).
+_DISABLED_HOOK_TOMBSTONE_MARKER = "# defenseclaw-managed-hook v0 (disabled tombstone)"
+
+
+def _is_disabled_hook_tombstone(path: str) -> bool:
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            head = fh.read(512)
+    except OSError:
+        return False
+    return _DISABLED_HOOK_TOMBSTONE_MARKER in head
+
+
 def _check_codex_hooks(
     cfg,
     r: _DoctorResult,
@@ -4540,7 +4554,17 @@ def _check_codex_hooks(
         return
     hook_dir = os.path.join(cfg.data_dir, "hooks")
     hook_script = os.path.join(hook_dir, "codex-hook.sh")
-    if os.path.isfile(hook_script):
+    if _is_disabled_hook_tombstone(hook_script):
+        # Teardown leaves this placeholder for running Codex sessions and
+        # removes the registration, so nothing is guarded (GAP-1312).
+        _emit(
+            "fail",
+            "Codex hooks",
+            f"connector torn down: {hook_script} is the disabled placeholder teardown leaves",
+            r=r,
+            remediation="re-register the hooks: defenseclaw setup codex --yes",
+        )
+    elif os.path.isfile(hook_script):
         _emit("pass", "Codex hooks", f"hook script at {hook_script}", r=r)
         _check_generated_hook_freshness(cfg, "codex", "Codex hooks", r)
     else:

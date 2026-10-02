@@ -496,6 +496,11 @@ def _connector_scope_text(cfg) -> str:
     return "global user config"
 
 
+def _guardrail_turned_off(gc) -> bool:
+    """Whether ``guardrail.enabled`` is explicitly false in the config."""
+    return getattr(gc, "enabled", True) is False
+
+
 def _print_agents(
     cfg,
     *,
@@ -547,12 +552,19 @@ def _print_agents(
         return
 
     gc = getattr(cfg, "guardrail", None)
+    # ``guardrail.enabled: false`` (``setup guardrail --disable``, or the
+    # default ``uninstall``) makes the gateway tear every hook connector
+    # down, so none of them enforces (GAP-1312). The OpenClaw row reports the
+    # OpenClaw gateway connection instead (#958) and keeps its own state.
+    guardrail_off = _guardrail_turned_off(gc) and any(c != "openclaw" for c in actives)
 
     def _is_enabled(name: str) -> bool:
         # An explicit ``enabled: false`` override (set by
         # ``guardrail disable --connector X``) means the connector was torn
         # down and is no longer enforcing. Default True so single-connector
         # installs and never-disabled connectors keep reading as active.
+        if guardrail_off and name != "openclaw":
+            return False
         if gc is None or not hasattr(gc, "effective_enabled"):
             return True
         try:
@@ -565,6 +577,8 @@ def _print_agents(
     header = f"{enabled_count} active"
     if disabled_count:
         header += f", {disabled_count} disabled"
+    if guardrail_off and not enabled_count:
+        header = ux._style(f"{len(actives)} configured, guardrail off (nothing is guarded)", fg="yellow")
     if sidecar_down and enabled_count:
         # Hooks are configured but nothing answers them: each connector falls
         # back to its fail-mode (open = calls run unchecked, closed = blocked).
@@ -573,6 +587,8 @@ def _print_agents(
             header += f" ({disabled_count} disabled)"
         header = ux._style(header, fg="yellow")
     _status_row("Agents", header)
+    if guardrail_off:
+        ux.echo(" " * 16 + ux.dim("Turn protection back on: defenseclaw setup guardrail"))
     if sidecar_down and enabled_count:
         ux.echo(
             " " * 16
@@ -1218,6 +1234,8 @@ def _connector_roster(cfg, health: dict | None = None) -> list[dict]:
         return ""
 
     def _enabled(name: str) -> bool:
+        if name != "openclaw" and _guardrail_turned_off(gc):
+            return False
         if gc is None or not hasattr(gc, "effective_enabled"):
             return True
         try:

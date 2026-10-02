@@ -1606,5 +1606,53 @@ class ExecutePlanAfterVenvRemovalTests(unittest.TestCase):
         binaries.assert_called_once_with(plan)
 
 
+class TurnGuardrailOffTests(unittest.TestCase):
+    # GAP-1312: the default uninstall keeps the config; it must say that the
+    # torn-down connectors no longer run, or status lists them as active and
+    # the next gateway start sets their hooks up again.
+
+    def test_kept_config_records_the_guardrail_off(self):
+        from defenseclaw import config as config_module
+
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"DEFENSECLAW_CONFIG": ""}):
+            cfg = config_module.load(data_dir=tmp)
+            cfg.data_dir = tmp
+            cfg.guardrail.enabled = True
+            cfg.guardrail.mode = "action"
+            cfg.save()
+            self.assertTrue(config_module.config_path_for_data_dir(tmp).is_file())
+
+            with capture_click_output():
+                cmd_uninstall._turn_guardrail_off(tmp)
+
+            kept = config_module.load(data_dir=tmp)
+            self.assertFalse(kept.guardrail.enabled)
+            self.assertEqual(kept.guardrail.mode, "action")
+
+    def test_missing_config_is_not_created(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cmd_uninstall._turn_guardrail_off(tmp)
+            self.assertEqual(os.listdir(tmp), [])
+
+    def test_only_the_default_uninstall_turns_it_off(self):
+        for remove_data_dir, calls in ((False, 1), (True, 0)):
+            with self.subTest(remove_data_dir=remove_data_dir):
+                plan = cmd_uninstall.UninstallPlan(
+                    connectors=("codex",), data_dir="/tmp/dc", remove_data_dir=remove_data_dir
+                )
+                with (
+                    patch.object(cmd_uninstall, "_validate_plan"),
+                    patch.object(cmd_uninstall, "_stop_gateway"),
+                    patch.object(cmd_uninstall, "_connector_teardown"),
+                    patch.object(cmd_uninstall, "_remove_data_dir"),
+                    patch.object(cmd_uninstall, "_remove_empty_plugin_cache"),
+                    patch.object(cmd_uninstall, "remove_own_api_port_claims"),
+                    patch.object(cmd_uninstall, "_turn_guardrail_off") as turn_off,
+                    capture_click_output(),
+                ):
+                    cmd_uninstall._execute_plan(plan)
+                self.assertEqual(turn_off.call_count, calls)
+
+
 if __name__ == "__main__":
     unittest.main()

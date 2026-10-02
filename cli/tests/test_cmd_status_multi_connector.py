@@ -70,6 +70,17 @@ def _render(cfg) -> str:
 
 
 class TestPrintAgentsRoster(unittest.TestCase):
+    def test_guardrail_off_lists_no_connector_as_active(self):
+        # GAP-1312: the default uninstall turns the guardrail off; the gateway
+        # then tears every connector down, so none of them is active.
+        cfg = _cfg(["claudecode", "codex"], modes={"claudecode": "action", "codex": "action"})
+        cfg.guardrail.enabled = False
+        out = _render(cfg)
+        self.assertIn("2 configured, guardrail off", out)
+        self.assertNotIn("active", out)
+        self.assertEqual(out.count("DISABLED"), 2)
+        self.assertIn("defenseclaw setup guardrail", out)
+
     def test_single_connector_uses_same_roster(self):
         # Uniform UX: a single-connector install renders the SAME "Agents"
         # section as a fan-out install (one row), not a special "Agent:" block.
@@ -773,6 +784,7 @@ class TestStatusJson(unittest.TestCase):
         from defenseclaw.config import PerConnectorGuardrailConfig
 
         gc = self.app.cfg.guardrail
+        gc.enabled = True
         gc.connector = "codex"
         gc.connectors = {
             "codex": PerConnectorGuardrailConfig(mode="action"),

@@ -1940,6 +1940,27 @@ class DoctorGeneratedHookFreshnessTests(unittest.TestCase):
         # rerunning setup so hooks are regenerated and re-registered).
         self.assertNotIn("doctor --fix", freshness[0]["detail"])
 
+    def test_codex_hook_check_fails_on_the_teardown_placeholder(self):
+        # GAP-1312: after uninstall the script is the disabled placeholder
+        # (disabledHookTombstone in Go) and config.toml no longer runs it.
+        from defenseclaw.commands import cmd_doctor
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self._make_cfg(tmp)
+            self._write_hook(
+                tmp,
+                "codex-hook.sh",
+                "#!/bin/sh\n# defenseclaw-managed-hook v0 (disabled tombstone)\n"
+                "# Codex connector was torn down. Existing host processes may\nexit 0\n",
+            )
+            result = _DoctorResult()
+
+            cmd_doctor._check_codex_hooks(cfg, result, platform_name="posix")
+
+        rows = [c for c in result.checks if c["label"].startswith("Codex hooks")]
+        self.assertEqual([c["status"] for c in rows], ["fail"], rows)
+        self.assertIn("torn down", rows[0]["detail"])
+
     def test_claude_freshness_checks_registered_hook_path(self):
         from defenseclaw.commands import cmd_doctor
 
