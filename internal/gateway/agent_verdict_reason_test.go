@@ -75,22 +75,28 @@ func TestAgentVerdictReasonNamesDefenseClawPolicyAndTheRule(t *testing.T) {
 		}
 	}
 
-	// A local rule merged with an AI Defense or judge verdict: the merged
-	// reason names the other lane's reason too, so the rule-only wording
-	// would drop the reason that decided (and could blame an alert-only
-	// rule). Such a reason keeps its display text.
-	for _, source := range []string{
-		markerRuleReason + "; Cisco AI Defense: prompt injection detected",
-		markerRuleReason + "; judge-injection: instruction override",
-		"matched ordered safety rule: CHAIN-1; judge-exfil: upload of a credential",
+	// A local rule merged with an AI Defense verdict: the merged reason names
+	// the other lane's reason too, so the rule-only wording would drop the
+	// reason that decided (and could blame an alert-only rule). Such a
+	// reason keeps its display text.
+	source := markerRuleReason + "; Cisco AI Defense: prompt injection detected"
+	if got := agentVerdictReason("block", source, agentDisplayReason(source, redaction.SinkPolicyDefault), redaction.SinkPolicyDefault); got != agentDisplayReason(source, redaction.SinkPolicyDefault) {
+		t.Fatalf("merged reason %q rewritten to %q", source, got)
+	}
+	// A local rule merged with an LLM judge verdict names both, never the
+	// judge's text (GAP-1824).
+	for source, want := range map[string]string{
+		markerRuleReason + "; judge-injection: instruction override":                       "(rule TEST-MARKER-BLOCK; LLM judge: prompt injection)",
+		"matched ordered safety rule: CHAIN-1; judge-exfil: upload of a credential":        "(rule CHAIN-1; LLM judge: possible data exfiltration)",
+		markerRuleReason + "; judge-pii: Password: 1 instance(s) detected; judge-exfil: x": "(rule TEST-MARKER-BLOCK; LLM judge: personal data or credentials, possible data exfiltration)",
 	} {
-		display := agentDisplayReason(source, redaction.SinkPolicyDefault)
-		if got := agentVerdictReason("block", source, display, redaction.SinkPolicyDefault); got != display {
-			t.Fatalf("merged reason %q rewritten to %q", source, got)
+		got := agentVerdictReason("block", source, agentDisplayReason(source, redaction.SinkPolicyDefault), redaction.SinkPolicyDefault)
+		if !strings.Contains(got, want) || strings.Contains(got, redactedTokenPrefix) || strings.Contains(got, "instance(s)") {
+			t.Fatalf("merged reason %q worded %q, want it to contain %q", source, got, want)
 		}
 	}
 	// The approval fallback's note is not another verdict: the rule decided.
-	source := markerRuleReason + "; " + approvalUnsupportedNote
+	source = markerRuleReason + "; " + approvalUnsupportedNote
 	if got := agentVerdictReason("block", source, agentDisplayReason(source, redaction.SinkPolicyDefault), redaction.SinkPolicyDefault); got != orgBlockWording {
 		t.Fatalf("approval fallback reason = %q, want %q", got, orgBlockWording)
 	}
