@@ -77,6 +77,7 @@ def test_v8_setup_writes_trace_destination_and_secret_outside_yaml(tmp_path, mon
 
     assert result.exit_code == 0, result.output
     assert "Action:      ADD" in result.output
+    assert "not saved" not in result.output
     source = (tmp_path / "config.yaml").read_text(encoding="utf-8")
     assert "must-never-print" not in source + result.output
     assert "# operator comment" in source
@@ -116,6 +117,9 @@ def test_v8_setup_is_idempotent_and_reports_update(tmp_path, monkeypatch) -> Non
     assert first.exit_code == 0, first.output
     assert second.exit_code == 0, second.output
     assert "Action:      ADD" in first.output
+    # GAP-1299: an environment-only key is not saved; say so and how to fix it.
+    assert "GALILEO_API_KEY was read from this shell and not saved" in first.output
+    assert "defenseclaw keys set GALILEO_API_KEY" in first.output
     assert "Action:      UPDATE" in second.output
     assert "already configured" in second.output
     assert (tmp_path / "config.yaml").read_text(encoding="utf-8") == after_first
