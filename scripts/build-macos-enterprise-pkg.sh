@@ -85,8 +85,14 @@ else
         (cd "$REPO_ROOT" && CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 \
             go build -trimpath -buildvcs=false -ldflags "$3" -o "$ROOT/$INSTALL_BIN/$1" "$2")
     }
-    COMMIT="$(git -C "$REPO_ROOT" rev-parse --short=8 HEAD 2>/dev/null || echo unknown)"
-    version_flags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT}"
+    # The Makefile passes GIT_COMMIT and BUILD_DATE (GAP-1446): a source tree
+    # without .git (git archive) builds with GIT_COMMIT=<sha> on the make line.
+    COMMIT="${GIT_COMMIT:-}"
+    if [ -z "$COMMIT" ] || [ "$COMMIT" = unknown ]; then
+        COMMIT="$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+    fi
+    DATE="${BUILD_DATE:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
+    version_flags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.date=${DATE}"
     build defenseclaw-gateway ./cmd/defenseclaw "$version_flags"
     build defenseclaw-hook ./cmd/defenseclaw-hook "$version_flags"
     build defenseclaw-sensor-helper ./cmd/defenseclaw-sensor-helper "$version_flags"

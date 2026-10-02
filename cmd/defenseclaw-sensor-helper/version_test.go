@@ -113,7 +113,18 @@ func TestHelperBuildsStampTheVersionAndCommit(t *testing.T) {
 	pkg := read("scripts", "build-macos-enterprise-pkg.sh")
 	flags := regexp.MustCompile(`(?m)^\s*version_flags="([^"]*)"`).FindStringSubmatch(pkg)
 	if flags == nil || !strings.Contains(flags[1], "-X main.version=") || !strings.Contains(flags[1], "-X main.commit=") ||
+		!strings.Contains(flags[1], "-X main.date=") ||
 		!strings.Contains(pkg, `build defenseclaw-sensor-helper ./cmd/defenseclaw-sensor-helper "$version_flags"`) {
 		t.Errorf("build-macos-enterprise-pkg.sh does not stamp the helper: version_flags=%q", flags)
+	}
+	// GAP-1446: the pkg took the commit only from git HEAD and set no build
+	// date, so a build from a source archive reported commit=unknown and
+	// every pkg binary built=unknown. The Make target passes both.
+	if !strings.Contains(pkg, `COMMIT="${GIT_COMMIT:-}"`) || !strings.Contains(pkg, `DATE="${BUILD_DATE:-`) {
+		t.Error("build-macos-enterprise-pkg.sh ignores GIT_COMMIT or BUILD_DATE")
+	}
+	target := regexp.MustCompile(`(?m)^packaging-macos-enterprise:\n\t(.*)$`).FindStringSubmatch(read("Makefile"))
+	if target == nil || !strings.Contains(target[1], `GIT_COMMIT="$(GIT_COMMIT)"`) || !strings.Contains(target[1], `BUILD_DATE="$(BUILD_DATE)"`) {
+		t.Errorf("packaging-macos-enterprise does not pass GIT_COMMIT and BUILD_DATE: %q", target)
 	}
 }
