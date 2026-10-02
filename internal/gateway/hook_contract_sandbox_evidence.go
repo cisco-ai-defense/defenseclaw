@@ -51,6 +51,13 @@ type sandboxHarnessContract struct {
 // another DefenseClaw release or an unknown contract are all reported as
 // (false, nil): the caller keeps its host-based verdict.
 func sandboxHarnessHookContract(dataDir, connectorName string) (sandboxHarnessContract, bool, error) {
+	return sandboxHarnessHookContractFor(dataDir, connectorName, version.Current().BinaryVersion)
+}
+
+// sandboxHarnessHookContractFor is sandboxHarnessHookContract with the release
+// pinned by the caller, so tests can exercise the "image built by another
+// release" rule without depending on the test binary's build metadata.
+func sandboxHarnessHookContractFor(dataDir, connectorName, release string) (sandboxHarnessContract, bool, error) {
 	name := strings.ToLower(strings.TrimSpace(connectorName))
 	if strings.TrimSpace(dataDir) == "" || name == "" {
 		return sandboxHarnessContract{}, false, nil
@@ -60,7 +67,7 @@ func sandboxHarnessHookContract(dataDir, connectorName string) (sandboxHarnessCo
 		return sandboxHarnessContract{}, false, fmt.Errorf("sandbox harness hook contract: %w", err)
 	}
 	sort.SliceStable(records, func(i, j int) bool { return records[i].BuiltAt.After(records[j].BuiltAt) })
-	currentRelease := version.Current().BinaryVersion
+	currentRelease := release
 	for _, rec := range records {
 		if !rec.HookFireVerified {
 			continue

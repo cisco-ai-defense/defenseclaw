@@ -124,6 +124,7 @@ from defenseclaw.platform_support import (
     local_shell_stacks_supported,
 )
 from defenseclaw.safety import DotenvValueError, reject_symlink, sanitize_dotenv_value
+from defenseclaw.sandbox_images import verified_harness_contract
 
 _supports_terminal_redraw = terminal_checkbox.supports_terminal_redraw
 _checkbox_key_name = terminal_checkbox.checkbox_key_name
@@ -4918,6 +4919,22 @@ def _check_connector_version_supported_for_setup(
 
     if not installed:
         if action_mode and compatibility.status != STATUS_NOT_GATED and not allow_drift:
+            # F9: no agent on this host is not the same as no verified hook
+            # surface. In the layout the sandbox documentation recommends the
+            # agent lives inside the harness image, and that image carries a
+            # harness version DefenseClaw pinned and hook-fire verified. Accept
+            # that evidence here; the gateway accepts the same evidence at
+            # admission (hook_contract_sandbox_evidence.go), so setup and the
+            # daemon do not disagree about the same host.
+            evidence = verified_harness_contract(data_dir, connector)
+            if evidence is not None:
+                if emit:
+                    ux.ok(
+                        f"{label}: connector was not detected locally, but the verified harness "
+                        f"image {evidence.tag} carries {evidence.harness_version} "
+                        f"({evidence.contract_id}); action mode will enforce that contract."
+                    )
+                return True
             if emit:
                 ux.err(f"{label}: connector was not detected locally; refusing action-mode hook setup.")
                 ux.subhead("Install the connector locally, or use observe mode until it is available.")
