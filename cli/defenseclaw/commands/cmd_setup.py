@@ -3172,13 +3172,19 @@ def _rotate_token_persisted_hook_scopes(data_dir: str) -> list[str]:
     return sorted(scopes)
 
 
-def _rotate_token_hook_value(body: bytes) -> str:
+def _rotate_token_hook_value(body: bytes, connector: str = "") -> str:
+    # Name the connector and the way out: a gateway restart re-issues a
+    # damaged scoped credential (GAP-1244).
+    message = (
+        f"The {connector or 'connector'} hook credential is malformed; refusing token rotation. "
+        "Run `defenseclaw-gateway restart` to re-issue it, then retry."
+    )
     try:
         value = body.decode("ascii").strip()
     except UnicodeDecodeError as exc:
-        raise click.ClickException("A connector hook credential is malformed; refusing token rotation.") from exc
+        raise click.ClickException(message) from exc
     if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
-        raise click.ClickException("A connector hook credential is malformed; refusing token rotation.")
+        raise click.ClickException(message)
     return value
 
 
@@ -3222,7 +3228,7 @@ def _rotate_token_hook_snapshot_locked(
                     )
         if len(body) > 4096:
             raise click.ClickException("A connector hook credential is oversized; refusing token rotation.")
-        value = _rotate_token_hook_value(body)
+        value = _rotate_token_hook_value(body, connector)
         return _RotateTokenHookSnapshot(
             connector=connector,
             path=path,

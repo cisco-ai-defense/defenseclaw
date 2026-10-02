@@ -493,3 +493,34 @@ func TestPublishHookAPITokenTransactionLockHelper(t *testing.T) {
 		t.Fatalf("hold transaction lock: %v", err)
 	}
 }
+
+// GAP-1244: a damaged scoped credential in a trusted file is re-issued on the
+// next setup (gateway restart, setup <connector>) instead of disabling the
+// connector's scoped token, which left the hook with no token at all.
+func TestEnsureHookAPITokenReissuesAMalformedCredential(t *testing.T) {
+	dataDir := testenv.PrivateTempDir(t)
+	original, err := EnsureHookAPIToken(dataDir, "claudecode")
+	if err != nil {
+		t.Fatalf("seed token: %v", err)
+	}
+	path, err := HookAPITokenFilePath(dataDir, "claudecode")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("not-a-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadHookAPIToken(dataDir, "claudecode"); err == nil {
+		t.Fatal("LoadHookAPIToken accepted a malformed credential")
+	}
+	reissued, err := EnsureHookAPIToken(dataDir, "claudecode")
+	if err != nil {
+		t.Fatalf("EnsureHookAPIToken with a malformed credential: %v", err)
+	}
+	if reissued == original || !otlpTokenHexRE.MatchString(reissued) {
+		t.Fatalf("re-issued token = %q, want a fresh 64-hex token", reissued)
+	}
+	if loaded, err := LoadHookAPIToken(dataDir, "claudecode"); err != nil || loaded != reissued {
+		t.Fatalf("LoadHookAPIToken after re-issue = %q, %v", loaded, err)
+	}
+}

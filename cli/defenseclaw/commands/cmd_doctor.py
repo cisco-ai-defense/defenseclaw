@@ -3771,6 +3771,73 @@ def _check_windows_watchdog_diagnostics(
     return True
 
 
+_HOOK_CREDENTIAL_NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]*")
+_HOOK_CREDENTIAL_VALUE_RE = re.compile(r"[0-9a-f]{64}")
+
+
+def _connector_hook_credential_problems(cfg, trust: _GatewayTrust | None) -> list[str]:
+    """Name active connectors whose scoped hook credential is damaged or refused.
+
+    GAP-1244: a hook credential that drifted from the one the gateway loaded
+    blocked every prompt while Doctor reported the gateway token as fine. A
+    malformed file is reported without sending it; a well-formed one is sent
+    only to the verified gateway, on a GET the hook route answers with 405 once
+    authentication passed, so no hook event is submitted. ``trust`` is resolved
+    on first use when None.
+    """
+    hooks_dir = os.path.join(str(getattr(cfg, "data_dir", "") or ""), "hooks")
+    problems: list[str] = []
+    for scope in _doctor_active_connectors(cfg):
+        if not _HOOK_CREDENTIAL_NAME_RE.fullmatch(scope):
+            continue
+        path = os.path.join(hooks_dir, f".hook-{scope}.token")
+        if os.path.islink(path) or not os.path.isfile(path):
+            continue
+        try:
+            with open(path, "rb") as stream:
+                body = stream.read(4097)
+        except OSError:
+            continue
+        value = body.decode("ascii", "replace").strip()
+        if len(body) > 4096 or not _HOOK_CREDENTIAL_VALUE_RE.fullmatch(value):
+            problems.append(scope)
+            continue
+        if trust is None:
+            trust = _trusted_gateway_listener(cfg)
+        if not trust.trusted:
+            continue
+        code, _detail = _http_probe(
+            _gateway_api_url(cfg, "/api/v1/inspect/tool"),
+            headers={
+                "Authorization": f"Bearer {value}",
+                "X-DefenseClaw-Connector": scope,
+                "X-DefenseClaw-Client": "doctor-hook-credential-probe",
+            },
+            timeout=3.0,
+            response_limit=4096,
+            bypass_proxy=True,
+            bound_peer=trust,
+        )
+        if code == 401:
+            problems.append(scope)
+    return problems
+
+
+def _check_connector_hook_credentials(cfg, r: _DoctorResult) -> None:
+    """Report connector hook credentials the gateway would refuse (GAP-1244)."""
+    problems = _connector_hook_credential_problems(cfg, None)
+    if not problems:
+        return
+    names = ", ".join(problems)
+    _emit(
+        "fail",
+        "Connector hook credential",
+        f"the {names} hook credential does not match the gateway, so its hooks are refused; "
+        "run `defenseclaw doctor --fix` (or `defenseclaw-gateway restart`) to re-issue it",
+        r=r,
+    )
+
+
 def _check_gateway_token_drift(cfg, r: _DoctorResult) -> None:
     """Compare daemon-effective auth state only after strong PID/home proof.
 
@@ -8738,6 +8805,7 @@ def doctor(
         if not auth_attempted:
             _check_gateway_token_drift(cfg, r)
         _check_gateway_home_mismatch(cfg, r)
+    _check_connector_hook_credentials(cfg, r)
     _check_windows_watchdog_diagnostics(cfg, r)
     # Run the per-connector hook/health check for EVERY active connector,
     # not just the primary. ``_doctor_active_connectors`` returns the single
@@ -12176,6 +12244,7 @@ def _fix_gateway_token_drift(
     # identity, home, foreign-owner, and ambiguity failures never authorize a
     # lifecycle mutation.
     auth_rejected = False
+    hook_drift = ""
     trust = _trusted_gateway_listener_for_lifecycle(cfg)
     if trust.code in {"foreign_listener", "ambiguous_listener"}:
         return (
@@ -12194,9 +12263,13 @@ def _fix_gateway_token_drift(
         )
         if code == 200:
             runtime_ok, runtime_detail = _authenticated_runtime_matches(cfg, trust.pid, body)
-            if runtime_ok:
+            if not runtime_ok:
+                return ("fail", runtime_detail)
+            # A restart re-reads every connector hook credential and re-issues
+            # a damaged one (GAP-1244).
+            hook_drift = ", ".join(_connector_hook_credential_problems(cfg, trust))
+            if not hook_drift:
                 return ("skip", "gateway already accepts the configured token")
-            return ("fail", runtime_detail)
         auth_rejected = code in {401, 403, 503}
         if not auth_rejected:
             detail = _token_probe_failure(code, body)
@@ -12211,7 +12284,7 @@ def _fix_gateway_token_drift(
             f"{trust.detail}; refusing automatic authentication repair",
         )
 
-    if not auth_rejected:
+    if not auth_rejected and not hook_drift:
         if not token_env_name:
             return ("skip", f"authentication could not be verified ({trust.detail})")
         process_token = _read_process_env_var(pid, token_env_name)
@@ -12224,6 +12297,11 @@ def _fix_gateway_token_drift(
             return ("skip", "sidecar token already matches the daemon-effective token")
 
     if plan_only:
+        if hook_drift:
+            return (
+                "plan",
+                f"restart verified sidecar pid {pid} to re-read or re-issue the {hook_drift} hook credential",
+            )
         return (
             "plan",
             f"restart verified sidecar pid {pid} and authenticate the replacement "
@@ -12231,7 +12309,8 @@ def _fix_gateway_token_drift(
         )
 
     if not assume_yes and not click.confirm(
-        f"    Restart sidecar (pid {pid}) to pick up the {token_source or 'configured token'}? "
+        f"    Restart sidecar (pid {pid}) to pick up the "
+        f"{f'{hook_drift} hook credential' if hook_drift else token_source or 'configured token'}? "
         "In-flight requests will be interrupted.",
         default=True,
     ):
@@ -12280,6 +12359,11 @@ def _fix_gateway_token_drift(
     )
     if not runtime_ok:
         return ("fail", runtime_detail)
+    if hook_drift:
+        still = ", ".join(_connector_hook_credential_problems(cfg, replacement_trust))
+        if still:
+            return ("fail", f"gateway restarted but still refuses the {still} hook credential")
+        return ("pass", f"sidecar restarted and the {hook_drift} hook credential is accepted again")
     return ("pass", "sidecar restarted and authenticated token acceptance was verified")
 
 
