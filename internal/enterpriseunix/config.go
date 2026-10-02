@@ -252,7 +252,11 @@ func (e *Env) checkRulePackDirs(cfg *config.Config) error {
 			continue
 		}
 		if info, err := os.Stat(e.P(clean)); err != nil || !info.IsDir() {
-			return fmt.Errorf("config %s %q does not exist; install the rule pack first or use %s", label, dir, filepath.Join(e.Layout.VendorPolicyDir, "guardrail", "default"))
+			// The shipped packs exist under the vendor folder only once a
+			// deployment is installed, so a first install cannot copy from
+			// there (GAP-1429): the source release has the same packs.
+			shipped := filepath.Join(e.Layout.VendorPolicyDir, "guardrail", "default")
+			return fmt.Errorf("config %s %q does not exist; create the pack there before you apply the config, starting from a copy of policies/guardrail/default in the DefenseClaw source release (installed hosts also have it at %s), or set it to %s, which the deployment installs", label, dir, shipped, shipped)
 		}
 	}
 	return nil

@@ -1609,8 +1609,21 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Stage > ordered[j].Stage })
 	stopUnit := func(unit Unit) {
 		_ = env.Services.Stop(ctx, unit)
-		if unit.Activate {
+		// On macOS launchctl disable writes an override into launchd's
+		// database that no command can delete (GAP-1443). The definitions
+		// are removed below; one that stays is disabled there.
+		if unit.Activate && env.GOOS != "darwin" {
 			_ = env.Services.Disable(ctx, unit)
+		}
+	}
+	disableKeptDefinitions := func() {
+		if env.GOOS != "darwin" {
+			return
+		}
+		for _, unit := range units {
+			if unit.Activate && exists(env.P(env.Services.DefinitionPath(unit, ChannelPayload))) {
+				_ = env.Services.Disable(ctx, unit)
+			}
 		}
 	}
 	// The guardian repairs any DefenseClaw registration that goes missing
@@ -1652,6 +1665,7 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 		}
 	}
 	if perUserLeft {
+		disableKeptDefinitions()
 		// Some users' agents still name the hook binary. Removing it now
 		// would leave those registrations calling a program that no longer
 		// exists, with nothing left to remove them: the binaries, the
@@ -1712,16 +1726,17 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	}
 	if env.GOOS == "darwin" {
 		// launchctl disable writes an override to launchd's database that
-		// outlives the job, so every removed label stayed listed as
-		// disabled. launchctl cannot delete an override; once a label's
-		// definition is gone, put it back to launchd's default, enabled
-		// (the state install leaves). A definition that is still there
-		// stays disabled, so a reboot does not start it.
+		// outlives the job, and launchctl cannot delete one. A label that an
+		// older version or --no-start disabled goes back to launchd's
+		// default, enabled, once its definition is gone (Enable writes
+		// nothing for a label that is not disabled). A definition that is
+		// still there is disabled, so a reboot does not start it.
 		for _, unit := range units {
 			if unit.Activate && !exists(env.P(env.Services.DefinitionPath(unit, ChannelPayload))) {
 				_ = env.Services.Enable(ctx, unit)
 			}
 		}
+		disableKeptDefinitions()
 	}
 	_ = os.RemoveAll(env.P(env.Layout.HookSocketDir))
 	// Runtime leftovers of the stopped services: the sensor helper's socket

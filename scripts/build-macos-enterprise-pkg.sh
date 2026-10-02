@@ -85,8 +85,14 @@ else
         (cd "$REPO_ROOT" && CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 \
             go build -trimpath -buildvcs=false -ldflags "$3" -o "$ROOT/$INSTALL_BIN/$1" "$2")
     }
-    COMMIT="$(git -C "$REPO_ROOT" rev-parse --short=8 HEAD 2>/dev/null || echo unknown)"
-    version_flags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT}"
+    # The Makefile passes GIT_COMMIT and BUILD_DATE (GAP-1446): a source tree
+    # without .git (git archive) builds with GIT_COMMIT=<sha> on the make line.
+    COMMIT="${GIT_COMMIT:-}"
+    if [ -z "$COMMIT" ] || [ "$COMMIT" = unknown ]; then
+        COMMIT="$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+    fi
+    DATE="${BUILD_DATE:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
+    version_flags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.date=${DATE}"
     build defenseclaw-gateway ./cmd/defenseclaw "$version_flags"
     build defenseclaw-hook ./cmd/defenseclaw-hook "$version_flags"
     build defenseclaw-sensor-helper ./cmd/defenseclaw-sensor-helper "$version_flags"
@@ -145,11 +151,28 @@ if [ -f "$record" ] && [ ! -L "$record" ] && [ "$(stat -f %u "$record")" = 0 ]; 
         echo "$message" >&2
         # The Installer shows only a generic error, so leave the reason in
         # the package result an MDM detection or an administrator reads.
+        # The refusal changed nothing, so the result reports the running
+        # deployment as its own status sees it (GAP-1428: a fixed document
+        # said every service was down). The fixed document stays the
+        # fallback for an installed gateway that cannot answer.
         umask 077
-        printf '{"schema_version":2,"ok":false,"action":"ensure","noop":false,"profile":"standalone","platform":"darwin","product_version":"%s","installed_version":"%s","installed":true,"transaction_pending":false,"services":[],"readiness":{"gateway":false,"guardian":false,"enumerator":false,"sensor_helper":false},"inspection":{"local":"unknown","ai_defense":"unknown"},"machine_policy":{},"enrollment":{"targets":0,"pending":0,"failed":0,"exempt":0},"coverage_complete":false,"security_complete":false,"errors":[{"code":"downgrade_refused","message":"%s"}],"exit_code":1}\n' \
-            "$package_version" "$installed" "$message" >"$state/last-package-result.json.tmp" &&
-            mv -f "$state/last-package-result.json.tmp" "$state/last-package-result.json" &&
-            echo "See $state/last-package-result.json." >&2
+        result="$state/last-package-result.json"
+        error="{\"code\":\"downgrade_refused\",\"message\":\"$message\"}"
+        gateway=/opt/cisco/defenseclaw/bin/defenseclaw-gateway
+        if ! { [ -x "$gateway" ] && "$gateway" enterprise macos status --json 2>/dev/null | sed \
+            -e 's/^  "ok": [a-z]*,$/  "ok": false,/' \
+            -e 's/^  "action": "[a-z-]*",$/  "action": "ensure",/' \
+            -e 's/^  "noop": [a-z]*,$/  "noop": false,/' \
+            -e '/^  "noop_reason": /d' \
+            -e "s|^  \"product_version\": \"[^\"]*\",\$|  \"product_version\": \"$package_version\",|" \
+            -e "s|^  \"errors\": \[\],\$|  \"errors\": [$error],|" \
+            -e "s|^  \"errors\": \[\$|  \"errors\": [$error,|" \
+            -e 's/^  "exit_code": [0-9]*$/  "exit_code": 1/' >"$result.tmp" &&
+            grep -q '"downgrade_refused"' "$result.tmp" && grep -q '^  "exit_code": 1$' "$result.tmp"; }; then
+            printf '{"schema_version":2,"ok":false,"action":"ensure","noop":false,"profile":"standalone","platform":"darwin","product_version":"%s","installed_version":"%s","installed":true,"transaction_pending":false,"services":[],"readiness":{"gateway":false,"guardian":false,"enumerator":false,"sensor_helper":false},"inspection":{"local":"unknown","ai_defense":"unknown"},"machine_policy":{},"enrollment":{"targets":0,"pending":0,"failed":0,"exempt":0},"coverage_complete":false,"security_complete":false,"errors":[%s],"exit_code":1}\n' \
+                "$package_version" "$installed" "$error" >"$result.tmp"
+        fi
+        mv -f "$result.tmp" "$result" && echo "See $result." >&2
         exit 1
     fi
 fi

@@ -856,7 +856,7 @@ packaging-linux-enterprise:
 # Unsigned unless MACOS_APP_SIGN_IDENTITY / MACOS_INSTALLER_SIGN_IDENTITY
 # are set; see scripts/build-macos-enterprise-pkg.sh.
 packaging-macos-enterprise:
-	@scripts/build-macos-enterprise-pkg.sh --version "$(VERSION)" --dist-dir "$(DIST_DIR)"
+	@GIT_COMMIT="$(GIT_COMMIT)" BUILD_DATE="$(BUILD_DATE)" scripts/build-macos-enterprise-pkg.sh --version "$(VERSION)" --dist-dir "$(DIST_DIR)"
 
 # The managed-enterprise Windows build is split so a macOS release box (which
 # has SSH access to cisco-aispg/ai-common) prepares the -tags cmid gateway

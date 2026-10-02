@@ -173,3 +173,47 @@ func TestLaunchdStatusRendersFullJobStates(t *testing.T) {
 		}
 	}
 }
+
+// printDisabledRunner answers `launchctl print-disabled system` with output
+// and records every launchctl call.
+type printDisabledRunner struct {
+	output string
+	calls  *[]string
+}
+
+func (r printDisabledRunner) Run(_ context.Context, _ string, args ...string) (CommandResult, error) {
+	*r.calls = append(*r.calls, strings.Join(args, " "))
+	if args[0] == "print-disabled" {
+		return CommandResult{Stdout: []byte(r.output)}, nil
+	}
+	return CommandResult{}, nil
+}
+
+// GAP-1443: launchctl enable wrote a "=> enabled" override for each label on
+// every install, and no command deletes one, so uninstall left six entries
+// in launchd's disabled-services database. Enable now only clears a
+// disabled override.
+func TestLaunchdEnableClearsOnlyADisabledOverride(t *testing.T) {
+	gateway := Unit{Name: labelGateway, Kind: "gateway"}
+	for name, tc := range map[string]struct {
+		output string
+		enable bool
+	}{
+		"no override":       {"disabled services = {\n\t\"com.apple.ftpd\" => disabled\n}\n", false},
+		"enabled override":  {"disabled services = {\n\t\"" + labelGateway + "\" => enabled\n}\n", false},
+		"disabled override": {"disabled services = {\n\t\"" + labelGateway + "\" => disabled\n}\n", true},
+		"older macOS":       {"disabled services = {\n\t\"" + labelGateway + "\" => true\n}\n", true},
+		"another label":     {"disabled services = {\n\t\"" + labelGateway + ".old\" => disabled\n}\n", false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var calls []string
+			manager := &launchdManager{env: &Env{GOOS: "darwin", Runner: printDisabledRunner{output: tc.output, calls: &calls}}}
+			if err := manager.Enable(context.Background(), gateway); err != nil {
+				t.Fatal(err)
+			}
+			if got := slices.Contains(calls, "enable system/"+labelGateway); got != tc.enable {
+				t.Fatalf("enable called = %v, want %v (calls %v)", got, tc.enable, calls)
+			}
+		})
+	}
+}
