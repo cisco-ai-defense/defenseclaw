@@ -240,3 +240,11 @@ def test_a_uv_in_the_bin_folder_is_used_not_replaced() -> None:
     lookup = text[text.index("$Uv = [string](Get-Command uv.exe") :][:600]
     assert '(Test-Path -LiteralPath (Join-Path $BinDir "uv.exe") -PathType Leaf)) { $Uv = Join-Path $BinDir "uv.exe" }' in lookup
     assert lookup.index("Join-Path $BinDir") < lookup.index("$Uv = Install-Uv")
+
+
+def test_the_locked_package_install_is_retried_once() -> None:
+    # GAP-1315: a sharing violation (os error 32) on uv's cache rename failed
+    # the whole Windows install.
+    body = _text()[_text().index("function New-Venv") :][:1600]
+    assert body.count("(Invoke-Native $Uv $lockArgs) -ne 0") == 2
+    assert "Retrying the Python package install once" in body
