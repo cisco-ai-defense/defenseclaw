@@ -1004,6 +1004,7 @@ def discover_agents(
             )
         )
     agents = {signal.name: signal for signal in signals}
+    _keep_versions_of_slow_unchanged_agents(agents, data_dir=data_dir)
     discovery = AgentDiscovery(scanned_at=scanned_at, agents=agents, cache_hit=False)
     if shared is not None:
         shared[shared_key] = discovery
@@ -1013,6 +1014,56 @@ def discover_agents(
     if persist_cache:
         _write_cache(discovery, data_dir=data_dir)
     return discovery
+
+
+def _keep_versions_of_slow_unchanged_agents(
+    agents: dict[str, AgentSignal],
+    *,
+    data_dir: str | os.PathLike[str] | None = None,
+) -> None:
+    """Keep the last observed version of a CLI whose probe only timed out.
+
+    Setup rescans every agent and republishes this cache, and the gateway
+    reads each peer's version from it when it restarts. On a busy host one
+    slow ``--version`` used to erase a version seen minutes earlier, so action
+    mode refused that peer and setup of an unrelated connector failed to
+    converge (RHEL-U3-13). The old version is kept only for the same binary
+    path, and only if that file has not changed since the earlier scan.
+    """
+    slow = [
+        signal
+        for signal in agents.values()
+        if signal.binary_path and not signal.version and VERSION_PROBE_TIMED_OUT in (signal.error or "")
+    ]
+    if not slow:
+        return
+    try:
+        with open(_cache_path(data_dir=data_dir), encoding="utf-8") as fh:
+            payload = json.load(fh)
+    except Exception:
+        return
+    if not isinstance(payload, dict) or payload.get("version") != CACHE_SCHEMA_VERSION:
+        return
+    previous_scan = _parse_rfc3339(str(payload.get("scanned_at") or ""))
+    previous_agents = payload.get("agents")
+    if previous_scan is None or not isinstance(previous_agents, dict):
+        return
+    for signal in slow:
+        previous = previous_agents.get(signal.name)
+        if not isinstance(previous, dict):
+            continue
+        version = str(previous.get("version") or "")
+        if not version or str(previous.get("binary_path") or "") != signal.binary_path:
+            continue
+        try:
+            changed_at = os.stat(os.path.realpath(signal.binary_path)).st_mtime
+        except OSError:
+            continue
+        if changed_at >= previous_scan.timestamp():
+            continue
+        signal.version = version
+        signal.error = ""
+        signal.installed = True
 
 
 def first_installed(disc: AgentDiscovery, fallback: str = "codex") -> str:
