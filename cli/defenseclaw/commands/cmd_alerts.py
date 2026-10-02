@@ -215,7 +215,10 @@ def _hook_decision(hook_details: list[str], hook_event: str = "") -> str:
         action = kv.get("action", "").lower()
         if action == "block":
             return "blocked"
-        if kv.get("would_block", "").lower() == "true":
+        # Observe mode records action=allow raw_action=block, with or without
+        # would_block=true; both are "would block" (GAP-1213).
+        observed_block = action == "allow" and kv.get("raw_action", "").lower() == "block"
+        if kv.get("would_block", "").lower() == "true" or observed_block:
             decision = (
                 "detected after the tool ran (cannot block)"
                 if is_post_tool_hook_event(hook_event)

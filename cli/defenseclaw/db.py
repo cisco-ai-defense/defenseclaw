@@ -712,6 +712,29 @@ class Store:
         )
         return [self._row_to_event(r) for r in cur.fetchall()]
 
+    def list_block_event_summaries(self, limit: int = 500) -> list[Event]:
+        """List the newest block/deny rows from the whole trail.
+
+        The Audit panel loads the newest 500 rows; with AI discovery on, those
+        are minutes of discovery and OTLP rows, so the Blocks filter missed
+        every older block (GAP-1355). This query reaches past them.
+        """
+
+        cur = self.db.execute(
+            """SELECT id, timestamp, action, target, actor,
+                      substr(COALESCE(details, ''), 1, ?) AS details,
+                      severity, run_id, NULL AS structured_json, connector, enforced
+               FROM audit_events
+               WHERE COALESCE(enforced, 0) = 1
+                  OR (action = 'connector-hook'
+                      AND (' ' || COALESCE(details, '')) LIKE '% action=block%')
+                  OR action LIKE '%block%' OR action LIKE '%deny%'
+                  OR action LIKE '%quarantine%' OR action LIKE '%reject%'
+               ORDER BY timestamp DESC, rowid DESC LIMIT ?""",
+            (_SUMMARY_DETAILS_BYTES, max(limit, 1)),
+        )
+        return [self._row_to_event(r) for r in cur.fetchall()]
+
     def list_actionable_event_summaries(self, limit: int = 100) -> list[Event]:
         """List high-signal audit rows for the default TUI view."""
 
@@ -1026,6 +1049,23 @@ class Store:
             eligible = f"({legacy_finding} OR {legacy_explicit})"
 
         predicates = [eligible, "action NOT LIKE 'dismiss%'"]
+        if "request_id" in columns:
+            # A block that a rule finding explains is one alert: the finding
+            # row (rule, severity; its detail names the hook decision).
+            # Listing the connector-hook row too showed two CLI rows per block
+            # next to one in the TUI, and the TUI's "Dismiss all" left the hook
+            # rows active (GAP-1305). A hook block without a finding stays.
+            predicates.append(
+                """NOT (
+                    LOWER(COALESCE(action, '')) = 'connector-hook'
+                    AND COALESCE(request_id, '') <> ''
+                    AND EXISTS (
+                        SELECT 1 FROM audit_events AS finding
+                        WHERE finding.request_id = audit_events.request_id
+                          AND finding.action = 'scan-finding'
+                    )
+                )"""
+            )
         if "payload_json" in columns:
             predicates.append(
                 """NOT EXISTS (

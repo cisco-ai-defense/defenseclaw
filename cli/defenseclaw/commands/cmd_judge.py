@@ -279,11 +279,10 @@ def _save_and_restart(app: AppContext, gc, *, restart: bool, action: str) -> Non
         )
 
     if app.logger:
-        app.logger.log_action(
-            "config-update",
-            "config",
-            f"judge-hooks {action} hook_connectors={gc.judge.hook_connectors} restart={restart}",
-        )
+        connectors = ",".join(gc.judge.hook_connectors or []) or "(none)"
+        # An Activity mutation names the new gate (hook_connectors: -> a,b);
+        # a plain config-update action lost it (GAP-1325).
+        app.logger.log_config_change(f"judge-hooks-{action}", f"hook_connectors={connectors}")
 
 
 @click.group("judge")

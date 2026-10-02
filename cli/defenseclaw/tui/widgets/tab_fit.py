@@ -17,6 +17,7 @@ first tab that no longer fits. That choice depends on the width only, so
 labels stay put as you switch panels or badges change. The active tab always
 shows its full name, every tab keeps its key letter, and unread badges stay
 unless even letter-only tabs with badges overflow. PANELS order never changes.
+Badges show the real count up to 999 and "999+" above that.
 """
 
 from __future__ import annotations
@@ -57,7 +58,7 @@ LABEL_PRIORITY: tuple[str, ...] = (
 )
 
 
-_SUPERSCRIPT = str.maketrans("0123456789", "⁰¹²³⁴⁵⁶⁷⁸⁹")
+_SUPERSCRIPT = str.maketrans("0123456789+", "⁰¹²³⁴⁵⁶⁷⁸⁹⁺")
 # Windows console fonts lack most superscript digits and draw them as
 # degree-like glyphs, so letter-only tabs there show a plain "8(3)" badge.
 _PLAIN_BADGE = os.name == "nt"
@@ -70,11 +71,22 @@ def _label(key: str, name: str, unread: int) -> str:
     badge costs one cell per digit instead of ``"(3)"``'s three.
     """
 
+    count = _badge(unread)
     if not name:
         if not unread:
             return key
-        return f"{key}({unread})" if _PLAIN_BADGE else f"{key}{str(unread).translate(_SUPERSCRIPT)}"
-    return f"{key} {name} ({unread})" if unread else f"{key} {name}"
+        return f"{key}({count})" if _PLAIN_BADGE else f"{key}{count.translate(_SUPERSCRIPT)}"
+    return f"{key} {name} ({count})" if unread else f"{key} {name}"
+
+
+# Badges show the real count, so the Alerts tab reads the same number as
+# Overview and the status bar (GAP-0978); only very large counts are capped,
+# and then visibly ("999+"), never silently.
+BADGE_MAX = 999
+
+
+def _badge(unread: int) -> str:
+    return f"{BADGE_MAX}+" if unread > BADGE_MAX else str(unread)
 
 
 def strip_width(labels: Sequence[str]) -> int:
@@ -134,13 +146,33 @@ def fit_tab_labels(
             labels[name] = _label(key, SHORT_LABELS.get(name, label), unread.get(name, 0))
         else:
             labels[name] = _label(key, "", unread.get(name, 0))
-    # 3. The active tab gets its full name from the room that is left, so
-    #    no other tab changes for it.
+    # 3. The active tab always shows a name. It takes its full (or short)
+    #    name from the room that is left, so no other tab changes for it;
+    #    only when there is no room do the least important other tabs fall
+    #    back to their key letter (GAP-1327: "A" alone on Activity).
     if active in labels:
         key, label = keys[active], next(label for name, _key, label in panels if name == active)
-        candidate = {**labels, active: _label(key, label, unread.get(active, 0))}
-        if strip_width(tuple(candidate.values())) <= width:
-            labels = candidate
+        count = unread.get(active, 0)
+        wanted = (_label(key, label, count), _label(key, SHORT_LABELS.get(active, label), count))
+        for want in wanted:
+            candidate = {**labels, active: want}
+            if strip_width(tuple(candidate.values())) <= width:
+                labels = candidate
+                break
+        else:
+            if not named[active]:
+                candidate = {**labels, active: wanted[-1]}
+                demoted: list[str] = []
+                for name in reversed(ranked):
+                    if strip_width(tuple(candidate.values())) <= width:
+                        break
+                    letter = _label(keys[name], "", unread.get(name, 0))
+                    if name != active and candidate[name] != letter:
+                        candidate[name] = letter
+                        demoted.append(name)
+                if strip_width(tuple(candidate.values())) <= width:
+                    labels = candidate
+                    named.update(dict.fromkeys(demoted, False))
     # 4. Only when the reserve is not enough (many large badges on a tiny
     #    terminal): drop the least important badges, then names.
     for name in reversed(ranked):
@@ -156,4 +188,12 @@ def fit_tab_labels(
     return labels
 
 
-__all__ = ["BADGE_RESERVE", "LABEL_PRIORITY", "SHORT_LABELS", "TAB_GUTTER", "fit_tab_labels", "strip_width"]
+__all__ = [
+    "BADGE_MAX",
+    "BADGE_RESERVE",
+    "LABEL_PRIORITY",
+    "SHORT_LABELS",
+    "TAB_GUTTER",
+    "fit_tab_labels",
+    "strip_width",
+]

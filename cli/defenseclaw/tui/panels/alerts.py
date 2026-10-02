@@ -40,6 +40,7 @@ from defenseclaw.tui.services.event_models import (
 from defenseclaw.tui.services.v8_event_history import (
     V8EventHistoryRow,
     load_v8_alert_history,
+    load_v8_event_history,
     payload_text,
 )
 
@@ -520,13 +521,20 @@ class AlertsPanelModel:
 
         if self.store is not None:
             rows = load_v8_alert_history(self.store, limit=500)
-            self.apply_v8_history(rows)
+            # The hook decision of a finding's evaluation is in the general
+            # history, not the alert view; without it a finding opened before
+            # the shared snapshot refresh showed no Decision line (GAP-0999).
+            self.apply_v8_history(rows, load_v8_event_history(self.store, limit=500))
         self.refresh_gateway_scans()
 
-    def apply_v8_history(self, rows: tuple[V8EventHistoryRow, ...]) -> None:
+    def apply_v8_history(
+        self,
+        rows: tuple[V8EventHistoryRow, ...],
+        context: tuple[V8EventHistoryRow, ...] = (),
+    ) -> None:
         """Apply an already-loaded shared canonical-history snapshot."""
 
-        audit_events = list(alerts_from_v8_history(rows))
+        audit_events = list(alerts_from_v8_history(rows, context))
         if self.audit_events == audit_events:
             return
         self.audit_events = audit_events
@@ -1184,12 +1192,15 @@ class AlertsPanelModel:
                 facts=event.facts,
             )
         event = hydrated or event
-        if event.action == "scan-finding" and not any(label == "Decision" for label, _value in event.facts):
+        if event.action == "scan-finding":
             # A hook-rule finding carries the rule, not the outcome; the
             # connector-hook row of the same request says whether the call was
-            # blocked or only observed (GAP-1213).
+            # blocked or only observed (GAP-1213). Its label is more precise
+            # than the evaluation's raw "allow", which an observe-mode match
+            # also records, so it replaces that one.
             if decision := _hook_decision_label(self.store, event.id, event.target):
-                event = replace(event, facts=(*event.facts, ("Decision", decision)))
+                facts = tuple(fact for fact in event.facts if fact[0] != "Decision")
+                event = replace(event, facts=(*facts, ("Decision", decision)))
         return AlertDetailInfo(
             event=event,
             findings=_list_findings_by_run_id(self.store, event.run_id),
@@ -1586,7 +1597,9 @@ def _hook_decision_label(store: object | None, event_id: str, hook_target: str =
         mode = tokens.get("mode", "").strip().lower()
         if action == "block":
             return f"blocked ({mode} mode)" if mode else "blocked"
-        if tokens.get("would_block", "").strip().lower() == "true":
+        raw_action = tokens.get("raw_action", "").strip().lower()
+        observed_block = action == "allow" and raw_action == "block"
+        if tokens.get("would_block", "").strip().lower() == "true" or observed_block:
             decision = (
                 "detected after the tool ran (cannot block)"
                 if is_post_tool_hook_event(hook_target)
@@ -1713,9 +1726,17 @@ def _alert_details_label(event: AlertEvent) -> str:
             return _truncate(" · ".join(parts), 58)
     # Canonical-history rows end with ``summary=<free text>``; that text (for
     # example the degraded subsystem and its reason) beats the bucket prefix.
-    _, has_summary, summary = event.details.partition(" summary=")
-    if has_summary and event.details.startswith("bucket=") and summary.strip():
-        return _truncate(summary.strip(), 58)
+    if event.details.startswith("bucket="):
+        summary = event.details.partition(" summary=")[2].strip()
+        event_name = event.details.partition("event_name=")[2].split(" ", 1)[0]
+        if summary and summary != event_name:
+            return _truncate(summary, 58)
+        # A finding with no summary of its own (prompt-lane rows) showed only
+        # "finding.observed"; its rule says what matched (GAP-1324).
+        if rule := next((value for label, value in event.facts if label == "Rule"), ""):
+            return _truncate(rule, 58)
+        if summary:
+            return _truncate(summary, 58)
     return _truncate(humanize_alert_details(event.details) or event.details, 58)
 
 

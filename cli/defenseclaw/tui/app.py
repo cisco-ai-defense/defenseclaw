@@ -2447,11 +2447,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
     def _panel_unread_count(self, panel: str) -> int:
         """Return ``max(0, total - seen)`` for the tab-badge renderer.
 
-        Capped at 99 so the tab strip stays one cell wide — anything
-        above that is already "lots of new things, just open the
-        panel". Skips badging on the currently active panel so the
-        cursor doesn't lap itself (you can't have unread content on a
-        panel you're staring at).
+        The tab strip shows the real number (``fit_tab_labels`` writes
+        "999+" only above 999), so the Alerts badge never reads 99 while
+        Overview says 118 (GAP-0978). Skips badging on the currently
+        active panel so the cursor doesn't lap itself (you can't have
+        unread content on a panel you're staring at).
         """
 
         if panel == self.active_panel:
@@ -2460,7 +2460,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             # Alerts is an inbox: its badge is the open-alert count that
             # Overview and the status bar show, not "new since last visit",
             # so the same number appears everywhere (WIN2-U2-11).
-            return min(99, self.alerts_model.total_count())
+            return max(0, self.alerts_model.total_count())
         total = self._panel_total_count(panel)
         if total <= 0:
             return 0
@@ -2468,7 +2468,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             seen = self.state_store.get_seen_count(panel)
         except AttributeError:
             seen = 0
-        return min(99, max(0, total - seen))
+        return max(0, total - seen)
 
     def _update_tab_labels(self) -> None:
         """Refresh Tab labels with "(N)" unread badges in-place.
@@ -3916,11 +3916,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             self.run_worker(self._confirm_and_run_parsed(parsed), exclusive=False, thread=False)
             return
 
-        self.run_worker(
-            self._run_command(parsed.binary, parsed.args, display_name=parsed.display_name),
-            exclusive=False,
-            thread=False,
-        )
+        self.run_worker(self._run_and_report(parsed), exclusive=False, thread=False)
 
     @on(DataTable.RowHighlighted, "#panel-table")
     def _on_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
@@ -3934,6 +3930,12 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # the per-panel current-cursor comparison covers the async highlight
         # events Textual delivers a tick later (e.g. after clear()+add_row()).
         if self._restoring_table_cursor:
+            return
+        if event.cursor_row != event.data_table.cursor_row:
+            # A stale highlight: the table cursor already moved on (a render
+            # added rows, highlighting row 0, then restored the cursor). For
+            # Logs it paused the stream and showed the oldest lines after a
+            # source switch (GAP-1216).
             return
         if self.active_panel == "ai" and self.focused is not event.control:
             # The AI panel has two simultaneously mounted tables. A delayed
@@ -10289,6 +10291,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # move_cursor fires RowHighlighted; suppress the handler's model
         # write so restoring the cursor here can't pause the Logs stream.
         table.move_cursor(row=cursor_row, column=0, animate=False)
+        if self.active_panel == "logs" and not self.logs_model.paused and cursor_row >= len(self._table_rows) - 1:
+            # Following the tail: scroll again once the layout settles and the
+            # horizontal scrollbar exists, so the newest line sits above it
+            # rather than hidden under it (GAP-1216).
+            table.call_after_refresh(lambda: table.scroll_to(y=table.max_scroll_y, animate=False))
         # Textual's DataTable binds left/right/enter to its own cursor
         # actions, which silently swallows the keys the setup wizard form
         # relies on. Keep its visual cursor but relinquish focus in that mode.
@@ -13011,6 +13018,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             stdin_input=getattr(intent, "secret_stdin", None),
             env_overrides=tuple(getattr(intent, "env_overrides", ()) or ()),
         )
+        self._report_command_result(intent.label, exit_code)
         return await self._run_follow_ups(intent, exit_code)
 
     async def _confirm_and_run_parsed(self, parsed: ParsedCommand) -> int | None:
@@ -13053,14 +13061,28 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             stdin_input=parsed.stdin_input,
             env_overrides=parsed.env_overrides,
         )
-        # Say how it ended: the status bar kept "Command cancelled." from an
-        # earlier cancel after a later run succeeded (GAP-1213).
+        self._report_command_result(parsed.display_name, exit_code)
+        return exit_code
+
+    def _report_command_result(self, display_name: str, exit_code: int | None) -> None:
+        """Say how a command ended in the status bar.
+
+        The status bar kept "Command cancelled." from an earlier cancel after
+        a later run succeeded (GAP-1213, GAP-1354), on every run path: the
+        preview, the destructive consequence modal and a typed read-only
+        command.
+        """
+
         if exit_code == 0:
-            self._set_status(f"Done: {parsed.display_name}.")
+            self._set_status(f"Done: {display_name}.")
         elif exit_code == 130:
-            self._set_status(f"Cancelled: {parsed.display_name}.")
+            self._set_status(f"Cancelled: {display_name}.")
         elif exit_code is not None:
-            self._set_status(f"{parsed.display_name} failed (exit {exit_code}). Activity shows the output.")
+            self._set_status(f"{display_name} failed (exit {exit_code}). Activity shows the output.")
+
+    async def _run_and_report(self, parsed: ParsedCommand) -> int | None:
+        exit_code = await self._run_command(parsed.binary, parsed.args, display_name=parsed.display_name)
+        self._report_command_result(parsed.display_name, exit_code)
         return exit_code
 
     def _schedule_data_refresh(self, *, force: bool = False) -> None:

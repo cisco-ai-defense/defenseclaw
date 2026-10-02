@@ -787,16 +787,24 @@ class LogsPanelModel:
 
     def set_source(self, source: LogSource) -> None:
         self.source = source
-        self._clamp_cursor()
+        self._source_changed()
 
     def next_source(self) -> None:
         index = LOG_SOURCES.index(self.source)
-        self.source = LOG_SOURCES[min(index + 1, len(LOG_SOURCES) - 1)]
-        self._clamp_cursor()
+        self.set_source(LOG_SOURCES[min(index + 1, len(LOG_SOURCES) - 1)])
 
     def previous_source(self) -> None:
         index = LOG_SOURCES.index(self.source)
-        self.source = LOG_SOURCES[max(index - 1, 0)]
+        self.set_source(LOG_SOURCES[max(index - 1, 0)])
+
+    def _source_changed(self) -> None:
+        """A source opens LIVE at its tail unless you moved in it before.
+
+        Switching to Verdicts used to show its oldest rows as PAUSED, and
+        switching back left Gateway PAUSED too (GAP-1216).
+        """
+
+        self.paused = self.cursor_moved.get(self.source, False)
         self._clamp_cursor()
 
     def set_filter(self, preset: str) -> None:
@@ -962,6 +970,9 @@ class LogsPanelModel:
             return LogPanelAction(True, hint="Open notifications toggle confirmation.", modal="notifications")
         if key == "space":
             self.paused = not self.paused
+            if not self.paused:
+                # Resuming LIVE follows the tail again.
+                self.cursor_moved[self.source] = False
             return LogPanelAction(True)
         if key in {"left", "h"} and not self.searching:
             self.previous_source()
@@ -985,7 +996,8 @@ class LogsPanelModel:
             rows = self.filtered_lines()
             if rows:
                 self.cursor[self.source] = len(rows) - 1
-                self.cursor_moved[self.source] = True
+            # G is "follow the tail": LIVE, and new lines keep the cursor there.
+            self.cursor_moved[self.source] = False
             self.paused = False
             self._clamp_scroll_to_cursor()
             return LogPanelAction(True)

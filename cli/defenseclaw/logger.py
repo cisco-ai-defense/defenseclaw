@@ -255,6 +255,44 @@ class Logger:
             }
         )
 
+    def log_config_change(self, operation: str, details: str, *, actor: str = "cli:operator") -> None:
+        """Record a CLI setting change as an Activity mutation that names it.
+
+        ``log_action("config-update", "config", ...)`` reaches the v8 trail
+        without its details, so Activity -> Mutations read only "cli
+        config-update config" for ``guardrail mode`` or ``block-at``
+        (GAP-1217). ``details`` is ``key=value`` text: ``scope=`` names the
+        target, ``previous=`` is the old value of the first field, and that
+        field becomes the diff (``mode: observe -> action``).
+        """
+
+        fields: dict[str, str] = {}
+        for token in details.split():
+            key, sep, value = token.partition("=")
+            if sep and key:
+                fields[key] = value
+        scope = _target_token(fields.pop("scope", ""))
+        previous = fields.pop("previous", None)
+        target_id = f"{_target_token(operation)}:{scope}" if scope else _target_token(operation)
+        diff: list[dict[str, Any]] = []
+        before: dict[str, Any] | None = None
+        if fields:
+            key, value = next(iter(fields.items()))
+            entry: dict[str, Any] = {"path": key, "op": "replace", "after": value or "(unset)"}
+            if previous is not None:
+                entry["before"] = previous or "(unset)"
+                before = {key: previous}
+            diff.append(entry)
+        self.log_activity(
+            actor=actor,
+            action="config-update",
+            target_type="config",
+            target_id=target_id or "config",
+            before=before,
+            after=dict(fields) or None,
+            diff=diff,
+        )
+
     def log_activity(
         self,
         *,
@@ -442,3 +480,10 @@ def _is_definite_preconnect_failure(exc: requests.RequestException) -> bool:
 
 def _current_run_id() -> str:
     return os.environ.get("DEFENSECLAW_RUN_ID", "").strip()
+
+
+def _target_token(value: str) -> str:
+    """Keep only characters the gateway accepts in an admin target reference."""
+
+    cleaned = "".join(ch if ch.isalnum() or ch in "._:/-" else "-" for ch in value.strip())
+    return cleaned.lstrip("._:/-")

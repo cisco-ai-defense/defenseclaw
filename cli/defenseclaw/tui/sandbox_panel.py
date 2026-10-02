@@ -973,6 +973,11 @@ class SandboxPanelMixin:
         return all(row.name != name for row in self.sandbox_model.rows)
 
     async def _sandbox_wrappers_menu(self) -> None:
+        if not self._sandbox_supported():
+            # The menu offered "Turn on: defenseclaw sandbox enable claude" on
+            # Windows, which the command refuses (GAP-1328); say it like n/t do.
+            self._set_status("OpenShell sandboxes run on Linux and macOS only.")  # type: ignore[attr-defined]
+            return
         model = self.sandbox_model
         names = model.harnesses or DEFAULT_SANDBOX_HARNESSES
         # A wrapper runs `sandbox run`, so while sandboxes cannot run the

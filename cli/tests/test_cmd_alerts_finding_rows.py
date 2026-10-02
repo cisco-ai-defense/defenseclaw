@@ -90,6 +90,17 @@ class AlertFindingRowsTests(unittest.TestCase):
                      f"alerts acknowledge --id {blocked_id}"):
             self.assertIn(text, show.output)
 
+    def test_a_block_explained_by_a_finding_is_one_alert(self):
+        """GAP-1305: one alert per block, like the TUI; a lone hook block stays."""
+        now = datetime.now(timezone.utc)
+        finding_id = self._finding(
+            "req-pair", "connector=claudecode result=ok action=block raw_action=block mode=action", now
+        )
+        lone = Event(action="connector-hook", target="PreToolUse", severity="CRITICAL", connector="claudecode",
+                     details="connector=claudecode result=ok action=block raw_action=block mode=action")
+        self.app.store.log_event(lone)
+        self.assertEqual(sorted(e.id for e in self.app.store.list_alerts(10)), sorted([finding_id, lone.id]))
+
     def test_show_hook_row_drops_details_json(self):
         self.app.store.log_event(Event(
             action="connector-hook", target="PreToolUse", severity="CRITICAL", connector="claudecode",

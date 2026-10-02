@@ -141,8 +141,7 @@ def test_enable_globally_composes_validates_then_switches(env) -> None:
     assert gc.rule_pack_dir == str(final)
     assert (gc.enabled, gc.mode, gc.port, gc.connectors) == (True, "action", 4321, {})
     app.cfg.save.assert_called_once()
-    assert app.logger.log_action.call_args.args[0] == "config-update"  # the registered audit action
-    assert app.logger.log_action.call_args.args[2].startswith("guardrail-protection ")
+    assert app.logger.log_config_change.call_args.args[0] == "guardrail-protection"  # a config-update mutation
 
 
 def test_second_pack_recomposes_from_the_recorded_base(env) -> None:
@@ -342,7 +341,7 @@ def test_audit_rejection_after_save_is_a_warning(env) -> None:
     from defenseclaw.logger import CanonicalObservabilityError
 
     app, _root, _validator = env
-    app.logger.log_action.side_effect = CanonicalObservabilityError("admission was not confirmed")
+    app.logger.log_config_change.side_effect = CanonicalObservabilityError("admission was not confirmed")
     result = _run(app, "enable", DB)
     assert result.exit_code == 0, result.output
     app.cfg.save.assert_called_once()
