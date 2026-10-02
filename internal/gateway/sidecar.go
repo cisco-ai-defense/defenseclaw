@@ -3062,7 +3062,19 @@ func (s *Sidecar) runWatcher(ctx context.Context) error {
 		fmt.Fprintf(os.Stderr, "[sidecar] watcher: connector resolution: %v\n", err)
 	}
 
-	skillDirs, pluginDirs, _ := resolveWatcherDirs(s.currentConfig(), conn, wcfg)
+	skillDirs, pluginDirs, src := resolveWatcherDirs(s.currentConfig(), conn, wcfg)
+	if cfg := s.currentConfig(); cfg != nil && !cfg.HasConnectorConfigured() {
+		// No connector configured (init --connector none, or setup remove of
+		// the last one): there is no agent to watch. The empty name resolves
+		// to the OpenClaw default, and watching its folders would create
+		// ~/.openclaw (GAP-1056). Explicit gateway.watcher dirs still apply.
+		if src.Skill != watcherDirsFromConfig {
+			skillDirs = nil
+		}
+		if src.Plugin != watcherDirsFromConfig {
+			pluginDirs = nil
+		}
+	}
 
 	if !wcfg.Skill.Enabled {
 		fmt.Fprintf(os.Stderr, "[sidecar] watcher: skill watching disabled\n")
