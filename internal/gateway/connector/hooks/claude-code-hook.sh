@@ -216,7 +216,10 @@ RESPONSE="$(defenseclaw_sandbox_post "/api/v1/claude-code/hook" "$PAYLOAD" \
   "${TRACE_HEADER_ARGS[@]+"${TRACE_HEADER_ARGS[@]}"}" \
   "${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}")" || {
   fail_unreachable "sandbox ingress unreachable"
-}{{else}}# A refused connection means this account's gateway is not running (after
+}{{else}}if defenseclaw_api_listener_foreign "$API_ADDR"; then
+  fail_unreachable "${API_ADDR} is held by another account while this account's gateway is not running; no token was sent. Run \`defenseclaw-gateway start\` for the fix"
+fi
+# A refused connection means this account's gateway is not running (after
 # a reboot, for example): start it once and retry. See
 # defenseclaw_gateway_cold_start in _hardening.sh.
 defenseclaw_hook_post() {

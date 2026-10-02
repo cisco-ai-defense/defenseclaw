@@ -832,6 +832,50 @@ defenseclaw_own_gateway_stopped() {
   return 0
 }
 
+# defenseclaw_api_listener_foreign HOST:PORT returns 0 when this account's
+# per-user gateway is not running and the loopback listener on PORT belongs to
+# another account (GAP-1260). The hook then sends it no token or payload: an
+# account that holds this account's port, or its old port after a move, would
+# otherwise collect the connector's credential. A running gateway rendered the
+# current API_ADDR itself, so the check costs only the PID test then. Linux
+# reads the owner from /proc/net/tcp*; macOS lsof lists only this account's
+# sockets, so a listener it does not show that still accepts is another's.
+defenseclaw_api_listener_foreign() {
+  case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
+    1|true|TRUE|yes|YES) return 1 ;;
+  esac
+  [ -z "${DEFENSECLAW_HOOK_SOCKET:-}" ] || return 1
+  defenseclaw_own_gateway_stopped || return 1
+  # The second argument (tests only) replaces /proc/net.
+  local port="${1##*:}" net="${2:-/proc/net}" uid="${EUID:-}" hex="" table="" owner=""
+  local _sl="" addr="" _rem="" st="" _q="" _t="" _r="" u="" _rest=""
+  case "$port" in ''|*[!0-9]*) return 1 ;; esac
+  [ -n "$uid" ] || return 1
+  if [ -r "${net}/tcp" ]; then
+    hex="$(printf '%04X' "$port")"
+    for table in "${net}/tcp" "${net}/tcp6"; do
+      [ -r "$table" ] || continue
+      while read -r _sl addr _rem st _q _t _r u _rest; do
+        [ "$st" = "0A" ] || continue
+        case "$addr" in
+          # 127.0.0.0/8, 0.0.0.0, ::, ::1 and v4-mapped loopback, kernel byte order.
+          ??????7F:"$hex"|00000000:"$hex"|00000000000000000000000000000000:"$hex"|00000000000000000000000001000000:"$hex"|0000000000000000FFFF0000??????7F:"$hex") ;;
+          *) continue ;;
+        esac
+        [ "$u" = "$uid" ] && return 1
+        owner="$u"
+      done < "$table"
+    done
+    [ -n "$owner" ]
+    return
+  fi
+  if [ -x /usr/sbin/lsof ]; then
+    /usr/sbin/lsof -nP -a -u "$uid" -iTCP:"$port" -sTCP:LISTEN -t >/dev/null 2>&1 && return 1
+    (exec 3<>"/dev/tcp/127.0.0.1/${port}") 2>/dev/null && return 0
+  fi
+  return 1
+}
+
 defenseclaw_response_failure_reason() {
   case "$1" in
     *"HTTP 401"*|*"HTTP 403"*)

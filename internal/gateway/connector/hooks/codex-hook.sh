@@ -316,6 +316,10 @@ API_TOKEN=
 PAYLOAD=
 unset API_TOKEN PAYLOAD
 
+if defenseclaw_api_listener_foreign "$API_ADDR"; then
+  fail_unreachable "${API_ADDR} is held by another account while this account's gateway is not running; no token was sent. Run \`defenseclaw-gateway start\` for the fix"
+fi
+
 # Each attempt opens fresh descriptors, because curl consumes them.
 codex_gateway_post() {
   local status=0

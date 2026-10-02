@@ -277,6 +277,134 @@ class SandboxActivityStream:
             pass
 
 
+class GatewayListenerNotOwnedError(requests.ConnectionError):
+    """Another account holds this account's loopback API port: no token was sent."""
+
+
+_LISTENER_OWNER_TTL_SECONDS = 5.0
+_listener_owner_cache: dict[tuple[str, int], tuple[float, str]] = {}
+
+
+def foreign_loopback_listener(host: str, port: int) -> str:
+    """Explain a loopback API listener that belongs to another account, or "".
+
+    GAP-1260: the per-user CLI sent this account's gateway token to whatever
+    listened on the configured port, so an account that held it (or the old
+    port after a move) collected the token. Like ``defenseclaw-gateway
+    start``, this names the holder from the kernel's socket tables on Linux,
+    or from ``lsof`` on macOS, which lists only this account's sockets. It
+    returns "" whenever ownership is unknown, on Windows, for a non-loopback
+    host, and on a managed host, where the gateway is a service of another
+    account by design.
+    """
+    import ipaddress
+    import time
+
+    if os.name == "nt" or not 0 < int(port) <= 65535:
+        return ""
+    try:
+        if not ipaddress.ip_address(str(host).strip("[]")).is_loopback:
+            return ""
+    except ValueError:
+        if str(host).strip().lower() != "localhost":
+            return ""
+    from defenseclaw.upgrade_shim import managed_descriptor
+
+    if managed_descriptor():
+        return ""
+    key = (str(host), int(port))
+    now = time.monotonic()
+    cached = _listener_owner_cache.get(key)
+    if cached is not None and now - cached[0] < _LISTENER_OWNER_TTL_SECONDS:
+        return cached[1]
+    problem = _foreign_loopback_listener_uncached(int(port))
+    if problem:
+        problem = (
+            f"{_url_host(str(host))}:{port} is held by {problem}, not by this account's gateway, "
+            "so the gateway token was not sent. Run `defenseclaw-gateway start` to see how to "
+            "move this account's gateway to a free port"
+        )
+    _listener_owner_cache[key] = (now, problem)
+    return problem
+
+
+def _foreign_loopback_listener_uncached(port: int, proc_net: str = "/proc/net") -> str:
+    own_uid = os.getuid()
+    if sys.platform.startswith("linux"):
+        from defenseclaw.doctor_gateway import _linux_proc_net_endpoint
+
+        owners: set[int] = set()
+        for table in (os.path.join(proc_net, "tcp"), os.path.join(proc_net, "tcp6")):
+            try:
+                with open(table, encoding="ascii") as stream:
+                    rows = stream.readlines()[1:]
+            except (OSError, UnicodeError):
+                continue
+            for row in rows:
+                fields = row.split()
+                # State 0A is LISTEN; field 7 is the socket owner's uid.
+                if len(fields) < 8 or fields[3] != "0A" or not fields[7].isdigit():
+                    continue
+                endpoint = _linux_proc_net_endpoint(fields[1])
+                if endpoint is None or endpoint[1] != port:
+                    continue
+                if endpoint[0].is_loopback or endpoint[0].is_unspecified:
+                    owners.add(int(fields[7]))
+        if not owners or own_uid in owners:
+            return ""
+        uid = min(owners)
+        try:
+            import pwd
+
+            return f"a process of another account (uid {uid}, {pwd.getpwuid(uid).pw_name})"
+        except (ImportError, KeyError):
+            return f"a process of another account (uid {uid})"
+    if sys.platform == "darwin":
+        import subprocess
+
+        from defenseclaw.doctor_gateway import trusted_lsof_path
+
+        lsof = trusted_lsof_path()
+        if not lsof:
+            return ""
+        try:
+            proc = subprocess.run(
+                [lsof, "-nP", "-a", "-u", str(own_uid), f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+                capture_output=True,
+                text=True,
+                timeout=3,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return ""
+        if proc.stdout.strip() or proc.returncode not in (0, 1) or proc.stderr.strip():
+            return ""
+        # lsof lists only this account's sockets: a listener it does not show
+        # that still accepts connections belongs to another account.
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=1):
+                pass
+        except OSError:
+            return ""
+        return "a process of another account"
+    return ""
+
+
+class _GatewaySession(requests.Session):
+    """A session that sends a bearer token only to this account's listener."""
+
+    def __init__(self, host: str, port: int) -> None:
+        super().__init__()
+        self._dc_target = (host, port)
+
+    def send(self, request, **kwargs):  # type: ignore[override]
+        if request.headers.get("Authorization") or request.headers.get("X-DC-Auth"):
+            problem = foreign_loopback_listener(*self._dc_target)
+            if problem:
+                raise GatewayListenerNotOwnedError(problem, request=request)
+        return super().send(request, **kwargs)
+
+
 class OrchestratorClient:
     def __init__(
         self,
@@ -289,7 +417,7 @@ class OrchestratorClient:
         self.base_url = f"http://{_url_host(host)}:{port}"
         self.timeout = timeout
         self.plugin_timeout = max(timeout, plugin_timeout or PLUGIN_MUTATION_TIMEOUT)
-        self._session = requests.Session()
+        self._session = _GatewaySession(host, port)
         # This client talks to the operator-selected managed gateway, often on
         # loopback or a local standalone bridge address. Environment proxy
         # discovery can forward both gateway bearer headers to HTTP_PROXY and
