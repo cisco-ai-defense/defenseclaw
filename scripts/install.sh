@@ -534,6 +534,7 @@ export UV_NO_CONFIG=1
 export UV_CACHE_DIR="${UV_CACHE_DIR:-${DEFENSECLAW_HOME}/.uv/cache}"
 export UV_PYTHON_INSTALL_DIR="${UV_PYTHON_INSTALL_DIR:-${DEFENSECLAW_HOME}/.uv/python}"
 UV_DIR_NEW=""
+UV_INSTALLED=""
 [[ -e "${DEFENSECLAW_HOME}/.uv" ]] || UV_DIR_NEW=1
 # A uv already in BIN_DIR belongs to the user (or an earlier run) even when
 # BIN_DIR is not on this shell's PATH yet: use it, never overwrite it.
@@ -543,6 +544,7 @@ fi
 if ! has uv; then
     info "Installing uv ${UV_VERSION} (Python package manager)"
     install_uv || die "Could not install uv; install it from https://docs.astral.sh/uv/ and retry"
+    UV_INSTALLED=1
     export PATH="${BIN_DIR}:${PATH}"
     has uv || die "uv was installed but is not on PATH"
 fi
@@ -635,10 +637,12 @@ make_venv() {
         && uv pip install --quiet --compile-bytecode --python "${venv}/bin/python" --no-deps "${STAGING}/${WHEEL}"
 }
 if ! make_venv "${STAGING}/venv"; then
-    # Leave nothing of a failed build behind: the staging dir, and uv's cache
-    # and Python when this run created them.
+    # Leave nothing of a failed build behind, and name what stays (GAP-1438).
     rm -rf "${STAGING}"
-    [[ -z "${UV_DIR_NEW}" ]] || rm -rf "${DEFENSECLAW_HOME}/.uv"
+    drop_new_uv
+    if [[ -z "${UV_DIR_NEW}" && -d "${DEFENSECLAW_HOME}/.uv" ]]; then
+        die "Could not install the DefenseClaw ${VERSION} Python package. Nothing else was changed, but uv's download cache ${DEFENSECLAW_HOME}/.uv ($(du -sm "${DEFENSECLAW_HOME}/.uv" 2>/dev/null | awk '{print $1}') MB) is kept; delete it to free that space"
+    fi
     die "Could not install the DefenseClaw ${VERSION} Python package; nothing was changed"
 fi
 "${STAGING}/venv/bin/defenseclaw" --version 2>/dev/null | grep -qF "${VERSION}" \
@@ -693,7 +697,7 @@ if ! snapshot; then
     undo_snapshot
     restart_old
     rm -rf "${STAGING}"
-    [[ -z "${UV_DIR_NEW}" ]] || rm -rf "${DEFENSECLAW_HOME}/.uv"
+    drop_new_uv
     die "Could not save the current install; nothing was changed"
 fi
 
@@ -838,6 +842,13 @@ install_uv() {
     return 1
 }
 
+# A failed install removes what it added for uv: the uv and uvx it
+# downloaded, and uv's cache and Python when this run created them (GAP-1438).
+drop_new_uv() {
+    [[ -z "${UV_DIR_NEW}" ]] || rm -rf "${DEFENSECLAW_HOME}/.uv"
+    [[ -z "${UV_INSTALLED}" ]] || rm -f "${BIN_DIR}/uv" "${BIN_DIR}/uvx" "${BIN_DIR}/defenseclaw-uv.sha256"
+}
+
 is_machinery() {
     local name="$1" pattern
     for pattern in ${NOT_DATA}; do
@@ -860,15 +871,21 @@ data_entries() {
 
 # require_free_space refuses before anything is written when the disk cannot
 # hold the install: uv's cache, the Python it fetches and the new environment
-# (about 1 GB on a first install, less once the cache exists) plus, over an
-# existing install, the rollback copy of the data that the swap saves. Runs
-# before the lock and before the gateway is stopped (GAP-1249, GAP-1527,
-# GAP-1538).
+# (about 1100 MB on a first install, down to 400 MB once the cache holds the
+# packages) plus, over an existing install, the rollback copy of the data that
+# the swap saves. Runs before the lock and before the gateway is stopped
+# (GAP-1249, GAP-1527, GAP-1538).
 require_free_space() {
     local cache="${UV_CACHE_DIR:-${DEFENSECLAW_HOME}/.uv/cache}" dir="${DEFENSECLAW_HOME}"
-    local free_kb need_kb copy_kb=0 size name biggest="" biggest_kb=0
-    space_needed_kb=$((400 * 1024))
-    [[ -d "${cache}" ]] || space_needed_kb=$((1100 * 1024))
+    local free_kb need_kb copy_kb=0 size name biggest="" biggest_kb=0 cache_kb=0
+    # An empty or partly filled cache saves only what it holds (GAP-1438).
+    if [[ -d "${cache}" ]]; then
+        cache_kb="$(du -sk "${cache}" 2>/dev/null | awk '{print $1}')"
+    fi
+    [[ "${cache_kb}" =~ ^[0-9]+$ ]] || cache_kb=0
+    cache_kb=$((cache_kb / 1024 * 1024))
+    [[ "${cache_kb}" -le $((700 * 1024)) ]] || cache_kb=$((700 * 1024))
+    space_needed_kb=$((1100 * 1024 - cache_kb))
     while [[ ! -d "${dir}" && "${dir}" == */* ]]; do dir="${dir%/*}"; done
     free_kb="$(df -Pk "${dir:-/}" 2>/dev/null | awk 'NR==2{print $4}')"
     [[ "${free_kb}" =~ ^[0-9]+$ ]] || return 0
