@@ -1190,6 +1190,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         self.status_text = ""
         # The panel that was on screen when the status line was last set.
         self._status_panel: str | None = None
+        self._status_set_at = 0.0
         self.hint_text = ""
         self.command_running = False
         self.command_label = ""
@@ -2662,13 +2663,16 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
 
         # A load message or result from the panel we just left ("MCPs: 0
         # loaded." or "Exported 17 audit row(s) ..." on Sandboxes) is about
-        # that panel, not this one (GAP-1166, GAP-1512, GAP-1541). Command
-        # results ("Done: ...") stay until the next action.
+        # that panel, not this one (GAP-1166, GAP-1512, GAP-1541). A command
+        # result ("Done: ...") follows you only for a few seconds; after that
+        # it is old news on every other panel (GAP-1821).
         left = self._status_panel
+        fresh_result = (
+            _is_command_result(self.status_text)
+            and time.monotonic() - self._status_set_at < _COMMAND_RESULT_FOLLOW_S
+        )
         if _is_load_status(self.status_text) or (
-            left not in (None, panel)
-            and not self.command_running
-            and not _is_command_result(self.status_text)
+            left not in (None, panel) and not self.command_running and not fresh_result
         ):
             self._set_status(self._status_text())
 
@@ -9981,6 +9985,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
     def _set_status(self, text: str) -> None:
         self.status_text = text
         self._status_panel = self.active_panel
+        self._status_set_at = time.monotonic()
         strip = render_status_strip(self._hint_status_model())
         rendered = f"{text}  [#444444]│[/]  {strip}"
         # ``text`` is operator-supplied via every ``_set_status`` caller —
@@ -12920,8 +12925,18 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
 
     async def _load_ai_discovery_model(self) -> None:
         intent = self.ai_discovery_model.load_intent()
-        self._set_status(intent.hint or "Loading AI discovery...")
-        await self._poll_ai_usage(force_render=True)
+        previous = self.status_text
+        hint = intent.hint or "Loading AI discovery..."
+        self._set_status(hint)
+        loaded = await self._poll_ai_usage(force_render=True)
+        # The hint stayed up for minutes after the snapshot was in (GAP-1821).
+        if self.status_text == hint:
+            if not loaded:
+                self._set_status("AI discovery did not refresh: the gateway is offline or refused the token.")
+            elif _is_command_result(previous):
+                self._set_status(previous)
+            else:
+                self._set_status("AI discovery refreshed.")
 
     async def _open_catalog_action_menu(self, panel: str) -> None:
         model = self.catalog_models[panel]
@@ -13714,6 +13729,12 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
 
         if getattr(self, "_app_shutting_down", False):
             return
+        if self._read_repository is not None:
+            # The repository snapshot already carries alerts, counts and
+            # egress. Reading them again here ran the full alert query on a
+            # second thread after every 3 s health poll (GAP-1816).
+            self._load_doctor_cache()
+            return
         if not self.is_running:
             self._refresh_overview_disk_models()
             return
@@ -14051,7 +14072,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 allow_scrolled=True,
             )
 
-    async def _poll_ai_usage(self, *, force_render: bool) -> None:
+    async def _poll_ai_usage(self, *, force_render: bool) -> bool:
         snapshot = await asyncio.to_thread(_fetch_ai_usage, self.config)
         if snapshot is None:
             if self.ai_discovery_model.snapshot is None:
@@ -14060,7 +14081,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 self._schedule_overview_sampled_refresh()
             if force_render or self.active_panel == "ai":
                 self._render_chrome()
-            return
+            return False
         self.overview_model.set_ai_usage(snapshot)
         self.ai_discovery_model.set_snapshot(snapshot)
         self.ai_discovery_model.message = ""
@@ -14068,6 +14089,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             self._schedule_overview_sampled_refresh()
         if force_render or self.active_panel == "ai":
             self._render_chrome()
+        return True
 
     def _sync_setup_readiness(self) -> None:
         """Rebuild the Setup readiness rows from current inputs.
@@ -15612,6 +15634,10 @@ def _is_registry_focus_status(text: str) -> bool:
     return text.startswith("Showing registry entry ") or text.endswith(
         " is not from a registry source. Showing all registry entries."
     )
+
+
+# Seconds a command result keeps showing after you switch panels (GAP-1821).
+_COMMAND_RESULT_FOLLOW_S = 15.0
 
 
 def _is_command_result(text: object) -> bool:

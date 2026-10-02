@@ -55,6 +55,12 @@ _HISTORY_LIMIT = 1000
 _PANEL_LIMIT = 500
 _SLOW_COMPONENT_TTL_SECONDS = 15.0
 _MAX_RETRY_SECONDS = 60.0
+# A history read that took d seconds (at least the minimum) waits d * factor,
+# at most the cap, before the next unforced one, so a huge audit.db can't keep
+# a core busy (GAP-1816). Quick reads on a normal database are not delayed.
+_BUSY_MIN_SECONDS = 0.25
+_BUSY_BACKOFF_FACTOR = 4.0
+_MAX_BUSY_BACKOFF_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -114,6 +120,7 @@ class TUIReadRepository:
         self._last_error = ""
         self._hook_stats: tuple[ConnectorHookStat, ...] = ()
         self._slow_components_loaded_at = 0.0
+        self._next_history_at = 0.0
 
     async def refresh(
         self,
@@ -170,6 +177,8 @@ class TUIReadRepository:
         now = monotonic()
         if not force and self._last_error and now < self._next_retry_at:
             return TUIReadResult(self._snapshot, False, self._last_error)
+        if not force and self._snapshot is not None and now < self._next_history_at:
+            return TUIReadResult(self._snapshot, False)
         try:
             store = self._ensure_open()
             data_version = int(store.db.execute("PRAGMA data_version").fetchone()[0])
@@ -190,6 +199,15 @@ class TUIReadRepository:
 
         previous = self._snapshot
         errors: list[str] = []
+        # Only the slow components are due: the audit rows are unchanged, so
+        # keep the history instead of re-running the full alert scan (GAP-1816).
+        if (
+            not force
+            and previous is not None
+            and self._successful_data_version == data_version
+            and previous.session_scan_since == scan_since
+        ):
+            return self._refresh_slow_components(store, previous, now)
 
         history_error_count = len(errors)
         history, alert_history, mutation_history = self._component(
@@ -295,6 +313,41 @@ class TUIReadRepository:
             return TUIReadResult(self._snapshot, changed, error)
 
         self._successful_data_version = data_version
+        self._last_error = ""
+        self._next_retry_at = 0.0
+        self._retry_seconds = 1.0
+        finished = monotonic()
+        elapsed = finished - now
+        if elapsed >= _BUSY_MIN_SECONDS:
+            self._next_history_at = finished + min(_MAX_BUSY_BACKOFF_SECONDS, elapsed * _BUSY_BACKOFF_FACTOR)
+        return TUIReadResult(self._snapshot, changed)
+
+    def _refresh_slow_components(self, store: Store, previous: TUIReadSnapshot, now: float) -> TUIReadResult:
+        errors: list[str] = []
+        tool_actions = self._component(
+            "tools", lambda: tuple(store.list_actions_by_type("tool")), previous.tool_actions, errors
+        )
+        enforcement_counts = self._component(
+            "counts", store.get_enforcement_counts, previous.enforcement_counts, errors
+        )
+        if not errors:
+            self._slow_components_loaded_at = now
+        candidate = replace(
+            previous,
+            tool_actions=tool_actions,
+            enforcement_counts=enforcement_counts,
+            session_scan_count=(
+                enforcement_counts.total_scans if previous.session_scan_since is None else previous.session_scan_count
+            ),
+        )
+        changed = candidate != previous
+        if changed:
+            self._revision += 1
+            self._snapshot = replace(candidate, revision=self._revision)
+        if errors:
+            error = "; ".join(errors)
+            self._record_failure(error)
+            return TUIReadResult(self._snapshot, changed, error)
         self._last_error = ""
         self._next_retry_at = 0.0
         self._retry_seconds = 1.0

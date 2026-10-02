@@ -670,7 +670,9 @@ class SkillsPanelModel(CatalogListModel[SkillRow]):
 
     def menu_actions(self) -> tuple[CatalogMenuAction, ...]:
         row = self.selected()
-        return skill_actions(row.status if row else "", bundled=bool(row and row.bundled))
+        if row is None:
+            return skill_actions("")
+        return skill_actions(row.status, bundled=row.bundled, install=row.install_action)
 
     def action_intent(self, key: str, *, origin: str = "action-menu") -> CatalogCommandIntent | None:
         row = self.selected()
@@ -1402,9 +1404,18 @@ def format_tool_time(value: object) -> str:
     return ""
 
 
-def skill_actions(status: str, *, bundled: bool = False) -> tuple[CatalogMenuAction, ...]:
+def skill_actions(status: str, *, bundled: bool = False, install: str = "") -> tuple[CatalogMenuAction, ...]:
     if bundled:
         return (CatalogMenuAction("i", "Info", "Show full details"),)
+    if install == "block" and status != "blocked":
+        # A watcher block also disables (and may quarantine) the skill, so its
+        # status reads "disabled"; it still needs Unblock, not Block (GAP-1820).
+        base = [action for action in skill_actions(status) if action.key not in {"b", "a"}]
+        return (
+            *base,
+            CatalogMenuAction("u", "Unblock", "Remove from block list"),
+            CatalogMenuAction("a", "Allow", "Pin as allow-listed"),
+        )
     actions = [
         CatalogMenuAction("s", "Scan", "Run security scan"),
         CatalogMenuAction("i", "Info", "Show full details"),
@@ -2096,7 +2107,7 @@ def _format_skill_detail(row: SkillRow) -> str:
     if row.reason:
         lines.append(f"  Reason     {_esc(row.reason)}")
     lines.append("")
-    lines.append(_skill_action_legend(row.status))
+    lines.append(_action_legend(skill_actions(row.status, bundled=row.bundled, install=row.install_action)))
     return "\n".join(lines)
 
 
@@ -2200,10 +2211,6 @@ def _action_legend(actions: tuple[CatalogMenuAction, ...]) -> str:
     if menu_only:
         chunks.append("\\[o] more: " + _esc(", ".join(menu_only)))
     return "  [dim]Actions:[/] " + "  ·  ".join(chunks)
-
-
-def _skill_action_legend(status: str) -> str:
-    return _action_legend(skill_actions(status))
 
 
 def _mcp_action_legend(status: str) -> str:
