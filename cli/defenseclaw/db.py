@@ -1925,7 +1925,8 @@ class Store:
         if seconds is None:
             return self.db.execute(sql).fetchone()[0]
         deadline = time.monotonic() + seconds
-        self.db.set_progress_handler(lambda: time.monotonic() > deadline, 100_000)
+        # >=: a zero budget must stop even where the clock ticks coarsely (Windows).
+        self.db.set_progress_handler(lambda: time.monotonic() >= deadline, 100_000)
         try:
             return self.db.execute(sql).fetchone()[0]
         except sqlite3.OperationalError as exc:

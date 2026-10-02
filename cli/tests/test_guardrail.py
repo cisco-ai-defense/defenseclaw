@@ -2438,7 +2438,7 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
         self,
         config_files,
     ):
-        from defenseclaw.commands.cmd_setup import _restart_services
+        from defenseclaw.commands.cmd_setup import _CONNECTOR_RUNTIME_READY_TIMEOUT_SECONDS, _restart_services
         from defenseclaw.cursor_contract import CURSOR_HOOK_EVENTS
 
         class Clock:
@@ -2562,7 +2562,7 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
                                 wait_for_connector_ready=True,
                             )
 
-                    self.assertEqual(clock.now, 60.0)
+                    self.assertEqual(clock.now, _CONNECTOR_RUNTIME_READY_TIMEOUT_SECONDS)
                     restart.assert_called_once()
 
     def test_malformed_or_mismatched_lock_churn_never_advances_readiness(self):
@@ -2839,7 +2839,7 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
         self.assertFalse(result)
         self.assertEqual(result.invariant, "deadline")
         self.assertEqual(visited, [expected[0]])
-        self.assertEqual(clock.now, 301.0)
+        self.assertEqual(clock.now, cmd_setup._CONNECTOR_RUNTIME_READY_ABSOLUTE_CAP_SECONDS + 1.0)
 
     def test_new_generation_terminal_health_fails_but_running_health_never_satisfies(self):
         from defenseclaw.commands.cmd_setup import _wait_for_connector_runtime
