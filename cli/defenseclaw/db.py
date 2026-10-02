@@ -1317,6 +1317,39 @@ class Store:
             )
         return results
 
+    def latest_failed_scans_by_scanner(self, scanner_name: str) -> list[dict[str, Any]]:
+        """Return the targets whose most recent scan for *scanner_name* failed.
+
+        ``latest_scans_by_scanner`` skips failed scans (GAP-1746), so a list
+        view can't tell "never scanned" from "last scan failed" without
+        this (GAP-1906). Each dict has keys: target, timestamp, error.
+        """
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(scan_results)").fetchall()}
+        failed = []
+        if "exit_code" in columns:
+            failed.append("COALESCE(sr.exit_code, 0) != 0")
+        if "error" in columns:
+            failed.append("COALESCE(sr.error, '') != ''")
+        if not failed:
+            return []
+        error_col = "sr.error" if "error" in columns else "''"
+        cur = self.db.execute(
+            f"""SELECT sr.target, sr.timestamp, {error_col}
+               FROM scan_results sr
+               WHERE sr.scanner = ? AND ({" OR ".join(failed)})
+                 AND sr.rowid = (
+                     SELECT candidate.rowid FROM scan_results candidate
+                     WHERE candidate.scanner = sr.scanner AND candidate.target = sr.target
+                     ORDER BY candidate.timestamp DESC, candidate.rowid DESC
+                     LIMIT 1
+                 )""",
+            (scanner_name,),
+        )
+        return [
+            {"target": row[0], "timestamp": _parse_ts(row[1]), "error": row[2] or "scan failed"}
+            for row in cur.fetchall()
+        ]
+
     def get_severity_counts_for_target(
         self,
         target: str,

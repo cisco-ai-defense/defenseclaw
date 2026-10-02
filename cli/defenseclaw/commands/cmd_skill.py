@@ -2257,7 +2257,9 @@ def _scan_one_local_skill(
         click.echo(f"error: scan failed: {exc}", err=True)
         raise SystemExit(1)
 
-    _record_scan(app.logger, result, connector=connector)
+    # A path scan belongs to no connector, so its audit record, alert and
+    # finding.observed carry none either (GAP-1919).
+    _record_scan(app.logger, result, connector=json_connector or None)
 
     payload: dict[str, Any] | None = None
     if as_json:

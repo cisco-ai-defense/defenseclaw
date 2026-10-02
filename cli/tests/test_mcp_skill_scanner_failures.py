@@ -154,3 +154,37 @@ def test_latest_scans_skip_failed_scans(tmp_path):
     latest = store.latest_scans_by_scanner("mcp-scanner")
 
     assert [(r["id"], r["target"]) for r in latest] == [("old-ok", "http://example.com/b")]
+
+
+def test_mcp_list_marks_failed_scan(tmp_path):
+    """GAP-1906: a server whose last scan failed is not shown as never scanned."""
+    from datetime import datetime, timezone
+
+    from defenseclaw.commands.cmd_mcp import _build_mcp_failed_scan_map, _mcp_list_json_items
+    from defenseclaw.config import MCPServerEntry
+    from defenseclaw.db import Store
+
+    store = Store(str(tmp_path / "audit.db"))
+    store.init()
+    store.db.execute("ALTER TABLE scan_results ADD COLUMN exit_code INTEGER")
+    store.db.execute("ALTER TABLE scan_results ADD COLUMN error TEXT")
+    t0 = datetime(2026, 10, 2, 12, 0, tzinfo=timezone.utc).isoformat()
+    for scan_id, target, exit_code, error in (
+        ("f1", "mcp://codex/fresh", 1, "scan failed: connection cancelled"),
+        ("ok1", "mcp://codex/fine", 0, None),
+    ):
+        store.db.execute(
+            "INSERT INTO scan_results (id, scanner, target, timestamp, finding_count, max_severity,"
+            " exit_code, error) VALUES (?, 'mcp-scanner', ?, ?, 0, 'INFO', ?, ?)",
+            (scan_id, target, t0, exit_code, error),
+        )
+    store.db.commit()
+    servers = [MCPServerEntry(name="fresh", url="http://example.com/mcp"), MCPServerEntry(name="fine", command="x")]
+
+    failed = _build_mcp_failed_scan_map(store, servers, "codex", allow_legacy_plain=False)
+    assert list(failed) == ["fresh"]
+
+    items = {i["name"]: i for i in _mcp_list_json_items(servers, {}, {}, connector="codex", failed_map=failed)}
+    assert items["fresh"]["verdict"] == "scan failed"
+    assert items["fresh"]["last_scan_error"] == "scan failed: connection cancelled"
+    assert items["fine"]["verdict"] == "-"
