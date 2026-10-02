@@ -318,7 +318,7 @@ var policyEvaluateFirewallCmd = &cobra.Command{
 
 var policyReloadCmd = &cobra.Command{
 	Use:   "reload",
-	Short: "Tell the running sidecar daemon to reload OPA policies",
+	Short: "Tell the running gateway to reload OPA policies",
 	RunE: func(_ *cobra.Command, _ []string) error {
 		port := 18790
 		bind := "127.0.0.1"
