@@ -15,9 +15,6 @@ from __future__ import annotations
 import sqlite3
 from types import SimpleNamespace
 
-from rich.text import Text
-from textual.markup import to_content
-
 from defenseclaw.tui.app import DefenseClawTUI
 from defenseclaw.tui.markup_safe import escape
 from defenseclaw.tui.panels.alerts import AlertsPanelModel
@@ -26,6 +23,8 @@ from defenseclaw.tui.panels.setup import SetupPanelModel, SetupWizard
 from defenseclaw.tui.screens.uninstall import UninstallOption, uninstall_command_for_option
 from defenseclaw.tui.services import v8_event_history
 from defenseclaw.tui.services.policy_state import POLICY_VIEWS, PoliciesPanelModel
+from rich.text import Text
+from textual.markup import to_content
 
 
 def test_alert_scan_skips_legacy_rows_whose_action_is_not_a_block(monkeypatch) -> None:
