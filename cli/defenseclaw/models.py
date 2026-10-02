@@ -224,6 +224,7 @@ class Counts:
     allowed_skills: int = 0
     blocked_mcps: int = 0
     allowed_mcps: int = 0
-    alerts: int = 0
+    # None: not counted in time (see Store.get_counts).
+    alerts: int | None = 0
     total_scans: int = 0
     blocked_egress_calls: int = 0

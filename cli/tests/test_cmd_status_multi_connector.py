@@ -741,6 +741,19 @@ class TestStatusDbErrorSurfacing(unittest.TestCase):
         self.assertIn("unavailable", result.output)
         self.assertIn("disk I/O error", result.output)
 
+    def test_alerts_too_slow_to_count_say_so(self):
+        # GAP-1149: a 2 GB audit database kept status silent for minutes.
+        from defenseclaw.models import Counts
+
+        self.app.store.get_counts = MagicMock(return_value=Counts(alerts=None))
+        result = self._invoke()
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("not counted", result.output)
+        self.assertIn("defenseclaw alerts", result.output)
+        self.assertEqual(
+            self.app.store.get_counts.call_args.kwargs, {"alert_count_seconds": cmd_status._ALERT_COUNT_SECONDS}
+        )
+
     def test_healthy_db_shows_counts(self):
         result = self._invoke()
         self.assertEqual(result.exit_code, 0, msg=result.output)

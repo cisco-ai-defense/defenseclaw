@@ -416,6 +416,82 @@ def test_a_gateway_that_refuses_to_start_says_why(tmp_path: Path) -> None:
     assert "The gateway refused to start: codex's agent changed" in out
 
 
+def test_a_restored_0_8_gateway_is_launched_and_waited_for(tmp_path: Path) -> None:
+    # GAP-1076, GAP-0012: a 0.8.x start stops the gateway it launched after
+    # 60 seconds, so one restored on a large audit database never came up.
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    start = text.index("start_gateway() {")
+    funcs = text[start : text.index("\n}\n", text.index("explain_start_failure() {")) + 3]
+    helpers = text[text.index("version_key() {") : text.index("is_version() {")]
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    pid_file, ready = tmp_path / "gateway.pid", tmp_path / "ready"
+    gateway = bin_dir / "defenseclaw-gateway"
+    gateway.write_text(
+        "#!/bin/sh\n"
+        'case "$1" in\n'
+        "  --version) echo 'defenseclaw-gateway version 0.8.10' ;;\n"
+        '  start) [ "${DEFENSECLAW_UPGRADE_FRESH_PROCESS:-}" = 1 ] || { echo FAILED; exit 1; }\n'
+        f"    (sleep 2; touch '{ready}'; exec sleep 30) >/dev/null 2>&1 &\n"
+        f"    echo $! > '{pid_file}'; echo LAUNCHED ;;\n"
+        f"  status) [ -f '{ready}' ] ;;\n"
+        "  *) exit 1 ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    gateway.chmod(0o755)
+    script = tmp_path / "start.sh"
+    script.write_text(
+        'set -euo pipefail\ninfo() { echo "info: $*"; }\nwarn() { echo "warn: $*"; }\nok() { echo "ok: $*"; }\n'
+        + helpers
+        + funcs
+        + f"gateway_pid() {{ kill -0 \"$(cat '{pid_file}')\" 2>/dev/null && cat '{pid_file}'; }}\n"
+        + f'DEFENSECLAW_HOME="{tmp_path}" BIN_DIR="{bin_dir}"\n'
+        + f'rc=0; start_gateway || rc=$?; echo "rc=$rc"; kill "$(cat \'{pid_file}\')"\n',
+        encoding="utf-8",
+    )
+
+    out = _run([str(script)], tmp_path).stdout
+
+    assert "LAUNCHED" in out, out
+    assert "ok: The gateway finished starting" in out
+    assert "rc=0" in out
+
+
+def test_a_rollback_whose_gateway_does_not_start_says_so_and_exits_1(tmp_path: Path) -> None:
+    # GAP-1076: the restored gateway stayed down, yet the rollback printed a
+    # green "Now running" and exited 0. GAP-1077: rolling forward was headed
+    # "Rolling back".
+    home = tmp_path / "home"
+    dc_home, bin_dir = home / ".defenseclaw", home / ".local" / "bin"
+    (dc_home / "previous" / "bin").mkdir(parents=True)
+    bin_dir.mkdir(parents=True)
+    for folder, version, start in ((bin_dir, "1.0.1", "exit 0"), (dc_home / "previous" / "bin", "0.8.10", "exit 1")):
+        gateway = folder / "defenseclaw-gateway"
+        gateway.write_text(
+            f'#!/bin/sh\ncase "$1" in --version) echo "defenseclaw-gateway version {version}" ;; start) {start} ;; esac\n',
+            encoding="utf-8",
+        )
+        gateway.chmod(0o755)
+    (dc_home / "previous" / "VERSION").write_text("0.8.10\n", encoding="utf-8")
+    (dc_home / "previous" / "GATEWAY_WAS_RUNNING").write_text("true\n", encoding="utf-8")
+    script = _stamped(tmp_path, "1.0.1")
+    env = {"DEFENSECLAW_APP_PATH": "none"}
+
+    back = _run([str(script), "--rollback", "--yes"], tmp_path, **env)
+
+    assert back.returncode == 1, back.stdout + back.stderr
+    assert "Rolling back to DefenseClaw 0.8.10" in back.stdout
+    assert "Now running DefenseClaw 0.8.10, but its gateway is not up" in back.stdout
+    assert "✓ Now running" not in back.stdout
+
+    forward = _run([str(script), "--rollback", "--yes"], tmp_path, **env)
+
+    assert forward.returncode == 0, forward.stdout + forward.stderr
+    assert "Rolling forward to DefenseClaw 1.0.1" in forward.stdout
+    assert "Now running DefenseClaw 1.0.1." in forward.stdout
+
+
 def test_a_rollback_copy_that_does_not_fit_says_how_much_to_free(tmp_path: Path) -> None:
     # RHEL-U3-02: the low-disk refusal named no sizes, no culprit and no next step.
     text = INSTALL_SH.read_text(encoding="utf-8")

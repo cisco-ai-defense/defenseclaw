@@ -451,10 +451,15 @@ recover_interrupted_run
 # ── Rollback-only mode ───────────────────────────────────────────────────────
 
 if [[ "${ROLLBACK}" == true ]]; then
-    step "Rolling back"
-    [[ -s "${PREVIOUS}/VERSION" ]] || die "No previous install to roll back to (${PREVIOUS} is missing)"
+    [[ -s "${PREVIOUS}/VERSION" ]] || { step "Rolling back"; die "No previous install to roll back to (${PREVIOUS} is missing)"; }
     back_to="$(cat "${PREVIOUS}/VERSION")"
     current="$(installed_version)"
+    # Run again after a rollback, this goes forward to the newer install.
+    if [[ -n "${current}" ]] && version_lt "${current}" "${back_to}"; then
+        step "Rolling forward to DefenseClaw ${back_to}"
+    else
+        step "Rolling back to DefenseClaw ${back_to}"
+    fi
     ask_yes_no "Replace DefenseClaw ${current:-?} with the previous install (${back_to})?" \
         || die "Rollback cancelled; nothing was changed"
     was_running=false
@@ -470,14 +475,26 @@ if [[ "${ROLLBACK}" == true ]]; then
         [[ "${swapped}" -eq 1 && "${was_running}" == true ]] && { start_gateway || true; }
         die "Rollback failed part-way; see ${LOG}"
     fi
+    rollback_rc=0
     if [[ "${restart}" == true ]]; then
-        start_gateway && restart_openclaw \
-            || warn_not_started
+        start_gateway || rollback_rc=$?
+        case "${rollback_rc}" in
+            0) restart_openclaw ;;
+            3) warn "A connector needs attention before it is guarded again (see the gateway output above)"; restart_openclaw ;;
+            *) rollback_rc=1 ;;
+        esac
+    fi
+    if [[ ${rollback_rc} -eq 1 ]]; then
+        # The swap is done, but the hooks are unguarded: say so, and exit 1.
+        warn "Now running DefenseClaw ${back_to}, but its gateway is not up, so agent hooks are not guarded until it is"
+        info "Start it with: defenseclaw-gateway start (its log: ${DEFENSECLAW_HOME}/gateway.log)"
+    else
+        ok "Now running DefenseClaw ${back_to}."
     fi
     if version_lt "${back_to}" 1.0.0; then
-        ok "Now running DefenseClaw ${back_to}. To return to ${current:-1.x}, run: bash ${PREVIOUS}/installer/install.sh --rollback"
+        info "To return to ${current:-1.x}, run: bash ${PREVIOUS}/installer/install.sh --rollback"
     else
-        ok "Now running DefenseClaw ${back_to}. Run 'defenseclaw rollback' again to return to ${current:-the other install}."
+        info "Run 'defenseclaw rollback' again to return to ${current:-the other install}."
     fi
     # The swap keeps the install just left, with its data, in previous/.
     if [[ -z "${current}" ]] || version_lt "${back_to}" "${current}"; then
@@ -485,7 +502,7 @@ if [[ "${ROLLBACK}" == true ]]; then
     else
         info "Data written while ${current} ran is kept in ${PREVIOUS} and comes back if you roll back again."
     fi
-    exit 0
+    exit "${rollback_rc}"
 fi
 
 # ── Stage: nothing live changes until the swap ───────────────────────────────
@@ -608,6 +625,11 @@ ok "DefenseClaw ${VERSION} is staged and checked"
 if [[ -n "${PREV_VERSION}" && "${PREV_VERSION}" == "${VERSION}" ]]; then
     ask_yes_no "Reinstall DefenseClaw ${VERSION}?" || die "Cancelled; nothing was changed"
 elif [[ -n "${PREV_VERSION}" ]]; then
+    if version_lt "${PREV_VERSION}" 1.0.0 && [[ -f "${DEFENSECLAW_HOME}/audit.db" ]]; then
+        # Audit migration 33 (privacy cutover) empties the pre-1.0 history.
+        warn "DefenseClaw 1.0 starts a new audit history: the audit events, scan results and findings ${PREV_VERSION} recorded are deleted when DefenseClaw ${VERSION} first opens its audit database"
+        info "A copy is kept in ${PREVIOUS}/data/audit.db until the next upgrade; 'defenseclaw rollback' brings it back"
+    fi
     ask_yes_no "Upgrade DefenseClaw ${PREV_VERSION} → ${VERSION}?" || die "Cancelled; nothing was changed"
 fi
 if [[ -z "${PREV_VERSION}" ]] && [[ "${YES}" != true ]] && [[ -z "${CONNECTOR}" ]]; then
@@ -680,6 +702,9 @@ ensure_path_hint
 printf "\n${BOLD}${GREEN}  DefenseClaw ${VERSION} is installed.${NC}\n"
 if [[ -n "${PREV_VERSION}" && "${PREV_VERSION}" != "${VERSION}" ]]; then
     printf "  Upgraded from ${PREV_VERSION}. Undo with: ${CYAN}defenseclaw rollback${NC}\n"
+    if version_lt "${PREV_VERSION}" 1.0.0 && [[ -f "${PREVIOUS}/data/audit.db" ]]; then
+        printf "  The audit history ${PREV_VERSION} recorded is not carried over to 1.0; a copy is in ${PREVIOUS}/data/audit.db\n"
+    fi
     if pgrep -f "${VENV}/bin/defenseclaw" >/dev/null 2>&1; then
         warn "Restart the DefenseClaw TUI and any other open DefenseClaw commands; they still run ${PREV_VERSION}"
     fi
@@ -1002,17 +1027,32 @@ restart_old() {
 }
 
 start_gateway() {
-    local log="${DEFENSECLAW_HOME}/gateway.log" from=0 rc=0 waited=0 up=0
+    local log="${DEFENSECLAW_HOME}/gateway.log" from=0 rc=0 waited=0 up=0 version delegate=""
     info "Starting the gateway"
+    # A 0.8.x start gives up after 60 seconds and stops the gateway it
+    # launched, so one restored on a large audit database is stopped before it
+    # is ready or can log why it would stop. Its upgrade-controller mode only
+    # launches the gateway; the loop below then waits for it.
+    version="$("${BIN_DIR}/defenseclaw-gateway" --version 2>/dev/null | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+    if [[ -n "${version}" ]] && version_lt "${version}" 1.0.0; then delegate=1; fi
     [[ -f "${log}" ]] && from="$(wc -c < "${log}" | tr -d ' ')"
-    PATH="${BIN_DIR}:${PATH}" "${BIN_DIR}/defenseclaw-gateway" start || rc=$?
-    [[ ${rc} -eq 0 || ${rc} -eq 3 ]] && return "${rc}"
-    explain_start_failure "${log}" "${from}"
-    # A readiness timeout leaves the gateway running. A restored older release
-    # checks a large audit database before it logs anything, and only then
-    # says why it stops, so wait for it before falling back to generic advice.
-    [[ -z "${START_EXPLAINED:-}" && -n "$(gateway_pid || true)" ]] || return "${rc}"
-    info "The gateway is still starting (a large audit database takes a while); waiting up to 3 minutes"
+    if [[ -n "${delegate}" ]]; then
+        PATH="${BIN_DIR}:${PATH}" DEFENSECLAW_UPGRADE_FRESH_PROCESS=1 "${BIN_DIR}/defenseclaw-gateway" start || rc=$?
+    else
+        PATH="${BIN_DIR}:${PATH}" "${BIN_DIR}/defenseclaw-gateway" start || rc=$?
+    fi
+    if [[ -n "${delegate}" && ${rc} -eq 0 ]]; then
+        # Launched, not yet ready: it is up only once the loop below says so.
+        rc=1
+        info "Waiting up to 3 minutes for the gateway to finish starting (a large audit database takes a while)"
+    else
+        [[ ${rc} -eq 0 || ${rc} -eq 3 ]] && return "${rc}"
+        explain_start_failure "${log}" "${from}"
+        # A gateway still running after its start gave up may yet log why it
+        # stops, so wait for it before falling back to generic advice.
+        [[ -z "${START_EXPLAINED:-}" && -n "$(gateway_pid || true)" ]] || return "${rc}"
+        info "The gateway is still starting (a large audit database takes a while); waiting up to 3 minutes"
+    fi
     while [[ -z "${START_EXPLAINED:-}" && ${waited} -lt 180 && -n "$(gateway_pid || true)" ]]; do
         sleep 3
         waited=$((waited + 3))
@@ -1025,6 +1065,11 @@ start_gateway() {
             up=0
         fi
     done
+    [[ -n "${START_EXPLAINED:-}" ]] || explain_start_failure "${log}" "${from}"
+    if [[ -z "${START_EXPLAINED:-}" && -n "$(gateway_pid || true)" ]]; then
+        warn "The gateway is still starting after 3 minutes; check it with: defenseclaw-gateway status"
+        START_EXPLAINED=1
+    fi
     return "${rc}"
 }
 
