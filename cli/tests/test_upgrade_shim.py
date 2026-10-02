@@ -711,3 +711,35 @@ def test_install_sh_environment_cannot_replace_the_platform_descriptor(tmp_path:
         assert completed.returncode == 1, (override, completed.stdout, completed.stderr)
         assert "managed by your organization" in completed.stdout
         assert "proceeded" not in completed.stdout
+
+
+def test_upgrade_with_an_older_latest_release_is_up_to_date(
+    home: Path, execs: list[list[str]], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # GAP-1801: 1.0.1 with 0.8.10 as the newest published release said
+    # "cannot install 0.8.10" (rc 1), as if a downgrade had been asked for.
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.1")
+    monkeypatch.setattr(upgrade_shim, "_latest_version", lambda repo: "0.8.10")
+
+    assert upgrade_shim.run(["upgrade", "--yes"]) == 0
+    assert execs == []
+    out = capsys.readouterr()
+    assert "DefenseClaw 1.0.1 is up to date (latest release: 0.8.10 is older). Nothing was changed." in out.out
+    assert "defenseclaw upgrade --version X.Y.Z" in out.out
+    assert "cannot install" not in out.out + out.err
+
+
+def test_the_rollback_refusal_prints_a_normalized_path(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # GAP-1842: Windows printed C:\\Users\\x/.defenseclaw\\previous (expanduser
+    # keeps the "/" of "~/.defenseclaw"); normpath gives one separator style.
+    (home / "installer").mkdir()
+    (home / "installer" / "install.ps1").write_text("", encoding="utf-8")
+    (home / "previous" / "legacy-setup").mkdir(parents=True)
+    monkeypatch.setenv("DEFENSECLAW_HOME", f"{home}/sub/..")
+    monkeypatch.setattr(upgrade_shim.os, "name", "nt")
+    monkeypatch.setattr(upgrade_shim.subprocess, "Popen", lambda *args, **kwargs: None)
+
+    assert upgrade_shim.run(["rollback", "--yes"]) == 1
+    assert f"are in {home / 'previous'}\n" in capsys.readouterr().err

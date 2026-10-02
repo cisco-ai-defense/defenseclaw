@@ -119,7 +119,9 @@ function Write-Info([string]$Message) { Write-Host "  > $Message" -ForegroundCol
 function Write-Ok([string]$Message) { Write-Host "  + $Message" -ForegroundColor Green }
 function Write-Warn([string]$Message) { Write-Host "  ! $Message" -ForegroundColor Yellow }
 function Write-Err([string]$Message) { Write-Host "  x $Message" -ForegroundColor Red }
-function Write-Step([string]$Message) { Write-Host ""; Write-Host "--- $Message" -ForegroundColor Cyan }
+function Get-UtcClock { return (Get-Date).ToUniversalTime().ToString("HH:mm:ss") + "Z" }
+# Step headers and gateway lines carry the UTC time, so the install log can time a run (GAP-1797).
+function Write-Step([string]$Message) { Write-Host ""; Write-Host "--- $Message  [$(Get-UtcClock)]" -ForegroundColor Cyan }
 function Die([string]$Message) { throw $Message }
 
 function Test-Version([string]$Value) {
@@ -590,7 +592,7 @@ function Stop-Gateway {
 function Start-Gateway {
     # Its readiness wait is the health check. Exit code 3: running, but a
     # connector refused admission (upgrading again would not change that).
-    Write-Info "Starting the gateway"
+    Write-Info "Starting the gateway [$(Get-UtcClock)]"
     $gateway = Join-Path $BinDir "defenseclaw-gateway.exe"
     $rc = Invoke-Native $gateway @("start")
     if ($rc -in @(0, 3) -or -not (Get-GatewayProcess)) { return $rc }
@@ -894,7 +896,9 @@ function Save-Snapshot {
     # A large audit.db makes this copy (and the antivirus scan of it) slow;
     # say how big it is and what is free (GAP-1519).
     $freeText = if ($free -ge 0) { ", {0:N0} MB free" -f ([double]$free / 1MB) } else { "" }
-    Write-Info ("Saving a rollback copy of the data folder ({0:N0} MB needed{1})" -f ([double]$need / 1MB), $freeText)
+    if ($PrevVersion -or $need -gt 0) {
+        Write-Info ("Saving a rollback copy of the data folder ({0:N0} MB needed{1})" -f ([double]$need / 1MB), $freeText)
+    }
     if ($free -ge 0 -and $free -lt $need + 100MB) {
         Write-Err "Not enough free disk space next to $DataDir for a rollback copy"
         return $false
@@ -1205,7 +1209,9 @@ function Complete-Swap {
     # The new install is live: a run killed from here on must not restore the old one.
     Remove-Item -LiteralPath (Join-Path $Snap "COMPLETE") -Force
     # Deleting the old venv and staging copies takes a minute or two on Windows (GAP-1347).
-    Write-Info "Cleaning up the previous install's files (this can take a minute or two)"
+    # A first install has no previous install, only its staging copies (GAP-1827).
+    if ($PrevVersion) { Write-Info "Cleaning up the previous install's files (this can take a minute or two)" }
+    else { Write-Info "Removing the staging files" }
     Invoke-Quietly {
         if ($Snap -eq (Join-Path $DataDir "previous.new") -and $PrevVersion) {
             Save-RolledBackData
@@ -1657,7 +1663,7 @@ function Invoke-Install {
     }
     $WasRunning = [bool](Get-GatewayProcess)
     if ($WasRunning) {
-        Write-Info "Stopping the gateway"
+        Write-Info "Stopping the gateway [$(Get-UtcClock)]"
         if (-not (Stop-Gateway)) {
             if ($Setup) { Restore-SetupInstall }
             Die "The running gateway did not stop; nothing was changed"
@@ -1696,6 +1702,7 @@ function Invoke-Install {
         Write-Warn "The gateway was running without a configuration; run 'defenseclaw init' to set it up"
     }
     if ($startNew) {
+        $startedAt = Get-Date
         $startRc = Start-Gateway
         if ($sealOnly) {
             [void](Stop-Gateway)
@@ -1704,7 +1711,7 @@ function Invoke-Install {
                 $startRc = 0
             }
         } elseif ($startRc -ne 0 -and $startRc -ne 3) {
-            Write-Err "The $Ver gateway did not become healthy; restoring $previousLabel"
+            Write-Err ("The $Ver gateway did not become healthy within {0:N0} s [{1}]; restoring $previousLabel" -f ((Get-Date) - $startedAt).TotalSeconds, (Get-UtcClock))
             [void](Stop-Gateway)
             Restore-Snapshot
             Die "DefenseClaw $Ver was not installed. $(Get-RestoredNote) Log: $($Run.Log)"

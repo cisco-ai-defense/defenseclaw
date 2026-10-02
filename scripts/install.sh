@@ -161,6 +161,7 @@ QUICKSTART_MODE=""
 QUICKSTART_RC=0
 OPENCLAW_MISSING=false
 OPENCLAW_INSTALLED=false
+OPENCLAW_NEXT=""
 QUICKSTART_RERUN=""
 INSTALL_SANDBOX=false
 PASSTHROUGH=()
@@ -788,7 +789,7 @@ if [[ -n "${QUICKSTART_RERUN}" ]]; then
 fi
 if [[ "${OPENCLAW_MISSING}" == true ]]; then
     # GAP-1523: OpenClaw is the connector asked for and is not installed.
-    warn "OpenClaw is not installed, so it is not guarded yet. Install it as shown above, then run: defenseclaw setup openclaw"
+    warn "OpenClaw is not installed, so it is not guarded yet. Install it as shown above, then run: ${OPENCLAW_NEXT:-defenseclaw setup openclaw}"
     exit 3
 fi
 if [[ "${OPENCLAW_INSTALLED}" == true ]]; then
@@ -1454,7 +1455,13 @@ first_install_extras() {
             local args=(quickstart --non-interactive --yes --connector "${CONNECTOR}")
             [[ -n "${QUICKSTART_MODE}" ]] && args+=(--mode "${QUICKSTART_MODE}")
             local rc=0
-            PATH="${BIN_DIR}:${PATH}" "${VENV}/bin/defenseclaw" "${args[@]}" || rc=$?
+            if [[ "${OPENCLAW_MISSING}" == true ]]; then
+                # GAP-1798: quickstart cannot set up an agent that is not
+                # installed; the summary names it as the step after OpenClaw.
+                OPENCLAW_NEXT="defenseclaw ${args[*]}"
+            else
+                PATH="${BIN_DIR}:${PATH}" "${VENV}/bin/defenseclaw" "${args[@]}" || rc=$?
+            fi
             if [[ ${rc} -ne 0 ]]; then
                 # The install stays; the summary names the failure and the re-run.
                 QUICKSTART_RC=${rc}
@@ -1470,6 +1477,12 @@ first_install_extras() {
 
 ensure_openclaw() {
     local found
+    # GAP-1523: a system Node (/usr, /opt/node22) has a root-owned global
+    # prefix; a standard user installs into ~/.local, whose bin is BIN_DIR.
+    # GAP-1798: every hint names the command this run would use.
+    local cmd=(npm install -g)
+    if has npm && ! npm_global_prefix_writable; then cmd+=(--prefix "${HOME}/.local"); fi
+    cmd+=("openclaw@${OPENCLAW_VERSION}")
     if has openclaw; then
         found="$(openclaw --version 2>/dev/null | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
         if [[ -n "${found}" ]] && ! version_lt "${found}" "${OPENCLAW_VERSION}"; then
@@ -1477,15 +1490,11 @@ ensure_openclaw() {
         fi
         ask_yes_no "Update OpenClaw ${found:-?} to ${OPENCLAW_VERSION}?" || { warn "Keeping OpenClaw ${found:-?}"; return; }
     else
-        ask_yes_no "Install OpenClaw ${OPENCLAW_VERSION}?" || { warn "Skipping OpenClaw; install it later with npm install -g openclaw@${OPENCLAW_VERSION}"; OPENCLAW_MISSING=true; return; }
+        ask_yes_no "Install OpenClaw ${OPENCLAW_VERSION}?" || { warn "Skipping OpenClaw; install it later with: ${cmd[*]}"; OPENCLAW_MISSING=true; return; }
     fi
-    has npm || { warn "npm is not installed; install OpenClaw with: npm install -g openclaw@${OPENCLAW_VERSION}"; OPENCLAW_MISSING=true; return; }
-    # GAP-1523: a system Node (/usr, /opt/node22) has a root-owned global
-    # prefix; a standard user installs into ~/.local, whose bin is BIN_DIR.
-    local cmd=(npm install -g)
-    npm_global_prefix_writable || cmd+=(--prefix "${HOME}/.local")
-    cmd+=("openclaw@${OPENCLAW_VERSION}")
-    if "${cmd[@]}" --loglevel=error; then
+    has npm || { warn "npm is not installed; install Node.js with npm, then run: ${cmd[*]}"; OPENCLAW_MISSING=true; return; }
+    info "Installing OpenClaw ${OPENCLAW_VERSION} with npm (this can take a minute)"
+    if "${cmd[@]}" --no-fund --no-audit --no-update-notifier --loglevel=error; then
         OPENCLAW_INSTALLED=true
     else
         warn "Could not install OpenClaw; run: ${cmd[*]}"

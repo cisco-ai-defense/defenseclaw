@@ -199,11 +199,15 @@ def _upgrade(version: str | None, *, yes: bool) -> int:
     explicit = version is not None
     if version is None:
         version = _local_version(local_dir) if local_dir else _latest_version(repo)
+    if not explicit and _key(version) <= _key(installed):
+        # GAP-1801: a newest release older than this install (0.8.x before
+        # 1.0 is published) is "nothing newer", not a refused downgrade.
+        older = " is older" if _key(version) < _key(installed) else ""
+        print(f"  ✓ DefenseClaw {installed} is up to date (latest release: {version}{older}). Nothing was changed.")
+        print("    To install a specific 1.x release: defenseclaw upgrade --version X.Y.Z")
+        return 0
     if _key(version) < (1, 0, 0):
         raise ShimError(f"DefenseClaw {installed} cannot install {version}; 1.x installs only 1.0.0 or later")
-    if not explicit and _key(version) <= _key(installed):
-        print(f"  ✓ DefenseClaw {installed} is up to date (latest release: {version}).")
-        return 0
 
     print(f"  → Installing DefenseClaw {version} (installed: {installed})")
     workdir = tempfile.mkdtemp(prefix="defenseclaw-upgrade-")
@@ -216,8 +220,13 @@ def _upgrade(version: str | None, *, yes: bool) -> int:
     return _run_installer(installer, (["--yes"] if yes else []) + extra, workdir)
 
 
+def _data_home() -> str:
+    """The data folder, normalized so Windows paths print with backslashes only (GAP-1842)."""
+    return os.path.normpath(os.path.expanduser(os.environ.get("DEFENSECLAW_HOME") or "~/.defenseclaw"))
+
+
 def _rollback(*, yes: bool) -> int:
-    home = os.path.expanduser(os.environ.get("DEFENSECLAW_HOME") or "~/.defenseclaw")
+    home = _data_home()
     name = _installer_name()
     installer = os.path.join(home, "installer", name)
     if not os.path.isfile(installer):
@@ -279,7 +288,7 @@ def _run_installer(path: str, args: list[str], workdir: str) -> int:
         except OSError as exc:
             shutil.rmtree(workdir, ignore_errors=True)
             raise ShimError(f"could not start {powershell}: {exc}") from None
-        home = os.path.normpath(os.path.expanduser(os.environ.get("DEFENSECLAW_HOME") or "~/.defenseclaw"))
+        home = _data_home()
         print("  → The installer continues in a new window, which shows the result when it ends.")
         print(f"    Its log is saved in {os.path.join(home, 'logs')} (install-<time>.log).")
         print("    Confirm the result afterwards with: defenseclaw --version")
