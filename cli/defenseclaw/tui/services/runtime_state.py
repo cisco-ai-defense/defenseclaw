@@ -22,6 +22,7 @@ decision is testable from a fixture.
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -275,7 +276,10 @@ def decode_runtime_snapshot(payload: Any) -> RuntimeSnapshot:
 class RuntimePanelModel:
     """Pure row model for the Runtime panel."""
 
-    def __init__(self) -> None:
+    def __init__(self, platform: str | None = None) -> None:
+        # The host plane's grant differs per OS; Linux was told to grant
+        # macOS Endpoint Security (GAP-1403).
+        self.platform = platform or sys.platform
         self.snapshot = RuntimeSnapshot()
         self._inventory_unobserved = 0
         self.filtered: tuple[RuntimeRow, ...] = ()
@@ -520,7 +524,7 @@ class RuntimePanelModel:
             )
         return (
             "HEALTHY means the user-level inference and egress planes are watching. "
-            "Endpoint Security is optional and needs an elevated gateway. "
+            f"{self._host_plane_note()} "
             "A quiet findings table is a clean host, not a blind sensor."
             + extra
         )
@@ -540,6 +544,30 @@ class RuntimePanelModel:
             for plane in self.snapshot.planes
         )
 
+    def _host_plane_note(self) -> str:
+        if self.platform.startswith("linux"):
+            return "Agent actions (plane C) is optional."
+        if self.platform == "darwin":
+            return "Endpoint Security is optional and needs an elevated gateway."
+        return "Agent actions (plane C) is optional."
+
+    def _host_plane_fix(self) -> str:
+        """Next step for the agent-actions plane, in this OS's terms."""
+
+        enable = "defenseclaw agent discovery runtime enable --enable-host-plane"
+        if self.platform.startswith("linux"):
+            return (
+                "Agent actions is optional. Process events need no grant; file events "
+                f"need CAP_SYS_ADMIN (fanotify). Turn it on: {enable}"
+            )
+        if self.platform == "darwin":
+            return (
+                "Agent actions is optional and needs an elevated gateway. "
+                "Use Permissions, then run runtime enable with "
+                "--enable-host-plane if you can grant Endpoint Security."
+            )
+        return f"Agent actions is optional. Use Permissions to see what it needs, then run: {enable}"
+
     def plane_fix(self, plane: PlaneRow) -> str:
         """Next action for an idle or blind plane. Empty when the plane is up."""
 
@@ -548,11 +576,7 @@ class RuntimePanelModel:
         reason = plane.reason.lower()
         if plane.plane == "c" or "not selected" in reason or "enable_host_plane" in reason:
             if plane.plane == "c":
-                return (
-                    "Agent actions is optional and needs an elevated gateway. "
-                    "Use Permissions, then run runtime enable with "
-                    "--enable-host-plane if you can grant Endpoint Security."
-                )
+                return self._host_plane_fix()
             return "Click Enable Runtime to turn on inference and egress."
         if any(
             token in reason

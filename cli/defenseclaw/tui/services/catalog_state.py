@@ -714,6 +714,10 @@ class SkillsPanelModel(CatalogListModel[SkillRow]):
         if self.filter_text:
             return "No skills match the filter."
         if not self.loaded:
+            if self.loading:
+                # A first visit loads by itself; "Press r" read as if it
+                # had to be asked for (GAP-1402).
+                return 'Loading skills... (runs "defenseclaw skill list --json")'
             return 'Press "r" to load skills. Runs "defenseclaw skill list --json".'
         return (
             f"No skills found in {connector_source_label(self.connector, 'skills')} "
@@ -811,6 +815,10 @@ class MCPsPanelModel(CatalogListModel[MCPRow]):
         if self.filter_text:
             return "No MCP servers match the filter."
         if not self.loaded:
+            if self.loading:
+                # A first visit loads by itself; "Press r" read as if it
+                # had to be asked for (GAP-1402).
+                return 'Loading MCP servers... (runs "defenseclaw mcp list --json")'
             return 'Press "r" to load MCP servers. Runs "defenseclaw mcp list --json".'
         return (
             f"No MCP servers configured in {connector_source_label(self.connector, 'mcps')} "
@@ -904,6 +912,10 @@ class PluginsPanelModel(CatalogListModel[PluginRow]):
 
     def empty_state(self) -> str:
         if not self.loaded:
+            if self.loading:
+                # A first visit loads by itself; "Press r" read as if it
+                # had to be asked for (GAP-1402).
+                return 'Loading plugins... (runs "defenseclaw plugin list --json")'
             return 'Press "r" to load plugins. Runs "defenseclaw plugin list --json".'
         return (
             f"No plugins detected. Plugins extend {friendly_connector_name(self.connector)} with tools and hooks. "
@@ -1017,9 +1029,10 @@ class ToolsPanelModel(CatalogListModel[ToolRow]):
         if key == "o":
             return CatalogPanelAction(True, open_action_menu=self.selected() is not None)
         if key in {"b", "a", "u"}:
-            intent = (
-                self.action_intent(key, origin="tools") if self.selected() and self.action_key_available(key) else None
-            )
+            if self.selected() is None:
+                # b/a on an empty table did nothing and said nothing (GAP-1486).
+                return CatalogPanelAction(True, hint=TOOLS_ADD_HINT)
+            intent = self.action_intent(key, origin="tools") if self.action_key_available(key) else None
             return CatalogPanelAction(True, intent)
         if key == "r":
             return CatalogPanelAction(
@@ -1041,7 +1054,13 @@ class ToolsPanelModel(CatalogListModel[ToolRow]):
         )
 
     def empty_state(self) -> str:
-        return "No tool policy rows. This table only shows block/allow entries; unblocked tools disappear here."
+        return (
+            "No tool policy rows. This table only shows block/allow entries; unblocked tools disappear here. "
+            + TOOLS_ADD_HINT
+        )
+
+
+TOOLS_ADD_HINT = "To add a rule, press : and type: tool block <tool-name> --connector <connector> (or tool allow)."
 
 
 def parse_skill_list_json(text: str) -> tuple[SkillRow, ...]:

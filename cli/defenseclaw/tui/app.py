@@ -614,6 +614,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         margin-bottom: 1;
         padding: 0 1;
         border: round TOKEN_BORDER_MUTED;
+        border-subtitle-color: TOKEN_ACCENT_CYAN;
         background: TOKEN_SURFACE_RAISED;
     }
 
@@ -694,6 +695,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
 
     #panel-table {
         height: 1fr;
+        /* With a detail pane open at 80x24 the list kept only its header
+           (or nothing): keep the header and two rows (GAP-1380). */
+        min-height: 3;
         border: none;
         background: TOKEN_SURFACE_BASE;
         color: TOKEN_TEXT_PRIMARY;
@@ -2558,11 +2562,39 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
 
     def on_resize(self, event: events.Resize) -> None:
         self._update_tab_labels()
+        self.call_after_refresh(self._mark_overflowing_controls)
         # The nav list and aside appear and disappear at width thresholds.
         if self.is_running and not self.help_open and len(self.screen_stack) <= 1:
             panel = self.active_panel
             if panel == "setup" or self._panel_nav(panel) or self._panel_aside(panel) is not None:
                 self.call_after_refresh(self._render_chrome)
+
+    def _mark_overflowing_controls(self) -> None:
+        """Say so on a button bar whose last buttons are cut off.
+
+        At 80 columns the bars scroll sideways and the last visible button was
+        cut mid-word ("Open de", "Selec") with nothing to show more exist
+        (GAP-1457). The bar's bottom border now reads "… more ▸" (or "◂ more"
+        once scrolled to the end).
+        """
+
+        try:
+            bars = list(self.query(".panel-controls"))
+        except Exception:  # noqa: BLE001 - teardown may race the refresh.
+            return
+        for bar in bars:
+            try:
+                overflow = bar.display and bar.max_scroll_x > 0
+                if not overflow:
+                    subtitle = ""
+                elif bar.scroll_x >= bar.max_scroll_x:
+                    subtitle = "◂ more"
+                else:
+                    subtitle = "… more ▸"
+                if bar.border_subtitle != subtitle:
+                    bar.border_subtitle = subtitle
+            except Exception:  # noqa: BLE001 - a cosmetic hint never breaks a render.
+                continue
 
     def action_switch_panel(self, panel: str) -> None:
         if panel not in PANEL_NAMES:
@@ -3713,7 +3745,34 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             return (rank, len(entry.tui_name), entry.tui_name)
 
         scored = ((rank, entry) for entry in self._command_registry if (rank := score(entry)) is not None)
-        return tuple(entry for _rank, entry in sorted(scored, key=lambda item: item[0])[:limit])
+        matches = tuple(entry for _rank, entry in sorted(scored, key=lambda item: item[0])[:limit])
+        return matches or self._palette_command_with_args(query)
+
+    def _palette_command_with_args(self, query: str) -> tuple[CmdEntry, ...]:
+        """The command a query starts with, when the rest are its arguments.
+
+        "tool block Write --connector claudecode" matched no row ("No
+        matching DefenseClaw command") although Enter runs it (GAP-1486); show
+        the command with the typed arguments as the row that will run.
+        """
+
+        typed = query.strip()
+        for prefix in ("defenseclaw-gateway ", "defenseclaw "):
+            if typed.lower().startswith(prefix):
+                typed = typed[len(prefix) :].strip()
+                break
+        tokens = typed.split()
+        lowered = [token.lower() for token in tokens]
+        best: CmdEntry | None = None
+        for entry in self._command_registry:
+            name = entry.tui_name.lower().split()
+            if len(name) < len(tokens) and lowered[: len(name)] == name:
+                if best is None or len(name) > len(best.tui_name.split()):
+                    best = entry
+        if best is None:
+            return ()
+        extra = tuple(tokens[len(best.tui_name.split()) :])
+        return (replace(best, tui_name=" ".join(tokens), cli_args=(*best.cli_args, *extra), needs_arg=False),)
 
     def _selected_palette_value(self) -> str:
         palette = self.query_one("#command-palette", DataTable)
@@ -3826,6 +3885,18 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
     @on(Input.Changed, "#tools-filter")
     def _on_tools_filter_changed(self, event: Input.Changed) -> None:
         self._on_catalog_filter_input_changed("tools", event.value)
+
+    def _clear_catalog_filter(self, panel: str) -> None:
+        model = self.catalog_models.get(panel)
+        if model is None:
+            return
+        model.clear_filter()
+        try:
+            self.query_one(f"#{panel}-filter", Input).value = ""
+        except NoMatches:
+            pass
+        self._set_status(f"{panel.title()} filter cleared.")
+        self._render_chrome()
 
     def _focus_catalog_filter(self, panel: str) -> bool:
         """``/`` on a catalog puts the cursor in its filter box.
@@ -4308,6 +4379,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # strip honest after refresh loops add new alerts / audit
         # entries while the operator is parked on a different panel.
         self._update_tab_labels()
+        self.call_after_refresh(self._mark_overflowing_controls)
         # A catalog-load worker (or the periodic refresh) can reach here
         # after the screen has begun tearing down, at which point #activity
         # and #body are gone and query_one raises NoMatches — surfacing as
@@ -4941,8 +5013,18 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         ai_visible = self.active_panel == "ai" and not self.help_open
         columns = self.ai_discovery_model.model_table_columns()
         rows = self.ai_discovery_model.model_table_rows()
-        model_visible = ai_visible and bool(rows)
-        model_label_visible = ai_visible and bool(self.ai_discovery_model.model_rows)
+        # At 80x24 an open product detail left the products table no rows
+        # under the models table (GAP-1380); the models table steps aside
+        # until the detail closes.
+        product_detail_short = (
+            0 < self.size.height < 30
+            and self.ai_discovery_model.detail_open
+            and self.ai_discovery_model.active_table == "agents"
+        )
+        model_visible = ai_visible and bool(rows) and not product_detail_short
+        model_label_visible = (
+            ai_visible and bool(self.ai_discovery_model.model_rows) and not product_detail_short
+        )
         product_label.set_class(not ai_visible, "hidden")
         model_label.set_class(not model_label_visible, "hidden")
         if model_label_visible:
@@ -5425,16 +5507,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # "filter-clear" has no key shortcut on the catalog model — wipe
         # the filter text directly so the body and table both repaint.
         if suffix == "filter-clear":
-            model = self.catalog_models.get(panel)
-            if model is None:
-                return
-            model.clear_filter()
-            try:
-                self.query_one(f"#{panel}-filter", Input).value = ""
-            except NoMatches:
-                pass
-            self._set_status(f"{panel.title()} filter cleared.")
-            self._render_chrome()
+            self._clear_catalog_filter(panel)
             return
         key = keys.get(suffix)
         if key is None:
@@ -5501,14 +5574,17 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         except NoMatches:
             return
         if filter_input.value != model.filter_text:
-            if not model.loaded and filter_input.has_focus:
+            if filter_input.has_focus:
                 # Initial catalog auto-loads can complete a repaint between
                 # Input.value changing and Textual delivering Input.Changed.
                 # Preserve fresh text only while this exact widget owns input
                 # focus. A failed/slow loader can otherwise repaint after the
                 # operator clicked Clear and resurrect a stale value from an
                 # unfocused or replaced Input. Input.Changed remains the
-                # canonical model update once Textual delivers it.
+                # canonical model update once Textual delivers it. Loaded
+                # catalogs repaint too (a block-triggered reload, the 2 s
+                # timer): writing the model's older text back dropped fast-
+                # typed characters ("ws1-notes" became "ws", GAP-1379).
                 model.set_filter(filter_input.value)
             else:
                 filter_input.value = model.filter_text
@@ -10762,6 +10838,12 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             if key == "/":
                 return self._focus_catalog_filter(self.active_panel)
             catalog_key = _catalog_key(key)
+            model = self.catalog_models[self.active_panel]
+            if catalog_key == "esc" and not model.detail_open and model.filter_text:
+                # The hint says "Esc clears the filter"; Esc on the list did
+                # nothing (GAP-1379, GAP-1402).
+                self._clear_catalog_filter(self.active_panel)
+                return True
             if catalog_key not in {"j", "k", "up", "down", "esc", "r"}:
                 self._sync_catalog_cursor_from_table(self.active_panel)
             action = self.catalog_models[self.active_panel].handle_key(catalog_key)
@@ -11456,6 +11538,12 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if model.form_active:
             label = setup_catalog.wizard_label(model.active_wizard)
             description = WIZARD_DESCRIPTIONS[int(model.active_wizard)]
+            goal = model.active_goal
+            if goal is not None and goal.label:
+                # The wizard-wide line ("See which API keys are missing and
+                # set them.") misdescribed a picked goal such as "Remove a
+                # stored credential" (GAP-1395).
+                description = f"{goal.label}. {goal.summary}" if goal.summary else f"{goal.label}."
             focused = model.focused_row_metadata()
             head = (
                 f"[bold #22D3EE]{rich_escape(label)}[/] "
@@ -11467,8 +11555,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             # Third line: the most urgent fact wins — a submit error, a
             # config change on disk, missing required fields, then the
             # focused field's hint.
-            if model.form_error:
-                third = self._setup_line(model.form_error, style="#F87171")
+            if form_error := model.current_form_error():
+                third = self._setup_line(form_error, style="#F87171")
             elif model.disk_change_pending:
                 third = self._setup_line(
                     "Config changed on disk. Your unsaved form values were preserved; "
@@ -12594,7 +12682,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         """
 
         loading = f"Loading inventory for {len(names)} connectors..."
-        self._set_status(loading)
+        # A background load of another panel ("Loading plugins for 5
+        # connectors..." on Tools) is not about the panel on screen (GAP-1402).
+        if self.active_panel == "inventory":
+            self._set_status(loading)
         results: list[tuple[str, str | None]] = []
         for name in names:
             intent = self.inventory_model.load_intent_for(name)
@@ -12831,6 +12922,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
 
     async def _load_catalog_model(self, panel: str) -> None:
         model = self.catalog_models[panel]
+        model.loading = True
         names = self._active_connector_names()
         asset_panel = panel in {"skills", "mcps", "plugins"}
         # 8.13 pass 2: Skills/MCPs/Plugins merge every active connector's list
@@ -12844,7 +12936,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         model.show_connector_column = False
         intent = model.load_intent_for(names[0]) if asset_panel and names else model.load_intent()
         loading = intent.hint or f"Loading {panel}..."
-        self._set_status(loading)
+        if self.active_panel == panel:
+            self._set_status(loading)
         try:
             returncode, stdout, stderr = await _communicate_captured(intent.binary, intent.args)
         except OSError as exc:
@@ -12886,7 +12979,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         """
 
         loading = f"Loading {panel} for {len(names)} connectors..."
-        self._set_status(loading)
+        if self.active_panel == panel:
+            self._set_status(loading)
         results: list[tuple[str, str | None]] = []
         for name in names:
             intent = model.load_intent_for(name)
@@ -12930,7 +13024,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             env_overrides=tuple(getattr(intent, "env_overrides", ()) or ()),
             consequence=str(getattr(intent, "consequence", "") or ""),
         )
-        exit_code = await self._confirm_and_run_parsed(parsed)
+        exit_code = await self._confirm_and_run_parsed(
+            parsed, stay_on_panel=bool(getattr(intent, "stay_on_panel", False))
+        )
         return await self._run_follow_ups(intent, exit_code)
 
     async def _run_follow_ups(self, intent: Any, exit_code: int | None) -> int | None:
@@ -13000,6 +13096,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if chosen is None or chosen.action_id != "run":
             self._write_activity(f"[#FBBF24]Cancelled:[/] {intent.label}")
             self._set_status("Command cancelled.")
+            self._release_cancelled_wizard(intent.binary, tuple(intent.args))
             return None
         # Confirmed (and danger-re-pressed): jump to Activity where the live
         # output is visible, record the alias in the palette MRU, then run.
@@ -13021,7 +13118,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         self._report_command_result(intent.label, exit_code)
         return await self._run_follow_ups(intent, exit_code)
 
-    async def _confirm_and_run_parsed(self, parsed: ParsedCommand) -> int | None:
+    async def _confirm_and_run_parsed(self, parsed: ParsedCommand, *, stay_on_panel: bool = False) -> int | None:
         """Preview ``parsed``, then run it and wait for it to finish.
 
         Returns the exit code, or ``None`` when the preview was cancelled or
@@ -13033,6 +13130,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if not confirmed:
             self._write_activity(f"[#FBBF24]Cancelled:[/] {parsed.display_name}")
             self._set_status("Command cancelled.")
+            self._release_cancelled_wizard(parsed.binary, parsed.args)
             return None
         # Any command that needed a preview is non-read-only (setup,
         # mutation, destructive, …) — most of them are interactive
@@ -13041,7 +13139,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # Without this jump the user sat on Overview staring at an empty
         # yellow "running" strip with no clue the wizard was waiting on
         # them.
-        if parsed.risk != "read-only" and self.active_panel != "activity":
+        if parsed.risk != "read-only" and not stay_on_panel and self.active_panel != "activity":
             self.action_switch_panel("activity")
         # Record the TUI alias in the palette MRU so the next time the
         # operator opens the palette without a query, the things they
@@ -13063,6 +13161,13 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         )
         self._report_command_result(parsed.display_name, exit_code)
         return exit_code
+
+    def _release_cancelled_wizard(self, binary: str, args: tuple[str, ...]) -> None:
+        """A Setup task whose confirm was cancelled kept "running Ns" (GAP-1478)."""
+
+        if binary == "defenseclaw" and args and args[0] in WIZARD_COMMAND_FAMILIES:
+            self.setup_model.mark_wizard_complete(args, success=False, cancelled=True)
+            self._render_chrome()
 
     def _report_command_result(self, display_name: str, exit_code: int | None) -> None:
         """Say how a command ended in the status bar.

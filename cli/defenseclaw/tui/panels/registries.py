@@ -51,6 +51,10 @@ class RegistryCommandIntent:
     risk: str = "mutation"
     # Plain-words effect the confirm modal shows (GAP-1281).
     consequence: str = ""
+    # Registry commands never prompt (--json/--non-interactive), so the
+    # panel stays in front and refreshes; jumping to Activity showed only
+    # their raw JSON (GAP-1485).
+    stay_on_panel: bool = True
 
     @property
     def argv(self) -> tuple[str, ...]:

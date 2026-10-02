@@ -177,6 +177,10 @@ def infer_command_risk(category: str, args: tuple[str, ...]) -> str:
         return "setup" if "--dry-run" in lowered else "destructive"
     if _has_any_arg(lowered, "restart", "rotate-token"):
         return "restart"
+    if lowered[0] in {"upgrade", "rollback"}:
+        # Replaces the binaries and restarts the gateway; the preview called
+        # it read-only (GAP-1422).
+        return "restart"
     if _has_any_arg(
         lowered,
         "block",

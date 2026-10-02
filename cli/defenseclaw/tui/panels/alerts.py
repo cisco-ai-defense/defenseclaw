@@ -277,6 +277,26 @@ def _evaluation_decisions(rows: Iterable[V8EventHistoryRow]) -> dict[str, str]:
     return decisions
 
 
+_POST_TOOL_DECISION = "detected after the tool ran (cannot block)"
+
+
+def _finding_title(rule_id: str, title: str) -> str:
+    """The rule pack's title for a secret finding whose stored title was redacted.
+
+    The audit store replaces every secret finding's title with "Secret finding";
+    "defenseclaw alerts" shows the pack's own title ("AWS access key"), and the
+    TUI uses the same lookup so both say the same thing (GAP-1423)."""
+
+    if not rule_id or title != "Secret finding":
+        return title
+    try:
+        from defenseclaw.commands.cmd_alerts import _finding_title as cli_finding_title  # noqa: PLC0415
+
+        return cli_finding_title(rule_id, title)
+    except Exception:  # noqa: BLE001 - a title is a display nicety.
+        return title
+
+
 def _v8_alert_event(row: V8EventHistoryRow, decisions: Mapping[str, str] | None = None) -> AlertEvent:
     payload = row.payload
     action = (
@@ -330,13 +350,9 @@ def _v8_alert_event(row: V8EventHistoryRow, decisions: Mapping[str, str] | None 
     facts: list[tuple[str, str]] = []
     if row.connector:
         facts.append(("Connector", row.connector))
+    rule_id = payload_text(payload, "defenseclaw.finding.rule_id")
     rule = ": ".join(
-        value
-        for value in (
-            payload_text(payload, "defenseclaw.finding.rule_id"),
-            payload_text(payload, "defenseclaw.finding.title"),
-        )
-        if value
+        value for value in (rule_id, _finding_title(rule_id, payload_text(payload, "defenseclaw.finding.title"))) if value
     )
     if rule:
         facts.append(("Rule", rule))
@@ -345,6 +361,11 @@ def _v8_alert_event(row: V8EventHistoryRow, decisions: Mapping[str, str] | None 
     decision = payload_text(payload, *_DECISION_KEYS)
     if not decision and decisions:
         decision = decisions.get(payload_text(payload, "defenseclaw.evaluation.id"), "")
+    if decision and row.bucket == "security.finding" and decision.strip().lower() == "allow":
+        if is_post_tool_hook_event(target):
+            # Same wording as "defenseclaw alerts": a post-tool finding is
+            # reported after the call ran, so "allow" is not a choice (GAP-1423).
+            decision = _POST_TOOL_DECISION
     if decision:
         facts.append(("Decision", decision))
     severity = (row.severity or "INFO").upper()
@@ -1601,7 +1622,7 @@ def _hook_decision_label(store: object | None, event_id: str, hook_target: str =
         observed_block = action == "allow" and raw_action == "block"
         if tokens.get("would_block", "").strip().lower() == "true" or observed_block:
             decision = (
-                "detected after the tool ran (cannot block)"
+                _POST_TOOL_DECISION
                 if is_post_tool_hook_event(hook_target)
                 else "would block (observe mode, allowed)"
             )
@@ -1698,6 +1719,13 @@ def _alert_target_label(event: AlertEvent) -> str:
     return _truncate(event.target, 42)
 
 
+def _is_redaction_placeholder(text: str) -> bool:
+    """True for the gateway's stand-in for redacted evidence ("<redacted-sensitive len=20>")."""
+
+    text = text.strip()
+    return text.startswith("<redacted") and text.endswith(">")
+
+
 def _alert_details_label(event: AlertEvent) -> str:
     """Pretty DETAILS cell text.
 
@@ -1729,10 +1757,12 @@ def _alert_details_label(event: AlertEvent) -> str:
     if event.details.startswith("bucket="):
         summary = event.details.partition(" summary=")[2].strip()
         event_name = event.details.partition("event_name=")[2].split(" ", 1)[0]
-        if summary and summary != event_name:
+        if summary and summary != event_name and not _is_redaction_placeholder(summary):
             return _truncate(summary, 58)
         # A finding with no summary of its own (prompt-lane rows) showed only
-        # "finding.observed"; its rule says what matched (GAP-1324).
+        # "finding.observed", and a secret finding only the redaction
+        # placeholder "<redacted-sensitive len=20>"; its rule says what
+        # matched (GAP-1324, GAP-1423).
         if rule := next((value for label, value in event.facts if label == "Rule"), ""):
             return _truncate(rule, 58)
         if summary:

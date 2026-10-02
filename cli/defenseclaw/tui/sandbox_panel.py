@@ -985,6 +985,10 @@ class SandboxPanelMixin:
         blocked = {
             "off": "Sandboxes are off; run the Sandbox wizard (0 Setup) first",
             "unavailable": "Sandboxes are unavailable; see: defenseclaw sandbox doctor",
+            # Before the first snapshot the state is unknown; offering "Turn
+            # on" then ran an enable the command refused (GAP-1371).
+            "waiting": "Sandbox status is still loading; try again in a moment",
+            "unreachable": "The DefenseClaw daemon is not answering; check: defenseclaw sandbox doctor",
         }.get(model.state(), "")
         actions = []
         for name in names:

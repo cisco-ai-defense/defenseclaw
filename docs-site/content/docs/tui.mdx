@@ -50,7 +50,7 @@ terminal width, so the labels don't change as you switch panels.
 | `3` | Skills | Scanned skill inventory |
 | `4` | MCPs | Scanned MCP servers |
 | `5` | Plugins | Installed plugins and their scan results for every connector that has plugins (Amp, Hermes, OpenClaw and others) |
-| `T` | Tools | The tool block/allow list (capital `T`; lowercase `t` is a panel key) |
+| `T` | Tools | The tool block/allow list (capital `T`; lowercase `t` is a panel key). To add the first rule, press `:` and type `tool block <tool-name> --connector <connector>` (or `tool allow`) |
 | `6` | Inventory | Combined inventory view |
 | `7` | Sandboxes | OpenShell sandboxes, their live activity feed, and the rare asks ([below](#sandboxes-panel)) |
 | `8` | Logs | Live gateway logs with filter presets. The view opens on the newest line and follows new lines until you move the cursor |
@@ -357,7 +357,7 @@ rules.
 | `?` | Toggle the help overlay (scroll it with `j`/`k` or `PgUp`/`PgDn`) |
 | `Ctrl+K` or `:` | Open the command palette (search-and-run any command; the Risk column marks what changes things) |
 | `Ctrl+P` | Jump to a panel by name |
-| `/` | On Skills, MCPs, Plugins and Runtime: filter the list (`Enter`, `Esc` or `Down` returns to it) |
+| `/` | On Skills, MCPs, Plugins and Runtime: filter the list (`Enter`, `Esc` or `Down` returns to it; `Esc` on the list clears the filter) |
 | `Ctrl+\` | Theme picker |
 | `D` | Run `defenseclaw doctor` in the background and toast the result (works on every panel) |
 | `Y` | Copy the last command's output (works on every panel) |
@@ -365,4 +365,4 @@ rules.
 | `Ctrl+C` | Quit the TUI (it cancels a running command first) |
 | `q` | Close the open drawer or overlay; it does not quit |
 | `b` | On Overview and Logs: turn desktop notifications on or off |
-| `e` | On Registries: require (or stop requiring) registry approval for the selected entry's type |
+| `e` | On Registries: require (or stop requiring) registry approval for the selected entry's type. Registry actions (sync, approve, reject, require) keep the Registries panel in front and report the result in the status bar; their full output is in Activity |

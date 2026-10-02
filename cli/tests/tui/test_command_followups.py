@@ -95,7 +95,7 @@ async def test_cancelled_preview_runs_nothing(tmp_path) -> None:
     ran: list[Any] = []
     logged: list[str] = []
 
-    async def cancelled(_parsed: Any) -> None:
+    async def cancelled(_parsed: Any, **_kwargs: Any) -> None:
         ran.append(_parsed.args)
         return None
 

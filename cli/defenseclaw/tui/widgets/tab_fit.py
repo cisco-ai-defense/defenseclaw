@@ -170,6 +170,18 @@ def fit_tab_labels(
                     if name != active and candidate[name] != letter:
                         candidate[name] = letter
                         demoted.append(name)
+                # Large badges (Windows draws them as "8(99)") can still
+                # leave no room: the active tab's name beats the badges of
+                # the least important other tabs, or it showed a bare key
+                # (GAP-1457).
+                for name in reversed(ranked):
+                    if strip_width(tuple(candidate.values())) <= width:
+                        break
+                    if name != active and unread.get(name, 0):
+                        keep_name = named[name] and name not in demoted
+                        candidate[name] = names[name] if keep_name else keys[name]
+                        if not keep_name:
+                            demoted.append(name)
                 if strip_width(tuple(candidate.values())) <= width:
                     labels = candidate
                     named.update(dict.fromkeys(demoted, False))
