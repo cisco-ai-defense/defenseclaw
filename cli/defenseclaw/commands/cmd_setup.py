@@ -13903,6 +13903,38 @@ def _lock_contract_failure_detail(connector: str, entry: Any, invariant: str) ->
         f"defenseclaw guardrail disable --connector {connector}"
     )
 
+def _gateway_refused_peers(
+    state: Any,
+    state_marker: int,
+    lock_marker: int,
+    *,
+    expected: set[str],
+    must_converge: set[str],
+    previous_state_marker: int | None,
+    previous_lock_marker: int | None,
+) -> set[str]:
+    """Peers a restarted gateway left out of its fresh active roster.
+
+    The gateway publishes the roster once per generation, after every
+    connector setup ran, so a peer missing from a fresh roster was refused
+    (Cursor whose version probe failed: "agent version not probed"). Waiting
+    can not bring it back, so the connector being set up must not fail and
+    roll back for it (GAP-1710). The connectors in ``must_converge`` are
+    never returned.
+    """
+    if not must_converge:
+        return set()
+    if previous_state_marker is not None and state_marker == previous_state_marker:
+        return set()
+    if previous_lock_marker is not None and lock_marker == previous_lock_marker:
+        return set()
+    runtime_sets = _connector_runtime_state_sets(state)
+    if runtime_sets is None:
+        return set()
+    active, _ = runtime_sets
+    return expected - active - must_converge
+
+
 def _connector_runtime_snapshot_failure(
     state: Any,
     state_marker: int,
@@ -14335,6 +14367,42 @@ def _wait_for_connector_runtime(
                 previous_lock_marker=previous_lock_marker,
                 tolerated=tolerated,
             )
+            refused = (
+                set()
+                if snapshot_ready
+                else _gateway_refused_peers(
+                    state,
+                    state_marker,
+                    lock_marker,
+                    expected=expected,
+                    must_converge=must_converge,
+                    previous_state_marker=previous_state_marker,
+                    previous_lock_marker=previous_lock_marker,
+                )
+            )
+            if refused:
+                for name in sorted(refused):
+                    ux.warn(
+                        f"skipping {name}: the restarted gateway did not activate it "
+                        "(gateway.log names the reason), so it is not guarded now"
+                    )
+                rerun = ", ".join(
+                    f"defenseclaw setup {'claude-code' if name == 'claudecode' else name}" for name in sorted(refused)
+                )
+                ux.subhead(f"Continuing with the rest of the roster. To guard it again, run: {rerun}")
+                expected = expected - refused
+                tolerated = frozenset(tolerated | refused)
+                ordered = tuple(name for name in ordered if name not in refused)
+                snapshot_ready = _connector_runtime_snapshot_ready(
+                    state,
+                    state_marker,
+                    lock,
+                    lock_marker,
+                    expected=expected,
+                    previous_state_marker=previous_state_marker,
+                    previous_lock_marker=previous_lock_marker,
+                    tolerated=tolerated,
+                )
             if not snapshot_ready:
                 last_failure = _connector_runtime_snapshot_failure(
                     state,
