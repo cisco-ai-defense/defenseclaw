@@ -8,3 +8,7 @@ package managed
 // ValidateServiceCanReadTree is a Windows preflight check: there Setup runs
 // as LocalSystem while the gateway runs as an NT SERVICE virtual account.
 func ValidateServiceCanReadTree(_, _, _ string) error { return nil }
+
+// IsServiceAccountUnresolved is false off Windows: there is no account to
+// resolve.
+func IsServiceAccountUnresolved(error) bool { return false }

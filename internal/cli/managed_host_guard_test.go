@@ -405,5 +405,18 @@ func TestManagedHostHelpDescribesTheManagedGateway(t *testing.T) {
 		if command.Hidden != managedHostPerUserDaemonCommands[command.Name()] {
 			t.Fatalf("command %s hidden=%t", command.Name(), command.Hidden)
 		}
+		if command.Name() == "status" && command.Short != managedHostStatusShort {
+			t.Fatalf("managed status row = %q", command.Short)
+		}
+	}
+	// GAP-1359: the record path is on a line of its own, and the prose
+	// wraps at the usual width.
+	if !strings.Contains(root.Long, "\n  HKLM\\SOFTWARE\\Cisco\\DefenseClaw\\Enterprise\n") {
+		t.Fatalf("record path is not on its own line:\n%s", root.Long)
+	}
+	for _, line := range strings.Split(root.Long, "\n") {
+		if !strings.HasPrefix(line, "  ") && len(line) > 80 {
+			t.Fatalf("description line is %d columns: %q", len(line), line)
+		}
 	}
 }

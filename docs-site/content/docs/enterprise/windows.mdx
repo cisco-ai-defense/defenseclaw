@@ -161,7 +161,9 @@ Without `guardrail.rule_pack_dir` or `policy_dir`, as here, the gateway uses
 the rule packs built into it. A rule-pack directory you name must exist, be
 writable only by administrators, and be readable by the gateway service
 account `NT SERVICE\DefenseClawGateway` (for example, leave the inherited
-`Users` read and execute entry in place). Every parent folder of it needs
+`Users` read and execute entry in place, and add no Deny entry for that
+account). Setup checks this before it changes anything and names the
+folder and an `icacls` command that fixes it. Every parent folder of it needs
 Read & execute for that account too, because the gateway reads each
 parent's permissions and lists it. So do not put the rule pack inside the
 locked staging folder below; give it its own folder:
