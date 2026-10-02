@@ -630,33 +630,10 @@ jobs:
       - run: make dev-pycli
       - run: make connector-matrix-test
 
-  enterprise-hook-hardening:
-    # The Secure Client profile flow: a synthetic target home and a TCP fake
-    # gateway. Linux has only the standalone profile (real account homes and
-    # the peer-authorized hook socket), which the Unix Standalone Lifecycle
-    # job and the deb and rpm install lanes cover.
-    name: Enterprise Hook Hardening (${{ matrix.os }}, ${{ matrix.connector }})
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest]
-        connector: [codex, claudecode, amp]
-    steps:
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
-        with:
-          persist-credentials: false
-      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
-        with:
-          go-version-file: go.mod
-      - name: Build enterprise gateway CLI
-        shell: bash
-        run: go build -o "$RUNNER_TEMP/defenseclaw-gateway" ./cmd/defenseclaw
-      - name: Test root boundary and connector repair
-        shell: bash
-        run: ./scripts/test-enterprise-hook-hardening.sh "$RUNNER_TEMP/defenseclaw-gateway" "${{ matrix.connector }}"
-
+  # The Secure Client profile hook hardening flow (a synthetic target home and
+  # a TCP fake gateway) runs only on macOS. Linux has only the standalone
+  # profile (real account homes and the peer-authorized hook socket), which the
+  # Unix Standalone Lifecycle job and the deb and rpm install lanes cover.
   # macOS runners bill at ~10x Linux, so the macOS hook hardening cells and the
   # enterprise packaging smoke share one runner and one gateway build instead
   # of four separate jobs.
