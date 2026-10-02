@@ -21,7 +21,6 @@ from unittest import mock
 
 import yaml
 from click.testing import CliRunner
-
 from defenseclaw.bootstrap import FirstRunOptions, StepResult, targeted_readiness
 from defenseclaw.commands import cmd_doctor, cmd_setup
 from defenseclaw.commands.cmd_doctor import _DoctorResult
