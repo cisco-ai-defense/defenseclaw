@@ -235,6 +235,17 @@ exact pre-DefenseClaw config or removes only DefenseClaw-owned entries, then
 removes only managed adapter files; it does not rely on an undocumented cached
 hook process.
 
+<Callout type="warn" title="Managed Windows: first start in a new folder">
+On Windows hosts with enterprise-managed Cursor hooks, Cursor Agent CLI
+(seen with 2026.10.01-e373342 and 2026.10.01-14929f9) can stay on
+"Trusting workspace..." after you answer `[a] Trust this workspace` the first
+time you start it in a folder. Its prompt box renders but ignores typing and
+Ctrl+C. The DefenseClaw hooks have already answered by then: the agent's trust
+dialog does not hand the terminal back. The folder is trusted at that point, so
+close the tab and start `cursor-agent` again. To avoid the dialog, start it in
+a new folder with `cursor-agent --trust`.
+</Callout>
+
 ## In an OpenShell sandbox
 
 <Callout type="warn" title="Cursor Agent cannot run in a sandbox yet">
