@@ -223,6 +223,32 @@ class TestAlertsCommand(unittest.TestCase):
         self.assertIn("defenseclaw setup galileo status", result.output)
         self.assertIn("defenseclaw alerts dismiss --id a1", result.output)
 
+    def test_alerts_show_delivery_and_circuit_alerts_explain_the_cause(self):
+        from unittest.mock import patch
+
+        from defenseclaw.commands.cmd_alerts import alerts
+
+        events = [
+            Event(id="a2", action="circuit_breaker_open", severity="HIGH",
+                  details="galileo degraded: otlp export paused after 1 failure "
+                          "(authentication: check the API key or token)"),
+            Event(id="a3", action="telemetry-destination", severity="HIGH",
+                  details="galileo/traces failed: http_authentication"),
+        ]
+        with patch.object(self.app.store, "list_alerts", return_value=events):
+            circuit = self.runner.invoke(alerts, ["--no-tui", "--show", "1"], obj=self.app,
+                                         catch_exceptions=False)
+            delivery = self.runner.invoke(alerts, ["--no-tui", "--show", "2"], obj=self.app,
+                                          catch_exceptions=False)
+        self.assertEqual(circuit.exit_code, 0, circuit.output)
+        self.assertIn("galileo degraded: otlp export paused after 1 failure (authentication", circuit.output)
+        self.assertNotIn("degraded:\n", circuit.output)
+        self.assertIn("defenseclaw setup galileo status", circuit.output)
+        self.assertIn("defenseclaw alerts dismiss --id a2", circuit.output)
+        self.assertEqual(delivery.exit_code, 0, delivery.output)
+        self.assertIn("rejected the credentials (HTTP 401/403)", delivery.output)
+        self.assertIn("defenseclaw alerts dismiss --id a3", delivery.output)
+
     def test_alerts_show_out_of_range(self):
         from defenseclaw.commands.cmd_alerts import alerts
 
