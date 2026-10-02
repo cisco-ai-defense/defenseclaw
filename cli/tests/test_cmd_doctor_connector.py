@@ -3440,7 +3440,11 @@ class TestDetectionStrategyRow(unittest.TestCase):
         # judge enabled but this hook connector is NOT in hook_connectors →
         # surfaces root #4: the judge won't actually fire for it.
         row = self._detection_row(self._cfg(judge_enabled=True, hook_connectors=["hermes"]), "codex")
-        self.assertIn("NOT gated", row["detail"])
+        self.assertIn("not turned on for this connector's hook lane", row["detail"])
+        # GAP-1731: the next step is the CLI command, not a config key.
+        self.assertIn("opt in: defenseclaw guardrail judge add codex", row["detail"])
+        self.assertNotIn("hook_connectors", row["detail"])
+        self.assertIn("Cisco AI Defense", row["detail"])
 
     def test_hook_connector_gated_explicit(self):
         row = self._detection_row(self._cfg(judge_enabled=True, hook_connectors=["codex"]), "codex")

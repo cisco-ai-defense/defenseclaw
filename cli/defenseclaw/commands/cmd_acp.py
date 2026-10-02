@@ -807,8 +807,12 @@ def status_cmd(app: AppContext, runtime_data_dir: Path | None, json_output: bool
 def _print_acp_status(payload: dict) -> None:
     """Readable ACP posture for 'acp status' (GAP-1501); --json keeps the document."""
     state = "on" if payload["enabled"] else "off"
-    click.echo(f"ACP guard: {state} (mode {payload['mode']}, default profile {payload['default_profile']})")
     bindings = payload["bindings"]
+    # Mode and profile are per binding (rows below). The top-level acp.mode /
+    # default_profile only seed the first setup, so showing them here
+    # described a past setup call rather than the guard (GAP-1732).
+    count = len(bindings)
+    click.echo(f"ACP guard: {state} ({count} binding{'' if count == 1 else 's'})")
     if not bindings:
         click.echo("  No guarded editor/agent pairs yet.")
         ux.subhead("Add one with: defenseclaw acp setup --client <editor> --agent <agent>", indent="  ")

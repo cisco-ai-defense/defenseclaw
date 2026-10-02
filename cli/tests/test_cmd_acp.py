@@ -221,6 +221,43 @@ def test_verify_detects_agent_digest_drift(tmp_path, monkeypatch):
         cleanup_app(app, db_path, data_dir)
 
 
+def test_doctor_reports_acp_bindings_and_fails_on_drift(tmp_path, monkeypatch):
+    """GAP-1534: doctor lists each binding and FAILs with the fix on drift."""
+    from defenseclaw.commands.cmd_doctor import _check_acp_bindings, _DoctorResult
+
+    _isolate_client_config(monkeypatch, tmp_path)
+    app, data_dir, db_path = _app(tmp_path)
+    guard = _binary(tmp_path / "guard")
+    agent_path = tmp_path / "kiro-cli"
+    agent = _binary(agent_path)
+    try:
+        empty = _DoctorResult()
+        _check_acp_bindings(app.cfg, empty)
+        assert empty.checks == []  # ACP is optional: no binding, no row
+
+        result = CliRunner().invoke(
+            acp_cmd,
+            ["setup", "--client", "zed", "--agent", "kiro", "--guard-binary", guard, "--agent-binary", agent],
+            obj=app,
+        )
+        assert result.exit_code == 0, result.output
+        healthy = _DoctorResult()
+        _check_acp_bindings(app.cfg, healthy)
+        [row] = healthy.checks
+        assert row["label"] == "ACP binding [zed/kiro]"
+        assert row["status"] == "pass" and "healthy; profile default (observe)" in row["detail"]
+
+        agent_path.write_bytes(b"drifted-binary")
+        drifted = _DoctorResult()
+        _check_acp_bindings(app.cfg, drifted)
+        [row] = drifted.checks
+        assert row["status"] == "fail"
+        assert "agent executable digest has drifted" in row["detail"]
+        assert row["remediation"] == "defenseclaw acp setup --client zed --agent kiro"
+    finally:
+        cleanup_app(app, db_path, data_dir)
+
+
 def test_verify_detects_client_configuration_drift(tmp_path, monkeypatch):
     _isolate_client_config(monkeypatch, tmp_path)
     app, data_dir, db_path = _app(tmp_path)
@@ -707,7 +744,10 @@ def test_verify_reports_profile_drift_after_a_hand_edit(tmp_path, monkeypatch):
         # GAP-1501: without --json the posture is a readable summary.
         human = CliRunner().invoke(acp_cmd, ["status"], obj=app)
         assert human.exit_code == 0, human.output
-        assert human.output.startswith("ACP guard: ")
+        # GAP-1732: the header holds only guard-wide facts; mode and
+        # profile live on each binding row.
+        assert human.output.startswith("ACP guard: on (1 binding)\n")
+        assert "default profile" not in human.output
         assert "zed/kiro" in human.output and "NEEDS ATTENTION" in human.output
         assert "acp status --json" in human.output
     finally:
