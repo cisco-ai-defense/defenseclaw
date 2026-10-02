@@ -4598,7 +4598,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 ("Enter / Esc", "Open / close detail"),
                 ("s / S", "Sync the selected source / sync all"),
                 ("a / x", "Approve / reject the selected entry"),
-                ("R", "Require registry approval for the entry's type"),
+                ("e", "Require (or stop requiring) registry approval for the entry's type"),
                 ("d", "Remove the selected source"),
                 ("r", "Refresh"),
             ],

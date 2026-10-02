@@ -45,6 +45,10 @@ class RegistryCommandIntent:
     hint: str = ""
     binary: str = "defenseclaw"
     category: str = "registries"
+    # Every registry command writes state (sync promotes rules into
+    # asset_policy, approve/reject/require change policy), so the preview
+    # must never call it read-only (GAP-1152).
+    risk: str = "mutation"
 
     @property
     def argv(self) -> tuple[str, ...]:
@@ -286,9 +290,11 @@ class RegistriesPanelModel:
             if row is None:
                 return RegistryPanelAction(True, hint="(no entry selected)")
             return RegistryPanelAction(True, reject_entry_intent(row))
-        if key == "R":
+        if key == "e":
             # E4h: toggle asset_policy.<type>.registry_required for the
             # selected entry's asset type (parity with `registry require`).
+            # Not on ``R``: that is the Registries tab key, and pressing it
+            # again must never start a policy change (GAP-1152).
             row = self.selected_entry()
             if row is None:
                 return RegistryPanelAction(True, hint="(no entry selected)")
@@ -475,11 +481,14 @@ def require_entry_intent(row: RegistryEntryRow, *, currently_required: bool) -> 
     asset type before building this intent.
     """
     flag = "--disabled" if currently_required else "--enabled"
-    state = "optional" if currently_required else "required"
+    if currently_required:
+        hint = f"Making registry approval optional for {row.type} assets"
+    else:
+        hint = f"Requiring registry approval: any {row.type} not approved in a registry will be refused"
     return RegistryCommandIntent(
         label=f"registry require --type {row.type} {flag}",
         args=("registry", "require", "--type", row.type, flag, "--json"),
-        hint=f"Marking {row.type} registry {state}",
+        hint=hint,
     )
 
 

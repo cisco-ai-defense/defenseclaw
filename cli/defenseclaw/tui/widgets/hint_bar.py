@@ -267,7 +267,7 @@ class HintEngine:
             return hint
         return (
             "KEYS  1/2/3 sources/entries/approved | j/k move | Enter detail | s sync | S sync all | "
-            "a approve | x reject | d remove source."
+            "a approve | x reject | e require approval | d remove source."
         )
 
     def _runtime_hint(self, state: HintState) -> str:
