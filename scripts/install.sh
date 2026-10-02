@@ -63,6 +63,9 @@ if [[ -n "${SELF_TMP}" && -n "$(find "${SELF_TMP}" -mindepth 1 -maxdepth 1 \
 fi
 [[ -z "${SELF_TMP}" ]] || trap 'rm -rf "${SELF_TMP}"' EXIT
 readonly OPENCLAW_VERSION="2026.3.24"
+# The PATH the user's shell has. Installing uv adds BIN_DIR to this process's
+# PATH, so the PATH hint at the end checks this copy instead.
+readonly CALLER_PATH="${PATH}"
 readonly MACOS_SYSCTL_BIN="/usr/sbin/sysctl"
 # Real files in BIN_DIR. Connector hooks record these paths, so they never move.
 readonly MANAGED_BINARIES="defenseclaw-gateway defenseclaw-acp"
@@ -1285,7 +1288,7 @@ ensure_openclaw() {
 }
 
 ensure_path_hint() {
-    case ":${PATH}:" in *":${BIN_DIR}:"*) return ;; esac
+    case ":${CALLER_PATH}:" in *":${BIN_DIR}:"*) return ;; esac
     local rc="${HOME}/.profile"
     case "${SHELL:-}" in */zsh) rc="${HOME}/.zshrc" ;; */bash) rc="${HOME}/.bashrc" ;; esac
     printf "\n  Add DefenseClaw to your PATH (then open a new shell):\n"

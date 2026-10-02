@@ -6300,6 +6300,7 @@ def setup_guardrail(
                 app,
                 gc,
                 agent_name=agent_name,
+                default_mode=guard_mode,
                 _pre_mutation_selection=preselect_guardrail_targets,
                 _pending_secrets=pending_guardrail_secrets,
             )
@@ -12182,9 +12183,12 @@ def _interactive_guardrail_setup(
     gc,
     *,
     agent_name: str | None = None,
+    default_mode: str | None = None,
     _pre_mutation_selection=None,
     _pending_secrets: list[_PendingGuardrailSecret] | None = None,
 ) -> bool:
+    # ``default_mode`` is ``setup guardrail --mode``: it preselects the mode
+    # prompt instead of being dropped by the interactive path.
     # Snapshot the entry-point ``gc.enabled`` BEFORE any prompt mutates
     # it. The wizard flips ``gc.enabled = True`` after the operator
     # confirms enabling, which means by the time we reach the fail-mode
@@ -12314,7 +12318,7 @@ def _interactive_guardrail_setup(
         connector_modes = _prompt_batch_connector_modes(
             mode_targets,
             gc,
-            default_mode=None,
+            default_mode=default_mode,
         )
         mode_changed = _write_per_connector_modes(gc, connector_modes)
     else:
@@ -12328,7 +12332,7 @@ def _interactive_guardrail_setup(
         )
         click.echo("    " + ux.bold("[2] action ") + " — scan and block/confirm when policy requires")
         current_mode = gc.mode or "observe"
-        mode_default = "1" if current_mode == "observe" else "2"
+        mode_default = "1" if (default_mode or current_mode) == "observe" else "2"
         mode_choice = click.prompt(
             "  Select mode",
             type=click.Choice(["1", "2"]),

@@ -337,6 +337,27 @@ def test_a_carriage_return_answer_takes_the_default(tmp_path: Path) -> None:
     assert proc.stdout.strip() == "yes", proc.stdout + proc.stderr
 
 
+def test_path_hint_uses_the_callers_path_not_the_uv_bootstrap_path(tmp_path: Path) -> None:
+    # SWEEP-18: installing uv puts BIN_DIR on this process's PATH, which hid
+    # the hint on a fresh macOS zsh account whose shell PATH lacks it.
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    start = text.index("ensure_path_hint() {")
+    func = text[start : text.index("\n}\n", start) + 3]
+    bin_dir = tmp_path / "home" / ".local" / "bin"
+    script = tmp_path / "hint.sh"
+    script.write_text(
+        "set -euo pipefail\nCYAN=; NC=\n"
+        f"BIN_DIR={bin_dir}\nCALLER_PATH=/usr/bin:/bin\n"
+        'export PATH="${BIN_DIR}:${PATH}"\n' + func + "ensure_path_hint\n",
+        encoding="utf-8",
+    )
+    env = {**os.environ, "SHELL": "/bin/zsh", "HOME": str(tmp_path / "home")}
+    proc = subprocess.run(["bash", str(script)], capture_output=True, text=True, check=False, env=env)
+    assert proc.returncode == 0, proc.stderr
+    assert "Add DefenseClaw to your PATH" in proc.stdout
+    assert ".zshrc" in proc.stdout
+
+
 def test_a_gateway_that_refuses_to_start_says_why(tmp_path: Path) -> None:
     # MAC-U2-01: after a rollback, the restored 0.8.x gateway refused to start
     # on hook contract drift, and the installer only relayed a readiness timeout.
