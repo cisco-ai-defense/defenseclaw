@@ -140,6 +140,14 @@ func StrictHookContractResolution() bool {
 	return strictHookContractResolution.Load()
 }
 
+// gitBuildVersionRE matches source-build version strings such as Hermes
+// "Hermes Agent vgit.5bba024 (2026.9.24)".
+var gitBuildVersionRE = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])v?git[.+-]?[0-9a-f]{7,40}(?:[^a-z0-9]|$)`)
+
+// gitBuildCompareVersion stands in for a git build when it is compared
+// with release-style (non-date) tested bounds.
+const gitBuildCompareVersion = "999.999.999"
+
 var versionNumberRE = regexp.MustCompile(`(?i)(?:^|[^0-9])v?([0-9]+)(?:\.([0-9]+))?(?:\.([0-9]+))?`)
 
 var proxyConnectorsWithoutHookGate = map[string]bool{
@@ -1183,6 +1191,22 @@ func resolveHookContractAgainst(name, rawVersion string, contracts []HookContrac
 			Status:            HookCompatibilityUnversioned,
 			Reason:            "agent version not probed; using connector default hook contract",
 			Contract:          defaultHookContract(contracts),
+		}
+	}
+	if gitBuildVersionRE.MatchString(raw) {
+		// A source build (Hermes "vgit.5bba024 (2026.9.24)") has no release
+		// version: its digits are a commit hash or a date. Treat it as newer
+		// than every tested range instead of reading a version out of the hash.
+		if contract, newest, ok := newestContractBelow(contracts, gitBuildCompareVersion); ok {
+			return HookContractResolution{
+				Connector:           name,
+				RawVersion:          raw,
+				Status:              HookCompatibilityKnown,
+				Reason:              fmt.Sprintf("%s: git build with no release version, treated as newer than the tested versions (%s); no known problems; using hook contract %s", UntestedNewerVersionReasonPrefix, newest, contract.ContractID),
+				Contract:            contract,
+				UntestedVersion:     true,
+				NewestTestedVersion: newest,
+			}
 		}
 	}
 	if normalized == "" {
