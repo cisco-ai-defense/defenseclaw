@@ -650,7 +650,7 @@ sudo DEFENSECLAW_CONFIG=/opt/cisco/defenseclaw/etc/config.yaml /opt/cisco/defens
 
 | Command | Use it for |
 | --- | --- |
-| `defenseclaw-gateway enterprise secret set --name N` | Store a credential. Pass exactly one of `--from-stdin` or `--from-file F`. The value is never printed |
+| `defenseclaw-gateway enterprise secret set --name N` | Store a credential. Pass exactly one of `--from-stdin` or `--from-file F`. The value is never printed. On Linux and macOS, `--lock-wait D` (set and remove) waits up to D (at most 15m) for another lifecycle run instead of exiting 75 |
 | `defenseclaw-gateway enterprise secret status` | List stored credentials with a digest prefix and modification time, never the value |
 | `defenseclaw-gateway enterprise secret remove --name N` | Remove a credential |
 

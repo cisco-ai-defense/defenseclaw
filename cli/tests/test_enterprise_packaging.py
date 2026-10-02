@@ -939,3 +939,57 @@ def test_linux_preremove_keeps_its_result_only_when_the_uninstall_failed(tmp_pat
         assert (host.state / "last-package-result.json").is_file()
     else:
         assert not host.state.exists()
+
+
+# GAP-1254, GAP-1258: the wrapper applied the config before it stored
+# --secret-name, so a config that references the credential never applied,
+# and the store then failed busy against the apply its own config change
+# started. It now stores the credential first and both steps wait.
+@pytest.mark.parametrize("os_dir", ["linux", "macos"])
+@pytest.mark.parametrize("secret_rc", [0, 75])
+def test_unix_wrapper_stores_the_credential_before_it_applies_the_config(tmp_path: Path, os_dir: str, secret_rc: int) -> None:
+    wrapper = (MDM / os_dir / "defenseclaw-enterprise.sh").read_text(encoding="utf-8")
+    functions = "\n".join(_shell_function(wrapper, name) for name in ("dc_run_lifecycle", "dc_main"))
+    log = tmp_path / "calls.log"
+    gateway = tmp_path / "defenseclaw-gateway"
+    gateway.write_text(f"""#!/bin/sh
+echo "$*" >>'{log}'
+case "$2" in secret) cat >/dev/null; echo secret-busy >&2; exit {secret_rc} ;; esac
+echo '{{"ok":true}}'
+""", encoding="utf-8")
+    gateway.chmod(0o755)
+    (tmp_path / "config.yaml").write_text("x: 1\n", encoding="utf-8")
+    (tmp_path / "key").write_text("value\n", encoding="utf-8")
+    group = "macos" if os_dir == "macos" else "linux"
+    script = f"""
+DC_SCRIPT_OS={"darwin" if os_dir == "macos" else "linux"}
+DC_EXIT_FAILURE=1 DC_EXIT_INVALID=2 DC_MAX_CONFIG_BYTES=4096 DC_MAX_SECRET_BYTES=4096
+dc_parse_args() {{ DC_ACTION=ensure DC_CONFIG_STDIN=0 DC_CONFIG_FILE='{tmp_path}/config.yaml' DC_SECRET_NAME=k DC_SECRET_STDIN=0 DC_SECRET_FILE='{tmp_path}/key' DC_SOURCE='' DC_SOURCE_URL='' DC_PRODUCT_VERSION=''; }}
+dc_platform() {{ echo "$DC_SCRIPT_OS"; }}
+dc_layout() {{ DC_GATEWAY='{gateway}' DC_OS_GROUP={group}; }}
+dc_validate_args() {{ :; }}
+id() {{ echo 0; }}
+mktemp() {{ command mktemp -d '{tmp_path}/stage.XXXXXX'; }}
+dc_cleanup() {{ :; }}
+dc_stat_uid() {{ echo 0; }}
+dc_log() {{ :; }}
+dc_trusted_path() {{ :; }}
+dc_stage_file() {{ cp "$1" "$2"; }}
+dc_annotate_package_step() {{ :; }}
+dc_emit_result() {{ cat "$DC_RESULT"; }}
+dc_fail_result() {{ echo "FAIL $2: $3"; exit "$1"; }}
+{functions}
+dc_main
+"""
+    result = subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=60)
+    calls = log.read_text(encoding="utf-8").splitlines()
+    assert result.returncode == secret_rc, result.stdout + result.stderr
+    assert calls[0] == "enterprise secret set --name k --from-stdin --lock-wait 10m --json"
+    if secret_rc:
+        assert calls == calls[:1], calls
+        assert "FAIL mdm_secret_failed" in result.stdout and "config was not applied" in result.stdout
+        return
+    assert len(calls) == 2 and re.fullmatch(
+        rf"enterprise {group} ensure --reason mdm --lock-wait 10m --config=.*/stage\.\w+/config\.yaml --json", calls[1]
+    ), calls
+

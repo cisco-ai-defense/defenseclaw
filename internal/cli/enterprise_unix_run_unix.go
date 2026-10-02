@@ -216,6 +216,12 @@ func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 	if action != "status" && env.Geteuid() != 0 {
 		return withExitCode(errors.New("run this command as root"), enterprisestatus.UnixExitFailure)
 	}
+	if opts.lockWait < 0 || opts.lockWait > enterpriseunix.MaxLockWait {
+		return withExitCode(fmt.Errorf("--lock-wait must be between 0 and %s", enterpriseunix.MaxLockWait), enterprisestatus.UnixExitInvalidArgs)
+	}
+	if opts.lockWait > 0 {
+		env.LockTimeout = opts.lockWait
+	}
 	switch action {
 	case "status":
 		states, err := env.SecretStatus()

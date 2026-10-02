@@ -956,7 +956,7 @@ used; `setsid -w` drops the controlling terminal. The documented form is
 | Another apt or dnf holds the package lock | `mdm_package_manager_busy`, exit `75` |
 | `--action verify --source <file>` | Refused (status and verify take no source), exit `2` |
 | `ensure` with no source on a clean host | `mdm_not_installed`, exit `1` |
-| `--secret-file` writable by others | `mdm_untrusted_input`. A valid file whose `secret set` fails after apply: `mdm_secret_failed` with the `secret set` exit code |
+| `--secret-file` writable by others | `mdm_untrusted_input`. A valid file whose `secret set` fails (Linux and macOS store it before the config apply): `mdm_secret_failed` with the `secret set` exit code, config not applied |
 
 Wrapper options: `--action ensure|status|verify`, `--source FILE` or
 `--source-url https://...`, `--sha256 HEX`, `--trust-mode hash_pinned|signed`,

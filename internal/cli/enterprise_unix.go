@@ -46,6 +46,9 @@ type enterpriseSecretOptions struct {
 	fromStdin bool
 	fromFile  string
 	json      bool
+	// lockWait is how long set and remove wait for another lifecycle run
+	// (Linux and macOS).
+	lockWait time.Duration
 }
 
 var (
@@ -190,6 +193,9 @@ func newEnterpriseSecretCommand(action, summary string) *cobra.Command {
 	if action == "set" {
 		cmd.Flags().BoolVar(&opts.fromStdin, "from-stdin", false, "read the value from standard input")
 		cmd.Flags().StringVar(&opts.fromFile, "from-file", "", "read the value from this file")
+	}
+	if action != "status" && runtime.GOOS != "windows" {
+		cmd.Flags().DurationVar(&opts.lockWait, "lock-wait", 0, lockWaitUsage)
 	}
 	cmd.Flags().BoolVar(&opts.json, "json", false, "print JSON")
 	return cmd
