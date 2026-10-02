@@ -1,8 +1,6 @@
 // Copyright 2026 Cisco Systems, Inc. and its affiliates
 // SPDX-License-Identifier: Apache-2.0
 
-//go:build linux || darwin
-
 package cli
 
 import (
@@ -13,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/daemon"
 )
 
 // A listener this home did not start (a gateway leaked by another home or
@@ -67,5 +66,38 @@ func TestFreeGatewayAPIPortSkipsSandboxPorts(t *testing.T) {
 	}
 	if got <= from+2 || (got-from)%gatewayAPIPortStep != 0 || got == from+gatewayAPIPortStep {
 		t.Fatalf("freeGatewayAPIPort(%d) = %d, want a later multiple of %d clear of busy sandbox ports", from, got, gatewayAPIPortStep)
+	}
+}
+
+// GAP-1344: Windows names a holder by PID only (no uid). Another account's
+// gateway on this account's port is not this account's gateway, so status
+// must not show its status as ours; a managed install keeps its own checks.
+func TestForeignGatewayListenerHolderWithoutUID(t *testing.T) {
+	oldHolder, oldAnswers, oldState := gatewayPortHolder, gatewayPortAnswers, gatewayManagedState
+	t.Cleanup(func() { gatewayPortHolder, gatewayPortAnswers, gatewayManagedState = oldHolder, oldAnswers, oldState })
+	gatewayPortHolder = func(string, int) (daemon.PortHolder, error) { return daemon.PortHolder{PID: 13496, UID: -1}, nil }
+	gatewayPortAnswers = func(string) bool { return true }
+	c := config.DefaultConfig()
+	c.Gateway.APIBind = "127.0.0.1"
+	c.Gateway.APIPort = 18970
+
+	for _, own := range []struct {
+		running bool
+		pid     int
+	}{{true, 4242}, {false, 0}} {
+		gatewayManagedState = func() (bool, int) { return own.running, own.pid }
+		if problem := foreignGatewayListener(c); !strings.Contains(problem, "held by PID 13496") ||
+			!strings.Contains(problem, "not by this account's gateway") {
+			t.Fatalf("own gateway running=%v: foreign listener = %q", own.running, problem)
+		}
+	}
+	gatewayManagedState = func() (bool, int) { return true, 13496 }
+	if problem := foreignGatewayListener(c); problem != "" {
+		t.Fatalf("this account's own gateway reported as foreign: %q", problem)
+	}
+	gatewayManagedState = func() (bool, int) { return false, 0 }
+	c.DeploymentMode = "managed_enterprise"
+	if problem := foreignGatewayListener(c); problem != "" {
+		t.Fatalf("managed install reported a foreign listener: %q", problem)
 	}
 }

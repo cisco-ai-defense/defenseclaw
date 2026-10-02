@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"runtime"
 	"strconv"
 	"time"
 
@@ -30,12 +29,14 @@ var (
 // run, another account's process, or any other program. It returns "" when
 // the port is free or held by the managed gateway.
 //
-// It never sends the gateway token to the listener. Windows start/restart
-// prove listener ownership separately and managed deployments run the
-// gateway as a service, so both keep their own checks.
+// It never sends the gateway token to the listener. Managed deployments run
+// the gateway as a service, so they keep their own checks. On Windows the
+// holder is named by PID and program (GAP-1344): status showed another
+// account's gateway on this account's port as this account's, rc 0.
 func foreignGatewayListener(cfg *config.Config) string {
-	if cfg == nil || runtime.GOOS == "windows" || cfg.StandaloneEnterprise() ||
-		managed.IsManagedEnterprise(os.Getenv(managed.DeploymentModeEnv)) {
+	if cfg == nil || cfg.StandaloneEnterprise() ||
+		managed.IsManagedEnterprise(os.Getenv(managed.DeploymentModeEnv)) ||
+		managed.IsManagedEnterprise(cfg.DeploymentMode) {
 		return ""
 	}
 	port := cfg.Gateway.APIPort
@@ -53,6 +54,9 @@ func foreignGatewayListener(cfg *config.Config) string {
 	running, managedPID := gatewayManagedState()
 	ownUID := os.Getuid()
 	who := holder.String(ownUID)
+	if label := listenerProcessLabel(holder.PID); label != "" {
+		who += " (" + label + ")"
+	}
 	switch {
 	case holderErr == nil && holder.UID >= 0 && holder.UID != ownUID:
 		return fmt.Sprintf("%s is held by %s, not by this account's gateway", addr, who)
