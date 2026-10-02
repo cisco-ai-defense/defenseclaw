@@ -116,6 +116,9 @@ type windowsManagedHooksTeardownReport struct {
 // tests.
 var windowsManagedHooksStandaloneUserRegistrationRemover = removeWindowsManagedHooksStandalonePerUserRegistrations
 
+// windowsManagedHooksStandaloneInventoryACERevoker is replaceable in tests.
+var windowsManagedHooksStandaloneInventoryACERevoker = enterprisehooks.RevokeGatewayInventoryReadForManifest
+
 // completeWindowsManagedHooksTeardownUserCleanup runs after a successful
 // standalone finalize: the uninstall has committed, so DefenseClaw's own
 // registrations are removed from users' agent configurations and the
@@ -129,10 +132,18 @@ func completeWindowsManagedHooksTeardownUserCleanup(
 	if !enterprisehooks.WindowsStandaloneProcess() {
 		return
 	}
+	// The gateway's AI-discovery read ACEs go first: on folders that are
+	// also on a managed hook path (~\.config, ~\.gemini) the removal trust
+	// check refuses a DACL that still carries them (GAP-1765).
+	revokeErr := windowsManagedHooksStandaloneInventoryACERevoker(manifest)
 	cleanup := windowsManagedHooksStandaloneUserRegistrationRemover(context.Background(), runtimeDir, manifest)
 	report.UserRegistrationsRemoved = len(cleanup.Removed)
 	report.UserRegistrationsPending = cleanup.Pending
 	report.UserRegistrationsFailed = cleanup.Failed
+	if revokeErr != nil {
+		report.UserRegistrationsFailed = append(report.UserRegistrationsFailed,
+			"gateway/AI discovery read access on users' agent folders: "+boundedEnterpriseHookUserCleanupText(revokeErr.Error()))
+	}
 	purge := os.Getenv(windowsManagedHooksPurgeUserStateEnv) == "1"
 	report.UserStateRemaining, report.UserStatePurged = windowsManagedHooksStandaloneUserState(manifest, purge, windowsManagedHooksAccountsKeepingRegistrations(cleanup))
 	if purge {

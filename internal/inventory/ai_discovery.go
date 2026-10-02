@@ -1228,6 +1228,14 @@ func (s *ContinuousDiscoveryService) fanoutReport(ctx context.Context, report AI
 	}
 }
 
+// managedInventoryEmitActive reports the live managed mode that gates the
+// process-only tick in fanoutReport.
+func (s *ContinuousDiscoveryService) managedInventoryEmitActive() bool {
+	s.managedInventoryEmitMu.RLock()
+	defer s.managedInventoryEmitMu.RUnlock()
+	return s.managedInventoryEmit != nil
+}
+
 // SetManagedInventoryEmitHook installs the sidecar callback that publishes the
 // connector and MCP endpoint snapshot after each managed discovery scan. A nil
 // callback clears it. The callback does not emit discovery signals; those flow
@@ -1454,7 +1462,7 @@ func (s *ContinuousDiscoveryService) classifyAndPersist(scanID, source string, s
 			t := now
 			sig.LastActiveAt = &t
 		}
-		if old, ok := prevMap[sig.Fingerprint]; ok {
+		if old, ok := prevMap[sig.Fingerprint]; ok && (old.UserID != "" || sig.UserID == "") {
 			if full && sig.Detector == "model_file" && sig.WorkspaceHash != "" &&
 				stats.ModelFileDeferred[sig.WorkspaceHash] {
 				// A cursor page can contain only part of a sharded model. Preserve
@@ -1487,6 +1495,13 @@ func (s *ContinuousDiscoveryService) classifyAndPersist(scanID, source string, s
 				sig.State = AIStateSeen
 			}
 		} else {
+			// Also new when a signal stored without an account (a build
+			// from before per-user attribution) now has one: the one
+			// discovered record with its user is what an administrator
+			// filters by (GAP-1739).
+			if old, ok := prevMap[sig.Fingerprint]; ok {
+				sig.FirstSeen = old.FirstSeen
+			}
 			sig.State = AIStateNew
 		}
 		// Include every active signal in the report (not just deltas)
@@ -1578,9 +1593,16 @@ func (s *ContinuousDiscoveryService) classifyAndPersist(scanID, source string, s
 		}
 	}
 
-	if err := s.store.Save(aiStateFile{Version: aiDiscoveryStateVersion, UpdatedAt: now, Signals: current}); err != nil {
-		stats.Errors++
-		stats.DetectorErrors["state_store"] = err.Error()
+	// Managed mode publishes lifecycle records on full scans only
+	// (fanoutReport), so a process-only tick there must not persist what it
+	// classified: the next full scan would take a process the tick found as
+	// already seen and never send its discovered record, only its removal
+	// (GAP-1738). Lifecycle deltas are then computed between full scans.
+	if full || !s.managedInventoryEmitActive() {
+		if err := s.store.Save(aiStateFile{Version: aiDiscoveryStateVersion, UpdatedAt: now, Signals: current}); err != nil {
+			stats.Errors++
+			stats.DetectorErrors["state_store"] = err.Error()
+		}
 	}
 
 	summary := AIDiscoverySummary{

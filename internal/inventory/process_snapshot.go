@@ -104,9 +104,10 @@ var processSnapshotSource = platformProcessSnapshot
 // turning desktop-app helper processes into additional product instances.
 func classifyWindowsProcesses(procs []processInfo, catalog []AISignature) {
 	aliases := windowsProcessAliases(catalog)
-	claudeCode := false
+	claudeCode, cursor := false, false
 	for _, sig := range catalog {
 		claudeCode = claudeCode || normalizeAIID(sig.ID) == "claudecode"
+		cursor = cursor || normalizeAIID(sig.ID) == "cursor"
 	}
 	byPID := make(map[int]*processInfo, len(procs))
 	for i := range procs {
@@ -116,6 +117,8 @@ func classifyWindowsProcesses(procs []processInfo, catalog []AISignature) {
 			procs[i].Connector = connector
 		} else if name == "claude" && claudeCode && windowsClaudeCodeImage(procs[i].Image) {
 			procs[i].Connector = "claudecode"
+		} else if name == "node" && cursor && windowsCursorAgentImage(procs[i].Image) {
+			procs[i].Connector = "cursor"
 		}
 	}
 	for i := 0; i < len(procs); i++ {
@@ -202,6 +205,14 @@ func windowsClaudeCodeImage(image string) bool {
 		}
 	}
 	return false
+}
+
+// windowsCursorAgentImage reports the node.exe that cursor-agent ships and
+// runs as on Windows (%LOCALAPPDATA%\cursor-agent\versions\<version>\node.exe),
+// so its runs are discovered like other agents' (GAP-1738).
+func windowsCursorAgentImage(image string) bool {
+	image = strings.ToLower(strings.ReplaceAll(image, "/", `\`))
+	return strings.Contains(image, `\appdata\local\cursor-agent\versions\`) && strings.HasSuffix(image, `\node.exe`)
 }
 
 func windowsNodeParentConnector(connector string) bool {

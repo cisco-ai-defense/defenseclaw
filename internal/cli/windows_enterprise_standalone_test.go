@@ -1607,3 +1607,33 @@ func TestRollbackWindowsFirstInstallAccountRemovesCopilotVSCodeHooks(t *testing.
 		t.Fatalf("failed Copilot removal leftovers = %v", got)
 	}
 }
+
+// GAP-1680: when the lifecycle removes a stale committed managed-hook
+// lifecycle journal itself, the Setup result and lifecycle log say so.
+func TestWindowsEnterpriseResultNamesRemovedStaleLifecycleJournal(t *testing.T) {
+	document, err := json.Marshal(map[string]any{
+		"schema_version": 1, "ok": true, "action": "upgrade", "installed": true, "transaction_pending": false,
+		"errors":                          []string{},
+		"stale_lifecycle_journal_removed": "managed-hook lifecycle snapshot retire failed: retire 2 managed runtime generations for SID S-1-5-21-1-2-3-1019: refusing to collect an invalid managed runtime bundle",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := parseWindowsEnterpriseInstallerReport(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := enterprisestatus.New("ensure", "standalone", "windows", "1.0.42")
+	addWindowsEnterpriseRecoveryGatewayWarnings(result, report)
+	addWindowsEnterpriseRecoveryGatewayWarnings(result, report)
+	var found []string
+	for _, warning := range result.Warnings {
+		if warning.Code == "stale_lifecycle_journal_removed" {
+			found = append(found, warning.Message)
+		}
+	}
+	if len(found) != 1 || !strings.Contains(found[0], "managed-hooks-lifecycle-journal.json") ||
+		!strings.Contains(found[0], "refusing to collect an invalid managed runtime bundle") {
+		t.Fatalf("warnings = %+v", result.Warnings)
+	}
+}

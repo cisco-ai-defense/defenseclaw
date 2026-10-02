@@ -105,6 +105,10 @@ type windowsEnterpriseInstallerReport struct {
 	// could not remove ("user (SID) [connectors]: item", or a machine item).
 	// Decoded leniently, like the registration lists.
 	RollbackLeftovers json.RawMessage `json:"rollback_leftovers"`
+	// StaleLifecycleJournalRemoved is set when the lifecycle removed a
+	// stale committed managed-hook lifecycle journal itself (GAP-1322); it
+	// holds the retire failure that made the journal stale.
+	StaleLifecycleJournalRemoved string `json:"stale_lifecycle_journal_removed"`
 
 	// probeFailed marks a failure document that reports no deployment
 	// state at all (no installed field and no pending transaction): the
@@ -631,6 +635,16 @@ func addWindowsEnterpriseRecoveryGatewayWarnings(result *enterprisestatus.Result
 		decodeWindowsEnterpriseRecoveryGatewayRefusal(report.RecoveryGatewayRefusal),
 	)
 	warnings = append(warnings, windowsEnterpriseRollbackLeftoverWarnings(report.RollbackLeftovers)...)
+	if removed := strings.TrimSpace(report.StaleLifecycleJournalRemoved); removed != "" {
+		// The lifecycle deleted a protected journal on its own; say so in
+		// the result and the lifecycle log (GAP-1680).
+		warnings = append(warnings, enterprisestatus.Message{
+			Code: "stale_lifecycle_journal_removed",
+			Message: "Setup removed the stale committed managed-hook lifecycle journal " +
+				"(managed-hooks-lifecycle-journal.json in the protected install state) because its retire could not complete: " +
+				windowsEnterpriseBoundedDiagnostic(removed),
+		})
+	}
 	for _, warning := range warnings {
 		duplicate := false
 		for _, existing := range result.Warnings {

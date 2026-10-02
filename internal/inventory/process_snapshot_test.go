@@ -315,3 +315,18 @@ func TestDetectProcessesClaimsEachPOSIXProcessOnce(t *testing.T) {
 		t.Fatalf("CLI plus app signals = %v, want claudecode=93283 claude-desktop=500", got)
 	}
 }
+
+// GAP-1738: cursor-agent runs as its own node.exe on Windows; that image is
+// Cursor, any other node.exe is not.
+func TestClassifyWindowsProcessesFindsCursorAgentNode(t *testing.T) {
+	catalog := append(windowsAgentCatalog(), AISignature{ID: "cursor", Name: "Cursor", ProcessNames: []string{"cursor", "Cursor"}})
+	procs := []processInfo{
+		{PID: 1, Comm: "node.exe", Image: `C:\Users\kevin\AppData\Local\cursor-agent\versions\2026.10.01-14929f9\node.exe`, Windows: true},
+		{PID: 2, Comm: "node.exe", Image: `C:\Program Files\nodejs\node.exe`, Windows: true},
+		{PID: 3, Comm: "rg.exe", Image: `C:\Users\kevin\AppData\Local\cursor-agent\versions\2026.10.01-14929f9\rg.exe`, Windows: true},
+	}
+	classifyWindowsProcesses(procs, catalog)
+	if procs[0].Connector != "cursor" || procs[1].Connector != "" || procs[2].Connector != "" {
+		t.Fatalf("connectors = %q %q %q", procs[0].Connector, procs[1].Connector, procs[2].Connector)
+	}
+}
