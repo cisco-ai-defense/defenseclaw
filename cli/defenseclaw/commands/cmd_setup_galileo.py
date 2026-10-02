@@ -321,8 +321,71 @@ def _print_status_payload(payload: dict, *, as_json: bool) -> None:
         click.echo(json.dumps(payload, indent=2, sort_keys=True))
         return
     ux.section("Galileo status")
-    for key, value in payload.items():
-        click.echo(f"  {key.replace('_', ' ').title():<12} {value}")
+    for label, value in _status_rows(payload):
+        click.echo(f"  {label:<15} {value}")
+    hint = _status_next_step(payload)
+    if hint:
+        click.echo()
+        click.echo(f"  Next step: {hint}")
+
+
+def _yes_no(value: object) -> str:
+    return "yes" if value else "no"
+
+
+def _status_rows(payload: dict) -> list[tuple[str, str]]:
+    """Render the status payload as readable label/value rows (no reprs)."""
+
+    signals = payload.get("signals") or {}
+    selected = [name for name, on in signals.items() if on] if isinstance(signals, dict) else []
+    rows = [
+        ("Configured", _yes_no(payload.get("configured"))),
+        ("Name", str(payload.get("name", ""))),
+        ("Enabled", _yes_no(payload.get("enabled"))),
+        ("Endpoint", str(payload.get("endpoint") or "-")),
+        ("Signals", ", ".join(selected) or "none"),
+        ("API key", str(payload.get("api_key", ""))),
+        ("Config version", str(payload.get("config_version", ""))),
+    ]
+    health = payload.get("health")
+    if not isinstance(health, dict):
+        return rows
+    state = str(health.get("state") or "unknown")
+    reason = health.get("reason")
+    rows.append(("Health", f"{state} ({reason})" if reason else state))
+    if "queue_items" in health or "dropped" in health:
+        queue = f"{health.get('queue_items', 0)}"
+        if health.get("queue_max_items"):
+            queue += f" / {health['queue_max_items']}"
+        queue += f" items, {health.get('dropped', 0)} dropped"
+        rows.append(("Queue", queue))
+    if health.get("last_success"):
+        rows.append(("Last success", str(health["last_success"])))
+    if health.get("last_failure"):
+        failure = str(health["last_failure"])
+        if health.get("last_error_class"):
+            failure += f" ({health['last_error_class']})"
+        rows.append(("Last failure", failure))
+    elif health.get("last_error_class"):
+        rows.append(("Last error", str(health["last_error_class"])))
+    return rows
+
+
+def _status_next_step(payload: dict) -> str:
+    if not payload.get("configured"):
+        return "run 'defenseclaw setup galileo' to add the destination."
+    if payload.get("api_key") == "missing":
+        return f"export {_KEY_ENV} or re-run 'defenseclaw setup galileo --persist-api-key'."
+    if not payload.get("enabled"):
+        return "run 'defenseclaw setup galileo enable'."
+    health = payload.get("health")
+    state = str(health.get("state") or "") if isinstance(health, dict) else ""
+    if state in {"failing", "degraded"}:
+        return (
+            "check the API key, endpoint and project, then run "
+            "'defenseclaw setup galileo test'; the gateway retries on its own once the destination answers."
+        )
+    return ""
 
 
 def _gateway_api_base(app: AppContext) -> str:

@@ -732,9 +732,12 @@ missed:
 
 <Callout type="warn">
 **macOS Full Disk Access applies to the responsible process** — the terminal
-or daemon that launched the gateway, not the gateway binary. Without it,
-Endpoint Security refuses the client outright even when running as root, and
-Plane C reports itself stopped with Apple's own message.
+or daemon that launched the gateway, not the gateway binary. On a managed Mac
+that is the root sensor helper, `defenseclaw-sensor-helper`; the
+[macOS enterprise guide](/docs/enterprise/macos#ai-discovery-plane-c-endpoint-security)
+has the PPPC payload. Without it, Endpoint Security refuses the client
+outright even when running as root, and Plane C reports itself stopped with
+Apple's own message.
 
 **Windows argv is a second policy.** The audit subcategories turn the events
 on; `ProcessCreationIncludeCmdLine_Enabled` turns on the argument vectors

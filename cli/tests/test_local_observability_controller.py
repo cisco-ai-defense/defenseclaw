@@ -793,7 +793,7 @@ def test_contract_and_environment_are_stable() -> None:
         "OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:4317",
         "OTEL_EXPORTER_OTLP_PROTOCOL": "grpc",
         "OTEL_SERVICE_NAME": "defenseclaw",
-        "OTEL_RESOURCE_ATTRIBUTES": ("service.namespace=defenseclaw,deployment.environment=local-dev"),
+        "OTEL_RESOURCE_ATTRIBUTES": ("service.namespace=defenseclaw,deployment.environment.name=local-dev"),
     }
 
 
@@ -1336,3 +1336,29 @@ func main() {
     assert "down --volumes" in recorded
     assert Path.home() == profile
     assert str(profile).startswith(str(tmp_path))
+
+
+def test_cli_help_lists_env_without_repo_history() -> None:
+    from click.testing import CliRunner
+    from defenseclaw.commands.cmd_setup_local_observability import local_observability
+
+    result = CliRunner().invoke(local_observability, ["--help"])
+
+    assert result.exit_code == 0, result.output
+    assert "historically" not in result.output and "``" not in result.output
+    assert "env      Print OTEL_" in result.output
+
+
+def test_cli_url_and_env_warn_when_docker_is_missing() -> None:
+    from click.testing import CliRunner
+    from defenseclaw.commands import cmd_setup_local_observability as module
+
+    with patch.object(module, "resolve_native_docker_executable", return_value=""):
+        url = CliRunner().invoke(module.local_observability, ["url"])
+        env = CliRunner().invoke(module.local_observability, ["env"])
+
+    for result in (url, env):
+        assert result.exit_code == 0, result.output
+        assert "Docker CLI was not found" in result.stderr
+        assert "Docker" not in result.stdout
+    assert "deployment.environment.name=local-dev" in env.stdout

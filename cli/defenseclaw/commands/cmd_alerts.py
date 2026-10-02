@@ -307,6 +307,24 @@ def alerts(
     _alerts_default(app, limit, show_idx, tui, connector)
 
 
+def _alert_next_step(event) -> str:
+    """Return a next step for alerts whose details alone do not say what to do."""
+    if event.action != "telemetry-destination":
+        return ""
+    destination = (event.details or "").split("/", 1)[0].strip()
+    status_cmd = (
+        "defenseclaw setup galileo status"
+        if destination == "galileo"
+        else "defenseclaw setup observability list"
+    )
+    selector = f"--id {event.id}" if event.id else "--severity HIGH"
+    return (
+        f"run '{status_cmd}' to see whether delivery has recovered (the gateway "
+        "retries on its own). This alert records the failure and stays listed "
+        f"after recovery; clear it with 'defenseclaw alerts dismiss {selector}'."
+    )
+
+
 def _alerts_default(
     app: AppContext,
     limit: int,
@@ -379,6 +397,9 @@ def _alerts_default(
                     click.echo(f"    {ux._style(tag, fg=sev_tag_fg, bold=True)}", nl=False)
                     loc = f"  {f['location']}" if f["location"] else ""
                     click.echo(f" {f['title']}{loc}")
+        hint = _alert_next_step(e)
+        if hint:
+            click.echo(f"  {ux._style('Next:', fg='bright_black', bold=True)}      {hint}")
         return
 
     if tui:

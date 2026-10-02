@@ -38,6 +38,7 @@ from defenseclaw.observability.local_stack import (
     GRAFANA_PASSWORD_FILE_NAME,
     LocalStackController,
     LocalStackError,
+    resolve_native_docker_executable,
     resolve_stack_dir,
 )
 
@@ -59,8 +60,8 @@ _DEFAULT_SIGNALS: tuple[str, ...] = ("traces", "metrics", "logs")
 def local_observability(ctx: click.Context) -> None:
     """Drive the bundled local observability stack.
 
-    Provides a one-command path to the same compose stack that
-    historically lived under ``deploy/observability/``. Subcommands:
+    Runs a local Prometheus, Loki, Tempo and Grafana stack with Docker
+    Compose on loopback and points this gateway at it. Subcommands:
 
     \b
       up       Start the stack, wait for readiness, wire config.yaml
@@ -69,10 +70,10 @@ def local_observability(ctx: click.Context) -> None:
       status   Show compose ps + per-service readiness probes
       logs     Tail logs for one or all services
       url      Print the Grafana / Prometheus / Tempo / Loki URLs
+      env      Print OTEL_* variables that point a process at the stack
 
-    Bare invocation is an alias for ``up`` so ``defenseclaw setup
-    local-observability`` matches the ergonomics of ``setup splunk
-    --logs``.
+    Running it without a subcommand is the same as 'up'. The stack needs
+    Docker with Compose v2.
     """
     if ctx.invoked_subcommand is None:
         ctx.invoke(up_cmd)
@@ -353,6 +354,7 @@ def logs_cmd(app: AppContext, service: str | None, follow: bool) -> None:
 @pass_ctx
 def url_cmd(_app: AppContext, emit_json: bool) -> None:
     """Print the Grafana / Prometheus / Tempo / Loki URLs."""
+    _warn_if_docker_missing()
     if emit_json:
         click.echo(_json.dumps(CONTRACT, separators=(",", ":")))
         return
@@ -364,6 +366,7 @@ def url_cmd(_app: AppContext, emit_json: bool) -> None:
 @pass_ctx
 def env_cmd(_app: AppContext, emit_json: bool) -> None:
     """Print environment values that point a gateway at the local collector."""
+    _warn_if_docker_missing()
     values = LocalStackController.environment_contract()
     if emit_json:
         click.echo(_json.dumps(values, separators=(",", ":")))
@@ -378,6 +381,25 @@ def env_cmd(_app: AppContext, emit_json: bool) -> None:
 
 
 T = TypeVar("T")
+
+
+def _warn_if_docker_missing() -> None:
+    """Say on stderr that the printed addresses have nothing behind them yet.
+
+    url and env print a fixed contract and stay exit 0 so scripts can use
+    them, but without Docker the stack cannot run on this machine.
+    """
+    try:
+        docker = resolve_native_docker_executable()
+    except LocalStackError:
+        docker = ""
+    if docker:
+        return
+    click.echo(
+        "  warning: Docker CLI was not found on PATH, so the local stack cannot run here. "
+        "These are the addresses it uses once 'defenseclaw setup local-observability up' succeeds.",
+        err=True,
+    )
 
 
 def _run_native_controller(operation: Callable[[], T], description: str) -> T:

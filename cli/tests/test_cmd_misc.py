@@ -208,6 +208,21 @@ class TestAlertsCommand(unittest.TestCase):
         self.assertIn("HIGH", result.output)
         self.assertIn("/skills/bad", result.output)
 
+    def test_alerts_show_telemetry_destination_names_next_step(self):
+        from unittest.mock import patch
+
+        from defenseclaw.commands.cmd_alerts import alerts
+
+        event = Event(id="a1", action="telemetry-destination", severity="HIGH",
+                      details="galileo/traces failed: request_timeout")
+        with patch.object(self.app.store, "list_alerts", return_value=[event]):
+            result = self.runner.invoke(alerts, ["--no-tui", "--show", "1"], obj=self.app,
+                                        catch_exceptions=False)
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("galileo/traces failed: request_timeout", result.output)
+        self.assertIn("defenseclaw setup galileo status", result.output)
+        self.assertIn("defenseclaw alerts dismiss --id a1", result.output)
+
     def test_alerts_show_out_of_range(self):
         from defenseclaw.commands.cmd_alerts import alerts
 
