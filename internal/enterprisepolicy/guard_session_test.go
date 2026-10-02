@@ -734,3 +734,16 @@ func TestGatewaySessionStoreEvictsOnlyCleanRecords(t *testing.T) {
 		t.Fatalf("a block was evicted: %d records", count)
 	}
 }
+
+// A hook-file block records no reason, so the later calls' finding must not
+// end in a dangling "session: " (GAP-1098).
+func TestStickySessionFindingReasonWithoutCause(t *testing.T) {
+	decision := stickySessionDecision(GuardDecision{}, "copilot", SessionRecord{Scope: ScopeUser, Path: "hooks.json", Digest: "d"})
+	if got := decision.Findings[0].Reason; got != "blocked since earlier in this session" {
+		t.Fatalf("reason = %q", got)
+	}
+	decision = stickySessionDecision(GuardDecision{}, "copilot", SessionRecord{Path: "p", Reason: "plugin"})
+	if got := decision.Findings[0].Reason; got != "blocked since earlier in this session: plugin" {
+		t.Fatalf("reason = %q", got)
+	}
+}
