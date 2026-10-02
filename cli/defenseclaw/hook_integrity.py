@@ -96,6 +96,27 @@ def hook_runtime_problems(cfg: Any, connector: str) -> list[str]:
 _CONFIG_LIMIT = 2 * 1024 * 1024
 
 
+def _registration_text(text: str) -> str:
+    """The part of an agent config file that can register DefenseClaw hooks.
+
+    Setup also writes ``env`` entries that name DefenseClaw (the OTLP headers
+    and resource attributes in ``~/.claude/settings.json``), so a whole-file
+    match kept a settings file with no hooks looking registered (GAP-1230).
+    For a JSON object only its ``hooks`` section counts; other formats are
+    matched as a whole.
+    """
+
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return text.lower()
+    if not isinstance(data, dict):
+        return text.lower()
+    if "hooks" in data:
+        return json.dumps(data["hooks"]).lower()
+    return json.dumps({key: value for key, value in data.items() if key != "env"}).lower()
+
+
 def hook_registration_problems(cfg: Any, connector: str) -> list[str]:
     """Report hook config files that no longer mention DefenseClaw at all.
 
@@ -130,7 +151,7 @@ def hook_registration_problems(cfg: Any, connector: str) -> list[str]:
         try:
             if not path.is_file() or path.stat().st_size > _CONFIG_LIMIT:
                 continue
-            if "defenseclaw" in path.read_text(encoding="utf-8", errors="replace").lower():
+            if "defenseclaw" in _registration_text(path.read_text(encoding="utf-8", errors="replace")):
                 return []
         except OSError:
             continue
