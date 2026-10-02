@@ -296,6 +296,9 @@ type HookCoverage struct {
 	ToolCalls    int64 `json:"tool_calls"`
 	ToolBlocked  int64 `json:"tool_blocked"`
 	ToolAsked    int64 `json:"tool_asked,omitempty"`
+	// PromptBlocked counts the submitted prompts DefenseClaw blocked
+	// (UserPromptSubmit and each harness's spelling of it).
+	PromptBlocked int64 `json:"prompt_blocked,omitempty"`
 	// Events counts the hook verdicts per hook event, under the name the
 	// harness sends (PreToolUse, preToolUse, tool.execute.before, ...).
 	// Their sum can be below HookRequests: a post refused before a verdict
@@ -763,9 +766,12 @@ const (
 	// ActivityToolAsked is a tool call DefenseClaw asked the user to
 	// confirm; the harness asks in its own UI.
 	ActivityToolAsked = "tool.asked"
-	ActivityLifecycle = "sandbox.lifecycle"
-	ActivityFinding   = "finding"
-	ActivityWorkspace = "workspace"
+	// ActivityHookBlocked is a hook event other than a tool call that
+	// DefenseClaw blocked, such as a submitted prompt.
+	ActivityHookBlocked = "hook.blocked"
+	ActivityLifecycle   = "sandbox.lifecycle"
+	ActivityFinding     = "finding"
+	ActivityWorkspace   = "workspace"
 	// ActivityHookFailed reports hook posts DefenseClaw answered with an
 	// error status (HookCoverage.HookFailed).
 	ActivityHookFailed = "hook.failed"

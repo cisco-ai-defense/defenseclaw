@@ -122,7 +122,25 @@ func (m *Manager) ObserveHookDecision(d HookDecision) {
 	}
 	b.hooks.countEvent(event)
 	if !toolEvent {
+		prompt := blocked && isPromptEvent(d.Event)
+		if prompt {
+			b.hooks.promptBlocked++
+		}
 		m.mu.Unlock()
+		if blocked {
+			// A blocked prompt (or other non-tool hook event) is a block
+			// of the session too: the feed shows every DefenseClaw block.
+			what := "prompt"
+			if !prompt {
+				what = firstNonEmpty(event, "a hook event")
+			}
+			msg := "✗ " + what + " blocked by DefenseClaw"
+			if reason != "" {
+				msg += ": " + truncate(reason, 200)
+			}
+			m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityHookBlocked, Sandbox: d.SandboxName,
+				Event: d.Event, Severity: d.Severity, Reason: truncate(reason, 300), Message: msg})
+		}
 		return
 	}
 	tamper := tamperNone
@@ -282,6 +300,12 @@ func isToolEvent(event string) bool {
 		return true
 	}
 	return false
+}
+
+// isPromptEvent reports whether a hook event is a harness's prompt
+// submission (UserPromptSubmit, userPromptSubmitted, beforeSubmitPrompt).
+func isPromptEvent(event string) bool {
+	return strings.Contains(strings.ToLower(event), "prompt")
 }
 
 func isBlockAction(action string) bool {

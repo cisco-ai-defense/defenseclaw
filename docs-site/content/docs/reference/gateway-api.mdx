@@ -820,6 +820,7 @@ Each `ActivityEvent` has a `seq` (one higher per event), `time`, `kind`, and
 | `egress.unblocked` | An unblock was applied. |
 | `approval.requested`, `approval.resolved` | An ask was raised or answered. |
 | `tool.blocked` | DefenseClaw blocked a tool call. `reason` is plain and never quotes matched content. |
+| `hook.blocked` | DefenseClaw blocked a hook event other than a tool call, such as a submitted prompt (`event` names it). The sandbox's `hooks.prompt_blocked` counts blocked prompts. |
 | `sandbox.lifecycle` | A sandbox changed phase. |
 | `finding` | A finding. Its `reason` is, for example, `hook_tamper` (a tool ran without a DefenseClaw verdict), `hook_silence`, `hooks_unreachable` (hooks do not reach DefenseClaw, so every tool call is blocked), `hooks_restored`, or `nested_repo`. |
 | `workspace` | An undo, or a copy-mode upload or pull. |

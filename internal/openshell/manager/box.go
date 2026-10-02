@@ -192,6 +192,8 @@ type hookStats struct {
 	// counts the rest (countEvent).
 	events      map[string]int64
 	otherEvents int64
+	// promptBlocked counts the prompts DefenseClaw blocked.
+	promptBlocked int64
 	// tampered counts tool calls that ran without a DefenseClaw verdict.
 	tampered   int64
 	lastTamper time.Time
@@ -626,7 +628,7 @@ func (m *Manager) view(b *box) sandboxapi.Sandbox {
 	}
 	v.Hooks = sandboxapi.HookCoverage{
 		LastHookAt: b.hooks.lastHook, LastOTLPAt: b.hooks.lastOTLP, HookRequests: b.hooks.requests,
-		ToolCalls: b.hooks.toolCalls, ToolBlocked: b.hooks.toolBlocked, ToolAsked: b.hooks.toolAsked, LastBlocked: b.hooks.lastBlocked,
+		ToolCalls: b.hooks.toolCalls, ToolBlocked: b.hooks.toolBlocked, ToolAsked: b.hooks.toolAsked, PromptBlocked: b.hooks.promptBlocked, LastBlocked: b.hooks.lastBlocked,
 		Events: maps.Clone(b.hooks.events), OtherEvents: b.hooks.otherEvents,
 		Tampered: b.hooks.tampered, LastTamperAt: b.hooks.lastTamper,
 		HookFailed: b.hooks.failed, LastHookFailure: b.hooks.lastFailure, LastHookFailureAt: b.hooks.lastFailureAt,
