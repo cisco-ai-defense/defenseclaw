@@ -442,6 +442,17 @@ def _cgnat_allowed() -> bool:
     return os.environ.get("DEFENSECLAW_ALLOW_CGNAT") == "1"
 
 
+def _private_target_hint(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> str:
+    """Explain the SSRF refusal and the way forward for one address."""
+    hint = (
+        "; webhooks must reach a public address so events can't be sent to "
+        "internal services (SSRF guard). Use a public endpoint or relay"
+    )
+    if ip.is_loopback:
+        hint += ", or for local testing set DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST=1"
+    return hint + "."
+
+
 def validate_webhook_url(url: str) -> None:
     """Raise ``ValueError`` if ``url`` is unsafe for outbound delivery.
 
@@ -480,7 +491,8 @@ def validate_webhook_url(url: str) -> None:
     if host.lower() == "localhost":
         if not allow_local:
             raise ValueError(
-                "localhost not allowed (set DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST=1 for local dev)",
+                "localhost is not allowed as a webhook target"
+                + _private_target_hint(ipaddress.ip_address("127.0.0.1")),
             )
         return
 
@@ -493,7 +505,10 @@ def validate_webhook_url(url: str) -> None:
         if _is_private_ip(literal_ip):
             if allow_local and literal_ip.is_loopback:
                 return
-            raise ValueError(f"IP {literal_ip} is private/reserved")
+            raise ValueError(
+                f"IP {literal_ip} is a private or reserved address"
+                + _private_target_hint(literal_ip),
+            )
         if _is_cgnat(literal_ip) and not _cgnat_allowed():
             raise ValueError(
                 f"IP {literal_ip} is in the RFC 6598 CGNAT range (set DEFENSECLAW_ALLOW_CGNAT=1 to opt in)"
@@ -517,7 +532,8 @@ def validate_webhook_url(url: str) -> None:
             if allow_local and resolved.is_loopback:
                 continue
             raise ValueError(
-                f"hostname {host!r} resolves to private IP {resolved}",
+                f"hostname {host!r} resolves to private IP {resolved}"
+                + _private_target_hint(resolved),
             )
         if _is_cgnat(resolved) and not _cgnat_allowed():
             raise ValueError(
