@@ -119,6 +119,21 @@ def test_make_all_migrates_existing_data_before_setup() -> None:
     assert "exit 1;" in recipe
 
 
+def test_make_all_restarts_a_running_gateway_it_replaced() -> None:
+    # GAP-1575: a second make all left the old gateway running on the replaced
+    # binary and still said "installed and ready".
+    text = MAKEFILE.read_text(encoding="utf-8")
+    all_target = text[text.index("\nall:") : text.index("\n\n", text.index("\nall:"))]
+    assert all_target.index("source-migrate") < all_target.index("source-restart-gateway")
+    assert all_target.index("source-restart-gateway") < all_target.index("quickstart")
+    recipe = text[text.index("\nsource-restart-gateway:") : text.index("\npath:")]
+    status = recipe.index('"$(INSTALL_DIR)/$(GATEWAY)$(EXE)" status')
+    assert status < recipe.index('"$(INSTALL_DIR)/$(GATEWAY)$(EXE)" restart')
+    assert "defenseclaw-gateway restart" in recipe
+    hint = text[text.index("\ngateway-install:") : text.index("\nplugin-install:")]
+    assert 'pgrep -x "$(GATEWAY)"' not in hint
+
+
 def test_make_all_keeps_an_existing_config_instead_of_rerunning_first_run() -> None:
     text = MAKEFILE.read_text(encoding="utf-8")
     quickstart = text[text.index("\nquickstart:") : text.index("\n# Post-install interactive prompt")]
