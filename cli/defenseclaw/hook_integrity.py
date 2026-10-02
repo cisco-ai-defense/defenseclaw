@@ -73,7 +73,10 @@ def hook_runtime_problems(cfg: Any, connector: str) -> list[str]:
     for script in scripts:
         expected = digests.get(script.name)
         if expected and _sha256_regular_file(script) != expected:
-            problems.append(f"hook script {script} changed since setup (it does not match hook_contract_lock.json)")
+            problems.append(
+                f"hook script {script} changed since setup (an edit, or a copy from another build; "
+                "it does not match hook_contract_lock.json)"
+            )
             break
 
     token_name = f".hook-{connector}.token"
@@ -87,7 +90,10 @@ def hook_runtime_problems(cfg: Any, connector: str) -> list[str]:
         if token_name not in text:
             continue
         token_path = script.parent / token_name
-        if not token_path.is_file() and not os.environ.get("DEFENSECLAW_GATEWAY_TOKEN"):
+        # A connector-scoped script clears any inherited
+        # DEFENSECLAW_GATEWAY_TOKEN and reads only this file, so the env var
+        # (which doctor and status load from .env) never stands in for it.
+        if not token_path.is_file():
             problems.append(f"hook token {token_path} is missing, so every hook call fails")
         break
     return problems

@@ -2763,16 +2763,19 @@ class WindowsHookDoctorTests(unittest.TestCase):
         )
         result = _DoctorResult()
 
-        _check_hook_contract_lock(
-            self.cfg,
-            "hermes",
-            result,
-            platform_name="nt",
-            config_path=str(config),
-            install_root=str(self.install),
-            search_path=str(self.install),
-            pathext=".EXE;.CMD",
-        )
+        # A Hermes host that may be running keeps the pending-reload state;
+        # an idle Hermes is healthy (GAP-1298).
+        with patch.object(cmd_doctor, "_hermes_host_running", return_value=None):
+            _check_hook_contract_lock(
+                self.cfg,
+                "hermes",
+                result,
+                platform_name="nt",
+                config_path=str(config),
+                install_root=str(self.install),
+                search_path=str(self.install),
+                pathext=".EXE;.CMD",
+            )
 
         self.assertEqual(result.checks[-1]["status"], "fail", result.checks[-1])
         self.assertIn("pending-reload", result.checks[-1]["detail"])

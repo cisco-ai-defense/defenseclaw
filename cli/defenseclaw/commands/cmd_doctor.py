@@ -702,6 +702,19 @@ def _check_generated_hook_freshness(
 ) -> None:
     reasons = _stale_generated_hook_reasons(cfg, connector, hook_script_paths=hook_script_paths)
     if not reasons:
+        from defenseclaw.hook_integrity import hook_runtime_problems
+
+        if any("changed since setup" in problem for problem in hook_runtime_problems(cfg, connector)):
+            # The sentinels can match an older build's render; the lock digest
+            # does not (GAP-1316). The Hook runtime files row names the repair.
+            _emit(
+                "warn",
+                f"{label} freshness",
+                "a generated script is not the one setup rendered (an edit, or a copy from another build)",
+                r=r,
+                remediation="run 'defenseclaw-gateway restart' to render the scripts again",
+            )
+            return
         _emit("pass", f"{label} freshness", "generated scripts include latest diagnostics", r=r)
         return
 
@@ -1680,12 +1693,34 @@ def _configured_local_retention_days(cfg) -> int:
     if raw is None and isinstance(observability, dict):
         raw = (observability.get("local") or {}).get("retention_days")
     if raw is None:
+        # The CLI config model does not carry observability.local, so read
+        # the value the gateway honors straight from config.yaml (GAP-1329).
+        raw = _config_yaml_local_retention_days(cfg)
+    if raw is None:
         return 7
     try:
         days = int(raw)
     except (TypeError, ValueError):
         return 7
     return days if days >= 0 else 7
+
+
+def _config_yaml_local_retention_days(cfg):
+    """Read observability.local.retention_days from config.yaml, or None."""
+    import yaml
+
+    from defenseclaw.config import config_path_for_data_dir
+
+    try:
+        path = config_path_for_data_dir(getattr(cfg, "data_dir", None))
+        if path.stat().st_size > 4 * 1024 * 1024:
+            return None
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, yaml.YAMLError):
+        return None
+    observability = data.get("observability") if isinstance(data, dict) else None
+    local = observability.get("local") if isinstance(observability, dict) else None
+    return local.get("retention_days") if isinstance(local, dict) else None
 
 
 def _human_size(num_bytes: int) -> str:
@@ -1874,7 +1909,20 @@ def _check_audit_db_store(cfg, r: _DoctorResult) -> None:
         free_bytes = shutil.disk_usage(os.path.dirname(os.path.abspath(db_path)) or os.curdir).free
     except OSError:
         return
-    if free_bytes < 256 * 1024 * 1024:
+    if free_bytes < 16 * 1024 * 1024:
+        # Below this SQLite cannot grow the audit database, so audit events
+        # are being lost now, not later (GAP-1308).
+        _emit(
+            "fail",
+            "Audit storage capacity",
+            f"the disk holding {os.path.dirname(os.path.abspath(db_path))} is full "
+            f"({free_bytes // (1024 * 1024)} MiB free); audit events cannot be written and are being lost",
+            r=r,
+            check_id="doctor.state.audit-storage-capacity",
+            reason_code="audit-storage-full",
+            remediation="free space on that disk; the gateway resumes writing audit events once there is room",
+        )
+    elif free_bytes < 256 * 1024 * 1024:
         _emit(
             "warn",
             "Audit storage capacity",
@@ -2586,6 +2634,10 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
                             if isinstance(raw, str):
                                 summary = raw.strip()
                         detail_msg = f"disabled — {summary}" if summary else "disabled (reported by sidecar)"
+                        if sub == "gateway" and _fleet_uplink_unused(cfg):
+                            # health.gateway is the OpenClaw fleet uplink,
+                            # which only proxy connectors use (GAP-1363).
+                            detail_msg = "disabled — not used: the configured connectors run through hooks"
                         _emit("skip", f"  └─ {sub}", detail_msg, r=r)
                 elif normalized_state == "degraded":
                     # Up but needs operator action (the sandbox subsystem
@@ -2595,7 +2647,8 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
                     reason = last_error.strip() if isinstance(last_error, str) else ""
                     _emit("warn", f"  └─ {sub}", f"degraded — {reason}" if reason else "degraded", r=r)
                 else:
-                    _emit("fail", f"  └─ {sub}", state, r=r)
+                    reason = _telemetry_error_reason(details) if sub == "telemetry" else ""
+                    _emit("fail", f"  └─ {sub}", f"{state} — {reason}" if reason else state, r=r)
             return health
         except (json.JSONDecodeError, TypeError):
             detail = body if body.startswith("response exceeds") else "could not parse /health response"
@@ -4289,6 +4342,8 @@ def _check_windows_native_hooks(
         search_path=search_path,
         pathext=pathext,
     )
+    if connector == "hermes":
+        check = _hermes_idle_native_check(check, r)
     status = "pass" if check.healthy else "fail"
     _emit(status, label, f"{check.state}: {check.detail}", r=r)
 
@@ -4610,10 +4665,12 @@ def _check_codex_otel_alignment(cfg, r: _DoctorResult) -> None:
             r=r,
         )
     elif telemetry_state not in {"running", "healthy"}:
+        reason = _telemetry_error_reason(telemetry.get("details") if isinstance(telemetry, dict) else None)
         _emit(
             "fail",
             "Codex OTel runtime",
-            f"environment is {runtime_environment!r}, but telemetry state is {telemetry_state or 'unknown'!r}",
+            f"environment is {runtime_environment!r}, but telemetry state is {telemetry_state or 'unknown'!r}"
+            + (f" ({reason})" if reason else ""),
             r=r,
         )
     else:
@@ -4623,6 +4680,27 @@ def _check_codex_otel_alignment(cfg, r: _DoctorResult) -> None:
             f"live telemetry is {telemetry_state} in environment {runtime_environment!r}",
             r=r,
         )
+
+
+_EVENT_HISTORY_SQLITE_CLASSES = {
+    "full": "the disk holding the audit database is full",
+    "busy_locked": "another process keeps the audit database locked",
+    "deadline": "audit database writes time out",
+    "io": "the disk returned an I/O error",
+    "readonly_cantopen": "the audit database is read-only or cannot be opened",
+    "constraint_corrupt": "the audit database is damaged",
+}
+
+
+def _telemetry_error_reason(details) -> str:
+    """Plain words for the gateway's event-history failure tokens (GAP-1308)."""
+    if not isinstance(details, dict):
+        return ""
+    if details.get("event_history_failure") != "sqlite_write_failed":
+        return ""
+    sqlite_class = str(details.get("event_history_last_sqlite_class") or "")
+    cause = _EVENT_HISTORY_SQLITE_CLASSES.get(sqlite_class, "the audit database rejects writes")
+    return f"audit events cannot be written: {cause}"
 
 
 def _check_hermes_hooks(
@@ -5984,7 +6062,9 @@ def _hermes_host_running() -> bool | None:
     prove a running host loaded it. With no host running there is nothing to
     reload: the next host starts with the registration.
     """
-    if os.name == "nt" or not hasattr(os, "getuid"):
+    if os.name == "nt":
+        return _hermes_host_running_windows()
+    if not hasattr(os, "getuid"):
         return None
     try:
         proc = subprocess.run(
@@ -6025,6 +6105,72 @@ def _hermes_host_running() -> bool | None:
         ):
             wrapped = True
     return None if wrapped else False
+
+
+def _hermes_host_running_windows(tasklist_output: str | None = None) -> bool | None:
+    """Windows form of :func:`_hermes_host_running` (GAP-1298).
+
+    ``tasklist`` lists this account's processes by image name only, so a
+    hermes.exe is proof of a host, any interpreter or launcher leaves it
+    unknown, and anything else means no Hermes host is running.
+    """
+    if tasklist_output is None:
+        user = os.environ.get("USERNAME", "")
+        if not user:
+            return None
+        domain = os.environ.get("USERDOMAIN", "")
+        account = f"{domain}\\{user}" if domain else user
+        try:
+            proc = subprocess.run(
+                ["tasklist", "/FO", "CSV", "/NH", "/FI", f"USERNAME eq {account}"],
+                capture_output=True,
+                text=True,
+                timeout=5.0,
+                check=False,
+            )
+        except (FileNotFoundError, subprocess.SubprocessError, OSError):
+            return None
+        if proc.returncode != 0:
+            return None
+        tasklist_output = proc.stdout
+    import csv
+
+    own = {str(os.getpid()), str(os.getppid())}
+    unknown = False
+    listed = False
+    for fields in csv.reader(tasklist_output.splitlines()):
+        if len(fields) < 2 or not fields[1].strip().isdigit():
+            continue
+        listed = True
+        if fields[1].strip() in own:
+            continue
+        program = fields[0].strip().lower().removesuffix(".exe")
+        if program in _HERMES_HOST_EXECUTABLES:
+            return True
+        if program.startswith("python") or program in _HERMES_LAUNCHERS:
+            unknown = True
+    if not listed:
+        return None  # tasklist printed only an "INFO: no tasks" line or nothing usable
+    return None if unknown else False
+
+
+def _hermes_idle_native_check(check: WindowsHookCheck, r: _DoctorResult) -> WindowsHookCheck:
+    """Report an idle Hermes as healthy on Windows, as on Unix (GAP-1298).
+
+    Hermes reads its hooks at startup, so with no Hermes host running there
+    is nothing to reload. --passive does not list processes and keeps the
+    pending-reload state.
+    """
+    if check.state != "pending-reload" or r.passive or _hermes_host_running() is not False:
+        return check
+    detail = check.detail.split("; running Hermes", 1)[0]
+    return WindowsHookCheck(
+        "healthy",
+        f"{detail}; no Hermes host is running, so the next one starts with the DefenseClaw hooks",
+        check.command,
+        check.target,
+        check.raw_target,
+    )
 
 
 def _omnigent_process_argv(pid: int) -> tuple[str, ...] | None:
@@ -7371,8 +7517,21 @@ def _check_llm_reachable(cfg, r: _DoctorResult) -> None:
         _emit("skip", "LLM reachable", "guardrail disabled", r=r)
         return
     llm = cfg.resolve_llm("guardrail")
+    prefix = ""
+    judge = getattr(gc, "judge", None)
+    if not (llm.model or "").strip() and bool(getattr(judge, "enabled", False)):
+        # A judge-only setup (`setup llm --role judge`) leaves the unified
+        # model empty; probe the judge LLM instead (GAP-1365).
+        llm = cfg.resolve_llm("guardrail.judge")
+        prefix = "judge LLM: "
     if not (llm.model or "").strip():
-        _emit("skip", "LLM reachable", "no model configured", r=r)
+        _emit(
+            "skip",
+            "LLM reachable",
+            "no LLM model is configured",
+            r=r,
+            remediation="run 'defenseclaw setup llm' to configure one",
+        )
         return
     if r.passive:
         _emit(
@@ -7390,9 +7549,9 @@ def _check_llm_reachable(cfg, r: _DoctorResult) -> None:
     with _capture_stdout_when_json():
         ok, msg = _llm.ping(llm, timeout=5)
     if ok:
-        _emit("pass", "LLM reachable", msg, r=r)
+        _emit("pass", "LLM reachable", prefix + msg, r=r)
     else:
-        _emit("warn", "LLM reachable", msg, r=r)
+        _emit("warn", "LLM reachable", prefix + msg, r=r)
 
 
 def _check_judge_calls(cfg, r: _DoctorResult) -> None:
@@ -7876,7 +8035,8 @@ def _verify_bedrock(api_key: str, r: _DoctorResult) -> None:
     format AWS introduced alongside GA of Bedrock. That's a different
     auth path from the long-term SigV4 ``AKIA…`` key-id / secret pair:
 
-    * ``ABSK…``  → bearer token, verifiable with a single GET.
+    * ``ABSK…`` (long-term) and ``bedrock-api-key-…`` (short-term, from
+      the AWS token generator) → bearer token, verifiable with a single GET.
     * ``AKIA…``  → SigV4 credentials; we can't verify without signing,
                   which would pull in botocore just for the doctor.
                   Emit a ``warn`` pointing at ``aws sts get-caller-identity``.
@@ -7896,11 +8056,11 @@ def _verify_bedrock(api_key: str, r: _DoctorResult) -> None:
             r=r,
         )
         return
-    if not api_key.startswith("ABSK"):
+    if not api_key.startswith(("ABSK", "bedrock-api-key-")):
         _emit(
             "pass",
             "LLM API key (Bedrock)",
-            f"key is set ({len(api_key)} chars) but shape not recognized; assuming operator knows what they're doing.",
+            f"key is set ({len(api_key)} chars) but is not a Bedrock API key format doctor knows, so it is not checked",
             r=r,
         )
         return
@@ -8268,6 +8428,11 @@ def _check_galileo_trace_canaries(
                 label,
                 f"{exc.failure_class}: {exc.message}",
                 r=r,
+                remediation=(
+                    "start the gateway with 'defenseclaw-gateway start', then run 'defenseclaw doctor' again"
+                    if exc.failure_class == "gateway_unavailable"
+                    else f"run 'defenseclaw observability destination test {destination.name}' to check the route"
+                ),
             )
             continue
         _emit(
@@ -10633,6 +10798,15 @@ def _doctor_active_connectors(cfg) -> list[str]:
     return [primary] if primary else []
 
 
+_FLEET_PROXY_CONNECTORS = frozenset({"openclaw", "zeptoclaw"})
+
+
+def _fleet_uplink_unused(cfg) -> bool:
+    """True when connectors are configured and none of them is a proxy connector."""
+    names = set(_doctor_active_connectors(cfg))
+    return bool(names) and not (names & _FLEET_PROXY_CONNECTORS)
+
+
 def _connector_enabled(cfg, connector: str) -> bool:
     """Whether *connector* is effectively enabled (not operator-disabled).
 
@@ -10845,12 +11019,27 @@ def _check_connector_inventory(
                 fail_mode = connector_fail_mode_report(cfg, connector)
             except Exception:  # noqa: BLE001 - doctor must still report partial state.
                 fail_mode = {"effective": "unknown", "provenance": "unavailable"}
-            _emit(
-                "pass",
-                "Mode",
-                f"{mode}; fail-mode={fail_mode['effective']}; provenance={fail_mode['provenance']}",
-                r=r,
-            )
+            if mode in {"observe", "action"}:
+                _emit(
+                    "pass",
+                    "Mode",
+                    f"{mode}; fail-mode={fail_mode['effective']}; provenance={fail_mode['provenance']}",
+                    r=r,
+                )
+            else:
+                # An invalid mode never gets a green tick (GAP-1363); the
+                # Config validation row names the same field.
+                from defenseclaw.hook_integrity import setup_command
+
+                _emit(
+                    "fail",
+                    "Mode",
+                    f"{mode!r} is not a guardrail mode (expected observe or action)",
+                    r=r,
+                    remediation=(
+                        f"set guardrail.mode to observe or action, or run `{setup_command(connector)} --mode action`"
+                    ),
+                )
 
     workspace = _workspace_dir(cfg)
     if workspace:
@@ -11112,6 +11301,8 @@ def _check_hook_contract_lock(
             search_path=search_path,
             pathext=pathext,
         )
+        if connector == "hermes":
+            native_runtime = _hermes_idle_native_check(native_runtime, r)
     if isinstance(locations, dict):
         workspace_dir = str(locations.get("workspace_dir") or "").strip()
         hook_paths = [str(v) for v in locations.get("hook_config_paths", []) if v]
@@ -12096,7 +12287,9 @@ def _watchdog_repair_posture(
     """Return whether the gateway lifecycle may safely attempt a start."""
     platform_name = platform_name or sys.platform
     if platform_name != "win32":
-        return (False, "native Windows watchdog lifecycle repair is not applicable")
+        # Only native Windows installs run a watchdog process; say so plainly
+        # without naming another OS (GAP-1363).
+        return (False, "not needed on this system (no watchdog process to repair)")
     if not _watchdog_enabled(cfg):
         return (False, "watchdog is disabled by configuration")
     evidence = evidence or GatewayEvidence(platform_name=platform_name)

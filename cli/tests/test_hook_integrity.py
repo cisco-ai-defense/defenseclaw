@@ -76,6 +76,16 @@ def test_edited_script_and_missing_token_fail_doctor(tmp_path, monkeypatch):
     assert "defenseclaw setup codex" in row["detail"]
 
 
+def test_missing_scoped_token_is_reported_even_with_gateway_token_env(tmp_path, monkeypatch):
+    # GAP-1138: doctor loads DEFENSECLAW_GATEWAY_TOKEN from .env, but the
+    # connector-scoped hook clears it, so the missing file still breaks hooks.
+    monkeypatch.setenv("DEFENSECLAW_GATEWAY_TOKEN", "from-dotenv")
+    cfg, _ = _install(tmp_path)
+    os.remove(tmp_path / "hooks" / ".hook-codex.token")
+    problems = hook_runtime_problems(cfg, "codex")
+    assert len(problems) == 1 and ".hook-codex.token is missing" in problems[0]
+
+
 def test_removed_hook_registration_is_reported(tmp_path):
     # GAP-1230: the hooks key deleted from the agent's settings file.
     settings = tmp_path / "settings.json"
@@ -97,3 +107,19 @@ def test_removed_hook_registration_is_reported(tmp_path):
     settings.write_text(json.dumps({"env": env}))
     assert hook_registration_problems(cfg, "claudecode")
     assert hook_registration_problems(cfg, "codex") == []
+
+
+def test_older_build_render_is_not_reported_fresh(tmp_path, monkeypatch):
+    # GAP-1316: an older build's script still holds the freshness sentinels,
+    # but it does not match the digest setup sealed.
+    from unittest import mock
+
+    from defenseclaw.commands import cmd_doctor
+
+    cfg, script = _install(tmp_path)
+    script.write_text(script.read_text() + "# rendered by an older build\n")
+    r = _DoctorResult(passive=True, quiet=True)
+    with mock.patch.object(cmd_doctor, "_stale_generated_hook_reasons", return_value=[]):
+        cmd_doctor._check_generated_hook_freshness(cfg, "codex", "Codex hooks", r)
+    row = r.checks[-1]
+    assert row["status"] == "warn" and "defenseclaw-gateway restart" in row["remediation"]

@@ -547,3 +547,21 @@ func TestPrintSubsystemsHidesUnusedFleetUplink(t *testing.T) {
 		t.Fatalf("OpenClaw roster must still show the fleet uplink:\n%s", out)
 	}
 }
+
+// TestPrintSubsystemExplainsAuditWriteFailure: a full disk reads as a plain
+// problem line, not raw event_history_* tokens (GAP-1308).
+func TestPrintSubsystemExplainsAuditWriteFailure(t *testing.T) {
+	h := gateway.SubsystemHealth{State: gateway.StateError, Details: map[string]interface{}{
+		"event_history_failure":                  "sqlite_write_failed",
+		"event_history_last_sqlite_class":        "full",
+		"event_history_last_sqlite_primary_code": float64(13),
+		"generation":                             float64(2),
+	}}
+	out := captureStdout(t, func() { printSubsystem("Telemetry", h) })
+	if !strings.Contains(out, "disk holding the audit database is full") || strings.Contains(out, "event_history_") {
+		t.Fatalf("audit write failure not in plain words:\n%s", out)
+	}
+	if !strings.Contains(out, "generation:") {
+		t.Fatalf("other details dropped:\n%s", out)
+	}
+}

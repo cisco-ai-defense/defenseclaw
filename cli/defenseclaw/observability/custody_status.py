@@ -571,7 +571,43 @@ def _verify_managed_backup(path: Path, connector: str) -> str:
         actual = _sha256_file(target)
         if not actual:
             return "unverifiable"
-    return "verified" if actual == expected else "drifted"
+    if actual == expected:
+        return "verified"
+    if actual != "missing" and _managed_otel_block_intact(target, connector):
+        # Codex itself writes to config.toml (a folder-trust decision adds
+        # [projects."<dir>"]). Only DefenseClaw's exporter block matters
+        # here, and it is unchanged (GAP-1330).
+        return "verified"
+    return "drifted"
+
+
+_OTEL_EXPORTERS = ("exporter", "trace_exporter", "metrics_exporter")
+
+
+def _managed_otel_block_intact(target: Path, connector: str) -> bool:
+    """Whether a TOML agent config still holds DefenseClaw's [otel] exporters."""
+    if target.suffix.lower() != ".toml":
+        return False
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # Python 3.10
+        import tomli as tomllib  # type: ignore[no-redef]
+    try:
+        document = tomllib.loads(target.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        return False
+    otel = document.get("otel")
+    if not isinstance(otel, dict):
+        return False
+    for name in _OTEL_EXPORTERS:
+        exporter = otel.get(name)
+        http = exporter.get("otlp-http") if isinstance(exporter, dict) else None
+        headers = http.get("headers") if isinstance(http, dict) else None
+        if not isinstance(headers, dict) or headers.get("x-defenseclaw-source") != connector:
+            return False
+        if not str(http.get("endpoint") or "").strip():
+            return False
+    return True
 
 
 def _sha256_file(path: Path) -> str:
