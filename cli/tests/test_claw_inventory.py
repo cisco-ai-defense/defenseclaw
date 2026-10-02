@@ -349,46 +349,21 @@ class TestLiveClawInventory(unittest.TestCase):
         self.assertTrue(any("Skills" in t for t in titles))
         self.assertTrue(any("Memory" in t for t in titles))
 
-    def test_scan_result_preserves_small_category_payload(self):
-        payload = [{"id": "weather", "description": "Weather lookup"}]
-        inv = {
-            "skills": payload,
-            "plugins": [],
-            "mcp": [],
-            "agents": [],
-            "tools": [],
-            "model_providers": [],
-            "memory": [],
-        }
-
-        result = claw_aibom_to_scan_result(inv, self.cfg)
-
-        skills = next(
-            finding for finding in result.findings
-            if finding.title.startswith("Skills (")
-        )
-        self.assertEqual(json.loads(skills.description), payload)
-
-    def test_scan_result_preserves_empty_category_payload_json_type(self):
-        for payload in ({}, "", False, 0, None, []):
+    def test_scan_result_summarizes_each_category_under_a_stable_rule(self):
+        # GAP-1822: an inventory category is exported as a bounded summary
+        # under one rule ID per category, whatever its item count.
+        empty = {key: [] for key in ("plugins", "mcp", "agents", "tools", "model_providers", "memory")}
+        rule_ids = set()
+        for payload in ([{"id": "weather", "description": "Weather lookup"}], [{"id": "a"}, {"id": "b"}], {}, None):
             with self.subTest(payload=payload):
-                inv = {
-                    "skills": payload,
-                    "plugins": [],
-                    "mcp": [],
-                    "agents": [],
-                    "tools": [],
-                    "model_providers": [],
-                    "memory": [],
-                }
-
-                result = claw_aibom_to_scan_result(inv, self.cfg)
-                skills = next(
-                    finding for finding in result.findings
-                    if finding.title.startswith("Skills (")
-                )
-
-                self.assertEqual(json.loads(skills.description), payload)
+                result = claw_aibom_to_scan_result({"skills": payload, **empty}, self.cfg)
+                skills = next(f for f in result.findings if f.title.startswith("Skills ("))
+                summary = json.loads(skills.description)
+                self.assertEqual(summary["schema"], "defenseclaw.aibom.telemetry-summary.v1")
+                self.assertEqual(summary["item_count"], len(payload) if isinstance(payload, list) else 0)
+                self.assertNotIn("weather", skills.description)
+                rule_ids.add(skills.rule_id)
+        self.assertEqual(rule_ids, {"aibom-claw.inventory.skills"})
 
     def test_scan_result_summarizes_oversized_category_for_canonical_ingress(self):
         payload = [
