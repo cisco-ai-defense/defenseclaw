@@ -2288,6 +2288,17 @@ func (s *ContinuousDiscoveryService) detectProcesses() ([]AISignal, error) {
 	}
 	now := time.Now().UTC()
 	var out []AISignal
+	// POSIX matches are name based, so one process can match several
+	// signatures (the "claude" CLI matches both Claude Code's "claude" and
+	// Claude Desktop's "Claude"). Each process keeps only its closest
+	// matches; see processMatchScore.
+	type posixClaim struct {
+		signal AISignal
+		pid    int
+		score  int
+	}
+	var claims []posixClaim
+	bestScore := map[int]int{}
 	for _, sig := range s.catalog {
 		if windowsSnapshot {
 			for i := range procs {
@@ -2298,8 +2309,8 @@ func (s *ContinuousDiscoveryService) detectProcesses() ([]AISignal, error) {
 			}
 			continue
 		}
-		for _, want := range sig.ProcessNames {
-			want = strings.ToLower(strings.TrimSpace(want))
+		for _, rawWant := range sig.ProcessNames {
+			want := strings.ToLower(strings.TrimSpace(rawWant))
 			if want == "" {
 				continue
 			}
@@ -2308,14 +2319,19 @@ func (s *ContinuousDiscoveryService) detectProcesses() ([]AISignal, error) {
 			// not whichever ps row sorted first. This makes "Last
 			// active" intuitive when a long-lived helper process and
 			// a fresh agent run share the same comm.
+			// A closer name match wins over recency, so Claude Desktop's
+			// "Claude" picks the app rather than a newer "claude" CLI.
 			var best *processInfo
+			bestMatch := 0
 			for i := range procs {
 				if !processNameMatches(procs[i].Comm, want) {
 					continue
 				}
-				if best == nil || procs[i].StartedAt.After(best.StartedAt) {
+				match := processMatchScore(procs[i].Comm, rawWant)
+				if best == nil || match > bestMatch || (match == bestMatch && procs[i].StartedAt.After(best.StartedAt)) {
 					p := procs[i]
 					best = &p
+					bestMatch = match
 				}
 			}
 			if best == nil {
@@ -2334,10 +2350,37 @@ func (s *ContinuousDiscoveryService) detectProcesses() ([]AISignal, error) {
 				quality = 0.5
 				matchKind = MatchKindSubstring
 			}
-			out = append(out, s.signalFromProcess(sig, *best, now, matchKind, quality))
+			score := bestMatch
+			if score > bestScore[best.PID] {
+				bestScore[best.PID] = score
+			}
+			claims = append(claims, posixClaim{signal: s.signalFromProcess(sig, *best, now, matchKind, quality), pid: best.PID, score: score})
+		}
+	}
+	for _, claim := range claims {
+		if claim.score == bestScore[claim.pid] {
+			out = append(out, claim.signal)
 		}
 	}
 	return out, nil
+}
+
+// processMatchScore ranks how closely a process name matches a catalog
+// process name: exact with the same case (4), exact ignoring case (3),
+// substring with the same case (2), substring ignoring case (1).
+func processMatchScore(have, want string) int {
+	have = strings.TrimSpace(filepath.Base(have))
+	want = strings.TrimSpace(filepath.Base(want))
+	switch {
+	case have == want:
+		return 4
+	case strings.EqualFold(have, want):
+		return 3
+	case strings.Contains(have, want):
+		return 2
+	default:
+		return 1
+	}
 }
 
 func (s *ContinuousDiscoveryService) signalFromProcess(sig AISignature, proc processInfo, now time.Time, matchKind string, quality float64) AISignal {

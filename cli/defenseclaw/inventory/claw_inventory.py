@@ -315,6 +315,7 @@ def enrich_with_policy(
     pe = PolicyEngine(store)
     if skill_actions is None:
         skill_actions = SkillActionsConfig()
+    inv_connector = connector_paths.normalize(str(inv.get("connector") or inv.get("claw_mode") or ""))
 
     for inv_key, target_type, scanner_name in _POLICY_CATEGORIES:
         items = inv.get(inv_key, [])
@@ -360,6 +361,13 @@ def enrich_with_policy(
             # as unscanned rather than inheriting a stranger's result.
             if scan_entry is not None and not _scan_entry_matches_path(scan_entry, source_path):
                 scan_entry = None
+            # `mcp scan` records a configured server as mcp://<connector>/<name>
+            # (what `mcp list` reads). That target names this exact copy, so it
+            # counts as this server's scan even though it is not its URL.
+            if target_type == "mcp" and inv_connector:
+                scoped_entry = scan_map.get(f"mcp://{inv_connector}/{name}")
+                if scoped_entry is not None:
+                    scan_entry = scoped_entry
             # F-0742: a ``source: user`` (or other operator/third-party)
             # AIBOM row must not be silently blessed by the first-party
             # allow list just because its resolved path lands under a
@@ -861,10 +869,19 @@ def _build_summary(inv: dict[str, Any]) -> dict[str, Any]:
     n_eligible = sum(1 for s in skills if s.get("eligible"))
     n_loaded = sum(1 for p in plugins if p.get("status") == "loaded")
     n_disabled = sum(1 for p in plugins if not p.get("enabled"))
+    # Connectors without a runtime "loaded" status (Hermes) report the
+    # configured state instead, so the summary does not read "0 loaded".
+    reports_loaded = any("status" in p for p in plugins)
 
     cats = {
         "skills": {"count": len(skills), "eligible": n_eligible},
-        "plugins": {"count": len(plugins), "loaded": n_loaded, "disabled": n_disabled},
+        "plugins": {
+            "count": len(plugins),
+            "loaded": n_loaded,
+            "enabled": len(plugins) - n_disabled,
+            "disabled": n_disabled,
+            "reports_loaded": reports_loaded,
+        },
         "mcp": {"count": len(inv.get("mcp", []))},
         "agents": {"count": len(inv.get("agents", []))},
         "rules": {"count": len(inv.get("rules", []))},
@@ -931,7 +948,10 @@ def _render_summary(console: Any, inv: dict[str, Any]) -> None:
     table.add_row("Skills", str(sk.get("count", 0)), sk_detail)
 
     pl = data.get("plugins", {})
-    pl_detail = f"{pl.get('loaded', 0)} loaded, {pl.get('disabled', 0)} disabled"
+    if pl.get("reports_loaded", True):
+        pl_detail = f"{pl.get('loaded', 0)} loaded, {pl.get('disabled', 0)} disabled"
+    else:
+        pl_detail = f"{pl.get('enabled', 0)} enabled, {pl.get('disabled', 0)} disabled"
     pl_detail += _scan_detail_suffix(data.get("scan_plugins"))
     pl_detail += _policy_detail_suffix(data.get("policy_plugins"))
     table.add_row("Plugins", str(pl.get("count", 0)), pl_detail)

@@ -2208,6 +2208,20 @@ class TestSkillInfo(SkillCommandTestBase):
         self.assertNotIn("5 CRITICAL findings", result.output)
 
     @patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info")
+    def test_info_states_policy_verdict_and_singular_finding(self, mock_info):
+        mock_info.return_value = {"name": "one-skill", "eligible": True}
+        self.app.cfg.skill_dirs = lambda connector=None: ["/path/to"]  # type: ignore[method-assign]
+        self.app.store.insert_scan_result(
+            str(uuid.uuid4()), "skill-scanner", "/path/to/one-skill",
+            datetime.now(timezone.utc), 500, 1, "CRITICAL", "{}",
+        )
+        result = self.invoke(["info", "one-skill"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("1 finding ", result.output)
+        self.assertNotIn("1 findings", result.output)
+        self.assertIn("Policy:", result.output)
+
+    @patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info")
     def test_info_known_skill(self, mock_info):
         mock_info.return_value = {
             "name": "web-search",
@@ -2614,6 +2628,12 @@ class TestSkillStatusDisplay(unittest.TestCase):
     def test_missing_when_no_info(self):
         result = _skill_status_display({})
         self.assertIn("missing", result)
+
+    def test_scan_findings_do_not_change_state(self):
+        # Findings are the Verdict column; Status says whether it is loaded.
+        scan = {"max_severity": "CRITICAL"}
+        self.assertIn("ready", _skill_status_display({"eligible": True}, None, scan))
+        self.assertIn("removed", _skill_status_display({"source": "scan-history"}, None, scan))
 
     def test_openclaw_disabled_takes_precedence_over_actions(self):
         ae = MagicMock()

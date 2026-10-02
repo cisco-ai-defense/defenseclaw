@@ -998,6 +998,13 @@ class TestBuildSummaryUnit(unittest.TestCase):
         self.assertEqual(s["plugins"]["disabled"], 1)
         self.assertEqual(s["errors"], 1)
 
+    def test_plugins_without_runtime_status_report_enabled_count(self):
+        # Hermes rows carry the configured state, not a runtime "loaded" status.
+        s = _build_summary({"plugins": [{"enabled": True}, {"enabled": True}, {"enabled": False}]})
+        self.assertFalse(s["plugins"]["reports_loaded"])
+        self.assertEqual(s["plugins"]["enabled"], 2)
+        self.assertEqual(s["plugins"]["disabled"], 1)
+
 
 class TestFetchAll(unittest.TestCase):
     """Tests for the parallel _fetch_all dispatcher."""
@@ -1973,6 +1980,29 @@ class TestEnrichWithPolicy(_StoreWithPolicyMixin, unittest.TestCase):
             self.assertEqual(inv["plugins"][0]["scan_severity"], "MEDIUM")
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_mcp_policy_enrichment_credits_connector_scoped_scans(self):
+        import uuid
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc)
+        self.store.insert_scan_result(
+            str(uuid.uuid4()), "mcp-scanner", "mcp://claudecode/deepwiki",
+            now, 100, 0, "", "{}",
+        )
+        inv = {
+            "connector": "claudecode",
+            "skills": [],
+            "plugins": [],
+            "mcp": [{"id": "deepwiki", "url": "https://mcp.deepwiki.com/mcp", "transport": "http"}],
+            "summary": {"skills": {"count": 0}, "plugins": {"count": 0}, "mcp": {"count": 1}},
+        }
+
+        enrich_with_policy(inv, self.store, self.skill_actions)
+
+        self.assertEqual(inv["mcp"][0]["policy_verdict"], "clean")
+        self.assertEqual(inv["mcp"][0]["scan_findings"], 0)
+        self.assertEqual(inv["summary"]["scan_mcp"]["unscanned"], 0)
 
     def test_mcp_policy_enrichment_matches_url_scan_targets(self):
         import uuid

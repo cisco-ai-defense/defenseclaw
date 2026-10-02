@@ -102,6 +102,26 @@ def test_skill_list_to_row_status_precedence_matches_go_oracle() -> None:
         ({"name": "a", "source": "enforcement"}, "removed"),
         ({"name": "a"}, "inactive"),
         ({"name": "a", "status": "blocked"}, "blocked"),
+        # The CLI's policy verdict wins over the severity heuristic, so a
+        # first-party skill the policy allows does not read "warning".
+        (
+            {
+                "name": "a",
+                "eligible": True,
+                "verdict": "allowed",
+                "scan": {"clean": False, "max_severity": "MEDIUM", "total_findings": 3},
+            },
+            "active",
+        ),
+        (
+            {
+                "name": "a",
+                "eligible": True,
+                "verdict": "rejected",
+                "scan": {"clean": False, "max_severity": "CRITICAL", "total_findings": 3},
+            },
+            "rejected",
+        ),
     ]
 
     for raw, want in cases:

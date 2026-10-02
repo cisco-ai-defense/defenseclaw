@@ -2320,7 +2320,10 @@ _RUNTIME_GRANTS: dict[str, list[dict[str, object]]] = {
                 "observation; without it peers are named by reverse DNS, less "
                 "confidently"
             ),
-            "how": "run the gateway as root, or set dns_capture: false to stop asking",
+            "how": (
+                "run the gateway as root, or turn DNS capture off: "
+                "defenseclaw agent discovery runtime enable --no-dns-capture"
+            ),
         },
         {
             "plane": "agent actions (C)",
@@ -2606,6 +2609,14 @@ def runtime_permissions(
         raise SystemExit(f"no permission guidance for {resolved}")
 
     for_this_host = target_os is None
+    dns_capture_on = True
+    if for_this_host:
+        try:
+            dns_capture_on = bool(
+                _load_config_best_effort(app).ai_discovery.runtime.dns_capture
+            )
+        except AttributeError:
+            dns_capture_on = True
     evaluated = []
     for entry in grants:
         if entry["needs"] == "nothing":
@@ -2614,7 +2625,12 @@ def runtime_permissions(
             state: bool | None = True
         else:
             state = _evaluate_grant(entry.get("probe"), for_this_host)  # type: ignore[arg-type]
-        evaluated.append({**entry, "granted": state})
+        item = {**entry, "granted": state}
+        if not dns_capture_on and "DNS naming" in str(entry["plane"]):
+            # dns_capture is off, so nothing is asking for this grant. Calling
+            # it missing would send the operator to grant something unused.
+            item["off"] = True
+        evaluated.append(item)
 
     if as_json:
         click.echo(json.dumps(
@@ -2635,6 +2651,15 @@ def runtime_permissions(
         # shadowing it left the loop's last dict bound to the name, so the
         # command believed --grant had been passed on every invocation.
         state = entry["granted"]
+        if entry.get("off"):
+            ux.subhead(f"[off] {entry['plane']}", indent="  ")
+            ux.subhead(
+                "dns_capture is off, so peers are named by reverse DNS. To name them "
+                "directly: defenseclaw agent discovery runtime enable --dns-capture "
+                f"(needs {entry['needs']})",
+                indent="    ",
+            )
+            continue
         if state is True:
             mark = "[granted]"
         elif state is False:

@@ -683,6 +683,29 @@ class TestPluginListMultiConnectorDefault(PluginCommandTestBase):
         self.assertEqual([item["id"] for item in groups["opencode"]], [plugin_name])
 
     @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
+    def test_hermes_list_uses_hermes_activation_state(self, _mock_oc):
+        rows = [
+            {"id": "web/exa", "name": "web/exa", "enabled": True, "source_kind": "bundled",
+             "source": os.path.join(self.tmp_dir, "plugins", "web", "exa")},
+            {"id": "disk-cleanup", "name": "disk-cleanup", "enabled": False, "source_kind": "bundled",
+             "source": os.path.join(self.tmp_dir, "plugins", "disk-cleanup")},
+            {"id": "extra", "name": "extra", "enabled": True, "source_kind": "entrypoint",
+             "source": "extra_pkg.plugin:register"},
+        ]
+        self.app.cfg.active_connectors = lambda: ["hermes"]  # type: ignore[method-assign]
+        with patch(
+            "defenseclaw.inventory.claw_inventory._enumerate_hermes_plugins",
+            return_value=rows,
+        ):
+            result = self.invoke(["list", "--connector", "hermes", "--json"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        items = {item["id"]: item for item in json.loads(result.output)}
+        self.assertEqual(sorted(items), ["disk-cleanup", "extra", "web/exa"])
+        self.assertTrue(items["web/exa"]["enabled"])
+        self.assertFalse(items["disk-cleanup"]["enabled"])
+        self.assertEqual(items["extra"].get("host_path", ""), "")
+
+    @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
     def test_table_title_counts_effectively_enabled_plugins(self, _mock_oc):
         codex_dir = os.path.join(self.tmp_dir, "codex-plugins")
         os.makedirs(os.path.join(codex_dir, "dc-plugin-alpha"))

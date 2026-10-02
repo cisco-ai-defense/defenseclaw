@@ -36,6 +36,7 @@ func (s *ClawShieldVulnScanner) SupportedTargets() []string { return []string{"s
 
 type csVulnRule struct {
 	id          string
+	title       string // optional; defaults to the category label
 	category    string
 	pattern     *regexp.Regexp
 	severity    Severity
@@ -105,7 +106,7 @@ var csVulnRules = []csVulnRule{
 	{id: "CS-VLN-XSS-COOKIE", category: "xss", pattern: regexp.MustCompile(`(?i)document\.cookie`), severity: SeverityHigh, remediation: "Mark cookies HttpOnly; avoid accessing document.cookie in user contexts"},
 	{id: "CS-VLN-XSS-DOCWRITE", category: "xss", pattern: regexp.MustCompile(`(?i)document\.write\s*\(`), severity: SeverityHigh, remediation: "Avoid document.write; use DOM APIs with proper encoding"},
 	{id: "CS-VLN-XSS-INNERHTML", category: "xss", pattern: regexp.MustCompile(`(?i)\.innerHTML\s*=`), severity: SeverityMedium, remediation: "Use textContent or sanitize before setting innerHTML"},
-	{id: "CS-VLN-XSS-EVAL", category: "xss", pattern: regexp.MustCompile(`(?i)\beval\s*\(`), severity: SeverityHigh, remediation: "Never use eval() with user-supplied content"},
+	{id: "CS-VLN-XSS-EVAL", title: "Dynamic code execution with eval()", category: "code_injection", pattern: regexp.MustCompile(`(?i)\beval\s*\(`), severity: SeverityHigh, remediation: "Never use eval() with user-supplied content"},
 }
 
 func (s *ClawShieldVulnScanner) Scan(ctx context.Context, target string) (*ScanResult, error) {
@@ -140,7 +141,7 @@ func csVulnScanContent(content []byte, path string) []Finding {
 			findings = append(findings, Finding{
 				ID:          rule.id,
 				Severity:    rule.severity,
-				Title:       fmt.Sprintf("Vulnerability: %s", rule.id),
+				Title:       csVulnTitle(rule),
 				Description: fmt.Sprintf("Category: %s — matched: %s", rule.category, csTruncateMatch(match)),
 				Location:    csLocation(path, content, loc[0]),
 				Remediation: rule.remediation,
@@ -151,4 +152,25 @@ func csVulnScanContent(content []byte, path string) []Finding {
 	}
 
 	return findings
+}
+
+// csVulnCategoryTitles names each rule category in words, so a finding title
+// says what was found rather than repeating the rule ID.
+var csVulnCategoryTitles = map[string]string{
+	"sqli":              "Possible SQL injection pattern",
+	"ssrf":              "Possible server-side request forgery target",
+	"path_traversal":    "Possible path traversal pattern",
+	"command_injection": "Possible shell command injection pattern",
+	"xss":               "Possible cross-site scripting pattern",
+	"code_injection":    "Possible code injection pattern",
+}
+
+func csVulnTitle(rule csVulnRule) string {
+	if rule.title != "" {
+		return rule.title
+	}
+	if title, ok := csVulnCategoryTitles[rule.category]; ok {
+		return title
+	}
+	return "Vulnerability pattern (" + rule.category + ")"
 }

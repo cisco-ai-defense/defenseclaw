@@ -275,3 +275,37 @@ func TestProcessSnapshotFailureIsStructuredInScanSummary(t *testing.T) {
 		t.Fatalf("structured process error = %q", got)
 	}
 }
+
+func TestDetectProcessesClaimsEachPOSIXProcessOnce(t *testing.T) {
+	old := processSnapshotSource
+	t.Cleanup(func() { processSnapshotSource = old })
+	started := time.Now().UTC().Add(-5 * time.Minute).Truncate(time.Second)
+	cliOnly := []processInfo{{PID: 93283, PPID: 93242, Comm: "claude", User: "kevin", StartedAt: started}}
+	processSnapshotSource = func() ([]processInfo, error) { return cliOnly, nil }
+	catalog := []AISignature{
+		{ID: "claudecode", Name: "Claude Code", ProcessNames: []string{"claude"}},
+		{ID: "claude-desktop", Name: "Claude Desktop", ProcessNames: []string{"Claude"}},
+	}
+	svc := &ContinuousDiscoveryService{catalog: catalog}
+	signals, err := svc.detectProcesses()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(signals) != 1 || signals[0].SignatureID != "claudecode" {
+		t.Fatalf("claude CLI signals = %+v, want one Claude Code row", signals)
+	}
+
+	both := append(cliOnly, processInfo{PID: 500, PPID: 1, Comm: "Claude", User: "kevin", StartedAt: started.Add(-time.Hour)})
+	processSnapshotSource = func() ([]processInfo, error) { return both, nil }
+	signals, err = svc.detectProcesses()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]int{}
+	for _, signal := range signals {
+		got[signal.SignatureID] = signal.Runtime.PID
+	}
+	if len(signals) != 2 || got["claudecode"] != 93283 || got["claude-desktop"] != 500 {
+		t.Fatalf("CLI plus app signals = %v, want claudecode=93283 claude-desktop=500", got)
+	}
+}
