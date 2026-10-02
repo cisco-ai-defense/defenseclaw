@@ -356,3 +356,20 @@ def test_uv_gets_load_tolerant_timeouts_and_they_are_restored() -> None:
     assert 'if (-not $env:UV_HTTP_TIMEOUT) { $env:UV_HTTP_TIMEOUT = "300" }' in install
     restore = _text()[_text().index("$savedEnv = @{}") :][:400]
     assert '"UV_COMPILE_BYTECODE_TIMEOUT", "UV_HTTP_TIMEOUT"' in restore
+
+
+def test_a_first_install_does_not_mention_a_previous_install() -> None:
+    # GAP-1827: a first install printed "Saving a rollback copy ... (0 MB needed)"
+    # and "Cleaning up the previous install's files".
+    assert "if ($PrevVersion -or $need -gt 0) {" in _ps1_function("Save-Snapshot")
+    swap = _ps1_function("Complete-Swap")
+    assert "if ($PrevVersion) { Write-Info \"Cleaning up the previous install's files" in swap
+    assert 'else { Write-Info "Removing the staging files" }' in swap
+
+
+def test_the_install_log_can_time_a_failed_gateway_start() -> None:
+    # GAP-1797: no line of the install log (a transcript) had a time.
+    text = _text()
+    assert '"--- $Message  [$(Get-UtcClock)]"' in text
+    assert 'Write-Info "Starting the gateway [$(Get-UtcClock)]"' in _ps1_function("Start-Gateway")
+    assert "did not become healthy within {0:N0} s [{1}]" in text

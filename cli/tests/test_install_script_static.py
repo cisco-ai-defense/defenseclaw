@@ -319,6 +319,7 @@ def test_a_failed_first_run_quickstart_keeps_the_install_and_exits_4(tmp_path: P
         "set -euo pipefail\nwarn() { :; }\n"
         + extras
         + 'CONNECTOR=codex RUN_QUICKSTART=true QUICKSTART_MODE=action QUICKSTART_RC=0 QUICKSTART_RERUN=""\n'
+        + 'OPENCLAW_MISSING=false OPENCLAW_NEXT=""\n'
         + f'DEFENSECLAW_HOME="{tmp_path}" VENV="{tmp_path / "venv"}" BIN_DIR="{venv_bin}"\n'
         + 'first_install_extras\nprintf "%s|%s\\n" "${QUICKSTART_RC}" "${QUICKSTART_RERUN}"\n',
         encoding="utf-8",
@@ -334,7 +335,7 @@ def test_a_failed_first_run_quickstart_keeps_the_install_and_exits_4(tmp_path: P
 
 
 
-def _openclaw_install_run(tmp_path: Path, npm_rc: int) -> subprocess.CompletedProcess[str]:
+def _openclaw_install_run(tmp_path: Path, npm_rc: int, answer: int = 0) -> subprocess.CompletedProcess[str]:
     text = INSTALL_SH.read_text(encoding="utf-8")
     start = text.index("ensure_openclaw() {")
     funcs = text[start : text.index("\n}\n", text.index("npm_global_prefix_writable() {")) + 3]
@@ -355,8 +356,8 @@ def _openclaw_install_run(tmp_path: Path, npm_rc: int) -> subprocess.CompletedPr
     script = tmp_path / "oc.sh"
     script.write_text(
         "set -euo pipefail\n"
-        'has() { command -v "$1" >/dev/null 2>&1; }\nask_yes_no() { return 0; }\n'
-        'warn() { echo "WARN $*"; }\nok() { :; }\nversion_lt() { return 1; }\n'
+        f'has() {{ command -v "$1" >/dev/null 2>&1; }}\nask_yes_no() {{ return {answer}; }}\n'
+        'warn() { echo "WARN $*"; }\ninfo() { echo "INFO $*"; }\nok() { :; }\nversion_lt() { return 1; }\n'
         f'OPENCLAW_VERSION=2026.3.24 OPENCLAW_MISSING=false OPENCLAW_INSTALLED=false BIN_DIR="{tmp_path / "home" / ".local" / "bin"}"\n'
         + funcs
         + 'ensure_openclaw\necho "missing=${OPENCLAW_MISSING} installed=${OPENCLAW_INSTALLED}"\n',
@@ -377,8 +378,10 @@ def test_openclaw_installs_into_the_user_prefix_when_the_node_prefix_is_read_onl
     assert done.returncode == 0, done.stdout + done.stderr
     home = tmp_path / "home"
     assert (tmp_path / "npm.log").read_text().split() == [
-        "install", "-g", "--prefix", f"{home}/.local", "openclaw@2026.3.24", "--loglevel=error"
+        "install", "-g", "--prefix", f"{home}/.local", "openclaw@2026.3.24",
+        "--no-fund", "--no-audit", "--no-update-notifier", "--loglevel=error",
     ]
+    assert "INFO Installing OpenClaw 2026.3.24 with npm" in done.stdout
     assert "missing=false installed=true" in done.stdout
 
     failed_dir = tmp_path / "f"
@@ -953,3 +956,20 @@ def test_the_two_python_environment_builds_are_named() -> None:
     install_new = install_new[: install_new.index("\n}\n")]
     assert "Building the final Python environment in $Venv" in install_new
     assert 'New-Venv $Venv "the final environment"' in install_new
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root can write any prefix")
+def test_declining_openclaw_names_the_working_command_and_skips_quickstart(tmp_path: Path) -> None:
+    # GAP-1798: the skip hint said plain "npm install -g" (EACCES on a
+    # root-owned Node), then quickstart failed on the missing agent (exit 4).
+    declined = _openclaw_install_run(tmp_path, 0, answer=1)
+    assert declined.returncode == 0, declined.stdout + declined.stderr
+    hint = f"install it later with: npm install -g --prefix {tmp_path / 'home'}/.local openclaw@2026.3.24"
+    assert hint in declined.stdout
+    assert "missing=true installed=false" in declined.stdout
+    assert not (tmp_path / "npm.log").exists()
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    extras = text[text.index("first_install_extras() {") :]
+    branch = extras[extras.index('if [[ "${OPENCLAW_MISSING}" == true ]]; then') :]
+    assert branch.index('OPENCLAW_NEXT="defenseclaw ${args[*]}"') < branch.index('"${VENV}/bin/defenseclaw" "${args[@]}"')
+    assert "then run: ${OPENCLAW_NEXT:-defenseclaw setup openclaw}" in text
