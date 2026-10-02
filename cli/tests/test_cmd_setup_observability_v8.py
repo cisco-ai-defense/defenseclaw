@@ -228,9 +228,14 @@ def test_setup_v8_add_with_gateway_down_says_so_without_traceback(
     args = ["add", "otlp", "--non-interactive", "--name", "local", "--endpoint", "127.0.0.1:14317"]
     result = CliRunner().invoke(observability, [*args, "--protocol", "grpc", "--allow-private-networks"], obj=app)
 
-    assert result.exit_code == 1, result.output
+    # GAP-1202: the destination is saved and loads on the next start, so exit 0 with a note.
+    assert result.exit_code == 0, result.output
     assert "Traceback" not in result.output and not isinstance(result.exception, CanonicalObservabilityUnavailableError)
-    assert "the gateway isn't running" in result.output
+    assert "The gateway isn't running" in result.output
+    assert "loads this destination when it starts" in result.output
+    assert "run the command again" not in result.output
+    source = load_validate_v8((tmp_path / "config.yaml").read_bytes()).source
+    assert [d["name"] for d in source["observability"]["destinations"]] == ["local"]
 
 
 def test_setup_v8_explicit_token_takes_precedence_over_environment(
@@ -395,6 +400,35 @@ def test_v8_secret_dotenv_preserves_owner_xattrs_and_tightens_read_mode(
         assert os.getxattr(dotenv, attribute) == b"preserve"
     assert dotenv_values(dotenv).get("EXISTING") == "keep"
     assert dotenv_values(dotenv).get(preset.token_env) == "replacement-secret"
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="SELinux label regression")
+def test_v8_secret_first_dotenv_write_keeps_kernel_selinux_label(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GAP-1221: on SELinux every new file gets security.selinux, which a user cannot strip."""
+    preset = PRESETS["datadog"]
+    dotenv = tmp_path / ".env"
+    label = ("security.selinux", b"unconfined_u:object_r:user_home_t:s0\x00")
+    real_read = v8_activation_module._read_xattrs
+
+    def labelled_read(descriptor, path):
+        return tuple(sorted({*real_read(descriptor, path), label}))
+
+    def refuse_label_removal(descriptor, name):
+        if name == label[0]:
+            raise PermissionError(errno.EACCES, "Permission denied", descriptor)
+        raise AssertionError(f"unexpected removexattr {name}")
+
+    monkeypatch.setattr(v8_activation_module, "_read_xattrs", labelled_read)
+    monkeypatch.setattr(os, "removexattr", refuse_label_removal)
+    monkeypatch.delenv(preset.token_env, raising=False)
+
+    apply_secret(str(tmp_path), preset, "first-secret", dry_run=False)
+
+    assert stat.S_IMODE(dotenv.stat().st_mode) == 0o600
+    assert dotenv_values(dotenv).get(preset.token_env) == "first-secret"
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX read-permission regression")

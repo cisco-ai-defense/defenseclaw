@@ -291,11 +291,21 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
     echo_setup_notes(preset, warnings)
 
     if not dry_run:
-        # The shared setup audit says plainly, without a traceback, when the
-        # gateway is down (for example after a failed auto-restart).
+        # The destination is already saved, and the gateway loads it when it
+        # starts, so a stopped gateway (or a failed auto-restart) only skips
+        # the audit event (GAP-1202): exit 0 with a note, never "run again".
         from defenseclaw.commands.cmd_setup import _log_setup_action
 
-        _log_setup_action(app, ACTION_SETUP_OBSERVABILITY, f"action=add-v8 preset={preset.id}", allow_offline=False)
+        _log_setup_action(
+            app,
+            ACTION_SETUP_OBSERVABILITY,
+            f"action=add-v8 preset={preset.id}",
+            allow_offline=True,
+            offline_note=(
+                "  ⚠ Saved. The gateway isn't running, so the setup audit event was not recorded; "
+                "it loads this destination when it starts (defenseclaw-gateway start)."
+            ),
+        )
 
 
 # ---------------------------------------------------------------------------
