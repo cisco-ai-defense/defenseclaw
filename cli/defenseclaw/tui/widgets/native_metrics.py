@@ -96,10 +96,14 @@ class MetricTile(Vertical):
         border: round {TOKENS.accent_red};
     }}
 
+    /* Narrow tiles end long titles and details with "…" instead of
+       cutting them mid-word ("Hook Calls (5") (GAP-1166). */
     MetricTile .metric-title {{
         height: 1;
         color: {TOKENS.accent_cyan};
         text-style: bold;
+        text-wrap: nowrap;
+        text-overflow: ellipsis;
     }}
 
     MetricTile .metric-digits {{
@@ -132,6 +136,8 @@ class MetricTile(Vertical):
     MetricTile .metric-detail {{
         height: 1;
         color: {TOKENS.text_secondary};
+        text-wrap: nowrap;
+        text-overflow: ellipsis;
     }}
     """
 
