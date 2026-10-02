@@ -29,6 +29,7 @@ import hashlib
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -1015,3 +1016,35 @@ def test_declining_openclaw_names_the_working_command_and_skips_quickstart(tmp_p
     branch = extras[extras.index('if [[ "${OPENCLAW_MISSING}" == true ]]; then') :]
     assert branch.index('OPENCLAW_NEXT="defenseclaw ${args[*]}"') < branch.index('"${VENV}/bin/defenseclaw" "${args[@]}"')
     assert "then run: ${OPENCLAW_NEXT:-defenseclaw setup openclaw}" in text
+
+
+def test_ctrl_c_before_the_swap_says_so_and_drops_what_was_staged(tmp_path: Path) -> None:
+    # GAP-1901: Ctrl+C at the connector prompt also killed tee, so the cancel
+    # message died on a broken pipe (exit 141) and 1.5 GB of .staging and .uv
+    # stayed behind with no CLI to remove them.
+    lines = INSTALL_SH.read_text(encoding="utf-8").splitlines()
+    tee = next(line for line in lines if line.startswith("exec > >("))
+    cancel = lines[lines.index("# Ctrl+C before the swap: drop what this run staged and fetched (GAP-1901).") + 1]
+    home = tmp_path / "home"
+    script = tmp_path / "cancel.sh"
+    script.write_text(
+        "set -euo pipefail\nerr() { echo \"x $*\" >&2; }\n"
+        f'DEFENSECLAW_HOME="{home}" STAGING="{home}/.staging" BIN_DIR="{tmp_path}/bin" UV_DIR_NEW=1 UV_INSTALLED=""\n'
+        f'LOG="{tmp_path}/install.log"\n{tee}\n{cancel}\n'
+        'mkdir -p "${STAGING}/bin" "${DEFENSECLAW_HOME}/.uv/cache"\nkill -INT 0\nsleep 5\n',
+        encoding="utf-8",
+    )
+    # A shell started with SIGINT ignored (a background job) cannot trap it.
+    completed = subprocess.run(
+        ["bash", str(script)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+        start_new_session=True,
+        preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL),
+    )
+    assert completed.returncode == 130, completed.stdout + completed.stderr
+    assert "x Cancelled; nothing was changed" in completed.stdout
+    assert "Cancelled; nothing was changed" in (tmp_path / "install.log").read_text(encoding="utf-8")
+    assert sorted(p.name for p in home.iterdir()) == []
