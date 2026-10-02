@@ -8293,6 +8293,8 @@ class DefenseClawTUI(App[None]):
             *connectors_block,
             ai_panel,
             Text(""),
+            self._overview_hardware_panel(),
+            Text(""),
             quick_text,
             footer_hint,
         )
@@ -8992,6 +8994,71 @@ class DefenseClawTUI(App[None]):
             + self._hardware_profile_section()
             + f"[bold {TOKENS.text_primary}]ACTIONS[/]  {quick}\n"
             "[#9FB2CC]Use the tabs or number keys to drill into Alerts, Audit, Logs, and Setup.[/]"
+        )
+
+    def _overview_hardware_panel(self) -> "Panel":
+        """Build the HARDWARE PROFILE panel for the overview grid layout."""
+        from rich.panel import Panel as RichPanel
+        from rich.text import Text as RichText
+        from rich.table import Table as RichTable
+
+        profile = self._get_hardware_profile()
+        if profile is None:
+            return RichPanel(
+                RichText("Hardware detection unavailable"),
+                title=RichText("HARDWARE PROFILE", style=f"bold {TOKENS.accent_violet}"),
+                title_align="left",
+                border_style=TOKENS.accent_violet,
+                padding=(0, 1),
+            )
+
+        tier = profile.get("hardware_tier", "unknown")
+        tier_colors = {
+            "server": TOKENS.accent_green,
+            "workstation": TOKENS.accent_cyan,
+            "desktop": TOKENS.accent_blue,
+            "laptop": TOKENS.accent_amber,
+            "edge": TOKENS.accent_red,
+        }
+        tier_color = tier_colors.get(tier, TOKENS.text_secondary)
+
+        table = RichTable.grid(padding=(0, 2))
+        table.add_column(style=TOKENS.text_secondary, min_width=18)
+        table.add_column(style=TOKENS.text_primary)
+        table.add_row("CPU", f"{profile.get('cpu_name', 'unknown')} ({profile.get('cpu_cores', 0)} cores)")
+        table.add_row("RAM", f"{profile.get('total_ram_gb', 0):.0f} GB")
+
+        tier_text = RichText()
+        tier_text.append(tier.upper(), style=f"bold {tier_color}")
+        table.add_row("Tier", tier_text)
+
+        for gpu in profile.get("gpus", []):
+            name = gpu.get("name", "unknown")
+            vram = gpu.get("vram_total_gb", 0)
+            backend = gpu.get("backend", "")
+            unified = " (unified)" if gpu.get("unified_memory") else ""
+            gpu_text = RichText()
+            gpu_text.append(f"{name}", style=f"bold {TOKENS.text_primary}")
+            gpu_text.append(f"  {vram:.0f}GB {backend}{unified}", style=TOKENS.text_secondary)
+            table.add_row("GPU", gpu_text)
+
+        if not profile.get("gpus"):
+            table.add_row("GPU", RichText("No GPU detected", style=TOKENS.text_muted))
+
+        max_fp16 = profile.get("max_model_fp16_gb", 0)
+        max_int4 = profile.get("max_model_int4_gb", 0)
+        model_text = RichText()
+        model_text.append(f"FP16 {max_fp16:.0f}GB", style=f"bold {TOKENS.accent_cyan}")
+        model_text.append("  |  ", style=TOKENS.text_muted)
+        model_text.append(f"INT4 {max_int4:.0f}GB", style=f"bold {TOKENS.accent_green}")
+        table.add_row("Max model", model_text)
+
+        return RichPanel(
+            table,
+            title=RichText("HARDWARE PROFILE", style=f"bold {TOKENS.accent_violet}"),
+            title_align="left",
+            border_style=TOKENS.accent_violet,
+            padding=(0, 1),
         )
 
     def _hardware_profile_section(self) -> str:
