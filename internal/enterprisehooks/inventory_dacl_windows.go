@@ -31,6 +31,10 @@ var inventoryDACLDotdirs = append([]string{
 	".codex",
 	".cursor",
 	".gemini",
+	// Antigravity CLI's own folder (skills, plugins). It is not on the
+	// Antigravity hook path, so it is granted even where the guardian owns
+	// .gemini (GAP-1863).
+	`.gemini\antigravity-cli`,
 	".openhands",
 	".openclaw",
 	".hermes",
@@ -48,14 +52,19 @@ var inventoryDACLDotdirs = append([]string{
 	`AppData\Local\hermes\plugins`,
 }, legacyconnector.InventoryDotDirs...)
 
-// inventoryDACLGuardianOwnedDotdirs maps a dotdir to the connector whose
-// enrollment puts it on that user's managed hook path. The guardian keeps
-// every element of that path at its exact protected DACL, so an inventory
-// grant there is drift that the next ensure or repair removes, and the
-// protected children (.kiro\settings, \hooks, \agents) never inherit it.
-// Such a dotdir is not granted while the user's row for its connector is
-// enabled (GAP-1210).
-var inventoryDACLGuardianOwnedDotdirs = map[string]string{".kiro": "kiro"}
+// inventoryDACLGuardianOwnedDotdirs maps a dotdir to the connectors whose
+// enrollment puts it on that user's managed hook path (Kiro: .kiro\settings;
+// Amp and OpenCode: .config\<agent>\plugins; Antigravity:
+// .gemini\config\hooks.json). The guardian keeps every element of that path
+// at its exact protected DACL, so an inventory grant there is drift that the
+// next ensure or repair removes, and the protected children never inherit
+// it. Such a dotdir is not granted while the user has an enabled row for one
+// of its connectors (GAP-1210, GAP-1863).
+var inventoryDACLGuardianOwnedDotdirs = map[string][]string{
+	".kiro":   {"kiro"},
+	".config": {"amp", "opencode"},
+	".gemini": {"antigravity"},
+}
 
 // inventoryDACLListOnlyDirs are per-user install folders the scanner only
 // needs to see. The service gets list and read-attributes rights on the
@@ -173,14 +182,16 @@ func inventoryDACLGuardianOwnedByHome(manifest Manifest) map[string]map[string]s
 			continue
 		}
 		home := strings.ToLower(filepath.Clean(strings.TrimSpace(target.UserHome)))
-		for dotdir, connectorName := range inventoryDACLGuardianOwnedDotdirs {
-			if !strings.EqualFold(strings.TrimSpace(target.Connector), connectorName) {
-				continue
+		for dotdir, connectorNames := range inventoryDACLGuardianOwnedDotdirs {
+			for _, connectorName := range connectorNames {
+				if !strings.EqualFold(strings.TrimSpace(target.Connector), connectorName) {
+					continue
+				}
+				if owned[home] == nil {
+					owned[home] = map[string]struct{}{}
+				}
+				owned[home][dotdir] = struct{}{}
 			}
-			if owned[home] == nil {
-				owned[home] = map[string]struct{}{}
-			}
-			owned[home][dotdir] = struct{}{}
 		}
 	}
 	return owned
