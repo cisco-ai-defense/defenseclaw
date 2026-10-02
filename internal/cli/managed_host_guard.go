@@ -111,15 +111,23 @@ func addManagedWindowsSetupAnswer(root *cobra.Command) {
 	})
 }
 
-// managedWindowsSetupRefusal is the answer to `defenseclaw setup <args>` on a
-// Windows standalone managed computer. Kiro is covered there through the ACP
-// guard, so `setup kiro` names it.
 // managedWindowsAdminCommandAnswer tells a user on a managed Windows computer
 // that a per-user command has no per-user deployment to read.
+// It names the administrator's check for this account as well, because the
+// deployment status has no per-account detail.
 func managedWindowsAdminCommandAnswer(where, command string) error {
 	return fmt.Errorf("this computer's DefenseClaw is managed by your organization (%s), so `%s` has no per-user "+
 		"deployment to check; an administrator can check the managed deployment with "+
-		"`defenseclaw-gateway enterprise windows status --profile standalone`. Nothing was changed", where, command)
+		"`defenseclaw-gateway enterprise windows status --profile standalone`, and your account's agents with "+
+		"`defenseclaw-gateway enterprise policy show --user %s`. Nothing was changed", where, command, managedHostCurrentAccount())
+}
+
+// managedHostCurrentAccount names the signed-in account for the answer above.
+var managedHostCurrentAccount = func() string {
+	if current, err := user.Current(); err == nil && strings.TrimSpace(current.Username) != "" {
+		return current.Username
+	}
+	return "<account>"
 }
 
 // managedWindowsConfigLoadError replaces the raw "read v8 config ...
@@ -146,11 +154,14 @@ func managedWindowsConfigLoadError(cmd *cobra.Command, err error) error {
 	return managedWindowsAdminCommandAnswer(where, command)
 }
 
+// managedWindowsSetupRefusal is the answer to `defenseclaw setup <args>` on a
+// Windows standalone managed computer. The guardian enrolls Kiro there for
+// each listed user through hooks, so `setup kiro` says so.
 func managedWindowsSetupRefusal(where string, args []string) error {
 	detail := "Rotating the credentials of a managed Windows deployment is not available yet. "
 	if len(args) > 0 && strings.EqualFold(strings.TrimSpace(args[0]), "kiro") {
-		detail = "On a managed Windows computer Kiro is protected through the ACP guard: " +
-			"your administrator enrolls it with `defenseclaw-gateway enterprise acp enroll`. "
+		detail = "On a managed Windows computer the guardian enrolls Kiro for each user when your administrator " +
+			"lists it in the deployment (guardrail.connectors.kiro); the ACP guard stays available for editors that start Kiro over ACP. "
 	}
 	return fmt.Errorf("this computer's DefenseClaw is managed by your organization (%s), so per-user setup "+
 		"commands are not available; your administrator manages its connectors and credentials. "+

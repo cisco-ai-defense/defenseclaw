@@ -339,7 +339,7 @@ func evaluateHookForeignGuard(name, hookBinary string, policy enterprisepolicy.P
 	accountHome := hookForeignGuardAccountHome()
 	owned := []string{}
 	if accountHome != "" {
-		owned = perUserOwnedHookCommands(name, accountHome, "")
+		owned = perUserOwnedHookCommandsForBinary(name, accountHome, "", hookBinary)
 	}
 	homes := hookForeignGuardHomes(accountHome)
 	if len(homes) == 0 {
@@ -509,11 +509,18 @@ func captureHookPayloadFacts(opts *hookexec.Options) hookPayloadFacts {
 // commands for the default per-user data dir under home and any explicit
 // data dir.
 func perUserOwnedHookCommands(name, home, dataDir string) []string {
+	return perUserOwnedHookCommandsForBinary(name, home, dataDir, "")
+}
+
+// perUserOwnedHookCommandsForBinary also owns the per-user commands rendered
+// for the administrator's published hookBinary: the hook process cannot
+// resolve the launcher the guardian registered.
+func perUserOwnedHookCommandsForBinary(name, home, dataDir, hookBinary string) []string {
 	dirs := appendDistinctAbs(nil, filepath.Join(home, ".defenseclaw"))
 	dirs = appendDistinctAbs(dirs, dataDir)
 	owned := []string{}
 	for _, dir := range dirs {
-		owned = append(owned, connector.PerUserOwnedHookCommands(name, dir)...)
+		owned = append(owned, connector.PerUserOwnedHookCommandsForBinary(name, dir, hookBinary)...)
 	}
 	return owned
 }

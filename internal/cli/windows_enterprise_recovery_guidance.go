@@ -242,6 +242,43 @@ func windowsEnterpriseStandaloneErrorText(message string) (text string, internal
 	return text, true
 }
 
+// windowsEnterprisePerUserDataDirNextStep names the next step when Setup
+// refused a user's .defenseclaw folder it did not create: the data folder of
+// a per-user install, which `defenseclaw uninstall --binaries` keeps. Setup
+// never adopts it (that user controls it), so the folder has to go first.
+func windowsEnterprisePerUserDataDirNextStep(original, text string) string {
+	if !strings.Contains(original, "reject noncanonical managed runtime baseline") {
+		return ""
+	}
+	folder := `that user's %USERPROFILE%\.defenseclaw`
+	if path := windowsEnterpriseFirstWindowsPath(text); path != "" {
+		if index := strings.Index(strings.ToLower(path), `\.defenseclaw`); index >= 0 {
+			folder = path[:index+len(`\.defenseclaw`)]
+		}
+	}
+	return ". DefenseClaw's managed install did not create " + folder +
+		"; a per-user DefenseClaw install leaves it, also after `defenseclaw uninstall --binaries`." +
+		" Next step: have that user run `defenseclaw uninstall --all --binaries --yes`, or move " + folder +
+		" out of the profile, then run Setup again."
+}
+
+// windowsEnterprisePerUserGatewayHolder reports a listener that is a
+// per-user install's DefenseClaw gateway: the gateway binary running as an
+// account. A managed gateway runs as a service identity (NT SERVICE or NT
+// AUTHORITY), for example another deployment's while this one's service
+// process is unknown.
+func windowsEnterprisePerUserGatewayHolder(image, account string) bool {
+	base := image[strings.LastIndexAny(image, `\/`)+1:]
+	if !strings.EqualFold(base, "defenseclaw-gateway.exe") {
+		return false
+	}
+	domain, _, found := strings.Cut(strings.TrimSpace(account), `\`)
+	if !found {
+		return false
+	}
+	return !strings.EqualFold(domain, "NT SERVICE") && !strings.EqualFold(domain, "NT AUTHORITY")
+}
+
 // windowsEnterpriseFirstWindowsPath returns the first drive-letter path in
 // text, ending at the first delimiter that cannot be part of it here.
 func windowsEnterpriseFirstWindowsPath(text string) string {
@@ -260,9 +297,13 @@ func windowsEnterpriseFirstWindowsPath(text string) string {
 }
 
 // windowsEnterpriseStandaloneSetupCommand is the Setup command line that
-// recovers a pending transaction for action.
-func windowsEnterpriseStandaloneSetupCommand(action, configPath string) string {
+// recovers a pending transaction for action. A purge keeps PURGE=1, so the
+// re-run finishes the uninstall the administrator asked for.
+func windowsEnterpriseStandaloneSetupCommand(action, configPath string, purge bool) string {
 	if action == "uninstall" {
+		if purge {
+			return windowsEnterpriseStandaloneSetupName + " /uninstall PURGE=1 JSON=1"
+		}
 		return windowsEnterpriseStandaloneSetupName + " /uninstall JSON=1"
 	}
 	config := strings.TrimSpace(configPath)
@@ -282,7 +323,7 @@ func windowsEnterpriseStandaloneSetupCommand(action, configPath string) string {
 func windowsEnterprisePendingInspectionStep(configPath string) string {
 	return "A lifecycle transaction is pending, so the DefenseClaw services stay stopped until it finishes or is recovered. " +
 		"If no DefenseClaw Setup or lifecycle command is running now, run DefenseClaw Setup (this release or a newer one) as LocalSystem: " +
-		windowsEnterpriseStandaloneSetupCommand("ensure", configPath) + "; as LocalSystem, Setup recovers the transaction with its own verified gateway."
+		windowsEnterpriseStandaloneSetupCommand("ensure", configPath, false) + "; as LocalSystem, Setup recovers the transaction with its own verified gateway."
 }
 
 // windowsEnterpriseStandaloneNextStep names what the administrator runs
@@ -292,6 +333,7 @@ func windowsEnterprisePendingInspectionStep(configPath string) string {
 func windowsEnterpriseStandaloneNextStep(
 	action string,
 	configPath string,
+	purge bool,
 	pending bool,
 	runs []windowsEnterpriseRecoveryGatewayRun,
 	refusal *windowsEnterpriseRecoveryGatewayRefusal,
@@ -299,7 +341,7 @@ func windowsEnterpriseStandaloneNextStep(
 	if !pending {
 		return ""
 	}
-	command := windowsEnterpriseStandaloneSetupCommand(action, configPath)
+	command := windowsEnterpriseStandaloneSetupCommand(action, configPath, purge)
 	const lead = "The transaction is still pending: the DefenseClaw services stay stopped until it is recovered."
 	const recovers = "; as LocalSystem, Setup recovers the transaction with its own verified gateway."
 	if len(runs) != 0 {

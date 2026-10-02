@@ -59,7 +59,7 @@ The sidecar must be running for this command to work.`,
 	// managed deployment without extra environment variables.
 	PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
 		applyManagedStandaloneAdminEnv(cmd.ErrOrStderr())
-		return loadGatewayCommandConfigOnly()
+		return loadGatewayCommandConfigFor(cmd)
 	},
 	PersistentPostRun: func(_ *cobra.Command, _ []string) {},
 	RunE:              runSidecarStatus,

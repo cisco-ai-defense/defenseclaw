@@ -160,10 +160,21 @@ Without `guardrail.rule_pack_dir` or `policy_dir`, as here, the gateway uses
 the rule packs built into it. A rule-pack directory you name must exist, be
 writable only by administrators, and be readable by the gateway service
 account `NT SERVICE\DefenseClawGateway` (for example, leave the inherited
-`Users` read and execute entry in place). Setup's checks run as SYSTEM, so
-they pass for a folder that only SYSTEM and Administrators can read. The
-gateway then cannot start, and Setup reports only that the service failed to
-start and rolls back. Setup checks the config with the
+`Users` read and execute entry in place). Every parent folder of it needs
+Read & execute for that account too, because the gateway reads each
+parent's permissions and lists it. So do not put the rule pack inside the
+locked staging folder below; give it its own folder:
+
+```powershell
+$Packs = 'C:\ProgramData\DefenseClaw-RulePacks'
+New-Item -ItemType Directory -Path $Packs -Force | Out-Null
+icacls $Packs /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' | Out-Null
+Copy-Item -Recurse .\my-pack "$Packs\my-pack"
+```
+
+Setup checks these permissions for the service account before it changes
+anything, and stops with exit code `1639` naming the folder and the
+`icacls` grant that fixes it. Setup checks the config with the
 gateway's own compiler, and loads every rule pack the gateway would load,
 before it changes anything. When the gateway could not load the file, Setup
 stops with exit code `1639` and names the line and the reason.
@@ -447,6 +458,18 @@ vendor machine policy the transaction had already published can still point
 at the stopped gateway. `status` shows the state; `verify` refuses until the
 transaction is recovered. The failed result names the command to run next.
 
+The rollback never deletes content in an account's `%USERPROFILE%\.defenseclaw`
+that it cannot prove DefenseClaw wrote: a file or folder it did not create,
+a file other than a DefenseClaw hook file whose owner or permissions changed,
+or a hard link. A DefenseClaw hook file whose permissions changed is removed.
+The rollback does not stay pending for the rest either, and the same holds
+when the account changed the owner or permissions of the folder itself or
+replaced it: it renames the folder to
+`%USERPROFILE%\.defenseclaw.rollback-<random>`, with that content inside, and
+finishes. Review that folder and delete it. A file or folder another program
+holds open still makes the rollback wait, because a retry can finish once the
+program closes it.
+
 The rollback of a failed first install also puts back each account's agent
 configuration and removes the machine policy the install published. It acts
 as each account, which needs LocalSystem. For a signed-out account it uses a
@@ -456,6 +479,19 @@ a domain controller answers. Set
 accounts. No guardian is left to clean an account later, so the result lists
 each item it could not remove as a `rollback_leftover` warning, by account
 and connector, with the command that removes it.
+
+Setup run from an elevated administrator prompt is not LocalSystem, so its
+rollback cannot act as any account. The guardian, a LocalSystem service, may
+already have registered DefenseClaw for the signed-in accounts (for example
+Copilot's `%USERPROFILE%\.copilot\hooks\defenseclaw-vscode.json`); those
+registrations stay and point at the removed hook binary, and each account is
+named with "because Setup did not run as LocalSystem". Only the failed run's
+result lists them, because a later `/status` finds no deployment, so keep
+that result. Fix the cause of the failure, then run `/ensure` and
+`/uninstall` as LocalSystem while the accounts are signed in, as in [Run
+Setup as LocalSystem](#run-setup-as-localsystem). An empty
+`C:\Program Files\ClaudeCode\managed-settings.d` can also stay; see
+[Remove](#remove).
 
 Recover by running DefenseClaw Setup as LocalSystem (Intune install behavior
 **System**, or another MDM's system context). `/ensure` recovers the pending
@@ -469,7 +505,8 @@ DefenseClawSetup-Enterprise-Standalone-x64.exe /uninstall JSON=1
 
 `/repair` also recovers the transaction; after a failed first install it
 then stops with "run Install", so `/ensure` is the one-step command. Outside
-an MDM, a one-time scheduled task that runs as SYSTEM gives the same context.
+an MDM, a one-time scheduled task that runs as SYSTEM gives the same context
+(see [Run Setup as LocalSystem](#run-setup-as-localsystem)).
 From a payload folder (see [Run the lifecycle CLI from a payload
 folder](#advanced-run-the-lifecycle-cli-from-a-payload-folder)),
 `"$Payload\defenseclaw.exe" enterprise windows ensure` (or `repair`,
@@ -526,6 +563,32 @@ that could not start. With the same release, or from an elevated
 administrator prompt, recovery keeps the coverage failure and a
 `recovery_gateway_not_used` warning gives the reason.
 
+### Run Setup as LocalSystem
+
+Without an MDM, an administrator gets LocalSystem from a one-time scheduled
+task. Run Setup from the administrator-only staging folder, never from a
+folder a standard user can write, because the task runs whatever file is at
+that path as SYSTEM. From an elevated PowerShell session, with `$Stage` as
+in [Write the config](#2-write-the-config):
+
+```powershell title="Elevated PowerShell"
+Copy-Item .\DefenseClawSetup-Enterprise-Standalone-x64.exe $Stage
+$Setup  = "$Stage\DefenseClawSetup-Enterprise-Standalone-x64.exe"
+$Result = "$Stage\setup-as-system.json"
+$Task   = 'DefenseClaw Setup as SYSTEM'
+$Action = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\cmd.exe" `
+    -Argument "/d /c `"`"$Setup`" /ensure CONFIG=$Stage\config.yaml JSON=1 > `"$Result`"`""
+Register-ScheduledTask -TaskName $Task -Action $Action -User 'NT AUTHORITY\SYSTEM' -RunLevel Highest -Force | Out-Null
+Start-ScheduledTask -TaskName $Task
+do { Start-Sleep -Seconds 5 } while ((Get-ScheduledTask -TaskName $Task).State -in 'Queued', 'Running')
+(Get-ScheduledTaskInfo -TaskName $Task).LastTaskResult
+Unregister-ScheduledTask -TaskName $Task -Confirm:$false
+Get-Content $Result
+```
+
+`LastTaskResult` is Setup's exit code. For `/uninstall`, replace
+`/ensure CONFIG=$Stage\config.yaml` with `/uninstall`.
+
 ## Per-user installs
 
 On a computer with the standalone deployment, the per-user product refuses
@@ -538,8 +601,12 @@ to run:
 | Per-user gateway | Refuses to start on a managed computer |
 
 Nothing migrates a per-user install automatically. Before you deploy, have
-each user remove their per-user install with `defenseclaw uninstall --binaries --yes`.
-Add `--all` to also delete `%USERPROFILE%\.defenseclaw`. See
+each user remove their per-user install with
+`defenseclaw uninstall --all --binaries --yes`. Setup needs `--all`: it does
+not adopt a `%USERPROFILE%\.defenseclaw` folder that a per-user install left,
+and refuses that profile until the folder is gone (move it aside to keep its
+data). A per-user gateway that still runs holds the gateway API port, and
+Setup names it in its `api_port_held` error. See
 [Uninstall and preserved state](/docs/get-started/windows/install-lifecycle#uninstall-and-preserved-state).
 
 ## Remove
@@ -587,7 +654,7 @@ connector and user SID it could not act as, and `user_registrations_failed`
 lists removals that failed, including a registration that a connector's
 removal left in the user's agent configuration (the message names the file).
 To clean every user, run the uninstall as LocalSystem while they are signed
-in.
+in (see [Run Setup as LocalSystem](#run-setup-as-localsystem)).
 
 `PURGE=1` also removes each enrolled account's `%USERPROFILE%\.defenseclaw`
 folder, including that account's per-user hook tokens, whether or not the
@@ -603,13 +670,10 @@ LocalSystem, a file in it could not be removed, or the account's roaming or
 container profile is not on the computer while it is signed out. Remove
 what it names as LocalSystem.
 
-The agents' shared machine folders also stay, because Setup does not record
-whether it created them and another product can use them. Setup removes its
-own files from them but leaves the folders. After a purge on a computer
-where these folders did not exist before, an empty
-`C:\Program Files\ClaudeCode\managed-settings.d` and a
-`C:\ProgramData\opencode\opencode.json` that holds only its `$schema` line
-can remain. Remove them if nothing else uses them.
+The agents' shared machine folders stay while they hold anything else,
+because another product can use them. Setup removes its own files from them.
+A purge also removes `C:\Program Files\ClaudeCode\managed-settings.d`, and
+then `C:\Program Files\ClaudeCode`, when nothing else is left in them.
 
 What stays is inert. Uninstall has already revoked every enrollment. The
 OpenCode and Amp plugins stop enforcing once uninstall removes
@@ -772,7 +836,7 @@ Limits:
 | OpenCode | Machine policy | `%ProgramData%\opencode` loads the managed plugin, plus a per-user hook runtime. Falls back to the per-user plugin while the managed plugin is not in force |
 | Antigravity, Devin, Hermes | Per user | The guardian registers `defenseclaw-hook.exe` in each user's agent config |
 | Amp | Per user | The guardian registers an in-agent plugin that calls the gateway after the listener proves it can derive the user's credential |
-| Kiro | Per user | The guardian writes `defenseclaw-hook.exe` into each user's global `%USERPROFILE%\.kiro\hooks\defenseclaw.json` (Kiro IDE 1.0.182 and later, `kiro-cli --v3`) and the CLI 2.x `defenseclaw` agent. A kiro-cli that has never run is reported until its first run. See [Kiro](/docs/connectors/kiro#enterprise-standalone-profile). The [ACP guard](/docs/acp-guard) stays available |
+| Kiro | Per user | The guardian writes `defenseclaw-hook.exe` into each user's global `%USERPROFILE%\.kiro\hooks\defenseclaw.json` (Kiro IDE 1.0.182 and later, `kiro-cli --v3`) and the CLI 2.x `defenseclaw` agent, pinned to a reviewed Windows hook contract (kiro-cli 2.24.1 and later, Kiro IDE 1.0.182 and later). A kiro-cli that has never run is reported until its first run. See [Kiro](/docs/connectors/kiro#enterprise-standalone-profile). The [ACP guard](/docs/acp-guard) stays available |
 | OpenHands, OmniGent, OpenClaw, ZeptoClaw | Not managed | The enumerator writes no targets for them, so they are not protected. A target manifest row that names one is refused with a reason. |
 
 Windows handles machine policy differently from Linux and macOS. See

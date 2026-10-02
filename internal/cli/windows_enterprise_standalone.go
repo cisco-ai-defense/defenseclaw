@@ -460,10 +460,12 @@ func applyWindowsEnterpriseInstallerReport(
 		message = windowsEnterpriseNameServiceRights(message, result.Action == "status" || result.Action == "verify")
 		code := windowsEnterpriseMessageCode(message, "lifecycle_error")
 		if lifecycle {
+			original := message
 			if text, internal := windowsEnterpriseStandaloneErrorText(message); internal {
 				result.AddWarning("lifecycle_diagnostic", windowsEnterpriseBoundedDiagnostic(message))
 				message = text
 			}
+			message += windowsEnterprisePerUserDataDirNextStep(original, message)
 		}
 		result.AddError(code, message)
 	}
@@ -474,20 +476,17 @@ func applyWindowsEnterpriseInstallerReport(
 		}
 		result.AddError(code, fmt.Sprintf("the standalone deployment is not healthy (installer exit %d)", run.ExitCode))
 	}
-	// A completed uninstall leaves nothing to secure; only a deployment that is
-	// still installed (or a lifecycle stuck mid-transaction) reports why its
-	// security is not complete.
-	if report.Installed || report.TransactionPending {
-		addEnterpriseSecurityIncompleteReasons(result, report.TransactionPending)
-	}
 	if lifecycle && !report.OK && len(result.Errors) > firstError {
 		configPath := ""
+		purge := false
 		if opts != nil {
 			configPath = opts.configPath
+			purge = opts.purge
 		}
 		if next := windowsEnterpriseStandaloneNextStep(
 			result.Action,
 			configPath,
+			purge,
 			report.TransactionPending,
 			decodeWindowsEnterpriseRecoveryGatewayRuns(report.RecoveryGatewayRuns),
 			decodeWindowsEnterpriseRecoveryGatewayRefusal(report.RecoveryGatewayRefusal),
@@ -517,6 +516,13 @@ func applyWindowsEnterpriseInstallerReport(
 		addWindowsEnterpriseUserStateWarning(result, report)
 	}
 	addWindowsEnterpriseRecoveryGatewayWarnings(result, report)
+	// Only when nothing above explains it. A completed uninstall leaves
+	// nothing to secure; only a deployment that is still installed (or a
+	// lifecycle stuck mid-transaction) reports why its security is not
+	// complete.
+	if report.Installed || report.TransactionPending {
+		addEnterpriseSecurityIncompleteReasons(result, report.TransactionPending)
+	}
 }
 
 // addWindowsEnterpriseUserStateWarning names each enrolled account's
@@ -566,11 +572,15 @@ func addWindowsEnterpriseRecoveryGatewayWarnings(result *enterprisestatus.Result
 // account changed after DefenseClaw wrote it is kept whole, so only a manual
 // edit removes DefenseClaw's entries from it. Everything else is removed by a
 // successful install followed by an uninstall, both as LocalSystem while the
-// accounts are signed in (an uninstall acts only for signed-in accounts).
+// accounts are signed in (an uninstall acts only for signed-in accounts). An
+// administrator at an elevated prompt gets LocalSystem from a one-time
+// scheduled task, which the remedy names.
 func windowsEnterpriseRollbackLeftoverWarnings(raw json.RawMessage) []enterprisestatus.Message {
 	var warnings []enterprisestatus.Message
 	for _, leftover := range windowsEnterpriseReportStrings(raw) {
-		remedy := "to remove it, run DefenseClaw Setup /ensure and then /uninstall, both as LocalSystem while the accounts are signed in"
+		remedy := "to remove it, run DefenseClaw Setup /ensure and then /uninstall, both as LocalSystem while the accounts are signed in " +
+			"(an MDM system context, or from an elevated prompt a one-time scheduled task that runs as SYSTEM; " +
+			"see \"Run Setup as LocalSystem\" in the Windows enterprise guide)"
 		if strings.HasSuffix(leftover, ", which changed after DefenseClaw wrote it") {
 			remedy = "remove DefenseClaw's entries from that file by hand"
 		}

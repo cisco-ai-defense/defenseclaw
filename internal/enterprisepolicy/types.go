@@ -205,8 +205,12 @@ type State struct {
 	// through, a Claude Code floor drop-in it must withdraw). A conflict
 	// says what; VerifyAll does not report the connector in place, so the
 	// lifecycle's ensure re-applies.
-	Drift          bool   `json:"drift,omitempty"`
-	LiveVerifiedAt string `json:"live_verified_at,omitempty"`
+	Drift bool `json:"drift,omitempty"`
+	// UserFileDrift names enrolled users' DefenseClaw-owned files that are
+	// missing or not current (Copilot's VS Code Local hook file). The hook
+	// guardian rewrites them as the user; until it has, verify fails.
+	UserFileDrift  []string `json:"user_file_drift,omitempty"`
+	LiveVerifiedAt string   `json:"live_verified_at,omitempty"`
 	// VersionFloor is Claude Code's requiredMinimumVersion state (claudecode
 	// only).
 	VersionFloor *VersionFloorState `json:"version_floor,omitempty"`

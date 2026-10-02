@@ -108,6 +108,9 @@ func atomicWriteOpenCodePlugin(opts Options, path string, data []byte) error {
 
 func openCodePluginLoadable(Options, string) (bool, error) { return true, nil }
 
+// The read-only attribute is a Windows file attribute.
+func openCodePluginReadOnly(string) bool { return false }
+
 // Standard accounts hold no write right on the plugin here.
 func releaseOpenCodePluginName(Options, string) error { return nil }
 

@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
 func TestWindowsManagedRuntimeGenerationOldOrNewPublication(t *testing.T) {
@@ -852,5 +854,25 @@ func createWindowsManagedRuntimeTestHooksWithDACL(t *testing.T, hookDir string, 
 		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
 		nil, nil, dacl, nil); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A managed Windows Kiro lock entry pins one of Kiro's reviewed managed
+// contracts, like every other managed footprint: no contract ID and the
+// sandbox-only Kiro contract are refused (WIN-R1-20).
+func TestWindowsManagedRuntimeValidContractRequiresRegisteredKiroContract(t *testing.T) {
+	if windowsManagedRuntimeValidContract("kiro", "") {
+		t.Fatal("kiro with no contract ID was accepted")
+	}
+	if windowsManagedRuntimeValidContract("kiro", "kiro-cli-hooks-v1") {
+		t.Fatal("kiro with the sandbox-only contract ID was accepted")
+	}
+	for _, id := range []string{connector.KiroWindowsManagedCLIContractID, connector.KiroWindowsManagedIDEContractID} {
+		if !windowsManagedRuntimeValidContract("kiro", id) {
+			t.Fatalf("kiro with its managed contract ID %s was refused", id)
+		}
+	}
+	if !windowsManagedRuntimeValidContract("codex", "codex-hooks-v1") {
+		t.Fatal("codex with its known contract ID was refused")
 	}
 }

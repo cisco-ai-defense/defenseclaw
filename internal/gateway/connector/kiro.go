@@ -476,12 +476,13 @@ func (c *KiroConnector) HookScripts(opts SetupOpts) []string {
 }
 
 func (c *KiroConnector) hookCommand(opts SetupOpts) string {
-	return kiroHookInvocationCommandFor(runtime.GOOS, filepath.Join(opts.DataDir, "hooks", kiroHookScriptName), "")
+	return kiroHookInvocationCommandFor(runtime.GOOS, filepath.Join(opts.DataDir, "hooks", kiroHookScriptName), "", kiroManaged(opts))
 }
 
 // kiroHookInvocationCommandFor renders one Kiro hook command. surface marks
 // the .kiro/hooks configuration (KiroHookSurfaceV3); the CLI 2.x agent
-// configuration is unmarked.
+// configuration is unmarked. On Windows, managed adds --enterprise-managed,
+// as every managed Windows hook command does.
 //
 // On Windows both commands start cmd.exe, which runs the system Windows
 // PowerShell with an encoded script that starts the GUI-subsystem launcher,
@@ -492,14 +493,14 @@ func (c *KiroConnector) hookCommand(opts SetupOpts) string {
 // earlier `& '<launcher>' ...` form failed under cmd.exe ("& was unexpected
 // at this time", exit 1) and, under PowerShell, returned before the GUI
 // launcher finished; either way Kiro proceeded.
-func kiroHookInvocationCommandFor(goos, unixCommand, surface string) string {
+func kiroHookInvocationCommandFor(goos, unixCommand, surface string, managed bool) string {
 	if goos != "windows" {
 		if surface != "" {
 			return unixCommand + " --hook-surface " + surface
 		}
 		return unixCommand
 	}
-	return windowsKiroHookCommandForBinary(defenseclawHookBinary(), surface)
+	return windowsKiroHookCommandForBinary(defenseclawHookBinary(), surface, managed)
 }
 
 // windowsKiroHookCommandForBinary renders the Windows Kiro command:
@@ -514,8 +515,8 @@ func kiroHookInvocationCommandFor(goos, unixCommand, surface string) string {
 // working, because powershell.exe refuses any argument after
 // -EncodedCommand's value. /d skips cmd.exe AutoRun commands; the command has
 // no quotes, percent signs or cmd.exe operators.
-func windowsKiroHookCommandForBinary(hookBinary, surface string) string {
-	return windowsSystemCmdExe() + " /d /c " + windowsKiroPowerShellBridgeForBinary(hookBinary, surface) + "\nexit $LASTEXITCODE"
+func windowsKiroHookCommandForBinary(hookBinary, surface string, managed bool) string {
+	return windowsSystemCmdExe() + " /d /c " + windowsKiroPowerShellBridgeForBinary(hookBinary, surface, managed) + "\nexit $LASTEXITCODE"
 }
 
 // windowsKiroPowerShellBridgeForBinary renders the encoded system PowerShell
@@ -525,14 +526,19 @@ func windowsKiroHookCommandForBinary(hookBinary, surface string) string {
 // mode fallback. Earlier builds wrote this bridge as the whole command, which
 // lost the block under a PowerShell host, so it stays owned for repair and
 // teardown. The arguments are fixed tokens without spaces or quotes, so the
-// rendered bridge is byte-identical to the one those builds wrote. Kiro is not
-// part of any enterprise profile on Windows, so only per-user setup writes
-// this.
-func windowsKiroPowerShellBridgeForBinary(hookBinary, surface string) string {
-	if surface == "" {
-		return windowsNativePowerShellHookCommandForBoundEvent("kiro", "", "", hookBinary)
+// rendered bridge is byte-identical to the one those builds wrote. Managed
+// Windows writes the same bridge under the target user token with managed
+// set; there hookBinary is the standalone defenseclaw-hook.exe and the
+// arguments add --enterprise-managed.
+func windowsKiroPowerShellBridgeForBinary(hookBinary, surface string, managed bool) string {
+	var extra []string
+	if managed {
+		extra = append(extra, "--enterprise-managed")
 	}
-	return windowsNativePowerShellHookCommandForBoundEvent("kiro", "", "", hookBinary, "--hook-surface", surface)
+	if surface != "" {
+		extra = append(extra, "--hook-surface", surface)
+	}
+	return windowsNativePowerShellHookCommandForBoundEvent("kiro", "", "", hookBinary, extra...)
 }
 
 // legacyWindowsKiroStartProcessHookCommandForBinary is the Start-Process
@@ -555,11 +561,17 @@ func kiroWindowsOwnedHookCommands() []string {
 	var commands []string
 	for _, binary := range nativeHookBinaryOwnershipCandidates() {
 		legacy := "& " + powershellQuoteLiteral(binary) + " " + nativeHookFlag + "kiro"
+		// Managed and per-user forms, and the managed form without
+		// --enterprise-managed that earlier managed builds wrote.
+		for _, managed := range []bool{false, true} {
+			commands = append(commands,
+				windowsKiroHookCommandForBinary(binary, "", managed),
+				windowsKiroHookCommandForBinary(binary, KiroHookSurfaceV3, managed),
+				windowsKiroPowerShellBridgeForBinary(binary, "", managed),
+				windowsKiroPowerShellBridgeForBinary(binary, KiroHookSurfaceV3, managed),
+			)
+		}
 		commands = append(commands,
-			windowsKiroHookCommandForBinary(binary, ""),
-			windowsKiroHookCommandForBinary(binary, KiroHookSurfaceV3),
-			windowsKiroPowerShellBridgeForBinary(binary, ""),
-			windowsKiroPowerShellBridgeForBinary(binary, KiroHookSurfaceV3),
 			legacyWindowsKiroStartProcessHookCommandForBinary(binary, ""),
 			legacyWindowsKiroStartProcessHookCommandForBinary(binary, KiroHookSurfaceV3),
 			legacy,
@@ -587,7 +599,7 @@ func kiroOwnedHookCommands(hookScript string) []string {
 // an argument there would orphan DefenseClaw's own entry. An absent marker
 // already resolves to the 2.x veto surface, which is what that config is.
 func (c *KiroConnector) hookCommandForV3Surface(opts SetupOpts) string {
-	return kiroHookInvocationCommandFor(runtime.GOOS, filepath.Join(opts.DataDir, "hooks", kiroHookScriptName), KiroHookSurfaceV3)
+	return kiroHookInvocationCommandFor(runtime.GOOS, filepath.Join(opts.DataDir, "hooks", kiroHookScriptName), KiroHookSurfaceV3, kiroManaged(opts))
 }
 
 // kiroManaged reports whether opts render the administrator-managed Kiro

@@ -4149,12 +4149,97 @@ function Stop-DefenseClawService {
 }
 
 function Start-DefenseClawService {
-    param([Parameter(Mandatory)][string]$Name)
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [string]$FailureLogPath
+    )
     $service = Microsoft.PowerShell.Management\Get-Service -Name $Name -ErrorAction Stop
     if ($service.Status -ne [ServiceProcess.ServiceControllerStatus]::Running) {
-        Microsoft.PowerShell.Management\Start-Service -Name $Name -ErrorAction Stop
-        $service.WaitForStatus([ServiceProcess.ServiceControllerStatus]::Running, [TimeSpan]::FromSeconds(60))
+        if (-not [string]::IsNullOrEmpty($FailureLogPath) -and (Test-DefenseClawStandaloneProfile)) {
+            # Only what this start writes explains its failure.
+            if ($null -eq $script:DefenseClawServiceLogOffsets) {
+                $script:DefenseClawServiceLogOffsets = @{}
+            }
+            $script:DefenseClawServiceLogOffsets[$FailureLogPath] = Get-DefenseClawLogLength -LogPath $FailureLogPath
+        }
+        try {
+            Microsoft.PowerShell.Management\Start-Service -Name $Name -ErrorAction Stop
+            $service.WaitForStatus([ServiceProcess.ServiceControllerStatus]::Running, [TimeSpan]::FromSeconds(60))
+        }
+        catch {
+            $logged = Get-DefenseClawStandaloneServiceLoggedError -LogPath $FailureLogPath
+            if ([string]::IsNullOrEmpty($logged)) {
+                throw
+            }
+            throw "$($_.Exception.Message) The service logged: $logged"
+        }
     }
+}
+
+# Log length before the lifecycle last started a service, by log path.
+$script:DefenseClawServiceLogOffsets = @{}
+
+function Get-DefenseClawLogLength {
+    param([Parameter(Mandatory)][string]$LogPath)
+    try {
+        $item = Microsoft.PowerShell.Management\Get-Item -LiteralPath $LogPath -Force -ErrorAction Stop
+        if ($item -is [IO.FileInfo]) {
+            return [long]$item.Length
+        }
+    }
+    catch {
+    }
+    return [long]0
+}
+
+function Get-DefenseClawStandaloneServiceLoggedError {
+    <#
+        The last "Error: " line a standalone service wrote to its log, or ''.
+        A failed first install rolls the log back with the data folder, so
+        the lifecycle error is the only place the administrator sees why
+        the service stopped.
+    #>
+    param([AllowEmptyString()][string]$LogPath)
+    if (-not (Test-DefenseClawStandaloneProfile) -or [string]::IsNullOrEmpty($LogPath)) {
+        return ''
+    }
+    try {
+        $item = Microsoft.PowerShell.Management\Get-Item -LiteralPath $LogPath -Force -ErrorAction Stop
+        if ($item.PSIsContainer -or $item.LinkType) {
+            return ''
+        }
+        $stream = [IO.File]::Open($LogPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete)
+        try {
+            $since = [long]0
+            if ($null -ne $script:DefenseClawServiceLogOffsets -and
+                $script:DefenseClawServiceLogOffsets.ContainsKey($LogPath) -and
+                [long]$script:DefenseClawServiceLogOffsets[$LogPath] -le $stream.Length) {
+                $since = [long]$script:DefenseClawServiceLogOffsets[$LogPath]
+            }
+            $tail = [Math]::Min([long]65536, $stream.Length - $since)
+            [void]$stream.Seek(-$tail, [IO.SeekOrigin]::End)
+            $buffer = [byte[]]::new($tail)
+            $read = $stream.Read($buffer, 0, $buffer.Length)
+            $text = [Text.Encoding]::UTF8.GetString($buffer, 0, $read)
+        }
+        finally {
+            $stream.Dispose()
+        }
+    }
+    catch {
+        return ''
+    }
+    $last = ''
+    foreach ($line in ($text -split "`r?`n")) {
+        $trimmed = $line.Trim()
+        if ($trimmed.StartsWith('Error: ', [StringComparison]::Ordinal)) {
+            $last = $trimmed.Substring(7).Trim()
+        }
+    }
+    if ($last.Length -gt 600) {
+        $last = $last.Substring(0, 600) + '...'
+    }
+    return $last
 }
 
 function Remove-DefenseClawService {
@@ -4681,6 +4766,32 @@ function Get-DefenseClawGatewayServiceDependencies {
         return $SensorHelperServiceName
     }
     return '/'
+}
+
+# Set-DefenseClawStandaloneEnumeratorEnvironment rewrites the enumerator's
+# environment pins from the layout, as the lifecycle rewrites the gateway's
+# and the guardian's. A replaced manifest retires the Claude Code
+# attestation, and the service assertion compares all three services
+# against the layout, so a stale enumerator pin failed the change with
+# "environment pin drift". The Secure Client profile is unchanged.
+function Set-DefenseClawStandaloneEnumeratorEnvironment {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$GuardianServiceName
+    )
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return
+    }
+    Set-DefenseClawServiceEnvironment `
+        -Name (Get-DefenseClawEnumeratorServiceName -GuardianServiceName $GuardianServiceName) `
+        -RuntimeDirectory $Layout.RuntimeDirectory `
+        -ConfigPath $Layout.ConfigPath `
+        -AuthorizationDirectory $Layout.AuthorizationDirectory `
+        -GatewayServiceName $GatewayServiceName `
+        -LogPath $Layout.GuardianLogPath `
+        -AgentApplicationControlAttested:$Layout.AgentApplicationControlAttested `
+        -ClaudeEffectivePolicyVerified:$Layout.ClaudeEffectivePolicyVerified
 }
 
 function Set-DefenseClawManagedServices {
@@ -16168,7 +16279,17 @@ function Wait-DefenseClawEnterpriseReadiness {
         }
         Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds 500
     } while ([DateTime]::UtcNow -lt $deadline)
-    throw "enterprise readiness timed out: broker_ready=$brokerReady gateway_ready=$gatewayReady guardian_ready=$guardianReady"
+    $message = "enterprise readiness timed out: broker_ready=$brokerReady gateway_ready=$gatewayReady guardian_ready=$guardianReady"
+    $gatewayLogPath = [string]$Layout['GatewayLogPath']
+    if (-not $gatewayReady -and -not [string]::IsNullOrEmpty($gatewayLogPath) -and
+        $null -ne $script:DefenseClawServiceLogOffsets -and
+        $script:DefenseClawServiceLogOffsets.ContainsKey($gatewayLogPath)) {
+        $logged = Get-DefenseClawStandaloneServiceLoggedError -LogPath $gatewayLogPath
+        if (-not [string]::IsNullOrEmpty($logged)) {
+            $message += "; the gateway logged: $logged"
+        }
+    }
+    throw $message
 }
 
 function Get-DefenseClawOptionalPropertyValues {
@@ -22554,6 +22675,10 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             -LogPath $Layout.GuardianLogPath `
             -AgentApplicationControlAttested:$Layout.AgentApplicationControlAttested `
             -ClaudeEffectivePolicyVerified:$Layout.ClaudeEffectivePolicyVerified
+        Set-DefenseClawStandaloneEnumeratorEnvironment `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -GuardianServiceName $GuardianServiceName
         if ([bool]$Layout.CodexTargetEnabled) {
             if (-not $priorCodexTargetEnabled) {
                 Add-DefenseClawCodexTransactionSnapshot `
@@ -22749,7 +22874,7 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             Set-DefenseClawServiceStartMode `
                 -Name $GatewayServiceName `
                 -StartMode 3
-            Start-DefenseClawService -Name $GatewayServiceName
+            Start-DefenseClawService -Name $GatewayServiceName -FailureLogPath $Layout.GatewayLogPath
             # Spec 005 D1 (CR PRRT_kwDORuAK-s6au6lZ): the enumerator
             # must be demand-started + RUNNING before the pending-state
             # assertion below, which requires every managed service to

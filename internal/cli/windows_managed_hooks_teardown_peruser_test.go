@@ -284,3 +284,29 @@ func TestFinalizeWindowsManagedHooksTeardownCleansUpUsersWhilePrepared(t *testin
 		t.Fatalf("finalize: err=%v phase=%s, users cleaned up at phase %q", err, written, cleanedUpAt)
 	}
 }
+
+func TestRemoveEmptyWindowsClaudeManagedSettingsFolders(t *testing.T) {
+	programFiles := t.TempDir()
+	dropIns := filepath.Join(programFiles, "ClaudeCode", "managed-settings.d")
+	if err := os.MkdirAll(dropIns, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	kept := filepath.Join(programFiles, "ClaudeCode", "managed-settings.json")
+	if err := os.WriteFile(kept, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	removeEmptyWindowsClaudeManagedSettingsFolders(programFiles)
+	if _, err := os.Lstat(dropIns); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the empty managed-settings.d stayed: %v", err)
+	}
+	if _, err := os.Lstat(kept); err != nil {
+		t.Fatalf("a ClaudeCode folder that holds the administrator's settings changed: %v", err)
+	}
+	if err := os.Remove(kept); err != nil {
+		t.Fatal(err)
+	}
+	removeEmptyWindowsClaudeManagedSettingsFolders(programFiles)
+	if _, err := os.Lstat(filepath.Join(programFiles, "ClaudeCode")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the empty ClaudeCode folder stayed: %v", err)
+	}
+}

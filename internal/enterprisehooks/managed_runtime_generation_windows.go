@@ -1112,8 +1112,7 @@ func validateWindowsManagedRuntimeGenerationDesired(
 		strings.ContainsAny(desired.ScopedToken, "\x00\r\n") {
 		return desired, nil, errors.New("enterprise hooks: managed runtime scoped token is invalid")
 	}
-	if !validWindowsManagedRuntimeText(desired.HookContractID, 256) ||
-		!windowsManagedRuntimeKnownContract(desired.Connector, desired.HookContractID) {
+	if !windowsManagedRuntimeValidContract(desired.Connector, desired.HookContractID) {
 		return desired, nil, errors.New("enterprise hooks: managed runtime hook contract is invalid")
 	}
 	lockTime, err := time.Parse(time.RFC3339Nano, desired.HookContractLockUpdatedAt)
@@ -1421,13 +1420,12 @@ func validWindowsManagedRuntimeText(value string, maximum int) bool {
 		!strings.ContainsAny(value, "\x00\r\n")
 }
 
-func windowsManagedRuntimeKnownContract(connectorName, contractID string) bool {
-	for _, contract := range connector.KnownHookContracts(connectorName) {
-		if contract.ContractID == contractID {
-			return true
-		}
-	}
-	return false
+// windowsManagedRuntimeValidContract accepts a hook contract ID registered
+// for the connector on this host, the managed Windows Kiro contracts
+// included. Every managed footprint pins one.
+func windowsManagedRuntimeValidContract(connectorName, contractID string) bool {
+	return validWindowsManagedRuntimeText(contractID, 256) &&
+		connector.HookContractRegistered(connectorName, contractID)
 }
 
 func requireWindowsManagedRuntimeEffectiveTarget(target *windows.SID) error {

@@ -167,14 +167,18 @@ func windowsStandaloneRowAdmission(profileHome, connectorName, version string) (
 
 // windowsStandaloneHookContractAdmitted reports whether version resolves to
 // a hook contract the guardian can install: a known contract or, for a
-// connector whose contract is not version-gated (Kiro), a version at or
-// above its standalone floor (standaloneNotGatedAgentFloors).
+// connector whose contract is not version-gated, a version at or above its
+// standalone floor (standaloneNotGatedAgentFloors). Kiro resolves against
+// its managed Windows contracts, whose floors name the refused version.
 func windowsStandaloneHookContractAdmitted(connectorName, version string) (bool, string) {
 	resolution := resolveHookContract(connectorName, version)
 	if standaloneNotGatedAgentFloor(connectorName) != "" && resolution.Status == connector.HookCompatibilityNotGated {
 		return standaloneNotGatedVersionAdmitted(resolution)
 	}
 	if resolution.Status != connector.HookCompatibilityKnown {
+		if standaloneNotGatedAgentFloor(connectorName) != "" && resolution.NormalizedVersion != "" {
+			return false, resolution.Reason
+		}
 		return false, fmt.Sprintf("version %s is not verified against a known hook contract", version)
 	}
 	return true, ""

@@ -1079,6 +1079,15 @@ func hookContractByIDForOS(connectorName, contractID, goos string) (HookContract
 			return contract, true
 		}
 	}
+	// A managed Windows Kiro footprint pins its reviewed managed contract;
+	// the gateway serving it resolves the pin without the managed flag.
+	if managedKiroOnOS(connectorName, goos) {
+		for _, contract := range kiroWindowsManagedHookContracts() {
+			if contract.ContractID == contractID {
+				return contract, true
+			}
+		}
+	}
 	// A sandbox binding pins the sandbox-only contract its image was built
 	// for; every OpenShell sandbox runs Linux.
 	if goos == "linux" {
@@ -1384,8 +1393,14 @@ func resolveHookContractForOptions(
 	opts SetupOpts,
 ) HookContractResolution {
 	goos := opts.profileGOOS()
-	resolution := resolveHookContractForOS(connectorName, opts.AgentVersion, goos)
-	if pinnedID := strings.TrimSpace(opts.HookContractID); pinnedID != "" {
+	pinnedID := strings.TrimSpace(opts.HookContractID)
+	var resolution HookContractResolution
+	if managedKiroOnOS(connectorName, goos) && (opts.ManagedEnterprise || kiroWindowsManagedHookContractID(pinnedID)) {
+		resolution = ResolveWindowsManagedKiroHookContract(opts.AgentVersion)
+	} else {
+		resolution = resolveHookContractForOS(connectorName, opts.AgentVersion, goos)
+	}
+	if pinnedID != "" {
 		pinned, ok := hookContractByIDForOS(connectorName, pinnedID, goos)
 		switch {
 		case !ok:

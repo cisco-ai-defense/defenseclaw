@@ -49,7 +49,7 @@ var standaloneNotGatedAgentFloors = map[string]string{
 // from the per-user discovery worker next to the kiro-cli one.
 const (
 	KiroIDEGlobalHooksFloor = "1.0.182"
-	KiroIDEVersionSuffix    = "+kiro-ide"
+	KiroIDEVersionSuffix    = connector.KiroIDEVersionSuffix
 	KiroIDEDiscoveryKey     = "kiro-ide"
 )
 

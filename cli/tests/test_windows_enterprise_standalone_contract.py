@@ -231,6 +231,7 @@ STANDALONE_SMOKES = (
     "enterprise-profile-lifecycle-lock-smoke.ps1",
     "enterprise-profile-deployment-record-smoke.ps1",
     "enterprise-standalone-claude-policy-binding-smoke.ps1",
+    "enterprise-standalone-enumerator-environment-smoke.ps1",
     "enterprise-standalone-install-tree-smoke.ps1",
     "enterprise-standalone-manifest-adoption-smoke.ps1",
     "enterprise-standalone-recorded-trust-smoke.ps1",
@@ -239,6 +240,7 @@ STANDALONE_SMOKES = (
     "enterprise-standalone-rollback-sensor-helper-smoke.ps1",
     "enterprise-standalone-root-squat-smoke.ps1",
     "enterprise-standalone-secrets-acl-smoke.ps1",
+    "enterprise-standalone-service-logged-error-smoke.ps1",
     "enterprise-standalone-user-cleanup-report-smoke.ps1",
 )
 

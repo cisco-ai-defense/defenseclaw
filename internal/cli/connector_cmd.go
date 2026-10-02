@@ -152,8 +152,8 @@ only in the child process environment. The credential is never printed or
 placed in the command arguments. Put -- before OpenHands flags.`,
 	// A launch client can coexist with the running gateway. Loading a second
 	// audit store would create the same WAL/SHM ownership hazard as status.
-	PersistentPreRunE: func(_ *cobra.Command, _ []string) error {
-		return loadGatewayCommandConfigOnly()
+	PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+		return loadGatewayCommandConfigFor(cmd)
 	},
 	PersistentPostRun: func(_ *cobra.Command, _ []string) {},
 	RunE:              runConnectorLaunch,

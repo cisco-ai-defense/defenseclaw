@@ -42,7 +42,10 @@ const (
 	// whole lifecycle. Only validation plans carry it.
 	windowsManagedRuntimeBaselinePending = "pending"
 
-	windowsManagedRuntimeStagePrefix       = ".defenseclaw.setup-"
+	windowsManagedRuntimeStagePrefix = ".defenseclaw.setup-"
+	// windowsManagedRuntimeRollbackPrefix names a transaction-created root
+	// the rollback kept aside because it holds content cleanup did not write.
+	windowsManagedRuntimeRollbackPrefix    = ".defenseclaw.rollback-"
 	windowsManagedRuntimeStageRandomBytes  = 16
 	windowsManagedRuntimeMarkerSubAuths    = 8
 	windowsManagedRuntimeMaxRoots          = 128
@@ -149,6 +152,12 @@ const (
 	// LocalSystem only. The canonical file DACL is also accepted, for a
 	// record the guardian hardened after a successful setup.
 	windowsManagedRuntimeCleanupConnectorBackupFile
+	// windowsManagedRuntimeCleanupHookFile is a file in the account's
+	// DefenseClaw hooks folder, owned by the account, LocalSystem or
+	// Administrators, with any DACL: a guardian retry, an older release's
+	// disabled-hook tombstone or the account may have rewritten it, and
+	// refusing such a file left the rollback pending with no recovery.
+	windowsManagedRuntimeCleanupHookFile
 )
 
 // windowsManagedRuntimeCleanupOwnedLocks are the root leaves the connector
@@ -255,11 +264,14 @@ func planWindowsManagedRuntimeRoots(
 		Roots:          make([]WindowsManagedRuntimeRootPlan, 0, len(targets)),
 	}
 	pendingAllowed := validation && windowsEnterpriseStandaloneProcess()
+	// Only a standalone install plan re-protects a folder a standalone purge
+	// kept; a validation plan never changes a folder.
+	adoptPurgeKept := !validation && windowsEnterpriseStandaloneProcess()
 	deferredOnly := windowsManagedRuntimeDeferredOnlyRoots(manifest)
 	err = windowsManagedRuntimeSetupPrivilege(func() error {
 		for _, target := range targets {
 			key := windowsManagedRuntimeRootKey(target.sid.String(), target.home)
-			root, inspectErr := planWindowsManagedRuntimeRoot(target, pendingAllowed && deferredOnly[key])
+			root, inspectErr := planWindowsManagedRuntimeRoot(target, pendingAllowed && deferredOnly[key], adoptPurgeKept)
 			if inspectErr != nil {
 				return inspectErr
 			}
@@ -372,8 +384,12 @@ func FinalizeWindowsManagedRuntimeRoots(
 // CleanupWindowsManagedRuntimeRoots removes only roots created by this plan.
 // A marker-staged root may be removed without a journaled identity because the
 // target cannot read or forge its protected random marker. Any root carrying
-// the canonical target DACL requires an exact journaled identity. Unexpected
-// content or substitutions fail closed and leave recovery authority intact.
+// the canonical target DACL requires an exact journaled identity.
+// Substitutions fail closed and leave recovery authority intact. Content the
+// preflight cannot prove DefenseClaw wrote (an unexpected entry, a changed
+// owner or DACL, a hard link) is never deleted: the journaled root holding it
+// is renamed aside (windowsManagedRuntimeRollbackPrefix) so the rollback
+// still completes instead of staying pending.
 func CleanupWindowsManagedRuntimeRoots(
 	request WindowsManagedRuntimeRequest,
 	manifest Manifest,
@@ -517,7 +533,7 @@ func windowsManagedRuntimeCleanupSpecs(plan WindowsManagedRuntimePlan, manifest 
 			}
 		}
 		for _, leaf := range files.hooks {
-			spec.hookFiles[leaf] = windowsManagedRuntimeCleanupCanonicalFile
+			spec.hookFiles[leaf] = windowsManagedRuntimeCleanupHookFile
 		}
 		if files.generation {
 			spec.generationConnectors[name] = struct{}{}
@@ -676,8 +692,10 @@ func windowsManagedRuntimeAccountCreatedBaseline(final windows.Handle, target wi
 // planWindowsManagedRuntimeRoot inspects one target root. With pendingAllowed
 // (a standalone validation plan of a profile whose rows are all deferred), an
 // absent data directory, or one the account created itself before enrollment,
-// is planned pending instead of absent or refused.
-func planWindowsManagedRuntimeRoot(target windowsManagedRuntimeTarget, pendingAllowed bool) (WindowsManagedRuntimeRootPlan, error) {
+// is planned pending instead of absent or refused. With adoptPurgeKept (a
+// standalone install plan), a data directory left by a standalone uninstall
+// with purge is given the canonical DACL again and planned canonical.
+func planWindowsManagedRuntimeRoot(target windowsManagedRuntimeTarget, pendingAllowed, adoptPurgeKept bool) (WindowsManagedRuntimeRootPlan, error) {
 	parent, err := openWindowsManagedRuntimeProfile(target)
 	if err != nil {
 		return WindowsManagedRuntimeRootPlan{}, err
@@ -698,7 +716,17 @@ func planWindowsManagedRuntimeRoot(target windowsManagedRuntimeTarget, pendingAl
 		return WindowsManagedRuntimeRootPlan{}, fmt.Errorf("enterprise hooks: inspect managed runtime baseline: %w", err)
 	} else {
 		defer windows.CloseHandle(final)
-		if err := validateWindowsTargetOwnedDirectoryHandle(final, target.data, target.sid); err != nil {
+		err := validateWindowsTargetOwnedDirectoryHandle(final, target.data, target.sid)
+		if err != nil && adoptPurgeKept {
+			adopted, adoptErr := adoptWindowsManagedRuntimePurgeKeptRoot(parent, final, target)
+			if adoptErr != nil {
+				return WindowsManagedRuntimeRootPlan{}, fmt.Errorf("enterprise hooks: restore the managed DACL on the folder a purge kept: %w", adoptErr)
+			}
+			if adopted {
+				err = validateWindowsTargetOwnedDirectoryHandle(final, target.data, target.sid)
+			}
+		}
+		if err != nil {
 			if !pendingAllowed || !windowsManagedRuntimeAccountCreatedBaseline(final, target) {
 				return WindowsManagedRuntimeRootPlan{}, fmt.Errorf("enterprise hooks: reject noncanonical managed runtime baseline: %w", err)
 			}
@@ -723,6 +751,54 @@ func planWindowsManagedRuntimeRoot(target windowsManagedRuntimeTarget, pendingAl
 	}
 	root.MarkerSID = marker.String()
 	return root, nil
+}
+
+// adoptWindowsManagedRuntimePurgeKeptRoot restores the canonical DACL on a
+// data directory that a standalone uninstall with purge kept. The purge keeps
+// the disabled hook scripts and returns what it keeps to the owner-private
+// shape (LocalSystem and OWNER RIGHTS full control) so that a later per-user
+// install can protect its own folder. A later managed install then found 2
+// ACEs instead of the canonical 7 and refused the folder, and only deleting
+// it as LocalSystem let the machine enroll again. Only a plain, target-owned
+// directory whose DACL is exactly that owner-private shape changes, through a
+// second handle bound to the same inode; its hooks folder, which the purge
+// relaxed the same way, gets the canonical DACL too. It reports whether it
+// changed the folder.
+func adoptWindowsManagedRuntimePurgeKeptRoot(parent, final windows.Handle, target windowsManagedRuntimeTarget) (bool, error) {
+	descriptor, err := windows.GetSecurityInfo(final, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return false, err
+	}
+	owner, _, err := descriptor.Owner()
+	if err != nil || owner == nil || !owner.Equals(target.sid) {
+		return false, err
+	}
+	if relaxed, err := windowsSetupRelaxedDirectoryDACL(descriptor); err != nil || !relaxed {
+		return false, err
+	}
+	identity, err := windowsManagedRuntimeHandleIdentity(final, true)
+	if err != nil {
+		return false, err
+	}
+	writer, err := openWindowsManagedRuntimeChild(parent, ".defenseclaw", windowsManagedRuntimeFinalReadAccess()|windows.WRITE_DAC, false)
+	if err != nil {
+		return false, err
+	}
+	defer windows.CloseHandle(writer)
+	if got, err := windowsManagedRuntimeHandleIdentity(writer, true); err != nil || got != identity {
+		return false, errors.Join(err, fmt.Errorf("enterprise hooks: %s changed while it was inspected", target.data))
+	}
+	acl, err := windowsUserPathProtectionACL(target.sid, true)
+	if err != nil {
+		return false, err
+	}
+	if err := setWindowsObjectDACLNoPropagation(writer, acl, true); err != nil {
+		return false, err
+	}
+	if _, err := windowsRecoverSetupRelaxedHookDirectory(target.data, target.sid); err != nil && !windowsManagedRuntimeRootMissing(err) {
+		return true, err
+	}
+	return true, nil
 }
 
 func stageWindowsManagedRuntimeRoot(rootPlan WindowsManagedRuntimeRootPlan, journal func(WindowsManagedRuntimeClaim) error) (WindowsManagedRuntimeClaim, error) {
@@ -945,29 +1021,34 @@ func cleanupWindowsManagedRuntimeRoot(
 		windows.FILE_SHARE_READ,
 	)
 	if finalErr == nil {
+		var refusal error
+		staging := false
 		identity, err := windowsManagedRuntimeHandleIdentity(final, true)
 		if err != nil || (expected.Identity != "" && identity != expected.Identity) {
-			_ = windows.CloseHandle(final)
-			return claim, fmt.Errorf("enterprise hooks: refuse cleanup of changed managed runtime root identity")
+			refusal = fmt.Errorf("enterprise hooks: refuse cleanup of changed managed runtime root identity")
+		} else {
+			canonical := validateWindowsTargetOwnedDirectoryHandle(final, target.data, target.sid) == nil
+			staging = validateWindowsManagedRuntimeCleanupMarkerHandle(final, target.sid, marker) == nil
+			claim.Identity = identity
+			claim.Created = true
+			if canonical {
+				claim.State = windowsManagedRuntimeStateCanonical
+			} else if staging {
+				claim.State = windowsManagedRuntimeStateStaged
+			}
+			if expected.Identity == "" && !staging {
+				refusal = fmt.Errorf("enterprise hooks: refuse cleanup of canonical managed runtime root without journaled identity")
+			} else if !canonical && !staging {
+				refusal = fmt.Errorf("enterprise hooks: refuse cleanup of unauthenticated managed runtime root")
+			}
 		}
-		canonical := validateWindowsTargetOwnedDirectoryHandle(final, target.data, target.sid) == nil
-		staging := validateWindowsManagedRuntimeCleanupMarkerHandle(final, target.sid, marker) == nil
-		claim.Identity = identity
-		claim.Created = true
-		if canonical {
-			claim.State = windowsManagedRuntimeStateCanonical
-		} else if staging {
-			claim.State = windowsManagedRuntimeStateStaged
-		}
-		if expected.Identity == "" && !staging {
-			_ = windows.CloseHandle(final)
-			return claim, fmt.Errorf("enterprise hooks: refuse cleanup of canonical managed runtime root without journaled identity")
-		}
-		if !canonical && !staging {
-			_ = windows.CloseHandle(final)
-			return claim, fmt.Errorf("enterprise hooks: refuse cleanup of unauthenticated managed runtime root")
-		}
-		if staging && expected.Identity == "" {
+		if refusal != nil {
+			if err := keepWindowsManagedRuntimeRootAside(refusal, final, parent, target, staging); err != nil {
+				_ = windows.CloseHandle(final)
+				return claim, err
+			}
+			err = nil
+		} else if staging && expected.Identity == "" {
 			err = requireWindowsManagedRuntimeDirectoryEmpty(final)
 			if err == nil {
 				var attributes uint32
@@ -978,6 +1059,10 @@ func cleanupWindowsManagedRuntimeRoot(
 			}
 		} else {
 			err = removeWindowsManagedRuntimeRootContents(final, target, marker, spec, staging)
+			var refused *windowsManagedRuntimeCleanupRefusal
+			if errors.As(err, &refused) {
+				err = keepWindowsManagedRuntimeRootAside(err, final, parent, target, staging)
+			}
 		}
 		if err != nil {
 			claim = refreshWindowsManagedRuntimeFailedCleanupClaim(claim, final, target, marker)
@@ -1000,35 +1085,37 @@ func cleanupWindowsManagedRuntimeRoot(
 		windows.FILE_SHARE_READ,
 	)
 	if stageErr == nil {
+		var refusal error
+		staging := false
 		identity, err := windowsManagedRuntimeHandleIdentity(stage, true)
 		if err != nil {
-			_ = windows.CloseHandle(stage)
-			return claim, err
+			refusal = err
+		} else if expected.Identity != "" && identity != expected.Identity {
+			refusal = fmt.Errorf("enterprise hooks: refuse cleanup of changed staging identity")
+		} else {
+			staging = validateWindowsManagedRuntimeStagingHandle(stage, target.sid, marker) == nil
+			canonical := expected.Identity != "" && validateWindowsTargetOwnedDirectoryHandle(stage, filepath.Join(target.home, rootPlan.StagingLeaf), target.sid) == nil
+			claim.Identity = identity
+			claim.Created = true
+			if staging {
+				claim.State = windowsManagedRuntimeStateStaged
+			} else if canonical {
+				claim.State = windowsManagedRuntimeStateCanonical
+			}
+			if !staging && !canonical {
+				refusal = fmt.Errorf("enterprise hooks: refuse cleanup of unauthenticated staging root")
+			} else if err := requireWindowsManagedRuntimeDirectoryEmpty(stage); err != nil {
+				refusal = err
+			}
 		}
-		if expected.Identity != "" && identity != expected.Identity {
-			_ = windows.CloseHandle(stage)
-			return claim, fmt.Errorf("enterprise hooks: refuse cleanup of changed staging identity")
-		}
-		staging := validateWindowsManagedRuntimeStagingHandle(stage, target.sid, marker) == nil
-		canonical := expected.Identity != "" && validateWindowsTargetOwnedDirectoryHandle(stage, filepath.Join(target.home, rootPlan.StagingLeaf), target.sid) == nil
-		claim.Identity = identity
-		claim.Created = true
-		if staging {
-			claim.State = windowsManagedRuntimeStateStaged
-		} else if canonical {
-			claim.State = windowsManagedRuntimeStateCanonical
-		}
-		if !staging && !canonical {
-			_ = windows.CloseHandle(stage)
-			return claim, fmt.Errorf("enterprise hooks: refuse cleanup of unauthenticated staging root")
-		}
-		if err := requireWindowsManagedRuntimeDirectoryEmpty(stage); err != nil {
-			_ = windows.CloseHandle(stage)
-			return claim, err
-		}
-		attributes, err := windowsQuarantineHandleAttributes(stage)
-		if err == nil {
-			err = markWindowsQuarantineHandleForDeletion(stage, attributes)
+		if refusal != nil {
+			err = keepWindowsManagedRuntimeRootAside(refusal, stage, parent, target, staging)
+		} else {
+			var attributes uint32
+			attributes, err = windowsQuarantineHandleAttributes(stage)
+			if err == nil {
+				err = markWindowsQuarantineHandleForDeletion(stage, attributes)
+			}
 		}
 		closeErr := windows.CloseHandle(stage)
 		if err != nil {
@@ -1786,7 +1873,10 @@ func removeWindowsManagedRuntimeRootContents(
 	}
 	tree, err := pinWindowsManagedRuntimeCleanupTree(root, target, spec)
 	if err != nil {
-		return err
+		if windowsManagedRuntimeCleanupTransient(err) {
+			return err
+		}
+		return &windowsManagedRuntimeCleanupRefusal{err: err}
 	}
 	defer tree.close()
 
@@ -1888,6 +1978,56 @@ func removeWindowsManagedRuntimeRootContents(
 		return err
 	}
 	return markWindowsQuarantineHandleForDeletion(root, attributes)
+}
+
+// windowsManagedRuntimeCleanupRefusal is a cleanup preflight that refused the
+// root's content before anything was changed. Nothing in the root is deleted;
+// cleanupWindowsManagedRuntimeRoot keeps the root aside instead.
+type windowsManagedRuntimeCleanupRefusal struct{ err error }
+
+func (r *windowsManagedRuntimeCleanupRefusal) Error() string { return r.err.Error() }
+func (r *windowsManagedRuntimeCleanupRefusal) Unwrap() error { return r.err }
+
+// windowsManagedRuntimeCleanupTransient reports a preflight failure a retry
+// can clear: a live handle on the root's content, or an entry that went away
+// while it was pinned. Those keep the transaction pending as before.
+func windowsManagedRuntimeCleanupTransient(err error) bool {
+	return errors.Is(err, windows.STATUS_SHARING_VIOLATION) || errors.Is(err, windows.ERROR_SHARING_VIOLATION) ||
+		errors.Is(err, windows.ERROR_LOCK_VIOLATION) || windowsManagedRuntimeRootMissing(err)
+}
+
+// keepWindowsManagedRuntimeRootAside ends a cleanup that refused root before
+// deleting anything. The Secure Client profile returns the refusal, so its
+// rollback stays pending as before. The standalone profile renames root aside
+// (detachWindowsManagedRuntimeRoot) and the rollback goes on.
+func keepWindowsManagedRuntimeRootAside(refusal error, root, parent windows.Handle, target windowsManagedRuntimeTarget, markerOwned bool) error {
+	if !windowsEnterpriseStandaloneProcess() {
+		return refusal
+	}
+	if err := detachWindowsManagedRuntimeRoot(root, parent, target, markerOwned); err != nil {
+		return errors.Join(refusal, err)
+	}
+	return nil
+}
+
+// detachWindowsManagedRuntimeRoot renames a journaled root whose content the
+// preflight refused to .defenseclaw.rollback-<random> beside it, so neither
+// managed name remains and the rollback completes without deleting anything
+// it could not authenticate. A marker-quarantined root goes back to the
+// account's own owner and DACL, best effort, so the account can review it.
+func detachWindowsManagedRuntimeRoot(root, parent windows.Handle, target windowsManagedRuntimeTarget, markerOwned bool) error {
+	random := make([]byte, windowsManagedRuntimeStageRandomBytes)
+	if _, err := io.ReadFull(windowsManagedRuntimeEntropy, random); err != nil {
+		return fmt.Errorf("enterprise hooks: name the kept managed runtime root: %w", err)
+	}
+	leaf := windowsManagedRuntimeRollbackPrefix + hex.EncodeToString(random)
+	if err := renameWindowsManagedRuntimeHandle(root, parent, leaf); err != nil {
+		return fmt.Errorf("enterprise hooks: keep the refused managed runtime root aside as %s: %w", leaf, err)
+	}
+	if markerOwned {
+		_ = setWindowsManagedRuntimeFinalSecurity(root, target.sid)
+	}
+	return nil
 }
 
 func pinWindowsManagedRuntimeCleanupTree(
@@ -2054,6 +2194,25 @@ func validateWindowsManagedRuntimeCleanupFileHandle(
 		return "", fmt.Errorf("enterprise hooks: cleanup file owner is unavailable")
 	}
 	dacl, daclDefaulted, err := descriptor.DACL()
+	if contract == windowsManagedRuntimeCleanupHookFile && windowsEnterpriseStandaloneProcess() {
+		// Standalone profile only. The handle identity already proves a
+		// regular, single-link file reached without a reparse point inside
+		// the authenticated root, and the hooks folder only ever holds
+		// DefenseClaw scripts and tombstones, so the DACL is not provenance
+		// here: removing the file fails safe, refusing it wedged the rollback.
+		if ownerDefaulted || !windowsManagedRuntimeHookCleanupOwner(owner, target.sid) {
+			return "", fmt.Errorf("enterprise hooks: hook cleanup file has foreign owner %s", windowsSIDString(owner))
+		}
+		var info windows.ByHandleFileInformation
+		if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+			return "", err
+		}
+		size := int64(uint64(info.FileSizeHigh)<<32 | uint64(info.FileSizeLow))
+		if size > windowsEnterpriseUserFileMaxBytes {
+			return "", fmt.Errorf("enterprise hooks: hook cleanup file exceeds %d bytes", windowsEnterpriseUserFileMaxBytes)
+		}
+		return identity, nil
+	}
 	if err != nil || dacl == nil {
 		return "", fmt.Errorf("enterprise hooks: cleanup file DACL is unavailable")
 	}
@@ -2090,16 +2249,20 @@ func validateWindowsManagedRuntimeCleanupFileHandle(
 		if size > windowsEnterpriseUserFileMaxBytes {
 			return "", fmt.Errorf("enterprise hooks: owned lock cleanup file exceeds %d bytes", windowsEnterpriseUserFileMaxBytes)
 		}
-	case windowsManagedRuntimeCleanupConnectorBackupFile:
+	case windowsManagedRuntimeCleanupConnectorBackupFile, windowsManagedRuntimeCleanupHookFile:
+		kind := "connector backup"
+		if contract == windowsManagedRuntimeCleanupHookFile {
+			kind = "hook"
+		}
 		if ownerDefaulted || daclDefaulted || !owner.Equals(target.sid) {
-			return "", fmt.Errorf("enterprise hooks: connector backup cleanup file owner or DACL provenance is invalid")
+			return "", fmt.Errorf("enterprise hooks: %s cleanup file owner or DACL provenance is invalid", kind)
 		}
 		if canonicalErr := validateWindowsUserPathProtectionACL(label, descriptor, dacl, target.sid, false); canonicalErr != nil {
 			system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
 			if err != nil {
 				return "", err
 			}
-			if err := validateWindowsManagedRuntimeExactFileACL(label, "connector backup", descriptor, dacl, []*windows.SID{target.sid, system}); err != nil {
+			if err := validateWindowsManagedRuntimeExactFileACL(label, kind, descriptor, dacl, []*windows.SID{target.sid, system}); err != nil {
 				return "", err
 			}
 		}
@@ -2109,7 +2272,7 @@ func validateWindowsManagedRuntimeCleanupFileHandle(
 		}
 		size := int64(uint64(info.FileSizeHigh)<<32 | uint64(info.FileSizeLow))
 		if size > windowsEnterpriseUserFileMaxBytes {
-			return "", fmt.Errorf("enterprise hooks: connector backup cleanup file exceeds %d bytes", windowsEnterpriseUserFileMaxBytes)
+			return "", fmt.Errorf("enterprise hooks: %s cleanup file exceeds %d bytes", kind, windowsEnterpriseUserFileMaxBytes)
 		}
 	case windowsManagedRuntimeCleanupGatewayFile:
 		administrators, administratorsErr := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
@@ -2123,6 +2286,23 @@ func validateWindowsManagedRuntimeCleanupFileHandle(
 		return "", fmt.Errorf("enterprise hooks: unknown cleanup file contract")
 	}
 	return identity, nil
+}
+
+// windowsManagedRuntimeHookCleanupOwner reports whether owner is one a
+// DefenseClaw writer leaves on a hook file: the account (writes under its
+// token) or the machine (writes as LocalSystem, owned by LocalSystem or
+// Administrators).
+func windowsManagedRuntimeHookCleanupOwner(owner, target *windows.SID) bool {
+	if owner.Equals(target) {
+		return true
+	}
+	for _, known := range []windows.WELL_KNOWN_SID_TYPE{windows.WinLocalSystemSid, windows.WinBuiltinAdministratorsSid} {
+		sid, err := windows.CreateWellKnownSid(known)
+		if err == nil && owner.Equals(sid) {
+			return true
+		}
+	}
+	return false
 }
 
 // validateWindowsManagedRuntimeOwnedLockACL accepts exactly the descriptor

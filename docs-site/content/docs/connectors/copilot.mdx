@@ -299,10 +299,13 @@ every enrolled user. It binds `SessionStart`, `UserPromptSubmit`,
 places the same hooks as a plugin under
 `~/.copilot/installed-plugins/defenseclaw/defenseclaw/`, enables
 `ChatPluginsEnabled`, and adds `enabledPlugins["defenseclaw@defenseclaw"]` to
-Copilot's managed settings. DefenseClaw writes these files as the user,
-rewrites only files it rendered, and keeps any other file at those paths,
-reporting it. Verify reports drift, and uninstall removes only DefenseClaw's
-copies.
+Copilot's managed settings. DefenseClaw writes these files as the user.
+The Local hook file is DefenseClaw's own: the hook guardian rewrites it when a
+user deletes or edits it (a directory or link at that name is replaced too),
+status and verify fail while it is missing or modified, and uninstall removes
+whatever is at that name. For the plugin files, DefenseClaw rewrites only
+files it rendered and keeps any other file at those paths, reporting it;
+verify reports their drift, and uninstall removes only DefenseClaw's copies.
 
 Copilot CLI also reads `~/.copilot/hooks` and runs the file's `command`, and
 VS Code runs both the file and the plugin. The gateway therefore answers a
