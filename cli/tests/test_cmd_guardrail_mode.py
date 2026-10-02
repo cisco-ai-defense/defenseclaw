@@ -82,8 +82,7 @@ def test_global_switch_sets_only_guardrail_mode(app) -> None:
     assert app.cfg.guardrail.connectors == {}
     _untouched(app)
     app.cfg.save.assert_called_once()
-    assert app.logger.log_action.call_args.args[0] == "config-update"  # the registered audit action
-    assert app.logger.log_action.call_args.args[2].startswith("guardrail-mode ")
+    assert app.logger.log_config_change.call_args.args[0] == "guardrail-mode"  # a config-update mutation
 
 
 def test_global_switch_restarts_a_running_gateway(app, restarts) -> None:

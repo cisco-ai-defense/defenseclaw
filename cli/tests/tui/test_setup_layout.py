@@ -234,3 +234,16 @@ async def test_a_wide_then_80_column_screen_names_tabs_and_keeps_validation(herm
             await pilot.pause()
         rows = _table_rows_on_screen(app)
         assert "Validation" in rows[0], "\n".join(rows)
+
+
+def test_the_active_tab_always_shows_its_name() -> None:
+    """GAP-1327: at 160 columns Activity or Audit active read just "A"/"9"."""
+
+    unread = {"alerts": 9}
+    for width in (66, 134, 148):
+        for active in ("activity", "audit", "registries", "ai"):
+            labels = fit_tab_labels(FIFTEEN_PANELS, active, unread, width)
+            assert strip_width(tuple(labels.values())) <= width, (width, active)
+            assert len(labels[active]) > 2, (width, active, labels[active])
+            for name, key, _label in FIFTEEN_PANELS:
+                assert labels[name].startswith(key)

@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -261,6 +262,15 @@ class AuditPanelModel:
             filtered_label = filter_label
             filter_label = f"Showing {len(self.filtered)} of {len(self.items)}: {filter_label}"
         summary = f"{len(self.filtered)} shown of {len(self.items)} events"
+        if len(self.items) >= AUDIT_LOAD_LIMIT:
+            # Say how far back the view reaches; blocks come from the whole
+            # trail, everything else from the newest rows (GAP-1355).
+            try:
+                oldest = min(event.timestamp for event in self.items[:AUDIT_LOAD_LIMIT])
+                since = f" since {timestamp_label(oldest)}"
+            except (TypeError, ValueError):
+                since = ""
+            summary += f" · newest {AUDIT_LOAD_LIMIT}{since} + all blocks; older: defenseclaw audit export"
         hidden = self.hidden_routine_count()
         if hidden:
             # The default view hides routine events (gateway starts, reloads,
@@ -369,7 +379,8 @@ class AuditPanelModel:
                 self.items = list(self.store.list_actionable_event_summaries(500))  # type: ignore[attr-defined]
                 self._count_routine()
             elif hasattr(self.store, "list_event_summaries"):
-                self.items = list(self.store.list_event_summaries(500))  # type: ignore[attr-defined]
+                newest = self.store.list_event_summaries(500)  # type: ignore[attr-defined]
+                self.items = with_older_blocks(self.store, newest)
             else:
                 self.items = list(self.store.list_events(500))  # type: ignore[attr-defined]
         except Exception as exc:  # noqa: BLE001 - store failures are panel error state.
@@ -601,13 +612,27 @@ class AuditPanelModel:
         # Guardrail verdicts and judge rows keep their outcome in the
         # structured record; the flat row only says "guardrail.evaluation.
         # completed" (GAP-1215).
-        pairs.extend(_structured_fact_pairs(event.structured))
-        if event.details:
-            structured = _structured_detail_rows(event.details)
-            if structured:
-                pairs.extend(structured)
-            else:
-                pairs.append(("Details", event.details))
+        kv_rows = _structured_detail_rows(event.details) if event.details else ()
+        # The row's own key=value details are the hook's record of the call;
+        # a structured fact with the same label (``Decision: none`` from a
+        # guardrail record) would contradict it, and a repeated Connector
+        # pushes Mode/Rules/Reason off the pane (GAP-1215).
+        kv_labels = {label for label, _value in kv_rows}
+        if "Enforcement mode" in kv_labels:
+            kv_labels.add("Mode")
+        if "Hook event" in kv_labels:
+            kv_labels.add("Hook")
+        for label, value in _structured_fact_pairs(event.structured):
+            if label not in kv_labels:
+                pairs.append((label, value))
+        shown = set(pairs)
+        has_connector = any(label == "Connector" for label, _value in pairs)
+        if kv_rows:
+            pairs.extend(
+                row for row in kv_rows if row not in shown and not (row[0] == "Connector" and has_connector)
+            )
+        elif event.details:
+            pairs.append(("Details", event.details))
         if event.run_id:
             pairs.append(("Run ID", event.run_id))
         if info.action is not None:
@@ -779,8 +804,8 @@ class AuditPanelModel:
             action_style_key=action_style,
             target_type=_target_type_from_action(event.action),
             target_label=target_label,
-            severity_label=event.severity,
-            severity_style_key=audit_severity_style_key(event.severity),
+            severity_label=_display_severity(event),
+            severity_style_key=audit_severity_style_key(_display_severity(event)),
             run_label=_truncate(event.run_id, 14),
             details_label=details_label,
             connector_label=_truncate(event_connector(event), 14),
@@ -1004,14 +1029,54 @@ def _target_type_from_action(action: str) -> str:
     return ""
 
 
+AUDIT_LOAD_LIMIT = 500
+
+
+def with_older_blocks(store: object, events: Iterable[Event]) -> list[Event]:
+    """The newest audit rows plus older block/deny rows past that window."""
+
+    rows = list(events)
+    lookup = getattr(store, "list_block_event_summaries", None)
+    if lookup is None or len(rows) < AUDIT_LOAD_LIMIT:
+        return rows
+    try:
+        blocks = lookup(AUDIT_LOAD_LIMIT)
+    except Exception:  # noqa: BLE001 - an older or locked DB keeps the newest rows.
+        return rows
+    seen = {event.id for event in rows}
+    return rows + [event for event in blocks if event.id not in seen]
+
+
+def _display_severity(event: Event) -> str:
+    """Row severity; a hook row stored as INFO shows its decision's severity.
+
+    A blocked ``connector-hook`` row is persisted with INFO while its details
+    say ``severity=CRITICAL``; the SEVERITY column read INFO next to
+    "block · CRITICAL" (GAP-1323).
+    """
+
+    severity = (event.severity or "").strip().upper()
+    if severity in {"", "INFO"} and event.action.lower() == "connector-hook":
+        decided = _parse_kv_details(event.details).get("severity", "").strip().upper()
+        if decided and decided != "NONE":
+            return decided
+    return event.severity
+
+
 def _matches_common_filter(event: Event, preset: AuditCommonFilter) -> bool:
     action = event.action.lower()
-    severity = event.severity.upper()
+    severity = _display_severity(event).upper()
     haystack = _event_haystack(event)
     if preset == "risk":
-        return severity in {"CRITICAL", "HIGH", "ERROR"} or any(
-            token in action or token in haystack
-            for token in ("block", "deny", "quarantine", "fail", "error", "panic", "timeout")
+        # Only rows at or above the alert level, blocks and would-blocks, and
+        # failures. Matching "block" anywhere in the text also kept every
+        # INFO allow row, whose details carry would_block=false (GAP-1323).
+        if severity in {"CRITICAL", "HIGH", "ERROR"} or _matches_common_filter(event, "blocks"):
+            return True
+        if _parse_kv_details(event.details).get("would_block", "").strip().lower() == "true":
+            return True
+        return any(token in action for token in ("block", "deny", "quarantine")) or any(
+            token in action or token in haystack for token in ("fail", "error", "panic", "timeout")
         )
     if preset == "blocks":
         # A hook or guardrail block is a ``connector-hook``/``guardrail-verdict``
@@ -1403,7 +1468,7 @@ def event_connector(event: Event) -> str:
 _STRUCTURED_FACTS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         "Decision",
-        ("defenseclaw.guardrail.decision", "defenseclaw.guardrail.effective_action", "defenseclaw.judge.action"),
+        ("defenseclaw.guardrail.effective_action", "defenseclaw.guardrail.decision", "defenseclaw.judge.action"),
     ),
     ("Mode", ("defenseclaw.guardrail.mode",)),
     ("Would block", ("defenseclaw.guardrail.would_block",)),
@@ -1432,10 +1497,20 @@ def _structured_fact_pairs(structured: object) -> tuple[tuple[str, str], ...]:
 
     pairs: list[tuple[str, str]] = []
     for label, keys in _STRUCTURED_FACTS:
-        value = next((text for key in keys if (text := _structured_text(structured, key))), "")
+        # "none" is a placeholder (no verdict from that stage), not a decision.
+        value = next(
+            (text for key in keys if (text := _structured_text(structured, key)) and text.lower() != "none"),
+            "",
+        )
+        if label == "Mode":
+            # The CLI and status bar call the enforcing mode "action".
+            value = _MODE_LABELS.get(value.lower(), value)
         if value:
             pairs.append((label, value))
     return tuple(pairs)
+
+
+_MODE_LABELS = {"enforce": "action"}
 
 
 parse_kv_details = _parse_kv_details

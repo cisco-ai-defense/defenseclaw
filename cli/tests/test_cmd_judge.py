@@ -102,7 +102,7 @@ class JudgeAddTests(unittest.TestCase):
         self.assertEqual(app.cfg.guardrail.judge.hook_connectors, ["hermes"])
         app.cfg.save.assert_called_once()
         restart.assert_called_once()
-        app.logger.log_action.assert_called_once()
+        app.logger.log_config_change.assert_called_once()
 
     @patch.object(cmd_setup, "_restart_services")
     def test_add_normalizes_case(self, restart):

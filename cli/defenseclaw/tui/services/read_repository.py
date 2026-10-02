@@ -39,6 +39,7 @@ from defenseclaw.tui.panels.activity import (
     activity_mutations_from_v8_history,
 )
 from defenseclaw.tui.panels.alerts import AlertEvent, alerts_from_v8_history
+from defenseclaw.tui.panels.audit import with_older_blocks
 from defenseclaw.tui.services.event_models import ActivityMutation, EgressEvent
 from defenseclaw.tui.services.gateway_log_views import (
     GatewayLogViews,
@@ -216,7 +217,7 @@ class TUIReadRepository:
 
         audit_events = self._component(
             "audit",
-            lambda: tuple(store.list_event_summaries(_PANEL_LIMIT)),
+            lambda: tuple(with_older_blocks(store, store.list_event_summaries(_PANEL_LIMIT))),
             previous.audit_events if previous else (),
             errors,
         )
