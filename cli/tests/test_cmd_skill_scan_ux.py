@@ -279,6 +279,20 @@ class TestPathTargetUX(_SkillScanUXBase):
         payload = json.loads(result.output[result.output.index("{"):])
         self.assertNotIn("connector", payload)
 
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
+    def test_folder_target_records_no_connector(self, mock_cls) -> None:
+        # GAP-1919: the audit record (alert, finding.observed) names no connector either.
+        self.app.cfg.guardrail.connector = "claudecode"
+        mock_cls.return_value.scan.return_value = self._blocked_result(self.skill_dir)
+        self.app.logger.log_scan = MagicMock()
+        with patch.object(type(self.app.cfg), "skill_dirs", lambda _self, _c=None: []):
+            result = self.invoke(["scan", self.skill_dir])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("(not from a connector config)", result.output)
+        self.app.logger.log_scan.assert_called_once()
+        self.assertIsNone(self.app.logger.log_scan.call_args.kwargs.get("connector"))
+
 
 class TestScanArgumentErrors(_SkillScanUXBase):
     """GAP-1771: argument errors agree with the help."""
