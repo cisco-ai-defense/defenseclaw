@@ -122,6 +122,44 @@ func TestPrepareOpenCodePluginArtifactDestinationRecordsTheFoldersItCreates(t *t
 	}
 }
 
+// GAP-1106: an earlier release made the plugin folder for its plugin without
+// listing it, so uninstall left it. A folder that holds only DefenseClaw's
+// plugin (or nothing) is recorded now; one with other plugins is not.
+func TestPrepareOpenCodePluginArtifactDestinationRecordsAnEarlierReleasesFolder(t *testing.T) {
+	for name, entries := range map[string][]string{
+		"only the plugin": {"defenseclaw.js"},
+		"empty":           nil,
+		"other plugins":   {"defenseclaw.js", "mine.ts"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			home := t.TempDir()
+			dataDir := filepath.Join(home, ".defenseclaw")
+			plugins := filepath.Join(home, ".config", "opencode", "plugins")
+			if err := os.MkdirAll(plugins, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			for _, entry := range entries {
+				if err := os.WriteFile(filepath.Join(plugins, entry), []byte("x"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			plugin := filepath.Join(plugins, "defenseclaw.js")
+			err := WithUserHomeDir(home, func() error { return prepareOpenCodePluginArtifactDestination(plugin, dataDir) })
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := readWatcherCreatedDirs(filepath.Join(dataDir, watcherCreatedDirsFile)).Dirs
+			var want []string
+			if name != "other plugins" {
+				want = []string{plugins}
+			}
+			if !slices.Equal(got, want) {
+				t.Fatalf("recorded %v, want %v", got, want)
+			}
+		})
+	}
+}
+
 // patchingConnector writes, besides its hook config, an agent file it lists
 // in AgentPaths (OpenCode's opencode.json in a home where OpenCode never ran).
 type patchingConnector struct {

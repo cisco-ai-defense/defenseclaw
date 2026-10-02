@@ -78,14 +78,43 @@ func recordDirsNowPresent(dataDir string, missing []string) {
 // the folder is made before any connector Setup runs (the gateway's
 // registration snapshot), so SetupRecordingCreatedDirs never sees it
 // missing, and the plugin file is not one of the hook config paths.
+//
+// A plugin folder that already holds nothing but DefenseClaw's plugin (or
+// nothing at all) is recorded too: an earlier release made it for its plugin
+// without listing it, so it stayed after uninstall (GAP-1106).
 func prepareOpenCodePluginArtifactDestination(path, dataDir string) error {
 	var missing []string
 	if home := strings.TrimSpace(userHomeDir()); home != "" && filepath.IsAbs(path) {
 		missing = missingParentDirs(filepath.Clean(home), path)
+		if dir := filepath.Dir(filepath.Clean(path)); len(missing) == 0 &&
+			belowDir(filepath.Clean(home), dir) && openCodePluginDirHoldsOnlyDefenseClaw(path) {
+			missing = []string{dir}
+		}
 	}
 	err := createOpenCodePluginArtifactDestination(path)
 	recordDirsNowPresent(dataDir, missing)
 	return err
+}
+
+// openCodePluginDirHoldsOnlyDefenseClaw reports whether the folder of path,
+// the OpenCode plugin, is a real folder whose only entries are that plugin
+// and its Windows lock file.
+func openCodePluginDirHoldsOnlyDefenseClaw(path string) bool {
+	dir := filepath.Dir(filepath.Clean(path))
+	if info, err := os.Lstat(dir); err != nil || info.Mode().Type() != fs.ModeDir {
+		return false
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	name := filepath.Base(path)
+	for _, entry := range entries {
+		if entry.Name() != name && entry.Name() != name+".lock" {
+			return false
+		}
+	}
+	return true
 }
 
 // RemovalLeavingNoNewDirs runs fn, a removal of conn's registration for a

@@ -165,3 +165,32 @@ func TestAddEnterpriseHookStatePurgesListsAccountsItCannotPurge(t *testing.T) {
 		t.Fatalf("alice purges %d, dave targets %+v", purges, jobs[1004].Request.Targets)
 	}
 }
+
+// GAP-1502: the purge removes the account's per-user install, so its gateway
+// port claims go too; other accounts' init would keep skipping that port.
+func TestStopPerUserGatewayForPurgeDropsTheAccountsPortClaims(t *testing.T) {
+	claims := t.TempDir()
+	previous := gatewayPortClaimDir
+	gatewayPortClaimDir = claims
+	t.Cleanup(func() { gatewayPortClaimDir = previous })
+	claim := filepath.Join(claims, gatewayPortClaimPrefix+"19126")
+	other := filepath.Join(claims, "unrelated-file")
+	for _, path := range []string{claim, other} {
+		if err := os.WriteFile(path, nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dataDir := filepath.Join(t.TempDir(), ".defenseclaw")
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if stopped, err := stopPerUserGatewayForPurge(enterprisehooks.InstallOptions{DataDir: dataDir}); err != nil || stopped {
+		t.Fatalf("stopPerUserGatewayForPurge = %v, %v; want false, nil", stopped, err)
+	}
+	if _, err := os.Lstat(claim); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the account's port claim is still there: %v", err)
+	}
+	if _, err := os.Lstat(other); err != nil {
+		t.Fatalf("an unrelated file went: %v", err)
+	}
+}

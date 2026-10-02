@@ -42,6 +42,7 @@ OpenClaw, never against the other adapters — calling
 from __future__ import annotations
 
 import contextlib
+import glob
 import json
 import ntpath
 import os
@@ -192,6 +193,13 @@ class UninstallPlan:
     # when they installed uv (--all --binaries only, and only when that uv
     # goes too and no other uv is on PATH).
     uv_leftovers: tuple[str, ...] = ()
+    # uv_cache_entries is uv's cache folder when it holds DefenseClaw entries
+    # an earlier installer's uv downloaded there; `uv cache clean defenseclaw`
+    # removes only those (--all --binaries; GAP-1411).
+    uv_cache_entries: str = ""
+    # hook_temp_dirs are the scratch folders (defenseclaw-hook.*) DefenseClaw's
+    # shell hooks left in the temp folders (--all; GAP-1411).
+    hook_temp_dirs: tuple[str, ...] = ()
     # mac_app is DefenseClawMac.app when it is installed (macOS). Uninstall
     # does not remove the app, its login item or its background service; the
     # plan says how to.
@@ -593,6 +601,9 @@ def _build_plan(
     openclaw_home = openclaw_home_candidate if owns_openclaw else ""
 
     sandbox_state = _sandbox_state_present(cfg, data_dir, platform_name)
+    uv_leftovers = (
+        _installer_uv_leftovers(install_root, binary_targets, data_dir, platform_name) if wipe_data and binaries else ()
+    )
     return UninstallPlan(
         sandbox_teardown=sandbox_state and not skip_sandbox_teardown,
         sandbox_teardown_skipped=sandbox_state and skip_sandbox_teardown,
@@ -622,11 +633,13 @@ def _build_plan(
             wipe_data and not preserve_data_entries and _local_observability_stack_file(data_dir) != ""
         ),
         mac_app=_installed_mac_app(platform_name) if wipe_data and binaries else "",
-        uv_leftovers=(
-            _installer_uv_leftovers(install_root, binary_targets, data_dir, platform_name)
-            if wipe_data and binaries
-            else ()
+        uv_leftovers=uv_leftovers,
+        uv_cache_entries=(
+            _uv_cache_with_defenseclaw(data_dir, platform_name, uv_leftovers)
+            if wipe_data and binaries and not preserve_data_entries
+            else ""
         ),
+        hook_temp_dirs=_hook_temp_dirs(platform_name) if wipe_data and not preserve_data_entries else (),
     )
 
 
@@ -858,6 +871,110 @@ def _installer_uv_leftovers(
         if base and _only_python(python_root, base):
             leftovers.append(python_root)
     return tuple(leftovers)
+
+
+def _uv_cache_with_defenseclaw(data_dir: str, platform_name: str, uv_leftovers: tuple[str, ...]) -> str:
+    """Return uv's cache folder when it holds DefenseClaw entries, else "".
+
+    Installers before 1.0.2 had uv download DefenseClaw into uv's own cache,
+    one entry per install (GAP-1411). The cache is the account's, so only
+    those entries go (`uv cache clean defenseclaw`), unless the plan removes
+    the whole cache anyway (uv_leftovers).
+    """
+    cache = os.environ.get("UV_CACHE_DIR", "")
+    if not os.path.isabs(cache) or _normalized(cache) == _normalized(data_dir) or _below(data_dir, cache):
+        cache = _uv_default_dirs(platform_name)[0]
+    if not cache or cache in uv_leftovers or not _plain_owned_dir(cache):
+        return ""
+    patterns = ("archive-v*/*/defenseclaw-*.dist-info", "wheels-v*/*/defenseclaw", "wheels-v*/*/*/defenseclaw")
+    if any(glob.glob(os.path.join(glob.escape(cache), pattern)) for pattern in patterns):
+        return cache
+    return ""
+
+
+def _clean_uv_cache_entries(plan: UninstallPlan) -> None:
+    """Remove DefenseClaw's entries from uv's cache; say how when that fails."""
+    cache = plan.uv_cache_entries
+    command = "uv cache clean defenseclaw"
+    uv_name = _UV_NAMES.get(plan.platform_name, _UV_NAMES_POSIX)[0]
+    candidates = (os.path.join(plan.install_root, uv_name), shutil.which(uv_name) or "")
+    uv = next((path for path in candidates if path and os.path.isfile(path) and os.access(path, os.X_OK)), "")
+    if not uv:
+        ux.warn(f"kept DefenseClaw's entries in uv's cache {cache}: no uv to remove them; run `{command}`")
+        return
+    env = dict(os.environ, UV_CACHE_DIR=cache)
+    try:
+        result = subprocess.run(
+            [uv, "cache", "clean", "defenseclaw"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        ux.warn(f"kept DefenseClaw's entries in uv's cache {cache} ({exc}); run `{command}`")
+        return
+    if result.returncode != 0:
+        ux.warn(f"kept DefenseClaw's entries in uv's cache {cache} (uv exited {result.returncode}); run `{command}`")
+        return
+    ux.ok(f"removed DefenseClaw's entries from uv's cache {cache}")
+
+
+# mktemp -d -t defenseclaw-hook.XXXXXXXX (_hardening.sh); BSD mktemp, on
+# macOS, adds its own suffix to that template.
+_HOOK_TEMP_DIR_RE = re.compile(r"defenseclaw-hook\.[A-Za-z0-9]{8}(\.[A-Za-z0-9]+)?")
+
+
+def _hook_temp_roots() -> tuple[str, ...]:
+    """Return the temp folders mktemp -t uses: $TMPDIR, else /tmp."""
+    roots: list[str] = []
+    for root in (os.environ.get("TMPDIR", ""), tempfile.gettempdir(), "/tmp"):
+        if root and os.path.isabs(root) and all(_normalized(root) != _normalized(seen) for seen in roots):
+            roots.append(root)
+    return tuple(roots)
+
+
+def _hook_temp_dirs(platform_name: str) -> tuple[str, ...]:
+    """Name the scratch folders DefenseClaw's shell hooks left in the temp folders.
+
+    Each hook runs with a private HOME made by mktemp and removes it when it
+    exits; a hook that was killed, or one of an earlier release, left it
+    behind (GAP-1411). Only this account's real folders count.
+    """
+    if platform_name == "win32" or not hasattr(os, "getuid"):
+        return ()
+    found: list[str] = []
+    for root in _hook_temp_roots():
+        try:
+            entries = list(os.scandir(root))
+        except OSError:
+            continue
+        for entry in entries:
+            if not _HOOK_TEMP_DIR_RE.fullmatch(entry.name):
+                continue
+            try:
+                info = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            if stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid():
+                found.append(entry.path)
+    return tuple(sorted(found))
+
+
+def _remove_hook_temp_dirs(paths: tuple[str, ...]) -> None:
+    removed = 0
+    for path in paths:
+        try:
+            _remove_tree_no_follow(path)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            ux.warn(f"could not remove {path}: {exc}")
+            continue
+        removed += 1
+    if removed:
+        ux.ok(f"removed {removed} scratch folder(s) DefenseClaw hooks left (defenseclaw-hook.*)")
 
 
 def _plain_owned_dir(path: str) -> bool:
@@ -1264,6 +1381,17 @@ def _render_plan(plan: UninstallPlan, *, dry_run: bool) -> None:
         )
         click.echo(f"  • {ux.bold('remove plugin:')}        {'yes' if plan.remove_plugin else 'no'}")
     click.echo(f"  • {ux.bold('wipe ' + plan.data_dir + ':')} {'yes' if plan.remove_data_dir else 'no'}")
+    if plan.hook_temp_dirs:
+        roots = sorted({os.path.dirname(path) for path in plan.hook_temp_dirs})
+        click.echo(
+            f"      {ux.dim('·')} {len(plan.hook_temp_dirs)} scratch folder(s) DefenseClaw hooks left "
+            f"(defenseclaw-hook.*) in {', '.join(roots)}"
+        )
+    if plan.uv_cache_entries:
+        click.echo(
+            f"      {ux.dim('·')} DefenseClaw's entries in uv's cache {plan.uv_cache_entries} "
+            "(uv cache clean defenseclaw)"
+        )
     if plan.preserve_data_entries:
         click.echo(f"  • {ux.bold('preserve runtime:')}      {', '.join(plan.preserve_data_entries)}")
     click.echo(f"  • {ux.bold('remove binaries:')}     {'yes' if plan.remove_binaries else 'no'}")
@@ -1368,6 +1496,12 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
     if plan.setup_leftovers:
         # After connector teardown, so no agent hook still runs the launcher.
         run_phase("Setup leftovers removal", lambda: _remove_setup_leftovers(plan.setup_leftovers))
+    if plan.hook_temp_dirs:
+        # After connector teardown: no hook runs in them any more.
+        _remove_hook_temp_dirs(plan.hook_temp_dirs)
+    if plan.uv_cache_entries:
+        # Before binary removal: the installer's uv may be the one that runs.
+        _clean_uv_cache_entries(plan)
     if plan.observability_teardown:
         # Before data removal: Compose needs the stack's files in data_dir.
         # A stack Docker cannot reach stays, with the command that removes it.

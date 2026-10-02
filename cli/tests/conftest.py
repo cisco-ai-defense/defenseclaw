@@ -117,6 +117,14 @@ def _private_api_port_claims(tmp_path_factory, monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_shared_hook_temp_dirs(monkeypatch: pytest.MonkeyPatch):
+    """Keep uninstall from sweeping the host's real temp folders (GAP-1411)."""
+    from defenseclaw.commands import cmd_uninstall
+
+    monkeypatch.setattr(cmd_uninstall, "_hook_temp_roots", lambda: ())
+
+
+@pytest.fixture(autouse=True)
 def _no_live_gateway_policy_reload(monkeypatch: pytest.MonkeyPatch):
     """Keep ``policy activate`` (reload on by default) off any real gateway.
 
