@@ -50,6 +50,7 @@ from defenseclaw.observability.local_stack import (
     CommandResult,
     CommandRunner,
     LocalStackError,
+    docker_cli_missing_message,
     resolve_native_docker_executable,
     validate_native_docker_preflight,
 )
@@ -528,7 +529,7 @@ class NativeLocalSplunkController:
 
     def compose_argv(self, *args: str, s3_export: bool = False) -> list[str]:
         if not self.docker_path:
-            raise LocalStackError("Docker CLI was not found on PATH. Install Docker Desktop and retry.")
+            raise LocalStackError(docker_cli_missing_message(self.os_name))
         argv = [
             self.docker_path,
             "compose",

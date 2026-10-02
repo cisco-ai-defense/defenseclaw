@@ -511,6 +511,27 @@ def _parse_json_object(raw: str, *, description: str) -> dict[str, object]:
     return value
 
 
+def _is_windows_server() -> bool:
+    try:
+        return "server" in (platform.win32_edition() or "").lower()
+    except (AttributeError, OSError):  # not Windows, or no edition in the registry
+        return False
+
+
+def docker_cli_missing_message(os_name: str) -> str:
+    """Say what to install when there is no Docker CLI (GAP-1368)."""
+
+    if os_name == "windows" and _is_windows_server():
+        # The bundled stack needs Docker Desktop with Linux containers, which
+        # runs on Windows Pro, Enterprise and Education only.
+        return (
+            "Docker CLI was not found on PATH. The bundled stack needs Docker Desktop with Linux "
+            "containers, which does not run on Windows Server. Send telemetry to an existing "
+            "collector instead: defenseclaw setup observability add otlp"
+        )
+    return "Docker CLI was not found on PATH. Install Docker Desktop and retry."
+
+
 def resolve_native_docker_executable(
     docker_path: str | os.PathLike[str] | None = None,
     *,
@@ -640,7 +661,7 @@ def validate_native_docker_preflight(
     """Validate Compose v2, the daemon, Linux containers, and Windows policy."""
 
     if not docker_path:
-        raise LocalStackError("Docker CLI was not found on PATH. Install Docker Desktop and retry.")
+        raise LocalStackError(docker_cli_missing_message(os_name))
     compose = runner.run([docker_path, "compose", "version"], timeout=10, env=environment)
     if compose.returncode != 0:
         raise LocalStackError("Docker Compose v2 is unavailable. Install/enable the 'docker compose' plugin.")
@@ -687,6 +708,8 @@ class LocalStackController:
         self.environment = dict(os.environ if environment is None else environment)
         # Set by status(): every readiness probe passed and no foreign copy was found.
         self.status_ready = False
+        # Set by status(): the containers belong to another copy of the stack.
+        self.status_foreign = False
         # The managed lifecycle always uses the Compose file's loopback default.
         # Intentional HOST_BIND overrides are confined to the documented manual
         # `docker compose` path, where the operator owns the exposure decision.
@@ -714,7 +737,7 @@ class LocalStackController:
         grafana_access_mode: str | None = None,
     ) -> list[str]:
         if not self.docker_path:
-            raise LocalStackError("Docker CLI was not found on PATH. Install Docker Desktop and retry.")
+            raise LocalStackError(docker_cli_missing_message(self.os_name))
         if grafana_access_mode is not None and grafana_access_mode not in GRAFANA_ACCESS_MODES:
             raise ValueError(f"unknown Grafana access mode: {grafana_access_mode!r}")
         command = [
@@ -1306,6 +1329,7 @@ class LocalStackController:
             self.verify_container_ownership()
         except LocalStackError as exc:
             self.status_ready = False
+            self.status_foreign = "belongs to another copy" in str(exc)
             lines.extend(("", f"Note: {exc}"))
         return "\n".join(lines).rstrip() + "\n"
 
