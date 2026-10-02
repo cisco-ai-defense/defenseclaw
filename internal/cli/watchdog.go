@@ -245,8 +245,22 @@ func init() {
 	rootCmd.AddCommand(watchdogCmd)
 }
 
+// loadWatchdogConfig loads the config the way the daemon does. The watchdog
+// commands skip the root pre-run, so destination secrets kept only in
+// <data_dir>/.env were missing: the config did not compile, a watchdog started
+// with 'watchdog start' exited at once (reported as an ownership-lock
+// timeout), and 'watchdog status' called it disabled while doctor said it was
+// enabled but not running (GAP-1310).
+func loadWatchdogConfig() (*config.Config, error) {
+	loaded, err := loadConfigV8File(config.ConfigPath(), config.DefaultDataPath())
+	if err != nil {
+		return nil, err
+	}
+	return config.LoadRuntimeV8FromBytes(loaded.source, loaded.raw)
+}
+
 func runWatchdogForeground(_ *cobra.Command, _ []string) error {
-	cfg, err := config.LoadRuntimeV8File(config.ConfigPath())
+	cfg, err := loadWatchdogConfig()
 	if err != nil {
 		return fmt.Errorf("watchdog: load schema-v8 config: %w", err)
 	}
@@ -815,7 +829,7 @@ func runWatchdogStatus(_ *cobra.Command, _ []string) error {
 	dataDir := config.DefaultDataPath()
 	pidPath := filepath.Join(dataDir, watchdogPIDFile)
 
-	cfg, cfgErr := config.LoadRuntimeV8File(config.ConfigPath())
+	cfg, cfgErr := loadWatchdogConfig()
 	enabled := cfgErr == nil && cfg.Gateway.Watchdog.Enabled
 
 	inspection := inspectWatchdogPIDOwnership(pidPath)
@@ -830,6 +844,10 @@ func runWatchdogStatus(_ *cobra.Command, _ []string) error {
 			return fmt.Errorf("watchdog: PID %d is alive but does not hold the ownership lock; status is indeterminate", info.PID)
 		} else if info.PID > 0 {
 			Warn(fmt.Sprintf("Watchdog: not running (stale PID %d record retained)", info.PID))
+		} else if cfgErr != nil {
+			Warn(fmt.Sprintf("Watchdog: not running (the config does not load: %v)", cfgErr))
+			Subhead("Check it with: defenseclaw config validate")
+			return nil
 		} else if enabled {
 			Warn("Watchdog: enabled but not running")
 		} else {
