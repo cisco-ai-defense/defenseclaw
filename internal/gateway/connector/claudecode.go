@@ -1870,6 +1870,32 @@ var claudeCodeEarlierReleaseEnv = map[string]string{
 	"OTEL_LOG_USER_PROMPTS": "1",
 }
 
+// claudeCodeEnvValueIsOrphanedEarlierRelease reports whether snapshot holds an
+// earlier release's value for key and no other telemetry setting. Earlier
+// releases wrote OTEL_LOG_USER_PROMPTS=1 inside their own telemetry block, so
+// a snapshot that keeps only the prompt flag was taken after an older
+// teardown or rollback removed the rest of that block (RHEL-U4-01). An
+// operator who turns prompt capture on configures telemetry in the same env
+// block.
+func claudeCodeEnvValueIsOrphanedEarlierRelease(snapshot map[string]interface{}, key string) bool {
+	want, known := claudeCodeEarlierReleaseEnv[key]
+	if !known {
+		return false
+	}
+	if got, _ := snapshot[key].(string); got != want {
+		return false
+	}
+	for _, other := range claudeCodeOtelEnvKeys {
+		if other == key || other == "DEFENSECLAW_FAIL_MODE" {
+			continue
+		}
+		if _, present := snapshot[other]; present {
+			return false
+		}
+	}
+	return true
+}
+
 // claudeCodeEnvSnapshotIsDefenseClawWritten reports whether a "pristine" env
 // snapshot was really taken from a DefenseClaw env block, for example after a
 // rollback to an earlier release dropped the restore metadata. Only
@@ -2090,18 +2116,23 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 						delete(envMap, key)
 						continue
 					}
+					if currentString, _ := current.(string); present && currentString != "" &&
+						claudeCodeEarlierReleaseEnv[key] == currentString {
+						// The value is one an earlier release wrote. When the operator's
+						// env did not have it, or has only an orphan of an earlier
+						// release's block, a stale DefenseClaw block was put back (by a
+						// rollback or another tool), so remove it.
+						if _, inSnapshot := originalEnv[key]; !inSnapshot ||
+							claudeCodeEnvValueIsOrphanedEarlierRelease(originalEnv, key) {
+							delete(envMap, key)
+							continue
+						}
+					}
 					if !managed || !present {
 						continue
 					}
 					owned := claudeCodeOtelValueIsManaged(current, written) ||
 						claudeCodeOtelValueLooksManaged(key, current, written)
-					if _, inSnapshot := originalEnv[key]; !owned && !inSnapshot {
-						// The operator's file did not have the key, and the value is
-						// one an earlier release wrote: a stale DefenseClaw block was
-						// put back (by a rollback or another tool), so remove it.
-						currentString, _ := current.(string)
-						owned = currentString != "" && claudeCodeEarlierReleaseEnv[key] == currentString
-					}
 					if !owned && (predecessorSnapshot || exactSnapshotEnv != nil) {
 						// The snapshot restore can already have put the earlier
 						// release's value back; it is still not the operator's.
@@ -2114,7 +2145,8 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 					}
 					if original, existed := originalEnv[key]; existed &&
 						!claudeCodeOtelValueLooksManaged(key, original, written) &&
-						!(predecessorSnapshot && claudeCodeOtelValueWrittenByDefenseClaw(key, original, written)) {
+						!(predecessorSnapshot && claudeCodeOtelValueWrittenByDefenseClaw(key, original, written)) &&
+						!claudeCodeEnvValueIsOrphanedEarlierRelease(originalEnv, key) {
 						envMap[key] = original
 					} else {
 						// A predecessor can lose its ownership metadata and later
