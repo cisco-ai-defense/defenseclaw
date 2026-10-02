@@ -19,6 +19,7 @@ own tests elsewhere.
 from __future__ import annotations
 
 import contextlib
+import errno
 import hashlib
 import io
 import json
@@ -1441,6 +1442,28 @@ class RemoveDataDirTests(unittest.TestCase):
             cmd_uninstall._remove_data_dir(str(data_dir))
 
             self.assertFalse(data_dir.exists())
+
+    def test_mount_point_data_dir_is_emptied_and_kept(self):
+        # GAP-1980: rmdir of a mount point fails with EBUSY; the contents are
+        # gone, so the uninstall goes on to the binaries.
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / ".defenseclaw"
+            (data_dir / "policies").mkdir(parents=True)
+            (data_dir / "config.yaml").write_text("config", encoding="utf-8")
+            real_rmdir = os.rmdir
+
+            def busy_rmdir(path, *args, **kwargs):
+                if os.path.samefile(path, data_dir):
+                    raise OSError(errno.EBUSY, "Device or resource busy", str(path))
+                return real_rmdir(path, *args, **kwargs)
+
+            out = io.StringIO()
+            with patch.object(cmd_uninstall.os, "rmdir", side_effect=busy_rmdir), contextlib.redirect_stdout(out):
+                cmd_uninstall._remove_data_dir(str(data_dir))
+
+            self.assertTrue(data_dir.is_dir())
+            self.assertEqual(list(data_dir.iterdir()), [])
+            self.assertIn("mount point", out.getvalue())
 
     def test_reset_rejects_symlinked_preserved_venv(self):
         with tempfile.TemporaryDirectory() as tmp:

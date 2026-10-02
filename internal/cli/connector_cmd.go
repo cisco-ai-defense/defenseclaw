@@ -466,6 +466,9 @@ func resolveConnectorOpts(dataDir string) connector.SetupOpts {
 		opts.ProxyAddr = fmt.Sprintf("127.0.0.1:%d", cfg.Guardrail.Port)
 	}
 	opts.WorkspaceDir = cfg.ConnectorWorkspaceDir()
+	// Setup writes this into Codex's [otel] table; a surgical teardown only
+	// removes it when it knows the same value (GAP-1979).
+	opts.CodexOtelEnvironment = cfg.Environment
 	opts.AgentExecutable = connector.LoadCachedAgentExecutable(dataDir, name)
 	opts.APIToken = cfg.Gateway.ResolvedToken()
 	return opts

@@ -87,7 +87,10 @@ refuse() {
         else
             echo "  defenseclaw-gateway stop; defenseclaw uninstall --binaries --yes && make all" >&2
         fi
-        echo "If the uninstall stops on a connector teardown timeout (older releases with a large audit log), run the same command again." >&2
+        # A 0.8.x uninstall can time out on every retry; the direct teardown
+        # of the connector it names finishes in seconds (GAP-2001).
+        echo "If the uninstall stops on a connector teardown timeout (older releases with a large audit log), tear that connector down directly, then run the uninstall again:" >&2
+        echo "  defenseclaw-gateway connector teardown --connector <name> --data-dir '${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}'" >&2
     elif [[ "${FOREIGN_INSTALL}" -eq 1 ]]; then
         # Windows finishes removing binaries a moment after the CLI exits.
         echo "To develop from this checkout instead, remove the installed binaries (this keeps ~/.defenseclaw: config, audit log and secrets), wait a few seconds, then build again:" >&2
