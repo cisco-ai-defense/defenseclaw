@@ -1144,3 +1144,18 @@ def test_overview_health_signals_name_their_cause() -> None:
     )
     messages = [notice.message for notice in model.build_notices()]
     assert any("shadow-egress idle" in m for m in messages), messages
+
+
+def test_no_config_overview_says_not_set_up() -> None:
+    """GAP-1163: with no config.yaml the Overview says DefenseClaw is not set up
+    and how to start, instead of 'Gateway status ... will retry'."""
+
+    from defenseclaw.tui.models import HintState
+    from defenseclaw.tui.widgets.hint_bar import HintEngine
+
+    model = OverviewPanelModel(None, version="test")
+    messages = [notice.message for notice in model.build_notices()]
+    assert any("not set up yet" in m and "defenseclaw init" in m for m in messages), messages
+    assert not any("not available yet" in m for m in messages)
+    hint = HintEngine().hint_for(HintState(active_panel="overview", not_configured=True))
+    assert "not set up yet" in hint

@@ -666,7 +666,17 @@ class OverviewPanelModel:
         gateway_standalone = self.health is not None and self.health.gateway.state.strip().lower() == "disabled"
         guardrail_off = self.cfg is None or not self.cfg.guardrail_enabled
 
-        if gateway_broken and guardrail_off and not self.skill_scanner_available:
+        if self.cfg is None:
+            # No config.yaml (first run, wizard declined): say so instead of
+            # implying the gateway will show up on its own (GAP-1163).
+            notices.append(
+                OverviewNotice(
+                    "warn",
+                    "DefenseClaw is not set up yet (no config.yaml). "
+                    "Press 0 for Setup, or run: defenseclaw init",
+                )
+            )
+        elif gateway_broken and guardrail_off and not self.skill_scanner_available:
             notices.append(
                 OverviewNotice(
                     "info",
@@ -679,7 +689,8 @@ class OverviewPanelModel:
                 suffix = f": {detail}" if detail else ""
                 notices.append(OverviewNotice("error", f"Gateway health check failed{suffix}"))
             elif gateway_state == "unknown":
-                notices.append(OverviewNotice("warn", "Gateway status is not available yet"))
+                if self.cfg is not None:
+                    notices.append(OverviewNotice("warn", "Gateway status is not available yet"))
             else:
                 notices.append(
                     OverviewNotice(

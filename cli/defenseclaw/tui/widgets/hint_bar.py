@@ -140,6 +140,8 @@ class HintEngine:
         return ""
 
     def _overview_hint(self, state: HintState, status: StatusModel | None) -> str:
+        if state.not_configured:
+            return "DefenseClaw is not set up yet. Press 0 for Setup, or run: defenseclaw init"
         if status:
             gateway_state = status.gateway.state.strip().lower()
             if gateway_state in {"starting", "reconnecting"}:

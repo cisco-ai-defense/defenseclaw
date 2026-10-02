@@ -9878,6 +9878,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 tuple(sorted(setup_keys.setup_conditions(self.setup_model))) if self.active_panel == "setup" else ()
             ),
             panel_has_rows=bool(self._table_rows) if active_panel == "sandboxes" else True,
+            not_configured=self.config is None,
         )
         hint.refresh_hint(hint_state, self._hint_status_model())
         self.hint_text = str(getattr(hint, "content", ""))
