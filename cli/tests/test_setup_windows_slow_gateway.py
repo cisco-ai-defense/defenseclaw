@@ -23,7 +23,8 @@ def test_windows_launcher_timeout_outlasts_the_gateway_readiness_wait():
     # The Go launcher stops the old gateway (10 s), waits for the port (10 s),
     # then waits for READY before it starts the watchdog.
     readiness = _go_seconds("daemon_readiness_windows.go")
-    assert readiness >= 180
+    # 240 s still stopped a start that was admitting connectors (GAP-1206).
+    assert readiness >= 600
     assert cmd_setup._DEFENSE_GATEWAY_LAUNCHER_TIMEOUT_SECONDS_WINDOWS > readiness + 20
     assert _go_seconds("daemon_readiness_other.go") == 60
 
@@ -50,3 +51,13 @@ def test_restart_passes_the_launcher_timeout(tmp_path):
     assert seen["timeout"] == cmd_setup._DEFENSE_GATEWAY_LAUNCHER_TIMEOUT_SECONDS
     if os.name == "nt":
         assert seen["timeout"] == cmd_setup._DEFENSE_GATEWAY_LAUNCHER_TIMEOUT_SECONDS_WINDOWS
+
+
+def test_runtime_wait_budget_tolerates_a_loaded_windows_host():
+    # GAP-1206: connectors took minutes to converge after a slow restart.
+    if os.name == "nt":
+        assert cmd_setup._CONNECTOR_RUNTIME_READY_TIMEOUT_SECONDS >= 180
+        assert cmd_setup._CONNECTOR_RUNTIME_READY_ABSOLUTE_CAP_SECONDS >= 900
+    else:
+        assert cmd_setup._CONNECTOR_RUNTIME_READY_TIMEOUT_SECONDS == 60
+        assert cmd_setup._CONNECTOR_RUNTIME_READY_ABSOLUTE_CAP_SECONDS == 300

@@ -26,8 +26,10 @@ import "time"
 // per-user databases) was measured at 135 s before the banner and 142 s before
 // the API listened, so the 60 s used elsewhere stopped a gateway that was
 // still making progress and connector setup then failed (GAP-1206, GAP-1396).
-// A gateway that exits is still reported at once.
-const platformStartReadinessTimeout = 240 * time.Second
+// A gateway that exits is still reported at once. With Defender at 50-100 %
+// CPU, 240 s was still too short: a start was stopped with only two of eight
+// connectors admitted, and the next start needed 312 s (GAP-1206).
+const platformStartReadinessTimeout = 600 * time.Second
 
 // startupRetriesSQLiteIO lets readiness wait out an event-history SQLite I/O
 // error as it does BUSY/LOCKED contention. On Windows an antivirus scan of a

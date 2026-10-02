@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import click
-from defenseclaw.agent_selection import SetupAgentSelection
+from defenseclaw.agent_selection import SetupAgentSelection, publish_setup_agent_selections
 from defenseclaw.commands import cmd_setup
 
 from tests.helpers import record_test_setup_agent_selections
@@ -96,3 +96,34 @@ def test_skipped_peer_is_not_required_by_the_readiness_wait():
             unverified=frozenset({"codex"}),
         )
         assert keep == {"codex", "claudecode"}
+
+
+def test_windows_selection_phase_prints_progress(capsys):
+    """GAP-1571: the executable re-verification ran for minutes in silence."""
+    with tempfile.TemporaryDirectory() as tmp:
+        data_dir = os.path.realpath(tmp)
+        record_test_setup_agent_selections(data_dir, ["amp"])
+        receipt = os.path.join(data_dir, "agent_selection.json")
+        _, _, generation = cmd_setup._capture_protected_setup_file(
+            receipt, cmd_setup._AGENT_SELECTION_MAX_BYTES, "agent_selection.json"
+        )
+        amp = SetupAgentSelection(
+            connector="amp",
+            executable=os.path.join(data_dir, "amp.exe"),
+            raw_version="0.0.1",
+            normalized_version="0.0.1",
+            sha256="a" * 64,
+        )
+        with patch("defenseclaw.platform_support.host_os", return_value="windows"), patch(
+            "defenseclaw.agent_selection.record_setup_agent_selections",
+            side_effect=lambda target, _names: (publish_setup_agent_selections(target, {"amp": amp}), ({"amp": amp}, {}))[1],
+        ):
+            cmd_setup._record_windows_setup_agent_selections(
+                data_dir,
+                ("amp",),
+                _prior_snapshot=SimpleNamespace(agent_selection_generation=generation),
+            )
+
+    out = capsys.readouterr().out
+    assert "Verifying 1 agent executable(s) (amp)" in out
+    assert "Verified 1 agent executable(s) in" in out
