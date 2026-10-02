@@ -158,8 +158,12 @@ _SETUP_BATCH_ROLLBACK_KEY = "defenseclaw._setup_batch_rollback_snapshot"
 # can retain fail-closed canonical admission without trying to audit through a
 # sidecar that ``init --no-start-gateway`` deliberately left stopped.
 _SETUP_BATCH_AUDIT_KEY = "defenseclaw._setup_batch_audits"
-_CONNECTOR_RUNTIME_READY_TIMEOUT_SECONDS = 60.0
-_CONNECTOR_RUNTIME_READY_ABSOLUTE_CAP_SECONDS = 300.0
+# A loaded Windows host (Defender at 50-100 % CPU) took minutes to admit
+# each connector after a restart, so the 60 s no-progress budget failed a
+# gateway that was still converging and the rollback then raced it
+# (GAP-1206).
+_CONNECTOR_RUNTIME_READY_TIMEOUT_SECONDS = 180.0 if os.name == "nt" else 60.0
+_CONNECTOR_RUNTIME_READY_ABSOLUTE_CAP_SECONDS = 900.0 if os.name == "nt" else 300.0
 # How long Setup waits for a running OpenCode to report that it loaded the
 # managed plugin before it accepts the plugin as current but not yet loaded.
 _OPENCODE_LOAD_HEARTBEAT_GRACE_SECONDS = 10.0
@@ -180,11 +184,11 @@ _GATEWAY_API_READY_TIMEOUT_SECONDS = 45.0
 _GATEWAY_PID_GENERATION_MAX_BYTES = 16 * 1024
 _DEFENSE_GATEWAY_LIFECYCLE_TIMEOUT_SECONDS = 60
 # `defenseclaw-gateway start|restart` stops the old gateway (up to 10 s), waits
-# for the port (up to 10 s), then waits for READY itself (240 s on Windows,
+# for the port (up to 10 s), then waits for READY itself (600 s on Windows,
 # 60 s elsewhere) and only then starts the watchdog. Killing it earlier left a
 # slow Windows start without its watchdog and raced the setup rollback against
 # a gateway that was still coming up (GAP-1206, GAP-1396).
-_DEFENSE_GATEWAY_LAUNCHER_TIMEOUT_SECONDS_WINDOWS = 300
+_DEFENSE_GATEWAY_LAUNCHER_TIMEOUT_SECONDS_WINDOWS = 660
 _DEFENSE_GATEWAY_LAUNCHER_TIMEOUT_SECONDS = _DEFENSE_GATEWAY_LAUNCHER_TIMEOUT_SECONDS_WINDOWS if os.name == "nt" else 30
 _DEFENSE_GATEWAY_STATUS_TIMEOUT_SECONDS = 10
 _DEFENSE_GATEWAY_STOP_TIMEOUT_SECONDS = 15
@@ -5391,10 +5395,21 @@ def _record_windows_setup_agent_selections(
         return None
 
     target_dir = data_dir or os.path.expanduser("~/.defenseclaw")
+    # Each executable is probed and hashed again here; with ten connectors on
+    # a busy Windows host that took minutes with no output, so setup looked
+    # hung after its version line (GAP-1571).
+    started = time.monotonic()
+    if host_os == "windows":
+        ux.subhead(
+            f"Verifying {len(selected)} agent executable(s) ({', '.join(selected)}): "
+            "version probe and digest; this can take a few minutes on a busy host..."
+        )
     try:
         selections, selection_errors = record_setup_agent_selections(target_dir, selected)
     except OSError as exc:
         raise click.ClickException(f"could not protect explicit agent executable selection: {exc}") from exc
+    if host_os == "windows" and selections:
+        ux.ok(f"Verified {len(selections)} agent executable(s) in {time.monotonic() - started:.0f} s")
 
     for connector in selected:
         if connector not in selections and connector not in selection_errors:
@@ -12689,7 +12704,13 @@ def _interactive_guardrail_setup(
             data_dir=getattr(app.cfg, "data_dir", None),
         )
         if _pre_mutation_selection is not None:
-            _pre_mutation_selection((selected_connector,))
+            # After a default uninstall the guardrail is off but the kept
+            # connectors stay configured, and the version check covers all of
+            # them; the exact OpenCode selection must cover the same set, or
+            # setup aborted with "exact OpenCode selection was not recorded"
+            # (GAP-1695).
+            kept = sorted(name for name in (getattr(gc, "connectors", None) or {}) if (name or "").strip())
+            _pre_mutation_selection(tuple(dict.fromkeys((selected_connector, *kept))))
         gc.connector = selected_connector
         click.echo()
         _print_connector_info(gc.connector)
