@@ -1238,9 +1238,10 @@ const maxConcurrentHookJudges = 16
 // guardrail.judge.hook_timeout is unset. Hook scripts call the gateway
 // with curl --max-time 10 (see connector/hooks/*-hook.sh); the proxy
 // lane's 30s judge default would let the client sever the connection
-// before a verdict lands. 5s leaves headroom for the regex/AID phases
-// plus response rendering.
-const defaultHookJudgeTimeout = 5 * time.Second
+// before a verdict lands. 8s fits Bedrock-class judge latency (Haiku 4.5
+// injection calls measured at p90 4.2s, max 5.0s; GAP-1475/GAP-1488) and
+// still leaves 2s for the regex/AID phases plus response rendering.
+const defaultHookJudgeTimeout = 8 * time.Second
 
 // hookJudgeInspect runs the LLM judge on hook-lane message content for
 // connectors gated on via guardrail.judge.hook_connectors. It maps the

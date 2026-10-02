@@ -2430,7 +2430,9 @@ func writeCodexNotifyBridge(opts SetupOpts) error {
 		"JSON=\n" +
 		"CURL_CONFIG_TOKEN=\n" +
 		"unset API_TOKEN JSON CURL_CONFIG_TOKEN USER_ID USER_NAME DEFENSECLAW_GATEWAY_TOKEN\n" +
-		"curl --silent --show-error --max-time 5 \\\n" +
+		// --noproxy keeps the loopback POST (bearer and turn payload) away from
+		// an inherited HTTP(S)_PROXY, like the connector hook scripts.
+		"curl --silent --show-error --noproxy '*' --max-time 5 \\\n" +
 		"  --header 'Content-Type: application/json' \\\n" +
 		transport +
 		// X-DefenseClaw-Client is required by the gateway's CSRF gate;

@@ -24,7 +24,7 @@ The judge runs in two lanes with different control models:
 * **Hook lane** (hermes, opencode, claudecode, …): gated per connector by
   ``guardrail.judge.hook_connectors``, **default off**. The gate ships
   empty deliberately — the judge adds latency (up to
-  ``guardrail.judge.hook_timeout``, default 5s) and LLM cost per inspected
+  ``guardrail.judge.hook_timeout``, default 8s) and LLM cost per inspected
   hook call, so upgrades must not silently change behavior. The cost of
   that safety default is that every operator must perform an explicit
   opt-in, and before this command the only way to do that was hand-editing
@@ -309,7 +309,7 @@ def judge() -> None:
     default=None,
     help=(
         "Also set guardrail.judge.hook_timeout (seconds). Caps the judge "
-        "round-trip on the hook lane; 0/unset = gateway default (5s). The "
+        "round-trip on the hook lane; 0/unset = gateway default (8s). The "
         "hook scripts allow 10s total, so values above ~8s risk the agent "
         "hanging up before a verdict lands."
     ),
@@ -517,7 +517,7 @@ def judge_list(app: AppContext) -> None:
     click.echo(f"  {ux.bold('guardrail.judge.enabled:')}         {ux.accent(str(bool(gc.judge.enabled)).lower())}")
     click.echo(f"  {ux.bold('guardrail.judge.hook_connectors:')} {ux.accent(_gate_label(gate))}")
     timeout = gc.judge.hook_timeout or 0
-    timeout_label = f"{timeout:g}s" if timeout else "5s (gateway default)"
+    timeout_label = f"{timeout:g}s" if timeout else "8s (gateway default)"
     click.echo(f"  {ux.bold('guardrail.judge.hook_timeout:')}    {ux.accent(timeout_label)}")
     click.echo()
 
