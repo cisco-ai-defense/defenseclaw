@@ -11810,3 +11810,59 @@ func TestZeptoClawHomeDir(t *testing.T) {
 		}
 	})
 }
+
+// GAP-1463: an edit the user makes to openclaw.json while enrolled survives
+// teardown, even after a later Setup (every gateway start) re-registers the
+// plugin; only DefenseClaw's own entries are removed.
+func TestOpenClaw_Teardown_KeepsUserEditsMadeWhileEnrolled(t *testing.T) {
+	requireOpenClawExtensionBundle(t)
+
+	dir := t.TempDir()
+	ocHome := filepath.Join(dir, "openclaw-home")
+	os.MkdirAll(ocHome, 0o755)
+	configPath := filepath.Join(ocHome, "openclaw.json")
+	os.WriteFile(configPath, []byte(`{"agents":{"defaults":{"model":{"primary":"first"}}}}`), 0o644)
+
+	OpenClawHomeOverride = ocHome
+	defer func() { OpenClawHomeOverride = "" }()
+
+	c := NewOpenClawConnector()
+	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	var cfg map[string]interface{}
+	data, _ := os.ReadFile(configPath)
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	cfg["agents"] = map[string]interface{}{"defaults": map[string]interface{}{"model": map[string]interface{}{"primary": "second"}}}
+	edited, _ := json.MarshalIndent(cfg, "", "  ")
+	os.WriteFile(configPath, edited, 0o644)
+
+	// The gateway restarts (Setup again), then the user leaves OpenClaw mode.
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("second Setup: %v", err)
+	}
+	if err := c.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+
+	cfg = map[string]interface{}{}
+	data, _ = os.ReadFile(configPath)
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	agents, _ := cfg["agents"].(map[string]interface{})
+	defaults, _ := agents["defaults"].(map[string]interface{})
+	model, _ := defaults["model"].(map[string]interface{})
+	if model["primary"] != "second" {
+		t.Fatalf("teardown reverted the user's edit: primary = %v, want second", model["primary"])
+	}
+	if openClawConfigRegistersDefenseClaw(configPath) {
+		t.Fatalf("teardown left the DefenseClaw plugin registered: %s", data)
+	}
+	if _, err := os.Stat(filepath.Join(ocHome, "extensions", "defenseclaw")); !os.IsNotExist(err) {
+		t.Fatalf("extension dir still present after Teardown: err=%v", err)
+	}
+}

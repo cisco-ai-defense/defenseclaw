@@ -154,14 +154,22 @@ func (c *OpenClawConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	// in openclaw.json. Enabling the connector is the *only* step an
 	// operator needs — no separate `defenseclaw setup guardrail` phase.
 	configPath := filepath.Join(openClawHome(), "openclaw.json")
-	if err := captureManagedFileBackup(opts.DataDir, c.Name(), "openclaw.json", configPath); err != nil {
+	keepSnapshot, err := openClawSnapshotUsable(opts.DataDir, c.Name(), configPath)
+	if err != nil {
 		return fmt.Errorf("openclaw config backup: %w", err)
+	}
+	if keepSnapshot {
+		if err := captureManagedFileBackup(opts.DataDir, c.Name(), "openclaw.json", configPath); err != nil {
+			return fmt.Errorf("openclaw config backup: %w", err)
+		}
 	}
 	if err := installOpenClawExtension(openClawHome(), opts.HILTEnabled); err != nil {
 		return fmt.Errorf("openclaw extension install: %w", err)
 	}
-	if err := updateManagedFileBackupPostHash(opts.DataDir, c.Name(), "openclaw.json", configPath); err != nil {
-		return fmt.Errorf("openclaw config backup hash: %w", err)
+	if keepSnapshot {
+		if err := updateManagedFileBackupPostHash(opts.DataDir, c.Name(), "openclaw.json", configPath); err != nil {
+			return fmt.Errorf("openclaw config backup hash: %w", err)
+		}
 	}
 
 	// Surface 2: Plugin subprocess enforcement
@@ -177,6 +185,56 @@ func (c *OpenClawConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	}
 
 	return nil
+}
+
+// openClawSnapshotUsable reports whether teardown may restore openclaw.json
+// from the pre-setup snapshot. Setup runs again on every gateway start, so a
+// snapshot is kept only while openclaw.json still holds exactly what DefenseClaw
+// last wrote. Once the user (or OpenClaw) changed it, or when there is no
+// snapshot but the file already registers DefenseClaw, teardown removes only
+// DefenseClaw's own entries and keeps everything else (GAP-1463).
+func openClawSnapshotUsable(dataDir, connectorName, configPath string) (bool, error) {
+	drifted, err := managedFileBackupDrifted(dataDir, connectorName, "openclaw.json", configPath)
+	if err != nil {
+		return false, err
+	}
+	if drifted {
+		discardManagedFileBackup(dataDir, connectorName, "openclaw.json")
+		return false, nil
+	}
+	if _, err := os.Stat(managedFileBackupPath(dataDir, connectorName, "openclaw.json")); err == nil {
+		return true, nil
+	}
+	return !openClawConfigRegistersDefenseClaw(configPath), nil
+}
+
+// openClawConfigRegistersDefenseClaw reports whether openclaw.json already
+// lists the DefenseClaw plugin, so a snapshot of it would not be pre-setup.
+func openClawConfigRegistersDefenseClaw(configPath string) bool {
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return false
+	}
+	cfg := map[string]interface{}{}
+	if json.Unmarshal(data, &cfg) != nil {
+		return false
+	}
+	plugins, _ := cfg["plugins"].(map[string]interface{})
+	if plugins == nil {
+		return false
+	}
+	if entries, ok := plugins["entries"].(map[string]interface{}); ok {
+		if _, found := entries["defenseclaw"]; found {
+			return true
+		}
+	}
+	allow, _ := plugins["allow"].([]interface{})
+	for _, v := range allow {
+		if s, _ := v.(string); s == "defenseclaw" {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *OpenClawConnector) Teardown(ctx context.Context, opts SetupOpts) error {

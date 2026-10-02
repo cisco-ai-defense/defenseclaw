@@ -382,6 +382,33 @@ func validateManagedFileBackupTarget(b managedFileBackup, connectorName, logical
 	return captured, nil
 }
 
+// managedFileBackupDrifted reports whether a backup exists and its target no
+// longer holds the bytes the connector last committed: the user (or the agent)
+// edited the file since. A later Setup must not refresh the post hash over
+// that edit, or teardown would restore the pre-setup snapshot and silently
+// revert it (GAP-1463).
+func managedFileBackupDrifted(dataDir, connectorName, logicalName, targetPath string) (bool, error) {
+	b, err := loadManagedFileBackupPath(managedFileBackupPath(dataDir, connectorName, logicalName))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	if b.PostSHA256 == "" {
+		return false, nil
+	}
+	boundPath, err := validateManagedFileBackupTarget(b, connectorName, logicalName, targetPath)
+	if err != nil {
+		return false, err
+	}
+	data, info, err := readManagedTarget(boundPath)
+	if err != nil {
+		return false, err
+	}
+	return !managedFileBackupMatchesSnapshot(&b, data, info != nil), nil
+}
+
 func discardManagedFileBackup(dataDir, connectorName, logicalName string) {
 	_ = os.Remove(managedFileBackupPath(dataDir, connectorName, logicalName))
 }
