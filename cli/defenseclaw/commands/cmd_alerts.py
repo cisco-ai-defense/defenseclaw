@@ -360,7 +360,7 @@ def _finding_facts(
         "rule": f"{rule_id}: {title}" if title else rule_id,
         "scanner": str(structured.get("defenseclaw.scan.scanner") or "").strip(),
         # GAP-1525: the file (and line) inside the scanned plugin or skill.
-        "location": str(structured.get("defenseclaw.finding.location") or "").strip(),
+        "location": _readable_location(structured.get("defenseclaw.finding.location")),
         "route": _acp_route(hook_details.get(e.id, [])),
         "path": scanned.get("path", "") if scanned.get("path", "") != target else "",
     }
@@ -393,6 +393,12 @@ def _alert_targets_for(store, alert_list: list) -> dict[str, dict[str, str]]:
     except Exception:  # noqa: BLE001 - an older or locked audit DB only loses the target
         return {}
     return result if isinstance(result, dict) else {}
+
+
+def _readable_location(value: object) -> str:
+    """A file and line, or "" for a redacted or hashed hook location (GAP-1676)."""
+    text = str(value or "").strip()
+    return "" if text.startswith("<") else text
 
 
 def _short_hook_target(target: str, connector: str) -> str:
