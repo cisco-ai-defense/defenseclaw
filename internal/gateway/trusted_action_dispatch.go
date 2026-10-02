@@ -171,8 +171,11 @@ func dispatchTrustedAction(
 			semanticFacts, staticTargetTwin, viewCandidate = view, &twin, redirectReductionCandidate
 		} else if view, ok := actionfacts.ShortCircuitListReduction(request.Input, facts); ok {
 			semanticFacts, viewCandidate = view, listReductionCandidate
-		} else if view, ok := actionfacts.StaticCommandSubsetReduction(request.Input, facts); ok {
+		} else if view, partialArgv, ok := actionfacts.StaticCommandSubsetReduction(request.Input, facts); ok {
 			semanticFacts, viewCandidate, subsetView = view, subsetReductionCandidate, true
+			if partialArgv {
+				viewCandidate = argvSubsetReductionCandidate
+			}
 		} else {
 			var fallbackTelemetry trustedActionTelemetry
 			findings, fallbackTelemetry = dispatchTrustedFallback(
@@ -492,6 +495,13 @@ func redirectReductionCandidate(candidate compiledSemanticRule) bool {
 func subsetReductionCandidate(candidate compiledSemanticRule) bool {
 	return candidate.owner.prerequisite == nil &&
 		candidate.program.StaticCommandSubsetSafe()
+}
+
+// argvSubsetReductionCandidate is subsetReductionCandidate for a view that
+// also keeps commands with partial argv (semantic.Program.StaticArgvSubsetSafe).
+func argvSubsetReductionCandidate(candidate compiledSemanticRule) bool {
+	return candidate.owner.prerequisite == nil &&
+		candidate.program.StaticArgvSubsetSafe()
 }
 
 // listReductionCandidate reports whether a result of candidate on the view

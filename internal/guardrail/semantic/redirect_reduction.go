@@ -41,8 +41,9 @@ import (
 // nor authoritative, reads argv_complete only on a command, and reads
 // redirects, paths, artifacts and archive_lineages only as the range of an
 // exists() reached from the root through &&, || and exists() or all()
-// predicates alone: more of them can then only keep a match. Any other use
-// (under !, ==, !=, in, or as the range of all()) could turn a match off, so
+// predicates alone (or as the list of an `in` reached that way): more of
+// them can then only keep a match. Any other use (under !, ==, !=, as the
+// element of an `in`, or as the range of all()) could turn a match off, so
 // it is unsafe. The other facts, including commands, operations, wrappers,
 // network and data flows, are those of a complete analysis; negation over
 // them is unaffected, except for facts only the target's real path could
@@ -82,10 +83,32 @@ func (p *Program) StaticCommandSubsetSafe() bool {
 	return p != nil && p.subsetReductionSafe
 }
 
+// StaticArgvSubsetSafe is StaticCommandSubsetSafe for a view that also keeps
+// commands with partial argv: commands with a static program word whose
+// view argv and arguments are only their static words, with no operations or
+// wrappers, and with effect execute. The expression must not read effect,
+// and must read argv, arguments, operations and wrappers only as the range
+// of an exists() or the list of an `in` reached the same way, so that more
+// of them can only keep a match. Negation or an all() over argv could turn a
+// match off, so it is unsafe.
+func (p *Program) StaticArgvSubsetSafe() bool {
+	return p != nil && p.argvSubsetReductionSafe
+}
+
 func subsetReductionSafe(ast *cel.Ast) bool {
 	return reductionSafe(ast, map[string]bool{
 		"commands": true, "redirects": true, "paths": true, "network": true,
 		"data_flows": true, "artifacts": true, "archive_lineages": true,
+	})
+}
+
+func argvSubsetReductionSafe(ast *cel.Ast) bool {
+	return reductionSafe(ast, map[string]bool{
+		"commands": true, "redirects": true, "paths": true, "network": true,
+		"data_flows": true, "artifacts": true, "archive_lineages": true,
+		"argv": true, "arguments": true, "operations": true, "wrappers": true,
+		// Not a collection: any read of effect is unsafe.
+		"effect": true,
 	})
 }
 
@@ -138,7 +161,12 @@ func reductionSafe(ast *cel.Ast, lacking map[string]bool) bool {
 			if call.IsMemberFunction() && !visit(call.Target(), false) {
 				return false
 			}
-			for _, argument := range call.Args() {
+			arguments := call.Args()
+			if (name == operators.In || name == operators.OldIn) && len(arguments) == 2 {
+				// A longer list or a larger map only keeps `x in y` true.
+				return visit(arguments[0], false) && visit(arguments[1], monotone)
+			}
+			for _, argument := range arguments {
 				if !visit(argument, argumentsMonotone) {
 					return false
 				}

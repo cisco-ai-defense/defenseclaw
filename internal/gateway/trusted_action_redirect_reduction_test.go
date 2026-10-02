@@ -89,6 +89,12 @@ func TestTrustedActionBlocksCommandRuleWithRuntimeExpandedRedirectTarget(t *test
 			redirectReductionMarker,
 			`f.commands.exists(c, c.argv_complete && c.argv.exists(a, a == "`+redirectReductionMarker+`"))`,
 		),
+		// An expanded word may be any argument, so negation over argv is unsafe.
+		redirectReductionRule(
+			"TEST-MARKER-NOT-N",
+			redirectReductionMarker,
+			`f.commands.exists(c, "`+redirectReductionMarker+`" in c.argv && !c.argv.exists(a, a == "-n"))`,
+		),
 	)
 
 	const (
@@ -146,9 +152,33 @@ func TestTrustedActionBlocksCommandRuleWithRuntimeExpandedRedirectTarget(t *test
 			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-NO-STDOUT-REDIRECT": blocks, "TEST-MARKER-COMPLETE-ARGV": blocks},
 		},
 		{
-			// An expanding argument is not reduced: the argv is not static.
+			// GAP-0029: a runtime-expanded argument becomes zero or more
+			// words, so the static marker is still an argument of echo. Its
+			// argv is not complete.
 			name:    "expanding argument",
-			command: "echo " + redirectReductionMarker + " $SUFFIX > ~/dc-x.txt",
+			command: "echo " + redirectReductionMarker + " $USER > /var/tmp/dc-x.txt",
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly, "TEST-MARKER-COMPLETE-ARGV": detectionOnly, "TEST-MARKER-NOT-N": detectionOnly},
+		},
+		{
+			name:    "quoted expanding argument",
+			command: "echo " + redirectReductionMarker + ` "$USER" > /var/tmp/dc-x.txt`,
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly, "TEST-MARKER-COMPLETE-ARGV": detectionOnly},
+		},
+		{
+			name:    "expanding argument and target",
+			command: "echo " + redirectReductionMarker + " $USER > ~/dc-x.txt",
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly, "TEST-MARKER-COMPLETE-ARGV": detectionOnly},
+		},
+		{
+			// The program itself expands: nothing certain runs.
+			name:    "expanding program",
+			command: "$CMD " + redirectReductionMarker,
+			want:    map[string]string{"TEST-MARKER-BLOCK": detectionOnly, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly, "TEST-MARKER-COMPLETE-ARGV": detectionOnly},
+		},
+		{
+			// A runtime-expanded export could change what echo runs.
+			name:    "after a runtime-expanded export",
+			command: "export PATH=$DIR; echo " + redirectReductionMarker + " $USER",
 			want:    map[string]string{"TEST-MARKER-BLOCK": detectionOnly, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly, "TEST-MARKER-COMPLETE-ARGV": detectionOnly},
 		},
 		{
