@@ -146,6 +146,33 @@ class AlertsAuditUxB6Tests(unittest.TestCase):
         self.assertEqual(rows[0]["target"], skill)
         self.assertEqual((rows[1]["target"], rows[1]["decision"]), ("ws1r2-rev2", "quarantined"))
 
+    def test_a_redacted_quarantine_path_reads_from_the_quarantine_record(self):
+        # GAP-1924: with redaction on, "Moved to" was a <hashed ...> placeholder.
+        now = datetime.now(timezone.utc)
+        self._log("enforcement_action_id", "enf-2", action="quarantine", severity="HIGH",
+                  details="enforcement.quarantine.applied", timestamp=now)
+        asset = self._log("enforcement_action_id", "enf-2", action="quarantine", severity="INFO",
+                          details="asset.quarantined", timestamp=now - timedelta(seconds=1))
+        hashed = "<hashed class=path v=1 key=e577d3fbc619 len=62 hmac=8fe8e454b0>"
+        self.app.store.db.execute(
+            "UPDATE audit_events SET payload_json=? WHERE id=?",
+            (json.dumps({"defenseclaw.asset.id": "sf2r4-review", "defenseclaw.asset.target_path": hashed}), asset),
+        )
+        moved = "/Users/dcm-fc2/.defenseclaw/quarantine/skills/sf2r4-review"
+        self.app.store.create_quarantine_record(
+            target_type="skill", target_name="sf2r4-review", original_path="/Users/dcm-fc2/.claude/skills/sf2r4-review",
+            quarantine_path=moved, content_hash="sha256:00", reason="watcher enforcement",
+        )
+        self.app.store.db.commit()
+
+        table = self._invoke("-n", "10")
+        self.assertNotIn("hashed", table)
+        self.assertIn("quarantined to", table)
+        shown = self._invoke("-n", "10", "--show", "1")
+        self.assertIn(f"Moved to:  {moved}", shown)
+        self.assertIn("Restore:   defenseclaw skill restore sf2r4-review", shown)
+        self.assertNotIn("hashed", shown)
+
     def test_audit_list_rows_read_the_outcome_without_the_full_payload(self):
         now = datetime.now(timezone.utc)
         self._log(action="hook_decision", severity="HIGH", connector="claudecode", details="hook_decision",

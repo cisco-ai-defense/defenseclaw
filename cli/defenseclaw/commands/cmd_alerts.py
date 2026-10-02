@@ -404,7 +404,14 @@ def _quarantine_facts(e, targets: dict[str, dict[str, str]]) -> dict[str, str] |
     found = targets.get(e.id)
     if not found:
         return None
-    return {"target": found.get("target", ""), "moved_to": found.get("path", "")}
+    moved_to = found.get("path", "")
+    if moved_to.startswith("<"):
+        # A redacted path with no quarantine record names nothing (GAP-1924).
+        moved_to = ""
+    facts = {"target": found.get("target", ""), "moved_to": moved_to}
+    if found.get("type") in ("skill", "plugin") and facts["target"]:
+        facts["restore"] = f"defenseclaw {found['type']} restore {facts['target']}"
+    return facts
 
 
 def _alert_targets_for(store, alert_list: list) -> dict[str, dict[str, str]]:
@@ -767,6 +774,8 @@ def _alerts_default(
             click.echo(f"  {label('Decision')} quarantined")
             if quarantined["moved_to"]:
                 click.echo(f"  {label('Moved to')} {quarantined['moved_to']}")
+            if quarantined.get("restore"):
+                click.echo(f"  {label('Restore')} {quarantined['restore']}")
         elif e.details:
             if connector_name := _event_connector(e):
                 click.echo(f"  {label('Connector')} {connector_name}")
