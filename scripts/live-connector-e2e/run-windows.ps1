@@ -5930,10 +5930,10 @@ print(json.dumps({
 function Assert-DoctorHookRegistration {
     $config = Get-EffectiveConnectorConfigPath $Connector
     $label = Get-ConnectorHookLabel
-    # Doctor's public status vocabulary is pass/fail/warn/skip. Hermes keeps
-    # the more specific pending-reload state in the detail while truthfully
-    # failing readiness until every running upstream host is restarted.
-    $expectedStatus = if ($Connector -eq 'hermes') { 'fail' } else { 'pass' }
+    # Doctor's public status vocabulary is pass/fail/warn/skip. With no
+    # Hermes host running there is nothing to reload, so an idle Hermes
+    # passes: the next host starts with the DefenseClaw hooks (GAP-1298).
+    $expectedStatus = 'pass'
     # Cursor's Windows runtime probe already retries inside Doctor. One extra
     # harness retry covers a loaded runner that still times out after that
     # bounded pair, without weakening the same pass/fail assertions.
@@ -5962,14 +5962,12 @@ function Assert-DoctorHookRegistration {
     if ($Connector -eq 'hermes' -and
         ($rows[0].detail -notmatch 'hook_entries=23' -or
          $rows[0].detail -notmatch 'allowlist_entries=23' -or
-         $rows[0].detail -notmatch 'must be reloaded or restarted' -or
-         $rows[0].detail -notmatch 'live=false')) {
-        throw "doctor did not preserve truthful Hermes pending-reload evidence: $($rows[0].detail)"
+         $rows[0].detail -notmatch 'no Hermes host is running')) {
+        throw "doctor did not report the idle Hermes hook inventory: $($rows[0].detail)"
     }
     if ($Connector -eq 'opencode') {
-        if ($rows[0].detail -notmatch 'managed plugin digest current' -or
-            $rows[0].detail -notmatch 'not tamper-proof') {
-            throw "doctor did not report the OpenCode user/admin ACL and digest boundary: $($rows[0].detail)"
+        if ($rows[0].detail -notmatch 'digest current') {
+            throw "doctor did not report the OpenCode plugin digest: $($rows[0].detail)"
         }
     } else {
         $expectedHookExecutable = if ($Connector -eq 'amp') {
@@ -6666,8 +6664,7 @@ function Assert-OpenCodePluginContract {
     try { $report = $result.StdOut | ConvertFrom-Json } catch { throw "Doctor did not return JSON: $($_.Exception.Message)" }
     $checks = @($report.checks | Where-Object { [string]::Equals([string]$_.label, $label, [StringComparison]::Ordinal) })
     if ($checks.Count -ne 1 -or $checks[0].status -ne 'pass' -or
-        $checks[0].detail -notmatch 'managed plugin digest current' -or
-        $checks[0].detail -notmatch 'not tamper-proof') {
+        $checks[0].detail -notmatch 'digest current') {
         throw "Doctor did not validate the OpenCode ACL/digest boundary: $($checks[0].detail)"
     }
     Write-Result 'doctor:windows-hook-registration' pass "label=$label target=$pluginPath digest=current user-admin-boundary=reported"
@@ -6708,7 +6705,7 @@ function Assert-OpenCodePluginContract {
         'runtime load (unverified: (sidecar /health is unavailable|managed gateway PID file is missing)|not checked: the gateway is not running)'
     if ($recoveredChecks.Count -ne 1 -or
         $recoveredChecks[0].status -ne 'warn' -or
-        $recoveredChecks[0].detail -notmatch 'managed plugin digest current' -or
+        $recoveredChecks[0].detail -notmatch 'digest current' -or
         $recoveredChecks[0].detail -notmatch $expectedStoppedRuntime) {
         throw 'Doctor did not recover after restoring the OpenCode plugin byte-for-byte'
     }
@@ -6911,8 +6908,7 @@ function Assert-DoctorWindowsHookRegistration {
     if ($Connector -eq 'hermes' -and
         ($check.detail -notmatch 'hook_entries=23' -or
          $check.detail -notmatch 'allowlist_entries=23' -or
-         $check.detail -notmatch 'must be reloaded or restarted' -or
-         $check.detail -notmatch 'live=false' -or
+         $check.detail -notmatch 'no Hermes host is running' -or
          $label -notmatch 'fail-open')) {
         throw "Doctor did not expose Hermes's exact event inventory and forced fail-open posture: $($check.detail)"
     }

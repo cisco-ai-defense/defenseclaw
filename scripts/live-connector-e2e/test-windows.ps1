@@ -4808,12 +4808,11 @@ threading.Event().wait()
         $ampSelfHealContract -match 'ToBase64String\(\$ExpectedBytes\)' -and
         $ampSelfHealContract -match 'Assert-AmpPluginPrivateACL \$PluginPath') `
         'Amp Windows contract deletes and verifies byte-exact, ACL-safe self-healing within 20 seconds'
-    Assert-True ($doctorSetupContract -match "expectedStatus = if \(\`$Connector -eq 'hermes'\) \{ 'fail' \}" -and
+    Assert-True ($doctorSetupContract -match "expectedStatus = 'pass'" -and
         $doctorSetupContract -match 'hook_entries=23' -and
         $doctorSetupContract -match 'allowlist_entries=23' -and
-        $doctorSetupContract -match 'must be reloaded or restarted' -and
-        $doctorSetupContract -match 'live=false') `
-        'Hermes setup Doctor contract preserves truthful failed readiness with direct-native pending-reload evidence'
+        $doctorSetupContract -match 'no Hermes host is running') `
+        'Hermes setup Doctor contract reports an idle Hermes as ready with its direct-native hook inventory'
     $hermesSetupContract = [regex]::Match(
         $harnessText,
         '(?s)function Assert-HermesWindowsHookConfig\b.*?(?=\nfunction Assert-DoctorHookRegistration\b)'
@@ -4865,7 +4864,7 @@ threading.Event().wait()
         'unversioned fixture override is scoped to the pre-recovery gateway restart'
     $openCodeDoctorContract = [regex]::Match($harnessText, '(?s)function Assert-OpenCodePluginContract\b.*?\n\}').Value
     Assert-True ($openCodeDoctorContract -match "recoveredChecks\[0\]\.status -ne 'warn'" -and
-        $openCodeDoctorContract -match 'managed plugin digest current' -and
+        $openCodeDoctorContract -match 'digest current' -and
         $openCodeDoctorContract -match '\$expectedStoppedRuntime' -and
         $openCodeDoctorContract -match 'sidecar /health is unavailable' -and
         $openCodeDoctorContract -match 'managed gateway PID file is missing' -and

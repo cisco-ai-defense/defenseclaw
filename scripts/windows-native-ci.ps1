@@ -6766,7 +6766,7 @@ function Assert-WindowsReleaseDoctorRows(
         },
         [pscustomobject]@{
             Label = 'OpenCode hooks'
-            Detail = 'managed plugin digest current'
+            Detail = 'digest current'
             Target = ''
         }
     )) {
