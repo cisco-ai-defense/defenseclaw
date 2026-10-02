@@ -3390,13 +3390,15 @@ function Assert-DefenseClawCanonicalRawPathAcl {
         [Parameter(Mandatory)]
         [Security.AccessControl.RawSecurityDescriptor]$Actual,
         [Parameter(Mandatory)][Security.AccessControl.FileSystemSecurity]$Expected,
-        # When set, the DACL-not-protected branch skips its icacls
-        # /inheritance:r self-heal and goes straight to throwing. Callers
-        # performing drift-detection (Repair-DefenseClawUninstallAdminFileAcl
-        # at line 7921) must not accidentally modify the inspected file
-        # mid-check: the detection is a signal to escalate deeper checks,
-        # not an invitation to repair.
-        [switch]$SkipSelfHeal
+        # When set, the DACL-not-protected branch attempts a one-shot
+        # icacls /inheritance:r self-heal + native re-read before giving
+        # up. ONLY stamp-and-verify callers (Set-DefenseClawPathAcl right
+        # after its Set-Acl) opt in. Drift-DETECTION callers (validation-
+        # only lifecycle paths, Repair-DefenseClawUninstallAdminFileAcl)
+        # must NOT self-heal: they expect the exact pre-call ACL state
+        # for their own tamper-check pipeline, and mutating the file
+        # mid-check masks the drift they are designed to observe.
+        [switch]$AllowSelfHeal
     )
     $expectedDescriptor = [Security.AccessControl.RawSecurityDescriptor]::new(
         $Expected.GetSecurityDescriptorBinaryForm(),
@@ -3406,12 +3408,13 @@ function Assert-DefenseClawCanonicalRawPathAcl {
         [Security.AccessControl.ControlFlags]::DiscretionaryAclProtected
     )
     if (([int]$Actual.ControlFlags -band $protectedFlag) -eq 0) {
-        if ($SkipSelfHeal) {
-            # Drift-detection caller: don't modify the file. The caller
-            # expects to see the exact drift state and route into its own
-            # deeper check pipeline (ancestor checks, authority RawAcl,
-            # hash validation). Mutating the file via icacls here would
-            # mask the drift from the caller and defeat its tamper gate.
+        if (-not $AllowSelfHeal) {
+            # Drift-detection / validation-only caller: throw immediately.
+            # The caller expects to see the exact drift state and route
+            # into its own deeper check pipeline (lifecycle refuses the
+            # manifest-publish step, repair escalates to ancestor + hash
+            # checks). Only stamp-and-verify callers opt in via
+            # -AllowSelfHeal.
             throw "managed DACL is not protected after exact ACL replacement: $Path"
         }
         # Self-heal: PowerShell's native Set-Acl can silently drop
@@ -3532,7 +3535,12 @@ function Test-DefenseClawCanonicalRawPathAcl {
 function Assert-DefenseClawCanonicalPathAcl {
     param(
         [Parameter(Mandatory)][string]$Path,
-        [Parameter(Mandatory)][Security.AccessControl.FileSystemSecurity]$Expected
+        [Parameter(Mandatory)][Security.AccessControl.FileSystemSecurity]$Expected,
+        # Forwarded to Assert-DefenseClawCanonicalRawPathAcl. Only
+        # Set-DefenseClawPathAcl's post-stamp verify opts in; validation-
+        # only callers (install-like lifecycle manifest drift gate, etc.)
+        # must leave it off so the drift is observed exactly.
+        [switch]$AllowSelfHeal
     )
     Assert-DefenseClawNoReparsePath -Path $Path
     $nativeSecurity = Initialize-DefenseClawNativeSecurity
@@ -3543,7 +3551,8 @@ function Assert-DefenseClawCanonicalPathAcl {
     Assert-DefenseClawCanonicalRawPathAcl `
         -Path $Path `
         -Actual $actualDescriptor `
-        -Expected $Expected
+        -Expected $Expected `
+        -AllowSelfHeal:$AllowSelfHeal
 }
 
 function Set-DefenseClawPathAcl {
@@ -3634,12 +3643,16 @@ function Set-DefenseClawPathAcl {
         -ErrorAction Stop
     # Set-Acl can silently drop PROTECTED_DACL_SECURITY_INFORMATION when
     # dispatching SetSecurityInfo on certain Windows 10/11 .NET revisions.
-    # The verifier below (Assert-DefenseClawCanonicalRawPathAcl) owns the
-    # icacls /inheritance:r self-heal and re-read: keeping that logic in
-    # one place rather than mirroring it in the setter preserves the
-    # canonical-setter contract (setter writes bytes; verifier judges and
-    # repairs).
-    Assert-DefenseClawCanonicalPathAcl -Path $Path -Expected $security
+    # Opt the verifier into its one-shot icacls /inheritance:r self-heal
+    # ONLY from this stamp-and-verify path. Validation-only callers of
+    # Assert-DefenseClawCanonicalPathAcl do NOT get the self-heal; they
+    # must observe the exact drift state for the deeper tamper-check
+    # pipeline (installer-like lifecycle manifest-drift gate,
+    # Repair-DefenseClawUninstallAdminFileAcl, etc.).
+    Assert-DefenseClawCanonicalPathAcl `
+        -Path $Path `
+        -Expected $security `
+        -AllowSelfHeal
 }
 
 # AIFW-34262: Set-DefenseClawPathAcl stamps the canonical descriptor and then
@@ -7860,26 +7873,7 @@ function Assert-DefenseClawUninstallAuthorityRawAcl {
         if ($sid -notin $trusted -and
             (Test-DefenseClawWriteLikeRights `
                 -Rights ([Security.AccessControl.FileSystemRights]$ace.AccessMask))) {
-            # Downgrade from throw to advisory: the uninstall path's job is
-            # to TEAR DOWN DefenseClaw, not to re-litigate trust on a
-            # transient ACE. A foreign write-like ACE on a managed path at
-            # uninstall time is the exact Explorer-Continue scenario (the
-            # admin clicked through a UAC prompt, Windows added their SID
-            # to the ACL). Refusing recovery here orphans the install: the
-            # admin can't reinstall and can't retry uninstall from the same
-            # state. The uninstall caller proceeds to re-stamp this path's
-            # canonical DACL or delete the file next; a pre-recovery trust
-            # assertion adds no safety and strands the endpoint.
-            # Structural failures (null DACL, unsupported ACE, non-access
-            # ACE) above remain fatal because they indicate a broken ACL
-            # we cannot reason about safely.
-            if (Test-DefenseClawTrustStrictAncestors) {
-                throw "refusing uninstall ACL recovery: untrusted principal $sid has write-like access to managed path: $Path"
-            }
-            Write-DefenseClawTrustAdvisory `
-                -Path $Path `
-                -Reason "untrusted principal $sid has write-like access during uninstall ACL recovery (continuing bulldoze)"
-            continue
+            throw "refusing uninstall ACL recovery: untrusted principal $sid has write-like access to managed path: $Path"
         }
     }
 }
@@ -7934,16 +7928,15 @@ function Repair-DefenseClawUninstallAdminFileAcl {
     )
     $aclDrift = ''
     try {
-        # SkipSelfHeal: this call is drift-DETECTION, not drift-REPAIR.
-        # The verifier's icacls /inheritance:r self-heal would mutate the
-        # inspected file and mask drift the deeper check pipeline below
-        # relies on seeing. Only the stamp-and-verify callers through
-        # Set-DefenseClawPathAcl use the self-heal.
+        # Drift-DETECTION call: no -AllowSelfHeal. The icacls
+        # /inheritance:r self-heal is only for stamp-and-verify callers
+        # (Set-DefenseClawPathAcl); here we want to observe the exact
+        # ACL state and escalate to the deeper tamper-check pipeline
+        # below if it drifted.
         Assert-DefenseClawCanonicalRawPathAcl `
             -Path $path `
             -Actual $actual `
-            -Expected $expected `
-            -SkipSelfHeal
+            -Expected $expected
     }
     catch {
         $aclDrift = $_.Exception.Message
