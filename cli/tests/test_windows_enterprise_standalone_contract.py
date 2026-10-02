@@ -275,6 +275,24 @@ def test_lifecycles_retire_a_stale_committed_journal_through_the_fallback() -> N
         assert "Invoke-DefenseClawCommittedManagedHooksLifecycleRetire" in _function_body(module, name)
 
 
+def test_standalone_purge_keeps_the_launching_cli_powershell_temp() -> None:
+    """GAP-1853: install-enterprise.ps1 moves TEMP into its bootstrap folder,
+    so the stale-temp sweep learns the launching CLI's protected folder from
+    -LauncherTemp, which only the standalone profile passes."""
+
+    installer = _text(INSTALLER)
+    standalone = installer[installer.index("if ($EnterpriseProfile -ceq 'Standalone') {") :]
+    standalone = standalone[: standalone.index("Invoke-DefenseClawEnterpriseLifecycle @arguments")]
+    assert "$arguments['LauncherTemp'] = [string]$bootstrapEnvironment.OriginalEnvironment['TEMP']" in standalone
+    module = _text(MODULE)
+    assert "$script:DefenseClawLauncherTemp = [string]$LauncherTemp" in _function_body(
+        module, "Invoke-DefenseClawEnterpriseLifecycle"
+    )
+    assert "$script:DefenseClawLauncherTemp" in _function_body(
+        module, "Remove-DefenseClawStalePowerShellTempDirectories"
+    )
+
+
 # The standalone PowerShell smokes run inside disposable scratch directories
 # and never touch a service or a real machine root, so Windows CI runs every
 # one of them on each installed engine (Windows PowerShell 5.1 and 7).

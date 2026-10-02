@@ -8,7 +8,9 @@
 # created go once dropping the serialization lock leaves them empty, and stay
 # while they hold anything else. GAP-1734: stale protected
 # DefenseClaw-PowerShell-<32 hex> temp folders go, except the one this run
-# uses; one it cannot remove is reported. Runs in a disposable scratch
+# uses and the launching CLI's own (GAP-1853: install-enterprise.ps1 moves
+# TEMP into its bootstrap folder, and the CLI still removes its folder after
+# PowerShell exits); one it cannot remove is reported. Runs in a disposable scratch
 # directory; no service or machine root is touched.
 
 [CmdletBinding()]
@@ -81,17 +83,20 @@ $failures = & $module {
         $stale = [IO.Path]::Combine($programData, 'DefenseClaw-PowerShell-' + ('a' * 32))
         $foreign = [IO.Path]::Combine($programData, 'DefenseClaw-PowerShell-' + ('b' * 32))
         $own = [IO.Path]::Combine($programData, 'DefenseClaw-PowerShell-' + ('c' * 32))
+        $launcher = [IO.Path]::Combine($programData, 'DefenseClaw-PowerShell-' + ('d' * 32))
         $unrelated = [IO.Path]::Combine($programData, 'DefenseClaw-PowerShell-notours')
         [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($stale, 'AppData', 'Local', 'Microsoft', 'PowerShell'))
         foreach ($path in @($foreign, $own, $unrelated)) {
             [void][IO.Directory]::CreateDirectory($path)
         }
+        [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($launcher, 'AppData', 'Local', 'Microsoft', 'PowerShell'))
         $env:TEMP = $own
+        $script:DefenseClawLauncherTemp = $launcher + '\'
         $left = @(Remove-DefenseClawStalePowerShellTempDirectories -ProgramData $programData)
         if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $stale) {
             $failures.Add('a stale DefenseClaw-PowerShell temp folder was not removed')
         }
-        foreach ($path in @($foreign, $own, $unrelated)) {
+        foreach ($path in @($foreign, $own, $launcher, $unrelated)) {
             if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path)) {
                 $failures.Add("removed a folder it must keep: $path")
             }
@@ -102,6 +107,7 @@ $failures = & $module {
     }
     finally {
         $env:TEMP = $savedTemp
+        $script:DefenseClawLauncherTemp = ''
         if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Scratch) {
             Microsoft.PowerShell.Management\Remove-Item -LiteralPath $Scratch -Recurse -Force
         }
