@@ -221,6 +221,24 @@ def test_the_upgrade_window_keeps_the_outcome_on_screen_with_yes() -> None:
     assert "[Console]::KeyAvailable" in body and "$Run.Log" in body
     # Windows PowerShell 5.1 runs this installer and has no [uint] accelerator.
     assert '"uint[]"' not in body
+    # GAP-1570: `& install.ps1` typed into the user's own shell returns at once;
+    # only a console started for the script waits before closing.
+    started_for_script = (
+        "[Environment]::CommandLine.IndexOf($scriptName, [StringComparison]::OrdinalIgnoreCase) -lt 0) { return }"
+    )
+    assert body.index("$Run.Log") < body.index(started_for_script) < body.index("if (-not $Yes)")
+
+
+def test_the_suggested_cleanup_removes_the_read_only_key_copy() -> None:
+    # GAP-1645: Remove-Item -Force first resets each file's attributes, which the
+    # read-only redaction key copy refuses; rd /s /q deletes it through the folder.
+    text = _text()
+    assert "Remove-Item -Recurse -Force '" not in text
+    assert text.count('cmd /c rd /s /q `"') == 2
+    # The installer's own cleanup deletes through .NET first, which is also much
+    # faster than Remove-Item in Windows PowerShell 5.1 (GAP-1600).
+    body = text[text.index("function Remove-Tree") : text.index("function New-InstallDirectory")]
+    assert body.index("[IO.Directory]::Delete(") < body.index("-Recurse -Force -ErrorAction SilentlyContinue")
 
 
 def test_remove_tree_retries_without_logging_a_terminating_error() -> None:

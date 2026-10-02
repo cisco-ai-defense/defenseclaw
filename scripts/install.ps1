@@ -171,11 +171,15 @@ function Remove-Tree([string]$Path) {
     # long profile path), so a failed attempt retries through the \\?\ path.
     # Only the last attempt may stop: a caught stopping error on an earlier one still
     # lands in the run log as a TerminatingError although the retry worked.
+    # The .NET delete goes first: Remove-Item took minutes for a venv in Windows
+    # PowerShell 5.1 (GAP-1600), and its -Force first resets each file's
+    # attributes, which a read-only key copy refuses (GAP-1645). Remove-Item then
+    # takes what .NET leaves (read-only files).
     for ($attempt = 1; Test-Path -LiteralPath $Path; $attempt++) {
         if ($attempt -ge 30) { Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop; return }
-        Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue
-        if (-not (Test-Path -LiteralPath $Path)) { return }
         try { [IO.Directory]::Delete("\\?\" + [IO.Path]::GetFullPath($Path), $true) } catch { }
+        if (-not (Test-Path -LiteralPath $Path)) { return }
+        Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue
         if (-not (Test-Path -LiteralPath $Path)) { return }
         Start-Sleep -Seconds 1
     }
@@ -509,6 +513,11 @@ function Wait-BeforeClose([int]$Code) {
         # and the catch below closed the window at once.
         if ([DefenseClawInstall.Native]::GetConsoleProcessList((New-Object "uint32[]" 4), 4) -ne 1) { return }
         if ($Run.Log) { Write-Host "  Install log: $($Run.Log)" }
+        # A shell the user typed `& install.ps1` into is alone on its console as
+        # well (Windows Terminal), but it stays open: only a process started for
+        # this script (-File, or Explorer's "Run with PowerShell") closes with it.
+        $scriptName = Split-Path -Leaf $PSCommandPath
+        if ([Environment]::CommandLine.IndexOf($scriptName, [StringComparison]::OrdinalIgnoreCase) -lt 0) { return }
         if (-not $Yes) {
             [void](Read-Host "  Press Enter to close this window")
             return
@@ -1049,7 +1058,7 @@ function Restore-Snapshot {
     Restart-Old
     $bytes = (Get-ChildItem -LiteralPath $failed -Recurse -Force -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
     Write-Warn ("The failed $Ver install was kept in $failed ({0:N1} MB) for troubleshooting" -f ([double]$bytes / 1MB))
-    Write-Info "Your previous install and its data are back; it is safe to remove the copy with: Remove-Item -Recurse -Force '$failed'"
+    Write-Info "Your previous install and its data are back; it is safe to remove the copy with: cmd /c rd /s /q `"$failed`""
 }
 
 function Save-RolledBackData {
@@ -1071,7 +1080,7 @@ function Save-RolledBackData {
     $bytes = (Get-ChildItem -LiteralPath $kept -Recurse -Force -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
     $what = if ($label -eq "rolled-back") { "the data from before the last rollback" } else { "the audit history DefenseClaw $version recorded" }
     Write-Info ("Kept $what in $kept ({0:N1} MB)" -f ([double]$bytes / 1MB))
-    Write-Info "It is not used again; once you no longer need its audit history, remove it with: Remove-Item -Recurse -Force '$kept'"
+    Write-Info "It is not used again; once you no longer need its audit history, remove it with: cmd /c rd /s /q `"$kept`""
 }
 
 function Save-Live([string]$Slot) {

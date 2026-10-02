@@ -613,3 +613,46 @@ def test_drifted_exporter_warn_names_setup_in_remediation() -> None:
     check = r.checks[-1]
     assert check["status"] == "warn"
     assert check["remediation"] == "run 'defenseclaw setup claude-code' to re-apply"
+
+
+def test_rows_that_name_a_command_in_their_detail_carry_it_as_remediation() -> None:
+    # GAP-1526: Gateway authentication / Gateway token env / Hook contract rows
+    # named their command only in the detail, so --json-output had no next step.
+    r = _DoctorResult()
+    text = _render(
+        lambda: (
+            cmd_doctor._emit(
+                "fail",
+                "Gateway authentication",
+                "no gateway token is configured — run `defenseclaw doctor --fix` to generate and persist one",
+                r=r,
+            ),
+            cmd_doctor._emit("pass", "Sidecar API", "127.0.0.1:18970 `x`", r=r),
+            cmd_doctor._emit("warn", "Plain", "nothing to run", r=r),
+        )
+    )
+    assert r.checks[0]["remediation"] == "run `defenseclaw doctor --fix` to generate and persist one"
+    assert [c["remediation"] for c in r.checks[1:]] == ["", ""]
+    assert text.count("defenseclaw doctor --fix") == 1 and "Next step" not in text
+
+
+def test_port_held_by_another_account_row_carries_its_next_step(tmp_path) -> None:
+    # GAP-1526: the foreign holder answers /health, and the FAIL row had no remediation.
+    from types import SimpleNamespace
+
+    from defenseclaw.config import GatewayConfig
+
+    cfg = SimpleNamespace(data_dir=str(tmp_path), gateway=GatewayConfig(api_bind="127.0.0.1", api_port=19_020))
+    trust = SimpleNamespace(trusted=False, detail="the gateway is not running (PID file is missing)")
+    r = _DoctorResult()
+    with (
+        mock.patch.object(cmd_doctor, "_http_probe", return_value=(200, "{}")),
+        mock.patch.object(cmd_doctor, "_trusted_gateway_listener", return_value=trust),
+        mock.patch.object(cmd_doctor, "_gateway_port_holder", return_value="uid 1032 (dcr-other)"),
+        mock.patch.object(cmd_doctor, "_free_api_port_hint", return_value=19_040),
+    ):
+        text = _render(lambda: cmd_doctor._check_sidecar(cfg, r))
+    row = r.checks[-1]
+    assert row["status"] == "fail" and r.gateway_down == "foreign"
+    assert "--api-port 19040" in row["remediation"] and "defenseclaw-gateway start" in row["remediation"]
+    assert text.count("defenseclaw setup gateway") == 1 and "`" not in text

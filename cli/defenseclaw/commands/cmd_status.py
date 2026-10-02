@@ -164,9 +164,12 @@ def _opencode_runtime_truth(
 
     heartbeat_raw = row.get("load_heartbeat_at")
     if not isinstance(heartbeat_raw, str) or not heartbeat_raw.strip():
+        # OpenCode reports the load when it starts, so a closed OpenCode is
+        # idle, not degraded (GAP-1632; doctor shows it as a skip, GAP-1565).
         return (
-            "degraded",
-            "runtime load unverified: no authenticated load heartbeat; OpenCode may be stopped or idle",
+            "idle",
+            "no authenticated load heartbeat yet: OpenCode has not loaded the plugin since the "
+            "gateway started, which is normal while OpenCode is closed",
         )
     heartbeat = _runtime_timestamp(heartbeat_raw)
     if heartbeat is None:

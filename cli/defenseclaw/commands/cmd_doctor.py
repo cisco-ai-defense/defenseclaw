@@ -470,6 +470,25 @@ def _plain_commands(text: str) -> str:
     return _BACKTICK_COMMAND.sub(r"'\1'", text)
 
 
+_DETAIL_CLAUSE_BREAK = re.compile(r"(?:\.\s+|;\s+|\s+—\s+)")
+
+
+def _remediation_from_detail(detail: str) -> str:
+    """Return the clause of *detail* that names a `command`, for the JSON row.
+
+    Many warn/fail rows spell their next step inside the detail ("... — run
+    `defenseclaw doctor --fix` to ..."). The TUI and scripts read
+    ``remediation``, so such rows would otherwise carry an empty one.
+    """
+    match = _BACKTICK_COMMAND.search(detail)
+    if not match:
+        return ""
+    start = 0
+    for brk in _DETAIL_CLAUSE_BREAK.finditer(detail, 0, match.start()):
+        start = brk.end()
+    return detail[start:].strip().rstrip(".")
+
+
 def _emit(
     tag: str,
     label: str,
@@ -504,6 +523,8 @@ def _emit(
         if tag in {"warn", "fail"} and hint and hint not in detail:
             _emit_hint(f"Next step: {_plain_commands(hint)}")
     if r is not None:
+        if tag in {"warn", "fail"} and not remediation.strip():
+            remediation = _remediation_from_detail(detail)
         r.record(
             tag,
             label,
@@ -2501,12 +2522,18 @@ def _foreign_gateway_port_holder(cfg) -> str:
     return holder
 
 
+def _foreign_gateway_port_remediation(cfg, then: str = "start") -> str:
+    return (
+        "Stop that process, or move this account's gateway with "
+        f"`defenseclaw setup gateway --api-port {_free_api_port_hint(cfg)} --non-interactive`, "
+        f"then run `defenseclaw-gateway {then}`"
+    )
+
+
 def _foreign_gateway_port_detail(cfg, holder: str) -> str:
     return (
         f"{_gateway_api_host(cfg)}:{cfg.gateway.api_port} is held by {holder}, not by this account's gateway. "
-        "Stop that process, or move this account's gateway with "
-        f"`defenseclaw setup gateway --api-port {_free_api_port_hint(cfg)} --non-interactive`, "
-        "then run `defenseclaw-gateway start`"
+        + _foreign_gateway_port_remediation(cfg)
     )
 
 
@@ -2557,13 +2584,20 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
                 "a binary that was replaced after it started. Run `defenseclaw-gateway restart` to load "
                 "the installed one",
                 r=r,
+                remediation="Run `defenseclaw-gateway restart`",
             )
         elif trust.trusted:
             _emit("pass", "Sidecar API", f"{bind}:{cfg.gateway.api_port}", r=r)
         elif holder:
             # Another process's /health says nothing about this account's
             # gateway, so its subsystem rows are not shown.
-            _emit("fail", "Sidecar API", f"{_foreign_gateway_port_detail(cfg, holder)} ({trust.detail})", r=r)
+            _emit(
+                "fail",
+                "Sidecar API",
+                f"{_foreign_gateway_port_detail(cfg, holder)} ({trust.detail})",
+                r=r,
+                remediation=_foreign_gateway_port_remediation(cfg),
+            )
             r.gateway_down = "foreign"
             return None
         else:
@@ -2571,14 +2605,14 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
             # passed while another account's listener held the API port.
             holders = _linux_foreign_listener_accounts(cfg.gateway.api_port)
             held = f"; the port is held by {holders}" if holders else ""
+            move = _foreign_gateway_port_remediation(cfg, then="restart")
             _emit(
                 "warn",
                 "Sidecar API",
                 f"{bind}:{cfg.gateway.api_port} answers, but not as this account's verified gateway "
-                f"({trust.detail}){held}. Stop that process, or move this account's gateway with "
-                f"`defenseclaw setup gateway --api-port {_free_api_port_hint(cfg)} --non-interactive`, "
-                "then run `defenseclaw-gateway restart`",
+                f"({trust.detail}){held}. {move}",
                 r=r,
+                remediation=move,
             )
 
         try:
@@ -2698,8 +2732,13 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
         r.gateway_down = "stopped"
     elif holder := _foreign_gateway_port_holder(cfg):
         # Something else answers on the port without a gateway /health.
-        detail = _foreign_gateway_port_detail(cfg, holder)
-        _emit("fail", "Sidecar API", detail, r=r, remediation=detail)
+        _emit(
+            "fail",
+            "Sidecar API",
+            _foreign_gateway_port_detail(cfg, holder),
+            r=r,
+            remediation=_foreign_gateway_port_remediation(cfg),
+        )
         r.gateway_down = "foreign"
     else:
         _emit(
@@ -11435,7 +11474,12 @@ def _check_hook_contract_lock(
                 r=r,
             )
         else:
-            _emit("warn", "Hook contract", "no hook_contract_lock.json yet — restart gateway after setup", r=r)
+            _emit(
+                "warn",
+                "Hook contract",
+                "no hook_contract_lock.json yet — restart the gateway after setup: `defenseclaw-gateway restart`",
+                r=r,
+            )
         return
     except PermissionError:
         if root_owned_private_regular_file(lock_path):
