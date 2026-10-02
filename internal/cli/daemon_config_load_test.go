@@ -98,3 +98,37 @@ func TestGatewayStatusConfigLoadErrorNamesStateAndNextStep(t *testing.T) {
 		}
 	}
 }
+
+// GAP-1785: an empty config.yaml gets the Python CLI's message (GAP-1633),
+// not the YAML loader's "root must be a mapping" advice.
+func TestGatewayConfigLoadErrorsCallAnEmptyConfigEmpty(t *testing.T) {
+	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
+	loadErr := errors.New("failed to load config: config.yaml: [yaml_root_mapping_required] $: the YAML document root must be a mapping")
+	for _, content := range []string{"", "\n  \n", "# only a comment\n"} {
+		if err := os.WriteFile(config.ConfigPath(), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		for _, err := range []error{
+			daemonConfigLoadError("start", loadErr),
+			daemonConfigLoadError("restart", loadErr),
+			gatewayStatusConfigLoadError(loadErr),
+		} {
+			msg := err.Error()
+			for _, want := range []string{config.ConfigPath() + " is empty: it holds no settings",
+				"nothing was changed", "run 'defenseclaw init'"} {
+				if !strings.Contains(msg, want) {
+					t.Errorf("content %q: error %q does not contain %q", content, msg, want)
+				}
+			}
+			if strings.Contains(msg, "yaml_root_mapping_required") || strings.Contains(msg, "config_version") {
+				t.Errorf("content %q: error %q still shows the loader detail", content, msg)
+			}
+		}
+	}
+	if err := os.WriteFile(config.ConfigPath(), []byte("config_version: 8\nguardrail: [unclosed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := daemonConfigLoadError("start", loadErr); strings.Contains(err.Error(), "is empty") {
+		t.Fatalf("a non-empty config was called empty: %v", err)
+	}
+}

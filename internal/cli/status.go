@@ -123,6 +123,9 @@ func gatewayStatusConfigLoadError(err error) error {
 	if running, pid := daemon.New(config.DefaultDataPath()).IsRunning(); running {
 		state = fmt.Sprintf("The gateway (PID %d) is still running with the config it started with.", pid)
 	}
+	if message, empty := emptyConfigFileMessage(config.ConfigPath()); empty {
+		return fmt.Errorf("%s %s", message, state)
+	}
 	var secretErr *config.V8SecretReferenceError
 	if errors.As(err, &secretErr) && !secretErr.Credential {
 		// Same next step start and restart print (GAP-1353).
