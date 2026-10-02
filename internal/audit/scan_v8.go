@@ -244,7 +244,7 @@ func scanFindingV8Operation(
 			DefenseClawFindingExternalEndpoint:    optionalScanV8Text(finding.ExternalEndpoint),
 			DefenseClawFindingDecisionPath:        optionalScanV8DecisionPath(finding.DecisionPath),
 			DefenseClawFindingContentFingerprint:  optionalScanV8Identifier(finding.ContentFingerprint),
-			DefenseClawScanScanner:                optionalScanV8Text(result.Scanner),
+			DefenseClawScanScanner:                optionalScanV8Text(scanFindingV8Scanner(finding, result)),
 			UserID:                                optionalScanV8Identifier(correlation.UserID),
 			DefenseClawUserIDKind:                 optionalNetworkUserIDKind(correlation.UserIDKind),
 			DefenseClawUserName:                   optionalScanV8Identifier(correlation.UserName),
@@ -254,6 +254,28 @@ func scanFindingV8Operation(
 	return RuntimeV8LogOperation{
 		ctx: contextWithLegacyEventProjection(ctx, event), metadata: metadata, build: build,
 	}, nil
+}
+
+// scanFindingV8Scanner names the detector of one finding. A hook or inspect
+// verdict merges the LLM-judge and AI Defense lanes into its own scan and tags
+// each lane finding with the lane (gateway mergeWithLaneVerdict), so the
+// exported record names that lane, as `defenseclaw alerts` does, instead of
+// the regex scan it rode in on (GAP-2000).
+func scanFindingV8Scanner(finding scanner.Finding, result *scanner.ScanResult) string {
+	if result.Scanner != "hook-rules" && result.Scanner != "inspect-http" {
+		return result.Scanner
+	}
+	for _, tag := range finding.Tags {
+		switch lane := strings.ToLower(strings.TrimSpace(tag)); lane {
+		case "llm-judge", "ai-defense":
+			return lane
+		}
+	}
+	// A PII judge finding's tags are rewritten when it is stored.
+	if strings.HasPrefix(strings.ToUpper(finding.RuleID), "JUDGE-") {
+		return "llm-judge"
+	}
+	return result.Scanner
 }
 
 // scanFindingV8EvidenceSummary follows the deterministic source order in the
