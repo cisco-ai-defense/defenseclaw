@@ -924,6 +924,10 @@ func TestSummaryLine(t *testing.T) {
 		"Blocked by DefenseClaw rule CMD-1: Destructive command (also CMD-2). Do not.": "Destructive command (CMD-1)",
 		"Blocked by DefenseClaw rule CMD-1. Do not.":                                   "CMD-1",
 		"Blocked by DefenseClaw policy. Try another approach.":                         "DefenseClaw policy",
+		// The host hook's wording (GAP-1885).
+		"DefenseClaw policy blocked this action (rule E2E-SANDBOX-MARKER: E2E sandbox marker command). Do not retry it in another form.": "E2E sandbox marker command (E2E-SANDBOX-MARKER)",
+		"DefenseClaw policy blocked this action (rules CMD-1: Destructive command, CMD-2). Do not retry it in another form.":             "Destructive command (CMD-1)",
+		"DefenseClaw policy blocked this action. Do not retry it in another form.":                                                       "DefenseClaw policy",
 		"marker": "marker",
 	} {
 		if got := blockedReason(in); got != want {

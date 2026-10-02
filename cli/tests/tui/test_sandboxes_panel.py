@@ -39,7 +39,7 @@ from defenseclaw.tui.screens.sandbox_launch import (
     SandboxLaunchValues,
     harness_choices,
 )
-from defenseclaw.tui.services.sandbox_state import TOAST_DEDUPE_SECONDS, host_port
+from defenseclaw.tui.services.sandbox_state import TOAST_DEDUPE_SECONDS, host_port, verdict_reason
 
 STATUS = {
     "enabled": True,
@@ -489,9 +489,9 @@ TOOL_BLOCK = {
     "kind": "tool.blocked",
     "sandbox": "myapp-claude-7f3a",
     "tool": "Bash",
-    "reason": "Blocked by DefenseClaw rule E2E-SANDBOX-MARKER: E2E sandbox marker command. "
-    "Try another approach that does not need this action, or ask the user to review the DefenseClaw policy.",
-    "message": "✗ Bash blocked by DefenseClaw: Blocked by DefenseClaw rule E2E-SANDBOX-MARKER: ...",
+    "reason": "DefenseClaw policy blocked this action (rule E2E-SANDBOX-MARKER: E2E sandbox marker command). "
+    "Do not retry it in another form.",
+    "message": "✗ Bash blocked by DefenseClaw: E2E-SANDBOX-MARKER (E2E sandbox marker command)",
 }
 
 
@@ -574,7 +574,9 @@ def test_feed_rows_use_plain_labels_and_no_advice_for_the_agent() -> None:
     assert all("_" not in event and "ask the user" not in event for event in events)
     model.cursor = 0
     pairs = dict(model.detail_pairs()[1])
-    assert pairs["Reason"] == "Blocked by DefenseClaw rule E2E-SANDBOX-MARKER: E2E sandbox marker command"
+    assert pairs["Reason"] == (
+        "DefenseClaw policy blocked this action (rule E2E-SANDBOX-MARKER: E2E sandbox marker command)"
+    )
     model.cursor = 2
     pairs = dict(model.detail_pairs()[1])
     assert pairs["Category"] == "webhook catcher" and pairs["Reason"].startswith("Webhook catchers record")
@@ -588,8 +590,11 @@ def test_feed_rows_use_plain_labels_and_no_advice_for_the_agent() -> None:
     model.view = "sandboxes"
     model.cursor = 0
     assert dict(model.detail_pairs()[1])["Last tool block"] == (
-        "Blocked by DefenseClaw rule E2E-SANDBOX-MARKER: E2E sandbox marker command"
+        "DefenseClaw policy blocked this action (rule E2E-SANDBOX-MARKER: E2E sandbox marker command)"
     )
+    # A gateway from before GAP-1885 still reads without its advice.
+    old = "Blocked by DefenseClaw rule E2E-SANDBOX-MARKER: E2E sandbox marker command. Try another approach."
+    assert verdict_reason(old) == "Blocked by DefenseClaw rule E2E-SANDBOX-MARKER: E2E sandbox marker command"
 
 
 @pytest.mark.asyncio

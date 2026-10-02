@@ -135,8 +135,8 @@ func (m *Manager) ObserveHookDecision(d HookDecision) {
 				what = firstNonEmpty(event, "a hook event")
 			}
 			msg := "✗ " + what + " blocked by DefenseClaw"
-			if reason != "" {
-				msg += ": " + truncate(reason, 200)
+			if label := sandboxapi.VerdictRuleLabel(reason); label != "" {
+				msg += ": " + truncate(label, 200)
 			}
 			m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityHookBlocked, Sandbox: d.SandboxName,
 				Event: d.Event, Severity: d.Severity, Reason: truncate(reason, 300), Message: msg})
@@ -170,8 +170,8 @@ func (m *Manager) ObserveHookDecision(d HookDecision) {
 		if d.Tool != "" {
 			msg = "✗ " + d.Tool + " blocked by DefenseClaw"
 		}
-		if reason != "" {
-			msg += ": " + truncate(reason, 200)
+		if label := sandboxapi.VerdictRuleLabel(reason); label != "" {
+			msg += ": " + truncate(label, 200)
 		}
 		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityToolBlocked, Sandbox: d.SandboxName, Tool: d.Tool,
 			Event: d.Event, Severity: d.Severity, Reason: truncate(reason, 300), Message: msg})
@@ -181,8 +181,8 @@ func (m *Manager) ObserveHookDecision(d HookDecision) {
 		if d.Tool != "" {
 			msg = "? DefenseClaw asked you to confirm " + d.Tool
 		}
-		if reason != "" {
-			msg += ": " + truncate(reason, 200)
+		if label := sandboxapi.VerdictRuleLabel(reason); label != "" {
+			msg += ": " + truncate(label, 200)
 		}
 		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityToolAsked, Sandbox: d.SandboxName, Tool: d.Tool,
 			Event: d.Event, Severity: d.Severity, Reason: truncate(reason, 300), Message: msg})

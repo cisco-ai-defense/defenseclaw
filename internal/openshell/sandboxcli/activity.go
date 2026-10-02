@@ -122,13 +122,13 @@ func (a *App) activityLine(ev sandboxapi.ActivityEvent, withSandbox bool) string
 		}
 	case sandboxapi.ActivityToolBlocked:
 		b.WriteString(a.style("✗", ansiRed) + " tool " + firstNonEmpty(ev.Tool, "call") + " blocked")
-		if ev.Reason != "" {
-			b.WriteString(": " + truncate(ev.Reason, 120))
+		if label := sandboxapi.VerdictRuleLabel(ev.Reason); label != "" {
+			b.WriteString(": " + truncate(label, 120))
 		}
 	case sandboxapi.ActivityToolAsked:
 		b.WriteString(a.style("?", ansiYellow, ansiBold) + " tool " + firstNonEmpty(ev.Tool, "call") + " asked for confirmation")
-		if ev.Reason != "" {
-			b.WriteString(": " + truncate(ev.Reason, 120))
+		if label := sandboxapi.VerdictRuleLabel(ev.Reason); label != "" {
+			b.WriteString(": " + truncate(label, 120))
 		}
 	case sandboxapi.ActivityHookBlocked:
 		b.WriteString(a.style("✗", ansiRed) + " " + firstNonEmpty(strings.TrimPrefix(ev.Message, "✗ "), "prompt blocked by DefenseClaw"))
