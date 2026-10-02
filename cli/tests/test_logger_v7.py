@@ -706,3 +706,42 @@ def test_close_closes_only_the_canonical_transport() -> None:
     logger = Logger(recorder)
     logger.close()
     assert recorder.closed
+
+
+def test_scan_ingress_keeps_only_gateway_finding_fields() -> None:
+    """GAP-1083: confidence/evidence made the gateway reject every scan with findings."""
+    import re
+
+    from defenseclaw.logger import _SCAN_FINDING_WIRE_FIELDS
+
+    go_source = (Path(__file__).resolve().parents[2] / "internal" / "gateway" / "cli_observability_v8.go").read_text(
+        encoding="utf-8"
+    )
+    struct = re.search(r"type cliObservabilityV8Finding struct \{(.*?)\n\}", go_source, re.S)
+    assert struct
+    assert set(_SCAN_FINDING_WIRE_FIELDS) == set(re.findall(r'json:"([a-z_]+)', struct.group(1)))
+
+    recorder = _Recorder()
+    Logger(recorder).log_scan(
+        ScanResult(
+            scanner="plugin-scanner",
+            target="/tmp/plugin",
+            timestamp=datetime(2026, 10, 2, tzinfo=timezone.utc),
+            findings=[
+                Finding(
+                    id="f-1",
+                    severity="HIGH",
+                    title="Install script",
+                    scanner="plugin-scanner",
+                    rule_id="plugin.install-script",
+                    line_number=3,
+                    confidence=0.9,
+                    evidence="matched text",
+                )
+            ],
+            duration=timedelta(milliseconds=5),
+        )
+    )
+    wire = recorder.payloads[0]["scan"]["findings"][0]
+    assert "confidence" not in wire and "evidence" not in wire
+    assert wire["rule_id"] == "plugin.install-script" and wire["line_number"] == 3
