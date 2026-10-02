@@ -22,10 +22,11 @@ import (
 )
 
 // PowerShellProfileWrapperReduction returns a complete view of a partial
-// action that is one `pwsh -Command "<body>"` or `powershell -Command
+// action that starts with a `pwsh -Command "<body>"` or `powershell -Command
 // "<body>"` call without -NoProfile, such as
-// `pwsh -Command "echo marker > C:/x.txt"` (GAP-1639). facts must be
-// Analyze(input).
+// `pwsh -Command "echo marker > C:/x.txt"` (GAP-1639), the same call with a
+// redirect outside the quotes, or the call followed by more list members
+// (`...; echo done`, GAP-1868). facts must be Analyze(input).
 //
 // The wrapper is unwrapped only with -NoProfile because a profile runs
 // commands before the body. Those commands come first and the body still
@@ -36,16 +37,19 @@ import (
 // redirects, paths, network facts and data flows cannot undo
 // (semantic.Program.StaticCommandSubsetSafe); a non-match proves nothing.
 //
-// The view is unavailable unless the call is a single top-level PowerShell
-// process with a static argv, certain control flow and no redirects, the
-// only parse issue is the unsupported wrapper, and the twin is complete.
+// A redirect on the call also takes the profile's output, and the commands
+// after it run as they do after the twin, so neither can undo the body's
+// match. The view is unavailable unless the call is the action's first
+// top-level command, a PowerShell process with a static argv and certain
+// control flow, the only parse issue is the unsupported wrapper, and the
+// twin is complete (so every other command and redirect target is too).
 func PowerShellProfileWrapperReduction(input Input, facts Facts) (view Facts, ok bool) {
 	defer func() {
 		if recover() != nil {
 			view, ok = Facts{}, false
 		}
 	}()
-	if facts.Parse.Status != StatusPartial || len(facts.Commands) != 1 ||
+	if facts.Parse.Status != StatusPartial || len(facts.Commands) == 0 ||
 		len(facts.Parse.Issues) != 1 || facts.Parse.Issues[0] != IssueUnsupportedConstruct ||
 		(facts.Parse.Dialect != DialectPOSIX && facts.Parse.Dialect != DialectPowerShell) {
 		return Facts{}, false
@@ -57,7 +61,7 @@ func PowerShellProfileWrapperReduction(input Input, facts Facts) (view Facts, ok
 		return Facts{}, false
 	}
 	if wrapper.ParentCommandID != 0 || !staticCertainPOSIXOrPowerShellProcess(wrapper) ||
-		len(wrapper.Redirects) != 0 || len(wrapper.Argv) < 3 {
+		len(wrapper.Argv) < 3 {
 		return Facts{}, false
 	}
 	for _, option := range wrapper.Argv[1:] {

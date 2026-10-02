@@ -251,6 +251,18 @@ func TestTrustedActionBlocksCommandRuleWithRuntimeExpandedRedirectTarget(t *test
 			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-COMPLETE-ARGV": blocks},
 		},
 		{
+			// GAP-1868: a redirect outside the quotes or a following list
+			// member does not undo the body's match either.
+			name:    "pwsh -Command with a redirect outside the quotes",
+			command: `pwsh -Command "echo ` + redirectReductionMarker + `" > C:/Users/alice/dc-x.txt`,
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly, "TEST-MARKER-COMPLETE-ARGV": blocks},
+		},
+		{
+			name:    "pwsh -Command followed by another command",
+			command: `pwsh -Command "echo ` + redirectReductionMarker + ` > C:/Users/alice/dc-x.txt"; echo done`,
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-COMPLETE-ARGV": blocks},
+		},
+		{
 			name:    "pwsh -Command in a list",
 			command: `cd $DIR; pwsh -Command "echo ` + redirectReductionMarker + `"`,
 			want:    map[string]string{"TEST-MARKER-BLOCK": detectionOnly},

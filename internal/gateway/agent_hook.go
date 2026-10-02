@@ -2055,7 +2055,8 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 		fallbackTool := agentHookTrustedActionTool(
 			req.ConnectorName, req.ToolName, runtime.GOOS,
 		)
-		if req.ConnectorName == "copilot" && req.HookSurface == connector.CopilotHookSurfaceVSCodeLocal {
+		if req.ConnectorName == "copilot" && (req.HookSurface == connector.CopilotHookSurfaceVSCodeLocal ||
+			connector.CopilotVSCodeLocalTool(req.ToolName)) {
 			fallbackTool = connector.CopilotVSCodeLocalActionTool(req.ToolName)
 		}
 		actionTool, resourceIdentity := trustedToolActionFromContext(
