@@ -635,7 +635,12 @@ def _print_agents(
 
     enabled_count = sum(1 for c in actives if _is_enabled(c))
     disabled_count = len(actives) - enabled_count
-    header = f"{enabled_count} active"
+    # GAP-1937: a connector whose setup failed at gateway start is not
+    # enforced; count it the way `defenseclaw-gateway status` does.
+    not_running_count = sum(1 for c in actives if _is_enabled(c) and c not in health_map and c in not_started)
+    header = f"{enabled_count - not_running_count} active"
+    if not_running_count:
+        header += f", {not_running_count} not running"
     if disabled_count:
         header += f", {disabled_count} disabled"
     if guardrail_off and not enabled_count:

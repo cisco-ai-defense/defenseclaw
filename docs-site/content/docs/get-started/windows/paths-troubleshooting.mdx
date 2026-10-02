@@ -217,6 +217,19 @@ residue automatically.
     Do not prepend an unpacked source checkout or embedded runtime directory as
     a permanent workaround.
   </Accordion>
+  <Accordion title="defenseclaw-hook --version prints after the prompt, or > file and $v = capture nothing">
+    `defenseclaw-hook.exe` is a no-console (GUI-subsystem) program, so agent
+    applications that run it never open a console window. PowerShell does not
+    wait for such a program when it is the last command of a pipeline: the
+    prompt returns first, the version line is written after it, `> file` and
+    `$v = defenseclaw-hook --version` capture nothing, and `$LASTEXITCODE` is
+    not the hook's exit code. Pipe it, or run it through cmd, to wait for it
+    and capture its output:
+    `defenseclaw-hook --version | Out-String`,
+    `defenseclaw-hook --version-json | ConvertFrom-Json`, or
+    `cmd /c "%USERPROFILE%\.local\bin\defenseclaw-hook.exe --version"`.
+    `defenseclaw doctor` also compares the hook's release with the CLI's.
+  </Accordion>
   <Accordion title="An install, upgrade, or rollback fails">
     Read the newest `%USERPROFILE%\.defenseclaw\logs\install-*.log`. A failed
     upgrade restores the previous install automatically and keeps the failed

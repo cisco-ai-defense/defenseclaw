@@ -216,6 +216,11 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
     undiscoverable: list[str] = []
     source_diagnostics: list[tuple[str, connector_paths.MCPSourceDiagnostic]] = []
     failed_rows: list[tuple[str, str]] = []
+    # GAP-1907: on a fan-out listing, a connector with no MCP servers is a
+    # normal state. Collect those into one short line instead of a warning
+    # (with every checked path) per connector; --connector X keeps the detail.
+    fan_out = explicit is None and len(connectors) > 1
+    empty_connectors: list[str] = []
     for connector in connectors:
         locations, servers, diagnostics = _collect_mcp_discovery(app, connector)
         source_diagnostics.extend((connector, diagnostic) for diagnostic in diagnostics)
@@ -239,6 +244,9 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
                     f"This is a gap in DefenseClaw, not a clean result.",
                 )
                 continue
+            if fan_out:
+                empty_connectors.append(connector)
+                continue
             ux.warn(
                 f"No MCP servers configured for connector={connector!r} "
                 f"(checked: {_mcp_source_hint(app, connector)}).",
@@ -251,6 +259,12 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
         _print_mcp_list_table(servers, scan_map, actions_map, connector, failed_map)
         failed_rows.extend((connector, name) for name in failed_map)
         shown_any = True
+
+    if empty_connectors:
+        ux.subhead(
+            f"No MCP servers for: {', '.join(empty_connectors)} "
+            "(defenseclaw mcp list --connector <name> shows the paths checked)"
+        )
 
     if failed_rows:
         # GAP-1906: a server whose last scan failed is unverified, not "never scanned".
@@ -1024,11 +1038,17 @@ def _scan_all_mcp(
     allow_private: bool = False,
     error_count_sink: list[int] | None = None,
     pack_cache: RulePackOverlayCache | None = None,
+    header: str = "",
+    empty_sink: list[str] | None = None,
 ) -> list[dict]:
     """Scan every MCP server registered for ``connector``.
 
     Extracted from ``mcp scan --all`` so a multi-connector install can fan
     out across each configured connector's servers (``cfg.mcp_servers(connector)``).
+    ``header`` is printed before this connector's output. With ``empty_sink``
+    a connector that has no servers (and no unreadable source) is appended
+    there and prints nothing, so the fan-out can summarize them on one line
+    (GAP-1907).
     """
     import time
 
@@ -1038,8 +1058,13 @@ def _scan_all_mcp(
     if pack_cache is None:
         pack_cache = {}
 
+    def _print_header() -> None:
+        if header and not as_json:
+            click.secho(header, fg="cyan")
+
     locations = _mcp_source_locations(app, connector)
     if not locations:
+        _print_header()
         if not as_json:
             ux.err(
                 f"No MCP config location is known for "
@@ -1056,6 +1081,10 @@ def _scan_all_mcp(
         connector,
         diagnostic_sink=diagnostics,
     )
+    if not servers and not diagnostics and empty_sink is not None:
+        empty_sink.append(connector)
+        return []
+    _print_header()
     source_error_rows = [
         {
             "scanner": "mcp-discovery",
@@ -1469,17 +1498,24 @@ def scan(
         connectors = resolve_list_connectors(app, connector_flag)
         json_rows: list[dict] = []
         error_counts: list[int] = []
+        fan_out = len(connectors) > 1 and not as_json
+        empty_connectors: list[str] = []
         for c in connectors:
-            if len(connectors) > 1 and not as_json:
-                click.secho(f"\n── connector: {c} ──", fg="cyan")
             rows = _scan_all_mcp(
                 app, c, analyzers, scan_prompts, scan_resources, scan_instructions,
                 as_json, allow_private=allow_private,
                 error_count_sink=error_counts,
                 pack_cache=pack_cache,
+                header=f"\n── connector: {c} ──" if fan_out else "",
+                empty_sink=empty_connectors if fan_out else None,
             )
             if as_json:
                 json_rows.extend(rows)
+        if empty_connectors:
+            click.echo(
+                f"\nNo MCP servers for: {', '.join(empty_connectors)} "
+                "(defenseclaw mcp list --connector <name> shows the paths checked)."
+            )
         if as_json:
             click.echo(json.dumps(json_rows, indent=2))
         if sum(error_counts):

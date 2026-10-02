@@ -1816,6 +1816,32 @@ class TestMcpListMultiConnectorDefault(MCPCommandTestBase):
         self.assertIn("connector=codex", result.output)
         self.assertNotIn("connector=claudecode", result.output)
 
+    def test_default_summarizes_empty_connectors_on_one_line(self):
+        # GAP-1907: no MCP servers is a normal state, so the fan-out prints
+        # one short line instead of a per-connector warning with every path.
+        self.app.cfg.mcp_servers = (  # type: ignore[method-assign]
+            lambda connector=None, **_: self._one_server() if connector == "claudecode" else []
+        )
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex", "hermes"]  # type: ignore[method-assign]
+
+        result = self.invoke(["list"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("connector=claudecode", result.output)
+        self.assertIn("No MCP servers for: codex, hermes", result.output)
+        self.assertNotIn("No MCP servers configured for connector=", result.output)
+        self.assertNotIn("checked:", result.output)
+
+        narrowed = self.invoke(["list", "--connector", "codex"])
+        self.assertEqual(narrowed.exit_code, 0, narrowed.output)
+        self.assertIn("No MCP servers configured for connector='codex' (checked:", narrowed.output)
+
+        with patch("defenseclaw.commands.cmd_mcp._run_scan", return_value=None):
+            scanned = self.invoke(["scan", "--all"])
+        self.assertIn("── connector: claudecode ──", scanned.output)
+        self.assertNotIn("── connector: codex ──", scanned.output)
+        self.assertIn("No MCP servers for: codex, hermes", scanned.output)
+
     def test_single_connector_install_keeps_flat_json(self):
         self.app.cfg.mcp_servers = lambda connector=None, **_: self._one_server()  # type: ignore[method-assign]
         self.app.cfg.active_connectors = lambda: ["claudecode"]  # type: ignore[method-assign]
