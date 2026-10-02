@@ -4316,14 +4316,20 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 		connectorModes[name] = mode
 		anyEnforcement = anyEnforcement || mode == "action"
 	}
-	s.health.SetGuardrail(StateRunning, "", map[string]interface{}{
+	guardrailDetails := map[string]interface{}{
 		"summary":             fmt.Sprintf("multi-connector direct-upstream mode (%d active)", len(succeeded)),
 		"connectors":          succeeded,
 		"connector_modes":     connectorModes,
 		"enforcement_enabled": anyEnforcement,
 		"proxy_port":          "closed",
 		"hint":                "hook/policy connectors enforce through agent-native lifecycle surfaces; the local guardrail proxy is not in the LLM data path",
-	})
+	}
+	// A configured connector whose setup failed is not enforced until the
+	// next start; status says so instead of only leaving it out (GAP-1714).
+	if notStarted := connectorsNotStarted(conns, succeeded); len(notStarted) > 0 {
+		guardrailDetails["connectors_not_started"] = notStarted
+	}
+	s.health.SetGuardrail(StateRunning, "", guardrailDetails)
 	fmt.Fprintf(os.Stderr, "[guardrail] multi-connector direct-upstream mode: %d active connector(s): %s; enforcement=%t — proxy port intentionally not bound\n", len(succeeded), strings.Join(succeeded, ", "), anyEnforcement)
 
 	<-ctx.Done()
@@ -5088,7 +5094,17 @@ func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns 
 				continue
 			}
 		}
-		if err := s.setupOneConnector(ctx, registration.conn, registration.opts, masterKey, cache); err != nil {
+		err := s.setupOneConnector(ctx, registration.conn, registration.opts, masterKey, cache)
+		// A probe that ran out of time on a busy host changed nothing and says
+		// nothing about the agent: try again before leaving the connector
+		// unenforced until the next restart (GAP-1714).
+		for attempt := 2; err != nil && attempt <= connectorProbeTimeoutAttempts &&
+			errors.Is(err, connector.ErrAgentVersionProbeTimeout) && ctx.Err() == nil; attempt++ {
+			fmt.Fprintf(os.Stderr, "[guardrail] connector %s: %v; retrying (attempt %d of %d)\n",
+				registration.conn.Name(), err, attempt, connectorProbeTimeoutAttempts)
+			err = s.setupOneConnector(ctx, registration.conn, registration.opts, masterKey, cache)
+		}
+		if err != nil {
 			// Admission failures happen before Setup writes hook files. Tearing
 			// down here deletes a still-valid install (for example Cursor
 			// Desktop vs Agent CLI probing the same cursor-hooks-v1 contract).
@@ -5163,6 +5179,26 @@ func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns 
 		fmt.Fprintf(os.Stderr, "[guardrail] connector ready: %s (%s)\n", registration.conn.Name(), registration.conn.Description())
 	}
 	return transaction, nil
+}
+
+// connectorProbeTimeoutAttempts bounds setup attempts for a connector whose
+// agent probe ran out of time (GAP-1714).
+const connectorProbeTimeoutAttempts = 3
+
+// connectorsNotStarted lists the configured connectors that did not come up.
+func connectorsNotStarted(conns []connector.Connector, succeeded []string) []string {
+	started := make(map[string]bool, len(succeeded))
+	for _, name := range succeeded {
+		started[strings.ToLower(strings.TrimSpace(name))] = true
+	}
+	var missing []string
+	for _, conn := range conns {
+		if name := conn.Name(); !started[strings.ToLower(strings.TrimSpace(name))] {
+			missing = append(missing, name)
+		}
+	}
+	sort.Strings(missing)
+	return missing
 }
 
 func rollbackMultiConnectorPublication(ctx context.Context, transaction multiConnectorSetupTransaction) error {

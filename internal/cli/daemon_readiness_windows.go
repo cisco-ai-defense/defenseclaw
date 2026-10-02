@@ -42,6 +42,6 @@ const startReadinessProgressFactor = 1
 // SQLite's own sharing-violation retries, which surfaces as SQLITE_IOERR; the
 // writer clears it after its next commit. An upgrade with a 1.3 GB audit.db
 // rolled back that way, and the restored gateway failed the same way, while a
-// start a minute later worked (GAP-1519). A write that timed out behind the
-// same hold (class deadline) is waited out too (GAP-1646).
+// start a minute later worked (GAP-1519). A write that timed out (class
+// deadline) is waited out on every OS (GAP-1646, GAP-1790).
 var startupRetriesSQLiteIO = true

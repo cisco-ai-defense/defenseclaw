@@ -536,6 +536,7 @@ def _print_agents(
     except Exception:
         manual_actives = []
     health_map = _fetch_health_connectors(health=health)
+    not_started = _connectors_not_started(health)
     state = _application_protection_status(cfg, health=health)
 
     roster: dict[str, dict] = {}
@@ -665,6 +666,13 @@ def _print_agents(
                 ux.echo(f"                {dim_text}{suffix}")
             elif conn == "openclaw" and openclaw_implied_but_not_installed(cfg):
                 suffix = _connector_state_verb("off") + ux.dim(" (OpenClaw is not installed)")
+                ux.echo(f"                {dim_text}{suffix}")
+            elif conn.strip().lower() in not_started:
+                # Setup failed when the gateway started (GAP-1714).
+                suffix = _connector_state_verb("not running") + ux.dim(
+                    " (setup failed when the gateway started, so it is not enforced; "
+                    "see gateway.log, then run: defenseclaw-gateway restart)"
+                )
                 ux.echo(f"                {dim_text}{suffix}")
             else:
                 # A drifted or removed hook registration shows with the
@@ -817,6 +825,16 @@ def _hook_runtime_degraded_suffix(cfg, connector: str) -> str:
         + ux._style("DEGRADED", fg="red", bold=True)
         + ux.dim(f" ({problems[0]}; run `{setup_command(connector)}`)")
     )
+
+
+def _connectors_not_started(health: dict | None) -> set[str]:
+    """Configured connectors the gateway could not set up at start (GAP-1714)."""
+    guardrail = health.get("guardrail") if isinstance(health, dict) else None
+    details = guardrail.get("details") if isinstance(guardrail, dict) else None
+    names = details.get("connectors_not_started") if isinstance(details, dict) else None
+    if not isinstance(names, list):
+        return set()
+    return {name.strip().lower() for name in names if isinstance(name, str) and name.strip()}
 
 
 def _connector_state_verb(state: str) -> str:

@@ -987,3 +987,19 @@ def test_status_shows_failing_llm_judge(capsys):
     out = capsys.readouterr().out
     assert "LLM judge" in out and "all of its last 10 call(s) failed" in out
     assert "model identifier is invalid" in out and "defenseclaw doctor" in out
+
+
+def test_status_names_a_connector_whose_setup_failed_at_gateway_start():
+    # GAP-1714: Hermes failed setup at start; status said mode=action with no
+    # runtime state, as if it were enforced.
+    cfg = _cfg(["codex", "hermes"], modes={"hermes": "action"})
+    health = {
+        "connectors": [{"name": "codex", "state": "running"}],
+        "guardrail": {"state": "running", "details": {"connectors_not_started": ["hermes"]}},
+    }
+    out = _render_live(cfg, health)
+    hermes_row = next(line for line in out.splitlines() if "Hermes (hermes)" in line)
+    codex_row = next(line for line in out.splitlines() if "Codex (codex)" in line)
+    assert "NOT RUNNING" in hermes_row and "not enforced" in hermes_row
+    assert "defenseclaw-gateway restart" in hermes_row
+    assert "NOT RUNNING" not in codex_row

@@ -990,17 +990,56 @@ func daemonConfigLoadError(verb string, err error) error {
 	}
 	// A running gateway keeps enforcing the config it started with; say so
 	// rather than read as "protection is off" (GAP-1634).
-	if running, pid := daemon.New(config.DefaultDataPath()).IsRunning(); running {
+	running, pid := daemon.New(config.DefaultDataPath()).IsRunning()
+	if running {
 		untouched += fmt.Sprintf(" The gateway (PID %d) is still running with the config it started with.", pid)
-		if verb == "start" {
-			untouched += " Nothing was changed."
-			next = "restart"
-		}
+	}
+	if message, empty := emptyConfigFileMessage(config.ConfigPath()); empty {
+		return fmt.Errorf("cannot %s the gateway: %s%s", verb, message, untouched)
+	}
+	if running && verb == "start" {
+		untouched += " Nothing was changed."
+		next = "restart"
 	}
 	return fmt.Errorf(
 		"cannot %s the gateway: %s does not load: %w.%s Fix the file (check it with: defenseclaw config validate), then run: defenseclaw-gateway %s",
 		verb, config.ConfigPath(), err, untouched, next,
 	)
+}
+
+// emptyConfigProbeBytes matches the Python CLI's _EMPTY_CONFIG_PROBE_BYTES.
+const emptyConfigProbeBytes = 64 << 10
+
+// emptyConfigFileMessage reports a config.yaml that exists but holds no
+// settings (0 bytes, blank or comments only) in the Python CLI's words
+// (GAP-1633). The YAML loader calls it a root that must be a mapping and told
+// the user to write config_version by hand (GAP-1785).
+func emptyConfigFileMessage(path string) (string, bool) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", false
+	}
+	defer file.Close()
+	raw, err := io.ReadAll(io.LimitReader(file, emptyConfigProbeBytes+1))
+	if err != nil || len(raw) > emptyConfigProbeBytes || !onlyYAMLComments(raw) {
+		return "", false
+	}
+	return fmt.Sprintf(
+		"%s is empty: it holds no settings (as after a crash or a full disk). "+
+			"It is not an older configuration, and nothing was changed. Restore your copy of config.yaml "+
+			"(an upgrade keeps the previous one in %s), or remove the empty file and run 'defenseclaw init'.",
+		path, filepath.Join(filepath.Dir(path), "previous", "data"),
+	), true
+}
+
+func onlyYAMLComments(raw []byte) bool {
+	for _, line := range bytes.Split(raw, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if len(line) > 0 && line[0] != '#' {
+			return false
+		}
+	}
+	return true
 }
 
 func loadDaemonConfig(_ *cobra.Command) (*config.Config, error) {
@@ -2303,8 +2342,10 @@ func telemetryReadinessRetryableSQLiteContention(details map[string]interface{})
 	transientIO := startupRetriesSQLiteIO && class == "io" && primary == 10
 	// A write that ran out of time behind a long hold on a large audit.db
 	// (class deadline, primary 0 or SQLITE_INTERRUPT) also clears after the
-	// writer's next commit (GAP-1519, GAP-1646).
-	transientDeadline := startupRetriesSQLiteIO && class == "deadline" && (primary == 0 || primary == 9)
+	// writer's next commit (GAP-1519, GAP-1646). A large audit.db is slow on
+	// every OS, not only under a Windows antivirus scan: a macOS start with a
+	// 1.3 GB audit.db failed this way and the next start worked (GAP-1790).
+	transientDeadline := class == "deadline" && (primary == 0 || primary == 9)
 	if !busyLocked && !transientIO && !transientDeadline {
 		return false
 	}
