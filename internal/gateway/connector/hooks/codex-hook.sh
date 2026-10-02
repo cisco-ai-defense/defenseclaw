@@ -316,6 +316,10 @@ API_TOKEN=
 PAYLOAD=
 unset API_TOKEN PAYLOAD
 
+if defenseclaw_api_listener_foreign "$API_ADDR"; then
+  fail_unreachable "${API_ADDR} is held by another account while this account's gateway is not running; no token was sent. Run \`defenseclaw-gateway start\` for the fix"
+fi
+
 # Each attempt opens fresh descriptors, because curl consumes them.
 codex_gateway_post() {
   local status=0
@@ -323,7 +327,7 @@ codex_gateway_post() {
     exec 8< <(printf '%s\n' "header = \"Authorization: Bearer ${_DC_CURL_CONFIG_TOKEN}\"")
   fi
   exec 9< <(printf '%s' "${_DC_HOOK_PAYLOAD}")
-  RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/codex/hook" \
+  RESPONSE=$(curl -s --noproxy '*' -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/codex/hook" \
     -H "Content-Type: application/json" \
     -H "X-DefenseClaw-Client: codex-hook/1.0" \
     -H "X-DefenseClaw-Hook-Event: ${BOUND_EVENT}" \
