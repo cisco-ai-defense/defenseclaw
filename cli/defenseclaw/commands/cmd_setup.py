@@ -2303,6 +2303,15 @@ def _collect_trusted_prefixes(data_dir: str, cfg=None) -> list[dict[str, object]
     return rows
 
 
+# The gateway route for each connector's hook endpoint (Go HookAPIPath()).
+# Only Claude Code's route differs from its connector name.
+_HOOK_API_ROUTE_NAMES = {"claudecode": "claude-code"}
+
+
+def _hook_api_path(connector: str) -> str:
+    return f"/api/v1/{_HOOK_API_ROUTE_NAMES.get(connector, connector)}/hook"
+
+
 def _emit_trusted_path_result(as_json: bool, *, ok: bool, path: str, message: str) -> None:
     if as_json:
         click.echo(_json.dumps({"ok": ok, "path": path, "message": message}, indent=2))
@@ -9452,7 +9461,7 @@ def _print_connector_observability_banner(connector: str, *, mode: str = "observ
         click.echo("    • Hooks      — five bound lifecycle events → /api/v1/antigravity/hook")
         click.echo("                   only PreToolUse carries documented ask/deny output")
     else:
-        click.echo(f"    • Hooks      — tool calls, prompt-submit, agent stop → /api/v1/{connector}/hook")
+        click.echo(f"    • Hooks      — tool calls, prompt-submit, agent stop → {_hook_api_path(connector)}")
     native_otel_connectors = {"codex", "claudecode", "omnigent"}
     if connector in native_otel_connectors:
         if connector == "omnigent":
