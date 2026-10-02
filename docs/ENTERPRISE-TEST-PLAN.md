@@ -2521,7 +2521,7 @@ the build and OS, and does not file a bug unless the behavior differs from the r
 | Row(s) | What a tester will see | Where |
 | --- | --- | --- |
 | R1, L-34, M-26, Linux residual 7, macOS residual 1, Windows residual 20 | A per-user agent started with another config root or a mode that skips user configuration runs with no DefenseClaw hook and no audit row, while status/verify keep the user's target ready: Amp (`XDG_CONFIG_HOME`, `HOME`), Devin (`XDG_CONFIG_HOME`, `devin --config <copy>`), Antigravity (`HOME`), Hermes (`--safe-mode`, `HERMES_HOME`, a replacing `HERMES_MANAGED_DIR` config), OpenHands (`HOME`), OpenCode on the per-user route (`OPENCODE_CONFIG_DIR`). Hermes `--ignore-user-config` alone keeps the hooks; `DEFENSECLAW_*` overrides do not remove them. A path a user breaks in their own home is only the warning `guardian_target_user_path` | Per-user connectors, every OS |
-| R2 | Claude Code `--bare` and `CLAUDE_CODE_SIMPLE=1` skip managed `SessionStart`/`UserPromptSubmit` hooks; `PreToolUse` still runs | Claude Code |
+| R2 | Claude Code `--bare` and `CLAUDE_CODE_SIMPLE=1` skip the managed `SessionStart` hook; in 2.1.287 `UserPromptSubmit` and `PreToolUse` still run (other releases may skip `UserPromptSubmit`) | Claude Code |
 | R3 | Amp: no machine plugin path, undefined handler order; another config dir loads no DefenseClaw plugin | Amp |
 | R4 | OpenCode: plugin order undefined on the per-user route; `--pure`, `OPENCODE_PURE=1`, `OPENCODE_TEST_MANAGED_CONFIG_DIR` start without any DefenseClaw plugin | OpenCode |
 | R5 | Hermes blocks only on a valid block answer (and exit 2 from 0.21); other failures and a timeout let the call run (some builds block on a stalled hook timeout, undocumented) | Hermes |

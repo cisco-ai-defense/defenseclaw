@@ -3642,8 +3642,8 @@
     {
       "name": "DEFENSECLAW_POLICY_VALIDATE_ALLOW_NO_OPA",
       "category": "security_opt_out",
-      "purpose": "Accept a policy file as 'validated' even when OPA / Rego is not installed. Default rejects; this turns validation into a no-op when OPA is absent.",
-      "default": "unset (validation requires OPA)",
+      "purpose": "Skip the Rego compile check when neither opa nor defenseclaw-gateway is available. A standard install validates Rego with the OPA engine built into defenseclaw-gateway and does not need this; the default fails validation when no checker is found.",
+      "default": "unset (validation needs opa or defenseclaw-gateway)",
       "accepted_values": [
         "1",
         "unset"
