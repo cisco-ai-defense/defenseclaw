@@ -954,13 +954,20 @@ function New-Venv([string]$Path, [string]$Where) {
 
 function Invoke-UvPipInstall([string[]]$UvArgs) {
     if ((Invoke-Native $Uv $UvArgs) -eq 0) { return $true }
-    # A disk that filled up is not a busy host, and a retry cannot help (GAP-1883).
-    if (Test-DiskFull) { return $false }
     # A scanner holding a file uv just wrote fails its cache rename with
-    # os error 32 or 5 (GAP-1315); the cache makes a second attempt cheap.
-    Write-Warn "Retrying the Python package install once (a busy host can make uv time out)"
-    Start-Sleep -Seconds 5
-    return (Invoke-Native $Uv $UvArgs) -eq 0
+    # os error 32 or 5 (GAP-1315). On a busy host that hits the next package
+    # too (GAP-1941), so back off a few times; what reached the cache stays
+    # there, so each attempt gets further.
+    $waits = @(5, 15, 30)
+    for ($i = 0; $i -lt $waits.Count; $i++) {
+        # A disk that filled up is not a busy host, and a retry cannot help (GAP-1883).
+        if (Test-DiskFull) { return $false }
+        Write-Warn ("Retrying the Python package install in {0} s (attempt {1} of {2}; a busy host can hold uv's cache files)" -f $waits[$i], ($i + 2), ($waits.Count + 1))
+        Start-Sleep -Seconds $waits[$i]
+        if ((Invoke-Native $Uv $UvArgs) -eq 0) { return $true }
+    }
+    Write-Warn "uv kept failing; if it reported a file in use (os error 32), another program held the file: run the same command again"
+    return $false
 }
 
 function Save-Snapshot {
