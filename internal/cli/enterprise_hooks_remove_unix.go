@@ -129,8 +129,7 @@ func removeAllEnterpriseHookTargets(cmd *cobra.Command) (enterpriseHooksRemoveAl
 	addEnterpriseHookLeftoverRemovals(jobs, manifest, accounts)
 	// The VS Code Local files also go from the accounts the guardian wrote
 	// them for that are no longer eligible.
-	vscodeRecordPath := enterprisehooks.UnixCopilotVSCodeAccountsPath(manifestPath)
-	recorded, recordErr := enterpriseHookLoadCopilotVSCodeAccounts(vscodeRecordPath)
+	vscodeRecordPath, recorded, recordErr := loadEnterpriseHookCopilotVSCodeAccounts(manifestPath)
 	if recordErr != nil {
 		report.Failed = append(report.Failed, "copilot vscode accounts record: "+boundedString(recordErr.Error(), 256))
 	}
@@ -138,7 +137,7 @@ func removeAllEnterpriseHookTargets(cmd *cobra.Command) (enterpriseHooksRemoveAl
 	if vscode, err := enterpriseHookCopilotVSCodeRemoval(); err != nil {
 		report.Failed = append(report.Failed, "copilot vscode hooks: "+boundedString(err.Error(), 256))
 	} else {
-		addEnterpriseHookCopilotVSCodeRemovals(jobs, vscodeAccounts, vscode)
+		addEnterpriseHookCopilotVSCodeRemovals(jobs, vscodeAccounts, vscode, copilotVSCodeCreatedDirs(recorded))
 	}
 	cleanupFailed := runEnterpriseHookPendingCleanups(cmd, &report, jobs)
 	if enterpriseHooksRemoveAllPurge {
@@ -197,7 +196,7 @@ func removeAllEnterpriseHookTargets(cmd *cobra.Command) (enterpriseHooksRemoveAl
 	sort.Strings(report.StateFailed)
 	report.OK = len(report.Failed) == 0
 	if report.OK && len(report.Pending) == 0 && recordErr == nil {
-		if err := os.Remove(vscodeRecordPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := removeEnterpriseHookCopilotVSCodeAccounts(vscodeRecordPath, manifestPath); err != nil {
 			report.Failed = append(report.Failed, "copilot vscode accounts record: "+boundedString(err.Error(), 256))
 			report.OK = false
 		}
@@ -334,7 +333,7 @@ func enterpriseHookCopilotVSCodeRemoval() (*enterpriseHookWorkerCopilotVSCode, e
 // DefenseClaw's VS Code Local hook file and Copilot plugin. They are
 // rendered for eligible accounts whether or not a manifest row names them,
 // and only DefenseClaw's exact renders are removed.
-func addEnterpriseHookCopilotVSCodeRemovals(jobs map[int]*enterpriseHookWorkerJob, accounts []enterprisehooks.UnixEligibleAccount, vscode *enterpriseHookWorkerCopilotVSCode) {
+func addEnterpriseHookCopilotVSCodeRemovals(jobs map[int]*enterpriseHookWorkerJob, accounts []enterprisehooks.UnixEligibleAccount, vscode *enterpriseHookWorkerCopilotVSCode, createdDirs map[int][]string) {
 	if vscode == nil {
 		return
 	}
@@ -348,9 +347,10 @@ func addEnterpriseHookCopilotVSCodeRemovals(jobs map[int]*enterpriseHookWorkerJo
 			Request: enterpriseHookWorkerRequest{Operation: enterpriseHookWorkerOpApply, Standalone: true},
 		}
 	}
-	for _, job := range jobs {
+	for uid, job := range jobs {
 		removal := *vscode
 		removal.HookFile, removal.Plugin = false, false
+		removal.RemoveDirs = createdDirs[uid]
 		job.Request.CopilotVSCode = &removal
 	}
 }

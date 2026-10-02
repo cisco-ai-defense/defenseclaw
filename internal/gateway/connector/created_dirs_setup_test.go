@@ -91,3 +91,28 @@ func TestRemovalLeavingNoNewDirsOnlyWhenDataDirWasMissing(t *testing.T) {
 		}
 	}
 }
+
+// The OpenCode plugin folder is made before any Setup (the gateway's
+// registration snapshot) and is not a hook config path, so it was never
+// listed and stayed after uninstall --all --binaries, empty.
+func TestPrepareOpenCodePluginArtifactDestinationRecordsTheFoldersItCreates(t *testing.T) {
+	home := t.TempDir()
+	dataDir := filepath.Join(home, ".defenseclaw")
+	if err := os.MkdirAll(filepath.Join(home, ".config", "opencode"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	plugin := filepath.Join(home, ".config", "opencode", "plugins", "defenseclaw.js")
+	err := WithUserHomeDir(home, func() error { return prepareOpenCodePluginArtifactDestination(plugin, dataDir) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := readWatcherCreatedDirs(filepath.Join(dataDir, watcherCreatedDirsFile)).Dirs
+	want := []string{filepath.Join(home, ".config", "opencode", "plugins")}
+	if !slices.Equal(got, want) {
+		t.Fatalf("recorded %v, want %v (the existing ~/.config/opencode is OpenCode's)", got, want)
+	}
+	removeWatcherCreatedDirs(dataDir, filepath.Join(home, ".config", "opencode"))
+	if _, err := os.Lstat(filepath.Dir(plugin)); !os.IsNotExist(err) {
+		t.Fatalf("the teardown must remove the empty plugin folder: %v", err)
+	}
+}
