@@ -82,6 +82,32 @@ def test_windows_publication_pins_parent_and_creates_relative_to_handle(tmp_path
     assert not moved.exists()
 
 
+@pytest.mark.skipif(os.name != "nt", reason="requires native Win32 relative opens")
+def test_windows_rebuild_replaces_only_the_bound_destination(tmp_path: Path) -> None:
+    # GAP-1784: builds stamp their date, so a same-checkout `make all` rebuild
+    # never matches the installed gateway and was always refused on Windows.
+    destination = tmp_path / "defenseclaw-gateway.exe"
+    old, new = tmp_path / "old.bin", tmp_path / "new.bin"
+    old.write_bytes(b"old build")
+    new.write_bytes(b"new build")
+    install_publish.publish_regular(old, destination, None)
+    with pytest.raises(install_publish.PublishError, match="preserved"):
+        install_publish.publish_regular(new, destination, None)
+    with pytest.raises(install_publish.PublishError, match="changed before publication"):
+        install_publish.publish_regular(new, destination, hashlib.sha256(b"other").hexdigest())
+    assert destination.read_bytes() == b"old build"
+
+    install_publish.publish_regular(new, destination, hashlib.sha256(b"old build").hexdigest())
+    assert destination.read_bytes() == b"new build"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["defenseclaw-gateway.exe", "new.bin", "old.bin"]
+    # A copy renamed aside while it ran is removed by the next rebuild.
+    leftover = tmp_path / ".defenseclaw-gateway.exe.source-install-old-0123"
+    leftover.write_bytes(b"older build")
+    install_publish.publish_regular(old, destination, hashlib.sha256(b"new build").hexdigest())
+    assert destination.read_bytes() == b"old build"
+    assert not leftover.exists()
+
+
 def test_source_preflight_publication_verbs_are_directly_executable(tmp_path: Path) -> None:
     install_dir = tmp_path / "home/.local/bin"
     reserved = _run("ensure-directory", install_dir)

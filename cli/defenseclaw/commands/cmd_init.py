@@ -736,6 +736,9 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
     # GAP-1656: the deferred multi-connector start must restart a running
     # gateway when only the hook fail mode changed, as run_first_run does.
     hook_fail_modes_before = _saved_hook_fail_modes() if defer_gateway else None
+    # GAP-1713: first run rebuilds guardrail.connectors; keep what init does
+    # not ask about (a use-pack override, levels) for re-selected connectors.
+    overrides_before = _saved_connector_overrides()
     report = run_first_run(opts)
     if unselectable:
         _report_unselectable_connectors(report, unselectable)
@@ -775,6 +778,7 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
             allow_trusted_path_prompt=interactive_wizard,
             protected_selection=report._protected_selection,
             hook_fail_modes_before=hook_fail_modes_before,
+            overrides_before=overrides_before,
         )
         # When the gateway start was deferred (multi-connector + start_gateway),
         # run_first_run recorded a stale "Sidecar not started (--no-start-gateway)"
@@ -1979,6 +1983,7 @@ def _activate_additional_connectors(
     allow_trusted_path_prompt: bool = False,
     protected_selection: object | None = None,
     hook_fail_modes_before: dict[str, str] | None = None,
+    overrides_before: dict[str, object] | None = None,
 ) -> tuple[list[str], StepResult | None]:
     """Merge the extra first-run connectors into ``guardrail.connectors``.
 
@@ -2090,7 +2095,20 @@ def _activate_additional_connectors(
     # Rebuild the multi map from the connector selection made in this init
     # run. Reusing the old map would keep unchecked/stale connectors active in
     # `guardrail status`.
-    gc.connectors = {primary_name: PerConnectorGuardrailConfig()}
+    previous = dict(overrides_before or {})
+    for name, block in (gc.connectors or {}).items():
+        previous.setdefault(connector_paths.normalize(name), block)
+
+    def _fresh_block(key: str) -> PerConnectorGuardrailConfig:
+        # Init asks for mode, fail mode and HITL; the rule pack, levels and
+        # block message it never asks about carry over (GAP-1713).
+        block = PerConnectorGuardrailConfig()
+        old = previous.get(key)
+        for field in _KEPT_CONNECTOR_FIELDS:
+            setattr(block, field, getattr(old, field, "") or "")
+        return block
+
+    gc.connectors = {primary_name: _fresh_block(primary_name)}
     trusted_prompt_cache: dict[str, bool] | None = {} if allow_trusted_path_prompt else None
     if (
         allow_trusted_path_prompt
@@ -2109,7 +2127,7 @@ def _activate_additional_connectors(
 
     for s in extras:
         key = connector_paths.normalize(s["connector"])
-        pc = gc.connectors.get(key) or PerConnectorGuardrailConfig()
+        pc = gc.connectors.get(key) or _fresh_block(key)
         mode = (s["profile"] or "observe").lower()
         # Parity with single-connector setup: an extra connector may only be
         # configured in enforcing (action) mode when its installed version maps
@@ -2208,6 +2226,21 @@ def _activate_additional_connectors(
             and _hook_fail_modes(cfg) != hook_fail_modes_before,
         )
     return active, sidecar_step
+
+
+# Per-connector guardrail settings init never prompts for (GAP-1713).
+_KEPT_CONNECTOR_FIELDS = ("rule_pack_dir", "block_at", "alert_at", "block_message")
+
+
+def _saved_connector_overrides() -> dict[str, object]:
+    """The saved per-connector guardrail blocks by connector ({} when none)."""
+    from defenseclaw import config as cfg_mod
+
+    try:
+        blocks = cfg_mod.load().guardrail.connectors or {}
+    except Exception:  # noqa: BLE001 - no saved config yet means nothing to keep
+        return {}
+    return {connector_paths.normalize(name): block for name, block in blocks.items()}
 
 
 def _saved_hook_fail_modes() -> dict[str, str]:

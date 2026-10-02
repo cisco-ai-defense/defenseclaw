@@ -878,7 +878,7 @@ function Invoke-UvPipInstall([string[]]$UvArgs) {
     if ((Invoke-Native $Uv $UvArgs) -eq 0) { return $true }
     # A scanner holding a file uv just wrote fails its cache rename with
     # os error 32 or 5 (GAP-1315); the cache makes a second attempt cheap.
-    Write-Warn "Retrying the Python package install once"
+    Write-Warn "Retrying the Python package install once (a busy host can make uv time out)"
     Start-Sleep -Seconds 5
     return (Invoke-Native $Uv $UvArgs) -eq 0
 }
@@ -1389,6 +1389,37 @@ function Invoke-Rollback {
     return 0
 }
 
+# On Windows `defenseclaw uninstall` finishes in a helper that runs after the
+# CLI exits: it deletes the data dir while %TEMP%\defenseclaw-uninstall-*\
+# plan.json exists, then a cmd.exe renames the helper's own Python folders
+# (plan.json interpreter_dirs) aside. An install started sooner lost its
+# files to that cleanup (GAP-1647), so wait for both. A plan.json older than
+# 10 minutes is a helper that died, not one that is still running.
+function Wait-UninstallCleanup([int]$Seconds = 300) {
+    $temp = [IO.Path]::GetTempPath()
+    $deadline = (Get-Date).AddSeconds($Seconds)
+    $waiting = $false
+    $folders = @()
+    while ($true) {
+        $plans = @(Get-ChildItem -LiteralPath $temp -Directory -Filter "defenseclaw-uninstall-*" -ErrorAction SilentlyContinue |
+            ForEach-Object { Get-Item -LiteralPath (Join-Path $_.FullName "plan.json") -ErrorAction SilentlyContinue } |
+            Where-Object { $_ -and $_.LastWriteTime -gt (Get-Date).AddMinutes(-10) } | ForEach-Object { $_.FullName })
+        foreach ($plan in $plans) {
+            $folders += @(Get-Field (Read-Json $plan) "interpreter_dirs") |
+                Where-Object { $_ -and ([string]$_).StartsWith($DataDir, [StringComparison]::OrdinalIgnoreCase) }
+        }
+        $folders = @($folders | Select-Object -Unique)
+        $pending = @($plans) + @($folders | Where-Object { Test-Path -LiteralPath $_ })
+        if (-not $pending.Count) { break }
+        if (-not $waiting) { Write-Info "Waiting for the cleanup of an earlier 'defenseclaw uninstall' to finish"; $waiting = $true }
+        if ((Get-Date) -gt $deadline) {
+            Die "An earlier 'defenseclaw uninstall' is still cleaning up ($($pending[0])); wait a minute, then run the installer again. Nothing was changed."
+        }
+        Start-Sleep -Seconds 2
+    }
+    if ($waiting) { Write-Ok "The earlier uninstall finished" }
+}
+
 function Invoke-Install {
     if ($Help) { Show-Usage; return 0 }
     foreach ($argument in $UnknownArguments) { Write-Warn "Ignoring unknown option: $argument" }
@@ -1480,6 +1511,8 @@ function Invoke-Install {
         return Invoke-ReleaseInstaller $TargetVersion $Forward
     }
 
+    Wait-UninstallCleanup
+
     # Lock and log.
     New-Item -ItemType Directory -Path (Join-Path $DataDir "logs") -Force | Out-Null
     $acl = Get-Acl -LiteralPath $DataDir
@@ -1532,6 +1565,10 @@ function Invoke-Install {
     # data dir, so `uninstall --all` leaves nothing of them in AppData.
     if (-not $env:UV_CACHE_DIR) { $env:UV_CACHE_DIR = Join-Path $DataDir ".uv\cache" }
     if (-not $env:UV_PYTHON_INSTALL_DIR) { $env:UV_PYTHON_INSTALL_DIR = Join-Path $DataDir ".uv\python" }
+    # uv's defaults (60 s to compile one file, 30 s per download read) fail
+    # on a Windows host busy with Defender and other accounts (GAP-1776).
+    if (-not $env:UV_COMPILE_BYTECODE_TIMEOUT) { $env:UV_COMPILE_BYTECODE_TIMEOUT = "600" }
+    if (-not $env:UV_HTTP_TIMEOUT) { $env:UV_HTTP_TIMEOUT = "300" }
     $Uv = [string](Get-Command uv.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Source)
     # A uv already in the bin folder belongs to the user (or an earlier run)
     # even when that folder is not on PATH yet: use it, never overwrite it.
@@ -1738,7 +1775,8 @@ function Invoke-Install {
 }
 
 $savedEnv = @{}
-foreach ($name in @("UV_NO_CONFIG", "UV_CACHE_DIR", "UV_PYTHON_INSTALL_DIR", "UV_INSTALL_DIR", "UV_NO_MODIFY_PATH", "DEFENSECLAW_GATEWAY_BIN",
+foreach ($name in @("UV_NO_CONFIG", "UV_CACHE_DIR", "UV_PYTHON_INSTALL_DIR", "UV_INSTALL_DIR", "UV_NO_MODIFY_PATH",
+        "UV_COMPILE_BYTECODE_TIMEOUT", "UV_HTTP_TIMEOUT", "DEFENSECLAW_GATEWAY_BIN",
         "DEFENSECLAW_UPGRADE_FRESH_PROCESS", "CODEX_HOME", "CLAUDE_CONFIG_DIR")) {
     $savedEnv[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
 }

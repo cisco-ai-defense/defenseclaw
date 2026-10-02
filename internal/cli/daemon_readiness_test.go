@@ -495,9 +495,13 @@ func TestGatewaySnapshotReadyRetriesEventHistoryIOWhenThePlatformDoes(t *testing
 	if ready || err != nil {
 		t.Fatalf("io readiness = %v, error = %v; want retryable not-ready", ready, err)
 	}
-	for _, primary := range []float64{0, 9} {
+	// GAP-1796: health omits a zero primary code (-1 = absent here).
+	for _, primary := range []float64{0, 9, -1} {
 		snap.Telemetry.Details["event_history_last_sqlite_class"] = "deadline"
 		snap.Telemetry.Details["event_history_last_sqlite_primary_code"] = primary
+		if primary < 0 {
+			delete(snap.Telemetry.Details, "event_history_last_sqlite_primary_code")
+		}
 		ready, err = gatewaySnapshotReady(snap, daemonReadinessRequirements{guardrailEnabled: true, telemetryEnabled: true})
 		if ready || err != nil {
 			t.Fatalf("deadline/%v readiness = %v, error = %v; want retryable not-ready", primary, ready, err)

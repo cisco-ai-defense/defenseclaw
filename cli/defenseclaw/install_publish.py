@@ -692,12 +692,14 @@ def _windows_publish_regular(
     *,
     expected_source: str | None,
 ) -> None:
-    """Publish a create-new Windows copy while every path claim is leased.
+    """Publish a Windows copy while every path claim is leased.
 
     Existing matching files are idempotent.  A differing existing file is
-    deliberately preserved: source installs are developer tooling, and the
-    release-owned PowerShell installer owns authenticated Windows replacement
-    and rollback transactions.
+    preserved unless the caller bound it with ``expected_current`` (the
+    preflight proved this checkout owns it): then it is renamed aside, the
+    copy takes its name, and the old file is deleted, so a same-checkout
+    ``make all`` rebuild works as it does on POSIX (GAP-1784).  Builds stamp
+    their date, so a rebuild never matches the installed bytes.
     """
 
     source = Path(ntpath.abspath(str(source)))
@@ -734,10 +736,11 @@ def _windows_publish_regular(
                     raise PublishError(f"source-install destination changed before publication: {destination}")
                 if current_digest == source_digest:
                     return
-                raise PublishError(
-                    f"Windows source-install destination already exists with different bytes and was preserved: "
-                    f"{destination}; use an isolated fresh developer install"
-                )
+                if expected_current is None:
+                    raise PublishError(
+                        f"Windows source-install destination already exists with different bytes and was preserved: "
+                        f"{destination}; use an isolated fresh developer install"
+                    )
 
             stage = destination.parent / f".{destination.name}.source-install-{uuid.uuid4().hex}"
             _validate_windows_directory_chain(destination_chain)
@@ -771,16 +774,34 @@ def _windows_publish_regular(
                         raise PublishError(f"source-install staging changed before publication: {destination}")
                     _validate_windows_directory_chain(source_chain)
                     _validate_windows_directory_chain(destination_chain)
+                    retired = -1
+                    if current_handle is not None:
+                        retired = _windows_retire_current(api, destination_chain[-1][0], destination, expected_current)
                     try:
                         api.rename_no_replace(
                             publication_handle,
                             destination_chain[-1][0],
                             destination.name,
                         )
-                    except FileExistsError:
-                        raise PublishError(
-                            f"source-install destination appeared concurrently and was preserved: {destination}"
-                        ) from None
+                    except BaseException as exc:
+                        if retired >= 0:
+                            try:
+                                api.rename_no_replace(retired, destination_chain[-1][0], destination.name)
+                            finally:
+                                api.close(retired)
+                        if isinstance(exc, FileExistsError):
+                            raise PublishError(
+                                f"source-install destination appeared concurrently and was preserved: {destination}"
+                            ) from None
+                        raise
+                    if retired >= 0:
+                        try:
+                            api.delete_on_close(retired)
+                        except OSError:
+                            pass  # A running process still maps it; the next rebuild removes it.
+                        finally:
+                            api.close(retired)
+                        _windows_prune_retired(destination)
                     _validate_windows_directory_chain(destination_chain)
                 except BaseException:
                     if publication_owned:
@@ -794,6 +815,47 @@ def _windows_publish_regular(
                     api.close(stage_handle)
         finally:
             api.close(source_handle)
+
+
+def _windows_retire_current(
+    api: _WindowsPublicationAPI,
+    parent_handle: int,
+    destination: Path,
+    expected_current: str | None,
+) -> int:
+    """Rename the owned destination aside; return its claimed handle (GAP-1784)."""
+
+    try:
+        handle = api.open_publication_claim_at(parent_handle, destination.name)
+    except OSError as exc:
+        stop = "defenseclaw-gateway stop" if destination.name.lower().startswith("defenseclaw-gateway") else "stop it"
+        raise PublishError(
+            f"{destination} is in use and cannot be replaced; {stop}, then build again"
+        ) from exc
+    try:
+        if expected_current is None or api.digest(handle) != expected_current:
+            raise PublishError(f"source-install destination changed before publication: {destination}")
+        api.rename_no_replace(handle, parent_handle, f".{destination.name}.source-install-old-{uuid.uuid4().hex}")
+        return handle
+    except BaseException:
+        api.close(handle)
+        raise
+
+
+def _windows_prune_retired(destination: Path) -> None:
+    """Best effort: remove copies an earlier rebuild renamed aside while they ran."""
+
+    prefix = f".{destination.name}.source-install-old-"
+    try:
+        entries = list(os.scandir(destination.parent))
+    except OSError:
+        return
+    for entry in entries:
+        if entry.name.startswith(prefix) and entry.is_file(follow_symlinks=False):
+            try:
+                os.unlink(entry.path)
+            except OSError:
+                pass
 
 
 def _identity(fd: int) -> tuple[int, int]:
