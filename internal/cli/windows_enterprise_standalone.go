@@ -474,7 +474,12 @@ func applyWindowsEnterpriseInstallerReport(
 		}
 		result.AddError(code, fmt.Sprintf("the standalone deployment is not healthy (installer exit %d)", run.ExitCode))
 	}
-	addEnterpriseSecurityIncompleteReasons(result, report.TransactionPending)
+	// A completed uninstall leaves nothing to secure; only a deployment that is
+	// still installed (or a lifecycle stuck mid-transaction) reports why its
+	// security is not complete.
+	if report.Installed || report.TransactionPending {
+		addEnterpriseSecurityIncompleteReasons(result, report.TransactionPending)
+	}
 	if lifecycle && !report.OK && len(result.Errors) > firstError {
 		configPath := ""
 		if opts != nil {
