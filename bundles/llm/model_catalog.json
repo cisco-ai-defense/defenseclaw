@@ -129,8 +129,6 @@
       "kind": "cloud",
       "env_keys": ["DEEPSEEK_API_KEY", "DEFENSECLAW_LLM_KEY"],
       "models": [
-        "deepseek-chat",
-        "deepseek-reasoner",
         "deepseek-v3.2",
         "deepseek-r1",
         "deepseek-coder"
