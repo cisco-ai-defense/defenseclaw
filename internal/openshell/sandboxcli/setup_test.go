@@ -203,6 +203,35 @@ func TestSetupNonInteractive(t *testing.T) {
 		"gateway configured and restarted", "Done →  cd <project> && defenseclaw sandbox run claude")
 }
 
+// TestSetupSwitchesAnUndrivenGatewayToDocker: a gateway whose configuration
+// pins a driver DefenseClaw does not drive (podman, from its install) is
+// switched to docker in setup's one plan (GAP-1264).
+func TestSetupSwitchesAnUndrivenGatewayToDocker(t *testing.T) {
+	ta := setupApp(t, "\n", "", true) // the switch question: its default, yes
+	ta.gateway.state.ComputeDriver = "podman"
+	ta.gateway.applyRes = &openshell.GatewayApplyResult{Restarted: true}
+	useGateway(ta)
+	ta.ok(t, ta.Setup(bg, SetupOptions{SkipImages: true, NoWrappers: true}))
+	if p := ta.gateway.planned; len(p) != 1 || p[0].ComputeDriver != openshell.DriverDocker || ta.gateway.applied != 1 {
+		t.Fatalf("gateway plans = %+v, applied %d", p, ta.gateway.applied)
+	}
+	has(t, ta.output(), `Switch your local OpenShell gateway to the docker compute driver? (its configuration selects the "podman" compute driver`, "Done →")
+}
+
+// TestSetupIsNotDoneWhileSandboxesStayOff: setup does not end "Done" when the
+// daemon never turns sandboxes on (GAP-1264).
+func TestSetupIsNotDoneWhileSandboxesStayOff(t *testing.T) {
+	ta := setupApp(t, "", "", true)
+	ta.IO.TTY = false
+	useGateway(ta)
+	ta.daemon.status.Available = false
+	ta.daemon.status.Reason = "the OpenShell gateway is not available"
+	ta.ok(t, ta.Setup(bg, SetupOptions{Yes: true, SkipImages: true, NoWrappers: true}))
+	has(t, ta.output(), "the daemon has not turned sandboxes on yet: the OpenShell gateway is not available",
+		"not ready for sandboxes yet: the DefenseClaw daemon has not turned sandboxes on; run `defenseclaw sandbox doctor --fix`")
+	lacks(t, ta.output(), "Done →")
+}
+
 // TestSetupShowsTheMachineCheckWhileItRuns pins that the machine check's
 // line is on screen while the checks run: on a Mac they took about 40 s
 // with nothing after the title (manual test M4).

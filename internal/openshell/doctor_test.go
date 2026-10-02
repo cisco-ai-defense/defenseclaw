@@ -620,7 +620,9 @@ func TestDoctorChecks(t *testing.T) {
 		{name: "wrong compute driver", setup: func(f *doctorFixture) {
 			f.fake = openshelltest.New(openshelltest.WithGatewayInfo(types.GatewayInfo{Version: "0.1.1",
 				ComputeDrivers: []types.ComputeDriverInfo{{Name: "podman", DriverName: "podman"}}}))
-		}, want: []checkWant{{"gateway-driver", fail, `this gateway runs "podman"`}}},
+		}, want: []checkWant{{"gateway-driver", fail, `this gateway runs "podman"`}},
+			// GAP-1264: doctor --fix switches it to docker.
+			fix: &fixWant{text: `set compute_driver = "docker"`, auto: true}},
 		{name: "global policy", setup: func(f *doctorFixture) { f.fake.SetGlobalPolicy(&openshell.SandboxPolicy{Version: 1}) },
 			want: []checkWant{{"global-policy", warn, "approvals are disabled"}}},
 
