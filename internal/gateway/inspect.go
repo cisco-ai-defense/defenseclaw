@@ -32,6 +32,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
@@ -537,6 +538,17 @@ func (a *APIServer) inspectToolPolicyCtx(ctx context.Context, req *ToolInspectRe
 		LegacyText:         string(req.Args),
 		Connector:          req.Connector,
 		EnforcementCapable: true,
+	}
+	if args, dir, ok := connector.TrustedShellArgs(req.Connector, req.Tool, req.Args); ok {
+		// OpenClaw's exec tool sends execution controls (yieldMs, timeout,
+		// workdir, ...) next to the command. Left in the arguments they made
+		// the parse partial, so every command block rule was detection-only
+		// (GAP-1450). The directory is the command's working directory when
+		// it is absolute; the session's is not known here.
+		action.Input.Args = args
+		if filepath.IsAbs(dir) || strings.HasPrefix(dir, "/") {
+			action.Input.CWD = dir
+		}
 	}
 	if trustedShimArgvTool(req.Tool) {
 		// Authenticated PATH shims have one closed argv envelope. If that
@@ -1504,8 +1516,17 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 			targetType = "prompt"
 		}
 	}
-	evalCtx := a.emitInspectVerdictFindings(r.Context(), "inspect-http",
-		"/api/v1/inspect/tool:"+req.Tool, targetType, verdict, elapsed,
+	// Findings name the connector the call was authenticated for, and the
+	// connector and tool as their target, as hook findings do: an OpenClaw
+	// block was an alert with no connector or target, so `alerts
+	// --connector openclaw` did not find it (GAP-1451).
+	findingCtx := r.Context()
+	if env := audit.EnvelopeFromContext(findingCtx); env.Connector == "" && req.Connector != "" {
+		env.Connector = req.Connector
+		findingCtx = audit.ContextWithEnvelope(findingCtx, env)
+	}
+	evalCtx := a.emitInspectVerdictFindings(findingCtx, "inspect-http",
+		hookEvaluationTarget(req.Connector, req.Tool), targetType, verdict, elapsed,
 		"emit_inspect_tool")
 	a.emitInspectTraceV8(r.Context(), req.Tool, targetType, verdict, elapsed, evalCtx)
 
@@ -1516,7 +1537,12 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 		auditDetails += fmt.Sprintf(" request_id=%s", requestID)
 	}
 	auditDetails = appendHookEvaluationDetails(auditDetails, evalCtx)
-	_ = a.logger.LogEventCtx(r.Context(), a.inspectToolAuditEvent(r, auditAction, req.Tool, auditDetails))
+	toolEvent := a.inspectToolAuditEvent(r, auditAction, req.Tool, auditDetails)
+	if verdict.Action != "allow" && verdict.Severity != "" && verdict.Severity != "NONE" {
+		// A block, confirm or alert row carries the verdict's severity.
+		toolEvent.Severity = verdict.Severity
+	}
+	_ = a.logger.LogEventCtx(r.Context(), toolEvent)
 
 	a.emitCodeGuardTelemetry(r.Context(), &req, verdict, elapsed)
 

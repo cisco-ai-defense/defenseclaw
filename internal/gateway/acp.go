@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/acp"
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
@@ -185,6 +186,22 @@ func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 	result := acp.Verdict{
 		Action: verdict.Action, RawAction: verdict.RawAction, Severity: verdict.Severity,
 		Reason: verdict.Reason, WouldBlock: verdict.WouldBlock,
+	}
+	if len(verdict.DetailedFindings) > 0 {
+		// A rule match is a finding of the agent's connector, as it is on the
+		// hook path: a blocked ACP prompt raised no alert (GAP-1302).
+		findingCtx := r.Context()
+		if env := audit.EnvelopeFromContext(findingCtx); env.Connector != agent.ConnectorID {
+			env.Connector = agent.ConnectorID
+			findingCtx = audit.ContextWithEnvelope(findingCtx, env)
+		}
+		targetType := "prompt"
+		if req.Direction == acp.AgentToClient {
+			targetType = "completion"
+		}
+		a.emitInspectVerdictFindings(findingCtx, "inspect-http",
+			hookEvaluationTarget(agent.ConnectorID, "acp"), targetType, verdict,
+			time.Since(started), "emit_acp_findings")
 	}
 	a.recordACPEvaluationV8(r.Context(), req, result, verdict.Findings, agent.ConnectorID, profileName, time.Since(started))
 	a.writeJSON(w, http.StatusOK, result)

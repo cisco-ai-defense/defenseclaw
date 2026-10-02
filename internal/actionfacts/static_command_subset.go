@@ -54,24 +54,35 @@ var shellStateBuiltins = map[string]bool{
 // unsupported constructs, when the command defines a function, or when a
 // dropped command is a shell builtin that could change what the kept ones
 // run or where their paths point (cd $DIR, eval "$X", exec $X, ...).
-func StaticCommandSubsetReduction(input Input, facts Facts) (view Facts, ok bool) {
+//
+// A command certain to run whose program word is static but some of whose
+// arguments expand at runtime, such as `echo marker $USER` (GAP-0029), is
+// kept with partial argv set: its argv and arguments are only its static
+// words, in order, its effect is execute, and it has no operations,
+// wrappers, paths, network facts or data flows. A runtime-expanded word becomes zero or more words, so each
+// static word is still an argument of the real process, but its position,
+// the argument count and what the command does are not known. A caller may
+// count a match on such a view only for an expression that also reads argv,
+// arguments, operations and wrappers only where more of them can only keep
+// a match, and never reads effect (semantic.Program.StaticArgvSubsetSafe).
+func StaticCommandSubsetReduction(input Input, facts Facts) (view Facts, partialArgv bool, ok bool) {
 	defer func() {
 		if recover() != nil {
-			view, ok = Facts{}, false
+			view, partialArgv, ok = Facts{}, false, false
 		}
 	}()
 	if facts.Parse.Status != StatusPartial || facts.Parse.Dialect != DialectPOSIX ||
 		len(facts.Commands) == 0 || !containsIssue(facts.Parse.Issues, IssueDynamicWord) {
-		return Facts{}, false
+		return Facts{}, false, false
 	}
 	for _, issue := range facts.Parse.Issues {
 		if issue != IssueDynamicWord && issue != IssueUnsupportedConstruct {
-			return Facts{}, false
+			return Facts{}, false, false
 		}
 	}
 	_, capture := analyzeWithRedirectTargets(input, "")
 	if definesFunction(capture.source) {
-		return Facts{}, false
+		return Facts{}, false, false
 	}
 
 	byID := make(map[int64]CommandFact, len(facts.Commands))
@@ -92,13 +103,17 @@ func StaticCommandSubsetReduction(input Input, facts Facts) (view Facts, ok bool
 	}
 	commands := make([]CommandFact, 0, len(facts.Commands))
 	for _, command := range cloneCommands(facts.Commands) {
-		if !keep(command, 0) {
-			if shellStateBuiltins[strings.ToLower(command.Program)] {
-				return Facts{}, false
+		static := keep(command, 0)
+		if !static {
+			parent, found := byID[command.ParentCommandID]
+			if !partialArgvPOSIXProcess(command) ||
+				(command.ParentCommandID != 0 && (!found || !keep(parent, 1))) {
+				if shellStateBuiltins[strings.ToLower(command.Program)] {
+					return Facts{}, false, false
+				}
+				continue
 			}
-			continue
 		}
-		kept[command.ID] = true
 		redirects := make([]RedirectFact, 0, len(command.Redirects))
 		for _, redirect := range command.Redirects {
 			if !redirect.Expands && redirect.Target != "" {
@@ -106,11 +121,30 @@ func StaticCommandSubsetReduction(input Input, facts Facts) (view Facts, ok bool
 			}
 		}
 		command.Redirects = redirects
-		command.ArgvComplete = true
+		if static {
+			kept[command.ID] = true
+			command.ArgvComplete = true
+		} else {
+			partialArgv = true
+			argv := make([]string, 0, len(command.Argv))
+			arguments := make([]ArgumentFact, 0, len(command.Arguments))
+			for index, argument := range command.Arguments {
+				if !argument.Expands && argument.StaticGlob == "" {
+					argv = append(argv, command.Argv[index])
+					arguments = append(arguments, argument)
+				}
+			}
+			command.Argv, command.Arguments = argv, arguments
+			command.ArgvComplete = false
+			// It runs; what its effect is depends on the expanded words.
+			command.Effect = EffectExecute
+			command.Operations = nil
+			command.Wrappers = nil
+		}
 		commands = append(commands, command)
 	}
 	if len(commands) == 0 {
-		return Facts{}, false
+		return Facts{}, false, false
 	}
 
 	view = facts
@@ -135,7 +169,30 @@ func StaticCommandSubsetReduction(input Input, facts Facts) (view Facts, ok bool
 			view.DataFlows = append(view.DataFlows, flow)
 		}
 	}
-	return view, true
+	return view, partialArgv, true
+}
+
+// partialArgvPOSIXProcess reports whether command is a POSIX process that is
+// certain to run, with a static program word that is not a shell builtin
+// changing later commands, but with runtime-expanded or glob arguments.
+func partialArgvPOSIXProcess(command CommandFact) bool {
+	if command.Dialect != DialectPOSIX ||
+		(command.Kind != CommandKindProcess && command.Kind != "") ||
+		(command.Effect != EffectExecute && command.Effect != EffectUncertain) ||
+		command.ControlFlowUncertain || command.Background ||
+		len(command.Argv) == 0 || command.Argv[0] == "" ||
+		command.Executable == "" || command.Program == "" ||
+		len(command.Arguments) != len(command.Argv) ||
+		command.Arguments[0].Expands || command.Arguments[0].StaticGlob != "" ||
+		shellStateBuiltins[strings.ToLower(command.Program)] {
+		return false
+	}
+	for _, argument := range command.Arguments[1:] {
+		if argument.Expands || argument.StaticGlob != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // staticCertainPOSIXProcess reports whether command is a POSIX process that

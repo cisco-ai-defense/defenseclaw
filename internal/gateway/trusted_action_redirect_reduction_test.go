@@ -89,6 +89,12 @@ func TestTrustedActionBlocksCommandRuleWithRuntimeExpandedRedirectTarget(t *test
 			redirectReductionMarker,
 			`f.commands.exists(c, c.argv_complete && c.argv.exists(a, a == "`+redirectReductionMarker+`"))`,
 		),
+		// An expanded word may be any argument, so negation over argv is unsafe.
+		redirectReductionRule(
+			"TEST-MARKER-NOT-N",
+			redirectReductionMarker,
+			`f.commands.exists(c, "`+redirectReductionMarker+`" in c.argv && !c.argv.exists(a, a == "-n"))`,
+		),
 	)
 
 	const (
@@ -146,9 +152,33 @@ func TestTrustedActionBlocksCommandRuleWithRuntimeExpandedRedirectTarget(t *test
 			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-NO-STDOUT-REDIRECT": blocks, "TEST-MARKER-COMPLETE-ARGV": blocks},
 		},
 		{
-			// An expanding argument is not reduced: the argv is not static.
+			// GAP-0029: a runtime-expanded argument becomes zero or more
+			// words, so the static marker is still an argument of echo. Its
+			// argv is not complete.
 			name:    "expanding argument",
-			command: "echo " + redirectReductionMarker + " $SUFFIX > ~/dc-x.txt",
+			command: "echo " + redirectReductionMarker + " $USER > /var/tmp/dc-x.txt",
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly, "TEST-MARKER-COMPLETE-ARGV": detectionOnly, "TEST-MARKER-NOT-N": detectionOnly},
+		},
+		{
+			name:    "quoted expanding argument",
+			command: "echo " + redirectReductionMarker + ` "$USER" > /var/tmp/dc-x.txt`,
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly, "TEST-MARKER-COMPLETE-ARGV": detectionOnly},
+		},
+		{
+			name:    "expanding argument and target",
+			command: "echo " + redirectReductionMarker + " $USER > ~/dc-x.txt",
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly, "TEST-MARKER-COMPLETE-ARGV": detectionOnly},
+		},
+		{
+			// The program itself expands: nothing certain runs.
+			name:    "expanding program",
+			command: "$CMD " + redirectReductionMarker,
+			want:    map[string]string{"TEST-MARKER-BLOCK": detectionOnly, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly, "TEST-MARKER-COMPLETE-ARGV": detectionOnly},
+		},
+		{
+			// A runtime-expanded export could change what echo runs.
+			name:    "after a runtime-expanded export",
+			command: "export PATH=$DIR; echo " + redirectReductionMarker + " $USER",
 			want:    map[string]string{"TEST-MARKER-BLOCK": detectionOnly, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly, "TEST-MARKER-COMPLETE-ARGV": detectionOnly},
 		},
 		{
@@ -393,5 +423,66 @@ func TestTrustedActionCorpusBlocksWithRuntimeExpandedRedirectTarget(t *testing.T
 				}
 			}
 		})
+	}
+}
+
+// GAP-1450: OpenClaw's exec tool reaches /api/v1/inspect/tool with its
+// execution controls next to the command. An argv_complete block rule must
+// block the call with yieldMs as it does without.
+func TestInspectToolBlocksOpenClawExecWithControls(t *testing.T) {
+	api := testAPIServerWithConfig(t, "action")
+	installRedirectReductionRules(t, "openclaw", redirectReductionRule(
+		"TEST-MARKER-BLOCK", redirectReductionMarker,
+		`f.commands.exists(c, c.argv_complete && c.argv.exists(a, a == "`+redirectReductionMarker+`"))`,
+	))
+	for _, args := range []string{
+		`{"command":"echo dc-block-marker > /tmp/dc-x.txt"}`,
+		`{"command":"echo dc-block-marker > /tmp/dc-x.txt","yieldMs":10000}`,
+		`{"command":"echo dc-block-marker > /tmp/dc-x.txt","timeout":30,"background":true,"workdir":"/tmp"}`,
+	} {
+		_, verdict := postInspectForConnector(t, api, "openclaw", `{"tool":"exec","args":`+args+`}`)
+		if verdict.Action != guardrailActionBlock || verdict.Severity != "CRITICAL" {
+			t.Errorf("exec %s = %s %s (%s), want a CRITICAL block", args, verdict.Action, verdict.Severity, verdict.Reason)
+		}
+	}
+}
+
+// GAP-1451: an OpenClaw block is a finding attributed to connector openclaw
+// with target openclaw:exec, and its inspect-tool-block row carries the
+// verdict's severity.
+func TestInspectToolBlockAttributesOpenClawFinding(t *testing.T) {
+	api := testAPIServerWithConfig(t, "action")
+	installRedirectReductionRules(t, "openclaw", redirectReductionRule(
+		"TEST-MARKER-BLOCK", redirectReductionMarker,
+		`f.commands.exists(c, c.argv.exists(a, a == "`+redirectReductionMarker+`"))`,
+	))
+	_, verdict := postInspectForConnector(t, api, "openclaw",
+		`{"tool":"exec","args":{"command":"echo dc-block-marker > /tmp/dc-x.txt"}}`)
+	if verdict.Action != guardrailActionBlock {
+		t.Fatalf("verdict = %s, want block", verdict.Action)
+	}
+	events, err := api.store.ListEvents(50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var finding, block bool
+	for _, event := range events {
+		switch event.Action {
+		case "scan-finding":
+			finding = true
+			target := auditStringValue(event.Structured["defenseclaw.finding.target_ref"])
+			if event.Connector != "openclaw" || target != "openclaw:exec" || event.Severity != "CRITICAL" {
+				t.Errorf("scan-finding connector=%q target=%q severity=%q, want openclaw, openclaw:exec, CRITICAL",
+					event.Connector, target, event.Severity)
+			}
+		case "inspect-tool-block":
+			block = true
+			if event.Connector != "openclaw" || event.Severity != "CRITICAL" {
+				t.Errorf("inspect-tool-block connector=%q severity=%q, want openclaw, CRITICAL", event.Connector, event.Severity)
+			}
+		}
+	}
+	if !finding || !block {
+		t.Fatalf("finding=%t block=%t, want both rows", finding, block)
 	}
 }
