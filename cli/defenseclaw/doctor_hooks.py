@@ -2840,7 +2840,15 @@ def _validate_hermes_allowlist(config_path: str, command: str) -> int:
                     f"unexpected Hermes event {event} contains a DefenseClaw approval",
                 )
             if event in _HERMES_REQUIRED_HOOKS and approved_command != command:
-                target, args, kind = _command_target(approved_command, "hermes")
+                try:
+                    target, args, kind = _command_target(approved_command, "hermes")
+                except _InspectionError:
+                    # Not a direct native DefenseClaw approval: a foreign
+                    # command or one an older release approved (a PowerShell
+                    # launcher) cannot conflict with ours. Failing here kept
+                    # Hermes unenrollable after an upgrade (GAP-1304).
+                    pairs.add((event, approved_command))
+                    continue
                 if (
                     kind == "direct"
                     and ntpath.basename(target).casefold() == "defenseclaw-hook.exe"
