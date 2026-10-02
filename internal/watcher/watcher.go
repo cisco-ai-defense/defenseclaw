@@ -115,12 +115,18 @@ type InstallWatcher struct {
 	// bundledPlugin reports whether a plugin path is DefenseClaw's own plugin,
 	// byte-identical to the copy this gateway ships (OpenClaw, GAP-1525).
 	bundledPlugin func(path string) bool
-	store         *audit.Store
-	logger        *audit.Logger
-	opa           *policy.Engine
-	webhooks      WebhookDispatcher
-	debounce      time.Duration
-	onAdmit       OnAdmission
+	// bundledPluginDir is where the connector writes that plugin at gateway
+	// start. The startup rescan defers it until Setup has refreshed it.
+	bundledPluginDir string
+	// startupRescanDone is set after the first rescan cycle (rescan goroutine
+	// only).
+	startupRescanDone bool
+	store             *audit.Store
+	logger            *audit.Logger
+	opa               *policy.Engine
+	webhooks          WebhookDispatcher
+	debounce          time.Duration
+	onAdmit           OnAdmission
 
 	mu      sync.Mutex
 	pending map[string]time.Time // path → first-seen, for debounce
@@ -202,6 +208,21 @@ func (w *InstallWatcher) SetManagedArtifacts(paths []string) {
 // added or changed file fails the check and is scanned like any other.
 func (w *InstallWatcher) SetBundledPluginCheck(check func(path string) bool) {
 	w.bundledPlugin = check
+}
+
+// SetBundledPluginDir records where the connector installs its own plugin.
+func (w *InstallWatcher) SetBundledPluginDir(dir string) {
+	w.bundledPluginDir = dir
+}
+
+// isBundledPluginDir reports whether path is the connector's own plugin dir.
+func (w *InstallWatcher) isBundledPluginDir(path string) bool {
+	if w.bundledPluginDir == "" {
+		return false
+	}
+	got, err1 := filepath.Abs(path)
+	want, err2 := filepath.Abs(w.bundledPluginDir)
+	return err1 == nil && err2 == nil && filepath.Clean(got) == filepath.Clean(want)
 }
 
 // isOwnPlugin reports whether a plugin path is connector-managed or

@@ -3118,6 +3118,7 @@ func (s *Sidecar) runWatcher(ctx context.Context) error {
 		}))
 		if bundled, ok := conn.(connector.BundledPluginChecker); ok {
 			w.SetBundledPluginCheck(bundled.IsBundledPlugin)
+			w.SetBundledPluginDir(bundled.BundledPluginDir())
 		}
 	}
 	watcherRuntime, _ := s.observabilityV8LifecycleRuntime().(watcher.ObservabilityV8Runtime)

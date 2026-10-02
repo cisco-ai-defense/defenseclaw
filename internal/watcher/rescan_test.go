@@ -17,6 +17,7 @@
 package watcher
 
 import (
+	"context"
 	"crypto/md5"
 	"encoding/json"
 	"fmt"
@@ -800,5 +801,38 @@ func TestEnumerateTargetsSkipsOwnBundledPlugin(t *testing.T) {
 	}
 	if len(plugins) != 1 || plugins[0] != other {
 		t.Fatalf("rescan plugin targets = %v, want only %s", plugins, other)
+	}
+}
+
+// GAP-1525: on an upgrade the old copy of DefenseClaw's own OpenClaw plugin
+// is still on disk when the startup rescan runs; connector setup replaces it
+// moments later. The startup cycle must not scan that dir, while a later
+// cycle still scans it if it really differs from the bundled copy.
+func TestStartupRescanDefersStaleOwnPluginDir(t *testing.T) {
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	pluginDir := filepath.Join(filepath.Dir(skillDir), "plugins")
+	own := filepath.Join(pluginDir, "defenseclaw")
+	if err := os.MkdirAll(own, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(own, "index.js"), []byte("// older release\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w := New(cfg, nil, []string{pluginDir}, store, logger, nil, nil)
+	w.SetBundledPluginCheck(func(string) bool { return false })
+	w.SetBundledPluginDir(own)
+	var scanned []string
+	w.scannerFactory = func(evt InstallEvent) scanner.Scanner {
+		scanned = append(scanned, evt.Path)
+		return nil
+	}
+
+	w.runRescanCycle(context.Background())
+	if len(scanned) != 0 {
+		t.Fatalf("startup rescan scanned %v, want the own plugin dir deferred", scanned)
+	}
+	w.runRescanCycle(context.Background())
+	if len(scanned) != 1 || scanned[0] != own {
+		t.Fatalf("second rescan scanned %v, want %s (still differs from the bundle)", scanned, own)
 	}
 }

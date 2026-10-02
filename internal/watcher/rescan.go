@@ -115,6 +115,7 @@ const (
 // since the last baseline. Unchanged targets are skipped entirely, which keeps
 // the periodic loop cheap and stops scan_results from growing on every cycle.
 func (w *InstallWatcher) runRescanCycle(ctx context.Context) {
+	defer func() { w.startupRescanDone = true }()
 	targets := w.enumerateTargets()
 	if len(targets) == 0 {
 		return
@@ -394,6 +395,22 @@ func enumerateClaudeWatcherPlugins(root string) []string {
 func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpCache map[InstallType]string) rescanOutcome {
 	if evt.Type == InstallSkill && isBundledSkillWatchPath(evt.Path) {
 		return rescanSkipped
+	}
+	if evt.Type == InstallPlugin {
+		// Re-check here: the connector may have restored its own plugin
+		// since enumerateTargets ran (GAP-1525).
+		if w.isOwnPlugin(evt.Path) {
+			return rescanSkipped
+		}
+		// At gateway start the connector's Setup rewrites its own plugin
+		// dir, so an old (upgrade) or drifted copy there is about to be
+		// replaced by the bundled one. Leave it to admission, which sees
+		// the rewrite, and to the next cycle, which scans it if it still
+		// differs.
+		if !w.startupRescanDone && w.isBundledPluginDir(evt.Path) {
+			fmt.Fprintf(os.Stderr, "[rescan] deferring %s: connector setup refreshes DefenseClaw's own plugin at start\n", evt.Path)
+			return rescanSkipped
+		}
 	}
 	currentSnap, err := w.snapshotForEvent(evt)
 	if errors.Is(err, os.ErrNotExist) {
