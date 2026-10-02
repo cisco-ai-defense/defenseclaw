@@ -33,6 +33,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -419,10 +420,10 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 	)
 	if err != nil {
 		fmt.Println(Style("FAILED", "fg=red", "bold"))
+		err = gatewayExitedBeforeReadinessError(err, d.LogFile(), logOffset)
 		if !rotationTransaction {
 			err = explainForeignListenerAtReadiness(cfg, err)
 		}
-		err = gatewayExitedBeforeReadinessError(err, d.LogFile(), logOffset)
 		return fmt.Errorf("start daemon readiness: %w (check %s for errors)%s", err, d.LogFile(),
 			gatewayStartFailureDiskNote(config.DefaultDataPath()))
 	}
@@ -776,8 +777,8 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 	)
 	if err != nil {
 		fmt.Println(Style("FAILED", "fg=red", "bold"))
-		err = explainForeignListenerAtReadiness(cfg, err)
 		err = gatewayExitedBeforeReadinessError(err, d.LogFile(), logOffset)
+		err = explainForeignListenerAtReadiness(cfg, err)
 		return fmt.Errorf("restart daemon readiness: %w (check %s for errors)%s", err, d.LogFile(),
 			gatewayStartFailureDiskNote(config.DefaultDataPath()))
 	}
@@ -929,6 +930,13 @@ type daemonReadinessRequirements struct {
 	listenerPort                int
 	listenerOwner               func(string, int) (int, error)
 	requireOwnership            bool
+	// portHolder and portAnswers name the API port's listener on Linux and
+	// macOS, where listenerOwner cannot, so readiness sends the gateway
+	// token only to the launched gateway (GAP-1967). tokenHost is the host
+	// the token goes to.
+	portHolder  func(string, int) (daemon.PortHolder, error)
+	portAnswers func(string) bool
+	tokenHost   string
 
 	// allowHookContractAdmissionRefusal lets an ordinary start accept a
 	// guardrail that stopped only because the hook-contract admission gate
@@ -1356,6 +1364,63 @@ func waitForConfiguredPortFree(cfg *config.Config, stoppedPID int, timeout, poll
 	}
 }
 
+var (
+	errReadinessListenerInspection = errors.New("inspect gateway listener ownership")
+	errReadinessListenerNotUp      = errors.New("the gateway API listener is not up yet")
+)
+
+// readinessListenerIsLaunchedGateway returns nil when the API port's
+// listener is the launched gateway, so readiness may send it the gateway
+// token (GAP-1967). It returns errReadinessListenerNotUp while no listener
+// this account can see is up, and an errGatewayIdentityMismatch error when
+// another process holds the port. Platforms that cannot name a listener's
+// process keep the authenticated status check alone.
+func readinessListenerIsLaunchedGateway(r daemonReadinessRequirements) error {
+	if r.requireOwnership {
+		ownerPID, err := r.listenerOwner(r.listenerHost, r.listenerPort)
+		switch {
+		case errors.Is(err, daemon.ErrNoListener):
+			return errReadinessListenerNotUp
+		case err != nil:
+			return fmt.Errorf("%w: %w", errReadinessListenerInspection, err)
+		case ownerPID != r.expectedPID:
+			return fmt.Errorf("%w: configured listener PID %d does not match launched PID %d; the gateway token was not sent",
+				errGatewayIdentityMismatch, ownerPID, r.expectedPID)
+		}
+		return nil
+	}
+	if r.portHolder == nil {
+		return nil
+	}
+	addr := net.JoinHostPort(r.tokenHost, strconv.Itoa(r.listenerPort))
+	foreign := fmt.Errorf("%w: another process holds %s, not the launched gateway (PID %d); the gateway token was not sent",
+		errGatewayIdentityMismatch, addr, r.expectedPID)
+	for attempt := 0; attempt < 2; attempt++ {
+		holder, err := r.portHolder(r.tokenHost, r.listenerPort)
+		switch {
+		case errors.Is(err, daemon.ErrListenerInspectionUnavailable):
+			return nil
+		case err == nil && holder.UID >= 0 && holder.UID != os.Getuid():
+			return foreign
+		case err == nil && holder.PID > 0 && holder.PID != r.expectedPID:
+			return foreign
+		case err == nil && holder.PID == r.expectedPID:
+			return nil
+		case err == nil:
+			// This account's socket whose process is not visible yet.
+			return errReadinessListenerNotUp
+		}
+		// No listener this account can see. lsof on macOS does not list
+		// another account's sockets, so a port that answers belongs to
+		// someone else unless the gateway bound it since the lookup: look
+		// once more before calling it foreign.
+		if r.portAnswers == nil || !r.portAnswers(addr) {
+			return errReadinessListenerNotUp
+		}
+	}
+	return foreign
+}
+
 func fetchSidecarStatus(client *http.Client, addr, token string) (gatewayStatusEnvelope, error) {
 	var status gatewayStatusEnvelope
 	if strings.TrimSpace(token) == "" {
@@ -1509,6 +1574,11 @@ func daemonReadinessRequirementsFromConfig(cfg *config.Config, startedNotBefore 
 		listenerPort:     cfg.Gateway.APIPort,
 		listenerOwner:    startupListenerOwner,
 		requireOwnership: requireStartupListenerOwnership,
+		tokenHost:        gatewayClientHost(cfg),
+	}
+	if !requireStartupListenerOwnership {
+		requirements.portHolder = gatewayPortHolder
+		requirements.portAnswers = gatewayPortAnswers
 	}
 	return requirements
 }
@@ -2095,8 +2165,14 @@ func waitForGatewayReadiness(
 			if requirements.token != nil {
 				token = requirements.token()
 			}
+			// The token goes only to the launched gateway's listener:
+			// another account's process can take the port after the start
+			// check, before the gateway binds it (GAP-1967).
 			var status gatewayStatusEnvelope
-			status, err = fetchSidecarStatus(client, healthURL, token)
+			err = readinessListenerIsLaunchedGateway(requirements)
+			if err == nil {
+				status, err = fetchSidecarStatus(client, healthURL, token)
+			}
 			if err == nil {
 				err = verifyGatewayRuntimeIdentity(status, requirements.expectedPID, requirements.expectedDataDir)
 				snap = status.Health
@@ -2106,16 +2182,8 @@ func waitForGatewayReadiness(
 					return snap, false, fmt.Errorf("rotation connector state mismatch: %w", stateErr)
 				}
 			}
-			if err == nil && requirements.requireOwnership {
-				ownerPID, ownerErr := requirements.listenerOwner(requirements.listenerHost, requirements.listenerPort)
-				switch {
-				case errors.Is(ownerErr, daemon.ErrNoListener):
-					err = ownerErr
-				case ownerErr != nil:
-					return lastSnap, false, fmt.Errorf("inspect gateway listener ownership: %w", ownerErr)
-				case ownerPID != requirements.expectedPID:
-					return lastSnap, false, fmt.Errorf("%w: configured listener PID %d does not match launched PID %d", errGatewayIdentityMismatch, ownerPID, requirements.expectedPID)
-				}
+			if errors.Is(err, errReadinessListenerInspection) {
+				return lastSnap, false, err
 			}
 		} else {
 			snap, err = fetchSidecarHealth(client, healthURL)

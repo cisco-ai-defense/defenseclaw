@@ -86,9 +86,11 @@ func foreignGatewayListenerAt(cfg *config.Config, host string, port int) string 
 // answered readiness on the API port. The start check passed, but another
 // account's gateway took the port before this one bound it, and start
 // reported only "gateway identity mismatch: authenticated status returned
-// 401 Unauthorized" (GAP-1285).
+// 401 Unauthorized" (GAP-1285). Readiness no longer sends the token to that
+// listener (GAP-1967), so the gateway, which then cannot bind the port,
+// often exits first: that exit names the holder too.
 func explainForeignListenerAtReadiness(cfg *config.Config, err error) error {
-	if cfg == nil || !errors.Is(err, errGatewayIdentityMismatch) {
+	if cfg == nil || !(errors.Is(err, errGatewayIdentityMismatch) || errors.Is(err, errGatewayExitedBeforeReadiness)) {
 		return err
 	}
 	if problem := foreignGatewayListener(cfg); problem != "" {
