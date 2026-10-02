@@ -150,6 +150,41 @@ def test_codeguard_skill_install_skips_bytecode_cache(tmp_path, monkeypatch):
     assert codeguard_status(cfg, connector="claudecode", target="skill").status == "conflict"
 
 
+def test_codeguard_skill_from_earlier_release_is_outdated_and_updates(tmp_path, monkeypatch):
+    """GAP-1594: an earlier DefenseClaw copy is ours to update, not a conflict."""
+    from defenseclaw import codeguard_skill
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    cfg = _cfg("claudecode", tmp_path)
+    install_codeguard_asset(cfg, connector="claudecode", target="skill")
+    installed = tmp_path / "home" / ".claude" / "skills" / "codeguard"
+    # Recreate the 1.0.x tree: no license/compatibility lines, plus a cache.
+    manifest = installed / "SKILL.md"
+    manifest.write_text(
+        "".join(
+            line
+            for line in manifest.read_text(encoding="utf-8").splitlines(keepends=True)
+            if not line.startswith(("license:", "compatibility:"))
+        ),
+        encoding="utf-8",
+    )
+    (installed / "__pycache__").mkdir()
+    (installed / "__pycache__" / "main.cpython-312.pyc").write_bytes(b"old cache")
+    assert codeguard_skill._dir_signature(str(installed), skip_bytecode=True) in (
+        codeguard_skill._PRIOR_SKILL_SIGNATURES
+    )
+
+    assert codeguard_status(cfg, connector="claudecode", target="skill").status == "outdated"
+    msg = install_codeguard_asset(cfg, connector="claudecode", target="skill")
+    assert msg.startswith("updated the earlier DefenseClaw copy at "), msg
+    assert codeguard_status(cfg, connector="claudecode", target="skill").status == "installed"
+
+    # Any other change is still a conflict that needs --replace.
+    (installed / "USER.md").write_text("mine", encoding="utf-8")
+    assert codeguard_status(cfg, connector="claudecode", target="skill").status == "conflict"
+
+
 def test_bundled_codeguard_skill_declares_license_and_network():
     manifest = (Path(__file__).resolve().parents[2] / "skills" / "codeguard" / "SKILL.md").read_text(
         encoding="utf-8"
