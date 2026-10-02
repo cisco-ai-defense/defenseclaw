@@ -2515,11 +2515,22 @@ def _private_upstream_ips(target: str) -> list[str]:
     return out
 
 
+_restart_option = click.option(
+    "--restart/--no-restart",
+    default=True,
+    help=(
+        "Restart a running gateway when the change needs it, so it enforces the change now "
+        "(default: on; a stopped gateway is never started)."
+    ),
+)
+
+
 @guardrail.command("allow-private-upstream")
 @click.argument("targets", nargs=-1)
 @click.option("--remove", is_flag=True, help="Remove these addresses instead of adding them.")
+@_restart_option
 @pass_ctx
-def guardrail_allow_private_upstream(app: AppContext, targets: tuple[str, ...], remove: bool) -> None:
+def guardrail_allow_private_upstream(app: AppContext, targets: tuple[str, ...], remove: bool, restart: bool) -> None:
     """Let the guardrail proxy reach an LLM endpoint on a private address.
 
     The proxy refuses upstreams that resolve to private addresses. An AWS
@@ -2529,6 +2540,8 @@ def guardrail_allow_private_upstream(app: AppContext, targets: tuple[str, ...], 
     addresses are stored in guardrail.allow_private_upstreams. Run it again if
     the endpoint's addresses change. With no arguments it lists the entries.
     Loopback, link-local and cloud metadata addresses are never allowed.
+    A running gateway is restarted so the proxy uses the change now
+    (``--no-restart`` to skip).
 
     \b
     Example:
@@ -2565,7 +2578,12 @@ def guardrail_allow_private_upstream(app: AppContext, targets: tuple[str, ...], 
     except OSError as exc:
         raise click.ClickException(f"could not save the config: {exc}") from exc
     ux.ok("guardrail.allow_private_upstreams: " + (", ".join(updated) or "(none)"), indent="  ")
-    click.echo("  Restart the gateway to apply it: defenseclaw-gateway restart")
+    # The proxy reads the allowlist at start, so apply it the way use-pack
+    # does; the OpenClaw error names only this command (GAP-1897).
+    outcome = _apply_to_running_gateway(app, needs_restart=True, restart=restart, quiet=False)
+    click.echo("  " + _GATEWAY_OUTCOMES[outcome])
+    if outcome == "restart_failed":
+        raise SystemExit(1)
 
 
 @guardrail.command("validate-pack")
@@ -2959,16 +2977,6 @@ def _log_guardrail_action(app: AppContext, action: str, details: str) -> None:
         click.echo(f"  ⚠ Change saved, but the gateway did not confirm the audit event ({exc}).", err=True)
     if pending:
         _echo_stopped_gateway_note(pending, audit_skipped=False)
-
-
-_restart_option = click.option(
-    "--restart/--no-restart",
-    default=True,
-    help=(
-        "Restart a running gateway when the change needs it, so it enforces the change now "
-        "(default: on; a stopped gateway is never started)."
-    ),
-)
 
 
 @guardrail.command("use-pack")

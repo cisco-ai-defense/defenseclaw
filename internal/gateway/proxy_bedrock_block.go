@@ -40,6 +40,13 @@ const (
 	bedrockApplyGuardrailActionSuffix = "/apply"
 )
 
+// bedrockBlockStopReason ends a block response as a normal turn. Clients map
+// "guardrail_intervened" differently: OpenClaw's Bedrock provider (pi-ai)
+// treats every stop reason except end_turn, stop_sequence, max_tokens and
+// tool_use as a failed run and shows "An unknown error occurred" after the
+// block text (GAP-1894). defenseclaw_blocked still marks the block.
+const bedrockBlockStopReason = "end_turn"
+
 // writeBlockedPassthroughBedrock dispatches a DefenseClaw-block response in
 // the Bedrock-native shape expected by the AWS SDK on the client side. The
 // stream flag is inferred from the URL path because Bedrock has no
@@ -76,6 +83,26 @@ func writeBedrockUpstreamError(w http.ResponseWriter, msg string) {
 	w.Header().Set("X-Amzn-ErrorType", "ServiceUnavailableException")
 	w.WriteHeader(http.StatusBadGateway)
 	_ = json.NewEncoder(w).Encode(map[string]string{"message": msg})
+}
+
+// requestBodyIsSigned reports a request whose AWS SigV4 signature covers the
+// body: an "AWS4-HMAC-SHA256" Authorization (or the X-AI-Auth copy the fetch
+// interceptor forwards) or a presigned X-Amz-Signature query, unless the
+// client declared UNSIGNED-PAYLOAD. The proxy holds no AWS credentials to
+// re-sign, so such a body must reach Bedrock byte-for-byte (GAP-1893).
+func requestBodyIsSigned(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Amz-Content-Sha256")), "UNSIGNED-PAYLOAD") {
+		return false
+	}
+	for _, name := range []string{"Authorization", "X-AI-Auth"} {
+		if strings.HasPrefix(strings.TrimSpace(r.Header.Get(name)), "AWS4-HMAC-SHA256") {
+			return true
+		}
+	}
+	return r.URL != nil && r.URL.Query().Get("X-Amz-Signature") != ""
 }
 
 // bedrockActionFromPath returns the trailing Bedrock action ("converse",
@@ -135,7 +162,7 @@ func bedrockBlockedConverseBody(model, msg string) map[string]any {
 				},
 			},
 		},
-		"stopReason": "guardrail_intervened",
+		"stopReason": bedrockBlockStopReason,
 		"usage": map[string]int{
 			"inputTokens":  0,
 			"outputTokens": 1,
@@ -167,7 +194,7 @@ func (p *GuardrailProxy) writeBlockedResponseBedrockConverse(w http.ResponseWrit
 //  1. messageStart       — role=assistant
 //  2. contentBlockDelta  — delta.text = <block message>
 //  3. contentBlockStop   — contentBlockIndex=0
-//  4. messageStop        — stopReason=guardrail_intervened
+//  4. messageStop        — stopReason=end_turn (bedrockBlockStopReason)
 //  5. metadata           — usage + metrics
 //
 // Each frame is framed with the AWS event-stream codec (preamble length +
@@ -209,7 +236,7 @@ func (p *GuardrailProxy) writeBlockedStreamBedrockConverse(w http.ResponseWriter
 		"p":                 "",
 	})
 	emit("messageStop", map[string]any{
-		"stopReason":          "guardrail_intervened",
+		"stopReason":          bedrockBlockStopReason,
 		"defenseclaw_blocked": true,
 		"defenseclaw_reason":  msg,
 		"defenseclaw_model":   model,

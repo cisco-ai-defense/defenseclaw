@@ -52,12 +52,26 @@ class AllowPrivateUpstreamTests(unittest.TestCase):
             added = self._run(HOST)
         self.assertEqual(added.exit_code, 0, added.output)
         self.assertEqual(self.app.cfg.guardrail.allow_private_upstreams, ["10.0.2.169", "10.0.3.65"])
-        self.assertIn("defenseclaw-gateway restart", added.output)
         listed = self._run()
         self.assertIn("10.0.2.169, 10.0.3.65", listed.output)
         removed = self._run("--remove", "10.0.2.169")
         self.assertEqual(removed.exit_code, 0, removed.output)
         self.assertEqual(self.app.cfg.guardrail.allow_private_upstreams, ["10.0.3.65"])
+
+    def test_a_running_gateway_is_restarted_so_the_change_applies(self):
+        # GAP-1897: the OpenClaw error names only this command, so it applies
+        # the allowlist itself; --no-restart leaves the restart to the user.
+        self.app.cfg.guardrail.enabled = True
+        with patch("socket.getaddrinfo", return_value=_resolves_to("10.0.2.169")), \
+                patch("defenseclaw.commands.cmd_guardrail._gateway_running", return_value=True), \
+                patch("defenseclaw.commands.cmd_setup._restart_defense_gateway", return_value=True) as restart:
+            added = self._run(HOST)
+            self.assertEqual(added.exit_code, 0, added.output)
+            restart.assert_called_once()
+            self.assertIn("Restarted the gateway", added.output)
+            skipped = self._run("--no-restart", "--remove", "10.0.2.169")
+            self.assertEqual(restart.call_count, 1)
+        self.assertIn("defenseclaw-gateway restart", skipped.output)
 
     def test_metadata_loopback_and_cidr_are_refused(self):
         for target in ("169.254.169.254", "127.0.0.1", "10.0.0.0/8"):

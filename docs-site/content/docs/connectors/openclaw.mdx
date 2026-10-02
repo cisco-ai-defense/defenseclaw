@@ -170,11 +170,11 @@ When `bedrock-runtime.<region>.amazonaws.com` resolves to an AWS PrivateLink
 every turn fails. The agent shows `DefenseClaw refused a private LLM endpoint;
 if you trust it, run: defenseclaw guardrail allow-private-upstream <host>`, and
 `defenseclaw doctor` warns with a **Private upstream** row naming the host.
-Allow the endpoint, then restart the gateway:
+Allow the endpoint; the command restarts a running gateway so the next turn
+goes through:
 
 ```bash
 defenseclaw guardrail allow-private-upstream bedrock-runtime.us-east-1.amazonaws.com
-defenseclaw-gateway restart
 ```
 
 ### OpenClaw gateway on another port
