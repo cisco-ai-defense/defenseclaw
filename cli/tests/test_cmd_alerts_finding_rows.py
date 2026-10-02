@@ -155,6 +155,23 @@ class AlertFindingRowsTests(unittest.TestCase):
         self.assertIn("decision=detected after the tool ran (cannot block)", table.output)
         self.assertNotIn("observe mode", table.output)
 
+    # GAP-1525: a plugin finding names the plugin (target_ref) and the file.
+    def test_plugin_finding_names_plugin_and_file(self):
+        structured = {
+            "defenseclaw.finding.rule_id": "SRC-EXEC",
+            "defenseclaw.finding.title": "Calls exec()",
+            "defenseclaw.finding.target_ref": "demo",
+            "defenseclaw.finding.location": "dist/index.js:12",
+            "defenseclaw.scan.scanner": "plugin-scanner",
+        }
+        self.app.store.log_event(Event(action="scan-finding", target="", severity="HIGH",
+                                       details="finding.observed", structured=structured))
+        table = self.runner.invoke(alerts, ["-n", "10"], obj=self.app, catch_exceptions=False)
+        self.assertIn("demo", table.output)
+        show = self.runner.invoke(alerts, ["--show", "1"], obj=self.app, catch_exceptions=False)
+        self.assertIn("demo", show.output)
+        self.assertIn("dist/index.js:12", show.output)
+
 
 def test_redacted_secret_title_uses_the_rule_pack_title():
     # GAP-1223: C2-METADATA-AWS is tagged "credential", so the store keeps only

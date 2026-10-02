@@ -230,7 +230,7 @@ func scanFindingV8Operation(
 			DefenseClawFindingCategory:            optionalScanV8Text(finding.Category),
 			DefenseClawSecuritySeverity:           string(finding.Severity),
 			DefenseClawFindingConfidence:          confidence,
-			DefenseClawFindingTargetRef:           optionalScanV8Identifier(result.Target),
+			DefenseClawFindingTargetRef:           scanFindingV8TargetRef(result),
 			DefenseClawGuardrailEvidenceSummary:   scanFindingV8EvidenceSummary(finding, result),
 			DefenseClawFindingTitle:               optionalScanV8Text(finding.Title),
 			DefenseClawFindingDescription:         optionalScanV8Text(finding.Description),
@@ -549,6 +549,27 @@ func scanV8SeverityCounts(result *scanner.ScanResult) map[scanner.Severity]int64
 		counts[result.Findings[index].Severity]++
 	}
 	return counts
+}
+
+// scanFindingV8TargetRef names the scanned asset. A file-system path is not an
+// identifier, so it becomes the asset's base name (the plugin or skill name)
+// instead of being dropped, which left plugin and skill finding alerts
+// without a target (GAP-1525).
+func scanFindingV8TargetRef(result *scanner.ScanResult) observability.Optional[string] {
+	if result == nil {
+		return observability.Absent[string]()
+	}
+	if ref := optionalScanV8Identifier(result.Target); ref.IsPresent() {
+		return ref
+	}
+	name := strings.TrimRight(strings.TrimSpace(result.Target), `/\`)
+	if i := strings.LastIndexAny(name, `/\`); i >= 0 {
+		name = name[i+1:]
+	}
+	if name == "" {
+		return observability.Absent[string]()
+	}
+	return optionalScanV8Identifier(name)
 }
 
 func optionalScanV8Identifier(value string) observability.Optional[string] {

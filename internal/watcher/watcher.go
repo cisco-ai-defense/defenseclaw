@@ -112,12 +112,15 @@ type InstallWatcher struct {
 	// visible to connector lifecycle/Doctor, but ordinary plugin scanners must
 	// not inspect or quarantine DefenseClaw's own bridge artifact.
 	managedArtifacts []string
-	store            *audit.Store
-	logger           *audit.Logger
-	opa              *policy.Engine
-	webhooks         WebhookDispatcher
-	debounce         time.Duration
-	onAdmit          OnAdmission
+	// bundledPlugin reports whether a plugin path is DefenseClaw's own plugin,
+	// byte-identical to the copy this gateway ships (OpenClaw, GAP-1525).
+	bundledPlugin func(path string) bool
+	store         *audit.Store
+	logger        *audit.Logger
+	opa           *policy.Engine
+	webhooks      WebhookDispatcher
+	debounce      time.Duration
+	onAdmit       OnAdmission
 
 	mu      sync.Mutex
 	pending map[string]time.Time // path → first-seen, for debounce
@@ -192,6 +195,13 @@ func (w *InstallWatcher) SetManagedArtifacts(paths []string) {
 			w.managedArtifacts = append(w.managedArtifacts, absolute)
 		}
 	}
+}
+
+// SetBundledPluginCheck binds the connector's check for its own shipped plugin.
+// A plugin that passes is DefenseClaw's own and is not scanned; one with an
+// added or changed file fails the check and is scanned like any other.
+func (w *InstallWatcher) SetBundledPluginCheck(check func(path string) bool) {
+	w.bundledPlugin = check
 }
 
 func (w *InstallWatcher) isManagedArtifact(path string) bool {
@@ -477,6 +487,13 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 			Event:   evt,
 			Verdict: VerdictAllowed,
 			Reason:  "connector-managed plugin is lifecycle-owned and discovery-only",
+		}
+	}
+	if evt.Type == InstallPlugin && w.bundledPlugin != nil && w.bundledPlugin(evt.Path) {
+		return AdmissionResult{
+			Event:   evt,
+			Verdict: VerdictAllowed,
+			Reason:  "DefenseClaw's own plugin, identical to the bundled copy",
 		}
 	}
 	// Vendor-managed skills remain visible to inventory, but

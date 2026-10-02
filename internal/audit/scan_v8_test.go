@@ -443,3 +443,24 @@ func TestLogInspectFindingsWithCorrelationUsesOneGeneratedV8Pipeline(t *testing.
 		t.Fatal("runtime inspection omitted the dashboard by-rule metric")
 	}
 }
+
+// GAP-1525: a path target is named by its base name, not dropped.
+func TestScanFindingV8TargetRefNamesPathTargets(t *testing.T) {
+	cases := []struct {
+		target, kind, want string
+	}{
+		{"/home/u/.openclaw/extensions/defenseclaw", "plugin", "defenseclaw"},
+		{`C:\Users\u\.cursor\skills\demo\`, "skill", "demo"},
+		{"claudecode:PreToolUse", "", "claudecode:PreToolUse"},
+	}
+	for _, tc := range cases {
+		got := scanFindingV8TargetRef(&scanner.ScanResult{Target: tc.target, TargetType: tc.kind})
+		value, ok := got.Get()
+		if !ok || value != tc.want {
+			t.Fatalf("target_ref(%q) = %q,%v; want %q", tc.target, value, ok, tc.want)
+		}
+	}
+	if got := scanFindingV8TargetRef(&scanner.ScanResult{Target: "/home/u/my skill", TargetType: "skill"}); got.IsPresent() {
+		t.Fatalf("a name that is not an identifier must stay absent, got %v", got)
+	}
+}

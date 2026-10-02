@@ -17,6 +17,7 @@
 package connector
 
 import (
+	"bytes"
 	"context"
 	"embed"
 	"encoding/json"
@@ -185,6 +186,58 @@ func (c *OpenClawConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	}
 
 	return nil
+}
+
+// IsBundledPlugin reports whether dir is DefenseClaw's own OpenClaw plugin
+// (~/.openclaw/extensions/defenseclaw) and every file in it is an unmodified
+// copy of the bundle this gateway embeds. Files still being written may be
+// missing; an added, changed or non-regular file makes it false (GAP-1525).
+func (c *OpenClawConnector) IsBundledPlugin(dir string) bool {
+	extDir := filepath.Join(openClawHome(), "extensions", "defenseclaw")
+	got, err1 := filepath.Abs(dir)
+	want, err2 := filepath.Abs(extDir)
+	if err1 != nil || err2 != nil || filepath.Clean(got) != filepath.Clean(want) {
+		return false
+	}
+	return openClawExtensionMatchesBundle(want)
+}
+
+var errNotBundledFile = errors.New("not a bundled file")
+
+func openClawExtensionMatchesBundle(extDir string) bool {
+	if !openClawExtensionAvailable() {
+		return false
+	}
+	if info, err := os.Lstat(extDir); err != nil || !info.IsDir() {
+		return false
+	}
+	files := 0
+	err := filepath.WalkDir(extDir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if !d.Type().IsRegular() {
+			return errNotBundledFile
+		}
+		rel, err := filepath.Rel(extDir, p)
+		if err != nil {
+			return err
+		}
+		want, err := openClawExtensionFS.ReadFile(path.Join(openClawPluginRoot, filepath.ToSlash(rel)))
+		if err != nil {
+			return errNotBundledFile
+		}
+		have, err := os.ReadFile(p)
+		if err != nil || !bytes.Equal(have, want) {
+			return errNotBundledFile
+		}
+		files++
+		return nil
+	})
+	return err == nil && files > 0
 }
 
 // openClawSnapshotUsable reports whether teardown may restore openclaw.json

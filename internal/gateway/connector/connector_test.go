@@ -11866,3 +11866,42 @@ func TestOpenClaw_Teardown_KeepsUserEditsMadeWhileEnrolled(t *testing.T) {
 		t.Fatalf("extension dir still present after Teardown: err=%v", err)
 	}
 }
+
+// GAP-1525: DefenseClaw's own OpenClaw plugin, as Setup writes it, is
+// recognized; a changed or added file makes it an ordinary plugin again.
+func TestOpenClaw_IsBundledPlugin(t *testing.T) {
+	requireOpenClawExtensionBundle(t)
+
+	dir := t.TempDir()
+	ocHome := filepath.Join(dir, "openclaw-home")
+	os.MkdirAll(ocHome, 0o755)
+	os.WriteFile(filepath.Join(ocHome, "openclaw.json"), []byte(`{}`), 0o644)
+	OpenClawHomeOverride = ocHome
+	defer func() { OpenClawHomeOverride = "" }()
+
+	c := NewOpenClawConnector()
+	if err := c.Setup(context.Background(), SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	extDir := filepath.Join(ocHome, "extensions", "defenseclaw")
+	if !c.IsBundledPlugin(extDir) {
+		t.Fatal("the plugin Setup wrote is not recognized as DefenseClaw's own")
+	}
+	other := filepath.Join(ocHome, "extensions", "other")
+	os.MkdirAll(other, 0o755)
+	if c.IsBundledPlugin(other) {
+		t.Fatal("another plugin directory was recognized as DefenseClaw's own")
+	}
+	extra := filepath.Join(extDir, "extra.js")
+	os.WriteFile(extra, []byte("module.exports = 1\n"), 0o644)
+	if c.IsBundledPlugin(extDir) {
+		t.Fatal("a plugin with an added file was recognized as DefenseClaw's own")
+	}
+	os.Remove(extra)
+	pkg := filepath.Join(extDir, "package.json")
+	data, _ := os.ReadFile(pkg)
+	os.WriteFile(pkg, append(data, ' '), 0o644)
+	if c.IsBundledPlugin(extDir) {
+		t.Fatal("a plugin with a changed file was recognized as DefenseClaw's own")
+	}
+}

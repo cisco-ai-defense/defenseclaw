@@ -934,6 +934,13 @@ type ManagedPluginArtifactOwner interface {
 	ManagedPluginArtifacts(opts SetupOpts) []string
 }
 
+// BundledPluginChecker is implemented by connectors that install DefenseClaw's
+// own plugin into the agent's plugin directory (OpenClaw). The install watcher
+// skips scanning that plugin while it is byte-identical to the shipped copy.
+type BundledPluginChecker interface {
+	IsBundledPlugin(path string) bool
+}
+
 // ManagedPluginArtifacts returns the connector's auto-loaded managed plugin
 // files, if any. The normalized list lets privileged installers distinguish a
 // plugin artifact from an executable hook even when legacy AgentPaths reports
