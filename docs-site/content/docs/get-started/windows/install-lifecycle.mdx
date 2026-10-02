@@ -192,6 +192,12 @@ keeps your configuration and data in `%USERPROFILE%\.defenseclaw`, and keeps the
 old program files in `%USERPROFILE%\.defenseclaw\previous\legacy-setup`.
 Connector hooks are rewritten to the new paths when the gateway starts.
 
+`defenseclaw rollback` cannot bring the Setup package back; it refuses and
+changes nothing. To go back to it by hand, run `defenseclaw uninstall`, then
+download `DefenseClawSetup-x64.exe` from the release you had and run it in
+your desktop session. Your data from before the upgrade is in
+`%USERPROFILE%\.defenseclaw\previous`.
+
 You do not need to run the old Setup to move. The published 0.8.x
 `DefenseClawSetup-x64.exe` files are not Authenticode signed, so their
 `/verify` exits `1` with `release setup lacks the required Cisco RFC3161
