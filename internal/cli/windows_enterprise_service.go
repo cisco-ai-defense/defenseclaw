@@ -248,7 +248,7 @@ func newWindowsEnterpriseLifecycleCommand(action string) *cobra.Command {
 	flags.BoolVar(&opts.attestAgentApplicationControl, "attest-agent-application-control", false, "attest that approved-client WDAC or AppLocker rules are live")
 	flags.BoolVar(&opts.attestClaudeEffectivePolicy, "attest-claude-effective-policy", false, "refresh live proof that DefenseClaw is Claude's effective managed-policy source")
 	flags.BoolVar(&opts.noStart, "no-start", false, "stage with both services disabled and stopped; activate with a later repair")
-	flags.BoolVar(&opts.purge, "purge", false, "remove managed state as well as services and binaries, and each enrolled account's %USERPROFILE%\\.defenseclaw and per-user binaries in %USERPROFILE%\\.local\\bin, naming each account in the result (authenticated purge or fail-closed exact-scope recovery)")
+	flags.BoolVar(&opts.purge, "purge", false, "also remove managed state (Secure Client; a standalone uninstall always removes it) and each enrolled account's %USERPROFILE%\\.defenseclaw and per-user binaries in %USERPROFILE%\\.local\\bin, naming each account in the result (authenticated purge or fail-closed exact-scope recovery)")
 	flags.BoolVar(&opts.allowUnsigned, "allow-unsigned", false, "allow unsigned artifacts only for controlled test builds")
 	// Spec 003 Workstream B: UCB-friendly late-config install.
 	// Requires managed-enterprise deployment mode; enforced by the
@@ -306,7 +306,7 @@ func windowsEnterpriseLifecycleSummary(action string) string {
 	case "verify":
 		return "Verify files, DACLs, service policy, mode pin, and readiness"
 	case "uninstall":
-		return "Remove enterprise services while preserving state by default"
+		return "Remove enterprise services, hooks and (standalone) machine state; users keep their data unless --purge"
 	case "ensure":
 		return "Converge a standalone deployment: install, upgrade, repair, or no-op"
 	default:
