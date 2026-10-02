@@ -215,6 +215,11 @@ def _omnigent_effective_runtime_state(cfg, state: str) -> tuple[str, str]:
     return raw_state, detail
 
 
+# GAP-1149: counting alerts reads every audit row, which took minutes on a
+# 2 GB audit database; status shows "not counted" (JSON: null) after this.
+_ALERT_COUNT_SECONDS = 3.0
+
+
 def _label(text: str) -> str:
     """Render a status label bold-and-dim.
 
@@ -332,7 +337,7 @@ def status(app: AppContext, as_json: bool) -> None:
         # exit-0 (it is an informational command parsed by the TUI/scripts and
         # should not hard-fail on a transient DB read); the error is visible.
         try:
-            counts = app.store.get_counts()
+            counts = app.store.get_counts(alert_count_seconds=_ALERT_COUNT_SECONDS)
         except Exception as exc:  # noqa: BLE001 — surface the error, don't hide it
             counts = None
             db_error = str(exc)
@@ -357,6 +362,8 @@ def status(app: AppContext, as_json: bool) -> None:
                 ("Total scans", counts.total_scans),
                 ("Active alerts", counts.alerts),
             ):
+                if val is None:
+                    val = ux.dim("not counted (too many audit events to count quickly; list them: defenseclaw alerts)")
                 ux.echo(f"    {_label((label + ':').ljust(16))} {val}")
         else:
             ux.echo(f"    {ux._style('unavailable', fg='yellow')} {ux.dim(f'(audit DB error: {db_error})')}")
@@ -1274,7 +1281,7 @@ def _status_payload(app) -> dict:
 
     if app.store:
         try:
-            counts = app.store.get_counts()
+            counts = app.store.get_counts(alert_count_seconds=_ALERT_COUNT_SECONDS)
         except Exception as exc:  # noqa: BLE001 — surface, don't hide (SU-05)
             payload["enforcement"] = None
             payload["activity"] = None

@@ -28,6 +28,7 @@ import os
 import sqlite3
 import stat
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1712,7 +1713,14 @@ class Store:
             connectors=connectors,
         )
 
-    def get_counts(self) -> Counts:
+    def get_counts(self, *, alert_count_seconds: float | None = None) -> Counts:
+        """Return status counters.
+
+        With ``alert_count_seconds``, ``alerts`` is None when counting them
+        takes longer: the alert predicate reads every audit row, which takes
+        minutes on a large or not yet migrated audit database.
+        """
+
         def _count(sql: str) -> int:
             return self.db.execute(sql).fetchone()[0]
 
@@ -1724,10 +1732,25 @@ class Store:
             allowed_skills=_count(q_skill + "'allow'"),
             blocked_mcps=_count(q_mcp + "'block'"),
             allowed_mcps=_count(q_mcp + "'allow'"),
-            alerts=_count(f"SELECT COUNT(*) FROM audit_events WHERE {alert_where}"),
+            alerts=self._count_within(f"SELECT COUNT(*) FROM audit_events WHERE {alert_where}", alert_count_seconds),
             total_scans=_count("SELECT COUNT(*) FROM scan_results"),
             blocked_egress_calls=_count("SELECT COUNT(*) FROM network_egress_events WHERE blocked = 1"),
         )
+
+    def _count_within(self, sql: str, seconds: float | None) -> int | None:
+        """Run a COUNT query; None when it outlasts ``seconds`` (no limit when None)."""
+        if seconds is None:
+            return self.db.execute(sql).fetchone()[0]
+        deadline = time.monotonic() + seconds
+        self.db.set_progress_handler(lambda: time.monotonic() > deadline, 100_000)
+        try:
+            return self.db.execute(sql).fetchone()[0]
+        except sqlite3.OperationalError as exc:
+            if "interrupt" not in str(exc).lower():
+                raise
+            return None
+        finally:
+            self.db.set_progress_handler(None, 0)
 
     def get_enforcement_counts(self) -> Counts:
         """Return cheap Overview enforcement counters.
