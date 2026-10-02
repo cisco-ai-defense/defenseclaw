@@ -1254,6 +1254,11 @@ func prepareWindowsEnterprisePowerShellTempWithOps(
 	}
 	cleanup := func() error {
 		if err := ops.validate(path); err != nil {
+			// An uninstall can remove the folder with the rest of
+			// DefenseClaw's ProgramData state; nothing is left to clean.
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
 			return fmt.Errorf("refusing unsafe temp cleanup: %w", err)
 		}
 		if err := ops.removeAll(path); err != nil && !errors.Is(err, os.ErrNotExist) {

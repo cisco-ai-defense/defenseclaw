@@ -1361,6 +1361,30 @@ func TestWindowsEnterpriseExactDescriptorMatchIgnoresOnlyAutoInherited(t *testin
 	}
 }
 
+func TestPrepareWindowsEnterprisePowerShellTempOpsCleanupAcceptsARemovedFolder(t *testing.T) {
+	validateCalls := 0
+	removeAllCalled := false
+	ops := deterministicWindowsEnterpriseTempOps(t)
+	ops.validate = func(path string) error {
+		validateCalls++
+		if validateCalls == 1 {
+			return nil
+		}
+		return errors.Join(errors.New("validation"), &os.PathError{Op: "GetFileAttributesEx", Path: path, Err: os.ErrNotExist})
+	}
+	ops.removeAll = func(string) error {
+		removeAllCalled = true
+		return nil
+	}
+	_, cleanup, err := prepareWindowsEnterprisePowerShellTempWithOps(ops)
+	if err != nil {
+		t.Fatalf("prepareWindowsEnterprisePowerShellTempWithOps: %v", err)
+	}
+	if err := cleanup(); err != nil || removeAllCalled {
+		t.Fatalf("cleanup of an already removed folder = %v (RemoveAll called: %t), want nil", err, removeAllCalled)
+	}
+}
+
 func TestPrepareWindowsEnterprisePowerShellTempOpsCleanupRefusesValidationDrift(t *testing.T) {
 	validateCalls := 0
 	removeAllCalled := false

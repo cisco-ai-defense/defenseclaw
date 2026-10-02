@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"slices"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 // createdDirsConnector writes its config file below the home on Setup and a
@@ -138,8 +140,10 @@ func TestPrepareOpenCodePluginArtifactDestinationRecordsAnEarlierReleasesFolder(
 			if err := os.MkdirAll(plugins, 0o700); err != nil {
 				t.Fatal(err)
 			}
+			// Private, as a DefenseClaw-written plugin is: Windows refuses an
+			// inherited DACL on the managed plugin target.
 			for _, entry := range entries {
-				if err := os.WriteFile(filepath.Join(plugins, entry), []byte("x"), 0o600); err != nil {
+				if err := safefile.WritePrivate(filepath.Join(plugins, entry), []byte("x")); err != nil {
 					t.Fatal(err)
 				}
 			}
