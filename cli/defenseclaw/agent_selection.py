@@ -185,6 +185,17 @@ def publish_setup_agent_selections(
     atomic_write_private_bytes(os.path.join(target_dir, SELECTION_FILENAME), body)
 
 
+# Setup's protected selection probes the agent once more right after
+# discovery; on a loaded Windows host `claude --version` took about 43 s, so
+# the 8 s discovery budget refused an agent setup had just verified
+# (GAP-1620).
+SELECTION_VERSION_TIMEOUT_SECONDS = 90.0
+
+_WINDOWS_NATIVE_INSTALL_HINTS = {
+    "claudecode": "install the native Claude Code build with `claude install`",
+}
+
+
 def _select_agent_executable(data_dir: str, connector: str) -> SetupAgentSelection:
     spec = agent_discovery._SPECS[connector]
     if connector == "opencode" and os.name == "nt":
@@ -242,7 +253,14 @@ def _select_agent_executable(data_dir: str, connector: str) -> SetupAgentSelecti
                 # environment and must not override that stronger setup decision.
                 require_trusted_binary_paths=False,
                 data_dir=data_dir,
+                timeout_override=SELECTION_VERSION_TIMEOUT_SECONDS,
             )
+        if probe_error == agent_discovery.VERSION_PROBE_TIMED_OUT:
+            rejection = (
+                f"{executable} did not answer its version probe within "
+                f"{SELECTION_VERSION_TIMEOUT_SECONDS:.0f} s (the host may be busy); re-run setup"
+            )
+            continue
         if probe_error or not raw_version:
             rejection = probe_error or "version probe returned no version"
             continue
@@ -279,7 +297,21 @@ def _select_agent_executable(data_dir: str, connector: str) -> SetupAgentSelecti
             normalized_version=normalized,
             sha256=digest,
         )
-    if untrusted_found and rejection.startswith("no installed executable"):
+    if (
+        untrusted_found
+        and rejection.startswith("no installed executable")
+        and os.name == "nt"
+        and os.path.splitext(untrusted_found)[1].casefold() != ".exe"
+    ):
+        # A .cmd/.bat/.ps1 shim (npm's claude.cmd) is refused wherever it
+        # lives, so trusted-paths add cannot help (GAP-1612): name the real
+        # reason and the native install instead.
+        native = _WINDOWS_NATIVE_INSTALL_HINTS.get(connector, "install the agent's native Windows (.exe) build")
+        rejection = (
+            f"{untrusted_found} is a script wrapper, not a native .exe that setup can verify; "
+            f"{native} and re-run setup"
+        )
+    elif untrusted_found and rejection.startswith("no installed executable"):
         # Name what was found and the one command that admits it; a bare
         # "no installed executable" reads as if the agent were missing.
         rejection = (
@@ -1025,6 +1057,7 @@ def _stable_windows_executable_version_and_sha256(
             version_args,
             require_trusted_binary_paths=False,
             data_dir=data_dir,
+            timeout_override=SELECTION_VERSION_TIMEOUT_SECONDS,
         )
         after_probe = os.fstat(descriptor)
         path_after_probe = os.lstat(path)
