@@ -91,29 +91,35 @@ func (a *APIServer) importDecodedOTLPRequestV8(
 	}
 	defer batch.Close()
 
+	addPrimary := func(leaf otlpDecodedLeaf, disposition otlpInboundPrimaryDisposition) error {
+		if disposition == otlpInboundInvalidRecord {
+			logInvalidInboundLeafV8(leaf, authenticatedSource)
+		}
+		return accounting.addPrimary(disposition)
+	}
 	_, walkErr := walkDecodedOTLPLeaves(message, signal, func(leaf otlpDecodedLeaf) error {
 		classification, classifyErr := classifier.classify(leaf, authenticatedSource)
 		if classifyErr != nil {
-			return accounting.addPrimary(otlpInboundInvalidRecord)
+			return addPrimary(leaf, otlpInboundInvalidRecord)
 		}
 		if disposition, terminal := inboundTerminalDisposition(classifier, leaf, classification); terminal {
-			return accounting.addPrimary(disposition)
+			return addPrimary(leaf, disposition)
 		}
 		correlated, correlationErr := a.correlateNativeOTLPLeafV8(
 			ctx, leaf, classification.match, authenticatedSource, receipt,
 		)
 		if correlationErr != nil {
 			if errors.Is(correlationErr, errNativeOTLPCorrelationInputV8) {
-				return accounting.addPrimary(otlpInboundInvalidMappedField)
+				return addPrimary(leaf, otlpInboundInvalidMappedField)
 			}
 			// Correlation state is part of local acceptance in v8. Never hand a
 			// leaf to the runtime/provider after the occurrence transaction has
 			// failed; account the leaf through the existing bounded local failure
 			// disposition so batch acknowledgement remains mathematically exact.
-			return accounting.addPrimary(otlpInboundLocalPersistenceFailed)
+			return addPrimary(leaf, otlpInboundLocalPersistenceFailed)
 		}
 		if correlated.suppressEmission {
-			return accounting.addPrimary(otlpInboundExactReplaySuppressed)
+			return addPrimary(leaf, otlpInboundExactReplaySuppressed)
 		}
 		leafResult := a.importClassifiedOTLPLeafV8(
 			correlated.ctx, batch, leaf, classification.match, classifier.catalog.WireContract(),
@@ -121,7 +127,7 @@ func (a *APIServer) importDecodedOTLPRequestV8(
 		)
 		if nativeOTLPLeafCanarySucceeded(leafResult) {
 			if finalizeErr := a.finalizeNativeOTLPCustodyV8(correlated.ctx, correlated); finalizeErr != nil {
-				return accounting.addPrimary(otlpInboundLocalPersistenceFailed)
+				return addPrimary(leaf, otlpInboundLocalPersistenceFailed)
 			}
 		}
 		for _, derivative := range leafResult.derivatives {
@@ -169,7 +175,7 @@ func (a *APIServer) importDecodedOTLPRequestV8(
 		if err := accounting.addUnknownFieldsDropped(unknownDropped); err != nil {
 			return err
 		}
-		return accounting.addPrimary(primaryDispositionForInboundLeaf(leafResult))
+		return addPrimary(leaf, primaryDispositionForInboundLeaf(leafResult))
 	})
 	if walkErr != nil || !accounting.valid() {
 		return accounting, errOTLPInboundMappingV8

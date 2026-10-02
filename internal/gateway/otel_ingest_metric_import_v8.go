@@ -355,6 +355,12 @@ func (a *APIServer) inboundDerivedMetricSourceV8(
 		return observability.NewInboundMetricDoubleValue(seconds),
 			observability.NewInboundMetricElapsedTimeSource(), endTime, false, false, nil
 	case observability.InboundDerivationClaudeTokenUsage:
+		if claudeTokenPointIsZeroV8(leaf) {
+			// Claude Code exports a zero point for token types a request did not
+			// use (cacheCreation or cacheRead on most turns). That is no
+			// observation, not a malformed record (GAP-1495).
+			return observability.InboundMetricValue{}, observability.InboundMetricSourceFacts{}, time.Time{}, true, false, nil
+		}
 		source, adjusted, duplicate, err := a.inboundClaudeTokenSourceV8(
 			leaf, target, authenticatedSource,
 		)
@@ -384,6 +390,44 @@ func (a *APIServer) inboundDerivedMetricSourceV8(
 		return value, source, timestamp, false, false, err
 	default:
 		return observability.InboundMetricValue{}, observability.InboundMetricSourceFacts{}, time.Time{}, false, false, errOTLPInboundMappingV8
+	}
+}
+
+// claudeTokenPointIsZeroV8 reports a gauge or sum token point whose value is
+// exactly zero.
+func claudeTokenPointIsZeroV8(leaf otlpDecodedLeaf) bool {
+	if leaf.numberPoint == nil ||
+		(leaf.metricShape != otlpTypedMetricGauge && leaf.metricShape != otlpTypedMetricSum) {
+		return false
+	}
+	switch value := leaf.numberPoint.Value.(type) {
+	case *metricspb.NumberDataPoint_AsInt:
+		return value.AsInt == 0
+	case *metricspb.NumberDataPoint_AsDouble:
+		return value.AsDouble == 0
+	default:
+		return false
+	}
+}
+
+// claudeTokenPointInt64V8 reads a token count. The Claude Code JavaScript SDK
+// exports counters as doubles, so an integral, finite double is accepted too.
+func claudeTokenPointInt64V8(point *metricspb.NumberDataPoint) (int64, bool) {
+	if point == nil {
+		return 0, false
+	}
+	switch value := point.Value.(type) {
+	case *metricspb.NumberDataPoint_AsInt:
+		return value.AsInt, true
+	case *metricspb.NumberDataPoint_AsDouble:
+		if math.IsNaN(value.AsDouble) || math.IsInf(value.AsDouble, 0) ||
+			value.AsDouble != math.Trunc(value.AsDouble) ||
+			value.AsDouble < math.MinInt64 || value.AsDouble >= math.MaxInt64 {
+			return 0, false
+		}
+		return int64(value.AsDouble), true
+	default:
+		return 0, false
 	}
 }
 
@@ -475,8 +519,8 @@ func (a *APIServer) inboundClaudeTokenSourceV8(
 			!sum.GetIsMonotonic() || leaf.numberPoint == nil {
 			return observability.InboundMetricSourceFacts{}, nil, false, errOTLPInboundMappingV8
 		}
-		integer, ok := leaf.numberPoint.Value.(*metricspb.NumberDataPoint_AsInt)
-		if !ok || integer.AsInt <= 0 {
+		tokens, ok := claudeTokenPointInt64V8(leaf.numberPoint)
+		if !ok || tokens <= 0 {
 			return observability.InboundMetricSourceFacts{}, nil, false, errOTLPInboundMappingV8
 		}
 		seriesKey, startTime, err := inboundProjectedCumulativeSeriesV8(
@@ -486,7 +530,7 @@ func (a *APIServer) inboundClaudeTokenSourceV8(
 			return observability.InboundMetricSourceFacts{}, nil, false, err
 		}
 		usage := otelTokenUsage{
-			tokens: integer.AsInt, cumulative: true,
+			tokens: tokens, cumulative: true,
 			seriesKey: seriesKey,
 			startTime: startTime,
 		}
