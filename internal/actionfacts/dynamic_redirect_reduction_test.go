@@ -49,6 +49,12 @@ func TestDynamicRedirectTargetReduction(t *testing.T) {
 		{name: "shell wrapper", command: "bash -c 'echo hi' > ~/x.txt", static: "bash -c 'echo hi' > " + staticRedirectTarget, reduced: true, programs: []string{"bash", "echo"}},
 		{name: "sudo wrapper", command: "sudo systemctl status sshd > ~/x.txt", static: "sudo systemctl status sshd > " + staticRedirectTarget, reduced: true, programs: []string{"sudo", "systemctl"}},
 
+		{name: "static directory with a parameter", command: "echo dc-block-marker > /tmp/dc-x-$USER.txt", static: "echo dc-block-marker > " + staticRedirectTarget, reduced: true, programs: []string{"echo"}},
+		{name: "quoted static directory with a parameter", command: `echo dc-block-marker > "/tmp/dc-x-${USER}.txt"`, static: "echo dc-block-marker > " + staticRedirectTarget, reduced: true, programs: []string{"echo"}},
+
+		{name: "dev directory with a parameter", command: "echo dc-block-marker > /dev/$OUT"},
+		{name: "globbed dev directory with a parameter", command: "echo dc-block-marker > /d?v/tcp/$OUT"},
+		{name: "root file with a parameter", command: "echo dc-block-marker > /dc-x-$USER.txt"},
 		{name: "complete action", command: "echo dc-block-marker > /tmp/dc-x.txt"},
 		{name: "any parameter", command: "echo dc-block-marker > $OUT"},
 		{name: "parameter directory", command: "echo dc-block-marker > $OUT/dc-x.txt"},

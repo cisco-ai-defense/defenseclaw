@@ -3503,9 +3503,45 @@ def migrate(
             f"{config_path} is at config_version {reached} after migrating; expected {CURRENT_CONFIG_VERSION}"
         )
     _refresh_local_observability_bundle(data_dir, __version__)
+    _refresh_guardrail_profiles(data_dir, config_path)
     if version < _FIRST_V8_CONFIG_VERSION:
         _select_windows_agents(data_dir)
     return MigrateResult(version, CURRENT_CONFIG_VERSION, names, changed=bool(names))
+
+
+def _refresh_guardrail_profiles(data_dir: str, config_path: str) -> None:
+    """Bring unedited seeded guardrail profiles to this release's rules.
+
+    Best effort: a failure keeps the previous profile, which still loads.
+    """
+
+    from defenseclaw.guardrail_profiles import refresh_stock_profiles
+
+    policy_dir = os.path.join(data_dir, "policies")
+    try:
+        raw = yaml.safe_load(_read_config_text(config_path) or "") or {}
+    except yaml.YAMLError:
+        raw = {}
+    configured = raw.get("policy_dir") if isinstance(raw, dict) else None
+    if isinstance(configured, str) and configured.strip():
+        policy_dir = os.path.expanduser(configured.strip())
+    result = refresh_stock_profiles(policy_dir, os.path.join(data_dir, "backups"))
+    if result.refreshed:
+        ux.ok(
+            f"Updated guardrail rule packs {', '.join(result.refreshed)} to this release "
+            f"(previous copies in {result.backup_dir})",
+            indent="    ",
+        )
+    if result.kept_modified:
+        guardrail_dir = os.path.join(policy_dir, "guardrail")
+        ux.warn(
+            f"kept edited guardrail rule packs {', '.join(result.kept_modified)} in {guardrail_dir}; "
+            "they do not get this release's rule changes. To use the new rules, move the folder "
+            "aside and run 'defenseclaw init' to seed it again",
+            indent="    ",
+        )
+    for error in result.errors:
+        ux.warn(f"guardrail rule pack was not updated ({error})", indent="    ")
 
 
 def _select_windows_agents(data_dir: str) -> None:

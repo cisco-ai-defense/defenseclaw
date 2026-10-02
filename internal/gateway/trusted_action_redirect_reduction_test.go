@@ -107,6 +107,12 @@ func TestTrustedActionBlocksCommandRuleWithRuntimeExpandedRedirectTarget(t *test
 			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly, "TEST-MARKER-COMPLETE-ARGV": blocks},
 		},
 		{
+			// GAP-0029: a parameter after a static directory is a file path.
+			name:    "static directory target with a parameter",
+			command: "echo " + redirectReductionMarker + " > /tmp/dc-x-$USER.txt",
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly, "TEST-MARKER-COMPLETE-ARGV": blocks},
+		},
+		{
 			name:    "no redirect",
 			command: "echo " + redirectReductionMarker,
 			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-NO-STDOUT-REDIRECT": blocks, "TEST-MARKER-COMPLETE-ARGV": blocks},
