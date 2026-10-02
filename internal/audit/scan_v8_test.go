@@ -129,6 +129,51 @@ func TestScanV8EmitsOccurrenceFindingsBeforeSummaryAndPreservesMetricParity(t *t
 	}
 }
 
+// GAP-2000: a judge or AI Defense finding merged into the hook-rules scan is
+// exported under its own lane, like `defenseclaw alerts` shows it.
+func TestScanV8HookLaneFindingsNameTheirScanner(t *testing.T) {
+	logger := newTestLogger(t)
+	runtime := newTestRuntimeV8Emitter(t, logger.store, router.AdmissionOrdinary)
+	logger.SetRuntimeV8Emitter(runtime)
+	result := &scanner.ScanResult{
+		Scanner: "hook-rules", Target: "claudecode/PreToolUse", TargetType: "tool_call",
+		Timestamp: time.Now().UTC(), Duration: time.Millisecond,
+		Findings: []scanner.Finding{
+			{ID: "JUDGE-EXFIL-FILE", RuleID: "JUDGE-EXFIL-FILE", Severity: scanner.SeverityHigh,
+				Title: "Sensitive File Access", Scanner: "hook-rules", Tags: []string{"llm-judge"}},
+			{ID: "JUDGE-PII-SSN", RuleID: "JUDGE-PII-SSN", Severity: scanner.SeverityHigh,
+				Title: "SSN", Scanner: "hook-rules", Tags: []string{"pii", "redacted"}},
+			{ID: "AID-PII", RuleID: "AID-PII", Severity: scanner.SeverityMedium,
+				Title: "PII", Scanner: "hook-rules", Tags: []string{"ai-defense"}},
+			{ID: "CMD-MARKER", RuleID: "CMD-MARKER", Severity: scanner.SeverityHigh,
+				Title: "Marker rule", Scanner: "hook-rules", Tags: []string{"command"}},
+		},
+	}
+	if err := logger.LogScanWithVerdict(result, "block"); err != nil {
+		t.Fatal(err)
+	}
+	_, records := runtime.snapshot()
+	want := map[string]string{
+		"JUDGE-EXFIL-FILE": "llm-judge", "JUDGE-PII-SSN": "llm-judge",
+		"AID-PII": "ai-defense", "CMD-MARKER": "hook-rules",
+	}
+	seen := 0
+	for _, record := range records {
+		if record.EventName() != observability.EventName(observability.TelemetryEventFindingObserved) {
+			continue
+		}
+		body := securityActionBody(t, record)
+		rule, _ := body["defenseclaw.finding.rule_id"].(string)
+		if got := body["defenseclaw.scan.scanner"]; got != want[rule] {
+			t.Errorf("%s scanner=%v, want %s", rule, got, want[rule])
+		}
+		seen++
+	}
+	if seen != len(want) {
+		t.Fatalf("finding records=%d, want %d", seen, len(want))
+	}
+}
+
 func TestScanV8FailureUsesFailedFamilyWithoutInventingFindingStatus(t *testing.T) {
 	logger := newTestLogger(t)
 	runtime := newTestRuntimeV8Emitter(t, logger.store, router.AdmissionOrdinary)
@@ -149,6 +194,29 @@ func TestScanV8FailureUsesFailedFamilyWithoutInventingFindingStatus(t *testing.T
 	body := securityActionBody(t, records[0])
 	if _, exists := body["defenseclaw.finding.status"]; exists {
 		t.Fatalf("failed scan invented finding status: %#v", body)
+	}
+	// GAP-1987: a scan that never ran is not clean on any signal.
+	if verdict, exists := body["defenseclaw.scan.verdict"]; exists {
+		t.Fatalf("failed scan log verdict=%v, want absent", verdict)
+	}
+	counted := false
+	for _, metric := range runtime.metricSnapshot() {
+		if metric.EventName() != observability.EventName(observability.TelemetryInstrumentDefenseClawScanCount) {
+			continue
+		}
+		counted = true
+		if got := metricAttributes(t, metric)["defenseclaw.metric.verdict"]; got != "error" {
+			t.Fatalf("failed scan count verdict=%v, want error (attributes %v)", got, metricAttributes(t, metric))
+		}
+	}
+	if !counted {
+		t.Fatal("failed scan emitted no scan.count metric")
+	}
+	if got := scanV8Verdict(result, "clean"); got != "error" {
+		t.Fatalf("explicit clean on a failed scan = %q, want error", got)
+	}
+	if _, present := scanV8VerdictEnum("error").Get(); present {
+		t.Fatal("error verdict reached the clean/warn/block enum")
 	}
 }
 

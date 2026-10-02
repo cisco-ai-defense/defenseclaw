@@ -547,6 +547,10 @@ func TestMetricHTTPRejectionIsLoggedCodedAndObserved(t *testing.T) {
 	if code := exporter.deliveryHealthSnapshot().LastFailureCode; code != delivery.FailureCodeHTTPRejected {
 		t.Fatalf("last_failure_code=%q", code)
 	}
+	// GAP-1994: same failure class as refused traces and logs.
+	if class := exporter.deliveryHealthSnapshot().LastFailureClass; class != delivery.FailureClassPermanentPayload {
+		t.Fatalf("last_failure_class=%q, want permanent_payload", class)
+	}
 	select {
 	case transition := <-transitions:
 		if transition.Current != delivery.HealthFailing || transition.FailureCode != delivery.FailureCodeHTTPRejected ||

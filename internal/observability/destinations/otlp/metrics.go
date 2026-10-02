@@ -411,6 +411,11 @@ func (exporter *MetricExporter) Export(ctx context.Context, metrics *metricdata.
 			exporter.healthMu.Unlock()
 		}
 		class := otlpFailureClass(exporter.config.tracker, dialSequence, err)
+		// GAP-1994: the SDK error hides the HTTP status, so classify a
+		// refused response from the status like traces and logs do.
+		if refused != nil && class == delivery.FailureClassTransient {
+			class = httpStatusFailureClass(refused.StatusCode)
+		}
 		exporter.recordCircuitFailure(class, exporter.nowUTC())
 		probePending = false
 		unlock()

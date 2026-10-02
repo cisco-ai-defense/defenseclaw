@@ -157,7 +157,7 @@ func newAssetScanRuntimeV8TraceInput(
 		DefenseClawScanLowCount:      observability.Present(counts[scanner.SeverityLow]),
 		DefenseClawScanInfoCount:     observability.Present(counts[scanner.SeverityInfo]),
 		DefenseClawScanSeverityMax:   optionalScanV8Text(string(result.MaxSeverity())),
-		DefenseClawScanVerdict:       optionalScanV8Text(scanner.NormalizeVerdictEnum(verdict)),
+		DefenseClawScanVerdict:       scanV8VerdictEnum(verdict),
 		DefenseClawScanExitCode:      observability.Present(int64(result.ExitCode)),
 		DefenseClawScanErrorSummary:  optionalScanV8Text(result.ScanError),
 		ErrorType:                    errorType,
@@ -244,7 +244,7 @@ func scanFindingV8Operation(
 			DefenseClawFindingExternalEndpoint:    optionalScanV8Text(finding.ExternalEndpoint),
 			DefenseClawFindingDecisionPath:        optionalScanV8DecisionPath(finding.DecisionPath),
 			DefenseClawFindingContentFingerprint:  optionalScanV8Identifier(finding.ContentFingerprint),
-			DefenseClawScanScanner:                optionalScanV8Text(result.Scanner),
+			DefenseClawScanScanner:                optionalScanV8Text(scanFindingV8Scanner(finding, result)),
 			UserID:                                optionalScanV8Identifier(correlation.UserID),
 			DefenseClawUserIDKind:                 optionalNetworkUserIDKind(correlation.UserIDKind),
 			DefenseClawUserName:                   optionalScanV8Identifier(correlation.UserName),
@@ -254,6 +254,28 @@ func scanFindingV8Operation(
 	return RuntimeV8LogOperation{
 		ctx: contextWithLegacyEventProjection(ctx, event), metadata: metadata, build: build,
 	}, nil
+}
+
+// scanFindingV8Scanner names the detector of one finding. A hook or inspect
+// verdict merges the LLM-judge and AI Defense lanes into its own scan and tags
+// each lane finding with the lane (gateway mergeWithLaneVerdict), so the
+// exported record names that lane, as `defenseclaw alerts` does, instead of
+// the regex scan it rode in on (GAP-2000).
+func scanFindingV8Scanner(finding scanner.Finding, result *scanner.ScanResult) string {
+	if result.Scanner != "hook-rules" && result.Scanner != "inspect-http" {
+		return result.Scanner
+	}
+	for _, tag := range finding.Tags {
+		switch lane := strings.ToLower(strings.TrimSpace(tag)); lane {
+		case "llm-judge", "ai-defense":
+			return lane
+		}
+	}
+	// A PII judge finding's tags are rewritten when it is stored.
+	if strings.HasPrefix(strings.ToUpper(finding.RuleID), "JUDGE-") {
+		return "llm-judge"
+	}
+	return result.Scanner
 }
 
 // scanFindingV8EvidenceSummary follows the deterministic source order in the
@@ -359,7 +381,7 @@ func scanSummaryV8Operation(
 			DefenseClawScanLowCount:      observability.Present(counts[scanner.SeverityLow]),
 			DefenseClawScanInfoCount:     observability.Present(counts[scanner.SeverityInfo]),
 			DefenseClawScanSeverityMax:   optionalScanV8Text(string(result.MaxSeverity())),
-			DefenseClawScanVerdict:       optionalScanV8Text(scanner.NormalizeVerdictEnum(verdict)),
+			DefenseClawScanVerdict:       scanV8VerdictEnum(verdict),
 			DefenseClawScanExitCode:      observability.Present(int64(result.ExitCode)),
 			DefenseClawScanErrorSummary:  optionalScanV8Text(result.ScanError),
 			UserID:                       optionalScanV8Identifier(correlation.UserID),
@@ -572,15 +594,39 @@ func scanV8TargetRef(target string) observability.Optional[string] {
 // scanV8Verdict keeps an explicit admission verdict. Without one (CLI and
 // hook-time scans), a scan with findings is "warn", never "clean": the
 // enum's default made scan.completed say clean for a skill the CLI counted
-// as having findings (GAP-1381).
+// as having findings (GAP-1381). A failed scan never reads "clean"
+// (GAP-1987): its scan.count metric says "error" and its scan.failed log and
+// asset.scan span carry no verdict, so clean counts cover only scans that ran.
 func scanV8Verdict(result *scanner.ScanResult, verdict string) string {
-	if strings.TrimSpace(verdict) != "" || result == nil {
+	if result == nil {
+		return verdict
+	}
+	failed := strings.TrimSpace(result.ScanError) != "" || result.ExitCode != 0
+	if strings.TrimSpace(verdict) != "" {
+		if failed && scanner.NormalizeVerdictEnum(verdict) == "clean" {
+			return scanV8ErrorVerdict
+		}
 		return verdict
 	}
 	if len(result.Findings) > 0 {
 		return "warn"
 	}
+	if failed {
+		return scanV8ErrorVerdict
+	}
 	return "clean"
+}
+
+// scanV8ErrorVerdict is the metric verdict of a scan that did not run to
+// completion. The log and span verdict enum (clean/warn/block) has no such
+// value, so scanV8VerdictEnum leaves the attribute absent for it.
+const scanV8ErrorVerdict = "error"
+
+func scanV8VerdictEnum(verdict string) observability.Optional[string] {
+	if verdict == scanV8ErrorVerdict {
+		return observability.Absent[string]()
+	}
+	return optionalScanV8Text(scanner.NormalizeVerdictEnum(verdict))
 }
 
 func optionalScanV8Identifier(value string) observability.Optional[string] {
