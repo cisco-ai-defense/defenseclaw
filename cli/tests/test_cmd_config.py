@@ -213,18 +213,21 @@ class ValidateConfigTests(unittest.TestCase):
             field_path='$.observability.destinations[0].headers["Galileo-API-Key"]',
             reason="[secret_reference_unresolved] required environment-backed secret is unavailable",
         )
-        with _IsolatedHome() as env:
-            env.config_path.write_text(
-                "config_version: 8\nobservability:\n  destinations:\n    - name: galileo\n"
-                "      headers:\n        Galileo-API-Key: ${GALILEO_API_KEY}\n",
-                encoding="utf-8",
-            )
-            with patch.object(cmd_config, "inspect_v8_config", side_effect=refusal):
-                res = cmd_config.validate_config()
-        self.assertEqual(len(res.errors), 1)
-        self.assertTrue(res.errors[0].startswith("line 6: "), res.errors)
-        self.assertIn("needs GALILEO_API_KEY", res.errors[0])
-        self.assertIn("defenseclaw keys set GALILEO_API_KEY", res.errors[0])
+        # setup galileo writes the {env: NAME} mapping form.
+        for reference in ("${GALILEO_API_KEY}", "{env: GALILEO_API_KEY}"):
+            with self.subTest(reference=reference), _IsolatedHome() as env:
+                env.config_path.write_text(
+                    "config_version: 8\nobservability:\n  destinations:\n    - name: galileo\n"
+                    f"      headers:\n        Galileo-API-Key: {reference}\n",
+                    encoding="utf-8",
+                )
+                with patch.object(cmd_config, "inspect_v8_config", side_effect=refusal):
+                    res = cmd_config.validate_config()
+                self.assertEqual(len(res.errors), 1)
+                self.assertTrue(res.errors[0].startswith("line 6: "), res.errors)
+                self.assertIn("needs GALILEO_API_KEY", res.errors[0])
+                self.assertIn("defenseclaw keys set GALILEO_API_KEY", res.errors[0])
+                self.assertNotIn("<NAME>", res.errors[0])
 
     def test_gateway_port_clash_is_warning_not_error(self):
         with _IsolatedHome() as env:
