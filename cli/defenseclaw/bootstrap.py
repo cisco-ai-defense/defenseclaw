@@ -1931,6 +1931,10 @@ def _next_commands(
         if step.next_command and step.next_command not in seen:
             commands.append(step.next_command)
             seen.add(step.next_command)
+    # "setup hermes --mode action" already covers a plain "setup hermes"
+    # (GAP-1372); the plain one prompts with observe as the default.
+    commands = [cmd for cmd in commands if not any(other.startswith(cmd + " --mode ") for other in commands)]
+    seen = set(commands)
     if "defenseclaw doctor" not in seen:
         commands.append("defenseclaw doctor")
     if getattr(cfg, "data_dir", "") and "defenseclaw keys list" not in seen:
