@@ -189,6 +189,24 @@ class TestScanUXSummary(_PluginScanUXBase):
         self.assertIn("blocked=1", result.output)
 
     @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
+    def test_low_only_finding_is_warn_not_blocked(self, mock_scan) -> None:
+        # GAP-1413: a LOW-only plugin is not blocked by policy, so it must
+        # not read [BLOCKED] or count in blocked=.
+        mock_scan.return_value = ScanResult(
+            scanner="plugin-scanner",
+            target="demo-plugin",
+            timestamp=datetime.now(timezone.utc),
+            findings=[Finding(id="P2", title="Plugin declares no permissions", severity="LOW")],
+            duration=timedelta(milliseconds=5),
+        )
+        result = self.invoke(["scan", self.plugin_name])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertNotIn("[BLOCKED]", result.output)
+        self.assertIn("[WARN]", result.output)
+        self.assertIn("blocked=0", result.output)
+        self.assertIn("findings=1", result.output)
+
+    @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
     def test_summary_includes_duration_ms(self, mock_scan) -> None:
         mock_scan.return_value = self._clean_result()
         result = self.invoke(["scan", self.plugin_name])

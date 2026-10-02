@@ -734,6 +734,11 @@ def _run_scan(app: AppContext, target: str, analyzers: str,
                 click.echo(json.dumps(payload, indent=2))
         else:
             click.echo(f"error: scan failed: {exc}", err=True)
+            if "connect" in str(exc).lower():
+                click.echo(
+                    "  Check that the server is running and reachable, then scan again.",
+                    err=True,
+                )
         return None
 
     if app.logger:

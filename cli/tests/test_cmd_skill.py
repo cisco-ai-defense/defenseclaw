@@ -3809,3 +3809,19 @@ def test_info_card_eligible_says_defenseclaw_keeps_blocked_skill_off(capsys):
 
     _print_skill_info_card({"name": "ok", "eligible": True}, "ok")
     assert "keeps it off" not in capsys.readouterr().out
+
+
+def test_info_card_block_list_only_points_at_disable(capsys):
+    # GAP-1320 (b4): a skill that is only on the install block list still
+    # loads, so the card must not claim DefenseClaw keeps it off.
+    from defenseclaw.commands.cmd_skill import _print_skill_info_card
+
+    _print_skill_info_card(
+        {"name": "fsav", "eligible": True, "disabled": False, "verdict": "blocked",
+         "actions": {"install": "block"}},
+        "fsav",
+    )
+    out = capsys.readouterr().out
+    assert "keeps it off" not in out
+    assert "keeps it disabled" not in out
+    assert "defenseclaw skill disable fsav" in out

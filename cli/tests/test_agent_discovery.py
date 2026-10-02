@@ -610,6 +610,8 @@ def test_devin_canonical_user_mcp_file_is_configuration_evidence(
         ("cursor", (".cursor", "hooks.json")),
         ("devin", (".devin", "hooks.v1.json")),
         ("copilot", (".copilot", "mcp-config.json")),
+        # GAP-1481: the user-level hooks file DefenseClaw writes for Copilot.
+        ("copilot", (".copilot", "hooks", "defenseclaw.json")),
         ("openhands", (".openhands", "hooks.json")),
         ("antigravity", (".gemini", "config", "hooks.json")),
         ("opencode", (".config", "opencode", "opencode.json")),
