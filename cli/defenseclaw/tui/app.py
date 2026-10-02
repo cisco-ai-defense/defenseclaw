@@ -1327,6 +1327,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         self._strip_spinner_tick: int = 0
         self._command_registry = build_registry()
         self._command_palette_values: list[str] = []
+        # True once Up/Down moved the palette cursor since the last edit:
+        # Enter then runs the highlighted row, not the typed filter text.
+        self._palette_cursor_moved = False
         self._last_table_click: tuple[str, int] | None = None
         # Textual posts Tabs.TabActivated for programmatic ``tabs.active``
         # changes too. Keep a one-shot count for tab ids that _render_chrome
@@ -3579,6 +3582,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             delta = -1 if event.key == "up" else 1
             target = max(0, min(palette.cursor_row + delta, len(self._command_palette_values) - 1))
             palette.move_cursor(row=target, column=0, animate=False)
+            self._palette_cursor_moved = True
             return True
         if event.key == "tab" and self._command_palette_values:
             selected = self._selected_palette_value()
@@ -3593,6 +3597,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         palette = self.query_one("#command-palette", DataTable)
         matches = self._palette_matches(query)
         self._command_palette_values = [entry.tui_name for entry in matches]
+        self._palette_cursor_moved = False
         palette.remove_class("hidden")
         palette.clear(columns=True)
         # New 4-column layout: command | cat/risk badge | argv preview
@@ -3733,6 +3738,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         suggestion = self._selected_palette_value().strip()
         if not suggestion or suggestion == typed:
             return raw_value
+        # The operator moved the cursor onto a row (Down x4 on the
+        # "discovery" matches): run that row (GAP-1154).
+        if self._palette_cursor_moved:
+            return suggestion
         # Only override when the suggestion is an extension of the
         # filter typed so far. That covers the autocomplete intent
         # ("agent discov" → highlighted "agent discovery enable")
@@ -3792,6 +3801,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             self._submit_command_text(selected)
 
     def _submit_command_text(self, value: str) -> None:
+        # Read the highlighted row before closing: closing clears the rows,
+        # which made the "typed text did not parse" fallback below a no-op.
+        highlighted = self._selected_palette_value()
         self._close_command_palette()
         stripped = value.strip()
         if not stripped:
@@ -3802,7 +3814,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         try:
             parsed = parse_command_line(value)
         except CommandLineError as exc:
-            selected = self._selected_palette_value()
+            selected = highlighted
             if selected and selected != stripped:
                 try:
                     parsed = parse_command_line(selected)
