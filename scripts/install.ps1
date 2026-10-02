@@ -817,8 +817,15 @@ function New-Venv([string]$Path) {
     # Compile the bytecode now: uv skips it by default, and the first start of
     # the CLI and the scanners would otherwise compile thousands of modules
     # (over a minute on a Windows host while the files are also first scanned).
-    if ((Invoke-Native $Uv @("pip", "install", "--quiet", "--compile-bytecode", "--python", $python, "--require-hashes", "--no-deps",
-            "-r", (Join-Path $Staging $Requirements))) -ne 0) { return $false }
+    $lockArgs = @("pip", "install", "--quiet", "--compile-bytecode", "--python", $python, "--require-hashes", "--no-deps",
+        "-r", (Join-Path $Staging $Requirements))
+    if ((Invoke-Native $Uv $lockArgs) -ne 0) {
+        # A scanner holding a file uv just wrote fails its cache rename with
+        # os error 32 (GAP-1315); the cache makes a second attempt cheap.
+        Write-Warn "Retrying the Python package install once"
+        Start-Sleep -Seconds 5
+        if ((Invoke-Native $Uv $lockArgs) -ne 0) { return $false }
+    }
     return (Invoke-Native $Uv @("pip", "install", "--quiet", "--compile-bytecode", "--python", $python, "--no-deps", (Join-Path $Staging $Wheel))) -eq 0
 }
 
