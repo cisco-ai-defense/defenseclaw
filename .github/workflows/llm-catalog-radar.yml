@@ -1,0 +1,38 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+# SPDX-License-Identifier: Apache-2.0
+
+# Scheduled drift radar for bundles/llm/model_catalog.json.
+#
+# The required PR gate (make check-llm-catalog) is hermetic: it reads the
+# LiteLLM registry snapshot pinned through uv.lock and judges deprecations as
+# of a fixed date, so an upstream deprecation cannot fail unrelated pull
+# requests. This workflow runs the live check (upstream LiteLLM registry,
+# today's date) off the pull-request path. A failed run means the catalog
+# needs a refresh; fix it in a normal PR and bump GATE_AS_OF in
+# scripts/check_llm_catalog.py.
+
+name: LLM Catalog Radar
+
+on:
+  schedule:
+    - cron: "29 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: llm-catalog-radar
+  cancel-in-progress: true
+
+jobs:
+  live-catalog:
+    name: Live LLM catalog check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - run: make check-llm-catalog-live

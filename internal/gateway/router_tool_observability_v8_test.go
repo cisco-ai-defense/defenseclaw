@@ -30,6 +30,15 @@ func bindEventRouterToolV8Runtime(
 	traces, metrics bool,
 ) (*EventRouter, *hookModelV8OTLPCapture, string) {
 	t.Helper()
+	router, capture, fixture := bindEventRouterToolV8RuntimeFixture(t, traces, metrics)
+	return router, capture, fixture.store.DatabasePath()
+}
+
+func bindEventRouterToolV8RuntimeFixture(
+	t *testing.T,
+	traces, metrics bool,
+) (*EventRouter, *hookModelV8OTLPCapture, sidecarV8BootstrapFixture) {
+	t.Helper()
 	capture := &hookModelV8OTLPCapture{}
 	server := httptest.NewServer(http.HandlerFunc(capture.handler))
 	t.Cleanup(server.Close)
@@ -44,7 +53,7 @@ func bindEventRouterToolV8Runtime(
 	if err != nil || !bound {
 		t.Fatalf("bootstrap EventRouter tool runtime bound=%t error=%v", bound, err)
 	}
-	return router, capture, fixture.store.DatabasePath()
+	return router, capture, fixture
 }
 
 func routeEventRouterToolCall(t *testing.T, router *EventRouter, payload ToolCallPayload) {
@@ -66,7 +75,8 @@ func routeEventRouterToolResult(t *testing.T, router *EventRouter, payload ToolR
 }
 
 func TestEventRouterToolV8PairsConcurrentSameNameCallsOnlyByCallID(t *testing.T) {
-	router, capture, databasePath := bindEventRouterToolV8Runtime(t, true, true)
+	router, capture, fixture := bindEventRouterToolV8RuntimeFixture(t, true, true)
+	databasePath := fixture.store.DatabasePath()
 	routeEventRouterToolCall(t, router, ToolCallPayload{
 		Tool: "shell", ID: "call-one", SessionID: "session-one", RunID: "run-one",
 		AgentName: "reported-agent", Args: json.RawMessage(`{"marker":"private-call-one"}`),
@@ -75,6 +85,14 @@ func TestEventRouterToolV8PairsConcurrentSameNameCallsOnlyByCallID(t *testing.T)
 		Tool: "shell", ID: "call-two", SessionID: "session-one", RunID: "run-one",
 		AgentName: "reported-agent", Args: json.RawMessage(`{"marker":"private-call-two"}`),
 	})
+	// Both same-name calls must be in flight at once before either result
+	// arrives; this is the overlap the pairing contract is about.
+	router.toolObservationMu.Lock()
+	pending := len(router.toolObservations)
+	router.toolObservationMu.Unlock()
+	if pending != 2 {
+		t.Fatalf("in-flight same-name calls=%d want=2", pending)
+	}
 	zero := 0
 	routeEventRouterToolResult(t, router, ToolResultPayload{
 		Tool: "shell", ID: "call-two", SessionID: "session-one", RunID: "run-one",
@@ -85,7 +103,18 @@ func TestEventRouterToolV8PairsConcurrentSameNameCallsOnlyByCallID(t *testing.T)
 		AgentName: "reported-agent", Output: `{"result":"private-result-one"}`, ExitCode: &zero,
 	})
 
-	spans := waitForEventRouterToolSpans(t, capture, 2)
+	// Retire the runtime instead of polling the periodic exporters: Close
+	// drains every pipeline, so the trace batch and the delta metric reader
+	// have synchronously exported everything recorded above when it returns.
+	// Polling against the 1s reader interval let a slow runner observe only
+	// part of the export stream.
+	if err := fixture.sidecar.closeOwnedObservabilityV8Runtime(); err != nil {
+		t.Fatalf("drain EventRouter tool runtime: %v", err)
+	}
+	spans := eventRouterToolSpans(capture)
+	if len(spans) != 2 {
+		t.Fatalf("captured generated tool spans=%d want=2 ids=%v", len(spans), eventRouterToolSpanIDs(spans))
+	}
 	byID := make(map[string]*tracepb.Span)
 	for _, span := range spans {
 		byID[gatewayProtoAttribute(span.Attributes, "gen_ai.tool.call.id")] = span
@@ -112,13 +141,9 @@ func TestEventRouterToolV8PairsConcurrentSameNameCallsOnlyByCallID(t *testing.T)
 			t.Errorf("tool %s reported/missing topology=%v", test.id, attributes)
 		}
 	}
+	// Delta temporality: the two completions may land in one export or be
+	// split across reader ticks, so the contract is the sum, not one point.
 	_, metricRequests := capture.snapshot()
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) &&
-		eventRouterToolMetricTotal(metricRequests, observability.TelemetryInstrumentDefenseClawToolCalls) < 2 {
-		time.Sleep(10 * time.Millisecond)
-		_, metricRequests = capture.snapshot()
-	}
 	points := hookModelV8MetricPoints(metricRequests, observability.TelemetryInstrumentDefenseClawToolCalls)
 	total := eventRouterToolMetricTotal(metricRequests, observability.TelemetryInstrumentDefenseClawToolCalls)
 	if total != 2 {
@@ -338,13 +363,7 @@ func waitForEventRouterToolSpans(
 	var tools []*tracepb.Span
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		tools = tools[:0]
-		for _, span := range hookModelV8CapturedSpansFromCapture(capture) {
-			if gatewayProtoAttribute(span.Attributes, "defenseclaw.span.family") ==
-				observability.TelemetryFamilyToolExecute {
-				tools = append(tools, span)
-			}
-		}
+		tools = eventRouterToolSpans(capture)
 		if len(tools) == want {
 			return tools
 		}
@@ -352,6 +371,17 @@ func waitForEventRouterToolSpans(
 	}
 	t.Fatalf("captured generated tool spans=%d want=%d", len(tools), want)
 	return nil
+}
+
+func eventRouterToolSpans(capture *hookModelV8OTLPCapture) []*tracepb.Span {
+	var tools []*tracepb.Span
+	for _, span := range hookModelV8CapturedSpansFromCapture(capture) {
+		if gatewayProtoAttribute(span.Attributes, "defenseclaw.span.family") ==
+			observability.TelemetryFamilyToolExecute {
+			tools = append(tools, span)
+		}
+	}
+	return tools
 }
 
 func eventRouterToolSpanIDs(spans []*tracepb.Span) []string {
