@@ -366,6 +366,8 @@ func connName(name string) string {
 
 func NewSidecarHealth() *SidecarHealth {
 	now := time.Now()
+	// The judge summary covers the calls since this gateway started.
+	judgeHealth.reset()
 	initial := SubsystemHealth{State: StateStarting, Since: now}
 	disabled := SubsystemHealth{State: StateDisabled, Since: now}
 	return &SidecarHealth{
@@ -1428,7 +1430,7 @@ func (h *SidecarHealth) Snapshot() HealthSnapshot {
 		Watcher:               h.watcher,
 		Config:                h.config,
 		API:                   h.api,
-		Guardrail:             h.guardrail,
+		Guardrail:             withJudgeHealth(h.guardrail),
 		Routing:               h.routing,
 		Telemetry:             h.telemetry,
 		AIDiscovery:           h.aiDiscovery,

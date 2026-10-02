@@ -967,3 +967,18 @@ class TestStatusProfileIdentity(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_status_shows_failing_llm_judge(capsys):
+    # GAP-1120: a judge whose calls all fail is named on the status page.
+    from defenseclaw.commands.cmd_status import _print_llm_judge
+
+    _print_llm_judge({"guardrail": {"details": {"mode": "action"}}})
+    assert "LLM judge" not in capsys.readouterr().out
+    _print_llm_judge({"guardrail": {"details": {
+        "judge_state": "failing", "judge_recent_calls": 10, "judge_failed_calls": 10,
+        "judge_last_error": "400 The provided model identifier is invalid.",
+    }}})
+    out = capsys.readouterr().out
+    assert "LLM judge" in out and "all of its last 10 call(s) failed" in out
+    assert "model identifier is invalid" in out and "defenseclaw doctor" in out

@@ -1433,6 +1433,13 @@ class OverviewPanelModel:
             parts.append(f"{pack} pack")
         if self.cfg.guardrail_judge_enabled and self.cfg.guardrail_judge_model:
             parts.append(f"judge:{self.cfg.guardrail_judge_model}")
+        # Recent judge calls that failed (gateway judge_* details, GAP-1288).
+        details = self.health.guardrail.details if self.health else {}
+        judge_state = str(details.get("judge_state") or "")
+        if judge_state in ("failing", "degraded"):
+            failed = details.get("judge_failed_calls", 0)
+            total = details.get("judge_recent_calls", 0)
+            parts.append(f"judge {judge_state}: {failed}/{total} calls failed")
         return ", ".join(parts)
 
     def ai_discovery_detail(self) -> str:

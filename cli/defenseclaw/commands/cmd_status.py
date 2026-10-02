@@ -404,6 +404,7 @@ def status(app: AppContext, as_json: bool) -> None:
         _print_agents(cfg, health=health)
         _print_application_protection(cfg, health=health)
         _print_semantic_routing(cfg, health=health)
+        _print_llm_judge(health)
         _print_hook_guardian(cfg)
         hint(
             "Dashboard:     defenseclaw alerts",
@@ -1018,6 +1019,32 @@ def _print_semantic_routing(cfg, health: dict | None = None) -> None:
     color = "green" if runtime == "running" else "yellow"
     value = f"{state['mode']} — {runtime}; {state['model_count']} model(s)"
     _status_row("Model routing", ux._style(value, fg=color))
+
+
+def _print_llm_judge(health: dict | None) -> None:
+    """Show the LLM judge row when the gateway has made judge calls.
+
+    A judge whose provider failed every call was invisible here: the hook
+    lane kept the rule verdicts and only the audit rows said so (GAP-1120).
+    """
+    guardrail = health.get("guardrail") if isinstance(health, dict) else None
+    details = guardrail.get("details") if isinstance(guardrail, dict) else None
+    if not isinstance(details, dict) or not details.get("judge_state"):
+        return
+    state = str(details.get("judge_state"))
+    total = details.get("judge_recent_calls", 0)
+    failed = details.get("judge_failed_calls", 0)
+    if state == "ok":
+        _status_row("LLM judge", ux._style(f"working (last {total} call(s) completed)", fg="green"))
+        return
+    if state == "failing":
+        value = f"failing: all of its last {total} call(s) failed, so only the rules decide"
+    else:
+        value = f"degraded: {failed} of its last {total} call(s) failed"
+    last_error = str(details.get("judge_last_error") or "").strip()
+    if last_error:
+        value += f"; last error: {last_error}"
+    _status_row("LLM judge", ux._style(value + "; run 'defenseclaw doctor'", fg="yellow"))
 
 
 def _load_application_protection_state(cfg) -> dict:
