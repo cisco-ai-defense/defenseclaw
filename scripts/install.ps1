@@ -857,14 +857,17 @@ function New-Venv([string]$Path) {
     # (over a minute on a Windows host while the files are also first scanned).
     $lockArgs = @("pip", "install", "--quiet", "--compile-bytecode", "--python", $python, "--require-hashes", "--no-deps",
         "-r", (Join-Path $Staging $Requirements))
-    if ((Invoke-Native $Uv $lockArgs) -ne 0) {
-        # A scanner holding a file uv just wrote fails its cache rename with
-        # os error 32 (GAP-1315); the cache makes a second attempt cheap.
-        Write-Warn "Retrying the Python package install once"
-        Start-Sleep -Seconds 5
-        if ((Invoke-Native $Uv $lockArgs) -ne 0) { return $false }
-    }
-    return (Invoke-Native $Uv @("pip", "install", "--quiet", "--compile-bytecode", "--python", $python, "--no-deps", (Join-Path $Staging $Wheel))) -eq 0
+    if (-not (Invoke-UvPipInstall $lockArgs)) { return $false }
+    return (Invoke-UvPipInstall @("pip", "install", "--quiet", "--compile-bytecode", "--python", $python, "--no-deps", (Join-Path $Staging $Wheel)))
+}
+
+function Invoke-UvPipInstall([string[]]$UvArgs) {
+    if ((Invoke-Native $Uv $UvArgs) -eq 0) { return $true }
+    # A scanner holding a file uv just wrote fails its cache rename with
+    # os error 32 or 5 (GAP-1315); the cache makes a second attempt cheap.
+    Write-Warn "Retrying the Python package install once"
+    Start-Sleep -Seconds 5
+    return (Invoke-Native $Uv $UvArgs) -eq 0
 }
 
 function Save-Snapshot {
@@ -875,6 +878,10 @@ function Save-Snapshot {
     foreach ($entry in $entries) { $need += Get-TreeSize $entry.FullName }
     $free = [long]-1
     try { $free = ([IO.DriveInfo][IO.Path]::GetPathRoot([IO.Path]::GetFullPath($DataDir))).AvailableFreeSpace } catch { }
+    # A large audit.db makes this copy (and the antivirus scan of it) slow;
+    # say how big it is and what is free (GAP-1519).
+    $freeText = if ($free -ge 0) { ", {0:N0} MB free" -f ([double]$free / 1MB) } else { "" }
+    Write-Info ("Saving a rollback copy of the data folder ({0:N0} MB needed{1})" -f ([double]$need / 1MB), $freeText)
     if ($free -ge 0 -and $free -lt $need + 100MB) {
         Write-Err "Not enough free disk space next to $DataDir for a rollback copy"
         return $false

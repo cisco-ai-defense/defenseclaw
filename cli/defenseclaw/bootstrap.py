@@ -1550,8 +1550,10 @@ def _running_connectors_from_state_file(data_dir: str) -> list[str] | None:
     return [single] if single else None
 
 
-# `defenseclaw-gateway start` waits up to 60 s for readiness; wait past that.
-_GATEWAY_START_TIMEOUT = 90
+# `defenseclaw-gateway start|restart` waits for READY itself (240 s on
+# Windows, 60 s elsewhere) and only then starts the watchdog, so wait past
+# that: killing it earlier left the gateway without its watchdog (GAP-1346).
+_GATEWAY_START_TIMEOUT = 300 if os.name == "nt" else 90
 
 
 def _start_gateway_structured(cfg: Config, *, hook_fail_mode_changed: bool = False) -> StepResult:
@@ -1613,7 +1615,7 @@ def _start_gateway_structured(cfg: Config, *, hook_fail_mode_changed: bool = Fal
                     [gw, "restart"],
                     capture_output=True,
                     text=True,
-                    timeout=30,
+                    timeout=_GATEWAY_START_TIMEOUT,
                 )
             except subprocess.TimeoutExpired:
                 return StepResult(

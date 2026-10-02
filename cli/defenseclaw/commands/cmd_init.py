@@ -3321,6 +3321,8 @@ def _start_gateway(cfg, logger) -> None:
         click.echo(f"  Sidecar:       already running (PID {pid})")
         return
 
+    from defenseclaw.bootstrap import _GATEWAY_START_TIMEOUT
+
     started = False
     click.echo("  Sidecar:       " + ux.dim("starting..."), nl=False)
     try:
@@ -3328,8 +3330,8 @@ def _start_gateway(cfg, logger) -> None:
             ["defenseclaw-gateway", "start"],
             capture_output=True,
             text=True,
-            # `defenseclaw-gateway start` waits up to 60 s for readiness (GAP-1382).
-            timeout=90,
+            # `defenseclaw-gateway start` waits for readiness itself (GAP-1382, GAP-1346).
+            timeout=_GATEWAY_START_TIMEOUT,
         )
         if result.returncode == 0:
             click.echo(" " + ux._style("✓", fg="green", bold=True))
@@ -3381,12 +3383,14 @@ def _restart_gateway_quiet() -> None:
     gw = shutil.which("defenseclaw-gateway")
     if not gw:
         return
+    from defenseclaw.bootstrap import _GATEWAY_START_TIMEOUT
+
     try:
         subprocess.run(
             [gw, "restart"],
             capture_output=True,
             text=True,
-            timeout=15,
+            timeout=_GATEWAY_START_TIMEOUT,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         pass

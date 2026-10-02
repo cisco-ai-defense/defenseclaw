@@ -2132,8 +2132,13 @@ func telemetryReadinessRetryableSQLiteContention(details map[string]interface{})
 	failure, failureOK := details["event_history_failure"].(string)
 	class, classOK := details["event_history_last_sqlite_class"].(string)
 	primary, primaryOK := details["event_history_last_sqlite_primary_code"].(float64)
-	if !failureOK || failure != "sqlite_write_failed" || !classOK || class != "busy_locked" ||
-		!primaryOK || primary != float64(uint8(primary)) || (primary != 5 && primary != 6) {
+	if !failureOK || failure != "sqlite_write_failed" || !classOK || !primaryOK ||
+		primary != float64(uint8(primary)) {
+		return false
+	}
+	busyLocked := class == "busy_locked" && (primary == 5 || primary == 6)
+	transientIO := startupRetriesSQLiteIO && class == "io" && primary == 10
+	if !busyLocked && !transientIO {
 		return false
 	}
 	generation, generationOK := details["generation"].(float64)

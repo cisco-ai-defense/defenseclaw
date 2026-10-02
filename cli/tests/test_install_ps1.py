@@ -256,9 +256,15 @@ def test_a_uv_in_the_bin_folder_is_used_not_replaced() -> None:
 def test_the_locked_package_install_is_retried_once() -> None:
     # GAP-1315: a sharing violation (os error 32) on uv's cache rename failed
     # the whole Windows install.
-    body = _text()[_text().index("function New-Venv") :][:1600]
-    assert body.count("(Invoke-Native $Uv $lockArgs) -ne 0") == 2
-    assert "Retrying the Python package install once" in body
+    # The DefenseClaw wheel install hit the same hold, so both uv pip steps
+    # go through the single-retry helper.
+    start = _text().index("function New-Venv")
+    body = _text()[start : _text().index("function Invoke-UvPipInstall")]
+    assert body.count("Invoke-UvPipInstall") == 2
+    assert "Invoke-Native $Uv @(\"pip\"" not in body
+    helper = _text()[_text().index("function Invoke-UvPipInstall") :][:600]
+    assert helper.count("Invoke-Native $Uv $UvArgs") == 2
+    assert "Retrying the Python package install once" in helper
 
 
 def _ps1_function(name: str) -> str:
@@ -297,3 +303,10 @@ def test_a_later_upgrade_keeps_the_0_x_audit_history() -> None:
     assert '$label = "audit-history"' in body
     assert '[version]$version -lt [version]"1.0.0"' in body
     assert "backups\\$label-$version-" in body
+
+
+def test_the_rollback_copy_states_its_size_and_the_free_space() -> None:
+    # GAP-1519: an upgrade with a 1.3 GB audit.db never said how much it copied.
+    body = _text()[_text().index("function Save-Snapshot") :][:1400]
+    assert "Saving a rollback copy of the data folder ({0:N0} MB needed{1})" in body
+    assert body.index("Saving a rollback copy") < body.index("Not enough free disk space")
