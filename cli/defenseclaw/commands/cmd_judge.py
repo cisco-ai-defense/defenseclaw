@@ -56,6 +56,7 @@ from __future__ import annotations
 import click
 
 from defenseclaw import connector_paths, ux
+from defenseclaw.commands._audit_notice import saved_change_audit
 from defenseclaw.context import AppContext, pass_ctx
 
 #: Sentinel accepted by the Go gate meaning "every hook connector".
@@ -287,7 +288,7 @@ def _save_and_restart(app: AppContext, gc, *, restart: bool, action: str, previo
         # An Activity mutation names the new gate (hook_connectors: -> a,b);
         # a plain config-update action lost it (GAP-1325).
         # With the old gate too: "hook_connectors: (none) -> claudecode" (GAP-1511).
-        app.logger.log_config_change(
+        saved_change_audit(app.logger).log_config_change(
             f"judge-hooks-{action}", f"hook_connectors={connectors} previous={previous or '(none)'}"
         )
 
