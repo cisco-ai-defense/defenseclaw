@@ -1000,6 +1000,16 @@ class TestLockContractFailureDetail:
         detail = cmd_setup._lock_contract_failure_detail("devin", newer, invariant)
         assert "predates" in detail and "defenseclaw-gateway restart" in detail
 
+    def test_unversioned_agent_names_a_missing_install(self) -> None:
+        # GAP-1285: OpenCode not installed for the account reports no version.
+        entry = {"connector": "opencode", "compatibility_status": "unversioned", "hook_fail_mode": "open"}
+        invariant = connector_lock_contract_invariant("opencode", entry)
+        if invariant != "version":
+            pytest.skip("opencode now has a default contract for an unversioned agent")
+        detail = cmd_setup._lock_contract_failure_detail("opencode", entry, invariant)
+        assert "installed and on PATH" in detail and "defenseclaw setup opencode" in detail
+        assert "invalid" not in detail
+
     def test_malformed_entry_still_reads_as_invalid(self) -> None:
         # A lock whose recorded connector does not match, or whose fields are
         # nonsense, is a genuine integrity failure and must keep saying so.

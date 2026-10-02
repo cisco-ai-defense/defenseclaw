@@ -267,8 +267,8 @@ proxy option of its own, so set `NO_PROXY=127.0.0.1,localhost` (and
 or `~/.zshrc`. On Windows run
 `setx NO_PROXY 127.0.0.1,localhost` once and open a new terminal.
 
-**Another account on the gateway port.** Per-user installs on Linux and macOS
-point Claude Code's OTel exporter at this account's gateway API port (for
+**Another account on the gateway port.** Per-user installs on Linux, macOS and
+Windows point Claude Code's OTel exporter at this account's gateway API port (for
 example `http://127.0.0.1:18970`) with the Claude-scoped OTLP bearer in
 `~/.claude/settings.json`. DefenseClaw's hooks and CLI check who owns that port
 and send nothing to another account's listener, but Claude Code's exporter

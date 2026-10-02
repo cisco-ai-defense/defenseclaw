@@ -418,6 +418,9 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 	)
 	if err != nil {
 		fmt.Println(Style("FAILED", "fg=red", "bold"))
+		if !rotationTransaction {
+			err = explainForeignListenerAtReadiness(cfg, err)
+		}
 		return fmt.Errorf("start daemon readiness: %w (check %s for errors)%s", err, d.LogFile(),
 			gatewayStartFailureDiskNote(config.DefaultDataPath()))
 	}
@@ -770,6 +773,7 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 	)
 	if err != nil {
 		fmt.Println(Style("FAILED", "fg=red", "bold"))
+		err = explainForeignListenerAtReadiness(cfg, err)
 		return fmt.Errorf("restart daemon readiness: %w (check %s for errors)%s", err, d.LogFile(),
 			gatewayStartFailureDiskNote(config.DefaultDataPath()))
 	}
