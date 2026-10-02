@@ -248,7 +248,21 @@ def _guardrail_judge_secret_wizard(
         gc.judge.enabled = True
         gc.judge.hook_connectors = ["opencode"]
 
+    def configure_judge_llm(cfg, data_dir, *, target_path="", _pending_secrets=None):
+        # The v5 judge wizard (provider/model pickers) writes guardrail.judge.llm
+        # and collects the key through the same pending-secret path.
+        llm = cmd_setup._target_llm_block(cfg, target_path)
+        llm.provider = "openai"
+        llm.model = "disposable-model-marker"
+        llm.base_url = "http://127.0.0.1:1/v1"
+        llm.api_key_env = env_name
+        cmd_setup._prompt_and_save_secret(env_name, "", data_dir, _pending_secrets=_pending_secrets)
+
     with (
+        patch(
+            "defenseclaw.commands.cmd_setup._configure_llm",
+            side_effect=configure_judge_llm,
+        ),
         patch(
             "defenseclaw.commands.cmd_setup.platform_support.host_os",
             return_value="windows",
