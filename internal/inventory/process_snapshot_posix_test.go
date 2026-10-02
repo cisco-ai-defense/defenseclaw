@@ -21,6 +21,8 @@ package inventory
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -231,5 +233,21 @@ func TestParseStandardPSProcessLinePreservesNonDarwinLayout(t *testing.T) {
 	}
 	if want := now.Add(-(2*time.Minute + 3*time.Second)); !info.StartedAt.Equal(want) {
 		t.Fatalf("started at = %s, want %s", info.StartedAt, want)
+	}
+}
+
+func TestProcArgv0KeepsOnlyTheFirstArgumentsBasename(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cmdline")
+	if err := os.WriteFile(path, []byte("/home/u/.local/bin/cursor-agent\x00--use-system-ca\x00/x/index.js\x00"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := procArgv0(path, "mainthread"); got != "cursor-agent" {
+		t.Fatalf("procArgv0 = %q, want cursor-agent", got)
+	}
+	if got := procArgv0(path, "cursor-agent"); got != "" {
+		t.Fatalf("procArgv0 = %q, want empty when it equals comm", got)
+	}
+	if got := procArgv0(filepath.Join(t.TempDir(), "gone"), "x"); got != "" {
+		t.Fatalf("procArgv0 = %q, want empty for an exited process", got)
 	}
 }

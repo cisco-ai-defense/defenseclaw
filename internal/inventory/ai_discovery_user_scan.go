@@ -233,6 +233,8 @@ func ScanUserHome(ctx context.Context, home, account string, uid int, opts UserS
 	scanID := newScanID()
 	signals, stats := svc.scanSignals(ctx, scanID, &aiDiscoveryScanObservation{}, true, nil)
 	out := make([]AISignal, 0, len(signals))
+	// No state store stamps these here; an unset time read as 0001-01-01.
+	seen := time.Now().UTC()
 	for _, sig := range signals {
 		if sig.Detector == "application" || !evidenceInsideHome(sig.Evidence, homeRoots) {
 			continue
@@ -251,6 +253,12 @@ func ScanUserHome(ctx context.Context, home, account string, uid int, opts UserS
 		sig.SignalID = stableSignalID(sig.Fingerprint)
 		sig.Source = AISourceUserScan
 		sig.State = AIStateSeen
+		if sig.FirstSeen.IsZero() {
+			sig.FirstSeen = seen
+		}
+		if sig.LastSeen.IsZero() {
+			sig.LastSeen = seen
+		}
 		out = append(out, sig)
 	}
 	if len(out) > MaxUserScanSignals {

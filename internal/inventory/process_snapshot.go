@@ -39,6 +39,11 @@ type processInfo struct {
 	// Image.
 	OwnerID   string
 	OwnerName string
+	// Argv0 is the basename of argv[0] on Linux, kept only when it differs
+	// from Comm. A runtime that renames its main thread hides the command
+	// from comm: cursor-agent runs `exec -a "$0" node ...` and Node names
+	// the thread MainThread (GAP-1207). Never any other argument.
+	Argv0 string
 }
 
 type windowsProcessEntry struct {
