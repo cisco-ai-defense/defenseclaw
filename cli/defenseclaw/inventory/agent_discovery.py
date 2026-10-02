@@ -1836,10 +1836,12 @@ def _version_for_binary(
     binary_name = _binary_command_name(binary_path)
     env = None
     timeout = VERSION_TIMEOUT_SECONDS
-    if binary_name == "openhands":
-        # Its --version loads the whole Python agent stack: 15 s idle on Linux.
+    if binary_name in {"openhands", "hermes"}:
+        # OpenHands' --version loads the whole Python agent stack (15 s idle
+        # on Linux); Hermes' runs a synchronous update check (17.5 s on
+        # Windows), and a timeout made init drop an enrolled Hermes (GAP-1604).
         timeout = 30.0
-    elif binary_name in {"claude", "hermes", "omnigent"} or (
+    elif binary_name in {"claude", "omnigent"} or (
         os.name == "nt" and binary_name in {"amp", "agent", "copilot", "cursor-agent"}
     ):
         timeout = 8.0

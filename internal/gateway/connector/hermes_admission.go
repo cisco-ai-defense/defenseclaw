@@ -32,7 +32,9 @@ import (
 )
 
 const (
-	hermesVersionProbeTimeout     = 10 * time.Second
+	// Hermes' --version runs a synchronous update check (17.5 s seen on
+	// Windows, GAP-1604); match the CLI's 30 s budget so admission agrees.
+	hermesVersionProbeTimeout     = 30 * time.Second
 	hermesVersionProbeOutputLimit = int64(4 << 10)
 )
 
