@@ -40,7 +40,8 @@ Switch panels with the number/letter key shown, from any panel (only an open
 Setup form or the config editor types digits), or cycle with `Tab` /
 `Shift+Tab`. Press `Ctrl+P` to fuzzy-jump to any panel by name. On a narrow
 terminal every tab stays on screen: the most-used tabs keep their names and
-the rest show only their key.
+the rest show only their key. Which tabs keep a name depends only on the
+terminal width, so the labels don't change as you switch panels.
 
 | Key | Panel | What it shows |
 | --- | --- | --- |
@@ -48,7 +49,8 @@ the rest show only their key.
 | `2` | Alerts | Recent guardrail and hook alerts |
 | `3` | Skills | Scanned skill inventory |
 | `4` | MCPs | Scanned MCP servers |
-| `5` | Plugins | Scanned plugins |
+| `5` | Plugins | Installed plugins and their scan results for every connector that has plugins (Amp, Hermes, OpenClaw and others) |
+| `T` | Tools | The tool block/allow list (capital `T`; lowercase `t` is a panel key) |
 | `6` | Inventory | Combined inventory view |
 | `7` | Sandboxes | OpenShell sandboxes, their live activity feed, and the rare asks ([below](#sandboxes-panel)) |
 | `8` | Logs | Live gateway logs with filter presets |
@@ -360,4 +362,7 @@ rules.
 | `D` | Run `defenseclaw doctor` in the background and toast the result (works on every panel) |
 | `Y` | Copy the last command's output (works on every panel) |
 | `Ctrl+S` | Save the last run to a log file |
-| `Ctrl+C` | Quit the TUI |
+| `Ctrl+C` | Quit the TUI (it cancels a running command first) |
+| `q` | Close the open drawer or overlay; it does not quit |
+| `b` | On Overview and Logs: turn desktop notifications on or off |
+| `e` | On Registries: require (or stop requiring) registry approval for the selected entry's type |
