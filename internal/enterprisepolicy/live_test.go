@@ -16,6 +16,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -72,6 +73,23 @@ func fakeCodexAppServer() {
 
 func fakeClaudeCLI() int {
 	base := os.Getenv("ANTHROPIC_BASE_URL")
+	if provider := os.Getenv("DC_FAKE_PROVIDER"); provider != "" {
+		// The user's settings route Claude Code to Bedrock. Command-line
+		// --settings outrank them; managed settings outrank both.
+		var flag struct {
+			Env map[string]string `json:"env"`
+		}
+		for i, arg := range os.Args {
+			if arg == "--settings" && i+1 < len(os.Args) {
+				_ = json.Unmarshal([]byte(os.Args[i+1]), &flag)
+			}
+		}
+		if provider == "managed-bedrock" || flag.Env["CLAUDE_CODE_USE_BEDROCK"] != "0" {
+			fmt.Println(`{"type":"result","duration_api_ms":3795,"stop_reason":"end_turn","total_cost_usd":0.03}`)
+			return 0
+		}
+		base = flag.Env["ANTHROPIC_BASE_URL"]
+	}
 	post := func(body string) (map[string]any, error) {
 		response, err := http.Post(base+"/v1/messages", "application/json", strings.NewReader(body))
 		if err != nil {
@@ -79,9 +97,13 @@ func fakeClaudeCLI() int {
 		}
 		defer response.Body.Close()
 		var decoded map[string]any
+		if response.Header.Get("Content-Type") == "text/event-stream" {
+			return decodeFakeMessageStream(response.Body)
+		}
 		return decoded, json.NewDecoder(response.Body).Decode(&decoded)
 	}
-	first, err := post(`{"messages":[{"role":"user","content":"go"}]}`)
+	// Claude Code streams the agent turn, which offers the tools.
+	first, err := post(`{"stream":true,"tools":[{"name":"Bash"}],"messages":[{"role":"user","content":"go"}]}`)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
@@ -130,6 +152,45 @@ func fakeClaudeCLI() int {
 	}
 	fmt.Println(`{"result":"done"}`)
 	return 0
+}
+
+// decodeFakeMessageStream rebuilds the message of a Messages API event
+// stream: its tool_use blocks with their streamed input, and its text.
+func decodeFakeMessageStream(body io.Reader) (map[string]any, error) {
+	var content []any
+	var current map[string]any
+	partial := ""
+	scanner := bufio.NewScanner(body)
+	for scanner.Scan() {
+		data, ok := strings.CutPrefix(scanner.Text(), "data: ")
+		if !ok {
+			continue
+		}
+		var event struct {
+			Type         string         `json:"type"`
+			ContentBlock map[string]any `json:"content_block"`
+			Delta        map[string]any `json:"delta"`
+		}
+		if err := json.Unmarshal([]byte(data), &event); err != nil {
+			return nil, err
+		}
+		switch event.Type {
+		case "content_block_start":
+			current, partial = event.ContentBlock, ""
+		case "content_block_delta":
+			if text, ok := event.Delta["partial_json"].(string); ok {
+				partial += text
+			}
+		case "content_block_stop":
+			if partial != "" {
+				var input map[string]any
+				_ = json.Unmarshal([]byte(partial), &input)
+				current["input"] = input
+			}
+			content = append(content, current)
+		}
+	}
+	return map[string]any{"content": content}, scanner.Err()
 }
 
 // fakeHookCall renders what the fake hook reports for one Claude Code
@@ -334,6 +395,29 @@ func TestLimitedBufferDiscardsPastTheLimitAndIsConcurrencySafe(t *testing.T) {
 	wg.Wait()
 	if got := len(shared.String()); got != 8000 {
 		t.Fatalf("concurrent writes lost bytes: %d", got)
+	}
+}
+
+// GAP-1135: a user whose settings route Claude Code to Bedrock made the
+// probe call Bedrock instead of the local stub, and the check dumped the
+// raw result JSON. The probe's command-line settings point Claude Code at
+// the stub; a provider only managed settings can force is named, not
+// dumped.
+func TestVerifyLiveClaudeOverridesTheUsersModelProvider(t *testing.T) {
+	opts := testOptions(t)
+	home := t.TempDir()
+	log := filepath.Join(t.TempDir(), "hook-calls.jsonl")
+	writeFile(t, log, "")
+	bedrock := fakeAgentScript(t, "claude", map[string]string{"DC_FAKE_HOOK_LOG": log, "DC_FAKE_PROVIDER": "bedrock"})
+	result, err := VerifyLive(context.Background(), opts, LiveOptions{Connector: ConnectorClaudeCode, AgentBinary: bedrock, Home: home, UID: os.Getuid(), HookRecords: fakeEventHistory(t, log, nil), Timeout: 30 * time.Second})
+	if err != nil || !result.Verified || result.HookContact != "yes" {
+		t.Fatalf("a user on Bedrock must still reach the stub: %+v %v", result, err)
+	}
+	managed := fakeAgentScript(t, "claude", map[string]string{"DC_FAKE_PROVIDER": "managed-bedrock"})
+	result, err = VerifyLive(context.Background(), opts, LiveOptions{Connector: ConnectorClaudeCode, AgentBinary: managed, Home: home, UID: os.Getuid(), HookRecords: fakeEventHistory(t, log, nil), Timeout: 30 * time.Second})
+	problems := strings.Join(result.Problems, " ")
+	if err != nil || result.Verified || !strings.Contains(problems, "CLAUDE_CODE_USE_BEDROCK") || strings.Contains(problems, "total_cost_usd") {
+		t.Fatalf("a provider the check cannot override must be named without the raw result: %+v %v", result, err)
 	}
 }
 
