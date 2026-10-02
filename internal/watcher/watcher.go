@@ -866,6 +866,12 @@ func (w *InstallWatcher) applyPostScanEnforcement(ctx context.Context, pe *enfor
 
 		if w.takeActionFor(evt) {
 			blockReason := fmt.Sprintf("auto-block: watch detected %s findings (scanner=%s)", result.MaxSeverity(), scannerName)
+			// An operator restore keeps the files only while the install
+			// block it left in place remains. Decide that before this scan
+			// adds its own block: after an unblock + restore, the block below
+			// is a fresh decision and the files must be quarantined again,
+			// not retained under a "quarantined" record (GAP-1971).
+			retainRestored := w.preserveRestoredBlockedAsset(evt)
 
 			installAction := coalesce(out.InstallAction, "block")
 			runtimeAction := coalesce(out.RuntimeAction, "allow")
@@ -883,7 +889,7 @@ func (w *InstallWatcher) applyPostScanEnforcement(ctx context.Context, pe *enfor
 				"file":        fileAction,
 			}
 
-			if fileAction == "quarantine" {
+			if fileAction == "quarantine" && !retainRestored {
 				_ = pe.Quarantine(targetType, evt.Name, blockReason)
 			}
 			if runtimeAction == "block" {
@@ -894,7 +900,7 @@ func (w *InstallWatcher) applyPostScanEnforcement(ctx context.Context, pe *enfor
 				fmt.Sprintf("type=%s reason=%s", targetType, blockReason), enforcement)
 
 			if fileAction == "quarantine" || runtimeAction == "block" {
-				w.enforceBlock(ctx, evt)
+				w.enforceBlockWith(ctx, evt, retainRestored)
 			}
 		}
 	case "warning":
@@ -1008,22 +1014,32 @@ func (w *InstallWatcher) takeActionFor(evt InstallEvent) bool {
 }
 
 func (w *InstallWatcher) enforceBlock(ctx context.Context, evt InstallEvent) {
+	w.enforceBlockWith(ctx, evt, true)
+}
+
+// enforceBlockWith applies the block; honorRestore keeps the files of an
+// operator-restored asset whose earlier install block still stands.
+func (w *InstallWatcher) enforceBlockWith(ctx context.Context, evt InstallEvent, honorRestore bool) {
 	switch evt.Type {
 	case InstallMCP:
 		// MCP servers have no filesystem artifact to quarantine. The sidecar's
 		// handleMCPAdmission applies the block verdict to the connector's MCP
 		// configuration from the admission result this watcher publishes.
 	case InstallSkill, InstallPlugin:
-		w.quarantineAsset(ctx, evt)
+		w.quarantineAssetWith(ctx, evt, honorRestore)
 	}
 }
 
 func (w *InstallWatcher) quarantineAsset(ctx context.Context, evt InstallEvent) {
+	w.quarantineAssetWith(ctx, evt, true)
+}
+
+func (w *InstallWatcher) quarantineAssetWith(ctx context.Context, evt InstallEvent, honorRestore bool) {
 	if w == nil || w.cfg == nil || w.store == nil {
 		w.emitQuarantineFailure(ctx, evt.Path, fmt.Errorf("watcher: quarantine provenance store is unavailable"))
 		return
 	}
-	if w.preserveRestoredBlockedAsset(evt) {
+	if honorRestore && w.preserveRestoredBlockedAsset(evt) {
 		_ = w.logger.LogAction(string(audit.ActionWatcherBlock), evt.Path,
 			fmt.Sprintf("type=%s restored physical files retained while install block remains", evt.Type))
 		return
