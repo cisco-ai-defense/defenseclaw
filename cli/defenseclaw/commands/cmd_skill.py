@@ -5133,7 +5133,11 @@ def info(app: AppContext, name: str, as_json: bool, connector_flag: str) -> None
                 cards.append(fallback)
 
     if not cards:
-        click.echo(f"error: skill {skill_name!r} not found", err=True)
+        list_cmd = f"defenseclaw skill list --connector {connector}" if connector_flag else "defenseclaw skill list"
+        click.echo(
+            f"Error: skill {skill_name!r} not found. Run `{list_cmd}` to see installed skills.",
+            err=True,
+        )
         raise SystemExit(1)
 
     if as_json:

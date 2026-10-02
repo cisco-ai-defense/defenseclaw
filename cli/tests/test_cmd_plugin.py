@@ -1455,7 +1455,12 @@ class TestPluginInfo(PluginCommandTestBase):
         # rendering a phantom "Installed: False" card. Mirrors skill SK-2.
         result = self.invoke(["info", "ghost-plugin"])
         self.assertEqual(result.exit_code, 1, result.output)
-        self.assertIn("not found", result.output)
+        # GAP-2003: same shape as policy show / mcp scan misses, with a next step.
+        self.assertIn(
+            "Error: plugin 'ghost-plugin' not found. "
+            "Run `defenseclaw plugin list` to see installed plugins.",
+            result.output,
+        )
 
     def test_info_json_installed(self):
         self._install_plugin("jsonplug")
