@@ -186,6 +186,13 @@ class TestPolicyShow(PolicyCommandTestBase):
         self.assertIn("show-me", result.output)
         self.assertIn("Test policy", result.output)
 
+    def test_show_names_guardrail_threshold_severities(self):
+        # GAP-1228: "MEDIUM (2)", not a bare "2 (severity rank)".
+        result = self.invoke(["show", "strict"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertNotIn("(severity rank)", result.output)
+        self.assertRegex(result.output, r"block_threshold:\s+(LOW|MEDIUM|HIGH|CRITICAL) \(\d\)")
+
     def test_show_nonexistent(self):
         result = self.invoke(["show", "does-not-exist"])
         self.assertNotEqual(result.exit_code, 0)

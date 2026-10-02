@@ -477,6 +477,7 @@ def test_setup_wait_commits_truthful_hermes_pending_reload(monkeypatch, tmp_path
             "runtime_state=pending-reload; running Hermes hosts are unverified; live=false",
         ),
     )
+    monkeypatch.setattr(cmd_doctor, "_hermes_host_running", lambda: True)
 
     readiness = cmd_setup._wait_for_connector_runtime(
         str(tmp_path),
@@ -489,6 +490,49 @@ def test_setup_wait_commits_truthful_hermes_pending_reload(monkeypatch, tmp_path
     assert readiness
     assert (readiness.connector, readiness.invariant) == ("hermes", "pending-reload")
     assert "live=false" in readiness.detail
+
+    # GAP-1235: with no Hermes host running there is nothing to reload, as doctor says.
+    monkeypatch.setattr(cmd_doctor, "_hermes_host_running", lambda: False)
+    readiness = cmd_setup._wait_for_connector_runtime(str(tmp_path), ["hermes"], None, None, timeout=0.5)
+    assert readiness
+    assert readiness.invariant != "pending-reload"
+
+
+def test_setup_wait_does_not_skip_an_idle_opencode_peer(monkeypatch, tmp_path: Path, capsys) -> None:
+    """GAP-1271: a stopped OpenCode peer is not 'skipped' with a re-run hint."""
+    cfg = _config(tmp_path)
+    entries = {name: _entry(name, tmp_path) for name in ("codex", "opencode")}
+    (tmp_path / "hook_contract_lock.json").write_text(
+        json.dumps({"version": 2, "connectors": entries}),
+        encoding="utf-8",
+    )
+    (tmp_path / "active_connector.json").write_text(
+        json.dumps({"version": 3, "names": ["codex", "opencode"], "inactive_names": []}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cmd_setup, "load_config", lambda **_kwargs: cfg)
+
+    def readiness(_cfg, name):
+        if name == "opencode":
+            return cmd_doctor.ConnectorSetupReadiness(
+                False,
+                "opencode",
+                "live-runtime",
+                "OpenCode hooks: warn: managed plugin digest current; runtime load unverified: "
+                "no authenticated load heartbeat; OpenCode may be stopped or idle",
+            )
+        return cmd_doctor.ConnectorSetupReadiness(True, name, "ready")
+
+    monkeypatch.setattr(cmd_doctor, "connector_setup_readiness", readiness)
+
+    result = cmd_setup._wait_for_connector_runtime(
+        str(tmp_path), ["codex", "opencode"], None, None, timeout=0.5, required={"codex"}
+    )
+
+    assert result
+    output = capsys.readouterr().out
+    assert "skipping opencode" not in output
+    assert "Re-run setup" not in output
 
 
 def test_restart_services_labels_hermes_pending_reload_without_live_claim(

@@ -27,11 +27,13 @@ existing aliases/scripts keep working.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import os
 import re
 import uuid
+from pathlib import Path
 
 import click
 import requests
@@ -214,6 +216,71 @@ def _hook_decision(hook_details: list[str]) -> str:
     return decision
 
 
+# The audit store replaces the title of every finding classed as a secret
+# with this placeholder, including rules tagged "credential" whose pack title
+# names no secret (GAP-1223).
+_REDACTED_SECRET_TITLE = "Secret finding"
+_RULE_FILE_LIMIT = 1024 * 1024
+
+
+def _rule_pack_dirs() -> list[Path]:
+    """Rule packs to read titles from: configured, seeded copies, then bundled."""
+    dirs: list[Path] = []
+    try:
+        from defenseclaw import config as config_module  # noqa: PLC0415
+
+        cfg = config_module.load()
+        gc = cfg.guardrail
+        if str(getattr(gc, "rule_pack_dir", "") or "").strip():
+            dirs.append(Path(gc.rule_pack_dir).expanduser())
+        policy_dir = str(getattr(cfg, "policy_dir", "") or "").strip()
+        if policy_dir:
+            seeded = Path(policy_dir).expanduser() / "guardrail"
+            if seeded.is_dir():
+                dirs.extend(sorted(p for p in seeded.iterdir() if p.is_dir()))
+    except Exception:  # noqa: BLE001 - titles are a display nicety.
+        pass
+    from defenseclaw.paths import bundled_guardrail_profiles_dir  # noqa: PLC0415
+
+    bundled = bundled_guardrail_profiles_dir()
+    if bundled is not None:
+        dirs.extend(sorted(p for p in bundled.iterdir() if p.is_dir()))
+    return dirs
+
+
+@functools.lru_cache(maxsize=1)
+def _rule_pack_titles() -> dict[str, str]:
+    """Rule id -> title from the local rule packs (static catalog text)."""
+    import yaml  # noqa: PLC0415
+
+    titles: dict[str, str] = {}
+    for pack in _rule_pack_dirs():
+        rules_dir = pack / "rules"
+        try:
+            files = sorted(rules_dir.glob("*.yaml")) if rules_dir.is_dir() else []
+        except OSError:
+            continue
+        for path in files:
+            try:
+                if path.stat().st_size > _RULE_FILE_LIMIT:
+                    continue
+                data = yaml.safe_load(path.read_text(encoding="utf-8"))
+            except Exception:  # noqa: BLE001 - skip an unreadable or broken file.
+                continue
+            rules = data.get("rules") if isinstance(data, dict) else None
+            for rule in rules if isinstance(rules, list) else []:
+                if isinstance(rule, dict) and isinstance(rule.get("id"), str) and isinstance(rule.get("title"), str):
+                    titles.setdefault(rule["id"].strip(), rule["title"].strip())
+    return titles
+
+
+def _finding_title(rule_id: str, title: str) -> str:
+    """The pack's own title for a rule whose stored title was redacted."""
+    if title == _REDACTED_SECRET_TITLE and rule_id:
+        return _rule_pack_titles().get(rule_id, title) or title
+    return title
+
+
 def _finding_facts(e, hook_details: dict[str, list[str]]) -> dict[str, str] | None:
     """Readable facts for a canonical finding row (GAP-1080).
 
@@ -228,7 +295,7 @@ def _finding_facts(e, hook_details: dict[str, list[str]]) -> dict[str, str] | No
     rule_id = str(structured.get("defenseclaw.finding.rule_id") or "").strip()
     if not rule_id:
         return None
-    title = str(structured.get("defenseclaw.finding.title") or "").strip()
+    title = _finding_title(rule_id, str(structured.get("defenseclaw.finding.title") or "").strip())
     facts = {
         "target": e.target or str(structured.get("defenseclaw.finding.target_ref") or "").strip(),
         "decision": _hook_decision(hook_details.get(e.id, [])),
@@ -559,7 +626,7 @@ def alerts_acknowledge(
     dry_run: bool,
     yes: bool,
 ) -> None:
-    """Mark alerts acknowledged through the canonical protected-state API."""
+    """Mark alerts as acknowledged (seen by an operator)."""
     n = _set_alert_disposition(
         app,
         "acknowledged",
@@ -608,7 +675,7 @@ def alerts_dismiss(
     dry_run: bool,
     yes: bool,
 ) -> None:
-    """Dismiss alerts through the canonical protected-state API."""
+    """Dismiss alerts so they no longer show in the active alert list."""
     n = _set_alert_disposition(
         app,
         "dismissed",

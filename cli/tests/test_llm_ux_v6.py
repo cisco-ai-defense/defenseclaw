@@ -348,6 +348,26 @@ class TestSetupLLMNonInteractiveFlags(unittest.TestCase):
         self.assertEqual(cfg.llm.bedrock.auth_mode, "iam_credentials")
         self.assertEqual(cfg.llm.bedrock.inference_profile, "us.")
 
+    def test_provider_and_model_flags_skip_the_prompts(self) -> None:
+        # GAP-1290: without --non-interactive the flags still answer the prompts.
+        res = self.runner.invoke(
+            setup,
+            [
+                "llm",
+                "--provider", "bedrock",
+                "--model", "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+                "--bedrock-region", "us-east-1",
+                "--bedrock-auth-mode", "instance_role",
+            ],
+            obj=self.app,
+            input="",
+            catch_exceptions=False,
+        )
+        self.assertEqual(res.exit_code, 0, res.output)
+        self.assertNotIn("Pick provider", res.output)
+        self.assertEqual(self.app.cfg.llm.provider, "bedrock")
+        self.assertEqual(self.app.cfg.llm.model, "us.anthropic.claude-haiku-4-5-20251001-v1:0")
+
     def test_instance_name_flag_persists(self) -> None:
         res = self.runner.invoke(
             setup,

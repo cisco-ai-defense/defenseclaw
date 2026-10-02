@@ -28,8 +28,8 @@ def audit() -> None:
     \b
     Export the audit log (incl. per-connector filtering and the activity feed):
         defenseclaw audit export [--connector X] [--since 1h] [--include-activity]
-    Report the current distinct scan findings (JSON):
-        defenseclaw audit findings [--scanner NAME] [--since RFC3339]
+    Report the current distinct skill/MCP/plugin/code scan findings (JSON):
+        defenseclaw audit findings [--scanner NAME] [--since 30m]
     'export' and 'findings' run 'defenseclaw-gateway audit <command>' with the
     same options. Show the newest gateway or watchdog log lines:
         defenseclaw audit logs [--source watchdog] [-n 50] [--grep TEXT]

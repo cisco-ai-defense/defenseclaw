@@ -195,7 +195,7 @@ func isKnownAuditAction(s string) bool {
 	return false
 }
 
-func runAuditExport(_ *cobra.Command, _ []string) error {
+func runAuditExport(cmd *cobra.Command, _ []string) error {
 	if cfg == nil {
 		return fmt.Errorf("audit export: config not loaded")
 	}
@@ -268,6 +268,8 @@ FROM audit_events` + where + ` ORDER BY ` + window.orderBy()
 	defer rows.Close()
 
 	sink := window.sink(out)
+	seenConnectors := map[string]struct{}{}
+	matchedConnectorRows := 0
 	for rows.Next() {
 		var (
 			id, ts, action, actor                           string
@@ -295,9 +297,13 @@ FROM audit_events` + where + ` ORDER BY ` + window.orderBy()
 		}
 		connector := resolveAuditEventConnector(ns(connectorCol), ns(details), ns(structuredRaw))
 		if connFilter != "" {
+			if connector != "" {
+				seenConnectors[connector] = struct{}{}
+			}
 			if connector != connFilter {
 				continue
 			}
+			matchedConnectorRows++
 		}
 
 		line, err := buildAuditEventLine(id, ts, action,
@@ -328,6 +334,9 @@ FROM audit_events` + where + ` ORDER BY ` + window.orderBy()
 	if err := sink.flush(); err != nil {
 		return err
 	}
+	if connFilter != "" && matchedConnectorRows == 0 {
+		noteUnmatchedAuditConnector(cmd.ErrOrStderr(), connFilter, seenConnectors)
+	}
 
 	// Activity rows are operator config mutations, not connector-scoped, so
 	// they are omitted whenever a connector filter is requested.
@@ -337,6 +346,22 @@ FROM audit_events` + where + ` ORDER BY ` + window.orderBy()
 		}
 	}
 	return nil
+}
+
+// noteUnmatchedAuditConnector says on stderr that --connector matched no row,
+// naming the connectors that do have rows in the window, so a typo is not
+// mistaken for "no activity" (GAP-1237). stdout stays valid, empty JSONL.
+func noteUnmatchedAuditConnector(w io.Writer, filter string, seen map[string]struct{}) {
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	if len(names) == 0 {
+		fmt.Fprintf(w, "audit export: no rows from connector %q in this window (no row in it names a connector)\n", filter)
+		return
+	}
+	fmt.Fprintf(w, "audit export: no rows from connector %q in this window; connectors with rows: %s\n", filter, strings.Join(names, ", "))
 }
 
 // auditExportWindow is the row selection of one export: an optional time

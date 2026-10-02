@@ -73,7 +73,12 @@ def observability_cmd() -> None:
 
 @observability_cmd.group("destination")
 def observability_destination() -> None:
-    """Inspect or explicitly test one configured destination."""
+    """Test one configured destination.
+
+    Delivery health for each destination (queue, last delivery, circuit
+    state) is in 'defenseclaw doctor'; 'defenseclaw observability plan'
+    shows which events are routed to each destination.
+    """
 
 
 @observability_destination.command("test")

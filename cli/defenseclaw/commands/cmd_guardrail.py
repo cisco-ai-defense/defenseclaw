@@ -3405,7 +3405,7 @@ def mode_cmd(
     # global mode change needs a restart to reach them.
     outcome = _apply_to_running_gateway(app, needs_restart=True, restart=restart, quiet=json_out)
 
-    plain = {"action": "enforces the policy (blocks what it blocks)", "observe": "logs findings, blocks nothing"}
+    plain = {"action": "blocks findings at or above the block-at severity", "observe": "logs findings, blocks nothing"}
     if connector_key is None:
         message = f"The global guardrail mode is now {new_mode}: it {plain[new_mode]}."
         not_covered = [c for c in actives if _override(c) and policy_catalog.mode_label(_override(c)) != new_mode]

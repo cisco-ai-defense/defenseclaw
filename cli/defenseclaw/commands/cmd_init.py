@@ -2306,11 +2306,29 @@ def _describe_connector_set(report, connectors: list[str]) -> None:
     report.next_commands = _next_commands(report.setup, report.readiness, report, report.profile)
 
 
+def _profile_label(report, connectors: list[str] | None) -> str:
+    """The header's profile, saying 'mixed' when the connectors' modes differ (GAP-1224)."""
+
+    if not connectors or len(connectors) < 2:
+        return report.profile
+    from defenseclaw import config as cfg_mod
+
+    try:
+        cfg = cfg_mod.load(data_dir=report.data_dir)
+        modes = [cfg.guardrail.effective_mode(name) for name in connectors]
+    except Exception:  # noqa: BLE001 - keep the bootstrap profile.
+        return report.profile
+    if len(set(modes)) < 2:
+        return modes[0] or report.profile
+    counts = ", ".join(f"{mode} {modes.count(mode)}" for mode in sorted(set(modes)))
+    return f"mixed ({counts})"
+
+
 def _render_first_run_report(report, renderer, *, connectors: list[str] | None = None) -> None:
     target = (
         f"connectors={len(connectors)}" if connectors and len(connectors) > 1 else f"connector={report.connector}"
     )
-    subtitle = f"status={report.status} {target} profile={report.profile}"
+    subtitle = f"status={report.status} {target} profile={_profile_label(report, connectors)}"
     renderer.title("DefenseClaw First-Run", subtitle)
     renderer.section("Setup")
     for step in report.setup:

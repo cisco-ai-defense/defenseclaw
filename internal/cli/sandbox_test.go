@@ -127,6 +127,9 @@ func TestSandboxCommandTreeCoversThePlan(t *testing.T) {
 		if err != nil || cmd.Flags().Lookup("output") == nil {
 			t.Errorf("sandbox %s has no --output", path)
 		}
+		if err == nil && cmd.Flags().Lookup("json") == nil {
+			t.Errorf("sandbox %s has no --json (GAP-1247)", path)
+		}
 	}
 }
 
@@ -434,5 +437,17 @@ func TestSandboxPackCommandsWithoutAConfig(t *testing.T) {
 	show, _, _ := sandboxCmd.Find([]string{"pack", "show"})
 	if err := sandboxPreRun(show, nil); err == nil {
 		t.Fatal("a broken config.yaml was ignored")
+	}
+}
+
+// GAP-1247: --json is the same as --output json.
+func TestSandboxJSONFlagSelectsJSONOutput(t *testing.T) {
+	cmd := &cobra.Command{Use: "x"}
+	out := outputFlag(cmd)
+	if err := cmd.Flags().Parse([]string{"--json"}); err != nil {
+		t.Fatal(err)
+	}
+	if *out != "json" {
+		t.Fatalf("--json gave output %q", *out)
 	}
 }
