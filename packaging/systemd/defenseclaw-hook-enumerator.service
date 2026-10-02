@@ -37,7 +37,9 @@ ProtectKernelLogs=true
 ProtectKernelModules=true
 ProtectKernelTunables=true
 ReadOnlyPaths=/etc/defenseclaw /opt/defenseclaw
-ReadWritePaths=/etc/defenseclaw/hook-guardian
+# The guardian data dir holds refused-surfaces.json, which the enumerator
+# publishes for the gateway (enterprise.enrollment.unverified_versions).
+ReadWritePaths=/etc/defenseclaw/hook-guardian /var/lib/defenseclaw-hook-guardian
 # CAP_SETUID and CAP_SETGID are also ambient: systemd 255 (Ubuntu 24.04)
 # drops CAP_SETUID from a User= service that filters system calls unless it
 # is in the ambient set, and the per-user workers need both. The kernel
