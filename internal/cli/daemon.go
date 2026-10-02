@@ -247,6 +247,9 @@ func runStart(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("hook cold start skipped: %w", err)
 		}
 		liftHookResourceLimits()
+		restoreGatewayLoginPath(dataDir)
+	} else {
+		recordGatewayLoginPath(dataDir)
 	}
 	lockWait := gatewayStartLockWait
 	if coldStart {
@@ -670,6 +673,7 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	defer release()
+	recordGatewayLoginPath(config.DefaultDataPath())
 	d := daemon.New(config.DefaultDataPath())
 	// Restart may stop an otherwise healthy managed gateway. Validate every
 	// process-identity artifact before that first side effect so malformed or

@@ -97,3 +97,29 @@ func TestStartLockRunsUnlockedWithoutADataDirectory(t *testing.T) {
 	}
 	release()
 }
+
+// GAP-1229: a hook cold start runs with the hook's locked-down PATH. The
+// gateway it starts gets the PATH of the last start from the account's own
+// session first, so agent CLIs such as Codex's node launcher still resolve.
+func TestHookColdStartRestoresTheRecordedLoginPath(t *testing.T) {
+	dataDir := t.TempDir()
+	t.Setenv("PATH", "/opt/node22/bin:relative/bin::/usr/bin")
+	recordGatewayLoginPath(dataDir)
+	info, err := os.Stat(filepath.Join(dataDir, gatewayLoginPathName))
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("recorded PATH file = %v, %v; want a 0600 file", info, err)
+	}
+
+	t.Setenv("PATH", "/home/u/.local/bin:/usr/local/bin:/usr/bin:/bin")
+	restoreGatewayLoginPath(dataDir)
+	if got, want := os.Getenv("PATH"), "/opt/node22/bin:/usr/bin:/home/u/.local/bin:/usr/local/bin:/bin"; got != want {
+		t.Fatalf("cold start PATH = %q, want %q", got, want)
+	}
+
+	// Without a record the hook's PATH stays as it is.
+	t.Setenv("PATH", "/usr/bin:/bin")
+	restoreGatewayLoginPath(t.TempDir())
+	if got := os.Getenv("PATH"); got != "/usr/bin:/bin" {
+		t.Fatalf("PATH without a record = %q", got)
+	}
+}
