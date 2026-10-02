@@ -333,6 +333,21 @@ def test_only_a_0x_import_selects_the_windows_agents(data_dir: Path, recorded: l
 
     migrate(str(data_dir), from_version="0.8.4")
     migrate(str(data_dir))
+    migrate(str(data_dir), from_version="1.0.0")
+
+    assert calls == [str(data_dir)]
+
+
+def test_a_0x_import_with_a_v8_config_selects_the_windows_agents(
+    data_dir: Path, recorded: list[str], monkeypatch
+) -> None:
+    # GAP-1390: 0.8.10 already writes config_version 8 but never recorded the
+    # Codex executable, so the 1.x gateway refused Codex after the upgrade.
+    calls: list[str] = []
+    monkeypatch.setattr(migrations, "_select_windows_agents", calls.append)
+    _write_config(data_dir, "config_version: 8\n")
+
+    migrate(str(data_dir), from_version="0.8.10")
 
     assert calls == [str(data_dir)]
 
