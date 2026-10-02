@@ -1957,6 +1957,54 @@ class DoctorGeneratedHookFreshnessTests(unittest.TestCase):
         # rerunning setup so hooks are regenerated and re-registered).
         self.assertNotIn("doctor --fix", freshness[0]["detail"])
 
+    def test_codex_hook_check_warns_about_another_installs_hooks(self):
+        # GAP-1529: a config.toml copied from another account kept that
+        # install's DefenseClaw hook entries next to ours; doctor said PASS.
+        from defenseclaw.commands import cmd_doctor
+
+        with tempfile.TemporaryDirectory() as tmp:
+            own_home = os.path.join(tmp, "home", ".defenseclaw")
+            cfg = self._make_cfg(own_home)
+            self._write_hook(own_home, "codex-hook.sh", "#!/bin/sh\n# defenseclaw-managed-hook v6\n")
+            other_live = os.path.join(tmp, "other", ".dc", "hooks", "codex-hook.sh")
+            os.makedirs(os.path.dirname(other_live))
+            with open(other_live, "w", encoding="utf-8") as fh:
+                fh.write("#!/bin/sh\n# defenseclaw-managed-hook v6\n")
+            other_gone = os.path.join(tmp, "gone", ".defenseclaw", "hooks", "codex-hook.sh")
+            third_party = os.path.join(tmp, "vendor", "hooks", "codex-hook.sh")
+            os.makedirs(os.path.dirname(third_party))
+            with open(third_party, "w", encoding="utf-8") as fh:
+                fh.write("#!/bin/sh\necho vendor\n")
+            own = os.path.join(own_home, "hooks", "codex-hook.sh")
+            config_toml = os.path.join(tmp, "codex", "config.toml")
+            os.makedirs(os.path.dirname(config_toml))
+            lines = []
+            for script in (own, other_live, other_gone, third_party):
+                lines += [
+                    "[[hooks.PreToolUse]]",
+                    "[[hooks.PreToolUse.hooks]]",
+                    'type = "command"',
+                    f'command = "{script} --event PreToolUse --hook-contract codex-hooks-v4"',
+                    "timeout = 30",
+                ]
+            with open(config_toml, "w", encoding="utf-8") as fh:
+                fh.write("\n".join(lines) + "\n")
+            result = _DoctorResult()
+
+            cmd_doctor._check_codex_hooks(cfg, result, platform_name="posix", config_path=config_toml)
+            clean = _DoctorResult()
+            with open(config_toml, "w", encoding="utf-8") as fh:
+                fh.write("\n".join(lines[:5]) + "\n")
+            cmd_doctor._check_codex_hooks(cfg, clean, platform_name="posix", config_path=config_toml)
+
+        rows = [c for c in result.checks if c["label"] == "Codex hooks of another install"]
+        self.assertEqual([c["status"] for c in rows], ["warn"], result.checks)
+        self.assertIn(other_live, rows[0]["detail"])
+        self.assertIn(other_gone, rows[0]["detail"])
+        self.assertNotIn(third_party, rows[0]["detail"])
+        self.assertNotIn(own + ",", rows[0]["detail"])
+        self.assertEqual([c for c in clean.checks if c["label"] == "Codex hooks of another install"], [])
+
     def test_codex_hook_check_fails_on_the_teardown_placeholder(self):
         # GAP-1312: after uninstall the script is the disabled placeholder
         # (disabledHookTombstone in Go) and config.toml no longer runs it.
