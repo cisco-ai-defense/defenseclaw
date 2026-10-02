@@ -1108,7 +1108,10 @@ def setup_llm(
     click.echo()
     ux.ok(f"Saved to {config_path_for_data_dir(cfg.data_dir)}")
     click.echo()
-    ux.subhead("Next: defenseclaw doctor       # verify the unified LLM is reachable")
+    # doctor's "LLM reachable" row probes the unified LLM, or the judge LLM
+    # when no unified model is set (GAP-1365).
+    which = "the judge LLM" if target_path == "guardrail.judge" else "the LLM"
+    ux.subhead(f"Next: defenseclaw doctor       # checks that {which} is reachable (row 'LLM reachable')")
     if run_ping:
         _run_llm_ping(cfg.resolve_llm(target_path))
 

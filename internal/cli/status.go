@@ -775,6 +775,10 @@ func printSubsystem(name string, h gateway.SubsystemHealth) {
 	if h.LastError != "" {
 		fmt.Printf("             %s %s\n", Dim("last error:"), asciiText(h.LastError))
 	}
+	problem := eventHistoryProblem(h.Details)
+	if problem != "" {
+		fmt.Printf("             %s %s\n", Dim("problem:"), problem)
+	}
 	if len(h.Details) > 0 {
 		keys := make([]string, 0, len(h.Details))
 		for k := range h.Details {
@@ -785,6 +789,9 @@ func printSubsystem(name string, h gateway.SubsystemHealth) {
 			if strings.Contains(k, "password") || strings.Contains(k, "secret") || strings.Contains(k, "token") {
 				continue
 			}
+			if problem != "" && strings.HasPrefix(k, "event_history_") {
+				continue // already said in plain words above
+			}
 			line, ok := formatDetailValue(h.Details[k])
 			if !ok {
 				continue
@@ -793,6 +800,28 @@ func printSubsystem(name string, h gateway.SubsystemHealth) {
 		}
 	}
 	fmt.Println()
+}
+
+// eventHistoryProblem says in plain words why audit events cannot be
+// written, instead of the raw event_history_* tokens (GAP-1308).
+func eventHistoryProblem(details map[string]interface{}) string {
+	if failure, _ := details["event_history_failure"].(string); failure != "sqlite_write_failed" {
+		return ""
+	}
+	class, _ := details["event_history_last_sqlite_class"].(string)
+	switch class {
+	case "full":
+		return "audit events cannot be written because the disk holding the audit database is full; " +
+			"free space on that disk (the gateway resumes writing once there is room)"
+	case "busy_locked":
+		return "audit events cannot be written because another process keeps the audit database locked"
+	case "readonly_cantopen":
+		return "audit events cannot be written because the audit database is read-only or cannot be opened"
+	case "constraint_corrupt":
+		return "audit events cannot be written because the audit database is damaged; run 'defenseclaw doctor'"
+	default:
+		return "audit events cannot be written to the audit database; run 'defenseclaw doctor'"
+	}
 }
 
 func formatDetailValue(v interface{}) (string, bool) {

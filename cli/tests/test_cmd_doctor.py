@@ -393,11 +393,9 @@ class DoctorGuardrailTests(unittest.TestCase):
         # _subsystem_expected_enabled returns None and we fall to
         # the "skip" branch; the post-fix change appends the summary.
         self.assertEqual(row["status"], "skip")
-        self.assertIn(
-            "no OpenClaw fleet configured (standalone mode)",
-            row["detail"],
-            f"summary should be surfaced in detail; got: {row['detail']!r}",
-        )
+        # GAP-1363: a hook-only roster never uses the OpenClaw fleet uplink,
+        # so the row says so instead of repeating the fleet summary.
+        self.assertEqual(row["detail"], "disabled — not used: the configured connectors run through hooks")
 
     @patch("defenseclaw.commands.cmd_doctor._http_probe")
     def test_sidecar_guardrail_row_shows_the_hook_policy_mode(self, mock_probe):
@@ -479,7 +477,7 @@ class DoctorGuardrailTests(unittest.TestCase):
         self.assertEqual(gateway_rows[0]["status"], "skip")
         self.assertEqual(
             gateway_rows[0]["detail"],
-            "disabled (reported by sidecar)",
+            "disabled — not used: the configured connectors run through hooks",
         )
 
     @patch("defenseclaw.commands.cmd_doctor._http_probe")
@@ -1668,7 +1666,15 @@ class VerifyBedrockTests(unittest.TestCase):
         r = _DoctorResult()
         _verify_bedrock("custom-gateway-token-xyz", r)
         self.assertEqual(r.passed, 1, r.checks)
-        self.assertIn("shape not recognized", r.checks[0]["detail"])
+        self.assertIn("not a Bedrock API key format doctor knows", r.checks[0]["detail"])
+
+    @patch("defenseclaw.commands.cmd_doctor._http_probe", return_value=(200, "{}"))
+    def test_short_term_bedrock_api_key_is_probed(self, mock_probe):
+        # GAP-1365: short-term keys from the AWS token generator.
+        r = _DoctorResult()
+        _verify_bedrock("bedrock-api-key-" + "A" * 40, r)
+        mock_probe.assert_called_once()
+        self.assertEqual(r.passed, 1, r.checks)
 
     @patch("defenseclaw.commands.cmd_doctor._http_probe", return_value=(200, "{}"))
     def test_absk_200_is_pass(self, mock_probe):

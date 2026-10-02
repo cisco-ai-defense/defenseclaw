@@ -181,6 +181,29 @@ def test_custody_status_detects_managed_exporter_drift_without_repair(tmp_path: 
     assert target.read_bytes() == before
 
 
+def test_codex_folder_trust_write_is_not_exporter_drift(tmp_path: Path) -> None:
+    # GAP-1330: Codex appends [projects."<dir>"] after setup; the managed
+    # [otel] exporters are unchanged, so this is not drift.
+    db_path = tmp_path / "audit.db"
+    db = _database(db_path)
+    _instance(db, "019b0000-0000-7000-8000-000000000001", "codex", "defenseclaw")
+    db.commit()
+    db.close()
+    headers = '{ x-defenseclaw-source = "codex", x-defenseclaw-client = "codex-otel/1.0" }'
+    managed = "".join(
+        f'[otel.{name}.otlp-http]\nendpoint = "http://127.0.0.1:18970/v1/logs"\nprotocol = "binary"\nheaders = {headers}\n'
+        for name in ("exporter", "trace_exporter", "metrics_exporter")
+    )
+    target = tmp_path / "config.toml"
+    target.write_text(managed)
+    _managed_backup(tmp_path, "codex", target)
+    target.write_text(managed + '\n[projects."/home/u/work"]\ntrust_level = "trusted"\n')
+    assert inspect_connector_custody(db_path, tmp_path, now=NOW).instances[0].managed_config_state == "verified"
+
+    target.write_text('[projects."/home/u/work"]\ntrust_level = "trusted"\n')
+    assert inspect_connector_custody(db_path, tmp_path, now=NOW).instances[0].managed_config_state == "drifted"
+
+
 def test_custody_status_missing_ledger_is_bounded_and_does_not_initialize(tmp_path: Path) -> None:
     missing = tmp_path / "missing.db"
     report = inspect_connector_custody(missing, tmp_path, now=NOW)

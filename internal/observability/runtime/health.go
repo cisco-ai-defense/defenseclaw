@@ -204,6 +204,7 @@ func (runtime *Runtime) DestinationHealthSnapshot(
 		}
 	}
 	for index := range rows {
+		settleInitializingRoute(&rows[index])
 		switch rows[index].CircuitState {
 		case delivery.CircuitOpen:
 			rows[index].State = delivery.HealthFailing
@@ -219,6 +220,20 @@ func (runtime *Runtime) DestinationHealthSnapshot(
 	return DestinationHealthSnapshot{
 		Generation: graph.Generation(), PlanDigest: graph.Digest(), Destinations: rows,
 	}, nil
+}
+
+// settleInitializingRoute reports a route healthy once it has delivered.
+// Each signal starts initializing and leaves that state on its first export,
+// so with light traffic (no spans yet) one idle signal kept the whole route
+// "initializing" although its logs were delivered (GAP-1332). Any degraded or
+// failing signal still outranks initializing and is left as it is.
+func settleInitializingRoute(row *DestinationHealth) {
+	if row.State != delivery.HealthInitializing || row.LastSuccess.IsZero() ||
+		row.LastFailure.After(row.LastSuccess) {
+		return
+	}
+	row.State = delivery.HealthHealthy
+	row.Reason = string(delivery.HealthReasonActivated)
 }
 
 func validDeliveryHealthReason(reason string) bool {

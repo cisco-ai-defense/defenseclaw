@@ -323,3 +323,105 @@ def test_setup_llm_summary_says_why_no_key_is_needed() -> None:
     keyless = LLMConfig(provider="bedrock", bedrock=BedrockKeyConfig(auth_mode="instance_role"))
     assert _llm_key_state(keyless, "") == "(not needed: bedrock auth_mode=instance_role uses AWS credentials)"
     assert _llm_key_state(LLMConfig(provider="bedrock"), "") == "(not set)"
+
+
+def test_retention_days_is_read_from_config_yaml(tmp_path, monkeypatch) -> None:
+    # GAP-1329: the CLI model has no observability.local, so doctor reads the
+    # value the gateway honors from config.yaml.
+    from types import SimpleNamespace
+
+    monkeypatch.delenv("DEFENSECLAW_CONFIG", raising=False)
+    cfg = SimpleNamespace(data_dir=str(tmp_path), observability=SimpleNamespace(connectors={}))
+    assert cmd_doctor._configured_local_retention_days(cfg) == 7
+    (tmp_path / "config.yaml").write_text("observability:\n  local:\n    retention_days: 0\n", encoding="utf-8")
+    assert cmd_doctor._configured_local_retention_days(cfg) == 0
+    (tmp_path / "config.yaml").write_text("observability:\n  local:\n    retention_days: 30\n", encoding="utf-8")
+    assert cmd_doctor._configured_local_retention_days(cfg) == 30
+
+
+def test_windows_hermes_idle_is_healthy_not_pending_reload() -> None:
+    # GAP-1298: with no Hermes process for the account there is nothing to reload.
+    from defenseclaw.doctor_hooks import WindowsHookCheck
+
+    listing = '"pwsh.exe","4100","RDP-Tcp#0","2","90,000 K"\n"defenseclaw-gateway.exe","4200","RDP-Tcp#0","2","40,000 K"\n'
+    assert cmd_doctor._hermes_host_running_windows(listing) is False
+    assert cmd_doctor._hermes_host_running_windows(listing + '"hermes.exe","4300","RDP-Tcp#0","2","9 K"\n') is True
+    assert cmd_doctor._hermes_host_running_windows(listing + '"python.exe","4400","RDP-Tcp#0","2","9 K"\n') is None
+    assert cmd_doctor._hermes_host_running_windows("INFO: No tasks are running.\n") is None
+
+    pending = WindowsHookCheck(
+        "pending-reload",
+        "on-disk Windows-native executable registration is valid; hook_entries=23; running Hermes "
+        "CLI/TUI/gateway/desktop/service hosts are unverified and must be reloaded or restarted; live=false",
+    )
+    with mock.patch.object(cmd_doctor, "_hermes_host_running", return_value=False):
+        idle = cmd_doctor._hermes_idle_native_check(pending, _DoctorResult())
+        assert idle.healthy and "no Hermes host is running" in idle.detail and "live=false" not in idle.detail
+        assert cmd_doctor._hermes_idle_native_check(pending, _DoctorResult(passive=True)) is pending
+    with mock.patch.object(cmd_doctor, "_hermes_host_running", return_value=True):
+        assert cmd_doctor._hermes_idle_native_check(pending, _DoctorResult()) is pending
+
+
+def test_hook_only_doctor_rows_skip_fleet_and_windows_wording_and_flag_bad_mode() -> None:
+    # GAP-1363
+    cfg = mock.MagicMock()
+    cfg.active_connectors.return_value = ["claudecode", "codex"]
+    assert cmd_doctor._fleet_uplink_unused(cfg) is True
+    cfg.active_connectors.return_value = ["codex", "openclaw"]
+    assert cmd_doctor._fleet_uplink_unused(cfg) is False
+
+    repair, detail = cmd_doctor._watchdog_repair_posture(cfg, platform_name="linux")
+    assert repair is False and "windows" not in detail.lower()
+
+    cfg.skill_dirs.return_value = []
+    cfg.plugin_dirs.return_value = []
+    cfg.mcp_servers.return_value = []
+    cfg.guardrail.effective_mode.return_value = "enforce-everything"
+    cfg.guardrail.effective_hook_fail_mode.return_value = "open"
+    cfg.guardrail.effective_rule_pack_dir.return_value = ""
+    cfg.data_dir = ""
+    r = _DoctorResult()
+    cmd_doctor._check_connector_inventory(cfg, "claudecode", r)
+    row = next(c for c in r.checks if c["label"] == "Mode")
+    assert row["status"] == "fail" and "expected observe or action" in row["detail"]
+
+
+def test_judge_only_llm_is_probed_by_llm_reachable(tmp_path, monkeypatch) -> None:
+    # GAP-1365: `setup llm --role judge` leaves the unified model empty.
+    monkeypatch.delenv("DEFENSECLAW_LLM_MODEL", raising=False)
+    cfg = _bedrock_judge_cfg(tmp_path, "api_key")
+    r = _DoctorResult()
+    with mock.patch("defenseclaw.llm.ping", return_value=(True, "ok (1 token)")) as ping:
+        cmd_doctor._check_llm_reachable(cfg, r)
+    assert ping.call_args[0][0].model == "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+    assert r.checks[-1]["status"] == "pass" and r.checks[-1]["detail"].startswith("judge LLM: ")
+
+
+def test_disk_full_audit_writes_read_plainly(tmp_path) -> None:
+    # GAP-1308: a full disk is a FAIL with a next step, and the telemetry
+    # error names the cause instead of internal tokens.
+    details = {
+        "event_history_failure": "sqlite_write_failed",
+        "event_history_last_sqlite_class": "full",
+        "event_history_last_sqlite_primary_code": 13,
+    }
+    assert "disk holding the audit database is full" in cmd_doctor._telemetry_error_reason(details)
+    assert cmd_doctor._telemetry_error_reason({"event_history_failure": ""}) == ""
+
+    from types import SimpleNamespace
+
+    from defenseclaw.doctor_recovery import AuditDBHealthStatus
+
+    health = mock.MagicMock(
+        status=AuditDBHealthStatus.VALID, file_bytes=1024, freelist_bytes=0, oldest_retention_unix_nano=None
+    )
+    cfg = SimpleNamespace(audit_db=str(tmp_path / "audit.db"), data_dir=str(tmp_path), observability=None)
+    r = _DoctorResult()
+    with (
+        mock.patch("defenseclaw.doctor_recovery.inspect_audit_db", return_value=health),
+        mock.patch.object(cmd_doctor.shutil, "disk_usage", return_value=SimpleNamespace(free=0)),
+    ):
+        cmd_doctor._check_audit_db_store(cfg, r)
+    row = next(c for c in r.checks if c["label"] == "Audit storage capacity")
+    assert row["status"] == "fail" and "is full" in row["detail"]
+    assert "free space" in row["remediation"]
