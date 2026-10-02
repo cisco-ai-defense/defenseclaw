@@ -152,13 +152,15 @@ function Remove-Tree([string]$Path) {
     # so a delete that fails is retried for up to 30 seconds. Windows PowerShell
     # cannot delete below MAX_PATH (a venv's bundled data goes deeper under a
     # long profile path), so a failed attempt retries through the \\?\ path.
+    # Only the last attempt may stop: a caught stopping error on an earlier one still
+    # lands in the run log as a TerminatingError although the retry worked.
     for ($attempt = 1; Test-Path -LiteralPath $Path; $attempt++) {
-        try { Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop } catch {
-            try { [IO.Directory]::Delete("\\?\" + [IO.Path]::GetFullPath($Path), $true) } catch { }
-            if (-not (Test-Path -LiteralPath $Path)) { return }
-            if ($attempt -ge 30) { throw }
-            Start-Sleep -Seconds 1
-        }
+        if ($attempt -ge 30) { Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop; return }
+        Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue
+        if (-not (Test-Path -LiteralPath $Path)) { return }
+        try { [IO.Directory]::Delete("\\?\" + [IO.Path]::GetFullPath($Path), $true) } catch { }
+        if (-not (Test-Path -LiteralPath $Path)) { return }
+        Start-Sleep -Seconds 1
     }
 }
 

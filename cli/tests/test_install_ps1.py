@@ -210,3 +210,13 @@ def test_the_upgrade_window_keeps_the_outcome_on_screen_with_yes() -> None:
     assert "[Console]::KeyAvailable" in body and "$Run.Log" in body
     # Windows PowerShell 5.1 runs this installer and has no [uint] accelerator.
     assert '"uint[]"' not in body
+
+
+def test_remove_tree_retries_without_logging_a_terminating_error() -> None:
+    # WIN2-U3-13 item 10: a caught Remove-Item -ErrorAction Stop still wrote
+    # "TerminatingError(Remove-Item)" into the upgrade transcript.
+    text = _text()
+    body = text[text.index("function Remove-Tree") : text.index("function New-InstallDirectory")]
+    retry = body[: body.index("if ($attempt -ge 30)")] + body[body.index("Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue") :]
+    assert "-ErrorAction Stop" not in retry
+    assert "if ($attempt -ge 30) { Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop; return }" in body

@@ -56,26 +56,35 @@ _W_FIXED    = _W_IDX + _W_SEV + _W_TIME + _W_ACTION + _W_TARGET  # = 43
 _SEV_ORDER  = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
 
 
+def _ellipsis() -> str:
+    # Piped or legacy-code-page output is written as ASCII, where the stream
+    # turns "…" into "..." after Rich sized the column (WIN2-U3-13), so
+    # truncate with the ASCII form there and size it correctly.
+    return "…" if ux.unicode_output_enabled() else "..."
+
+
 def _trunc(s: str, width: int) -> str:
     s = s.strip()
     if len(s) <= width:
         return s
-    return s[: width - 1] + "…"
+    ell = _ellipsis()
+    return s[: max(0, width - len(ell))] + ell
 
 
 def _trunc_path(s: str, width: int) -> str:
     s = s.strip()
     if len(s) <= width:
         return s
+    ell = _ellipsis()
     parts = s.rstrip("/").split("/")
     for n in range(1, len(parts) + 1):
         candidate = "/".join(parts[-n:])
-        if len(candidate) + 2 <= width:
-            return "…/" + candidate
+        if len(candidate) + len(ell) + 1 <= width:
+            return ell + "/" + candidate
     tail = parts[-1]
-    if len(tail) + 2 <= width:
-        return "…/" + tail
-    return "…" + s[-(width - 1):]
+    if len(tail) + len(ell) + 1 <= width:
+        return ell + "/" + tail
+    return ell + s[-max(1, width - len(ell)):]
 
 
 _DETAIL_KEY = re.compile(r"[A-Za-z_][\w.]*")
@@ -135,7 +144,7 @@ def _humanize_details(raw: str) -> str:
 
 
 def _findings_json(findings: list[dict], width: int) -> str:
-    suffix = "…"
+    suffix = _ellipsis()
     close = "]"
     parts: list[str] = []
     for f in findings:
@@ -199,6 +208,7 @@ def _render_table(alert_list: list, store, connector: str | None = None) -> None
     was retired in P3-#20. Kept in a helper so the deprecated
     ``--tui`` flag can fall through here without duplicating the
     column/width logic."""
+    from rich import box
     from rich.console import Console
     from rich.markup import escape
     from rich.table import Table
@@ -215,6 +225,7 @@ def _render_table(alert_list: list, store, connector: str | None = None) -> None
             "or [bold]defenseclaw tui[/bold] for the interactive Alerts panel."
         ),
         show_lines=False,
+        box=box.HEAVY_HEAD if ux.unicode_output_enabled() else box.ASCII,
     )
     table.add_column("#",         no_wrap=True)
     table.add_column("Severity",  style="bold", no_wrap=True)

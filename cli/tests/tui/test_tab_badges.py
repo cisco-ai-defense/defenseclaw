@@ -104,6 +104,19 @@ def test_unread_count_caps_at_99() -> None:
     assert app._panel_unread_count("audit") == 99
 
 
+def test_alerts_badge_is_the_open_alert_count_not_unread_delta() -> None:
+    """WIN2-U2-11: the Alerts tab shows the same count as Overview and the
+    status bar, even after the panel was visited."""
+
+    app = DefenseClawTUI(config=_config_for())
+    app.alerts_model.total_count = lambda: 110  # type: ignore[method-assign]
+    app.state_store.record_seen_count("alerts", 107)
+    app.active_panel = "overview"
+    assert app._panel_unread_count("alerts") == 99
+    app.alerts_model.total_count = lambda: 5  # type: ignore[method-assign]
+    assert app._panel_unread_count("alerts") == 5
+
+
 def test_panel_total_count_sums_alerts_streams() -> None:
     """Alerts pulls from both audit_events + egress_events so the
     badge reflects "total things in the alerts feed", not just one
