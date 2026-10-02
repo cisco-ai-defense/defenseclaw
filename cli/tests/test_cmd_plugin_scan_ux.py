@@ -267,6 +267,32 @@ class TestScanHostConnectorResolve(_PluginScanUXBase):
         self.assertEqual(mock_scan.call_args.args[0], plugin_file)
 
 
+class TestScanPathConnector(_PluginScanUXBase):
+    """GAP-1087: a path scan names the connector that owns the path."""
+
+    @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
+    @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
+    def test_scan_path_names_owning_connector(self, mock_scan, _mock_oc) -> None:
+        mock_scan.return_value = self._clean_result()
+        amp_dir = os.path.join(self.tmp_dir, "amp-plugins")
+        hermes_dir = os.path.join(self.tmp_dir, "hermes-plugins")
+        target = os.path.join(hermes_dir, "browser")
+        os.makedirs(amp_dir)
+        os.makedirs(target)
+        self.app.cfg.active_connector = lambda: "amp"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["amp", "hermes"]  # type: ignore[method-assign]
+        self.app.cfg.plugin_dirs = lambda c=None: {  # type: ignore[method-assign]
+            "amp": [amp_dir],
+            "hermes": [hermes_dir],
+        }.get(c, [])
+
+        result = self.invoke(["scan", target])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Scanning 1 plugin on hermes", result.output)
+        self.assertNotIn("on amp", result.output)
+
+
 class TestScanAllSweep(_PluginScanUXBase):
     """P-C: ``plugin scan --all`` sweeps installed plugins across connectors."""
 
