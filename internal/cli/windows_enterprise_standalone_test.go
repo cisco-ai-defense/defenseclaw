@@ -1431,3 +1431,33 @@ func TestWindowsFirstInstallRollbackLeftoverNamesTheElevatedPrompt(t *testing.T)
 		t.Fatalf("warnings = %+v", warnings)
 	}
 }
+
+// An ensure whose install reported success while the host has no deployment
+// fails: ok with exit 0 would tell an MDM the device is protected while
+// nothing is installed (GAP-1079). This is the report the lifecycle returned
+// when an Install finished an earlier installed-CLI purge instead of
+// installing.
+func TestWindowsEnterpriseEnsureFailsWhenInstallLeavesNothingInstalled(t *testing.T) {
+	absent := map[string]any{"schema_version": 1, "ok": true, "action": "status", "installed": false, "transaction_pending": false, "errors": []string{}}
+	stub := &ensureStub{t: t, replies: []map[string]any{
+		absent,
+		{"schema_version": 1, "ok": true, "action": "Uninstall", "installed": false, "transaction_pending": false, "purged": true, "errors": []string{}},
+	}}
+	stub.install(t)
+	command := &cobra.Command{}
+	var stdout bytes.Buffer
+	command.SetOut(&stdout)
+	command.SetErr(&bytes.Buffer{})
+	err := runWindowsEnterpriseStandaloneEnsure(context.Background(), command, ensureTestOptions(), `C:\stage\install-enterprise.ps1`)
+	if got := commandExitCode(err); got != 1603 || len(stub.calls) != 2 || stub.calls[1][1] != "Install" {
+		t.Fatalf("exit %d after runs %q (%v)", got, stub.calls, err)
+	}
+	var result enterprisestatus.Result
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.OK || result.Installed || len(result.Errors) != 1 || result.Errors[0].Code != "not_installed" ||
+		!strings.Contains(result.Errors[0].Message, "nothing protects it") {
+		t.Fatalf("result %+v", result)
+	}
+}

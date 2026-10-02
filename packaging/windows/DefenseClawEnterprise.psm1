@@ -20650,7 +20650,11 @@ function Invoke-DefenseClawSelfUninstallRecovery {
     Remove-DefenseClawSelfUninstallEvidence `
         -Layout $Layout `
         -Receipt $receipt
-    if ([bool]$receipt.purge_requested -and
+    # Only an Uninstall reports the finished purge as its result. Any other
+    # action continues on the now-empty host: an Install that returned the
+    # purge result here reported ok with nothing installed (GAP-1079).
+    if ($Action -eq 'Uninstall' -and
+        [bool]$receipt.purge_requested -and
         -not (Microsoft.PowerShell.Management\Test-Path `
             -LiteralPath $Layout.StateRoot)) {
         $result = Get-DefenseClawLifecycleStatus `

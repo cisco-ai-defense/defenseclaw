@@ -249,7 +249,25 @@ func runWindowsEnterpriseStandaloneAction(
 		report = windowsEnterpriseFailureWithDeploymentState(ctx, cmd, opts, script, report)
 	}
 	applyWindowsEnterpriseInstallerReport(result, opts, report, run)
+	addWindowsEnterpriseNothingInstalledError(result, report, action)
 	return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+}
+
+// addWindowsEnterpriseNothingInstalledError fails an install or upgrade
+// whose lifecycle reported success while the host has no deployment. An MDM
+// or administrator reading ok with exit 0 would treat the device as
+// protected while nothing is installed (GAP-1079).
+func addWindowsEnterpriseNothingInstalledError(result *enterprisestatus.Result, report *windowsEnterpriseInstallerReport, action string) {
+	if action != "install" && action != "upgrade" {
+		return
+	}
+	if report == nil || !report.OK || report.Installed || report.TransactionPending || len(result.Errors) != 0 {
+		return
+	}
+	result.AddError("not_installed", fmt.Sprintf(
+		"%s reported success but left no DefenseClaw deployment on this host, so nothing protects it; run the same command again, and if it repeats keep the enterprise lifecycle log for support",
+		action,
+	))
 }
 
 // windowsEnterpriseFailureWithDeploymentState gives a lifecycle action that
@@ -1459,6 +1477,7 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 	}
 	report = windowsEnterpriseFailureWithDeploymentState(ctx, cmd, opts, script, report)
 	applyWindowsEnterpriseInstallerReport(result, opts, report, run)
+	addWindowsEnterpriseNothingInstalledError(result, report, plan.Action)
 	result.AddWarning("ensure_"+plan.Action, "ensure ran "+plan.Action+": "+plan.Reason)
 	return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 }
