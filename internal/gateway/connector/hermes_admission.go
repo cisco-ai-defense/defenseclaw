@@ -38,6 +38,18 @@ const hermesVersionProbeOutputLimit = int64(4 << 10)
 // the connector's existing hooks instead of rolling them back (GAP-1587).
 var ErrAgentVersionProbeTimeout = errors.New("slow agent probe")
 
+// ErrSetupRefusedUnchanged marks a Setup refusal raised before Setup wrote
+// anything, such as an unsupported Hermes profile topology. Rolling back
+// after it would tear down the hooks an earlier setup installed, so a gateway
+// start keeps them (GAP-1851).
+var ErrSetupRefusedUnchanged = errors.New("connector setup refused before any change")
+
+type setupRefusedUnchanged struct{ err error }
+
+func (e setupRefusedUnchanged) Error() string { return e.err.Error() }
+
+func (e setupRefusedUnchanged) Unwrap() []error { return []error{ErrSetupRefusedUnchanged, e.err} }
+
 var (
 	// hermesVersionProbeTimeout bounds 'hermes --version'. It takes about 4 s
 	// on an idle Windows host and passed 10 s on a busy one (GAP-1587).

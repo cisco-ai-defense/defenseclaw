@@ -578,8 +578,6 @@ class TestClaudeAutoMemory:
             ("named_home", "named profiles"),
             ("profile_directory", "named profile"),
             ("active_profile", "active named profile"),
-            ("multiplex_config", "multiplex profiles"),
-            ("multiplex_env", "multiplex profiles"),
         ],
     )
     def test_hermes_profile_topology_is_rejected(self, fixture, needle, tmp_path, monkeypatch):
@@ -592,15 +590,27 @@ class TestClaudeAutoMemory:
             (home / "profiles" / "coder").mkdir(parents=True)
         elif fixture == "active_profile":
             (home / "active_profile").write_text("coder\n", encoding="utf-8")
-        elif fixture == "multiplex_config":
-            config.write_text("gateway:\n  multiplex_profiles: true\n", encoding="utf-8")
-        elif fixture == "multiplex_env":
-            monkeypatch.setenv("GATEWAY_MULTIPLEX_PROFILES", "on")
         monkeypatch.setenv("HERMES_HOME", str(config.parent))
 
         reason = connector_paths.hermes_profile_unsupported_reason(str(config))
 
         assert needle in reason
+        assert "'hermes profile " in reason  # names the Hermes command that fixes it
+
+    def test_hermes_default_multiplex_without_named_profiles_is_supported(self, tmp_path, monkeypatch):
+        # Hermes writes its default gateway.multiplex_profiles: true by itself;
+        # with no named profile it serves only the default home (GAP-1844).
+        home = tmp_path / "hermes"
+        (home / "profiles").mkdir(parents=True)
+        config = home / "config.yaml"
+        config.write_text(
+            "gateway:\n  multiplex_profiles: true\n  auto_multiplex_migration: true\n  profile_routes: []\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("GATEWAY_MULTIPLEX_PROFILES", "on")
+        monkeypatch.setenv("HERMES_HOME", str(home))
+
+        assert connector_paths.hermes_profile_unsupported_reason(str(config)) == ""
 
     def test_copilot_skill_and_agent_dirs_follow_official_precedence(self, tmp_path, monkeypatch):
         home = tmp_path / "home"

@@ -5110,12 +5110,18 @@ func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns 
 			// Desktop vs Agent CLI probing the same cursor-hooks-v1 contract).
 			// A version probe that ran out of time on a busy host is the same:
 			// it removed working Hermes hooks on a plain restart (GAP-1587).
-			if errors.Is(err, ErrHookContractAdmission) || errors.Is(err, connector.ErrAgentVersionProbeTimeout) {
+			// So is a Setup that refused before writing anything (GAP-1851).
+			if errors.Is(err, ErrHookContractAdmission) || errors.Is(err, connector.ErrAgentVersionProbeTimeout) ||
+				errors.Is(err, connector.ErrSetupRefusedUnchanged) {
 				if restoreErr := restoreFailedConnectorLock(registration.opts.DataDir, registration.conn.Name(), previousLock); restoreErr != nil {
 					fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s setup failed, skipping (other connectors unaffected): %v; restore prior hook contract lock: %v\n", registration.conn.Name(), err, restoreErr)
 					continue
 				}
 				fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s setup failed, skipping (other connectors unaffected): %v\n", registration.conn.Name(), err)
+				if errors.Is(err, connector.ErrSetupRefusedUnchanged) {
+					fmt.Fprintf(os.Stderr, "[guardrail] connector %s kept its earlier hook registration; it is not enforced by this gateway until the refusal is fixed\n", registration.conn.Name())
+					continue
+				}
 				transaction.admissionRefused = append(transaction.admissionRefused, registration.conn.Name())
 				if errors.Is(err, errReleaseContractRefusal) {
 					transaction.releaseRefused = true
@@ -6485,7 +6491,9 @@ func (s *Sidecar) failGuardrailWithRollback(ctx context.Context, opts connector.
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "[guardrail] connector %s %s failed: %v\n", conn.Name(), surface, err)
-	recordAndRollbackFailedConnectorSetup(conn, opts, ctx)
+	if !errors.Is(err, connector.ErrSetupRefusedUnchanged) {
+		recordAndRollbackFailedConnectorSetup(conn, opts, ctx)
+	}
 	if s != nil && s.health != nil {
 		s.health.SetGuardrail(StateError, err.Error(), nil)
 	}

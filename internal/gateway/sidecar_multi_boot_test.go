@@ -1871,6 +1871,30 @@ func TestSetupConnectorsIsolated_SlowVersionProbeKeepsExistingHooks(t *testing.T
 	}
 }
 
+// GAP-1851: a Setup that refused before writing anything (an unsupported
+// Hermes profile topology) keeps the hooks an earlier setup installed.
+func TestSetupConnectorsIsolated_RefusedUnchangedSetupKeepsExistingHooks(t *testing.T) {
+	s := multiBootSidecar(t)
+	refused := &bootStubConnector{
+		stubConnector: stubConnector{name: "claudecode"},
+		setupErr:      fmt.Errorf("Hermes named profile %q is unsupported: %w", "coder", connector.ErrSetupRefusedUnchanged),
+	}
+	peer := &bootStubConnector{stubConnector: stubConnector{name: "codex"}}
+	got, err := s.setupConnectorsIsolated(
+		context.Background(), []connector.Connector{refused, peer},
+		"tok", "127.0.0.1:0", "127.0.0.1:0", "master", guardrail.NewRulePackCache(),
+	)
+	if err != nil {
+		t.Fatalf("setupConnectorsIsolated: %v", err)
+	}
+	if want := []string{"codex"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("survivors=%v, want %v", got, want)
+	}
+	if refused.teardownCalls != 0 {
+		t.Fatalf("refused connector teardownCalls=%d, want 0 (keep its hooks)", refused.teardownCalls)
+	}
+}
+
 // TestSetupConnectorsIsolated_AllFailReturnsEmpty confirms that when every
 // connector fails the result is empty (the caller turns this into a loud boot
 // failure rather than idling on a gateway that protects nothing).
