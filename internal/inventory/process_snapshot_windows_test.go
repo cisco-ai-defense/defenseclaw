@@ -161,8 +161,11 @@ func TestNativeWindowsNamedAgentProcessHelper(t *testing.T) {
 	if os.Getenv("DEFENSECLAW_WINDOWS_PROCESS_HELPER") != "1" {
 		return
 	}
+	_, _ = os.Stdout.WriteString(namedWindowsProcessReady)
 	_, _ = io.Copy(io.Discard, os.Stdin)
 }
+
+const namedWindowsProcessReady = "named-process-helper-ready\n"
 
 type namedWindowsProcessHelper struct {
 	cmd   *exec.Cmd
@@ -183,36 +186,45 @@ func startNamedWindowsProcessHelper(t *testing.T, dir, name string) *namedWindow
 	// activation marker prevents credentials from being copied into a process
 	// whose sole purpose is to appear in a local snapshot.
 	cmd.Env = []string{"DEFENSECLAW_WINDOWS_PROCESS_HELPER=1"}
-	cmd.Stdout = io.Discard
-	cmd.Stderr = io.Discard
-	stdin, err := cmd.StdinPipe()
+	// The helper announces readiness on stdout once its runtime is up. A
+	// first-run image scan can delay that arbitrarily, so the wait is ordered
+	// on the announcement or the helper's exit, never on a wall clock.
+	readyReader, readyWriter, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := cmd.Start(); err != nil {
+	cmd.Stdout = readyWriter
+	cmd.Stderr = io.Discard
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		_ = readyReader.Close()
+		_ = readyWriter.Close()
+		t.Fatal(err)
+	}
+	startErr := cmd.Start()
+	_ = readyWriter.Close()
+	if startErr != nil {
+		_ = readyReader.Close()
 		_ = stdin.Close()
-		t.Fatalf("start %s helper: %v", name, err)
+		t.Fatalf("start %s helper: %v", name, startErr)
 	}
 	helper := &namedWindowsProcessHelper{cmd: cmd, stdin: stdin, done: make(chan error, 1)}
 	go func() { helper.done <- cmd.Wait() }()
 	t.Cleanup(func() { stopNamedWindowsProcessHelper(t, helper) })
 
-	deadline := time.Now().Add(5 * time.Second)
-	reader := nativeWindowsSnapshotReader{}
-	for {
-		if _, err := reader.Details(cmd.Process.Pid); err == nil {
-			return helper
-		}
-		select {
-		case waitErr := <-helper.done:
-			t.Fatalf("%s helper exited before snapshot readiness: %v", name, waitErr)
-		default:
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("%s helper PID %d did not become queryable", name, cmd.Process.Pid)
-		}
-		time.Sleep(20 * time.Millisecond)
+	// EOF (helper exit) ends the read early; anything but the announcement
+	// means the helper did not reach its blocking stdin read.
+	announcement := make([]byte, len(namedWindowsProcessReady))
+	_, readErr := io.ReadFull(readyReader, announcement)
+	// Keep draining so the helper's final test-framework output cannot block.
+	go func() {
+		_, _ = io.Copy(io.Discard, readyReader)
+		_ = readyReader.Close()
+	}()
+	if readErr != nil || string(announcement) != namedWindowsProcessReady {
+		t.Fatalf("%s helper PID %d did not announce readiness: %q, %v", name, cmd.Process.Pid, announcement, readErr)
 	}
+	return helper
 }
 
 func copyWindowsTestExecutable(t *testing.T, source, destination string) {
@@ -237,19 +249,10 @@ func copyWindowsTestExecutable(t *testing.T, source, destination string) {
 
 func stopNamedWindowsProcessHelper(t *testing.T, helper *namedWindowsProcessHelper) {
 	t.Helper()
+	// Closing stdin ends the helper's only blocking read.
 	_ = helper.stdin.Close()
-	select {
-	case err := <-helper.done:
-		if err != nil {
-			t.Errorf("named process helper exit: %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		_ = helper.cmd.Process.Kill()
-		select {
-		case <-helper.done:
-		case <-time.After(5 * time.Second):
-			t.Errorf("named process helper PID %d did not exit after kill", helper.cmd.Process.Pid)
-		}
+	if err := <-helper.done; err != nil {
+		t.Errorf("named process helper exit: %v", err)
 	}
 }
 

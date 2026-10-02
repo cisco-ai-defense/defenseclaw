@@ -27,9 +27,33 @@ import os
 import sys
 from types import SimpleNamespace
 
+from defenseclaw import __version__
+
+
+def _version_json_record() -> str:
+    return json.dumps(
+        {
+            "schema_version": 1,
+            "name": "defenseclaw-cli",
+            "version": __version__,
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+# Installers and Setup probe the CLI identity with exactly ``--version-json``
+# under a short bound. Answer it before the command tree is imported, as the
+# native Go binaries do, so the probe measures interpreter startup instead of
+# importing every command module (hundreds of modules on a cold Windows host).
+if __name__ == "__main__" and sys.argv[1:] == ["--version-json"]:
+    sys.stdout.write(_version_json_record() + "\n")
+    sys.stdout.flush()
+    raise SystemExit(0)
+
 import click
 
-from defenseclaw import __version__, ux
+from defenseclaw import ux
 from defenseclaw.commands.cmd_acp import acp_cmd
 from defenseclaw.commands.cmd_agent import agent
 from defenseclaw.commands.cmd_aibom import aibom
@@ -183,17 +207,7 @@ def _emit_version_json(ctx: click.Context, _param: click.Parameter | None, value
     """Emit a stable installer-facing version record before config loading."""
     if not value or ctx.resilient_parsing:
         return
-    click.echo(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "name": "defenseclaw-cli",
-                "version": __version__,
-            },
-            separators=(",", ":"),
-            sort_keys=True,
-        )
-    )
+    click.echo(_version_json_record())
     ctx.exit()
 
 

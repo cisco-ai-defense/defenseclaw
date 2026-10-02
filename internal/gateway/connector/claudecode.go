@@ -2084,11 +2084,24 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 				for _, key := range claudeCodeOtelEnvKeys {
 					written, managed := managedEnv[key]
 					current, present := envMap[key]
+					if key == "DEFENSECLAW_FAIL_MODE" {
+						// Only DefenseClaw hooks read this key, so whatever value it
+						// holds is DefenseClaw config: never keep or restore it.
+						delete(envMap, key)
+						continue
+					}
 					if !managed || !present {
 						continue
 					}
 					owned := claudeCodeOtelValueIsManaged(current, written) ||
 						claudeCodeOtelValueLooksManaged(key, current, written)
+					if _, inSnapshot := originalEnv[key]; !owned && !inSnapshot {
+						// The operator's file did not have the key, and the value is
+						// one an earlier release wrote: a stale DefenseClaw block was
+						// put back (by a rollback or another tool), so remove it.
+						currentString, _ := current.(string)
+						owned = currentString != "" && claudeCodeEarlierReleaseEnv[key] == currentString
+					}
 					if !owned && (predecessorSnapshot || exactSnapshotEnv != nil) {
 						// The snapshot restore can already have put the earlier
 						// release's value back; it is still not the operator's.

@@ -109,6 +109,82 @@ func resumeCapturedProcess(pid uint32) error {
 	}
 }
 
+var procIsProcessInJob = windows.NewLazySystemDLL("kernel32.dll").NewProc("IsProcessInJob")
+
+// capturedJobProcessIDHeader is the fixed head of
+// JOBOBJECT_BASIC_PROCESS_ID_LIST; first marks where the ID array starts.
+type capturedJobProcessIDHeader struct {
+	assigned uint32
+	listed   uint32
+	first    uintptr
+}
+
+// capturedJobProcessIDs lists every process currently assigned to job,
+// growing the buffer from NumberOfAssignedProcesses on ERROR_MORE_DATA so a
+// large tree is never truncated.
+func capturedJobProcessIDs(job windows.Handle) ([]uintptr, error) {
+	const word = unsafe.Sizeof(uintptr(0))
+	head := int(unsafe.Offsetof(capturedJobProcessIDHeader{}.first) / word)
+	capacity := 64
+	for {
+		buffer := make([]uintptr, head+capacity)
+		err := windows.QueryInformationJobObject(
+			job,
+			windows.JobObjectBasicProcessIdList,
+			uintptr(unsafe.Pointer(&buffer[0])),
+			uint32(uintptr(len(buffer))*word),
+			nil,
+		)
+		header := (*capturedJobProcessIDHeader)(unsafe.Pointer(&buffer[0]))
+		if err == nil {
+			return buffer[head : head+min(int(header.listed), capacity)], nil
+		}
+		if !errors.Is(err, windows.ERROR_MORE_DATA) {
+			return nil, err
+		}
+		capacity = max(2*capacity, int(header.assigned)+16)
+	}
+}
+
+// waitCapturedJobExited blocks until the processes TerminateJobObject is
+// ending have exited. TerminateJobObject only starts termination; a process
+// releases its handles before its process object is signalled, so after this
+// returns no terminated descendant still holds the captured output pipes and
+// cmd.Wait reaches EOF without racing WaitDelay.
+//
+// The wait has no deadline, like the direct-process wait before it: every
+// listed process is already being force-terminated and runs no more user
+// code, so only kernel teardown remains.
+func waitCapturedJobExited(job windows.Handle) error {
+	ids, err := capturedJobProcessIDs(job)
+	if err != nil {
+		return fmt.Errorf("list captured process tree: %w", err)
+	}
+	for _, id := range ids {
+		process, openErr := windows.OpenProcess(
+			windows.SYNCHRONIZE|windows.PROCESS_QUERY_LIMITED_INFORMATION,
+			false,
+			uint32(id),
+		)
+		if openErr != nil {
+			continue // already gone
+		}
+		// A listed ID can be reused once its process exits; wait only on a
+		// process that is still a member of this job.
+		var member int32
+		ok, _, _ := procIsProcessInJob.Call(uintptr(process), uintptr(job), uintptr(unsafe.Pointer(&member)))
+		var waitErr error
+		if ok != 0 && member != 0 {
+			_, waitErr = windows.WaitForSingleObject(process, windows.INFINITE)
+		}
+		windows.CloseHandle(process)
+		if waitErr != nil {
+			return fmt.Errorf("wait for captured process tree exit: %w", waitErr)
+		}
+	}
+	return nil
+}
+
 func combinedOutputTree(cmd *exec.Cmd, allowManagedBreakaway bool) ([]byte, error) {
 	if cmd.Stdout != nil {
 		return nil, errors.New("exec: Stdout already set")
@@ -193,6 +269,9 @@ func combinedOutputTree(cmd *exec.Cmd, allowManagedBreakaway bool) ([]byte, erro
 	// Reap descendants that did not exit with the direct command. A managed
 	// daemon can survive only by explicitly breaking away from the permitted job.
 	jobErr := windows.TerminateJobObject(job, 1)
+	if jobErr == nil {
+		jobErr = waitCapturedJobExited(job)
+	}
 	waitErr := cmd.Wait()
 	if directWaitErr != nil {
 		directWaitErr = fmt.Errorf("wait for captured process exit: %w", directWaitErr)

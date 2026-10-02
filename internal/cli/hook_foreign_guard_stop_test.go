@@ -130,7 +130,8 @@ func TestForeignHookGuardLetsABlockedSessionStop(t *testing.T) {
 			connector: "devin", file: filepath.Join(".devin", "config.json"), body: claudeForeignHook, key: "session_id",
 			start: "SessionStart", tool: "PreToolUse", stops: []string{"Stop", "SessionEnd"},
 			deny: func(code int, stdout string) bool {
-				return code == 2 && strings.Contains(stdout, `"decision":"block"`)
+				// Devin shows an exit-2 stdout verbatim: the plain reason.
+				return code == 2 && strings.HasPrefix(stdout, "enterprise_foreign_hook_blocked: ")
 			},
 		},
 		{

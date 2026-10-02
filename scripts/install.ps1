@@ -479,14 +479,27 @@ function Update-UserPath([string]$Add = "", [string]$Remove = "") {
     return $true
 }
 
-function Wait-BeforeClose {
-    # `defenseclaw upgrade` runs this installer in a console of its own, which
-    # closes when it exits: keep the outcome on screen unless -Yes was given.
-    if ($Yes -or -not $RunAsFile) { return }
+function Wait-BeforeClose([int]$Code) {
+    # `defenseclaw upgrade` and `rollback` run this installer in a console of
+    # their own, which closes when it exits: keep the outcome on screen. With
+    # -Yes nobody may be watching, so wait a bounded time instead of forever.
+    if (-not $RunAsFile) { return }
     try {
         Initialize-Native
-        if ([DefenseClawInstall.Native]::GetConsoleProcessList((New-Object "uint[]" 4), 4) -eq 1) {
+        # Windows PowerShell 5.1 has no [uint] accelerator, so a uint array threw here
+        # and the catch below closed the window at once.
+        if ([DefenseClawInstall.Native]::GetConsoleProcessList((New-Object "uint32[]" 4), 4) -ne 1) { return }
+        if ($Run.Log) { Write-Host "  Install log: $($Run.Log)" }
+        if (-not $Yes) {
             [void](Read-Host "  Press Enter to close this window")
+            return
+        }
+        $seconds = if ($Code -eq 0) { 15 } else { 120 }
+        Write-Host "  This window closes in $seconds seconds (press any key to close it now)."
+        $deadline = (Get-Date).AddSeconds($seconds)
+        while ((Get-Date) -lt $deadline) {
+            if ([Console]::KeyAvailable) { [void][Console]::ReadKey($true); break }
+            Start-Sleep -Milliseconds 200
         }
     } catch { }
 }
@@ -1610,7 +1623,7 @@ try {
         Invoke-Quietly { Remove-Tree $launchDir }
     }
 }
-Wait-BeforeClose
+Wait-BeforeClose $code
 if ($RunAsFile) { exit $code }
 # `irm | iex` cannot exit, so a failure ends in a terminating error. Raising
 # it from a one-line script block keeps PowerShell 7 from printing an excerpt

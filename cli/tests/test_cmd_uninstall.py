@@ -392,6 +392,16 @@ class WindowsOwnedCleanupTests(unittest.TestCase):
                 with patch.object(cmd_uninstall.time, "sleep"), self.assertRaises(OSError):
                     cmd_uninstall._remove_binaries(plan)
 
+    def test_failed_phase_prints_its_reason_once(self):
+        plan = cmd_uninstall.UninstallPlan(platform_name="win32", remove_binaries=True)
+        refusal = click.ClickException("refusing Windows binary removal:\n  Remove-Item -LiteralPath 'x'")
+        buf = io.StringIO()
+        with patch.object(cmd_uninstall, "_validate_plan", side_effect=refusal), contextlib.redirect_stdout(buf):
+            with self.assertRaises(click.ClickException):
+                cmd_uninstall._execute_plan(plan)
+        self.assertIn("plan validation: failed", buf.getvalue())
+        self.assertNotIn("Remove-Item", buf.getvalue())
+
     def test_windows_developer_install_refusal_names_the_files_to_remove(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "bin"
@@ -503,6 +513,35 @@ class WindowsOwnedCleanupTests(unittest.TestCase):
         self.assertEqual(order, ["validate", "stop", "teardown", "schedule"])
         self.assertEqual(result.phases[-1].status, "scheduled")
         self.assertTrue(result.succeeded)
+
+    def test_binaries_only_leaves_the_running_cli_shim_to_the_helper(self):
+        root = "C:\\Users\\test\\.local\\bin"
+        shim = root + "\\defenseclaw.cmd"
+        gateway = root + "\\defenseclaw-gateway.exe"
+        plan = cmd_uninstall.UninstallPlan(
+            platform_name="win32",
+            install_root=root,
+            gateway_path=gateway,
+            binary_targets=(shim, gateway),
+            data_dir="C:\\Users\\test\\.defenseclaw",
+            managed_venv="C:\\Users\\test\\.defenseclaw\\.venv",
+            remove_binaries=True,
+        )
+        scheduled = []
+        with (
+            patch.object(cmd_uninstall, "_validate_plan"),
+            patch.object(cmd_uninstall, "_running_from_managed_venv", return_value=True),
+            patch.object(cmd_uninstall, "_schedule_deferred_cleanup", side_effect=scheduled.append),
+            patch.object(cmd_uninstall.os.path, "lexists", return_value=True),
+            patch.object(cmd_uninstall.os, "unlink") as unlink,
+            patch.object(cmd_uninstall, "_remove_install_bookkeeping"),
+            patch.object(cmd_uninstall.shutil, "which", return_value=None),
+        ):
+            cmd_uninstall._remove_binaries(plan)
+
+        unlink.assert_called_once_with(gateway)
+        self.assertEqual([p.binary_targets for p in scheduled], [(shim,)])
+        self.assertFalse(scheduled[0].remove_data_dir)
 
     def test_deferred_scheduling_failure_is_nonzero_and_stops_cleanup(self):
         plan = cmd_uninstall.UninstallPlan(

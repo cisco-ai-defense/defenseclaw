@@ -519,9 +519,11 @@ func applyWindowsEnterpriseInstallerReport(
 		addWindowsEnterpriseUserStateWarning(result, report)
 	}
 	addWindowsEnterpriseRecoveryGatewayWarnings(result, report)
-	// Only when nothing above explains it, and never for a committed
-	// uninstall, which leaves nothing to secure.
-	if result.Action != "uninstall" || report.Installed {
+	// Only when nothing above explains it. A completed uninstall leaves
+	// nothing to secure; only a deployment that is still installed (or a
+	// lifecycle stuck mid-transaction) reports why its security is not
+	// complete.
+	if report.Installed || report.TransactionPending {
 		addEnterpriseSecurityIncompleteReasons(result, report.TransactionPending)
 	}
 }

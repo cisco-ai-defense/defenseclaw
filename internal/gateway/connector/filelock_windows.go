@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -151,7 +152,11 @@ func withFileLockMode(path string, managedEnterprise bool, fn func() error) erro
 	}
 	deadline := time.Now().Add(windowsManagedFileLockTimeout)
 	for {
-		err = windows.LockFileEx(handle, flags, 0, 1, 0, overlapped)
+		if managedEnterprise {
+			err = windows.LockFileEx(handle, flags, 0, 1, 0, overlapped)
+		} else {
+			err = lockWindowsFileExclusive(handle, overlapped, lockPath)
+		}
 		if err == nil {
 			break
 		}
@@ -188,6 +193,30 @@ func withFileLockMode(path string, managedEnterprise bool, fn func() error) erro
 	}
 
 	return fn()
+}
+
+// windowsLockContendedHookForTest, when set, is told that a blocking lock
+// acquisition found the lock held and is about to wait for it. Tests use it to
+// prove a contender reached the held lock instead of sleeping and hoping.
+var windowsLockContendedHookForTest atomic.Pointer[func(lockPath string)]
+
+// lockWindowsFileExclusive takes the exclusive byte-range lock on handle,
+// blocking until it is available. A contended attempt is reported to the
+// test hook before the blocking wait.
+func lockWindowsFileExclusive(handle windows.Handle, overlapped *windows.Overlapped, lockPath string) error {
+	err := windows.LockFileEx(
+		handle,
+		windows.LOCKFILE_EXCLUSIVE_LOCK|windows.LOCKFILE_FAIL_IMMEDIATELY,
+		0, 1, 0,
+		overlapped,
+	)
+	if !errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
+		return err
+	}
+	if hook := windowsLockContendedHookForTest.Load(); hook != nil {
+		(*hook)(lockPath)
+	}
+	return windows.LockFileEx(handle, windows.LOCKFILE_EXCLUSIVE_LOCK, 0, 1, 0, overlapped)
 }
 
 // openWindowsManagedFileLock opens or creates a target-owned lock leaf without

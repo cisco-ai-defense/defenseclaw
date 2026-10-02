@@ -290,7 +290,11 @@ func lastJSON(run sandboxHookRun) map[string]interface{} {
 // event-native object a failure on a known event prints with its exit 2.
 var sandboxHookFailObject = map[string]func(sandboxHookRun) bool{
 	"cursor": func(run sandboxHookRun) bool { return lastJSON(run)["permission"] == "deny" },
-	"devin":  func(run sandboxHookRun) bool { return lastJSON(run)["decision"] == "block" },
+	// Devin shows an exit-2 stdout verbatim: a plain reason, never JSON.
+	"devin": func(run sandboxHookRun) bool {
+		out := strings.TrimSpace(run.stdout)
+		return out != "" && !strings.HasPrefix(out, "{")
+	},
 }
 
 func sandboxHookCases() []sandboxHookCase {
@@ -595,7 +599,7 @@ func TestSandboxHooksRenderVerdicts(t *testing.T) {
 		{"kiro bare block", "kiro", "", nil, `{"action":"block","reason":"nope"}`, -1, "", "nope"},
 		{"kiro verdict deny", "kiro", "", nil, `{"action":"allow","hook_output":{"decision":"deny","reason":"nope"}}`, -1, "", "nope"},
 		{"devin allow", "devin", "", nil, `{"action":"allow"}`, 0, "", ""},
-		{"devin block verdict", "devin", "", nil, `{"action":"block","reason":"nope","hook_output":{"decision":"block","reason":"nope"}}`, -1, `{"decision":"block","reason":"nope"}`, ""},
+		{"devin block verdict", "devin", "", nil, `{"action":"block","reason":"nope","hook_output":{"decision":"block","reason":"nope"}}`, -1, "nope", ""},
 		{"devin bare block", "devin", "", nil, `{"action":"block","reason":"nope"}`, -1, any, "nope"},
 		// Context for an observation event is printed without blocking.
 		{"devin context", "devin", `{"hook_event_name":"PostToolUse","tool_name":"exec"}`, nil, `{"action":"alert","hook_output":` + devinContext + `}`, 0, devinContext, ""},

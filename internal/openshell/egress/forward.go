@@ -445,15 +445,29 @@ func (p *Proxy) roundTrip(r *http.Request) (*http.Response, error) {
 
 func (p *Proxy) forwardResponse(resp *http.Response) error {
 	st := forwardStateOf(resp.Request.Context())
-	if st == nil || !st.allowed.CompareAndSwap(false, true) {
+	if st == nil {
 		return nil
 	}
 	t := st.tunnel
+	// A recheck that ends the request only cancels its upstream exchange,
+	// and the Transport can still hand back a response that raced that
+	// cancellation. Refuse it here, before any of it reaches the client:
+	// forwardError answers with the recheck's verdict.
+	if t.ended.Load() != nil {
+		return errForwardEnded
+	}
+	if !st.allowed.CompareAndSwap(false, true) {
+		return nil
+	}
 	e := p.event(EventAllowed, t.principal, t.method, t.dec)
 	e.TunnelID, e.RemoteAddr, e.Status, e.FirstSeen = t.id, st.remoteAddr(), resp.StatusCode, t.flow.open()
 	p.emit(e)
 	return nil
 }
+
+// errForwardEnded fails a forwarded response that arrived after a recheck
+// ended its request.
+var errForwardEnded = errors.New("egress: the request was ended by a recheck")
 
 func (p *Proxy) forwardError(w http.ResponseWriter, r *http.Request, err error) {
 	st := forwardStateOf(r.Context())

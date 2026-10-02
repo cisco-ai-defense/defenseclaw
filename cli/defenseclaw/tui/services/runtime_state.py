@@ -344,8 +344,15 @@ class RuntimePanelModel:
             "No findings at or above the reporting floor. "
             f"{self.snapshot.processes_observed} processes and "
             f"{self.snapshot.connections_observed} connections were watched. "
-            "A quiet table is a clean host, not a blind sensor."
+            + self._quiet_table_note()
         )
+
+    def _quiet_table_note(self) -> str:
+        """Only call a quiet table clean when coverage is not DEGRADED."""
+
+        if self.snapshot.degraded:
+            return "Coverage is partial, so a quiet table is not proof of a clean host."
+        return "A quiet table is a clean host, not a blind sensor."
 
     def inventory_unobserved_count(self) -> int:
         return self._inventory_unobserved
@@ -362,7 +369,7 @@ class RuntimePanelModel:
         if not self.snapshot.rows:
             return (
                 f"No findings at or above the reporting floor. {watched}. "
-                "A quiet table is a clean host, not a blind sensor."
+                + self._quiet_table_note()
             )
         unobserved = self.inventory_unobserved_count()
         parts = [f"{len(self.snapshot.rows)} scored finding(s). {watched}."]

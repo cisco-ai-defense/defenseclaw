@@ -172,6 +172,7 @@ def test_setup_v8_loopback_otlp_needs_and_accepts_allow_private_networks(
     source = load_validate_v8((tmp_path / "config.yaml").read_bytes()).source
     assert source["observability"]["destinations"][0]["network_safety"] == {"allow_private_networks": True}
     assert "add --plaintext" in result.output
+    assert "Generic OTLP: added" in result.output  # WIN2-U3-13: a new destination is not "updated"
 
     # MAC-U2-10: a local collector without TLS needs tls.insecure, which add could not write.
     result = CliRunner().invoke(

@@ -94,8 +94,14 @@ class CommandExecutor:
             process.send_signal(signal.SIGINT)
             try:
                 await asyncio.wait_for(asyncio.shield(process.wait()), timeout=self._cancel_grace)
-            except TimeoutError:
-                process.kill()
+            except asyncio.TimeoutError:
+                # The grace wait is torn down across loop iterations, so the
+                # child can exit naturally and its transport can finish right
+                # at the deadline. asyncio then raises ProcessLookupError from
+                # kill(); the process is already gone, so the cancel still
+                # completes with a single cancelled result.
+                with contextlib.suppress(ProcessLookupError):
+                    process.kill()
                 await asyncio.wait_for(asyncio.shield(process.wait()), timeout=self._cancel_force)
             return True
 
@@ -195,7 +201,7 @@ class CommandExecutor:
                         process.stdout.read(4096),
                         timeout=_PIPE_FRAGMENT_FLUSH_SECONDS,
                     )
-                except TimeoutError:
+                except asyncio.TimeoutError:
                     # A newline-less interactive prompt must become visible
                     # while the child is waiting for stdin. Delay only long
                     # enough to coalesce ordinary cross-chunk line fragments.

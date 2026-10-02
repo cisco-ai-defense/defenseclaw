@@ -71,6 +71,16 @@ func (c *KiroConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	}
 	command := c.hookCommand(opts)
 	v3Command := c.hookCommandForV3Surface(opts)
+	// A workspace copy an earlier Setup wrote for another (or no longer
+	// selected) workspace runs a DefenseClaw hook nothing maintains, for
+	// example after a failed setup rolled the workspace setting back. A
+	// managed Setup reclaims it with the rest of the per-user footprint.
+	var staleErr error
+	if !kiroManaged(opts) {
+		for _, path := range c.staleRecordedKiroHookPaths(opts, c.hookConfigPaths(opts)) {
+			staleErr = errors.Join(staleErr, c.reclaimKiroHookFile(opts, path, v3Command))
+		}
+	}
 	for _, path := range c.hookConfigPaths(opts) {
 		if err := captureManagedFileBackup(opts.DataDir, c.Name(), kiroBackupLogicalName(path), path); err != nil {
 			return fmt.Errorf("kiro capture hook backup %s: %w", path, err)
@@ -118,7 +128,7 @@ func (c *KiroConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	if err := updateManagedFileBackupPostHash(opts.DataDir, c.Name(), kiroSettingsLogicalName, settingsPath); err != nil {
 		return errors.Join(reclaimErr, fmt.Errorf("kiro record settings backup: %w", err))
 	}
-	return reclaimErr
+	return errors.Join(staleErr, reclaimErr)
 }
 
 func (c *KiroConnector) Teardown(_ context.Context, opts SetupOpts) error {
@@ -127,7 +137,9 @@ func (c *KiroConnector) Teardown(_ context.Context, opts SetupOpts) error {
 	if err := migrateKiroGlobalHooksBackup(opts); err != nil {
 		errs = append(errs, fmt.Errorf("kiro migrate hook backup: %w", err))
 	}
-	for _, path := range c.hookCleanupPaths(opts) {
+	cleanup := c.hookCleanupPaths(opts)
+	cleanup = append(cleanup, c.staleRecordedKiroHookPaths(opts, cleanup)...)
+	for _, path := range cleanup {
 		if err := c.reclaimKiroHookFile(opts, path, command); err != nil {
 			errs = append(errs, err)
 		}
@@ -508,63 +520,34 @@ func windowsKiroHookCommandForBinary(hookBinary, surface string, managed bool) s
 }
 
 // windowsKiroPowerShellBridgeForBinary renders the encoded system PowerShell
-// bridge the Kiro command runs. Earlier builds wrote it as the whole command,
-// which lost the block under a PowerShell host. Its script starts the launcher with Process.Start rather than Start-Process
-// -Wait, the bridge Codex and Antigravity use: Start-Process opens its handle
-// to the child only after the child is running, so a launcher that exits at
-// once made it fail with "the process has exited" and PowerShell exit 1,
-// which Kiro treats as proceed. Process.Start keeps the handle CreateProcess
-// returns, so the exit status is always there to read. Redirecting stderr
-// makes .NET pass the agent's own stdin and stdout to the launcher (a
-// GUI-subsystem child gets no standard handles otherwise); the script copies
-// the launcher's stderr, where the block reason is, to its own unchanged.
-// Constrained Language mode (WDAC or AppLocker script enforcement) refuses
-// the .NET calls, which would exit 1 on every call, and Start-Process -Wait
-// loses a fast launcher's status there too. In that mode the script runs the
-// launcher with the call operator and pipes its stdout (empty) to Out-Host:
-// a piped GUI-subsystem launcher is awaited on the handle Process.Start
-// returned, and $LASTEXITCODE is its status. The launcher keeps the agent's
-// stdin and stderr. Continue keeps a host that turns native stderr into
-// error records from ending the script with 1.
-// The arguments are fixed tokens without spaces or quotes. Managed Windows
-// writes the same bridge under the target user token with managed set; there
-// hookBinary is the standalone defenseclaw-hook.exe and the arguments add
-// --enterprise-managed.
+// bridge the Kiro command runs: the shared awaited-hook bridge
+// (windowsAwaitedHookStatements), which starts the launcher with Process.Start
+// and returns a fast-exiting launcher's block, with a Constrained Language
+// mode fallback. Earlier builds wrote this bridge as the whole command, which
+// lost the block under a PowerShell host, so it stays owned for repair and
+// teardown. The arguments are fixed tokens without spaces or quotes, so the
+// rendered bridge is byte-identical to the one those builds wrote. Managed
+// Windows writes the same bridge under the target user token with managed
+// set; there hookBinary is the standalone defenseclaw-hook.exe and the
+// arguments add --enterprise-managed.
 func windowsKiroPowerShellBridgeForBinary(hookBinary, surface string, managed bool) string {
-	arguments := "hook --connector kiro"
+	var extra []string
 	if managed {
-		arguments += " --enterprise-managed"
+		extra = append(extra, "--enterprise-managed")
 	}
 	if surface != "" {
-		arguments += " --hook-surface " + surface
+		extra = append(extra, "--hook-surface", surface)
 	}
-	quoted := strings.Fields(arguments)
-	for i, argument := range quoted {
-		quoted[i] = powershellQuoteLiteral(argument)
-	}
-	script := strings.Join([]string{
-		"$ErrorActionPreference='Stop'",
-		"$env:NoDefaultCurrentDirectoryInExePath='1'",
-		"if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') { $ErrorActionPreference='Continue'; & " +
-			powershellQuoteLiteral(hookBinary) + " " + strings.Join(quoted, " ") + " | Microsoft.PowerShell.Core\\Out-Host; exit $LASTEXITCODE }",
-		"$hookStart=[System.Diagnostics.ProcessStartInfo]::new(" + powershellQuoteLiteral(hookBinary) + "," + powershellQuoteLiteral(arguments) + ")",
-		"$hookStart.UseShellExecute=$false",
-		"$hookStart.RedirectStandardError=$true",
-		"$hookProcess=[System.Diagnostics.Process]::Start($hookStart)",
-		"$hookProcess.StandardError.BaseStream.CopyTo([Console]::OpenStandardError())",
-		"$hookProcess.WaitForExit()",
-		"exit $hookProcess.ExitCode",
-	}, "; ")
-	return windowsSystemPowerShellExe() + " -NoLogo -NoProfile -NonInteractive -EncodedCommand " + powershellEncodedCommand(script)
+	return windowsNativePowerShellHookCommandForBoundEvent("kiro", "", "", hookBinary, extra...)
 }
 
 // legacyWindowsKiroStartProcessHookCommandForBinary is the Start-Process
 // -Wait bridge earlier builds wrote for Kiro. It is never generated.
 func legacyWindowsKiroStartProcessHookCommandForBinary(hookBinary, surface string) string {
 	if surface == "" {
-		return windowsNativePowerShellHookCommandForBoundEvent("kiro", "", "", hookBinary)
+		return legacyStartProcessWindowsNativePowerShellHookCommand("kiro", "", "", hookBinary)
 	}
-	return windowsNativePowerShellHookCommandForBoundEvent("kiro", "", "", hookBinary, "--hook-surface", surface)
+	return legacyStartProcessWindowsNativePowerShellHookCommand("kiro", "", "", hookBinary, "--hook-surface", surface)
 }
 
 // kiroWindowsOwnedHookCommands are the Windows Kiro commands DefenseClaw
@@ -652,6 +635,31 @@ func (c *KiroConnector) hookCleanupPaths(opts SetupOpts) []string {
 		paths = append(paths, workspace)
 	}
 	return uniqueNonEmptyStrings(paths)
+}
+
+// staleRecordedKiroHookPaths lists the v3 hook files a Kiro backup record
+// names that are not in current. The records outlive the workspace setting,
+// so a workspace copy is still found once claw.workspace_dir no longer names
+// it (RHEL-U3-09).
+func (c *KiroConnector) staleRecordedKiroHookPaths(opts SetupOpts, current []string) []string {
+	if strings.TrimSpace(opts.DataDir) == "" {
+		return nil
+	}
+	known := map[string]bool{}
+	for _, path := range current {
+		known[filepath.Clean(path)] = true
+	}
+	var stale []string
+	_ = forEachManagedFileBackup(opts.DataDir, func(b managedFileBackup) error {
+		if b.Connector != c.Name() || !strings.HasPrefix(b.LogicalName, kiroV3HooksLogicalName+"-") ||
+			b.LogicalName != kiroBackupLogicalName(b.Path) || known[filepath.Clean(b.Path)] {
+			return nil
+		}
+		known[filepath.Clean(b.Path)] = true
+		stale = append(stale, b.Path)
+		return nil
+	})
+	return stale
 }
 
 func kiroHooksPath(opts SetupOpts) string {

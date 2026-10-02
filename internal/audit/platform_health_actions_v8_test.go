@@ -370,3 +370,21 @@ func TestAuditPlatformHealthV8ConcurrentDetachDoesNotRaceOrFallback(t *testing.T
 	}
 	<-done
 }
+
+func TestAuditPlatformHealthV8DetailsNameSubsystemAndReason(t *testing.T) {
+	logger := newTestLogger(t)
+	runtime := newTestRuntimeV8Emitter(t, logger.store, router.AdmissionOrdinary)
+	logger.SetRuntimeV8Emitter(runtime)
+	if err := logger.LogActionSeverityConnector(
+		string(ActionGuardrailDegraded), "codex", "hook self-heal Setup failed", "", "codex",
+	); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := logger.store.ListEvents(10)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("rows=%d err=%v", len(rows), err)
+	}
+	if want := "guardrail degraded: hook self-heal Setup failed"; rows[0].Details != want {
+		t.Fatalf("details = %q, want %q", rows[0].Details, want)
+	}
+}

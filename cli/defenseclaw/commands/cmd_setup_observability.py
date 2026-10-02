@@ -248,6 +248,16 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
             name=name or "",
         )
         _require_v8_operator_status(app.cfg.data_dir)
+        destination_name = _destination_name(preset, name, _resolve_inputs(preset, resolved_inputs))
+        # Only picks "added" or "updated" for the summary line. A missing or
+        # unreadable config is the add step's to report, not this lookup's.
+        try:
+            existed = any(
+                existing.get("name") == destination_name
+                for existing in _v8_authored_destinations(app.cfg.data_dir)
+            )
+        except (OSError, ValueError):
+            existed = False
         result, warnings = _add_v8_destination(
             app.cfg.data_dir,
             preset,
@@ -271,7 +281,10 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
             )
         raise click.ClickException(message) from exc
     mode = "DRY-RUN " if dry_run else ""
-    changed = "updated" if result.changed else "already configured"
+    if not result.changed:
+        changed = "already configured"
+    else:
+        changed = "updated" if existed else "added"
     click.echo(f"  {mode}{preset.display_name}: {changed}")
     echo_setup_notes(preset, warnings)
 

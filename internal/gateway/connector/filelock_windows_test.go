@@ -526,16 +526,26 @@ func TestOrdinaryWindowsFileLockRetainsBlockingSemantics(t *testing.T) {
 		t.Fatalf("hold ordinary contention fixture: %v", err)
 	}
 
+	contended := make(chan struct{})
+	report := func(lockPath string) {
+		if lockPath == path+".lock" {
+			close(contended)
+		}
+	}
+	windowsLockContendedHookForTest.Store(&report)
+	t.Cleanup(func() { windowsLockContendedHookForTest.Store(nil) })
 	done := make(chan error, 1)
 	go func() {
 		done <- withFileLock(path, func() error { return nil })
 	}()
+	// The contention event fires only once the lock was found held; returning
+	// first means ordinary locking did not wait for the holder.
 	select {
 	case err := <-done:
 		_ = windows.UnlockFileEx(handle, 0, 1, 0, overlapped)
 		_ = hostile.Close()
 		t.Fatalf("ordinary lock returned before contention released: %v", err)
-	case <-time.After(75 * time.Millisecond):
+	case <-contended:
 	}
 	if err := windows.UnlockFileEx(handle, 0, 1, 0, overlapped); err != nil {
 		hostile.Close()
@@ -544,13 +554,8 @@ func TestOrdinaryWindowsFileLockRetainsBlockingSemantics(t *testing.T) {
 	if err := hostile.Close(); err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("ordinary lock after release: %v", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("ordinary blocking lock did not progress after contention release")
+	if err := <-done; err != nil {
+		t.Fatalf("ordinary lock after release: %v", err)
 	}
 }
 

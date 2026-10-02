@@ -236,9 +236,14 @@ def _api_port_free(host: str, port: int) -> bool:
     family = socket.AF_INET6 if ":" in host else socket.AF_INET
     try:
         with socket.socket(family, socket.SOCK_STREAM) as sock:
-            # The gateway listens with SO_REUSEADDR too, so a TIME_WAIT
-            # connection does not count as a holder.
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            if platform_support.host_os() == "windows":
+                # On Windows SO_REUSEADDR lets a bind succeed over another
+                # account's listener, so ask for the port exclusively instead.
+                sock.setsockopt(socket.SOL_SOCKET, getattr(socket, "SO_EXCLUSIVEADDRUSE", -5), 1)
+            else:
+                # The gateway listens with SO_REUSEADDR too, so a TIME_WAIT
+                # connection does not count as a holder.
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             sock.bind((host, port))
     except OSError:
         return False
@@ -251,11 +256,9 @@ def choose_first_run_api_port(cfg: Config) -> str:
     Per-user installs of several accounts on one host all default to 18970.
     The account installed second would otherwise send its hook calls, with its
     token, to the first account's gateway, which refuses them. Only a new
-    config that still has the default port moves, and only on Linux and
-    macOS. Returns a line for the first-run output, or "" when nothing moved.
+    config that still has the default port moves. Returns a line for the
+    first-run output, or "" when nothing moved.
     """
-    if platform_support.host_os() == "windows":
-        return ""
     if int(getattr(cfg.gateway, "api_port", 0) or 0) != _DEFAULT_API_PORT:
         return ""
     from defenseclaw.config import api_bind_host
