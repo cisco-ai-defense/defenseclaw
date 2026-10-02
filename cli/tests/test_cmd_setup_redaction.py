@@ -274,6 +274,24 @@ def test_profile_show_reads_compiler_owned_redaction_profile_catalog(
     assert payload["field_classes"]["content"] == "detect"
 
 
+def test_profile_show_unknown_name_lists_the_profiles(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # GAP-1928: "no compiled profile named X" named no valid profile.
+    monkeypatch.setattr(
+        cmd_setup_redaction,
+        "_effective",
+        lambda _app: {"redaction_profiles": [{"name": n} for n in ("none", "sensitive", "content", "strict")]},
+    )
+
+    result = CliRunner().invoke(redaction, ["profile", "show", "nope"], obj=_app(tmp_path))
+
+    assert result.exit_code == 1, result.output
+    assert "compiled" not in result.output
+    assert (
+        "Error: redaction profile 'nope' not found. Available: content, none, sensitive, strict. "
+        "Run `defenseclaw setup redaction profile list` for details."
+    ) in result.output
+
+
 def test_execute_mutations_binds_write_to_preview_and_verifies_plan(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

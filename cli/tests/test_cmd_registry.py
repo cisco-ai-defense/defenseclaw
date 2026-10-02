@@ -225,7 +225,13 @@ class TestRegistryListShow(RegistryCommandTestBase):
             registry, ["show", "nope"],
             obj=self.app, catch_exceptions=True,
         )
-        self.assertNotEqual(result.exit_code, 0)
+        # GAP-1928: the shared not-found shape with the valid ids, exit 1.
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn(
+            "Error: registry source 'nope' not found. Available: corp-skills. "
+            "Run `defenseclaw registry list` for details.",
+            result.output,
+        )
 
 
 class TestRegistryEdit(RegistryCommandTestBase):

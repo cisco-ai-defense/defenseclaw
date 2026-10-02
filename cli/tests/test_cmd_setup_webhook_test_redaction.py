@@ -35,6 +35,25 @@ class WebhookTestMasksUrl(unittest.TestCase):
         self.assertNotIn(SECRET_PART, result.output)
 
 
+class WebhookUnknownName(unittest.TestCase):
+    """GAP-1928: an unknown name is "Error: ... not found" with the valid names, exit 1."""
+
+    def test_show_and_test_list_the_webhooks(self):
+        view = SimpleNamespace(name="ops", type="slack", url=URL)
+        with tempfile.TemporaryDirectory() as tmp:
+            app = AppContext()
+            app.cfg = SimpleNamespace(data_dir=tmp)
+            with patch("defenseclaw.commands.cmd_setup_webhook.list_webhooks", return_value=[view]):
+                for args in (["show", "nope"], ["test", "nope", "--dry-run"]):
+                    result = CliRunner().invoke(webhook, args, obj=app)
+                    self.assertEqual(result.exit_code, 1, result.output)
+                    self.assertIn(
+                        "Error: webhook 'nope' not found. Available: ops. "
+                        "Run `defenseclaw setup webhook list` for details.",
+                        result.output,
+                    )
+
+
 class WebhookAddWithGatewayStopped(unittest.TestCase):
     """GAP-1399: a saved webhook must not end in a traceback and rc=1."""
 

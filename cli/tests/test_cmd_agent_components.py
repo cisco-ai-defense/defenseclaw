@@ -293,6 +293,9 @@ class ResolveComponentTests(unittest.TestCase):
             client, name="not-real", ecosystem=None)
         self.assertEqual(comp, {})
         self.assertIn("not found", err)
+        # GAP-1928: name the components and the list command.
+        self.assertIn("Available: anthropic, openai.", err)
+        self.assertIn("Run `defenseclaw agent components` for details.", err)
 
     def test_request_failures_surface_as_errors(self):
         client = MagicMock()

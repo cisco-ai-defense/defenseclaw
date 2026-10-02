@@ -42,7 +42,7 @@ from __future__ import annotations
 
 import json as _json
 import os
-from typing import Any
+from typing import Any, NoReturn
 
 import click
 
@@ -298,6 +298,13 @@ def list_cmd(app: AppContext, emit_json: bool, connector: str | None) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _webhook_not_found(name: str, entries: dict[str, Any]) -> NoReturn:
+    """Name the configured webhooks for an unknown name, then exit 1 (GAP-1928)."""
+    message = ux.not_found_message("webhook", name, entries, "defenseclaw setup webhook list")
+    click.echo(f"Error: {message}", err=True)
+    raise SystemExit(1)
+
+
 @webhook.command("show")
 @click.argument("name")
 @click.option("--json", "emit_json", is_flag=True, help="Emit JSON")
@@ -307,8 +314,7 @@ def show_cmd(app: AppContext, name: str, emit_json: bool) -> None:
     entries = {v.name: v for v in list_webhooks(app.cfg.data_dir)}
     v = entries.get(name)
     if v is None:
-        click.echo(f"error: no webhook named {name!r}", err=True)
-        raise SystemExit(2)
+        _webhook_not_found(name, entries)
     if emit_json:
         click.echo(_json.dumps(_view_to_dict(v), indent=2))
         return
@@ -424,11 +430,7 @@ def test_cmd(app: AppContext, name: str, dry_run: bool, timeout: float) -> None:
     entries = {v.name: v for v in list_webhooks(app.cfg.data_dir)}
     v = entries.get(name)
     if v is None:
-        click.echo(f"error: no webhook named {name!r}", err=True)
-        click.echo("  Known webhooks:", err=True)
-        for k in sorted(entries):
-            click.echo(f"    - {k}", err=True)
-        raise SystemExit(2)
+        _webhook_not_found(name, entries)
 
     secret_value = ""
     if v.secret_env:

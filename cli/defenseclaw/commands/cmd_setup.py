@@ -8967,6 +8967,21 @@ def _rollback_failed_connector_application(
             "the gateway could not start, so setup put the previous connector configuration back. "
             "Fix the start error shown above, then run `defenseclaw-gateway start`."
         )
+    elif (
+        type(cause) is _GatewayRestartFailed
+        and not rollback_errors
+        and not gateway_still_down
+        and (not exact_runtime or snapshot.applied_runtime.lifecycle == "running")
+    ):
+        # GAP-1872: the rollback restarted the gateway on the previous
+        # connectors, so "may not be protected, run defenseclaw-gateway
+        # start" sent the user to start a gateway that was already running.
+        failure = click.ClickException(
+            "the gateway could not apply the new connector configuration (see the error above). "
+            f"Setup {outcome}: the gateway is running again with the previous connectors, which "
+            "stay protected. Fix that error, then run the same setup command again; "
+            "`defenseclaw status` shows each connector's current mode."
+        )
     elif isinstance(cause, _GatewayRestartFailed):
         # GAP-1705: the gateway did not start; say that (with its next steps)
         # instead of a reference that is the same for every such failure.
@@ -10543,9 +10558,12 @@ def _default_batch_judge_labels(
     gc,
     display_by_connector: dict[str, str],
 ) -> list[str]:
-    if not bool(getattr(gc.judge, "enabled", False)):
-        return []
     gate = list(getattr(gc.judge, "hook_connectors", []) or [])
+    if not bool(getattr(gc.judge, "enabled", False)):
+        # GAP-1933: `guardrail judge add X` lists X while the judge is off
+        # and points here to turn it on; keep X checked. The "*" default
+        # still means nothing is preselected for a judge that is off.
+        gate = [c for c in gate if c != "*"]
     if gate == ["*"]:
         selected = set(connectors)
     else:
