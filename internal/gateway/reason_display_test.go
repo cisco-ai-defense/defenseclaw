@@ -193,3 +193,24 @@ func TestSanitizeForResponseHonorsManagedRedactionDirective(t *testing.T) {
 		t.Fatalf("managed-raw response reason = %q, want %q", got.Reason, untrusted)
 	}
 }
+
+// GAP-1099: a static block-list verdict reaches the agent as a DefenseClaw
+// block naming the tool, not as a fully redacted reason.
+func TestAgentVerdictReasonNamesBlockListEntry(t *testing.T) {
+	for _, tc := range []struct{ source, want string }{
+		{`tool "Write" is on the static block list`, "(tool Write is on the block list)"},
+		{`mcp server "github" is blocked`, "(MCP server github is on the block list)"},
+	} {
+		display := agentDisplayReason(tc.source, redaction.SinkPolicyDefault)
+		got := agentVerdictReason("block", tc.source, display, redaction.SinkPolicyDefault)
+		if !strings.HasPrefix(got, "DefenseClaw policy blocked this action") || !strings.Contains(got, tc.want) {
+			t.Errorf("agentVerdictReason(%q) = %q, want a DefenseClaw block naming %q", tc.source, got, tc.want)
+		}
+	}
+	// Anything outside the exact shape keeps the existing redaction.
+	odd := `tool "Write; echo x" is on the static block list`
+	display := agentDisplayReason(odd, redaction.SinkPolicyDefault)
+	if got := agentVerdictReason("block", odd, display, redaction.SinkPolicyDefault); got != display {
+		t.Errorf("unexpected rewrite of a non-matching reason: %q", got)
+	}
+}

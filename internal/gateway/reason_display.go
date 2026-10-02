@@ -136,6 +136,13 @@ func agentVerdictReason(action, sourceReason, displayReason string, policy redac
 	if managedEnterpriseActive.Load() || policy != redaction.SinkPolicyDefault {
 		return displayReason
 	}
+	if subject := agentBlockListSubject(sourceReason); action == "block" && subject != "" {
+		if standaloneEnterpriseActive.Load() {
+			return "DefenseClaw blocked this action under your organization's policy (" + subject + "). " +
+				agentBlockNoRetry + " Contact your administrator if you need it allowed."
+		}
+		return "DefenseClaw policy blocked this action (" + subject + "). " + agentBlockNoRetry
+	}
 	if displayReason == sourceReason && !trustedBuiltInMatchReason(sourceReason) {
 		return displayReason
 	}
@@ -159,6 +166,27 @@ func agentVerdictReason(action, sourceReason, displayReason string, policy redac
 	default:
 		return "DefenseClaw policy needs your confirmation for this action (" + rules + ")."
 	}
+}
+
+// agentBlockListReasonPattern matches the two ship-authored block-list
+// reasons (inspect.go): `tool "<name>" is on the static block list` and
+// `mcp server "<name>" is blocked`. The name is the tool or server the agent
+// itself called; any other text fails the match and stays redacted.
+var agentBlockListReasonPattern = regexp.MustCompile(
+	`^(tool|mcp server) "([A-Za-z0-9][A-Za-z0-9._:@/-]{0,127})" (?:is on the static block list|is blocked)$`)
+
+// agentBlockListSubject words a block-list reason for the agent ("tool Write
+// is on the block list"), or returns "" for any other reason. The redacted
+// reason read like a broken hook ("hook error: <redacted ...>") (GAP-1099).
+func agentBlockListSubject(reason string) string {
+	m := agentBlockListReasonPattern.FindStringSubmatch(reason)
+	if m == nil {
+		return ""
+	}
+	if m[1] == "tool" {
+		return "tool " + m[2] + " is on the block list"
+	}
+	return "MCP server " + m[2] + " is on the block list"
 }
 
 // agentOrderedRulePrefix starts the note an ordered tool-call chain match
