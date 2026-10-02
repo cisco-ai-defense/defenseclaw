@@ -281,6 +281,15 @@ func (c *KiroConnector) reclaimKiroHookFile(opts SetupOpts, path, command string
 		if err := removeKiroV3Hooks(path, command); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("kiro remove hook %s: %w", path, err)
 		}
+	} else if present, err := kiroV3FileReferencesHook(path, command); err != nil {
+		return fmt.Errorf("kiro inspect restored hook %s: %w", path, err)
+	} else if present {
+		// A backup captured while the account still held an earlier
+		// enrollment's hooks (whose own backup is gone) put DefenseClaw's
+		// entries back; they go too (GAP-1932).
+		if err := removeKiroV3Hooks(path, command); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("kiro remove hook %s: %w", path, err)
+		}
 	}
 	discardManagedFileBackup(opts.DataDir, c.Name(), logical)
 	return nil
@@ -294,6 +303,14 @@ func (c *KiroConnector) reclaimKiroAgentFile(opts SetupOpts, path, command strin
 		return fmt.Errorf("kiro restore agent %s: %w", path, err)
 	}
 	if !restored {
+		if err := removeKiroV2AgentHooks(path, command); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("kiro remove agent hooks %s: %w", path, err)
+		}
+	} else if present, err := kiroV2AgentReferencesAnyHook(path, command); err != nil {
+		return fmt.Errorf("kiro inspect restored agent %s: %w", path, err)
+	} else if present {
+		// The restored agent came from a backup that already held
+		// DefenseClaw's hooks (GAP-1932).
 		if err := removeKiroV2AgentHooks(path, command); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("kiro remove agent hooks %s: %w", path, err)
 		}

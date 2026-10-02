@@ -1074,6 +1074,12 @@ $guardianFailureDiagnosticPreserved = & $module {
                 connector = 'cursor'
                 sid = 'S-1-5-21-1001'
                 ok = $true
+            },
+            [pscustomobject][ordered]@{
+                connector = 'kiro'
+                sid = 'S-1-5-21-1002'
+                ok = $false
+                pending = $true
             }
         )
     } | Microsoft.PowerShell.Utility\ConvertTo-Json -Compress -Depth 4
@@ -1087,7 +1093,10 @@ $guardianFailureDiagnosticPreserved = & $module {
         $diagnostic -notmatch 'immutable managed runtime generation' -or
         $diagnostic -match [regex]::Escape($secretMarker) -or
         $diagnostic -notmatch 'token=<redacted>' -or
-        $diagnostic -match 'cursor@S-1-5-21-1001') {
+        $diagnostic -match 'cursor@S-1-5-21-1001' -or
+        # GAP-1940: a signed-out account's pending row is no failure.
+        $diagnostic -match 'kiro@S-1-5-21-1002' -or
+        $diagnostic -notmatch 'claudecode@S-1-5-21-1000.*1 target\(s\) of signed-out accounts are pending') {
         throw "guardian live verifier diagnostic was not safely preserved: $diagnostic"
     }
     return $true

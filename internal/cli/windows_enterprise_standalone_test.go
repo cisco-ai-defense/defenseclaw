@@ -1262,7 +1262,9 @@ func TestWindowsEnterpriseUninstallReportsTheUserRegistrationsItLeft(t *testing.
 	attempted := warnings(base + `,"user_registrations_pending":["amp/` + sid + `"],"user_registrations_failed":["kiro/` + sid +
 		`: C:\\Users\\alice\\.kiro\\hooks\\defenseclaw.json still holds DefenseClaw's hook"]}`)
 	if len(attempted) != 2 || attempted[1].Code != "user_registrations_failed" ||
-		!strings.Contains(attempted[1].Message, `defenseclaw.json still holds`) {
+		!strings.Contains(attempted[1].Message, `defenseclaw.json still holds`) ||
+		// GAP-1932: a failed removal names a next step.
+		!strings.Contains(attempted[1].Message, "remove the named DefenseClaw entries from those files as that user, or run DefenseClaw Setup /ensure and then /uninstall") {
 		t.Fatalf("attempted-failure warnings = %+v", attempted)
 	}
 	signedOut := warnings(base + `,"user_registrations_pending":["amp/` + sid + `"],"user_registrations_failed":[]}`)

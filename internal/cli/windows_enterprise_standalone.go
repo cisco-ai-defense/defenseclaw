@@ -734,8 +734,9 @@ func addWindowsEnterpriseUserRegistrationWarnings(result *enterprisestatus.Resul
 	}
 	if len(failed) > 0 {
 		result.AddWarning("user_registrations_failed", fmt.Sprintf(
-			"removing DefenseClaw per-user registrations failed: %s",
+			"removing DefenseClaw per-user registrations failed: %s. The entries that stay are inert (the managed install is gone); remove the named DefenseClaw entries from those files as that user, or %s",
 			windowsEnterpriseBoundedLabels(failed),
+			windowsEnterpriseLocalSystemRemedy("/uninstall"),
 		))
 	}
 }

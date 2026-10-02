@@ -394,3 +394,39 @@ func TestKiroManagedSetupSwitchesTheDefaultAgentWhenTheReclaimFails(t *testing.T
 		t.Fatalf("managed hook registration present = %v, %v", present, err)
 	}
 }
+
+// GAP-1932: a backup captured while the account still held DefenseClaw's
+// Kiro hook and agent files (an earlier enrollment whose own backup is gone)
+// put them back on restore, so teardown failed VerifyClean. The restored
+// files lose DefenseClaw's entries too, and files left with nothing else go.
+func TestKiroManagedTeardownRemovesHooksARestoredBackupPutBack(t *testing.T) {
+	home := t.TempDir()
+	dataDir := t.TempDir()
+	t.Cleanup(func() { KiroHomeOverride = "" })
+	KiroHomeOverride = home
+	opts := SetupOpts{DataDir: dataDir, APIAddr: "127.0.0.1:18970", APIToken: "tok-test", HookFailMode: "closed", ManagedEnterprise: true}
+	conn := NewKiroConnector()
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	if err := os.RemoveAll(filepath.Join(dataDir, "connector_backups")); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup over the earlier registration: %v", err)
+	}
+	if err := conn.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	if err := conn.VerifyClean(opts); err != nil {
+		t.Fatalf("VerifyClean: %v", err)
+	}
+	for _, path := range []string{
+		filepath.Join(home, "hooks", kiroManagedHooksName),
+		filepath.Join(home, "agents", kiroManagedAgentName+".json"),
+	} {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Fatalf("teardown left DefenseClaw's %s (err=%v)", path, err)
+		}
+	}
+}

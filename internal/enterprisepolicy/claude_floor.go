@@ -86,8 +86,11 @@ var claudeVersionPattern = regexp.MustCompile(`^v?[0-9]+\.[0-9]+\.[0-9]+([-+][0-
 type VersionFloorState struct {
 	// Mode is enterprise.machine_policy.connectors.claudecode.version_floor.
 	Mode string `json:"mode"`
-	// Floor is the lowest Claude Code version with a verified hook contract.
-	Floor string `json:"floor"`
+	// Floor is the lowest Claude Code version with a verified hook contract,
+	// or the lowest version of the machine-wide hook drop-in's contract when
+	// that is higher (Reason then says so).
+	Floor  string `json:"floor"`
+	Reason string `json:"reason,omitempty"`
 	// Path is DefenseClaw's floor drop-in.
 	Path string `json:"path"`
 	// Owner says who sets requiredMinimumVersion (defenseclaw,
@@ -130,6 +133,9 @@ func (s VersionFloorState) Summary() string {
 			} else {
 				note += ", which is not a version"
 			}
+		}
+		if s.Reason != "" {
+			note += "; " + s.Reason
 		}
 		return fmt.Sprintf("requiredMinimumVersion %s set by DefenseClaw (%s%s%s), version_floor=%s", s.Value, s.Source, note, ignored, s.Mode)
 	case VersionFloorOwnerAdministrator:
@@ -177,6 +183,39 @@ func ClaudeVersionFloor() string {
 		}
 	}
 	return floor
+}
+
+// claudeMachineContractFloor is the lowest Claude Code version of the hook
+// contract the machine-wide hook drop-in is rendered from, when that is
+// above ClaudeVersionFloor(); empty otherwise. A build below it would read
+// hook events it does not know in DefenseClaw's drop-in and open every
+// session with a settings warning about a file its user cannot fix.
+func (o Options) claudeMachineContractFloor() (string, string) {
+	contractID := strings.TrimSpace(o.ClaudeMachineHookContract)
+	if contractID == "" {
+		return "", ""
+	}
+	base := ClaudeVersionFloor()
+	for _, contract := range connector.KnownHookContracts(claudeConnector) {
+		if contract.ContractID != contractID {
+			continue
+		}
+		minimum := connector.NormalizeAgentVersion(claudeConnector, contract.MinAgentVersion)
+		if minimum != "" && base != "" && compareVersions(minimum, base) > 0 {
+			return minimum, contractID
+		}
+	}
+	return "", ""
+}
+
+// claudeVersionFloorFor is the requiredMinimumVersion DefenseClaw sets for
+// opts: ClaudeVersionFloor(), raised to the lowest version of the machine-wide
+// hook drop-in's contract.
+func claudeVersionFloorFor(opts Options) string {
+	if floor, _ := opts.claudeMachineContractFloor(); floor != "" {
+		return floor
+	}
+	return ClaudeVersionFloor()
 }
 
 func (o Options) claudeVersionFloorMode() string {
@@ -261,7 +300,7 @@ func (p claudeFloorPlan) occupied() bool {
 }
 
 func planClaudeVersionFloor(opts Options, sources []claudeSource, higher []higherClaudeSource) (claudeFloorPlan, error) {
-	plan := claudeFloorPlan{mode: opts.claudeVersionFloorMode(), floor: ClaudeVersionFloor()}
+	plan := claudeFloorPlan{mode: opts.claudeVersionFloorMode(), floor: claudeVersionFloorFor(opts)}
 	path, err := ClaudeVersionFloorPath(opts)
 	if err != nil {
 		return plan, err
@@ -275,7 +314,7 @@ func planClaudeVersionFloor(opts Options, sources []claudeSource, higher []highe
 	}
 	plan.owned = plan.exists && plan.record != nil && plan.record.Path == path &&
 		sha256Hex(plan.current) == plan.record.PostimageSHA256 ||
-		claudeFloorAdoptable(plan.record, path, plan.current, plan.exists)
+		claudeFloorAdoptable(opts, plan.record, path, plan.current, plan.exists)
 	for _, source := range sources {
 		if plan.owned && source.name == path {
 			continue
@@ -312,11 +351,11 @@ func planClaudeVersionFloor(opts Options, sources []claudeSource, higher []highe
 // holds another postimage: DefenseClaw replaced the drop-in (a release that
 // raised the floor) and was stopped before it saved the record. The drop-in
 // is DefenseClaw's. Any other change to it makes it the administrator's.
-func claudeFloorAdoptable(record *ownershipRecord, path string, current []byte, exists bool) bool {
+func claudeFloorAdoptable(opts Options, record *ownershipRecord, path string, current []byte, exists bool) bool {
 	if !exists || record == nil || record.Path != path || sha256Hex(current) == record.PostimageSHA256 {
 		return false
 	}
-	floor := ClaudeVersionFloor()
+	floor := claudeVersionFloorFor(opts)
 	if floor == "" {
 		return false
 	}
@@ -333,7 +372,7 @@ func adoptClaudeVersionFloor(opts Options, path string, state *State) error {
 		return err
 	}
 	current, exists, err := readPolicyFile(opts, path)
-	if err != nil || !claudeFloorAdoptable(record, path, current, exists) {
+	if err != nil || !claudeFloorAdoptable(opts, record, path, current, exists) {
 		return err
 	}
 	record.PostimageSHA256 = sha256Hex(current)
@@ -458,12 +497,24 @@ func purgeUnrecordedClaudeVersionFloor(opts Options, transaction claudeFloorTran
 			return false, err
 		}
 		current, exists, err := readPolicyFile(opts, path)
-		floor := ClaudeVersionFloor()
-		if err != nil || !exists || floor == "" {
+		if err != nil || !exists {
 			return false, err
 		}
-		rendered, err := renderClaudeVersionFloor(floor)
-		return err == nil && bytes.Equal(current, rendered), err
+		// The floor raised to the machine contract's version is
+		// DefenseClaw's rendering too.
+		for _, floor := range []string{ClaudeVersionFloor(), claudeVersionFloorFor(opts)} {
+			if floor == "" {
+				continue
+			}
+			rendered, err := renderClaudeVersionFloor(floor)
+			if err != nil {
+				return false, err
+			}
+			if bytes.Equal(current, rendered) {
+				return true, nil
+			}
+		}
+		return false, nil
 	}
 	if found, err := unrecorded(); err != nil || !found {
 		return false, err
@@ -600,6 +651,10 @@ func inspectClaudeVersionFloor(opts Options, policy config.ResolvedConnectorPoli
 		state.detail("Claude Code version floor: no verified hook contract has a lower bound, so DefenseClaw sets no requiredMinimumVersion")
 		return nil
 	}
+	if raised, contractID := opts.claudeMachineContractFloor(); raised != "" {
+		floor.Reason = fmt.Sprintf("the machine-wide hook drop-in uses hook contract %s, which needs Claude Code %s or later", contractID, raised)
+		state.detail("Claude Code version floor: %s, not %s: %s; older builds would warn about hook events they do not know at every session start", raised, ClaudeVersionFloor(), floor.Reason)
+	}
 	promised := plan.mode == config.ClaudeVersionFloorEnforce && policy.Ownership == config.MachinePolicyOwnershipMerge
 	switch {
 	case plan.effectiveAdmin() && plan.owned && !plan.adminOutranks:
@@ -720,7 +775,7 @@ func exportClaudeVersionFloor(opts Options) ([]byte, error) {
 	if opts.claudeVersionFloorMode() == config.ClaudeVersionFloorOff {
 		return nil, errors.New("the Claude Code version floor is off (enterprise.machine_policy.connectors.claudecode.version_floor)")
 	}
-	floor := ClaudeVersionFloor()
+	floor := claudeVersionFloorFor(opts)
 	if floor == "" {
 		return nil, errors.New("no verified Claude Code hook contract has a lower bound")
 	}

@@ -1107,6 +1107,7 @@ func nativeHookBinaryOwnershipCandidates() []string {
 		hookBinaries,
 		canonicalNativeWindowsHookBinary(),
 		canonicalNativeWindowsInstalledHookBinary(),
+		canonicalStandaloneWindowsHookBinary(),
 		filepath.Join(userHomeDir(), ".local", "bin", windowsHookBinaryName),
 	))
 }

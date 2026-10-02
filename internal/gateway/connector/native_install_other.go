@@ -24,6 +24,10 @@ func canonicalNativeWindowsInstallRoot() string {
 	return ""
 }
 
+func canonicalStandaloneWindowsHookBinary() string {
+	return ""
+}
+
 func canonicalNativeWindowsHookBinary() string {
 	return ""
 }
