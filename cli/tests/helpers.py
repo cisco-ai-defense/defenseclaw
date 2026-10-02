@@ -102,7 +102,7 @@ class _CommandReadModelFixture:
     def __init__(self, store: Store) -> None:
         self.store = store
 
-    def log_scan(self, result: ScanResult) -> None:
+    def log_scan(self, result: ScanResult, *, connector: str | None = None) -> None:
         scan_id = str(uuid.uuid4())
         self.store.insert_scan_result(
             scan_id,

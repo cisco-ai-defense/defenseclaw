@@ -745,3 +745,20 @@ def test_scan_ingress_keeps_only_gateway_finding_fields() -> None:
     wire = recorder.payloads[0]["scan"]["findings"][0]
     assert "confidence" not in wire and "evidence" not in wire
     assert wire["rule_id"] == "plugin.install-script" and wire["line_number"] == 3
+
+
+def test_scan_payload_names_the_connector_when_given() -> None:
+    """GAP-1381: CLI scan telemetry says which connector's asset was scanned."""
+    recorder = _Recorder()
+    result = ScanResult(
+        scanner="skill-scanner",
+        target="/tmp/skills/ws1-notes",
+        timestamp=datetime(2026, 7, 6, tzinfo=timezone.utc),
+        findings=[],
+        duration=timedelta(milliseconds=5),
+    )
+    Logger(recorder).log_scan(result, connector="claudecode")
+    Logger(recorder).log_scan(result)
+
+    assert recorder.payloads[0]["scan"]["connector"] == "claudecode"
+    assert "connector" not in recorder.payloads[1]["scan"]

@@ -2121,7 +2121,7 @@ def _scan_one_local_skill(
         raise SystemExit(1)
 
     if app.logger:
-        app.logger.log_scan(result)
+        app.logger.log_scan(result, connector=connector)
 
     payload: dict[str, Any] | None = None
     if as_json:
@@ -2699,7 +2699,7 @@ def _scan_all(
         telemetry_error: Exception | None = None
         if app.logger:
             try:
-                app.logger.log_scan(result)
+                app.logger.log_scan(result, connector=resolved_connector)
             except Exception as exc:
                 telemetry_error = exc
                 telemetry_errors += 1
@@ -5142,7 +5142,7 @@ def _scan_installed_skill_for_connector(
         raise SystemExit(1)
 
     if app.logger:
-        app.logger.log_scan(result)
+        app.logger.log_scan(result, connector=connector)
 
     _print_result(skill_name, result)
 

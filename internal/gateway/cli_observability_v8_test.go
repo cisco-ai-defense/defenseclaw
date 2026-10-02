@@ -403,3 +403,51 @@ func newCLIObservabilityV8Fixture(
 	api.bindObservabilityV8Runtimes(owner, owner, nil, owner)
 	return fixture, api, capture
 }
+
+// GAP-1381: a CLI skill scan names the connector and the skill, not only the
+// scanner, on scan.completed and finding.observed.
+func TestCLIObservabilityV8ScanNamesConnectorAndSkill(t *testing.T) {
+	fixture, api, _ := newCLIObservabilityV8Fixture(t)
+	body := `{"kind":"scan","run_id":"gap-1381","scan":{"scanner":"skill-scanner","target":"/home/dcr-u/.claude/skills/ws1-notes","connector":"claudecode","timestamp":"2026-07-06T00:00:00Z","duration_ms":5,"findings":[{"id":"rule-1","severity":"INFO","title":"No license","description":"no license","location":"SKILL.md","remediation":"add one","scanner":"skill-scanner","tags":[],"rule_id":"skill.rule-1"}]}}`
+	request := httptest.NewRequest(http.MethodPost, cliObservabilityV8Path, bytes.NewBufferString(body))
+	response := httptest.NewRecorder()
+	api.handleCLIObservabilityV8(response, request)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("status=%d response=%q", response.Code, response.Body.String())
+	}
+	database, err := sql.Open("sqlite", fixture.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	rows, err := database.Query(`SELECT event_name, COALESCE(connector,''), payload_json
+		FROM audit_events WHERE run_id = 'gap-1381'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	seen := 0
+	for rows.Next() {
+		var eventName, connector, payload string
+		if err := rows.Scan(&eventName, &connector, &payload); err != nil {
+			t.Fatal(err)
+		}
+		if eventName != "scan.completed" && eventName != "finding.observed" {
+			continue
+		}
+		seen++
+		if connector != "claudecode" || !strings.Contains(payload, `_ref":"ws1-notes"`) ||
+			strings.Contains(payload, "/home/dcr-u") {
+			t.Errorf("%s connector=%q payload does not name the skill: %s", eventName, connector, payload)
+		}
+		if eventName == "scan.completed" && !strings.Contains(payload, `"defenseclaw.scan.verdict":"warn"`) {
+			t.Errorf("scan.completed with a finding is not warn: %s", payload)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if seen != 2 {
+		t.Fatalf("scan records=%d, want scan.completed and finding.observed", seen)
+	}
+}

@@ -45,6 +45,7 @@ func (l *Logger) emitScanV8(
 	if observedAt.IsZero() {
 		observedAt = time.Now().UTC()
 	}
+	verdict = scanV8Verdict(result, verdict)
 	operations := make([]RuntimeV8LogOperation, 0, len(result.Findings)+1)
 	for index := range result.Findings {
 		finding := result.Findings[index]
@@ -230,7 +231,7 @@ func scanFindingV8Operation(
 			DefenseClawFindingCategory:            optionalScanV8Text(finding.Category),
 			DefenseClawSecuritySeverity:           string(finding.Severity),
 			DefenseClawFindingConfidence:          confidence,
-			DefenseClawFindingTargetRef:           optionalScanV8Identifier(result.Target),
+			DefenseClawFindingTargetRef:           scanV8TargetRef(result.Target),
 			DefenseClawGuardrailEvidenceSummary:   scanFindingV8EvidenceSummary(finding, result),
 			DefenseClawFindingTitle:               optionalScanV8Text(finding.Title),
 			DefenseClawFindingDescription:         optionalScanV8Text(finding.Description),
@@ -348,7 +349,7 @@ func scanSummaryV8Operation(
 			Envelope: envelope, Severity: severity, LogLevel: logLevel, Outcome: outcome,
 			DefenseClawEvaluationID: optionalScanV8Identifier(correlation.EvaluationID),
 			DefenseClawScanID:       scanID, DefenseClawScanScanner: result.Scanner,
-			DefenseClawScanTargetRef:     optionalScanV8Identifier(result.Target),
+			DefenseClawScanTargetRef:     scanV8TargetRef(result.Target),
 			DefenseClawScanTargetType:    optionalScanV8Text(scanner.NormalizeTargetTypeEnum(result.EffectiveTargetType())),
 			DefenseClawScanDurationMs:    observability.Present(result.Duration.Milliseconds()),
 			DefenseClawScanFindingCount:  observability.Present(int64(len(result.Findings))),
@@ -549,6 +550,37 @@ func scanV8SeverityCounts(result *scanner.ScanResult) map[scanner.Severity]int64
 		counts[result.Findings[index].Severity]++
 	}
 	return counts
+}
+
+// scanV8TargetRef names the scanned asset. Skill, plugin and file scans
+// target a filesystem path ("/home/u/.claude/skills/notes",
+// `C:\Users\u\...\notes`), which is not a valid identifier, so the
+// ref used to be dropped and the record never said what was scanned
+// (GAP-1381). Fall back to the last path element: the skill, plugin or file
+// name, without the account's home path.
+func scanV8TargetRef(target string) observability.Optional[string] {
+	if ref := optionalScanV8Identifier(target); ref.IsPresent() {
+		return ref
+	}
+	trimmed := strings.TrimRight(strings.TrimSpace(target), `/\`)
+	if index := strings.LastIndexAny(trimmed, `/\`); index >= 0 {
+		trimmed = trimmed[index+1:]
+	}
+	return optionalScanV8Identifier(trimmed)
+}
+
+// scanV8Verdict keeps an explicit admission verdict. Without one (CLI and
+// hook-time scans), a scan with findings is "warn", never "clean": the
+// enum's default made scan.completed say clean for a skill the CLI counted
+// as having findings (GAP-1381).
+func scanV8Verdict(result *scanner.ScanResult, verdict string) string {
+	if strings.TrimSpace(verdict) != "" || result == nil {
+		return verdict
+	}
+	if len(result.Findings) > 0 {
+		return "warn"
+	}
+	return "clean"
 }
 
 func optionalScanV8Identifier(value string) observability.Optional[string] {

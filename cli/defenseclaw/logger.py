@@ -232,19 +232,19 @@ class Logger:
 
         return cls(_NoRuntimeRecorder())
 
-    def log_scan(self, result: ScanResult) -> None:
-        payload = {
-            "kind": "scan",
-            "run_id": _current_run_id(),
-            "scan": {
-                "scanner": result.scanner,
-                "target": result.target,
-                "timestamp": result.timestamp.isoformat(),
-                "findings": [_scan_finding_wire(finding) for finding in result.findings],
-                "duration_ms": int(result.duration.total_seconds() * 1000),
-            },
+    def log_scan(self, result: ScanResult, *, connector: str | None = None) -> None:
+        scan: dict[str, Any] = {
+            "scanner": result.scanner,
+            "target": result.target,
+            "timestamp": result.timestamp.isoformat(),
+            "findings": [_scan_finding_wire(finding) for finding in result.findings],
+            "duration_ms": int(result.duration.total_seconds() * 1000),
         }
-        self._emit(payload)
+        # Name the agent whose skill/plugin/MCP server was scanned, so the
+        # scan telemetry says which connector the asset belongs to (GAP-1381).
+        if connector:
+            scan["connector"] = connector
+        self._emit({"kind": "scan", "run_id": _current_run_id(), "scan": scan})
 
     def log_action(self, action: str, target: str, details: str) -> None:
         self._emit(
