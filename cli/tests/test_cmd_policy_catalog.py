@@ -164,3 +164,22 @@ def test_activate_with_stopped_gateway_skips_audit_and_succeeds(app, monkeypatch
     result = _invoke(app, ["activate", "permissive"])
     assert result.exit_code == 0, result.output
     assert "it loads this policy when it starts" in result.output
+
+
+def test_create_and_delete_with_stopped_gateway_warn_once_without_traceback(app, monkeypatch):
+    # GAP-1651: the file is written; only the audit event is skipped.
+    from defenseclaw.logger import CanonicalObservabilityUnavailableError
+
+    def _down(*_args, **_kwargs):
+        raise CanonicalObservabilityUnavailableError("no gateway")
+
+    monkeypatch.setattr(app.logger, "log_action", _down)
+    created = _invoke(app, ["create", "gap1651", "--from-preset", "strict"])
+    assert created.exit_code == 0, created.output
+    assert "Policy 'gap1651' created" in created.output
+    assert "Policy created. The gateway isn't running, so the audit event was not recorded" in created.output
+    assert "Traceback" not in created.output
+
+    deleted = _invoke(app, ["delete", "gap1651"])
+    assert deleted.exit_code == 0, deleted.output
+    assert "Policy deleted. The gateway isn't running" in deleted.output

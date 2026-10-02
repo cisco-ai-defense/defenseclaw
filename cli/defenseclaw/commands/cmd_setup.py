@@ -421,25 +421,29 @@ def setup(
 ) -> None:
     """Configure DefenseClaw components.
 
-    Legacy behavior:
-    Multi-connector:
-      One gateway enforces N agent-native connectors (codex, claudecode,
-      hermes, antigravity, omnigent, and others) tracked under guardrail.connectors. Add one
-      with 'defenseclaw setup <connector>' (choose Add when prompted),
-      remove with 'defenseclaw setup remove <name>'. Scope policy per peer
-      with 'defenseclaw guardrail ... --connector X', and inspect the
-      roster with 'defenseclaw status' / 'defenseclaw guardrail status'.
-      Note: OpenClaw/ZeptoClaw use the proxy path and cannot be multi peers.
+    Run 'defenseclaw setup <connector>' to add an agent connector, or one of
+    the subcommands below for guardrails, observability, keys and more.
 
-    Legacy warning:
-    Batch (no subcommand):
-      'defenseclaw setup' with no subcommand launches an interactive
-      active-connector picker (detected connectors pre-checked), then
-      batch mode / optional judge connector pickers. For scripting, select
-      connectors with repeatable '-c/--connector', '--detected', and/or
-      '--all' (e.g. 'defenseclaw setup -c hermes -c codex --mode action').
-      Use '--add-detected --yes' to add newly installed connectors in observe
-      mode without changing the existing active roster or its modes.
+    \b
+    Multi-connector:
+      One gateway enforces several agent-native connectors (codex, claudecode,
+      hermes, antigravity, omnigent and others), listed under
+      guardrail.connectors.
+        Add one:       defenseclaw setup <connector>  (choose Add when asked)
+        Remove one:    defenseclaw setup remove <name>
+        Scope policy:  defenseclaw guardrail ... --connector <name>
+        See them all:  defenseclaw status, defenseclaw guardrail status
+      OpenClaw and ZeptoClaw use the proxy path, so they can't be added this way.
+
+    \b
+    With no subcommand:
+      'defenseclaw setup' opens a connector picker (detected connectors are
+      pre-checked), then asks for the mode and an optional judge connector.
+      For scripts, pick connectors with -c/--connector (repeatable),
+      --detected or --all, for example:
+        defenseclaw setup -c hermes -c codex --mode action
+      Use --add-detected --yes to add newly installed connectors in observe
+      mode without changing the existing connectors or their modes.
     """
     app = ctx.find_object(AppContext)
     if (
@@ -2308,6 +2312,15 @@ def _collect_trusted_prefixes(data_dir: str, cfg=None) -> list[dict[str, object]
     return rows
 
 
+# The gateway route for each connector's hook endpoint (Go HookAPIPath()).
+# Only Claude Code's route differs from its connector name.
+_HOOK_API_ROUTE_NAMES = {"claudecode": "claude-code"}
+
+
+def _hook_api_path(connector: str) -> str:
+    return f"/api/v1/{_HOOK_API_ROUTE_NAMES.get(connector, connector)}/hook"
+
+
 def _emit_trusted_path_result(as_json: bool, *, ok: bool, path: str, message: str) -> None:
     if as_json:
         click.echo(_json.dumps({"ok": ok, "path": path, "message": message}, indent=2))
@@ -2322,7 +2335,6 @@ def _emit_trusted_path_result(as_json: bool, *, ok: bool, path: str, message: st
 def trusted_paths(ctx: click.Context) -> None:
     """Manage directories DefenseClaw trusts for connector-binary discovery.
 
-    Legacy examples:
     Action-mode setup reads a connector's version by executing its binary, but
     only when that binary lives under a trusted prefix — a guard against a
     hostile binary planted on $PATH. Built-in defaults cover system and
@@ -5623,8 +5635,19 @@ def _hilt_support_note(connector: str) -> str:
     return "Support depends on the connector surface."
 
 
-def _configure_hilt_interactive(gc, *, action_connectors: list[str] | None = None) -> None:
-    """Prompt for human approval settings from the guardrail advanced section."""
+def _configure_hilt_interactive(
+    gc,
+    *,
+    action_connectors: list[str] | None = None,
+    flag_enabled: bool | None = None,
+    flag_min_severity: str | None = None,
+) -> None:
+    """Prompt for human approval settings from the guardrail advanced section.
+
+    ``flag_enabled`` / ``flag_min_severity`` are ``--human-approval`` and
+    ``--hilt-min-severity``: when given, the prompts default to them, so
+    pressing Enter keeps what the command line asked for (GAP-1614).
+    """
     ux.section("Human Approval (HILT)")
     if action_connectors is not None:
         if not action_connectors:
@@ -5641,13 +5664,16 @@ def _configure_hilt_interactive(gc, *, action_connectors: list[str] | None = Non
         connector = gc.connector or "openclaw"
     ux.subhead(_hilt_support_note(connector))
     ux.subhead("CRITICAL findings still block. HILT can confirm risky HIGH findings first.")
-    enabled = click.confirm("  Human approval for risky actions?", default=gc.hilt.enabled)
+    enabled = click.confirm(
+        "  Human approval for risky actions?",
+        default=gc.hilt.enabled if flag_enabled is None else flag_enabled,
+    )
     gc.hilt.enabled = enabled
     if not enabled:
         gc.hilt.min_severity = gc.hilt.min_severity or "HIGH"
         return
 
-    default_min = (gc.hilt.min_severity or "HIGH").upper()
+    default_min = (flag_min_severity or gc.hilt.min_severity or "HIGH").upper()
     if default_min not in _HILT_MIN_SEVERITIES:
         default_min = "HIGH"
     gc.hilt.min_severity = click.prompt(
@@ -6539,12 +6565,16 @@ def setup_guardrail(
                 click.echo("  ℹ Cisco AI Defense credentials not configured — using local scanner only")
     else:
         secret_collection_failure_code: str | None = None
+        if guard_mode or human_approval is not None or hilt_min_severity:
+            click.echo("  The prompts below default to the flags you passed; add --yes to skip them.")
         try:
             interactive_completed = _interactive_guardrail_setup(
                 app,
                 gc,
                 agent_name=agent_name,
                 default_mode=guard_mode,
+                human_approval=human_approval,
+                hilt_min_severity=hilt_min_severity,
                 _pre_mutation_selection=preselect_guardrail_targets,
                 _pending_secrets=pending_guardrail_secrets,
             )
@@ -9469,7 +9499,7 @@ def _print_connector_observability_banner(connector: str, *, mode: str = "observ
         click.echo("    • Hooks      — five bound lifecycle events → /api/v1/antigravity/hook")
         click.echo("                   only PreToolUse carries documented ask/deny output")
     else:
-        click.echo(f"    • Hooks      — tool calls, prompt-submit, agent stop → /api/v1/{connector}/hook")
+        click.echo(f"    • Hooks      — tool calls, prompt-submit, agent stop → {_hook_api_path(connector)}")
     native_otel_connectors = {"codex", "claudecode", "omnigent"}
     if connector in native_otel_connectors:
         if connector == "omnigent":
@@ -12618,6 +12648,8 @@ def _interactive_guardrail_setup(
     *,
     agent_name: str | None = None,
     default_mode: str | None = None,
+    human_approval: bool | None = None,
+    hilt_min_severity: str | None = None,
     _pre_mutation_selection=None,
     _pending_secrets: list[_PendingGuardrailSecret] | None = None,
 ) -> bool:
@@ -12849,7 +12881,12 @@ def _interactive_guardrail_setup(
         hilt_action_connectors = None
         hilt_applicable = gc.mode == "action"
     if hilt_applicable:
-        _configure_hilt_interactive(gc, action_connectors=hilt_action_connectors)
+        _configure_hilt_interactive(
+            gc,
+            action_connectors=hilt_action_connectors,
+            flag_enabled=human_approval,
+            flag_min_severity=hilt_min_severity,
+        )
 
     ux.section("Scanner engine")
     click.echo(

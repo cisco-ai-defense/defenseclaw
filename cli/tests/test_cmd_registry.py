@@ -291,6 +291,25 @@ class TestRegistryRemove(RegistryCommandTestBase):
         ids = [s.id for s in self.app.cfg.registries.sources]
         self.assertNotIn("corp-skills", ids)
 
+    def test_remove_accepts_yes_like_other_confirm_commands(self):
+        result = self.invoke(["remove", "corp-skills", "--yes"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertNotIn("corp-skills", [s.id for s in self.app.cfg.registries.sources])
+
+    def test_remove_with_stopped_gateway_warns_without_traceback(self):
+        from unittest.mock import patch
+
+        from defenseclaw.logger import CanonicalObservabilityUnavailableError
+
+        with patch.object(
+            self.app.logger, "log_action", side_effect=CanonicalObservabilityUnavailableError("no gateway")
+        ):
+            result = self.runner.invoke(registry, ["remove", "corp-skills", "--yes"], obj=self.app)
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("The gateway isn't running, so the audit event was not recorded", result.output)
+        self.assertIn("Removed registry source", result.output)
+        self.assertIsNone(result.exception)
+
     def test_remove_clears_associated_asset_policy_rules(self):
         from defenseclaw.config import AssetPolicyRule
 

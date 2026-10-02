@@ -925,7 +925,12 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
             self.assertIn(connector, result.output)
         self.assertIn("codex, claudecode", result.output)
         self.assertIn("hermes, antigravity", result.output)
-        self.assertIn("OpenClaw/ZeptoClaw use the proxy path", result.output)
+        self.assertIn("OpenClaw and ZeptoClaw use the proxy path", result.output)
+        # GAP-1628: no leftover "Legacy ..." labels or run-together paragraphs.
+        self.assertNotIn("Legacy", result.output)
+        self.assertIn("Multi-connector:\n", result.output)
+        self.assertIn("With no subcommand:\n", result.output)
+        self.assertNotIn("claudecode,   hermes", result.output)
         self.assertNotIn("antigravity, openclaw", result.output)
         self.assertNotIn("openclaw) tracked under guardrail.connectors", result.output)
 

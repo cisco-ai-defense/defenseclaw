@@ -588,6 +588,14 @@ def _apply_mutation(
             return _delete_existing(text, parent_node, parent_part, node)
         if _same_value(current, mutation.value):
             return text
+        key_node = _mapping_pair(parent_node, parent_part)[0] if (
+            isinstance(parent_node, MappingNode) and isinstance(parent_part, str)
+        ) else None
+        expanded = _expand_empty_flow_value(
+            text, parent_node, key_node, node, mutation.value, newline, source_name, path
+        )
+        if expanded is not None:
+            return expanded
         rendered = _render_replacement(mutation.value, node, newline, source_name, path)
         end = node.end_mark.index
         if isinstance(node, (MappingNode, SequenceNode)) and not node.flow_style:
@@ -640,21 +648,35 @@ def _insert_missing(
 ) -> str:
     node = root
     current = value
+    parent: Node | None = None
+    key_node: Node | None = None
     for offset, part in enumerate(path):
         remainder = path[offset + 1 :]
         if isinstance(part, str) and isinstance(node, MappingNode) and isinstance(current, dict):
             found = _mapping_pair(node, part)
             if found is None or part not in current:
                 nested = _build_missing_value(remainder, replacement, source_name, path)
+                expanded = _expand_empty_flow_value(
+                    text, parent, key_node, node, {part: nested}, newline, source_name, path
+                )
+                if expanded is not None:
+                    return expanded
                 return _insert_mapping_entry(text, node, part, nested, newline, source_name, path)
-            _, node = found
+            parent = node
+            key_node, node = found
             current = current[part]
             continue
         if isinstance(part, int) and isinstance(node, SequenceNode) and isinstance(current, list):
             if part == len(node.value):
                 nested = _build_missing_value(remainder, replacement, source_name, path)
+                expanded = _expand_empty_flow_value(
+                    text, parent, key_node, node, [nested], newline, source_name, path
+                )
+                if expanded is not None:
+                    return expanded
                 return _append_sequence_item(text, node, nested, newline, source_name, path)
             if 0 <= part < len(node.value):
+                parent, key_node = node, None
                 node = node.value[part]
                 current = current[part]
                 continue
@@ -689,6 +711,46 @@ def _build_missing_value(
                 path=path,
             )
     return nested
+
+
+def _expand_empty_flow_value(
+    text: str,
+    parent: Node | None,
+    key_node: Node | None,
+    node: Node,
+    value: Any,
+    newline: str,
+    source_name: str,
+    path: YAMLPath,
+) -> str | None:
+    """Write ``key: {}`` / ``key: []`` that gains content as a block collection.
+
+    A fresh config holds ``observability: {}``.  Keeping that empty flow style
+    would put the whole first destination on one very long line, so an empty
+    flow value of a block-mapping key is rewritten in block style instead.
+    Returns ``None`` when the shape is anything else (the caller keeps the
+    existing style).
+    """
+
+    if not (isinstance(parent, MappingNode) and not parent.flow_style and isinstance(key_node, ScalarNode)):
+        return None
+    if not (isinstance(node, (MappingNode, SequenceNode)) and node.flow_style and not node.value):
+        return None
+    if not isinstance(value, (dict, list)) or not value:
+        return None
+    if key_node.start_mark.line != node.start_mark.line:
+        return None
+    line_end = text.find("\n", node.end_mark.index)
+    if text[node.end_mark.index : len(text) if line_end < 0 else line_end].strip():
+        return None  # a comment or more content follows on the same line
+    start = node.start_mark.index
+    while start > 0 and text[start - 1] in " \t":
+        start -= 1
+    if start == 0 or text[start - 1] != ":":
+        return None
+    block = _dump_block(value, newline, source_name, path).rstrip("\r\n")
+    block = _prefix_lines(block, " " * (key_node.start_mark.column + 2), newline)
+    return text[:start] + newline + block + text[node.end_mark.index :]
 
 
 def _insert_mapping_entry(
