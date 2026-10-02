@@ -1292,6 +1292,7 @@ class TestCheckHookContractLock(unittest.TestCase):
         check = r.checks[-1]
         self.assertEqual(check["status"], "fail")
         self.assertIn("exact_setup_executable_evidence=missing", check["detail"])
+        self.assertIn("run `defenseclaw setup opencode --yes`", check["detail"])
 
     def test_windows_opencode_known_lock_with_digest_drift_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1323,6 +1324,8 @@ class TestCheckHookContractLock(unittest.TestCase):
         check = r.checks[-1]
         self.assertEqual(check["status"], "fail")
         self.assertIn("exact_setup_executable_evidence=invalid:digest", check["detail"])
+        self.assertIn("executable changed since setup sealed it", check["detail"])
+        self.assertIn("run `defenseclaw setup opencode --yes` to re-seal it", check["detail"])
 
     def test_non_windows_opencode_seal_does_not_suppress_version_drift(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

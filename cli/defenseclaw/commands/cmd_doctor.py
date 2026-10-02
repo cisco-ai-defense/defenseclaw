@@ -11044,6 +11044,14 @@ def _check_hook_contract_lock(
             _emit("fail", "Hook contract", detail + f" expected_hook_fail_mode={expected_cursor_fail_mode}", r=r)
             return
     if windows_protected_authority_missing or windows_protected_authority_invalid:
+        from defenseclaw.hook_integrity import setup_command
+
+        if windows_protected_authority_invalid == "digest":
+            # Amp updates itself at launch, which changes the sealed executable
+            # (GAP-1050); agent= above is the version setup sealed.
+            detail += f"; the {connector} executable changed since setup sealed it (an agent update does this)"
+        action = "re-seal" if windows_protected_authority_invalid else "seal"
+        detail += f"; run `{setup_command(connector)} --yes` to {action} it"
         _emit("fail", "Hook contract", detail, r=r)
     elif native_runtime is not None and not native_runtime.healthy:
         _emit("fail", "Hook contract", detail, r=r)

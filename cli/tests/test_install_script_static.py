@@ -538,3 +538,93 @@ def test_both_installers_keep_uv_downloads_in_the_data_dir() -> None:
     assert 'NOT_DATA=".venv .uv ' in posix
     assert '$env:UV_CACHE_DIR = Join-Path $DataDir ".uv\\cache"' in windows
     assert '$env:UV_PYTHON_INSTALL_DIR = Join-Path $DataDir ".uv\\python"' in windows
+
+
+def _uv_bootstrap(tmp_path: Path, free_kb: int) -> subprocess.CompletedProcess[str]:
+    # The installer's uv bootstrap and free-space preflight, from the UV_*
+    # exports to the first write of the staging dir.
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    snippet = text[text.index('export UV_CACHE_DIR="') : text.index('rm -rf "${STAGING}"\nmkdir -p "${STAGING}/bin"')]
+    install_uv = text[text.index("install_uv() {") : text.index("\n}\n", text.index("install_uv() {")) + 3]
+    home = tmp_path / "home"
+    data_dir = home / ".defenseclaw"
+    data_dir.mkdir(parents=True)
+    bin_dir = home / ".local" / "bin"
+    fake = tmp_path / "fake"
+    fake.mkdir()
+    (fake / "df").write_text(f"#!/bin/sh\necho head\necho fs 1 1 {free_kb} 1% /\n", encoding="utf-8")
+    (fake / "curl").write_text("#!/bin/sh\necho CURL-CALLED\nexit 1\n", encoding="utf-8")
+    for name in ("df", "curl"):
+        (fake / name).chmod(0o755)
+    script = tmp_path / "uv.sh"
+    script.write_text(
+        'set -euo pipefail\nerr() { echo "err: $*"; }\ndie() { err "$@"; exit 1; }\ninfo() { echo "info: $*"; }\n'
+        "has() { command -v \"$1\" >/dev/null 2>&1; }\n"
+        f'OS=darwin ARCH=arm64 UV_VERSION=0 DEFENSECLAW_HOME="{data_dir}" BIN_DIR="{bin_dir}"\n'
+        f'PATH="{fake}:/usr/bin:/bin"\nunset UV_CACHE_DIR UV_PYTHON_INSTALL_DIR\n'
+        + install_uv
+        + snippet
+        + 'echo "uv=$(command -v uv)"\n',
+        encoding="utf-8",
+    )
+    return _run([str(script)], tmp_path)
+
+
+def test_a_uv_in_bin_dir_off_path_is_used_not_replaced(tmp_path: Path) -> None:
+    # GAP-1125: with ~/.local/bin off PATH the installer downloaded its pinned
+    # uv over the user's newer one and recorded it as its own.
+    bin_dir = tmp_path / "home" / ".local" / "bin"
+    bin_dir.mkdir(parents=True)
+    (bin_dir / "uv").write_text("#!/bin/sh\necho users-uv\n", encoding="utf-8")
+    (bin_dir / "uv").chmod(0o755)
+
+    proc = _uv_bootstrap(tmp_path, free_kb=10 * 1024 * 1024)
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert f"uv={bin_dir / 'uv'}" in proc.stdout
+    assert "Installing uv" not in proc.stdout and "CURL-CALLED" not in proc.stdout
+    assert (bin_dir / "uv").read_text(encoding="utf-8") == "#!/bin/sh\necho users-uv\n"
+    assert not (bin_dir / "defenseclaw-uv.sha256").exists()
+
+
+def test_install_uv_never_replaces_an_existing_uv(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "home" / ".local" / "bin"
+    bin_dir.mkdir(parents=True)
+    (bin_dir / "uvx").write_text("mine", encoding="utf-8")
+    fake = tmp_path / "fake"
+    fake.mkdir()
+    (fake / "curl").write_text("#!/bin/sh\necho CURL-CALLED\nexit 1\n", encoding="utf-8")
+    (fake / "curl").chmod(0o755)
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    func = text[text.index("install_uv() {") : text.index("\n}\n", text.index("install_uv() {")) + 3]
+    script = tmp_path / "guard.sh"
+    script.write_text(
+        f'set -euo pipefail\nOS=darwin ARCH=arm64 UV_VERSION=0 BIN_DIR="{bin_dir}"\nPATH="{fake}:/usr/bin:/bin"\n'
+        + func
+        + 'rc=0; install_uv || rc=$?; echo "rc=$rc"\n',
+        encoding="utf-8",
+    )
+
+    out = _run([str(script)], tmp_path).stdout
+
+    assert "rc=1" in out and "CURL-CALLED" not in out
+    assert (bin_dir / "uvx").read_text(encoding="utf-8") == "mine"
+
+
+def test_a_first_install_without_room_refuses_before_writing(tmp_path: Path) -> None:
+    # GAP-1249: on a nearly full disk uv failed mid-build with ENOSPC, the
+    # installer said "nothing was changed" and left ~286 MB in ~/.defenseclaw.
+    proc = _uv_bootstrap(tmp_path, free_kb=300 * 1024)
+
+    assert proc.returncode == 1, proc.stdout
+    assert "the install needs about 1100 MB and 300 MB is free" in proc.stdout
+    assert "Free at least 800 MB" in proc.stdout and "nothing was changed" in proc.stdout
+    assert "Installing uv" not in proc.stdout
+    assert not (tmp_path / "home" / ".defenseclaw" / ".uv").exists()
+
+
+def test_a_failed_python_build_removes_what_it_wrote() -> None:
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    failure = text[text.index('if ! make_venv "${STAGING}/venv"; then') :][:400]
+    assert 'rm -rf "${STAGING}"' in failure
+    assert '[[ -z "${UV_DIR_NEW}" ]] || rm -rf "${DEFENSECLAW_HOME}/.uv"' in failure
