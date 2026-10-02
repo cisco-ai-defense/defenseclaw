@@ -943,7 +943,12 @@ def _print_skill_info_card(
         click.echo(f"{ux.bold('Path:')}        {info_map['baseDir']}")
     if info_map.get("filePath"):
         click.echo(f"{ux.bold('File:')}        {info_map['filePath']}")
-    click.echo(f"{ux.bold('Eligible:')}    {info_map.get('eligible', False)}")
+    eligible = info_map.get("eligible", False)
+    held = info_map.get("disabled") or info_map.get("verdict") in ("blocked", "quarantined", "disabled")
+    # GAP-1320: "Eligible: True" is the connector's own check; say that
+    # DefenseClaw keeps a blocked or disabled skill off.
+    note = " (the connector would load it; DefenseClaw keeps it off)" if eligible is True and held else ""
+    click.echo(f"{ux.bold('Eligible:')}    {eligible}{note}")
     click.echo(f"{ux.bold('Disabled:')}    {info_map.get('disabled', False)}")
     click.echo(f"{ux.bold('Bundled:')}     {info_map.get('bundled', False)}")
     if info_map.get("homepage"):
@@ -1070,6 +1075,8 @@ def _skill_policy_note(name: str, label: str) -> str:
         )
     if label == "warning":
         return f"allowed with findings. Block it: defenseclaw skill block {name}"
+    if label == "blocked":
+        return f"on the block list, so DefenseClaw keeps it disabled. Unblock it: defenseclaw skill unblock {name}"
     return ""
 
 
@@ -2011,7 +2018,14 @@ def _scan_one_local_skill(
             if json_sink is None:
                 raise SystemExit(2)
             return payload
-        click.echo(f"BLOCKED: {name} — remove from block list first", err=True)
+        scope = f" for connector={connector}" if connector else ""
+        flag = f" --connector {connector}" if connector else ""
+        click.echo(
+            f"BLOCKED: {name} is on the block list{scope}, so it was not scanned.\n"
+            f"  'defenseclaw skill scan --all{flag}' still reports its findings. "
+            f"To scan it alone, unblock it first: defenseclaw skill unblock {name}{flag}",
+            err=True,
+        )
         raise SystemExit(2)
 
     # F-0282: a bare ``pe.is_allowed("skill", name)`` check skips the scan
@@ -2665,12 +2679,15 @@ def _scan_all(
             json_rows.append(payload)
         else:
             enforcement_blocks = False
-            if result.is_clean():
+            # GAP-1320: a block-listed skill reads BLOCKED and counts in the
+            # Summary's blocked=, like 'skill list' shows it.
+            listed_block = pe.is_blocked_for_connector("skill", name, connector or "")
+            if result.is_clean() and not listed_block:
                 _scan_ui.render_per_target_status(
                     ctx, target=name, verdict=_scan_ui.VERDICT_CLEAN, findings=0,
                 )
             else:
-                enforcement_blocks = (
+                enforcement_blocks = listed_block or (
                     enforce
                     and _skill_scan_would_install_block(
                         app, pe, name, base_dir, result, connector=connector,
@@ -2682,10 +2699,13 @@ def _scan_all(
                     verdict=_skill_scan_findings_verdict(
                         result, blocked=enforcement_blocks,
                     ),
-                    detail=f"max severity: {result.max_severity()}",
+                    detail=(
+                        f"max severity: {result.max_severity()}"
+                        if result.findings else "on the block list"
+                    ),
                     findings=len(result.findings),
                 )
-                if not enforcement_blocks:
+                if listed_block or not enforcement_blocks:
                     _print_skill_scan_policy(
                         app, name, base_dir, result, connector=connector or "", pe=pe,
                     )
@@ -2702,7 +2722,7 @@ def _scan_all(
             _apply_scan_enforcement(app, pe, name, base_dir, result, connector=connector)
 
     if not as_json and verdicts:
-        clean = sum(1 for v in verdicts if v["result"].is_clean())
+        clean = sum(1 for v in verdicts if v["result"].is_clean() and not v.get("blocked"))
         blocked = sum(1 for v in verdicts if v.get("blocked"))
         findings = sum(int(v.get("findings") or 0) for v in verdicts)
         duration_ms = int((time.monotonic() - started) * 1000)
