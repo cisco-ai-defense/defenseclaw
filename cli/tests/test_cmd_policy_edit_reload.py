@@ -114,6 +114,29 @@ def test_rejected_reload_exits_1(app, monkeypatch) -> None:
     assert "defenseclaw policy validate" in result.output and "compilation failed" in result.output
 
 
+def test_skill_action_change_restarts_a_running_gateway(app, monkeypatch) -> None:
+    # GAP-1236: the gateway's config watcher refuses a skill_actions change
+    # ("requires gateway restart"), so a hot policy reload alone would claim
+    # an enforcement it does not have.
+    from defenseclaw.commands import cmd_policy, cmd_setup
+
+    restarts: list[str] = []
+
+    def _no_reload(self):
+        raise AssertionError("a restart replaces the hot reload")
+
+    monkeypatch.setattr(gateway.OrchestratorClient, "reload_policy", _no_reload)
+    monkeypatch.setattr(cmd_policy, "_gateway_pid_alive", lambda _app: True)
+    monkeypatch.setattr(
+        cmd_setup, "_restart_defense_gateway", lambda data_dir, **_kw: restarts.append(data_dir) or True
+    )
+    result = _invoke(app, ["activate", "strict"])
+    assert result.exit_code == 0, result.output
+    assert restarts == [app.cfg.data_dir]
+    assert "Restarted the gateway; it is enforcing the policy now." in result.output
+    assert "Gateway reloaded the policy" not in result.output
+
+
 def test_no_change_does_not_reload(app, monkeypatch) -> None:
     def _boom(self):
         raise AssertionError("must not contact the gateway")
