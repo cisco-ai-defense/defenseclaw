@@ -3894,10 +3894,13 @@ def _cursor_mcp_servers(
 ) -> list[MCPServerEntry]:
     home = str(Path.home())
     entries: list[MCPServerEntry] = []
+    user_mcp = os.path.join(home, ".cursor", "mcp.json")
     project_mcp = _discovery_path(
         workspace_dir, ".cursor", "mcp.json", infer_from_cwd=infer_from_cwd,
     )
-    if project_mcp:
+    # GAP-1505: run from the home directory, the project file IS the user
+    # file; reading it twice listed, scanned and counted each server twice.
+    if project_mcp and os.path.realpath(project_mcp) != os.path.realpath(user_mcp):
         entries.extend(
             _read_dotmcp_json(
                 project_mcp,
@@ -3907,7 +3910,7 @@ def _cursor_mcp_servers(
         )
     entries.extend(
         _read_dotmcp_json(
-            os.path.join(home, ".cursor", "mcp.json"),
+            user_mcp,
             source_scope="user",
             diagnostic_sink=diagnostic_sink,
         )
@@ -3927,9 +3930,11 @@ def _kiro_mcp_read_paths(
     project_mcp = _discovery_path(
         workspace_dir, ".kiro", "settings", "mcp.json", infer_from_cwd=infer_from_cwd,
     )
-    if project_mcp:
+    user_mcp = os.path.join(connector_home("kiro"), "settings", "mcp.json")
+    # GAP-1505: from the home directory the project file is the user file.
+    if project_mcp and os.path.realpath(project_mcp) != os.path.realpath(user_mcp):
         paths.append(project_mcp)
-    paths.append(os.path.join(connector_home("kiro"), "settings", "mcp.json"))
+    paths.append(user_mcp)
     return paths
 
 

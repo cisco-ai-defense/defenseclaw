@@ -1208,8 +1208,12 @@ def _scan_one_resolved(
     pe,
     emit_hints: bool,
     pack_cache: RulePackOverlayCache | None = None,
+    adhoc_url: bool = False,
 ) -> str:
     """Resolve, block-check, and scan a single name/URL within one connector.
+
+    ``adhoc_url`` marks a direct URL given without ``--connector``: it is not
+    read from any connector's config, so the preamble must not name one.
 
     Renders the shared scan UX (preamble + per-target glyph + summary) and
     returns one of ``"clean"`` / ``"findings"`` / ``"policy-blocked"`` /
@@ -1254,6 +1258,7 @@ def _scan_one_resolved(
 
     ctx = _scan_ui.ScanContext.for_mcp(
         connector=connector, paths=[resolved], as_json=as_json,
+        where="at a direct URL (not from a connector config)" if adhoc_url else "",
     )
     _scan_ui.render_preamble(ctx, target_count=1)
 
@@ -1441,7 +1446,10 @@ def scan(
     # contract: resolve against the chosen connector (the active one when no
     # flag was passed) and scan exactly that target.
     if connector_flag or "://" in target:
-        status = _scan_one_resolved(app, connector, target, emit_hints=True, **common)
+        status = _scan_one_resolved(
+            app, connector, target, emit_hints=True,
+            adhoc_url=not connector_flag and "://" in target, **common,
+        )
         if status == "policy-blocked":
             raise SystemExit(2)
         if status == "error":

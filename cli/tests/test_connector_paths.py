@@ -3011,3 +3011,16 @@ def test_bundled_mcp_names_are_claude_code_only():
     )
     assert not connector_paths.is_bundled_mcp_server("github")
     assert not connector_paths.is_bundled_mcp_server("")
+
+
+def test_cursor_mcp_from_home_reads_user_file_once(tmp_path, monkeypatch):
+    # GAP-1505: with cwd == home the project file is the user file.
+    home = tmp_path / "home"
+    path = home / ".cursor" / "mcp.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"mcpServers": {"deepwiki": {"url": "https://mcp.example.test/mcp"}}}))
+    monkeypatch.setenv("HOME", str(home))
+
+    entries = connector_paths.mcp_servers("cursor", workspace_dir=str(home))
+
+    assert [(e.name, e.source_scope) for e in entries] == [("deepwiki", "user")]

@@ -325,7 +325,7 @@ def enrich_with_policy(
         if not items:
             continue
 
-        actions_map = _build_actions_map_for_type(store, target_type)
+        actions_map = _build_actions_map_for_type(store, target_type, inv_connector)
         scan_map = _build_scan_map_for_type(store, scanner_name)
 
         counts: dict[str, int] = {
@@ -387,6 +387,7 @@ def enrich_with_policy(
                 policy_dir=policy_dir,
                 source_path=source_path,
                 allow_first_party=allow_first_party,
+                connector=inv_connector,
             )
             item["policy_verdict"] = verdict
             item["policy_detail"] = detail
@@ -501,8 +502,14 @@ def _admission_verdict(
     policy_dir: str = "",
     source_path: str = "",
     allow_first_party: bool = True,
+    connector: str = "",
 ) -> tuple[str, str]:
-    """Replicate admission ordering for offline inventory evaluation."""
+    """Replicate admission ordering for offline inventory evaluation.
+
+    GAP-1558: pass the inventory's connector so a connector-scoped block
+    (``skill block X --connector claudecode``) reads "blocked" here, as it
+    does in ``skill list`` and ``skill info``.
+    """
     from defenseclaw.enforce.admission import evaluate_admission
 
     decision = evaluate_admission(
@@ -511,6 +518,7 @@ def _admission_verdict(
         target_type=target_type,
         name=name,
         source_path=source_path,
+        connector=connector,
         scan_result=scan_entry,
         action_entry=action_entry,
         fallback_actions=skill_actions,
@@ -635,14 +643,26 @@ def _lookup_by_candidates(mapping: dict[str, Any], candidates: list[str]) -> Any
     return None
 
 
-def _build_actions_map_for_type(store: Any, target_type: str) -> dict[str, ActionEntry]:
+def _build_actions_map_for_type(
+    store: Any, target_type: str, connector: str = "",
+) -> dict[str, ActionEntry]:
+    """Name -> action entry; with *connector*, its own entry wins over a
+    global one and other connectors' entries are ignored."""
     actions_map: dict[str, ActionEntry] = {}
     try:
         entries = store.list_actions_by_type(target_type)
     except Exception:
         return actions_map
+    if not connector:
+        for e in entries:
+            actions_map[e.target_name] = e
+        return actions_map
     for e in entries:
-        actions_map[e.target_name] = e
+        scope = connector_paths.normalize(getattr(e, "connector", "") or "")
+        if scope == connector:
+            actions_map[e.target_name] = e
+        elif not scope:
+            actions_map.setdefault(e.target_name, e)
     return actions_map
 
 

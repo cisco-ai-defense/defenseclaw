@@ -656,3 +656,38 @@ class TestScanAllSweep(_PluginScanUXBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_plugin_info_card_states_total_and_max_severity(capsys):
+    # GAP-1507: 1 HIGH + 1 LOW is "2 findings (max severity: HIGH)", not "2 HIGH findings".
+    from defenseclaw.commands.cmd_plugin import _print_plugin_info_card
+
+    _print_plugin_info_card(
+        {"name": "spotify", "scan": {"clean": False, "total_findings": 2, "max_severity": "HIGH", "target": "/p"}},
+        "spotify",
+    )
+    out = capsys.readouterr().out
+    assert "Findings: 2 findings (max severity: HIGH)" in out
+    assert "2 HIGH findings" not in out
+
+
+class TestScanFolderOfPlugins(_PluginScanUXBase):
+    """GAP-1580: a Hermes category folder is not scanned as one plugin."""
+
+    @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
+    def test_folder_of_plugins_lists_them_and_exits_2(self, mock_scan) -> None:
+        folder = os.path.join(self.tmp_dir, "browser")
+        for child in ("browser_use", "firecrawl"):
+            os.makedirs(os.path.join(folder, child))
+            with open(os.path.join(folder, child, "plugin.yaml"), "w") as f:
+                f.write(f"name: {child}\n")
+        os.makedirs(os.path.join(folder, "__pycache__"))
+
+        result = self.runner.invoke(plugin, ["scan", folder], obj=self.app)
+
+        self.assertEqual(result.exit_code, 2, result.output)
+        self.assertIn("is a folder of 2 plugin(s), not a plugin", result.output)
+        self.assertIn("It holds: browser_use, firecrawl", result.output)
+        self.assertIn(os.path.join(folder, "browser_use"), result.output)
+        self.assertNotIn("BLOCKED", result.output)
+        mock_scan.assert_not_called()
