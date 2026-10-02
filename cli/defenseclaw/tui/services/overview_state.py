@@ -1043,10 +1043,10 @@ class OverviewPanelModel:
         if key == "gateway" and (self.health is None or self.gateway_down()):
             # Match the "Gateway is not running" banner instead of "unknown".
             return self.gateway_availability().state if self.gateway_probe is not None else "unknown"
-        if self.health is None:
-            return "unknown"
         if self.gateway_down() and key in _GATEWAY_HOSTED_SERVICES:
             return "offline"
+        if self.health is None:
+            return "unknown"
         match key:
             case "gateway":
                 # ``health.gateway`` is the OpenClaw fleet uplink. A hook-only
