@@ -22,9 +22,11 @@ deduplication, and assessment computation.
 
 from __future__ import annotations
 
+import io
 import os
 import re
 import stat
+import tokenize
 from datetime import datetime, timezone
 from enum import Enum
 
@@ -116,6 +118,51 @@ def strip_hash_comment(line: str) -> str:
         elif ch == "#":
             return line[:i].rstrip()
     return line
+
+
+def python_code_lines(content: str, *, keep_strings: bool = False) -> list[str] | None:
+    """Return *content*'s lines with Python comments and docstrings blanked.
+
+    Source rules must not match words inside docstrings, warning prose or
+    regex data (GAP-1877). ``keep_strings=False`` blanks every string
+    literal too (for call-shaped rules); ``keep_strings=True`` keeps
+    non-docstring literals such as URLs and paths. Columns are kept, so
+    line numbers still match ``content.split("\n")``. Returns ``None``
+    when the file doesn't tokenize, so the caller can fall back.
+    """
+    try:
+        toks = list(tokenize.generate_tokens(io.StringIO(content).readline))
+    except (tokenize.TokenError, SyntaxError):
+        return None
+    string_types = {tokenize.STRING}
+    if hasattr(tokenize, "FSTRING_MIDDLE"):
+        string_types.add(tokenize.FSTRING_MIDDLE)
+    spans = []
+    stmt_start = True
+    for i, tok in enumerate(toks):
+        if tok.type == tokenize.COMMENT or (tok.type in string_types and not keep_strings):
+            spans.append(tok)
+        elif tok.type == tokenize.STRING and stmt_start:
+            # A bare string statement (docstring): strings up to NEWLINE.
+            j = i + 1
+            while j < len(toks) and toks[j].type in (tokenize.STRING, tokenize.NL, tokenize.COMMENT):
+                j += 1
+            if j == len(toks) or toks[j].type in (tokenize.NEWLINE, tokenize.ENDMARKER):
+                spans.extend(t for t in toks[i:j] if t.type == tokenize.STRING)
+        if tok.type in (tokenize.NEWLINE, tokenize.INDENT, tokenize.DEDENT):
+            stmt_start = True
+        elif tok.type not in (tokenize.NL, tokenize.COMMENT):
+            stmt_start = False
+    rows = [list(r) for r in content.split("\n")]
+    for tok in spans:
+        (sr, sc), (er, ec) = tok.start, tok.end
+        for r in range(sr - 1, min(er, len(rows))):
+            row = rows[r]
+            lo = sc if r == sr - 1 else 0
+            hi = ec if r == er - 1 else len(row)
+            for c in range(lo, min(hi, len(row))):
+                row[c] = " "
+    return ["".join(r).rstrip() for r in rows]
 
 
 def is_comment_line(line: str) -> bool:

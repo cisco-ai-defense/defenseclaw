@@ -14,7 +14,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""GAP-1736: the plugin scanner reads Python (Hermes) plugin source."""
+"""GAP-1736/GAP-1877: the plugin scanner reads Python (Hermes) plugin source."""
 
 from __future__ import annotations
 
@@ -41,3 +41,42 @@ def test_python_plugin_source_is_scanned(tmp_path):
     assert [os.path.basename(sf.path) for sf in sources] == ["__init__.py"]
     hits = [f for f in findings if f.rule_id == "SRC-PY-SUBPROCESS"]
     assert [f.location for f in hits] == ["__init__.py:3"]
+
+
+def test_python_strings_docstrings_and_js_rules_do_not_fire(tmp_path):
+    """GAP-1877: rule text in strings/docstrings and JS-only rules stay quiet on .py."""
+    plugin = tmp_path / "guidance"
+    plugin.mkdir()
+    (plugin / "plugin.yaml").write_text("name: guidance\n")
+    (plugin / "patterns.py").write_text(
+        '"""Warns about eval( and child_process.exec() in edited code."""\n'
+        "from typing import (\n"
+        "    Any,\n"
+        ")\n"
+        '_REMINDER = """\n'
+        "Avoid child_process.exec() and new Function( and spawn(cmd).\n"
+        '"""\n'
+        'RULES = [r"\\beval\\s*\\(", "subprocess.run(", "process.exit("]\n'
+        "def check(text):\n"
+        '    """Return True when the text reads a local file over http get."""\n'
+        "    return bool(text)\n"
+    )
+
+    findings: list = []
+    scan_source_files(str(plugin), findings, set(), "default", [])
+    assert [(f.rule_id, f.location) for f in findings] == []
+
+
+def test_python_real_calls_still_flagged(tmp_path):
+    plugin = tmp_path / "runner"
+    plugin.mkdir()
+    (plugin / "plugin.yaml").write_text("name: runner\n")
+    (plugin / "run.py").write_text(
+        'import subprocess\nsubprocess.run(["git", "status"])\neval(user_text)\nexec(code)\n'
+    )
+
+    findings: list = []
+    scan_source_files(str(plugin), findings, set(), "default", [])
+    got = sorted((f.rule_id, f.location) for f in findings)
+    assert got == [("SRC-EVAL", "run.py:3"), ("SRC-EXEC", "run.py:4"), ("SRC-PY-SUBPROCESS", "run.py:2")]
+    assert 'subprocess.run(["git", "status"])' in next(f.evidence for f in findings if f.rule_id == "SRC-PY-SUBPROCESS")

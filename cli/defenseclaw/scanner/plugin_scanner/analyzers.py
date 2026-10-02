@@ -38,6 +38,7 @@ from defenseclaw.scanner.plugin_scanner.helpers import (
     is_comment_line,
     is_test_path,
     make_finding,
+    python_code_lines,
     sanitise_evidence,
     strip_comment,
     strip_hash_comment,
@@ -539,10 +540,17 @@ def scan_source_files(
 
         in_test = is_test_path(rel_path)
         lines = content.split("\n")
-        if file_path.casefold().endswith(".py"):
-            code_lines = [strip_hash_comment(line) for line in lines]
+        is_py = file_path.casefold().endswith(".py")
+        if is_py:
+            # Python rules skip comments and docstrings; call rules also skip
+            # every string literal (warning text, regex data) (GAP-1877).
+            code_lines = python_code_lines(content, keep_strings=True) or [
+                strip_hash_comment(line) for line in lines
+            ]
+            call_lines = python_code_lines(content) or code_lines
         else:
             code_lines = [strip_comment(line) for line in lines]
+            call_lines = code_lines
 
         if source_files_out is not None:
             source_files_out.append(
@@ -556,15 +564,21 @@ def scan_source_files(
                 )
             )
 
-        _scan_suspicious_patterns(code_lines, rel_path, findings, capabilities, profile, in_test)
+        _scan_suspicious_patterns(
+            call_lines, rel_path, findings, capabilities, profile, in_test, "py" if is_py else "js", code_lines
+        )
         _check_for_hardcoded_secrets(lines, rel_path, findings, in_test)
         _check_for_credential_access(code_lines, rel_path, findings, capabilities, in_test)
         _check_for_exfiltration(lines, content, rel_path, findings, capabilities, in_test)
         _check_for_ssrf(code_lines, rel_path, findings, in_test)
-        _check_for_dynamic_imports(code_lines, rel_path, findings, in_test)
+        if not is_py:
+            # import()/require()/spawn() and the gateway rules are JavaScript
+            # shapes; on Python they match ``from x import (`` and prose.
+            _check_for_dynamic_imports(code_lines, rel_path, findings, in_test)
         _check_for_cognitive_file_tampering(code_lines, content, rel_path, findings)
         _check_for_obfuscation(code_lines, content, rel_path, findings, in_test)
-        _check_for_gateway_manipulation(code_lines, lines, rel_path, findings, in_test)
+        if not is_py:
+            _check_for_gateway_manipulation(code_lines, lines, rel_path, findings, in_test)
         _check_for_cost_runaway(code_lines, rel_path, findings)
 
     return len(ts_files), total_bytes
@@ -577,13 +591,17 @@ def _scan_suspicious_patterns(
     capabilities: set[str],
     profile: str,
     in_test_path: bool,
+    language: str = "js",
+    evidence_lines: list[str] | None = None,
 ) -> None:
     for rule in SOURCE_PATTERN_RULES:
-        if profile not in rule.profiles:
+        if profile not in rule.profiles or language not in rule.languages:
             continue
 
         for i, line in enumerate(code_lines):
             if rule.pattern.search(line):
+                if evidence_lines is not None and i < len(evidence_lines):
+                    line = evidence_lines[i]
                 if rule.capability:
                     capabilities.add(rule.capability)
                 if in_test_path and rule.severity == "INFO":
