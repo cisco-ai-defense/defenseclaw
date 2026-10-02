@@ -40,6 +40,8 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/hwprofile"
+	"github.com/defenseclaw/defenseclaw/internal/usecases"
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -98,7 +100,9 @@ type Sidecar struct {
 	appProtection *applicationProtectionController
 	osNotifier    *notifier.Dispatcher
 	configMgr     *ConfigManager
-	modelRouter   ModelRouter
+	modelRouter      ModelRouter
+	hwProfile        *hwprofile.SystemProfile
+	inferredUseCases []usecases.InferredUseCase
 
 	// ipcRunner is injected by the CLI layer to avoid a gateway/ipc import
 	// cycle. A nil runner disables the managed UDS server.
