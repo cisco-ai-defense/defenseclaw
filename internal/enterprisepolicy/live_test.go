@@ -336,3 +336,27 @@ func TestLimitedBufferDiscardsPastTheLimitAndIsConcurrencySafe(t *testing.T) {
 		t.Fatalf("concurrent writes lost bytes: %d", got)
 	}
 }
+
+// GAP-1136: an npm codex launcher whose node is not on the probe's PATH
+// made the app-server exit at once, and the check said only "app-server
+// closed its output".
+func TestVerifyLiveCodexExplainsAnAppServerThatEndsAtOnce(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX launcher script")
+	}
+	opts := testOptions(t)
+	launcher := filepath.Join(t.TempDir(), "codex.js")
+	writeFile(t, launcher, "#!/usr/bin/env dc-missing-node-interpreter\n")
+	if err := os.Chmod(launcher, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, err := VerifyLive(context.Background(), opts, LiveOptions{Connector: ConnectorCodex, AgentBinary: launcher, Home: t.TempDir(), Timeout: 30 * time.Second})
+	if err == nil {
+		t.Fatal("an app-server that cannot start must fail the check")
+	}
+	for _, want := range []string{"closed its output (exit status 127)", "stderr: ", "runs dc-missing-node-interpreter, which is not on the probe's PATH", "--agent-binary"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not contain %q", err, want)
+		}
+	}
+}

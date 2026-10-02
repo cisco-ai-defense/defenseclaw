@@ -158,13 +158,17 @@ func verifyCodexLive(ctx context.Context, opts Options, lo LiveOptions, result *
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start codex app-server: %w", err)
 	}
+	// The reader waits for the process once its output ends, so a closed
+	// output can report how the app-server exited.
+	exit := &appServerExit{done: make(chan struct{})}
 	defer func() {
 		_ = stdin.Close()
 		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
+		<-exit.done
 	}()
 	responses := make(chan map[string]json.RawMessage, 8)
 	go func() {
+		defer func() { exit.err = cmd.Wait(); close(exit.done) }()
 		defer close(responses)
 		scanner := bufio.NewScanner(io.LimitReader(stdout, 8<<20))
 		scanner.Buffer(make([]byte, 64<<10), 4<<20)
@@ -186,7 +190,7 @@ func verifyCodexLive(ctx context.Context, opts Options, lo LiveOptions, result *
 				return nil, fmt.Errorf("%s: %w", method, ctx.Err())
 			case envelope, ok := <-responses:
 				if !ok {
-					return nil, fmt.Errorf("%s: app-server closed its output (%s)", method, strings.TrimSpace(stderr.String()))
+					return nil, fmt.Errorf("%s: %s", method, codexAppServerEnded(lo, exit, stderr))
 				}
 				var got int
 				if json.Unmarshal(envelope["id"], &got) != nil || got != id {
@@ -200,9 +204,13 @@ func verifyCodexLive(ctx context.Context, opts Options, lo LiveOptions, result *
 		}
 	}
 	if err := encoder.Encode(map[string]any{"method": "initialize", "id": 1, "params": map[string]any{"clientInfo": map[string]string{"name": "defenseclaw", "title": "DefenseClaw", "version": "1"}}}); err != nil {
-		return err
+		// The app-server is gone before it read a request.
+		return fmt.Errorf("initialize: %s", codexAppServerEnded(lo, exit, stderr))
 	}
 	if _, err := waitFor(ctx, responses, 1); err != nil {
+		if errors.Is(err, errAppServerClosed) {
+			return fmt.Errorf("initialize: %s", codexAppServerEnded(lo, exit, stderr))
+		}
 		return err
 	}
 	_ = encoder.Encode(map[string]any{"method": "initialized"})
@@ -259,6 +267,75 @@ func verifyCodexLive(ctx context.Context, opts Options, lo LiveOptions, result *
 	return nil
 }
 
+var errAppServerClosed = errors.New("app-server closed its output")
+
+// appServerExit is the app-server's exit, known once done is closed.
+type appServerExit struct {
+	done chan struct{}
+	err  error
+}
+
+// codexAppServerEnded explains an app-server that closed its output: its
+// exit status, what it printed on stderr and, for a launcher script whose
+// interpreter is not on the probe's PATH, what to pass instead (GAP-1136).
+func codexAppServerEnded(lo LiveOptions, exit *appServerExit, stderr *limitedBuffer) string {
+	status := "still running"
+	select {
+	case <-exit.done:
+		var exitErr *exec.ExitError
+		switch {
+		case errors.As(exit.err, &exitErr):
+			status = exitErr.ProcessState.String()
+		case exit.err != nil:
+			status = exit.err.Error()
+		default:
+			status = "exit status 0"
+		}
+	case <-time.After(2 * time.Second):
+	}
+	message := "the Codex app-server closed its output (" + status + ")"
+	if text := strings.TrimSpace(truncate(stderr.String(), 400)); text != "" {
+		message += "; stderr: " + text
+	} else {
+		message += "; it printed nothing on stderr"
+	}
+	if hint := missingScriptInterpreter(lo); hint != "" {
+		message += "; " + hint
+	}
+	return message
+}
+
+// missingScriptInterpreter names the fix when binary is a "#!/usr/bin/env
+// <interpreter>" launcher (the npm codex.js runs node) and the interpreter
+// is on none of the directories of the probe's minimal PATH.
+func missingScriptInterpreter(lo LiveOptions) string {
+	binary := lo.AgentBinary
+	file, err := os.Open(binary)
+	if err != nil {
+		return ""
+	}
+	defer file.Close()
+	head := make([]byte, 256)
+	n, _ := io.ReadFull(file, head)
+	line, _, _ := strings.Cut(string(head[:n]), "\n")
+	fields := strings.Fields(strings.TrimPrefix(line, "#!"))
+	if !strings.HasPrefix(line, "#!") || len(fields) < 2 || filepath.Base(fields[0]) != "env" {
+		return ""
+	}
+	interpreter := fields[len(fields)-1]
+	for _, entry := range liveEnv(lo) {
+		if value, ok := strings.CutPrefix(entry, "PATH="); ok {
+			for _, dir := range filepath.SplitList(value) {
+				if info, err := os.Stat(filepath.Join(dir, interpreter)); err == nil && !info.IsDir() {
+					return ""
+				}
+			}
+			return fmt.Sprintf("%s is a launcher script that runs %s, which is not on the probe's PATH (%s); pass --agent-binary the native Codex executable (for an npm install, node_modules/@openai/codex-<platform>/vendor/<target>/bin/codex inside the package) or link %s next to %s", binary, interpreter, value, interpreter, binary)
+		}
+	}
+	return ""
+}
+
 func waitFor(ctx context.Context, responses <-chan map[string]json.RawMessage, id int) (map[string]json.RawMessage, error) {
 	for {
 		select {
@@ -266,7 +343,7 @@ func waitFor(ctx context.Context, responses <-chan map[string]json.RawMessage, i
 			return nil, ctx.Err()
 		case envelope, ok := <-responses:
 			if !ok {
-				return nil, errors.New("app-server closed its output")
+				return nil, errAppServerClosed
 			}
 			var got int
 			if json.Unmarshal(envelope["id"], &got) == nil && got == id {
