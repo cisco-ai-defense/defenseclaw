@@ -117,6 +117,38 @@ func TestManagedWindowsSetupAnswer(t *testing.T) {
 	}
 }
 
+// GAP-1317: status on a managed Linux/macOS host without a per-user config
+// gave the raw "read v8 config ... no such file" error.
+func TestManagedUnixConfigLoadErrorNamesTheManagedDeployment(t *testing.T) {
+	descriptor := filepath.Join(t.TempDir(), "managed-runtime.json")
+	restore, restoreWindows, restoreTrust := managedHostDescriptorPath, managedHostWindowsStandalone, managedHostRecordTrusted
+	managedHostDescriptorPath = func() string { return descriptor }
+	managedHostWindowsStandalone = func() (string, bool) { return "", false }
+	managedHostRecordTrusted = func(string) error { return nil }
+	defer func() {
+		managedHostDescriptorPath, managedHostWindowsStandalone, managedHostRecordTrusted = restore, restoreWindows, restoreTrust
+	}()
+	t.Setenv(managed.DeploymentModeEnv, "")
+	t.Setenv(managed.ConfigPathEnv, "")
+	root := &cobra.Command{Use: "defenseclaw-gateway"}
+	status := &cobra.Command{Use: "status"}
+	root.AddCommand(status)
+	missing := fmt.Errorf("read v8 config /home/u/.defenseclaw/config.yaml: %w", fs.ErrNotExist)
+
+	if err := managedWindowsConfigLoadError(status, missing); err != missing {
+		t.Fatalf("an unmanaged host changed the error: %v", err)
+	}
+	if err := os.WriteFile(descriptor, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := managedWindowsConfigLoadError(status, missing)
+	if err == missing || !strings.Contains(err.Error(), "managed by your organization ("+descriptor+")") ||
+		!strings.Contains(err.Error(), "`status` has no per-user gateway") ||
+		!strings.Contains(err.Error(), "enterprise ") {
+		t.Fatalf("status on a managed unix host: %v", err)
+	}
+}
+
 func TestRefusePerUserGatewayIgnoresAnUntrustedDescriptor(t *testing.T) {
 	descriptor := filepath.Join(t.TempDir(), "managed-runtime.json")
 	if err := os.WriteFile(descriptor, []byte("{}"), 0o644); err != nil {

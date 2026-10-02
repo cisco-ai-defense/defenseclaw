@@ -702,6 +702,21 @@ class TestPerConnectorWriteSurface(_BaseSetup):
         self.assertEqual(res.exit_code, 0, msg=res.output)
         self.assertTrue(gc.judge.enabled)
         self.assertEqual(gc.judge.hook_connectors, ["codex", "hermes"])
+        self.assertNotIn("--enable-judge was not applied", res.output)
+
+    def test_enable_judge_in_observe_mode_says_it_was_not_applied(self):
+        # GAP-1333: observe mode drops the connector from the judge gate.
+        self._seed_map("codex", "hermes")
+        gc = self.app.cfg.guardrail
+        with _stub_side_effects():
+            res = _invoke(
+                ["hermes", "--yes", "--no-restart", "--mode", "observe", "--enable-judge"],
+                self.app,
+            )
+        self.assertEqual(res.exit_code, 0, msg=res.output)
+        self.assertNotIn("hermes", gc.judge.hook_connectors or [])
+        self.assertIn("--enable-judge was not applied", res.output)
+        self.assertIn("--mode action --enable-judge", res.output)
 
     def test_no_enable_judge_opts_connector_out_of_concrete_gate(self):
         self._seed_map("codex", "hermes")
@@ -4028,6 +4043,14 @@ class TestGatewayOfflineStaging(_BaseSetup):
 # ND-3 — setup mode removal
 # ---------------------------------------------------------------------------
 class TestSetupModeHelp(unittest.TestCase):
+    def test_connector_id_claudecode_is_a_hidden_alias(self):
+        # GAP-1356: init/status print "claudecode"; setup accepts it too.
+        res = CliRunner().invoke(setup_group, ["claudecode", "--help"], catch_exceptions=False)
+        self.assertEqual(res.exit_code, 0, msg=res.output)
+        self.assertIn("claude-code", res.output)
+        listing = CliRunner().invoke(setup_group, ["--help"], catch_exceptions=False).output
+        self.assertNotRegex(listing, r"(?m)^ +claudecode ")
+
     def test_mode_subcommand_is_removed(self):
         res = CliRunner().invoke(setup_group, ["mode", "--help"])
         self.assertNotEqual(res.exit_code, 0)

@@ -142,6 +142,7 @@ def galileo(
         )
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
+    key_saved = bool(api_key or persist_api_key or _dotenv_value(app.cfg.data_dir, _KEY_ENV))
     _print_v8_setup_result(
         result,
         warnings,
@@ -151,6 +152,7 @@ def galileo(
         logstream=logstream,
         dry_run=dry_run,
         existed=existed,
+        key_saved=key_saved,
     )
 
 
@@ -248,6 +250,7 @@ def _print_v8_setup_result(
     logstream: str,
     dry_run: bool,
     existed: bool,
+    key_saved: bool = True,
 ) -> None:
     """Render one secret-free result from the canonical v8 writer."""
 
@@ -263,6 +266,15 @@ def _print_v8_setup_result(
     click.echo("  Delivery:    real-time after each completed model/tool operation (≤1s batch delay)")
     click.echo(f"  Config:      v8 ({'changed' if result.changed else 'already configured'})")
     echo_setup_notes(resolve_preset("galileo"), warnings)
+    if not dry_run and not key_saved:
+        # GAP-1299: the key came from this shell only. A gateway started
+        # anywhere else has no key and every export fails.
+        ux.warn(
+            f"{_KEY_ENV} was read from this shell and not saved. The gateway loses it when it "
+            f"restarts outside this shell. Save it with: defenseclaw keys set {_KEY_ENV} "
+            "(or re-run with --persist-api-key).",
+            indent="  ",
+        )
     if not dry_run:
         ux.subhead("Next: defenseclaw setup galileo test")
 

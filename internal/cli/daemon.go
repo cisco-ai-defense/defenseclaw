@@ -330,6 +330,11 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 		if note := otherGatewayBinaryNote(d.RecordedExecutable()); note != "" {
 			fmt.Println(note)
 		}
+		if _, healthErr := fetchSidecarHealth(client, sidecarHealthURL(cfg)); healthErr != nil {
+			// GAP-1342: a hung gateway; status and start pointed at each other.
+			fmt.Println("It does not answer /health. If it stays that way, restart it with: defenseclaw-gateway restart")
+			return nil
+		}
 		fmt.Println("Use 'defenseclaw-gateway status' to check health")
 		return nil
 	}

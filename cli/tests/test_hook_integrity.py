@@ -89,4 +89,11 @@ def test_removed_hook_registration_is_reported(tmp_path):
     settings.write_text(json.dumps({"model": "x"}))
     problems = hook_registration_problems(cfg, "claudecode")
     assert problems and str(settings) in problems[0]
+
+    # Setup's OTEL env entries name DefenseClaw too; they register no hook.
+    env = {"OTEL_RESOURCE_ATTRIBUTES": "service.name=defenseclaw"}
+    settings.write_text(json.dumps({"env": env, "hooks": {}}))
+    assert hook_registration_problems(cfg, "claudecode")
+    settings.write_text(json.dumps({"env": env}))
+    assert hook_registration_problems(cfg, "claudecode")
     assert hook_registration_problems(cfg, "codex") == []

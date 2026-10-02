@@ -287,6 +287,24 @@ def _log_setup_action(
         ) from exc
 
 
+class _SetupGroup(click.Group):
+    """``setup`` with hidden aliases for connector ids.
+
+    init, status and ``--connector`` name Claude Code ``claudecode``, so
+    ``defenseclaw setup claudecode`` runs ``setup claude-code`` instead of
+    failing with "No such command" (GAP-1356).
+    """
+
+    _ALIASES = {"claudecode": "claude-code"}
+
+    def get_command(self, ctx: click.Context, cmd_name: str) -> click.Command | None:
+        return super().get_command(ctx, self._ALIASES.get(cmd_name, cmd_name))
+
+    def resolve_command(self, ctx: click.Context, args: list[str]):
+        name, command, rest = super().resolve_command(ctx, args)
+        return (command.name if command is not None else name), command, rest
+
+
 def _config_yaml_path_from_ctx(ctx: click.Context) -> str | None:
     """Return the active config path when the AppContext is loaded.
 
@@ -314,7 +332,7 @@ def _safe_mtime(path: str | None) -> float | None:
         return None
 
 
-@click.group(invoke_without_command=True)
+@click.group(cls=_SetupGroup, invoke_without_command=True)
 @click.option(
     "--connector",
     "-c",
@@ -1987,9 +2005,10 @@ def _prompt_and_save_secret(
 
 
 def _mask(key: str) -> str:
+    # Last four only, like keys set/list (GAP-1133, GAP-1366).
     if len(key) <= 8:
         return "****"
-    return key[:4] + "..." + key[-4:]
+    return "..." + key[-4:]
 
 
 def _llm_key_state(resolved, key_val: str) -> str:
@@ -9046,6 +9065,17 @@ def _apply_hook_connector_setup(
     # second observe-mode setup call, and pruning only after that save leaves
     # a stale gate on disk that the restarted gateway immediately reloads.
     _prune_judge_gate_to_action_scope(gc, [connector])
+    _judge_gate = [normalize_connector(str(c)) for c in (getattr(gc.judge, "hook_connectors", None) or [])]
+    if enable_judge and "*" not in _judge_gate and normalize_connector(connector) not in _judge_gate:
+        # GAP-1333: the gate drops observe-mode connectors; say so instead
+        # of exiting 0 with the judge silently left off.
+        ux.warn(
+            f"--enable-judge was not applied: the LLM judge reviews {connector} hook calls only in "
+            f"action mode, and {connector} is in observe mode. Enable it with: "
+            f"defenseclaw setup {'claude-code' if connector == 'claudecode' else connector} "
+            "--mode action --enable-judge --yes",
+            indent="  ",
+        )
 
     if not preserve_global_settings:
         gc.scanner_mode = "local"
@@ -9154,10 +9184,13 @@ def _apply_hook_connector_setup(
             _rollback_failed_connector_application(app, setup_snapshot, exc)
         if connector == "hermes":
             click.echo("  ✓ Hermes on-disk hook registration staged")
-            ux.warn(
-                "Hermes callbacks are not live-verified: reload or restart every running "
-                "Hermes CLI, TUI, gateway, desktop, and service host before relying on registration changes."
-            )
+            if _hermes_hosts_idle():
+                click.echo("  ✓ No Hermes host is running, so the next one starts with the DefenseClaw hooks")
+            else:
+                ux.warn(
+                    "Hermes callbacks are not live-verified: reload or restart every running "
+                    "Hermes CLI, TUI, gateway, desktop, and service host before relying on registration changes."
+                )
         elif connector == "omnigent":
             click.echo("  ✓ OmniGent on-disk policy registration staged")
             ux.warn(
@@ -9289,6 +9322,17 @@ def _print_connector_observability_banner(connector: str, *, mode: str = "observ
     click.echo()
 
 
+def _hermes_hosts_idle() -> bool:
+    """True when no Hermes host runs as this account (doctor's check).
+
+    Hermes reads its hooks only at startup, so with no host running there is
+    nothing to reload (GAP-1339). Unknown (Windows, ps failure) is not idle.
+    """
+    from defenseclaw.commands import cmd_doctor
+
+    return cmd_doctor._hermes_host_running() is False
+
+
 def _print_connector_next_steps(connector: str, *, os_name: str | None = None) -> None:
     """Print native commands for inspecting one connector's activity."""
 
@@ -9301,7 +9345,7 @@ def _print_connector_next_steps(connector: str, *, os_name: str | None = None) -
         "(start it with defenseclaw-gateway start if it is stopped)"
     )
     click.echo("    • Optionally launch the bundled local stack: defenseclaw setup local-observability up")
-    if connector == "hermes":
+    if connector == "hermes" and not _hermes_hosts_idle():
         click.echo(
             "    • Reload/restart every running Hermes CLI, TUI, gateway, desktop, and service host; "
             "DefenseClaw does not manage Hermes PortableGit terminal behavior"
@@ -9412,7 +9456,12 @@ def _print_observability_summary(
                 ("hook failure posture", "upstream fail-open"),
                 ("native ask/approve", "unsupported"),
                 ("native OTel", "unsupported; hook-derived audit only"),
-                ("running Hermes hosts", "unverified; reload/restart required"),
+                (
+                    "running Hermes hosts",
+                    "none; the next one starts with the DefenseClaw hooks"
+                    if _hermes_hosts_idle()
+                    else "unverified; reload/restart required",
+                ),
                 ("validation evidence", "not recorded; live=false"),
             ]
         )
@@ -10635,7 +10684,8 @@ def _hook_guardrail_options(fn):
             default=None,
             help=(
                 "Enable LLM judge scanning for this connector and bump "
-                "the detection strategy off regex_only. --no-enable-judge "
+                "the detection strategy off regex_only (action mode only; "
+                "observe-mode connectors are not judged). --no-enable-judge "
                 "opts this connector out of a concrete hook-lane gate while "
                 "leaving the global judge switch alone. Configure the judge "
                 "model via `setup guardrail` / `setup llm`."

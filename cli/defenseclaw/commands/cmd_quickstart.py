@@ -182,6 +182,21 @@ def quickstart_cmd(
         detected = _detect_installed_connectors()
         configured = _configured_quickstart_connectors(cfg_mod)
         candidates = sorted({name for name in [*configured, *detected] if name})
+        if len(candidates) > 1 and configured:
+            # GAP-1352: on an install that already guards connectors,
+            # 'quickstart --connector X' refuses (it would narrow the roster),
+            # so point at the commands that keep the roster.
+            click.echo(
+                "  ✗ Multiple connectors detected/configured: "
+                f"{', '.join(candidates)}.\n"
+                f"    This install already guards: {', '.join(dict.fromkeys(configured))}.\n"
+                "    Quickstart configures one connector on a new install.\n"
+                "    Add or reconfigure one and keep the rest: defenseclaw setup <connector> --yes\n"
+                "    Change the whole set: defenseclaw init\n"
+                "    See what is guarded now: defenseclaw status",
+                err=True,
+            )
+            sys.exit(2)
         if len(candidates) > 1:
             click.echo(
                 "  ✗ Multiple connectors detected/configured: "

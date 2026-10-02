@@ -1026,3 +1026,21 @@ class TestUnconvergeablePeersAreSkipped:
         )
         assert keep == {"kiro"}
         assert tolerated == frozenset({"devin"})
+
+
+def test_hermes_summary_skips_reload_advice_when_no_host_runs(monkeypatch, capsys) -> None:
+    # GAP-1339: with no Hermes host running there is nothing to reload.
+    def summary() -> str:
+        cmd_setup._print_observability_summary("hermes", None, mode="observe", os_name="posix")
+        return capsys.readouterr().out
+
+    monkeypatch.setattr(cmd_doctor, "_hermes_host_running", lambda: False)
+    idle = summary()
+    assert "unverified; reload/restart required" not in idle
+    assert "Reload/restart every running Hermes" not in idle
+    assert "the next one starts with the DefenseClaw hooks" in idle
+
+    monkeypatch.setattr(cmd_doctor, "_hermes_host_running", lambda: True)
+    running = summary()
+    assert "unverified; reload/restart required" in running
+    assert "Reload/restart every running Hermes" in running

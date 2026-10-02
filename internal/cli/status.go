@@ -198,6 +198,17 @@ func runSidecarStatus(_ *cobra.Command, _ []string) error {
 	if err != nil {
 		var requestErr *url.Error
 		if errors.As(err, &requestErr) {
+			if running, pid := gatewayManagedState(); running && cfg != nil && !cfg.StandaloneEnterprise() {
+				// A live but hung gateway (GAP-1342): "start" only says it
+				// is already running, so name restart here.
+				fmt.Println()
+				Warn("Sidecar Status: NOT ANSWERING")
+				printGatewayKV("Endpoint", addr)
+				printGatewayKV("PID", strconv.Itoa(pid))
+				Subhead(fmt.Sprintf("The gateway process (PID %d) is running but does not answer /health.", pid))
+				Subhead("Restart it with: defenseclaw-gateway restart")
+				return fmt.Errorf("sidecar not answering")
+			}
 			fmt.Println()
 			Warn("Sidecar Status: NOT RUNNING")
 			printGatewayKV("Endpoint", addr)

@@ -488,12 +488,48 @@ def _force_utf8_io() -> None:
     sys.stderr = ux.ascii_safe_redirected_stream(sys.stderr)
 
 
+def _output_pipe_closed(exc: OSError) -> bool:
+    """Whether *exc* means the reader of stdout went away.
+
+    Click already ends quietly on EPIPE. Windows reports a pipe closed by
+    the reader (``| Select -First 2``) as EINVAL instead, so that printed a
+    traceback (GAP-1313). EINVAL counts only when stdout itself can no
+    longer be flushed.
+    """
+    import errno
+
+    if isinstance(exc, BrokenPipeError) or exc.errno == errno.EPIPE:
+        return True
+    if sys.platform != "win32" or exc.errno != errno.EINVAL:
+        return False
+    try:
+        sys.stdout.flush()
+    except OSError:
+        return True
+    return False
+
+
+def _silence_closed_stdout() -> None:
+    """Point stdout at the null device so exit-time flushes stay quiet."""
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.__stdout__.fileno())
+    except (OSError, AttributeError, ValueError):
+        pass
+
+
 def main() -> None:
     """Entrypoint: try TUI handoff first, fall back to Click CLI."""
     ux.configure_console_output()
     _force_utf8_io()
-    if not _try_launch_tui():
-        cli()
+    try:
+        if not _try_launch_tui():
+            cli()
+    except OSError as exc:
+        if not _output_pipe_closed(exc):
+            raise
+        _silence_closed_stdout()
+        sys.exit(1)
 
 
 if __name__ == "__main__":

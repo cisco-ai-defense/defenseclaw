@@ -236,15 +236,24 @@ func managedWindowsConfigLoadError(cmd *cobra.Command, err error) error {
 	if strings.TrimSpace(os.Getenv(managed.ConfigPathEnv)) != "" {
 		return err
 	}
-	where, present := managedHostWindowsStandalone()
-	if !present {
-		return err
-	}
 	command := "this command"
 	if cmd != nil {
 		if name := strings.TrimSpace(strings.TrimPrefix(cmd.CommandPath(), cmd.Root().Name())); name != "" {
 			command = name
 		}
+	}
+	where, present := managedHostWindowsStandalone()
+	if !present {
+		// GAP-1317: a standard user on a managed Linux or macOS host has no
+		// per-user config either; give the answer start gives.
+		record, unixPresent := managedHostUnixRecord(nil)
+		if !unixPresent {
+			return err
+		}
+		return fmt.Errorf("this computer's DefenseClaw is managed by your organization (%s), so `%s` has no "+
+			"per-user gateway to check; an administrator can check the managed deployment with "+
+			"`sudo %s enterprise %s status`. Nothing was changed",
+			record, command, managedHostGatewayCommand(), managedHostPlatform())
 	}
 	return managedWindowsAdminCommandAnswer(where, command)
 }

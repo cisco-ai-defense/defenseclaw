@@ -970,7 +970,8 @@ def _mask(value: str) -> str:
         return ""
     if len(value) <= 8:
         return "****"
-    return value[:4] + "..." + value[-4:]
+    # Last four only, like keys set/list (GAP-1366).
+    return "..." + value[-4:]
 
 
 # Registry accessor for cmd_setup.py (imports register the group under setup)
