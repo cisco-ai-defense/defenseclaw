@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from typing import NoReturn
 
 import click
@@ -817,9 +818,13 @@ def _activate_policy(app: AppContext, name: str) -> str:
 @click.argument("name")
 @click.option("--force", is_flag=True,
               help="Delete even if active; re-activates 'default' afterward")
+@click.option("--yes", "-y", "assume_yes", is_flag=True, help="Skip the confirmation prompt.")
 @pass_ctx
-def delete(app: AppContext, name: str, force: bool) -> None:
+def delete(app: AppContext, name: str, force: bool, assume_yes: bool) -> None:
     """Delete a custom policy, or your edited copy of a built-in.
+
+    The policy file is removed for good (no backup is kept). On a terminal
+    you are asked to confirm first; pass --yes to skip the prompt.
 
     For a built-in policy (default, strict, permissive) only the user copy
     that ``policy edit`` saved is removed, which restores the built-in; an
@@ -861,6 +866,7 @@ def delete(app: AppContext, name: str, force: bool) -> None:
     is_active = name == _get_active_policy_name(app)
     if builtin:
         # GAP-1458: drop the user copy that shadowed the built-in.
+        _confirm_policy_delete(f"your edited copy of built-in policy '{name}'", path, assume_yes)
         os.remove(real_path)
         ux.ok(f"Removed your edited copy of built-in policy '{name}'; the built-in version is back.")
         _log_policy_action(app, "policy-delete", name, "reverted edited built-in", done="Copy removed")
@@ -877,6 +883,7 @@ def delete(app: AppContext, name: str, force: bool) -> None:
         )
         raise SystemExit(1)
 
+    _confirm_policy_delete(f"policy '{name}'", path, assume_yes)
     os.remove(real_path)
     ux.ok(f"Policy '{name}' deleted.")
     _log_policy_action(app, "policy-delete", name, "", done="Policy deleted")
@@ -888,6 +895,23 @@ def delete(app: AppContext, name: str, force: bool) -> None:
     if is_active:
         ux.warn(f"'{name}' was the active policy — re-activating 'default'.")
         _reactivate_after_delete(app, "default")
+
+
+def _stdin_is_tty() -> bool:
+    try:
+        return sys.stdin.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
+def _confirm_policy_delete(label: str, path: str, assume_yes: bool) -> None:
+    """Ask before removing a user-authored policy file (GAP-1887)."""
+    if assume_yes or not _stdin_is_tty():
+        return
+    shown = path.replace(os.path.expanduser("~"), "~", 1)
+    if not click.confirm(f"Delete {label} ({shown})? It cannot be undone", default=False):
+        click.echo("Cancelled; nothing was deleted.")
+        raise SystemExit(1)
 
 
 def _reactivate_after_delete(app: AppContext, name: str) -> None:
