@@ -308,9 +308,12 @@ files it rendered and keeps any other file at those paths, reporting it;
 verify reports their drift, and uninstall removes only DefenseClaw's copies.
 
 Copilot CLI also reads `~/.copilot/hooks` and runs the file's `command`, and
-VS Code runs both the file and the plugin. The gateway therefore answers a
-second delivery of the same tool call with the first verdict, so the call is
-evaluated and audited once. It matches deliveries by `tool_use_id`, or, for
+VS Code runs both the file and the plugin. On Linux and macOS, when the
+Copilot CLI runs the Local hook file while DefenseClaw's Copilot machine
+policy is in force, the command allows the event without asking the
+gateway: the machine policy hook already evaluates it. Otherwise the gateway
+answers a second delivery of the same tool call with the first verdict, so
+the call is evaluated and audited once. It matches deliveries by `tool_use_id`, or, for
 the two Copilot CLI formats, by the same session, event, tool and arguments
 within a few seconds.
 

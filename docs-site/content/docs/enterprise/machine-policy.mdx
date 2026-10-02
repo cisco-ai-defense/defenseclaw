@@ -525,7 +525,17 @@ $env:DEFENSECLAW_CONFIG = 'C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml'
 - **`verify --live`** runs the real Codex or Claude Code client as a user
   and proves that it loads DefenseClaw's hooks. It needs `--user`, exactly
   one `--connector` (`codex` or `claudecode`) and `--agent-binary` with
-  the client's absolute path. `--timeout` defaults to 90 seconds. For
+  the client's absolute path. `--timeout` defaults to 90 seconds. The
+  client runs with a minimal environment whose `PATH` holds only the
+  client's folder, `/usr/bin` and `/bin`, so name the native executable,
+  not a launcher script: the npm `codex` command is `codex.js`, which needs
+  `node` on that `PATH`; the native Codex binary is inside the package
+  under `node_modules/@openai/codex-<platform>/vendor/<target>/bin/codex`.
+  When the client ends early, the result shows its exit status and what it
+  printed. Claude Code is pointed at a local stub through command-line
+  settings, which outrank the user's settings, so a user whose settings
+  use Amazon Bedrock, Vertex AI or another base URL makes no model call; a
+  provider that managed settings force makes the check fail. For
   Claude Code, the proof is the gateway's `tool.invocation.requested` record
   of a canary tool call in its event history, so the gateway must be running
   and collecting tool activity; `--audit-db` names the gateway's audit

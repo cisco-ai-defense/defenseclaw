@@ -136,8 +136,12 @@ type UnixEnumerateOptions struct {
 	DiscoverStaticSurfaces UnixDiscoverSurfacesFunc
 	// MachineVersion reads root-owned machine-scoped metadata.
 	MachineVersion func(connector string) string
-	State          *UnixEnumeratorState
-	Logger         EnumerationLogger
+	// OutsideDiscovery finds a connector's CLI in an administrator prefix
+	// that discovery does not search (UnixAgentOutsideDiscovery), so a
+	// user without a row for it is reported instead of skipped silently.
+	OutsideDiscovery func(connector string) (binary, prefix string)
+	State            *UnixEnumeratorState
+	Logger           EnumerationLogger
 	// CheckHome classifies a candidate's home; nil uses CheckUnixTargetHome.
 	CheckHome func(home string, uid int) HomeCheck
 	// PreviousRefusedSurfaces are the refusals the last cycle published. A
@@ -277,6 +281,18 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 		perUser = append(perUser, name)
 	}
 	report.Connectors = perUser
+	outsideFound := map[string][2]string{}
+	outsideDiscovery := func(conn string) (string, string) {
+		if opts.OutsideDiscovery == nil {
+			return "", ""
+		}
+		found, known := outsideFound[conn]
+		if !known {
+			found[0], found[1] = opts.OutsideDiscovery(conn)
+			outsideFound[conn] = found
+		}
+		return found[0], found[1]
+	}
 	// Machine-policy connectors whose unenrolled users are inspected get no
 	// rows; with unverified_versions: refuse their surfaces are still
 	// discovered, so the gateway can refuse a user whose only installs are
@@ -631,19 +647,28 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 				if reason == "" {
 					reason = "no supported installation found"
 				}
+				consequence := "it runs without DefenseClaw hooks"
+				if _, isMachine := machinePolicy[conn]; isMachine {
+					consequence = "it is not enrolled, so the gateway refuses its tool calls (enrollment.unenrolled_users: deny)"
+				}
 				if check.State != HomeAvailable {
 					reason = check.Reason
 				} else if UnixAgentInstalledWithoutVersion(reason) {
-					consequence := "it runs without DefenseClaw hooks"
-					if _, isMachine := machinePolicy[conn]; isMachine {
-						consequence = "it is not enrolled, so the gateway refuses its tool calls (enrollment.unenrolled_users: deny)"
-					}
 					report.Unprotected = append(report.Unprotected, UnprotectedAgent{
 						User:      name,
 						UID:       intPointer(account.UID),
 						Connector: conn,
 						Code:      UnprotectedCodeAgentUnprotected,
 						Reason:    reason + "; DefenseClaw cannot select a hook contract without a version, so " + consequence,
+					})
+				} else if binary, prefix := outsideDiscovery(conn); binary != "" {
+					report.Unprotected = append(report.Unprotected, UnprotectedAgent{
+						User:      name,
+						UID:       intPointer(account.UID),
+						Connector: conn,
+						Code:      UnprotectedCodeAgentUnprotected,
+						Reason: fmt.Sprintf("installed at %s, a prefix DefenseClaw does not search for agents; add %s to enterprise.enrollment.agent_prefixes. Until then %s",
+							binary, prefix, consequence),
 					})
 				}
 				logfSafely(opts.Logger, name, fmt.Sprintf("new (%s, %s) row skipped: %s", name, conn, reason))

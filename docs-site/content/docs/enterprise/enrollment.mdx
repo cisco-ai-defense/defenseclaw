@@ -69,7 +69,10 @@ An agent CLI installed anywhere else in a user's home (a custom `NVM_DIR`,
 `XDG_DATA_HOME` or `PNPM_HOME`, an `npm --prefix` given on the command line,
 or a binary copied into an arbitrary directory) is not found, so it is
 neither enrolled nor reported. On Linux and macOS, install shared agents
-under an `agent_prefixes` path. Use application control where users must
+under an `agent_prefixes` path. An agent CLI in an `/opt/<name>/bin`
+directory that is not under an `agent_prefixes` path is reported: `status`
+and `verify` warn `agent_unprotected` for each user it is not enrolled for
+and name the prefix to add. Use application control where users must
 not run agents from arbitrary locations.
 
 Outside the user's home, discovery runs or reads an agent file only when
