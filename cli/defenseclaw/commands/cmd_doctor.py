@@ -6448,7 +6448,6 @@ def _hermes_host_running_windows(tasklist_output: str | None = None) -> bool | N
             if tasklist_output is None:
                 return None
     import csv
-
     import ntpath
 
     own = {str(os.getpid()), str(os.getppid())}
