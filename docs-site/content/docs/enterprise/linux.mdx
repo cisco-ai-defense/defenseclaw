@@ -32,7 +32,7 @@ the same config.
 | Architecture | x86_64 (`amd64`) or `arm64`. Each release has a package and a tarball for both. |
 | Package format | `.deb` (Debian, Ubuntu) or `.rpm` (RHEL and derivatives). Hosts without a package manager use the payload tarball. |
 | SELinux | Supported. After each change the lifecycle runs `restorecon -R` on `/opt/defenseclaw` and `/etc/defenseclaw`, and reports a `selinux_relabel` warning if that fails. |
-| Privileges | root. Only `enterprise linux status` works without root. |
+| Privileges | root. Every `enterprise linux` action, status included, needs root: a standard user gets `not_root`. Per-user commands such as `defenseclaw-gateway status` and `audit export` answer that the computer is managed and name the administrator command. |
 | Other profiles | No Secure Client DefenseClaw layout at `/opt/cisco/secureclient/defenseclaw`. The lifecycle refuses with `profile_conflict`. |
 
 The systemd version decides how the gateway reads secrets:

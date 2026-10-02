@@ -141,7 +141,7 @@ func auditExportPersistentPreRunE(cmd *cobra.Command, _ []string) error {
 		warn = cmd.ErrOrStderr()
 	}
 	applyManagedStandaloneAdminEnv(warn)
-	if err := loadGatewayCommandConfigOnly(); err != nil {
+	if err := loadGatewayCommandConfigFor(cmd); err != nil {
 		return err
 	}
 	return checkManagedAuditExportDatabase()

@@ -250,10 +250,16 @@ func managedWindowsConfigLoadError(cmd *cobra.Command, err error) error {
 		if !unixPresent {
 			return err
 		}
+		// GAP-1196: name the administrator's form of the command too, so
+		// `audit export` reads as an administrator command here.
+		asAdmin := ""
+		if command != "this command" {
+			asAdmin = fmt.Sprintf("run `sudo %s %s` or ", managedHostGatewayCommand(), command)
+		}
 		return fmt.Errorf("this computer's DefenseClaw is managed by your organization (%s), so `%s` has no "+
-			"per-user gateway to check; an administrator can check the managed deployment with "+
+			"per-user gateway to check; an administrator can %scheck the managed deployment with "+
 			"`sudo %s enterprise %s status`. Nothing was changed",
-			record, command, managedHostGatewayCommand(), managedHostPlatform())
+			record, command, asAdmin, managedHostGatewayCommand(), managedHostPlatform())
 	}
 	return managedWindowsAdminCommandAnswer(where, command)
 }

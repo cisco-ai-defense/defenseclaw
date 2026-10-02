@@ -31,7 +31,7 @@ same config.
 | --- | --- |
 | macOS | macOS 13.0 or later. The pkg refuses older versions. |
 | Hardware | Apple silicon only. The pkg is `arm64`-only, and releases build no Intel macOS binaries, so neither the pkg nor the tarball runs on an Intel Mac. |
-| Privileges | root, through `sudo` or an MDM agent. Only `enterprise macos status` works without root. |
+| Privileges | root, through `sudo` or an MDM agent. Every `enterprise macos` action, status included, needs root: a standard user gets `not_root`. Per-user commands such as `defenseclaw-gateway status` and `audit export` answer that the computer is managed and name the administrator command. |
 | Other profiles | No Secure Client DefenseClaw module. The pkg's pre-install script refuses when `/opt/cisco/secureclient/defenseclaw` or a `com.cisco.secureclient.defenseclaw*` LaunchDaemon exists. |
 | Gatekeeper | Only the pkg can be Developer ID-signed and notarized. It is signed only when the release pipeline has Apple signing credentials, and notarized only when it also has notary credentials, so a release can be signed but not notarized. Releases currently ship it unsigned and hash-pinned by `checksums.txt` (see step 1 under Install). The tarball's binaries are never Developer ID-signed. On Macs that require notarized software, use the pkg and check it first with `spctl --assess --type install --verbose=2 <pkg>`. |
 
