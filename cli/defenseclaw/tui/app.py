@@ -3613,6 +3613,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         palette.clear(columns=True)
         self._command_palette_values = []
         self.set_focus(None)
+        # Closing the palette by running a row left "Command palette open."
+        # in the status bar (GAP-1213). Callers that report something else
+        # set their own status after this.
+        if self.status_text.startswith("Command palette open"):
+            self._set_status(self._status_text())
 
     def _handle_command_palette_key(self, event: events.Key) -> bool:
         palette = self.query_one("#command-palette", DataTable)
