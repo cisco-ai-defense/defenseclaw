@@ -467,6 +467,18 @@ func (s *ContinuousDiscoveryService) detectUserScans(now time.Time) ([]AISignal,
 	return out, files, errs
 }
 
+// ReadUserScanRecord reads one spool record (<uid>.json) with the checks the
+// gateway applies: a root-owned regular file within the size limit, the
+// current schema, and the uid its file name gives. The administrator's
+// discovery view reads the spool with it.
+func ReadUserScanRecord(path string) (UserScanRecord, error) {
+	record, err := readUserScanRecord(path)
+	if err == nil && strconv.Itoa(record.UID)+".json" != filepath.Base(path) {
+		err = errors.New("the record names another uid")
+	}
+	return record, err
+}
+
 func readUserScanRecord(path string) (UserScanRecord, error) {
 	var record UserScanRecord
 	info, err := os.Lstat(path)
