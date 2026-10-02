@@ -72,6 +72,12 @@ restart potential, and platform. The top-level `outcome` and `exit_code`
 combine health and repair results without adding repair failures to health
 counters.
 
+Doctor is the command that reaches out: the `LLM reachable` check sends one
+request to the configured provider, and on Windows the Codex check starts
+Codex's own app-server, which reads Codex's cloud requirements from OpenAI.
+`defenseclaw status` makes no calls to model vendors; it reads local state
+and the local gateway only.
+
 Use `--passive` to suppress synthetic telemetry, LLM, and
 inspection-content-submitting probes. Every `--fix --dry-run` is passive and
 runs planners only, so it cannot mutate disk or restart a service.
