@@ -11221,6 +11221,22 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             # Long group headers (".. PLUGIN ACTIONS (severity -> …) ..") would
             # size the Field column and push values off an 80-column screen;
             # the focused field's full label is in the body line above.
+            width = int(getattr(getattr(self, "size", None), "width", 0) or 0)
+            if 0 < width < 100:
+                # Narrow: the hint is already in the body line, and long values
+                # end with "…" so the Validation column stays on screen (GAP-1166).
+                value_room = max(12, width - 34 - 12 - 10)
+                return (
+                    ("Field", "Value", "Validation"),
+                    tuple(
+                        (
+                            _truncate_ellipsis(field.label, 30),
+                            _truncate_ellipsis(_config_display_value(field), value_room),
+                            _truncate_ellipsis(_validation_label(field), 12),
+                        )
+                        for field in section.fields
+                    ),
+                )
             return (
                 ("Field", "Value", "Validation", "Hint"),
                 tuple(
