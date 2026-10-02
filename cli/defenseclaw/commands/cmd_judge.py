@@ -247,7 +247,7 @@ def _ensure_enabled_hook_judge_strategies(gc) -> bool:
     return changed
 
 
-def _save_and_restart(app: AppContext, gc, *, restart: bool, action: str) -> None:
+def _save_and_restart(app: AppContext, gc, *, restart: bool, action: str, previous: str = "") -> None:
     try:
         app.cfg.save()
     except OSError as exc:
@@ -286,7 +286,10 @@ def _save_and_restart(app: AppContext, gc, *, restart: bool, action: str) -> Non
         connectors = ",".join(gc.judge.hook_connectors or []) or "(none)"
         # An Activity mutation names the new gate (hook_connectors: -> a,b);
         # a plain config-update action lost it (GAP-1325).
-        app.logger.log_config_change(f"judge-hooks-{action}", f"hook_connectors={connectors}")
+        # With the old gate too: "hook_connectors: (none) -> claudecode" (GAP-1511).
+        app.logger.log_config_change(
+            f"judge-hooks-{action}", f"hook_connectors={connectors} previous={previous or '(none)'}"
+        )
 
 
 @click.group("judge")
@@ -353,6 +356,7 @@ def judge_add(
 
     gc = app.cfg.guardrail
     gate = list(gc.judge.hook_connectors or [])
+    previous_gate = ",".join(gate)
 
     timeout_changed = False
     if hook_timeout is not None:
@@ -434,7 +438,7 @@ def judge_add(
         click.echo("  " + ux.dim(f"{noop_reason} — saving {' + '.join(saved)} only."))
 
     _warn_if_unconfigured(app, name)
-    _save_and_restart(app, gc, restart=restart, action=f"add {name}")
+    _save_and_restart(app, gc, restart=restart, action=f"add {name}", previous=previous_gate)
     click.echo()
 
 
@@ -464,6 +468,7 @@ def judge_remove(app: AppContext, connector: str, restart: bool) -> None:
 
     gc = app.cfg.guardrail
     gate = list(gc.judge.hook_connectors or [])
+    previous_gate = ",".join(gate)
 
     click.echo()
     if name == ALL_CONNECTORS:
@@ -501,7 +506,7 @@ def judge_remove(app: AppContext, connector: str, restart: bool) -> None:
         click.echo()
         return
 
-    _save_and_restart(app, gc, restart=restart, action=f"remove {name}")
+    _save_and_restart(app, gc, restart=restart, action=f"remove {name}", previous=previous_gate)
     click.echo()
 
 

@@ -196,6 +196,11 @@ class _CommandReadModelFixture:
             )
         )
 
+    def log_config_change(self, operation: str, details: str, *, actor: str = "cli:operator") -> None:
+        from defenseclaw.logger import Logger
+
+        Logger.log_config_change(self, operation, details, actor=actor)  # type: ignore[arg-type]
+
     def log_alert(self, source: str, severity: str, summary: str, details=None) -> None:
         self.store.log_event(
             Event(

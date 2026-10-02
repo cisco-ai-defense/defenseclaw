@@ -9952,6 +9952,15 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if not target.is_absolute():
             target = (self.data_dir or Path.cwd()) / target
         target = target.resolve(strict=False)
+        # Each export is a new timestamped file; the fixed name silently
+        # replaced the previous export (GAP-1533).
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        candidate = target.with_name(f"{target.stem}-{stamp}{target.suffix}")
+        counter = 2
+        while candidate.exists():
+            candidate = target.with_name(f"{target.stem}-{stamp}-{counter}{target.suffix}")
+            counter += 1
+        target = candidate
         managed_data_dir = self.data_dir.resolve(strict=False) if self.data_dir is not None else None
         protect_parent = managed_data_dir is not None and target.parent.is_relative_to(managed_data_dir)
         rows = []
@@ -11099,10 +11108,12 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             return False
         if getattr(action, "intent", None) is not None and action.intent.kind == "export":
             rows = len(self.audit_model.filtered)
+            view = self.audit_model.active_filter_label() or "all loaded events"
             path = self._export_audit(action.intent.path)
             self._render_chrome()
-            # Say what was written: the rows in the current view (GAP-1215).
-            self._set_status(f"Exported {rows} audit row(s) from the current view to {path}.")
+            # Say what was written: the rows of the current view, named, in a
+            # new file (GAP-1215, GAP-1533).
+            self._set_status(f"Exported {rows} audit row(s) ({view}) to {path}.")
             return True
         if getattr(action, "hint", ""):
             self._set_status(action.hint)

@@ -42,7 +42,7 @@ class WebhookAddWithGatewayStopped(unittest.TestCase):
         from defenseclaw.logger import CanonicalObservabilityUnavailableError
 
         logger = SimpleNamespace(
-            log_action=lambda *a, **k: (_ for _ in ()).throw(
+            log_config_change=lambda *a, **k: (_ for _ in ()).throw(
                 CanonicalObservabilityUnavailableError("gateway authentication is unavailable")
             ),
         )

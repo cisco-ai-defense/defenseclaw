@@ -413,6 +413,8 @@ class AuditPanelModel:
 
     def apply_filter(self) -> None:
         self.filtered = [event for event in self.items if self._matches_active_filters(event)]
+        if self.common_filter == "blocks":
+            self.filtered = _without_duplicate_hook_decisions(self.filtered)
         if self.filtered:
             self.cursor = max(0, min(self.cursor, len(self.filtered) - 1))
         else:
@@ -1083,6 +1085,11 @@ def _matches_common_filter(event: Event, preset: AuditCommonFilter) -> bool:
         # row whose decision is block; the action name alone never says so,
         # and the filter showed 0 rows (GAP-1215). Observe-mode would-blocks
         # are not blocks.
+        if action == "llm-judge-response":
+            # The judge's verdict is an input to the hook decision; the call's
+            # own hook or guardrail row records whether it was blocked, and an
+            # observe-mode verdict blocked nothing (GAP-1510).
+            return False
         if event.enforced is True:
             return True
         if action == "connector-hook":
@@ -1095,6 +1102,32 @@ def _matches_common_filter(event: Event, preset: AuditCommonFilter) -> bool:
     if preset == "credentials":
         return any(token in haystack for token in ("credential", "api key", "apikey", "token", "secret", "key"))
     return True
+
+
+def _without_duplicate_hook_decisions(events: list[Event]) -> list[Event]:
+    """Drop a ``hook_decision`` row whose call already has a ``connector-hook`` block row.
+
+    Every hook block is recorded twice (the connector-hook row and its
+    canonical hook_decision); Blocks listed each one twice (GAP-1510).
+    """
+
+    hook_blocks = [
+        (event_connector(event).lower(), event.timestamp)
+        for event in events
+        if event.action.lower() == "connector-hook"
+    ]
+    if not hook_blocks:
+        return events
+    kept: list[Event] = []
+    for event in events:
+        if event.action.lower() == "hook_decision":
+            connector = event_connector(event).lower()
+            if any(
+                name == connector and _seconds_apart(event.timestamp, at) <= 2.0 for name, at in hook_blocks
+            ):
+                continue
+        kept.append(event)
+    return kept
 
 
 def _is_low_signal_event(event: Event) -> bool:
@@ -1397,7 +1430,21 @@ def _row_target_label(event: Event) -> str:
             return _truncate(f"{connector} · {hook_phase}", 32)
         if connector:
             return _truncate(connector, 32)
+    if not event.target:
+        # Guardrail-verdict, judge and hook_decision rows have no target of
+        # their own; name the call instead of a blank cell (GAP-1510).
+        return _truncate(_structured_target_label(event.structured), 32)
     return _truncate(event.target, 32)
+
+
+def _structured_target_label(structured: object) -> str:
+    if method := _structured_text(structured, "defenseclaw.acp.method"):
+        return f"ACP {method}"
+    if hook := _structured_text(structured, "defenseclaw.hook.event"):
+        return hook
+    if kind := _structured_text(structured, "defenseclaw.judge.kind"):
+        return f"{kind} judge"
+    return ""
 
 
 def _row_details_label(event: Event) -> str:
@@ -1411,6 +1458,11 @@ def _row_details_label(event: Event) -> str:
     """
 
     if event.action != "connector-hook":
+        if "=" not in event.details and (outcome := _structured_outcome_label(event)):
+            # The details of a v8 row are only its event name
+            # ("guardrail.evaluation.completed"); the decision and rule say
+            # more ("block · SEC-AWS-KEY") (GAP-1510).
+            return _truncate(outcome, 20)
         return _truncate(event.details, 20)
     parsed = _parse_kv_details(event.details)
     decision = parsed.get("action", "") or parsed.get("decision", "")
@@ -1426,6 +1478,14 @@ def _row_details_label(event: Event) -> str:
     if not parts:
         return _truncate(event.details, 20)
     return _truncate(" · ".join(parts), 20)
+
+
+def _structured_outcome_label(event: Event) -> str:
+    facts = dict(_structured_fact_pairs(event.structured))
+    decision = facts.get("Decision", "")
+    if event.action.lower() == "llm-judge-response":
+        return f"judge: {decision}" if decision else ""
+    return " · ".join(part for part in (decision, facts.get("Rules", "")) if part)
 
 
 # Public aliases — re-exported so the Alerts panel (which surfaces

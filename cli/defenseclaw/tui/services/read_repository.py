@@ -38,7 +38,7 @@ from defenseclaw.models import ActionEntry, Counts, Event
 from defenseclaw.tui.panels.activity import (
     activity_mutations_from_v8_history,
 )
-from defenseclaw.tui.panels.alerts import AlertEvent, alerts_from_v8_history
+from defenseclaw.tui.panels.alerts import AlertEvent, alerts_from_v8_history, with_hook_decisions
 from defenseclaw.tui.panels.audit import with_older_blocks
 from defenseclaw.tui.services.event_models import ActivityMutation, EgressEvent
 from defenseclaw.tui.services.gateway_log_views import (
@@ -210,7 +210,10 @@ class TUIReadRepository:
             mutations = previous.mutations
         else:
             panel_history = history[:_PANEL_LIMIT]
-            alert_events = alerts_from_v8_history(alert_history, history)
+            # Same decision lookup as AlertsPanelModel.refresh: without it the
+            # list read "allow" for a would-block or post-tool finding after
+            # every background refresh (GAP-1456, GAP-1560).
+            alert_events = tuple(with_hook_decisions(store, list(alerts_from_v8_history(alert_history, history))))
             log_views = project_v8_log_views(history)
             egress_events = project_v8_egress_events(panel_history)
             mutations = activity_mutations_from_v8_history(mutation_history)

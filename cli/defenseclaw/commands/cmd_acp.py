@@ -652,11 +652,35 @@ def setup_cmd(
         "contract_lock": str(lock_path),
         "managed": managed,
     }
+    prior = acp_snapshot.bindings.get(pair_key)
+    prior_profile = acp_snapshot.profiles.get(prior.profile) if prior is not None else None
+    _log_acp_change(
+        app,
+        "acp-setup",
+        f"scope={client}/{agent} mode={mode} previous={getattr(prior_profile, 'mode', '') or ''}",
+    )
     click.echo(
         json.dumps(result, sort_keys=True)
         if json_output
         else f"Configured {agent} through DefenseClaw in {client} ({mode}) at {path}"
     )
+
+
+def _log_acp_change(app: AppContext, operation: str, details: str) -> None:
+    """Record an ACP entry change as an Activity mutation that names it (GAP-1511).
+
+    The change is saved first; a stopped gateway only skips the audit event.
+    """
+    if not getattr(app, "logger", None):
+        return
+    from defenseclaw.logger import CanonicalObservabilityError, CanonicalObservabilityUnavailableError
+
+    try:
+        app.logger.log_config_change(operation, details)
+    except CanonicalObservabilityUnavailableError:
+        click.echo("  ⚠ Change saved. The gateway isn't running, so the audit event was not recorded.", err=True)
+    except CanonicalObservabilityError as exc:
+        click.echo(f"  ⚠ Change saved, but the gateway did not confirm the audit event ({exc}).", err=True)
 
 
 @acp_cmd.command("remove")
@@ -725,6 +749,7 @@ def remove_cmd(app: AppContext, client: str, agent: str, managed: bool, runtime_
                 rollback_errors.append(f"{managed_path}: {type(rollback_exc).__name__}")
         suffix = f"; rollback problems: {', '.join(rollback_errors)}" if rollback_errors else ""
         raise click.ClickException(f"ACP removal was rolled back: {exc}{suffix}") from exc
+    _log_acp_change(app, "acp-remove", f"scope={client}/{agent} entry=removed previous=configured")
     if had_entry:
         click.echo(f"Removed the DefenseClaw {agent} entry from {path}")
     else:
