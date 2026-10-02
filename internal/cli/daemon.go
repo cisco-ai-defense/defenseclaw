@@ -2550,8 +2550,8 @@ func printDaemonStartResult(pid int, snap gateway.HealthSnapshot) {
 func printConnectorsNotStarted(snap gateway.HealthSnapshot) {
 	for _, name := range guardrailConnectorsNotStarted(snap.Guardrail.Details) {
 		fmt.Printf("  %s %s (%s) was skipped: its setup failed, so it is not enforced. "+
-			"See gateway.log for the reason, then run: defenseclaw-gateway restart\n",
-			Style("!", "fg=yellow", "bold"), friendlyConnectorName(name), name)
+			"See gateway.log for the reason, then run: defenseclaw setup %s\n",
+			Style("!", "fg=yellow", "bold"), friendlyConnectorName(name), name, name)
 	}
 }
 

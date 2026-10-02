@@ -19,7 +19,7 @@ func TestPrintDaemonStartResultNamesSkippedConnectors(t *testing.T) {
 	out := captureStdout(t, func() { printDaemonStartResult(42, snap) })
 	if !strings.Contains(out, "OK (PID 42)") ||
 		!strings.Contains(out, "(opencode) was skipped: its setup failed, so it is not enforced") ||
-		!strings.Contains(out, "run: defenseclaw-gateway restart") {
+		!strings.Contains(out, "run: defenseclaw setup opencode") {
 		t.Fatalf("output = %q, want the skipped connector named with a next step", out)
 	}
 	snap.Guardrail.Details = nil
