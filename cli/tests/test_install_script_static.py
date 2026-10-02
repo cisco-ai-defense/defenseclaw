@@ -357,9 +357,9 @@ def _openclaw_install_run(tmp_path: Path, npm_rc: int) -> subprocess.CompletedPr
         "set -euo pipefail\n"
         'has() { command -v "$1" >/dev/null 2>&1; }\nask_yes_no() { return 0; }\n'
         'warn() { echo "WARN $*"; }\nok() { :; }\nversion_lt() { return 1; }\n'
-        f'OPENCLAW_VERSION=2026.3.24 OPENCLAW_MISSING=false BIN_DIR="{tmp_path / "home" / ".local" / "bin"}"\n'
+        f'OPENCLAW_VERSION=2026.3.24 OPENCLAW_MISSING=false OPENCLAW_INSTALLED=false BIN_DIR="{tmp_path / "home" / ".local" / "bin"}"\n'
         + funcs
-        + 'ensure_openclaw\necho "missing=${OPENCLAW_MISSING}"\n',
+        + 'ensure_openclaw\necho "missing=${OPENCLAW_MISSING} installed=${OPENCLAW_INSTALLED}"\n',
         encoding="utf-8",
     )
     try:
@@ -379,16 +379,18 @@ def test_openclaw_installs_into_the_user_prefix_when_the_node_prefix_is_read_onl
     assert (tmp_path / "npm.log").read_text().split() == [
         "install", "-g", "--prefix", f"{home}/.local", "openclaw@2026.3.24", "--loglevel=error"
     ]
-    assert "missing=false" in done.stdout
+    assert "missing=false installed=true" in done.stdout
 
     failed_dir = tmp_path / "f"
     failed_dir.mkdir()
     failed = _openclaw_install_run(failed_dir, 1)
     assert f"run: npm install -g --prefix {failed_dir / 'home'}/.local openclaw@2026.3.24" in failed.stdout
-    assert "missing=true" in failed.stdout
+    assert "missing=true installed=false" in failed.stdout
     summary = INSTALL_SH.read_text(encoding="utf-8")
     tail = summary[summary.index('if [[ "${OPENCLAW_MISSING}" == true ]]; then') :]
     assert tail.index("exit 3") < tail.index("exit ${START_RC}")
+    # A fresh OpenClaw still needs its own setup; say so before the exit.
+    assert tail.index("openclaw onboard") < tail.index("exit ${START_RC}")
 
 
 def test_a_carriage_return_answer_takes_the_default(tmp_path: Path) -> None:
@@ -656,7 +658,7 @@ def test_both_installers_keep_uv_downloads_in_the_data_dir() -> None:
     assert '$env:UV_PYTHON_INSTALL_DIR = Join-Path $DataDir ".uv\\python"' in windows
 
 
-def _uv_bootstrap(tmp_path: Path, free_kb: int) -> subprocess.CompletedProcess[str]:
+def _uv_bootstrap(tmp_path: Path, free_kb: int, cache_mb: int | None = None) -> subprocess.CompletedProcess[str]:
     # The installer's uv bootstrap and free-space preflight, from the UV_*
     # exports to the first write of the staging dir.
     text = INSTALL_SH.read_text(encoding="utf-8")
@@ -674,6 +676,16 @@ def _uv_bootstrap(tmp_path: Path, free_kb: int) -> subprocess.CompletedProcess[s
     (fake / "curl").write_text("#!/bin/sh\necho CURL-CALLED\nexit 1\n", encoding="utf-8")
     for name in ("df", "curl"):
         (fake / name).chmod(0o755)
+    if cache_mb is not None:
+        # uv's cache holds cache_mb; every other du call is the real one.
+        cache = data_dir / ".uv" / "cache"
+        cache.mkdir(parents=True, exist_ok=True)
+        du = shutil.which("du", path="/usr/bin:/bin")
+        (fake / "du").write_text(
+            f'#!/bin/sh\nif [ "$2" = "{cache}" ]; then echo "{cache_mb * 1024}\t$2"; exit 0; fi\nexec {du} "$@"\n',
+            encoding="utf-8",
+        )
+        (fake / "du").chmod(0o755)
     script = tmp_path / "uv.sh"
     script.write_text(
         'set -euo pipefail\nerr() { echo "err: $*"; }\ndie() { err "$@"; exit 1; }\ninfo() { echo "info: $*"; }\n'
@@ -746,8 +758,7 @@ def test_a_first_install_without_room_refuses_before_writing(tmp_path: Path) -> 
 
 def test_an_upgrade_without_room_refuses_before_staging(tmp_path: Path) -> None:
     # GAP-1307: an upgrade with 8 MB free failed at staging with a raw cp ENOSPC.
-    (tmp_path / "home" / ".defenseclaw" / ".uv" / "cache").mkdir(parents=True)
-    proc = _uv_bootstrap(tmp_path, free_kb=8 * 1024)
+    proc = _uv_bootstrap(tmp_path, free_kb=8 * 1024, cache_mb=900)
 
     assert proc.returncode == 1, proc.stdout
     assert "the install needs about 400 MB and 8 MB is free" in proc.stdout
@@ -759,16 +770,63 @@ def test_an_upgrade_counts_the_rollback_copy_before_staging_or_stopping(tmp_path
     # GAP-1527: the rollback-copy check ran only after staging and after the
     # gateway stopped, and left the staged files behind.
     data_dir = tmp_path / "home" / ".defenseclaw"
-    (data_dir / ".uv" / "cache").mkdir(parents=True)
-    (data_dir / ".venv").mkdir()
+    (data_dir / ".venv").mkdir(parents=True)
     (data_dir / "audit.db").write_bytes(b"x" * (3 * 1024 * 1024))
-    proc = _uv_bootstrap(tmp_path, free_kb=450 * 1024)
+    proc = _uv_bootstrap(tmp_path, free_kb=450 * 1024, cache_mb=700)
 
     assert proc.returncode == 1, proc.stdout
     assert "the upgrade needs about 503 MB (400 MB for the new version and 103 MB for a rollback copy" in proc.stdout
     assert "450 MB is free" in proc.stdout and "Free at least 53 MB" in proc.stdout
     assert f"The largest item is {data_dir}/audit.db (3 MB)" in proc.stdout
     assert "nothing was changed" in proc.stdout
+
+
+def test_an_empty_or_partial_uv_cache_is_not_counted_as_warm(tmp_path: Path) -> None:
+    # GAP-1438: an existing but empty ~/.defenseclaw/.uv/cache cut the estimate
+    # to 400 MB, so a 600 MB disk passed and the build then hit ENOSPC.
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    (empty / "home" / ".defenseclaw" / ".uv" / "cache").mkdir(parents=True)
+    proc = _uv_bootstrap(empty, free_kb=597 * 1024)
+    assert proc.returncode == 1, proc.stdout
+    assert "the install needs about 1100 MB and 597 MB is free" in proc.stdout
+    assert "Installing uv" not in proc.stdout
+
+    partial = tmp_path / "partial"
+    partial.mkdir()
+    proc = _uv_bootstrap(partial, free_kb=597 * 1024, cache_mb=300)
+    assert proc.returncode == 1, proc.stdout
+    assert "the install needs about 800 MB and 597 MB is free" in proc.stdout
+
+
+def test_a_failed_python_build_removes_the_uv_it_installed_and_names_the_kept_cache(tmp_path: Path) -> None:
+    # GAP-1438: after ENOSPC it said "nothing was changed" but left the uv it
+    # downloaded in ~/.local/bin and 367 MB in a .uv that existed before.
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    block = text[text.index('if ! make_venv "${STAGING}/venv"; then') :]
+    block = block[: block.index("\nfi\n") + 4]
+    helper = text[text.index("drop_new_uv() {") : text.index("\n}\n", text.index("drop_new_uv() {")) + 3]
+    data_dir = tmp_path / "home" / ".defenseclaw"
+    (data_dir / ".uv" / "cache").mkdir(parents=True)
+    bin_dir = tmp_path / "home" / ".local" / "bin"
+    bin_dir.mkdir(parents=True)
+    for name in ("uv", "uvx", "defenseclaw-uv.sha256", "defenseclaw"):
+        (bin_dir / name).write_text("x", encoding="utf-8")
+    script = tmp_path / "fail.sh"
+    script.write_text(
+        'set -euo pipefail\nerr() { echo "err: $*"; }\ndie() { err "$@"; exit 1; }\nmake_venv() { return 1; }\n'
+        f'DEFENSECLAW_HOME="{data_dir}" BIN_DIR="{bin_dir}" STAGING="{data_dir}/.staging" VERSION=1.0.1\n'
+        'UV_DIR_NEW="" UV_INSTALLED=1\n' + helper + block,
+        encoding="utf-8",
+    )
+
+    proc = _run([str(script)], tmp_path)
+
+    assert proc.returncode == 1, proc.stdout
+    assert sorted(p.name for p in bin_dir.iterdir()) == ["defenseclaw"]
+    assert (data_dir / ".uv").is_dir()
+    assert f"uv's download cache {data_dir}/.uv (" in proc.stdout and "MB) is kept" in proc.stdout
+    assert "nothing was changed" not in proc.stdout
 
 
 def test_a_full_disk_is_checked_before_the_lock() -> None:
@@ -813,7 +871,9 @@ def test_a_failed_python_build_removes_what_it_wrote() -> None:
     text = INSTALL_SH.read_text(encoding="utf-8")
     failure = text[text.index('if ! make_venv "${STAGING}/venv"; then') :][:400]
     assert 'rm -rf "${STAGING}"' in failure
-    assert '[[ -z "${UV_DIR_NEW}" ]] || rm -rf "${DEFENSECLAW_HOME}/.uv"' in failure
+    assert "drop_new_uv" in failure
+    helper = text[text.index("drop_new_uv() {") :][:300]
+    assert '[[ -z "${UV_DIR_NEW}" ]] || rm -rf "${DEFENSECLAW_HOME}/.uv"' in helper
 
 
 def _install_sh_functions(*names: str) -> str:

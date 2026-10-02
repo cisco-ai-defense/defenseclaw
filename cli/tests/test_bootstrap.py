@@ -164,6 +164,29 @@ class BootstrapEnvTests(unittest.TestCase):
         self.assertEqual(result.status, "pass")
         self.assertIn("Hermes config found", result.detail)
 
+    def test_openclaw_setup_and_readiness_agree_before_openclaw_json_exists(self):
+        # GAP-1523: Guardrail skipped ("OpenClaw config not found ... skipped
+        # connector patch") while Readiness passed on the openclaw.json the
+        # gateway writes at start, also when OpenClaw was not installed.
+        from defenseclaw import bootstrap
+
+        cfg = _cfg_for(os.path.join(self._tmp.name, "dchome"))
+        cfg.claw.config_file = os.path.join(self._tmp.name, "oc", "openclaw.json")
+        with patch("defenseclaw.commands.cmd_setup.execute_guardrail_setup", return_value=(True, [])) as setup:
+            step = bootstrap._quiet_guardrail_setup(SimpleNamespace(cfg=cfg), "openclaw", verbose=False)
+        setup.assert_called_once()
+        self.assertEqual(step.status, "pass", step.detail)
+
+        os.makedirs(os.path.dirname(cfg.claw.config_file))
+        with open(cfg.claw.config_file, "w", encoding="utf-8") as fh:
+            fh.write("{}\n")
+        with patch.object(bootstrap.shutil, "which", return_value=None):
+            missing = _connector_readiness(cfg, "openclaw")
+        with patch.object(bootstrap.shutil, "which", return_value="/home/u/.local/bin/openclaw"):
+            found = _connector_readiness(cfg, "openclaw")
+        self.assertEqual((missing.status, missing.detail), ("warn", "OpenClaw is not installed (openclaw is not on PATH)"))
+        self.assertEqual(found.status, "pass")
+
     def test_opencode_readiness_honors_custom_config_dir(self):
         cfg = _cfg_for(os.path.join(self._tmp.name, "dchome"))
         config_home = os.path.join(self._tmp.name, "opencode-config")
@@ -1224,6 +1247,29 @@ class FirstRunApiPortTests(unittest.TestCase):
         self.assertIn("configured by another account", note)
 
     @unittest.skipIf(os.name == "nt", "port claims are a Linux and macOS hint")
+    def test_new_config_skips_a_port_a_deleted_account_claimed(self):
+        # GAP-1704: nobody can replace a deleted account's claim, so a port
+        # it holds went to two accounts and the first one's gateway could not start.
+        import pwd
+        import tempfile
+
+        from defenseclaw import bootstrap
+        from defenseclaw.config import default_config
+
+        cfg = default_config()
+        with tempfile.TemporaryDirectory() as claims:
+            open(os.path.join(claims, "defenseclaw-api-port-18970"), "w").close()
+            with (
+                patch.object(bootstrap, "_API_PORT_CLAIM_DIR", claims),
+                patch.object(bootstrap, "_api_port_free", return_value=True),
+                patch.object(bootstrap.os, "getuid", return_value=os.getuid() + 1),
+                patch.object(pwd, "getpwuid", side_effect=KeyError("deleted account")),
+            ):
+                bootstrap.choose_first_run_api_port(cfg)
+
+        self.assertEqual(cfg.gateway.api_port, 18980)
+
+    @unittest.skipIf(os.name == "nt", "port claims are a Linux and macOS hint")
     def test_new_config_claims_its_port_so_a_concurrent_init_skips_it(self):
         # GAP-1462: two accounts' inits must not pick the same free port.
         import tempfile
@@ -1286,13 +1332,12 @@ class FirstRunApiPortTests(unittest.TestCase):
                 patch.object(bootstrap.platform_support, "host_os", return_value="windows"),
                 patch.dict(os.environ, {"ProgramData": claims}),
                 patch.object(bootstrap, "_windows_own_sid", return_value=own),
-                patch.object(bootstrap, "_windows_account_exists", side_effect=lambda sid: sid == other),
             ):
+                # Also when the SID's account was deleted: no other account
+                # can remove its claim from %ProgramData% (GAP-1704).
                 self.assertTrue(bootstrap._api_port_claimed_by_other_account(18970))
                 self.assertFalse(bootstrap._api_port_claimed_by_other_account(18980), "own claim")
                 self.assertFalse(bootstrap._api_port_claimed_by_other_account(18990), "no claim")
-                with patch.object(bootstrap, "_windows_account_exists", return_value=False):
-                    self.assertFalse(bootstrap._api_port_claimed_by_other_account(18970), "deleted account")
                 bootstrap.remove_own_api_port_claims()
             self.assertEqual(os.listdir(claims), ["defenseclaw-api-port-18970"])
 

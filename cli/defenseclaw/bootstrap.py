@@ -261,9 +261,9 @@ def _api_port_free(host: str, port: int) -> bool:
 # A per-user gateway start leaves an empty file owned by its account here for
 # its API port (internal/cli/gateway_port_claim_unix.go). A stopped or crashed
 # gateway frees its port, so init on another account checks these claims too
-# (GAP-1261). A claim by a deleted account is ignored. On Windows the claims
-# are in %ProgramData% and hold the claiming account's SID
-# (gateway_port_claim_windows.go, GAP-1569).
+# (GAP-1261). A claim left by a deleted account counts too: nobody else can
+# remove it (GAP-1704). On Windows the claims are in %ProgramData% and hold
+# the claiming account's SID (gateway_port_claim_windows.go, GAP-1569).
 _API_PORT_CLAIM_DIR = "/var/tmp"
 _API_PORT_CLAIM_PREFIX = "defenseclaw-api-port-"
 _WINDOWS_CLAIM_SID = re.compile(r"S-1-[0-9]+(?:-[0-9]+)+")
@@ -301,49 +301,23 @@ def _windows_own_sid() -> str:
         return ""
 
 
-def _windows_account_exists(sid: str) -> bool:
-    """False only when Windows says no account has ``sid`` (a deleted account)."""
-    try:
-        import ctypes
-        from ctypes import wintypes
-
-        advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
-        raw = ctypes.c_void_p()
-        if not advapi32.ConvertStringSidToSidW(ctypes.c_wchar_p(sid), ctypes.byref(raw)):
-            return True
-        try:
-            name_len, domain_len, use = wintypes.DWORD(0), wintypes.DWORD(0), wintypes.DWORD(0)
-            advapi32.LookupAccountSidW(
-                None, raw, None, ctypes.byref(name_len), None, ctypes.byref(domain_len), ctypes.byref(use)
-            )
-            return ctypes.get_last_error() != 1332  # ERROR_NONE_MAPPED
-        finally:
-            ctypes.windll.kernel32.LocalFree(raw)
-    except Exception:  # noqa: BLE001 - an unverifiable claim still counts
-        return True
-
-
 def _api_port_claimed_by_other_account(port: int) -> bool:
     path = os.path.join(_api_port_claim_dir(), f"{_API_PORT_CLAIM_PREFIX}{port}")
     if _windows_port_claims():
         sid = _windows_claim_sid(path)
         own = _windows_own_sid()
-        return bool(sid and own) and sid.upper() != own.upper() and _windows_account_exists(sid)
+        return bool(sid and own) and sid.upper() != own.upper()
     if os.name == "nt":
         return False
     try:
         info = os.lstat(path)
     except OSError:
         return False
-    if not stat.S_ISREG(info.st_mode) or info.st_uid == os.getuid():
-        return False
-    try:
-        import pwd
-
-        pwd.getpwuid(info.st_uid)
-    except (ImportError, KeyError):
-        return False
-    return True
+    # No standard account can remove or replace another uid's claim in the
+    # sticky /var/tmp, even a deleted account's. Skipping only live owners'
+    # claims let two accounts take the same port: the first one's gateway
+    # could not claim it, so the next init picked it again (GAP-1704).
+    return stat.S_ISREG(info.st_mode) and info.st_uid != os.getuid()
 
 
 def remove_own_api_port_claims() -> None:
@@ -1596,20 +1570,9 @@ def _scanner_availability(cfg: Config) -> list[StepResult]:
 def _quiet_guardrail_setup(app, connector: str, *, verbose: bool) -> StepResult:
     from defenseclaw.commands.cmd_setup import execute_guardrail_setup
 
-    if connector == "openclaw":
-        oc_path = os.path.expanduser(app.cfg.claw.config_file)
-        if not os.path.isfile(oc_path):
-            try:
-                app.cfg.save()
-            except OSError:
-                pass
-            return StepResult(
-                "Guardrail",
-                "warn",
-                f"OpenClaw config not found at {app.cfg.claw.config_file}; saved config but skipped connector patch",
-                "defenseclaw setup guardrail",
-            )
-
+    # OpenClaw needs no openclaw.json yet: the gateway registers its plugin
+    # there (creating the file) when it starts, as for every connector. This
+    # step used to skip with a warning that Readiness then contradicted (GAP-1523).
     buf = io.StringIO()
     sink = contextlib.nullcontext() if verbose else contextlib.redirect_stdout(buf)
     try:
@@ -1955,6 +1918,14 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
     if connector == "none":
         return StepResult("Connector", "skip", "no connector requested")
     if connector == "openclaw":
+        if not shutil.which("openclaw"):
+            # The gateway writes openclaw.json even without OpenClaw (GAP-1523).
+            return StepResult(
+                "Connector",
+                "warn",
+                "OpenClaw is not installed (openclaw is not on PATH)",
+                "defenseclaw setup openclaw",
+            )
         path = os.path.expanduser(cfg.claw.config_file)
         if os.path.isfile(path):
             return StepResult("Connector", "pass", f"OpenClaw config found: {cfg.claw.config_file}")
