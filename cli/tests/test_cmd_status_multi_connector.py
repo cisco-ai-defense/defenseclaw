@@ -778,6 +778,44 @@ class TestStatusDbErrorSurfacing(unittest.TestCase):
         self.assertNotIn("disk I/O error", result.output)
 
 
+class TestStatusHeaderAndConfigProblems(unittest.TestCase):
+    """GAP-1789 (version, sidecar PID/uptime/API, footer) and GAP-1788."""
+
+    def setUp(self):
+        self.app, self.tmp_dir, self.db_path = make_app_context()
+
+    def tearDown(self):
+        cleanup_app(self.app, self.db_path, self.tmp_dir)
+
+    def _invoke(self, args=()):
+        with patch.object(cmd_status, "_fetch_runtime_bound_health", return_value=None):
+            return CliRunner().invoke(status_cmd, list(args), obj=self.app, catch_exceptions=False)
+
+    def test_sidecar_running_detail(self):
+        detail = cmd_status._sidecar_running_detail({"pid": 4242, "uptime_ms": 3_725_000}, "127.0.0.1", 19030)
+        self.assertEqual(detail, " (PID 4242, up 1h 2m, API http://127.0.0.1:19030)")
+        self.assertEqual(cmd_status._sidecar_running_detail({}, "", 0), "")
+
+    def test_header_names_version_and_footer_skips_status_itself(self):
+        from defenseclaw import __version__
+
+        result = self._invoke()
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn(f"Version:      {__version__}", result.output)
+        self.assertNotIn("Operator overview: defenseclaw status", result.output)
+
+    def test_config_problem_still_renders_and_exits_one(self):
+        self.app.config_problems = ["galileo needs GALILEO_API_KEY"]
+        result = self._invoke()
+        self.assertEqual(result.exit_code, 1, msg=result.output)
+        self.assertIn("1 problem(s)", result.output)
+        self.assertIn("Sidecar", result.output)
+        self.assertIn("Enforcement", result.output)
+        as_json = self._invoke(["--json"])
+        self.assertEqual(as_json.exit_code, 1, msg=as_json.output)
+        self.assertEqual(json.loads(as_json.output)["config_errors"], ["galileo needs GALILEO_API_KEY"])
+
+
 class TestStatusJson(unittest.TestCase):
     """SU-13: ``status --json`` emits a machine-readable document."""
 

@@ -455,6 +455,13 @@ func (a *App) project() (string, error) {
 	return real, nil
 }
 
+// DisabledError is the daemon's refusal while sandboxes are off. With
+// --output json the command prints {"enabled": false, "available": false,
+// "reason": ...} like `sandbox status --json` (GAP-1817).
+type DisabledError struct{ Message string }
+
+func (e *DisabledError) Error() string { return e.Message }
+
 // apiError explains a daemon error for people. Admin refusals start with
 // "blocked by your organization's DefenseClaw policy".
 func apiError(err error) error {
@@ -471,7 +478,7 @@ func apiError(err error) error {
 			return fmt.Errorf("the DefenseClaw daemon is not running (start it with `defenseclaw-gateway start`): %s", e.Detail)
 		}
 	case sandboxapi.CodeDisabled:
-		return fmt.Errorf("%s", e.Message)
+		return &DisabledError{Message: e.Message}
 	case sandboxapi.CodeAdminViolation:
 		return errors.New(violationMessage(e.Violation, e.Message, e.Detail, true))
 	case sandboxapi.CodePolicyViolation:

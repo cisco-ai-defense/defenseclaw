@@ -195,8 +195,12 @@ class TestPolicyShow(PolicyCommandTestBase):
 
     def test_show_nonexistent(self):
         result = self.invoke(["show", "does-not-exist"])
-        self.assertNotEqual(result.exit_code, 0)
-        self.assertIn("not found", result.output)
+        self.assertEqual(result.exit_code, 1)
+        # GAP-1818: CLI error style plus the valid names and the next step.
+        self.assertIn("Error: policy 'does-not-exist' not found.", result.output)
+        self.assertIn("Available policies:", result.output)
+        self.assertIn("default", result.output)
+        self.assertIn("defenseclaw policy list", result.output)
 
 
 class TestPolicyActivate(PolicyCommandTestBase):

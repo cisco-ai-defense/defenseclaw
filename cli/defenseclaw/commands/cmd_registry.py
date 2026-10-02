@@ -1488,6 +1488,12 @@ def _do_manual_verdict(
             "No cached manifest yet — run `defenseclaw registry sync "
             f"{source.id}` to fetch and promote.",
         )
+    elif approved and verdict.status == "pending":
+        # GAP-1750: say what "pending" waits for and how to finish.
+        ux.subhead(
+            "Status stays pending until the next scan: run `defenseclaw registry sync "
+            f"{source.id}` (in the TUI Registries panel, press s).",
+        )
 
 
 # ---------------------------------------------------------------------------

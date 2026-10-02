@@ -5,8 +5,11 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -73,5 +76,56 @@ func TestUsageErrorShowsSubcommandFormOfRunnableGroup(t *testing.T) {
 	err := unexpectedArgs(group, []string{"bogus"})
 	if err == nil || !strings.Contains(err.Error(), "watchdog [command]") || !strings.Contains(err.Error(), "unknown command") {
 		t.Fatalf("usage error = %v", err)
+	}
+}
+
+// GAP-1788: with only a destination secret missing, gateway status still
+// loads enough of config.yaml to query the gateway, then reports the
+// problem with a fix that works (not "disable that destination").
+func TestGatewayStatusMissingDestinationSecretStillFindsGateway(t *testing.T) {
+	home := t.TempDir()
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	const secretEnv = "DC_TEST_STATUS_MISSING_KEY"
+	t.Setenv("DEFENSECLAW_HOME", home)
+	t.Setenv("DEFENSECLAW_CONFIG", configPath)
+	t.Setenv(secretEnv, "")
+	raw := fmt.Sprintf(`config_version: 8
+data_dir: %s
+gateway:
+  api_bind: 127.0.0.1
+  api_port: 19131
+observability:
+  destinations:
+    - name: galileo
+      kind: otlp
+      endpoint: https://collector.example.test
+      headers:
+        Galileo-API-Key: {env: %s}
+`, filepath.ToSlash(home), secretEnv)
+	if err := os.WriteFile(configPath, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previous := cfg
+	t.Cleanup(func() { cfg = previous; gatewayStatusConfigProblem = nil })
+
+	loadErr := loadGatewayCommandConfigFor(statusCmd)
+	if loadErr == nil {
+		t.Fatal("config with a missing destination secret loaded")
+	}
+	relaxed := gatewayStatusRelaxedConfig(loadErr)
+	if relaxed == nil || relaxed.Gateway.APIPort != 19131 {
+		t.Fatalf("relaxed config = %+v (load error %v)", relaxed, loadErr)
+	}
+	msg := gatewayStatusConfigLoadError(loadErr).Error()
+	for _, want := range []string{"defenseclaw keys set " + secretEnv, `remove destination "galileo" from ` + configPath} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("status error %q does not contain %q", msg, want)
+		}
+	}
+	if strings.Contains(msg, "disable that destination") {
+		t.Errorf("status error still advises a disable that setup refuses: %q", msg)
+	}
+	if gatewayStatusRelaxedConfig(errors.New("failed to load config: bad yaml")) != nil {
+		t.Error("a non-secret error was relaxed")
 	}
 }

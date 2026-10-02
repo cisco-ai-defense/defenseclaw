@@ -203,6 +203,15 @@ defenseclaw setup galileo enable
 defenseclaw setup galileo remove --yes
 ```
 
+If the key is missing (for example, removed from `~/.defenseclaw/.env`), the
+gateway keeps running with the config it started with, but it cannot restart.
+`defenseclaw status` and `defenseclaw-gateway status` still show the gateway
+and name the missing key, and exit `1`. Every `setup` command, including
+`setup galileo disable` and `remove`, checks the whole file first and refuses.
+Save the key with `defenseclaw keys set GALILEO_API_KEY`, or delete the
+`galileo` destination from `config.yaml`, then run
+`defenseclaw-gateway restart`.
+
 Destination names are identities. A new name appends a route; the same name
 updates only that route. The dedicated Galileo command always manages the
 destination named `galileo`, so rerunning it reports `UPDATE` and never replaces

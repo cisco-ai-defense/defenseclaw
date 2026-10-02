@@ -987,8 +987,8 @@ func missingObservabilitySecretError(verb string, err error) error {
 	}
 	return fmt.Errorf(
 		"cannot %s the gateway: observability destination %q needs %s, which is not set. "+
-			"Set it with: defenseclaw keys set %s (or disable that destination), then run: defenseclaw-gateway %s",
-		verb, secretErr.Destination, secretErr.Reference, secretErr.Reference, verb,
+			"Set it with: defenseclaw keys set %s (or remove that destination from %s), then run: defenseclaw-gateway %s",
+		verb, secretErr.Destination, secretErr.Reference, secretErr.Reference, config.ConfigPath(), verb,
 	)
 }
 

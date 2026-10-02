@@ -237,7 +237,11 @@ def scan(
             registry_cache=registry_cache,
         )
         if scan_dir:
-            matches = [_PluginMatch(connector, scan_dir, adhoc=adhoc)]
+            # GAP-1697: report a Hermes plugin under the id plugin list shows.
+            plugin_id = (
+                _hermes_plugin_id_for_path(scan_dir) if connector_paths.normalize(connector) == "hermes" else ""
+            )
+            matches = [_PluginMatch(connector, scan_dir, adhoc=adhoc, plugin_id=plugin_id)]
     else:
         if connector_flag:
             from defenseclaw.commands import resolve_list_connector
@@ -463,7 +467,7 @@ def _scan_one_plugin_dir(
     if result.is_clean():
         _scan_ui.render_per_target_status(
             ctx,
-            target=target_name,
+            target=plugin_id or target_name,
             verdict=_scan_ui.VERDICT_CLEAN,
             findings=0,
         )
@@ -483,7 +487,7 @@ def _scan_one_plugin_dir(
     )
     _scan_ui.render_per_target_status(
         ctx,
-        target=target_name,
+        target=plugin_id or target_name,
         verdict=verdict,
         detail=f"max severity: {sev}",
         findings=len(result.findings),
@@ -3137,6 +3141,20 @@ def _resolve_connector_scope(app: AppContext, connector_flag: str) -> str:
     from defenseclaw.commands import resolve_list_connector
 
     return resolve_list_connector(app, connector_flag)
+
+
+def _hermes_plugin_id_for_path(scan_dir: str) -> str:
+    """The id ``plugin list --connector hermes`` shows for a plugin folder, or ""."""
+    try:
+        rows = _list_hermes_plugins()
+    except Exception:  # noqa: BLE001 - fall back to the manifest name.
+        return ""
+    real = os.path.realpath(scan_dir)
+    for row in rows:
+        host = row.get("host_path") or ""
+        if host and os.path.realpath(host) == real:
+            return str(row["id"])
+    return ""
 
 
 def _hermes_listed_plugin(

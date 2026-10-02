@@ -1486,6 +1486,18 @@ class TestPluginInfoNestedHermes(PluginCommandTestBase):
             self.assertIn("'web/none' not found", miss.output)
 
 
+    def test_path_scan_uses_the_listed_id(self):
+        # GAP-1697: a path scan names the plugin as plugin list does.
+        from defenseclaw.commands import cmd_plugin
+
+        path = os.path.join(self.tmp_dir, "hermes-agent", "plugins", "platforms", "photon")
+        os.makedirs(path)
+        rows = [{"id": "photon", "name": "photon-platform", "host_path": path}]
+        with patch("defenseclaw.commands.cmd_plugin._list_hermes_plugins", return_value=rows):
+            self.assertEqual(cmd_plugin._hermes_plugin_id_for_path(path + os.sep), "photon")
+            self.assertEqual(cmd_plugin._hermes_plugin_id_for_path(self.tmp_dir), "")
+
+
 class TestPluginMultiConnectorSemantics(PluginCommandTestBase):
     def setUp(self):
         super().setUp()
