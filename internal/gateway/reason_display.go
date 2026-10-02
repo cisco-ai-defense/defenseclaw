@@ -145,11 +145,7 @@ func agentVerdictReason(action, sourceReason, displayReason string, policy redac
 		subject = agentRuleAndJudgeSubject(sourceReason)
 	}
 	if action == "block" && subject != "" {
-		if standaloneEnterpriseActive.Load() {
-			return "DefenseClaw blocked this action under your organization's policy (" + subject + "). " +
-				agentBlockNoRetry + " Contact your administrator if you need it allowed."
-		}
-		return "DefenseClaw policy blocked this action (" + subject + "). " + agentBlockNoRetry
+		return agentBlockSentence(subject)
 	}
 	if displayReason == sourceReason && !trustedBuiltInMatchReason(sourceReason) {
 		return displayReason
@@ -160,20 +156,44 @@ func agentVerdictReason(action, sourceReason, displayReason string, policy redac
 	}
 	standalone := standaloneEnterpriseActive.Load()
 	switch {
-	case action == "block" && standalone:
-		return "DefenseClaw blocked this action under your organization's policy (" + rules + "). " +
-			agentBlockNoRetry + " Contact your administrator if you need it allowed."
 	case action == "block":
-		return "DefenseClaw policy blocked this action (" + rules + "). " + agentBlockNoRetry
+		return agentBlockSentence(rules)
 	case action == agentReviewAction && standalone:
 		return "DefenseClaw flagged this action for review under your organization's policy (" + rules + ")."
 	case action == agentReviewAction:
 		return "DefenseClaw policy flagged this action for review (" + rules + ")."
-	case standalone:
-		return "DefenseClaw needs your confirmation for this action under your organization's policy (" + rules + ")."
 	default:
-		return "DefenseClaw policy needs your confirmation for this action (" + rules + ")."
+		return agentConfirmSentence(rules)
 	}
+}
+
+// agentBlockSentence is the block an agent and its user read for subject
+// (the deciding rules, a judge verdict or a block-list entry; "" when none
+// can be named). Host hooks (agentVerdictReason) and sandbox hooks
+// (sandboxVerdictReason) share it, so one rule reads the same wherever the
+// connector runs (GAP-1885).
+func agentBlockSentence(subject string) string {
+	detail := ""
+	if subject != "" {
+		detail = " (" + subject + ")"
+	}
+	if standaloneEnterpriseActive.Load() {
+		return "DefenseClaw blocked this action under your organization's policy" + detail + ". " +
+			agentBlockNoRetry + " Contact your administrator if you need it allowed."
+	}
+	return "DefenseClaw policy blocked this action" + detail + ". " + agentBlockNoRetry
+}
+
+// agentConfirmSentence is agentBlockSentence for a confirmation.
+func agentConfirmSentence(subject string) string {
+	detail := ""
+	if subject != "" {
+		detail = " (" + subject + ")"
+	}
+	if standaloneEnterpriseActive.Load() {
+		return "DefenseClaw needs your confirmation for this action under your organization's policy" + detail + "."
+	}
+	return "DefenseClaw policy needs your confirmation for this action" + detail + "."
 }
 
 // agentObservedReason names the rules of a finding DefenseClaw lets through

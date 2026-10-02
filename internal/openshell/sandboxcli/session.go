@@ -1208,41 +1208,20 @@ func (s *session) startedBefore(daemonStarted time.Time) bool {
 // blockedReason is a blocked tool call's reason as the summary names it:
 // the deciding rule's title and ID ("E2E sandbox marker command
 // (E2E-SANDBOX-MARKER)"), taken from the reason DefenseClaw gave the
-// harness ("Blocked by DefenseClaw rule E2E-SANDBOX-MARKER: E2E sandbox
-// marker command. Try another approach…"), or the reason cut short.
+// harness ("DefenseClaw policy blocked this action (rule E2E-SANDBOX-MARKER:
+// E2E sandbox marker command). Do not retry it in another form."), or the
+// reason cut short.
 func blockedReason(reason string) string {
-	r := strings.TrimSpace(reason)
-	for _, verb := range []string{"Blocked by ", "Held for approval by ", "Flagged by "} {
-		rest, ok := strings.CutPrefix(r, verb+"DefenseClaw rule ")
-		if !ok {
-			if strings.HasPrefix(r, verb+"DefenseClaw policy.") {
-				return "DefenseClaw policy"
-			}
-			continue
-		}
-		end := len(rest)
-		for _, sep := range []string{":", " (", ". "} {
-			if i := strings.Index(rest, sep); i >= 0 && i < end {
-				end = i
-			}
-		}
-		id := strings.TrimSuffix(rest[:end], ".")
-		title := ""
-		if strings.HasPrefix(rest[end:], ":") {
-			title = strings.TrimSpace(rest[end+1:])
-			for _, sep := range []string{" (also ", ". "} {
-				if i := strings.Index(title, sep); i >= 0 {
-					title = title[:i]
-				}
-			}
-			title = strings.TrimSuffix(title, ".")
-		}
-		if title == "" {
-			return truncate(id, 60)
-		}
-		return truncate(title, 60) + " (" + id + ")"
+	id, title, ok := sandboxapi.VerdictRule(reason)
+	switch {
+	case !ok:
+		return truncate(strings.TrimSpace(reason), 60)
+	case id == "":
+		return "DefenseClaw policy"
+	case title == "":
+		return truncate(id, 60)
 	}
-	return truncate(r, 60)
+	return truncate(title, 60) + " (" + id + ")"
 }
 
 // headMoved describes what a session did to HEAD: "switched main → fix",

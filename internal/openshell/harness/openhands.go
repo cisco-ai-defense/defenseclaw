@@ -55,7 +55,7 @@ const openHandsShimModuleName = "defenseclaw_openhands"
 //     "Hook: PreToolUse (terminal) Status: BLOCKED - Blocked by DefenseCla...",
 //     so the rule and reason showed only after Ctrl+O. For a block whose
 //     reason is DefenseClaw's, the rendering starts with
-//     "BLOCKED by DefenseClaw rule <ID>: <title>. ..." instead, followed by
+//     "BLOCKED: DefenseClaw policy blocked this action (rule <ID>: <title>). ..." instead, followed by
 //     the rest of OpenHands' own rendering.
 //   - Authlib's deprecation warning stays off the screen. The SDK imports
 //     authlib.jose (openhands/sdk/llm/auth/openai.py), which warns

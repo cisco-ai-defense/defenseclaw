@@ -485,12 +485,23 @@ func mergeWithLaneVerdict(local *ToolInspectVerdict, aid *ScanVerdict, findingTa
 		// across the AID / judge / regex lanes. Confidence stays at 0
 		// (lane doesn't self-report one); the emitter treats zero as
 		// "not computed" and omits it on the wire.
+		// A judge finding is titled by its category and keeps the
+		// severity of the judge that reported it, not the strictest one
+		// of the judges merged into the lane verdict (GAP-1886).
 		for _, f := range aid.Findings {
 			rf := RuleFinding{
 				RuleID:   f,
 				Title:    f,
 				Severity: aid.Severity,
 				Tags:     []string{strings.TrimSuffix(findingTag, ":")},
+			}
+			if s := aid.findingSeverity[f]; s != "" {
+				rf.Severity = s
+			}
+			if findingTag == "llm-judge:" {
+				if title := judgeFindingTitle(f); title != "" {
+					rf.Title = title
+				}
 			}
 			local.DetailedFindings = append(local.DetailedFindings, rf)
 		}
@@ -1552,6 +1563,15 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 		hookEvaluationTarget(req.Connector, req.Tool), targetType, verdict, elapsed,
 		"emit_inspect_tool")
 	a.emitInspectTraceV8(r.Context(), req.Tool, targetType, verdict, elapsed, evalCtx)
+	if targetType == "tool_call" && strings.EqualFold(firstNonEmpty(req.Connector, connectorName), "openclaw") {
+		// The event router puts the decision on the call's tool span
+		// (GAP-1930).
+		if outcome, ok := hookGuardrailOutcomeFor(verdict.Action, verdict.Severity, verdict.Reason, evalCtx.RuleIDs); ok {
+			meta := hookDecisionMetricMeta(r.Context(), connectorName)
+			rememberOpenClawToolOutcome(firstNonEmpty(meta.SessionID, req.SessionID), meta.RunID, req.Tool, outcome,
+				AgentIdentityFromContext(r.Context()))
+		}
+	}
 
 	requestID := RequestIDFromContext(r.Context())
 	auditDetails := fmt.Sprintf("severity=%s confidence=%.2f reason=%s elapsed=%s mode=%s would_block=%v raw_action=%s",

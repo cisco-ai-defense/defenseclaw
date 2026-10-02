@@ -570,7 +570,8 @@ func TestHookCoverage(t *testing.T) {
 	ask := d("PreToolUse", "", "confirm")
 	ask.Severity, ask.Reason = "HIGH", "DefenseClaw rule C2-WEBHOOK-SITE asks you to confirm this."
 	allow.Severity, other.BindingID = "NONE", "sb_other"
-	block.Severity, block.WouldBlock, block.Reason = "HIGH", true, "Blocked by DefenseClaw rule E2E-SANDBOX-MARKER: E2E sandbox marker command."
+	block.Severity, block.WouldBlock, block.Reason = "HIGH", true,
+		"DefenseClaw policy blocked this action (rule E2E-SANDBOX-MARKER: E2E sandbox marker command). Do not retry it in another form."
 	alert.Severity, alert.Reason = "high", "Allowed but flagged by DefenseClaw rule E2E-SANDBOX-ALERT: E2E sandbox alert marker. "+
 		"The action was allowed; DefenseClaw recorded the finding for the user's review."
 	for _, dec := range []HookDecision{allow, block, alert, ask, d("PostToolUse", "", "allow"), other} {
@@ -584,7 +585,9 @@ func TestHookCoverage(t *testing.T) {
 		got[0].Message != "? DefenseClaw asked you to confirm Bash: "+ask.Reason {
 		t.Fatalf("tool asks on the feed = %+v", got)
 	}
-	if got := e.events("hookbox", sandboxapi.ActivityToolBlocked, ""); len(got) != 1 || got[0].Tool != "Bash" {
+	if got := e.events("hookbox", sandboxapi.ActivityToolBlocked, ""); len(got) != 1 || got[0].Tool != "Bash" ||
+		got[0].Message != "✗ Bash blocked by DefenseClaw: E2E-SANDBOX-MARKER (E2E sandbox marker command)" ||
+		got[0].Reason != block.Reason {
 		t.Fatalf("tool blocks on the feed = %+v", got)
 	}
 	findings := e.events("hookbox", sandboxapi.ActivityFinding, sandboxapi.ReasonHookFinding)
@@ -592,16 +595,19 @@ func TestHookCoverage(t *testing.T) {
 		!strings.Contains(findings[0].Message, "Bash: Allowed but flagged by DefenseClaw rule E2E-SANDBOX-ALERT") {
 		t.Fatalf("finding events = %+v", findings)
 	}
-	// A blocked prompt is on the feed and counted, but is no tool call (GAP-1791).
+	// A blocked prompt is on the feed and counted, but is no tool call
+	// (GAP-1791). Its line names the rule, not the whole reason with the
+	// advice to the agent (GAP-1902).
 	prompt := d("UserPromptSubmit", "", "block")
-	prompt.Tool, prompt.Severity, prompt.Reason = "", "CRITICAL", "Blocked by DefenseClaw rule SEC-AWS-KEY: AWS access key."
+	prompt.Tool, prompt.Severity, prompt.Reason = "", "CRITICAL",
+		"DefenseClaw policy blocked this action (rule SEC-AWS-KEY: AWS access key). Do not retry it in another form."
 	e.m.ObserveHookDecision(prompt)
 	e.m.ObserveHookDecision(d("UserPromptSubmit", "", "allow"))
 	if h := e.get("hookbox").Hooks; h.ToolCalls != 4 || h.ToolBlocked != 1 || h.PromptBlocked != 1 {
 		t.Fatalf("hooks after a prompt block = %+v", h)
 	}
 	if got := e.events("hookbox", sandboxapi.ActivityHookBlocked, ""); len(got) != 1 || got[0].Severity != "CRITICAL" ||
-		got[0].Message != "✗ prompt blocked by DefenseClaw: "+prompt.Reason {
+		got[0].Message != "✗ prompt blocked by DefenseClaw: SEC-AWS-KEY (AWS access key)" || got[0].Reason != prompt.Reason {
 		t.Fatalf("prompt blocks on the feed = %+v", got)
 	}
 }

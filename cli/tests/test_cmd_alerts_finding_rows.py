@@ -64,6 +64,37 @@ class AlertFindingRowsTests(unittest.TestCase):
         store.db.commit()
         return finding.id
 
+    def test_judge_finding_names_the_judge_and_no_repeated_id(self):
+        # GAP-1886: a judge finding read "Rule: JUDGE-EXFIL-FILE: JUDGE-EXFIL-FILE"
+        # and "Scanner: hook-rules", like a regex rule.
+        now = datetime.now(timezone.utc)
+        rows = (
+            {"defenseclaw.finding.rule_id": "JUDGE-EXFIL-FILE", "defenseclaw.finding.title": "JUDGE-EXFIL-FILE",
+             "defenseclaw.finding.tags": ["llm-judge"]},
+            {"defenseclaw.finding.rule_id": "JUDGE-EXFIL-CHANNEL", "defenseclaw.finding.title": "Exfiltration Channel",
+             "defenseclaw.finding.tags": ["llm-judge"]},
+            {"defenseclaw.finding.rule_id": "JUDGE-PII-SSN", "defenseclaw.finding.title": "PII finding",
+             "defenseclaw.finding.tags": ["pii", "redacted"]},
+        )
+        for i, structured in enumerate(rows):
+            self.app.store.log_event(Event(
+                action="scan-finding", target="", severity="HIGH", connector="claudecode",
+                details="finding.observed", timestamp=now - timedelta(seconds=i),
+                structured={"defenseclaw.finding.target_ref": "claudecode:UserPromptSubmit",
+                            "defenseclaw.scan.scanner": "hook-rules", **structured},
+            ))
+        shown = self.runner.invoke(alerts, ["--show", "1"], obj=self.app, catch_exceptions=False)
+        self.assertEqual(shown.exit_code, 0, shown.output)
+        self.assertIn("JUDGE-EXFIL-FILE", shown.output)
+        self.assertNotIn("JUDGE-EXFIL-FILE: JUDGE-EXFIL-FILE", shown.output)
+        self.assertIn("llm-judge", shown.output)
+        self.assertNotIn("hook-rules", shown.output)
+        shown = self.runner.invoke(alerts, ["--show", "2"], obj=self.app, catch_exceptions=False)
+        self.assertIn("JUDGE-EXFIL-CHANNEL: Exfiltration Channel", shown.output)
+        shown = self.runner.invoke(alerts, ["--show", "3"], obj=self.app, catch_exceptions=False)
+        self.assertIn("llm-judge", shown.output)
+        self.assertNotIn("hook-rules", shown.output)
+
     def test_finding_rows_show_target_rule_connector_and_decision(self):
         now = datetime.now(timezone.utc)
         self._finding("req-observe", "connector=claudecode result=ok action=allow raw_action=block "

@@ -1493,7 +1493,31 @@ class Store:
             ).fetchall():
                 if name or path:
                     out.setdefault(alert_id, {"target": str(name or path or ""), "path": str(path or "")})
+        if "quarantine_records" in tables:
+            self._quarantine_paths(out)
         return out
+
+    def _quarantine_paths(self, targets: dict[str, dict[str, str]]) -> None:
+        """Put the real quarantine path and asset type on quarantine targets.
+
+        A redaction policy stores the ``asset.quarantined`` path as a
+        ``<hashed ...>`` placeholder, so the alert told the user nothing about
+        where the files went (GAP-1924). The quarantine record of the asset
+        keeps the path ``skill restore`` uses."""
+        for found in targets.values():
+            name = found.get("target", "")
+            if not name or (found.get("path") and not found["path"].startswith("<")):
+                continue
+            row = self.db.execute(
+                """SELECT quarantine_path, target_type FROM quarantine_records
+                   WHERE target_name = ? ORDER BY (state = 'active') DESC, created_at DESC LIMIT 1""",
+                (name,),
+            ).fetchone()
+            if row is None:
+                continue
+            if found.get("path", "").startswith("<"):
+                found["path"] = str(row[0] or "")
+            found["type"] = str(row[1] or "")
 
     # -- Actions --
     #

@@ -30,6 +30,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
+	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
@@ -63,7 +64,8 @@ func installSandboxMarkerRules(t *testing.T) {
 }
 
 // sandboxMarkerBlockReason is the plain reason of a marker rule block.
-const sandboxMarkerBlockReason = "Blocked by DefenseClaw rule E2E-SANDBOX-MARKER: E2E sandbox marker command. " + sandboxDefaultRemediation
+const sandboxMarkerBlockReason = "DefenseClaw policy blocked this action (rule E2E-SANDBOX-MARKER: E2E sandbox marker command). " +
+	agentBlockNoRetry
 
 func sandboxTestBinding(connectorName string) sandboxauth.Binding {
 	return sandboxauth.Binding{
@@ -87,7 +89,7 @@ func TestSandboxVerdictReason(t *testing.T) {
 	installSandboxMarkerRules(t)
 	command := firstBuiltinRule(t, "command")
 	cg := scanner.BuiltinRulesMeta()[0]
-	generic := "Blocked by DefenseClaw policy. " + sandboxDefaultRemediation
+	generic := "DefenseClaw policy blocked this action. " + agentBlockNoRetry
 	for _, tc := range []struct {
 		name             string
 		action           string
@@ -95,34 +97,35 @@ func TestSandboxVerdictReason(t *testing.T) {
 		want             string
 	}{
 		{"rule pack rule", "block", []string{"E2E-SANDBOX-MARKER"}, nil,
-			"Blocked by DefenseClaw rule E2E-SANDBOX-MARKER: E2E sandbox marker command. " + sandboxDefaultRemediation},
+			sandboxMarkerBlockReason},
 		{"case-insensitive ID", "block", []string{"e2e-sandbox-marker"}, nil,
-			"Blocked by DefenseClaw rule E2E-SANDBOX-MARKER: E2E sandbox marker command. " + sandboxDefaultRemediation},
+			sandboxMarkerBlockReason},
 		{"from finding labels", "block", nil, []string{"E2E-SANDBOX-MARKER:E2E sandbox marker command"},
-			"Blocked by DefenseClaw rule E2E-SANDBOX-MARKER: E2E sandbox marker command. " + sandboxDefaultRemediation},
-		{"built-in rule and category remediation", "block", []string{command.ID}, nil,
-			"Blocked by DefenseClaw rule " + command.ID + ": " + strings.TrimRight(command.Title, ".") + ". " +
-				sandboxCategoryRemediation["command"]},
+			sandboxMarkerBlockReason},
+		{"built-in rule", "block", []string{command.ID}, nil,
+			"DefenseClaw policy blocked this action (rule " + command.ID + ": " + strings.TrimRight(command.Title, ".") + "). " +
+				agentBlockNoRetry},
 		{"CodeGuard rule", "block", nil, []string{"codeguard:" + cg.ID + ":" + cg.Title},
-			"Blocked by DefenseClaw rule " + cg.ID + ": " + strings.TrimRight(cg.Title, ".") + ". " + sentence(cg.Remediation)},
+			"DefenseClaw policy blocked this action (rule " + cg.ID + ": " + strings.TrimRight(cg.Title, ".") + "). " +
+				agentBlockNoRetry},
 		{"confirm", "confirm", []string{"E2E-SANDBOX-MARKER"}, nil,
-			"Held for approval by DefenseClaw rule E2E-SANDBOX-MARKER: E2E sandbox marker command. " + sandboxDefaultRemediation},
+			"DefenseClaw policy needs your confirmation for this action (rule E2E-SANDBOX-MARKER: E2E sandbox marker command)."},
 		{"alert", "alert", []string{"E2E-SANDBOX-MARKER"}, nil,
 			"Allowed but flagged by DefenseClaw rule E2E-SANDBOX-MARKER: E2E sandbox marker command. " + sandboxFlaggedNote},
 		// The most severe rule leads; the others are named.
 		{"several rules", "block", []string{"E2E-QUOTING-TITLE", "E2E-SANDBOX-MARKER", "E2E-SANDBOX-MARKER"}, nil,
-			"Blocked by DefenseClaw rule E2E-SANDBOX-MARKER: E2E sandbox marker command (also E2E-QUOTING-TITLE). " +
-				sandboxDefaultRemediation},
+			"DefenseClaw policy blocked this action (rules E2E-SANDBOX-MARKER: E2E sandbox marker command, E2E-QUOTING-TITLE). " +
+				agentBlockNoRetry},
 		// A title that quotes what its rule, a secret rule, or any other
 		// guardrail rule matches is left out.
 		{"title quoting its own match", "block", []string{"E2E-QUOTING-TITLE"}, nil,
-			"Blocked by DefenseClaw rule E2E-QUOTING-TITLE. " + sandboxDefaultRemediation},
+			"DefenseClaw policy blocked this action (rule E2E-QUOTING-TITLE). " + agentBlockNoRetry},
 		{"title matching a secret rule", "block", []string{"E2E-SECRET-TITLE"}, nil,
-			"Blocked by DefenseClaw rule E2E-SECRET-TITLE. " + sandboxDefaultRemediation},
+			"DefenseClaw policy blocked this action (rule E2E-SECRET-TITLE). " + agentBlockNoRetry},
 		{"title matching a command rule", "block", []string{"E2E-CMD-TITLE"}, nil,
-			"Blocked by DefenseClaw rule E2E-CMD-TITLE. " + sandboxDefaultRemediation},
-		{"secret category remediation", "block", []string{"E2E-SECRET"}, nil,
-			"Blocked by DefenseClaw rule E2E-SECRET: E2E secret marker. " + sandboxCategoryRemediation["secret"]},
+			"DefenseClaw policy blocked this action (rule E2E-CMD-TITLE). " + agentBlockNoRetry},
+		{"secret rule", "block", []string{"E2E-SECRET"}, nil,
+			"DefenseClaw policy blocked this action (rule E2E-SECRET: E2E secret marker). " + agentBlockNoRetry},
 		// IDs no catalog knows cannot be told apart from content.
 		{"unknown rule", "block", []string{"NOT-A-RULE"}, []string{"dce2e_secret_9:matched text"}, generic},
 		{"malformed IDs", "block", []string{"has spaces", "", strings.Repeat("A", 200)}, nil, generic},
@@ -139,6 +142,28 @@ func TestSandboxVerdictReason(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestSandboxBlockReadsAsHostBlock pins GAP-1885: one rule's block reads
+// the same in a sandboxed connector as in a host hook. The sandbox said
+// "Blocked by DefenseClaw rule SEC-AWS-KEY: AWS access key. Do not read,
+// print or send credentials ...", the host "DefenseClaw policy blocked this
+// action (rule SEC-AWS-KEY: AWS access key). Do not retry it in another
+// form."
+func TestSandboxBlockReadsAsHostBlock(t *testing.T) {
+	for _, category := range []string{"secret", "command"} {
+		rule := firstBuiltinRule(t, category)
+		host := agentVerdictReason("block", builtInMatchReasonPrefix+rule.ID+":"+rule.Title, "<redacted>",
+			redaction.SinkPolicyDefault)
+		if sandbox := sandboxVerdictReason("claudecode", "block", []string{rule.ID}, nil); sandbox != host {
+			t.Fatalf("%s rule %s:\n  sandbox %q\n  host    %q", category, rule.ID, sandbox, host)
+		}
+		host = agentVerdictReason("confirm", builtInMatchReasonPrefix+rule.ID+":"+rule.Title, "<redacted>",
+			redaction.SinkPolicyDefault)
+		if sandbox := sandboxVerdictReason("claudecode", "confirm", []string{rule.ID}, nil); sandbox != host {
+			t.Fatalf("%s rule %s confirm:\n  sandbox %q\n  host    %q", category, rule.ID, sandbox, host)
+		}
 	}
 }
 
@@ -193,7 +218,7 @@ func TestApplySandboxVerdictReasonLeavesHostAndAllowAlone(t *testing.T) {
 		t.Fatalf("foreign binding rewrote the verdict: %q", got.Reason)
 	}
 	got = apply(ctx, blocked)
-	if !strings.HasPrefix(got.Reason, "Blocked by DefenseClaw rule E2E-SANDBOX-MARKER") || hookSourceReason(got) != blocked.Reason {
+	if !strings.HasPrefix(got.Reason, "DefenseClaw policy blocked this action (rule E2E-SANDBOX-MARKER") || hookSourceReason(got) != blocked.Reason {
 		t.Fatalf("sandbox verdict: reason %q source %q", got.Reason, hookSourceReason(got))
 	}
 }
@@ -294,7 +319,7 @@ func TestSandboxEvaluatorFailureIsNotAPolicyBlock(t *testing.T) {
 
 	// A policy block keeps its rule reason and is no failure.
 	resp = post("echo DCE2E-BLOCK-MARKER > /tmp/dce2e-blocked.txt")
-	if resp["action"] != "block" || !strings.HasPrefix(resp["reason"].(string), "Blocked by DefenseClaw rule E2E-SANDBOX-MARKER") {
+	if resp["action"] != "block" || !strings.HasPrefix(resp["reason"].(string), "DefenseClaw policy blocked this action (rule E2E-SANDBOX-MARKER") {
 		t.Fatalf("policy block = %v", resp)
 	}
 	if _, gotFailures := obs.take(); len(gotFailures) != 0 {
