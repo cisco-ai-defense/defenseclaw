@@ -151,8 +151,9 @@ acp:
       allowed_agents: [devin]
 ```
 
-`defenseclaw acp status` prints a summary of the guard and each binding (health,
-resolved profile and mode). `defenseclaw acp status --json` reports each
+`defenseclaw acp status` prints whether the guard is on, how many bindings it
+has, and each binding's health, resolved profile and mode. `defenseclaw doctor`
+lists the same bindings and fails on a broken one. `defenseclaw acp status --json` reports each
 binding's resolved profile and whether it came from the binding or was inherited:
 
 ```json

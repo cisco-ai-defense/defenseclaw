@@ -9492,6 +9492,7 @@ def doctor(
     # only ever deny (no plugin-registry pipeline exists in v1) and silently
     # blocks all plugins under enforcement. (OTHER-5)
     _check_plugin_registry_required(cfg, r)
+    _check_acp_bindings(cfg, r)
 
     if not json_out:
         _doctor_subsection("Scanners")
@@ -11530,7 +11531,7 @@ def _check_connector_inventory(
         judge_enabled = bool(getattr(judge, "enabled", False)) if judge is not None else False
         detail = f"strategy={strategy}"
         if not judge_enabled:
-            detail += "; judge disabled (regex/Cisco-AID lanes only)"
+            detail += "; judge disabled (regex and Cisco AI Defense lanes only)"
         elif connector not in _HOOK_ENFORCED_CONNECTORS:
             # Proxy connector: the judge runs in the proxy lane.
             detail += "; judge active (proxy lane)"
@@ -11541,9 +11542,9 @@ def _check_connector_inventory(
                 detail += "; judge active (hook lane)"
             else:
                 detail += (
-                    "; judge enabled but NOT gated for this connector's hook "
-                    "lane (regex/Cisco-AID lanes only) — add it to "
-                    "guardrail.judge.hook_connectors to forward content to the judge"
+                    "; judge enabled but not turned on for this connector's hook "
+                    "lane (regex and Cisco AI Defense lanes only); opt in: "
+                    f"defenseclaw guardrail judge add {connector}"
                 )
         _emit("pass", "Detection", detail, r=r)
 
@@ -11977,6 +11978,66 @@ def _plugin_registry_required_offenders(cfg) -> list[str]:
         if pc_plugin is not None and getattr(pc_plugin, "registry_required", None) is True:
             offenders.append(f"connector:{name}")
     return offenders
+
+
+def _check_acp_bindings(cfg, r: _DoctorResult) -> None:
+    """One row per ACP editor/agent binding, failing on drift (GAP-1534).
+
+    Runs the same per-binding check as 'defenseclaw acp verify', so a drifted
+    or broken guard entry shows up in doctor too. Prints nothing when no
+    binding is configured: ACP is optional.
+    """
+    acp = getattr(cfg, "acp", None)
+    if acp is None:
+        return
+    try:
+        from defenseclaw.commands import cmd_acp
+
+        pairs = set(cmd_acp._managed_pairs())
+        for key in list(getattr(acp, "bindings", {}) or {}):
+            client, _, agent = str(key).partition("/")
+            if client in cmd_acp._CLIENTS and agent in cmd_acp._AGENTS:
+                pairs.add((client, agent))
+    except Exception as exc:  # unreadable editor settings must not abort doctor
+        _emit(
+            "warn",
+            "ACP bindings",
+            f"could not read the editor ACP settings: {exc}",
+            r=r,
+            remediation="defenseclaw acp status",
+        )
+        return
+    if not pairs:
+        return
+    managed = str(getattr(cfg, "deployment_mode", "") or "") == "managed_enterprise"
+    data_dir = str(Path(str(getattr(cfg, "data_dir", "") or "")).expanduser().resolve())
+    for client, agent in sorted(pairs):
+        label = f"ACP binding [{client}/{agent}]"
+        try:
+            problems = cmd_acp._verify_binding(data_dir, client, agent, acp)
+            profile = acp.profile_for_pair(client, agent)
+            resolved = acp.profiles.get(profile)
+            mode = (resolved.mode if resolved else "") or acp.mode
+        except Exception as exc:
+            problems, profile, mode = [f"could not be checked: {exc}"], "?", "?"
+        if not problems:
+            _emit("pass", label, f"healthy; profile {profile} ({mode})", r=r)
+            continue
+        if any("acp refresh" in problem for problem in problems):
+            fix = "defenseclaw acp refresh"
+        else:
+            fix = f"defenseclaw acp setup --client {client} --agent {agent}"
+        if managed:
+            # A managed enrollment keeps its locks in a per-user runtime dir
+            # that doctor does not know, so only acp verify can be sure.
+            fix = f"defenseclaw acp verify --client {client} --agent {agent} --runtime-data-dir <dir>"
+        _emit(
+            "warn" if managed else "fail",
+            label,
+            "; ".join(problems),
+            r=r,
+            remediation=fix,
+        )
 
 
 def _check_plugin_registry_required(cfg, r: _DoctorResult) -> None:
