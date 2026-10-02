@@ -8456,9 +8456,33 @@ def _teardown_restored_inactive_connectors(data_dir: str, connectors: tuple[str,
                 )
 
 
+def _failed_start_left_nothing(
+    cfg,
+    snapshot: _SetupConfigSnapshot,
+    failed_locations: tuple[_SetupRegistrationLocationEvidence, ...],
+) -> bool:
+    """Whether a stopped gateway's failed setup start left nothing to reconcile.
+
+    When the start never ran a gateway (for example another account holds the
+    API port), no gateway is running and the restored runtime already matches
+    the snapshot. Starting it again only to stop it fails the same way and
+    reported the rollback as incomplete (GAP-1705).
+    """
+    from defenseclaw.commands.cmd_doctor import _trusted_gateway_listener
+
+    try:
+        trust = _trusted_gateway_listener(cfg, platform_name="win32")
+        if trust.code not in {"missing", "missing_process"}:
+            return False
+        return not _verify_restored_setup_runtime(cfg, snapshot, failed_locations)
+    except Exception:  # noqa: BLE001 - fall back to the reconciling restart.
+        return False
+
+
 def _restore_prior_setup_lifecycle(
     app: AppContext,
     snapshot: _SetupConfigSnapshot,
+    failed_locations: tuple[_SetupRegistrationLocationEvidence, ...] = (),
 ) -> Exception | None:
     expected = snapshot.applied_runtime
     if expected is None:
@@ -8468,6 +8492,12 @@ def _restore_prior_setup_lifecycle(
         return None
 
     inactive_connectors = _stopped_snapshot_inactive_connectors(snapshot)
+    if _failed_start_left_nothing(app.cfg, snapshot, failed_locations):
+        if inactive_connectors:
+            reactivated = _restored_reactivated_inactive_connectors(app.cfg.data_dir, inactive_connectors)
+            if reactivated:
+                _teardown_restored_inactive_connectors(app.cfg.data_dir, reactivated)
+        return None
 
     from defenseclaw.commands.cmd_doctor import _trusted_gateway_listener
 
@@ -8656,7 +8686,11 @@ def _rollback_failed_connector_application(
     if authority_safe:
         try:
             if exact_runtime:
-                lifecycle_error = _restore_prior_setup_lifecycle(app, snapshot)
+                lifecycle_error = _restore_prior_setup_lifecycle(
+                    app,
+                    snapshot,
+                    failed_registration_locations or (),
+                )
                 pre_lock_runtime_failures = _verify_restored_setup_runtime(
                     app.cfg,
                     snapshot,
@@ -8730,10 +8764,15 @@ def _rollback_failed_connector_application(
         if rollback_errors
         else "restored the prior connector configuration and runtime"
     )
-    failure = click.ClickException(
-        f"connector setup did not converge {cause_text}; {outcome}. "
-        "Check each connector's current mode with `defenseclaw status`, then run the same setup command again."
-    )
+    if isinstance(cause, _GatewayRestartFailed):
+        # GAP-1705: the gateway did not start; say that (with its next steps)
+        # instead of a reference that is the same for every such failure.
+        failure = click.ClickException(f"{cause.format_message()} Setup {outcome}.")
+    else:
+        failure = click.ClickException(
+            f"connector setup did not converge {cause_text}; {outcome}. "
+            "Check each connector's current mode with `defenseclaw status`, then run the same setup command again."
+        )
     if exact_runtime:
         raise failure from None
     raise failure from cause
@@ -13508,13 +13547,17 @@ def _restart_services(
     _fail_if_restart_failed(failed)
 
 
+class _GatewayRestartFailed(click.ClickException):
+    """A setup restart or start of the gateway failed (fixed, secret-free text)."""
+
+
 def _fail_if_restart_failed(failed: list[str]) -> None:
     """Raise a ``ClickException`` (non-zero exit) when any service restart
     failed, so setup fails closed instead of silently reporting success
     against a gateway that never came back up (Avarice F-0142/F-0143)."""
     if not failed:
         return
-    raise click.ClickException(
+    raise _GatewayRestartFailed(
         "gateway restart/readiness failed for: "
         + ", ".join(failed)
         + ". The requested configuration was not verified as applied, so the agents may not be "
@@ -15067,7 +15110,9 @@ def _auto_restart_sidecar_after_setup(ctx: click.Context, *_args, **_kwargs) -> 
 
     click.echo("")
     click.echo("  Auto-restarting defenseclaw-gateway to apply config changes…")
-    _restart_defense_gateway(data_dir, start_if_stopped=False)
+    if not _restart_defense_gateway(data_dir, start_if_stopped=False):
+        # GAP-1573: a failed restart left the change unapplied but exited 0.
+        _fail_if_restart_failed(["defenseclaw-gateway"])
 
 
 def _openclaw_gateway_healthy(host: str, port: int, timeout: float = 5.0) -> bool:

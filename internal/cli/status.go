@@ -906,6 +906,9 @@ func eventHistoryProblem(details map[string]interface{}) string {
 		return "audit events cannot be written because the audit database is read-only or cannot be opened"
 	case "constraint_corrupt":
 		return "audit events cannot be written because the audit database is damaged; run 'defenseclaw doctor'"
+	case "io", "deadline":
+		return "audit events cannot be written because reading or writing the audit database failed or timed out " +
+			"(another program, such as an antivirus scan, may hold the file); try again in a minute"
 	default:
 		return "audit events cannot be written to the audit database; run 'defenseclaw doctor'"
 	}

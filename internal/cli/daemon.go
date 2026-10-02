@@ -33,7 +33,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -197,6 +196,12 @@ func (fingerprints *rotationHookTokenFingerprints) UnmarshalJSON(data []byte) er
 }
 
 var errGatewayIdentityMismatch = errors.New("gateway identity mismatch")
+
+// errManagedGatewayOffConfiguredPort: this account's gateway runs but does not
+// listen on the configured API port, because the port changed since it
+// started (setup gateway --api-port). Restart stops it and starts it on the
+// new port (GAP-1573); start says to restart.
+var errManagedGatewayOffConfiguredPort = errors.New("this account's gateway does not listen on the configured API port")
 
 func init() {
 	// Override PersistentPreRunE to skip config/audit loading for daemon management commands
@@ -699,7 +704,7 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 	var cfgErr error
 	client := &http.Client{Timeout: defaultReadinessHTTPTimeout}
 
-	running, pid, err := inspectConfiguredListener(d, cfg, client)
+	running, pid, err := inspectRestartTarget(d, cfg, client)
 	if err != nil {
 		return err
 	}
@@ -1106,6 +1111,18 @@ func daemonDotenvValue(env map[string]string, key string) string {
 	return ""
 }
 
+// inspectRestartTarget is inspectConfiguredListener for restart. When the API
+// port changed while this account's gateway ran on the old one, restart stops
+// that gateway (stop verifies its own PID record) and starts it on the new
+// port, instead of failing and leaving it on the old port (GAP-1573).
+func inspectRestartTarget(d daemonState, cfg *config.Config, client *http.Client) (bool, int, error) {
+	running, pid, err := inspectConfiguredListener(d, cfg, client)
+	if errors.Is(err, errManagedGatewayOffConfiguredPort) {
+		return true, pid, nil
+	}
+	return running, pid, err
+}
+
 func inspectConfiguredListener(d daemonState, cfg *config.Config, client *http.Client) (bool, int, error) {
 	running, managedPID := d.IsRunning()
 	if !requireStartupListenerOwnership {
@@ -1114,7 +1131,11 @@ func inspectConfiguredListener(d daemonState, cfg *config.Config, client *http.C
 	ownerPID, err := startupListenerOwner(gatewayBindHost(cfg), cfg.Gateway.APIPort)
 	if errors.Is(err, daemon.ErrNoListener) {
 		if running {
-			return false, 0, fmt.Errorf("configured gateway port has no listener for managed PID %d", managedPID)
+			return false, managedPID, fmt.Errorf(
+				"%w: the gateway (PID %d) is not listening on port %d, probably because the port changed after it started; "+
+					"apply the change with: defenseclaw-gateway restart",
+				errManagedGatewayOffConfiguredPort, managedPID, cfg.Gateway.APIPort,
+			)
 		}
 		return false, 0, nil
 	}
@@ -1128,11 +1149,8 @@ func inspectConfiguredListener(d daemonState, cfg *config.Config, client *http.C
 		if label := listenerProcessLabel(ownerPID); label != "" {
 			holder += " (" + label + ")"
 		}
-		port := "<free port>"
-		if free := freeGatewayAPIPort(gatewayClientHost(cfg), cfg.Gateway.APIPort); free > 0 {
-			port = strconv.Itoa(free)
-		}
-		return false, 0, fmt.Errorf("configured gateway port %d is held by %s, not by this account's gateway; move this account's gateway to a free port with: defenseclaw setup gateway --api-port %s --non-interactive, then run: defenseclaw-gateway start", cfg.Gateway.APIPort, holder, port)
+		return false, 0, fmt.Errorf("configured gateway port %d is held by %s, not by this account's gateway. %s",
+			cfg.Gateway.APIPort, holder, foreignGatewayListenerFix(cfg))
 	}
 	authenticatedMigration := false
 	if identity, ok := d.(managedProcessIdentity); ok && !identity.HasManagedProcessIdentity(managedPID) {
@@ -2029,9 +2047,12 @@ func waitForGatewayReadiness(
 			if lastSnap.Telemetry.State == gateway.StateError &&
 				strings.TrimSpace(lastSnap.Telemetry.LastError) == "" &&
 				telemetryReadinessRetryableSQLiteContention(lastSnap.Telemetry.Details) {
-				detail := telemetryReadinessFailureDetail(lastSnap.Telemetry.Details)
+				detail := "error (" + telemetryReadinessFailureDetail(lastSnap.Telemetry.Details) + ")"
+				if problem := eventHistoryProblem(lastSnap.Telemetry.Details); problem != "" {
+					detail += ": " + problem
+				}
 				return lastSnap, false, fmt.Errorf(
-					"gateway telemetry did not recover before the startup deadline: error (%s)", detail,
+					"gateway telemetry did not recover before the startup deadline: %s", detail,
 				)
 			}
 			if lastStep != "" {
@@ -2147,6 +2168,10 @@ func gatewaySnapshotReady(
 			if subsystem.name == "telemetry" {
 				if diagnosis := telemetryReadinessFailureDetail(subsystem.health.Details); diagnosis != "" {
 					detail += " (" + diagnosis + ")"
+				}
+				// GAP-1603: say why in plain words, not only the token.
+				if problem := eventHistoryProblem(subsystem.health.Details); problem != "" {
+					detail += ": " + problem
 				}
 			}
 		}

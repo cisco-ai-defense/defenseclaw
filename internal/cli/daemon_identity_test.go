@@ -374,8 +374,17 @@ func TestInspectConfiguredListenerRejectsManagedPIDWithoutListener(t *testing.T)
 	cfg := startupTestConfig(t)
 	withStartupListenerInspector(t, func(string, int) (int, error) { return 0, daemon.ErrNoListener })
 	_, _, err := inspectConfiguredListener(fakeDaemonState{running: true, pid: 42}, cfg, http.DefaultClient)
-	if err == nil || !strings.Contains(err.Error(), "no listener") {
-		t.Fatalf("error = %v, want managed-PID-without-listener failure", err)
+	if !errors.Is(err, errManagedGatewayOffConfiguredPort) || !strings.Contains(err.Error(), "defenseclaw-gateway restart") {
+		t.Fatalf("error = %v, want managed-PID-without-listener failure naming restart", err)
+	}
+	// GAP-1573: after setup gateway --api-port, restart stops the gateway on
+	// the old port and starts it on the new one instead of failing.
+	running, pid, err := inspectRestartTarget(fakeDaemonState{running: true, pid: 42}, cfg, http.DefaultClient)
+	if err != nil || !running || pid != 42 {
+		t.Fatalf("restart target = %v, %d, %v; want the running gateway PID 42", running, pid, err)
+	}
+	if running, _, err := inspectRestartTarget(fakeDaemonState{running: false}, cfg, http.DefaultClient); err != nil || running {
+		t.Fatalf("stopped gateway restart target = %v, %v", running, err)
 	}
 }
 
