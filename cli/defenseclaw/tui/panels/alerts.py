@@ -1647,12 +1647,24 @@ def _with_hook_decisions(store: object | None, events: list[AlertEvent]) -> list
         return events
     out: list[AlertEvent] = []
     for event in events:
-        decision = _hook_decision_from_rows(details.get(event.id, []), event.target) if event.id in details else ""
+        rows = details.get(event.id, [])
+        decision = _hook_decision_from_rows(rows, event.target) if event.id in details else ""
         if decision:
-            facts = tuple(fact for fact in event.facts if fact[0] != "Decision")
-            event = replace(event, facts=(*facts, ("Decision", decision)))
+            facts = tuple(fact for fact in event.facts if fact[0] not in ("Decision", "Route"))
+            # An ACP prompt names its route like the audit row (GAP-1629).
+            route = _acp_route_from_rows(rows)
+            event = replace(event, facts=(*facts, ("Decision", decision), *((("Route", route),) if route else ())))
         out.append(event)
     return out
+
+
+def _acp_route_from_rows(rows: Iterable[str]) -> str:
+    for raw in rows:
+        tokens = parse_detail_tokens(raw or "")
+        if method := tokens.get("acp_method", "").strip():
+            client = tokens.get("acp_client", "").strip()
+            return f"ACP {method} (client {client})" if client else f"ACP {method}"
+    return ""
 
 
 def _hook_decision_from_rows(rows: Iterable[str], hook_target: str = "") -> str:

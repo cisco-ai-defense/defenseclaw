@@ -78,15 +78,28 @@ def _trunc_path(s: str, width: int) -> str:
     if len(s) <= width:
         return s
     ell = _ellipsis()
-    parts = s.rstrip("/").split("/")
+    # Windows paths split on "\\" (GAP-1590).
+    sep = "\\" if "\\" in s and "/" not in s else "/"
+    parts = s.rstrip(sep).split(sep)
     for n in range(1, len(parts) + 1):
-        candidate = "/".join(parts[-n:])
+        candidate = sep.join(parts[-n:])
         if len(candidate) + len(ell) + 1 <= width:
-            return ell + "/" + candidate
+            return ell + sep + candidate
     tail = parts[-1]
     if len(tail) + len(ell) + 1 <= width:
-        return ell + "/" + tail
+        return ell + sep + tail
     return ell + s[-max(1, width - len(ell)):]
+
+
+_ABS_PATH = re.compile(r"^(?:[A-Za-z]:[\\/]|[/\\~])")
+
+
+def _path_name(target: str) -> str:
+    """The last part of a file system path (the skill or file name); other targets as is."""
+    target = target.strip()
+    if not _ABS_PATH.match(target):
+        return target
+    return re.split(r"[\\/]", target.rstrip("\\/"))[-1] or target
 
 
 _DETAIL_KEY = re.compile(r"[A-Za-z_][\w.]*")
@@ -227,6 +240,16 @@ def _hook_decision(hook_details: list[str], hook_event: str = "") -> str:
     return decision
 
 
+def _acp_route(hook_details: list[str]) -> str:
+    """``ACP session/prompt (client zed)`` from the guardrail-verdict row of an ACP finding."""
+    for raw in hook_details:
+        kv = _kv(raw)
+        if method := kv.get("acp_method", ""):
+            client = kv.get("acp_client", "")
+            return f"ACP {method} (client {client})" if client else f"ACP {method}"
+    return ""
+
+
 # The audit store replaces the title of every finding classed as a secret
 # with this placeholder, including rules tagged "credential" whose pack title
 # names no secret (GAP-1223).
@@ -292,7 +315,11 @@ def _finding_title(rule_id: str, title: str) -> str:
     return title
 
 
-def _finding_facts(e, hook_details: dict[str, list[str]]) -> dict[str, str] | None:
+def _finding_facts(
+    e,
+    hook_details: dict[str, list[str]],
+    targets: dict[str, dict[str, str]] | None = None,
+) -> dict[str, str] | None:
     """Readable facts for a canonical finding row (GAP-1080).
 
     The audit row behind a hook-rule finding has an empty target and only
@@ -307,7 +334,11 @@ def _finding_facts(e, hook_details: dict[str, list[str]]) -> dict[str, str] | No
     if not rule_id:
         return None
     title = _finding_title(rule_id, str(structured.get("defenseclaw.finding.title") or "").strip())
-    target = e.target or str(structured.get("defenseclaw.finding.target_ref") or "").strip()
+    # A skill or path scan finding keeps its path in the scan result (GAP-1590).
+    scanned = (targets or {}).get(e.id, {})
+    target = (
+        e.target or str(structured.get("defenseclaw.finding.target_ref") or "").strip() or scanned.get("target", "")
+    )
     if e.action == "sandbox-finding":
         # GAP-1303: a sandbox finding row has no target and only
         # ``finding.observed`` as details; name the sandbox (or the
@@ -328,8 +359,38 @@ def _finding_facts(e, hook_details: dict[str, list[str]]) -> dict[str, str] | No
         "connector": _event_connector(e),
         "rule": f"{rule_id}: {title}" if title else rule_id,
         "scanner": str(structured.get("defenseclaw.scan.scanner") or "").strip(),
+        "route": _acp_route(hook_details.get(e.id, [])),
+        "path": scanned.get("path", "") if scanned.get("path", "") != target else "",
     }
     return facts
+
+
+def _quarantine_facts(e, targets: dict[str, dict[str, str]]) -> dict[str, str] | None:
+    """Name the skill or plugin of a quarantine row (GAP-1590).
+
+    The ``enforcement.quarantine.applied`` row has no target; the
+    ``asset.quarantined`` row of the same enforcement names the asset."""
+    if e.action != "quarantine" or e.target:
+        return None
+    found = targets.get(e.id)
+    if not found:
+        return None
+    return {"target": found.get("target", ""), "moved_to": found.get("path", "")}
+
+
+def _alert_targets_for(store, alert_list: list) -> dict[str, dict[str, str]]:
+    lookup = getattr(store, "alert_targets_for", None)
+    ids = [
+        e.id for e in alert_list
+        if not (e.target or "").strip() and e.action in ("scan-finding", "quarantine") and getattr(e, "id", "")
+    ]
+    if lookup is None or not ids:
+        return {}
+    try:
+        result = lookup(ids)
+    except Exception:  # noqa: BLE001 - an older or locked audit DB only loses the target
+        return {}
+    return result if isinstance(result, dict) else {}
 
 
 def _short_hook_target(target: str, connector: str) -> str:
@@ -413,6 +474,7 @@ def _render_table(alert_list: list, store, connector: str | None = None) -> None
     }
 
     hook_details = _hook_details_for(store, alert_list)
+    targets = _alert_targets_for(store, alert_list)
     for idx, e in enumerate(alert_list, 1):
         sev_style = sev_styles.get(e.severity, "")
         sev_cell = f"[{sev_style}]{e.severity}[/{sev_style}]" if sev_style else e.severity
@@ -421,10 +483,15 @@ def _render_table(alert_list: list, store, connector: str | None = None) -> None
         target = _trunc_path(e.target or "", w_target)
         kv_map = _kv(e.details or "")
         scanner_name = kv_map.get("scanner", "")
-        facts = _finding_facts(e, hook_details)
+        facts = _finding_facts(e, hook_details, targets)
+        quarantined = _quarantine_facts(e, targets)
         if facts is not None:
-            target = _trunc_path(_short_hook_target(facts["target"], facts.get("connector", "")), w_target)
+            short = _path_name(_short_hook_target(facts["target"], facts.get("connector", "")))
+            target = _trunc_path(short, w_target)
             raw_details = _finding_details(facts)
+        elif quarantined is not None:
+            target = _trunc_path(quarantined["target"], w_target)
+            raw_details = f"quarantined to {quarantined['moved_to']}" if quarantined["moved_to"] else "quarantined"
         elif e.action == "scan" and scanner_name and e.target:
             findings = store.get_findings_for_target(e.target, scanner_name)
             raw_details = _findings_json(findings, w_details) if findings else _humanize_details(e.details or "")
@@ -542,8 +609,11 @@ def _alerts_json(app: AppContext, limit: int, connector: str | None) -> None:
         alert_list = _filter_by_connector(app.store.list_alerts(max(limit, _CONNECTOR_SCAN_POOL)), needle)[:limit]
     else:
         alert_list = app.store.list_alerts(limit)
-    rows = [
-        {
+    hook_details = _hook_details_for(app.store, alert_list)
+    targets = _alert_targets_for(app.store, alert_list)
+    rows = []
+    for e in alert_list:
+        row = {
             "id": e.id,
             "timestamp": e.timestamp.isoformat() if e.timestamp else "",
             "severity": e.severity,
@@ -553,8 +623,17 @@ def _alerts_json(app: AppContext, limit: int, connector: str | None) -> None:
             "connector": _event_connector(e),
             "details": e.details,
         }
-        for e in alert_list
-    ]
+        # The same facts the table and --show print: a finding row's own
+        # target and details are empty or only "finding.observed" (GAP-1615).
+        facts = _finding_facts(e, hook_details, targets) or _quarantine_facts(e, targets) or {}
+        if facts.get("target"):
+            row["target"] = facts["target"]
+        for key in ("decision", "route", "rule", "scanner", "sandbox", "path", "moved_to"):
+            if facts.get(key):
+                row[key] = facts[key]
+        if "moved_to" in facts:
+            row.setdefault("decision", "quarantined")
+        rows.append(row)
     click.echo(json.dumps(rows, indent=2, sort_keys=True))
 
 
@@ -603,7 +682,9 @@ def _alerts_default(
         def label(name: str) -> str:
             return ux._style(f"{name}:".ljust(10), fg="bright_black", bold=True)
 
-        facts = _finding_facts(e, _hook_details_for(app.store, [e]))
+        targets = _alert_targets_for(app.store, [e])
+        facts = _finding_facts(e, _hook_details_for(app.store, [e]), targets)
+        quarantined = _quarantine_facts(e, targets)
         click.echo(f"{ux.bold(f'Alert #{show_idx}')}")
         if e.id:
             click.echo(f"  {label('ID')} {e.id}")
@@ -612,14 +693,19 @@ def _alerts_default(
         ts = e.timestamp.strftime("%Y-%m-%d %H:%M:%S") if e.timestamp else ""
         click.echo(f"  {label('Timestamp')} {ts}")
         click.echo(f"  {label('Action')} {e.action}")
-        target = facts["target"] if facts else e.target
+        target = facts["target"] if facts else (quarantined["target"] if quarantined else e.target)
         if target:
             click.echo(f"  {label('Target')} {target}")
         if facts:
-            for key, name in (("decision", "Decision"), ("connector", "Connector"),
-                              ("rule", "Rule"), ("scanner", "Scanner"), ("sandbox", "Sandbox")):
+            for key, name in (("decision", "Decision"), ("route", "Route"), ("connector", "Connector"),
+                              ("rule", "Rule"), ("scanner", "Scanner"), ("sandbox", "Sandbox"),
+                              ("path", "Path")):
                 if facts.get(key):
                     click.echo(f"  {label(name)} {facts[key]}")
+        elif quarantined:
+            click.echo(f"  {label('Decision')} quarantined")
+            if quarantined["moved_to"]:
+                click.echo(f"  {label('Moved to')} {quarantined['moved_to']}")
         elif e.details:
             if connector_name := _event_connector(e):
                 click.echo(f"  {label('Connector')} {connector_name}")
