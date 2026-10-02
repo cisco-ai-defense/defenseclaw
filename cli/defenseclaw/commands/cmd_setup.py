@@ -507,14 +507,19 @@ def _initialize_setup_runtime(app: AppContext | None, ctx: click.Context) -> Non
 
     result = validate_config()
     if not result.ok:
-        ux.echo("Config validation failed:", err=True)
+        timed_out = getattr(result, "timed_out", False)
+        ux.echo("Config check did not finish:" if timed_out else "Config validation failed:", err=True)
         if result.parse_error:
             ux.echo(f"  ✗ {result.parse_error}", err=True)
         for issue in result.errors:
             ux.echo(f"  ✗ {issue}", err=True)
-        # doctor --fix repairs nothing until config.yaml is valid, so don't
-        # offer it here (GAP-1442).
-        ux.echo("  Fix config.yaml first (check it with: defenseclaw config validate).", err=True)
+        if timed_out:
+            # A busy host, not a bad file (GAP-1621).
+            ux.echo("  Nothing was changed; re-run the command.", err=True)
+        else:
+            # doctor --fix repairs nothing until config.yaml is valid, so don't
+            # offer it here (GAP-1442).
+            ux.echo("  Fix config.yaml first (check it with: defenseclaw config validate).", err=True)
         ctx.exit(1)
 
     from defenseclaw.db import Store

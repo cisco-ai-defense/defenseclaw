@@ -933,12 +933,22 @@ func daemonConfigLoadError(verb string, err error) error {
 		return secretErr
 	}
 	untouched := ""
+	next := verb
 	if verb == "restart" {
 		untouched = " Nothing was stopped."
 	}
+	// A running gateway keeps enforcing the config it started with; say so
+	// rather than read as "protection is off" (GAP-1634).
+	if running, pid := daemon.New(config.DefaultDataPath()).IsRunning(); running {
+		untouched += fmt.Sprintf(" The gateway (PID %d) is still running with the config it started with.", pid)
+		if verb == "start" {
+			untouched += " Nothing was changed."
+			next = "restart"
+		}
+	}
 	return fmt.Errorf(
 		"cannot %s the gateway: %s does not load: %w.%s Fix the file (check it with: defenseclaw config validate), then run: defenseclaw-gateway %s",
-		verb, config.ConfigPath(), err, untouched, verb,
+		verb, config.ConfigPath(), err, untouched, next,
 	)
 }
 

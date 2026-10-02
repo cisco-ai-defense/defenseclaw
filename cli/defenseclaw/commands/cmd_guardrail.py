@@ -612,7 +612,6 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
             "enable enforcement.",
             indent="    ",
         )
-        click.echo(f"  • {ux._style('port:', fg='bright_black', bold=True)}       {gc.port}")
         click.echo()
         return
     if not actives:
@@ -620,6 +619,11 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
         # (has_connector_configured true) — keep the legacy single-connector
         # floor so those installs still render their one block.
         actives = [connector]
+    # Only proxy connectors (openclaw, zeptoclaw) use guardrail.port; hook
+    # connectors have no proxy listener (GAP-1649).
+    from defenseclaw.platform_support import PROXY_CONNECTORS
+
+    proxy_in_use = any(normalize_connector(n) in PROXY_CONNECTORS for n in actives)
 
     # G3: optional --connector scoping. Default shows the full roster (uniform
     # layout, unchanged); --connector X narrows it to one active peer, matched
@@ -647,7 +651,10 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
                 cfm = runtime_state.runtime
             else:
                 cfm = "unknown"
-            if runtime_state.drift:
+            # A connector disabled on purpose had its hooks removed, so the
+            # missing hooks are not drift (GAP-1648).
+            enforcing = gc.enabled and (gc.effective_enabled(name) if hasattr(gc, "effective_enabled") else True)
+            if runtime_state.drift and enforcing:
                 fail_drift = f" (desired {runtime_state.desired}; drift: " + ", ".join(runtime_state.drift) + ")"
                 runtime_drift_rows.append(f"{_connector_label(name)} ({name}){fail_drift}")
         elif normalize_connector(name) in _UPSTREAM_FAIL_OPEN_CONNECTORS:
@@ -737,7 +744,8 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
         ux.warn("connector limitation: " + limit_row, indent="  ")
     click.echo(f"  • {ux.dim('fail = invalid, unauthorized, incomplete, or unreachable gateway responses')}")
 
-    click.echo(f"  • {ux._style('port:', fg='bright_black', bold=True)}       {gc.port}")
+    if proxy_in_use:
+        click.echo(f"  • {ux._style('port:', fg='bright_black', bold=True)}       {gc.port}")
     click.echo()
     if gc.enabled:
         click.echo(f"  {ux.dim('Disable with:')}  defenseclaw guardrail disable")

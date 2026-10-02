@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"os/signal"
@@ -878,6 +879,11 @@ func runWatchdogStatus(_ *cobra.Command, _ []string) error {
 	fmt.Printf("Watchdog: %s (PID %d)\n", Style("running", "fg=green", "bold"), info.PID)
 
 	state, stateErr := readWatchdogState(dataDir)
+	if errors.Is(stateErr, fs.ErrNotExist) {
+		// Right after start, before the first poll (GAP-1623).
+		fmt.Printf("  %s %s\n", Style("Last known state:", "fg=bright_black", "bold"), "none recorded yet (first poll pending)")
+		return nil
+	}
 	if stateErr != nil {
 		Warn(fmt.Sprintf("Watchdog last known state: unavailable (%v)", stateErr))
 		return nil

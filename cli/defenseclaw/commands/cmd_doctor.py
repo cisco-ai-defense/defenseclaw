@@ -8362,7 +8362,7 @@ def _check_cisco_ai_defense(cfg, r: _DoctorResult) -> None:
 def _check_observability(cfg, r: _DoctorResult, *, live_health: dict | None = None) -> None:
     """Inspect v8 status and exercise each enabled Galileo runtime route."""
     from defenseclaw.config import config_path_for_data_dir
-    from defenseclaw.config_inspect import ConfigInspectError
+    from defenseclaw.config_inspect import ConfigInspectError, ConfigInspectTimeoutError
     from defenseclaw.observability.custody_status import inspect_connector_custody
     from defenseclaw.observability.v8_config import V8ConfigError
     from defenseclaw.observability.v8_status import inspect_v8_operator_status
@@ -8370,6 +8370,10 @@ def _check_observability(cfg, r: _DoctorResult, *, live_health: dict | None = No
     config_path = config_path_for_data_dir(cfg.data_dir)
     try:
         status = inspect_v8_operator_status(config_path)
+    except ConfigInspectTimeoutError as exc:
+        # A busy host, not a bad config (GAP-1621).
+        _emit("warn", "Observability v8 effective plan", f"{exc}; re-run defenseclaw doctor", r=r)
+        return
     except (ConfigInspectError, V8ConfigError, ValueError) as exc:
         _emit("fail", "Observability v8 effective plan", str(exc), r=r)
         return

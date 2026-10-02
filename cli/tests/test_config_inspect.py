@@ -103,7 +103,7 @@ def test_effective_bridge_uses_versioned_go_helper_without_shell() -> None:
         text=True,
         encoding="utf-8",
         errors="replace",
-        timeout=15,
+        timeout=config_inspect.CONFIG_V8_HELPER_TIMEOUT_SECONDS,
         check=False,
     )
 
@@ -227,7 +227,7 @@ def test_bridge_missing_binary_and_timeout_are_actionable() -> None:
             "run_pinned_executable",
             side_effect=subprocess.TimeoutExpired(["gateway"], timeout=15),
         ),
-        pytest.raises(config_inspect.ConfigInspectError, match="timed out"),
+        pytest.raises(config_inspect.ConfigInspectTimeoutError, match="did not finish within"),
     ):
         config_inspect.inspect_v8_config("validate", config_path="config.yaml")
 
