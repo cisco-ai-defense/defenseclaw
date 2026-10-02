@@ -77,6 +77,10 @@ The command restarts the gateway and reconciles native hook state by default.
 the prior value. `guardrail status` reports configured and runtime values so
 that drift is visible.
 
+A connector turned off with `guardrail disable --connector X` has no hooks, so
+it has no fail mode: `guardrail status` shows `-` in its Fail column and
+`guardrail fail-mode` lists it as `disabled (no hooks)`.
+
 ## Connector response shapes
 
 Fail mode can block only where the agent protocol has a block shape:

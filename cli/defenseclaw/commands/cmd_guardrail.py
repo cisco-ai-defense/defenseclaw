@@ -671,6 +671,7 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
         actives = scoped
 
     rows: list[dict[str, tuple[str, str]]] = []
+    any_disabled = False
     runtime_drift_rows: list[str] = []
     runtime_limit_rows: list[str] = []
     for name in actives:
@@ -727,6 +728,12 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
             state = ux._style(state_raw, fg="yellow")
         fail_raw = cfm
         cfm_display = _style_fail_mode(cfm)
+        if not (gc.enabled and c_enabled) and not as_json:
+            # A disabled connector has no hooks and so no fail mode; match
+            # `guardrail fail-mode`, which shows "disabled (no hooks)" (GAP-1953).
+            fail_raw = "-"
+            cfm_display = ux.dim(fail_raw)
+            any_disabled = True
         # Each connector can scan against its OWN rule pack (per-connector
         # override, else the global pack); surface it so the roster shows which
         # policy each peer is enforcing. Empty dir = the built-in default pack.
@@ -780,6 +787,8 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
     for limit_row in runtime_limit_rows:
         ux.warn("connector limitation: " + limit_row, indent="  ")
     click.echo(f"  • {ux.dim('fail = invalid, unauthorized, incomplete, or unreachable gateway responses')}")
+    if any_disabled:
+        click.echo(f"  • {ux.dim('fail - = disabled connector (no hooks, so no fail mode)')}")
 
     if proxy_in_use:
         click.echo(f"  • {ux._style('port:', fg='bright_black', bold=True)}       {gc.port}")
@@ -963,8 +972,28 @@ def enable_cmd(
         ux.subhead("Run 'defenseclaw setup guardrail' to configure first.", indent="    ")
         raise SystemExit(1)
 
+    # The boot loop runs Connector.Setup for every active connector that
+    # is not disabled on its own (`guardrail disable --connector X` is
+    # kept); name exactly those, here and in the result (GAP-1809).
+    _actives = _active_connector_set(app.cfg, connector)
+    _kept_off = [
+        name for name in _actives if hasattr(gc, "effective_enabled") and not gc.effective_enabled(name)
+    ]
+    _set_up = [name for name in _actives if name not in _kept_off]
+
     click.echo()
-    click.echo(f"  {ux.bold('Enabling guardrail')} for {_active_connector_display(app.cfg, connector)}")
+    if _set_up:
+        _targets = ", ".join(f"{_connector_label(n)} ({n})" for n in _set_up)
+    else:
+        _targets = "no connectors (every active connector is disabled on its own)"
+    click.echo(f"  {ux.bold('Enabling guardrail')} for {_targets}")
+    if not restart:
+        for name in _kept_off:
+            ux.subhead(
+                f"{_connector_label(name)} ({name}) stays disabled; turn it on with: "
+                f"defenseclaw guardrail enable --connector {name}",
+                indent="  ",
+            )
     if restart:
         ux.subhead(
             "Will restart the gateway so the connector setup runs immediately.",
@@ -994,14 +1023,6 @@ def enable_cmd(
         # Lazy import via module: see disable_cmd above for rationale.
         from defenseclaw.commands import cmd_setup
 
-        # The boot loop runs Connector.Setup for every active connector that
-        # is not disabled on its own (`guardrail disable --connector X` is
-        # kept); report exactly those (GAP-1809).
-        _actives = _active_connector_set(app.cfg, connector)
-        _kept_off = [
-            name for name in _actives if hasattr(gc, "effective_enabled") and not gc.effective_enabled(name)
-        ]
-        _set_up = [name for name in _actives if name not in _kept_off]
         cmd_setup._restart_services(
             app.cfg.data_dir,
             app.cfg.gateway.host,

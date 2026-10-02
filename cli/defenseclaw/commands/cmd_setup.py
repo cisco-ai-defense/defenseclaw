@@ -265,6 +265,7 @@ class _GatewayRuntimeGeneration:
 
 
 _SETUP_OFFLINE_NOTED_KEY = "defenseclaw.setup.offline_noted"
+_SETUP_OFFLINE_AUDIT_NOTE_KEY = "defenseclaw.setup.offline_audit_note"
 
 
 def _log_setup_action(
@@ -300,13 +301,18 @@ def _log_setup_action(
             ) from exc
         note = (
             offline_note
-            or "  ⚠ Change saved, but the gateway runtime is unavailable; the canonical setup audit "
-            "event was not recorded. Start it with 'defenseclaw-gateway start' before the next change."
+            or "  ⚠ Change saved, but the gateway isn't running, so the setup audit event was not "
+            "recorded. Start it with 'defenseclaw-gateway start' before the next change."
         )
+        current = click.get_current_context(silent=True)
+        # A multi-connector run audits once per connector; say it once (GAP-1951).
+        if current is not None and current.meta.get(_SETUP_OFFLINE_AUDIT_NOTE_KEY) == note:
+            return
         click.echo(note, err=True)
+        if current is not None:
+            current.meta[_SETUP_OFFLINE_AUDIT_NOTE_KEY] = note
         # A note that already says how to start the gateway must not be
         # repeated in other words by the setup result callback (GAP-1369).
-        current = click.get_current_context(silent=True)
         if current is not None and "defenseclaw-gateway start" in note:
             current.meta[_SETUP_OFFLINE_NOTED_KEY] = True
     except CanonicalObservabilityError as exc:
@@ -10972,8 +10978,9 @@ def _apply_setup_batch(
         ctx.meta[_SETUP_BATCH_REQUIRED_KEY] = tuple(sorted(set(applied)))
         ctx.meta[_SETUP_BATCH_AUDIT_KEY] = tuple(sorted(deferred_audits))
     else:
+        # The summary above already says the change applies on the next
+        # gateway restart; a second note said it again (GAP-1951).
         ctx.meta[_SETUP_RESTART_HANDLED_KEY] = True
-        click.echo("  --no-restart: config updated; restart defenseclaw-gateway to wire the connector hooks.")
 
 
 def _dispatch_bare_setup(

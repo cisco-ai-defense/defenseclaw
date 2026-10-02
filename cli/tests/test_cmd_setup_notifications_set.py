@@ -99,7 +99,7 @@ class TestNotificationsSetCategory(_NotificationsSetBase):
         )
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertFalse(self.app.cfg.notifications.block_enforced)
-        self.assertIn("canonical setup audit event was not recorded", result.output)
+        self.assertIn("setup audit event was not recorded", result.output)
 
 
 class TestNotificationsToggle(_NotificationsSetBase):
@@ -110,7 +110,7 @@ class TestNotificationsToggle(_NotificationsSetBase):
         result = self._run("notifications", "off", "--yes", "--no-restart")
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertFalse(self.app.cfg.notifications.enabled)
-        self.assertIn("canonical setup audit event was not recorded", result.output)
+        self.assertIn("setup audit event was not recorded", result.output)
 
 
 class TestNotificationsSetSource(_NotificationsSetBase):
