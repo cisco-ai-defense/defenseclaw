@@ -18,6 +18,7 @@ package cli
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 )
 
@@ -31,13 +32,17 @@ func TestWindowsEnterpriseEnrollmentAccounts(t *testing.T) {
 	})
 	var out bytes.Buffer
 	writeWindowsEnterpriseEnrollmentAccounts(&out, accounts)
+	// GAP-1733: a pending or failed account names why.
 	want := "  Account dcw-std1 (S-1-5-21-1-2-3-1001): claudecode enrolled, codex enrolled\n" +
 		"  Account dcw-std2 (S-1-5-21-1-2-3-1002): copilot pending\n" +
-		"  Account S-1-5-21-1-2-3-1003: codex failed\n"
+		"    " + windowsEnterpriseEnrollmentPending + "\n" +
+		"  Account S-1-5-21-1-2-3-1003: codex failed\n" +
+		"    failed: codex: profile gone\n"
 	if out.String() != want {
 		t.Fatalf("accounts:\n%s\nwant:\n%s", out.String(), want)
 	}
-	if len(accounts) != 3 || accounts[0].Connectors["codex"] != "enrolled" {
+	if len(accounts) != 3 || accounts[0].Connectors["codex"] != "enrolled" || accounts[0].Reason != "" ||
+		!strings.Contains(accounts[1].Reason, "active (connected) session") {
 		t.Fatalf("accounts = %+v", accounts)
 	}
 }

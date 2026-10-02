@@ -60,8 +60,17 @@ case "$status" in
         echo "  Apply this package with: sudo $gateway enterprise linux ensure --from-package" >&2
         ;;
     *)
-        echo "defenseclaw-enterprise: installed, but the lifecycle reported a problem." >&2
-        echo "  See $state/last-package-result.json or run: sudo $gateway enterprise linux verify" >&2
+        echo "defenseclaw-enterprise: installed, but the lifecycle reported a problem, so no deployment is active." >&2
+        # Name the cause (the first error of the JSON result, one line) so
+        # the administrator does not have to open the file (GAP-1744).
+        cause=$(sed -n 's/.*"errors":\[{"code":"\([^"]*\)","message":"\(\([^"\\]\|\\.\)*\)".*/\1: \2/p' \
+            "$state/last-package-result.json" 2>/dev/null | head -n 1 |
+            sed 's/\\"/"/g; s/\\u003c/</g; s/\\u003e/>/g; s/\\u0026/\&/g')
+        if [ -n "$cause" ]; then
+            echo "  $cause" >&2
+        fi
+        echo "  Fix that, then finish the install with: sudo $gateway enterprise linux ensure --from-package" >&2
+        echo "  The full result is in $state/last-package-result.json." >&2
         ;;
 esac
 exit 0

@@ -31,6 +31,14 @@ import (
 // "each account's detail", which status did not show).
 func windowsEnterpriseEnrollmentAccounts(rows []enterpriseHookReconcileRow) []enterprisestatus.EnrollmentAccount {
 	var accounts []enterprisestatus.EnrollmentAccount
+	// The first failure of each account names why it failed.
+	failures := map[string]string{}
+	for _, row := range rows {
+		key := windowsEnterpriseEnrollmentKey(row.SID, row.User, row.UserHome)
+		if !row.OK && !row.Pending && strings.TrimSpace(row.Error) != "" && failures[key] == "" {
+			failures[key] = strings.TrimSpace(row.Connector) + ": " + boundedEnterpriseHookUserCleanupText(strings.TrimSpace(row.Error))
+		}
+	}
 	for _, entry := range enterpriseHookEnrollmentFromRows(rows) {
 		account := enterprisestatus.EnrollmentAccount{
 			Account:    strings.TrimSpace(entry.User),
@@ -43,9 +51,12 @@ func windowsEnterpriseEnrollmentAccounts(rows []enterpriseHookReconcileRow) []en
 		if account.Account == "" {
 			account.Account = account.SID
 		}
+		pending := false
 		for _, connector := range entry.Connectors {
 			account.Connectors[connector.Connector] = connector.State
+			pending = pending || connector.State == "pending"
 		}
+		account.Reason = windowsEnterpriseEnrollmentReason(pending, failures[windowsEnterpriseEnrollmentKey(entry.SID, entry.User, entry.UserHome)])
 		accounts = append(accounts, account)
 	}
 	return accounts
@@ -69,5 +80,40 @@ func writeWindowsEnterpriseEnrollmentAccounts(output io.Writer, accounts []enter
 			states = append(states, name+" "+account.Connectors[name])
 		}
 		fmt.Fprintf(output, "  Account %s: %s\n", label, strings.Join(states, ", "))
+		if account.Reason != "" {
+			fmt.Fprintf(output, "    %s\n", account.Reason)
+		}
 	}
+}
+
+// windowsEnterpriseEnrollmentKey groups rows by account the way
+// enterpriseHookEnrollmentFromRows does.
+func windowsEnterpriseEnrollmentKey(sid, user, home string) string {
+	if key := strings.TrimSpace(sid); key != "" {
+		return key
+	}
+	if key := strings.TrimSpace(user); key != "" {
+		return key
+	}
+	return strings.TrimSpace(home)
+}
+
+// windowsEnterpriseEnrollmentPending is why an account's connector is
+// pending: the guardian acts as a user only in an active (connected)
+// session, so a signed-in account with a disconnected session waits too
+// (docs: enrollment, "Signed-in session"; GAP-1733).
+const windowsEnterpriseEnrollmentPending = "pending: waiting for an active (connected) session of this account; " +
+	"its agents are not guarded until then, and a signed-out or disconnected session keeps waiting"
+
+// windowsEnterpriseEnrollmentReason says why an account is not fully
+// enrolled, or "" when it is.
+func windowsEnterpriseEnrollmentReason(pending bool, failure string) string {
+	var reasons []string
+	if pending {
+		reasons = append(reasons, windowsEnterpriseEnrollmentPending)
+	}
+	if failure != "" {
+		reasons = append(reasons, "failed: "+failure)
+	}
+	return strings.Join(reasons, "; ")
 }

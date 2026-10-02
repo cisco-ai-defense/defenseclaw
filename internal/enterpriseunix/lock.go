@@ -29,13 +29,28 @@ const lockFileName = "lifecycle.lock"
 // errLockBusy reports that another lifecycle run holds the lock.
 var errLockBusy = errors.New("another DefenseClaw enterprise lifecycle run is in progress")
 
+// verifyBusyNextStep is what an administrator does about errLockBusy on
+// verify, which has no --lock-wait.
+const verifyBusyNextStep = "wait for it to finish, then rerun verify"
+
 // lockBusyNextStep is what an administrator does about errLockBusy on an
-// action that takes --lock-wait; verifyBusyNextStep is the same for verify,
-// which has no --lock-wait.
-const (
-	lockBusyNextStep   = "wait for it to finish, then rerun, or pass --lock-wait <duration> (at most 15m) to wait for it"
-	verifyBusyNextStep = "wait for it to finish, then rerun verify"
-)
+// action that takes --lock-wait. It names the wait this run already did, so
+// a run given --lock-wait 1s is not told to pass --lock-wait (GAP-1722).
+func lockBusyNextStep(waited time.Duration) string {
+	if waited >= MaxLockWait {
+		return "waited " + formatLockWait(waited) + " for it; wait for it to finish, then rerun"
+	}
+	return "waited " + formatLockWait(waited) + " for it; wait for it to finish, then rerun, or pass a longer --lock-wait <duration> (at most " +
+		formatLockWait(MaxLockWait) + ") to wait longer"
+}
+
+// formatLockWait prints a whole number of minutes as "10m", not "10m0s".
+func formatLockWait(wait time.Duration) string {
+	if wait >= time.Minute && wait%time.Minute == 0 {
+		return fmt.Sprintf("%dm", int(wait/time.Minute))
+	}
+	return wait.String()
+}
 
 type lifecycleLock struct {
 	file *os.File

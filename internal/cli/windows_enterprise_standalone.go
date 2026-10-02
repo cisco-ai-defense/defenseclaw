@@ -245,6 +245,13 @@ func runWindowsEnterpriseStandaloneAction(
 			return finishWindowsEnterpriseStandalone(cmd, opts, result, 0)
 		}
 	}
+	if (action == "status" || action == "verify") && !windowsEnterpriseIsElevated() && windowsEnterpriseInstallerRefusedModule(report) {
+		// A standard account cannot run the installer's own integrity checks,
+		// which only an administrator can; its refusal read as a broken
+		// install with administrator-only advice (GAP-1720).
+		result.AddError("elevation_required", windowsEnterpriseStandardUserInspectionAnswer(action))
+		return finishWindowsEnterpriseStandalone(cmd, opts, result, enterprisestatus.WindowsExitAccessDenied)
+	}
 	if action != "status" {
 		report = windowsEnterpriseFailureWithDeploymentState(ctx, cmd, opts, script, report)
 	}
@@ -567,9 +574,8 @@ func applyWindowsEnterpriseInstallerReport(
 // could not remove, with the reason. What stays holds per-user hook tokens
 // that nothing accepts any more.
 func addWindowsEnterpriseUserStateWarning(result *enterprisestatus.Result, report *windowsEnterpriseInstallerReport) {
-	for _, account := range windowsEnterpriseReportStrings(report.UserStatePurged) {
-		result.Changes = append(result.Changes, "removed all DefenseClaw per-user data of "+account+
-			" (hook scripts and foreign-hooks-backup included) and its per-user binaries in %USERPROFILE%\\.local\\bin")
+	for _, entry := range windowsEnterpriseReportStrings(report.UserStatePurged) {
+		result.Changes = append(result.Changes, windowsEnterprisePurgedUserStateChange(entry))
 	}
 	var notLocalSystem, remaining []string
 	for _, entry := range windowsEnterpriseReportStrings(report.UserStateRemaining) {
@@ -598,15 +604,6 @@ func addWindowsEnterpriseUserStateWarning(result *enterprisestatus.Result, repor
 			windowsEnterpriseBoundedLabels(remaining),
 		))
 	}
-}
-
-// windowsEnterpriseLocalSystemRemedy is the next step for what only a
-// LocalSystem run removes: install again, then run the given Setup action,
-// both as LocalSystem while the accounts are signed in.
-func windowsEnterpriseLocalSystemRemedy(action string) string {
-	return "run DefenseClaw Setup /ensure and then " + action + ", both as LocalSystem while the accounts are signed in " +
-		"(an MDM system context, or from an elevated prompt a one-time scheduled task that runs as SYSTEM; " +
-		"see \"Run Setup as LocalSystem\" in the Windows enterprise guide)"
 }
 
 // addWindowsEnterpriseRecoveryGatewayWarnings records which gateway a
@@ -648,7 +645,7 @@ func addWindowsEnterpriseRecoveryGatewayWarnings(result *enterprisestatus.Result
 func windowsEnterpriseRollbackLeftoverWarnings(raw json.RawMessage) []enterprisestatus.Message {
 	var warnings []enterprisestatus.Message
 	for _, leftover := range windowsEnterpriseReportStrings(raw) {
-		remedy := "to remove it, run DefenseClaw Setup /ensure and then /uninstall, both as LocalSystem while the accounts are signed in " +
+		remedy := "to remove it, run DefenseClaw Setup /ensure and then /uninstall, both as LocalSystem " + windowsEnterpriseActiveSessionWhen + " " +
 			"(an MDM system context, or from an elevated prompt a one-time scheduled task that runs as SYSTEM; " +
 			"see \"Run Setup as LocalSystem\" in the Windows enterprise guide)"
 		if strings.HasSuffix(leftover, ", which changed after DefenseClaw wrote it") {
@@ -681,7 +678,7 @@ const windowsEnterpriseUserRegistrationListMax = 20
 func addWindowsEnterpriseUserRegistrationWarnings(result *enterprisestatus.Result, report *windowsEnterpriseInstallerReport) {
 	failed := windowsEnterpriseReportStrings(report.UserRegistrationsFailed)
 	if pending := windowsEnterpriseReportStrings(report.UserRegistrationsPending); len(pending) > 0 {
-		reason := "those accounts were signed out"
+		reason := "those accounts " + windowsEnterpriseNoActiveSession
 		// "not LocalSystem" means no removal was attempted: the pending
 		// warning says so and names the remedy, so it is not also reported
 		// as a failed removal (GAP-1568).

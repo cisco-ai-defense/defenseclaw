@@ -591,6 +591,11 @@ func TestUninstallRemovesTheMachineStateUnlessKeepState(t *testing.T) {
 			t.Fatalf("uninstall summary lacks %q:\n%s", want, summary)
 		}
 	}
+	// GAP-1721: the binaries are gone, so the kept line does not tell the
+	// administrator to run the removed gateway binary.
+	if !strings.Contains(summary, "install the DefenseClaw enterprise package again and run") || strings.Contains(summary, "--purge` removes them too") {
+		t.Fatalf("the kept line names a removed binary:\n%s", summary)
+	}
 	if exists(h.env.P(filepath.Join(l.BinDir, binGateway))) || exists(h.env.P(l.DescriptorPath)) ||
 		exists(h.env.P("/etc/systemd/system/"+unitGateway)) || exists(h.env.deploymentPath()) {
 		t.Fatal("uninstall left deployment files behind")
@@ -674,8 +679,17 @@ func TestLifecycleLockIsExclusive(t *testing.T) {
 	defer held.release()
 	r := h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")})
 	requireError(t, r, codeBusy)
-	if msg := r.Errors[len(r.Errors)-1].Message; !strings.Contains(msg, "--lock-wait <duration>") {
-		t.Fatalf("busy must name the next step (GAP-1427): %q", msg)
+	if msg := r.Errors[len(r.Errors)-1].Message; !strings.Contains(msg, "--lock-wait <duration>") ||
+		!strings.Contains(msg, "waited "+formatLockWait(h.env.LockTimeout)+" for it") {
+		t.Fatalf("busy must name the wait done and the next step (GAP-1427, GAP-1722): %q", msg)
+	}
+	// GAP-1722: a run that already waited the longest allowed time is not
+	// told to wait longer.
+	if got := lockBusyNextStep(MaxLockWait); got != "waited 15m for it; wait for it to finish, then rerun" {
+		t.Fatalf("busy after the longest wait: %q", got)
+	}
+	if got := lockBusyNextStep(time.Second); !strings.HasPrefix(got, "waited 1s for it;") || !strings.Contains(got, "a longer --lock-wait <duration> (at most 15m)") {
+		t.Fatalf("busy after --lock-wait 1s: %q", got)
 	}
 	if r.ExitCode != enterprisestatus.UnixExitBusy {
 		t.Fatalf("busy exit %d, want %d", r.ExitCode, enterprisestatus.UnixExitBusy)

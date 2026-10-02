@@ -255,11 +255,12 @@ func windowsManagedHooksStandaloneUserState(
 			reason = "kept: the account's agent registrations were not all removed, and its connector_backups restore them"
 		default:
 			err := windowsManagedHooksStandaloneUserStatePurger(home, sid, target.DataDir)
+			var binaries []string
 			if err == nil {
-				_, err = windowsManagedHooksStandaloneUserBinariesPurger(home, sid)
+				binaries, err = windowsManagedHooksStandaloneUserBinariesPurger(home, sid)
 			}
 			if err == nil {
-				purged = append(purged, label)
+				purged = append(purged, windowsManagedHooksPurgedLabel(label, binaries))
 				continue
 			}
 			reason = boundedEnterpriseHookUserCleanupText(err.Error())

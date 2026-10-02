@@ -255,7 +255,7 @@ func TestCompleteWindowsManagedHooksTeardownUserCleanupIsStandaloneOnly(t *testi
 	}
 	windowsManagedHooksStandaloneCursorTombstonePurger = func() error { return nil }
 	// The report names each account whose data went.
-	if len(report.UserStatePurged) != 1 || !strings.HasSuffix(report.UserStatePurged[0], `\.defenseclaw`) {
+	if len(report.UserStatePurged) != 1 || !strings.HasSuffix(report.UserStatePurged[0], `\.defenseclaw`+windowsManagedHooksPurgedBinariesMarker+"defenseclaw.cmd") {
 		t.Fatalf("purged accounts = %v", report.UserStatePurged)
 	}
 	if body, _ := json.Marshal(report); !strings.Contains(string(body), `"user_state_purged":[`) {
