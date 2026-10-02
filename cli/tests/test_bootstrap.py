@@ -1298,13 +1298,12 @@ class FirstRunApiPortTests(unittest.TestCase):
                 patch.object(bootstrap.platform_support, "host_os", return_value="windows"),
                 patch.dict(os.environ, {"ProgramData": claims}),
                 patch.object(bootstrap, "_windows_own_sid", return_value=own),
-                patch.object(bootstrap, "_windows_account_exists", side_effect=lambda sid: sid == other),
             ):
+                # Also when the SID's account was deleted: no other account
+                # can remove its claim from %ProgramData% (GAP-1704).
                 self.assertTrue(bootstrap._api_port_claimed_by_other_account(18970))
                 self.assertFalse(bootstrap._api_port_claimed_by_other_account(18980), "own claim")
                 self.assertFalse(bootstrap._api_port_claimed_by_other_account(18990), "no claim")
-                with patch.object(bootstrap, "_windows_account_exists", return_value=False):
-                    self.assertFalse(bootstrap._api_port_claimed_by_other_account(18970), "deleted account")
                 bootstrap.remove_own_api_port_claims()
             self.assertEqual(os.listdir(claims), ["defenseclaw-api-port-18970"])
 
