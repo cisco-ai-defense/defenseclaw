@@ -294,12 +294,6 @@ func (c *CiscoDefenseClawInspectClient) Inspect(ctx context.Context, messages []
 		if len(m.ToolCalls) > 0 {
 			msg["tool_calls"] = m.ToolCalls
 		}
-		if m.ToolCallID != "" {
-			msg["tool_call_id"] = m.ToolCallID
-		}
-		if m.Name != "" {
-			msg["name"] = m.Name
-		}
 		chatMsgs[i] = msg
 	}
 	// The defense_claw endpoint's cloud-side tenant is the authoritative

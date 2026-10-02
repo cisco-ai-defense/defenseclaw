@@ -482,12 +482,6 @@ func (c *CiscoInspectClient) Inspect(ctx context.Context, messages []ChatMessage
 		if len(m.ToolCalls) > 0 {
 			msg["tool_calls"] = m.ToolCalls
 		}
-		if m.ToolCallID != "" {
-			msg["tool_call_id"] = m.ToolCallID
-		}
-		if m.Name != "" {
-			msg["name"] = m.Name
-		}
 		chatMsgs[i] = msg
 	}
 

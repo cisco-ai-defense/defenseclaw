@@ -346,7 +346,10 @@ func TestProxyManagedAIDOnly_PreservesHistoryWithoutDuplication(t *testing.T) {
 		if verdict == nil || verdict.Action != "block" {
 			t.Fatalf("verdict = %+v, want block", verdict)
 		}
-		wantMessages := append(before, ChatMessage{Role: "user", Content: "provider-native prompt"})
+		// The proxy lane keeps provider tool calls local (see inspectCisco).
+		wantHistory := append([]ChatMessage(nil), before...)
+		wantHistory[0].ToolCalls = nil
+		wantMessages := append(wantHistory, ChatMessage{Role: "user", Content: "provider-native prompt"})
 		if !reflect.DeepEqual(stub.messages, wantMessages) {
 			t.Fatalf("AID messages = %#v, want preserved history plus synthetic turn %#v", stub.messages, wantMessages)
 		}
@@ -354,6 +357,82 @@ func TestProxyManagedAIDOnly_PreservesHistoryWithoutDuplication(t *testing.T) {
 			t.Fatalf("caller messages mutated: got %#v, want %#v", original, before)
 		}
 	})
+}
+
+// The proxy lane sends AID a provider's history as role and content only, as
+// before tool calls were carried. A provider's tool fields are raw (here an
+// Ollama call: object arguments, no id), and one malformed entry fails the
+// whole request, so they stay local; only the hook lane sends tool calls.
+func TestProxyAIDLane_ProviderToolCallsStayLocal(t *testing.T) {
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"is_safe":true,"action":"Allow","rules":[]}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	history := []ChatMessage{
+		{Role: "system", Content: "You are helpful."},
+		{Role: "user", Content: "list files", Name: "alice"},
+		{Role: "assistant", ToolCalls: json.RawMessage(
+			`[{"function":{"name":"get_weather","arguments":{"city":"Paris"}}}]`)},
+		{Role: "tool", Content: "22C", ToolCallID: "call_1"},
+		{Role: "user", Content: "thanks"},
+	}
+	before := append([]ChatMessage(nil), history...)
+
+	apiKeyClient := newCiscoInspectTestClient(t, srv.URL, "TEST_PROXY_TOOL_CALLS_LOCAL")
+	apiKeyClient.client = srv.Client()
+	managedClient := NewCiscoDefenseClawInspectClient(&config.CiscoAIDefenseConfig{
+		Endpoint:  srv.URL,
+		TimeoutMs: 3000,
+	}, newFakeCloudProvider("cmid-token-1"))
+	if managedClient == nil {
+		t.Fatal("expected managed client")
+	}
+	for _, lane := range []struct {
+		name      string
+		guardrail func() *GuardrailInspector
+		content   func(string) interface{}
+	}{
+		{
+			name:      "api-key",
+			guardrail: func() *GuardrailInspector { return NewGuardrailInspector("remote", apiKeyClient, nil, "") },
+			content:   func(text string) interface{} { return text },
+		},
+		{
+			name: "managed",
+			guardrail: func() *GuardrailInspector {
+				g := NewGuardrailInspector("both", nil, nil, "")
+				g.SetManagedMode(true)
+				g.SetCiscoInspector(managedClient)
+				return g
+			},
+			content: func(text string) interface{} { return map[string]interface{}{"text": text} },
+		},
+	} {
+		t.Run(lane.name, func(t *testing.T) {
+			gotBody = nil
+			lane.guardrail().Inspect(t.Context(), "prompt", "thanks", history, "provider/model", "action")
+			var payload struct {
+				Messages []map[string]interface{} `json:"messages"`
+			}
+			if err := json.Unmarshal(gotBody, &payload); err != nil {
+				t.Fatalf("unmarshal: %v (body=%s)", err, gotBody)
+			}
+			want := make([]map[string]interface{}, len(history))
+			for i, message := range history {
+				want[i] = map[string]interface{}{"role": message.Role, "content": lane.content(message.Content)}
+			}
+			if !reflect.DeepEqual(payload.Messages, want) {
+				t.Fatalf("AID messages = %v, want role and content only %v", payload.Messages, want)
+			}
+			if !reflect.DeepEqual(history, before) {
+				t.Fatalf("caller messages mutated: got %#v, want %#v", history, before)
+			}
+		})
+	}
 }
 
 func TestProxyManagedAIDOnly_CompletionRemainsAssistantOnly(t *testing.T) {
