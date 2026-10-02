@@ -1199,6 +1199,33 @@ func TestScanUserHomeFindsARenamedMainThreadByArgv0(t *testing.T) {
 	t.Fatalf("signals = %+v, want an active_process signal for cursor-agent", report.Signals)
 }
 
+// Cursor's `agent` alias is a symlink to .../cursor-agent; argv[0]'s basename
+// is "agent", which the catalog leaves out (ssh-agent, gpg-agent), so the
+// resolved name is what matches (GAP-1865).
+func TestScanUserHomeFindsCursorStartedThroughItsAgentAlias(t *testing.T) {
+	signature := AISignature{ID: "cursor", Name: "Cursor", Category: "supported_connector", Confidence: 0.95, ProcessNames: []string{"cursor", "Cursor"}}
+	stubProcessSnapshotSource(t, func() ([]processInfo, error) {
+		return []processInfo{
+			{PID: os.Getpid(), User: "alice", Comm: "mainthread", Argv0: "agent", Argv0Target: "cursor-agent"},
+			{PID: os.Getpid() + 1, User: "alice", Comm: "ssh-agent"},
+		}, nil
+	})
+	report := ScanUserHome(context.Background(), t.TempDir(), "alice", os.Getuid(), UserScanOptions{}, []AISignature{signature})
+	found := false
+	for _, sig := range report.Signals {
+		if sig.Runtime == nil {
+			continue
+		}
+		if sig.Runtime.PID != os.Getpid() || sig.Runtime.Comm != "cursor-agent" {
+			t.Fatalf("signal = %+v, want only the cursor-agent alias process", sig)
+		}
+		found = true
+	}
+	if !found {
+		t.Fatalf("signals = %+v, want an active_process signal for the agent alias", report.Signals)
+	}
+}
+
 // A partial per-user scan names the detector that failed. Only the process
 // and model file scans used to, so a package manifest walk error on macOS
 // reached the gateway as "partial scan: " with no cause.
