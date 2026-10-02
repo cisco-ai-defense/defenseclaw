@@ -466,7 +466,9 @@ stopped. The install, `status` and `verify` name each such account with the
 Run these as root from `/opt/defenseclaw/bin`. Uninstall removes each user's
 DefenseClaw hook registrations and DefenseClaw's own machine-policy entries
 first. Administrator entries in those files stay as they were.
-Each user keeps `~/.defenseclaw` unless you purge. With `--purge` it also
+Each user keeps `~/.defenseclaw` unless you purge; the result's `kept:` line
+names the accounts that still have `~/.defenseclaw` or per-user binaries in
+`~/.local/bin`. With `--purge` it also
 stops each enrolled user's per-user gateway and removes all of that user's
 `~/.defenseclaw`, the empty agent folders DefenseClaw created in that home,
 and the per-user binaries and launcher links in `~/.local/bin`, and the

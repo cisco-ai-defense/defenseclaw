@@ -128,7 +128,10 @@ func newUnixLifecycleCommand(platform, action, summary string) *cobra.Command {
 		Short:        summary,
 		SilenceUsage: true,
 		Args: func(cmd *cobra.Command, args []string) error {
-			return invalidLifecycleArguments(cobra.NoArgs(cmd, args))
+			if err := cobra.NoArgs(cmd, args); err != nil {
+				return lifecycleFlagError(cmd, err)
+			}
+			return nil
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runUnixLifecycle(cmd, platform, action, opts)
@@ -172,8 +175,15 @@ func invalidLifecycleArguments(err error) error {
 	return withExitCode(err, enterprisestatus.InvalidArgsExitCode(runtime.GOOS))
 }
 
-func lifecycleFlagError(_ *cobra.Command, err error) error {
-	return invalidLifecycleArguments(err)
+// lifecycleFlagError reports an unknown flag, a malformed value or a stray
+// argument with the usage line and the --help pointer every other gateway
+// command prints (GAP-1549, GAP-1943), and the lifecycle's documented
+// invalid-arguments exit code.
+func lifecycleFlagError(c *cobra.Command, err error) error {
+	if c == nil || err == nil {
+		return invalidLifecycleArguments(err)
+	}
+	return invalidLifecycleArguments(&delegatedUsageError{msg: usageMessage(c, err), err: err})
 }
 
 func newEnterpriseSecretCommand(action, summary string) *cobra.Command {

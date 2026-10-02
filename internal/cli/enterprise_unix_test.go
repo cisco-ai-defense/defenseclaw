@@ -13,6 +13,7 @@ package cli
 import (
 	"errors"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
@@ -64,12 +65,19 @@ func TestUnixLifecycleInvalidArgumentsExitTwo(t *testing.T) {
 				if parseErr == nil {
 					t.Fatalf("%s %s accepted %v", group, action, flags)
 				}
-				if got := commandExitCode(cmd.FlagErrorFunc()(cmd, parseErr)); got != want {
+				flagErr := cmd.FlagErrorFunc()(cmd, parseErr)
+				if got := commandExitCode(flagErr); got != want {
 					t.Fatalf("enterprise %s %s %v exits %d, want %d", group, action, flags, got, want)
+				}
+				// GAP-1943: the usage line and the --help pointer, as on every
+				// other gateway command.
+				if msg := flagErr.Error(); !strings.Contains(msg, "\nUsage: "+cmd.UseLine()) ||
+					!strings.HasSuffix(msg, "Try '"+cmd.CommandPath()+" --help' for help.") {
+					t.Fatalf("enterprise %s %s %v: %q", group, action, flags, msg)
 				}
 			}
 			argsErr := cmd.ValidateArgs([]string{"extra"})
-			if argsErr == nil || commandExitCode(argsErr) != want {
+			if argsErr == nil || commandExitCode(argsErr) != want || !strings.Contains(argsErr.Error(), cmd.CommandPath()+" --help") {
 				t.Fatalf("enterprise %s %s extra: %v exits %d, want %d", group, action, argsErr, commandExitCode(argsErr), want)
 			}
 		}

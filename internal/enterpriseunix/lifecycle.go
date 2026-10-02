@@ -133,6 +133,10 @@ type lifecycle struct {
 	// perUserRemoved counts the per-user hook registrations an uninstall
 	// removed, for its summary.
 	perUserRemoved int
+	// keptPerUser is what each enrolled account keeps after a default
+	// uninstall; keptKnown is false when the accounts record was unreadable.
+	keptPerUser []perUserKept
+	keptKnown   bool
 }
 
 // noteChange records one change a repair or ensure made to an installed
@@ -1610,6 +1614,10 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 		}
 		return 0
 	}
+	if !l.opts.Purge {
+		// Read before the machine state, and the accounts record with it, go.
+		l.keptPerUser, l.keptKnown = env.perUserLeftovers()
+	}
 	ordered := append([]Unit{}, units...)
 	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Stage > ordered[j].Stage })
 	stopUnit := func(unit Unit) {
@@ -1869,25 +1877,11 @@ func (l *lifecycle) uninstallSummary(record *Deployment) []string {
 		lines = append(lines, "removed the machine state: "+state+", the lifecycle state ("+layout.LifecycleDir+") and the service account "+layout.ServiceUser)
 	}
 	if !l.opts.Purge {
-		lines = append(lines, "kept: each enrolled user's ~/.defenseclaw and per-user binaries; "+l.keptPerUserNextStep(record))
+		if kept := l.keptPerUserLine(record); kept != "" {
+			lines = append(lines, kept)
+		}
 	}
 	return lines
-}
-
-// keptPerUserNextStep says how to remove the per-user data a default
-// uninstall keeps. --purge needs the gateway binary, which this uninstall
-// removed unless the deb/rpm owns it, so the next step must not name a
-// binary that is gone (GAP-1721).
-func (l *lifecycle) keptPerUserNextStep(record *Deployment) string {
-	env := l.env
-	purge := "`" + env.lifecycleCommand(ActionUninstall) + " --purge`"
-	if !exists(env.P(filepath.Join(env.Layout.BinDir, binGateway))) {
-		return "this uninstall removed the DefenseClaw binaries, so to remove them too, install the DefenseClaw enterprise package again and run " + purge
-	}
-	if record != nil && record.Channel == ChannelPackage && env.GOOS == "linux" {
-		return purge + " removes them too while the defenseclaw-enterprise package is installed (once the package is removed, install it again first)"
-	}
-	return purge + " removes them too"
 }
 
 // removePerUserRegistrations runs `enterprise hooks remove-all` (with

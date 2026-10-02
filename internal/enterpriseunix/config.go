@@ -94,10 +94,23 @@ func (e *Env) validateConfig(raw []byte) (*validatedConfig, error) {
 func (e *Env) validateConfigSource(raw []byte, source string) (*validatedConfig, error) {
 	validated, err := e.checkConfig(raw)
 	if err != nil {
+		if plain, ok := e.plainConfigProblem(err, source, raw); ok {
+			return nil, &plainConfigError{msg: plain, err: err}
+		}
 		return nil, e.explainConfigError(err, source)
 	}
 	return validated, nil
 }
+
+// plainConfigError is a config problem in plain words; it keeps the
+// diagnostic for errors.As.
+type plainConfigError struct {
+	msg string
+	err error
+}
+
+func (e *plainConfigError) Error() string { return e.msg }
+func (e *plainConfigError) Unwrap() error { return e.err }
 
 // explainConfigError rewrites a config error for the managed host: it names
 // the administrator's file, and a config_version problem says how to fix the

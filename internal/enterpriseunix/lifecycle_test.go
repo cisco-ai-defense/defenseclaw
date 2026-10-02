@@ -586,7 +586,7 @@ func TestUninstallRemovesTheMachineStateUnlessKeepState(t *testing.T) {
 	// GAP-1227: the result says what went and what stayed.
 	summary := strings.Join(r.Changes, "\n")
 	for _, want := range []string{"stopped and removed the DefenseClaw services", "removed the machine state",
-		"and the service account", "kept: each enrolled user's ~/.defenseclaw", "--purge"} {
+		"and the service account", "kept: each enrolled account's DefenseClaw per-user data (~/.defenseclaw)", "--purge"} {
 		if !strings.Contains(summary, want) {
 			t.Fatalf("uninstall summary lacks %q:\n%s", want, summary)
 		}
@@ -647,7 +647,7 @@ func TestUninstallRemovesTheMachineStateUnlessKeepState(t *testing.T) {
 	purge := h.run(Options{Action: ActionUninstall, Purge: true, KeepServiceAccount: true})
 	requireOK(t, purge)
 	if summary := strings.Join(purge.Changes, "\n"); !strings.Contains(summary, "removed the machine state") ||
-		!strings.Contains(summary, "kept the service account") || strings.Contains(summary, "kept: each enrolled user") {
+		!strings.Contains(summary, "kept the service account") || strings.Contains(summary, "kept: each enrolled account") {
 		t.Fatalf("purge summary:\n%s", summary)
 	}
 	for _, dir := range []string{l.ConfigDir, l.DataDir, l.LifecycleDir, l.InstallRoot, l.GuardianAuthDir} {
