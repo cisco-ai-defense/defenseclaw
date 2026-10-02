@@ -182,6 +182,9 @@ path: _source-install-preflight
 # Run the freshly-installed CLI binary directly so a stale shell PATH
 # doesn't invoke an older `defenseclaw` still sitting earlier in PATH.
 # The CLI handles its own idempotence, so repeated `make all` is safe.
+# An existing config is kept as it is (first-run setup would replace its
+# connectors and modes with the defaults); only newly detected hook connectors
+# are added, unless CONNECTOR or PROFILE asks for first-run setup.
 # When no TTY is available, the follow-up additive setup observes only newly
 # detected hook connectors, preserves existing modes, and restarts the gateway
 # only when it actually adds a connector.
@@ -202,6 +205,7 @@ quickstart: _source-install-preflight
 			echo "  Developers: run 'make all'. Release installs: run 'defenseclaw upgrade'."; \
 			exit 1; \
 		fi; \
+		cfg_file="$${DEFENSECLAW_CONFIG:-$${DEFENSECLAW_HOME:-$$HOME/.defenseclaw}/config.yaml}"; \
 		if [ -n "$${CONNECTOR:-}" ]; then \
 			if ! "$$dc_bin" init --non-interactive --yes \
 				--connector "$${CONNECTOR}" \
@@ -209,6 +213,12 @@ quickstart: _source-install-preflight
 				--scanner-mode "$${SCANNER_MODE:-local}" \
 				--no-start-gateway --verify; then \
 				echo "  Quickstart reported errors — run 'defenseclaw doctor' to investigate"; \
+				exit 1; \
+			fi; \
+		elif [ -z "$${PROFILE:-}" ] && [ -f "$$cfg_file" ]; then \
+			echo "  • Existing config kept ($$cfg_file); change connectors or modes with: defenseclaw init"; \
+			if ! "$$dc_bin" setup --add-detected --yes --restart; then \
+				echo "  Could not add newly detected connectors — run 'defenseclaw agent discover --refresh' to investigate"; \
 				exit 1; \
 			fi; \
 		elif [ -t 0 ] && [ -t 1 ] && [ "$${CI:-}" != "true" ]; then \
