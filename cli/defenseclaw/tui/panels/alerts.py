@@ -1152,7 +1152,7 @@ class AlertsPanelModel:
         if self.filter_text or self.severity_filter:
             return "No alerts match the current filters."
         if not self.show_all_severities:
-            return "No actionable alerts. Press 1 to show all severities."
+            return "No actionable alerts. Press l to show all severities."
         return "No active alerts."
 
     def _store_alert_reader(self) -> object:
