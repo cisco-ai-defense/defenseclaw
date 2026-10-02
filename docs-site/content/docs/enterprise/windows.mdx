@@ -699,6 +699,10 @@ The agents' shared machine folders stay while they hold anything else,
 because another product can use them. Setup removes its own files from them.
 A purge also removes `C:\Program Files\ClaudeCode\managed-settings.d`, and
 then `C:\Program Files\ClaudeCode`, when nothing else is left in them.
+It also removes any `C:\ProgramData\DefenseClaw-PowerShell-<32 hex>` folder
+an interrupted elevated DefenseClaw command left. The
+`machine_state_remaining` warning names any of these folders it could not
+remove, and why.
 
 What stays is inert. Uninstall has already revoked every enrollment. The
 OpenCode and Amp plugins stop enforcing once uninstall removes
