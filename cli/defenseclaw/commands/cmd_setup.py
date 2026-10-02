@@ -5941,8 +5941,9 @@ def _resolve_judge_hook_gate(
     help=(
         "Agent framework connector. Alias: --agent. When omitted: the "
         "connector an earlier run saved, else the one picked at install "
-        "time, else openclaw (the interactive wizard also suggests a "
-        "connector it finds on this machine)."
+        "time; if neither is set, pass --connector with the agent you use "
+        "(the interactive wizard also suggests a connector it finds on "
+        "this machine)."
     ),
 )
 @click.option("--mode", "guard_mode", type=click.Choice(["observe", "action"]), default=None, help="Guardrail mode")
@@ -7441,6 +7442,18 @@ def _capture_failed_setup_registration_locations(cfg) -> tuple[_SetupRegistratio
     raise OSError(f"failed-generation registration evidence did not stabilize [{reference}]") from None
 
 
+class _SetupGatewayNoAnswerError(OSError):
+    """The running gateway (a trusted PID) did not answer its health check (GAP-1859)."""
+
+    def __init__(self, pid: int, seconds: float | None = None) -> None:
+        self.pid = pid
+        self.seconds = seconds
+        if seconds is None:
+            super().__init__("authenticated gateway generation evidence is unavailable")
+        else:
+            super().__init__(f"the running gateway (PID {pid}) did not answer within {max(1, round(seconds))} s")
+
+
 def _capture_setup_gateway_boundary(cfg) -> tuple[str, dict[str, Any] | None, str | None]:
     from defenseclaw.commands.cmd_doctor import _trusted_gateway_listener
     from defenseclaw.commands.cmd_status import _fetch_runtime_bound_health
@@ -7460,6 +7473,8 @@ def _capture_setup_gateway_boundary(cfg) -> tuple[str, dict[str, Any] | None, st
         health = _fetch_runtime_bound_health(client, cfg)
     except Exception:
         health = None
+    if health is None:
+        raise _SetupGatewayNoAnswerError(trust.pid)
     generation = health.get("started_at") if isinstance(health, dict) else None
     if (
         not isinstance(generation, str)
@@ -7709,6 +7724,7 @@ def _capture_setup_applied_runtime(
     last_error: Exception | None = None
     last_error_site: str | None = None
     last_difference: str | None = None
+    started = time.monotonic()
     for attempt in range(_SETUP_RUNTIME_SNAPSHOT_ATTEMPTS):
         try:
             current = _capture_setup_applied_runtime_once(cfg, required_registration_locations)
@@ -7728,6 +7744,8 @@ def _capture_setup_applied_runtime(
             previous = current
         if attempt + 1 < _SETUP_RUNTIME_SNAPSHOT_ATTEMPTS:
             time.sleep(_SETUP_RUNTIME_SNAPSHOT_RETRY_SECONDS)
+    if last_difference is None and isinstance(last_error, _SetupGatewayNoAnswerError):
+        raise _SetupGatewayNoAnswerError(last_error.pid, time.monotonic() - started) from None
     if last_difference is not None:
         reference = f"diff={last_difference}"
     elif last_error is not None:
@@ -8671,7 +8689,21 @@ def _restore_setup_config_in_memory(app: AppContext, snapshot: _SetupConfigSnaps
     return cfg
 
 
-def _restart_restored_connector_runtime(app: AppContext, *, skip_openclaw: bool = False) -> None:
+_ROLLBACK_RESTART_TITLE = "Restoring the previous configuration"
+
+
+def _restart_restored_connector_runtime(
+    app: AppContext,
+    *,
+    skip_openclaw: bool = False,
+    same_failure: BaseException | None = None,
+) -> None:
+    """Restart the gateway on the restored config, labelled as the rollback step.
+
+    ``same_failure`` is the start failure that triggered the rollback: when the
+    restart fails the same way, its output is one line instead of the same
+    start error again (GAP-1808).
+    """
     cfg = app.cfg
     restored = list(cfg.active_connectors()) if hasattr(cfg, "active_connectors") else []
     primary = normalize_connector(cfg.active_connector()) if hasattr(cfg, "active_connector") else "openclaw"
@@ -8686,15 +8718,33 @@ def _restart_restored_connector_runtime(app: AppContext, *, skip_openclaw: bool 
         # same 30 s timeout. It loads the restored plugin when it starts
         # (GAP-1702).
         primary = ""
-    _restart_services(
-        cfg.data_dir,
-        cfg.gateway.host,
-        cfg.gateway.port,
-        connector=primary,
-        connectors=restored,
-        wait_for_connector_ready=bool({normalize_connector(name) for name in restored} & _HOOK_ENFORCED_CONNECTORS),
-        start_if_stopped=True,
-    )
+    restart_kwargs: dict[str, Any] = {
+        "connector": primary,
+        "connectors": restored,
+        "wait_for_connector_ready": bool(
+            {normalize_connector(name) for name in restored} & _HOOK_ENFORCED_CONNECTORS
+        ),
+        "start_if_stopped": True,
+        "title": _ROLLBACK_RESTART_TITLE,
+    }
+    if same_failure is None:
+        _restart_services(cfg.data_dir, cfg.gateway.host, cfg.gateway.port, **restart_kwargs)
+        return
+    import contextlib
+    import io
+
+    captured = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(captured):
+            _restart_services(cfg.data_dir, cfg.gateway.host, cfg.gateway.port, **restart_kwargs)
+    except Exception as exc:
+        if str(exc) != str(same_failure):
+            click.echo(captured.getvalue(), nl=False)
+        else:
+            ux.section(_ROLLBACK_RESTART_TITLE)
+            click.echo("  defenseclaw-gateway: still cannot start (same error as above)")
+        raise
+    click.echo(captured.getvalue(), nl=False)
 
 
 def _rollback_failed_connector_application(
@@ -8817,10 +8867,10 @@ def _rollback_failed_connector_application(
                 if lifecycle_error is not None:
                     raise lifecycle_error
             else:
-                _restart_restored_connector_runtime(
-                    app,
-                    skip_openclaw=isinstance(cause, _OpenClawGatewayNotRunning),
-                )
+                restore_kwargs: dict[str, Any] = {"skip_openclaw": isinstance(cause, _OpenClawGatewayNotRunning)}
+                if isinstance(cause, _GatewayRestartFailed) and not isinstance(cause, _OpenClawGatewayNotRunning):
+                    restore_kwargs["same_failure"] = cause
+                _restart_restored_connector_runtime(app, **restore_kwargs)
         except BaseException as exc:  # Report both non-secret transaction failures.
             if _secret_safe:
                 secret_rollback_failed = True
@@ -8881,7 +8931,14 @@ def _rollback_failed_connector_application(
         )
     else:
         outcome = "restored the prior connector configuration and runtime"
-    if isinstance(cause, _GatewayRestartFailed):
+    if gateway_still_down and type(cause) is _GatewayRestartFailed and "defenseclaw-gateway" in str(cause):
+        # GAP-1808: one cause and one next step, not the restart error's
+        # generic advice followed by a second, different one.
+        failure = click.ClickException(
+            "the gateway could not start, so setup put the previous connector configuration back. "
+            "Fix the start error shown above, then run `defenseclaw-gateway start`."
+        )
+    elif isinstance(cause, _GatewayRestartFailed):
         # GAP-1705: the gateway did not start; say that (with its next steps)
         # instead of a reference that is the same for every such failure.
         failure = click.ClickException(f"{cause.format_message()} Setup {outcome}.")
@@ -9156,8 +9213,12 @@ def _apply_hook_connector_setup(
     _version_preflighted: bool = False,
     _protected_selection: _VerifiedSetupAgentSelections | None = None,
     _selection_transaction_snapshot: _SetupConfigSnapshot | None = None,
+    _batch_summary: dict[str, Any] | None = None,
 ) -> bool:
     """Pin DefenseClaw to *connector* in hook-driven mode.
+
+    ``_batch_summary``: a multi-connector run collects the per-connector
+    status lines here and prints one summary for the run (GAP-1781).
 
     Idempotent: running twice with the same arguments yields the same
     on-disk state. The function:
@@ -9238,6 +9299,14 @@ def _apply_hook_connector_setup(
     pack_dir = _resolve_rule_pack_dir(app, rule_pack=rule_pack, rule_pack_dir=rule_pack_dir)
     try:
         setup_snapshot = _capture_setup_config_snapshot(app.cfg, capture_runtime=_windows_runtime_rollback(restart))
+    except _SetupGatewayNoAnswerError as exc:
+        # Same next step as the busy-gateway restart check (GAP-1668).
+        click.echo(
+            f"  ✗ Setup did not start: {exc}; the host may be busy.\n"
+            "    Nothing was changed. Retry, or check it with: defenseclaw-gateway status",
+            err=True,
+        )
+        return False
     except OSError as exc:
         click.echo(
             f"  ✗ Cannot establish connector setup rollback point: {exc}\n"
@@ -9393,10 +9462,13 @@ def _apply_hook_connector_setup(
         and connector not in {"cursor", "hermes", "copilot", "antigravity"}
         and gc.effective_hook_fail_mode(connector) == "open"
     ):
-        click.echo(
-            f"  ⚠ {connector} hook failures are fail-open: while the gateway is down or "
-            "unreachable, tool calls run uninspected. Pass --fail-mode closed to block them."
-        )
+        if _batch_summary is not None:
+            _batch_summary.setdefault("fail_open", []).append(connector)
+        else:
+            click.echo(
+                f"  ⚠ {connector} hook failures are fail-open: while the gateway is down or "
+                "unreachable, tool calls run uninspected. Pass --fail-mode closed to block them."
+            )
     if connector == "cursor":
         if hilt:
             click.echo("  ⚠ Cursor native human approval is not implemented; disabling it for this connector.")
@@ -9472,7 +9544,8 @@ def _apply_hook_connector_setup(
 
     try:
         cfg.save()
-        click.echo("  ✓ Config saved to ~/.defenseclaw/config.yaml")
+        if _batch_summary is None:
+            click.echo("  ✓ Config saved to ~/.defenseclaw/config.yaml")
     except OSError as exc:
         try:
             _restore_setup_config_snapshot(app, setup_snapshot)
@@ -9501,22 +9574,26 @@ def _apply_hook_connector_setup(
         )
         return False
     _actives = list(cfg.active_connectors()) if hasattr(cfg, "active_connectors") else [connector]
-    if len(_actives) > 1:
+    if _batch_summary is not None:
+        _batch_summary.setdefault("modes", {})[connector] = desired_mode
+        _batch_summary["workspace"] = workspace
+    elif len(_actives) > 1:
         click.echo(
             f"  ✓ Desired roster staged for {connector!r} — "
             f"{len(_actives)} connectors selected: {', '.join(_actives)}"
         )
     else:
         click.echo(f"  ✓ Desired connector {connector!r} staged")
-    if workspace:
-        click.echo(f"  ✓ Workspace root pinned to {workspace}")
-    else:
-        click.echo("  ✓ Scope: global user config (no workspace pinned)")
-    # Hook connector setup should describe mode in connector terms. The first
-    # connector may still be represented through legacy global fields on disk,
-    # but presenting that as guardrail.mode nudges users toward unsafe global
-    # edits on multi-connector installs.
-    click.echo(f"  ✓ {connector} mode={desired_mode}")
+    if _batch_summary is None:
+        if workspace:
+            click.echo(f"  ✓ Workspace root pinned to {workspace}")
+        else:
+            click.echo("  ✓ Scope: global user config (no workspace pinned)")
+        # Hook connector setup should describe mode in connector terms. The
+        # first connector may still be represented through legacy global
+        # fields on disk, but presenting that as guardrail.mode nudges users
+        # toward unsafe global edits on multi-connector installs.
+        click.echo(f"  ✓ {connector} mode={desired_mode}")
     if connector == "cursor":
         effective_fail_mode = "closed" if desired_mode == "action" else "open"
         click.echo(
@@ -9560,10 +9637,10 @@ def _apply_hook_connector_setup(
             )
         else:
             click.echo(f"  ✓ {_CONNECTOR_META[connector]['label']} connector setup complete")
-    else:
+    elif _batch_summary is None:
         click.echo(
-            "  ℹ Connector desired state is staged offline; it is not active until the gateway "
-            "publishes matching registration and lock evidence."
+            "  ℹ Saved. It takes effect once the gateway restarts and confirms the connector "
+            "(defenseclaw-gateway restart)."
         )
 
     if not defer_audit:
@@ -9575,6 +9652,33 @@ def _apply_hook_connector_setup(
         )
 
     return True
+
+
+def _echo_batch_setup_summary(applied: list[str], summary: dict[str, Any], *, restart: bool) -> None:
+    """One summary for a multi-connector setup run (GAP-1781)."""
+    modes: dict[str, str] = summary.get("modes", {})
+    click.echo()
+    click.echo("  ✓ Config saved to ~/.defenseclaw/config.yaml")
+    click.echo(f"  ✓ {len(applied)} connector(s) set up:")
+    for name in applied:
+        click.echo(f"      - {name}: {modes.get(name, 'observe')}")
+    workspace = summary.get("workspace")
+    if workspace:
+        click.echo(f"  ✓ Workspace root pinned to {workspace}")
+    else:
+        click.echo("  ✓ Scope: global user config (no workspace pinned)")
+    fail_open = summary.get("fail_open") or []
+    if fail_open:
+        click.echo(
+            f"  ⚠ Hook failures are fail-open for {', '.join(fail_open)}: while the gateway is down or "
+            "unreachable, their tool calls run uninspected. Block them with: "
+            "defenseclaw guardrail fail-mode closed"
+        )
+    if not restart:
+        click.echo(
+            "  ℹ Saved. It takes effect once the gateway restarts and confirms the connectors "
+            "(defenseclaw-gateway restart)."
+        )
 
 
 # Backwards-compat alias for any out-of-tree callers; new code must
@@ -10778,6 +10882,7 @@ def _apply_setup_batch(
 
     applied: list[str] = []
     deferred_audits: list[tuple[str, str]] = []
+    batch_summary: dict[str, Any] = {}
     if allow_trusted_path_prompt:
         trusted_prompt_cache = trusted_prompt_cache if trusted_prompt_cache is not None else {}
     else:
@@ -10808,6 +10913,7 @@ def _apply_setup_batch(
                 _version_preflighted=True,
                 _protected_selection=protected_selection,
                 _selection_transaction_snapshot=setup_snapshot,
+                _batch_summary=batch_summary,
             )
         except Exception as exc:
             try:
@@ -10836,8 +10942,7 @@ def _apply_setup_batch(
     if not applied:
         raise click.ClickException("no connectors were configured — see errors above")
 
-    click.echo()
-    click.echo(f"  ✓ Staged desired config for {len(applied)} connector(s): {', '.join(applied)}")
+    _echo_batch_setup_summary(applied, batch_summary, restart=restart)
 
     # Restart handling: the bare batch owns one narrow result-callback marker.
     # Its default restart must start or restart the gateway and verify every
@@ -13492,6 +13597,8 @@ def _restart_services(
     connectors: list[str] | None = None,
     wait_for_connector_ready: bool = False,
     start_if_stopped: bool = True,
+    title: str = "Restarting services",
+    summary_exclude: frozenset[str] = frozenset(),
 ) -> None:
     """Restart defenseclaw-gateway and, when OpenClaw is the selected
     connector, restart the OpenClaw gateway too so it picks up the
@@ -13512,8 +13619,12 @@ def _restart_services(
     success while the gateway is down and hooks fail open.
 
     ``start_if_stopped=False`` preserves the setup result callback's policy
-    of never starting a gateway the operator deliberately stopped."""
-    ux.section("Restarting services")
+    of never starting a gateway the operator deliberately stopped.
+
+    ``title`` labels the step (a rollback restart says so, GAP-1808).
+    ``summary_exclude`` names connectors left out of the closing roster line
+    because they stay disabled (GAP-1809); the restart itself is unchanged."""
+    ux.section(title)
 
     # Names of services whose restart failed; non-empty ⇒ fail the command.
     failed: list[str] = []
@@ -13629,7 +13740,9 @@ def _restart_services(
         click.echo()
         _fail_if_restart_failed(failed)
     if connector != "openclaw" and len(hook_multi) > 1:
-        names = ", ".join(sorted(hook_multi))
+        names = ", ".join(sorted(c for c in hook_multi if c not in summary_exclude))
+        shown = [c for c in hook_multi if c not in summary_exclude]
+        roster = f"{_count_label(len(shown))} ({names})"
         if "omnigent" in hook_multi:
             registration_state = (
                 "DefenseClaw gateway registration is ready"
@@ -13644,21 +13757,21 @@ def _restart_services(
             )
         elif connector_runtime_pending_reload == "opencode":
             ux.subhead(
-                f"{len(hook_multi)} hook connectors ({names}): protected registrations are current "
+                f"{roster}: protected registrations are current "
                 "on the sidecar API port; OpenCode loads the managed plugin when it starts, so restart "
                 "any OpenCode session that is open now. No proxy listener — each talks "
                 "directly to its native upstream."
             )
         elif connector_runtime_pending_reload:
             ux.subhead(
-                f"{len(hook_multi)} hook connectors ({names}): protected registrations are current "
+                f"{roster}: protected registrations are current "
                 "on the sidecar API port; a Hermes session that is open now keeps its old hooks "
                 "until it is restarted. No proxy listener — each talks "
                 "directly to its native upstream."
             )
         else:
             ux.subhead(
-                f"{len(hook_multi)} hook connectors ({names}): enforcement via native "
+                f"{roster}: enforcement via native "
                 f"lifecycle surfaces on the sidecar API port. No proxy listener — each talks directly "
                 f"to its native upstream."
             )
@@ -13720,6 +13833,10 @@ def _pending_reload_hint(connector: str) -> str:
     if connector == "hermes":
         return "restart any open Hermes session so it loads the DefenseClaw hooks"
     return f"restart any open {connector or 'agent'} session so it loads the DefenseClaw hooks"
+
+
+def _count_label(count: int) -> str:
+    return f"{count} hook connector" + ("" if count == 1 else "s")
 
 
 class _GatewayRestartFailed(click.ClickException):

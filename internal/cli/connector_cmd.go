@@ -53,19 +53,14 @@ var connectorCmd = &cobra.Command{
 	Short: "Inspect and manage individual connector lifecycle state",
 	Long: `Low-level connector lifecycle commands.
 
-These subcommands operate on a single connector adapter (openclaw, codex,
-claudecode, amp, zeptoclaw, or any plugin connector) and intentionally bypass
-the interactive 'defenseclaw setup' flow. They are primarily intended for
-the 'defenseclaw uninstall' flow and for operator debugging when a
-connector switch leaves residual state behind.
+These subcommands work on one connector (for example claudecode, codex,
+cursor or opencode) and bypass the interactive 'defenseclaw setup' flow.
+'defenseclaw uninstall' uses them, and they help clean up state that a
+connector switch left behind.
 
-Each subcommand accepts an optional --connector flag. When omitted, the
-active connector is resolved in this order:
-
-  1. <data-dir>/active_connector.json (written by the sidecar after a
-     successful connector boot).
-  2. guardrail.connector from defenseclaw.yaml.
-  3. "openclaw" (legacy default).
+Each subcommand accepts --connector. When omitted, it uses the active
+connector: the one the gateway last started, else guardrail.connector in
+config.yaml. 'defenseclaw guardrail status' lists the connector names.
 `,
 }
 
@@ -187,7 +182,7 @@ Pass --json for a structured payload suitable for piping into 'jq'.`,
 
 func init() {
 	connectorCmd.PersistentFlags().StringVar(&connectorFlagName, "connector", "",
-		"Connector name (default: the active connector; see defenseclaw connector list)")
+		"Connector name (default: the active connector; 'defenseclaw guardrail status' lists them)")
 	connectorCmd.PersistentFlags().BoolVar(&connectorFlagJSON, "json", false,
 		"Emit machine-readable JSON instead of the human-readable view")
 	connectorCmd.PersistentFlags().StringVar(&connectorFlagDataDir, "data-dir", "",

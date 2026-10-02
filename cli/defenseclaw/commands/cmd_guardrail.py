@@ -671,6 +671,10 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
                 f"{_connector_label(name)} ({name}) is upstream-enforced fail-open"
                 f" (configured provenance: {configured_cfm})"
             )
+        elif _cursor_stays_fail_closed(gc, name):
+            # Cursor hooks always fail closed in action mode, whatever is
+            # saved; show that, like `guardrail fail-mode` (GAP-1717).
+            cfm = "closed"
         # Per-connector on/off: a connector turned off via
         # `guardrail disable --connector X` is reported as disabled so the
         # roster never implies it is enforcing when its hooks have been torn
@@ -963,24 +967,36 @@ def enable_cmd(
         # Lazy import via module: see disable_cmd above for rationale.
         from defenseclaw.commands import cmd_setup
 
+        # The boot loop runs Connector.Setup for every active connector that
+        # is not disabled on its own (`guardrail disable --connector X` is
+        # kept); report exactly those (GAP-1809).
+        _actives = _active_connector_set(app.cfg, connector)
+        _kept_off = [
+            name for name in _actives if hasattr(gc, "effective_enabled") and not gc.effective_enabled(name)
+        ]
+        _set_up = [name for name in _actives if name not in _kept_off]
         cmd_setup._restart_services(
             app.cfg.data_dir,
             app.cfg.gateway.host,
             app.cfg.gateway.port,
             connector=connector,
-            connectors=_active_connector_set(app.cfg, connector),
+            connectors=_actives,
+            **({"summary_exclude": frozenset(_kept_off)} if _kept_off else {}),
         )
-        # The boot loop runs Connector.Setup for EVERY active connector;
-        # report them all in a multi-connector install.
-        _actives = _active_connector_set(app.cfg, connector)
-        if len(_actives) > 1:
+        if len(_set_up) > 1:
             ux.ok(
-                f"connector setup complete for {len(_actives)} connectors: "
-                + ", ".join(_actives),
+                f"connector setup complete for {len(_set_up)} connectors: "
+                + ", ".join(_set_up),
                 indent="  ",
             )
-        else:
-            ux.ok(f"{_connector_label(connector)} connector setup complete", indent="  ")
+        elif _set_up:
+            ux.ok(f"{_connector_label(_set_up[0])} connector setup complete", indent="  ")
+        for name in _kept_off:
+            ux.subhead(
+                f"{_connector_label(name)} ({name}) stays disabled; turn it on with: "
+                f"defenseclaw guardrail enable --connector {name}",
+                indent="  ",
+            )
         click.echo()
 
     _log_guardrail_action(
@@ -1423,7 +1439,12 @@ def fail_mode_cmd(
         _open_names: list[str] = []
         for _name in _actives:
             _eff = gc.effective_hook_fail_mode(_name) if hasattr(gc, "effective_hook_fail_mode") else current
-            if normalize_connector(_name) in _RUNTIME_FAIL_MODE_CONNECTORS:
+            _enforcing = gc.enabled and (gc.effective_enabled(_name) if hasattr(gc, "effective_enabled") else True)
+            if not _enforcing:
+                # A disabled connector has no hooks, so it has no fail mode and
+                # its missing hooks are not drift (GAP-1717, like GAP-1648).
+                _eff = "disabled (no hooks)"
+            elif normalize_connector(_name) in _RUNTIME_FAIL_MODE_CONNECTORS:
                 _state = resolve_connector_fail_mode(app.cfg, _name)
                 _eff = _state.runtime or "unknown"
                 if _state.drift:
@@ -1437,15 +1458,18 @@ def fail_mode_cmd(
             _eff_disp = ux._style(_eff, fg="yellow") if _eff == "closed" else _eff
             click.echo(f"      - {_connector_label(_name)} ({_name}): {_eff_disp}")
         click.echo()
+        # One rule per view: each connector follows the value shown above
+        # (GAP-1717: a global "ALLOW" line contradicted Cursor's "closed").
         if current == "open":
             ux.subhead(
-                "Invalid, unauthorized, incomplete, and unreachable responses ALLOW the tool/prompt.",
+                "Invalid, unauthorized, incomplete, and unreachable gateway responses ALLOW the "
+                "tool/prompt for connectors that are open above and BLOCK it for those that are closed.",
                 indent="  ",
             )
             click.echo(f"  {ux.dim('Switch to closed:')} defenseclaw guardrail fail-mode closed")
         else:
             ux.subhead(
-                "Invalid, unauthorized, incomplete, and unreachable responses BLOCK connectors "
+                "Invalid, unauthorized, incomplete, and unreachable gateway responses BLOCK connectors "
                 "that are closed above; Hermes remains fail-open.",
                 indent="  ",
             )
@@ -1454,12 +1478,6 @@ def fail_mode_cmd(
                 # open although the global default is closed.
                 _warn_still_fail_open(gc, _open_names)
             click.echo(f"  {ux.dim('Switch to open:')}   defenseclaw guardrail fail-mode open")
-        click.echo()
-        ux.subhead(
-            "Invalid, unauthorized, incomplete, and unreachable gateway responses "
-            "follow each connector's effective fail mode.",
-            indent="  ",
-        )
         click.echo()
         return
 
@@ -2789,12 +2807,41 @@ def _gateway_running(app: AppContext) -> bool:
         return False
 
 
+_STOPPED_NOTE_KEY = "defenseclaw.guardrail.stopped_gateway_note"
+
+
 def _note_applies_on_start(what: str) -> None:
-    """A saved change for a stopped gateway, which is never started here (GAP-1370)."""
-    ux.ok(
-        f"Saved. The gateway is not running, so it was left stopped; the {what} applies "
-        "once it starts: defenseclaw-gateway start",
-        indent="  ",
+    """A saved change for a stopped gateway, which is never started here (GAP-1370).
+
+    The audit step that follows every caller prints this together with the
+    skipped audit event, so the user reads one note instead of two overlapping
+    "gateway isn't running" lines (GAP-1718).
+    """
+    ctx = click.get_current_context(silent=True)
+    if ctx is None:
+        _echo_stopped_gateway_note(what, audit_skipped=False)
+        return
+    ctx.meta[_STOPPED_NOTE_KEY] = what
+
+
+def _pop_stopped_gateway_note() -> str | None:
+    ctx = click.get_current_context(silent=True)
+    return ctx.meta.pop(_STOPPED_NOTE_KEY, None) if ctx is not None else None
+
+
+def _echo_stopped_gateway_note(what: str | None, *, audit_skipped: bool) -> None:
+    if not what:
+        click.echo(
+            "  ⚠ The gateway isn't running, so the audit event was not recorded; "
+            "the change applies when it starts (defenseclaw-gateway start).",
+            err=True,
+        )
+        return
+    tail = "; the audit event was not recorded" if audit_skipped else ""
+    click.echo(
+        f"  ⚠ The gateway isn't running, so it was left stopped: the {what} applies when it starts "
+        f"(defenseclaw-gateway start){tail}.",
+        err=True,
     )
 
 
@@ -2837,18 +2884,20 @@ def _log_guardrail_change(app: AppContext, operation: str, details: str) -> None
     """
     from defenseclaw.logger import CanonicalObservabilityError, CanonicalObservabilityUnavailableError
 
+    pending = _pop_stopped_gateway_note()
     if not app.logger:
+        if pending:
+            _echo_stopped_gateway_note(pending, audit_skipped=False)
         return
     try:
         app.logger.log_config_change(operation, details)
     except CanonicalObservabilityUnavailableError:
-        click.echo(
-            "  ⚠ Change saved. The gateway isn't running, so the audit event was not recorded; "
-            "it loads the change when it starts (defenseclaw-gateway start).",
-            err=True,
-        )
+        _echo_stopped_gateway_note(pending, audit_skipped=True)
+        return
     except CanonicalObservabilityError as exc:
         click.echo(f"  ⚠ Change saved, but the gateway did not confirm the audit event ({exc}).", err=True)
+    if pending:
+        _echo_stopped_gateway_note(pending, audit_skipped=False)
 
 
 def _log_guardrail_action(app: AppContext, action: str, details: str) -> None:
@@ -2860,18 +2909,20 @@ def _log_guardrail_action(app: AppContext, action: str, details: str) -> None:
     """
     from defenseclaw.logger import CanonicalObservabilityError, CanonicalObservabilityUnavailableError
 
+    pending = _pop_stopped_gateway_note()
     if not app.logger:
+        if pending:
+            _echo_stopped_gateway_note(pending, audit_skipped=False)
         return
     try:
         app.logger.log_action(action, "config", details)
     except CanonicalObservabilityUnavailableError:
-        click.echo(
-            "  ⚠ Change saved. The gateway isn't running, so the audit event was not recorded; "
-            "it loads the change when it starts (defenseclaw-gateway start).",
-            err=True,
-        )
+        _echo_stopped_gateway_note(pending, audit_skipped=True)
+        return
     except CanonicalObservabilityError as exc:
         click.echo(f"  ⚠ Change saved, but the gateway did not confirm the audit event ({exc}).", err=True)
+    if pending:
+        _echo_stopped_gateway_note(pending, audit_skipped=False)
 
 
 _restart_option = click.option(

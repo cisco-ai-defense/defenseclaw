@@ -25,6 +25,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from click.testing import CliRunner
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from defenseclaw.commands import cmd_config
@@ -167,7 +169,7 @@ class ValidateConfigTests(unittest.TestCase):
             env.config_path.write_text("config_version: 8\nopenshell:\n  binary: bin/openshell\n", encoding="utf-8")
             with patch.object(cmd_config, "inspect_v8_config", side_effect=placed):
                 res = cmd_config.validate_config()
-            self.assertEqual(res.errors, ["openshell.llm: unknown field. All fields: defenseclaw config reference"])
+            self.assertEqual(res.errors, ["openshell.llm: unknown field. All fields: defenseclaw config reference --format json-schema"])
 
     def test_enum_refusal_names_line_value_and_allowed_values(self):
         # GAP-1499: no "candidate field=$...; reason=[config_schema_invalid]" record.
@@ -186,10 +188,30 @@ class ValidateConfigTests(unittest.TestCase):
         self.assertEqual(
             res.errors,
             [
-                'line 3: guardrail.mode is "enforce-everything"; allowed values: observe, action. '
-                "All fields: defenseclaw config reference"
+                'line 3: guardrail.mode is "enforce-everything"; allowed values: observe, action.'
             ],
         )
+
+    def test_reference_yaml_drops_generator_header_and_help_names_json_schema(self):
+        # GAP-1661: the YAML reference covers only observability; the help says
+        # where every field is, and the output carries no repository paths.
+        generated = (
+            "# DEFENSECLAW CONFIGURATION v8 \u2014 OBSERVABILITY REFERENCE\n#\n"
+            "# GENERATED FILE. DO NOT EDIT.\n"
+            "# Canonical schema: schemas/config/v8/defenseclaw-config.schema.json\n"
+            "# Generator: scripts/generate_observability_v8_reference.py\n#\n"
+            "# This is the complete source-config surface.\nconfig_version: 8\n"
+        )
+        runner = CliRunner()
+        with patch.object(cmd_config, "config_v8_reference", return_value=generated):
+            res = runner.invoke(cmd_config.config_reference, [])
+        self.assertEqual(res.exit_code, 0, res.output)
+        self.assertNotIn("DO NOT EDIT", res.output)
+        self.assertNotIn("schemas/config", res.output)
+        self.assertNotIn("#\n#\n", res.output)
+        self.assertIn("config_version: 8", res.output)
+        help_text = runner.invoke(cmd_config.config_reference, ["--help"]).output
+        self.assertIn("json-schema prints the schema of every", help_text)
 
     def test_yaml_syntax_refusal_names_the_bad_line_and_parser_reason(self):
         # GAP-1430: validate named line 119 and a generic list for a bad line 118.
