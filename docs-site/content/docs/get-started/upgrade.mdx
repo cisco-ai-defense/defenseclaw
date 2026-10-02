@@ -90,8 +90,15 @@ installed. Every path keeps your configuration and data.
   (its program folder, sign-in start entry, Add/Remove Programs entry, and
   `PATH` entry). The old program files are kept in
   `~/.defenseclaw/previous/legacy-setup`.
-- To go back to 0.8.x afterwards, run `defenseclaw rollback`. To return to 1.x
-  from there, run the install command again.
+- To go back to 0.8.x afterwards, run `defenseclaw rollback`. 0.8.x has no
+  rollback command, so to return to 1.x from there, run the command the
+  rollback prints:
+
+  ```bash
+  bash ~/.defenseclaw/previous/installer/install.sh --rollback
+  ```
+
+  Running the install command again also works.
 
 ## Rollback
 
@@ -101,7 +108,15 @@ were at upgrade time. Anything written since then moves into
 `~/.defenseclaw/previous` and comes back if you roll forward; if you upgrade
 again instead, it is kept in `~/.defenseclaw/backups/rolled-back-<version>-<time>`.
 One previous install is kept, and rolling back needs no network. Reinstalling
-the same version does not replace the rollback copy.
+the same version does not replace the rollback copy. Running it again rolls
+forward (its header then reads `Rolling forward to DefenseClaw <version>`).
+
+The rollback starts the restored gateway when it was running and waits for it.
+A 0.8.x gateway on a large audit database can take a few minutes to start, so
+the rollback waits up to 3 minutes for it. If the gateway does not come up,
+the rollback says so (`Now running DefenseClaw <version>, but its gateway is
+not up`) and exits `1`: the swap is done, but agent hooks are not guarded
+until `defenseclaw-gateway start` succeeds.
 
 If an upgrade or rollback is interrupted (the terminal closes or the machine
 loses power), run the same command again. The installer first restores the
