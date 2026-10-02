@@ -570,8 +570,23 @@ PRIVATE_IP_PATTERN: re.Pattern[str] = re.compile(
     r"(?:^|\b)(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|127\.\d{1,3}\.\d{1,3}\.\d{1,3})(?:\b|$)"
 )
 
+# An internal host is hostname-shaped: ``localhost``, an internal word in a
+# URL's host, or a quoted host with an internal suffix (``"db.corp"``). Bare
+# identifiers (``local = ...``, ``Preset.PRIVATE``, ``corp=%s``) are not hosts,
+# and ``.get(`` / ``.post(`` count only on an HTTP client, not on a dict
+# (GAP-1982).
+_INTERNAL_HOST = (
+    r"(?:\blocalhost\b"
+    r"|://[^\s/\"'`]*\b(?:internal|corp|local|intranet|private)\b"
+    r"|[\"'`/@][\w-]+(?:\.[\w-]+)*\.(?:internal|corp|local|intranet|lan|localdomain)\b)"
+)
+_NETWORK_CALL = (
+    r"(?:\b(?:fetch|https?|requests?|urlopen|axios|httpx|aiohttp|curl|wget)\b"
+    r"|(?<![\w.])(?:get|post)\b"
+    r"|\b(?:requests|httpx|axios|session|client|http)\.(?:get|post)\b)"
+)
 INTERNAL_HOSTNAME_PATTERNS: re.Pattern[str] = re.compile(
-    r"\b(?:localhost|internal|corp|local|intranet|private)\b.*\b(?:fetch|http|request|get|post)\b|\b(?:fetch|http|request|get|post)\b.*\b(?:localhost|internal|corp|local|intranet|private)\b",
+    rf"{_INTERNAL_HOST}.*{_NETWORK_CALL}|{_NETWORK_CALL}.*{_INTERNAL_HOST}",
     re.IGNORECASE,
 )
 
