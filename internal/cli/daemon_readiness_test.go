@@ -513,12 +513,21 @@ func TestGatewaySnapshotReadyRetriesEventHistoryIOWhenThePlatformDoes(t *testing
 	if !strings.Contains(err.Error(), "event_history=sqlite_write_failed/full): audit events cannot be written because the disk holding the audit database is full") {
 		t.Fatalf("error = %v, want the plain cause and SQLite class", err)
 	}
+	// GAP-1790: a write that timed out on a large audit.db is waited out on
+	// every OS (a macOS start failed this way, the next start worked); an
+	// I/O error stays fatal outside Windows.
 	startupRetriesSQLiteIO = false
 	snap.Telemetry.Details["event_history_last_sqlite_class"] = "deadline"
 	snap.Telemetry.Details["event_history_last_sqlite_primary_code"] = float64(9)
+	ready, err = gatewaySnapshotReady(snap, daemonReadinessRequirements{guardrailEnabled: true, telemetryEnabled: true})
+	if ready || err != nil {
+		t.Fatalf("deadline elsewhere readiness = %v, error = %v; want retryable not-ready", ready, err)
+	}
+	snap.Telemetry.Details["event_history_last_sqlite_class"] = "io"
+	snap.Telemetry.Details["event_history_last_sqlite_primary_code"] = float64(10)
 	_, err = gatewaySnapshotReady(snap, daemonReadinessRequirements{guardrailEnabled: true, telemetryEnabled: true})
-	if err == nil || !strings.Contains(err.Error(), "event_history=sqlite_write_failed/deadline") {
-		t.Fatalf("deadline elsewhere = %v; want an immediate failure naming the class", err)
+	if err == nil || !strings.Contains(err.Error(), "event_history=sqlite_write_failed/io") {
+		t.Fatalf("io elsewhere = %v; want an immediate failure naming the class", err)
 	}
 }
 

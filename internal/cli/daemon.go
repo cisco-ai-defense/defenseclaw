@@ -2298,8 +2298,10 @@ func telemetryReadinessRetryableSQLiteContention(details map[string]interface{})
 	transientIO := startupRetriesSQLiteIO && class == "io" && primary == 10
 	// A write that ran out of time behind a long hold on a large audit.db
 	// (class deadline, primary 0 or SQLITE_INTERRUPT) also clears after the
-	// writer's next commit (GAP-1519, GAP-1646).
-	transientDeadline := startupRetriesSQLiteIO && class == "deadline" && (primary == 0 || primary == 9)
+	// writer's next commit (GAP-1519, GAP-1646). A large audit.db is slow on
+	// every OS, not only under a Windows antivirus scan: a macOS start with a
+	// 1.3 GB audit.db failed this way and the next start worked (GAP-1790).
+	transientDeadline := class == "deadline" && (primary == 0 || primary == 9)
 	if !busyLocked && !transientIO && !transientDeadline {
 		return false
 	}
