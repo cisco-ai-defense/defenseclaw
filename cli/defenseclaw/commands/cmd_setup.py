@@ -9165,10 +9165,13 @@ def _apply_hook_connector_setup(
             _rollback_failed_connector_application(app, setup_snapshot, exc)
         if connector == "hermes":
             click.echo("  ✓ Hermes on-disk hook registration staged")
-            ux.warn(
-                "Hermes callbacks are not live-verified: reload or restart every running "
-                "Hermes CLI, TUI, gateway, desktop, and service host before relying on registration changes."
-            )
+            if _hermes_hosts_idle():
+                click.echo("  ✓ No Hermes host is running, so the next one starts with the DefenseClaw hooks")
+            else:
+                ux.warn(
+                    "Hermes callbacks are not live-verified: reload or restart every running "
+                    "Hermes CLI, TUI, gateway, desktop, and service host before relying on registration changes."
+                )
         elif connector == "omnigent":
             click.echo("  ✓ OmniGent on-disk policy registration staged")
             ux.warn(
@@ -9300,6 +9303,17 @@ def _print_connector_observability_banner(connector: str, *, mode: str = "observ
     click.echo()
 
 
+def _hermes_hosts_idle() -> bool:
+    """True when no Hermes host runs as this account (doctor's check).
+
+    Hermes reads its hooks only at startup, so with no host running there is
+    nothing to reload (GAP-1339). Unknown (Windows, ps failure) is not idle.
+    """
+    from defenseclaw.commands import cmd_doctor
+
+    return cmd_doctor._hermes_host_running() is False
+
+
 def _print_connector_next_steps(connector: str, *, os_name: str | None = None) -> None:
     """Print native commands for inspecting one connector's activity."""
 
@@ -9312,7 +9326,7 @@ def _print_connector_next_steps(connector: str, *, os_name: str | None = None) -
         "(start it with defenseclaw-gateway start if it is stopped)"
     )
     click.echo("    • Optionally launch the bundled local stack: defenseclaw setup local-observability up")
-    if connector == "hermes":
+    if connector == "hermes" and not _hermes_hosts_idle():
         click.echo(
             "    • Reload/restart every running Hermes CLI, TUI, gateway, desktop, and service host; "
             "DefenseClaw does not manage Hermes PortableGit terminal behavior"
@@ -9423,7 +9437,12 @@ def _print_observability_summary(
                 ("hook failure posture", "upstream fail-open"),
                 ("native ask/approve", "unsupported"),
                 ("native OTel", "unsupported; hook-derived audit only"),
-                ("running Hermes hosts", "unverified; reload/restart required"),
+                (
+                    "running Hermes hosts",
+                    "none; the next one starts with the DefenseClaw hooks"
+                    if _hermes_hosts_idle()
+                    else "unverified; reload/restart required",
+                ),
                 ("validation evidence", "not recorded; live=false"),
             ]
         )
