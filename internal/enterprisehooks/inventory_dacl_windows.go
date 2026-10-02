@@ -76,11 +76,17 @@ var inventoryDACLGuardianOwnedDotdirs = map[string][]string{
 // files (.copilot\hooks, AppData\Roaming\devin\config.json) put those
 // folders on the guardian's protected path, so the service sees their
 // install folders instead, Copilot CLI's package cache and Devin CLI's
-// install (GAP-1739).
+// install (GAP-1739). Amp keeps its settings in .config\amp, which stays
+// protected for a user enrolled for Amp, so the service sees its npm install
+// folder (GAP-1963). Cursor's hooks are machine-level on a managed computer,
+// so a user without ~\.cursor\mcp.json is seen by cursor-agent's install
+// folder (GAP-1739).
 var inventoryDACLListOnlyDirs = []string{
 	`AppData\Local\Kiro-Cli`,
 	`AppData\Local\copilot\pkg`,
 	`AppData\Local\devin\cli`,
+	`AppData\Roaming\npm\node_modules\@ampcode\cli`,
+	`AppData\Local\cursor-agent`,
 }
 
 // gatewayServiceNamePattern matches the certification-scoped gateway service

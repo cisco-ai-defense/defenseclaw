@@ -270,6 +270,7 @@
       "config_paths": [
         "~/.cursor/hooks.json",
         "~/.cursor/mcp.json",
+        "$LOCALAPPDATA/cursor-agent",
         ".cursor/mcp.json",
         ".cursor/rules",
         ".cursor/skills",
@@ -753,6 +754,7 @@
       "config_paths": [
         "~/.config/amp/settings.json",
         "~/.config/amp/settings.jsonc",
+        "$APPDATA/npm/node_modules/@ampcode/cli",
         "/Library/Application Support/ampcode/managed-settings.json",
         "/etc/ampcode/managed-settings.json",
         "$ProgramData/ampcode/managed-settings.json",

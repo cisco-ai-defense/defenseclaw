@@ -14,6 +14,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -148,5 +152,110 @@ func TestEnterpriseDiscoveryShowsRuntimePlanes(t *testing.T) {
 	if err := writeEnterpriseDiscovery(&down, filepath.Join(t.TempDir(), "missing"), "", false); err != nil ||
 		!strings.Contains(down.String(), "Runtime discovery: not read: the gateway at 127.0.0.1:18970 did not answer") {
 		t.Fatalf("gateway down = %v:\n%s", err, down.String())
+	}
+}
+
+// GAP-1144: root's discovery view read root's own ~/.defenseclaw/config.yaml
+// and never reached the managed gateway. The runtime read now pins the
+// managed deployment's config first; this runs the real fetch against a
+// gateway that only the pinned config and token reach.
+func TestEnterpriseDiscoveryRuntimeReadsTheManagedDeployment(t *testing.T) {
+	const token = "dc-test-discovery-token"
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/ai-usage/runtime" || r.Header.Get("Authorization") != "Bearer "+token {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		_, _ = w.Write([]byte(`{"enabled":true,"scanned_at":"2026-10-02T23:00:00Z","planes":[{"plane":"a","name":"inference heartbeat","available":true,"running":true,"mechanism":"ps(1)"}],"findings":[]}`))
+	}))
+	t.Cleanup(gateway.Close)
+	_, port, _ := net.SplitHostPort(gateway.Listener.Addr().String())
+
+	dataDir := t.TempDir()
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	raw := fmt.Sprintf("config_version: 8\ndata_dir: %s\ngateway:\n  api_bind: 127.0.0.1\n  api_port: %s\n", filepath.ToSlash(dataDir), port)
+	if err := os.WriteFile(configPath, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, ".env"), []byte("DEFENSECLAW_GATEWAY_TOKEN="+token+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DEFENSECLAW_CONFIG", "")
+	t.Setenv("DEFENSECLAW_HOME", "")
+	t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", "")
+	previousCfg, previousPin := cfg, enterpriseDiscoveryPinManagedEnv
+	t.Cleanup(func() { cfg, enterpriseDiscoveryPinManagedEnv = previousCfg, previousPin })
+	pinned := false
+	enterpriseDiscoveryPinManagedEnv = func() error {
+		pinned = true
+		_ = os.Setenv("DEFENSECLAW_CONFIG", configPath)
+		return os.Setenv("DEFENSECLAW_HOME", dataDir)
+	}
+
+	view, err := fetchEnterpriseDiscoveryRuntime()
+	if err != nil || !pinned {
+		t.Fatalf("runtime fetch = %v (pinned %v)", err, pinned)
+	}
+	if view.Gateway != "127.0.0.1:"+port || !view.Enabled || len(view.Planes) != 1 || view.Planes[0].Mechanism != "ps(1)" {
+		t.Fatalf("runtime view = %+v", view)
+	}
+}
+
+// GAP-1964: managed Windows had no `enterprise windows discovery`. The
+// gateway service scans every profile there, so the view groups its own
+// report by the account each signal was found in.
+func TestWindowsEnterpriseDiscoveryGroupsTheGatewayReportByAccount(t *testing.T) {
+	stubEnterpriseDiscoveryRuntime(t, nil, errors.New("stub"))
+	previous := enterpriseDiscoveryGatewayReport
+	t.Cleanup(func() { enterpriseDiscoveryGatewayReport = previous })
+	scanned := time.Date(2026, 10, 2, 22, 0, 0, 0, time.UTC)
+	enterpriseDiscoveryGatewayReport = func() (enterpriseGatewayAIUsage, string, error) {
+		return enterpriseGatewayAIUsage{Enabled: true, Summary: inventory.AIDiscoverySummary{ScannedAt: scanned, Result: "ok"}, Signals: []inventory.AISignal{
+			{Name: "Amp", Category: "supported_connector", SupportedConnector: "amp", Detector: "config", UserName: "dcw-std2", UserID: "S-1-5-21-2", LastSeen: scanned},
+			{Name: "dccert-mcp", Category: "mcp_server", SupportedConnector: "codex", UserName: "dcw-std1", UserID: "S-1-5-21-1", LastSeen: scanned},
+			{Name: "dccert-skill", Category: "skill", UserName: "dcw-std1", UserID: "S-1-5-21-1", LastSeen: scanned},
+			{Name: "Ollama", Category: "local_ai_app", LastSeen: scanned},
+		}}, "127.0.0.1:18970", nil
+	}
+
+	var summary bytes.Buffer
+	if err := writeWindowsEnterpriseDiscovery(&summary, "", false); err != nil {
+		t.Fatal(err)
+	}
+	got := summary.String()
+	for _, want := range []string{
+		"AI Discovery inventory from the gateway's scan of each user profile (gateway 127.0.0.1:18970)",
+		"dcw-std1: scanned 2026-10-02T22:00:00Z, result ok, 2 signal(s)", "mcp_server 1, skill 1",
+		"dcw-std2: scanned", "supported_connector 1", "machine-wide (no account): scanned",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("summary lacks %q:\n%s", want, got)
+		}
+	}
+	if strings.Index(got, "dcw-std1") > strings.Index(got, "dcw-std2") {
+		t.Fatalf("accounts are not sorted:\n%s", got)
+	}
+
+	var one bytes.Buffer
+	if err := writeWindowsEnterpriseDiscovery(&one, "DCW-STD1", false); err != nil {
+		t.Fatal(err)
+	}
+	if got := one.String(); !strings.Contains(got, "dccert-mcp") || strings.Contains(got, "Amp") {
+		t.Fatalf("--user dcw-std1 output:\n%s", got)
+	}
+
+	var asJSON bytes.Buffer
+	if err := writeWindowsEnterpriseDiscovery(&asJSON, "S-1-5-21-2", true); err != nil {
+		t.Fatal(err)
+	}
+	var report enterpriseDiscoveryReport
+	if err := json.Unmarshal(asJSON.Bytes(), &report); err != nil || len(report.Accounts) != 1 ||
+		report.Accounts[0].SID != "S-1-5-21-2" || report.Accounts[0].UID != nil || report.Gateway != "127.0.0.1:18970" {
+		t.Fatalf("--json --user <sid> = %s (%v)", asJSON.String(), err)
+	}
+
+	if err := writeWindowsEnterpriseDiscovery(&bytes.Buffer{}, "nobody", false); err == nil || !strings.Contains(err.Error(), `no AI Discovery signal for account "nobody"`) {
+		t.Fatalf("an unknown account = %v", err)
 	}
 }

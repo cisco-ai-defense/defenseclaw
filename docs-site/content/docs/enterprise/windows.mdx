@@ -423,6 +423,32 @@ yet; it takes the permissions of its folder, so write it to a folder only
 administrators can read. Treat it as sensitive: it can hold prompt and tool
 content.
 
+## Review AI Discovery
+
+With `ai_discovery.enabled: true` in the deployment config, the gateway
+service scans each user profile for AI agents and apps, skills, MCP servers,
+plugins and running AI processes, and sends what it finds to your
+observability destinations. To read the inventory on the computer, run the
+read-only `discovery` view from an elevated Administrator prompt, or as
+LocalSystem from an MDM script:
+
+```powershell title="Elevated Administrator prompt"
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows discovery
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows discovery --user <account> --json
+```
+
+It lists each account's signals by category (`--user` lists one account's
+signals; it takes the account name or SID), then the runtime discovery
+planes (`ai_discovery.runtime`) with their state, last poll and findings.
+Standard accounts cannot run it.
+
+Skills and MCP servers are inventoried, not scanned: a managed deployment
+does not run the skill or MCP scanners. The inventory names each skill and
+MCP server per user, and its `ai_component` and per-entry skill and MCP
+records go to your observability destinations. See
+[AI Discovery](/docs/ai-discovery#per-user-scans-in-standalone-enterprise)
+for the folders the service may read in each profile.
+
 ## Inspect machine policy
 
 Run the policy commands from an elevated Administrator prompt, or as

@@ -124,20 +124,21 @@ func classifyWindowsProcesses(procs []processInfo, catalog []AISignature) {
 			procs[i].Connector = "cursor"
 		}
 	}
-	// cursor-agent's worker-server is a second cursor-agent node.exe started
-	// by the first one: fold it into its parent so one run is one Cursor
-	// process (GAP-1849).
-	var cursorHelpers []int
+	// A helper an agent starts from its own executable is part of that run:
+	// cursor-agent's worker-server is a second cursor-agent node.exe
+	// (GAP-1849) and Amp's plugin runtimes are amp.exe children of amp.exe
+	// (GAP-1965). Fold each into its parent so one run is one process.
+	var helpers []int
 	for i := range procs {
-		if procs[i].Connector != "cursor" || normalizedWindowsProcessName(procs[i].Comm) != "node" {
+		if procs[i].Connector == "" {
 			continue
 		}
-		if parent := byPID[procs[i].PPID]; parent != nil && parent.PID != procs[i].PID && parent.Connector == "cursor" &&
-			normalizedWindowsProcessName(parent.Comm) == "node" {
-			cursorHelpers = append(cursorHelpers, i)
+		if parent := byPID[procs[i].PPID]; parent != nil && parent.PID != procs[i].PID && parent.Connector == procs[i].Connector &&
+			normalizedWindowsProcessName(parent.Comm) == normalizedWindowsProcessName(procs[i].Comm) {
+			helpers = append(helpers, i)
 		}
 	}
-	for _, i := range cursorHelpers {
+	for _, i := range helpers {
 		procs[i].Connector = ""
 	}
 	for i := 0; i < len(procs); i++ {

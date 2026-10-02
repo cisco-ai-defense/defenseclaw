@@ -34,6 +34,11 @@ func TestServiceContextScanAttributesSignalsToProfileOwner(t *testing.T) {
 		filepath.Join(bob, "AppData", "Local", "copilot", "pkg"),
 		filepath.Join(alice, "AppData", "Local", "devin", "cli"),
 		filepath.Join(bob, "AppData", "Local", "devin", "cli"),
+		// Amp's npm install and cursor-agent's install (GAP-1963,
+		// GAP-1739): what the service sees when the guardian protects
+		// .config, and for a user without ~\.cursor\mcp.json.
+		filepath.Join(alice, "AppData", "Roaming", "npm", "node_modules", "@ampcode", "cli"),
+		filepath.Join(bob, "AppData", "Local", "cursor-agent"),
 	} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			t.Fatal(err)
@@ -54,7 +59,8 @@ func TestServiceContextScanAttributesSignalsToProfileOwner(t *testing.T) {
 	for _, sig := range catalog {
 		configPaths[sig.ID] = strings.Join(sig.ConfigPaths, "\n")
 	}
-	for id, want := range map[string]string{"kiro": "$LOCALAPPDATA/Kiro-Cli", "copilot": "$LOCALAPPDATA/copilot/pkg", "devin": "$LOCALAPPDATA/devin/cli"} {
+	for id, want := range map[string]string{"kiro": "$LOCALAPPDATA/Kiro-Cli", "copilot": "$LOCALAPPDATA/copilot/pkg", "devin": "$LOCALAPPDATA/devin/cli",
+		"amp": "$APPDATA/npm/node_modules/@ampcode/cli", "cursor": "$LOCALAPPDATA/cursor-agent"} {
 		if !strings.Contains(configPaths[id], want) {
 			t.Fatalf("catalog %s config paths %q do not name its install folder %s", id, configPaths[id], want)
 		}
@@ -66,6 +72,8 @@ func TestServiceContextScanAttributesSignalsToProfileOwner(t *testing.T) {
 			{ID: "kiro", Name: "Kiro", SupportedConnector: "kiro", ConfigPaths: []string{"~/.kiro/settings/cli.json", "$LOCALAPPDATA/Kiro-Cli"}},
 			{ID: "copilot", Name: "GitHub Copilot", SupportedConnector: "copilot", ConfigPaths: []string{"~/.copilot/config.json", "$LOCALAPPDATA/copilot/pkg"}},
 			{ID: "devin", Name: "Devin", SupportedConnector: "devin", ConfigPaths: []string{"$APPDATA/devin/config.json", "$LOCALAPPDATA/devin/cli"}},
+			{ID: "amp", Name: "Amp", SupportedConnector: "amp", ConfigPaths: []string{"~/.config/amp/settings.json", "$APPDATA/npm/node_modules/@ampcode/cli"}},
+			{ID: "cursor", Name: "Cursor", SupportedConnector: "cursor", ConfigPaths: []string{"~/.cursor/mcp.json", "$LOCALAPPDATA/cursor-agent"}},
 		},
 	}
 
@@ -82,6 +90,8 @@ func TestServiceContextScanAttributesSignalsToProfileOwner(t *testing.T) {
 		"copilot/bob":   "S-1-5-21-1-2-3-1002",
 		"devin/alice":   "S-1-5-21-1-2-3-1001",
 		"devin/bob":     "S-1-5-21-1-2-3-1002",
+		"amp/alice":     "S-1-5-21-1-2-3-1001",
+		"cursor/bob":    "S-1-5-21-1-2-3-1002",
 	}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("config signals by signature/user = %v, want %v", got, want)
