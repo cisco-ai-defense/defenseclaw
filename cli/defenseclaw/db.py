@@ -1257,6 +1257,31 @@ class Store:
         )
         return [{"severity": r[0], "title": r[1], "location": r[2] or ""} for r in cur.fetchall()]
 
+    def hook_details_for_alerts(self, alert_ids: list[str]) -> dict[str, list[str]]:
+        """Map alert IDs to the details of connector-hook rows of the same request.
+
+        A hook-rule finding row carries the rule but not the decision; the
+        connector-hook row written for the same request does.
+        """
+        ids = [alert_id for alert_id in alert_ids if alert_id]
+        columns, _tables = self._audit_projection_schema()
+        if not ids or "request_id" not in columns:
+            return {}
+        placeholders = ",".join("?" for _ in ids)
+        cur = self.db.execute(
+            f"""SELECT f.id, h.details
+               FROM audit_events AS f
+               JOIN audit_events AS h
+                 ON h.request_id = f.request_id AND h.action = 'connector-hook'
+               WHERE f.id IN ({placeholders}) AND COALESCE(f.request_id, '') <> ''
+               ORDER BY h.timestamp ASC, h.rowid ASC""",
+            ids,
+        )
+        out: dict[str, list[str]] = {}
+        for alert_id, details in cur.fetchall():
+            out.setdefault(alert_id, []).append(details or "")
+        return out
+
     # -- Actions --
     #
     # Connector scoping (SK-4): every method below takes a ``connector``
