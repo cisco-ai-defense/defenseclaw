@@ -116,3 +116,44 @@ func TestPrepareOpenCodePluginArtifactDestinationRecordsTheFoldersItCreates(t *t
 		t.Fatalf("the teardown must remove the empty plugin folder: %v", err)
 	}
 }
+
+// patchingConnector writes, besides its hook config, an agent file it lists
+// in AgentPaths (OpenCode's opencode.json in a home where OpenCode never ran).
+type patchingConnector struct {
+	createdDirsConnector
+	patched string
+}
+
+func (c *patchingConnector) AgentPaths(SetupOpts) AgentPaths {
+	return AgentPaths{PatchedFiles: []string{c.patched}}
+}
+
+func (c *patchingConnector) Setup(ctx context.Context, opts SetupOpts) error {
+	if err := os.MkdirAll(filepath.Dir(c.patched), 0o755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(c.patched, []byte("{}"), 0o600); err != nil {
+		return err
+	}
+	return c.createdDirsConnector.Setup(ctx, opts)
+}
+
+func TestSetupRecordingCreatedDirsRecordsPatchedFileParents(t *testing.T) {
+	home := t.TempDir()
+	dataDir := filepath.Join(home, ".defenseclaw")
+	conn := &patchingConnector{
+		createdDirsConnector: createdDirsConnector{stubConnector: stubConnector{name: "fake"}, config: filepath.Join(home, ".agent", "hooks.json")},
+		patched:              filepath.Join(home, ".config", "opencode", "opencode.json"),
+	}
+	if err := WithUserHomeDir(home, func() error {
+		return SetupRecordingCreatedDirs(context.Background(), conn, SetupOpts{DataDir: dataDir})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got := readWatcherCreatedDirs(filepath.Join(dataDir, watcherCreatedDirsFile)).Dirs
+	for _, want := range []string{filepath.Join(home, ".config"), filepath.Join(home, ".config", "opencode"), filepath.Join(home, ".agent")} {
+		if !slices.Contains(got, want) {
+			t.Fatalf("recorded %v, want it to list %s", got, want)
+		}
+	}
+}
