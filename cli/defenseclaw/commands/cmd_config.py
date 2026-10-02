@@ -373,32 +373,142 @@ def validate_config() -> ValidationResult:
 
 
 def _v8_failure_detail(cfg_path: str, exc: ConfigInspectError) -> str:
-    """The canonical validator's refusal, with the field when it names none.
+    """The canonical validator's refusal in plain words, with its line.
+
+    The Go decision stands; this only says it plainly (GAP-1430, GAP-1499):
+    the line, the field, the bad enum value and the allowed values, and the
+    command to run next, instead of the "candidate field=...; reason=[code]"
+    wire record.
 
     The Go helper reports a failure outside its schema pass (the runtime
     loader's checks, such as openshell.binary or an openshell.egress
     pattern) only as "configuration could not be compiled safely" at "$".
-    The Go decision stands; the Python mirror of those checks
-    (``load_validate_v8``, value-free) only says which field it is and what
-    it takes.
+    For those, the Python mirror (``load_validate_v8``, value-free) says
+    which field it is and what it takes.
     """
 
-    if exc.field_path != "$":
+    raw = _bounded_source(cfg_path)
+    if exc.field_path == "$":
+        if raw is None:
+            return str(exc)
+        syntax = _yaml_syntax_detail(raw)
+        if syntax:
+            return syntax
+        try:
+            load_validate_v8(raw, source_name=cfg_path)
+        except V8ConfigError as mirror:
+            return _plain_v8_issue(raw, mirror.path, f"[{mirror.keyword}] {mirror.corrective_action}")
+        except (OSError, RuntimeError, ValueError):
+            pass
         return str(exc)
+    if exc.field_path and exc.reason:
+        return _plain_v8_issue(raw, exc.field_path, exc.reason)
+    return str(exc)
+
+
+def _bounded_source(cfg_path: str) -> bytes | None:
+    # Read no more than the canonical validator does: an over-limit source
+    # keeps its refusal, and is never read whole.
     try:
-        # Read no more than the canonical validator does: an over-limit
-        # source keeps its refusal, and is never read whole (the mirror
-        # would only refuse it for its size too).
         with open(cfg_path, "rb") as stream:
             raw = stream.read(MAX_SOURCE_BYTES + 1)
-        if len(raw) > MAX_SOURCE_BYTES:
-            return str(exc)
-        load_validate_v8(raw, source_name=cfg_path)
-    except V8ConfigError as mirror:
-        return f"candidate field={mirror.path}; reason=[{mirror.keyword}] {mirror.corrective_action}"
-    except (OSError, RuntimeError, ValueError):
-        pass
-    return str(exc)
+    except OSError:
+        return None
+    return None if len(raw) > MAX_SOURCE_BYTES else raw
+
+
+def _yaml_syntax_detail(raw: bytes) -> str | None:
+    """Name the line and the parser's reason for a YAML syntax error."""
+
+    from defenseclaw.observability.v8_config import yaml_error_mark
+
+    try:
+        yaml.compose(raw)
+    except yaml.YAMLError as exc:
+        mark = yaml_error_mark(exc)
+        where = f"line {mark.line + 1}, column {mark.column + 1}: " if mark is not None else ""
+        problem = str(getattr(exc, "problem", "") or "") or "malformed YAML"
+        return f"{where}invalid YAML ({problem}). Fix that line, or restore a backup of config.yaml"
+    except Exception:  # noqa: BLE001 - anything else is the mirror's to explain.
+        return None
+    return None
+
+
+_V8_PATH_TOKEN = re.compile(r'\.([^.\[\s]+)|\[(\d+)\]|\["((?:[^"\\]|\\.)*)"\]')
+_V8_REASON = re.compile(r"^\[(?P<code>[A-Za-z0-9_-]+)\]\s*(?P<text>.*)$", re.S)
+_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_ENV_REFERENCE = re.compile(r"\$\{(?:env:)?([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def _yaml_node_at(raw: bytes | None, field_path: str):
+    """The composed YAML node at a ``$.a.b[0]["k"]`` path, or None."""
+
+    if raw is None or not field_path.startswith("$"):
+        return None
+    try:
+        node = yaml.compose(raw)
+    except Exception:  # noqa: BLE001 - no position is better than a crash.
+        return None
+    rest = field_path[1:]
+    while rest and node is not None:
+        match = _V8_PATH_TOKEN.match(rest)
+        if match is None:
+            return None
+        rest = rest[match.end() :]
+        key, index, quoted = match.groups()
+        if index is not None:
+            if not isinstance(node, yaml.SequenceNode) or int(index) >= len(node.value):
+                return None
+            node = node.value[int(index)]
+            continue
+        name = key if key is not None else quoted.replace('\\"', '"')
+        if not isinstance(node, yaml.MappingNode):
+            return None
+        node = next(
+            (value for k, value in node.value if isinstance(k, yaml.ScalarNode) and k.value == name),
+            None,
+        )
+    return None if rest else node
+
+
+def _plain_v8_issue(raw: bytes | None, field_path: str, reason: str) -> str:
+    path = field_path.split(" (line", 1)[0].strip()
+    field = path[2:] if path.startswith("$.") else ("config.yaml" if path == "$" else path)
+    node = _yaml_node_at(raw, path)
+    where = f"line {node.start_mark.line + 1}: " if node is not None else ""
+    match = _V8_REASON.match(reason.strip())
+    code, text = (match.group("code"), match.group("text")) if match else ("", reason.strip())
+
+    if code == "secret_reference_unresolved" and "protected credential" not in text:
+        env = ""
+        if isinstance(node, yaml.ScalarNode):
+            value = node.value.strip()
+            reference = _ENV_REFERENCE.fullmatch(value)
+            env = reference.group(1) if reference else (value if _ENV_NAME.fullmatch(value) else "")
+        needs = env or "an environment variable"
+        save = env or "<NAME>"
+        return (
+            f"{where}{field} needs {needs}, which has no value in the environment or the DefenseClaw "
+            f".env file. Save it with: defenseclaw keys set {save} (setup commands check the whole "
+            "file, including the ones that remove this destination)"
+        )
+
+    parts = [
+        part.strip()
+        for part in text.split("; ")
+        if part.strip() and not part.strip().startswith("inspect the canonical v8 schema")
+    ]
+    allowed = re.search(r"expected one of (\[.*?\])(?:;|$)", text)
+    if allowed and isinstance(node, yaml.ScalarNode):
+        try:
+            choices = ", ".join(str(choice) for choice in json.loads(allowed.group(1)))
+        except (TypeError, ValueError):
+            choices = allowed.group(1)
+        value = node.value if len(node.value) <= 60 else node.value[:57] + "..."
+        return f'{where}{field} is "{value}"; allowed values: {choices}. All fields: defenseclaw config reference'
+    detail = "; ".join(parts).rstrip(".") or "is not valid"
+    suffix = " All fields: defenseclaw config reference" if code == "config_schema_invalid" else ""
+    return f"{where}{field}: {detail}.{suffix}"
 
 
 def _looks_like_v8_config(path: str) -> bool:

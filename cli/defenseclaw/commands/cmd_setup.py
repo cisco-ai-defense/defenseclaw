@@ -249,6 +249,9 @@ class _GatewayRuntimeGeneration:
     replacement_not_before: float
 
 
+_SETUP_OFFLINE_NOTED_KEY = "defenseclaw.setup.offline_noted"
+
+
 def _log_setup_action(
     app: AppContext,
     action: str,
@@ -280,12 +283,17 @@ def _log_setup_action(
                 "the command's offline option (--no-restart or --no-verify, where it has one) to "
                 "stage the change for the next gateway start."
             ) from exc
-        click.echo(
+        note = (
             offline_note
             or "  ⚠ Change saved, but the gateway runtime is unavailable; the canonical setup audit "
-            "event was not recorded. Start it with 'defenseclaw-gateway start' before the next change.",
-            err=True,
+            "event was not recorded. Start it with 'defenseclaw-gateway start' before the next change."
         )
+        click.echo(note, err=True)
+        # A note that already says how to start the gateway must not be
+        # repeated in other words by the setup result callback (GAP-1369).
+        current = click.get_current_context(silent=True)
+        if current is not None and "defenseclaw-gateway start" in note:
+            current.meta[_SETUP_OFFLINE_NOTED_KEY] = True
     except CanonicalObservabilityError as exc:
         # Still fail-closed, without a traceback: for example another
         # account's gateway on this port refuses this account's token.
@@ -503,11 +511,9 @@ def _initialize_setup_runtime(app: AppContext | None, ctx: click.Context) -> Non
             ux.echo(f"  ✗ {result.parse_error}", err=True)
         for issue in result.errors:
             ux.echo(f"  ✗ {issue}", err=True)
-        ux.echo(
-            "  Run 'defenseclaw config validate' for details, or "
-            "'defenseclaw doctor --fix' to auto-repair.",
-            err=True,
-        )
+        # doctor --fix repairs nothing until config.yaml is valid, so don't
+        # offer it here (GAP-1442).
+        ux.echo("  Fix config.yaml first (check it with: defenseclaw config validate).", err=True)
         ctx.exit(1)
 
     from defenseclaw.db import Store
@@ -1128,7 +1134,9 @@ def setup_llm(
                 f"{cfg.resolve_llm(target_path).model} and doctor reports the key as missing."
             )
             if not click.confirm("  Save this LLM configuration without a key?", default=False):
-                click.echo("  LLM configuration not saved. Run 'defenseclaw setup llm' when you have a key.")
+                # Name the command that was run, including --role (GAP-1490).
+                rerun = "defenseclaw setup llm" + (f" --role {role}" if role and role != "unified" else "")
+                click.echo(f"  LLM configuration not saved. Run '{rerun}' when you have a key.")
                 return
     cfg.save()
 
@@ -1455,10 +1463,19 @@ def _configure_llm(
                 non_interactive=False,
             )
             if prov == "bedrock":
+                profile_value = None
+                if auth_value == "profile":
+                    # Ask which named AWS profile to use (GAP-1492).
+                    current_profile = (llm.bedrock.profile_name if llm.bedrock is not None else "") or ""
+                    profile_value = click.prompt(
+                        "  AWS profile name",
+                        default=current_profile or os.environ.get("AWS_PROFILE", "") or "default",
+                    ).strip()
                 _apply_llm_provider_typed_flags(
                     llm,
                     bedrock_region=region_value,
                     bedrock_auth_mode=auth_value,
+                    bedrock_profile_name=profile_value,
                 )
             elif prov in ("vertex_ai", "vertex", "gemini"):
                 _apply_llm_provider_typed_flags(
@@ -4039,8 +4056,11 @@ def _refuse_rotate_token_on_managed_host() -> None:
 )
 @click.option(
     "--yes",
+    "--non-interactive",
+    "--accept-defaults",
+    "yes",
     is_flag=True,
-    help="Skip the confirmation prompt and rotate immediately.",
+    help="Skip the confirmation prompt and rotate immediately (--non-interactive and --accept-defaults are aliases).",
 )
 @pass_ctx
 def rotate_token_cmd(app: AppContext, connector: str | None, no_restart: bool, yes: bool) -> None:
@@ -8432,11 +8452,17 @@ def _restart_restored_connector_runtime(app: AppContext) -> None:
     cfg = app.cfg
     restored = list(cfg.active_connectors()) if hasattr(cfg, "active_connectors") else []
     primary = normalize_connector(cfg.active_connector()) if hasattr(cfg, "active_connector") else "openclaw"
+    if not restored:
+        # The prior config guarded nothing (for example after `setup remove
+        # --force`). active_connector() still floors to "openclaw", but there
+        # is no OpenClaw gateway to bounce, so restart only DefenseClaw's
+        # gateway (GAP-1470).
+        primary = ""
     _restart_services(
         cfg.data_dir,
         cfg.gateway.host,
         cfg.gateway.port,
-        connector=primary or "openclaw",
+        connector=primary,
         connectors=restored,
         wait_for_connector_ready=bool({normalize_connector(name) for name in restored} & _HOOK_ENFORCED_CONNECTORS),
         start_if_stopped=True,
@@ -11958,6 +11984,8 @@ for _guardrail_connector in ("openclaw", "zeptoclaw"):
 @click.option(
     "--yes",
     "-y",
+    "--non-interactive",
+    "--accept-defaults",
     "yes",
     is_flag=True,
     help=(
@@ -12379,6 +12407,10 @@ def _prompt_hook_fail_mode(gc) -> None:
     )
     current_fail = (getattr(gc, "hook_fail_mode", "") or "open").lower()
     fail_default = "2" if current_fail == "closed" else "1"
+    if fail_default == "2":
+        # The default keeps the saved value, which can differ from the
+        # recommended choice; say so instead of leaving [2] unexplained.
+        click.echo("  " + ux.dim("Current setting: closed. Press Enter to keep it, or type 1 for open."))
     fail_choice = click.prompt(
         "  Select hook fail mode",
         type=click.Choice(["1", "2"]),
@@ -14144,6 +14176,17 @@ def _restart_openclaw_gateway() -> bool:
             text=True,
             timeout=60,
         )
+        output = f"{result.stdout or ''}\n{result.stderr or ''}"
+        if result.returncode == 0 and "service not loaded" in output.lower():
+            # OpenClaw exits 0 but restarted nothing: there is no installed
+            # gateway service (for example a foreground `openclaw gateway`).
+            # Don't claim a restart happened (GAP-1408).
+            click.echo(" - (no OpenClaw gateway service to restart)")
+            click.echo(
+                "    If OpenClaw runs in a terminal (openclaw gateway), restart it there so it loads "
+                "the DefenseClaw plugin."
+            )
+            return True
         if result.returncode == 0:
             click.echo(" ✓")
             return True
@@ -14857,6 +14900,8 @@ def _auto_restart_sidecar_after_setup(ctx: click.Context, *_args, **_kwargs) -> 
 
     pid_file = os.path.join(data_dir, "gateway.pid")
     if not _is_pid_alive(pid_file):
+        if ctx.meta.get(_SETUP_OFFLINE_NOTED_KEY):
+            return
         click.echo("")
         click.echo("  Config updated. Gateway is not running — changes will take effect on next start.")
         click.echo("    Start it with: defenseclaw-gateway start")
@@ -17170,7 +17215,15 @@ def _show_splunk_credentials(data_dir: str) -> None:
 @click.option("--enable", is_flag=True, help="Enable semantic model routing.")
 @click.option("--disable", is_flag=True, help="Disable semantic model routing.")
 @click.option("--status", is_flag=True, help="Show routing status.")
-@click.option("--yes", "-y", is_flag=True, help="Accepted for compatibility; this command is non-interactive.")
+@click.option(
+    "--yes",
+    "-y",
+    "--non-interactive",
+    "--accept-defaults",
+    "yes",
+    is_flag=True,
+    help="Accepted for compatibility; this command is non-interactive.",
+)
 @pass_ctx
 def setup_routing(app: AppContext, enable: bool, disable: bool, status: bool, yes: bool) -> None:
     """Configure semantic model routing.

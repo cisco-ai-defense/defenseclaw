@@ -8,6 +8,8 @@ from defenseclaw.commands.cmd_setup import setup
 CONNECTOR_COMMANDS = (
     "claude-code", "codex", "hermes", "cursor", "devin", "copilot", "openhands",
     "antigravity", "opencode", "amp", "omnigent", "kiro", "openclaw", "zeptoclaw", "remove",
+    # GAP-1387: the other setup commands that take --yes.
+    "acp", "notifications", "rotate-token", "routing",
 )
 
 
@@ -30,3 +32,10 @@ def test_non_interactive_sets_yes_for_hook_connector():
     cmd = setup.commands["amp"]
     ctx = cmd.make_context("amp", ["--non-interactive", "--no-restart"], resilient_parsing=True)
     assert ctx.params["yes"] is True
+
+
+def test_non_interactive_sets_yes_for_routing_and_acp():
+    for name, param in (("routing", "yes"), ("acp", "assume_yes"), ("rotate-token", "yes"), ("notifications", "yes")):
+        cmd = setup.commands[name]
+        ctx = cmd.make_context(name, ["--non-interactive"], resilient_parsing=True)
+        assert ctx.params[param] is True, name

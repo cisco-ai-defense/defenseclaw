@@ -263,6 +263,10 @@ def _save_and_restart(app: AppContext, gc, *, restart: bool, action: str) -> Non
 
     _warn_if_inert(app, gc)
 
+    if not restart and gc.enabled:
+        # The judge gate is read at gateway start (GAP-1476).
+        ux.subhead("The running gateway keeps the old gate until: defenseclaw-gateway restart", indent="  ")
+
     if restart and gc.enabled:
         # Lazy import — see module docstring. The judge instance and its
         # hook wiring (APIServer.SetHookJudge) are built at sidecar

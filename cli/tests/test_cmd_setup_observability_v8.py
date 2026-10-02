@@ -241,6 +241,37 @@ def test_setup_v8_add_with_gateway_down_says_so_without_traceback(
     assert [d["name"] for d in source["observability"]["destinations"]] == ["local"]
 
 
+def test_offline_setup_note_is_not_repeated_by_the_setup_callback(tmp_path: Path) -> None:
+    # GAP-1369: the offline note already says the gateway is stopped, so the
+    # setup result callback must not print a second "not running" notice.
+    import click
+    from defenseclaw.commands import cmd_setup
+    from defenseclaw.logger import CanonicalObservabilityUnavailableError
+
+    app = _setup_app(tmp_path)
+    app.logger = SimpleNamespace(
+        log_action=lambda *_a, **_k: (_ for _ in ()).throw(CanonicalObservabilityUnavailableError("down"))
+    )
+
+    def run(*, offline_note: bool) -> str:
+        @click.command()
+        @click.pass_context
+        def probe(ctx: click.Context) -> None:
+            if offline_note:
+                cmd_setup._log_setup_action(app, "setup-observability", "x", allow_offline=True, offline_note="  noted (defenseclaw-gateway start)")
+            ctx.meta[cmd_setup._SETUP_CFG_MTIME_KEY] = 0.0
+            (tmp_path / "config.yaml").write_text("x: 1\n")
+            cmd_setup._auto_restart_sidecar_after_setup()
+
+        result = CliRunner().invoke(probe, [], obj=app, catch_exceptions=False)
+        assert result.exit_code == 0, result.output
+        return result.output
+
+    assert "Gateway is not running" in run(offline_note=False)
+    noted = run(offline_note=True)
+    assert "noted" in noted and "Gateway is not running" not in noted
+
+
 def test_setup_v8_explicit_token_takes_precedence_over_environment(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

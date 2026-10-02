@@ -106,6 +106,27 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
         self.assertIn("defenseclaw setup claude-code --yes --mode action", output)
         first_run.assert_not_called()
 
+    def test_openclaw_on_a_hook_roster_suggests_commands_that_work(self):
+        # GAP-1407: "setup openclaw --yes" is refused next to hook connectors,
+        # and setup openclaw has no --replace.
+        forbidden = AssertionError("quickstart narrowed an existing roster")
+        with (
+            patch("defenseclaw.platform_support.host_os", return_value="macos"),
+            patch(
+                "defenseclaw.commands.cmd_quickstart._configured_quickstart_connectors",
+                return_value=["claudecode", "codex"],
+            ),
+            patch("defenseclaw.bootstrap.run_first_run", side_effect=forbidden),
+        ):
+            result = self._invoke(["--connector", "openclaw", "--mode", "action", "--skip-gateway"])
+
+        self.assertEqual(result.exit_code, 2, result.output)
+        output = result.output + (result.stderr or "")
+        self.assertIn("defenseclaw setup remove <connector>", output)
+        self.assertIn("defenseclaw setup openclaw --mode action", output)
+        self.assertNotIn("--replace", output)
+        self.assertNotIn("--yes --mode action", output)
+
     def test_explicit_connector_matching_existing_roster_is_allowed(self):
         from defenseclaw import config as cfg_mod
         from defenseclaw.commands import cmd_quickstart

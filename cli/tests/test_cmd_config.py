@@ -149,7 +149,7 @@ class ValidateConfigTests(unittest.TestCase):
             self.assertFalse(res.ok)
             self.assertEqual(
                 res.errors,
-                ["candidate field=$.openshell.binary; reason=[semantic] use a command name on PATH or an absolute path"],
+                ["line 3: openshell.binary: use a command name on PATH or an absolute path."],
             )
 
             # Nothing the mirror finds: Go's own words.
@@ -158,16 +158,73 @@ class ValidateConfigTests(unittest.TestCase):
                 res = cmd_config.validate_config()
             self.assertEqual(res.errors, [str(generic)])
 
-            # A refusal Go placed is left as it is.
+            # A refusal Go placed keeps its field and reason, in plain words.
             placed = ConfigInspectError(
                 "candidate field=$.openshell.llm; reason=[config_schema_invalid] …",
                 field_path="$.openshell.llm",
-                reason="[config_schema_invalid] …",
+                reason="[config_schema_invalid] unknown field",
             )
             env.config_path.write_text("config_version: 8\nopenshell:\n  binary: bin/openshell\n", encoding="utf-8")
             with patch.object(cmd_config, "inspect_v8_config", side_effect=placed):
                 res = cmd_config.validate_config()
-            self.assertEqual(res.errors, [str(placed)])
+            self.assertEqual(res.errors, ["openshell.llm: unknown field. All fields: defenseclaw config reference"])
+
+    def test_enum_refusal_names_line_value_and_allowed_values(self):
+        # GAP-1499: no "candidate field=$...; reason=[config_schema_invalid]" record.
+        refusal = ConfigInspectError(
+            "candidate field=$.guardrail.mode; reason=...",
+            field_path="$.guardrail.mode",
+            reason='[config_schema_invalid] configuration violates the enum constraint; expected one of '
+            '["observe","action"]; inspect the canonical v8 schema or generated reference and correct this field',
+        )
+        with _IsolatedHome() as env:
+            env.config_path.write_text(
+                "config_version: 8\nguardrail:\n  mode: enforce-everything\n", encoding="utf-8"
+            )
+            with patch.object(cmd_config, "inspect_v8_config", side_effect=refusal):
+                res = cmd_config.validate_config()
+        self.assertEqual(
+            res.errors,
+            [
+                'line 3: guardrail.mode is "enforce-everything"; allowed values: observe, action. '
+                "All fields: defenseclaw config reference"
+            ],
+        )
+
+    def test_yaml_syntax_refusal_names_the_bad_line_and_parser_reason(self):
+        # GAP-1430: validate named line 119 and a generic list for a bad line 118.
+        generic = ConfigInspectError(
+            "candidate field=$; reason=[yaml_syntax_invalid] configuration source is not valid YAML",
+            field_path="$",
+            reason="[yaml_syntax_invalid] configuration source is not valid YAML",
+        )
+        with _IsolatedHome() as env:
+            env.config_path.write_text("config_version: 8\na: 1\nguardrail: [unclosed\n", encoding="utf-8")
+            with patch.object(cmd_config, "inspect_v8_config", side_effect=generic):
+                res = cmd_config.validate_config()
+        self.assertEqual(len(res.errors), 1)
+        self.assertTrue(res.errors[0].startswith("line 3, column 12: invalid YAML (expected ',' or ']'"), res.errors)
+        self.assertNotIn("candidate field", res.errors[0])
+
+    def test_missing_secret_refusal_names_the_variable_and_keys_set(self):
+        # GAP-1442: name the way out instead of "doctor --fix".
+        refusal = ConfigInspectError(
+            "candidate field=...",
+            field_path='$.observability.destinations[0].headers["Galileo-API-Key"]',
+            reason="[secret_reference_unresolved] required environment-backed secret is unavailable",
+        )
+        with _IsolatedHome() as env:
+            env.config_path.write_text(
+                "config_version: 8\nobservability:\n  destinations:\n    - name: galileo\n"
+                "      headers:\n        Galileo-API-Key: ${GALILEO_API_KEY}\n",
+                encoding="utf-8",
+            )
+            with patch.object(cmd_config, "inspect_v8_config", side_effect=refusal):
+                res = cmd_config.validate_config()
+        self.assertEqual(len(res.errors), 1)
+        self.assertTrue(res.errors[0].startswith("line 6: "), res.errors)
+        self.assertIn("needs GALILEO_API_KEY", res.errors[0])
+        self.assertIn("defenseclaw keys set GALILEO_API_KEY", res.errors[0])
 
     def test_gateway_port_clash_is_warning_not_error(self):
         with _IsolatedHome() as env:

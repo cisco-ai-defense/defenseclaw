@@ -2448,10 +2448,21 @@ def _windows_process_label(pid: int) -> str:
         image, account = row[0].strip(), row[6].strip()
         if account and account.upper() not in {"N/A", "UNKNOWN"}:
             return f"{image}, {account}"
-        if image.lower() == "defenseclaw-gateway.exe":
-            return f"{image}, probably another account's DefenseClaw gateway"
-        return image
-    return ""
+        return _windows_image_label(image)
+    # tasklist answers "Access denied" to a standard user on some hosts; a
+    # process snapshot still names the program (GAP-1345).
+    try:
+        from defenseclaw.process_liveness import process_image_name_windows
+
+        return _windows_image_label(process_image_name_windows(int(pid)))
+    except Exception:  # noqa: BLE001 - the label is best effort
+        return ""
+
+
+def _windows_image_label(image: str) -> str:
+    if image.lower() == "defenseclaw-gateway.exe":
+        return f"{image}, probably another account's DefenseClaw gateway"
+    return image
 
 
 def _free_api_port_hint(cfg) -> str:

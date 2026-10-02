@@ -171,8 +171,10 @@ def _unreadable_config_message(cfg_file: str, exc: BaseException) -> str:
     """Name the file, the problem and its position, and the next step."""
 
     if isinstance(exc, yaml.YAMLError):
+        from defenseclaw.observability.v8_config import yaml_error_mark
+
         problem = str(getattr(exc, "problem", "") or "") or "malformed YAML"
-        mark = getattr(exc, "problem_mark", None) or getattr(exc, "context_mark", None)
+        mark = yaml_error_mark(exc)
         where = f" at line {mark.line + 1}, column {mark.column + 1}" if mark is not None else ""
         detail = f"invalid YAML{where} ({problem})"
     elif isinstance(exc, UnicodeError):

@@ -254,12 +254,33 @@ def _recent_galileo_delivery_failure(store, since) -> tuple[str, str]:
     return "", ""
 
 
-def _test_galileo_trace_canary(data_dir: str, timeout: float, *, store=None) -> None:
+# How long a failed canary waits for the gateway to record this run's
+# delivery alert; it lands a few seconds after the canary returns (GAP-1318).
+_GALILEO_ALERT_WAIT_SECONDS = 6.0
+
+
+def _galileo_alert_floor(data_dir: str):
+    """The oldest alert time that can still describe the current config.
+
+    The gateway records a repeated failure once, so its alert can be older
+    than this run; one from the last few minutes still names the cause. An
+    alert from before the last config.yaml change belongs to the previous
+    endpoint or key, so it is never used (GAP-1318).
+    """
     from datetime import datetime, timedelta, timezone
 
-    # The gateway records a repeated failure once, so its alert can be older
-    # than this run; one from the last few minutes still names the cause.
     since = datetime.now(timezone.utc) - timedelta(minutes=15)
+    try:
+        changed = datetime.fromtimestamp(os.stat(config_path_for_data_dir(data_dir)).st_mtime, timezone.utc)
+    except (OSError, OverflowError, ValueError):
+        return since
+    return max(since, changed)
+
+
+def _test_galileo_trace_canary(data_dir: str, timeout: float, *, store=None) -> None:
+    import time
+
+    since = _galileo_alert_floor(data_dir)
     try:
         result = run_trace_canary(
             destination=_DESTINATION,
@@ -269,9 +290,14 @@ def _test_galileo_trace_canary(data_dir: str, timeout: float, *, store=None) -> 
         )
     except TraceCanaryError as exc:
         hint = ""
-        delivery, when = (
-            _recent_galileo_delivery_failure(store, since) if exc.failure_class == "gateway_rejected" else ("", "")
-        )
+        delivery, when = "", ""
+        if exc.failure_class == "gateway_rejected" and store is not None:
+            deadline = time.monotonic() + _GALILEO_ALERT_WAIT_SECONDS
+            while True:
+                delivery, when = _recent_galileo_delivery_failure(store, since)
+                if delivery or time.monotonic() >= deadline:
+                    break
+                time.sleep(0.5)
         if delivery:
             hint = (
                 f". The gateway's latest Galileo export failure ({when}) is {delivery}: "

@@ -488,11 +488,20 @@ func v8Error(source string, code V8YAMLErrorCode, path string, node *yaml.Node, 
 
 var v8YAMLSyntaxLine = regexp.MustCompile(`(?:^|[ :])line ([0-9]+)(?:[ :]|$)`)
 
+// yaml.v3 reports parser errors (unlike scanner errors) with the 0-based
+// line of their context mark, one line before the bad line that Python and
+// editors name (GAP-1430).
+var v8YAMLParserError = regexp.MustCompile(
+	`did not find expected (?:<document start>|node content|key|'-' indicator|',' or '\]'|',' or '\}')`)
+
 func v8SyntaxError(source string, cause error) error {
 	line := 0
 	if cause != nil {
 		if match := v8YAMLSyntaxLine.FindStringSubmatch(cause.Error()); len(match) == 2 {
 			line, _ = strconv.Atoi(match[1])
+			if line > 0 && v8YAMLParserError.MatchString(cause.Error()) {
+				line++
+			}
 		}
 	}
 	return &V8YAMLError{

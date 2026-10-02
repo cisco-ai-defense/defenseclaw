@@ -129,6 +129,38 @@ class TestRestartFailsClosed(unittest.TestCase):
 
         self.assertIs(_restart_openclaw_gateway(), False)
 
+    def test_gap1408_openclaw_service_not_loaded_is_not_a_restart(self):
+        import contextlib
+        import io
+
+        from defenseclaw.commands.cmd_setup import _restart_openclaw_gateway
+
+        done = subprocess.CompletedProcess(
+            ["openclaw"], 0, stdout="Gateway service not loaded. Start with: openclaw gateway install\n", stderr=""
+        )
+        with patch("defenseclaw.commands.cmd_setup.subprocess.run", return_value=done):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                self.assertIs(_restart_openclaw_gateway(), True)
+            text = buf.getvalue()
+        self.assertNotIn("✓", text)
+        self.assertIn("no OpenClaw gateway service", text)
+
+    def test_gap1470_rollback_to_empty_roster_skips_openclaw(self):
+        from types import SimpleNamespace
+
+        from defenseclaw.commands import cmd_setup
+
+        cfg = SimpleNamespace(
+            data_dir="/nonexistent",
+            gateway=SimpleNamespace(host="127.0.0.1", port=18789),
+            active_connectors=lambda: [],
+            active_connector=lambda: "openclaw",
+        )
+        with patch.object(cmd_setup, "_restart_services") as restart:
+            cmd_setup._restart_restored_connector_runtime(SimpleNamespace(cfg=cfg))
+        self.assertEqual(restart.call_args.kwargs["connector"], "")
+
 
 class TestInitDirPermissions(unittest.TestCase):
     """F-0122: first-run init must create operator-private dirs 0700."""

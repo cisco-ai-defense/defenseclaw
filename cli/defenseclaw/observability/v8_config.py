@@ -281,6 +281,23 @@ _SECRET_FIELD_NAMES = frozenset(
 _HEADER_MAP_FIELD_NAMES = frozenset(("headers", "extra_headers"))
 
 
+def yaml_error_mark(exc: BaseException) -> Any:
+    """The source position a YAML error belongs to.
+
+    When the parser only notices the problem at the end of the stream (an
+    unclosed ``[`` or quote on the last line), the problem mark is the line
+    after the file; the context mark is the line that opened the construct,
+    which is the line to fix (GAP-1430).
+    """
+
+    problem_mark = getattr(exc, "problem_mark", None)
+    context_mark = getattr(exc, "context_mark", None)
+    problem = str(getattr(exc, "problem", "") or "")
+    if context_mark is not None and ("stream end" in problem or "end of stream" in problem):
+        return context_mark
+    return problem_mark or context_mark
+
+
 class V8ConfigError(ValueError):
     """A source-validation error whose message never contains source values."""
 
@@ -614,7 +631,7 @@ def _preflight_yaml_structure(text: str, source_name: str, *, reject_aliases: bo
     except V8ConfigError:
         raise
     except (yaml.YAMLError, RecursionError, OverflowError) as exc:
-        mark = getattr(exc, "problem_mark", None)
+        mark = yaml_error_mark(exc)
         path = f"$ (line {mark.line + 1}, column {mark.column + 1})" if mark is not None else "$"
         raise V8ConfigError(
             source_name,

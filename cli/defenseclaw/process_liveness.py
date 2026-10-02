@@ -272,6 +272,23 @@ def _process_image_path_windows(pid: int) -> str | None:  # pragma: no cover - W
 
 def _process_parent_id_windows(pid: int) -> int | None:  # pragma: no cover - Windows only
     """Return the snapshot parent PID for ``pid`` using the Windows toolhelp API."""
+    entry = _windows_snapshot_entry(pid)
+    return (entry[0] or None) if entry is not None else None
+
+
+def process_image_name_windows(pid: int) -> str:  # pragma: no cover - Windows only
+    """The image name of ``pid`` from a process snapshot, or "".
+
+    Unlike ``tasklist`` (access denied for a standard user on some hosts) or
+    opening the process, a toolhelp snapshot lists every account's process
+    (GAP-1345).
+    """
+    entry = _windows_snapshot_entry(pid)
+    return entry[1] if entry is not None else ""
+
+
+def _windows_snapshot_entry(pid: int) -> tuple[int, str] | None:  # pragma: no cover - Windows only
+    """Return ``(parent PID, image name)`` for ``pid`` from a toolhelp snapshot."""
     import ctypes
     from ctypes import wintypes
 
@@ -316,7 +333,7 @@ def _process_parent_id_windows(pid: int) -> int | None:  # pragma: no cover - Wi
             return None
         while True:
             if entry.th32ProcessID == pid:
-                return int(entry.th32ParentProcessID) or None
+                return int(entry.th32ParentProcessID), str(entry.szExeFile)
             entry.dwSize = ctypes.sizeof(entry)
             if not process_next(snapshot, ctypes.byref(entry)):
                 return None
