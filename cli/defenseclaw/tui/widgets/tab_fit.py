@@ -250,17 +250,45 @@ def fit_tab_labels(
     #    important badges to superscript ("8 Logs²"), then drop them, then
     #    names. The Alerts count goes last: it is the open-alert count that
     #    Overview and the status bar show.
-    for shrink, kept in ((compact, False), (no_badge, False), (compact, True), (no_badge, True)):
+    def fit_badges(chosen: Mapping[str, str], steps: Sequence[tuple[set[str], bool]]) -> bool:
+        for shrink, kept in steps:
+            for name in reversed(ranked):
+                if width_of(chosen) <= width:
+                    return True
+                if name != active and unread.get(name, 0) and (name in KEEP_BADGE) == kept:
+                    shrink.add(name)
+        return width_of(chosen) <= width
+
+    if not fit_badges(chosen, ((compact, False), (no_badge, False), (compact, True), (no_badge, True))):
         for name in reversed(ranked):
             if width_of(chosen) <= width:
-                return render(chosen)
-            if name != active and unread.get(name, 0) and (name in KEEP_BADGE) == kept:
-                shrink.add(name)
-    for name in reversed(ranked):
-        if width_of(chosen) <= width:
-            break
-        if name != active:
-            chosen[name] = ""
+                break
+            if name != active:
+                chosen[name] = ""
+    # 5. A shortened active name always ends with "…": shrink or drop other
+    #    tabs' badges for it (never the Alerts count), so "7 Sandbox" is never
+    #    shown as if it were the full name while Logs/Audit badges are up
+    #    (GAP-1541).
+    #    When no badge is left to give, use the tiny name ("Reg…") and, last,
+    #    the least important other tabs' names.
+    current = chosen.get(active, "")
+    if current and current != titles[active] and not current.endswith("\u2026"):
+        saved = (set(compact), set(no_badge))
+        tiny = _names(active, titles[active])[0]
+        for text in dict.fromkeys((current, tiny)):
+            candidate = {**chosen, active: _abbreviated(text, titles[active])}
+            if fit_badges(candidate, ((compact, False), (no_badge, False), (compact, True))):
+                return render(candidate)
+            compact.clear()
+            compact.update(saved[0])
+            no_badge.clear()
+            no_badge.update(saved[1])
+        candidate = {**chosen, active: _abbreviated(current, titles[active])}
+        for name in reversed(ranked):
+            if width_of(candidate) <= width:
+                return render(candidate)
+            if name != active:
+                candidate[name] = ""
     return render(chosen)
 
 

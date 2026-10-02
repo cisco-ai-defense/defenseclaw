@@ -25,7 +25,7 @@ from defenseclaw.tui.theme import DEFAULT_TOKENS
 
 # Footer hint text. The armed variant is shown once a ``danger`` action has
 # been chosen a first time and is waiting for the explicit second confirm.
-_HINT_DEFAULT = "up/down choose  enter confirm  esc cancel"
+_HINT_DEFAULT = "press a row's key, or up/down and enter  ·  esc cancel"
 _HINT_ARMED = "⚠ danger — press enter / click again to confirm  ·  esc cancel"
 
 
@@ -290,6 +290,12 @@ class ConsequenceModalScreen(ModalScreen[ConsequenceAction | None]):
         if index is None:
             return
         event.stop()
+        if not action.danger:
+            # "[p] Preview plan" did nothing when Preview was already the
+            # highlighted row: a safe row's key runs it (GAP-1606). A danger
+            # row's key only selects it; Enter twice still confirms.
+            self._choose_index(index)
+            return
         self.selected_index = index
         self._disarm()
         self._sync_selection()
