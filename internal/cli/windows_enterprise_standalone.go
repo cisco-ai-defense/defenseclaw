@@ -567,6 +567,7 @@ func applyWindowsEnterpriseInstallerReport(
 	if opts != nil && opts.purge {
 		addWindowsEnterpriseUserStateWarning(result, report)
 	}
+	addWindowsEnterpriseMachineStateWarning(result, report)
 	addWindowsEnterpriseRecoveryGatewayWarnings(result, report)
 	// Only when nothing above explains it. A completed uninstall leaves
 	// nothing to secure; only a deployment that is still installed (or a
@@ -612,9 +613,16 @@ func addWindowsEnterpriseUserStateWarning(result *enterprisestatus.Result, repor
 			windowsEnterpriseBoundedLabels(remaining),
 		))
 	}
+}
+
+// addWindowsEnterpriseMachineStateWarning names the machine folders outside
+// StateRoot that the uninstall could not remove. Every standalone uninstall
+// removes them, not only --purge, so the MDM default uninstall reports them
+// too (GAP-1734).
+func addWindowsEnterpriseMachineStateWarning(result *enterprisestatus.Result, report *windowsEnterpriseInstallerReport) {
 	if kept := windowsEnterpriseReportStrings(report.MachineStateRemaining); len(kept) > 0 {
 		result.AddWarning("machine_state_remaining", fmt.Sprintf(
-			"--purge could not remove %d DefenseClaw machine folder(s); remove them from an elevated prompt: %s",
+			"the uninstall could not remove %d DefenseClaw machine folder(s); remove them from an elevated prompt: %s",
 			len(kept),
 			windowsEnterpriseBoundedLabels(kept),
 		))
