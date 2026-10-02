@@ -65,8 +65,51 @@ The sidecar must be running for this command to work.`,
 	RunE:              runSidecarStatus,
 }
 
+// gatewayStatusJSON selects the machine-readable status (GAP-1609).
+var gatewayStatusJSON bool
+
 func init() {
+	statusCmd.Flags().BoolVar(&gatewayStatusJSON, "json", false, "Print the gateway health as JSON")
 	rootCmd.AddCommand(statusCmd)
+}
+
+// gatewayStatusDocument is the --json form of gateway status: the /health
+// snapshot when the gateway answers, otherwise why not and the next step.
+type gatewayStatusDocument struct {
+	Running  bool                    `json:"running"`
+	Endpoint string                  `json:"endpoint"`
+	Health   *gateway.HealthSnapshot `json:"health,omitempty"`
+	Error    string                  `json:"error,omitempty"`
+	Hint     string                  `json:"hint,omitempty"`
+}
+
+func runSidecarStatusJSON(w io.Writer) error {
+	addr := sidecarHealthURL(cfg)
+	doc := gatewayStatusDocument{Endpoint: addr}
+	var failure error
+	if problem := foreignGatewayListener(cfg); problem != "" {
+		doc.Error = problem
+		doc.Hint = foreignGatewayListenerFix(cfg)
+		failure = errors.New("the gateway port is held by another process")
+	} else if snap, err := fetchSidecarHealth(&http.Client{Timeout: 5 * time.Second}, addr); err != nil {
+		doc.Error = err.Error()
+		doc.Hint = sidecarNotRunningHint(cfg)
+		failure = errors.New("sidecar unreachable")
+		if running, pid := gatewayManagedState(); running && cfg != nil && !cfg.StandaloneEnterprise() {
+			doc.Hint = fmt.Sprintf("The gateway process (PID %d) is running but does not answer /health. "+
+				"Restart it with: defenseclaw-gateway restart", pid)
+			failure = errors.New("sidecar not answering")
+		}
+	} else {
+		doc.Running = true
+		doc.Health = &snap
+	}
+	encoder := json.NewEncoder(w)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(doc); err != nil {
+		return err
+	}
+	return failure
 }
 
 // gatewayStatusConfigLoadError adds the daemon state and the next step when
@@ -79,6 +122,12 @@ func gatewayStatusConfigLoadError(err error) error {
 	state := "The gateway is not running."
 	if running, pid := daemon.New(config.DefaultDataPath()).IsRunning(); running {
 		state = fmt.Sprintf("The gateway (PID %d) is still running with the config it started with.", pid)
+	}
+	var secretErr *config.V8SecretReferenceError
+	if errors.As(err, &secretErr) && !secretErr.Credential {
+		// Same next step start and restart print (GAP-1353).
+		return fmt.Errorf("%w. %s Set it with: defenseclaw keys set %s (or disable that destination), "+
+			"then run: defenseclaw-gateway restart", err, state, secretErr.Reference)
 	}
 	return fmt.Errorf("%w. %s Fix the file (check it with: defenseclaw config validate)", err, state)
 }
@@ -195,6 +244,9 @@ func fetchSidecarHealth(client *http.Client, addr string) (gateway.HealthSnapsho
 }
 
 func runSidecarStatus(_ *cobra.Command, _ []string) error {
+	if gatewayStatusJSON {
+		return runSidecarStatusJSON(os.Stdout)
+	}
 	addr := sidecarHealthURL(cfg)
 	// /health is public: any process on the port answers it. Never present
 	// another home's or account's gateway as this one.

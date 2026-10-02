@@ -813,6 +813,22 @@ class TestAdditiveSetupCommand(unittest.TestCase):
         self.assertIn("DEFENSECLAW_GATEWAY_TOKEN=openclaw-side-token", dotenv)
         self.assertIn("OPENCLAW_GATEWAY_TOKEN=openclaw-side-token", dotenv)
 
+    # GAP-1524: DefenseClaw dials the OpenClaw gateway on openclaw.json's port.
+    def test_openclaw_gateway_port_is_adopted_from_openclaw_json(self):
+        oc = os.path.join(self.tmp_dir, "openclaw.json")
+        with open(oc, "w", encoding="utf-8") as handle:
+            json.dump({"gateway": {"mode": "local", "port": 19089}}, handle)
+        self.app.cfg.claw.config_file = oc
+        self.app.cfg.gateway.host = "127.0.0.1"
+        self.app.cfg.gateway.port = 18789
+        cmd_setup._adopt_openclaw_gateway_port(self.app)
+        self.assertEqual(self.app.cfg.gateway.port, 19089)
+        # A remote OpenClaw gateway keeps the configured endpoint.
+        self.app.cfg.gateway.host = "10.0.0.5"
+        self.app.cfg.gateway.port = 18789
+        cmd_setup._adopt_openclaw_gateway_port(self.app)
+        self.assertEqual(self.app.cfg.gateway.port, 18789)
+
     # D4: an existing PROXY connector is replaced, never added to.
     def test_proxy_existing_is_replaced_not_added(self):
         self._seed_single("openclaw")

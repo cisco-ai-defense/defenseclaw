@@ -67,6 +67,17 @@ func (p *GuardrailProxy) writeBlockedPassthroughBedrock(w http.ResponseWriter, p
 	}
 }
 
+// writeBedrockUpstreamError reports a failed upstream call the way Bedrock
+// reports its own errors (an X-Amzn-ErrorType header and a "message" body),
+// so the AWS SDK in the agent shows the reason instead of "UnknownError"
+// (GAP-1406).
+func writeBedrockUpstreamError(w http.ResponseWriter, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Amzn-ErrorType", "ServiceUnavailableException")
+	w.WriteHeader(http.StatusBadGateway)
+	_ = json.NewEncoder(w).Encode(map[string]string{"message": msg})
+}
+
 // bedrockActionFromPath returns the trailing Bedrock action ("converse",
 // "converse-stream", "invoke", "invoke-with-response-stream") from a URL
 // path like "/model/{modelId}/{action}". The modelId itself may contain

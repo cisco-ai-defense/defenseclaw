@@ -456,10 +456,11 @@ def test_opencode_agent_state_requires_fresh_authenticated_heartbeat() -> None:
         assert model.subsystem_state("agent") == "degraded"
         assert "manual or automatic OpenCode registration" in model.agent_detail()
 
-    # No heartbeat yet: OpenCode is closed, which is idle, not degraded (GAP-1632).
     model.set_health(snapshot())
+    # No heartbeat yet: OpenCode is closed, which is idle, not degraded
+    # (GAP-1608).
     assert model.subsystem_state("agent") == "idle"
-    assert "normal while OpenCode is closed" in model.agent_detail()
+    assert "not open" in model.agent_detail()
     assert "pure" not in model.agent_detail().lower()
 
     model.set_health(snapshot(heartbeat=(now - timedelta(minutes=16)).isoformat()))

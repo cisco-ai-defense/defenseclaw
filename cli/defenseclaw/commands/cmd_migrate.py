@@ -57,6 +57,11 @@ def _validate_from_version(_ctx, _param, value):
     )
 
 
+def _release_tuple(value: str) -> tuple[int, int, int]:
+    match = re.match(r"\s*v?(\d+)\.(\d+)\.(\d+)", value or "")
+    return tuple(int(part) for part in match.groups()) if match else (0, 0, 0)  # type: ignore[return-value]
+
+
 @click.command("migrate")
 @click.option(
     "--check",
@@ -81,7 +86,17 @@ def _validate_from_version(_ctx, _param, value):
 def migrate_cmd(check, from_version, data_dir, openclaw_home, gateway_binary, as_json, yes) -> None:
     """Bring config and data to this version's schema."""
     del yes
+    from defenseclaw import __version__
     from defenseclaw.migrations import ConfigTooNewError, MigrationError, display_step_name, migrate
+
+    if from_version and _release_tuple(from_version) > _release_tuple(__version__):
+        # The installer passes the release it replaces, which may be newer on
+        # a downgrade, so this warns instead of refusing (GAP-1610).
+        ux.echo(
+            f"  ⚠ --from-version {from_version} is newer than this DefenseClaw ({__version__}). "
+            "It should name the release that wrote the data (the one installed before this one).",
+            err=True,
+        )
 
     # With --json, stdout carries only the JSON document; step progress goes to stderr.
     progress = contextlib.redirect_stdout(sys.stderr) if as_json else contextlib.nullcontext()

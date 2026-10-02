@@ -106,7 +106,7 @@ var csVulnRules = []csVulnRule{
 	{id: "CS-VLN-XSS-COOKIE", category: "xss", pattern: regexp.MustCompile(`(?i)document\.cookie`), severity: SeverityHigh, remediation: "Mark cookies HttpOnly; avoid accessing document.cookie in user contexts"},
 	{id: "CS-VLN-XSS-DOCWRITE", category: "xss", pattern: regexp.MustCompile(`(?i)document\.write\s*\(`), severity: SeverityHigh, remediation: "Avoid document.write; use DOM APIs with proper encoding"},
 	{id: "CS-VLN-XSS-INNERHTML", category: "xss", pattern: regexp.MustCompile(`(?i)\.innerHTML\s*=`), severity: SeverityMedium, remediation: "Use textContent or sanitize before setting innerHTML"},
-	{id: "CS-VLN-XSS-EVAL", title: "Dynamic code execution with eval()", category: "code_injection", pattern: regexp.MustCompile(`(?i)\beval\s*\(`), severity: SeverityHigh, remediation: "Never use eval() with user-supplied content"},
+	{id: "CS-VLN-CODE-EVAL", title: "Dynamic code evaluation with eval()", category: "code_injection", pattern: regexp.MustCompile(`(?i)\beval\s*\(`), severity: SeverityHigh, remediation: "Never use eval() with user-supplied content"},
 }
 
 func (s *ClawShieldVulnScanner) Scan(ctx context.Context, target string) (*ScanResult, error) {

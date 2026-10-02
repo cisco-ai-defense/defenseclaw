@@ -1136,12 +1136,14 @@ def skill_list_to_row(raw: Mapping[str, Any]) -> SkillRow:
         status = "blocked"
     elif status_field == "disabled":
         status = "disabled"
+    elif source in {"enforcement", "scan-history"} and not bool(raw.get("eligible")):
+        # Gone from disk: the CLI says "removed"; the verdict stays in its
+        # own column (GAP-1598).
+        status = "removed"
     elif scan_mismatch:
         status = scan_mismatch
     elif bool(raw.get("eligible")):
         status = "active"
-    elif source in {"enforcement", "scan-history"}:
-        status = "removed"
     else:
         status = "inactive"
 

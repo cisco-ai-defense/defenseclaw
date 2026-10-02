@@ -1044,8 +1044,10 @@ func loadUnselectedWindowsManagedRuntimeBundle(
 		!sameWindowsEnterprisePath(bundle.DataDir, opts.DataDir) ||
 		bundle.HookExecutable != opts.HookExecutable ||
 		!sameWindowsEnterprisePath(bundle.HookExecutable, opts.HookExecutable) {
-		return entry, nil, errors.New(
-			"enterprise hooks: refusing to collect a managed runtime bundle with a foreign identity",
+		return entry, nil, fmt.Errorf(
+			"enterprise hooks: refusing to collect a managed runtime bundle with a foreign identity: %s: "+
+				"it names another connector, account, data folder or hook binary than its file name and this deployment do",
+			path,
 		)
 	}
 	desired := WindowsManagedRuntimeGenerationDesired{
@@ -1066,8 +1068,10 @@ func loadUnselectedWindowsManagedRuntimeBundle(
 	// accepts (1.0.1 wrote Kiro bundles with no contract ID), and refusing it
 	// failed every later upgrade, repair and uninstall (GAP-1322).
 	if _, err := validateWindowsManagedRuntimeGenerationIdentity(desired); err != nil {
-		return entry, nil, errors.New(
-			"enterprise hooks: refusing to collect an invalid managed runtime bundle",
+		return entry, nil, fmt.Errorf(
+			"enterprise hooks: refusing to collect an invalid managed runtime bundle: %s: %s",
+			path,
+			strings.TrimPrefix(err.Error(), "enterprise hooks: "),
 		)
 	}
 	entry = windowsManagedRuntimeSelectorTargetFromDesired(

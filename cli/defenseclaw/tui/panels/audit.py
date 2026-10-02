@@ -1168,12 +1168,14 @@ def _event_field(event: Event, field: str) -> str:
         return event.action.lower()
     if field == "actor":
         return event.actor.lower()
+    # connector and severity match what the CONNECTOR and SEVERITY columns
+    # show, not only the raw details/severity (GAP-1631).
     if field == "connector":
-        return _parse_kv_details(event.details).get("connector", "").lower()
+        return event_connector(event).lower()
     if field == "details":
         return event.details.lower()
     if field == "severity":
-        return event.severity.lower()
+        return _display_severity(event).lower()
     if field == "target":
         return event.target.lower()
     if field == "type":
@@ -1189,6 +1191,8 @@ def _event_haystack(event: Event) -> str:
             event.target,
             event.actor,
             event.severity,
+            _display_severity(event),
+            event_connector(event),
             event.details,
             event.run_id,
             _target_type_from_action(event.action),

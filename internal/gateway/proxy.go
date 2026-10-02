@@ -1327,7 +1327,11 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	fmt.Fprintf(os.Stderr, "[guardrail] passthrough → %s\n", scrubURLSecrets(upstreamURL))
 	resp, err := doProviderRequest(upstreamReq, p.emitEgress)
 	if err != nil {
-		writeOpenAIError(w, http.StatusBadGateway, "upstream error: "+err.Error())
+		if provider == "bedrock" {
+			writeBedrockUpstreamError(w, "upstream error: "+err.Error())
+		} else {
+			writeOpenAIError(w, http.StatusBadGateway, "upstream error: "+err.Error())
+		}
 		return
 	}
 	defer resp.Body.Close()

@@ -22,6 +22,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // While another process holds the gateway API port (it binds loopback
@@ -55,6 +56,11 @@ func applyWindowsEnterpriseAPIPortHolders(result *enterprisestatus.Result, repor
 	if !inspection && !lifecycleFailed {
 		return
 	}
+	// An installer that refused its own module never started a gateway, so
+	// the port is not why it failed (GAP-1658).
+	if lifecycleFailed && windowsEnterpriseInstallerRefusedModule(report) {
+		return
+	}
 	address := fmt.Sprintf("127.0.0.1:%d", config.DefaultGatewayAPIPort)
 	listeners, err := windowsEnterpriseAPIListeners("127.0.0.1", config.DefaultGatewayAPIPort)
 	if err != nil || len(listeners) == 0 {
@@ -63,10 +69,14 @@ func applyWindowsEnterpriseAPIPortHolders(result *enterprisestatus.Result, repor
 	// Without the running gateway's own process ID a listener cannot be told
 	// apart from the gateway itself. A gateway that is not running holds no
 	// listener.
-	gatewayPID := 0
-	if strings.TrimSpace(report.GatewayService) != "" {
-		gatewayPID = windowsEnterpriseServicePID(report.GatewayService)
+	gatewayService := strings.TrimSpace(report.GatewayService)
+	if gatewayService == "" {
+		// A lifecycle that failed before it read the deployment (an
+		// installer that refused its module, GAP-1658) names no service;
+		// the installed gateway service then still holds its own port.
+		gatewayService = managed.StandaloneWindowsGatewaySvc
 	}
+	gatewayPID := windowsEnterpriseServicePID(gatewayService)
 	if gatewayRunning && gatewayPID == 0 {
 		return
 	}
@@ -120,6 +130,17 @@ func applyWindowsEnterpriseAPIPortHolders(result *enterprisestatus.Result, repor
 		"the gateway API port %s is held by %s, not by the DefenseClaw gateway; hooks fail closed until the port is free. "+
 			"%s: the gateway keeps retrying and takes the port back by itself",
 		address, strings.Join(names, "; "), stop))
+}
+
+// windowsEnterpriseInstallerRefusedModule reports a lifecycle the installer
+// stopped before it imported its module: nothing ran.
+func windowsEnterpriseInstallerRefusedModule(report *windowsEnterpriseInstallerReport) bool {
+	for _, message := range append([]string{report.Error}, report.Errors...) {
+		if strings.Contains(message, "installer rejected its module before import") {
+			return true
+		}
+	}
+	return false
 }
 
 // queryWindowsEnterpriseServicePID returns the process ID of a running

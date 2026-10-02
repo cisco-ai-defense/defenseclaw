@@ -127,9 +127,14 @@ class InventoryPlugin:
             id=str(raw.get("id") or ""),
             name=str(raw.get("name") or ""),
             version=str(raw.get("version") or ""),
-            origin=str(raw.get("origin") or ""),
+            # GAP-1593: Hermes rows carry source_kind and enabled, not
+            # origin and status; show them as 'plugin list' does.
+            origin=str(raw.get("origin") or raw.get("source_kind") or ""),
             enabled=bool(raw.get("enabled")),
-            status=str(raw.get("status") or ""),
+            status=str(
+                raw.get("status")
+                or (("enabled" if raw.get("enabled") else "disabled") if "enabled" in raw else "")
+            ),
             verdict=str(raw.get("policy_verdict") or raw.get("verdict") or ""),
             verdict_detail=str(raw.get("policy_detail") or raw.get("verdict_detail") or ""),
             scan_findings=int(raw.get("scan_findings") or 0),
@@ -1266,11 +1271,13 @@ class InventoryPanelModel:
                 True,
                 hint=f"Inventory filter: {label} (1 shows all). Digits filter on this sub-tab; Ctrl+P switches panel.",
             )
-        if key in {"h", "left", "shift+tab"}:
+        # Tab / Shift+Tab stay global (next / previous panel), as the help
+        # says; h/l walk the sub-tabs (GAP-1641).
+        if key in {"h", "left"}:
             before = self.active_sub
             self.move_subtab(-1)
             return InventoryPanelAction(True, hint="" if self.active_sub != before else "(first inventory sub-tab)")
-        if key in {"l", "right", "tab"}:
+        if key in {"l", "right"}:
             before = self.active_sub
             self.move_subtab(1)
             return InventoryPanelAction(True, hint="" if self.active_sub != before else "(last inventory sub-tab)")
@@ -1364,7 +1371,7 @@ def _plugin_count_summary(count: str, mapping: Mapping[str, Any]) -> str:
 
 def _verdict_summary(mapping: Mapping[str, str]) -> str:
     parts: list[str] = []
-    for key in ("blocked", "rejected", "allowed", "warning", "clean", "unscanned"):
+    for key in ("blocked", "rejected", "allowed", "warning", "clean", "unscanned", "discovery-only"):
         value = mapping.get(key, "0")
         if value not in {"", "0"}:
             parts.append(f"{value} {key}")

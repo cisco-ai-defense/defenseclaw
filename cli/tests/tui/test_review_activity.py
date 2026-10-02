@@ -47,6 +47,6 @@ async def test_activity_history_is_visible_at_80x24(tmp_path) -> None:
         app.action_switch_panel("activity")
         await settle_panel(app, pilot)
         text = screen_text(app)
-        assert "[2] Mutations" in text
+        assert "Mutations (gateway activity)   h/l switch" in text
         assert "$ doctor" in text
         assert "--backend go" not in text

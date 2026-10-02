@@ -113,7 +113,7 @@ class TestStatusCommand(unittest.TestCase):
         result = self.runner.invoke(status, ["--json"], obj=self.app, catch_exceptions=False)
         self.assertEqual(result.exit_code, 0, result.output)
         payload = json.loads(result.output)
-        self.assertEqual(payload["sandbox"], {"available": False, "legacy_standalone": True})
+        self.assertEqual(payload["sandbox"], {"available": False, "enabled": False, "legacy_standalone": True})
 
     @patch("defenseclaw.gateway.OrchestratorClient")
     def test_status_sandbox_not_configured_on_host_mode(self, mock_client_cls):
@@ -126,7 +126,25 @@ class TestStatusCommand(unittest.TestCase):
         result = self.runner.invoke(status, ["--json"], obj=self.app, catch_exceptions=False)
         self.assertEqual(result.exit_code, 0, result.output)
         payload = json.loads(result.output)
-        self.assertEqual(payload["sandbox"], {"available": False, "legacy_standalone": False})
+        self.assertEqual(payload["sandbox"], {"available": False, "enabled": False, "legacy_standalone": False})
+        result = self.runner.invoke(status, [], obj=self.app, catch_exceptions=False)
+        self.assertIn("off (set up with: defenseclaw sandbox setup)", result.output)
+
+    @patch("defenseclaw.gateway.OrchestratorClient")
+    def test_status_sandbox_row_reflects_enabled_sandboxes(self, mock_client_cls):
+        # GAP-1619: the row was hard-coded to "not configured".
+        from defenseclaw.commands import cmd_status
+
+        mock_client = MagicMock()
+        mock_client.is_running.return_value = False
+        mock_client_cls.return_value = mock_client
+        self.app.cfg.openshell.enabled = True
+
+        with patch.object(cmd_status, "_host_is_windows", return_value=False):
+            result = self.runner.invoke(cmd_status.status, [], obj=self.app, catch_exceptions=False)
+            self.assertIn("details: defenseclaw sandbox status", result.output)
+            result = self.runner.invoke(cmd_status.status, ["--json"], obj=self.app, catch_exceptions=False)
+        self.assertTrue(json.loads(result.output)["sandbox"]["enabled"])
 
 
 # ---------------------------------------------------------------------------

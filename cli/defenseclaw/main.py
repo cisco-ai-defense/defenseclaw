@@ -281,6 +281,18 @@ def cli(ctx: click.Context) -> None:
             ux.echo(str(exc), err=True)
             raise SystemExit(1) from exc
 
+    if invoked == "doctor" and cfg_mod.config_is_empty():
+        # An empty config.yaml loads as built-in defaults; judging the install
+        # against them printed wrong FAIL rows. Stop at the config rows, as for
+        # a malformed file (GAP-1633).
+        from defenseclaw.doctor_preflight import inspect_doctor_config_load_failure
+
+        app.doctor_startup_diagnostics = inspect_doctor_config_load_failure(
+            cfg_mod.ConfigVersionError(cfg_mod.empty_config_message())
+        )
+        app.cfg = SimpleNamespace(data_dir=str(cfg_mod.default_data_path()))
+        return
+
     try:
         app.cfg = cfg_mod.load()
     except Exception as exc:
@@ -331,16 +343,27 @@ def cli(ctx: click.Context) -> None:
 
         result = validate_config()
         if not result.ok:
-            ux.echo("Config validation failed:", err=True)
+            timed_out = getattr(result, "timed_out", False)
+            ux.echo("Config check did not finish:" if timed_out else "Config validation failed:", err=True)
             if result.parse_error:
                 ux.echo(f"  ✗ {result.parse_error}", err=True)
             for issue in result.errors:
                 ux.echo(f"  ✗ {issue}", err=True)
-            ux.echo(
-                "  Run 'defenseclaw config validate' for details, repair or upgrade the configuration, "
-                "then rerun the command.",
-                err=True,
-            )
+            if timed_out:
+                ux.echo("  Nothing was changed; re-run the command.", err=True)
+            else:
+                ux.echo(
+                    "  Run 'defenseclaw config validate' for details, repair or upgrade the configuration, "
+                    "then rerun the command.",
+                    err=True,
+                )
+            if invoked == "status":
+                # The gateway is not stopped by a bad file (GAP-1353).
+                ux.echo(
+                    "  A gateway that is already running keeps the config it started with "
+                    "(check it with: defenseclaw-gateway status).",
+                    err=True,
+                )
             raise SystemExit(1)
 
     # The setup group must inspect its child command before deciding whether

@@ -4260,6 +4260,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                     # lifecycle. Status text shows the ambient hint so we
                     # don't double up on "running …" in two places.
                     self._strip_running(label)
+                    # "Command cancelled." from an earlier preview is not
+                    # about this run (GAP-1606).
+                    if _is_command_result(self.status_text) or self.status_text == "Uninstall cancelled.":
+                        self._set_status(self._status_text())
                     self._refresh_hint()
                 elif event.kind == "output":
                     self.activity_model.append_output(event.text)
@@ -4326,6 +4330,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                         event.duration or 0.0,
                         cancelled=event.cancelled,
                     )
+                    # Every run path says how it ended (the uninstall chooser,
+                    # palette reruns and panel info commands did not); a
+                    # refresh status set below still wins (GAP-1606).
+                    self._report_command_result(label, result)
                     if event.exit_code == 0 and not event.cancelled:
                         await self._handle_successful_command(binary, args)
                     elif binary == "defenseclaw" and args and args[0] in WIZARD_COMMAND_FAMILIES:
@@ -4637,7 +4645,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 ("1-5", "Filter by severity (1=All 2=Crit 3=High 4=Med 5=Low); Tab or Ctrl+P switches panel"),
                 ("/", "Search target / action / details"),
                 ("Space", "Toggle select current alert"),
-                ("a / A or X", "Select all filtered / deselect all"),
+                ("a / X", "Select all filtered / deselect all"),
                 ("x", "Acknowledge selected alerts"),
                 ("d", "Dismiss the highlighted alert"),
                 ("c / C", "Dismiss filtered / dismiss ALL alerts"),
@@ -4674,7 +4682,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 ("r", "Refresh"),
             ],
             "inventory": [
-                ("h/l or Tab", "Switch sub-tab"),
+                ("h/l", "Switch sub-tab (Tab moves to the next panel)"),
                 ("j/k or Up/Down", "Navigate items"),
                 ("Enter / Esc", "Open / close the detail pane"),
                 ("1 / 2-4", "Skills and Plugins sub-tabs: show all / filter (elsewhere digits switch panel)"),
@@ -4704,7 +4712,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 ("r", "Refresh"),
             ],
             "activity": [
-                ("1 / 2", "Commands / gateway activity"),
+                ("h / l", "Commands / gateway activity (Mutations)"),
                 ("j/k or Up/Down", "Navigate entries"),
                 ("Enter", "Expand / collapse output"),
                 ("t / Esc", "Terminal view / back to the history"),
@@ -4944,6 +4952,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         """Colored Runtime header: health first, then planes, coverage, findings."""
 
         model = self.runtime_model
+        model.short_screen = 0 < self.size.height < 32
         state = model.health_state()
         title = model.health_title()
         color = {
@@ -4972,12 +4981,12 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             f"[bold {TOKENS.accent_cyan}]Runtime[/]  "
             f"[bold {color}]● {title}[/]  "
             + "  ".join(meta),
-            f"[{TOKENS.text_secondary}]{rich_escape(model.health_explanation())}[/]",
+            f"[{TOKENS.text_secondary}]{rich_escape(model.health_explanation(short=model.short_screen))}[/]",
         ]
         if not snap.planes:
             if snap.enabled:
                 lines.append(f"[{TOKENS.text_muted}]Planes: the gateway has not reported any yet.[/]")
-        elif model.planes_expanded == (self.size.height >= 32 or self.size.height == 0):
+        elif model.planes_shown_expanded():
             # Short terminals start on the one-line plane strip (p expands
             # it) so the findings table stays on screen.
             lines.append(f"[bold {TOKENS.text_primary}]PLANES[/]")
@@ -9931,6 +9940,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                     f"[{TOKENS.text_muted}]No audit events yet. Scans, blocks, approvals and config "
                     "changes are recorded here as they happen.[/]"
                 )
+        elif not self.audit_model.filtered and not self.audit_model.filtering:
+            # A search with no matches showed an empty table and no text
+            # (GAP-1631).
+            lines.append(f"[{TOKENS.text_muted}]No events match the search or filter. Esc clears it.[/]")
         return "\n".join(lines)
 
     def _set_status(self, text: str) -> None:
@@ -10733,6 +10746,20 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             # behind.
             panel.scroll_home(animate=False)
             self._last_detail_signature = detail_signature
+            # The detail takes rows from the table: scroll the selected row
+            # back into view once the layout settles, or at 80x24 AI
+            # Discovery showed Codex while OpenCode's detail was open
+            # (GAP-1596).
+            self.call_after_refresh(self._keep_table_cursor_visible)
+
+    def _keep_table_cursor_visible(self) -> None:
+        try:
+            table = self.query_one("#panel-table", DataTable)
+        except NoMatches:
+            return
+        scroll = getattr(table, "_scroll_cursor_into_view", None)
+        if table.row_count and callable(scroll):
+            scroll(animate=False)
 
     def _detail_text(self) -> str:
         if self.active_panel == "alerts":
@@ -10870,6 +10897,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             self.run_worker(self._open_mode_picker(), exclusive=False, thread=False)
             return True
         if self.active_panel == "runtime":
+            self.runtime_model.short_screen = 0 < self.size.height < 32
             return self._apply_runtime_action(self.runtime_model.handle_key(key))
         if self.active_panel == "sandboxes":
             # ``U`` (undo) differs from ``u`` (unblock); _panel_key folds it.
@@ -11081,6 +11109,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             return False
         if action.hint:
             self._set_status(action.hint)
+        elif _is_registry_focus_status(self.status_text):
+            # The jump from Skills/MCPs is done; the next move on this panel
+            # (a sub-tab, another row) clears it (GAP-1597).
+            self._set_status(self._status_text())
         if action.intent is not None:
             self.run_worker(self._confirm_and_run_intent(action.intent), exclusive=False, thread=False)
         self._render_chrome()
@@ -11093,9 +11125,15 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             self._set_status(action.hint)
         if action.registry_focus is not None:
             focus = action.registry_focus
-            self.registries_model.focus_entry(focus.entry_type, focus.name)
+            found = self.registries_model.focus_entry(focus.entry_type, focus.name)
             self.action_switch_panel("registries")
-            self._set_status(f"Focused registry entry {focus.name}.")
+            # codeguard is a local skill, not a registry entry: don't claim
+            # it was focused (GAP-1597).
+            self._set_status(
+                _REGISTRY_FOCUS_FOUND.format(name=focus.name)
+                if found
+                else _REGISTRY_FOCUS_MISSING.format(name=focus.name)
+            )
             return True
         if action.open_mcp_set_form:
             self.run_worker(self._open_mcp_set_form(), exclusive=False, thread=False)
@@ -11357,7 +11395,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             return True
         self.activity_model.handle_key(_vim_key(key))
         self._render_chrome()
-        return key in {"1", "2", "up", "down", "j", "k", "enter", "t", "q", "esc"}
+        return key in {"h", "l", "left", "right", "up", "down", "j", "k", "enter", "t", "q", "esc"}
 
     def _forward_activity_stdin(self, key: str) -> bool:
         if key in {"up", "down", "j", "k", "esc", "q"}:
@@ -15510,6 +15548,16 @@ def _is_load_status(text: object) -> bool:
 _COMMAND_RESULT_RE = re.compile(
     r"^(Done: .+|Cancelled: .+|Command cancelled\.|.+ failed \(exit \d+\)\. Activity shows the output\.)$"
 )
+
+
+_REGISTRY_FOCUS_FOUND = "Showing registry entry {name}."
+_REGISTRY_FOCUS_MISSING = "{name} is not from a registry source. Showing all registry entries."
+
+
+def _is_registry_focus_status(text: str) -> bool:
+    return text.startswith("Showing registry entry ") or text.endswith(
+        " is not from a registry source. Showing all registry entries."
+    )
 
 
 def _is_command_result(text: object) -> bool:

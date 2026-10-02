@@ -291,6 +291,11 @@ class RuntimePanelModel:
         # the host is DEGRADED, which is the question this panel exists
         # to answer.
         self.planes_expanded = True
+        # Short terminals (under 32 rows) keep their own choice and start on
+        # the one-line strip, so a "p" pressed on a tall screen does not
+        # expand the planes over the findings table at 80x24 (GAP-1596).
+        self.short_screen = False
+        self.planes_expanded_short = False
         self.message = ""
 
     def set_snapshot(self, payload: Any) -> None:
@@ -471,8 +476,12 @@ class RuntimePanelModel:
             "healthy": "HEALTHY",
         }[self.health_state()]
 
-    def health_explanation(self) -> str:
-        """What the badge means, and what a quiet findings table does not mean."""
+    def health_explanation(self, short: bool = False) -> str:
+        """What the badge means, and what a quiet findings table does not mean.
+
+        ``short`` (80x24) keeps only the DEGRADED reasons, so the buttons and
+        the findings table stay on screen (GAP-1596).
+        """
 
         state = self.health_state()
         if state == "off":
@@ -510,6 +519,8 @@ class RuntimePanelModel:
             extra = ""
             if self.snapshot.degraded_reasons:
                 extra = " " + "; ".join(self.snapshot.degraded_reasons) + "."
+            if short:
+                return f"DEGRADED means coverage is partial ({coverage}).{extra}"
             return (
                 f"DEGRADED means coverage is partial ({coverage}).{extra} "
                 "Findings below are still valid for the planes that are up. "
@@ -614,11 +625,16 @@ class RuntimePanelModel:
         )
         return tuple(parts)
 
+    def planes_shown_expanded(self) -> bool:
+        """Whether the planes show one line each (with reasons) right now."""
+
+        return self.planes_expanded_short if self.short_screen else self.planes_expanded
+
     def plane_strip(self) -> tuple[str, ...]:
         """The always-visible plane strip."""
         if not self.snapshot.planes:
             return ("plane health unavailable: the gateway reported no planes",)
-        if self.planes_expanded:
+        if self.planes_shown_expanded():
             return tuple(plane.summary for plane in self.snapshot.planes)
         return tuple(f"{plane.name}: {plane.badge}" for plane in self.snapshot.planes)
 
@@ -670,7 +686,10 @@ class RuntimePanelModel:
         if key == "e":
             return RuntimePanelAction.ENABLE
         if key == "p":
-            self.planes_expanded = not self.planes_expanded
+            if self.short_screen:
+                self.planes_expanded_short = not self.planes_expanded_short
+            else:
+                self.planes_expanded = not self.planes_expanded
             return RuntimePanelAction.TOGGLE_PLANES
         if key == "/":
             self.filtering = True

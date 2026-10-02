@@ -157,7 +157,12 @@ class TestScanUXVerdictLines(_PluginScanUXBase):
         result = self.invoke(["scan", self.plugin_name])
         # Exit code is still zero — scan only reports; install --action enforces.
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("[BLOCKED]", result.output)
+        # GAP-1592: a scan blocks nothing; the policy verdict and how to act
+        # follow the WARN line, as in 'skill scan'.
+        self.assertIn("[WARN]", result.output)
+        self.assertNotIn("[BLOCKED]", result.output)
+        self.assertIn("policy: rejected", result.output)
+        self.assertIn(f"Block it: defenseclaw plugin block {self.plugin_name}", result.output)
         # Finding count must be visible.
         self.assertIn("1 finding", result.output)
         # Severity surfaced via the "max severity:" detail string.
@@ -180,13 +185,25 @@ class TestScanUXSummary(_PluginScanUXBase):
         self.assertIn("blocked=0", result.output)
 
     @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
-    def test_summary_blocked(self, mock_scan) -> None:
+    def test_summary_rejected_is_not_blocked(self, mock_scan) -> None:
         mock_scan.return_value = self._blocked_result()
         result = self.invoke(["scan", self.plugin_name])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Summary: 1 plugin scanned", result.output)
         self.assertIn("clean=0", result.output)
+        self.assertIn("blocked=0", result.output)
+
+    @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
+    def test_summary_block_listed_is_blocked(self, mock_scan) -> None:
+        from defenseclaw.enforce import PolicyEngine
+
+        PolicyEngine(self.app.store).block("plugin", self.plugin_name, "test")
+        mock_scan.return_value = self._blocked_result()
+        result = self.invoke(["scan", self.plugin_name])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("[BLOCKED]", result.output)
         self.assertIn("blocked=1", result.output)
+        self.assertNotIn("policy: rejected", result.output)
 
     @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
     def test_low_only_finding_is_warn_not_blocked(self, mock_scan) -> None:
@@ -309,6 +326,30 @@ class TestScanPathConnector(_PluginScanUXBase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Scanning 1 plugin on hermes", result.output)
         self.assertNotIn("on amp", result.output)
+
+    @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
+    @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
+    def test_scan_path_outside_every_root_is_adhoc(self, mock_scan, _mock_oc) -> None:
+        # GAP-1640: a folder no connector root holds is not "on <first connector>".
+        mock_scan.return_value = self._blocked_result()
+        amp_dir = os.path.join(self.tmp_dir, "amp-plugins")
+        target = os.path.join(self.tmp_dir, "staging", "spotify")
+        os.makedirs(amp_dir)
+        os.makedirs(target)
+        with open(os.path.join(target, "plugin.json"), "w") as f:
+            f.write('{"name": "spotify", "version": "1.0.0"}')
+        self.app.cfg.active_connector = lambda: "amp"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["amp"]  # type: ignore[method-assign]
+        self.app.cfg.plugin_dirs = lambda c=None: {"amp": [amp_dir]}.get(c, [])  # type: ignore[method-assign]
+
+        result = self.invoke(["scan", target])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Scanning 1 plugin at a path (not from a connector config)", result.output)
+        self.assertNotIn("on amp", result.output)
+        self.assertIn("the policy would refuse this plugin at install.", result.output)
+        self.assertNotIn("still loads", result.output)
+        self.assertNotIn("--connector amp", result.output)
 
 
 class TestScanAllSweep(_PluginScanUXBase):

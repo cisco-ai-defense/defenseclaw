@@ -58,6 +58,13 @@ func TestRunRestartRefusesCorruptConfigBeforeStoppingGateway(t *testing.T) {
 	if running, currentPID := d.IsRunning(); !running || currentPID != pid {
 		t.Fatalf("gateway after refused restart = running %v PID %d, want running PID %d", running, currentPID, pid)
 	}
+	// GAP-1634: start on a running gateway says it still runs and names restart.
+	err = daemonConfigLoadError("start", errors.New("config.yaml:2: not valid YAML"))
+	for _, want := range []string{"is still running with the config it started with", "Nothing was changed", "then run: defenseclaw-gateway restart"} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("start refusal %v does not contain %q", err, want)
+		}
+	}
 }
 
 func TestDaemonConfigLoadErrorNamesTheConfig(t *testing.T) {

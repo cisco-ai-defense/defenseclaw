@@ -3439,7 +3439,13 @@ def migrate(
     """
 
     from defenseclaw import __version__
-    from defenseclaw.config import CURRENT_CONFIG_VERSION, ConfigVersionError, source_config_version
+    from defenseclaw.config import (
+        CURRENT_CONFIG_VERSION,
+        ConfigVersionError,
+        config_is_empty,
+        empty_config_message,
+        source_config_version,
+    )
 
     data_dir = os.path.abspath(os.path.expanduser(data_dir))
     ctx = MigrationContext(
@@ -3455,6 +3461,9 @@ def migrate(
         raise MigrationError(str(exc)) from exc
     if version is None:
         return MigrateResult(None, CURRENT_CONFIG_VERSION)
+    if version == 0 and config_is_empty(config_path):
+        # An empty file is not a 0.x install to import (GAP-1633).
+        raise MigrationError(empty_config_message(config_path))
     if version > CURRENT_CONFIG_VERSION:
         raise ConfigTooNewError(
             f"{config_path} has config_version {version}, but DefenseClaw {__version__} "

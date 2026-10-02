@@ -963,3 +963,12 @@ def test_threat_model_r7_matches_linux_socket_dependency() -> None:
     assert "which the gateway serves independently of the TCP port" not in model
     assert "does not start at all, and every hook on the host fails closed" in model
     assert "| R34 |" in model and "logger -t defenseclaw-gateway" in model
+
+
+def test_first_guardrail_initializes_before_setup() -> None:
+    # GAP-1613: the installer does not initialize DefenseClaw, so the
+    # walkthrough must run init before any other defenseclaw command.
+    text = (ROOT / "docs-site/content/docs/get-started/first-guardrail.mdx").read_text()
+    commands = re.findall(r"^defenseclaw(?:-gateway)? [a-z-]+", text, re.MULTILINE)
+    assert commands[0] == "defenseclaw init", commands
+    assert "defenseclaw init --connector claudecode" in text

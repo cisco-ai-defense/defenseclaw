@@ -42,6 +42,7 @@ from defenseclaw import config as config_module
 from defenseclaw import ux
 from defenseclaw.config_inspect import (
     ConfigInspectError,
+    ConfigInspectTimeoutError,
     config_v8_reference,
     config_v8_schema,
     inspect_v8_config,
@@ -339,6 +340,9 @@ class ValidationResult:
         self.parse_error: str = ""
         self.errors: list[str] = []
         self.warnings: list[str] = []
+        # The canonical validator did not finish (a busy host); the file was
+        # not judged invalid (GAP-1621).
+        self.timed_out: bool = False
 
     @property
     def ok(self) -> bool:
@@ -362,12 +366,16 @@ def validate_config() -> ValidationResult:
         try:
             inspected = inspect_v8_config("validate", config_path=cfg_path)
         except ConfigInspectError as exc:
+            res.timed_out = isinstance(exc, ConfigInspectTimeoutError)
             res.errors.append(_v8_failure_detail(cfg_path, exc))
             return res
         if inspected.valid is not True:
             res.errors.append("canonical v8 validator returned no validity decision")
         return res
 
+    if config_module.config_is_empty(cfg_path):
+        res.errors.append(config_module.empty_config_message(cfg_path))
+        return res
     res.errors.append("Configuration schema v8 is required — run 'defenseclaw migrate' first.")
     return res
 

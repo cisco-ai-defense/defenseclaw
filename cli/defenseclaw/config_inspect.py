@@ -37,7 +37,8 @@ from defenseclaw.gateway import resolve_trusted_gateway_binary
 from defenseclaw.pinned_exec import run_pinned_executable
 
 CONFIG_V8_WIRE_VERSION: Final = 2
-CONFIG_V8_HELPER_TIMEOUT_SECONDS: Final = 15
+# A loaded Windows host took more than 15 s (GAP-1621).
+CONFIG_V8_HELPER_TIMEOUT_SECONDS: Final = 60
 _OPERATIONS: Final = frozenset({"validate", "effective"})
 _REFERENCE_FORMATS: Final = frozenset({"yaml", "markdown"})
 _CONTROL_CHARACTERS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
@@ -66,6 +67,10 @@ class ConfigInspectError(RuntimeError):
         self.field_path = field_path
         self.reason = reason
         super().__init__(message)
+
+
+class ConfigInspectTimeoutError(ConfigInspectError):
+    """The helper did not finish in time; the configuration was not judged."""
 
 
 @dataclass(frozen=True)
@@ -212,7 +217,10 @@ def _run(
             env=environment,
         )
     except subprocess.TimeoutExpired as exc:
-        raise ConfigInspectError("configuration helper timed out without producing a result") from exc
+        raise ConfigInspectTimeoutError(
+            f"the configuration check did not finish within {CONFIG_V8_HELPER_TIMEOUT_SECONDS} s "
+            "(the host may be busy), so config.yaml was not judged valid or invalid"
+        ) from exc
     except UnsafePathError as exc:
         raise ConfigInspectError(unsafe_gateway_remedy(exc)) from exc
     except OSError as exc:

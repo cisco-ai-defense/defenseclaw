@@ -304,8 +304,12 @@ def status(app: AppContext, as_json: bool) -> None:
             ux._style("legacy install detected", fg="yellow")
             + ux.dim(" (run: defenseclaw sandbox legacy-cleanup)"),
         )
+    elif _sandboxes_enabled(cfg):
+        _status_row("Sandbox", ux._style("on", fg="green") + ux.dim(" (details: defenseclaw sandbox status)"))
+    elif _host_is_windows():
+        _status_row("Sandbox", ux.dim("not supported on Windows"))
     else:
-        _status_row("Sandbox", ux.dim("not configured"))
+        _status_row("Sandbox", ux.dim("off (set up with: defenseclaw sandbox setup)"))
 
     # Scanners
     ux.section("Scanners")
@@ -1376,7 +1380,11 @@ def _status_payload(app) -> dict:
             "config": str(config_path()),
             "audit_db": cfg.audit_db,
             "scope": _connector_scope_text(cfg),
-            "sandbox": {"available": False, "legacy_standalone": legacy_standalone_configured(cfg)},
+            "sandbox": {
+                "available": False,
+                "enabled": _sandboxes_enabled(cfg),
+                "legacy_standalone": legacy_standalone_configured(cfg),
+            },
             "scanners": _scanner_status_map(cfg),
         }
     )
@@ -1424,3 +1432,14 @@ def _status_payload(app) -> dict:
     payload["native_otlp_delivery"] = _native_delivery_summary(cfg).as_json()
 
     return payload
+
+
+def _sandboxes_enabled(cfg) -> bool:
+    # Identity check, as doctor's: a stand-in config must not read as on.
+    return getattr(getattr(cfg, "openshell", None), "enabled", False) is True
+
+
+def _host_is_windows() -> bool:
+    from defenseclaw.platform_support import host_os
+
+    return host_os() == "windows"

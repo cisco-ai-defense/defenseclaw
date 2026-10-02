@@ -189,6 +189,7 @@ Per-connector guardrail controls. `--connector X` is the explicit scope selector
 | `defenseclaw guardrail protection list [--json]` | Read-only. Lists the opt-in protection packs (five selectable, one staged) and which scope (the global pack or an active connector) has which on. See [Opt-in protection packs](#opt-in-protection-packs). |
 | `defenseclaw guardrail protection enable NAME [--connector X] [--no-validate] [--no-restart] [--json]` | Turn an opt-in protection pack on for the global rule pack or for one connector. Composes, validates, and switches to `~/.defenseclaw/policies/guardrail/protected-<scope>/`; an invalid composition (exit `1`) or an unavailable validator (exit `2`, unless `--no-validate`) switches nothing. Staged and unknown packs are refused (exit `1`). |
 | `defenseclaw guardrail protection disable NAME [--connector X] [--no-restart] [--json]` | Turn it off again. The scope's pack is recomposed without it; when no opt-in pack is left, the scope goes back to its base pack. |
+| `defenseclaw guardrail allow-private-upstream [HOST\|IP ...] [--remove]` | Let the guardrail proxy reach an LLM endpoint on a private address, such as an AWS PrivateLink (VPC interface) endpoint for Bedrock, whose hostname resolves to private IPs. A hostname is resolved now and its private addresses are stored in `guardrail.allow_private_upstreams`; run it again if the endpoint's addresses change. Run bare it lists the entries. Loopback, link-local and cloud metadata addresses are never allowed. Restart the gateway afterwards. |
 | `defenseclaw guardrail validate-pack PATH [--json]` | Validate a rule pack offline with the gateway's own validator. Exit `1` means invalid, `2` means the validator is unavailable. |
 
 ```bash
@@ -375,7 +376,7 @@ These list/inventory verbs read across the full active roster:
 | Command | Use it for |
 | --- | --- |
 | `defenseclaw tui` | Interactive terminal dashboard — audit, alerts, logs, inventory, and setup panels. The recommended live view. |
-| `defenseclaw alerts [--connector X]` | Snapshot of recent alerts (default 25) as a table. `--connector X` filters by per-event connector attribution; `--limit N` widens the scan window, and `--show <n>` prints the full record. |
+| `defenseclaw alerts [--connector X] [--json]` | Snapshot of recent alerts (default 25) as a table. `--connector X` filters by per-event connector attribution; `--limit N` widens the scan window, and `--show <n>` prints the full record. A finding row names its target, decision (`blocked`, `would block (observe mode)`, ...), rule and scanner, and an ACP finding its route (`ACP session/prompt (client zed)`); `--json` prints the same fields (`target`, `decision`, `rule`, `scanner`, `location`, `route`, `path`, `moved_to` for quarantine rows) next to the raw `details`. |
 | `defenseclaw alerts acknowledge` / `dismiss` | Acknowledge or dismiss alerts (writes an `audit_log_activity` mutation). `--severity all\|CRITICAL\|HIGH\|MEDIUM\|LOW`. |
 | `defenseclaw audit log-activity --payload-file <f>` | Record a config/operator mutation through the gateway's audit logger. Used internally by the TUI on save. |
 | `defenseclaw-gateway audit export` (or `defenseclaw audit export`, which runs it with the same options) | JSONL export of `audit_events` from the SQLite DB, including `structured` when `structured_json` is present. Rows are emitted oldest-first; `--limit N` returns the earliest N matching rows, and with `--newest` the most recent N (still written oldest-first). `--since` (inclusive) and `--until` (exclusive) take an RFC3339 time or a duration ago such as `30m` or `2h`. `--connector` keeps one connector's rows. `--include-activity` also dumps `activity_events`, within the same window. |
@@ -453,7 +454,7 @@ The sidecar is the Go binary; the Python CLI does not own a `gateway` group. Mos
 | `defenseclaw-gateway start` | `defenseclaw-gateway` | Start the sidecar as a background daemon. |
 | `defenseclaw-gateway stop` | `defenseclaw-gateway` | Stop the running sidecar. |
 | `defenseclaw-gateway restart` | `defenseclaw-gateway` | Restart the sidecar. |
-| `defenseclaw-gateway status` | `defenseclaw-gateway` | Health snapshot of the running daemon. On a multi-connector install it also renders a per-connector **"Connector Mode"** section (one row per active connector) sourced from the `/status` endpoint's `connector_modes` array. |
+| `defenseclaw-gateway status` | `defenseclaw-gateway` | Health snapshot of the running daemon. On a multi-connector install it also renders a per-connector **"Connector Mode"** section (one row per active connector) sourced from the `/status` endpoint's `connector_modes` array. `--json` prints one JSON document (`running`, `endpoint`, the `/health` snapshot as `health`, or `error` and `hint`); it exits `1` when the gateway does not answer. |
 | `defenseclaw-gateway policy reload` | `defenseclaw-gateway` | Re-read OPA policies from disk without bouncing the daemon. |
 | `defenseclaw-gateway watchdog [start\|stop\|status]` | `defenseclaw-gateway` | Health-watchdog daemon that notifies when the gateway is down. |
 | `tail -f ~/.defenseclaw/gateway.jsonl \| jq` | shell | Tail a configured `kind: jsonl` destination. It contains only records selected for that destination; mandatory complete local log history remains SQLite. |
@@ -470,7 +471,7 @@ The sidecar is the Go binary; the Python CLI does not own a `gateway` group. Mos
 | --- | --- |
 | `defenseclaw upgrade [--version X] [--yes]` | Download the latest (or the given) release's installer, check it against that release's `checksums.txt`, and run it. The installer keeps your configuration and data, migrates them, restarts the gateway, and restores the previous install if anything fails. See [Upgrade DefenseClaw](/docs/get-started/upgrade). |
 | `defenseclaw rollback [--yes]` | Swap the live install with the one the last upgrade replaced. Run it again to roll forward. |
-| `defenseclaw migrate [--check] [--from-version X] [--json]` | Bring configuration and data to this version's schema. The installer runs it on every upgrade; `--check` changes nothing. Exits `2` for a configuration written by a newer release. |
+| `defenseclaw migrate [--check] [--from-version X] [--json]` | Bring configuration and data to this version's schema. The installer runs it on every upgrade; `--check` changes nothing. Exits `2` for a configuration written by a newer release. `--from-version` names the release that wrote the data; a value newer than this release prints a warning. An empty `config.yaml` is refused (exit `1`) with the repair: restore your copy or remove it and run `defenseclaw init`. |
 
 ## Uninstall / disable
 

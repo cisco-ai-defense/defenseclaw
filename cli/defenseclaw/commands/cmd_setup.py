@@ -507,14 +507,19 @@ def _initialize_setup_runtime(app: AppContext | None, ctx: click.Context) -> Non
 
     result = validate_config()
     if not result.ok:
-        ux.echo("Config validation failed:", err=True)
+        timed_out = getattr(result, "timed_out", False)
+        ux.echo("Config check did not finish:" if timed_out else "Config validation failed:", err=True)
         if result.parse_error:
             ux.echo(f"  ✗ {result.parse_error}", err=True)
         for issue in result.errors:
             ux.echo(f"  ✗ {issue}", err=True)
-        # doctor --fix repairs nothing until config.yaml is valid, so don't
-        # offer it here (GAP-1442).
-        ux.echo("  Fix config.yaml first (check it with: defenseclaw config validate).", err=True)
+        if timed_out:
+            # A busy host, not a bad file (GAP-1621).
+            ux.echo("  Nothing was changed; re-run the command.", err=True)
+        else:
+            # doctor --fix repairs nothing until config.yaml is valid, so don't
+            # offer it here (GAP-1442).
+            ux.echo("  Fix config.yaml first (check it with: defenseclaw config validate).", err=True)
         ctx.exit(1)
 
     from defenseclaw.db import Store
@@ -11798,6 +11803,7 @@ def _setup_guardrail_connector_alias(
 
     if connector == "openclaw":
         _adopt_openclaw_gateway_token(app)
+        _adopt_openclaw_gateway_port(app)
     app.cfg.claw.mode = connector
     app.cfg.guardrail.connector = connector
     _write_picked_connector_hint(getattr(app.cfg, "data_dir", None), connector)
@@ -11898,6 +11904,39 @@ def _adopt_openclaw_gateway_token(app: AppContext) -> None:
     for key in keys:
         _save_secret_to_dotenv(key, detected, app.cfg.data_dir)
     click.echo("  Using the OpenClaw gateway token from openclaw.json for DefenseClaw (the two differed).")
+
+
+def _openclaw_json_gateway_port(openclaw_config_file: str) -> int | None:
+    """gateway.port from a local-mode openclaw.json, or None when it sets none."""
+    from defenseclaw.config import _read_openclaw_config
+
+    oc = _read_openclaw_config(openclaw_config_file)
+    gw = oc.get("gateway") if isinstance(oc, dict) else None
+    if not isinstance(gw, dict) or gw.get("mode", "local") != "local" or "port" not in gw:
+        return None
+    try:
+        port = int(gw["port"])
+    except (TypeError, ValueError):
+        return None
+    return port if 0 < port < 65536 else None
+
+
+def _adopt_openclaw_gateway_port(app: AppContext) -> None:
+    """Dial the OpenClaw gateway on the port openclaw.json sets (GAP-1524).
+
+    OpenClaw onboarded after DefenseClaw (``openclaw onboard --gateway-port``)
+    listens where openclaw.json says, while gateway.port kept the 18789
+    default: the sidecar then dialed the wrong port forever. Like the token,
+    a local OpenClaw gateway's port is read from openclaw.json.
+    """
+    gw = app.cfg.gateway
+    if (gw.host or "127.0.0.1") not in ("127.0.0.1", "localhost", "::1"):
+        return
+    port = _openclaw_json_gateway_port(app.cfg.claw.config_file)
+    if port is None or port == gw.port:
+        return
+    click.echo(f"  Using the OpenClaw gateway port from openclaw.json: {port} (was {gw.port}).")
+    gw.port = port
 
 
 def _make_guardrail_connector_setup_command(connector: str) -> click.Command:
@@ -13366,7 +13405,8 @@ def _restart_services(
     if connector == "openclaw":
         if not _restart_openclaw_gateway():
             failed.append("openclaw-gateway")
-        _check_openclaw_gateway(oc_host, oc_port)
+        if not _check_openclaw_gateway(oc_host, oc_port) and "openclaw-gateway" not in failed:
+            failed.append("openclaw-gateway")
     elif connector in _PROXY_BACKED_CONNECTORS:
         # OpenClaw is the only proxy-backed connector that owns its own
         # gateway process; others (ZeptoClaw today) get the proxy
@@ -14986,7 +15026,7 @@ def _openclaw_gateway_healthy(host: str, port: int, timeout: float = 5.0) -> boo
         return False
 
 
-def _check_openclaw_gateway(host: str = "127.0.0.1", port: int = 18789) -> None:
+def _check_openclaw_gateway(host: str = "127.0.0.1", port: int = 18789) -> bool:
     """Verify the OpenClaw gateway remains healthy after a config change.
 
     OpenClaw watches openclaw.json and auto-restarts on certain changes
@@ -15020,10 +15060,12 @@ def _check_openclaw_gateway(host: str = "127.0.0.1", port: int = 18789) -> None:
         time.sleep(poll_interval)
 
     if not healthy:
+        # GAP-1524: this is OpenClaw's own gateway, not defenseclaw-gateway.
         click.echo(" not running")
-        click.echo("    Gateway did not respond within 30s.")
-        click.echo("    Start manually: defenseclaw-gateway start")
-        return
+        click.echo(f"    The OpenClaw gateway did not respond at {host}:{port} within 30s.")
+        click.echo("    Start it: openclaw gateway run (or, as a service: openclaw gateway restart)")
+        click.echo("    If it listens on another port: defenseclaw setup gateway --port <port>")
+        return False
 
     # Phase 2 — confirm stability for stable_window seconds
     click.echo(" up", nl=False)
@@ -15040,7 +15082,7 @@ def _check_openclaw_gateway(host: str = "127.0.0.1", port: int = 18789) -> None:
     if not went_unhealthy:
         elapsed = int(time.monotonic() - start)
         click.echo(f" ✓ (healthy, stable for {elapsed}s)")
-        return
+        return True
 
     # Phase 3 — gateway went unhealthy (config-triggered restart);
     #           wait up to recovery_timeout for it to come back
@@ -15055,12 +15097,12 @@ def _check_openclaw_gateway(host: str = "127.0.0.1", port: int = 18789) -> None:
     if recovered:
         elapsed = int(time.monotonic() - start)
         click.echo(f" ✓ (recovered after restart, {elapsed}s)")
-    else:
-        elapsed = int(time.monotonic() - start)
-        click.echo(f" ✗ (unhealthy after {elapsed}s)")
-        click.echo("    Gateway did not recover after config-triggered restart.")
-        click.echo("    Check: defenseclaw-gateway status")
-        click.echo("    Logs: ~/.defenseclaw/logs/gateway.err.log")
+        return True
+    elapsed = int(time.monotonic() - start)
+    click.echo(f" ✗ (unhealthy after {elapsed}s)")
+    click.echo(f"    The OpenClaw gateway at {host}:{port} did not recover after its config-triggered restart.")
+    click.echo("    Check: openclaw gateway status")
+    return False
 
 
 def _looks_like_secret(value: str) -> bool:

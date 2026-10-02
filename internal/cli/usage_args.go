@@ -53,8 +53,14 @@ func inCommandTree(c *cobra.Command, names []string) bool {
 // exit status 2, the shape and status the Python defenseclaw CLI uses.
 func usageError(c *cobra.Command, err error) error {
 	use := c.UseLine()
-	if !c.Runnable() && c.HasAvailableSubCommands() {
-		use = c.CommandPath() + " [command]"
+	if c.HasAvailableSubCommands() {
+		// Show the subcommand form too, as --help does (GAP-1622).
+		group := c.CommandPath() + " [command]"
+		if c.Runnable() {
+			use += "\n       " + group
+		} else {
+			use = group
+		}
 	}
 	return withExitCode(fmt.Errorf("%w\nUsage: %s\nTry '%s --help' for help.", err, use, c.CommandPath()), 2)
 }

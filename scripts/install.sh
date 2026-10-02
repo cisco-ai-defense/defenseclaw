@@ -159,6 +159,7 @@ NO_OPENCLAW=false
 RUN_QUICKSTART=false
 QUICKSTART_MODE=""
 QUICKSTART_RC=0
+OPENCLAW_MISSING=false
 QUICKSTART_RERUN=""
 INSTALL_SANDBOX=false
 PASSTHROUGH=()
@@ -779,6 +780,11 @@ if [[ -n "${QUICKSTART_RERUN}" ]]; then
     err "Quickstart failed (exit ${QUICKSTART_RC}): DefenseClaw ${VERSION} is installed, but ${CONNECTOR} is not set up yet"
     printf "  Fix what quickstart reported above ('defenseclaw doctor' helps), then run:\n    ${CYAN}%s${NC}\n\n" "${QUICKSTART_RERUN}"
     exit 4
+fi
+if [[ "${OPENCLAW_MISSING}" == true ]]; then
+    # GAP-1523: OpenClaw is the connector asked for and is not installed.
+    warn "OpenClaw is not installed, so it is not guarded yet. Install it as shown above, then run: defenseclaw setup openclaw"
+    exit 3
 fi
 exit ${START_RC}
 
@@ -1449,11 +1455,29 @@ ensure_openclaw() {
         fi
         ask_yes_no "Update OpenClaw ${found:-?} to ${OPENCLAW_VERSION}?" || { warn "Keeping OpenClaw ${found:-?}"; return; }
     else
-        ask_yes_no "Install OpenClaw ${OPENCLAW_VERSION}?" || { warn "Skipping OpenClaw; install it later with npm install -g openclaw@${OPENCLAW_VERSION}"; return; }
+        ask_yes_no "Install OpenClaw ${OPENCLAW_VERSION}?" || { warn "Skipping OpenClaw; install it later with npm install -g openclaw@${OPENCLAW_VERSION}"; OPENCLAW_MISSING=true; return; }
     fi
-    has npm || { warn "npm is not installed; install OpenClaw with: npm install -g openclaw@${OPENCLAW_VERSION}"; return; }
-    npm install -g "openclaw@${OPENCLAW_VERSION}" --loglevel=error \
-        || warn "Could not install OpenClaw; run: npm install -g openclaw@${OPENCLAW_VERSION}"
+    has npm || { warn "npm is not installed; install OpenClaw with: npm install -g openclaw@${OPENCLAW_VERSION}"; OPENCLAW_MISSING=true; return; }
+    # GAP-1523: a system Node (/usr, /opt/node22) has a root-owned global
+    # prefix; a standard user installs into ~/.local, whose bin is BIN_DIR.
+    local cmd=(npm install -g)
+    npm_global_prefix_writable || cmd+=(--prefix "${HOME}/.local")
+    cmd+=("openclaw@${OPENCLAW_VERSION}")
+    if ! "${cmd[@]}" --loglevel=error; then
+        warn "Could not install OpenClaw; run: ${cmd[*]}"
+        PATH="${BIN_DIR}:${PATH}" has openclaw || OPENCLAW_MISSING=true
+    fi
+}
+
+npm_global_prefix_writable() {
+    local prefix dir
+    prefix="$(npm prefix -g 2>/dev/null)" || return 0
+    [[ -n "${prefix}" ]] || return 0
+    for dir in "${prefix}/lib/node_modules" "${prefix}/bin"; do
+        [[ -e "${dir}" ]] || dir="${prefix}"
+        [[ -w "${dir}" ]] || return 1
+    done
+    return 0
 }
 
 ensure_path_hint() {

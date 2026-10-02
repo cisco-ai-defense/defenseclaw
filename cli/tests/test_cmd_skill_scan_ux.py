@@ -211,6 +211,37 @@ class TestSingleTargetUX(_SkillScanUXBase):
         mock_sidecar.return_value.disable_skill.assert_called_once_with("demo-skill")
 
 
+class TestPathTargetUX(_SkillScanUXBase):
+    """GAP-1599: ``skill scan <folder>`` outside every connector's skill dirs."""
+
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
+    def test_folder_target_is_adhoc_and_not_called_loaded(self, mock_cls) -> None:
+        self.app.cfg.skill_actions.high = SeverityAction(install="block")
+        mock_scanner = MagicMock()
+        mock_scanner.scan.return_value = self._blocked_result(self.skill_dir)
+        mock_cls.return_value = mock_scanner
+        with patch.object(type(self.app.cfg), "skill_dirs", lambda _self, _c=None: []):
+            result = self.invoke(["scan", self.skill_dir])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Scanning 1 skill at a path (not from a connector config)", result.output)
+        self.assertIn(f"Source: {self.skill_dir}", result.output)
+        self.assertIn("the policy would refuse this skill at install.", result.output)
+        self.assertNotIn("stays loaded", result.output)
+        self.assertIn("Block it: defenseclaw skill block demo-skill\n", result.output)
+
+
+def test_skill_finding_line_counts_front_matter(tmp_path) -> None:
+    # GAP-1599: the SDK numbers SKILL.md lines after the front matter.
+    from defenseclaw.scanner.skill import _snippet_file_line
+
+    (tmp_path / "SKILL.md").write_text("---\nname: x\ndescription: y\nlicense: MIT\n---\nMarker text here.\n")
+    assert _snippet_file_line(str(tmp_path), "SKILL.md", 1, "Marker text here.") == 6
+    assert _snippet_file_line(str(tmp_path), "SKILL.md", 2, "") == 2
+    assert _snippet_file_line(str(tmp_path), "SKILL.md", 6, "Marker text") == 6
+    assert _snippet_file_line(str(tmp_path), "missing.md", 3, "Marker") == 3
+
+
 class TestSingleTargetJsonMode(_SkillScanUXBase):
     @patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info", return_value=None)
     @patch("defenseclaw.scanner.skill.SkillScannerWrapper")

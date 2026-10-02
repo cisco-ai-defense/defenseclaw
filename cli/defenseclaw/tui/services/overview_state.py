@@ -857,7 +857,7 @@ class OverviewPanelModel:
                 if self._is_multi_connector() and self.health.connectors:
                     # One idle connector out of several is normal; only say
                     # something when none of them has seen a hook event.
-                    if not any(conn.requests for conn in self.health.connectors):
+                    if not any(_connector_saw_traffic(conn) for conn in self.health.connectors):
                         notices.append(
                             OverviewNotice(
                                 "info",
@@ -866,7 +866,7 @@ class OverviewPanelModel:
                                 "verify connector hook setup if this persists",
                             )
                         )
-                elif self.health.connector.requests == 0:
+                elif not _connector_saw_traffic(self.health.connector):
                     notices.append(OverviewNotice("info", zero_connector_requests_notice(live, uptime)))
 
         probe_detail = gateway_availability.last_error.strip().lower()
@@ -1263,6 +1263,9 @@ class OverviewPanelModel:
         return rows
 
     _RUNNING_STATES = frozenset({"running", "active", "enabled"})
+    # A connector whose agent is simply not open (OpenCode before it loads
+    # its plugin) is idle, not a degraded service (GAP-1608).
+    _READY_STATES = _RUNNING_STATES | {"idle"}
 
     def _effective_connector_runtime(self, connector: ConnectorHealth) -> tuple[str, str]:
         state = (connector.state or "").strip().lower() or "unknown"
@@ -1273,7 +1276,7 @@ class OverviewPanelModel:
 
         health = self.health
         availability = self.gateway_availability().state.strip().lower()
-        return _opencode_runtime_truth(
+        state, detail = _opencode_runtime_truth(
             {
                 "name": connector.name,
                 "state": connector.state,
@@ -1283,6 +1286,11 @@ class OverviewPanelModel:
             gateway_started_at=health.started_at if health is not None else "",
             gateway_available=availability == "running",
         )
+        if state in {"degraded", "idle"} and "no authenticated load heartbeat" in detail:
+            # OpenCode reports the load when it starts, so a closed OpenCode
+            # is normal, as doctor says (GAP-1565, GAP-1608).
+            return "idle", "idle: OpenCode is not open; it loads the plugin when it starts"
+        return state, detail
 
     def _is_multi_connector(self) -> bool:
         return self.cfg is not None and len([c for c, _m in self.cfg.connector_modes if c]) > 1
@@ -1315,8 +1323,9 @@ class OverviewPanelModel:
                     return "disabled"
             return "unknown"
         running = [state for state in states if state in self._RUNNING_STATES]
-        if len(running) == len(states):
-            return "running"
+        ready = [state for state in states if state in self._READY_STATES]
+        if len(ready) == len(states):
+            return "running" if running else "idle"
         if running:
             return "degraded"
         return states[0] or "unknown"
@@ -1334,13 +1343,13 @@ class OverviewPanelModel:
             disabled_n = sum(1 for c, _m in self.cfg.connector_modes if c and self.cfg.connector_is_disabled(c))
             enabled_total = max(total - disabled_n, 0)
             live = self.health.connectors if self.health else ()
-            running = sum(1 for conn in live if self._effective_connector_runtime(conn)[0] in self._RUNNING_STATES)
+            running = sum(1 for conn in live if self._effective_connector_runtime(conn)[0] in self._READY_STATES)
             if not disabled_n:
                 # No kill switches → original phrasing, unchanged.
                 if not live:
                     return f"{total} connectors configured"
                 if running == total:
-                    return f"{total} connectors active"
+                    return f"{total} connectors active{self._idle_suffix()}"
                 return f"{running}/{total} connectors running{self._not_running_suffix()}"
             # One or more connectors disabled: report them separately.
             suffix = f" · {disabled_n} disabled"
@@ -1387,9 +1396,19 @@ class OverviewPanelModel:
             if not name or self.cfg.connector_is_disabled(name):
                 continue
             conn = live.get(name)
-            if conn is None or self._effective_connector_runtime(conn)[0] not in self._RUNNING_STATES:
+            if conn is None or self._effective_connector_runtime(conn)[0] not in self._READY_STATES:
                 down.append(friendly_connector_name(name))
         return f" · not running: {', '.join(down)}" if down else ""
+
+    def _idle_suffix(self) -> str:
+        """`` · idle: OpenCode (not open)`` for connectors waiting on their agent."""
+
+        idle = [
+            friendly_connector_name(conn.name)
+            for conn in (self.health.connectors if self.health else ())
+            if self._effective_connector_runtime(conn)[0] == "idle"
+        ]
+        return f" · idle: {', '.join(idle)} (not open)" if idle else ""
 
     def watchdog_detail(self) -> str:
         if self.health is None:
@@ -1629,6 +1648,22 @@ def keys_overflow_suffix(total: int, shown: int) -> str:
     if total <= shown:
         return ""
     return f" (+{total - shown} more)"
+
+
+def _connector_saw_traffic(connector: ConnectorHealth) -> bool:
+    """Any guarded traffic since the gateway started.
+
+    OpenClaw's exec checks go through /api/v1/inspect/tool and count as tool
+    inspections, not requests; the notice said "0 requests ... verify your
+    agent is dialing the gateway port" after six guarded turns (GAP-1617).
+    """
+
+    return bool(
+        connector.requests
+        or connector.tool_inspections
+        or connector.tool_blocks
+        or connector.subprocess_blocks
+    )
 
 
 def zero_connector_requests_notice(connector_name: str, uptime: timedelta) -> str:
