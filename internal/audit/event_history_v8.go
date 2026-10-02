@@ -538,6 +538,12 @@ func (writer *EventHistoryWriter) appendContextTxResolvedProfile(
 	metadata := projection.Metadata()
 	target := projectedCompatibilityTarget(projection)
 	details := projectedCompatibilityDetails(projection, string(record.EventName()))
+	if target == "" && details == string(record.EventName()) && correlation.EvaluationID != "" &&
+		record.EventName() == observability.EventName(observability.TelemetryEventEnforcementBlockApplied) {
+		if blockTarget, blockDetails := enforcementBlockCompatibility(ctx, tx, correlation.EvaluationID); blockDetails != "" {
+			target, details = blockTarget, blockDetails
+		}
+	}
 	severity, hasSeverity := record.Severity()
 	var severityValue any
 	if hasSeverity {
@@ -1149,6 +1155,53 @@ func projectedCompatibilityDetails(projection observabilityredaction.Projection,
 		return label
 	}
 	return fallback
+}
+
+// enforcementBlockCompatibility names what a generated enforcement.block.applied
+// row blocked and why. That family carries only identifiers, so a guardrail
+// proxy prompt block was listed in alerts as "block | | enforcement.block.applied"
+// (GAP-1895). Its guardrail evaluation row (same evaluation_id, already
+// projected into this table) holds the direction, rule ids and reason.
+func enforcementBlockCompatibility(ctx context.Context, tx *sql.Tx, evaluationID string) (string, string) {
+	var payload string
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COALESCE(payload_json, '') FROM audit_events
+		WHERE evaluation_id = ? AND event_name = ?
+		ORDER BY rowid DESC LIMIT 1`,
+		evaluationID, observability.TelemetryEventGuardrailEvaluationCompleted,
+	).Scan(&payload); err != nil {
+		return "", ""
+	}
+	var fields map[string]any
+	if json.Unmarshal([]byte(payload), &fields) != nil {
+		return "", ""
+	}
+	text := func(key string) string {
+		value, _ := fields[key].(string)
+		return strings.TrimSpace(value)
+	}
+	direction := text("defenseclaw.guardrail.target_type")
+	parts := []string{"decision=blocked"}
+	if direction != "" {
+		parts = append(parts, "direction="+direction)
+	}
+	if reason := text("defenseclaw.guardrail.reason"); reason != "" {
+		parts = append(parts, "reason="+reason)
+	} else if ids, ok := fields["defenseclaw.guardrail.rule_ids"].([]any); ok && len(ids) > 0 {
+		rules := make([]string, 0, len(ids))
+		for _, id := range ids {
+			if value, ok := id.(string); ok && value != "" {
+				rules = append(rules, value)
+			}
+		}
+		if len(rules) > 0 {
+			parts = append(parts, "rule="+strings.Join(rules, ","))
+		}
+	}
+	if len(parts) == 1 {
+		return "", ""
+	}
+	return direction, strings.Join(parts, " ")
 }
 
 func projectedCompatibilityString(
