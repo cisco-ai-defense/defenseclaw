@@ -663,8 +663,8 @@ if [[ -n "${PREV_VERSION}" && "${PREV_VERSION}" == "${VERSION}" ]]; then
 elif [[ -n "${PREV_VERSION}" ]]; then
     if version_lt "${PREV_VERSION}" 1.0.0 && [[ -f "${DEFENSECLAW_HOME}/audit.db" ]]; then
         # Audit migration 33 (privacy cutover) empties the pre-1.0 history.
-        warn "DefenseClaw 1.0 starts a new audit history: the audit events, scan results and findings ${PREV_VERSION} recorded are deleted when DefenseClaw ${VERSION} first opens its audit database"
-        info "A copy is kept in ${PREVIOUS}/data/audit.db until the next upgrade; 'defenseclaw rollback' brings it back"
+        warn "DefenseClaw 1.0 starts a new audit history: the audit events, scan results and findings ${PREV_VERSION} recorded (${DEFENSECLAW_HOME}/audit.db, $(du -sh "${DEFENSECLAW_HOME}/audit.db" 2>/dev/null | awk '{print $1}')) are deleted when DefenseClaw ${VERSION} first opens its audit database"
+        info "A copy is kept in ${PREVIOUS}/data/audit.db; 'defenseclaw rollback' brings it back, and later upgrades keep it in ${DEFENSECLAW_HOME}/backups"
     fi
     ask_yes_no "Upgrade DefenseClaw ${PREV_VERSION} → ${VERSION}?" || die "Cancelled; nothing was changed"
 fi
@@ -1179,14 +1179,23 @@ finish_swap() {
     ok "Installed DefenseClaw ${VERSION}"
 }
 
-# A rollback parks the data written since the upgrade in previous/. Keep it
-# when a later upgrade reuses the slot: it can hold audit history.
+# A rollback parks the data written since the upgrade in previous/, and a 0.x
+# install kept there holds the only copy of the audit history 1.0 does not
+# carry over (GAP-1360). Keep either when a later upgrade reuses the slot.
 keep_rolled_back_data() {
-    [[ -f "${PREVIOUS}/ROLLED_BACK" && -d "${PREVIOUS}/data" ]] || return 0
-    local kept
-    kept="${DEFENSECLAW_HOME}/backups/rolled-back-$(cat "${PREVIOUS}/VERSION" 2>/dev/null || echo unknown)-$(date +%Y%m%dT%H%M%S)"
+    [[ -d "${PREVIOUS}/data" ]] || return 0
+    local kept version label what
+    version="$(cat "${PREVIOUS}/VERSION" 2>/dev/null || echo unknown)"
+    if [[ -f "${PREVIOUS}/ROLLED_BACK" ]]; then
+        label=rolled-back what="the data from before the last rollback"
+    elif is_version "${version}" && version_lt "${version}" 1.0.0 && [[ -f "${PREVIOUS}/data/audit.db" ]]; then
+        label=audit-history what="the audit history DefenseClaw ${version} recorded"
+    else
+        return 0
+    fi
+    kept="${DEFENSECLAW_HOME}/backups/${label}-${version}-$(date +%Y%m%dT%H%M%S)"
     mkdir -p "${DEFENSECLAW_HOME}/backups" && mv "${PREVIOUS}/data" "${kept}" || return 1
-    info "Kept the data from before the last rollback in ${kept} ($(du -sh "${kept}" 2>/dev/null | awk '{print $1}'))"
+    info "Kept ${what} in ${kept} ($(du -sh "${kept}" 2>/dev/null | awk '{print $1}'))"
     info "It is not used again; once you no longer need its audit history, remove it with: rm -rf '${kept}'"
 }
 

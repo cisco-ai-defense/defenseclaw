@@ -97,8 +97,12 @@ installed. Every path keeps your configuration and data.
   recorded (a one-time privacy cutover: 0.x history can hold unredacted
   content). The installer says so before it upgrades and again in its summary.
   Configuration, inventory and connector setup are kept. The 0.x database stays
-  in `~/.defenseclaw/previous/data/audit.db` until your next upgrade, and
-  `defenseclaw rollback` brings it back.
+  in `~/.defenseclaw/previous/data/audit.db`, and `defenseclaw rollback` brings
+  it back. Your next upgrade moves it to
+  `~/.defenseclaw/backups/audit-history-<version>-<time>`; remove that folder
+  once you no longer need the old history. `make all` from a source checkout
+  over a 0.x install keeps a copy in
+  `~/.defenseclaw/backups/audit-history-<time>.db` and says so.
 - To go back to 0.8.x afterwards, run `defenseclaw rollback`. 0.8.x has no
   rollback command, so to return to 1.x from there, run the command the
   rollback prints:

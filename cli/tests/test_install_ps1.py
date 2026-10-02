@@ -277,3 +277,12 @@ def test_a_restore_that_leaves_the_old_gateway_down_says_so() -> None:
     text = _text()
     assert text.count("$(Get-RestoredNote) Log: $($Run.Log)") == 2
     assert "Your previous install is back. Log:" not in text
+
+
+def test_a_later_upgrade_keeps_the_0_x_audit_history() -> None:
+    # GAP-1360: previous\ held the only copy of the 0.x audit history, and the
+    # next upgrade replaced it.
+    body = _ps1_function("Save-RolledBackData")
+    assert '$label = "audit-history"' in body
+    assert '[version]$version -lt [version]"1.0.0"' in body
+    assert "backups\\$label-$version-" in body

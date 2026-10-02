@@ -1024,15 +1024,24 @@ function Restore-Snapshot {
 }
 
 function Save-RolledBackData {
-    # A rollback parks the data written since the upgrade in previous\. Keep it
-    # when a later upgrade reuses the slot: it can hold audit history.
-    if (-not (Test-Path -LiteralPath (Join-Path $Previous "ROLLED_BACK")) -or -not (Test-Path -LiteralPath (Join-Path $Previous "data"))) { return }
+    # A rollback parks the data written since the upgrade in previous\, and a
+    # 0.x install kept there holds the only copy of the audit history 1.0 does
+    # not carry over (GAP-1360). Keep either when a later upgrade reuses the slot.
+    if (-not (Test-Path -LiteralPath (Join-Path $Previous "data"))) { return }
     $version = Read-Text (Join-Path $Previous "VERSION")
-    $kept = Join-Path $DataDir ("backups\rolled-back-$version-" + (Get-Date -Format "yyyyMMddTHHmmss"))
+    if (Test-Path -LiteralPath (Join-Path $Previous "ROLLED_BACK")) {
+        $label = "rolled-back"
+    } elseif ((Test-Version $version) -and [version]$version -lt [version]"1.0.0" -and (Test-Path -LiteralPath (Join-Path $Previous "data\audit.db"))) {
+        $label = "audit-history"
+    } else {
+        return
+    }
+    $kept = Join-Path $DataDir ("backups\$label-$version-" + (Get-Date -Format "yyyyMMddTHHmmss"))
     New-Item -ItemType Directory -Path (Join-Path $DataDir "backups") -Force | Out-Null
     Move-Path (Join-Path $Previous "data") $kept
     $bytes = (Get-ChildItem -LiteralPath $kept -Recurse -Force -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
-    Write-Info ("Kept the data from before the last rollback in $kept ({0:N1} MB)" -f ([double]$bytes / 1MB))
+    $what = if ($label -eq "rolled-back") { "the data from before the last rollback" } else { "the audit history DefenseClaw $version recorded" }
+    Write-Info ("Kept $what in $kept ({0:N1} MB)" -f ([double]$bytes / 1MB))
     Write-Info "It is not used again; once you no longer need its audit history, remove it with: Remove-Item -Recurse -Force '$kept'"
 }
 
@@ -1538,10 +1547,12 @@ function Invoke-Install {
     if ($PrevVersion -and $PrevVersion -eq $Ver) {
         if (-not (Confirm-Step "Reinstall DefenseClaw ${Ver}?")) { Die "Cancelled; nothing was changed" }
     } elseif ($PrevVersion) {
-        if ([version]$PrevVersion -lt [version]"1.0.0" -and (Test-Path -LiteralPath (Join-Path $DataDir "audit.db"))) {
+        $auditDb = Join-Path $DataDir "audit.db"
+        if ([version]$PrevVersion -lt [version]"1.0.0" -and (Test-Path -LiteralPath $auditDb)) {
             # Audit migration 33 (privacy cutover) empties the pre-1.0 history.
-            Write-Warn "DefenseClaw 1.0 starts a new audit history: the audit events, scan results and findings $PrevVersion recorded are deleted when DefenseClaw $Ver first opens its audit database"
-            Write-Info "A copy is kept in $(Join-Path $Previous 'data\audit.db') until the next upgrade; 'defenseclaw rollback' brings it back"
+            $auditMb = "{0:N0} MB" -f ((Get-Item -LiteralPath $auditDb).Length / 1MB)
+            Write-Warn "DefenseClaw 1.0 starts a new audit history: the audit events, scan results and findings $PrevVersion recorded ($auditDb, $auditMb) are deleted when DefenseClaw $Ver first opens its audit database"
+            Write-Info "A copy is kept in $(Join-Path $Previous 'data\audit.db'); 'defenseclaw rollback' brings it back, and later upgrades keep it in $(Join-Path $DataDir 'backups')"
         }
         if (-not (Confirm-Step "Upgrade DefenseClaw $PrevVersion -> ${Ver}?")) { Die "Cancelled; nothing was changed" }
     }
