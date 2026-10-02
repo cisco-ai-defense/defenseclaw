@@ -564,6 +564,15 @@ func (a *APIServer) inspectToolPolicyCtx(ctx context.Context, req *ToolInspectRe
 		}
 		action.LegacyText = serializeArgvForLegacyScan(argv)
 		action.EnforcementCapable = true
+		return a.inspectTrustedToolPolicyCtx(ctx, req, action)
+	}
+	// An argument TrustedShellArgs leaves for the parser (OpenClaw's env,
+	// elevated, host, node) keeps the parse partial, so a CRITICAL command
+	// rule stayed detection-only and the command ran (GAP-1450). As for a
+	// sandbox's shell calls, the command is also judged on its own, and that
+	// verdict only ever adds to the call's.
+	if command, ok := connector.ShellCommandArgs(req.Connector, req.Tool, req.Args); ok {
+		return a.inspectSandboxShellToolPolicyCtx(ctx, req, action, command, action.Input.Tool)
 	}
 	return a.inspectTrustedToolPolicyCtx(ctx, req, action)
 }
@@ -1307,10 +1316,13 @@ func (a *APIServer) runHookJudge(ctx context.Context, strategyDirection, judgeDi
 	case "judge_first":
 		// Judge always runs.
 	case "regex_judge":
-		// Mirror the proxy regex_judge semantics: a HIGH+ regex/AID
-		// verdict is already decisive, so the LLM round-trip is spent
-		// only on content the local lanes couldn't condemn.
-		if current != nil && severityRank[strings.ToUpper(current.Severity)] >= severityRank["HIGH"] {
+		// A regex/AID verdict that already blocks, or is CRITICAL, is
+		// decisive: the judge cannot raise it. A HIGH verdict that only
+		// alerts (block-at CRITICAL) is not, so the judge still runs and
+		// the stronger verdict wins; skipping it let a prompt with more
+		// sensitive data through where the judge blocked less (GAP-1677).
+		if current != nil && (strings.EqualFold(current.Action, "block") ||
+			severityRank[strings.ToUpper(current.Severity)] >= severityRank["CRITICAL"]) {
 			return nil
 		}
 	default: // regex_only / unset

@@ -108,9 +108,11 @@ func TestTrustedActionBlocksCommandRuleWithRuntimeExpandedRedirectTarget(t *test
 		want    map[string]string
 	}{
 		{
+			// A lone command's "~/" target resolves in the trusted home
+			// (GAP-1666), so the analysis is complete and sees the redirect.
 			name:    "tilde target",
 			command: "echo " + redirectReductionMarker + " > ~/dc-x.txt",
-			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly, "TEST-MARKER-COMPLETE-ARGV": blocks},
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-NO-STDOUT-REDIRECT": absent, "TEST-MARKER-COMPLETE-ARGV": blocks},
 		},
 		{
 			// GAP-0029: a parameter after a static directory is a file path.
@@ -208,6 +210,55 @@ func TestTrustedActionBlocksCommandRuleWithRuntimeExpandedRedirectTarget(t *test
 			name:    "background list",
 			command: "cd /tmp && echo " + redirectReductionMarker + " &",
 			want:    map[string]string{"TEST-MARKER-BLOCK": detectionOnly, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly, "TEST-MARKER-COMPLETE-ARGV": detectionOnly},
+		},
+		{
+			// GAP-0029: an && or || list member with a runtime-expanded
+			// argument is judged as the same list with static words is.
+			name:    "expanding argument first in an && list",
+			command: "echo " + redirectReductionMarker + " $USER && echo done",
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-COMPLETE-ARGV": detectionOnly, "TEST-MARKER-NOT-N": detectionOnly},
+		},
+		{
+			name:    "expanding argument after && with a target",
+			command: "true && echo " + redirectReductionMarker + " $USER > /var/tmp/dc-x.txt",
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-COMPLETE-ARGV": detectionOnly},
+		},
+		{
+			name:    "expanding argument between static cd and echo",
+			command: "cd /var/tmp && echo " + redirectReductionMarker + " $USER > dc-x.txt && echo done",
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-COMPLETE-ARGV": detectionOnly},
+		},
+		{
+			name:    "expanding argument after ||",
+			command: "false || echo " + redirectReductionMarker + " $USER",
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks},
+		},
+		{
+			name:    "expanding argument after a runtime cd in an && list",
+			command: "cd $DIR && echo " + redirectReductionMarker + " $USER",
+			want:    map[string]string{"TEST-MARKER-BLOCK": detectionOnly},
+		},
+		{
+			// GAP-1639: a PowerShell profile runs only before the body, so
+			// the body's match counts without -NoProfile.
+			name:    "pwsh -Command without -NoProfile",
+			command: `pwsh -Command "echo ` + redirectReductionMarker + ` > C:/Users/alice/dc-x.txt"`,
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly, "TEST-MARKER-COMPLETE-ARGV": blocks},
+		},
+		{
+			name:    "powershell -NoLogo -Command without -NoProfile",
+			command: `powershell -NoLogo -Command "echo ` + redirectReductionMarker + `"`,
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-COMPLETE-ARGV": blocks},
+		},
+		{
+			name:    "pwsh -Command in a list",
+			command: `cd $DIR; pwsh -Command "echo ` + redirectReductionMarker + `"`,
+			want:    map[string]string{"TEST-MARKER-BLOCK": detectionOnly},
+		},
+		{
+			name:    "expanding argument under if",
+			command: "if test -n \"$X\"; then echo " + redirectReductionMarker + " $USER; fi",
+			want:    map[string]string{"TEST-MARKER-BLOCK": detectionOnly},
 		},
 	}
 	for _, test := range tests {
@@ -439,11 +490,20 @@ func TestInspectToolBlocksOpenClawExecWithControls(t *testing.T) {
 		`{"command":"echo dc-block-marker > /tmp/dc-x.txt"}`,
 		`{"command":"echo dc-block-marker > /tmp/dc-x.txt","yieldMs":10000}`,
 		`{"command":"echo dc-block-marker > /tmp/dc-x.txt","timeout":30,"background":true,"workdir":"/tmp"}`,
+		// GAP-1450: arguments left for the parser (env, elevated) keep the
+		// call's parse partial; the command judged on its own still blocks.
+		`{"command":"echo dc-block-marker > /tmp/dc-x.txt","env":{"DCX":"1"},"yieldMs":5000}`,
+		`{"command":"echo dc-block-marker > /tmp/dc-x.txt","elevated":false}`,
 	} {
 		_, verdict := postInspectForConnector(t, api, "openclaw", `{"tool":"exec","args":`+args+`}`)
 		if verdict.Action != guardrailActionBlock || verdict.Severity != "CRITICAL" {
 			t.Errorf("exec %s = %s %s (%s), want a CRITICAL block", args, verdict.Action, verdict.Severity, verdict.Reason)
 		}
+	}
+	_, verdict := postInspectForConnector(t, api, "openclaw",
+		`{"tool":"exec","args":{"command":"echo hello > /tmp/dc-x.txt","env":{"DCX":"1"}}}`)
+	if verdict.Action == guardrailActionBlock {
+		t.Errorf("benign exec with env = %s (%s), want no block", verdict.Action, verdict.Reason)
 	}
 }
 

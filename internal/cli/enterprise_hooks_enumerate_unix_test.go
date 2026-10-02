@@ -284,3 +284,30 @@ func TestRevokeGoneCommandRemovesDeletedAccountsTargets(t *testing.T) {
 		t.Fatal("a relative manifest path must be refused")
 	}
 }
+
+// GAP-1441: an empty refusal list must not touch the guardian data dir when
+// no list was ever published, so a read-only parent cannot warn each cycle.
+func TestWriteEnterpriseHookRefusedSurfacesEmptyWithoutFileIsNoop(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(managed.HookGuardianAuthorizationDirEnv, dir)
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	if err := writeEnterpriseHookRefusedSurfaces(dir, nil); err != nil {
+		t.Fatalf("empty list with no file: %v", err)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, managed.HookGuardianRefusedSurfacesFile)
+	if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeEnterpriseHookRefusedSurfaces(dir, nil); err != nil {
+		t.Fatalf("empty list withdraws the file: %v", err)
+	}
+	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("refused-surfaces.json still present: %v", err)
+	}
+}

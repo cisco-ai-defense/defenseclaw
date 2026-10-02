@@ -1114,6 +1114,9 @@ def targeted_readiness(cfg: Config, options: FirstRunOptions) -> list[StepResult
                 "defenseclaw-gateway status" if not running else "",
             )
         )
+        runtime_step = _connector_runtime_readiness(cfg, connector) if running else None
+        if runtime_step is not None:
+            steps.append(runtime_step)
 
     llm = cfg.resolve_llm("guardrail")
     if cfg.guardrail.enabled and llm.is_local_provider():
@@ -1665,6 +1668,44 @@ def _running_connector_from_state_file(data_dir: str) -> str | None:
         return None
     name = name.strip().lower()
     return name or None
+
+
+def _connector_runtime_readiness(cfg: Config, connector: str) -> StepResult | None:
+    """Read back whether the running gateway guards *connector* (GAP-1589).
+
+    Setup and "Sidecar already running" only prove the config was written and
+    some gateway is up. The gateway can still have refused the connector, or
+    its hook files can have drifted, which ``status`` shows as DEGRADED and
+    ``doctor`` as a failed hook row. Use the same checks here so first run
+    does not report the agent as guarded when it is not.
+    """
+
+    if connector in ("", "none"):
+        return None
+    from defenseclaw.commands.cmd_setup import _CONNECTOR_META
+    from defenseclaw.hook_integrity import hook_registration_problems, hook_runtime_problems, setup_command
+
+    label = _CONNECTOR_META.get(connector, {}).get("label", connector)
+    roster = _running_connectors_from_state_file(cfg.data_dir)
+    if roster is not None and connector not in roster:
+        return StepResult(
+            "Connector runtime",
+            "warn",
+            f"the running gateway has not loaded {label}, so it is not guarded yet",
+            "defenseclaw-gateway restart",
+        )
+    try:
+        problems = hook_runtime_problems(cfg, connector) or hook_registration_problems(cfg, connector)
+    except Exception:  # noqa: BLE001 - the doctor hook rows report unreadable state.
+        return None
+    if not problems:
+        return None
+    return StepResult(
+        "Connector runtime",
+        "warn",
+        f"{label} is not guarded: {problems[0]}",
+        setup_command(connector),
+    )
 
 
 def _running_connectors_from_state_file(data_dir: str) -> list[str] | None:

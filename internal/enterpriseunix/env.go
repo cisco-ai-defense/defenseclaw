@@ -74,6 +74,7 @@ var commandCandidates = map[string][]string{
 	"dscl":             {"/usr/bin/dscl"},
 	"pkgutil":          {"/usr/sbin/pkgutil"},
 	"lsof":             {"/usr/sbin/lsof", "/usr/bin/lsof"},
+	"ps":               {"/bin/ps", "/usr/bin/ps"},
 }
 
 // ExecRunner is the production Runner.

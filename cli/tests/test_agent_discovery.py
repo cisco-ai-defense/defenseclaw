@@ -2136,7 +2136,8 @@ def test_hermes_version_probe_gets_longer_timeout(monkeypatch, tmp_path):
     assert error == ""
     assert version == "Hermes Agent v0.20.0 (2026.8.3)"
     _, kwargs = calls[0]
-    assert kwargs["timeout"] == 8.0
+    # GAP-1604: its --version runs an update check (17.5 s on Windows).
+    assert kwargs["timeout"] == 30.0
 
 
 @pytest.mark.parametrize(

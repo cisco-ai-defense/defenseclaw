@@ -1206,7 +1206,9 @@ func readMCPServersZeptoClaw(workspaceDir string) ([]MCPServerEntry, error) {
 }
 
 func readMCPServersHermes() ([]MCPServerEntry, error) {
-	return readMCPFromYAMLPath(hermespath.ConfigPath(), []string{"mcp", "servers"}, []string{"mcpServers"})
+	// Hermes loads top-level mcp_servers (GAP-1591); mcp.servers is where
+	// older DefenseClaw builds wrote, kept readable so it can be removed.
+	return readMCPFromYAMLPath(hermespath.ConfigPath(), []string{"mcp_servers"}, []string{"mcp", "servers"}, []string{"mcpServers"})
 }
 
 func readMCPServersCursor(workspaceDir string) ([]MCPServerEntry, error) {
