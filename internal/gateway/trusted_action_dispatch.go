@@ -163,11 +163,16 @@ func dispatchTrustedAction(
 	// staticTargetTwin is the complete analysis a redirect-target view was
 	// cut from, with the placeholder targets' redirect and path facts.
 	var staticTargetTwin *actionfacts.Facts
+	// subsetView is set when semanticFacts keeps only the action's static,
+	// certain commands; as on a redirect-target view, only a match counts.
+	subsetView := false
 	if !facts.Authoritative() {
 		if view, twin, ok := actionfacts.DynamicRedirectTargetReduction(request.Input, facts); ok {
 			semanticFacts, staticTargetTwin, viewCandidate = view, &twin, redirectReductionCandidate
 		} else if view, ok := actionfacts.ShortCircuitListReduction(request.Input, facts); ok {
 			semanticFacts, viewCandidate = view, listReductionCandidate
+		} else if view, ok := actionfacts.StaticCommandSubsetReduction(request.Input, facts); ok {
+			semanticFacts, viewCandidate, subsetView = view, subsetReductionCandidate, true
 		} else {
 			var fallbackTelemetry trustedActionTelemetry
 			findings, fallbackTelemetry = dispatchTrustedFallback(
@@ -181,7 +186,7 @@ func dispatchTrustedAction(
 		}
 	}
 	// matchOnly is set when only a match on the view counts.
-	matchOnly := staticTargetTwin != nil
+	matchOnly := staticTargetTwin != nil || subsetView
 	fullProjection, projectionCode := semantic.Project(semanticFacts)
 	if projectionCode != semantic.ProjectionOK {
 		var fallbackTelemetry trustedActionTelemetry
@@ -476,6 +481,17 @@ func withSequenceProvenFindings(findings, sequence []RuleFinding) []RuleFinding 
 // fallback, as for any other partial action.
 func redirectReductionCandidate(candidate compiledSemanticRule) bool {
 	return candidate.program.RedirectReductionSafe()
+}
+
+// subsetReductionCandidate reports whether a match of candidate on the view
+// from actionfacts.StaticCommandSubsetReduction may stand for the whole
+// action: the expression must be one that more commands and facts cannot turn
+// off (semantic.Program.StaticCommandSubsetSafe), and the rule must have no
+// code-owned prerequisite, a Go check written for complete facts. Other rules
+// keep their legacy fallback.
+func subsetReductionCandidate(candidate compiledSemanticRule) bool {
+	return candidate.owner.prerequisite == nil &&
+		candidate.program.StaticCommandSubsetSafe()
 }
 
 // listReductionCandidate reports whether a result of candidate on the view

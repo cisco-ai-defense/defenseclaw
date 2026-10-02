@@ -3419,6 +3419,34 @@ class TestMultiConnectorInit(unittest.TestCase):
             self.assertEqual(gc.connector, "claudecode")
             self.assertEqual(reloaded.claw.mode, "claudecode")
 
+    def test_activate_additional_connectors_observe_extras_follow_global_mode(self):
+        """GAP-1218: observe extras carry no per-connector override, so one
+        global mode switch moves them; an action extra keeps its own mode."""
+        from defenseclaw import config as cfg_mod
+        from defenseclaw.commands.cmd_init import _activate_additional_connectors
+
+        with patch.dict(os.environ, {"DEFENSECLAW_HOME": self.tmp_dir}), patch(
+            "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+            return_value=True,
+        ):
+            cfg = cfg_mod.default_config()
+            cfg.guardrail.connector = "codex"
+            cfg.claw.mode = "codex"
+            cfg.guardrail.mode = "observe"
+            cfg.guardrail.enabled = True
+            cfg.save()
+            none = {"fail_mode": None, "human_approval": None, "hilt_min_severity": None}
+            _activate_additional_connectors(
+                {"connector": "codex", "profile": "observe", **none},
+                [{"connector": "hermes", "profile": "observe", **none},
+                 {"connector": "claudecode", "profile": "action", **none}],
+                start_gateway=False,
+            )
+            gc = cfg_mod.load().guardrail
+            self.assertEqual(gc.connectors["hermes"].mode, "")
+            self.assertEqual(gc.connectors["codex"].mode, "")
+            self.assertEqual(gc.connectors["claudecode"].mode, "action")
+
     def test_activate_additional_connectors_leaves_out_unverified_macos_openhands(self):
         from defenseclaw import config as cfg_mod
         from defenseclaw.commands.cmd_init import _activate_additional_connectors

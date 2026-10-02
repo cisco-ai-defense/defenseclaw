@@ -113,6 +113,34 @@ func TestTrustedActionBlocksCommandRuleWithRuntimeExpandedRedirectTarget(t *test
 			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly, "TEST-MARKER-COMPLETE-ARGV": blocks},
 		},
 		{
+			// GAP-0029: the static echo runs whatever the runtime-expanded
+			// words elsewhere expand to, so a rule over its argv blocks.
+			name:    "command substitution in the target",
+			command: "echo " + redirectReductionMarker + " > /var/tmp/dc-x-$(id -u).txt",
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly, "TEST-MARKER-COMPLETE-ARGV": blocks},
+		},
+		{
+			name:    "PWD target",
+			command: "echo " + redirectReductionMarker + " > $PWD/dc-x.txt",
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly, "TEST-MARKER-COMPLETE-ARGV": blocks},
+		},
+		{
+			name:    "expansion in another command of the pipeline",
+			command: "echo " + redirectReductionMarker + " | tee /var/tmp/dc-x-$USER.txt",
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly, "TEST-MARKER-COMPLETE-ARGV": blocks},
+		},
+		{
+			// A runtime cd or a function could change what the echo runs.
+			name:    "after a runtime-expanded cd",
+			command: "cd $DIR; echo " + redirectReductionMarker + " > $PWD/dc-x.txt",
+			want:    map[string]string{"TEST-MARKER-BLOCK": detectionOnly, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly, "TEST-MARKER-COMPLETE-ARGV": detectionOnly},
+		},
+		{
+			name:    "after a function definition",
+			command: "echo() { :; }; echo " + redirectReductionMarker + " > $PWD/dc-x.txt",
+			want:    map[string]string{"TEST-MARKER-BLOCK": detectionOnly, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly, "TEST-MARKER-COMPLETE-ARGV": detectionOnly},
+		},
+		{
 			name:    "no redirect",
 			command: "echo " + redirectReductionMarker,
 			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-NO-STDOUT-REDIRECT": blocks, "TEST-MARKER-COMPLETE-ARGV": blocks},
