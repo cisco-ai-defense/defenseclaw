@@ -91,6 +91,11 @@ $PosixShim = "defenseclaw"
 # from the environment an agent runs it with (a custom DEFENSECLAW_HOME too).
 $HookState = "defenseclaw-hook-state.json"
 $ManagedFiles = $ManagedBinaries + @($ManagedShims | ForEach-Object { "$_.cmd" }) + @($PosixShim, $HookState)
+# What a `make all` developer install publishes to BinDir besides the managed
+# binaries (cmd_uninstall._WINDOWS_DEVELOPER_FILES). PATHEXT runs
+# defenseclaw.exe before the defenseclaw.cmd shim, so these must go.
+$DeveloperFiles = @("defenseclaw.exe", "litellm.exe", "skill-scanner.exe", "skill-scanner-api.exe",
+    "skill-scanner-pre-commit.exe", "mcp-scanner.exe", "mcp-scanner-api.exe", ".defenseclaw-source-root")
 # Data-dir entries that are install machinery, not user data.
 $NotData = @(".venv", ".venv.busy", ".uv", "previous", "previous.new", ".repair", ".staging", ".failed-*",
     "installer", "logs", ".install.lock", "backups", ".rollback-hold", ".rollback-hold.done")
@@ -747,6 +752,17 @@ function Remove-Aside([string]$Path) {
     $aside = "$Path.old-" + (Get-Date -Format "yyyyMMddTHHmmssfff")
     Move-Path $Path $aside
     Remove-Item -LiteralPath $aside -Force -ErrorAction SilentlyContinue
+}
+
+function Remove-DeveloperFiles {
+    # The source ownership marker proves the files came from `make all`.
+    if (-not (Test-Path -LiteralPath (Join-Path $BinDir ".defenseclaw-source-root") -PathType Leaf)) { return }
+    $removed = @()
+    foreach ($name in $DeveloperFiles) {
+        $path = Join-Path $BinDir $name
+        if (Test-Path -LiteralPath $path -PathType Leaf) { Remove-Aside $path; $removed += $name }
+    }
+    if ($removed) { Write-Info "Removed the developer install ('make all') files from ${BinDir}: $($removed -join ', ')" }
 }
 
 function Install-File([string]$Source, [string]$Destination) {
@@ -1583,6 +1599,7 @@ function Invoke-Install {
         }
     }
     Complete-Swap
+    Remove-DeveloperFiles
     try { [Console]::TreatControlCAsInput = $false } catch { }
 
     if ($startRc -eq 3) { Write-Warn "A connector needs attention before it is guarded again (see the gateway output above)" }

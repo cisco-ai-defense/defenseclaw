@@ -126,6 +126,17 @@ def test_uninstall_owns_every_file_the_installer_writes_to_local_bin() -> None:
     assert written | uv_written == windows_uninstall_helper._ALLOWED_BINARIES
 
 
+def test_a_release_install_removes_the_developer_install_files() -> None:
+    # GAP-1493: defenseclaw.exe from `make all` shadows the release
+    # defenseclaw.cmd (PATHEXT), so the release install removes what make all
+    # published beyond the managed binaries, once the swap is done.
+    developer = set(cmd_uninstall._WINDOWS_DEVELOPER_FILES) - set(_list("ManagedBinaries"))
+    assert set(_list("DeveloperFiles")) == developer
+    text = _text()
+    assert '(Join-Path $BinDir ".defenseclaw-source-root") -PathType Leaf' in text
+    assert "    Complete-Swap\n    Remove-DeveloperFiles\n" in text
+
+
 def test_cli_shim_is_the_one_uninstall_recognizes() -> None:
     match = re.search(r'\$text = "(@echo off[^\n]*)"\n', _text())
     assert match is not None
