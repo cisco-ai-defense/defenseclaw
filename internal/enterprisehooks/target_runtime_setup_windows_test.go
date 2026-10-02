@@ -633,6 +633,12 @@ func TestWindowsManagedRuntimeCleanupRemovesExactMultiConnectorFreshFootprint(t 
 			setWindowsManagedRuntimeCleanupConnectorBackupShape(t, filepath.Join(backupRoot, connectorName, leaf), target, false)
 		}
 	}
+	// Kiro setup writes kiro-created-dirs.json as the account with that
+	// owner-private shape; unlisted, it kept the root aside (GAP-1287).
+	if _, listed := spec.rootFiles["kiro-created-dirs.json"]; !listed {
+		t.Fatal("kiro cleanup contract does not list kiro-created-dirs.json")
+	}
+	setWindowsManagedRuntimeCleanupConnectorBackupShape(t, filepath.Join(plan.Roots[0].DataDir, "kiro-created-dirs.json"), target, false)
 	generations := make([]string, 0, len(spec.generationConnectors))
 	for connectorName := range spec.generationConnectors {
 		generations = append(generations, connectorName)

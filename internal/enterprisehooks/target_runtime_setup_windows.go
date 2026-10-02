@@ -168,6 +168,13 @@ var windowsManagedRuntimeCleanupOwnedLocks = map[string]struct{}{
 	".hook-api-token-publish.lock": {},
 }
 
+// windowsManagedRuntimeCleanupPrivateRootFiles are the root leaves the
+// connector code writes as the account with the owner-private descriptor of
+// a connector backup record (full control for the account and LocalSystem).
+var windowsManagedRuntimeCleanupPrivateRootFiles = map[string]struct{}{
+	"kiro-created-dirs.json": {},
+}
+
 type windowsManagedRuntimeCleanupSpec struct {
 	rootFiles            map[string]windowsManagedRuntimeCleanupFileContract
 	hookFiles            map[string]windowsManagedRuntimeCleanupFileContract
@@ -586,6 +593,9 @@ func windowsManagedRuntimeCleanupSpecs(plan WindowsManagedRuntimePlan, manifest 
 			if _, lock := windowsManagedRuntimeCleanupOwnedLocks[leaf]; lock {
 				spec.rootFiles[leaf] = windowsManagedRuntimeCleanupOwnedLockFile
 			}
+			if _, private := windowsManagedRuntimeCleanupPrivateRootFiles[leaf]; private {
+				spec.rootFiles[leaf] = windowsManagedRuntimeCleanupConnectorBackupFile
+			}
 		}
 		for _, leaf := range files.hooks {
 			spec.hookFiles[leaf] = windowsManagedRuntimeCleanupHookFile
@@ -675,6 +685,10 @@ var windowsManagedRuntimeCleanupConnectors = map[string]windowsManagedRuntimeCle
 		generation: true,
 	},
 	"kiro": {
+		// kiro-created-dirs.json lists the Kiro folders setup created
+		// (connector.kiroCreatedDirsFile). Unlisted, it kept every failed
+		// first install's root aside as .defenseclaw.rollback-<id> (GAP-1287).
+		root:       []string{"kiro-created-dirs.json"},
 		hooks:      windowsManagedRuntimeRuntimeLeaves("kiro", append([]string{"kiro-hook.sh"}, windowsManagedRuntimeSharedHookScripts...)...),
 		backups:    []string{"hooks-global.json", "agent-defenseclaw.json", "settings-cli.json"},
 		generation: true,

@@ -36,8 +36,9 @@ func windowsManagedHooksLifecycleFirstInstall(
 
 // Replaceable in tests.
 var (
-	windowsFirstInstallRollbackUserConfigRestorer = enterprisehooks.RestoreWindowsStandaloneUserAgentConfigs
-	windowsFirstInstallRollbackFootprintRemover   = rollbackWindowsStandaloneFirstInstallFootprint
+	windowsFirstInstallRollbackUserConfigRestorer   = enterprisehooks.RestoreWindowsStandaloneUserAgentConfigs
+	windowsFirstInstallRollbackCopilotVSCodeRemover = enterprisehooks.RemoveWindowsStandaloneCopilotVSCodeUserFiles
+	windowsFirstInstallRollbackFootprintRemover     = rollbackWindowsStandaloneFirstInstallFootprint
 )
 
 // rollbackWindowsStandaloneFirstInstallFootprint runs when a rolled-back
@@ -87,13 +88,7 @@ func rollbackWindowsStandaloneFirstInstallFootprint(ctx windowsManagedHooksLifec
 		if names := connectors[key]; len(names) > 0 {
 			account += " [" + strings.Join(names, ", ") + "]"
 		}
-		_, kept, err := windowsFirstInstallRollbackUserConfigRestorer(home, sid, target.DataDir)
-		for _, path := range kept {
-			note("%s: %s, which changed after DefenseClaw wrote it", account, path)
-		}
-		if leftover := windowsFirstInstallRollbackAccountLeftover(account, err); leftover != "" {
-			leftovers = append(leftovers, leftover)
-		}
+		leftovers = append(leftovers, rollbackWindowsFirstInstallAccount(account, home, sid, target.DataDir, connectors[key])...)
 	}
 	if err := enterprisehooks.RemoveWindowsPerUserManagedEnrollments(
 		ctx.opts.HookBinary,
@@ -131,6 +126,29 @@ func rollbackWindowsStandaloneFirstInstallFootprint(ctx windowsManagedHooksLifec
 	}
 	if err := enterprisehooks.RemoveWindowsStandaloneManagedPolicyLocks(ctx.opts.RequirementsPath); err != nil {
 		note("managed policy locks: %v", err)
+	}
+	return leftovers
+}
+
+// rollbackWindowsFirstInstallAccount puts back one account's agent files and
+// removes DefenseClaw's Copilot VS Code Local hook file and plugin from its
+// home when Copilot is enrolled for it: the guardian writes those without a
+// connector backup, so the restore alone left them pointing at a removed
+// hook (GAP-1287). It returns the account's leftovers.
+func rollbackWindowsFirstInstallAccount(account, home, sid, dataDir string, connectors []string) []string {
+	var leftovers []string
+	_, kept, err := windowsFirstInstallRollbackUserConfigRestorer(home, sid, dataDir)
+	for _, path := range kept {
+		leftovers = append(leftovers, fmt.Sprintf("%s: %s, which changed after DefenseClaw wrote it", account, path))
+	}
+	if leftover := windowsFirstInstallRollbackAccountLeftover(account, err); leftover != "" {
+		leftovers = append(leftovers, leftover)
+	}
+	if slices.Contains(connectors, "copilot") {
+		err := windowsFirstInstallRollbackCopilotVSCodeRemover(home, sid)
+		if leftover := windowsFirstInstallRollbackAccountLeftover(account+" Copilot VS Code hooks", err); leftover != "" {
+			leftovers = append(leftovers, leftover)
+		}
 	}
 	return leftovers
 }
