@@ -90,6 +90,7 @@ type APIServer struct {
 	scannerCfg        *config.Config
 	hilt              *HILTApprovalManager
 	notifier          *notifier.Dispatcher
+	webhookSource     func() *WebhookDispatcher
 	aiDiscoveryMu     sync.RWMutex
 	aiDiscovery       *inventory.ContinuousDiscoveryService
 	aiRuntimeMu       sync.RWMutex
@@ -686,6 +687,41 @@ func (a *APIServer) leaseAIDiscovery() (*inventory.ContinuousDiscoveryService, f
 // circuit on nil so callers do not need to guard each emission site.
 func (a *APIServer) SetNotifier(n *notifier.Dispatcher) {
 	a.notifier = n
+}
+
+// SetWebhookSource wires the gateway's current webhook dispatcher into the
+// connector-hook handlers. A func is stored because a config reload swaps
+// the dispatcher.
+func (a *APIServer) SetWebhookSource(source func() *WebhookDispatcher) {
+	a.webhookSource = source
+}
+
+// dispatchHookBlockWebhook sends an enforced connector-hook block to the
+// configured webhooks. Only the LLM proxy, watcher and health paths used to
+// dispatch, so blocks on the per-user hook connectors reached no webhook
+// (GAP-1145). Dispatch redacts the reason and applies severity, event and
+// cooldown filters.
+func (a *APIServer) dispatchHookBlockWebhook(connectorName, toolName, hookEvent, severity, reason string) {
+	if a == nil || a.webhookSource == nil {
+		return
+	}
+	webhooks := a.webhookSource()
+	if webhooks == nil {
+		return
+	}
+	target := strings.TrimSpace(toolName)
+	if target == "" {
+		target = hookEvent
+	}
+	webhooks.Dispatch(audit.Event{
+		Timestamp: time.Now().UTC(),
+		Action:    string(audit.ActionBlock),
+		Target:    target,
+		Actor:     "defenseclaw-hook",
+		Details:   fmt.Sprintf("connector=%s event=%s reason=%s", connectorName, hookEvent, reason),
+		Severity:  severity,
+		Connector: connectorName,
+	})
 }
 
 func (a *APIServer) connectorName() string {

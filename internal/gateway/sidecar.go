@@ -6693,6 +6693,7 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	api.SetAIDiscoveryService(s.aiDiscoverySnapshot())
 	api.SetAIRuntimeService(s.aiRuntimeSnapshot())
 	api.SetNotifier(s.osNotifier)
+	api.SetWebhookSource(s.webhooksSnapshot)
 	if s.opa != nil {
 		api.SetPolicyReloader(s.opa.Reload)
 	}

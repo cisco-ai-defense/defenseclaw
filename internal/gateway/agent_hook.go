@@ -2373,6 +2373,9 @@ func decodeAgentHookToolInput(raw json.RawMessage) map[string]interface{} {
 // PreToolUse" — operators paging through toasts can attribute each
 // one to a specific framework without opening the audit log.
 func (a *APIServer) dispatchAgentHookNotification(req agentHookRequest, action, rawAction, severity, reason string, wouldBlock bool, evalCtx hookEvaluationContext, policy ...redaction.SinkPolicy) {
+	if action == "block" {
+		a.dispatchHookBlockWebhook(req.ConnectorName, req.ToolName, req.HookEventName, severity, reason)
+	}
 	if a == nil || a.notifier == nil {
 		return
 	}
