@@ -43,6 +43,7 @@ const (
 
 type LogAdapter struct {
 	config        signalConfig
+	destination   string
 	builder       *CanonicalLogRequestBuilder
 	httpClient    *http.Client
 	httpTransport *http.Transport
@@ -83,7 +84,7 @@ func (factory *Factory) NewLogAdapter(ctx context.Context, snapshot LogResourceS
 		return nil, err
 	}
 	adapter := &LogAdapter{
-		config: config, builder: builder,
+		config: config, destination: factory.config.Destination, builder: builder,
 		maxBytes: factory.config.Batch.MaxExportBatchBytes, gate: make(chan struct{}, 1),
 	}
 	adapter.gate <- struct{}{}
@@ -194,11 +195,15 @@ func canonicalLogSeverityNumber(level string) logspb.SeverityNumber {
 		return logspb.SeverityNumber_SEVERITY_NUMBER_DEBUG
 	case "INFO":
 		return logspb.SeverityNumber_SEVERITY_NUMBER_INFO
-	case "WARN", "WARNING":
+	// Security severities (records without a log level, such as scan
+	// findings and hook decisions) map onto the nearest OTel band.
+	case "LOW":
+		return logspb.SeverityNumber_SEVERITY_NUMBER_INFO2
+	case "WARN", "WARNING", "MEDIUM":
 		return logspb.SeverityNumber_SEVERITY_NUMBER_WARN
-	case "ERROR":
+	case "ERROR", "HIGH":
 		return logspb.SeverityNumber_SEVERITY_NUMBER_ERROR
-	case "FATAL":
+	case "FATAL", "CRITICAL":
 		return logspb.SeverityNumber_SEVERITY_NUMBER_FATAL
 	default:
 		return logspb.SeverityNumber_SEVERITY_NUMBER_UNSPECIFIED
@@ -252,6 +257,7 @@ func (adapter *LogAdapter) deliverHTTP(ctx context.Context, request *collectorlo
 		return failedResult(delivery.OutcomeTransient, httpStatusFailureCode(response.StatusCode))
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		logHTTPRejection(adapter.destination, observability.SignalLogs, response, recordCount, nil)
 		return failedResult(delivery.OutcomePermanentPayload, httpStatusFailureCode(response.StatusCode))
 	}
 	body, readErr := io.ReadAll(io.LimitReader(response.Body, maxLogResponseBodyBytes+1))

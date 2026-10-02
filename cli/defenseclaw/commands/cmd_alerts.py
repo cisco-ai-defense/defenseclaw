@@ -565,7 +565,7 @@ _DELIVERY_FAILURE_REASONS = {
     "hec_ack_authentication": "the destination rejected the credentials; check the HEC token",
     "http_retryable": "the destination was busy or failing (HTTP 408, 429 or 5xx)",
     "hec_ack_retryable": "the destination was busy and asked for a retry",
-    "http_rejected": "the destination rejected the data (HTTP 4xx)",
+    "http_rejected": "the destination rejected the data (HTTP 4xx); gateway.log names the status code and reason",
     "hec_ack_rejected": "the destination rejected the data",
     "resolution_failed": "the endpoint host name did not resolve; check the endpoint and DNS",
     "connection_failed": "could not connect to the endpoint; check the endpoint and the network",

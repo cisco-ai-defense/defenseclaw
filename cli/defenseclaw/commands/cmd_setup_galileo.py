@@ -221,7 +221,10 @@ def test_cmd(app: AppContext, timeout: float) -> None:
 _GALILEO_DELIVERY_HINTS = {
     "http_authentication": "Galileo rejected the credentials (HTTP 401/403): check that the API key and "
     "project belong to this deployment",
-    "http_rejected": "Galileo rejected the data (HTTP 4xx): check the project and log stream names",
+    "http_rejected": (
+        "Galileo rejected the data (HTTP 4xx): check the project and log stream names; "
+        "gateway.log names the status code and reason"
+    ),
     "resolution_failed": "the endpoint host name did not resolve: check the endpoint and DNS",
     "connection_failed": "could not connect to the endpoint: check the endpoint and the network",
     "request_timeout": "the export to Galileo timed out: check the network, then retry",
