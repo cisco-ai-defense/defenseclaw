@@ -381,7 +381,9 @@ def test_windows_hermes_idle_is_healthy_not_pending_reload() -> None:
     listing = '"pwsh.exe","4100","RDP-Tcp#0","2","90,000 K"\n"defenseclaw-gateway.exe","4200","RDP-Tcp#0","2","40,000 K"\n'
     assert cmd_doctor._hermes_host_running_windows(listing) is False
     assert cmd_doctor._hermes_host_running_windows(listing + '"hermes.exe","4300","RDP-Tcp#0","2","9 K"\n') is True
-    assert cmd_doctor._hermes_host_running_windows(listing + '"python.exe","4400","RDP-Tcp#0","2","9 K"\n') is None
+    # An interpreter is judged by its command line (GAP-1605); unreadable is unknown.
+    with mock.patch.object(cmd_doctor, "_windows_process_command_lines", return_value=None):
+        assert cmd_doctor._hermes_host_running_windows(listing + '"python.exe","4400","RDP-Tcp#0","2","9 K"\n') is None
     assert cmd_doctor._hermes_host_running_windows("INFO: No tasks are running.\n") is None
 
     pending = WindowsHookCheck(
