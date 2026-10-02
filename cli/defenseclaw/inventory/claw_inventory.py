@@ -405,6 +405,10 @@ def enrich_with_policy(
                 verdict, detail = "discovery-only", "vendor-bundled; not scanned or blocked"
             item["policy_verdict"] = verdict
             item["policy_detail"] = detail
+            if target_type == "skill":
+                # GAP-1997: "eligible" says the agent loads the skill; this
+                # says DefenseClaw scans it, matching summary.skills.eligible.
+                item["scan_eligible"] = bool(item.get("eligible")) and verdict != "discovery-only"
             # GAP-1383: a skill DefenseClaw disabled or quarantined is not
             # enabled, whatever the connector's own config says; the Skills
             # panel and 'skill info' already say so.
@@ -1161,9 +1165,18 @@ def _render_skills(console: Any, skills: list[dict[str, Any]]) -> None:
     ineligible = [s for s in skills if not s.get("eligible")]
     has_policy = any(s.get("policy_verdict") for s in skills)
     has_scan = any("scan_findings" in s for s in skills)
+    discovery_only = sum(1 for s in eligible if s.get("policy_verdict") == "discovery-only")
 
     if eligible:
-        table = Table(title=f"Skills — eligible ({len(eligible)})")
+        # GAP-1997: discovery-only skills are listed but not scanned, so the
+        # title counts them apart, as the summary line does.
+        title = f"Skills — eligible ({len(eligible)})"
+        if discovery_only:
+            title = (
+                f"Skills ({len(eligible)}): {len(eligible) - discovery_only} eligible, "
+                f"{discovery_only} discovery-only"
+            )
+        table = Table(title=title)
         table.add_column("Name", style="green bold")
         table.add_column("Source")
         table.add_column("Description", max_width=50)

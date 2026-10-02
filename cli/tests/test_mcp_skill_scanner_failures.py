@@ -199,3 +199,64 @@ def test_mcp_list_marks_failed_scan(tmp_path):
     assert items["fresh"]["verdict"] == "scan failed"
     assert items["fresh"]["last_scan_error"] == "scan failed: connection cancelled"
     assert items["fine"]["verdict"] == "-"
+
+
+def test_mcp_list_drops_stale_severity_after_failed_scan(tmp_path):
+    """GAP-1991: a clean scan older than a failed one is not the current severity."""
+    from datetime import datetime, timedelta, timezone
+
+    from defenseclaw.commands.cmd_mcp import (
+        _build_mcp_failed_scan_map,
+        _build_mcp_scan_map,
+        _mcp_list_json_items,
+    )
+    from defenseclaw.config import MCPServerEntry
+    from defenseclaw.db import Store
+
+    store = Store(str(tmp_path / "audit.db"))
+    store.init()
+    store.db.execute("ALTER TABLE scan_results ADD COLUMN exit_code INTEGER")
+    store.db.execute("ALTER TABLE scan_results ADD COLUMN error TEXT")
+    t0 = datetime(2026, 10, 2, 12, 0, tzinfo=timezone.utc)
+    for scan_id, ts, exit_code, error in (
+        ("ok", t0, 0, None),
+        ("bad", t0 + timedelta(minutes=5), 1, "scan failed: connection cancelled"),
+    ):
+        store.db.execute(
+            "INSERT INTO scan_results (id, scanner, target, timestamp, finding_count, max_severity,"
+            " exit_code, error) VALUES (?, 'mcp-scanner', 'mcp://codex/loop', ?, 0, 'INFO', ?, ?)",
+            (scan_id, ts.isoformat(), exit_code, error),
+        )
+    store.db.commit()
+    servers = [MCPServerEntry(name="loop", url="http://127.0.0.1:47311/mcp")]
+
+    scan_map = _build_mcp_scan_map(store, servers, "codex", allow_legacy_plain=False)
+    failed = _build_mcp_failed_scan_map(store, servers, "codex", allow_legacy_plain=False)
+    [item] = _mcp_list_json_items(servers, scan_map, {}, connector="codex", failed_map=failed)
+
+    assert "severity" not in item
+    assert item["last_good_severity"] == "CLEAN"
+    assert item["verdict"] == "scan failed"
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (
+            "refusing to scan remote MCP target http://127.0.0.1:47311/mcp: host '127.0.0.1' resolves to "
+            "disallowed address 127.0.0.1 (use --allow-private to opt in)",
+            "defenseclaw mcp scan loop --connector codex --allow-private",
+        ),
+        ("command is not an allowlisted stdio launcher (allowed: npx, uvx)", "not an npx or uvx launcher"),
+        ("scan failed: Connection to MCP server was cancelled", "fix reachability, then scan again"),
+    ],
+)
+def test_failed_scan_next_step_follows_error(error, expected):
+    """GAP-1992: the footer hint matches why the scan failed."""
+    from defenseclaw.commands.cmd_mcp import _failed_scan_next_step
+
+    hint = _failed_scan_next_step("loop", "codex", error)
+
+    assert expected in hint
+    if "allow-private" not in expected:
+        assert "--allow-private" not in hint
