@@ -306,6 +306,16 @@ your own Codex configuration does not change.
   on `PATH` and a forged sandbox token), and a live sandbox run fired the hooks
   and honoured a deny with a Bedrock Mantle model.
 
+## Troubleshooting
+
+- **401 from the model right after you changed its key.** Codex keeps one
+  shared app-server daemon running in the background, and that daemon keeps
+  the environment it started with. After you rotate the provider key (for
+  example a short-term Amazon Bedrock key in `AWS_BEARER_TOKEN_BEDROCK`, or
+  `OPENAI_API_KEY`), run `codex app-server daemon restart` from a shell that
+  has the new key, then open Codex again. The request fails before any tool
+  call, so DefenseClaw's hooks are not involved.
+
 ## Disable
 
 ```bash
