@@ -596,6 +596,10 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
         self.assertIn("Multiple connectors detected/configured", output)
         self.assertIn("codex, hermes", output)
         self.assertNotIn('"connector": "codex"', result.output)
+        # GAP-1352: --connector would be refused here; name the setup command.
+        self.assertIn("This install already guards: codex, hermes", output)
+        self.assertIn("defenseclaw setup <connector> --yes", output)
+        self.assertNotIn("Re-run with --connector", output)
 
 
 if __name__ == "__main__":
