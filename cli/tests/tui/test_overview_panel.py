@@ -369,7 +369,7 @@ def test_agent_detail_rolls_up_connectors_in_multi_connector() -> None:
             ),
         )
     )
-    assert multi.agent_detail() == "1/2 connectors running"
+    assert multi.agent_detail() == "1/2 connectors running · not running: Cursor"
     assert multi.subsystem_state("agent") == "degraded"
 
     # Older gateway without a connectors[] array -> configured count fallback.
@@ -1111,3 +1111,36 @@ def test_guardrail_detail_names_the_rule_pack_not_a_placeholder_strategy() -> No
     assert detail("/p/guardrail/strict") == "observe, port 4000, strict pack"
     assert detail("/p/guardrail/protected-codex/default") == "observe, port 4000, protected-codex pack"
     assert detail("") == "observe, port 4000"
+
+
+def test_overview_health_signals_name_their_cause() -> None:
+    """GAP-1158: no proxy port for hook-only rosters, the zero-hook notice is
+    scoped to the gateway uptime, and a DEGRADED runtime says why."""
+
+    from defenseclaw.tui.services.overview_state import zero_connector_requests_notice
+    from defenseclaw.tui.services.runtime_state import RuntimeOverview
+
+    hook_only = OverviewConfig(
+        guardrail_enabled=True,
+        guardrail_mode="action",
+        guardrail_port=4000,
+        guardrail_connector="claudecode",
+        claw_mode="claudecode",
+    )
+    assert "port" not in OverviewPanelModel(hook_only, version="test").guardrail_detail()
+    proxy = OverviewConfig(guardrail_enabled=True, guardrail_port=4000, guardrail_connector="openclaw")
+    assert "port 4000" in OverviewPanelModel(proxy, version="test").guardrail_detail()
+
+    assert "since the gateway started" in zero_connector_requests_notice("claudecode", timedelta(minutes=6))
+
+    model = OverviewPanelModel(hook_only, version="test")
+    model.runtime = RuntimeOverview(
+        health_title="DEGRADED",
+        enabled=True,
+        scanned=True,
+        processes=845,
+        connections=6,
+        degraded_reason="partial coverage: shadow-egress idle",
+    )
+    messages = [notice.message for notice in model.build_notices()]
+    assert any("shadow-egress idle" in m for m in messages), messages

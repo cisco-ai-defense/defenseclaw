@@ -6203,7 +6203,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             guardrail_bits: list[str] = [
                 f"[{TOKENS.accent_green}]{guardrail_mode}[/]"
             ]
-            if cfg and cfg.guardrail_port:
+            if cfg and cfg.guardrail_port and cfg.uses_guardrail_proxy_port():
                 guardrail_bits.append(f":{cfg.guardrail_port}")
             llm_label = self._compact_llm_provider(
                 cfg.llm_provider if cfg else "",
@@ -8416,6 +8416,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         )
         for display_name, key in services_layout:
             state = state_by_key.get(key, "unknown")
+            # The gateway does not report sink health yet; a permanent
+            # "unknown" row only adds noise (GAP-1158).
+            if key == "sinks" and not _service_reported(state):
+                continue
             color = state_color(state)
             normalized = (state or "").strip().lower()
             dot = "●" if normalized in {"running", "active", "enabled", "clean", "allowed"} else "○"
@@ -9458,7 +9462,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             ("Watchdog", state_by_key.get("watcher", "unknown"), detail_by_key.get("watcher", "")),
             ("Guardrail", state_by_key.get("guardrail", "unknown"), detail_by_key.get("guardrail", "")),
             ("API", state_by_key.get("api", "unknown"), detail_by_key.get("api", "")),
-            ("Sinks", state_by_key.get("sinks", "unknown"), detail_by_key.get("sinks", "")),
+            *(
+                (("Sinks", state_by_key["sinks"], detail_by_key.get("sinks", "")),)
+                if _service_reported(state_by_key.get("sinks", ""))
+                else ()
+            ),
             ("Telemetry", state_by_key.get("telemetry", "unknown"), detail_by_key.get("telemetry", "")),
             ("AI Discovery", state_by_key.get("ai_discovery", "unknown"), detail_by_key.get("ai_discovery", "")),
         ]
@@ -15078,6 +15086,10 @@ def _truncate_for_strip(value: str, width: int) -> str:
     if len(cleaned) <= limit:
         return cleaned
     return cleaned[: max(0, limit - 3)] + "..."
+
+
+def _service_reported(state: str) -> bool:
+    return (state or "").strip().lower() not in {"", "unknown"}
 
 
 def _palette_risk_style(badge: str) -> str:

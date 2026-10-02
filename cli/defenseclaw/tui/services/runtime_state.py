@@ -197,6 +197,9 @@ class RuntimeOverview:
     context: str = ""
     top_findings: tuple[str, ...] = ()
     next_action: str = ""
+    # Why the badge says DEGRADED, in a few words (e.g. "partial coverage:
+    # shadow-egress idle"), so Overview can say it without the Runtime tab.
+    degraded_reason: str = ""
 
 
 def decode_runtime_snapshot(payload: Any) -> RuntimeSnapshot:
@@ -428,7 +431,22 @@ class RuntimePanelModel:
             context=self.findings_context(),
             top_findings=tuple(top),
             next_action=self.next_action(),
+            degraded_reason=self.degraded_reason(),
         )
+
+    def degraded_reason(self) -> str:
+        """Short cause for a DEGRADED badge; empty when not degraded."""
+
+        if self.health_state() != "degraded":
+            return ""
+        if self.snapshot.degraded_reasons:
+            return "; ".join(self.snapshot.degraded_reasons)
+        gaps = [
+            f"{plane.name} {plane.badge}"
+            for plane in self.snapshot.planes
+            if plane.badge != "up" and _selected_plane_gap(plane)
+        ]
+        return f"partial coverage: {', '.join(gaps)}" if gaps else "partial coverage"
 
     def health_state(self) -> str:
         """Operator-facing health: off, waiting, degraded, or healthy."""
