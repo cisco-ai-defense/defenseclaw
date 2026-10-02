@@ -269,7 +269,9 @@ const codeAgentUnprotected = enterprisehooks.UnprotectedCodeAgentUnprotected
 // installed but could not enroll (its unprotected-agents record next to the
 // manifest) and marks the deployment security-incomplete. Each is one
 // account's agent, so it is a warning for that account, verify included; an
-// unreadable record hides which agents they are, so verify fails on it.
+// unreadable record hides which agents they are, so verify fails on it, as
+// on an app or extension surface enterprise.enrollment.unverified_versions:
+// refuse could not refuse.
 func (l *lifecycle) describeUnprotectedAgents() {
 	env, r := l.env, l.result
 	data, err := readBounded(env.P(enterprisehooks.UnprotectedAgentsPath(env.Layout.ManifestPath)), enterprisehooks.UnprotectedAgentsMaxBytes)
@@ -288,6 +290,10 @@ func (l *lifecycle) describeUnprotectedAgents() {
 		return
 	}
 	for _, agent := range agents {
+		if agent.Refusal == enterprisehooks.RefusalMissing && l.opts.Action == ActionVerify {
+			r.AddError(agent.Code, agent.Message())
+			continue
+		}
 		r.AddWarning(agent.Code, agent.Message())
 	}
 	if len(agents) > 0 {

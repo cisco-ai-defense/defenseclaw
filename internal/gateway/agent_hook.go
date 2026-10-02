@@ -277,7 +277,23 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Copilot hook event registration is required"})
 				return
 			}
-			if !connector.ValidCopilotHookEvent(event) {
+			vscodeLocal := copilotHookDialectFromHeaders(r.Header) == connector.CopilotHookSurfaceVSCodeLocal
+			if vscodeLocal {
+				// The VS Code Local harness names the event in its body.
+				// It must be the event the hook command is bound to, so a
+				// body cannot pick a weaker event's handling.
+				if !connector.ValidCopilotVSCodeLocalHookEvent(event) {
+					a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "invalid_event", int64(len(b)))
+					a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid Copilot hook event"})
+					return
+				}
+				if payloadString(payload, "hook_event_name") != event {
+					a.recordConnectorHookRejection(r.Context(), connectorName, event, "harness_event_mismatch", int64(len(b)))
+					a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "harness_event_mismatch"})
+					return
+				}
+				r = r.WithContext(withCopilotVSCodeLocal(r.Context()))
+			} else if !connector.ValidCopilotHookEvent(event) {
 				a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "invalid_event", int64(len(b)))
 				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid Copilot hook event"})
 				return
@@ -333,6 +349,9 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		if connectorName == "kiro" {
 			req.HookSurface = kiroHookSurfaceFromHeaders(r.Header)
 		}
+		if connectorName == "copilot" && copilotVSCodeLocalFromContext(r.Context()) {
+			req.HookSurface = connector.CopilotHookSurfaceVSCodeLocal
+		}
 		// tokenAuth wraps this handler in APIServer.Run, so reaching this point
 		// proves the connector hook route authenticated the request. A fresh
 		// SessionStart is the last authoritative recovery signal before a
@@ -349,6 +368,16 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				})
 				return
 			}
+		}
+		// A second delivery of one Copilot tool call (see
+		// agent_hook_copilot_dedupe.go) gets the first delivery's verdict,
+		// rendered for its own profile, and is not evaluated or audited
+		// again.
+		earlier, deduped, dedupeTicket := a.copilotDedupe.begin(r.Context(), connectorName, req)
+		defer dedupeTicket.release()
+		if deduped {
+			a.writeJSON(w, http.StatusOK, renderAgentHookResponseForProfile(profile, copilotDedupedResponse(profile, req, earlier)))
+			return
 		}
 		// From here on the hook is accepted: its verdict is enforced, so its
 		// correlation, hook_decision and audit row must not depend on the client
@@ -380,6 +409,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		req.toolChain = &toolChainHookCapture{}
 		ctx = withToolChainHookCapture(ctx, req.toolChain)
 		ctx = withSandboxCoverage(ctx)
+		ctx = withAgentHost(ctx, r.Header)
 		ctx = enrichAgentHookContext(ctx, req)
 		ctx = withHookToolCallCapture(ctx, &hookToolCallCapture{})
 		if a.hookJudge != nil && shouldResetToolJudgeSession(req) {
@@ -568,6 +598,9 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			runtime.EmitLLMEvent(a, ctx, req, b, payload, rawEventIDs)
 		}
 
+		if !panicked {
+			dedupeTicket.complete(resp)
+		}
 		persistCtx, cancelPersist := agentHookPersistenceContext(ctx)
 		defer cancelPersist()
 		persisted := a.finalizeAgentHook(persistCtx, connectorName, req, resp, rawEventIDs, b, elapsed, panicked, hookRequestAuditExtra(ctx, profile))
@@ -2006,6 +2039,9 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 		fallbackTool := agentHookTrustedActionTool(
 			req.ConnectorName, req.ToolName, runtime.GOOS,
 		)
+		if req.ConnectorName == "copilot" && req.HookSurface == connector.CopilotHookSurfaceVSCodeLocal {
+			fallbackTool = connector.CopilotVSCodeLocalActionTool(req.ToolName)
+		}
 		actionTool, resourceIdentity := trustedToolActionFromContext(
 			ctx, req.ConnectorName, req.ToolName, fallbackTool,
 		)

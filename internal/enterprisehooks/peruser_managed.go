@@ -36,6 +36,7 @@ var windowsStandalonePerUserConnectors = map[string]bool{
 	"antigravity": true,
 	"devin":       true,
 	"hermes":      true,
+	"kiro":        true,
 	"opencode":    true,
 	"amp":         false,
 }
@@ -74,7 +75,6 @@ func windowsStandaloneRuntimeOnlyConnector(name string) bool {
 var windowsEnterpriseRefusedConnectors = map[string]string{
 	"openhands": "OpenHands CLI requires WSL on Windows; DefenseClaw has no WSL connector path",
 	"omnigent":  "OmniGent enforces through an in-process policy API with no hook boundary a standard user cannot remove; it is not managed on Windows",
-	"kiro":      "Kiro is managed through `defenseclaw-gateway enterprise acp`, not the hook guardian",
 	"openclaw":  "OpenClaw requires the guardrail proxy, which the Windows enterprise profile does not host",
 	"zeptoclaw": "ZeptoClaw requires the guardrail proxy, which the Windows enterprise profile does not host",
 }
@@ -89,7 +89,7 @@ func windowsStandalonePerUserConnector(name string) (hookBinary, ok bool) {
 // WindowsStandalonePerUserConnectorNames returns the per-user connector names
 // in a stable order.
 func WindowsStandalonePerUserConnectorNames() []string {
-	return []string{"amp", "antigravity", "copilot", "devin", "hermes", "opencode"}
+	return []string{"amp", "antigravity", "copilot", "devin", "hermes", "kiro", "opencode"}
 }
 
 // WindowsEnterpriseRefusedConnectorReason returns the administrator-facing
@@ -107,6 +107,9 @@ func isWindowsStandalonePerUserBuiltin(name string, conn connector.Connector) bo
 		return connector.IsBuiltinAMPConnector(conn)
 	case "copilot", "antigravity", "devin", "hermes", "opencode":
 		return connector.IsBuiltinHookOnlyConnector(conn, strings.ToLower(strings.TrimSpace(name)))
+	case "kiro":
+		_, ok := conn.(*connector.KiroConnector)
+		return ok
 	default:
 		return false
 	}

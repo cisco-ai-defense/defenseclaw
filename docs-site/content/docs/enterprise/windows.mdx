@@ -565,8 +565,8 @@ uninstall succeeds and changes nothing.
 
 Uninstall revokes every per-user enrollment first. Once it has committed,
 it removes DefenseClaw's own hook registrations and plugins (Amp,
-Antigravity, Devin, Hermes, OpenCode, and a DefenseClaw Copilot user hook
-file) from the agent configuration of every signed-in user, running as that
+Antigravity, Devin, Hermes, Kiro, OpenCode, and a DefenseClaw Copilot user
+hook file) from the agent configuration of every signed-in user, running as that
 user. Only DefenseClaw's entries are removed; the user's own hooks and
 settings stay. Cleanups the guardian still owed to revoked users are
 included.
@@ -601,7 +601,7 @@ what it names as LocalSystem.
 What stays is inert. Uninstall has already revoked every enrollment. The
 OpenCode and Amp plugins stop enforcing once uninstall removes
 `C:\ProgramData\Cisco\DefenseClaw-HookRuntime` and the install marker. The
-Devin, Hermes and Antigravity hooks point at the removed
+Devin, Hermes, Antigravity and Kiro hooks point at the removed
 `defenseclaw-hook.exe`, so each hook call fails to start. None of these
 agents blocks on that: Devin blocks only on exit code 2 (a missing command
 exits 127), and Hermes and Antigravity do not enforce a nonzero hook exit. A
@@ -690,6 +690,64 @@ format and cannot be passed here. Later `repair`, `verify` and `uninstall`
 runs re-trust the installed files from the digests the deployment recorded,
 so they need no manifest.
 
+## Agent sessions in WSL
+
+An agent that runs inside a WSL 2 distribution is outside every policy
+DefenseClaw publishes on Windows. The distribution has its own
+`/etc/claude-code` and `~/.codex`, the user can open it as root
+(`wsl -u root`), and Windows endpoint sensors do not see the WSL VM. The
+standalone profile keeps these sessions off where a vendor documents a
+control, and `enterprise policy show` and `verify` report the rest in a `wsl`
+row. Set the behavior under `enterprise.machine_policy.windows_wsl` (see
+[Configuration](/docs/enterprise/configuration)).
+
+| Surface | What DefenseClaw does | Vendor source |
+| --- | --- | --- |
+| Claude Desktop WSL sessions | The guardian adds `disableWslSessions` (REG_SZ `true`) to `HKLM\SOFTWARE\Policies\Claude` when the key already holds machine policy. It never changes an administrator's value: an administrator `false` or `0` turns WSL sessions on and fails `verify` unless `agent_sessions: allow` is set. | [Claude Code admin setup](https://code.claude.com/docs/en/admin-setup), [Claude Desktop MDM](https://claude.com/docs/third-party/claude-desktop/mdm) |
+| `wslInheritsWindowsSettings` | Detected, never written, in `HKLM` or `HKCU` `SOFTWARE\Policies\ClaudeCode\Settings` and the Program Files managed settings. While WSL sessions are allowed it fails `verify`: a WSL session would load DefenseClaw's Windows hook command, which cannot start inside Linux. | [Claude Code admin setup](https://code.claude.com/docs/en/admin-setup) |
+| Codex IDE extension | Every guardian pass, as each enrolled user, the guardian resets `chatgpt.runCodexInWindowsSubsystemForLinux: true` to `false` in VS Code, VS Code Insiders and Cursor user settings, profiles included, keeping every other byte. After 3 repairs for one account within an hour it only reports. `chatgpt.cliExecutable` is reported, not changed. | [Codex IDE settings](https://learn.chatgpt.com/docs/ide/settings) |
+| Codex app | Reported only. The agent environment (Windows native or WSL) is an in-app setting with no documented managed control or storage. | [Codex app on Windows](https://learn.chatgpt.com/docs/windows/windows-app) |
+| WSL itself | With `platform: disable`, the guardian sets `HKLM\SOFTWARE\Policies\WSL\AllowWSL=0`, which turns WSL off for every account. It never replaces an administrator value. | [WSL settings for enterprise](https://learn.microsoft.com/en-us/windows/wsl/intune) |
+
+Claude Desktop's hive rule decides where the gate may go. Any REG_SZ,
+REG_EXPAND_SZ or REG_DWORD value directly under `HKLM\SOFTWARE\Policies\Claude`
+makes Desktop ignore `HKCU\SOFTWARE\Policies\Claude` entirely, and a managed
+key other than Desktop's app-behavior keys makes Desktop ignore local
+third-party configuration in `%LOCALAPPDATA%\Claude-3p\configLibrary`. So by
+default DefenseClaw only joins machine policy that is already there. With an
+empty key, Claude Desktop's own default applies: it keeps WSL sessions off on
+devices it treats as organization-managed. The `wsl` row stays covered and
+shows a `pending` line with the step that makes the gate explicit: add the
+output of `enterprise policy export --connector wsl` (`reg`, `json` or
+`intune`) to the Claude Desktop policy you already deploy, or set
+`claude_desktop_key: create`. With `create` DefenseClaw writes the value to an
+empty key, but still not while a signed-in account has HKCU Claude Desktop
+policy or any account has local third-party configuration; then `verify`
+fails, because the requested gate is missing. It never writes the gate when
+the key grants write access to anyone other than Administrators, SYSTEM and
+TrustedInstaller, and `verify` fails, because a standard account could turn
+WSL sessions on. Uninstall removes only the values DefenseClaw wrote that are
+still unchanged.
+
+Limits:
+
+- Whether REG_SZ `true` forces Claude Desktop's WSL gate off is not
+  documented; the vendor documents only `false` and `0`, which turn WSL
+  sessions on. Desktop also turns WSL sessions off by default on devices it
+  treats as managed. Check Desktop's `main.log` for `[wslPolicyGate]` lines
+  after you deploy.
+- A Claude Desktop WSL session that is already running continues. Desktop
+  checks the value at each WSL session start.
+- A user can turn the Codex extension setting back on. The window lasts until
+  the next guardian pass. The setting is window-scoped, so a trusted
+  workspace's `.vscode/settings.json` or `.code-workspace` file can also turn
+  it on; workspace settings and VS Code Remote - WSL windows are not checked.
+- Agent CLIs that a user runs inside the distribution, and editor or SSH
+  sessions into it, are not covered. Only `platform: disable` (`AllowWSL=0`)
+  closes WSL as a whole.
+- A Linux standalone install inside the distribution is refused. See
+  [Linux requirements](/docs/enterprise/linux#requirements).
+
 ## Connectors on Windows
 
 | Connector | Route on Windows | Notes |
@@ -701,7 +759,7 @@ so they need no manifest.
 | OpenCode | Machine policy | `%ProgramData%\opencode` loads the managed plugin, plus a per-user hook runtime. Falls back to the per-user plugin while the managed plugin is not in force |
 | Antigravity, Devin, Hermes | Per user | The guardian registers `defenseclaw-hook.exe` in each user's agent config |
 | Amp | Per user | The guardian registers an in-agent plugin that calls the gateway after the listener proves it can derive the user's credential |
-| Kiro | ACP | Managed through `defenseclaw-gateway enterprise acp`. See [ACP guard](/docs/acp-guard). The guardian does not enroll Kiro on Windows: `kiro-cli.exe` records its version nowhere DefenseClaw can read without running it. |
+| Kiro | Per user | The guardian writes `defenseclaw-hook.exe` into each user's global `%USERPROFILE%\.kiro\hooks\defenseclaw.json` (Kiro IDE 1.0.182 and later, `kiro-cli --v3`) and the CLI 2.x `defenseclaw` agent. A kiro-cli that has never run is reported until its first run. See [Kiro](/docs/connectors/kiro#enterprise-standalone-profile). The [ACP guard](/docs/acp-guard) stays available |
 | OpenHands, OmniGent, OpenClaw, ZeptoClaw | Not managed | The enumerator writes no targets for them, so they are not protected. A target manifest row that names one is refused with a reason. |
 
 Windows handles machine policy differently from Linux and macOS. See

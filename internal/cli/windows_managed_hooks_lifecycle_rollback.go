@@ -115,6 +115,9 @@ func rollbackWindowsStandaloneFirstInstallFootprint(ctx windowsManagedHooksLifec
 		if _, err := enterprisepolicy.RemoveWindowsClaudeVersionFloor(opts); err != nil {
 			note("the Claude Code version floor: %v", err)
 		}
+		if _, err := enterprisepolicy.RemoveWindowsWSL(opts); err != nil {
+			note("the WSL agent-session policy: %v", err)
+		}
 	}
 	if err := enterprisehooks.RemoveWindowsStandalonePerUserRuntimeSelectors(); err != nil {
 		note("per-user runtime selectors: %v", err)

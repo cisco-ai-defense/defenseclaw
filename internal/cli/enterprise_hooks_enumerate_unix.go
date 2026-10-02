@@ -32,6 +32,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
@@ -303,8 +304,9 @@ func runEnterpriseHooksEnumerateCycle(
 		MachinePolicyConnectors: machinePolicy,
 		OwnershipOffConnectors:  enterprisepolicy.OwnershipOffConnectors(current, runtime.GOOS),
 		SessionUIDs:             enterpriseHookSessionUIDs,
-		Discover:                enterpriseHooksEnumerateDiscover,
-		DiscoverStatic:          enterpriseHooksEnumerateDiscoverStatic,
+		DiscoverSurfaces:        enterpriseHooksEnumerateDiscoverSurfaces,
+		DiscoverStaticSurfaces:  enterpriseHooksEnumerateDiscoverStaticSurfaces,
+		PreviousRefusedSurfaces: readEnterpriseHookRefusedSurfaces(current.DataDir, stderr),
 		MachineVersion:          enterprisehooks.DiscoverUnixMachineAgentVersion,
 		State:                   state,
 		Logger: func(subject, reason string) {
@@ -341,6 +343,9 @@ func runEnterpriseHooksEnumerateCycle(
 	if err := enterpriseHooksEnumerateUnprotectedWriter(enterprisehooks.UnprotectedAgentsPath(manifestPath), cycle.Unprotected); err != nil {
 		fmt.Fprintf(stderr, "[hook-enumerator] warn: could not publish the unprotected agents: %v\n", err)
 	}
+	if err := enterpriseHooksEnumerateRefusedWriter(current.DataDir, cycle.RefusedSurfaces); err != nil {
+		fmt.Fprintf(stderr, "[hook-enumerator] warn: could not publish the refused surfaces: %v\n", err)
+	}
 	return report, nil
 }
 
@@ -350,6 +355,7 @@ var (
 	enterpriseHooksEnumerateManifestWriter    = enterprisehooks.WriteUnixTargetsManifestAtomic
 	enterpriseHooksEnumerateEligibleWriter    = enterprisehooks.WriteUnixEligibleAccounts
 	enterpriseHooksEnumerateUnprotectedWriter = enterprisehooks.WriteUnixUnprotectedAgents
+	enterpriseHooksEnumerateRefusedWriter     = writeEnterpriseHookRefusedSurfaces
 )
 
 // enterpriseHooksEnumerateResolver is replaceable in tests.
@@ -398,6 +404,23 @@ func enterpriseHooksEnumerateDiscoverStatic(ctx context.Context, account unixide
 }
 
 func enterpriseHooksEnumerateDiscoverWith(ctx context.Context, account unixidentity.Account, connectors []string, static bool) (map[string]string, map[string]string, error) {
+	found, err := enterpriseHooksEnumerateDiscoverAll(ctx, account, connectors, static)
+	return found.Versions, found.Reasons, err
+}
+
+// enterpriseHooksEnumerateDiscoverSurfaces is enterpriseHooksEnumerateDiscover
+// plus the account's app and extension surfaces.
+func enterpriseHooksEnumerateDiscoverSurfaces(ctx context.Context, account unixidentity.Account, connectors []string) (enterprisehooks.UnixDiscovery, error) {
+	return enterpriseHooksEnumerateDiscoverAll(ctx, account, connectors, false)
+}
+
+// enterpriseHooksEnumerateDiscoverStaticSurfaces is
+// enterpriseHooksEnumerateDiscoverSurfaces for an untrusted home.
+func enterpriseHooksEnumerateDiscoverStaticSurfaces(ctx context.Context, account unixidentity.Account, connectors []string) (enterprisehooks.UnixDiscovery, error) {
+	return enterpriseHooksEnumerateDiscoverAll(ctx, account, connectors, true)
+}
+
+func enterpriseHooksEnumerateDiscoverAll(ctx context.Context, account unixidentity.Account, connectors []string, static bool) (enterprisehooks.UnixDiscovery, error) {
 	response, err := enterpriseHookWorkerRunner(ctx, enterpriseHookWorkerAccount{
 		UID:  account.UID,
 		GID:  account.GID,
@@ -405,12 +428,14 @@ func enterpriseHooksEnumerateDiscoverWith(ctx context.Context, account unixident
 		Home: filepath.Clean(account.Home),
 	}, enterpriseHookWorkerRequest{Operation: enterpriseHookWorkerOpDiscover, Standalone: true, Connectors: connectors, StaticDiscovery: static})
 	if err != nil {
-		return nil, nil, err
+		return enterprisehooks.UnixDiscovery{}, err
 	}
 	wanted := map[string]bool{}
 	for _, name := range connectors {
 		wanted[strings.ToLower(strings.TrimSpace(name))] = true
 	}
+	// The Kiro IDE version travels next to the kiro-cli one.
+	wanted[enterprisehooks.KiroIDEDiscoveryKey] = wanted["kiro"]
 	versions := map[string]string{}
 	for name, version := range response.Versions {
 		if wanted[name] && enterprisehooks.ValidUnixAgentVersion(version) {
@@ -426,7 +451,18 @@ func enterpriseHooksEnumerateDiscoverWith(ctx context.Context, account unixident
 			reasons[name] = reason
 		}
 	}
-	return versions, reasons, nil
+	surfaces := map[string][]connector.AgentSurface{}
+	for name, found := range response.Surfaces {
+		if !wanted[name] {
+			continue
+		}
+		for _, surface := range found {
+			if valid, ok := enterprisehooks.ValidUnixAgentSurface(surface); ok && len(surfaces[name]) < enterprisehooks.UnixAgentSurfacesMax {
+				surfaces[name] = append(surfaces[name], valid)
+			}
+		}
+	}
+	return enterprisehooks.UnixDiscovery{Versions: versions, Reasons: reasons, Surfaces: surfaces}, nil
 }
 
 // enterpriseHookSessionUIDs lists uids with a live login session:
@@ -472,4 +508,60 @@ func printEnterpriseHooksEnumerateReport(stdout, stderr io.Writer, report enterp
 	}
 	fmt.Fprintf(stderr, "[hook-enumerator] %d candidates, %d eligible, %d rows (%d new, %d deferred, %d revoked), manifest changed=%t\n",
 		report.Candidates, report.Eligible, report.Rows, report.New, report.Deferred, report.Revoked, report.Changed)
+}
+
+// readEnterpriseHookRefusedSurfaces reads the refusals the last cycle
+// published; a missing or unreadable file is none (with a warning when
+// unreadable).
+func readEnterpriseHookRefusedSurfaces(dataDir string, stderr io.Writer) []enterprisehooks.UnixRefusedSurface {
+	path := filepath.Join(managed.HookGuardianAuthorizationDir(dataDir), managed.HookGuardianRefusedSurfacesFile)
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	var doc struct {
+		Refused []enterprisehooks.UnixRefusedSurface `json:"refused_surfaces"`
+	}
+	if err == nil {
+		err = json.Unmarshal(data, &doc)
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "[hook-enumerator] warn: could not read the refused surfaces: %v\n", err)
+		return nil
+	}
+	return doc.Refused
+}
+
+// writeEnterpriseHookRefusedSurfaces publishes the users the gateway refuses
+// under enterprise.enrollment.unverified_versions: refuse, next to the
+// ledger and with its ownership and mode. An empty list removes the file.
+func writeEnterpriseHookRefusedSurfaces(dataDir string, refused []enterprisehooks.UnixRefusedSurface) error {
+	dir := managed.HookGuardianAuthorizationDir(dataDir)
+	path := filepath.Join(dir, managed.HookGuardianRefusedSurfacesFile)
+	if len(refused) == 0 {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
+	}
+	if err := ensureEnterpriseHookStandaloneAuthDir(dir); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(struct {
+		Version int                                  `json:"version"`
+		Refused []enterprisehooks.UnixRefusedSurface `json:"refused_surfaces"`
+	}{Version: 1, Refused: refused}, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := writeEnterpriseHookProtectedFile(path, append(data, '\n')); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	if err := os.Chmod(path, 0o640); err != nil {
+		return err
+	}
+	if err := enterpriseHookAuthorizationOwnershipSetter(path); err != nil {
+		return err
+	}
+	return enterpriseHookAuthorizationFileTrustCheck(path)
 }

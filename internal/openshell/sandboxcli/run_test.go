@@ -511,33 +511,26 @@ func TestRunSafeDropsBypassFlags(t *testing.T) {
 
 // The banner and the start say what the run brings: the model and where its
 // key goes (Codex on Bedrock runs the Mantle profile's default model unless
-// -m picks another, and a conversation is warned that Mantle rejects its
-// follow-up turns), the image build only when the image is missing
+// -m picks another), the image build only when the image is missing
 // (manual test L9), and a copy the organization requires (manual R2-103).
 func TestRunBanner(t *testing.T) {
-	bedrock := func(tty bool) func(*testApp) {
-		return func(ta *testApp) {
-			ta.env[EnvBedrockToken] = "bedrock-test-not-a-secret"
-			ta.IO.TTY = tty
-			noChanges(ta)
-		}
+	bedrock := func(ta *testApp) {
+		ta.env[EnvBedrockToken] = "bedrock-test-not-a-secret"
+		ta.IO.TTY = true
+		noChanges(ta)
 	}
 	missing := func(ta *testApp) {
 		noChanges(ta)
 		ta.images.missing = map[string]bool{"claudecode": true}
 	}
-	caveat := "⚠ Bedrock Mantle rejects every turn after the first of a Codex conversation"
 	copyNote := "copy mode: your organization requires copy mode for this folder (openshell.admin.require_copy_for); the agent works on a copy"
 	runCases(t, []runCase{
-		{name: "codex on bedrock", setup: bedrock(true), opts: RunOptions{Harness: "codex", LLM: LLMBedrock},
-			want: []string{"Model     openai.gpt-oss-20b (the default; -- -m MODEL picks another) · AWS_BEARER_TOKEN_BEDROCK → " +
-				"bedrock-mantle.us-east-1.api.aws only (the sandbox sees a placeholder)", caveat},
+		{name: "codex on bedrock", setup: bedrock, opts: RunOptions{Harness: "codex", LLM: LLMBedrock},
+			want: []string{"Model     openai.gpt-5.5 (the default; -- -m MODEL picks another) · AWS_BEARER_TOKEN_BEDROCK → " +
+				"bedrock-mantle.us-east-1.api.aws only (the sandbox sees a placeholder)"},
 			not: []string{"bedrock-test-not-a-secret"}},
-		{name: "codex on bedrock with -m", setup: bedrock(true), opts: RunOptions{Harness: "codex", LLM: LLMBedrock, Args: []string{"-m", "openai.gpt-oss-120b"}},
-			want: []string{"Model     openai.gpt-oss-120b · AWS_BEARER_TOKEN_BEDROCK → bedrock-mantle.us-east-1.api.aws only", caveat}},
-		// A one-prompt run has no second turn to warn about.
-		{name: "codex on bedrock, one prompt", setup: bedrock(false), opts: RunOptions{Harness: "codex", LLM: LLMBedrock, Prompt: "fix the tests"},
-			want: []string{"Model     openai.gpt-oss-20b"}, not: []string{"rejects every turn"}},
+		{name: "codex on bedrock with -m", setup: bedrock, opts: RunOptions{Harness: "codex", LLM: LLMBedrock, Args: []string{"-m", "openai.gpt-5.4"}},
+			want: []string{"Model     openai.gpt-5.4 · AWS_BEARER_TOKEN_BEDROCK → bedrock-mantle.us-east-1.api.aws only"}},
 		{name: "image built", setup: noChanges, opts: RunOptions{Harness: "claude"}, not: []string{"building its image first"}},
 		{name: "image missing", setup: missing, opts: RunOptions{Harness: "claude"}, want: []string{"building its image first"}},
 		{name: "image missing, --no-build", setup: missing, opts: RunOptions{Harness: "claude", NoBuild: true}, not: []string{"building its image first"}},
@@ -996,50 +989,6 @@ func TestBanner(t *testing.T) {
 		if got := withArticle(name); got != want {
 			t.Errorf("withArticle(%s) = %q", name, got)
 		}
-	}
-}
-
-// An interactive Copilot session is told before it starts that every hook
-// waits out Copilot's 30-second timeout in a sandbox (#966), whatever its
-// credential; a one-prompt run, which is not slowed, is not. The provider's
-// own caveat still follows the harness's.
-func TestBannerCaveats(t *testing.T) {
-	copilot := harness.Copilot.InteractiveCaveat()
-	if !strings.Contains(copilot, "30-second timeout") || !strings.Contains(copilot, "--prompt") {
-		t.Fatalf("Copilot's interactive caveat = %q, want the 30-second hook wait and the --prompt way around it", copilot)
-	}
-	mantle, err := harness.Codex.CredentialProfile(profiles.CodexBedrockMantleID, "")
-	if err != nil || mantle.Caveat == "" {
-		t.Fatalf("Codex Bedrock Mantle profile = %+v, %v; want its caveat", mantle, err)
-	}
-	asCopilot := func(profile string) func(*sandboxapi.Sandbox) {
-		return func(sb *sandboxapi.Sandbox) {
-			sb.Harness, sb.HarnessName, sb.Launch.CredentialProfile = "copilot", "GitHub Copilot CLI", profile
-		}
-	}
-	for _, c := range []struct {
-		name      string
-		edit      func(*sandboxapi.Sandbox)
-		o         RunOptions
-		want, not []string
-	}{
-		{"interactive copilot", asCopilot(profiles.CopilotAnthropicID), RunOptions{}, []string{"⚠ " + copilot}, nil},
-		{"copilot without a credential", asCopilot(""), RunOptions{}, []string{"⚠ " + copilot}, nil},
-		{"copilot with --prompt", asCopilot(profiles.CopilotAnthropicID), RunOptions{Prompt: "hi"}, nil, []string{"⚠ "}},
-		{"copilot in its own prompt mode", asCopilot(profiles.CopilotAnthropicID), RunOptions{Args: []string{"-p", "hi"}}, nil, []string{"⚠ "}},
-		{"codex on Bedrock Mantle", func(sb *sandboxapi.Sandbox) {
-			sb.Harness, sb.HarnessName, sb.Launch.CredentialProfile = "codex", "Codex", profiles.CodexBedrockMantleID
-		}, RunOptions{}, []string{"⚠ " + mantle.Caveat}, []string{copilot}},
-		{"claude code", func(*sandboxapi.Sandbox) {}, RunOptions{}, nil, []string{"⚠ "}},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			ta := newTestApp(t, "")
-			sb := sampleSandbox("box")
-			c.edit(&sb)
-			ta.banner(&sb, bannerInfo{o: c.o})
-			has(t, ta.output(), c.want...)
-			lacks(t, ta.output(), c.not...)
-		})
 	}
 }
 

@@ -47,7 +47,8 @@ import (
 // the guardian's other goroutines, and NFS root_squash homes work.
 
 const (
-	enterpriseHookWorkerProtocolVersion = 1
+	// 2: the discover operation also answers app and extension surfaces.
+	enterpriseHookWorkerProtocolVersion = 2
 	enterpriseHookWorkerRequestLimit    = 1 << 20
 	enterpriseHookWorkerResponseLimit   = 8 << 20
 	enterpriseHookWorkerStderrLimit     = 64 << 10
@@ -148,6 +149,28 @@ type enterpriseHookWorkerRequest struct {
 	// AIDiscovery carries the settings and signature catalog of the
 	// ai_discovery operation; the worker cannot read the managed config.
 	AIDiscovery *enterpriseHookWorkerAIDiscovery `json:"ai_discovery,omitempty"`
+	// CopilotVSCode asks the foreign_cleanup worker to place or remove
+	// DefenseClaw's VS Code Local hook file and Copilot plugin in the
+	// user's own home.
+	CopilotVSCode *enterpriseHookWorkerCopilotVSCode `json:"copilot_vscode,omitempty"`
+}
+
+// enterpriseHookWorkerCopilotVSCode is what the user's home should hold
+// for the VS Code Local harness; the parent resolves it from the
+// administrator's config.
+type enterpriseHookWorkerCopilotVSCode struct {
+	HookBinary string `json:"hook_binary"`
+	HookFile   bool   `json:"hook_file"`
+	Plugin     bool   `json:"plugin"`
+}
+
+// enterpriseHookWorkerCopilotVSCodeReport is the worker's account of it
+// (user-influenced; only logged).
+type enterpriseHookWorkerCopilotVSCodeReport struct {
+	Changed []string `json:"changed,omitempty"`
+	Removed []string `json:"removed,omitempty"`
+	Kept    []string `json:"kept,omitempty"`
+	Error   string   `json:"error,omitempty"`
 }
 
 type enterpriseHookWorkerAIDiscovery struct {
@@ -185,10 +208,13 @@ type enterpriseHookWorkerTargetResult struct {
 }
 
 type enterpriseHookWorkerResponse struct {
-	Version  int                                          `json:"version"`
-	Targets  []enterpriseHookWorkerTargetResult           `json:"targets,omitempty"`
-	Versions map[string]string                            `json:"versions,omitempty"`
-	Reasons  map[string]string                            `json:"reasons,omitempty"`
+	Version  int                                `json:"version"`
+	Targets  []enterpriseHookWorkerTargetResult `json:"targets,omitempty"`
+	Versions map[string]string                  `json:"versions,omitempty"`
+	Reasons  map[string]string                  `json:"reasons,omitempty"`
+	// Surfaces are the discovered app and extension installs per connector
+	// (user-influenced; the parent validates them).
+	Surfaces map[string][]connector.AgentSurface          `json:"surfaces,omitempty"`
 	Cleanup  map[string]enterpriseHookWorkerCleanupReport `json:"cleanup,omitempty"`
 	// Blocks are the foreign-hook blocks the user's hooks recorded since
 	// the last cleanup (user-influenced; only logged).
@@ -198,7 +224,9 @@ type enterpriseHookWorkerResponse struct {
 	// AIDiscovery is the user's scan report (user-influenced; the guardian
 	// validates it before the gateway reads it).
 	AIDiscovery *inventory.AIDiscoveryReport `json:"ai_discovery,omitempty"`
-	Error       string                       `json:"error,omitempty"`
+	// CopilotVSCode reports the VS Code Local hook file and plugin.
+	CopilotVSCode *enterpriseHookWorkerCopilotVSCodeReport `json:"copilot_vscode,omitempty"`
+	Error         string                                   `json:"error,omitempty"`
 }
 
 // enterpriseHookWorkerAccount is the resolved target the parent spawns
@@ -270,6 +298,7 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 	case enterpriseHookWorkerOpDiscover:
 		versions := map[string]string{}
 		reasons := map[string]string{}
+		surfaces := map[string][]connector.AgentSurface{}
 		for _, name := range request.Connectors {
 			name = strings.ToLower(strings.TrimSpace(name))
 			if name == "" {
@@ -286,8 +315,19 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 			} else if reason != "" {
 				reasons[name] = reason
 			}
+			// Host apps are never run; an engine CLI bundled in one is run
+			// only outside a static (untrusted-home) discovery.
+			if found := enterpriseHookWorkerDiscoverSurfaces(ctx, request.Home, name, !request.StaticDiscovery); len(found) != 0 {
+				surfaces[name] = found
+			}
+			if name == "kiro" {
+				// The Kiro IDE is read, never run, so static discovery reads it too.
+				if ide, _ := enterpriseHookWorkerDiscoverKiroIDE(request.Home); ide != "" {
+					versions[enterprisehooks.KiroIDEDiscoveryKey] = ide
+				}
+			}
 		}
-		return respond(enterpriseHookWorkerResponse{Versions: versions, Reasons: reasons}, 0)
+		return respond(enterpriseHookWorkerResponse{Versions: versions, Reasons: reasons, Surfaces: surfaces}, 0)
 	case enterpriseHookWorkerOpForeignCleanup:
 		for _, target := range request.Targets {
 			if target.Mode != enterpriseHookWorkerModeRemoveLeftover {
@@ -296,6 +336,9 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 		}
 		now := time.Now()
 		response := enterpriseHookWorkerResponse{Cleanup: runEnterpriseHookWorkerForeignCleanup(request, now)}
+		if request.CopilotVSCode != nil {
+			response.CopilotVSCode = runEnterpriseHookWorkerCopilotVSCode(request)
+		}
 		if len(request.Targets) > 0 {
 			response.Targets = runEnterpriseHookWorkerApply(ctx, request).Targets
 		}
@@ -320,11 +363,15 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 	}
 }
 
-// enterpriseHookWorkerDiscoverVersion and
-// enterpriseHookWorkerDiscoverStaticVersion are replaceable in tests.
+// enterpriseHookWorkerDiscoverVersion,
+// enterpriseHookWorkerDiscoverStaticVersion,
+// enterpriseHookWorkerDiscoverSurfaces and
+// enterpriseHookWorkerDiscoverKiroIDE are replaceable in tests.
 var (
 	enterpriseHookWorkerDiscoverVersion       = enterprisehooks.DiscoverUnixAgentVersion
 	enterpriseHookWorkerDiscoverStaticVersion = enterprisehooks.DiscoverUnixAgentVersionStatically
+	enterpriseHookWorkerDiscoverSurfaces      = enterprisehooks.DiscoverUnixAgentSurfaces
+	enterpriseHookWorkerDiscoverKiroIDE       = enterprisehooks.DiscoverUnixKiroIDEVersion
 )
 
 func validateEnterpriseHookWorkerIdentity(request enterpriseHookWorkerRequest) error {

@@ -756,9 +756,9 @@ var builtinHookContracts = map[string][]HookContract{
 		ToolCallLifecycle:   devinToolCallLifecycle(),
 		Notes: []string{
 			"The reviewed native contract is pinned to Devin CLI 3000.4.25, and on Linux also to 3000.11.3, which delivers SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, Stop and SessionEnd under these event names and honors exit-code-2 blocks on UserPromptSubmit and PreToolUse (PermissionRequest and PostCompaction are not verified). It uses user config.json or the recommended project .devin/hooks.v1.json.",
-			"Devin Desktop's default Devin Local agent shares the Devin CLI harness and hook config; its legacy Cascade agent uses a separate contract that is not registered.",
+			"Devin Desktop's default Devin Local agent shares the Devin CLI harness and hook config. Devin Desktop 3.9.19 removed the legacy Cascade agent; builds before it run Cascade under a separate contract that is not registered.",
 			"Exit code 2 blocks; every other hook error is logged by Devin and fails open. Responses use top-level decision/reason and event-tagged hookSpecificOutput only where documented.",
-			"Restricted Mode disables hooks and agents. Cloud Devin, proxy/ACP integrations, native OTLP, and closed-beta plugins are excluded.",
+			"Restricted Mode disables hooks and agents. Cloud Devin, proxy/ACP integrations, and native OTLP are excluded. DefenseClaw registers no plugin hooks; under the standalone enterprise profile the foreign-hook guard checks the hooks of installed Devin plugins.",
 		},
 	}},
 	"copilot": {
@@ -1152,8 +1152,9 @@ func strictHookContractResolutionOf(resolution HookContractResolution) HookContr
 // resolveHookContractAgainst matches rawVersion against contracts, the
 // registered contracts of connector name. A version on the known-broken
 // list is unknown. A version newer than every tested range resolves to the
-// newest contract with UntestedVersion set; versions below a floor, between
-// ranges or next to an exact pin of the same build stay unknown.
+// newest contract with UntestedVersion set, and so does one between two
+// exact pins of one contract; versions below a floor, between ranges or next
+// to an exact pin of the same build stay unknown.
 func resolveHookContractAgainst(name, rawVersion string, contracts []HookContract) HookContractResolution {
 	if len(contracts) == 0 {
 		return HookContractResolution{
@@ -1228,7 +1229,8 @@ func resolveHookContractAgainst(name, rawVersion string, contracts []HookContrac
 
 // newestContractBelow returns the contract with the highest tested bound
 // when normalized is newer than every bound of its version scheme: at or
-// above each range's exclusive maximum and above each exact pin. An
+// above each range's exclusive maximum and above an exact pin of each
+// pinned contract (between two pins of one contract counts). An
 // open-ended range means nothing is newer than it (a version at or above
 // its minimum already matches). Date-style builds (major >= 1000, such as
 // Cursor agent 2026.07.23 or Devin 3000.11.3) are compared only with bounds
@@ -1240,20 +1242,30 @@ func newestContractBelow(contracts []HookContract, normalized string) (HookContr
 	var best HookContract
 	newest, label := "", ""
 	for _, contract := range contracts {
-		bounds := 0
+		bounds, pinsAbove := 0, 0
 		upper, upperLabel := "", ""
 		for _, pin := range contract.ExactAgentVersions {
 			pinNorm := NormalizeAgentVersion("", pin)
 			if pinNorm == "" || dateStyle(pinNorm) != scheme {
 				continue
 			}
-			if compareVersion(normalized, pinNorm) <= 0 {
+			switch cmp := compareVersion(normalized, pinNorm); {
+			case cmp == 0:
 				return HookContract{}, "", false
+			case cmp < 0:
+				pinsAbove++
+				continue
 			}
 			bounds++
 			if upper == "" || compareVersion(pinNorm, upper) > 0 {
 				upper, upperLabel = pinNorm, pin
 			}
+		}
+		// A version between two exact pins of one contract (Devin on Linux:
+		// 3000.4.25 and 3000.11.3) is an untested version of that contract;
+		// one below all of its pins is under its floor.
+		if pinsAbove > 0 && bounds == 0 {
+			return HookContract{}, "", false
 		}
 		if contract.MinAgentVersion != "" || contract.MaxAgentVersion != "" {
 			edge := contract.MaxAgentVersion

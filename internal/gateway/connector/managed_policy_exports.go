@@ -127,6 +127,21 @@ func WindowsCodexStandaloneManagedHookCommand(hookBinary, event, hookContract st
 	return windowsCodexBoundManagedHookCommand(hookBinary, event, hookContract)
 }
 
+// CopilotVSCodeLocalManagedHookCommand renders the command DefenseClaw's
+// VS Code Local harness hook file and agent plugin register for event: the
+// administrator-owned hookBinary bound to the Local dialect. On Windows it
+// is the exit-code-preserving PowerShell boundary, which runs the same from
+// any shell VS Code or the Copilot CLI starts it in; elsewhere a POSIX
+// command line. The foreign-hook guard recognizes exactly these strings.
+func CopilotVSCodeLocalManagedHookCommand(goos, hookBinary, event string) string {
+	if goos == "windows" {
+		return windowsNativePowerShellHookCommandForBoundEvent("copilot", event, "", hookBinary,
+			"--enterprise-managed", "--hook-surface", CopilotHookSurfaceVSCodeLocal)
+	}
+	return shellSingleQuote(hookBinary) + " hook --connector copilot --enterprise-managed --event " +
+		shellSingleQuote(event) + " --hook-surface " + CopilotHookSurfaceVSCodeLocal
+}
+
 // WindowsAwaitedHookStatements returns the PowerShell statements that start
 // the GUI-subsystem hook launcher, wait for it and exit with its status,
 // keeping the process handle from the start so a launcher that exits at once

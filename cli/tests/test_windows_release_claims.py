@@ -342,7 +342,7 @@ def test_public_docs_expose_devin_and_no_retired_desktop_setup_surface() -> None
     # vendor documentation until a live run is recorded, and never for Cascade.
     devin_page = (docs_root / "content/docs/connectors/devin.mdx").read_text(encoding="utf-8")
     assert "**Devin Local** agent (the default for new tabs) | **Yes, per vendor documentation**" in devin_page
-    assert "legacy **Cascade** agent | **No**" in devin_page
+    assert "before 3.9.19, legacy **Cascade** agent | **No; turned off under the standalone enterprise profile**" in devin_page
 
 
 def test_codex_compatibility_docs_list_current_versioned_contracts() -> None:

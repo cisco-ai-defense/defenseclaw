@@ -105,6 +105,7 @@ const (
 	codeVerify              = "verify_failed"
 	codeState               = "state_unreadable"
 	codeLeftovers           = "unmanaged_leftovers"
+	codeWSL                 = "wsl_distribution"
 )
 
 type lifecycle struct {
@@ -192,6 +193,9 @@ func (l *lifecycle) run(ctx context.Context) int {
 	if err := env.Services.Check(ctx); err != nil {
 		r.AddError(codeServiceManager, err.Error())
 		return 0
+	}
+	if l.opts.Action != ActionInstall && l.opts.Action != ActionEnsure && env.insideWSL() {
+		r.AddWarning(codeWSL, wslDeploymentWarning)
 	}
 	if readOnly {
 		return l.readOnly(ctx)
@@ -289,6 +293,9 @@ func (l *lifecycle) run(ctx context.Context) int {
 		if record == nil {
 			return l.settleInputChanges(ctx, l.freshInstall(ctx))
 		}
+		if env.insideWSL() {
+			r.AddWarning(codeWSL, wslDeploymentWarning)
+		}
 		if noop, reason := l.ensureNoop(ctx, record); noop {
 			r.Noop = true
 			r.NoopReason = reason
@@ -363,8 +370,31 @@ func (l *lifecycle) validateOptions() int {
 	return 0
 }
 
+// wslDeploymentWarning reports a deployment that already runs inside WSL.
+const wslDeploymentWarning = "this Linux system is a WSL distribution: the Windows user can open it as root (wsl -u root) and Windows machine policy does not reach it, so DefenseClaw cannot enforce here; govern WSL from the Windows side (enterprise.machine_policy.windows_wsl) and uninstall this deployment"
+
+// insideWSL reports whether this Linux system is a WSL distribution: the
+// interop binfmt handler or /run/WSL is present, or the kernel release
+// names Microsoft.
+func (e *Env) insideWSL() bool {
+	if e.GOOS != "linux" {
+		return false
+	}
+	for _, marker := range []string{"/proc/sys/fs/binfmt_misc/WSLInterop", "/proc/sys/fs/binfmt_misc/WSLInterop-late", "/run/WSL"} {
+		if _, err := os.Stat(e.P(marker)); err == nil {
+			return true
+		}
+	}
+	release, err := os.ReadFile(e.P("/proc/sys/kernel/osrelease"))
+	return err == nil && strings.Contains(strings.ToLower(string(release)), "microsoft")
+}
+
 func (l *lifecycle) freshInstall(ctx context.Context) int {
 	env, r := l.env, l.result
+	if env.insideWSL() {
+		r.AddError(codeWSL, "refusing to install inside a WSL distribution: the Windows user can open it as root (wsl -u root) and Windows machine policy does not reach it, so it is not a boundary DefenseClaw can enforce; govern WSL from the Windows side with enterprise.machine_policy.windows_wsl")
+		return 0
+	}
 	if present, where := env.secureClientPresent(); present {
 		r.AddError(codeProfileConflict, fmt.Sprintf("a Cisco Secure Client DefenseClaw deployment is present (%s); the profiles are mutually exclusive — uninstall it first", where))
 		return 0

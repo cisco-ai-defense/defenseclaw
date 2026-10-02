@@ -92,12 +92,22 @@ Older Kiro IDE builds read only `<workspace>/.kiro/hooks/*.json`, so for them
 the enforcing file is the workspace copy. For those builds, set
 `claw.workspace_dir` to the project root before running setup. `defenseclaw
 doctor`'s `Connector scope [kiro]` check passes when the global
-`~/.kiro/hooks/defenseclaw.json` holds DefenseClaw's hooks, and its detail
-says that Kiro IDE builds before 1.0.182 also need `claw.workspace_dir`,
-because doctor cannot tell which Kiro build you run. It fails
+`~/.kiro/hooks/defenseclaw.json` holds DefenseClaw's hooks. Doctor reads the
+installed Kiro IDE's version from its `resources/app/product.json` (it never
+starts the IDE) and warns (`kiro_ide_below_global_hooks_floor`) when that IDE
+is older than 1.0.182; when it finds no IDE, the pass detail says that older
+builds also need `claw.workspace_dir`. It fails
 (`kiro_hooks_not_workspace_scoped`) only when neither the global
 registration nor a workspace copy is present; run `defenseclaw setup kiro`
 to fix that.
+
+Doctor and the enterprise guardian look for the IDE's `product.json` in
+`Kiro.app/Contents/Resources/app` under `~/Applications` or `/Applications`
+on macOS, and on Linux under `/usr/share/kiro` (the deb package), `~/Kiro`
+or `/opt/Kiro` (the tar.gz package's `Kiro/` folder) followed by
+`resources/app`. On Windows doctor and the guardian read
+`%LOCALAPPDATA%\Programs\Kiro` and `%ProgramFiles%\Kiro`, the usual
+installer folders; those paths are not verified against a Kiro install yet.
 </Callout>
 
 ## Native Windows
@@ -150,8 +160,9 @@ replaces those entries.
 
 ## Enterprise (standalone profile)
 
-On Linux and macOS the [enterprise guardian](/docs/enterprise/concepts#per-user-connector)
-enrolls Kiro per user. For each enrolled user it writes and repairs:
+The [enterprise guardian](/docs/enterprise/concepts#per-user-connector)
+enrolls Kiro per user on Linux, macOS and Windows. For each enrolled user it
+writes and repairs:
 
 - `~/.kiro/hooks/defenseclaw.json`, the global hook file that Kiro IDE and
   `kiro-cli --v3` merge into every workspace;
@@ -165,6 +176,12 @@ It never edits the user's own agents. When a user has set another
 other key in `cli.json`). An agent the user picks explicitly
 (`--agent`, `/agent swap`) runs without DefenseClaw's hooks. A per-user
 `defenseclaw setup kiro` still adds the hooks to the user's own default agent.
+Kiro IDE hides an agent that has hooks, so `defenseclaw doctor` reports a
+custom `chat.defaultAgent`: `kiro_custom_agent_hooked` when it carries
+DefenseClaw's hooks (IDE sessions still use the global file), and
+`kiro_custom_agent_unhooked` when it does not (bare `kiro-cli` runs it
+without DefenseClaw's hooks; start `kiro-cli --v3` or
+`kiro-cli --agent defenseclaw`, or run `defenseclaw setup kiro` again).
 
 After Kiro is disabled on Linux or macOS, `~/.defenseclaw/hooks/kiro-hook.sh`
 remains as an inert stub that exits successfully. A running Kiro session may
@@ -175,6 +192,19 @@ per-user `defenseclaw guardrail disable --connector kiro` and
 On macOS the guardian also finds `kiro-cli` inside `Kiro CLI.app`, in
 `~/Applications` or `/Applications`, before the app's shell setup links it
 into a bin directory.
+
+The guardian also discovers the Kiro IDE, reading its version from the
+`product.json` from the locations listed in the hook scope callout above
+as the user, without starting it. A user with the IDE and no kiro-cli
+version is enrolled at the IDE's version, shown with a `+kiro-ide` suffix
+(for example `1.2.4+kiro-ide`); the IDE's floor is 1.0.182, the first build
+that reads the global hook file. An IDE older than that reads only workspace
+hooks: it is reported as `kiro_ide_below_global_hooks_floor` in `status`,
+`enterprise policy show` and `verify`, and the user's kiro-cli row, if any,
+stays enrolled. The global file has to hold every DefenseClaw entry as
+the guardian renders it: an entry turned off with `"enabled": false` (Kiro
+skips it), removed or pointed at another command fails verification, and the
+guardian rewrites the file.
 
 It never writes a workspace copy, even when `claw.workspace_dir` is set. That
 directory is machine-wide, so every enrolled user would share the copy, and
@@ -190,10 +220,18 @@ hook contract drift until kiro-cli reaches 2.24.1. The guardian follows a
 kiro-cli self-update at or above 2.24.1 and re-renders the user's hooks. It
 does not follow a downgrade below that version.
 
-On Windows the guardian does not enroll Kiro. `kiro-cli.exe` records its
-version nowhere DefenseClaw can read without running it, and Windows
-discovery runs nothing. Protect Kiro there with
-`defenseclaw-gateway enterprise acp` and the [ACP guard](/docs/acp-guard).
+On Windows the guardian writes the same files under `%USERPROFILE%\.kiro`,
+with the hook command described in [Native Windows](#native-windows).
+Windows discovery runs nothing. `kiro-cli.exe` records no version beside
+itself, but each run copies the build to
+`%LOCALAPPDATA%\Kiro-Cli\run\chat-cli-<version>.exe`; the guardian takes
+the copy whose size matches `kiro-cli.exe`. A kiro-cli that has never run has
+no copy, so it is reported as installed with a version that cannot be read
+until its first run, unless the Kiro IDE enrolls the user. The IDE's version
+comes from the `product.json` folders in the hook scope callout above.
+
+`defenseclaw-gateway enterprise acp` and the [ACP guard](/docs/acp-guard)
+stay available on every OS for editors that start Kiro over ACP:
 
 ```bash
 defenseclaw acp setup --client zed --agent kiro

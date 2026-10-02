@@ -98,6 +98,10 @@ func TestCopilotDropInAndAdminPolicyCoexist(t *testing.T) {
 	dir, _ := CopilotPolicyDir(opts)
 	admin := filepath.Join(dir, "10-company.json")
 	writeFile(t, admin, `{"version": 1, "hooks": {"preToolUse": [{"type": "command", "bash": "/usr/local/bin/company-audit", "timeoutSec": 5}]}}`)
+	// The administrator's VS Code policy value is kept; DefenseClaw adds
+	// only the policy that is absent, and removes only that one.
+	vscodePolicy := filepath.Join(opts.Root, "etc/vscode/policy.json")
+	writeFile(t, vscodePolicy, `{"ChatHooks": false, "UpdateMode": "manual"}`)
 	state, err := copilotTarget{}.Reconcile(opts)
 	if err != nil {
 		t.Fatal(err)
@@ -110,6 +114,9 @@ func TestCopilotDropInAndAdminPolicyCoexist(t *testing.T) {
 	if !strings.Contains(drop, `hook --connector copilot --enterprise-managed --event 'preToolUse'`) {
 		t.Fatalf("copilot drop-in: %s", drop)
 	}
+	if got := readFile(t, vscodePolicy); !strings.Contains(got, `"ChatEditorPreferCopilotHarness": true`) || !strings.Contains(got, `"ChatHooks": false`) {
+		t.Fatalf("vscode policy: %s", got)
+	}
 	if _, err := (copilotTarget{}).RemoveOwned(opts); err != nil {
 		t.Fatal(err)
 	}
@@ -118,6 +125,9 @@ func TestCopilotDropInAndAdminPolicyCoexist(t *testing.T) {
 	}
 	if _, err := os.Stat(admin); err != nil {
 		t.Fatal("administrator policy file must survive")
+	}
+	if got := readFile(t, vscodePolicy); strings.Contains(got, "ChatEditorPreferCopilotHarness") || !strings.Contains(got, `"ChatHooks": false`) || !strings.Contains(got, "UpdateMode") {
+		t.Fatalf("vscode policy after removal: %s", got)
 	}
 }
 

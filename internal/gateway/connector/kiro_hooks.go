@@ -331,6 +331,44 @@ func kiroV3FileReferencesHook(path, hookScript string) (bool, error) {
 	return false, nil
 }
 
+// kiroV3HooksCurrent reports whether the v3 hook file at path holds
+// DefenseClaw's entry for every kiroV3HookSpecs trigger exactly as Setup
+// writes it: the command hookCommand, the matcher, the 30-second timeout,
+// and not turned off. Kiro skips an entry with "enabled": false
+// (kiro.dev/docs/hooks: "Set false to skip the hook without deleting it"),
+// and the presence check kiroV3FileReferencesHook, which teardown uses,
+// accepts any entry named defenseclaw-*, so a user who turned DefenseClaw's
+// entries off or pointed them at another command still passed verification
+// and the guardian never repaired the file.
+func kiroV3HooksCurrent(path, hookCommand string) (bool, error) {
+	cfg, err := readJSONObject(path)
+	if err != nil {
+		return false, err
+	}
+	hooks, _ := cfg["hooks"].([]interface{})
+	for _, spec := range kiroV3HookSpecs {
+		current := false
+		for _, item := range hooks {
+			obj, _ := item.(map[string]interface{})
+			action, _ := obj["action"].(map[string]interface{})
+			if obj == nil || action == nil || obj["name"] != spec.name || obj["trigger"] != spec.trigger ||
+				action["type"] != "command" || action["command"] != hookCommand ||
+				obj["enabled"] == false || !kiroV2HookTimeoutIs(obj["timeout"], 30) {
+				continue
+			}
+			if matcher, _ := obj["matcher"].(string); matcher != spec.matcher {
+				continue
+			}
+			current = true
+			break
+		}
+		if !current {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
 // kiroV2AgentReferencesHook reports whether the CLI 2.x agent holds
 // DefenseClaw's entry for every kiroV2HookSpecs event with the matcher and
 // timeout this build writes. An entry an earlier build rendered with another

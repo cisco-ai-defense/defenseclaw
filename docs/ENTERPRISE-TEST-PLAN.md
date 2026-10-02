@@ -186,7 +186,7 @@ Service accounts the lifecycle creates: `defenseclaw` (Linux), `_defenseclaw`
 
 | Item | Linux | macOS | Windows |
 | --- | --- | --- | --- |
-| Service manager | systemd 239 or later as PID 1. Containers and WSL without systemd as PID 1 are refused (`service_manager_unavailable`); WSL with systemd is unsupported (L-29) but passes this check. Check `systemctl --version` and `ps -p 1 -o comm=` | launchd | Service Control Manager |
+| Service manager | systemd 239 or later as PID 1. Containers and WSL without systemd as PID 1 are refused (`service_manager_unavailable`); WSL with systemd passes this check, and the lifecycle then refuses a new install (`wsl_distribution`, L-29). Check `systemctl --version` and `ps -p 1 -o comm=` | launchd | Service Control Manager |
 | Privileges | Root for everything except `enterprise linux status` | Root for everything except `enterprise macos status` | An elevated administrator token or LocalSystem. Setup exits `1603` without elevation |
 | Platform | amd64 or arm64; SELinux enforcing is supported (the lifecycle relabels after each change) | macOS 13 or later, Apple silicon | Native x64 |
 | PowerShell | - | - | Stable PowerShell 7 x64 from Microsoft's MSI, registered under `HKLM\SOFTWARE\Microsoft\PowerShellCore\InstalledVersions`, installed under Program Files, with a valid Microsoft signature on `pwsh.exe` (PATH is ignored; preview builds are refused). Use 7.4 or later: the MDM wrapper and Intune packager require it. FullLanguage mode (under WDAC or AppLocker, allow the DefenseClaw signer). Check with `Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\PowerShellCore\InstalledVersions\*' \| Select-Object SemanticVersion, InstallLocation` and `$ExecutionContext.SessionState.LanguageMode` |
@@ -218,7 +218,7 @@ inside these ranges, and one version outside a range as a negative test.
 | Hermes (`hermes`) | 0.19.0 up to 0.22.0 | Self-updating: do not update during a run. Configure a model provider with `hermes setup` |
 | OpenHands (`openhands`) | 1.12.0 and later; Linux and macOS only | `uv tool install openhands==<version>`; set the LLM in the user's OpenHands settings |
 | OmniGent (`omnigent`) | 0.7.0 up to 0.14.0; Linux and macOS only | `uv tool install --python 3.12 omnigent==0.13.0` (a default install gets a newer, unverified release) |
-| Kiro (`kiro`) | kiro-cli 2.24.1 and later in the standalone profile; Linux and macOS through the guardian, Windows through ACP only | Kiro sign-in (`kiro-cli login`) |
+| Kiro (`kiro`) | kiro-cli 2.24.1 or Kiro IDE 1.0.182 and later in the standalone profile, through the guardian on every OS | Kiro sign-in (`kiro-cli login`) |
 
 Where discovery looks: on Linux and macOS, each agent's usual per-user
 location, nvm, fnm, Volta, asdf, mise, pnpm and yarn globals, the npm prefix in
@@ -634,9 +634,7 @@ enterprise:
     disable_self_update: true
 ```
 
-OpenHands and OmniGent are not managed on Windows, and Kiro is covered there
-only through `defenseclaw-gateway enterprise acp` (see
-[Kiro](#per-connector-procedure)). Windows ignores `unenrolled_users`, `root` and the uid limits.
+OpenHands and OmniGent are not managed on Windows. Windows ignores `unenrolled_users`, `root` and the uid limits.
 On Linux and macOS, the machine-policy connectors (Claude Code, Codex, Cursor,
 Copilot, OpenCode) get per-user targets only with `unenrolled_users: deny`, so
 `enrollment.targets` counts per-user connectors; run once with
@@ -1451,7 +1449,7 @@ prompt literal; accept no model prose as evidence of a tool result.
 `openclaw` and `zeptoclaw` require the separate guardrail proxy and are
 refused here. `windsurf` is a retired id migrated to Devin; `geminicli` is
 removed. Record their migration or refusal under CON-14 and CON-15.
-Windows must refuse guardian rows for OpenHands, OmniGent and Kiro. Kiro ACP
+Windows must refuse guardian rows for OpenHands and OmniGent. Kiro ACP
 is a separate route and needs its own UI and [ACP guard](https://cisco-ai-defense.github.io/defenseclaw/docs/acp-guard)
 evidence if deployed.
 
@@ -1575,7 +1573,7 @@ For each row, install the verified version listed under [Agent CLIs and model ac
 | CON-11 | OmniGent (Linux/macOS): start `omnigent server --config ~/.omnigent/config.yaml`; if the team has no documented interactive client command, mark tool-call cases `NOT_RUN` with that reason | C1 change the `policy_modules` entry or bridge, restart, then wait for repair. C2 `omnigent server` without its managed config can be R1. C3 and C3b `OMNIGENT_CONFIG`/`OMNIGENT_CONFIG_HOME` alternate root is R1. C4 0.14+ is unverified. C5 no hook process exists; simulate gateway unavailability and record the policy decision. C6 no foreign-policy guard (R24). Windows `N/A` |
 | CON-12 | Kiro (Linux/macOS): `cd ~/dc-test-proj && kiro-cli` for CLI 2.x; separately `kiro-cli --v3`; use the DefenseClaw agent (`/agent swap defenseclaw` if necessary) | C1 change own `~/.kiro/hooks/defenseclaw.json`, `~/.kiro/agents/defenseclaw.json`, default-agent setting or `kiro-hook.sh`; guardian repairs. C2 `/agent swap` to an own agent or `kiro-cli chat --agent <own-agent>` bypasses the CLI 2.x hook (R22). C3 and C3b alternate `KIRO_HOME` is R22. C4 below 2.24.1 not enrolled. C5 a non-2 hook failure may let the call run. C6 project `.kiro/hooks` merges with global hooks on v3; no foreign guard. The v3 prompt marker reaches the model with a DefenseClaw result attached (R22). Windows guardian `N/A`; test the separate ACP route if configured |
 | CON-12W | Windows Kiro ACP route; managed `acp:` profile `kiro-only` and a supported editor | Admin: `enterprise acp enroll --user std1 --client zed --agent kiro --profile kiro-only --json`; record `token_file` and `next`, never the token. Run `next` in std1's editor session; verify and run allowed and blocked calls; revoke, retry a copied bearer, and re-enroll. Expected: allow and block are audited, revoke immediately rejects the old bearer, re-enroll mints a new one, and enroll without `--profile` fails. |
-| CON-13 | Windows managed config copies with `openhands: {}`, `omnigent: {}` and `kiro: {}` | Apply each unsupported connector separately with `ensure`, recording its exact `not supported on Windows managed_enterprise` refusal; after the three cycles `policy show` and targets contain none of them, and no Kiro guardian row appears. ACP is tested in CON-12W. |
+| CON-13 | Windows managed config copies with `openhands: {}` and `omnigent: {}` | Apply each unsupported connector separately with `ensure`, recording its exact `not supported on Windows managed_enterprise` refusal; after the two cycles `policy show` and targets contain neither of them. ACP is tested in CON-12W. |
 | CON-14 | Disposable config using retired `windsurf` ID | Apply with `ensure`; `policy show` and `hooks status` name Devin after migration and publish no `windsurf` target. Record the migration notice. |
 | CON-15 | Disposable config using removed `geminicli` ID | Run `ensure` and `policy show`; record the explicit unsupported-connector refusal and verify no target is published. |
 
@@ -2342,8 +2340,8 @@ has found a regression.
 - **REG-1-7-37** **[L][M][W] `defenseclaw doctor` (per-user)** passes a global Kiro install that has
   `~/.kiro/hooks/defenseclaw.json`. Code.
 - **REG-1-7-38** **[W] (per-user) Kiro blocks on native Windows**: the hook accepts `--hook-surface` and the
-  PowerShell bridge returns exit 2. Code. (The managed profile covers Kiro on Windows only
-  through the ACP guard, R22.)
+  PowerShell bridge returns exit 2. Code. (The managed profile enrolls Kiro on Windows per
+  user, R22.)
 
 
 **OmniGent**
@@ -2547,13 +2545,13 @@ the build and OS, and does not file a bug unless the behavior differs from the r
 | R19, Linux residual 9, Windows residual 15 | Agents installed outside the known locations (custom `NVM_DIR`, `PNPM_HOME`, `--prefix`, arbitrary folders) are neither enrolled nor reported | Every OS |
 | R20, L-26, Linux residual 11 | `unprivileged_user_namespaces` warning on stock Ubuntu 24.04 and RHEL 9; the sysctl remedies also restrict agent sandboxes (Codex's bubblewrap already fails on stock Ubuntu 24.04) | Linux |
 | R21 | Admin-triggered windows: a hot reload just before the lifecycle rejects an in-place edit (`config_rejected`); an upgrade that changes a socket unit releases the listener | Linux, macOS |
-| R22 | Kiro is advisory: neither kiro-cli engine vetoes prompts (`--v3` sends a blocked prompt to the model with the reason attached; the audit records the block); another agent, a moved `KIRO_HOME` or cloud config sync run without the hook; on Windows Kiro is covered only through the ACP guard | Kiro |
+| R22 | Kiro is advisory: neither kiro-cli engine vetoes prompts (`--v3` sends a blocked prompt to the model with the reason attached; the audit records the block); another agent, a moved `KIRO_HOME` or cloud config sync run without the hook; on Windows a kiro-cli that has never run is reported and not enrolled until its first run | Kiro |
 | R23 | Cursor applies enterprise `hooks.json` only on plans that support it | Cursor |
 | R24 | Antigravity, OpenHands, OmniGent (and Hermes on Windows) have no lock and no foreign-hook guard; Hermes gaps on Linux/macOS: hooks re-read on plugin reload, Python plugins, a session that never loads DefenseClaw's hook | Those connectors |
 | R25, W-57, L-27, M-18 | Desktop-app or editor-extension-only users are not enrolled (#912) | Every OS |
 | R26, W-58, L-28, M-19 | Copilot in VS Code (Local harness) is not governed (#913) | Every OS |
-| R27, W-59, L-29 | Agent sessions in WSL are outside Windows machine policy (#914); a Linux install inside WSL is unsupported | Windows |
-| R28, W-60, L-30, M-20 | Devin Desktop not enrolled; Cascade in builds 3.0.12 to before 3.9.19 not covered (#915) | Every OS |
+| R27, W-59, L-29 | Agent sessions in WSL are partly covered (#914): CLIs inside the distribution, Remote - WSL windows and the Codex app's agent environment stay open; a Linux install inside WSL is refused | Windows |
+| R28, W-60, L-30, M-20 | Devin Desktop enrolled at a bundled Devin CLI version from 3000.4.25 on that is not known broken; Cascade in builds 3.0.12 to before 3.9.19 refused through the machine-level Cascade hooks file, not inspected (#915) | Every OS |
 | R29, W-61, L-31, M-21 | Kiro IDE not discovered, no floor, global hooks not live-verified; Kiro IDE Windows hook shell not live-verified (#916) | Every OS |
 | R30, L-33, M-23 | A project `.openhands/hooks.json` replaces the user's, so none of DefenseClaw's OpenHands hooks run in that project (OpenHands shows "1 hook" instead of six) | OpenHands |
 | R31 | Per-account hook budget (60/s, burst 120, 32 in flight): under `hook_fail_mode: open` a user who floods their own budget makes their own hooks allow | Standalone |

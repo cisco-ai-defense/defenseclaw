@@ -32,6 +32,40 @@ import (
 func init() {
 	enterprisehooks.SetWindowsOpenCodeMachinePolicy(windowsOpenCodeMachinePolicy)
 	enterprisehooks.SetWindowsClaudeManagedHooksOnlyPolicy(windowsClaudeManagedHooksOnlyEnforced)
+	enterprisehooks.SetWindowsCopilotVSCodeUser(windowsCopilotVSCodeUser)
+}
+
+// windowsCopilotVSCodeUser places, checks (verify) or removes DefenseClaw's
+// VS Code Local hook file and Copilot plugin in home, from the loaded
+// config. The install and remove calls run under the target user's
+// impersonation.
+func windowsCopilotVSCodeUser(home string, verify, remove bool) error {
+	opts, _, standalone, err := windowsStandaloneGuardianOptions()
+	if !standalone {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	hookFile, plugin := enterprisepolicy.CopilotVSCodeUserWant(opts)
+	if remove {
+		hookFile, plugin = false, false
+	}
+	result, err := enterprisepolicy.EnsureCopilotVSCodeUser(enterprisepolicy.CopilotVSCodeUserRequest{
+		Home:       home,
+		GOOS:       "windows",
+		HookBinary: opts.HookBinary,
+		HookFile:   hookFile,
+		Plugin:     plugin,
+		DryRun:     verify,
+	})
+	if err != nil {
+		return err
+	}
+	if verify && len(result.Changed)+len(result.Removed) > 0 {
+		return fmt.Errorf("DefenseClaw's VS Code Local hooks under %s are not current: %s", home, strings.Join(append(result.Changed, result.Removed...), ", "))
+	}
+	return nil
 }
 
 // windowsClaudeManagedHooksOnlyEnforced reports whether the loaded config's
@@ -80,8 +114,9 @@ func windowsStandaloneGuardianOptions() (enterprisepolicy.Options, []string, boo
 }
 
 // enterpriseHookStandalonePlatformPrepare publishes the Go-owned Windows
-// machine policy and summary, and re-checks the Claude Code version floor
-// drop-in (inside the lifecycle's Claude Code policy lock). Failure is
+// machine policy and summary, re-checks the Claude Code version floor
+// drop-in (inside the lifecycle's Claude Code policy lock) and reconciles
+// the WSL agent-session registry policy. Failure is
 // reported, not fatal: rows that depend on the policy (Copilot) fail their
 // own verification, and `enterprise policy verify` reports a missing floor.
 func enterpriseHookStandalonePlatformPrepare(stderr io.Writer) {
@@ -101,6 +136,9 @@ func enterpriseHookStandalonePlatformPrepare(stderr io.Writer) {
 	}
 	if _, err := enterpriseHookWindowsClaudeVersionFloor(opts, connectors); err != nil {
 		fmt.Fprintf(stderr, "defenseclaw: enterprise machine policy (Windows): Claude Code version floor: %v\n", err)
+	}
+	if _, err := enterpriseHookWindowsWSL(opts); err != nil {
+		fmt.Fprintf(stderr, "defenseclaw: enterprise machine policy (Windows): WSL agent sessions: %v\n", err)
 	}
 }
 
@@ -372,6 +410,12 @@ func enterpriseHookStandalonePlatformFinish(ctx context.Context, stderr io.Write
 		enterpriseHookWindowsForeignCleanupState.fingerprint = fingerprint
 	}
 	enterpriseHookWindowsForeignCleanupState.Unlock()
+	// The Codex IDE extension's WSL switch is reset every pass, so a session
+	// the user moves into WSL comes back within a pass; reports wait for the
+	// cleanup interval.
+	for _, key := range order {
+		enterpriseHookWSLEditorPass(stderr, users[key].creds, now, due)
+	}
 	if !due {
 		return
 	}

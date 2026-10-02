@@ -3555,6 +3555,13 @@ class TestKiroConnectorScopeRequiresWorkspace(unittest.TestCase):
         )
         patcher.start()
         self.addCleanup(patcher.stop)
+        self._ide_products: list[str] = []
+        ide_patcher = patch(
+            "defenseclaw.commands.cmd_doctor._kiro_ide_product_candidates",
+            side_effect=lambda: self._ide_products,
+        )
+        ide_patcher.start()
+        self.addCleanup(ide_patcher.stop)
 
     def _write_global_hooks(self, command: str, name: str = "defenseclaw-pre-tool") -> str:
         path = os.path.join(self._kiro_home.name, "hooks", "defenseclaw.json")
@@ -3607,6 +3614,34 @@ class TestKiroConnectorScopeRequiresWorkspace(unittest.TestCase):
         self.assertEqual(row["status"], "pass")
         self.assertIn(path, row["detail"])
         self.assertIn("claw.workspace_dir", row["detail"])
+
+    def test_kiro_ide_below_global_hooks_floor_warns(self) -> None:
+        self._write_global_hooks("/home/u/.defenseclaw/hooks/kiro-hook.sh --hook-surface v3")
+        product = os.path.join(self._kiro_home.name, "product.json")
+        with open(product, "w", encoding="utf-8") as fh:
+            json.dump({"nameShort": "Kiro", "applicationName": "kiro", "version": "1.0.181"}, fh)
+        self._ide_products.append(product)
+        row = self._scope_row("kiro", "")
+        self.assertEqual(row["status"], "warn")
+        self.assertEqual(row["reason_code"], "kiro_ide_below_global_hooks_floor")
+
+    def test_kiro_custom_default_agent_is_reported(self) -> None:
+        # The global hook file stays authoritative; a custom default agent is
+        # reported: hooked (Kiro IDE hides it) or unhooked (bare kiro-cli).
+        settings = os.path.join(self._kiro_home.name, "settings", "cli.json")
+        agent = os.path.join(self._kiro_home.name, "agents", "team.json")
+        os.makedirs(os.path.dirname(settings))
+        os.makedirs(os.path.dirname(agent))
+        with open(settings, "w", encoding="utf-8") as fh:
+            json.dump({"chat.defaultAgent": "team"}, fh)
+        codes = []
+        for hooks in ({"preToolUse": [{"command": "/home/u/.defenseclaw/hooks/kiro-hook.sh"}]}, {}):
+            with open(agent, "w", encoding="utf-8") as fh:
+                json.dump({"name": "team", "hooks": hooks}, fh)
+            r = _DoctorResult()
+            _check_connector_inventory(self._cfg(""), "kiro", r)
+            codes += [c["reason_code"] for c in r.checks if c["label"] == "Kiro default agent"]
+        self.assertEqual(codes, ["kiro_custom_agent_hooked", "kiro_custom_agent_unhooked"])
 
     def test_kiro_global_file_without_defenseclaw_hooks_fails(self) -> None:
         self._write_global_hooks("/usr/local/bin/other-audit-hook", name="team-audit")

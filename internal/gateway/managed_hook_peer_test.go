@@ -31,11 +31,13 @@ func TestManagedHookAuthorizerMatrix(t *testing.T) {
 		{UID: uidPtr(2001), Connector: "cursor", OK: true},
 		{User: "carol", Connector: "hermes", OK: false},
 		{User: "dave", UID: uidPtr(4001), Connector: "claudecode", OK: true},
+		{User: "erin", Connector: "antigravity", OK: true},
 	}}
 	load := func() (managedHookLedger, error) { return ledger, nil }
 	alice := managedHookPeer{UID: 1001, Name: "alice"}
 	bob := managedHookPeer{UID: 2001, Name: "bob"}
 	carol := managedHookPeer{UID: 3001, Name: "carol"}
+	erin := managedHookPeer{UID: 5001, Name: "erin"}
 	root := managedHookPeer{UID: 0, Name: "root"}
 
 	cases := []struct {
@@ -44,6 +46,7 @@ func TestManagedHookAuthorizerMatrix(t *testing.T) {
 		loader     func() (managedHookLedger, error)
 		peer       managedHookPeer
 		connector  string
+		surface    string
 		allow      bool
 		reason     string
 		exempt     bool
@@ -62,6 +65,13 @@ func TestManagedHookAuthorizerMatrix(t *testing.T) {
 		{name: "exempt by name", enrollment: config.EnterpriseEnrollmentConfig{ExemptUsers: []string{"carol"}}, peer: carol, connector: "hermes", allow: true, exempt: true},
 		{name: "exempt by uid", enrollment: config.EnterpriseEnrollmentConfig{ExemptUsers: []string{"3001"}}, peer: carol, connector: "hermes", allow: true, exempt: true},
 		{name: "unknown connector", peer: alice, connector: "", reason: managedHookReasonConnectorUnknown},
+		{name: "refuse denies a user whose only codex install is a refused surface", enrollment: config.EnterpriseEnrollmentConfig{UnverifiedVersions: "refuse"}, peer: carol, connector: "codex", reason: managedHookReasonSurfaceUnverified},
+		{name: "refuse keeps inspecting other users", enrollment: config.EnterpriseEnrollmentConfig{UnverifiedVersions: "refuse"}, peer: bob, connector: "codex", allow: true},
+		{name: "refuse denies an enrolled user's unverified extension", enrollment: config.EnterpriseEnrollmentConfig{UnverifiedVersions: "refuse"}, peer: alice, connector: "claudecode", surface: "extension", reason: managedHookReasonSurfaceUnverified},
+		{name: "refuse keeps the same user's cli", enrollment: config.EnterpriseEnrollmentConfig{UnverifiedVersions: "refuse"}, peer: alice, connector: "claudecode", surface: "cli", allow: true},
+		{name: "refuse admits a live-verified surface", enrollment: config.EnterpriseEnrollmentConfig{UnverifiedVersions: "refuse"}, peer: bob, connector: "cursor", surface: "desktop", allow: true},
+		{name: "report allows an unverified surface", peer: alice, connector: "claudecode", surface: "extension", allow: true},
+		{name: "refuse denies a per-user refusal row", enrollment: config.EnterpriseEnrollmentConfig{UnverifiedVersions: "refuse"}, peer: erin, connector: "antigravity", reason: managedHookReasonSurfaceUnverified},
 		{name: "ledger failure fails closed", loader: func() (managedHookLedger, error) { return managedHookLedger{}, errors.New("untrusted") }, peer: alice, connector: "claudecode", reason: managedHookReasonLedgerUnavailable},
 	}
 	for _, tc := range cases {
@@ -71,7 +81,10 @@ func TestManagedHookAuthorizerMatrix(t *testing.T) {
 				loader = load
 			}
 			authorizer := newManagedHookAuthorizer(tc.enrollment, []string{"codex", " "}, loader)
-			decision := authorizer.decide(tc.peer, tc.connector)
+			authorizer.loadRefused = func() (managedHookLedger, error) {
+				return managedHookLedger{Refused: []managedHookLedgerTarget{{UID: uidPtr(3001), Connector: "codex"}, {UID: uidPtr(5001), Connector: "antigravity"}}}, nil
+			}
+			decision := authorizer.decide(tc.peer, tc.connector, tc.surface)
 			if decision.Allow != tc.allow || decision.Reason != tc.reason || decision.Exempt != tc.exempt {
 				t.Fatalf("decision = %+v, want allow=%v reason=%q exempt=%v", decision, tc.allow, tc.reason, tc.exempt)
 			}

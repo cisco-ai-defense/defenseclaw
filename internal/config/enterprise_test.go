@@ -209,6 +209,42 @@ enterprise:
 			}
 		}
 	})
+
+	t.Run("copilot harness knobs", func(t *testing.T) {
+		const head = "config_version: 8\nenterprise:\n  machine_policy:\n"
+		for name, doc := range map[string]string{
+			"both":     head + "    connectors:\n      copilot:\n        harness_preference: unmanaged\n        local_harness: retire\n        ownership: merge\n",
+			"defaults": head + "    connectors:\n      copilot:\n        harness_preference: sdk\n        local_harness: govern\n",
+		} {
+			document, err := ParseV8YAML(name+".yaml", []byte(doc))
+			if err == nil {
+				err = validateV8Schema(name+".yaml", document)
+			}
+			if err != nil {
+				t.Fatalf("v8 schema rejected %s: %v", name, err)
+			}
+		}
+		for name, doc := range map[string]string{
+			"bad value":         head + "    connectors:\n      copilot:\n        local_harness: remove\n",
+			"another connector": head + "    connectors:\n      cursor:\n        harness_preference: sdk\n",
+			"the default block": head + "    default:\n      local_harness: govern\n",
+		} {
+			document, err := ParseV8YAML(name+".yaml", []byte(doc))
+			if err == nil {
+				err = validateV8Schema(name+".yaml", document)
+			}
+			if err == nil {
+				t.Errorf("v8 schema accepted %s", name)
+			}
+		}
+		if err := validateConnectorPolicy("enterprise.machine_policy.connectors.cursor", EnterpriseConnectorPolicy{LocalHarness: "govern"}); err == nil {
+			t.Error("validation accepted local_harness outside connectors.copilot")
+		}
+		m := EnterpriseMachinePolicyConfig{Connectors: map[string]EnterpriseConnectorPolicy{"copilot": {HarnessPreference: "Unmanaged"}}}
+		if m.CopilotHarnessPreference() != CopilotHarnessPreferenceUnmanaged || m.CopilotLocalHarness() != CopilotLocalHarnessGovern {
+			t.Errorf("effective knobs = %q, %q", m.CopilotHarnessPreference(), m.CopilotLocalHarness())
+		}
+	})
 }
 
 // enterprise.trust.mode "" is the documented default (the hash_pinned
@@ -496,6 +532,43 @@ func TestClaudeVersionFloorDefaultsToEnforce(t *testing.T) {
 	}
 }
 
+// enterprise.machine_policy.windows_wsl: defaults, the schema, the loader and
+// the standalone-only rule.
+func TestWindowsWSLPolicyValidation(t *testing.T) {
+	if got := (EnterpriseMachinePolicyConfig{}).WSL(); got != (EnterpriseWindowsWSLPolicy{AgentSessions: "block", Platform: "leave", EditorSettings: "repair", ClaudeDesktopKey: "merge"}) {
+		t.Fatalf("defaults: %+v", got)
+	}
+	const head = "config_version: 8\nenterprise:\n  machine_policy:\n    windows_wsl:\n"
+	for doc, ok := range map[string]bool{
+		head + "      agent_sessions: allow\n      platform: disable\n      editor_settings: report\n      claude_desktop_key: create\n": true,
+		head + "      platform: off\n":    false,
+		head + "      codex_app: block\n": false,
+	} {
+		document, err := ParseV8YAML("wsl.yaml", []byte(doc))
+		if err == nil {
+			err = validateV8Schema("wsl.yaml", document)
+		}
+		if (err == nil) != ok {
+			t.Errorf("schema on %q: %v", doc, err)
+		}
+	}
+	managedConfig := func(w EnterpriseWindowsWSLPolicy, profile string) Config {
+		return Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{Profile: profile, MachinePolicy: EnterpriseMachinePolicyConfig{WindowsWSL: w}}}
+	}
+	good := managedConfig(EnterpriseWindowsWSLPolicy{Platform: "disable"}, "standalone")
+	if err := resolveEnterpriseConfig(&good, "windows", ""); err != nil {
+		t.Fatalf("valid windows_wsl rejected: %v", err)
+	}
+	bad := managedConfig(EnterpriseWindowsWSLPolicy{EditorSettings: "delete"}, "standalone")
+	if err := resolveEnterpriseConfig(&bad, "windows", ""); err == nil || !strings.Contains(err.Error(), "enterprise.machine_policy.windows_wsl.editor_settings") {
+		t.Fatalf("a bad knob must be rejected by name, got %v", err)
+	}
+	secureClient := managedConfig(EnterpriseWindowsWSLPolicy{AgentSessions: "allow"}, "secure_client")
+	if err := resolveEnterpriseConfig(&secureClient, "windows", ""); err == nil || !strings.Contains(err.Error(), "apply only to the standalone profile") {
+		t.Fatalf("secure_client accepted windows_wsl: %v", err)
+	}
+}
+
 func TestClaudeVersionFloorValidation(t *testing.T) {
 	managedConfig := func(m EnterpriseMachinePolicyConfig) Config {
 		return Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{MachinePolicy: m}}
@@ -531,5 +604,48 @@ func TestClaudeVersionFloorValidation(t *testing.T) {
 	unmanaged := Config{Enterprise: EnterpriseConfig{MachinePolicy: claudeFloorPolicy("off")}}
 	if err := resolveEnterpriseConfig(&unmanaged, "linux", ""); err == nil || !strings.Contains(err.Error(), "requires deployment_mode") {
 		t.Fatalf("an unmanaged config accepted version_floor: %v", err)
+	}
+}
+
+// unverified_versions defaults to report, a per-connector override wins,
+// both are validated, and Secure Client refuses the knob.
+func TestEnterpriseUnverifiedVersions(t *testing.T) {
+	en := EnterpriseEnrollmentConfig{UnverifiedVersions: "refuse", UnverifiedVersionsByConnector: map[string]string{"devin": "report"}}
+	if got := (EnterpriseEnrollmentConfig{}).UnverifiedVersionsFor("codex"); got != EnterpriseUnverifiedReport {
+		t.Fatalf("default = %q, want report", got)
+	}
+	if en.UnverifiedVersionsFor("codex") != EnterpriseUnverifiedRefuse || en.UnverifiedVersionsFor("Devin") != EnterpriseUnverifiedReport {
+		t.Fatalf("override not applied: %+v", en)
+	}
+	for _, tc := range []struct {
+		en      EnterpriseEnrollmentConfig
+		profile string
+		ok      bool
+	}{
+		{en, "", true},
+		{EnterpriseEnrollmentConfig{UnverifiedVersions: "block"}, "", false},
+		{EnterpriseEnrollmentConfig{UnverifiedVersionsByConnector: map[string]string{"codex": "allow"}}, "", false},
+		{EnterpriseEnrollmentConfig{UnverifiedVersions: "report"}, "secure_client", false},
+	} {
+		goos := "linux"
+		if tc.profile == "secure_client" {
+			goos = "windows"
+		}
+		cfg := Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{Profile: tc.profile, Enrollment: tc.en}}
+		if err := resolveEnterpriseConfig(&cfg, goos, ""); (err == nil) != tc.ok {
+			t.Fatalf("%+v (%q): err = %v, want ok=%v", tc.en, tc.profile, err, tc.ok)
+		}
+	}
+	for doc, ok := range map[string]bool{
+		"    unverified_versions: refuse\n    unverified_versions_by_connector:\n      codex: report\n": true,
+		"    unverified_versions: block\n": false,
+	} {
+		document, err := ParseV8YAML("unverified.yaml", []byte("config_version: 8\nenterprise:\n  enrollment:\n"+doc))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := validateV8Schema("unverified.yaml", document); (err == nil) != ok {
+			t.Fatalf("schema on %q: err = %v, want ok=%v", doc, err, ok)
+		}
 	}
 }

@@ -156,6 +156,22 @@ func CascadeUserHooksPath(home string) string {
 	return filepath.Join(home, ".codeium", "windsurf", "hooks.json")
 }
 
+// Pre-rename machine-level Cascade hooks folder names, which Devin Desktop
+// still reads when no Devin one exists (docs.devin.ai/desktop/cascade/hooks):
+// /Library/Application Support/Windsurf on macOS, /etc/windsurf on Linux and
+// %ProgramData%\Windsurf on Windows.
+const (
+	CascadeMachineFolder     = "Windsurf"
+	CascadeMachineFolderUnix = "windsurf"
+)
+
+// DesktopBundledCLIDir is where a Devin Desktop app keeps the Devin CLI it
+// bundles, relative to the app's resources/app folder: the pre-rename
+// extension folder extensions/windsurf/devin (from the 3.10 packages).
+func DesktopBundledCLIDir() string {
+	return filepath.Join("extensions", VendorToken, "devin")
+}
+
 // DesktopLegacyRulePaths are pre-rename rule locations Devin Desktop still
 // loads. They are read-only inventory inputs.
 func DesktopLegacyRulePaths(home, workspace string) []string {

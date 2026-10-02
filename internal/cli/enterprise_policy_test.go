@@ -102,14 +102,16 @@ func TestEnterprisePolicyVerifyShowAndExport(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &report); err != nil {
 		t.Fatalf("verify --json: %v\n%s", err, out)
 	}
-	if !report.Complete || report.Profile != "standalone" || len(report.Result.States) != len(ctx.connectors) {
+	// devin brings its Cascade companion.
+	if !report.Complete || report.Profile != "standalone" || len(report.Result.States) != len(ctx.connectors)+1 {
 		t.Fatalf("report: %+v", report)
 	}
 	routes := map[string]string{}
 	for _, state := range report.Result.States {
 		routes[state.Connector] = state.Route
 	}
-	if routes["codex"] != enterprisepolicy.RouteMachinePolicy || routes["devin"] != enterprisepolicy.RoutePerUser {
+	if routes["codex"] != enterprisepolicy.RouteMachinePolicy || routes["devin"] != enterprisepolicy.RoutePerUser ||
+		routes[enterprisepolicy.ConnectorDevinCascade] != enterprisepolicy.RouteMachinePolicy {
 		t.Fatalf("routes: %v", routes)
 	}
 	if !report.Guard["cursor"].Guard || !report.Guard["devin"].Guard || report.Guard["codex"].Guard {
@@ -158,6 +160,28 @@ func TestEnterprisePolicyVerifyShowAndExport(t *testing.T) {
 	out, err = runPolicyCommand(t, runEnterprisePolicyShow)
 	if err != nil || !strings.Contains(out, "hook_contract_unverified: cursor 4.1.0 for user alice is not protected") {
 		t.Fatalf("show must name the unprotected agent: %v\n%s", err, out)
+	}
+
+	// The wsl row is Windows only; there an uncovered row fails verify.
+	enterprisePolicyConnector = enterprisepolicy.ConnectorWSL
+	if _, err := runPolicyCommand(t, runEnterprisePolicyVerify); err == nil || !strings.Contains(err.Error(), "only to Windows") {
+		t.Fatalf("the wsl row must be refused off Windows, got %v", err)
+	}
+	out, err = runPolicyCommand(t, runEnterprisePolicyExport)
+	if err != nil || !strings.Contains(out, `"disableWslSessions"="true"`) {
+		t.Fatalf("wsl export: %v\n%s", err, out)
+	}
+	windowsCtx := ctx
+	windowsCtx.opts.GOOS = "windows"
+	standaloneEnterprisePolicyOptions = func() (enterprisePolicyContext, error) { return windowsCtx, nil }
+	previousWSL := enterprisePolicyWSLState
+	t.Cleanup(func() { enterprisePolicyWSLState = previousWSL })
+	enterprisePolicyWSLState = func(enterprisePolicyContext) (enterprisepolicy.State, error) {
+		return enterprisepolicy.State{Connector: enterprisepolicy.ConnectorWSL, Route: enterprisepolicy.RouteMachinePolicy, Conflicts: []string{"disableWslSessions is not set"}}, nil
+	}
+	out, err = runPolicyCommand(t, runEnterprisePolicyVerify)
+	if err == nil || !strings.Contains(out, "disableWslSessions is not set") {
+		t.Fatalf("an uncovered wsl row must fail verify: %v\n%s", err, out)
 	}
 }
 

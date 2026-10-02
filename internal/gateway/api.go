@@ -77,6 +77,9 @@ type APIServer struct {
 	// hookCallerLimits bounds each verified caller identity's requests on a
 	// standalone gateway (hook socket and per-user credentials).
 	hookCallerLimits hookCallerLimiter
+	// copilotDedupe answers the second delivery of one Copilot tool call
+	// with the first delivery's verdict.
+	copilotDedupe copilotHookDedupe
 
 	// shutdownRequester cancels the owning Sidecar run context after an
 	// authenticated, loopback-only management request has proven the expected
@@ -3578,6 +3581,9 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 		}
 		if hookScope, ok := a.hookTokenScopeForPath(r.URL.Path); ok && connector.IsLoopback(r) && token != "" {
 			if identity, ok := a.lookupUserScopedCredential(connector.UserScopedHookCredential, hookScope, token); ok {
+				if a.refuseUnverifiedSurface(w, r, route, hookScope) {
+					return
+				}
 				a.serveUserScoped(w, r, route, identity, next, func(ctx context.Context) context.Context {
 					return withAuthenticatedHookConnector(ctx, hookScope)
 				})
@@ -3610,6 +3616,9 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			}
 			if registered {
 				if identity, ok := a.lookupUserScopedCredential(connector.UserScopedHookCredential, hookScope, token); ok {
+					if a.refuseUnverifiedSurface(w, r, route, hookScope) {
+						return
+					}
 					a.serveUserScoped(w, r, route, identity, next, func(ctx context.Context) context.Context {
 						return withAuthenticatedInspectConnector(ctx, hookScope)
 					})

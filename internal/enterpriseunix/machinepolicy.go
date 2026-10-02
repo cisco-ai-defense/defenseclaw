@@ -86,7 +86,37 @@ func (m *policyManager) options(cfg *config.Config) (enterprisepolicy.Options, e
 	// config names; enterprisepolicy inspects it under Root.
 	opts.SkipTrustChecks = m.skipTrust
 	opts.Now = env.Now
+	if cfg != nil {
+		opts.CopilotUserHomes = m.enrolledHomes()
+	}
 	return opts, opts.Validate()
+}
+
+// enrolledHomes are the eligible accounts' homes from the enumerator's
+// root-only record (under Root in tests); the Copilot VS Code lock gate
+// checks each for DefenseClaw's plugin. An unreadable record is no homes,
+// which keeps the lock off.
+func (m *policyManager) enrolledHomes() []string {
+	env := m.env
+	data, err := readBounded(env.P(enterprisehooks.UnixEligibleAccountsPath(env.Layout.ManifestPath)), maxInputBytes)
+	if err != nil {
+		return nil
+	}
+	var record struct {
+		Accounts []struct {
+			Home string `json:"home"`
+		} `json:"accounts"`
+	}
+	if json.Unmarshal(data, &record) != nil {
+		return nil
+	}
+	homes := []string{}
+	for _, account := range record.Accounts {
+		if home := strings.TrimSpace(account.Home); home != "" {
+			homes = append(homes, env.P(home))
+		}
+	}
+	return homes
 }
 
 func (m *policyManager) Intended(cfg *config.Config) ([]string, error) {

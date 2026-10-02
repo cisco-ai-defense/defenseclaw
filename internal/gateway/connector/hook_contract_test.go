@@ -3378,5 +3378,16 @@ func TestDevinContractPinsArePerOS(t *testing.T) {
 		if got := resolveHookContractForOS("devin", "3000.4.25", goos).Status; got != HookCompatibilityKnown {
 			t.Fatalf("devin 3000.4.25 on %s: status %s", goos, got)
 		}
+		// 3000.10.48 (Devin Desktop 3.10's bundled CLI) is untested on every
+		// OS, between the Linux pins; below the 3000.4.25 floor stays unknown.
+		if got := resolveHookContractForOS("devin", "3000.10.48", goos); got.Status != HookCompatibilityKnown || !got.UntestedVersion || got.Contract.ContractID != "devin-hooks-v1" {
+			t.Fatalf("devin 3000.10.48 on %s: %+v, want known untested", goos, got)
+		}
+		if got := resolveHookContractForOSMode("devin", "3000.10.48", goos, true).Status; got != HookCompatibilityUnknown {
+			t.Fatalf("devin 3000.10.48 on %s strict: status %s", goos, got)
+		}
+		if got := resolveHookContractForOS("devin", "3000.4.24", goos).Status; got != HookCompatibilityUnknown {
+			t.Fatalf("devin 3000.4.24 on %s: status %s", goos, got)
+		}
 	}
 }

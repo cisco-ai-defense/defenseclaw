@@ -448,12 +448,12 @@ func TestLaunchArgv(t *testing.T) {
 		// before commands and edits (on-request never would).
 		{"codex-interactive-safe", Codex, LaunchOptions{Mode: Interactive},
 			[]string{CodexLauncherPath, "-c", `sandbox_mode="danger-full-access"`, "-c", `approval_policy="untrusted"`}},
-		{"codex-headless-mantle", Codex, LaunchOptions{Mode: Headless, Yolo: true, Prompt: "p", CredentialProfile: profiles.CodexBedrockMantleID, BedrockRegion: "us-west-2", Args: []string{"-m", "openai.gpt-oss-20b"}},
+		{"codex-headless-mantle", Codex, LaunchOptions{Mode: Headless, Yolo: true, Prompt: "p", CredentialProfile: profiles.CodexBedrockMantleID, BedrockRegion: "us-west-2", Args: []string{"-m", "openai.gpt-5.4"}},
 			[]string{CodexLauncherPath, "exec", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox",
 				"-c", `model_provider="mantle"`, "-c", `model_providers.mantle.name="mantle"`,
-				"-c", `model_providers.mantle.base_url="https://bedrock-mantle.us-west-2.api.aws/v1"`,
+				"-c", `model_providers.mantle.base_url="https://bedrock-mantle.us-west-2.api.aws/openai/v1"`,
 				"-c", `model_providers.mantle.env_key="BEDROCK_MANTLE_API_KEY"`, "-c", `model_providers.mantle.wire_api="responses"`,
-				"--disable", "multi_agent", "-c", `web_search="disabled"`, "-m", "openai.gpt-oss-20b", "p"}},
+				"--disable", "multi_agent", "-c", `web_search="disabled"`, "-m", "openai.gpt-5.4", "p"}},
 		{"opencode-interactive-yolo", OpenCode, LaunchOptions{Mode: Interactive, Yolo: true}, []string{OpenCodeLauncherPath, "--auto"}},
 		{"opencode-interactive-safe", OpenCode, LaunchOptions{Mode: Interactive, Args: []string{"-m", "anthropic/claude-haiku-4-5"}},
 			[]string{OpenCodeLauncherPath, "-m", "anthropic/claude-haiku-4-5"}},
@@ -845,7 +845,7 @@ func TestCredentialProfilesPinTheModelProvider(t *testing.T) {
 		t.Fatalf("openai profile = %+v, %v", openai.ModelProvider, err)
 	}
 	mantle, err := Codex.CredentialProfile(profiles.CodexBedrockMantleID, "eu-west-1")
-	if err != nil || mantle.ModelProvider == nil || mantle.ModelProvider.BaseURL != "https://bedrock-mantle.eu-west-1.api.aws/v1" ||
+	if err != nil || mantle.ModelProvider == nil || mantle.ModelProvider.BaseURL != "https://bedrock-mantle.eu-west-1.api.aws/openai/v1" ||
 		!mantle.ModelProvider.FunctionToolsOnly || mantle.DefaultModel != CodexMantleDefaultModel || mantle.ModelProvider.DefaultModel != CodexMantleDefaultModel {
 		t.Fatalf("mantle profile = %+v, %v", mantle.ModelProvider, err)
 	}
@@ -856,7 +856,7 @@ func TestCredentialProfilesPinTheModelProvider(t *testing.T) {
 		}
 	}
 	// The base profile table is not mutated by region resolution.
-	if again, _ := Codex.CredentialProfile(profiles.CodexBedrockMantleID, "us-west-2"); again.ModelProvider.BaseURL != "https://bedrock-mantle.us-west-2.api.aws/v1" {
+	if again, _ := Codex.CredentialProfile(profiles.CodexBedrockMantleID, "us-west-2"); again.ModelProvider.BaseURL != "https://bedrock-mantle.us-west-2.api.aws/openai/v1" {
 		t.Fatalf("mantle base URL = %s", again.ModelProvider.BaseURL)
 	}
 	claude, _ := ClaudeCode.CredentialProfile(profiles.ClaudeBedrockMantleID, "eu-west-1")

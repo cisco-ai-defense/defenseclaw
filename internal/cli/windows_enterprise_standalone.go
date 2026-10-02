@@ -678,7 +678,12 @@ func applyWindowsEnterpriseUnprotectedAgents(result *enterprisestatus.Result) {
 		return
 	}
 	for _, agent := range agents {
-		result.AddWarning(agent.Code, agent.Message())
+		// unverified_versions: refuse that nothing enforces fails verify.
+		if agent.Refusal == enterprisehooks.RefusalMissing && result.Action == "verify" {
+			result.AddError(agent.Code, agent.Message())
+		} else {
+			result.AddWarning(agent.Code, agent.Message())
+		}
 		result.SecurityComplete = false
 	}
 }

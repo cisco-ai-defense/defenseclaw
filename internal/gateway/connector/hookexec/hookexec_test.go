@@ -1035,6 +1035,18 @@ func TestResponseFailure(t *testing.T) {
 		}
 	})
 
+	t.Run("surface refusal blocks even in fail-open mode", func(t *testing.T) {
+		r := run(t, "claudecode", &stubRT{status: 403, body: `{"error":"forbidden","reason":"enterprise_managed_surface_unverified"}`}, func(o *Options) {
+			o.AgentSurface = "Extension"
+		})
+		if r.code != blockExit || !strings.Contains(r.stderr, "this editor extension is not verified") {
+			t.Fatalf("code = %d stderr = %q, want a surface block", r.code, r.stderr)
+		}
+		if got := r.rt.gotReq.Header.Get(AgentSurfaceHeader); got != "extension" {
+			t.Fatalf("%s = %q, want extension", AgentSurfaceHeader, got)
+		}
+	})
+
 	t.Run("cursor response failure fail open emits valid allow json", func(t *testing.T) {
 		r := run(t, "cursor", &stubRT{status: 401, body: "unauthorized"}, nil)
 		if r.code != 0 {

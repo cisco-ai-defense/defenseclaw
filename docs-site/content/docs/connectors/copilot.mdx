@@ -245,6 +245,118 @@ audit, alert, webhook, and configured export destinations.
 GitHub's Copilot CLI 1.0.76 release notes state that per-path sandbox denials cannot be enforced on Windows. Hook enforcement remains event-specific; do not treat Copilot's Windows sandbox as per-path filesystem containment.
 </Callout>
 
+## GitHub Copilot in VS Code
+
+VS Code runs Copilot agent sessions on one of two harnesses. The Copilot SDK
+harness reads the same `policy.d` hooks as Copilot CLI, so the enterprise
+drop-in covers it. The default Local harness does not read `policy.d`. It
+reads hook files from `.github/hooks/*.json` and `~/.copilot/hooks/*.json` in
+its own format: PascalCase event names (`PreToolUse`, `UserPromptSubmit`,
+`Stop`, and others), snake_case stdin fields (`tool_name`, `tool_input`,
+`tool_use_id`), and a `hookSpecificOutput.permissionDecision` of `allow`,
+`deny` or `ask`. Sources:
+[Agent hooks](https://code.visualstudio.com/docs/copilot/customization/hooks),
+[Hooks reference](https://code.visualstudio.com/docs/agents/reference/hooks-reference),
+[Enterprise policies](https://code.visualstudio.com/docs/enterprise/policies).
+
+**Local harness dialect.** A hook command bound with
+`defenseclaw-hook hook --connector copilot --event PreToolUse --hook-surface vscode-local`
+speaks the Local format. The gateway rejects a body whose `hook_event_name`
+differs from the bound event. It maps the Local tool names DefenseClaw has
+reviewed (`run_in_terminal`, `read_file`, `list_dir`, `create_file`,
+`replace_string_in_file`, `insert_edit_into_file`, `fetch_webpage`) to
+canonical actions, and passes any other tool or argument through in its
+native form. A block on `PreToolUse` is a structured `deny`, a confirm is a
+native `ask`, and an allow prints nothing, because a Local `allow`
+auto-approves the call. A fail-closed `PreToolUse` or `UserPromptSubmit`
+denies with exit code 0; `Stop` never fails closed. Without the flag, a
+Copilot hook keeps the Copilot CLI contract.
+
+**Device policies (enterprise, standalone profile).** With
+`ownership: merge`, the Copilot machine policy also enables the VS Code
+policies `ChatHooks` (a user cannot turn hooks off with `chat.useHooks`) and
+`ChatEditorPreferCopilotHarness` (VS Code 1.134 and later open new editor
+chats on the SDK harness):
+
+| Platform | Where | How |
+| --- | --- | --- |
+| Windows | `HKLM\Software\Policies\Microsoft\VSCode` | `REG_DWORD` value `1` |
+| Linux | `/etc/vscode/policy.json` | JSON `true` (Devin Desktop reads the same file) |
+| macOS | Configuration profile | Not written; deploy both values through MDM |
+
+DefenseClaw adds a value only when it is absent, keeps any value the
+administrator set (and reports one that is not enabled), and records the
+values it added. Uninstall removes only those, and only while they still
+hold DefenseClaw's value. `ownership: verify_only` reports missing values
+without writing them.
+
+**Local hook file and plugin (enterprise, standalone profile).** While the
+Copilot machine policy is not `ownership: off` and `local_harness` is
+`govern`, DefenseClaw places `~/.copilot/hooks/defenseclaw-vscode.json` for
+every enrolled user. It binds `SessionStart`, `UserPromptSubmit`,
+`PreToolUse`, `PostToolUse` and `Stop` to the administrator's hook binary with
+`--hook-surface vscode-local`. With `managed_hooks_only: enforce` it also
+places the same hooks as a plugin under
+`~/.copilot/installed-plugins/defenseclaw/defenseclaw/`, enables
+`ChatPluginsEnabled`, and adds `enabledPlugins["defenseclaw@defenseclaw"]` to
+Copilot's managed settings. DefenseClaw writes these files as the user,
+rewrites only files it rendered, and keeps any other file at those paths,
+reporting it. Verify reports drift, and uninstall removes only DefenseClaw's
+copies.
+
+Copilot CLI also reads `~/.copilot/hooks` and runs the file's `command`, and
+VS Code runs both the file and the plugin. The gateway therefore answers a
+second delivery of the same tool call with the first verdict, so the call is
+evaluated and audited once. It matches deliveries by `tool_use_id`, or, for
+the two Copilot CLI formats, by the same session, event, tool and arguments
+within a few seconds.
+
+**Local harness lock.** Copilot's managed settings key
+`allowManagedHooksOnly` makes the Local harness run only managed hooks and
+plugins. DefenseClaw sets it only when all of these hold: Linux
+(`/etc/github-copilot/managed-settings.json`); `managed_hooks_only: enforce`;
+every enrolled user already has DefenseClaw's plugin; and every VS Code
+installation found is 1.139.x, the version whose plugin store DefenseClaw
+writes. Otherwise status explains why it is not set. Values the administrator
+set are kept, and uninstall removes only the keys DefenseClaw added. On macOS
+DefenseClaw reports the keys to deploy through device management and writes
+nothing. On Windows it does not write the lock.
+
+**Harness settings.** Two keys under `enterprise.machine_policy.connectors.copilot`:
+
+| Key | Values | Effect |
+| --- | --- | --- |
+| `harness_preference` | `sdk` (default), `unmanaged` | `sdk` enables `ChatEditorPreferCopilotHarness`; `unmanaged` leaves the editor's harness choice to the user |
+| `local_harness` | `govern` (default), `retire` | `govern` places the Local hook file (and the plugin under `managed_hooks_only: enforce`); `retire` places neither and sets `sandbox.enabled` in Copilot's managed settings |
+
+The Copilot status row lists both settings, the VS Code installations found
+with their versions, and how many enrolled users have the Local hook file and
+the plugin.
+
+**Foreign-hook guard.** In a Local harness request the guard also checks the
+Local harness's own hook sources:
+
+- `~/.claude/settings.json`;
+- `chat.hookFilesLocations` in VS Code user and workspace settings;
+- custom agents in `.github/agents/*.agent.md` whose frontmatter declares hooks;
+- installed Copilot plugins.
+
+All of these are report-only, and DefenseClaw never edits them. A linked plugin
+directory cannot be verified, so the guard treats it as an unreadable source.
+
+**Not covered yet.**
+
+- Under the lock, the guard still treats user-installed plugins and
+  custom-agent hooks as foreign. Whether `allowManagedHooksOnly` also stops
+  them in the Local harness is not yet confirmed live.
+- VS Code 1.140 and later keep plugin records in `~/.copilot/config.json`,
+  which DefenseClaw does not write yet, so the lock is not set for them.
+- `retire` does not yet pick the editor's harness for the user.
+- Per-user Copilot hook files written in the Copilot CLI format are not
+  decoded correctly when the Local harness runs them.
+- VS Code publishes no list of built-in tool names. The mapped names above
+  follow the current tool set and are confirmed live with an audit-only hook.
+
 ## In an OpenShell sandbox
 
 `defenseclaw sandbox run copilot` runs GitHub Copilot CLI in an NVIDIA
@@ -299,28 +411,15 @@ replaces that list, so name every harness you want:
   the screen, followed by `defenseclaw: Ctrl-Z cannot suspend a harness in
   an OpenShell sandbox (the sandbox refuses the signal): it keeps running,
   and there is nothing to bring back with fg.`
-- **Interactive hook latency.** In the interactive TUI every hook takes
-  Copilot's full hook timeout (30 seconds) although DefenseClaw answers in
-  milliseconds. A prompt takes about a minute to reach the model and one
-  tool call about a minute and a half, Copilot shows only "Working"
-  meanwhile, and a Ctrl-C waits for the hook that is running. The launch
-  banner of `sandbox run` and `sandbox connect` says so. This happens on
-  Linux and in a Mac's MicroVM alike, and it is a limit of OpenShell 0.1.1
-  and Copilot CLI 1.0.88, not of the hooks: the sandbox refuses
-  `pidfd_open` (ENOSYS), in the MicroVM too although its own Linux kernel
-  has the call, so Copilot's native runtime falls back to watching
-  `SIGCHLD` for its hook processes, and in the TUI Copilot's own Node.js
-  subprocess handling resets that signal to its default. The finished hook
-  stays a zombie until the timeout kills it; its verdict is still applied.
-  Headless runs are not affected: pass the prompt with
-  `defenseclaw sandbox run copilot --prompt "PROMPT"`, or
-  `defenseclaw sandbox connect NAME --prompt "PROMPT"`. DefenseClaw does not
-  shorten the timeout, because Copilot allows a tool call whose hook timed
-  out. Nor does it use Copilot's HTTP hooks, which start no hook process:
-  Copilot also allows a tool call when an HTTP hook fails (a network error,
-  a timeout or an error status), and the sandbox hooks must block on every
-  failure. Tracked in
-  [#966](https://github.com/cisco-ai-defense/defenseclaw/issues/966).
+- **Interactive hook latency.** The sandbox refuses `pidfd_open`
+  (ENOSYS), on Linux and in a Mac's MicroVM alike, and in the interactive
+  TUI Copilot CLI 1.0.88 then learns that a hook exited only when the
+  30-second hook timeout ends it. The image fixes this with a small
+  root-owned preload library that answers the refused call for the pinned
+  Copilot executable only, so hooks take milliseconds in the TUI as in
+  headless runs. Hooks, tools and every other process Copilot starts run
+  without it
+  ([#966](https://github.com/cisco-ai-defense/defenseclaw/issues/966)).
 - **Image and verification.** The image installs Copilot CLI 1.0.88,
   replacing the base image's 1.0.16, which no hook contract covers. Verified
   end to end: against a mock model

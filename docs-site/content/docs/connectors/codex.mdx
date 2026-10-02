@@ -273,19 +273,14 @@ your own Codex configuration does not change.
   sign-in is not shared. OpenShell holds the secret, and the sandbox gets a
   placeholder that works only at `api.openai.com`. `--llm bedrock`, and `auto`
   when neither is set, shares a short-term Amazon Bedrock API key from
-  `AWS_BEARER_TOKEN_BEDROCK` for a Codex custom provider on the Bedrock Mantle endpoint in `--bedrock-region`
+  `AWS_BEARER_TOKEN_BEDROCK` for a Codex custom provider on the Bedrock Mantle OpenAI route in `--bedrock-region`
   (default `$AWS_REGION`, then `$AWS_DEFAULT_REGION`, then `us-east-1`), with
   Codex's multi-agent and web search tools off. Mantle does not serve Codex's
-  own default model, so a Bedrock run uses `openai.gpt-oss-20b` unless you
-  pick another with `-- -m MODEL` (a `-c model=` override does not change
+  own default model, so a Bedrock run uses `openai.gpt-5.5` unless you
+  pick another the route serves with `-- -m MODEL` (a `-c model=` override does not change
   it); the banner's Model line names the model either way. `openshell.llm`
   sets the choice for runs without `--llm`, such as the `codex` shell
   wrapper's.
-- **Bedrock follow-up turns.** Bedrock Mantle rejects every turn after the
-  first of a Codex conversation, which Codex shows as `stream disconnected
-  before completion`; no provider setting avoids it. Start each task with
-  `/new` in the TUI, or run one `--prompt` per task. The banner of an
-  interactive Codex session on Bedrock says so.
 - **Per-sandbox settings.** Codex reads one `managed_config.toml` and one
   `requirements.toml`, so each sandbox gets both again, read-only, with its
   own settings. `managed_config.toml` pins the model provider the run chose,
