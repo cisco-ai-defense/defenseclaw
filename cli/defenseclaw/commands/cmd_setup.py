@@ -176,6 +176,8 @@ class _ConnectorRuntimeReadiness:
     connector: str = ""
     invariant: str = ""
     detail: str = ""
+    # Peers the restarted gateway refused and setup skipped (GAP-1710).
+    skipped: frozenset[str] = frozenset()
 
     def __bool__(self) -> bool:
         return self.ready
@@ -13565,10 +13567,13 @@ def _restart_services(
         if readiness:
             # Prove that the healthy API is the replacement generation, not an
             # old process that remained reachable while runtime files changed.
+            # A peer the restarted gateway refused was skipped by the runtime
+            # wait; the API never reports it running either (GAP-1710).
+            not_expected = unverified_peers | getattr(readiness, "skipped", frozenset())
             if not _wait_for_defense_gateway_api(
                 data_dir,
                 previous_generation=gateway_generation_before,
-                expected_connectors=[name for name in wait_targets if name not in unverified_peers],
+                expected_connectors=[name for name in wait_targets if name not in not_expected],
             ):
                 readiness = _ConnectorRuntimeReadiness(
                     False,
@@ -14263,6 +14268,7 @@ def _wait_for_connector_runtime(
     absolute_deadline = started_at + absolute_budget
     baseline_publications = dict(previous_lock_publications or {})
     observed_fresh_publications: set[str] = set()
+    skipped_peers: set[str] = set()
     last_failure = _ConnectorRuntimeReadiness(False, invariant="snapshot", detail="runtime files are not ready")
 
     def gateway_ready(deadline: float) -> tuple[bool, str | None, _ConnectorRuntimeReadiness]:
@@ -14481,6 +14487,7 @@ def _wait_for_connector_runtime(
                 )
                 ux.subhead(f"Continuing with the rest of the roster. To guard it again, run: {rerun}")
                 expected = expected - refused
+                skipped_peers.update(refused)
                 tolerated = frozenset(tolerated | refused)
                 ordered = tuple(name for name in ordered if name not in refused)
                 snapshot_ready = _connector_runtime_snapshot_ready(
@@ -14542,6 +14549,8 @@ def _wait_for_connector_runtime(
                                 and _regular_file_marker(lock_path) == lock_marker
                             )
                         if health_ok and snapshot_still_ready and time.monotonic() < deadline:
+                            if skipped_peers and isinstance(validation, _ConnectorRuntimeReadiness):
+                                return replace(validation, skipped=frozenset(skipped_peers))
                             return validation
                         last_failure = (
                             health_failure
