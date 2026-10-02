@@ -32,6 +32,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
@@ -537,6 +538,17 @@ func (a *APIServer) inspectToolPolicyCtx(ctx context.Context, req *ToolInspectRe
 		LegacyText:         string(req.Args),
 		Connector:          req.Connector,
 		EnforcementCapable: true,
+	}
+	if args, dir, ok := connector.TrustedShellArgs(req.Connector, req.Tool, req.Args); ok {
+		// OpenClaw's exec tool sends execution controls (yieldMs, timeout,
+		// workdir, ...) next to the command. Left in the arguments they made
+		// the parse partial, so every command block rule was detection-only
+		// (GAP-1450). The directory is the command's working directory when
+		// it is absolute; the session's is not known here.
+		action.Input.Args = args
+		if filepath.IsAbs(dir) || strings.HasPrefix(dir, "/") {
+			action.Input.CWD = dir
+		}
 	}
 	if trustedShimArgvTool(req.Tool) {
 		// Authenticated PATH shims have one closed argv envelope. If that

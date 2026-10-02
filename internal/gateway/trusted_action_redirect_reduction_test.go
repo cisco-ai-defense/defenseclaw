@@ -425,3 +425,24 @@ func TestTrustedActionCorpusBlocksWithRuntimeExpandedRedirectTarget(t *testing.T
 		})
 	}
 }
+
+// GAP-1450: OpenClaw's exec tool reaches /api/v1/inspect/tool with its
+// execution controls next to the command. An argv_complete block rule must
+// block the call with yieldMs as it does without.
+func TestInspectToolBlocksOpenClawExecWithControls(t *testing.T) {
+	api := testAPIServerWithConfig(t, "action")
+	installRedirectReductionRules(t, "openclaw", redirectReductionRule(
+		"TEST-MARKER-BLOCK", redirectReductionMarker,
+		`f.commands.exists(c, c.argv_complete && c.argv.exists(a, a == "`+redirectReductionMarker+`"))`,
+	))
+	for _, args := range []string{
+		`{"command":"echo dc-block-marker > /tmp/dc-x.txt"}`,
+		`{"command":"echo dc-block-marker > /tmp/dc-x.txt","yieldMs":10000}`,
+		`{"command":"echo dc-block-marker > /tmp/dc-x.txt","timeout":30,"background":true,"workdir":"/tmp"}`,
+	} {
+		_, verdict := postInspectForConnector(t, api, "openclaw", `{"tool":"exec","args":`+args+`}`)
+		if verdict.Action != guardrailActionBlock || verdict.Severity != "CRITICAL" {
+			t.Errorf("exec %s = %s %s (%s), want a CRITICAL block", args, verdict.Action, verdict.Severity, verdict.Reason)
+		}
+	}
+}
