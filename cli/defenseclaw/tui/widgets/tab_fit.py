@@ -10,7 +10,7 @@
 
 """Fit the top tab strip into the terminal width.
 
-Fifteen tabs with full names need about 170 columns. ``fit_tab_labels``
+Sixteen tabs with full names need about 180 columns. ``fit_tab_labels``
 starts from the key letter alone and then gives tabs a short name, and then
 their full name, in order of importance (``LABEL_PRIORITY``), stopping at the
 first tab that no longer fits. The active tab always keeps its full name, every tab
@@ -44,6 +44,7 @@ LABEL_PRIORITY: tuple[str, ...] = (
     "skills",
     "mcps",
     "plugins",
+    "tools",
     "sandboxes",
     "logs",
     "audit",

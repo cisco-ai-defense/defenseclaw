@@ -399,6 +399,7 @@ PANELS = (
     ("skills", "3", "Skills"),
     ("mcps", "4", "MCPs"),
     ("plugins", "5", "Plugins"),
+    ("tools", "T", "Tools"),
     ("inventory", "6", "Inventory"),
     ("sandboxes", "7", "Sandboxes"),
     ("logs", "8", "Logs"),
@@ -411,7 +412,11 @@ PANELS = (
     ("setup", "0", "Setup"),
 )
 
-PANEL_SHORTCUTS = {key.lower(): name for name, key, _label in PANELS}
+# Panel keys that only work in the exact case shown: lowercase ``t`` stays
+# free for panel-local use (AI Discovery and Sandboxes use it).
+CASE_SENSITIVE_PANEL_KEYS = frozenset({"T"})
+PANEL_SHORTCUTS = {key.lower(): name for name, key, _label in PANELS if key not in CASE_SENSITIVE_PANEL_KEYS}
+CASE_SENSITIVE_PANEL_SHORTCUTS = {key: name for name, key, _label in PANELS if key in CASE_SENSITIVE_PANEL_KEYS}
 
 # How long a successful command's progress strip stays before hiding itself.
 STRIP_SUCCESS_SECONDS = 8.0
@@ -2262,7 +2267,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             event.prevent_default()
             return
 
-        panel = PANEL_SHORTCUTS.get(event.key.lower())
+        panel = CASE_SENSITIVE_PANEL_SHORTCUTS.get(event.character or "") or PANEL_SHORTCUTS.get(event.key.lower())
         if panel is None:
             return
 
@@ -2352,49 +2357,14 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
     def _panel_hidden(self, panel: str) -> bool:
         """Return True if ``panel`` should be hidden from tabs + cycling.
 
-        Mirrors Go's ``Model.panelHidden`` (see ``internal/tui/app.go``).
-        Today only the Plugins panel is connector-gated — DefenseClaw
-        plugins are an OpenClaw-only concept (G4); showing the tab for
-        any other connector would yield an empty list and operator
-        confusion.
-
-        E3/A4: in a multi-connector install the gate follows the connector
-        filter so the tab tracks whatever catalog the operator is looking at,
-        and under the merged "All" view it shows whenever OpenClaw is anywhere
-        in the active set — not just when it is the primary. Both the tab gate
-        (here) and the body/bar render gate route through
-        :meth:`_plugins_visible_for_connector` so they always agree.
+        No panel is hidden today. Plugins used to be OpenClaw-only, but
+        Amp, Hermes and other connectors have plugins too (``plugin list``
+        shows them), so the tab is always reachable and shows each
+        connector's plugins or an empty state (GAP-1153). The hook stays so
+        a future connector-gated panel has one place to opt out.
         """
 
-        if panel != "plugins":
-            return False
-        return not self._plugins_visible_for_connector()
-
-    def _plugins_visible_for_connector(self) -> bool:
-        """Whether the Plugins panel is reachable for the current filter (A4).
-
-        Plugins are an OpenClaw-only concept, so the panel is shown only while
-        the operator is looking at OpenClaw's catalog:
-
-        * an explicit filter shows Plugins only when it is OpenClaw;
-        * under "All" (or a single-connector install) it shows when OpenClaw
-          is the resolved connector, or — in a multi-connector install — when
-          OpenClaw is *anywhere* in the active set.
-
-        The last clause is the A4 fix: the singular
-        ``PluginsPanelModel.is_visible_for_connector`` gate (fed the primary
-        connector under "All") hid Plugins whenever OpenClaw was
-        active-but-not-primary (e.g. roster ``[codex, openclaw]``). Resolving
-        from the active set here closes that without touching the catalog
-        state layer.
-        """
-
-        filt = self._connector_filter()
-        if filt:
-            return filt.lower() == "openclaw"
-        if "openclaw" in self._active_connector_names():
-            return True
-        return _active_connector(self.config).lower() == "openclaw"
+        return False
 
     def _visible_panels(self) -> list[str]:
         """Ordered list of panel names that should currently be visible.
@@ -4458,7 +4428,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         """
 
         global_section: list[tuple[str, str]] = [
-            ("1-9 0 A V N R P", "Switch panel (Tab / Ctrl+P where digits are taken)"),
+            ("1-9 0 A V N R P T", "Switch panel (Tab / Ctrl+P where digits are taken)"),
             ("Tab / Shift+Tab", "Next / previous panel"),
             (": or Ctrl+K", "Open command palette"),
             ("Ctrl+P", "Fuzzy panel jumper"),
@@ -4755,9 +4725,6 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             return self.body_text
         if self.active_panel in self.catalog_models:
             model = self.catalog_models[self.active_panel]
-            if self.active_panel == "plugins" and not self._plugins_visible_for_connector():
-                self.body_text = f"[bold #22D3EE]Plugins[/]\n\n{self.plugins_model.openclaw_only_notice()}"
-                return self.body_text
             self._sync_catalog_connector_filters()
             self._table_columns = model.data_table_columns()
             self._table_rows = model.data_table_rows()
