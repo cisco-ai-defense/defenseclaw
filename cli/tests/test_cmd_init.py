@@ -18,12 +18,14 @@
 
 import hashlib
 import hmac
+import io
 import json
 import os
 import shutil
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import ANY, MagicMock, patch
@@ -4192,10 +4194,46 @@ class TestMultiConnectorInit(unittest.TestCase):
         with patch.object(cmd_init.agent_discovery, "discover_agents", side_effect=[cached, fresh]) as discover, \
                 patch.object(cmd_init.agent_discovery, "render_discovery_table", return_value=""), \
                 patch.object(cmd_init, "_with_config_state", side_effect=configured), \
+                patch.object(cmd_init.click, "confirm", return_value=True), \
                 patch.object(cmd_init, "_prompt_checkbox_selection", return_value=["claudecode"]) as selector:
             cmd_init._prompt_connector_selection(None, False)
         self.assertTrue(discover.call_args.kwargs["refresh"])
         self.assertEqual(selector.call_args.kwargs["default_selected"], ["claudecode", "opencode"])
+
+    def _select_after_unchecking_hermes(self, confirm: bool):
+        from defenseclaw.commands import cmd_init
+
+        disc = self._disc({"claudecode", "codex", "hermes"})
+
+        def configured(found, _data_dir):
+            for name in ("claudecode", "codex", "hermes"):
+                found.agents[name].active = True
+            return found
+
+        out = io.StringIO()
+        with patch.object(cmd_init.agent_discovery, "discover_agents", return_value=disc), \
+                patch.object(cmd_init.agent_discovery, "render_discovery_table", return_value=""), \
+                patch.object(cmd_init, "_with_config_state", side_effect=configured), \
+                patch.object(cmd_init.click, "confirm", return_value=confirm) as asked, \
+                patch.object(cmd_init, "_prompt_checkbox_selection", return_value=["claudecode", "codex"]), \
+                redirect_stdout(out), redirect_stderr(out):
+            got = cmd_init._prompt_connector_selection(None, False)
+        return got, asked, out.getvalue()
+
+    def test_unchecking_an_active_connector_names_it_and_confirms(self):
+        # GAP-1938: clearing hermes removed its hooks with no line naming it.
+        got, asked, text = self._select_after_unchecking_hermes(confirm=True)
+        self.assertEqual(got, ["claudecode", "codex"])
+        self.assertIn("hermes", text)
+        self.assertIn("run unguarded", text)
+        self.assertIn("defenseclaw setup hermes", text)
+        self.assertIn("Stop guarding hermes?", asked.call_args.args[0])
+        self.assertFalse(asked.call_args.kwargs["default"])
+
+    def test_declining_the_drop_keeps_the_connector_active(self):
+        got, _asked, text = self._select_after_unchecking_hermes(confirm=False)
+        self.assertIn("hermes", got)
+        self.assertIn("Keeping hermes active", text)
 
     def test_connector_selection_can_trust_untrusted_binary_dirs_and_rescan(self):
         from defenseclaw.commands import cmd_init

@@ -199,3 +199,31 @@ class TestSharedSkillDirScope(unittest.TestCase):
         restored = self.invoke(["restore", "review", "--connector", "claudecode"])
         self.assertEqual(restored.exit_code, 0, restored.output)
         self.assertTrue(os.path.isfile(os.path.join(self.original, "SKILL.md")))
+
+
+class TestSharedSkillDirGlobalWatcherBlock(TestSharedSkillDirScope):
+    # GAP-1259 r4: the watcher's decision is global, and its quarantine record
+    # is filed under amp. Scoped unblock named only "a global decision", and
+    # bare unblock reported "cleared (connector=amp)" for a claudecode skill.
+    def _watcher_state(self):
+        quarantined = self.invoke(["quarantine", "review", "--connector", "amp"])
+        self.assertEqual(quarantined.exit_code, 0, quarantined.output)
+        pe = PolicyEngine(self.app.store)
+        pe.remove_action_for_connector("skill", "review", "amp")
+        pe.block("skill", "review", "watcher enforcement")
+        return pe
+
+    def test_scoped_unblock_names_the_peer_that_holds_the_quarantine(self):
+        self._watcher_state()
+        unblocked = self.invoke(["unblock", "review", "--connector", "claudecode"])
+        self.assertEqual(unblocked.exit_code, 0, unblocked.output)
+        self.assertIn("a global decision", unblocked.output)
+        self.assertIn("quarantined under connector=amp", unblocked.output)
+
+    def test_bare_unblock_reports_the_global_clear_not_the_quarantine_owner(self):
+        pe = self._watcher_state()
+        unblocked = self.invoke(["unblock", "review"])
+        self.assertEqual(unblocked.exit_code, 0, unblocked.output)
+        self.assertIn("cleared (global, every connector)", unblocked.output)
+        self.assertNotIn("connector=amp", unblocked.output)
+        self.assertFalse(pe.is_blocked("skill", "review"))
