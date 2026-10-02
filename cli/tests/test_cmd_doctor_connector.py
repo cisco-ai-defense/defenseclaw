@@ -303,7 +303,8 @@ class TestCheckConnectorInventory(unittest.TestCase):
         self.assertEqual(skill_check["status"], "pass")
         self.assertIn("1/1 present", skill_check["detail"])
 
-    def test_skill_paths_warn_when_no_directory_exists(self) -> None:
+    def test_skill_paths_skip_when_no_directory_exists(self) -> None:
+        # No skill folder yet is a healthy setup, not a warning (GAP-1814).
         cfg = self._cfg(
             skill_dirs=["/nonexistent/path/for/test"],
             plugin_dirs=[],
@@ -312,8 +313,10 @@ class TestCheckConnectorInventory(unittest.TestCase):
         r = _DoctorResult()
         _check_connector_inventory(cfg, "codex", r)
         skill_check = next(c for c in r.checks if c["label"] == "Skill paths")
-        self.assertEqual(skill_check["status"], "warn")
+        self.assertEqual(skill_check["status"], "skip")
         self.assertIn("0/1 present", skill_check["detail"])
+        self.assertIn("no skills installed yet", skill_check["detail"])
+        self.assertEqual(r.warned, 0)
 
     def test_skill_paths_skip_when_empty_list(self) -> None:
         cfg = self._cfg(skill_dirs=[], plugin_dirs=[], servers=[])
