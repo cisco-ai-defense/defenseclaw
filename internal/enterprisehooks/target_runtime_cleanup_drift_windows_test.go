@@ -89,3 +89,34 @@ func TestWindowsManagedRuntimeCleanupAcceptsRepublishedRowsOfThePlannedRoots(t *
 		t.Fatalf("finalize with a republished manifest: err = %v, want the digest refusal", err)
 	}
 }
+
+// An account deleted with its profile while Setup ran left the rollback
+// cleanup failing on the missing profile folder ("inspect user home ...
+// cannot find the file"), so the transaction stayed pending with every
+// service stopped and no Setup could recover it (GAP-1293). The vanished
+// profile has nothing to clean and is reported as its absent baseline.
+func TestWindowsManagedRuntimeCleanupTreatsAVanishedProfileAsClean(t *testing.T) {
+	target := currentWindowsTestSID(t)
+	home := newWindowsTargetOwnedTestHome(t, target)
+	manifest := windowsManagedRuntimeTestManifest(home, target)
+	digest := strings.Repeat("4", 64)
+	plan, err := PlanWindowsManagedRuntimeRoots(manifest, `C:\ProgramData\DefenseClaw\etc\targets.yaml`, digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Roots) != 1 || plan.Roots[0].Baseline != windowsManagedRuntimeBaselineAbsent {
+		t.Fatalf("plan roots = %+v, want one absent baseline", plan.Roots)
+	}
+	if err := os.RemoveAll(home); err != nil {
+		t.Fatal(err)
+	}
+	request := WindowsManagedRuntimeRequest{SchemaVersion: WindowsManagedRuntimeRequestSchemaVersion, Plan: plan}
+	claims, err := CleanupWindowsManagedRuntimeRoots(request, manifest, digest)
+	if err != nil {
+		t.Fatalf("cleanup with a vanished profile: %v", err)
+	}
+	if len(claims) != 1 || claims[0].State != windowsManagedRuntimeStateAbsent || claims[0].Created ||
+		claims[0].Identity != "" || !strings.EqualFold(claims[0].SID, target.String()) {
+		t.Fatalf("cleanup claims = %+v, want one absent claim", claims)
+	}
+}
