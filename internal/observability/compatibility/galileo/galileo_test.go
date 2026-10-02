@@ -452,6 +452,39 @@ func TestProjectToolRemovedContentIsAnExplicitSchemaMiss(t *testing.T) {
 	}
 }
 
+// GAP-1164: an allowed Hermes or Antigravity call ends with a tool_end whose
+// result the hook never reported. That span must reach Galileo with an empty
+// result placeholder, not be dropped and leave a bare invoke_agent root.
+func TestProjectToolWithUnreportedResultUsesEmptyPlaceholder(t *testing.T) {
+	t.Parallel()
+	projection := projectRecord(t, observability.BucketToolActivity, "span.tool.execute", "execute_tool write_file", map[string]any{
+		"kind": "INTERNAL",
+		"attributes": map[string]any{
+			"gen_ai.operation.name": "execute_tool", "gen_ai.tool.name": "write_file",
+			"gen_ai.tool.call.arguments":            map[string]any{"path": "index.html"},
+			"defenseclaw.telemetry.input.reported":  true,
+			"defenseclaw.telemetry.output.reported": false,
+		},
+	}, redaction.ProfileNone)
+	result := Project(projection, Limits{})
+	if !result.Eligible() {
+		t.Fatalf("result = %q, missing %v", result.Reason(), result.MissingFields())
+	}
+	attributes := resultAttributes(t, result)
+	if got := attributes["gen_ai.tool.call.result"]; got != "" {
+		t.Errorf("result placeholder = %#v", got)
+	}
+	if got := attributes["defenseclaw.telemetry.result.state"]; got != "not_reported" {
+		t.Errorf("result state = %#v", got)
+	}
+	if got := attributes["output.value"]; got != "" {
+		t.Errorf("output alias = %#v", got)
+	}
+	if got, _ := attributes["input.value"].(string); !strings.Contains(got, "index.html") {
+		t.Errorf("input alias = %#v", attributes["input.value"])
+	}
+}
+
 // Amp's built-in modes name no model, so its agent spans carry no provider.
 // Galileo requires one: the agent span failed the projection and those
 // traces never appeared in Galileo. The connector stands in.

@@ -381,14 +381,26 @@ func prepareRequiredProjection(
 		if !resultOK {
 			result, resultOK = contentScalar(attributes, "output", limits.MaxAttributeValueBytes)
 		}
-		if argumentsOK {
+		// A tool slot the canonical record says was never reported (for
+		// example the result of a Hermes or Antigravity call whose post-tool
+		// hook carries no output) is an honest empty placeholder, as on agent
+		// and model spans. Without it every such allowed call reached Galileo
+		// as a bare invoke_agent root (GAP-1164). Content that was reported but
+		// cannot be projected stays a schema miss.
+		switch {
+		case argumentsOK:
 			attributes["gen_ai.tool.call.arguments"] = arguments
-		} else {
+		case contentNotReported(attributes, "input"):
+			attributes["gen_ai.tool.call.arguments"] = ""
+		default:
 			missing = append(missing, "gen_ai.tool.call.arguments")
 		}
-		if resultOK {
+		switch {
+		case resultOK:
 			attributes["gen_ai.tool.call.result"] = result
-		} else {
+		case contentNotReported(attributes, "output"):
+			attributes["gen_ai.tool.call.result"] = ""
+		default:
 			missing = append(missing, "gen_ai.tool.call.result")
 		}
 		inputReported := ensureMessages(attributes, "input", "user", valueWhen(argumentsOK, arguments), limits)
@@ -416,6 +428,13 @@ func prepareRequiredProjection(
 	}
 	missing = uniqueSorted(missing)
 	return missing
+}
+
+// contentNotReported reports whether the canonical record explicitly marks
+// one content direction as not reported by its source.
+func contentNotReported(attributes map[string]any, direction string) bool {
+	reported, present := boolAttribute(attributes, "defenseclaw.telemetry."+direction+".reported")
+	return present && !reported
 }
 
 func validSpanName(contract shapeContract, name string, attributes map[string]any) bool {
