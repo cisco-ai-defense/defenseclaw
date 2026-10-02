@@ -1426,6 +1426,7 @@ class CommandRegistrationTests(unittest.TestCase):
                 "block-message",
                 "block-at",
                 "alert-at",
+                "allow-private-upstream",
                 "judge",
                 "list-packs",
                 "mode",
