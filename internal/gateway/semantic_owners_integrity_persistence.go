@@ -129,7 +129,7 @@ var semanticIntegrityPersistenceOwners = map[string]semanticOwner{
 		suppressFallback: func(actionfacts.Facts) bool { return true },
 	},
 	"PATH-SSH-DIR": {
-		prerequisite:     sshAuthorizedKeysStructuredPrerequisite,
+		prerequisite:     sshDirectoryPrerequisite,
 		suppressFallback: sshAuthorizedKeysPathSafeNegative,
 	},
 	"privilege.container_runtime_socket_access": {
@@ -1408,6 +1408,25 @@ func sshAuthorizedKeysStructuredPrerequisite(
 	facts actionfacts.Facts,
 ) bool {
 	return sshAuthorizedKeysPrerequisite(facts, true)
+}
+
+// sshDirectoryPrerequisite is PATH-SSH-DIR's: a structured write or delete
+// of authorized_keys, or any write, append or delete of the active user's
+// SSH private key (touch, sed -i, echo >> ~/.ssh/id_ed25519), which had no
+// finding at all (GAP-1666). ssh-keygen creating the key is routine.
+func sshDirectoryPrerequisite(facts actionfacts.Facts) bool {
+	if sshAuthorizedKeysStructuredPrerequisite(facts) {
+		return true
+	}
+	for _, candidate := range facts.Paths {
+		command, ok := integrityCommandByID(facts, candidate.CommandID)
+		if ok && !strings.EqualFold(command.Program, "ssh-keygen") &&
+			matchesActiveSSHPrivateKey(facts, candidate) &&
+			integrityCommandMutatesPath(command, candidate) {
+			return true
+		}
+	}
+	return false
 }
 
 func sshAuthorizedKeysPrerequisite(
