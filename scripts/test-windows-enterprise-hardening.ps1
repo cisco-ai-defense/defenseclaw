@@ -7251,6 +7251,36 @@ function Read-PID([string]$Path) {
     return [int]$record.pid
 }
 
+# Get-AwaitedHookBridge parses a decoded hook bridge script: the launcher is
+# started with Process.Start, which keeps the handle CreateProcess returned so
+# a launcher that exits at once still returns its status, and with the call
+# operator piped to Out-Host in Constrained Language mode. It returns the
+# launcher, its arguments and the call-operator invocation, or $null when the
+# script is not exactly that bridge with the same launcher and arguments in
+# both branches.
+function Get-AwaitedHookBridge([string]$Script) {
+    $pattern = '^\$ErrorActionPreference=''Stop''; \$env:NoDefaultCurrentDirectoryInExePath=''1''; ' +
+        'if \(\$ExecutionContext\.SessionState\.LanguageMode -ne ''FullLanguage''\) \{ \$ErrorActionPreference=''Continue''; ' +
+        '(?<invocation>& (?<file>''(?:''''|[^''])+'')(?<quoted>(?: ''[^'' ]+'')+)) \| Microsoft\.PowerShell\.Core\\Out-Host; exit \$LASTEXITCODE \}; ' +
+        '\$hookStart=\[System\.Diagnostics\.ProcessStartInfo\]::new\(\k<file>,''(?<arguments>[^'' ]+(?: [^'' ]+)*)''\); ' +
+        '\$hookStart\.UseShellExecute=\$false; \$hookStart\.RedirectStandardError=\$true; ' +
+        '\$hookProcess=\[System\.Diagnostics\.Process\]::Start\(\$hookStart\); ' +
+        '\$hookProcess\.StandardError\.BaseStream\.CopyTo\(\[Console\]::OpenStandardError\(\)\); ' +
+        '\$hookProcess\.WaitForExit\(\); exit \$hookProcess\.ExitCode$'
+    $match = [regex]::Match($Script, $pattern)
+    if (-not $match.Success) { return $null }
+    $arguments = @($match.Groups['arguments'].Value.Split(' '))
+    if ((@($arguments | ForEach-Object { " '" + $_ + "'" }) -join '') -cne $match.Groups['quoted'].Value) {
+        return $null
+    }
+    $fileLiteral = $match.Groups['file'].Value
+    return [pscustomobject]@{
+        File = $fileLiteral.Substring(1, $fileLiteral.Length - 2).Replace("''", "'")
+        Arguments = $arguments
+        Invocation = $match.Groups['invocation'].Value
+    }
+}
+
 function Get-CodexManagedHookFingerprint(
     [string]$Text,
     [string]$ExpectedHook
@@ -7328,23 +7358,12 @@ function Get-CodexManagedHookFingerprint(
             $decoded = [Text.Encoding]::Unicode.GetString(
                 [Convert]::FromBase64String($encoded.Groups[1].Value)
             )
-            $startProcess = [regex]::Match(
-                $decoded,
-                '(?i)\$hookProcess=Microsoft\.PowerShell\.Management\\Start-Process\s+-FilePath\s+(?<file>''(?:''''|[^''])+'')\s+-ArgumentList\s+@\(''hook'',''--connector'',''codex''\)\s+-NoNewWindow\s+-Wait\s+-PassThru'
-            )
-            if (-not $startProcess.Success -or
-                $decoded -notmatch
-                    '(?i)(?:^|;\s*)exit\s+\$hookProcess\.ExitCode(?:;|$)' -or
-                $decoded -match '(?i)\$LASTEXITCODE') {
+            $bridge = Get-AwaitedHookBridge $decoded
+            if ($null -eq $bridge -or
+                (@($bridge.Arguments) -join ' ') -cne 'hook --connector codex') {
                 throw 'Codex Windows managed hook command does not use the exact synchronous launcher contract'
             }
-            $fileLiteral = $startProcess.Groups['file'].Value
-            $actualHook = [IO.Path]::GetFullPath(
-                $fileLiteral.Substring(1, $fileLiteral.Length - 2).Replace(
-                    "''",
-                    "'"
-                )
-            ).TrimEnd('\')
+            $actualHook = [IO.Path]::GetFullPath($bridge.File).TrimEnd('\')
             $expectedCanonicalHook = [IO.Path]::GetFullPath(
                 $ExpectedHook
             ).TrimEnd('\')

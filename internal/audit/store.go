@@ -222,6 +222,11 @@ type Store struct {
 	ready       atomic.Bool
 	closed      bool
 
+	// checkpointDB is a second connection used only for PASSIVE WAL
+	// checkpoints. It is opened on first use and closed with the store.
+	checkpointMu sync.Mutex
+	checkpointDB *sql.DB
+
 	sqliteBusyMu       sync.RWMutex
 	sqliteBusyObserver SQLiteBusyObservabilityV8
 
@@ -4318,6 +4323,12 @@ func (s *Store) Close() error {
 	s.ready.Store(false)
 	s.closed = true
 	err := s.db.Close()
+	s.checkpointMu.Lock()
+	if s.checkpointDB != nil {
+		err = errors.Join(err, s.checkpointDB.Close())
+		s.checkpointDB = nil
+	}
+	s.checkpointMu.Unlock()
 	s.dbPathGuard.close()
 	s.dbPathGuard = nil
 	return err
