@@ -3528,7 +3528,7 @@ func (a *APIServer) scanCodexChangedFiles(ctx context.Context, req codexHookRequ
 	return &ToolInspectVerdict{
 		Action:   action,
 		Severity: string(maxSeverity),
-		Reason:   fmt.Sprintf("CodeGuard found %d finding(s) in Codex changed files", len(findings)),
+		Reason:   codeGuardHookReason(codeGuardPlaceCodexChanged, findings),
 		Findings: findings,
 	}
 }

@@ -270,8 +270,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	// Done before dispatchClaudeCodeHookNotification so the OS toast
 	// can carry the same evaluation_id + rule_ids that the audit
 	// row + HTTP response will surface.
-	evalCtx := a.emitHookRuleFindings(ctx, "claudecode", req.HookEventName, verdict,
-		hookTargetTypeForEvent(req.HookEventName), time.Since(t0))
+	evalCtx := a.emitClaudeCodeHookRuleFindings(ctx, req, verdict, time.Since(t0))
 	if !hookNotificationCoveredByAssetPolicy(rawActionBeforeAssets, assetDecisions) {
 		a.dispatchClaudeCodeHookNotification(req, action, rawAction, verdict.Severity, verdict.Reason, wouldBlock, evalCtx,
 			sinkPolicyFor(ctx, verdict.RedactionEnabled))
@@ -914,7 +913,7 @@ func (a *APIServer) scanClaudeCodeEventFile(ctx context.Context, req claudeCodeH
 	return &ToolInspectVerdict{
 		Action:   action,
 		Severity: string(maxSeverity),
-		Reason:   fmt.Sprintf("CodeGuard found %d finding(s) in Claude Code %s file", len(findings), req.HookEventName),
+		Reason:   codeGuardHookReason(claudeCodeCodeGuardEventPlace(req.HookEventName), findings),
 		Findings: findings,
 	}
 }
@@ -968,7 +967,7 @@ func (a *APIServer) scanClaudeCodeChangedFiles(ctx context.Context, req claudeCo
 	return &ToolInspectVerdict{
 		Action:   action,
 		Severity: string(maxSeverity),
-		Reason:   fmt.Sprintf("CodeGuard found %d finding(s) in Claude Code changed files", len(findings)),
+		Reason:   codeGuardHookReason(codeGuardPlaceClaudeChanged, findings),
 		Findings: findings,
 	}
 }
