@@ -1723,5 +1723,73 @@ class TurnGuardrailOffTests(unittest.TestCase):
                 self.assertEqual(turn_off.call_count, calls)
 
 
+class LauncherRemovedNextStepsTests(unittest.TestCase):
+    """GAP-1923: --all without --binaries removed the defenseclaw launcher."""
+
+    def test_next_steps_name_no_defenseclaw_command(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_dir = Path(tmp) / "bin"
+            bin_dir.mkdir()
+            gateway = bin_dir / "defenseclaw-gateway"
+            gateway.write_text("gateway", encoding="utf-8")
+            plan = cmd_uninstall.UninstallPlan(
+                platform_name="linux",
+                data_dir=str(Path(tmp) / ".defenseclaw"),
+                install_root=str(bin_dir),
+                remove_data_dir=True,
+                binary_targets=(str(bin_dir / "defenseclaw"), str(gateway)),
+                data_bound_launchers=(str(bin_dir / "defenseclaw"),),
+            )
+            with patch("defenseclaw.upgrade_shim.managed_deployment", return_value=None), \
+                    capture_click_output() as buf:
+                cmd_uninstall._render_kept_and_next_steps(plan)
+        text = buf.getvalue()
+        self.assertIn(f"{bin_dir}: defenseclaw-gateway (the defenseclaw command went with the data)", text)
+        self.assertIn(f"rm -f {gateway}", text)
+        self.assertIn("install.sh | bash", text)
+        self.assertNotIn("the DefenseClaw commands", text)
+        self.assertNotIn("  • set DefenseClaw up again:  defenseclaw", text)
+        self.assertNotIn("defenseclaw uninstall --all", text)
+
+
+class RetiredSourceInstallCopyTests(unittest.TestCase):
+    """GAP-1929: copies a source install renamed aside go with --binaries."""
+
+    def test_windows_plan_lists_the_retired_gateway_copy_and_helper_accepts_it(self):
+        from defenseclaw.commands import windows_uninstall_helper
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            bin_dir = home / ".local" / "bin"
+            bin_dir.mkdir(parents=True)
+            retired = bin_dir / ".defenseclaw-gateway.exe.source-install-old-e9080aa812c842d58857a299fd53186e"
+            retired.write_bytes(b"MZold")
+            (bin_dir / ".claude.exe.source-install-old-0123").write_bytes(b"not ours")
+            (bin_dir / "claude.exe.old.1").write_bytes(b"not ours")
+            with patch.dict(os.environ, {"USERPROFILE": str(home)}):
+                install_root, targets = cmd_uninstall._owned_binary_targets("win32")
+            retired_targets = [target for target in targets if ".source-install-old-" in target]
+            self.assertEqual(retired_targets, [str(retired)])
+
+            managed_venv = home / ".defenseclaw" / ".venv"
+            managed_venv.mkdir(parents=True)
+            (bin_dir / "defenseclaw.cmd").write_text(
+                f'@echo off\r\n"{managed_venv / "Scripts" / "defenseclaw.exe"}" %*\r\n', encoding="utf-8"
+            )
+            plan = {
+                "install_root": install_root,
+                "data_dir": str(home / ".defenseclaw"),
+                "managed_venv": str(managed_venv),
+                "protected_paths": [],
+                "binary_targets": [str(retired)],
+                "remove_data_dir": False,
+            }
+            _root, _data, accepted = windows_uninstall_helper._validate_plan(plan)
+            self.assertEqual(accepted, [os.path.normcase(os.path.abspath(retired))])
+            plan["binary_targets"] = [str(bin_dir / ".claude.exe.source-install-old-0123")]
+            with self.assertRaises(ValueError):
+                windows_uninstall_helper._validate_plan(plan)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1861,6 +1861,17 @@ func (c *hookOnlyConnector) teardown(ctx context.Context, opts SetupOpts, hermes
 				errs = append(errs, fmt.Sprintf("remove hook entries from the restored config: %v", err))
 			}
 		}
+	case restored && (c.name == "copilot" || c.name == "openhands"):
+		// The same for a backup captured after a rollback: the earlier
+		// release's gateway registered its own hooks again before this
+		// release's setup took the backup (GAP-1926). A file that does not
+		// parse is the operator's and stays as restored.
+		hookScript := c.hookCommand(opts)
+		if cfg, err := readJSONObject(path); err == nil && containsHookScript(cfg, hookScript) {
+			if err := c.removeConfigEntries(path, hookScript, opts); err != nil {
+				errs = append(errs, fmt.Sprintf("remove hook entries from the restored config: %v", err))
+			}
+		}
 	case restored:
 	case !restored:
 		if err := c.removeConfigEntriesWithManagedBackup(
