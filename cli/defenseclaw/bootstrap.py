@@ -305,6 +305,30 @@ def _api_port_available(host: str, port: int) -> bool:
     return _api_port_free(host, port) and not _api_port_claimed_by_other_account(port)
 
 
+def _reserve_api_port(port: int) -> bool:
+    """Claim ``port`` for this account now, as its gateway start would.
+
+    Two accounts running init at the same time could otherwise both pick a
+    port neither gateway listens on yet (GAP-1462). O_EXCL makes the claim
+    atomic; False only when another account claimed the port first.
+    """
+    if os.name == "nt":
+        return True
+    try:
+        os.close(
+            os.open(
+                os.path.join(_API_PORT_CLAIM_DIR, f"{_API_PORT_CLAIM_PREFIX}{port}"),
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                0o644,
+            )
+        )
+    except FileExistsError:
+        return not _api_port_claimed_by_other_account(port)
+    except OSError:
+        return True  # a claim is only a hint
+    return True
+
+
 def suggest_free_api_port(host: str, port: int) -> int:
     """A port after ``port``, in the first-run steps, this account can use now; 0 if none."""
     host = (host or "127.0.0.1").strip("[]")
@@ -334,11 +358,11 @@ def choose_first_run_api_port(cfg: Config) -> str:
     if host in {"", "localhost"}:
         host = "127.0.0.1"
     host = host.strip("[]")
-    if _api_port_available(host, _DEFAULT_API_PORT):
+    if _api_port_available(host, _DEFAULT_API_PORT) and _reserve_api_port(_DEFAULT_API_PORT):
         return ""
     for step in range(1, _FIRST_RUN_API_PORT_TRIES + 1):
         port = _DEFAULT_API_PORT + step * _FIRST_RUN_API_PORT_STEP
-        if _api_port_available(host, port):
+        if _api_port_available(host, port) and _reserve_api_port(port):
             cfg.gateway.api_port = port
             return (
                 f"{host}:{_DEFAULT_API_PORT} is in use or configured by another account's DefenseClaw gateway, "

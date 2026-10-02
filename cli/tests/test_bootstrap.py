@@ -1224,6 +1224,27 @@ class FirstRunApiPortTests(unittest.TestCase):
         self.assertIn("configured by another account", note)
 
     @unittest.skipIf(os.name == "nt", "port claims are a Linux and macOS hint")
+    def test_new_config_claims_its_port_so_a_concurrent_init_skips_it(self):
+        # GAP-1462: two accounts' inits must not pick the same free port.
+        import tempfile
+
+        from defenseclaw import bootstrap
+        from defenseclaw.config import default_config
+
+        first, second = default_config(), default_config()
+        with tempfile.TemporaryDirectory() as claims:
+            with (
+                patch.object(bootstrap, "_API_PORT_CLAIM_DIR", claims),
+                patch.object(bootstrap, "_api_port_free", side_effect=lambda _host, port: port != 18970),
+            ):
+                bootstrap.choose_first_run_api_port(first)
+                self.assertTrue(os.path.exists(os.path.join(claims, "defenseclaw-api-port-18980")))
+                with patch.object(bootstrap.os, "getuid", return_value=os.getuid() + 1):
+                    bootstrap.choose_first_run_api_port(second)
+
+        self.assertEqual((first.gateway.api_port, second.gateway.api_port), (18980, 18990))
+
+    @unittest.skipIf(os.name == "nt", "port claims are a Linux and macOS hint")
     def test_uninstall_all_removes_only_this_accounts_claims(self):
         import tempfile
 
