@@ -30,7 +30,9 @@ const (
 	codexManagedSubprocessHome   = "DEFENSECLAW_TEST_CODEX_MANAGED_HOME"
 )
 
-func TestConnectorReconcilePublishesManagedCodexRegistrationInSubprocess(t *testing.T) {
+// Per-user Windows installs register Codex hooks in CODEX_HOME\config.toml with
+// their trust state; current Codex ignores managed_config.toml there.
+func TestConnectorReconcilePublishesCodexUserRegistrationInSubprocess(t *testing.T) {
 	root := testenv.PrivateTempDir(t)
 	dataDir := filepath.Join(root, "data")
 	userHome := filepath.Join(root, "user")
@@ -66,14 +68,13 @@ func TestConnectorReconcilePublishesManagedCodexRegistrationInSubprocess(t *test
 		t.Fatalf("Codex reconcile subprocess: %v\n%s", err, output)
 	}
 
-	managedPath := filepath.Join(codexHome, "managed_config.toml")
-	managed := readCodexSubprocessTOML(t, managedPath)
-	hooks, ok := managed["hooks"].(map[string]interface{})
+	user := readCodexSubprocessTOML(t, filepath.Join(codexHome, "config.toml"))
+	hooks, ok := user["hooks"].(map[string]interface{})
 	if !ok {
-		t.Fatalf("managed_config.toml has no hooks table: %#v", managed)
+		t.Fatalf("config.toml has no hooks table: %#v", user)
 	}
-	if _, exists := hooks["state"]; exists {
-		t.Fatalf("managed hook source unexpectedly contains private trust state: %#v", hooks["state"])
+	if _, exists := hooks["state"]; !exists {
+		t.Fatal("config.toml hooks have no trust state, so Codex would not run them")
 	}
 
 	expectedEvents := []string{
@@ -83,34 +84,36 @@ func TestConnectorReconcilePublishesManagedCodexRegistrationInSubprocess(t *test
 	for _, event := range expectedEvents {
 		groups, ok := hooks[event].([]interface{})
 		if !ok || len(groups) != 1 {
-			t.Fatalf("managed hooks.%s groups = %#v, want exactly one", event, hooks[event])
+			t.Fatalf("config.toml hooks.%s groups = %#v, want exactly one", event, hooks[event])
 		}
 		group, ok := groups[0].(map[string]interface{})
 		if !ok {
-			t.Fatalf("managed hooks.%s group is malformed: %#v", event, groups[0])
+			t.Fatalf("config.toml hooks.%s group is malformed: %#v", event, groups[0])
 		}
 		handlers, ok := group["hooks"].([]interface{})
 		if !ok || len(handlers) != 1 {
-			t.Fatalf("managed hooks.%s handlers = %#v, want exactly one", event, group["hooks"])
+			t.Fatalf("config.toml hooks.%s handlers = %#v, want exactly one", event, group["hooks"])
 		}
 		handler, ok := handlers[0].(map[string]interface{})
 		if !ok || handler["type"] != "command" {
-			t.Fatalf("managed hooks.%s handler is malformed: %#v", event, handlers[0])
+			t.Fatalf("config.toml hooks.%s handler is malformed: %#v", event, handlers[0])
 		}
 		command, ok := handler["command_windows"].(string)
 		if !ok || command == "" {
-			t.Fatalf("managed hooks.%s has no command_windows: %#v", event, handler)
+			t.Fatalf("config.toml hooks.%s has no command_windows: %#v", event, handler)
 		}
 		decoded := decodeCodexManagedPowerShellCommand(t, command)
 		if !strings.Contains(strings.ToLower(decoded), strings.ToLower(expectedHook)) ||
 			!strings.Contains(strings.ToLower(decoded), "'hook','--connector','codex'") {
-			t.Fatalf("managed hooks.%s does not name the exact hook contract: %q", event, decoded)
+			t.Fatalf("config.toml hooks.%s does not name the exact hook contract: %q", event, decoded)
 		}
 	}
 
-	user := readCodexSubprocessTOML(t, filepath.Join(codexHome, "config.toml"))
-	if _, exists := user["hooks"]; exists {
-		t.Fatalf("user config.toml contains the Windows managed hook matrix: %#v", user["hooks"])
+	managedPath := filepath.Join(codexHome, "managed_config.toml")
+	if _, err := os.Stat(managedPath); err == nil {
+		if managed := readCodexSubprocessTOML(t, managedPath); managed["hooks"] != nil {
+			t.Fatalf("per-user reconcile wrote hooks to managed_config.toml: %#v", managed["hooks"])
+		}
 	}
 }
 
