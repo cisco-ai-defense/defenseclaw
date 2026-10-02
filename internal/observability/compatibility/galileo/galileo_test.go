@@ -1421,3 +1421,49 @@ func resultAttributes(t *testing.T, result Result) map[string]any {
 	}
 	return attributes
 }
+
+// GAP-1904: allowed tool calls and agent turns name their user in Galileo's
+// user_metadata too, not only blocked calls.
+func TestProjectAllowedToolAndAgentSpansNameTheirUser(t *testing.T) {
+	t.Parallel()
+	user := map[string]any{"user.id": "S-1-5-21-1-2-3-1017", "defenseclaw.user.name": "dcw-std1"}
+	tool := map[string]any{
+		"gen_ai.operation.name": "execute_tool", "gen_ai.tool.name": "apply_patch",
+		"gen_ai.tool.call.arguments": map[string]any{"path": "index.html"}, "gen_ai.tool.call.result": "ok",
+	}
+	agent := map[string]any{
+		"gen_ai.operation.name": "invoke_agent", "gen_ai.agent.name": "copilot", "gen_ai.provider.name": "github",
+		"gen_ai.input.messages": messages("user", "create index.html"), "gen_ai.output.messages": messages("assistant", "done"),
+	}
+	for _, test := range []struct {
+		bucket     observability.Bucket
+		family     observability.EventName
+		name, kind string
+		attributes map[string]any
+	}{
+		{observability.BucketToolActivity, "span.tool.execute", "execute_tool apply_patch", "INTERNAL", tool},
+		{observability.BucketAgentLifecycle, "span.agent.invoke", "invoke_agent copilot", "INTERNAL", agent},
+	} {
+		for key, value := range user {
+			test.attributes[key] = value
+		}
+		body := map[string]any{"kind": test.kind, "attributes": test.attributes, "resource": map[string]any{"attributes": canonicalResourceAttributes()}}
+		result := Project(projectRecord(t, test.bucket, test.family, test.name, body, redaction.ProfileNone), Limits{})
+		if !result.Eligible() {
+			t.Fatalf("%s: reason = %q, missing %v", test.family, result.Reason(), result.MissingFields())
+		}
+		raw, _ := resultAttributes(t, result)["metadata"].(string)
+		var metadata map[string]string
+		if err := json.Unmarshal([]byte(raw), &metadata); err != nil {
+			t.Fatalf("%s: metadata %q: %v", test.family, raw, err)
+		}
+		for key, value := range user {
+			if metadata[key] != value {
+				t.Fatalf("%s: metadata = %v, want %s=%v", test.family, metadata, key, value)
+			}
+		}
+		if metadata["deployment.environment.name"] == "" || metadata["defenseclaw.guardrail.action"] != "" {
+			t.Fatalf("%s: metadata = %v, want the deployment and no guardrail decision", test.family, metadata)
+		}
+	}
+}

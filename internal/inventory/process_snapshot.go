@@ -44,6 +44,9 @@ type processInfo struct {
 	// from comm: cursor-agent runs `exec -a "$0" node ...` and Node names
 	// the thread MainThread (GAP-1207). Never any other argument.
 	Argv0 string
+	// Argv0Target is the basename argv[0] resolves to when it is an absolute
+	// symlink, kept only when it differs (Cursor's `agent` alias, GAP-1865).
+	Argv0Target string
 }
 
 type windowsProcessEntry struct {

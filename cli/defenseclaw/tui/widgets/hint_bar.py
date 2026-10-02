@@ -181,6 +181,9 @@ class HintEngine:
     def _alerts_hint(self, state: HintState) -> str:
         if state.total_alerts == 0:
             return "No active alerts. DefenseClaw is monitoring for scan findings."
+        if state.filter_active == "All severities":
+            # All is not a filter; name the way back to the default queue (GAP-1875).
+            return "Showing alerts of all severities. Press h or Esc for Actionable; / searches."
         if state.filter_active:
             return f"Alerts filtered to {state.filter_active}. Click All or press Esc to clear; / changes search."
         if state.critical_alerts > 0:

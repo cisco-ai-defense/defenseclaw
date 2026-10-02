@@ -27,6 +27,13 @@ func TestServiceContextScanAttributesSignalsToProfileOwner(t *testing.T) {
 		// Kiro CLI's install folder (GAP-1210): what the service can still
 		// see when the guardian protects the user's .kiro.
 		filepath.Join(alice, "AppData", "Local", "Kiro-Cli"),
+		// Copilot CLI's package cache and Devin CLI's install (GAP-1739):
+		// what the service sees when the guardian protects .copilot and
+		// AppData\Roaming\devin.
+		filepath.Join(alice, "AppData", "Local", "copilot", "pkg"),
+		filepath.Join(bob, "AppData", "Local", "copilot", "pkg"),
+		filepath.Join(alice, "AppData", "Local", "devin", "cli"),
+		filepath.Join(bob, "AppData", "Local", "devin", "cli"),
 	} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			t.Fatal(err)
@@ -43,20 +50,22 @@ func TestServiceContextScanAttributesSignalsToProfileOwner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var kiroPaths []string
+	configPaths := map[string]string{}
 	for _, sig := range catalog {
-		if sig.ID == "kiro" {
-			kiroPaths = sig.ConfigPaths
-		}
+		configPaths[sig.ID] = strings.Join(sig.ConfigPaths, "\n")
 	}
-	if !strings.Contains(strings.Join(kiroPaths, "\n"), "$LOCALAPPDATA/Kiro-Cli") {
-		t.Fatalf("catalog Kiro config paths %v do not name the Kiro CLI install folder", kiroPaths)
+	for id, want := range map[string]string{"kiro": "$LOCALAPPDATA/Kiro-Cli", "copilot": "$LOCALAPPDATA/copilot/pkg", "devin": "$LOCALAPPDATA/devin/cli"} {
+		if !strings.Contains(configPaths[id], want) {
+			t.Fatalf("catalog %s config paths %q do not name its install folder %s", id, configPaths[id], want)
+		}
 	}
 	s := &ContinuousDiscoveryService{
 		opts: AIDiscoveryOptions{HomeDir: alice, HomeDirs: []string{alice, bob}, homeOwners: owners},
 		catalog: []AISignature{
 			{ID: "hermes", Name: "Hermes", SupportedConnector: "hermes", ConfigPaths: []string{"$LOCALAPPDATA/hermes/skills"}},
 			{ID: "kiro", Name: "Kiro", SupportedConnector: "kiro", ConfigPaths: []string{"~/.kiro/settings/cli.json", "$LOCALAPPDATA/Kiro-Cli"}},
+			{ID: "copilot", Name: "GitHub Copilot", SupportedConnector: "copilot", ConfigPaths: []string{"~/.copilot/config.json", "$LOCALAPPDATA/copilot/pkg"}},
+			{ID: "devin", Name: "Devin", SupportedConnector: "devin", ConfigPaths: []string{"$APPDATA/devin/config.json", "$LOCALAPPDATA/devin/cli"}},
 		},
 	}
 
@@ -65,10 +74,14 @@ func TestServiceContextScanAttributesSignalsToProfileOwner(t *testing.T) {
 		got[sig.SignatureID+"/"+sig.UserName] = sig.UserID
 	}
 	want := map[string]string{
-		"hermes/alice": "S-1-5-21-1-2-3-1001",
-		"hermes/bob":   "S-1-5-21-1-2-3-1002",
-		"kiro/alice":   "S-1-5-21-1-2-3-1001",
-		"kiro/bob":     "S-1-5-21-1-2-3-1002",
+		"hermes/alice":  "S-1-5-21-1-2-3-1001",
+		"hermes/bob":    "S-1-5-21-1-2-3-1002",
+		"kiro/alice":    "S-1-5-21-1-2-3-1001",
+		"kiro/bob":      "S-1-5-21-1-2-3-1002",
+		"copilot/alice": "S-1-5-21-1-2-3-1001",
+		"copilot/bob":   "S-1-5-21-1-2-3-1002",
+		"devin/alice":   "S-1-5-21-1-2-3-1001",
+		"devin/bob":     "S-1-5-21-1-2-3-1002",
 	}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("config signals by signature/user = %v, want %v", got, want)

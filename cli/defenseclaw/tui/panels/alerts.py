@@ -997,15 +997,19 @@ class AlertsPanelModel:
         if key == "x":
             if not self.selected_ids:
                 return AlertPanelAction(True, hint="Select alerts before acknowledging them.")
+            count = len(self.selected_ids)
+            # Name the marked alert(s) like the d confirm does (GAP-1874).
             return AlertPanelAction(
                 True,
                 AlertCommandIntent(
-                    label=f"alerts acknowledge {len(self.selected_ids)} selected",
+                    label=f"alerts acknowledge {count} selected",
                     args=_alert_id_command_args("acknowledge", self.selected_ids),
-                    hint=f"Acknowledging {len(self.selected_ids)} selected alert(s).",
-                    consequence=(
-                        f"Marks {len(self.selected_ids)} alert(s) as handled and removes them from the "
-                        "active list. The audit trail keeps the events."
+                    hint=f"Acknowledging {count} selected alert(s).",
+                    consequence=_marked_consequence(
+                        f"Marks {count} alert(s) as handled and removes them from the active list. "
+                        "The audit trail keeps the events.",
+                        self.marked_events(),
+                        count,
                     ),
                 ),
             )
@@ -1552,7 +1556,17 @@ def _alert_summary_line(event: AlertEvent) -> str:
 
 
 def _marked_dismiss_consequence(events: list[AlertEvent], count: int) -> str:
-    lines = [f"Removes {count} marked alert(s) from the active list. The audit trail keeps the events."]
+    return _marked_consequence(
+        f"Removes {count} marked alert(s) from the active list. The audit trail keeps the events.",
+        events,
+        count,
+    )
+
+
+def _marked_consequence(head: str, events: list[AlertEvent], count: int) -> str:
+    """Confirm text: what the action does, then one line per marked alert."""
+
+    lines = [head]
     shown = events[:5]
     lines.extend(f"  {_alert_summary_line(event)}" for event in shown)
     if count > len(shown):

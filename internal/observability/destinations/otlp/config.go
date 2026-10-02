@@ -25,6 +25,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/netguard"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
+	"github.com/defenseclaw/defenseclaw/internal/observability/delivery"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 )
 
@@ -133,6 +134,9 @@ type Dependencies struct {
 	AggregationSelector sdkmetric.AggregationSelector
 	Observer            SignalObserver
 	CanaryObserver      CanaryAcknowledgementObserver
+	// HealthObserver gets metric health transitions; the log and trace
+	// dispatchers report theirs through their own delivery config.
+	HealthObserver delivery.Observer
 }
 
 type signalConfig struct {
@@ -150,6 +154,7 @@ type signalConfig struct {
 	aggregation sdkmetric.AggregationSelector
 	observer    SignalObserver
 	canary      CanaryAcknowledgementObserver
+	health      delivery.Observer
 	tracker     *dialOutcomeTracker
 }
 
@@ -228,6 +233,7 @@ func Prepare(ctx context.Context, config Config, dependencies Dependencies) (*Fa
 		}
 		resolved.observer = dependencies.Observer
 		resolved.canary = dependencies.CanaryObserver
+		resolved.health = dependencies.HealthObserver
 		resolved.tracker = &dialOutcomeTracker{}
 		signals[signal] = resolved
 	}

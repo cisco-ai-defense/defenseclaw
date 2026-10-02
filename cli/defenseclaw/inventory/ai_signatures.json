@@ -330,6 +330,7 @@
       ],
       "config_paths": [
         "$APPDATA/devin/config.json",
+        "$LOCALAPPDATA/devin/cli",
         "$APPDATA/devin/mcp_config.json",
         "$APPDATA/devin/skills",
         "~/.config/devin/config.json",
@@ -404,6 +405,7 @@
       ],
       "config_paths": [
         "~/.copilot/config.json",
+        "$LOCALAPPDATA/copilot/pkg",
         "~/.copilot/mcp-config.json",
         ".github/hooks/defenseclaw.json",
         ".github/mcp.json",

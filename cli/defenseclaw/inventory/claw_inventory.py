@@ -423,6 +423,12 @@ def enrich_with_policy(
         summary = inv.get("summary")
         if summary:
             summary[f"policy_{inv_key}"] = counts
+            if target_type == "skill" and isinstance(summary.get(inv_key), dict) and discovery_only:
+                # GAP-1920: discovery-only skills are listed, never scanned, so
+                # they are not "eligible" next to the discovery-only count.
+                summary[inv_key]["eligible"] = sum(
+                    1 for it in items if it.get("eligible") and it.get("policy_verdict") != "discovery-only"
+                )
             summary[f"scan_{inv_key}"] = {
                 "scanned": scanned,
                 "unscanned": len(items) - scanned - discovery_only,

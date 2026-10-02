@@ -234,3 +234,19 @@ def test_status_disabled_app_protect_names_the_way_forward(capsys) -> None:
     assert "disabled (disabled)" not in out
     assert "awaiting discovery scan" not in out
     assert "application_protection.enabled: true" in out
+
+
+def test_stopped_sidecar_tags_no_single_connector() -> None:
+    # GAP-1871: OpenCode must not be the only connector tagged DEGRADED.
+    cfg = MagicMock()
+    cfg.active_connectors.return_value = ["codex", "opencode"]
+    cfg.guardrail.effective_mode.return_value = "action"
+    cfg.guardrail.effective_enabled.return_value = True
+    cfg.application_protection = ApplicationProtectionConfig()
+    cfg.ai_discovery = AIDiscoveryConfig()
+    cfg.data_dir = ""
+    out = _capture(cmd_status._print_agents, cfg, sidecar_down=True)
+    assert "2 configured, not enforced while the sidecar is stopped" in out
+    assert "(opencode)" in out
+    assert "DEGRADED" not in out
+    assert "runtime load unverified" not in out

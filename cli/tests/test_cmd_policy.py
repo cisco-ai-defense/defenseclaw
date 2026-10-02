@@ -341,6 +341,21 @@ class TestPolicyDelete(PolicyCommandTestBase):
         self.assertIn("Gateway reloaded the policy", result.output)
         reload.assert_called_once()
 
+    def test_delete_asks_on_a_terminal_and_accepts_yes(self):
+        # GAP-1887: a user-authored policy is removed for good, so confirm first.
+        from unittest.mock import patch
+
+        self.invoke(["create", "askme"])
+        path = os.path.join(self.app.cfg.policy_dir, "askme.yaml")
+        with patch("defenseclaw.commands.cmd_policy._stdin_is_tty", return_value=True):
+            declined = self.runner.invoke(policy, ["delete", "askme"], obj=self.app, input="n\n")
+            self.assertEqual(declined.exit_code, 1, declined.output)
+            self.assertIn("Delete policy 'askme'", declined.output)
+            self.assertTrue(os.path.exists(path))
+            accepted = self.invoke(["delete", "askme", "--yes"])
+        self.assertEqual(accepted.exit_code, 0, accepted.output)
+        self.assertFalse(os.path.exists(path))
+
     def test_delete_nonexistent(self):
         result = self.invoke(["delete", "nope"])
         self.assertNotEqual(result.exit_code, 0)

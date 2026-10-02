@@ -2480,13 +2480,17 @@ func (s *ContinuousDiscoveryService) detectProcesses() ([]AISignal, error) {
 }
 
 // processMatchName is the process name that matches want: comm, or else
-// argv[0]'s basename when the process renamed its main thread (Linux).
+// argv[0]'s basename when the process renamed its main thread (Linux), or
+// else the basename argv[0]'s symlink resolves to (Cursor's `agent` alias).
 func processMatchName(proc processInfo, want string) string {
 	if processNameMatches(proc.Comm, want) {
 		return proc.Comm
 	}
 	if proc.Argv0 != "" && processNameMatches(proc.Argv0, want) {
 		return proc.Argv0
+	}
+	if proc.Argv0Target != "" && processNameMatches(proc.Argv0Target, want) {
+		return proc.Argv0Target
 	}
 	return ""
 }

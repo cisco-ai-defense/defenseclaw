@@ -160,6 +160,8 @@ class SourcePatternRule:
     profiles: list[str]  # list of RuleProfile
     tags: list[str] = field(default_factory=list)
     capability: str | None = None
+    # Source languages the rule applies to: "js" (JS/TS) and/or "py".
+    languages: tuple[str, ...] = ("js",)
 
 
 SOURCE_PATTERN_RULES: list[SourcePatternRule] = [
@@ -173,6 +175,7 @@ SOURCE_PATTERN_RULES: list[SourcePatternRule] = [
         profiles=["default", "strict"],
         tags=["code-execution"],
         capability="eval",
+        languages=("js", "py"),
     ),
     SourcePatternRule(
         id="SRC-NEW-FUNC",
@@ -211,6 +214,7 @@ SOURCE_PATTERN_RULES: list[SourcePatternRule] = [
         profiles=["default", "strict"],
         tags=["code-execution"],
         capability="child-process",
+        languages=("js", "py"),
     ),
     # Python plugins (Hermes): the subprocess/os counterparts of child_process.
     SourcePatternRule(
@@ -225,6 +229,7 @@ SOURCE_PATTERN_RULES: list[SourcePatternRule] = [
         profiles=["default", "strict"],
         tags=["code-execution"],
         capability="child-process",
+        languages=("py",),
     ),
     SourcePatternRule(
         id="SRC-DENO-RUN",

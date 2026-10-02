@@ -824,6 +824,15 @@ function Assert-InstallRoom([long]$Extra, [string]$ForWhat) {
         ([double]($data + $Extra + 100MB) / 1MB), ([double]$data / 1MB), ([double]$Extra / 1MB), ([double]$free / 1MB))
 }
 
+function Test-DiskFull {
+    $free = [long]-1
+    try { $root = [IO.Path]::GetPathRoot([IO.Path]::GetFullPath($DataDir)); $free = ([IO.DriveInfo]$root).AvailableFreeSpace } catch { }
+    if ($free -lt 0 -or $free -ge 300MB) { return $false }
+    Write-Err ("The disk $root is full ({0:N0} MB free). Free at least {1:N0} MB on it, then run the installer again" -f
+        ([double]$free / 1MB), ([double]((Get-DataSize) + $InstallRoom + 100MB) / 1MB))
+    return $true
+}
+
 function Clear-StagedRelease {
     # The staged release (about 900 MB) is not needed once the install stops
     # or is undone, and on a full disk the restore and the old gateway need
@@ -945,6 +954,8 @@ function New-Venv([string]$Path, [string]$Where) {
 
 function Invoke-UvPipInstall([string[]]$UvArgs) {
     if ((Invoke-Native $Uv $UvArgs) -eq 0) { return $true }
+    # A disk that filled up is not a busy host, and a retry cannot help (GAP-1883).
+    if (Test-DiskFull) { return $false }
     # A scanner holding a file uv just wrote fails its cache rename with
     # os error 32 or 5 (GAP-1315); the cache makes a second attempt cheap.
     Write-Warn "Retrying the Python package install once (a busy host can make uv time out)"
@@ -1076,6 +1087,7 @@ function Restart-Old {
 }
 
 function Get-RestoredNote {
+    if (-not $PrevVersion) { return "Nothing was left installed." }
     if ($Run.OldGatewayDown) { return "Your previous install is back, but its gateway is not running (see above)." }
     return "Your previous install is back."
 }
@@ -1137,6 +1149,17 @@ function Restore-Snapshot {
         Die "Could not restore $previousLabel; run the installer again to finish restoring it. Log: $($Run.Log)"
     }
     Restart-Old
+    if (-not $PrevVersion) {
+        # A first install has nothing to look back at, and the copy it kept
+        # (about 2 GB) held a full disk full for every account (GAP-1883).
+        Invoke-Quietly { Remove-Tree $failed }
+        $uvDir = Join-Path $DataDir ".uv"
+        $bytes = (Get-ChildItem -LiteralPath $uvDir -Recurse -Force -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+        if ($bytes) {
+            Write-Info ("The download cache in $uvDir ({0:N0} MB) was kept so the next run is faster; remove it with: cmd /c rd /s /q `"$uvDir`"" -f ([double]$bytes / 1MB))
+        }
+        return
+    }
     $bytes = (Get-ChildItem -LiteralPath $failed -Recurse -Force -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
     Write-Warn ("The failed $Ver install was kept in $failed ({0:N1} MB) for troubleshooting" -f ([double]$bytes / 1MB))
     Write-Info "Your previous install and its data are back; it is safe to remove the copy with: cmd /c rd /s /q `"$failed`""

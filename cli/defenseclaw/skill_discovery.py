@@ -563,7 +563,13 @@ def _discover_hermes_skill_directories(skill_root: str) -> list[SkillDirectory]:
 
 
 def _discover_cursor_skill_directories(skill_root: str) -> list[SkillDirectory]:
-    """Recursively discover Cursor SKILL.md files without following aliases."""
+    """Recursively discover Cursor SKILL.md files without following aliases.
+
+    Cursor also reads the Codex skills root, so Codex's vendor ``.system``
+    skills are bundled (discovery-only) here too, with their real parent as
+    the source, matching the codex connector (GAP-1908).
+    """
+    from defenseclaw.enforce.skill_enforcer import is_bundled_skill_path
 
     try:
         root_identity = _stable_directory_info(skill_root)
@@ -588,7 +594,15 @@ def _discover_cursor_skill_directories(skill_root: str) -> list[SkillDirectory]:
             if _directory_unchanged(current, skill_identity):
                 rel = os.path.relpath(current, skill_root)
                 name = os.path.basename(current) if rel != "." else os.path.basename(skill_root)
-                rows.append(SkillDirectory(name, current, skill_root))
+                bundled = is_bundled_skill_path(current)
+                rows.append(
+                    SkillDirectory(
+                        name,
+                        current,
+                        os.path.dirname(current) if bundled else skill_root,
+                        bundled=bundled,
+                    )
+                )
         for _name, child, _identity in reversed(children):
             pending.append(child)
         if not _directory_unchanged(current, current_identity):

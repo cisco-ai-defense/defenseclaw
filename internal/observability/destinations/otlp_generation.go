@@ -455,6 +455,7 @@ func (factory *Factory) prepareOTLPTelemetryFactory(
 			return metricSpec.Temporality
 		},
 		CanaryObserver: canary,
+		HealthObserver: factory.deliveryObserver,
 	})
 }
 

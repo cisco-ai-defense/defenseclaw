@@ -72,8 +72,16 @@ var inventoryDACLGuardianOwnedDotdirs = map[string][]string{
 // without reading what the folder holds. Kiro CLI installs into
 // %LOCALAPPDATA%\Kiro-Cli, whose data.sqlite3 holds the user's session and
 // sign-in state; this is how a user whose .kiro the guardian protects is
-// still discovered.
-var inventoryDACLListOnlyDirs = []string{`AppData\Local\Kiro-Cli`}
+// still discovered. Copilot CLI and Devin CLI are the same case: their hook
+// files (.copilot\hooks, AppData\Roaming\devin\config.json) put those
+// folders on the guardian's protected path, so the service sees their
+// install folders instead, Copilot CLI's package cache and Devin CLI's
+// install (GAP-1739).
+var inventoryDACLListOnlyDirs = []string{
+	`AppData\Local\Kiro-Cli`,
+	`AppData\Local\copilot\pkg`,
+	`AppData\Local\devin\cli`,
+}
 
 // gatewayServiceNamePattern matches the certification-scoped gateway service
 // name. The scope suffix (10 lowercase hex chars) is generated at install time
