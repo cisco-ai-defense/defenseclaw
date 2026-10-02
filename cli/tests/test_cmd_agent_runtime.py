@@ -589,3 +589,21 @@ def test_runtime_acquisition_is_pruned_when_unset():
     kept = {"runtime": {"enabled": True, "acquisition": "helper"}}
     _prune_ai_runtime_fields(kept)
     assert kept["runtime"]["acquisition"] == "helper"
+
+
+def test_status_marks_a_limited_running_plane_partial(monkeypatch: pytest.MonkeyPatch) -> None:
+    # GAP-1377: a non-elevated Windows gateway runs Plane B on its own sockets
+    # only; status and findings must not print a plain "running".
+    payload = dict(_DEGRADED_SNAPSHOT)
+    payload["planes"] = [
+        {"plane": "b", "name": "shadow egress", "available": True, "running": True,
+         "mechanism": "GetExtendedTcpTable and GetExtendedUdpTable",
+         "reason": "egress attribution is limited to this process's own sockets; "
+                   "run the gateway elevated for machine-wide coverage"},
+    ]
+    client = _StubClient(payload)
+    monkeypatch.setattr(cmd_agent, "_usage_client", lambda *a, **k: client)
+    result = _invoke("findings")
+    assert result.exit_code == 0, result.output
+    assert "shadow egress: partial, running via GetExtendedTcpTable" in result.output
+    assert "limited to this process's own sockets" in result.output

@@ -88,7 +88,9 @@ class PlaneRow:
     @property
     def badge(self) -> str:
         if self.running:
-            return "up"
+            # Running with a stated limit (a non-elevated gateway sees only
+            # its own sockets) is partial coverage, as selftest says (GAP-1377).
+            return "partial" if self.reason else "up"
         if self.available:
             return "idle"
         return "blind"
@@ -103,7 +105,10 @@ class PlaneRow:
         that is genuinely clean.
         """
         if self.running:
-            return f"{self.name}: up via {self.mechanism or 'unknown mechanism'}"
+            via = self.mechanism or "unknown mechanism"
+            if self.reason:
+                return f"{self.name}: partial via {via} -- {self.reason}"
+            return f"{self.name}: up via {via}"
         detail = self.reason or "no reason reported"
         if self.available:
             return f"{self.name}: available but not running -- {detail}"
@@ -498,6 +503,7 @@ class RuntimePanelModel:
             )
         if state == "degraded":
             up = sum(1 for plane in self.snapshot.planes if plane.badge == "up")
+            partial = sum(1 for plane in self.snapshot.planes if plane.badge == "partial")
             idle = sum(
                 1
                 for plane in self.snapshot.planes
@@ -511,6 +517,8 @@ class RuntimePanelModel:
             parts: list[str] = []
             if up:
                 parts.append(f"{up} watching")
+            if partial:
+                parts.append(f"{partial} partially watching")
             if idle:
                 parts.append(f"{idle} selected but not running")
             if blind:
@@ -583,7 +591,7 @@ class RuntimePanelModel:
         """Next action for an idle or blind plane. Empty when the plane is up."""
 
         if plane.running:
-            return ""
+            return "Click Permissions for what full coverage needs." if plane.reason else ""
         reason = plane.reason.lower()
         if plane.plane == "c" or "not selected" in reason or "enable_host_plane" in reason:
             if plane.plane == "c":
