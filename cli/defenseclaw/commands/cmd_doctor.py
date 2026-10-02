@@ -1173,7 +1173,7 @@ def _check_sandbox(cfg, r: _DoctorResult) -> None:
 
 def _check_config(cfg, r: _DoctorResult) -> None:
     from defenseclaw.config import config_path_for_data_dir
-    from defenseclaw.config_inspect import ConfigInspectError, inspect_v8_config
+    from defenseclaw.config_inspect import ConfigInspectError, ConfigInspectTimeoutError, inspect_v8_config
 
     cfg_path = str(config_path_for_data_dir(cfg.data_dir))
     if not os.path.isfile(cfg_path):
@@ -1181,6 +1181,17 @@ def _check_config(cfg, r: _DoctorResult) -> None:
         return
     try:
         validation = inspect_v8_config("validate", config_path=cfg_path)
+    except ConfigInspectTimeoutError as exc:
+        # A busy host, not a bad config (GAP-1621).
+        _emit(
+            "warn",
+            "Config validation",
+            f"{exc}; re-run defenseclaw doctor",
+            r=r,
+            check_id="doctor.config.canonical-v8",
+            reason_code="canonical-validation-timeout",
+        )
+        return
     except ConfigInspectError as exc:
         from defenseclaw.commands.cmd_config import _v8_failure_detail
 
@@ -3762,7 +3773,9 @@ def _check_windows_gateway_diagnostics(
         _emit(
             "fail",
             "Gateway listener owner",
-            "configured API port is owned by " + (holder or "an unexpected process") + ", not by this account's gateway",
+            "configured API port is owned by "
+            + (holder or "an unexpected process")
+            + ", not by this account's gateway",
             r=r,
         )
     elif not identity_ok:

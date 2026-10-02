@@ -1299,6 +1299,39 @@ class GatewaySupportProbeTests(unittest.TestCase):
             self.assertFalse(cmd_uninstall._gateway_supports_connector_teardown())
 
 
+class MCPWriterBackupRemovalTests(unittest.TestCase):
+    def test_full_uninstall_removes_recorded_mcp_config_backups(self):
+        # GAP-1699: the .defenseclaw-<name>.bak copies next to the agent
+        # configs stayed after uninstall --all; files of the user stay.
+        from defenseclaw.connector_paths import _managed_mcp_backup_path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / ".defenseclaw"
+            registry_dir = data_dir / "connector_backups" / "mcp"
+            registry_dir.mkdir(parents=True)
+            config = root / ".codex" / "config.toml"
+            config.parent.mkdir()
+            config.write_text("[mcp_servers]\n")
+            backup = Path(_managed_mcp_backup_path(str(config)))
+            backup.write_text("copy")
+            unrelated = config.parent / "notes.bak"
+            unrelated.write_text("mine")
+            registry = {
+                "a": {"path": str(config), "backup": str(backup)},
+                "b": {"path": str(config), "backup": str(unrelated)},
+            }
+            (registry_dir / "registry.json").write_text(json.dumps(registry))
+
+            with capture_click_output() as buf:
+                cmd_uninstall._remove_mcp_writer_backups(str(data_dir))
+
+            self.assertFalse(backup.exists())
+            self.assertTrue(unrelated.exists())
+            self.assertTrue(config.exists())
+            self.assertIn(str(backup), buf.getvalue())
+
+
 class GatewayTeardownOutputTests(unittest.TestCase):
     def test_gateway_teardown_uses_utf8_and_preserves_checkmark(self):
         completed = type(
@@ -1318,6 +1351,22 @@ class GatewayTeardownOutputTests(unittest.TestCase):
         self.assertEqual(kwargs["encoding"], "utf-8")
         self.assertEqual(kwargs["errors"], "replace")
         self.assertNotIn("text", kwargs)
+
+    def test_gateway_teardown_waits_for_a_slow_gateway(self):
+        # GAP-1663: a no-op teardown took 108 s on a busy Windows home; the
+        # fixed 60 s aborted every uninstall run there.
+        completed = type("Completed", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+        with (
+            patch("shutil.which", return_value="defenseclaw-gateway.exe"),
+            patch("subprocess.run", return_value=completed) as run_mock,
+            capture_click_output() as buf,
+        ):
+            self.assertTrue(cmd_uninstall._run_gateway_connector_teardown("codex"))
+
+        self.assertIn("tearing down codex", buf.getvalue())
+        timeouts = [call.kwargs["timeout"] for call in run_mock.call_args_list]
+        self.assertEqual(len(timeouts), 2)  # teardown, then verify
+        self.assertTrue(all(timeout >= 300 for timeout in timeouts), timeouts)
 
     def test_gateway_stop_uses_utf8(self):
         completed = type("Completed", (), {"returncode": 0, "stdout": "✓ stopped\n", "stderr": ""})()

@@ -46,3 +46,23 @@ def test_main_exits_without_a_traceback_when_the_pipe_closes(monkeypatch):
         main_mod.main()
     assert exited.value.code == 1
     silence.assert_called_once()
+
+
+def test_main_turns_an_unreachable_gateway_audit_into_one_line(capsys):
+    # GAP-1689: skill scan after init --no-start-gateway printed a traceback.
+    from defenseclaw.logger import CanonicalObservabilityUnavailableError
+
+    unavailable = CanonicalObservabilityUnavailableError("gateway authentication is unavailable")
+    with (
+        patch.object(main_mod.ux, "configure_console_output"),
+        patch.object(main_mod, "_force_utf8_io"),
+        patch.object(main_mod, "_try_launch_tui", side_effect=unavailable),
+        pytest.raises(SystemExit) as exited,
+    ):
+        main_mod.main()
+    assert exited.value.code == 1
+    err = capsys.readouterr().err
+    assert "Traceback" not in err
+    assert err.count("\n") == 1
+    assert "gateway authentication is unavailable" in err
+    assert "defenseclaw-gateway start" in err

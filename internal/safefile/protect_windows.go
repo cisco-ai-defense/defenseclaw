@@ -34,9 +34,41 @@ func protectDirectory(path string) error {
 		return err
 	}
 	if safe {
-		return preserveExistingProtection(path, path)
+		protected, err := windowsDACLProtected(path)
+		if err != nil {
+			return err
+		}
+		if protected {
+			// Writing a directory DACL makes Windows re-propagate it to every
+			// file below. On a long-lived data dir (.venv, .uv, backups,
+			// rollback copies) each gateway command spent minutes there, so
+			// the gateway missed its startup deadline (GAP-1687, GAP-1348).
+			return nil
+		}
+		return preserveDirectoryProtection(path, path)
 	}
 	return setPrivateDACL(path, true)
+}
+
+// preserveDirectoryProtection is preserveExistingProtection; tests count calls.
+var preserveDirectoryProtection = preserveExistingProtection
+
+// windowsDACLProtected reports whether path's DACL already blocks
+// inheritance from its parent.
+func windowsDACLProtected(path string) (bool, error) {
+	extended, err := winpath.Extended(path)
+	if err != nil {
+		return false, err
+	}
+	sd, err := windows.GetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return false, err
+	}
+	control, _, err := sd.Control()
+	if err != nil {
+		return false, err
+	}
+	return control&windows.SE_DACL_PROTECTED != 0, nil
 }
 
 func validatePrivateProtection(path string, wantDirectory bool) error {
