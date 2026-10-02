@@ -81,6 +81,9 @@ def test_help_lists_and_examples_keep_their_lines() -> None:
     guard = page("setup", "guardrail")
     assert "\n  Two modes:\n    observe - " in guard
     assert "OpenClaw" not in guard.split("Options:")[0]
+    # GAP-1862: the --connector option agrees with the description.
+    assert "else openclaw" not in " ".join(guard.split())
+    assert "if neither is set, pass --connector" in " ".join(guard.split())
 
 
 def _signal(name: str, version: str = "1.0.0") -> agent_discovery.AgentSignal:

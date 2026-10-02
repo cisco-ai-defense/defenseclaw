@@ -123,7 +123,10 @@ missing cache is normal before the first Doctor run.
 The shape below shows the normal source-authoring surface. Every block is
 optional, and setup commands preserve comments and unrelated hand edits. Use
 `defenseclaw config reference observability` for the generated all-knobs
-reference instead of copying every default into this file.
+observability reference instead of copying every default into this file, and
+`defenseclaw config reference --format json-schema` for the schema of every
+section (each field with its allowed values). `defenseclaw config validate`
+points to the JSON schema when a field is wrong.
 
 ```yaml
 config_version: 8             # strict current schema; upgrade migrates supported v7 files

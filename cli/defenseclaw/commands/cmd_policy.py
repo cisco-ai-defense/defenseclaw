@@ -472,32 +472,44 @@ def activate(app: AppContext, name: str, reload_gateway: bool) -> None:
     before = _restart_only_config(app.cfg)
     path = _activate_policy(app, name)
     ux.ok(f"Policy '{name}' activated.")
-    _log_policy_action(app, "policy-activate", name, f"source={path}", done="Policy saved")
     # The policy's guardrail thresholds are not the tool-call block level
     # (GAP-1228).
     click.echo(
         "  Its guardrail thresholds govern LLM traffic through the proxy; tool-call "
         "blocking is unchanged (see 'defenseclaw guardrail status' and 'guardrail block-at')."
     )
+    # A stopped gateway gets one note after the success lines, covering both
+    # the skipped audit event and the reload on start (GAP-1718).
+    audit_skipped = _log_policy_action(
+        app, "policy-activate", name, f"source={path}", done="Policy saved", defer_stopped=reload_gateway
+    )
     if not reload_gateway:
         return
-    _reload_and_report(app, name, needs_restart=_restart_only_config(app.cfg) != before)
+    _reload_and_report(
+        app, name, needs_restart=_restart_only_config(app.cfg) != before, audit_skipped=audit_skipped
+    )
 
 
-def _log_policy_action(app: AppContext, action: str, name: str, details: str, *, done: str) -> None:
+def _log_policy_action(
+    app: AppContext, action: str, name: str, details: str, *, done: str, defer_stopped: bool = False
+) -> bool:
     """Record a finished policy change; a stopped gateway only skips the audit event.
 
     The policy file is already written, so a stopped or refusing gateway prints
     one plain warning instead of a traceback and rc=1 (GAP-1651), like
-    ``setup webhook`` and ``guardrail fail-mode``.
+    ``setup webhook`` and ``guardrail fail-mode``. With ``defer_stopped`` the
+    stopped-gateway warning is left to the caller, which folds it into its
+    own note; returns True when the audit event was skipped that way.
     """
     if not app.logger:
-        return
+        return False
     from defenseclaw.logger import CanonicalObservabilityError, CanonicalObservabilityUnavailableError
 
     try:
         app.logger.log_action(action, name, details)
     except CanonicalObservabilityUnavailableError:
+        if defer_stopped:
+            return True
         click.echo(
             f"  ⚠ {done}. The gateway isn't running, so the audit event was not recorded "
             "(start it with: defenseclaw-gateway start).",
@@ -505,6 +517,7 @@ def _log_policy_action(app: AppContext, action: str, name: str, details: str, *,
         )
     except CanonicalObservabilityError as exc:
         click.echo(f"  ⚠ {done}, but the gateway did not confirm the audit event ({exc}).", err=True)
+    return False
 
 
 def _restart_only_config(cfg) -> tuple[str, ...]:  # noqa: ANN001 - Config, imported lazily
@@ -564,7 +577,9 @@ def _severity_rank_label(value: object) -> str:
     return f"{name} ({rank})" if name else str(value)
 
 
-def _reload_and_report(app: AppContext, name: str, *, needs_restart: bool = False) -> None:
+def _reload_and_report(
+    app: AppContext, name: str, *, needs_restart: bool = False, audit_skipped: bool = False
+) -> None:
     """Ask the running gateway to reload its policy and say how that went.
 
     Shared by ``policy activate`` and ``policy edit``: reloaded → ok;
@@ -572,8 +587,15 @@ def _reload_and_report(app: AppContext, name: str, *, needs_restart: bool = Fals
     rejected → exit 1 pointing at ``defenseclaw policy validate``. When
     ``needs_restart`` (the change also touched config sections the gateway
     only reads at start) a running gateway is restarted instead.
+    ``audit_skipped``: the caller's audit event found no gateway; say so here.
     """
+    skipped_note = (
+        "  ⚠ The gateway isn't running, so the audit event was not recorded "
+        "(start it with: defenseclaw-gateway start)."
+    )
     if needs_restart and _gateway_pid_alive(app):
+        if audit_skipped:
+            click.echo(skipped_note, err=True)
         from defenseclaw.commands import cmd_setup
 
         if cmd_setup._restart_defense_gateway(app.cfg.data_dir, start_if_stopped=False):
@@ -590,8 +612,13 @@ def _reload_and_report(app: AppContext, name: str, *, needs_restart: bool = Fals
         ux.ok("Gateway reloaded the policy; it is enforcing it now.")
         return
     if outcome == "unreachable":
-        click.echo("saved; the gateway isn't running, it loads this policy when it starts")
+        click.echo(
+            "  ⚠ The gateway isn't running; it loads this policy when it starts "
+            "(defenseclaw-gateway start)" + ("; the audit event was not recorded." if audit_skipped else ".")
+        )
         return
+    if audit_skipped:
+        click.echo(skipped_note, err=True)
     click.echo(
         f"error: policy '{name}' was saved, but the running gateway rejected the reload"
         + (f" ({detail})" if detail else "")

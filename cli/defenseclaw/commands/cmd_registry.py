@@ -375,12 +375,14 @@ def add_cmd(  # noqa: PLR0913 - mirrors the prompt surface
     cfg.registries.sources.append(new_source)
     cfg.save()
 
-    _log_registry_action(app, "registry-add", f"id={sid} kind={kind} content={content} url={url}")
-
+    add_details = f"id={sid} kind={kind} content={content} url={url}"
     if emit_json:
+        _log_registry_action(app, "registry-add", add_details)
         _emit_json({"action": "add", "source": _source_to_dict(new_source)})
         return
     ux.ok(f"Registered registry source {sid!r}.")
+    # The success line first, then any stopped-gateway note (GAP-1718).
+    _log_registry_action(app, "registry-add", add_details)
     ux.subhead(
         f"Run `defenseclaw registry sync {sid}` to fetch + scan + promote entries."
     )
@@ -482,12 +484,12 @@ def edit_cmd(  # noqa: PLR0913
     _validate_file_url(source.kind, source.url)
 
     cfg.save()
-    _log_registry_action(app, "registry-edit", f"id={source.id}")
-
     if emit_json:
+        _log_registry_action(app, "registry-edit", f"id={source.id}")
         _emit_json({"action": "edit", "source": _source_to_dict(source)})
         return
     ux.ok(f"Updated registry source {source.id!r}.")
+    _log_registry_action(app, "registry-edit", f"id={source.id}")
 
 
 # ---------------------------------------------------------------------------
@@ -611,7 +613,7 @@ def _log_registry_action(app: AppContext, action: str, details: str) -> None:
         app.logger.log_action(action, "config", details)
     except CanonicalObservabilityUnavailableError:
         click.echo(
-            "  ⚠ Saved. The gateway isn't running, so the audit event was not recorded "
+            "  ⚠ The gateway isn't running, so the audit event was not recorded "
             "(start it with: defenseclaw-gateway start).",
             err=True,
         )
@@ -661,12 +663,12 @@ def remove_cmd(
     if not keep_cache:
         remove_source_cache(cfg.data_dir, sid)
 
-    _log_registry_action(app, "registry-remove", f"id={sid}")
-
     if emit_json:
+        _log_registry_action(app, "registry-remove", f"id={sid}")
         _emit_json({"action": "remove", "source_id": sid})
         return
     ux.ok(f"Removed registry source {sid!r}.")
+    _log_registry_action(app, "registry-remove", f"id={sid}")
 
 
 # ---------------------------------------------------------------------------
@@ -1463,9 +1465,9 @@ def _do_manual_verdict(
             cfg, cfg.data_dir, source, save=True,
         )
 
-    _log_registry_action(app, "registry-edit", f"{action_label} id={source.id} {entry_type}:{entry_name}")
-
+    entry_details = f"{action_label} id={source.id} {entry_type}:{entry_name}"
     if emit_json:
+        _log_registry_action(app, "registry-edit", entry_details)
         out: dict[str, Any] = {
             "action": action_label,
             "verdict": verdict.to_dict(),
@@ -1483,6 +1485,7 @@ def _do_manual_verdict(
 
     label = "Approved" if approved else "Rejected"
     ux.ok(f"{label} {entry_type}:{entry_name} from {source.id}.")
+    _log_registry_action(app, "registry-edit", entry_details)
     if repromote and promoted is None:
         ux.subhead(
             "No cached manifest yet — run `defenseclaw registry sync "

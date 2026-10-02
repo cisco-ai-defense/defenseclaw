@@ -98,7 +98,7 @@ def test_stopped_gateway_is_fine(app) -> None:
     # The autouse conftest stub makes reload_policy raise ConnectionError.
     result = _invoke(app, EDITS[0])
     assert result.exit_code == 0, result.output
-    assert "saved; the gateway isn't running, it loads this policy when it starts" in result.output
+    assert "The gateway isn't running; it loads this policy when it starts" in result.output
 
 
 def test_rejected_reload_exits_1(app, monkeypatch) -> None:

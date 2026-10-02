@@ -308,6 +308,10 @@ class TestRegistryRemove(RegistryCommandTestBase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("The gateway isn't running, so the audit event was not recorded", result.output)
         self.assertIn("Removed registry source", result.output)
+        # GAP-1718: the success line comes first, then the note.
+        self.assertLess(
+            result.output.index("Removed registry source"), result.output.index("The gateway isn't running")
+        )
         self.assertIsNone(result.exception)
 
     def test_remove_clears_associated_asset_policy_rules(self):

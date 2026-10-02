@@ -2096,6 +2096,29 @@ class TestSetupAppliedRuntimeRollback(unittest.TestCase):
         self.assertNotIn("rollback was incomplete", message)
         self.assertIn("gateway still cannot start for the same reason", message)
 
+    def test_gateway_start_failure_ends_with_one_next_step(self):
+        # GAP-1808: one cause and one next step after the restored config.
+        snapshot = cmd_setup._capture_setup_config_snapshot(self.app.cfg)
+        cause = cmd_setup._GatewayRestartFailed(
+            "gateway restart/readiness failed for: defenseclaw-gateway. Run `defenseclaw-gateway start`, "
+            "then `defenseclaw doctor`, before relying on enforcement."
+        )
+        with (
+            patch("defenseclaw.commands.cmd_setup._restore_setup_config_snapshot"),
+            patch(
+                "defenseclaw.commands.cmd_setup._restart_restored_connector_runtime",
+                side_effect=cmd_setup._GatewayRestartFailed(cause.message),
+            ),
+            self.assertRaises(click.ClickException) as raised,
+        ):
+            cmd_setup._rollback_failed_connector_application(self.app, snapshot, cause)
+
+        message = raised.exception.format_message()
+        self.assertIn("put the previous connector configuration back", message)
+        self.assertIn("Fix the start error shown above", message)
+        self.assertNotIn("defenseclaw doctor", message)
+        self.assertEqual(message.count("defenseclaw-gateway start"), 1)
+
     def test_persistence_exception_does_not_skip_remaining_verification(self):
         snapshot = replace(
             cmd_setup._capture_setup_config_snapshot(self.app.cfg),

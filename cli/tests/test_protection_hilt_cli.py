@@ -64,4 +64,6 @@ def test_fail_mode_exits_0_with_a_plain_note_when_the_gateway_is_stopped(app) ->
     assert result.exit_code == 0, result.output
     assert result.exception is None
     assert app.cfg.guardrail.hook_fail_mode == "open"
-    assert "The gateway isn't running, so the audit event was not recorded" in result.output
+    # GAP-1718: one stopped-gateway note that also names the skipped audit event.
+    assert result.output.count("gateway isn't running") == 1, result.output
+    assert "the audit event was not recorded" in result.output

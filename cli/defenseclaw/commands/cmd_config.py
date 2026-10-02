@@ -239,6 +239,25 @@ def config_show(
 # ---------------------------------------------------------------------------
 
 
+_ALL_FIELDS_COMMAND = "defenseclaw config reference --format json-schema"
+
+# Build provenance lines of the generated YAML reference; they name repository
+# files a user does not have and tell them not to edit what they may copy.
+_GENERATOR_HEADER_LINES = ("# GENERATED FILE. DO NOT EDIT.", "# Canonical schema:", "# Generator:")
+
+
+def _strip_generator_header(rendered: str) -> str:
+    lines = rendered.splitlines(keepends=True)
+    kept: list[str] = []
+    for line in lines[:12]:
+        if line.startswith(_GENERATOR_HEADER_LINES):
+            continue
+        if line.strip() == "#" and kept and kept[-1].strip() == "#":
+            continue
+        kept.append(line)
+    return "".join(kept + lines[12:])
+
+
 @config_cmd.command("reference")
 @click.argument(
     "section",
@@ -263,7 +282,10 @@ def config_show(
 def config_reference(section: str, fmt: str, output: Path | None) -> None:
     """Print the configuration reference for this version.
 
-    SECTION defaults to observability (the only section today).
+    The yaml and markdown formats cover SECTION, and observability is the
+    only section they have. --format json-schema prints the schema of every
+    section (guardrail, gateway, scanners and the rest) with each field's
+    allowed values.
     """
 
     try:
@@ -272,6 +294,8 @@ def config_reference(section: str, fmt: str, output: Path | None) -> None:
         )
     except ConfigInspectError as exc:
         raise click.ClickException(str(exc)) from exc
+    if fmt.lower() == "yaml":
+        rendered = _strip_generator_header(rendered)
 
     if output is None:
         click.echo(rendered, nl=not rendered.endswith("\n"))
@@ -526,9 +550,11 @@ def _plain_v8_issue(raw: bytes | None, field_path: str, reason: str) -> str:
         except (TypeError, ValueError):
             choices = allowed.group(1)
         value = node.value if len(node.value) <= 60 else node.value[:57] + "..."
-        return f'{where}{field} is "{value}"; allowed values: {choices}. All fields: defenseclaw config reference'
+        return f'{where}{field} is "{value}"; allowed values: {choices}.'
     detail = "; ".join(parts).rstrip(".") or "is not valid"
-    suffix = " All fields: defenseclaw config reference" if code == "config_schema_invalid" else ""
+    # ``config reference`` (YAML) covers only observability; the JSON schema
+    # lists every section and field (GAP-1661).
+    suffix = f" All fields: {_ALL_FIELDS_COMMAND}" if code == "config_schema_invalid" else ""
     return f"{where}{field}: {detail}.{suffix}"
 
 
