@@ -1467,6 +1467,16 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 	verdict.applyMode(inspectMode(a.scannerCfg))
 	a.resolveOpenClawInspectConfirm(r.Context(), &req, verdict)
 
+	// Count the check against the authenticated connector so /health (and the
+	// TUI's "0 requests ... verify your agent is dialing the gateway port"
+	// notice) sees OpenClaw's exec checks, which arrive only here (GAP-1617).
+	if a.recordsConnectorHealth(r.Context()) {
+		a.health.RecordToolInspectionFor(serverConnector)
+		if verdict.Action == "block" {
+			a.health.RecordToolBlockFor(serverConnector)
+		}
+	}
+
 	elapsed := time.Since(t0)
 
 	// verdict.Reason is normally composed as "matched: <rule-id>:<title>".

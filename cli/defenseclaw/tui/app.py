@@ -2603,6 +2603,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
 
     def on_resize(self, event: events.Resize) -> None:
         self._update_tab_labels()
+        # Fit again once the new size has settled, so a label chosen for an
+        # in-between size does not stay ("R Registry…" with room left, GAP-1751).
+        self.call_after_refresh(self._update_tab_labels)
         self.call_after_refresh(self._mark_overflowing_controls)
         # The nav list and aside appear and disappear at width thresholds.
         if self.is_running and not self.help_open and len(self.screen_stack) <= 1:
@@ -8600,6 +8603,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # emitted. ``notice.message`` also routinely includes bracketed
         # tokens (``[skill] missing scan``) — same crash class.
         notice_block: list[Text] = []
+        short_notices = 0 < self.size.height < 32
         for notice in notices[:4]:
             if notice.level == "error":
                 icon, color = "[!]", TOKENS.accent_red
@@ -8610,6 +8614,12 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             else:
                 icon, color = "[-]", TOKENS.accent_green
             line = Text(" ")
+            if short_notices:
+                # One row per notice that ends with "…" when it is cut: at
+                # 80x24 the wrapped rest fell under the button bar mid-sentence
+                # (GAP-1775). Taller screens wrap the full text.
+                line.no_wrap = True
+                line.overflow = "ellipsis"
             line.append(icon, style=f"{color} bold")
             line.append(" ")
             line.append(notice.message)
@@ -13038,7 +13048,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             ActionMenuScreen(
                 "Filter by Connector",
                 tuple(actions),
-                subtitle="Applies across Overview, Alerts, Audit, Logs",
+                subtitle="Applies to Overview, Alerts, Audit, Logs, Skills, MCPs, Plugins, Tools, Inventory",
                 selected_index=selected_index,
             )
         )
@@ -15612,7 +15622,9 @@ def _is_bare_json_punctuation(text: str) -> bool:
 
 
 def _truncate_for_strip(value: str, width: int) -> str:
-    limit = max(24, width - 38)
+    # The snippet has a row of its own in the card, so it may use the card's
+    # width; "width - 38" cut the registry summary at 80 columns (GAP-1754).
+    limit = max(24, width - 2)
     cleaned = value.replace("\n", " ").strip()
     if len(cleaned) <= limit:
         return cleaned

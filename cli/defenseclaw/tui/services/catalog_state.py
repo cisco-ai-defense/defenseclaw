@@ -21,6 +21,7 @@ from datetime import datetime
 from typing import Any, Generic, Literal, TypeVar
 
 from defenseclaw.connector_paths import (
+    claude_mcp_state_path,
     connector_config_files,
     connector_home,
     hermes_config_path,
@@ -350,6 +351,7 @@ class CatalogListModel(Generic[RowT]):
         # reload needed when the operator cycles the shared chip.
         self.show_connector_column = False
         self.connector_filter = ""
+        self.merged_connectors: tuple[str, ...] = ()
 
     def set_connector_filter(self, connector: str) -> None:
         """Narrow the merged rows to one connector ("" = All); re-filters."""
@@ -378,6 +380,7 @@ class CatalogListModel(Generic[RowT]):
         """
 
         rows: list[RowT] = []
+        self.merged_connectors = tuple(connector for connector, _text in results if connector)
         for connector, text in results:
             if not text:
                 continue
@@ -499,6 +502,31 @@ class CatalogListModel(Generic[RowT]):
     def _row_matches_connector_filter(self, row: RowT) -> bool:
         return connector_filter_svc.filter_allows(self.connector_filter, self.row_connector(row))
 
+    def connector_filter_empty_state(self, noun: str) -> str:
+        """Say the shared connector filter hides every row (GAP-1752).
+
+        Without this the panel read "0 of 60 - No plugins detected" while
+        the 60 rows belonged to other connectors.
+        """
+
+        if not (self.connector_filter and self.items and not self.filtered):
+            return ""
+        return (
+            f"No {noun} for {friendly_connector_name(self.connector_filter)}; "
+            f"{len(self.items)} in other connectors. Press m and pick All connectors to see them."
+        )
+
+    def merged_empty_state(self, noun: str) -> str:
+        """Empty state for the merged All view of several connectors (GAP-1806)."""
+
+        if self.connector_filter or not self.show_connector_column or len(self.merged_connectors) < 2:
+            return ""
+        names = ", ".join(friendly_connector_name(name) for name in self.merged_connectors)
+        return (
+            f"No {noun} found for the {len(self.merged_connectors)} active connectors ({names}). "
+            "Press m and pick one connector to see where it looks."
+        )
+
     def selected(self) -> RowT | None:
         if 0 <= self.cursor < len(self.filtered):
             return self.filtered[self.cursor]
@@ -589,8 +617,12 @@ class CatalogListModel(Generic[RowT]):
     def empty_state(self) -> str:
         return ""
 
+    # Plugins show the scan verdict in this column, so they label it Verdict
+    # like ``plugin list`` does (GAP-1749).
+    actions_header = "Actions"
+
     def data_table_columns(self) -> tuple[str, ...]:
-        base = ("Name", "Status", "Source", "Actions", "Details")
+        base = ("Name", "Status", "Source", self.actions_header, "Details")
         if self.show_connector_column:
             return ("Connector", *base)
         return base
@@ -720,6 +752,9 @@ class SkillsPanelModel(CatalogListModel[SkillRow]):
                 # had to be asked for (GAP-1402).
                 return 'Loading skills... (runs "defenseclaw skill list --json")'
             return 'Press "r" to load skills. Runs "defenseclaw skill list --json".'
+        merged = self.connector_filter_empty_state("skills") or self.merged_empty_state("skills")
+        if merged:
+            return merged
         return (
             f"No skills found in {connector_source_label(self.connector, 'skills')} "
             f"(active connector: {friendly_connector_name(self.connector)})."
@@ -821,6 +856,9 @@ class MCPsPanelModel(CatalogListModel[MCPRow]):
                 # had to be asked for (GAP-1402).
                 return 'Loading MCP servers... (runs "defenseclaw mcp list --json")'
             return 'Press "r" to load MCP servers. Runs "defenseclaw mcp list --json".'
+        merged = self.connector_filter_empty_state("MCP servers") or self.merged_empty_state("MCP servers")
+        if merged:
+            return merged
         return (
             f"No MCP servers configured in {connector_source_label(self.connector, 'mcps')} "
             f"(active connector: {friendly_connector_name(self.connector)})."
@@ -829,6 +867,8 @@ class MCPsPanelModel(CatalogListModel[MCPRow]):
 
 class PluginsPanelModel(CatalogListModel[PluginRow]):
     """Pure Plugins panel state and action-intent mapping."""
+
+    actions_header = "Verdict"
 
     def __init__(self, *, connector: str = "") -> None:
         # Without filter fields the filter matched every row (GAP-1520).
@@ -921,6 +961,9 @@ class PluginsPanelModel(CatalogListModel[PluginRow]):
                 # had to be asked for (GAP-1402).
                 return 'Loading plugins... (runs "defenseclaw plugin list --json")'
             return 'Press "r" to load plugins. Runs "defenseclaw plugin list --json".'
+        merged = self.connector_filter_empty_state("plugins") or self.merged_empty_state("plugins")
+        if merged:
+            return merged
         return (
             f"No plugins detected. Plugins extend {friendly_connector_name(self.connector)} with tools and hooks. "
             'Use : then "plugin install <name>" to add one.'
@@ -1060,6 +1103,9 @@ class ToolsPanelModel(CatalogListModel[ToolRow]):
     def empty_state(self) -> str:
         if self.filter_text and self.items:
             return "No tool rules match the filter."
+        hidden = self.connector_filter_empty_state("tool rules")
+        if hidden:
+            return hidden
         # The summary above already says what the table holds (GAP-1541).
         return "No tool policy rows yet. " + TOOLS_ADD_HINT
 
@@ -1815,7 +1861,11 @@ def connector_source_label(connector: str, category: str) -> str:
         ),
         ("omnigent", "skills"): ("unsupported by the OmniGent connector",),
         ("openclaw", "mcps"): ("openclaw config get mcp.servers", "openclaw.json (mcp.servers)"),
-        ("claudecode", "mcps"): (f"{claude_config} (mcpServers)", "./.mcp.json"),
+        ("claudecode", "mcps"): (
+            f"{claude_mcp_state_path()} (mcpServers)",
+            f"{claude_config} (mcpServers)",
+            "./.mcp.json",
+        ),
         ("codex", "mcps"): (
             f"{codex_config} ([mcp_servers])",
             "./.codex/config.toml ([mcp_servers]; trusted projects only)",

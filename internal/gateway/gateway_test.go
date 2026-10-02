@@ -4072,6 +4072,29 @@ func postInspectHTTP(
 	return w, verdict
 }
 
+func TestInspectToolCountsConnectorInspections(t *testing.T) {
+	api := testAPIServerWithConfig(t, "action")
+	postInspectForConnector(t, api, "openclaw", `{"tool":"read_file","args":{"path":"/tmp/hello.txt"}}`)
+	postInspectForConnector(t, api, "openclaw", `{"tool":"read_file","args":{"path":"/tmp/hello2.txt"}}`)
+
+	snap := api.health.Snapshot()
+	var got *ConnectorHealth
+	for i := range snap.Connectors {
+		if snap.Connectors[i].Name == "openclaw" {
+			got = &snap.Connectors[i]
+		}
+	}
+	if got == nil && snap.Connector != nil && snap.Connector.Name == "openclaw" {
+		got = snap.Connector
+	}
+	if got == nil {
+		t.Fatalf("openclaw connector missing from health snapshot: %+v", snap.Connectors)
+	}
+	if got.ToolInspections != 2 {
+		t.Errorf("tool_inspections = %d, want 2 (GAP-1617)", got.ToolInspections)
+	}
+}
+
 func TestInspectToolMethodNotAllowed(t *testing.T) {
 	api := testAPIServerWithConfig(t, "observe")
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/inspect/tool", nil)

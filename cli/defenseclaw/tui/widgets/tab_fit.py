@@ -210,6 +210,16 @@ def fit_tab_labels(
                 break
             chosen = candidate
     named = {name for name in keys if chosen[name]}
+
+    def fit_badges(chosen: Mapping[str, str], steps: Sequence[tuple[set[str], bool]]) -> bool:
+        for shrink, kept in steps:
+            for name in reversed(ranked):
+                if width_of(chosen) <= width:
+                    return True
+                if name != active and unread.get(name, 0) and (name in KEEP_BADGE) == kept:
+                    shrink.add(name)
+        return width_of(chosen) <= width
+
     # 2. Badges go on every tab. 3. The active tab always shows a name. It
     #    takes its full (or a shortened) name from the room that is left, so
     #    no other tab changes for it; only when it has no name at all do the
@@ -219,7 +229,21 @@ def fit_tab_labels(
         title = titles[active]
         short = _names(active, title)[1]
         wanted = list(dict.fromkeys((title, _abbreviated(short, title), short)))
-        if chosen[active]:
+        if chosen[active] and width_of({**chosen, active: title}) > width:
+            # The tab you are on reads in full before other tabs keep their
+            # least important badges: "R Registry…" showed on a 200-column
+            # screen for want of one cell (GAP-1751). Alerts keeps its count.
+            saved = (set(compact), set(no_badge))
+            if fit_badges({**chosen, active: title}, ((compact, False), (no_badge, False))):
+                chosen = {**chosen, active: title}
+            else:
+                compact.clear()
+                compact.update(saved[0])
+                no_badge.clear()
+                no_badge.update(saved[1])
+        if chosen[active] == title:
+            wanted = [title]
+        elif chosen[active]:
             # Never trade a name for a shorter one; keep the plain
             # abbreviation when even its "…" doesn't fit.
             current = chosen[active]
@@ -250,15 +274,6 @@ def fit_tab_labels(
     #    important badges to superscript ("8 Logs²"), then drop them, then
     #    names. The Alerts count goes last: it is the open-alert count that
     #    Overview and the status bar show.
-    def fit_badges(chosen: Mapping[str, str], steps: Sequence[tuple[set[str], bool]]) -> bool:
-        for shrink, kept in steps:
-            for name in reversed(ranked):
-                if width_of(chosen) <= width:
-                    return True
-                if name != active and unread.get(name, 0) and (name in KEEP_BADGE) == kept:
-                    shrink.add(name)
-        return width_of(chosen) <= width
-
     if not fit_badges(chosen, ((compact, False), (no_badge, False), (compact, True), (no_badge, True))):
         for name in reversed(ranked):
             if width_of(chosen) <= width:

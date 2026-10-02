@@ -352,7 +352,10 @@ def build_readiness_checks(
         checks.append(ReadinessCheck("Guardrail", f"enabled in {mode} mode", "pass"))
 
     missing = list(missing_credential_rows(credentials))
-    if not missing:
+    # The doctor result is only a fallback before the keys list has loaded;
+    # an older doctor run kept "1 required credential(s) missing" after
+    # keys check said every key is set (GAP-1805).
+    if not missing and not credentials:
         missing.extend(
             CredentialRow(env_name=env, requirement="required") for env in _doctor_missing_credentials(doctor)
         )

@@ -252,27 +252,34 @@ def task_detail(model: Any, wizard: SetupWizard, status: TaskStatus) -> Text:
     """Description, Now, what needs attention (with fixes), Runs, and goals."""
 
     how_to = WIZARD_HOW_TO[int(wizard)]
-    text = Text(" ".join(WIZARD_DESCRIPTIONS[int(wizard)].split()), style=TOKENS.text_primary)
+    description = " ".join(WIZARD_DESCRIPTIONS[int(wizard)].split())
     if not model.wizard_available(wizard):
+        text = Text(description, style=TOKENS.text_primary)
         _line(text, "Unavailable:", model.wizard_unavailable_reason(wizard), TOKENS.accent_amber)
         return text
-    # The wizard's own summary says more than the Status cell when it has one.
-    summary = " ".join(wizard_state_summary(wizard, model.config).split())
-    if summary:
-        _line(text, "Now:", summary)
-    else:
-        _line(text, "Now:", status.label, glyph_style(status.label))
     problems = _status_problems(model, wizard, status)
     for problem in setup_catalog.task_problems(wizard, tuple(model.readiness_checks), model.config):
         detail = " ".join(problem.check.detail.split()).rstrip(".")
         if not problem.owned:
             detail = f"{problem.check.title}: {detail} ({problem.why})"
         problems.append((detail, problem.fix))
+    # What needs attention, with its fix command, comes first: at 80x24 the
+    # box shows about four rows and the fix fell under its border (GAP-1806).
+    text = Text()
     for detail, fix in problems:
         _line(text, "Needs attention:", detail, TOKENS.accent_amber)
         if fix:
             text.append(" — fix: ", style=TOKENS.text_secondary)
             text.append(fix, style=TOKENS.accent_green)
+    if text.plain:
+        text.append("\n")
+    text.append(description, style=TOKENS.text_primary)
+    # The wizard's own summary says more than the Status cell when it has one.
+    summary = " ".join(wizard_state_summary(wizard, model.config).split())
+    if summary:
+        _line(text, "Now:", summary)
+    else:
+        _line(text, "Now:", status.label, glyph_style(status.label))
     how_to = " ".join(how_to.split())
     if how_to.startswith("Runs:"):
         _line(text, "Runs:", how_to[len("Runs:") :].strip())
