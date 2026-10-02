@@ -77,6 +77,7 @@ from defenseclaw.connector_paths import (
     copilot_home,
     copilot_settings_resolution,
     devin_hook_config_path,
+    devin_user_config_path,
     hermes_config_path,
     hermes_profile_unsupported_reason,
     normalize,
@@ -6122,11 +6123,7 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
             # unrelated default home when the lock is unavailable.
             candidates = connector_config_files("opencode")
         elif connector == "devin":
-            project_hook = devin_hook_config_path(_workspace_dir(cfg))
-            if not project_hook:
-                _emit("fail", label, "no pinned workspace for .devin/hooks.v1.json", r=r)
-                return
-            candidates = [project_hook]
+            candidates = [devin_hook_config_path(_workspace_dir(cfg)) or devin_user_config_path()]
         else:
             candidates = [os.path.join(home, rel) for rel in rel_candidates]
     present = [p for p in candidates if os.path.isfile(p)]
