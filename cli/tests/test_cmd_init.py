@@ -501,6 +501,49 @@ class TestInitFirstRunBackend(unittest.TestCase):
             sidecar = [s for s in summary["setup"] if s["name"] == "Sidecar"]
             self.assertEqual([s["detail"] for s in sidecar], [want], summary["setup"])
 
+    def test_wizard_trusted_path_survives_the_init_transaction(self):
+        """GAP-1058: a directory trusted in the wizard is kept by init, so setup
+        can run that agent in the same run."""
+        from defenseclaw.bootstrap import StepResult
+        from defenseclaw.commands import cmd_init
+        from defenseclaw.commands.cmd_setup import _add_trusted_bin_prefix
+
+        # An earlier init left a config.yaml without the agent's directory.
+        self._invoke([
+            "--non-interactive", "--yes", "--connector", "codex", "--scanner-mode", "local",
+            "--skip-install", "--no-verify", "--no-start-gateway", "--json-summary",
+        ])
+        self.assertTrue(os.path.isfile(os.path.join(self.tmp_dir, "config.yaml")))
+        bin_dir = os.path.join(self.tmp_dir, "agent-bin")
+        os.makedirs(bin_dir)
+        settings = [
+            {
+                "connector": "codex",
+                "profile": "observe",
+                "fail_mode": None,
+                "human_approval": None,
+                "hilt_min_severity": None,
+            }
+        ]
+
+        def wizard(**_kwargs):
+            # The wizard's "Trusted binary paths" prompt answered Yes.
+            self.assertTrue(_add_trusted_bin_prefix(bin_dir, self.tmp_dir))
+            return (settings, "local", False, None, False, False)
+
+        with (
+            patch.object(cmd_init, "_stdin_is_tty", return_value=True),
+            patch.object(cmd_init, "_prompt_first_run", side_effect=wizard),
+            patch(
+                "defenseclaw.bootstrap._quiet_guardrail_setup",
+                return_value=StepResult("Guardrail", "pass", "test"),
+            ),
+        ):
+            result = self._invoke(["--skip-install"])
+
+        self.assertNotIn("did not retain the pre-init trusted binary prefix", result.output)
+        self.assertIn(os.path.realpath(bin_dir), _trusted_prefixes_from_config(self.tmp_dir), result.output)
+
     def test_guided_opencode_primary_records_complete_roster_once(self):
         from defenseclaw.bootstrap import StepResult
         from defenseclaw.commands import cmd_init

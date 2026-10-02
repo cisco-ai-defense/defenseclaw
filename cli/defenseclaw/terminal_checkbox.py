@@ -292,8 +292,8 @@ def prompt_checkbox_selection(
     cursor = 0
     ux.subhead(title)
     ux.subhead(
-        "  Up/Down or j/k moves, Space toggles, a selects all, "
-        "n clears, Enter continues."
+        # Fits 80 columns with the subhead indent.
+        "  Up/Down or j/k moves, Space toggles, a all, n none, Enter continues."
     )
 
     if redraw is None:
@@ -334,10 +334,31 @@ def prompt_checkbox_selection(
                     ux.warn(warning, indent="  ")
                     warning, warning_rows = "", 1
 
+            # A key read in the same chunk as Enter (Space Enter in one burst)
+            # changes the menu after the last render; redraw it before
+            # returning so the final screen shows what was chosen (GAP-1263).
+            changed = False
             for key in [checkbox_key_name(k) for k in split_checkbox_keys(read_key())]:
                 if key == "enter":
                     if selected or empty_ok:
-                        if not redraw:
+                        if redraw and changed:
+                            render_checkbox_menu(
+                                options,
+                                selected,
+                                cursor,
+                                redraw=True,
+                                rows_below=warning_rows,
+                            )
+                            if warning_rows:
+                                click.echo("\r\x1b[2K", nl=False, color=True)
+                        elif not redraw:
+                            if changed:
+                                status_width = _render_non_redraw_status(
+                                    options,
+                                    selected,
+                                    cursor,
+                                    status_width,
+                                )
                             click.echo()
                         return [name for name in options if name in selected]
                     if redraw:
@@ -359,6 +380,7 @@ def prompt_checkbox_selection(
                     selected = set(options)
                 elif key == "none":
                     selected.clear()
+                changed = changed or key in ("toggle", "up", "down", "all", "none")
 
             if not redraw:
                 status_width = _render_non_redraw_status(
