@@ -1957,6 +1957,7 @@ class DoctorGeneratedHookFreshnessTests(unittest.TestCase):
         # rerunning setup so hooks are regenerated and re-registered).
         self.assertNotIn("doctor --fix", freshness[0]["detail"])
 
+    @unittest.skipIf(os.name == "nt", "POSIX hook paths in a TOML basic string")
     def test_codex_hook_check_warns_about_another_installs_hooks(self):
         # GAP-1529: a config.toml copied from another account kept that
         # install's DefenseClaw hook entries next to ours; doctor said PASS.
