@@ -2799,7 +2799,14 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
                     _emit("warn", f"  └─ {sub}", f"degraded — {reason}" if reason else "degraded", r=r)
                 else:
                     reason = _telemetry_error_reason(details) if sub == "telemetry" else ""
-                    _emit("fail", f"  └─ {sub}", f"{state} — {reason}" if reason else state, r=r)
+                    next_step = _audit_write_failure(health)[1] if reason else ""
+                    _emit(
+                        "fail",
+                        f"  └─ {sub}",
+                        f"{state} — {reason}" if reason else state,
+                        r=r,
+                        remediation=next_step,
+                    )
             return health
         except (json.JSONDecodeError, TypeError):
             detail = body if body.startswith("response exceeds") else "could not parse /health response"
@@ -2846,6 +2853,16 @@ def _check_gateway_auth(cfg, r: _DoctorResult) -> bool:
     while every real CLI and hook request receives HTTP 401.
     """
     token, _token_env, _token_source = _daemon_effective_gateway_token(cfg)
+    if not token and r.gateway_down == "stopped" and not _custom_gateway_token_env(cfg):
+        # The gateway generates and persists its token on its first start, so
+        # right after `init --no-start-gateway` nothing needs repair (GAP-1975).
+        _emit(
+            "skip",
+            "Gateway authentication",
+            "no gateway token yet — the gateway creates one when it starts: `defenseclaw-gateway start`",
+            r=r,
+        )
+        return True
     if not token:
         _emit(
             "fail",
@@ -4812,8 +4829,23 @@ def _check_codex_hooks(
                     "then run: defenseclaw setup codex --yes"
                 ),
             )
+    elif r.gateway_down == "stopped":
+        # The gateway writes the hook script when it starts (GAP-1975).
+        _emit(
+            "skip",
+            "Codex hooks",
+            f"hook script not written yet — the gateway writes {hook_script} when it starts: "
+            "`defenseclaw-gateway start`",
+            r=r,
+        )
     else:
-        _emit("fail", "Codex hooks", f"hook script not found at {hook_script}", r=r)
+        _emit(
+            "fail",
+            "Codex hooks",
+            f"hook script not found at {hook_script}",
+            r=r,
+            remediation="re-register the hooks: defenseclaw setup codex --yes",
+        )
 
 
 _CODEX_HOOK_SCRIPT = "codex-hook.sh"
@@ -5031,6 +5063,32 @@ _EVENT_HISTORY_SQLITE_CLASSES = {
     "readonly_cantopen": "the audit database is read-only or cannot be opened",
     "constraint_corrupt": "the audit database is damaged",
 }
+
+
+_EVENT_HISTORY_SQLITE_REMEDIATION = {
+    "full": "free space on the disk that holds the audit database; the gateway resumes writing audit events "
+    "once there is room",
+}
+
+
+def _audit_write_failure(live_health) -> tuple[str, str]:
+    """(reason, next step) when the live gateway reports failing audit writes (GAP-1984)."""
+    telemetry = live_health.get("telemetry") if isinstance(live_health, dict) else None
+    if not isinstance(telemetry, dict):
+        return "", ""
+    state = str(telemetry.get("state", telemetry.get("status", "")) or "").strip().lower()
+    if state in {"running", "healthy", "disabled"}:
+        return "", ""
+    details = telemetry.get("details")
+    reason = _telemetry_error_reason(details)
+    if not reason:
+        return "", ""
+    sqlite_class = str(details.get("event_history_last_sqlite_class") or "")
+    remediation = _EVENT_HISTORY_SQLITE_REMEDIATION.get(
+        sqlite_class,
+        "fix the audit database storage, then run 'defenseclaw-gateway restart'",
+    )
+    return reason, remediation
 
 
 def _telemetry_error_reason(details) -> str:
@@ -9249,11 +9307,16 @@ def _check_observability_v8_status(
 
     retention = "unbounded" if status.unbounded_retention else f"{status.retention_days} days"
     local_path = status.local_path or "built-in data directory"
+    write_failure, write_next_step = _audit_write_failure(live_health)
+    local_detail = f"retention={retention}; path={local_path}"
+    if write_failure:
+        local_detail += f"; {write_failure}"
     _emit(
-        "warn" if status.unbounded_retention else "pass",
+        "fail" if write_failure else ("warn" if status.unbounded_retention else "pass"),
         "Local SQLite",
-        f"retention={retention}; path={local_path}",
+        local_detail,
         r=r,
+        remediation=write_next_step,
     )
     if status.judge_bodies_path:
         # The store sits outside every redaction profile; say so (GAP-1693).
@@ -9318,12 +9381,21 @@ def _check_observability_v8_status(
         elif destination.enabled and destination.kind != "sqlite":
             tag = "warn"
             detail += "; health=unavailable; queue=unavailable; last=unavailable"
+        sqlite_write_failure = bool(destination.enabled and destination.kind == "sqlite" and write_failure)
+        if sqlite_write_failure:
+            # The sink's own counters lag the gateway's audit-write failure,
+            # so say what the telemetry row says (GAP-1984).
+            tag = "fail"
+            detail += f"; {write_failure}"
+        next_step = ""
+        if tag in {"warn", "fail"}:
+            next_step = write_next_step if sqlite_write_failure else _destination_remediation(destination, live)
         _emit(
             tag,
             f"Destination: {destination.name}",
             detail if destination.enabled else f"disabled; {detail}",
             r=r,
-            remediation=_destination_remediation(destination, live) if tag in {"warn", "fail"} else "",
+            remediation=next_step,
         )
 
     retention_state, retention_failure = retention_health_from_gateway(live_health)
@@ -12088,7 +12160,8 @@ def _check_hook_contract_lock(
             _emit(
                 "warn",
                 "Hook contract",
-                "no hook_contract_lock.json yet — restart the gateway after setup: `defenseclaw-gateway restart`",
+                "no hook_contract_lock.json yet — the gateway writes it when it starts: "
+                "`defenseclaw-gateway restart` (also starts a stopped gateway)",
                 r=r,
             )
         return

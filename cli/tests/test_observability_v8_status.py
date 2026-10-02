@@ -1224,3 +1224,53 @@ def test_doctor_judge_body_row_says_capture_is_unredacted() -> None:
         "capture=enabled (raw judge text, not redacted; turn off with guardrail.retain_judge_bodies: false); "
         "retention=7 days; path=/tmp/judge.db"
     )
+
+
+def test_doctor_v8_local_rows_fail_when_gateway_reports_audit_write_failure() -> None:
+    # GAP-1984: a full data disk made the telemetry row fail while Local SQLite
+    # and Destination: local-sqlite stayed green in the same run.
+    from defenseclaw.commands.cmd_doctor import _check_observability_v8_status, _DoctorResult
+
+    status = V8OperatorStatus(
+        source="/tmp/config.yaml",
+        data_dir="/tmp",
+        plan_digest="a" * 64,
+        bucket_catalog_version=1,
+        retention_days=30,
+        local_path="/tmp/audit.db",
+        judge_bodies_path="",
+        destinations=(
+            V8DestinationStatus(
+                name="local-sqlite",
+                kind="sqlite",
+                enabled=True,
+                generated=True,
+                capabilities=("logs",),
+                selected_signals=("logs",),
+                policy_form="implicit_local",
+                endpoint="/tmp/audit.db",
+                route_count=1,
+                buckets=("compliance.activity",),
+                redaction_profiles=("none",),
+            ),
+        ),
+        buckets=(V8BucketStatus("compliance.activity", ("logs",), "none"),),
+        warnings=(),
+    )
+    full = {
+        "telemetry": {
+            "state": "error",
+            "details": {"event_history_failure": "sqlite_write_failed", "event_history_last_sqlite_class": "full"},
+        }
+    }
+    result = _DoctorResult()
+    _check_observability_v8_status(status, result, live_health=full)
+    checks = {item["label"]: item for item in result.checks}
+    for label in ("Local SQLite", "Destination: local-sqlite"):
+        assert checks[label]["status"] == "fail"
+        assert "disk holding the audit database is full" in checks[label]["detail"]
+        assert checks[label]["remediation"].startswith("free space on the disk")
+
+    healthy = _DoctorResult()
+    _check_observability_v8_status(status, healthy, live_health={"telemetry": {"state": "running"}})
+    assert {c["label"]: c["status"] for c in healthy.checks}["Local SQLite"] == "pass"
