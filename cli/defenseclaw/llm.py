@@ -548,6 +548,39 @@ def call_llm(request: dict) -> dict:
 call_litellm = call_llm
 
 
+def _bedrock_config_region(llm_config: Any) -> str:
+    """The region configured for a Bedrock LLM block, or "" (env decides)."""
+    bedrock = getattr(llm_config, "bedrock", None)
+    for value in (getattr(bedrock, "region", ""), getattr(llm_config, "region", "")):
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _plain_provider_error(exc: BaseException) -> str:
+    """The provider's own message without LiteLLM's class-name prefixes.
+
+    ``litellm.BadRequestError: BedrockException - {"message":"..."}`` becomes
+    the quoted message, so doctor rows read as the provider's words.
+    """
+    import re  # noqa: PLC0415
+
+    text = (str(exc).strip().splitlines() or [""])[0].strip()
+    text = re.sub(r"^(?:litellm\.)?\w+(?:Error|Exception):\s*", "", text)
+    text = re.sub(r"^(?:litellm\.)?\w+(?:Error|Exception):\s*", "", text)
+    text = re.sub(r"^\w+Exception\s*-\s*", "", text)
+    if text.startswith("{"):
+        try:
+            body = json.loads(text)
+        except ValueError:
+            body = None
+        if isinstance(body, dict):
+            message = body.get("message") or body.get("Message")
+            if isinstance(message, str) and message.strip():
+                text = message.strip()
+    return text or type(exc).__name__
+
+
 def ping(llm_config: Any, *, timeout: int = 5) -> tuple[bool, str]:
     """One-shot reachability probe for a resolved :class:`LLMConfig`.
 
@@ -605,7 +638,17 @@ def ping(llm_config: Any, *, timeout: int = 5) -> tuple[bool, str]:
         kwargs["api_base"] = base_url
     if api_key:
         kwargs["api_key"] = api_key
+    if provider in ("bedrock", "amazon-bedrock") or model.startswith("bedrock/"):
+        # A Bedrock API key is bound to its region; without the configured
+        # region LiteLLM falls back to its own default and the key fails
+        # authentication although the gateway accepts it (GAP-1365).
+        region = _bedrock_config_region(llm_config)
+        if region:
+            kwargs["aws_region_name"] = region
 
+    # LiteLLM prints "Give Feedback / Get Help" and "LiteLLM.Info: ...
+    # _turn_on_debug()" lines on a failure; doctor shows its own row (GAP-1489).
+    litellm.suppress_debug_info = True
     try:
         resp = litellm.completion(**kwargs)
     except Exception as exc:
@@ -620,7 +663,7 @@ def ping(llm_config: Any, *, timeout: int = 5) -> tuple[bool, str]:
         if missing is not None:
             return (False, missing)
         st = _classify_llm_exception(exc)
-        return (False, f"{st}: {type(exc).__name__}: {exc}".strip().splitlines()[0][:240])
+        return (False, f"{st}: {_plain_provider_error(exc)}"[:240])
 
     try:
         choices = getattr(resp, "choices", None) or []

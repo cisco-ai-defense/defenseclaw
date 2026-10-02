@@ -40,6 +40,17 @@ def setup_command(connector: str) -> str:
     return f"defenseclaw setup {'claude-code' if connector == 'claudecode' else connector}"
 
 
+def _hook_token_well_formed(path: Path) -> bool:
+    """Whether a connector hook token holds the 64 hex characters the gateway mints."""
+    try:
+        with path.open("rb") as stream:
+            body = stream.read(4097)
+    except OSError:
+        return True  # unreadable here is not proof of damage; the hook rows report access
+    value = body.decode("ascii", "replace").strip()
+    return len(body) <= 4096 and len(value) == 64 and all(c in "0123456789abcdef" for c in value)
+
+
 def hook_runtime_problems(cfg: Any, connector: str) -> list[str]:
     """Return short descriptions of drifted hook files for *connector*."""
 
@@ -95,6 +106,9 @@ def hook_runtime_problems(cfg: Any, connector: str) -> list[str]:
         # (which doctor and status load from .env) never stands in for it.
         if not token_path.is_file():
             problems.append(f"hook token {token_path} is missing, so every hook call fails")
+        elif not _hook_token_well_formed(token_path):
+            # An empty or damaged token fails every call too (GAP-1436).
+            problems.append(f"hook token {token_path} is empty or damaged, so every hook call fails")
         break
     return problems
 
