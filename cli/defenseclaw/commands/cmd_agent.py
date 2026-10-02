@@ -415,6 +415,12 @@ def processes(
     click.echo(_render_ai_processes_table(process_signals, limit=limit).rstrip())
 
 
+_AI_DISCOVERY_DISABLED_HINT = (
+    "AI discovery is disabled, so there are no components to show. "
+    "Enable it with: defenseclaw agent discovery enable"
+)
+
+
 @agent.group("components", invoke_without_command=True)
 @click.option("--refresh", is_flag=True, help="Ask the sidecar to scan before rendering.")
 @click.option("--json", "as_json", is_flag=True, help="Output the components rollup as JSON.")
@@ -526,9 +532,17 @@ def components_cmd(
         raise click.ClickException(f"sidecar unavailable: {exc}") from exc
     except requests.HTTPError as exc:
         status = exc.response.status_code if exc.response is not None else "unknown"
+        if status == 503:
+            raise click.ClickException(_AI_DISCOVERY_DISABLED_HINT) from exc
         raise click.ClickException(f"sidecar rejected components request: HTTP {status}") from exc
     except requests.RequestException as exc:
         raise click.ClickException(f"sidecar request failed: {exc}") from exc
+
+    if payload.get("enabled") is False and not as_json:
+        # The sidecar answers with an empty rollup while discovery is off
+        # (the default after init); say so instead of an empty table.
+        click.echo(_AI_DISCOVERY_DISABLED_HINT)
+        return
 
     rows = _filter_components(
         payload.get("components", []) or [],
