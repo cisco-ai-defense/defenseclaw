@@ -26,8 +26,8 @@ def audit() -> None:
     """Audit trail helpers: export, findings, gateway logs, activity logging.
 
     \b
-    Export the audit log (incl. per-connector filtering and the activity feed):
-        defenseclaw audit export [--connector X] [--since 1h] [--include-activity]
+    Export the audit log, config changes included (action config-update):
+        defenseclaw audit export [--connector X] [--since 1h]
     Report the current distinct skill/MCP/plugin/code scan findings (JSON):
         defenseclaw audit findings [--scanner NAME] [--since 30m]
     'export' and 'findings' run 'defenseclaw-gateway audit <command>' with the
@@ -58,6 +58,9 @@ def run_gateway(argv: Sequence[str]) -> NoReturn:
         raise click.ClickException(str(exc)) from exc
     if not binary:
         raise click.ClickException(_GATEWAY_MISSING)
+    # Usage errors then name 'defenseclaw audit ...', the command the user
+    # typed, instead of 'defenseclaw-gateway audit ...' (GAP-1644).
+    os.environ["DEFENSECLAW_DELEGATED_FROM"] = "defenseclaw"
     for stream in (sys.stdout, sys.stderr):
         try:
             stream.flush()
