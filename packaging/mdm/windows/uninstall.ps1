@@ -10,7 +10,8 @@
     standalone --json` (which stops and deletes the services, removes
     DefenseClaw's hooks and machine-policy entries while preserving
     administrator entries, and removes the Add/Remove Programs entry and
-    marker). -Purge also removes managed state.
+    marker, and the managed machine state). -Purge also removes each enrolled
+    account's DefenseClaw data and per-user binaries.
 
     Works in Windows PowerShell 5.1 (32- or 64-bit) and PowerShell 7: it only
     locates the installed native CLI through the protected 64-bit HKLM marker

@@ -328,9 +328,10 @@ Uninstall does the following on every OS:
   entries stay. On Linux and macOS it restores the preimages it recorded.
 - It stops and removes the services.
 
-Config, credentials, state, and logs stay unless you purge, and so does
-each user's DefenseClaw folder (`~/.defenseclaw`). A purge removes
-everything, each enrolled user's folder and per-user binaries included.
+It also removes the machine state: the config, credentials, state and logs.
+Each user's DefenseClaw folder (`~/.defenseclaw`) and per-user binaries stay.
+A purge removes everything, each enrolled user's folder and per-user binaries
+included. The Secure Client profile keeps its machine state unless you purge.
 
 On Linux and macOS, the default uninstall removes the deployment and its
 machine state: the config, credentials, gateway and guardian state, logs,

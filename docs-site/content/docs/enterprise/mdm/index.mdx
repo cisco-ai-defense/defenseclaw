@@ -305,7 +305,7 @@ are accepted and ignored.
 | `ALLOWEDSIGNERS=` | Comma-separated SHA-256 thumbprints of accepted Authenticode signers, for a signed Setup. |
 | `JSON=1` | Print the result document on standard output. Always set it from an MDM. |
 | `NOSTART=1` | Install with the services stopped (mutating actions only). |
-| `PURGE=1` | With `/uninstall`, also remove the config, credentials and state. |
+| `PURGE=1` | With `/uninstall`, also remove each enrolled account's DefenseClaw data and per-user binaries. Uninstall always removes the config, credentials and machine state. |
 | `TIMEOUTSECONDS=` | Lifecycle timeout, 60 to 7200 seconds. Default 1800. |
 | `ATTESTCLAUDEEFFECTIVEPOLICY=1` | With `/repair`: record the administrator's attestation that Claude Code runs DefenseClaw's managed hooks. See [Claude Code on Windows](#claude-code-on-windows). |
 
@@ -505,7 +505,7 @@ a no-op result and exit `0`.
 | --- | --- | --- |
 | Linux | `uninstall.sh [--purge] [--keep-package] [--log FILE]`, or `DC_PURGE=1` and `DC_KEEP_PACKAGE=1` in its settings block | The services, DefenseClaw's hooks and machine-policy entries (administrator entries stay), then the deb or rpm unless `--keep-package`. `--purge` also removes `/etc/defenseclaw` (config, policies, keys), the state under `/var/lib` and the logs. The `defenseclaw` service account stays. |
 | macOS | `uninstall.sh [--purge] [--log FILE]` | The same, and the lifecycle forgets the pkg receipt. `--purge` also removes `/opt/cisco/defenseclaw` and the logs. |
-| Windows | `uninstall.ps1 [-Purge]` (runs in Windows PowerShell 5.1 or PowerShell 7), or `DefenseClawSetup-Enterprise-Standalone-x64.exe /uninstall JSON=1` with optional `PURGE=1` | The services, hooks, machine-policy entries, the Add/Remove Programs entry and the marker. Purge also removes the managed state. |
+| Windows | `uninstall.ps1 [-Purge]` (runs in Windows PowerShell 5.1 or PowerShell 7), or `DefenseClawSetup-Enterprise-Standalone-x64.exe /uninstall JSON=1` with optional `PURGE=1` | The services, hooks, machine-policy entries, the managed machine state, the Add/Remove Programs entry and the marker. Purge also removes each enrolled account's DefenseClaw data and per-user binaries. |
 
 See [Uninstall](/docs/enterprise/lifecycle#uninstall) for what stays behind and
 how to remove the service account.

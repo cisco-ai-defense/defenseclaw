@@ -232,7 +232,7 @@ dashes, so `ALLOWEDSIGNERS=` and `allowed-signers=` are the same.
 | `ALLOWEDSIGNERS=<sha256>,<sha256>` | Accept only these Authenticode signer certificates (SHA-256 thumbprints). Applies to a signed Setup. |
 | `JSON=1` | Print the result document on standard output |
 | `NOSTART=1` | Install or update with the services stopped and disabled. A later `/repair` starts them. |
-| `PURGE=1` | With `/uninstall`, also remove the state under `C:\ProgramData\Cisco\DefenseClaw`, each enrolled account's `%USERPROFILE%\.defenseclaw`, and the DefenseClaw files of a per-user install in `%USERPROFILE%\.local\bin` with that folder's user `Path` entry once it is empty. The result names each account |
+| `PURGE=1` | With `/uninstall`, also remove each enrolled account's `%USERPROFILE%\.defenseclaw`, and the DefenseClaw files of a per-user install in `%USERPROFILE%\.local\bin` with that folder's user `Path` entry once it is empty. The result names each account |
 | `TIMEOUTSECONDS=<n>` | Lifecycle timeout, from 60 to 7200 seconds. The default is 1800. |
 
 The other actions are `/install`, `/upgrade`, `/repair`, `/reconcile`,
@@ -627,9 +627,10 @@ Or with the installed CLI:
 ```
 
 Uninstall removes DefenseClaw's hook registrations and machine-policy
-entries, the four services and the binaries. It keeps the config, secrets,
-data and service logs under `C:\ProgramData\Cisco\DefenseClaw`. To remove
-those too, add `PURGE=1` to Setup or `--purge` to the CLI. After a successful
+entries, the four services, the binaries, and the machine state under
+`C:\ProgramData\Cisco\DefenseClaw` (config, secrets, data and service logs).
+Each user keeps `%USERPROFILE%\.defenseclaw` and the per-user binaries. To
+remove those too, add `PURGE=1` to Setup or `--purge` to the CLI. After a successful
 uninstall, the marker key, the Add/Remove Programs entry and a
 `DisableSelfUpdate` value that the lifecycle wrote are gone, and so are their
 parent keys and `C:\Program Files\Cisco` when nothing else is left in them.
