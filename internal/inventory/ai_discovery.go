@@ -2338,12 +2338,14 @@ func (s *ContinuousDiscoveryService) detectProcesses() ([]AISignal, error) {
 			var best *processInfo
 			bestMatch := 0
 			for i := range procs {
-				if !processNameMatches(procs[i].Comm, want) {
+				name := processMatchName(procs[i], want)
+				if name == "" {
 					continue
 				}
-				match := processMatchScore(procs[i].Comm, rawWant)
+				match := processMatchScore(name, rawWant)
 				if best == nil || match > bestMatch || (match == bestMatch && procs[i].StartedAt.After(best.StartedAt)) {
 					p := procs[i]
+					p.Comm = name
 					best = &p
 					bestMatch = match
 				}
@@ -2377,6 +2379,18 @@ func (s *ContinuousDiscoveryService) detectProcesses() ([]AISignal, error) {
 		}
 	}
 	return out, nil
+}
+
+// processMatchName is the process name that matches want: comm, or else
+// argv[0]'s basename when the process renamed its main thread (Linux).
+func processMatchName(proc processInfo, want string) string {
+	if processNameMatches(proc.Comm, want) {
+		return proc.Comm
+	}
+	if proc.Argv0 != "" && processNameMatches(proc.Argv0, want) {
+		return proc.Argv0
+	}
+	return ""
 }
 
 // processMatchScore ranks how closely a process name matches a catalog

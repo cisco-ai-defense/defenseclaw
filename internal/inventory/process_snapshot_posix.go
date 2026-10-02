@@ -114,10 +114,39 @@ func platformProcessSnapshot() ([]processInfo, error) {
 	for _, line := range strings.Split(out.String(), "\n") {
 		info, ok := parseStandardPSProcessLine(line, now)
 		if ok {
+			if runtime.GOOS == "linux" {
+				info.Argv0 = procArgv0("/proc/"+strconv.Itoa(info.PID)+"/cmdline", info.Comm)
+			}
 			infos = append(infos, info)
 		}
 	}
 	return infos, nil
+}
+
+// procArgv0 is the lower-cased basename of argv[0] in a /proc/<pid>/cmdline
+// file, or empty when it is unreadable or the same as comm. Only the first
+// 4 KiB are read, and nothing after the first NUL is kept.
+func procArgv0(cmdlinePath, comm string) string {
+	f, err := os.Open(cmdlinePath)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	buf := make([]byte, 4096)
+	n, _ := io.ReadFull(f, buf)
+	arg := buf[:n]
+	if i := bytes.IndexByte(arg, 0); i >= 0 {
+		arg = arg[:i]
+	}
+	name := strings.TrimSpace(string(arg))
+	if name == "" {
+		return ""
+	}
+	name = strings.ToLower(filepath.Base(name))
+	if name == "." || name == "/" || name == comm {
+		return ""
+	}
+	return name
 }
 
 func parseDarwinPSOutput(
