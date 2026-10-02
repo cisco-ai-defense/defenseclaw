@@ -830,7 +830,8 @@ class PluginsPanelModel(CatalogListModel[PluginRow]):
     """Pure Plugins panel state and action-intent mapping."""
 
     def __init__(self, *, connector: str = "") -> None:
-        super().__init__()
+        # Without filter fields the filter matched every row (GAP-1520).
+        super().__init__(filter_fields=("id", "name", "description", "origin", "status", "verdict"))
         self.connector = connector
 
     def load_intent(self) -> CatalogCommandIntent:
@@ -911,6 +912,8 @@ class PluginsPanelModel(CatalogListModel[PluginRow]):
         return CatalogPanelAction(False)
 
     def empty_state(self) -> str:
+        if self.filter_text and self.items:
+            return "No plugins match the filter."
         if not self.loaded:
             if self.loading:
                 # A first visit loads by itself; "Press r" read as if it
@@ -927,7 +930,7 @@ class ToolsPanelModel(CatalogListModel[ToolRow]):
     """Pure Tools panel state backed by audit-store tool action rows."""
 
     def __init__(self, store: object | None = None, *, connector: str = "") -> None:
-        super().__init__()
+        super().__init__(filter_fields=("name", "scope", "status", "reason", "target_name"))
         self.store = store
         self.connector = connector
 
@@ -1054,6 +1057,8 @@ class ToolsPanelModel(CatalogListModel[ToolRow]):
         )
 
     def empty_state(self) -> str:
+        if self.filter_text and self.items:
+            return "No tool rules match the filter."
         return (
             "No tool policy rows. This table only shows block/allow entries; unblocked tools disappear here. "
             + TOOLS_ADD_HINT
@@ -1606,7 +1611,9 @@ def plugin_action_intent(key: str, row: PluginRow, *, origin: str, connector: st
         "i": ("info", "info plugin"),
         "b": ("block", "block plugin"),
         "a": ("allow", "allow plugin"),
-        "u": ("allow", "unblock plugin"),
+        # ``plugin unblock`` clears enforcement without an allow entry; ``allow``
+        # here allow-listed the plugin over later scan verdicts (GAP-1530).
+        "u": ("unblock", "unblock plugin"),
         "d": ("disable", "disable plugin"),
         "e": ("enable", "enable plugin"),
         "q": ("quarantine", "quarantine plugin"),

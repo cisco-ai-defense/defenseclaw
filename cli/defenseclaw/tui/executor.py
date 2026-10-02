@@ -7,6 +7,7 @@ import codecs
 import contextlib
 import ntpath
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -23,6 +24,9 @@ from defenseclaw.gateway import resolve_gateway_binary
 _CREATE_SUSPENDED = 0x00000004
 _PIPE_FRAGMENT_FLUSH_SECONDS = 0.05
 _PIPE_FRAGMENT_MAX_CHARS = 64 * 1024
+# A colour code cut by a read boundary ("\x1b[9" | "0m..."): held back so the
+# next read completes it instead of showing "[90m" text (GAP-1543).
+_INCOMPLETE_ESCAPE_RE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*)?\Z")
 
 
 @dataclass(frozen=True)
@@ -205,9 +209,9 @@ class CommandExecutor:
                     # A newline-less interactive prompt must become visible
                     # while the child is waiting for stdin. Delay only long
                     # enough to coalesce ordinary cross-chunk line fragments.
-                    for text in _split_terminal_chunk(pending):
+                    ready, pending = _hold_incomplete_escape(pending)
+                    for text in _split_terminal_chunk(ready):
                         yield CommandEvent("output", text)
-                    pending = ""
                     continue
                 if not chunk:
                     break
@@ -273,6 +277,10 @@ class CommandExecutor:
         os.close(slave_fd)
         self._process = process
         self._master_fd = master_fd
+        # A read can end inside a UTF-8 character or a colour code; carry
+        # the cut part into the next read (GAP-1543).
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        carry = ""
         try:
             while True:
                 if process.returncode is not None:
@@ -283,8 +291,11 @@ class CommandExecutor:
                     break
                 if not chunk:
                     break
-                for text in _split_terminal_chunk(chunk.decode(errors="replace")):
+                ready, carry = _hold_incomplete_escape(carry + decoder.decode(chunk))
+                for text in _split_terminal_chunk(ready):
                     yield CommandEvent("output", text)
+            for text in _split_terminal_chunk(carry + decoder.decode(b"", final=True)):
+                yield CommandEvent("output", text)
             exit_code = await process.wait()
         finally:
             async with self._cancel_lock:
@@ -357,6 +368,15 @@ def managed_subprocess_kwargs() -> dict[str, int]:
     if os.name == "nt":
         kwargs["creationflags"] |= _CREATE_SUSPENDED
     return kwargs
+
+
+def _hold_incomplete_escape(text: str) -> tuple[str, str]:
+    """Split ``text`` into what can be shown now and a cut trailing escape."""
+
+    match = _INCOMPLETE_ESCAPE_RE.search(text)
+    if match is None:
+        return text, ""
+    return text[: match.start()], text[match.start() :]
 
 
 def _split_terminal_chunk(text: str) -> tuple[str, ...]:
