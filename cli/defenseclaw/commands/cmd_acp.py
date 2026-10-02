@@ -398,7 +398,10 @@ def _verify_binding(
             and lock_guard.get("managed_custody") is True
             and _managed_guard_custody_is_trusted(path_value)
         ):
-            problems.append(f"{key} executable digest has drifted")
+            problems.append(
+                f"{key} executable digest has drifted"
+                + ("; after a DefenseClaw upgrade run: defenseclaw acp refresh" if key == "guard" else "")
+            )
     # Policy drift. The guard carries its profile and mode in argv, pinned
     # here at setup, and the gateway refuses a request whose profile the
     # configuration no longer assigns to this pair. Editing
@@ -828,6 +831,54 @@ def verify_cmd(app: AppContext, client: str | None, agent: str | None, runtime_d
             click.echo(f"Verified {pair_client}/{pair_agent}: editor entry and executable digests match")
     if failures:
         raise click.ClickException("ACP binding verification failed: " + " | ".join(failures))
+
+
+@acp_cmd.command("refresh")
+@click.option(
+    "--from-sha256",
+    "from_sha256",
+    default="",
+    help="Re-pin only locks that pinned this guard digest (the installer passes the guard it replaced).",
+)
+@pass_ctx
+def refresh_cmd(app: AppContext, from_sha256: str) -> None:
+    """Re-pin the DefenseClaw ACP guard in every editor entry after an upgrade.
+
+    An upgrade replaces defenseclaw-acp, so each contract lock still names the
+    old guard digest and the editor entry fails closed. This re-pins only
+    DefenseClaw's own guard and the protocol schema; a changed agent binary or
+    editor entry still needs 'defenseclaw acp setup'. The installer runs it.
+    """
+    if not app.cfg:
+        raise click.ClickException("configuration is unavailable")
+    data_dir = str(Path(app.cfg.data_dir).expanduser().resolve())
+    protocol = {"schema_version": _SCHEMA_VERSION, "schema_sha256": _SCHEMA_SHA256}
+    for client, agent in sorted(_managed_pairs()):
+        lock_path = _contract_lock_path(data_dir, client, agent)
+        try:
+            if lock_path.is_symlink() or not lock_path.is_file() or lock_path.stat().st_size > 64 << 10:
+                continue
+            document = json.loads(lock_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        guard = document.get("guard") if isinstance(document, dict) else None
+        guard_path = guard.get("path") if isinstance(guard, dict) else None
+        if (
+            not isinstance(guard_path, str)
+            or guard.get("managed_custody") is True
+            or Path(guard_path).name.lower() not in _GUARD_BASENAMES
+            or not Path(guard_path).is_file()
+        ):
+            continue
+        if from_sha256 and str(guard.get("sha256", "")).lower() != from_sha256.strip().lower():
+            continue
+        digest = _sha256_file(guard_path)
+        if guard.get("sha256") == digest and document.get("protocol") == protocol:
+            continue
+        guard["sha256"] = digest
+        document["protocol"] = protocol
+        atomic_write_private_bytes(lock_path, (json.dumps(document, indent=2, sort_keys=True) + "\n").encode())
+        click.echo(f"Re-pinned the DefenseClaw ACP guard for {client}/{agent}")
 
 
 # --- ACP discovery and takeover -------------------------------------------

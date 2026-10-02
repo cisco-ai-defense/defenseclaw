@@ -929,6 +929,12 @@ function Install-New {
         # contract lock and doctor can check compatibility. Best effort.
         Write-Info "Refreshing agent discovery"
         Invoke-Native (Join-Path $Venv "Scripts\defenseclaw.exe") @("agent", "discover", "--refresh", "--no-emit-otel") -Quiet | Out-Null
+        # The new defenseclaw-acp has a new digest: re-pin it in configured
+        # editor entries, which would otherwise fail closed. Best effort.
+        $oldGuard = Join-Path $Snap "bin\defenseclaw-acp.exe"
+        if (Test-Path -LiteralPath $oldGuard) {
+            Invoke-Native (Join-Path $Venv "Scripts\defenseclaw.exe") @("acp", "refresh", "--from-sha256", (Get-Sha256 $oldGuard)) | Out-Null
+        }
     }
     return $true
 }

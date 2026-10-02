@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -753,5 +754,43 @@ def test_verify_without_options_checks_every_binding(tmp_path, monkeypatch):
         result = runner.invoke(acp_cmd, ["verify"], obj=app)
         assert result.exit_code == 0, result.output
         assert "Verified jetbrains/kiro" in result.output and "Verified zed/kiro" in result.output
+    finally:
+        cleanup_app(app, db_path, data_dir)
+
+
+def test_refresh_repins_only_the_upgraded_defenseclaw_guard(tmp_path, monkeypatch):
+    # GAP-1294: an upgrade replaces defenseclaw-acp, and every editor entry
+    # then failed closed on the stale guard digest until acp setup was rerun.
+    _isolate_client_config(monkeypatch, tmp_path)
+    app, data_dir, db_path = _app(tmp_path)
+    guard_path = tmp_path / "bin" / "defenseclaw-acp"
+    guard_path.parent.mkdir()
+    guard = _binary(guard_path)
+    agent_path = tmp_path / "kiro-cli"
+    agent = _binary(agent_path)
+    try:
+        setup = ["setup", "--client", "zed", "--agent", "kiro", "--guard-binary", guard, "--agent-binary", agent]
+        assert CliRunner().invoke(acp_cmd, setup, obj=app).exit_code == 0
+        verify = ["verify", "--client", "zed", "--agent", "kiro"]
+
+        old_sha = hashlib.sha256(guard_path.read_bytes()).hexdigest()
+        guard_path.write_bytes(b"upgraded-guard")
+        result = CliRunner().invoke(acp_cmd, verify, obj=app)
+        assert result.exit_code != 0 and "defenseclaw acp refresh" in result.output
+
+        # The installer names the guard it replaced; a lock pinned to another
+        # guard is left alone.
+        result = CliRunner().invoke(acp_cmd, ["refresh", "--from-sha256", "0" * 64], obj=app)
+        assert result.exit_code == 0 and result.output == ""
+        result = CliRunner().invoke(acp_cmd, ["refresh", "--from-sha256", old_sha], obj=app)
+        assert result.exit_code == 0 and "Re-pinned the DefenseClaw ACP guard for zed/kiro" in result.output
+        assert CliRunner().invoke(acp_cmd, verify, obj=app).exit_code == 0
+        assert CliRunner().invoke(acp_cmd, ["refresh"], obj=app).output == ""  # nothing left to do
+
+        # A changed agent binary is not re-pinned.
+        agent_path.write_bytes(b"other-agent")
+        CliRunner().invoke(acp_cmd, ["refresh"], obj=app)
+        result = CliRunner().invoke(acp_cmd, verify, obj=app)
+        assert result.exit_code != 0 and "agent executable digest has drifted" in result.output
     finally:
         cleanup_app(app, db_path, data_dir)
