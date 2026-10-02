@@ -40,6 +40,11 @@ def test_posix_launcher_timeout_outlasts_the_gateway_readiness_wait():
     text = (_REPO / "internal" / "cli" / "daemon_readiness_other.go").read_text(encoding="utf-8")
     factor = int(re.search(r"startReadinessProgressFactor = (\d+)", text).group(1))
     assert cmd_setup._DEFENSE_GATEWAY_LAUNCHER_TIMEOUT_SECONDS_POSIX > readiness * factor + 20
+    # The launcher applies a pending audit upgrade before that wait starts
+    # (upgradeAuditStoreBeforeStart), so the bound allows for it too.
+    allowance = cmd_setup._GATEWAY_AUDIT_UPGRADE_ALLOWANCE_SECONDS
+    assert allowance >= 300
+    assert cmd_setup._DEFENSE_GATEWAY_LAUNCHER_TIMEOUT_SECONDS_POSIX >= readiness * factor + 20 + allowance
     if os.name != "nt":
         assert cmd_setup._DEFENSE_GATEWAY_LAUNCHER_TIMEOUT_SECONDS == cmd_setup._DEFENSE_GATEWAY_LAUNCHER_TIMEOUT_SECONDS_POSIX
 
