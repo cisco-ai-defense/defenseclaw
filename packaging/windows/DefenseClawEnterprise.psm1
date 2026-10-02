@@ -9346,6 +9346,59 @@ function Remove-DefenseClawCommittedManagedHooksSerializationLocks {
     }
 }
 
+# Setup creates Claude Code's managed-settings.d (and ClaudeCode) for its
+# drop-ins. The finalize purge cannot remove them: the Claude serialization
+# lock is still inside until the step above drops it (GAP-0100). A purge
+# removes each one that is now empty; anything else, or a reparse point,
+# stays. Writes "path: reason" for an empty folder it could not remove.
+function Remove-DefenseClawEmptyClaudeManagedSettingsFolders {
+    param([Parameter(Mandatory)][string]$ProgramFiles)
+    $root = [IO.Path]::Combine($ProgramFiles, 'ClaudeCode')
+    foreach ($directory in @([IO.Path]::Combine($root, 'managed-settings.d'), $root)) {
+        $item = Microsoft.PowerShell.Management\Get-Item -LiteralPath $directory -Force -ErrorAction SilentlyContinue
+        if ($null -eq $item) {
+            continue
+        }
+        if (-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            return
+        }
+        if ($null -ne (Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $directory -Force | Microsoft.PowerShell.Utility\Select-Object -First 1)) {
+            return
+        }
+        try {
+            Microsoft.PowerShell.Management\Remove-Item -LiteralPath $directory -Force -ErrorAction Stop
+        }
+        catch {
+            "${directory}: " + (ConvertTo-DefenseClawBoundedDiagnostic -Value $_.Exception.Message -MaxLength 512)
+            return
+        }
+    }
+}
+
+# An elevated enterprise CLI run gives PowerShell a protected temp folder,
+# ProgramData\DefenseClaw-PowerShell-<32 hex>, and removes it when PowerShell
+# exits; a run stopped before that leaves it (GAP-1734). A purge removes every
+# such folder except the one this run uses, and writes "path: reason" for
+# each one it kept.
+function Remove-DefenseClawStalePowerShellTempDirectories {
+    param([Parameter(Mandatory)][string]$ProgramData)
+    $own = ([string]$env:TEMP).TrimEnd('\') + '\'
+    foreach ($item in @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $ProgramData -Force -Directory -Filter 'DefenseClaw-PowerShell-*' -ErrorAction SilentlyContinue)) {
+        $path = [string]$item.FullName
+        if ([string]$item.Name -cnotmatch '^DefenseClaw-PowerShell-[a-f0-9]{32}$' -or
+            $own.StartsWith($path.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) {
+            continue
+        }
+        try {
+            Assert-DefenseClawPathAcl -Path $path -AllowedWriterSIDs @($script:SystemSID, $script:AdministratorsSID)
+            Remove-DefenseClawManagedTree -Path $path -RequiredBase $ProgramData -Label 'stale enterprise PowerShell temp'
+        }
+        catch {
+            "${path}: " + (ConvertTo-DefenseClawBoundedDiagnostic -Value $_.Exception.Message -MaxLength 512)
+        }
+    }
+}
+
 function Remove-DefenseClawTransactionCreatedSharedDirectories {
     param(
         [Parameter(Mandatory)]$Snapshot,
@@ -21428,6 +21481,10 @@ function Invoke-DefenseClawCommittedUninstallCleanup {
         -GatewayServiceName $GatewayServiceName `
         -GuardianServiceName $GuardianServiceName)
     Remove-DefenseClawCommittedManagedHooksSerializationLocks -Layout $Layout
+    $machineStateRemaining = [string[]]@()
+    if ($Purge -and (Test-DefenseClawStandaloneProfile)) {
+        $machineStateRemaining = [string[]]@(Remove-DefenseClawEmptyClaudeManagedSettingsFolders -ProgramFiles $script:ProgramFiles)
+    }
     foreach ($ancestor in @($Layout.StateRootAncestors)) {
         Revoke-DefenseClawStateAncestorTraverse `
             -Path $ancestor `
@@ -21454,6 +21511,20 @@ function Invoke-DefenseClawCommittedUninstallCleanup {
                 -Result $result `
                 -Layout $Layout `
                 -Finalization $finalization
+        }
+        if (Test-DefenseClawStandaloneProfile) {
+            # What a purge could not remove outside StateRoot, for the
+            # uninstall result's warnings.
+            $machineStateRemaining = [string[]]@(
+                @($machineStateRemaining) +
+                @(Remove-DefenseClawStalePowerShellTempDirectories -ProgramData $script:ProgramData)
+            )
+            $result |
+                Microsoft.PowerShell.Utility\Add-Member `
+                    -MemberType NoteProperty `
+                    -Name machine_state_remaining `
+                    -Value $machineStateRemaining `
+                    -Force
         }
         return $result
     }

@@ -220,8 +220,11 @@ func verifyWindowsManagedHooksStandalonePerUserClean(targets []windowsManagedHoo
 // windowsManagedHooksStandaloneUserCleanups lists the per-user registrations
 // an uninstall removes: the guardian's protected per-user rows, the
 // cleanups it recorded for signed-out users, and enabled manifest rows that
-// were not deferred. Deferred rows the guardian never protected have
-// nothing to remove.
+// were not deferred. A deferred row the guardian never protected has
+// nothing to remove unless an earlier install enrolled that user, which
+// left the user's DefenseClaw data folder: its registrations may still be
+// there, so it is attempted and, without an active session, reported as
+// pending instead of silently kept (GAP-1795).
 func windowsManagedHooksStandaloneUserCleanups(
 	runtimeDir string,
 	manifest enterprisehooks.Manifest,
@@ -235,7 +238,7 @@ func windowsManagedHooksStandaloneUserCleanups(
 		rows = append(rows, authorization.ProtectedTargets...)
 	}
 	for _, target := range manifest.Targets {
-		if !target.IsEnabled() || target.IsDeferred() {
+		if !target.IsEnabled() || (target.IsDeferred() && !windowsManagedHooksStandaloneEnrolledBefore(target)) {
 			continue
 		}
 		rows = append(rows, enterpriseHookReconcileRow{
@@ -258,6 +261,21 @@ func windowsManagedHooksStandaloneUserCleanups(
 	}
 	nobody := func(string, string) bool { return false }
 	return planEnterpriseHookUserCleanups(pending, rows, nobody, windowsStandalonePerUserCleanupConnector, now), problems
+}
+
+// windowsManagedHooksStandaloneEnrolledBefore reports whether the target's
+// DefenseClaw data folder exists, which an enrollment creates and a default
+// uninstall keeps.
+func windowsManagedHooksStandaloneEnrolledBefore(target enterprisehooks.ManifestTarget) bool {
+	dataDir := strings.TrimSpace(target.DataDir)
+	if dataDir == "" && strings.TrimSpace(target.UserHome) != "" {
+		dataDir = filepath.Join(strings.TrimSpace(target.UserHome), ".defenseclaw")
+	}
+	if dataDir == "" {
+		return false
+	}
+	info, err := os.Lstat(dataDir)
+	return err == nil && info.IsDir()
 }
 
 // windowsManagedHooksRegistrationsNotRemovedPrefix starts the failure an

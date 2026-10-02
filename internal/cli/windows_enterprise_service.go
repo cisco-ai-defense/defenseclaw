@@ -442,10 +442,12 @@ func runWindowsEnterpriseLifecycle(
 			windowsEnterpriseInstalledNonCLIUninstallCaller(action, script, executable) {
 			return failPreflight(windowsEnterpriseInvalidArguments(
 				"only the installed CLI can uninstall from its own folder: %s would keep that folder "+
-					"in use, so the uninstall would stop halfway. Run defenseclaw.exe from the same bin "+
-					"folder (defenseclaw.exe enterprise windows uninstall --profile standalone) "+
-					"or DefenseClawSetup-Enterprise-Standalone-x64.exe /uninstall",
+					"in use, so the uninstall would stop halfway. From a prompt whose folder is outside %s "+
+					"(for example, cd /d C:\\ first), run \"%s\" enterprise windows uninstall --profile standalone, "+
+					"or run DefenseClawSetup-Enterprise-Standalone-x64.exe /uninstall",
 				filepath.Base(executable),
+				filepath.Dir(filepath.Dir(executable)),
+				filepath.Join(filepath.Dir(executable), "defenseclaw.exe"),
 			))
 		}
 		if callerPID, ok := windowsEnterpriseSelfUninstallCaller(
@@ -455,9 +457,12 @@ func runWindowsEnterpriseLifecycle(
 			os.Getpid(),
 		); ok {
 			if windowsEnterpriseStandalone(opts) {
-				if err := windowsEnterpriseLeaveInstallRoot(
-					filepath.Dir(filepath.Dir(executable)),
-				); err != nil {
+				installRoot := filepath.Dir(filepath.Dir(executable))
+				started, _ := os.Getwd()
+				if err := windowsEnterpriseLeaveInstallRoot(installRoot); err != nil {
+					return failPreflight(err)
+				}
+				if err := windowsEnterpriseInstallRootStillInUse(installRoot, started); err != nil {
 					return failPreflight(err)
 				}
 			}
@@ -693,6 +698,54 @@ func windowsEnterpriseLeaveInstallRoot(installRoot string) error {
 		return fmt.Errorf("leave the install folder before the uninstall: %w", err)
 	}
 	return nil
+}
+
+// windowsEnterpriseDirectoryInUse is replaceable in tests.
+var windowsEnterpriseDirectoryInUse = windowsDirectoryOpenWithoutDeleteSharing
+
+// windowsEnterpriseInstallRootStillInUse refuses a self-uninstall started in a
+// folder inside installRoot that another process still uses once the CLI has
+// left it. That is usually the prompt it was typed into (cmd.exe after
+// cd /d ...\bin): the CLI can move only its own working folder, and the
+// prompt's keeps InstallRoot from being renamed aside, so the uninstall
+// committed and then failed 1603, and so did every retry from that prompt
+// (GAP-1794). Nothing has changed yet when this refuses.
+func windowsEnterpriseInstallRootStillInUse(installRoot, started string) error {
+	if started == "" || !windowsEnterprisePathWithin(started, installRoot) || !windowsEnterpriseDirectoryInUse(started) {
+		return nil
+	}
+	return windowsEnterpriseInvalidArguments(
+		"another program, usually the prompt this was run from, is using %s as its working folder, "+
+			"so the uninstall could not remove %s and would stop halfway. Nothing was changed. "+
+			"Change that prompt to a folder outside %s (for example, cd /d C:\\) and run the uninstall again",
+		started,
+		installRoot,
+		installRoot,
+	)
+}
+
+// windowsDirectoryOpenWithoutDeleteSharing reports whether another handle to
+// the directory denies delete sharing, as a process's working-folder handle
+// does. Any other failure (access denied, missing) is not reported as in use.
+func windowsDirectoryOpenWithoutDeleteSharing(path string) bool {
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return false
+	}
+	handle, err := windows.CreateFile(
+		name,
+		windows.DELETE,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil,
+		windows.OPEN_EXISTING,
+		windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT,
+		0,
+	)
+	if err != nil {
+		return errors.Is(err, windows.ERROR_SHARING_VIOLATION)
+	}
+	_ = windows.CloseHandle(handle)
+	return false
 }
 
 func windowsEnterprisePowerShellArgs(action string, opts *windowsEnterpriseLifecycleOptions) []string {

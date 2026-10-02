@@ -154,6 +154,9 @@ all: _source-install-dev-preflight
 	@$(MAKE) --no-print-directory _source-dev-install
 	@$(MAKE) --no-print-directory source-migrate
 	@$(MAKE) --no-print-directory source-restart-gateway
+	@# Pre-1.0 installers left their retired binaries behind; install.sh
+	@# removes them, so a source install must too (GAP-0053).
+	@$(HOST_PYTHON) ./scripts/sweep-pre-1.0-install-custody.py
 	@$(MAKE) --no-print-directory path
 	@$(MAKE) --no-print-directory quickstart
 	@$(MAKE) --no-print-directory llm-setup

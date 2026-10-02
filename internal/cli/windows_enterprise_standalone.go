@@ -92,6 +92,10 @@ type windowsEnterpriseInstallerReport struct {
 	// UserStatePurged names each enrolled account whose per-user folder and
 	// per-user binaries a purge removed ("user (SID): path").
 	UserStatePurged json.RawMessage `json:"user_state_purged"`
+	// MachineStateRemaining names what a standalone purge could not remove
+	// outside StateRoot ("path: reason"), such as a stale protected
+	// PowerShell temp folder (GAP-1734).
+	MachineStateRemaining json.RawMessage `json:"machine_state_remaining"`
 	// Pending-transaction recovery reports each managed-hook lifecycle step
 	// it ran with the Setup's verified gateway, and why it kept the staged
 	// one. Decoded leniently, like the registration lists.
@@ -602,6 +606,13 @@ func addWindowsEnterpriseUserStateWarning(result *enterprisestatus.Result, repor
 			"--purge could not remove all DefenseClaw per-user data and binaries of %d enrolled account(s), which keep per-user hook tokens that nothing accepts any more; remove what stays as LocalSystem: %s",
 			len(remaining),
 			windowsEnterpriseBoundedLabels(remaining),
+		))
+	}
+	if kept := windowsEnterpriseReportStrings(report.MachineStateRemaining); len(kept) > 0 {
+		result.AddWarning("machine_state_remaining", fmt.Sprintf(
+			"--purge could not remove %d DefenseClaw machine folder(s); remove them from an elevated prompt: %s",
+			len(kept),
+			windowsEnterpriseBoundedLabels(kept),
 		))
 	}
 }

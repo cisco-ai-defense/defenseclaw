@@ -1317,6 +1317,19 @@ func TestWindowsEnterpriseUninstallReportsTheUserRegistrationsItLeft(t *testing.
 		!strings.Contains(done.Changes[0], `.local\bin`) {
 		t.Fatalf("purged accounts: changes %+v warnings %+v", done.Changes, done.Warnings)
 	}
+	// GAP-1734: a purge names the machine folders it could not remove.
+	machine, err := parseWindowsEnterpriseInstallerReport([]byte(base + `,"machine_state_remaining":["C:\\ProgramData\\DefenseClaw-PowerShell-` +
+		strings.Repeat("a", 32) + `: access denied"]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	left := enterprisestatus.New("uninstall", "standalone", "windows", "test")
+	applyWindowsEnterpriseInstallerReport(left, &windowsEnterpriseLifecycleOptions{purge: true}, machine, windowsEnterpriseStandaloneRun{})
+	if len(left.Errors) != 0 || len(left.Warnings) != 1 || left.Warnings[0].Code != "machine_state_remaining" ||
+		!strings.Contains(left.Warnings[0].Message, `1 DefenseClaw machine folder(s)`) ||
+		!strings.Contains(left.Warnings[0].Message, `C:\ProgramData\DefenseClaw-PowerShell-`+strings.Repeat("a", 32)+`: access denied`) {
+		t.Fatalf("machine leftovers: errors %+v warnings %+v", left.Errors, left.Warnings)
+	}
 	if got := warnings(base + `}`); len(got) != 0 {
 		t.Fatalf("a report without the cleanup fields warned: %+v", got)
 	}

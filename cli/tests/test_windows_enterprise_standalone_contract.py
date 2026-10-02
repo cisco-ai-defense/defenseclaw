@@ -284,6 +284,7 @@ STANDALONE_SMOKES = (
     "enterprise-standalone-claude-policy-binding-smoke.ps1",
     "enterprise-standalone-enumerator-environment-smoke.ps1",
     "enterprise-standalone-install-tree-smoke.ps1",
+    "enterprise-standalone-machine-leftovers-purge-smoke.ps1",
     "enterprise-standalone-manifest-adoption-smoke.ps1",
     "enterprise-standalone-recorded-trust-smoke.ps1",
     "enterprise-standalone-recovery-activation-deferral-smoke.ps1",

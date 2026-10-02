@@ -102,6 +102,21 @@ func TestRemoveWindowsManagedHooksStandalonePerUserRegistrationsCoversEveryRecor
 		t.Fatalf("result = %+v", result)
 	}
 
+	// GAP-1795: a deferred row of a user an earlier install enrolled (its
+	// DefenseClaw data folder is still there) may still hold that install's
+	// registrations, so it is attempted and reported, not skipped.
+	if err := os.MkdirAll(filepath.Join(homeB, ".defenseclaw"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	attempted = nil
+	result = removeWindowsManagedHooksStandalonePerUserRegistrations(context.Background(), dataDir, manifest)
+	if want := "amp/" + userCleanupSIDB + ",devin/" + userCleanupSIDA + ",hermes/" + userCleanupSIDB + ",opencode/" + userCleanupSIDB; strings.Join(attempted, ",") != want {
+		t.Fatalf("attempted %v, want %s", attempted, want)
+	}
+	if err := os.RemoveAll(filepath.Join(homeB, ".defenseclaw")); err != nil {
+		t.Fatal(err)
+	}
+
 	attempted = nil
 	enterpriseHookWindowsUserCleanupIdentity = func() error {
 		return errors.New("per-user Windows hook mutation requires the LocalSystem guardian service")

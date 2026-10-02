@@ -15,6 +15,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 	"unsafe"
 
 	"github.com/spf13/cobra"
@@ -1784,5 +1785,53 @@ func TestWindowsEnterpriseLeaveInstallRootMovesTheWorkingDirectoryOut(t *testing
 	}
 	if current := workingDirectory(); !strings.EqualFold(current, safe) {
 		t.Fatalf("working directory = %s, want %s", current, safe)
+	}
+}
+
+// GAP-1794: a self-uninstall typed into cmd.exe whose folder is inside
+// InstallRoot is refused before anything changes, and says how to proceed.
+func TestWindowsEnterpriseSelfUninstallRefusesAPromptInsideInstallRoot(t *testing.T) {
+	installRoot := t.TempDir()
+	bin := filepath.Join(installRoot, "bin")
+	if err := os.Mkdir(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if windowsDirectoryOpenWithoutDeleteSharing(bin) {
+		t.Fatal("a folder nobody uses was reported in use")
+	}
+	// An idle interactive prompt in bin, reading commands from a pipe.
+	prompt := exec.Command("cmd.exe", "/d", "/q", "/k")
+	prompt.Dir = bin
+	input, err := prompt.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := prompt.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = input.Close()
+		_ = prompt.Process.Kill()
+		_ = prompt.Wait()
+	})
+	deadline := time.Now().Add(10 * time.Second)
+	for !windowsDirectoryOpenWithoutDeleteSharing(bin) {
+		if time.Now().After(deadline) {
+			t.Fatal("a prompt's working folder was not reported in use")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	err = windowsEnterpriseInstallRootStillInUse(installRoot, bin)
+	if !errors.Is(err, errWindowsEnterpriseInvalidArguments) ||
+		!strings.Contains(err.Error(), "is using "+bin+" as its working folder") ||
+		!strings.Contains(err.Error(), "Nothing was changed") ||
+		!strings.Contains(err.Error(), `cd /d C:\`) {
+		t.Fatalf("refusal = %v", err)
+	}
+	if err := windowsEnterpriseInstallRootStillInUse(installRoot, t.TempDir()); err != nil {
+		t.Fatalf("a run started outside InstallRoot was refused: %v", err)
+	}
+	if err := windowsEnterpriseInstallRootStillInUse(installRoot, ""); err != nil {
+		t.Fatalf("an unknown start folder was refused: %v", err)
 	}
 }
