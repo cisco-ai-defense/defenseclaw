@@ -24,9 +24,13 @@ import "time"
 // launched gateway to report READY before stopping it.
 const platformStartReadinessTimeout = 60 * time.Second
 
-// startReadinessProgressFactor: see daemon_readiness_windows.go. Elsewhere
-// setup progress does not extend the readiness timeout.
-const startReadinessProgressFactor = 1
+// startReadinessProgressFactor: see daemon_readiness_windows.go. Each setup
+// step (and each retry of a slow agent probe) gives start and restart another
+// 60 s, up to 180 s in all: a Codex probe that timed out three times (20 s
+// each) used up the whole 60 s, so restart stopped the gateway and every
+// connector lost enforcement instead of one being shown NOT RUNNING
+// (GAP-1850). A start that makes no progress still fails at 60 s.
+const startReadinessProgressFactor = 3
 
 // startupRetriesSQLiteIO: see daemon_readiness_windows.go. Elsewhere an
 // event-history I/O error stays an immediate startup failure.

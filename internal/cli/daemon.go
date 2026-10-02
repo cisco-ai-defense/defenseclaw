@@ -937,7 +937,13 @@ func connectorSetupStep(guardrail gateway.SubsystemHealth) string {
 	if strings.TrimSpace(name) == "" || step < 1 || total < step {
 		return ""
 	}
-	return fmt.Sprintf("setting up connector %s (%d of %d)", name, int(step), int(total))
+	text := fmt.Sprintf("setting up connector %s (%d of %d)", name, int(step), int(total))
+	// A retried slow agent probe is a new step, so readiness keeps waiting
+	// (GAP-1850).
+	if attempt, _ := guardrail.Details["setup_attempt"].(float64); attempt > 1 {
+		text += fmt.Sprintf(", attempt %d", int(attempt))
+	}
+	return text
 }
 
 // startProgressPrinter prints a slow start's progress under the
