@@ -266,6 +266,28 @@ class TestPathTargetUX(_SkillScanUXBase):
         self.assertNotIn("on openclaw", result.output)
 
 
+class TestScanArgumentErrors(_SkillScanUXBase):
+    """GAP-1771: argument errors agree with the help."""
+
+    def test_missing_folder_is_named_not_use_path(self) -> None:
+        missing = os.path.join(self.tmp_dir, "no-such-dir")
+        for args in (["scan", missing], ["scan", "--path", missing]):
+            result = self.invoke(args)
+            self.assertEqual(result.exit_code, 1, result.output)
+            self.assertIn(f"{missing} does not exist", result.output)
+            self.assertNotIn("use --path", result.output)
+            self.assertNotIn("Missing argument", result.output)
+
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
+    def test_path_option_needs_no_target(self, mock_cls) -> None:
+        mock_cls.return_value.scan.return_value = self._clean_result(self.skill_dir)
+        with patch.object(type(self.app.cfg), "skill_dirs", lambda _self, _c=None: []):
+            result = self.invoke(["scan", "--path", self.skill_dir])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertNotIn("Missing argument", result.output)
+        mock_cls.return_value.scan.assert_called_once()
+
+
 def test_skill_finding_line_counts_front_matter(tmp_path) -> None:
     # GAP-1599: the SDK numbers SKILL.md lines after the front matter.
     from defenseclaw.scanner.skill import _snippet_file_line

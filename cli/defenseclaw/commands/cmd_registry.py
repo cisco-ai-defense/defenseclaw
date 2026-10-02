@@ -1534,9 +1534,9 @@ def _registry_required_payload(result: RegistryRequiredResult) -> dict[str, Any]
               help="Flip asset_policy.<type>.registry_required")
 @click.option(
     "--connector", "connector", default="", metavar="C",
-    help="Scope the toggle to asset_policy.connectors[C].<type>."
-         "registry_required (per-connector override, OTHER-7). Omit for the "
-         "global asset_policy.<type>.registry_required.",
+    help="Set the requirement for one connector only "
+         "(asset_policy.connectors[C].<type>.registry_required). Omit to set "
+         "it for every connector (asset_policy.<type>.registry_required).",
 )
 @click.option("--json", "emit_json", is_flag=True, help="Print the result as JSON.")
 @pass_ctx

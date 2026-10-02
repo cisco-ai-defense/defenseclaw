@@ -187,11 +187,11 @@ Pass --json for a structured payload suitable for piping into 'jq'.`,
 
 func init() {
 	connectorCmd.PersistentFlags().StringVar(&connectorFlagName, "connector", "",
-		"Connector name (defaults to the active connector resolved from active_connector.json / guardrail.connector / openclaw)")
+		"Connector name (default: the active connector; see defenseclaw connector list)")
 	connectorCmd.PersistentFlags().BoolVar(&connectorFlagJSON, "json", false,
 		"Emit machine-readable JSON instead of the human-readable view")
 	connectorCmd.PersistentFlags().StringVar(&connectorFlagDataDir, "data-dir", "",
-		"Override the data directory (defaults to cfg.DataDir)")
+		"Use this DefenseClaw data directory (default: data_dir in config.yaml, usually ~/.defenseclaw)")
 	connectorCmd.PersistentFlags().StringVar(&connectorFlagConfigHome, "config-home", "",
 		"Bind native connector maintenance to an installer-validated configuration home")
 	_ = connectorCmd.PersistentFlags().MarkHidden("config-home")
