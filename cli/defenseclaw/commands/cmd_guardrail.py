@@ -1352,6 +1352,7 @@ def fail_mode_cmd(
         _actives = _active_connector_set(app.cfg, _resolve_active_connector(app.cfg))
         click.echo()
         click.echo(f"  {ux._style('per connector:', fg='bright_black', bold=True)}")
+        _open_names: list[str] = []
         for _name in _actives:
             _eff = gc.effective_hook_fail_mode(_name) if hasattr(gc, "effective_hook_fail_mode") else current
             if normalize_connector(_name) in _RUNTIME_FAIL_MODE_CONNECTORS:
@@ -1361,6 +1362,8 @@ def fail_mode_cmd(
                     _eff += f" (desired {_state.desired}; drift: {', '.join(_state.drift)})"
             elif normalize_connector(_name) == "hermes":
                 _eff = f"open (Hermes upstream; configured provenance: {_eff})"
+            if _eff.startswith("open") and normalize_connector(_name) != "hermes":
+                _open_names.append(_name)
             _eff_disp = ux._style(_eff, fg="yellow") if _eff == "closed" else _eff
             click.echo(f"      - {_connector_label(_name)} ({_name}): {_eff_disp}")
         click.echo()
@@ -1372,10 +1375,18 @@ def fail_mode_cmd(
             click.echo(f"  {ux.dim('Switch to closed:')} defenseclaw guardrail fail-mode closed")
         else:
             ux.subhead(
-                "Invalid, unauthorized, incomplete, and unreachable responses BLOCK supported "
-                "connectors; Hermes remains fail-open.",
+                "Invalid, unauthorized, incomplete, and unreachable responses BLOCK connectors "
+                "that are closed above; Hermes remains fail-open.",
                 indent="  ",
             )
+            if _open_names:
+                # GAP-1109: a connector override (or observe mode) keeps these
+                # open although the global default is closed.
+                ux.warn(
+                    "Still fail-open: " + ", ".join(_open_names) + ". Close one with: "
+                    "defenseclaw guardrail fail-mode closed --connector <name>",
+                    indent="  ",
+                )
             click.echo(f"  {ux.dim('Switch to open:')}   defenseclaw guardrail fail-mode open")
         click.echo()
         ux.subhead(

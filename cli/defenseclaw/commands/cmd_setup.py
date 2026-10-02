@@ -8565,9 +8565,18 @@ def _write_connector_identity(
             and existing_single in _HOOK_ENFORCED_CONNECTORS
             and existing_single not in gc.connectors
         ):
+            # Pin the fail mode only for an action predecessor. An observe
+            # connector's "open" is derived from observe mode; pinning it made
+            # a later `setup <it> --mode action` stay fail-open under a closed
+            # global default (GAP-1109), so it inherits instead.
+            seeded_mode = gc.effective_mode(existing_single)
             gc.connectors[existing_single] = PerConnectorGuardrailConfig(
-                mode=gc.effective_mode(existing_single),
-                hook_fail_mode=gc.effective_hook_fail_mode(existing_single),
+                mode=seeded_mode,
+                hook_fail_mode=(
+                    gc.effective_hook_fail_mode(existing_single)
+                    if str(seeded_mode).strip().lower() == "action"
+                    else ""
+                ),
             )
         if connector not in gc.connectors:
             gc.connectors[connector] = PerConnectorGuardrailConfig()
@@ -8939,6 +8948,16 @@ def _apply_hook_connector_setup(
             gc.connectors[connector].hook_fail_mode = normalized_fail
         else:
             gc.hook_fail_mode = normalized_fail
+    if (
+        fail_mode is None
+        and desired_mode == "action"
+        and connector not in {"cursor", "hermes", "copilot", "antigravity"}
+        and gc.effective_hook_fail_mode(connector) == "open"
+    ):
+        click.echo(
+            f"  ⚠ {connector} hook failures are fail-open: while the gateway is down or "
+            "unreachable, tool calls run uninspected. Pass --fail-mode closed to block them."
+        )
     if connector == "cursor":
         if hilt:
             click.echo("  ⚠ Cursor native human approval is not implemented; disabling it for this connector.")
