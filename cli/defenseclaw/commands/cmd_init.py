@@ -730,6 +730,9 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
         hilt_min_severity=primary["hilt_min_severity"] or "",
         trusted_binary_prefixes=trusted_binary_prefixes,
     )
+    # GAP-1656: the deferred multi-connector start must restart a running
+    # gateway when only the hook fail mode changed, as run_first_run does.
+    hook_fail_modes_before = _saved_hook_fail_modes() if defer_gateway else None
     report = run_first_run(opts)
     if unselectable:
         _report_unselectable_connectors(report, unselectable)
@@ -768,6 +771,7 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
             quiet=json_summary,
             allow_trusted_path_prompt=interactive_wizard,
             protected_selection=report._protected_selection,
+            hook_fail_modes_before=hook_fail_modes_before,
         )
         # When the gateway start was deferred (multi-connector + start_gateway),
         # run_first_run recorded a stale "Sidecar not started (--no-start-gateway)"
@@ -1971,6 +1975,7 @@ def _activate_additional_connectors(
     quiet: bool = False,
     allow_trusted_path_prompt: bool = False,
     protected_selection: object | None = None,
+    hook_fail_modes_before: dict[str, str] | None = None,
 ) -> tuple[list[str], StepResult | None]:
     """Merge the extra first-run connectors into ``guardrail.connectors``.
 
@@ -2192,10 +2197,25 @@ def _activate_additional_connectors(
     # report would contradict the gateway it just (re)started.
     sidecar_step = None
     if start_gateway:
-        from defenseclaw.bootstrap import _start_gateway_structured
+        from defenseclaw.bootstrap import _hook_fail_modes, _start_gateway_structured
 
-        sidecar_step = _start_gateway_structured(cfg)
+        sidecar_step = _start_gateway_structured(
+            cfg,
+            hook_fail_mode_changed=hook_fail_modes_before is not None
+            and _hook_fail_modes(cfg) != hook_fail_modes_before,
+        )
     return active, sidecar_step
+
+
+def _saved_hook_fail_modes() -> dict[str, str]:
+    """Effective hook fail mode per connector in the saved config ({} when none)."""
+    from defenseclaw import config as cfg_mod
+    from defenseclaw.bootstrap import _hook_fail_modes
+
+    try:
+        return _hook_fail_modes(cfg_mod.load())
+    except Exception:  # noqa: BLE001 - no saved config yet means nothing to compare
+        return {}
 
 
 def _normalize_connector_arg(

@@ -4516,6 +4516,27 @@ class TestInitObserveAllActionConnectors(unittest.TestCase):
         # be recomputed away now that the gateway is actually running.
         self.assertNotIn("defenseclaw-gateway start", summary["next_commands"])
 
+    @patch("defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup", return_value=True)
+    @patch("defenseclaw.bootstrap._start_gateway_structured")
+    @patch("defenseclaw.commands.cmd_init.agent_discovery.discover_agents")
+    def test_multi_connector_fail_mode_only_change_restarts_gateway(self, mock_discover, mock_start, _gate):
+        # GAP-1656: a re-init that changes only the fail mode of the same
+        # roster must ask the running gateway to restart and rewrite the hooks.
+        from defenseclaw.bootstrap import StepResult
+
+        mock_discover.return_value = self._disc({"codex", "claudecode"})
+        mock_start.return_value = StepResult("Sidecar", "pass", "already running")
+        changed = []
+        for fail_mode in ("closed", "open", "open"):
+            result = self._invoke([
+                "--non-interactive", "--yes", "--action-connectors", "claudecode,codex",
+                "--fail-mode", fail_mode, "--start-gateway",
+                "--scanner-mode", "local", "--skip-install", "--no-verify", "--json-summary",
+            ])
+            self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+            changed.append(mock_start.call_args.kwargs.get("hook_fail_mode_changed"))
+        self.assertEqual(changed, [True, True, False])
+
     @patch("defenseclaw.bootstrap._start_gateway_structured")
     @patch("defenseclaw.commands.cmd_init.agent_discovery.discover_agents")
     def test_deferred_gateway_warn_marks_report_partial(self, mock_discover, mock_start):
