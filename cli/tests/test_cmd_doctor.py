@@ -2000,11 +2000,27 @@ class DoctorGeneratedHookFreshnessTests(unittest.TestCase):
 
         rows = [c for c in result.checks if c["label"] == "Codex hooks of another install"]
         self.assertEqual([c["status"] for c in rows], ["warn"], result.checks)
-        self.assertIn(other_live, rows[0]["detail"])
-        self.assertIn(other_gone, rows[0]["detail"])
+        runs, fails = rows[0]["detail"].split("; ")
+        self.assertIn(other_live, runs)
+        self.assertIn("runs two hook chains", runs)
+        # GAP-1854: a deleted script fails on every event; it is no second chain.
+        self.assertIn(other_gone, fails)
+        self.assertIn("fail on every Codex event", fails)
         self.assertNotIn(third_party, rows[0]["detail"])
         self.assertNotIn(own + ",", rows[0]["detail"])
         self.assertEqual([c for c in clean.checks if c["label"] == "Codex hooks of another install"], [])
+
+    def test_unreadable_foreign_codex_hook_script_counts_as_broken(self):
+        # GAP-1854: another account's unreadable home raised PermissionError
+        # and the foreign entry was ignored.
+        from unittest import mock
+
+        from defenseclaw.commands import cmd_doctor
+
+        path = "/Users/other/.defenseclaw/hooks/codex-hook.sh"
+        with mock.patch("builtins.open", side_effect=PermissionError(13, "denied")):
+            self.assertEqual(cmd_doctor._defenseclaw_hook_script_kind(path), "broken")
+            self.assertEqual(cmd_doctor._defenseclaw_hook_script_kind("/opt/vendor/hooks/codex-hook.sh"), "")
 
     def test_codex_hook_check_fails_on_the_teardown_placeholder(self):
         # GAP-1312: after uninstall the script is the disabled placeholder

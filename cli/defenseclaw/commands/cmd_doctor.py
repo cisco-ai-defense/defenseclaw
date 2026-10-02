@@ -4760,16 +4760,27 @@ def _check_codex_hooks(
         _emit("pass", "Codex hooks", f"hook script at {hook_script}", r=r)
         _check_generated_hook_freshness(cfg, "codex", "Codex hooks", r)
         config_toml = config_path or os.path.join(codex_home(), "config.toml")
-        foreign = _foreign_defenseclaw_codex_hook_scripts(config_toml, hook_script)
-        if foreign:
+        live, broken = _foreign_defenseclaw_codex_hook_scripts(config_toml, hook_script)
+        if live or broken:
+            details = []
+            if live:
+                details.append(
+                    f"{config_toml} also runs {len(live)} hook script(s) of another DefenseClaw "
+                    f"install ({', '.join(live)}), so every Codex event runs two hook chains"
+                )
+            if broken:
+                details.append(
+                    f"{config_toml} also lists {len(broken)} hook script(s) of another DefenseClaw "
+                    f"install that this account cannot run ({', '.join(broken)}: missing or not "
+                    "readable), so those hook entries fail on every Codex event"
+                )
             _emit(
                 "warn",
                 "Codex hooks of another install",
-                f"{config_toml} also runs {len(foreign)} hook script(s) of another DefenseClaw "
-                f"install ({', '.join(foreign)}), so every Codex event runs two hook chains",
+                "; ".join(details),
                 r=r,
                 remediation=(
-                    f"delete the hook entries that run {foreign[0]} from {config_toml}, "
+                    f"delete the hook entries that run {(live or broken)[0]} from {config_toml}, "
                     "then run: defenseclaw setup codex --yes"
                 ),
             )
@@ -4781,28 +4792,32 @@ _CODEX_HOOK_SCRIPT = "codex-hook.sh"
 _MANAGED_HOOK_MARKER = "# defenseclaw-managed-hook v"
 
 
-def _foreign_defenseclaw_codex_hook_scripts(config_toml: str, own_hook_script: str) -> list[str]:
+def _foreign_defenseclaw_codex_hook_scripts(
+    config_toml: str, own_hook_script: str
+) -> tuple[list[str], list[str]]:
     """DefenseClaw codex-hook.sh scripts in config.toml other than our own.
 
     Copied dotfiles or a second DEFENSECLAW home leave another install's
     hook entries next to ours; setup keeps them because they are not this
     install's, and every Codex event then runs both chains (GAP-1529). A
     script counts as DefenseClaw's when it carries the managed-hook marker
-    or, once deleted, sits under a .defenseclaw directory.
+    or, when deleted or unreadable (another account's home, GAP-1854), sits
+    under a .defenseclaw directory. Returns (live, broken): live scripts run
+    a second chain, broken ones fail on every event.
     """
     try:
         with open(config_toml, "rb") as fh:
             raw = fh.read(1024 * 1024 + 1)
         if len(raw) > 1024 * 1024:
-            return []
+            return [], []
         document = tomllib.loads(raw.decode("utf-8"))
     except (OSError, UnicodeError, tomllib.TOMLDecodeError):
-        return []
+        return [], []
     hooks = document.get("hooks") if isinstance(document, dict) else None
     if not isinstance(hooks, dict):
-        return []
+        return [], []
     own = os.path.realpath(own_hook_script)
-    found: set[str] = set()
+    found: dict[str, bool] = {}
     for groups in hooks.values():
         for group in groups if isinstance(groups, list) else []:
             handlers = group.get("hooks") if isinstance(group, dict) else None
@@ -4817,19 +4832,20 @@ def _foreign_defenseclaw_codex_hook_scripts(config_toml: str, own_hook_script: s
                     or os.path.realpath(script) == own
                 ):
                     continue
-                if _is_defenseclaw_hook_script(script):
-                    found.add(script)
-    return sorted(found)
+                kind = _defenseclaw_hook_script_kind(script)
+                if kind:
+                    found[script] = kind == "live"
+    return sorted(k for k, v in found.items() if v), sorted(k for k, v in found.items() if not v)
 
 
-def _is_defenseclaw_hook_script(path: str) -> bool:
+def _defenseclaw_hook_script_kind(path: str) -> str:
+    """'live' for a readable DefenseClaw hook script, 'broken' for a missing
+    or unreadable one under a .defenseclaw directory, '' otherwise."""
     try:
         with open(path, encoding="utf-8", errors="replace") as fh:
-            return _MANAGED_HOOK_MARKER in fh.read(512)
-    except FileNotFoundError:
-        return ".defenseclaw" in path.replace("\\", "/").split("/")
+            return "live" if _MANAGED_HOOK_MARKER in fh.read(512) else ""
     except OSError:
-        return False
+        return "broken" if ".defenseclaw" in path.replace("\\", "/").split("/") else ""
 
 
 def _check_codex_otel_alignment(cfg, r: _DoctorResult) -> None:
