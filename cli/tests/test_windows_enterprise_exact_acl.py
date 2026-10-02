@@ -111,11 +111,21 @@ def test_canonical_setter_replaces_the_entire_protected_dacl() -> None:
     assert "GetSecurityDescriptorSddlForm" not in assertion
     assert "GetFileSecurityDescriptor" in assertion
     assert "Test-DefenseClawExactRawDACL" in assertion
+    # Get-Acl stays out of the verifier (it strips SE_DACL_PROTECTED on some
+    # .NET revisions, which is the very bug the verifier is designed to
+    # catch). The icacls /inheritance:r self-heal uses the native
+    # GetFileSecurityDescriptor to re-read after forcing the protected flag.
     assert "Get-Acl" not in assertion
     assert "$ownerSID -cne $expectedOwnerSID" in assertion
     assert "$groupSID -cne $expectedGroupSID" in assertion
     assert "Invoke-DefenseClawNative" not in setter
-    assert "$script:IcaclsExe" not in setter
+    # icacls is permitted ONLY inside Assert-DefenseClawCanonicalRawPathAcl's
+    # one-shot self-heal (restores PROTECTED_DACL_SECURITY_INFORMATION that
+    # Set-Acl occasionally drops silently on Windows 10/11). It must not
+    # appear anywhere else in the canonical setter: the setter still writes
+    # bytes via Set-Acl and verifies via native GetFileSecurityDescriptor.
+    setter_without_assertion = setter.replace(assertion, "")
+    assert "$script:IcaclsExe" not in setter_without_assertion
 
 
 def test_state_root_ancestor_grant_is_additive_not_a_canonical_seizure() -> None:

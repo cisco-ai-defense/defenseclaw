@@ -155,6 +155,10 @@ $script:System32 = [IO.Path]::GetFullPath(
     [IO.Path]::Combine($script:WindowsDirectory, 'System32')
 ).TrimEnd('\')
 $script:ScExe = [IO.Path]::Combine($script:System32, 'sc.exe')
+# icacls is used only by the canonical-ACL verify self-heal path when
+# Set-Acl silently drops PROTECTED_DACL_SECURITY_INFORMATION on certain
+# Windows 10/11 .NET revisions; the main setter is the native Set-Acl.
+$script:IcaclsExe = [IO.Path]::Combine($script:System32, 'icacls.exe')
 $script:DefenseClawNativeSecurityType = $null
 
 function Initialize-DefenseClawNativeSecurity {
@@ -3395,16 +3399,18 @@ function Assert-DefenseClawCanonicalRawPathAcl {
         [Security.AccessControl.ControlFlags]::DiscretionaryAclProtected
     )
     if (([int]$Actual.ControlFlags -band $protectedFlag) -eq 0) {
-        # Self-heal: PowerShell's Set-Acl can silently drop
+        # Self-heal: PowerShell's native Set-Acl can silently drop
         # PROTECTED_DACL_SECURITY_INFORMATION even when the input
         # descriptor had SetAccessRuleProtection($true, $false). Force
         # the flag via Win32 (icacls /inheritance:r) and re-read before
-        # giving up. See the mirror self-heal in Set-DefenseClawPathAcl.
+        # giving up, using the same native GetFileSecurityDescriptor the
+        # rest of this verifier uses so we never cross back into the .NET
+        # Security\\* cmdlet path that may re-drop the protected flag.
         try {
-            $null = & icacls.exe $Path '/inheritance:r' 2>&1
-            $reread = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Path
+            $null = & $script:IcaclsExe $Path '/inheritance:r' 2>&1
+            $rereadNative = Initialize-DefenseClawNativeSecurity
             $rereadRaw = [Security.AccessControl.RawSecurityDescriptor]::new(
-                $reread.GetSecurityDescriptorBinaryForm(),
+                $rereadNative::GetFileSecurityDescriptor($Path),
                 0
             )
             if (([int]$rereadRaw.ControlFlags -band $protectedFlag) -ne 0) {
@@ -3611,32 +3617,13 @@ function Set-DefenseClawPathAcl {
         -LiteralPath $Path `
         -AclObject $security `
         -ErrorAction Stop
-    # Self-heal the Win32 DACL state so the stamp is deterministic across the
-    # .NET versions on Windows 10/11. PowerShell's Set-Acl writes the DACL
-    # bytes from the FileSecurity object but can silently drop
-    # PROTECTED_DACL_SECURITY_INFORMATION when sending SetSecurityInfo - the
-    # resulting DACL re-admits inherited ACEs (retired per-service SIDs,
-    # GPO-pushed grants, AV-engine stamps) that the canonical descriptor
-    # intentionally excluded. Force the protected flag via Win32 (icacls)
-    # after the stamp lands so a subsequent verify finds the state the
-    # canonical ACL asked for.
-    #
-    # Product posture: canonical-state-after-install is the invariant, not
-    # refuse-on-drift. If icacls can't disable inheritance (GPO override,
-    # filesystem driver interference), the subsequent verify self-heal path
-    # (Assert-DefenseClawCanonicalRawPathAcl) downgrades to a warning rather
-    # than aborting the install - leaving the endpoint unprotected because
-    # of a transient ACL race is worse than installing onto a path with a
-    # wider DACL than the canonical shape.
-    try {
-        $null = & icacls.exe $Path '/inheritance:r' 2>&1
-    }
-    catch {
-        Microsoft.PowerShell.Utility\Write-Verbose (
-            "canonical post-stamp icacls fallback failed on {0}: {1}" -f
-            $Path, $_.Exception.Message
-        )
-    }
+    # Set-Acl can silently drop PROTECTED_DACL_SECURITY_INFORMATION when
+    # dispatching SetSecurityInfo on certain Windows 10/11 .NET revisions.
+    # The verifier below (Assert-DefenseClawCanonicalRawPathAcl) owns the
+    # icacls /inheritance:r self-heal and re-read: keeping that logic in
+    # one place rather than mirroring it in the setter preserves the
+    # canonical-setter contract (setter writes bytes; verifier judges and
+    # repairs).
     Assert-DefenseClawCanonicalPathAcl -Path $Path -Expected $security
 }
 
