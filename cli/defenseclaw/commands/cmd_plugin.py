@@ -34,6 +34,7 @@ import click
 
 from defenseclaw import connector_paths
 from defenseclaw.commands import compute_verdict as _compute_verdict
+from defenseclaw.commands._scan_ui import record_scan as _record_scan
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.inventory.plugin_directories import (
     PluginInstallClaims,
@@ -431,8 +432,7 @@ def _scan_one_plugin_dir(
         click.echo(f"error: scan failed: {exc}", err=True)
         raise SystemExit(1)
 
-    if app.logger:
-        app.logger.log_scan(result)
+    _record_scan(app.logger, result)
 
     if as_json:
         # Preserve the ScanResult keys automation already parses, while adding
@@ -1112,8 +1112,7 @@ def _scan_all_plugins(
                 if not as_json:
                     click.echo(f"  error: scan failed for {pid!r}: {exc}", err=True)
                 continue
-            if app.logger:
-                app.logger.log_scan(result)
+            _record_scan(app.logger, result)
             total_ms += int(result.duration.total_seconds() * 1000)
             if as_json:
                 payload = json.loads(result.to_json())
