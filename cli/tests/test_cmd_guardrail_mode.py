@@ -45,6 +45,21 @@ def app(tmp_path, monkeypatch):
     return ctx
 
 
+@pytest.fixture(autouse=True)
+def version_checks(monkeypatch):
+    """Record action-mode version probes; every connector verifies by default."""
+    calls: list[str] = []
+    verdicts: dict[str, bool] = {}
+
+    def check(connector, *, mode, **_k):
+        assert mode == "action"
+        calls.append(connector)
+        return verdicts.get(connector, True)
+
+    monkeypatch.setattr(cmd_setup, "_check_connector_version_supported_for_setup", check)
+    return calls, verdicts
+
+
 @pytest.fixture
 def restarts(monkeypatch):
     calls: list[str] = []
@@ -151,3 +166,25 @@ def test_usage_errors(app, args) -> None:
     result = CliRunner().invoke(cmd_guardrail.guardrail, ["mode", *args], obj=app)
     assert result.exit_code == 2
     app.cfg.save.assert_not_called()
+
+
+def test_action_switch_probes_versions_and_refuses_an_unverified_connector(app, restarts, version_checks) -> None:
+    # GAP-1340/GAP-1362: after an observe-mode quickstart no agent version is
+    # on record, so the action-mode gateway refused to start. The switch now
+    # probes first and changes nothing when a connector can't be verified.
+    calls, verdicts = version_checks
+    verdicts["codex"] = False
+    result, payload = _run(app, "action", "--json")
+    assert result.exit_code == 1 and payload["ok"] is False and payload["changed"] is False
+    assert "Nothing was changed" in payload["message"] and "Codex" in payload["message"]
+    assert calls == ["codex"] and restarts == []
+    assert app.cfg.guardrail.mode == "observe"
+    app.cfg.save.assert_not_called()
+
+    verdicts["codex"] = True
+    result, payload = _run(app, "action", "--json")
+    assert result.exit_code == 0 and payload["gateway"] == "restarted"
+    assert calls == ["codex", "codex"]
+    # Switching back to observe needs no probe.
+    _run(app, "observe", "--json")
+    assert calls == ["codex", "codex"]
