@@ -6,6 +6,7 @@
 package connector
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
@@ -372,5 +373,39 @@ func TestRenameAtomicTransformBoundFileStopsAtRetryBound(t *testing.T) {
 	}
 	if calls != atomicFileRenameMaxAttempts {
 		t.Fatalf("calls=%d, want %d", calls, atomicFileRenameMaxAttempts)
+	}
+}
+
+// A standard user can set FILE_ATTRIBUTE_READONLY on their own agent file.
+// A private publication over it failed with access denied, so the guardian
+// never restored DefenseClaw's emptied Hermes and Kiro registrations
+// (GAP-1439). It replaces the file, and the read-only attribute with it.
+func TestAtomicWritePrivatePublicationReplacesReadOnlyDestination(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "shell-hooks-allowlist.json")
+	if err := atomicWriteFile(path, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	pathPtr, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attributes, err := windows.GetFileAttributes(pathPtr); err != nil ||
+		attributes&windows.FILE_ATTRIBUTE_READONLY == 0 {
+		t.Fatalf("fixture is not read-only: attributes=%#x err=%v", attributes, err)
+	}
+	want := []byte("{\"approvals\":[]}\n")
+	if err := atomicWriteFile(path, want, 0o600); err != nil {
+		t.Fatalf("replace read-only destination: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(got, want) {
+		t.Fatalf("published content=%q err=%v, want %q", got, err, want)
+	}
+	attributes, err := windows.GetFileAttributes(pathPtr)
+	if err != nil || attributes&windows.FILE_ATTRIBUTE_READONLY != 0 {
+		t.Fatalf("published file attributes=%#x err=%v, want writable", attributes, err)
 	}
 }

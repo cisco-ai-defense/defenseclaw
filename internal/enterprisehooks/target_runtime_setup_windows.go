@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -165,6 +166,13 @@ const (
 var windowsManagedRuntimeCleanupOwnedLocks = map[string]struct{}{
 	".hermes-lifecycle.lock":       {},
 	".hook-api-token-publish.lock": {},
+}
+
+// windowsManagedRuntimeCleanupPrivateRootFiles are the root leaves the
+// connector code writes as the account with the owner-private descriptor of
+// a connector backup record (full control for the account and LocalSystem).
+var windowsManagedRuntimeCleanupPrivateRootFiles = map[string]struct{}{
+	"kiro-created-dirs.json": {},
 }
 
 type windowsManagedRuntimeCleanupSpec struct {
@@ -406,6 +414,8 @@ func CleanupWindowsManagedRuntimeRoots(
 	// planned profile roots; stage and finalize still require the planned
 	// digest.
 	rowDrift := !strings.EqualFold(strings.TrimSpace(manifestSHA256), request.Plan.ManifestSHA256)
+	request, manifest, vanished := dropVanishedWindowsManagedRuntimeProfiles(request, manifest)
+	rowDrift = rowDrift || len(vanished) > 0
 	claimsByRoot, err := validateWindowsManagedRuntimeRequestRows(request, manifest, false, rowDrift)
 	if err != nil {
 		if rowDrift {
@@ -417,7 +427,8 @@ func CleanupWindowsManagedRuntimeRoots(
 	if err != nil {
 		return nil, err
 	}
-	claims := make([]WindowsManagedRuntimeClaim, 0, len(request.Plan.Roots))
+	claims := make([]WindowsManagedRuntimeClaim, 0, len(request.Plan.Roots)+len(vanished))
+	claims = append(claims, vanished...)
 	err = windowsManagedRuntimeSetupPrivilege(func() error {
 		for _, rootPlan := range request.Plan.Roots {
 			key := windowsManagedRuntimeRootKey(rootPlan.SID, rootPlan.UserHome)
@@ -432,6 +443,57 @@ func CleanupWindowsManagedRuntimeRoots(
 		return nil
 	})
 	return claims, err
+}
+
+// dropVanishedWindowsManagedRuntimeProfiles takes out of a rollback cleanup
+// each planned root whose profile folder no longer exists: the account was
+// deleted with its profile while the install ran, so nothing of it is left
+// to clean. Validating it failed on the missing folder and kept the
+// transaction pending with the services stopped, and no Setup could recover
+// it (GAP-1293). Each such root is reported as its baseline.
+func dropVanishedWindowsManagedRuntimeProfiles(
+	request WindowsManagedRuntimeRequest,
+	manifest Manifest,
+) (WindowsManagedRuntimeRequest, Manifest, []WindowsManagedRuntimeClaim) {
+	gone := map[string]bool{}
+	var vanished []WindowsManagedRuntimeClaim
+	roots := make([]WindowsManagedRuntimeRootPlan, 0, len(request.Plan.Roots))
+	for _, root := range request.Plan.Roots {
+		home := filepath.Clean(strings.TrimSpace(root.UserHome))
+		if _, err := os.Lstat(home); filepath.IsAbs(home) && errors.Is(err, os.ErrNotExist) {
+			gone[strings.ToUpper(home)] = true
+			claim := windowsManagedRuntimeClaimFromPlan(root)
+			claim.State = windowsManagedRuntimeStateAbsent
+			if root.Baseline == windowsManagedRuntimeBaselineCanonical {
+				// An existing baseline is never changed by cleanup.
+				claim.State = windowsManagedRuntimeStateCanonical
+				claim.Identity = root.BaselineIdentity
+			}
+			vanished = append(vanished, claim)
+			continue
+		}
+		roots = append(roots, root)
+	}
+	if len(vanished) == 0 {
+		return request, manifest, nil
+	}
+	isGone := func(home string) bool { return gone[strings.ToUpper(filepath.Clean(strings.TrimSpace(home)))] }
+	request.Plan.Roots = roots
+	claims := make([]WindowsManagedRuntimeClaim, 0, len(request.Claims))
+	for _, claim := range request.Claims {
+		if !isGone(claim.UserHome) {
+			claims = append(claims, claim)
+		}
+	}
+	request.Claims = claims
+	targets := make([]ManifestTarget, 0, len(manifest.Targets))
+	for _, row := range manifest.Targets {
+		if !isGone(row.UserHome) {
+			targets = append(targets, row)
+		}
+	}
+	manifest.Targets = targets
+	return request, manifest, vanished
 }
 
 func windowsManagedRuntimeCleanupClaimReportable(claim WindowsManagedRuntimeClaim) bool {
@@ -531,6 +593,9 @@ func windowsManagedRuntimeCleanupSpecs(plan WindowsManagedRuntimePlan, manifest 
 			if _, lock := windowsManagedRuntimeCleanupOwnedLocks[leaf]; lock {
 				spec.rootFiles[leaf] = windowsManagedRuntimeCleanupOwnedLockFile
 			}
+			if _, private := windowsManagedRuntimeCleanupPrivateRootFiles[leaf]; private {
+				spec.rootFiles[leaf] = windowsManagedRuntimeCleanupConnectorBackupFile
+			}
 		}
 		for _, leaf := range files.hooks {
 			spec.hookFiles[leaf] = windowsManagedRuntimeCleanupHookFile
@@ -620,6 +685,10 @@ var windowsManagedRuntimeCleanupConnectors = map[string]windowsManagedRuntimeCle
 		generation: true,
 	},
 	"kiro": {
+		// kiro-created-dirs.json lists the Kiro folders setup created
+		// (connector.kiroCreatedDirsFile). Unlisted, it kept every failed
+		// first install's root aside as .defenseclaw.rollback-<id> (GAP-1287).
+		root:       []string{"kiro-created-dirs.json"},
 		hooks:      windowsManagedRuntimeRuntimeLeaves("kiro", append([]string{"kiro-hook.sh"}, windowsManagedRuntimeSharedHookScripts...)...),
 		backups:    []string{"hooks-global.json", "agent-defenseclaw.json", "settings-cli.json"},
 		generation: true,
