@@ -160,23 +160,25 @@ class RecoveryPublicationError(OSError):
         super().__init__(code)
 
 
-def _prefetch_audit_db(path: str | os.PathLike[str], deadline: float) -> None:
-    """Read the file once, in order, until the deadline.
+def _prefetch_audit_db(path: str | os.PathLike[str], deadline: float) -> bool:
+    """Read the file once, in order, until the deadline; True if it reached the end.
 
     quick_check visits pages in b-tree order, which is random on disk. On a
-    cold page cache each page is a separate small read, so a few hundred MiB
-    took 30 s or more on a cloud disk (SWEEP-10), while one sequential read of
-    the same file took under a second. Warming the cache first lets the walk
-    finish inside the budget. Errors are ignored: the walk reports them.
+    cold page cache each page is a separate small read, so a 314 MiB file took
+    29-47 s on a cloud disk (SWEEP-10), while one sequential read of the same
+    file took under a second. Warming the cache first lets the walk finish
+    inside the budget. A read error returns True: the walk then reports it.
     """
 
     buffer = bytearray(_AUDIT_PREFETCH_CHUNK_BYTES)
     try:
         with open(path, "rb", buffering=0) as handle:
-            while time.monotonic() < deadline and handle.readinto(buffer):
-                pass
+            while handle.readinto(buffer):
+                if time.monotonic() >= deadline:
+                    return False
     except OSError:
-        return
+        return True
+    return True
 
 
 def _bounded_quick_check(connection: sqlite3.Connection, deadline: float) -> tuple[tuple[object, ...], bool]:
@@ -253,8 +255,12 @@ def inspect_audit_db(
         uri = Path(os.path.abspath(plan.target)).as_uri() + "?" + urllib.parse.urlencode(
             {"mode": "ro"}
         )
-        deadline = time.monotonic() + _AUDIT_INTEGRITY_TIME_BUDGET_SECONDS
-        _prefetch_audit_db(plan.target, deadline)
+        started = time.monotonic()
+        deadline = started + _AUDIT_INTEGRITY_TIME_BUDGET_SECONDS
+        # A file that cannot even be read in order within half the budget
+        # would not be walked in time either, and SQLite before 3.44 cannot
+        # interrupt the walk at all, so such a file is reported as unverified.
+        warmed = _prefetch_audit_db(plan.target, started + _AUDIT_INTEGRITY_TIME_BUDGET_SECONDS / 2)
         connection = sqlite3.connect(uri, uri=True, timeout=0.1)
         try:
             connection.execute("PRAGMA query_only=ON")
@@ -263,7 +269,10 @@ def inspect_audit_db(
             freelist = int(connection.execute("PRAGMA freelist_count").fetchone()[0] or 0)
             file_bytes = page_count * page_size
             freelist_bytes = freelist * page_size
-            quick_check, integrity_scanned = _bounded_quick_check(connection, deadline)
+            quick_check: tuple[object, ...] = ("ok",)
+            integrity_scanned = False
+            if warmed:
+                quick_check, integrity_scanned = _bounded_quick_check(connection, deadline)
             tables = {
                 str(row[0])
                 for row in connection.execute(

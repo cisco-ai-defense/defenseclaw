@@ -241,6 +241,28 @@ def test_audit_db_inspection_stops_a_slow_walk_at_the_time_budget(
     assert health.file_bytes > 0
 
 
+def test_audit_db_inspection_skips_the_walk_when_the_file_cannot_be_read_in_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # SWEEP-10: SQLite before 3.44 cannot interrupt the walk, so a file too
+    # large to read in order within half the budget is not walked at all.
+    data_dir = _private_data_dir(tmp_path)
+    target = data_dir / "audit.db"
+    plan = plan_missing_audit_db(target, data_dir=data_dir)
+    apply_audit_db_recovery(plan, approved=True, unattended=True)
+
+    def no_walk(*_args, **_kwargs):
+        raise AssertionError("quick_check must not start")
+
+    monkeypatch.setattr(recovery, "_prefetch_audit_db", lambda *_a, **_k: False)
+    monkeypatch.setattr(recovery, "_bounded_quick_check", no_walk)
+
+    health = inspect_audit_db(target, data_dir=data_dir)
+
+    assert health.status is AuditDBHealthStatus.INTEGRITY_UNVERIFIED
+    assert health.integrity_scanned is False
+
+
 def test_audit_db_apply_creates_verified_private_schema(tmp_path: Path) -> None:
     data_dir = _private_data_dir(tmp_path)
     target = data_dir / "audit.db"
