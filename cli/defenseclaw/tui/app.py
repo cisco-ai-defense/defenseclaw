@@ -4266,13 +4266,22 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                     self.command_label = label
                     self._command_started_at = time.monotonic()
                     self.commands_run += 1
-                    self.activity_model.add_entry(event.text, masked_argv=masked_argv)
-                    # event.text is the parsed command label (argv joined
-                    # with spaces); arguments routinely contain brackets
-                    # (e.g. ``defenseclaw scan skill[0]``). Escape so the
+                    # Activity, the drawer and Save output show the redacted
+                    # argv, as the confirm dialog does (GAP-1889); Rerun keeps
+                    # the real command and hidden inputs in memory.
+                    shown = " ".join(masked_argv)
+                    self.activity_model.add_entry(
+                        shown,
+                        masked_argv=masked_argv,
+                        rerun_command=event.text,
+                        rerun_stdin=stdin_input,
+                        rerun_env=tuple(dict(env_overrides).items()) if env_overrides else (),
+                    )
+                    # The command text routinely contains brackets (e.g.
+                    # ``defenseclaw scan skill[0]``). Escape so the
                     # markup-parsed RichLog never crashes.
                     self._write_activity(
-                        f"[#FBBF24]running[/] {rich_escape(event.text)}"
+                        f"[#FBBF24]running[/] {rich_escape(shown)}"
                     )
                     # The strip is the single source of truth for command
                     # lifecycle. Status text shows the ambient hint so we
@@ -11428,7 +11437,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             if sent:
                 return True
         if key == "!":
-            last = self.activity_model.last_command
+            entry = self.activity_model.entries[-1] if self.activity_model.entries else None
+            last = (entry.rerun_command or entry.command) if entry is not None else ""
             if not last:
                 self._set_status("No Activity command to rerun.")
                 return True
@@ -11437,11 +11447,19 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             except CommandLineError as exc:
                 self._set_status(f"Cannot rerun command: {exc}")
                 return True
+            if entry is not None and (entry.rerun_stdin is not None or entry.rerun_env):
+                parsed = replace(parsed, stdin_input=entry.rerun_stdin, env_overrides=entry.rerun_env)
             if parsed.needs_preview:
                 self.run_worker(self._confirm_and_run_parsed(parsed), exclusive=False, thread=False)
             else:
                 self.run_worker(
-                    self._run_command(parsed.binary, parsed.args, display_name=parsed.display_name),
+                    self._run_command(
+                        parsed.binary,
+                        parsed.args,
+                        display_name=parsed.display_name,
+                        stdin_input=parsed.stdin_input,
+                        env_overrides=parsed.env_overrides,
+                    ),
                     exclusive=False,
                     thread=False,
                 )

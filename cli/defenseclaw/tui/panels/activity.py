@@ -142,6 +142,11 @@ class ActivityEntry:
     restart_completed: bool = False
     doctor_cache_refreshed: bool = False
     suggested_next_action: str = ""
+    # ``command`` is the redacted text every view shows (GAP-1889). Rerun
+    # needs the real command and its hidden inputs; they stay in memory only.
+    rerun_command: str = field(default="", repr=False)
+    rerun_stdin: str | None = field(default=None, repr=False)
+    rerun_env: tuple[tuple[str, str], ...] = field(default=(), repr=False)
 
     @property
     def status_label(self) -> str:
@@ -224,12 +229,18 @@ class ActivityPanelModel:
         *,
         started_at: datetime | None = None,
         masked_argv: tuple[str, ...] | None = None,
+        rerun_command: str = "",
+        rerun_stdin: str | None = None,
+        rerun_env: tuple[tuple[str, str], ...] = (),
     ) -> None:
         self.entries.append(
             ActivityEntry(
                 command=command,
                 started_at=started_at or datetime.now(timezone.utc),
                 masked_argv=tuple(masked_argv) if masked_argv else (),
+                rerun_command=rerun_command,
+                rerun_stdin=rerun_stdin,
+                rerun_env=tuple(rerun_env),
             )
         )
         self.cursor = len(self.entries) - 1

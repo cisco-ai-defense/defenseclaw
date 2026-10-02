@@ -755,26 +755,38 @@ class Store:
         )
         return [self._summary_row_to_event(r) for r in cur.fetchall()]
 
-    def list_block_event_summaries(self, limit: int = 500) -> list[Event]:
+    def list_block_event_summaries(self, limit: int = 500, *, after_rowid: int | None = None) -> list[Event]:
         """List the newest block/deny rows from the whole trail.
 
         The Audit panel loads the newest 500 rows; with AI discovery on, those
         are minutes of discovery and OTLP rows, so the Blocks filter missed
         every older block (GAP-1355). This query reaches past them.
+
+        ``after_rowid`` reads only rows added after that rowid: the filter
+        walks every row, which on a huge audit.db costs real CPU (GAP-1816).
         """
 
+        table = "audit_events"
+        scope = ""
+        params: tuple[int, ...] = (_SUMMARY_DETAILS_BYTES, max(limit, 1))
+        if after_rowid is not None:
+            # NOT INDEXED keeps SQLite on the rowid range instead of a
+            # timestamp-index walk over the whole table.
+            table = "audit_events NOT INDEXED"
+            scope = "rowid > ? AND "
+            params = (_SUMMARY_DETAILS_BYTES, int(after_rowid), max(limit, 1))
         cur = self.db.execute(
             f"""SELECT id, timestamp, action, target, actor,
                       substr(COALESCE(details, ''), 1, ?) AS details,
                       severity, run_id, {self._summary_structured_sql()} AS structured_json, connector, enforced
-               FROM audit_events
-               WHERE COALESCE(enforced, 0) = 1
+               FROM {table}
+               WHERE {scope}(COALESCE(enforced, 0) = 1
                   OR (action = 'connector-hook'
                       AND (' ' || COALESCE(details, '')) LIKE '% action=block%')
                   OR action LIKE '%block%' OR action LIKE '%deny%'
-                  OR action LIKE '%quarantine%' OR action LIKE '%reject%'
+                  OR action LIKE '%quarantine%' OR action LIKE '%reject%')
                ORDER BY timestamp DESC, rowid DESC LIMIT ?""",
-            (_SUMMARY_DETAILS_BYTES, max(limit, 1)),
+            params,
         )
         return [self._summary_row_to_event(r) for r in cur.fetchall()]
 

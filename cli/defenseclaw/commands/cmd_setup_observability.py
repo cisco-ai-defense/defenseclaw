@@ -131,7 +131,8 @@ def observability() -> None:
 @click.option("--token", "token_value", default=None,
               envvar="DEFENSECLAW_SETUP_OBSERVABILITY_TOKEN",
               show_envvar=True,
-              help="Secret value to persist under the preset's token_env in ~/.defenseclaw/.env")
+              help="Secret value to persist under the preset's token_env in ~/.defenseclaw/.env."
+                   " Command-line values are visible to other local users (ps); prefer the env var.")
 @click.option("--enabled/--disabled", "enabled", default=True,
               help="Mark destination enabled (default) or disabled")
 @click.option("--dry-run", is_flag=True, help="Preview YAML/dotenv changes without writing")

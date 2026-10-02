@@ -821,7 +821,12 @@ def migrate_llm(app: AppContext, dry_run: bool, no_backup: bool) -> None:
 @click.option(
     "--api-key",
     default=None,
-    help="Secret value to persist into ~/.defenseclaw/.env under --api-key-env.",
+    envvar="DEFENSECLAW_SETUP_LLM_API_KEY",
+    show_envvar=True,
+    help=(
+        "Secret value to persist into ~/.defenseclaw/.env under --api-key-env."
+        " Command-line values are visible to other local users (ps); prefer the env var."
+    ),
 )
 @click.option("--base-url", default=None, help="Provider base URL override.")
 @click.option("--timeout", type=int, default=None, help="LLM timeout in seconds.")
@@ -4307,7 +4312,16 @@ def rotate_token_cmd(app: AppContext, connector: str | None, no_restart: bool, y
 @click.option("--host", default=None, help="Gateway host")
 @click.option("--port", type=int, default=None, help="Gateway WebSocket port")
 @click.option("--api-port", type=int, default=None, help="Sidecar REST API port")
-@click.option("--token", default=None, help="Gateway auth token")
+@click.option(
+    "--token",
+    default=None,
+    envvar="DEFENSECLAW_SETUP_GATEWAY_TOKEN",
+    show_envvar=True,
+    help=(
+        "Gateway auth token."
+        " Command-line values are visible to other local users (ps); prefer the env var."
+    ),
+)
 @click.option("--ssm-param", default=None, help="AWS SSM parameter name for token")
 @click.option("--ssm-region", default=None, help="AWS region for SSM")
 @click.option("--ssm-profile", default=None, help="AWS CLI profile for SSM")
@@ -15789,9 +15803,27 @@ def _native_windows_local_splunk() -> bool:
     help="Enable remote Splunk Enterprise via HEC endpoint + token",
 )
 @click.option("--realm", default=None, help="Splunk O11y realm (e.g. us1, us0, eu0)")
-@click.option("--access-token", default=None, help="Splunk O11y access token")
+@click.option(
+    "--access-token",
+    default=None,
+    envvar="DEFENSECLAW_SETUP_SPLUNK_ACCESS_TOKEN",
+    show_envvar=True,
+    help=(
+        "Splunk O11y access token."
+        " Command-line values are visible to other local users (ps); prefer the env var."
+    ),
+)
 @click.option("--hec-endpoint", default=None, help="Remote Splunk Enterprise HEC endpoint")
-@click.option("--hec-token", default=None, help="Remote Splunk Enterprise HEC token")
+@click.option(
+    "--hec-token",
+    default=None,
+    envvar="DEFENSECLAW_SETUP_SPLUNK_HEC_TOKEN",
+    show_envvar=True,
+    help=(
+        "Remote Splunk Enterprise HEC token."
+        " Command-line values are visible to other local users (ps); prefer the env var."
+    ),
+)
 @click.option("--app-name", default=None, help="OTEL service name (default: defenseclaw)")
 @click.option(
     "--index",
