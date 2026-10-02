@@ -250,14 +250,16 @@ def _ensure_enabled_hook_judge_strategies(gc) -> bool:
 def _save_and_restart(app: AppContext, gc, *, restart: bool, action: str) -> None:
     try:
         app.cfg.save()
-        ux.ok(
-            f"Config saved (guardrail.judge.hook_connectors: "
-            f"{_gate_label(gc.judge.hook_connectors)})",
-            indent="  ",
-        )
     except OSError as exc:
         ux.err(f"Failed to save config: {exc}", indent="  ")
         raise click.Abort() from exc
+    # Outside the try: an output error (a closed pipe) is not a save failure
+    # (GAP-1313).
+    ux.ok(
+        f"Config saved (guardrail.judge.hook_connectors: "
+        f"{_gate_label(gc.judge.hook_connectors)})",
+        indent="  ",
+    )
 
     _warn_if_inert(app, gc)
 
