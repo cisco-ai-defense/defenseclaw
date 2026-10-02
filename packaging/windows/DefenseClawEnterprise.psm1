@@ -183,6 +183,11 @@ $script:DefenseClawRecoveryActivationDeferred = $false
 # per-user DefenseClaw folder when the managed-hook teardown finalizes
 # (Invoke-DefenseClawGatewayCommand tells the helper). Set per lifecycle run.
 $script:DefenseClawUninstallPurgeUserState = $false
+# Standalone: the protected DefenseClaw-PowerShell-<32 hex> temp folder the
+# launching CLI gave this run, before install-enterprise.ps1 moved TEMP into
+# its bootstrap folder (GAP-1853). The CLI removes it when PowerShell exits,
+# so the stale-temp sweep must keep it. Set per lifecycle run.
+$script:DefenseClawLauncherTemp = ''
 
 function Set-DefenseClawEnterpriseProfile {
     param(
@@ -9378,15 +9383,22 @@ function Remove-DefenseClawEmptyClaudeManagedSettingsFolders {
 # An elevated enterprise CLI run gives PowerShell a protected temp folder,
 # ProgramData\DefenseClaw-PowerShell-<32 hex>, and removes it when PowerShell
 # exits; a run stopped before that leaves it (GAP-1734). A purge removes every
-# such folder except the one this run uses, and writes "path: reason" for
-# each one it kept.
+# such folder except the ones this run uses (its TEMP and the launching CLI's
+# folder, GAP-1853), and writes "path: reason" for each one it kept.
 function Remove-DefenseClawStalePowerShellTempDirectories {
     param([Parameter(Mandatory)][string]$ProgramData)
-    $own = ([string]$env:TEMP).TrimEnd('\') + '\'
+    $inUse = @(
+        @([string]$env:TEMP, [string]$script:DefenseClawLauncherTemp) |
+            Microsoft.PowerShell.Core\Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+            Microsoft.PowerShell.Core\ForEach-Object { $_.TrimEnd('\') + '\' }
+    )
     foreach ($item in @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $ProgramData -Force -Directory -Filter 'DefenseClaw-PowerShell-*' -ErrorAction SilentlyContinue)) {
         $path = [string]$item.FullName
+        $prefix = $path.TrimEnd('\') + '\'
         if ([string]$item.Name -cnotmatch '^DefenseClaw-PowerShell-[a-f0-9]{32}$' -or
-            $own.StartsWith($path.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) {
+            @($inUse | Microsoft.PowerShell.Core\Where-Object {
+                $_.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)
+            }).Count -gt 0) {
             continue
         }
         try {
@@ -24247,9 +24259,13 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         [string]$TrustMode = 'Authenticode',
         [string]$PayloadManifest,
         [string[]]$AllowedSigners = @(),
-        [string]$ProductVersion
+        [string]$ProductVersion,
+        # Standalone: the launching CLI's own protected PowerShell temp folder
+        # (install-enterprise.ps1 passes the TEMP it was started with).
+        [string]$LauncherTemp
     )
     Set-DefenseClawEnterpriseProfile -EnterpriseProfile $EnterpriseProfile
+    $script:DefenseClawLauncherTemp = [string]$LauncherTemp
     $script:DefenseClawUninstallPurgeUserState = (
         $Action -eq 'Uninstall' -and [bool]$Purge -and (Test-DefenseClawStandaloneProfile)
     )

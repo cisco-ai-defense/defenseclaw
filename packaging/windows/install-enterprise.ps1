@@ -3375,6 +3375,9 @@ try {
         $arguments['PayloadManifest'] = $PayloadManifest
         $arguments['AllowedSigners'] = [string[]]$bootstrapAllowedSigners
         $arguments['ProductVersion'] = $ProductVersion
+        # The launching CLI's protected temp folder, which the purge's stale
+        # temp sweep must keep (GAP-1853); TEMP now points at the bootstrap.
+        $arguments['LauncherTemp'] = [string]$bootstrapEnvironment.OriginalEnvironment['TEMP']
     }
     $result = DefenseClawEnterprise\Invoke-DefenseClawEnterpriseLifecycle @arguments
     if ($null -ne $result.PSObject.Properties['ok'] -and -not [bool]$result.ok) {
