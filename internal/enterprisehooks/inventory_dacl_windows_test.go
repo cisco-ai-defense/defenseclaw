@@ -38,8 +38,8 @@ func TestInventoryDACLSkipsKiroWhereTheGuardianOwnsIt(t *testing.T) {
 }
 
 // GAP-1863: every inventory folder that holds an enrolled per-user
-// connector's hook config (Amp and OpenCode under .config, Antigravity under
-// .gemini) is guardian-owned for that user, so the enumerator does not grant
+// connector's hook config or managed footprint (Amp and OpenCode under
+// .config, Antigravity under .gemini) is guardian-owned for that user, so the enumerator does not grant
 // a folder the next ensure resets to its protected DACL.
 func TestInventoryDACLSkipsEveryPerUserHookPathFolder(t *testing.T) {
 	home := t.TempDir()
@@ -55,10 +55,14 @@ func TestInventoryDACLSkipsEveryPerUserHookPathFolder(t *testing.T) {
 		}
 		var paths []string
 		if err := connector.WithUserHomeDir(home, func() error {
-			paths = connector.HookConfigPathsForConnector(conn, connector.SetupOpts{
-				DataDir:           filepath.Join(home, ".defenseclaw"),
-				ManagedEnterprise: true,
-			})
+			setup := connector.SetupOpts{DataDir: filepath.Join(home, ".defenseclaw"), ManagedEnterprise: true}
+			paths = connector.HookConfigPathsForConnector(conn, setup)
+			if provider, ok := conn.(connector.AgentPathProvider); ok {
+				footprint := provider.AgentPaths(setup)
+				for _, group := range [][]string{footprint.PatchedFiles, footprint.GeneratedFiles, footprint.GeneratedExecutables, footprint.CreatedDirs} {
+					paths = append(paths, group...)
+				}
+			}
 			return nil
 		}); err != nil {
 			t.Fatal(err)
@@ -74,13 +78,43 @@ func TestInventoryDACLSkipsEveryPerUserHookPathFolder(t *testing.T) {
 				continue
 			}
 			if _, ok := owned[first]; !ok {
-				t.Errorf("%s hook config %s is under granted folder %s, which is not guardian-owned for it", name, rel, first)
+				t.Errorf("%s managed path %s is under granted folder %s, which is not guardian-owned for it", name, rel, first)
 			}
 		}
 	}
 	owned := inventoryDACLGuardianOwnedByHome(Manifest{Targets: []ManifestTarget{{UserHome: home, Connector: "codex"}}})
 	if len(owned) != 0 {
 		t.Fatalf("a codex-only home owns %v", owned)
+	}
+}
+
+// GAP-1863: Windows splits the read grant into a folder ACE and an
+// inherit-only ACE, and the next pass must see it as already present.
+func TestEnsureInventoryReadACEIsIdempotent(t *testing.T) {
+	sid, err := windows.CreateWellKnownSid(windows.WinLocalServiceSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(t.TempDir(), ".claude")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for pass, want := range []inventoryDACLResult{inventoryDACLGranted, inventoryDACLAlreadyPresent, inventoryDACLAlreadyPresent} {
+		result, err := ensureInventoryReadACE(dir, sid)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result != want {
+			t.Fatalf("pass %d result = %v, want %v", pass, result, want)
+		}
+	}
+	// A subfolder covered by the inherited grant is already present too.
+	child := filepath.Join(dir, "skills")
+	if err := os.Mkdir(child, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if result, err := ensureInventoryReadACE(child, sid); err != nil || result != inventoryDACLAlreadyPresent {
+		t.Fatalf("child result = %v, %v; want already present", result, err)
 	}
 }
 
