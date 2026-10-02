@@ -61,3 +61,16 @@ def test_status_reads_fail_mode_without_starting_the_codex_app_server(monkeypatc
     result = cmd_status._effective_status_fail_mode(SimpleNamespace(), "codex")
     assert result["effective"] == "closed"
     assert calls == [("codex", False)]
+
+
+def test_docs_say_gateway_start_runs_the_codex_check_on_windows():
+    # GAP-1942: gateway start/restart sets up the Codex connector, which on
+    # Windows starts the Codex app-server (OpenAI and the model provider);
+    # the CLI reference said only doctor reaches out.
+    from pathlib import Path
+
+    docs = Path(__file__).resolve().parents[2] / "docs-site" / "content" / "docs"
+    cli = " ".join((docs / "reference" / "cli.mdx").read_text(encoding="utf-8").split())
+    assert "so `defenseclaw-gateway start` and `restart`, Codex setup, and the installers" in cli
+    codex = " ".join((docs / "connectors" / "codex.mdx").read_text(encoding="utf-8").split())
+    assert "Each gateway start or restart with the Codex connector enabled runs Codex's app-server once" in codex
