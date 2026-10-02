@@ -173,6 +173,7 @@ def quickstart_cmd(
     connector_source: dict[str, str] = {}
     if agent_name:
         connector = agent_name
+        _refuse_roster_narrowing(cfg_mod, connector, mode)
     else:
         data_dir = str(cfg_mod.default_data_path())
         picked_path = os.path.join(data_dir, "picked_connector")
@@ -284,6 +285,34 @@ def _require_operational_success(report, *, gateway_requested: bool) -> None:
                 step.status = "fail"
 
     report.status = _rollup_status(report.setup, report.readiness)
+
+
+def _refuse_roster_narrowing(cfg_mod, connector: str, mode: str | None = None) -> None:
+    """Stop ``quickstart --connector X`` from silently dropping other connectors.
+
+    First-run setup rebuilds the roster around the one connector it is
+    given, so on an install that already guards other connectors quickstart
+    would leave their hooks installed while the gateway stops enforcing them
+    (GAP-1078). Refuse and point at the commands that keep (or deliberately
+    change) the roster instead.
+    """
+    from defenseclaw import connector_paths
+
+    wanted = connector_paths.normalize(connector)
+    configured = list(dict.fromkeys(connector_paths.normalize(c) for c in _configured_quickstart_connectors(cfg_mod)))
+    if not [c for c in configured if c and c != wanted]:
+        return
+    slug = "claude-code" if wanted == "claudecode" else wanted
+    mode_flag = f" --mode {mode}" if mode else ""
+    click.echo(
+        f"  \u2717 This install already guards: {', '.join(configured)}.\n"
+        "    Quickstart configures one connector and would stop guarding the others.\n"
+        f"    Add or reconfigure {wanted} and keep the rest: defenseclaw setup {slug} --yes{mode_flag}\n"
+        f"    Guard only {wanted} and remove the others: defenseclaw setup {slug} --replace{mode_flag}\n"
+        "    Change the whole set: defenseclaw init",
+        err=True,
+    )
+    sys.exit(2)
 
 
 def _configured_quickstart_connectors(cfg_mod) -> list[str]:

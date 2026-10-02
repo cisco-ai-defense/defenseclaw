@@ -341,6 +341,29 @@ class FreshMigrationCursorTests(unittest.TestCase):
         self.assertEqual(preserved.guardrail.connector, "claudecode")
         self.assertEqual(preserved.guardrail.mode, "action")
 
+    def test_no_connector_fresh_first_run_persists_no_active_connector(self):
+        # GAP-1056: init --connector none on a fresh home left the OpenClaw
+        # default active, so status listed it and uninstall planned its teardown.
+        from defenseclaw.bootstrap import FirstRunOptions, run_first_run
+        from defenseclaw.config import load
+
+        data_dir = os.path.join(self._tmp_root, "none-fresh")
+        with patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}):
+            report = run_first_run(
+                FirstRunOptions(
+                    connector="none",
+                    profile="observe",
+                    skip_install=True,
+                    start_gateway=False,
+                    verify=False,
+                )
+            )
+            cfg = load()
+
+        self.assertNotEqual(report.status, "needs_attention")
+        self.assertFalse(cfg.has_connector_configured())
+        self.assertEqual(cfg.active_connectors(), [])
+
     def test_no_connector_first_run_preserves_unloadable_existing_config(self):
         from defenseclaw.bootstrap import FirstRunOptions, run_first_run
 

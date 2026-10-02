@@ -100,6 +100,9 @@ def test_noninteractive_quickstart_adds_newly_detected_connectors_safely() -> No
     no_tty_setup = quickstart.index(setup_guard, no_tty_init)
     setup_failure = quickstart[no_tty_setup : quickstart.index("\n\t\t\tfi; \\", no_tty_setup)]
     assert "Could not add newly detected connectors" in setup_failure
+    # GAP-1148: name the re-run, not an unrelated discovery command.
+    assert "defenseclaw setup --add-detected --yes" in setup_failure
+    assert "agent discover --refresh" not in quickstart
     assert "exit 1;" in setup_failure
 
 

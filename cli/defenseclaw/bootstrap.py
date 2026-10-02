@@ -650,6 +650,14 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
 
         if connector != "none":
             _apply_first_run_choices(cfg, options, connector, profile, scanner_mode)
+        elif new_config:
+            # A fresh config defaults to OpenClaw. Persist the explicit
+            # "no connector" markers (the state `setup remove --force` leaves)
+            # so status and uninstall do not treat an uninstalled OpenClaw as
+            # the active connector (GAP-1056).
+            cfg.claw.mode = ""
+            cfg.guardrail.connector = ""
+            cfg.guardrail.connectors = {}
     except BaseException as exc:
         rollback_error = _restore_first_run_selection_transaction(transaction_app, setup_snapshot)
         if rollback_error:

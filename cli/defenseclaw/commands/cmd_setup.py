@@ -5147,26 +5147,45 @@ def _windows_opencode_requires_exact_selection(connector: str) -> bool:
     return normalize_connector(connector) == "opencode" and platform_support.host_os() == "windows"
 
 
+def _protected_selection_targets(connectors: list[str] | tuple[str, ...]) -> tuple[str, ...]:
+    """Connectors whose executable setup must verify on this OS."""
+
+    host_os = platform_support.host_os()
+    if host_os not in {"windows", "darwin"}:
+        return ()
+    from defenseclaw.agent_selection import setup_agent_selection_connectors
+
+    selected = setup_agent_selection_connectors(connectors)
+    if host_os == "darwin":
+        selected = tuple(name for name in selected if name == "openhands")
+    return selected
+
+
 def _record_windows_setup_agent_selections(
     data_dir: str | os.PathLike[str] | None,
     connectors: list[str] | tuple[str, ...],
     *,
     _prior_snapshot: _SetupConfigSnapshot | None = None,
     required: set[str] | None = None,
+    skip_unverified: bool = False,
 ) -> _VerifiedSetupAgentSelections | None:
-    """Refresh protected executable authority for native runtime inspection."""
+    """Refresh protected executable authority for native runtime inspection.
+
+    ``required`` names the connectors whose executable must verify; with
+    ``skip_unverified`` none must (``setup --add-detected`` leaves an
+    unverifiable newcomer out instead of failing the batch). Skipped peers are
+    reported and are absent from the returned selection.
+    """
 
     host_os = platform_support.host_os()
     if host_os not in {"windows", "darwin"}:
         return None
     from defenseclaw.agent_selection import (
+        publish_setup_agent_selections,
         record_setup_agent_selections,
-        setup_agent_selection_connectors,
     )
 
-    selected = setup_agent_selection_connectors(connectors)
-    if host_os == "darwin":
-        selected = tuple(name for name in selected if name == "openhands")
+    selected = _protected_selection_targets(connectors)
     if not selected:
         return None
 
@@ -5191,7 +5210,7 @@ def _record_windows_setup_agent_selections(
         blocking = {
             name: detail
             for name, detail in selection_errors.items()
-            if not must_verify or normalize_connector(name) in must_verify
+            if not skip_unverified and (not must_verify or normalize_connector(name) in must_verify)
         }
         if blocking:
             details = "; ".join(f"{name}: {detail}" for name, detail in sorted(blocking.items()))
@@ -5200,13 +5219,22 @@ def _record_windows_setup_agent_selections(
             )
         for name, detail in sorted(selection_errors.items()):
             ux.warn(f"skipping {name}: could not verify its executable ({detail})")
-        ux.subhead(
-            "Continuing with the rest of the roster. "
-            f"Re-run setup for {', '.join(sorted(selection_errors))} once its executable verifies."
+        rerun = ", ".join(
+            f"defenseclaw setup {'claude-code' if name == 'claudecode' else name}" for name in sorted(selection_errors)
         )
+        ux.subhead(f"Continuing with the rest of the roster. Once the executable verifies, re-run: {rerun}")
         selected = tuple(name for name in selected if name not in selection_errors)
         if not selected:
             return None
+        # record_setup_agent_selections publishes nothing when any probe
+        # fails, so the receipt binding below always found the previous
+        # generation and aborted (GAP-1052). Publish the verified subset; the
+        # gateway keeps a skipped peer's existing sealed lock as its authority.
+        selections = {name: selections[name] for name in selected}
+        try:
+            publish_setup_agent_selections(target_dir, selections)
+        except OSError as exc:
+            raise click.ClickException(f"could not protect explicit agent executable selection: {exc}") from exc
     try:
         return _validate_setup_agent_selection_receipt(
             target_dir,
@@ -10232,6 +10260,7 @@ def _apply_setup_batch(
                 getattr(app.cfg, "data_dir", None),
                 tuple(connectors),
                 _prior_snapshot=setup_snapshot,
+                skip_unverified=preserve_global_settings,
             )
         except Exception as exc:
             try:
@@ -10242,6 +10271,20 @@ def _apply_setup_batch(
                     f"agent_selection.json rollback was incomplete: {rollback_exc}"
                 ) from exc
             raise
+        if preserve_global_settings:
+            # --add-detected (make all): a newly detected connector whose
+            # executable cannot be verified is left out with the warning
+            # above instead of failing every other connector (GAP-1148).
+            unverified = {
+                name
+                for name in _protected_selection_targets(tuple(connectors))
+                if protected_selection is None or protected_selection.record_for(name) is None
+            }
+            connectors = [c for c in connectors if normalize_connector(c) not in unverified]
+            if not connectors:
+                click.echo("  No newly detected connector could be verified; nothing was added.")
+                ctx.meta[_SETUP_RESTART_HANDLED_KEY] = True
+                return
 
     if not preserve_global_settings:
         _reconcile_batch_active_connectors(app.cfg, connectors)
@@ -10578,9 +10621,11 @@ def _hook_guardrail_options(fn):
 @click.option(
     "--yes",
     "-y",
+    "--non-interactive",
+    "--accept-defaults",
     "yes",
     is_flag=True,
-    help="Skip the confirmation prompt (non-interactive).",
+    help="Skip the confirmation prompt (aliases: --non-interactive, --accept-defaults).",
 )
 @click.option(
     "--restart/--no-restart",
@@ -10730,9 +10775,11 @@ def setup_codex(
 @click.option(
     "--yes",
     "-y",
+    "--non-interactive",
+    "--accept-defaults",
     "yes",
     is_flag=True,
-    help="Skip the confirmation prompt (non-interactive).",
+    help="Skip the confirmation prompt (aliases: --non-interactive, --accept-defaults).",
 )
 @click.option(
     "--restart/--no-restart",
@@ -11103,9 +11150,11 @@ def _remove_connector(
 @click.option(
     "--yes",
     "-y",
+    "--non-interactive",
+    "--accept-defaults",
     "yes",
     is_flag=True,
-    help="Skip the confirmation prompt (non-interactive).",
+    help="Skip the confirmation prompt (aliases: --non-interactive, --accept-defaults).",
 )
 @pass_ctx
 def setup_remove(
@@ -11185,9 +11234,11 @@ def _make_observability_setup_command(connector: str) -> click.Command:
     @click.option(
         "--yes",
         "-y",
+        "--non-interactive",
+        "--accept-defaults",
         "yes",
         is_flag=True,
-        help="Skip the confirmation prompt (non-interactive).",
+        help="Skip the confirmation prompt (aliases: --non-interactive, --accept-defaults).",
     )
     @click.option(
         "--restart/--no-restart",

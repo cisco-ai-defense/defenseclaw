@@ -143,6 +143,22 @@ def record_setup_agent_selections(
         # touched connector roster, mode, locks, or desired/applied state.
         return selections, errors
 
+    publish_setup_agent_selections(target_dir, selections)
+    return selections, errors
+
+
+def publish_setup_agent_selections(
+    data_dir: str | os.PathLike[str],
+    selections: dict[str, SetupAgentSelection],
+) -> None:
+    """Write a fresh receipt that covers exactly ``selections``.
+
+    Callers that decided to continue without some peers (their probe failed)
+    publish the verified subset; the gateway keeps an omitted peer's existing
+    sealed lock as its authority.
+    """
+
+    target_dir = os.path.abspath(os.fspath(data_dir))
     now = datetime.now(timezone.utc)
     expires = now + SELECTION_LIFETIME
     # This receipt authorizes only the current transaction's full protected
@@ -167,7 +183,6 @@ def record_setup_agent_selections(
     }
     body = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
     atomic_write_private_bytes(os.path.join(target_dir, SELECTION_FILENAME), body)
-    return selections, errors
 
 
 def _select_agent_executable(data_dir: str, connector: str) -> SetupAgentSelection:
