@@ -6,6 +6,7 @@
 package managed
 
 import (
+	"errors"
 	"fmt"
 	"io/fs"
 	"path/filepath"
@@ -43,8 +44,11 @@ const allServicesSID = "S-1-5-80-0"
 // cannot read is skipped.
 func ValidateServiceCanReadTree(root, label, serviceAccount string) error {
 	serviceSID, err := windowsVirtualServiceSID(serviceAccount)
-	if err != nil || serviceSID == nil {
-		return err
+	if err != nil {
+		return &serviceAccountUnresolvedError{err: err}
+	}
+	if serviceSID == nil {
+		return nil
 	}
 	// The gateway itself reads the tree directly; the DACL check is for a
 	// preflight that runs as another account.
@@ -89,6 +93,22 @@ func ValidateServiceCanReadTree(root, label, serviceAccount string) error {
 			"%s %s: the gateway service account %s cannot read %s; grant it Read & execute, for example: icacls %q /grant \"%s:(OI)(CI)RX\" /T",
 			label, root, serviceAccount, path, root, serviceAccount)
 	})
+}
+
+// serviceAccountUnresolvedError is a service account whose SID could not be
+// resolved, for example before Setup has created the service.
+type serviceAccountUnresolvedError struct{ err error }
+
+func (e *serviceAccountUnresolvedError) Error() string { return e.err.Error() }
+func (e *serviceAccountUnresolvedError) Unwrap() error { return e.err }
+
+// IsServiceAccountUnresolved reports whether ValidateServiceCanReadTree
+// failed only because the service account could not be resolved. Setup's
+// preflight before a first install has no service yet and leaves the check
+// to the install.
+func IsServiceAccountUnresolved(err error) bool {
+	var unresolved *serviceAccountUnresolvedError
+	return errors.As(err, &unresolved)
 }
 
 // serviceReadParents lists the parent folders of root up to its volume

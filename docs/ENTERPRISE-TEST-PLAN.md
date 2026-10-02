@@ -646,7 +646,7 @@ failure drills). The Windows result is for Setup `/ensure CONFIG=<file>`:
 | Change | Linux and macOS (`ensure --config <file> --json`) | Windows |
 | --- | --- | --- |
 | `data_dir: /tmp/x` | Exit `1`, `config_invalid`; installed config unchanged | N/A (leave `data_dir` unset) |
-| `guardrail.mode: blockall` | Exit `1`, `config_invalid` | Exit `1639` before any change: "the gateway cannot load `<file>` at `<path>`: `<reason>`; fix the config and run again (nothing was changed)" |
+| `guardrail.mode: blockall` | Exit `1`, `config_invalid` | Exit `1639` before any change: "the gateway cannot load `<file>` at `<path>`: `<reason>`; fix it and run again (nothing was changed)" |
 | `gateway.api_bind: 0.0.0.0` | Exit `1`, `config_invalid` | Refused; record whether Setup's preflight (`1639`) or the lifecycle (`1603`, rolled back) refuses it |
 | `enterprise.profile: secure_client` on a standalone host | Refused (`config_invalid` or `profile_conflict`); record which | Refused: the profile cannot change in place |
 | An inline `cisco_ai_defense.api_key` | Refused | Refused; the Intune packager also refuses a config with an `api_key:` line |

@@ -396,8 +396,16 @@ func windowsEnterpriseStoppedServiceNextStep(services []enterprisestatus.Service
 	if len(stopped) == 0 {
 		return ""
 	}
-	return ". Next step: run `defenseclaw enterprise windows repair --profile standalone` from an elevated prompt, or " +
+	return ". Next step: from an elevated PowerShell prompt run " + windowsEnterpriseAdminCommand("repair") + ", or " +
 		windowsEnterpriseStandaloneSetupName + " /repair JSON=1, to start " + strings.Join(stopped, ", ") + " again"
+}
+
+// windowsEnterpriseAdminCommand is an `enterprise windows <action>` command
+// for the standalone profile as an administrator types it. Setup puts no
+// DefenseClaw command on PATH, so a bare `defenseclaw ...` hint was "not
+// recognized"; the installed CLI is named by its path (GAP-1183, GAP-1338).
+func windowsEnterpriseAdminCommand(action string) string {
+	return "`& '" + managedWindowsAdminCLI() + "' enterprise windows " + action + " --profile standalone`"
 }
 
 // windowsEnterpriseStandaloneLifecycleAction reports whether a standalone
@@ -432,7 +440,7 @@ func windowsEnterpriseNotHealthyMessage(services []enterprisestatus.Service, exi
 	switch len(stopped) {
 	case 0:
 		return fmt.Sprintf("the standalone deployment is not healthy (its health check exited %d); "+
-			"run `defenseclaw enterprise windows verify --profile standalone` from an elevated prompt for the failing checks", exitCode)
+			"from an elevated PowerShell prompt run "+windowsEnterpriseAdminCommand("verify")+" for the failing checks", exitCode)
 	case 1:
 		return "the standalone deployment is not healthy: the " + stopped[0] + " service is stopped"
 	default:

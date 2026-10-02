@@ -177,10 +177,11 @@ func applyManagedHostHelp(root *cobra.Command) bool {
 	if managed.IsManagedEnterprise(os.Getenv(managed.DeploymentModeEnv)) {
 		return false
 	}
-	admin := ""
+	admin, adminLead := "", "An administrator checks the deployment with:"
 	where, present := managedHostWindowsStandalone()
 	if present {
-		admin = "& '" + managedWindowsAdminCLI() + "' enterprise windows status --profile standalone  (elevated PowerShell)"
+		admin = "& '" + managedWindowsAdminCLI() + "' enterprise windows status --profile standalone"
+		adminLead = "An administrator checks it from an elevated PowerShell prompt with:"
 	} else if where, present = managedHostUnixRecord(nil); present {
 		admin = "sudo " + managedHostGatewayCommand() + " enterprise " + managedHostPlatform() + " status"
 	}
@@ -188,20 +189,33 @@ func applyManagedHostHelp(root *cobra.Command) bool {
 		return false
 	}
 	root.Short = "DefenseClaw managed gateway"
+	// The record path and the admin command sit on lines of their own: in
+	// the first sentence they made a 110-column line among 75-column ones
+	// (GAP-1359).
 	root.Long = fmt.Sprintf(`DefenseClaw managed gateway. Your organization manages DefenseClaw on this
-computer (%s): the gateway runs as a system service, answers the hooks of
-the enrolled agents and enforces the managed policy. The per-user daemon
+computer: the gateway runs as a system service, answers the hooks of the
+enrolled agents and enforces the managed policy. The per-user daemon
 commands (start, stop, restart, watchdog, sandbox) are not available here.
 
-An administrator checks the deployment with:
-  %s`, where, admin)
+Managed deployment record:
+  %s
+
+%s
+  %s`, where, adminLead, admin)
 	for _, command := range root.Commands() {
 		if managedHostPerUserDaemonCommands[command.Name()] {
 			command.Hidden = true
 		}
+		if command.Name() == "status" {
+			command.Short = managedHostStatusShort
+		}
 	}
 	return true
 }
+
+// managedHostStatusShort is the status row of the managed root help, which
+// said "the running sidecar" although a managed computer has none (GAP-1359).
+const managedHostStatusShort = "Show health of the gateway service's subsystems"
 
 // managedHostCurrentAccount names the signed-in account for the answer above.
 var managedHostCurrentAccount = func() string {

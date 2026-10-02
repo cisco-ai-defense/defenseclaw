@@ -31,7 +31,8 @@ func TestWindowsEnterpriseStoppedServiceNextStep(t *testing.T) {
 		{Name: "DefenseClawHookGuardian", Kind: "guardian", State: "stopped", Required: true},
 	}
 	got := windowsEnterpriseStoppedServiceNextStep(services)
-	for _, want := range []string{"Next step:", "enterprise windows repair --profile standalone", "/repair JSON=1", "start DefenseClawHookGuardian again"} {
+	// GAP-1338: the repair names the installed CLI, which Setup keeps off PATH.
+	for _, want := range []string{"Next step:", "& '" + managedWindowsAdminCLI() + "' enterprise windows repair --profile standalone", "/repair JSON=1", "start DefenseClawHookGuardian again"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("next step %q lacks %q", got, want)
 		}
@@ -56,7 +57,7 @@ func TestWindowsEnterpriseNotHealthyMessageNamesTheStoppedService(t *testing.T) 
 		t.Fatalf("not healthy message = %q", got)
 	}
 	services[0].State = "running"
-	if got := windowsEnterpriseNotHealthyMessage(services, 1); !strings.Contains(got, "enterprise windows verify") || strings.Contains(got, "installer exit") {
+	if got := windowsEnterpriseNotHealthyMessage(services, 1); !strings.Contains(got, "& '"+managedWindowsAdminCLI()+"' enterprise windows verify --profile standalone") || strings.Contains(got, "installer exit") {
 		t.Fatalf("no stopped service, message = %q", got)
 	}
 }
