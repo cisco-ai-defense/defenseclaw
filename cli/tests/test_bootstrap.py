@@ -939,6 +939,30 @@ class StartGatewayStructuredDriftTests(unittest.TestCase):
             "missing active_connector.json must NEVER trigger a restart; legacy 'already running' behavior wins",
         )
 
+    def test_removed_connector_restart_names_the_dropped_connector(self):
+        from defenseclaw.bootstrap import _start_gateway_structured
+        from defenseclaw.config import PerConnectorGuardrailConfig
+
+        # GAP-1938: init dropped hermes; the summary only said "3 selected".
+        self.cfg.guardrail.connector = "codex"
+        self.cfg.claw.mode = "codex"
+        self.cfg.guardrail.connectors = {
+            name: PerConnectorGuardrailConfig() for name in ("claudecode", "codex", "opencode")
+        }
+        self._write_pid_file()
+        with open(os.path.join(self.data_dir, "active_connector.json"), "w", encoding="utf-8") as fh:
+            json.dump(
+                {"version": 2, "names": ["claudecode", "codex", "hermes", "opencode"], "name": "claudecode"},
+                fh,
+            )
+        recorder: list = []
+        with self._patch_subprocess(recorder, returncode=0):
+            result = _start_gateway_structured(self.cfg)
+        self.assertEqual(result.status, "pass")
+        self.assertEqual(
+            result.detail, "restarted to load the 3 selected connectors; no longer guarding hermes",
+        )
+
     def test_added_connector_with_same_primary_restarts_on_the_new_roster(self):
         from defenseclaw.bootstrap import _start_gateway_structured
         from defenseclaw.config import PerConnectorGuardrailConfig

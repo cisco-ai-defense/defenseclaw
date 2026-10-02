@@ -1227,6 +1227,7 @@ def _prompt_connector_selection(
             title=title,
             empty_ok=True,
         )
+        selected = _confirm_dropped_connectors(installed, active, selected)
         if selected:
             return selected
         ux.subhead("No host connector selected; DefenseClaw will not protect a host agent.")
@@ -1245,6 +1246,32 @@ def _prompt_connector_selection(
         show_default=True,
     )
     return [_normalize_connector_arg(raw)]
+
+
+def _confirm_dropped_connectors(
+    installed: list[str], active: list[str], selected: list[str],
+) -> list[str]:
+    """Name the active connectors the operator unchecked and confirm it.
+
+    GAP-1938: clearing an enrolled connector's box removed its hooks with no
+    line naming it, so that agent ran unguarded. Declining keeps it active.
+    """
+    dropped = [name for name in active if name not in selected]
+    if not dropped:
+        return selected
+    names = ", ".join(dropped)
+    ux.warn(
+        f"Unchecked active connector(s): {names}. This setup removes their "
+        "DefenseClaw hooks, so they run unguarded.",
+        indent="  ",
+    )
+    ux.subhead(f"Re-add one later with 'defenseclaw setup {dropped[0]}'.")
+    terminal_checkbox.restore_line_prompt_mode()
+    if click.confirm(f"  Stop guarding {names}?", default=False):
+        return selected
+    kept = set(selected) | set(dropped)
+    ux.subhead(f"Keeping {names} active.")
+    return [name for name in installed if name in kept]
 
 
 def _note_proxy_connectors(disc) -> None:

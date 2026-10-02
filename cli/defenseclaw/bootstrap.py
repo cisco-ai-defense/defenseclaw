@@ -1798,13 +1798,16 @@ def _start_gateway_structured(cfg: Config, *, hook_fail_mode_changed: bool = Fal
                 )
             if result.returncode == 0:
                 active = cfg.active_connectors()
-                return StepResult(
-                    "Sidecar",
-                    "pass",
+                detail = (
                     f"restarted (was {running}, now {desired})"
                     if len(active) <= 1
-                    else f"restarted to load the {len(active)} selected connectors",
+                    else f"restarted to load the {len(active)} selected connectors"
                 )
+                # GAP-1938: name the connectors this restart stops guarding.
+                dropped = sorted(set(roster or ()) - set(desired_roster))
+                if dropped and len(active) > 1:
+                    detail += f"; no longer guarding {', '.join(dropped)}"
+                return StepResult("Sidecar", "pass", detail)
             detail = (result.stderr or result.stdout or "restart failed").strip().splitlines()
             return StepResult(
                 "Sidecar",

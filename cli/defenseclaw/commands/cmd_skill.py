@@ -4204,7 +4204,8 @@ def _report_inherited_skill_state(
     "already unblocked" read as wrong. Name the scope that holds the state and
     the command that clears it. Returns True when something was reported.
     """
-    peers = {c for record in physical_records for c in record.connectors if c}
+    holders = sorted({c for record in physical_records for c in record.connectors if c} - {connector})
+    peers = set(holders)
     peers.update(_skill_policy_fanout_connectors(app, pe, skill_name))
     peers.discard(connector)
     owners = sorted(c for c in peers if _skill_has_connector_enforcement(app, skill_name, c))
@@ -4218,6 +4219,13 @@ def _report_inherited_skill_state(
     scope = "a global decision that covers every connector" if global_state else (
         f"connector={', '.join(owners)}, which shares this skill directory"
     )
+    if global_state and holders:
+        # GAP-1259: the watcher files a shared-dir quarantine under the
+        # connector it runs as (amp for ~/.claude/skills); name it.
+        scope += (
+            f" (quarantined under connector={', '.join(holders)}, "
+            "which shares this skill directory)"
+        )
     click.echo(
         f"[skill] {skill_name!r} has no enforcement state of its own on {connector}; "
         f"it is blocked by {scope}"
@@ -4318,8 +4326,16 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
         for target_connector in targets
     )
     if targets and (has_unscoped_state or has_scoped_state):
+        # GAP-1259: report only the scopes that held state; a global decision
+        # on a shared-dir quarantine was reported as "connector=amp".
+        owners = [
+            target_connector
+            for target_connector in targets
+            if _skill_has_connector_enforcement(app, skill_name, target_connector)
+        ]
         for target_connector in targets:
             pe.remove_action_for_connector("skill", skill_name, target_connector)
+        for target_connector in owners:
             click.secho(
                 f"[skill] {skill_name!r} all enforcement state cleared "
                 f"(connector={target_connector}) (allow/block/quarantine/disable)",
@@ -4327,6 +4343,11 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
             )
         if has_unscoped_state:
             pe.remove_action("skill", skill_name)
+            click.secho(
+                f"[skill] {skill_name!r} all enforcement state cleared "
+                "(global, every connector) (allow/block/quarantine/disable)",
+                fg="green",
+            )
         click.echo(
             "  The skill will go through normal scanning on next install."
         )
