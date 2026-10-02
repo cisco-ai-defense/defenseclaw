@@ -2,7 +2,7 @@ BINARY      := defenseclaw
 GATEWAY     := defenseclaw-gateway
 ACP_GUARD   := defenseclaw-acp
 HOOK_LAUNCHER := defenseclaw-hook
-VERSION     := 0.8.10
+VERSION     := 1.0.0
 .DEFAULT_GOAL := help
 # Stamp the source commit and build time so `defenseclaw version` names the
 # build (goreleaser does the same for releases).
@@ -172,6 +172,7 @@ all: _source-install-dev-preflight
 		echo "  defenseclaw-gateway status   # shows why, and the fix"; \
 		echo "  defenseclaw-gateway start    # start it"; \
 	fi
+	@echo "  Built DefenseClaw $(VERSION) (commit $(GIT_COMMIT)) from this checkout."
 	@echo ""
 	@echo "Try it out:"
 	@echo "  defenseclaw            # launch the TUI"

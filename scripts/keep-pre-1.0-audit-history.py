@@ -10,8 +10,9 @@ findings 0.x recorded. The release installers keep the old install, database
 included, in ~/.defenseclaw/previous. A source install has no such copy, so
 this keeps one in ~/.defenseclaw/backups and says so (GAP-1469).
 
-Exit 0 when there is nothing to keep or the copy was made; exit 1 when a copy
-is needed but could not be made, so `make all` stops before anything changed.
+Exit 0 when there is nothing to keep or the copy was made; exit 1 when the
+database cannot be read or a copy is needed but could not be made, so
+`make all` stops before anything changed.
 """
 
 from __future__ import annotations
@@ -34,9 +35,28 @@ def data_dir() -> Path:
     return Path(home) if home else Path.home() / ".defenseclaw"
 
 
+def open_db(db: Path) -> sqlite3.Connection:
+    """Open db without changing it.
+
+    Apple's /usr/bin/python3 (SQLite 3.43) cannot open a WAL database
+    read-only once a stopped gateway has removed its -shm file, so fall back to
+    a normal connection, which only adds the -wal/-shm files SQLite removes
+    again on close (GAP-1792).
+    """
+    conn = None
+    try:
+        conn = sqlite3.connect(f"{db.as_uri()}?mode=ro", uri=True)
+        conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchall()
+        return conn
+    except sqlite3.OperationalError:
+        if conn is not None:
+            conn.close()
+    return sqlite3.connect(f"{db.as_uri()}?mode=rw", uri=True)
+
+
 def rows_to_purge(db: Path) -> int:
     """Rows the purge would delete, or 0 when this database is already 1.x."""
-    conn = sqlite3.connect(f"{db.as_uri()}?mode=ro", uri=True)
+    conn = open_db(db)
     try:
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
         if "schema_version" not in tables:
@@ -57,8 +77,11 @@ def main() -> int:
     try:
         rows = rows_to_purge(db)
     except sqlite3.Error as exc:
-        print(f"  ! Could not read {db} to check for a 0.x audit history ({exc}); continuing", file=sys.stderr)
-        return 0
+        # The 1.0 gateway would delete a 0.x history unseen, so stop here.
+        print(f"  x Could not read {db} to check for a 0.x audit history ({exc}).", file=sys.stderr)
+        print("    Nothing was changed.", file=sys.stderr)
+        print(f"    Stop any gateway using it, or move {db} somewhere safe, then run make all again.", file=sys.stderr)
+        return 1
     if rows == 0:
         return 0
     backups = home / "backups"
@@ -77,7 +100,7 @@ def main() -> int:
     kept = backups / f"audit-history-{time.strftime('%Y%m%dT%H%M%S')}.db"
     print(f"    Copying it to {kept} ({size // (1024 * 1024):,} MB; a large database takes a few minutes) ...", flush=True)
     partial = kept.with_name(kept.name + ".partial")
-    source = sqlite3.connect(f"{db.as_uri()}?mode=ro", uri=True)
+    source = open_db(db)
     try:
         # Copy under another name, so an interrupted copy is never taken for one.
         partial.unlink(missing_ok=True)
