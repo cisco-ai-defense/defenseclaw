@@ -218,10 +218,15 @@ def scan(
         from defenseclaw.commands import resolve_list_connector
 
         connector = resolve_list_connector(app, connector_flag)
+        adhoc = False
         if not connector_flag:
             # Without --connector, name the connector whose plugin root holds
-            # the path rather than the first active one.
-            connector = _connector_for_plugin_path(app, name_or_path) or connector
+            # the path rather than the first active one. A folder no connector
+            # root holds is an ad-hoc path scan (GAP-1640): it is still scanned
+            # with the active connector's policy, but not attributed to it.
+            owner = _connector_for_plugin_path(app, name_or_path)
+            adhoc = not owner
+            connector = owner or connector
         scan_dir = _resolve_plugin_dir(
             name_or_path,
             app.cfg.plugin_dir,
@@ -230,7 +235,7 @@ def scan(
             registry_cache=registry_cache,
         )
         if scan_dir:
-            matches = [_PluginMatch(connector, scan_dir)]
+            matches = [_PluginMatch(connector, scan_dir, adhoc=adhoc)]
     else:
         if connector_flag:
             from defenseclaw.commands import resolve_list_connector
@@ -326,6 +331,7 @@ def scan(
             scope=match.scope,
             project_path=match.project_path,
             plugin_id=match.plugin_id,
+            adhoc=match.adhoc,
         )
 
 
@@ -391,6 +397,7 @@ def _scan_one_plugin_dir(
     scope: str = "",
     project_path: str = "",
     plugin_id: str = "",
+    adhoc: bool = False,
 ) -> None:
     from defenseclaw.commands import _scan_ui
 
@@ -401,6 +408,7 @@ def _scan_one_plugin_dir(
         connector=connector,
         paths=[scan_dir],
         as_json=as_json,
+        where=_scan_ui.WHERE_ADHOC_PATH if adhoc else "",
     )
     _scan_ui.render_preamble(ctx, target_count=1)
     if not as_json:
@@ -469,7 +477,7 @@ def _scan_one_plugin_dir(
         return
 
     sev = result.max_severity()
-    verdict = _plugin_scan_findings_verdict(
+    verdict, rejects = _plugin_scan_findings_verdict(
         app, result, name=plugin_id or target_name, path=scan_dir, connector=connector,
     )
     _scan_ui.render_per_target_status(
@@ -479,6 +487,10 @@ def _scan_one_plugin_dir(
         detail=f"max severity: {sev}",
         findings=len(result.findings),
     )
+    if rejects:
+        _print_plugin_scan_policy(
+            plugin_id or target_name, connector="" if adhoc else connector, installed=not adhoc,
+        )
     click.echo()
     for f in result.findings:
         sev_color = {"CRITICAL": "red", "HIGH": "red", "MEDIUM": "yellow", "LOW": "cyan"}.get(f.severity, "white")
@@ -501,12 +513,14 @@ def _scan_one_plugin_dir(
 
 def _plugin_scan_findings_verdict(
     app: AppContext, result: Any, *, name: str, path: str, connector: str,
-) -> str:
-    """BLOCKED only when the plugin policy would block it (GAP-1413).
+) -> tuple[str, bool]:
+    """The scan line's verdict, and whether the policy rejects the plugin.
 
-    A plugin whose worst finding is LOW ("declares no permissions") is not
-    blocked by the default policy, so it reads WARN (or INFO) and does not
-    count in the Summary's blocked=.
+    BLOCKED (and the Summary's blocked=) only for a plugin that is on the
+    block list, as in ``skill scan`` (GAP-1592): a scan blocks nothing, so a
+    plugin the policy would refuse at install reads WARN and gets a
+    "policy: rejected" line instead. A LOW-only plugin ("declares no
+    permissions") is not rejected by the default policy (GAP-1413).
     """
     from defenseclaw.commands import _scan_ui
 
@@ -515,8 +529,14 @@ def _plugin_scan_findings_verdict(
         from defenseclaw.enforce import PolicyEngine
         from defenseclaw.enforce.admission import evaluate_admission
 
+        pe = PolicyEngine(app.store)
+        try:
+            if pe.is_blocked_for_connector("plugin", name, connector):
+                return _scan_ui.VERDICT_BLOCKED, False
+        except Exception:  # noqa: BLE001 - fall through to the policy check.
+            pass
         decision = evaluate_admission(
-            PolicyEngine(app.store),
+            pe,
             policy_dir=app.cfg.policy_dir,
             target_type="plugin",
             name=name,
@@ -529,9 +549,24 @@ def _plugin_scan_findings_verdict(
         blocks = decision.verdict != "allowed" and decision.action.install == "block"
     except Exception:
         blocks = app.cfg.plugin_actions.should_install_block(sev)
-    if blocks:
-        return _scan_ui.VERDICT_BLOCKED
-    return _scan_ui.VERDICT_INFO if sev == "INFO" else _scan_ui.VERDICT_WARN
+    return (_scan_ui.VERDICT_INFO if sev == "INFO" else _scan_ui.VERDICT_WARN), blocks
+
+
+def _print_plugin_scan_policy(name: str, *, connector: str = "", installed: bool = True) -> None:
+    """Under a WARN line, say the policy rejects the plugin and how to act.
+
+    Same shape as ``skill scan``'s "policy: rejected" line (GAP-1592).
+    """
+    flag = f" --connector {connector}" if connector else ""
+    if installed:
+        text = (
+            "the policy refuses this plugin at install; the copy already "
+            "installed still loads until you act."
+        )
+    else:
+        text = "the policy would refuse this plugin at install."
+    click.echo(f"        policy: rejected — {text}")
+    click.echo(f"          Block it: defenseclaw plugin block {name}{flag}")
 
 
 def _host_plugin_dirs(app: AppContext, connector: str) -> list[str]:
@@ -754,6 +789,8 @@ class _PluginMatch:
     project_path: str = ""
     registry_source: str = ""
     plugin_id: str = ""
+    # True for an explicit folder that no connector plugin root holds.
+    adhoc: bool = False
 
     def __iter__(self):
         # Keep the established private helper contract for governance callers
@@ -1100,7 +1137,7 @@ def _scan_all_plugins(
                 )
             else:
                 findings_total += len(result.findings)
-                verdict = _plugin_scan_findings_verdict(
+                verdict, rejects = _plugin_scan_findings_verdict(
                     app, result, name=pid, path=scan_dir, connector=connector,
                 )
                 if verdict == _scan_ui.VERDICT_BLOCKED:
@@ -1112,6 +1149,8 @@ def _scan_all_plugins(
                     detail=f"max severity: {result.max_severity()}",
                     findings=len(result.findings),
                 )
+                if rejects:
+                    _print_plugin_scan_policy(pid, connector=connector)
         if as_json:
             json_groups.append({"connector": connector, "results": group_results})
         else:
@@ -4122,6 +4161,16 @@ def _plugin_info_card(
     if connector:
         matches = _plugin_match_dir_scopes(app, plugin_name, connector)
         candidate = matches[0][1] if matches else ""
+        if not candidate:
+            # GAP-1592: Hermes nests plugins in category folders (bundled
+            # ``platforms/photon``); find them the way 'plugin list' does so
+            # info does not read "Installed: False" for a listed plugin.
+            try:
+                hermes_match = _hermes_listed_plugin(app, plugin_name, connector)
+            except click.ClickException:
+                hermes_match = None
+            if hermes_match is not None and hermes_match[1] and os.path.exists(hermes_match[1]):
+                candidate = hermes_match[1]
         if candidate:
             info_map = _plugin_metadata_from_path(plugin_name, candidate)
         else:

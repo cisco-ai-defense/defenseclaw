@@ -1819,6 +1819,38 @@ class TestEnrichWithPolicy(_StoreWithPolicyMixin, unittest.TestCase):
         self.assertEqual(by_id["new-skill"]["policy_verdict"], "unscanned")
         self.assertEqual(by_id["peekaboo"]["policy_verdict"], "rejected")
 
+    def test_same_named_copies_use_their_own_scan_and_bundled_is_discovery_only(self):
+        # GAP-1593: codeguard lives in every connector; the codex copy read
+        # "unscanned" because the basename key held another copy's scan.
+        import uuid
+        from datetime import datetime, timedelta, timezone
+        now = datetime.now(timezone.utc)
+        codex_copy = os.path.abspath("/home/u/.codex/skills/codeguard")
+        claude_copy = os.path.abspath("/home/u/.claude/skills/codeguard")
+        self.store.insert_scan_result(
+            str(uuid.uuid4()), "skill-scanner", codex_copy, now - timedelta(minutes=5), 100, 0, "INFO", "{}",
+        )
+        self.store.insert_scan_result(
+            str(uuid.uuid4()), "skill-scanner", claude_copy, now, 100, 0, "INFO", "{}",
+        )
+        inv = {
+            "connector": "codex",
+            "skills": [
+                {"id": "codeguard", "eligible": True, "path": codex_copy},
+                {"id": "imagegen", "eligible": True, "bundled": True,
+                 "path": os.path.abspath("/home/u/.codex/skills/.system/imagegen")},
+            ],
+            "summary": {"skills": {"count": 2}},
+        }
+        enrich_with_policy(inv, self.store, self.skill_actions)
+
+        by_id = {s["id"]: s for s in inv["skills"]}
+        self.assertEqual(by_id["codeguard"]["policy_verdict"], "clean")
+        self.assertEqual(by_id["codeguard"]["scan_target"], codex_copy)
+        self.assertEqual(by_id["imagegen"]["policy_verdict"], "discovery-only")
+        self.assertEqual(inv["summary"]["scan_skills"]["unscanned"], 0)
+        self.assertIn("1 discovery-only", _policy_detail_suffix(inv["summary"]["policy_skills"]))
+
     def test_disabled_skill_is_not_enabled(self):
         # GAP-1383: Inventory said "Enabled yes" for a skill DefenseClaw
         # had blocked and disabled.

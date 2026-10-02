@@ -334,6 +334,27 @@ def test_codeguard_install_hint_uses_standard_absolute_gateway(tmp_path, monkeyp
     assert "defenseclaw scan code" not in hints[0]
 
 
+def test_codeguard_install_hint_is_short_when_path_gateway_is_trusted(tmp_path, monkeypatch):
+    # GAP-1595: the gateway on PATH is the trusted one, so print the short command.
+    gateway_name = "defenseclaw-gateway.exe" if os.name == "nt" else gateway.GATEWAY_BIN_NAME
+    trusted_dir = tmp_path / ".local" / "bin"
+    trusted_gateway = trusted_dir / gateway_name
+    _make_runnable(trusted_gateway)
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+    monkeypatch.delenv("DEFENSECLAW_INSTALL_ROOT", raising=False)
+    monkeypatch.delenv("DEFENSECLAW_GATEWAY_BIN", raising=False)
+    monkeypatch.setattr(gateway, "_CANONICAL_INSTALL_DIR", str(trusted_dir))
+    monkeypatch.setattr(gateway.shutil, "which", lambda _name: str(trusted_gateway))
+    hints = _capture_hints(monkeypatch)
+
+    app = AppContext()
+    app.cfg = _multi_cfg(["codex"], tmp_path)
+    result = CliRunner().invoke(codeguard, ["install", "--target", "skill"], obj=app)
+
+    assert result.exit_code == 0, result.output
+    assert hints == ["Scan code now:  defenseclaw-gateway scan code <path to scan>"]
+
+
 def test_codeguard_install_hint_accepts_absolute_gateway_override(tmp_path, monkeypatch):
     gateway_name = "defenseclaw-gateway.exe" if os.name == "nt" else gateway.GATEWAY_BIN_NAME
     trusted_gateway = tmp_path / "Operator's Gateway" / gateway_name

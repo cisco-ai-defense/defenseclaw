@@ -272,6 +272,7 @@ class SkillScannerWrapper:
             location = getattr(sf, "file_path", "") or ""
             line = getattr(sf, "line_number", None)
             if line and location:
+                line = _snippet_file_line(target, location, line, getattr(sf, "snippet", ""))
                 location = f"{location}:{line}"
 
             tags: list[str] = []
@@ -306,3 +307,29 @@ class SkillScannerWrapper:
             findings=findings,
             duration=timedelta(seconds=elapsed),
         )
+
+
+def _snippet_file_line(target: str, file_path: str, line: int, snippet: object) -> int:
+    """The file line that holds *snippet*, when the SDK's line is off.
+
+    GAP-1599: the SDK counts SKILL.md lines from the end of the front
+    matter, so a match on line 6 of the file read "SKILL.md:1". Keep the
+    SDK's line when it already holds the snippet or the snippet is not found.
+    """
+    first = next((ln.strip() for ln in str(snippet or "").splitlines() if ln.strip()), "")
+    if not first:
+        return line
+    path = file_path if os.path.isabs(file_path) else os.path.join(target, file_path)
+    try:
+        if os.path.getsize(path) > 2_000_000:
+            return line
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            lines = fh.read().splitlines()
+    except (OSError, ValueError):
+        return line
+    if 0 < line <= len(lines) and first in lines[line - 1]:
+        return line
+    for idx, text in enumerate(lines, start=1):
+        if first in text:
+            return idx
+    return line

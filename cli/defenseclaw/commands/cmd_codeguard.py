@@ -164,7 +164,7 @@ def _emit_code_scan_hint() -> None:
         return
 
     command = _format_code_scan_command(executable)
-    label = "Scan code now (PowerShell)" if os.name == "nt" else "Scan code now"
+    label = "Scan code now (PowerShell)" if command.startswith("& ") else "Scan code now"
     hint(f"{label}:  {command}")
 
 
@@ -210,11 +210,30 @@ def _runnable_absolute_path(candidate: object) -> str | None:
 
 
 def _format_code_scan_command(executable: str) -> str:
-    """Render the absolute executable for the operator's current shell."""
+    """Render the scan command for the operator's current shell.
+
+    GAP-1595: when ``defenseclaw-gateway`` on PATH is this same executable,
+    print the short command; otherwise keep the absolute path so the hint
+    never runs a different binary.
+    """
+    if _path_gateway_is(executable):
+        return "defenseclaw-gateway scan code <path to scan>"
     argv = (executable, "scan", "code", "<path to scan>")
     if os.name != "nt":
         return shlex.join(argv)
     return "& " + " ".join(_powershell_quote(arg) for arg in argv)
+
+
+def _path_gateway_is(executable: str) -> bool:
+    import shutil
+
+    try:
+        found = shutil.which("defenseclaw-gateway")
+        if not found:
+            return False
+        return os.path.normcase(os.path.realpath(found)) == os.path.normcase(os.path.realpath(executable))
+    except (OSError, ValueError):
+        return False
 
 
 def _powershell_quote(value: str) -> str:
