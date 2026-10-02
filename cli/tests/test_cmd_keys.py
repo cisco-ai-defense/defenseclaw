@@ -215,6 +215,8 @@ class KeysSetTests(unittest.TestCase):
             self.assertEqual(result.exit_code, 0, msg=result.output)
             dotenv_path = os.path.join(tmp, ".env")
             self.assertTrue(os.path.isfile(dotenv_path))
+            # GAP-1297: the same path keys remove prints (no mixed separators).
+            self.assertIn(f"to {dotenv_path}", result.output)
             with open(dotenv_path, encoding="utf-8") as fh:
                 body = fh.read()
             self.assertIn("DEFENSECLAW_TEST_KEY", body)

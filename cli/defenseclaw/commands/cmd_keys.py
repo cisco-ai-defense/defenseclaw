@@ -221,7 +221,8 @@ def keys_set(app: AppContext, env_name: str, value: str | None, value_stdin: boo
                 "  ⚠ Key saved, but the gateway runtime is unavailable; the audit event was not recorded.",
                 err=True,
             )
-    ux.ok(f"Saved {env_name} = {mask(value)} to {app.cfg.data_dir}/.env", indent="  ")
+    # One path style: keys remove prints os.path.join too (GAP-1297).
+    ux.ok(f"Saved {env_name} = {mask(value)} to {dotenv_path}", indent="  ")
     _emit_bound_endpoint_hint(spec, app.cfg, indent="    ")
 
 
