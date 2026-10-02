@@ -58,7 +58,7 @@ func TestSetupRecordingCreatedDirsRecordsConfigParents(t *testing.T) {
 	}
 }
 
-func TestRemovalLeavingNoNewDirsOnlyWhenDataDirWasMissing(t *testing.T) {
+func TestRemovalLeavingNoNewDirs(t *testing.T) {
 	for _, existed := range []bool{false, true} {
 		home := t.TempDir()
 		dataDir := filepath.Join(home, ".defenseclaw")
@@ -83,11 +83,16 @@ func TestRemovalLeavingNoNewDirsOnlyWhenDataDirWasMissing(t *testing.T) {
 		}
 		_, dataErr := os.Lstat(dataDir)
 		_, agentErr := os.Lstat(filepath.Join(home, ".agent"))
-		if existed && (dataErr != nil || agentErr != nil) {
-			t.Fatalf("existing data dir: the removal's files must stay (data %v, agent %v)", dataErr, agentErr)
+		// The empty config folder the removal made goes either way (an empty
+		// ~/.codex stayed after the purge on dc-ubuntu-eh).
+		if !os.IsNotExist(agentErr) {
+			t.Fatalf("existed %v: the empty folder the removal made stayed: %v", existed, agentErr)
 		}
-		if !existed && (!os.IsNotExist(dataErr) || !os.IsNotExist(agentErr)) {
-			t.Fatalf("missing data dir: want no new folders, got data %v, agent %v", dataErr, agentErr)
+		if existed && dataErr != nil {
+			t.Fatalf("existing data dir: the removal's files must stay: %v", dataErr)
+		}
+		if !existed && !os.IsNotExist(dataErr) {
+			t.Fatalf("missing data dir: want no new folders, got data %v", dataErr)
 		}
 	}
 }

@@ -89,23 +89,24 @@ func prepareOpenCodePluginArtifactDestination(path, dataDir string) error {
 }
 
 // RemovalLeavingNoNewDirs runs fn, a removal of conn's registration for a
-// target that may never have had DefenseClaw's per-user state. When the data
-// directory did not exist, what fn put there (the disabled hook scripts and
-// locks a teardown writes so an agent's cached registration stays harmless;
-// none can be cached, as no hook script was ever there) goes again, and so do
-// the agent config folders below the home it created and left empty.
+// target. The agent config folders below the home that fn itself created
+// and left empty go again (removing Codex's hooks made an empty ~/.codex in
+// an account where Codex never ran, and the purge then left it). When the
+// data directory did not exist, what fn put there (the disabled hook
+// scripts and locks a teardown writes so an agent's cached registration
+// stays harmless; none can be cached, as no hook script was ever there)
+// goes too.
 func RemovalLeavingNoNewDirs(conn Connector, opts SetupOpts, fn func() error) error {
 	dataDir := filepath.Clean(strings.TrimSpace(opts.DataDir))
 	_, statErr := os.Lstat(dataDir)
 	dataDirMissing := strings.TrimSpace(opts.DataDir) != "" && errors.Is(statErr, fs.ErrNotExist)
 	missing := missingConfigDirs(conn, opts)
 	err := fn()
-	if !dataDirMissing {
-		return err
-	}
-	if info, statErr := os.Lstat(dataDir); statErr == nil && info.IsDir() {
-		if removeErr := os.RemoveAll(dataDir); removeErr != nil && err == nil {
-			err = removeErr
+	if dataDirMissing {
+		if info, statErr := os.Lstat(dataDir); statErr == nil && info.IsDir() {
+			if removeErr := os.RemoveAll(dataDir); removeErr != nil && err == nil {
+				err = removeErr
+			}
 		}
 	}
 	sort.Slice(missing, func(i, j int) bool { return len(missing[i]) > len(missing[j]) })
