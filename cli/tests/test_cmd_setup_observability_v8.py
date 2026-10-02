@@ -397,6 +397,35 @@ def test_v8_secret_dotenv_preserves_owner_xattrs_and_tightens_read_mode(
     assert dotenv_values(dotenv).get(preset.token_env) == "replacement-secret"
 
 
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="SELinux label regression")
+def test_v8_secret_first_dotenv_write_keeps_kernel_selinux_label(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GAP-1221: on SELinux every new file gets security.selinux, which a user cannot strip."""
+    preset = PRESETS["datadog"]
+    dotenv = tmp_path / ".env"
+    label = ("security.selinux", b"unconfined_u:object_r:user_home_t:s0\x00")
+    real_read = v8_activation_module._read_xattrs
+
+    def labelled_read(descriptor, path):
+        return tuple(sorted({*real_read(descriptor, path), label}))
+
+    def refuse_label_removal(descriptor, name):
+        if name == label[0]:
+            raise PermissionError(errno.EACCES, "Permission denied", descriptor)
+        raise AssertionError(f"unexpected removexattr {name}")
+
+    monkeypatch.setattr(v8_activation_module, "_read_xattrs", labelled_read)
+    monkeypatch.setattr(os, "removexattr", refuse_label_removal)
+    monkeypatch.delenv(preset.token_env, raising=False)
+
+    apply_secret(str(tmp_path), preset, "first-secret", dry_run=False)
+
+    assert stat.S_IMODE(dotenv.stat().st_mode) == 0o600
+    assert dotenv_values(dotenv).get(preset.token_env) == "first-secret"
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX read-permission regression")
 def test_v8_secret_dotenv_read_only_discovery_rejects_broadly_readable_file(
     tmp_path: Path,
