@@ -786,3 +786,9 @@ func TestACPEvaluateBlockRecordsConnectorFinding(t *testing.T) {
 	}
 	t.Fatal("blocked ACP prompt recorded no scan-finding")
 }
+
+// auditStringValue is shared by tests on every platform.
+func auditStringValue(value any) string {
+	text, _ := value.(string)
+	return text
+}
