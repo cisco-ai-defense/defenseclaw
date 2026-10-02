@@ -100,6 +100,61 @@ func (p EgressProxy) Environment() map[string]string {
 	return env
 }
 
+// instanceMetadataHosts are the cloud instance-metadata and container
+// credential endpoints (EC2 IMDS over IPv4 and IPv6, ECS task credentials).
+// AWS asks that they bypass any proxy: the SDKs fetch role credentials there
+// over plain HTTP.
+var instanceMetadataHosts = []string{"169.254.169.254", "169.254.170.2", "fd00:ec2::254"}
+
+// ExemptInstanceMetadataFromProxy adds the instance-metadata endpoints to
+// NO_PROXY and no_proxy when a proxy variable is set, so an AWS credential
+// lookup (Bedrock instance_role) never sends the IMDS token request and the
+// role credentials through a proxy (GAP-1655). Existing entries are kept
+// (NO_PROXY falls back to no_proxy and the reverse, as the HTTP clients
+// read them), and nothing changes when no proxy is set or NO_PROXY is "*".
+func ExemptInstanceMetadataFromProxy(getenv func(string) string, setenv func(key, value string) error) error {
+	proxied := false
+	for _, key := range []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"} {
+		if strings.TrimSpace(getenv(key)) != "" {
+			proxied = true
+			break
+		}
+	}
+	if !proxied {
+		return nil
+	}
+	for _, pair := range [][2]string{{"NO_PROXY", "no_proxy"}, {"no_proxy", "NO_PROXY"}} {
+		current := strings.TrimSpace(getenv(pair[0]))
+		if current == "" {
+			current = strings.TrimSpace(getenv(pair[1]))
+		}
+		if current == "*" {
+			continue
+		}
+		entries := map[string]bool{}
+		for _, entry := range strings.Split(current, ",") {
+			entries[strings.ToLower(strings.TrimSpace(entry))] = true
+		}
+		updated := current
+		for _, host := range instanceMetadataHosts {
+			if entries[host] {
+				continue
+			}
+			if updated != "" {
+				updated += ","
+			}
+			updated += host
+		}
+		if updated == current && current == strings.TrimSpace(getenv(pair[0])) {
+			continue
+		}
+		if err := setenv(pair[0], updated); err != nil {
+			return fmt.Errorf("set %s: %w", pair[0], err)
+		}
+	}
+	return nil
+}
+
 // Transport returns a clone of http.DefaultTransport that selects the proxy
 // with ProxyFunc, for outbound clients that otherwise use the default
 // transport.
