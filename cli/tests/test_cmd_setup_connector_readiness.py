@@ -609,9 +609,12 @@ def test_restart_services_labels_hermes_pending_reload_without_live_claim(
     )
 
     output = capsys.readouterr().out
-    assert "hermes: pending-reload" in output
+    assert "waiting for verified setup... ! (restart any open Hermes session" in output
     assert "connector runtime: waiting for verified setup... ✓" not in output
-    assert any("runtime_state=pending-reload" in hint and "live=false" in hint for hint in hints)
+    assert any("keeps its old hooks until it is restarted" in hint for hint in hints)
+    # GAP-1782: no internal state names in user output.
+    for text in [output, *hints]:
+        assert "live=false" not in text and "pending-reload" not in text and "--passive" not in text
 
 
 def test_upstream_fail_open_remains_distinct_from_configured_mode(monkeypatch, tmp_path: Path) -> None:

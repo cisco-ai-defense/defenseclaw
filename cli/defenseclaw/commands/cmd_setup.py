@@ -13586,7 +13586,9 @@ def _restart_services(
         )
         if readiness and getattr(readiness, "invariant", "") == "pending-reload":
             connector_runtime_pending_reload = getattr(readiness, "connector", "") or True
-            click.echo(f" !{f' ({diagnostic})' if diagnostic else ''}")
+            # Plain words, not the doctor detail with its internal state
+            # names (--passive, live=false) (GAP-1782).
+            click.echo(f" ! ({_pending_reload_hint(getattr(readiness, 'connector', ''))})")
         elif readiness:
             click.echo(" ✓")
             connector_registration_verified = True
@@ -13627,8 +13629,8 @@ def _restart_services(
         elif connector_runtime_pending_reload:
             ux.subhead(
                 f"{len(hook_multi)} hook connectors ({names}): protected registrations are current "
-                "on the sidecar API port; Hermes remains live=false/pending-reload until every "
-                "affected Hermes host is reloaded or restarted. No proxy listener — each talks "
+                "on the sidecar API port; a Hermes session that is open now keeps its old hooks "
+                "until it is restarted. No proxy listener — each talks "
                 "directly to its native upstream."
             )
         else:
@@ -13674,9 +13676,9 @@ def _restart_services(
             )
         elif connector == "hermes" and connector_runtime_pending_reload:
             ux.subhead(
-                "hermes connector: protected on-disk registration is current on the sidecar API port; "
-                "runtime_state=pending-reload and live=false until every affected Hermes host is "
-                "reloaded or restarted. No proxy listener — hermes talks directly to its native upstream."
+                "hermes connector: the hooks are registered on the sidecar API port; a Hermes session "
+                "that is open now keeps its old hooks until it is restarted. "
+                "No proxy listener — hermes talks directly to its native upstream."
             )
         else:
             surface = "synchronous policy plugin" if connector == "amp" else "hook bus"
@@ -13687,6 +13689,14 @@ def _restart_services(
 
     click.echo()
     _fail_if_restart_failed(failed)
+
+
+def _pending_reload_hint(connector: str) -> str:
+    if connector == "opencode":
+        return "restart any open OpenCode session so it loads the DefenseClaw plugin"
+    if connector == "hermes":
+        return "restart any open Hermes session so it loads the DefenseClaw hooks"
+    return f"restart any open {connector or 'agent'} session so it loads the DefenseClaw hooks"
 
 
 class _GatewayRestartFailed(click.ClickException):
