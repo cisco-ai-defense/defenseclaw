@@ -1176,11 +1176,9 @@ def _run_mcp_scan(  # type: ignore[no-untyped-def]
         if scanner is None:
             return None
         try:
-            return scanner.scan(
-                entry.name, server_entry=server, allow_private=allow_private
+            return _scan_mcp_and_record(
+                app, scanner, entry.name, server_entry=server, allow_private=allow_private
             )
-        except SystemExit:
-            return None
         except Exception as exc:  # noqa: BLE001
             # The sync engine marks the entry ``error`` and the source
             # STATUS error instead of leaving it silently pending (GAP-1357).
@@ -1204,11 +1202,36 @@ def _run_mcp_scan(  # type: ignore[no-untyped-def]
     if scanner is None:
         return None
     try:
-        return scanner.scan(entry.url, allow_private=allow_private)
-    except SystemExit:
-        return None
+        return _scan_mcp_and_record(app, scanner, entry.url, allow_private=allow_private)
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(f"MCP scan failed for {entry.url}: {exc}") from exc
+
+
+def _scan_mcp_and_record(app: AppContext, scanner, target: str, **kwargs):  # type: ignore[no-untyped-def]
+    """Run one registry MCP scan and record it as 'mcp scan' does (GAP-1881).
+
+    Skill entries go through cmd_skill, which records its scans; the MCP
+    scanner does not, so registry sync left no scan.completed log, scan
+    metric or asset.scan trace. A failed record never fails the scan.
+    """
+    from defenseclaw.commands._scan_ui import record_scan
+
+    try:
+        result = scanner.scan(target, **kwargs)
+    except SystemExit:
+        return None
+    except Exception as exc:
+        if app.logger:
+            try:
+                app.logger.log_scan_failed("mcp-scanner", target, f"scan failed: {exc}")
+            except Exception as log_exc:  # noqa: BLE001 - keep the scan error primary
+                click.echo(f"warning: could not record the failed scan: {log_exc}", err=True)
+        raise
+    try:
+        record_scan(app.logger, result)
+    except Exception as exc:  # noqa: BLE001 - the verdict still drives promotion
+        click.echo(f"warning: could not record the scan of {target}: {exc}", err=True)
+    return result
 
 
 def _registry_mcp_url_allowed(url: str, *, allow_private: bool = False) -> bool:

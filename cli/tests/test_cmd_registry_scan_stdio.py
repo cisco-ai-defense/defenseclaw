@@ -136,5 +136,30 @@ class RegistrySyncScanStdioTests(unittest.TestCase):
         )
 
 
+    def test_sync_records_clean_and_failed_mcp_scans(self):
+        """GAP-1881: registry sync scanned MCP entries but recorded no scan."""
+        from unittest.mock import MagicMock
+
+        self.app.logger = MagicMock()
+        result, _ = self._sync(["--scan-stdio"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        recorded = self.app.logger.log_scan.call_args.args[0]
+        self.assertEqual((recorded.scanner, recorded.target), ("mcp-scanner", "some-mcp"))
+
+        manifest = _stdio_mcp_manifest()
+        raw = json.dumps(manifest.to_dict()).encode("utf-8")
+
+        def _failing_scan(_self, target, server_entry=None, *, allow_private=False):
+            raise ConnectionError("server unreachable")
+
+        with patch("defenseclaw.registries.sync.fetch_manifest",
+                   lambda _source, *, allow_private=False: (manifest, raw)):
+            with patch.object(MCPScannerWrapper, "scan", _failing_scan):
+                self.runner.invoke(registry, ["sync", "corp-mcp", "--scan-stdio"], obj=self.app)
+        self.app.logger.log_scan_failed.assert_called_once_with(
+            "mcp-scanner", "some-mcp", "scan failed: server unreachable",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
