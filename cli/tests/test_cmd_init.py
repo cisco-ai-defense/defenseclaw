@@ -3485,6 +3485,37 @@ class TestMultiConnectorInit(unittest.TestCase):
             self.assertEqual(gc.connectors["codex"].mode, "")
             self.assertEqual(gc.connectors["claudecode"].mode, "action")
 
+    def test_activate_additional_connectors_keeps_a_rule_pack_override(self):
+        """GAP-1713: a re-run of init dropped a saved use-pack override."""
+        from defenseclaw import config as cfg_mod
+        from defenseclaw.commands.cmd_init import _activate_additional_connectors
+
+        with patch.dict(os.environ, {"DEFENSECLAW_HOME": self.tmp_dir}), patch(
+            "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+            return_value=True,
+        ):
+            cfg = cfg_mod.default_config()
+            cfg.guardrail.connector = "codex"
+            cfg.guardrail.enabled = True
+            cfg.save()
+            before = {
+                "claudecode": PerConnectorGuardrailConfig(mode="action", rule_pack_dir="/p/strict", block_at="HIGH"),
+                "codex": PerConnectorGuardrailConfig(rule_pack_dir="/p/custom"),
+            }
+            none = {"fail_mode": None, "human_approval": None, "hilt_min_severity": None}
+            _activate_additional_connectors(
+                {"connector": "codex", "profile": "observe", **none},
+                [{"connector": "claudecode", "profile": "observe", **none}],
+                start_gateway=False,
+                overrides_before=before,
+            )
+            gc = cfg_mod.load().guardrail
+            self.assertEqual(gc.effective_rule_pack_dir("claudecode"), "/p/strict")
+            self.assertEqual(gc.connectors["claudecode"].block_at, "HIGH")
+            self.assertEqual(gc.effective_rule_pack_dir("codex"), "/p/custom")
+            # The mode is the answer given in this init run, not the old override.
+            self.assertEqual(gc.connectors["claudecode"].mode, "")
+
     def test_activate_additional_connectors_leaves_out_unverified_macos_openhands(self):
         from defenseclaw import config as cfg_mod
         from defenseclaw.commands.cmd_init import _activate_additional_connectors
