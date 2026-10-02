@@ -22,6 +22,7 @@ import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
+from time import monotonic
 from typing import Any
 
 from defenseclaw.alert_semantics import (
@@ -64,6 +65,10 @@ _MAX_ROWS = 1000
 LEGACY_HOOK_EVENT_NAME = "legacy.audit.connector.hook"
 _MAX_PAYLOAD_BYTES = 64 * 1024
 _MAX_FINDING_TAGS_BYTES = 16 * 1024
+# After a full alert scan the reader scans only rows added since, plus the
+# alerts it already holds (GAP-1816). A full scan still runs this often, so
+# a missed edge case (an older row that became an alert) heals itself.
+_ALERT_FULL_SCAN_SECONDS = 300.0
 
 
 def _sql_string_values(values: tuple[str, ...]) -> str:
@@ -356,6 +361,12 @@ class V8EventHistoryReader:
         self._schema_version: int | None = None
         self._has_ack_projection = False
         self._columns: frozenset[str] = frozenset()
+        # Incremental alert scan state (GAP-1816): the highest rowid the last
+        # alert scan covered, the alert rowids it selected, and its scope.
+        self._alert_mark: int | None = None
+        self._alert_rowids: tuple[int, ...] = ()
+        self._alert_scope: tuple[object, ...] = ()
+        self._alert_full_at = 0.0
         if self.db is not None:
             self.db.create_function(
                 "dc_hook_decision",
@@ -438,7 +449,76 @@ class V8EventHistoryReader:
         ack_filter = self._alert_ack_filter_sql()
         alert_where = _v8_alert_where_sql(self._columns)
         select_columns = _v8_select_columns(self._columns)
-        rows = self.db.execute(
+        # On a huge legacy audit.db with few alerts, the alert filter walks
+        # every row: seconds of CPU after every gateway write (GAP-1816).
+        # Rows are append-only, so after one full scan only newer rows and
+        # the alerts already selected (re-checked for acks) need the filter.
+        max_rowid = int(self.db.execute("SELECT COALESCE(MAX(rowid), 0) FROM audit_events").fetchone()[0])
+        scope = (self._schema_version, self._has_ack_projection, bounded_alerts)
+        incremental = (
+            self._alert_mark is not None
+            and self._alert_scope == scope
+            and max_rowid >= self._alert_mark
+            and monotonic() - self._alert_full_at < _ALERT_FULL_SCAN_SECONDS
+        )
+        rows = self._query_views(
+            select_columns,
+            alert_where,
+            ack_filter,
+            bounded_history,
+            bounded_alerts,
+            bounded_mutations,
+            (self._alert_mark, json.dumps(self._alert_rowids)) if incremental else None,
+        )
+        alert_rowids = tuple(int(row[1]) for row in rows if int(row[0]) == 1)
+        if incremental and len(self._alert_rowids) >= bounded_alerts > len(alert_rowids):
+            # A full window lost rows (acknowledged or pruned): older alerts
+            # may now belong in it, which only a full scan finds.
+            rows = self._query_views(
+                select_columns, alert_where, ack_filter, bounded_history, bounded_alerts, bounded_mutations, None
+            )
+            alert_rowids = tuple(int(row[1]) for row in rows if int(row[0]) == 1)
+            incremental = False
+        if not incremental:
+            self._alert_full_at = monotonic()
+        self._alert_mark = max_rowid
+        self._alert_rowids = alert_rowids
+        self._alert_scope = scope
+        history_rows = [tuple(row[2:]) for row in rows if int(row[0]) == 0]
+        alert_rows = [tuple(row[2:]) for row in rows if int(row[0]) == 1]
+        mutation_rows = [tuple(row[2:]) for row in rows if int(row[0]) == 2]
+        return (
+            _decode_v8_event_history_rows(history_rows),
+            _decode_v8_event_history_rows(alert_rows),
+            _decode_v8_event_history_rows(mutation_rows),
+        )
+
+    def _query_views(
+        self,
+        select_columns: str,
+        alert_where: str,
+        ack_filter: str,
+        bounded_history: int,
+        bounded_alerts: int,
+        bounded_mutations: int,
+        since: tuple[int | None, str] | None,
+    ) -> list[tuple[Any, ...]]:
+        """Run the combined history/alerts/mutations query.
+
+        ``since`` is ``(mark, json_rowids)``: limit the alert filter to rows
+        after ``mark`` plus the listed rowids. ``None`` scans every row.
+        """
+
+        alert_scope = ""
+        alert_table_hint = ""
+        scope_params: tuple[object, ...] = ()
+        if since is not None:
+            alert_scope = "AND (rowid > ? OR rowid IN (SELECT value FROM json_each(?)))"
+            # Without it SQLite still walks the bucket index over every
+            # legacy row; the rowid range and lookups are the cheap path.
+            alert_table_hint = " NOT INDEXED"
+            scope_params = since
+        return self.db.execute(
             f"""SELECT * FROM (
                WITH history AS (
                    SELECT rowid AS dc_rowid, {select_columns}
@@ -448,18 +528,19 @@ class V8EventHistoryReader:
                ), newest_alerts AS (
                    SELECT rowid AS dc_rowid, timestamp AS dc_timestamp,
                           0 AS dc_priority
-                   FROM audit_events
+                   FROM audit_events{alert_table_hint}
                    WHERE (
                            (signal = 'logs' AND bucket IS NOT NULL AND bucket <> '')
                            OR bucket IS NULL
                        )
                      AND {alert_where}
                      {ack_filter}
+                     {alert_scope}
                    ORDER BY timestamp DESC, rowid DESC LIMIT ?
                ), actionable_alerts AS (
                    SELECT rowid AS dc_rowid, timestamp AS dc_timestamp,
                           1 AS dc_priority
-                   FROM audit_events
+                   FROM audit_events{alert_table_hint}
                    WHERE (
                            (signal = 'logs' AND bucket IS NOT NULL AND bucket <> '')
                            OR bucket IS NULL
@@ -467,6 +548,7 @@ class V8EventHistoryReader:
                      AND {alert_where}
                      AND {_V8_ACTIONABLE_ALERT_WHERE_SQL}
                      {ack_filter}
+                     {alert_scope}
                    ORDER BY timestamp DESC, rowid DESC LIMIT ?
                ), selected_alerts AS (
                    SELECT dc_rowid, MAX(dc_priority) AS dc_priority,
@@ -504,7 +586,9 @@ class V8EventHistoryReader:
                 _MAX_PAYLOAD_BYTES,
                 _MAX_FINDING_TAGS_BYTES,
                 bounded_history,
+                *scope_params,
                 bounded_alerts,
+                *scope_params,
                 bounded_alerts,
                 bounded_alerts,
                 _MAX_PAYLOAD_BYTES,
@@ -516,14 +600,6 @@ class V8EventHistoryReader:
                 bounded_mutations,
             ),
         ).fetchall()
-        history_rows = [tuple(row[2:]) for row in rows if int(row[0]) == 0]
-        alert_rows = [tuple(row[2:]) for row in rows if int(row[0]) == 1]
-        mutation_rows = [tuple(row[2:]) for row in rows if int(row[0]) == 2]
-        return (
-            _decode_v8_event_history_rows(history_rows),
-            _decode_v8_event_history_rows(alert_rows),
-            _decode_v8_event_history_rows(mutation_rows),
-        )
 
     @staticmethod
     def _bounded_limit(limit: int) -> int:

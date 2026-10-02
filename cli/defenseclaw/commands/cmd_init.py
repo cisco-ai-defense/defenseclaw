@@ -168,7 +168,16 @@ _WINDOWS_LAUNCHER_EXECUTABLE = "defenseclaw.exe"
 )
 @click.option("--llm-provider", default="", help="Unified LLM provider (openai, anthropic, ollama, etc.).")
 @click.option("--llm-model", default="", help="Unified LLM model, preferably provider/model.")
-@click.option("--llm-api-key", default="", help="LLM API key to save into .env (config stores only the env name).")
+@click.option(
+    "--llm-api-key",
+    default="",
+    envvar="DEFENSECLAW_INIT_LLM_API_KEY",
+    show_envvar=True,
+    help=(
+        "LLM API key to save into .env (config stores only the env name)."
+        " Command-line values are visible to other local users (ps); prefer the env var."
+    ),
+)
 @click.option(
     "--llm-api-key-env",
     default="DEFENSECLAW_LLM_KEY",
@@ -177,7 +186,16 @@ _WINDOWS_LAUNCHER_EXECUTABLE = "defenseclaw.exe"
 )
 @click.option("--llm-base-url", default="", help="Local/proxy LLM base URL.")
 @click.option("--cisco-endpoint", default="", help="Cisco AI Defense endpoint.")
-@click.option("--cisco-api-key", default="", help="Cisco AI Defense key to save into .env.")
+@click.option(
+    "--cisco-api-key",
+    default="",
+    envvar="DEFENSECLAW_INIT_CISCO_API_KEY",
+    show_envvar=True,
+    help=(
+        "Cisco AI Defense key to save into .env."
+        " Command-line values are visible to other local users (ps); prefer the env var."
+    ),
+)
 @click.option(
     "--cisco-api-key-env",
     default="CISCO_AI_DEFENSE_API_KEY",

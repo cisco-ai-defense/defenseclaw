@@ -32,6 +32,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from time import monotonic
+from types import SimpleNamespace
 
 from defenseclaw.db import Store
 from defenseclaw.models import ActionEntry, Counts, Event
@@ -61,6 +62,9 @@ _MAX_RETRY_SECONDS = 60.0
 _BUSY_MIN_SECONDS = 0.25
 _BUSY_BACKOFF_FACTOR = 4.0
 _MAX_BUSY_BACKOFF_SECONDS = 30.0
+# Block rows for the Audit panel are read incrementally; a full read still
+# runs this often (GAP-1816).
+_BLOCKS_FULL_READ_SECONDS = 300.0
 
 
 @dataclass(frozen=True)
@@ -121,6 +125,9 @@ class TUIReadRepository:
         self._hook_stats: tuple[ConnectorHookStat, ...] = ()
         self._slow_components_loaded_at = 0.0
         self._next_history_at = 0.0
+        self._blocks_mark: int | None = None
+        self._blocks: tuple[Event, ...] = ()
+        self._blocks_read_at = 0.0
 
     async def refresh(
         self,
@@ -238,7 +245,12 @@ class TUIReadRepository:
 
         audit_events = self._component(
             "audit",
-            lambda: tuple(with_older_blocks(store, store.list_event_summaries(_PANEL_LIMIT))),
+            lambda: tuple(
+                with_older_blocks(
+                    SimpleNamespace(list_block_event_summaries=lambda limit: self._block_summaries(store, limit)),
+                    store.list_event_summaries(_PANEL_LIMIT),
+                )
+            ),
             previous.audit_events if previous else (),
             errors,
         )
@@ -352,6 +364,27 @@ class TUIReadRepository:
         self._next_retry_at = 0.0
         self._retry_seconds = 1.0
         return TUIReadResult(self._snapshot, changed)
+
+    def _block_summaries(self, store: Store, limit: int) -> list[Event]:
+        """Block/deny rows for the Audit panel, reading only rows added since.
+
+        The block filter walks every audit row; after each gateway write that
+        cost a large audit.db seconds of CPU (GAP-1816). Audit rows are
+        append-only, so the newer rows go in front of the ones already read.
+        """
+
+        mark = int(store.db.execute("SELECT COALESCE(MAX(rowid), 0) FROM audit_events").fetchone()[0])
+        now = monotonic()
+        if self._blocks_mark is None or mark < self._blocks_mark or now - self._blocks_read_at >= _BLOCKS_FULL_READ_SECONDS:
+            rows = store.list_block_event_summaries(limit)
+            self._blocks_read_at = now
+        else:
+            newer = store.list_block_event_summaries(limit, after_rowid=self._blocks_mark)
+            seen = {event.id for event in newer}
+            rows = [*newer, *(event for event in self._blocks if event.id not in seen)][:limit]
+        self._blocks_mark = mark
+        self._blocks = tuple(rows)
+        return rows
 
     def _load_hook_stats(
         self,

@@ -1463,8 +1463,12 @@ class SetupPanelModel:
             return "defenseclaw " + " ".join(command) if command else "defenseclaw"
         from defenseclaw.tui.command_line import display_argv  # the CLI tree; keep it off the model import
 
+        args, secret_env = wizard_secrets_to_env(args)
         masked = mask_wizard_secret_values(self.form_fields, args)
-        return "defenseclaw " + display_argv(masked) if masked else "defenseclaw"
+        # The run passes these in the environment (GAP-1888); show them the
+        # way a shell would, values hidden.
+        env_prefix = "".join(f"{name}=<redacted> " for name, _value in secret_env)
+        return env_prefix + ("defenseclaw " + display_argv(masked) if masked else "defenseclaw")
 
     def mark_wizard_complete(self, args: Sequence[str], *, success: bool = True, cancelled: bool = False) -> None:
         """Clear the per-wizard "running..." badge after a setup run.
@@ -1579,7 +1583,14 @@ class SetupPanelModel:
                 )
                 return SetupPanelAction(True)
         args = build_wizard_args(self.active_wizard, self.form_fields, self.config)
+        # Secret flag values go to the child's environment, not its argv,
+        # which every local account can read with ps (GAP-1888).
+        args, secret_env = wizard_secrets_to_env(args)
         name = WIZARD_NAMES[int(self.active_wizard)]
+        if self.active_wizard == SetupWizard.OBSERVABILITY:
+            # Named after the chosen destination: a Datadog run said
+            # "setup Observability / Galileo failed" (GAP-1891).
+            name = "Observability / " + observability_preset_label(wizard_field_value(self.form_fields, "Preset"))
         if self.active_wizard == SetupWizard.CONNECTOR_SETUP and len(args) > 1 and not args[1].startswith("-"):
             # "setup claude-code", not "setup Connector Setup" (GAP-1709).
             name = args[1]
@@ -1635,6 +1646,7 @@ class SetupPanelModel:
                 origin="setup-wizard",
                 follow_up=follow_up,
                 secret_stdin=secret_stdin,
+                env_overrides=secret_env,
                 risk=risk,
                 terminal=terminal,
             ),
@@ -5510,6 +5522,46 @@ def render_wizard_value(field: WizardFormField, *, reveal: bool = False) -> str:
     if reveal:
         return field.value or "(empty)"
     return mask_secret(field.value)
+
+
+# Secret flags the Setup wizards fill, with the variable that command reads
+# instead (Click envvar). argv is readable by every local account (ps, /proc),
+# the environment only by the same user (GAP-1888).
+WIZARD_SECRET_ENV: tuple[tuple[tuple[str, ...], str, str], ...] = (
+    (("setup", "observability", "add"), "--token", "DEFENSECLAW_SETUP_OBSERVABILITY_TOKEN"),
+    (("setup", "llm"), "--api-key", "DEFENSECLAW_SETUP_LLM_API_KEY"),
+    (("setup", "gateway"), "--token", "DEFENSECLAW_SETUP_GATEWAY_TOKEN"),
+    (("setup", "splunk"), "--access-token", "DEFENSECLAW_SETUP_SPLUNK_ACCESS_TOKEN"),
+    (("setup", "splunk"), "--hec-token", "DEFENSECLAW_SETUP_SPLUNK_HEC_TOKEN"),
+    (("setup", "splunk", "dashboards"), "--o11y-api-token", "SFX_AUTH_TOKEN"),
+)
+
+
+def wizard_secrets_to_env(args: Sequence[str]) -> tuple[tuple[str, ...], tuple[tuple[str, str], ...]]:
+    """Move secret ``--flag value`` pairs out of argv into env overrides."""
+
+    names = {
+        flag: env_name for prefix, flag, env_name in WIZARD_SECRET_ENV if tuple(args[: len(prefix)]) == prefix
+    }
+    out: list[str] = []
+    env: list[tuple[str, str]] = []
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg in names and index + 1 < len(args):
+            env.append((names[arg], args[index + 1]))
+            index += 2
+            continue
+        out.append(arg)
+        index += 1
+    return tuple(out), tuple(env)
+
+
+def observability_preset_label(preset_id: str) -> str:
+    """Short destination name: 'Datadog', 'Galileo Cloud', 'Generic OTLP'."""
+
+    label = dict(OBSERVABILITY_PRESETS).get(preset_id, preset_id or "destination")
+    return label.split(" / ")[0]
 
 
 def mask_wizard_secret_values(fields: Sequence[WizardFormField], args: Sequence[str]) -> tuple[str, ...]:

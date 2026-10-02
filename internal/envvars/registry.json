@@ -4187,9 +4187,143 @@
         {
           "location": "cli/defenseclaw/commands/cmd_setup_observability.py",
           "description": "Click reads the setup token from the child process environment instead of argv"
+        },
+        {
+          "location": "cli/defenseclaw/tui/panels/setup.py",
+          "description": "The TUI Setup wizard passes the token in the child process environment instead of argv (GAP-1888)"
         }
       ],
       "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_SETUP_LLM_API_KEY",
+      "category": "credential",
+      "purpose": "Secret transport for 'defenseclaw setup llm' (--api-key). Set in the child process environment so the value is not exposed in command-line arguments, which other local users can read; same as the flag.",
+      "default": "unset",
+      "accepted_values": [
+        "secret-value",
+        "unset"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "cli/defenseclaw/commands/cmd_setup.py",
+          "description": "Click reads the flag value from the environment instead of argv"
+        },
+        {
+          "location": "cli/defenseclaw/tui/panels/setup.py",
+          "description": "The TUI Setup wizard passes the secret in the child process environment instead of argv (GAP-1888)"
+        }
+      ],
+      "since": "1.0.0"
+    },
+    {
+      "name": "DEFENSECLAW_SETUP_GATEWAY_TOKEN",
+      "category": "credential",
+      "purpose": "Secret transport for 'defenseclaw setup gateway' (--token). Set in the child process environment so the value is not exposed in command-line arguments, which other local users can read; same as the flag.",
+      "default": "unset",
+      "accepted_values": [
+        "secret-value",
+        "unset"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "cli/defenseclaw/commands/cmd_setup.py",
+          "description": "Click reads the flag value from the environment instead of argv"
+        },
+        {
+          "location": "cli/defenseclaw/tui/panels/setup.py",
+          "description": "The TUI Setup wizard passes the secret in the child process environment instead of argv (GAP-1888)"
+        }
+      ],
+      "since": "1.0.0"
+    },
+    {
+      "name": "DEFENSECLAW_SETUP_SPLUNK_ACCESS_TOKEN",
+      "category": "credential",
+      "purpose": "Secret transport for 'defenseclaw setup splunk' (--access-token). Set in the child process environment so the value is not exposed in command-line arguments, which other local users can read; same as the flag.",
+      "default": "unset",
+      "accepted_values": [
+        "secret-value",
+        "unset"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "cli/defenseclaw/commands/cmd_setup.py",
+          "description": "Click reads the flag value from the environment instead of argv"
+        },
+        {
+          "location": "cli/defenseclaw/tui/panels/setup.py",
+          "description": "The TUI Setup wizard passes the secret in the child process environment instead of argv (GAP-1888)"
+        }
+      ],
+      "since": "1.0.0"
+    },
+    {
+      "name": "DEFENSECLAW_SETUP_SPLUNK_HEC_TOKEN",
+      "category": "credential",
+      "purpose": "Secret transport for 'defenseclaw setup splunk' (--hec-token). Set in the child process environment so the value is not exposed in command-line arguments, which other local users can read; same as the flag.",
+      "default": "unset",
+      "accepted_values": [
+        "secret-value",
+        "unset"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "cli/defenseclaw/commands/cmd_setup.py",
+          "description": "Click reads the flag value from the environment instead of argv"
+        },
+        {
+          "location": "cli/defenseclaw/tui/panels/setup.py",
+          "description": "The TUI Setup wizard passes the secret in the child process environment instead of argv (GAP-1888)"
+        }
+      ],
+      "since": "1.0.0"
+    },
+    {
+      "name": "DEFENSECLAW_INIT_LLM_API_KEY",
+      "category": "credential",
+      "purpose": "Secret transport for 'defenseclaw init' (--llm-api-key). Set in the child process environment so the value is not exposed in command-line arguments, which other local users can read; same as the flag.",
+      "default": "unset",
+      "accepted_values": [
+        "secret-value",
+        "unset"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "cli/defenseclaw/commands/cmd_init.py",
+          "description": "Click reads the flag value from the environment instead of argv"
+        }
+      ],
+      "since": "1.0.0"
+    },
+    {
+      "name": "DEFENSECLAW_INIT_CISCO_API_KEY",
+      "category": "credential",
+      "purpose": "Secret transport for 'defenseclaw init' (--cisco-api-key). Set in the child process environment so the value is not exposed in command-line arguments, which other local users can read; same as the flag.",
+      "default": "unset",
+      "accepted_values": [
+        "secret-value",
+        "unset"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "cli/defenseclaw/commands/cmd_init.py",
+          "description": "Click reads the flag value from the environment instead of argv"
+        }
+      ],
+      "since": "1.0.0"
     },
     {
       "name": "DEFENSECLAW_SETUP_SERVICE_CONTROL_TEST_HELPER",
