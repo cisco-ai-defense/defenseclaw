@@ -881,7 +881,7 @@ func TestKiroWindowsCommandsUseTheAwaitedPowerShellBridge(t *testing.T) {
 	} {
 		command := hookInvocationCommandFor("windows", "kiro", "")
 		if surface != "" {
-			command = kiroHookInvocationCommandFor("windows", "", surface)
+			command = kiroHookInvocationCommandFor("windows", "", surface, false)
 		}
 		if strings.HasPrefix(command, "&") {
 			t.Fatalf("surface %q: the call-operator form loses exit 2: %q", surface, command)
@@ -894,8 +894,16 @@ func TestKiroWindowsCommandsUseTheAwaitedPowerShellBridge(t *testing.T) {
 			t.Fatalf("surface %q: DefenseClaw does not recognize its own command", surface)
 		}
 		// The bare bridge earlier builds wrote stays owned, so Setup replaces it.
-		if runtime.GOOS == "windows" && !kiroCommandOwned(windowsKiroPowerShellBridgeForBinary(launcher, surface), hookInvocationCommandFor("windows", "kiro", "")) {
+		if runtime.GOOS == "windows" && !kiroCommandOwned(windowsKiroPowerShellBridgeForBinary(launcher, surface, false), hookInvocationCommandFor("windows", "kiro", "")) {
 			t.Fatalf("surface %q: DefenseClaw does not recognize the earlier bare bridge", surface)
+		}
+		// Managed Windows passes --enterprise-managed, and DefenseClaw owns that form too.
+		managed := kiroHookInvocationCommandFor("windows", "", surface, true)
+		if !strings.Contains(decodeKiroWindowsBridge(t, managed), "'hook --connector kiro --enterprise-managed") {
+			t.Fatalf("surface %q: managed command lacks --enterprise-managed", surface)
+		}
+		if runtime.GOOS == "windows" && !kiroCommandOwned(managed, hookInvocationCommandFor("windows", "kiro", "")) {
+			t.Fatalf("surface %q: DefenseClaw does not recognize its managed command", surface)
 		}
 	}
 	// Other connectors keep their commands.

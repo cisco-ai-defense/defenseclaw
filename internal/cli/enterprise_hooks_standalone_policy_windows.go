@@ -42,7 +42,7 @@ func init() {
 // standalone removal falls back to the deployment's own hook launcher, the
 // one the files were rendered for.
 func windowsCopilotVSCodeUser(home string, verify, remove bool) error {
-	opts, _, standalone, err := windowsStandaloneGuardianOptions()
+	opts, _, standalone, err := enterpriseHookWindowsGuardianOptions()
 	if !standalone {
 		if !remove || verify || !enterprisehooks.WindowsStandaloneProcess() {
 			return nil

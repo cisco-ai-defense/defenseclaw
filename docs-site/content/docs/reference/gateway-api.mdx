@@ -136,9 +136,18 @@ X-DefenseClaw-Client: cli
 
 | Method | Path | Auth | Purpose |
 | --- | --- | --- | --- |
-| `GET` | `/health` | exempt | Liveness + uptime + version. Used by k8s probes and `defenseclaw doctor`. |
+| `GET` | `/health` | exempt | The full health document: uptime, every subsystem's state and details, provenance and ACP posture. Used by readiness probes, `defenseclaw doctor`, `defenseclaw status`, the TUI, the watchdog and in-agent plugins. |
 | `GET` | `/status` | required | Health, process identity, provenance, an optional connected-gateway hello, legacy singular `connector_mode`, and `connector_modes` (one entry per active connector). Used by `defenseclaw status` and the TUI. |
 | `GET` | `/v1/connectors` | required | Lists every connector registered in the gateway (name, description, source, hook capabilities, tool inspection mode). |
+
+`/health` is unauthenticated by design. Any local process that can reach
+the API port can read it, including another account on a multi-user host.
+The document carries the gateway's config path (which names the owner's
+home directory), the active connectors with per-agent request and block
+counts, and the guardrail, routing and telemetry state, including
+telemetry destinations. It carries no tokens, keys or request content.
+This is accepted so that every health consumer works without a
+credential; see residual R33 in the enterprise threat model.
 
 When `openshell.enabled` is `true`, `/health` includes a `sandbox` subsystem
 for the OpenShell sandbox runtime:

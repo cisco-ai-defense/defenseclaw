@@ -113,6 +113,7 @@ func TestStandaloneForeignCleanupCoversMachinePolicyOnlyUsers(t *testing.T) {
 		cfg, enterpriseHookManifest = previousCfg, previousManifest
 		enterpriseHookLoadEligibleAccounts, enterpriseHookCheckHome, enterpriseHookWorkerRunner = previousLoad, previousCheck, previousRunner
 		enterpriseHookForeignCleanupState.last, enterpriseHookForeignCleanupState.fingerprint = time.Time{}, ""
+		enterpriseHookForeignCleanupState.unrepaired = nil
 	})
 	enterpriseHookForeignCleanupState.last, enterpriseHookForeignCleanupState.fingerprint = time.Time{}, ""
 	cfg = &config.Config{
@@ -307,5 +308,67 @@ func TestRemoveAllRemovesCopilotVSCodeFilesForEveryAvailableAccount(t *testing.T
 		if got == nil || got.HookBinary != "/opt/dc/bin/defenseclaw-hook" || got.HookFile || got.Plugin {
 			t.Fatalf("uid %d: CopilotVSCode = %+v, want a removal for the hook binary", uid, got)
 		}
+	}
+}
+
+// A deleted Copilot VS Code Local hook file is the guardian's to rewrite on
+// its next pass (WIN-R1-25, #1055), not after the cleanup interval; one it
+// could not rewrite waits for the interval.
+func TestStandaloneForeignCleanupRewritesADeletedCopilotLocalHookFileAtOnce(t *testing.T) {
+	previousCfg := cfg
+	previousLoad, previousCheck, previousRunner := enterpriseHookLoadEligibleAccounts, enterpriseHookCheckHome, enterpriseHookWorkerRunner
+	t.Cleanup(func() {
+		cfg = previousCfg
+		enterpriseHookLoadEligibleAccounts, enterpriseHookCheckHome, enterpriseHookWorkerRunner = previousLoad, previousCheck, previousRunner
+		enterpriseHookForeignCleanupState.last, enterpriseHookForeignCleanupState.fingerprint = time.Time{}, ""
+		enterpriseHookForeignCleanupState.unrepaired = nil
+	})
+	enterpriseHookForeignCleanupState.last, enterpriseHookForeignCleanupState.fingerprint = time.Time{}, ""
+	cfg = &config.Config{
+		DeploymentMode: managed.DeploymentModeManagedEnterprise,
+		Enterprise: config.EnterpriseConfig{
+			Profile:       managed.ProfileStandalone,
+			MachinePolicy: config.EnterpriseMachinePolicyConfig{Connectors: map[string]config.EnterpriseConnectorPolicy{"copilot": {}}},
+		},
+	}
+	home := t.TempDir()
+	enterpriseHookLoadEligibleAccounts = func(string) ([]enterprisehooks.UnixEligibleAccount, error) {
+		return []enterprisehooks.UnixEligibleAccount{{User: "alice", UID: 4242, GID: 4242, Home: home}}, nil
+	}
+	enterpriseHookCheckHome = func(string, int) enterprisehooks.HomeCheck {
+		return enterprisehooks.HomeCheck{State: enterprisehooks.HomeAvailable}
+	}
+	runs := 0
+	enterpriseHookWorkerRunner = func(_ context.Context, account enterpriseHookWorkerAccount, request enterpriseHookWorkerRequest) (enterpriseHookWorkerResponse, error) {
+		runs++
+		request.Home = account.Home // as the worker spawn does
+		return enterpriseHookWorkerResponse{CopilotVSCode: runEnterpriseHookWorkerCopilotVSCode(request)}, nil
+	}
+	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	runEnterpriseHookStandaloneForeignCleanup(context.Background(), &bytes.Buffer{}, now, nil)
+	hookFile := enterprisepolicy.CopilotVSCodeLocalHookFilePath(home)
+	runEnterpriseHookStandaloneForeignCleanup(context.Background(), &bytes.Buffer{}, now.Add(time.Minute), nil)
+	if _, err := os.Stat(hookFile); err != nil || runs != 1 {
+		t.Fatalf("first pass must place the file and the next stay idle: runs=%d err=%v", runs, err)
+	}
+	if err := os.Remove(hookFile); err != nil {
+		t.Fatal(err)
+	}
+	runEnterpriseHookStandaloneForeignCleanup(context.Background(), &bytes.Buffer{}, now.Add(2*time.Minute), nil)
+	if _, err := os.Stat(hookFile); err != nil || runs != 2 {
+		t.Fatalf("a deleted hook file must be rewritten on the next pass: runs=%d err=%v", runs, err)
+	}
+	// One the worker cannot rewrite waits for the interval, not every pass.
+	enterpriseHookWorkerRunner = func(context.Context, enterpriseHookWorkerAccount, enterpriseHookWorkerRequest) (enterpriseHookWorkerResponse, error) {
+		runs++
+		return enterpriseHookWorkerResponse{}, nil
+	}
+	if err := os.Remove(hookFile); err != nil {
+		t.Fatal(err)
+	}
+	runEnterpriseHookStandaloneForeignCleanup(context.Background(), &bytes.Buffer{}, now.Add(3*time.Minute), nil)
+	runEnterpriseHookStandaloneForeignCleanup(context.Background(), &bytes.Buffer{}, now.Add(4*time.Minute), nil)
+	if runs != 3 {
+		t.Fatalf("an unrepaired hook file must not re-run the cleanup every pass: runs=%d", runs)
 	}
 }

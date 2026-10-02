@@ -26,8 +26,8 @@ import (
 )
 
 // TestCopilotVSCodeLocalAndManagedSettings covers the per-user Local hook
-// file and plugin (written, recognized as DefenseClaw's by the guard, never
-// overwriting a user's file) and the managed-settings keys (plugin enabled,
+// file and plugin (written, recognized as DefenseClaw's by the guard) and
+// the managed-settings keys (plugin enabled,
 // the managed-only lock only once its gate passes, removal keeping the
 // administrator's keys).
 func TestCopilotVSCodeLocalAndManagedSettings(t *testing.T) {
@@ -83,20 +83,16 @@ func TestCopilotVSCodeLocalAndManagedSettings(t *testing.T) {
 		t.Fatalf("removal: %s", got)
 	}
 
-	foreign := `{"hooks":{"PreToolUse":[{"type":"command","command":"user-tool"}]}}`
-	writeFile(t, hookFile, foreign)
-	if result := ensure(false, false); len(result.Kept) != 1 || result.Kept[0] != hookFile {
-		t.Fatalf("user's hook file not kept: %+v", result)
-	}
-	if got := readFile(t, hookFile); got != foreign {
-		t.Fatalf("user's hook file changed: %s", got)
-	}
+	ensure(false, false)
 	if _, err := os.Stat(filepath.Dir(CopilotPluginDir(home))); !os.IsNotExist(err) {
 		t.Fatalf("plugin directories left behind: %v", err)
 	}
 }
 
-func TestCopilotVSCodeRepairsAnEmptiedHookFile(t *testing.T) {
+// The Local hook file is the guardian's (WIN-R1-25): verify reports a
+// deleted or edited copy as drift, setup rewrites it and uninstall removes
+// it, whatever the user left at its name.
+func TestCopilotVSCodeRepairsATamperedHookFile(t *testing.T) {
 	home := t.TempDir()
 	run := func(keep, dryRun bool) CopilotVSCodeUserResult {
 		t.Helper()
@@ -110,20 +106,42 @@ func TestCopilotVSCodeRepairsAnEmptiedHookFile(t *testing.T) {
 	}
 	run(true, false)
 	hookFile := CopilotVSCodeLocalHookFilePath(home)
-	if err := os.WriteFile(hookFile, []byte("{}"), 0o600); err != nil {
+	if err := os.Remove(hookFile); err != nil {
+		t.Fatal(err)
+	}
+	if result := run(true, true); len(result.Changed) != 1 {
+		t.Fatalf("verify must report the deleted hook file as drift: %+v", result)
+	}
+	// Edited and marked read-only (0o400 sets the Windows read-only
+	// attribute), which a rename alone cannot replace there.
+	edited := []byte(`{"hooks":{"PreToolUse":[{"type":"command","command":"user-tool"}]}}`)
+	if err := os.WriteFile(hookFile, edited, 0o400); err != nil {
 		t.Fatal(err)
 	}
 	if result := run(true, true); len(result.Changed) != 1 || len(result.Kept) != 0 {
-		t.Fatalf("verify must report the emptied hook file as drift: %+v", result)
+		t.Fatalf("verify must report the edited hook file as drift: %+v", result)
 	}
 	if result := run(true, false); !result.HookFileOK {
-		t.Fatalf("setup must repair the emptied hook file: %+v", result)
+		t.Fatalf("setup must repair the edited hook file: %+v", result)
 	}
-	if err := os.WriteFile(hookFile, []byte(`{"hooks":{"PreToolUse":[]}}`), 0o600); err != nil {
+	// A directory (or link) a user puts at the name is replaced too.
+	if err := os.Remove(hookFile); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(hookFile, "nested"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if result := run(true, false); !result.HookFileOK || readFile(t, hookFile) == "" {
+		t.Fatalf("setup must replace a directory at the hook file: %+v", result)
+	}
+	if err := os.Remove(hookFile); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(hookFile, "nested"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if result := run(false, false); len(result.Removed) != 1 {
-		t.Fatalf("uninstall must remove the emptied hook file: %+v", result)
+		t.Fatalf("uninstall must remove whatever is at the hook file: %+v", result)
 	}
 	if _, err := os.Stat(hookFile); !os.IsNotExist(err) {
 		t.Fatalf("hook file left behind: %v", err)
