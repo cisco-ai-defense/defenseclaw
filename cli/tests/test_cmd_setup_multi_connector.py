@@ -39,6 +39,7 @@ import stat
 import sys
 import unittest
 from dataclasses import replace
+from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
 import click
@@ -1371,6 +1372,28 @@ class TestRemoveConnector(unittest.TestCase):
         self.assertIn("the agents may not be", message)
         self.assertIn("Setup restored the prior connector configuration and runtime", message)
         self.assertNotIn("[ref ", message)
+
+    def test_rollback_that_restarted_the_gateway_does_not_say_start_it(self):
+        # GAP-1872: the rollback restarted the gateway on the previous
+        # connectors; "may not be protected, run defenseclaw-gateway start"
+        # told the user to start a gateway that was already running.
+        self._seed_map("codex")
+        snapshot = cmd_setup._capture_setup_config_snapshot(self.app.cfg)
+        try:
+            cmd_setup._fail_if_restart_failed(["defenseclaw-gateway"])
+        except click.ClickException as exc:
+            cause = exc
+        with (
+            patch("defenseclaw.commands.cmd_setup._restart_restored_connector_runtime"),
+            self.assertRaises(click.ClickException) as raised,
+        ):
+            cmd_setup._rollback_failed_connector_application(self.app, snapshot, cause)
+
+        message = raised.exception.format_message()
+        self.assertIn("restored the prior connector configuration and runtime", message)
+        self.assertIn("previous connectors, which stay protected", message)
+        self.assertNotIn("may not be protected", message)
+        self.assertNotIn("defenseclaw-gateway start", message)
 
     # D3=A: --no-restart does NOT bounce and warns teardown is deferred.
     def test_remove_no_restart_defers_teardown(self):
@@ -3397,6 +3420,23 @@ class TestPerConnectorModeAndPreserve(unittest.TestCase):
         self.assertEqual(r.exit_code, 0, msg=r.output)
         self.assertEqual(self.app.cfg.guardrail.detection_strategy, "regex_judge")
         self.assertFalse(self.app.cfg.guardrail.judge.enabled)
+
+
+class JudgePickerDefaults(unittest.TestCase):
+    def test_judge_add_connector_stays_checked_while_the_judge_is_off(self):
+        # GAP-1933: `guardrail judge add claudecode` lists claudecode with the
+        # judge off and points to `setup guardrail`, whose picker showed it
+        # unchecked, so Enter dropped it.
+        labels = {"claudecode": "Claude Code", "codex": "Codex"}
+
+        def picked(enabled, gate):
+            gc = SimpleNamespace(judge=SimpleNamespace(enabled=enabled, hook_connectors=gate))
+            return cmd_setup._default_batch_judge_labels(["claudecode", "codex"], gc, labels)
+
+        self.assertEqual(picked(False, ["claudecode"]), ["Claude Code"])
+        self.assertEqual(picked(False, ["*"]), [])
+        self.assertEqual(picked(False, []), [])
+        self.assertEqual(picked(True, ["*"]), ["Claude Code", "Codex"])
 
 
 if __name__ == "__main__":

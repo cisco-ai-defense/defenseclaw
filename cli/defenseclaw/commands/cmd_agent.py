@@ -5112,8 +5112,20 @@ def _resolve_component(
             continue
         matches.append(c)
     if not matches:
-        scope = f" in ecosystem {ecosystem!r}" if ecosystem else ""
-        return {}, f"component {name!r} not found{scope}"
+        from defenseclaw import ux
+
+        # GAP-1928: name the components there are, like policy show does.
+        known = (
+            c.get("name")
+            for c in payload.get("components", []) or []
+            if not eco_filter or str(c.get("ecosystem", "")).lower() == eco_filter
+        )
+        message = ux.not_found_message(
+            "component", name, known, "defenseclaw agent components", empty="No components were found."
+        )
+        if ecosystem:
+            message = message.replace(" not found.", f" not found in ecosystem {ecosystem!r}.", 1)
+        return {}, message
     if len(matches) > 1:
         ecos = sorted({str(c.get("ecosystem", "")) for c in matches})
         return {}, (

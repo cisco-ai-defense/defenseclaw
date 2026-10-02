@@ -38,6 +38,7 @@ import atexit
 import os
 import re
 import sys
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 
@@ -555,6 +556,32 @@ def err(text: str, *, indent: str = "  ", marker: str = "✗") -> None:
     :func:`click.echo` with ``err=True`` directly.
     """
     echo(f"{indent}{_style(marker, fg='red', bold=True)} {_style(text, fg='red')}")
+
+
+def not_found_message(
+    kind: str,
+    name: str,
+    available: Iterable[object],
+    list_command: str,
+    *,
+    empty: str = "",
+    limit: int = 12,
+) -> str:
+    """One wording for an unknown name on show/enable/... commands (GAP-1818, GAP-1928).
+
+    ``kind 'name' not found. Available: a, b. Run `<list_command>` for details.``
+    Callers add the ``Error:`` prefix (``click.ClickException`` does) and exit 1.
+    """
+    names = sorted({str(item) for item in available if item is not None and str(item)})
+    text = f"{kind} '{name}' not found."
+    if names:
+        shown = ", ".join(names[:limit])
+        if len(names) > limit:
+            shown += f" and {len(names) - limit} more"
+        text += f" Available: {shown}."
+    else:
+        text += " " + (empty or f"No {kind}s are configured.")
+    return f"{text} Run `{list_command}` for details."
 
 
 def kv(
