@@ -53,6 +53,11 @@ func inCommandTree(c *cobra.Command, names []string) bool {
 // usageError adds the usage line and a --help pointer to err and gives it
 // exit status 2, the shape and status the Python defenseclaw CLI uses.
 func usageError(c *cobra.Command, err error) error {
+	return withExitCode(&delegatedUsageError{msg: usageMessage(c, err), err: err}, 2)
+}
+
+// usageMessage is err with the command's usage line and the --help pointer.
+func usageMessage(c *cobra.Command, err error) string {
 	use := c.UseLine()
 	if c.HasAvailableSubCommands() {
 		// Show the subcommand form too, as --help does (GAP-1622).
@@ -64,7 +69,7 @@ func usageError(c *cobra.Command, err error) error {
 		}
 	}
 	msg := fmt.Sprintf("%v\nUsage: %s\nTry '%s --help' for help.", err, use, c.CommandPath())
-	return withExitCode(&delegatedUsageError{msg: delegatedCommandText(c, msg), err: err}, 2)
+	return delegatedCommandText(c, msg)
 }
 
 // delegatedFromEnv is set by the Python CLI when it runs a gateway command on
