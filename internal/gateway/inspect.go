@@ -224,7 +224,7 @@ func (a *APIServer) managedAIDOnly() bool {
 	return a != nil && a.scannerCfg != nil && a.scannerCfg.ManagedAIDOnly()
 }
 
-// aidToolCall is a tool invocation for the managed lane.
+// aidToolCall is a tool invocation sent to AID as a structured tool call.
 type aidToolCall struct {
 	Name string
 	ID   string
@@ -428,7 +428,7 @@ func toolCallArgsCarryable(req *ToolInspectRequest) bool {
 	return json.Unmarshal(req.Args, &object) == nil
 }
 
-// hookAIDInspectTool sends the invocation as a tool call beside the text form,
+// hookAIDInspectTool sends the invocation as a tool call ahead of the text form,
 // and as text alone when the arguments cannot be carried as fields.
 func (a *APIServer) hookAIDInspectTool(
 	ctx context.Context,
@@ -456,9 +456,11 @@ func toolCallWireID(call aidToolCall) string {
 	return "dc-" + hex.EncodeToString(sum[:8])
 }
 
-// hookAIDInspectToolCall sends the text form as a user message and the same
-// invocation as an assistant tool call: assistant role, arguments as a JSON
-// string. Text rules keep their input, field rules gain one.
+// hookAIDInspectToolCall sends the invocation as an assistant tool call, with
+// arguments as a JSON string, followed by the message hookAIDInspect would send
+// for it. That user message is unchanged and stays last: AID takes the
+// direction from the last role, so the request path, its policies and the
+// text rules' input are what they were, and the tool call only adds to them.
 func (a *APIServer) hookAIDInspectToolCall(
 	ctx context.Context,
 	call aidToolCall,
@@ -490,8 +492,8 @@ func (a *APIServer) hookAIDInspectToolCall(
 	}
 	defer yieldHookRunSlot(ctx)()
 	return a.ciscoInspector.Inspect(ctx, []ChatMessage{
-		{Role: "user", Content: hookAIDToolText(name, content)},
 		{Role: "assistant", ToolCalls: toolCalls},
+		{Role: "user", Content: hookAIDToolText(call.Name, content)},
 	})
 }
 

@@ -13,14 +13,16 @@ const (
 )
 
 // AIDWireVersionChatToolCalls names the encoding a hook surface is sent in:
-// the flattened text as a user message, and the invocation as an assistant
-// tool call whose arguments are a JSON string. Changing the encoding takes a
-// new version here, which the manifest parity test then requires.
+// the flattened text as a user message, the same one sent before tool calls
+// were carried, and for a tool invocation an assistant tool call whose
+// arguments are a JSON string, placed ahead of that text so the text stays the
+// last message. Changing the encoding takes a new version here, which the
+// manifest parity test then requires.
 const AIDWireVersionChatToolCalls = "chat-tool-calls-v1"
 
 // aidPromptSurfaceEvents and aidToolResultSurfaceEvents are the canonical
 // spellings each surface accepts, mirroring the runtime classification in
-// isPromptLikeEvent / isResultLikeEvent. TestAgentHookAIDSurfaceEventsMatchRuntime
+// isPromptLikeEvent / isResultLikeEvent. TestAIDSurfaceEventsMatchRuntimeClassification
 // fails if the two ever disagree.
 var aidPromptSurfaceEvents = map[string]bool{
 	"userpromptsubmit": true, "userpromptsubmitted": true, "userprompttransformed": true,

@@ -16,6 +16,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -468,6 +469,63 @@ func TestHookManagedAIDOnly_ToolPolicyBlock(t *testing.T) {
 	v := a.inspectToolPolicy(req)
 	if v == nil || v.Action != "block" {
 		t.Fatalf("managed tool policy with AID block: want block, got %+v", v)
+	}
+}
+
+// A managed PreToolUse goes out as the tool call followed by the text form the
+// managed lane sent before, byte for byte, so the text stays the last message
+// and AID keeps the request path.
+func TestHookManagedAIDOnly_ToolCallKeepsTextForm(t *testing.T) {
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"is_safe":true,"action":"Allow","rules":[]}`)
+	}))
+	t.Cleanup(srv.Close)
+	client := NewCiscoDefenseClawInspectClient(&config.CiscoAIDefenseConfig{
+		Endpoint:  srv.URL,
+		TimeoutMs: 3000,
+	}, newFakeCloudProvider("cmid-token-1"))
+	if client == nil {
+		t.Fatal("expected managed client")
+	}
+	a := managedHookServer(client)
+
+	const args = `{"command":"rm -rf /"}`
+	send := func(req *ToolInspectRequest) []json.RawMessage {
+		t.Helper()
+		gotBody = nil
+		if v := a.inspectToolPolicy(req); v == nil || v.Action != "allow" {
+			t.Fatalf("verdict = %+v, want AID's allow", v)
+		}
+		var payload struct {
+			Messages []json.RawMessage `json:"messages"`
+		}
+		if err := json.Unmarshal(gotBody, &payload); err != nil {
+			t.Fatalf("unmarshal: %v (body=%s)", err, gotBody)
+		}
+		return payload.Messages
+	}
+	textOnly := send(&ToolInspectRequest{Tool: "Bash", Args: json.RawMessage(args)})
+	withCall := send(&ToolInspectRequest{
+		Tool:      "Bash",
+		Args:      json.RawMessage(args),
+		Direction: "tool_call",
+		toolUseID: "toolu_01U3wpX",
+	})
+
+	const text = `{"content":{"text":"Tool call: Bash\n{\"command\":\"rm -rf /\"}"},"role":"user"}`
+	if len(textOnly) != 1 || string(textOnly[0]) != text {
+		t.Fatalf("text form = %s, want %s", textOnly, text)
+	}
+	if len(withCall) != 2 || string(withCall[1]) != text {
+		t.Fatalf("messages = %s, want the tool call, then %s", withCall, text)
+	}
+	const toolCall = `{"content":{"text":""},"role":"assistant","tool_calls":[{"function":` +
+		`{"arguments":"{\"command\":\"rm -rf /\"}","name":"Bash"},"id":"toolu_01U3wpX","type":"function"}]}`
+	if string(withCall[0]) != toolCall {
+		t.Errorf("tool call message = %s, want %s", withCall[0], toolCall)
 	}
 }
 

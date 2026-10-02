@@ -5,11 +5,14 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -592,9 +595,9 @@ func TestCiscoInspectClient_NonManagedHookSendsToolCall(t *testing.T) {
 		t.Fatalf("unmarshal: %v (body=%s)", err, gotBody)
 	}
 	if len(payload.Messages) != 2 {
-		t.Fatalf("want the text form and the tool call; body = %s", gotBody)
+		t.Fatalf("want the tool call and the text form; body = %s", gotBody)
 	}
-	text, structured := payload.Messages[0], payload.Messages[1]
+	structured, text := payload.Messages[0], payload.Messages[1]
 	if text.Role != "user" || !strings.Contains(text.Content, "rm -rf / --no-preserve-root") {
 		t.Errorf("text form = %+v", text)
 	}
@@ -651,10 +654,10 @@ func TestCiscoInspectClient_ToolUseIDReachesWire(t *testing.T) {
 	if err := json.Unmarshal(gotBody, &payload); err != nil {
 		t.Fatalf("unmarshal: %v (body=%s)", err, gotBody)
 	}
-	if len(payload.Messages) != 2 || len(payload.Messages[1].ToolCalls) != 1 {
-		t.Fatalf("want the text form and one tool call; body = %s", gotBody)
+	if len(payload.Messages) != 2 || len(payload.Messages[0].ToolCalls) != 1 {
+		t.Fatalf("want one tool call and the text form; body = %s", gotBody)
 	}
-	if got := payload.Messages[1].ToolCalls[0].ID; got != "call_from_connector_42" {
+	if got := payload.Messages[0].ToolCalls[0].ID; got != "call_from_connector_42" {
 		t.Errorf("tool call id = %q, want the connector's id", got)
 	}
 }
@@ -680,5 +683,119 @@ func TestCiscoInspectClient_NoArgsFallsBackToText(t *testing.T) {
 	}
 	if strings.Contains(string(gotBody), `"tool_calls"`) {
 		t.Errorf("tool_calls must be absent without args; body = %s", gotBody)
+	}
+}
+
+// Adding the tool call leaves the text form exactly as it is sent without one,
+// and keeps it the last message: AID takes the direction from the last role,
+// so the request path, its policies and the text rules' input are unchanged.
+func TestHookAIDToolCall_TextFormUnchangedAndLast(t *testing.T) {
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"is_safe":true,"action":"Allow","rules":[]}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	apiKey := testAPIServerWithConfig(t, "action")
+	apiKeyClient := newCiscoInspectTestClient(t, srv.URL, "TEST_TOOL_CALL_TEXT_FORM")
+	apiKeyClient.client = srv.Client()
+	apiKey.SetCiscoInspector(apiKeyClient)
+	managedClient := NewCiscoDefenseClawInspectClient(&config.CiscoAIDefenseConfig{
+		Endpoint:  srv.URL,
+		TimeoutMs: 3000,
+	}, newFakeCloudProvider("cmid-token-1"))
+	if managedClient == nil {
+		t.Fatal("expected managed client")
+	}
+
+	const args = `{"command":"rm -rf /"}`
+	for _, lane := range []struct {
+		name string
+		api  *APIServer
+		// bashText is the text form for tool "Bash", as main sends it.
+		bashText     string
+		emptyContent interface{}
+	}{
+		{
+			name:         "api-key",
+			api:          apiKey,
+			bashText:     `{"content":"Tool call: Bash\n{\"command\":\"rm -rf /\"}","role":"user"}`,
+			emptyContent: "",
+		},
+		{
+			name:         "managed",
+			api:          managedHookServer(managedClient),
+			bashText:     `{"content":{"text":"Tool call: Bash\n{\"command\":\"rm -rf /\"}"},"role":"user"}`,
+			emptyContent: map[string]interface{}{"text": ""},
+		},
+	} {
+		// A blank tool name keeps main's text form; only function.name falls
+		// back to "tool".
+		for _, tool := range []string{"Bash", "", " "} {
+			t.Run(lane.name+"/"+strconv.Quote(tool), func(t *testing.T) {
+				messages := func(send func()) []json.RawMessage {
+					t.Helper()
+					gotBody = nil
+					send()
+					var payload struct {
+						Messages []json.RawMessage `json:"messages"`
+					}
+					if err := json.Unmarshal(gotBody, &payload); err != nil {
+						t.Fatalf("unmarshal: %v (body=%s)", err, gotBody)
+					}
+					return payload.Messages
+				}
+				textOnly := messages(func() { lane.api.hookAIDInspect(t.Context(), tool, args) })
+				withCall := messages(func() {
+					lane.api.hookAIDInspectToolCall(t.Context(), aidToolCall{
+						Name: tool,
+						ID:   "toolu_1",
+						Args: json.RawMessage(args),
+					}, args)
+				})
+				if len(textOnly) != 1 || len(withCall) != 2 {
+					t.Fatalf("messages = %d and %d, want 1 and 2", len(textOnly), len(withCall))
+				}
+				if !bytes.Equal(withCall[1], textOnly[0]) {
+					t.Errorf("last message = %s, want the text form unchanged: %s", withCall[1], textOnly[0])
+				}
+				if tool == "Bash" && string(textOnly[0]) != lane.bashText {
+					t.Errorf("text form = %s, want %s", textOnly[0], lane.bashText)
+				}
+
+				var structured struct {
+					Role      string      `json:"role"`
+					Content   interface{} `json:"content"`
+					ToolCalls []struct {
+						ID       string `json:"id"`
+						Type     string `json:"type"`
+						Function struct {
+							Name      string `json:"name"`
+							Arguments string `json:"arguments"`
+						} `json:"function"`
+					} `json:"tool_calls"`
+				}
+				if err := json.Unmarshal(withCall[0], &structured); err != nil {
+					t.Fatalf("unmarshal tool call message: %v (%s)", err, withCall[0])
+				}
+				if structured.Role != "assistant" || !reflect.DeepEqual(structured.Content, lane.emptyContent) {
+					t.Errorf("tool call message = %s, want assistant with empty content", withCall[0])
+				}
+				wantName := tool
+				if strings.TrimSpace(tool) == "" {
+					wantName = "tool"
+				}
+				if len(structured.ToolCalls) != 1 {
+					t.Fatalf("tool_calls = %d, want 1 (%s)", len(structured.ToolCalls), withCall[0])
+				}
+				call := structured.ToolCalls[0]
+				if call.ID != "toolu_1" || call.Type != "function" ||
+					call.Function.Name != wantName || call.Function.Arguments != args {
+					t.Errorf("tool call = %+v, want id toolu_1, function %q(%s)", call, wantName, args)
+				}
+			})
+		}
 	}
 }

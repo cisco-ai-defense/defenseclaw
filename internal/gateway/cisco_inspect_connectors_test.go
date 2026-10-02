@@ -192,9 +192,10 @@ func TestCiscoInspectClient_ConnectorToolCallPayloads(t *testing.T) {
 			got := decodeAIDWire(t, captureAIDPayloadForConnector(t, test.connector, payload, test.headers))
 
 			if len(got.Messages) != 2 {
-				t.Fatalf("messages = %d, want the text form and the tool call", len(got.Messages))
+				t.Fatalf("messages = %d, want the tool call and the text form", len(got.Messages))
 			}
-			text, structured := got.Messages[0], got.Messages[1]
+			// The text form stays last, so AID keeps the request path.
+			structured, text := got.Messages[0], got.Messages[1]
 			if text.Role != "user" {
 				t.Errorf("text role = %q, want user", text.Role)
 			}
@@ -222,6 +223,9 @@ func TestCiscoInspectClient_ConnectorToolCallPayloads(t *testing.T) {
 			if !reflect.DeepEqual(args, test.args) {
 				t.Errorf("arguments = %v, want %v", args, test.args)
 			}
+			if want := "Tool call: " + test.tool + "\n" + call.Function.Arguments; text.Content != want {
+				t.Errorf("text content = %q, want the same invocation as text %q", text.Content, want)
+			}
 			if call.ID == nil || *call.ID == "" {
 				t.Errorf("id = %v, want a non-empty id on every tool call", call.ID)
 			} else if test.wantID != "" && *call.ID != test.wantID {
@@ -234,8 +238,9 @@ func TestCiscoInspectClient_ConnectorToolCallPayloads(t *testing.T) {
 // A payload with no tool-argument object leaves args as the whole hook envelope,
 // which cannot stand as tool-call fields, so only the text form is sent.
 func TestCiscoInspectClient_HookEnvelopeArgsStayText(t *testing.T) {
-	body := captureAIDPayloadForConnector(t, "windsurf", map[string]interface{}{
-		"hook_event_name": "pre_run_command",
+	body := captureAIDPayloadForConnector(t, "devin", map[string]interface{}{
+		"hook_event_name": "PreToolUse",
+		"tool_name":       "exec",
 		"session_id":      "dc-envelope",
 		"execution_id":    "e1",
 		"command":         "rm -rf /",
