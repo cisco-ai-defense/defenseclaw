@@ -232,6 +232,26 @@ class KeptAndNextStepsTests(unittest.TestCase):
         self.assertIn("Remove-Item -LiteralPath", text)
         self.assertIn(f"'{root / 'defenseclaw.exe'}'", text)
 
+    def test_binaries_only_next_steps_do_not_run_defenseclaw(self):
+        # GAP-1745: --binaries removed the command the old next steps named.
+        plan = cmd_uninstall.UninstallPlan(
+            data_dir="/home/u/.defenseclaw", install_root="/home/u/.local/bin", remove_binaries=True
+        )
+        with patch("defenseclaw.upgrade_shim.managed_deployment", return_value=None), \
+                capture_click_output() as buf:
+            cmd_uninstall._render_kept_and_next_steps(plan)
+        text = buf.getvalue()
+        self.assertIn("/home/u/.defenseclaw: config, audit log, policies and secrets", text)
+        self.assertIn("rm -rf /home/u/.defenseclaw", text)
+        self.assertIn("install.sh | bash", text)
+        self.assertNotIn("  • turn protection back on:   defenseclaw", text)
+        self.assertNotIn("defenseclaw uninstall --all", text)
+
+        with patch("defenseclaw.upgrade_shim.managed_deployment", return_value="/etc/x"), \
+                capture_click_output() as buf:
+            cmd_uninstall._render_kept_and_next_steps(plan)
+        self.assertNotIn("reinstall", buf.getvalue())
+
     def test_full_uninstall_prints_nothing(self):
         plan = cmd_uninstall.UninstallPlan(data_dir="/d", install_root="/b", remove_data_dir=True, remove_binaries=True)
         with capture_click_output() as buf:

@@ -77,6 +77,22 @@ class JudgeBedrockSetupTests(unittest.TestCase):
         self.assertNotIn("has no value", res.output)
         save.assert_called_once()
 
+    def test_setup_llm_role_judge_header_names_keyless_auth(self) -> None:
+        """GAP-1730: the Current line shows the Bedrock auth, not an API key env."""
+        self.app.cfg.guardrail.judge.llm = _instance_role_llm()
+
+        with (
+            mock.patch.object(cmd_setup, "_maybe_inherit_existing_llm", return_value=None),
+            mock.patch.object(cmd_setup, "_configure_llm"),
+            mock.patch.object(self.app.cfg, "save"),
+        ):
+            res = CliRunner().invoke(setup, ["llm", "--role", "judge"], obj=self.app, input="", catch_exceptions=False)
+
+        self.assertEqual(res.exit_code, 0, res.output)
+        current = next(line for line in res.output.splitlines() if "Current:" in line)
+        self.assertIn(f"provider=bedrock, model={HAIKU}, region=us-east-1, auth=instance_role", current)
+        self.assertNotIn("api_key_env", current)
+
     def test_declining_save_without_key_names_the_role(self) -> None:
         """GAP-1490: the rerun hint keeps --role judge."""
 

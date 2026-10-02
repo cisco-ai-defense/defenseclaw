@@ -2111,13 +2111,17 @@ def _scan_one_local_skill(
     from defenseclaw.enforce import PolicyEngine
 
     name = os.path.basename(scan_dir)
+    # An ad-hoc path scan is not from a connector config, so its JSON names
+    # no connector, like the text banner (GAP-1766). Policy checks still use
+    # the resolved connector.
+    json_connector = "" if adhoc else connector
 
     if _is_bundled_skill_scan_path(scan_dir):
         payload = _skill_scan_skipped_json_payload(
             name,
             scan_dir,
             reason="vendor-bundled",
-            connector=connector,
+            connector=json_connector,
         )
         if as_json:
             _emit_skill_json_payload(payload, json_sink=json_sink)
@@ -2135,7 +2139,7 @@ def _scan_one_local_skill(
             payload = _skill_scan_error_json_payload(
                 scan_dir,
                 RuntimeError(f"{name} is blocked by policy"),
-                connector=connector,
+                connector=json_connector,
             )
             _emit_skill_json_payload(payload, json_sink=json_sink)
             if json_sink is None:
@@ -2175,7 +2179,7 @@ def _scan_one_local_skill(
                 name,
                 scan_dir,
                 reason="manual-allow",
-                connector=connector,
+                connector=json_connector,
             )
             _emit_skill_json_payload(payload, json_sink=json_sink)
             return payload
@@ -2203,7 +2207,7 @@ def _scan_one_local_skill(
         if as_json:
             if captured_stdout is not None:
                 _emit_captured_scan_stdout(captured_stdout.getvalue())
-            payload = _skill_scan_error_json_payload(scan_dir, exc, connector=connector)
+            payload = _skill_scan_error_json_payload(scan_dir, exc, connector=json_connector)
             _emit_skill_json_payload(payload, json_sink=json_sink)
             if json_sink is None:
                 raise SystemExit(1)
@@ -2215,7 +2219,7 @@ def _scan_one_local_skill(
 
     payload: dict[str, Any] | None = None
     if as_json:
-        payload = _skill_scan_result_json_payload(result, connector=connector)
+        payload = _skill_scan_result_json_payload(result, connector=json_connector)
         _emit_skill_json_payload(payload, json_sink=json_sink)
     else:
         # Per-target glyph line (S6.3 — shared scan UX) sits above the

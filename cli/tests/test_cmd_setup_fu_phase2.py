@@ -3148,17 +3148,23 @@ class TestInteractiveModeJudgePrompts(_BaseSetup):
         class _StopError(Exception):
             pass
 
-        def preselect(targets):
-            seen.append(tuple(targets))
-            raise _StopError
-
+        # GAP-1753: no first-run picker; the kept set is named up front. The
+        # "Enable guardrail?" confirm stops the wizard.
         with patch(
             "defenseclaw.commands.cmd_setup._select_connector_interactive",
-            return_value="claudecode",
-        ), self.assertRaises(_StopError):
-            cmd_setup._interactive_guardrail_setup(self.app, gc, _pre_mutation_selection=preselect)
+            side_effect=AssertionError("first-run picker shown"),
+        ), patch("defenseclaw.commands.cmd_setup.click.echo") as echo, \
+                patch("defenseclaw.commands.cmd_setup.click.confirm", side_effect=_StopError), \
+                self.assertRaises(_StopError):
+            cmd_setup._interactive_guardrail_setup(
+                self.app, gc, _pre_mutation_selection=lambda targets: seen.append(tuple(targets))
+            )
 
         self.assertEqual(seen, [("claudecode", "codex", "opencode")])
+        printed = " ".join(str(c.args[0]) for c in echo.call_args_list if c.args)
+        self.assertIn(
+            "Turning protection back on for 3 configured connector(s): claudecode, codex, opencode.", printed
+        )
 
     def test_single_connector_resume_defaults_to_its_action_override(self):
         # GAP-1093: `setup claudecode --mode action` writes a per-connector

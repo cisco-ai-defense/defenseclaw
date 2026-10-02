@@ -1114,7 +1114,7 @@ def setup_llm(
         ux.subhead("scanners.*.llm / guardrail.{llm,judge.llm}.")
     click.echo()
     if llm.model:
-        click.echo(f"  Current: model={llm.model}, api_key_env={llm.api_key_env or DEFENSECLAW_LLM_KEY_ENV}")
+        click.echo(f"  Current: {_llm_current_summary(cfg, target_path, llm)}")
         click.echo()
 
     preflight_result: dict[str, Any] | None = None
@@ -2052,6 +2052,30 @@ def _mask(key: str) -> str:
     if len(key) <= 8:
         return "****"
     return "..." + key[-4:]
+
+
+def _llm_current_summary(cfg, target_path: str, llm) -> str:
+    """'provider=..., model=..., ...' for the setup llm header (GAP-1730).
+
+    Keyless Bedrock auth (instance_role, profile, iam_credentials) and local
+    runtimes take no API key, so the header names the auth mode instead of
+    an api_key_env the LLM never reads.
+    """
+    resolved = cfg.resolve_llm(target_path)
+    parts: list[str] = []
+    provider = resolved.provider or llm.provider
+    if provider:
+        parts.append(f"provider={provider}")
+    parts.append(f"model={llm.model}")
+    keyless = resolved.keyless_auth_mode()
+    if keyless:
+        region = (resolved.bedrock.region if resolved.bedrock else "") or resolved.region
+        if region:
+            parts.append(f"region={region}")
+        parts.append(f"auth={keyless} (AWS credentials, no API key)")
+    elif resolved.needs_api_key():
+        parts.append(f"api_key_env={resolved.api_key_env or llm.api_key_env or DEFENSECLAW_LLM_KEY_ENV}")
+    return ", ".join(parts)
 
 
 def _llm_key_state(resolved, key_val: str) -> str:
@@ -12792,6 +12816,12 @@ def _interactive_guardrail_setup(
     # ever run still shows the picker.
     configured = _configured_connector_set(gc)
     active_connectors = [] if was_initial_setup else configured
+    # A default uninstall turns the guardrail off but keeps the connectors
+    # (guardrail.connectors). Turning it back on covers all of them, so say
+    # so and skip the first-run picker (GAP-1753).
+    resuming_kept = bool(was_initial_setup and getattr(gc, "connectors", None) and configured)
+    if resuming_kept:
+        active_connectors = configured
     is_multi = len(active_connectors) >= 2
     if agent_name and agent_name in _CONNECTOR_META:
         if _pre_mutation_selection is not None:
@@ -12807,10 +12837,20 @@ def _interactive_guardrail_setup(
         # and leave the current primary pointer untouched.
         names = ", ".join(active_connectors)
         click.echo()
-        click.echo(
-            "  "
-            + ux.dim(f"Editing global guardrail policy for {len(active_connectors)} configured connector(s): {names}.")
-        )
+        if resuming_kept:
+            click.echo(
+                "  "
+                + ux.dim(
+                    f"Turning protection back on for {len(active_connectors)} configured connector(s): {names}."
+                )
+            )
+        else:
+            click.echo(
+                "  "
+                + ux.dim(
+                    f"Editing global guardrail policy for {len(active_connectors)} configured connector(s): {names}."
+                )
+            )
         # Only steer toward per-connector mode when there's genuinely more
         # than one connector — a single active connector still gets the
         # (meaningful, unambiguous) observe/action prompt below, so the
@@ -14084,12 +14124,15 @@ def _opencode_awaiting_restart(readiness: _ConnectorRuntimeReadiness) -> bool:
     detail = readiness.detail.casefold()
     return (
         readiness.connector == "opencode"
-        and readiness.invariant == "live-runtime"
+        and readiness.invariant in {"live-runtime", "digest"}
         and "digest current" in detail
         and (
             "no authenticated load heartbeat" in detail
             or "no load heartbeat yet" in detail
             or "load heartbeat predates the current gateway generation" in detail
+            # Right after the gateway restart the status has no OpenCode row
+            # until OpenCode next starts (GAP-1763).
+            or "authenticated status has no opencode connector row" in detail
         )
     )
 
