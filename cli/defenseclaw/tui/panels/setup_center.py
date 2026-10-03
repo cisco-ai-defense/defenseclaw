@@ -85,6 +85,7 @@ def task_statuses(model: Any) -> dict[SetupWizard, TaskStatus]:
             observability=getattr(model, "observability_status", None),
             observability_error=getattr(model, "observability_status_error", ""),
             available=model.wizard_available(wizard),
+            failing_exports=tuple(getattr(model, "failing_exports", ()) or ()),
         )
         for wizard in setup_catalog.display_order()
     }

@@ -364,8 +364,12 @@ def _gateway_status(cfg: Any, problems: Sequence[TaskProblem]) -> TaskStatus:
     return TaskStatus("ok", _short(f"{host}:{port}" if port else host))
 
 
-def _observability_status(observability: Any, error: str) -> TaskStatus:
+def _observability_status(observability: Any, error: str, failing: Sequence[str] = ()) -> TaskStatus:
     destinations = _destinations(observability)
+    if destinations and failing:
+        # Overview and doctor called an export failing while this said
+        # "✓ 3 exports + local" (GAP-2394).
+        return TaskStatus("attention", f"{len(failing)} of {len(destinations)} failing")
     if destinations is None:
         if error:
             return TaskStatus("attention", "config unreadable")
@@ -439,6 +443,7 @@ def task_status(
     observability: Any = None,
     observability_error: str = "",
     available: bool = True,
+    failing_exports: Sequence[str] = (),
 ) -> TaskStatus:
     """Rate one Setup task for the Status column.
 
@@ -511,7 +516,7 @@ def task_status(
         hooks = [hook for hook in _items(cfg, "webhooks") if _enabled(hook, default=False)]
         return TaskStatus("ok", _plural(len(hooks), "webhook")) if hooks else TaskStatus("off", "none")
     if wizard == SetupWizard.OBSERVABILITY:
-        return _observability_status(observability, observability_error)
+        return _observability_status(observability, observability_error, failing_exports)
     if wizard == SetupWizard.SPLUNK:
         return _splunk_status(cfg, observability)
     if wizard == SetupWizard.SPLUNK_DASHBOARDS:

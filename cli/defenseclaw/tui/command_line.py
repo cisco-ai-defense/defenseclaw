@@ -305,7 +305,8 @@ def doctor_attention_rows(lines: Sequence[str]) -> list[str]:
     """Labels of the doctor checks that warned or failed, in output order."""
 
     labels = (m.group(1).strip() for line in lines if (m := _DOCTOR_ATTENTION_RE.match(line.strip())))
-    return list(dict.fromkeys(labels))
+    # "⚠ Fix the failures above, then re-run" is doctor's footer, not a check.
+    return list(dict.fromkeys(label for label in labels if not label.startswith("Fix the failures above")))
 
 
 def suggested_next_action(
@@ -429,6 +430,18 @@ def _plugin_info_summary(lines: Sequence[str]) -> str:
     if actions and actions != "-":
         parts.append(f"actions: {actions}")
     return f"{name}: {', '.join(parts)}"
+
+
+def failure_result_summary(command: str, lines: Sequence[str]) -> str:
+    """The result of a failed command, or "" to fall back to its last line.
+
+    A failed doctor ended with "Fix the failures above, then re-run", but
+    the drawer shows nothing above it: name the failing checks (GAP-2395).
+    """
+
+    if "doctor" in command.strip().lower():
+        return command_result_summary(command, lines)
+    return ""
 
 
 def command_result_summary(command: str, lines: Sequence[str]) -> str:

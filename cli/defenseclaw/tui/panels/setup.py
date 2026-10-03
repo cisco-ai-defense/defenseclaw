@@ -98,6 +98,7 @@ from defenseclaw.tui.services.setup_state import (
     blocking_validation_errors,
     build_readiness_checks,
     config_diff,
+    failing_exports,
     get_config_value,
     guardrail_mode_label,
     is_python_modeled,
@@ -618,6 +619,10 @@ class SetupPanelModel:
         self._wizard_run_started: dict[SetupWizard, datetime] = {}
         # A check-only run (the Sandbox wizard's doctor) puts back the status it found.
         self._status_before_check: dict[SetupWizard, str] = {}
+        # The last gateway health, so a new export plan can name the failing
+        # exports (GAP-2394).
+        self._readiness_health: Any = None
+        self.failing_exports: tuple[str, ...] = ()
         self.form_fields: list[WizardFormField] = []
         self.form_cursor = 0
         self.form_active = False
@@ -683,10 +688,14 @@ class SetupPanelModel:
 
         self.observability_status = status
         self.observability_status_error = error.strip()
-        # The readiness Telemetry row names the configured exports (GAP-2351).
-        detail = telemetry_readiness_detail(status)
+        # The readiness Telemetry row names the configured exports (GAP-2351)
+        # and the failing ones (GAP-2394).
+        self.failing_exports = failing_exports(status, self._readiness_health)
+        detail = telemetry_readiness_detail(status, self.failing_exports)
+        state = "warn" if self.failing_exports else "pass"
         self.readiness_checks = tuple(
-            replace(check, detail=detail) if check.title == "Telemetry" else check for check in self.readiness_checks
+            replace(check, detail=detail, status=state) if check.title == "Telemetry" else check
+            for check in self.readiness_checks
         )
         active_name = self.sections[self.active_section].name if self.sections else ""
         rebuilt = build_setup_sections(
@@ -729,6 +738,8 @@ class SetupPanelModel:
         if rows is None:
             snapshot = self.credential_snapshot
             rows = tuple(getattr(snapshot, "rows", ()) or ())
+        self._readiness_health = health
+        self.failing_exports = failing_exports(self.observability_status, health)
         self.readiness_checks = build_readiness_checks(
             self.config,
             health,

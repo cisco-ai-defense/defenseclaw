@@ -225,7 +225,7 @@ class HintEngine:
             )
         return (
             "KEYS  j/k move | Enter detail | o actions | s scan | b block | "
-            "a allow | u unblock | R registries | r refresh | / filter."
+            "a allow | u unblock | R registry entry | r refresh | / filter."
         )
 
     def _mcps_hint(self, state: HintState) -> str:
@@ -233,7 +233,7 @@ class HintEngine:
             return hint
         return (
             "KEYS  j/k move | Enter detail | o actions | s scan | b block | "
-            "a allow | u unblock | n add server | R registries."
+            "a allow | u unblock | n add server | R registry entry."
         )
 
     def _plugins_hint(self, state: HintState) -> str:

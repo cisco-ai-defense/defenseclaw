@@ -264,13 +264,49 @@ def _all_hook_enforced(connectors: Sequence[str]) -> bool:
 _EXPORT_TELEMETRY_TASK = "0 Setup → Alerts & telemetry → Export telemetry"
 
 
-def telemetry_readiness_detail(observability: object | None = None) -> str:
+def failing_exports(observability: object | None, health: object | Mapping[str, Any] | None) -> tuple[str, ...]:
+    """Names of the enabled exports the live gateway reports as failing.
+
+    Overview said "sf3r9-dead (failing)" and doctor failed it while Setup
+    said "3 exports + local" and readiness passed (GAP-2394).
+    """
+
+    if observability is None or health is None:
+        return ()
+    from defenseclaw.observability.v8_status import destination_health_from_gateway
+
+    details = _get_path(health, "telemetry.details", None)
+    live = destination_health_from_gateway({"details": details}) if isinstance(details, Mapping) else {}
+    return tuple(
+        name
+        for destination in getattr(observability, "destinations", ()) or ()
+        if getattr(destination, "enabled", False)
+        and not getattr(destination, "generated", False)
+        and (name := str(getattr(destination, "name", "") or ""))
+        and (state := live.get(name)) is not None
+        and (state.state == "failing" or state.circuit_state == "open")
+    )
+
+
+def telemetry_readiness_detail(observability: object | None = None, failing: Sequence[str] = ()) -> str:
     """The readiness Telemetry row: the local log plus the configured exports.
 
     It said "export destinations are set in the Observability task", a task
-    Setup does not have, and never counted the exports (GAP-2351).
+    Setup does not have, and never counted the exports (GAP-2351). A failing
+    export leads, with the next step (GAP-2394).
     """
 
+    if observability is not None and failing:
+        exports = [
+            destination
+            for destination in getattr(observability, "destinations", ()) or ()
+            if getattr(destination, "enabled", False) and not getattr(destination, "generated", False)
+        ]
+        noun = "export" if len(exports) == 1 else "exports"
+        return (
+            f"{len(failing)} of {len(exports)} {noun} failing: {', '.join(failing)}. "
+            f"Run defenseclaw setup observability test {failing[0]}, or turn it off in {_EXPORT_TELEMETRY_TASK}."
+        )
     if observability is None:
         return f"Local audit log is always on; exports are set in {_EXPORT_TELEMETRY_TASK}."
     exports = [
@@ -517,13 +553,14 @@ def build_readiness_checks(
             ),
         )
 
+    failing = failing_exports(observability, health)
     checks.append(
         ReadinessCheck(
             "Telemetry",
             # Users only ever see one routing plan, so "canonical" and "v8"
             # explained nothing (GAP-2221).
-            telemetry_readiness_detail(observability),
-            "pass",
+            telemetry_readiness_detail(observability, failing),
+            "warn" if failing else "pass",
         )
     )
 

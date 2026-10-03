@@ -17,7 +17,7 @@ import os
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Generic, Literal, TypeVar
 
 from defenseclaw.connector_paths import (
@@ -133,6 +133,8 @@ class PluginScanSummary:
     total_findings: int = 0
     # E4i: per-severity breakdown (see CatalogScanSummary.severity_counts).
     severity_counts: Mapping[str, int] = field(default_factory=dict)
+    # "YYYY-MM-DD HH:MM:SS UTC" from ``plugin list --json`` (GAP-2201).
+    scanned_at: str = ""
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any] | None) -> PluginScanSummary | None:
@@ -143,6 +145,7 @@ class PluginScanSummary:
             max_severity=str(raw.get("max_severity") or ""),
             total_findings=int(raw.get("total_findings") or 0),
             severity_counts=_parse_severity_counts(raw.get("severity_counts")),
+            scanned_at=str(raw.get("scanned_at") or ""),
         )
 
 
@@ -745,7 +748,10 @@ class SkillsPanelModel(CatalogListModel[SkillRow]):
         if key == "r":
             return CatalogPanelAction(True, self.load_intent(), reload_requested=True)
         if key == "R":
-            return CatalogPanelAction(True, registry_focus=self.registry_focus())
+            # With no row R is the global Registries key; it did nothing and
+            # said nothing on an empty list (GAP-2404).
+            focus = self.registry_focus()
+            return CatalogPanelAction(True, registry_focus=focus) if focus else CatalogPanelAction(False)
         return CatalogPanelAction(False)
 
     def empty_state(self) -> str:
@@ -849,7 +855,10 @@ class MCPsPanelModel(CatalogListModel[MCPRow]):
         if key == "r":
             return CatalogPanelAction(True, self.load_intent(), reload_requested=True)
         if key == "R":
-            return CatalogPanelAction(True, registry_focus=self.registry_focus())
+            # With no row R is the global Registries key; it did nothing and
+            # said nothing on an empty list (GAP-2404).
+            focus = self.registry_focus()
+            return CatalogPanelAction(True, registry_focus=focus) if focus else CatalogPanelAction(False)
         return CatalogPanelAction(False)
 
     def empty_state(self) -> str:
@@ -2264,6 +2273,26 @@ PLUGIN_DESCRIPTION_MAX = 160
 PLUGIN_DESCRIPTION_MORE = "  Full description: press o, then Info, then A for its output"
 
 
+def _scanned_line(scanned_at: str, now: datetime | None = None) -> str:
+    """``2026-10-02 16:53Z (15 h ago)`` for a plugin scan time, or "".
+
+    A verdict from a scan many builds old read as current (GAP-2401).
+    """
+
+    try:
+        when = datetime.strptime(scanned_at, "%Y-%m-%d %H:%M:%S UTC").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return _esc(scanned_at)
+    minutes = max(0, int(((now or datetime.now(timezone.utc)) - when).total_seconds() // 60))
+    if minutes < 60:
+        age = f"{minutes} min"
+    elif minutes < 48 * 60:
+        age = f"{minutes // 60} h"
+    else:
+        age = f"{minutes // (24 * 60)} d"
+    return f"{when:%Y-%m-%d %H:%M}Z ({age} ago)"
+
+
 def _format_plugin_detail(row: PluginRow) -> str:
     status = _plugin_status(row)
     status_line = f"  Status     {_format_status(status)}"
@@ -2289,6 +2318,8 @@ def _format_plugin_detail(row: PluginRow) -> str:
                 row.scan.severity_counts,
             )
         )
+        if row.scan.scanned_at:
+            lines.append(f"  Scanned    {_scanned_line(row.scan.scanned_at)} · press s to rescan with this build")
     if row.verdict == "rejected":
         # Same meaning as the CLI scan's "policy: rejected" line (GAP-2048). q is not a
         # row key (GAP-2111): Quarantine lives in the o actions menu.
