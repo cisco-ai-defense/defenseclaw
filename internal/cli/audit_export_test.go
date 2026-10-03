@@ -416,7 +416,8 @@ func TestManagedAuditStoreOpensReadOnly(t *testing.T) {
 }
 
 // GAP-2203: a v8 runtime record keeps the action of its telemetry family
-// (telemetry-destination, circuit_breaker_open, config.change.applied);
+// (telemetry-destination, circuit_breaker_open, config.change.applied, and
+// the llm_prompt, lifecycle and correlation rows of GAP-2220);
 // only legacy rows with an unregistered action are rewritten to "action".
 func TestBuildAuditEventLineKeepsV8RecordAction(t *testing.T) {
 	build := func(action, eventName string) map[string]any {
@@ -444,6 +445,12 @@ func TestBuildAuditEventLineKeepsV8RecordAction(t *testing.T) {
 		"circuit_breaker_open":  "subsystem.degraded",
 		"telemetry-destination": "subsystem.degraded",
 		"config.change.applied": "config.change.applied",
+		// GAP-2220: OpenClaw event-router and correlation rows.
+		"llm_prompt":                       "model.request",
+		"llm_response":                     "model.response",
+		"lifecycle":                        "agent.run.observed",
+		"tool_invocation":                  "tool.invocation.requested",
+		"correlation.relationship.changed": "correlation.relationship.changed",
 	} {
 		ev := build(action, eventName)
 		if ev["action"] != action || ev["details"] != "destination=otlp" {

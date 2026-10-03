@@ -1322,6 +1322,24 @@ def _execute_route_mutations(
     )
 
 
+def _log_redaction_change(app: AppContext, action: str, audit_details: str, changed: int, newly: int) -> None:
+    """Record the setup row plus an operator Activity mutation naming the change.
+
+    Profile ``strict`` keeps only metadata, so the setup row's details read
+    as an internal event name; the Activity target (for example
+    ``config:redaction-apply:all-configurable:strict``) survives (GAP-2192).
+    """
+
+    app.logger.log_action(ACTION_SETUP_REDACTION_POLICY, "redaction-policy", audit_details)
+    verb, _, rest = action.partition(" ")
+    fields = dict(token.partition("=")[::2] for token in rest.split())
+    scope = ":".join(value for value in fields.values() if value)
+    details = [f"scope={scope}"] if scope else []
+    details += [f"{key}={value}" for key, value in fields.items() if key != "scope"]
+    details += [f"changed_legs={changed}", f"newly_unredacted={newly}"]
+    app.logger.log_config_change(f"redaction-{verb}", " ".join(details))
+
+
 def _execute_mutations(
     app: AppContext,
     mutations: Iterable[V8YAMLMutation],
@@ -1386,10 +1404,8 @@ def _execute_mutations(
     audit_after_restart = False
     if app.logger:
         try:
-            app.logger.log_action(
-                ACTION_SETUP_REDACTION_POLICY,
-                "redaction-policy",
-                audit_details,
+            _log_redaction_change(
+                app, action, audit_details, len(preview.changes), preview.newly_unredacted
             )
         except CanonicalObservabilityUnavailableError:
             audit_after_restart = restart
@@ -1424,10 +1440,8 @@ def _execute_mutations(
             raise
         if audit_after_restart and app.logger:
             try:
-                app.logger.log_action(
-                    ACTION_SETUP_REDACTION_POLICY,
-                    "redaction-policy",
-                    audit_details,
+                _log_redaction_change(
+                    app, action, audit_details, len(preview.changes), preview.newly_unredacted
                 )
             except CanonicalObservabilityUnavailableError as exc:
                 rollback_path = result.backup_path or str(backup)

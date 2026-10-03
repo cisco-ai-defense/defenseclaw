@@ -612,6 +612,10 @@ func (writer *EventHistoryWriter) appendContextTxResolvedProfile(
 		legacyActor = legacy.Actor
 		if value, kept := keptCompatibilityValue(projected, "details", legacy.Details); kept {
 			legacyDetails = value
+		} else if details == string(record.EventName()) {
+			// The profile removed the details: say so rather than show the
+			// internal legacy.audit.* event name as the row text (GAP-2192).
+			legacyDetails = "details removed by redaction profile " + string(expectedProfile)
 		}
 		if encoded, err := json.Marshal(legacy.Structured); len(legacy.Structured) == 0 ||
 			(err == nil && projected["structured_json"] == string(encoded)) {
