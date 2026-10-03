@@ -52,8 +52,9 @@ def test_tab_strip_names_every_tab_from_158_columns_and_drops_the_brand_first(tm
             for name, key, title in PANELS:
                 opened = tab_fit.fit_tab_labels(PANELS, name, {**_UNREAD, name: 0}, strip)
                 assert opened[name].startswith(f"{key} {title}"), (width, opened[name])
-    # The brand shows only once every tab keeps its name beside it.
-    for width, brand in ((165, False), (170, False), (180, True)):
+    # The brand shows only once every tab keeps its full name beside it, so it
+    # never shortens a name a narrower screen showed (GAP-2517).
+    for width, brand in ((165, False), (170, False), (180, False), (240, True)):
         monkeypatch.setattr(type(app), "size", property(lambda _self, width=width: Size(width, 45)))
         assert bool(app._header_title()) is brand, width  # noqa: SLF001
 

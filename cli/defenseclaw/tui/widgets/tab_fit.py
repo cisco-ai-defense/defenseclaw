@@ -241,7 +241,9 @@ def _wide_labels(
        Policies first, then the cheapest names, so as many tabs as fit get
        one (GAP-2150, GAP-2180). The order doesn't depend on the width, so a
        wider strip never names fewer tabs;
-    3. the tiny, short and full names, most important first.
+    3. the tiny, short and full names, most important first, only once
+       every tab has a name: "4 MCPs" and "T Tools" beside bare "3" and
+       "5" read as if those tabs had no room (GAP-2517).
 
     Keeping one label per tab costs room: the strip keeps enough free for
     the longest full name ("V AI Discovery"), so a panel with a short name
@@ -292,10 +294,9 @@ def _wide_labels(
         for name in order:
             if not grow(name, _shortest(name, titles[name])):
                 break
-    for tier in range(3):
+    for tier in range(3 if all(chosen.values()) else 0):
         for name in ranked:
-            if chosen[name]:
-                grow(name, _names(name, titles[name])[tier])
+            grow(name, _names(name, titles[name])[tier])
     others = {name: label(name, chosen[name]) for name in keys}
     used = strip_width(tuple(others.values()))
     actives: dict[str, str] = {}
@@ -317,6 +318,7 @@ def _every_tab_named(panels: Sequence[tuple[str, str, str]], width: int) -> dict
     room for the longest full name ("V AI Discovery"), so with few counts any
     tab opens under its full name. Every tab gets its shortest name ("Log",
     "Inv"), then the tiny, short and full names grow, most important first,
+    up to the first that doesn't fit (GAP-2517),
     while ``OPEN_COUNT_RESERVE`` cells stay free for the counts, so the open
     tab keeps its full name beside Alerts, Logs and Audit backlogs (GAP-2420).
     """
@@ -341,12 +343,17 @@ def _every_tab_named(panels: Sequence[tuple[str, str, str]], width: int) -> dict
     # beside 11 free cells (GAP-2500).
     if cost() > width:
         return None
+    # The names grow in one fixed order and stop at the first that doesn't
+    # fit, so a wider strip never shortens a name: skipping a long name for a
+    # later short one read "7 Sandboxes" at 182 columns and "7 Sandbox" at 183
+    # (GAP-2517).
     for tier in range(3):
         for name in sorted(keys, key=_rank):
             before = chosen[name]
             chosen[name] = max(before, _names(name, titles[name])[tier], key=len)
             if cost() + OPEN_COUNT_RESERVE > width:
                 chosen[name] = before
+                return chosen
     return chosen
 
 
