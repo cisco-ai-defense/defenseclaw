@@ -23567,14 +23567,25 @@ function Invoke-DefenseClawNuclearUninstall {
         }
     }
 
-    # 3. Nuke the handful of fixed-path artifacts that live outside
-    #    --install-root / --state-root scope (per-user Claude managed
-    #    policy / managed-hooks state, the one legacy production IPC
-    #    directory). Each path hardcoded; safe-root scope implicit.
+    # 3a. Unconditional-delete DefenseClaw-owned sidecar files inside
+    #     each agent config directory. These sidecars are our own
+    #     per-connector state/lock/receipt files - no other owner.
     foreach ($fixedPath in @(
+        # Legacy production IPC dir (orphan NT SERVICE SIDs land here).
         'C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw\ipc',
+        # Claude Code managed hooks sidecars.
+        'C:\Program Files\ClaudeCode\managed-settings.d\90-defenseclaw.json',
         'C:\Program Files\ClaudeCode\managed-settings.d\.defenseclaw-managed-hooks.state',
-        'C:\Program Files\ClaudeCode\managed-settings.d\managed-settings.json'
+        'C:\Program Files\ClaudeCode\managed-settings.d\.defenseclaw-managed-hooks.lock',
+        # Codex managed hooks sidecars.
+        'C:\ProgramData\OpenAI\Codex\.defenseclaw-managed-hooks.state',
+        'C:\ProgramData\OpenAI\Codex\.defenseclaw-managed-hooks.lock',
+        'C:\ProgramData\OpenAI\Codex\.defenseclaw-managed-hooks.receipt',
+        # Cursor managed hooks sidecars + the adapter stub we drop.
+        'C:\ProgramData\Cursor\defenseclaw-hook.ps1',
+        'C:\ProgramData\Cursor\.defenseclaw-managed-hooks.state',
+        'C:\ProgramData\Cursor\.defenseclaw-managed-hooks.lock',
+        'C:\ProgramData\Cursor\.defenseclaw-managed-hooks.receipt'
     )) {
         if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $fixedPath)) {
             continue
@@ -23590,6 +23601,59 @@ function Invoke-DefenseClawNuclearUninstall {
         }
         catch {
             $warnings.Add("nuclear uninstall could not remove fixed-path $fixedPath : $($_.Exception.Message)")
+        }
+    }
+
+    # 3b. Agent-config files that are SHARED with the host agent (Codex
+    #     requirements.toml, Cursor hooks.json). In managed_enterprise
+    #     mode these are DefenseClaw-owned (allow_managed_hooks_only
+    #     = true), but we still gate deletion on a content check: delete
+    #     only if the file references defenseclaw-hook.exe. If a user
+    #     hand-crafted a non-DefenseClaw file at the same path, leave it
+    #     alone.
+    #
+    #     The content check matches ANY scoped bin dir, not just the
+    #     current scope - that is deliberate. Over an iterated test
+    #     cycle a VM accumulates stale entries from previous scoped
+    #     installs (observed on this VM: four distinct DefenseClaw-Cert
+    #     runIDs stamped into one Codex requirements.toml). "Clean
+    #     slate" means ALL of them go.
+    foreach ($agentConfigPath in @(
+        'C:\ProgramData\OpenAI\Codex\requirements.toml',
+        'C:\ProgramData\Cursor\hooks.json'
+    )) {
+        if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $agentConfigPath)) {
+            continue
+        }
+        $content = $null
+        try {
+            $content = Microsoft.PowerShell.Management\Get-Content `
+                -LiteralPath $agentConfigPath -Raw -ErrorAction Stop
+        }
+        catch {
+            try { $null = & $takeownExe '/F' $agentConfigPath '/A' 2>&1 } catch {}
+            try { $null = & $script:IcaclsExe $agentConfigPath '/reset' '/C' '/L' 2>&1 } catch {}
+            try {
+                $content = Microsoft.PowerShell.Management\Get-Content `
+                    -LiteralPath $agentConfigPath -Raw -ErrorAction Stop
+            }
+            catch {
+                $warnings.Add("nuclear uninstall could not read agent config $agentConfigPath to decide ownership: $($_.Exception.Message)")
+                continue
+            }
+        }
+        if ($content -notmatch 'defenseclaw-hook\.exe|defenseclaw-hook\.ps1|defenseclaw-cmid|DefenseClaw-Cert|Cisco Secure Client\\DefenseClaw') {
+            # Not our file - do not touch.
+            continue
+        }
+        try { $null = & $takeownExe '/F' $agentConfigPath '/A' 2>&1 } catch {}
+        try { $null = & $script:IcaclsExe $agentConfigPath '/reset' '/C' '/L' 2>&1 } catch {}
+        try {
+            Microsoft.PowerShell.Management\Remove-Item `
+                -LiteralPath $agentConfigPath -Force -ErrorAction Stop
+        }
+        catch {
+            $warnings.Add("nuclear uninstall could not remove agent config $agentConfigPath : $($_.Exception.Message)")
         }
     }
 
