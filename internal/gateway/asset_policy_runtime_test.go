@@ -561,13 +561,18 @@ func TestAssetPolicyResponseReasonEmitsAllStructuredFields(t *testing.T) {
 		"asset_type=mcp",
 		"asset_name=rogue",
 		"connector=claudecode",
-		"registry_status=not-registered",
+		// The decision vocabulary, as the asset-policy audit row has it
+		// (GAP-2516).
+		"registry_status=unregistered",
 		"registry_configured=true",
 		"surface=hook",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("response reason %q missing %q", got, want)
 		}
+	}
+	if strings.Contains(got, "not-registered") {
+		t.Errorf("response reason %q renames registry_status; the asset-policy row says unregistered", got)
 	}
 	if strings.Contains(got, "detail=") {
 		t.Errorf("response reason should NOT include detail= field; redactor would scrub it anyway: %q", got)

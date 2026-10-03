@@ -64,7 +64,7 @@ func (r *EventRouter) emitEventRouterModelV8(
 	meta.Provider = provider
 	meta.Model = model
 	observation := hookModelV8Observation{
-		meta: meta, prompt: prompt, response: response,
+		meta: meta, prompt: prompt, response: openClawReplyText(response),
 		usage: hookLLMSpanUsage{
 			promptTokens: promptTokens, completionTokens: completionTokens, model: model,
 		},
