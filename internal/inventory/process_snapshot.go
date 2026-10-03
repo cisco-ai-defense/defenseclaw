@@ -128,13 +128,16 @@ func classifyWindowsProcesses(procs []processInfo, catalog []AISignature) {
 	// cursor-agent's worker-server is a second cursor-agent node.exe
 	// (GAP-1849) and Amp's plugin runtimes are amp.exe children of amp.exe
 	// (GAP-1965). Fold each into its parent so one run is one process.
+	// The Copilot CLI runs its engine as a copilot-runtime.exe child; that
+	// engine alone is VS Code Copilot Chat's agent host (GAP-2043).
 	var helpers []int
 	for i := range procs {
 		if procs[i].Connector == "" {
 			continue
 		}
+		name := normalizedWindowsProcessName(procs[i].Comm)
 		if parent := byPID[procs[i].PPID]; parent != nil && parent.PID != procs[i].PID && parent.Connector == procs[i].Connector &&
-			normalizedWindowsProcessName(parent.Comm) == normalizedWindowsProcessName(procs[i].Comm) {
+			(normalizedWindowsProcessName(parent.Comm) == name || name == "copilot-runtime") {
 			helpers = append(helpers, i)
 		}
 	}
