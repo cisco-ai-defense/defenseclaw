@@ -1632,10 +1632,20 @@ def _split_typed_name(
     prefix = prefix.lower()
     if not sep or not bare or prefix not in ("skill", "mcp"):
         return entry_name, entry_type
+    verdicts = load_index(cfg.data_dir, source.id).verdicts
+    if any(v.name == entry_name for v in verdicts):
+        return entry_name, entry_type
     if entry_type and entry_type.lower() != prefix:
-        return entry_name, entry_type
-    if any(v.name == entry_name for v in load_index(cfg.data_dir, source.id).verdicts):
-        return entry_name, entry_type
+        # GAP-2457: "skill:<name> --type mcp" contradicts itself; say so.
+        types = sorted({v.type for v in verdicts if v.name == bare})
+        hint = (
+            f"; it is {_with_article(types[0])} entry (use {_typed_forms(types[0], bare)})"
+            if len(types) == 1 else ""
+        )
+        raise click.UsageError(
+            f"the {prefix}: prefix in {entry_name!r} does not match "
+            f"--type {entry_type.lower()}{hint}",
+        )
     return bare, prefix
 
 
@@ -1690,7 +1700,7 @@ def _missing_entry_message(
     if other:
         return (
             f"{source.id} has no {label}entry {entry_name!r}; it is "
-            f"{_with_article(other[0])} entry (use --type {other[0]})"
+            f"{_with_article(other[0])} entry (use {_typed_forms(other[0], entry_name)})"
         )
     names = sorted({v.name for v in idx.verdicts if not entry_type or v.type == entry_type})
     shown = ", ".join(names[:10]) + (", ..." if len(names) > 10 else "")
@@ -1702,6 +1712,11 @@ def _missing_entry_message(
 
 def _with_article(entry_type: str) -> str:
     return f"an {entry_type}" if entry_type == "mcp" else f"a {entry_type}"
+
+
+def _typed_forms(entry_type: str, name: str) -> str:
+    """Both spellings approve/reject accept for an entry (GAP-2457)."""
+    return f"{entry_type}:{name} or {name} --type {entry_type}"
 
 
 def _do_manual_verdict(
