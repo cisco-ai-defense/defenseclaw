@@ -6470,15 +6470,17 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             "": "gateway status pending",
         }.get(gateway_state, "gateway offline")
 
-        sev = self._alert_severity_counts_for_connectors(scope_connectors)
+        # Unfiltered, the Findings card counts every alert, as the Alerts
+        # panel (scope All) does: a connector-less alert (galileo export,
+        # gateway) is not "outside" any roster (GAP-2088).
         fleet_sev = self._alert_severity_counts("")
+        sev = self._alert_severity_counts(selected_connector) if selected_connector else fleet_sev
         critical = sev.get("CRITICAL", 0)
         high = sev.get("HIGH", 0)
         medium = sev.get("MEDIUM", 0)
         low = sev.get("LOW", 0)
         total_findings = critical + high + medium + low
         fleet_findings = sum(fleet_sev.values())
-        outside_roster_findings = max(fleet_findings - total_findings, 0) if scope_connectors and not selected_connector else 0
 
         cfg = self.overview_model.cfg
         # Per-connector modes: "observe, 1 action", or the filtered connector's
@@ -6547,7 +6549,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             blocks_value = total_block
             fleet_blocks_value = fleet_total_block
             outside_roster_blocks = max(fleet_blocks_value - blocks_value, 0) if scope_connectors and not selected_connector else 0
-            finding_timestamps = self._finding_event_timestamps_for_connectors(scope_connectors)
+            finding_timestamps = self._finding_event_timestamps_for_connectors((selected_connector,) if selected_connector else ())
 
             call_detail_parts: list[str] = []
             if allow_count or alert_count or block_decisions:
@@ -6640,12 +6642,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 medium,
                 low,
                 connector=selected_connector,
-                connectors=scope_connectors,
             )
             if selected_connector:
                 findings_detail = f"{findings_detail} · all connectors {fleet_findings}"
-            elif outside_roster_findings:
-                findings_detail = f"{findings_detail} · outside roster {outside_roster_findings}"
 
             metrics = (
                 MetricDatum(
