@@ -14,6 +14,7 @@ package cli
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -331,7 +332,15 @@ func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 		if err != nil {
 			return withExitCode(err, enterprisestatus.UnixExitInvalidArgs)
 		}
-		mutate = func(ctx context.Context) error { return env.WriteSecret(ctx, opts.name, value) }
+		mutate = func(ctx context.Context) error {
+			// An identical value is not rewritten, so the output can say
+			// the credential already holds it (GAP-2373).
+			stored, readErr := os.ReadFile(filepath.Join(env.P(env.Layout.SecretsDir), opts.name))
+			if existed = readErr == nil && subtle.ConstantTimeCompare(stored, value) == 1; existed {
+				return nil
+			}
+			return env.WriteSecret(ctx, opts.name, value)
+		}
 	case "remove":
 		mutate = func(context.Context) error {
 			_, statErr := os.Lstat(filepath.Join(env.P(env.Layout.SecretsDir), opts.name))
@@ -354,7 +363,8 @@ func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 // describeSecretChange labels a secret set or remove result with the command
 // the administrator typed and the credential it changed. Both printed the
 // same "✓ ensure: done" block before, so the two opposite actions could not
-// be told apart (GAP-2305). The JSON document keeps action "ensure".
+// be told apart (GAP-2305). The JSON document keeps action "ensure". For
+// set, existed reports that the credential already held this exact value.
 func describeSecretChange(result *enterprisestatus.Result, action, name string, existed bool) *enterprisestatus.Result {
 	shown := *result
 	shown.Action = "secret " + action
@@ -362,6 +372,13 @@ func describeSecretChange(result *enterprisestatus.Result, action, name string, 
 		return &shown
 	}
 	change := "stored credential " + name
+	if action == "set" && existed {
+		change = "credential " + name + " already holds this value; not rewritten"
+	} else if action == "set" && result.Noop && result.NoopReason == "up_to_date" {
+		// The value was written, so "nothing to do" would be wrong even
+		// when the apply found nothing else to change (GAP-2373).
+		shown.Noop, shown.NoopReason = false, ""
+	}
 	if action == "remove" {
 		change = "removed credential " + name
 		if !existed {

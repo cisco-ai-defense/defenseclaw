@@ -432,3 +432,33 @@ func TestEnterpriseLeavesRejectAStrayArgumentAsUnexpected(t *testing.T) {
 		}
 	}
 }
+
+// A same-value secret set headlined "nothing to do (up_to_date)" while it
+// rewrote the file and printed "stored credential" (GAP-2373).
+func TestSecretSetUpToDateHeadlineMatchesTheChange(t *testing.T) {
+	upToDate := func() *enterprisestatus.Result {
+		result := enterprisestatus.New(enterpriseunix.ActionEnsure, "standalone", "darwin", "1.0.0")
+		result.OK = true
+		result.Noop, result.NoopReason = true, "up_to_date"
+		return result
+	}
+	for _, tc := range []struct {
+		unchanged bool
+		want      string
+	}{
+		{true, "✓ secret set: nothing to do (up_to_date)\n  - credential dctest-cred already holds this value; not rewritten\n"},
+		{false, "✓ secret set: done\n  - stored credential dctest-cred\n"},
+	} {
+		result := upToDate()
+		var out bytes.Buffer
+		if err := printLifecycleResult(&out, describeSecretChange(result, "set", "dctest-cred", tc.unchanged), false); err != nil {
+			t.Fatal(err)
+		}
+		if out.String() != tc.want {
+			t.Fatalf("unchanged=%v output = %q, want %q", tc.unchanged, out.String(), tc.want)
+		}
+		if !result.Noop {
+			t.Fatalf("the JSON result changed: %+v", result)
+		}
+	}
+}
