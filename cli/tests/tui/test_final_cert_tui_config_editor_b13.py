@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -24,6 +25,7 @@ async def test_config_editor_value_column_fits_default_paths_at_160(tmp_path, mo
     # GAP-2253: the device key path and the token env name
     # were cut in a 24-cell Value column next to a 38% aside.
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Windows expanduser
     monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path / ".defenseclaw"))
     from defenseclaw.config import default_config
 
@@ -38,6 +40,6 @@ async def test_config_editor_value_column_fits_default_paths_at_160(tmp_path, mo
         assert app.setup_model.sections[app.setup_model.active_section].name == "Gateway"
         _columns, rows = app._setup_table()  # noqa: SLF001
         values = {row[0]: row[1] for row in rows}
-        assert values["Device Key File"] == "~/.defenseclaw/device.key"
+        assert values["Device Key File"] == os.path.join("~", ".defenseclaw", "device.key")
         assert values["Token Env"] == "DEFENSECLAW_GATEWAY_TOKEN"
         assert app._setup_config_value_room([row[0] for row in rows], [row[2] for row in rows]) >= 34  # noqa: SLF001
