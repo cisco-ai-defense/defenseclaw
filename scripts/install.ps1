@@ -640,6 +640,20 @@ function Stop-Watchdog {
     Write-Warn "The previous watchdog is still running; stop it with: defenseclaw-gateway watchdog stop"
 }
 
+# A 1.0.0 gateway cannot start on a WAL-mode audit.db whose 5-second startup
+# check times out (a large store): SQLite drops and recreates audit.db-wal,
+# and 1.0.0 refuses the new file (fixed in 1.0.1). In rollback-journal mode
+# it starts, and switches the database back to WAL itself (GAP-1988).
+$AuditJournalPy = "import sqlite3,sys;c=sqlite3.connect(sys.argv[1],timeout=10);c.execute('pragma journal_mode').fetchone()[0]=='wal' and c.execute('pragma journal_mode=delete').fetchone();c.close()"
+
+function Reset-AuditJournalMode {
+    $db = Join-Path $DataDir "audit.db"
+    $python = Join-Path $Venv "Scripts\python.exe"
+    if ((Test-Path -LiteralPath $db -PathType Leaf) -and (Test-Path -LiteralPath $python -PathType Leaf)) {
+        [void](Invoke-Native $python @("-c", $AuditJournalPy, $db) -Quiet)
+    }
+}
+
 function Start-Gateway {
     # Its readiness wait is the health check. Exit code 3: running, but a
     # connector refused admission (upgrading again would not change that).
@@ -650,6 +664,8 @@ function Start-Gateway {
         Write-Warn "$gateway is missing, so the gateway was not started"
         return 1
     }
+    $version = Get-InstalledVersion
+    if ((Test-Version $version) -and [version]$version -lt [version]"1.0.1") { Reset-AuditJournalMode }
     $rc = Invoke-Native $gateway @("start")
     if ($rc -in @(0, 3) -or -not (Get-GatewayProcess)) { return $rc }
     # A first start over a large audit database can outlast start's own
