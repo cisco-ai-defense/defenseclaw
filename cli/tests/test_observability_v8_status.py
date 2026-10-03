@@ -1325,3 +1325,13 @@ def test_doctor_v8_local_rows_fail_when_gateway_reports_audit_write_failure() ->
     healthy = _DoctorResult()
     _check_observability_v8_status(status, healthy, live_health={"telemetry": {"state": "running"}})
     assert {c["label"]: c["status"] for c in healthy.checks}["Local SQLite"] == "pass"
+
+
+def test_destination_display_reason_hides_routine_healthy_codes() -> None:
+    """GAP-2557: doctor shows no lifecycle code for a healthy destination."""
+    from defenseclaw.observability.v8_status import V8DestinationHealth
+
+    assert V8DestinationHealth(name="g", state="healthy", reason="delivery_recovered").display_reason == ""
+    assert V8DestinationHealth(name="g", state="healthy", reason="activated").display_reason == ""
+    assert V8DestinationHealth(name="g", state="degraded", reason="queue_full").display_reason == "queue_full"
+    assert V8DestinationHealth(name="g", state="healthy", reason="origin_loop").display_reason == "origin_loop"

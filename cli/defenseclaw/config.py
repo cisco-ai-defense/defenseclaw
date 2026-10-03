@@ -5536,9 +5536,12 @@ def _apply_instance_overlay(out: LLMConfig, data_dir: str) -> None:
 def _load_dotenv_into_os(data_dir: str) -> None:
     """Load KEY=VALUE pairs from ~/.defenseclaw/.env into os.environ.
 
-    Existing environment variables are never overwritten.  This ensures
+    Variables the shell exported are never overwritten.  This ensures
     secrets stored by ``defenseclaw setup`` are available to the Python CLI
-    even when not exported in the user's shell profile.
+    even when not exported in the user's shell profile.  A value an earlier
+    load copied from this file is refreshed, so a long-lived process (the
+    TUI) picks up a rotated gateway token instead of keeping the one it read
+    at launch (GAP-2547).
     """
     env_path = os.path.join(data_dir, ".env")
     credential_provenance.begin_dotenv_load(data_dir, env_path)
@@ -5569,7 +5572,8 @@ def _load_dotenv_into_os(data_dir: str) -> None:
                 value = value[1:-1]
             if key and key not in seen_keys:
                 seen_keys.add(key)
-                injected = key not in os.environ
+                current = os.environ.get(key)
+                injected = current is None or credential_provenance.holds_injected_value(data_dir, key, current)
                 if injected:
                     os.environ[key] = value
                 credential_provenance.note_dotenv_candidate(

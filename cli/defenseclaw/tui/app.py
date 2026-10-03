@@ -9053,6 +9053,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # folded "canonical destination plan loading" four letters a line),
         # so the detail goes under the state instead.
         narrow_services = self.size.width < 100
+        # The detail column of the narrow layout: the card's inner width (as
+        # for CONFIGURATION) minus the dot, the label and the grid padding.
+        services_detail_width = max(20, (int(getattr(self.size, "width", 0) or 0) - 8) // 2 - 5) - 16
         services_table = Table.grid(padding=(0, 1), expand=True)
         services_table.add_column(no_wrap=True, width=2)
         # 13 = the longest label ("AI Discovery") plus a space, so it never
@@ -9096,7 +9099,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             if narrow_services:
                 state_cell = Text(state or "unknown", style=color)
                 if detail:
-                    state_cell.append("\n" + detail, style=TOKENS.text_secondary)
+                    # Break between ", " items, as ENFORCEMENT does: a folding
+                    # cell broke at any space, so "2 skill dirs, 2" / "plugin
+                    # dirs" and "25 active, 0" / "new, enhanced" (GAP-2546).
+                    items = [Text(item) for item in re.split(r"(?<=,) ", detail)]
+                    state_cell.append("\n" + _fit_units(items, services_detail_width, sep=" ").plain, style=TOKENS.text_secondary)
                 services_table.add_row(
                     Text(dot, style=color), Text(display_name, style=TOKENS.text_primary), state_cell
                 )
@@ -9421,16 +9428,20 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                     )
                 else:
                     colored_parts.append(f"[{color}]{part}[/]")
-            header_markup = "  ".join(colored_parts) if colored_parts else f"[{TOKENS.text_secondary}]no data[/]"
+            header_units = colored_parts or [f"[{TOKENS.text_secondary}]no data[/]"]
             if doctor.age_label:
-                header_markup += f"  [{TOKENS.text_muted}]· {doctor.age_label}[/]"
+                header_units.append(f"[{TOKENS.text_muted}]· {doctor.age_label}[/]")
             if doctor.stale:
-                header_markup += (
-                    f"  [{TOKENS.accent_amber}](stale — [/]"
+                header_units.append(
+                    f"[{TOKENS.accent_amber}](stale — [/]"
                     f"[{TOKENS.accent_amber} bold]\\[d][/]"
                     f"[{TOKENS.accent_amber}] to rerun)[/]"
                 )
-            doctor_lines: list[RenderableType] = [Text.from_markup(header_markup)]
+            # Whole "N pass" / "· 2m ago" items per line: a plain wrap at 80
+            # columns left "· 2m" / "ago" (GAP-2546).
+            doctor_lines: list[RenderableType] = [
+                _fit_units([Text.from_markup(unit) for unit in header_units], cfg_inner, sep="  ")
+            ]
             if doctor.run_outcome:
                 outcome_color = {
                     "healthy": TOKENS.accent_green,
@@ -9847,9 +9858,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                     TOKENS.text_muted,
                 )
             ]
-        scope = f"bounded {summary.observation_window_hours}h"
-        if summary.event_rows_truncated:
-            scope += ", truncated; counts partial"
+        from defenseclaw.observability.custody_status import native_evidence_scope
+
+        scope = native_evidence_scope(summary.observation_window_hours, summary.event_rows_truncated)
         lines: list[RenderableType] = [
             _hanging_text(
                 "Native connector OTLP delivery ·",
@@ -10049,9 +10060,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 "collector/runtime health does not prove accepted delivery"
             )
         else:
-            scope = f"bounded {summary.observation_window_hours}h"
-            if summary.event_rows_truncated:
-                scope += ", truncated; counts partial"
+            from defenseclaw.observability.custody_status import native_evidence_scope
+
+            scope = native_evidence_scope(summary.observation_window_hours, summary.event_rows_truncated)
             delivery_lines.append(
                 f"  Native connector OTLP delivery · {scope} · "
                 "collector/runtime health does not prove accepted delivery"
@@ -15416,6 +15427,21 @@ def _gateway_listener_pending(trust: object, *, now: float | None = None) -> boo
     return 0 <= age <= _GATEWAY_STARTUP_GRACE_SECONDS
 
 
+def _refreshed_gateway_token(config: object, token: str) -> str:
+    """The gateway token after rereading ``<data_dir>/.env``; "" when it did not change."""
+
+    data_dir = str(getattr(config, "data_dir", "") or "")
+    resolve_token = getattr(getattr(config, "gateway", None), "resolved_token", None)
+    if not data_dir or not callable(resolve_token):
+        return ""
+    try:
+        config_module._load_dotenv_into_os(data_dir)  # noqa: SLF001 - the loader's refresh rule
+        fresh = str(resolve_token() or "")
+    except Exception:  # noqa: BLE001 - an unreadable .env keeps the original 401.
+        return ""
+    return fresh if fresh != token else ""
+
+
 def _fetch_gateway_health(config: object | None) -> GatewayHealthResult:
     """Probe the configured authenticated sidecar status without using proxy state.
 
@@ -15470,7 +15496,18 @@ def _fetch_gateway_health(config: object | None) -> GatewayHealthResult:
         return GatewayHealthResult("error", f"gateway listener identity is unverified: {trust.detail}")
 
     try:
-        document = client.status()
+        try:
+            document = client.status()
+        except requests.HTTPError as exc:
+            # The gateway rotated its token (a restart or an OpenClaw token
+            # refresh rewrites ~/.defenseclaw/.env), but this process still
+            # holds the copy it read at launch: reread .env and retry once
+            # instead of a lasting 401 until the TUI restarts (GAP-2547).
+            rejected = exc.response is not None and exc.response.status_code in {401, 403}
+            fresh = _refreshed_gateway_token(config, token) if rejected else ""
+            if not fresh:
+                raise
+            document = OrchestratorClient(host=host, port=port, token=fresh, timeout=3).status()
     except requests.HTTPError as exc:
         status = exc.response.status_code if exc.response is not None else 0
         if status in {401, 403}:
