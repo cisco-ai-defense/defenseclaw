@@ -59,7 +59,8 @@ def test_rejected_plugin_detail_says_what_it_means_and_where_the_findings_are() 
     )
     text = Text.from_markup(catalog_detail_text(row)).plain
     assert "Enabled  yes" not in text
-    assert "still loads until you act (q quarantines it)" in text
+    assert "still loads until you act (o, then Quarantine)" in text
+    assert "(q " not in text  # GAP-2111: q is not a Plugins row key
     assert "defenseclaw plugin scan photon --connector hermes" in text
     description = [line for line in text.splitlines() if line.strip().startswith("word")][0]
     assert description.endswith("…") and len(description.strip()) <= 160
