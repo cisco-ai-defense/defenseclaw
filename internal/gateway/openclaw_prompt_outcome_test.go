@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/observability"
@@ -148,5 +149,31 @@ func TestOpenClawAgentSpanCarriesTheReply(t *testing.T) {
 	silent := eventRouterAgentInputV8(hookModelV8Observation{})
 	if silent.DefenseClawTelemetryOutputReported || silent.GenAIOutputMessages.IsPresent() {
 		t.Fatalf("an empty reply was reported as output")
+	}
+}
+
+// TestOpenClawReplyTextIsTheReplyNotTheBlockJSON pins the GAP-2495 reopen:
+// the chat and agent spans carry the reply text of an OpenClaw content
+// array, not the raw block JSON, with the assistant role.
+func TestOpenClawReplyTextIsTheReplyNotTheBlockJSON(t *testing.T) {
+	for _, tc := range []struct{ content, want string }{
+		{`[{"type":"text","text":"ready"}]`, "ready"},
+		{`[{"type":"thinking","thinking":"x"},{"type":"text","text":"a"},{"type":"text","text":"b"}]`, "a\nb"},
+		{`[{"type":"toolCall","id":"c1","name":"exec","arguments":{"command":"ls"}}]`, "[tool call] exec"},
+		{"[DefenseClaw] blocked", "[DefenseClaw] blocked"},
+		{"plain reply", "plain reply"},
+	} {
+		if got := openClawReplyText(tc.content); got != tc.want {
+			t.Errorf("openClawReplyText(%s) = %q, want %q", tc.content, got, tc.want)
+		}
+	}
+	turn := hookModelV8Observation{response: openClawReplyText(`[{"type":"text","text":"ready"}]`)}
+	got, ok := eventRouterAgentInputV8(turn).GenAIOutputMessages.Get()
+	if !ok || len(got.Items) != 1 || got.Items[0].Role != "assistant" {
+		t.Fatalf("agent output messages = %+v, want one assistant message", got)
+	}
+	gotJSON, _ := json.Marshal(got)
+	if strings.Contains(string(gotJSON), `\"type\"`) || !strings.Contains(string(gotJSON), `"ready"`) {
+		t.Fatalf("agent output = %s, want the reply text without block JSON", gotJSON)
 	}
 }
