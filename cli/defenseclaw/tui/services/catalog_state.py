@@ -2026,6 +2026,17 @@ def _verdict_before_source(cells: tuple[str, ...]) -> tuple[str, ...]:
     return (*head, verdict, source, details)
 
 
+def _plugin_status(row: PluginRow) -> str:
+    """The plugin Status shown in the table and the detail (GAP-2369)."""
+
+    status = row.status or ("enabled" if row.enabled else "disabled")
+    if status == "blocked":
+        # A block only refuses new installs; Status shows whether the
+        # installed copy loads, Verdict says it is blocked (GAP-2228).
+        status = "enabled" if row.enabled else "disabled"
+    return status
+
+
 def catalog_row_cells(row: object) -> tuple[str, str, str, str, str]:
     if isinstance(row, SkillRow):
         source = " ".join(part for part in (row.source, row.registry_badge) if part)
@@ -2036,13 +2047,8 @@ def catalog_row_cells(row: object) -> tuple[str, str, str, str, str]:
         detail = row.server_url or row.command or row.verdict or row.severity
         return (row.name, row.status, source, row.actions, _truncate(detail, 72))
     if isinstance(row, PluginRow):
-        status = row.status or ("enabled" if row.enabled else "disabled")
-        if status == "blocked":
-            # A block only refuses new installs; Status shows whether the
-            # installed copy loads, Verdict says it is blocked (GAP-2228).
-            status = "enabled" if row.enabled else "disabled"
         detail = row.description or row.origin or row.verdict
-        return (row.display_name, status, row.origin, row.verdict or "-", _truncate(detail, 72))
+        return (row.display_name, _plugin_status(row), row.origin, row.verdict or "-", _truncate(detail, 72))
     if isinstance(row, ToolRow):
         return (row.name, row.status, row.display_scope, "-", _truncate(row.reason, 72))
     return ("", "", "", "", "")
@@ -2253,13 +2259,13 @@ def _format_mcp_detail(row: MCPRow) -> str:
 
 # A plugin description longer than this ends with "…" in the detail pane,
 # which is only a few rows high (GAP-2048); a line under it points to
-# o, then Info, which prints it in full (GAP-2314).
+# o, then Info, which prints it in full; A opens that output (GAP-2314, GAP-2370).
 PLUGIN_DESCRIPTION_MAX = 160
-PLUGIN_DESCRIPTION_MORE = "  Full description: press o, then Info"
+PLUGIN_DESCRIPTION_MORE = "  Full description: press o, then Info, then A for its output"
 
 
 def _format_plugin_detail(row: PluginRow) -> str:
-    status = row.status or ("enabled" if row.enabled else "disabled")
+    status = _plugin_status(row)
     status_line = f"  Status     {_format_status(status)}"
     # "Status enabled  Enabled yes" said the same thing twice (GAP-2048).
     if status.lower() not in {"enabled", "disabled"}:
