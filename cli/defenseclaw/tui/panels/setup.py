@@ -2958,16 +2958,18 @@ _SKILL_SCANNER_HINTS: dict[str, str] = {
     "--use-virustotal": "Look up the skill's files on VirusTotal; needs VIRUSTOTAL_API_KEY.",
     "--use-aidefense": "Send skill content to Cisco AI Defense for analysis; needs an AI Defense API key.",
     "--policy": (
-        "strict: fewest exceptions, for untrusted skills; balanced: the default; "
-        "permissive: fewest false positives, for trusted skills; none: the built-in default."
+        "strict: fewest exceptions, for untrusted skills; balanced: between the two; "
+        "permissive: fewest false positives, for trusted skills (the default); "
+        "none: the scanner's built-in policy."
     ),
-    "--lenient": "Scan skills with malformed front matter or missing fields instead of failing them.",
+    "--lenient": "yes (the default): scan skills with malformed front matter or missing fields; no: fail them.",
 }
 _MCP_SCANNER_HINTS: dict[str, str] = {
     **_SCANNER_LLM_HINTS,
     "--analyzers": (
-        "Comma-separated: yara (local rules), api (Cisco AI Defense), llm (LLM review), "
-        "behavioral (code vs. description), readiness (timeouts, retries)."
+        "auto (the default) picks them for you, or a comma-separated list: yara (local rules), "
+        "api (Cisco AI Defense), llm (LLM review), behavioral (code vs. description), "
+        "readiness (timeouts, retries)."
     ),
     "--api-endpoint": "Cisco AI Defense API URL for the api analyzer; empty keeps the current one.",
     "--api-key-env": "Env var NAME holding the Cisco AI Defense API key, e.g. CISCO_AI_DEFENSE_API_KEY.",
@@ -3028,6 +3030,12 @@ def wizard_form_defs(
     if builder is not None:
         return builder(cfg)
     if wizard == SetupWizard.SKILL_SCANNER:
+        # Policy and lenient open on the effective config, as the gateway
+        # form does: "balanced" / "no" showed on a permissive, lenient
+        # install, and Run kept the real values (GAP-2536). A field left at
+        # its current value emits no flag; a change always emits one.
+        policy, lenient = _skill_scanner_policy_values(cfg)
+        policies = ("strict", "balanced", "permissive", "none")
         skill_fields = (
             WizardFormField("Behavioral Analyzer", "bool", "--use-behavioral", value="no", default="no"),
             WizardFormField("LLM Analyzer", "bool", "--use-llm", value="no", default="no"),
@@ -3049,23 +3057,18 @@ def wizard_form_defs(
                 "Scan Policy",
                 "choice",
                 "--policy",
-                value="balanced",
-                default="balanced",
-                options=("strict", "balanced", "permissive", "none"),
+                value=policy,
+                default=policy,
+                options=policies if policy in policies else (policy, *policies),
             ),
-            WizardFormField("Lenient Mode", "bool", "--lenient", value="no", default="no"),
+            WizardFormField("Lenient Mode", "bool", "--lenient", "--no-lenient", value=lenient, default=lenient),
             WizardFormField("Verify After Setup", "bool", "--verify", "--no-verify", value="yes", default="yes"),
         )
         return _hinted(skill_fields, _SKILL_SCANNER_HINTS)
     if wizard == SetupWizard.MCP_SCANNER:
+        analyzers = _cfg_str(cfg, "scanners.mcp_scanner.analyzers", "auto")  # GAP-2536
         mcp_fields = (
-            WizardFormField(
-                "Analyzers",
-                "string",
-                "--analyzers",
-                value="yara,api,llm,behavioral,readiness",
-                default="yara,api,llm,behavioral,readiness",
-            ),
+            WizardFormField("Analyzers", "string", "--analyzers", value=analyzers, default=analyzers),
             WizardFormField(
                 "LLM Provider",
                 "choice",
@@ -3227,6 +3230,21 @@ _GUARDRAIL_JUDGE_SECTIONS: tuple[str, ...] = (
 
 def _cfg_str(cfg: object | Mapping[str, Any] | None, path: str, default: str = "") -> str:
     return str(get_config_value(cfg, path, default) or default).strip()
+
+
+def _skill_scanner_policy_values(cfg: object | Mapping[str, Any] | None) -> tuple[str, str]:
+    """The effective skill-scanner policy and lenient mode as form values.
+
+    The defaults match ``SkillScannerConfig`` (permissive, lenient on);
+    an empty policy is what ``--policy none`` saves.
+    """
+
+    policy = get_config_value(cfg, "scanners.skill_scanner.policy", "permissive")
+    policy = str(policy).strip() or "none"
+    lenient = get_config_value(cfg, "scanners.skill_scanner.lenient", True)
+    if not isinstance(lenient, bool):
+        lenient = str(lenient).strip().lower() in {"1", "true", "yes", "on"}
+    return policy, "yes" if lenient else "no"
 
 
 def _cfg_port(cfg: object | Mapping[str, Any] | None, path: str) -> str:

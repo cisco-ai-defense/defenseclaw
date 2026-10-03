@@ -1240,7 +1240,7 @@ def setup_llm(
     type=click.Choice(["strict", "balanced", "permissive", "none"], case_sensitive=False),
     help="Scan policy preset (strict, balanced, permissive, none)",
 )
-@click.option("--lenient", is_flag=True, default=None, help="Tolerate malformed skills")
+@click.option("--lenient/--no-lenient", default=None, help="Tolerate malformed skills (or fail them)")
 @click.option("--verify/--no-verify", default=True, help="Run connectivity checks after setup (default: on)")
 @click.option("--non-interactive", is_flag=True, help="Use flags instead of prompts")
 @pass_ctx
