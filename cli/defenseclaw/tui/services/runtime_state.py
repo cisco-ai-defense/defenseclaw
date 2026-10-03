@@ -536,12 +536,17 @@ class RuntimePanelModel:
                 extra = " " + "; ".join(self.snapshot.degraded_reasons) + "."
             if short:
                 return f"DEGRADED means coverage is partial ({coverage}).{extra}"
-            for plane in off:
-                extra += f" {plane.name.capitalize()} is off (not selected). {self.plane_fix(plane)}"
+            # The how-to-enable hint ends in a command, so it goes last: text
+            # run on after it read as part of the command (GAP-2102).
+            enable_hint = "".join(
+                f" {plane.name.capitalize()} is off (not selected). {self.plane_fix(plane)}"
+                for plane in off
+            )
             return (
                 f"DEGRADED means coverage is partial ({coverage}).{extra} "
                 "Findings below are still valid for the planes that are up. "
                 "HEALTHY means every selected plane is watching."
+                + enable_hint
             )
         unobserved = self.inventory_unobserved_count()
         extra = ""

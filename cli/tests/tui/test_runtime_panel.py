@@ -423,4 +423,5 @@ def test_an_unselected_plane_is_off_and_says_how_to_turn_it_on() -> None:
     assert "(1 watching, 1 not selected)" in explanation
     assert "Agent actions is off (not selected)" in explanation
     assert "runtime enable --enable-host-plane" in explanation
+    assert explanation.endswith("runtime enable --enable-host-plane")
     assert "1 not selected" in model.health_explanation(short=True)
