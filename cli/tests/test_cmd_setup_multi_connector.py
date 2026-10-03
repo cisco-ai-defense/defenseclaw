@@ -829,6 +829,8 @@ class TestAdditiveSetupCommand(unittest.TestCase):
                 setup_group, ["openclaw", "--replace", "--no-restart", "--no-verify"], obj=self.app, input="n\n"
             )
         self.assertIn("--replace removes 2 hook connector(s): codex, cursor", declined.output)
+        # GAP-2117: say when the removed hooks go away, not only in the prompt.
+        self.assertIn("Their hooks stay installed until the gateway restarts (--no-restart).", declined.output)
         self.assertIn("Aborted", declined.output)
         self.assertEqual(set(self.app.cfg.guardrail.connectors), {"codex", "cursor"})
 
@@ -836,6 +838,7 @@ class TestAdditiveSetupCommand(unittest.TestCase):
             result = _invoke(["openclaw", "--replace", "--yes", "--no-restart", "--no-verify"], self.app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
         backend.assert_called_once()
+        self.assertIn("Remove them now with: defenseclaw-gateway restart", result.output)
         gc = self.app.cfg.guardrail
         self.assertEqual(gc.connectors, {})
         self.assertEqual(gc.connector, "openclaw")
@@ -1097,6 +1100,22 @@ class TestObservabilitySummaryDisplay(unittest.TestCase):
         self.assertIn("unsupported", out)
         self.assertIn("native OTel:", out)
         self.assertIn("hook-derived audit only", out)
+
+
+    # GAP-2013: a peer the restarted gateway refused is configured but not
+    # guarded, so the Summary must not list it with the guarded connectors.
+    def test_summary_marks_a_refused_peer_not_guarded(self):
+        self._seed_map("claudecode", "codex", "hermes", "opencode")
+        buf = io.StringIO()
+        with click.Context(click.Command("setup")), contextlib.redirect_stdout(buf):
+            cmd_setup._remember_runtime_skipped_peers({"hermes"})
+            _print_observability_summary("opencode", self.app.cfg, mode="action", os_name="posix")
+        out = buf.getvalue()
+
+        self.assertRegex(out, r"connectors:\s+claudecode, codex, opencode\n")
+        self.assertRegex(out, r"not guarded now:\s+hermes ")
+        self.assertIn("This install now has 4 connectors configured; 3 guarded now: claudecode, codex, opencode.", out)
+        self.assertIn("Not guarded now: hermes. To guard it again, run: defenseclaw setup hermes", out)
 
 
 class TestConfiguredConnectorSet(unittest.TestCase):
