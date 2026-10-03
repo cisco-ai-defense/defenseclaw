@@ -322,6 +322,9 @@ class ProbeTransport(Protocol):
     ) -> None:
         """Write exactly one marked, content-free synthetic probe."""
 
+    # Optional: check_credentials(destination, target, *, probe_id, timeout)
+    # sends an empty OTLP export with the configured credentials.
+
 
 class SocketProbeTransport:
     """No-proxy, redirect-free transport with dial-time address pinning."""
@@ -354,6 +357,43 @@ class SocketProbeTransport:
                 body=b"",
                 headers={"Content-Length": "0", "Connection": "close"},
                 inspect_hec=False,
+            )
+        finally:
+            sock.close()
+
+    def check_credentials(
+        self,
+        destination: _Destination,
+        target: _Target,
+        *,
+        probe_id: str,
+        timeout: float,
+    ) -> None:
+        """Send one empty OTLP/HTTP export with the configured credentials.
+
+        An empty ExportServiceRequest holds no logs, spans or metrics, so the
+        collector stores nothing; a 401 or 403 says the key or token is not
+        accepted at this endpoint (GAP-2289). Any other answer leaves the
+        result to the handshake.
+        """
+        headers = dict(destination.headers)
+        _drop_case_insensitive(headers, _PROBE_MARKER_HEADER)
+        _drop_case_insensitive(headers, _PROBE_ID_HEADER)
+        headers[_PROBE_MARKER_HEADER] = "destination-test"
+        headers[_PROBE_ID_HEADER] = probe_id
+        headers["Content-Type"] = "application/x-protobuf"
+        headers["Content-Length"] = "0"
+        headers["Connection"] = "close"
+        sock = self._open_resolved_socket(target, timeout)
+        try:
+            _request_over_socket(
+                sock,
+                target,
+                method="POST",
+                body=b"",
+                headers=headers,
+                inspect_hec=False,
+                authentication_only=True,
             )
         finally:
             sock.close()
@@ -515,11 +555,22 @@ def run_destination_test(
                 message = "this local or pull destination has no isolated write-probe semantics"
             raise DestinationTestError("unsupported", message)
         active_transport = transport or SocketProbeTransport()
+        credentials_checked = False
         if write_probe:
             active_transport.write_probe(destination, probe_id=probe_id, timeout=timeout)
         else:
             for target in destination.targets:
                 active_transport.handshake(target, timeout=timeout)
+            check_credentials = getattr(active_transport, "check_credentials", None)
+            if (
+                check_credentials is not None
+                and destination.kind == "otlp"
+                and _destination_has_credentials(destination)
+            ):
+                for target in destination.targets:
+                    if target.protocol == "http":
+                        check_credentials(destination, target, probe_id=probe_id, timeout=timeout)
+                        credentials_checked = True
     except DestinationTestError as exc:
         _record_outcome(compliance, name, probe_id, mode, "failed", exc.failure_class)
         raise
@@ -536,7 +587,7 @@ def run_destination_test(
         probe_id=probe_id,
         endpoint_count=len(destination.targets),
         protocol=destination.protocol,
-        authentication_verified=write_probe and _destination_has_credentials(destination),
+        authentication_verified=(write_probe and _destination_has_credentials(destination)) or credentials_checked,
         compliance_recorded=True,
     )
 
@@ -932,6 +983,7 @@ def _request_over_socket(
     body: bytes,
     headers: Mapping[str, str],
     inspect_hec: bool,
+    authentication_only: bool = False,
 ) -> None:
     connection = http.client.HTTPConnection(target.host, target.port, timeout=sock.gettimeout())
     connection.sock = sock
@@ -942,7 +994,15 @@ def _request_over_socket(
         if 300 <= status < 400:
             raise DestinationTestError("unsafe_endpoint", "the destination attempted a redirect")
         if method != "OPTIONS" and status in {401, 403}:
+            if authentication_only:
+                raise DestinationTestError(
+                    "authentication_failed",
+                    f"the destination rejected the configured credentials (HTTP {status}): check the API key "
+                    "or token, and that the endpoint belongs to the same account or cluster as the key",
+                )
             raise DestinationTestError("authentication_failed", "the destination rejected authentication")
+        if authentication_only:
+            return
         if inspect_hec:
             if not 200 <= status < 300:
                 raise DestinationTestError("remote_rejected", "the destination rejected the synthetic probe")
