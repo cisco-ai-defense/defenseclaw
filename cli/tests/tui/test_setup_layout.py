@@ -182,13 +182,12 @@ def test_tabs_name_the_most_important_panels_first() -> None:
     assert full["policies"] == "P Policies"
     assert wide["overview"] == "1 Overview"
     assert strip_width(tuple(wide.values())) <= 120 - 33
-    # A named tab is never less important than a letter-only one.
+    # Overview, Alerts and Policies are named first, then the cheapest names
+    # so the most tabs get one (GAP-2180).
     named = [name for name in LABEL_PRIORITY if name in wide and wide[name] != wide[name][:1]]
     letter_only = [name for name in LABEL_PRIORITY if name in wide and name not in named]
     assert named and letter_only
-    assert max(LABEL_PRIORITY.index(n) for n in named if n != "overview") < min(
-        LABEL_PRIORITY.index(n) for n in letter_only
-    )
+    assert {"overview", "alerts", "policies"} <= set(named)
     # Unknown width (before the first layout) keeps the full labels.
     assert fit_tab_labels(FIFTEEN_PANELS, "overview", {}, 0) == full
 

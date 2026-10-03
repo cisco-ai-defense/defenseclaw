@@ -19,18 +19,17 @@ shows its full name, every tab keeps its key letter, and unread badges stay
 unless even letter-only tabs with badges overflow. PANELS order never changes.
 Badges show the real count up to 999 and "999+" above that.
 
-From 80 columns up (wider than ``NARROW_STRIP``) every other tab shows the
-shortest label it gets with any panel active, so switching panels changes
-only the tab you leave and the tab you open (GAP-2078). Other tabs keep
-their unread counts ahead of their names (GAP-2077), but no tab is left a
-bare key while the minor Logs/Audit counts could make room for its name
-(GAP-2150).
+Wider than ``NARROW_STRIP`` (80 columns and up) every other tab keeps one
+label whichever panel is open, so switching panels changes only the tab you
+leave and the tab you open (GAP-2078). There other tabs give up their names
+before their unread counts (GAP-2077), and a tab stays a bare key only when
+even its shortest name doesn't fit (GAP-2150, GAP-2180); see ``_wide_labels``.
 """
 
 from __future__ import annotations
 
 import os
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 
 # Every Textual Tab has one cell of padding on each side.
 TAB_GUTTER = 2
@@ -128,6 +127,10 @@ def strip_width(labels: Sequence[str]) -> int:
 # Badges shortened or dropped only after every other tab's.
 KEEP_BADGE = frozenset({"alerts"})
 
+# Wider than NARROW_STRIP these most important tabs get a name first; the
+# rest follow cheapest name first, so the most tabs get one (GAP-2180).
+NAMED_FIRST = 3
+
 # Strip cells at an 80-column terminal (80 less the header padding and the
 # ":" and "?" buttons). Narrower strips give the active tab's name priority
 # over the other tabs' minor badges (GAP-1998).
@@ -160,75 +163,128 @@ def fit_tab_labels(
     """Label per panel name for a strip ``width`` cells wide.
 
     ``panels`` is the visible ``(name, key, label)`` rows in order. A width
-    of 0 or less means "unknown" and returns full labels.
-
-    Wider than ``NARROW_STRIP``, a tab that is not active shows the shortest
-    label it gets in the fit for any other active tab. Each of those fits
-    is no wider than ``width``, so the strip still fits, and the labels of
-    the other tabs no longer depend on which panel is open (GAP-2078: at 160
-    columns "Alerts (7)" read "Alerts⁷" and "Policies" read "Policy" on some
-    panels only).
+    of 0 or less means "unknown" and returns full labels. Up to
+    ``NARROW_STRIP`` cells the labels are fitted for the active tab
+    (``_fit_for_active``); wider strips use ``_wide_labels``, where other
+    tabs keep one label whichever tab is open (GAP-2078).
     """
 
     names = [name for name, _key, _title in panels]
     if width <= NARROW_STRIP or active not in names or len(names) < 2:
         return _fit_for_active(panels, active, unread, width)
-    # The other tabs' labels for this width and these counts, cached: the
-    # strip is redrawn on every render.
-    key = (tuple(panels), tuple(sorted((name, unread.get(name, 0)) for name in names)), width, _PLAIN_BADGE)
-    stable = _STABLE_CACHE.get(key)
+    full = {name: _label(key, label, unread.get(name, 0)) for name, key, label in panels}
+    if strip_width(tuple(full.values())) <= width:
+        return full
+    # Cached: the strip is redrawn on every render.
+    key = (tuple(panels), tuple(unread.get(name, 0) for name in names), width, _PLAIN_BADGE)
+    stable = _WIDE_CACHE.get(key)
     if stable is None:
-        stable = _stable_labels(panels, unread, width)
-        if len(_STABLE_CACHE) >= 64:
-            _STABLE_CACHE.clear()
-        _STABLE_CACHE[key] = stable
+        stable = _wide_labels(panels, unread, width)
+        if len(_WIDE_CACHE) >= 64:
+            _WIDE_CACHE.clear()
+        _WIDE_CACHE[key] = stable
     others, actives = stable
-    labels = dict(others)
-    labels[active] = actives[active]
-    return labels
+    return {**others, active: actives[active]}
 
 
-def _stable_labels(
+def _rank(name: str) -> int:
+    return LABEL_PRIORITY.index(name) if name in LABEL_PRIORITY else len(LABEL_PRIORITY)
+
+
+def _shortest(name: str, label: str) -> str:
+    """The shortest readable name of one tab ("Log", "Inv")."""
+
+    tiny = _names(name, label)[0]
+    fewer = SINGULAR_LABELS.get(name, "")
+    return fewer if fewer and len(fewer) < len(tiny) else tiny
+
+
+def _wide_labels(
     panels: Sequence[tuple[str, str, str]],
     unread: Mapping[str, int],
     width: int,
 ) -> tuple[dict[str, str], dict[str, str]]:
-    """``(others, actives)``: every tab's label when it is not the active
-    tab, and its label when it is. Neither depends on which tab is active.
+    """``(others, actives)`` for a strip wider than ``NARROW_STRIP``.
 
-    Two layouts qualify and the one that names more wins:
+    ``others`` is each tab's label while another tab is open and ``actives``
+    its label while it is open, so switching panels changes only the tab you
+    leave and the tab you open (GAP-2078). Counts are superscript ("8 Logs⁶⁴",
+    "8⁶⁴"). Labels grow in this order, and a step is kept only while the
+    strip still fits with any tab open under its full name:
 
-    * each tab's shortest label in the fit for any other active tab (each
-      of those fits is no wider than ``width``, so any mix of them fits);
-    * one fit for the strip less a reserve that is enough for any tab's
-      full name (with its count in superscript), found by iterating.
+    1. every unread count: other tabs give up their names before their
+       counts (GAP-2077); only if even bare keys overflow do the least
+       important counts go, never the Alerts count;
+    2. each tab's shortest name ("Log", "Inv"): Overview, Alerts and
+       Policies first, then the cheapest names, so as many tabs as fit get
+       one (GAP-2150, GAP-2180). The order doesn't depend on the width, so a
+       wider strip never names fewer tabs;
+    3. the tiny, short and full names, most important first.
+
+    Keeping one label per tab costs room: the strip keeps enough free for
+    the longest full name ("V AI Discovery"), so a panel with a short name
+    shows those cells free while the least important tabs are bare keys
+    (GAP-2179).
+
+    The open tab shows its full name, or the longest "Regis…" that fits.
     """
 
-    names = [name for name, _key, _title in panels]
-    fits = {name: _fit_for_active(panels, name, unread, width) for name in names}
-    across = {name: min((fits[other][name] for other in names if other != name), key=len) for name in names}
-    best = (across, {name: fits[name][name] for name in names})
-    reserve = 0
-    for _attempt in range(6):
-        base = _fit_for_active(panels, "", unread, width - reserve)
-        full = {name: _label(key, label, unread.get(name, 0), True) for name, key, label in panels}
-        need = max(len(full[name]) - len(base[name]) for name in names)
-        if need <= reserve:
-            if strip_width(tuple(base.values())) + need <= width and sum(map(len, base.values())) > sum(
-                map(len, across.values())
-            ):
-                roomy = {name: _label(key, label, unread.get(name, 0)) for name, key, label in panels}
-                spare = width - strip_width(tuple(base.values()))
-                actives = {
-                    name: roomy[name] if len(roomy[name]) - len(base[name]) <= spare else full[name] for name in names
-                }
-                best = (base, actives)
+    keys = {name: key for name, key, _title in panels}
+    titles = {name: title for name, _key, title in panels}
+    ranked = sorted(keys, key=_rank)
+    counted = {name for name in keys if unread.get(name, 0)}
+
+    def label(name: str, text: str) -> str:
+        return _label(keys[name], text, unread.get(name, 0) if name in counted else 0, True)
+
+    def cost(chosen: Mapping[str, str]) -> int:
+        labels = {name: label(name, chosen[name]) for name in keys}
+        reserve = max(len(label(name, titles[name])) - len(labels[name]) for name in keys)
+        return strip_width(tuple(labels.values())) + reserve
+
+    chosen = dict.fromkeys(keys, "")
+    for name in reversed(ranked):
+        if cost(chosen) <= width:
             break
-        reserve = need
-    return best
+        if name not in KEEP_BADGE:
+            counted.discard(name)
+
+    def grow(name: str, text: str) -> bool:
+        before = chosen[name]
+        if len(text) > len(before):
+            chosen[name] = text
+            if cost(chosen) > width:
+                chosen[name] = before
+                return False
+        return True
+
+    # Names wait until every count shows, so cells freed by a dropped count
+    # never name a tab that a wider strip would leave bare again.
+    if counted == {name for name in keys if unread.get(name, 0)}:
+        order = [
+            *ranked[:NAMED_FIRST],
+            *sorted(ranked[NAMED_FIRST:], key=lambda name: len(_shortest(name, titles[name]))),
+        ]
+        for name in order:
+            if not grow(name, _shortest(name, titles[name])):
+                break
+    for tier in range(3):
+        for name in ranked:
+            if chosen[name]:
+                grow(name, _names(name, titles[name])[tier])
+    others = {name: label(name, chosen[name]) for name in keys}
+    used = strip_width(tuple(others.values()))
+    actives: dict[str, str] = {}
+    for name in keys:
+        room = width - used + len(others[name])
+        title = titles[name]
+        wants = [title] + [f"{title[:n].rstrip()}\u2026" for n in range(len(title) - 1, 1, -1)]
+        texts = (label(name, want) for want in wants)
+        actives[name] = next((text for text in texts if len(others[name]) < len(text) <= room), others[name])
+    return others, actives
 
 
-_STABLE_CACHE: dict[tuple[object, ...], tuple[dict[str, str], dict[str, str]]] = {}
+_WIDE_CACHE: dict[tuple[object, ...], tuple[dict[str, str], dict[str, str]]] = {}
 
 
 def _fit_for_active(
@@ -259,11 +315,6 @@ def _fit_for_active(
     )
     no_badge: set[str] = set()
     compact: set[str] = set()
-    # From 80 columns up other tabs give up their names before their unread
-    # counts (GAP-2077: the Logs and Audit counts showed at 140 columns, not
-    # at 160).
-    wide = width > NARROW_STRIP
-    minor_drop: tuple[tuple[set[str], bool], ...] = () if wide else ((no_badge, False),)
 
     def render(chosen: Mapping[str, str], badges: bool = True) -> dict[str, str]:
         return {
@@ -395,7 +446,7 @@ def _fit_for_active(
             # least important badges: "R Registry…" showed on a 200-column
             # screen for want of one cell (GAP-1751). Alerts keeps its count.
             saved = (set(compact), set(no_badge))
-            if fit_badges({**chosen, active: title}, ((compact, False), *minor_drop)):
+            if fit_badges({**chosen, active: title}, ((compact, False), (no_badge, False))):
                 chosen = {**chosen, active: title}
             else:
                 compact.clear()
@@ -412,7 +463,7 @@ def _fit_for_active(
             saved = (set(compact), set(no_badge))
 
             def room(trial: dict[str, str], alerts: bool = False) -> bool:
-                steps = [(compact, False), *minor_drop] + ([(compact, True)] if alerts else [])
+                steps = [(compact, False), (no_badge, False)] + ([(compact, True)] if alerts else [])
                 if fit_badges(trial, steps):
                     return True
                 compact.clear()
@@ -480,16 +531,7 @@ def _fit_for_active(
     #    important badges to superscript ("8 Logs²"), then drop them, then
     #    names. The Alerts count goes last: it is the open-alert count that
     #    Overview and the status bar show.
-    if wide:
-        # Names go before the unread counts (GAP-2077).
-        if not fit_badges(chosen, ((compact, False), (compact, True))):
-            for name in reversed(ranked):
-                if width_of(chosen) <= width:
-                    break
-                if name != active:
-                    chosen[name] = ""
-            fit_badges(chosen, ((no_badge, False), (no_badge, True)))
-    elif not fit_badges(chosen, ((compact, False), (no_badge, False), (compact, True), (no_badge, True))):
+    if not fit_badges(chosen, ((compact, False), (no_badge, False), (compact, True), (no_badge, True))):
         for name in reversed(ranked):
             if width_of(chosen) <= width:
                 break
@@ -523,81 +565,9 @@ def _fit_for_active(
                     candidate[name] = ""
             chosen = candidate
 
-    def name_bare_tabs(chosen: dict[str, str]) -> dict[str, str]:
-        """7. Above 80 columns, no tab is a bare key while badges could give way.
-
-        The steps above keep the badge reserve and the Logs/Audit badges, so
-        at 124-136 cells five or six tabs stayed bare keys and a wider strip
-        could name fewer tabs than a narrower one (GAP-2150). Give every tab
-        its shortest name ("Log", "Inv") with the minor badges dropped and
-        the Alerts count compact; then win back, while the strip fits, the
-        tiny names, the Alerts count, the minor badges and the longer names.
-        The active tab keeps the name it has.
-        """
-
-        bare = [name for name in ranked if name != active and not chosen[name]]
-        if width <= NARROW_STRIP or not bare:
-            return chosen
-        saved = (set(compact), set(no_badge))
-        minor = [name for name in reversed(ranked) if name not in {active, "alerts"} and unread.get(name, 0)]
-
-        def shortest(name: str) -> str:
-            tiny = _names(name, titles[name])[0]
-            fewer = SINGULAR_LABELS.get(name, "")
-            return fewer if fewer and len(fewer) < len(tiny) else tiny
-
-        trial = {name: (text if name == active or not text else shortest(name)) for name, text in chosen.items()}
-        no_badge.update(minor)
-        if active != "alerts" and unread.get("alerts", 0):
-            compact.add("alerts")
-        for name in bare:
-            candidate = {**trial, name: shortest(name)}
-            if width_of(candidate) > width:
-                break
-            trial = candidate
-        if sum(1 for name in keys if name != active and not trial[name]) >= len(bare):
-            compact.clear()
-            compact.update(saved[0])
-            no_badge.clear()
-            no_badge.update(saved[1])
-            return chosen
-
-        def keep(change: Callable[[], object]) -> None:
-            """Apply ``change`` (a name or badge step); undo it when it overflows."""
-
-            before = (dict(trial), set(compact), set(no_badge))
-            change()
-            if width_of(trial) > width:
-                trial.clear()
-                trial.update(before[0])
-                compact.clear()
-                compact.update(before[1])
-                no_badge.clear()
-                no_badge.update(before[2])
-
-        def rename(name: str, tier: int) -> None:
-            text = _names(name, titles[name])[tier]
-            if len(text) > len(trial[name]):
-                trial[name] = text
-
-        for name in ranked:
-            if name != active and trial[name]:
-                keep(lambda name=name: rename(name, 0))
-        keep(lambda: compact.discard("alerts"))
-        for name in reversed(minor):
-            keep(lambda name=name: (no_badge.discard(name), compact.add(name)))
-        for tier in (1, 2):
-            for name in ranked:
-                if name != active and trial[name]:
-                    keep(lambda name=name, tier=tier: rename(name, tier))
-        for name in reversed(minor):
-            if name not in saved[0]:
-                keep(lambda name=name: compact.discard(name))
-        return trial
-
     if active in keys:
         chosen = longest_active_name(chosen)
-    return render(name_bare_tabs(chosen))
+    return render(chosen)
 
 
 __all__ = [
