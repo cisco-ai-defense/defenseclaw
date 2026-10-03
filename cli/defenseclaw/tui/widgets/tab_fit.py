@@ -145,6 +145,13 @@ NARROW_STRIP = 66
 # change as unread badges come and go (GAP-1155).
 BADGE_RESERVE = 6
 
+# Cells kept free for the Alerts, Logs and Audit counts once every tab has a
+# name: "2 Alerts¹⁷¹", "8 Logs⁹⁹⁹⁺" and "9 Audit⁵⁷⁹" took 9 cells and cut the
+# open "V AI Discovery" at 172-180 cells while the other tabs kept their full
+# names (GAP-2420). Room for three "999+" counts, less the one Alerts digit
+# already counted, so the other tabs take shorter names instead.
+OPEN_COUNT_RESERVE = 11
+
 
 def _names(name: str, label: str) -> tuple[str, str, str]:
     """The tiny, short and full name of one tab."""
@@ -310,7 +317,8 @@ def _every_tab_named(panels: Sequence[tuple[str, str, str]], width: int) -> dict
     room for the longest full name ("V AI Discovery"), so with few counts any
     tab opens under its full name. Every tab gets its shortest name ("Log",
     "Inv"), then the tiny, short and full names grow, most important first,
-    while ``BADGE_RESERVE`` cells stay free for the counts.
+    while ``OPEN_COUNT_RESERVE`` cells stay free for the counts, so the open
+    tab keeps its full name beside Alerts, Logs and Audit backlogs (GAP-2420).
     """
 
     keys = {name: key for name, key, _title in panels}
@@ -331,7 +339,7 @@ def _every_tab_named(panels: Sequence[tuple[str, str, str]], width: int) -> dict
         for name in sorted(keys, key=_rank):
             before = chosen[name]
             chosen[name] = max(before, _names(name, titles[name])[tier], key=len)
-            if cost() + BADGE_RESERVE > width:
+            if cost() + OPEN_COUNT_RESERVE > width:
                 chosen[name] = before
     return chosen
 
