@@ -4721,6 +4721,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             "skills": [
                 ("j/k or Up/Down", "Navigate items"),
                 ("Enter / Esc", "Open / close the detail pane"),
+                ("PgUp / PgDn", "Scroll the open detail"),
                 ("/", "Filter (Enter or Esc returns to the list)"),
                 ("s / b / a / u", "Scan / block / allow / unblock selected"),
                 ("o", "Open the action menu (every action for the row)"),
@@ -4730,6 +4731,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             "mcps": [
                 ("j/k or Up/Down", "Navigate items"),
                 ("Enter / Esc", "Open / close the detail pane"),
+                ("PgUp / PgDn", "Scroll the open detail"),
                 ("/", "Filter (Enter or Esc returns to the list)"),
                 ("s / b / a / u", "Scan / block / allow / unblock selected"),
                 ("n", "Add or update an MCP server"),
@@ -4740,6 +4742,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             "plugins": [
                 ("j/k or Up/Down", "Navigate items"),
                 ("Enter / Esc", "Open / close the detail pane"),
+                ("PgUp / PgDn", "Scroll the open detail"),
                 ("/", "Filter (Enter or Esc returns to the list)"),
                 ("s / b / a / u", "Scan / block / allow / unblock selected"),
                 ("o", "Open the action menu (every action for the row)"),
@@ -11116,6 +11119,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 return self._focus_catalog_filter(self.active_panel)
             catalog_key = _catalog_key(key)
             model = self.catalog_models[self.active_panel]
+            if model.detail_open and key in {"pagedown", "page_down", "pageup", "page_up"}:
+                # At 80x24 the detail pane stops after the Scan line; PgUp/PgDn
+                # reach the verdict, findings and Actions lines (GAP-2087).
+                return self._scroll_detail_panel(key)
             if catalog_key == "esc" and not model.detail_open and model.filter_text:
                 # The hint says "Esc clears the filter"; Esc on the list did
                 # nothing (GAP-1379, GAP-1402).
@@ -12168,6 +12175,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # ``q`` on a text row starts typing (a value can begin with q);
         # elsewhere it closes the form like Esc.
         if key in {"esc", "escape"} or (key == "q" and not text_row):
+            if self.setup_model.back_to_goal_menu():
+                return SetupPanelAction(True, hint="Back to the goal list.")
             self.setup_model.close_wizard_form()
             return SetupPanelAction(True, hint="Setup wizard form closed.")
         if key in {"tab", "down"}:
