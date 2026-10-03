@@ -7585,7 +7585,8 @@ function Assert-PackagedRotationActionClosedPosture([object[]]$Posture) {
             [string]$row.fail_runtime -cne 'closed' -or
             -not [bool]$row.fail_current -or
             @($row.fail_drift).Count -ne 0) {
-            throw "packaged token rotation connector '$([string]$row.name)' is not exact action/closed without drift"
+            $postureDetail = ([pscustomobject]$row) | ConvertTo-Json -Compress -Depth 4
+            throw "packaged token rotation connector '$([string]$row.name)' is not exact action/closed without drift: $postureDetail"
         }
     }
 }
