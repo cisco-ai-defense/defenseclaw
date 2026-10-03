@@ -413,6 +413,27 @@ class DiscoveryEnableTests(unittest.TestCase):
 
 
 class DiscoveryDisableTests(unittest.TestCase):
+    def setUp(self):
+        running = patch.object(cmd_agent, "_gateway_running", return_value=True)
+        running.start()
+        self.addCleanup(running.stop)
+
+    def test_stopped_gateway_is_not_started(self):
+        # GAP-2389: the user stopped the gateway; disable saves the change
+        # without starting it and without claiming a restart.
+        runner = CliRunner()
+        app = _make_ctx(enabled=True)
+        with patch.object(cmd_agent, "_gateway_running", return_value=False), \
+                patch("defenseclaw.commands.cmd_setup._restart_services") as restart_mock:
+            result = runner.invoke(cmd_agent.discovery_disable, input="y\n", obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertFalse(app.cfg.ai_discovery.enabled)
+        app.cfg.save.assert_called_once()
+        restart_mock.assert_not_called()
+        self.assertIn("gateway is not running", result.output)
+        self.assertNotIn("Will restart", result.output)
+        self.assertNotIn("restarted", result.output)
+
     def test_already_disabled_short_circuits(self):
         runner = CliRunner()
         app = _make_ctx(enabled=False)
@@ -511,7 +532,8 @@ class DiscoveryConnectorConfigRoundTripTests(unittest.TestCase):
                 app.logger = MagicMock()
                 with patch(
                     "defenseclaw.commands.cmd_setup._restart_services"
-                ) as restart_mock, patch.object(cmd_agent, "_trigger_post_enable_scan"):
+                ) as restart_mock, patch.object(cmd_agent, "_trigger_post_enable_scan"), \
+                        patch.object(cmd_agent, "_gateway_running", return_value=True):
                     result = CliRunner().invoke(command, args, obj=app)
 
                 with open(config_path, encoding="utf-8") as handle:
