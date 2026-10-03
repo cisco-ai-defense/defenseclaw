@@ -15202,6 +15202,7 @@ def _fetch_native_delivery_summary(
 
     from defenseclaw.observability.custody_status import (
         NativeDeliverySummary,
+        gateway_api_addr,
         inspect_connector_custody,
         summarize_native_delivery,
     )
@@ -15215,7 +15216,9 @@ def _fetch_native_delivery_summary(
     if not database:
         database = str(Path(root) / "audit.db")
     try:
-        return summarize_native_delivery(inspect_connector_custody(database, root))
+        return summarize_native_delivery(
+            inspect_connector_custody(database, root, api_addr=gateway_api_addr(config))
+        )
     except Exception:  # noqa: BLE001 - TUI absence is bounded evidence, never a failure.
         return NativeDeliverySummary("no_evidence", "evidence_unavailable", 24)
 

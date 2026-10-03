@@ -191,16 +191,18 @@ func TestServiceContextSkillRowsNameSkillsOnly(t *testing.T) {
 	bob := filepath.Join(root, "Users", "bob")
 	hermes := filepath.Join(bob, "AppData", "Local", "hermes", "skills")
 	cursor := filepath.Join(bob, ".cursor", "skills-cursor")
-	for _, dir := range []string{filepath.Join(hermes, "creative", "ascii-art"), filepath.Join(hermes, "media"), filepath.Join(cursor, "canvas")} {
+	codex := filepath.Join(bob, ".codex", "skills")
+	for _, dir := range []string{filepath.Join(hermes, "creative", "ascii-art"), filepath.Join(hermes, "media"), filepath.Join(cursor, "canvas"), filepath.Join(codex, ".system", "imagegen")} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			t.Fatal(err)
 		}
 	}
 	for path, body := range map[string]string{
-		filepath.Join(hermes, "creative", "ascii-art", "SKILL.md"): "---\nname: ascii-art\n---\n",
-		filepath.Join(hermes, ".bundled_manifest"):                 "",
-		filepath.Join(hermes, ".curator_state"):                    "{}",
-		filepath.Join(cursor, ".sync-manifest.json"):               "{}",
+		filepath.Join(hermes, "creative", "ascii-art", "SKILL.md"):     "---\nname: ascii-art\n---\n",
+		filepath.Join(hermes, ".bundled_manifest"):                     "",
+		filepath.Join(hermes, ".curator_state"):                        "{}",
+		filepath.Join(cursor, ".sync-manifest.json"):                   "{}",
+		filepath.Join(codex, ".system", ".codex-system-skills.marker"): "",
 	} {
 		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 			t.Fatal(err)
@@ -222,5 +224,9 @@ func TestServiceContextSkillRowsNameSkillsOnly(t *testing.T) {
 	}
 	if got := entries(s.signalFromDirectoryChildren(AISignature{ID: "cursor", Name: "Cursor"}, SignalSkill, "skill", cursor)); got != "canvas" {
 		t.Fatalf("Cursor skill entries = %q, want canvas", got)
+	}
+	// The Codex marker sits inside .system, one level below the skills root.
+	if got := entries(s.signalFromDirectoryChildren(AISignature{ID: "codex", Name: "Codex"}, SignalSkill, "skill", codex)); got != "imagegen" {
+		t.Fatalf("Codex skill entries = %q, want imagegen", got)
 	}
 }

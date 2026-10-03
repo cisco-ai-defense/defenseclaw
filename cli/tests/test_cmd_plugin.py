@@ -1008,9 +1008,25 @@ class TestPluginListMultiConnectorDefault(PluginCommandTestBase):
                     self.assertIn("-", cells)
                 self.assertEqual("Hidden to fit" in listed.output, hidden, listed.output)
                 if hidden:
-                    self.assertIn("defenseclaw plugin info <id>", listed.output)
+                    self.assertIn("See: defenseclaw plugin info <id>", lines, listed.output)
                 else:
                     self.assertIn("Description", listed.output)
+
+    @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
+    def test_hidden_to_fit_hint_never_splits_the_command(self, _mock_oc):
+        """GAP-2348: the plugin info command stays whole at 80, 60 and 45 columns."""
+        rows = self._hermes_nested_rows()
+        for row in rows:
+            row["description"] = "Browser Use (https://browser-use.com) cloud browser backend for Hermes"
+        for columns in ("80", "60", "45"):
+            with self.subTest(columns=columns):
+                with (
+                    patch("defenseclaw.inventory.claw_inventory._enumerate_hermes_plugins", return_value=rows),
+                    patch.dict(os.environ, {"COLUMNS": columns}),
+                ):
+                    listed = self.invoke(["list", "--connector", "hermes"])
+                self.assertEqual(listed.exit_code, 0, listed.output)
+                self.assertIn("See: defenseclaw plugin info <id>", listed.output.splitlines(), listed.output)
 
     def test_list_below_70_columns_hides_actions_instead_of_squeezing(self):
         """GAP-2333/GAP-2334: Actions hides (and is named) before Status/Verdict are cut."""

@@ -343,6 +343,9 @@ func writeEnterpriseDiscovery(w io.Writer, dir, user string, asJSON bool) error 
 // writeEnterpriseDiscoveryReport adds the runtime discovery section to the
 // accounts' inventory and prints both.
 func writeEnterpriseDiscoveryReport(w io.Writer, report enterpriseDiscoveryReport, user string, asJSON bool, heading string) error {
+	for i := range report.Accounts {
+		report.Accounts[i].Signals = enterpriseDiscoveryAdminSignals(report.Accounts[i].Signals)
+	}
 	if view, err := enterpriseDiscoveryRuntime(); err != nil {
 		report.RuntimeError = err.Error()
 	} else if view != nil {
@@ -398,10 +401,7 @@ func writeEnterpriseDiscoveryReport(w io.Writer, report enterpriseDiscoveryRepor
 			if connector == "" {
 				connector = "-"
 			}
-			files := strings.Join(enterpriseDiscoverySignalFiles(signal), ",")
-			if files == "" {
-				files = "-"
-			}
+			files := enterpriseDiscoverySignalFiles(signal)
 			fmt.Fprintf(table, "  %s\t%s\t%s\t%s\t%s\t%s\n", signal.Category, signal.Name, connector, signal.State,
 				signal.LastSeen.UTC().Format(time.RFC3339), files)
 		}
@@ -417,22 +417,54 @@ func writeEnterpriseDiscoveryReport(w io.Writer, report enterpriseDiscoveryRepor
 	return nil
 }
 
-// enterpriseDiscoverySignalFiles names what a signal found. A skills or
-// plugins folder's signal lists its entries (skill_entry, plugin_entry),
-// not the folder itself, which its evidence keeps as the first row; the
-// view named "skills" in every skill row (GAP-2263). Other signals list
-// their basenames.
-func enterpriseDiscoverySignalFiles(signal inventory.AISignal) []string {
-	var entries []string
-	for _, evidence := range signal.Evidence {
-		if strings.HasSuffix(evidence.Type, "_entry") && evidence.Basename != "" && !slices.Contains(entries, evidence.Basename) {
-			entries = append(entries, evidence.Basename)
+// enterpriseDiscoveryAdminSignals makes each signal's basenames name what
+// it found. Evidence keeps the scanned folder or config file as its first
+// row, so the view named "skills" in every skill row (GAP-2263) and each
+// MCP config file as a server (GAP-2337). A skill, plugin or rule signal
+// lists its *_entry names and an MCP signal its mcp_server names. An MCP
+// config file read in full that declares no server is not an MCP server:
+// it is left out. Signals without evidence are kept as they are.
+func enterpriseDiscoveryAdminSignals(signals []inventory.AISignal) []inventory.AISignal {
+	out := make([]inventory.AISignal, 0, len(signals))
+	for _, signal := range signals {
+		if len(signal.Evidence) == 0 {
+			out = append(out, signal)
+			continue
 		}
+		var names []string
+		for _, evidence := range signal.Evidence {
+			named := strings.HasSuffix(evidence.Type, "_entry") || evidence.Type == "mcp_server"
+			if named && evidence.Basename != "" && !slices.Contains(names, evidence.Basename) {
+				names = append(names, evidence.Basename)
+			}
+		}
+		switch {
+		case len(names) > 0:
+			sort.Strings(names)
+			signal.Basenames = names
+		case signal.Category == inventory.SignalMCPServer && !signal.Partial:
+			continue
+		}
+		out = append(out, signal)
 	}
-	if len(entries) == 0 {
-		return signal.Basenames
+	return out
+}
+
+// enterpriseDiscoverySignalFiles is a signal's FILES cell; a partial scan
+// says so, so an unread folder is not taken for an empty one.
+func enterpriseDiscoverySignalFiles(signal inventory.AISignal) string {
+	files := strings.Join(signal.Basenames, ",")
+	if files == "" {
+		files = "-"
 	}
-	return entries
+	if signal.Partial {
+		reason := signal.CoverageReason
+		if reason == "" {
+			reason = "incomplete"
+		}
+		files += " (partial: " + reason + ")"
+	}
+	return files
 }
 
 // writeEnterpriseRuntime prints the runtime discovery section.
