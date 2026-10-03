@@ -55,6 +55,15 @@ def _root_click_commands() -> set[str]:
     return set(cli.commands)
 
 
+def _masked_display(raw: str, tokens: tuple[str, ...]) -> str:
+    """The typed command for the status bar, drawer and MRU, secrets redacted (GAP-2010)."""
+
+    from defenseclaw.tui.screens.command_preview import mask_argv  # local: that module imports this one
+
+    masked = mask_argv(tokens)
+    return raw if masked == tokens else " ".join(masked)
+
+
 def _is_env_prefix(token: str) -> bool:
     if "=" not in token:
         return False
@@ -99,7 +108,7 @@ def parse_command_line(text: str) -> ParsedCommand:
     return ParsedCommand(
         binary=entry.cli_binary,
         args=args,
-        display_name=raw,
+        display_name=_masked_display(raw, tokens),
         category=entry.category,
         risk=risk,
         needs_preview=_needs_preview(entry.category, args),
@@ -122,7 +131,7 @@ def _parse_raw_binary(tokens: tuple[str, ...]) -> ParsedCommand:
         return ParsedCommand(
             binary="defenseclaw",
             args=args,
-            display_name=" ".join(tokens),
+            display_name=_masked_display(" ".join(tokens), tokens),
             category=category,
             risk=risk,
             needs_preview=_needs_preview(category, args),
@@ -136,7 +145,7 @@ def _parse_raw_binary(tokens: tuple[str, ...]) -> ParsedCommand:
     return ParsedCommand(
         binary="defenseclaw-gateway",
         args=args,
-        display_name=" ".join(tokens),
+        display_name=_masked_display(" ".join(tokens), tokens),
         category=entry.category,
         risk=risk,
         needs_preview=_needs_preview(entry.category, args),

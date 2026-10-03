@@ -5555,6 +5555,11 @@ def wizard_secrets_to_env(args: Sequence[str]) -> tuple[tuple[str, ...], tuple[t
             env.append((names[arg], args[index + 1]))
             index += 2
             continue
+        flag, equals, value = arg.partition("=")
+        if equals and flag in names:
+            env.append((names[flag], value))
+            index += 1
+            continue
         out.append(arg)
         index += 1
     return tuple(out), tuple(env)

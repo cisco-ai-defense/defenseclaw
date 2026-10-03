@@ -105,6 +105,7 @@ from defenseclaw.tui.panels.setup import (
     llm_model_candidates,
     render_wizard_value,
     wizard_field_value,
+    wizard_secrets_to_env,
     wizard_state_summary,
 )
 from defenseclaw.tui.panels.skills import SkillsPanelModel
@@ -4270,6 +4271,12 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         masked_argv = tuple(
             (binary, *mask_argv(tuple(args)))
         )
+        if binary == "defenseclaw":
+            # A typed --token/--api-key goes to the child's env, as the
+            # wizards do (GAP-1888, GAP-2010): argv is visible to local users.
+            args, secret_env = wizard_secrets_to_env(args)
+            if secret_env:
+                env_overrides = (*(tuple(dict(env_overrides).items()) if env_overrides else ()), *secret_env)
         pre_started_at = self._last_gateway_started_at
         pre_doctor_mtime = self._doctor_cache_mtime()
         run_kwargs: dict[str, Any] = {}

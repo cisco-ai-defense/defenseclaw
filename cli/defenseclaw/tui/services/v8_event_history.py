@@ -22,7 +22,6 @@ import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
-from time import monotonic
 from typing import Any
 
 from defenseclaw.alert_semantics import (
@@ -66,9 +65,9 @@ LEGACY_HOOK_EVENT_NAME = "legacy.audit.connector.hook"
 _MAX_PAYLOAD_BYTES = 64 * 1024
 _MAX_FINDING_TAGS_BYTES = 16 * 1024
 # After a full alert scan the reader scans only rows added since, plus the
-# alerts it already holds (GAP-1816). A full scan still runs this often, so
-# a missed edge case (an older row that became an alert) heals itself.
-_ALERT_FULL_SCAN_SECONDS = 300.0
+# alerts it already holds (GAP-1816). Audit rows are append-only and acks
+# are never removed, so an older row can't become an alert again; there is
+# no timed full rescan, which walked every row of a huge audit.db (GAP-2007).
 
 
 def _sql_string_values(values: tuple[str, ...]) -> str:
@@ -366,7 +365,7 @@ class V8EventHistoryReader:
         self._alert_mark: int | None = None
         self._alert_rowids: tuple[int, ...] = ()
         self._alert_scope: tuple[object, ...] = ()
-        self._alert_full_at = 0.0
+        self._alert_acks = 0
         if self.db is not None:
             self.db.create_function(
                 "dc_hook_decision",
@@ -455,11 +454,13 @@ class V8EventHistoryReader:
         # the alerts already selected (re-checked for acks) need the filter.
         max_rowid = int(self.db.execute("SELECT COALESCE(MAX(rowid), 0) FROM audit_events").fetchone()[0])
         scope = (self._schema_version, self._has_ack_projection, bounded_alerts)
+        acks = self._alert_ack_count()
         incremental = (
             self._alert_mark is not None
             and self._alert_scope == scope
             and max_rowid >= self._alert_mark
-            and monotonic() - self._alert_full_at < _ALERT_FULL_SCAN_SECONDS
+            # A removed ack could bring an older alert back.
+            and acks >= self._alert_acks
         )
         rows = self._query_views(
             select_columns,
@@ -479,8 +480,7 @@ class V8EventHistoryReader:
             )
             alert_rowids = tuple(int(row[1]) for row in rows if int(row[0]) == 1)
             incremental = False
-        if not incremental:
-            self._alert_full_at = monotonic()
+        self._alert_acks = acks
         self._alert_mark = max_rowid
         self._alert_rowids = alert_rowids
         self._alert_scope = scope
@@ -619,6 +619,11 @@ class V8EventHistoryReader:
             self._has_ack_projection = "alert_acknowledgement_projection" in tables
             self._schema_version = schema_version
         return bool(self._supported)
+
+    def _alert_ack_count(self) -> int:
+        if not self._has_ack_projection:
+            return 0
+        return int(self.db.execute("SELECT COUNT(*) FROM alert_acknowledgement_projection").fetchone()[0])
 
     def _alert_ack_filter_sql(self) -> str:
         if not self._has_ack_projection:

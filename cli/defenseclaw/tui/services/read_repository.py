@@ -26,6 +26,7 @@ snapshot instead of flashing every panel empty.
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
@@ -62,9 +63,8 @@ _MAX_RETRY_SECONDS = 60.0
 _BUSY_MIN_SECONDS = 0.25
 _BUSY_BACKOFF_FACTOR = 4.0
 _MAX_BUSY_BACKOFF_SECONDS = 30.0
-# Block rows for the Audit panel are read incrementally; a full read still
-# runs this often (GAP-1816).
-_BLOCKS_FULL_READ_SECONDS = 300.0
+# Block rows for the Audit panel are read incrementally (GAP-1816); a full
+# read runs only when held rows were pruned from a full window (GAP-2007).
 
 
 @dataclass(frozen=True)
@@ -127,7 +127,6 @@ class TUIReadRepository:
         self._next_history_at = 0.0
         self._blocks_mark: int | None = None
         self._blocks: tuple[Event, ...] = ()
-        self._blocks_read_at = 0.0
 
     async def refresh(
         self,
@@ -374,14 +373,26 @@ class TUIReadRepository:
         """
 
         mark = int(store.db.execute("SELECT COALESCE(MAX(rowid), 0) FROM audit_events").fetchone()[0])
-        now = monotonic()
-        if self._blocks_mark is None or mark < self._blocks_mark or now - self._blocks_read_at >= _BLOCKS_FULL_READ_SECONDS:
+        held = self._blocks
+        if held:
+            # Drop held rows that retention pruned: a primary-key lookup,
+            # not the timed full read that walked every row (GAP-2007).
+            kept = {
+                str(row[0])
+                for row in store.db.execute(
+                    "SELECT id FROM audit_events WHERE id IN (SELECT value FROM json_each(?))",
+                    (json.dumps([event.id for event in held]),),
+                )
+            }
+            held = tuple(event for event in held if event.id in kept)
+        if self._blocks_mark is None or mark < self._blocks_mark or len(self._blocks) >= limit > len(held):
+            # First read, a reset table, or a full window lost rows that
+            # older blocks may now fill.
             rows = store.list_block_event_summaries(limit)
-            self._blocks_read_at = now
         else:
             newer = store.list_block_event_summaries(limit, after_rowid=self._blocks_mark)
             seen = {event.id for event in newer}
-            rows = [*newer, *(event for event in self._blocks if event.id not in seen)][:limit]
+            rows = [*newer, *(event for event in held if event.id not in seen)][:limit]
         self._blocks_mark = mark
         self._blocks = tuple(rows)
         return rows
