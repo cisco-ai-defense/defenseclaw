@@ -19,6 +19,8 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -77,6 +79,12 @@ type ToolInspectRequest struct {
 	// selects the connector generation; a mismatched assertion is rejected.
 	Connector     string `json:"connector,omitempty"`
 	MCPServerName string `json:"mcp_server_name,omitempty"`
+	// toolUseID is set by a connector adapter, never from the wire (see
+	// contentScope below).
+	toolUseID string
+	// toolArgsAreHookEnvelope marks args the connector did not project from a
+	// tool payload: the whole hook envelope, session and event keys included.
+	toolArgsAreHookEnvelope bool
 	// contentScope is set only after a connector adapter derives content
 	// provenance from its typed hook payload. It is deliberately not accepted
 	// from the public inspect wire, where a caller could otherwise promote its
@@ -216,6 +224,13 @@ func (a *APIServer) managedAIDOnly() bool {
 	return a != nil && a.scannerCfg != nil && a.scannerCfg.ManagedAIDOnly()
 }
 
+// aidToolCall is a tool invocation sent to AID as a structured tool call.
+type aidToolCall struct {
+	Name string
+	ID   string
+	Args json.RawMessage
+}
+
 // inspectManagedAIDOnly is the managed_enterprise hook-lane inspection
 // path: Cisco AI Defense is the only thing that can block. Static
 // block/allow lists, MCP-server blocks, connector regex packs, CodeGuard,
@@ -223,14 +238,31 @@ func (a *APIServer) managedAIDOnly() bool {
 // down / timeout / token failure — hookAIDInspect returns nil), the request
 // fails open with an explicit allow verdict.
 func (a *APIServer) inspectManagedAIDOnly(ctx context.Context, toolName, content string) *ToolInspectVerdict {
+	return a.inspectManagedAIDOnlyCall(ctx, toolName, content, nil)
+}
+
+// inspectManagedAIDOnlyCall is the shared fail-open path: call is nil for
+// content, set for a tool invocation.
+func (a *APIServer) inspectManagedAIDOnlyCall(
+	ctx context.Context,
+	toolName, content string,
+	call *aidToolCall,
+) *ToolInspectVerdict {
 	failOpenReason := aidFailOpenUnavailable
-	if !managedAIDHookContentIsInspectable(toolName, content) {
+	if call == nil && !managedAIDHookContentIsInspectable(toolName, content) {
+		failOpenReason = aidFailOpenNoContent
+	} else if call != nil && len(call.Args) == 0 {
 		failOpenReason = aidFailOpenNoContent
 	} else if a == nil || a.ciscoInspector == nil || a.scannerCfg == nil ||
 		!a.scannerCfg.CiscoAIDefense.HookSurfaceEnabled() {
 		failOpenReason = aidFailOpenUnwired
 	}
-	aid := a.hookAIDInspect(ctx, toolName, content)
+	var aid *ScanVerdict
+	if call != nil {
+		aid = a.hookAIDInspectToolCall(ctx, *call, content)
+	} else {
+		aid = a.hookAIDInspect(ctx, toolName, content)
+	}
 	if aid == nil {
 		// Fail-open surface: managed_enterprise's local detectors are
 		// demoted, so a nil AID verdict means this inspection ends
@@ -380,12 +412,108 @@ func (a *APIServer) hookAIDInspect(ctx context.Context, toolName string, content
 	// "createJiraIssue") have it visible. AID's /inspect/chat reads
 	// content as a free-text user message; the structured tool name
 	// would otherwise be lost on the wire.
-	body := content
-	if toolName != "" && toolName != "message" {
-		body = fmt.Sprintf("Tool call: %s\n%s", toolName, content)
+	defer yieldHookRunSlot(ctx)()
+	return a.ciscoInspector.Inspect(ctx, []ChatMessage{
+		{Role: "user", Content: hookAIDToolText(toolName, content)},
+	})
+}
+
+// toolCallArgsCarryable reports whether the arguments can stand as tool-call
+// fields: a JSON object the connector projected from its own tool payload.
+// JSON null decodes into a map without error, but it is not an object, and
+// AID's rule engine fails the tool-call rules on it.
+func toolCallArgsCarryable(req *ToolInspectRequest) bool {
+	if req == nil || req.Direction != "tool_call" || req.toolArgsAreHookEnvelope {
+		return false
+	}
+	var object map[string]json.RawMessage
+	return json.Unmarshal(req.Args, &object) == nil && object != nil
+}
+
+// hookAIDInspectTool sends the invocation as a tool call ahead of the text form,
+// and as text alone when the arguments cannot be carried as fields.
+func (a *APIServer) hookAIDInspectTool(
+	ctx context.Context,
+	req *ToolInspectRequest,
+	toolName, argsStr string,
+) *ScanVerdict {
+	if toolCallArgsCarryable(req) {
+		return a.hookAIDInspectToolCall(ctx, aidToolCall{
+			Name: toolName,
+			ID:   req.toolUseID,
+			Args: req.Args,
+		}, argsStr)
+	}
+	return a.hookAIDInspect(ctx, toolName, argsStr)
+}
+
+// aidToolCallMaxBytes bounds the tool call added beside the text form. Both
+// carry the arguments, so a larger one is sent as text alone, as before:
+// doubling the arguments could push the request past AID's 10 MiB body limit,
+// which fails the inspection open.
+const aidToolCallMaxBytes = 2 << 20
+
+// toolCallWireID is the tool call's id. The chat schema requires a non-empty
+// one, so an invocation the agent did not identify is given a "dc-" id derived
+// from its own content, which also marks it as not the agent's.
+func toolCallWireID(call aidToolCall) string {
+	if call.ID != "" {
+		return call.ID
+	}
+	sum := sha256.Sum256(append([]byte(call.Name+"\x00"), call.Args...))
+	return "dc-" + hex.EncodeToString(sum[:8])
+}
+
+// hookAIDInspectToolCall sends the invocation as an assistant tool call, with
+// arguments as a JSON string, followed by the message hookAIDInspect would send
+// for it. That user message is unchanged and stays last: AID takes the
+// direction from the last role, so the request path, its policies and the
+// text rules' input are what they were, and the tool call only adds to them.
+func (a *APIServer) hookAIDInspectToolCall(
+	ctx context.Context,
+	call aidToolCall,
+	content string,
+) *ScanVerdict {
+	if a == nil || a.ciscoInspector == nil {
+		return nil
+	}
+	if a.scannerCfg == nil || !a.scannerCfg.CiscoAIDefense.HookSurfaceEnabled() {
+		return nil
+	}
+	if len(call.Args) == 0 {
+		return nil
+	}
+	name := call.Name
+	if strings.TrimSpace(name) == "" {
+		name = "tool"
+	}
+	toolCalls, err := json.Marshal([]map[string]interface{}{{
+		"id":   toolCallWireID(call),
+		"type": "function",
+		"function": map[string]interface{}{
+			"name":      name,
+			"arguments": string(call.Args),
+		},
+	}})
+	if err != nil {
+		return nil
+	}
+	if len(toolCalls) > aidToolCallMaxBytes {
+		return a.hookAIDInspect(ctx, call.Name, content)
 	}
 	defer yieldHookRunSlot(ctx)()
-	return a.ciscoInspector.Inspect(ctx, []ChatMessage{{Role: "user", Content: body}})
+	return a.ciscoInspector.Inspect(ctx, []ChatMessage{
+		{Role: "assistant", ToolCalls: toolCalls},
+		{Role: "user", Content: hookAIDToolText(call.Name, content)},
+	})
+}
+
+// hookAIDToolText is the flattened form AID's text classifiers read.
+func hookAIDToolText(toolName, content string) string {
+	if toolName != "" && toolName != "message" {
+		return fmt.Sprintf("Tool call: %s\n%s", toolName, content)
+	}
+	return content
 }
 
 // managedAIDHookContentIsInspectable applies text trimming only to the
@@ -615,6 +743,13 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 	// CodeGuard, and the judge lane; AID inspects the tool call directly
 	// and a nil AID verdict fails open. See inspectManagedAIDOnly.
 	if a.managedAIDOnly() {
+		if toolCallArgsCarryable(req) {
+			return a.inspectManagedAIDOnlyCall(ctx, req.Tool, string(req.Args), &aidToolCall{
+				Name: req.Tool,
+				ID:   req.toolUseID,
+				Args: req.Args,
+			})
+		}
 		return a.inspectManagedAIDOnly(ctx, req.Tool, string(req.Args))
 	}
 
@@ -712,7 +847,7 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 		// turn — operators with custom AID policies (e.g. block
 		// `createJiraIssue`, throttle `addComment`) want their rules to
 		// fire even when no DefenseClaw built-in pattern matched.
-		if aid := a.hookAIDInspect(ctx, toolName, argsStr); aid != nil && aid.Action != "allow" && aid.Action != "" {
+		if aid := a.hookAIDInspectTool(ctx, req, toolName, argsStr); aid != nil && aid.Action != "allow" && aid.Action != "" {
 			verdict = mergeWithAIDVerdict(nil, aid)
 		}
 	} else {
@@ -759,11 +894,9 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 
 		// AID lane: also forward to Cisco AI Defense when the operator has
 		// configured a key. Strictest verdict wins via mergeWithAIDVerdict.
-		// We send the rule reasons text rather than just the args because
-		// AID's classifier reads free-text content; the rule names give it
-		// useful context. The lane is silent when no AID client is wired
-		// or when ScanHookSurface=false.
-		if aid := a.hookAIDInspect(ctx, toolName, argsStr); aid != nil {
+		// The lane is silent when no AID client is wired or when
+		// ScanHookSurface=false.
+		if aid := a.hookAIDInspectTool(ctx, req, toolName, argsStr); aid != nil {
 			verdict = mergeWithAIDVerdict(verdict, aid)
 		}
 	}

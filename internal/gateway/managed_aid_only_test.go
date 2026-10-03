@@ -16,6 +16,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -345,7 +346,10 @@ func TestProxyManagedAIDOnly_PreservesHistoryWithoutDuplication(t *testing.T) {
 		if verdict == nil || verdict.Action != "block" {
 			t.Fatalf("verdict = %+v, want block", verdict)
 		}
-		wantMessages := append(before, ChatMessage{Role: "user", Content: "provider-native prompt"})
+		// The proxy lane keeps provider tool calls local (see inspectCisco).
+		wantHistory := append([]ChatMessage(nil), before...)
+		wantHistory[0].ToolCalls = nil
+		wantMessages := append(wantHistory, ChatMessage{Role: "user", Content: "provider-native prompt"})
 		if !reflect.DeepEqual(stub.messages, wantMessages) {
 			t.Fatalf("AID messages = %#v, want preserved history plus synthetic turn %#v", stub.messages, wantMessages)
 		}
@@ -353,6 +357,106 @@ func TestProxyManagedAIDOnly_PreservesHistoryWithoutDuplication(t *testing.T) {
 			t.Fatalf("caller messages mutated: got %#v, want %#v", original, before)
 		}
 	})
+}
+
+// The proxy lane sends AID a provider's history as role and content only, as
+// before tool calls were carried. A provider's tool fields are raw (here an
+// Ollama call: object arguments, no id), and one malformed entry fails the
+// whole request, so they stay local; only the hook lane sends tool calls.
+// Every strategy calls AID from its own site, so each is covered.
+func TestProxyAIDLane_ProviderToolCallsStayLocal(t *testing.T) {
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"is_safe":true,"action":"Allow","rules":[]}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	// Long enough for the injection judge to ask its provider.
+	const prompt = "thanks, now summarize that weather report"
+	history := []ChatMessage{
+		{Role: "system", Content: "You are helpful."},
+		{Role: "user", Content: "list files", Name: "alice"},
+		{Role: "assistant", ToolCalls: json.RawMessage(
+			`[{"function":{"name":"get_weather","arguments":{"city":"Paris"}}}]`)},
+		{Role: "tool", Content: "22C", ToolCallID: "call_1"},
+		{Role: "user", Content: prompt},
+	}
+	before := append([]ChatMessage(nil), history...)
+
+	apiKeyClient := newCiscoInspectTestClient(t, srv.URL, "TEST_PROXY_TOOL_CALLS_LOCAL")
+	apiKeyClient.client = srv.Client()
+	managedClient := NewCiscoDefenseClawInspectClient(&config.CiscoAIDefenseConfig{
+		Endpoint:  srv.URL,
+		TimeoutMs: 3000,
+	}, newFakeCloudProvider("cmid-token-1"))
+	if managedClient == nil {
+		t.Fatal("expected managed client")
+	}
+	apiKey := func(strategy string, judge *LLMJudge) func() *GuardrailInspector {
+		return func() *GuardrailInspector {
+			g := NewGuardrailInspector("remote", apiKeyClient, judge, "")
+			g.SetDetectionStrategy(strategy, "", "", "", false)
+			return g
+		}
+	}
+	text := func(content string) interface{} { return content }
+	// A judge that answers, with every label false, so judge_first takes its
+	// judged path rather than the fallback.
+	judgeProvider := &mockLLMProvider{response: &ChatResponse{Choices: []ChatChoice{{Message: &ChatMessage{
+		Content: `{"Instruction Manipulation":{"label":false},"Context Manipulation":{"label":false},` +
+			`"Obfuscation":{"label":false},"Semantic Manipulation":{"label":false},"Token Exploitation":{"label":false}}`,
+	}}}}}
+	judge := &LLMJudge{
+		cfg:      &config.JudgeConfig{Enabled: true, Injection: true, Model: "test/m"},
+		provider: judgeProvider,
+		rp:       mustLoadRulePack(t, ""),
+	}
+	for _, lane := range []struct {
+		name      string
+		guardrail func() *GuardrailInspector
+		content   func(string) interface{}
+	}{
+		{name: "api-key/regex_only", guardrail: apiKey("regex_only", nil), content: text},
+		{name: "api-key/regex_judge", guardrail: apiKey("regex_judge", nil), content: text},
+		{name: "api-key/judge_first/fallback", guardrail: apiKey("judge_first", nil), content: text},
+		{name: "api-key/judge_first/judged", guardrail: apiKey("judge_first", judge), content: text},
+		{
+			name: "managed",
+			guardrail: func() *GuardrailInspector {
+				g := NewGuardrailInspector("both", nil, nil, "")
+				g.SetManagedMode(true)
+				g.SetCiscoInspector(managedClient)
+				return g
+			},
+			content: func(text string) interface{} { return map[string]interface{}{"text": text} },
+		},
+	} {
+		t.Run(lane.name, func(t *testing.T) {
+			gotBody = nil
+			lane.guardrail().Inspect(t.Context(), "prompt", prompt, history, "provider/model", "action")
+			var payload struct {
+				Messages []map[string]interface{} `json:"messages"`
+			}
+			if err := json.Unmarshal(gotBody, &payload); err != nil {
+				t.Fatalf("unmarshal: %v (body=%s)", err, gotBody)
+			}
+			want := make([]map[string]interface{}, len(history))
+			for i, message := range history {
+				want[i] = map[string]interface{}{"role": message.Role, "content": lane.content(message.Content)}
+			}
+			if !reflect.DeepEqual(payload.Messages, want) {
+				t.Fatalf("AID messages = %v, want role and content only %v", payload.Messages, want)
+			}
+			if !reflect.DeepEqual(history, before) {
+				t.Fatalf("caller messages mutated: got %#v, want %#v", history, before)
+			}
+		})
+	}
+	if len(judgeProvider.captured) == 0 {
+		t.Error("the judged path never asked the judge")
+	}
 }
 
 func TestProxyManagedAIDOnly_CompletionRemainsAssistantOnly(t *testing.T) {
@@ -468,6 +572,89 @@ func TestHookManagedAIDOnly_ToolPolicyBlock(t *testing.T) {
 	v := a.inspectToolPolicy(req)
 	if v == nil || v.Action != "block" {
 		t.Fatalf("managed tool policy with AID block: want block, got %+v", v)
+	}
+}
+
+// A managed PreToolUse goes out as the tool call followed by the text form the
+// managed lane sent before, byte for byte, so the text stays the last message
+// and AID keeps the request path.
+func TestHookManagedAIDOnly_ToolCallKeepsTextForm(t *testing.T) {
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"is_safe":true,"action":"Allow","rules":[]}`)
+	}))
+	t.Cleanup(srv.Close)
+	client := NewCiscoDefenseClawInspectClient(&config.CiscoAIDefenseConfig{
+		Endpoint:  srv.URL,
+		TimeoutMs: 3000,
+	}, newFakeCloudProvider("cmid-token-1"))
+	if client == nil {
+		t.Fatal("expected managed client")
+	}
+	a := managedHookServer(client)
+
+	const args = `{"command":"rm -rf /"}`
+	send := func(req *ToolInspectRequest) []json.RawMessage {
+		t.Helper()
+		gotBody = nil
+		if v := a.inspectToolPolicy(req); v == nil || v.Action != "allow" {
+			t.Fatalf("verdict = %+v, want AID's allow", v)
+		}
+		var payload struct {
+			Messages []json.RawMessage `json:"messages"`
+		}
+		if err := json.Unmarshal(gotBody, &payload); err != nil {
+			t.Fatalf("unmarshal: %v (body=%s)", err, gotBody)
+		}
+		return payload.Messages
+	}
+	textOnly := send(&ToolInspectRequest{Tool: "Bash", Args: json.RawMessage(args)})
+	withCall := send(&ToolInspectRequest{
+		Tool:      "Bash",
+		Args:      json.RawMessage(args),
+		Direction: "tool_call",
+		toolUseID: "toolu_01U3wpX",
+	})
+
+	const text = `{"content":{"text":"Tool call: Bash\n{\"command\":\"rm -rf /\"}"},"role":"user"}`
+	if len(textOnly) != 1 || string(textOnly[0]) != text {
+		t.Fatalf("text form = %s, want %s", textOnly, text)
+	}
+	if len(withCall) != 2 || string(withCall[1]) != text {
+		t.Fatalf("messages = %s, want the tool call, then %s", withCall, text)
+	}
+	const toolCall = `{"content":{"text":""},"role":"assistant","tool_calls":[{"function":` +
+		`{"arguments":"{\"command\":\"rm -rf /\"}","name":"Bash"},"id":"toolu_01U3wpX","type":"function"}]}`
+	if string(withCall[0]) != toolCall {
+		t.Errorf("tool call message = %s, want %s", withCall[0], toolCall)
+	}
+}
+
+// The managed lane makes its own carryable check, so arguments that cannot
+// stand as tool-call fields go out as the text form alone there too.
+func TestHookManagedAIDOnly_UncarryableArgsStayText(t *testing.T) {
+	stub := &stubAIDInspector{verdict: &ScanVerdict{Action: "allow", Severity: "NONE", Scanner: "ai-defense"}}
+	a := managedHookServer(stub)
+	for _, req := range []*ToolInspectRequest{
+		{Tool: "shell", Args: json.RawMessage(`null`), Direction: "tool_call"},
+		{Tool: "shell", Args: json.RawMessage(` null `), Direction: "tool_call"},
+		{Tool: "shell", Args: json.RawMessage(`"rm -rf /"`), Direction: "tool_call"},
+		{Tool: "shell", Args: json.RawMessage(`["rm -rf /"]`), Direction: "tool_call"},
+		{
+			Tool:                    "shell",
+			Args:                    json.RawMessage(`{"hook_event_name":"PreToolUse","command":"rm -rf /"}`),
+			Direction:               "tool_call",
+			toolArgsAreHookEnvelope: true,
+		},
+	} {
+		stub.messages = nil
+		a.inspectToolPolicy(req)
+		want := []ChatMessage{{Role: "user", Content: "Tool call: shell\n" + string(req.Args)}}
+		if !reflect.DeepEqual(stub.messages, want) {
+			t.Errorf("args %s: AID messages = %#v, want the text form alone", req.Args, stub.messages)
+		}
 	}
 }
 

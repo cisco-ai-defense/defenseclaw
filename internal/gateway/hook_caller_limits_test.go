@@ -138,9 +138,8 @@ func TestAdmitHookCallerRunsACallersRequestsInItsOwnSlots(t *testing.T) {
 
 	// A request waiting on Cisco AI Defense uses no gateway CPU, so the
 	// caller's next request runs meanwhile instead of waiting out that round
-	// trip, and the scan takes a slot back when AI Defense answers.
-	aid := heldAIDInspector{called: make(chan struct{}), reply: make(chan struct{})}
-	api.scannerCfg, api.ciscoInspector = &config.Config{}, aid
+	// trip, and the scan takes a slot back when AI Defense answers. Both
+	// senders, the text form and the tool call, give the slot up.
 	serve := func(handler http.HandlerFunc) chan struct{} {
 		done := make(chan struct{})
 		go func() {
@@ -149,23 +148,36 @@ func TestAdmitHookCallerRunsACallersRequestsInItsOwnSlots(t *testing.T) {
 		}()
 		return done
 	}
-	scanned := serve(func(_ http.ResponseWriter, r *http.Request) { api.hookAIDInspect(r.Context(), "Bash", "ls") })
-	<-aid.called
-	next := serve(func(http.ResponseWriter, *http.Request) {})
-	select {
-	case <-next:
-	case <-time.After(5 * time.Second):
+	for _, scan := range []struct {
+		name string
+		run  func(context.Context)
+	}{
+		{"text", func(ctx context.Context) { api.hookAIDInspect(ctx, "Bash", "ls") }},
+		{"tool call", func(ctx context.Context) {
+			args := `{"command":"ls"}`
+			api.hookAIDInspectToolCall(ctx, aidToolCall{Name: "Bash", Args: json.RawMessage(args)}, args)
+		}},
+	} {
+		aid := heldAIDInspector{called: make(chan struct{}), reply: make(chan struct{})}
+		api.scannerCfg, api.ciscoInspector = &config.Config{}, aid
+		scanned := serve(func(_ http.ResponseWriter, r *http.Request) { scan.run(r.Context()) })
+		<-aid.called
+		next := serve(func(http.ResponseWriter, *http.Request) {})
+		select {
+		case <-next:
+		case <-time.After(5 * time.Second):
+			close(aid.reply)
+			t.Fatalf("%s: the caller's next request waited for another request's AI Defense answer", scan.name)
+		}
 		close(aid.reply)
-		t.Fatal("the caller's next request waited for another request's AI Defense answer")
-	}
-	close(aid.reply)
-	select {
-	case <-scanned:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the scanned request did not finish after AI Defense answered")
-	}
-	if budget := api.hookCallerLimits.callers["1001"]; budget.inFlight != 0 || len(budget.running) != 0 {
-		t.Fatalf("in-flight = %d, running = %d, want 0 and 0", budget.inFlight, len(budget.running))
+		select {
+		case <-scanned:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s: the scanned request did not finish after AI Defense answered", scan.name)
+		}
+		if budget := api.hookCallerLimits.callers["1001"]; budget.inFlight != 0 || len(budget.running) != 0 {
+			t.Fatalf("%s: in-flight = %d, running = %d, want 0 and 0", scan.name, budget.inFlight, len(budget.running))
+		}
 	}
 }
 
