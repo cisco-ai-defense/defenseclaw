@@ -230,6 +230,12 @@ residue automatically.
     `cmd /c "%USERPROFILE%\.local\bin\defenseclaw-hook.exe --version"`.
     `defenseclaw doctor` also compares the hook's release with the CLI's.
   </Accordion>
+  <Accordion title="Ctrl+C on a running command asks Terminate batch job (Y/N)?">
+    `defenseclaw` runs through the `defenseclaw.cmd` launcher, and cmd.exe asks
+    this question whenever Ctrl+C reaches a batch file. The command has already
+    stopped (`Aborted!`): answer `Y` or `N`, both return you to the prompt.
+    Quitting the `defenseclaw` TUI with Ctrl+C does not ask it.
+  </Accordion>
   <Accordion title="An install, upgrade, or rollback fails">
     Read the newest `%USERPROFILE%\.defenseclaw\logs\install-*.log`. A failed
     upgrade restores the previous install automatically and keeps the failed
