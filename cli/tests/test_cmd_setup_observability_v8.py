@@ -1502,3 +1502,37 @@ def test_setup_v8_remove_says_the_key_stays_in_dotenv(
     assert "DD_API_KEY is still stored in" in last.output
     assert "defenseclaw keys remove DD_API_KEY" in last.output
     assert dotenv_values(tmp_path / ".env").get("DD_API_KEY") == "dummy-key"
+
+
+@pytest.mark.parametrize(
+    ("preset", "flag", "value", "where"),
+    [
+        ("otlp", "--endpoint", "https://user:pw@127.0.0.1:14318/v1/traces", "headers:"),
+        ("otlp", "--endpoint", "user@collector.example.com:4317", "headers:"),
+        ("splunk-enterprise", "--endpoint", "https://u:p@splunk.example.com:8088/services/collector", "--token"),
+    ],
+)
+def test_setup_v8_add_refuses_endpoint_credentials_in_plain_words(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    preset: str,
+    flag: str,
+    value: str,
+    where: str,
+) -> None:
+    # GAP-2205: the schema said "destinations[2] (oneOf)" and blamed config.yaml.
+    _stub_canonical_v8_gateway(monkeypatch)
+    app = _setup_app(tmp_path)
+    before = (tmp_path / "config.yaml").read_text()
+    args = ["add", preset, "--non-interactive", "--name", "x", flag, value, "--allow-private-networks"]
+    if preset == "otlp":
+        args += ["--protocol", "http"]
+
+    result = CliRunner().invoke(observability, args, obj=app)
+
+    assert result.exit_code == 1, result.output
+    assert f"{flag} must not contain a user name or password" in result.output
+    assert where in result.output
+    for jargon in ("oneOf", "v8", "$.observability", "config.yaml:", "pw@"):
+        assert jargon not in result.output
+    assert (tmp_path / "config.yaml").read_text() == before

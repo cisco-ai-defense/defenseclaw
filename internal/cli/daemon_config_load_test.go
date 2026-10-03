@@ -173,3 +173,45 @@ func TestGatewayEmptyConfigMessageDatesThePreviousCopy(t *testing.T) {
 		}
 	}
 }
+
+// GAP-2206: the empty-config message names the newest backups/config.yaml.*
+// copy ahead of the older copy the last version upgrade kept.
+func TestGatewayEmptyConfigMessageNamesTheNewestBackup(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("DEFENSECLAW_HOME", home)
+	if err := os.WriteFile(config.ConfigPath(), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	write := func(path, body string, when time.Time) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, when, when); err != nil {
+			t.Fatal(err)
+		}
+	}
+	kept := filepath.Join(home, "previous", "data", "config.yaml")
+	write(kept, "config_version: 7\n", time.Date(2026, 10, 2, 4, 40, 0, 0, time.UTC))
+	write(filepath.Join(home, "backups", "config.yaml.empty"), "", time.Date(2026, 10, 2, 20, 0, 0, 0, time.UTC))
+	write(filepath.Join(home, "backups", "config.yaml.before-redaction-1"), "config_version: 8\n",
+		time.Date(2026, 10, 2, 6, 0, 0, 0, time.UTC))
+	newest := filepath.Join(home, "backups", "config.yaml.before-redaction-2")
+	write(newest, "config_version: 8\n", time.Date(2026, 10, 2, 8, 58, 0, 0, time.UTC))
+
+	loadErr := errors.New("failed to load config: config.yaml: [yaml_root_mapping_required] $: the YAML document root must be a mapping")
+	want := "Restore your copy of config.yaml (the newest backup is " + newest + ", from 2026-10-02 08:58 UTC; " +
+		"the last version upgrade kept an older copy from 2026-10-02 04:40 UTC in " + kept + "), " +
+		"or remove the empty file and run 'defenseclaw init'."
+	for _, err := range []error{
+		daemonConfigLoadError("start", loadErr),
+		gatewayStatusConfigLoadError(loadErr),
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not contain %q", err, want)
+		}
+	}
+}
