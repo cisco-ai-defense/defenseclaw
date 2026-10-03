@@ -4217,10 +4217,7 @@ def block(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
         skill_path = _resolve_path(app, skill_name, connector)
         if skill_path:
             pe.set_source_path("skill", skill_name, skill_path, connector)
-        click.secho(
-            f"[skill] {skill_name!r} added to block list (connector={connector})",
-            fg="red",
-        )
+        click.secho(f"[skill] Blocked {skill_name!r} ({connector}).", fg="red")
     else:
         pe.block("skill", skill_name, reason)
         skill_path = _resolve_path(app, skill_name)
@@ -4230,12 +4227,10 @@ def block(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
             target_connector
             for target_connector, _path in _skill_match_dir_scopes(app, skill_name)
         ]
-        suffix = (
-            f" for {_format_connector_scope_list(affected_connectors)}"
-            if affected_connectors
-            else ""
-        )
-        click.secho(f"[skill] {skill_name!r} added to block list{suffix}", fg="red")
+        # GAP-2085: a bare block is global; name it the way bare unblock does.
+        click.secho(f"[skill] Blocked {skill_name!r} (every connector).", fg="red")
+        if affected_connectors:
+            click.echo(f"  Copies found for {_format_connector_scope_list(affected_connectors)}.")
 
     if app.logger:
         saved_change_audit(app.logger).log_action(
@@ -4397,7 +4392,7 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
             pe.remove_action("skill", skill_name)
             click.secho(f"[skill] Unblocked {skill_name!r} (every connector).", fg="green")
         click.echo(
-            "  The skill will go through normal scanning on next install."
+            "  It will be scanned on the next check."
         )
         if physical_records:
             click.echo(

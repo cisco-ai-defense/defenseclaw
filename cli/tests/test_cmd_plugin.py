@@ -185,7 +185,7 @@ class TestOpenCodeManagedBridgeProtection(PluginCommandTestBase):
             )
 
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("added to block list", result.output)
+        self.assertIn("[plugin] Blocked 'defenseclaw' (opencode).", result.output)
         self.assertEqual(quarantined.exit_code, 0, quarantined.output)
         self.assertIn("quarantined", quarantined.output)
         self.assertFalse(os.path.exists(sibling))
@@ -810,7 +810,7 @@ class TestPluginListMultiConnectorDefault(PluginCommandTestBase):
         with patch("defenseclaw.inventory.claw_inventory._enumerate_hermes_plugins", return_value=rows):
             blocked = self.invoke(["block", "ddgs", "--connector", "hermes"])
             self.assertEqual(blocked.exit_code, 0, blocked.output)
-            self.assertIn("'web/ddgs' added to block list", blocked.output)
+            self.assertIn("[plugin] Blocked 'web/ddgs' (hermes).", blocked.output)
             listed = self.invoke(["list", "--connector", "hermes", "--json"])
             items = {item["id"]: item for item in json.loads(listed.output)}
             self.assertEqual(items["web/ddgs"]["status"], "blocked")
@@ -1058,7 +1058,7 @@ class TestPluginBlock(PluginCommandTestBase):
     def test_block_happy_path(self):
         result = self.invoke(["block", "blocked-one"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("added to block list", result.output)
+        self.assertIn("[plugin] Blocked 'blocked-one' (every connector).", result.output)
         self.assertIn("blocked-one", result.output)
         self.assertTrue(PolicyEngine(self.app.store).is_blocked("plugin", "blocked-one"))
         events = [e for e in self.app.store.list_events(10) if e.action == "plugin-block"]
@@ -1737,7 +1737,7 @@ class TestPluginMultiConnectorSemantics(PluginCommandTestBase):
             ["block", "dc-plugin-final-state", "--connector", "codex"]
         )
         self.assertEqual(scoped_block.exit_code, 0, scoped_block.output)
-        self.assertIn("connector=codex", scoped_block.output)
+        self.assertIn("[plugin] Blocked 'dc-plugin-final-state' (codex).", scoped_block.output)
 
         bare_allow = self.invoke(["allow", "dc-plugin-final-state"])
         self.assertEqual(bare_allow.exit_code, 0, bare_allow.output)

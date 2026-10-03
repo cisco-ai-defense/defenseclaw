@@ -3439,16 +3439,13 @@ def block(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
         plugin_path = hermes_path or _resolve_plugin_path(app, plugin_name, connector)
         if plugin_path:
             pe.set_source_path("plugin", plugin_name, plugin_path, connector)
-        click.secho(
-            f"[plugin] {plugin_name!r} added to block list (connector={connector})",
-            fg="red",
-        )
+        click.secho(f"[plugin] Blocked {plugin_name!r} ({connector}).", fg="red")
     else:
         pe.block("plugin", plugin_name, reason)
         plugin_path = hermes_path or _resolve_plugin_path(app, plugin_name)
         if plugin_path:
             pe.set_source_path("plugin", plugin_name, plugin_path)
-        click.secho(f"[plugin] {plugin_name!r} added to block list", fg="red")
+        click.secho(f"[plugin] Blocked {plugin_name!r} (every connector).", fg="red")
 
     if app.logger:
         saved_change_audit(app.logger).log_action(

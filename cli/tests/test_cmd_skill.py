@@ -103,7 +103,7 @@ class TestSkillBlock(SkillCommandTestBase):
 
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("evil-skill", result.output)
-        self.assertIn("block list", result.output)
+        self.assertIn("[skill] Blocked 'evil-skill' (every connector).", result.output)
 
         pe = PolicyEngine(self.app.store)
         self.assertTrue(pe.is_blocked("skill", "evil-skill"))
@@ -3492,7 +3492,8 @@ class TestSkillConnectorPolicyValidation(SkillCommandTestBase):
 
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn(
-            "[skill] 'sample' added to block list for connector=hermes, connector=codex",
+            "[skill] Blocked 'sample' (every connector).\n"
+            "  Copies found for connector=hermes, connector=codex.",
             result.output,
         )
         self.assertTrue(self.app.store.has_action("skill", "sample", "install", "block"))
@@ -3502,6 +3503,18 @@ class TestSkillConnectorPolicyValidation(SkillCommandTestBase):
         self.assertFalse(
             self.app.store.has_action("skill", "sample", "install", "block", "codex")
         )
+
+        # GAP-2085: bare unblock names the same scope the bare block did.
+        unblocked = self.invoke(["unblock", "sample"])
+        self.assertEqual(unblocked.exit_code, 0, unblocked.output)
+        self.assertIn("[skill] Unblocked 'sample' (every connector).", unblocked.output)
+        self.assertIn("It will be scanned on the next check.", unblocked.output)
+
+    def test_scoped_block_uses_unblock_line_style(self):
+        result = self.invoke(["block", "sample", "--connector", "codex"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("[skill] Blocked 'sample' (codex).", result.output)
 
     def test_bare_allow_fans_out_to_matching_connector_copies(self):
         hermes_root = os.path.join(self.tmp_dir, "hermes", "skills")
