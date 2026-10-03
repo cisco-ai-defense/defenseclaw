@@ -235,7 +235,7 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 			continue
 		}
 		for _, e := range entries {
-			if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+			if !e.IsDir() || skipPluginChildDir(e.Name()) {
 				continue
 			}
 			if w.isOwnPlugin(filepath.Join(dir, e.Name())) {
@@ -268,6 +268,22 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 	}
 
 	return targets
+}
+
+// skipPluginChildDir reports whether a child of a plugin root is not a
+// plugin: a dot-dir, a Python bytecode cache or an npm dependency tree.
+// Hermes' plugins folder is a Python package, so it holds __pycache__; the
+// CLI inventory skips these too (GAP-1086), while the gateway scanned it and
+// raised a MANIFEST-MISSING finding on every start (GAP-2338).
+func skipPluginChildDir(name string) bool {
+	if strings.HasPrefix(name, ".") {
+		return true
+	}
+	switch strings.ToLower(name) {
+	case "__pycache__", "node_modules":
+		return true
+	}
+	return false
 }
 
 func isClaudeSkillsPlugin(path string) bool {

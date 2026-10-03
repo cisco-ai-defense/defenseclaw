@@ -804,6 +804,34 @@ func TestEnumerateTargetsSkipsOwnBundledPlugin(t *testing.T) {
 	}
 }
 
+// GAP-2338: Hermes' plugins folder is a Python package with a __pycache__
+// dir. Neither the rescan nor a live create event treats it (or
+// node_modules) as a plugin.
+func TestPluginRootSkipsBytecodeAndDependencyDirs(t *testing.T) {
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	pluginDir := filepath.Join(filepath.Dir(skillDir), "plugins")
+	plugin := filepath.Join(pluginDir, "disk-cleanup")
+	for _, d := range []string{plugin, filepath.Join(pluginDir, "__pycache__"), filepath.Join(pluginDir, "node_modules")} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w := New(cfg, nil, []string{pluginDir}, store, logger, nil, nil)
+
+	var plugins []string
+	for _, target := range w.enumerateTargets() {
+		if target.Type == InstallPlugin {
+			plugins = append(plugins, target.Path)
+		}
+	}
+	if len(plugins) != 1 || plugins[0] != plugin {
+		t.Fatalf("rescan plugin targets = %v, want only %s", plugins, plugin)
+	}
+	if w.isDirectChildDir(filepath.Join(pluginDir, "__pycache__")) || !w.isDirectChildDir(plugin) {
+		t.Fatal("live create events must admit plugins but not __pycache__")
+	}
+}
+
 // GAP-1525: on an upgrade the old copy of DefenseClaw's own OpenClaw plugin
 // is still on disk when the startup rescan runs; connector setup replaces it
 // moments later. The startup cycle must not scan that dir, while a later

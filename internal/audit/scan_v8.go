@@ -579,16 +579,39 @@ func scanV8SeverityCounts(result *scanner.ScanResult) map[scanner.Severity]int64
 // `C:\Users\u\...\notes`), which is not a valid identifier, so the
 // ref used to be dropped and the record never said what was scanned
 // (GAP-1381). Fall back to the last path element: the skill, plugin or file
-// name, without the account's home path.
+// name, without the account's home path. A name the identifier grammar
+// rejects ("__pycache__", "My Plugin") is qualified with its parent folder
+// and its rejected characters become "_", so a scan row always names its
+// target (GAP-2338).
 func scanV8TargetRef(target string) observability.Optional[string] {
 	if ref := optionalScanV8Identifier(target); ref.IsPresent() {
 		return ref
 	}
-	trimmed := strings.TrimRight(strings.TrimSpace(target), `/\`)
-	if index := strings.LastIndexAny(trimmed, `/\`); index >= 0 {
-		trimmed = trimmed[index+1:]
+	parts := strings.FieldsFunc(strings.TrimSpace(target), func(r rune) bool {
+		return r == '/' || r == '\\'
+	})
+	if len(parts) == 0 {
+		return observability.Absent[string]()
 	}
-	return optionalScanV8Identifier(trimmed)
+	name := parts[len(parts)-1]
+	if ref := optionalScanV8Identifier(name); ref.IsPresent() {
+		return ref
+	}
+	if len(parts) > 1 {
+		name = parts[len(parts)-2] + "/" + name
+	}
+	name = strings.Map(func(r rune) rune {
+		if r < utf8.RuneSelf && (r == '.' || r == '_' || r == ':' || r == '/' || r == '-' ||
+			(r >= '0' && r <= '9') || (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z')) {
+			return r
+		}
+		return '_'
+	}, name)
+	name = strings.TrimLeft(name, "._:/-")
+	if len(name) > 256 {
+		name = name[:256]
+	}
+	return optionalScanV8Identifier(name)
 }
 
 // scanV8Verdict keeps an explicit admission verdict. Without one (CLI and

@@ -520,6 +520,9 @@ func TestScanV8NamesPathTargetsAndKeepsFindingsOutOfClean(t *testing.T) {
 		`C:\Users\u\.claude\skills\ws1-notes`: "ws1-notes",
 		"skill://demo":                        "skill://demo",
 		"http://127.0.0.1:8000/mcp":           "http://127.0.0.1:8000/mcp",
+		// GAP-2338: names the identifier grammar rejects still name the target.
+		"/home/u/.hermes/hermes-agent/plugins/__pycache__": "plugins/__pycache__",
+		`C:\Users\u\plugins\My Plugin`:                     "plugins/My_Plugin",
 	} {
 		if got, ok := scanV8TargetRef(target).Get(); !ok || got != want {
 			t.Errorf("scanV8TargetRef(%q) = %q, %v; want %q", target, got, ok, want)
