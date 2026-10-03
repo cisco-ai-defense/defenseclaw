@@ -122,7 +122,7 @@ func windowsEnterpriseCertificationScope(opts *windowsEnterpriseLifecycleOptions
 func resolveWindowsEnterpriseLifecycleProfile(action string, opts *windowsEnterpriseLifecycleOptions) error {
 	requested := managed.NormalizeEnterpriseProfile(opts.profile)
 	if requested != "" && requested != managed.ProfileSecureClient && requested != managed.ProfileStandalone {
-		return windowsEnterpriseInvalidArguments("invalid --profile %q: use %s or %s", strings.TrimSpace(opts.profile), managed.ProfileStandalone, managed.ProfileSecureClient)
+		return windowsEnterpriseInvalidArguments("--profile must be %s or %s", managed.ProfileSecureClient, managed.ProfileStandalone)
 	}
 	if path := strings.TrimSpace(opts.configPath); path != "" {
 		configured, err := readWindowsEnterpriseConfigProfile(path)

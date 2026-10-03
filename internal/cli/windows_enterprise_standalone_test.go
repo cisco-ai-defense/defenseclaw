@@ -437,7 +437,7 @@ func TestWindowsEnterpriseStandaloneFailureCodes(t *testing.T) {
 		exit    int
 	}{
 		{"another DefenseClaw enterprise lifecycle mutation holds the protected file lock for more than 30 seconds", "lifecycle_busy", 1618},
-		{`invalid arguments: invalid --profile "nope": use standalone or secure_client`, "invalid_arguments", 1639},
+		{"invalid arguments: --profile must be secure_client or standalone", "invalid_arguments", 1639},
 		{"powershell7_required: the standalone enterprise lifecycle requires PowerShell 7", "powershell7_required", 1603},
 		{"profile_conflict: a Cisco Secure Client DefenseClaw deployment exists", "profile_conflict", 1603},
 		{"Install requires -Config", "lifecycle_error", 1603},

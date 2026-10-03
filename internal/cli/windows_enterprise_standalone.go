@@ -1254,6 +1254,12 @@ func writeWindowsEnterpriseStandalonePreflightFailure(
 		message = strings.TrimPrefix(message, code+": ")
 	case "invalid_arguments":
 		message = strings.TrimPrefix(message, errWindowsEnterpriseInvalidArguments.Error()+": ")
+		if windowsEnterpriseUnknownProfileRequested(opts) {
+			// Name the value once (GAP-2040); the resolution error keeps
+			// the text the Secure Client profile pins.
+			message = fmt.Sprintf("invalid --profile %q: use %s or %s",
+				strings.TrimSpace(opts.profile), managed.ProfileStandalone, managed.ProfileSecureClient)
+		}
 	}
 	result.AddError(code, message)
 	return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
