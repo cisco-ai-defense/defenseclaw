@@ -310,6 +310,7 @@ func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 		return lifecycleFlagError(cmd, errors.New("pass exactly one of --from-stdin or --from-file"))
 	}
 	var mutate func(context.Context) error
+	existed := false
 	switch action {
 	case "set":
 		var source io.Reader = cmd.InOrStdin()
@@ -327,13 +328,41 @@ func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 		}
 		mutate = func(ctx context.Context) error { return env.WriteSecret(ctx, opts.name, value) }
 	case "remove":
-		mutate = func(context.Context) error { return env.RemoveSecret(opts.name) }
+		mutate = func(context.Context) error {
+			_, statErr := os.Lstat(filepath.Join(env.P(env.Layout.SecretsDir), opts.name))
+			existed = statErr == nil
+			return env.RemoveSecret(opts.name)
+		}
 	}
 	// Write and apply under one lifecycle lock. The apply watcher the write
 	// wakes then finds the change already applied instead of racing it.
 	result := enterpriseunix.Run(cmd.Context(), env, enterpriseunix.Options{Action: enterpriseunix.ActionEnsure, Reason: "secret", Mutate: mutate})
+	if !opts.json {
+		result = describeSecretChange(result, action, opts.name, existed)
+	}
 	if err := printLifecycleResult(cmd.OutOrStdout(), result, opts.json); err != nil {
 		return err
 	}
 	return lifecycleFailure(result, opts.json, "")
+}
+
+// describeSecretChange labels a secret set or remove result with the command
+// the administrator typed and the credential it changed. Both printed the
+// same "✓ ensure: done" block before, so the two opposite actions could not
+// be told apart (GAP-2305). The JSON document keeps action "ensure".
+func describeSecretChange(result *enterprisestatus.Result, action, name string, existed bool) *enterprisestatus.Result {
+	shown := *result
+	shown.Action = "secret " + action
+	if !result.OK {
+		return &shown
+	}
+	change := "stored credential " + name
+	if action == "remove" {
+		change = "removed credential " + name
+		if !existed {
+			change = "credential " + name + " was not stored; nothing to remove"
+		}
+	}
+	shown.Changes = append([]string{change}, result.Changes...)
+	return &shown
 }
