@@ -103,6 +103,43 @@ class GuardedOpenClawSwitchTests(unittest.TestCase):
         self._assert_refused(result, slug="claude-code")
         first_run.assert_not_called()
 
+    def test_init_without_connector_is_refused_when_it_picks_hook_connectors(self):
+        # GAP-2455: discovery, --observe-all and --action-connectors bypassed the guard.
+        picked = [{"connector": "codex", "profile": "observe", "fail_mode": None,
+                   "human_approval": None, "hilt_min_severity": None}]
+        forbidden = AssertionError("init replaced a guarded OpenClaw")
+        for args in (["--yes"], ["--non-interactive"], ["--observe-all", "--yes"],
+                     ["--action-connectors", "codex", "--yes"]):
+            with self.subTest(args=args), patch(
+                "defenseclaw.commands.cmd_init._build_noninteractive_connector_settings",
+                return_value=picked,
+            ), patch("defenseclaw.bootstrap.run_first_run", side_effect=forbidden) as first_run:
+                result = CliRunner().invoke(
+                    init_cmd, args, obj=AppContext(), env={"DEFENSECLAW_HOME": self.tmp_dir},
+                )
+                self._assert_refused(result)
+                first_run.assert_not_called()
+
+    def test_interactive_init_asks_before_replacing_openclaw(self):
+        started = RuntimeError("wizard started")
+        with patch("defenseclaw.commands.cmd_init._stdin_is_tty", return_value=True), patch(
+            "defenseclaw.commands.cmd_init._prompt_first_run", side_effect=started,
+        ) as wizard:
+            kept = CliRunner().invoke(
+                init_cmd, [], obj=AppContext(), input="\n", env={"DEFENSECLAW_HOME": self.tmp_dir},
+            )
+            output = kept.output + (kept.stderr or "")
+            self.assertNotEqual(kept.exit_code, 0, output)
+            self.assertIn("Stop guarding OpenClaw", output)
+            self.assertIn("No changes made; OpenClaw stays guarded", output)
+            self.assertEqual(self.cfg_file.read_bytes(), self.before)
+            wizard.assert_not_called()
+
+            replaced = CliRunner().invoke(
+                init_cmd, [], obj=AppContext(), input="y\n", env={"DEFENSECLAW_HOME": self.tmp_dir},
+            )
+            self.assertIs(replaced.exception, started)
+
 
 class SetupGuardrailSwitchTests(unittest.TestCase):
     def setUp(self):

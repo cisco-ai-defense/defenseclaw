@@ -643,6 +643,9 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
         and _stdin_is_tty()
     ):
         interactive_wizard = True
+        if not connector:
+            # GAP-2455: the wizard sets up hook connectors only.
+            _confirm_replacing_guarded_proxy()
         (
             connector_settings,
             scanner_mode,
@@ -703,6 +706,12 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
             quiet=json_summary,
             data_dir=data_dir,
         )
+        # GAP-2455: discovery, --observe-all and --action-connectors pick hook
+        # connectors too; never let them silently replace a guarded OpenClaw.
+        from defenseclaw.commands.cmd_setup import _refuse_hook_switch_over_configured_proxy
+
+        for setting in connector_settings:
+            _refuse_hook_switch_over_configured_proxy(setting["connector"])
     if start_gateway is None:
         # GAP-1539: a running gateway loads its connector set only at start,
         # so a scripted re-init reconciles (restarts) it instead of leaving
@@ -1295,6 +1304,32 @@ def _confirm_dropped_connectors(
     kept = set(selected) | set(dropped)
     ux.subhead(f"Keeping {names} active.")
     return [name for name in installed if name in kept]
+
+
+def _confirm_replacing_guarded_proxy() -> None:
+    """Ask before the wizard replaces a guarded OpenClaw/ZeptoClaw (GAP-2455).
+
+    The picker offers hook connectors only, and setting them up removes the
+    DefenseClaw plugin from the proxy connector. The default keeps it.
+    """
+    from defenseclaw.commands.cmd_setup import _CONNECTOR_META, _configured_sole_guarded_proxy_connector
+
+    proxy = _configured_sole_guarded_proxy_connector()
+    if not proxy:
+        return
+    label = _CONNECTOR_META.get(proxy, {}).get("label", proxy)
+    ux.warn(
+        f"This install guards {label}, which is proxy-backed and cannot run next to hook "
+        f"connectors. This wizard sets up hook connectors: it removes the DefenseClaw plugin "
+        f"from {label}, which then runs unguarded.",
+        indent="  ",
+    )
+    if click.confirm(f"  Stop guarding {label} and set up hook connectors instead?", default=False):
+        return
+    raise click.ClickException(
+        f"No changes made; {label} stays guarded. To change its settings, run "
+        f"'defenseclaw setup {proxy}'."
+    )
 
 
 def _note_proxy_connectors(disc) -> None:

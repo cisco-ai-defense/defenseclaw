@@ -12544,27 +12544,42 @@ def _refuse_hook_switch_over_proxy(gc, connector: str | None) -> None:
     wanted = normalize_connector((connector or "").strip())
     if not wanted or wanted == "none" or wanted in _PROXY_BACKED_CONNECTORS:
         return
+    proxy = _sole_guarded_proxy_connector(gc)
+    if proxy:
+        _refuse_hook_setup_over_proxy_connector(wanted, proxy)
+
+
+def _sole_guarded_proxy_connector(gc) -> str:
+    """The guarded proxy connector when no hook connector runs next to it, else ``""``."""
     proxy = _guarded_proxy_connector(gc)
     if not proxy:
-        return
+        return ""
     roster = {normalize_connector(n) for n in (getattr(gc, "connectors", None) or {}) if (n or "").strip()}
-    if roster - {proxy}:
-        return
-    _refuse_hook_setup_over_proxy_connector(wanted, proxy)
+    return "" if roster - {proxy} else proxy
 
 
-def _refuse_hook_switch_over_configured_proxy(connector: str | None) -> None:
-    """:func:`_refuse_hook_switch_over_proxy` against the saved config (GAP-2455)."""
+def _configured_sole_guarded_proxy_connector() -> str:
+    """:func:`_sole_guarded_proxy_connector` for the saved config (GAP-2455)."""
     from defenseclaw import config as cfg_mod
 
     try:
         if not os.path.exists(cfg_mod.config_path()):
-            return
+            return ""
         cfg_mod.require_v8_config()
         cfg = cfg_mod.load()
     except Exception:  # noqa: BLE001 - the first-run flow reports config errors itself.
+        return ""
+    return _sole_guarded_proxy_connector(cfg.guardrail)
+
+
+def _refuse_hook_switch_over_configured_proxy(connector: str | None) -> None:
+    """:func:`_refuse_hook_switch_over_proxy` against the saved config (GAP-2455)."""
+    wanted = normalize_connector((connector or "").strip())
+    if not wanted or wanted == "none" or wanted in _PROXY_BACKED_CONNECTORS:
         return
-    _refuse_hook_switch_over_proxy(cfg.guardrail, connector)
+    proxy = _configured_sole_guarded_proxy_connector()
+    if proxy:
+        _refuse_hook_setup_over_proxy_connector(wanted, proxy)
 
 
 def _hook_peers_of_proxy_connector(gc, connector: str) -> list[str]:
