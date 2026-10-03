@@ -913,6 +913,11 @@ def sync_cmd(  # noqa: PLR0913
         _make_scan_callback(app, allow_private=allow_private, scan_stdio=scan_stdio)
         if scan else None
     )
+    # GAP-2327: a fetch plus a remote MCP scan can take 10 s or more; say
+    # what is running on an interactive stderr so the CLI does not look hung.
+    progress = not emit_json and _stderr_is_tty()
+    if progress and callback is not None:
+        callback = _with_scan_progress(callback, scan_stdio=scan_stdio)
 
     if sync_all_flag:
         if source_ids:
@@ -921,6 +926,8 @@ def sync_cmd(  # noqa: PLR0913
                 err=True,
             )
             raise SystemExit(2)
+        if progress:
+            click.echo("Syncing all enabled registry sources ...", err=True)
         reports = sync_all(
             cfg,
             cfg.data_dir,
@@ -939,6 +946,8 @@ def sync_cmd(  # noqa: PLR0913
         reports = []
         for sid in source_ids:
             source = _find_source(cfg, sid)
+            if progress:
+                click.echo(f"Fetching {source.id} ...", err=True)
             reports.append(sync_source(
                 cfg,
                 cfg.data_dir,
@@ -974,6 +983,30 @@ def sync_cmd(  # noqa: PLR0913
     if any(not r.ok() for r in reports):
         # A failed fetch or entry scan is not a successful sync (GAP-1357).
         raise SystemExit(1)
+
+
+def _stderr_is_tty() -> bool:
+    try:
+        return sys.stderr.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
+def _with_scan_progress(callback: ScanCallback, *, scan_stdio: bool) -> ScanCallback:
+    """Print one stderr line before each entry scan (GAP-2327)."""
+
+    def _scan(source: RegistrySource, entry: ManifestEntry):  # type: ignore[no-untyped-def]
+        note = ""
+        if entry.is_mcp():
+            if (entry.transport or "stdio") != "stdio":
+                note = " (remote, can take up to a minute)"
+            elif not scan_stdio:
+                # The callback prints its own "skipping stdio MCP scan" notice.
+                return callback(source, entry)
+        click.echo(f"  scanning {entry.type}:{entry.name}{note} ...", err=True)
+        return callback(source, entry)
+
+    return _scan
 
 
 def _promoted_label(skills: int, mcps: int) -> str:

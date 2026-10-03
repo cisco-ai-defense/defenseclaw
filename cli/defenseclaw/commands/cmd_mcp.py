@@ -127,9 +127,9 @@ def mcp() -> None:
 )
 @pass_ctx
 def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
-    """List MCP servers configured for a connector.
+    """List MCP servers for every configured connector.
 
-    By default this lists **every configured connector's** MCP servers — each
+    By default this lists every configured connector's MCP servers — each
     connector gets its own connector-tagged table — so the output reads
     the same whether one or many connectors are active. ``--connector
     <name>`` narrows the listing to one configured connector.
@@ -2423,17 +2423,17 @@ def set_server(
     )
     if len(applied) > 1:
         click.secho(
-            f"Added MCP server: {name} to {len(applied)} connectors: "
-            f"{', '.join(applied)}{not_applied_suffix}",
+            f"[mcp] Added {name!r} to {len(applied)} connectors: "
+            f"{', '.join(applied)}{not_applied_suffix}.",
             fg="green",
         )
     elif not_applied:
         click.secho(
-            f"Added MCP server: {name} to {applied[0]}{not_applied_suffix}",
+            f"[mcp] Added {name!r} ({applied[0]}){not_applied_suffix}.",
             fg="green",
         )
     else:
-        click.secho(f"Added MCP server: {name}", fg="green")
+        click.secho(f"[mcp] Added {name!r} ({applied[0]}).", fg="green")
 
     if app.logger:
         saved_change_audit(app.logger).log_action(
@@ -2450,8 +2450,15 @@ def set_server(
             )
         raise SystemExit(1)
 
+    import shlex
+
     from defenseclaw.commands import hint
-    hint(f"Scan it now:  defenseclaw mcp scan {name}")
+
+    scan_cmd = f"defenseclaw mcp scan {shlex.quote(name)}"
+    if connector_flag and len(applied) == 1:
+        # GAP-2311: keep the --connector the user passed, as unblock does.
+        scan_cmd += f" --connector {applied[0]}"
+    hint(f"Scan it now:  {scan_cmd}")
 
 
 @mcp.command("unset")
@@ -2537,9 +2544,9 @@ def unset_server(app: AppContext, name: str, connector_flag: str) -> None:
     skipped_note = f" ({len(skipped)} skipped: {', '.join(skipped)})" if skipped else ""
     if gone:
         if len(gone) == 1 and len(connectors) == 1:
-            click.secho(f"Removed MCP server: {name}", fg="yellow")
+            click.secho(f"[mcp] Removed {name!r} ({gone[0]}).", fg="yellow")
         else:
-            click.secho(f"Removed MCP server: {name} from {', '.join(gone)}{skipped_note}", fg="yellow")
+            click.secho(f"[mcp] Removed {name!r} from {', '.join(gone)}{skipped_note}.", fg="yellow")
     for c in restored:
         click.secho(
             f"Restored your previous {name} entry on {c} (DefenseClaw's version removed); "

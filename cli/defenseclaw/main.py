@@ -442,13 +442,17 @@ cli.add_command(version_cmd, "version")
 
 
 _RST_LITERAL = re.compile(r"``([^`]+?)``")
+_MD_BOLD = re.compile(r"\*\*([^*]+?)\*\*")
 
 
 def _plain_help(text: str | None) -> str | None:
-    """Show RST inline literals (``x``) as 'x': Click prints help verbatim."""
-    if not text or "``" not in text:
+    """Show RST literals (``x``) as 'x' and drop **bold** markers (GAP-2310).
+
+    Click prints help verbatim, so markup would show as typed.
+    """
+    if not text or ("``" not in text and "**" not in text):
         return text
-    return _RST_LITERAL.sub(r"'\1'", text)
+    return _MD_BOLD.sub(r"\1", _RST_LITERAL.sub(r"'\1'", text))
 
 
 def _first_sentence(text: str | None) -> str | None:

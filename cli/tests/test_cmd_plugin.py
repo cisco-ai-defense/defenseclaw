@@ -735,25 +735,25 @@ class TestPluginList(PluginCommandTestBase):
 
                 text_result = self.invoke(["list", "--connector", "claudecode"])
                 self.assertEqual(text_result.exit_code, 0, text_result.output)
-                self.assertIn(registry, text_result.output)
                 if expected_state == "missing":
+                    self.assertIn(registry, text_result.output)
                     # GAP-2274: plain wording, no internal "registry source" text.
                     self.assertIn("claudecode has no installed plugins", text_result.output)
                     self.assertNotIn("registry source", text_result.output)
                     # GAP-2290: no second "check your installation" line.
                     self.assertNotIn("No plugins found", text_result.output)
                 else:
-                    self.assertIn(f"— {expected_state}; entries=0", text_result.output)
-                    self.assertIn("No plugins found", text_result.output)
+                    # GAP-2317: a valid but empty registry reads the same way.
+                    self.assertIn("claudecode has no installed plugins.", text_result.output)
+                    self.assertNotIn("entries=0", text_result.output)
+                    self.assertNotIn("No plugins found", text_result.output)
 
                 json_result = self.invoke(
                     ["list", "--connector", "claudecode", "--json"]
                 )
                 self.assertEqual(json_result.exit_code, 0, json_result.output)
                 self.assertEqual(json.loads(json_result.stdout), [])
-                self.assertIn(registry, json_result.stderr)
-                if expected_state == "valid":
-                    self.assertIn(f"— {expected_state}; entries=0", json_result.stderr)
+                self.assertIn("claudecode has no installed plugins", json_result.stderr)
 
 
 class TestPluginScanAllMissingClaudeRegistry(PluginCommandTestBase):

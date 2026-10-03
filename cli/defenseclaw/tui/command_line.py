@@ -432,6 +432,9 @@ def command_result_summary(command: str, lines: Sequence[str]) -> str:
         noun = "connector" if len(connectors) == 1 else "connectors"
         return f"{len(connectors)} {noun} scanned"
     for index, line in enumerate(lines):
+        if "installed copy is disabled, so it does not load" in line:
+            # GAP-2313: ``plugin block`` of a disabled plugin.
+            return "New installs blocked; the installed copy is disabled."
         if "block only refuses new installs" in line:
             # ``plugin block`` ends with "To stop it: ..."; the card dropped
             # the sentence that says the copy still loads (GAP-2228).
