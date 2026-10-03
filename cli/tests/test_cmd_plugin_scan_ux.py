@@ -714,6 +714,26 @@ def test_plugin_info_card_states_total_and_max_severity(capsys):
     assert "2 HIGH findings" not in out
 
 
+def test_plugin_info_card_reads_the_same_for_every_outcome(capsys):
+    # GAP-2201: yes/no values; Verdict, Findings and scan time for clean and warned plugins.
+    from datetime import datetime, timezone
+
+    from defenseclaw.commands.cmd_plugin import _plugin_scan_payload_from_latest, _print_plugin_info_card
+
+    when = datetime(2026, 10, 3, 4, 14, 21, tzinfo=timezone.utc)
+    for count, sev, verdict in ((0, "INFO", "CLEAN"), (1, "MEDIUM", "MEDIUM")):
+        scan = _plugin_scan_payload_from_latest(
+            {"target": "/p", "finding_count": count, "max_severity": sev, "timestamp": when}
+        )
+        _print_plugin_info_card({"name": "p", "installed": True, "quarantined": False, "scan": scan}, "p")
+        out = capsys.readouterr().out
+        assert "Installed:   yes" in out and "Quarantined: no" in out
+        assert "True" not in out and "False" not in out
+        assert f"Verdict:  {verdict}" in out
+        assert "Findings: " in out
+        assert "Scanned:  2026-10-03 04:14:21 UTC" in out
+
+
 class TestScanFolderOfPlugins(_PluginScanUXBase):
     """GAP-1580: a Hermes category folder is not scanned as one plugin."""
 

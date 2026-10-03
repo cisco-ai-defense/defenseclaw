@@ -920,6 +920,27 @@ class TestPluginListMultiConnectorDefault(PluginCommandTestBase):
         self.assertIn("image_gen/xai, web/xai", ambiguous.output)
 
     @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
+    def test_block_keeps_runtime_status_and_one_line_rows(self, _mock_oc):
+        """GAP-2199/GAP-2202: block shows in Actions only; long descriptions stay on one line."""
+        rows = self._hermes_nested_rows()
+        rows[0]["description"] = "Brave Search (free tier) - web search via the public API " * 2
+        with (
+            patch("defenseclaw.inventory.claw_inventory._enumerate_hermes_plugins", return_value=rows),
+            patch.dict(os.environ, {"COLUMNS": "200"}),
+        ):
+            self.assertEqual(self.invoke(["block", "ddgs", "--connector", "hermes"]).exit_code, 0)
+            listed = self.invoke(["list", "--connector", "hermes"])
+        self.assertEqual(listed.exit_code, 0, listed.output)
+        row = next(line for line in listed.output.splitlines() if "web/ddgs" in line)
+        self.assertIn("\u2713 enabled", row)
+        self.assertIn("install-blocked", row)
+        self.assertNotIn("\u2717 blocked", row)
+        self.assertIn("\u2026", row)
+        body = [line for line in listed.output.splitlines() if line.startswith("\u2502")]
+        self.assertEqual(len(body), len(rows), listed.output)
+        self.assertIn("(4/4 enabled)", listed.output)
+
+    @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
     def test_hermes_nested_block_is_keyed_by_listed_id(self, _mock_oc):
         """GAP-1480: blocking a nested Hermes plugin turns its list row blocked."""
         rows = self._hermes_nested_rows()
@@ -1653,8 +1674,8 @@ class TestPluginInfo(PluginCommandTestBase):
         result = self.invoke(["info", "infoplug"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("infoplug", result.output)
-        self.assertIn("Installed:   True", result.output)
-        self.assertIn("Quarantined: False", result.output)
+        self.assertIn("Installed:   yes", result.output)
+        self.assertIn("Quarantined: no", result.output)
 
     def test_info_not_installed(self):
         # P-D: a plugin that exists nowhere (not installed, no scan/enforcement
@@ -1709,7 +1730,7 @@ class TestPluginInfoNestedHermes(PluginCommandTestBase):
                 self.assertEqual(data["name"], pid)
             bare = self.invoke(["info", "web/ddgs"])
             self.assertEqual(bare.exit_code, 0, bare.output)
-            self.assertIn("Installed:   True", bare.output)
+            self.assertIn("Installed:   yes", bare.output)
             miss = self.invoke(["info", "web/none", "--connector", "hermes"])
             self.assertIn("'web/none' not found", miss.output)
 
@@ -1837,7 +1858,7 @@ class TestPluginMultiConnectorSemantics(PluginCommandTestBase):
 
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Connector:   codex", result.output)
-        self.assertIn("Installed:   False", result.output)
+        self.assertIn("Installed:   no", result.output)
         self.assertIn("Actions:     disabled", result.output)
 
     def test_info_global_action_does_not_create_phantom_card(self):
@@ -2268,6 +2289,12 @@ class TestPluginQuarantineRestoreOriginalPath(PluginCommandTestBase):
             result = self.invoke(["quarantine", "photon", "--connector", "hermes"])
             self.assertEqual(result.exit_code, 0, result.output)
             self.assertFalse(os.path.exists(path))
+            # GAP-2200: the listed name finds the quarantine keyed by manifest id.
+            info = self.invoke(["info", "photon", "--connector", "hermes"])
+            self.assertEqual(info.exit_code, 0, info.output)
+            self.assertIn("Quarantined: yes", info.output)
+            self.assertIn("Actions:     quarantined", info.output)
+            self.assertIn(os.path.join("hermes", "photon-platform"), info.output)
             result = self.invoke(["restore", "photon", "--connector", "hermes"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertTrue(os.path.isfile(os.path.join(path, "plugin.yaml")))
