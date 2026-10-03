@@ -14,6 +14,7 @@ import os
 import secrets
 import shutil
 import stat
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -677,6 +678,8 @@ def setup_cmd(
         "acp-setup",
         f"scope={client}/{agent} mode={mode} previous={getattr(prior_profile, 'mode', '') or ''}",
     )
+    if not managed:
+        _wait_for_gateway_acp(app, profile, mode, show)
     click.echo(
         json.dumps(result, sort_keys=True)
         if json_output
@@ -699,6 +702,55 @@ def _log_acp_change(app: AppContext, operation: str, details: str) -> None:
         click.echo("  ⚠ Change saved. The gateway isn't running, so the audit event was not recorded.", err=True)
     except CanonicalObservabilityError as exc:
         click.echo(f"  ⚠ Change saved, but the gateway did not confirm the audit event ({exc}).", err=True)
+
+
+# The gateway reloads config.yaml about half a second after it changes.
+_GATEWAY_ACP_APPLY_SECONDS = 10.0
+
+
+def _wait_for_gateway_acp(app: AppContext, profile: str, mode: str, show: bool) -> None:
+    """Return once the running gateway has loaded this setup (GAP-2135).
+
+    An editor session started before the reload was refused with HTTP 503
+    ("ACP guard is not enabled") right after setup said Configured. A gateway
+    that is stopped, or does not answer this request, is not waited for.
+    """
+    from defenseclaw.gateway import OrchestratorClient, gateway_api_client_host
+
+    try:
+        client = OrchestratorClient(
+            host=gateway_api_client_host(app.cfg),
+            port=app.cfg.gateway.api_port,
+            token=app.cfg.gateway.resolved_token(),
+            timeout=2,
+        )
+    except Exception:  # noqa: BLE001 - the wait is best effort
+        return
+    deadline = time.monotonic() + _GATEWAY_ACP_APPLY_SECONDS
+    announced = False
+    try:
+        while True:
+            try:
+                loaded = client.acp_profiles()
+            except Exception:  # noqa: BLE001 - stopped or older gateway: nothing to wait for
+                return
+            profiles = loaded.get("profiles")
+            entry = profiles.get(profile) if isinstance(profiles, dict) else None
+            if loaded.get("enabled") is True and isinstance(entry, dict) and entry.get("mode") == mode:
+                return
+            if time.monotonic() >= deadline:
+                click.echo(
+                    "  ⚠ Change saved, but the gateway has not loaded it yet; an editor session started "
+                    "in the next few seconds may be refused. Wait a moment before you start it.",
+                    err=True,
+                )
+                return
+            if not announced:
+                _progress(show, "Waiting for the gateway to load the ACP policy...")
+                announced = True
+            time.sleep(0.25)
+    finally:
+        client.close()
 
 
 @acp_cmd.command("remove")

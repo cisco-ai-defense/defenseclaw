@@ -868,3 +868,45 @@ def test_setup_and_remove_print_each_slow_step_and_keep_json_clean(tmp_path, mon
         assert "Recording the change with the gateway" in result.stderr
     finally:
         cleanup_app(app, db_path, data_dir)
+
+
+def test_setup_returns_once_the_gateway_has_loaded_the_guard(tmp_path, monkeypatch):
+    """GAP-2135: an editor started right after setup was refused with HTTP 503."""
+    from defenseclaw.gateway import OrchestratorClient
+
+    _isolate_client_config(monkeypatch, tmp_path)
+    app, data_dir, db_path = _app(tmp_path)
+    guard = _binary(tmp_path / "guard")
+    agent = _binary(tmp_path / "kiro-cli")
+    answers = [
+        {"enabled": False, "profiles": {}},
+        {"enabled": True, "profiles": {"r4x": {"mode": "observe"}}},
+        {"enabled": True, "profiles": {"r4x": {"mode": "action"}}},
+    ]
+    calls: list[int] = []
+
+    def acp_profiles(_self):
+        calls.append(1)
+        return answers[min(len(calls), len(answers)) - 1]
+
+    monkeypatch.setattr(OrchestratorClient, "acp_profiles", acp_profiles)
+    monkeypatch.setattr(cmd_acp_module.time, "sleep", lambda _seconds: None)
+    setup = ["setup", "--client", "zed", "--agent", "kiro", "--activate", "--profile", "r4x",
+             "--guard-binary", guard, "--agent-binary", agent]
+    try:
+        result = CliRunner().invoke(acp_cmd, setup, obj=app)
+        assert result.exit_code == 0, result.output
+        assert len(calls) == 3
+        assert "Waiting for the gateway to load the ACP policy" in result.stderr
+        assert "has not loaded it yet" not in result.stderr
+
+        # A gateway that never loads it: setup still succeeds, and says so.
+        calls.clear()
+        answers[:] = [{"enabled": False, "profiles": {}}]
+        monkeypatch.setattr(cmd_acp_module, "_GATEWAY_ACP_APPLY_SECONDS", 0.0)
+        result = CliRunner().invoke(acp_cmd, setup, obj=app)
+        assert result.exit_code == 0, result.output
+        assert "the gateway has not loaded it yet" in result.stderr
+        assert result.stdout.startswith("Configured kiro through DefenseClaw in zed (action)")
+    finally:
+        cleanup_app(app, db_path, data_dir)
