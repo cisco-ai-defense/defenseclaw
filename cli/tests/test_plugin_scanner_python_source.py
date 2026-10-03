@@ -113,3 +113,36 @@ def test_internal_host_rule_needs_a_host_and_a_network_call(tmp_path):
         findings = []
         scan_source_files(str(plug), findings, set(), "default", [])
         assert [f.rule_id for f in findings if f.rule_id == "SSRF-INTERNAL-HOST"] == ["SSRF-INTERNAL-HOST"], body
+
+
+def test_internal_host_rule_ignores_example_urls_and_scheme_checks(tmp_path):
+    """GAP-2068: a URL's own http:// scheme or the word in a string is not a call."""
+    quiet = tmp_path / "quiet2"
+    quiet.mkdir()
+    (quiet / "plugin.yaml").write_text("name: quiet2\n")
+    (quiet / "tools.py").write_text(
+        "def f(url, parsed):\n"
+        "    if not url:\n"
+        '        return "Error: url is required (e.g. http://localhost:9999)."\n'
+        '    help_text = "SearXNG instance URL (e.g. http://localhost:8080)"\n'
+        '    ok = parsed.scheme == "http" and (parsed.hostname or "") in ("localhost", "::1")\n'
+        "    return help_text, ok\n"
+    )
+    (quiet / "hint.js").write_text('const EXAMPLE = "http://localhost:3000";\n')
+    findings: list = []
+    scan_source_files(str(quiet), findings, set(), "default", [])
+    assert [f.location for f in findings if f.rule_id == "SSRF-INTERNAL-HOST"] == []
+
+    loud = tmp_path / "loud-multiline"
+    loud.mkdir()
+    (loud / "plugin.yaml").write_text("name: loud\n")
+    (loud / "adapter.py").write_text(
+        "async def health(session, port):\n"
+        "    async with session.get(\n"
+        '        f"http://localhost:{port}/health",\n'
+        "    ) as resp:\n"
+        "        return resp.status\n"
+    )
+    findings = []
+    scan_source_files(str(loud), findings, set(), "default", [])
+    assert [f.location for f in findings if f.rule_id == "SSRF-INTERNAL-HOST"] == ["adapter.py:3"]

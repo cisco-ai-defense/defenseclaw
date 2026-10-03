@@ -38,7 +38,7 @@ from defenseclaw.scanner.plugin_scanner.helpers import (
     is_comment_line,
     is_test_path,
     make_finding,
-    python_code_lines,
+    python_code_views,
     sanitise_evidence,
     strip_comment,
     strip_hash_comment,
@@ -55,9 +55,10 @@ from defenseclaw.scanner.plugin_scanner.rules import (
     DANGEROUS_PERMISSIONS,
     DYNAMIC_IMPORT_PATTERNS,
     GATEWAY_PATTERNS,
-    INTERNAL_HOSTNAME_PATTERNS,
+    INTERNAL_HOST_PATTERN,
     JSON_SECRET_PATTERNS,
     JSON_URL_PATTERNS,
+    NETWORK_CALL_PATTERN,
     PRIVATE_IP_PATTERN,
     RISKY_DEPENDENCIES,
     SAFE_DOTFILES,
@@ -544,10 +545,12 @@ def scan_source_files(
         if is_py:
             # Python rules skip comments and docstrings; call rules also skip
             # every string literal (warning text, regex data) (GAP-1877).
-            code_lines = python_code_lines(content, keep_strings=True) or [
-                strip_hash_comment(line) for line in lines
-            ]
-            call_lines = python_code_lines(content) or code_lines
+            views = python_code_views(content)
+            if views is None:
+                code_lines = [strip_hash_comment(line) for line in lines]
+                call_lines = code_lines
+            else:
+                code_lines, call_lines = views
         else:
             code_lines = [strip_comment(line) for line in lines]
             call_lines = code_lines
@@ -570,7 +573,7 @@ def scan_source_files(
         _check_for_hardcoded_secrets(lines, rel_path, findings, in_test)
         _check_for_credential_access(code_lines, rel_path, findings, capabilities, in_test)
         _check_for_exfiltration(lines, content, rel_path, findings, capabilities, in_test)
-        _check_for_ssrf(code_lines, rel_path, findings, in_test)
+        _check_for_ssrf(code_lines, rel_path, findings, in_test, call_lines)
         if not is_py:
             # import()/require()/spawn() and the gateway rules are JavaScript
             # shapes; on Python they match ``from x import (`` and prose.
@@ -1230,6 +1233,7 @@ def _check_for_ssrf(
     rel_path: str,
     findings: list[Finding],
     in_test_path: bool,
+    call_lines: list[str] | None = None,
 ) -> None:
     # Cloud metadata endpoints
     for cmp in CLOUD_METADATA_PATTERNS:
@@ -1280,9 +1284,15 @@ def _check_for_ssrf(
             )
             break
 
-    # Internal hostnames in network calls
+    # Internal hostnames in network calls. The call must be code, not text in
+    # a string (an example URL in a help message), on this line or the line
+    # that opens a multi-line call (GAP-2068).
+    calls = call_lines if call_lines is not None else code_lines
     for i, line in enumerate(code_lines):
-        if INTERNAL_HOSTNAME_PATTERNS.search(line):
+        if not INTERNAL_HOST_PATTERN.search(line):
+            continue
+        call_context = "\n".join(calls[max(i - 1, 0) : i + 1])
+        if NETWORK_CALL_PATTERN.search(call_context):
             findings.append(
                 make_finding(
                     len(findings) + 1,
