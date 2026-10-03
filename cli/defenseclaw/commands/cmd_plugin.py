@@ -1531,7 +1531,7 @@ def install(app: AppContext, name_or_path: str, force: bool, take_action: bool, 
         if "hermes" in installed_connectors:
             _echo_hermes_activation_note(plugin_name)
         if "claudecode" in installed_connectors:
-            _echo_claudecode_install_note(source_path)
+            _echo_claudecode_install_note(source_path, plugin_name)
 
         from defenseclaw.commands import hint
 
@@ -2828,7 +2828,7 @@ def _hermes_plugin_off_id(plugin_name: str) -> str:
     return ""
 
 
-def _echo_claudecode_install_note(source_path: str) -> None:
+def _echo_claudecode_install_note(source_path: str, plugin_name: str) -> None:
     """Say that Claude Code will not load a copied plugin (GAP-2084).
 
     Claude Code loads only plugins it installed from a marketplace (listed in
@@ -2846,6 +2846,7 @@ def _echo_claudecode_install_note(source_path: str) -> None:
         "  To use a Claude Code plugin, run /plugin marketplace add <marketplace folder or repo>, "
         "then /plugin install <name>@<marketplace> in Claude Code."
     )
+    click.echo(f"  Remove this copy: defenseclaw plugin remove {plugin_name} --connector claudecode")
 
 
 def _echo_hermes_activation_note(plugin_name: str) -> None:
@@ -3164,6 +3165,62 @@ def _list_openclaw_plugins(connector: str = "") -> list[dict]:
     return []
 
 
+def _claude_known_marketplaces(plugins_root: str) -> set[str]:
+    """Lower-cased marketplace names from Claude Code's known_marketplaces.json."""
+    try:
+        with open(os.path.join(plugins_root, "known_marketplaces.json"), encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return set()
+    return {str(key).casefold() for key in data} if isinstance(data, dict) else set()
+
+
+def _claude_cache_install_copies(
+    app: AppContext,
+    name: str,
+    connectors: list[str],
+    known_paths: list[str],
+) -> list[tuple[str, str]]:
+    """Copies ``plugin install --connector claudecode`` put in Claude's cache.
+
+    GAP-2152: install copies the folder to ``<cache>/<name>`` (and refuses a
+    reinstall while it is there), but discovery reads only the marketplace
+    layout, so remove never found it. Marketplace folders (named in
+    known_marketplaces.json or holding a discovered plugin) are skipped.
+    """
+    known = [os.path.realpath(path) for path in known_paths]
+    found: list[tuple[str, str]] = []
+    for connector in connectors:
+        if _normalize_runtime_connector(connector) != "claudecode":
+            continue
+        for root in _plugin_roots_for_connector(app, connector, include_legacy=False):
+            if os.path.basename(os.path.normpath(root)).casefold() != "cache":
+                continue
+            try:
+                identities = enumerate_physical_identities(root)
+                discovered = discover_plugin_directories(
+                    root,
+                    connector=connector,
+                    workspace_dir=app.cfg.connector_workspace_dir(),
+                )
+            except (OSError, PluginIdentityError):
+                continue
+            busy = known + [os.path.realpath(entry.path) for entry in discovered]
+            marketplaces = _claude_known_marketplaces(os.path.dirname(os.path.normpath(root)))
+            key = filesystem_identity_key(name, root)
+            for item in identities:
+                if filesystem_identity_key(item.plugin_id, root) != key:
+                    continue
+                if os.path.basename(item.path).casefold() in marketplaces:
+                    continue
+                real = os.path.realpath(item.path)
+                if any(path == real or path.startswith(real + os.sep) for path in busy):
+                    continue
+                found.append((connector, item.path))
+                known.append(real)
+    return found
+
+
 @plugin.command()
 @click.argument("name")
 @click.option(
@@ -3210,6 +3267,15 @@ def remove(app: AppContext, name: str, connector_flag: str) -> None:
         candidates = _plugin_match_dir_scopes(app, safe_name, connectors[0])
     else:
         candidates = _plugin_match_dir_scopes(app, safe_name)
+    candidates = [
+        *[(match.connector, match.path) for match in candidates],
+        *_claude_cache_install_copies(
+            app,
+            safe_name,
+            [connectors[0]] if scoped and connectors else _active_plugin_connectors(app),
+            [match.path for match in candidates],
+        ),
+    ]
     for connector, candidate in candidates:
         if is_link_or_reparse(candidate):
             raise click.ClickException(f"refusing to remove linked plugin path: {candidate}")
@@ -3596,11 +3662,19 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
         _plugin_has_connector_enforcement(app, plugin_name, target_connector) for target_connector in targets
     )
     if targets and (has_unscoped_state or has_scoped_state):
+        # GAP-2085: name only the scopes that held state, like skill unblock.
+        owners = [
+            target_connector
+            for target_connector in targets
+            if _plugin_has_connector_enforcement(app, plugin_name, target_connector)
+        ]
         for target_connector in targets:
             pe.remove_action_for_connector("plugin", plugin_name, target_connector)
+        for target_connector in owners:
             click.secho(f"[plugin] Unblocked {plugin_name!r} ({target_connector}).", fg="green")
         if has_unscoped_state:
             pe.remove_action("plugin", plugin_name)
+            click.secho(f"[plugin] Unblocked {plugin_name!r} (every connector).", fg="green")
         click.echo(_PLUGIN_UNBLOCK_NOTE)
         if app.logger:
             saved_change_audit(app.logger).log_action(
@@ -3621,7 +3695,7 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
         return
 
     pe.remove_action("plugin", plugin_name)
-    click.secho(f"[plugin] Unblocked {plugin_name!r}.", fg="green")
+    click.secho(f"[plugin] Unblocked {plugin_name!r} (every connector).", fg="green")
     click.echo(_PLUGIN_UNBLOCK_NOTE)
     if app.logger:
         saved_change_audit(app.logger).log_action("plugin-unblock", plugin_name, "manual unblock via CLI")

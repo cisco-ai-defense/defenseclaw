@@ -292,10 +292,22 @@ def set_registry_required(
     enabled: bool,
     *,
     connector: str = "",
+    enforce: bool = False,
 ) -> RegistryRequiredResult:
-    """Reconcile, atomically persist, verify, then publish to ``cfg``."""
+    """Reconcile, atomically persist, verify, then publish to ``cfg``.
+
+    ``enforce`` also turns asset policy on (``enabled=true``, ``mode=action``,
+    and a ``--connector`` override mode set to action) in the same save (GAP-2119).
+    """
     working = copy.deepcopy(cfg)
     result = reconcile_registry_required(working, asset_type, enabled, connector=connector)
+    if enforce:
+        working.asset_policy.enabled = True
+        working.asset_policy.mode = "action"
+        if result.storage_key is not None:
+            override = working.asset_policy.connectors.get(result.storage_key)
+            if override is not None and getattr(override, "mode", "").strip():
+                override.mode = "action"
     try:
         working.save_verified(lambda path: _verify_registry_required(path, result))
     except Exception as exc:

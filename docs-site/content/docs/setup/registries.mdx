@@ -208,8 +208,19 @@ Once entries are flowing in, `asset_policy.<type>.registry_required` flips the c
 
 ```bash
 defenseclaw registry require --type skill --enabled
-defenseclaw registry require --type mcp   --enabled
+defenseclaw registry require --type mcp   --enabled --enforce
 ```
+
+The requirement is enforced only while asset policy is on:
+`asset_policy.enabled: true` and `asset_policy.mode: action`. A per-user
+install starts with `enabled: false` and `mode: observe`, so `require` alone
+blocks nothing and the CLI says so. Add `--enforce` to turn both on in the same
+save, or set them in the TUI config editor (Setup → `c` → Asset Policy). In
+`observe` mode an unregistered asset is logged, not blocked.
+
+A registry rule that pins `transport` treats `http` and `streamable-http` as
+the same HTTP transport, and a URL server added without `--transport` counts as
+`http`.
 
 An unscoped operation is broad operator intent: it updates the global default
 and clears only the targeted `registry_required` override on every active

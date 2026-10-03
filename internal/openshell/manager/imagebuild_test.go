@@ -198,6 +198,24 @@ type relabeled struct{ err error }
 func (r relabeled) Error() string { return "the build broke" }
 func (r relabeled) Unwrap() error { return r.err }
 
+// A build the daemon cannot run for the docker socket's permissions names
+// the restart that picks up a docker group joined since (GAP-2137).
+func TestImageErrorNamesTheDaemonRestart(t *testing.T) {
+	denied := &image.BuildError{Err: &image.CommandError{Args: []string{"build"}, ExitCode: 1},
+		Output: "ERROR: permission denied while trying to connect to the docker API at unix:///var/run/docker.sock"}
+	e := newImageError("the Claude Code sandbox image is not usable", fmt.Errorf("openshell image: docker build t: %w", denied))
+	if !strings.Contains(e.api.Detail, "→ the DefenseClaw daemon cannot reach Docker") || !strings.Contains(e.api.Detail, "defenseclaw-gateway restart") {
+		t.Fatalf("detail = %q", e.api.Detail)
+	}
+	if strings.Contains(e.summary, "restart") {
+		t.Fatalf("summary = %q", e.summary)
+	}
+	other := newImageError("x", errors.New("docker build exited 1"))
+	if strings.Contains(other.api.Detail, "restart") {
+		t.Fatalf("detail = %q", other.api.Detail)
+	}
+}
+
 // withoutBuildOutput keeps the whole message but the output of the docker
 // build that failed, and never lets the output through.
 func TestWithoutBuildOutput(t *testing.T) {

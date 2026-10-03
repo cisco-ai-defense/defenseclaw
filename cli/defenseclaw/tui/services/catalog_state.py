@@ -2254,9 +2254,10 @@ def _format_plugin_detail(row: PluginRow) -> str:
             )
         )
     if row.verdict == "rejected":
-        # Same meaning as the CLI scan's "policy: rejected" line (GAP-2048).
+        # Same meaning as the CLI scan's "policy: rejected" line (GAP-2048). q is not a
+        # row key (GAP-2111): Quarantine lives in the o actions menu.
         lines.append(
-            "  Verdict    rejected: the policy refuses it at install; this copy still loads until you act (q quarantines it)"
+            "  Verdict    rejected: the policy refuses it at install; this copy still loads until you act (o, then Quarantine)"
         )
     elif row.verdict and row.verdict not in {status, row.scan.max_severity if row.scan else ""}:
         lines.append(f"  Verdict    {_esc(row.verdict)}")
