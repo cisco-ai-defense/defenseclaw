@@ -57,7 +57,7 @@ defenseclaw setup guardrail \
   --non-interactive
 ```
 
-In `regex_judge`, a decisive `HIGH_SIGNAL` local result returns immediately. `NEEDS_REVIEW` goes to the judge, and a `NO_SIGNAL` prompt also goes to the judge when `judge_sweep` is enabled (the current default). `judge_first` runs local triage and the judge in parallel.
+Codex is a hook connector, so the judge runs in the gateway's hook lane. With `regex_judge`, a local result that already blocks or is CRITICAL returns without a judge call; every other prompt, tool call or tool output goes to the judge, and the stricter verdict wins. `judge_first` calls the judge on every eligible event. The triage levels and `judge_sweep` setting apply to the LLM proxy lane, not to Codex hooks.
 
 </Step>
 
@@ -97,23 +97,18 @@ before drilling into the canonical structured body.
 
 <Flow
   direction="TB"
-  caption="regex_judge uses local triage as a router: decisive signals return immediately, ambiguous signals are adjudicated, and NO_SIGNAL can take the judge-sweep path."
+  caption="What happens to a Codex prompt, tool call or tool output with regex_judge. The judge runs only when codex is listed in guardrail.judge.hook_connectors. If the local result already blocks or is CRITICAL, as TRUST-IGNORE-PREVIOUS is, the judge is skipped. Otherwise the judge reviews the content and the stricter of the two verdicts wins; if the judge fails or times out, the local verdict stands."
 >
-  <Node id="prompt" kind="generic">Prompt or tool content</Node>
-  <Node id="regex" kind="policy">Local triage</Node>
-  <Node id="level" kind="decision">Signal level</Node>
-  <Node id="local" kind="generic">Return decisive local verdict</Node>
-  <Node id="judge" kind="policy">LLM judge</Node>
-  <Node id="clean" kind="generic">Allow / normal tier</Node>
-  <Node id="verdict" kind="generic">Final policy verdict</Node>
-  <Edge from="prompt" to="regex" />
-  <Edge from="regex" to="level" />
-  <Edge from="level" to="local" label="HIGH_SIGNAL" />
-  <Edge from="level" to="judge" label="NEEDS_REVIEW" />
-  <Edge from="level" to="judge" label="NO_SIGNAL + sweep" />
-  <Edge from="level" to="clean" label="NO_SIGNAL, no sweep" />
-  <Edge from="local" to="verdict" />
-  <Edge from="judge" to="verdict" />
+  <Node id="prompt" kind="agent">{`Codex hook event\nprompt · tool call · output`}</Node>
+  <Node id="rules" kind="policy">{`Local rules check it\nplus Cisco AI Defense, if set`}</Node>
+  <Node id="level" kind="decision">{`Blocked or CRITICAL?`}</Node>
+  <Node id="judge" kind="policy">{`LLM judge reviews it\nstricter verdict wins`}</Node>
+  <Node id="verdict" kind="generic">{`Hook answers Codex\nblock, or continue with a warning`}</Node>
+  <Edge from="prompt" to="rules" label="sends" />
+  <Edge from="rules" to="level" />
+  <Edge from="level" to="judge" label="no" />
+  <Edge from="level" to="verdict" label="yes, skip judge" />
+  <Edge from="judge" to="verdict" label="returns" />
 </Flow>
 
 ## Prompt alerts versus tool-call enforcement
