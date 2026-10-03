@@ -8370,7 +8370,7 @@ def _check_llm_reachable(cfg, r: _DoctorResult) -> None:
         )
     elif " through the proxy " in msg and (proxy := _llm.env_proxy(llm)) is not None:
         # Doctor's probe uses this shell's proxy; say how to fix or skip it (GAP-2421).
-        source = proxy[1] if proxy[1].endswith("_PROXY") else "the system proxy"
+        source = proxy[1] if proxy[1].upper().endswith("_PROXY") else "the system proxy"
         _emit(
             "warn",
             "LLM reachable",
