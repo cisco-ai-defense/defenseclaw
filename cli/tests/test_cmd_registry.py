@@ -283,14 +283,15 @@ class TestRegistryEdit(RegistryCommandTestBase):
         with patch.object(self.app, "logger", MagicMock()) as logger:
             self.invoke(["edit", "corp-skills", "--disabled", "--non-interactive"])
             self.invoke([
-                "edit", "corp-skills", "--enabled", "--auto-sync",
-                "--sync-interval-hours", "1", "--non-interactive",
+                "edit", "corp-skills", "--enabled", "--url", "https://catalog.example.com/v2.yaml",
+                "--auth-env", "DEFENSECLAW_TOKEN", "--non-interactive",
             ])
             self.invoke(["edit", "corp-skills", "--enabled", "--non-interactive"])
         details = [c.args[2] for c in logger.log_action.call_args_list if c.args[0] == "registry-edit"]
         self.assertEqual(details, [
             "id=corp-skills enabled=true->false",
-            "id=corp-skills enabled=false->true auto_sync=false->true sync_interval_hours=24->1",
+            "id=corp-skills url=https://catalog.example.com/skills.yaml->https://catalog.example.com/v2.yaml "
+            'auth_env=""->DEFENSECLAW_TOKEN enabled=false->true',
             "id=corp-skills unchanged",
         ])
 
