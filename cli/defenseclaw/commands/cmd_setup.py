@@ -12346,7 +12346,7 @@ def _setup_guardrail_connector_alias(
     if replaced:
         app.cfg.guardrail.connectors = {}
     if connector == "openclaw":
-        _adopt_openclaw_gateway_token(app)
+        _adopt_openclaw_gateway_token(app, restart=restart)
         _adopt_openclaw_gateway_port(app)
     app.cfg.claw.mode = connector
     app.cfg.guardrail.connector = connector
@@ -12439,7 +12439,7 @@ def _hook_peers_of_proxy_connector(gc, connector: str) -> list[str]:
     return sorted(name for name in names if name in _HOOK_ENFORCED_CONNECTORS)
 
 
-def _adopt_openclaw_gateway_token(app: AppContext) -> None:
+def _adopt_openclaw_gateway_token(app: AppContext, *, restart: bool = False) -> None:
     """Use OpenClaw's gateway token before the restart (GAP-1179).
 
     DefenseClaw authenticates to the OpenClaw gateway and serves its own API
@@ -12447,17 +12447,58 @@ def _adopt_openclaw_gateway_token(app: AppContext) -> None:
     two differ: the sidecar then adopted OpenClaw's token mid-setup and the
     readiness check, still holding the old one, failed with 401. Reconcile the
     token up front so the first run converges.
+
+    With *restart*, a running gateway is stopped while ``.env`` still holds the
+    token it loaded, then started on the new one. Setup's own restart sent the
+    new token to the old gateway's shutdown API, which logged an
+    api-auth-failure security event (GAP-2259).
     """
     detected = (_detect_openclaw_gateway_token(app.cfg.claw.config_file) or "").strip()
     gw = app.cfg.gateway
     if not detected or detected == gw.resolved_token():
         return
+    data_dir = app.cfg.data_dir
+    stopped = restart and _stop_gateway_before_token_swap(data_dir)
     keys = ["DEFENSECLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_TOKEN"]
     if gw.token_env and gw.token_env not in keys:
         keys.append(gw.token_env)
     for key in keys:
-        _save_secret_to_dotenv(key, detected, app.cfg.data_dir)
+        _save_secret_to_dotenv(key, detected, data_dir)
     click.echo("  Using the OpenClaw gateway token from openclaw.json for DefenseClaw (the two differed).")
+    if stopped:
+        ctx = click.get_current_context(silent=True)
+        handled = ctx.meta.get(_SETUP_RESTART_HANDLED_KEY) if ctx is not None else None
+        _restart_defense_gateway(data_dir)
+        if ctx is not None:
+            # Only the token step restarted; setup's own restart still runs.
+            ctx.meta[_SETUP_RESTART_HANDLED_KEY] = handled
+
+
+def _stop_gateway_before_token_swap(data_dir: str) -> bool:
+    """Stop a running gateway with the token it loaded; True when it is now down."""
+    pid_file = os.path.join(data_dir, "gateway.pid")
+    if not _is_pid_alive(pid_file) or not _gateway_pid_file_identifies_gateway(pid_file):
+        return False
+    if os.name == "nt":
+        from defenseclaw.gateway import packaged_windows_install_root
+
+        if packaged_windows_install_root():
+            return _stop_defense_gateway_native(data_dir)
+    executable = _gateway_lifecycle_executable()
+    if not executable:
+        return False
+    try:
+        run_pinned_executable(
+            [executable, "stop"],
+            capture_output=True,
+            text=True,
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            timeout=_DEFENSE_GATEWAY_STOP_TIMEOUT_SECONDS,
+        )
+    except (UnsafePathError, subprocess.TimeoutExpired, OSError):
+        pass
+    return not _is_pid_alive(pid_file)
 
 
 def _openclaw_json_gateway_port(openclaw_config_file: str) -> int | None:
