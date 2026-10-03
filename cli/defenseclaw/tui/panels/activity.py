@@ -220,6 +220,16 @@ class ActivityPanelModel:
     def is_running(self) -> bool:
         return bool(self.entries and not self.entries[-1].done)
 
+    @property
+    def shows_finished_output(self) -> bool:
+        """The body shows a finished command's whole output (the drawer log
+        would only repeat it, GAP-2326)."""
+
+        if self.tab != "commands" or not self.term_mode or not self.entries:
+            return False
+        index = self.cursor if 0 <= self.cursor < len(self.entries) else len(self.entries) - 1
+        return self.entries[index].done
+
     def set_tab(self, tab: ActivityTab) -> None:
         self.tab = tab
 

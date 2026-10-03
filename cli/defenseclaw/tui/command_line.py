@@ -392,6 +392,7 @@ _SETUP_MODE_RE = re.compile(r"^[\u2713\u2714]\s+\S+ mode=(observe|action)$")
 # "OK set" (ux.ascii_presentation_text), so match both (GAP-2238).
 _KEYS_ROW_RE = re.compile(r"^[\u25cf\u25cb\u00b7*o-]\s+([A-Z][A-Z0-9_]*)\s+(.*)$")
 _KEYS_SET_RE = re.compile(r"(?:\u2713|\u2714|\bOK) set\b")
+_SCAN_DONE_RE = re.compile(r"^(?:[\u2713\u2714]|OK)?\s*(Scan complete: .+)$")
 
 
 def command_result_summary(command: str, lines: Sequence[str]) -> str:
@@ -424,6 +425,13 @@ def command_result_summary(command: str, lines: Sequence[str]) -> str:
         for line in lines:
             if match := _GATEWAY_PID_RE.search(line):
                 return f"Gateway restarted (PID {match.group(1)})"
+        return ""
+    if "discovery scan" in lowered:
+        # ``agent discovery scan`` ends with a hint about other commands;
+        # the receipt showed that hint instead of the counts (GAP-2319).
+        for line in lines:
+            if match := _SCAN_DONE_RE.match(line.strip()):
+                return match.group(1)
         return ""
     connectors = [m.group(1) for line in lines if (m := _CONNECTOR_HEADER_RE.match(line.strip()))]
     if connectors and "scan" in command.lower():

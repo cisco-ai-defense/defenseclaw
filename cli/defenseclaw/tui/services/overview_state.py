@@ -535,7 +535,9 @@ QUICK_ACTIONS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("s", "Scan all", ("skill", "scan", "--all")),
     ("d", "Doctor", ("doctor",)),
     ("i", "Inventory", ("aibom", "scan", "--json")),
-    ("g", "Guardrail", ("setup", "guardrail")),
+    # The app opens Setup's Guardrail goals for g (GAP-2323); this is the
+    # non-interactive fallback for any other caller.
+    ("g", "Guardrail", ("setup", "guardrail", "--non-interactive")),
     ("m", "Mode", ("setup", "connector")),
     # ``p`` switches to the Policies panel (app.py), so it has no command here.
     ("l", "Logs", ("logs",)),
