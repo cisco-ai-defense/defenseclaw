@@ -369,7 +369,7 @@ func (p *GuardrailProxy) proxyV8ModelInput(
 		DefenseClawTelemetryOutputReported:  false,
 		DefenseClawContentOutputState:       "not_reported",
 		GenAIOperationName:                  observability.Present("chat"),
-		GenAIRequestModel:                   strings.TrimSpace(req.Model),
+		GenAIRequestModel:                   telemetryModelID(strings.TrimSpace(req.Model)),
 		DefenseClawModelAttempt:             observability.Present[int64](1),
 		DefenseClawModelRetryCount:          observability.Present[int64](0),
 		DefenseClawModelStreaming:           observability.Present(req.Stream),
