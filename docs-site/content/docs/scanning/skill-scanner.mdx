@@ -82,6 +82,52 @@ defenseclaw skill scan my-skill --remote
   </Tab>
 </Tabs>
 
+## Configure the scanner
+
+`defenseclaw setup skill-scanner` chooses the analyzers, the scan policy and the
+optional external checks. Run it bare for the wizard, which asks about each
+analyzer in turn, or pass flags with `--non-interactive`:
+
+```bash
+defenseclaw setup skill-scanner                    # interactive
+
+defenseclaw setup skill-scanner \
+  --non-interactive \
+  --use-behavioral \
+  --use-llm --llm-provider anthropic --llm-model claude-sonnet-4-5 \
+  --enable-meta \
+  --policy balanced
+```
+
+| Flag | What it turns on or sets |
+| --- | --- |
+| `--use-behavioral` | Behavioral (dataflow) analyzer. |
+| `--use-llm` | LLM analyzer (semantic analysis). |
+| `--enable-meta` | Meta-analyzer that filters false positives (with the LLM analyzer). |
+| `--use-trigger` | Trigger analyzer that flags vague skill descriptions. |
+| `--use-virustotal` | VirusTotal check of bundled binaries. The key is read from `VIRUSTOTAL_API_KEY`. |
+| `--use-aidefense` | Cisco AI Defense analyzer. |
+| `--llm-provider anthropic\|openai`, `--llm-model <id>` | LLM for the analyzer. Other providers are set with `defenseclaw setup llm --provider ...`. |
+| `--llm-consensus-runs <n>` | Run the LLM analysis n times and combine the results (`0` turns it off). |
+| `--policy strict\|balanced\|permissive\|none` | Scanner policy preset. |
+| `--lenient` | Tolerate malformed skills instead of failing them. |
+| `--verify` / `--no-verify` | Run connectivity checks after setup (default on). |
+
+With `--non-interactive`, the analyzer flags only turn analyzers on and leave
+the others as they are. To turn one off, run the wizard.
+
+The LLM provider and model are written to the unified top-level `llm:` block,
+which the MCP and plugin scanners and the guardrail judge share. Cisco AI
+Defense settings stay in `cisco_ai_defense`.
+
+For VirusTotal, store the key before you turn the check on (the wizard asks for
+it and saves it the same way):
+
+```bash
+defenseclaw keys set VIRUSTOTAL_API_KEY
+defenseclaw setup skill-scanner --non-interactive --use-virustotal
+```
+
 ## Continuous protection: the install watcher
 
 Running a one-shot scan is a starting point. The real value is the **install watcher**. It runs inside the gateway, is on by default, and watches the skill folders of every configured connector:
@@ -93,7 +139,7 @@ Running a one-shot scan is a starting point. The real value is the **install wat
   <Node id="new" kind="datastore">{`New or changed skill\nin a watched folder`}</Node>
   <Node id="lists" kind="decision">{`Block or allow list?\nchecked before scanning`}</Node>
   <Node id="ok" kind="generic">{`Allowed\nnot scanned`}</Node>
-  <Node id="scan" kind="connector">{`Skill scanner\nstatic + optional LLM`}</Node>
+  <Node id="scan" kind="generic">{`Skill scanner\nstatic + optional LLM`}</Node>
   <Node id="policy" kind="policy">{`skill_actions\nmaps the top severity`}</Node>
   <Node id="keep" kind="generic">{`Stays installed\nclean, or a warning`}</Node>
   <Node id="q" kind="gateway">{`Quarantined\nand install blocked`}</Node>
@@ -157,25 +203,16 @@ Each severity bucket has three independent actions:
 
 `first_party_allow_list` is a **policy-file** key (not `~/.defenseclaw/config.yaml`) — bundles whose source path contains any of the listed substrings are exempted from `skill_actions`. See [Policies](/docs/policies) for the full schema and [Defaults](/docs/policies/defaults) for what each shipped rule pack sets these to.
 
-Codex's personal and project skill directories both use the shared
-`.agents/skills` namespace. Path alone cannot distinguish a protected install
-from an attacker-controlled repository entry, so CodeGuard at either Codex
-location remains scan-required unless stronger provenance is available.
-Codex also discovers operator-installed skills under `$CODEX_HOME/skills`;
-those remain scan-required. Only the exact vendor cache at
-`$CODEX_HOME/skills/.system` is discovery-only and excluded from every scanner
-and enforcement entrypoint. An unrelated `.system` directory receives no
-exemption.
-In `aibom scan`, such skills count as discovery-only, not eligible: the
-skills table is titled `Skills (6): 1 eligible, 5 discovery-only`, and in
-`--json` each skill's `scan_eligible` matches `summary.skills.eligible`
-(`eligible` still means the agent loads the skill).
-
-Hermes mixes installer-synced and operator-authored skills under
-`$HERMES_HOME/skills`. DefenseClaw grants discovery-only status only when the
-`.bundled_manifest` hash, installed copy, and matching
-`$HERMES_HOME/hermes-agent/skills` source tree all agree. Modified, untracked,
-linked, oversized, or otherwise unverifiable copies remain scan-required.
+<Callout title="Vendor-bundled skills are inventory only">
+A few skill folders hold copies the agent vendor ships, and DefenseClaw lists
+them without scanning or enforcing on them. For [Codex](/docs/connectors/codex)
+that is only the exact vendor cache at `$CODEX_HOME/skills/.system`; every
+other Codex skill, including CodeGuard under `.agents/skills`, is scanned. For
+[Hermes](/docs/connectors/hermes), a skill under `$HERMES_HOME/skills` is
+inventory only when it matches the installer's `.bundled_manifest` and the
+bundled source exactly; modified, extra or unverifiable copies are scanned.
+`aibom scan` counts these skills as discovery-only.
+</Callout>
 
 To switch profiles for the entire `skill_actions` table:
 
@@ -193,10 +230,10 @@ LLM-assisted analysis is what catches the *new* malicious skills you don't yet h
 defenseclaw keys set DEFENSECLAW_LLM_KEY
 ```
 
-Under the hood DefenseClaw injects the unified key into the scanner subprocess as `SKILL_SCANNER_LLM_API_KEY` and `SKILL_SCANNER_LLM_MODEL`, plus the matching provider-native variable (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `AWS_BEARER_TOKEN_BEDROCK`, `GOOGLE_API_KEY`, `AZURE_OPENAI_API_KEY`, `GROQ_API_KEY`, etc.) via `inject_llm_env`. See [Setup → Unified LLM key](/docs/guardrail/unified-llm-key) for the resolution order and Bifrost provider catalog.
+Under the hood DefenseClaw injects the unified key into the scanner subprocess as `SKILL_SCANNER_LLM_API_KEY` and `SKILL_SCANNER_LLM_MODEL`, plus the matching provider-native variable (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `AWS_BEARER_TOKEN_BEDROCK`, `GOOGLE_API_KEY`, `AZURE_OPENAI_API_KEY`, `GROQ_API_KEY`, etc.) via `inject_llm_env`. See [Unified LLM key](/docs/guardrail/unified-llm-key) for the resolution order and Bifrost provider catalog.
 
 <Callout type="info">
-LLM mode works with any LiteLLM-supported provider. The upstream Skill Scanner SDK auto-detects the provider from the LiteLLM-shaped `provider/model` string in your unified config (e.g. `bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0`, `gemini/gemini-2.5-pro`, `vertex_ai/gemini-1.5-pro`). For self-hosted endpoints (vLLM, LM Studio, LiteLLM proxy) set `llm.base_url` in `~/.defenseclaw/config.yaml`.
+`setup skill-scanner --llm-provider` offers only `anthropic` and `openai`. To use another provider, configure the unified LLM with `defenseclaw setup llm --provider ...`. LLM mode works with any LiteLLM-supported provider. The upstream Skill Scanner SDK auto-detects the provider from the LiteLLM-shaped `provider/model` string in your unified config (e.g. `bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0`, `gemini/gemini-2.5-pro`, `vertex_ai/gemini-1.5-pro`). For self-hosted endpoints (vLLM, LM Studio, LiteLLM proxy) set `llm.base_url` in `~/.defenseclaw/config.yaml`.
 </Callout>
 
 ## Availability and recovery
@@ -238,8 +275,8 @@ Every action is audited (`skill-block`, `skill-quarantine`, etc.) so the trail i
 
 ## See also
 
-- [Setup → MCP scanner](/docs/scanning/mcp-scanner) — sibling scanner for MCP servers, same admission pattern via `mcp_actions`
-- [Setup → Unified LLM key](/docs/guardrail/unified-llm-key) — the env var the LLM-assisted analysis reads
+- [MCP scanner](/docs/scanning/mcp-scanner) — sibling scanner for MCP servers, same admission pattern via `mcp_actions`
+- [Unified LLM key](/docs/guardrail/unified-llm-key) — the env var the LLM-assisted analysis reads
 - [Defaults](/docs/policies/defaults) — the `skill_actions` table for each shipped rule pack
 - [Policies](/docs/policies) — the layered architecture (admission → scanner → action mapping)
 - [Reference → CLI](/docs/reference/cli) — full `defenseclaw skill` subcommand reference

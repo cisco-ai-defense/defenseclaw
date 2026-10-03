@@ -29,7 +29,7 @@ An **on-demand** registry sync verified source integrity, routed an entry throug
   type={{
     'clawhub': {
       type: 'kind',
-      description: 'CIO-curated public catalog. URL is optional (defaults to npmjs view); --content selects skill, mcp, or both.',
+      description: 'OpenClaw plugin catalog. Reads the openclaw npm package metadata from registry.npmjs.org and lists its bundled plugins; no URL needed.',
     },
     'smithery': {
       type: 'kind',
@@ -60,26 +60,9 @@ An **on-demand** registry sync verified source integrity, routed an entry throug
 
 ## Three worked examples
 
-<Tabs items={['Public clawhub', 'Internal http_yaml mirror', 'smithery MCPs']}>
+<Tabs items={['Internal mirror', 'Smithery MCPs', 'ClawHub']}>
 
-<Tab value="Public clawhub">
-
-The friendly default. No URL, no auth, just opt in to the catalog:
-
-```bash
-defenseclaw registry add clawhub \
-  --kind clawhub \
-  --content skill \
-  --non-interactive
-
-defenseclaw registry sync clawhub
-```
-
-The first sync downloads the manifest, runs the skill scanner on every entry, and promotes the clean ones into `asset_policy.skill.registry`.
-
-</Tab>
-
-<Tab value="Internal http_yaml mirror">
+<Tab value="Internal mirror">
 
 Most enterprises run a curated mirror inside their own DNS:
 
@@ -100,7 +83,7 @@ The `--auth-env` option takes the **name** of an env var; the literal token neve
 
 </Tab>
 
-<Tab value="smithery MCPs">
+<Tab value="Smithery MCPs">
 
 For the smithery.ai public MCP catalog:
 
@@ -113,7 +96,24 @@ defenseclaw registry add smithery-public \
 defenseclaw registry sync smithery-public
 ```
 
-Each entry is run through the MCP scanner; clean ones land in `asset_policy.mcp.registry` so an MCP listed in the catalog passes admission attribution-clean. Remote (URL) entries are scanned directly. A stdio entry would start the package, so it is scanned only with `registry sync --scan-stdio`; without that flag it stays `pending` and is not promoted.
+Each entry is run through the MCP scanner; clean ones land in `asset_policy.mcp.registry` so an MCP listed in the catalog passes admission with the registry named as the reason. Remote (URL) entries are scanned directly. Scanning a stdio entry starts the publisher's package on your machine, so it happens only with `registry sync --scan-stdio`; without that flag the entry stays `pending` and is not promoted. Use `--scan-stdio` only for a catalog whose packages you are willing to run.
+
+</Tab>
+
+<Tab value="ClawHub">
+
+ClawHub lists OpenClaw plugins, so it matters mainly for OpenClaw installs. No URL and no auth are needed:
+
+```bash
+defenseclaw registry add clawhub \
+  --kind clawhub \
+  --content skill \
+  --non-interactive
+
+defenseclaw registry sync clawhub
+```
+
+The first sync downloads the manifest, runs the skill scanner on every entry, and promotes the clean ones into `asset_policy.skill.registry`.
 
 </Tab>
 
@@ -230,13 +230,39 @@ an optional JSONL destination contains only the records its v8 route selects.
 | Knob | Default | Purpose |
 | --- | --- | --- |
 | `--auth-env <ENV>` | `""` | Name of an env var holding a bearer token sent on every fetch. The CLI rejects values that look like literal secrets. |
-| `--allow-private` | off | Permit RFC1918 / ULA destinations. Off in production; on for an internal mirror behind a private subnet. Same flag exists on `test` and `sync`. |
+| `--allow-private` | off | A `registry test` and `registry sync` flag (not `add`). Permits RFC 1918 / ULA destinations: off in production, on for an internal mirror on a private subnet. |
+| `--scan-stdio` | off | A `registry sync` flag. Also scans stdio MCP entries, which starts each publisher-controlled package on this machine. |
 | `--non-interactive` | off | Required for CI; missing required flags exit non-zero with a clear `error: --foo is required`. |
 | SHA-256 on `source_url` | required for `http_yaml` / `http_json` / `git` / `file` | Per-entry integrity; the scanner refuses to download an entry whose computed digest does not match. |
 
 Registry fetches use the same hardened URL path in `test` and `sync`: loopback, link-local, cloud-metadata, and private-network destinations are refused by default, including DNS resolutions that rebind into a reserved range. Use `--allow-private` only for a registry mirror you intentionally run on an internal network. Local `file` registries must use absolute paths, and remote entry downloads must pass the per-entry SHA-256 check before scanner promotion can happen.
 
 ## Inspect what landed
+
+This is a real `file` source with two stdio MCP entries, synced without
+`--scan-stdio`, so both entries are still `pending`:
+
+```text title="defenseclaw registry list"
+  Registry sources
+  ----------------
+  ID                       KIND         CONTENT  ON  ENTRIES            LAST SYNC              URL
+  ------------------------ ------------ -------- --- ------------------ ---------------------- --------------------------------
+  corp-mcp                 file         mcp      yes 2 (0/0/0)          2026-10-03T04:25:28Z   /tmp/corp-mcp.yaml
+
+  ENTRIES column: total (clean/warning/blocked)
+```
+
+```text title="defenseclaw registry entries corp-mcp --status pending"
+  Entries for corp-mcp
+  --------------------
+  NAME                             TYPE   STATUS     SEV      A/R
+  -------------------------------- ------ ---------- -------- ---
+  context7                         mcp    pending    -        --
+  filesystem                       mcp    pending    -        --
+```
+
+`ENTRIES` reads total, then clean, warning and blocked counts; a dash means the
+source was never synced. `A/R` shows whether you approved or rejected an entry.
 
 ```bash
 defenseclaw registry list                              # one row per source, with cached counts
@@ -250,12 +276,18 @@ defenseclaw registry reject  corp-skills evil-skill --type skill
 
 ## Sync schedules
 
-Today, syncing is **on demand**. The `--auto-sync` and `--sync-interval-hours` flags on `add` / `edit` are persisted but the runtime does not poll. Run `registry sync --all` from a cron / systemd timer / GitHub Actions schedule until scheduled sync ships in a future release:
+Today, syncing is **on demand**. The `--auto-sync` and `--sync-interval-hours` flags on `add` / `edit` are saved, but the runtime does not poll. Run `registry sync --all` on a schedule until scheduled sync ships in a future release.
+
+DefenseClaw configuration is per user, so schedule the sync as the user who
+runs DefenseClaw, for example in that user's crontab (`crontab -e`):
 
 ```bash
-# /etc/cron.d/defenseclaw-registry
 0 * * * * defenseclaw registry sync --all
 ```
+
+Keep the gateway running: `registry sync` records an audit event and exits with
+an error when the gateway is unavailable. Use the full path to `defenseclaw` if
+cron's `PATH` does not include it.
 
 ## Common gotchas
 
@@ -302,5 +334,5 @@ from the checkout. Use Python 3.11 or newer when MCP scanning is required.
 - [`cli/defenseclaw/commands/cmd_registry.py`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/cli/defenseclaw/commands/cmd_registry.py) — every subcommand, validator, and the lifecycle helpers.
 - [`cli/defenseclaw/registries/`](https://github.com/cisco-ai-defense/defenseclaw/tree/main/cli/defenseclaw/registries) — adapters, manifest schema, sync engine, promotion rules.
 - [Reference → CLI](/docs/reference/cli) — full CLI catalog.
-- [Setup → Skill scanner](/docs/scanning/skill-scanner) and [MCP scanner](/docs/scanning/mcp-scanner) — what the scanners look at when verdicts get computed.
+- [Skill scanner](/docs/scanning/skill-scanner) and [MCP scanner](/docs/scanning/mcp-scanner) — what the scanners look at when verdicts get computed.
 - [Policies](/docs/policies) — how `asset_policy` decisions blend with repo policies and the LLM judge.

@@ -16,7 +16,7 @@ defenseclaw setup hermes --mode action
 defenseclaw setup antigravity --mode observe
 ```
 
-On a host that already has connector wiring, the interactive flow asks whether to **Add** the new connector alongside the existing one or **Replace** the old wiring. Add is the default multi-connector path. Replace is only for hosts where you intentionally want one connector wired after setup finishes.
+On a host that already has connector wiring, the interactive flow asks whether to **Add** the new connector alongside the existing one or **Replace** the old wiring. Add is the default, also when you pass `--yes`. Replace is only for hosts where you intentionally want one connector wired after setup finishes.
 
 <Callout type="info">
 The audit DB is connector-agnostic. Adding, reconfiguring, removing, or replacing connector wiring does not delete history; each audit row keeps its own connector attribution.

@@ -1,6 +1,6 @@
 ---
 title: MCP scanner
-description: Behavioural scan of every Model Context Protocol server an agent might call. DefenseClaw wraps cisco-ai-mcp-scanner to surface hidden tool intents and shadow capabilities, and writes verdicts into the same mcp_actions admission policy as the watcher.
+description: Behavioural scan of every Model Context Protocol server an agent might call. DefenseClaw wraps cisco-ai-mcp-scanner to surface hidden tool intents and shadow capabilities, and maps each verdict through the mcp_actions admission policy.
 keywords:
   - DefenseClaw MCP scanner
   - cisco-ai-mcp-scanner
@@ -52,7 +52,7 @@ The default sources include:
 - `~/.cursor/mcp.json` → `mcpServers`
 - `~/.config/devin/mcp_config.json` and `<workspace>/.devin/mcp_config.json` → `mcpServers`
 - `~/.gemini/config/mcp_config.json` and `<workspace>/.agents/mcp_config.json` → `mcpServers` (Antigravity)
-- Connector-specific paths registered by `defenseclaw setup guardrail`.
+- The MCP config of every other connector you set up with `defenseclaw setup <connector>`.
 
 Each server is scanned independently and findings are tagged with the connector that discovered them. Use `--connector <name>` on list, scan, set, unset, block, allow, and unblock commands when you want one connector's MCP source instead of the full configured roster. Without `--connector`, `mcp set` writes the server into every configured connector's MCP source, and `mcp unset` removes it from every configured connector that has it.
 
@@ -89,28 +89,65 @@ Extends the scan beyond the tool list to also evaluate the server's prompts, res
   </Tab>
 </Tabs>
 
-Other real flags: `--analyzers <list>` to constrain which analyzer plugins run, `--json` for machine output. The default analyzer setting is `auto`, which lets DefenseClaw select the scanner plugins available in the installed `cisco-ai-mcp-scanner` version and enabled by your credentials. To opt out of a plugin, pass an explicit comma-separated list that omits it; explicit lists are honored as-is rather than being expanded back to `auto`.
+Other real flags: `--analyzers <list>` to constrain which analyzer plugins run, `--json` for machine output, and `--allow-private` to scan a remote server on a private, loopback, link-local or CGNAT address (refused by default). The default analyzer setting is `auto`, which lets DefenseClaw select the scanner plugins available in the installed `cisco-ai-mcp-scanner` version and enabled by your credentials. To opt out of a plugin, pass an explicit comma-separated list that omits it; explicit lists are honored as-is rather than being expanded back to `auto`.
+
+## Configure the scanner
+
+`defenseclaw setup mcp-scanner` chooses which analyzers run and what each scan
+covers. Run it bare for the wizard, or pass flags with `--non-interactive`:
+
+```bash
+defenseclaw setup mcp-scanner                      # interactive
+
+defenseclaw setup mcp-scanner \
+  --non-interactive \
+  --analyzers yara,api,llm,behavioral \
+  --llm-provider anthropic \
+  --llm-model claude-sonnet-4-5 \
+  --scan-prompts --scan-resources --scan-instructions
+```
+
+| Flag | What it sets |
+| --- | --- |
+| `--analyzers <list>` | Comma-separated analyzers: `yara`, `api`, `llm`, `behavioral`, `readiness`. |
+| `--llm-provider anthropic\|openai` | LLM provider for semantic analysis. Other providers are set with `defenseclaw setup llm --provider ...`. |
+| `--llm-model <id>` | LLM model for semantic analysis. |
+| `--scan-prompts`, `--scan-resources`, `--scan-instructions` | Also scan the server's prompts, resources and instructions on every scan. |
+| `--verify` / `--no-verify` | Run connectivity checks after setup (default on). |
+| `--non-interactive` | Use flags instead of prompts. |
+
+The LLM settings are written to the unified top-level `llm:` block, which the
+skill and plugin scanners and the guardrail judge share. Cisco AI Defense
+settings stay in `cisco_ai_defense`.
 
 ## Continuous protection
 
-Just like skills, MCP scanning is most valuable as part of an admission pipeline. `defenseclaw setup guardrail` configures the watcher to:
+MCP servers are not found by watching files. They are admitted through the CLI
+and rescanned on a schedule:
 
 <Steps>
   <Step>
-    **Block** — when a new entry appears in any tracked
-    `mcpServers` file, hold the agent off until the scan resolves.
+    **Scan on add.** `defenseclaw mcp set <name> ...` scans the server before
+    writing it into the connector's MCP config, unless you pass `--skip-scan`.
+    A scan failure stops the add.
   </Step>
   <Step>
-    **Allow** — release the server back to the agent if the result
-    severity maps to `runtime: enable` for the active rule pack.
+    **Act on the verdict.** The top severity maps through `mcp_actions` (below):
+    in the default policy, HIGH and CRITICAL block the install and disable the
+    server.
   </Step>
   <Step>
-    **Scan** — run the wrapper against the new entry and emit the
-    findings to the audit pipeline.
+    **Rescan.** The gateway re-checks configured servers on a schedule
+    (`watch.rescan_enabled`, every `watch.rescan_interval_min` minutes; 60 by
+    default) and rescans a server when its entry or the scanner settings
+    changed. Set `gateway.watcher.mcp.take_action: false` to record verdicts
+    without acting on them.
   </Step>
 </Steps>
 
-If you only want one-shot scans (no watcher), keep `setup guardrail`'s admission off and run `defenseclaw mcp scan --all` from CI or a daily cron. The findings still enter mandatory local history and every matching v8 observability destination.
+For one-shot scans in CI or a daily job, run `defenseclaw mcp scan --all`. The
+findings still enter mandatory local history and every matching v8
+observability destination.
 
 ## Configure the action mapping
 
@@ -162,7 +199,7 @@ defenseclaw policy activate permissive
 
 ## Block / allow individual servers
 
-The watcher's verdict is the default. Operators always have manual override (block / allow act on the **whole server**, not on individual tools — the CLI doesn't take a `--tool` flag):
+The scan verdict is the default. Operators always have manual override (block / allow act on the **whole server**, not on individual tools — the CLI doesn't take a `--tool` flag):
 
 ```bash
 defenseclaw mcp list                                         # what is configured + state across configured connectors
@@ -181,21 +218,46 @@ next to `last_scan_error`. The footer gives one next step per failed server: add
 `--allow-private` for a private or loopback URL, use an npx or uvx launcher for
 a stdio command the scanner refuses, or fix reachability and scan again.
 
+This is a real run against a server on a private address:
+
+```text title="defenseclaw mcp scan internal-docs"
+  Scanning 1 MCP server on claudecode for:
+    - untrusted command paths
+    - outbound URL allow-listing
+    - tool-name spoofing
+    - auth-token handling
+
+  Source: http://10.20.30.40:8080/mcp
+
+error: scan failed: refusing to scan remote MCP target 'http://10.20.30.40:8080/mcp': host '10.20.30.40' resolves to private address 10.20.30.40 (use --allow-private to opt in)
+```
+
+```text title="defenseclaw mcp list --connector claudecode"
+                                 MCP Servers (connector=claudecode)
+┏━━━━━━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━┓
+┃ Name          ┃ Transport ┃ Command ┃ URL                     ┃ Severity ┃ Verdict     ┃ Actions ┃
+┡━━━━━━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━┩
+│ internal-docs │ sse       │         │ http://10.20.30.40:808… │ -        │ scan failed │ -       │
+└───────────────┴───────────┴─────────┴─────────────────────────┴──────────┴─────────────┴─────────┘
+  ! 1 MCP server(s) could not be scanned (last scan failed): internal-docs (claudecode)
+  internal-docs (claudecode): refused, the URL is a private or loopback address; to scan it anyway: defenseclaw mcp scan internal-docs --connector claudecode --allow-private
+```
+
 Amp MCP discovery is intentionally read-only. Use `amp mcp add` (or edit Amp's
 settings through Amp tooling) for schema-preserving writes and workspace
 approval, then re-run `defenseclaw mcp scan --connector amp`.
 
-Every action is audited (`block-mcp`, etc.) so the trail is intact even when the manual override contradicts the watcher.
+Every action is audited (`block-mcp`, etc.) so the trail is intact even when the manual override contradicts a scan verdict.
 
 ## Using the unified LLM key
 
-Behavioural intent analysis depends on the LLM judge being able to reason about each tool's description vs. its parameter schema. Set the unified key once:
+The scanner's LLM analyzer compares each tool's description with its parameter schema. It uses the unified LLM key; set it once:
 
 ```bash
 defenseclaw keys set DEFENSECLAW_LLM_KEY
 ```
 
-DefenseClaw injects it into the scanner subprocess via `inject_llm_env`, alongside any [Cisco AI Defense](https://www.cisco.com/site/us/en/products/security/ai-defense/index.html) API key for content classification. See [Setup → Unified LLM key](/docs/guardrail/unified-llm-key) for the resolution order and Bifrost provider catalog.
+DefenseClaw injects it into the scanner subprocess via `inject_llm_env`, alongside any [Cisco AI Defense](https://www.cisco.com/site/us/en/products/security/ai-defense/index.html) API key for content classification. See [Unified LLM key](/docs/guardrail/unified-llm-key) for the resolution order and Bifrost provider catalog.
 
 <Callout type="warn" title="A local scan runs the server">
 A local stdio scan starts the server as an ordinary subprocess that runs as
@@ -232,8 +294,8 @@ isn't present; it never crashes the gateway.
 
 ## See also
 
-- [Setup → Skill scanner](/docs/scanning/skill-scanner) — sibling scanner for skill bundles, same admission pattern via `skill_actions`
-- [Setup → Unified LLM key](/docs/guardrail/unified-llm-key) — the env var the LLM-assisted analysis reads
+- [Skill scanner](/docs/scanning/skill-scanner) — sibling scanner for skill bundles, same admission pattern via `skill_actions`
+- [Unified LLM key](/docs/guardrail/unified-llm-key) — the env var the LLM-assisted analysis reads
 - [Defaults](/docs/policies/defaults) — the `mcp_actions` table for each shipped rule pack
 - [Policies](/docs/policies) — the layered architecture
 - [Reference → CLI](/docs/reference/cli) — full `defenseclaw mcp` subcommand reference
