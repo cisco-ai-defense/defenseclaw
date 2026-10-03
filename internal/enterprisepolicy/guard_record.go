@@ -44,11 +44,44 @@ type BlockRecord struct {
 	Reason    string `json:"reason,omitempty"`
 }
 
-// BlockSummary is the records for one connector, file and digest.
+// BlockSummary is the records for one connector, file and digest. The
+// embedded record is the first block; Events counts every hook event the
+// file blocked, in first-seen order, so the summary never attributes all
+// blocks to the first event.
 type BlockSummary struct {
 	BlockRecord
+	Count  int          `json:"count"`
+	Last   string       `json:"last,omitempty"`
+	Events []EventCount `json:"events,omitempty"`
+}
+
+// EventCount is how many blocks one hook event had in a summary.
+type EventCount struct {
+	Event string `json:"event"`
 	Count int    `json:"count"`
-	Last  string `json:"last,omitempty"`
+}
+
+// blockEventLimit bounds the distinct events one summary lists; the
+// last slot becomes "other" once more events appear.
+const blockEventLimit = 8
+
+func (s *BlockSummary) addEvent(event string) {
+	if event == "" {
+		event = "-"
+	}
+	for i := range s.Events {
+		if s.Events[i].Event == event {
+			s.Events[i].Count++
+			return
+		}
+	}
+	if len(s.Events) == blockEventLimit {
+		last := &s.Events[blockEventLimit-1]
+		last.Event = "other"
+		last.Count++
+		return
+	}
+	s.Events = append(s.Events, EventCount{Event: event, Count: 1})
 }
 
 const (
@@ -152,9 +185,12 @@ func CollectForeignHookBlocks(accountHome string, now time.Time) ([]BlockSummary
 		if summary, ok := summaries[key]; ok {
 			summary.Count++
 			summary.Last = record.Time
+			summary.addEvent(record.Event)
 			continue
 		}
-		summaries[key] = &BlockSummary{BlockRecord: record, Count: 1, Last: record.Time}
+		summary := &BlockSummary{BlockRecord: record, Count: 1, Last: record.Time}
+		summary.addEvent(record.Event)
+		summaries[key] = summary
 		order = append(order, key)
 	}
 	sort.SliceStable(order, func(i, j int) bool { return summaries[order[i]].Time < summaries[order[j]].Time })
@@ -189,10 +225,22 @@ func (r BlockRecord) bounded() BlockRecord {
 
 // String renders a summary for the guardian log.
 func (s BlockSummary) String() string {
-	event := s.Event
-	if event == "" {
-		event = "-"
+	events := s.Events
+	if len(events) == 0 {
+		event := s.Event
+		if event == "" {
+			event = "-"
+		}
+		events = []EventCount{{Event: event, Count: s.Count}}
 	}
-	return fmt.Sprintf("blocked %s %s %d time(s) between %s and %s: %s file %s (sha256:%s) %s",
-		s.Connector, event, s.Count, s.Time, s.Last, s.Scope, s.Path, s.Digest, s.Reason)
+	parts := make([]string, 0, len(events))
+	for _, e := range events {
+		parts = append(parts, fmt.Sprintf("%s %d", e.Event, e.Count))
+	}
+	when := fmt.Sprintf("between %s and %s", s.Time, s.Last)
+	if s.Count == 1 || s.Last == "" || s.Last == s.Time {
+		when = "at " + s.Time
+	}
+	return fmt.Sprintf("blocked %d %s hook call(s) (%s) %s: %s file %s (sha256:%s) %s",
+		s.Count, s.Connector, strings.Join(parts, ", "), when, s.Scope, s.Path, s.Digest, s.Reason)
 }
