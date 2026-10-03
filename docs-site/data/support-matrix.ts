@@ -83,7 +83,7 @@ export const generated: GeneratedStatus = {
     codeguard: { oss: 'SSS', enterprise: 'PPP' },
     'skill-scanner': { oss: 'SSP', enterprise: 'SSP' },
     'mcp-scanner': { oss: 'SPS', enterprise: 'SSP' },
-    judge: { oss: 'SPP', enterprise: 'PPP' },
+    judge: { oss: 'SSP', enterprise: 'PPP' },
     redaction: { oss: 'SSP', enterprise: 'NNN' },
     sandboxes: { oss: 'PPU', enterprise: 'UUU' },
     acp: { oss: 'PSP', enterprise: 'PPP' },
