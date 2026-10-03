@@ -1097,3 +1097,37 @@ def test_ctrl_c_before_the_swap_says_so_and_drops_what_was_staged(tmp_path: Path
     assert "x Cancelled; nothing was changed" in completed.stdout
     assert "Cancelled; nothing was changed" in (tmp_path / "install.log").read_text(encoding="utf-8")
     assert sorted(p.name for p in home.iterdir()) == []
+
+
+def test_installed_version_is_the_gateway_on_path_not_a_stale_release_venv(tmp_path: Path) -> None:
+    # GAP-2454: `make all` over a 0.8.10 release install leaves the 0.8.10
+    # release venv behind; the installer called that "Installed: 0.8.10", warned
+    # that the 1.0 audit history would be deleted and labelled the rollback 0.8.10.
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    start = text.index("installed_version() {")
+    func = text[start : text.index("\n}\n", start) + 3]
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    venv = tmp_path / ".venv"
+    (venv / "lib" / "python3.12" / "site-packages" / "defenseclaw-0.8.10.dist-info").mkdir(parents=True)
+    gateway = bin_dir / "defenseclaw-gateway"
+    gateway.write_text("#!/bin/sh\necho 'defenseclaw-gateway version 1.0.0 (commit=abc1234)'\n", encoding="utf-8")
+    gateway.chmod(0o755)
+    script = tmp_path / "version.sh"
+    script.write_text(
+        f'set -euo pipefail\nVENV="{venv}" BIN_DIR="{bin_dir}"\n' + func + 'echo "v=$(installed_version)"\n',
+        encoding="utf-8",
+    )
+
+    assert "v=1.0.0" in _run([str(script)], tmp_path).stdout
+
+    # A gateway that prints no version (or is missing) falls back to the venv.
+    gateway.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    assert "v=0.8.10" in _run([str(script)], tmp_path).stdout
+    gateway.unlink()
+    assert "v=0.8.10" in _run([str(script)], tmp_path).stdout
+
+    # install.ps1 asks the gateway first as well.
+    ps1 = (ROOT / "scripts" / "install.ps1").read_text(encoding="utf-8")
+    body = ps1[ps1.index("function Get-InstalledVersion {") :]
+    assert body.index('"defenseclaw-gateway.exe"') < body.index("dist-info")
