@@ -4,7 +4,8 @@
 
 """Final-cert doctor b3: plain full-disk cache note (GAP-2015), freed audit
 disk no longer FAILs (GAP-2016), old real drops do not turn by-design skips
-into data loss (GAP-2035)."""
+into data loss (GAP-2035), freed-disk telemetry row reads recovering
+(GAP-2139)."""
 
 from __future__ import annotations
 
@@ -146,3 +147,26 @@ def test_old_real_drops_do_not_count_by_design_skips_as_loss(tmp_path: Path) -> 
     assert "reason: invalid mapped field;" in detail and "unsupported identity" not in detail
     assert "last at 2026-10-02T05:04:00Z" in detail
     assert "20 more held only records DefenseClaw does not map, skipped by design" in detail
+
+
+def test_freed_audit_disk_telemetry_row_does_not_lead_with_error(tmp_path: Path) -> None:
+    # GAP-2139: the WARN telemetry row started with the raw state word "error".
+    from defenseclaw.config import GatewayConfig
+
+    cfg = SimpleNamespace(
+        data_dir=str(tmp_path),
+        audit_db=str(tmp_path / "audit.db"),
+        gateway=GatewayConfig(api_bind="127.0.0.1", api_port=19_140),
+    )
+    trusted = SimpleNamespace(trusted=True, record=None, process=None, pid=0)
+    for freed, status, word in ((True, "warn", "recovering — "), (False, "fail", "error — ")):
+        result = _DoctorResult()
+        with (
+            mock.patch.object(cmd_doctor, "_http_probe", return_value=(200, json.dumps(_HEALTH))),
+            mock.patch.object(cmd_doctor, "_trusted_gateway_listener", return_value=trusted),
+            mock.patch.object(cmd_doctor, "_replaced_gateway_executable", return_value=False),
+            mock.patch("defenseclaw.audit_capacity.audit_disk_freed", return_value=freed),
+        ):
+            cmd_doctor._check_sidecar(cfg, result)
+        row = next(c for c in result.checks if c["label"].endswith("telemetry"))
+        assert row["status"] == status and row["detail"].startswith(word), row
