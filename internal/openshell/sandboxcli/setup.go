@@ -258,7 +258,7 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 		if c := rep.Get(id); c != nil && c.Status == openshell.StatusFail {
 			a.bad(c.Title + ": " + c.Detail)
 			if c.Fix != nil {
-				a.note("→ " + c.Fix.Summary + " " + c.Fix.Command)
+				a.note("→ " + c.Fix.Line())
 			}
 			return &Silent{Err: fmt.Errorf("the OpenShell gateway is not usable yet (%s); see `%s doctor`", c.Title, CommandName)}
 		}
@@ -584,7 +584,7 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 	if onMicroVMs {
 		driver = openshell.DriverVM
 	}
-	ready := a.waitDaemon(ctx, driver)
+	ready, noDockerGroup := a.waitDaemon(ctx, driver)
 	for _, s := range skipped {
 		a.note("skipped: " + s)
 	}
@@ -602,6 +602,10 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 	case stuck:
 		a.warn("not ready for sandboxes yet: restart the OpenShell gateway on the MicroVM driver (`" + CommandName + " setup --restart-gateway`), then `" +
 			CommandName + " run " + cmd + "`")
+		return nil
+	case noDockerGroup:
+		a.warn("not ready for sandboxes yet: the DefenseClaw daemon started before you joined the docker group, so it cannot reach Docker. " +
+			"Restart it so it picks up the group: `defenseclaw-gateway restart`; then `" + CommandName + " run " + cmd + "`")
 		return nil
 	case !ready:
 		a.warn("not ready for sandboxes yet: the DefenseClaw daemon has not turned sandboxes on; run `" + CommandName +
@@ -874,7 +878,7 @@ func (a *App) prepareMicroVMs(ctx context.Context, o SetupOptions, rep *openshel
 		if problems := rep.MicroVM.Problems(); len(problems) > 0 {
 			a.bad("MicroVM driver: " + strings.Join(problems, "; "))
 			if c := rep.Get(openshell.CheckIDVMDriver); c != nil && c.Fix != nil {
-				a.note("→ " + c.Fix.Summary + " " + c.Fix.Command)
+				a.note("→ " + c.Fix.Line())
 			}
 			return nil, &Silent{Err: errors.New("this machine cannot run MicroVM sandboxes yet (MicroVM driver)")}
 		}
@@ -894,7 +898,7 @@ func (a *App) machineFailure(rep *openshell.DoctorReport, landlockLater bool) er
 		if c := rep.Get(id); c != nil && c.Status == openshell.StatusFail {
 			a.bad(c.Title + ": " + c.Detail)
 			if c.Fix != nil {
-				a.note("→ " + c.Fix.Summary + " " + c.Fix.Command)
+				a.note("→ " + c.Fix.Line())
 			}
 			return &Silent{Err: fmt.Errorf("this machine cannot run sandboxes yet (%s)", c.Title)}
 		}
@@ -1134,11 +1138,12 @@ func undrivenGatewayDriver(rep *openshell.DoctorReport, state *openshell.Gateway
 // waitDaemon waits briefly for the daemon to turn sandboxes on and, when
 // driver is set, to drive the gateway on it: the daemon learns a driver
 // switch when it next asks the gateway. It reports false when the daemon
-// answers but has not turned sandboxes on.
-func (a *App) waitDaemon(ctx context.Context, driver openshell.ComputeDriver) bool {
+// answers but has not turned sandboxes on, and noDockerGroup when the
+// daemon started before its user joined the docker group (GAP-2137).
+func (a *App) waitDaemon(ctx context.Context, driver openshell.ComputeDriver) (ready, noDockerGroup bool) {
 	api, err := a.api()
 	if err != nil {
-		return true
+		return true, false
 	}
 	const wait, poll = 30 * time.Second, 2 * time.Second
 	deadline := a.Now().Add(wait)
@@ -1152,23 +1157,23 @@ func (a *App) waitDaemon(ctx context.Context, driver openshell.ComputeDriver) bo
 		switch {
 		case err != nil:
 			a.warn("the DefenseClaw daemon is not running; start it with `defenseclaw-gateway start`")
-			return true
+			return true, false
 		case st.Enabled && st.Available && (driver == "" || drives == driver):
 			a.ok("the daemon runs the sandbox subsystem (ingress " + st.IngressAddr + ", egress proxy " + st.EgressAddr + ")")
-			return true
+			return true, st.DockerGroupMissing
 		}
 		// The polls bound the wait when the clock does not move.
 		if a.Now().After(deadline) || time.Duration(polls)*poll >= wait {
 			if st.Enabled && st.Available {
 				a.warn(fmt.Sprintf("the daemon still drives the OpenShell gateway as the %s driver, not %s; restart it (`defenseclaw-gateway restart`) "+
 					"if `%s doctor` says the same", drives, driver, CommandName))
-				return true
+				return true, false
 			}
 			a.warn("the daemon has not turned sandboxes on yet: " + firstNonEmpty(st.Reason, "see `"+CommandName+" doctor`"))
-			return false
+			return false, false
 		}
 		if a.Sleep(ctx, poll) != nil {
-			return true
+			return true, false
 		}
 	}
 }

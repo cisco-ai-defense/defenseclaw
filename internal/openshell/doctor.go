@@ -120,6 +120,15 @@ type Fix struct {
 	Apply func(ctx context.Context) error `json:"-"`
 }
 
+// Line is the fix as one line: its summary, then its command after a
+// colon (GAP-2136).
+func (f *Fix) Line() string {
+	if f.Command == "" {
+		return f.Summary
+	}
+	return f.Summary + ": " + f.Command
+}
+
 // Check is one doctor finding.
 type Check struct {
 	ID     string      `json:"id"`
@@ -676,7 +685,9 @@ func (r *doctorRun) dockerCheck(ctx context.Context) (Check, string) {
 	jsonErr := json.Unmarshal(firstJSONLine(out), &info)
 	serverErr := strings.Join(info.ServerErrors, "; ")
 	if serverErr == "" && err != nil {
-		serverErr = strings.TrimSpace(string(out))
+		// docker info prints its (empty) JSON before the client's error;
+		// keep only the error (GAP-2136).
+		serverErr = withoutJSONLines(out)
 		if serverErr == "" {
 			serverErr = err.Error()
 		}
@@ -727,6 +738,29 @@ func (r *doctorRun) buildKitCheck(ctx context.Context) Check {
 		c.Detail += " (buildx " + v + ")"
 	}
 	return c
+}
+
+// withoutJSONLines is out without its JSON lines, trimmed.
+func withoutJSONLines(out []byte) string {
+	var kept []string
+	for _, line := range strings.Split(string(out), "\n") {
+		if line = strings.TrimSpace(line); line != "" && !strings.HasPrefix(line, "{") {
+			kept = append(kept, line)
+		}
+	}
+	return strings.Join(kept, "; ")
+}
+
+// DockerGroupMissingInProcess reports whether this process's user belongs
+// to the docker group while the process itself does not have it: it
+// started before the user joined, so it cannot reach the Docker socket
+// until it restarts (GAP-2137). Linux only; false for root.
+func DockerGroupMissingInProcess() bool {
+	if runtime.GOOS != "linux" || os.Geteuid() == 0 {
+		return false
+	}
+	member, inSession, err := dockerGroupMembership()
+	return err == nil && member && !inSession
 }
 
 func firstJSONLine(out []byte) []byte {

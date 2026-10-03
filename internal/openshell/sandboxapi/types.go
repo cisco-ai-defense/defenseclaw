@@ -76,6 +76,10 @@ type Status struct {
 	// it drives the user's OpenShell gateway and mounts the user's files, so
 	// the doctor checks it is the user's own.
 	DaemonUID *int `json:"daemon_uid,omitempty"`
+	// DockerGroupMissing reports that the daemon's user is in the docker
+	// group but the daemon started before that, so it cannot reach Docker
+	// until it restarts (Linux).
+	DockerGroupMissing bool `json:"docker_group_missing,omitempty"`
 }
 
 // Gateway is the OpenShell gateway the daemon is connected to.
