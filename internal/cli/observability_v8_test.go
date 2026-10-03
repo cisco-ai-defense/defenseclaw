@@ -247,12 +247,27 @@ func TestRunTraceCanaryCommandBoundsRemoteFailureAndResponseBody(t *testing.T) {
 		t.Fatal(decodeErr)
 	}
 	if result != (traceCanaryHelperResult{
-		Destination: "galileo", FailureClass: "gateway_rejected",
+		Destination: "galileo", FailureClass: "delivery_failed",
 	}) {
 		t.Fatalf("failure result = %+v", result)
 	}
 	if strings.Contains(output.String(), token) || strings.Contains(output.String(), remoteSecret) {
 		t.Fatalf("bounded helper output leaked sensitive text: %s", output.String())
+	}
+}
+
+func TestRequestTraceCanaryKeepsGatewayRejectedForRefusals(t *testing.T) {
+	t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", "")
+	t.Setenv("OPENCLAW_GATEWAY_TOKEN", "")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	}))
+	defer server.Close()
+
+	configPath, dataDir := traceCanaryHelperConfig(t, server.URL, "refusal-token")
+	result, err := requestTraceCanary(t.Context(), "galileo", configPath, dataDir, 2*time.Second)
+	if err == nil || result.FailureClass != "gateway_rejected" {
+		t.Fatalf("refused canary = %+v / %v", result, err)
 	}
 }
 
