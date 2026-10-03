@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -2634,8 +2635,34 @@ func removeOwnedClaudeCodeHooks(
 	return removeMatchingHookHandlers(hookEventValue, func(rawHook interface{}) bool {
 		return isOwnedHookHandler(rawHook, hooksDir) ||
 			hookUsesTrackedClaudeCodeCommand(rawHook, managedCommands) ||
-			hookUsesLegacyClaudeCodeNativeCommand(rawHook)
+			hookUsesLegacyClaudeCodeNativeCommand(rawHook) ||
+			hookUsesForeignDefenseClawClaudeCodeScript(rawHook)
 	}), nil
+}
+
+// hookUsesForeignDefenseClawClaudeCodeScript recognizes a handler that runs
+// the generated Claude Code hook of another DefenseClaw data dir:
+// <home>/.defenseclaw/hooks/claude-code-hook.sh. A settings.json copied from
+// another account (or from dotfiles) carries those entries, and that script
+// is often unreadable, so the marker check cannot claim it. Setup then kept
+// the dead entries next to its own, doctor kept warning "stale generated
+// script", and uninstall left them in place (GAP-2031). Only Setup's and
+// Teardown's removal pass uses this; the exact path shape is the claim.
+func hookUsesForeignDefenseClawClaudeCodeScript(rawHook interface{}) bool {
+	hook, ok := rawHook.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	command, _ := hook["command"].(string)
+	if command == "" || strings.ContainsAny(command, " \t\"'") {
+		return false
+	}
+	command = filepath.ToSlash(command)
+	hooksDir := path.Dir(command)
+	return path.IsAbs(command) && path.Clean(command) == command &&
+		path.Base(command) == "claude-code-hook.sh" &&
+		path.Base(hooksDir) == "hooks" &&
+		path.Base(path.Dir(hooksDir)) == ".defenseclaw"
 }
 
 func validateClaudeCodeHookEventShape(hookEventValue interface{}) error {

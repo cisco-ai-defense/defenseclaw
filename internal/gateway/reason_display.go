@@ -23,6 +23,7 @@ import (
 	"sync/atomic"
 
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
+	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
 
 const builtInMatchReasonPrefix = "matched: "
@@ -55,6 +56,12 @@ func trustedBuiltInFindingLabel(label string) bool {
 			if label == base || label == base+obfuscatedFindingLabelSuffix {
 				return true
 			}
+		}
+	}
+	// A built-in CodeGuard rule on a file write (GAP-2029).
+	for _, rule := range scanner.BuiltinRulesMeta() {
+		if label == rule.ID+":"+strings.TrimSpace(rule.Title) {
+			return true
 		}
 	}
 	return false
