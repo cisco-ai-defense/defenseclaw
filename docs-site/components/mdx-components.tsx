@@ -6,7 +6,6 @@ import { File, Folder, Files } from 'fumadocs-ui/components/files';
 import { Card as FumadocsCard, Cards as FumadocsCards } from 'fumadocs-ui/components/card';
 import { Banner } from 'fumadocs-ui/components/banner';
 import { TypeTable as FumadocsTypeTable } from 'fumadocs-ui/components/type-table';
-import { ImageZoom } from 'fumadocs-ui/components/image-zoom';
 import Link from 'fumadocs-core/link';
 import type { MDXComponents } from 'mdx/types';
 import { Flow, Node, Edge, Zone, Sequence, Message } from '@/components/diagram';
@@ -89,17 +88,6 @@ function InlineCode(props: ComponentProps<'code'>) {
   return <code {...props} data-inline={text.length <= 32 ? 'short' : 'long'} />;
 }
 
-function MdxImage(imgProps: ComponentProps<'img'>) {
-  const props = imgProps as ComponentProps<typeof ImageZoom>;
-  return (
-    <ImageZoom
-      sizes="(max-width: 768px) 100vw, (max-width: 1200px) 70vw, 900px"
-      {...props}
-      className={cn('rounded-lg', props.className)}
-    />
-  );
-}
-
 function MdxInput(props: ComponentProps<'input'>) {
   if (props.type === 'checkbox') {
     return (
@@ -122,7 +110,6 @@ export const mdxComponents: MDXComponents = {
   table: ResponsiveTable,
   pre: DocsCodeBlock,
   code: InlineCode,
-  img: MdxImage,
   input: MdxInput,
   Tab,
   Tabs,

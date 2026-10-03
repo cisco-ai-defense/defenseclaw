@@ -2641,12 +2641,12 @@ samp {
  * blocks and the terminal animation use it. */
 .dc-scroll-cue {
   --cue-bg: var(--color-fd-background);
-  --cue-shadow: color-mix(in oklab, var(--color-fd-foreground) 16%, transparent);
+  --cue-shadow: color-mix(in oklab, var(--color-fd-foreground) 30%, transparent);
   background:
     linear-gradient(to right, var(--cue-bg) 35%, transparent) left center / 2.25rem 100% no-repeat local,
     linear-gradient(to left, var(--cue-bg) 35%, transparent) right center / 2.25rem 100% no-repeat local,
-    linear-gradient(to right, var(--cue-shadow), transparent) left center / 0.9rem 100% no-repeat scroll,
-    linear-gradient(to left, var(--cue-shadow), transparent) right center / 0.9rem 100% no-repeat scroll;
+    linear-gradient(to right, var(--cue-shadow), transparent) left center / 1rem 100% no-repeat scroll,
+    linear-gradient(to left, var(--cue-shadow), transparent) right center / 1rem 100% no-repeat scroll;
   background-color: var(--cue-bg);
 }
 
