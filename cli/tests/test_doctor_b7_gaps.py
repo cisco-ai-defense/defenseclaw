@@ -81,3 +81,15 @@ def test_judge_auth_failure_fails_llm_reachable(tmp_path, monkeypatch) -> None:
     with mock.patch("defenseclaw.llm.ping", return_value=(False, "Bedrock timed out: read timeout")):
         cmd_doctor._check_llm_reachable(cfg, r)
     assert r.checks[-1]["status"] == "warn"
+
+
+def test_bedrock_key_rejection_raised_as_connection_error_is_auth_failed() -> None:
+    # GAP-2108: LiteLLM raises a Bedrock 403 for an expired or malformed key as
+    # APIConnectionError (status 500) whose text has no 403.
+    from defenseclaw import llm
+
+    err = type("APIConnectionError", (Exception,), {})
+    for body in ("Bearer Token has expired", "Invalid API Key format: Delimiter ':' not found"):
+        exc = err(f'litellm.APIConnectionError: BedrockException - {{"Message":"{body}"}}')
+        assert llm._classify_llm_exception(exc) == "auth_failed"
+    assert llm._classify_llm_exception(err("litellm.APIConnectionError: Connection refused")) == "network_error"
