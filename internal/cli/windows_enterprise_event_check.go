@@ -100,7 +100,7 @@ can run it.`,
 			report := checkWindowsEnterpriseEvents(entries, lines, log)
 			report.Log, report.Source, report.LifecycleLog = log, source, logPath
 			if jsonOutput {
-				encoder := json.NewEncoder(cmd.OutOrStdout())
+				encoder := newEnterpriseJSONEncoder(cmd.OutOrStdout())
 				encoder.SetIndent("", "  ")
 				if err := encoder.Encode(report); err != nil {
 					return err

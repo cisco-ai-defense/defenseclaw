@@ -505,7 +505,7 @@ func writeWindowsEnterpriseLifecyclePreflightFailure(
 		Error:         cause.Error(),
 		Errors:        []string{cause.Error()},
 	}
-	if err := json.NewEncoder(cmd.OutOrStdout()).Encode(report); err != nil {
+	if err := newEnterpriseJSONEncoder(cmd.OutOrStdout()).Encode(report); err != nil {
 		return fmt.Errorf(
 			"Windows enterprise %s preflight failed and its JSON report could not be encoded: %w",
 			report.Action,
@@ -1515,14 +1515,14 @@ func newWindowsServiceConfigValidationCommand() *cobra.Command {
 			report, err := validateWindowsServiceConfig(configPath, dataDir, serviceAccount)
 			if jsonOutput {
 				if err != nil {
-					_ = json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{
+					_ = newEnterpriseJSONEncoder(cmd.OutOrStdout()).Encode(map[string]any{
 						"schema_version": 1,
 						"ok":             false,
 						"error":          err.Error(),
 					})
 					return errors.New("Windows enterprise service config validation failed")
 				}
-				return json.NewEncoder(cmd.OutOrStdout()).Encode(report)
+				return newEnterpriseJSONEncoder(cmd.OutOrStdout()).Encode(report)
 			}
 			if err != nil {
 				return err

@@ -11,7 +11,6 @@
 package cli
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -474,7 +473,7 @@ func recordEnterprisePolicyReportError(cmd *cobra.Command, report *enterprisePol
 
 func writeEnterprisePolicyReport(out io.Writer, report enterprisePolicyReport) error {
 	if enterprisePolicyJSON {
-		encoder := json.NewEncoder(out)
+		encoder := newEnterpriseJSONEncoder(out)
 		encoder.SetIndent("", "  ")
 		return encoder.Encode(report)
 	}
