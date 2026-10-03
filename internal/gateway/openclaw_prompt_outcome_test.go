@@ -59,3 +59,28 @@ func TestOpenClawPromptBlockMarksTheTurn(t *testing.T) {
 		t.Fatalf("a repeated turn was marked %q", again.outcome)
 	}
 }
+
+// TestOpenClawAllowedTurnNamesTheLocalUser pins GAP-2287: an allowed
+// OpenClaw turn names the gateway's own user on an unmanaged install, as a
+// blocked turn and every other connector's turns do; a user the stream
+// named is kept.
+func TestOpenClawAllowedTurnNamesTheLocalUser(t *testing.T) {
+	_, wantName := localProcessUser()
+	if wantName == "" {
+		t.Skip("no local process user on this host")
+	}
+	allowed := hookModelV8Observation{response: "ok"}
+	applyOpenClawPromptBlock(&allowed)
+	if allowed.outcome != "" {
+		t.Fatalf("an allowed turn was marked %q", allowed.outcome)
+	}
+	if name, _ := eventRouterAgentInputV8(allowed).DefenseClawUserName.Get(); name != wantName {
+		t.Fatalf("allowed turn user = %q, want %q", name, wantName)
+	}
+	named := hookModelV8Observation{response: "ok"}
+	named.meta.UserName = "stream-user"
+	applyOpenClawPromptBlock(&named)
+	if named.meta.UserName != "stream-user" {
+		t.Fatalf("stream user replaced by %q", named.meta.UserName)
+	}
+}

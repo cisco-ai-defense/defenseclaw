@@ -266,6 +266,8 @@ ACTION_REGISTRY_EDIT: Final[str] = "registry-edit"
 ACTION_REGISTRY_REMOVE: Final[str] = "registry-remove"
 ACTION_REGISTRY_SYNC: Final[str] = "registry-sync"
 ACTION_REGISTRY_REQUIRE: Final[str] = "registry-require"
+ACTION_REGISTRY_APPROVE: Final[str] = "registry-approve"
+ACTION_REGISTRY_REJECT: Final[str] = "registry-reject"
 ACTION_SCAN_ENFORCED: Final[str] = "scan-enforced"
 ACTION_SCAN_FINDING: Final[str] = "scan-finding"
 ACTION_DISMISS_ALERT: Final[str] = "dismiss-alert"
@@ -480,6 +482,8 @@ ALL_ACTIONS: Final[tuple[str, ...]] = (
     ACTION_REGISTRY_REMOVE,
     ACTION_REGISTRY_SYNC,
     ACTION_REGISTRY_REQUIRE,
+    ACTION_REGISTRY_APPROVE,
+    ACTION_REGISTRY_REJECT,
     ACTION_SCAN_ENFORCED,
     ACTION_SCAN_FINDING,
     ACTION_DISMISS_ALERT,

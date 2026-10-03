@@ -97,7 +97,9 @@ policy-activate
 policy-create
 policy-delete
 registry-add
+registry-approve
 registry-edit
+registry-reject
 registry-remove
 registry-require
 registry-sync

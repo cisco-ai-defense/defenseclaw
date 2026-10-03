@@ -208,6 +208,8 @@ classes:
       ActionRegistryRemove: "registry-remove"
       ActionRegistrySync: "registry-sync"
       ActionRegistryRequire: "registry-require"
+      ActionRegistryApprove: "registry-approve"
+      ActionRegistryReject: "registry-reject"
       ActionScanEnforced: "scan-enforced"
       ActionScanFinding: "scan-finding"
       ActionDismissAlert: "dismiss-alert"

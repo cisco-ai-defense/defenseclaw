@@ -1197,15 +1197,12 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		}
 
 		t0 := time.Now()
-		verdict := p.inspector.Inspect(r.Context(), "prompt", inspectionText, partial.Messages, label, mode)
 		// F-1265: stripOpenClawUntrustedEnvelope is keyed on a literal prefix
 		// any client can forge, so we additionally inspect the RAW user text
 		// when the strip actually changed the content. Either path can
-		// trigger a block; we keep the stricter verdict.
-		if inspectionText != inspectRaw {
-			rawVerdict := p.inspector.Inspect(r.Context(), "prompt", inspectRaw, partial.Messages, label, mode)
-			verdict = mergePromptVerdicts(verdict, rawVerdict)
-		}
+		// trigger a block; we keep the stricter verdict, as one evaluation
+		// (GAP-2288).
+		verdict := inspectPromptWithRawRecheck(r.Context(), p.inspector, inspectionText, inspectRaw, partial.Messages, label, mode)
 		p.resolveConfirm(r.Context(), r, verdict, "prompt", label, mode)
 		if deferManagedPrompt {
 			// AID directive from this prompt's inspection is now known;
@@ -2816,15 +2813,12 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 
 		t0 := time.Now()
 
-		verdict := p.inspector.Inspect(agentCtx, "prompt", inspectionText, req.Messages, req.Model, mode)
 		// F-1265: stripOpenClawUntrustedEnvelope is keyed on a literal prefix
 		// any client can forge, so we additionally inspect the RAW user text
 		// when the strip actually changed the content. Either path can
-		// trigger a block; we keep the stricter verdict.
-		if inspectionText != inspectText {
-			rawVerdict := p.inspector.Inspect(agentCtx, "prompt", inspectText, req.Messages, req.Model, mode)
-			verdict = mergePromptVerdicts(verdict, rawVerdict)
-		}
+		// trigger a block; we keep the stricter verdict, as one evaluation
+		// (GAP-2288).
+		verdict := inspectPromptWithRawRecheck(agentCtx, p.inspector, inspectionText, inspectText, req.Messages, req.Model, mode)
 		p.resolveConfirm(r.Context(), r, verdict, "prompt", req.Model, mode)
 		promptEmitContext := r.Context()
 		if deferManagedPrompt {
