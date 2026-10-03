@@ -371,6 +371,15 @@ def test_a_failed_first_run_quickstart_keeps_the_install_and_exits_4(tmp_path: P
 
 
 
+def test_quickstart_failure_without_hermes_says_how_to_install_it() -> None:
+    # GAP-2383: "Fix what quickstart reported above" did not say Hermes was missing.
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    summary = text[text.index('if [[ -n "${QUICKSTART_RERUN}" ]]; then') :]
+    branch = summary[: summary.index("exit 4")]
+    assert '[[ "${CONNECTOR}" == hermes ]] && ! PATH="${BIN_DIR}:${PATH}" has hermes' in branch
+    assert "Install Hermes (https://github.com/NousResearch/hermes-agent), then run:" in branch
+
+
 def _openclaw_install_run(tmp_path: Path, npm_rc: int, answer: int = 0) -> subprocess.CompletedProcess[str]:
     text = INSTALL_SH.read_text(encoding="utf-8")
     start = text.index("ensure_openclaw() {")

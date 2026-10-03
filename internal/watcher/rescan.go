@@ -154,6 +154,11 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 	var targets []InstallEvent
 
 	for _, dir := range w.skillDirs {
+		// A watch folder the agent has not created yet is deferred by the
+		// watcher; there is nothing in it to rescan (GAP-2384).
+		if _, err := os.Lstat(dir); errors.Is(err, os.ErrNotExist) {
+			continue
+		}
 		if hermesskills.IsRoot(dir) {
 			entries, err := hermesskills.Discover(dir, hermesskills.DefaultDirectoryLimit)
 			if err == nil {
@@ -231,7 +236,10 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 		}
 		entries, err := os.ReadDir(dir)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "[rescan] enumerate plugins dir %s: %v\n", dir, err)
+			// Deferred until the agent creates it, as for skills above.
+			if !errors.Is(err, os.ErrNotExist) {
+				fmt.Fprintf(os.Stderr, "[rescan] enumerate plugins dir %s: %v\n", dir, err)
+			}
 			continue
 		}
 		for _, e := range entries {
@@ -252,7 +260,10 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 
 	servers, err := w.cfg.ReadMCPServers()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[rescan] enumerate mcp servers: %v\n", err)
+		// No agent config yet means no MCP servers to rescan.
+		if !errors.Is(err, os.ErrNotExist) {
+			fmt.Fprintf(os.Stderr, "[rescan] enumerate mcp servers: %v\n", err)
+		}
 		return targets
 	}
 	for _, server := range servers {
