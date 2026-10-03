@@ -1,10 +1,9 @@
 ---
 title: Multi-connector
-description: One DefenseClaw gateway enforces guardrail policy for N hook connectors at once — each with its own mode, fail mode, HILT, block message, and rule pack — under guardrail.connectors. Add a connector with setup <connector> → "Add", and claw.mode flips to multi.
+description: One DefenseClaw gateway enforces guardrail policy for several hook connectors at once, each with its own mode, fail mode, HITL, block message and rule pack under guardrail.connectors. Add a connector with setup <connector> and choose Add.
 keywords:
   - DefenseClaw multi-connector
   - guardrail.connectors
-  - claw.mode multi
   - DefenseClaw per-connector policy
   - defenseclaw guardrail --connector
 ---
@@ -26,7 +25,7 @@ Each connector you add gets an entry under `guardrail.connectors.<name>` in `~/.
 
 ```yaml title="~/.defenseclaw/config.yaml (two connectors)"
 claw:
-  mode: multi                  # set automatically once >1 connector is active
+  mode: claudecode             # one primary connector, kept for backward compatibility
 
 guardrail:
   enabled: true
@@ -47,9 +46,20 @@ guardrail:
 
 Every field under a connector is optional. An unset field **inherits the global value**, so a connector block only needs to carry what differs.
 
-## `claw.mode` becomes `multi`
+## `claw.mode` keeps one primary connector
 
-`claw.mode` records which connector is "active" on a single-connector install. The moment a second connector is active, DefenseClaw sets `claw.mode: multi`. This sentinel also surfaces in telemetry: the OTel resource attribute `defenseclaw.claw.mode` reports `multi` so dashboards and SIEM rules can tell a fan-out gateway apart from a single-connector one. See [Configuration → guardrail.connectors](/docs/reference/configuration) for the full schema.
+`claw.mode` and `guardrail.connector` name the active connector on a
+single-connector install. With more than one connector they keep naming one
+primary connector for backward compatibility: the existing one when you add a
+connector, otherwise the first name in sorted order. Read the full roster from
+`guardrail.connectors`, `defenseclaw status` or `defenseclaw guardrail status`.
+
+In telemetry, the gateway leaves out the process-level `defenseclaw.claw.mode`
+resource attribute while more than one connector is active. Dashboards and SIEM
+rules should use the per-event `connector` metric label or the
+`defenseclaw.connector.source` span attribute instead. See
+[Configuration → guardrail.connectors](/docs/reference/configuration) for the
+full schema.
 
 ## Adding a connector (Add vs Replace)
 
@@ -59,11 +69,27 @@ Run the hook setup for the connector you want to add:
 defenseclaw setup codex
 ```
 
-If a different connector is already wired, the wizard asks whether to **Add** or **Replace**:
+If a different connector is already configured, setup asks whether to **Add**
+or **Replace**. This is the prompt from a real run of `defenseclaw setup codex`
+on a host that already guarded Claude Code:
+
+```text title="defenseclaw setup codex"
+  DefenseClaw is already configured for: claudecode
+  You are setting up: codex
+    [a] Add     — run it alongside the existing connector(s) (multi-connector)
+    [r] Replace — switch to only this connector
+    [c] Cancel  — make no changes
+  Choose (a, r, c) [a]: a
+  ✓ Codex: version codex-cli 0.154.0 is supported by codex-hooks-v4.
+  ✓ Config saved to ~/.defenseclaw/config.yaml
+  ✓ Desired roster staged for 'codex' — 2 connectors selected: claudecode, codex
+  ✓ codex mode=observe
+  ℹ Saved. It takes effect once the gateway restarts and confirms the connector (defenseclaw-gateway restart).
+```
 
 <Cards>
-  <Card title="Add" description="Keep the existing connector(s) wired and layer the new one in. The gateway now enforces both; claw.mode flips to multi. This is the multi-connector path." />
-  <Card title="Replace" description="Tear down the previous connector's wiring and make the new one the single active connector. Use this only when you no longer want the old connector wired." />
+  <Card title="Add" description="Keep the existing connectors wired and add the new one. The gateway enforces all of them. This is the default, also with --yes." />
+  <Card title="Replace" description="Tear down the previous connector's wiring and make the new one the only connector. Non-interactively, pass --replace." />
 </Cards>
 
 Choose **Add** to build a multi-connector install. Each added connector starts from the global guardrail defaults; tune it afterward with the per-connector CLI (below).
@@ -116,6 +142,38 @@ defenseclaw guardrail status     # per-connector blocks for ALL active connector
 defenseclaw guardrail status --connector codex
 ```
 
+With Claude Code in action mode with the judge on and Codex in observe mode,
+the output looks like this:
+
+```text title="defenseclaw guardrail status"
+  Guardrail status
+  ----------------
+  • enabled:    yes
+      - Claude Code
+          key:         claudecode
+          state:       enabled
+          mode:        action
+          fail:        open
+          rule-pack:   default
+          block/alert: CRITICAL/MEDIUM+
+          hilt:        off
+          scan:        regex_judge
+          judge:       on
+      - Codex
+          key:         codex
+          state:       enabled
+          mode:        observe
+          fail:        open
+          rule-pack:   default
+          block/alert: CRITICAL/MEDIUM+
+          hilt:        off
+          scan:        regex_only
+          judge:       off
+  • fail = invalid, unauthorized, incomplete, or unreachable gateway responses
+
+  Disable with:  defenseclaw guardrail disable
+```
+
 See [Reference → CLI](/docs/reference/cli#guardrail) for the full command group.
 
 ## CLI contract: read vs write
@@ -150,6 +208,6 @@ create one.
 ## See also
 
 - [Changing connectors](/docs/guardrail/switching-connectors) — add, reconfigure, remove, or replace connector wiring
-- [Setup Guardrail](/docs/guardrail) — the central setup command and the Add/Replace prompt
+- [Set up the guardrail](/docs/guardrail) — the central setup command
 - [Reference → Configuration](/docs/reference/configuration) — the `guardrail.connectors` schema
 - [Observability](/docs/observability) — filtering telemetry by the `connector` dimension

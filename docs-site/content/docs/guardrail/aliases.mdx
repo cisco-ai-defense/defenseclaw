@@ -13,6 +13,7 @@ keywords:
   - defenseclaw setup amp
   - defenseclaw setup omnigent
   - defenseclaw setup devin
+  - defenseclaw setup kiro
   - defenseclaw setup openclaw
   - defenseclaw setup zeptoclaw
 ---
@@ -38,6 +39,7 @@ These connectors talk directly to their native upstream, so DefenseClaw never pr
   <Card title="OpenCode" href="/docs/connectors/opencode" description="defenseclaw setup opencode" />
   <Card title="Amp" href="/docs/connectors/amp" description="defenseclaw setup amp — synchronous pre-execution and model-bound result policy, with foreground native confirmation" />
   <Card title="OmniGent" href="/docs/connectors/omnigent" description="defenseclaw setup omnigent — custom policy bridge with native ALLOW / ASK / DENY" />
+  <Card title="Kiro" href="/docs/connectors/kiro" description="defenseclaw setup kiro — lifecycle hooks shared by the Kiro IDE and CLI" />
 </Cards>
 
 ```bash
@@ -47,7 +49,7 @@ defenseclaw setup cursor --no-restart        # apply config without bouncing the
 ```
 
 <Callout>
-These aliases are shorthand for `setup guardrail --connector <name>` with connector-specific options. On a single-connector host that connector is the active posture. On a host with another hook or policy connector already active, choose **Add** to keep both connectors wired under `guardrail.connectors` and let `claw.mode` become `multi`.
+These aliases are shorthand for `setup guardrail --connector <name>` with connector-specific options. On a single-connector host that connector is the active posture. On a host with another hook or policy connector already configured, setup asks whether to **Add** the new connector or **Replace** the old one. Add is the default, also under `--yes`; it keeps both connectors wired under `guardrail.connectors`. Pass `--replace` to switch instead.
 </Callout>
 
 ### What a direct-to-upstream alias does
@@ -78,25 +80,70 @@ Restarts the gateway (unless `--no-restart`).
 
 ### Common flags
 
+Every hook alias (`setup claude-code`, `setup codex`, `setup kiro`, ...) takes
+these flags; run `defenseclaw setup <connector> --help` for the exact list. The
+policy flags write a per-connector override on a multi-connector install, and
+the global value when the connector is the only one.
+
 <TypeTable
   type={{
-    "--yes / -y": {
+    "-y / --yes": {
       type: "flag",
-      description: "Skip the confirmation prompt (non-interactive).",
+      description: "Skip the confirmation prompt. Aliases: --non-interactive, --accept-defaults.",
     },
     "--restart / --no-restart": {
       type: "flag",
-      description: "Restart defenseclaw-gateway after applying changes.",
+      description: "Restart defenseclaw-gateway after applying changes, so the connector's hooks and telemetry are wired.",
       default: "--restart",
     },
-    "--mode observe / action": {
-      type: "option",
-      description: "Choose record-only behavior or connector-native enforcement on supported callbacks.",
-      default: "observe",
+    "--mode": {
+      type: "observe|action",
+      description: "Record only, or return the connector's native block or approval verdict on supported events. A re-run keeps the current mode.",
+      default: "observe on first setup",
+    },
+    "--replace": {
+      type: "flag",
+      description: "Replace the configured connectors with this one. Without it, setup adds the connector next to the others.",
+    },
+    "--rule-pack": {
+      type: "default|strict|permissive",
+      description: "Rule-pack profile for this connector. Omit it to inherit the global pack.",
+    },
+    "--rule-pack-dir": {
+      type: "path",
+      description: "Custom rule-pack directory for this connector, instead of --rule-pack. Pass an empty string to clear the override.",
+    },
+    "--enable-judge / --no-enable-judge": {
+      type: "flag",
+      description: "Judge this connector's hook events (action mode only). Configure the judge model with setup guardrail or setup llm.",
+    },
+    "--judge-hook-connectors": {
+      type: "all|none|list",
+      description: "Hook-lane judge gate to write (guardrail.judge.hook_connectors). With --enable-judge alone, it defaults to this connector.",
+    },
+    "--human-approval / --no-human-approval": {
+      type: "flag",
+      description: "Turn human approval (HITL) on or off for this connector (action mode).",
+    },
+    "--hilt-min-severity": {
+      type: "high|medium|low|critical",
+      description: "Lowest severity that asks for human approval for this connector.",
+    },
+    "--block-message": {
+      type: "string",
+      description: "Block message for this connector. Empty inherits the global or default message.",
+    },
+    "--fail-mode": {
+      type: "open|closed",
+      description: "Hook fail mode for this connector: open allows and logs when the gateway answers with an error; closed blocks.",
+    },
+    "--workspace / --workspace-dir": {
+      type: "path",
+      description: "Use workspace-scoped config for this setup instead of the global user config.",
     },
     "--with-local-stack / --no-local-stack": {
       type: "flag",
-      description: "Bring up the bundled Prom/Loki/Tempo/Grafana stack via `defenseclaw setup local-observability up` once config is saved.",
+      description: "Also bring up the bundled Prometheus, Loki, Tempo and Grafana stack with defenseclaw setup local-observability up once config is saved.",
       default: "--no-local-stack",
     },
   }}
