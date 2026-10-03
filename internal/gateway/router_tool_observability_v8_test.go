@@ -246,7 +246,7 @@ func TestEventRouterToolV8BlockedCallIsTerminalWithoutPendingState(t *testing.T)
 	if len(points) != 1 || points[0].attributes["defenseclaw.metric.action"] != "block" ||
 		points[0].attributes["defenseclaw.connector.source"] != "openclaw" ||
 		points[0].attributes["defenseclaw.security.severity"] != "HIGH" ||
-		points[0].attributes["defenseclaw.metric.tool"] != "shell" {
+		points[0].attributes["defenseclaw.metric.tool"] != "openclaw:shell" {
 		t.Fatalf("generated inspect metric=%+v", points)
 	}
 	assertEventRouterToolLocalLogs(t, databasePath, []string{"private-blocked"})
@@ -258,15 +258,14 @@ func TestEventRouterToolV8DangerousFindingFeedsGeneratedAlertAndDashboardMetrics
 		Tool: "shell", ID: "call-dangerous", SessionID: "session-dangerous", RunID: "run-dangerous",
 		Args: json.RawMessage(`{"command":"rm -rf /"}`),
 	})
-	inspect := waitForEventRouterMetricPoints(
-		t, capture, observability.TelemetryInstrumentDefenseClawInspectEvaluations, 1,
-	)
 	alerts := waitForEventRouterMetricPoints(
 		t, capture, observability.TelemetryInstrumentDefenseClawAlertCount, 1,
 	)
-	if len(inspect) != 1 || inspect[0].attributes["defenseclaw.metric.action"] != "alert" ||
-		inspect[0].attributes["defenseclaw.security.severity"] != "CRITICAL" {
-		t.Fatalf("dangerous inspect metric=%+v", inspect)
+	// GAP-2046: the plugin's /api/v1/inspect/tool call owns the call's one
+	// inspect evaluation; the observing router counts only the alert.
+	_, requests := capture.snapshot()
+	if inspect := hookModelV8MetricPoints(requests, observability.TelemetryInstrumentDefenseClawInspectEvaluations); len(inspect) != 0 {
+		t.Fatalf("flagged call counted a second inspect evaluation: %+v", inspect)
 	}
 	if len(alerts) != 1 || alerts[0].attributes["defenseclaw.metric.alert.type"] != "tool-call-flagged" ||
 		alerts[0].attributes["defenseclaw.metric.alert.source"] != "tool-inspect" ||

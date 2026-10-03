@@ -64,6 +64,11 @@ func (r *EventRouter) recordEventRouterGuardrailMetricsV8(
 	}
 	observation.action = strings.TrimSpace(observation.action)
 	observation.tool = strings.TrimSpace(observation.tool)
+	// Name the tool as the inspect lane does ("openclaw:exec"), so one
+	// tool has one label in defenseclaw_inspect_evaluations_total.
+	if observation.tool != "" && !strings.HasPrefix(observation.tool, eventRouterToolConnector+":") {
+		observation.tool = eventRouterToolConnector + ":" + observation.tool
+	}
 	observation.alertType = strings.TrimSpace(observation.alertType)
 	observation.alertSource = strings.TrimSpace(observation.alertSource)
 	if observation.action == "" && observation.alertType == "" {
