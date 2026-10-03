@@ -6904,6 +6904,8 @@ def setup_guardrail(
         return
 
     judge_on_before_versions = bool(gc.judge.enabled)
+    # An 'all' gate pruned to nothing already warns (GAP-2297); don't repeat it.
+    judge_gate_was_all = list(gc.judge.hook_connectors or []) == ["*"]
     validation_failed_with_secret = False
     try:
         versions_supported = _check_guardrail_setup_connector_versions(
@@ -6930,7 +6932,7 @@ def setup_guardrail(
         if not rollback_status.complete:
             raise _GuardrailSecretFailure("validation-refused-rollback-incomplete") from None
         return
-    if non_interactive and judge_on_before_versions and not gc.judge.enabled:
+    if non_interactive and judge_on_before_versions and not gc.judge.enabled and not judge_gate_was_all:
         # GAP-2175: the judge was requested, but every connector in scope is
         # in observe mode, so the gate prune turned it back off. Say so.
         observe_scope = [
@@ -10857,14 +10859,19 @@ def _prune_judge_gate_to_action_scope(gc, connectors: list[str]) -> list[str]:
         # covered, and say that 'all' is gone instead of narrowing silently.
         new_gate = sorted({c for c in configured_hook_connectors - targets if _is_action(c)} | action_targets)
         dropped = sorted((configured_hook_connectors | targets) - set(new_gate))
-        ux.warn(
-            "LLM judge gate 'all' was replaced with "
-            + (", ".join(new_gate) if new_gate else "nothing (judge off)")
-            + f": {', '.join(dropped)} {'is' if len(dropped) == 1 else 'are'} in observe mode, and the judge "
-            "reviews hook calls only for action-mode connectors. Connectors set up later are not added "
-            "automatically: defenseclaw guardrail judge add <connector>",
-            indent="  ",
-        )
+        if new_gate:
+            ux.warn(
+                "LLM judge gate 'all' was replaced with "
+                + ", ".join(new_gate)
+                + f": {', '.join(dropped)} {'is' if len(dropped) == 1 else 'are'} in observe mode, and the judge "
+                "reviews hook calls only for action-mode connectors. Connectors set up later are not added "
+                "automatically: defenseclaw guardrail judge add <connector>",
+                indent="  ",
+            )
+        else:
+            # GAP-2297: no 'all' talk and no 'judge add' hint (it refuses
+            # observe-mode connectors); say the judge is off and how to fix it.
+            ux.warn("The LLM judge is off: " + _judge_observe_mode_hint(dropped), indent="  ")
     else:
         new_gate = sorted(c for c in current_gate if c not in targets or c in action_targets)
 
