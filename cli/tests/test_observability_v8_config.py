@@ -663,6 +663,35 @@ observability:
     assert "path-secret-canary" not in rendered
 
 
+def test_masked_source_keeps_asset_policy_rule_urls_readable() -> None:
+    source = """config_version: 8
+asset_policy:
+  mcp:
+    registry:
+      - name: deepwiki
+        reason: registry:t2r4-local
+        url: https://mcp.deepwiki.com/mcp
+      - name: keyed
+        url: https://mcp.example.test/s/k3yS3cretValue0123456789abcd/mcp?api_key=query-secret
+      - name: userinfo
+        url: https://user:pass-secret@mcp.example.test/mcp
+    allowed:
+      - url: https://mcp.example.test/v1/sse
+observability: {}
+"""
+    validated = load_validate_v8(source)
+    mcp = validated.masked["asset_policy"]["mcp"]["registry"]
+
+    assert mcp[0]["url"] == "https://mcp.deepwiki.com/mcp"
+    assert mcp[1]["url"] == "https://mcp.example.test/s/[REDACTED]/mcp?[REDACTED]"
+    assert mcp[2]["url"] == "[REDACTED_URL]"
+    assert validated.masked["asset_policy"]["mcp"]["allowed"][0]["url"] == "https://mcp.example.test/v1/sse"
+    rendered = validated.masked_json()
+    assert "k3yS3cretValue0123456789abcd" not in rendered
+    assert "query-secret" not in rendered
+    assert "pass-secret" not in rendered
+
+
 def test_returned_source_and_masked_views_are_detached() -> None:
     validated = load_validate_v8("config_version: 8\nobservability: {}\n")
     source = validated.source
