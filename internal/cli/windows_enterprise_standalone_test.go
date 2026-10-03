@@ -1760,6 +1760,13 @@ func TestWindowsEnterpriseLifecycleCallerErrorsExitCodes(t *testing.T) {
 			if tc.profile == "nope" && (!result.Installed || len(result.Services) != 3 || result.Services[0].State != "running" || err.Error() != tc.text) {
 				t.Fatalf("verify --profile nope --json: result %+v, error %q", result, err)
 			}
+			// GAP-2161: readiness follows the service states where a state
+			// decides it, and a warning names the checks that never ran.
+			if tc.profile == "nope" && (!result.Readiness.Enumerator || result.Readiness.SensorHelper ||
+				len(result.Warnings) != 1 || result.Warnings[0].Code != "health_not_checked" ||
+				!strings.Contains(result.Warnings[0].Message, "enterprise windows verify --profile standalone --json")) {
+				t.Fatalf("verify --profile nope --json: readiness %+v, warnings %+v", result.Readiness, result.Warnings)
+			}
 		}
 	}
 
@@ -1774,5 +1781,61 @@ func TestWindowsEnterpriseLifecycleCallerErrorsExitCodes(t *testing.T) {
 	err = resolveWindowsEnterpriseLifecycleProfile("repair", &windowsEnterpriseLifecycleOptions{profile: "standalone"})
 	if err == nil || !strings.Contains(err.Error(), "read enterprise.trust from") {
 		t.Fatalf("elevated repair: %v", err)
+	}
+}
+
+// GAP-2162: a standard account's status or verify reports what any account
+// can read (the recorded deployment, present but unreadable to it, and the
+// service states) instead of installed=false with no services, and text
+// mode is the one refusal line. Exit 5 stays.
+func TestWindowsEnterpriseStandardUserStatusReportsRecordedDeployment(t *testing.T) {
+	stubWindowsEnterpriseDeployments(t, map[string]winpath.EnterpriseDeploymentState{"standalone": winpath.EnterpriseDeploymentUnknown})
+	originalRunner := windowsEnterpriseStandaloneRunner
+	originalObserver := windowsEnterpriseStandaloneObserver
+	originalElevated := windowsEnterpriseIsElevated
+	originalServiceState := windowsEnterpriseServiceState
+	t.Cleanup(func() {
+		windowsEnterpriseStandaloneRunner = originalRunner
+		windowsEnterpriseStandaloneObserver = originalObserver
+		windowsEnterpriseIsElevated = originalElevated
+		windowsEnterpriseServiceState = originalServiceState
+	})
+	windowsEnterpriseStandaloneRunner = func(context.Context, *cobra.Command, string, []string) (windowsEnterpriseStandaloneRun, error) {
+		return windowsEnterpriseStandaloneRun{
+			Output:   []byte(`{"schema_version":1,"ok":false,"error":"the installer rejected its module before import"}`),
+			ExitCode: 1603,
+		}, nil
+	}
+	windowsEnterpriseStandaloneObserver = func(*enterprisestatus.Result, *windowsEnterpriseLifecycleOptions) string { return "" }
+	windowsEnterpriseIsElevated = func() bool { return false }
+	windowsEnterpriseServiceState = func(string) string { return "running" }
+
+	for _, action := range []string{"status", "verify"} {
+		for _, jsonOutput := range []bool{false, true} {
+			var stdout bytes.Buffer
+			command := &cobra.Command{}
+			command.SetOut(&stdout)
+			opts := &windowsEnterpriseLifecycleOptions{resolvedProfile: "standalone", jsonOutput: jsonOutput}
+			err := runWindowsEnterpriseStandaloneAction(context.Background(), command, action, opts, `C:\x\install-enterprise.ps1`, nil)
+			if commandExitCode(err) != 5 || strings.Contains(err.Error(), "the standalone enterprise") ||
+				!strings.HasPrefix(err.Error(), "the managed deployment's "+action+" needs an elevated prompt") {
+				t.Fatalf("%s (json %t): exit %d, error %v", action, jsonOutput, commandExitCode(err), err)
+			}
+			if !jsonOutput {
+				if stdout.Len() != 0 {
+					t.Fatalf("%s: text output %q, want only the refusal line", action, stdout.String())
+				}
+				continue
+			}
+			var result enterprisestatus.Result
+			if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+				t.Fatal(err)
+			}
+			if !result.Installed || result.InstalledVersion != "" || len(result.Services) != 4 ||
+				result.Errors[0].Code != "elevation_required" || result.ExitCode != 5 ||
+				len(result.Warnings) != 1 || result.Warnings[0].Code != "health_not_checked" {
+				t.Fatalf("%s --json: result %+v", action, result)
+			}
+		}
 	}
 }
