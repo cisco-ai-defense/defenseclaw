@@ -1298,7 +1298,9 @@ def setup_skill_scanner(
             parts.append(f"llm_provider={llm.provider}")
         if sc.policy:
             parts.append(f"policy={sc.policy}")
-        app.logger.log_action(ACTION_SETUP_SKILL_SCANNER, "config", " ".join(parts))
+        # The scanner config is local; a stopped gateway skips only the
+        # audit event, with one note, instead of failing a saved change (GAP-1970).
+        _log_setup_action(app, ACTION_SETUP_SKILL_SCANNER, " ".join(parts), allow_offline=True)
 
 
 def _interactive_setup(sc, llm, aid, cfg) -> None:
@@ -2704,7 +2706,7 @@ def setup_mcp_scanner(
         if llm.model:
             parts.append(f"llm_model={llm.model}")
         parts.append("mcp_managed_via=openclaw_config")
-        app.logger.log_action(ACTION_SETUP_MCP_SCANNER, "config", " ".join(parts))
+        _log_setup_action(app, ACTION_SETUP_MCP_SCANNER, " ".join(parts), allow_offline=True)
 
 
 def _interactive_mcp_setup(mc, cfg) -> None:

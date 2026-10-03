@@ -3137,7 +3137,12 @@ def remove(app: AppContext, name: str, connector_flag: str) -> None:
 
     from defenseclaw.commands import hint
 
-    hint("Restart gateway to apply:  defenseclaw-gateway restart")
+    # Like install: only the OpenClaw gateway loads plugins at start; a hook
+    # connector stops loading the plugin in its own next session (GAP-1969).
+    hints = ["List plugins:      defenseclaw plugin list"]
+    if any(_normalize_runtime_connector(connector) == "openclaw" for connector, _path in removed):
+        hints.append("Restart gateway:   defenseclaw-gateway restart")
+    hint(*hints)
 
 
 # ---------------------------------------------------------------------------

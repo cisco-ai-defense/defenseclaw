@@ -248,6 +248,18 @@ def _ensure_enabled_hook_judge_strategies(gc) -> bool:
     return changed
 
 
+def _gateway_running(app: AppContext) -> bool:
+    """Same PID-file probe as ``cmd_guardrail._gateway_running``."""
+    import os
+
+    from defenseclaw.process_liveness import pid_file_alive
+
+    try:
+        return pid_file_alive(os.path.join(app.cfg.data_dir, "gateway.pid"))
+    except Exception:  # noqa: BLE001 - an unreadable PID file means "not running".
+        return False
+
+
 def _save_and_restart(app: AppContext, gc, *, restart: bool, action: str, previous: str = "") -> None:
     try:
         app.cfg.save()
@@ -264,8 +276,10 @@ def _save_and_restart(app: AppContext, gc, *, restart: bool, action: str, previo
 
     _warn_if_inert(app, gc)
 
-    if not restart and gc.enabled:
-        # The judge gate is read at gateway start (GAP-1476).
+    if not restart and gc.enabled and _gateway_running(app):
+        # The judge gate is read at gateway start (GAP-1476). A stopped
+        # gateway reads the new gate when it starts; the audit note says how
+        # to start it (GAP-1978).
         ux.subhead("The running gateway keeps the old gate until: defenseclaw-gateway restart", indent="  ")
 
     if restart and gc.enabled:

@@ -915,6 +915,28 @@ class TestPluginRemove(PluginCommandTestBase):
         self.assertTrue(os.path.exists(os.path.join(codex_dir, "scoped")))
         self.assertFalse(os.path.exists(os.path.join(hermes_dir, "scoped")))
 
+    def test_remove_names_the_gateway_restart_only_for_openclaw(self):
+        # GAP-1969: a Hermes plugin is not loaded by the gateway.
+        self.app.cfg.active_connectors = lambda: ["codex", "hermes"]  # type: ignore[method-assign]
+        self.app.cfg.active_connector = lambda: "codex"  # type: ignore[method-assign]
+        hermes_dir = os.path.join(self.tmp_dir, "hermes-plugins")
+        self.app.cfg.plugin_dirs = lambda connector=None: [hermes_dir] if connector == "hermes" else []  # type: ignore[method-assign]
+        os.makedirs(os.path.join(hermes_dir, "scoped"))
+
+        with patch("defenseclaw.commands.hint") as hint:
+            result = self.invoke(["remove", "scoped", "--connector", "hermes"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(hint.call_args.args, ("List plugins:      defenseclaw plugin list",))
+
+    def test_remove_from_the_openclaw_plugin_dir_names_the_gateway_restart(self):
+        self._install_plugin("legacy")
+        with patch("defenseclaw.commands.hint") as hint:
+            result = self.invoke(["remove", "legacy"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Restart gateway:   defenseclaw-gateway restart", hint.call_args.args)
+
     def test_remove_connector_flag_rejects_unknown_connector(self):
         self.app.cfg.active_connectors = lambda: ["codex", "hermes"]  # type: ignore[method-assign]
 

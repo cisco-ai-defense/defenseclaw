@@ -50,6 +50,8 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.delenv(update_notice.NO_CHECK_ENV, raising=False)
     monkeypatch.delenv("CI", raising=False)
     monkeypatch.delenv("DEFENSECLAW_CONFIG", raising=False)
+    for name in ("SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"):
+        monkeypatch.delenv(name, raising=False)
     # A developer's own cosign must not take part; the signature tests add a fake one.
     monkeypatch.setattr(upgrade_shim, "_cosign", lambda: None)
     return data
@@ -312,6 +314,28 @@ def test_windows_starts_the_installer_detached(
     assert started[0][1:6] == ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", started[0][5]]
     assert started[0][5].endswith("install.ps1")
     assert started[0][6:] == ["-Yes", "-Local", str(release)]
+
+
+def test_windows_rollback_over_ssh_gives_the_command_for_this_terminal(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # GAP-1993: the new window never appears in an SSH session; rc 0 hid the result.
+    (home / "installer").mkdir()
+    (home / "installer" / "install.ps1").write_text("", encoding="utf-8")
+    monkeypatch.setattr(upgrade_shim.os, "name", "nt")
+    monkeypatch.setenv("SSH_CONNECTION", "10.0.0.1 50000 10.0.0.2 22")
+    started: list[object] = []
+    monkeypatch.setattr(upgrade_shim.subprocess, "Popen", lambda *args, **kwargs: started.append(args))
+
+    assert upgrade_shim.run(["rollback", "--yes"]) == 1
+
+    assert started == []
+    err = capsys.readouterr().err
+    assert "no desktop (SSH session)" in err and "Nothing was changed." in err
+    command = next(line.strip() for line in err.splitlines() if line.strip().startswith("powershell "))
+    assert command.endswith("install.ps1\" -Rollback -Yes"), command
+    staged = command.split('"')[1]
+    assert os.path.isfile(staged) and staged != str(home / "installer" / "install.ps1")
 
 
 def test_rollback_uses_the_saved_installer(home: Path, execs: list[list[str]]) -> None:
@@ -577,7 +601,7 @@ class _FakeKey:
     def __init__(self, values: dict[str, str]) -> None:
         self.values = values
 
-    def __enter__(self) -> "_FakeKey":
+    def __enter__(self) -> _FakeKey:
         return self
 
     def __exit__(self, *_: object) -> None:

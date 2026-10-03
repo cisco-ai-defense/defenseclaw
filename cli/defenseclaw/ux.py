@@ -293,6 +293,19 @@ def ascii_safe_redirected_stream(stream: Any) -> Any:
     return _ASCIIPresentationStream(stream)
 
 
+def table_cell_text(text: str) -> str:
+    """A Rich table cell as the output stream will print it.
+
+    Behind :func:`ascii_safe_redirected_stream` a glyph turns into wider
+    ASCII ("✓" -> "OK") after Rich sized the column, which can eat the
+    cell's right padding (GAP-1972). Swapping first sizes the column right.
+    """
+
+    if isinstance(sys.stdout, _ASCIIPresentationStream):
+        return ascii_presentation_text(text)
+    return text
+
+
 def echo(message: object | None = None, **kwargs: object) -> None:
     """Call :func:`click.echo` with presentation-safe human output."""
 

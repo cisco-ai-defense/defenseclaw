@@ -221,8 +221,9 @@ class JudgeAddTests(unittest.TestCase):
         app.cfg.save.assert_called_once()
         self.assertNotIn("nothing to do", result.output)
 
+    @patch.object(cmd_judge, "_gateway_running", return_value=True)
     @patch.object(cmd_setup, "_restart_services")
-    def test_add_no_restart_flag(self, restart):
+    def test_add_no_restart_flag(self, restart, _running):
         app = make_ctx()
         result = invoke(app, ["add", "hermes", "--no-restart"])
         self.assertEqual(result.exit_code, 0, msg=result.output)
@@ -230,6 +231,16 @@ class JudgeAddTests(unittest.TestCase):
         restart.assert_not_called()
         # GAP-1476: say the running gateway needs a restart to apply it.
         self.assertIn("defenseclaw-gateway restart", result.output)
+
+    @patch.object(cmd_judge, "_gateway_running", return_value=False)
+    @patch.object(cmd_setup, "_restart_services")
+    def test_add_no_restart_with_the_gateway_stopped_names_no_running_gateway(self, restart, _running):
+        # GAP-1978: "The running gateway keeps the old gate" with no gateway running.
+        app = make_ctx()
+        result = invoke(app, ["add", "hermes", "--no-restart"])
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        restart.assert_not_called()
+        self.assertNotIn("running gateway", result.output)
 
     @patch.object(cmd_setup, "_restart_services")
     def test_add_skips_restart_when_guardrail_disabled(self, restart):

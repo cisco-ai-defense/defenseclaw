@@ -845,8 +845,24 @@ def disable_cmd(
 
     _preflight_config_write(app)
 
+    # A connector disabled on its own (`guardrail disable --connector X`) was
+    # already torn down; name only the connectors this teardown reaches, as
+    # `guardrail enable` does (GAP-1985, the twin of GAP-1809).
+    _actives = _active_connector_set(app.cfg, connector)
+    _already_off = [name for name in _actives if _disabled_on_its_own(gc, name)]
+    _torn_down = [name for name in _actives if name not in _already_off]
+
     click.echo()
-    click.echo(f"  {ux.bold('Disabling guardrail')} for {_active_connector_display(app.cfg, connector)}")
+    if len(_actives) > 1 or _already_off:
+        if _torn_down:
+            _targets = ", ".join(f"{_connector_label(n)} ({n})" for n in _torn_down)
+        else:
+            _targets = "no connectors (every active connector is already disabled on its own)"
+        click.echo(f"  {ux.bold('Disabling guardrail')} for {_targets}")
+        for name in _already_off:
+            ux.subhead(f"{_connector_label(name)} ({name}) is already disabled on its own.", indent="  ")
+    else:
+        click.echo(f"  {ux.bold('Disabling guardrail')} for {_active_connector_display(app.cfg, connector)}")
     if restart and not _gateway_running(app):
         # GAP-1370: say plainly that a stopped gateway gets started.
         ux.subhead(
@@ -898,13 +914,13 @@ def disable_cmd(
             connectors=_active_connector_set(app.cfg, connector),
         )
         # In a multi-connector install the gateway boot loop tears down
-        # EVERY active connector on restart, so report them all rather
-        # than implying only the primary was affected.
-        _actives = _active_connector_set(app.cfg, connector)
-        if len(_actives) > 1:
+        # every active connector on restart, so report them all rather
+        # than implying only the primary was affected; one already disabled
+        # on its own was torn down before (GAP-1985).
+        if len(_actives) > 1 or _already_off:
             ux.ok(
-                f"connector teardown complete for {len(_actives)} connectors: "
-                + ", ".join(_actives),
+                f"connector teardown complete for {len(_torn_down)} connector"
+                f"{'' if len(_torn_down) == 1 else 's'}: " + (", ".join(_torn_down) or "none"),
                 indent="  ",
             )
         else:
@@ -1312,14 +1328,18 @@ def _apply_global_fail_mode_transaction(
             app.cfg.save()
             if fail_mode_targets:
                 # A pinned connector (Cursor) keeps its own value; say so
-                # instead of counting it in the overrides (GAP-1432).
+                # instead of counting it in the overrides (GAP-1432). A
+                # disabled connector has no hooks: its value is saved for
+                # later and not counted (GAP-1977).
                 pinned = {name: (target_modes or {}).get(name, mode) for name in fail_mode_targets}
+                disabled = {name for name in fail_mode_targets if _disabled_on_its_own(gc, name)}
                 kept = "".join(
                     f"; {_connector_label(name)} stays {value}"
                     for name, value in sorted(pinned.items())
-                    if value != mode
+                    if value != mode and name not in disabled
                 )
-                changed = sum(1 for value in pinned.values() if value == mode)
+                kept += "".join(f"; {_connector_label(name)} is disabled (no hooks)" for name in sorted(disabled))
+                changed = sum(1 for name, value in pinned.items() if value == mode and name not in disabled)
                 ux.ok(
                     f"Config saved (global default + {changed} active connector overrides = {mode}{kept})",
                     indent="  ",
@@ -1557,7 +1577,8 @@ def fail_mode_cmd(
         fail_mode_targets
         and all(target_modes[name] == desired_modes[name] for name in fail_mode_targets)
         and all(
-            runtime_states[name].desired == desired_modes[name] and runtime_states[name].current
+            (runtime_states[name].desired == desired_modes[name] and runtime_states[name].current)
+            or _disabled_on_its_own(gc, name)
             for name in fail_mode_targets
         )
     ):
@@ -1593,6 +1614,13 @@ def fail_mode_cmd(
         click.echo(f"  {ux.bold('Changing hook fail mode for active connectors:')} {ux.accent(mode)}")
         for name in fail_mode_targets:
             old = target_modes.get(name, current)
+            if _disabled_on_its_own(gc, name):
+                # Like the bare view: no hooks, so no fail mode (GAP-1977).
+                click.echo(
+                    f"      - {_connector_label(name)} ({name}): disabled (no hooks); "
+                    f"{mode} is saved for when it is turned on again"
+                )
+                continue
             if desired_modes[name] != mode:
                 click.echo(
                     f"      - {_connector_label(name)} ({name}): stays {desired_modes[name]} "
@@ -1614,12 +1642,19 @@ def fail_mode_cmd(
                     f"      - {_connector_label(name)} ({name}): stays closed; Cursor hooks always fail "
                     "closed in action mode (open is saved for observe mode)"
                 )
-            elif old != mode and shown == mode:
-                click.echo(f"      - {_connector_label(name)} ({name}): already {mode}; saved as its own setting")
+            elif shown != mode:
+                # The fan-out saves the value as the connector's own setting,
+                # which applies in observe mode too (GAP-1977).
+                note = ux.dim(" (its own setting, also in observe mode)") if _observe_keeps_fail_open(gc, name) else ""
+                click.echo(
+                    f"      - {_connector_label(name)} ({name}): {shown} {ux.dim('→')} {ux.accent(mode)}{note}"
+                )
             elif old != mode:
-                click.echo(f"      - {_connector_label(name)} ({name}): {shown} {ux.dim('→')} {ux.accent(mode)}")
+                click.echo(f"      - {_connector_label(name)} ({name}): already {mode}; saved as its own setting")
             elif not runtime_states[name].current:
                 click.echo(f"      - {_connector_label(name)} ({name}): reconcile stale runtime")
+            else:
+                click.echo(f"      - {_connector_label(name)} ({name}): already {mode}")
     elif current == mode:
         click.echo(
             f"  {ux.bold('Re-applying hook fail mode:')} {ux.accent(mode)} "
@@ -1628,7 +1663,9 @@ def fail_mode_cmd(
     else:
         click.echo(f"  {ux.bold('Changing hook fail mode:')} {current} {ux.dim('→')} {ux.accent(mode)}")
     active_names = fail_mode_targets or [single_connector]
-    if mode == "closed":
+    if mode == "closed" and not fail_mode_targets:
+        # The multi-connector fan-out gives every connector its own value,
+        # so observe mode no longer keeps it fail-open (GAP-1977).
         _observe_open = [name for name in active_names if _observe_keeps_fail_open(gc, name)]
         if _observe_open:
             ux.warn(
@@ -2870,6 +2907,11 @@ def _cursor_stays_fail_closed(gc, name: str) -> bool:
         return (gc.effective_mode(name) or "").strip().lower() == "action"
     except Exception:  # noqa: BLE001 — an unknown connector keeps the saved value.
         return False
+
+
+def _disabled_on_its_own(gc, name: str) -> bool:
+    """Whether *name* was turned off with `guardrail disable --connector` (no hooks)."""
+    return hasattr(gc, "effective_enabled") and not gc.effective_enabled(name)
 
 
 def _gateway_running(app: AppContext) -> bool:
