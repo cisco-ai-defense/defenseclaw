@@ -5084,6 +5084,35 @@ def _hermes_pip_entry_points() -> list[tuple[Any, str]]:
     return rows
 
 
+def hermes_listed_identity(path: str) -> tuple[str, str] | None:
+    """The (id, origin) _enumerate_hermes_plugins gives the plugin folder *path*.
+
+    Works when the folder is gone (quarantined): it only compares paths with
+    the same roots, so ``.../plugins/platforms/photon`` is ``photon`` and
+    ``.../plugins/web/ddgs`` is ``web/ddgs`` (GAP-2265).
+    """
+    user_root = os.path.join(connector_paths.hermes_home(), "plugins")
+    bundled = "bundled-nix" if (os.environ.get("HERMES_BUNDLED_PLUGINS") or "").strip() else "bundled"
+    skip = {"memory", "context_engine", "platforms", "model-providers"}
+    bases: list[tuple[str, str, set[str]]] = []
+    for root in connector_paths.plugin_dirs("hermes"):
+        if os.path.normcase(root) != os.path.normcase(user_root):
+            bases.append((os.path.join(root, "platforms"), bundled, set()))
+            bases.append((root, bundled, skip))
+    bases.append((user_root, "user", set()))
+    target = os.path.abspath(path.rstrip("/\\") or path)
+    for base, source, skipped in bases:
+        try:
+            rel = os.path.relpath(target, os.path.abspath(base))
+        except ValueError:
+            continue
+        parts = rel.split(os.sep)
+        if rel == os.curdir or parts[0] == os.pardir or len(parts) > 2 or parts[0] in skipped:
+            continue
+        return "/".join(parts), source
+    return None
+
+
 def _enumerate_hermes_plugins() -> list[dict[str, Any]]:
     """Mirror v0.19's bounded default-profile plugin source and activation order."""
 

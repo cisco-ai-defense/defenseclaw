@@ -2192,8 +2192,9 @@ def _collect_plugins_for_connector(
     for pid, ae in sorted(_build_plugin_actions_map(app.store, connector).items()):
         if pid in known_ids or ae.actions.file != "quarantine":
             continue
-        plugins.append(
-            {
+        row = _quarantined_hermes_row(app, pid, ae, connector)
+        if row is None or row["id"] in known_ids:
+            row = {
                 "id": pid,
                 "name": pid,
                 "description": "",
@@ -2202,8 +2203,8 @@ def _collect_plugins_for_connector(
                 "enabled": False,
                 "source": "enforcement",
             }
-        )
-        known_ids.add(pid)
+        plugins.append(row)
+        known_ids.add(row["id"])
     if connector != "openclaw":
         return plugins
     for scan_id in scan_map:
@@ -2221,6 +2222,53 @@ def _collect_plugins_for_connector(
             )
             known_ids.add(scan_id)
     return plugins
+
+
+def _quarantined_hermes_row(
+    app: AppContext,
+    action_id: str,
+    entry: Any,
+    connector: str,
+) -> dict[str, Any] | None:
+    """GAP-2265: the row a quarantined Hermes plugin had before quarantine.
+
+    Quarantine is keyed by manifest id (``photon-platform``), but the list
+    showed the folder id (``photon``). Rebuild that id and origin from the
+    original path, and the name and description from the quarantined copy.
+    """
+    if connector != "hermes" or not entry.source_path:
+        return None
+    from defenseclaw.enforce.plugin_enforcer import PluginEnforcer
+    from defenseclaw.inventory.claw_inventory import _read_hermes_plugin_manifest, hermes_listed_identity
+
+    identity = hermes_listed_identity(entry.source_path)
+    if identity is None:
+        return None
+    qpath = PluginEnforcer(app.cfg.quarantine_dir)._quarantine_path(action_id, connector)
+    manifest = (_read_hermes_plugin_manifest(os.path.join(qpath, "plugin.yaml")) if qpath else None) or {}
+    return {
+        "id": identity[0],
+        "name": str(manifest.get("name") or action_id),
+        "description": str(manifest.get("description") or ""),
+        "version": str(manifest.get("version") or ""),
+        "origin": identity[1],
+        "enabled": False,
+        "source": "host:hermes",
+        "action_id": action_id,
+    }
+
+
+def _row_action(p: dict[str, Any], actions_map: dict[str, Any]) -> Any:
+    """The action entry for a list row (a quarantined row lists its old id)."""
+    return actions_map.get(p.get("action_id") or p["id"])
+
+
+def _plugin_actions_label(state: Any) -> str:
+    """GAP-2199/GAP-2264: list and info say what an install block covers."""
+    label = state.summary()
+    if state.install == "block":
+        label = label.replace("blocked", "install-blocked")
+    return label
 
 
 def _assert_connector_plugin_identities_unambiguous(
@@ -2374,8 +2422,8 @@ def _plugin_list_json_items(
             "version": p.get("version", ""),
             "origin": p.get("origin", ""),
             "source": p.get("source", ""),
-            "status": _plugin_status(p, actions_map.get(pid)),
-            "enabled": _plugin_effectively_enabled(p, actions_map.get(pid)),
+            "status": _plugin_status(p, _row_action(p, actions_map)),
+            "enabled": _plugin_effectively_enabled(p, _row_action(p, actions_map)),
         }
         if connector:
             item["connector"] = connector
@@ -2393,11 +2441,10 @@ def _plugin_list_json_items(
                 item[field] = value
         if pid in scan_map:
             item["scan"] = scan_map[pid]
-        if pid in actions_map:
-            ae = actions_map[pid]
-            if not ae.actions.is_empty():
-                item["actions"] = ae.actions.to_dict()
-        verdict_label, _ = _compute_verdict(actions_map.get(pid), scan_map.get(pid))
+        ae = _row_action(p, actions_map)
+        if ae is not None and not ae.actions.is_empty():
+            item["actions"] = ae.actions.to_dict()
+        verdict_label, _ = _compute_verdict(ae, scan_map.get(pid))
         item["verdict"] = verdict_label
         items.append(item)
     return items
@@ -2429,7 +2476,7 @@ def _print_plugin_list_table(
 
     from defenseclaw.commands import list_scope_title
 
-    enabled_count = sum(1 for p in plugins if _plugin_effectively_enabled(p, actions_map.get(p["id"])))
+    enabled_count = sum(1 for p in plugins if _plugin_effectively_enabled(p, _row_action(p, actions_map)))
 
     detail = f"({enabled_count}/{len(plugins)} enabled)"
     title = list_scope_title("Plugins", connector, detail) if connector else f"Plugins {detail}"
@@ -2448,8 +2495,10 @@ def _print_plugin_list_table(
     for p in plugins:
         pid = p["id"]
         name = p["name"]
-        status_display = _plugin_status_display(p, actions_map.get(pid))
-        desc = p.get("description", "")
+        action_entry = _row_action(p, actions_map)
+        status_display = _plugin_status_display(p, action_entry)
+        # GAP-2202: YAML folded descriptions end in (or hold) newlines.
+        desc = " ".join(str(p.get("description") or "").split())
 
         origin = p.get("origin", "") or p.get("source", "")
 
@@ -2466,16 +2515,13 @@ def _print_plugin_list_table(
             }.get(severity, "")
 
         actions_str = "-"
-        verdict_action = actions_map.get(pid)
-        if pid in actions_map:
-            state = actions_map[pid].actions
-            actions_str = state.summary()
-            if state.install == "block":
-                # GAP-2199: say what the block covers, and keep the scan
-                # verdict when nothing stops the installed copy.
-                actions_str = actions_str.replace("blocked", "install-blocked")
-                if state.file != "quarantine" and state.runtime != "disable":
-                    verdict_action = None
+        verdict_action = action_entry
+        if action_entry is not None:
+            state = action_entry.actions
+            actions_str = _plugin_actions_label(state)
+            # GAP-2199: keep the scan verdict when nothing stops the installed copy.
+            if state.install == "block" and state.file != "quarantine" and state.runtime != "disable":
+                verdict_action = None
 
         verdict_label, verdict_style = _compute_verdict(
             verdict_action,
@@ -4583,12 +4629,17 @@ def _print_plugin_info_card(
         # "2 HIGH findings" read as two HIGH ones (same wording as skill info).
         n = scan_data.get("total_findings", 0)
         noun = "finding" if n == 1 else "findings"
+        # GAP-2201: Verdict is the same word plugin list shows (clean,
+        # warning, rejected); the severity belongs on the Findings line.
         if scan_data.get("clean"):
-            click.secho("  Verdict:  CLEAN", fg="green")
+            click.secho("  Verdict:  clean", fg="green")
             click.echo("  Findings: 0 findings")
         else:
             sev = scan_data.get("max_severity", "INFO")
-            click.secho(f"  Verdict:  {sev}", fg=_SCAN_SEVERITY_COLORS.get(sev))
+            verdict, _style = _compute_verdict(None, scan_data)
+            if verdict == "-":
+                verdict = str(sev).lower()
+            click.secho(f"  Verdict:  {verdict}", fg=_SCAN_SEVERITY_COLORS.get(sev))
             click.echo(f"  Findings: {n} {noun} (max severity: {sev})")
         if scan_data.get("scanned_at"):
             click.echo(f"  Scanned:  {scan_data['scanned_at']}")
@@ -4599,8 +4650,11 @@ def _print_plugin_info_card(
         from defenseclaw.models import ActionState
 
         state = ActionState.from_dict(actions_data)
+        label = _plugin_actions_label(state)
+        if state.install == "block" and state.file != "quarantine" and state.runtime != "disable":
+            label += " (new installs are refused; the installed copy still loads)"
         click.echo()
-        click.echo(f"Actions:     {state.summary()}")
+        click.echo(f"Actions:     {label}")
 
 
 # ---------------------------------------------------------------------------
@@ -4713,6 +4767,22 @@ def _host_plugin_ids_by_path(app: AppContext, connector: str) -> dict[str, str]:
         except (OSError, ValueError):
             continue
         ids.setdefault(real_path, str(plugin_entry.get("id") or ""))
+    if (connector or "").lower() == "hermes" and app.store is not None:
+        # GAP-2265: a quarantined Hermes plugin keeps its listed id and scan.
+        from defenseclaw.inventory.claw_inventory import hermes_listed_identity
+
+        try:
+            entries = app.store.list_actions_by_type("plugin")
+        except Exception:  # noqa: BLE001 - scan map stays best effort
+            entries = []
+        for entry in entries:
+            if entry.actions.file != "quarantine" or not entry.source_path:
+                continue
+            if entry.connector not in ("", "hermes"):
+                continue
+            identity = hermes_listed_identity(entry.source_path)
+            if identity:
+                ids.setdefault(os.path.normcase(os.path.realpath(entry.source_path)), identity[0])
     return ids
 
 
