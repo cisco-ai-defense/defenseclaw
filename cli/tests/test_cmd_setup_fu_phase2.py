@@ -4254,3 +4254,29 @@ def test_gateway_lifecycle_progress_reports_a_slow_restart(capsys):
     with cmd_setup._GatewayLifecycleProgress("restarting", interval=60):
         pass
     assert capsys.readouterr().out == ""
+
+
+def test_gateway_lifecycle_progress_names_a_pending_audit_upgrade(tmp_path, capsys):
+    # GAP-2027: over a 0.x audit history setup printed only "waiting for the
+    # gateway" while the launcher ran the one-time audit upgrade.
+    import sqlite3
+    import time as _time
+
+    assert cmd_setup._audit_upgrade_note(str(tmp_path)) == ""
+    conn = sqlite3.connect(tmp_path / "audit.db")
+    conn.execute("CREATE TABLE schema_version (version INTEGER)")
+    conn.execute("INSERT INTO schema_version VALUES (32)")
+    conn.commit()
+    note = cmd_setup._audit_upgrade_note(str(tmp_path))
+    assert note.startswith("Upgrading the audit database (one time")
+    conn.execute("INSERT INTO schema_version VALUES (33)")
+    conn.commit()
+    conn.close()
+    assert cmd_setup._audit_upgrade_note(str(tmp_path)) == ""
+
+    with cmd_setup._GatewayLifecycleProgress("starting", interval=0.01, note=note):
+        _time.sleep(0.05)
+    out = capsys.readouterr().out
+    assert out.startswith("\n    Upgrading the audit database (one time; a large history can take a few minutes)...\n")
+    assert "    still starting after 0s: upgrading the audit database" in out
+    assert out.endswith("  defenseclaw-gateway:")
