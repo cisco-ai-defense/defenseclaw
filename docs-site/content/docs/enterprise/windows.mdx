@@ -178,8 +178,7 @@ the rule packs built into it. A rule-pack directory you name must exist, be
 writable only by administrators, and be readable by the gateway service
 account `NT SERVICE\DefenseClawGateway` (for example, leave the inherited
 `Users` read and execute entry in place, and add no Deny entry for that
-account). Setup checks this before it changes anything and names the
-folder and an `icacls` command that fixes it. Every parent folder of it needs
+account). Every parent folder of it needs
 Read & execute for that account too, because the gateway reads each
 parent's permissions and lists it. So do not put the rule pack inside the
 locked staging folder below; give it its own folder:
@@ -321,8 +320,12 @@ hooks on this computer:
    prompt, check that the gateway recorded the call:
 
    ```powershell
-   & $Cli audit export --connector claudecode -o C:\Temp\audit-claudecode.jsonl
+   & $Cli audit export --connector claudecode -o "$Stage\audit-claudecode.jsonl"
    ```
+
+   `$Stage` is the administrator-only folder from
+   [Write the config](#2-write-the-config); the export can hold prompt and
+   tool content.
 
    `enterprise policy verify --live` is not available on Windows; see
    [Inspect machine policy](#inspect-machine-policy).
@@ -347,6 +350,40 @@ form to the others; the attestation then stands for each of those computers.
 
 The guardian writes a user's hook registrations only while that user has an
 active (connected) session. It retries until the session is active again.
+
+### What Windows shows after an install
+
+The four services run under Automatic start, Add/Remove Programs lists
+**Cisco DefenseClaw Enterprise**, and the `DefenseClaw` event log (Event
+Viewer > Applications and Services Logs > DefenseClaw) holds one entry per
+lifecycle run. Captured on a standalone install, from an elevated prompt:
+
+```powershell title="Elevated PowerShell"
+Get-Service DefenseClaw* | Format-Table Name, Status, StartType
+Get-WinEvent -LogName DefenseClaw -MaxEvents 3 | Format-Table TimeCreated, Id, LevelDisplayName, ProviderName
+```
+
+```text title="Output"
+Name                      Status  StartType
+----                      ------  ---------
+DefenseClawGateway        Running Automatic
+DefenseClawHookEnumerator Running Automatic
+DefenseClawHookGuardian   Running Automatic
+DefenseClawSensorHelper   Running Automatic
+
+TimeCreated           Id LevelDisplayName ProviderName
+-----------           -- ---------------- ------------
+10/3/2026 4:03:07 AM 102 Information      DefenseClaw Lifecycle
+10/3/2026 3:58:30 AM 150 Error            DefenseClaw Lifecycle
+10/3/2026 3:58:30 AM 150 Error            DefenseClaw Lifecycle
+```
+
+Event 102 is a repair or reconcile, and 150 a refused run (here, a `status`
+with an invalid `--profile`); see
+[Logs and events](/docs/enterprise/operations#logs-and-events) for every ID.
+Each message names the action and result and ends with its record, for
+example
+`DefenseClaw enterprise repair (standalone) ok=true exit=0 version=1.0.29 installed=1.0.29 record 452e0e82c58af2aaf46a795939e582d7`.
 
 Each elevated lifecycle run appends its result to the lifecycle log. Every
 run except a healthy `status` or `verify` also writes an event (IDs 100 to
@@ -377,12 +414,8 @@ and SIEM forwarding at the `DefenseClaw` log (`Get-WinEvent -LogName
 DefenseClaw`) instead of the Application log's `DefenseClaw Enterprise`
 source.
 
-Each DefenseClaw event ends with `record <id>`, and the matching line of
-`enterprise-lifecycle.log`, which only administrators and LocalSystem can
-write, holds the same id under `event.record` with the event ID
-(`event.id`), the SHA-256 of the exact message (`event.sha256`) and the
-event logs that took the entry (`event.logs`). Check the entries from any
-prompt:
+To check that the event-log entries are genuine, run `events` from any
+prompt. It exits `1` and names each entry that fails:
 
 ```powershell title="Check the DefenseClaw event-log entries"
 & 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows events
@@ -390,6 +423,15 @@ prompt:
 # The legacy Application-log copies:
 & 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows events --application
 ```
+
+<Accordions>
+<Accordion title="How an entry is matched to the lifecycle log (for SIEM rules)">
+
+Each DefenseClaw event ends with `record <id>`, and the matching line of
+`enterprise-lifecycle.log`, which only administrators and LocalSystem can
+write, holds the same id under `event.record` with the event ID
+(`event.id`), the SHA-256 of the exact message (`event.sha256`) and the
+event logs that took the entry (`event.logs`).
 
 An entry is DefenseClaw's only when all of these hold:
 
@@ -409,6 +451,9 @@ earlier release wrote without records, show as unverifiable. Apply the same
 rules in a SIEM: matching a record alone is not enough, because anyone can
 copy a genuine entry.
 
+</Accordion>
+</Accordions>
+
 `status` and `verify` also name every agent the enumerator found installed
 but could not enroll (`hook_contract_unverified`, `agent_unprotected`); see
 [Enrollment](/docs/enterprise/enrollment#agents-that-cannot-be-enrolled).
@@ -427,7 +472,8 @@ The gateway service owns the local audit database under
 Administrator prompt, or as LocalSystem from an MDM script:
 
 ```powershell title="Elevated Administrator prompt"
-& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' audit export --connector claudecode -o C:\Temp\audit-claudecode.jsonl
+$Stage = 'C:\ProgramData\DefenseClaw-Staging'   # administrator-only, from Write the config
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' audit export --connector claudecode -o "$Stage\audit-claudecode.jsonl"
 ```
 
 On a standalone host, `audit export` run this way reads the managed
@@ -560,6 +606,15 @@ folder](#advanced-run-the-lifecycle-cli-from-a-payload-folder)),
 `uninstall`) with the same `--profile`, trust and `--config` options, run as
 LocalSystem, works the same way.
 
+If recovery cannot finish with the gateway the pending transaction staged,
+it can fall back to the gateway in the running Setup's payload, and it
+reports what it did in the result (`recovery_gateway_fallback`,
+`recovery_gateway_not_used` or `recovery_activation_deferred`). Do not edit
+DefenseClaw files or permissions by hand to recover.
+
+<Accordions>
+<Accordion title="How recovery chooses a gateway">
+
 Recovery first uses the gateway the pending transaction staged. When that
 gateway cannot restore or retire the transaction's managed-hook state, or
 cannot remove the per-user runtime roots the transaction created (the
@@ -593,7 +648,6 @@ fallback, a `recovery_gateway_not_used` warning gives the reason
 `version_unknown`, `no_payload`, `inside_install_root`, `unsigned_scope`)
 and the staged gateway's error stands. A failure that concerns file permissions is reported in plain terms;
 the internal detail is kept in a `lifecycle_diagnostic` warning for support.
-Do not edit DefenseClaw files or permissions by hand to recover.
 
 Recovery then restarts the restored release, and its gateway starts only
 after that release's guardian publishes full coverage. When the restored
@@ -609,6 +663,9 @@ that point with the next step, because it reapplies the installed release
 that could not start. With the same release, or from an elevated
 administrator prompt, recovery keeps the coverage failure and a
 `recovery_gateway_not_used` warning gives the reason.
+
+</Accordion>
+</Accordions>
 
 ### Run Setup as LocalSystem
 
@@ -756,8 +813,10 @@ Devin, Hermes, Antigravity and Kiro hooks point at the removed
 `defenseclaw-hook.exe`, so each hook call fails to start. None of these
 agents blocks on that: Devin blocks only on exit code 2 (a missing command
 exits 127), and Hermes and Antigravity do not enforce a nonzero hook exit. A
-DefenseClaw Copilot user hook that stays fails open, like every Copilot
-integration failure.
+DefenseClaw Copilot user hook that stays points at the removed hook binary,
+so Copilot cannot start it and does not block on it. (This is a hook that
+cannot start at all, unlike a running hook a user stops; see
+[Hook process control](/docs/enterprise/threat-model#users-can-end-or-stall-their-own-hook).)
 
 ## Payload trust
 

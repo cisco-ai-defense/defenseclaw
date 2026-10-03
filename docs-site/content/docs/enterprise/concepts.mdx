@@ -246,8 +246,8 @@ after DefenseClaw could change a tool call that DefenseClaw already allowed.
 ### Foreign-hook guard
 
 The protection against [foreign hooks](#foreign-hook). It covers Cursor, GitHub
-Copilot, Devin, OpenCode, and Amp, Hermes on Linux and macOS, and also Codex
-and Claude Code when their `managed_hooks_only` setting is not `enforce`. With the default
+Copilot, Devin, OpenCode and Amp on every OS, Hermes on Linux and macOS, and
+Codex and Claude Code when their `managed_hooks_only` setting is `preserve`. With the default
 `foreign_hooks: remove`, the guardian removes foreign entries from the user's
 config, and `defenseclaw-hook` blocks tool calls while an unapproved one is in
 the user or project config. The OpenCode and Amp plugins ask
@@ -381,16 +381,23 @@ satisfy it.
 
 ### Trust zones
 
-The threat model puts every component in one zone. An arrow between zones is
-a boundary that DefenseClaw protects.
+The threat model puts every component in one of six zones. An arrow between
+zones is a boundary that DefenseClaw protects.
 
-| Zone | What it holds | How it is treated |
-| --- | --- | --- |
-| Z0 | The platform and the administrator: the OS service manager, root, administrators, the MDM agent, the lifecycle | Trusted by assumption |
-| Z1 | DefenseClaw's privileged services: guardian, enumerator, sensor helper | Trusted. A compromise here equals an administrator compromise |
-| Z2 | The gateway, under its restricted service account | Restricted: it cannot change its own policy or the ledger |
-| Z3 | Administrator-owned state: program files, config, policies, secrets, target manifest, ledger, vendor machine policy | Protected: written only by administrators and DefenseClaw's privileged services |
-| Z4 | The user session: the user, the AI agent, the hook as it runs, the user's own files | Untrusted |
-| Z5 | External services the gateway calls, such as Cisco AI Defense when an administrator stores an API key | External. The gateway reaches them outbound over TLS |
+- **Z0 · Admin and OS**: the OS service manager, the MDM agent, the package
+  installer and the lifecycle commands. Trusted.
+- **Z1 · Services**: the guardian, the enumerator and the sensor helper.
+  Privileged and trusted; a compromise here equals an administrator
+  compromise.
+- **Z2 · Gateway**: the gateway, under its own low-privilege account. It
+  cannot change its own policy or the ledger.
+- **Z3 · Admin-owned files**: binaries, config, policies, secrets, the target
+  manifest, the authorization ledger and vendor machine policy. Written only
+  by administrators and DefenseClaw's privileged services.
+- **Z4 · User session**: the user, the AI agent, the hook as it runs for the
+  user, and the user's own files. Untrusted.
+- **Z5 · Cloud**: Cisco AI Defense, used only when an administrator stores an
+  API key. External; the gateway reaches it outbound over TLS.
 
-See [Threat model](/docs/enterprise/threat-model#trust-zones).
+The full definitions, with what runs in each zone on each OS, are in the
+[threat model](/docs/enterprise/threat-model#trust-zones).

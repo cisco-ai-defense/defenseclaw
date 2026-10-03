@@ -46,7 +46,7 @@ one of three ways:
 | Route | Agents | What DefenseClaw writes |
 | --- | --- | --- |
 | [Machine policy](/docs/enterprise/concepts#machine-policy-connector) | Claude Code, Codex, Cursor, GitHub Copilot, and OpenCode with DefenseClaw's managed OpenCode plugin | Its hooks in the vendor's administrator-owned policy files, which apply to every user of the computer |
-| [Per-user](/docs/enterprise/concepts#per-user-connector) | Devin, Antigravity, Hermes, Amp, Kiro and OpenCode. On Linux and macOS also OpenHands and OmniGent | The guardian writes the hook, or plugin, into each enrolled user's own agent config and repairs it |
+| [Per-user](/docs/enterprise/concepts#per-user-connector) | Devin, Antigravity, Hermes, Amp and Kiro, and OpenCode while the managed plugin is not in force. On Linux and macOS also OpenHands and OmniGent | The guardian writes the hook, or plugin, into each enrolled user's own agent config and repairs it |
 | [ACP guard](/docs/enterprise/concepts#acp-mediated-connector) | Kiro in an editor that starts it over ACP | Nothing per user: the editor runs Kiro through `defenseclaw-gateway enterprise acp` |
 
 OpenHands and OmniGent are refused on Windows. Which agent and OS combinations
@@ -108,8 +108,9 @@ How each wrapper takes the config is in
 [Deliver the config](/docs/enterprise/mdm#deliver-the-config).
 
 The Cisco AI Defense key is optional. It never goes in the config, an MDM
-script or a command line. Store it after the install with
-`enterprise secret set`, from standard input or a file only administrators can change; see
+script or a command line. Store it with `enterprise secret set`, from
+standard input or a file only administrators can change: after the install
+on Windows, and before or after it on Linux and macOS; see
 [Deliver the AI Defense key](/docs/enterprise/mdm#deliver-the-ai-defense-key)
 and [Cisco AI Defense key](/docs/enterprise/ai-defense-key).
 
@@ -171,17 +172,14 @@ is listed in [Exit codes](/docs/enterprise/mdm#exit-codes).
 Deploy a pilot ring with `guardrail.mode: observe`. Observe mode records every
 decision, including what DefenseClaw would have blocked, without blocking on
 policy verdicts. When the pilot is healthy and the decisions are reviewed, set
-`guardrail.mode: action` and deliver the config again. A possible plan:
+`guardrail.mode: action` and deliver the config again. Then grow the
+deployment in rings (pilot, early, broad, everyone), moving on only when a
+ring is healthy.
 
-| Ring | Endpoints | Mode | Move on when |
-| --- | --- | --- | --- |
-| Pilot | A few dozen, every OS and agent | `observe` | Every install exits `0`, `verify` passes, and the decisions are reviewed |
-| Early | About 10% | `observe`, then `action` | No unexpected blocks for a week in `action` mode |
-| Broad | About 40% | `action` | Detection and health stay green |
-| Everyone | The rest | `action` | |
-
-[Plan a rollout](/docs/enterprise/rollout) covers choosing users, handling
-existing per-user installs and planning upgrades and rollback.
+[Plan a rollout](/docs/enterprise/rollout) has a ring plan with sizes and exit
+criteria ([Step 5](/docs/enterprise/rollout#step-5-expand-in-rings)), and
+covers choosing users, handling existing per-user installs and planning
+upgrades and rollback.
 
 ## Next steps
 

@@ -291,14 +291,13 @@ for a user and repository. Each line shows the connector, `blocked`,
 `reported` or `allowlisted`, the scope, the file and `sha256:<digest>`.
 
 ```bash
-sudo DEFENSECLAW_CONFIG=/etc/defenseclaw/config.yaml /opt/defenseclaw/bin/defenseclaw-gateway enterprise policy show --user alice --project /home/alice/repo
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise policy show --user alice --project /home/alice/repo
 ```
 
-On macOS use `DEFENSECLAW_CONFIG=/opt/cisco/defenseclaw/etc/config.yaml`
-and `/opt/cisco/defenseclaw/bin/defenseclaw-gateway`. On Windows:
+On macOS use `/opt/cisco/defenseclaw/bin/defenseclaw-gateway`. On Windows,
+from an elevated prompt:
 
 ```powershell
-$env:DEFENSECLAW_CONFIG = 'C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml'
 & 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise policy show --user alice --project C:\src\repo
 ```
 
