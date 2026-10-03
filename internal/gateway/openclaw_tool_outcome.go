@@ -160,11 +160,24 @@ func takeOpenClawToolOutcome(sessionID, runID, tool, arguments string) (openClaw
 
 // applyOpenClawToolOutcome puts a remembered decision on the tool span of
 // the call: the guardrail outcome, a blocked status for a block, and the
-// user when the stream did not name one.
+// user when the stream did not name one. A call without a remembered
+// decision (an allowed call) names the gateway's own OS user on an unmanaged
+// install, as the turn's agent and chat spans do (GAP-2358).
 func applyOpenClawToolOutcome(observation *generatedToolV8Observation) {
-	if observation == nil || observation.meta.Guardrail.Action != "" {
+	if observation == nil {
 		return
 	}
+	if observation.meta.Guardrail.Action == "" {
+		applyOpenClawToolDecision(observation)
+	}
+	if observation.meta.UserID == "" && observation.meta.UserName == "" {
+		userID, userName := localProcessUser()
+		observation.meta.UserID, observation.meta.UserName = userID, userName
+		observation.meta.UserIDKind = useridentity.KindForID(userID)
+	}
+}
+
+func applyOpenClawToolDecision(observation *generatedToolV8Observation) {
 	arguments := observation.arguments
 	if observation.argumentsTruncated {
 		arguments = ""

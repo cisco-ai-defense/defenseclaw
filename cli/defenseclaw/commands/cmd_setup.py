@@ -98,7 +98,7 @@ from defenseclaw.connector_contracts import (
     resolve_connector_contract,
     stable_agent_version,
 )
-from defenseclaw.context import SETUP_RESTART_HANDLED_META_KEY, AppContext, pass_ctx
+from defenseclaw.context import SETUP_RESTART_HANDLED_META_KEY, SETUP_SECRET_CHANGED_META_KEY, AppContext, pass_ctx
 from defenseclaw.file_permissions import (
     MAX_DOTENV_BYTES,
     UnsafePathError,
@@ -15907,7 +15907,9 @@ def _auto_restart_sidecar_after_setup(ctx: click.Context, *_args, **_kwargs) -> 
         and all(isinstance(item, (list, tuple)) and len(item) == 2 for item in batch_audits_raw)
         else []
     )
-    if not batch_targets and (cfg_path is None or after is None or before == after):
+    # GAP-2356: a changed key in .env needs the restart too.
+    secret_changed = bool(ctx.meta.get(SETUP_SECRET_CHANGED_META_KEY))
+    if not batch_targets and not secret_changed and (cfg_path is None or after is None or before == after):
         return
 
     data_dir = app.cfg.data_dir

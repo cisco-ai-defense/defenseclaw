@@ -1582,3 +1582,55 @@ def test_observability_help_uses_plain_wording() -> None:
     assert "canonical" not in result.output.lower()
     assert "Turn a disabled destination back on." in result.output
     assert "Delete a destination you added." in result.output
+
+
+def test_setup_v8_add_with_only_a_new_key_restarts_the_gateway(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # GAP-2356: re-adding a destination with a new key said "already
+    # configured" and skipped the restart (config.yaml was unchanged), so the
+    # running gateway kept exporting with the old, rejected key.
+    from defenseclaw.commands import cmd_setup
+    from defenseclaw.context import SETUP_SECRET_CHANGED_META_KEY
+
+    _stub_canonical_v8_gateway(monkeypatch)
+    app = _setup_app(tmp_path)
+    app.logger = SimpleNamespace(log_action=lambda *_a, **_k: None)
+    seen: list[bool] = []
+
+    @click.group()
+    def probe() -> None:
+        pass
+
+    probe.add_command(observability)
+
+    @probe.result_callback()
+    @click.pass_context
+    def done(ctx: click.Context, *_a, **_k) -> None:
+        seen.append(bool(ctx.meta.get(SETUP_SECRET_CHANGED_META_KEY)))
+
+    args = ["observability", "add", "datadog", "--non-interactive", "--site", "us5", "--signals", "traces", "--token"]
+    outputs = []
+    for key in ("first-dd-key", "first-dd-key", "second-dd-key"):
+        result = CliRunner().invoke(probe, [*args, key], obj=app, catch_exceptions=False)
+        assert result.exit_code == 0, result.output
+        outputs.append(result.output)
+    assert seen == [True, False, True]
+    assert "Datadog: already configured as destination" in outputs[1]
+    assert "Datadog: key updated, already configured as destination" in outputs[2]
+
+    @click.command()
+    @click.pass_context
+    def key_only(ctx: click.Context) -> None:
+        ctx.meta[cmd_setup._SETUP_CFG_MTIME_KEY] = cmd_setup._safe_mtime(str(tmp_path / "config.yaml"))
+        ctx.meta[SETUP_SECRET_CHANGED_META_KEY] = True
+        cmd_setup._auto_restart_sidecar_after_setup()
+
+    with (
+        patch.object(cmd_setup, "_is_pid_alive", return_value=True),
+        patch.object(cmd_setup, "_restart_defense_gateway", return_value=True) as restart,
+    ):
+        result = CliRunner().invoke(key_only, [], obj=app)
+    assert result.exit_code == 0, result.output
+    assert restart.called and "Auto-restarting defenseclaw-gateway" in result.output
