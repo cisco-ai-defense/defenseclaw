@@ -247,10 +247,16 @@ class ActivityPanelModel:
         self.term_mode = True
         self.term_scroll = 0
 
-    def append_output(self, line: str) -> None:
+    def append_output(self, line: str, *, continues: bool = False) -> None:
         if not self.entries:
             return
-        self.entries[-1].output.append(line)
+        output = self.entries[-1].output
+        if continues and output:
+            # The rest of a line already shown, such as the mark after
+            # "restarting..." (GAP-2284).
+            output[-1] += line
+        else:
+            output.append(line)
 
     def finish_entry(
         self,

@@ -438,6 +438,36 @@ async def test_pipe_executor_bounds_newline_free_pending_output(monkeypatch) -> 
     assert [event.text for event in events if event.kind == "output"] == ["abcd", "ef"]
 
 
+@pytest.mark.asyncio
+async def test_pipe_executor_marks_the_rest_of_a_line_shown_early(monkeypatch) -> None:
+    # GAP-2284: "restarting..." is shown after a pause; its mark must go on
+    # that line, while text after a newline starts a new one.
+    executor = _mock_pipe_executor(
+        monkeypatch,
+        (b"restarting...", b" \xe2\x9c\x93\n", b"waiting", b"\nstill waiting\n", b""),
+    )
+    wait_calls = 0
+
+    async def controlled_wait_for(awaitable, *, timeout: float) -> bytes:
+        nonlocal wait_calls
+        wait_calls += 1
+        if wait_calls in (2, 5):
+            awaitable.close()
+            raise asyncio.TimeoutError
+        return await awaitable
+
+    monkeypatch.setattr(asyncio, "wait_for", controlled_wait_for)
+
+    events = await _collect(executor, ("-c", "ignored"))
+
+    assert [(event.text, event.continues) for event in events if event.kind == "output"] == [
+        ("restarting...", False),
+        (" ✓", True),
+        ("waiting", False),
+        ("still waiting", False),
+    ]
+
+
 @pytest.mark.parametrize("reap_first", [False, True], ids=["in-flight-exit", "reaped-exit"])
 @pytest.mark.asyncio
 async def test_cancel_natural_exit_race_has_one_terminal_result(reap_first: bool) -> None:

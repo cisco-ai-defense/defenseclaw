@@ -1197,6 +1197,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # the panel's scroller).
         self._help_return_scroll = 0.0
         self.activity_lines: list[str] = []
+        # Where the last output line starts in the Activity log while it may
+        # still get its rest (GAP-2284); None once anything else is written.
+        self._activity_open_line: tuple[bool, int] | None = None
         self.body_text = ""
         # E1: per-render map of clickable connector-chip segments,
         # ``[(col_start, col_end, connector)]`` in visible columns of the chip
@@ -1396,6 +1399,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # Every output line of the current run (capped), so a --json result
         # can be summarised instead of showing its last "}" (GAP-1681).
         self._strip_output_lines: list[str] = []
+        # The last output line so far, and whether it is the last entry of
+        # _strip_output_lines, for a line that gets its rest later (GAP-2284).
+        self._strip_open_line: tuple[str, bool] = ("", False)
         self._strip_summary: str = ""
         self._strip_spinner_tick: int = 0
         self._command_registry = build_registry()
@@ -4355,16 +4361,16 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                         self._set_status(self._status_text())
                     self._refresh_hint()
                 elif event.kind == "output":
-                    self.activity_model.append_output(event.text)
+                    self.activity_model.append_output(event.text, continues=event.continues)
                     # Subprocess stdout/stderr is the highest-volume crash
                     # source: ``Selection [3]:`` / ``[INFO] foo`` / colored
                     # progress bars all break Rich's markup parser. Hand
                     # the line to the safe writer which escapes brackets.
-                    self._write_activity_safe(event.text)
+                    self._write_activity_safe(event.text, continues=event.continues)
                     # Surface a live tail so users on Overview can see the
                     # wizard prompt or scanner progress without switching
                     # panels. ``_strip_output`` filters whitespace.
-                    self._strip_output(event.text)
+                    self._strip_output(event.text, continues=event.continues)
                 elif event.kind == "done":
                     self.command_running = False
                     self.command_label = ""
@@ -6003,6 +6009,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             except NoMatches:
                 pass
             self.activity_lines = []
+            self._activity_open_line = None
             self._render_chrome()
             self._set_status(
                 f"Cleared {removed} Activity entr{'y' if removed == 1 else 'ies'}."
@@ -8443,19 +8450,31 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         self._strip_frozen_duration = None
         self._strip_last_output = ""
         self._strip_output_lines = []
+        self._strip_open_line = ("", False)
         self._strip_summary = ""
         self._strip_spinner_tick = 0
         self._render_command_strip()
 
-    def _strip_output(self, line: str) -> None:
-        """Record the most recent meaningful output line for live snippet."""
+    def _strip_output(self, line: str, *, continues: bool = False) -> None:
+        """Record the most recent meaningful output line for live snippet.
 
+        ``continues`` is the rest of the line recorded last, such as the
+        mark after "restarting..." (GAP-2284): that line is replaced.
+        """
+
+        head, recorded = self._strip_open_line if continues else ("", False)
+        line = head + line
         text = _strip_ansi(line).strip()
+        self._strip_open_line = (line, bool(text))
         if not text:
             return
         self._strip_last_output = text
-        if len(self._strip_output_lines) < STRIP_OUTPUT_LINE_CAP:
+        if recorded and self._strip_output_lines:
+            self._strip_output_lines[-1] = text
+        elif len(self._strip_output_lines) < STRIP_OUTPUT_LINE_CAP:
             self._strip_output_lines.append(text)
+        else:
+            self._strip_open_line = (line, False)
         if self._strip_state == "running":
             self._render_command_strip()
 
@@ -10237,6 +10256,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         self._last_status_signature = rendered
 
     def _write_activity(self, text: str) -> None:
+        self._activity_open_line = None
         self.activity_lines.append(text)
         self._activity_log_write(self.query_one("#activity", RichLog), text)
 
@@ -10262,7 +10282,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         width = self.size.width - 8
         return width if width > log.min_width else None
 
-    def _write_activity_safe(self, text: str) -> None:
+    def _write_activity_safe(self, text: str, *, continues: bool = False) -> None:
         """Write subprocess output to the Activity RichLog without ever
         crashing the markup parser AND honouring terminal ANSI colors.
 
@@ -10289,10 +10309,51 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         the resulting content as opaque (no further markup parsing
         re-trips the bracket crash). One call covers both problems
         without needing a separate ``rich_escape`` step.
+
+        ``continues`` adds ``text`` to the output line written last, which
+        was shown before its newline arrived ("restarting..." and then its
+        mark): that line is written again whole (GAP-2284).
         """
 
+        log = self.query_one("#activity", RichLog)
+        if continues and self.activity_lines and self._activity_log_drop_open_line(log):
+            text = self.activity_lines.pop() + text
         self.activity_lines.append(text)
-        self._activity_log_write(self.query_one("#activity", RichLog), Text.from_ansi(text))
+        self._activity_open_line = self._activity_log_mark(log)
+        self._activity_log_write(log, Text.from_ansi(text))
+
+    @staticmethod
+    def _activity_log_mark(log: RichLog) -> tuple[bool, int]:
+        """Where the next write lands: (still deferred, index)."""
+
+        deferred = getattr(log, "_deferred_renders", None)
+        if not getattr(log, "_size_known", True) and deferred is not None:
+            return True, len(deferred)
+        return False, len(getattr(log, "lines", ()))
+
+    def _activity_log_drop_open_line(self, log: RichLog) -> bool:
+        """Remove the open output line from the Activity log; False if it can't."""
+
+        if self._activity_open_line is None or log.max_lines is not None:
+            return False
+        deferred, start = self._activity_open_line
+        if deferred != self._activity_log_mark(log)[0]:
+            return False  # the log got its size since, so the line moved
+        if deferred:
+            queue = log._deferred_renders
+            if len(queue) <= start:
+                return False
+            while len(queue) > start:
+                queue.pop()
+            return True
+        if len(log.lines) <= start:
+            return False
+        del log.lines[start:]
+        cache = getattr(log, "_line_cache", None)
+        if cache is not None:
+            cache.clear()
+        log.refresh()
+        return True
 
     def _export_audit(self, path: Path | None) -> Path:
         target = path or Path("defenseclaw-audit-export.json")

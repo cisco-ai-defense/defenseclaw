@@ -37,6 +37,9 @@ class CommandEvent:
     exit_code: int | None = None
     duration: float = 0.0
     cancelled: bool = False
+    # An "output" piece that goes on the line shown last: that line was shown
+    # before its newline arrived, as "restarting..." is (GAP-2284).
+    continues: bool = False
 
 
 class ProcessTree(Protocol):
@@ -201,6 +204,7 @@ class CommandExecutor:
             assert process.stdout is not None
             decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
             pending = ""
+            open_line = False
             while True:
                 try:
                     chunk = await asyncio.wait_for(
@@ -212,8 +216,9 @@ class CommandExecutor:
                     # while the child is waiting for stdin. Delay only long
                     # enough to coalesce ordinary cross-chunk line fragments.
                     ready, pending = _hold_incomplete_escape(pending)
-                    for text in _split_terminal_chunk(ready):
-                        yield CommandEvent("output", text)
+                    for event in _output_events(ready, open_line):
+                        yield event
+                    open_line = _line_left_open(ready, open_line)
                     continue
                 if not chunk:
                     break
@@ -225,15 +230,17 @@ class CommandExecutor:
                             pending[:_PIPE_FRAGMENT_MAX_CHARS],
                             pending[_PIPE_FRAGMENT_MAX_CHARS:],
                         )
-                        for text in _split_terminal_chunk(bounded):
-                            yield CommandEvent("output", text)
+                        for event in _output_events(bounded, open_line):
+                            yield event
+                        open_line = _line_left_open(bounded, open_line)
                     continue
-                for text in _split_terminal_chunk(complete):
-                    yield CommandEvent("output", text)
+                for event in _output_events(complete, open_line):
+                    yield event
+                open_line = False
                 pending = trailing
             pending += decoder.decode(b"", final=True)
-            for text in _split_terminal_chunk(pending):
-                yield CommandEvent("output", text)
+            for event in _output_events(pending, open_line):
+                yield event
             exit_code = await process.wait()
         finally:
             async with self._cancel_lock:
@@ -288,6 +295,7 @@ class CommandExecutor:
         # until its newline, or show it after a short pause so a prompt
         # without a newline still appears (GAP-1772), as the pipe path does.
         partial = ""
+        open_line = False
         read: asyncio.Future[bytes] | None = None
         try:
             while True:
@@ -298,8 +306,9 @@ class CommandExecutor:
                 if partial:
                     done, _ = await asyncio.wait({read}, timeout=_PIPE_FRAGMENT_FLUSH_SECONDS)
                     if not done:
-                        for text in _split_terminal_chunk(partial):
-                            yield CommandEvent("output", text)
+                        for event in _output_events(partial, open_line):
+                            yield event
+                        open_line = _line_left_open(partial, open_line)
                         partial = ""
                         continue
                 try:
@@ -314,14 +323,16 @@ class CommandExecutor:
                 text_so_far = partial + ready
                 cut = max(text_so_far.rfind("\n"), text_so_far.rfind("\r")) + 1
                 complete, partial = text_so_far[:cut], text_so_far[cut:]
-                for text in _split_terminal_chunk(complete):
-                    yield CommandEvent("output", text)
+                for event in _output_events(complete, open_line):
+                    yield event
+                open_line = _line_left_open(complete, open_line)
                 while len(partial) >= _PIPE_FRAGMENT_MAX_CHARS:
                     bounded, partial = partial[:_PIPE_FRAGMENT_MAX_CHARS], partial[_PIPE_FRAGMENT_MAX_CHARS:]
-                    for text in _split_terminal_chunk(bounded):
-                        yield CommandEvent("output", text)
-            for text in _split_terminal_chunk(partial + carry + decoder.decode(b"", final=True)):
-                yield CommandEvent("output", text)
+                    for event in _output_events(bounded, open_line):
+                        yield event
+                    open_line = _line_left_open(bounded, open_line)
+            for event in _output_events(partial + carry + decoder.decode(b"", final=True), open_line):
+                yield event
             exit_code = await process.wait()
         finally:
             async with self._cancel_lock:
@@ -403,6 +414,23 @@ def _hold_incomplete_escape(text: str) -> tuple[str, str]:
     if match is None:
         return text, ""
     return text[: match.start()], text[match.start() :]
+
+
+def _output_events(text: str, open_line: bool) -> tuple[CommandEvent, ...]:
+    """Output events for ``text``. While a line shown before its newline is
+    still open, the first piece of ``text`` goes on that line (GAP-2284)."""
+
+    continues = open_line and not text.startswith(("\n", "\r"))
+    return tuple(
+        CommandEvent("output", part, continues=continues and index == 0)
+        for index, part in enumerate(_split_terminal_chunk(text))
+    )
+
+
+def _line_left_open(text: str, open_line: bool) -> bool:
+    """Whether the last line is still open after showing ``text``."""
+
+    return open_line if not text else not text.endswith(("\n", "\r"))
 
 
 def _split_terminal_chunk(text: str) -> tuple[str, ...]:
