@@ -20,7 +20,9 @@
  * Health monitor that periodically checks the DefenseClaw sidecar and
  * exposes an `isUnprotected` flag for the fetch interceptor to query.
  *
- * The monitor does NOT block LLM calls — it only warns.
+ * The monitor does NOT block LLM calls — it only warns. Model calls go
+ * through the gateway's proxy, so while the gateway is down they fail
+ * closed (GAP-2428): the warning says so instead of "not being scanned".
  */
 
 import type { OutboundSidecarRequestLog } from "./types.js";
@@ -52,6 +54,7 @@ export class HealthMonitor {
   private _unprotected = false;
   private _wasUnprotected = false;
   private _connecting = false;
+  private _down = false;
 
   constructor(opts: HealthMonitorOptions) {
     this.statusUrl = opts.statusUrl;
@@ -129,10 +132,10 @@ export class HealthMonitor {
           }
           this._connecting = true;
         } else {
-          this.markUnprotected();
+          this.markUnprotected(false);
         }
       } else {
-        this.markUnprotected();
+        this.markUnprotected(false);
       }
     } catch {
       const duration_ms = Math.round(performance.now() - started);
@@ -141,20 +144,26 @@ export class HealthMonitor {
         status_code: 0,
         duration_ms,
       });
-      this.markUnprotected();
+      this.markUnprotected(true);
     }
   }
 
-  private markUnprotected(): void {
+  /** `down`: the gateway did not answer at all, so model calls through its proxy are refused. */
+  private markUnprotected(down: boolean): void {
     this._unprotected = true;
+    this._down = down;
     if (!this._wasUnprotected) {
       this._wasUnprotected = true;
-      console.warn(
-        "[defenseclaw] WARNING: The DefenseClaw security gateway is not running. " +
-          "Your prompts and responses are NOT being scanned for security threats. " +
-          "Run 'defenseclaw-gateway start' to restore protection.",
-      );
+      console.warn(`[defenseclaw] WARNING: ${this.describe()}`);
     }
+  }
+
+  private describe(): string {
+    return this._down
+      ? "The DefenseClaw gateway is not running, so model calls are blocked (fail-closed) until it is back. " +
+          "Run 'defenseclaw-gateway start' to restore protection."
+      : "The DefenseClaw gateway is not healthy, so protection may be incomplete. " +
+          "Check it with 'defenseclaw-gateway status'.";
   }
 
   /**
@@ -163,10 +172,6 @@ export class HealthMonitor {
    */
   getWarningMessage(): string | null {
     if (!this._unprotected) return null;
-    return (
-      "[DEFENSECLAW WARNING] The DefenseClaw security gateway is not running. " +
-      "Your prompts and responses are NOT being scanned for security threats. " +
-      "Run 'defenseclaw-gateway start' to restore protection."
-    );
+    return `[DEFENSECLAW WARNING] ${this.describe()}`;
   }
 }

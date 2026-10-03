@@ -111,6 +111,19 @@ describe("HealthMonitor", () => {
     expect(msg).toContain("DEFENSECLAW WARNING");
   });
 
+  it("says model calls are blocked, not unscanned, when the gateway is down", async () => {
+    // GAP-2428: with the gateway down every call through its proxy is
+    // refused, so "NOT being scanned" was wrong.
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    globalThis.fetch = vi.fn().mockRejectedValue(new Error("down"));
+    const m = new HealthMonitor({ statusUrl });
+    await triggerCheck(m);
+    const warning = String(warnSpy.mock.calls[0]?.[0]);
+    expect(warning).toContain("model calls are blocked (fail-closed)");
+    expect(warning).toContain("defenseclaw-gateway start");
+    expect(warning).not.toContain("NOT being scanned");
+  });
+
   it("marks unprotected when gateway state is not running", async () => {
     vi.spyOn(console, "warn").mockImplementation(() => {});
     globalThis.fetch = vi.fn().mockResolvedValue(degradedResponse());

@@ -311,6 +311,51 @@ export const DC_AUTH_HEADER = "X-DC-Auth";
  * the Ollama port rules so a relative URL to a local Ollama still
  * gets intercepted.
  */
+/**
+ * GAP-2428: what a model call shows when the DefenseClaw gateway is down.
+ * The proxy hop is refused, so the call fails closed; without this the
+ * agent only reported "connection refused by the provider endpoint". The
+ * wording avoids "refused", "timeout" and "unavailable" so OpenClaw shows
+ * it as is instead of mapping it to its generic transport copy.
+ */
+export const GATEWAY_DOWN_MESSAGE =
+  "[DefenseClaw] The DefenseClaw gateway is not running, so this request was blocked (fail-closed). " +
+  "Run: defenseclaw-gateway start";
+
+function isConnectionRefused(err: unknown): boolean {
+  const e = err as { code?: unknown; cause?: { code?: unknown } } | null;
+  return e?.code === "ECONNREFUSED" || e?.cause?.code === "ECONNREFUSED";
+}
+
+/** A provider-shaped 503 for a refused fetch hop; OpenAI and Anthropic SDKs both surface its message. */
+export function gatewayDownResponse(): Response {
+  return new Response(
+    JSON.stringify({
+      type: "error",
+      error: { type: "defenseclaw_gateway_down", message: GATEWAY_DOWN_MESSAGE },
+    }),
+    { status: 503, headers: { "Content-Type": "application/json", "x-should-retry": "false" } },
+  );
+}
+
+/**
+ * Name the DefenseClaw gateway in a refused node:http proxy hop's error,
+ * keeping its code so SDK retry logic is unchanged.
+ */
+export function explainRefusedProxyHop<T extends { emit: (event: string | symbol, ...args: unknown[]) => boolean }>(
+  req: T,
+): T {
+  const emit = req.emit;
+  if (typeof emit !== "function") return req;
+  req.emit = function (this: T, event: string | symbol, ...args: unknown[]): boolean {
+    if (event === "error" && isConnectionRefused(args[0]) && args[0] instanceof Error) {
+      args[0].message = GATEWAY_DOWN_MESSAGE;
+    }
+    return emit.call(this, event, ...args);
+  } as T["emit"];
+  return req;
+}
+
 function extractHost(urlStr: string): string {
   try {
     return new URL(urlStr).hostname.toLowerCase();
@@ -1412,7 +1457,13 @@ export function createFetchInterceptor(
         );
       }
 
-      const response = await originalFetch!(proxied, newInit);
+      let response: Response;
+      try {
+        response = await originalFetch!(proxied, newInit);
+      } catch (err) {
+        if (!isConnectionRefused(err)) throw err;
+        return gatewayDownResponse();
+      }
 
       const blocked = response.headers.get("x-defenseclaw-blocked") === "true";
       if (blocked) {
@@ -1708,7 +1759,9 @@ export function createFetchInterceptor(
         // F-1586: now that http.request is also patched, the proxy
         // hop must use the captured original to avoid recursing
         // back into this branch.
-        return originalHttpRequest!(newOpts as unknown as Parameters<typeof http.request>[0], cb as Parameters<typeof http.request>[1]);
+        return explainRefusedProxyHop(
+          originalHttpRequest!(newOpts as unknown as Parameters<typeof http.request>[0], cb as Parameters<typeof http.request>[1]),
+        );
       }
 
       // Non-intercepted https.request — report silent passthrough so

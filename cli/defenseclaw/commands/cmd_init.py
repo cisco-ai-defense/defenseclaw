@@ -2522,15 +2522,30 @@ def _render_first_run_report(report, renderer, *, connectors: list[str] | None =
     renderer.section("Next")
     for cmd in report.next_commands[:5]:
         renderer.echo(f"  {cmd}")
-    renderer.echo("  Adding another agent later: defenseclaw setup <connector>")
-    if _closed_fail_mode_connectors(report, connectors):
+    proxy = _proxy_connector_label(report, connectors)
+    if proxy:
+        # GAP-2427: a proxy connector has no hooks. Its model calls go through
+        # the gateway, nothing restarts the gateway for it, and it cannot run
+        # next to hook connectors, so the hook advice below is wrong for it.
+        renderer.echo(
+            f"  {proxy} runs alone: defenseclaw setup <connector> for a hook agent replaces {proxy}'s guardrail"
+        )
+        renderer.echo(f"  {proxy} model calls fail while the DefenseClaw gateway is down (fail-closed)")
+        if platform_support.host_os() in {"linux", "darwin"}:
+            renderer.echo(
+                f"  Nothing starts the gateway for {proxy}: after a reboot or defenseclaw-gateway stop,"
+                " run: defenseclaw-gateway start"
+            )
+    else:
+        renderer.echo("  Adding another agent later: defenseclaw setup <connector>")
+    if not proxy and _closed_fail_mode_connectors(report, connectors):
         # --non-interactive keeps the closed default the wizard asks about
         # (GAP-1424): say what it means and how to change it.
         renderer.echo(
             "  Fail mode is closed: hooks block the agent while the gateway is unreachable;"
             " to allow and log instead: defenseclaw guardrail fail-mode open"
         )
-    if platform_support.host_os() in {"linux", "darwin"}:
+    if not proxy and platform_support.host_os() in {"linux", "darwin"}:
         # No service unit restarts a per-user gateway on Linux or macOS; the
         # agent shell hooks start it on their next call (RHEL-U3-06).
         renderer.echo(
@@ -2541,6 +2556,19 @@ def _render_first_run_report(report, renderer, *, connectors: list[str] | None =
         renderer.echo("  Running coding agents in OpenShell sandboxes: defenseclaw sandbox setup")
     if summary := _unguarded_acp_summary():
         renderer.echo(f"  Unguarded ACP agents found ({summary}): defenseclaw setup acp")
+
+
+_PROXY_LABELS = {"openclaw": "OpenClaw", "zeptoclaw": "ZeptoClaw"}
+
+
+def _proxy_connector_label(report, connectors: list[str] | None) -> str:
+    """The display name of the proxy connector this install runs, or ''."""
+
+    names = connectors or ([report.connector] if report.connector else [])
+    for name in names:
+        if platform_support.is_proxy_connector(name):
+            return _PROXY_LABELS.get(name, name)
+    return ""
 
 
 def _closed_fail_mode_connectors(report, connectors: list[str] | None) -> list[str]:
