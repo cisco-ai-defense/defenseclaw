@@ -158,7 +158,7 @@ def fetch_git(
                         f"manifest {name} is {size} bytes (max {MAX_MANIFEST_BYTES})"
                     )
                 raw = candidate.read_bytes()
-                manifest = parse_manifest(raw)
+                manifest = parse_manifest(raw, origin=name)
                 return manifest, raw
 
         raise IngestError(

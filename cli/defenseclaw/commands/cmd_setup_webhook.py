@@ -555,12 +555,12 @@ def _record_audit(done: str, record: Any) -> None:
     try:
         record()
     except CanonicalObservabilityUnavailableError:
-        click.echo(
+        ux.echo(
             f"  ⚠ {done}. The gateway isn't running, so the audit event was not recorded.",
             err=True,
         )
     except CanonicalObservabilityError as exc:
-        click.echo(f"  ⚠ {done}, but the gateway did not confirm the audit event ({exc}).", err=True)
+        ux.echo(f"  ⚠ {done}, but the gateway did not confirm the audit event ({exc}).", err=True)
 
 
 def _prompt_missing(

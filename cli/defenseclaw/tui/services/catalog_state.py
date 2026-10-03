@@ -263,6 +263,8 @@ class MCPRow:
     severity: str = ""
     verdict: str = ""
     registry_source: str = ""
+    # Why the agent skips this entry and how to repair it (GAP-2531).
+    not_loaded: str = ""
     # Same denormalization as SkillRow so the detail pane can show
     # the file/runtime/install state without re-parsing the JSON.
     total_findings: int = 0
@@ -815,6 +817,9 @@ class MCPsPanelModel(CatalogListModel[MCPRow]):
     def blocked_count(self) -> int:
         return sum(1 for row in self.items if row.status == "blocked")
 
+    def not_loaded_count(self) -> int:
+        return sum(1 for row in self.items if row.not_loaded)
+
     def menu_actions(self) -> tuple[CatalogMenuAction, ...]:
         row = self.selected()
         return mcp_actions(row.status if row else "", self.connector)
@@ -1287,6 +1292,10 @@ def mcp_list_to_row(raw: Mapping[str, Any]) -> MCPRow:
         status = "disabled"
     elif actions.install == "allow":
         status = "allowed"
+    not_loaded = str(raw.get("not_loaded_repair") or raw.get("not_loaded") or "")
+    if not_loaded and status == "active":
+        # The agent skips it, so it is not live (GAP-2531).
+        status = "not loaded"
     return MCPRow(
         name=str(raw.get("name") or ""),
         connector=str(raw.get("connector") or ""),
@@ -1297,6 +1306,7 @@ def mcp_list_to_row(raw: Mapping[str, Any]) -> MCPRow:
         server_url=str(raw.get("url") or ""),
         severity=str(raw.get("severity") or scan.max_severity if scan else ""),
         verdict=str(raw.get("verdict") or ""),
+        not_loaded=not_loaded,
         total_findings=scan.total_findings if scan is not None else 0,
         scan_clean=scan.clean if scan is not None else True,
         scan_target=scan.target if scan is not None else "",
@@ -2106,6 +2116,7 @@ _STATUS_COLOR: Mapping[str, str] = {
     "rejected": "#F87171",
     "quarantined": "#F87171",
     "warning": "#FBBF24",
+    "not loaded": "#FBBF24",
     "disabled": "#94A3B8",
     "removed": "#94A3B8",
     "inactive": "#94A3B8",
@@ -2261,6 +2272,8 @@ def _format_mcp_detail(row: MCPRow) -> str:
         lines.append(f"  Verdict    {_esc(row.verdict)}")
     if row.reason:
         lines.append(f"  Reason     {_esc(row.reason)}")
+    if row.not_loaded:
+        lines.append(f"  Not loaded {_esc(row.not_loaded)}")
     lines.append("")
     lines.append(_mcp_action_legend(row.status))
     return "\n".join(lines)

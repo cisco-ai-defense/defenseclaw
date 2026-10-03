@@ -206,6 +206,9 @@ class MCPServerEntry:
     # Why the agent itself skips this entry ("" = it loads). Set for Claude
     # Code entries it rejects, so list/scan/doctor do not call them live.
     load_problem: str = ""
+    # True when ``mcp set`` rewrites the skipped entry itself (the user-scope
+    # ``mcpServers`` it writes). Other scopes are repaired in their own file.
+    load_problem_set_repairs: bool = False
 
 
 @dataclass(frozen=True)
@@ -383,15 +386,22 @@ def _claude_mcp_entry(entry: dict[str, Any]) -> dict[str, Any]:
 
 
 def _flag_claude_unloadable(
-    entries: list[MCPServerEntry], servers: Any, path: str,
+    entries: list[MCPServerEntry], servers: Any, path: str, *, user_scope: bool = False,
+    where: str = "",
 ) -> list[MCPServerEntry]:
     """Mark the entries Claude Code skips as not loaded (GAP-2514).
 
     Claude Code skips a ``url`` entry without ``type`` ("has a \"url\" but
     no \"type\""), the shape ``mcp set`` wrote before GAP-1837. The entry
     stays listed (so ``mcp unset`` and the repair still find it) but carries
-    ``load_problem`` instead of passing as a live server.
+    ``load_problem`` instead of passing as a live server. ``mcp set`` only
+    writes the user-scope ``mcpServers`` of :func:`claude_mcp_state_path`,
+    so only those entries say it repairs them (GAP-2528). ``where`` names
+    the key inside *path* (a per-project entry, GAP-2530).
     """
+    set_repairs = user_scope and os.path.normcase(os.path.abspath(path)) == os.path.normcase(
+        os.path.abspath(claude_mcp_state_path())
+    )
     if not isinstance(servers, dict):
         return entries
     out: list[MCPServerEntry] = []
@@ -402,7 +412,11 @@ def _flag_claude_unloadable(
             and str(cfg.get("url", "") or "").strip()
             and not str(cfg.get("type", "") or "").strip()
         ):
-            entry = replace(entry, load_problem=f'has a "url" but no "type" in {path}')
+            entry = replace(
+                entry,
+                load_problem=f'has a "url" but no "type" in {path}{where}',
+                load_problem_set_repairs=set_repairs,
+            )
         out.append(entry)
     return out
 
@@ -3688,12 +3702,13 @@ def _read_claude_mcp_state(
             local_servers = project_state.get("mcpServers")
             local_entries = _flag_claude_unloadable(
                 _parse_mcp_servers_value(local_servers), local_servers, path,
+                where=f' (projects["{project_key}"].mcpServers)',
             )
             break
 
     user_servers = data.get("mcpServers")
     user_entries = _flag_claude_unloadable(
-        _parse_mcp_servers_value(user_servers), user_servers, path,
+        _parse_mcp_servers_value(user_servers), user_servers, path, user_scope=True,
     )
     return local_entries, user_entries
 
@@ -7699,14 +7714,13 @@ def _set_claudecode_mcp_server(
             identity_matches = _claude_postimage_identity_matches(path, state)
             if raw != postimage or not identity_matches:
                 state["exact_restore"] = False
-            if not identity_matches:
-                released.update(state["managed"])
-                state["managed"].clear()
-            else:
-                previously_managed = set(state["managed"])
-                if _reconcile_claude_managed_servers(state, data):
-                    released.update(previously_managed - set(state["managed"]))
-                    state["exact_restore"] = False
+            # Claude Code rewrites ~/.claude.json as it runs (new inode, its own
+            # state added), so ownership follows each entry's value, not the
+            # file identity (GAP-2541).
+            previously_managed = set(state["managed"])
+            if _reconcile_claude_managed_servers(state, data):
+                released.update(previously_managed - set(state["managed"]))
+                state["exact_restore"] = False
             if not state["managed"]:
                 _finish_claude_mcp_episode(path, None, released)
                 state = None
@@ -7844,14 +7858,12 @@ def _unset_claudecode_mcp_server(path: str, name: str) -> bool | str:
         if not bytes_match:
             state["exact_restore"] = False
         target_was_owned = name in state["managed"]
-        if not identity_matches:
-            released.update(state["managed"])
-            state["managed"].clear()
-        else:
-            previously_managed = set(state["managed"])
-            if _reconcile_claude_managed_servers(state, data):
-                released.update(previously_managed - set(state["managed"]))
-                state["exact_restore"] = False
+        # An entry still exactly as DefenseClaw wrote it stays DefenseClaw's,
+        # even after Claude Code rewrote the file around it (GAP-2541).
+        previously_managed = set(state["managed"])
+        if _reconcile_claude_managed_servers(state, data):
+            released.update(previously_managed - set(state["managed"]))
+            state["exact_restore"] = False
 
         if not state["managed"]:
             _finish_claude_mcp_episode(path, None, released)

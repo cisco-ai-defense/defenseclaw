@@ -222,7 +222,7 @@ func (a *APIServer) emitForeignHookSessionDenialV8(
 	// was denied, never "tool_call" (GAP-2142).
 	targetType, tool := foreignHookSessionDenialTarget(exchange)
 	if tool != "" {
-		if outcome, ok := hookGuardrailOutcomeFor(resp.Action, resp.Severity, resp.Reason, nil); ok {
+		if outcome, ok := hookGuardrailOutcomeFor(resp.Action, resp.Severity, resp.Reason, env.RuleIDs); ok {
 			meta := hookLLMEventMeta(ctx, connectorName, exchange.Key.Session, "", "", connectorName, "", "", "", nil)
 			meta = applyHookEventMeta(meta, event, nil)
 			meta.Guardrail = outcome

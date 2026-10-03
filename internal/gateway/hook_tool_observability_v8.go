@@ -277,6 +277,11 @@ func hookToolV8AgentInput(observation generatedToolV8Observation) (observability
 	applyHookModelV8AgentFacts(&input, identity, rootAgentID, rootSessionID)
 	input.DefenseClawAgentPhase = observability.Present("tool")
 	input.DefenseClawAgentPhaseCode = observability.Present[int64](4)
+	// The agent root of a blocked (or asked, alerted) tool call names the
+	// rule as its tool span does, so Galileo and Tempo show the rule of a
+	// turn blocked at a tool call, not only of a blocked prompt (GAP-2525).
+	input.DefenseClawGuardrailAction, input.DefenseClawGuardrailRuleID, input.DefenseClawGuardrailSeverity =
+		guardrailOutcomeAttributes(meta.Guardrail)
 	return input, true
 }
 

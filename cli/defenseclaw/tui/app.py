@@ -197,8 +197,6 @@ from defenseclaw.tui.widgets.panel_split import (
 from defenseclaw.tui.widgets.status_strip import render_status_strip
 from defenseclaw.tui.widgets.tab_fit import (
     BADGE_RESERVE,
-    SHORT_LABELS,
-    TINY_LABELS,
     fit_tab_labels,
     strip_width,
 )
@@ -459,6 +457,36 @@ def _wrap_at_separators(value: str, width: int) -> str:
     return "\n".join(lines)
 
 
+def _fit_units(units: Sequence[Text], width: int, sep: str = "   ") -> Text:
+    """``units`` joined by ``sep``, starting a new line before a unit that would not fit.
+
+    A folding cell breaks at any space, so at 80 columns "0 blocked   0
+    allowed" read "0 blocked   0" / "allowed" and "201 processes" lost its
+    unit (GAP-2521). Each unit stays whole unless it alone is too wide.
+    """
+
+    out = Text()
+    used = 0
+    for unit in units:
+        if used and used + len(sep) + unit.cell_len > width:
+            out.append("\n")
+            used = 0
+        elif used:
+            out.append(sep)
+            used += len(sep)
+        out.append_text(unit)
+        used += unit.cell_len
+    return out
+
+
+def _count_unit(count: object, label: str, color: str) -> Text:
+    """ "3 blocked" with the number in ``color``."""
+
+    unit = Text(str(count), style=color)
+    unit.append(f" {label}")
+    return unit
+
+
 # Stores opened by background readers; shutdown interrupts their queries.
 _LIVE_WORKER_STORES: weakref.WeakSet[Any] = weakref.WeakSet()
 
@@ -503,6 +531,18 @@ def _panel_label(panel: str) -> str:
     """The tab label for ``panel`` ("MCPs", not ``"mcps".title()`` = "Mcps")."""
 
     return next((label for name, _key, label in PANELS if name == panel), panel.title())
+
+
+def _catalog_loaded_text(panel: str, model: Any) -> str:
+    """How a catalog load ended; rows the agent skips are not counted as loaded (GAP-2531)."""
+
+    label = _panel_label(panel)
+    skipped = model.not_loaded_count() if hasattr(model, "not_loaded_count") else 0
+    if skipped:
+        return f"{label}: {len(model.items)} listed, {skipped} not loaded by the agent (see the row's detail)."
+    return f"{label}: {len(model.items)} loaded."
+
+
 PANEL_NAMES = {name for name, _key, _label in PANELS}
 
 
@@ -2648,26 +2688,25 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             return versioned
         if width >= 120 and self._tabs_fit_next_to(versioned, width):
             return versioned
-        if width >= 96 and self._tabs_fit_next_to("DefenseClaw", width, tiny=True):
+        if width >= 96 and self._tabs_fit_next_to("DefenseClaw", width):
             # The version is on Overview; its cells go to tab names, so a
             # 200-column screen names every tab instead of a bare "R"
-            # (GAP-1283). The brand stays only while every tab keeps at least
-            # its tiny name beside it: from 140 to 157 columns it kept its 12
-            # cells while five tabs were bare key letters (GAP-1544, GAP-2150).
+            # (GAP-1283). The brand shows only once every tab keeps its full
+            # name beside it: from 140 to 157 columns it kept its 12 cells
+            # while five tabs were bare key letters (GAP-1544, GAP-2150), and
+            # at 175 columns it turned "3 Skills" (170) back into "3 Skill"
+            # (GAP-2517).
             return "DefenseClaw"
         # At 80 columns the brand would push tabs off screen; Overview still
         # shows the wordmark.
         return ""
 
-    def _tabs_fit_next_to(self, title: str, width: int, *, tiny: bool = False) -> bool:
-        """True when every visible tab keeps its full (or tiny) name beside ``title``."""
+    def _tabs_fit_next_to(self, title: str, width: int) -> bool:
+        """True when every visible tab keeps its full name beside ``title``."""
 
         strip = max(0, width - 2 - (len(title) + 1 if title else 0) - 12)
         visible = [(name, key, label) for name, key, label in PANELS if not self._panel_hidden(name)]
-        labels = [
-            f"{key} {TINY_LABELS.get(name, SHORT_LABELS.get(name, label)) if tiny else label}"
-            for name, key, label in visible
-        ]
+        labels = [f"{key} {label}" for _name, key, label in visible]
         if not visible or strip_width(labels) + BADGE_RESERVE > strip:
             return False
         # The brand goes before any tab loses its name, counts and the room
@@ -2676,7 +2715,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         unread = {name: self._panel_unread_count(name) for name, _key, _label in visible}
         widest = max(visible, key=lambda row: len(row[2]))[0]
         fitted = fit_tab_labels(visible, widest, unread, strip)
-        return all(fitted[name].startswith(f"{key} ") for name, key, _label in visible)
+        # The title also waits until every count keeps its "(n)" form beside
+        # it: taking those cells back turned "Alerts (1)" into "Alerts¹" at 215
+        # and 221 columns and back at 219 and 225 (GAP-2543). A width of 0
+        # gives the full labels.
+        return fitted == fit_tab_labels(visible, widest, unread, 0)
 
     def _sync_header_title(self) -> None:
         title = self._header_title()
@@ -8937,7 +8980,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # ``OK`` etc. and crash the overview the moment any notice is
         # emitted. ``notice.message`` also routinely includes bracketed
         # tokens (``[skill] missing scan``) — same crash class.
-        notice_block: list[Text] = []
+        notice_block: list[RenderableType] = []
         short_notices = 0 < self.size.height < 32
         for notice in notices[:4]:
             if notice.level == "error":
@@ -8948,16 +8991,14 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 icon, color = "[>]", TOKENS.accent_blue
             else:
                 icon, color = "[-]", TOKENS.accent_green
-            line = Text(" ")
-            if short_notices:
-                # One row per notice that ends with "…" when it is cut: at
-                # 80x24 the wrapped rest fell under the button bar mid-sentence
-                # (GAP-1775). Taller screens wrap the full text.
-                line.no_wrap = True
-                line.overflow = "ellipsis"
-            line.append(icon, style=f"{color} bold")
-            line.append(" ")
-            line.append(notice.message)
+            # A grid so wrapped lines hang under the text, not under the icon
+            # (GAP-2533). Below 32 rows each notice is one row ending with "…"
+            # when cut: at 80x24 the wrapped rest fell under the button bar
+            # mid-sentence (GAP-1775). Taller screens wrap the full text.
+            line = Table.grid(expand=True)
+            line.add_column(no_wrap=True, width=len(icon) + 2)
+            line.add_column(ratio=1, no_wrap=short_notices, overflow="ellipsis")
+            line.add_row(Text.assemble(" ", (icon, f"{color} bold"), " "), Text(notice.message))
             notice_block.append(line)
         if not notice_block:
             quiet = Text(" ")
@@ -9127,6 +9168,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
 
         enf_table = Table.grid(padding=(0, 2), expand=True)
         enf_table.add_column(width=12, no_wrap=True)
+        enf_value_width = cfg_inner - 14
         enf_table.add_column(overflow="fold")
         # 8.13: when a connector is selected the ENFORCEMENT panel narrows to
         # that connector's real Alerts/Hook calls/Blocks (the connector-
@@ -9199,10 +9241,13 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             else:
                 enf_table.add_row(
                     Text("Skills", style=TOKENS.text_secondary),
-                    Text.from_markup(
-                        f"[{TOKENS.text_primary}]{selected_scan['skills']}[/]   "
-                        f"[{TOKENS.accent_red}]{selected_scan['skills_blocked']}[/] blocked   "
-                        f"[{TOKENS.accent_green}]{selected_scan['skills_allowed']}[/] allowed"
+                    _fit_units(
+                        (
+                            Text(str(selected_scan["skills"]), style=TOKENS.text_primary),
+                            _count_unit(selected_scan["skills_blocked"], "blocked", TOKENS.accent_red),
+                            _count_unit(selected_scan["skills_allowed"], "allowed", TOKENS.accent_green),
+                        ),
+                        enf_value_width,
                     ),
                 )
                 enf_table.add_row(
@@ -9220,20 +9265,20 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 Text("Total scans", style=TOKENS.text_secondary),
                 Text.from_markup(f"[{TOKENS.accent_green}]{counts.total_scans}[/]"),
             )
-            enf_table.add_row(
-                Text("Skills", style=TOKENS.text_secondary),
-                Text.from_markup(
-                    f"[{TOKENS.accent_red}]{counts.blocked_skills}[/] blocked   "
-                    f"[{TOKENS.accent_green}]{counts.allowed_skills}[/] allowed"
-                ),
-            )
-            enf_table.add_row(
-                Text("MCPs", style=TOKENS.text_secondary),
-                Text.from_markup(
-                    f"[{TOKENS.accent_red}]{counts.blocked_mcps}[/] blocked   "
-                    f"[{TOKENS.accent_green}]{counts.allowed_mcps}[/] allowed"
-                ),
-            )
+            for label, blocked, allowed in (
+                ("Skills", counts.blocked_skills, counts.allowed_skills),
+                ("MCPs", counts.blocked_mcps, counts.allowed_mcps),
+            ):
+                enf_table.add_row(
+                    Text(label, style=TOKENS.text_secondary),
+                    _fit_units(
+                        (
+                            _count_unit(blocked, "blocked", TOKENS.accent_red),
+                            _count_unit(allowed, "allowed", TOKENS.accent_green),
+                        ),
+                        enf_value_width,
+                    ),
+                )
 
         keys = self.overview_model.keys_status()
         sc_table = Table.grid(padding=(0, 2), expand=True)
@@ -9353,6 +9398,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                     "healthy": TOKENS.accent_green,
                     "warning": TOKENS.accent_amber,
                     "failed": TOKENS.accent_red,
+                    "stale": TOKENS.accent_blue,
                 }.get(doctor.run_outcome, TOKENS.accent_amber)
                 doctor_lines.append(
                     Text.from_markup(
@@ -9412,6 +9458,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                         f"[{TOKENS.accent_green}]All checks passing — nothing to address.[/]"
                     )
                 )
+            if doctor.note:
+                doctor_lines.append(Text(doctor.note, style=TOKENS.text_secondary))
             doctor_body = Group(*doctor_lines)
 
         if ai_box.rows:
@@ -9573,7 +9621,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # a new width is new content: after a resize it kept the old width's
         # wrapping until the next data change (GAP-2509).
         width = int(getattr(self.size, "width", 0) or 0)
-        return ("overview", self.help_open, width, stable_text)
+        # Notices are one "…" line below 32 rows and wrap above it, so the
+        # height band is content too: 160x45 -> 80x45 -> 80x24 kept the
+        # wrapped notice, its end hidden under the button bar (GAP-2519).
+        short = 0 < int(getattr(self.size, "height", 0) or 0) < 32
+        return ("overview", self.help_open, width, short, stable_text)
 
     def _runtime_sample_time(self) -> str:
         """When the last runtime sample was taken ("14:02:11", "Oct 02 14:02"), or "".
@@ -9607,6 +9659,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         }.get(runtime.health_title, TOKENS.text_secondary)
         table = Table.grid(padding=(0, 1), expand=True)
         table.add_column(overflow="fold")
+        # The card's inner width, as for CONFIGURATION in the same columns.
+        card_inner = max(20, (int(getattr(self.size, "width", 0) or 0) - 8) // 2 - 5)
         if self.overview_model.gateway_down():
             # Runtime data comes from the gateway. With it stopped the last
             # sample ("DEGRADED · 17 processes · inference heartbeat: up")
@@ -9630,16 +9684,17 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if runtime.health_title:
             header = Text()
             header.append(f"● {runtime.health_title}", style=f"bold {title_color}")
+            units = [header]
             if runtime.processes or runtime.connections or runtime.findings:
-                header.append(
-                    f"   {runtime.findings} findings   "
-                    f"{runtime.processes} processes   "
-                    f"{runtime.connections} connections",
-                    style=TOKENS.text_secondary,
-                )
-            table.add_row(header)
+                units += [
+                    Text(f"{runtime.findings} findings", style=TOKENS.text_secondary),
+                    Text(f"{runtime.processes} processes", style=TOKENS.text_secondary),
+                    Text(f"{runtime.connections} connections", style=TOKENS.text_secondary),
+                ]
+            table.add_row(_fit_units(units, card_inner))
         if runtime.plane_summary:
-            table.add_row(Text(runtime.plane_summary, style=TOKENS.text_secondary))
+            planes = [Text(plane, style=TOKENS.text_secondary) for plane in runtime.plane_summary.split("  ")]
+            table.add_row(_fit_units(planes, card_inner, sep="  "))
         if runtime.host_observations or runtime.host_gated:
             table.add_row(
                 Text(
@@ -9769,6 +9824,14 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             return lines
         from defenseclaw.observability.custody_status import native_delivery_display_rows
 
+        # The detail already names the state ("accepted native delivery
+        # observed ..."), so the state word is only a color here, and a
+        # grid gives wrapped detail a hanging indent instead of lines flush
+        # with the panel edge (GAP-2545).
+        rows = Table.grid(padding=(0, 1))
+        rows.add_column(width=1)
+        rows.add_column(no_wrap=True)
+        rows.add_column(overflow="fold")
         for label, item in native_delivery_display_rows(summary.connectors):
             instance = f" · {label}" if label else ""
             style = {
@@ -9776,13 +9839,12 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 "partial_drop_only": TOKENS.accent_amber,
                 "accepted": TOKENS.accent_green,
             }.get(item.state, TOKENS.text_muted)
-            lines.append(
-                Text(
-                    f"  {friendly_connector_name(item.connector)} ({item.connector}){instance}: "
-                    f"{item.state.replace('_', '-')} · {item.detail}",
-                    style=style,
-                )
+            rows.add_row(
+                "",
+                Text(f"{friendly_connector_name(item.connector)} ({item.connector}){instance}:", style=style),
+                Text(item.detail, style=style),
             )
+        lines.append(rows)
         return lines
 
     def _overview_observability_panel(self) -> RenderableType:
@@ -9811,9 +9873,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 )
                 table_rows: list[tuple[Text, ...]] = []
                 for row in rows:
-                    health = row.state
-                    if row.health_reason:
-                        health += f" ({row.health_reason})"
+                    health = row.health_label
                     table_rows.append(
                         (
                             Text(row.name, style=TOKENS.text_primary),
@@ -9965,8 +10025,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             for label, item in native_delivery_display_rows(summary.connectors):
                 instance = f" · {label}" if label else ""
                 delivery_lines.append(
-                    f"    {friendly_connector_name(item.connector)} ({item.connector}){instance}: "
-                    f"{item.state.replace('_', '-')} · {item.detail}"
+                    f"    {friendly_connector_name(item.connector)} ({item.connector}){instance}: {item.detail}"
                 )
         delivery_text = "\n".join(delivery_lines)
         if not rows:
@@ -9996,9 +10055,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 f"{'CONFIGURED LIMITS':<30}LAST RESULT / TARGET",
             ]
             for row in rows:
-                health = row.state
-                if row.health_reason:
-                    health += f" ({row.health_reason})"
+                health = row.health_label
                 lines.append(
                     f"  {rich_escape(row.name[:19]):<20}{rich_escape(row.kind[:13]):<14}"
                     f"{rich_escape(row.policy_state[:10]):<11}{rich_escape(health[:21]):<22}"
@@ -10220,6 +10277,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                     "healthy": TOKENS.accent_green,
                     "warning": TOKENS.accent_amber,
                     "failed": TOKENS.accent_red,
+                    "stale": TOKENS.accent_blue,
                 }.get(doctor.run_outcome, TOKENS.accent_amber)
                 doctor_summary += (
                     f"  [{outcome_color} bold]outcome={doctor.run_outcome}[/]"
@@ -12876,12 +12934,18 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             # the selected field's editor with the digit appended (30 -> 301);
             # Enter edits a field (GAP-1282).
             return SetupPanelAction(False)
+        if key == "q" or (character or key) in CASE_SENSITIVE_PANEL_KEYS:
+            # q closes the drawer or overlay, as the ? sheet says, and T, A, V,
+            # N and P switch panels like the digits. q typed "30q" into the
+            # selected Timeout field (GAP-2520).
+            return SetupPanelAction(False)
         seed = _typed_seed(key, character)
         if seed:
             # Letters the editor uses as commands (j k s r w ...) were
-            # handled above; any other printable key opens the text box.
+            # handled above. Other printable keys never type into a field:
+            # "c" then "q" gave "30cq"; the hint bar says Enter edits (GAP-2520).
             if text_row and field is not None:
-                return SetupPanelAction(True, open_field_editor="config", field_editor_value=field.value + seed)
+                return SetupPanelAction(True, hint="Press Enter to edit this value.")
             if field is not None and field.interactive:
                 return SetupPanelAction(True, hint="Press Enter or Space to change this value.")
             reason = field.hint if field is not None else ""
@@ -13976,7 +14040,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 model.apply_loaded([], exc)
             if hint := _no_connector_hint(stderr):
                 model.message = hint
-        self._end_load(panel, loading, announce, model.message, f"{_panel_label(panel)}: {len(model.items)} loaded.")
+        self._end_load(panel, loading, announce, model.message, _catalog_loaded_text(panel, model))
         self._render_chrome()
 
     def _end_load(self, panel: str, loading: str, announce: bool, error: str, done: str) -> None:
@@ -14029,7 +14093,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if not any(text for _name, text in results):
             model.message = f"Could not load {panel} for any connector."
         model.set_connector_filter(self._connector_filter())
-        self._end_load(panel, loading, announce, model.message, f"{_panel_label(panel)}: {len(model.items)} loaded.")
+        self._end_load(panel, loading, announce, model.message, _catalog_loaded_text(panel, model))
         self._render_chrome()
 
     async def _confirm_and_run_intent(self, intent: Any) -> int | None:

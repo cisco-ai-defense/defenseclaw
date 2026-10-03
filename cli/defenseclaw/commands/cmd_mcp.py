@@ -303,7 +303,17 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
 
 
 def _mcp_not_loaded_next_step(s: MCPServerEntry, connector: str) -> str:
-    """Explain why the agent skips *s* and how to repair it (GAP-2514)."""
+    """Explain why the agent skips *s* and how to repair it (GAP-2514).
+
+    ``mcp set`` writes the user scope, so for a workspace ``.mcp.json`` or a
+    per-project entry it would add a second copy and leave this one broken
+    (GAP-2528); those are repaired in their own file.
+    """
+    if not s.load_problem_set_repairs:
+        return (
+            f"Claude Code skips it: it {s.load_problem}. Repair it by adding "
+            f'"type": "http" to the {s.name} entry there'
+        )
     return (
         f"Claude Code skips it: it {s.load_problem}. Repair it with: "
         f"defenseclaw mcp set {s.name} --url {s.url} --connector {connector} "
@@ -474,6 +484,7 @@ def _mcp_list_json_items(
             verdict_label = "bundled"
         if s.load_problem:
             entry["not_loaded"] = s.load_problem
+            entry["not_loaded_repair"] = _mcp_not_loaded_next_step(s, connector)
             verdict_label = "not loaded"
         entry["verdict"] = verdict_label
         out.append(entry)

@@ -1240,7 +1240,7 @@ def setup_llm(
     type=click.Choice(["strict", "balanced", "permissive", "none"], case_sensitive=False),
     help="Scan policy preset (strict, balanced, permissive, none)",
 )
-@click.option("--lenient", is_flag=True, default=None, help="Tolerate malformed skills")
+@click.option("--lenient/--no-lenient", default=None, help="Tolerate malformed skills (or fail them)")
 @click.option("--verify/--no-verify", default=True, help="Run connectivity checks after setup (default: on)")
 @click.option("--non-interactive", is_flag=True, help="Use flags instead of prompts")
 @pass_ctx
@@ -1433,7 +1433,7 @@ def _log_llm_change(app: AppContext, target_path: str, previous: str) -> None:
     try:
         saved_change_audit(app.logger).log_config_change("llm", details)
     except CanonicalObservabilityError as exc:
-        click.echo(f"  ⚠ Change saved, but the gateway did not confirm the audit event ({exc}).", err=True)
+        ux.echo(f"  ⚠ Change saved, but the gateway did not confirm the audit event ({exc}).", err=True)
 
 
 def _role_to_target_path(role: str) -> str:
@@ -2698,6 +2698,14 @@ def _print_summary(sc, llm, aid) -> None:
     help="LLM provider (anthropic or openai)",
 )
 @click.option("--llm-model", default=None, help="LLM model for semantic analysis")
+@click.option("--api-endpoint", default=None, help="Cisco AI Defense API URL for the api analyzer")
+@click.option("--api-key-env", default=None, help="Env var holding the Cisco AI Defense API key")
+@click.option(
+    "--api-timeout-ms",
+    type=click.IntRange(min=1),
+    default=None,
+    help="Cisco AI Defense request timeout in milliseconds",
+)
 @click.option("--scan-prompts", is_flag=True, default=None, help="Scan MCP prompts")
 @click.option("--scan-resources", is_flag=True, default=None, help="Scan MCP resources")
 @click.option("--scan-instructions", is_flag=True, default=None, help="Scan server instructions")
@@ -2709,6 +2717,9 @@ def setup_mcp_scanner(
     analyzers,
     llm_provider,
     llm_model,
+    api_endpoint,
+    api_key_env,
+    api_timeout_ms,
     scan_prompts,
     scan_resources,
     scan_instructions,
@@ -2737,6 +2748,14 @@ def setup_mcp_scanner(
             llm.provider = llm_provider
         if llm_model is not None:
             llm.model = llm_model
+        # The TUI's "Use a remote scan API" goal sends these; without them
+        # the command failed with "No such option: --api-endpoint" (GAP-2529).
+        if api_endpoint is not None:
+            aid.endpoint = api_endpoint
+        if api_key_env is not None:
+            aid.api_key_env = api_key_env
+        if api_timeout_ms is not None:
+            aid.timeout_ms = api_timeout_ms
         if scan_prompts is not None:
             mc.scan_prompts = scan_prompts
         if scan_resources is not None:
@@ -2829,6 +2848,10 @@ def _print_mcp_summary(mc, llm, aid) -> None:
             rows.append(("llm", "base_url", llm.base_url))
     if aid.endpoint:
         rows.append(("cisco_ai_defense", "endpoint", aid.endpoint))
+        # --api-key-env and --api-timeout-ms are saved too (GAP-2539).
+        if aid.api_key_env:
+            rows.append(("cisco_ai_defense", "api_key_env", aid.api_key_env))
+        rows.append(("cisco_ai_defense", "timeout_ms", str(aid.timeout_ms)))
     if mc.scan_prompts:
         rows.append(("scanners.mcp_scanner", "scan_prompts", "true"))
     if mc.scan_resources:
@@ -4493,19 +4516,21 @@ def setup_gateway(
     target_changed = (gw.host, gw.port) != previous_target
     _print_gateway_summary(gw, openclaw=uses_openclaw)
 
-    if verify and not api_port_changed and not gateway_stopped:
+    # The sidecar can only be checked while it runs on its current API port.
+    check_sidecar = verify and not api_port_changed and not gateway_stopped
+    if check_sidecar or (verify and uses_openclaw):
         from defenseclaw.commands.cmd_doctor import _check_openclaw_gateway, _check_sidecar, _DoctorResult
 
         ux.section("Verifying gateway connectivity")
         r = _DoctorResult()
         # Hook-only installs have no OpenClaw gateway to reach. The OpenClaw
         # listener check does not depend on the running sidecar, so it runs
-        # for a new address too (GAP-2486).
+        # for a new address (GAP-2486) and with the sidecar stopped (GAP-2505).
         if uses_openclaw:
             _check_openclaw_gateway(app.cfg, r)
-        if not target_changed:
+        if check_sidecar and not target_changed:
             _check_sidecar(app.cfg, r)
-        elif not r.failed:
+        elif check_sidecar and not r.failed:
             click.echo("  The gateway connects to the new address after the restart below.")
             click.echo("  Check it then with: defenseclaw doctor")
         click.echo()
@@ -16220,7 +16245,7 @@ def _check_openclaw_gateway(host: str = "127.0.0.1", port: int = 18789) -> bool:
 
     if not went_unhealthy:
         elapsed = int(time.monotonic() - start)
-        click.echo(f" ✓ (healthy, stable for {elapsed}s)")
+        ux.echo(f" ✓ (healthy, stable for {elapsed}s)")
         return True
 
     # Phase 3 — gateway went unhealthy (config-triggered restart);
@@ -16235,7 +16260,7 @@ def _check_openclaw_gateway(host: str = "127.0.0.1", port: int = 18789) -> bool:
 
     if recovered:
         elapsed = int(time.monotonic() - start)
-        click.echo(f" ✓ (recovered after restart, {elapsed}s)")
+        ux.echo(f" ✓ (recovered after restart, {elapsed}s)")
         return True
     elapsed = int(time.monotonic() - start)
     click.echo(f" ✗ (unhealthy after {elapsed}s)")

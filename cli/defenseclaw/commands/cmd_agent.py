@@ -3015,7 +3015,7 @@ def _apply_runtime_settings(
         ux.subhead(
             "--no-restart specified: the setting is saved but the running gateway keeps "
             "its current planes until you restart it "
-            "('defenseclaw setup restart').",
+            "('defenseclaw-gateway restart').",
             indent="  ",
         )
         return
@@ -3038,11 +3038,20 @@ def _apply_runtime_settings(
             connector=connector,
             connectors=connectors,
         )
+    except cmd_setup._OpenClawGatewayNotRunning:
+        # GAP-2548: defenseclaw-gateway, which runs the runtime planes,
+        # restarted fine; only OpenClaw's own gateway is down. That does not
+        # stop the planes, so this is not a failed restart.
+        ux.warn(
+            "The OpenClaw gateway is not running, so OpenClaw traffic is not guarded "
+            "until you start it: 'openclaw gateway run'.",
+            indent="  ",
+        )
     except Exception as exc:  # noqa: BLE001 - the config is already saved
         ux.err(f"Gateway restart failed: {exc}", indent="  ")
         ux.subhead(
             "The configuration is saved. Restart the gateway to apply it: "
-            "'defenseclaw setup restart'.",
+            "'defenseclaw-gateway restart'.",
             indent="    ",
         )
         raise SystemExit(1) from exc

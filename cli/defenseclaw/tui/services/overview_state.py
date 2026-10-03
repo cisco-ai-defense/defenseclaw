@@ -466,6 +466,28 @@ class ObservabilityDestinationRow:
     activity: str = ""
     health_reason: str = ""
 
+    @property
+    def health_label(self) -> str:
+        """HEALTH in plain words: "healthy", or "degraded (queue full)".
+
+        A healthy exporter reports "activated" at start and
+        "delivery_recovered" after every successful export, failure or not,
+        so "healthy (delivery_recovered)" showed after a plain restart
+        (GAP-2523). Those codes are not shown; other codes lose the "_".
+        """
+
+        reason = self.health_reason.strip()
+        if not reason or (self.state == "healthy" and reason in _ROUTINE_HEALTH_REASONS):
+            return self.state
+        if reason.isidentifier() and reason.islower():
+            reason = reason.replace("_", " ")
+        return f"{self.state} ({reason})"
+
+
+# Lifecycle codes a healthy destination reports on start and after each
+# successful export; they are not news (GAP-2523).
+_ROUTINE_HEALTH_REASONS = frozenset({"activated", "delivery_recovered", "scrape_recovered"})
+
 
 @dataclass(frozen=True)
 class ObservabilityStorageStatus:
@@ -496,6 +518,7 @@ class DoctorBoxState:
     recovered: bool = False
     checks: tuple[RenderedDoctorCheck, ...] = ()
     all_green: bool = False
+    note: str = ""
 
 
 @dataclass(frozen=True)
@@ -836,7 +859,14 @@ class OverviewPanelModel:
                         "see the DOCTOR panel or rerun the selected repair",
                     )
                 )
-            elif self.doctor.outcome_state(now=now) == "failed" and effective_failed == 0 and not removed:
+            elif (
+                self.doctor.outcome_state(now=now) == "failed"
+                and effective_failed == 0
+                and not removed
+                and not self._doctor_failed_only_stale(stale_failures, effective_failed, now=now)
+            ):
+                # Not for a run whose only failures are stale: that showed a
+                # red banner beside "1 stale failure(s)" (GAP-2518).
                 notices.append(
                     OverviewNotice(
                         "error",
@@ -919,13 +949,16 @@ class OverviewPanelModel:
                 )
             )
         elif runtime.scanned and runtime.findings == 0 and runtime.processes and not self.gateway_down():
-            why = f" ({runtime.degraded_reason}; press N for details)" if runtime.degraded_reason else ""
+            # One short line like the other notices; the Runtime panel (N)
+            # carries the full reason and what to do about it (GAP-2533).
+            why, tail = "", "no findings above the reporting floor"
+            if runtime.degraded_reason:
+                why, tail = f" ({runtime.degraded_reason})", "no findings; N for details"
             notices.append(
                 OverviewNotice(
                     "info",
-                    f"Runtime is {runtime.health_title or 'watching'}{why}: "
-                    f"{runtime.processes} processes and {runtime.connections} connections, "
-                    "no findings above the reporting floor.",
+                    f"Runtime is {runtime.health_title or 'watching'}{why}: {runtime.processes} processes, "
+                    f"{runtime.connections} connections, {tail}",
                 )
             )
 
@@ -971,7 +1004,9 @@ class OverviewPanelModel:
     def doctor_check_stale_reason(self, check: DoctorCheck) -> str:
         """Why a cached doctor check no longer describes the live state, or ""."""
 
-        if live_health_contradicts(check, self.health):
+        # The last /health payload is kept while the gateway is down, so it
+        # cannot clear a check that the gateway being down explains.
+        if not self.gateway_down() and live_health_contradicts(check, self.health):
             return "live state OK"
         if self._doctor_destination_removed(check):
             return "destination removed"
@@ -1018,16 +1053,42 @@ class OverviewPanelModel:
             rendered.append(RenderedDoctorCheck(badge=badge, label=check.label, detail=detail, stale=stale))
 
         outcome = self.doctor.outcome_state(now=now)
+        stale = self.doctor.is_stale(now=now)
+        note = ""
+        if self._doctor_failed_only_stale(stale_failures, effective_failed, now=now):
+            # The only failures are ones /health now contradicts, so the run
+            # is out of date, not failed (GAP-2518).
+            outcome = "stale"
+        all_green = not rendered and outcome in {"", "healthy"}
+        if all_green and self.gateway_down():
+            # A passing run from before the gateway stopped read "HEALTHY /
+            # All checks passing" beside an all-offline SERVICES (GAP-2518).
+            outcome, stale, all_green = "stale", True, False
+            note = "The gateway stopped after this run."
         return DoctorBoxState(
             empty=False,
             summary_parts=tuple(parts),
             repair_summary_parts=self.doctor.repair_summary_parts(),
             run_outcome=outcome,
             age_label=format_age(self.doctor.age(now=now)),
-            stale=self.doctor.is_stale(now=now),
+            stale=stale,
             recovered=stale_count > 0,
             checks=tuple(rendered),
-            all_green=not rendered and outcome in {"", "healthy"},
+            all_green=all_green,
+            note=note,
+        )
+
+    def _doctor_failed_only_stale(self, stale_failures: int, effective_failed: int, *, now: datetime) -> bool:
+        """The run failed only on checks the live state now contradicts."""
+
+        doctor = self.doctor
+        return (
+            doctor is not None
+            and stale_failures > 0
+            and effective_failed == 0
+            and not doctor.repair_count("failed")
+            and not doctor.repair_count("blocked")
+            and doctor.outcome_state(now=now) == "failed"
         )
 
     def keys_status(self) -> KeysStatus:
@@ -1489,10 +1550,11 @@ class OverviewPanelModel:
             return ""
         details = self.health.watcher.details
         parts: list[str] = []
-        if "skill_dirs" in details:
-            parts.append(f"{details['skill_dirs']} skill dirs")
-        if "plugin_dirs" in details:
-            parts.append(f"{details['plugin_dirs']} plugin dirs")
+        for key, noun in (("skill_dirs", "skill dir"), ("plugin_dirs", "plugin dir")):
+            if key in details:
+                count = details[key]
+                # "1 plugin dir", not "1 plugin dirs" (GAP-2526).
+                parts.append(f"{count} {noun}" if str(count).strip() == "1" else f"{count} {noun}s")
         return ", ".join(parts)
 
     def guardrail_mode_label(self, connector: str = "") -> str:

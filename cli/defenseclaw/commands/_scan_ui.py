@@ -64,6 +64,8 @@ from typing import Any
 
 import click
 
+from defenseclaw import ux
+
 # ---------------------------------------------------------------------------
 # Component / category definitions
 # ---------------------------------------------------------------------------
@@ -430,4 +432,4 @@ def record_scan(logger: Any, result: Any, **kwargs: Any) -> None:
             _SCAN_NOT_RECORDED_NOTED = True
             from defenseclaw.commands._audit_notice import not_recorded_warning
 
-            click.echo(not_recorded_warning("this scan result"), err=True)
+            ux.echo(not_recorded_warning("this scan result"), err=True)

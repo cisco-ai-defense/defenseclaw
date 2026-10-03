@@ -2941,6 +2941,79 @@ def _build_redaction_args(fields: Sequence[WizardFormField]) -> tuple[str, ...]:
     return tuple(args)
 
 
+# What each scanner and LLM field means and what its choices do. The
+# generated hints only repeated the label or flag ("Select scan policy.",
+# "Sets --llm-model.", GAP-2522).
+_SCANNER_LLM_HINTS: dict[str, str] = {
+    "--llm-provider": "anthropic or openai; saved in the shared llm: block every scanner uses.",
+    "--llm-model": "Model id for the LLM review, e.g. claude-haiku-4-5; saved in the shared llm: block.",
+}
+_SKILL_SCANNER_HINTS: dict[str, str] = {
+    **_SCANNER_LLM_HINTS,
+    "--use-behavioral": "Follow data through the skill's scripts to catch behavior its description hides.",
+    "--use-llm": "Have an LLM review each skill's instructions, with the LLM Provider and Model below.",
+    "--llm-consensus-runs": "LLM reviews per skill; only findings most runs agree on are kept. 0 = one review.",
+    "--enable-meta": "A second LLM pass over all findings that drops false positives and ranks the rest.",
+    "--use-trigger": "Flag skill descriptions so broad that they would trigger on almost any request.",
+    "--use-virustotal": "Look up the skill's files on VirusTotal; needs VIRUSTOTAL_API_KEY.",
+    "--use-aidefense": "Send skill content to Cisco AI Defense for analysis; needs an AI Defense API key.",
+    "--policy": (
+        "strict: fewest exceptions, for untrusted skills; balanced: between the two; "
+        "permissive: fewest false positives, for trusted skills (the default); "
+        "none: the scanner's built-in policy."
+    ),
+    "--lenient": "yes (the default): scan skills with malformed front matter or missing fields; no: fail them.",
+}
+_MCP_SCANNER_HINTS: dict[str, str] = {
+    **_SCANNER_LLM_HINTS,
+    "--analyzers": (
+        "auto (the default) picks them for you, or a comma-separated list: yara (local rules), "
+        "api (Cisco AI Defense), llm (LLM review), behavioral (code vs. description), "
+        "readiness (timeouts, retries)."
+    ),
+    "--api-endpoint": "Cisco AI Defense API URL for the api analyzer; empty keeps the current one.",
+    "--api-key-env": "Env var NAME holding the Cisco AI Defense API key, e.g. CISCO_AI_DEFENSE_API_KEY.",
+    "--api-timeout-ms": "How long the api analyzer waits for Cisco AI Defense, in milliseconds.",
+    "--scan-prompts": "Also check the prompt templates the server offers.",
+    "--scan-resources": "Also check the resources (files, data) the server exposes.",
+    "--scan-instructions": "Also check the instructions text the server sends to the agent.",
+}
+_LLM_FORM_HINTS: dict[str, str] = {
+    "--role": (
+        "unified: the shared LLM for scanners and judge; agent: the same, and the judge inherits it; "
+        "judge: only the guardrail judge's LLM."
+    ),
+    "--provider": "Where the model runs; Bedrock, Vertex AI and Azure show their own fields below.",
+    "--model": "Model id, e.g. claude-haiku-4-5; Enter opens the model picker.",
+    "--api-key-env": "Env var NAME holding the API key; defenseclaw keys set stores it.",
+    "--base-url": "Endpoint of a proxy or self-hosted model; empty uses the provider's.",
+    "--timeout": "Seconds to wait for one LLM request.",
+    "--max-retries": "How often a failed or timed-out LLM request is retried.",
+    "--bedrock-auth-mode": (
+        "api_key: a Bedrock API key; iam_credentials: access key env vars; "
+        "profile: an AWS profile; instance_role: the host's IAM role."
+    ),
+    "--bedrock-access-key-env": "Env var holding the AWS access key ID.",
+    "--bedrock-secret-key-env": "Env var holding the AWS secret access key.",
+    "--bedrock-session-token-env": "Env var holding the AWS session token (temporary credentials).",
+    "--bedrock-profile-name": "AWS profile name from ~/.aws/config.",
+    "--bedrock-inference-profile": "Inference-profile prefix for cross-region models, e.g. us.",
+    "--vertex-project-id": "GCP project that hosts Vertex AI.",
+    "--vertex-auth-mode": (
+        "service_account: a key file; adc: gcloud application-default credentials; "
+        "workload_identity: the workload's own identity."
+    ),
+    "--vertex-service-account-json-env": "Env var holding the path to the service-account JSON file.",
+    "--azure-auth-mode": "api_key: an Azure OpenAI key; managed_identity: the host's managed identity.",
+}
+
+
+def _hinted(fields: tuple[WizardFormField, ...], hints: Mapping[str, str]) -> tuple[WizardFormField, ...]:
+    """``fields`` with the hints in ``hints`` (by flag) in place of generated ones."""
+
+    return tuple(replace(field, hint=hints[field.flag]) if field.flag in hints else field for field in fields)
+
+
 def wizard_form_defs(
     wizard: SetupWizard | int, cfg: object | Mapping[str, Any] | None = None
 ) -> tuple[WizardFormField, ...]:
@@ -2957,7 +3030,13 @@ def wizard_form_defs(
     if builder is not None:
         return builder(cfg)
     if wizard == SetupWizard.SKILL_SCANNER:
-        return (
+        # Policy and lenient open on the effective config, as the gateway
+        # form does: "balanced" / "no" showed on a permissive, lenient
+        # install, and Run kept the real values (GAP-2536). A field left at
+        # its current value emits no flag; a change always emits one.
+        policy, lenient = _skill_scanner_policy_values(cfg)
+        policies = ("strict", "balanced", "permissive", "none")
+        skill_fields = (
             WizardFormField("Behavioral Analyzer", "bool", "--use-behavioral", value="no", default="no"),
             WizardFormField("LLM Analyzer", "bool", "--use-llm", value="no", default="no"),
             WizardFormField(
@@ -2978,22 +3057,18 @@ def wizard_form_defs(
                 "Scan Policy",
                 "choice",
                 "--policy",
-                value="balanced",
-                default="balanced",
-                options=("strict", "balanced", "permissive", "none"),
+                value=policy,
+                default=policy,
+                options=policies if policy in policies else (policy, *policies),
             ),
-            WizardFormField("Lenient Mode", "bool", "--lenient", value="no", default="no"),
+            WizardFormField("Lenient Mode", "bool", "--lenient", "--no-lenient", value=lenient, default=lenient),
             WizardFormField("Verify After Setup", "bool", "--verify", "--no-verify", value="yes", default="yes"),
         )
+        return _hinted(skill_fields, _SKILL_SCANNER_HINTS)
     if wizard == SetupWizard.MCP_SCANNER:
-        return (
-            WizardFormField(
-                "Analyzers",
-                "string",
-                "--analyzers",
-                value="yara,api,llm,behavioral,readiness",
-                default="yara,api,llm,behavioral,readiness",
-            ),
+        analyzers = _cfg_str(cfg, "scanners.mcp_scanner.analyzers", "auto")  # GAP-2536
+        mcp_fields = (
+            WizardFormField("Analyzers", "string", "--analyzers", value=analyzers, default=analyzers),
             WizardFormField(
                 "LLM Provider",
                 "choice",
@@ -3029,6 +3104,7 @@ def wizard_form_defs(
             WizardFormField("Scan Instructions", "bool", "--scan-instructions", value="no", default="no"),
             WizardFormField("Verify After Setup", "bool", "--verify", "--no-verify", value="yes", default="yes"),
         )
+        return _hinted(mcp_fields, _MCP_SCANNER_HINTS)
     if wizard == SetupWizard.GATEWAY:
         # Start from the configured gateway: the form showed localhost /
         # 9090 / 9099 on a gateway at 127.0.0.1:19020, so an edit of one
@@ -3154,6 +3230,21 @@ _GUARDRAIL_JUDGE_SECTIONS: tuple[str, ...] = (
 
 def _cfg_str(cfg: object | Mapping[str, Any] | None, path: str, default: str = "") -> str:
     return str(get_config_value(cfg, path, default) or default).strip()
+
+
+def _skill_scanner_policy_values(cfg: object | Mapping[str, Any] | None) -> tuple[str, str]:
+    """The effective skill-scanner policy and lenient mode as form values.
+
+    The defaults match ``SkillScannerConfig`` (permissive, lenient on);
+    an empty policy is what ``--policy none`` saves.
+    """
+
+    policy = get_config_value(cfg, "scanners.skill_scanner.policy", "permissive")
+    policy = str(policy).strip() or "none"
+    lenient = get_config_value(cfg, "scanners.skill_scanner.lenient", True)
+    if not isinstance(lenient, bool):
+        lenient = str(lenient).strip().lower() in {"1", "true", "yes", "on"}
+    return policy, "yes" if lenient else "no"
 
 
 def _cfg_port(cfg: object | Mapping[str, Any] | None, path: str) -> str:
@@ -6468,7 +6559,7 @@ def _llm_wizard_fields_for(
         ),
     )
     driver = {"provider": provider, "role": role, "bedrock_auth_mode": bedrock_auth_mode}
-    return _apply_dynamic_fields(candidates, overrides, driver)
+    return _apply_dynamic_fields(_hinted(candidates, _LLM_FORM_HINTS), overrides, driver)
 
 
 def llm_wizard_fields(cfg: object | Mapping[str, Any] | None = None) -> tuple[WizardFormField, ...]:
@@ -8950,6 +9041,8 @@ def _default_wizard_field_hint(label: str, kind: str, flag: str = "") -> str:
     if kind == "bool":
         if lowered.startswith("restart gateway"):
             return _RESTART_GATEWAY_HINT
+        if lowered == "verify after setup":
+            return "Run the connectivity checks once the settings are saved."
         return f"Toggle {lowered}."
     if kind in {"choice", "preset", "whtype", "regid"}:
         return f"Select {lowered}."
