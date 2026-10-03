@@ -181,7 +181,9 @@ def _scan_one_connector(
         app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "openclaw"
     )
     if not as_json:
-        click.echo(ux.dim(f"Scanning live {label} environment …"), err=True)
+        # Neutral wording: some connectors (Hermes) are read from disk, and the
+        # report header names the real source (GAP-2312).
+        click.echo(ux.dim(f"Scanning {label} inventory …"), err=True)
     inv = build_claw_aibom(app.cfg, live=True, categories=cats, connector=connector)
 
     enrich_with_policy(

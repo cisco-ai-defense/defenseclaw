@@ -312,3 +312,42 @@ func TestEnterpriseSecretArgumentErrorsPrintUsage(t *testing.T) {
 		}
 	}
 }
+
+// secret set and secret remove both printed only "✓ ensure: done" and the
+// apply steps; each names the command and the credential it changed
+// (GAP-2305).
+func TestSecretChangeOutputNamesTheCommandAndCredential(t *testing.T) {
+	applied := func() *enterprisestatus.Result {
+		result := enterprisestatus.New(enterpriseunix.ActionEnsure, "standalone", "linux", "1.0.0")
+		result.OK = true
+		result.Changes = []string{"applied the changed secrets"}
+		return result
+	}
+	for _, tc := range []struct {
+		action  string
+		existed bool
+		want    string
+	}{
+		{"set", false, "✓ secret set: done\n  - stored credential dctest-cred\n  - applied the changed secrets\n"},
+		{"remove", true, "✓ secret remove: done\n  - removed credential dctest-cred\n  - applied the changed secrets\n"},
+		{"remove", false, "  - credential dctest-cred was not stored; nothing to remove\n"},
+	} {
+		result := applied()
+		var out bytes.Buffer
+		if err := printLifecycleResult(&out, describeSecretChange(result, tc.action, "dctest-cred", tc.existed), false); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(out.String(), tc.want) || strings.Contains(out.String(), "ensure") {
+			t.Fatalf("secret %s output = %q", tc.action, out.String())
+		}
+		if result.Action != enterpriseunix.ActionEnsure || len(result.Changes) != 1 {
+			t.Fatalf("the JSON result changed: %+v", result)
+		}
+	}
+	failed := enterprisestatus.New(enterpriseunix.ActionEnsure, "standalone", "linux", "1.0.0")
+	failed.AddError("change_failed", "the installed config still references credential dctest-cred")
+	shown := describeSecretChange(failed, "remove", "dctest-cred", true)
+	if shown.Action != "secret remove" || len(shown.Changes) != 0 {
+		t.Fatalf("failed remove = %+v", shown)
+	}
+}

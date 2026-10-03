@@ -534,6 +534,18 @@ class TestRegistryApproveReject(RegistryCommandTestBase):
         self.assertIn("entries: demo-skill", result.output)
         self.assertNotIn("sync` first", result.output)
 
+    def test_approve_with_wrong_type_points_at_other_type(self):
+        # GAP-2307: the entry exists as a skill; --type mcp must say so.
+        result = self.runner.invoke(registry, [
+            "approve", "corp-skills", "demo-skill", "--type", "mcp", "--no-repromote",
+        ], obj=self.app)
+        self.assertEqual(result.exit_code, 2, result.output)
+        self.assertIn(
+            "corp-skills has no mcp entry 'demo-skill'; it is a skill entry (use --type skill)",
+            result.output,
+        )
+        self.assertNotIn("entries: none", result.output)
+
     def test_approve_in_never_synced_source_says_sync_first(self):
         self.invoke([
             "add", "fresh", "--kind", "http_yaml", "--content", "skill",
@@ -1045,6 +1057,16 @@ class TestFileAdapterPathValidation(RegistryCommandTestBase):
         result = self.invoke(["edit", "local", "--url", present, "--json"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertNotIn("warning", json.loads(result.output))
+
+    def test_add_file_kind_warns_when_url_is_a_directory(self):
+        # GAP-2306: an existing directory is not "missing".
+        result = self.invoke([
+            "add", "local-dir", "--kind", "file", "--content", "mcp",
+            "--url", self.tmp_dir, "--non-interactive",
+        ])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn(f"{self.tmp_dir} is a directory, not a manifest file", result.output)
+        self.assertNotIn("does not exist yet", result.output)
 
     def test_add_file_kind_accepts_tilde_expansion(self):
         # ``~/manifest.yaml`` expands to an absolute path so it should
