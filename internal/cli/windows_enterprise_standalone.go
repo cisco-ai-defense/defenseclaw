@@ -267,7 +267,10 @@ func runWindowsEnterpriseStandaloneAction(
 	if (action == "status" || action == "verify") && !windowsEnterpriseIsElevated() && windowsEnterpriseInstallerRefusedModule(report) {
 		// A standard account cannot run the installer's own integrity checks,
 		// which only an administrator can; its refusal read as a broken
-		// install with administrator-only advice (GAP-1720).
+		// install with administrator-only advice (GAP-1720). Its --json
+		// result still reports what any account can read: the recorded
+		// deployment and the service states (GAP-2162).
+		applyWindowsEnterpriseRecordedDeployment(result)
 		result.AddError("elevation_required", windowsEnterpriseStandardUserInspectionAnswer(action))
 		return finishWindowsEnterpriseStandalone(cmd, opts, result, enterprisestatus.WindowsExitAccessDenied)
 	}
@@ -1163,14 +1166,20 @@ func finishWindowsEnterpriseStandalone(
 	exitCode := result.Finish("windows", failureCode)
 	result.LogPath = windowsEnterpriseStandaloneObserver(result, opts)
 	unknownProfile := windowsEnterpriseUnknownProfileRequested(opts) && exitCode != 0 && len(result.Errors) != 0
+	// A standard account's status or verify ran none of the deployment's
+	// checks, so it is one refusal line too, not a FAILED summary and "the
+	// standalone enterprise status failed: ..." (GAP-2162).
+	oneLine := unknownProfile || (exitCode == enterprisestatus.WindowsExitAccessDenied &&
+		(result.Action == "status" || result.Action == "verify") &&
+		len(result.Errors) != 0 && result.Errors[0].Code == "elevation_required")
 	if opts.jsonOutput {
 		if err := json.NewEncoder(cmd.OutOrStdout()).Encode(result); err != nil {
 			return withExitCode(fmt.Errorf("encode the standalone lifecycle result: %w", err), enterprisestatus.WindowsExitFailure)
 		}
-	} else if !unknownProfile {
+	} else if !oneLine {
 		writeWindowsEnterpriseStandaloneSummary(cmd.OutOrStdout(), result)
 	}
-	if unknownProfile {
+	if oneLine {
 		// An unknown --profile selected no profile: one error line, not a
 		// "(standalone): FAILED" summary or "the standalone enterprise ...
 		// failed" of a profile never chosen (GAP-2040, GAP-2113).
@@ -1277,11 +1286,22 @@ var windowsEnterpriseServiceState = windowsEnterpriseSCMServiceState
 // the deployment this computer records and its services' states. An unknown
 // --profile selects no profile and inspects nothing, so its --json result
 // reported an installed computer as installed=false with no services
-// (GAP-2113).
+// (GAP-2113). A standard account cannot read the administrator-only record,
+// so for it a record that is present counts as installed with no version;
+// the service manager's states are readable by any account (GAP-2162).
+// Only the enumerator's and sensor helper's readiness follow from a service
+// state (as in a full status); the gateway's and guardian's readiness,
+// coverage_complete and security_complete need checks this refusal never
+// ran, so a health_not_checked warning says so instead of leaving their
+// false values to read as failed checks (GAP-2161).
 func applyWindowsEnterpriseRecordedDeployment(result *enterprisestatus.Result) {
 	for _, profile := range []string{managed.ProfileStandalone, managed.ProfileSecureClient} {
 		deployment, err := windowsEnterpriseDeploymentInspector(profile)
-		if err != nil || deployment.State != winpath.EnterpriseDeploymentInstalled {
+		if err != nil {
+			continue
+		}
+		unreadable := deployment.State == winpath.EnterpriseDeploymentUnknown && !windowsEnterpriseIsElevated()
+		if deployment.State != winpath.EnterpriseDeploymentInstalled && !unreadable {
 			continue
 		}
 		result.Profile, result.Installed, result.InstalledVersion = profile, true, deployment.ProductVersion
@@ -1291,12 +1311,23 @@ func applyWindowsEnterpriseRecordedDeployment(result *enterprisestatus.Result) {
 			{"DefenseClawHookEnumerator", "enumerator"},
 			{"DefenseClawSensorHelper", "sensor_helper"},
 		} {
-			if state := windowsEnterpriseServiceState(service.name); state != "absent" {
-				result.Services = append(result.Services, enterprisestatus.Service{
-					Name: service.name, Kind: service.kind, State: state, Required: true,
-				})
+			state := windowsEnterpriseServiceState(service.name)
+			if state == "absent" {
+				continue
+			}
+			result.Services = append(result.Services, enterprisestatus.Service{
+				Name: service.name, Kind: service.kind, State: state, Required: true,
+			})
+			switch service.kind {
+			case "enumerator":
+				result.Readiness.Enumerator = state == "running"
+			case "sensor_helper":
+				result.Readiness.SensorHelper = state == "running"
 			}
 		}
+		result.AddWarning("health_not_checked", "this request was refused before any health check ran, so readiness.gateway, readiness.guardian, "+
+			"coverage_complete and security_complete were not checked (they read false); only the recorded deployment and the service states are reported. "+
+			"For the deployment's health, run `& '"+managedWindowsAdminCLI()+"' enterprise windows verify --profile "+profile+" --json` from an elevated PowerShell prompt")
 		return
 	}
 }
