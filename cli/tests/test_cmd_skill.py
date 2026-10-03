@@ -2115,6 +2115,26 @@ class TestSkillList(SkillCommandTestBase):
         self.assertIn("ghost-skill", result.output)
 
     @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full")
+    def test_list_unblocked_skill_with_quarantined_files_is_quarantined(self, mock_list):
+        # GAP-2008: after a bare unblock the files stay in quarantine until an
+        # explicit restore, so the row says quarantined, not removed.
+        mock_list.return_value = {"skills": []}
+        self.app.store.insert_scan_result(
+            str(uuid.uuid4()), "skill-scanner", "/h/.claude/skills/held-skill",
+            datetime.now(timezone.utc), 500, 1, "CRITICAL", "{}",
+        )
+        self.app.store.create_quarantine_record(
+            "skill", "held-skill", "/h/.claude/skills/held-skill",
+            "/h/.defenseclaw/quarantine/skills/amp/held-skill", "sha256:x",
+            "watcher enforcement", "amp", state="active",
+        )
+
+        result = self.invoke(["list"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("quarantined", result.output)
+        self.assertNotIn("removed", result.output)
+
+    @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full")
     def test_list_no_duplicate_entries(self, mock_list):
         """If a skill is in both OpenClaw list and actions DB, it shouldn't appear twice."""
         mock_list.return_value = {
