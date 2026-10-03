@@ -8,6 +8,8 @@ keywords:
   - Codex notify bridge
 ---
 
+import { ConnectorSupport } from '@/components/support-matrix';
+
 The Codex connector wires DefenseClaw into [Codex's documented hooks](https://github.com/openai/codex), [native OpenTelemetry exporter](https://learn.chatgpt.com/docs/config-file/config-advanced#observability-and-telemetry), and the notify bridge for agent-turn-complete events.
 
 <Callout type="info">
@@ -20,6 +22,8 @@ are not proxy-intercepted.
 </Callout>
 
 ## Platform support
+
+<ConnectorSupport id="codex" />
 
 | Platform | Status | Connector path |
 | --- | --- | --- |

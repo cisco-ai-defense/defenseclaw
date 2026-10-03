@@ -8,9 +8,13 @@ keywords:
   - Copilot guardrail
 ---
 
+import { ConnectorSupport } from '@/components/support-matrix';
+
 The GitHub Copilot CLI connector wires DefenseClaw into [Copilot CLI hooks](https://docs.github.com/copilot/) globally under `~/.copilot/hooks/` by default, with an optional workspace mode for `<workspace>/.github/hooks/`. Native ask is supported on `preToolUse`, so HITL approvals surface inside the agent UI.
 
 ## Platform support
+
+<ConnectorSupport id="copilot" />
 
 | Platform | Status | Connector path |
 | --- | --- | --- |

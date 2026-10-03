@@ -9,6 +9,8 @@ keywords:
   - Amp Galileo
 ---
 
+import { ConnectorSupport } from '@/components/support-matrix';
+
 The Amp connector installs a dependency-free TypeScript policy plugin into
 Amp's documented system-plugin directory. The plugin sends
 `session.start`, `agent.start`, `tool.call`, `tool.result`, and `agent.end`
@@ -22,6 +24,8 @@ Amp continues to talk directly to its own model provider. DefenseClaw does not
 proxy Amp's model traffic.
 
 ## Platform support
+
+<ConnectorSupport id="amp" />
 
 | Platform | Status | Notes |
 | --- | --- | --- |

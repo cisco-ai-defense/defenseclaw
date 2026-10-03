@@ -8,9 +8,13 @@ keywords:
   - OmniGent OpenTelemetry
 ---
 
+import { ConnectorSupport } from '@/components/support-matrix';
+
 The OmniGent connector uses OmniGent's documented custom Python policy API. It does not proxy OmniGent's model traffic. A small in-process policy bridge sends each policy event to the local DefenseClaw gateway, then maps the result back to OmniGent `ALLOW`, `ASK`, or `DENY`.
 
 ## Platform support
+
+<ConnectorSupport id="omnigent" />
 
 | Platform | Status | Notes |
 | --- | --- | --- |

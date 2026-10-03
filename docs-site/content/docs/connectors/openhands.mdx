@@ -8,9 +8,13 @@ keywords:
   - OpenHands guardrail
 ---
 
+import { ConnectorSupport } from '@/components/support-matrix';
+
 The OpenHands connector wires DefenseClaw into [OpenHands lifecycle hooks](https://docs.openhands.dev/openhands/usage/customization/hooks). DefenseClaw installs the hook globally at `~/.openhands/hooks.json` by default so local OpenHands sessions across repositories report into the same DefenseClaw gateway, while OpenHands still talks directly to its configured upstream model provider.
 
 ## Platform support
+
+<ConnectorSupport id="openhands" />
 
 | Platform | Status | Notes |
 | --- | --- | --- |

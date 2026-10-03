@@ -7,12 +7,16 @@ keywords:
   - Hermes agent runtime
 ---
 
+import { ConnectorSupport } from '@/components/support-matrix';
+
 The Hermes connector wires DefenseClaw into the Hermes agent runtime through
 the effective default-profile `HERMES_HOME/config.yaml`
 (`%LOCALAPPDATA%\hermes\config.yaml` on native Windows when `HERMES_HOME` is
 unset) and exact approvals in `shell-hooks-allowlist.json`.
 
 ## Platform support
+
+<ConnectorSupport id="hermes" />
 
 | Platform | Status | Connector path |
 | --- | --- | --- |
