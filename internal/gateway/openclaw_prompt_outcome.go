@@ -113,6 +113,46 @@ func openClawMessageText(content string) string {
 	return b.String()
 }
 
+// openClawReplyText is the reply of an OpenClaw assistant message, as its chat
+// and invoke_agent spans carry it: the message string itself, or the text
+// blocks of a content array, or the called tools by name for a message that
+// only calls tools. The raw block JSON is not the reply: Galileo showed it as
+// a user message with the JSON as its content (GAP-2495).
+func openClawReplyText(content string) string {
+	trimmed := strings.TrimSpace(content)
+	if !strings.HasPrefix(trimmed, "[") {
+		return content
+	}
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+		Name string `json:"name"`
+	}
+	if json.Unmarshal([]byte(trimmed), &blocks) != nil {
+		return content
+	}
+	var texts, tools []string
+	for _, block := range blocks {
+		switch block.Type {
+		case "text":
+			if text := strings.TrimSpace(block.Text); text != "" {
+				texts = append(texts, text)
+			}
+		case "toolCall", "tool_use", "tool_call":
+			if name := strings.TrimSpace(block.Name); name != "" {
+				tools = append(tools, name)
+			}
+		}
+	}
+	if len(texts) > 0 {
+		return strings.Join(texts, "\n")
+	}
+	if len(tools) > 0 {
+		return "[tool call] " + strings.Join(tools, ", ")
+	}
+	return ""
+}
+
 // applyOpenClawPromptBlock marks the turn of a blocked prompt: its agent and
 // chat spans get a blocked outcome with the block's rule and severity
 // (GAP-2332), and the user when the stream named none.
