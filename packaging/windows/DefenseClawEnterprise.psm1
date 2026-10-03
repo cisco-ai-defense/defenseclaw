@@ -170,6 +170,10 @@ $script:DefenseClawRecoveryGatewayRefusal = $null
 # managed-hook lifecycle journal it could not retire (GAP-1322). Reset per
 # lifecycle run.
 $script:DefenseClawStaleLifecycleJournalRemoved = ''
+# Standalone: set when this run's managed-hook lifecycle capture wrote the
+# release's Cursor enterprise adapter back over a changed or deleted one
+# (GAP-2480). Reset per lifecycle run.
+$script:DefenseClawCursorAdapterRestored = $false
 # Standalone: what the rollback of a failed first install could not remove
 # (the managed-hook lifecycle retire report's leftovers). Reset per lifecycle
 # run.
@@ -14827,6 +14831,10 @@ function Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand {
     if ([string]$report.phase -notin @($expectedPhase)) {
         throw "managed-hook lifecycle snapshot $Action returned invalid phase: $($report.phase)"
     }
+    $restored = $report.PSObject.Properties['cursor_adapter_restored']
+    if ($null -ne $restored -and $restored.Value -is [bool] -and [bool]$restored.Value) {
+        $script:DefenseClawCursorAdapterRestored = $true
+    }
     return $report
 }
 
@@ -14863,6 +14871,7 @@ function Set-DefenseClawRecoveryGatewayCandidate {
     $script:DefenseClawRecoveryGatewayRuns = @()
     $script:DefenseClawRecoveryGatewayRefusal = $null
     $script:DefenseClawStaleLifecycleJournalRemoved = ''
+    $script:DefenseClawCursorAdapterRestored = $false
     $script:DefenseClawRollbackLeftovers = @()
     $script:DefenseClawRecoveryActivationDeferrable = $false
     $script:DefenseClawRecoveryActivationDeferred = $false
@@ -18357,6 +18366,9 @@ function Get-DefenseClawLifecycleStatus {
         if (-not [string]::IsNullOrEmpty($script:DefenseClawStaleLifecycleJournalRemoved)) {
             $status['stale_lifecycle_journal_removed'] =
                 $script:DefenseClawStaleLifecycleJournalRemoved
+        }
+        if ($script:DefenseClawCursorAdapterRestored) {
+            $status['cursor_adapter_restored'] = $true
         }
         # What a recovered failed first install's rollback left.
         if (@($script:DefenseClawRollbackLeftovers).Count -gt 0) {
