@@ -221,7 +221,7 @@ class TestCodexOtelAlignment(unittest.TestCase):
         ), patch(
             "defenseclaw.commands.cmd_doctor._http_probe",
             return_value=(200, json.dumps(payload)),
-        ):
+        ), patch("defenseclaw.audit_capacity.audit_disk_freed", return_value=False):
             self._write_codex_config(home, '[otel]\nenvironment = "linux"\n')
             result = _DoctorResult()
             _check_codex_otel_alignment(self._cfg("linux"), result)

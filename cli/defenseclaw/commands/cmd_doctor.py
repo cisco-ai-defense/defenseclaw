@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import errno
 import hashlib
 import hmac
 import http.client
@@ -412,8 +413,13 @@ def _write_doctor_cache(cfg, result: _DoctorResult) -> None:
         body = json.dumps(payload, indent=2).encode("utf-8")
         atomic_write_private_bytes(path, body)
     except OSError as exc:
+        if exc.errno == errno.ENOSPC:
+            # The cache is optional; the Audit storage capacity row already
+            # names the full disk and the next step (GAP-2015).
+            ux.echo(f"note: doctor results were not cached: the disk holding {data_dir} is full", err=True)
+            return
         ux.echo(
-            f"warning: could not write doctor cache at {path}: {exc}",
+            f"warning: could not write doctor cache at {path}: {exc.strerror or exc}",
             err=True,
         )
 
@@ -2830,10 +2836,11 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
                     reason = last_error.strip() if isinstance(last_error, str) else ""
                     _emit("warn", f"  └─ {sub}", f"degraded — {reason}" if reason else "degraded", r=r)
                 else:
-                    reason = _telemetry_error_reason(details) if sub == "telemetry" else ""
-                    next_step = _audit_write_failure(health)[1] if reason else ""
+                    audit_db = str(getattr(cfg, "audit_db", "") or "")
+                    reason = _telemetry_error_reason(details, audit_db) if sub == "telemetry" else ""
+                    _, next_step, freed = _audit_write_failure(health, audit_db) if reason else ("", "", False)
                     _emit(
-                        "fail",
+                        "warn" if freed else "fail",
                         f"  └─ {sub}",
                         f"{state} — {reason}" if reason else state,
                         r=r,
@@ -5058,7 +5065,20 @@ def _check_codex_otel_alignment(cfg, r: _DoctorResult) -> None:
             r=r,
         )
     elif telemetry_state not in {"running", "healthy"}:
-        reason = _telemetry_error_reason(telemetry.get("details") if isinstance(telemetry, dict) else None)
+        details = telemetry.get("details") if isinstance(telemetry, dict) else None
+        audit_db = str(getattr(cfg, "audit_db", "") or "")
+        reason = _telemetry_error_reason(details, audit_db)
+        if reason and _audit_disk_freed(details, audit_db):
+            # Only the gateway's stale disk-full state is left; the telemetry
+            # row already says it clears with the next event (GAP-2016).
+            _emit(
+                "pass",
+                "Codex OTel runtime",
+                f"Codex telemetry settings are correct (environment {runtime_environment!r}); "
+                "live telemetry recovers with the next audit event now that the audit disk has room",
+                r=r,
+            )
+            return
         if reason:
             # The audit store, not Codex, is failing; the audit storage and
             # telemetry rows already FAIL with the fix (GAP-1927).
@@ -5103,32 +5123,51 @@ _EVENT_HISTORY_SQLITE_REMEDIATION = {
 }
 
 
-def _audit_write_failure(live_health) -> tuple[str, str]:
-    """(reason, next step) when the live gateway reports failing audit writes (GAP-1984)."""
+def _audit_write_failure(live_health, audit_db: str = "") -> tuple[str, str, bool]:
+    """(reason, next step, disk freed) when the live gateway reports failing audit writes (GAP-1984)."""
     telemetry = live_health.get("telemetry") if isinstance(live_health, dict) else None
     if not isinstance(telemetry, dict):
-        return "", ""
+        return "", "", False
     state = str(telemetry.get("state", telemetry.get("status", "")) or "").strip().lower()
     if state in {"running", "healthy", "disabled"}:
-        return "", ""
+        return "", "", False
     details = telemetry.get("details")
-    reason = _telemetry_error_reason(details)
+    reason = _telemetry_error_reason(details, audit_db)
     if not reason:
-        return "", ""
+        return "", "", False
+    if _audit_disk_freed(details, audit_db):
+        return reason, "", True
     sqlite_class = str(details.get("event_history_last_sqlite_class") or "")
     remediation = _EVENT_HISTORY_SQLITE_REMEDIATION.get(
         sqlite_class,
         "fix the audit database storage, then run 'defenseclaw-gateway restart'",
     )
-    return reason, remediation
+    return reason, remediation, False
 
 
-def _telemetry_error_reason(details) -> str:
+def _audit_disk_freed(details, audit_db: str) -> bool:
+    """The gateway last failed on a full disk that has room again (GAP-2016).
+
+    The gateway clears the failure on its next audit write, not on its own.
+    """
+    from defenseclaw.audit_capacity import audit_disk_freed
+
+    if not isinstance(details, dict) or details.get("event_history_last_sqlite_class") != "full":
+        return False
+    return audit_disk_freed(audit_db)
+
+
+def _telemetry_error_reason(details, audit_db: str = "") -> str:
     """Plain words for the gateway's event-history failure tokens (GAP-1308)."""
     if not isinstance(details, dict):
         return ""
     if details.get("event_history_failure") != "sqlite_write_failed":
         return ""
+    if _audit_disk_freed(details, audit_db):
+        return (
+            "audit events could not be written while the disk holding the audit database was full; "
+            "it has room again, and this clears with the next audit event"
+        )
     sqlite_class = str(details.get("event_history_last_sqlite_class") or "")
     cause = _EVENT_HISTORY_SQLITE_CLASSES.get(sqlite_class, "the audit database rejects writes")
     return f"audit events cannot be written: {cause}"
@@ -9012,7 +9051,9 @@ def _check_observability(cfg, r: _DoctorResult, *, live_health: dict | None = No
         # finding, not a crash of the whole report.
         _emit("fail", "Observability v8 effective plan", f"cannot inspect the configuration: {exc}", r=r)
         return
-    _check_observability_v8_status(status, r, live_health=live_health)
+    _check_observability_v8_status(
+        status, r, live_health=live_health, audit_db=str(getattr(cfg, "audit_db", "") or "")
+    )
     _check_connector_export_custody(
         inspect_connector_custody(
             status.local_path or getattr(cfg, "audit_db", os.path.join(cfg.data_dir, "audit.db")),
@@ -9328,6 +9369,7 @@ def _check_observability_v8_status(
     r: _DoctorResult,
     *,
     live_health: dict | None = None,
+    audit_db: str = "",
 ) -> None:
     """Render one canonical v8 operator snapshot into doctor checks."""
 
@@ -9339,12 +9381,14 @@ def _check_observability_v8_status(
 
     retention = "unbounded" if status.unbounded_retention else f"{status.retention_days} days"
     local_path = status.local_path or "built-in data directory"
-    write_failure, write_next_step = _audit_write_failure(live_health)
+    write_failure, write_next_step, disk_freed = _audit_write_failure(live_health, audit_db)
     local_detail = f"retention={retention}; path={local_path}"
+    local_tag = "warn" if status.unbounded_retention else "pass"
     if write_failure:
         local_detail += f"; {write_failure}"
+        local_tag = "warn" if disk_freed else "fail"
     _emit(
-        "fail" if write_failure else ("warn" if status.unbounded_retention else "pass"),
+        local_tag,
         "Local SQLite",
         local_detail,
         r=r,
@@ -9381,7 +9425,7 @@ def _check_observability_v8_status(
             # The sink's own counters lag the gateway's audit-write failure
             # (healthy, 0 consecutive failures), so leave them out and say
             # what the telemetry row says (GAP-1984, GAP-2002).
-            tag = "fail"
+            tag = "warn" if disk_freed else "fail"
             detail += f"; {write_failure}"
         elif destination.enabled and live is not None:
             live_state = live.state or "unavailable"
