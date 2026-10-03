@@ -452,6 +452,42 @@ func TestProjectToolRemovedContentIsAnExplicitSchemaMiss(t *testing.T) {
 	}
 }
 
+// GAP-2565: the "strict" profile removes a tool call's arguments and result.
+// The execute_tool span must still reach Galileo with empty slots, as under
+// "content", or the turn shows no tool step.
+func TestProjectToolUnderStrictRedactionKeepsTheSpan(t *testing.T) {
+	t.Parallel()
+	const canary = "gap2565-strict-canary"
+	projection := projectRecord(t, observability.BucketToolActivity, "span.tool.execute", "execute_tool exec", map[string]any{
+		"kind": "INTERNAL",
+		"attributes": map[string]any{
+			"gen_ai.operation.name": "execute_tool", "gen_ai.tool.name": "exec",
+			"gen_ai.tool.call.arguments":            `{"command":"echo ` + canary + `"}`,
+			"gen_ai.tool.call.result":               canary,
+			"defenseclaw.telemetry.input.reported":  true,
+			"defenseclaw.telemetry.output.reported": true,
+		},
+	}, redaction.ProfileStrict)
+	result := Project(projection, Limits{})
+	if !result.Eligible() {
+		t.Fatalf("result = %q, missing %v", result.Reason(), result.MissingFields())
+	}
+	if encoded, _ := result.Bytes(); bytes.Contains(encoded, []byte(canary)) {
+		t.Fatal("strict tool span recovered raw content")
+	}
+	attributes := resultAttributes(t, result)
+	for _, key := range []string{"gen_ai.tool.call.arguments", "gen_ai.tool.call.result", "input.value", "output.value"} {
+		if got := attributes[key]; got != "" {
+			t.Errorf("%s = %#v, want empty", key, got)
+		}
+	}
+	for _, slot := range []string{"arguments", "result"} {
+		if got := attributes["defenseclaw.telemetry."+slot+".state"]; got != "not_reported" {
+			t.Errorf("%s state = %#v", slot, got)
+		}
+	}
+}
+
 // GAP-1164: an allowed Hermes or Antigravity call ends with a tool_end whose
 // result the hook never reported. That span must reach Galileo with an empty
 // result placeholder, not be dropped and leave a bare invoke_agent root.

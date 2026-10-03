@@ -21,6 +21,13 @@ import (
 // returns it with that destination's span capture.
 func hookGalileoSpanCapture(t *testing.T) (*APIServer, func() []*tracepb.Span) {
 	t.Helper()
+	return hookGalileoSpanCaptureWithProfile(t, "")
+}
+
+// hookGalileoSpanCaptureWithProfile is hookGalileoSpanCapture with the
+// Galileo destination on a redaction profile ("" keeps the preset default).
+func hookGalileoSpanCaptureWithProfile(t *testing.T, profile string) (*APIServer, func() []*tracepb.Span) {
+	t.Helper()
 	galileo := &hookModelV8OTLPCapture{}
 	galileoServer := httptest.NewServer(http.HandlerFunc(galileo.handler))
 	t.Cleanup(galileoServer.Close)
@@ -34,6 +41,9 @@ func hookGalileoSpanCapture(t *testing.T) (*APIServer, func() []*tracepb.Span) {
 		"    - name: hook-galileo\n      kind: otlp\n      preset: galileo\n      endpoint: %q\n      protocol: http/protobuf\n"+
 			"      tls:\n        insecure: true\n      network_safety:\n        allow_private_networks: true\n"+
 			"      batch:\n        max_export_batch_size: 16\n        scheduled_delay_ms: 10\n", galileoServer.URL)...)
+	if profile != "" {
+		raw = append(raw, fmt.Sprintf("      send: {signals: [traces], buckets: ['*'], redaction_profile: %s}\n", profile)...)
+	}
 	if bound, err := fixture.sidecar.BootstrapObservabilityRuntime(t.Context(), fixture.configPath, raw); err != nil || !bound {
 		t.Fatalf("bootstrap bound=%t error=%v", bound, err)
 	}
@@ -182,4 +192,49 @@ func TestHookClaudeCodeTurnAfterGatewayRestartHasAChatSpanOnGalileo(t *testing.T
 		}
 	}
 	t.Fatal("galileo got no chat span for the turn after the restart")
+}
+
+// GAP-2556: on Bedrock the startup SessionStart names the inference profile
+// ("us.anthropic..."), while the transcript the gateway reads after a restart
+// (GAP-2511) names the model ID Bedrock answered with ("anthropic..."). One
+// model showed up as two on Galileo. Both turns now carry the model ID.
+func TestHookClaudeCodeBedrockChatSpanModelSurvivesAGatewayRestart(t *testing.T) {
+	api, spans := hookGalileoSpanCapture(t)
+	const profile = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+	const model = "anthropic.claude-haiku-4-5-20251001-v1:0"
+	transcript := filepath.Join(t.TempDir(), "claude-bedrock-session.jsonl")
+	if err := os.WriteFile(transcript, []byte(
+		`{"type":"assistant","message":{"model":"`+model+`","role":"assistant","content":[{"type":"text","text":"ready"}]}}`+"\n",
+	), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	api.emitClaudeCodeHookLLMEvent(t.Context(), claudeCodeHookRequest{
+		HookEventName: "SessionStart", SessionID: "claude-bedrock-fresh", Model: profile,
+		Payload: map[string]any{"source": "startup", "model": profile},
+	}, nil, nil)
+	for _, session := range []string{"claude-bedrock-fresh", "claude-bedrock-after-restart"} {
+		api.emitClaudeCodeHookLLMEvent(context.Background(), claudeCodeHookRequest{
+			HookEventName: "UserPromptSubmit", SessionID: session, Prompt: "Reply with one word: ready",
+			TranscriptPath: transcript, Payload: map[string]any{},
+		}, nil, []byte(`{"prompt":"Reply with one word: ready"}`))
+		api.emitClaudeCodeHookLLMEvent(context.Background(), claudeCodeHookRequest{
+			HookEventName: "Stop", SessionID: session, LastAssistantMessage: "ready",
+			TranscriptPath: transcript, Payload: map[string]any{},
+		}, nil, []byte(`{"last_assistant_message":"ready"}`))
+	}
+	chats := 0
+	for _, span := range waitHookGalileoSpans(spans, "chat", 2) {
+		if strings.HasPrefix(span.Name, "chat") {
+			chats++
+			if span.Name != "chat "+model {
+				t.Errorf("chat span name=%q, want %q", span.Name, "chat "+model)
+			}
+		}
+	}
+	if chats != 2 {
+		t.Fatalf("galileo chat spans=%d, want 2", chats)
+	}
+	if got := claudeCodeSessionModel("claude-haiku-4-5"); got != "claude-haiku-4-5" {
+		t.Fatalf("non-Bedrock model=%q, want it unchanged", got)
+	}
 }

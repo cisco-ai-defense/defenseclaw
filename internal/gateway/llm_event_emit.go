@@ -829,6 +829,7 @@ func (a *APIServer) emitClaudeCodeHookLLMEvent(ctx context.Context, req claudeCo
 		// longer knows the session model (GAP-2511); the transcript does.
 		meta.Model = claudeCodeTranscriptModel(req.TranscriptPath)
 	}
+	meta.Model = claudeCodeSessionModel(meta.Model)
 	meta.TraceEventID = hookTraceEventID(ctx, meta)
 	meta = finalizeHookEventCorrelation(meta, req.Payload)
 	meta, recordLifecycle := a.prepareHookLifecycleTransition(meta)

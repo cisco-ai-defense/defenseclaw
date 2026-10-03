@@ -74,7 +74,9 @@ func Project(input redaction.Projection, configured Limits) Result {
 	projectedAttributes := projectAttributes(
 		attributes, contract.allowedAttributes, limits.MaxAttributeValueBytes,
 	)
-	missing = prepareRequiredProjection(contract, envelope, projectedAttributes, limits)
+	missing = prepareRequiredProjection(
+		contract, envelope, projectedAttributes, limits, input.Metadata().RemovedFields > 0,
+	)
 	if len(missing) > 0 {
 		return rejected(ReasonSchemaMissingRequired, missing...)
 	}
@@ -324,6 +326,7 @@ func prepareRequiredProjection(
 	envelope projectedEnvelope,
 	attributes map[string]any,
 	limits Limits,
+	redactionRemoved bool,
 ) []string {
 	missing := make([]string, 0, 8)
 	kind, present := normalizedSpanKind(envelope.Body["kind"])
@@ -367,6 +370,8 @@ func prepareRequiredProjection(
 		ensureMessages(attributes, "input", "user", contentFallback(attributes, "input", limits), limits)
 		ensureMessages(attributes, "output", "assistant", contentFallback(attributes, "output", limits), limits)
 	case ShapeTool:
+		_, argumentsPresent := attributes["gen_ai.tool.call.arguments"]
+		_, resultPresent := attributes["gen_ai.tool.call.result"]
 		arguments, argumentsOK := boundedCanonicalString(
 			attributes["gen_ai.tool.call.arguments"], limits.MaxAttributeValueBytes,
 		)
@@ -385,12 +390,15 @@ func prepareRequiredProjection(
 		// example the result of a Hermes or Antigravity call whose post-tool
 		// hook carries no output) is an honest empty placeholder, as on agent
 		// and model spans. Without it every such allowed call reached Galileo
-		// as a bare invoke_agent root (GAP-1164). Content that was reported but
-		// cannot be projected stays a schema miss.
+		// as a bare invoke_agent root (GAP-1164). A slot the redaction profile
+		// removed ("strict" removes all content) is the same honest empty
+		// placeholder: without it every strict tool span was dropped and the
+		// turn lost its tool step in Galileo (GAP-2565). Content that was
+		// reported but cannot be projected stays a schema miss.
 		switch {
 		case argumentsOK:
 			attributes["gen_ai.tool.call.arguments"] = arguments
-		case contentNotReported(attributes, "input"):
+		case contentNotReported(attributes, "input"), redactionRemoved && !argumentsPresent:
 			attributes["gen_ai.tool.call.arguments"] = ""
 		default:
 			missing = append(missing, "gen_ai.tool.call.arguments")
@@ -398,7 +406,7 @@ func prepareRequiredProjection(
 		switch {
 		case resultOK:
 			attributes["gen_ai.tool.call.result"] = result
-		case contentNotReported(attributes, "output"):
+		case contentNotReported(attributes, "output"), redactionRemoved && !resultPresent:
 			attributes["gen_ai.tool.call.result"] = ""
 		default:
 			missing = append(missing, "gen_ai.tool.call.result")

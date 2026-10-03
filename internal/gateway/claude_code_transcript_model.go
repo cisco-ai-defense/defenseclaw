@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -68,4 +69,22 @@ func claudeCodeTranscriptModel(path string) string {
 		}
 	}
 	return ""
+}
+
+// bedrockInferenceProfileModel matches a Bedrock cross-region inference
+// profile ID ("us.anthropic.claude-haiku-4-5-20251001-v1:0") and captures the
+// model ID it routes to ("anthropic.claude-haiku-4-5-20251001-v1:0").
+var bedrockInferenceProfileModel = regexp.MustCompile(`^(?:us|us-gov|eu|apac|ca|jp|au|global)\.(anthropic\..+)$`)
+
+// claudeCodeSessionModel gives one Claude Code session one model ID. On
+// Bedrock the startup SessionStart names the inference profile the user
+// configured ("us.anthropic..."), while the transcript, which names the model
+// after a gateway restart or on a resumed session (GAP-2511), records the
+// model ID Bedrock answered with ("anthropic..."). The same session then
+// showed up under two models in Galileo (GAP-2556). Both now use the model ID.
+func claudeCodeSessionModel(model string) string {
+	if match := bedrockInferenceProfileModel.FindStringSubmatch(model); match != nil {
+		return match[1]
+	}
+	return model
 }
