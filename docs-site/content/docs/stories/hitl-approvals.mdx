@@ -107,21 +107,19 @@ The TUI is useful for reviewing audit events, alerts, logs, and inventory. It do
 
 <Flow
   direction="TB"
-  caption="A confirmable finding pauses only on an event with native ask support. All other events take their connector-specific fallback immediately."
+  caption="What happens to a confirm verdict, such as the .env read above. Only an event with native ask can pause the call; every other event takes its connector's fallback at once, and nothing in DefenseClaw can resume it later."
 >
-  <Node id="hook" kind="connector">Confirmable finding</Node>
-  <Node id="native" kind="decision">Native ask on this event?</Node>
-  <Node id="ask" kind="agent">Prompt and pause in host UI</Node>
-  <Node id="approve" kind="operator">Approve / deny</Node>
-  <Node id="result" kind="agent">Host applies decision</Node>
-  <Node id="fallback" kind="generic">Alert / allow / context fallback</Node>
-  <Node id="audit" kind="operator">Review in audit or TUI</Node>
-  <Edge from="hook" to="native" />
+  <Node id="verdict" kind="gateway">{`Verdict is confirm\nHIGH finding, HITL on`}</Node>
+  <Node id="native" kind="decision">{`Can this event ask?\nsee the HITL table`}</Node>
+  <Node id="ask" kind="agent">{`Agent pauses and asks\nits own permission prompt`}</Node>
+  <Node id="decide" kind="operator">{`You approve or deny\nthe call runs or stops`}</Node>
+  <Node id="fallback" kind="connector">{`No pause\nalert, note or block\ndepends on connector`}</Node>
+  <Node id="review" kind="operator">{`Review it afterwards\naudit log or TUI\ncannot resume the call`}</Node>
+  <Edge from="verdict" to="native" />
   <Edge from="native" to="ask" label="yes" />
-  <Edge from="ask" to="approve" />
-  <Edge from="approve" to="result" />
+  <Edge from="ask" to="decide" label="waits for" />
   <Edge from="native" to="fallback" label="no" />
-  <Edge from="fallback" to="audit" />
+  <Edge from="fallback" to="review" label="logged for" />
 </Flow>
 
 ## When HITL is not the right answer
