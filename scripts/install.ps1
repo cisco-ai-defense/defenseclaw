@@ -900,9 +900,10 @@ function Assert-InstallRoom([long]$Extra, [string]$ForWhat) {
 
 function Write-KeptUvCache {
     # A failed first install keeps only uv's download cache: say how large it
-    # is and how to remove it (GAP-1883).
+    # is and how to remove it (GAP-1883). Get-TreeSize, not Measure-Object:
+    # under StrictMode an empty or missing cache has no .Sum (GAP-2616).
     $uvDir = Join-Path $DataDir ".uv"
-    $bytes = (Get-ChildItem -LiteralPath $uvDir -Recurse -Force -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+    $bytes = Get-TreeSize $uvDir
     if ($bytes) {
         Write-Info ("The download cache in $uvDir ({0:N0} MB) was kept so the next run is faster; remove it with: cmd /c rd /s /q `"$uvDir`"" -f ([double]$bytes / 1MB))
     }
@@ -1275,7 +1276,7 @@ function Restore-Snapshot {
         Write-Info "The failed $Ver install and its download cache were removed, so DefenseClaw Setup's gateway can start"
         return
     }
-    $bytes = (Get-ChildItem -LiteralPath $failed -Recurse -Force -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+    $bytes = Get-TreeSize $failed
     Write-Warn ("The failed $Ver install was kept in $failed ({0:N1} MB) for troubleshooting" -f ([double]$bytes / 1MB))
     Write-Info "Your previous install and its data are back; it is safe to remove the copy with: cmd /c rd /s /q `"$failed`""
 }
@@ -1296,7 +1297,7 @@ function Save-RolledBackData {
     $kept = Join-Path $DataDir ("backups\$label-$version-" + (Get-Date -Format "yyyyMMddTHHmmss"))
     New-Item -ItemType Directory -Path (Join-Path $DataDir "backups") -Force | Out-Null
     Move-Path (Join-Path $Previous "data") $kept
-    $bytes = (Get-ChildItem -LiteralPath $kept -Recurse -Force -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+    $bytes = Get-TreeSize $kept
     $what = if ($label -eq "rolled-back") { "the data from before the last rollback" } else { "the audit history DefenseClaw $version recorded" }
     Write-Info ("Kept $what in $kept ({0:N1} MB)" -f ([double]$bytes / 1MB))
     Write-Info "It is not used again; once you no longer need its audit history, remove it with: cmd /c rd /s /q `"$kept`""
