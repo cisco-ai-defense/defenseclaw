@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // GAP-2259: when OpenClaw rotates gateway.auth.token, auth repair adopts the
@@ -21,10 +22,7 @@ import (
 // must accept it next to its boot token instead of logging invalid_token.
 func TestTokenAuth_AcceptsTokenAdoptedByAuthRepair(t *testing.T) {
 	home := t.TempDir()
-	dataDir := t.TempDir()
-	if err := os.Chmod(dataDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	dataDir := testenv.PrivateTempDir(t)
 	if err := os.MkdirAll(filepath.Join(home, ".openclaw"), 0o700); err != nil {
 		t.Fatal(err)
 	}
