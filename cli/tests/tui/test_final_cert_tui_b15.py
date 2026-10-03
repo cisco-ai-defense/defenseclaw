@@ -51,12 +51,12 @@ def test_config_editor_esc_goes_back_to_the_tasks(tmp_path, monkeypatch) -> None
 
 def test_plugin_block_confirm_and_card_say_the_copy_still_loads() -> None:
     # GAP-2228: generic confirm, card dropped "still loads", Status "blocked".
-    row = PluginRow(id="cron_providers/chronos", name="chronos", status="blocked", verdict="blocked")
+    row = PluginRow(id="cron_providers/chronos", name="chronos", status="blocked", enabled=True, verdict="blocked")
     block = plugin_action_intent("b", row, origin="plugins", connector="hermes")
     assert block is not None and "installed copy keeps loading" in block.consequence
     unblock = plugin_action_intent("u", row, origin="plugins", connector="hermes")
     assert unblock is not None and "agent's own config" in unblock.consequence
-    assert catalog_row_cells(row)[1:4:2] == ("disabled", "blocked")
+    assert catalog_row_cells(row)[1:4:2] == ("enabled", "blocked")
 
     lines = [
         "[plugin] Blocked 'cron_providers/chronos' (hermes).",

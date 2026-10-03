@@ -1710,8 +1710,15 @@ def plugin_action_intent(key: str, row: PluginRow, *, origin: str, connector: st
         # N1: plugin remove (``x``) deletes files from disk — flag it so the
         # dispatcher routes it through the destructive/consequence confirm.
         risk="destructive" if key == "x" else "read-only",
-        consequence=_PLUGIN_CONSEQUENCES.get(key, "").format(name=row.display_name),
+        consequence=_plugin_consequence(key, row),
     )
+
+
+def _plugin_consequence(key: str, row: PluginRow) -> str:
+    if key == "b" and not row.enabled and row.status != "quarantined":
+        # GAP-2313: a disabled copy does not load, so don't say it keeps loading.
+        return f"Block refuses new installs of {row.display_name}; the installed copy is disabled, so it does not load."
+    return _PLUGIN_CONSEQUENCES.get(key, "").format(name=row.display_name)
 
 
 # The confirm said only "This enforce command can change DefenseClaw state."

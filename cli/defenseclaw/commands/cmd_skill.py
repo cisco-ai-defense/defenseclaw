@@ -1237,7 +1237,7 @@ def _skill_display_name(s: dict[str, Any]) -> str:
 def list_skills(app: AppContext, as_json: bool, connector_flag: str) -> None:
     """List skills with their latest scan severity.
 
-    By default this lists **every configured connector's** skills — on a
+    By default this lists every configured connector's skills — on a
     multi-connector install each connector gets its own connector-tagged
     section/table, so you no longer have to re-run with ``--connector``
     per peer. ``--connector <name>`` narrows the listing to one configured
@@ -2998,7 +2998,7 @@ def _skill_search_dirs(app: AppContext, connector: str = "") -> list[str]:
     """Skill directories to resolve a bare name against (ND-1).
 
     With ``connector`` set, scope to that one peer's dirs. Otherwise search
-    the union of **every configured connector's** skill dirs — active-connector
+    the union of every configured connector's skill dirs — active-connector
     dirs FIRST so a name present on the active peer keeps resolving exactly
     as before, while a skill that only lives on a NON-active peer becomes
     reachable by bare name too. Order-preserving and de-duplicated.
@@ -3090,7 +3090,7 @@ def _skill_match_dir_scopes(app: AppContext, target: str, connector: str = "") -
 def _resolve_path(app: AppContext, target: str, connector: str = "") -> str | None:
     """Resolve a skill name or path to an actual directory.
 
-    A bare name resolves across **every configured connector** (ND-1), not just
+    A bare name resolves across every configured connector (ND-1), not just
     the active one, so a skill living on a non-active peer is findable
     without ``--connector``. When the same name exists under more than one
     connector the active-connector copy wins here; verbs that must reject the
