@@ -94,17 +94,19 @@ _PLAIN_BADGE = os.name == "nt"
 
 
 def _label(key: str, name: str, unread: int, compact: bool = False) -> str:
-    """``"2 Alerts (3)"``, or ``"2³"`` when ``name`` is empty.
+    """``"2 Alerts (3)"``, or ``"2(3)"`` when ``name`` is empty.
 
-    A letter-only tab shows its unread count as superscript digits, so the
-    badge costs one cell per digit instead of ``"(3)"``'s three. A named tab
-    does the same when ``compact`` (``"8 Logs²"``).
+    With ``compact`` the count is superscript digits (``"8 Logs²"``, ``"2³"``),
+    so the badge costs one cell per digit instead of ``"(3)"``'s three. A
+    letter-only tab uses that only when the brackets don't fit: superscript
+    digits glued to a digit key read as an exponent ("2²²" for 22 alerts,
+    GAP-2247).
     """
 
     count = _badge(unread)
     if not unread:
         return f"{key} {name}" if name else key
-    small = f"({count})" if _PLAIN_BADGE else count.translate(_SUPERSCRIPT)
+    small = f"({count})" if _PLAIN_BADGE or not compact else count.translate(_SUPERSCRIPT)
     if not name:
         return f"{key}{small}"
     return f"{key} {name}{small}" if compact else f"{key} {name} ({count})"
@@ -208,8 +210,8 @@ def _wide_labels(
 
     ``others`` is each tab's label while another tab is open and ``actives``
     its label while it is open, so switching panels changes only the tab you
-    leave and the tab you open (GAP-2078). Counts are superscript ("8 Logs⁶⁴",
-    "8⁶⁴"). Labels grow in this order, and a step is kept only while the
+    leave and the tab you open (GAP-2078). Counts are compact ("8 Logs⁶⁴",
+    "8(64)"). Labels grow in this order, and a step is kept only while the
     strip still fits with any tab open under its full name:
 
     1. every unread count: other tabs give up their names before their
@@ -235,7 +237,9 @@ def _wide_labels(
     counted = {name for name in keys if unread.get(name, 0)}
 
     def label(name: str, text: str) -> str:
-        return _label(keys[name], text, unread.get(name, 0) if name in counted else 0, True)
+        # Named tabs take superscript counts ("8 Logs⁶⁴"); bare keys keep
+        # brackets ("8(64)"), as "2²²" reads as an exponent (GAP-2247).
+        return _label(keys[name], text, unread.get(name, 0) if name in counted else 0, bool(text))
 
     def cost(chosen: Mapping[str, str]) -> int:
         labels = {name: label(name, chosen[name]) for name in keys}
@@ -317,12 +321,15 @@ def _fit_for_active(
     compact: set[str] = set()
 
     def render(chosen: Mapping[str, str], badges: bool = True) -> dict[str, str]:
+        # A bare key's count stays in brackets ("9(1)", not "9¹"); only the
+        # Alerts count goes superscript, and only when nothing else fits
+        # (GAP-2247).
         return {
             name: _label(
                 keys[name],
                 chosen[name],
                 unread.get(name, 0) if badges and name not in no_badge else 0,
-                name in compact,
+                name in compact and (bool(chosen[name]) or name in KEEP_BADGE),
             )
             for name in keys
         }

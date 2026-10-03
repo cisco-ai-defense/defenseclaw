@@ -58,12 +58,14 @@ class CommandPreview:
     def cancel_by_default(self) -> bool:
         """Whether Cancel, not Run, takes the initial focus.
 
-        Destructive and secret-bearing commands, and upgrade/rollback (they
-        replace the binaries and restart the gateway, GAP-2090), so a
-        reflexive Enter cancels instead of running them.
+        Destructive, secret-bearing and restart commands, and
+        upgrade/rollback (they replace the binaries and restart the gateway,
+        GAP-2090), so a reflexive Enter cancels instead of running them. One
+        rule for every origin: palette "restart" focused Run while Overview
+        "u" focused Cancel (GAP-2251).
         """
 
-        if self.risk in {"destructive", "secret"}:
+        if self.risk in {"destructive", "secret", "restart"}:
             return True
         return bool(_upgrade_summary(self.masked_argv[1:]))
 
@@ -169,7 +171,25 @@ def _upgrade_summary(args: tuple[str, ...]) -> str:
 
     verb = args[0].lower() if args else ""
     if verb == "upgrade":
-        return "Upgrade command. Installs the new release, replaces the DefenseClaw binaries and restarts the gateway."
+        # It read as if a new release were certain, with no versions, even
+        # when the install was already up to date (GAP-2250).
+        try:
+            from defenseclaw import __version__ as installed
+        except ImportError:  # pragma: no cover - the package always has it.
+            installed = ""
+        current = f"DefenseClaw {installed}" if installed else "the installed DefenseClaw"
+        lowered = [arg.lower() for arg in args]
+        if "--version" in lowered and lowered.index("--version") + 1 < len(args):
+            target = args[lowered.index("--version") + 1]
+            return (
+                f"Upgrade command. Installs release {target} over {current}: "
+                "replaces the DefenseClaw binaries and restarts the gateway."
+            )
+        return (
+            f"Upgrade command. Checks the latest release first. If it is newer than {current}, "
+            "installs it, replaces the DefenseClaw binaries and restarts the gateway; "
+            "if you are up to date, nothing changes."
+        )
     if verb == "rollback":
         return "Rollback command. Restores the previous release's binaries and restarts the gateway."
     return ""
@@ -249,6 +269,10 @@ class CommandPreviewScreen(ModalScreen[bool]):
         Binding("escape", "cancel", "Cancel", show=False),
         Binding("q", "cancel", "Cancel", show=False),
         Binding("enter", "run", "Run", show=False),
+        # Left/Right move between Cancel and Run like the forms' arrows;
+        # only Tab did (GAP-2251).
+        Binding("left", "move_focus(-1)", "Previous button", show=False),
+        Binding("right", "move_focus(1)", "Next button", show=False),
     ]
 
     def __init__(self, command: ParsedCommand) -> None:
@@ -289,6 +313,14 @@ class CommandPreviewScreen(ModalScreen[bool]):
         # running them. Benign commands keep Run focused for fast confirmation.
         target = "#preview-cancel" if self.preview.cancel_by_default else "#preview-run"
         self.query_one(target, Button).focus()
+
+    def action_move_focus(self, step: int) -> None:
+        buttons = list(self.query("#preview-buttons Button").results(Button))
+        if not buttons:
+            return
+        current = self.focused
+        index = buttons.index(current) if current in buttons else 0
+        buttons[max(0, min(len(buttons) - 1, index + step))].focus()
 
     def action_cancel(self) -> None:
         self.dismiss(False)

@@ -29,7 +29,7 @@ def test_active_tab_reads_in_full_at_80_columns(monkeypatch) -> None:
         for width in range(62, 76):
             labels = fit_tab_labels(PANELS, active, unread, width)
             assert labels[active] == title, (width, labels[active])
-            assert "¹" in labels["alerts"]
+            assert labels["alerts"].endswith(("¹", "(1)"))  # bare keys: "2(1)" (GAP-2247)
             assert strip_width(tuple(labels.values())) <= width
 
 
