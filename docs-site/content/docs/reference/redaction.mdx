@@ -411,7 +411,8 @@ private backup, atomically replaces `config.yaml`, verifies the installed
 effective-plan digest, and records a `setup-redaction-policy` audit action plus a
 `config-update` Activity row whose target names the change (for example
 `config:redaction-apply:all-configurable:strict`; profile `strict` keeps that
-target but drops the setup row details). The backup path is unique for each write:
+target but drops the setup row details, which then read
+`details removed by redaction profile strict`). The backup path is unique for each write:
 
 ```text
 <data-dir>/backups/config.yaml.before-redaction-<nanosecond-timestamp>
