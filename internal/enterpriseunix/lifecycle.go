@@ -1629,8 +1629,12 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	if record == nil && !l.opts.Purge {
 		r.Noop = true
 		r.NoopReason = "not_installed"
+		// After a failed first package install, give the same finish step
+		// as status and verify (GAP-2410).
+		failure := env.lastPackageInstallFailure()
+		env.warnPackageInstallFailed(r, failure)
 		if leftovers := env.unmanagedLeftovers(env.Services, ChannelPayload); len(leftovers) > 0 {
-			r.AddWarning(codeLeftovers, "no committed deployment, but DefenseClaw machine state exists ("+strings.Join(leftovers, ", ")+"); "+env.leftoversNextStep(ctx, false))
+			r.AddWarning(codeLeftovers, "no committed deployment, but DefenseClaw machine state exists ("+strings.Join(leftovers, ", ")+"); "+env.leftoversNextStep(ctx, failure != ""))
 		}
 		return 0
 	}

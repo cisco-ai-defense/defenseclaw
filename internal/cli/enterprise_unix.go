@@ -188,6 +188,14 @@ func newUnixLifecycleCommand(platform, action, summary string) *cobra.Command {
 			return runUnixLifecycle(cmd, platform, action, opts)
 		},
 	}
+	// status and verify take no --lock-wait, so their help says how they
+	// wait for another lifecycle run (GAP-2409).
+	switch action {
+	case "verify":
+		cmd.Long = summary + ".\n\nverify first waits up to 5s for another lifecycle run to finish. If that run is still going, it checks nothing and exits 75 (lifecycle_busy)."
+	case "status":
+		cmd.Long = summary + ".\n\nRun as root, status first waits up to 5s for another lifecycle run to finish. If that run is still going, it reports the installed version, checks nothing else and exits 75 (lifecycle_busy)."
+	}
 	// An unknown flag or a malformed value fails before RunE; the documented
 	// exit code for it is invalid arguments, not cobra's generic 1.
 	cmd.SetFlagErrorFunc(lifecycleFlagError)
