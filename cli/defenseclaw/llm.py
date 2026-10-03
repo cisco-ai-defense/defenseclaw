@@ -606,7 +606,9 @@ def env_proxy(llm_config: Any) -> tuple[str, str] | None:
     source = "the system proxy settings"
     for name in (f"{scheme}_proxy", f"{scheme.upper()}_PROXY", "all_proxy", "ALL_PROXY"):
         if os.environ.get(name, "").strip() == url.strip():
-            source = name.upper()
+            # POSIX env names are case-sensitive: name the one the shell set,
+            # so "unset <name>" clears it (GAP-2446). Windows ignores case.
+            source = name.upper() if os.name == "nt" else name
             break
     parts = urllib.parse.urlsplit(url if "://" in url else f"http://{url}")
     netloc = parts.hostname or ""
@@ -758,9 +760,15 @@ def ping(llm_config: Any, *, timeout: int = 5) -> tuple[bool, str]:
         if st in ("network_error", "timeout"):
             # A dead or wrong shell proxy reads like the provider being down;
             # name the proxy the call went through (GAP-2421).
+            if st == "timeout":
+                # LiteLLM's text reads "litellm.Timeout: ... after None
+                # seconds"; state the real limit instead (GAP-2447).
+                what = f"{what} after {kwargs['timeout']} s"
             proxy = env_proxy(llm_config)
             if proxy is not None:
                 what = f"{what} through the proxy {proxy[0]} (from {proxy[1]})"
+            if st == "timeout":
+                return (False, f"{label} {what}"[:240])
         return (False, f"{label} {what}: {_plain_provider_error(exc)}"[:240])
 
     try:
