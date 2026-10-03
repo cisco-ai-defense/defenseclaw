@@ -8,6 +8,8 @@ keywords:
   - Google Antigravity guardrail
 ---
 
+import { ConnectorSupport } from '@/components/support-matrix';
+
 The Antigravity connector is hook-only: Antigravity continues to contact its
 model provider directly, while its documented lifecycle hooks send local events
 to the authenticated DefenseClaw gateway. DefenseClaw does not proxy
@@ -21,6 +23,8 @@ native Windows, macOS, and Linux clients. This is vendor availability metadata,
 not DefenseClaw validation or certification.
 
 ## Platform support
+
+<ConnectorSupport id="antigravity" />
 
 | Platform | Status | Notes |
 | --- | --- | --- |

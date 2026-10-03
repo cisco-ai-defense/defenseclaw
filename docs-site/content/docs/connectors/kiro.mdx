@@ -3,6 +3,8 @@ title: Kiro
 description: Use Kiro IDE or Kiro CLI through one DefenseClaw connector. Each hook surface vetoes what Kiro honors there; ACP is an independent path.
 ---
 
+import { ConnectorSupport } from '@/components/support-matrix';
+
 Kiro is a regular DefenseClaw connector. First-run and `defenseclaw setup kiro`
 activate it whether the operator has Kiro IDE, Kiro CLI, or both, so
 DefenseClaw shows one Kiro row. The optional ACP path is `kiro-cli acp` behind
@@ -266,6 +268,8 @@ JSON. The guard also never sends that token over loopback: request and verdict
 authentication use a fresh nonce-bound HMAC exchange.
 
 ## Platform support
+
+<ConnectorSupport id="kiro" />
 
 | Platform | Status | Setup and enforcement boundary |
 | --- | --- | --- |

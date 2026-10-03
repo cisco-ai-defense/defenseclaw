@@ -8,6 +8,8 @@ keywords:
   - opencode guardrail
 ---
 
+import { ConnectorSupport } from '@/components/support-matrix';
+
 The OpenCode connector wires DefenseClaw into [OpenCode](https://opencode.ai). OpenCode has no command-hook config surface: it [auto-loads JavaScript/TypeScript plugins](https://opencode.ai/docs/plugins/) from its user plugin directory at startup. DefenseClaw installs a single, dependency-free **bridge plugin** (`defenseclaw.js`) there. The plugin's `tool.execute.before` hook forwards every tool call to the local DefenseClaw gateway and **throws** whenever the gateway returns a block decision. That documented, awaited thrown-error path is the connector's authoritative enforcement boundary. OpenCode continues to talk directly to its configured upstream model provider; DefenseClaw never inserts an LLM proxy.
 
 <Callout type="info">
@@ -15,6 +17,8 @@ The OpenCode connector wires DefenseClaw into [OpenCode](https://opencode.ai). O
 </Callout>
 
 ## Platform support
+
+<ConnectorSupport id="opencode" />
 
 | Platform | Status | Notes |
 | --- | --- | --- |

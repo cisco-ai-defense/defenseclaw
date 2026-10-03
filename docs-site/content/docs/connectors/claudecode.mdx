@@ -8,6 +8,8 @@ keywords:
   - Claude Code observability
 ---
 
+import { ConnectorSupport } from '@/components/support-matrix';
+
 The Claude Code connector wires DefenseClaw into [Anthropic's documented hook surfaces](https://code.claude.com/docs/en/hooks) without inserting a proxy in the data path. Claude Code talks directly to its native upstream; DefenseClaw inspects via hooks + native OTel.
 
 <Callout type="info">
@@ -20,6 +22,8 @@ stopping Claude's next turn. No proxy listener is involved.
 </Callout>
 
 ## Platform support
+
+<ConnectorSupport id="claudecode" />
 
 | Platform | Status | Connector path |
 | --- | --- | --- |

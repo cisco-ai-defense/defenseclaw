@@ -17,6 +17,8 @@ keywords:
   - OmniGent connector
 ---
 
+import { ConnectorOsMatrix } from '@/components/support-matrix';
+
 Connectors are the adapter layer between agent frameworks and DefenseClaw.
 They share one Go interface, but each connector advertises only the
 capabilities its agent actually exposes. Proxy routing, lifecycle hooks,
@@ -43,28 +45,16 @@ native telemetry, and approval support therefore vary by connector.
 
 ## Platform support
 
-Every connector page now keeps its macOS/Linux and native Windows setup in one
-place, including platform-specific paths, dependencies, and enforcement
-limits. **Supported** means the connector is available through the ordinary
-setup path; it does not invent official-client validation evidence when that
-evidence has not been recorded.
+Which agents DefenseClaw guards on Linux, macOS and Windows, and what live
+tests verified in this release. Switch to **Enterprise** for the managed
+edition and the route it uses for each agent. Each connector page has the
+setup paths, dependencies and limits for every OS. The full
+[support matrix](/docs/support-matrix) adds features by edition.
 
-| Connector | macOS / Linux | Native Windows x64 | Important Windows boundary |
-| --- | --- | --- | --- |
-| [Claude Code](/docs/connectors/claudecode) | **Supported** | **Supported** | Direct executable hooks; Git for Windows is optional and WSL is outside the native contract. |
-| [Codex](/docs/connectors/codex) | **Supported** | **Supported** | Event-bound system PowerShell bridge to the packaged hook executable plus native OTLP; no resumable native ask response. |
-| [Kiro](/docs/connectors/kiro) | **Supported** | **Supported** | Regular connector: workspace-scoped native hooks in `.kiro/hooks` for Kiro IDE and `kiro-cli --v3`, a CLI 2.x agent config for bare `kiro-cli`, plus optional ACP via the shipped stdio guard. |
-| [Amp](/docs/connectors/amp) | **Supported** | **Supported** | Owner-only TypeScript system-policy plugin; no shell hook or native OTLP exporter. |
-| [Cursor](/docs/connectors/cursor) | **Supported** | **Supported** | Managed PowerShell adapter; DefenseClaw does not enable Cursor's native ask response. |
-| [Devin CLI and Devin Desktop](/docs/connectors/devin) | **Supported** | **Supported** | Exact same-user CLI `3000.4.25` hook admission. Devin Desktop's default Devin Local agent shares the CLI hooks; Desktop 3.9.19 removed the legacy Cascade agent, which earlier builds run uncovered. The separate native `devin acp` entry point is cataloged for the shared guard, while cloud Devin, proxy, and native OTLP remain excluded. |
-| [GitHub Copilot CLI](/docs/connectors/copilot) | **Supported** | **Supported** | Uses Copilot's PowerShell hook field; upstream Windows sandboxing cannot enforce per-path denials. |
-| [Antigravity](/docs/connectors/antigravity) | **Supported** | **Supported** | Native PowerShell launcher; only `PreToolUse` can block or ask. |
-| [Hermes](/docs/connectors/hermes) | **Supported** | **Supported** | Direct executable hook is shell-free, but Hermes' own terminal tool depends on its bundled Git Bash. |
-| [OpenCode](/docs/connectors/opencode) | **Supported** | **Supported** | Direct Windows execution is supported; only awaited `tool.execute.before` can block. |
-| [OmniGent](/docs/connectors/omnigent) | **Supported** | **Supported — native degraded** | Server/SDK policy path only; terminal wrappers and filesystem/network/L7 sandbox parity are unavailable. |
-| [OpenHands](/docs/connectors/openhands) | **Supported** | **Unsupported** | OpenHands CLI requires WSL, and DefenseClaw has no WSL connector path. |
-| [OpenClaw](/docs/connectors/openclaw) | **Supported** | **Unsupported** | Its DefenseClaw integration requires the guardrail proxy, which native Windows does not host. |
-| [ZeptoClaw](/docs/connectors/zeptoclaw) | **Supported** | **Unsupported** | Its DefenseClaw integration requires the guardrail proxy and upstream publishes macOS/Linux builds. |
+<ConnectorOsMatrix />
+
+OpenClaw and ZeptoClaw connect through the guardrail proxy, which native
+Windows doesn't host. Their pages cover their platforms.
 
 Connectors that earlier releases shipped under other names, or that were
 removed, are listed with migration steps in

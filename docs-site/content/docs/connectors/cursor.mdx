@@ -8,6 +8,8 @@ keywords:
   - Cursor beforeMCPExecution
 ---
 
+import { ConnectorSupport } from '@/components/support-matrix';
+
 The Cursor connector wires DefenseClaw into Cursor's
 [user-scoped hooks.json](https://cursor.com/docs/hooks) so documented prompt,
 tool, shell, MCP, file, and lifecycle events can be evaluated.
@@ -23,6 +25,8 @@ writes `failClosed: true`; observe remains allow/`would_block` with
 system is implemented by this connector.
 
 ## Platform support
+
+<ConnectorSupport id="cursor" />
 
 | Platform | Status | Connector path |
 | --- | --- | --- |

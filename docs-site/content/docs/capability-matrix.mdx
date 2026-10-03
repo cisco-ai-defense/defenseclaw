@@ -12,13 +12,13 @@ keywords:
 
 This page is the single source of truth for "can this connector do X?". Every row is hand-derived from the Go connector files in `internal/gateway/connector/` and re-verified on every change. Use it to pick the connector that fits your safety posture, or to find the gaps you need to compensate for.
 
-<Callout title="Connector capability is not platform certification">
-This matrix describes each connector's product-level hook or proxy contract.
-Platform availability, setup, and operating-system-specific limits live in the
-[connector platform table](/docs/connectors#platform-support) and on each
-connector page. A supported native Windows path does not fabricate
-official-client validation evidence, and the Windows package does not provide
-the proxy or subprocess-shim wiring used by some connectors elsewhere.
+<Callout title="Looking for what works on your OS?">
+This matrix describes each connector's hook or proxy contract, not where it
+runs. Which agents and features work on Linux, macOS and Windows, in the
+open-source and enterprise editions, and what live tests verified in this
+release, is on the [support matrix](/docs/support-matrix). OS-specific
+setup and limits are on each connector page. The Windows package doesn't
+provide the proxy or subprocess-shim wiring some connectors use elsewhere.
 </Callout>
 
 <CapabilityMatrix />
