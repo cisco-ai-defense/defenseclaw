@@ -9130,6 +9130,7 @@ def _check_connector_export_custody(report, r: _DoctorResult, *, configured: set
 
     delivery_rows = iter(summarize_native_delivery(report).connectors)
     removed: list[str] = []
+    idle: dict[str, int] = {}
     for item in report.instances:
         suffix = "" if item.default else f"/{item.connector_instance_id[:8]}"
         label = f"Connector OTLP: {item.connector}{suffix}"
@@ -9137,6 +9138,17 @@ def _check_connector_export_custody(report, r: _DoctorResult, *, configured: set
         if configured is not None and normalize(item.connector) not in configured:
             if item.connector not in removed:
                 removed.append(item.connector)
+            continue
+        if (
+            not item.default
+            and delivery is not None
+            and delivery.state == "no_evidence"
+            and item.credential_state not in {"invalid", "recovered"}
+        ):
+            # An additional instance (one per OpenShell sandbox run) with no
+            # evidence is an idle or deleted sandbox, not a custody problem:
+            # fold it into one line per connector, as status does (GAP-2097).
+            idle[item.connector] = idle.get(item.connector, 0) + 1
             continue
         if item.custody == "external":
             tag = "warn"
@@ -9244,6 +9256,14 @@ def _check_connector_export_custody(report, r: _DoctorResult, *, configured: set
             remediation=remediation,
         )
 
+    for connector, count in idle.items():
+        noun = "instance" if count == 1 else "instances"
+        _emit(
+            "pass",
+            f"Connector OTLP: {connector} ({count} additional {noun})",
+            "inactive (for example past sandbox runs); no recent native delivery evidence, nothing to do",
+            r=r,
+        )
     if removed:
         _emit(
             "skip",
