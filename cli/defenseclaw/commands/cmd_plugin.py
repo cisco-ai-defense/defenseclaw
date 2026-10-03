@@ -3142,7 +3142,11 @@ def remove(app: AppContext, name: str, connector_flag: str) -> None:
     for connector, candidate in candidates:
         if is_link_or_reparse(candidate):
             raise click.ClickException(f"refusing to remove linked plugin path: {candidate}")
-        shutil.rmtree(candidate)
+        # Amp and OpenCode direct plugins are single source files.
+        if os.path.isfile(candidate):
+            os.remove(candidate)
+        else:
+            shutil.rmtree(candidate)
         removed.append((connector, candidate))
 
     if not removed:

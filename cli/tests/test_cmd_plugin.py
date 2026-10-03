@@ -232,6 +232,14 @@ class TestAmpManagedBridgeProtection(PluginCommandTestBase):
             self.assertIn("defenseclaw setup remove amp", result.output, args)
         self.assertTrue(os.path.isfile(self.managed))
 
+    def test_remove_deletes_an_ordinary_amp_file_plugin(self):
+        """GAP-2063: direct Amp plugins are files, not directories."""
+        result = self.invoke(["remove", "architect", "--connector", "amp"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("removed from", result.output)
+        self.assertFalse(os.path.exists(os.path.join(self.amp_plugins, "architect.ts")))
+        self.assertTrue(os.path.isfile(self.managed))
+
 
 class TestPluginInstall(PluginCommandTestBase):
     """Local directory installs — scanner mocked to return clean."""
