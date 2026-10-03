@@ -1533,7 +1533,12 @@ func (s *ContinuousDiscoveryService) classifyAndPersist(scanID, source string, s
 		// `mtime`-style hint via signal.LastActiveAt, keep that
 		// value; otherwise default LastActiveAt to `now` so consumers
 		// always have *some* "freshness" timestamp to render.
-		if sig.LastActiveAt == nil && !(sig.Model != nil && sig.Model.Status == "installed") {
+		// Shell-history matches are the exception: a substring hit in a
+		// flat command log carries no time of use, so stamping the scan
+		// time would report a tool that never ran as "last active: just
+		// now". Leave it nil; freshness falls back to LastSeen.
+		if sig.LastActiveAt == nil && sig.Detector != "shell_history" &&
+			!(sig.Model != nil && sig.Model.Status == "installed") {
 			t := now
 			sig.LastActiveAt = &t
 		}
