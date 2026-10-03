@@ -105,10 +105,13 @@ def test_typed_secret_flag_is_redacted_in_the_command_name() -> None:
         assert "<redacted>" in parsed.display_name
 
 
-async def test_typed_secret_flag_stays_off_argv_status_and_drawer(tmp_path) -> None:
+async def test_typed_secret_flag_stays_off_argv_status_and_drawer(tmp_path, monkeypatch) -> None:
     # GAP-2010: the status bar ("Done: ... --token <value>") and the drawer's
     # "Cancelled:" line echoed a palette-typed key, and ps showed it on argv.
     app = snapshot_app(tmp_path)
+    # The post-setup reload must not read the runner's real config, whose
+    # missing audit DB would overwrite the status bar with "Data refresh stale".
+    monkeypatch.setattr("defenseclaw.tui.app.config_module.load", lambda: app.config)
     calls: list[tuple[tuple[str, ...], dict[str, Any]]] = []
     written: list[str] = []
 
