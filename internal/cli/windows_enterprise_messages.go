@@ -17,11 +17,24 @@
 package cli
 
 import (
+	"encoding/json"
+	"io"
 	"strings"
 )
 
 // Windows enterprise result wording that does not depend on Windows APIs,
 // kept here so the unit tests run on every platform.
+
+// newEnterpriseJSONEncoder is the encoder for enterprise --json output. Its
+// messages carry PowerShell next steps (`& 'C:\...\defenseclaw.exe' ...`),
+// and the default encoder HTML-escapes & to \u0026, so the raw JSON a person
+// reads did not show the copy-pasteable command the human line shows
+// (GAP-2504).
+func newEnterpriseJSONEncoder(w io.Writer) *json.Encoder {
+	encoder := json.NewEncoder(w)
+	encoder.SetEscapeHTML(false)
+	return encoder
+}
 
 // windowsEnterpriseNoActiveSession is why LocalSystem could not act as an
 // account: Windows gives it a user's token only for an active (connected)
