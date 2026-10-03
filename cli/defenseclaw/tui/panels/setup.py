@@ -104,6 +104,7 @@ from defenseclaw.tui.services.setup_state import (
     looks_like_secret_value,
     mask_secret,
     split_csv,
+    telemetry_readiness_detail,
     validate_config_field,
     validation_errors,
 )
@@ -682,6 +683,11 @@ class SetupPanelModel:
 
         self.observability_status = status
         self.observability_status_error = error.strip()
+        # The readiness Telemetry row names the configured exports (GAP-2351).
+        detail = telemetry_readiness_detail(status)
+        self.readiness_checks = tuple(
+            replace(check, detail=detail) if check.title == "Telemetry" else check for check in self.readiness_checks
+        )
         active_name = self.sections[self.active_section].name if self.sections else ""
         rebuilt = build_setup_sections(
             self.config,
@@ -730,6 +736,7 @@ class SetupPanelModel:
             rows,
             self.restart_queue,
             gateway_status,
+            observability=self.observability_status,
         )
 
     def wizard_infos(self, *, now: datetime | None = None) -> tuple[SetupWizardInfo, ...]:
@@ -1623,9 +1630,11 @@ class SetupPanelModel:
         args, secret_env = wizard_secrets_to_env(args)
         name = WIZARD_NAMES[int(self.active_wizard)]
         if self.active_wizard == SetupWizard.OBSERVABILITY:
-            # Named after the chosen destination: a Datadog run said
-            # "setup Observability / Galileo failed" (GAP-1891).
-            name = "Observability / " + observability_preset_label(wizard_field_value(self.form_fields, "Preset"))
+            # Named after the Setup task and the chosen destination: a Datadog
+            # run said "setup Observability / Galileo failed" (GAP-1891), and
+            # Setup has no "Observability" task (GAP-2351).
+            preset = wizard_field_value(self.form_fields, "Preset")
+            name = "Export telemetry" + (f" / {observability_preset_label(preset)}" if preset else "")
         if self.active_wizard == SetupWizard.CONNECTOR_SETUP and len(args) > 1 and not args[1].startswith("-"):
             # "setup claude-code", not "setup Connector Setup" (GAP-1709).
             name = args[1]
@@ -2986,9 +2995,20 @@ def wizard_form_defs(
         api_port = _cfg_port(cfg, "gateway.api_port")
         return (
             WizardFormField("Remote Mode", "bool", "--remote", value="no", default="no"),
-            WizardFormField("Host", "string", "--host", value=host, default=host),
-            WizardFormField("Port", "int", "--port", value=port, default=port),
-            WizardFormField("API Port", "int", "--api-port", value=api_port, default=api_port),
+            WizardFormField(
+                "Host", "string", "--host", value=host, default=host, hint="Address of the gateway to connect to."
+            ),
+            WizardFormField(
+                "Port", "int", "--port", value=port, default=port, hint="The gateway's WebSocket port."
+            ),
+            WizardFormField(
+                "API Port",
+                "int",
+                "--api-port",
+                value=api_port,
+                default=api_port,
+                hint="The gateway's REST API port, which hooks and this TUI call.",
+            ),
             WizardFormField("Auth Token", "password", "--token"),
             WizardFormField("SSM Param", "string", "--ssm-param"),
             WizardFormField("SSM Region", "string", "--ssm-region"),
@@ -3559,7 +3579,7 @@ def _gateway_goals(cfg: object | Mapping[str, Any] | None) -> tuple[WizardGoal, 
         WizardGoal(
             "ports",
             "Change host and ports",
-            summary="Set the gateway host, proxy port, and API port.",
+            summary="Set the gateway host, WebSocket port, and API port.",
             fields=("Host", "Port", "API Port"),
         ),
         WizardGoal(
@@ -6486,6 +6506,15 @@ def _guardrail_wizard_fields_for(
     # matches what saving the form will write. Only a dedicated
     # ``guardrail.judge.model`` triggers this — a value merely inherited from
     # ``llm.model`` is not emitted as ``--judge-model`` and must not promote.
+    # A judge strategy with the judge off scans regex only (the goal menu's
+    # "Now: regex_only (judge off)"), so open the form on that (GAP-2349).
+    if not judge and strategy in ("regex_judge", "judge_first"):
+        if not bool(get_config_value(cfg, "guardrail.judge.enabled", False)):
+            strategy = "regex_only"
+    # The field default is the current strategy, so any other choice
+    # (regex_only included) is emitted as --detection-strategy; the CLI flag
+    # defaults to "keep current" (GAP-2349).
+    strategy_default = strategy
     if judge and strategy in ("", "regex_only"):
         strategy = "regex_judge"
     strategy = (overrides.get("--detection-strategy") or strategy).strip() or "regex_only"
@@ -6577,8 +6606,8 @@ def _guardrail_wizard_fields_for(
                 "global-all-active exposes process-global settings affecting every active connector."
             ),
         ),
-        WizardFormField("Connector Policy (selected active member)", "section", visible_when=connector_scope),
-        WizardFormField("Global Settings (affects all active connectors)", "section", visible_when=global_scope),
+        WizardFormField("Connector policy (this connector only)", "section", visible_when=connector_scope),
+        WizardFormField("Global settings (all active connectors)", "section", visible_when=global_scope),
         WizardFormField(
             "Connector",
             "choice",
@@ -6587,12 +6616,18 @@ def _guardrail_wizard_fields_for(
             default=connector,
             options=_guardrail_connector_choices(cfg),
             required=True,
-            hint=(
-                "Choose an active connector policy target. On fresh/single setup this also selects the setup target."
-            ),
+            hint="The connector whose policy this changes (on a first setup, also the one set up).",
             visible_when=connector_or_bootstrap_target,
         ),
-        WizardFormField("Mode", "choice", "--mode", value=mode, default=mode, options=("observe", "action")),
+        WizardFormField(
+            "Mode",
+            "choice",
+            "--mode",
+            value=mode,
+            default=mode,
+            options=("observe", "action"),
+            hint="observe only logs what the policy would block; action blocks it.",
+        ),
         WizardFormField(
             "Scanner Mode",
             "choice",
@@ -6615,9 +6650,12 @@ def _guardrail_wizard_fields_for(
             "choice",
             "--detection-strategy",
             value=strategy,
-            default="regex_only",
+            default=strategy_default,
             options=("regex_only", "regex_judge", "judge_first"),
-            hint="Rule/regex scanning is the baseline; judge strategies add LLM review on top.",
+            hint=(
+                "Rule/regex scanning is the baseline; regex_judge and judge_first turn the LLM judge on "
+                "(set its model and key in 'Set up / change the LLM Judge')."
+            ),
             visible_when=global_scope,
         ),
         WizardFormField(

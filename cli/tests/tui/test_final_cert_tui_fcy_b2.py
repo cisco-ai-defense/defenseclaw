@@ -112,7 +112,7 @@ def test_cli_reads_each_secret_flag_from_its_env_var(path: tuple[str, ...], flag
 async def test_datadog_run_keeps_the_key_off_argv_and_out_of_activity(tmp_path) -> None:
     intent = _datadog_intent()
     # GAP-1891: named after the destination, not "Observability / Galileo".
-    assert intent.label == "setup Observability / Datadog"
+    assert intent.label == "setup Export telemetry / Datadog"
     assert MARK not in " ".join(intent.args)
     assert intent.env_overrides == (("DEFENSECLAW_SETUP_OBSERVABILITY_TOKEN", MARK),)
 
@@ -133,7 +133,7 @@ async def test_datadog_run_keeps_the_key_off_argv_and_out_of_activity(tmp_path) 
         await app._confirm_and_run_intent(intent)
         assert dict(calls[0][1]["env_overrides"]) == {"DEFENSECLAW_SETUP_OBSERVABILITY_TOKEN": MARK}
         assert all(MARK not in arg for arg in calls[0][0])
-        assert "Observability / Datadog" in app.status_text
+        assert "Export telemetry / Datadog" in app.status_text
 
         # GAP-1889: a typed command with the key on argv is shown redacted in
         # Activity, the drawer and Save output; Rerun still has the value.
