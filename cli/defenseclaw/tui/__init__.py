@@ -126,6 +126,7 @@ def run_textual_tui() -> None:
     """Run the Python Textual TUI backend."""
 
     from defenseclaw import config
+    from defenseclaw.file_lock import hold_tui_lock, release_tui_lock
     from defenseclaw.tui.app import DefenseClawTUI
 
     _harden_textual_stdin_decoder()
@@ -145,11 +146,16 @@ def run_textual_tui() -> None:
             first_run = False
         except Exception:
             cfg, first_run = _load_after_optional_first_run_prompt(config)
-    DefenseClawTUI(
-        config=cfg,
-        first_run=first_run,
-        config_path=config.config_path(),
-    ).run()
+    data_dir = str(config.default_data_path())
+    tui_lock = hold_tui_lock(data_dir)
+    try:
+        DefenseClawTUI(
+            config=cfg,
+            first_run=first_run,
+            config_path=config.config_path(),
+        ).run()
+    finally:
+        release_tui_lock(tui_lock, data_dir)
 
 
 def _load_after_optional_first_run_prompt(config_module: object) -> tuple[object | None, bool]:
