@@ -257,6 +257,21 @@ class TestRegistryListShow(RegistryCommandTestBase):
             result.output,
         )
 
+    def test_remove_unknown_source_with_none_configured_points_at_add(self):
+        # GAP-2392: with no sources left, hint at add/wizard, not the empty list.
+        self.invoke(["remove", "corp-skills", "-y"])
+        result = self.runner.invoke(
+            registry, ["remove", "corp-skills", "-y"],
+            obj=self.app, catch_exceptions=True,
+        )
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn(
+            "Error: registry source 'corp-skills' not found. No registry sources are configured. "
+            "Add one with: defenseclaw registry add <id> ... (or defenseclaw registry wizard).",
+            result.output,
+        )
+        self.assertNotIn("registry list", result.output)
+
 
 class TestRegistryEdit(RegistryCommandTestBase):
     def setUp(self):
