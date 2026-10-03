@@ -1588,6 +1588,7 @@ def fail_mode_cmd(
         and all(
             (runtime_states[name].desired == desired_modes[name] and runtime_states[name].current)
             or _disabled_on_its_own(gc, name)
+            or not gc.enabled
             for name in fail_mode_targets
         )
     ):
@@ -1619,10 +1620,22 @@ def fail_mode_cmd(
         return
 
     click.echo()
+    guardrail_off = not gc.enabled
     if fail_mode_targets:
-        click.echo(f"  {ux.bold('Changing hook fail mode for active connectors:')} {ux.accent(mode)}")
+        if guardrail_off:
+            click.echo(f"  {ux.bold('Saving hook fail mode for configured connectors:')} {ux.accent(mode)}")
+        else:
+            click.echo(f"  {ux.bold('Changing hook fail mode for active connectors:')} {ux.accent(mode)}")
         for name in fail_mode_targets:
             old = target_modes.get(name, current)
+            if guardrail_off:
+                # GAP-2156: a global disable removed every hook, so nothing
+                # changes now; read like the per-connector disabled line.
+                click.echo(
+                    f"      - {_connector_label(name)} ({name}): guardrail off (no hooks); "
+                    f"{desired_modes[name]} is saved for when it is turned on again"
+                )
+                continue
             if _disabled_on_its_own(gc, name):
                 # Like the bare view: no hooks, so no fail mode (GAP-1977).
                 click.echo(
@@ -1694,6 +1707,12 @@ def fail_mode_cmd(
             "authentication, and transport failures continue upstream.",
             indent="    ",
         )
+    elif mode == "closed" and guardrail_off:
+        ux.subhead(
+            "Once the guardrail is enabled, invalid or unavailable gateway responses will BLOCK "
+            "supported connectors." + (" Hermes remains fail-open." if hermes_targeted else ""),
+            indent="  ",
+        )
     elif mode == "closed":
         ux.warn(
             "Invalid or unavailable gateway responses will now BLOCK supported connectors.",
@@ -1707,8 +1726,10 @@ def fail_mode_cmd(
         )
     else:
         ux.subhead(
-            "Invalid or unavailable gateway responses will now ALLOW the agent and log the failure to "
-            "~/.defenseclaw/logs/hook-failures.jsonl.",
+            ("Once the guardrail is enabled, invalid or unavailable gateway responses will ALLOW"
+             if guardrail_off
+             else "Invalid or unavailable gateway responses will now ALLOW")
+            + " the agent and log the failure to ~/.defenseclaw/logs/hook-failures.jsonl.",
             indent="  ",
         )
     click.echo()
