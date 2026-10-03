@@ -1497,7 +1497,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                         tooltip="Run `defenseclaw agent discovery enable --yes`",
                     )
                     yield Button(
-                        "Scan AI Agents",
+                        "Run AI Discovery",
                         id="overview-scan-ai-discovery",
                         compact=True,
                         tooltip="Run `defenseclaw agent discovery scan`",
@@ -9767,7 +9767,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 table,
                 Text(
                     "Names are identities: a new name adds a route; the same name updates it. "
-                    "Manage in 0 Setup → Observability / Galileo.",
+                    "Manage in 0 Setup → Alerts & telemetry → Export telemetry.",
                     style=f"italic {TOKENS.text_muted}",
                 ),
             )
@@ -9776,7 +9776,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 f"Telemetry status unavailable: {status_error}"
                 if status_error
                 else "No runtime-loaded destinations. Configure one in 0 Setup → "
-                "Observability / Galileo, then restart the gateway."
+                "Alerts & telemetry → Export telemetry, then restart the gateway."
             )
             body = Group(
                 *self._overview_native_delivery_renderables(),
@@ -9862,7 +9862,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 f"{rich_escape(self.overview_model.observability_status_error)}"
                 if self.overview_model.observability_status_error
                 else "No runtime-loaded destinations. Configure one in 0 Setup → "
-                "Observability / Galileo, then restart the gateway."
+                "Alerts & telemetry → Export telemetry, then restart the gateway."
             )
             return (
                 f"[bold {TOKENS.accent_cyan}]OBSERVABILITY DESTINATIONS · RUNTIME[/]\n{delivery_text}\n  {message}\n\n"
@@ -9925,7 +9925,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             )
         lines.append(
             "  Names are identities: a new name adds; the same name updates. "
-            "Manage in 0 Setup → Observability / Galileo."
+            "Manage in 0 Setup → Alerts & telemetry → Export telemetry."
         )
         return (
             f"[bold {TOKENS.accent_cyan}]OBSERVABILITY DESTINATIONS · RUNTIME[/]\n"
@@ -11508,6 +11508,17 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             intent = self.overview_model.action_intent(key)
             if intent is None:
                 return False
+            # One rule with the action-bar buttons and the palette: a
+            # read-only command (d doctor, s skill scan) runs at once; the
+            # rest show the preview first. d asked to confirm while the Run
+            # Doctor button ran it straight away (GAP-2350).
+            try:
+                parsed = parse_command_line(" ".join(intent.argv))
+            except CommandLineError:
+                parsed = None
+            if parsed is not None and not parsed.needs_preview:
+                self.run_worker(self._run_and_report(parsed), exclusive=False, thread=False)
+                return True
             self.run_worker(self._confirm_and_run_intent(intent), exclusive=False, thread=False)
             return True
         if self.active_panel == "inventory":
@@ -12195,6 +12206,20 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         escaped = rich_escape(plain)
         return "[" + style + "]" + escaped + "[/]" if style else escaped
 
+    def _setup_wrapped_line(self, text: str, *, style: str = "", indent: int = 7) -> str:
+        """``text`` wrapped to at most two body lines (the second one cut).
+
+        The focused field's hint was cut to one line, so at 80x24 it read
+        "Choose an active connector policy targe…" (GAP-2352).
+        """
+
+        room = max(20, self._setup_width() - indent)
+        lines = textwrap.wrap(" ".join(text.split()), room) or [""]
+        if len(lines) > 2:
+            lines = [lines[0], _truncate_ellipsis(" ".join(lines[1:]), room)]
+        escaped = "\n".join(rich_escape(line) for line in lines)
+        return "[" + style + "]" + escaped + "[/]" if style else escaped
+
     def _setup_task_statuses(self) -> dict[SetupWizard, setup_catalog.TaskStatus]:
         return setup_center.task_statuses(self.setup_model)
 
@@ -12266,7 +12291,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 missing = model.missing_required_fields()
                 prefix = f"Required: {', '.join(missing)} · " if missing else ""
                 hint = focused.hint or (focused.action.description if focused.action else "")
-                third = self._setup_line(
+                third = self._setup_wrapped_line(
                     f"{prefix}{focused.label}: {hint}" if hint else f"{prefix}{focused.label}",
                     style="#FBBF24" if missing else TOKENS.text_secondary,
                 )

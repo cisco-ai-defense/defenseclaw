@@ -261,6 +261,29 @@ def _all_hook_enforced(connectors: Sequence[str]) -> bool:
     return all(str(name).strip().lower() in _HOOK_ENFORCED_CONNECTORS for name in connectors)
 
 
+_EXPORT_TELEMETRY_TASK = "0 Setup → Alerts & telemetry → Export telemetry"
+
+
+def telemetry_readiness_detail(observability: object | None = None) -> str:
+    """The readiness Telemetry row: the local log plus the configured exports.
+
+    It said "export destinations are set in the Observability task", a task
+    Setup does not have, and never counted the exports (GAP-2351).
+    """
+
+    if observability is None:
+        return f"Local audit log is always on; exports are set in {_EXPORT_TELEMETRY_TASK}."
+    exports = [
+        destination
+        for destination in getattr(observability, "destinations", ()) or ()
+        if getattr(destination, "enabled", False) and not getattr(destination, "generated", False)
+    ]
+    if not exports:
+        return f"Local audit log is always on; no exports yet (add one in {_EXPORT_TELEMETRY_TASK})."
+    noun = "export" if len(exports) == 1 else "exports"
+    return f"Local audit log is always on; {len(exports)} {noun} set in {_EXPORT_TELEMETRY_TASK}."
+
+
 def build_readiness_checks(
     cfg: object | Mapping[str, Any] | None,
     health: object | Mapping[str, Any] | None,
@@ -268,6 +291,8 @@ def build_readiness_checks(
     credentials: Sequence[CredentialRow],
     queue: RestartQueue = RestartQueue(),
     gateway_status: object | Mapping[str, Any] | None = None,
+    *,
+    observability: object | None = None,
 ) -> tuple[ReadinessCheck, ...]:
     """Build Setup readiness rows using the same status/fix contract as Go."""
 
@@ -497,7 +522,7 @@ def build_readiness_checks(
             "Telemetry",
             # Users only ever see one routing plan, so "canonical" and "v8"
             # explained nothing (GAP-2221).
-            "Local audit log is always on; export destinations are set in the Observability task.",
+            telemetry_readiness_detail(observability),
             "pass",
         )
     )
