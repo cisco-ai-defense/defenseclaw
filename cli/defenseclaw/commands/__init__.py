@@ -93,6 +93,23 @@ def resolve_list_connector(app: Any, requested: str | None) -> str:
     return match
 
 
+NO_CONNECTOR_HINT = "no connector configured — run 'defenseclaw setup <connector>'"
+
+
+def echo_no_connector() -> None:
+    """Print the empty state of a list command with no connector configured.
+
+    With ``--json`` stdout stays JSON (an empty list) and the hint goes to
+    stderr, so scripts and the TUI panels can parse the output (GAP-2073).
+    """
+    ctx = click.get_current_context(silent=True)
+    if ctx is not None and ctx.params.get("as_json"):
+        click.echo("[]")
+        click.echo(NO_CONNECTOR_HINT, err=True)
+        return
+    click.echo(NO_CONNECTOR_HINT)
+
+
 def resolve_list_connectors(app: Any, requested: str | None) -> list[str]:
     """Resolve which connector(s) a *list* command should cover.
 
@@ -126,9 +143,7 @@ def resolve_list_connectors(app: Any, requested: str | None) -> list[str]:
         except Exception:  # noqa: BLE001 — fail open to legacy behavior.
             configured = True
         if not configured:
-            click.echo(
-                "no connector configured — run 'defenseclaw setup <connector>'"
-            )
+            echo_no_connector()
             raise SystemExit(0)
     try:
         if cfg is not None and hasattr(cfg, "active_connectors"):

@@ -129,3 +129,48 @@ observability:
 		t.Error("a non-secret error was relaxed")
 	}
 }
+
+// GAP-2062: an invalid enum value does not hide the running gateway either:
+// status drops the value to find the gateway, then reports the problem.
+func TestGatewayStatusInvalidEnumStillFindsGateway(t *testing.T) {
+	home := t.TempDir()
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	t.Setenv("DEFENSECLAW_HOME", home)
+	t.Setenv("DEFENSECLAW_CONFIG", configPath)
+	raw := fmt.Sprintf(`config_version: 8
+data_dir: %s
+gateway:
+  api_bind: 127.0.0.1
+  api_port: 19132
+guardrail:
+  mode: enforce-everything
+`, filepath.ToSlash(home))
+	if err := os.WriteFile(configPath, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previous := cfg
+	t.Cleanup(func() { cfg = previous; gatewayStatusConfigProblem = nil })
+
+	loadErr := loadGatewayCommandConfigFor(statusCmd)
+	if loadErr == nil {
+		t.Fatal("config with an invalid guardrail.mode loaded")
+	}
+	relaxed := gatewayStatusRelaxedConfig(loadErr)
+	if relaxed == nil || relaxed.Gateway.APIPort != 19132 {
+		t.Fatalf("relaxed config = %+v (load error %v)", relaxed, loadErr)
+	}
+	msg := gatewayStatusConfigLoadError(loadErr).Error()
+	if !strings.Contains(msg, `guardrail.mode is "enforce-everything"`) {
+		t.Errorf("status error %q does not name the invalid value", msg)
+	}
+}
+
+func TestYAMLWithoutPath(t *testing.T) {
+	out, ok := yamlWithoutPath([]byte("a:\n  b: 1\n  c: [x, y]\n"), "$.a.c[0]")
+	if !ok || strings.Contains(string(out), "x") || !strings.Contains(string(out), "b: 1") {
+		t.Fatalf("yamlWithoutPath = %q, %v", out, ok)
+	}
+	if _, ok := yamlWithoutPath([]byte("a: 1\n"), "$.missing"); ok {
+		t.Error("a missing path was removed")
+	}
+}

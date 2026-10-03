@@ -445,10 +445,22 @@ def status(app: AppContext, as_json: bool) -> None:
             holder = _foreign_gateway_port_holder(cfg)
         except Exception:  # noqa: BLE001 - status stays best effort
             holder = ""
+        # GAP-2081: a live gateway.pid with no /health answer is a gateway
+        # that is still starting or hung, as defenseclaw-gateway status says;
+        # "start it" was a dead end (start says it is already running).
+        hung_pid = 0 if holder else _live_gateway_pid(cfg)
         if holder:
             _status_row(
                 "Sidecar",
                 ux._style(f"not running; port {cfg.gateway.api_port} is held by {holder}", fg="yellow"),
+            )
+        elif hung_pid:
+            _status_row(
+                "Sidecar",
+                ux._style(
+                    f"running (PID {hung_pid}) but not answering /health; it is still starting or hung",
+                    fg="yellow",
+                ),
             )
         else:
             _status_row(
@@ -458,19 +470,35 @@ def status(app: AppContext, as_json: bool) -> None:
         _print_audit_log_health(cfg, None)
         # Even when the sidecar is down, show the *configured* agents
         # so operators know what `start` will spin up.
-        _print_agents(cfg, sidecar_down=True)
+        _print_agents(cfg, sidecar_down=True, sidecar_hung=bool(hung_pid))
         _print_application_protection(cfg)
         _print_semantic_routing(cfg)
         _print_hook_guardian(cfg)
-        hint(
-            "Free the port:  stop that process, or run: defenseclaw setup gateway --api-port "
-            f"{_free_api_port_hint(cfg)} --non-interactive"
-            if holder
-            else "Start sidecar:  defenseclaw-gateway start",
-            "Subsystems:    defenseclaw-gateway status",
-        )
+        if holder:
+            first_hint = (
+                "Free the port:  stop that process, or run: defenseclaw setup gateway --api-port "
+                f"{_free_api_port_hint(cfg)} --non-interactive"
+            )
+        elif hung_pid:
+            first_hint = "Check sidecar:  defenseclaw-gateway status (restart it if it stays this way)"
+        else:
+            first_hint = "Start sidecar:  defenseclaw-gateway start"
+        hint(first_hint, "Subsystems:    defenseclaw-gateway status")
     if config_problems:
         raise SystemExit(1)
+
+
+def _live_gateway_pid(cfg) -> int:
+    """PID of a live gateway recorded in ``gateway.pid``, else 0 (best effort)."""
+    data_dir = str(getattr(cfg, "data_dir", "") or "")
+    if not data_dir:
+        return 0
+    try:
+        from defenseclaw.commands.cmd_doctor import _read_pid_from_file
+
+        return _read_pid_from_file(os.path.join(data_dir, "gateway.pid"))
+    except Exception:  # noqa: BLE001 - status stays best effort
+        return 0
 
 
 def _format_uptime(ms: object) -> str:
@@ -566,6 +594,7 @@ def _print_agents(
     *,
     health: dict | None = None,
     sidecar_down: bool = False,
+    sidecar_hung: bool = False,
 ) -> None:
     """Render the "Agents" roster as one section, for ANY connector count.
 
@@ -648,7 +677,11 @@ def _print_agents(
     if sidecar_down and enabled_count:
         # Hooks are configured but nothing answers them: each connector falls
         # back to its fail-mode (open = calls run unchecked, closed = blocked).
-        header = f"{enabled_count} configured, not enforced while the sidecar is stopped"
+        header = (
+            f"{enabled_count} configured, no hook verdicts while the sidecar is not answering"
+            if sidecar_hung
+            else f"{enabled_count} configured, not enforced while the sidecar is stopped"
+        )
         if disabled_count:
             header += f" ({disabled_count} disabled)"
         header = ux._style(header, fg="yellow")
@@ -660,7 +693,8 @@ def _print_agents(
             " " * 16
             + ux.dim(
                 "Hooks fall back to each connector's fail-mode: open lets calls run "
-                "unchecked, closed blocks them. Start it: defenseclaw-gateway start"
+                "unchecked, closed blocks them. "
+                + ("Check it: defenseclaw-gateway status" if sidecar_hung else "Start it: defenseclaw-gateway start")
             )
         )
     for conn in actives:
@@ -1334,8 +1368,10 @@ def _print_native_delivery_status(summary) -> None:
         reason = f"; {summary.reason.replace('_', ' ')}" if summary.reason else ""
         ux.echo(f"      {ux.dim(f'no evidence ({scope}{reason})')}")
         return
-    for item in summary.connectors:
-        instance = "" if item.default else " (additional instance)"
+    from defenseclaw.observability.custody_status import native_delivery_display_rows
+
+    for label, item in native_delivery_display_rows(summary.connectors):
+        instance = f" ({label})" if label else ""
         state = item.state.replace("_", "-")
         color = "green" if item.state == "accepted" else "yellow"
         if item.state == "no_evidence":

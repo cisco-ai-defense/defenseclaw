@@ -606,6 +606,27 @@ def test_restart_services_does_not_wait_for_a_refused_peer_in_the_api(monkeypatc
     assert seen == [["hermes", "claudecode"]]
 
 
+def test_restart_services_roster_line_leaves_out_a_refused_peer(monkeypatch, tmp_path: Path) -> None:
+    """GAP-2013: a peer setup skipped is not named as protected in the closing line."""
+    hints: list[str] = []
+    roster = ["claudecode", "codex", "hermes", "opencode"]
+    monkeypatch.setattr(cmd_setup, "_restart_defense_gateway", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(cmd_setup, "_hook_runtime_wait_targets", lambda *_args: list(roster))
+    monkeypatch.setattr(cmd_setup, "_unverified_setup_peers", frozenset)
+    monkeypatch.setattr(cmd_setup, "_wait_for_defense_gateway_api", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        cmd_setup,
+        "_wait_for_connector_runtime",
+        lambda *_args, **_kwargs: cmd_setup._ConnectorRuntimeReadiness(True, skipped=frozenset({"hermes"})),
+    )
+    monkeypatch.setattr(cmd_setup.ux, "subhead", hints.append)
+
+    cmd_setup._restart_services(str(tmp_path), connector="opencode", connectors=roster, wait_for_connector_ready=True)
+
+    assert any(hint.startswith("3 hook connectors (claudecode, codex, opencode):") for hint in hints), hints
+    assert not any("hermes" in hint for hint in hints), hints
+
+
 def test_restart_services_labels_hermes_pending_reload_without_live_claim(
     monkeypatch,
     tmp_path: Path,

@@ -233,6 +233,16 @@ def _close_async_process_transport(process: asyncio.subprocess.Process) -> None:
         transport.close()
 
 
+def _no_connector_hint(stderr: bytes) -> str:
+    """The list commands' "no connector configured" hint from stderr (GAP-2073)."""
+
+    from defenseclaw.commands import NO_CONNECTOR_HINT
+
+    if NO_CONNECTOR_HINT in stderr.decode(errors="replace"):
+        return NO_CONNECTOR_HINT[:1].upper() + NO_CONNECTOR_HINT[1:]
+    return ""
+
+
 async def _communicate_captured(
     binary: str,
     args: tuple[str, ...],
@@ -9391,8 +9401,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             reason = f" · {summary.reason.replace('_', ' ')}" if summary.reason else ""
             lines.append(Text(f"  no evidence{reason}", style=TOKENS.text_muted))
             return lines
-        for item in summary.connectors:
-            instance = "" if item.default else " · additional instance"
+        from defenseclaw.observability.custody_status import native_delivery_display_rows
+
+        for label, item in native_delivery_display_rows(summary.connectors):
+            instance = f" · {label}" if label else ""
             style = {
                 "all_drop_only": TOKENS.accent_red,
                 "partial_drop_only": TOKENS.accent_amber,
@@ -9591,8 +9603,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             if not summary.connectors:
                 reason = f" · {summary.reason.replace('_', ' ')}" if summary.reason else ""
                 delivery_lines.append(f"    no evidence{reason}")
-            for item in summary.connectors:
-                instance = "" if item.default else " · additional instance"
+            from defenseclaw.observability.custody_status import native_delivery_display_rows
+
+            for label, item in native_delivery_display_rows(summary.connectors):
+                instance = f" · {label}" if label else ""
                 delivery_lines.append(
                     f"    {friendly_connector_name(item.connector)} ({item.connector}){instance}: "
                     f"{item.state.replace('_', '-')} · {item.detail}"
@@ -13008,6 +13022,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             self.inventory_model.apply_json(stdout.decode(errors="replace"))
         except Exception as exc:  # noqa: BLE001 - parser errors are panel state.
             self.inventory_model.apply_loaded(None, exc)
+        if hint := _no_connector_hint(stderr):
+            self.inventory_model.message = hint
         self._end_load("inventory", loading, announce, self.inventory_model.message, "Inventory updated.")
         self._render_chrome()
 
@@ -13323,6 +13339,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 model.apply_json(stdout.decode(errors="replace"))  # type: ignore[attr-defined]
             except Exception as exc:  # noqa: BLE001 - parser errors are panel state.
                 model.apply_loaded([], exc)
+            if hint := _no_connector_hint(stderr):
+                model.message = hint
         self._end_load(panel, loading, announce, model.message, f"{_panel_label(panel)}: {len(model.items)} loaded.")
         self._render_chrome()
 
