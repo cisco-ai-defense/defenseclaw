@@ -9407,8 +9407,10 @@ def _destination_remediation(destination, live) -> str:
     target = f" at {destination.endpoint}" if destination.endpoint else ""
     return (
         f"check that the collector{target} is running and reachable from this machine ({test}), "
-        "then run 'defenseclaw-gateway restart'; to stop using this route, run "
-        f"'defenseclaw setup observability disable {name}'"
+        "then run 'defenseclaw-gateway restart'. The test connects directly; the gateway uses the "
+        "proxy it was started with (HTTPS_PROXY/NO_PROXY), so if the test passes, restart the "
+        "gateway from a shell with the right proxy settings and check gateway.log. To stop using "
+        f"this route, run 'defenseclaw setup observability disable {name}'"
     )
 
 

@@ -242,7 +242,9 @@ func (adapter *LogAdapter) deliverHTTP(ctx context.Context, request *collectorlo
 		case wroteRequest.Load():
 			return failedResult(delivery.OutcomeAmbiguous, delivery.FailureCodeAcknowledgementLost)
 		default:
-			return failedResult(delivery.OutcomeTransient, transportFailureCode(err))
+			code := transportFailureCode(err)
+			logTransportFailure(adapter.destination, observability.SignalLogs, code, recordCount)
+			return failedResult(delivery.OutcomeTransient, code)
 		}
 	}
 	if response == nil {

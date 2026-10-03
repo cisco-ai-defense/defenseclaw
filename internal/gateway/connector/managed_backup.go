@@ -409,6 +409,29 @@ func managedFileBackupDrifted(dataDir, connectorName, logicalName, targetPath st
 	return !managedFileBackupMatchesSnapshot(&b, data, info != nil), nil
 }
 
+// recaptureManagedFileBackup replaces a drifted record with one whose
+// snapshot is the target's current bytes (raw), so drift detection stays on
+// after the agent itself edits the file. Only connectors whose teardown
+// filters their own fields out of an exact restore may use it: the outside
+// edit then survives teardown just as it does with surgical cleanup. It
+// returns the new record, or nil (leaving none) when the target no longer
+// holds raw.
+func recaptureManagedFileBackup(
+	dataDir, connectorName, logicalName, targetPath string, raw []byte, exists bool,
+) *managedFileBackup {
+	discardManagedFileBackup(dataDir, connectorName, logicalName)
+	if err := captureManagedFileBackup(dataDir, connectorName, logicalName, targetPath); err != nil {
+		discardManagedFileBackup(dataDir, connectorName, logicalName)
+		return nil
+	}
+	b, err := loadManagedFileBackupPath(managedFileBackupPath(dataDir, connectorName, logicalName))
+	if err != nil || !managedFileBackupMatchesSnapshot(&b, raw, exists) {
+		discardManagedFileBackup(dataDir, connectorName, logicalName)
+		return nil
+	}
+	return &b
+}
+
 func discardManagedFileBackup(dataDir, connectorName, logicalName string) {
 	_ = os.Remove(managedFileBackupPath(dataDir, connectorName, logicalName))
 }
