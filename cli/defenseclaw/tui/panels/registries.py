@@ -324,8 +324,10 @@ class RegistriesPanelModel:
     def data_table_columns(self) -> tuple[str, ...]:
         if self.current_tab == RegistriesTab.SOURCES:
             # Verdict counts share one clean/warn/block/error ("C/W/B/E") column so the
-            # table fits 80 columns instead of clipping "Error" (GAP-1166).
-            return ("ID", "Kind", "Content", "On", "Last Sync", "Status", "Entries", "C/W/B/E")
+            # table fits 80 columns instead of clipping "Error" (GAP-1166). The
+            # counts come before Last Sync: at 80 columns a sync time cut
+            # them to "1/0" (GAP-2315); the detail has the full time.
+            return ("ID", "Kind", "Content", "On", "Status", "Entries", "C/W/B/E", "Last Sync")
         return ("Source", "Name", "Type", "Status", "Severity", "A/R", "Location")
 
     def data_table_rows(self) -> tuple[tuple[str, ...], ...]:
@@ -336,10 +338,10 @@ class RegistriesPanelModel:
                     row.kind,
                     row.content,
                     row.enabled_label,
-                    row.last_sync or "(never)",
                     row.status_label,
                     str(row.entry_count),
                     f"{row.clean_count}/{row.warning_count}/{row.blocked_count}/{row.error_count}",
+                    _short_sync_time(row.last_sync) or "(never)",
                 )
                 for row in self.sources
             )
@@ -442,6 +444,15 @@ SYNC_CONSEQUENCE = (
     "Fetches the source, scans each entry and promotes clean or approved entries into policy. "
     "A remote MCP scan connects to the server and runs the MCP scanner, so it can take up to a minute."
 )
+
+
+def _short_sync_time(value: str) -> str:
+    """``2026-10-03T06:17:21Z`` as ``2026-10-03 06:17Z`` for the Sources table."""
+
+    text = (value or "").strip()
+    if len(text) >= 16 and text[10:11] == "T" and text.endswith("Z"):
+        return f"{text[:10]} {text[11:16]}Z"
+    return text
 
 
 def sync_source_intent(source_id: str) -> RegistryCommandIntent:
