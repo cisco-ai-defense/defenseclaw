@@ -444,10 +444,16 @@ def _unconfirmed_audit_reason(exc: BaseException) -> str:
             "the gateway on this port refused this account's credentials; "
             "check with 'defenseclaw doctor' that it is this account's gateway"
         )
-    if isinstance(exc, requests.Timeout) or (isinstance(status, int) and status >= 500):
+    if isinstance(exc, requests.Timeout):
         return (
             "the gateway could not record it in time, likely because its audit database is busy "
             "or slow; gateway.log has the cause. Try again in a minute"
+        )
+    if isinstance(status, int) and status >= 500:
+        # GAP-2381: a 5xx is not always a busy database; the gateway logs the cause.
+        return (
+            f"the gateway could not record it (HTTP {status}); gateway.log has the cause. "
+            "If it names a busy or locked audit database, try again in a minute"
         )
     return "the gateway did not acknowledge it; gateway.log has the cause. Try again in a minute"
 

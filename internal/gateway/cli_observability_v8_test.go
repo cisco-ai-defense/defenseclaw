@@ -519,3 +519,33 @@ func TestCLIObservabilityV8PluginScanRowNamesTargetAndConnector(t *testing.T) {
 		}
 	}
 }
+
+// GAP-2381: re-running "defenseclaw init" on a v8 install sent the "init"
+// action, whose registry entry needs caller context, and got a 503.
+func TestCLIObservabilityV8RecordsContextRequiredSetupActions(t *testing.T) {
+	fixture, api, _ := newCLIObservabilityV8Fixture(t)
+	for _, action := range []string{"init", "bootstrap"} {
+		body := `{"kind":"action","run_id":"python-init","action":{"name":"` + action +
+			`","target":"/home/u/.defenseclaw","details":"environment=linux"}}`
+		request := httptest.NewRequest(http.MethodPost, cliObservabilityV8Path, bytes.NewBufferString(body))
+		response := httptest.NewRecorder()
+		api.handleCLIObservabilityV8(response, request)
+		if response.Code != http.StatusNoContent {
+			t.Fatalf("%s: status=%d response=%q", action, response.Code, response.Body.String())
+		}
+	}
+	database, err := sql.Open("sqlite", fixture.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var count int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM audit_events
+		WHERE run_id = 'python-init' AND bucket = 'compliance.activity' AND action IN ('init', 'bootstrap')`,
+	).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("recorded setup actions=%d, want 2", count)
+	}
+}

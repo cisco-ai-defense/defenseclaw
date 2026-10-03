@@ -655,6 +655,9 @@ class TestMergeFunctions(unittest.TestCase):
         # GAP-2357: same default as the gateway (viper gateway.watcher.*.take_action).
         self.assertTrue(gw.skill.take_action)
         self.assertTrue(gw.plugin.take_action)
+        # GAP-2382: the mcp watcher block is modeled with the gateway default too.
+        self.assertTrue(gw.mcp.take_action)
+        self.assertFalse(_merge_gateway_watcher({"mcp": {"take_action": False}}).mcp.take_action)
 
     def test_merge_gateway_watcher_with_data(self):
         gw = _merge_gateway_watcher({"enabled": True, "skill": {"enabled": False, "dirs": ["/tmp"]}})
