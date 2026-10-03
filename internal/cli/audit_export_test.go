@@ -312,7 +312,7 @@ func TestBuildAuditEventLineIncludesStructuredPayload(t *testing.T) {
 		"shell",
 		"tool-1",
 		"policy-1",
-		"codex",
+		"codex", "",
 		version.Provenance{SchemaVersion: 7, ContentHash: "hash-1", Generation: 2, BinaryVersion: "0.0.0-test"},
 	)
 	if err != nil {
@@ -412,5 +412,48 @@ func TestManagedAuditStoreOpensReadOnly(t *testing.T) {
 	managedAuditStoreTrustCheck = func(string) error { return errors.New("owner uid 1000 is not trusted") }
 	if _, err := openManagedAuditStoreReadOnly(path); err == nil || !strings.Contains(err.Error(), "managed audit store") {
 		t.Fatalf("an untrusted managed audit store opened: %v", err)
+	}
+}
+
+// GAP-2203: a v8 runtime record keeps the action of its telemetry family
+// (telemetry-destination, circuit_breaker_open, config.change.applied);
+// only legacy rows with an unregistered action are rewritten to "action".
+func TestBuildAuditEventLineKeepsV8RecordAction(t *testing.T) {
+	build := func(action, eventName string) map[string]any {
+		t.Helper()
+		line, err := buildAuditEventLine(
+			"00000000-0000-0000-0000-000000000002", "2026-10-03T04:00:00Z", action,
+			"otlp", "destination=otlp", "HIGH", "run-1", "",
+			"", "", "gateway.destination_circuit",
+			"", "", "", "",
+			sql.NullInt64{Int64: 8, Valid: true}, "", sql.NullInt64{}, "",
+			"", "", "", "",
+			"", eventName,
+			version.Provenance{SchemaVersion: 8},
+		)
+		if err != nil {
+			t.Fatalf("buildAuditEventLine(%q, %q): %v", action, eventName, err)
+		}
+		var ev map[string]any
+		if err := json.Unmarshal(line, &ev); err != nil {
+			t.Fatal(err)
+		}
+		return ev
+	}
+	for action, eventName := range map[string]string{
+		"circuit_breaker_open":  "subsystem.degraded",
+		"telemetry-destination": "subsystem.degraded",
+		"config.change.applied": "config.change.applied",
+	} {
+		ev := build(action, eventName)
+		if ev["action"] != action || ev["details"] != "destination=otlp" {
+			t.Errorf("v8 record %q exported action=%v details=%v, want the action kept", action, ev["action"], ev["details"])
+		}
+	}
+	for _, eventName := range []string{"", "legacy.audit.action"} {
+		ev := build("circuit_breaker_open", eventName)
+		if ev["action"] != "action" || ev["details"] != "legacy_action=circuit_breaker_open | destination=otlp" {
+			t.Errorf("legacy row (event_name %q) exported action=%v details=%v", eventName, ev["action"], ev["details"])
+		}
 	}
 }

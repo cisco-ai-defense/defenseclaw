@@ -10,8 +10,8 @@
     "timestamp": { "type": "string", "format": "date-time" },
     "action": {
       "type": "string",
-      "description": "Curated action — see internal/audit/actions.go (Go) and cli/defenseclaw/audit_actions.py (Python). Extending this enum is a minor schema bump. The `codex.notify.<sanitized-type>` family is dynamic: the gateway derives the suffix from the codex notify payload after sanitization ([a-z0-9._-]{1,64}). Validators MUST accept either the static enum OR the prefixed pattern.",
-      "oneOf": [
+      "description": "Curated action — see internal/audit/actions.go (Go) and cli/defenseclaw/audit_actions.py (Python). Extending this enum is a minor schema bump. The `codex.notify.<sanitized-type>` family is dynamic: the gateway derives the suffix from the codex notify payload after sanitization ([a-z0-9._-]{1,64}). Validators MUST accept the static enum, the prefixed pattern, or the v8 record action: rows written by the v8 runtime (event_name set, not legacy.audit.*) keep the action of their telemetry family, for example telemetry-destination, circuit_breaker_open or config.change.applied.",
+      "anyOf": [
         {
           "enum": [
             "init",
@@ -231,6 +231,11 @@
           "type": "string",
           "pattern": "^codex\\.notify\\.[a-z0-9._-]{1,64}$",
           "description": "Dynamic codex notify suffix family. Suffix is derived from the inbound payload's `type` field via sanitizeNotifyType."
+        },
+        {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$",
+          "description": "v8 record action: the action of a v8 runtime telemetry family (internal/cli/audit_export.go isV8RecordAction)."
         }
       ]
     },
