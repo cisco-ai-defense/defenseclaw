@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
@@ -121,18 +122,66 @@ arguments, 75 another lifecycle run holds the lock.`,
 // lifecycle lock.
 const lockWaitUsage = "wait up to this long for another lifecycle run (default 5s, at most 15m) before exiting 75"
 
+// lockWaitValue is --lock-wait: a duration that keeps the text as typed, so
+// the cap error names "1h", not "60m", and whose malformed-value error gives
+// examples inside the cap (GAP-2329).
+type lockWaitValue struct {
+	wait  *time.Duration
+	typed string
+}
+
+func (v *lockWaitValue) Set(s string) error {
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return err
+	}
+	*v.wait, v.typed = d, s
+	return nil
+}
+
+func (v *lockWaitValue) Type() string { return "duration" }
+
+// String is "0" when unset, so --help prints no "(default 0s)".
+func (v *lockWaitValue) String() string {
+	if v.wait == nil || *v.wait == 0 {
+		return "0"
+	}
+	return v.wait.String()
+}
+
+func (v *lockWaitValue) flagTakes() string { return "a duration from 0 to 15m, such as 30s or 5m" }
+
+func addLockWaitFlag(flags *pflag.FlagSet, wait *time.Duration) {
+	flags.Var(&lockWaitValue{wait: wait}, "lock-wait", lockWaitUsage)
+}
+
+// typedLockWait is --lock-wait as typed when it was typed as wait, or "".
+func typedLockWait(cmd *cobra.Command, wait time.Duration) string {
+	if f := cmd.Flags().Lookup("lock-wait"); f != nil {
+		if v, ok := f.Value.(*lockWaitValue); ok && v.typed != "" && *v.wait == wait {
+			return v.typed
+		}
+	}
+	return ""
+}
+
+// lifecycleNoArgs rejects a stray positional argument with the wording of
+// every other gateway command ("unexpected argument", GAP-2330) and the
+// lifecycle's invalid-arguments exit code.
+func lifecycleNoArgs(cmd *cobra.Command, args []string) error {
+	if err := strayArgumentError(cmd, args); err != nil {
+		return lifecycleFlagError(cmd, err)
+	}
+	return nil
+}
+
 func newUnixLifecycleCommand(platform, action, summary string) *cobra.Command {
 	opts := &unixLifecycleOptions{}
 	cmd := &cobra.Command{
 		Use:          action,
 		Short:        summary,
 		SilenceUsage: true,
-		Args: func(cmd *cobra.Command, args []string) error {
-			if err := cobra.NoArgs(cmd, args); err != nil {
-				return lifecycleFlagError(cmd, err)
-			}
-			return nil
-		},
+		Args:         lifecycleNoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runUnixLifecycle(cmd, platform, action, opts)
 		},
@@ -155,15 +204,15 @@ func newUnixLifecycleCommand(platform, action, summary string) *cobra.Command {
 		if action == "ensure" {
 			flags.StringVar(&opts.reason, "reason", "", "why ensure runs (recorded in the result)")
 		}
-		flags.DurationVar(&opts.lockWait, "lock-wait", 0, lockWaitUsage)
+		addLockWaitFlag(flags, &opts.lockWait)
 	case "uninstall":
 		flags.BoolVar(&opts.purge, "purge", false, "also remove each enrolled account's ~/.defenseclaw, the empty agent folders DefenseClaw created in its home, its per-user binaries in ~/.local/bin and DefenseClaw's entries in its uv cache ~/.cache/uv (after stopping its per-user gateway); the result names every enrolled account whose data it removed, and warns for each one whose data it kept; accounts the deployment never enrolled have no DefenseClaw per-user data and are not listed")
 		flags.BoolVar(&opts.keepState, "keep-state", false, "keep the machine state (config, secrets, gateway and guardian state, logs, lifecycle state) and the service account, so a reinstall resumes with them; without it uninstall removes all of it")
 		flags.BoolVar(&opts.keepServiceAccount, "keep-service-account", false, "keep the gateway service account, which uninstall deletes otherwise")
 		flags.BoolVar(&opts.removeServiceAccount, "remove-service-account", false, "delete the gateway service account (the default now; kept for older scripts)")
-		flags.DurationVar(&opts.lockWait, "lock-wait", 0, lockWaitUsage)
+		addLockWaitFlag(flags, &opts.lockWait)
 	case "reconcile", "rotate-credentials":
-		flags.DurationVar(&opts.lockWait, "lock-wait", 0, lockWaitUsage)
+		addLockWaitFlag(flags, &opts.lockWait)
 	}
 	flags.BoolVar(&opts.json, "json", false, "print the lifecycle result as JSON")
 	return cmd
@@ -206,7 +255,7 @@ func newEnterpriseSecretCommand(action, summary string) *cobra.Command {
 		cmd.Flags().StringVar(&opts.fromFile, "from-file", "", "read the value from this file")
 	}
 	if action != "status" && runtime.GOOS != "windows" {
-		cmd.Flags().DurationVar(&opts.lockWait, "lock-wait", 0, lockWaitUsage)
+		addLockWaitFlag(cmd.Flags(), &opts.lockWait)
 	}
 	cmd.Flags().BoolVar(&opts.json, "json", false, "print JSON")
 	if runtime.GOOS != "windows" {
@@ -214,12 +263,7 @@ func newEnterpriseSecretCommand(action, summary string) *cobra.Command {
 		// --name is invalid arguments: exit 2 with the usage line and the
 		// --help pointer, as on enterprise linux|macos (GAP-2095).
 		cmd.SetFlagErrorFunc(lifecycleFlagError)
-		cmd.Args = func(cmd *cobra.Command, args []string) error {
-			if err := cobra.NoArgs(cmd, args); err != nil {
-				return lifecycleFlagError(cmd, err)
-			}
-			return nil
-		}
+		cmd.Args = lifecycleNoArgs
 		cmd.PreRunE = func(cmd *cobra.Command, _ []string) error {
 			if err := cmd.ValidateRequiredFlags(); err != nil {
 				return lifecycleFlagError(cmd, err)

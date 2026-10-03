@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 
@@ -22,9 +23,16 @@ import (
 
 // usageArgsExempt lists the command trees whose positional-argument handling
 // stays cobra's own: agent hooks and the notify hook have exit-status
-// contracts of their own (rc 2 blocks an agent's tool call), and the
-// enterprise lifecycle leaves are driven by deployment tooling.
-var usageArgsExempt = []string{"enterprise", "hook", "notify"}
+// contracts of their own (rc 2 blocks an agent's tool call).
+var usageArgsExempt = []string{"hook", "notify"}
+
+// usageArgsExemptGroups lists command groups (paths below the root) whose
+// leaves keep their own positional-argument handling: Setup and the Windows
+// module drive the Windows enterprise lifecycle, whose invalid-arguments
+// exit code is 1639. The rest of the enterprise tree rejects a stray
+// argument like every other command (GAP-2330: "enterprise hooks status
+// extra-arg" ran and exited 0).
+var usageArgsExemptGroups = []string{"enterprise windows"}
 
 // usageTakesArgs lists the commands that read positional arguments without
 // declaring an Args validator.
@@ -128,6 +136,11 @@ func plainFlagValueError(err error) string {
 		return err.Error()
 	}
 	takes := ""
+	if t, ok := invalid.GetFlag().Value.(interface{ flagTakes() string }); ok {
+		// A flag with a narrower range says so (GAP-2329: "1h" was the
+		// example and the 15m cap of --lock-wait then refused it).
+		return fmt.Sprintf("--%s takes %s, not %q", invalid.GetFlag().Name, t.flagTakes(), invalid.GetValue())
+	}
 	switch invalid.GetFlag().Value.Type() {
 	case "bool":
 		takes = "true or false"
@@ -172,6 +185,16 @@ func (e *delegatedUsageError) Unwrap() error { return e.err }
 // (GAP-1549): "status extra-arg" ran status and "watchdog bogus" started the
 // foreground watchdog.
 func unexpectedArgs(c *cobra.Command, args []string) error {
+	if err := strayArgumentError(c, args); err != nil {
+		return usageError(c, err)
+	}
+	return nil
+}
+
+// strayArgumentError is the bare error for positional arguments on a command
+// that takes none: "unexpected argument" on a leaf, "unknown command" on a
+// group. cobra.NoArgs said "unknown command" on a leaf too (GAP-2330).
+func strayArgumentError(c *cobra.Command, args []string) error {
 	if len(args) == 0 {
 		return nil
 	}
@@ -183,7 +206,24 @@ func unexpectedArgs(c *cobra.Command, args []string) error {
 	if suggestions := c.SuggestionsFor(args[0]); len(suggestions) > 0 {
 		msg += "\nDid you mean " + strings.Join(suggestions, " or ") + "?"
 	}
-	return usageError(c, fmt.Errorf("%s", msg))
+	return fmt.Errorf("%s", msg)
+}
+
+// isCobraNoArgs reports whether a command's validator is cobra.NoArgs,
+// which reports a stray argument on a leaf as an unknown command.
+func isCobraNoArgs(args cobra.PositionalArgs) bool {
+	return args != nil && reflect.ValueOf(args).Pointer() == reflect.ValueOf(cobra.NoArgs).Pointer()
+}
+
+// inExemptGroup reports whether the command path (below the root) is one of
+// the usageArgsExemptGroups or sits under one.
+func inExemptGroup(path string) bool {
+	for _, group := range usageArgsExemptGroups {
+		if path == group || strings.HasPrefix(path, group+" ") {
+			return true
+		}
+	}
+	return false
 }
 
 // unknownSubcommand reports a command group invoked with a name that is none
@@ -215,8 +255,8 @@ func installUsageArgChecks(root *cobra.Command) {
 				continue
 			}
 			path := strings.TrimSpace(strings.TrimPrefix(sub.CommandPath(), root.CommandPath()))
-			if sub.Runnable() && sub.Args == nil && !sub.DisableFlagParsing &&
-				!usageTakesArgs[path] && !inCommandTree(sub, usageArgsExempt) {
+			if sub.Runnable() && (sub.Args == nil || isCobraNoArgs(sub.Args)) && !sub.DisableFlagParsing &&
+				!usageTakesArgs[path] && !inCommandTree(sub, usageArgsExempt) && !inExemptGroup(path) {
 				sub.Args = unexpectedArgs
 			}
 			walk(sub)
