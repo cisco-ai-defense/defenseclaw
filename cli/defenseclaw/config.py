@@ -1534,10 +1534,17 @@ class GatewayWatcherPluginConfig:
 
 
 @dataclass
+class GatewayWatcherMCPConfig:
+    # Same default as the gateway's viper default (GAP-2382).
+    take_action: bool = True
+
+
+@dataclass
 class GatewayWatcherConfig:
     enabled: bool = True
     skill: GatewayWatcherSkillConfig = field(default_factory=GatewayWatcherSkillConfig)
     plugin: GatewayWatcherPluginConfig = field(default_factory=GatewayWatcherPluginConfig)
+    mcp: GatewayWatcherMCPConfig = field(default_factory=GatewayWatcherMCPConfig)
 
 
 @dataclass
@@ -5410,6 +5417,7 @@ def _merge_gateway_watcher(raw: dict[str, Any] | None) -> GatewayWatcherConfig:
         return GatewayWatcherConfig()
     skill_raw = raw.get("skill", {})
     plugin_raw = raw.get("plugin", {})
+    mcp_raw = raw.get("mcp") or {}
     return GatewayWatcherConfig(
         enabled=raw.get("enabled", True),
         skill=GatewayWatcherSkillConfig(
@@ -5421,6 +5429,9 @@ def _merge_gateway_watcher(raw: dict[str, Any] | None) -> GatewayWatcherConfig:
             enabled=plugin_raw.get("enabled", True),
             take_action=plugin_raw.get("take_action", True),
             dirs=plugin_raw.get("dirs", []),
+        ),
+        mcp=GatewayWatcherMCPConfig(
+            take_action=mcp_raw.get("take_action", True),
         ),
     )
 
