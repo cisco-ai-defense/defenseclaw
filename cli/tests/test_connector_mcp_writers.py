@@ -411,13 +411,43 @@ class TestClaudeCodeWrites:
         result = json.loads(settings.read_text(encoding="utf-8"))
         assert result["mcpServers"]["managed"] == {"command": "operator-replacement"}
 
-    def test_unset_after_claude_rewrites_settings_reports_entry_kept(
+    def test_unset_after_claude_rewrites_settings_removes_unchanged_entry(
         self,
         tmp_path,
         monkeypatch,
     ):
-        # GAP-1400: Claude Code rewrites ~/.claude.json (a new file with its
-        # own state added); the entry stays and unset must not claim success.
+        # GAP-2541: Claude Code rewrites ~/.claude.json as it runs (a new file
+        # with its own state added). An entry still exactly as DefenseClaw
+        # wrote it is removed; Claude Code's own state stays.
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path / "defenseclaw-home"))
+        settings = tmp_path / ".claude.json"
+
+        set_mcp_server("claudecode", "deepwiki", {"type": "http", "url": "https://mcp.example.invalid/mcp"})
+        set_mcp_server("claudecode", "other", {"command": "inert-other"})
+        rewritten = json.loads(settings.read_text(encoding="utf-8"))
+        rewritten["numStartups"] = 3
+        staged = settings.with_name(".claude.json.tmp")
+        staged.write_text(json.dumps(rewritten, indent=2), encoding="utf-8")
+        os.replace(staged, settings)
+
+        unset_mcp_server("claudecode", "deepwiki")
+        result = json.loads(settings.read_text(encoding="utf-8"))
+        assert result["numStartups"] == 3
+        assert result["mcpServers"] == {"other": {"command": "inert-other"}}
+        # A second rewrite still leaves the other managed entry removable.
+        os.replace(settings, staged)
+        os.replace(staged, settings)
+        unset_mcp_server("claudecode", "other")
+        assert "other" not in json.loads(settings.read_text(encoding="utf-8")).get("mcpServers", {})
+
+    def test_unset_after_claude_rewrites_changed_entry_reports_entry_kept(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        # GAP-1400: a rewrite that also changed the entry leaves it in place,
+        # and unset (and a repeat unset) says so.
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path / "defenseclaw-home"))
         settings = tmp_path / ".claude.json"
@@ -425,16 +455,17 @@ class TestClaudeCodeWrites:
         set_mcp_server("claudecode", "deepwiki", {"url": "https://mcp.example.invalid/mcp"})
         rewritten = json.loads(settings.read_text(encoding="utf-8"))
         rewritten["numStartups"] = 3
+        rewritten["mcpServers"]["deepwiki"] = {"url": "https://operator.example.invalid/mcp"}
         staged = settings.with_name(".claude.json.tmp")
         staged.write_text(json.dumps(rewritten, indent=2), encoding="utf-8")
         os.replace(staged, settings)
 
-        with pytest.raises(connector_paths.MCPServerNotRemovedError, match="claude mcp remove deepwiki -s user"):
-            unset_mcp_server("claudecode", "deepwiki")
-        assert "deepwiki" in json.loads(settings.read_text(encoding="utf-8"))["mcpServers"]
-        # A second unset (the entry is now released) must still say so.
-        with pytest.raises(connector_paths.MCPServerNotRemovedError, match="claude mcp remove deepwiki -s user"):
-            unset_mcp_server("claudecode", "deepwiki")
+        for _ in range(2):
+            with pytest.raises(connector_paths.MCPServerNotRemovedError, match="claude mcp remove deepwiki -s user"):
+                unset_mcp_server("claudecode", "deepwiki")
+        assert json.loads(settings.read_text(encoding="utf-8"))["mcpServers"]["deepwiki"] == {
+            "url": "https://operator.example.invalid/mcp",
+        }
 
     @pytest.mark.parametrize("first_unset", ["first", "second"])
     def test_multiple_managed_servers_restore_only_after_last_unset(
@@ -1885,13 +1916,16 @@ class TestClaudeCodeWrites:
         replacement.write_bytes(managed_bytes)
         os.replace(replacement, settings)
 
-        # GAP-1400: the replaced file keeps the entry, and the unset says so.
-        with pytest.raises(connector_paths.MCPServerNotRemovedError, match="no longer owns"):
-            unset_mcp_server("claudecode", "demo")
+        # GAP-2541: the replaced file is never deleted or restored wholesale,
+        # but the entry DefenseClaw wrote (still unchanged) is removed.
+        unset_mcp_server("claudecode", "demo")
 
         assert settings.exists()
-        assert settings.read_bytes() == managed_bytes
-        assert _claude_released_names(data_home) == {"demo"}
+        result = json.loads(settings.read_text(encoding="utf-8"))
+        assert "demo" not in result.get("mcpServers", {})
+        if preexisting:
+            assert result["theme"] == "operator"
+        assert _claude_ownership_files(data_home) == []
 
     @pytest.mark.parametrize("preexisting", [False, True])
     def test_same_byte_replacement_between_publish_and_observation_is_never_owned(
