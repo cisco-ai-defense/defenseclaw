@@ -4889,7 +4889,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 ("d", "Remove the selected source"),
                 ("r", "Refresh"),
                 # The compact column headers had no legend (GAP-2229).
-                ("C/W/B/E", "Sources column: clean / warning / blocked / error entries"),
+                ("C/W/B/E", "Sources column: clean / warning / blocked / error entries (rejected ones are not counted)"),
                 ("A/R", "Entries column: A approved, R rejected, - neither"),
             ],
             "policies": [

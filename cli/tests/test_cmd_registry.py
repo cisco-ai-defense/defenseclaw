@@ -1192,23 +1192,36 @@ class TestRegistryEntriesFilters(RegistryCommandTestBase):
         rows = json.loads(result.output)
         names = {row["name"] for row in rows}
         self.assertEqual(names, {"rejected-one"})
-        # The reject path also flips ``status`` to ``blocked`` so the
-        # operator's call survives both filter shapes.
-        self.assertEqual(rows[0]["status"], "blocked")
+        # The reject path also flips ``status`` to ``rejected`` (GAP-2371)
+        # so the operator's call survives both filter shapes.
+        self.assertEqual(rows[0]["status"], "rejected")
 
-    def test_entries_status_blocked_includes_rejected(self):
-        # Cross-check: the reject above should land on the
-        # ``--status blocked`` filter as well, not just on
-        # ``--rejected``. This is the regression the
-        # ``manual_set_verdict`` fix targets.
+    def test_entries_status_rejected_not_blocked(self):
+        # GAP-2371: a rejected entry is on ``--status rejected``, not on
+        # ``--status blocked`` (reject does not block the server itself).
         result = self.invoke([
             "entries", "corp-skills",
-            "--status", "blocked",
+            "--status", "rejected",
             "--json",
         ])
         self.assertEqual(result.exit_code, 0, result.output)
         names = {row["name"] for row in json.loads(result.output)}
         self.assertEqual(names, {"rejected-one"})
+        blocked = self.invoke(["entries", "corp-skills", "--status", "blocked", "--json"])
+        self.assertEqual(json.loads(blocked.output), [])
+
+    def test_list_counts_rejected_apart_from_blocked(self):
+        # GAP-2371: list shows "2 (1/0/0/0/1)", not the reject under B.
+        result = self.invoke(["list"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("2 (1/0/0/0/1)", result.output)
+        self.assertIn("ENTRIES column: total (clean/warning/blocked/error/rejected)", result.output)
+        payload = json.loads(self.invoke(["list", "--json"]).output)
+        self.assertEqual((payload[0]["entries"]["blocked"], payload[0]["entries"]["rejected"]), (0, 1))
+        entries = self.invoke(["entries", "corp-skills"])
+        row = next(line for line in entries.output.splitlines() if "rejected-one" in line)
+        self.assertIn(" rejected ", row)
+        self.assertNotIn("blocked", row)
 
     def test_entries_approved_and_rejected_returns_empty(self):
         # Mutual exclusivity by definition.

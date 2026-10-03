@@ -87,6 +87,23 @@ def test_registry_index_loader_reads_configurable_data_dir(tmp_path: Path) -> No
     assert index.verdicts[0].name == "demo-skill"
 
 
+def test_registry_index_loader_reads_older_reject_as_rejected(tmp_path: Path) -> None:
+    # GAP-2371: an older reject stored status "blocked" and counted it under B.
+    write_index(
+        tmp_path,
+        "sf1-local",
+        {
+            "blocked_count": 1,
+            "verdicts": [{"name": "deepwiki", "type": "mcp", "status": "blocked", "rejected": True}],
+        },
+    )
+
+    index = load_registry_index(tmp_path, "sf1-local")
+
+    assert index.verdicts[0].status == "rejected"
+    assert (index.blocked_count, index.rejected_count) == (0, 1)
+
+
 def test_registry_index_loader_missing_file_is_an_error(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
         load_registry_index(tmp_path, "no-such")

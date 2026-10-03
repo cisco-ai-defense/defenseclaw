@@ -575,7 +575,7 @@ def list_cmd(app: AppContext, emit_json: bool) -> None:
     """List configured registry sources.
 
     The ``ENTRIES`` column reports cached counts as
-    ``total (clean/warning/blocked/error)`` from the on-disk index — a
+    ``total (clean/warning/blocked/error/rejected)`` from the on-disk index — a
     dash means the source has never been synced. A source whose last
     sync failed is named below the table. Counts are
     deliberately read fresh from ``index.json`` rather than the
@@ -600,6 +600,7 @@ def list_cmd(app: AppContext, emit_json: bool) -> None:
                     "warning": idx.warning_count,
                     "blocked": idx.blocked_count,
                     "error": idx.error_count,
+                    "rejected": idx.rejected_count,
                 }
             out.append(d)
         _emit_json(out)
@@ -630,14 +631,16 @@ def list_cmd(app: AppContext, emit_json: bool) -> None:
         else:
             entries = (
                 f"{idx.entry_count} "
-                f"({idx.clean_count}/{idx.warning_count}/{idx.blocked_count}/{idx.error_count})"
+                f"({idx.clean_count}/{idx.warning_count}/{idx.blocked_count}/{idx.error_count}"
+                f"/{idx.rejected_count})"
             )
         click.echo(
             f"  {s.id:<24} {s.kind:<12} {s.content:<8} {on:<3} "
             f"{entries:<18} {last:<22} {url}"
         )
     click.echo()
-    ux.subhead("ENTRIES column: total (clean/warning/blocked/error)")
+    # GAP-2371: a reject only stops promotion, so it is not counted as blocked.
+    ux.subhead("ENTRIES column: total (clean/warning/blocked/error/rejected)")
     # A failed last sync must not look like a healthy one (GAP-2210).
     for s in sources:
         if (s.last_status or "").startswith("error"):
@@ -674,7 +677,7 @@ def show_cmd(app: AppContext, source_id: str, emit_json: bool) -> None:
     click.echo(
         f"    {ux.dim('Verdicts:')}       "
         f"{idx.clean_count} clean, {idx.warning_count} warning, "
-        f"{idx.blocked_count} blocked, {idx.error_count} error",
+        f"{idx.blocked_count} blocked, {idx.error_count} error, {idx.rejected_count} rejected",
     )
     click.echo()
 
@@ -1379,9 +1382,10 @@ def _registry_mcp_url_allowed(url: str, *, allow_private: bool = False) -> bool:
               type=click.Choice(["skill", "mcp", "all"], case_sensitive=False),
               default="all", help="Show only skills or MCP servers")
 @click.option("--status",
-              type=click.Choice(["pending", "clean", "warning", "blocked", "error", "all"],
+              type=click.Choice(["pending", "clean", "warning", "blocked", "error", "rejected", "all"],
                                 case_sensitive=False),
-              default="all", help="Show only entries with this scan status")
+              default="all",
+              help="Show only entries with this status (rejected: an operator reject, never promoted)")
 @click.option("--approved", is_flag=True,
               help="Show only operator-approved entries")
 @click.option("--rejected", is_flag=True,
