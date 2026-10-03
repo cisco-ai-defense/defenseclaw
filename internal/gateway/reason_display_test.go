@@ -21,6 +21,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 )
@@ -247,5 +248,26 @@ func TestAgentVerdictReasonNamesLLMJudgeKind(t *testing.T) {
 	}
 	if alert := agentVerdictReason("alert", source, display, redaction.SinkPolicyDefault); alert != display {
 		t.Errorf("an alert was reworded: %q", alert)
+	}
+}
+
+// GAP-2423: an asset-policy block reaches the agent as a DefenseClaw block
+// naming the asset, not as a redacted key=value reason.
+func TestAgentVerdictReasonNamesAssetPolicyBlock(t *testing.T) {
+	source := assetPolicyResponseReason(config.AssetPolicyDecision{
+		Source: "registry-required", TargetType: "mcp", TargetName: "f1r10-off", Connector: "claudecode",
+		RegistryStatus: "unregistered", RegistryConfigured: true, RuntimeSurface: "hook",
+	})
+	display := agentDisplayReason(source, redaction.SinkPolicyDefault)
+	got := agentVerdictReason("block", source, display, redaction.SinkPolicyDefault)
+	want := "DefenseClaw policy blocked this action (MCP server f1r10-off is not in the approved registry). " + agentBlockNoRetry
+	if got != want {
+		t.Errorf("agentVerdictReason(%q) = %q, want %q", source, got, want)
+	}
+	// A name outside the plain shape keeps the existing redaction.
+	odd := "ASSET-POLICY reason_code=not-in-approved-registry asset_type=mcp asset_name=a;b"
+	oddDisplay := agentDisplayReason(odd, redaction.SinkPolicyDefault)
+	if got := agentVerdictReason("block", odd, oddDisplay, redaction.SinkPolicyDefault); got != oddDisplay {
+		t.Errorf("unexpected rewrite of a non-matching reason: %q", got)
 	}
 }

@@ -241,7 +241,7 @@ func TestEvaluateClaudeCodeHook_BlocksUnregisteredMCPPermissionRequest(t *testin
 	if !ok || decision["behavior"] != "deny" {
 		t.Fatalf("permission decision = %+v, want behavior=deny", hook["decision"])
 	}
-	for _, want := range []string{"reason_code=not-in-approved-registry", "asset_type=mcp", "asset_name=rogue", "connector=claudecode", "source=registry-required", "registry_status=not-registered", "registry_configured=true"} {
+	for _, want := range []string{"DefenseClaw policy blocked this action", "MCP server rogue is not in the approved registry"} {
 		if !strings.Contains(resp.Reason, want) {
 			t.Fatalf("reason %q missing %q", resp.Reason, want)
 		}
@@ -276,7 +276,7 @@ func TestEvaluateClaudeCodeHook_BlocksUnregisteredSkillPreToolUse(t *testing.T) 
 	if !containsString(resp.Findings, "ASSET-POLICY-SKILL") {
 		t.Fatalf("findings=%v, want ASSET-POLICY-SKILL", resp.Findings)
 	}
-	for _, want := range []string{"reason_code=not-in-approved-registry", "asset_type=skill", "asset_name=rogue-skill", "connector=claudecode", "source=registry-required", "registry_status=not-registered", "registry_configured=true"} {
+	for _, want := range []string{"DefenseClaw policy blocked this action", "skill rogue-skill is not in the approved registry"} {
 		if !strings.Contains(resp.Reason, want) {
 			t.Fatalf("reason %q missing %q", resp.Reason, want)
 		}
@@ -313,7 +313,7 @@ func TestEvaluateClaudeCodeHook_BlocksUnregisteredSkillUserPromptExpansion(t *te
 	if resp.ClaudeCodeOutput["decision"] != "block" {
 		t.Fatalf("claude output = %+v, want decision=block", resp.ClaudeCodeOutput)
 	}
-	for _, want := range []string{"reason_code=not-in-approved-registry", "asset_type=skill", "asset_name=rogue-skill", "connector=claudecode", "source=registry-required", "registry_status=not-registered", "registry_configured=true", "surface=prompt_expansion"} {
+	for _, want := range []string{"DefenseClaw policy blocked this action", "skill rogue-skill is not in the approved registry"} {
 		if !strings.Contains(resp.Reason, want) {
 			t.Fatalf("reason %q missing %q", resp.Reason, want)
 		}
@@ -407,10 +407,11 @@ func TestEvaluateClaudeCodeHook_NamespacedPluginUserPromptExpansionPolicy(t *tes
 				t.Fatalf("claude output=%+v, want decision=block", resp.ClaudeCodeOutput)
 			}
 			for _, want := range []string{
-				"asset_type=plugin",
-				"asset_name=" + tc.wantTarget,
-				"source=" + tc.wantSource,
-				"surface=prompt_expansion",
+				"DefenseClaw policy blocked this action",
+				"plugin " + tc.wantTarget + map[string]string{
+					"admin-deny":        " is denied by asset policy",
+					"registry-required": " is not in the approved registry",
+				}[tc.wantSource],
 			} {
 				if !strings.Contains(resp.Reason, want) {
 					t.Fatalf("reason %q missing %q", resp.Reason, want)
@@ -449,7 +450,7 @@ func TestEvaluateClaudeCodeHook_BlocksUnregisteredMCPPromptExpansion(t *testing.
 	if resp.ClaudeCodeOutput["decision"] != "block" {
 		t.Fatalf("claude output = %+v, want decision=block", resp.ClaudeCodeOutput)
 	}
-	for _, want := range []string{"reason_code=not-in-approved-registry", "asset_type=mcp", "asset_name=rogue", "connector=claudecode", "source=registry-required", "registry_status=not-registered", "registry_configured=true", "surface=prompt_expansion"} {
+	for _, want := range []string{"DefenseClaw policy blocked this action", "MCP server rogue is not in the approved registry"} {
 		if !strings.Contains(resp.Reason, want) {
 			t.Fatalf("reason %q missing %q", resp.Reason, want)
 		}
@@ -488,8 +489,8 @@ func TestEvaluateClaudeCodeHook_RegistryRequiredEmptyDeniesByDefault(t *testing.
 	if !containsString(resp.Findings, "ASSET-POLICY-MCP") {
 		t.Fatalf("findings=%v, want ASSET-POLICY-MCP", resp.Findings)
 	}
-	if !strings.Contains(resp.Reason, "reason_code=registry-required-but-empty") {
-		t.Fatalf("reason %q missing registry-required-but-empty reason_code", resp.Reason)
+	if !strings.Contains(resp.Reason, "needs an approved registry, and none is configured") {
+		t.Fatalf("reason %q missing the empty-registry wording", resp.Reason)
 	}
 }
 
@@ -550,8 +551,8 @@ func TestEvaluateClaudeCodeHook_UserPromptExpansionRegistryRequiredEmptyDeniesBy
 	if !containsString(resp.Findings, "ASSET-POLICY-SKILL") {
 		t.Fatalf("findings=%v, want ASSET-POLICY-SKILL", resp.Findings)
 	}
-	if !strings.Contains(resp.Reason, "reason_code=registry-required-but-empty") {
-		t.Fatalf("reason %q missing registry-required-but-empty reason_code", resp.Reason)
+	if !strings.Contains(resp.Reason, "needs an approved registry, and none is configured") {
+		t.Fatalf("reason %q missing the empty-registry wording", resp.Reason)
 	}
 }
 
@@ -630,7 +631,7 @@ func TestEvaluateClaudeCodeHook_SkillCraftedPathStillBlocksWhenUnregistered(t *t
 	if !containsString(resp.Findings, "ASSET-POLICY-SKILL") {
 		t.Fatalf("findings=%v, want ASSET-POLICY-SKILL", resp.Findings)
 	}
-	if !strings.Contains(resp.Reason, "asset_name=evil-skill") {
+	if !strings.Contains(resp.Reason, "skill evil-skill is not in the approved registry") {
 		t.Fatalf("reason %q must surface the normalized basename so audit can see what was matched", resp.Reason)
 	}
 }
@@ -693,7 +694,7 @@ func TestEvaluateClaudeCodeHook_SkillDefaultDenyBlocksWithoutRegistry(t *testing
 	if !containsString(resp.Findings, "ASSET-POLICY-SKILL") {
 		t.Fatalf("findings=%v, want ASSET-POLICY-SKILL", resp.Findings)
 	}
-	for _, want := range []string{"reason_code=default-deny", "source=default-deny", "asset_type=skill", "asset_name=rogue-skill", "connector=claudecode", "registry_status=unknown", "registry_configured=false"} {
+	for _, want := range []string{"DefenseClaw policy blocked this action", "skill rogue-skill is denied by the default asset policy"} {
 		if !strings.Contains(resp.Reason, want) {
 			t.Fatalf("reason %q missing %q", resp.Reason, want)
 		}
