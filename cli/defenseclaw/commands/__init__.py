@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import shutil
 import sys
 from typing import Any
 
@@ -28,9 +29,17 @@ def hint(*lines: str) -> None:
     """Print dim post-command hints, only when stdout is a terminal."""
     if not sys.stdout.isatty():
         return
+    width = shutil.get_terminal_size().columns
     click.echo()
     for line in lines:
-        click.echo(click.style(line, dim=True))
+        # GAP-2363: a "Label:  command" hint wider than the terminal puts the
+        # command on its own line, so the wrap never splits the command.
+        label, sep, command = line.partition(":  ")
+        if sep and len(line) > width:
+            click.echo(click.style(f"{label}:", dim=True))
+            click.echo(click.style(f"  {command}", dim=True))
+        else:
+            click.echo(click.style(line, dim=True))
 
 
 def resolve_list_connector(app: Any, requested: str | None) -> str:
