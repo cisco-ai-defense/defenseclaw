@@ -169,7 +169,15 @@ func enterpriseHookStandalonePlatformPrepare(stderr io.Writer) {
 	if _, err := enterpriseHookWindowsWSL(opts); err != nil {
 		fmt.Fprintf(stderr, "defenseclaw: enterprise machine policy (Windows): WSL agent sessions: %v\n", err)
 	}
+	if refreshed, err := enterpriseHookWindowsCursorAdapterRefresh(opts.HookBinary); err != nil {
+		fmt.Fprintf(stderr, "defenseclaw: enterprise machine policy (Windows): Cursor enterprise adapter: %v\n", err)
+	} else if refreshed {
+		fmt.Fprintf(stderr, "[hook-guardian] rewrote the Cursor enterprise adapter for this release\n")
+	}
 }
+
+// enterpriseHookWindowsCursorAdapterRefresh is replaceable in tests.
+var enterpriseHookWindowsCursorAdapterRefresh = enterprisehooks.RefreshWindowsCursorManagedAdapter
 
 // windowsStandaloneGoOwnedPolicyMu serializes the guardian's writers of the
 // Go-owned machine policy: the reconcile's publish and the OpenCode plugin
