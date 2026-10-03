@@ -283,6 +283,7 @@ def _interpreter_dirs(plan: dict[str, object], data_dir: str) -> list[str]:
 
 
 _EMPTY_DIR_RD_TRIES = 30
+_LOCK_CLOCK_SLACK_SECONDS = 0.5
 
 
 class _SupersededError(Exception):
@@ -299,13 +300,16 @@ def _superseded_detail(data_dir: str) -> str:
 def _check_not_superseded(data_dir: str, since: float) -> None:
     """Stop before deleting anything once an installer holds its lock in data_dir (GAP-2149).
 
-    A lock older than this helper is a leftover, not a new install.
+    A lock older than this helper is a leftover, not a new install. NTFS
+    stamps file times from the coarse system clock (one ~16 ms tick behind
+    time.time()), so a lock taken just after the helper started can look a
+    little older; _LOCK_CLOCK_SLACK_SECONDS absorbs that.
     """
     try:
         changed = os.lstat(os.path.join(data_dir, _INSTALL_LOCK)).st_mtime
     except OSError:
         return
-    if changed >= since:
+    if changed >= since - _LOCK_CLOCK_SLACK_SECONDS:
         raise _SupersededError(_superseded_detail(data_dir))
 
 
