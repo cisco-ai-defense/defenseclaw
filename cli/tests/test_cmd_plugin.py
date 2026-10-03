@@ -1957,6 +1957,26 @@ class TestPluginMultiConnectorSemantics(PluginCommandTestBase):
         self.assertIn("hermes plugins enable optin", result.output)
 
     @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
+    def test_install_with_gateway_never_started_warns_once_and_exits_zero(self, mock_scan):
+        # GAP-2066: the plugin is installed and clean; a gateway that was
+        # never started skips only the audit events (scan included), rc 0.
+        from defenseclaw.logger import CanonicalObservabilityUnavailableError
+
+        mock_scan.side_effect = lambda path, **_kwargs: self._clean_scan_result(path)
+        src = self._create_plugin_dir("nogw")
+        down = CanonicalObservabilityUnavailableError("gateway authentication is unavailable")
+        with (
+            patch("defenseclaw.commands._audit_notice._NOTED", False),
+            patch.object(self.app.logger, "log_scan", side_effect=down),
+            patch.object(self.app.logger, "log_action", side_effect=down),
+        ):
+            result = self.invoke(["install", src, "--connector", "hermes"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertTrue(os.path.isdir(os.path.join(self.hermes_root, "nogw")))
+        self.assertEqual(result.output.count("audit event was not recorded"), 1, result.output)
+        self.assertNotIn("run the command again", result.output)
+
+    @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
     def test_install_antigravity_uses_documented_plugin_dir(self, mock_scan):
         mock_scan.side_effect = lambda path, **_kwargs: self._clean_scan_result(path)
         antigravity_root = os.path.join(self.tmp_dir, "antigravity", "plugins")

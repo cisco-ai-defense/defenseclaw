@@ -87,6 +87,18 @@ func (e *V8SchemaError) Error() string {
 	return message
 }
 
+// ValidateV8SchemaBytes checks raw against the embedded v8 schema only,
+// without decoding it into a Config. A wrong-type value fails the typed
+// decode with a plain unmarshal error, so callers that need the schema
+// violation (its path and keyword) check the schema first (GAP-2118).
+func ValidateV8SchemaBytes(source string, raw []byte) error {
+	document, err := ParseV8YAML(source, raw)
+	if err != nil {
+		return err
+	}
+	return validateV8Schema(source, document)
+}
+
 func validateV8Schema(source string, document *V8YAMLDocument) error {
 	schema, err := compiledObservabilityV8Schema()
 	if err != nil {

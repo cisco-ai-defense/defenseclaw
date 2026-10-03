@@ -234,6 +234,16 @@ def _close_async_process_transport(process: asyncio.subprocess.Process) -> None:
         transport.close()
 
 
+def _no_connector_hint(stderr: bytes) -> str:
+    """The list commands' "no connector configured" hint from stderr (GAP-2073)."""
+
+    from defenseclaw.commands import NO_CONNECTOR_HINT
+
+    if NO_CONNECTOR_HINT in stderr.decode(errors="replace"):
+        return NO_CONNECTOR_HINT[:1].upper() + NO_CONNECTOR_HINT[1:]
+    return ""
+
+
 async def _communicate_captured(
     binary: str,
     args: tuple[str, ...],
@@ -13105,6 +13115,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             self.inventory_model.apply_json(stdout.decode(errors="replace"))
         except Exception as exc:  # noqa: BLE001 - parser errors are panel state.
             self.inventory_model.apply_loaded(None, exc)
+        if hint := _no_connector_hint(stderr):
+            self.inventory_model.message = hint
         self._end_load("inventory", loading, announce, self.inventory_model.message, "Inventory updated.")
         self._render_chrome()
 
@@ -13420,6 +13432,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 model.apply_json(stdout.decode(errors="replace"))  # type: ignore[attr-defined]
             except Exception as exc:  # noqa: BLE001 - parser errors are panel state.
                 model.apply_loaded([], exc)
+            if hint := _no_connector_hint(stderr):
+                model.message = hint
         self._end_load(panel, loading, announce, model.message, f"{_panel_label(panel)}: {len(model.items)} loaded.")
         self._render_chrome()
 
