@@ -71,5 +71,6 @@ def test_uninstall_model_defaults_to_dry_run_and_maps_all_argv() -> None:
     assert wipe_all is not None and wipe_all.action_id == UninstallOption.WIPE_ALL.value
     # The TUI only shows the wipe command (GAP-2585), so no danger confirm (GAP-2595).
     assert not wipe_all.danger and model.action_for_hotkey("u").danger
-    assert "--yes" in "\n".join((*model.details, model.consequence))
+    # The header names what the TUI row keeps, not CLI flags (GAP-2608).
+    assert "keeps ~/.defenseclaw" in model.consequence
     assert "dry-run" in model.actions[0].description

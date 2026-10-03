@@ -91,7 +91,11 @@ def build_command_preview(command: ParsedCommand) -> CommandPreview:
         # so one Enter removed the source (GAP-2309).
         risk = inferred
     restart = _restart_effect(risk, command.args)
-    summary = _upgrade_summary(command.args) or _risk_summary(risk, command.category)
+    summary = (
+        _upgrade_summary(command.args)
+        or _gateway_lifecycle_summary(command.binary, command.args)
+        or _risk_summary(risk, command.category)
+    )
     changes_state = risk in {"setup", "mutation"}
     if changes_state and restart != "no" and command.args[:1] == ("registry",):
         # Sync and remove restart only when they change policy; a sync that
@@ -222,6 +226,22 @@ def _upgrade_summary(args: tuple[str, ...]) -> str:
         )
     if verb == "rollback":
         return "Rollback command. Restores the previous release's binaries and restarts the gateway."
+    return ""
+
+
+def _gateway_lifecycle_summary(binary: str, args: tuple[str, ...]) -> str:
+    """What gateway ``stop``/``start`` change; both said only "can change DefenseClaw state" (GAP-2607)."""
+
+    if not binary.lower().removesuffix(".exe").endswith("defenseclaw-gateway"):
+        return ""
+    verbs = tuple(arg.lower() for arg in args if not arg.startswith("-"))
+    if verbs == ("stop",):
+        return (
+            "Stops the gateway and its watchdog. Hooks are not checked until you start it again: "
+            "fail-open connectors run unchecked and fail-closed connectors refuse tool calls."
+        )
+    if verbs == ("start",):
+        return "Starts the gateway (and its watchdog, if enabled). Agent hooks are checked again."
     return ""
 
 
