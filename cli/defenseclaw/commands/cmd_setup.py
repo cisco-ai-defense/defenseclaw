@@ -6378,6 +6378,7 @@ def setup_guardrail(
     restart: bool,
     verify: bool,
     non_interactive: bool,
+    _prior_snapshot: _SetupConfigSnapshot | None = None,
 ) -> None:
     """Configure the LLM guardrail that inspects your agent's prompts and responses.
 
@@ -6421,7 +6422,11 @@ def setup_guardrail(
             _refuse_hook_setup_over_proxy_connector(explicit_connector, proxy_active)
 
     try:
-        setup_snapshot = _capture_setup_config_snapshot(app.cfg, capture_runtime=_windows_runtime_rollback(restart))
+        # `setup openclaw|zeptoclaw` switches the connector in memory before it
+        # gets here, so it passes the rollback point it took first (GAP-2473).
+        setup_snapshot = _prior_snapshot or _capture_setup_config_snapshot(
+            app.cfg, capture_runtime=_windows_runtime_rollback(restart)
+        )
     except OSError as exc:
         raise click.ClickException(
             f"cannot establish guardrail setup rollback point: {exc}\n{_SETUP_ROLLBACK_POINT_NEXT_STEP}"
@@ -12431,6 +12436,16 @@ def _setup_guardrail_connector_alias(
             click.echo("  Aborted — no changes made.")
             return
 
+    # Take the rollback point before switching the connector below: a
+    # snapshot taken afterwards restores the requested connector in memory
+    # and its picked_connector hint, so a failed setup's rollback restarted
+    # and labelled the connector it had just failed to apply (GAP-2473).
+    try:
+        prior_snapshot = _capture_setup_config_snapshot(app.cfg, capture_runtime=_windows_runtime_rollback(restart))
+    except OSError as exc:
+        raise click.ClickException(
+            f"cannot establish guardrail setup rollback point: {exc}\n{_SETUP_ROLLBACK_POINT_NEXT_STEP}"
+        ) from exc
     if replaced:
         app.cfg.guardrail.connectors = {}
     if connector == "openclaw":
@@ -12488,6 +12503,7 @@ def _setup_guardrail_connector_alias(
         restart=restart,
         verify=verify,
         non_interactive=True,
+        _prior_snapshot=prior_snapshot,
     )
 
 
