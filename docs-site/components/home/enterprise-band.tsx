@@ -11,11 +11,11 @@ const FACTS = [
   },
   {
     label: 'Machine policy',
-    body: 'Hooks installed at machine level for Claude Code, Codex, Copilot, Cursor and OpenCode.',
+    body: 'Hooks installed at machine level for Claude Code, Codex, Copilot, Cursor, and OpenCode with the managed plugin.',
   },
   {
     label: 'Your MDM',
-    body: 'Recipes for Intune, Jamf, Kandji, Workspace ONE, ConfigMgr and Linux configuration management.',
+    body: 'Recipes for Intune, Jamf, Iru (formerly Kandji), Workspace ONE, ConfigMgr and Linux configuration management.',
   },
 ];
 

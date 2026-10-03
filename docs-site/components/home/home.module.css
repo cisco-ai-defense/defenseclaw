@@ -249,10 +249,6 @@
   color: var(--editorial-amber);
 }
 
-.agentOs [data-status='unsupported'] {
-  opacity: 0.6;
-}
-
 .agentOs [data-status='unsupported'] > span:first-of-type {
   text-decoration: line-through;
 }

@@ -2417,3 +2417,12 @@ article#nd-page .scenario-frame code {
     display: none;
   }
 }
+
+/* JetBrains Mono ligatures turn -< and >- into arrows, which garbles names
+   such as defenseclaw-enterprise-<version>-linux-amd64.rpm. Keep code literal. */
+code,
+pre,
+kbd,
+samp {
+  font-variant-ligatures: none;
+}

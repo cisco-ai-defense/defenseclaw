@@ -74,8 +74,8 @@ Status rules: a cell is `supported` only when the code allows it **and** a live 
 
 Regenerating before a release:
 
-1. Run the maintainers' matrix generator against the current certification results. It is kept outside this repository with the rest of the certification tooling, and it prints the status values.
-2. Paste the values into `data/support-matrix.ts` and set `asOf` to the date of the snapshot. The table footers print it.
+1. Run the maintainers' matrix generator against the current certification results. It is kept outside this repository with the rest of the certification tooling. Its preview mode prints the changes, and its write mode rewrites the `BEGIN GENERATED` block in `data/support-matrix.ts` in place.
+2. The generator also sets `asOf` to the date of the snapshot, which the table footers print. Don't edit the generated block by hand.
 3. Run `npm run build` and look over `/docs/support-matrix`. The diff in `support-matrix.ts` should only touch statuses and `asOf`, unless a connector or platform was added in code.
 
 OpenClaw, ZeptoClaw (proxy mode) and the Copilot VS Code extension are left out of these tables on purpose. Their own pages are unchanged.

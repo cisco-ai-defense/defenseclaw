@@ -496,7 +496,8 @@ const featureSources: FeatureSource[] = [
     label: 'MDM deployment',
     href: '/docs/enterprise/mdm',
     group: 'Enterprise controls',
-    note: 'Intune, Jamf, Kandji, Workspace ONE, ConfigMgr and Linux configuration management.',
+    note:
+      'Intune, Jamf, Iru (formerly Kandji), Workspace ONE, ConfigMgr and Linux configuration management. Verified by simulating the MDM run context; the recipes have not been run in a live MDM tenant.',
   },
 ];
 
