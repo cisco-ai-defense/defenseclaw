@@ -722,9 +722,11 @@ class TestPluginList(PluginCommandTestBase):
                     # GAP-2274: plain wording, no internal "registry source" text.
                     self.assertIn("claudecode has no installed plugins", text_result.output)
                     self.assertNotIn("registry source", text_result.output)
+                    # GAP-2290: no second "check your installation" line.
+                    self.assertNotIn("No plugins found", text_result.output)
                 else:
                     self.assertIn(f"— {expected_state}; entries=0", text_result.output)
-                self.assertIn("No plugins found", text_result.output)
+                    self.assertIn("No plugins found", text_result.output)
 
                 json_result = self.invoke(
                     ["list", "--connector", "claudecode", "--json"]
@@ -963,6 +965,36 @@ class TestPluginListMultiConnectorDefault(PluginCommandTestBase):
         self.assertIn("(4/4 enabled)", listed.output)
 
     @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
+    def test_narrow_terminals_keep_status_id_and_verdict_on_one_line(self, _mock_oc):
+        """GAP-2292: Description narrows or hides first at 80 and 120 columns."""
+        rows = self._hermes_nested_rows()
+        for row in rows:
+            row["description"] = "Browser Use (https://browser-use.com) cloud browser backend for Hermes"
+        for columns, hidden in (("80", True), ("120", False), ("200", False)):
+            with self.subTest(columns=columns):
+                with (
+                    patch("defenseclaw.inventory.claw_inventory._enumerate_hermes_plugins", return_value=rows),
+                    patch.dict(os.environ, {"COLUMNS": columns}),
+                ):
+                    listed = self.invoke(["list", "--connector", "hermes"])
+                self.assertEqual(listed.exit_code, 0, listed.output)
+                lines = listed.output.splitlines()
+                self.assertTrue(all(len(line) <= int(columns) for line in lines), listed.output)
+                body = [line for line in lines if line.startswith("\u2502") and " Status " not in line]
+                self.assertEqual(len(body), len(rows), listed.output)
+                for row in rows:
+                    line = next(b for b in body if f"\u2502 {row['id']} " in b)
+                    cells = [cell.strip() for cell in line.strip("\u2502").split("\u2502")]
+                    # Status, full ID, then Severity/Verdict "-" (no scan yet).
+                    self.assertEqual(cells[:2], ["\u2713 enabled", row["id"]])
+                    self.assertIn("-", cells)
+                self.assertEqual("Hidden to fit" in listed.output, hidden, listed.output)
+                if hidden:
+                    self.assertIn("defenseclaw plugin info <id>", listed.output)
+                else:
+                    self.assertIn("Description", listed.output)
+
+    @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
     def test_hermes_nested_block_is_keyed_by_listed_id(self, _mock_oc):
         """GAP-1480: blocking a nested Hermes plugin turns its list row blocked."""
         rows = self._hermes_nested_rows()
@@ -1064,6 +1096,30 @@ class TestPluginListMultiConnectorDefault(PluginCommandTestBase):
         self.assertIn("Plugins (connector=opencode): no plugins found", result.output)
         self.assertNotIn("Check your antigravity", result.output)
         self.assertNotIn("Check your opencode", result.output)
+
+    @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
+    def test_default_puts_missing_claude_registry_on_its_own_line(self, _mock_oc):
+        """GAP-2290: the not-found note replaces claudecode's summary line."""
+        plugin_root = os.path.join(self.tmp_dir, "noclaude", "plugins")
+        os.makedirs(plugin_root)
+        self.app.cfg.active_connectors = lambda: ["claudecode", "hermes"]  # type: ignore[method-assign]
+        self.app.cfg.plugin_dirs = lambda connector=None: [plugin_root] if connector == "claudecode" else []  # type: ignore[method-assign]
+
+        result = self.invoke(["list"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        registry = os.path.join(plugin_root, "installed_plugins.json")
+        lines = result.output.splitlines()
+        self.assertEqual(
+            lines[:2],
+            [
+                f"Plugins (connector=claudecode): no installed plugins ({registry} not found)",
+                "Plugins (connector=hermes): no plugins found",
+            ],
+            result.output,
+        )
+        self.assertNotIn("claudecode has no installed plugins", result.output)
+        self.assertNotIn("Check your", result.output)
 
 
 class TestPluginRemove(PluginCommandTestBase):
@@ -2381,7 +2437,9 @@ class TestPluginQuarantineRestoreOriginalPath(PluginCommandTestBase):
         cells = [cell.strip() for cell in row.strip("\u2502").split("\u2502")]
         self.assertEqual(cells[1:5], ["photon", "photon-platform", "Photon Spectrum gateway adapter.", "bundled"])
         self.assertEqual(cells[5], "MEDIUM")
-        self.assertEqual(cells[6:], ["quarantined", "quarantined"])
+        # GAP-2293: Verdict keeps the scan verdict; Status and Actions show the quarantine.
+        self.assertEqual(cells[0], "\u2717 quarantined")
+        self.assertEqual(cells[6:], ["warning", "quarantined"])
         item = next(entry for entry in json.loads(as_json.output) if entry["id"] == "photon")
         self.assertEqual(item["status"], "quarantined")
         self.assertEqual(item["actions"], {"file": "quarantine"})

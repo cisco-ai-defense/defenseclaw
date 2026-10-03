@@ -779,6 +779,18 @@ def _render_plugin_registry_diagnostics(
             )
 
 
+def _missing_plugin_registry(
+    diagnostics: dict[str, list[PluginRegistryProbe]],
+    connector: str,
+) -> str:
+    """Path of the connector's not-found plugin registry, or ""."""
+
+    for probe in diagnostics.get(connector) or []:
+        if probe.state == PluginRegistryState.MISSING:
+            return str(probe.source_path)
+    return ""
+
+
 def _fail_on_plugin_registry_errors(
     diagnostics: dict[str, list[PluginRegistryProbe]],
     *,
@@ -2154,7 +2166,15 @@ def list_plugins(app: AppContext, as_json: bool, connector_flag: str) -> None:
         if not plugins:
             empty_connectors.append(connector)
             if len(connectors) > 1:
-                click.echo(f"Plugins (connector={connector}): no plugins found")
+                # GAP-2290: a missing registry is the normal "none yet" case;
+                # say it on this connector's own line.
+                missing = _missing_plugin_registry(discovery, connector)
+                if missing:
+                    click.echo(
+                        f"Plugins (connector={connector}): no installed plugins ({missing} not found)"
+                    )
+                else:
+                    click.echo(f"Plugins (connector={connector}): no plugins found")
             continue
         actions_map = _build_plugin_actions_map(app.store, connector)
         connector_scan_map = _build_plugin_scan_map_for_connector(app, connector)
@@ -2162,8 +2182,8 @@ def list_plugins(app: AppContext, as_json: bool, connector_flag: str) -> None:
         shown_any = True
 
     if not shown_any:
-        _render_plugin_registry_diagnostics(discovery)
-        if len(connectors) == 1:
+        _render_plugin_registry_diagnostics(discovery, hide_missing=len(connectors) > 1)
+        if len(connectors) == 1 and not _missing_plugin_registry(discovery, connectors[0]):
             click.echo(f"No plugins found. Check your {connectors[0]} installation and plugin directories.")
         return
 
@@ -2485,7 +2505,6 @@ def _print_plugin_list_table(
     connector: str = "",
 ) -> None:
     from rich.console import Console
-    from rich.table import Table
 
     from defenseclaw.commands import list_scope_title
 
@@ -2494,16 +2513,7 @@ def _print_plugin_list_table(
     detail = f"({enabled_count}/{len(plugins)} enabled)"
     title = list_scope_title("Plugins", connector, detail) if connector else f"Plugins {detail}"
     console = Console()
-    table = Table(title=title)
-    table.add_column("Status", style="bold")
-    table.add_column("ID")
-    table.add_column("Plugin")
-    # GAP-2202: one line per row; Rich cuts a long description with "…".
-    table.add_column("Description", max_width=50, no_wrap=True, overflow="ellipsis")
-    table.add_column("Origin")
-    table.add_column("Severity")
-    table.add_column("Verdict")
-    table.add_column("Actions")
+    rows: list[dict[str, str]] = []
 
     for p in plugins:
         pid = p["id"]
@@ -2533,7 +2543,9 @@ def _print_plugin_list_table(
             state = action_entry.actions
             actions_str = _plugin_actions_label(state)
             # GAP-2199: keep the scan verdict when nothing stops the installed copy.
-            if state.install == "block" and state.file != "quarantine" and state.runtime != "disable":
+            # GAP-2293: a quarantine shows in Status and Actions; Verdict keeps
+            # the last scan verdict, as ``plugin info`` does.
+            if state.file == "quarantine" or (state.install == "block" and state.runtime != "disable"):
                 verdict_action = None
 
         verdict_label, verdict_style = _compute_verdict(
@@ -2547,18 +2559,85 @@ def _print_plugin_list_table(
         elif "\u2713" in status_display:
             status_style = "green"
 
-        table.add_row(
-            f"[{status_style}]{status_display}[/{status_style}]" if status_style else status_display,
-            pid,
-            name,
-            desc,
-            origin,
-            f"[{sev_style}]{severity}[/{sev_style}]" if sev_style else severity,
-            f"[{verdict_style}]{verdict_label}[/{verdict_style}]" if verdict_style else verdict_label,
-            actions_str,
+        rows.append(
+            {
+                "Status": f"[{status_style}]{status_display}[/{status_style}]" if status_style else status_display,
+                "ID": pid,
+                "Plugin": name,
+                "Description": desc,
+                "Origin": origin,
+                "Severity": f"[{sev_style}]{severity}[/{sev_style}]" if sev_style else severity,
+                "Verdict": f"[{verdict_style}]{verdict_label}[/{verdict_style}]" if verdict_style else verdict_label,
+                "Actions": actions_str,
+            }
         )
 
+    table, hidden = _fit_plugin_list_table(console, title, rows)
     console.print(table)
+    if hidden:
+        console.print(
+            f"[dim]Hidden to fit: {', '.join(hidden)}. See defenseclaw plugin info <id>[/dim]"
+        )
+
+
+# GAP-2292: the column order, and which columns may be hidden (first to last)
+# when the terminal is too narrow for one line per row.
+_PLUGIN_LIST_COLUMNS = ("Status", "ID", "Plugin", "Description", "Origin", "Severity", "Verdict", "Actions")
+_PLUGIN_LIST_OPTIONAL = ("Description", "Origin", "Plugin")
+_PLUGIN_LIST_DESC_MAX = 50
+_PLUGIN_LIST_DESC_MIN = 16
+
+
+def _fit_plugin_list_table(console: Any, title: str, rows: list[dict[str, str]]) -> tuple[Any, list[str]]:
+    """Build the plugin table so each row fits on one terminal line.
+
+    Rich never shrinks a ``no_wrap`` column, so a fixed-width Description
+    squeezed Status, ID and Verdict to "…" on 80/120-column terminals
+    (GAP-2292). Instead the Description narrows first, then Description,
+    Origin and Plugin are hidden in that order. Returns (table, hidden).
+    """
+    from rich.cells import cell_len
+    from rich.measure import Measurement
+    from rich.table import Table
+
+    def build(hidden: tuple[str, ...], desc_width: int) -> Any:
+        table = Table(title=title)
+        for col in _PLUGIN_LIST_COLUMNS:
+            if col in hidden:
+                continue
+            if col == "Description":
+                table.add_column(col, max_width=desc_width, no_wrap=True, overflow="ellipsis")
+            elif col in ("Plugin", "Origin", "Actions"):
+                table.add_column(col)
+            else:
+                table.add_column(col, no_wrap=True, style="bold" if col == "Status" else "")
+        for row in rows:
+            table.add_row(*(row[col] for col in _PLUGIN_LIST_COLUMNS if col not in hidden))
+        return table
+
+    width = console.width
+    wide = console.options.update_width(10_000)
+
+    def natural(table: Any) -> int:
+        return Measurement.get(console, wide, table).maximum
+
+    table = build((), _PLUGIN_LIST_DESC_MAX)
+    excess = natural(table) - width
+    if excess <= 0:
+        return table, []
+    desc_width = min(
+        _PLUGIN_LIST_DESC_MAX,
+        max([len("Description")] + [cell_len(row["Description"]) for row in rows]),
+    )
+    if desc_width - excess >= _PLUGIN_LIST_DESC_MIN:
+        return build((), desc_width - excess), []
+    has_desc = any(row["Description"] for row in rows)
+    for count in range(1, len(_PLUGIN_LIST_OPTIONAL) + 1):
+        hidden = _PLUGIN_LIST_OPTIONAL[:count]
+        table = build(hidden, _PLUGIN_LIST_DESC_MAX)
+        if natural(table) <= width or count == len(_PLUGIN_LIST_OPTIONAL):
+            break
+    return table, [col for col in hidden if col != "Description" or has_desc]
 
 
 def _looks_like_explicit_path(value: str) -> bool:
