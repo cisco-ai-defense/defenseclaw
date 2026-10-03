@@ -1775,6 +1775,11 @@ func (a *APIServer) mergeHookSessionLifecycle(meta llmEventMeta) llmEventMeta {
 	meta.SessionResumed = meta.SessionResumed || snapshot.meta.SessionResumed
 	meta.UserID = firstNonEmpty(meta.UserID, snapshot.meta.UserID)
 	meta.UserName = firstNonEmpty(meta.UserName, snapshot.meta.UserName)
+	// Claude Code reports the model only on SessionStart. The first turn
+	// used to consume it with that event's usage, so every later turn had
+	// no model and no chat span (GAP-2511). The session keeps it; an event
+	// that reports a model still wins.
+	meta.Model = firstNonEmpty(meta.Model, snapshot.meta.Model)
 	return meta
 }
 
