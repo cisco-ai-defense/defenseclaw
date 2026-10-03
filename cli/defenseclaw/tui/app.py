@@ -457,6 +457,36 @@ def _wrap_at_separators(value: str, width: int) -> str:
     return "\n".join(lines)
 
 
+def _fit_units(units: Sequence[Text], width: int, sep: str = "   ") -> Text:
+    """``units`` joined by ``sep``, starting a new line before a unit that would not fit.
+
+    A folding cell breaks at any space, so at 80 columns "0 blocked   0
+    allowed" read "0 blocked   0" / "allowed" and "201 processes" lost its
+    unit (GAP-2521). Each unit stays whole unless it alone is too wide.
+    """
+
+    out = Text()
+    used = 0
+    for unit in units:
+        if used and used + len(sep) + unit.cell_len > width:
+            out.append("\n")
+            used = 0
+        elif used:
+            out.append(sep)
+            used += len(sep)
+        out.append_text(unit)
+        used += unit.cell_len
+    return out
+
+
+def _count_unit(count: object, label: str, color: str) -> Text:
+    """ "3 blocked" with the number in ``color``."""
+
+    unit = Text(str(count), style=color)
+    unit.append(f" {label}")
+    return unit
+
+
 # Stores opened by background readers; shutdown interrupts their queries.
 _LIVE_WORKER_STORES: weakref.WeakSet[Any] = weakref.WeakSet()
 
@@ -9124,6 +9154,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
 
         enf_table = Table.grid(padding=(0, 2), expand=True)
         enf_table.add_column(width=12, no_wrap=True)
+        enf_value_width = cfg_inner - 14
         enf_table.add_column(overflow="fold")
         # 8.13: when a connector is selected the ENFORCEMENT panel narrows to
         # that connector's real Alerts/Hook calls/Blocks (the connector-
@@ -9196,10 +9227,13 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             else:
                 enf_table.add_row(
                     Text("Skills", style=TOKENS.text_secondary),
-                    Text.from_markup(
-                        f"[{TOKENS.text_primary}]{selected_scan['skills']}[/]   "
-                        f"[{TOKENS.accent_red}]{selected_scan['skills_blocked']}[/] blocked   "
-                        f"[{TOKENS.accent_green}]{selected_scan['skills_allowed']}[/] allowed"
+                    _fit_units(
+                        (
+                            Text(str(selected_scan["skills"]), style=TOKENS.text_primary),
+                            _count_unit(selected_scan["skills_blocked"], "blocked", TOKENS.accent_red),
+                            _count_unit(selected_scan["skills_allowed"], "allowed", TOKENS.accent_green),
+                        ),
+                        enf_value_width,
                     ),
                 )
                 enf_table.add_row(
@@ -9217,20 +9251,20 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 Text("Total scans", style=TOKENS.text_secondary),
                 Text.from_markup(f"[{TOKENS.accent_green}]{counts.total_scans}[/]"),
             )
-            enf_table.add_row(
-                Text("Skills", style=TOKENS.text_secondary),
-                Text.from_markup(
-                    f"[{TOKENS.accent_red}]{counts.blocked_skills}[/] blocked   "
-                    f"[{TOKENS.accent_green}]{counts.allowed_skills}[/] allowed"
-                ),
-            )
-            enf_table.add_row(
-                Text("MCPs", style=TOKENS.text_secondary),
-                Text.from_markup(
-                    f"[{TOKENS.accent_red}]{counts.blocked_mcps}[/] blocked   "
-                    f"[{TOKENS.accent_green}]{counts.allowed_mcps}[/] allowed"
-                ),
-            )
+            for label, blocked, allowed in (
+                ("Skills", counts.blocked_skills, counts.allowed_skills),
+                ("MCPs", counts.blocked_mcps, counts.allowed_mcps),
+            ):
+                enf_table.add_row(
+                    Text(label, style=TOKENS.text_secondary),
+                    _fit_units(
+                        (
+                            _count_unit(blocked, "blocked", TOKENS.accent_red),
+                            _count_unit(allowed, "allowed", TOKENS.accent_green),
+                        ),
+                        enf_value_width,
+                    ),
+                )
 
         keys = self.overview_model.keys_status()
         sc_table = Table.grid(padding=(0, 2), expand=True)
@@ -9350,6 +9384,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                     "healthy": TOKENS.accent_green,
                     "warning": TOKENS.accent_amber,
                     "failed": TOKENS.accent_red,
+                    "stale": TOKENS.accent_blue,
                 }.get(doctor.run_outcome, TOKENS.accent_amber)
                 doctor_lines.append(
                     Text.from_markup(
@@ -9409,6 +9444,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                         f"[{TOKENS.accent_green}]All checks passing — nothing to address.[/]"
                     )
                 )
+            if doctor.note:
+                doctor_lines.append(Text(doctor.note, style=TOKENS.text_secondary))
             doctor_body = Group(*doctor_lines)
 
         if ai_box.rows:
@@ -9570,7 +9607,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # a new width is new content: after a resize it kept the old width's
         # wrapping until the next data change (GAP-2509).
         width = int(getattr(self.size, "width", 0) or 0)
-        return ("overview", self.help_open, width, stable_text)
+        # Notices are one "…" line below 32 rows and wrap above it, so the
+        # height band is content too: 160x45 -> 80x45 -> 80x24 kept the
+        # wrapped notice, its end hidden under the button bar (GAP-2519).
+        short = 0 < int(getattr(self.size, "height", 0) or 0) < 32
+        return ("overview", self.help_open, width, short, stable_text)
 
     def _runtime_sample_time(self) -> str:
         """When the last runtime sample was taken ("14:02:11", "Oct 02 14:02"), or "".
@@ -9604,6 +9645,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         }.get(runtime.health_title, TOKENS.text_secondary)
         table = Table.grid(padding=(0, 1), expand=True)
         table.add_column(overflow="fold")
+        # The card's inner width, as for CONFIGURATION in the same columns.
+        card_inner = max(20, (int(getattr(self.size, "width", 0) or 0) - 8) // 2 - 5)
         if self.overview_model.gateway_down():
             # Runtime data comes from the gateway. With it stopped the last
             # sample ("DEGRADED · 17 processes · inference heartbeat: up")
@@ -9627,16 +9670,17 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if runtime.health_title:
             header = Text()
             header.append(f"● {runtime.health_title}", style=f"bold {title_color}")
+            units = [header]
             if runtime.processes or runtime.connections or runtime.findings:
-                header.append(
-                    f"   {runtime.findings} findings   "
-                    f"{runtime.processes} processes   "
-                    f"{runtime.connections} connections",
-                    style=TOKENS.text_secondary,
-                )
-            table.add_row(header)
+                units += [
+                    Text(f"{runtime.findings} findings", style=TOKENS.text_secondary),
+                    Text(f"{runtime.processes} processes", style=TOKENS.text_secondary),
+                    Text(f"{runtime.connections} connections", style=TOKENS.text_secondary),
+                ]
+            table.add_row(_fit_units(units, card_inner))
         if runtime.plane_summary:
-            table.add_row(Text(runtime.plane_summary, style=TOKENS.text_secondary))
+            planes = [Text(plane, style=TOKENS.text_secondary) for plane in runtime.plane_summary.split("  ")]
+            table.add_row(_fit_units(planes, card_inner, sep="  "))
         if runtime.host_observations or runtime.host_gated:
             table.add_row(
                 Text(
@@ -9808,9 +9852,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 )
                 table_rows: list[tuple[Text, ...]] = []
                 for row in rows:
-                    health = row.state
-                    if row.health_reason:
-                        health += f" ({row.health_reason})"
+                    health = row.health_label
                     table_rows.append(
                         (
                             Text(row.name, style=TOKENS.text_primary),
@@ -9993,9 +10035,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 f"{'CONFIGURED LIMITS':<30}LAST RESULT / TARGET",
             ]
             for row in rows:
-                health = row.state
-                if row.health_reason:
-                    health += f" ({row.health_reason})"
+                health = row.health_label
                 lines.append(
                     f"  {rich_escape(row.name[:19]):<20}{rich_escape(row.kind[:13]):<14}"
                     f"{rich_escape(row.policy_state[:10]):<11}{rich_escape(health[:21]):<22}"
@@ -10217,6 +10257,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                     "healthy": TOKENS.accent_green,
                     "warning": TOKENS.accent_amber,
                     "failed": TOKENS.accent_red,
+                    "stale": TOKENS.accent_blue,
                 }.get(doctor.run_outcome, TOKENS.accent_amber)
                 doctor_summary += (
                     f"  [{outcome_color} bold]outcome={doctor.run_outcome}[/]"
