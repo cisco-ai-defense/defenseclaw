@@ -1219,6 +1219,10 @@ class TestCLIIntegration(unittest.TestCase):
         runner = CliRunner()
         result = runner.invoke(aibom, ["scan", "--summary"], obj=self.app)
         self.assertEqual(result.exit_code, 0, result.output)
+        # GAP-2312: the progress line must not claim "live" (Hermes is read
+        # from disk); the report header names the source.
+        self.assertIn("inventory", result.stderr)
+        self.assertNotIn("Scanning live", result.stderr)
 
     @patch("defenseclaw.inventory.claw_inventory.subprocess.run", side_effect=_mock_run)
     def test_scan_only_filter(self, _):
@@ -4034,6 +4038,12 @@ class TestBuildAibomFromFilesystem(unittest.TestCase):
         )
         self.assertTrue(all(item["connector"] == "codex" for item in inv["limitations"]))
         self.assertTrue(all(item["status"] == "unsupported" for item in inv["limitations"]))
+        # GAP-2312: the default notes must not describe another product's
+        # model ("plugin's manifest", "the framework").
+        for item in inv["limitations"]:
+            self.assertNotIn("framework", item["reason"])
+            self.assertNotIn("manifest", item["reason"])
+            self.assertIn("this connector", item["reason"])
 
     def test_claudecode_expected_limitations_are_not_errors(self):
         cfg = _make_cfg_for_connector(self.tmp, "claudecode")
