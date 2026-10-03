@@ -432,28 +432,30 @@ def _mini_bar(value: int, max_value: int, width: int = 14) -> str:
 
 
 def _wrap_at_separators(value: str, width: int) -> str:
-    """``value`` in lines of at most ``width`` cells, broken after "." or "/".
+    """``value`` in lines of at most ``width`` cells, broken at spaces or after "." or "/".
 
-    A piece longer than a line is still cut, as ``overflow="fold"`` would.
+    Spaces come first: breaking only after "." or "/" cut "block CRITICAL ·
+    al" / "ert MEDIUM+" mid-word (GAP-2501). A piece longer than a line is
+    still cut, as ``overflow="fold"`` would.
     """
 
     if width <= 0 or len(value) <= width:
         return value
     lines: list[str] = []
     line = ""
-    for piece in re.split(r"(?<=[./])", value):
-        while len(piece) > width:
-            if line:
-                lines.append(line)
-                line = ""
+    for piece in re.split(r"(?<=[./ ])", value):
+        while len(piece.rstrip()) > width:
+            if line.strip():
+                lines.append(line.rstrip())
+            line = ""
             lines.append(piece[:width])
             piece = piece[width:]
-        if len(line) + len(piece) > width:
-            lines.append(line)
+        if line and len(line) + len(piece.rstrip()) > width:
+            lines.append(line.rstrip())
             line = ""
         line += piece
-    if line:
-        lines.append(line)
+    if line.strip():
+        lines.append(line.rstrip())
     return "\n".join(lines)
 
 
@@ -9110,8 +9112,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 cfg_table.add_row(cell)
                 continue
             if not value_text.spans and value_text.cell_len > cfg_inner - 2:
-                # Break a URL or path after "." or "/", not mid-word
-                # ("https://us.api.inspect.aidefe" / "nse...", GAP-2443).
+                # Break at a space, or a URL or path after "." or "/", not
+                # mid-word ("https://us.api.inspect.aidefe" / "nse...",
+                # GAP-2443; "block CRITICAL · al" / "ert", GAP-2501).
                 value_text = Text(_wrap_at_separators(value_text.plain, cfg_inner - 2), style=value_text.style)
             indented = Table.grid()
             indented.add_column(width=2)
@@ -10805,7 +10808,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             return ("form", tuple(row[:-1] for row in self._table_rows))
         view = self._setup_view()
         if view == "wizards":
-            return (view, setup_center.active_group(model))
+            # The Status cells wrap to the width (GAP-2502), and patched rows
+            # keep their old column widths, so a resize rebuilds the table.
+            return (view, setup_center.active_group(model), int(getattr(self.size, "width", 0) or 0))
         if view == "config":
             # The column sizes depend on the width (narrow screens ellipsize
             # values), so a resize rebuilds the table instead of keeping the
@@ -12268,7 +12273,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             )
         # Task list: the selected group's tasks (the nav or the body switcher
         # picks the group). What a task runs is in its detail.
-        return ("Task", "Status"), setup_center.task_rows(self.setup_model, self._setup_task_statuses())
+        rows = setup_center.task_rows(self.setup_model, self._setup_task_statuses())
+        return ("Task", "Status"), self._wrap_setup_task_status(rows)
 
     def _setup_panel_nav(self) -> tuple[NavItem, ...]:
         """Setup's side of ``_panel_nav``: task groups, or config sections."""
@@ -12316,6 +12322,36 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
     def _setup_width(self) -> int:
         width = int(getattr(self.size, "width", 0) or 0)
         return width if width > 0 else 80
+
+    def _wrap_setup_task_status(self, rows: tuple[tuple[str, str], ...]) -> tuple[tuple[str, str], ...]:
+        """Wrap a task's Status to the room the Task column leaves.
+
+        Beside the nav and the task detail the table is 64 cells wide at 160
+        columns, so "✓ on · action, 1 observe · ran ok" was cut to "… · ran"
+        at the border (GAP-2502). Wrapped, its row grows instead.
+        """
+
+        if not rows:
+            return rows
+        width = self._setup_width()
+        # The body (margins and padding), then the nav and the task detail on
+        # the right, as the split's CSS lays them out.
+        split = width - 6
+        main = split
+        if self._setup_nav_shown():
+            main -= NAV_WIDTH + 1
+        if width >= ASIDE_MIN_WIDTH:
+            main -= int(split * TASK_ASIDE_SHARE) + 1
+        # Table border and scrollbar, the Task column with its two padding
+        # cells, then the Status padding.
+        task = max(len("Task"), *(len(label) for label, _status in rows))
+        room = main - 4 - (task + 2) - 2
+        if room < 12:
+            return rows
+        return tuple(
+            (label, "\n".join(textwrap.wrap(status, room)) if len(status) > room else status)
+            for label, status in rows
+        )
 
     def _setup_config_value_room(self, labels: Sequence[str], checks: Sequence[str]) -> int:
         """Cells the config editor's Value column has beside the section nav."""
@@ -16789,6 +16825,8 @@ def _clamp_int(value: int, lower: int, upper: int) -> int:
 # Share of the split the config editor's aside takes (the
 # "#panel-split.narrow-aside #panel-aside" CSS rule; GAP-2253).
 CONFIG_ASIDE_SHARE = 0.28
+# The task detail beside the Setup task table (the #panel-aside CSS width).
+TASK_ASIDE_SHARE = 0.38
 
 
 def _config_display_value(field: Any) -> str:
