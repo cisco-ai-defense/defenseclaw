@@ -1044,7 +1044,7 @@ class SetupPanelModel:
                     "config",
                     "open_observability_editor",
                     "E",
-                    "Open the canonical destination editor.",
+                    "Open the destination editor.",
                 )
             if section is not None and section.name == "Webhooks":
                 return SetupFocusedRowAction(
@@ -3568,28 +3568,28 @@ def _observability_goals(cfg: object | Mapping[str, Any] | None) -> tuple[Wizard
         WizardGoal(
             "list",
             "List destinations",
-            summary="List canonical process-wide destinations.",
+            summary="List the telemetry destinations.",
             presets={"@Action": "list"},
             fields=("Action", "JSON Output"),
         ),
         WizardGoal(
             "enable",
             "Enable a destination",
-            summary="Enable a canonical destination by name.",
+            summary="Enable a destination by name.",
             presets={"@Action": "enable"},
             fields=("Action", "Name"),
         ),
         WizardGoal(
             "disable",
             "Disable a destination",
-            summary="Disable a canonical destination by name.",
+            summary="Disable a destination by name.",
             presets={"@Action": "disable"},
             fields=("Action", "Name"),
         ),
         WizardGoal(
             "remove",
             "Remove a destination",
-            summary="Remove a canonical destination by name.",
+            summary="Remove a destination by name.",
             presets={"@Action": "remove"},
             fields=("Action", "Name"),
         ),
@@ -6040,23 +6040,23 @@ def _prune_empty_sections(fields: Sequence[WizardFormField]) -> tuple[WizardForm
 
 # Goals that act on a connector that is already set up.
 _CONFIGURED_CONNECTOR_GOALS = frozenset({"rerun", "remove"})
-_CONNECTOR_ACTIONS = ("setup", "batch", "remove")
 
 
 def _pin_goal_action(
     fields: Sequence[WizardFormField], goal: WizardGoal | None
 ) -> tuple[WizardFormField, ...]:
-    """Keep a connector goal's Action row on the goal's own action.
+    """Keep a goal's Action row on the goal's own action.
 
     Each goal shows only the rows its action needs, so cycling Action in
     "Add or configure a connector" to batch asked for Connectors (CSV) or
     Detected/All rows the form never showed, and remove kept the ignored
-    Guardrail Mode and Replace Existing rows (GAP-2026). The other actions
-    have their own goals.
+    Guardrail Mode and Replace Existing rows (GAP-2026). "See which
+    credentials are set" cycled to remove and then asked for an Env Name
+    row it never showed (GAP-2185). The other actions have their own goals.
     """
 
     action = (goal.presets.get("@Action") or "") if goal is not None else ""
-    if action not in _CONNECTOR_ACTIONS:
+    if not action:
         return tuple(fields)
     return tuple(
         replace(
@@ -6066,7 +6066,7 @@ def _pin_goal_action(
             default=action,
             hint="Fixed by this goal.",
         )
-        if field.label == "Action" and field.kind == "choice" and set(field.options) == set(_CONNECTOR_ACTIONS)
+        if field.label == "Action" and field.kind == "choice" and action in field.options
         else field
         for field in fields
     )
