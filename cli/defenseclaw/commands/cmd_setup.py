@@ -291,8 +291,13 @@ def _log_setup_action(
     *,
     allow_offline: bool,
     offline_note: str = "",
+    change: tuple[str, str] | None = None,
 ) -> None:
     """Audit a setup mutation without breaking explicit offline staging.
+
+    ``change`` (``operation, key=value details``) also records an operator
+    Activity mutation: its target survives redaction profile ``strict``,
+    which drops the setup row's details (GAP-2192).
 
     Canonical admission and server responses remain fail-closed.  The only
     exception is a setup command that explicitly selected an offline staging
@@ -305,6 +310,8 @@ def _log_setup_action(
         return
     try:
         app.logger.log_action(action, "config", details)
+        if change is not None:
+            app.logger.log_config_change(*change)
     except CanonicalObservabilityUnavailableError as exc:
         if not allow_offline:
             # Stay fail-closed, but say so plainly instead of a traceback: the
@@ -1076,6 +1083,8 @@ def setup_llm(
         )
         return
 
+    previous_llm = _llm_audit_model(cfg.resolve_llm(target_path))
+
     if not non_interactive and provider and model:
         # Flags typed on the command line answer their prompts; asking
         # "Pick provider [anthropic]" again would let Enter undo --provider
@@ -1118,6 +1127,7 @@ def setup_llm(
             insecure_skip_verify=insecure_skip_verify,
         )
         cfg.save()
+        _log_llm_change(app, target_path, previous_llm)
 
         click.echo()
         ux.ok(f"Saved to {config_path_for_data_dir(cfg.data_dir)}")
@@ -1190,6 +1200,7 @@ def setup_llm(
                 click.echo(f"  LLM configuration not saved. Run '{rerun}' when you have a key.")
                 return
     cfg.save()
+    _log_llm_change(app, target_path, previous_llm)
 
     click.echo()
     ux.ok(f"Saved to {config_path_for_data_dir(cfg.data_dir)}")
@@ -1384,6 +1395,39 @@ _LLM_ROLE_TO_TARGET_PATH: dict[str, str] = {
     "agent": "",
     "judge": "guardrail.judge",
 }
+
+
+def _llm_audit_model(resolved: Any) -> str:
+    """``provider/model`` as one whitespace-free audit token."""
+
+    provider = "".join((resolved.provider or "").split()) or "(unset)"
+    model = "".join((resolved.model or "").split()) or "(unset)"
+    return f"{provider}/{model}"
+
+
+def _log_llm_change(app: AppContext, target_path: str, previous: str) -> None:
+    """Record a saved ``setup llm`` change as an operator Activity mutation.
+
+    Without it the change showed up only as the gateway's internal
+    ``config.change.applied`` row with no actor or target (GAP-2191).  The
+    row names the block (``config:llm:guardrail.judge``), the model diff and
+    the key variable name; never a key value.
+    """
+
+    if not app.logger:
+        return
+    from defenseclaw.commands._audit_notice import saved_change_audit
+
+    resolved = app.cfg.resolve_llm(target_path)
+    key_env = "".join((resolved.api_key_env or DEFENSECLAW_LLM_KEY_ENV).split())
+    details = (
+        f"scope={target_path or 'unified'} model={_llm_audit_model(resolved)} "
+        f"previous={previous} api_key_env={key_env}"
+    )
+    try:
+        saved_change_audit(app.logger).log_config_change("llm", details)
+    except CanonicalObservabilityError as exc:
+        click.echo(f"  ⚠ Change saved, but the gateway did not confirm the audit event ({exc}).", err=True)
 
 
 def _role_to_target_path(role: str) -> str:
@@ -7003,6 +7047,10 @@ def setup_guardrail(
         ACTION_SETUP_GUARDRAIL,
         f"mode={gc.mode} scanner_mode={gc.scanner_mode} port={gc.port} model={gc.model} hilt={bool(gc.hilt.enabled)!s}",
         allow_offline=not restart,
+        change=(
+            "guardrail-setup",
+            f"scope={gc.connector or 'openclaw'}:{gc.mode} mode={gc.mode} scanner_mode={gc.scanner_mode}",
+        ),
     )
     if guardrail_secret_transaction is not None:
         guardrail_secret_transaction.clear()
