@@ -220,11 +220,32 @@ func validateWindowsNamespacePurgeProductionStateRoot(path string) error {
 	if err != nil {
 		return fmt.Errorf("enterprise hooks: resolve trusted ProgramData for namespace cleanup: %w", err)
 	}
-	production := filepath.Join(programData, "Cisco", "Cisco Secure Client", "DefenseClaw")
-	if !strings.EqualFold(path, production) {
-		return fmt.Errorf("enterprise hooks: namespace cleanup state root is outside the exact production DefenseClaw layout")
+	base := filepath.Join(programData, "Cisco", "Cisco Secure Client")
+	production := filepath.Join(base, "DefenseClaw")
+	if strings.EqualFold(path, production) {
+		return nil
 	}
-	return nil
+	// Accept certification-scoped state root DefenseClaw-Cert\<10-hex-char
+	// runID>, mirror of the install-root scope widening above. Scoped
+	// uninstall of a scoped install must be able to clean the scoped
+	// state root the install created.
+	certification := filepath.Join(base, "DefenseClaw-Cert")
+	leaf := filepath.Base(path)
+	if strings.EqualFold(filepath.Dir(path), certification) &&
+		len(leaf) == windowsNamespacePurgeCertRunIDLength &&
+		leaf == strings.ToLower(leaf) {
+		validLeaf := true
+		for _, character := range leaf {
+			if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+				validLeaf = false
+				break
+			}
+		}
+		if validLeaf {
+			return nil
+		}
+	}
+	return fmt.Errorf("enterprise hooks: namespace cleanup state root is outside the exact production DefenseClaw layout")
 }
 
 func validateWindowsNamespacePurgeProductionInstallRoot(path string) error {
@@ -232,11 +253,33 @@ func validateWindowsNamespacePurgeProductionInstallRoot(path string) error {
 	if err != nil {
 		return fmt.Errorf("enterprise hooks: resolve trusted Program Files for namespace cleanup: %w", err)
 	}
-	production := filepath.Join(programFiles, "Cisco", "Cisco Secure Client", "DefenseClaw")
-	if !strings.EqualFold(path, production) {
-		return fmt.Errorf("enterprise hooks: namespace cleanup install root is outside the exact production DefenseClaw layout")
+	base := filepath.Join(programFiles, "Cisco", "Cisco Secure Client")
+	production := filepath.Join(base, "DefenseClaw")
+	if strings.EqualFold(path, production) {
+		return nil
 	}
-	return nil
+	// Accept certification scope DefenseClaw-Cert\<10-hex-char runID>, same
+	// as validateWindowsNamespacePurgeProductionRoot. Native uninstall
+	// cleanup must be able to retire scoped unsigned-certification install
+	// roots or scoped tests cannot be uninstalled by the EXE that installed
+	// them.
+	certification := filepath.Join(base, "DefenseClaw-Cert")
+	leaf := filepath.Base(path)
+	if strings.EqualFold(filepath.Dir(path), certification) &&
+		len(leaf) == windowsNamespacePurgeCertRunIDLength &&
+		leaf == strings.ToLower(leaf) {
+		validLeaf := true
+		for _, character := range leaf {
+			if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+				validLeaf = false
+				break
+			}
+		}
+		if validLeaf {
+			return nil
+		}
+	}
+	return fmt.Errorf("enterprise hooks: namespace cleanup install root is outside the exact production DefenseClaw layout")
 }
 
 func parseWindowsNamespacePurgeGatewaySID(value string) (*windows.SID, error) {
