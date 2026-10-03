@@ -537,6 +537,21 @@ class TestRegistryRequire(RegistryCommandTestBase):
             self.assertEqual(len(actions), 1, actions)
             self.assertIn(f"require scope=asset_policy.connectors.openhands.mcp.registry required={state}", actions[0][2])
 
+    def test_require_with_gateway_down_saves_warns_and_exits_zero(self):
+        # GAP-2236: the change is saved; a stopped gateway skips only the event.
+        from defenseclaw.logger import CanonicalObservabilityUnavailableError
+
+        logger = MagicMock()
+        logger.log_action.side_effect = CanonicalObservabilityUnavailableError("down")
+        with patch.object(self.app, "logger", logger):
+            result = CliRunner().invoke(
+                registry, ["require", "--type", "mcp", "--enabled", "--connector", "hermes"], obj=self.app,
+            )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertTrue(self.app.cfg.asset_policy.effective_asset_type_policy("hermes", "mcp").registry_required)
+        self.assertEqual(result.output.count("audit event was not recorded"), 1)
+        self.assertNotIn("run the command again", result.output)
+
     def test_require_messages_name_asset_policy_key_and_count(self):
         # GAP-1880: singular "1 entry" and the same key name as the success line.
         from defenseclaw.config import AssetPolicyRule
