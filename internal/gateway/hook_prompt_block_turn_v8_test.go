@@ -84,7 +84,10 @@ func TestHookBlockedPromptEndsTheTurnWithTheBlockOnGalileo(t *testing.T) {
 		}, time.Millisecond)
 
 	found := map[string]map[string]string{}
-	for _, span := range waitHookGalileoSpans(spans, "chat", 1) {
+	// The chat span ends before its agent span, so the two can land in
+	// separate export batches: wait for both.
+	waitHookGalileoSpans(spans, "chat", 1)
+	for _, span := range waitHookGalileoSpans(spans, "invoke_agent", 1) {
 		for _, prefix := range []string{"invoke_agent", "chat"} {
 			if strings.HasPrefix(span.Name, prefix) {
 				found[prefix] = hookModelV8ProtoAttributes(span)
