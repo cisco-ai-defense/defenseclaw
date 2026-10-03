@@ -1652,6 +1652,24 @@ class ExecutePlanConnectorTests(unittest.TestCase):
                 c.__exit__(None, None, None)
 
 
+class RemovePluginMessageTests(unittest.TestCase):
+    """GAP-2497: after the openclaw teardown removed the plugin, the plugin
+    step must not claim it "was not installed"."""
+
+    def test_plugin_already_removed_by_teardown(self):
+        plan = cmd_uninstall.UninstallPlan(
+            connector="openclaw", connectors=("openclaw",), data_dir="/tmp/dc", remove_plugin=True
+        )
+        with (
+            patch("defenseclaw.guardrail.uninstall_openclaw_plugin", return_value=""),
+            capture_click_output() as out,
+        ):
+            cmd_uninstall._remove_plugin(plan)
+        text = out.getvalue()
+        self.assertIn("plugin already removed", text)
+        self.assertNotIn("not installed", text)
+
+
 def _completed(returncode: int, stderr: str = ""):
     return type("Completed", (), {"returncode": returncode, "stdout": "", "stderr": stderr})()
 
