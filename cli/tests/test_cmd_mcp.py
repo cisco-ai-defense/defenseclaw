@@ -1222,6 +1222,29 @@ class TestMCPScan(MCPCommandTestBase):
         self.assertIn("claudecode", result.output)
 
     @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")
+    @patch("defenseclaw.enforce.admission.evaluate_admission")
+    def test_set_admission_refusal_is_audited_per_connector(self, mock_admit, mock_set):
+        # GAP-2120: an asset-policy admission refusal wrote no audit row.
+        from defenseclaw.enforce.admission import AdmissionDecision
+
+        self.app.cfg.active_connectors = lambda: ["hermes"]  # type: ignore[method-assign]
+        mock_admit.return_value = AdmissionDecision(
+            "blocked", "mcp 'offreg' is not in the approved registry",
+            source="asset-policy-registry-required",
+        )
+
+        result = self.invoke(["set", "offreg", "--url", "https://x/mcp", "--skip-scan"])
+
+        self.assertNotEqual(result.exit_code, 0)
+        mock_set.assert_not_called()
+        rows = [e for e in self.app.store.list_events(50) if e.action == "install-rejected"]
+        self.assertEqual(len(rows), 1, [(e.action, e.target) for e in self.app.store.list_events(50)])
+        self.assertEqual(rows[0].target, "offreg")
+        self.assertIn("connector=hermes", rows[0].details)
+        self.assertIn("source=asset-policy-registry-required", rows[0].details)
+        self.assertIn("not in the approved registry", rows[0].details)
+
+    @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")
     @patch("defenseclaw.commands.cmd_mcp._run_scan")
     @patch("defenseclaw.enforce.admission.evaluate_admission")
     def test_set_post_scan_allow_records_connector_scoped_allow(

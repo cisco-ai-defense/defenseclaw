@@ -12367,6 +12367,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             return SetupPanelAction(True, hint=f"Fix config validation: {errors[0]}")
         if not self.setup_model.has_changes():
             return SetupPanelAction(True, hint="No config changes to save.")
+        saved_entries = self.setup_model.config_diff()
         try:
             self.setup_model.apply_changes_to_config()
             save = getattr(self.config, "save", None)
@@ -12392,7 +12393,33 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             self.setup_model.mark_saved()
         except Exception as exc:  # noqa: BLE001 - user feedback belongs in status.
             return SetupPanelAction(True, hint=f"Config save failed: {exc}")
+        self._schedule_config_save_audit(saved_entries)
         return SetupPanelAction(True, hint="Config changes saved; restart queued if gateway is running.")
+
+    def _schedule_config_save_audit(self, entries: tuple[Any, ...]) -> None:
+        """Record the saved keys as a config-update audit event (GAP-2121).
+
+        The gateway hand-off is an HTTP call, so it runs in a thread worker;
+        before the app is mounted (model-level callers) it runs inline.
+        """
+
+        from defenseclaw.tui.services.config_audit import record_config_save
+
+        cfg = self.config
+
+        def record() -> None:
+            if not record_config_save(cfg, entries) and self.is_running:
+                self.call_from_thread(
+                    self._set_status,
+                    "Config changes saved; the audit event was not recorded (is the gateway running?).",
+                )
+
+        if not entries:
+            return
+        if not self.is_running:
+            record_config_save(cfg, entries)
+            return
+        self.run_worker(record, thread=True, exclusive=False, group="config-save-audit")
 
     async def _open_config_diff(self) -> None:
         result = await self.push_screen_wait(ConfigDiffScreen(self.setup_model.config_diff()))
