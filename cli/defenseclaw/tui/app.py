@@ -4849,6 +4849,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 ("e", "Require (or stop requiring) registry approval for the entry's type"),
                 ("d", "Remove the selected source"),
                 ("r", "Refresh"),
+                # The compact column headers had no legend (GAP-2229).
+                ("C/W/B/E", "Sources column: clean / warning / blocked / error entries"),
+                ("A/R", "Entries column: A approved, R rejected, - neither"),
             ],
             "policies": [
                 *((keys, what) for keys, what, _views in policy_keymap_rows(self.policy_model.sandbox_supported)),
@@ -9596,7 +9599,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             )
         else:
             message = (
-                f"Canonical observability status unavailable: {status_error}"
+                f"Telemetry status unavailable: {status_error}"
                 if status_error
                 else "No runtime-loaded destinations. Configure one in 0 Setup → "
                 "Observability / Galileo, then restart the gateway."
@@ -9681,7 +9684,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         delivery_text = "\n".join(delivery_lines)
         if not rows:
             message = (
-                f"Canonical observability status unavailable: "
+                f"Telemetry status unavailable: "
                 f"{rich_escape(self.overview_model.observability_status_error)}"
                 if self.overview_model.observability_status_error
                 else "No runtime-loaded destinations. Configure one in 0 Setup → "
@@ -10313,9 +10316,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             new_lines_since_pause=int(self.logs_model.new_lines_since_pause),
             panel_view=self._hint_panel_view(active_panel),
             panel_keys=self.sandbox_model.keys_line() if active_panel == "sandboxes" else "",
-            panel_conditions=(
-                tuple(sorted(setup_keys.setup_conditions(self.setup_model))) if self.active_panel == "setup" else ()
-            ),
+            panel_conditions=self._hint_panel_conditions(active_panel),
             panel_has_rows=bool(self._table_rows) if active_panel == "sandboxes" else True,
             not_configured=self.config is None,
             connector_filter=friendly_connector_name(connector_filter) if connector_filter else "",
@@ -10323,6 +10324,13 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         )
         hint.refresh_hint(hint_state, self._hint_status_model())
         self.hint_text = str(getattr(hint, "content", ""))
+
+    def _hint_panel_conditions(self, active_panel: str) -> tuple[str, ...]:
+        if self.active_panel == "setup":
+            return tuple(sorted(setup_keys.setup_conditions(self.setup_model)))
+        if active_panel == "ai":
+            return self.ai_discovery_model.hint_conditions()
+        return ()
 
     def _hint_panel_view(self, active_panel: str) -> str:
         if active_panel == "sandboxes":
@@ -12242,7 +12250,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             target = step_nav(items, delta)
             if target == setup_center.NAV_CONFIG:
                 setup_center.select_nav(self.setup_model, target)
-                return SetupPanelAction(True, hint="Config editor opened. w goes back to the tasks.")
+                return SetupPanelAction(True, hint="Config editor opened. Esc or w goes back to the tasks.")
             self.setup_model.active_wizard = setup_catalog.step_group(self.setup_model.active_wizard, delta)
             return SetupPanelAction(True)
         if key == "i":
@@ -12260,7 +12268,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if key in {"c", "`"}:
             self.setup_model.mode = "config"
             self.setup_model.active_line = self.setup_model.first_editable_line()
-            return SetupPanelAction(True, hint="Config editor opened.")
+            return SetupPanelAction(True, hint="Config editor opened. Esc or w goes back to the tasks.")
         if key == "r":
             return SetupPanelAction(True, refresh_credentials=True, hint="Refreshing credential snapshot.")
         if self.setup_model.active_wizard == SetupWizard.CREDENTIALS and key in {"f", "s"}:
@@ -12352,9 +12360,18 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             return SetupPanelAction(True, open_picker="sections")
         if key == "/":
             return SetupPanelAction(True, open_picker="fields")
-        if key in {"w", "`"}:
+        if key in {"w", "`", "esc"}:
+            # Esc goes back like every other Setup view (GAP-2222). Unsaved
+            # edits stay in the editor, so say so instead of dropping them.
             self.setup_model.mode = "wizards"
-            return SetupPanelAction(True, hint="Setup wizards opened.")
+            changed = len(self.setup_model.config_diff())
+            if changed:
+                noun = "change" if changed == 1 else "changes"
+                return SetupPanelAction(
+                    True,
+                    hint=f"Back to the Setup tasks. {changed} unsaved config {noun} kept: c reopens the editor, S saves.",
+                )
+            return SetupPanelAction(True, hint="Back to the Setup tasks.")
         if key in {"tab", "right", "]"}:
             self._move_setup_section(1)
             return SetupPanelAction(True)
@@ -12366,7 +12383,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             if section is not None and section.name == "Observability":
                 return SetupPanelAction(
                     True,
-                    hint="Opening canonical Observability destination editor.",
+                    hint="Opening the Observability destination editor.",
                     open_resource_editor="observability",
                 )
             if section is not None and section.name == "Webhooks":
@@ -14902,7 +14919,7 @@ def _fetch_v8_operator_status(
             safe_path = re.sub(r"[^A-Za-z0-9_.$\[\]-]", "?", path)[:256]
             safe_keyword = re.sub(r"[^A-Za-z0-9_.-]", "?", keyword)[:64]
             return None, f"invalid v8 configuration at {safe_path} ({safe_keyword})"
-        return None, "canonical v8 status could not be loaded; run defenseclaw observability validate"
+        return None, "telemetry status could not be loaded; run defenseclaw observability validate"
 
 
 def _fetch_native_delivery_summary(

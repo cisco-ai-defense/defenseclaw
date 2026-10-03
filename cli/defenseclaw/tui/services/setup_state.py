@@ -471,8 +471,10 @@ def build_readiness_checks(
 
     checks.append(
         ReadinessCheck(
-            "Observability v8",
-            "Canonical routing is active; local SQLite collection is mandatory.",
+            "Telemetry",
+            # Users only ever see one routing plan, so "canonical" and "v8"
+            # explained nothing (GAP-2221).
+            "Local audit log is always on; export destinations are set in the Observability task.",
             "pass",
         )
     )
