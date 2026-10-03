@@ -8,11 +8,22 @@
 'use client';
 
 import { useMemo, useState } from 'react';
+import yaml from 'js-yaml';
 import recipesData from '@/data/policy-recipes.json';
 import type { DataAxis, Recipe, RecipesFile } from './types';
 import { CopyButton } from './ui/copy-button';
 
 const ALL: Recipe[] = (recipesData as unknown as RecipesFile).recipes;
+
+// Cards rendered per page. The full catalog is several hundred entries,
+// so it is revealed in steps instead of all at once.
+const PAGE_SIZE = 24;
+
+// One YAML list item, ready to paste under a rules file's `rules:` key or
+// a suppressions.yaml list.
+function recipeYaml(r: Recipe): string {
+  return yaml.dump([r.body], { lineWidth: -1, noRefs: true, quotingType: "'" });
+}
 
 const AXIS_LABELS: Array<{ value: DataAxis | 'all'; label: string }> = [
   { value: 'all', label: 'any axis' },
@@ -24,7 +35,6 @@ const AXIS_LABELS: Array<{ value: DataAxis | 'all'; label: string }> = [
 const KIND_LABELS: Array<{ value: Recipe['kind'] | 'all'; label: string }> = [
   { value: 'all', label: 'all' },
   { value: 'rule:secret', label: 'rule: secrets' },
-  { value: 'rule:injection', label: 'rule: injection' },
   { value: 'rule:command', label: 'rule: command' },
   { value: 'rule:sensitive-path', label: 'rule: sensitive paths' },
   { value: 'rule:enterprise-data', label: 'rule: enterprise-data' },
@@ -40,6 +50,7 @@ export function RecipeCatalog() {
   const [query, setQuery] = useState('');
   const [kind, setKind] = useState<Recipe['kind'] | 'all'>('all');
   const [axis, setAxis] = useState<DataAxis | 'all'>('all');
+  const [limit, setLimit] = useState(PAGE_SIZE);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -58,6 +69,8 @@ export function RecipeCatalog() {
         );
       });
   }, [query, kind, axis]);
+  const shown = filtered.slice(0, limit);
+  const remaining = filtered.length - shown.length;
 
   return (
     <div className="recipe-catalog my-6 border border-fd-border bg-fd-card/30 p-4">
@@ -66,14 +79,20 @@ export function RecipeCatalog() {
           type="text"
           aria-label="Search policy recipes"
           value={query}
-          onChange={(e) => setQuery(e.target.value)}
+          onChange={(e) => {
+            setQuery(e.target.value);
+            setLimit(PAGE_SIZE);
+          }}
           placeholder={`Search ${ALL.length} recipes…`}
           className="flex-1 rounded-md border border-fd-border bg-fd-background px-2.5 py-1.5 text-sm text-fd-foreground placeholder:text-fd-muted-foreground focus:border-[var(--brand-cisco)] focus:outline-none focus:ring-1 focus:ring-[var(--brand-cisco)]"
         />
         <select
           aria-label="Filter by recipe kind"
           value={kind}
-          onChange={(e) => setKind(e.target.value as Recipe['kind'] | 'all')}
+          onChange={(e) => {
+            setKind(e.target.value as Recipe['kind'] | 'all');
+            setLimit(PAGE_SIZE);
+          }}
           className="rounded-md border border-fd-border bg-fd-background px-2 py-1.5 text-xs text-fd-foreground"
         >
           {KIND_LABELS.map((opt) => (
@@ -84,7 +103,10 @@ export function RecipeCatalog() {
         </select>
         <select
           value={axis}
-          onChange={(e) => setAxis(e.target.value as DataAxis | 'all')}
+          onChange={(e) => {
+            setAxis(e.target.value as DataAxis | 'all');
+            setLimit(PAGE_SIZE);
+          }}
           className="rounded-md border border-fd-border bg-fd-background px-2 py-1.5 text-xs text-fd-foreground"
           aria-label="Filter by data axis"
           title="Filter by the lethal-trifecta data axis the recipe contributes to"
@@ -96,11 +118,12 @@ export function RecipeCatalog() {
           ))}
         </select>
       </div>
-      <div className="text-[11px] text-fd-muted-foreground">
-        Showing {filtered.length} of {ALL.length} recipes.
+      <div className="text-[11px] text-fd-muted-foreground" aria-live="polite">
+        Showing {shown.length} of {filtered.length}
+        {filtered.length === ALL.length ? '' : ` matching (${ALL.length} total)`} recipes.
       </div>
       <ul className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-2">
-        {filtered.map((r) => (
+        {shown.map((r) => (
           <li
             key={r.id}
             className="flex flex-col gap-2 rounded-md border border-fd-border bg-fd-background p-3"
@@ -159,16 +182,34 @@ export function RecipeCatalog() {
                 YAML
               </summary>
               <pre className="mt-1 overflow-x-auto rounded bg-fd-background px-2 py-1.5 text-[11px] leading-snug text-fd-foreground">
-                {JSON.stringify(r.body, null, 2)}
+                {recipeYaml(r)}
               </pre>
             </details>
             <div className="flex items-center justify-between gap-2">
               <span className="text-[10px] text-fd-muted-foreground">{r.source}</span>
-              <CopyButton value={JSON.stringify(r.body, null, 2)} label="Copy JSON" />
+              <CopyButton value={recipeYaml(r)} label="Copy YAML" />
             </div>
           </li>
         ))}
       </ul>
+      {remaining > 0 && (
+        <div className="mt-3 flex flex-wrap items-center justify-center gap-2">
+          <button
+            type="button"
+            onClick={() => setLimit((n) => n + PAGE_SIZE)}
+            className="rounded-md border border-fd-border bg-fd-background px-3 py-1.5 text-xs font-medium text-fd-foreground hover:border-[var(--brand-cisco)]"
+          >
+            Show {Math.min(PAGE_SIZE, remaining)} more
+          </button>
+          <button
+            type="button"
+            onClick={() => setLimit(filtered.length)}
+            className="rounded-md px-3 py-1.5 text-xs text-fd-muted-foreground underline-offset-2 hover:text-fd-foreground hover:underline"
+          >
+            Show all {filtered.length}
+          </button>
+        </div>
+      )}
     </div>
   );
 }

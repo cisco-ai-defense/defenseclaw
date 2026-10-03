@@ -277,7 +277,7 @@ function SeverityRubricCallout() {
             <span className="font-mono">LOW</span> — log, no user friction.
           </li>
           <li>
-            <span className="font-mono">MEDIUM</span> — alert; HILT prompt depending on
+            <span className="font-mono">MEDIUM</span> — alert; HITL prompt depending on
             install column.
           </li>
           <li>

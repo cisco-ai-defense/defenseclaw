@@ -1,6 +1,6 @@
 ---
 title: Recipes
-description: Catalog of regex rules, suppressions, sensitive tools, and judge categories shipped with the strict policy — search, copy, and remix.
+description: Catalog of the regex rules and suppressions shipped with DefenseClaw's bundled policy packs — search, filter, and copy the YAML.
 keywords:
   - DefenseClaw recipes
   - regex catalog
@@ -10,26 +10,30 @@ keywords:
 
 import { RecipeCatalog } from "@/components/policy-creator/recipe-catalog";
 
-The recipe catalog is the same library the [Policy creator](/docs/policies/creator) draws from. Every entry
-ships with the bundled `strict` policy so you can paste the YAML directly into your own pack —
-or use the wizard to drop one into a draft and tune it interactively.
+The recipe catalog is the same library the [Policy creator](/docs/policies/creator) draws from.
+It holds every rule in the bundled `strict` pack plus the suppressions the packs ship, so you can
+copy an entry's YAML into your own pack, or use the creator to drop one into a draft and tune it.
 
 <Callout type="info" title="Where these come from">
-Each rule originates in `policies/guardrail/strict/rules/<category>.yaml` and gets compiled into
-this catalog at build time by `docs-site/scripts/build-policy-assets.ts`. The bundled strict
-pack is the source of truth — when it changes, this catalog regenerates.
+Rules come from the strict pack's `rules/` files, and suppressions from the packs'
+`suppressions.yaml` files. Each card names its source file. The catalog is generated at build
+time by `docs-site/scripts/build-policy-assets.ts`, so it changes when the packs change.
 </Callout>
-
-<RecipeCatalog />
 
 ## Reading a recipe
 
 | Field           | Meaning                                                                                                           |
 | --------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `kind`          | What this recipe slots into — a regex rule (`rule:secrets`, `rule:injection`, …) or one of the three suppression layers (`pre_judge_strip`, `finding_suppression`, `tool_suppression`). |
-| `id`            | Stable identifier the engine uses for telemetry. Keep this stable across edits.                                   |
-| `pattern`       | The Go-`regexp` (RE2) source the engine compiles. The wizard's regex tester checks this is RE2-compatible.        |
-| `severity`      | The wizard's severity ladder is `CRITICAL > HIGH > MEDIUM > LOW > INFO`. The guardrail block/alert thresholds use ranks. |
-| `confidence`    | Hint to the judge: how confident you are this is a true positive.                                                 |
-| `tags`          | Free-form. Useful for filtering and reporting.                                                                    |
-| `examples` / `counterexamples` | What the wizard's live tester will run through your pattern. Add your own in the regex tester for sanity. |
+| `kind`          | What this recipe slots into: a rule file (`rule:secret`, `rule:command`, …) or one of the three suppression layers (`pre_judge_strip`, `finding_suppression`, `tool_suppression`). |
+| `id`            | Stable identifier the engine uses for findings and telemetry. Keep it stable across edits.                        |
+| `pattern`       | The Go `regexp` (RE2) source the engine compiles. The creator's regex tester checks it is RE2-compatible.        |
+| `severity`      | `CRITICAL`, `HIGH`, `MEDIUM` or `LOW`. The active pack, or `guardrail block-at` and `alert-at`, maps it to an action. |
+| `confidence`    | How often a match is a true positive, from `0` to `1`.                                                            |
+| `tags`          | Free-form labels for filtering and reporting.                                                                     |
+| `examples` / `counterexamples` | Strings the creator's live tester runs through the pattern. Add your own in the regex tester.      |
+
+Each card's **YAML** view shows the entry as one list item. Paste a rule under the `rules:` key
+of a file in your pack's `rules/` directory, and a suppression under the matching list in
+`suppressions.yaml`.
+
+<RecipeCatalog />

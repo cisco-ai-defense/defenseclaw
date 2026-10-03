@@ -169,22 +169,13 @@ const SECTION_DEFS: SectionDef[] = [
   {
     id: 'correlator',
     title: 'Session correlator (Layer 5)',
-    subtitle: (p) => {
-      const enabled = p.correlator.filter((c) => c.enabled).length;
-      if (p.correlator.length === 0) return 'not loaded — pick a preset to seed defaults';
-      return enabled === p.correlator.length
-        ? `${enabled} pattern${enabled === 1 ? '' : 's'} enabled`
-        : `${enabled} of ${p.correlator.length} patterns enabled`;
-    },
-    // Highlight as "warning" when the operator has disabled bundled
-    // patterns — that's an intentional choice but the wizard should
-    // make it visible so a teammate reviewing the share link spots it.
-    status: (p) => {
-      if (p.correlator.length === 0) return 'untouched';
-      const disabled = p.correlator.filter((c) => !c.enabled).length;
-      if (disabled > 0) return 'warning';
-      return 'customized';
-    },
+    subtitle: (p) =>
+      p.correlator.length === 0
+        ? 'not loaded — pick a preset to show the bundled patterns'
+        : `${p.correlator.length} compiled-in pattern${p.correlator.length === 1 ? '' : 's'}, read-only`,
+    // Read-only: the gateway runs only its compiled-in patterns, so
+    // this section never counts as customized.
+    status: () => 'untouched',
     render: (p, set) => <CorrelatorSection policy={p} onPolicyChange={set} />,
   },
   {

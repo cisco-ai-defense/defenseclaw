@@ -20,14 +20,14 @@ DefenseClaw separates *admission policy* from *runtime guardrail rules*. They sh
 
 <Cards>
   <Card title="Admission policy (OPA)" description="What happens when a skill / MCP / plugin gets installed or executed. Lives in policies/<name>.yaml, activated by defenseclaw policy activate <name>." />
-  <Card title="Guardrail rule pack" description="The regex patterns, LLM-judge prompts, and suppressions that gate prompts and completions in flight. Lives in policies/guardrail/<name>/, pointed at by guardrail.rule_pack_dir." />
+  <Card title="Guardrail rule pack" description="The rules, LLM-judge prompts, and suppressions that check prompts, completions, and tool calls in flight. Lives in policies/guardrail/<name>/, pointed at by guardrail.rule_pack_dir." />
 </Cards>
 
 Both layers ship in three named profiles — `default`, `strict`, `permissive` — and you flip them independently:
 
 ```bash
-defenseclaw policy activate default                                # OPA layer
-defenseclaw setup guardrail --rule-pack default                    # Guardrail layer
+defenseclaw policy activate default          # OPA layer
+defenseclaw guardrail use-pack default        # Guardrail layer
 ```
 
 <Callout type="warn">
@@ -109,6 +109,7 @@ guardrail:
   connector: claudecode
   enabled: true
   scanner_mode: local
+  llm_role: judge_only
   mode: action
   rule_pack_dir: /home/<you>/.defenseclaw/policies/guardrail/default
 
@@ -169,7 +170,7 @@ defenseclaw setup guardrail \
   --mode action \
   --rule-pack strict \
   --detection-strategy regex_judge \
-  --judge-model openai/gpt-4o-mini \
+  --judge-model anthropic/claude-haiku-4-5 \
   --restart \
   --non-interactive
 ```
@@ -262,11 +263,16 @@ or `--effective --provenance` for explicit compiler annotations. V8 rejects
 `policy show <name>` prints a normalized summary of the named file (`default`,
 `strict`, `permissive`, or any custom `policies/<name>.yaml` you've added).
 It does not dump the source YAML or individual guardrail rules. To find a rule
-by id, search the configured rule-pack directory directly:
+by ID, look up the directory a connector enforces with `list-packs`, then
+search it:
 
 ```bash
-grep -rn "rule_id_you_care_about" "$(awk '/rule_pack_dir/ {print $2}' ~/.defenseclaw/config.yaml)"
+defenseclaw guardrail list-packs
+grep -rn "RULE_ID" ~/.defenseclaw/policies/guardrail/default/rules/
 ```
+
+`(built-in default)` in the `list-packs` output means no pack has been
+selected yet, so the `default` pack applies.
 
 ## Reset to defaults
 

@@ -1,6 +1,6 @@
 ---
 title: Regex cookbook
-description: Battle-tested regex patterns for DefenseClaw guardrails — secrets, command injection, exfiltration markers, prompt injection — with explanations and counterexamples.
+description: RE2 regex patterns for DefenseClaw guardrails, quoted from the shipped strict pack — secrets, prompt injection, exfiltration endpoints and enterprise data — with what makes each one precise.
 keywords:
   - DefenseClaw regex
   - secrets detection
@@ -10,8 +10,9 @@ keywords:
 ---
 
 DefenseClaw compiles every guardrail pattern with Go's standard `regexp` package, which is
-RE2-based. The wizard's regex tester catches incompatible features before you commit; this page
-is the deeper reference for the patterns that ship in the strict pack.
+RE2-based. The creator's regex tester catches incompatible features before you export. Every
+rule quoted on this page ships in the strict pack under `policies/guardrail/strict/rules/`;
+the [recipe catalog](/docs/policies/recipes) lists all of them.
 
 <Callout type="info" title="Regex detection is not trusted-action proof">
 Patterns remain useful for broad, portable detection. On authenticated tool
@@ -21,62 +22,70 @@ See the [CEL engine runtime boundary](/docs/policies/cel/engine#runtime-results)
 </Callout>
 
 <Callout type="info" title="RE2 in 30 seconds">
-RE2 trades a few features for predictable, polynomial-time matching. Patterns you know from PCRE
-that <strong>do not work</strong> in RE2:
+RE2 never backtracks: matching time grows linearly with the input, so no pattern can hang the
+gateway. In exchange, these PCRE features <strong>do not work</strong>:
 
 - Lookarounds: `(?=…)`, `(?!…)`, `(?<=…)`, `(?<!…)`
 - Backreferences: `\1`, `\2`, `\k<name>`
 - Atomic groups: `(?>…)`
 - Possessive quantifiers: `*+`, `++`, `?+`
 
-If your pattern needs any of those, the wizard turns the input field red and tells you which
-feature failed. Re-author with a non-capturing group and tighter quantifiers.
+If your pattern needs any of those, the creator turns the input field red and names the
+feature. Re-author it with a non-capturing group and tighter character classes. A rule's
+fallback `pattern` can be at most 2,048 bytes.
 </Callout>
 
 ## Anatomy of a good rule
 
-```yaml
-- id: SEC-OPENAI-V2
-  title: OpenAI API key (current format)
-  pattern: 'sk-[A-Za-z0-9]{48}'
+```yaml title="policies/guardrail/strict/rules/secrets.yaml (excerpt)"
+- id: SEC-AWS-KEY
+  pattern: '\b(?:AKIA|ASIA)[0-9A-Z]{16}\b'
+  title: "AWS access key"
   severity: CRITICAL
   confidence: 0.95
-  tags: [secret, openai]
+  tags: [credential]
 ```
 
 What makes this work:
 
-- **Anchored prefix.** `sk-` is the OpenAI marker. Without it the pattern would match every
-  ~48-character base62 string.
-- **Bounded quantifier.** `{48}` instead of `{20,}` keeps the false positive rate low.
-- **Conservative confidence.** Even at 0.95, the LLM judge can downgrade in context.
-- **Self-describing tags.** Useful when you triage thousands of findings in dashboards.
+- **A fixed prefix.** `AKIA` and `ASIA` are the AWS long-term and temporary key markers.
+  Without them, the pattern would match any 20-character upper-case string.
+- **An exact length.** `{16}` after the prefix matches the real key length, and the `\b`
+  word boundaries stop it matching inside a longer token.
+- **Honest confidence.** `confidence` records how often a match is a real key. The shipped
+  `SEC-OPENAI-V2` rule (`sk-[a-zA-Z0-9]{40,}`) uses 0.85 because other vendors also use an
+  `sk-` prefix.
+- **Useful tags.** Tags group findings when you triage them in dashboards.
 
 ## Patterns by category
 
 ### Secrets
 
-| ID | Pattern shape | Catches | Avoids |
-| --- | --- | --- | --- |
-| `SEC-AWS-KEY` | `\b(AKIA\|ASIA)[A-Z0-9]{16}\b` | IAM, STS keys | Random base62 of similar length |
-| `SEC-GITHUB-TOKEN` | `\bgh[posr]_[A-Za-z0-9]{36,}` | New GitHub token formats | Plain `gh-` strings |
-| `SEC-PRIVKEY` | `-----BEGIN [A-Z ]+PRIVATE KEY-----` | RSA, ED25519, OPENSSH | Public certs, certificate signing requests |
-| `SEC-OPENAI-V2` | `sk-[A-Za-z0-9]{48}` | OpenAI keys | `sk-test-` Stripe keys |
-| `SEC-SLACK-WEBHOOK` | `https://hooks\.slack\.com/services/[A-Z0-9]+/[A-Z0-9]+/[A-Za-z0-9]+` | Slack incoming webhooks | Other Slack URLs (channels, files) |
+| ID | Pattern | Catches |
+| --- | --- | --- |
+| `SEC-AWS-KEY` | `\b(?:AKIA\|ASIA)[0-9A-Z]{16}\b` | AWS access key IDs |
+| `SEC-GITHUB-TOKEN` | `(?:ghp_\|gho_\|ghu_\|ghs_\|ghr_)[a-zA-Z0-9]{36,}` | GitHub personal, OAuth, user, server and refresh tokens |
+| `SEC-PRIVKEY` | `-----BEGIN (?:RSA \|EC \|OPENSSH \|PGP \|DSA )?PRIVATE KEY-----` | PEM and OpenSSH private keys; public keys and certificates don't match |
+| `SEC-OPENAI` | `sk-proj-[a-zA-Z0-9]{20,}` | OpenAI project keys |
+| `SEC-SLACK-WEBHOOK` | `https://hooks\.slack\.com/services/T[A-Z0-9]+/B[A-Z0-9]+/[a-zA-Z0-9]+` | Slack incoming-webhook URLs, which carry their own secret |
 
-### Prompt / tool injection
+### Prompt injection
 
-These rely on the natural-language signal more than character classes. Always pair with an LLM
-judge for confirmation — the regex is the cheap pre-filter.
+Plain-language injection is the hardest shape to match precisely, so the shipped rules
+anchor the phrase to the start of a sentence, a list item or a role label. That keeps a
+sentence that merely mentions the phrase from matching:
 
-```yaml
-- id: INJ-OVERRIDE-INSTRUCTION
-  pattern: '(?i)\b(ignore|disregard)\s+(all\s+)?(previous|prior|above)\s+(instructions|prompts|rules)\b'
-  severity: HIGH
-- id: INJ-SHELL-EXEC
-  pattern: '(?i)\b(rm\s+-rf|dd\s+if=|mkfs|truncate\s+-s|format\s+c:)\b'
+```yaml title="policies/guardrail/strict/rules/trust-exploit.yaml (excerpt)"
+- id: TRUST-IGNORE-PREVIOUS
+  pattern: '(?im)(?:^|[.!?;,:]\s*|(?:[-*>•]|<!--|["''])\s*|\b(?:task|instruction|system|assistant)\s*:\s*)(?:(?:please,?|(?:can|could|will|would)\s+you(?:\s+please)?|i\s+(?:want|need)\s+you\s+to(?:\s+please)?|now,?|next,?|you\s+(?:must|should|need\s+to))\s+)?ignore\s+(?:all\s+)?(?:previous|prior|above|earlier)\s+(?:instructions|rules|guidelines|context)'
+  title: "Ignore previous instructions"
   severity: CRITICAL
+  confidence: 0.90
+  tags: [prompt-injection]
 ```
+
+For ambiguous wording, enable the [LLM judge](/docs/policies) (Layer 3) as a second
+opinion rather than widening the regex.
 
 ### Unicode zero-width obfuscation
 
@@ -84,7 +93,7 @@ The shipped rule looks for sustained insertion of zero-width characters after AS
 digits. Requiring ten insertions catches deliberately split tokens while avoiding isolated
 formatting artifacts and ordinary emoji ZWJ sequences.
 
-```yaml
+```yaml title="policies/guardrail/strict/rules/trust-exploit.yaml (excerpt)"
 - id: OBFUSC-UNICODE-ZWSP
   pattern: '(?:[A-Za-z0-9][\x{200B}\x{200C}\x{200D}\x{FEFF}][\s\S]*?){10,}'
   title: Zero-width character obfuscation
@@ -99,49 +108,83 @@ The counted characters are U+200B (zero-width space), U+200C (zero-width non-joi
 alphanumeric character. Nine insertions do not match, and a ZWJ between two emoji does not count.
 </Callout>
 
-### Exfiltration markers
+### Exfiltration endpoints and download-and-run
 
-When a model surfaces a base64 blob, an out-of-band webhook URL, or a tar pipe, you usually want
-to alert before allowing the output downstream:
+Known collection endpoints are matched as a whole host name, so `webhook.site` matches but
+`mywebhook.site.example` doesn't:
 
-```yaml
-- id: EXFIL-CURL-PIPE-SH
-  pattern: '\bcurl\s+[^\s]+\s*\|\s*(bash|sh|zsh)\b'
-  severity: CRITICAL
-- id: EXFIL-WEBHOOK-DOMAIN
-  pattern: '(?i)\b(webhook\.site|requestbin\.com|ngrok\.io|interactsh\.com)\b'
+```yaml title="policies/guardrail/strict/rules/c2.yaml (excerpt)"
+- id: C2-WEBHOOK-SITE
+  pattern: '(?i)(?:^|[^a-zA-Z0-9-])webhook\.site(?:[^a-zA-Z0-9.-]|$)'
+  title: "webhook.site (known exfil)"
   severity: HIGH
+  confidence: 0.90
+  tags: [exfiltration, c2]
 ```
+
+Tool-call rules pair a CEL `expression` with the regex fallback. Here the fallback catches a
+`wget` download piped into an interpreter when the call can't be parsed:
+
+```yaml title="policies/guardrail/strict/rules/commands.yaml (excerpt)"
+- id: CMD-PIPE-WGET
+  tool_call_only: true
+  expression: >-
+    f.commands.exists(c, c.argv_complete && c.program in ['wget', 'wget.exe'] &&
+    (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_FETCH in c.operations ||
+    defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in c.operations))
+  pattern: '(?i)\bwget\b\s+[^|]*\|\s*(?:[/\w.-]+/)?(?:bash|zsh|sh|dash|ksh|python(?:[0-9.]*)?|perl|ruby)\b'
+  title: "wget piped to shell"
+  severity: CRITICAL
+  confidence: 0.95
+  tags: [execution, download-exec]
+```
+
+See [Authoring CEL rules](/docs/policies/cel/authoring) for the expression side.
 
 ### Enterprise data shape
 
-Numeric-only patterns are the easiest to false-positive. Always pair them with a `condition`
-in your finding suppressions (see [the suppression cookbook](/docs/policies/suppression-cookbook)).
+Numeric-only patterns are the easiest to false-positive, so the shipped rules encode the
+structure of the number instead of just its length. The SSN rule rejects area numbers that are
+never issued (`000`, `666`, `9xx`) and all-zero groups:
 
-```yaml
-- id: PII-SSN
-  pattern: '\b\d{3}-\d{2}-\d{4}\b'
-  severity: HIGH
-- id: PII-CREDIT-CARD
-  pattern: '\b(?:4\d{3}|5[1-5]\d{2}|3[47]\d{2}|6(?:011|5\d{2}))[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b'
+```yaml title="policies/guardrail/strict/rules/enterprise-data.yaml (excerpt)"
+- id: ENT-BULK-SSN
+  pattern: '\b(?:00[1-9]|0[1-9][0-9]|[1-5][0-9]{2}|6[0-5][0-9]|66[0-5]|66[7-9]|6[7-9][0-9]|[78][0-9]{2})-(?:0[1-9]|[1-9][0-9])-(?:000[1-9]|00[1-9][0-9]|0[1-9][0-9]{2}|[1-9][0-9]{3})\b'
+  title: "US Social Security Number"
   severity: CRITICAL
+  confidence: 0.85
+  tags: [pii, regulated]
+- id: ENT-CC-VISA
+  pattern: '\b4\d{3}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b'
+  title: "Visa credit card number"
+  severity: CRITICAL
+  confidence: 0.80
+  tags: [pii, pci]
 ```
+
+Suppressions can't quiet these rules: they filter only LLM-judge findings (see the
+[suppression cookbook](/docs/policies/suppression-cookbook)). If a numeric rule is noisy in
+your environment, narrow its pattern or disable it in your own pack.
 
 ## Patterns to avoid
 
-- **`.*` anywhere unanchored.** It almost always matches, slowly. Pair with at least one bounded
-  segment (`[A-Z0-9]{8,}`) and an anchor.
-- **Greedy quantifiers under groups under quantifiers.** `(\w+)+` is the classic catastrophic
-  backtracking shape. The wizard's `REGEX_REDOS` heuristic flags this on the way in.
-- **Case-insensitive without `(?i)`.** Use the inline flag so the engine and your tester agree.
+- **An unanchored `.*` or `[\s\S]*`.** It lets a match span unrelated text, so two harmless
+  words far apart become a finding. Bound the gap (`[\s\S]{0,120}`) or anchor both sides.
+- **Short or common prefixes on their own.** `sk-` or `ghp` alone match ordinary text; pair a
+  prefix with the exact length and character class of the real value.
+- **Nested quantifiers such as `(\w+)+`.** RE2 still runs them in linear time, but they are a
+  sign of a pattern that matches far more than intended. The creator's `REGEX_REDOS` check
+  flags them.
+- **Case-insensitive matching without `(?i)`.** Use the inline flag so the engine and your
+  tester agree.
 
 ## Workflow
 
 In the [Policy creator](/docs/policies/creator) Rule pack section:
 
 1. Pick a recipe from the catalog or click "+ Rule" on the appropriate file.
-2. Paste your pattern in. The wizard runs every keystroke through V8, the RE2 lint, and the
-   ReDoS heuristic, plus your `should match` and `should NOT match` examples.
-3. Once the pill colors line up (green for pass, amber for mismatch, red for compile error),
-   review the verdict in the Live Test pane on the right — it'll show how the pattern interacts
-   with the severity matrix and admission policy.
+2. Paste your pattern in. The creator runs every keystroke through V8, the RE2 lint, and the
+   nested-quantifier check, plus your `should match` and `should NOT match` examples.
+3. When the pills line up (green for pass, amber for mismatch, red for compile error),
+   export the pack and run `defenseclaw guardrail validate-pack` on it. The Live Test pane
+   evaluates only the OPA/Rego policy, not regex rules.

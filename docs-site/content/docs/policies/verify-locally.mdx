@@ -34,10 +34,13 @@ VERIFY_HOME="$(mktemp -d "${TMPDIR:-/tmp}/defenseclaw-policy-verify.XXXXXX")"
 export HOME="$VERIFY_HOME"
 export DEFENSECLAW_HOME="$VERIFY_HOME/.defenseclaw"
 
-sed -n '1,240p' "$INSTALL_SCRIPT"
+grep -nE '^(cat >|defenseclaw )' "$INSTALL_SCRIPT"   # every file it writes and command it runs
+less "$INSTALL_SCRIPT"                                 # the full script
 ```
 
-The generated script honors `DEFENSECLAW_HOME` and falls back to
+The script is long (about 3,900 lines with the default Quick Start answers)
+because every rule-pack and judge file is inlined as a heredoc, so review it
+with the list of write targets first. The generated script honors `DEFENSECLAW_HOME` and falls back to
 `$HOME/.defenseclaw`. Keeping both variables inside `VERIFY_HOME` also isolates
 connector files such as `.codex/config.toml`.
 
@@ -67,8 +70,8 @@ defenseclaw policy list
 defenseclaw policy show my-policy
 ```
 
-Replace `my-policy` with the policy name shown by the creator. The second
-command reports the resolved severity actions, guardrail thresholds, firewall,
+Replace `my-policy` with the policy name shown by the creator, here and in the
+later steps. The second command reports the resolved severity actions, guardrail thresholds, firewall,
 and other fields that activation loaded.
 
 ## 4. Validate and test the active Rego
@@ -109,24 +112,40 @@ Change `--severity`, `--findings`, or `--target-type` to exercise other cases.
 This command evaluates locally; it does not require the gateway daemon to be
 running.
 
-## 6. Confirm the audit record
+## 6. Validate and switch to the rule pack
 
-Policy activation is written to the isolated audit database. Export it with the
-gateway binary and select the activation event:
+`policy activate` switches only the OPA policy. The script also writes a
+complete rule pack (rules, suppressions, sensitive tools and judges), but
+connectors keep their current pack until you switch to it:
 
 ```bash
-defenseclaw-gateway audit export --output - \
-  | jq 'select(.action == "policy-activate")'
+defenseclaw guardrail validate-pack "$DEFENSECLAW_HOME/policies/guardrail/my-policy"
+defenseclaw guardrail use-pack my-policy
+defenseclaw guardrail list-packs
 ```
+
+`validate-pack` prints `Rule pack valid` and the component counts.
+`list-packs` should then show the pack for the global scope and every
+connector, not `(built-in default)`.
+
+The throwaway gateway isn't running, so `policy activate` and `use-pack` warn
+that their audit events were not recorded. That is expected here; against an
+installation with a running gateway, both are audited and `use-pack` restarts
+the gateway so it loads the pack.
 
 ## 7. Promote or clean up
 
 Run the already-reviewed script with the real home values to install it for the
-operator, or delete only the temporary directory:
+operator, then switch the real installation to the pack. A global `use-pack`
+removes per-connector pack overrides and lists the ones it removed; add
+`--connector X` to switch one connector instead. Delete only the temporary
+directory:
 
 ```bash
 HOME="$REAL_HOME" DEFENSECLAW_HOME="$REAL_DEFENSECLAW_HOME" \
   bash "$INSTALL_SCRIPT"
+HOME="$REAL_HOME" DEFENSECLAW_HOME="$REAL_DEFENSECLAW_HOME" \
+  defenseclaw guardrail use-pack my-policy
 
 rm -rf -- "$VERIFY_HOME"
 ```
