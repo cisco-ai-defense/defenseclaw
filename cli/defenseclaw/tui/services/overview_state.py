@@ -949,13 +949,16 @@ class OverviewPanelModel:
                 )
             )
         elif runtime.scanned and runtime.findings == 0 and runtime.processes and not self.gateway_down():
-            why = f" ({runtime.degraded_reason}; press N for details)" if runtime.degraded_reason else ""
+            # One short line like the other notices; the Runtime panel (N)
+            # carries the full reason and what to do about it (GAP-2533).
+            why, tail = "", "no findings above the reporting floor"
+            if runtime.degraded_reason:
+                why, tail = f" ({runtime.degraded_reason})", "no findings; N for details"
             notices.append(
                 OverviewNotice(
                     "info",
-                    f"Runtime is {runtime.health_title or 'watching'}{why}: "
-                    f"{runtime.processes} processes and {runtime.connections} connections, "
-                    "no findings above the reporting floor.",
+                    f"Runtime is {runtime.health_title or 'watching'}{why}: {runtime.processes} processes, "
+                    f"{runtime.connections} connections, {tail}",
                 )
             )
 

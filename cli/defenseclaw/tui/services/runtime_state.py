@@ -449,8 +449,20 @@ class RuntimePanelModel:
             context=self.findings_context(),
             top_findings=tuple(top),
             next_action=self.next_action(),
-            degraded_reason=self.degraded_reason(),
+            degraded_reason=self.degraded_summary(),
         )
+
+    def degraded_summary(self) -> str:
+        """The cause heads only ("shadow egress partially covered"), for Overview.
+
+        The full reasons ran 2-3 lines on Overview and told a standard user to
+        run the gateway elevated; the Runtime panel keeps the detail (GAP-2533).
+        """
+
+        if self.health_state() != "degraded" or not self.snapshot.degraded_reasons:
+            return self.degraded_reason()
+        heads = [reason.split(":", 1)[0].strip() for reason in self.snapshot.degraded_reasons]
+        return ", ".join(dict.fromkeys(head for head in heads if head))
 
     def degraded_reason(self) -> str:
         """Short cause for a DEGRADED badge; empty when not degraded."""
