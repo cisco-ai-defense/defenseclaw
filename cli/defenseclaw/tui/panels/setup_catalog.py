@@ -536,12 +536,15 @@ def setup_detail_pairs(model: object) -> tuple[tuple[str, str], ...]:
         fix = getattr(check, "fix", None)
         if fix is not None and check.status != "pass":
             value += f" · fix: {getattr(fix, 'binary', 'defenseclaw')} {' '.join(fix.args)}"
-        pairs.append((check.title, value))
+        # "Active Connector: claudecode" wrapped over two lines in the
+        # 22-cell label column (GAP-2059).
+        label = check.title.replace("Active Connector: ", "Connector ", 1)
+        pairs.append((label, value))
     snapshot = getattr(model, "credential_snapshot", None)
     if getattr(snapshot, "error", ""):
         pairs.append(("API keys", f"Could not list keys: {snapshot.error}"))
     elif not getattr(snapshot, "rows", ()):
-        pairs.append(("API keys", "Not loaded yet; press r on the task list to load them."))
+        pairs.append(("API keys", "Not loaded yet; select API keys & secrets and press r to load them."))
     return tuple(pairs)
 
 

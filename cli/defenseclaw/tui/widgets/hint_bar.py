@@ -181,11 +181,18 @@ class HintEngine:
     def _alerts_hint(self, state: HintState) -> str:
         if state.total_alerts == 0:
             return "No active alerts. DefenseClaw is monitoring for scan findings."
-        if state.filter_active == "All severities":
-            # All is not a filter; name the way back to the default queue (GAP-1875).
+        scope, _sep, search = state.filter_active.partition(", search ")
+        if scope == "All severities":
+            # All is not a filter; name the way back to the default queue
+            # (GAP-1875), with or without a search (GAP-2074).
+            if search:
+                return f"Showing all severities matching {search}. Esc clears the search; h goes back to Actionable."
             return "Showing alerts of all severities. Press h or Esc for Actionable; / searches."
+        if search:
+            # Esc clears the search first; the severity chip stays (GAP-2074).
+            return f"Alerts filtered to {scope}, search {search}. Esc clears the search; / changes it."
         if state.filter_active:
-            return f"Alerts filtered to {state.filter_active}. Click All or press Esc to clear; / changes search."
+            return f"Alerts filtered to {scope}. Esc goes back to Actionable; click All for every severity."
         if state.critical_alerts > 0:
             scope = f" for {state.connector_filter}" if state.connector_filter else ""
             return (
@@ -200,8 +207,8 @@ class HintEngine:
     def _audit_hint(self, state: HintState) -> str:
         if state.filter_active:
             return (
-                f"Audit filtered to {state.filter_active}. Click All or press Esc to clear; "
-                "Same target/run correlates rows."
+                f"Audit filtered to {state.filter_active}. Esc clears every filter; "
+                "t / u show the same target / run."
             )
         return (
             "KEYS  j/k move | Enter detail | h/l filter chips | / search field:value | "

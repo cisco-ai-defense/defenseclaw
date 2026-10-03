@@ -77,13 +77,20 @@ SETUP_KEYMAPS: dict[SetupView, tuple[KeySpec, ...]] = {
     # switcher) and a double-click on a task do what its buttons did.
     "wizards": (
         KeySpec("↑/↓", "choose", "Move between setup tasks (on into the next group)", None, ("up", "down", "j", "k")),
-        KeySpec("←/→", "group", "Previous / next task group (also [ and ])", None, ("left", "right", "[", "]")),
+        KeySpec(
+            "←/→",
+            "group",
+            "Previous / next task group (also [ and ]); → after the last group opens the config editor",
+            None,
+            ("left", "right", "[", "]"),
+        ),
         KeySpec("Enter", "open", "Open the selected task", None, ("enter",)),
         KeySpec("i", "details", "Readiness checks and what the selected task runs", None, ("i",)),
         KeySpec("c", "config", "Edit config.yaml fields directly (config editor)", None, ("c",)),
         KeySpec("f", "fill missing", "Prompt for every missing required key", None, ("f",), when="credentials"),
         KeySpec("s", "set key", "Set one API key", None, ("s",), when="credentials"),
-        KeySpec("r", "refresh", "Reload the list of API keys", None, ("r",)),
+        # Shown on the API keys task, where the list it reloads is (GAP-2061).
+        KeySpec("r", "reload", "Reload the list of stored API keys", None, ("r",), when="credentials"),
         *_RESTART,
     ),
     "goals": (
@@ -199,7 +206,8 @@ def keymap(view: SetupView, conditions: Iterable[str] = ()) -> tuple[KeySpec, ..
 # each side); it has no button bar to fall back on.
 HINT_WIDTH = 78
 ONE_ROW_VIEWS: frozenset[str] = frozenset({"wizards"})
-MORE_KEYS = "? all keys"
+# "? all keys" read as "show all API keys" on the API keys task (GAP-2061).
+MORE_KEYS = "? help"
 
 
 def keys_hint(view: SetupView, conditions: Iterable[str] = ()) -> str:
@@ -207,8 +215,9 @@ def keys_hint(view: SetupView, conditions: Iterable[str] = ()) -> str:
 
     On the task list the keys of the selected task (``f``, ``s``, ``G``) win
     over the general ones: those go from the end until the line fits one
-    80-column row, and ``? all keys`` points at the help sheet that still
-    lists them (GAP-1825).
+    80-column row, and ``? help`` points at the help sheet that still
+    lists them (GAP-1825). ``Enter open`` is the task list's main key, so it
+    stays while ``←/→``, ``i`` and ``c`` give way.
     """
 
     specs = [spec for spec in keymap(view, conditions) if spec.in_hint]
@@ -219,9 +228,10 @@ def keys_hint(view: SetupView, conditions: Iterable[str] = ()) -> str:
     text = join(specs)
     if view not in ONE_ROW_VIEWS or len(text) <= HINT_WIDTH:
         return text
-    for spec in reversed(specs[1:]):
-        if spec.when:
-            continue
+    # The general keys go first, then r (reload) and last Enter.
+    droppable = [spec for spec in reversed(specs[1:]) if not spec.when and spec.key != "Enter"]
+    droppable += [spec for key in ("r", "Enter") for spec in specs[1:] if spec.key == key]
+    for spec in droppable:
         specs.remove(spec)
         text = join(specs, MORE_KEYS)
         if len(text) <= HINT_WIDTH:

@@ -3576,6 +3576,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
     def _close_help(self) -> None:
         self.help_open = False
         self._render_chrome()
+        # The Setup card below the table was sized while the help still
+        # filled the screen; size it again once the panel is laid out, or it
+        # wrapped for the wrong box and lost its "… i details" (GAP-2072).
+        self.call_after_refresh(self._render_chrome)
         # Scrolling the help moved the shared scroller; put the panel back
         # where it was once its content is laid out again.
         try:
@@ -3690,9 +3694,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if self.help_open:
             self._close_help()
             return
-        # `q` doubles as the strip's keyboard dismiss. We intentionally
-        # never auto-hide on success per UX decision, so this is the
-        # primary way users return the strip to idle.
+        # `q` doubles as the strip's keyboard dismiss: a failure stays until
+        # dismissed, and q clears a success before it hides itself after
+        # STRIP_SUCCESS_SECONDS.
         if self._strip_state != "idle" and self.active_panel != "activity":
             self._strip_clear()
             self._set_status("Cleared command status.")
@@ -8284,7 +8288,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
     #   _strip_clear()          on q-dismiss
     #
     # Per user request:
-    #   * never auto-hide on success — user must explicitly press q
+    #   * a success hides itself after STRIP_SUCCESS_SECONDS (the footer
+    #     says so) and leaves its result on the status line; a failure
+    #     stays until the user presses q
     #   * snippet on success is a summary, not a raw last line
     #   * strip is hidden when the user is on the Activity panel (live
     #     stream is right there, the strip would be redundant)
@@ -8451,7 +8457,12 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
 
     def _auto_hide_success_strip(self, token: object) -> None:
         if self._strip_state == "success" and getattr(self, "_strip_auto_hide_token", None) is token:
+            # The result and its next step stay readable on the status line
+            # after the card goes (GAP-2058).
+            receipt = f"{self._strip_label or 'command'}: {self._strip_summary}" if self._strip_summary else ""
             self._strip_clear()
+            if receipt:
+                self._set_status(receipt)
 
     def _strip_json_result_summary(self) -> str:
         """Readable result of a registry ``--json`` run, or "" (GAP-1681)."""
@@ -8612,7 +8623,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
 
         hint = {
             "running": "press A for live output  ·  Ctrl+C or click Cancel to stop",
-            "success": "press A for full output  ·  q or click Dismiss to clear",
+            # A success hides itself; say so, or "q to clear" read as if it
+            # stayed (GAP-2058).
+            "success": f"press A for full output  ·  hides in {STRIP_SUCCESS_SECONDS:.0f}s  ·  q or Dismiss clears it now",
             "failure": "press A for full output  ·  q or click Dismiss to clear",
             "cancelled": "press A for full output  ·  q or click Dismiss to clear",
             "rejected": "press : to retry  ·  q or click Dismiss to clear",
@@ -12125,6 +12138,13 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             self.setup_model.active_wizard = setup_catalog.step_group(self.setup_model.active_wizard, -1)
             return SetupPanelAction(True)
         if key in {"right", "]"}:
+            groups = setup_catalog.GROUP_TITLES
+            if setup_catalog.wizard_group(self.setup_model.active_wizard) == groups[-1]:
+                # The nav lists "Config editor" after the last group: Right
+                # goes there instead of wrapping to the first (GAP-2060).
+                self.setup_model.mode = "config"
+                self.setup_model.active_line = self.setup_model.first_editable_line()
+                return SetupPanelAction(True, hint="Config editor opened. w goes back to the setup tasks.")
             self.setup_model.active_wizard = setup_catalog.step_group(self.setup_model.active_wizard, 1)
             return SetupPanelAction(True)
         if key == "i":

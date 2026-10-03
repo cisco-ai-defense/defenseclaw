@@ -48,8 +48,11 @@ def test_every_tab_has_a_name_at_160_columns_and_short_active_names_end_with_an_
         labels = tab_fit.fit_tab_labels(PANELS, active, unread, 146)
         assert tab_fit.strip_width(tuple(labels.values())) <= 146
         bare = [name for name, key, _label in PANELS if labels[name] in {key, f"{key}⁵"}]
-        assert bare == [], (active, labels)
-        assert labels["inventory"] == "6 Inv" and labels["runtime"] == "N Run"
+        # Labels stay put across panels and the counts stay (GAP-2077,
+        # GAP-2078): with two counts up only the two least important tabs
+        # wait as key letters, so AI Discovery can read in full.
+        assert set(bare) <= {"runtime", "registries"}, (active, labels)
+        assert labels["inventory"] == "6 Inv" and "⁵" in labels["audit"]
     # GAP-1751: at 80 columns the active tab reads in full when other tabs'
     # names and minor badges make room (an abbreviated one still ends with "…").
     labels = tab_fit.fit_tab_labels(PANELS, "sandboxes", unread, 66)
