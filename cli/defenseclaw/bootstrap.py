@@ -1297,6 +1297,12 @@ def _action_downgrade_record(connector: str, discovery=None) -> dict:
         "next_command": f"defenseclaw setup {key} --mode action",
     }
     signal = getattr(discovery, "agents", {}).get(key) if discovery is not None else None
+    if key == "hermes" and not getattr(signal, "binary_path", "") and not _hermes_installed():
+        # Its version cannot be checked before it is installed, and setup
+        # alone cannot fix that, so name the install first (GAP-2383).
+        record["reason"] = "Hermes is not installed, so its version cannot be checked yet"
+        record["next_command"] = f"{HERMES_INSTALL_HINT}, then run: defenseclaw setup hermes --mode action"
+        return record
     if (
         signal is not None
         and getattr(signal, "error", "") == agent_discovery.UNTRUSTED_PREFIX_ERROR
@@ -1971,6 +1977,10 @@ def _file_mentions_defenseclaw(path: str) -> bool:
         return False
 
 
+# Where to get Hermes when it is missing (GAP-2383).
+HERMES_INSTALL_HINT = "install Hermes (https://github.com/NousResearch/hermes-agent)"
+
+
 def _hermes_installed() -> bool:
     spec = agent_discovery._SPECS["hermes"]
     if agent_discovery._binary_path_for_agent("hermes", spec):
@@ -2023,7 +2033,7 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
                 "Connector",
                 "warn",
                 "Hermes is not installed (hermes is not on PATH)",
-                "install Hermes, then run defenseclaw setup hermes",
+                f"{HERMES_INSTALL_HINT}, then run: defenseclaw setup hermes",
             )
         path = hermes_config_path()
         if os.path.isfile(path):

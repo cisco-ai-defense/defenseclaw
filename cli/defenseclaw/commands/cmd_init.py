@@ -1543,7 +1543,14 @@ def _action_downgrade_record(connector: str, discovery=None) -> dict:
         "reason": "connector version could not be verified against a known hook contract",
         "next_command": f"defenseclaw setup {key} --mode action",
     }
+    from defenseclaw.bootstrap import HERMES_INSTALL_HINT, _hermes_installed
+
     signal = getattr(discovery, "agents", {}).get(key) if discovery is not None else None
+    if key == "hermes" and not getattr(signal, "binary_path", "") and not _hermes_installed():
+        # Setup alone cannot verify an agent that is not installed (GAP-2383).
+        record["reason"] = "Hermes is not installed, so its version cannot be checked yet"
+        record["next_command"] = f"{HERMES_INSTALL_HINT}, then run: defenseclaw setup hermes --mode action"
+        return record
     if (
         signal is not None
         and getattr(signal, "error", "") == agent_discovery.UNTRUSTED_PREFIX_ERROR

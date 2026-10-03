@@ -790,8 +790,14 @@ if [[ -n "${APP_RELAUNCH:-}" ]]; then
 fi
 printf "\n"
 if [[ -n "${QUICKSTART_RERUN}" ]]; then
-    err "Quickstart failed (exit ${QUICKSTART_RC}): DefenseClaw ${VERSION} is installed, but ${CONNECTOR} is not set up yet"
-    printf "  Fix what quickstart reported above ('defenseclaw doctor' helps), then run:\n    ${CYAN}%s${NC}\n\n" "${QUICKSTART_RERUN}"
+    if [[ "${CONNECTOR}" == hermes ]] && ! PATH="${BIN_DIR}:${PATH}" has hermes; then
+        # GAP-2383: the agent itself is missing, so say how to get it.
+        err "Quickstart failed (exit ${QUICKSTART_RC}): DefenseClaw ${VERSION} is installed, but Hermes is not installed yet"
+        printf "  Install Hermes (https://github.com/NousResearch/hermes-agent), then run:\n    ${CYAN}%s${NC}\n\n" "${QUICKSTART_RERUN}"
+    else
+        err "Quickstart failed (exit ${QUICKSTART_RC}): DefenseClaw ${VERSION} is installed, but ${CONNECTOR} is not set up yet"
+        printf "  Fix what quickstart reported above ('defenseclaw doctor' helps), then run:\n    ${CYAN}%s${NC}\n\n" "${QUICKSTART_RERUN}"
+    fi
     exit 4
 fi
 if [[ "${OPENCLAW_MISSING}" == true ]]; then
