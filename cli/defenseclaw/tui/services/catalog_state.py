@@ -2252,8 +2252,10 @@ def _format_mcp_detail(row: MCPRow) -> str:
 
 
 # A plugin description longer than this ends with "…" in the detail pane,
-# which is only a few rows high (GAP-2048); "i Info" shows it in full.
+# which is only a few rows high (GAP-2048); a line under it points to
+# o, then Info, which prints it in full (GAP-2314).
 PLUGIN_DESCRIPTION_MAX = 160
+PLUGIN_DESCRIPTION_MORE = "  Full description: press o, then Info"
 
 
 def _format_plugin_detail(row: PluginRow) -> str:
@@ -2295,11 +2297,14 @@ def _format_plugin_detail(row: PluginRow) -> str:
         lines.append(f"  Findings   press s, or run: defenseclaw plugin scan {_esc(row.id)}{_esc(flag)}")
     if row.description:
         description = " ".join(row.description.split())
-        if len(description) > PLUGIN_DESCRIPTION_MAX:
+        cut_off = len(description) > PLUGIN_DESCRIPTION_MAX
+        if cut_off:
             cut = description[: PLUGIN_DESCRIPTION_MAX - 1].rsplit(" ", 1)[0].rstrip(" ,.;:")
             description = f"{cut}\u2026"
         lines.append("")
         lines.append(f"  {_esc(description)}")
+        if cut_off:
+            lines.append(f"[dim]{PLUGIN_DESCRIPTION_MORE}[/]")
     lines.append("")
     lines.append(_plugin_action_legend(row.verdict, status, row.enabled))
     return "\n".join(lines)
