@@ -48,7 +48,11 @@ class TestSetupNarrowsAllGate(_BaseSetup):
         gc.connectors["claudecode"].mode = "action"
         gc.judge.enabled = True
         gc.judge.hook_connectors = ["*"]
-        with _stub_side_effects():
+        # Windows verifies the Codex executable first; the runner has none.
+        with (
+            _stub_side_effects(),
+            patch.object(cmd_setup, "_record_windows_setup_agent_selections", return_value=None),
+        ):
             res = _invoke(["codex", "--yes", "--no-restart", "--mode", "observe"], self.app)
         assert res.exit_code == 0, res.output
         assert gc.judge.hook_connectors == ["claudecode"]

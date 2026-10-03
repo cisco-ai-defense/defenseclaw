@@ -482,8 +482,12 @@ class TestScanAllSweep(_PluginScanUXBase):
                     ["scan", "--all", "--connector", "claudecode"]
                 )
                 self.assertEqual(text_result.exit_code, 0, text_result.output)
-                self.assertIn(registry, text_result.output)
-                self.assertIn(f"— {expected_state}; entries=0", text_result.output)
+                if expected_state == "valid":
+                    self.assertIn(registry, text_result.output)
+                    self.assertIn(f"— {expected_state}; entries=0", text_result.output)
+                else:
+                    # GAP-2274: a missing registry only means no plugins yet.
+                    self.assertNotIn(registry, text_result.output)
                 self.assertIn("No plugins found to scan", text_result.output)
 
                 json_result = self.invoke(

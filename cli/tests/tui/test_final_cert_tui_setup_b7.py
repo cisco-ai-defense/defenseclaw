@@ -41,7 +41,8 @@ def test_connector_readiness_wording_and_form_hints() -> None:
     assert "Scanner Mode" not in hook and "Verify After Setup" not in hook
     assert hook["Guardrail Mode"].hint.startswith("observe only logs")
     assert not any(field.hint.startswith(("Select ", "Toggle ")) for field in hook.values())
-    proxy = {field.label for field in connector_setup_wizard_fields({"guardrail": {"connector": "openclaw"}})}
+    # Linux: Windows has no openclaw, so the form would open on a hook connector.
+    proxy = {field.label for field in connector_setup_wizard_fields({"guardrail": {"connector": "openclaw"}}, "linux")}
     assert {"Scanner Mode", "Verify After Setup"} <= proxy
     texts = " ".join(
         f"{goal.label} {goal.summary}"

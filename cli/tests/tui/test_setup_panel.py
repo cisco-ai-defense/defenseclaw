@@ -543,7 +543,8 @@ def test_connector_wizard_builds_go_argv_for_supported_connectors() -> None:
         "setup claude-code",
     )
 
-    fields = connector_setup_wizard_fields({"guardrail": {"connector": "openclaw"}})
+    # Linux: Windows has no openclaw, so the form would open on a hook connector.
+    fields = connector_setup_wizard_fields({"guardrail": {"connector": "openclaw"}}, "linux")
     fields = _with_field(fields, "Connector", "openclaw")
     fields = _with_field(fields, "Guardrail Mode", "action")
     fields = _with_field(fields, "Scanner Mode", "both")
