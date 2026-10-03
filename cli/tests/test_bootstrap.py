@@ -158,11 +158,18 @@ class BootstrapEnvTests(unittest.TestCase):
         with open(os.path.join(hermes_home, "config.yaml"), "w", encoding="utf-8") as fh:
             fh.write("hooks: {}\n")
 
+        from defenseclaw import bootstrap
+
         with patch.dict(os.environ, {"HERMES_HOME": hermes_home}):
-            result = _connector_readiness(cfg, "hermes")
+            with patch.object(bootstrap, "_hermes_installed", return_value=True):
+                result = _connector_readiness(cfg, "hermes")
+            # GAP-2354: the config.yaml setup writes is not an installed Hermes.
+            with patch.object(bootstrap, "_hermes_installed", return_value=False):
+                missing = _connector_readiness(cfg, "hermes")
 
         self.assertEqual(result.status, "pass")
         self.assertIn("Hermes config found", result.detail)
+        self.assertEqual((missing.status, missing.detail), ("warn", "Hermes is not installed (hermes is not on PATH)"))
 
     def test_openclaw_setup_and_readiness_agree_before_openclaw_json_exists(self):
         # GAP-1523: Guardrail skipped ("OpenClaw config not found ... skipped
