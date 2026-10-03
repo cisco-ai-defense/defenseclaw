@@ -1271,7 +1271,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 			p.enqueueBlockNotification(verdict, "prompt", partial.Model)
 			// The OpenClaw event router marks the turn that carries this
 			// text as blocked (GAP-2231).
-			rememberOpenClawPromptBlock(msg, AgentIdentityFromContext(r.Context()))
+			rememberOpenClawPromptBlock(msg, AgentIdentityFromContext(r.Context()), verdict)
 			// Return 200 with the block message as an assistant turn so
 			// the agent surfaces it to the user rather than treating it as
 			// an error and retrying with a different provider.
@@ -2897,7 +2897,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 			traceResult = proxyV8TraceResult{Outcome: observability.OutcomeBlocked, Streaming: req.Stream}
 			msg := blockMessage(customBlockMsg, "prompt", verdict.Reason)
 			p.enqueueBlockNotification(verdict, "prompt", req.Model)
-			rememberOpenClawPromptBlock(msg, AgentIdentityFromContext(r.Context()))
+			rememberOpenClawPromptBlock(msg, AgentIdentityFromContext(r.Context()), verdict)
 			if req.Stream {
 				p.writeBlockedStream(w, req.Model, msg)
 			} else {

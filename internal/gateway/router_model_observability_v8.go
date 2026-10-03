@@ -189,6 +189,8 @@ func eventRouterAgentInputV8(observation hookModelV8Observation) observability.S
 	input.DefenseClawRunID = hookModelV8OptionalID(meta.RunID)
 	input.DefenseClawTurnID = hookModelV8OptionalID(meta.TurnID)
 	input.DefenseClawPolicyID = hookModelV8OptionalID(meta.PolicyID)
+	input.DefenseClawGuardrailAction, input.DefenseClawGuardrailRuleID, input.DefenseClawGuardrailSeverity =
+		guardrailOutcomeAttributes(meta.Guardrail)
 	input.GenAIConversationID = hookModelV8OptionalID(observation.sessionID)
 	input.GenAIAgentID = hookModelV8OptionalID(observation.agentID)
 	input.GenAIAgentName = hookModelV8OptionalID(observation.agentName)

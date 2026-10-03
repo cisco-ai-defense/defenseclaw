@@ -255,7 +255,8 @@ func TestEventRouterBlockedPromptTurnCarriesThePrompt(t *testing.T) {
 	router, capture := bindEventRouterModelV8Runtime(t, []string{"traces"})
 	const prompt = "Reply with one word: ok. Reference dccert-prompt-marker"
 	block := blockMessage("", "prompt", "matched: R9-PROMPT-MARKER:marker")
-	rememberOpenClawPromptBlock(block, AgentIdentity{UserName: "dcr-oc9a"})
+	rememberOpenClawPromptBlock(block, AgentIdentity{UserName: "dcr-oc9a"},
+		&ScanVerdict{Action: "block", Severity: "HIGH", RuleIDs: []string{"R9-PROMPT-MARKER"}})
 
 	router.handleSessionMessage(eventRouterSessionMessageFrame(t, "session-block", 1, "user",
 		[]map[string]any{{"type": "text", "text": prompt}}))
@@ -291,6 +292,14 @@ func TestEventRouterBlockedPromptTurnCarriesThePrompt(t *testing.T) {
 		}
 		if attributes["defenseclaw.outcome"] != string(observability.OutcomeBlocked) {
 			t.Errorf("%s outcome=%q want blocked", family, attributes["defenseclaw.outcome"])
+		}
+		// GAP-2332: the blocked turn names the rule, as a tool span does.
+		if attributes["defenseclaw.guardrail.action"] != "block" ||
+			attributes["defenseclaw.guardrail.rule_id"] != "R9-PROMPT-MARKER" ||
+			attributes["defenseclaw.guardrail.severity"] != "HIGH" {
+			t.Errorf("%s guardrail=%q/%q/%q want block/R9-PROMPT-MARKER/HIGH", family,
+				attributes["defenseclaw.guardrail.action"], attributes["defenseclaw.guardrail.rule_id"],
+				attributes["defenseclaw.guardrail.severity"])
 		}
 		withPrompt[family]++
 	}

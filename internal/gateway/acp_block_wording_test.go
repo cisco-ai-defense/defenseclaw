@@ -94,6 +94,13 @@ func TestACPEvaluateBlockUsesAgentWordingAndEmitsGuardrailSpan(t *testing.T) {
 		t.Fatalf("invoke_agent outcome=%q conversation=%q, want blocked and the ACP session",
 			attributes["defenseclaw.outcome"], attributes["gen_ai.conversation.id"])
 	}
+	// GAP-2332: the agent span Galileo ingests names the rule of the block.
+	if attributes["defenseclaw.guardrail.action"] != "block" || attributes["defenseclaw.guardrail.rule_id"] != "SEC-AWS-KEY" ||
+		attributes["defenseclaw.guardrail.severity"] == "" {
+		t.Fatalf("invoke_agent guardrail=%q/%q/%q, want block, SEC-AWS-KEY and a severity",
+			attributes["defenseclaw.guardrail.action"], attributes["defenseclaw.guardrail.rule_id"],
+			attributes["defenseclaw.guardrail.severity"])
+	}
 	if user := useridentity.Current(); user.ID != "" && attributes["user.id"] != user.ID {
 		t.Fatalf("invoke_agent user.id=%q, want the gateway's user %q", attributes["user.id"], user.ID)
 	}

@@ -210,6 +210,10 @@ func (trace *proxyV8RequestTrace) AddGuardrailOverlay(overlay proxyGuardrailV8Ov
 		return
 	}
 	trace.agentInput.Events = append(trace.agentInput.Events, overlay.agentEvents...)
+	if overlay.guardrail.Action != "" && !guardrailOutcomeBlocked(trace.agentInput.DefenseClawGuardrailAction) {
+		trace.agentInput.DefenseClawGuardrailAction, trace.agentInput.DefenseClawGuardrailRuleID,
+			trace.agentInput.DefenseClawGuardrailSeverity = guardrailOutcomeAttributes(overlay.guardrail)
+	}
 }
 
 func (trace *proxyV8ModelTrace) Finish(result proxyV8TraceResult) {
@@ -239,6 +243,10 @@ func (trace *proxyV8ModelTrace) AddGuardrailOverlay(overlay proxyGuardrailV8Over
 		return
 	}
 	trace.input.Events = append(trace.input.Events, overlay.modelEvents...)
+	if overlay.guardrail.Action != "" && !guardrailOutcomeBlocked(trace.input.DefenseClawGuardrailAction) {
+		trace.input.DefenseClawGuardrailAction, trace.input.DefenseClawGuardrailRuleID,
+			trace.input.DefenseClawGuardrailSeverity = guardrailOutcomeAttributes(overlay.guardrail)
+	}
 }
 
 func (trace *proxyV8ModelTrace) recordMetrics(result proxyV8TraceResult) {

@@ -25,7 +25,8 @@ func TestOpenClawPromptBlockMarksTheTurn(t *testing.T) {
 	})
 
 	msg := blockMessage("", "prompt", "matched: R6-PROMPT-MARKER:marker")
-	rememberOpenClawPromptBlock(msg, AgentIdentity{UserID: "1001", UserIDKind: "posix_uid", UserName: "dcr-qvc5a"})
+	rememberOpenClawPromptBlock(msg, AgentIdentity{UserID: "1001", UserIDKind: "posix_uid", UserName: "dcr-qvc5a"},
+		&ScanVerdict{Action: "block", Severity: "HIGH", RuleIDs: []string{"R6-PROMPT-MARKER"}})
 
 	allowed := hookModelV8Observation{response: `[{"type":"text","text":"ok"}]`}
 	applyOpenClawPromptBlock(&allowed)
@@ -47,8 +48,24 @@ func TestOpenClawPromptBlockMarksTheTurn(t *testing.T) {
 	if name, _ := agent.DefenseClawUserName.Get(); name != "dcr-qvc5a" {
 		t.Fatalf("agent user = %q, want dcr-qvc5a", name)
 	}
-	if chat := hookModelV8ModelInput(blocked); chat.Outcome != observability.OutcomeBlocked {
+	chat := hookModelV8ModelInput(blocked)
+	if chat.Outcome != observability.OutcomeBlocked {
 		t.Fatalf("chat outcome = %q, want blocked", chat.Outcome)
+	}
+	// GAP-2332: both spans name the rule, severity and action of the block.
+	for family, got := range map[string][3]observability.Optional[string]{
+		"agent": {agent.DefenseClawGuardrailAction, agent.DefenseClawGuardrailRuleID, agent.DefenseClawGuardrailSeverity},
+		"chat":  {chat.DefenseClawGuardrailAction, chat.DefenseClawGuardrailRuleID, chat.DefenseClawGuardrailSeverity},
+	} {
+		action, _ := got[0].Get()
+		rule, _ := got[1].Get()
+		severity, _ := got[2].Get()
+		if action != "block" || rule != "R6-PROMPT-MARKER" || severity != "HIGH" {
+			t.Fatalf("%s guardrail = %q/%q/%q, want block/R6-PROMPT-MARKER/HIGH", family, action, rule, severity)
+		}
+	}
+	if action := hookModelV8ModelInput(allowed).DefenseClawGuardrailAction; action.IsPresent() {
+		t.Fatalf("an allowed turn carries a guardrail action")
 	}
 
 	// The decision is taken once: a later turn that repeats the text is
