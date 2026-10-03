@@ -74,6 +74,22 @@ func Discover(root string, directoryLimit int) ([]Entry, error) {
 	if !IsRoot(root) {
 		return nil, fmt.Errorf("not the resolved Hermes skills root: %s", root)
 	}
+	return discover(root, directoryLimit)
+}
+
+// DiscoverProfileRoot is Discover for the Hermes skills root of a profile
+// the caller resolved itself: a service-context scan (managed Windows)
+// reads every user's profile, while IsRoot resolves only this process's
+// own Hermes home. Provenance is decided the same way, against that
+// profile's own manifest and Hermes checkout.
+func DiscoverProfileRoot(root string, directoryLimit int) ([]Entry, error) {
+	if filepath.Base(filepath.Clean(root)) != "skills" {
+		return nil, fmt.Errorf("not a Hermes skills root: %s", root)
+	}
+	return discover(root, directoryLimit)
+}
+
+func discover(root string, directoryLimit int) ([]Entry, error) {
 	if directoryLimit <= 0 {
 		directoryLimit = DefaultDirectoryLimit
 	}

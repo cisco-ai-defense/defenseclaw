@@ -2137,7 +2137,7 @@ func (s *ContinuousDiscoveryService) signalFromDirectoryChildren(sig AISignature
 			coverageReason = CoverageReasonReadError
 		default:
 			if detector == "skill" && strings.EqualFold(strings.TrimSpace(sig.ID), "hermes") &&
-				hermesskills.IsRoot(path) {
+				s.isHermesSkillsRoot(path) {
 				if childPartial, childReason := s.appendHermesSkillChildren(&evidence, path); childPartial {
 					partial = true
 					coverageReason = childReason
@@ -2155,6 +2155,12 @@ func (s *ContinuousDiscoveryService) signalFromDirectoryChildren(sig AISignature
 				}
 				name := sanitizeBasenameValue(entry.Name())
 				if name == "" {
+					continue
+				}
+				// A skill is a folder. A hidden file beside the skills is
+				// the agent's own state (Cursor .sync-manifest.json, the
+				// Codex .codex-system-skills.marker), not a skill (GAP-2263).
+				if detector == "skill" && strings.HasPrefix(entry.Name(), ".") && entry.Type().IsRegular() {
 					continue
 				}
 				// Codex uses `.system` as a one-level skill container. Expand
@@ -2214,7 +2220,11 @@ func (s *ContinuousDiscoveryService) appendHermesSkillChildren(evidence *[]AIEvi
 	if remaining <= 0 {
 		return true, CoverageReasonCapExceeded
 	}
-	entries, err := hermesskills.Discover(root, hermesskills.DefaultDirectoryLimit)
+	discover := hermesskills.Discover
+	if !hermesskills.IsRoot(root) {
+		discover = hermesskills.DiscoverProfileRoot
+	}
+	entries, err := discover(root, hermesskills.DefaultDirectoryLimit)
 	if err != nil {
 		if errors.Is(err, os.ErrPermission) {
 			return true, CoverageReasonPermissionDenied
@@ -2249,6 +2259,35 @@ func (s *ContinuousDiscoveryService) appendHermesSkillChildren(evidence *[]AIEvi
 		return true, CoverageReasonCapExceeded
 	}
 	return false, ""
+}
+
+// hermesProfileSkillsRoots are where a Hermes skills root sits in a
+// profile: %LOCALAPPDATA%\hermes\skills on Windows, ~/.hermes/skills
+// elsewhere (the catalog's two Hermes skill paths).
+var hermesProfileSkillsRoots = []string{
+	filepath.Join("AppData", "Local", "hermes", "skills"),
+	filepath.Join(".hermes", "skills"),
+}
+
+// isHermesSkillsRoot reports whether path is a Hermes skills root: this
+// process's own, or on a service-context scan (managed Windows) the one in
+// a scanned profile. hermesskills.IsRoot resolves only the service
+// account's own Hermes home, so every user's Hermes category folders and
+// .bundled_manifest were listed as skills (GAP-2263).
+func (s *ContinuousDiscoveryService) isHermesSkillsRoot(path string) bool {
+	if hermesskills.IsRoot(path) {
+		return true
+	}
+	owner, ok := s.homeOwnerForPath(path)
+	if !ok {
+		return false
+	}
+	for _, tail := range hermesProfileSkillsRoots {
+		if strings.EqualFold(filepath.Clean(path), filepath.Join(filepath.Clean(owner.Home), tail)) {
+			return true
+		}
+	}
+	return false
 }
 
 // appendSystemSkillChildren enumerates one level below a Codex `.system`

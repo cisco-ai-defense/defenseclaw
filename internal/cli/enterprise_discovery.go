@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -210,11 +211,16 @@ func enterpriseGatewayGet(path string, out any) (string, error) {
 // writeManagedViewRefusalJSON gives a --json caller a "code: message"
 // refusal with its exit code (elevation_required) as JSON on stdout, in the
 // errors[] form `enterprise windows status --json` uses, so a script reads
-// the code instead of an empty document (GAP-2114).
+// the code instead of an empty document (GAP-2114). A managedViewRefusal
+// carries its code beside the sentence (GAP-2262).
 func writeManagedViewRefusalJSON(w io.Writer, err error) {
 	code, message, ok := strings.Cut(err.Error(), ": ")
 	if !ok || strings.ContainsAny(code, " \t") {
 		code, message = "error", err.Error()
+	}
+	var refusal *managedViewRefusal
+	if errors.As(err, &refusal) {
+		code, message = refusal.code, refusal.message
 	}
 	_ = json.NewEncoder(w).Encode(struct {
 		OK       bool                       `json:"ok"`
@@ -392,7 +398,7 @@ func writeEnterpriseDiscoveryReport(w io.Writer, report enterpriseDiscoveryRepor
 			if connector == "" {
 				connector = "-"
 			}
-			files := strings.Join(signal.Basenames, ",")
+			files := strings.Join(enterpriseDiscoverySignalFiles(signal), ",")
 			if files == "" {
 				files = "-"
 			}
@@ -409,6 +415,24 @@ func writeEnterpriseDiscoveryReport(w io.Writer, report enterpriseDiscoveryRepor
 		fmt.Fprintln(w, "Run with --user <account> to list one account's signals, or --json for every field.")
 	}
 	return nil
+}
+
+// enterpriseDiscoverySignalFiles names what a signal found. A skills or
+// plugins folder's signal lists its entries (skill_entry, plugin_entry),
+// not the folder itself, which its evidence keeps as the first row; the
+// view named "skills" in every skill row (GAP-2263). Other signals list
+// their basenames.
+func enterpriseDiscoverySignalFiles(signal inventory.AISignal) []string {
+	var entries []string
+	for _, evidence := range signal.Evidence {
+		if strings.HasSuffix(evidence.Type, "_entry") && evidence.Basename != "" && !slices.Contains(entries, evidence.Basename) {
+			entries = append(entries, evidence.Basename)
+		}
+	}
+	if len(entries) == 0 {
+		return signal.Basenames
+	}
+	return entries
 }
 
 // writeEnterpriseRuntime prints the runtime discovery section.

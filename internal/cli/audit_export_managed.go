@@ -5,7 +5,6 @@
 package cli
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -58,7 +57,7 @@ func pinManagedAdministratorEnvironment(command string, refusal func() string) e
 		return nil
 	}
 	if !auditExportCallerIsAdministrator() {
-		return withExitCode(errors.New(refusal()), enterprisestatus.WindowsExitAccessDenied)
+		return withExitCode(&managedViewRefusal{code: "elevation_required", message: refusal()}, enterprisestatus.WindowsExitAccessDenied)
 	}
 	layout, err := auditExportManagedLayout()
 	if err != nil {

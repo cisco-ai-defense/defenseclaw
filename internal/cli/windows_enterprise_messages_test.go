@@ -56,7 +56,8 @@ func TestWindowsEnterpriseSessionAndStandardUserWording(t *testing.T) {
 	t.Cleanup(func() { managedHostCurrentAccount = restore })
 	managedHostCurrentAccount = func() string { return `HOST\dcw-std1` }
 	answer := windowsEnterpriseStandardUserInspectionAnswer("status")
-	for _, want := range []string{"needs an elevated prompt", "enterprise windows status --profile standalone", `--user HOST\dcw-std1`, "Nothing was changed."} {
+	// GAP-2262: the account is named as the discovery view names it.
+	for _, want := range []string{"needs an elevated prompt", "enterprise windows status --profile standalone", "--user dcw-std1`", "Nothing was changed."} {
 		if !strings.Contains(answer, want) {
 			t.Fatalf("answer lacks %q: %q", want, answer)
 		}
