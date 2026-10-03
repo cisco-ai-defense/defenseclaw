@@ -71,7 +71,7 @@ class CliSmokeTests(unittest.TestCase):
             commands = text.split("Commands:", 1)[1]
             self.assertNotIn("...", commands, f"{group}: {commands}")
             if group == "mcp":
-                self.assertIn("clear enforcement state.", " ".join(commands.split()))
+                self.assertIn("in the configured connector(s)' MCP config.", " ".join(commands.split()))
 
     def test_init_help_works(self):
         from defenseclaw.main import cli
