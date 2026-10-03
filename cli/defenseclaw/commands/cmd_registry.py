@@ -439,6 +439,7 @@ def edit_cmd(  # noqa: PLR0913
     """
     cfg = _require_cfg(app)
     source = _find_source(cfg, source_id)
+    before = {field: getattr(source, field) for field in _EDIT_AUDIT_FIELDS}
 
     any_mutating = any(v is not None for v in (
         kind, content, url, auth_env, enabled, auto_sync, sync_interval_hours,
@@ -487,12 +488,38 @@ def edit_cmd(  # noqa: PLR0913
     _validate_file_url(source.kind, source.url)
 
     cfg.save()
+    edit_details = _registry_edit_details(source, before)
     if emit_json:
-        _log_registry_action(app, "registry-edit", f"id={source.id}")
+        _log_registry_action(app, "registry-edit", edit_details)
         _emit_json({"action": "edit", "source": _source_to_dict(source)})
         return
     ux.ok(f"Updated registry source {source.id!r}.")
-    _log_registry_action(app, "registry-edit", f"id={source.id}")
+    _log_registry_action(app, "registry-edit", edit_details)
+
+
+# The fields `registry edit` can change, in the order its audit row names them.
+_EDIT_AUDIT_FIELDS = ("kind", "content", "url", "auth_env", "enabled", "auto_sync", "sync_interval_hours")
+
+
+def _registry_edit_details(source: RegistrySource, before: dict[str, Any]) -> str:
+    """Audit details of an edit: the id and each changed field as old->new.
+
+    Every edit row said only ``id=<source>``, so a disable could not be told
+    apart from any other edit (GAP-2211). auth_env is an env var name, not
+    its value.
+    """
+
+    def _fmt(value: Any) -> str:
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        return str(value) if value not in (None, "") else '""'
+
+    changes = [
+        f"{field}={_fmt(before[field])}->{_fmt(getattr(source, field))}"
+        for field in _EDIT_AUDIT_FIELDS
+        if before[field] != getattr(source, field)
+    ]
+    return " ".join([f"id={source.id}", *(changes or ["unchanged"])])
 
 
 # ---------------------------------------------------------------------------

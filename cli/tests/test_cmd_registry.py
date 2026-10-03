@@ -278,6 +278,22 @@ class TestRegistryEdit(RegistryCommandTestBase):
         src = next(s for s in self.app.cfg.registries.sources if s.id == "corp-skills")
         self.assertEqual(src.auth_env, "")
 
+    def test_edit_audit_row_names_changed_fields(self):
+        # GAP-2211: each edit row says what changed, before and after.
+        with patch.object(self.app, "logger", MagicMock()) as logger:
+            self.invoke(["edit", "corp-skills", "--disabled", "--non-interactive"])
+            self.invoke([
+                "edit", "corp-skills", "--enabled", "--auto-sync",
+                "--sync-interval-hours", "1", "--non-interactive",
+            ])
+            self.invoke(["edit", "corp-skills", "--enabled", "--non-interactive"])
+        details = [c.args[2] for c in logger.log_action.call_args_list if c.args[0] == "registry-edit"]
+        self.assertEqual(details, [
+            "id=corp-skills enabled=true->false",
+            "id=corp-skills enabled=false->true auto_sync=false->true sync_interval_hours=24->1",
+            "id=corp-skills unchanged",
+        ])
+
 
 class TestRegistryRemove(RegistryCommandTestBase):
     def setUp(self):
