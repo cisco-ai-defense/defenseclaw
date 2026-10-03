@@ -718,7 +718,12 @@ class TestPluginList(PluginCommandTestBase):
                 text_result = self.invoke(["list", "--connector", "claudecode"])
                 self.assertEqual(text_result.exit_code, 0, text_result.output)
                 self.assertIn(registry, text_result.output)
-                self.assertIn(f"— {expected_state}; entries=0", text_result.output)
+                if expected_state == "missing":
+                    # GAP-2274: plain wording, no internal "registry source" text.
+                    self.assertIn("claudecode has no installed plugins", text_result.output)
+                    self.assertNotIn("registry source", text_result.output)
+                else:
+                    self.assertIn(f"— {expected_state}; entries=0", text_result.output)
                 self.assertIn("No plugins found", text_result.output)
 
                 json_result = self.invoke(
@@ -727,10 +732,23 @@ class TestPluginList(PluginCommandTestBase):
                 self.assertEqual(json_result.exit_code, 0, json_result.output)
                 self.assertEqual(json.loads(json_result.stdout), [])
                 self.assertIn(registry, json_result.stderr)
-                self.assertIn(
-                    f"— {expected_state}; entries=0",
-                    json_result.stderr,
-                )
+                if expected_state == "valid":
+                    self.assertIn(f"— {expected_state}; entries=0", json_result.stderr)
+
+
+class TestPluginScanAllMissingClaudeRegistry(PluginCommandTestBase):
+    @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
+    def test_scan_all_without_claude_plugins_prints_the_plain_line(self, _mock_oc):
+        # GAP-2274: same one-liner as the other connectors.
+        plugin_root = os.path.join(self.tmp_dir, "noclaude", "plugins")
+        os.makedirs(plugin_root)
+        self.app.cfg.active_connectors = lambda: ["claudecode"]  # type: ignore[method-assign]
+        self.app.cfg.plugin_dirs = lambda connector=None: [plugin_root]  # type: ignore[method-assign]
+        result = self.invoke(["scan", "--all", "--connector", "claudecode"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("No plugins found to scan for connector=claudecode.", result.output)
+        self.assertNotIn("discovery source", result.output)
+        self.assertNotIn("registry source", result.output)
 
 
 class TestPluginListMultiConnectorDefault(PluginCommandTestBase):
@@ -1231,8 +1249,7 @@ class TestPluginAllow(PluginCommandTestBase):
     def test_allow_happy_path(self):
         result = self.invoke(["allow", "allowed-one"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("added to allow list", result.output)
-        self.assertIn("allowed-one", result.output)
+        self.assertIn("[plugin] Allowed 'allowed-one' (every connector).", result.output)
         self.assertTrue(PolicyEngine(self.app.store).is_allowed("plugin", "allowed-one"))
         events = [e for e in self.app.store.list_events(10) if e.action == "plugin-allow"]
         self.assertEqual(len(events), 1)
@@ -1898,13 +1915,17 @@ class TestPluginMultiConnectorSemantics(PluginCommandTestBase):
 
         bare_allow = self.invoke(["allow", "dc-plugin-final-state"])
         self.assertEqual(bare_allow.exit_code, 0, bare_allow.output)
-        self.assertIn("added to allow list (connector=codex)", bare_allow.output)
-        self.assertIn("added to allow list (connector=hermes)", bare_allow.output)
+        self.assertIn("[plugin] Allowed 'dc-plugin-final-state' (codex).", bare_allow.output)
+        self.assertIn("[plugin] Allowed 'dc-plugin-final-state' (hermes).", bare_allow.output)
 
         bare_unblock = self.invoke(["unblock", "dc-plugin-final-state"])
         self.assertEqual(bare_unblock.exit_code, 0, bare_unblock.output)
-        self.assertIn("Unblocked 'dc-plugin-final-state' (codex).", bare_unblock.output)
-        self.assertIn("Unblocked 'dc-plugin-final-state' (hermes).", bare_unblock.output)
+        # GAP-2273: the bare allow replaced the codex block, so only allow
+        # entries were left to clear.
+        self.assertIn("Removed the allow entry for 'dc-plugin-final-state' (codex).", bare_unblock.output)
+        self.assertIn("Removed the allow entry for 'dc-plugin-final-state' (hermes).", bare_unblock.output)
+        self.assertNotIn("Unblocked", bare_unblock.output)
+        self.assertIn("defenseclaw plugin scan dc-plugin-final-state", bare_unblock.output)
 
         codex_info = self.invoke(
             ["info", "dc-plugin-final-state", "--connector", "codex"]
@@ -1919,6 +1940,17 @@ class TestPluginMultiConnectorSemantics(PluginCommandTestBase):
         self.assertEqual(hermes_info.exit_code, 0, hermes_info.output)
         self.assertIn("Connector:   hermes", hermes_info.output)
         self.assertIn("Actions:     -", hermes_info.output)
+
+    def test_unblock_of_allow_only_plugin_says_allow_entry_removed(self):
+        # GAP-2273: an allow entry is not a block; say what was cleared.
+        self._seed_connector_plugin("hermes", "spotify")
+        self.invoke(["allow", "spotify", "--connector", "hermes"])
+        result = self.invoke(["unblock", "spotify", "--connector", "hermes"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("[plugin] Removed the allow entry for 'spotify' (hermes).", result.output)
+        self.assertIn("defenseclaw plugin scan spotify --connector hermes", result.output)
+        self.assertNotIn("Unblocked", result.output)
+        self.assertIsNone(self.app.store.get_action("plugin", "spotify", "hermes"))
 
     def test_bare_unblock_clears_all_scoped_enforcement_fields(self):
         self._seed_connector_plugin("codex", "shared")

@@ -42,6 +42,7 @@ from defenseclaw.inventory.plugin_directories import (
     PluginInstallClaims,
     PluginRegistryCache,
     PluginRegistryProbe,
+    PluginRegistryState,
     discover_plugin_directories,
     plugin_directory_entries,
     probe_claude_plugin_registry,
@@ -751,12 +752,23 @@ def _render_plugin_registry_diagnostics(
     *,
     failures_only: bool = False,
     force_stderr: bool = False,
+    hide_missing: bool = False,
 ) -> None:
     """Render exact discovery source outcomes for human-facing commands."""
 
     for connector, probes in diagnostics.items():
         for probe in probes:
             if failures_only and not probe.failed:
+                continue
+            if probe.state == PluginRegistryState.MISSING:
+                # GAP-2274: a missing installed_plugins.json only means the
+                # agent has no plugins yet; say so plainly (or not at all).
+                if not hide_missing:
+                    click.echo(
+                        f"{connector} has no installed plugins "
+                        f"({probe.source_path} not found).",
+                        err=force_stderr,
+                    )
                 continue
             suffix = f" ({probe.detail})" if probe.detail else ""
             click.echo(
@@ -1146,7 +1158,8 @@ def _scan_all_plugins(
         if not targets:
             if not as_json:
                 _render_plugin_registry_diagnostics(
-                    {connector: discovery.get(connector, [])}
+                    {connector: discovery.get(connector, [])},
+                    hide_missing=True,
                 )
                 click.echo(f"No plugins found to scan for connector={connector}.")
             else:
@@ -3645,6 +3658,48 @@ def block(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
 _PLUGIN_UNBLOCK_NOTE = "  DefenseClaw no longer overrides it; it keeps the on/off setting from the agent's own config."
 
 
+def _plugin_only_allow_entry(app: AppContext, pe, plugin_name: str, connector: str) -> bool:
+    """True when the only state at this exact scope is an allow entry."""
+    if app.store is None:
+        return False
+    if connector:
+        restrictive = (
+            app.store.has_action("plugin", plugin_name, "install", "block", connector)
+            or app.store.has_action("plugin", plugin_name, "file", "quarantine", connector)
+            or app.store.has_action("plugin", plugin_name, "runtime", "disable", connector)
+        )
+        allowed = app.store.has_action("plugin", plugin_name, "install", "allow", connector)
+    else:
+        restrictive = (
+            pe.is_blocked("plugin", plugin_name)
+            or pe.is_quarantined("plugin", plugin_name)
+            or app.store.has_action("plugin", plugin_name, "runtime", "disable")
+        )
+        allowed = pe.is_allowed("plugin", plugin_name)
+    return allowed and not restrictive
+
+
+def _plugin_unblock_line(plugin_name: str, connector: str, only_allow: bool) -> str:
+    # GAP-2273: same wording as mcp unblock (GAP-2225).
+    scope = f" ({connector})" if connector else " (every connector)"
+    if only_allow:
+        return f"[plugin] Removed the allow entry for {plugin_name!r}{scope}."
+    return f"[plugin] Unblocked {plugin_name!r}{scope}."
+
+
+def _plugin_unblock_followup(plugin_name: str, connector: str, all_only_allow: bool) -> None:
+    import shlex
+
+    if not all_only_allow:
+        click.echo(_PLUGIN_UNBLOCK_NOTE)
+        return
+    cmd = f"defenseclaw plugin scan {shlex.quote(plugin_name)}"
+    if connector:
+        cmd += f" --connector {connector}"
+    click.echo("  Its scan verdict applies again.")
+    click.echo(f"  To scan it now, run: {cmd}")
+
+
 @plugin.command()
 @click.argument("name")
 @click.option(
@@ -3675,9 +3730,10 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
         if not has_state:
             click.echo(f"[plugin] {plugin_name!r} has no enforcement state to clear for {connector}")
             return
+        only_allow = _plugin_only_allow_entry(app, pe, plugin_name, connector)
         pe.remove_action_for_connector("plugin", plugin_name, connector)
-        click.secho(f"[plugin] Unblocked {plugin_name!r} ({connector}).", fg="green")
-        click.echo(_PLUGIN_UNBLOCK_NOTE)
+        click.secho(_plugin_unblock_line(plugin_name, connector, only_allow), fg="green")
+        _plugin_unblock_followup(plugin_name, connector, only_allow)
         if app.logger:
             saved_change_audit(app.logger).log_action(
                 "plugin-unblock",
@@ -3704,14 +3760,22 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
             for target_connector in targets
             if _plugin_has_connector_enforcement(app, plugin_name, target_connector)
         ]
+        scopes = list(owners) + ([""] if has_unscoped_state else [])
+        only_allow = {
+            scope: _plugin_only_allow_entry(app, pe, plugin_name, scope) for scope in scopes
+        }
         for target_connector in targets:
             pe.remove_action_for_connector("plugin", plugin_name, target_connector)
-        for target_connector in owners:
-            click.secho(f"[plugin] Unblocked {plugin_name!r} ({target_connector}).", fg="green")
         if has_unscoped_state:
             pe.remove_action("plugin", plugin_name)
-            click.secho(f"[plugin] Unblocked {plugin_name!r} (every connector).", fg="green")
-        click.echo(_PLUGIN_UNBLOCK_NOTE)
+        for scope in scopes:
+            click.secho(_plugin_unblock_line(plugin_name, scope, only_allow[scope]), fg="green")
+        only_one = len(owners) == 1 and not has_unscoped_state
+        _plugin_unblock_followup(
+            plugin_name,
+            owners[0] if only_one else "",
+            bool(scopes) and all(only_allow.values()),
+        )
         if app.logger:
             saved_change_audit(app.logger).log_action(
                 "plugin-unblock",
@@ -3730,9 +3794,10 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
         click.echo(f"[plugin] {plugin_name!r} has no enforcement state to clear")
         return
 
+    only_allow = _plugin_only_allow_entry(app, pe, plugin_name, "")
     pe.remove_action("plugin", plugin_name)
-    click.secho(f"[plugin] Unblocked {plugin_name!r} (every connector).", fg="green")
-    click.echo(_PLUGIN_UNBLOCK_NOTE)
+    click.secho(_plugin_unblock_line(plugin_name, "", only_allow), fg="green")
+    _plugin_unblock_followup(plugin_name, "", only_allow)
     if app.logger:
         saved_change_audit(app.logger).log_action("plugin-unblock", plugin_name, "manual unblock via CLI")
 
@@ -3786,10 +3851,7 @@ def allow(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
         plugin_path = hermes_path or _resolve_plugin_path(app, plugin_name, connector_scope)
         if plugin_path:
             pe.set_source_path("plugin", plugin_name, plugin_path, connector_scope)
-        click.secho(
-            f"[plugin] {plugin_name!r} added to allow list (connector={connector_scope})",
-            fg="green",
-        )
+        click.secho(f"[plugin] Allowed {plugin_name!r} ({connector_scope}).", fg="green")
         if app.logger:
             saved_change_audit(app.logger).log_action(
                 "plugin-allow",
@@ -3811,10 +3873,7 @@ def allow(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
             plugin_path = _resolve_plugin_path(app, plugin_name, target_connector)
             if plugin_path:
                 pe.set_source_path("plugin", plugin_name, plugin_path, target_connector)
-            click.secho(
-                f"[plugin] {plugin_name!r} added to allow list (connector={target_connector})",
-                fg="green",
-            )
+            click.secho(f"[plugin] Allowed {plugin_name!r} ({target_connector}).", fg="green")
         if app.store and pe.get_action("plugin", plugin_name) is not None:
             pe.remove_action("plugin", plugin_name)
         if app.logger:
@@ -3849,10 +3908,11 @@ def allow(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
     if plugin_path:
         pe.set_source_path("plugin", plugin_name, plugin_path)
     if runtime_cleared:
-        click.secho(f"[plugin] {plugin_name!r} added to allow list", fg="green")
+        click.secho(f"[plugin] Allowed {plugin_name!r} (every connector).", fg="green")
     else:
         click.secho(
-            f"[plugin] {plugin_name!r} added to allow list; runtime disable remains until the gateway is reachable",
+            f"[plugin] Allowed {plugin_name!r} (every connector); "
+            "runtime disable remains until the gateway is reachable.",
             fg="yellow",
         )
 
