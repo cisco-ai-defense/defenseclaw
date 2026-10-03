@@ -1561,6 +1561,7 @@ def _print_skill_list_table(
         elif "✓" in status_display:
             status_style = "green"
 
+        status_display = ux.table_cell_text(status_display)
         table.add_row(
             f"[{status_style}]{status_display}[/{status_style}]" if status_style else status_display,
             display_name,

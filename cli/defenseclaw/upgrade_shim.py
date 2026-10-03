@@ -278,6 +278,19 @@ def _run_installer(path: str, args: list[str], workdir: str) -> int:
         # Windows PowerShell 5.1 then cannot load its built-in modules (Get-Acl
         # fails), so let it build its default module path.
         env = {key: value for key, value in os.environ.items() if key.upper() != "PSMODULEPATH"}
+        if _windows_terminal_without_desktop():
+            # An SSH session has no desktop: the new window never appears and
+            # the result would only be in the install log (GAP-1993). Keep the
+            # staged installer and give the command that runs it right here.
+            command = " ".join(
+                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", f'"{path}"', *ps_args]
+            )
+            raise ShimError(
+                "this terminal has no desktop (SSH session), so the installer's window would not be "
+                "visible here.\n"
+                "    Run the installer in this terminal instead; it shows the result and sets the exit code:\n"
+                f"      {command}"
+            )
         try:
             subprocess.Popen(  # noqa: S603 - fixed interpreter and verified script
                 [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path, *ps_args],
@@ -303,6 +316,11 @@ def _run_installer(path: str, args: list[str], workdir: str) -> int:
         shutil.rmtree(workdir, ignore_errors=True)
         raise ShimError(f"could not run {bash}: {exc}") from None
     return 0  # pragma: no cover - execv does not return
+
+
+def _windows_terminal_without_desktop() -> bool:
+    """An OpenSSH session on Windows: a new console window is never shown there."""
+    return any(os.environ.get(name) for name in ("SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"))
 
 
 def _powershell_flag(arg: str) -> str:
