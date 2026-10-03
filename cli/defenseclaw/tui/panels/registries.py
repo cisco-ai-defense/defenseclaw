@@ -490,6 +490,12 @@ SYNC_CONSEQUENCE = (
     "Fetches the source, scans each entry and promotes clean or approved entries into policy. "
     "A remote MCP scan connects to the server and runs the MCP scanner, so it can take up to a minute."
 )
+# Sync all names every source and the per-entry cost (GAP-2542).
+SYNC_ALL_CONSEQUENCE = (
+    "Fetches every enabled source, scans each entry and promotes clean or approved entries into policy. "
+    "A remote MCP scan connects to the server and runs the MCP scanner, so it can take up to a minute "
+    "per remote MCP entry."
+)
 
 
 def _short_sync_time(value: str) -> str:
@@ -544,7 +550,7 @@ def sync_all_intent() -> RegistryCommandIntent:
         label="registry sync --all",
         args=("registry", "sync", "--all", "--json"),
         hint="Syncing all enabled sources ...",
-        consequence=SYNC_CONSEQUENCE,
+        consequence=SYNC_ALL_CONSEQUENCE,
     )
 
 
