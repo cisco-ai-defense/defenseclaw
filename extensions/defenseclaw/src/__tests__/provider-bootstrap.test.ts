@@ -24,12 +24,17 @@
  *     overlay.
  */
 
-import { describe, it, expect, beforeEach } from "vitest";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import {
   applyProviderRegistry,
   bootstrapProviderOverlay,
+  createFetchInterceptor,
   isLLMUrl,
 } from "../fetch-interceptor.js";
+import { _resetSidecarConfigCache } from "../sidecar-config.js";
 
 function makeFetchOK(body: unknown): typeof fetch {
   return (async () => {
@@ -190,5 +195,45 @@ describe("bootstrapProviderOverlay", () => {
     await expect(
       bootstrapProviderOverlay(4000, { fetchImpl: badFetch }),
     ).resolves.toBeUndefined();
+  });
+});
+
+describe("provider overlay bootstrap across module instances", () => {
+  const savedFetch = globalThis.fetch;
+  const savedHome = process.env.DEFENSECLAW_HOME;
+  const savedToken = process.env.DEFENSECLAW_GATEWAY_TOKEN;
+
+  afterEach(() => {
+    globalThis.fetch = savedFetch;
+    if (savedHome === undefined) delete process.env.DEFENSECLAW_HOME;
+    else process.env.DEFENSECLAW_HOME = savedHome;
+    if (savedToken === undefined) delete process.env.DEFENSECLAW_GATEWAY_TOKEN;
+    else process.env.DEFENSECLAW_GATEWAY_TOKEN = savedToken;
+    _resetSidecarConfigCache();
+  });
+
+  // GAP-2223: OpenClaw evaluates the plugin more than once; the later
+  // instances must not call the authenticated endpoint without a token.
+  it("sends the sidecar token from every instance", async () => {
+    process.env.DEFENSECLAW_HOME = mkdtempSync(join(tmpdir(), "dc-overlay-"));
+    process.env.DEFENSECLAW_GATEWAY_TOKEN = "sidecar-token";
+    _resetSidecarConfigCache();
+    const auth: Array<string | undefined> = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith("/v1/config/providers")) {
+        auth.push((init?.headers as Record<string, string> | undefined)?.["X-DC-Auth"]);
+      }
+      return new Response(JSON.stringify({ providers: [], ollama_ports: [] }));
+    }) as typeof fetch;
+
+    const first = createFetchInterceptor(4000);
+    const second = createFetchInterceptor(4000);
+    first.start();
+    second.start();
+    await new Promise((r) => setTimeout(r, 0));
+    second.stop();
+    first.stop();
+
+    expect(auth).toEqual(["Bearer sidecar-token", "Bearer sidecar-token"]);
   });
 });
