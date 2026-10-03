@@ -6414,6 +6414,11 @@ def setup_guardrail(
     if explicit_connector:
         _ensure_connector_available(explicit_connector)
         _refuse_proxy_next_to_hook_connectors(gc, explicit_connector)
+        # GAP-2452: the same rule as 'setup <connector>' (GAP-2426): a hook
+        # connector here would replace a guarded OpenClaw/ZeptoClaw.
+        proxy_active = _guarded_proxy_connector(gc)
+        if proxy_active and explicit_connector not in _PROXY_BACKED_CONNECTORS:
+            _refuse_hook_setup_over_proxy_connector(explicit_connector, proxy_active)
 
     try:
         setup_snapshot = _capture_setup_config_snapshot(app.cfg, capture_runtime=_windows_runtime_rollback(restart))
@@ -10435,6 +10440,14 @@ def _setup_observability_alias(
                 "connector to that folder."
             )
 
+    # GAP-2426: a guarded proxy connector (OpenClaw/ZeptoClaw) cannot run next
+    # to hook connectors, so setting this one up removes its plugin and leaves
+    # that agent unguarded. Mirror the reverse refusal (GAP-1178): no changes
+    # without an explicit --replace.
+    proxy_active = _guarded_proxy_connector(app.cfg.guardrail)
+    if proxy_active and not replace:
+        _refuse_hook_setup_over_proxy_connector(connector, proxy_active)
+
     mode_from_flag = mode is not None
     if mode is None:
         # Doctor's repair advice is `setup <connector> --yes`: leaving
@@ -10483,6 +10496,18 @@ def _setup_observability_alias(
             click.echo("  Aborted — no changes made.")
             return
         write_mode = "add" if _existing_connector_override(gc, connector) is not None else "replace"
+    elif proxy_active:
+        # --replace over a guarded proxy connector: confirm the switch. Name
+        # what is removed in every mode, not only in the prompt (GAP-2418).
+        proxy_label = _CONNECTOR_META.get(proxy_active, {}).get("label", proxy_active)
+        click.echo(f"  --replace removes {proxy_label}: DefenseClaw stops guarding it.")
+        if not yes and not click.confirm(
+            f"  Replace {proxy_label} with {label}? {proxy_label} stops being guarded by DefenseClaw.",
+            default=False,
+        ):
+            click.echo("  Aborted — no changes made.")
+            return
+        write_mode = "replace"
     elif not existing_others:
         if not yes:
             verb = "enforcement" if normalized_mode == "action" else "observability"
@@ -12484,6 +12509,62 @@ def _refuse_proxy_next_to_hook_connectors(gc, connector: str) -> None:
         f"to {label} and remove them, run 'defenseclaw setup {connector} --replace' (or remove "
         "them one at a time with 'defenseclaw setup remove <connector>')."
     )
+
+
+def _guarded_proxy_connector(gc) -> str:
+    """The proxy-backed connector this install guards, or ``""`` (GAP-2426)."""
+    if not getattr(gc, "enabled", False):
+        return ""
+    single = normalize_connector((getattr(gc, "connector", "") or "").strip())
+    return single if single in _PROXY_BACKED_CONNECTORS else ""
+
+
+def _refuse_hook_setup_over_proxy_connector(connector: str, proxy: str) -> None:
+    """Fail when a hook connector setup would silently replace a proxy connector."""
+    label = _CONNECTOR_META.get(connector, {}).get("label", connector)
+    proxy_label = _CONNECTOR_META.get(proxy, {}).get("label", proxy)
+    slug = "claude-code" if connector == "claudecode" else connector
+    raise click.ClickException(
+        f"this install guards {proxy_label}, which is proxy-backed and cannot run next to hook "
+        f"connectors: setting up {label} would remove the DefenseClaw plugin from {proxy_label} "
+        f"and leave it unguarded. No changes made. To switch this install to {label}, run "
+        f"'defenseclaw setup {slug} --replace'."
+    )
+
+
+def _refuse_hook_switch_over_proxy(gc, connector: str | None) -> None:
+    """Refuse switching a guarded OpenClaw/ZeptoClaw install to a hook connector.
+
+    GAP-2455: ``init --connector`` rebuilt the install around the hook
+    connector, which removed the DefenseClaw plugin from the proxy connector
+    and left it unguarded. Like ``setup <connector>`` (GAP-2426) and
+    ``setup guardrail``/``quickstart`` (GAP-2452), it refuses with no changes
+    and points at the explicit ``--replace`` switch.
+    """
+    wanted = normalize_connector((connector or "").strip())
+    if not wanted or wanted == "none" or wanted in _PROXY_BACKED_CONNECTORS:
+        return
+    proxy = _guarded_proxy_connector(gc)
+    if not proxy:
+        return
+    roster = {normalize_connector(n) for n in (getattr(gc, "connectors", None) or {}) if (n or "").strip()}
+    if roster - {proxy}:
+        return
+    _refuse_hook_setup_over_proxy_connector(wanted, proxy)
+
+
+def _refuse_hook_switch_over_configured_proxy(connector: str | None) -> None:
+    """:func:`_refuse_hook_switch_over_proxy` against the saved config (GAP-2455)."""
+    from defenseclaw import config as cfg_mod
+
+    try:
+        if not os.path.exists(cfg_mod.config_path()):
+            return
+        cfg_mod.require_v8_config()
+        cfg = cfg_mod.load()
+    except Exception:  # noqa: BLE001 - the first-run flow reports config errors itself.
+        return
+    _refuse_hook_switch_over_proxy(cfg.guardrail, connector)
 
 
 def _hook_peers_of_proxy_connector(gc, connector: str) -> list[str]:

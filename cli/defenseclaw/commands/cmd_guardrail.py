@@ -1542,6 +1542,8 @@ def fail_mode_cmd(
                     _eff += f" (desired {_state.desired}; drift: {', '.join(_state.drift)})"
             elif normalize_connector(_name) == "hermes":
                 _eff = f"open (Hermes upstream; configured provenance: {_eff})"
+            elif _is_proxy_connector(_name):
+                _eff = "closed (proxy-backed, no hooks: blocked while the gateway is down)"
             elif _cursor_stays_fail_closed(gc, _name):
                 _eff = "closed (Cursor hooks always fail closed in action mode)"
             if _eff.startswith("open") and normalize_connector(_name) != "hermes":
@@ -1741,6 +1743,16 @@ def fail_mode_cmd(
             + (" Hermes remains fail-open." if hermes_targeted else ""),
             indent="    ",
         )
+    elif all(_is_proxy_connector(name) for name in active_names):
+        # GAP-2448: OpenClaw/ZeptoClaw have no hooks; the plugin blocks while
+        # the gateway is down whatever this value says.
+        labels = ", ".join(_connector_label(name) for name in active_names)
+        ux.warn(
+            f"{labels} is proxy-backed and has no hooks, so the hook fail mode does not apply to it: "
+            "its requests stay blocked (fail-closed) while the gateway is down.",
+            indent="  ",
+        )
+        ux.subhead("open is saved for hook connectors you set up later.", indent="    ")
     else:
         ux.subhead(
             ("Once the guardrail is enabled, invalid or unavailable gateway responses will ALLOW"
@@ -1779,6 +1791,12 @@ def fail_mode_cmd(
             else f"old={current} new={mode} restart={restart}"
         ),
     )
+
+
+def _is_proxy_connector(name: str) -> bool:
+    from defenseclaw.platform_support import PROXY_CONNECTORS
+
+    return normalize_connector(name) in PROXY_CONNECTORS
 
 
 def _cursor_pinned_fail_mode(gc, name: str) -> str | None:

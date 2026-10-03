@@ -195,4 +195,4 @@ def test_r_on_an_empty_list_falls_through_to_registries() -> None:
     # GAP-2404: R did nothing and said nothing on an empty Skills/MCPs list.
     for model in (SkillsPanelModel(), MCPsPanelModel()):
         assert model.handle_key("R").handled is False
-    assert app_module.PANEL_SHORTCUTS["r"] == "registries"
+    assert app_module.CASE_SENSITIVE_PANEL_SHORTCUTS["R"] == "registries"

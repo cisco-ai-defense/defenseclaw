@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -625,7 +627,11 @@ func scanV8ResultTargetRef(result *scanner.ScanResult) observability.Optional[st
 		})
 		for i := len(parts) - 3; i >= 0; i-- {
 			if strings.EqualFold(parts[i], "plugins") {
-				if ref := optionalScanV8Identifier(strings.Join(parts[i+1:], "/")); ref.IsPresent() {
+				rel := parts[i+1:]
+				if len(rel) == 2 && hermesBundledPlatforms(result.Target, parts, i) {
+					rel = rel[1:]
+				}
+				if ref := optionalScanV8Identifier(strings.Join(rel, "/")); ref.IsPresent() {
 					return ref
 				}
 				break
@@ -633,6 +639,24 @@ func scanV8ResultTargetRef(result *scanner.ScanResult) observability.Optional[st
 		}
 	}
 	return scanV8TargetRef(result.Target)
+}
+
+// hermesBundledPlatforms reports whether target is a plugin in Hermes's
+// bundled platforms folder (hermes-agent/plugins/platforms/<x>, or the
+// HERMES_BUNDLED_PLUGINS root). Hermes lists those by the bare folder name
+// ("discord"), so the audit target does too, while user-root and other
+// category plugins keep category/name (GAP-2453; the watcher names them the
+// same way, GAP-2439).
+func hermesBundledPlatforms(target string, parts []string, pluginsIdx int) bool {
+	if !strings.EqualFold(parts[pluginsIdx+1], "platforms") {
+		return false
+	}
+	if pluginsIdx > 0 && parts[pluginsIdx-1] == "hermes-agent" {
+		return true
+	}
+	bundled := strings.TrimSpace(os.Getenv("HERMES_BUNDLED_PLUGINS"))
+	return bundled != "" &&
+		filepath.Clean(bundled) == filepath.Dir(filepath.Dir(filepath.Clean(strings.TrimSpace(target))))
 }
 
 // scanV8Verdict keeps an explicit admission verdict. Without one (CLI and

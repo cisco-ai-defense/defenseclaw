@@ -12,9 +12,11 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from rich.text import Text
 from textual import events
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
@@ -25,6 +27,73 @@ from textual.widgets import Digits, ProgressBar, Sparkline, Static
 from defenseclaw.tui.theme import DEFAULT_TOKENS
 
 TOKENS = DEFAULT_TOKENS
+
+_DETAIL_SEPARATOR = " · "
+_MORE = " …"
+# The last word of an item that holds its number: "380", "x11", "15".
+_TRAILING_COUNT = re.compile(r"\S*\d\S*$")
+
+
+def fit_metric_title(label: str, width: int) -> str:
+    """``label`` for a tile ``width`` cells wide, dropping words, never a cut.
+
+    "Hook Calls (4 connectors)" becomes "Hook Calls (4)", then "Hook Calls";
+    the plain ellipsis read "Hook Calls (…" at 80x24 (GAP-2443).
+    """
+
+    if width <= 0 or len(label) <= width:
+        return label
+    match = re.fullmatch(r"(.*?) \((.*)\)", label)
+    if match is None:
+        return label
+    base, inner = match.groups()
+    first = inner.split()[0] if inner.split() else ""
+    if first.isdigit() and len(f"{base} ({first})") <= width:
+        return f"{base} ({first})"
+    return base
+
+
+def fit_metric_detail(detail: str, width: int) -> str | Text:
+    """``detail`` for a tile ``width`` cells wide, cut only between items.
+
+    The line is "item · item · item". Items that don't fit are dropped whole
+    and " …" marks that more were left out, so a count is never cut into a
+    different number ("UserPromptSubmit x1…" for x11, "claudecode 3…" for
+    380, GAP-2430). When even the first item doesn't fit, its label is
+    shortened and its number kept ("claudeco… 380", GAP-2443).
+    """
+
+    if width <= 0 or not detail:
+        return detail
+    text = Text.from_markup(detail)
+    if text.cell_len <= width:
+        return text
+    plain = text.plain
+    ends: list[int] = []
+    start = plain.find(_DETAIL_SEPARATOR)
+    while start >= 0:
+        ends.append(start)
+        start = plain.find(_DETAIL_SEPARATOR, start + len(_DETAIL_SEPARATOR))
+    for end in reversed(ends):
+        kept = text[:end]
+        if kept.cell_len + len(_MORE) <= width:
+            kept.append(_MORE, style=TOKENS.text_muted)
+            return kept
+    first = text[: ends[0]] if ends else text
+    count = _TRAILING_COUNT.search(first.plain)
+    if count is not None and count.start() > 0:
+        number = first[count.start() :]
+        room = width - number.cell_len - 2
+        if room >= 2:
+            label = first[:room]
+            label.rstrip()
+            label.append("… ")
+            label.append_text(number)
+            return label
+        if number.cell_len <= width:
+            return number
+    first.truncate(width, overflow="ellipsis")
+    return first
 
 
 @dataclass(frozen=True)
@@ -180,7 +249,7 @@ class MetricTile(Vertical):
             return
 
         if previous is None or previous.label != metric.label:
-            self._title.update(metric.label)
+            self._title.update(fit_metric_title(metric.label, self.content_size.width))
 
         digits_text = self._digits_text(metric)
         if previous is None or self._digits_text(previous) != digits_text:
@@ -201,7 +270,7 @@ class MetricTile(Vertical):
             self._sparkline.data = trend
 
         if previous is None or previous.detail != metric.detail:
-            self._detail.update(metric.detail)
+            self._detail.update(fit_metric_detail(metric.detail, self.content_size.width))
 
         class_map = self._class_map(metric)
         if previous is None or self._class_map(previous) != class_map:
@@ -212,6 +281,12 @@ class MetricTile(Vertical):
             self.tooltip = tooltip
 
         self._rendered_metric = metric
+
+    def on_resize(self, _event: events.Resize) -> None:
+        # The title and detail are fitted to the tile width (GAP-2430).
+        width = self.content_size.width
+        self._title.update(fit_metric_title(self.metric.label, width))
+        self._detail.update(fit_metric_detail(self.metric.detail, width))
 
     def _apply_class_map(self, classes: dict[str, bool]) -> None:
         """Apply a class map atomically using the Textual 8 API."""

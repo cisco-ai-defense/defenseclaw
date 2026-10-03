@@ -152,6 +152,10 @@ BADGE_RESERVE = 6
 # already counted, so the other tabs take shorter names instead.
 OPEN_COUNT_RESERVE = 11
 
+# The same room for bracket counts (Windows): three "(999+)" counts less the
+# one Alerts digit already counted.
+PLAIN_COUNT_RESERVE = 17
+
 
 def _names(name: str, label: str) -> tuple[str, str, str]:
     """The tiny, short and full name of one tab."""
@@ -333,7 +337,12 @@ def _every_tab_named(panels: Sequence[tuple[str, str, str]], width: int) -> dict
         )
         return strip_width(tuple(labels.values())) + reserve + alerts
 
-    if cost() > width:
+    # Windows' bracket counts ("2 Alerts(24)", "8 Log(205)") cost more than
+    # superscript digits. When even the shortest names leave no room for
+    # them beside a full open name, ``_wide_labels`` leaves the least
+    # important tabs bare instead: "6 Invento…" and "A Activi…" opened at
+    # 160 columns (GAP-2442).
+    if cost() + (PLAIN_COUNT_RESERVE if _PLAIN_BADGE else 0) > width:
         return None
     for tier in range(3):
         for name in sorted(keys, key=_rank):

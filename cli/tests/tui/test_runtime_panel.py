@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from defenseclaw.tui.app import PANEL_SHORTCUTS, PANELS
+from defenseclaw.tui.app import CASE_SENSITIVE_PANEL_SHORTCUTS, PANEL_SHORTCUTS, PANELS
 from defenseclaw.tui.panels.runtime import (
     RuntimePanelAction,
     RuntimePanelModel,
@@ -85,7 +85,9 @@ def _model() -> RuntimePanelModel:
 
 def test_panel_is_registered_with_its_own_shortcut() -> None:
     assert ("runtime", "N", "Runtime") in PANELS
-    assert PANEL_SHORTCUTS["n"] == "runtime"
+    # Letter panel keys are capitals only (GAP-2438).
+    assert CASE_SENSITIVE_PANEL_SHORTCUTS["N"] == "runtime"
+    assert "n" not in PANEL_SHORTCUTS
 
 
 def test_findings_sort_worst_first() -> None:

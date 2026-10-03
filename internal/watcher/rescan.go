@@ -255,14 +255,19 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 			// refuses it (GAP-1580). Rescan the plugins inside it instead,
 			// keyed by the category/name id 'plugin list' shows (GAP-2411).
 			if children := pluginFolderChildren(path); len(children) > 0 {
+				bare := w.hermesBareCategory(dir, e.Name())
 				for _, child := range children {
 					childPath := filepath.Join(path, child)
 					if w.isOwnPlugin(childPath) {
 						continue
 					}
+					name := e.Name() + "/" + child
+					if bare {
+						name = child
+					}
 					targets = append(targets, InstallEvent{
 						Type:      InstallPlugin,
-						Name:      e.Name() + "/" + child,
+						Name:      name,
 						Path:      childPath,
 						Timestamp: time.Now().UTC(),
 					})
@@ -306,6 +311,24 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 // Hermes' plugins folder is a Python package, so it holds __pycache__; the
 // CLI inventory skips these too (GAP-1086), while the gateway scanned it and
 // raised a MANIFEST-MISSING finding on every start (GAP-2338).
+// hermesBareCategory reports whether the plugins in the category folder of
+// plugin root dir go by their bare folder name. Hermes lists its bundled
+// platforms/* plugins (hermes-agent/plugins/platforms/a2a) as "a2a": that is
+// the id "plugin list" shows and "plugin scan" accepts, so the rescan log
+// names them the same way (GAP-2439). The user plugin root (~/.hermes/plugins)
+// keeps category/name, as "plugin list" does.
+func (w *InstallWatcher) hermesBareCategory(dir, category string) bool {
+	if category != "platforms" || watcherConnectorName(w.cfg) != "hermes" {
+		return false
+	}
+	dir = filepath.Clean(dir)
+	if filepath.Base(dir) == "plugins" && filepath.Base(filepath.Dir(dir)) == "hermes-agent" {
+		return true
+	}
+	bundled := strings.TrimSpace(os.Getenv("HERMES_BUNDLED_PLUGINS"))
+	return bundled != "" && filepath.Clean(bundled) == dir
+}
+
 func skipPluginChildDir(name string) bool {
 	if strings.HasPrefix(name, ".") {
 		return true

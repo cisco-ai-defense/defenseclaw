@@ -53,7 +53,9 @@ deployment does not run the skill or MCP scanners.`,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			runtimeCommand = cmd
-			return writeWindowsEnterpriseDiscovery(cmd.OutOrStdout(), user, asJSON)
+			err := writeWindowsEnterpriseDiscovery(cmd.OutOrStdout(), user, asJSON)
+			silenceJSONReportedError(cmd, asJSON, err)
+			return err
 		},
 	}
 	cmd.Flags().StringVar(&user, "user", "", "list one account's signals (account name or SID)")

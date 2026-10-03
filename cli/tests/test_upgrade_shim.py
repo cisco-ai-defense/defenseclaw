@@ -369,9 +369,25 @@ def test_windows_rollback_to_the_setup_package_refuses_in_this_terminal(
     assert "releases/tag/0.8.10" in err
 
 
-def test_rollback_without_a_saved_installer_explains(home: Path, execs: list[list[str]]) -> None:
+def test_rollback_from_a_source_install_uses_the_installer_it_replaced(home: Path, execs: list[list[str]]) -> None:
+    # GAP-2459: a 'make all' install has no installer/; the release it rolled
+    # back from keeps one in previous/, and that rolls forward again.
+    saved = home / "previous" / "installer" / "install.sh"
+    saved.parent.mkdir(parents=True)
+    saved.write_text("#!/bin/bash\n", encoding="utf-8")
+
+    assert upgrade_shim.run(["rollback", "--yes"]) == 0
+
+    assert execs[0][2:] == ["--rollback", "--yes"]
+    assert execs[0][1] != str(saved)
+
+
+def test_rollback_without_a_saved_installer_explains(
+    home: Path, execs: list[list[str]], capsys: pytest.CaptureFixture[str]
+) -> None:
     assert upgrade_shim.run(["rollback"]) == 1
     assert execs == []
+    assert "previous" in capsys.readouterr().err
 
 
 def test_entry_dispatches_upgrade_before_importing_the_cli(monkeypatch: pytest.MonkeyPatch) -> None:

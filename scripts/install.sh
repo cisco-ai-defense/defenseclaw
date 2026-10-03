@@ -410,16 +410,23 @@ gateway_pid() {
 }
 
 installed_version() {
-    local info
+    # The gateway on PATH is the install that runs. A `make all` source install
+    # replaces it (and the CLI link) but leaves an older release venv behind, so
+    # that venv's version is only the fallback (GAP-2454).
+    local info version=""
+    if [[ -x "${BIN_DIR}/defenseclaw-gateway" ]]; then
+        version="$("${BIN_DIR}/defenseclaw-gateway" --version 2>/dev/null | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+    fi
+    if [[ -n "${version}" ]]; then
+        printf '%s' "${version}"
+        return
+    fi
     for info in "${VENV}"/lib/python*/site-packages/defenseclaw-*.dist-info; do
         [[ -d "${info}" ]] || continue
         info="${info##*/defenseclaw-}"
         printf '%s' "${info%.dist-info}"
         return
     done
-    if [[ -x "${BIN_DIR}/defenseclaw-gateway" ]]; then
-        "${BIN_DIR}/defenseclaw-gateway" --version 2>/dev/null | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true
-    fi
 }
 
 stop_gateway() {
