@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -264,5 +265,30 @@ func TestIncludeActivityWithoutHistoryNotesWhy(t *testing.T) {
 	}
 	if out.Len() != 0 || !strings.Contains(stderr.String(), "config-update") {
 		t.Fatalf("stdout %q, stderr %q", out.String(), stderr.String())
+	}
+}
+
+// GAP-2110: a bad --since or --until is a usage error (exit 2) like a bad
+// --limit or an unknown flag, and it fails before an -o file is created.
+func TestAuditExportBadWindowIsUsageError(t *testing.T) {
+	dir := t.TempDir()
+	prevCfg, prevOut := cfg, auditExportOut
+	prevSince, prevUntil := auditExportSince, auditExportUntil
+	t.Cleanup(func() {
+		cfg, auditExportOut = prevCfg, prevOut
+		auditExportSince, auditExportUntil = prevSince, prevUntil
+	})
+	cfg = &config.Config{AuditDB: filepath.Join(dir, "audit.db")}
+	out := filepath.Join(dir, "out.jsonl")
+	auditExportOut = out
+	for _, bad := range [][2]string{{"yesterday", ""}, {"", "tomorrow"}, {"2026-09-27T19:00:00Z", "2026-09-27T18:00:00Z"}} {
+		auditExportSince, auditExportUntil = bad[0], bad[1]
+		err := runAuditExport(auditExportCmd, nil)
+		if commandExitCode(err) != 2 || !strings.Contains(fmt.Sprint(err), "--help") {
+			t.Errorf("--since %q --until %q = %v (exit %d), want a usage error with exit 2", bad[0], bad[1], err, commandExitCode(err))
+		}
+		if _, statErr := os.Stat(out); !os.IsNotExist(statErr) {
+			t.Fatalf("--since %q --until %q created %s", bad[0], bad[1], out)
+		}
 	}
 }
