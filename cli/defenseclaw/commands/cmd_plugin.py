@@ -2583,7 +2583,9 @@ def _print_plugin_list_table(
 # GAP-2292: the column order, and which columns may be hidden (first to last)
 # when the terminal is too narrow for one line per row.
 _PLUGIN_LIST_COLUMNS = ("Status", "ID", "Plugin", "Description", "Origin", "Severity", "Verdict", "Actions")
-_PLUGIN_LIST_OPTIONAL = ("Description", "Origin", "Plugin")
+# GAP-2333/GAP-2334: Actions hides last, and is named in "Hidden to fit",
+# instead of being squeezed to "quarantin…" or to a zero-width column.
+_PLUGIN_LIST_OPTIONAL = ("Description", "Origin", "Plugin", "Actions")
 _PLUGIN_LIST_DESC_MAX = 50
 _PLUGIN_LIST_DESC_MIN = 16
 
@@ -2594,7 +2596,7 @@ def _fit_plugin_list_table(console: Any, title: str, rows: list[dict[str, str]])
     Rich never shrinks a ``no_wrap`` column, so a fixed-width Description
     squeezed Status, ID and Verdict to "…" on 80/120-column terminals
     (GAP-2292). Instead the Description narrows first, then Description,
-    Origin and Plugin are hidden in that order. Returns (table, hidden).
+    Origin, Plugin and Actions are hidden in that order. Returns (table, hidden).
     """
     from rich.cells import cell_len
     from rich.measure import Measurement
@@ -2607,8 +2609,12 @@ def _fit_plugin_list_table(console: Any, title: str, rows: list[dict[str, str]])
                 continue
             if col == "Description":
                 table.add_column(col, max_width=desc_width, no_wrap=True, overflow="ellipsis")
-            elif col in ("Plugin", "Origin", "Actions"):
+            elif col in ("Plugin", "Origin"):
                 table.add_column(col)
+            elif col == "ID":
+                # GAP-2333: when even the required columns overflow, a long ID
+                # folds onto a second line rather than squeezing Status/Verdict.
+                table.add_column(col, overflow="fold")
             else:
                 table.add_column(col, no_wrap=True, style="bold" if col == "Status" else "")
         for row in rows:

@@ -1012,6 +1012,33 @@ class TestPluginListMultiConnectorDefault(PluginCommandTestBase):
                 else:
                     self.assertIn("Description", listed.output)
 
+    def test_list_below_70_columns_hides_actions_instead_of_squeezing(self):
+        """GAP-2333/GAP-2334: Actions hides (and is named) before Status/Verdict are cut."""
+        from defenseclaw.commands.cmd_plugin import _fit_plugin_list_table
+        from rich.console import Console
+
+        rows = [
+            {"Status": status, "ID": pid, "Plugin": pid, "Description": "A plugin", "Origin": "bundled",
+             "Severity": sev, "Verdict": verdict, "Actions": actions}
+            for status, pid, sev, verdict, actions in (
+                ("\u2717 disabled", "cron_providers/chronos", "-", "-", "disabled"),
+                ("\u2713 enabled", "dashboard_auth/self_hosted", "-", "-", "-"),
+                ("\u2717 quarantined", "photon", "MEDIUM", "warning", "quarantined"),
+            )
+        ]
+        for width in (60, 80):
+            with self.subTest(width=width):
+                console = Console(width=width, record=True)
+                table, hidden = _fit_plugin_list_table(console, "Plugins", rows)
+                console.print(table)
+                text = console.export_text()
+                self.assertEqual(hidden, ["Description", "Origin", "Plugin", "Actions"])
+                self.assertNotIn("\u2026", text, text)
+                self.assertNotIn("\u2503\u2503", text, text)
+                for cell in ("\u2717 disabled", "\u2717 quarantined", "Severity", "Verdict", "warning"):
+                    self.assertIn(cell, text)
+                self.assertTrue(all(len(line) <= width for line in text.splitlines()), text)
+
     @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
     def test_hermes_nested_block_is_keyed_by_listed_id(self, _mock_oc):
         """GAP-1480: blocking a nested Hermes plugin turns its list row blocked."""
