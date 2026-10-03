@@ -685,11 +685,9 @@ def _log_registry_action(app: AppContext, action: str, target: str, details: str
     try:
         app.logger.log_action(action, target or "config", details)
     except CanonicalObservabilityUnavailableError:
-        click.echo(
-            "  ⚠ The gateway isn't running, so the audit event was not recorded "
-            "(start it with: defenseclaw-gateway start).",
-            err=True,
-        )
+        from defenseclaw.commands._audit_notice import NOT_RECORDED_WARNING
+
+        click.echo(NOT_RECORDED_WARNING, err=True)
 
 
 @registry.command("remove")
@@ -1856,7 +1854,12 @@ def require_cmd(
         return
     if enforce:
         ux.subhead("Asset policy enforcement is on (asset_policy.enabled=true, mode=action).")
-        ux.subhead(f"Turn it off with: defenseclaw registry require --type {asset} --disabled --no-enforce")
+        # GAP-2266: repeat the scope; without --connector the undo resets every override.
+        scope_flag = f" --connector {result.connector}" if result.connector else ""
+        ux.subhead(
+            f"Turn it off with: defenseclaw registry require --type {asset} --disabled"
+            f"{scope_flag} --no-enforce"
+        )
     if not policy_on:
         ux.warn(
             "Asset policy is off (asset_policy.enabled=false): nothing is blocked "
