@@ -93,8 +93,16 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 			r.AddError(codeNotInstalled, message)
 		}
 		if failure != "" {
+			next := "fix that, then finish the install with `" + env.lifecycleCommand(ActionEnsure) + " --from-package`"
+			if env.GOOS == "darwin" {
+				// A failed pkg install records no receipt, and ensure does not
+				// write one, so receipt-based MDM inventory keeps reporting the
+				// Mac as not installed (GAP-2359).
+				next = "fix that, then install the package again, which also records the pkg receipt that MDM inventory reads (`" +
+					env.lifecycleCommand(ActionEnsure) + " --from-package` finishes the install but records no receipt)"
+			}
 			r.AddWarning(codePackageInstallFailed, "the package was installed, but its own install run did not complete, so no deployment is active: "+
-				failure+"; fix that, then finish the install with `"+env.lifecycleCommand(ActionEnsure)+" --from-package`")
+				failure+"; "+next)
 		}
 		if leftovers := env.unmanagedLeftovers(env.Services, ChannelPayload); len(leftovers) > 0 {
 			r.AddWarning(codeLeftovers, "DefenseClaw machine state exists without a committed deployment: "+strings.Join(leftovers, ", ")+"; "+env.leftoversNextStep(ctx))
