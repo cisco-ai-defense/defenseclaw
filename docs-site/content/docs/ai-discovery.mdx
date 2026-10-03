@@ -15,7 +15,7 @@ keywords:
   - agent kill chain
 ---
 
-Most security teams find that the first useful question DefenseClaw answers isn't "did you block X?" — it's *"what AI is installed or running on this machine?"* AI Discovery is the four-surface inventory pipeline that answers it.
+Most security teams find that the first useful question DefenseClaw answers isn't "did you block X?" — it's *"what AI is installed or running on this machine?"* AI Discovery is the inventory pipeline that answers it.
 
 <DefenseClawDemo scenario="ai-discovery-evidence" />
 
@@ -60,29 +60,26 @@ defenseclaw agent discover --json --no-emit-otel
 defenseclaw agent discover --require-otel
 ```
 
-## How the four surfaces relate
+## Where discovery data goes
 
 <Flow
-  direction="TB"
+  direction="LR"
   compact
-  caption="Continuous (gateway) and on-demand (CLI) discovery feed the same audit pipeline. AIBOM and the Registry sit alongside them, each contributing a different slice of the inventory."
+  caption="The two CLI commands run when you call them. The continuous scan (every 5 minutes by default) and the runtime planes run inside the gateway. The gateway records everything in the local audit log and exports it to your telemetry. The Registry is not a discovery source: it decides what is allowed."
 >
-  <Node id="op" kind="operator">{`Operator\ndefenseclaw CLI`}</Node>
-  <Node id="gateway" kind="gateway">DefenseClaw Gateway</Node>
-  <Node id="cont" kind="connector">{`Continuous scanner\nai_discovery.go`}</Node>
-  <Node id="disc" kind="connector">{`agent discover\nagent_discovery.py`}</Node>
-  <Node id="bom" kind="connector">{`aibom scan\nclaw_inventory.py`}</Node>
-  <Node id="reg" kind="connector">{`registry sync\nasset_policy`}</Node>
-  <Node id="audit" kind="datastore">{`Audit pipeline\nJSONL · OTLP · HEC`}</Node>
-  <Edge from="op" to="disc" />
-  <Edge from="op" to="bom" />
-  <Edge from="op" to="reg" />
-  <Edge from="gateway" to="cont" />
-  <Edge from="cont" to="audit" label="EventAIDiscovery" />
-  <Edge from="disc" to="gateway" label="POST /api/v1/agents/discovery" />
-  <Edge from="gateway" to="audit" label="agent_discovery" />
-  <Edge from="bom" to="audit" label="ScanResult" />
-  <Edge from="reg" to="gateway" label="asset_policy promotion" />
+  <Node id="rt" kind="generic" tag="in the gateway">{`What actually ran\nruntime planes`}</Node>
+  <Node id="cont" kind="generic" tag="in the gateway">{`AI on the host\ncontinuous scan`}</Node>
+  <Node id="bom" kind="operator" tag="CLI, on demand">{`Agent assets\naibom scan`}</Node>
+  <Node id="disc" kind="operator" tag="CLI, on demand">{`Installed agents\nagent discover`}</Node>
+  <Node id="gateway" kind="gateway">{`Gateway\nchecks and records`}</Node>
+  <Node id="sinks" kind="datastore">{`Your telemetry\nOTLP, Splunk`}</Node>
+  <Node id="audit" kind="datastore">{`Audit log\nlocal SQLite`}</Node>
+  <Edge from="rt" to="gateway" label="reports" />
+  <Edge from="cont" to="gateway" label="reports" />
+  <Edge from="bom" to="gateway" label="sends" />
+  <Edge from="disc" to="gateway" label="sends" />
+  <Edge from="gateway" to="sinks" label="exports" />
+  <Edge from="gateway" to="audit" label="records" />
 </Flow>
 
 ## What gets discovered
