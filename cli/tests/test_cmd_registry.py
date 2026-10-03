@@ -614,6 +614,19 @@ class TestRegistryApproveReject(RegistryCommandTestBase):
         )
         self.assertNotIn("entries: none", result.output)
 
+    def test_approve_reject_accept_the_printed_type_prefix(self):
+        # GAP-2450: sync and approve print "skill:demo-skill"; that form works too.
+        for verb, key in (("reject", "rejected"), ("approve", "approved")):
+            result = self.invoke([verb, "corp-skills", "skill:demo-skill", "--no-repromote", "--json"])
+            self.assertEqual(result.exit_code, 0, result.output)
+            payload = json.loads(result.output)
+            self.assertEqual(payload["verdict"]["name"], "demo-skill")
+            self.assertTrue(payload["verdict"][key])
+        result = self.runner.invoke(registry, [
+            "approve", "corp-skills", "skill:demo-skill", "--no-repromote",
+        ], obj=self.app)
+        self.assertIn("Approved skill:demo-skill from corp-skills.", result.output)
+
     def test_approve_in_never_synced_source_says_sync_first(self):
         self.invoke([
             "add", "fresh", "--kind", "http_yaml", "--content", "skill",
