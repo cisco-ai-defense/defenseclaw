@@ -7714,14 +7714,13 @@ def _set_claudecode_mcp_server(
             identity_matches = _claude_postimage_identity_matches(path, state)
             if raw != postimage or not identity_matches:
                 state["exact_restore"] = False
-            if not identity_matches:
-                released.update(state["managed"])
-                state["managed"].clear()
-            else:
-                previously_managed = set(state["managed"])
-                if _reconcile_claude_managed_servers(state, data):
-                    released.update(previously_managed - set(state["managed"]))
-                    state["exact_restore"] = False
+            # Claude Code rewrites ~/.claude.json as it runs (new inode, its own
+            # state added), so ownership follows each entry's value, not the
+            # file identity (GAP-2541).
+            previously_managed = set(state["managed"])
+            if _reconcile_claude_managed_servers(state, data):
+                released.update(previously_managed - set(state["managed"]))
+                state["exact_restore"] = False
             if not state["managed"]:
                 _finish_claude_mcp_episode(path, None, released)
                 state = None
@@ -7859,14 +7858,12 @@ def _unset_claudecode_mcp_server(path: str, name: str) -> bool | str:
         if not bytes_match:
             state["exact_restore"] = False
         target_was_owned = name in state["managed"]
-        if not identity_matches:
-            released.update(state["managed"])
-            state["managed"].clear()
-        else:
-            previously_managed = set(state["managed"])
-            if _reconcile_claude_managed_servers(state, data):
-                released.update(previously_managed - set(state["managed"]))
-                state["exact_restore"] = False
+        # An entry still exactly as DefenseClaw wrote it stays DefenseClaw's,
+        # even after Claude Code rewrote the file around it (GAP-2541).
+        previously_managed = set(state["managed"])
+        if _reconcile_claude_managed_servers(state, data):
+            released.update(previously_managed - set(state["managed"]))
+            state["exact_restore"] = False
 
         if not state["managed"]:
             _finish_claude_mcp_episode(path, None, released)
