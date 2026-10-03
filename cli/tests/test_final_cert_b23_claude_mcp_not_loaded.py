@@ -47,12 +47,41 @@ def test_claude_url_without_type_is_flagged_not_loaded(home):
     assert found["deepwiki"] == ""
 
 
+def test_only_user_scope_entries_point_at_mcp_set(home, monkeypatch):
+    """GAP-2528: mcp set writes the user scope, so a workspace .mcp.json or
+    per-project entry must be repaired in its own file."""
+    ws = home / "ws"
+    ws.mkdir()
+    (ws / ".mcp.json").write_text(json.dumps({"mcpServers": {"wsurl": {"url": URL}}}), encoding="utf-8")
+    (home / ".claude.json").write_text(json.dumps({
+        "mcpServers": {"userurl": {"url": URL}},
+        "projects": {str(ws): {"mcpServers": {"localurl": {"url": URL}}}},
+    }), encoding="utf-8")
+    monkeypatch.chdir(ws)
+    found = {
+        s.name: s for s in connector_paths.mcp_servers("claudecode", infer_workspace_from_cwd=True)
+    }
+    assert {n: bool(found[n].load_problem) for n in ("wsurl", "userurl", "localurl")} == {
+        "wsurl": True, "userurl": True, "localurl": True,
+    }
+    assert found["userurl"].load_problem_set_repairs
+    assert not found["wsurl"].load_problem_set_repairs
+    assert not found["localurl"].load_problem_set_repairs
+    from defenseclaw.commands.cmd_mcp import _mcp_not_loaded_next_step
+
+    ws_hint = _mcp_not_loaded_next_step(found["wsurl"], "claudecode")
+    assert "mcp set" not in ws_hint
+    assert '"type": "http"' in ws_hint and ".mcp.json" in ws_hint
+    assert "defenseclaw mcp set userurl --url" in _mcp_not_loaded_next_step(found["userurl"], "claudecode")
+
+
 class TestMcpNotLoaded(MCPCommandTestBase):
     def setUp(self):
         super().setUp()
         entry = MCPServerEntry(
             name="deepwiki", url=URL, transport="http",
             load_problem='has a "url" but no "type" in /h/.claude.json',
+            load_problem_set_repairs=True,
         )
         self.app.cfg.active_connectors = lambda: ["claudecode"]  # type: ignore[method-assign]
         self.app.cfg.mcp_servers = lambda connector=None, **_: [entry]  # type: ignore[method-assign]

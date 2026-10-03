@@ -206,6 +206,9 @@ class MCPServerEntry:
     # Why the agent itself skips this entry ("" = it loads). Set for Claude
     # Code entries it rejects, so list/scan/doctor do not call them live.
     load_problem: str = ""
+    # True when ``mcp set`` rewrites the skipped entry itself (the user-scope
+    # ``mcpServers`` it writes). Other scopes are repaired in their own file.
+    load_problem_set_repairs: bool = False
 
 
 @dataclass(frozen=True)
@@ -383,15 +386,20 @@ def _claude_mcp_entry(entry: dict[str, Any]) -> dict[str, Any]:
 
 
 def _flag_claude_unloadable(
-    entries: list[MCPServerEntry], servers: Any, path: str,
+    entries: list[MCPServerEntry], servers: Any, path: str, *, user_scope: bool = False,
 ) -> list[MCPServerEntry]:
     """Mark the entries Claude Code skips as not loaded (GAP-2514).
 
     Claude Code skips a ``url`` entry without ``type`` ("has a \"url\" but
     no \"type\""), the shape ``mcp set`` wrote before GAP-1837. The entry
     stays listed (so ``mcp unset`` and the repair still find it) but carries
-    ``load_problem`` instead of passing as a live server.
+    ``load_problem`` instead of passing as a live server. ``mcp set`` only
+    writes the user-scope ``mcpServers`` of :func:`claude_mcp_state_path`,
+    so only those entries say it repairs them (GAP-2528).
     """
+    set_repairs = user_scope and os.path.normcase(os.path.abspath(path)) == os.path.normcase(
+        os.path.abspath(claude_mcp_state_path())
+    )
     if not isinstance(servers, dict):
         return entries
     out: list[MCPServerEntry] = []
@@ -402,7 +410,11 @@ def _flag_claude_unloadable(
             and str(cfg.get("url", "") or "").strip()
             and not str(cfg.get("type", "") or "").strip()
         ):
-            entry = replace(entry, load_problem=f'has a "url" but no "type" in {path}')
+            entry = replace(
+                entry,
+                load_problem=f'has a "url" but no "type" in {path}',
+                load_problem_set_repairs=set_repairs,
+            )
         out.append(entry)
     return out
 
@@ -3693,7 +3705,7 @@ def _read_claude_mcp_state(
 
     user_servers = data.get("mcpServers")
     user_entries = _flag_claude_unloadable(
-        _parse_mcp_servers_value(user_servers), user_servers, path,
+        _parse_mcp_servers_value(user_servers), user_servers, path, user_scope=True,
     )
     return local_entries, user_entries
 
