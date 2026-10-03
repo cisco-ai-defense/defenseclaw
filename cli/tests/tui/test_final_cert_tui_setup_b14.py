@@ -67,8 +67,10 @@ async def test_setup_card_layout_survives_help_80x24(tmp_path) -> None:
         assert app.query_one("#detail-panel").region.y == app.query_one("#panel-table").region.bottom + 1
 
 
-def test_connector_form_starts_on_codex_when_none_is_configured() -> None:
+def test_connector_form_starts_on_codex_when_none_is_configured(monkeypatch) -> None:
     # GAP-2159: an install with no connector offered (and Ctrl+R ran) setup openclaw.
+    # Pin Linux: Windows has no openclaw, so a stored openclaw falls back to codex.
+    monkeypatch.setattr("defenseclaw.platform_support.host_os", lambda: "linux")
     for cfg in ({}, {"claw": {"mode": ""}, "guardrail": {"connector": ""}}):
         fields = connector_setup_wizard_fields(cfg)
         assert next(f.value for f in fields if f.label == "Connector") == "codex"

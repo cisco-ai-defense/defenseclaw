@@ -936,7 +936,8 @@ class TestPluginListMultiConnectorDefault(PluginCommandTestBase):
         self.assertIn("install-blocked", row)
         self.assertNotIn("\u2717 blocked", row)
         self.assertIn("\u2026", row)
-        body = [line for line in listed.output.splitlines() if line.startswith("\u2502")]
+        # Windows draws the header row with the same light bar as the body.
+        body = [line for line in listed.output.splitlines() if line.startswith("\u2502") and " Status " not in line]
         self.assertEqual(len(body), len(rows), listed.output)
         self.assertIn("(4/4 enabled)", listed.output)
 

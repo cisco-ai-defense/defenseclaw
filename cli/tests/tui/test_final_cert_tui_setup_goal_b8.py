@@ -27,10 +27,12 @@ def _goal(goal_id: str, cfg: object | None = None):
     return next(goal for goal in wizard_goals(SetupWizard.CONNECTOR_SETUP, cfg) if goal.id == goal_id)
 
 
-async def test_rerun_form_relays_out_when_the_connector_drops_rows(tmp_path) -> None:
+async def test_rerun_form_relays_out_when_the_connector_drops_rows(tmp_path, monkeypatch) -> None:
     # GAP-2131: switching openclaw -> a hook connector drops Scanner Mode and
     # Verify After Setup; the patched table kept the wider Field column, so
     # the Connector hint was cut at the screen edge instead of wrapping.
+    # Pin Linux: Windows has no openclaw, so the form would open on codex.
+    monkeypatch.setattr("defenseclaw.platform_support.host_os", lambda: "linux")
     from textual.widgets import DataTable
 
     cfg = {"guardrail": {"connector": "openclaw", "connectors": {"openclaw": {}, "codex": {}}}}
