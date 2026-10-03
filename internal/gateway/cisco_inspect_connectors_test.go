@@ -274,7 +274,7 @@ func TestCiscoInspectClient_NonObjectArgsStayText(t *testing.T) {
 	client.client = srv.Client()
 	api.SetCiscoInspector(client)
 
-	for _, args := range []string{`"rm -rf /"`, `42`, `["rm -rf /"]`} {
+	for _, args := range []string{`"rm -rf /"`, `42`, `["rm -rf /"]`, `null`, ` null `} {
 		gotBody = nil
 		req := &ToolInspectRequest{
 			Tool:      "shell",
@@ -287,5 +287,18 @@ func TestCiscoInspectClient_NonObjectArgsStayText(t *testing.T) {
 		if strings.Contains(string(gotBody), `"tool_calls"`) {
 			t.Errorf("args %s: tool_calls must be absent; body = %s", args, gotBody)
 		}
+	}
+}
+
+// A hook whose tool_input is null projects "null", which decodes without error
+// but is not an object: AID's rule engine fails the tool-call rules on it, so
+// only the text form is sent.
+func TestCiscoInspectClient_NullToolInputStaysText(t *testing.T) {
+	payload := loadGoldenHookPayload(t, "cursor", "pre_tool_block")
+	payload["tool_input"] = nil
+	body := captureAIDPayloadForConnector(t, "cursor", payload, nil)
+	got := decodeAIDWire(t, body)
+	if len(got.Messages) != 1 || got.Messages[0].Role != "user" || len(got.Messages[0].ToolCalls) != 0 {
+		t.Fatalf("want the text form alone; body = %s", body)
 	}
 }

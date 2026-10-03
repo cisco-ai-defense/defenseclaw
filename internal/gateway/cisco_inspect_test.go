@@ -799,3 +799,59 @@ func TestHookAIDToolCall_TextFormUnchangedAndLast(t *testing.T) {
 		}
 	}
 }
+
+// A tool call over aidToolCallMaxBytes goes out as the text form alone, exactly
+// as without one: the arguments would otherwise travel twice and could push
+// the request past AID's body limit, which fails the inspection open.
+func TestHookAIDToolCall_OversizedSendsTextFormAlone(t *testing.T) {
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"is_safe":true,"action":"Allow","rules":[]}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	api := testAPIServerWithConfig(t, "action")
+	client := newCiscoInspectTestClient(t, srv.URL, "TEST_TOOL_CALL_OVERSIZED")
+	client.client = srv.Client()
+	api.SetCiscoInspector(client)
+
+	messages := func(send func()) []json.RawMessage {
+		t.Helper()
+		gotBody = nil
+		send()
+		var payload struct {
+			Messages []json.RawMessage `json:"messages"`
+		}
+		if err := json.Unmarshal(gotBody, &payload); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		return payload.Messages
+	}
+	for _, test := range []struct {
+		name      string
+		size      int
+		wantCalls bool
+	}{
+		{name: "under the limit", size: aidToolCallMaxBytes / 2, wantCalls: true},
+		{name: "over the limit", size: aidToolCallMaxBytes},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			args := `{"content":"` + strings.Repeat("a", test.size) + `"}`
+			textOnly := messages(func() { api.hookAIDInspect(t.Context(), "Write", args) })
+			sent := messages(func() {
+				api.hookAIDInspectToolCall(t.Context(), aidToolCall{Name: "Write", Args: json.RawMessage(args)}, args)
+			})
+			if !test.wantCalls {
+				if len(sent) != 1 || !bytes.Equal(sent[0], textOnly[0]) {
+					t.Fatalf("messages = %d, want the text form alone", len(sent))
+				}
+				return
+			}
+			if len(sent) != 2 || !bytes.Equal(sent[1], textOnly[0]) {
+				t.Fatalf("messages = %d, want the tool call and the text form", len(sent))
+			}
+		})
+	}
+}

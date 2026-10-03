@@ -420,12 +420,14 @@ func (a *APIServer) hookAIDInspect(ctx context.Context, toolName string, content
 
 // toolCallArgsCarryable reports whether the arguments can stand as tool-call
 // fields: a JSON object the connector projected from its own tool payload.
+// JSON null decodes into a map without error, but it is not an object, and
+// AID's rule engine fails the tool-call rules on it.
 func toolCallArgsCarryable(req *ToolInspectRequest) bool {
 	if req == nil || req.Direction != "tool_call" || req.toolArgsAreHookEnvelope {
 		return false
 	}
 	var object map[string]json.RawMessage
-	return json.Unmarshal(req.Args, &object) == nil
+	return json.Unmarshal(req.Args, &object) == nil && object != nil
 }
 
 // hookAIDInspectTool sends the invocation as a tool call ahead of the text form,
@@ -444,6 +446,12 @@ func (a *APIServer) hookAIDInspectTool(
 	}
 	return a.hookAIDInspect(ctx, toolName, argsStr)
 }
+
+// aidToolCallMaxBytes bounds the tool call added beside the text form. Both
+// carry the arguments, so a larger one is sent as text alone, as before:
+// doubling the arguments could push the request past AID's 10 MiB body limit,
+// which fails the inspection open.
+const aidToolCallMaxBytes = 2 << 20
 
 // toolCallWireID is the tool call's id. The chat schema requires a non-empty
 // one, so an invocation the agent did not identify is given a "dc-" id derived
@@ -489,6 +497,9 @@ func (a *APIServer) hookAIDInspectToolCall(
 	}})
 	if err != nil {
 		return nil
+	}
+	if len(toolCalls) > aidToolCallMaxBytes {
+		return a.hookAIDInspect(ctx, call.Name, content)
 	}
 	defer yieldHookRunSlot(ctx)()
 	return a.ciscoInspector.Inspect(ctx, []ChatMessage{
