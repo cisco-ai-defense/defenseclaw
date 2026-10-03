@@ -13779,6 +13779,9 @@ def _restart_services(
 
     connector_registration_verified = False
     connector_runtime_pending_reload = False
+    # Peers the restarted gateway refused: setup skipped them, so they are
+    # not guarded now and the closing roster line leaves them out (GAP-2013).
+    runtime_skipped: frozenset[str] = frozenset()
     if wait_for_connector_ready and wait_targets and gateway_restarted:
         readiness_label = "DefenseClaw gateway registration" if "omnigent" in wait_targets else "connector runtime"
         click.echo(f"  {readiness_label}: waiting for verified setup...", nl=False)
@@ -13805,7 +13808,8 @@ def _restart_services(
             # old process that remained reachable while runtime files changed.
             # A peer the restarted gateway refused was skipped by the runtime
             # wait; the API never reports it running either (GAP-1710).
-            not_expected = unverified_peers | getattr(readiness, "skipped", frozenset())
+            runtime_skipped = frozenset(getattr(readiness, "skipped", frozenset()))
+            not_expected = unverified_peers | runtime_skipped
             if not _wait_for_defense_gateway_api(
                 data_dir,
                 previous_generation=gateway_generation_before,
@@ -13847,8 +13851,9 @@ def _restart_services(
         click.echo()
         _fail_if_restart_failed(failed)
     if connector != "openclaw" and len(hook_multi) > 1:
-        names = ", ".join(sorted(c for c in hook_multi if c not in summary_exclude))
-        shown = [c for c in hook_multi if c not in summary_exclude]
+        excluded = summary_exclude | runtime_skipped
+        names = ", ".join(sorted(c for c in hook_multi if c not in excluded))
+        shown = [c for c in hook_multi if c not in excluded]
         roster = f"{_count_label(len(shown))} ({names})"
         if "omnigent" in hook_multi:
             registration_state = (
@@ -13857,7 +13862,7 @@ def _restart_services(
                 else "DefenseClaw gateway registration is not verified"
             )
             ux.subhead(
-                f"{len(hook_multi)} hook/policy connectors ({names}): {registration_state} "
+                f"{len(shown)} hook/policy connectors ({names}): {registration_state} "
                 "on the sidecar API port; OmniGent loaded policy generation "
                 "remains unverified pending reload/restart. No proxy listener — each talks directly "
                 "to its native upstream."
