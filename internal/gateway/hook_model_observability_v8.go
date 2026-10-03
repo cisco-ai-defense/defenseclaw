@@ -237,6 +237,8 @@ func hookModelV8TerminalResult(meta llmEventMeta) (observability.Outcome, bool, 
 		return observability.OutcomeCancelled, false, ""
 	case "rejected":
 		return observability.OutcomeRejected, false, ""
+	case "blocked":
+		return observability.OutcomeBlocked, false, ""
 	default:
 		return observability.OutcomeCompleted, false, ""
 	}
