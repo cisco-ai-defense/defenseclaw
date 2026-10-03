@@ -32,6 +32,9 @@ from defenseclaw.inventory.plugin_identity import (
     validate_plugin_id,
 )
 
+# Quarantine tree of plugins in a Hermes category folder, next to plugins/.
+PLUGIN_CATEGORY_QUARANTINE_DIR = "plugin-categories"
+
 
 class PluginEnforcer:
     def __init__(self, quarantine_dir: str) -> None:
@@ -47,19 +50,26 @@ class PluginEnforcer:
 
     def _quarantine_path(self, plugin_name: str, connector: str = "") -> str | None:
         # GAP-2464: a Hermes plugin in a category folder is quarantined by the
-        # gateway watcher as <connector>/<category>/<name>.
+        # gateway watcher as <connector>/<category>/<name>, in its own tree
+        # (GAP-2470): inside plugins/ it would sit in the slot of a flat
+        # plugin named like the category, and restoring that one would bring
+        # the category plugin back with it (internal/watcher
+        # pluginCategoryQuarantineDir).
         parts = [self._safe_segment(part) for part in plugin_name.split("/")]
         if len(parts) > 2 or None in parts:
             return None
         safe_name = os.path.join(*parts)
+        base = self.quarantine_dir
+        if len(parts) == 2:
+            base = os.path.join(os.path.dirname(self.quarantine_dir), PLUGIN_CATEGORY_QUARANTINE_DIR)
         if connector:
             safe_connector = self._safe_segment(connector)
             if safe_connector is None:
                 return None
-            dest = os.path.join(self.quarantine_dir, safe_connector, safe_name)
+            dest = os.path.join(base, safe_connector, safe_name)
         else:
-            dest = os.path.join(self.quarantine_dir, safe_name)
-        if not os.path.realpath(dest).startswith(os.path.realpath(self.quarantine_dir) + os.sep):
+            dest = os.path.join(base, safe_name)
+        if not os.path.realpath(dest).startswith(os.path.realpath(base) + os.sep):
             return None
         return dest
 

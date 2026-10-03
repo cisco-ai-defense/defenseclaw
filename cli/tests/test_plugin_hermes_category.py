@@ -1,6 +1,6 @@
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 # SPDX-License-Identifier: Apache-2.0
-"""Hermes category-folder plugins in plugin list and restore (GAP-2463, GAP-2464)."""
+"""Hermes category-folder plugins in plugin list and restore (GAP-2463, GAP-2464, GAP-2470)."""
 
 from __future__ import annotations
 
@@ -50,7 +50,10 @@ class TestHermesCategoryPlugins(PluginCommandTestBase):
     def _watcher_quarantine(self, listed_id: str) -> str:
         """The state the gateway watcher leaves: a global action, the copy under hermes/."""
         source = os.path.join(self.user, *listed_id.split("/"))
-        _write_plugin(os.path.join(self.app.cfg.quarantine_dir, "plugins", "hermes", *listed_id.split("/")), "dup")
+        tree = "plugin-categories" if "/" in listed_id else "plugins"
+        _write_plugin(
+            os.path.join(self.app.cfg.quarantine_dir, tree, "hermes", *listed_id.split("/")), listed_id.split("/")[-1]
+        )
         pe = PolicyEngine(self.app.store)
         pe.quarantine("plugin", listed_id, "auto-block: watch detected HIGH findings")
         pe.set_source_path("plugin", listed_id, source)
@@ -77,7 +80,7 @@ class TestHermesCategoryPlugins(PluginCommandTestBase):
         result = self.invoke(["restore", "memx/dup"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertTrue(os.path.isfile(os.path.join(memx, "plugin.yaml")))
-        self.assertEqual(os.listdir(os.path.join(self.app.cfg.quarantine_dir, "plugins", "hermes", "memx")), [])
+        self.assertEqual(os.listdir(os.path.join(self.app.cfg.quarantine_dir, "plugin-categories", "hermes", "memx")), [])
 
     def test_restore_category_plugin_by_folder_name(self, _mock_oc):
         """GAP-2464: the bare folder name restores a unique category plugin."""
@@ -85,3 +88,18 @@ class TestHermesCategoryPlugins(PluginCommandTestBase):
         result = self.invoke(["restore", "flagtwo"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertTrue(os.path.isfile(os.path.join(source, "plugin.yaml")))
+
+    def test_restore_flat_plugin_leaves_category_plugin_of_same_name(self, _mock_oc):
+        """GAP-2470: restoring flat coll leaves the separately quarantined coll/inner quarantined."""
+        flat = self._watcher_quarantine("coll")
+        inner = self._watcher_quarantine("coll/inner")
+
+        result = self.invoke(["restore", "coll"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertTrue(os.path.isfile(os.path.join(flat, "plugin.yaml")))
+        self.assertFalse(os.path.exists(inner))
+        self.assertTrue(PolicyEngine(self.app.store).is_quarantined("plugin", "coll/inner"))
+
+        result = self.invoke(["restore", "coll/inner"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertTrue(os.path.isfile(os.path.join(inner, "plugin.yaml")))

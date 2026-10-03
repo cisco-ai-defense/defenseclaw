@@ -40,6 +40,18 @@ func (w *InstallWatcher) pluginRootDepth(path string) (string, int) {
 	return "", 0
 }
 
+// hermesCategoryFolder reports whether dir, a folder directly in a Hermes
+// plugin root, is a category folder rather than a plugin. Hermes
+// scan_directory loads a folder only with its plugin.yaml (or plugin.json)
+// and otherwise looks one level down for plugins, so a README, notes or a
+// not-yet-manifested __init__.py doesn't make it a plugin. It used to be
+// admitted as one: quarantined whole when created live, never watched when
+// it existed at start, so a plugin added to it later got no verdict
+// (GAP-2471).
+func (w *InstallWatcher) hermesCategoryFolder(dir string) bool {
+	return watcherConnectorName(w.cfg) == "hermes" && !hasPluginManifest(dir)
+}
+
 // waitForPluginFolder watches dir so that content or plugins added to it
 // later reach admission (Run sets addWatch; it is nil in unit tests).
 func (w *InstallWatcher) waitForPluginFolder(dir string) {
@@ -127,7 +139,7 @@ func (w *InstallWatcher) pluginFolderEvents(path string) ([]InstallEvent, bool) 
 		}
 		files = true
 	}
-	if files && len(pluginFolderChildren(path)) == 0 {
+	if files && len(pluginFolderChildren(path)) == 0 && !w.hermesCategoryFolder(path) {
 		delete(w.pluginWaiting, filepath.Clean(path))
 		return plugin, true
 	}
@@ -178,7 +190,7 @@ func (w *InstallWatcher) watchExistingPluginFolders(root string) {
 				subdirs = append(subdirs, filepath.Join(dir, c.Name()))
 			}
 		}
-		if files && len(pluginFolderChildren(dir)) == 0 {
+		if files && len(pluginFolderChildren(dir)) == 0 && !w.hermesCategoryFolder(dir) {
 			continue // a plugin without a manifest, as pluginFolderEvents admits it
 		}
 		w.waitForPluginFolder(dir)

@@ -274,6 +274,9 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 				}
 				continue
 			}
+			if w.hermesCategoryFolder(path) {
+				continue // a Hermes category folder with no plugins yet (GAP-2471)
+			}
 			targets = append(targets, InstallEvent{
 				Type:      InstallPlugin,
 				Name:      e.Name(),
