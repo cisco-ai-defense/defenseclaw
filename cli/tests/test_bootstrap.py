@@ -1515,6 +1515,34 @@ def test_a_gateway_start_that_outlasts_init_says_it_is_still_starting(tmp_path, 
     assert step.next_command == "defenseclaw-gateway status"
 
 
+def test_a_failed_first_start_names_the_error_not_the_migration_banner(tmp_path, monkeypatch):
+    # GAP-2341: on a fresh home the first stderr line is an audit migration
+    # banner, and init showed it as the Sidecar failure.
+    import subprocess
+
+    from defenseclaw import bootstrap
+
+    cfg = MagicMock()
+    cfg.data_dir = str(tmp_path)
+    monkeypatch.setattr(bootstrap.shutil, "which", lambda _name: "/bin/defenseclaw-gateway")
+    monkeypatch.setattr(bootstrap, "_pid_file_running", lambda _path: False)
+    stderr = (
+        "[audit] applying migration 1: initial schema: audit_events, scan_results\n"
+        "[judge_body] applying migration 1: initial schema\n"
+        "Error: start daemon readiness: hermes hook config: handler has a tampered DefenseClaw command\n"
+    )
+    monkeypatch.setattr(
+        bootstrap.subprocess, "run", lambda argv, **_kw: subprocess.CompletedProcess(argv, 1, "", stderr)
+    )
+    step = bootstrap._start_gateway_structured(cfg)
+
+    assert step.status == "warn"
+    assert step.detail == "Error: start daemon readiness: hermes hook config: handler has a tampered DefenseClaw command"
+    banner_only = subprocess.CompletedProcess([], 1, "", "[audit] applying migration 1: x\ngateway exited\n")
+    assert bootstrap.gateway_failure_detail(banner_only, "start failed") == "gateway exited"
+    assert bootstrap.gateway_failure_detail(subprocess.CompletedProcess([], 1, "", ""), "start failed") == "start failed"
+
+
 def test_init_waits_past_the_windows_gateway_readiness_wait():
     # GAP-1346: init killed `defenseclaw-gateway start` before its own Windows
     # readiness wait (240 s) ended, so the watchdog never started.

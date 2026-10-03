@@ -1425,6 +1425,26 @@ def test_setup_v8_destination_test_unknown_name_lists_configured_names() -> None
     assert "configured: otlp-127-0-0-1, terminal" in message
 
 
+def test_setup_v8_destination_test_network_failure_names_the_network_path() -> None:
+    # GAP-2344: 'observability destination test' printed this note on a connection failure; setup did not.
+    from defenseclaw.observability.destination_test import NETWORK_PATH_NOTE, DestinationTestError
+
+    inspected = SimpleNamespace(effective={"destinations": []}, source="/tmp/dc/config.yaml", data_dir="/tmp/dc")
+    with (
+        patch("defenseclaw.config_inspect.inspect_v8_config", return_value=inspected),
+        patch("defenseclaw.observability.destination_test.canonical_local_compliance_recorder"),
+        patch(
+            "defenseclaw.observability.destination_test.run_destination_test",
+            side_effect=DestinationTestError("connection_failed", "the destination connection failed"),
+        ),
+        pytest.raises(click.ClickException) as raised,
+    ):
+        _test_v8_destination("/tmp/dc", "dead", 3.0, write_probe=False)
+    assert raised.value.message == (
+        "destination test failed (connection_failed): the destination connection failed\n" + NETWORK_PATH_NOTE
+    )
+
+
 def test_v8_remove_unknown_destination_fails_before_the_prompt(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

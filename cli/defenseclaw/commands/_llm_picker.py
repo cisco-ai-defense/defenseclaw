@@ -303,7 +303,13 @@ def pick_model(
             click.echo(f"    [{idx}] {m}")
         click.echo("    [c] type a custom model id")
         click.echo()
-        default = current if current in models else models[0]
+        # Keep the saved model as the default even when it is not in the
+        # suggested list (an older or custom id), so pressing Enter keeps
+        # it. A live runtime list is authoritative: only installed models.
+        if current and (current in models or live_models is None):
+            default = current
+        else:
+            default = models[0]
         while True:
             raw = click.prompt("  Pick model", default=default, show_default=True).strip()
             if raw.isdigit():
