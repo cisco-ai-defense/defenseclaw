@@ -5,11 +5,15 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 import urllib.request
 from types import SimpleNamespace
 
 import pytest
-from defenseclaw.entry import exempt_instance_metadata_from_proxy
+from defenseclaw import entry
+from defenseclaw.entry import exempt_instance_metadata_from_proxy, use_bundled_litellm_cost_map
 
 IMDS = "169.254.169.254,169.254.170.2,fd00:ec2::254"
 
@@ -74,3 +78,29 @@ def test_docs_say_gateway_start_runs_the_codex_check_on_windows():
     assert "so `defenseclaw-gateway start` and `restart`, Codex setup, and the installers" in cli
     codex = " ".join((docs / "connectors" / "codex.mdx").read_text(encoding="utf-8").split())
     assert "Each gateway start or restart with the Codex connector enabled runs Codex's app-server once" in codex
+
+
+def test_litellm_uses_the_bundled_price_list_without_a_fetch():
+    # GAP-2451: importing litellm fetched the remote price list, which printed
+    # a LiteLLM:WARNING line in doctor output behind a dead proxy.
+    env = {}
+    use_bundled_litellm_cost_map(env)
+    assert env == {"LITELLM_LOCAL_MODEL_COST_MAP": "True"}
+    kept = {"LITELLM_LOCAL_MODEL_COST_MAP": "False"}
+    use_bundled_litellm_cost_map(kept)
+    assert kept == {"LITELLM_LOCAL_MODEL_COST_MAP": "False"}
+
+    code = (
+        "from defenseclaw.entry import use_bundled_litellm_cost_map\n"
+        "use_bundled_litellm_cost_map()\n"
+        "import litellm\n"
+        "from litellm.litellm_core_utils.get_model_cost_map import get_model_cost_map_source_info\n"
+        "print(get_model_cost_map_source_info()['source'])\n"
+    )
+    child = {k: v for k, v in os.environ.items() if k != "LITELLM_LOCAL_MODEL_COST_MAP"}
+    child["HTTPS_PROXY"] = "http://127.0.0.1:9"
+    child["PYTHONPATH"] = os.path.dirname(os.path.dirname(os.path.abspath(entry.__file__)))
+    out = subprocess.run([sys.executable, "-c", code], env=child, capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip().splitlines()[-1] == "local"
+    assert "Failed to fetch remote model cost map" not in out.stderr + out.stdout
