@@ -558,6 +558,10 @@ type ReviewResponse struct {
 	Summary  string                  `json:"summary"`
 	RiskLine string                  `json:"risk_line,omitempty"`
 	Diff     string                  `json:"diff,omitempty"`
+	// UnmaskedSecrets are the project's files that look like secrets and
+	// that the sandbox's masks (fixed when it was created) leave visible:
+	// its next start refuses while they stay in the project.
+	UnmaskedSecrets []string `json:"unmasked_secrets,omitempty"`
 }
 
 // Workspace operations the CLI reports (the copy-mode steps it runs).

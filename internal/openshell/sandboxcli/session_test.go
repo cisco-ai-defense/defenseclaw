@@ -94,7 +94,23 @@ func TestSessionEnd(t *testing.T) {
 	}
 	stopped := func(t *testing.T, ta *testApp) { ta.wantCalls(t, 1, "POST", sbName+"/stop") }
 	copyRun := RunOptions{Harness: "claude", Copy: true, Name: "fix-tests"}
+	// GAP-2094: a secret file the session left in the project stops the
+	// next start, so the summary says so before the question and the
+	// resume step names what to move first.
+	unmasked := func(ta *testApp) { ta.daemon.review.UnmaskedSecrets = []string{"blk2.txt"} }
+	warnedFirst := func(t *testing.T, ta *testApp) {
+		out := ta.output()
+		if w, q := strings.Index(out, "blk2.txt looks like a secret"), strings.Index(out, "Keep changes?"); w < 0 || q < 0 || w > q {
+			t.Fatalf("warning at %d, question at %d; want the warning first:\n%s", w, q, out)
+		}
+	}
 	runCases(t, []runCase{
+		{name: "a secret file kept in the project", input: "y\n", setup: unmasked, opts: RunOptions{Harness: "claude"}, check: warnedFirst,
+			want: []string{"keeping it in the project means " + sbName + " cannot be resumed",
+				"Sandbox kept (stopped) → to resume, first move blk2.txt out of the project, then: defenseclaw sandbox connect " + sbName},
+			not: []string{"→ resume: "}},
+		{name: "a secret file undone", input: "u\n", setup: unmasked, opts: RunOptions{Harness: "claude"},
+			want: []string{"Sandbox kept (stopped) → resume: defenseclaw sandbox connect " + sbName}, not: []string{"to resume, first move"}},
 		{name: "the sandbox stops before the review", input: "y\n", opts: RunOptions{Harness: "claude"}, want: []string{"Sandbox kept (stopped)"},
 			check: func(t *testing.T, ta *testApp) {
 				paths := ta.daemon.paths()
