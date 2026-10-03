@@ -101,11 +101,15 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 				next = "fix that, then install the package again, which also records the pkg receipt that MDM inventory reads (`" +
 					env.lifecycleCommand(ActionEnsure) + " --from-package` finishes the install but records no receipt)"
 			}
-			r.AddWarning(codePackageInstallFailed, "the package was installed, but its own install run did not complete, so no deployment is active: "+
-				failure+"; "+next)
+			opening := "the package was installed, but its own install run did not complete, so no deployment is active: "
+			if env.GOOS == "darwin" {
+				// pkgutil keeps no receipt for a pkg whose postinstall failed.
+				opening = "the package's files were copied, but its postinstall did not complete, so macOS recorded no pkg receipt and no deployment is active: "
+			}
+			r.AddWarning(codePackageInstallFailed, opening+failure+"; "+next)
 		}
 		if leftovers := env.unmanagedLeftovers(env.Services, ChannelPayload); len(leftovers) > 0 {
-			r.AddWarning(codeLeftovers, "DefenseClaw machine state exists without a committed deployment: "+strings.Join(leftovers, ", ")+"; "+env.leftoversNextStep(ctx))
+			r.AddWarning(codeLeftovers, "DefenseClaw machine state exists without a committed deployment: "+strings.Join(leftovers, ", ")+"; "+env.leftoversNextStep(ctx, failure != ""))
 		}
 		return 0
 	}
@@ -419,9 +423,15 @@ func (e *Env) lastPackageInstallFailure() string {
 // leftoversNextStep tells the administrator what to do about machine state
 // no committed deployment owns, typically after a lifecycle uninstall that
 // kept the package installed: remove the package, or activate it again.
-func (e *Env) leftoversNextStep(ctx context.Context) string {
+// After the package's own install run failed, the package_install_failed
+// warning already names the finish step (on macOS: install the pkg again,
+// for its receipt), so the activate hint defers to it (GAP-2380).
+func (e *Env) leftoversNextStep(ctx context.Context, packageInstallFailed bool) string {
 	gateway := filepath.Join(e.Layout.BinDir, binGateway)
 	reactivate := "`" + e.lifecycleCommand("ensure") + " --from-package --config <file>`"
+	if packageInstallFailed {
+		reactivate = "finish the install as the " + codePackageInstallFailed + " warning says"
+	}
 	if e.GOOS == "linux" {
 		remove := ""
 		if _, err := e.Runner.Run(ctx, "dpkg", "-S", gateway); err == nil {
@@ -435,8 +445,14 @@ func (e *Env) leftoversNextStep(ctx context.Context) string {
 			remove = "dnf remove defenseclaw-enterprise"
 		}
 		if remove != "" {
+			if packageInstallFailed {
+				return "the defenseclaw-enterprise package is still installed: remove it with `" + remove + "` (or the MDM uninstall.sh), or " + reactivate
+			}
 			return "the defenseclaw-enterprise package is still installed: remove it with `" + remove + "` (or the MDM uninstall.sh), or activate the deployment again with " + reactivate
 		}
+	}
+	if packageInstallFailed {
+		return "remove it with `" + e.lifecycleCommand("uninstall") + " --purge` (this also deletes the kept config and state), or " + reactivate
 	}
 	return "remove it with `" + e.lifecycleCommand("uninstall") + " --purge` (this also deletes the kept config and state), or activate the deployment again with " + reactivate + " (package) or `--payload <dir>` (payload archive)"
 }
