@@ -2715,7 +2715,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         unread = {name: self._panel_unread_count(name) for name, _key, _label in visible}
         widest = max(visible, key=lambda row: len(row[2]))[0]
         fitted = fit_tab_labels(visible, widest, unread, strip)
-        return all(fitted[name].startswith(f"{key} {label}") for name, key, label in visible)
+        # The title also waits until every count keeps its "(n)" form beside
+        # it: taking those cells back turned "Alerts (1)" into "Alerts¹" at 215
+        # and 221 columns and back at 219 and 225 (GAP-2543). A width of 0
+        # gives the full labels.
+        return fitted == fit_tab_labels(visible, widest, unread, 0)
 
     def _sync_header_title(self) -> None:
         title = self._header_title()

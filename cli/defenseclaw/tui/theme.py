@@ -79,6 +79,9 @@ STATE_STYLES: Mapping[str, str] = {
     "warn": DEFAULT_TOKENS.accent_amber,
     "reconnecting": DEFAULT_TOKENS.accent_amber,
     "starting": DEFAULT_TOKENS.accent_amber,
+    # A server the agent skips (url-only Claude Code entry, GAP-2531) reads
+    # amber in the MCPs list as in its detail pane (GAP-2544).
+    "not loaded": DEFAULT_TOKENS.accent_amber,
     "quarantined": DEFAULT_TOKENS.accent_pink,
     "disabled": DEFAULT_TOKENS.text_muted,
     "offline": DEFAULT_TOKENS.text_muted,
@@ -124,7 +127,7 @@ def state_color(state: str, tokens: ThemeTokens = DEFAULT_TOKENS) -> str:
         return tokens.accent_green
     if normalized in {"blocked", "error", "rejected", "stopped"}:
         return tokens.accent_red
-    if normalized in {"degraded", "reconnecting", "starting", "warn", "warning"}:
+    if normalized in {"degraded", "not loaded", "reconnecting", "starting", "warn", "warning"}:
         return tokens.accent_amber
     if normalized == "quarantined":
         return tokens.accent_pink
