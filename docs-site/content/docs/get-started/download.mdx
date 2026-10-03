@@ -1,0 +1,174 @@
+---
+title: Download
+description: Install DefenseClaw on macOS, Linux or Windows with one command, get the macOS app and the enterprise packages, verify a download, and upgrade or uninstall.
+keywords:
+  - download DefenseClaw
+  - DefenseClaw install command
+  - DefenseClaw install.sh
+  - DefenseClaw install.ps1
+  - DefenseClaw enterprise package
+  - DefenseClaw checksums
+---
+
+import { OsPanel, OsTabs } from '@/components/install/os-download-tiles';
+import { InstallCommand } from '@/components/install/install-command';
+
+Every release is on [GitHub](https://github.com/cisco-ai-defense/defenseclaw/releases/latest).
+The commands on this page always fetch the latest one. Each installs
+DefenseClaw for the user who runs it, checks every file against the release's
+`checksums.txt`, and needs nothing else: it installs `uv`, which provides the
+Python runtime, if you don't have it.
+
+## Install
+
+Pick your system. This site remembers the choice.
+
+<OsTabs>
+<OsPanel os="macos">
+
+<InstallCommand command="curl -LsSf https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.sh | bash" prompt="$" copyLabel="Copy the install command" />
+
+To guard one agent and run the first-run quickstart in the same step:
+
+<InstallCommand command="curl -LsSf https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.sh | bash -s -- --connector claudecode --quickstart" prompt="$" copyLabel="Copy the install-and-quickstart command" />
+
+- **Requires** a Mac with Apple silicon (`arm64`). Intel Macs are not
+  supported, Rosetta included; the installer stops before changing anything.
+- **Menu-bar app (preview).** Download
+  `DefenseClawMac-<version>-macos-arm64.dmg` from the
+  [release page](https://github.com/cisco-ai-defense/defenseclaw/releases/latest).
+  It needs macOS 14 or newer. The installer updates an app that is already
+  installed; it does not install one. See [macOS app](/docs/macos-app).
+
+</OsPanel>
+<OsPanel os="linux">
+
+<InstallCommand command="curl -LsSf https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.sh | bash" prompt="$" copyLabel="Copy the install command" />
+
+To guard one agent and run the first-run quickstart in the same step:
+
+<InstallCommand command="curl -LsSf https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.sh | bash -s -- --connector claudecode --quickstart" prompt="$" copyLabel="Copy the install-and-quickstart command" />
+
+- **Requires** Linux on `x86_64` or `arm64`, with `bash` and `curl`.
+- **Certified** on RHEL in this release.
+
+</OsPanel>
+<OsPanel os="windows">
+
+<InstallCommand command="irm https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.ps1 | iex" prompt="PS>" copyLabel="Copy the install command" />
+
+To guard one agent and run the first-run quickstart in the same step:
+
+<InstallCommand command="& ([scriptblock]::Create((irm https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.ps1))) -Connector codex -Quickstart" prompt="PS>" copyLabel="Copy the install-and-quickstart command" />
+
+- **Requires** Windows on `x64` and Windows PowerShell 5.1 or later. Windows
+  on ARM64 is not certified, including x64 emulation; the installer stops
+  before changing anything.
+- **Runs as you.** Install as the user who runs the agents. It does not need
+  administrator rights. More in [Native Windows](/docs/get-started/windows).
+
+</OsPanel>
+</OsTabs>
+
+`--connector` (`-Connector`) takes any connector id, for example `claudecode`,
+`codex`, `copilot` or `cursor`; see [Connectors](/docs/connectors). Every
+option and exit code is in [Install options](/docs/get-started/install).
+
+## Then initialize
+
+```bash
+defenseclaw init
+```
+
+Press Enter through it. It finds the agents you have and starts them in
+observe mode, so nothing is blocked yet. The
+[5-minute quickstart](/docs/get-started/quickstart) takes you from here to
+your first blocked tool call.
+
+<Callout title="On a computer your organization manages">
+When an administrator has deployed DefenseClaw enterprise on a computer, the
+per-user installer and `defenseclaw upgrade` refuse to run there: the
+organization installs and updates DefenseClaw through its MDM.
+</Callout>
+
+## Managing many machines? [#enterprise]
+
+Enterprise packages install DefenseClaw as administrator-owned services that
+users can't turn off. They are attached to the same
+[GitHub release](https://github.com/cisco-ai-defense/defenseclaw/releases/latest).
+`<version>` is the release number and `<arch>` is `amd64` or `arm64`.
+
+| Platform | Artifact | Notes |
+| --- | --- | --- |
+| Windows x64 | `DefenseClawSetup-Enterprise-Standalone-x64.exe` | Setup for Intune and other MDMs, with its `.payload-manifest.json` |
+| macOS (Apple silicon) | `defenseclaw-enterprise-<version>-darwin-arm64.pkg` | Also as a `.tar.gz` payload |
+| Linux | `defenseclaw-enterprise-<version>-linux-<arch>.rpm` | Certified on RHEL in this release |
+| Linux | `defenseclaw-enterprise-<version>-linux-<arch>.deb` | Built, not certified in this release |
+| Linux | `defenseclaw-enterprise-<version>-linux-<arch>.tar.gz` | Payload for configuration management |
+
+Start with [Deploy to a fleet](/docs/enterprise/get-started), or read the
+[enterprise overview](/docs/enterprise) first.
+
+## Verify a download
+
+The installers check their own downloads. When `cosign` 2.0 or later is
+installed they also verify the Sigstore signature on `checksums.txt`, and stop
+if it fails. To check a file you downloaded yourself, fetch `checksums.txt` and
+`checksums.txt.bundle` from the same release, then:
+
+<Tabs items={['macOS / Linux', 'Windows']}>
+<Tab value="macOS / Linux">
+
+```bash
+cosign verify-blob --bundle checksums.txt.bundle \
+  --certificate-identity "https://github.com/cisco-ai-defense/defenseclaw/.github/workflows/release.yaml@refs/heads/main" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  checksums.txt
+sha256sum --ignore-missing -c checksums.txt   # Linux
+shasum -a 256 DefenseClawMac-*.dmg            # macOS: compare with its line in checksums.txt
+```
+
+</Tab>
+<Tab value="Windows">
+
+```powershell
+cosign verify-blob --bundle checksums.txt.bundle `
+  --certificate-identity 'https://github.com/cisco-ai-defense/defenseclaw/.github/workflows/release.yaml@refs/heads/main' `
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' `
+  checksums.txt
+(Get-FileHash .\DefenseClawSetup-Enterprise-Standalone-x64.exe -Algorithm SHA256).Hash.ToLower()
+Select-String -Path .\checksums.txt -Pattern 'DefenseClawSetup-Enterprise-Standalone-x64\.exe$'
+```
+
+The two hashes must match.
+
+</Tab>
+</Tabs>
+
+## Upgrade
+
+```bash
+defenseclaw upgrade                  # the latest release
+defenseclaw upgrade --version X.Y.Z  # a specific release, newer or older
+defenseclaw rollback                 # put back the install the last upgrade replaced
+```
+
+The upgrade runs the new release's own installer, keeps your configuration and
+data, and puts the previous version back if anything fails. See
+[Upgrade](/docs/get-started/upgrade).
+
+## Uninstall
+
+```bash
+defenseclaw uninstall --dry-run          # show what would be removed
+defenseclaw uninstall                    # remove connector hooks; keep ~/.defenseclaw and the binaries
+defenseclaw uninstall --all --binaries   # remove everything, including the audit log and config
+```
+
+See [Uninstall](/docs/get-started/install#uninstall) for what each flag keeps.
+
+<Cards>
+  <Card title="5-minute quickstart" href="/docs/get-started/quickstart" description="From install to your first blocked tool call." />
+  <Card title="Install options" href="/docs/get-started/install" description="Every installer option, exit codes, source builds and LLM backends." />
+  <Card title="Support matrix" href="/docs/support-matrix" description="Which agents and features work on each OS and edition." />
+</Cards>
