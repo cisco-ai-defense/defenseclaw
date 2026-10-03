@@ -919,8 +919,10 @@ func TestProjectBlockedTurnMetadataNamesTheRule(t *testing.T) {
 			t.Fatalf("%s: metadata %q: %v", tc.family, raw, err)
 		}
 		if metadata["defenseclaw.guardrail.rule_id"] != "R6-PROMPT-MARKER" ||
-			metadata["defenseclaw.guardrail.severity"] != "HIGH" || metadata["defenseclaw.guardrail.action"] != "block" {
-			t.Fatalf("%s: metadata = %v, want the block, its rule and its severity", tc.family, metadata)
+			metadata["defenseclaw.guardrail.severity"] != "HIGH" || metadata["defenseclaw.guardrail.action"] != "block" ||
+			metadata["defenseclaw.outcome"] != "blocked" {
+			// GAP-2484: the blocked outcome stays next to the guardrail fields.
+			t.Fatalf("%s: metadata = %v, want the block, its rule, its severity and the blocked outcome", tc.family, metadata)
 		}
 	}
 }
