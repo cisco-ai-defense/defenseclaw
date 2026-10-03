@@ -983,6 +983,21 @@ def test_guardrail_wizard_promotes_strategy_when_judge_model_configured() -> Non
     assert wizard_field_value(_guardrail_wizard_fields_for({}, cfg_inherit), "Strategy") == "regex_only"
 
 
+
+def test_guardrail_wizard_prefills_v5_judge_llm_block() -> None:
+    # GAP-2176: setup guardrail now writes only guardrail.judge.llm, so the
+    # wizard must read the judge model from there (v4 judge.model stays a fallback).
+    cfg = {
+        "guardrail": {
+            "detection_strategy": "regex_only",
+            "judge": {"llm": {"provider": "bedrock", "model": "us.anthropic.claude-haiku-4-5-20251001-v1:0"}},
+        },
+    }
+    fields = _guardrail_wizard_fields_for({}, cfg)
+    assert wizard_field_value(fields, "Model") == "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+    assert wizard_field_value(fields, "Strategy") == "regex_judge"
+
+
 def test_credentials_matrix_actions_are_data_only_and_validate_required_fields() -> None:
     fields = wizard_form_defs(SetupWizard.CREDENTIALS)
 

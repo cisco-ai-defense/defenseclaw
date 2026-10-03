@@ -5609,6 +5609,24 @@ def _record_windows_setup_agent_selections(
         ) from exc
 
 
+def _guardrail_effective_mode(gc, connector: str) -> str:
+    """Effective enforcement mode for CONNECTOR (tolerates SimpleNamespace stubs)."""
+    if hasattr(gc, "effective_mode"):
+        return gc.effective_mode(connector)
+    return getattr(gc, "mode", "") or "observe"
+
+
+def _judge_observe_mode_hint(connectors: list[str]) -> str:
+    """Explain that the hook-lane judge skips observe-mode CONNECTORS, with the fix."""
+    first = connectors[0]
+    verb = "is" if len(connectors) == 1 else "are"
+    return (
+        f"the LLM judge reviews hook calls only for action-mode connectors, and "
+        f"{', '.join(connectors)} {verb} in observe mode. Enable it with: "
+        f"defenseclaw setup {'claude-code' if first == 'claudecode' else first} --mode action --enable-judge --yes"
+    )
+
+
 def _guardrail_setup_check_targets(app: AppContext, gc, explicit_connector: str | None) -> list[str]:
     """Connectors whose binaries should be verified before guardrail setup."""
     targets: list[str] = []
@@ -6551,15 +6569,12 @@ def setup_guardrail(
         if effective_inherit_from:
             _apply_llm_inherit(app.cfg, inherit_from=effective_inherit_from, target_path="guardrail.judge")
         if judge_model is not None:
-            gc.judge.model = judge_model
             gc.judge.llm.model = judge_model
             gc.judge.enabled = True
             judge_enabled_by_this_run = True
         if judge_api_base is not None:
-            gc.judge.api_base = judge_api_base
             gc.judge.llm.base_url = judge_api_base
         if judge_api_key_env is not None:
-            gc.judge.api_key_env = judge_api_key_env
             gc.judge.llm.api_key_env = judge_api_key_env
             # Mirror the interactive path (see _interactive_guardrail_setup):
             # when the operator supplies a NEW env var that diverges from the
@@ -6577,6 +6592,14 @@ def setup_guardrail(
                 and not app.cfg.llm.api_key_env
             ):
                 app.cfg.llm.api_key_env = judge_api_key_env
+        if judge_model is not None or judge_api_base is not None or judge_api_key_env is not None:
+            # GAP-2176: write only the v5 guardrail.judge.llm block, like the
+            # wizard (GAP-1121). Config load already copied any v4
+            # judge.{model,api_base,api_key_env} into judge.llm, so clearing
+            # them loses nothing and stops the deprecation warning.
+            gc.judge.model = ""
+            gc.judge.api_base = ""
+            gc.judge.api_key_env = ""
         if judge_provider is not None:
             gc.judge.llm.provider = judge_provider.strip().lower()
         if judge_region is not None:
@@ -6679,6 +6702,22 @@ def setup_guardrail(
         )
         if new_gate is not None:
             gc.judge.hook_connectors = new_gate
+        if judge_hook_connectors is not None and new_gate and "*" not in new_gate:
+            # GAP-2175: the hook-lane judge only covers action-mode connectors,
+            # and the version check below would silently drop observe-mode
+            # ones (leaving the judge off). Refuse before anything is saved.
+            scope = (
+                list(transaction_targets)
+                if transaction_targets is not None
+                else _guardrail_setup_check_targets(app, gc, target_connector)
+            )
+            observe_named = [c for c in new_gate if c in scope and _guardrail_effective_mode(gc, c) != "action"]
+            if observe_named:
+                _clear_pending_guardrail_secrets(pending_guardrail_secrets)
+                restore_precommit_guardrail_selection()
+                raise click.UsageError(
+                    "--judge-hook-connectors was not applied: " + _judge_observe_mode_hint(observe_named)
+                )
 
         if gc.judge.enabled and list(gc.judge.hook_connectors or []) and detection_strategy_completion is None:
             _default_hook_judge_completion_strategy(gc)
@@ -6797,6 +6836,7 @@ def setup_guardrail(
         click.echo("  Guardrail not enabled. Run again without declining to configure.")
         return
 
+    judge_on_before_versions = bool(gc.judge.enabled)
     validation_failed_with_secret = False
     try:
         versions_supported = _check_guardrail_setup_connector_versions(
@@ -6823,6 +6863,20 @@ def setup_guardrail(
         if not rollback_status.complete:
             raise _GuardrailSecretFailure("validation-refused-rollback-incomplete") from None
         return
+    if non_interactive and judge_on_before_versions and not gc.judge.enabled:
+        # GAP-2175: the judge was requested, but every connector in scope is
+        # in observe mode, so the gate prune turned it back off. Say so.
+        observe_scope = [
+            c
+            for c in (
+                list(transaction_targets)
+                if transaction_targets is not None
+                else _guardrail_setup_check_targets(app, gc, target_connector)
+            )
+            if _guardrail_effective_mode(gc, c) != "action"
+        ]
+        if observe_scope:
+            ux.warn("The LLM judge was not enabled: " + _judge_observe_mode_hint(observe_scope), indent="  ")
 
     setup_failed_with_secret = False
     try:
