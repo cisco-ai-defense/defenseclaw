@@ -295,6 +295,33 @@ class TestMCPConnectorScope(MCPCommandTestBase):
         self.assertFalse(self.app.store.has_action("mcp", "ctx7", "install", "block", "codex"))
         self.assertFalse(pe.is_allowed("mcp", "ctx7"))
 
+    def test_unblock_after_failed_scan_says_no_verdict(self):
+        # GAP-2367: a server whose last scan failed has no verdict to apply.
+        db = self.app.store.db
+        cols = {row[1] for row in db.execute("PRAGMA table_info(scan_results)").fetchall()}
+        for col, kind in (("exit_code", "INTEGER"), ("error", "TEXT")):
+            if col not in cols:
+                db.execute(f"ALTER TABLE scan_results ADD COLUMN {col} {kind}")
+        ts = datetime(2026, 10, 3, 8, 0, tzinfo=timezone.utc).isoformat()
+        db.execute(
+            "INSERT INTO scan_results (id, scanner, target, timestamp, finding_count, max_severity,"
+            " exit_code, error) VALUES ('f1', 'mcp-scanner', 'mcp://codex/fresh', ?, 0, 'INFO', 1, 'unreachable')",
+            (ts,),
+        )
+        db.commit()
+        pe = PolicyEngine(self.app.store)
+        pe.block_for_connector("mcp", "fresh", "codex", "x")
+        pe.block_for_connector("mcp", "never", "codex", "x")
+
+        result = self.invoke(["unblock", "fresh", "--connector", "codex"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("It has no scan verdict yet (its last scan failed).", result.output)
+        self.assertNotIn("Its scan verdict applies again", result.output)
+        self.assertIn("To scan it now, run: defenseclaw mcp scan fresh --connector codex", result.output)
+
+        never = self.invoke(["unblock", "never", "--connector", "codex"])
+        self.assertIn("It has no scan verdict yet (it has not been scanned).", never.output)
+
     def test_unblock_connector_scopes_to_peer(self):
         pe = PolicyEngine(self.app.store)
         pe.block_for_connector("mcp", "http://demo.example.com", "codex", "x")
