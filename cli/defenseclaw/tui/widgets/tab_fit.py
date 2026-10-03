@@ -370,10 +370,10 @@ def _named_fit(
     name: an Activity count (GAP-2372), and Skills, MCPs and Plugins counts
     beside a Logs and Audit backlog (GAP-2403), turned the open
     "R Registries" into "R Registri…". A count that doesn't fit waits; it
-    never costs a name. The counts don't depend on the open tab, so switching
-    panels never relabels a third tab. The open tab reads in full: when the
-    Alerts, Logs or Audit count took that room, the least important tabs
-    become bare keys instead, whichever tab is open (GAP-2460).
+    never costs a name. The counts don't depend on the open tab. The open tab
+    reads in full: when the Alerts, Logs or Audit count took that room, the
+    least important other tabs become bare keys while it is open (GAP-2460,
+    GAP-2491).
     """
 
     keys = {name: key for name, key, _title in panels}
@@ -396,20 +396,22 @@ def _named_fit(
         room = spare if name in _OPEN_NAME_COUNTS else reserve
         if name == "alerts" or strip_width(tuple(render(named, shown | {name}).values())) + room <= width:
             shown.add(name)
-    # When the Alerts, Logs and Audit counts leave no room for the longest
-    # full name, the least important tabs go bare first, whichever tab is
-    # open, so the open tab still reads in full: "R Regist…" and "V AI Di…"
-    # opened beside Alerts²⁹, Log⁹⁹⁹⁺ and Audit⁵⁰⁶ at 160 columns (GAP-2460).
+    # When the Alerts, Logs and Audit counts leave no room for the open tab's
+    # full name, the least important other tabs go bare first, so the open
+    # tab still reads in full: "R Regist…" and "V AI Di…" opened beside
+    # Alerts²⁹, Log⁹⁹⁹⁺ and Audit⁵⁰⁶ at 160 columns (GAP-2460). Only the open
+    # tab's own name counts: keeping room for "V AI Discovery" on every panel
+    # left "R" bare beside 13 free cells at 160 columns (GAP-2491).
     named = dict(named)
 
     def short_of() -> int:
-        room = max(len(_label(keys[name], titles[name], 0)) - len(_label(keys[name], named[name], 0)) for name in keys)
+        room = len(_label(keys[active], titles[active], 0)) - len(_label(keys[active], named[active], 0))
         return strip_width(tuple(render(named, shown).values())) + room - width
 
     for name in sorted(keys, key=_rank, reverse=True):
         if short_of() <= 0:
             break
-        if name in KEEP_BADGE or name == "overview" or not named[name]:
+        if name in KEEP_BADGE or name in {"overview", active} or not named[name]:
             continue
         before, deficit = named[name], short_of()
         named[name] = ""
