@@ -79,6 +79,8 @@ class ScanResult:
     timestamp: datetime
     findings: list[Finding] = field(default_factory=list)
     duration: timedelta = field(default_factory=timedelta)
+    # Short notes about analyzers that did not run (a partial scan).
+    notes: list[str] = field(default_factory=list)
 
     def has_severity(self, severity: str) -> bool:
         return any(f.severity == severity for f in self.findings)

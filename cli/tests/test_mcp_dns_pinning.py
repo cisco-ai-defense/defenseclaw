@@ -155,6 +155,50 @@ def test_only_local_provider_default_can_resolve_loopback(
     assert calls == ["redirect.invalid", "localhost"]
 
 
+
+@pytest.mark.parametrize(
+    ("provider", "model", "allowed"),
+    [
+        pytest.param("bedrock", "us.anthropic.claude-haiku-4-5", True, id="bedrock"),
+        pytest.param("", "bedrock/us.anthropic.claude-haiku-4-5", True, id="bedrock-model"),
+        pytest.param("anthropic", "claude-haiku-4-5", False, id="anthropic"),
+    ],
+)
+def test_bedrock_llm_analyzer_can_reach_aws_credential_endpoint(provider, model, allowed):
+    """GAP-2604: instance-role credentials come from IMDS during a pinned scan."""
+    from defenseclaw.scanner.mcp import _llm_uses_aws_credentials
+
+    def fake_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):  # noqa: A002
+        node = host.decode("ascii") if isinstance(host, bytes) else str(host)
+        return [(socket.AF_INET, type or socket.SOCK_STREAM, proto, "", (node, port))]
+
+    class Analyzer:
+        async def analyze(self):
+            return await anyio.getaddrinfo("169.254.169.254", 80)
+
+    scanner = SimpleNamespace(_api_analyzer=Analyzer(), _llm_analyzer=Analyzer())
+    llm = LLMConfig(provider=provider, model=model)
+    _scope_network_analyzer_dns(
+        scanner,
+        api_endpoint="",
+        llm_base_url="",
+        llm_uses_local_default=False,
+        llm_uses_aws_credentials=_llm_uses_aws_credentials(llm),
+    )
+
+    with patch.object(socket, "getaddrinfo", fake_getaddrinfo):
+        with pinned_getaddrinfo("mcp.example", 443, "93.184.216.34"):
+            if allowed:
+                results = anyio.run(_run_with_pinned_dns, scanner._llm_analyzer.analyze)
+                assert {info[4][0] for info in results} == {"169.254.169.254"}
+            else:
+                with pytest.raises(SSRFError):
+                    anyio.run(_run_with_pinned_dns, scanner._llm_analyzer.analyze)
+            # The API analyzer never gets the credential endpoint.
+            with pytest.raises(SSRFError):
+                anyio.run(_run_with_pinned_dns, scanner._api_analyzer.analyze)
+
+
 @contextmanager
 def _serve_mcp(transport: str):
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
