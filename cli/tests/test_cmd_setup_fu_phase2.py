@@ -4224,6 +4224,26 @@ class TestJ3PerDirectionStrategy(_BaseSetup):
         self.assertEqual(self.app.cfg.guardrail.detection_strategy_completion, "regex_only")
         self.assertEqual(self.app.cfg.guardrail.judge.hook_connectors, ["*"])
 
+    def test_summary_shows_the_judge_llm_in_use(self):
+        # GAP-2056: the summary printed the empty legacy guardrail.judge.model
+        # and api_key_env right after the judge step named the judge LLM.
+        self.app.cfg.guardrail.judge.llm.model = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+        self.app.cfg.guardrail.judge.llm.api_key_env = "DEFENSECLAW_LLM_KEY"
+        with _stub_side_effects(), \
+                patch("defenseclaw.commands.cmd_setup.execute_guardrail_setup", return_value=(True, [])):
+            res = _invoke(
+                [
+                    "guardrail", "--non-interactive", "--connector", "codex", "--no-restart", "--no-verify",
+                    "--mode", "action", "--detection-strategy", "regex_judge",
+                ],
+                self.app,
+            )
+        self.assertEqual(res.exit_code, 0, msg=res.output)
+        self.assertRegex(res.output, r"guardrail\.judge\.llm\.model:\s+us\.anthropic\.claude-haiku-4-5")
+        self.assertRegex(res.output, r"judge credentials:\s+DEFENSECLAW_LLM_KEY")
+        for legacy in ("guardrail.judge.model", "guardrail.judge.api_key_env", "guardrail.model_name"):
+            self.assertNotIn(legacy, res.output)
+
     def test_off_by_default_tool_call_unset(self):
         with _stub_side_effects(), \
                 patch("defenseclaw.commands.cmd_setup.execute_guardrail_setup", return_value=(True, [])):
