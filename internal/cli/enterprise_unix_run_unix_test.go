@@ -351,3 +351,64 @@ func TestSecretChangeOutputNamesTheCommandAndCredential(t *testing.T) {
 		t.Fatalf("failed remove = %+v", shown)
 	}
 }
+
+// GAP-2329: a malformed --lock-wait gives examples inside the 15m cap, and
+// the cap error names the value as typed ("not 1h", not "not 60m").
+func TestUnixLifecycleLockWaitMessagesStayInsideTheCap(t *testing.T) {
+	platform := "linux"
+	if runtime.GOOS == "darwin" {
+		platform = "macos"
+	}
+	cmd, _, err := rootCmd.Find([]string{"enterprise", platform, "ensure"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		v := cmd.Flags().Lookup("lock-wait").Value.(*lockWaitValue)
+		*v.wait, v.typed = 0, ""
+	})
+	if got := plainFlagValueError(cmd.ParseFlags([]string{"--lock-wait=banana"})); got != `--lock-wait takes a duration from 0 to 15m, such as 30s or 5m, not "banana"` {
+		t.Fatalf("--lock-wait banana: %q", got)
+	}
+	if err := cmd.ParseFlags([]string{"--lock-wait=1h"}); err != nil {
+		t.Fatal(err)
+	}
+	opts := &unixLifecycleOptions{lockWait: time.Hour}
+	runErr := runUnixLifecycle(cmd, platform, "ensure", opts)
+	if runErr == nil || commandExitCode(runErr) != 2 || !strings.HasPrefix(runErr.Error(), "--lock-wait takes at most 15m, not 1h\nUsage: ") {
+		t.Fatalf("--lock-wait 1h: %v (exit %d)", runErr, commandExitCode(runErr))
+	}
+	if strings.Contains(cmd.Flags().FlagUsages(), "default 0") {
+		t.Fatalf("--help shows a zero default:\n%s", cmd.Flags().FlagUsages())
+	}
+}
+
+// GAP-2330: a stray argument on a lifecycle or secret leaf is an
+// "unexpected argument", as on every other gateway command, not an
+// "unknown command"; enterprise hooks status no longer ignores it.
+func TestEnterpriseLeavesRejectAStrayArgumentAsUnexpected(t *testing.T) {
+	installUsageArgChecks(rootCmd)
+	platform := "linux"
+	if runtime.GOOS == "darwin" {
+		platform = "macos"
+	}
+	for _, path := range [][]string{
+		{"enterprise", platform, "ensure"},
+		{"enterprise", platform, "status"},
+		{"enterprise", "secret", "status"},
+		{"enterprise", "hooks", "status"},
+	} {
+		cmd, _, err := rootCmd.Find(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := cmd.ValidateArgs([]string{"extra-arg"})
+		want := `unexpected argument "extra-arg" for "` + cmd.CommandPath() + `"` + "\nUsage: "
+		if got == nil || commandExitCode(got) != 2 || !strings.HasPrefix(got.Error(), want) {
+			t.Fatalf("%v extra-arg: exit %d, %v", path, commandExitCode(got), got)
+		}
+		if err := cmd.ValidateArgs(nil); err != nil {
+			t.Fatalf("%v without arguments: %v", path, err)
+		}
+	}
+}

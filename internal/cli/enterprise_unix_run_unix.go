@@ -54,9 +54,14 @@ func checkLockWait(cmd *cobra.Command, wait time.Duration) error {
 		return nil
 	}
 	limit := enterpriseunix.FormatLockWait(enterpriseunix.MaxLockWait)
-	msg := fmt.Sprintf("--lock-wait takes at most %s, not %s", limit, enterpriseunix.FormatLockWait(wait))
+	// Name the value as typed ("not 1h", not "not 60m"; GAP-2329).
+	typed := typedLockWait(cmd, wait)
+	if typed == "" {
+		typed = enterpriseunix.FormatLockWait(wait)
+	}
+	msg := fmt.Sprintf("--lock-wait takes at most %s, not %s", limit, typed)
 	if wait < 0 {
-		msg = fmt.Sprintf("--lock-wait takes a duration from 0 to %s, not %s", limit, wait)
+		msg = fmt.Sprintf("--lock-wait takes a duration from 0 to %s, not %s", limit, typed)
 	}
 	return lifecycleFlagError(cmd, errors.New(msg))
 }

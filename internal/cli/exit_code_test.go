@@ -103,10 +103,11 @@ func TestDelegatedUsageErrorNamesTheTypedCommand(t *testing.T) {
 }
 
 // GAP-1549: a stray argument or an unknown subcommand is a usage error with
-// rc 2; hook trees and the enterprise leaves keep cobra's own handling.
+// rc 2; hook trees keep cobra's own handling, and enterprise hooks status
+// rejects one too (GAP-2330).
 func TestStrayArgumentsAreUsageErrors(t *testing.T) {
 	installUsageArgChecks(rootCmd)
-	for _, path := range [][]string{{"status"}, {"watchdog"}, {"policy", "show"}} {
+	for _, path := range [][]string{{"status"}, {"watchdog"}, {"policy", "show"}, {"enterprise", "hooks", "status"}} {
 		cmd, _, err := rootCmd.Find(path)
 		if err != nil {
 			t.Fatal(err)
@@ -119,7 +120,7 @@ func TestStrayArgumentsAreUsageErrors(t *testing.T) {
 			t.Fatalf("%v without arguments: %v", path, err)
 		}
 	}
-	for _, path := range [][]string{{"connector", "launch"}, {"enterprise", "hooks", "status"}} {
+	for _, path := range [][]string{{"connector", "launch"}} {
 		cmd, _, err := rootCmd.Find(path)
 		if err != nil {
 			t.Fatal(err)
