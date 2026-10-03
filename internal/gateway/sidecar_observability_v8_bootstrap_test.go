@@ -662,7 +662,7 @@ func TestSidecarBootstrapLocalObservabilityCanaryReachesAgent360Projection(t *te
 			child = span
 		}
 	}
-	if root == nil || child == nil || root.Name != "invoke_agent diagnostic" || child.Name != "chat gpt-4o-mini" ||
+	if root == nil || child == nil || root.Name != "invoke_agent diagnostic" || child.Name != "chat defenseclaw-diagnostic" ||
 		fmt.Sprintf("%x", root.TraceId) != result.TraceID ||
 		!bytes.Equal(root.TraceId, child.TraceId) || !bytes.Equal(root.SpanId, child.ParentSpanId) {
 		t.Fatalf("canonical root/child pair root=%+v child=%+v result=%+v", root, child, result)

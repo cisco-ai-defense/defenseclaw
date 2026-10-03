@@ -1442,10 +1442,10 @@ func v8TargetedCanary(parameters sdktrace.SamplingParameters) bool {
 	if !canary || strings.TrimSpace(destination) == "" || operation != v8CanaryOperationValue {
 		return false
 	}
-	return (parameters.Name == "invoke_agent diagnostic" &&
+	return (parameters.Name == observability.RuntimeCanaryAgentSpanName &&
 		bucket == string(observability.BucketAgentLifecycle) &&
 		family == observability.TelemetryFamilyAgentInvoke) ||
-		(parameters.Name == "chat gpt-4o-mini" &&
+		(parameters.Name == observability.RuntimeCanaryModelSpanName &&
 			bucket == string(observability.BucketModelIO) &&
 			family == observability.TelemetryFamilyModelChat)
 }

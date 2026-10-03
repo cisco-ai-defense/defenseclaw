@@ -256,6 +256,11 @@ in compiled-plan order. If more than four are enabled, doctor leaves their
 runtime-health checks in place and emits a bounded coverage warning instead of
 adding unbounded sequential network latency. Every doctor invocation can
 therefore create up to four diagnostic traces in Galileo.
+Each diagnostic trace (from `doctor` or `defenseclaw setup galileo test`) is an
+`invoke_agent diagnostic` root with one `chat defenseclaw-diagnostic` span. It
+names no real vendor model, and its user_metadata carries
+`defenseclaw.telemetry.canary: "true"`. Filter on that key to leave these
+traces out of model, cost and latency views.
 
 ## What you see in Galileo
 
