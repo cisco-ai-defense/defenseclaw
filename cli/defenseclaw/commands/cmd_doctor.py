@@ -8883,8 +8883,9 @@ def _verify_bedrock(api_key: str, r: _DoctorResult, *, key_env: str = "DEFENSECL
     * ``AKIA…``  → SigV4 credentials; we can't verify without signing,
                   which would pull in botocore just for the doctor.
                   Emit a ``warn`` pointing at ``aws sts get-caller-identity``.
-    * anything else → shape we don't recognize; pass with a note, same
-                      as the generic fallback in ``_check_llm_api_key``.
+    * anything else → not a Bedrock key shape; warn with a next step
+                      (Bedrock rejects it with "Must start with pre-defined
+                      prefix", GAP-2195), and don't probe it.
 
     The foundation-models list endpoint is a cheap GET that returns
     the list of models enabled for the account. ``200`` confirms auth
@@ -8901,10 +8902,15 @@ def _verify_bedrock(api_key: str, r: _DoctorResult, *, key_env: str = "DEFENSECL
         return
     if not api_key.startswith(("ABSK", "bedrock-api-key-")):
         _emit(
-            "pass",
+            "warn",
             "LLM API key (Bedrock)",
-            f"key is set ({len(api_key)} chars) but is not a Bedrock API key format doctor knows, so it is not checked",
+            f"key is set ({len(api_key)} chars) but does not look like a Bedrock API key "
+            "(ABSK... or bedrock-api-key-...), so it is not checked",
             r=r,
+            remediation=(
+                f"replace it: defenseclaw keys set {key_env} --value-stdin "
+                "(or defenseclaw setup llm), then defenseclaw-gateway restart"
+            ),
         )
         return
     region = _bedrock_region()
