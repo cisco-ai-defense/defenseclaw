@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 from unittest import mock
 
+import pytest
 from click.testing import CliRunner
 
 from tests.helpers import record_test_setup_agent_selections
@@ -84,3 +85,35 @@ def test_a_rolled_back_first_run_says_nothing_was_saved(tmp_path) -> None:
     assert row.name == "First-run rollback" and row.status == "fail"
     assert "nothing was saved" in row.detail
     assert not (tmp_path / "home" / "config.yaml").exists()
+
+
+@pytest.mark.parametrize(
+    ("name", "detail", "suffix"),
+    [
+        ("Cisco AI Defense", "MY_AID_KEY not set", "inactive until the key is set"),
+        ("Cisco AI Defense", "authentication failed (HTTP 401)", "inactive until a valid key is set"),
+        ("LLM API key", "DEFENSECLAW_LLM_KEY not set (checked env + .env)", "inactive until the key is set"),
+        ("LLM API key", "invalid key (401 Unauthorized)", "inactive until a valid key is set"),
+    ],
+)
+def test_readiness_wording_tells_a_missing_key_from_a_rejected_one(tmp_path, name, detail, suffix) -> None:
+    # GAP-2596: a rejected key still said "stays inactive until the key is set".
+    from defenseclaw.bootstrap import FirstRunOptions, StepResult, targeted_readiness
+    from defenseclaw.config import LLMConfig, default_config
+
+    with mock.patch.dict(os.environ, {"DEFENSECLAW_HOME": str(tmp_path)}):
+        cfg = default_config()
+    cfg.guardrail.enabled = True
+    cfg.guardrail.scanner_mode = "remote"
+    cfg.llm = LLMConfig(provider="anthropic", model="claude-haiku-4-5", api_key_env="DEFENSECLAW_LLM_KEY")
+    failed = StepResult(name, "fail", detail, "defenseclaw doctor")
+    other = StepResult("other", "pass", "ok")
+    with mock.patch(
+        "defenseclaw.bootstrap._doctor_check",
+        side_effect=lambda _fn, _cfg, label: failed if label == name else other,
+    ):
+        steps = targeted_readiness(cfg, FirstRunOptions(connector="claudecode", start_gateway=False))
+
+    row = next(s for s in steps if s.name == name)
+    assert row.status == "warn"
+    assert row.detail.startswith(f"{detail}; ") and row.detail.endswith(suffix)
