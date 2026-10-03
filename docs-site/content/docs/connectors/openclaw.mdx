@@ -234,26 +234,26 @@ interception** row when the plugin self-test cannot prove a rewrite onto
 
 ## What the plugin does
 
-<Sequence
-  caption="The bundled plugin redirects recognized LLM traffic through the guardrail proxy and calls the inspect API before tool execution. Gateway is defenseclaw-gateway."
-  participants={[
-    { id: 'u',  label: 'User',                kind: 'operator' },
-    { id: 'oc', label: 'OpenClaw', kind: 'agent' },
-    { id: 'p',  label: 'Plugin',   kind: 'connector' },
-    { id: 'g',  label: 'Gateway',  kind: 'gateway' },
-  ]}
+The plugin loads inside OpenClaw and hands two kinds of work to the gateway.
+Recognized LLM calls go through the guardrail proxy, which checks the request
+and the response. Before each tool call, the plugin asks the inspect API for a
+verdict. The [OpenClaw integration page](/docs/openclaw#end-to-end-flow) walks
+through both as sequences, including approvals.
+
+<Flow
+  direction="TB"
+  caption="The plugin's two checkpoints. Both listeners belong to defenseclaw-gateway; the ports shown are the defaults."
 >
-  <Message from="u"  to="oc" label="prompt" />
-  <Message from="oc" to="p"  label="recognized LLM request" />
-  <Message from="p"  to="g"  label="proxy request + X-DC-Target-URL" />
-  <Message from="g"  to="p"  kind="return" label="inspected upstream response" />
-  <Message from="p"  to="oc" kind="return" label="response (or policy block)" />
-  <Message from="oc" to="p"  label="before_tool_call(name, args)" />
-  <Message from="p"  to="g"  label="POST /api/v1/inspect/tool" />
-  <Message from="g"  to="p"  kind="return" label="verdict" />
-  <Message from="p"  to="oc" kind="return" label="allow / block / pause" />
-  <Message from="oc" to="u"  label="response" />
-</Sequence>
+  <Node id="oc" kind="agent">OpenClaw</Node>
+  <Node id="p" kind="connector">{`DefenseClaw plugin\nloads inside OpenClaw`}</Node>
+  <Node id="proxy" kind="gateway">{`Guardrail proxy :4000\nchecks request and response`}</Node>
+  <Node id="api" kind="gateway">{`Inspect API :18970\nchecks the tool call`}</Node>
+  <Node id="llm" kind="generic">Model provider</Node>
+  <Edge from="oc" to="p" label="runs" />
+  <Edge from="p" to="proxy" label="redirects LLM calls" />
+  <Edge from="p" to="api" label="asks before tools" />
+  <Edge from="proxy" to="llm" label="forwards if allowed" />
+</Flow>
 
 ## Hook capabilities
 
