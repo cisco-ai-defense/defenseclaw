@@ -250,3 +250,36 @@ func keys(m map[string]AIEvidence) []string {
 	}
 	return out
 }
+
+// GAP-2379: a stock Hermes install bundles 58 skills in category folders.
+// Every one is named and the signal is complete, not cap_exceeded.
+func TestSignalFromDirectoryChildrenNamesEveryStockHermesSkill(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HERMES_HOME", home)
+	root := filepath.Join(home, "skills")
+	const stock = 58
+	for i := 0; i < stock; i++ {
+		dir := filepath.Join(root, fmt.Sprintf("category-%02d", i%12), fmt.Sprintf("skill-%02d", i))
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatalf("prepare skill: %v", err)
+		}
+		body := []byte(fmt.Sprintf("---\nname: skill-%02d\n---\n", i))
+		if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), body, 0o600); err != nil {
+			t.Fatalf("write skill: %v", err)
+		}
+	}
+	s := &ContinuousDiscoveryService{opts: AIDiscoveryOptions{HomeDir: home}}
+	signal := s.signalFromDirectoryChildren(AISignature{ID: "hermes"}, SignalSkill, "skill", root)
+	if signal.Partial || signal.CoverageReason != "" {
+		t.Fatalf("stock Hermes skills: Partial=%v CoverageReason=%q, want complete", signal.Partial, signal.CoverageReason)
+	}
+	named := 0
+	for _, ev := range signal.Evidence {
+		if ev.Type == "skill_entry" {
+			named++
+		}
+	}
+	if named != stock {
+		t.Fatalf("named %d Hermes skills, want %d", named, stock)
+	}
+}
