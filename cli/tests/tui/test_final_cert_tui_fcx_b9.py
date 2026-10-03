@@ -73,9 +73,9 @@ def test_overview_with_the_gateway_down_drops_uptime_and_dates_the_last_sample(t
     app.overview_model.set_health(HealthSnapshot(uptime_ms=91_000))
     app.runtime_model.snapshot = RuntimeSnapshot(scanned_at="2026-10-03T06:00:05Z")
     app.overview_model.set_gateway_probe("running")
-    assert "uptime=91s" in _plain(app._overview_renderable())  # noqa: SLF001
+    assert "up 1m" in _plain(app._overview_renderable())  # noqa: SLF001
     app.overview_model.set_gateway_probe("stopped")
-    assert "uptime=" not in _plain(app._overview_renderable())  # noqa: SLF001
+    assert "up 1m" not in _plain(app._overview_renderable())  # noqa: SLF001
     runtime = _plain(app._overview_runtime_panel())  # noqa: SLF001
     assert re.search(r"Last sample at (\d\d:\d\d:\d\d|Oct 0[23] \d\d:\d\d); it", runtime), runtime
     assert " ago" not in runtime

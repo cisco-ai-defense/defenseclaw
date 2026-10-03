@@ -210,6 +210,9 @@ class OverviewConfig:
     # roster silently collapsing (chip vanishes, ``m`` stops cycling, tiles
     # disappear). Empty (the common case) renders nothing.
     roster_error: str = ""
+    # ``openshell.enabled``: a sandbox is set up. Without one the Sandbox
+    # row reads "disabled" whether or not the gateway runs (GAP-2361).
+    sandbox_enabled: bool = False
 
     def connector_is_disabled(self, name: str) -> bool:
         """True when ``name`` is in the roster but enforcement is disabled."""
@@ -1056,6 +1059,10 @@ class OverviewPanelModel:
             # Match the "Gateway is not running" banner instead of "unknown".
             return self.gateway_availability().state if self.gateway_probe is not None else "unknown"
         if self.gateway_down() and key in _GATEWAY_HOSTED_SERVICES:
+            # A sandbox that is not set up is not a service that went down
+            # with the gateway: it reads "disabled" in both states (GAP-2361).
+            if key == "sandbox" and self.cfg is not None and not self.cfg.sandbox_enabled:
+                return "disabled"
             return "offline"
         if self.health is None:
             return "unknown"
