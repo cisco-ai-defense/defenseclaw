@@ -168,6 +168,7 @@ def quickstart_cmd(
     from defenseclaw.commands.cmd_setup import (
         _detect_installed_connectors,
         _read_picked_connector,
+        _refuse_hook_switch_over_configured_proxy,
     )
     from defenseclaw.ux import CLIRenderer
 
@@ -175,6 +176,7 @@ def quickstart_cmd(
     if agent_name:
         connector = agent_name
         _refuse_roster_narrowing(cfg_mod, connector, mode)
+        _refuse_hook_switch_over_configured_proxy(connector)
     else:
         data_dir = str(cfg_mod.default_data_path())
         picked_path = os.path.join(data_dir, "picked_connector")

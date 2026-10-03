@@ -301,6 +301,11 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
                 f"connector {requested!r} is {support.status} on "
                 f"{platform_support.host_os()}: {support.reason}"
             )
+    if connector:
+        from defenseclaw.commands.cmd_setup import _refuse_hook_switch_over_configured_proxy
+
+        # GAP-2455: never silently replace a guarded OpenClaw/ZeptoClaw.
+        _refuse_hook_switch_over_configured_proxy(_normalize_connector_arg(connector))
 
     if _use_guided_first_run(
         non_interactive=non_interactive,
