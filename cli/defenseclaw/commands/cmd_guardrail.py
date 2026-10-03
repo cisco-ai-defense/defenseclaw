@@ -1364,10 +1364,14 @@ def _apply_global_fail_mode_transaction(
             used_full_restart = False
             gateway_stopped = False
             try:
+                # GAP-2071: a connector disabled on its own has no hooks to
+                # refresh or verify; its value is only saved for later.
+                disabled = frozenset(name for name in transaction_targets if _disabled_on_its_own(gc, name))
+                live_targets = [name for name in transaction_targets if name not in disabled]
                 runtime_targets = [
-                    name for name in transaction_targets if normalize_connector(name) in _RUNTIME_FAIL_MODE_CONNECTORS
+                    name for name in live_targets if normalize_connector(name) in _RUNTIME_FAIL_MODE_CONNECTORS
                 ]
-                if transaction_targets and len(runtime_targets) == len(transaction_targets):
+                if live_targets and len(runtime_targets) == len(live_targets):
                     for name in runtime_targets:
                         reconcile_connector_registration(app.cfg, name)
                 elif not _gateway_running(app):
@@ -1387,6 +1391,7 @@ def _apply_global_fail_mode_transaction(
                         app.cfg.gateway.port,
                         connector=single_connector,
                         connectors=_active_connector_set(app.cfg, single_connector),
+                        summary_exclude=disabled,
                     )
                     for name in runtime_targets:
                         state = resolve_connector_fail_mode(app.cfg, name)
@@ -2671,7 +2676,7 @@ def guardrail_allow_private_upstream(app: AppContext, targets: tuple[str, ...], 
     # does; the OpenClaw error names only this command (GAP-1897).
     outcome = _apply_to_running_gateway(app, needs_restart=True, restart=restart, quiet=False)
     click.echo("  " + _GATEWAY_OUTCOMES[outcome])
-    if outcome == "restart_failed":
+    if outcome in _GATEWAY_UNCONFIRMED:
         raise SystemExit(1)
 
 
@@ -2870,7 +2875,14 @@ _GATEWAY_OUTCOMES = {
         "The change is saved, but the gateway restart failed; run defenseclaw-gateway restart, "
         "then defenseclaw doctor."
     ),
+    "still_starting": (
+        "The change is saved. The gateway is still starting and was kept running, so protection is "
+        "not confirmed yet; check it with: defenseclaw-gateway status (restart it only if it does "
+        "not become healthy)."
+    ),
 }
+#: Outcomes that leave the change unconfirmed: the command exits 1.
+_GATEWAY_UNCONFIRMED = frozenset({"restart_failed", "still_starting"})
 
 
 def _resolve_scope_connector(app: AppContext, connector: str) -> tuple[str, str]:
@@ -3019,7 +3031,9 @@ def _apply_to_running_gateway(app: AppContext, *, needs_restart: bool, restart: 
 
     with contextlib.redirect_stdout(sys.stderr) if quiet else contextlib.nullcontext():
         restarted = cmd_setup._restart_defense_gateway(app.cfg.data_dir, start_if_stopped=False)
-    return "restarted" if restarted else "restart_failed"
+    if restarted:
+        return "restarted"
+    return "still_starting" if cmd_setup._take_gateway_left_starting() else "restart_failed"
 
 
 def _log_guardrail_change(app: AppContext, operation: str, details: str) -> None:
@@ -3155,6 +3169,8 @@ def use_pack_cmd(
                 ux.warn(warning, indent="  ")
             if ok:
                 ux.ok(message, indent="  ")
+            elif gateway == "still_starting":
+                ux.warn(message, indent="  ")
             else:
                 ux.err(message, indent="  ")
         if exit_code:
@@ -3200,8 +3216,8 @@ def use_pack_cmd(
         _log_use_pack(app, f"scope={connector_key} pack={fallback.pack} previous={previous_name}")
         outcome = _apply_to_running_gateway(app, needs_restart=True, restart=restart, quiet=json_out)
         _finish(
-            ok=outcome != "restart_failed",
-            exit_code=1 if outcome == "restart_failed" else 0,
+            ok=outcome not in _GATEWAY_UNCONFIRMED,
+            exit_code=1 if outcome in _GATEWAY_UNCONFIRMED else 0,
             scope=scope,
             pack_name=fallback.pack,
             path=fallback.path,
@@ -3309,8 +3325,8 @@ def use_pack_cmd(
     )
     outcome = _apply_to_running_gateway(app, needs_restart=True, restart=restart, quiet=json_out)
     _finish(
-        ok=outcome != "restart_failed",
-        exit_code=1 if outcome == "restart_failed" else 0,
+        ok=outcome not in _GATEWAY_UNCONFIRMED,
+        exit_code=1 if outcome in _GATEWAY_UNCONFIRMED else 0,
         scope=scope,
         pack_name=pack_name,
         path=path,
@@ -3562,7 +3578,7 @@ def _change_protection(
         else:
             if warning:
                 ux.warn(warning, indent="  ")
-            (ux.ok if ok else ux.err)(message, indent="  ")
+            (ux.ok if ok else ux.warn if gateway == "still_starting" else ux.err)(message, indent="  ")
             for note in notes or []:
                 ux.subhead(note, indent="    ")
         if exit_code:
@@ -3720,8 +3736,8 @@ def _change_protection(
         )
     notes.extend(_not_covered_notes(not_covered, pack.name, enable=enable))
     _finish(
-        ok=outcome != "restart_failed",
-        exit_code=1 if outcome == "restart_failed" else 0,
+        ok=outcome not in _GATEWAY_UNCONFIRMED,
+        exit_code=1 if outcome in _GATEWAY_UNCONFIRMED else 0,
         pack_path=target,
         protection=desired,
         validation=validation,
@@ -3818,7 +3834,7 @@ def mode_cmd(
                 )
             )
         else:
-            (ux.ok if ok else ux.err)(message, indent="  ")
+            (ux.ok if ok else ux.warn if gateway == "still_starting" else ux.err)(message, indent="  ")
             for note in notes or []:
                 ux.subhead(note, indent="    ")
         if exit_code:
@@ -3965,8 +3981,8 @@ def mode_cmd(
         for c in not_covered
     )
     _finish(
-        ok=outcome != "restart_failed",
-        exit_code=1 if outcome == "restart_failed" else 0,
+        ok=outcome not in _GATEWAY_UNCONFIRMED,
+        exit_code=1 if outcome in _GATEWAY_UNCONFIRMED else 0,
         new_mode=new_mode,
         previous=previous,
         source=source,
@@ -4061,7 +4077,7 @@ def _set_tool_call_level(
                 )
             )
         else:
-            (ux.ok if ok else ux.err)(message, indent="  ")
+            (ux.ok if ok else ux.warn if gateway == "still_starting" else ux.err)(message, indent="  ")
             for note in notes or []:
                 ux.subhead(note, indent="    ")
         if exit_code:
@@ -4171,8 +4187,8 @@ def _set_tool_call_level(
                 f"{policy_catalog.level_name(old_rank)} --connector {name}"
             )
     _finish(
-        ok=outcome != "restart_failed",
-        exit_code=1 if outcome == "restart_failed" else 0,
+        ok=outcome not in _GATEWAY_UNCONFIRMED,
+        exit_code=1 if outcome in _GATEWAY_UNCONFIRMED else 0,
         message=f"{message} {_GATEWAY_OUTCOMES[outcome]}",
         previous=previous,
         gateway=outcome,

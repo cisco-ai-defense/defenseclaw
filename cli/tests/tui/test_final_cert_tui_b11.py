@@ -144,14 +144,19 @@ def test_tab_bar_names_tabs_before_minor_badges_and_brand(tmp_path, monkeypatch)
     unread = {"alerts": 22, "audit": 13, "logs": 1000}
     for active in ("registries", "setup", "overview"):
         previous = len(PANELS)
-        for width in range(66, 180):
+        # From 67 cells (wider than NARROW_STRIP) other tabs keep one label
+        # whichever tab is open (GAP-2078); at that step one tab can give up
+        # its name, so the check starts there.
+        for width in range(tab_fit.NARROW_STRIP + 1, 180):
             labels = fit_tab_labels(PANELS, active, unread, width)
             assert strip_width(tuple(labels.values())) <= width
             bare = sum(" " not in label for label in labels.values())
             assert bare <= previous, (active, width, labels)
             previous = bare
     labels = fit_tab_labels(PANELS, "registries", unread, 136)
-    assert sum(" " not in label for label in labels.values()) <= 2
+    # Other tabs keep one label whichever tab is open (GAP-2078), which
+    # costs one name here: three bare keys, not five to seven.
+    assert sum(" " not in label for label in labels.values()) <= 3
     assert labels["registries"] == "R Registries" and "²²" in labels["alerts"]
 
     app = snapshot_app(tmp_path)

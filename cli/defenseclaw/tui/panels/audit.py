@@ -474,10 +474,13 @@ class AuditPanelModel:
 
     def filter_same_target(self) -> bool:
         event = self.selected()
-        if event is None or not event.target:
+        # The TARGET the table shows, also for hook-decision, guardrail and
+        # ACP rows that have no target column of their own (GAP-2076).
+        target = _event_target(event) if event is not None else ""
+        if not target:
             return False
         self.common_filter = ""
-        self.correlation_target = event.target
+        self.correlation_target = target
         self.correlation_run_id = ""
         self.apply_filter()
         return True
@@ -848,7 +851,7 @@ class AuditPanelModel:
             return False
         if self.common_filter and not _matches_common_filter(event, self.common_filter):
             return False
-        if self.correlation_target and event.target != self.correlation_target:
+        if self.correlation_target and _event_target(event) != self.correlation_target:
             return False
         if self.correlation_run_id and event.run_id != self.correlation_run_id:
             return False
@@ -1205,7 +1208,7 @@ def _event_field(event: Event, field: str) -> str:
     if field == "severity":
         return _display_severity(event).lower()
     if field == "target":
-        return event.target.lower()
+        return _event_target(event).lower()
     if field == "type":
         return _target_type_from_action(event.action).lower()
     return ""
@@ -1239,7 +1242,7 @@ def _event_haystack(event: Event) -> str:
         (
             event.id,
             event.action,
-            event.target,
+            _event_target(event),
             event.actor,
             event.severity,
             _display_severity(event),
@@ -1494,6 +1497,12 @@ def _row_target_label(event: Event) -> str:
         # their own; name the call instead of a blank cell (GAP-1510).
         return _truncate(_structured_target_label(event.structured), 32)
     return _truncate(event.target, 32)
+
+
+def _event_target(event: Event) -> str:
+    """The row's target: its own, else the call it names (GAP-1510, GAP-2076)."""
+
+    return event.target or _structured_target_label(event.structured)
 
 
 def _structured_target_label(structured: object) -> str:

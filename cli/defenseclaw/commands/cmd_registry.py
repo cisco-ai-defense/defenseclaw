@@ -389,6 +389,15 @@ def add_cmd(  # noqa: PLR0913 - mirrors the prompt surface
     ux.ok(f"Registered registry source {sid!r}.")
     # The success line first, then any stopped-gateway note (GAP-1718).
     _log_registry_action(app, "registry-add", add_details)
+    # The wizard offers the sync itself and prints this only on "n" (GAP-2075).
+    if not click.get_current_context().meta.get(_WIZARD_SYNC_PROMPT_KEY):
+        _print_sync_hint(sid)
+
+
+_WIZARD_SYNC_PROMPT_KEY = "defenseclaw.registry.wizard_offers_sync"
+
+
+def _print_sync_hint(sid: str) -> None:
     ux.subhead(
         f"Run `defenseclaw registry sync {sid}` to fetch + scan + promote entries."
     )
@@ -1782,18 +1791,25 @@ def wizard_cmd(ctx: click.Context, app: AppContext) -> None:
         f"Content ({'/'.join(REGISTRY_CONTENT_TYPES)})", default="skill",
     )
     url = ""
-    if kind == "skills_sh":
+    kind_key = kind.strip().lower()
+    if kind_key == "skills_sh":
         url = click.prompt(
             "Manifest URL or view (curated/all-time/trending/hot)",
             default="curated",
         )
-    elif kind != "clawhub":
+    elif kind_key == "file":
+        # A local file, not a URL (GAP-2075); store it with ~ expanded.
+        url = os.path.expanduser(click.prompt("Manifest file path (absolute or ~/...)").strip())
+    elif kind_key == "git":
+        url = click.prompt("Git repository URL")
+    elif kind_key != "clawhub":
         url = click.prompt("Manifest URL")
     auth_env = ""
     # Only sources fetched over the network send a token (GAP-2123).
     if kind.strip().lower() != "file" and click.confirm("Use an auth token (read from an env var)?", default=False):
         auth_env = click.prompt("Env var name", default="DEFENSECLAW_REGISTRY_TOKEN")
 
+    ctx.meta[_WIZARD_SYNC_PROMPT_KEY] = True
     ctx.invoke(
         add_cmd,
         source_id=sid,
@@ -1808,18 +1824,20 @@ def wizard_cmd(ctx: click.Context, app: AppContext) -> None:
         emit_json=False,
     )
 
-    if click.confirm("Sync now?", default=True):
-        scan = click.confirm("Run scanners during sync?", default=True)
-        ctx.invoke(
-            sync_cmd,
-            source_ids=(sid,),
-            sync_all_flag=False,
-            include_disabled=False,
-            scan=scan,
-            allow_private=False,
-            no_promote=False,
-            emit_json=False,
-        )
+    if not click.confirm("Sync now?", default=True):
+        _print_sync_hint(sid)
+        return
+    scan = click.confirm("Run scanners during sync?", default=True)
+    ctx.invoke(
+        sync_cmd,
+        source_ids=(sid,),
+        sync_all_flag=False,
+        include_disabled=False,
+        scan=scan,
+        allow_private=False,
+        no_promote=False,
+        emit_json=False,
+    )
 
 
 # ---------------------------------------------------------------------------
