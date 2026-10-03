@@ -405,7 +405,7 @@ def test_registries_panel_source_detail_preserves_full_id_and_cache_safety(tmp_p
     assert detail is not None
     fields = dict(detail.fields)
     assert detail.title == f"SOURCE: {long_id}"
-    assert fields["Source ID"] == long_id
+    assert "Source ID" not in fields
     assert fields["URL"] == "https://example.com/index.json"
     assert Path(fields["Cache Path"]).parts[-3:] == ("registries", long_id, "index.json")
 

@@ -45,6 +45,7 @@ from defenseclaw.tui.command_line import (
     CommandLineError,
     ParsedCommand,
     command_result_summary,
+    failure_result_summary,
     infer_command_risk,
     is_command_hint,
     is_listing_detail,
@@ -8580,6 +8581,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             tail = self._strip_last_output
             if _is_bare_json_punctuation(tail):
                 tail = ""
+            result = result or failure_result_summary(self._strip_label, self._strip_output_lines)
             self._strip_summary = result or tail or f"exit {exit_code} · no output captured"
         # Append a contextual "next thing to try" hint when we have a
         # confident suggestion (e.g. the readiness key after `setup

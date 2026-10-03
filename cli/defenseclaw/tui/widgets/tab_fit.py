@@ -347,15 +347,16 @@ def _named_fit(
 
     Counts are compact ("8 Logs⁶⁴"). The Alerts count always shows; the
     other counts take the cells the names leave free, most important tab
-    first, including the room kept for a long open name (GAP-2077). The
-    counts of tabs less important than Audit (Activity, AI Discovery, ...)
-    take that room only while every tab still opens under its full name: a
-    new Activity count turned the open "R Registries" into "R Registri…"
-    (GAP-2372). A count that doesn't fit waits; it never costs a name. The
-    counts don't depend on the open tab, so switching panels never relabels
-    a third tab. The open tab reads in full, or "V AI Disco…" when the
-    Alerts, Logs or Audit count took that room: it is the one label that may
-    change, and its panel title names it.
+    first, Logs and Audit before the rest. Only the Alerts, Logs and Audit
+    counts may take the room kept for a long open name (GAP-2077); every
+    other count takes room only while every tab still opens under its full
+    name: an Activity count (GAP-2372), and Skills, MCPs and Plugins counts
+    beside a Logs and Audit backlog (GAP-2403), turned the open
+    "R Registries" into "R Registri…". A count that doesn't fit waits; it
+    never costs a name. The counts don't depend on the open tab, so switching
+    panels never relabels a third tab. The open tab reads in full, or
+    "V AI Disco…" when the Alerts, Logs or Audit count took that room: it is
+    the one label that may change, and its panel title names it.
     """
 
     keys = {name: key for name, key, _title in panels}
@@ -372,9 +373,10 @@ def _named_fit(
     spare = 1 if reserve else 0
     shown: set[str] = set()
     for name in sorted(
-        (name for name in keys if unread.get(name, 0)), key=lambda name: (name != "alerts", _rank(name))
+        (name for name in keys if unread.get(name, 0)),
+        key=lambda name: (name != "alerts", name not in _OPEN_NAME_COUNTS, _rank(name)),
     ):
-        room = spare if _rank(name) <= _rank("audit") else reserve
+        room = spare if name in _OPEN_NAME_COUNTS else reserve
         if name == "alerts" or strip_width(tuple(render(named, shown | {name}).values())) + room <= width:
             shown.add(name)
     title = titles[active]
@@ -386,6 +388,8 @@ def _named_fit(
     return render(named, shown - {"alerts"})
 
 
+# The counts that may shorten the open tab's name (GAP-2077, GAP-2403).
+_OPEN_NAME_COUNTS = frozenset({"alerts", "logs", "audit"})
 _WIDE_CACHE: dict[tuple[object, ...], tuple[dict[str, str], dict[str, str]]] = {}
 _NAMES_CACHE: dict[tuple[object, ...], dict[str, str] | None] = {}
 

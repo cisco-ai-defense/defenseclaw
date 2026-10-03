@@ -1061,6 +1061,11 @@ class OverviewPanelModel:
         if key == "gateway" and (self.health is None or self.gateway_down()):
             # Match the "Gateway is not running" banner instead of "unknown".
             return self.gateway_availability().state if self.gateway_probe is not None else "unknown"
+        if key == "sinks" and (self.health is None or self.health.sinks.state.strip().lower() in {"", "unknown"}):
+            # The gateway does not report sink health, so SERVICES hides the
+            # row; the stopped-gateway fallback showed "Sinks offline" only
+            # then (GAP-1158, GAP-2396).
+            return "unknown"
         if self.gateway_down() and key in _GATEWAY_HOSTED_SERVICES:
             # A sandbox that is not set up, or AI discovery that is turned
             # off, is not a service that went down with the gateway: it

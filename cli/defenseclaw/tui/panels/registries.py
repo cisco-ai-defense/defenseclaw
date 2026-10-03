@@ -368,7 +368,7 @@ class RegistriesPanelModel:
                 row.name,
                 row.type,
                 row.status or "-",
-                row.severity or "-",
+                entry_severity_label(row),
                 row.approval_marker,
                 row.location,
             )
@@ -606,8 +606,8 @@ def registry_badge(source_id: str, *, max_id_chars: int = 18) -> str:
 
 
 def source_detail_info(source: RegistrySourceRow, data_dir: str | Path | None = None) -> RegistryDetailInfo:
+    # The title already names the source (GAP-2402).
     fields: list[tuple[str, str]] = [
-        ("Source ID", source.id),
         ("Kind", source.kind),
         ("Content", source.content),
         ("Enabled", source.enabled_label),
@@ -636,6 +636,15 @@ def source_detail_info(source: RegistrySourceRow, data_dir: str | Path | None = 
         except Exception as exc:  # noqa: BLE001 - detail view should surface unsafe configured IDs.
             fields.append(("Cache Safety", str(exc)))
     return RegistryDetailInfo(f"SOURCE: {source.id}", tuple(fields))
+
+
+def entry_severity_label(entry: RegistryEntryRow) -> str:
+    """The severity word ``mcp list`` uses: CLEAN, not INFO, with no findings (GAP-2402)."""
+
+    severity = (entry.severity or "").strip()
+    if entry.findings == 0 and severity.upper() in {"", "INFO", "NONE", "CLEAN"}:
+        return "CLEAN" if entry.status == "clean" else "-"
+    return severity or "-"
 
 
 def entry_status_label(status: str) -> str:
@@ -718,7 +727,7 @@ def entry_detail_info(entry: RegistryEntryRow) -> RegistryDetailInfo:
         ("Source ID", entry.source_id),
         ("Type", entry.type),
         ("Status", entry_status_label(entry.status)),
-        ("Severity", entry.severity or "-"),
+        ("Severity", entry_severity_label(entry)),
         ("Findings", str(entry.findings)),
         ("Approved", "yes" if entry.approved else "no"),
         ("Rejected", "yes" if entry.rejected else "no"),
