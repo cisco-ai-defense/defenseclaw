@@ -38,6 +38,7 @@ RuleProfile = str  # "default" | "strict"
 # ---------------------------------------------------------------------------
 
 DANGEROUS_PERMISSIONS: set[str] = {
+    "*",  # full wildcard: every capability (GAP-2277)
     "fs:write",
     "fs:*",
     "net:*",

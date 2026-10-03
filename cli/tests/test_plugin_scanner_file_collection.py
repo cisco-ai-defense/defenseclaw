@@ -460,6 +460,20 @@ class TestStandardManifestDirectoryStructure(unittest.TestCase):
         self.assertEqual(len(perm_findings), 1)
         self.assertTrue(self._has_location(result, "PERM-DANGEROUS", "/.claude-plugin/plugin.json"))
 
+    def test_full_wildcard_permission_is_dangerous(self):
+        # GAP-2277: a bare "*" grants everything, so it must not scan clean.
+        root = os.path.join(self.tmp, "full-wildcard")
+        os.makedirs(os.path.join(root, ".claude-plugin"))
+        with open(os.path.join(root, ".claude-plugin", "plugin.json"), "w", encoding="utf-8") as f:
+            json.dump({"name": "p", "version": "1.0.0", "permissions": ["*"]}, f)
+
+        result = scan_plugin(root)
+
+        rule_ids = [finding.rule_id for finding in result.findings]
+        self.assertIn("PERM-DANGEROUS", rule_ids)
+        self.assertNotIn("PERM-NONE", rule_ids)
+        self.assertTrue(self._has_location(result, "PERM-DANGEROUS", "/.claude-plugin/plugin.json"))
+
     def test_regular_file_named_like_manifest_directory_remains_hidden(self):
         root = os.path.join(self.tmp, "regular-file")
         os.makedirs(root)

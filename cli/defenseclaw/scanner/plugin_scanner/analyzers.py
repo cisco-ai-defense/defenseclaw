@@ -93,6 +93,11 @@ def _manifest_location(target: str, manifest: PluginManifest, perm: str | None =
 # ---------------------------------------------------------------------------
 
 
+def _permission_scope(perm: str) -> str:
+    scope = perm.split(":")[0]
+    return "unrestricted access to every capability" if scope == "*" else f"broad {scope} access"
+
+
 def check_permissions(
     manifest: PluginManifest,
     findings: list[Finding],
@@ -132,7 +137,7 @@ def check_permissions(
                     title=f"Dangerous permission: {perm}",
                     evidence=f'"permissions": ["{perm}"]',
                     description=(
-                        f'Plugin requests "{perm}" which grants broad {perm.split(":")[0]} access. '
+                        f'Plugin requests "{perm}" which grants {_permission_scope(perm)}. '
                         "This permission should be scoped more narrowly."
                     ),
                     location=_manifest_location(target, manifest, perm),
