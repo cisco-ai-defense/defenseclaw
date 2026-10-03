@@ -41,7 +41,7 @@ operator workflows:
 | Upgrade | [Upgrade](https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/upgrade/) |
 | Windows | [Native Windows](https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/windows/) |
 | Connectors | [Connector compatibility](https://cisco-ai-defense.github.io/defenseclaw/docs/connectors/compatibility/) |
-| Guardrails | [Guardrail setup](https://cisco-ai-defense.github.io/defenseclaw/docs/setup/guardrail/) |
+| Guardrails | [Guardrail setup](https://cisco-ai-defense.github.io/defenseclaw/docs/guardrail/) |
 | Configuration | [Configuration reference](https://cisco-ai-defense.github.io/defenseclaw/docs/reference/configuration/) |
 | CLI | [CLI reference](https://cisco-ai-defense.github.io/defenseclaw/docs/reference/cli/) |
 | Observability | [Observability](https://cisco-ai-defense.github.io/defenseclaw/docs/observability/) |

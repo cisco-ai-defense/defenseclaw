@@ -10,11 +10,13 @@ keywords:
   - DefenseClaw connector setup generator
 ---
 
-`defenseclaw setup guardrail` is fully scriptable — every prompt in the interactive wizard has a flag, with two exceptions, listed under **Prompt → flag mapping** on the [Guardrail page](/docs/guardrail). The generator below lets you build the exact `--non-interactive` invocation for any connector without leaving the docs. Pick the knobs; the command rewrites itself live; the **Notes & validation** panel flags combinations that won't behave the way you expect (e.g. HITL in observe mode, remote scanner with no Cisco endpoint, connectors that can't fail closed).
+`defenseclaw setup guardrail` is fully scriptable — every prompt in the interactive wizard has a flag, with two exceptions, listed under [Prompt-flag mapping](/docs/guardrail#prompt-flag-mapping) on the Guardrail page. The generator below lets you build the exact `--non-interactive` invocation for any connector without leaving the docs. Pick the knobs; the command rewrites itself live; the **Notes & validation** panel flags combinations that won't behave the way you expect (e.g. HITL in observe mode, remote scanner with no Cisco endpoint, connectors that can't fail closed).
 
 <Callout>
 Generated commands are display-only. Nothing on this page runs against your machine. Select **Bash / zsh** for macOS or Linux, or **PowerShell** for native Windows, then copy the result into that host's terminal.
 </Callout>
+
+## Build a command
 
 <CommandGenerator />
 

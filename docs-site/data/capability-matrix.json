@@ -154,7 +154,7 @@
       "id": "omnigent",
       "label": "OmniGent",
       "windowsSupport": "degraded",
-      "windowsNote": "Native Windows is limited to OmniGent 0.7.x server and SDK harnesses; terminal wrappers and filesystem, network, and L7 sandbox parity are unavailable.",
+      "windowsNote": "Native Windows supports OmniGent 0.7.x through 0.13.x server and SDK harnesses in a degraded mode; terminal wrappers and filesystem, network, and L7 sandbox parity are unavailable.",
       "summary": "Custom policy bridge with allow, ask, and deny enforcement.",
       "family": "hooks",
       "toolInspection": "pre-execution + response-scan",

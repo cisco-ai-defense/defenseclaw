@@ -266,11 +266,11 @@ describe('feature demo catalog', () => {
     }
   });
 
-  it('labels the supported Cursor walkthrough as synthetic without claiming validation evidence', () => {
-    assert.match(cursorStory, /title="Synthetic walkthrough"/);
-    assert.match(cursorStory, /not an executable fixture, official-client test,\s*or certification record/);
-    assert.match(cursorStory, /Cursor is supported, while validated evidence remains empty/);
-    assert.match(cursorStory, /separate authenticated acceptance campaign/);
+  it('keeps the Cursor walkthrough safe and does not claim live validation evidence', () => {
+    assert.match(cursorStory, /title="Safe by design"/);
+    assert.match(cursorStory, /placeholder text/);
+    assert.match(cursorStory, /\.invalid/);
+    assert.doesNotMatch(cursorStory, /verified live|certified|validated evidence/i);
     assert.match(cursorStory, /permission: \"deny\"/);
     assert.match(cursorStory, /conflict-detection\s+API/);
     assert.match(cursorStory, /does not enable native ask\/HITL/);

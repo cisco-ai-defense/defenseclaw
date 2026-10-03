@@ -5953,7 +5953,7 @@
     {
       "name": "DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST",
       "category": "security_opt_out",
-      "purpose": "Relax the webhook SSRF guard to permit RFC1918 / loopback / link-local destinations. Required for local-development setups (e.g. webhook against http://127.0.0.1:5000); a production setup should not use this.",
+      "purpose": "Relax the webhook SSRF guard to permit localhost and loopback destinations only; private (RFC 1918), link-local and cloud-metadata addresses stay blocked. Required for local-development setups (e.g. webhook against http://127.0.0.1:5000); a production setup should not use this.",
       "default": "unset (SSRF guard blocks private IPs)",
       "accepted_values": [
         "1",

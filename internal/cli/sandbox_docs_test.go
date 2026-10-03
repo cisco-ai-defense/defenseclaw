@@ -256,7 +256,7 @@ func TestSandboxDocsExitStatuses(t *testing.T) {
 		return strings.Join(strings.Fields(part), " ")
 	}
 	reference := read(filepath.Join("reference", sandboxDocsPage), "- **Exit status.**", "\n- ")
-	guide := read(filepath.Join("setup", "sandbox.mdx"), "Exit statuses:", "\n\n")
+	guide := read(filepath.Join("sandboxes", "guide.mdx"), "Exit statuses:", "\n\n")
 	for _, c := range []struct {
 		code      int
 		reference string

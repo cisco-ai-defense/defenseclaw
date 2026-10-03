@@ -498,10 +498,13 @@ posture. See [ACP guard](/docs/acp-guard).
 
 ### Correlation ledger
 
-Each read route accepts exactly one supported identity anchor (for example
-`record_id`, `evaluation_id` is not a supported query key here,
-`semantic_event_id`, `session_id`, `trace_id`, or `tool_invocation_id`) and
-supports bounded cursor pagination.
+Each read route takes exactly one identity anchor as a query parameter:
+`record_id`, `semantic_event_id`, `logical_event_id`, `session_id`, `turn_id`,
+`agent_id`, `lifecycle_id`, `execution_id`, `model_request_id`,
+`model_response_id`, `tool_invocation_id` or `trace_id`. `evaluation_id` is
+not an anchor. `span_id` narrows a `trace_id` anchor, and
+`connector_instance_id` narrows any anchor to one connector instance. Results
+page with `limit` (at most 500), `after_time` and `after_id`.
 
 | Method | Path | Purpose |
 | --- | --- | --- |

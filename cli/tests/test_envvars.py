@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -39,8 +40,14 @@ def _doc_rows_by_name(path: Path) -> dict[str, list[str]]:
     for line in path.read_text(encoding="utf-8").splitlines():
         if not line.startswith("| `DEFENSECLAW_"):
             continue
-        cells = [cell.strip() for cell in line.strip("|").split("|")]
-        rows[cells[0].strip("`")] = cells
+        # Row shape: | `NAME`<br/>Impact: X<br/>Default: Y<br/>Values: Z | ... |
+        # Impact is omitted for variables without one. Split on unescaped
+        # pipes only, because values such as `a\|b` contain escaped ones.
+        cells = [cell.strip() for cell in re.split(r"(?<!\\)\|", line.strip().strip("|"))]
+        parts = cells[0].split("<br/>")
+        fields = dict(part.split(": ", 1) for part in parts[1:] if ": " in part)
+        name = parts[0].strip("`")
+        rows[name] = [name, fields.get("Impact", "—"), fields.get("Default", ""), fields.get("Values", "")]
     return rows
 
 

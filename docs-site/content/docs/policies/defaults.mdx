@@ -232,7 +232,7 @@ guardrail:
       hook_fail_mode: open         # explicit softer override for Codex
 ```
 
-`claw.mode` flips to `multi` automatically once more than one connector is active. Manage these blocks with `defenseclaw setup <connector>` (choosing **Add**) and the `defenseclaw guardrail ... --connector X` command group — see [Setup → Multi-connector](/docs/guardrail/multi-connector) and [Reference → Configuration](/docs/reference/configuration). The OPA admission policy is still global — there's no per-connector policy override surface yet.
+With more than one connector active, `claw.mode` keeps naming the primary connector, and the gateway leaves the `defenseclaw.claw.mode` telemetry attribute off. Manage these blocks with `defenseclaw setup <connector>` (choosing **Add**) and the `defenseclaw guardrail ... --connector X` command group — see [Setup → Multi-connector](/docs/guardrail/multi-connector) and [Reference → Configuration](/docs/reference/configuration). The OPA admission policy is still global — there's no per-connector policy override surface yet.
 
 <Callout type="warn" title="Legacy top-level connector blocks are deprecated">
 Older installs used top-level `claude_code:` / `codex:` blocks (the `AgentHookConfig` fields) for per-connector overrides:

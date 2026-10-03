@@ -27,11 +27,11 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 )
 
-// GAP-1197: the first-guardrail walkthrough adds the test rule it prints to a
-// copy of the default pack, and Claude Code's `echo defenseclaw-demo-marker`
-// must then be blocked.
+// GAP-1197: the quickstart (the first-guardrail walkthrough starts there) adds
+// the test rule it prints to a copy of the default pack, and Claude Code's
+// `echo defenseclaw-demo-marker` must then be blocked.
 func TestFirstGuardrailDocsTestRuleBlocks(t *testing.T) {
-	doc, err := os.ReadFile(filepath.Join("..", "..", "docs-site", "content", "docs", "get-started", "first-guardrail.mdx"))
+	doc, err := os.ReadFile(filepath.Join("..", "..", "docs-site", "content", "docs", "get-started", "quickstart.mdx"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,7 +39,7 @@ func TestFirstGuardrailDocsTestRuleBlocks(t *testing.T) {
 	_, rest, found := strings.Cut(strings.ReplaceAll(string(doc), "\r\n", "\n"), "<<'EOF'\n")
 	rule, _, closed := strings.Cut(rest, "\nEOF\n")
 	if !found || !closed {
-		t.Fatal("first-guardrail.mdx has no test rule heredoc")
+		t.Fatal("quickstart.mdx has no test rule heredoc")
 	}
 
 	pack := t.TempDir()

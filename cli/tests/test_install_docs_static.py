@@ -39,8 +39,10 @@ DOC_INSTALL_COMMANDS = {
         LATEST_POSIX_INSTALL_COMMAND,
         LATEST_WINDOWS_INSTALL_COMMAND,
     ),
-    "docs-site/content/docs/get-started/first-guardrail.mdx": (
-        f"{LATEST_POSIX_INSTALL_COMMAND} -s -- --connector claudecode",
+    # Quickstart and Upgrade include this shared snippet.
+    "docs-site/content/snippets/install-commands.mdx": (
+        LATEST_POSIX_INSTALL_COMMAND,
+        LATEST_WINDOWS_INSTALL_COMMAND,
     ),
     "docs-site/components/terminal-demo.tsx": (
         f"text: '{LATEST_POSIX_INSTALL_COMMAND}',",
@@ -55,13 +57,13 @@ INSTALLER_FILES = (
 OBSERVABILITY_V8_CURRENT_AUTHORITY_FILES = (
     "docs-site/components/command-generator.tsx",
     "docs-site/content/docs/command-generator.mdx",
-    "docs-site/content/docs/setup/guardrail/index.mdx",
+    "docs-site/content/docs/guardrail/index.mdx",
     "docs-site/content/docs/connectors/openclaw.mdx",
     "docs-site/content/docs/connectors/zeptoclaw.mdx",
     "docs-site/content/docs/connectors/claudecode.mdx",
     "docs-site/content/docs/connectors/codex.mdx",
-    "docs-site/content/docs/setup/index.mdx",
-    "docs-site/content/docs/reference/redaction.mdx",
+    "docs-site/content/docs/reference/setup-commands.mdx",
+    "docs-site/content/docs/observability/redaction.mdx",
     "docs-site/content/docs/reference/cli.mdx",
     "docs-site/content/docs/observability/index.mdx",
     "bundles/local_observability_stack/prometheus/rules/alerts.yml",
@@ -72,8 +74,7 @@ OBSERVABILITY_V8_CURRENT_AUTHORITY_FILES = (
 OBSERVABILITY_V8_WORKFLOW_GUIDES = (
     "docs-site/components/command-generator.tsx",
     "docs-site/content/docs/command-generator.mdx",
-    "docs-site/content/docs/setup/guardrail/index.mdx",
-    "docs-site/content/docs/setup/index.mdx",
+    "docs-site/content/docs/observability/redaction.mdx",
     "bundles/local_observability_stack/prometheus/rules/alerts.yml",
 )
 
@@ -85,7 +86,7 @@ OBSERVABILITY_V8_CONNECTOR_GUIDES = (
 )
 
 OBSERVABILITY_V8_JSONL_GUIDES = {
-    "docs-site/content/docs/setup/index.mdx": "kind: jsonl",
+    "docs-site/content/docs/reference/setup-commands.mdx": "kind: jsonl",
     "docs-site/content/docs/reference/configuration.mdx": "kind: jsonl",
 }
 
@@ -636,7 +637,7 @@ def test_repository_operator_pointers_delegate_to_the_canonical_website() -> Non
         "docs/ENV-VARS.md": "https://cisco-ai-defense.github.io/defenseclaw/docs/reference/env-vars/",
         "docs/INSTALL.md": "https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/install/",
         "docs/QUICKSTART.md": "https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/quickstart/",
-        "docs/REGISTRIES.md": "https://cisco-ai-defense.github.io/defenseclaw/docs/setup/registries/",
+        "docs/REGISTRIES.md": "https://cisco-ai-defense.github.io/defenseclaw/docs/scanning/registries/",
         "docs/SPLUNK_APP.md": "https://cisco-ai-defense.github.io/defenseclaw/docs/observability/splunk/",
     }
     for rel, canonical_url in expected.items():
@@ -649,11 +650,11 @@ def test_repository_operator_pointers_delegate_to_the_canonical_website() -> Non
 
 def test_scanner_recovery_docs_match_dependency_and_registry_contracts() -> None:
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    mcp_docs = (ROOT / "docs-site/content/docs/setup/mcp-scanner.mdx").read_text(
+    mcp_docs = (ROOT / "docs-site/content/docs/scanning/mcp-scanner.mdx").read_text(
         encoding="utf-8"
     )
     registry_docs = (
-        ROOT / "docs-site/content/docs/setup/registries.mdx"
+        ROOT / "docs-site/content/docs/scanning/registries.mdx"
     ).read_text(encoding="utf-8")
     llm_source = (ROOT / "cli/defenseclaw/llm.py").read_text(encoding="utf-8")
     mcp_source = (ROOT / "cli/defenseclaw/scanner/mcp.py").read_text(
@@ -747,9 +748,6 @@ def test_current_observability_docs_do_not_advertise_retired_redaction_controls(
         for retired in retired_guidance:
             assert retired not in text, f"{rel} still advertises retired control: {retired}"
 
-    guardrail_reference = (ROOT / "docs-site/content/docs/setup/guardrail/index.mdx").read_text(encoding="utf-8")
-    assert "Legacy v7 JSONL export" in guardrail_reference
-
 
 def test_current_observability_guidance_explains_v8_redaction_workflow() -> None:
     required_workflow = (
@@ -793,7 +791,7 @@ def test_dev_installer_only_offers_jsonl_tail_when_the_destination_exists() -> N
 
 
 def test_setup_index_separates_commands_from_policy_reference_cards() -> None:
-    text = (ROOT / "docs-site/content/docs/setup/index.mdx").read_text(encoding="utf-8")
+    text = (ROOT / "docs-site/content/docs/reference/setup-commands.mdx").read_text(encoding="utf-8")
     command_start = text.index("## Auxiliary configuration commands")
     reference_start = text.index("## Deployment and policy references")
     matrix_start = text.index("## Interactive vs non-interactive")
@@ -805,8 +803,8 @@ def test_setup_index_separates_commands_from_policy_reference_cards() -> None:
 
 
 def test_redaction_cli_docs_cover_simple_advanced_and_scripted_workflows() -> None:
-    redaction = (ROOT / "docs-site/content/docs/reference/redaction.mdx").read_text(encoding="utf-8")
-    setup = (ROOT / "docs-site/content/docs/setup/index.mdx").read_text(encoding="utf-8")
+    redaction = (ROOT / "docs-site/content/docs/observability/redaction.mdx").read_text(encoding="utf-8")
+    setup = (ROOT / "docs-site/content/docs/reference/setup-commands.mdx").read_text(encoding="utf-8")
     cli = (ROOT / "docs-site/content/docs/reference/cli.mdx").read_text(encoding="utf-8")
 
     for text in (redaction, setup, cli):
@@ -827,8 +825,8 @@ def test_redaction_cli_docs_cover_simple_advanced_and_scripted_workflows() -> No
 
 
 def test_redaction_workflow_documents_linux_windows_macos_and_tui_surfaces() -> None:
-    redaction = (ROOT / "docs-site/content/docs/reference/redaction.mdx").read_text(encoding="utf-8")
-    setup = (ROOT / "docs-site/content/docs/setup/index.mdx").read_text(encoding="utf-8")
+    redaction = (ROOT / "docs-site/content/docs/observability/redaction.mdx").read_text(encoding="utf-8")
+    setup = (ROOT / "docs-site/content/docs/reference/setup-commands.mdx").read_text(encoding="utf-8")
     cli = (ROOT / "docs-site/content/docs/reference/cli.mdx").read_text(encoding="utf-8")
     windows_paths = (
         ROOT / "docs-site/content/docs/get-started/windows/paths-troubleshooting.mdx"
@@ -836,13 +834,13 @@ def test_redaction_workflow_documents_linux_windows_macos_and_tui_surfaces() -> 
 
     for expected in (
         "macOS, Linux, and native Windows",
-        "Setup → Redaction Policy",
+        "0 Setup → Guardrail & scanning → Redaction",
         "%USERPROFILE%\\.defenseclaw\\backups\\config.yaml.before-redaction",
         "protected current-user/SYSTEM DACL",
         "0700`/`0600",
     ):
         assert expected in redaction
-    assert "TUI → Setup → Redaction Policy" in setup
+    assert "TUI → 0 Setup → Guardrail & scanning → Redaction" in setup
     assert "Logs → Redaction policy…" in setup
     assert "config.yaml.before-redaction-*" in windows_paths
     assert (
@@ -921,7 +919,7 @@ def test_zeptoclaw_calls_out_local_history_retention_and_trust_boundary() -> Non
 
 
 def test_enterprise_example_uses_secure_managed_redaction_default() -> None:
-    text = (ROOT / "docs-site/content/docs/setup/enterprise-deployment.mdx").read_text()
+    text = (ROOT / "docs-site/content/docs/enterprise/secure-client.mdx").read_text()
     assert "  defaults:\n    redaction_profile: sensitive" in text
 
 
@@ -970,10 +968,10 @@ def test_threat_model_r7_matches_linux_socket_dependency() -> None:
     assert "| R34 |" in model and "logger -t defenseclaw-gateway" in model
 
 
-def test_first_guardrail_initializes_before_setup() -> None:
+def test_quickstart_initializes_before_setup() -> None:
     # GAP-1613: the installer does not initialize DefenseClaw, so the
-    # walkthrough must run init before any other defenseclaw command.
-    text = (ROOT / "docs-site/content/docs/get-started/first-guardrail.mdx").read_text()
+    # walkthrough (the quickstart; First guardrail continues from it) must
+    # run init before any other defenseclaw command.
+    text = (ROOT / "docs-site/content/docs/get-started/quickstart.mdx").read_text()
     commands = re.findall(r"^defenseclaw(?:-gateway)? [a-z-]+", text, re.MULTILINE)
     assert commands[0] == "defenseclaw init", commands
-    assert "defenseclaw init --connector claudecode" in text

@@ -47,7 +47,7 @@ set it.
 | `previous\` | The install the last upgrade replaced. | No. `defenseclaw rollback` swaps it back. |
 | `installer\install.ps1` | The installer of the current install. | No. `defenseclaw rollback` runs it. |
 | `hooks\` | Generated hook files and per-connector credentials. | **No.** Never print or copy them. `defenseclaw doctor` and setup repair them. |
-| `backups\`, `connector_backups\` | Copies DefenseClaw needs to restore agent files and earlier settings. | No. They can contain credentials. |
+| `backups\`, `connector_backups\` | Copies DefenseClaw needs to restore agent files and earlier settings, including the timestamped `config.yaml.before-redaction-*` copies that `setup redaction` writes before each change. | No. They can contain credentials. |
 | `quarantine\` | Quarantined skills and plugins. | No. Use `defenseclaw skill restore` or `defenseclaw plugin restore`. |
 | `gateway.pid`, `watchdog.pid` | Records of the running gateway and watchdog. | No. Do not delete them while a process may be running. |
 | `gateway.jsonl` | Exists only if you configured a JSONL destination with that path. | Manage it through [observability](/docs/observability). |

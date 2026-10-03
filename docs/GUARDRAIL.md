@@ -1,7 +1,7 @@
 # Guardrail implementation map
 
 Operator setup and behavior are documented on the published
-[guardrail guide](https://cisco-ai-defense.github.io/defenseclaw/docs/setup/guardrail/).
+[guardrail guide](https://cisco-ai-defense.github.io/defenseclaw/docs/guardrail/).
 Policy authoring and tuning live under the published
 [policies section](https://cisco-ai-defense.github.io/defenseclaw/docs/policies/).
 

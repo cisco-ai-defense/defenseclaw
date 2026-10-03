@@ -17,5 +17,5 @@ a spec records the intended contract and the open work.
 The operator-facing behavior of specs 003 to 005 is also documented in
 [`WINDOWS-ENTERPRISE-THREAT-MODEL.md`](../WINDOWS-ENTERPRISE-THREAT-MODEL.md)
 and on the docs site's
-[Secure Client managed deployment](https://cisco-ai-defense.github.io/defenseclaw/docs/setup/enterprise-deployment/)
+[Secure Client managed deployment](https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/secure-client/)
 page.

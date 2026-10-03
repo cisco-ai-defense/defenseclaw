@@ -4,7 +4,7 @@
 > listed below; it is not a current support table. Use the
 > [published connector compatibility matrix](https://cisco-ai-defense.github.io/defenseclaw/docs/connectors/compatibility/)
 > and
-> [capability matrix](https://cisco-ai-defense.github.io/defenseclaw/docs/capability-matrix/)
+> [capability matrix](https://cisco-ai-defense.github.io/defenseclaw/docs/connectors/capability-matrix/)
 > for current behavior.
 >
 > In particular, the Codex column below intentionally records superseded

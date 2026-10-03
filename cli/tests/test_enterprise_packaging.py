@@ -618,7 +618,7 @@ def test_launchd_enterprise_installer_matches_cisco_plist_layout():
     assert "system/com.defenseclaw." not in text
 
     deployment_docs = (
-        ROOT / "docs-site" / "content" / "docs" / "setup" / "enterprise-deployment.mdx"
+        ROOT / "docs-site" / "content" / "docs" / "enterprise" / "secure-client.mdx"
     ).read_text(encoding="utf-8")
     documented_contract = {
         "There is no dedicated `defenseclaw` service user on macOS.",

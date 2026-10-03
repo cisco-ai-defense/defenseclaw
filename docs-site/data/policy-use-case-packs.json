@@ -78,7 +78,7 @@
       "id": "database-destruction-protection",
       "title": "Database destruction protection",
       "status": "selectable",
-      "summary": "This opt-in guardrail profile extends the embedded balanced defaults and blocks static destructive SQL passed directly to supported command-line clients.",
+      "summary": "This opt-in guardrail profile extends the embedded balanced defaults and blocks static destructive SQL passed directly to supported command-line clients or authenticated structured database tools. It also enables the exact same-database, same-table chain from a sensitive SQLite read to a later unbounded delete.",
       "files": [
         {
           "filename": "database-destruction",
@@ -136,7 +136,7 @@
       "id": "infrastructure-destruction-protection",
       "title": "Infrastructure destruction protection",
       "status": "selectable",
-      "summary": "This opt-in guardrail profile extends the embedded balanced defaults and blocks full infrastructure destruction through Terraform, OpenTofu, or Pulumi. Assign it only to connectors whose selected workspace or stack can reach production; workspace and stack names are not treated as production evidence.",
+      "summary": "This opt-in guardrail profile extends the embedded balanced defaults with five exact protected-environment rules. Assign it only to connectors whose selected host, workspace, or stack can reach production; names are not treated as production evidence.",
       "files": [
         {
           "filename": "infrastructure-destruction",
@@ -223,7 +223,7 @@
       "id": "kubernetes-production-protection",
       "title": "Kubernetes production protection",
       "status": "selectable",
-      "summary": "This opt-in guardrail profile extends the embedded balanced defaults and blocks statically proven namespace deletion and closed forms of bulk workload deletion through `kubectl` or `oc`. Assign it only to connectors whose Kubernetes context can reach production; namespace names are not treated as production evidence.",
+      "summary": "This opt-in guardrail profile extends the embedded balanced defaults and blocks an exact named Secret content read, statically proven namespace deletion, and closed forms of bulk workload deletion through `kubectl` or `oc`. Assign it only to connectors whose Kubernetes context can reach production; cluster and namespace names are not treated as production evidence.",
       "files": [
         {
           "filename": "kubernetes-production",

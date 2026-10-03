@@ -155,11 +155,11 @@ points to the JSON schema when a field is wrong.
 config_version: 8             # strict current schema; upgrade migrates supported v7 files
 
 claw:
-  mode: claudecode             # single-connector mode; setup aliases select this with --connector.
-                               # Set to `multi` automatically when more than one
-                               # connector is active (see guardrail.connectors below).
-                               # This value is mirrored to the OTel resource attr
-                               # `defenseclaw.claw.mode`.
+  mode: claudecode             # the primary connector; setup aliases select this with --connector.
+                               # With several connectors active it names the primary one
+                               # (see guardrail.connectors below). It is mirrored to the
+                               # OTel resource attr `defenseclaw.claw.mode` only while a
+                               # single connector is active.
 
 gateway:
   host: 127.0.0.1              # upstream agent gateway host (OpenClaw/ZeptoClaw fleet link)
@@ -850,7 +850,7 @@ They are read only by the legacy bind rule above and by
 ignored. No migration rewrites the block.
 
 
-## `guardrail.connectors` and `claw.mode: multi`
+## `guardrail.connectors` (several connectors)
 
 A single gateway can enforce guardrail policy for several **hook** connectors at once. Each connector that's active gets a `guardrail.connectors.<name>` block; the gateway resolves policy per connector and falls back to the global `guardrail.*` values for anything a block leaves unset.
 
@@ -865,7 +865,7 @@ A single gateway can enforce guardrail policy for several **hook** connectors at
 | `alert_at` | same values — lowest severity that alerts; never above the block level | `guardrail.alert_at`, then the rule pack's level |
 | `hilt` | `{ enabled, min_severity }` | `guardrail.hilt` |
 
-`claw.mode` becomes **`multi`** automatically once more than one connector is active. That sentinel is mirrored onto the OTel resource attribute `defenseclaw.claw.mode`, so a fan-out gateway is distinguishable from a single-connector one in dashboards and SIEM. The singular `guardrail.connector` is untouched and still drives single-connector installs — the map is purely additive. Proxy connectors (OpenClaw, ZeptoClaw) cannot be entries here; multi-connector is hook-only. Manage these blocks with `defenseclaw setup <connector>` (choosing **Add**) and the `defenseclaw guardrail ... --connector X` command group — see [Setup → Multi-connector](/docs/guardrail/multi-connector).
+With more than one connector active, `claw.mode` and `guardrail.connector` keep naming the primary connector (the first one in alphabetical order unless setup keeps the existing primary). The gateway then leaves the OTel resource attribute `defenseclaw.claw.mode` off, so a gateway serving several connectors is distinguishable from a single-connector one in dashboards and SIEM; read each event's connector attribute for the connector that produced it. Proxy connectors (OpenClaw, ZeptoClaw) cannot be entries here; multi-connector is hook-only. Manage these blocks with `defenseclaw setup <connector>` (choosing **Add**) and the `defenseclaw guardrail ... --connector X` command group — see [Setup → Multi-connector](/docs/guardrail/multi-connector).
 
 ## Enterprise settings (`enterprise.*`)
 
@@ -1020,7 +1020,7 @@ data directory. Configure the sidecar API listener with `gateway.api_bind` and
 `guardrail.host` and `guardrail.port`; `gateway.host`/`gateway.port` are the
 upstream agent-gateway address. The gateway has no log-level flag; for extra
 diagnostics, set one of the variables under **Debug / verbose logging** in
-[Environment variables](/docs/reference/env-vars), such as
+[Environment variables](/docs/reference/env-vars#debug--verbose-logging), such as
 `DEFENSECLAW_SIDECAR_DIAG=1`, in the gateway's environment and restart it.
 
 **Proxy variables.** The gateway's telemetry exporters (OTLP, Galileo, Splunk

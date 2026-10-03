@@ -8,7 +8,7 @@ behaviours the code is built around. The code is the authority; each section
 names the package to read.
 
 The operator guide for the sandbox commands is the
-[published sandbox page](https://cisco-ai-defense.github.io/defenseclaw/docs/setup/sandbox/)
+[published sandbox page](https://cisco-ai-defense.github.io/defenseclaw/docs/sandboxes/guide/)
 (`docs-site/content/docs/sandboxes/guide.mdx`): setup, running a harness, the
 session, the end-of-session review and undo, the run variations, MCP
 servers, the shell wrapper, troubleshooting, and the legacy 0.0.x cleanup.
@@ -3015,7 +3015,7 @@ defenseclaw sandbox legacy-cleanup
 Cleanup stops the systemd units itself but changes nothing else while any part
 of the legacy sandbox still runs. Stop the non-systemd launcher first with
 `sudo <data_dir>/scripts/run-sandbox.sh stop`. The
-[published cleanup guide](https://cisco-ai-defense.github.io/defenseclaw/docs/setup/sandbox/)
+[published cleanup guide](https://cisco-ai-defense.github.io/defenseclaw/docs/sandboxes/guide/)
 lists every step, the opt-in `--remove-user` and `--remove-binary` removals,
 and the follow-up commands.
 
