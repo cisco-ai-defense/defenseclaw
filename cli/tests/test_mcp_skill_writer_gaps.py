@@ -152,7 +152,7 @@ class TestMCPUnsetWording(unittest.TestCase):
         mock_unset.side_effect = _kept
         result = self.invoke(["unset", "ctx7"])
         self.assertEqual(result.exit_code, 1)
-        self.assertIn("Removed MCP server: ctx7 from codex", result.output)
+        self.assertIn("[mcp] Removed 'ctx7' from codex", result.output)
         self.assertIn("Error: MCP server 'ctx7' was not removed from: claudecode.", result.output)
 
     @patch("defenseclaw.commands.cmd_mcp._unset_mcp_via_connector")
@@ -161,7 +161,7 @@ class TestMCPUnsetWording(unittest.TestCase):
         mock_unset.return_value = connector_paths.MCP_PRIOR_RESTORED
         result = self.invoke(["unset", "ctx7", "--connector", "claudecode"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertNotIn("Removed MCP server", result.output)
+        self.assertNotIn("[mcp] Removed", result.output)
         self.assertIn("Restored your previous ctx7 entry on claudecode", result.output)
 
 

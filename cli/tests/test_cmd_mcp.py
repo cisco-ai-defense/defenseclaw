@@ -1380,7 +1380,7 @@ class TestMCPScan(MCPCommandTestBase):
         result = self.invoke(["unset", "ctx7"])
 
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("Removed MCP server: ctx7", result.output)
+        self.assertIn("[mcp] Removed 'ctx7'", result.output)
         self.assertIn("codex", result.output)
         self.assertIn("skipped", result.output)
 
@@ -1402,7 +1402,7 @@ class TestMCPScan(MCPCommandTestBase):
         result = self.invoke(["set", "ctx7", "--url", "https://x/mcp", "--skip-scan"])
 
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("Added MCP server: ctx7 to 2 connectors", result.output)
+        self.assertIn("[mcp] Added 'ctx7' to 2 connectors", result.output)
         self.assertIn("not applied: zeptoclaw", result.output)
 
     @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")
@@ -1425,7 +1425,7 @@ class TestMCPScan(MCPCommandTestBase):
         self.assertNotEqual(result.exit_code, 0)
         attempted = {c.kwargs.get("connector") for c in mock_set.call_args_list}
         self.assertEqual(attempted, {"claudecode", "codex"})  # loop not aborted
-        self.assertIn("Added MCP server: ctx7", result.output)  # codex landed
+        self.assertIn("[mcp] Added 'ctx7'", result.output)  # codex landed
         self.assertIn("failed [claudecode]", result.output)
 
     @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")
@@ -1464,7 +1464,7 @@ class TestMCPScan(MCPCommandTestBase):
         self.assertNotEqual(result.exit_code, 0)
         attempted = {c.kwargs.get("connector") for c in mock_unset.call_args_list}
         self.assertEqual(attempted, {"claudecode", "codex"})  # loop not aborted
-        self.assertIn("Removed MCP server: ctx7", result.output)  # codex removed
+        self.assertIn("[mcp] Removed 'ctx7'", result.output)  # codex removed
         self.assertIn("failed [claudecode]", result.output)
 
     @patch("defenseclaw.commands.cmd_mcp._unset_mcp_via_connector")
@@ -1487,12 +1487,12 @@ class TestMCPScan(MCPCommandTestBase):
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("not removed [claudecode]", result.output)
         self.assertIn("claude mcp remove ctx7 -s user", result.output)
-        self.assertIn("Removed MCP server: ctx7", result.output)  # codex removed
+        self.assertIn("[mcp] Removed 'ctx7'", result.output)  # codex removed
         self.assertNotIn("claudecode, codex", result.output)
 
         result = self.invoke(["unset", "ctx7", "--connector", "claudecode"])
         self.assertNotEqual(result.exit_code, 0)
-        self.assertNotIn("Removed MCP server", result.output)
+        self.assertNotIn("[mcp] Removed", result.output)
         self.assertIn("was not removed from: claudecode", result.output)
 
     @patch("defenseclaw.scanner.mcp.MCPScannerWrapper.scan")
