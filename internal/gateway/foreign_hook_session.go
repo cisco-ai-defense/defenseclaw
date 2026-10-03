@@ -130,7 +130,7 @@ func (a *APIServer) auditForeignHookSessionDenial(
 	exchange enterprisepolicy.SessionExchange,
 	decision enterprisepolicy.GuardDecision,
 ) {
-	if a == nil || a.logger == nil {
+	if a == nil {
 		return
 	}
 	block := "call"
@@ -164,7 +164,7 @@ func (a *APIServer) auditForeignHookSessionDenial(
 		break
 	}
 	reason := clipForeignHookAuditField(decision.Reason, foreignHookAuditReasonLimit)
-	_ = a.logConnectorHookAuditEnvelope(ctx, HookAuditEnvelope{
+	env := HookAuditEnvelope{
 		Connector:  connectorName,
 		Event:      "foreign_hook_session",
 		Result:     "ok",
@@ -176,7 +176,46 @@ func (a *APIServer) auditForeignHookSessionDenial(
 		WouldBlock: true,
 		Enforced:   true,
 		Extra:      extra,
-	})
+	}
+	// The denial is a guardrail block like any other, so it is exported as
+	// one: a hook decision record naming the user, the connector-hook block
+	// metrics and an apply_guardrail block span. Before, it reached only the
+	// audit row, and dashboards, alerts and traces that count blocks never
+	// saw it (GAP-2044).
+	a.emitForeignHookSessionDenialV8(ctx, connectorName, exchange, env)
+	if a.logger != nil {
+		_ = a.logConnectorHookAuditEnvelope(ctx, env)
+	}
+}
+
+// emitForeignHookSessionDenialV8 exports one foreign-hook guard denial
+// through the same v8 families as a connector-hook block.
+func (a *APIServer) emitForeignHookSessionDenialV8(
+	ctx context.Context,
+	connectorName string,
+	exchange enterprisepolicy.SessionExchange,
+	env HookAuditEnvelope,
+) {
+	if ctx == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	req := agentHookRequest{
+		ConnectorName: connectorName,
+		HookEventName: env.Event,
+		SessionID:     exchange.Key.Session,
+	}
+	// An enforced block, as a hook response reports it: would_block marks an
+	// observe-mode decision only.
+	resp := agentHookResponse{
+		Action: env.Action, RawAction: env.RawAction, Severity: env.Severity,
+		Mode: env.Mode, Reason: env.Reason,
+	}
+	a.emitHookDecisionObservabilityV8(ctx, req, resp, env, false)
+	a.emitGuardrailApplyTraceV8(ctx, connectorName, "", "tool_call", &ToolInspectVerdict{
+		Action: resp.Action, RawAction: resp.RawAction, Severity: resp.Severity,
+		Reason: resp.Reason, Mode: resp.Mode,
+	}, 0, hookEvaluationContext{})
 }
 
 // foreignHookRemovalCache holds the guardian's foreign-hook removal ledger

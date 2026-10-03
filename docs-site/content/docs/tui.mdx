@@ -41,7 +41,9 @@ Setup form or a `/` search box types digits and letters), or cycle with `Tab` /
 `Shift+Tab`. Press `Ctrl+P` to fuzzy-jump to any panel by name. On a narrow
 terminal every tab stays on screen: the most-used tabs keep their names and
 the rest show only their key. Which tabs keep a name depends only on the
-terminal width, so the labels don't change as you switch panels. Below 80
+terminal width and the unread counts, so switching panels changes only the tab
+you leave and the tab you open; other tabs give up their names before their
+unread counts. Below 80
 columns the tab you are on gets as much of its name as fits (`R Regis…`), ahead
 of the other tabs' unread counts; the Alerts count stays. Below about 68
 columns every tab shows only its key, and the panel title names the panel.
@@ -160,7 +162,11 @@ you enter for **API keys & secrets** reach `defenseclaw keys set --value-stdin`
 on standard input, never on the command line. Follow-up commands run only after
 the previous one succeeds.
 
-Press `c` for the **config editor**. On wide terminals its sections are listed
+A successful run's result card hides itself after 8 seconds (its footer says
+so) and leaves the result on the status line; `q` or **Dismiss** clears it
+sooner. A failed run's card stays until you dismiss it.
+
+Press `c` for the **config editor** (or `→` past the last group). On wide terminals its sections are listed
 on the left, grouped (Core, Protection, …), with the highlighted field's value
 and help beside the table:
 

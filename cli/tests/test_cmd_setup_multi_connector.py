@@ -820,6 +820,21 @@ class TestAdditiveSetupCommand(unittest.TestCase):
         self.assertEqual(gc.connector, "codex")
         self.assertEqual(self.app.cfg.claw.mode, "codex")
 
+    # GAP-2067: "init --connector hermes" leaves a single hook connector in
+    # guardrail.connector (empty map); setup openclaw must refuse it too.
+    def test_openclaw_next_to_single_hook_connector_is_refused(self):
+        self._seed_single("hermes")
+        with _setup_patches():
+            result = _invoke(["openclaw", "--yes", "--no-restart", "--no-verify"], self.app)
+        self.assertNotEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("1 configured (hermes)", result.output)
+        self.assertEqual(self.app.cfg.guardrail.connector, "hermes")
+        with _setup_patches(), patch("defenseclaw.commands.cmd_setup.setup_guardrail"):
+            result = _invoke(["openclaw", "--replace", "--yes", "--no-restart", "--no-verify"], self.app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("--replace removes 1 hook connector(s): hermes", result.output)
+        self.assertEqual(self.app.cfg.guardrail.connector, "openclaw")
+
     # GAP-1455: --replace switches a hook-connector install to OpenClaw in one
     # command, after listing (and confirming) what it removes.
     def test_openclaw_replace_removes_hook_connectors(self):

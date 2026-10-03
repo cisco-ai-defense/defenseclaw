@@ -9454,8 +9454,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             reason = f" · {summary.reason.replace('_', ' ')}" if summary.reason else ""
             lines.append(Text(f"  no evidence{reason}", style=TOKENS.text_muted))
             return lines
-        for item in summary.connectors:
-            instance = "" if item.default else " · additional instance"
+        from defenseclaw.observability.custody_status import native_delivery_display_rows
+
+        for label, item in native_delivery_display_rows(summary.connectors):
+            instance = f" · {label}" if label else ""
             style = {
                 "all_drop_only": TOKENS.accent_red,
                 "partial_drop_only": TOKENS.accent_amber,
@@ -9654,8 +9656,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             if not summary.connectors:
                 reason = f" · {summary.reason.replace('_', ' ')}" if summary.reason else ""
                 delivery_lines.append(f"    no evidence{reason}")
-            for item in summary.connectors:
-                instance = "" if item.default else " · additional instance"
+            from defenseclaw.observability.custody_status import native_delivery_display_rows
+
+            for label, item in native_delivery_display_rows(summary.connectors):
+                instance = f" · {label}" if label else ""
                 delivery_lines.append(
                     f"    {friendly_connector_name(item.connector)} ({item.connector}){instance}: "
                     f"{item.state.replace('_', '-')} · {item.detail}"

@@ -193,6 +193,16 @@ _GATEWAY_LEFT_STARTING_MARKER = "is still starting and was left running"
 # The restart error for a gateway that was still starting and was kept
 # (GAP-2080); setup's rollback reports that cause, not "could not apply" (GAP-2105).
 _GATEWAY_KEPT_STARTING_TEXT = "the gateway is still starting and was kept running"
+# Set when the last _restart_defense_gateway failed only because the gateway
+# was still starting and was kept (GAP-2080); read once by the caller.
+_gateway_left_starting = False
+
+
+def _take_gateway_left_starting() -> bool:
+    """Whether the last restart left a still-starting gateway running; clears it."""
+    global _gateway_left_starting
+    left, _gateway_left_starting = _gateway_left_starting, False
+    return left
 _GATEWAY_PID_GENERATION_MAX_BYTES = 16 * 1024
 _DEFENSE_GATEWAY_LIFECYCLE_TIMEOUT_SECONDS = 60
 # `defenseclaw-gateway start|restart` stops the old gateway (up to 10 s), waits
@@ -4427,9 +4437,13 @@ def setup_gateway(
     # succeed until then, and the gateway may be down precisely because the
     # old port was taken.
     api_port_changed = gw.api_port != previous_api_port
+    # A gateway that was never started (or was stopped) has nothing to
+    # verify yet and cannot record the audit event; the change applies when
+    # it starts (GAP-2009).
+    gateway_stopped = not api_port_changed and not _is_pid_alive(os.path.join(data_dir, "gateway.pid"))
     _print_gateway_summary(gw, openclaw=uses_openclaw)
 
-    if verify and not api_port_changed:
+    if verify and not api_port_changed and not gateway_stopped:
         from defenseclaw.commands.cmd_doctor import _check_openclaw_gateway, _check_sidecar, _DoctorResult
 
         ux.section("Verifying gateway connectivity")
@@ -4452,13 +4466,16 @@ def setup_gateway(
         # the sidecar has started. Suppress only definite runtime
         # unavailability; server rejections and every other admission failure
         # remain fatal through _log_setup_action.
-        allow_offline=not verify or api_port_changed,
+        allow_offline=not verify or api_port_changed or gateway_stopped,
         # The start hint follows from the setup restart step; say only what
         # the missing gateway means for this change.
         offline_note=(
             "  Note: nothing listens on the new API port until the gateway restarts, so this change "
             "was not written to the audit log."
             if api_port_changed
+            else "  Note: the gateway isn't running, so this change takes effect when it starts and was not "
+            "written to the audit log. Start it with: defenseclaw-gateway start"
+            if gateway_stopped
             else "  Note: the gateway could not be reached, so this change was not written to the audit log."
         ),
     )
@@ -12348,14 +12365,19 @@ def _refuse_proxy_next_to_hook_connectors(gc, connector: str) -> None:
 
 
 def _hook_peers_of_proxy_connector(gc, connector: str) -> list[str]:
-    """Hook connectors configured next to a proxy-backed *connector*."""
+    """Hook connectors configured next to a proxy-backed *connector*.
+
+    GAP-2067: ``init --connector hermes`` records a single hook connector in
+    ``guardrail.connector`` with an empty ``guardrail.connectors`` map, so the
+    single value counts as a configured peer too.
+    """
     if connector not in _PROXY_BACKED_CONNECTORS:
         return []
-    return [
-        name
-        for name in sorted(getattr(gc, "connectors", None) or {})
-        if normalize_connector(name) in _HOOK_ENFORCED_CONNECTORS
-    ]
+    names = {normalize_connector(name) for name in (getattr(gc, "connectors", None) or {}) if name.strip()}
+    single = (getattr(gc, "connector", "") or "").strip()
+    if single:
+        names.add(normalize_connector(single))
+    return sorted(name for name in names if name in _HOOK_ENFORCED_CONNECTORS)
 
 
 def _adopt_openclaw_gateway_token(app: AppContext) -> None:
@@ -14045,6 +14067,13 @@ def _fail_if_restart_failed(failed: list[str]) -> None:
             "The OpenClaw gateway is not running. Start it with `openclaw gateway run` "
             "(or `openclaw gateway restart`), then run the same setup command again."
         )
+    if failed == ["defenseclaw-gateway"] and _take_gateway_left_starting():
+        # GAP-2080: restarting a slow gateway again would only stop it again.
+        raise _GatewayRestartFailed(
+            "the gateway is still starting and was kept running, so the change is not confirmed as "
+            "applied yet. Check it with: defenseclaw-gateway status. If it does not become healthy, run: "
+            "defenseclaw-gateway restart, then defenseclaw doctor."
+        )
     raise _GatewayRestartFailed(
         "gateway restart/readiness failed for: "
         + ", ".join(failed)
@@ -15251,6 +15280,8 @@ def _restart_defense_gateway(
         ctx = None
     if ctx is not None:
         ctx.meta[_SETUP_RESTART_HANDLED_KEY] = True
+    global _gateway_left_starting
+    _gateway_left_starting = False
 
     if os.name == "nt":
         from defenseclaw.gateway import packaged_windows_install_root
@@ -15337,7 +15368,12 @@ def _restart_defense_gateway(
         ):
             click.echo(" ✓ (ready after a slow start)")
             return True
-        click.echo(" ✗")
+        if _GATEWAY_LEFT_STARTING_MARKER in err:
+            # Not a failed restart: the gateway is alive and was kept (GAP-2080).
+            _gateway_left_starting = True
+            click.echo(" ⚠ (still starting; kept running)")
+        else:
+            click.echo(" ✗")
         if err:
             for line in err.splitlines()[:3]:
                 click.echo(f"    {line}")

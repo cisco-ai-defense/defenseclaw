@@ -1296,8 +1296,12 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 		emitVerdict(vctx, gatewaylog.StageRegex, gatewaylog.DirectionToolCall, "",
 			"alert", findings[0].Title, deriveSeverity(severity), []string{flaggedPattern}, 0,
 			emitVerdictExtras{RuleIDs: []string{flaggedPattern}})
+		// Only the alert is counted here. This lane observes a call the
+		// OpenClaw plugin already sent to /api/v1/inspect/tool, which records
+		// the call's one inspect evaluation (block, alert or allow); a second
+		// action=alert evaluation counted one blocked call twice (GAP-2046).
 		r.recordEventRouterGuardrailMetricsV8(vctx, eventRouterGuardrailMetricObservation{
-			meta: toolObservation.meta, tool: payload.Tool, action: "alert", severity: severity,
+			meta: toolObservation.meta, severity: severity,
 			alertType: "tool-call-flagged", alertSource: "tool-inspect", observedAt: time.Now().UTC(),
 		})
 	}

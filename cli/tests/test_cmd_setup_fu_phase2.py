@@ -3688,6 +3688,22 @@ class TestGatewayOfflineStaging(_BaseSetup):
         self.assertNotIn("takes effect when the gateway starts", result.output)
         openclaw_check.assert_not_called()
 
+    def test_stopped_gateway_is_not_a_failed_verification(self):
+        # GAP-2009: on a fresh account (gateway never started) the next step
+        # sandbox names ended in a FAIL row and "Error: ... gateway isn't running", rc 1.
+        self.app.logger = MagicMock()
+        self.app.logger.log_action.side_effect = CanonicalObservabilityUnavailableError("gateway is not running")
+        self._seed_map("codex")
+
+        with patch("defenseclaw.commands.cmd_doctor._check_sidecar") as sidecar_check:
+            result = _invoke(["gateway", "--non-interactive"], self.app)
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertNotIn("Error", result.output)
+        self.assertIn("the gateway isn't running, so this change takes effect when it starts", result.output)
+        self.assertEqual(result.output.count("defenseclaw-gateway start"), 1, result.output)
+        sidecar_check.assert_not_called()
+
     def test_api_port_flag_is_used_on_a_terminal(self):
         # MAC-U2-03: the port hint run on a terminal prompted with the old
         # port, repointed a hook-only roster at OPENCLAW_GATEWAY_TOKEN and
