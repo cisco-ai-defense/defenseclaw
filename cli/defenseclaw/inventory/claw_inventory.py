@@ -1585,7 +1585,10 @@ def _render_limitations(console: Any, limitations: list[dict[str, Any]]) -> None
     for limitation in limitations:
         category = limitation.get("category", "?")
         reason = limitation.get("reason", "unsupported by this connector")
-        label = _LIMITATION_STATUS_LABELS.get(str(limitation.get("status", "")), "")
+        # status is usually an InventoryCapabilityStatus member; str() of a
+        # (str, Enum) member is "InventoryCapabilityStatus.X", so use .value.
+        status = limitation.get("status", "")
+        label = _LIMITATION_STATUS_LABELS.get(str(getattr(status, "value", status)), "")
         suffix = f" [dim]({label})[/dim]" if label else ""
         # Wrapped lines stay indented under the category (GAP-2227).
         console.print(Padding(f"[cyan]{category}[/cyan]{suffix} — {reason}", (0, 0, 0, 2)))
