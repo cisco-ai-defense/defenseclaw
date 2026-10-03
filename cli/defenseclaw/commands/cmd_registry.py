@@ -182,6 +182,12 @@ def _missing_file_warning(kind: str, url: str) -> str | None:
     path = os.path.expanduser(bare)
     if not bare or os.path.isfile(path):
         return None
+    # GAP-2306: an existing directory (or other non-file) is not "missing";
+    # say what sync will say instead.
+    if os.path.isdir(path):
+        return f"{path} is a directory, not a manifest file; sync will fail until --url points at a file."
+    if os.path.exists(path):
+        return f"{path} is not a regular file; sync will fail until it is."
     return f"{path} does not exist yet; sync will fail until it does."
 
 
@@ -1528,13 +1534,27 @@ def _missing_entry_message(
             f"no cached entries for {source.id}; run "
             f"`defenseclaw registry sync {source.id}` first"
         )
+    label = f"{entry_type} " if entry_type else ""
+    # GAP-2307: the name exists, but under the other type; point at it.
+    other = sorted({
+        v.type for v in idx.verdicts
+        if v.name == entry_name and entry_type and v.type != entry_type
+    })
+    if other:
+        return (
+            f"{source.id} has no {label}entry {entry_name!r}; it is "
+            f"{_with_article(other[0])} entry (use --type {other[0]})"
+        )
     names = sorted({v.name for v in idx.verdicts if not entry_type or v.type == entry_type})
     shown = ", ".join(names[:10]) + (", ..." if len(names) > 10 else "")
-    label = f"{entry_type} " if entry_type else ""
     return (
         f"{source.id} has no {label}entry {entry_name!r} "
-        f"(entries: {shown or 'none'}; see 'defenseclaw registry entries {source.id}')"
+        f"({label}entries: {shown or 'none'}; see 'defenseclaw registry entries {source.id}')"
     )
+
+
+def _with_article(entry_type: str) -> str:
+    return f"an {entry_type}" if entry_type == "mcp" else f"a {entry_type}"
 
 
 def _do_manual_verdict(
