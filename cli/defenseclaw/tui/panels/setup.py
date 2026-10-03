@@ -8106,7 +8106,7 @@ def _scanners_section(cfg: object | Mapping[str, Any] | None) -> ConfigSection:
             ("strict", "balanced", "permissive", "none"),
             "Skill scanner policy.",
         ),
-        _field(cfg, "Lenient", "scanners.skill_scanner.lenient", "bool", hint="Downgrade findings by one severity."),
+        _field(cfg, "Lenient", "scanners.skill_scanner.lenient", "bool", hint="Tolerate malformed skills (off: fail them)."),
         _field(cfg, "Use LLM", "scanners.skill_scanner.use_llm", "bool", hint="Enable LLM-assisted classification."),
         _field(
             cfg, "LLM Consensus Runs", "scanners.skill_scanner.llm_consensus_runs", "int", hint="Number of LLM votes."

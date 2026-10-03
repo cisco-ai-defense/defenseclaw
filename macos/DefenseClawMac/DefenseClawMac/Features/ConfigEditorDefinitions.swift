@@ -539,7 +539,7 @@ enum ConfigEditorCatalog {
             .init(label: "Policy", key: "scanners.skill_scanner.policy", kind: .choice,
                   options: ["strict", "balanced", "permissive", "none"], hint: "Skill scanner policy."),
             .init(label: "Lenient", key: "scanners.skill_scanner.lenient", kind: .bool,
-                  hint: "Downgrade findings by one severity."),
+                  hint: "Tolerate malformed skills (off: fail them)."),
             .init(label: "Use LLM", key: "scanners.skill_scanner.use_llm", kind: .bool,
                   hint: "Enable LLM-assisted classification."),
             .init(label: "LLM Consensus Runs", key: "scanners.skill_scanner.llm_consensus_runs", kind: .int,
