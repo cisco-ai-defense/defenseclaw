@@ -1630,7 +1630,7 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 		r.Noop = true
 		r.NoopReason = "not_installed"
 		if leftovers := env.unmanagedLeftovers(env.Services, ChannelPayload); len(leftovers) > 0 {
-			r.AddWarning(codeLeftovers, "no committed deployment, but DefenseClaw machine state exists ("+strings.Join(leftovers, ", ")+"); "+env.leftoversNextStep(ctx))
+			r.AddWarning(codeLeftovers, "no committed deployment, but DefenseClaw machine state exists ("+strings.Join(leftovers, ", ")+"); "+env.leftoversNextStep(ctx, false))
 		}
 		return 0
 	}
