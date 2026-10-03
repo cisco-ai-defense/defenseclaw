@@ -287,13 +287,20 @@ func windowsManagedHooksStandaloneRegistrationGone(target enterprisehooks.Manife
 
 // windowsManagedHooksStandaloneRegistrationPresent is replaceable in tests.
 var windowsManagedHooksStandaloneRegistrationPresent = func(target enterprisehooks.ManifestTarget) (bool, error) {
-	return enterprisehooks.WindowsStandalonePerUserRegistrationPresent(enterprisehooks.InstallOptions{
-		ConnectorName: strings.ToLower(strings.TrimSpace(target.Connector)),
+	name := strings.ToLower(strings.TrimSpace(target.Connector))
+	present, err := enterprisehooks.WindowsStandalonePerUserRegistrationPresent(enterprisehooks.InstallOptions{
+		ConnectorName: name,
 		UserHome:      strings.TrimSpace(target.UserHome),
 		OwnerSID:      strings.TrimSpace(target.SID),
 		DataDir:       strings.TrimSpace(target.DataDir),
 		Registry:      enterpriseHooksCertifiedRegistryFactory(),
 	})
+	if err != nil || present || name != "copilot" {
+		return present, err
+	}
+	// Copilot's registration is also the VS Code Local hook file and plugin,
+	// whose encoded bridge the hook-command search cannot read (GAP-2098).
+	return windowsCopilotVSCodeUserFilesLeft(strings.TrimSpace(target.UserHome))
 }
 
 // windowsManagedHooksStandaloneEnrolledBefore reports whether the target's
