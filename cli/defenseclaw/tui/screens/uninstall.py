@@ -72,7 +72,7 @@ def build_uninstall_model() -> ConsequenceModalModel:
         title="Uninstall DefenseClaw",
         summary="Choose what the TUI should run. The default is preview-only.",
         details=(
-            "Destructive rows pass --yes because this modal is the confirmation step.",
+            "The keep-data row passes --yes because this modal is the confirmation step.",
             "Use the dry-run row first if you want to inspect the plan.",
         ),
         consequence="Uninstall can remove hooks, plugin integration, config, audit DB, secrets, and binaries.",
@@ -97,23 +97,31 @@ def build_uninstall_model() -> ConsequenceModalModel:
                 action_id=UninstallOption.WIPE_DATA.value,
                 hotkey="a",
                 label="Uninstall and wipe data",
-                description="Shows the terminal command to run after quitting; deletes ~/.defenseclaw.",
+                # The TUI cannot remove the data it keeps open, so this row
+                # only shows a command and needs no danger confirm (GAP-2595).
+                description=(
+                    "The TUI cannot do this. Quit, then "
+                    f"`{terminal_command_for_option(UninstallOption.WIPE_DATA.value)}` deletes ~/.defenseclaw."
+                ),
                 command=uninstall_command_for_option(UninstallOption.WIPE_DATA),
                 variant="error",
-                danger=True,
             ),
             ConsequenceAction(
                 action_id=UninstallOption.WIPE_ALL.value,
                 hotkey="e",
                 label="Uninstall everything",
-                description="Shows the terminal command to run after quitting; also deletes binaries.",
+                description=(
+                    "The TUI cannot do this. Quit, then "
+                    f"`{terminal_command_for_option(UninstallOption.WIPE_ALL.value)}` "
+                    "deletes ~/.defenseclaw and the binaries."
+                ),
                 command=uninstall_command_for_option(UninstallOption.WIPE_ALL),
                 variant="error",
-                danger=True,
             ),
         ),
         default_action_id=UninstallOption.DRY_RUN.value,
         border_color=DEFAULT_TOKENS.accent_red,
+        hint="p previews  ·  a/e show the command to run after quitting  ·  u, then enter twice, uninstalls  ·  esc cancel",
     )
 
 
