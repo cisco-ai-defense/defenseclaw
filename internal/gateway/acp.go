@@ -363,6 +363,14 @@ func (a *APIServer) traceACPDecisionV8(
 		}
 	}
 	if agentSpan != nil {
+		ruleIDs := evaluation.RuleIDs
+		if len(ruleIDs) == 0 {
+			ruleIDs = scanner.TopRuleIDs(ruleFindingsToInspect(verdict.DetailedFindings, ""), 8)
+		}
+		if outcome, ok := hookGuardrailOutcomeFor(verdict.Action, verdict.Severity, verdict.Reason, ruleIDs); ok {
+			agentInput.DefenseClawGuardrailAction, agentInput.DefenseClawGuardrailRuleID,
+				agentInput.DefenseClawGuardrailSeverity = guardrailOutcomeAttributes(outcome)
+		}
 		agentInput.EndTimeUnixNano = uint64(time.Now().UTC().UnixNano())
 		_ = agentSpan.End(agentInput)
 	}

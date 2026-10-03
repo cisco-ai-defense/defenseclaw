@@ -151,6 +151,28 @@ func (a *APIServer) annotateHookToolInvocation(meta llmEventMeta, tool, invocati
 	}
 }
 
+// guardrailOutcomeAttributes are the flat defenseclaw.guardrail.action,
+// rule_id and severity attributes of an outcome, all absent without one.
+// The agent and chat spans of a blocked prompt or turn carry them as a tool
+// span does, so Galileo shows the rule of a prompt block on the turn
+// (GAP-2332).
+func guardrailOutcomeAttributes(
+	outcome hookGuardrailOutcome,
+) (action, ruleID, severity observability.Optional[string]) {
+	if outcome.Action == "" {
+		return observability.Absent[string](), observability.Absent[string](), observability.Absent[string]()
+	}
+	return observability.Present(outcome.Action), hookV8OptionalIdentifier(outcome.RuleID),
+		hookV8OptionalText(outcome.Severity, 16)
+}
+
+// guardrailOutcomeBlocked reports whether a span already carries a block,
+// which a later alert on the same span must not replace.
+func guardrailOutcomeBlocked(action observability.Optional[string]) bool {
+	value, ok := action.Get()
+	return ok && value == "block"
+}
+
 // guardrailOutcomeEvent is the one field set every
 // defenseclaw.guardrail.<action> span event carries. The generated event
 // inputs of each family and action share it, so each converts from it.

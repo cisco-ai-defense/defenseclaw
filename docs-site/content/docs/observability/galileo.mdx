@@ -341,7 +341,11 @@ and `status: ERROR` for a block. Filter Galileo spans on those metadata keys.
 Decisions that do not belong to a tool call, such as a blocked prompt, produce
 an `apply_guardrail` span with the same status, event, and attributes. Galileo
 has no span type for it, so it reaches local observability and other OTLP
-destinations but not Galileo.
+destinations but not Galileo. The turn's `invoke_agent` and `chat` spans
+instead carry the decision for Galileo: the outcome `blocked` and the same
+three flat `defenseclaw.guardrail.*` attributes, which Galileo shows in the
+span's metadata. A prompt block therefore shows its rule and severity on the
+turn.
 
 Galileo and Agent360 are complementary rather than competing views:
 
