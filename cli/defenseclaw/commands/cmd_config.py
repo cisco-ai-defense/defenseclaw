@@ -506,6 +506,23 @@ def _yaml_node_at(raw: bytes | None, field_path: str):
     return None if rest else node
 
 
+def _duplicate_key_line(raw: bytes | None, field_path: str) -> int:
+    """The 1-based line of the second definition of the key at ``field_path``, or 0."""
+
+    tokens = list(_V8_PATH_TOKEN.finditer(field_path, 1))
+    if not field_path.startswith("$") or not tokens or tokens[-1].end() != len(field_path):
+        return 0
+    key, _index, quoted = tokens[-1].groups()
+    if key is None and quoted is None:
+        return 0
+    name = key if key is not None else quoted.replace('\\"', '"')
+    parent = _yaml_node_at(raw, field_path[: tokens[-1].start()])
+    if not isinstance(parent, yaml.MappingNode):
+        return 0
+    lines = [k.start_mark.line + 1 for k, _ in parent.value if isinstance(k, yaml.ScalarNode) and k.value == name]
+    return lines[1] if len(lines) > 1 else 0
+
+
 def _plain_v8_issue(raw: bytes | None, field_path: str, reason: str) -> str:
     path = field_path.split(" (line", 1)[0].strip()
     field = path[2:] if path.startswith("$.") else ("config.yaml" if path == "$" else path)
@@ -537,6 +554,16 @@ def _plain_v8_issue(raw: bytes | None, field_path: str, reason: str) -> str:
             f".env file. Save it with: defenseclaw keys set {save}. Until it is set, setup commands "
             "refuse to run, including the one that removes this destination"
         )
+
+    if code == "yaml_duplicate_key":
+        # Name the second definition's line, not the first one's value
+        # (GAP-2188).
+        first = re.search(r"first definition is at line (\d+)", text)
+        line = _duplicate_key_line(raw, path)
+        if first and line:
+            return (
+                f"line {line}: {field} appears twice; the first one is at line {first.group(1)}. Merge them into one."
+            )
 
     parts = [
         part.strip()

@@ -118,11 +118,20 @@ func gatewayStatusRelaxedConfig(err error) *config.Config {
 			}
 			return relaxed
 		}
-		var schemaErr *config.V8SchemaError
-		if !gatewayStatusDroppableValue(schemaCheck) || !errors.As(schemaCheck, &schemaErr) {
+		if !gatewayStatusDroppableValue(schemaCheck) {
 			return nil
 		}
-		next, ok := yamlWithoutPath(raw, schemaErr.Path)
+		var next []byte
+		ok := false
+		var schemaErr *config.V8SchemaError
+		var yamlErr *config.V8YAMLError
+		switch {
+		case errors.As(schemaCheck, &schemaErr):
+			next, ok = yamlWithoutPath(raw, schemaErr.Path, 0)
+		case errors.As(schemaCheck, &yamlErr):
+			// Keep the first definition of a duplicate section (GAP-2188).
+			next, ok = yamlWithoutPath(raw, yamlErr.Path, yamlErr.Line)
+		}
 		if !ok {
 			return nil
 		}
@@ -135,6 +144,12 @@ func gatewayStatusRelaxedConfig(err error) *config.Config {
 // unknown enum choice, a wrong type or an undeclared key), whose removal leaves the rest of
 // config.yaml, including the gateway address, as written.
 func gatewayStatusDroppableValue(err error) bool {
+	var yamlErr *config.V8YAMLError
+	if errors.As(err, &yamlErr) {
+		// A second definition of a key (GAP-2188) is dropped too.
+		return yamlErr.Code == config.V8YAMLErrorDuplicateKey && yamlErr.Line > 0 &&
+			yamlErr.Path != "" && yamlErr.Path != "$"
+	}
 	var schemaErr *config.V8SchemaError
 	if !errors.As(err, &schemaErr) || schemaErr.Path == "" || schemaErr.Path == "$" {
 		return false
@@ -146,8 +161,10 @@ func gatewayStatusDroppableValue(err error) bool {
 var yamlPathSegment = regexp.MustCompile(`^(?:\.([A-Za-z0-9_-]+)|\[([0-9]+)\])`)
 
 // yamlWithoutPath removes the value at a schema display path such as
-// $.guardrail.mode or $.connectors[0].name from a YAML document.
-func yamlWithoutPath(raw []byte, path string) ([]byte, bool) {
+// $.guardrail.mode or $.connectors[0].name from a YAML document. With a
+// line above zero it removes only the key written on that line, the second
+// definition of a duplicate key.
+func yamlWithoutPath(raw []byte, path string, line int) ([]byte, bool) {
 	rest := strings.TrimPrefix(path, "$")
 	var segments []string
 	for rest != "" {
@@ -169,7 +186,7 @@ func yamlWithoutPath(raw []byte, path string) ([]byte, bool) {
 		switch node.Kind {
 		case yaml.MappingNode:
 			for j := 0; j+1 < len(node.Content); j += 2 {
-				if node.Content[j].Value != segment {
+				if node.Content[j].Value != segment || last && line > 0 && node.Content[j].Line != line {
 					continue
 				}
 				if last {

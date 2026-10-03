@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -34,7 +35,10 @@ var (
 	observabilityV8SchemaErr  error
 )
 
-var observabilityV8AdditionalPropertyPattern = regexp.MustCompile(`additionalProperties '((?:\\'|[^'])+)' not allowed`)
+var (
+	observabilityV8AdditionalPropertyPattern = regexp.MustCompile(`additionalProperties ((?:'(?:\\'|[^'])+'(?:, )?)+) not allowed`)
+	observabilityV8QuotedPropertyPattern     = regexp.MustCompile(`'((?:\\'|[^'])+)'`)
+)
 
 type V8SchemaError struct {
 	Source        string
@@ -126,7 +130,7 @@ func validateV8Schema(source string, document *V8YAMLDocument) error {
 		if keyword == "" {
 			keyword = "schema"
 		}
-		unknown := v8SchemaUnknownProperty(leaf)
+		unknown := v8SchemaUnknownProperty(leaf, document.Document)
 		if unknown != "" {
 			path = v8YAMLChildPath(path, unknown)
 		}
@@ -247,7 +251,10 @@ func v8SchemaPointerSegments(pointer string) []string {
 	return parts
 }
 
-func v8SchemaUnknownProperty(validation *jsonschema.ValidationError) string {
+// v8SchemaUnknownProperty names the undeclared key of an additionalProperties
+// violation. With several (two typos in one section) it is the first one in
+// the file, so the error names a key, not its section (GAP-2173).
+func v8SchemaUnknownProperty(validation *jsonschema.ValidationError, document *yaml.Node) string {
 	if validation == nil || !strings.HasSuffix(validation.KeywordLocation, "/additionalProperties") {
 		return ""
 	}
@@ -255,7 +262,21 @@ func v8SchemaUnknownProperty(validation *jsonschema.ValidationError) string {
 	if len(match) != 2 {
 		return ""
 	}
-	return strings.ReplaceAll(match[1], `\'`, `'`)
+	var names []string
+	for _, quoted := range observabilityV8QuotedPropertyPattern.FindAllStringSubmatch(match[1], -1) {
+		names = append(names, strings.ReplaceAll(quoted[1], `\'`, `'`))
+	}
+	if len(names) == 0 {
+		return ""
+	}
+	if mapping := v8SchemaYAMLNode(document, validation.InstanceLocation, ""); mapping != nil && mapping.Kind == yaml.MappingNode {
+		for index := 0; index+1 < len(mapping.Content); index += 2 {
+			if key := mapping.Content[index].Value; slices.Contains(names, key) {
+				return key
+			}
+		}
+	}
+	return names[0]
 }
 
 func v8SchemaExpectation(validation *jsonschema.ValidationError, unknown string) (string, string) {

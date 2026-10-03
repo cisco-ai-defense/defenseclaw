@@ -48,3 +48,24 @@ func TestBadFlagValueNamesWhatTheFlagTakes(t *testing.T) {
 		}
 	}
 }
+
+// GAP-2189: run by its absolute path (the enterprise rpm puts nothing on
+// PATH), a usage error names that path, so the hint runs as typed.
+func TestUsageMessageNamesTheInvokedPath(t *testing.T) {
+	previous := invokedGatewayPath
+	t.Cleanup(func() { invokedGatewayPath = previous })
+	invokedGatewayPath = func(string) string { return "/opt/defenseclaw/bin/defenseclaw-gateway" }
+	root := &cobra.Command{Use: "defenseclaw-gateway"}
+	set := &cobra.Command{Use: "set", RunE: func(*cobra.Command, []string) error { return nil }}
+	root.AddCommand(set)
+	got := usageMessage(set, errors.New("bad flag"))
+	want := "bad flag\nUsage: /opt/defenseclaw/bin/defenseclaw-gateway set\n" +
+		"Try '/opt/defenseclaw/bin/defenseclaw-gateway set --help' for help."
+	if got != want {
+		t.Errorf("usage message = %q, want %q", got, want)
+	}
+	t.Setenv(delegatedFromEnv, "defenseclaw")
+	if got := usageMessage(set, errors.New("bad flag")); !strings.Contains(got, "Try 'defenseclaw set --help'") {
+		t.Errorf("delegated usage message = %q, want the defenseclaw command", got)
+	}
+}
