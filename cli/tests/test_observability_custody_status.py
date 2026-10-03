@@ -422,3 +422,26 @@ def test_native_delivery_missing_evidence_is_bounded_not_failed(capsys) -> None:
     assert "no evidence" in output
     assert "database missing" in output
     assert "fail" not in output.lower()
+
+
+def test_status_folds_native_delivery_rows_of_unconfigured_connectors(capsys) -> None:
+    # GAP-2242: evidence outlives `setup remove`; status scopes rows like doctor.
+    summary = summarize_native_delivery(
+        ConnectorCustodyReport(
+            "available",
+            "",
+            24,
+            (
+                ConnectorCustodyStatus("019b0001", "claudecode", "defenseclaw", "v1", True, normalized_batches=88),
+                ConnectorCustodyStatus("019b0002", "omnigent", "defenseclaw", "v1", True),
+                ConnectorCustodyStatus("019b0003", "codex", "defenseclaw", "v1", True, normalized_batches=4),
+            ),
+        )
+    )
+
+    _print_native_delivery_status(summary, configured={"codex"})
+    output = capsys.readouterr().out
+    assert "codex  accepted" in output
+    assert "claudecode  accepted" not in output
+    assert "omnigent  no-evidence" not in output
+    assert "not configured (telemetry history only, not checked): claudecode, omnigent" in output
