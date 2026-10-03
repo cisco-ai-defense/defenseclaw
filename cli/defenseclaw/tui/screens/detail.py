@@ -45,7 +45,10 @@ class DetailModalModel:
         # Long labels wrap instead of being cut: "Active Connector: cla…"
         # and two "Active Connector: ope…" rows hid which connector was
         # meant (GAP-1547).
-        table.add_column(width=22, overflow="fold")
+        # The column grows to the longest label (up to 26) so labels such as
+        # "Registry / Asset Policy" stay on one line (GAP-2127).
+        longest = max((len(label) for label, _ in self.pairs), default=0)
+        table.add_column(width=max(22, min(26, longest)), overflow="fold")
         table.add_column(overflow="fold")
         for label, value in self.pairs:
             if not label and not value:

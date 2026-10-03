@@ -10925,7 +10925,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             title, content = split_aside(below)
             more = getattr(below, "more", "")
             if more and rows > 0 and isinstance(content, Text):
-                content = fit_rows(content, self.console, width, rows, more)
+                # Fit one column narrower than the box: text that filled the
+                # box exactly got a scrollbar after the help overlay closed,
+                # re-wrapped one column narrower, and lost its "… i details"
+                # ending behind the scrollbar (GAP-2072).
+                content = fit_rows(content, self.console, max(1, width - 1), rows, more)
             signature = (self.active_panel, "aside", title, content)
             if signature != self._last_detail_signature:
                 panel.border_title = rich_escape(title) if title else None
