@@ -924,6 +924,9 @@ class TestPluginListMultiConnectorDefault(PluginCommandTestBase):
         """GAP-2199/GAP-2202: block shows in Actions only; long descriptions stay on one line."""
         rows = self._hermes_nested_rows()
         rows[0]["description"] = "Brave Search (free tier) - web search via the public API " * 2
+        # GAP-2202 (b11): YAML folded/multi-paragraph descriptions hold newlines.
+        rows[1]["description"] = "A2A adapter.\n\nSecond paragraph\nof text.\n"
+        rows[2]["description"] = "Image generation via xAI.\n"
         with (
             patch("defenseclaw.inventory.claw_inventory._enumerate_hermes_plugins", return_value=rows),
             patch.dict(os.environ, {"COLUMNS": "200"}),
@@ -1834,7 +1837,8 @@ class TestPluginMultiConnectorSemantics(PluginCommandTestBase):
         self.assertIn(codex_path, result.output)
         self.assertIn(hermes_path, result.output)
         self.assertIn("Actions:     -", result.output)
-        self.assertIn("Actions:     blocked", result.output)
+        # GAP-2264: the same wording as plugin list, with what still runs.
+        self.assertIn("Actions:     install-blocked (new installs are refused; the installed copy still loads)", result.output)
 
     def test_scoped_info_labels_connector_for_installed_plugin(self):
         codex_path = self._seed_connector_plugin("codex", "shared")
@@ -2300,6 +2304,55 @@ class TestPluginQuarantineRestoreOriginalPath(PluginCommandTestBase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertTrue(os.path.isfile(os.path.join(path, "plugin.yaml")))
         self.assertFalse(os.path.exists(os.path.join(root, "platforms", "photon-platform")))
+
+    @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
+    def test_hermes_quarantined_nested_plugin_keeps_its_list_row(self, _mock_oc):
+        """GAP-2265: the quarantined row keeps id, description, origin and severity."""
+        from datetime import datetime, timedelta, timezone
+
+        from defenseclaw.models import Finding, ScanResult
+
+        root = os.path.join(self.tmp_dir, "hermes-agent", "plugins")
+        path = os.path.join(root, "platforms", "photon")
+        os.makedirs(path)
+        with open(os.path.join(path, "plugin.yaml"), "w", encoding="utf-8") as handle:
+            handle.write("name: photon-platform\ndescription: >\n  Photon Spectrum gateway adapter.\n")
+        _seed_scan(self.app.store, ScanResult(
+            scanner="plugin-scanner", target=path, timestamp=datetime.now(timezone.utc),
+            findings=[Finding(id="f1", severity="MEDIUM", title="t", scanner="plugin-scanner")],
+            duration=timedelta(seconds=0.1),
+        ))
+        self.app.cfg.active_connectors = lambda: ["hermes"]  # type: ignore[method-assign]
+        self.app.cfg.plugin_dirs = lambda connector=None: [root]  # type: ignore[method-assign]
+        before = [{
+            "id": "photon", "name": "photon-platform", "description": "Photon Spectrum gateway adapter.",
+            "version": "", "origin": "bundled", "enabled": True, "source": "host:hermes", "host_path": path,
+        }]
+        other = [{
+            "id": "spotify", "name": "spotify", "description": "", "version": "",
+            "origin": "bundled", "enabled": True, "source": "host:hermes", "host_path": "",
+        }]
+        with (
+            patch.dict(os.environ, {"HERMES_HOME": self.tmp_dir, "COLUMNS": "200"}),
+            patch("defenseclaw.commands.cmd_plugin._list_hermes_plugins", return_value=before),
+        ):
+            result = self.invoke(["quarantine", "photon", "--connector", "hermes"])
+            self.assertEqual(result.exit_code, 0, result.output)
+        with (
+            patch.dict(os.environ, {"HERMES_HOME": self.tmp_dir, "COLUMNS": "200"}),
+            patch("defenseclaw.commands.cmd_plugin._list_hermes_plugins", return_value=other),
+        ):
+            listed = self.invoke(["list", "--connector", "hermes"])
+            as_json = self.invoke(["list", "--connector", "hermes", "--json"])
+        self.assertEqual(listed.exit_code, 0, listed.output)
+        row = next(line for line in listed.output.splitlines() if "quarantined" in line)
+        cells = [cell.strip() for cell in row.strip("\u2502").split("\u2502")]
+        self.assertEqual(cells[1:5], ["photon", "photon-platform", "Photon Spectrum gateway adapter.", "bundled"])
+        self.assertEqual(cells[5], "MEDIUM")
+        self.assertEqual(cells[6:], ["quarantined", "quarantined"])
+        item = next(entry for entry in json.loads(as_json.output) if entry["id"] == "photon")
+        self.assertEqual(item["status"], "quarantined")
+        self.assertEqual(item["actions"], {"file": "quarantine"})
 
 
 class TestPluginInfoHelpers(PluginCommandTestBase):

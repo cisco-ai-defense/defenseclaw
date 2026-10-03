@@ -72,7 +72,8 @@ def test_redaction_change_target_names_scope_and_profile() -> None:
 
     app.logger.log_action.assert_called_once()
     activity = _activity(*app.logger.log_config_change.call_args.args)
-    assert activity["target_id"] == "redaction-apply:all-configurable:strict"
+    # The counts ride in the target too: strict keeps only "object_fields=3" of after.
+    assert activity["target_id"] == "redaction-apply:all-configurable:strict:changed-legs-56:newly-unredacted-0"
     assert activity["after"] == {"profile": "strict", "changed_legs": "56", "newly_unredacted": "0"}
 
 
