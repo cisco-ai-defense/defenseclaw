@@ -1946,9 +1946,12 @@ def _parse_memory(raw: Any) -> list[dict[str, Any]]:
 
 _FILESYSTEM_ONLY_CONNECTOR_NOTES: dict[str, str] = {
     "agents": "agents are not a first-class concept on this connector",
-    "tools": "tool registry is owned by each plugin's manifest",
-    "models": "model providers are configured inside the framework",
-    "memory": "memory backend is private to the framework",
+    # Connector-neutral wording: these defaults apply to every non-OpenClaw
+    # connector (Copilot, Cursor, ...), which have no plugin manifests or
+    # "framework" of their own (GAP-2312).
+    "tools": "this connector has no local tool registry to read; its MCP servers are listed under MCP",
+    "models": "model and provider settings are not read for this connector",
+    "memory": "this connector has no documented local memory store to read",
 }
 
 _PARTIAL_CONNECTOR_NOTES: dict[tuple[str, str], str] = {
