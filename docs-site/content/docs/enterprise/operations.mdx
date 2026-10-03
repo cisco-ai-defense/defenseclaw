@@ -58,6 +58,9 @@ from any shell.
 On Linux and macOS, `verify` first waits up to 5 seconds for another
 lifecycle run to finish, and holds no lock while it checks. If that run is
 still going, `verify` skips its checks and exits `75` with `lifecycle_busy`.
+`status` run as root waits the same way; if the run is still going, it
+reports the installed version but skips its checks, because that run may be
+restarting the services, and exits `75` with `lifecycle_busy`.
 The Linux verify unit accepts that exit, so a daily run that met an
 administrator's change is not left failed. On Windows, `verify` does not
 wait: while another run's transaction is pending, it fails (`1603`); run it
