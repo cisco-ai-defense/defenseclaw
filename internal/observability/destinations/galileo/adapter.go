@@ -94,7 +94,7 @@ func NewAdapter(ctx context.Context, factory *otlp.Factory) (*Adapter, error) {
 	if ctx == nil || factory == nil {
 		return nil, &Error{code: ErrorInvalidTransport}
 	}
-	inner, err := factory.NewProjectedTraceAdapter(ctx, projectedBuilder{})
+	inner, err := factory.NewProjectedTraceAdapter(ctx, projectedBuilder{roots: newGalileoRootedTraces()})
 	if err != nil {
 		return nil, &Error{code: ErrorInvalidTransport}
 	}
@@ -158,9 +158,9 @@ func (adapter *Adapter) Counters() otlp.ExportCounters {
 	return adapter.inner.Counters()
 }
 
-type projectedBuilder struct{}
+type projectedBuilder struct{ roots *galileoRootedTraces }
 
-func (projectedBuilder) BuildProjectedTraceRequest(
+func (builder projectedBuilder) BuildProjectedTraceRequest(
 	destination string,
 	batch delivery.Batch,
 ) (otlp.ProjectedTraceRequest, bool) {
@@ -197,6 +197,17 @@ func (projectedBuilder) BuildProjectedTraceRequest(
 			})
 		}
 	}
+	canaryTraces := make(map[string]bool, len(canarySpans))
+	for traceID := range canarySpans {
+		if decoded, ok := decodeID(traceID, 16); ok {
+			canaryTraces[hex.EncodeToString(decoded)] = true
+		}
+	}
+	spans := make([]*tracepb.Span, 0, len(resources))
+	for _, resource := range resources {
+		spans = append(spans, resource.ScopeSpans[0].Spans[0])
+	}
+	builder.roots.reRootLateSpans(spans, canaryTraces)
 	acknowledged := make([]string, 0, len(canarySpans))
 	for traceID, spans := range canarySpans {
 		if traceSpanCount[traceID] == 2 && completeProjectedCanaryTrace(spans) {
