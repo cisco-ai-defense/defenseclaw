@@ -2576,15 +2576,12 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             return versioned
         if width >= 120 and self._tabs_fit_next_to(versioned, width):
             return versioned
-        if width >= 96:
+        if width >= 96 and self._tabs_fit_next_to("DefenseClaw", width, tiny=True):
             # The version is on Overview; its cells go to tab names, so a
             # 200-column screen names every tab instead of a bare "R"
-            # (GAP-1283). Around 160 columns the brand alone is what leaves
-            # tabs as bare key letters, so it goes too (GAP-1544).
-            if self._tabs_fit_next_to("", width, tiny=True) and not self._tabs_fit_next_to(
-                "DefenseClaw", width, tiny=True
-            ):
-                return ""
+            # (GAP-1283). The brand stays only while every tab keeps at least
+            # its tiny name beside it: from 140 to 157 columns it kept its 12
+            # cells while five tabs were bare key letters (GAP-1544, GAP-2150).
             return "DefenseClaw"
         # At 80 columns the brand would push tabs off screen; Overview still
         # shows the wordmark.
