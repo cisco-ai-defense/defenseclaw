@@ -7744,7 +7744,56 @@ function Get-DefenseClawDeploymentMetadata {
         $metadata = Microsoft.PowerShell.Management\Get-Content -LiteralPath $Layout.MetadataPath -Raw | Microsoft.PowerShell.Utility\ConvertFrom-Json
     }
     catch {
-        throw "cannot parse DefenseClaw enterprise deployment metadata: $($_.Exception.Message)"
+        # Bulldoze: a prior scoped uninstall cycle on this box may have
+        # rewritten deployment.json's DACL into a state where even the
+        # elevated LocalSystem/Administrator token lacks read access
+        # (foreign owner from inherited Users default + a canonical DACL
+        # that only grants rights to SYSTEM/Administrators as explicit
+        # ACEs - but the file is now owned by Users, so admin lost
+        # owner-implicit read_control). Attempt a one-shot takeown +
+        # icacls /reset to transfer ownership back to Administrators and
+        # drop any hostile explicit DACL, then retry the content read.
+        # Strict mode (DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS=1)
+        # preserves the pre-change throw.
+        if (Test-DefenseClawTrustStrictAncestors) {
+            throw "cannot parse DefenseClaw enterprise deployment metadata: $($_.Exception.Message)"
+        }
+        $initialReadError = $_.Exception.Message
+        Write-DefenseClawAclSelfHealAdvisory `
+            -Path $Layout.MetadataPath `
+            -Reason (
+                "deployment metadata read failed, attempting takeown + " +
+                "icacls /reset recovery: " + $initialReadError
+            )
+        $takeownExe = [IO.Path]::Combine($script:System32, 'takeown.exe')
+        try {
+            $null = & $takeownExe '/F' $Layout.MetadataPath '/A' 2>&1
+            $null = & $script:IcaclsExe $Layout.MetadataPath '/reset' '/C' '/L' 2>&1
+            $metadata = Microsoft.PowerShell.Management\Get-Content `
+                -LiteralPath $Layout.MetadataPath `
+                -Raw |
+                Microsoft.PowerShell.Utility\ConvertFrom-Json
+        }
+        catch {
+            # Recovery read also denied. In non-strict mode this is
+            # tolerable for both Required and optional callers: an
+            # uninstall whose state root is this corrupted cannot be
+            # authenticated by metadata anyway, and the next uninstall
+            # step removes the state root wholesale. Return null so the
+            # caller (which already handles the "file missing" branch)
+            # continues to the bulk delete path. Strict mode threw above
+            # before we got here.
+            Write-DefenseClawAclSelfHealAdvisory `
+                -Path $Layout.MetadataPath `
+                -Reason (
+                    "deployment metadata read failed even after " +
+                    "takeown + icacls /reset recovery (" +
+                    $_.Exception.Message +
+                    "); treating as absent so uninstall can proceed to " +
+                    "bulk state-root removal"
+                )
+            return $null
+        }
     }
     if ([int]$metadata.schema_version -ne $script:SchemaVersion) {
         throw "unsupported DefenseClaw enterprise deployment metadata schema: $($metadata.schema_version)"
