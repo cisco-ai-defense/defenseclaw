@@ -8212,6 +8212,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             # look active.
             if cfg.connector_is_disabled(connector):
                 status = "disabled"
+            elif self.overview_model.gateway_down():
+                # connectors[] in the last /health kept every row a green
+                # "running" with the gateway stopped (GAP-2586).
+                status = "offline (gateway not running)"
             elif connector.strip().lower() == "opencode" and connector.strip().lower() not in status_map:
                 # A running gateway is not proof that OpenCode loaded its
                 # managed plugin. Older/malformed health without an OpenCode
