@@ -75,7 +75,7 @@ class GuardedOpenClawSwitchTests(unittest.TestCase):
     def _assert_refused(self, result, slug="codex"):
         output = result.output + (result.stderr or "")
         self.assertNotEqual(result.exit_code, 0, output)
-        self.assertIn("OpenClaw", output)
+        self.assertIn("openclaw", output.lower())
         self.assertIn("No changes made", output)
         self.assertIn(f"defenseclaw setup {slug} --replace", output)
         self.assertEqual(self.cfg_file.read_bytes(), self.before)

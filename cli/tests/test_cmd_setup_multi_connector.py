@@ -971,6 +971,22 @@ class TestAdditiveSetupCommand(unittest.TestCase):
             self.assertEqual(self.app.cfg.claw.mode, "openclaw")
             self.assertFalse(os.path.exists(self.cfg_path))
 
+    # GAP-2452: 'setup guardrail --connector <hook>' takes the same rule.
+    def test_setup_guardrail_hook_connector_over_guarded_openclaw_is_refused(self):
+        self._seed_single("openclaw")
+        self.app.cfg.guardrail.enabled = True
+        with _setup_patches() as restart:
+            result = CliRunner().invoke(
+                setup_group, ["guardrail", "--connector", "codex", "--non-interactive"], obj=self.app
+            )
+        self.assertNotEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("No changes made", result.output)
+        self.assertIn("defenseclaw setup codex --replace", result.output)
+        restart.assert_not_called()
+        self.assertEqual(self.app.cfg.guardrail.connector, "openclaw")
+        self.assertEqual(self.app.cfg.claw.mode, "openclaw")
+        self.assertFalse(os.path.exists(self.cfg_path))
+
     def test_hook_setup_replace_over_guarded_openclaw_confirms(self):
         self._seed_single("openclaw")
         self.app.cfg.guardrail.enabled = True
@@ -988,6 +1004,8 @@ class TestAdditiveSetupCommand(unittest.TestCase):
         with _setup_patches():
             result = _invoke(["codex", "--replace", "--yes", "--no-restart"], self.app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
+        # GAP-2418: --yes skips the question, so the output must still name OpenClaw.
+        self.assertIn("--replace removes OpenClaw: DefenseClaw stops guarding it.", result.output)
         self.assertEqual(self.app.cfg.guardrail.connector, "codex")
         self.assertEqual(self.app.cfg.claw.mode, "codex")
 
