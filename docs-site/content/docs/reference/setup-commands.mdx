@@ -75,7 +75,7 @@ which ones are interactive and which ones are designed for scripts.
   <Card
     title="defenseclaw keys"
     href="/docs/guardrail/unified-llm-key"
-    description="Stash DEFENSECLAW_LLM_KEY (and any per-component overrides) in ~/.defenseclaw/.env. Top-level group: list, set, fill-missing, check. Not a setup subcommand."
+    description="Stash DEFENSECLAW_LLM_KEY (and any per-component overrides) in ~/.defenseclaw/.env. Top-level group: list, set, remove, fill-missing, check. Not a setup subcommand."
   />
   <Card
     title="setup routing"
@@ -176,6 +176,7 @@ the interactive and scripted form of each.
 | `keys set` | hidden prompt when no value is given | `--value-stdin` (or `--value`, which is visible in `ps`) | See [Unified LLM key](/docs/guardrail/unified-llm-key#non-interactive-ci-and-scripts). |
 | `keys fill-missing` | yes | `--yes` skips the opening confirmation | Prompts for every required key that is not set. |
 | `keys list` / `keys check` | no | always | `keys check` exits non-zero when a required key is missing. |
+| `keys remove` | asks to confirm | `--yes` | See [Keys](/docs/reference/keys). |
 | `setup webhook add <type>` | yes (default) | `--non-interactive` + flags | URL and secret env are prompt-or-flag; the type is always positional. |
 | `setup webhook test <name>` | no | always | Safe to re-run; `--dry-run` formats without delivering. |
 | `registry add <id>` | yes (default) | `--non-interactive` + flags | `registry wizard` is the first-run add-and-sync flow. |
@@ -194,8 +195,8 @@ the interactive and scripted form of each.
 <Callout title="Redaction is its own workflow">
 `defenseclaw setup redaction` edits the v8 bucket, profile, destination and
 route policy for telemetry. See [Redaction](/docs/observability/redaction) for
-the interactive and scripted workflow, which is also in **TUI → Setup →
-Redaction Policy** and the macOS app.
+the interactive and scripted workflow, which is also in **TUI → 0 Setup → Guardrail & scanning →
+Redaction** and in the macOS app under **Logs → Redaction policy…**.
 </Callout>
 
 <Callout title="See it for yourself">
