@@ -210,7 +210,9 @@ post-install script runs
 creates `_defenseclaw`, validates the config, lays out the files, writes the
 LaunchDaemons, starts them in order, verifies, and rolls back on any failure.
 A failed apply fails the pkg install, so `installer` and your MDM report it.
-The result is in `last-package-result.json`. The pkg receipt is
+The result is in `last-package-result.json`, and `/var/log/install.log`
+names its first error and the `ensure --from-package` command that finishes
+the install once you fix it. The pkg receipt is
 `com.cisco.defenseclaw.enterprise`.
 
 If you did not stage a config, the pkg installs the default, which protects

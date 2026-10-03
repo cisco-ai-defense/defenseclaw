@@ -1093,3 +1093,19 @@ dc_main
         rf"enterprise {group} ensure --reason mdm --lock-wait 10m --config=.*/stage\.\w+/config\.yaml --json", calls[1]
     ), calls
 
+
+
+# GAP-2331: the pkg postinstall logged only "did not apply (exit 1); see
+# last-package-result.json"; install.log must name the first error and the
+# finish step, as the Linux postinstall does (GAP-1744).
+def test_macos_pkg_postinstall_names_the_lifecycle_error_and_the_finish_step(tmp_path: Path) -> None:
+    document = {
+        "schema_version": 2,
+        "ok": False,
+        "errors": [{"code": "config_invalid", "message": 'config guardrail.rule_pack_dir "/x/cert-s3" does not exist'}],
+    }
+    host = _Host(tmp_path, gateway_rc=1, gateway_out=json.dumps(document, indent=2))
+    result = host.run(_macos_pkg_postinstall(host))
+    assert result.returncode == 1
+    assert 'DefenseClaw: config_invalid: config guardrail.rule_pack_dir "/x/cert-s3" does not exist' in result.stderr
+    assert f"finish the install with: sudo {host.gateway} enterprise macos ensure --from-package" in result.stderr
