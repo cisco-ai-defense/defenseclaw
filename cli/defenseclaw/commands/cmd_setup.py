@@ -8984,6 +8984,7 @@ def _rollback_failed_connector_application(
             )
     restore_complete = True
     gateway_still_down = False
+    openclaw_gateway_down = False
     try:
         # Keep the hook lock the gateway published for the failed generation.
         # It is the gateway's teardown authority for that generation: with
@@ -9079,6 +9080,11 @@ def _rollback_failed_connector_application(
                 # GAP-1139: the restored config is in place; the gateway
                 # cannot start for the same reason the setup failed.
                 gateway_still_down = True
+            elif not _secret_safe and not exact_runtime and isinstance(exc, _OpenClawGatewayNotRunning):
+                # GAP-2477: defenseclaw-gateway is back on the restored config;
+                # only OpenClaw's own gateway is down, which is a note, not an
+                # incomplete rollback.
+                openclaw_gateway_down = True
             elif not _secret_safe:
                 detail = (
                     f"restore prior gateway lifecycle [{_setup_runtime_ref(type(exc).__name__)}]"
@@ -9122,7 +9128,7 @@ def _rollback_failed_connector_application(
 
     cause_text = f"[ref {_setup_runtime_ref(type(cause).__name__)}]" if exact_runtime else f"({cause})"
     if rollback_errors:
-        outcome = "rollback was incomplete: " + "; ".join(rollback_errors)
+        outcome = "rollback was incomplete: " + "; ".join(error.rstrip(".") for error in rollback_errors)
     elif gateway_still_down:
         outcome = (
             "restored the prior connector configuration, but the gateway still cannot start for the "
@@ -9173,6 +9179,11 @@ def _rollback_failed_connector_application(
         failure = click.ClickException(
             f"connector setup did not converge {cause_text}; {outcome}. "
             "Check each connector's current mode with `defenseclaw status`, then run the same setup command again."
+        )
+    if openclaw_gateway_down:
+        failure = click.ClickException(
+            f"{failure.format_message()} Note: the OpenClaw gateway is not running; start it with "
+            "`openclaw gateway run` (or `openclaw gateway restart`) and it loads the DefenseClaw plugin."
         )
     if exact_runtime:
         raise failure from None
