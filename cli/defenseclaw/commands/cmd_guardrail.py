@@ -1545,9 +1545,15 @@ def fail_mode_cmd(
             )
             click.echo(f"  {ux.dim('Switch to closed:')} defenseclaw guardrail fail-mode closed")
         else:
+            # Name Hermes only when it is configured (GAP-2116).
+            _hermes_note = (
+                "; Hermes remains fail-open"
+                if any(normalize_connector(n) == "hermes" for n in _actives)
+                else ""
+            )
             ux.subhead(
                 "Invalid, unauthorized, incomplete, and unreachable gateway responses BLOCK connectors "
-                "that are closed above; Hermes remains fail-open.",
+                f"that are closed above{_hermes_note}.",
                 indent="  ",
             )
             if _open_names:
@@ -1692,7 +1698,8 @@ def fail_mode_cmd(
         )
         ux.subhead(
             "A 4xx, malformed/incomplete response, timeout, or connection failure blocks connectors "
-            "with a native fail-closed surface. Hermes remains fail-open.",
+            "with a native fail-closed surface."
+            + (" Hermes remains fail-open." if hermes_targeted else ""),
             indent="    ",
         )
     else:
