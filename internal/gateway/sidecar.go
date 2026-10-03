@@ -863,12 +863,6 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 		return err
 	}
 
-	if s.currentConfig().Guardrail.Enabled && s.currentConfig().Guardrail.Model == "" &&
-		proxyShouldBindForConfiguredConnector(s.currentConfig()) {
-		fmt.Fprintf(os.Stderr, "[sidecar] WARNING: guardrail.enabled is true but guardrail.model is empty — relying on fetch-interceptor routing.\n")
-		fmt.Fprintf(os.Stderr, "[sidecar]          Set guardrail.model in ~/.defenseclaw/config.yaml only if you need a fixed advertised model name.\n")
-	}
-
 	if strings.EqualFold(s.currentConfig().Guardrail.Host, "localhost") {
 		fmt.Fprintf(os.Stderr, "[sidecar] WARNING: guardrail.host is set to \"localhost\" which may resolve to IPv6 (::1) on macOS.\n")
 		fmt.Fprintf(os.Stderr, "[sidecar]          The proxy binds 127.0.0.1 only. Set guardrail.host to \"127.0.0.1\" to avoid silent connection failures.\n")

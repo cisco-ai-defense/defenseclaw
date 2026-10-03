@@ -7794,13 +7794,9 @@ def _check_guardrail_proxy(cfg, r: _DoctorResult) -> None:
         _emit("pass", "Guardrail proxy", closed_detail, r=r)
         return
 
-    if not cfg.guardrail.model:
-        _emit(
-            "warn",
-            "Guardrail proxy",
-            "guardrail.model is empty — relying on fetch-interceptor routing",
-            r=r,
-        )
+    # An empty guardrail.model is the normal state: connectors route LLM
+    # traffic through the OpenClaw fetch interceptor, an api_base rewrite or
+    # a /c/<connector> base URL, never through an advertised model name.
 
     host = getattr(cfg.guardrail, "host", None) or "127.0.0.1"
     url = f"http://{host}:{cfg.guardrail.port}/health/liveliness"
