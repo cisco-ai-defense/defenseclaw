@@ -144,7 +144,7 @@ from defenseclaw.tui.screens.trusted_paths_editor import (
     trusted_paths_rows_from_config,
     untrusted_connector_dir,
 )
-from defenseclaw.tui.screens.uninstall import UninstallScreen
+from defenseclaw.tui.screens.uninstall import UninstallScreen, terminal_command_for_option
 from defenseclaw.tui.services import connector_filter as connector_filter_svc
 from defenseclaw.tui.services.catalog_state import (
     CatalogCommandIntent,
@@ -14029,6 +14029,16 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         command = action.command
         if command is None:
             self._set_status("Uninstall action has no command.")
+            return
+        terminal_command = terminal_command_for_option(action.action_id)
+        if terminal_command:
+            # Removing ~/.defenseclaw is refused while this TUI is open, so
+            # name the terminal command instead of running it (GAP-2585).
+            self._set_status(f"Quit the TUI (Ctrl+C), then run: {terminal_command}")
+            self.notify(
+                f"This TUI keeps ~/.defenseclaw open. Quit it (Ctrl+C), then run in a terminal: {terminal_command}",
+                timeout=12,
+            )
             return
         self.active_panel = "activity"
         self._render_chrome()
