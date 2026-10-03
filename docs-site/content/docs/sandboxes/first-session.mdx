@@ -144,20 +144,21 @@ row counts the sites contacted and blocked.
 Say the task really needs a site the blocklist covers. Here is what happens:
 
 <Sequence
-  caption="A blocked site, from the agent's request to your unblock. The agent is told why and how to ask you, and is told not to try another way."
+  caption="A blocked site, from the agent's request to your unblock. Hooks are DefenseClaw's hooks inside the sandbox; their note tells the agent why the site was blocked, how you can unblock it, and not to try another way."
   participants={[
     { id: 'a', label: 'Agent', kind: 'agent' },
     { id: 'p', label: 'Egress proxy', kind: 'gateway' },
-    { id: 'h', label: 'DefenseClaw hooks', kind: 'policy' },
+    { id: 'h', label: 'Hooks', kind: 'policy' },
     { id: 'u', label: 'You', kind: 'operator' },
   ]}
 >
-  <Message from="a" to="p" label="CONNECT webhook.site:443" />
-  <Message from="p" to="a" kind="return" label="403, blocked (webhook catcher)" />
-  <Message from="p" to="u" label="✗ in the feed and a notice" />
-  <Message from="h" to="a" kind="return" label="after the tool call: blocked, why, unblock" />
+  <Message from="a" to="p" label="connect to webhook.site:443" />
+  <Message from="p" to="a" kind="return" label="403: blocked, webhook catcher" />
+  <Message from="p" to="u" label="shows the block: feed and terminal" />
+  <Message from="a" to="h" label="tool call finished" />
+  <Message from="h" to="a" kind="return" label="note: blocked, why, how to unblock" />
   <Message from="u" to="p" label="sandbox unblock webhook.site" />
-  <Message from="a" to="p" label="retry" />
+  <Message from="a" to="p" label="connects again" />
   <Message from="p" to="a" kind="return" label="allowed" />
 </Sequence>
 

@@ -31,30 +31,26 @@ The proxy checks each request in a fixed order, and the first match decides.
 Every sandbox is decided by its own policy: another sandbox's pack, block
 list or unblocks never apply to it.
 
-<Flow direction="TB" caption="How the egress proxy decides a site, simplified. Private networks and the port list are checked with the first step. The full order has twelve steps, including your organization's allow-only list.">
-  <Node id="req" kind="agent">{`Agent opens a site\nthrough the proxy`}</Node>
-  <Node id="d1" kind="decision">{`This machine or a\nmetadata address?`}</Node>
-  <Node id="b1" kind="policy">{`Blocked\nnever unblockable`}</Node>
-  <Node id="d2" kind="decision">{`On your org's or\nyour block list?`}</Node>
-  <Node id="b2" kind="policy">{`Blocked\nunblock cannot lift`}</Node>
-  <Node id="d3" kind="decision">{`Unblocked, or on\nan allow list?`}</Node>
-  <Node id="a3" kind="generic">{`Allowed\nand logged`}</Node>
-  <Node id="d4" kind="decision">{`On the blocklist\nfeed?`}</Node>
-  <Node id="b4" kind="policy">{`Blocked\nyou can unblock`}</Node>
-  <Node id="d5" kind="decision">{`Network profile\ndefault`}</Node>
-  <Node id="a5" kind="generic">{`open: any name\nIP address blocked`}</Node>
-  <Node id="b5" kind="policy">{`balanced: blocked\nyou can unblock`}</Node>
-  <Edge from="req" to="d1" />
-  <Edge from="d1" to="b1" label="yes" />
-  <Edge from="d1" to="d2" label="no" />
-  <Edge from="d2" to="b2" label="yes" />
-  <Edge from="d2" to="d3" label="no" />
-  <Edge from="d3" to="a3" label="yes" />
-  <Edge from="d3" to="d4" label="no" />
-  <Edge from="d4" to="b4" label="yes" />
-  <Edge from="d4" to="d5" label="no" />
-  <Edge from="d5" to="a5" label="open" />
-  <Edge from="d5" to="b5" label="balanced" />
+<Flow direction="TB" caption="The egress proxy's checks, in order: the first that matches decides. When your organization turns unblocking off, unblocks do not count and the feed is checked before your allow list.">
+  <Node id="guard" kind="policy">{`Safety checks\nthis machine, private networks, ports\nblocked; no unblock opens these`}</Node>
+  <Node id="org" kind="policy">{`Your organization's lists\nlisted, or off its allow-only list: blocked`}</Node>
+  <Node id="block" kind="policy">{`Your block list\nblocked; remove the entry to open it`}</Node>
+  <Node id="allow" kind="generic">{`Your unblocks and allow list\nallowed`}</Node>
+  <Node id="feed" kind="policy">{`The blocklist feed\nblocked; you can unblock it`}</Node>
+  <Node id="dflt" kind="decision">{`The network profile\ndecides the rest (next diagram)`}</Node>
+  <Edge from="guard" to="org" />
+  <Edge from="org" to="block" />
+  <Edge from="block" to="allow" />
+  <Edge from="allow" to="feed" />
+  <Edge from="feed" to="dflt" />
+</Flow>
+
+<Flow direction="TB" caption="What the profile does with a site no check matched. A site on your organization's allow-only list is allowed just before this. The strict profile has no egress proxy, so its sandboxes never get here.">
+  <Node id="p" kind="decision">{`Network profile?\nnothing else matched`}</Node>
+  <Node id="b" kind="policy">{`Only the curated allowlist\nthe rest blocked; you can unblock`}</Node>
+  <Node id="o" kind="generic">{`Any site name allowed\nIP addresses blocked, can unblock`}</Node>
+  <Edge from="p" to="b" label="balanced" />
+  <Edge from="p" to="o" label="open" />
 </Flow>
 
 In words:
@@ -63,7 +59,7 @@ In words:
    blocked. Nothing opens them. To let the sandbox use one service on your
    machine, start it with `--host-port PORT`, which you then approve.
 2. **Private networks** such as `10.x`, `192.168.x` and intranet names are
-   blocked unless an allow entry names them exactly.
+   blocked unless an allow entry names them. An unblock never opens them.
 3. **Ports** other than those on the proxy port list are blocked. The default
    list is 80 and 443.
 4. **Your organization's block list**, then its allow-only list, if it has
@@ -81,7 +77,7 @@ In words:
    anything outside its curated allowlist, and you can unblock it.
 
 [How a destination is decided](/docs/setup/sandbox-policy#how-a-destination-is-decided)
-lists all twelve steps, including the organization settings.
+lists every step in full, including your organization's settings.
 
 ## Network profiles
 

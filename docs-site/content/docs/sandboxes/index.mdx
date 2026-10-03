@@ -104,13 +104,13 @@ images.
 
 ## The session lifecycle
 
-<Flow direction="TB" caption="A sandbox's life. Setup is once per machine; each run starts or resumes a sandbox, and the end of each session asks what to do with the changes.">
-  <Node id="setup" kind="operator">{`sandbox setup\nonce per machine`}</Node>
-  <Node id="run" kind="agent">{`sandbox run claude\nor connect NAME`}</Node>
-  <Node id="session" kind="agent">{`Session\nhooks and egress checked`}</Node>
-  <Node id="review" kind="decision">{`End of session\nreview the changes`}</Node>
-  <Node id="keep" kind="datastore">{`Linux: keep or undo\nmacOS: pull back`}</Node>
-  <Node id="stop" kind="generic">{`Stopped and kept\nor sandbox delete`}</Node>
+<Flow direction="TB" caption="A sandbox's life, one step per item in the list below. Setup is once per machine; every run after it repeats steps 2 to 6.">
+  <Node id="setup" kind="operator">{`Set up the machine\nonce: defenseclaw sandbox setup`}</Node>
+  <Node id="run" kind="operator">{`Start or resume a sandbox\nsandbox run · sandbox connect`}</Node>
+  <Node id="session" kind="agent">{`The agent works\nevery tool call and site checked`}</Node>
+  <Node id="review" kind="decision">{`Review what changed\nfiles that can run code flagged`}</Node>
+  <Node id="keep" kind="operator">{`Decide what to keep\nLinux: keep or undo · Mac: bring back`}</Node>
+  <Node id="stop" kind="generic">{`Sandbox stopped and kept\nresume it later, or delete it`}</Node>
   <Edge from="setup" to="run" />
   <Edge from="run" to="session" />
   <Edge from="session" to="review" />
