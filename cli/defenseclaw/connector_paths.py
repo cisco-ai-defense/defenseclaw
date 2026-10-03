@@ -7822,12 +7822,24 @@ def _unset_claude_without_state(
     return True
 
 
-def _raise_claude_mcp_not_removed(path: str, name: str, data: dict[str, Any]) -> None:
+_CLAUDE_ENTRY_CHANGED = "the entry changed after DefenseClaw wrote it"
+_CLAUDE_ENTRY_CHANGED_OR_PRIOR = (
+    "the entry changed after DefenseClaw wrote it, or it was there before DefenseClaw wrote it"
+)
+
+
+def _raise_claude_mcp_not_removed(
+    path: str,
+    name: str,
+    data: dict[str, Any],
+    reason: str = _CLAUDE_ENTRY_CHANGED_OR_PRIOR,
+) -> None:
+    # A Claude Code rewrite alone no longer releases an entry (GAP-2541), so
+    # the reason names the entry's own change, not the rewrite (GAP-2553).
     servers = data.get("mcpServers")
     if isinstance(servers, dict) and name in servers:
         raise MCPServerNotRemovedError(
-            f"DefenseClaw no longer owns {name!r} in {path} (Claude Code rewrote the file as it ran, "
-            "or the entry was there before DefenseClaw wrote it), so it left the entry in place; "
+            f"DefenseClaw no longer owns {name!r} in {path} ({reason}), so it left the entry in place; "
             f"remove it with: claude mcp remove {name} -s user"
         )
 
@@ -7871,7 +7883,12 @@ def _unset_claudecode_mcp_server(path: str, name: str) -> bool | str:
                 # The file changed since DefenseClaw wrote the entry, so it
                 # is no longer DefenseClaw's to remove (GAP-1400): say so
                 # rather than let the caller report it removed.
-                _raise_claude_mcp_not_removed(path, name, data)
+                _raise_claude_mcp_not_removed(
+                    path,
+                    name,
+                    data,
+                    _CLAUDE_ENTRY_CHANGED if target_was_owned else _CLAUDE_ENTRY_CHANGED_OR_PRIOR,
+                )
                 return False
             return _unset_claude_without_state(path, name, raw, data, released)
 

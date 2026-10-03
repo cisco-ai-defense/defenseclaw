@@ -2679,9 +2679,12 @@ def set_server(
 
     from defenseclaw.commands import hint
 
-    # GAP-2311: keep the --connector the user passed, as unblock does.
-    scan_connector = applied[0] if connector_flag and len(applied) == 1 else ""
-    hint(f"Scan it now:  {_mcp_scan_command(name, scan_connector, url)}")
+    # GAP-2554: a scanned add already printed its result; only an unscanned
+    # add (--skip-scan, or a policy allow) needs the hint.
+    if result is None:
+        # GAP-2311: keep the --connector the user passed, as unblock does.
+        scan_connector = applied[0] if connector_flag and len(applied) == 1 else ""
+        hint(f"Scan it now:  {_mcp_scan_command(name, scan_connector, url)}")
 
 
 @mcp.command("unset")
