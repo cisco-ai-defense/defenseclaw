@@ -235,27 +235,15 @@ def _source_to_dict(source: RegistrySource) -> dict[str, Any]:
 def registry() -> None:
     """Manage external skill / MCP catalog sources.
 
-    A "registry source" is a fetchable manifest (corporate HTTPS YAML,
-    smithery.ai, a git repo containing ``defenseclaw-registry.yaml``,
-    etc.) that DefenseClaw ingests on demand. Synced entries are
-    scanned with the existing skill / MCP scanners and clean ones are
-    auto-promoted into ``asset_policy.{skill,mcp}.registry`` so
-    admission decisions can attribute the rule back to its source.
+    A registry source is a fetchable manifest (corporate HTTPS YAML,
+    smithery.ai, a git repo containing defenseclaw-registry.yaml, and
+    others) that DefenseClaw ingests on demand. Synced entries are
+    scanned with the skill / MCP scanners, and clean ones are promoted
+    into asset_policy.skill.registry or asset_policy.mcp.registry, so
+    admission decisions can name the source of each rule.
 
-    \b
-    Subcommands:
-      add       Register a new source (interactive or flag-only).
-      edit      Update an existing source.
-      list      Show every configured source (with entry counts).
-      show      Pretty-print a single source.
-      remove    Delete a source and its cache.
-      test      Dry-run fetch + parse — no cache or policy writes.
-      sync      Fetch + scan + promote one or all sources.
-      entries   Show cached entries (after sync).
-      approve   Mark an entry approved (forces promotion next sync).
-      reject    Mark an entry rejected (always blocked).
-      require   Toggle ``asset_policy.{type}.registry_required``.
-      wizard    First-run interactive add+sync convenience flow.
+    Start with 'defenseclaw registry wizard', or 'registry add' then
+    'registry sync'.
     """
 
 
