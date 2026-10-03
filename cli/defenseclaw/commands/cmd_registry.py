@@ -753,7 +753,7 @@ def _log_registry_action(app: AppContext, action: str, target: str, details: str
     except CanonicalObservabilityUnavailableError:
         from defenseclaw.commands._audit_notice import NOT_RECORDED_WARNING
 
-        click.echo(NOT_RECORDED_WARNING, err=True)
+        ux.echo(NOT_RECORDED_WARNING, err=True)
 
 
 @registry.command("remove")

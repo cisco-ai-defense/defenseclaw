@@ -525,13 +525,13 @@ def _log_policy_action(
     except CanonicalObservabilityUnavailableError:
         if defer_stopped:
             return True
-        click.echo(
+        ux.echo(
             f"  ⚠ {done}. The gateway isn't running, so the audit event was not recorded "
             "(start it with: defenseclaw-gateway start).",
             err=True,
         )
     except CanonicalObservabilityError as exc:
-        click.echo(f"  ⚠ {done}, but the gateway did not confirm the audit event ({exc}).", err=True)
+        ux.echo(f"  ⚠ {done}, but the gateway did not confirm the audit event ({exc}).", err=True)
     return False
 
 
@@ -610,7 +610,7 @@ def _reload_and_report(
     )
     if needs_restart and _gateway_pid_alive(app):
         if audit_skipped:
-            click.echo(skipped_note, err=True)
+            ux.echo(skipped_note, err=True)
         from defenseclaw.commands import cmd_setup
 
         if cmd_setup._restart_defense_gateway(app.cfg.data_dir, start_if_stopped=False):
@@ -633,7 +633,7 @@ def _reload_and_report(
         )
         return
     if audit_skipped:
-        click.echo(skipped_note, err=True)
+        ux.echo(skipped_note, err=True)
     click.echo(
         f"error: policy '{name}' was saved, but the running gateway rejected the reload"
         + (f" ({detail})" if detail else "")

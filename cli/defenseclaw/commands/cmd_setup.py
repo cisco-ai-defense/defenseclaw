@@ -1433,7 +1433,7 @@ def _log_llm_change(app: AppContext, target_path: str, previous: str) -> None:
     try:
         saved_change_audit(app.logger).log_config_change("llm", details)
     except CanonicalObservabilityError as exc:
-        click.echo(f"  ⚠ Change saved, but the gateway did not confirm the audit event ({exc}).", err=True)
+        ux.echo(f"  ⚠ Change saved, but the gateway did not confirm the audit event ({exc}).", err=True)
 
 
 def _role_to_target_path(role: str) -> str:
@@ -16220,7 +16220,7 @@ def _check_openclaw_gateway(host: str = "127.0.0.1", port: int = 18789) -> bool:
 
     if not went_unhealthy:
         elapsed = int(time.monotonic() - start)
-        click.echo(f" ✓ (healthy, stable for {elapsed}s)")
+        ux.echo(f" ✓ (healthy, stable for {elapsed}s)")
         return True
 
     # Phase 3 — gateway went unhealthy (config-triggered restart);
@@ -16235,7 +16235,7 @@ def _check_openclaw_gateway(host: str = "127.0.0.1", port: int = 18789) -> bool:
 
     if recovered:
         elapsed = int(time.monotonic() - start)
-        click.echo(f" ✓ (recovered after restart, {elapsed}s)")
+        ux.echo(f" ✓ (recovered after restart, {elapsed}s)")
         return True
     elapsed = int(time.monotonic() - start)
     click.echo(f" ✗ (unhealthy after {elapsed}s)")
