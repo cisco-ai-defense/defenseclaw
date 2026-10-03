@@ -171,6 +171,24 @@ class BootstrapEnvTests(unittest.TestCase):
         self.assertIn("Hermes config found", result.detail)
         self.assertEqual((missing.status, missing.detail), ("warn", "Hermes is not installed (hermes is not on PATH)"))
 
+    def test_missing_hermes_action_next_step_names_the_install_first(self):
+        # GAP-2383: the first Next line was "setup hermes --mode action",
+        # which cannot work before Hermes is installed.
+        from defenseclaw import bootstrap
+
+        cfg = _cfg_for(os.path.join(self._tmp.name, "dchome"))
+        with patch.object(bootstrap, "_hermes_installed", return_value=False):
+            setup = bootstrap._connector_mode_warning_steps([bootstrap._action_downgrade_record("hermes")])
+            readiness = [_connector_readiness(cfg, "hermes")]
+        commands = bootstrap._next_commands(setup, readiness, cfg, "observe")
+
+        self.assertEqual(
+            commands[0],
+            "install Hermes (https://github.com/NousResearch/hermes-agent), then run: defenseclaw setup hermes --mode action",
+        )
+        self.assertIn("Hermes is not installed", setup[0].detail)
+        self.assertFalse([c for c in commands if c.startswith("defenseclaw setup hermes")])
+
     def test_openclaw_setup_and_readiness_agree_before_openclaw_json_exists(self):
         # GAP-1523: Guardrail skipped ("OpenClaw config not found ... skipped
         # connector patch") while Readiness passed on the openclaw.json the
