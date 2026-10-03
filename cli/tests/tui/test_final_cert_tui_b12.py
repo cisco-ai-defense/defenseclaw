@@ -40,7 +40,8 @@ def test_tab_labels_stay_put_and_keep_unread_counts_on_wide_strips(monkeypatch) 
                         assert labels[name] == other_labels[name], (width, active, other, name)
         # The Logs and Audit counts show at every width (GAP-2193: the queue
         # merge dropped them at 80-146 cells).
-        assert "⁶⁴" in fits["registries"]["logs"] and "¹⁰" in fits["registries"]["audit"], width
+        assert fits["registries"]["logs"].endswith(("⁶⁴", "(64)")), width
+        assert fits["registries"]["audit"].endswith(("¹⁰", "(10)")), width
     # At 160 columns every tab has a name as well.
     assert all(" " in label for label in fits["registries"].values())
 

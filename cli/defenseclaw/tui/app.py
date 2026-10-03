@@ -165,13 +165,14 @@ from defenseclaw.tui.services.overview_state import (
     ConnectorOverviewRow,
     HealthSnapshot,
     SubsystemHealth,
+    format_scan_age,
 )
 from defenseclaw.tui.services.read_repository import (
     TUIReadRepository,
     TUIReadResult,
     TUIReadSnapshot,
 )
-from defenseclaw.tui.services.setup_state import validate_config_field
+from defenseclaw.tui.services.setup_state import credential_reload_summary, validate_config_field
 from defenseclaw.tui.services.tui_state import TUIState, TUIStateStore
 from defenseclaw.tui.theme import DEFAULT_TOKENS, TEXTUAL_CSS, severity_color, state_color
 from defenseclaw.tui.widgets.action_menu import ActionMenuScreen, MenuAction
@@ -2515,16 +2516,19 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         "999+" only above 999), so the Alerts badge never reads 99 while
         Overview says 118 (GAP-0978). Skips badging on the currently
         active panel so the cursor doesn't lap itself (you can't have
-        unread content on a panel you're staring at).
+        unread content on a panel you're staring at), except Alerts,
+        whose badge is the open-alert count.
         """
 
-        if panel == self.active_panel:
-            return 0
         if panel == "alerts":
             # Alerts is an inbox: its badge is the open-alert count that
             # Overview and the status bar show, not "new since last visit",
-            # so the same number appears everywhere (WIN2-U2-11).
+            # so the same number appears everywhere (WIN2-U2-11). It stays
+            # on the open Alerts tab too: dropping it there freed two cells
+            # and relabelled other tabs ("4 MCP" -> "4 MCPs", GAP-2247).
             return max(0, self.alerts_model.total_count())
+        if panel == self.active_panel:
+            return 0
         total = self._panel_total_count(panel)
         if total <= 0:
             return 0
@@ -2670,6 +2674,18 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             visible = self._visible_panels()
             panel = visible[0] if visible else "overview"
         self._panel_passive_refresh_pending.clear()
+        previous_panel = self.active_panel
+        if previous_panel != panel:
+            # Whatever loaded while you were looking at the panel you leave
+            # is seen, so its badge counts only what arrives afterwards. The
+            # Logs file tail lands after the switch-in, and recording the
+            # count only on entry left "Logs(999+)" behind (GAP-2244).
+            try:
+                self.state_store.record_seen_count(
+                    previous_panel, self._panel_total_count(previous_panel)
+                )
+            except Exception:  # noqa: BLE001 - persistence is cosmetic
+                pass
         self.active_panel = panel
         self.help_open = False
         if self._read_snapshot is not None:
@@ -4379,7 +4395,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                         and post_doctor_mtime != pre_doctor_mtime
                         and exit_code == 0
                     )
-                    next_hint = suggested_next_action(label, exit_code)
+                    next_hint = suggested_next_action(label, exit_code, lines=self._strip_output_lines)
                     self.activity_model.finish_entry(
                         exit_code,
                         # The header said "exit 0 (0:00:00)" for a 13 s run
@@ -4720,7 +4736,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 ("m", overview_m),
                 ("i / l / p", "Jump to Inventory / Logs / Policies"),
                 ("b", "Turn desktop notifications on or off"),
-                ("u / X", "Upgrade / uninstall (both preview first)"),
+                ("u", "Upgrade: checks the latest release first; nothing changes when up to date"),
+                ("X", "Uninstall (preview first)"),
             ],
             "alerts": [
                 ("j/k or Up/Down", "Navigate alerts"),
@@ -6495,7 +6512,15 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         guardrail_mode = self.overview_model.guardrail_mode_label(selected_connector) or "observe"
         guardrail_active = guardrail_running or guardrail_enabled
         guardrail_value_text = "ON" if guardrail_active else "OFF"
-        if guardrail_active:
+        # The gateway enforces the guardrail. With it stopped, "ON / action"
+        # read as live protection beside an all-offline SERVICES list
+        # (GAP-2248).
+        guardrail_gateway_down = guardrail_active and self.overview_model.gateway_down()
+        if guardrail_gateway_down:
+            guardrail_active = False
+            guardrail_value_text = "DOWN"
+            guardrail_detail = f"[{TOKENS.accent_amber}]{guardrail_mode} · gateway not running[/]"
+        elif guardrail_active:
             guardrail_bits: list[str] = [
                 f"[{TOKENS.accent_green}]{guardrail_mode}[/]"
             ]
@@ -8476,7 +8501,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # guardrail`). Empty string means "no hint" — skip the footer
         # rather than rendering an awkward dangling separator.
         label = self._strip_label or "command"
-        hint = "" if cancelled else suggested_next_action(label, exit_code, panel=self.active_panel)
+        hint = (
+            ""
+            if cancelled
+            else suggested_next_action(label, exit_code, panel=self.active_panel, lines=self._strip_output_lines)
+        )
         if hint:
             self._strip_summary = f"{self._strip_summary} · next: {hint}"
         # Fire a transient toast as well so operators on a different
@@ -9316,6 +9345,18 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         stable_text = re.sub(r"\b\d+(?:s|m|h|d) ago\b", "<live> ago", stable_text)
         return ("overview", self.help_open, stable_text)
 
+    def _runtime_sample_age(self) -> str:
+        """How old the last runtime sample is ("4m ago"), or ""."""
+
+        raw = getattr(getattr(self.runtime_model, "snapshot", None), "scanned_at", "") or ""
+        try:
+            stamp = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        except ValueError:
+            return ""
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=timezone.utc)
+        return format_scan_age(stamp)
+
     def _overview_runtime_panel(self) -> RenderableType:
         """Always-visible Runtime coverage so Overview is not a services-only wall."""
 
@@ -9328,6 +9369,26 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         }.get(runtime.health_title, TOKENS.text_secondary)
         table = Table.grid(padding=(0, 1), expand=True)
         table.add_column(overflow="fold")
+        if self.overview_model.gateway_down():
+            # Runtime data comes from the gateway. With it stopped the last
+            # sample ("DEGRADED · 17 processes · inference heartbeat: up")
+            # read as live beside an all-offline SERVICES list (GAP-2248).
+            table.add_row(Text("○ NO DATA - gateway not running", style=f"bold {TOKENS.text_muted}"))
+            age = self._runtime_sample_age()
+            last = f"Last sample {age}; it" if age else "Runtime coverage"
+            table.add_row(
+                Text(
+                    f"{last} updates again once the gateway runs: press : and run \"start\".",
+                    style=TOKENS.text_muted,
+                )
+            )
+            return Panel(
+                table,
+                title=Text("RUNTIME", style=f"bold {TOKENS.accent_cyan}"),
+                title_align="left",
+                border_style=TOKENS.accent_cyan,
+                padding=(0, 1),
+            )
         if runtime.health_title:
             header = Text()
             header.append(f"● {runtime.health_title}", style=f"bold {title_color}")
@@ -11611,7 +11672,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 thread=False,
             )
         if action.refresh_credentials:
-            self.run_worker(self._load_setup_credentials(), exclusive=False, thread=False)
+            self.run_worker(self._reload_setup_credentials(action.hint), exclusive=False, thread=False)
         if action.open_model_picker:
             self.run_worker(self._open_model_picker(), exclusive=False, thread=False)
         if action.open_field_editor:
@@ -11836,7 +11897,17 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 # Values longer than the room left end with "…": a path cut
                 # at the edge ("/Users/dcm-fc3/.defensecl") looked like a
                 # wrong path (GAP-1554).
-                labels = [_truncate_ellipsis(field.label, 34) for field in section.fields]
+                # Group headers (".. Unified LLM (shared by scanners ...) ..")
+                # sized the Field column, cutting paths to "/Users/dcm-fc3/.d…"
+                # at 160 columns (GAP-2253): they take the fields' width.
+                fields_width = max(
+                    (len(field.label) for field in section.fields if not field.label.startswith("..")), default=34
+                )
+                header_room = max(20, min(34, fields_width))
+                labels = [
+                    _truncate_ellipsis(field.label, header_room if field.label.startswith("..") else 34)
+                    for field in section.fields
+                ]
                 checks = [_truncate_ellipsis(_validation_label(field), 30) for field in section.fields]
                 value_room = self._setup_config_value_room(labels, checks)
                 return (
@@ -11944,8 +12015,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 main -= int(split * 0.38) + 1
         # Table border and scrollbar, then each column's text plus its
         # two padding cells.
+        # The column titles count too: "Validation" was cut to "Valid".
         label_width = max((len(text) for text in labels), default=0)
-        check_width = max((len(text) for text in checks), default=0)
+        check_width = max(len("Validation"), *(len(text) for text in checks))
         return max(12, main - 4 - (label_width + 2) - (check_width + 2) - 2)
 
     def _setup_line(self, text: str, *, style: str = "", indent: int = 7) -> str:
@@ -12270,7 +12342,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             self.setup_model.active_line = self.setup_model.first_editable_line()
             return SetupPanelAction(True, hint="Config editor opened. Esc or w goes back to the tasks.")
         if key == "r":
-            return SetupPanelAction(True, refresh_credentials=True, hint="Refreshing credential snapshot.")
+            return SetupPanelAction(True, refresh_credentials=True, hint="Reloading API keys...")
         if self.setup_model.active_wizard == SetupWizard.CREDENTIALS and key in {"f", "s"}:
             return self.setup_model.credential_action(key)
         return SetupPanelAction(False)
@@ -13135,6 +13207,16 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         finally:
             self._credentials_refresh_running = False
 
+    async def _reload_setup_credentials(self, hint: str) -> None:
+        """Reload the API keys, then say it finished (GAP-2255).
+
+        "Refreshing credential snapshot." stayed in the status bar for good.
+        """
+
+        await self._load_setup_credentials()
+        if not hint or self.status_text == hint:
+            self._set_status(credential_reload_summary(self.setup_model.credential_snapshot))
+
     async def _load_setup_credentials(self) -> None:
         try:
             returncode, stdout, stderr = await _communicate_captured(
@@ -13820,6 +13902,24 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             thread=False,
         )
 
+    def _mark_log_tail_seen(self, before: int) -> None:
+        """Count a raw-log tail read for the Logs visit as seen (GAP-2244).
+
+        Every tail read is started from the Logs panel. Lines it brings in
+        were loaded for that visit, so they never become an unread badge,
+        even when the read lands just after you switch away.
+        """
+
+        try:
+            after = self._panel_total_count("logs")
+            if self.active_panel == "logs":
+                seen = after
+            else:
+                seen = self.state_store.get_seen_count("logs") + max(0, after - before)
+            self.state_store.record_seen_count("logs", seen)
+        except Exception:  # noqa: BLE001 - persistence is cosmetic
+            pass
+
     async def _run_log_file_refresh(self, request: LogFileReadRequest) -> None:
         """Read a bounded raw-log tail on a worker, then atomically apply it."""
 
@@ -13827,7 +13927,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             snapshot = await asyncio.to_thread(self.logs_model.read_file_request, request)
             if getattr(self, "_app_shutting_down", False):
                 return
+            before = self._panel_total_count("logs")
             changed = self.logs_model.apply_file_snapshot(snapshot)
+            if changed:
+                self._mark_log_tail_seen(before)
             if changed and self.logs_model.source == request.source:
                 self.logs_model._clamp_cursor()  # noqa: SLF001 - snapshot boundary.
                 if self.screen_stack and len(self.screen_stack) <= 1:
@@ -16324,6 +16427,10 @@ def _config_display_value(field: Any) -> str:
 
 
 def _validation_label(field: Any) -> str:
+    if getattr(field, "kind", "") == "header":
+        # A group header has nothing to validate; a read-only row says so
+        # here, not in its Value (GAP-2253).
+        return "" if str(getattr(field, "label", "")).startswith("..") else "read-only"
     result = validate_config_field(field)
     if result.message:
         return f"{result.severity}: {result.message}"

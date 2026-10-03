@@ -568,7 +568,7 @@ def setup_detail_pairs(model: object) -> tuple[tuple[str, str], ...]:
 # --- config sections -------------------------------------------------------
 
 SECTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("Core", ("General", "Agent", "Claw", "Gateway", "Gateway Watcher", "Gateway Watchdog")),
+    ("Core", ("General", "Agent", "Gateway", "Gateway Watcher", "Gateway Watchdog")),
     (
         "Protection",
         (
@@ -587,7 +587,10 @@ SECTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ),
     ("Hooks (read-only)", ("Agent Hooks", "Connector Hooks")),
     ("Observability", ("Observability", "Webhooks", "Notifications", "AI Discovery")),
-    ("Legacy", ("Inspect LLM (legacy - read-only)",)),
+    # claw.mode is the single-agent setting from before connectors; on a
+    # multi-connector install it read as "Which agent framework DefenseClaw
+    # defends" (GAP-2253).
+    ("Legacy", ("Claw", "Inspect LLM (legacy - read-only)")),
 )
 _DEFAULT_SECTION_GROUP = "Core"
 _LEGACY_GROUP = "Legacy"

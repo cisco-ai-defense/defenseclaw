@@ -230,6 +230,22 @@ def missing_credential_rows(rows: Sequence[CredentialRow]) -> tuple[CredentialRo
     return tuple(row for row in rows if row.requirement.lower() == "required" and not row.set)
 
 
+def credential_reload_summary(snapshot: CredentialSnapshot) -> str:
+    """Status line for a finished ``r`` reload of the API keys (GAP-2255).
+
+    "Credentials reloaded: 6, 1 required, all set", or the missing names, or
+    why the list could not be read.
+    """
+
+    if snapshot.error:
+        return f"Could not reload credentials: {snapshot.error}"
+    rows = snapshot.rows
+    required = sum(1 for row in rows if row.requirement.lower() == "required")
+    missing = [row.env_name for row in missing_credential_rows(rows)]
+    text = f"Credentials reloaded: {len(rows)}, {required} required"
+    return f"{text}, missing: {', '.join(missing)}" if missing else f"{text}, all set"
+
+
 # Maps a regional provider id to its config sub-block name. ``vertex_ai`` is
 # the provider id but the persisted block is ``llm.vertex`` (see config.py
 # ``LLMConfig.vertex``); Azure carries an endpoint instead of a region.

@@ -295,7 +295,22 @@ def _flag_is_secret(flag: str) -> bool:
 READINESS_HINT = "press 0 (Setup), then i for readiness"
 
 
-def suggested_next_action(command: str, exit_code: int, *, panel: str = "") -> str:
+# A doctor row that needs attention: "[WARN] Connector OTLP: codex  -  ..."
+# (plain) or "⚠ Connector OTLP: codex  —  ..." (color), label only.
+_DOCTOR_ATTENTION_RE = re.compile(r"^(?:\[(?:WARN|FAIL)\]|[\u26a0\u2717])\s+(.+?)(?:\s{2,}[\u2014-]\s{2,}.*)?$")
+DOCTOR_DETAILS_HINT = "press A (Activity) for the check details"
+
+
+def doctor_attention_rows(lines: Sequence[str]) -> list[str]:
+    """Labels of the doctor checks that warned or failed, in output order."""
+
+    labels = (m.group(1).strip() for line in lines if (m := _DOCTOR_ATTENTION_RE.match(line.strip())))
+    return list(dict.fromkeys(labels))
+
+
+def suggested_next_action(
+    command: str, exit_code: int, *, panel: str = "", lines: Sequence[str] = ()
+) -> str:
     """Return a one-line nudge for what to do after a command finishes.
 
     Each hint names the key that gets there. Returns an empty string when
@@ -310,6 +325,10 @@ def suggested_next_action(command: str, exit_code: int, *, panel: str = "") -> s
 
     readiness = "press i for readiness" if panel == "setup" else READINESS_HINT
     cmd = command.strip().lower()
+    if "doctor" in cmd and doctor_attention_rows(lines):
+        # Readiness passed every row while doctor warned about a connector's
+        # OTLP drops: the doctor output in Activity names the check (GAP-2252).
+        return DOCTOR_DETAILS_HINT if exit_code == 0 else f"{DOCTOR_DETAILS_HINT}, or rerun doctor"
     if exit_code != 0:
         if "keys" in cmd:
             return "open Credentials or run keys check"
@@ -383,7 +402,25 @@ def command_result_summary(command: str, lines: Sequence[str]) -> str:
     (GAP-1910). ``lines`` are the ANSI-free output lines.
     """
 
-    if "restart" in command.lower():
+    lowered = command.strip().lower()
+    if lowered.startswith("upgrade"):
+        # "Done: Upgrade · To install a specific 1.x release: ..." hid the
+        # result line above it (GAP-2250).
+        for line in lines:
+            text = line.strip().lstrip("\u2713\u2714").strip()
+            if " is up to date" in text or text.startswith(("\u2192 Installing", "Installing DefenseClaw")):
+                return text.lstrip("\u2192 ").strip()
+        return ""
+    if "doctor" in lowered:
+        attention = doctor_attention_rows(lines)
+        health = next((line.strip() for line in reversed(lines) if line.strip().startswith("Health:")), "")
+        if health and attention:
+            # "Health: 129 passed, 1 warning" did not say which check warned
+            # (GAP-2252).
+            more = f" and {len(attention) - 2} more" if len(attention) > 2 else ""
+            return f"{health} · check: {', '.join(attention[:2])}{more}"
+        return ""
+    if "restart" in lowered:
         for line in lines:
             if match := _GATEWAY_PID_RE.search(line):
                 return f"Gateway restarted (PID {match.group(1)})"
