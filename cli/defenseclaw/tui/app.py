@@ -2716,6 +2716,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             panel = self.active_panel
             if panel == "setup" or self._panel_nav(panel) or self._panel_aside(panel) is not None:
                 self.call_after_refresh(self._render_chrome)
+            elif panel == "overview":
+                # Overview's cards are built for the current width (GAP-2509).
+                self.call_after_refresh(self._update_body_only)
 
     def _mark_overflowing_controls(self) -> None:
         """Say so on a button bar whose last buttons are cut off.
@@ -9566,7 +9569,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
 
         stable_text = re.sub(r"\buptime=\d+s\b", "uptime=<live>", self.body_text)
         stable_text = re.sub(r"\b\d+(?:s|m|h|d) ago\b", "<live> ago", stable_text)
-        return ("overview", self.help_open, stable_text)
+        # The CONFIGURATION card is laid out for the width at render time, so
+        # a new width is new content: after a resize it kept the old width's
+        # wrapping until the next data change (GAP-2509).
+        width = int(getattr(self.size, "width", 0) or 0)
+        return ("overview", self.help_open, width, stable_text)
 
     def _runtime_sample_time(self) -> str:
         """When the last runtime sample was taken ("14:02:11", "Oct 02 14:02"), or "".
@@ -12238,7 +12245,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                         for (label, value), check in zip(cells, checks, strict=True)
                     ),
                 )
-            # Long group headers (".. PLUGIN ACTIONS (severity -> …) ..") would
+            # Long group headers (".. Unified LLM (for scanners ...) ..") would
             # size the Field column and push values off an 80-column screen;
             # the focused field's full label is in the body line above.
             width = int(getattr(getattr(self, "size", None), "width", 0) or 0)
