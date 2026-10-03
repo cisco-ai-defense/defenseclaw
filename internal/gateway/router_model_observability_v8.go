@@ -55,7 +55,7 @@ func (r *EventRouter) emitEventRouterModelV8(
 	if !authoritative || lifecycle == nil {
 		return ctx
 	}
-	model = strings.TrimSpace(model)
+	model = telemetryModelID(strings.TrimSpace(model))
 	if !hookModelV8Identifier(model) {
 		return ctx
 	}

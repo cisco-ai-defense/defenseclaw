@@ -3007,7 +3007,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 			selectedPromptProvider = strings.TrimSpace(routedDecision.Provider)
 		}
 		pendingPromptMeta.Provider = selectedPromptProvider
-		pendingPromptMeta.Model = req.Model
+		pendingPromptMeta.Model = telemetryModelID(req.Model)
 		promptID = p.emitLLMPromptEventV8(
 			ctx, pendingPromptMeta, inspectText, req.RawBody,
 		)

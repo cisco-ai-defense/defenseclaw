@@ -267,7 +267,7 @@ func TestHookClaudeCodeBedrockChatSpanModelSurvivesAGatewayRestart(t *testing.T)
 	if chats != 2 {
 		t.Fatalf("galileo chat spans=%d, want 2", chats)
 	}
-	if got := claudeCodeSessionModel("claude-haiku-4-5"); got != "claude-haiku-4-5" {
+	if got := telemetryModelID("claude-haiku-4-5"); got != "claude-haiku-4-5" {
 		t.Fatalf("non-Bedrock model=%q, want it unchanged", got)
 	}
 }
