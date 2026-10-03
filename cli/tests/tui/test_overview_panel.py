@@ -442,7 +442,7 @@ def test_agent_detail_rolls_up_connectors_in_multi_connector() -> None:
 
 
 def test_cursor_agent_detail_has_enabled_disabled_parity_and_preserves_codex() -> None:
-    disclosure = "priority-conflict-detection=unavailable (none inferred)"
+    disclosure = "overrides by Enterprise, Team or Project hooks can't be detected"
 
     enabled = OverviewPanelModel(OverviewConfig(claw_mode="cursor"), version="test")
     enabled.set_health(HealthSnapshot(connector=ConnectorHealth(name="cursor", state="running")))
@@ -1072,7 +1072,7 @@ def test_multi_connector_rows_lists_each_connector_with_mode() -> None:
     rows = model.multi_connector_rows()
     assert [value for _, value in rows] == [
         "Codex (codex) — mode=observe",
-        "Cursor (cursor) — mode=action, priority-conflict-detection=unavailable (none inferred)",
+        "Cursor (cursor) — mode=action, overrides by Enterprise, Team or Project hooks can't be detected",
     ]
     # Indented sub-lines: blank label so the key:<16 formatting nests
     # them under the single "Agent" line.
@@ -1116,7 +1116,7 @@ def test_multi_connector_rows_append_effective_rule_pack() -> None:
         ("", "Codex (codex) — mode=action, strict"),
         (
             "",
-            "Cursor (cursor) — mode=observe, priority-conflict-detection=unavailable (none inferred)",
+            "Cursor (cursor) — mode=observe, overrides by Enterprise, Team or Project hooks can't be detected",
         ),
     ]
 

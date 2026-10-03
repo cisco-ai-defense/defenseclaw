@@ -887,7 +887,7 @@ def test_overview_reuses_hook_event_snapshot_within_one_render() -> None:
 def test_cursor_disclosure_renders_for_enabled_and_disabled_rows_only() -> None:
     from rich.console import Console
 
-    disclosure = "priority-conflict-detection=unavailable (none inferred)"
+    disclosure = "DefenseClaw can't tell whether an Enterprise, Team or Projec"
     for disabled in (False, True):
         cfg = OverviewConfig(
             claw_mode="codex",
@@ -920,10 +920,9 @@ def test_cursor_disclosure_renders_for_enabled_and_disabled_rows_only() -> None:
         assert rows["cursor"].status == ("disabled" if disabled else "running")
         assert rich_text.count(disclosure) == 1
         assert fallback_text.count(disclosure) == 1
-        assert f"Cursor (cursor): {disclosure}" in rich_text
-        assert f"Cursor (cursor): {disclosure}" in fallback_text
-        assert f"Codex (codex): {disclosure}" not in rich_text
-        assert f"Codex (codex): {disclosure}" not in fallback_text
+        assert f"Cursor: {disclosure}" in rich_text
+        assert f"Cursor: {disclosure}" in fallback_text
+        assert "priority-conflict-detection" not in rich_text + fallback_text
 
 
 def test_overview_connector_rows_degrade_only_unverified_opencode_runtime() -> None:

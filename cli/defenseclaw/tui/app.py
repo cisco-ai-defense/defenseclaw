@@ -9801,7 +9801,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         )
         table_rows: list[tuple[Text, ...]] = []
         selected = self._connector_filter()
-        disclosure_lines: list[Text] = []
+        disclosure_lines: list[RenderableType] = []
         for row in rows:
             normalized = row.status.strip().lower() or "unknown"
             color_dot = state_color(normalized)
@@ -9818,9 +9818,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             )
             color_blocks = TOKENS.accent_red if row.blocks else TOKENS.text_muted
             color_alerts = TOKENS.accent_amber if row.alerts else TOKENS.text_muted
-            disclosure = self.overview_model.connector_priority_conflict_disclosure(row.connector)
-            if disclosure:
-                disclosure_lines.append(Text(f"{name} ({row.connector}): {disclosure}", style=TOKENS.text_muted))
+            notice = self.overview_model.connector_priority_conflict_notice(row.connector)
+            if notice:
+                # Wrapped lines start under the sentence (GAP-2561).
+                disclosure_lines.append(_hanging_text(f"{name}:", notice, TOKENS.text_muted))
             table_rows.append(
                 (
                     Text(f"{name} ({row.connector})", style=name_style),
@@ -10041,9 +10042,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 f"[{color_alerts}]{row.alerts:>8}[/]"
                 f"  [{color_dot}]{dot} {row.status or 'unknown'}[/]"
             )
-            disclosure = self.overview_model.connector_priority_conflict_disclosure(row.connector)
-            if disclosure:
-                lines.append(f"  [{TOKENS.text_muted}]{name}: {disclosure}[/]")
+            notice = self.overview_model.connector_priority_conflict_notice(row.connector)
+            if notice:
+                lines.append(f"  [{TOKENS.text_muted}]{friendly_connector_name(row.connector)}: {notice}[/]")
         body = "\n".join(lines)
         return f"[bold {TOKENS.accent_green}]CONNECTORS[/]\n{body}\n\n"
 

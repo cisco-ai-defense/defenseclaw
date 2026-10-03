@@ -487,7 +487,11 @@ def task_status(
         if not _text(cfg, f"scanners.{scanner}.binary"):
             return TaskStatus("off")
         if wizard == SetupWizard.SKILL_SCANNER:
-            policy = _text(cfg, "scanners.skill_scanner.policy") or "permissive"
+            # An empty policy is what "--policy none" saves; only an unset one
+            # is the permissive default, as the strictness form reads it
+            # (GAP-2562).
+            raw = _value(cfg, "scanners.skill_scanner.policy", "permissive")
+            policy = "permissive" if raw is None else (str(raw).strip() or "none")
             return TaskStatus("ok", f"{policy} · LLM" if _flag(cfg, "scanners.skill_scanner.use_llm") else policy)
         return TaskStatus("ok", _short(f"{_text(cfg, 'scanners.mcp_scanner.analyzers') or 'auto'} analyzers"))
     if wizard == SetupWizard.REDACTION:

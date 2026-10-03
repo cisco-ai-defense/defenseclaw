@@ -43,7 +43,14 @@ NoticeLevel = Literal["info", "warn", "error"]
 STALENESS_WINDOW = timedelta(minutes=15)
 DOCTOR_CLOCK_SKEW_TOLERANCE = timedelta(minutes=5)
 MAX_AI_DISCOVERY_OVERVIEW_ROWS = 8
-_CURSOR_PRIORITY_CONFLICT_DISCLOSURE = "priority-conflict-detection=unavailable (none inferred)"
+# Cursor merges hooks Enterprise > Team > Project > User and has no API to
+# detect a higher-priority file, so DefenseClaw infers none. Plain words, not
+# the old "priority-conflict-detection=unavailable" token (GAP-2561).
+_CURSOR_PRIORITY_CONFLICT_DISCLOSURE = "overrides by Enterprise, Team or Project hooks can't be detected"
+_CURSOR_PRIORITY_CONFLICT_NOTICE = (
+    "DefenseClaw can't tell whether an Enterprise, Team or Project Cursor hooks file "
+    "overrides its user hooks (Cursor has no API for this)."
+)
 
 
 @dataclass(frozen=True)
@@ -1359,6 +1366,13 @@ class OverviewPanelModel:
     def connector_priority_conflict_disclosure(connector: str) -> str:
         if connector.strip().lower() == "cursor":
             return _CURSOR_PRIORITY_CONFLICT_DISCLOSURE
+        return ""
+
+    @staticmethod
+    def connector_priority_conflict_notice(connector: str) -> str:
+        """The sentence the CONNECTORS panel shows under its table, or ``""``."""
+        if connector.strip().lower() == "cursor":
+            return _CURSOR_PRIORITY_CONFLICT_NOTICE
         return ""
 
     def multi_connector_rows(self) -> list[tuple[str, str]]:
