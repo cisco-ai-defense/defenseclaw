@@ -8498,6 +8498,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             # The result and its "next:" step stay readable on the status
             # line once the receipt goes (GAP-2058).
             done = f"Done: {self._strip_label} · {self._strip_summary}" if self._strip_summary else ""
+            if done:
+                # The status line cuts at its right edge, which took the
+                # next step first at 80x24 (GAP-2133).
+                done = _fit_keeping_next_step(done, max(24, self.size.width - 2))
             self._strip_clear()
             if done:
                 self._set_status(done)
@@ -15895,10 +15899,23 @@ def _is_bare_json_punctuation(text: str) -> bool:
 def _truncate_for_strip(value: str, width: int) -> str:
     # The snippet has a row of its own in the card, so it may use the card's
     # width; "width - 38" cut the registry summary at 80 columns (GAP-1754).
-    limit = max(24, width - 2)
+    return _fit_keeping_next_step(value, max(24, width - 2))
+
+
+_NEXT_STEP_SEP = " · next: "
+
+
+def _fit_keeping_next_step(value: str, limit: int) -> str:
+    """Cut ``value`` to ``limit`` cells, shortening the result before its
+    "· next: ..." step so the step stays readable at 80x24 (GAP-2133)."""
+
     cleaned = value.replace("\n", " ").strip()
     if len(cleaned) <= limit:
         return cleaned
+    head, sep, step = cleaned.rpartition(_NEXT_STEP_SEP)
+    room = limit - len(sep) - len(step)
+    if sep and room >= 12:
+        return f"{head[: room - 1].rstrip()}…{sep}{step}"
     return cleaned[: max(0, limit - 3)] + "..."
 
 
