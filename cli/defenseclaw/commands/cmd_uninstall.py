@@ -1969,10 +1969,14 @@ def _validate_plan(plan: UninstallPlan) -> None:
         ownership_markers = ("config.yaml", "audit.db", ".env", "policies", "quarantine", ".venv")
         # An empty folder holds nothing to remove; it is what the data phase
         # leaves when the data dir is a mount point (GAP-1980).
-        if os.path.isdir(plan.data_dir) and not _is_empty_dir(plan.data_dir) and not any(
-            os.path.exists(os.path.join(plan.data_dir, marker))
-            and not _is_reparse_path(os.path.join(plan.data_dir, marker))
-            for marker in ownership_markers
+        if (
+            os.path.isdir(plan.data_dir)
+            and not _is_empty_dir(plan.data_dir)
+            and not any(
+                os.path.exists(os.path.join(plan.data_dir, marker))
+                and not _is_reparse_path(os.path.join(plan.data_dir, marker))
+                for marker in ownership_markers
+            )
         ):
             raise click.ClickException(
                 f"refusing to remove {plan.data_dir}: path does not look like a DefenseClaw data directory"
