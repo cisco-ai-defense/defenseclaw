@@ -6878,7 +6878,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 if bucket in counts:
                     seen.add(self._event_count_key(row.event))
                     counts[bucket] += 1
-        for event in self._recent_hook_scope_summary(scope, since=since)["finding_events"]:
+        for event in self._supplemental_hook_finding_events(scope, since):
             key = self._event_count_key(event)
             if key in seen:
                 continue
@@ -6887,6 +6887,36 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 seen.add(key)
                 counts[bucket] += 1
         return counts
+
+    def _alerts_view_is_canonical(self) -> bool:
+        """True when the Alerts model reads the audit store's alert view.
+
+        That view already lists every hook block and rule finding once (a
+        block that a finding explains is the finding row), so the Overview
+        must count its rows and not add connector-hook rows on top: each
+        block was counted twice (GAP-2088).
+        """
+
+        return self.alerts_model is not None and getattr(self.alerts_model, "store", None) is not None
+
+    def _supplemental_hook_finding_events(self, scope: tuple[str, ...], since: datetime | None) -> list[Any]:
+        """Hook rows that stand in for alerts when no alert view is loaded."""
+
+        if self._alerts_view_is_canonical():
+            return []
+        return list(self._recent_hook_scope_summary(scope, since=since)["finding_events"])
+
+    def _connector_alert_count(self, connector: str, hook_alerts: int) -> int:
+        """ALERTS for one CONNECTORS row: what its Alerts scope lists (GAP-2089)."""
+
+        if not self._alerts_view_is_canonical():
+            return hook_alerts
+        scope = (connector.strip().lower(),)
+        return sum(
+            1
+            for row in self.alerts_model.flat_rows()
+            if row.kind != "scan_finding" and self._cached_event_matches_scope(row.event, scope)
+        )
 
     @staticmethod
     def _normalize_connector_scope(connectors: Iterable[str]) -> tuple[str, ...]:
@@ -7878,10 +7908,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             if not connector:
                 continue
             health_row = self._connector_health_for_metric(connector, use_single=True)
-            allow, alerts, blocks, _newest = self._connector_hook_stats_for_connectors(
+            allow, hook_alerts, blocks, _newest = self._connector_hook_stats_for_connectors(
                 (connector,)
             )
-            calls = allow + alerts + blocks
+            calls = allow + hook_alerts + blocks
+            alerts = self._connector_alert_count(connector, hook_alerts)
             last = self._connector_last_activity(
                 connector,
                 health_row=health_row,
@@ -8120,7 +8151,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             ):
                 stamps.append(event.timestamp)
                 seen.add(self._event_count_key(event))
-        for event in self._recent_hook_scope_summary(scope, since=since)["finding_events"]:
+        for event in self._supplemental_hook_finding_events(scope, since):
             key = self._event_count_key(event)
             if key in seen:
                 continue
@@ -8209,7 +8240,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         for event in alert_events:
             seen.add(self._event_count_key(event))
             consider(event)
-        for event in self._recent_hook_scope_summary(scope, since=since)["finding_events"]:
+        for event in self._supplemental_hook_finding_events(scope, since):
             key = self._event_count_key(event)
             if key in seen:
                 continue
