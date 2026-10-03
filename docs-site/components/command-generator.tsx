@@ -1293,8 +1293,8 @@ function SegmentedControl<T extends string>({
             className={[
               'rounded-md px-3 py-1.5 text-xs font-medium transition-colors',
               isActive
-                ? 'bg-[var(--brand-cisco)]/15 text-[var(--brand-cisco-strong)]'
-                : 'text-fd-muted-foreground hover:text-fd-foreground',
+                ? 'border border-[var(--brand-cisco)] bg-[var(--brand-cisco)]/15 text-[var(--brand-cisco-strong)]'
+                : 'border border-transparent text-fd-muted-foreground hover:text-fd-foreground',
               disabled ? 'cursor-not-allowed' : '',
             ].join(' ')}
           >
@@ -1406,7 +1406,7 @@ function Field({
         inputMode={inputMode}
         onChange={(e) => onChange(e.target.value)}
         className={[
-          'rounded-md border border-fd-border bg-fd-background px-2 py-1.5 text-xs text-fd-foreground placeholder:text-fd-muted-foreground/60',
+          'rounded-md border border-fd-border bg-fd-background px-2 py-1.5 text-xs text-fd-foreground placeholder:text-fd-muted-foreground',
           'focus:border-[var(--brand-cisco)] focus:outline-none focus:ring-1 focus:ring-[var(--brand-cisco)]',
           disabled ? 'cursor-not-allowed opacity-60' : '',
         ].join(' ')}
@@ -1474,7 +1474,7 @@ function TextArea({
         rows={3}
         onChange={(e) => onChange(e.target.value)}
         className={[
-          'rounded-md border border-fd-border bg-fd-background px-2 py-1.5 font-mono text-xs text-fd-foreground placeholder:text-fd-muted-foreground/60',
+          'rounded-md border border-fd-border bg-fd-background px-2 py-1.5 font-mono text-xs text-fd-foreground placeholder:text-fd-muted-foreground',
           'focus:border-[var(--brand-cisco)] focus:outline-none focus:ring-1 focus:ring-[var(--brand-cisco)]',
         ].join(' ')}
       />

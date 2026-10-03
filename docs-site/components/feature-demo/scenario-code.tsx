@@ -8,6 +8,19 @@ import type {
 } from './types';
 import { scenarioConnectorMappings } from './types';
 
+// GitHub Light's green (#22863a) sits just above 4.5:1 on white and
+// drops below it on the tinted code surface and highlighted lines.
+// Swap it for a darker green of the same hue in the light theme only;
+// the rest of Shiki's palette clears AA on every scenario surface.
+const LIGHT_TOKEN_COLORS: Record<string, string> = {
+  '#22863a': '#176b31',
+};
+
+function tokenColor(color: string | undefined, theme: 'light' | 'dark') {
+  if (!color || theme !== 'light') return color;
+  return LIGHT_TOKEN_COLORS[color.toLowerCase()] ?? color;
+}
+
 function TokenLines({
   lines,
   theme,
@@ -57,7 +70,7 @@ function TokenLines({
               {line.length === 0 ? '\u00a0' : line.map((token, tokenIndex) => (
                 <span
                   key={`${lineNumber}-${tokenIndex}`}
-                  style={{ color: token.color, fontStyle: token.fontStyle === 1 ? 'italic' : undefined }}
+                  style={{ color: tokenColor(token.color, theme), fontStyle: token.fontStyle === 1 ? 'italic' : undefined }}
                 >
                   {token.content}
                 </span>

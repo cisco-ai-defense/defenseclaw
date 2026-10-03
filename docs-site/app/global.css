@@ -38,7 +38,7 @@
   --diagram-edge-label: #33434d;
   --diagram-lane-bg: #f6f8f9;
   --diagram-row-rule: #e8edf0;
-  --diagram-row-number: #71818c;
+  --diagram-row-number: #5d6b75;
   --diagram-text: #17212a;
   --diagram-muted: #56656f;
   --diagram-accent-blue: var(--brand-cisco);
@@ -68,7 +68,11 @@
   --diagram-zone-external-bg: #f6f8f9;
 
   --color-fd-primary: var(--brand-cisco);
-  --color-fd-accent: var(--brand-cisco);
+  /* Fumadocs paints hover, open and active rows (sidebar, TOC, search,
+   * TypeTable, accordions) with fd-accent + fd-accent-foreground, so the
+   * accent is a quiet brand-tinted surface, not the brand blue itself. */
+  --color-fd-accent: #e3f0f6;
+  --color-fd-accent-foreground: #0a3d55;
   --color-fd-ring: var(--brand-cisco);
   --color-fd-background: #ffffff;
   --color-fd-foreground: #0a0d10;
@@ -81,6 +85,11 @@
   --color-fd-popover: #ffffff;
   --color-fd-popover-foreground: #0a0d10;
   --color-fd-border: #d9e0e5;
+  /* Callout icons and rails are status indicators (3:1 non-text).
+   * Fumadocs' amber, green and orange sit near 2:1 on white. */
+  --color-fd-warning: #b45309;
+  --color-fd-success: #15803d;
+  --color-fd-idea: #c2410c;
 
   /* Widen Fumadocs's docs chrome on large screens. The library default
    * of 97rem (1552px) leaves ~360px unused on a 1920px monitor, which
@@ -112,7 +121,8 @@
   --brand-cisco: #5fc4e8;
   --brand-cisco-strong: #57bde3;
   --color-fd-primary: var(--brand-cisco);
-  --color-fd-accent: var(--brand-cisco);
+  --color-fd-accent: #1c323d;
+  --color-fd-accent-foreground: #d8eef7;
   --color-fd-ring: var(--brand-cisco);
   --color-fd-background: #141a20;
   --color-fd-foreground: #d8e0e5;
@@ -125,6 +135,9 @@
   --color-fd-popover: #1a2128;
   --color-fd-popover-foreground: #d8e0e5;
   --color-fd-border: #3a4650;
+  --color-fd-warning: oklch(76.9% 0.188 70.08);
+  --color-fd-success: oklch(72.3% 0.219 149.579);
+  --color-fd-idea: oklch(70.5% 0.209 60.849);
   --diagram-surface: #1a2127;
   --diagram-canvas: #1a2127;
   --diagram-node-bg: #20292f;
@@ -138,7 +151,7 @@
   --diagram-edge-label: #bbc6cc;
   --diagram-lane-bg: #1d252b;
   --diagram-row-rule: #2d373e;
-  --diagram-row-number: #87959e;
+  --diagram-row-number: #94a2ab;
   --diagram-text: #d9e0e4;
   --diagram-muted: #9eabb3;
   --diagram-accent-blue: var(--brand-cisco);
@@ -165,19 +178,31 @@
   --diagram-zone-external-bg: #1f262c;
 }
 
-/* Hero terminal window — minimal styling, leans on the Fumadocs token
- * palette so the component re-themes for free when operators switch
- * to light mode.
+/* Terminal windows (<TerminalAnimation>, <TerminalDemo>) stay dark in
+ * both themes: a terminal reads as a terminal, and one palette keeps
+ * every line above WCAG AA. The tokens are fixed, not theme-derived,
+ * so light mode can no longer pair a white body with pale text.
+ * Ratios on --term-bg: fg 14.9, text 12.0, muted 7.5, ok 9.8,
+ * warn 11.1, prompt 9.1, reply 8.7; control border 3.7 on chrome.
  */
 .terminal-window {
-  background: linear-gradient(
-    180deg,
-    color-mix(in oklab, var(--color-fd-card) 92%, transparent) 0%,
-    color-mix(in oklab, var(--color-fd-card) 70%, transparent) 100%
-  );
-  border: 1px solid var(--color-fd-border);
-  box-shadow: 0 30px 80px -20px rgb(0 0 0 / 0.45),
-    inset 0 0 0 1px color-mix(in oklab, var(--brand-cisco) 12%, transparent);
+  --term-bg: #10161c;
+  --term-chrome: #172028;
+  --term-border: #2a3540;
+  --term-fg: #e3e9ee;
+  --term-text: #c9d3da;
+  --term-muted: #9aa8b3;
+  --term-ok: #5fd39a;
+  --term-warn: #f2c45a;
+  --term-prompt: #5fc4e8;
+  --term-reply: #ff9a4d;
+  --term-control-border: #6b7a86;
+
+  color-scheme: dark;
+  background: var(--term-bg);
+  color: var(--term-text);
+  border: 1px solid var(--term-border);
+  box-shadow: 0 24px 48px -28px rgb(0 0 0 / 0.4);
 }
 
 /* Subtle SVG grain layer for the landing-page hero. Inline data URI to
@@ -232,6 +257,20 @@
     transform: translateY(0);
     filter: blur(0);
   }
+}
+
+/* Form controls need a 3:1 boundary against the page (WCAG 1.4.11);
+ * the hairline --color-fd-border (1.3:1) stays for cards and tables. */
+:root {
+  --control-border: #7a8a95;
+}
+
+.dark {
+  --control-border: #74838d;
+}
+
+:is(input, select, textarea, [role='radio'], [role='checkbox']).border-fd-border:not(:focus):not([aria-checked='true']) {
+  border-color: var(--control-border);
 }
 
 .connector-word-in {
@@ -805,6 +844,12 @@ article#nd-page .prose :where(code):not(pre code) {
   font-size: 0.65rem;
   font-weight: 800;
   letter-spacing: -0.04em;
+  /* Initials are text: shade the brand hue so it clears 4.5:1 on cards. */
+  color: color-mix(in oklab, var(--connector-brand) 75%, #000);
+}
+
+.dark .connector-brand-fallback {
+  color: color-mix(in oklab, var(--connector-brand) 60%, #fff);
 }
 
 .dark .connector-brand-mark[data-monochrome='true'] {
@@ -1840,13 +1885,6 @@ article#nd-page .prose :where(code):not(pre code) {
 .scenario-line-content {
   color: var(--scenario-ink);
   white-space: pre;
-}
-
-/* GitHub Light's green is just at the AA threshold on white and drops
- * below it on an annotated line. Darken that token only in the light
- * scenario surface; the rest of Shiki's token palette remains intact. */
-.scenario-code-theme-light .scenario-line-content > span[style*='#22863a' i] {
-  color: #176b31 !important;
 }
 
 .scenario-mobile-marker {

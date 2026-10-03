@@ -196,7 +196,7 @@ export function RulesSection({
                   type="button"
                   onClick={() => removeRulesFile(fileIdx)}
                   aria-label={`Delete ${file.filename}`}
-                  className="rounded-md border border-fd-border bg-fd-background px-2 py-1 text-[11px] text-fd-muted-foreground hover:border-red-500 hover:text-red-500"
+                  className="rounded-md border border-fd-border bg-fd-background px-2 py-1 text-[11px] text-fd-muted-foreground hover:border-red-500 hover:text-red-700 dark:hover:text-red-400"
                 >
                   Delete file
                 </button>
@@ -239,7 +239,7 @@ export function RulesSection({
                             type="button"
                             onClick={() => removeRule(fileIdx, ruleIdx)}
                             aria-label="Remove rule"
-                            className="ml-auto rounded-md border border-fd-border bg-fd-background px-2 py-1 text-[11px] text-fd-muted-foreground hover:border-red-500 hover:text-red-500"
+                            className="ml-auto rounded-md border border-fd-border bg-fd-background px-2 py-1 text-[11px] text-fd-muted-foreground hover:border-red-500 hover:text-red-700 dark:hover:text-red-400"
                           >
                             ×
                           </button>

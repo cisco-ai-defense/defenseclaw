@@ -123,7 +123,7 @@ export function JudgesSection({
                 <button
                   type="button"
                   onClick={() => removeJudge(judgeIdx)}
-                  className="ml-auto text-[11px] text-fd-muted-foreground hover:text-red-500"
+                  className="ml-auto text-[11px] text-fd-muted-foreground hover:text-red-700 dark:hover:text-red-400"
                 >
                   Remove judge
                 </button>
@@ -243,7 +243,7 @@ export function JudgesSection({
                             type="button"
                             aria-label={`Remove ${key}`}
                             onClick={() => removeCategory(judgeIdx, key)}
-                            className="rounded-md border border-fd-border bg-fd-background px-2 py-1 text-[11px] text-fd-muted-foreground hover:border-red-500 hover:text-red-500"
+                            className="rounded-md border border-fd-border bg-fd-background px-2 py-1 text-[11px] text-fd-muted-foreground hover:border-red-500 hover:text-red-700 dark:hover:text-red-400"
                           >
                             ×
                           </button>

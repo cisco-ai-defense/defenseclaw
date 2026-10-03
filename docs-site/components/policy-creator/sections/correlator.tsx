@@ -220,7 +220,7 @@ function PatternEditor({
           type="button"
           onClick={onRemove}
           aria-label="Remove pattern"
-          className="rounded-md border border-fd-border bg-fd-background px-2 py-1 text-[11px] text-fd-muted-foreground hover:border-red-500 hover:text-red-500"
+          className="rounded-md border border-fd-border bg-fd-background px-2 py-1 text-[11px] text-fd-muted-foreground hover:border-red-500 hover:text-red-700 dark:hover:text-red-400"
         >
           ×
         </button>
@@ -442,7 +442,7 @@ function ClauseList({
                   type="button"
                   onClick={() => remove(i)}
                   aria-label="Remove clause"
-                  className="rounded border border-fd-border bg-fd-background px-1 py-0.5 text-[10px] text-fd-muted-foreground hover:border-red-500 hover:text-red-500"
+                  className="rounded border border-fd-border bg-fd-background px-1 py-0.5 text-[10px] text-fd-muted-foreground hover:border-red-500 hover:text-red-700 dark:hover:text-red-400"
                 >
                   ×
                 </button>
@@ -509,7 +509,7 @@ function SequenceList({
                 type="button"
                 onClick={() => remove(i)}
                 aria-label="Remove step"
-                className="rounded text-[10px] text-fd-muted-foreground hover:text-red-500"
+                className="rounded text-[10px] text-fd-muted-foreground hover:text-red-700 dark:hover:text-red-400"
               >
                 ×
               </button>

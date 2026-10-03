@@ -441,7 +441,7 @@ function RiskyConfigBanner({
       <div className="flex items-baseline gap-2">
         <span aria-hidden="true">⚠</span>
         <span className="font-semibold">Risky configuration</span>
-        <span className="text-amber-700/80 dark:text-amber-300/80">
+        <span className="text-amber-800 dark:text-amber-300">
           ({findings.length} {findings.length === 1 ? 'item' : 'items'})
         </span>
       </div>
@@ -449,13 +449,13 @@ function RiskyConfigBanner({
         {findings.map((f, i) => (
           <li key={`${f.code}:${i}`}>
             <div className="flex items-baseline gap-2">
-              <code className="font-mono text-[10px] text-amber-700/80 dark:text-amber-300/80">
+              <code className="font-mono text-[10px] text-amber-800 dark:text-amber-300">
                 {f.location}
               </code>
             </div>
             <div>{f.message}</div>
             {f.fix && (
-              <div className="text-[10px] text-amber-700/80 dark:text-amber-300/80">
+              <div className="text-[10px] text-amber-800 dark:text-amber-300">
                 Fix: {f.fix}
               </div>
             )}
@@ -530,10 +530,10 @@ function DiffVsPresetBanner({
                 <span
                   className={
                     d.kind === 'added'
-                      ? 'text-emerald-600 dark:text-emerald-400'
+                      ? 'text-emerald-700 dark:text-emerald-400'
                       : d.kind === 'removed'
-                        ? 'text-red-500'
-                        : 'text-amber-600 dark:text-amber-400'
+                        ? 'text-red-700 dark:text-red-400'
+                        : 'text-amber-700 dark:text-amber-400'
                   }
                 >
                   {d.kind === 'added' ? '+' : d.kind === 'removed' ? '−' : '~'}
@@ -574,13 +574,13 @@ function FindingsBar({
         <span aria-hidden="true">⚠</span>
         <span>
           {counts.errors > 0 && (
-            <span className="text-red-500">
+            <span className="text-red-700 dark:text-red-400">
               {counts.errors} error{counts.errors === 1 ? '' : 's'}
             </span>
           )}
           {counts.errors > 0 && (counts.warnings > 0 || counts.info > 0) && ' · '}
           {counts.warnings > 0 && (
-            <span className="text-amber-600">
+            <span className="text-amber-700 dark:text-amber-400">
               {counts.warnings} warning{counts.warnings === 1 ? '' : 's'}
             </span>
           )}
@@ -596,9 +596,9 @@ function FindingsBar({
               <span
                 className={
                   f.level === 'error'
-                    ? 'text-red-500'
+                    ? 'text-red-700 dark:text-red-400'
                     : f.level === 'warning'
-                      ? 'text-amber-600 dark:text-amber-400'
+                      ? 'text-amber-700 dark:text-amber-400'
                       : 'text-fd-muted-foreground'
                 }
               >
