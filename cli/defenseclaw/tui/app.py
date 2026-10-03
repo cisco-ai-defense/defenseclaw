@@ -15277,6 +15277,25 @@ def _project_omnigent_effective_readiness(
     )
 
 
+_GATEWAY_STARTUP_GRACE_SECONDS = 90
+
+
+def _gateway_listener_pending(trust: object, *, now: float | None = None) -> bool:
+    """True when the managed gateway started recently and has no API listener yet."""
+
+    if getattr(trust, "code", "") != "missing_listener":
+        return False
+    record = getattr(trust, "record", None)
+    try:
+        started = int(getattr(record, "start_time", "") or 0)
+    except (TypeError, ValueError):
+        return False
+    if started <= 0:
+        return False
+    age = (time.time() if now is None else now) - started
+    return 0 <= age <= _GATEWAY_STARTUP_GRACE_SECONDS
+
+
 def _fetch_gateway_health(config: object | None) -> GatewayHealthResult:
     """Probe the configured authenticated sidecar status without using proxy state.
 
@@ -15323,6 +15342,11 @@ def _fetch_gateway_health(config: object | None) -> GatewayHealthResult:
             # Report it as offline so the Overview gives the start command
             # instead of an identity error (GAP-1110).
             return GatewayHealthResult("offline", "the gateway is not running")
+        if _gateway_listener_pending(trust):
+            # Our gateway process is up but has not bound its API port yet:
+            # right after a restart that is startup, not an identity
+            # problem (GAP-2513).
+            return GatewayHealthResult("starting", "starting")
         return GatewayHealthResult("error", f"gateway listener identity is unverified: {trust.detail}")
 
     try:
