@@ -407,7 +407,13 @@ def _data_left_detail(plan: dict[str, object], data_dir: str, error: OSError) ->
     held = getattr(error.__cause__, "filename", "") or ""
     shim = os.path.join(str(plan["install_root"]), "defenseclaw.cmd")
     flags = " --binaries" if plan.get("remove_empty_install_root") else ""
-    rerun = f'run "{shim}" uninstall --all{flags} --yes again' if os.path.isfile(shim) else "remove it by hand"
+    # PowerShell (the Windows Terminal default) needs the & call operator
+    # before a quoted command path; Command Prompt rejects it (GAP-2082).
+    rerun = (
+        f'run & "{shim}" uninstall --all{flags} --yes again in PowerShell (in Command Prompt, leave out the &)'
+        if os.path.isfile(shim)
+        else "remove it by hand"
+    )
     if held:
         detail = f"could not remove {data_dir}: {held} is in use by another program. Close that program, then {rerun}."
     else:
