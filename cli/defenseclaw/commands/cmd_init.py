@@ -253,6 +253,10 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
 
     Use --enable-guardrail to configure the LLM guardrail inline.
     """
+    from defenseclaw.commands.cmd_setup import _validated_api_key_env_name
+
+    # Refuse a pasted key before anything is written (GAP-2589).
+    cisco_api_key_env = _validated_api_key_env_name(cisco_api_key_env, "'--cisco-api-key-env'")
     requested_connectors = []
     if connector:
         requested_connectors.append(_normalize_connector_arg(connector))
