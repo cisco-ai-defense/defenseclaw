@@ -1159,6 +1159,33 @@ class TestPluginListMultiConnectorDefault(PluginCommandTestBase):
         self.assertNotIn("Check your opencode", result.output)
 
     @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
+    def test_copilot_lister_failure_is_reported_not_an_empty_state(self, _mock_oc):
+        """GAP-2415: say Copilot plugins could not be listed, and why."""
+        from defenseclaw.commands import cmd_plugin
+
+        self.app.cfg.active_connectors = lambda: ["copilot"]  # type: ignore[method-assign]
+        self.app.cfg.active_connector = lambda: "copilot"  # type: ignore[method-assign]
+
+        def _failing_lister(connector, cfg, **_kw):
+            if connector == "copilot":
+                cmd_plugin._HOST_PLUGIN_LIST_ERRORS["copilot"] = "`copilot plugin list --json` exited 2"
+            return []
+
+        with patch.object(cmd_plugin, "_list_host_plugins", side_effect=_failing_lister):
+            text = self.invoke(["list", "--connector", "copilot"])
+            as_json = self.invoke(["list", "--connector", "copilot", "--json"])
+
+        self.assertEqual(text.exit_code, 1, text.output)
+        self.assertIn(
+            "warning: could not list copilot plugins: `copilot plugin list --json` exited 2",
+            text.stderr,
+        )
+        self.assertNotIn("has no installed plugins", text.output)
+        self.assertEqual(as_json.exit_code, 1, as_json.output)
+        self.assertEqual(json.loads(as_json.stdout), [])
+        self.assertIn("could not list copilot plugins", as_json.stderr)
+
+    @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
     def test_single_connector_without_plugins_is_a_plain_empty_state(self, _mock_oc):
         """GAP-2368: no plugins is normal; don't hint at a broken install."""
         codex_dir = os.path.join(self.tmp_dir, "codex-empty-plugins")
@@ -3347,11 +3374,57 @@ class HostPluginEnumerationTests(unittest.TestCase):
         args, kwargs = run.call_args
         self.assertEqual(
             args[0],
-            [r"C:\Tools\copilot.exe", "plugins", "list", "--kind", "plugin", "--json"],
+            [r"C:\Tools\copilot.exe", "plugin", "list", "--json"],
         )
         self.assertEqual(kwargs["cwd"], self.tmp_dir)
         self.assertEqual(kwargs["env"]["COPILOT_HOME"], os.path.join(os.path.expanduser("~"), ".copilot"))
         self.assertEqual(kwargs["timeout"], 15)
+
+    @patch("defenseclaw.commands.cmd_plugin.subprocess.run")
+    @patch(
+        "defenseclaw.commands.cmd_plugin._trusted_copilot_binary",
+        return_value="/usr/local/bin/copilot",
+    )
+    def test_list_copilot_plugins_reads_copilot_1_0_90_rows(self, _trusted, run):
+        """GAP-2415: 1.0.90 prints name + marketplace rows."""
+        from defenseclaw.commands.cmd_plugin import _list_copilot_plugins
+
+        run.return_value = SimpleNamespace(
+            returncode=0,
+            stdout='[{"name":"v10crm-plug","marketplace":"v10crm-mkt",'
+            '"version":"0.0.1","enabled":true,"source":"live"}]',
+            stderr="",
+        )
+
+        rows = _list_copilot_plugins(workspace_dir=self.tmp_dir)
+
+        self.assertEqual([(r["id"], r["name"]) for r in rows], [("v10crm-plug@v10crm-mkt", "v10crm-plug")])
+        run.assert_called_once()
+
+    @patch("defenseclaw.commands.cmd_plugin.subprocess.run")
+    @patch(
+        "defenseclaw.commands.cmd_plugin._trusted_copilot_binary",
+        return_value="/usr/local/bin/copilot",
+    )
+    def test_list_copilot_plugins_records_why_listing_failed(self, _trusted, run):
+        """GAP-2415: a failing Copilot lister is not an empty plugin list."""
+        from defenseclaw.commands import cmd_plugin
+
+        run.return_value = SimpleNamespace(
+            returncode=2,
+            stdout="",
+            stderr="error: unexpected argument '--json' found\nUsage: copilot plugin list\n",
+        )
+
+        self.assertEqual(cmd_plugin._list_copilot_plugins(workspace_dir=self.tmp_dir), [])
+        self.assertEqual(
+            [c.args[0][1:] for c in run.call_args_list],
+            [["plugin", "list", "--json"], ["plugins", "list", "--kind", "plugin", "--json"]],
+        )
+        self.assertEqual(
+            cmd_plugin._HOST_PLUGIN_LIST_ERRORS.pop("copilot"),
+            "`copilot plugin list --json` exited 2: error: unexpected argument '--json' found",
+        )
 
     @patch("defenseclaw.commands.cmd_plugin.subprocess.run")
     @patch("defenseclaw.commands.cmd_plugin._trusted_copilot_binary", return_value="")

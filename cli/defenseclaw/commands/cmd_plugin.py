@@ -2141,6 +2141,7 @@ def list_plugins(app: AppContext, as_json: bool, connector_flag: str) -> None:
                     _build_plugin_actions_map(app.store, connector),
                     connector=connector,
                 )
+                _report_host_plugin_list_error(connector)
                 total_plugins += len(items)
                 groups.append({"connector": connector, "plugins": items})
             click.echo(json.dumps(groups, indent=2, default=str))
@@ -2163,6 +2164,8 @@ def list_plugins(app: AppContext, as_json: bool, connector_flag: str) -> None:
                 connector=connectors[0],
             )
             click.echo(json.dumps(items, indent=2, default=str))
+            if _report_host_plugin_list_error(connectors[0]) and not items:
+                raise SystemExit(1)
             if not items and discovery.get(connectors[0]):
                 _render_plugin_registry_diagnostics(
                     discovery,
@@ -2171,6 +2174,7 @@ def list_plugins(app: AppContext, as_json: bool, connector_flag: str) -> None:
         return
 
     shown_any = False
+    list_failed = False
     empty_connectors: list[str] = []
     for connector in connectors:
         plugins = _collect_plugins_for_connector(
@@ -2179,8 +2183,14 @@ def list_plugins(app: AppContext, as_json: bool, connector_flag: str) -> None:
             scan_map,
             registry_cache=registry_cache,
         )
+        list_error = _report_host_plugin_list_error(connector)
         if not plugins:
             empty_connectors.append(connector)
+            if list_error:
+                list_failed = True
+                if len(connectors) > 1:
+                    click.echo(f"Plugins (connector={connector}): could not list plugins")
+                continue
             if len(connectors) > 1:
                 # GAP-2290: a missing registry is the normal "none yet" case;
                 # say it on this connector's own line.
@@ -2198,6 +2208,8 @@ def list_plugins(app: AppContext, as_json: bool, connector_flag: str) -> None:
         shown_any = True
 
     if not shown_any:
+        if list_failed and len(connectors) == 1:
+            raise SystemExit(1)
         _render_plugin_registry_diagnostics(discovery, hide_missing=len(connectors) > 1)
         if len(connectors) == 1 and _empty_plugin_registry_note(discovery, connectors[0]) is None:
             # GAP-2368: no plugins is a normal state, not a broken install.
@@ -2210,6 +2222,18 @@ def list_plugins(app: AppContext, as_json: bool, connector_flag: str) -> None:
         from defenseclaw.commands import hint
 
         hint("Scan a plugin:  defenseclaw plugin scan <name>")
+
+
+def _report_host_plugin_list_error(connector: str) -> str:
+    """Say on stderr why *connector*'s plugins could not be listed (GAP-2415)."""
+
+    reason = _HOST_PLUGIN_LIST_ERRORS.pop(connector, "")
+    if reason:
+        click.echo(
+            f"warning: could not list {connector} plugins: {reason}",
+            err=True,
+        )
+    return reason
 
 
 def _collect_plugins_for_connector(
@@ -3189,6 +3213,30 @@ def _trusted_copilot_binary(
     return ""
 
 
+# GAP-2415: Copilot CLI 1.0.90 rejects the older ``plugins list --kind
+# plugin`` form; ``plugin list --json`` is the supported read-only command.
+# The older form stays as a fallback for earlier Copilot CLIs.
+_COPILOT_PLUGIN_LIST_ARGVS: tuple[tuple[str, ...], ...] = (
+    ("plugin", "list", "--json"),
+    ("plugins", "list", "--kind", "plugin", "--json"),
+)
+
+# Why a host plugin lister could not list plugins, by connector, so
+# ``plugin list`` says so instead of claiming there are none (GAP-2415).
+_HOST_PLUGIN_LIST_ERRORS: dict[str, str] = {}
+
+
+def _copilot_list_failure(argv: tuple[str, ...], proc: Any) -> str:
+    detail = ""
+    for stream in (getattr(proc, "stderr", ""), getattr(proc, "stdout", "")):
+        lines = [ln.strip() for ln in str(stream or "").splitlines() if ln.strip()]
+        if lines:
+            detail = lines[0][:200]
+            break
+    msg = f"`copilot {' '.join(argv)}` exited {proc.returncode}"
+    return f"{msg}: {detail}" if detail else msg
+
+
 def _list_copilot_plugins(
     *,
     data_dir: str | os.PathLike[str] | None = None,
@@ -3228,16 +3276,33 @@ def _list_copilot_plugins(
         return []
     env = os.environ.copy()
     env["COPILOT_HOME"] = bound_home
-    try:
-        proc = subprocess.run(
-            [copilot, "plugins", "list", "--kind", "plugin", "--json"],
-            capture_output=True,
-            text=True,
-            timeout=15,
-            cwd=workspace,
-            env=env,
-        )
-    except (OSError, subprocess.TimeoutExpired):
+    _HOST_PLUGIN_LIST_ERRORS.pop("copilot", None)
+    proc = None
+    failure = ""
+    for argv in _COPILOT_PLUGIN_LIST_ARGVS:
+        try:
+            proc = subprocess.run(
+                [copilot, *argv],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                cwd=workspace,
+                env=env,
+            )
+        except subprocess.TimeoutExpired:
+            failure = failure or f"`copilot {' '.join(argv)}` timed out after 15s"
+            proc = None
+            break
+        except OSError as exc:
+            failure = failure or f"could not run copilot: {exc}"
+            proc = None
+            break
+        if proc.returncode == 0:
+            break
+        failure = failure or _copilot_list_failure(argv, proc)
+        proc = None
+    if proc is None:
+        _HOST_PLUGIN_LIST_ERRORS["copilot"] = failure
         return []
     try:
         after = os.stat(workspace, follow_symlinks=False)
@@ -3255,12 +3320,22 @@ def _list_copilot_plugins(
         after.st_ctime_ns,
     ):
         return []
-    if proc.returncode != 0:
+    try:
+        if (proc.stdout or "").strip():
+            json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        _HOST_PLUGIN_LIST_ERRORS["copilot"] = "copilot printed output that is not JSON"
         return []
     plugins = _parse_plugin_list_json(proc.stdout)
     out: list[dict[str, Any]] = []
     for p in plugins:
-        pid = str(p.get("id") or p.get("name") or "").strip()
+        pid = str(p.get("id") or "").strip()
+        if not pid:
+            # Copilot CLI 1.0.90 rows carry name + marketplace; Copilot
+            # addresses an installed plugin as <name>@<marketplace>.
+            base = str(p.get("name") or "").strip()
+            market = str(p.get("marketplace") or "").strip()
+            pid = f"{base}@{market}" if base and market else base
         if not pid:
             continue
         out.append(
