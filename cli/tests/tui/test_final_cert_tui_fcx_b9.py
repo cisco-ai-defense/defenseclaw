@@ -18,6 +18,7 @@ import sys
 from pathlib import Path
 
 from defenseclaw.tui.app import PANELS
+from defenseclaw.tui.screens.uninstall import build_uninstall_model
 from defenseclaw.tui.services.overview_state import HealthSnapshot
 from defenseclaw.tui.services.runtime_state import RuntimeSnapshot
 from defenseclaw.tui.widgets import tab_fit
@@ -79,3 +80,9 @@ def test_overview_with_the_gateway_down_drops_uptime_and_dates_the_last_sample(t
     assert re.search(r"Last sample at (\d\d:\d\d:\d\d|Oct 0[23] \d\d:\d\d); it", runtime), runtime
     assert " ago" not in runtime
 
+
+def test_uninstall_chooser_hint_says_which_keys_run_and_which_select() -> None:
+    # GAP-2303: "press a row's key" while [u] only selects and [p] runs.
+    hint = build_uninstall_model().default_hint
+    assert hint.startswith("p runs now") and "u/a/e select, then enter twice runs" in hint
+    assert "row's key" not in hint and hint.endswith("esc cancel")
