@@ -153,12 +153,25 @@ func (a *APIServer) emitHookGuardrailOutcomeV8(
 		meta := capture.promptMeta
 		meta.Guardrail = outcome
 		meta.LifecycleOutcome = "blocked"
-		reply := strings.TrimSpace(redaction.ForSinkReason(resp.Reason))
+		reply := strings.TrimSpace(hookPromptBlockReply(resp.Reason))
 		if reply == "" {
 			reply = "DefenseClaw blocked this prompt"
 		}
 		a.emitHookLLMSpan(ctx, meta, reply)
 	}
+}
+
+// hookPromptBlockReply is the reply a blocked prompt's turn carries: the
+// block message the agent showed its user. That message is already worded
+// and scrubbed for the agent (agentDisplayReason, agentVerdictReason), so the
+// sink scrub on top turned it into a "<redacted len=N sha=...>" token even
+// for an unredacted destination (GAP-2510). A managed (Secure Client)
+// deployment keeps the scrub.
+func hookPromptBlockReply(reason string) string {
+	if managedEnterpriseActive.Load() {
+		return redaction.ForSinkReason(reason)
+	}
+	return reason
 }
 
 // annotateHookToolInvocation attaches an ask or alert decision to the tool
