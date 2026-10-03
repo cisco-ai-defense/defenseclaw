@@ -6560,6 +6560,9 @@ def _guardrail_wizard_fields_for(
     j_vertex = j_provider_is("vertex_ai", "vertex")
     j_azure = j_provider_is("azure")
     j_region_opts = _llm_catalog_regions(judge_provider)
+    judge_bedrock_region = str(get_config_value(cfg, "guardrail.judge.llm.bedrock.region", "") or "").strip()
+    if j_region_opts and judge_bedrock_region and judge_bedrock_region not in j_region_opts:
+        j_region_opts = (judge_bedrock_region, *j_region_opts)
     candidates: tuple[WizardFormField, ...] = (
         WizardFormField("Operation Scope", "section"),
         WizardFormField(
@@ -6698,6 +6701,8 @@ def _guardrail_wizard_fields_for(
             "Region",
             "choice" if j_region_opts else "string",
             "--judge-bedrock-region",
+            value=judge_bedrock_region,
+            default=judge_bedrock_region,
             options=j_region_opts,
             hint="AWS region, e.g. us-east-1.",
             visible_when=j_bedrock,
