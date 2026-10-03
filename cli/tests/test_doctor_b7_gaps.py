@@ -93,3 +93,27 @@ def test_bedrock_key_rejection_raised_as_connection_error_is_auth_failed() -> No
         exc = err(f'litellm.APIConnectionError: BedrockException - {{"Message":"{body}"}}')
         assert llm._classify_llm_exception(exc) == "auth_failed"
     assert llm._classify_llm_exception(err("litellm.APIConnectionError: Connection refused")) == "network_error"
+
+
+def test_llm_reachable_names_the_shell_proxy(tmp_path, monkeypatch) -> None:
+    # GAP-2421: a dead HTTPS_PROXY read as a bare "[Errno 61] Connection refused".
+    import requests
+
+    for name in ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy", "DEFENSECLAW_LLM_MODEL"):
+        monkeypatch.delenv(name, raising=False)
+    cfg = _bedrock_judge_cfg(tmp_path, "api_key")
+    refused = requests.ConnectionError("[Errno 61] Connection refused")
+    monkeypatch.setenv("HTTPS_PROXY", "http://u:pw@127.0.0.1:18508")
+    r = _DoctorResult()
+    with mock.patch("litellm.completion", side_effect=refused):
+        cmd_doctor._check_llm_reachable(cfg, r)
+    row = r.checks[-1]
+    assert row["status"] == "warn"
+    assert "could not be reached through the proxy http://127.0.0.1:18508 (from HTTPS_PROXY)" in row["detail"]
+    assert "pw" not in row["detail"] and "unset HTTPS_PROXY" in row["remediation"]
+    # NO_PROXY covering the provider host: the call goes direct, no proxy wording.
+    monkeypatch.setenv("NO_PROXY", ".amazonaws.com")
+    r = _DoctorResult()
+    with mock.patch("litellm.completion", side_effect=refused):
+        cmd_doctor._check_llm_reachable(cfg, r)
+    assert "proxy" not in r.checks[-1]["detail"] and not r.checks[-1].get("remediation")
