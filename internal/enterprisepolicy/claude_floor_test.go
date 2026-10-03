@@ -919,6 +919,11 @@ func TestClaudeVersionFloorFollowsTheMachineHookContract(t *testing.T) {
 	if !strings.Contains(floor.Summary(), "claudecode-hooks-v2") || !hasDetail(state, "2.1.219, not 2.1.154") {
 		t.Fatalf("status must name why the floor is 2.1.219: %s / %v", floor.Summary(), state.Details)
 	}
+	// GAP-1555: builds before 2.1.163 ignore the floor and still show the
+	// unknown-event warning; status and verify must say so.
+	if !hasDetail(state, "builds before 2.1.163 ignore the version floor") {
+		t.Fatalf("status must name the pre-2.1.163 residual: %v", state.Details)
+	}
 	if again := reconcileClaude(t, opts); again.Changed {
 		t.Fatalf("a second reconcile must be a no-op: %+v", again)
 	}

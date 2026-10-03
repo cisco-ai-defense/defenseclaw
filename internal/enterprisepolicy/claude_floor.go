@@ -654,6 +654,10 @@ func inspectClaudeVersionFloor(opts Options, policy config.ResolvedConnectorPoli
 	if raised, contractID := opts.claudeMachineContractFloor(); raised != "" {
 		floor.Reason = fmt.Sprintf("the machine-wide hook drop-in uses hook contract %s, which needs Claude Code %s or later", contractID, raised)
 		state.detail("Claude Code version floor: %s, not %s: %s; older builds would warn about hook events they do not know at every session start", raised, ClaudeVersionFloor(), floor.Reason)
+		// Builds before 2.1.163 ignore requiredMinimumVersion (upstream), so
+		// they still start and show that warning; DefenseClaw's other hooks
+		// in the drop-in still run. Say so, and name the control that stops them.
+		state.detail("Claude Code builds before %s ignore the version floor: they still start and warn that the newer hook events in 90-defenseclaw.json are unknown, and DefenseClaw's other hooks still apply; update them, or allow only supported Claude Code versions with application control", claudeFloorSettingVersion)
 	}
 	promised := plan.mode == config.ClaudeVersionFloorEnforce && policy.Ownership == config.MachinePolicyOwnershipMerge
 	switch {

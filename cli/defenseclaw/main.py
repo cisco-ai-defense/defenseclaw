@@ -499,17 +499,23 @@ class _HelpFormatter(click.HelpFormatter):
     Click's wrapper splits 'defenseclaw-gateway', '~/.defenseclaw/last-run.log'
     or 'log-activity' across two lines, so they can't be read or copied whole.
     Hyphens are non-breaking while a block wraps and plain again in the output.
+    Redirected help gets the same ASCII stand-ins as the rest of the CLI
+    (em dash, ellipsis; GAP-2598), swapped before wrapping so widths hold.
     """
 
     def write_text(self, text: str) -> None:
         start = len(self.buffer)
-        super().write_text(text.replace("-", _NB_HYPHEN))
+        super().write_text(ux.console_text(text).replace("-", _NB_HYPHEN))
         self._restore_hyphens(start)
 
     def write_dl(self, rows, col_max: int = 30, col_spacing: int = 2) -> None:
         start = len(self.buffer)
-        super().write_dl([(term, desc.replace("-", _NB_HYPHEN)) for term, desc in rows], col_max, col_spacing)
+        rows = [(ux.console_text(term), ux.console_text(desc).replace("-", _NB_HYPHEN)) for term, desc in rows]
+        super().write_dl(rows, col_max, col_spacing)
         self._restore_hyphens(start)
+
+    def getvalue(self) -> str:
+        return ux.console_text(super().getvalue())
 
     def _restore_hyphens(self, start: int) -> None:
         self.buffer[start:] = [part.replace(_NB_HYPHEN, "-") for part in self.buffer[start:]]

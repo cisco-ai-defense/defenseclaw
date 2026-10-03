@@ -397,3 +397,17 @@ def test_cli_echo_calls_with_presentation_glyphs_go_through_ux() -> None:
             ):
                 offenders.append(f"{path.relative_to(root)}:{node.lineno}")
     assert offenders == [], "use ux.echo/ux.secho for glyph text: " + ", ".join(offenders)
+
+
+def test_redirected_click_help_is_ascii() -> None:
+    # GAP-2598: Click formats --help itself, so em dashes and U+2026 skipped ux.console_text.
+    from defenseclaw.main import cli
+
+    runner = CliRunner()
+    with mock.patch.object(ux, "_configured_unicode_output", False):
+        root = runner.invoke(cli, ["--help"], prog_name="defenseclaw", catch_exceptions=False)
+        aibom = runner.invoke(cli.commands["aibom"], ["--help"], prog_name="defenseclaw aibom", catch_exceptions=False)
+    assert root.exit_code == 0 and aibom.exit_code == 0
+    assert root.output.isascii(), [line for line in root.output.splitlines() if not line.isascii()]
+    assert aibom.output.isascii(), [line for line in aibom.output.splitlines() if not line.isascii()]
+    assert "Manage MCP servers - " in root.output

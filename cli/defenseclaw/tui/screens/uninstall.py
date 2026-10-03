@@ -70,12 +70,11 @@ def build_uninstall_model() -> ConsequenceModalModel:
 
     return ConsequenceModalModel(
         title="Uninstall DefenseClaw",
-        summary="Choose what the TUI should run. The default is preview-only.",
-        details=(
-            "The keep-data row passes --yes because this modal is the confirmation step.",
-            "Use the dry-run row first if you want to inspect the plan.",
-        ),
-        consequence="Uninstall can remove hooks, plugin integration, config, audit DB, secrets, and binaries.",
+        # The header said "Choose what the TUI should run" and explained
+        # "--yes", though rows a and e only show a command (GAP-2608).
+        summary="Preview the plan, or uninstall and keep your data. The default is preview-only.",
+        details=("Deleting data or binaries is done from a terminal after you quit (rows a and e show the command).",),
+        consequence="Uninstall here removes the DefenseClaw hooks and plugin integration and keeps ~/.defenseclaw.",
         actions=(
             ConsequenceAction(
                 action_id=UninstallOption.DRY_RUN.value,

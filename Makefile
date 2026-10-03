@@ -199,16 +199,25 @@ source-migrate: _source-install-preflight
 
 # A running gateway keeps the binary it started with after make all replaced
 # it, so the CLI and the gateway differed and doctor called the old process a
-# stranger on the port (GAP-1575). Restart it to load this build.
+# stranger on the port (GAP-1575). Restart it to load this build. Its output
+# is dropped, so first say when this start applies the one-time pre-1.0 audit
+# upgrade, which takes minutes on a large history (GAP-2027).
 source-restart-gateway: _source-install-preflight
-	@if [ -f "$(SOURCE_GATEWAY_STOPPED)" ]; then \
+	@upgrade_note() { \
+		if $(HOST_PYTHON) ./scripts/keep-pre-1.0-audit-history.py --pending 2>/dev/null; then \
+			echo "  Upgrading the audit database before the gateway starts (one time; a large history can take a few minutes)..."; \
+		fi; \
+	}; \
+	if [ -f "$(SOURCE_GATEWAY_STOPPED)" ]; then \
 		rm -f "$(SOURCE_GATEWAY_STOPPED)"; \
+		upgrade_note; \
 		if "$(INSTALL_DIR)/$(GATEWAY)$(EXE)" start >/dev/null 2>&1; then \
 			echo "  ✓ Started the gateway again on this build"; \
 		else \
 			echo "  ! Could not start the gateway on this build. Run: defenseclaw-gateway start"; \
 		fi; \
 	elif "$(INSTALL_DIR)/$(GATEWAY)$(EXE)" status >/dev/null 2>&1; then \
+		upgrade_note; \
 		if "$(INSTALL_DIR)/$(GATEWAY)$(EXE)" restart >/dev/null 2>&1; then \
 			echo "  ✓ Restarted the running gateway so it runs this build"; \
 		else \
