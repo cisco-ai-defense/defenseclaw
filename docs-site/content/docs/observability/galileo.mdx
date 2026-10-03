@@ -293,6 +293,18 @@ Completed chat and tool operations carry their measured duration and are sent
 as soon as the connector exposes completion, so operators do not need to wait
 for a final Stop event to see a multi-hour agent's progress.
 
+### Tool calls that end after their turn was sent
+
+Galileo closes a trace when it ingests the request that carries the trace's
+root span, and drops spans of that trace that arrive in a later request. An
+OpenClaw turn's `invoke_agent openclaw` root is sent when the model message
+arrives, so a tool call that runs for more than a moment ends after Galileo
+closed its trace. The Galileo destination therefore sends such a span as the
+root of its own Galileo trace and adds the original trace ID to the span's
+metadata as `defenseclaw.trace.id`; filter on that key to find the rest of the
+turn. Local observability and other OTLP destinations keep the span in its
+original trace.
+
 ### Model detail: inspect input, output, latency, and reported usage
 
 ![Galileo model span detail showing rendered input and assistant output inside a long-running agent session](/images/galileo/model-input-output.png)
