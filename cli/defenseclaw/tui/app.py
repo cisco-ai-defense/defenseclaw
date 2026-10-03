@@ -5019,6 +5019,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 ("h/l", "Sources / entries / approved sub-tab"),
                 ("j/k or Up/Down", "Navigate rows"),
                 ("Enter / Esc", "Open / close detail"),
+                ("PgUp / PgDn", "Scroll the open detail"),
                 ("s / S", "Sync the selected source / sync all"),
                 ("a / x", "Approve / reject the selected entry"),
                 ("e", "Require (or stop requiring) registry approval for the entry's type"),
@@ -11701,6 +11702,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             action = self.alerts_model.handle_key(key)
             return self._apply_alert_action(action)
         if self.active_panel == "registries":
+            if self.registries_model.detail_open and key in {"pagedown", "page_down", "pageup", "page_up"}:
+                # The source/entry detail cut its last lines (Blocked/Errors/
+                # Rejected, Approved/URL) and no key moved it (GAP-2591).
+                return self._scroll_detail_panel(key)
             action = self.registries_model.handle_key(key)
             return self._apply_registry_action(action)
         if self.active_panel in self.catalog_models:
