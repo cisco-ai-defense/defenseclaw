@@ -95,7 +95,8 @@ All three packs share the same [severity rubric](/docs/policies#shared-severity-
 After `defenseclaw init`, this command:
 
 ```bash
-defenseclaw setup guardrail --connector claudecode --mode action --rule-pack default --non-interactive
+defenseclaw setup guardrail --connector claudecode --mode action \
+  --rule-pack default --non-interactive
 ```
 
 writes these settings (other generated fields omitted):
@@ -111,7 +112,7 @@ guardrail:
   mode: action
   rule_pack_dir: /home/<you>/.defenseclaw/policies/guardrail/default
 
-observability: {}                     # no optional destinations; local SQLite still records everything
+observability: {}   # no optional destinations; local SQLite still records
 ```
 
 Settings it doesn't write keep their defaults: `guardrail.hook_fail_mode` is
