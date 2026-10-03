@@ -21,8 +21,10 @@ import (
 	"crypto/md5"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
@@ -862,5 +864,34 @@ func TestStartupRescanDefersStaleOwnPluginDir(t *testing.T) {
 	w.runRescanCycle(context.Background())
 	if len(scanned) != 1 || scanned[0] != own {
 		t.Fatalf("second rescan scanned %v, want %s (still differs from the bundle)", scanned, own)
+	}
+}
+
+// GAP-2384: a deferred watch folder (Hermes before its first run) and a
+// missing agent config are skipped quietly, as the watcher does.
+func TestEnumerateTargetsSkipsMissingDeferredDirsQuietly(t *testing.T) {
+	cfg, store, logger, _ := setupTestEnv(t)
+	home := t.TempDir()
+	t.Setenv("HERMES_HOME", home)
+	cfg.Guardrail.Connector = "hermes"
+	missing := filepath.Join(home, "hermes-agent", "plugins")
+
+	r, wr, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig := os.Stderr
+	os.Stderr = wr
+	w := New(cfg, []string{filepath.Join(home, "skills")}, []string{missing}, store, logger, nil, nil)
+	targets := w.enumerateTargets()
+	os.Stderr = orig
+	_ = wr.Close()
+	out, _ := io.ReadAll(r)
+
+	if len(targets) != 0 {
+		t.Fatalf("targets = %+v, want none", targets)
+	}
+	if strings.Contains(string(out), "[rescan]") {
+		t.Fatalf("rescan logged an error for a deferred folder: %s", out)
 	}
 }
