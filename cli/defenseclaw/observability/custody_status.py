@@ -298,8 +298,13 @@ def inspect_connector_custody(
     data_dir: str | os.PathLike[str],
     *,
     now: datetime | None = None,
+    api_addr: str = "",
 ) -> ConnectorCustodyReport:
     """Read custody and recent ingest evidence without initializing SQLite.
+
+    ``api_addr`` is the gateway REST listener (``host:port``, see
+    :func:`gateway_api_addr`). When given, a DefenseClaw-managed exporter
+    that points anywhere else is drift (GAP-2345).
 
     Absence is a bounded status, not an exception: ``observability plan`` must
     remain usable before the gateway has created its database, and doctor
@@ -345,7 +350,7 @@ def inspect_connector_custody(
                 return ConnectorCustodyReport("unavailable", "invalid_ledger", window_hours)
             connector_id, connector, custody, profile_version, is_default = item
             managed_state, managed_files = _managed_config_state(
-                Path(data_dir), connector, custody, is_default
+                Path(data_dir), connector, custody, is_default, api_addr
             )
             # The current inbound endpoint resolves one implicit/default
             # instance per authenticated connector source. Never smear that
@@ -578,7 +583,7 @@ def _credential_state(last_auth: datetime | None, last_native: datetime | None) 
 
 
 def _managed_config_state(
-    data_dir: Path, connector: str, custody: str, is_default: bool
+    data_dir: Path, connector: str, custody: str, is_default: bool, api_addr: str = ""
 ) -> tuple[str, int]:
     if custody != "defenseclaw" or not is_default:
         return "not_applicable", 0
@@ -602,7 +607,7 @@ def _managed_config_state(
         return "unverifiable", len(backups)
     verified = 0
     for backup in backups:
-        state = _verify_managed_backup(backup, connector)
+        state = _verify_managed_backup(backup, connector, api_addr)
         if state == "drifted":
             return "drifted", len(backups)
         if state != "verified":
@@ -611,7 +616,7 @@ def _managed_config_state(
     return "verified", verified
 
 
-def _verify_managed_backup(path: Path, connector: str) -> str:
+def _verify_managed_backup(path: Path, connector: str, api_addr: str = "") -> str:
     try:
         info = path.lstat()
         if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
@@ -650,19 +655,43 @@ def _verify_managed_backup(path: Path, connector: str) -> str:
             return "unverifiable"
     if actual == expected:
         return "verified"
-    if actual != "missing" and _managed_otel_block_intact(target, connector):
+    if actual != "missing" and _managed_otel_block_intact(target, connector, api_addr):
         # Codex itself writes to config.toml (a folder-trust decision adds
         # [projects."<dir>"]). Only DefenseClaw's exporter block matters
-        # here, and it is unchanged (GAP-1330).
+        # here, and it still has the shape DefenseClaw writes (GAP-1330).
         return "verified"
     return "drifted"
 
 
-_OTEL_EXPORTERS = ("exporter", "trace_exporter", "metrics_exporter")
+_OTEL_EXPORTERS = {"exporter": "logs", "trace_exporter": "traces", "metrics_exporter": "metrics"}
 
 
-def _managed_otel_block_intact(target: Path, connector: str) -> bool:
-    """Whether a TOML agent config still holds DefenseClaw's [otel] exporters."""
+def gateway_api_addr(cfg: Any) -> str:
+    """The gateway REST listener as ``host:port``, or "" when unknown.
+
+    Mirrors ``apiListenAddr`` in internal/gateway/sidecar.go, which is the
+    base of every managed native OTLP endpoint.
+    """
+    try:
+        from defenseclaw.config import api_bind_host
+
+        port = int(getattr(getattr(cfg, "gateway", None), "api_port", 0) or 0)
+        host = api_bind_host(cfg)
+    except Exception:  # noqa: BLE001 - an unknown listener only skips the port check.
+        return ""
+    return f"{host}:{port}" if host and port > 0 else ""
+
+
+def _managed_otel_block_intact(target: Path, connector: str, api_addr: str = "") -> bool:
+    """Whether a TOML agent config still holds DefenseClaw's [otel] exporters.
+
+    Codex may rewrite the file, so this checks what DefenseClaw wrote rather
+    than the file hash: every exporter carries this connector's source
+    header, ends in its own ``/v1/<signal>`` path, and shares one base URL
+    and one header set. With ``api_addr`` the base must also be the gateway
+    listener. A hand-edited endpoint (another port, GAP-2345) or header is
+    drift, because Codex would send its OTLP credential there.
+    """
     if target.suffix.lower() != ".toml":
         return False
     try:
@@ -676,13 +705,30 @@ def _managed_otel_block_intact(target: Path, connector: str) -> bool:
     otel = document.get("otel")
     if not isinstance(otel, dict):
         return False
-    for name in _OTEL_EXPORTERS:
+    bases: set[str] = set()
+    header_sets: list[dict[str, Any]] = []
+    for name, signal in _OTEL_EXPORTERS.items():
         exporter = otel.get(name)
         http = exporter.get("otlp-http") if isinstance(exporter, dict) else None
         headers = http.get("headers") if isinstance(http, dict) else None
         if not isinstance(headers, dict) or headers.get("x-defenseclaw-source") != connector:
             return False
-        if not str(http.get("endpoint") or "").strip():
+        endpoint = str(http.get("endpoint") or "").strip()
+        suffix = f"/v1/{signal}"
+        if not endpoint.endswith(suffix):
+            return False
+        bases.add(endpoint[: -len(suffix)].rstrip("/"))
+        header_sets.append(headers)
+    if len(bases) != 1 or any(headers != header_sets[0] for headers in header_sets):
+        return False
+    if api_addr:
+        from urllib.parse import urlsplit
+
+        try:
+            netloc = urlsplit(next(iter(bases))).netloc
+        except ValueError:
+            return False
+        if netloc.lower() != api_addr.lower():
             return False
     return True
 
@@ -725,6 +771,7 @@ __all__ = [
     "ConnectorCustodyStatus",
     "NativeDeliveryStatus",
     "NativeDeliverySummary",
+    "gateway_api_addr",
     "inspect_connector_custody",
     "summarize_native_delivery",
 ]
