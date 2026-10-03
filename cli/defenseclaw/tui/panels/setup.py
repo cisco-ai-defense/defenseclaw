@@ -2176,7 +2176,14 @@ def _acp_wizard_fields() -> tuple[WizardFormField, ...]:
 
     return (
         WizardFormField(
-            "Client", "choice", "--client", value="zed", default="zed", options=ACP_CLIENT_IDS, required=True
+            "Client",
+            "choice",
+            "--client",
+            value="zed",
+            default="zed",
+            options=ACP_CLIENT_IDS,
+            required=True,
+            hint="Editor that launches the agent over ACP.",
         ),
         WizardFormField(
             "Agent",
@@ -2186,8 +2193,17 @@ def _acp_wizard_fields() -> tuple[WizardFormField, ...]:
             default="kiro",
             options=ACP_AGENT_IDS,
             required=True,
+            hint="ACP agent DefenseClaw sits in front of and guards.",
         ),
-        WizardFormField("Profile", "string", "--profile", value="default", default="default", required=True),
+        WizardFormField(
+            "Profile",
+            "string",
+            "--profile",
+            value="default",
+            default="default",
+            required=True,
+            hint="ACP policy profile (acp.profiles) the guard enforces.",
+        ),
         WizardFormField(
             "Action Mode",
             "bool",
