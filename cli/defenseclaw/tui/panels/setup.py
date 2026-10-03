@@ -5912,6 +5912,36 @@ def _prune_empty_sections(fields: Sequence[WizardFormField]) -> tuple[WizardForm
 
 # Goals that act on a connector that is already set up.
 _CONFIGURED_CONNECTOR_GOALS = frozenset({"rerun", "remove"})
+_CONNECTOR_ACTIONS = ("setup", "batch", "remove")
+
+
+def _pin_goal_action(
+    fields: Sequence[WizardFormField], goal: WizardGoal | None
+) -> tuple[WizardFormField, ...]:
+    """Keep a connector goal's Action row on the goal's own action.
+
+    Each goal shows only the rows its action needs, so cycling Action in
+    "Add or configure a connector" to batch asked for Connectors (CSV) or
+    Detected/All rows the form never showed, and remove kept the ignored
+    Guardrail Mode and Replace Existing rows (GAP-2026). The other actions
+    have their own goals.
+    """
+
+    action = (goal.presets.get("@Action") or "") if goal is not None else ""
+    if action not in _CONNECTOR_ACTIONS:
+        return tuple(fields)
+    return tuple(
+        replace(
+            field,
+            options=(action,),
+            value=action,
+            default=action,
+            hint="Fixed by this goal.",
+        )
+        if field.label == "Action" and field.kind == "choice" and set(field.options) == set(_CONNECTOR_ACTIONS)
+        else field
+        for field in fields
+    )
 
 
 def _narrow_goal_connectors(
@@ -5927,6 +5957,7 @@ def _narrow_goal_connectors(
     unless it already holds a configured connector.
     """
 
+    fields = _pin_goal_action(fields, goal)
     if goal is None or goal.id not in _CONFIGURED_CONNECTOR_GOALS:
         return tuple(fields)
     configured = tuple(sorted(dict.fromkeys(_active_connector_names_for_setup(cfg))))
