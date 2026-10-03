@@ -393,6 +393,14 @@ sensitive substrings or transform/remove whole field classes. Under `content`
 and `strict` the messages keep their structure for Galileo: each message keeps
 a role Galileo accepts (`user` for input, `assistant` or `tool` for output) and
 text parts, while their text is the redaction placeholder or is removed.
+The input of a Claude Code `tool_batch` span lists the calls of the batch by
+tool name and call ID. Those are identifiers, as on the span of each call, so
+`content` keeps them in clear.
+
+On Bedrock, a Claude Code chat span names the model ID
+(`chat anthropic.claude-haiku-4-5-20251001-v1:0`), not the cross-region
+inference profile from `ANTHROPIC_MODEL` (`us.anthropic...`). It names the same
+model before and after a gateway restart and on a resumed session.
 
 The Galileo preset binds the generated `galileo-rich-v2` compatibility profile.
 Eligibility, projected attributes, events, links, instrumentation scope, and
