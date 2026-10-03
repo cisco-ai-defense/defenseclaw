@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -148,4 +150,36 @@ func TestHookClaudeCodeEveryTurnHasAChatSpanOnGalileo(t *testing.T) {
 	if chats != len(turns) {
 		t.Fatalf("galileo chat spans=%d, want one per turn (%d)", chats, len(turns))
 	}
+}
+
+// GAP-2511: after a gateway restart (or on a resumed session) the gateway
+// never sees the startup SessionStart that names the model. The transcript
+// records it on each assistant message, so the turn still has its chat span.
+func TestHookClaudeCodeTurnAfterGatewayRestartHasAChatSpanOnGalileo(t *testing.T) {
+	api, spans := hookGalileoSpanCapture(t)
+	transcript := filepath.Join(t.TempDir(), "claude-restarted-session.jsonl")
+	if err := os.WriteFile(transcript, []byte(
+		`{"type":"user","message":{"role":"user","content":"Reply with one word: ready"}}`+"\n"+
+			`{"type":"assistant","message":{"model":"anthropic.claude-haiku-4-5-20251001-v1:0","role":"assistant","content":[{"type":"text","text":"ready"}]}}`+"\n"+
+			`{"type":"assistant","message":{"model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"No response requested."}]}}`+"\n",
+	), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const session = "claude-restarted-session"
+	prompt := "Reply with one word: restarted"
+	api.emitClaudeCodeHookLLMEvent(context.Background(), claudeCodeHookRequest{
+		HookEventName: "UserPromptSubmit", SessionID: session, Prompt: prompt, TranscriptPath: transcript, Payload: map[string]any{},
+	}, nil, []byte(`{"prompt":"`+prompt+`"}`))
+	api.emitClaudeCodeHookLLMEvent(context.Background(), claudeCodeHookRequest{
+		HookEventName: "Stop", SessionID: session, LastAssistantMessage: "restarted", TranscriptPath: transcript, Payload: map[string]any{},
+	}, nil, []byte(`{"last_assistant_message":"restarted"}`))
+	for _, span := range waitHookGalileoSpans(spans, "chat", 1) {
+		if strings.HasPrefix(span.Name, "chat") {
+			if span.Name != "chat anthropic.claude-haiku-4-5-20251001-v1:0" {
+				t.Fatalf("chat span name=%q, want the transcript model", span.Name)
+			}
+			return
+		}
+	}
+	t.Fatal("galileo got no chat span for the turn after the restart")
 }

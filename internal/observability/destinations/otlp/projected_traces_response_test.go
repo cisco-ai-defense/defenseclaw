@@ -11,10 +11,14 @@
 package otlp
 
 import (
+	"bytes"
+	"strings"
 	"testing"
 
 	collectortracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	"google.golang.org/protobuf/proto"
+
+	"github.com/defenseclaw/defenseclaw/internal/observability/delivery"
 )
 
 func TestDecodeProjectedTraceHTTPResponseSupportsOTLPEncodings(t *testing.T) {
@@ -86,5 +90,36 @@ func TestDecodeProjectedTraceHTTPResponseFailsClosed(t *testing.T) {
 				t.Fatalf("invalid response accepted: %+v", got)
 			}
 		})
+	}
+}
+
+// GAP-2532: Galileo answers 2xx with a partial success that refuses every
+// span it cannot read. Doctor showed only "permanent payload (unspecified)"
+// and gateway.log had nothing; now the result names the refusal and the log
+// carries the collector's reason.
+func TestProjectedTraceAllRejectedPartialSuccessNamesTheReason(t *testing.T) {
+	var out bytes.Buffer
+	previous := rejectionLogWriter
+	rejectionLogWriter = &out
+	t.Cleanup(func() { rejectionLogWriter = previous })
+
+	adapter := &ProjectedTraceAdapter{destination: "galileo-gap2532"}
+	result := adapter.classifyTraceResponse(&collectortracepb.ExportTraceServiceResponse{
+		PartialSuccess: &collectortracepb.ExportTracePartialSuccess{
+			RejectedSpans: 2,
+			ErrorMessage:  `Group 0: Validation error: "field": ["agent", "input", "str"], "message": "Input should be a valid string"`,
+		},
+	}, 2, nil)
+	if result.Outcome != delivery.OutcomePermanentPayload || result.FailureCode != delivery.FailureCodeHTTPRejected {
+		t.Fatalf("result = %+v, want permanent payload with http_rejected", result)
+	}
+	line := strings.TrimSpace(out.String())
+	for _, want := range []string{
+		"galileo-gap2532 traces export partly rejected by the collector: 2 of 2 spans refused",
+		`["agent", "input", "str"]`,
+	} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("log %q lacks %q", line, want)
+		}
 	}
 }

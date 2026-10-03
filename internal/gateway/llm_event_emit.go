@@ -824,6 +824,11 @@ func (a *APIServer) emitClaudeCodeHookLLMEvent(ctx context.Context, req claudeCo
 	meta = a.inferAndEmitHookSpawnStart(ctx, meta)
 	meta = a.reconcileHookParent(meta)
 	meta = a.mergeHookSessionLifecycle(meta)
+	if strings.TrimSpace(meta.Model) == "" {
+		// After a gateway restart or on a resumed session the gateway no
+		// longer knows the session model (GAP-2511); the transcript does.
+		meta.Model = claudeCodeTranscriptModel(req.TranscriptPath)
+	}
 	meta.TraceEventID = hookTraceEventID(ctx, meta)
 	meta = finalizeHookEventCorrelation(meta, req.Payload)
 	meta, recordLifecycle := a.prepareHookLifecycleTransition(meta)
