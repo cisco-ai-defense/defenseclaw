@@ -1370,7 +1370,11 @@ class FirstRunApiPortTests(unittest.TestCase):
                 bootstrap.choose_first_run_guardrail_port(first)
                 self.assertTrue(os.path.exists(os.path.join(claims, "defenseclaw-guardrail-port-4010")))
                 with patch.object(bootstrap.os, "getuid", return_value=os.getuid() + 1):
-                    bootstrap.choose_first_run_guardrail_port(second)
+                    note = bootstrap.choose_first_run_guardrail_port(second)
+            # GAP-2283: 4010 is only claimed (nothing listens), so the note
+            # must not send the user looking for a process on it.
+            self.assertIn("in use or claimed by another account's DefenseClaw install", note)
+            self.assertNotIn("often", note)
             with patch.object(bootstrap, "_API_PORT_CLAIM_DIR", claims):
                 bootstrap.remove_own_api_port_claims()
                 self.assertEqual(os.listdir(claims), [])
