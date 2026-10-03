@@ -73,14 +73,18 @@ def build_command_preview(command: ParsedCommand) -> CommandPreview:
 
     argv = (command.binary, *command.args)
     risk = command.risk if command.risk != "read-only" else classify_risk(command.category, command.args)
+    restart = _restart_effect(risk, command.args)
+    summary = _upgrade_summary(command.args) or _risk_summary(risk, command.category)
+    if restart == "yes" and risk in {"setup", "mutation"}:
+        summary = f"This {command.category} command restarts the gateway. Runtime traffic may briefly pause."
     return CommandPreview(
         title=command.display_name,
         masked_argv=mask_argv(argv),
         category=command.category,
         risk=risk,
         origin=command.category,
-        restart=_restart_effect(risk, command.args),
-        summary=_upgrade_summary(command.args) or _risk_summary(risk, command.category),
+        restart=restart,
+        summary=summary,
         hidden_inputs=hidden_input_lines(command),
         consequence=command.consequence,
     )
@@ -195,6 +199,13 @@ def _restart_effect(risk: str, args: tuple[str, ...]) -> str:
         # ``setup observability list`` read "Risk read-only  Restart
         # possible" (GAP-2186).
         return "no"
+    if lowered[:2] == ("agent", "discovery") and "--no-restart" not in lowered:
+        # ``agent discovery enable|disable|setup`` and ``agent discovery
+        # runtime enable|disable`` restart the gateway by default
+        # (GAP-2269).
+        verbs = {arg for arg in lowered[2:4] if not arg.startswith("-")}
+        if verbs & {"enable", "disable", "setup"}:
+            return "yes"
     if lowered and lowered[0] == "setup" and "--no-restart" not in lowered:
         return "possible"
     return "no"
