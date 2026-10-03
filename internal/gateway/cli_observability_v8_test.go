@@ -510,8 +510,9 @@ func TestCLIObservabilityV8PluginScanRowNamesTargetAndConnector(t *testing.T) {
 	).Scan(&target, &connector, &details); err != nil {
 		t.Fatal(err)
 	}
-	if target != "ddgs" || connector != "hermes" {
-		t.Fatalf("scan row target=%q connector=%q, want ddgs and hermes", target, connector)
+	// GAP-2440: a plugin in a category folder keeps that folder (web/ddgs).
+	if target != "web/ddgs" || connector != "hermes" {
+		t.Fatalf("scan row target=%q connector=%q, want web/ddgs and hermes", target, connector)
 	}
 	for _, want := range []string{"scanner=plugin-scanner", "target_type=plugin", "findings=1", "verdict=warn"} {
 		if !strings.Contains(details, want) {
