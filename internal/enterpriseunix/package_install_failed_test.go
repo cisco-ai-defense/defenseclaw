@@ -36,3 +36,30 @@ func TestPackageInstallFailedNamesTheFinishStepPerOS(t *testing.T) {
 		})
 	}
 }
+
+// GAP-2380: after a failed first pkg install, verify's unmanaged_leftovers
+// warning still said to activate the deployment with `ensure --from-package
+// --config <file>`, beside the package_install_failed warning that says to
+// install the pkg again (ensure records no receipt), and that warning opened
+// with "the package was installed" although pkgutil has no receipt.
+func TestFailedPkgInstallVerifyNextStepsAgree(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	dir := h.env.P(h.env.Layout.LifecycleDir)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	last := `{"ok":false,"action":"ensure","errors":[{"code":"config_invalid","message":"rule pack missing"}]}`
+	if err := os.WriteFile(filepath.Join(dir, lastPackageResultFile), []byte(last), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeHostFile(t, h, h.env.Layout.DescriptorPath, "{}")
+	r := h.run(Options{Action: ActionVerify})
+	failed := messagesOf(r.Warnings, codePackageInstallFailed)
+	if strings.Contains(failed, "the package was installed") || !strings.Contains(failed, "no pkg receipt") {
+		t.Fatalf("package_install_failed warning = %q", failed)
+	}
+	leftovers := messagesOf(r.Warnings, codeLeftovers)
+	if leftovers == "" || strings.Contains(leftovers, "--config <file>") || !strings.Contains(leftovers, "as the "+codePackageInstallFailed+" warning says") {
+		t.Fatalf("unmanaged_leftovers warning = %q, want it to defer to the %s advice", leftovers, codePackageInstallFailed)
+	}
+}
