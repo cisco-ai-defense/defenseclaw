@@ -66,6 +66,7 @@ lifecycle does.`,
 			var coded *exitCodeError
 			if enterprisePolicyJSON && errors.As(err, &coded) {
 				writeManagedViewRefusalJSON(cmd.OutOrStdout(), err)
+				silenceJSONReportedError(cmd, true, err)
 			}
 			return err
 		}
