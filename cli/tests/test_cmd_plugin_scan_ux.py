@@ -721,7 +721,8 @@ def test_plugin_info_card_reads_the_same_for_every_outcome(capsys):
     from defenseclaw.commands.cmd_plugin import _plugin_scan_payload_from_latest, _print_plugin_info_card
 
     when = datetime(2026, 10, 3, 4, 14, 21, tzinfo=timezone.utc)
-    for count, sev, verdict in ((0, "INFO", "CLEAN"), (1, "MEDIUM", "MEDIUM")):
+    # GAP-2201 (b11): Verdict is the plugin list word, not the severity.
+    for count, sev, verdict in ((0, "INFO", "clean"), (1, "MEDIUM", "warning")):
         scan = _plugin_scan_payload_from_latest(
             {"target": "/p", "finding_count": count, "max_severity": sev, "timestamp": when}
         )
@@ -730,6 +731,7 @@ def test_plugin_info_card_reads_the_same_for_every_outcome(capsys):
         assert "Installed:   yes" in out and "Quarantined: no" in out
         assert "True" not in out and "False" not in out
         assert f"Verdict:  {verdict}" in out
+        assert "Verdict:  MEDIUM" not in out and "Verdict:  CLEAN" not in out
         assert "Findings: " in out
         assert "Scanned:  2026-10-03 04:14:21 UTC" in out
 
