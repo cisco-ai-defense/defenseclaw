@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -81,7 +82,9 @@ def test_guardrail_mode_names_connector_overrides() -> None:
 def test_overview_paths_show_home_as_tilde(monkeypatch, tmp_path) -> None:
     # GAP-2324: long home paths broke mid-path in the 80-column card.
     monkeypatch.setenv("HOME", str(tmp_path))
-    assert tui_app._home_short(str(tmp_path / ".defenseclaw")) == "~/.defenseclaw"  # noqa: SLF001
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Windows expanduser
+    want = "~" + os.sep + ".defenseclaw"
+    assert tui_app._home_short(str(tmp_path / ".defenseclaw")) == want  # noqa: SLF001
     assert tui_app._home_short("/etc/defenseclaw") == "/etc/defenseclaw"  # noqa: SLF001
 
 
