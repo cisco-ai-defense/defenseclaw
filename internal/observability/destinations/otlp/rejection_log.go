@@ -164,6 +164,28 @@ func logHTTPRejection(destination string, signal observability.Signal, response 
 	_, _ = fmt.Fprintln(rejectionLogOutput(), line)
 }
 
+// logPartialRejection writes one gateway.log line when the collector accepted
+// the export but rejected some or all of its items (an OTLP partial success).
+// Galileo answers that way when it cannot read a span, and the reason used to
+// show only as "permanent payload (unspecified)" in doctor, with nothing in
+// gateway.log (GAP-2532). At most one line per destination and signal per
+// minute; the reason is scrubbed and shortened like an HTTP rejection's.
+func logPartialRejection(destination string, signal observability.Signal, rejected, total int, message string) {
+	suppressed, ok := rejectionLogAdmit(fmt.Sprintf("%s/%s/partial", destination, signal))
+	if !ok {
+		return
+	}
+	line := fmt.Sprintf("[observability] %s %s export partly rejected by the collector: %d of %d %s refused",
+		safeLogToken(destination), signal, rejected, total, itemUnit(signal, total))
+	if reason := scrubRejectionText(message); reason != "" {
+		line += ": " + reason
+	}
+	if suppressed > 0 {
+		line += fmt.Sprintf(" [%d similar in the last minute not logged]", suppressed)
+	}
+	_, _ = fmt.Fprintln(rejectionLogOutput(), line)
+}
+
 // rejectionLogAdmit applies the once-a-minute limit for key. It reports
 // whether a line may be written and how many were skipped since the last one.
 func rejectionLogAdmit(key string) (int, bool) {
