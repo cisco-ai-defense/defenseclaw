@@ -459,6 +459,13 @@ func TestDoctorChecks(t *testing.T) {
 			docker("permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock", errors.New("exit status 1"))(f)
 			f.doctor.DockerGroup = func() (bool, bool, error) { return false, false, nil }
 		}, want: []checkWant{{"docker", fail, "permission denied"}}, fix: &fixWant{text: "sudo usermod -aG docker dev"}},
+		// docker info prints its empty JSON before the client's error: the
+		// detail keeps only the error (GAP-2136).
+		{name: "docker permission denied, JSON before the error", setup: func(f *doctorFixture) {
+			docker(`{"ID":"","Containers":0,"ClientInfo":{"Plugins":[]}}`+"\npermission denied while trying to connect to the docker API at unix:///var/run/docker.sock\n", errors.New("exit status 1"))(f)
+			f.doctor.DockerGroup = func() (bool, bool, error) { return false, false, nil }
+		}, want: []checkWant{{"docker", fail, "the Docker daemon is not reachable: permission denied while trying to connect to the docker API at unix:///var/run/docker.sock"}},
+			fix: &fixWant{text: "sudo usermod -aG docker dev"}},
 		{name: "docker permission denied, stale session", setup: func(f *doctorFixture) {
 			docker(`{"ServerErrors":["permission denied while trying to connect to the Docker daemon socket"]}`, errors.New("exit status 1"))(f)
 			f.doctor.DockerGroup = func() (bool, bool, error) { return true, false, nil }
