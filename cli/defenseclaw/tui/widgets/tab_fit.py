@@ -411,7 +411,12 @@ def _named_fit(
         (name for name in keys if unread.get(name, 0)),
         key=lambda name: (name != "alerts", name not in _OPEN_NAME_COUNTS, _rank(name)),
     ):
-        room = spare if name in _OPEN_NAME_COUNTS else reserve
+        # A tab's own count is 0 while it is open (``_panel_unread_count``),
+        # so only the other tabs' full names need room beside it: keeping
+        # "AI Discovery" free for the AI count hid "V AI⁴" at 200 columns
+        # beside 12 free cells (GAP-2582).
+        others = max((len(titles[other]) - len(named[other]) for other in keys if other != name), default=0)
+        room = spare if name in _OPEN_NAME_COUNTS else others
         if name == "alerts" or strip_width(tuple(render(named, shown | {name}).values())) + room <= width:
             shown.add(name)
     # When the Alerts, Logs and Audit counts leave no room for the open tab's
