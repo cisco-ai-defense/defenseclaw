@@ -256,3 +256,22 @@ def test_the_active_tab_always_shows_its_name() -> None:
             assert len(labels[active]) > 2, (width, active, labels[active])
             for name, key, _label in FIFTEEN_PANELS:
                 assert labels[name].startswith(key)
+
+
+async def test_config_editor_keeps_the_selected_field_in_view_after_a_resize(hermetic) -> None:
+    """GAP-2535: after 160x45 -> 80x24 the table stayed scrolled to the top
+    while the selection (the row Enter edits) sat below the bottom edge."""
+
+    from defenseclaw.config import default_config
+
+    app = snapshot_app(hermetic, setup_config=default_config())
+    async with app.run_test(size=(160, 45)) as pilot:
+        app.action_switch_panel("setup")
+        await pilot.pause()
+        await pilot.press("c", "/", *"llm.timeout", "enter")
+        await pilot.pause()
+        for size in ((80, 24), (160, 45), (80, 24)):
+            await pilot.resize_terminal(*size)
+            for _ in range(3):
+                await pilot.pause()
+            assert any("Timeout (s)" in row for row in _table_rows_on_screen(app)), size
