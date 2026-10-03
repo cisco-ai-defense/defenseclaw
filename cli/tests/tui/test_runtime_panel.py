@@ -399,3 +399,28 @@ def test_a_limited_running_plane_is_partial_not_up() -> None:
     assert "partial via GetExtendedTcpTable" in plane_b.summary
     assert "Permissions" in model.plane_fix(plane_b)
     assert "1 partially watching" in model.health_explanation()
+
+
+def test_an_unselected_plane_is_off_and_says_how_to_turn_it_on() -> None:
+    """GAP-2102: a plane left out of ai_discovery.runtime.planes is 'off', not 'blind'."""
+    model = RuntimePanelModel(platform="win32")
+    model.set_snapshot(
+        {
+            "enabled": True,
+            "scanned_at": "2026-10-03T01:50:53Z",
+            "degraded": True,
+            "planes": [
+                {"plane": "a", "name": "inference heartbeat", "available": True, "running": True,
+                 "mechanism": "Toolhelp32 snapshot"},
+                {"plane": "c", "name": "agent actions", "available": False, "running": False,
+                 "reason": "not selected in ai_discovery.runtime.planes"},
+            ],
+        }
+    )
+    model.handle_key("p")
+    assert "agent actions: off" in model.plane_strip()
+    explanation = model.health_explanation()
+    assert "(1 watching, 1 not selected)" in explanation
+    assert "Agent actions is off (not selected)" in explanation
+    assert "runtime enable --enable-host-plane" in explanation
+    assert "1 not selected" in model.health_explanation(short=True)
