@@ -61,7 +61,9 @@ working install as failed. Route A detects through the lifecycle instead.
 ### 1. Host the package
 
 Put the pkg on an HTTPS location the Macs reach without a proxy, for example
-an Azure Blob Storage container or your artifact server. If the download
+an Azure Blob Storage container or your artifact server. The URL must serve the
+file itself: with `curl` the wrapper does not follow redirects, so a GitHub
+release download link fails. If the download
 needs a proxy, set `DC_HTTPS_PROXY` in the next step; only the download uses
 it.
 
@@ -106,10 +108,8 @@ guardrail:
   enabled: true
   mode: observe
   connectors:
-    claudecode:
-      enabled: true
-    codex:
-      enabled: true
+    claudecode: {}
+    codex: {}
 DEFENSECLAW_CONFIG
 }
 ```
@@ -217,9 +217,10 @@ First remove the Macs from the install script's assignment. Then assign a root
 shell script, set to run once, with `packaging/mdm/macos/uninstall.sh`. It
 stops and removes the LaunchDaemons, removes DefenseClaw's hooks and
 machine-policy entries (administrator entries stay), removes the binaries and
-forgets the pkg receipt. Set `DC_PURGE=1` in its settings block to also remove
-the config, the key and the state. On a Mac with nothing installed it exits
-`0`.
+forgets the pkg receipt. It also removes the config, the key, the state and
+the logs. Set `DC_PURGE=1` in its settings block to also remove each enrolled
+user's `~/.defenseclaw` and per-user binaries. On a Mac with nothing installed
+it exits `0`.
 
 ## Troubleshoot
 

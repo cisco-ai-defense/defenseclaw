@@ -48,6 +48,8 @@ detection and logs.
 Put the package or payload archive on an HTTPS location the devices can reach,
 for example an Azure Blob Storage container or your artifact server. The
 wrapper downloads it with `curl` (or `wget`) and accepts only `https://` URLs.
+The URL must serve the file itself: with `curl` the wrapper does not follow
+redirects, so a GitHub release download link fails.
 If the download needs a proxy, set `DC_HTTPS_PROXY` in the next step; only
 the download uses it.
 
@@ -96,10 +98,8 @@ guardrail:
   enabled: true
   mode: observe
   connectors:
-    claudecode:
-      enabled: true
-    codex:
-      enabled: true
+    claudecode: {}
+    codex: {}
 DEFENSECLAW_CONFIG
 }
 ```
@@ -182,10 +182,12 @@ applies it.
 First remove the devices from the install script's assignment. Then assign a
 root platform script with `packaging/mdm/linux/uninstall.sh`. It stops and
 removes the services, removes DefenseClaw's hooks and machine-policy entries
-(administrator entries stay), and removes the deb or rpm. Set `DC_PURGE=1` in
-its settings block to also remove `/etc/defenseclaw` (config, policies, key),
-the state and the logs. On a host with nothing installed it exits `0`, so
-repeated runs are harmless.
+(administrator entries stay), removes the machine state (config, policies,
+key, state and logs) and the `defenseclaw` service account, and removes the deb
+or rpm. Set `DC_PURGE=1` in its settings block to also remove each enrolled
+user's `~/.defenseclaw` and per-user binaries. On a host with nothing installed
+it exits `0`, so repeated runs are harmless. To keep the machine state for a
+reinstall, see [Uninstall](/docs/enterprise/lifecycle#uninstall).
 
 ## Notes
 

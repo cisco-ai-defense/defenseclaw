@@ -1,5 +1,5 @@
 ---
-title: Deploy on Linux with configuration management
+title: Linux configuration management
 description: Idempotent Ansible, Puppet, Chef, Salt and plain apt or dnf recipes that install, configure, verify, upgrade and remove the standalone DefenseClaw enterprise package on Linux.
 keywords:
   - DefenseClaw Ansible
@@ -672,13 +672,16 @@ and [Status and verify](/docs/enterprise/operations#status-and-verify).
 
 Remove DefenseClaw from the tool's run list first, so the next run does not
 reinstall it. Then remove the package: its pre-remove step runs
-`enterprise linux uninstall`, which stops the services and removes
-DefenseClaw's hooks and machine-policy entries, and keeps the config and
-state. To remove the config, credentials, state and logs as well, run the
-kit's `packaging/mdm/linux/uninstall.sh --purge`, which runs the lifecycle's
-uninstall with `--purge` and then removes the package. On Debian and Ubuntu,
-purging the package (`apt-get purge defenseclaw-enterprise`) also removes
-those folders. Delete `/etc/mdm/defenseclaw` when you no longer need the
+`enterprise linux uninstall`, which stops the services, removes DefenseClaw's
+hooks and machine-policy entries, and removes the machine state (config,
+credentials, state and logs) and the `defenseclaw` service account. Each user
+keeps `~/.defenseclaw` and the per-user binaries. To remove those too, run the
+kit's `packaging/mdm/linux/uninstall.sh --purge` instead, which runs the
+lifecycle's uninstall with `--purge` and then removes the package. On Debian
+and Ubuntu, purging the package (`apt-get purge defenseclaw-enterprise`) also
+deletes what a failed uninstall left of those folders. To keep the machine
+state for a reinstall, see [Uninstall](/docs/enterprise/lifecycle#uninstall).
+Delete `/etc/mdm/defenseclaw` when you no longer need the
 staged config and key.
 
 ## Exit codes
