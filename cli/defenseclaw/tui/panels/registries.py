@@ -491,6 +491,11 @@ def remove_source_intent(source_id: str) -> RegistryCommandIntent:
         label=f"registry remove {source_id}",
         args=("registry", "remove", source_id, "--non-interactive", "--json"),
         hint=f"Removing {source_id}",
+        # Say what goes with the source, as Sync and Approve do (GAP-2229).
+        consequence=(
+            f"Removes source {source_id} from config, drops the policy rules it promoted "
+            "and deletes its cached entries. Add and sync it again to bring them back."
+        ),
     )
 
 
@@ -642,8 +647,8 @@ def _int(value: object) -> int:
 
 def entry_detail_info(entry: RegistryEntryRow) -> RegistryDetailInfo:
     fields: list[tuple[str, str]] = [
+        # The title already names the entry (GAP-2229).
         ("Source ID", entry.source_id),
-        ("Name", entry.name),
         ("Type", entry.type),
         ("Status", entry_status_label(entry.status)),
         ("Severity", entry.severity or "-"),
@@ -660,8 +665,9 @@ def entry_detail_info(entry: RegistryEntryRow) -> RegistryDetailInfo:
         fields.append(("URL", entry.url))
     if entry.source_url:
         fields.append(("Source URL", entry.source_url))
-    if entry.location:
+    if entry.location and entry.location != entry.url:
         fields.append(("Location", entry.location))
+    fields.append(("Keys", "a approve | x reject | e require approval | Esc close"))
     return RegistryDetailInfo(f"{entry.type.upper()}: {entry.name}", tuple(fields))
 
 

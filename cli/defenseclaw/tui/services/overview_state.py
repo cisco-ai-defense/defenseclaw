@@ -1488,7 +1488,7 @@ class OverviewPanelModel:
         """Summarize compiler-owned canonical v8 destinations."""
 
         if self.observability_status is None:
-            return "canonical destination plan loading"
+            return "loading telemetry destinations\u2026"
         rows = self._v8_observability_destination_rows()
         labels = [f"{row.name} ({row.state})" for row in rows if row.policy_state == "enabled"]
         count = len(labels)
