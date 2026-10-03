@@ -1794,6 +1794,8 @@ def require_cmd(
             f"registry policy update failed for {targets}; {rollback}: {exc.cause}"
         ) from exc
 
+    # GAP-2377: product noun for the asset type ("a mcp" read badly).
+    noun, article = ("MCP server", "an") if asset == "mcp" else (asset, "a")
     scope_label = (
         f"asset_policy.connectors.{result.storage_key}.{asset}"
         if result.storage_key is not None
@@ -1872,12 +1874,12 @@ def require_cmd(
     if not policy_on:
         ux.warn(
             "Asset policy is off (asset_policy.enabled=false): nothing is blocked "
-            f"yet, and a {asset} that is not in the registry is still added. "
+            f"yet, and {article} {noun} that is not in the registry is still added. "
             "Re-run with --enforce to turn it on (asset_policy.enabled=true, mode=action).",
         )
     elif policy_mode != "action":
         ux.warn(
-            f"Asset policy mode is {policy_mode!r}: a {asset} that is not in the "
+            f"Asset policy mode is {policy_mode!r}: {article} {noun} that is not in the "
             "registry is logged, not blocked. Re-run with --enforce to set mode=action.",
         )
 
@@ -1892,7 +1894,7 @@ def require_cmd(
             when = "will be" if enforcing else "would be"
             ux.warn(
                 f"asset_policy.{asset}.registry is EMPTY and "
-                f"registry_empty_action='deny' — every {asset} {when} "
+                f"registry_empty_action='deny' — every {noun} {when} "
                 "blocked at admission until you `registry sync` (or add "
                 "manual rules)."
                 + ("" if enforcing else " Nothing is blocked while asset policy enforcement is off."),
