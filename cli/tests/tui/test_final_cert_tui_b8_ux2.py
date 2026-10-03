@@ -21,7 +21,6 @@ import pytest
 from defenseclaw.tui.app import PANELS, _validation_label
 from defenseclaw.tui.command_line import (
     DOCTOR_DETAILS_HINT,
-    READINESS_HINT,
     ParsedCommand,
     command_result_summary,
     suggested_next_action,
@@ -120,7 +119,7 @@ def test_upgrade_and_doctor_results_name_the_outcome() -> None:
         "Health: 129 passed, 1 warning, 29 skipped · check: Connector OTLP: codex"
     )
     assert suggested_next_action("Doctor", 0, lines=doctor) == DOCTOR_DETAILS_HINT
-    assert suggested_next_action("Doctor", 0, lines=doctor[:1]) == READINESS_HINT
+    assert suggested_next_action("Doctor", 0, lines=doctor[:1]) == ""
     summary = build_command_preview(_parsed(("upgrade",))).summary
     assert "Checks the latest release first" in summary and "nothing changes" in summary
 

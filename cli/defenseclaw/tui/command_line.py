@@ -379,7 +379,11 @@ def suggested_next_action(
         if "doctor" in cmd:
             return f"{readiness}, or rerun doctor"
         return "review output and rerun when fixed"
-    if "keys" in cmd or "doctor" in cmd or "setup" in cmd:
+    if "doctor" in cmd:
+        # Every check passed: readiness would only repeat those PASS rows,
+        # so a clean doctor run gets no next step (GAP-2587).
+        return ""
+    if "keys" in cmd or "setup" in cmd:
         return readiness
     return ""
 
