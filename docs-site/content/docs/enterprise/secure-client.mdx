@@ -44,7 +44,7 @@ standard user can and cannot do is the same; see
 
 What is specific to the Secure Client profile:
 
-| | Secure Client profile |
+| Setting | Secure Client profile |
 | --- | --- |
 | Platforms | Windows (x64) and macOS (Apple silicon) |
 | Who decides on each tool call | Cisco AI Defense, authenticated with the Secure Client machine identity (CMID). The local detectors are off |
@@ -80,6 +80,31 @@ its own roots and a PowerShell 7 lifecycle; see
 
 The AI agent runs as the interactive standard user. It invokes the hooks but
 cannot stop, reconfigure or replace any of these services.
+
+<Flow
+  direction="TB"
+  caption="Windows, Secure Client profile. The hook asks the gateway on 127.0.0.1:18970 after it has checked that the listener is the DefenseClawGateway service. The gateway runs as a virtual account with no access to the machine identity: it asks the LocalSystem CMID broker for a token over a gateway-only named pipe, then sends the call to Cisco AI Defense, which decides. The sensor helper answers fixed AI Discovery requests over a local socket. The guardian and enumerator, which keep each user's hooks in place, are shown in the Windows standalone deployment."
+>
+  <Zone id="sc4" label="Z4 · User session (the user)" tone="untrusted">
+    <Node id="agent" kind="agent">{`AI agent\nruns as the user`}</Node>
+    <Node id="hook" kind="connector">{`defenseclaw-hook.exe\nchecks the listener`}</Node>
+  </Zone>
+  <Zone id="sc2" label="Z2 · Gateway (virtual account)" tone="restricted">
+    <Node id="gw" kind="gateway">{`Gateway\nallows or blocks`}</Node>
+  </Zone>
+  <Zone id="sc1" label="Z1 · Services (LocalSystem)" tone="privileged">
+    <Node id="broker" kind="generic">{`CMID broker\nholds machine identity`}</Node>
+    <Node id="sensor" kind="generic">{`Sensor helper\nanswers AI Discovery`}</Node>
+  </Zone>
+  <Zone id="sc5" label="Z5 · Cloud" tone="external">
+    <Node id="aid" kind="policy">{`Cisco AI Defense\ndecides each call`}</Node>
+  </Zone>
+  <Edge from="agent" to="hook" label="runs per tool call" />
+  <Edge from="hook" to="gw" label="asks over loopback TCP" />
+  <Edge from="gw" to="broker" label="token, named pipe" />
+  <Edge from="gw" to="sensor" label="asks, local socket" />
+  <Edge from="gw" to="aid" label="inspects, HTTPS" />
+</Flow>
 
 | Item | Path |
 | --- | --- |
@@ -129,10 +154,9 @@ write, verifies each embedded digest, and runs the enterprise lifecycle.
 
 ```powershell
 $Stage = 'C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw-Staging'
-.\DefenseClawSetup-Enterprise-x64.exe /install `
+.\DefenseClawSetup-Enterprise-x64.exe /install JSON=1 `
   CONFIG="$Stage\config.yaml" `
-  MANIFEST="$Stage\targets.yaml" `
-  JSON=1
+  MANIFEST="$Stage\targets.yaml"
 ```
 
 | Action | What it does |

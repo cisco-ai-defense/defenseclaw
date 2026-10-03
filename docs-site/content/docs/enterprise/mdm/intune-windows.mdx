@@ -124,7 +124,7 @@ Upload the `.intunewin` in **Apps** > **All Apps** > **Create** >
 | Program | Device restart behavior | **Determine behavior based on return codes** |
 | Program | Return codes | Keep the defaults: `0` Success, `1707` Success, `3010` Soft reboot, `1641` Hard reboot, `1618` Retry. The lifecycle's `1603` and `1639` then report as Failed. |
 | Requirements | Operating system architecture | **x64** only |
-| Requirements | Minimum operating system | The oldest Windows release your fleet runs. DefenseClaw does not check the Windows version; it needs x64 and PowerShell 7. |
+| Requirements | Minimum operating system | The oldest Windows release your fleet runs. The packaging script prints Windows 10 22H2 as a starting point. DefenseClaw itself does not check the Windows version; it needs x64 and PowerShell 7. |
 | Detection rules | Rule | **Registry**. Key path `HKEY_LOCAL_MACHINE\SOFTWARE\Cisco\DefenseClaw\Enterprise`, value name `ProductVersion`, detection method **Version comparison**, operator **Greater than or equal to**, value `<version>`, *Associated with a 32-bit app on 64-bit clients*: **No** |
 | Dependencies | App | The PowerShell 7 app, **Automatically install**: **Yes** |
 | Supersedence | Previous DefenseClaw app | **Uninstall previous version**: **No** |

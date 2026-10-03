@@ -1,5 +1,5 @@
 ---
-title: Deploy with Jamf Pro
+title: Jamf Pro
 description: Install, configure, detect, repair, upgrade and remove the standalone DefenseClaw enterprise profile on Macs with Jamf Pro packages, policy scripts and an extension attribute.
 keywords:
   - DefenseClaw Jamf Pro
@@ -169,8 +169,9 @@ script creates the folder and the file with the right owner and mode.
 ### DefenseClaw uninstall
 
 Upload `uninstall.sh` and add the same `set --` line to its settings block.
-Set `DC_PURGE=1` only if you also want to remove the config, credentials,
-state and logs.
+The uninstall always removes the config, credentials, state and logs. Set
+`DC_PURGE=1` to also remove each enrolled user's `~/.defenseclaw` and per-user
+binaries.
 
 ## Install
 
@@ -303,9 +304,9 @@ Jamf Pro's own package uninstall works only for packages indexed with Jamf
 Admin, which Jamf Pro 11.7 removed
 ([Policy Payload Reference](https://learn.jamf.com/r/en-US/jamf-pro-documentation-current/Policy_Payload_Reference)).
 Remove DefenseClaw with a policy that runs `DefenseClaw uninstall`. It runs
-`enterprise macos uninstall`, which stops the services and removes
-DefenseClaw's hooks and machine-policy entries, and the lifecycle forgets the
-package receipt. On a Mac without the deployment it prints a no-op result and
+`enterprise macos uninstall`, which stops the services, removes DefenseClaw's
+hooks and machine-policy entries, the binaries and the machine state, and
+forgets the package receipt. On a Mac without the deployment it prints a no-op result and
 exits `0`. Remove the Mac from the install and ensure policies first, and
 remove `/Library/Management/DefenseClaw` if you no longer need the staged
 config.
