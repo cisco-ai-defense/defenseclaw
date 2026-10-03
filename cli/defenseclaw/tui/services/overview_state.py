@@ -777,9 +777,20 @@ class OverviewPanelModel:
                     f"{self.silent_bypass} silent LLM bypass event(s) in the last 5m - see Alerts -> egress",
                 )
             )
+        failing_exports = () if self.gateway_down() else self.failing_export_destinations()
+        if failing_exports:
+            names = ", ".join(failing_exports[:2]) + keys_overflow_suffix(len(failing_exports), 2)
+            notices.append(
+                OverviewNotice(
+                    "warn",
+                    f"Telemetry export failing: {names} - check it with: "
+                    f"defenseclaw setup observability test {failing_exports[0]}",
+                )
+            )
 
         if self.doctor is not None and not self.doctor.is_empty():
-            _, contradicted = partition_doctor_checks(self.doctor.checks, self.health)
+            contradicted = tuple(check for check in self.doctor.checks if self.doctor_check_stale_reason(check))
+            removed = tuple(check for check in contradicted if self._doctor_destination_removed(check))
             stale_failures = sum(1 for check in contradicted if check.status == "fail")
             effective_failed = max(self.doctor.failed - stale_failures, 0)
             if effective_failed > 0:
@@ -787,6 +798,16 @@ class OverviewPanelModel:
                     OverviewNotice(
                         "error",
                         f"Doctor found {effective_failed} failure(s) - see the DOCTOR panel or run: defenseclaw doctor",
+                    )
+                )
+            elif contradicted and len(removed) == len(contradicted):
+                # A failing check for a destination that was removed since
+                # the run is not a current failure (GAP-2431).
+                notices.append(
+                    OverviewNotice(
+                        "info",
+                        f"The last doctor run ({format_age(self.doctor.age(now=now))}) checked "
+                        f"{len(removed)} telemetry destination(s) that no longer exist - press [d] to refresh",
                     )
                 )
             elif contradicted:
@@ -815,7 +836,7 @@ class OverviewPanelModel:
                         "see the DOCTOR panel or rerun the selected repair",
                     )
                 )
-            elif self.doctor.outcome_state(now=now) == "failed" and effective_failed == 0:
+            elif self.doctor.outcome_state(now=now) == "failed" and effective_failed == 0 and not removed:
                 notices.append(
                     OverviewNotice(
                         "error",
@@ -937,19 +958,36 @@ class OverviewPanelModel:
             )
         return tuple(cards)
 
+    def _doctor_destination_removed(self, check: DoctorCheck) -> bool:
+        """A failing "Destination: <name>" check for a destination since removed (GAP-2431)."""
+
+        status = self.observability_status
+        label = check.label.strip()
+        if status is None or check.status not in {"fail", "warn"} or not label.lower().startswith("destination:"):
+            return False
+        name = label.split(":", 1)[1].strip()
+        return bool(name) and name not in {destination.name for destination in status.destinations}
+
+    def doctor_check_stale_reason(self, check: DoctorCheck) -> str:
+        """Why a cached doctor check no longer describes the live state, or ""."""
+
+        if live_health_contradicts(check, self.health):
+            return "live state OK"
+        if self._doctor_destination_removed(check):
+            return "destination removed"
+        return ""
+
     def doctor_box(self, *, now: datetime | None = None) -> DoctorBoxState:
         now = now or datetime.now(timezone.utc)
         if self.doctor is None or self.doctor.is_empty():
             return DoctorBoxState(empty=True)
 
-        stale_checks = tuple(
-            check for check in self.doctor.top_failures(3) if live_health_contradicts(check, self.health)
-        )
+        stale_checks = tuple(check for check in self.doctor.top_failures(3) if self.doctor_check_stale_reason(check))
         stale_failures = sum(
-            1 for check in self.doctor.checks if check.status == "fail" and live_health_contradicts(check, self.health)
+            1 for check in self.doctor.checks if check.status == "fail" and self.doctor_check_stale_reason(check)
         )
         stale_warnings = sum(
-            1 for check in self.doctor.checks if check.status == "warn" and live_health_contradicts(check, self.health)
+            1 for check in self.doctor.checks if check.status == "warn" and self.doctor_check_stale_reason(check)
         )
         effective_failed = max(self.doctor.failed - stale_failures, 0)
         effective_warned = max(self.doctor.warned - stale_warnings, 0)
@@ -971,7 +1009,12 @@ class OverviewPanelModel:
         for check in self.doctor.top_failures(3):
             stale = check in stale_checks
             badge = "STALE" if stale else check.status.upper()
-            detail = f"{check.detail} (live state OK)" if stale and check.detail else check.detail
+            reason = self.doctor_check_stale_reason(check)
+            detail = check.detail
+            if reason == "destination removed":
+                detail = f"{check.detail} ({reason})".strip() if check.detail else f"({reason})"
+            elif stale and check.detail:
+                detail = f"{check.detail} (live state OK)"
             rendered.append(RenderedDoctorCheck(badge=badge, label=check.label, detail=detail, stale=stale))
 
         outcome = self.doctor.outcome_state(now=now)
@@ -1106,7 +1149,12 @@ class OverviewPanelModel:
             case "sinks":
                 return self.health.sinks.state
             case "telemetry":
-                return self.health.telemetry.state
+                state = self.health.telemetry.state
+                if state.strip().lower() in {"running", "healthy"} and self.failing_export_destinations():
+                    # Setup said "needs attention" while this row stayed
+                    # green for a failing export (GAP-2432).
+                    return "degraded"
+                return state
             case "ai_discovery":
                 return self.health.ai_discovery.state
             case "api":
@@ -1518,6 +1566,15 @@ class OverviewPanelModel:
         if failure := self.audit_write_failure():
             return f"{failure}; {summary}"
         return summary
+
+    def failing_export_destinations(self) -> tuple[str, ...]:
+        """Names of enabled export destinations the gateway reports as failing."""
+
+        return tuple(
+            row.name
+            for row in self._v8_observability_destination_rows()
+            if row.policy_state == "enabled" and row.kind != "sqlite" and row.state in {"failing", "degraded"}
+        )
 
     def audit_write_failure(self) -> str:
         """Plain words when the live gateway reports failing audit writes, else ""."""
