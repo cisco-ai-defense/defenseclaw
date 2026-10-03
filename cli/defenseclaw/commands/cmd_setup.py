@@ -187,6 +187,9 @@ _GATEWAY_API_READY_TIMEOUT_SECONDS = 45.0
 # `defenseclaw-gateway start|restart` prints this when its readiness deadline
 # passed but the new gateway is still alive and was kept (GAP-2022).
 _GATEWAY_LEFT_STARTING_MARKER = "is still starting and was left running"
+# The restart error for a gateway that was still starting and was kept
+# (GAP-2080); setup's rollback reports that cause, not "could not apply" (GAP-2105).
+_GATEWAY_KEPT_STARTING_TEXT = "the gateway is still starting and was kept running"
 _GATEWAY_PID_GENERATION_MAX_BYTES = 16 * 1024
 _DEFENSE_GATEWAY_LIFECYCLE_TIMEOUT_SECONDS = 60
 # `defenseclaw-gateway start|restart` stops the old gateway (up to 10 s), waits
@@ -8985,6 +8988,19 @@ def _rollback_failed_connector_application(
         )
     elif (
         type(cause) is _GatewayRestartFailed
+        and _GATEWAY_KEPT_STARTING_TEXT in str(cause)
+        and not rollback_errors
+        and not gateway_still_down
+        and (not exact_runtime or snapshot.applied_runtime.lifecycle == "running")
+    ):
+        # GAP-2105: nothing failed but readiness timing; say that, not "fix that error".
+        failure = click.ClickException(
+            "the gateway did not become ready in time (it was still starting), so setup put the "
+            "previous connector configuration back and the gateway runs with it. Once "
+            "`defenseclaw-gateway status` shows it healthy, run the same setup command again."
+        )
+    elif (
+        type(cause) is _GatewayRestartFailed
         and not rollback_errors
         and not gateway_still_down
         and (not exact_runtime or snapshot.applied_runtime.lifecycle == "running")
@@ -10697,7 +10713,6 @@ def _prompt_batch_judge_connectors(connectors: list[str], gc) -> set[str]:
     ux.section("Optional LLM judge")
     ux.subhead("Rule/regex scanning is enabled by default for every active connector selected above.")
     ux.subhead("Only action-mode connectors can add LLM judge review in this setup flow.")
-    ux.subhead("These LLM settings are shared by all connectors with judge enabled.")
     selected = _prompt_checkbox_selection(
         options,
         default_selected=_default_batch_judge_labels(connectors, gc, display_by_connector),
@@ -10720,7 +10735,6 @@ def _prompt_guardrail_judge_enablement(
         options, display_by_connector, connector_by_display = _connector_display_options(judge_targets)
         ux.subhead("Rule/regex scanning is already enabled for every active connector.")
         ux.subhead("Only action-mode connectors can add LLM judge review in this setup flow.")
-        ux.subhead("These LLM settings are shared by all connectors with judge enabled.")
         selected = _prompt_checkbox_selection(
             options,
             default_selected=_default_batch_judge_labels(judge_targets, gc, display_by_connector),
@@ -13706,6 +13720,7 @@ def _restart_services(
     start_if_stopped: bool = True,
     title: str = "Restarting services",
     summary_exclude: frozenset[str] = frozenset(),
+    teardown: bool = False,
 ) -> None:
     """Restart defenseclaw-gateway and, when OpenClaw is the selected
     connector, restart the OpenClaw gateway too so it picks up the
@@ -13730,7 +13745,9 @@ def _restart_services(
 
     ``title`` labels the step (a rollback restart says so, GAP-1808).
     ``summary_exclude`` names connectors left out of the closing roster line
-    because they stay disabled (GAP-1809); the restart itself is unchanged."""
+    because they stay disabled (GAP-1809); the restart itself is unchanged.
+    ``teardown`` marks a ``guardrail disable`` restart: the closing line says
+    the hooks were removed instead of announcing enforcement (GAP-1985)."""
     ux.section(title)
 
     # Names of services whose restart failed; non-empty ⇒ fail the command.
@@ -13850,7 +13867,13 @@ def _restart_services(
         names = ", ".join(sorted(c for c in hook_multi if c not in summary_exclude))
         shown = [c for c in hook_multi if c not in summary_exclude]
         roster = f"{_count_label(len(shown))} ({names})"
-        if "omnigent" in hook_multi:
+        if teardown:
+            ux.subhead(
+                f"{roster}: guardrail hooks removed; DefenseClaw no longer enforces policy for them."
+                if shown
+                else "No hook connectors were left to tear down."
+            )
+        elif "omnigent" in hook_multi:
             registration_state = (
                 "DefenseClaw gateway registration is ready"
                 if connector_registration_verified
@@ -13900,7 +13923,9 @@ def _restart_services(
         # No proxy listener binds for hook-only connectors — the agent
         # talks directly to its native upstream and DefenseClaw
         # observes/enforces via the hook bus on the sidecar API port.
-        if connector == "omnigent":
+        if teardown:
+            ux.subhead(f"{connector} connector: guardrail hooks removed; DefenseClaw no longer enforces policy for it.")
+        elif connector == "omnigent":
             registration_state = (
                 "DefenseClaw gateway registration is ready"
                 if connector_registration_verified
