@@ -199,7 +199,7 @@ func CopilotVSCodeLocalActionTool(toolName string) string {
 // value keeps the native object, so ActionFacts sees the shape it cannot
 // prove instead of a projection that drops part of the call.
 func copilotVSCodeLocalToolArgs(toolName string, input interface{}) json.RawMessage {
-	native, err := json.Marshal(input)
+	native, err := MarshalToolArgs(input)
 	if err != nil {
 		return nil
 	}
@@ -218,7 +218,7 @@ func copilotVSCodeLocalToolArgs(toolName string, input interface{}) json.RawMess
 		if !ok || strings.TrimSpace(url) == "" {
 			return native
 		}
-		out, _ := json.Marshal(map[string]string{"url": url})
+		out, _ := MarshalToolArgs(map[string]string{"url": url})
 		return out
 	}
 	p, ok := copilotVSCodeLocalProjections[toolName]
@@ -237,7 +237,7 @@ func copilotVSCodeLocalToolArgs(toolName string, input interface{}) json.RawMess
 		}
 		out[to] = text
 	}
-	encoded, err := json.Marshal(out)
+	encoded, err := MarshalToolArgs(out)
 	if err != nil {
 		return native
 	}

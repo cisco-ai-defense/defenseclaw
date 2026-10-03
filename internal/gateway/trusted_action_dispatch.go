@@ -2616,6 +2616,15 @@ func trustedLegacyProvenCommandFinding(
 	) && (contract.prerequisite == nil || contract.prerequisite(facts)) {
 		finding.enforcement = findingEnforcementDetectionOnly
 	}
+	if finding.RuleID == "CMD-EVAL" &&
+		finding.enforcement != findingEnforcementDetectionOnly {
+		// eval's operand is only known when it runs, so no parse can prove
+		// the call and the proof boundary left the finding detection-only,
+		// which "defenseclaw alerts" never shows (GAP-2575). An executed
+		// eval with a runtime operand alerts at the connector's threshold
+		// and never confirms or blocks.
+		finding.enforcement = findingEnforcementAlertOnly
+	}
 	if proof, proven := trustedSemanticOwnerFindingProofFromActions(
 		finding.RuleID,
 		facts,
