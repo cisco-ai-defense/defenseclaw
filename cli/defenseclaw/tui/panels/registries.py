@@ -343,9 +343,11 @@ class RegistriesPanelModel:
             return ("ID", "Kind", "Content", "On", "Status", "Entries", "C/W/B/E", "Last Sync")
         return ("Source", "Name", "Type", "Status", "Severity", "A/R", "Location")
 
-    def data_table_rows(self) -> tuple[tuple[str, ...], ...]:
+    def data_table_rows(self, width: int = 0) -> tuple[tuple[str, ...], ...]:
+        """Table rows; ``width`` (cells, 0 = unknown) fits the Sources table."""
+
         if self.current_tab == RegistriesTab.SOURCES:
-            return tuple(
+            rows = tuple(
                 (
                     row.id,
                     row.kind,
@@ -358,6 +360,7 @@ class RegistriesPanelModel:
                 )
                 for row in self.sources
             )
+            return _fit_source_rows(self.data_table_columns(), rows, width)
         return tuple(
             (
                 row.source_id,
@@ -475,6 +478,35 @@ def _short_sync_time(value: str) -> str:
     if len(text) >= 16 and text[10:11] == "T" and text.endswith("Z"):
         return f"{text[:10]} {text[11:16]}Z"
     return text
+
+
+# Shortest ID the Sources table cuts to; the detail (Enter) has the full ID.
+_MIN_ID_CELLS = 8
+
+
+def _fit_source_rows(
+    columns: tuple[str, ...], rows: tuple[tuple[str, ...], ...], width: int
+) -> tuple[tuple[str, ...], ...]:
+    """Sources rows that fit ``width`` cells: a longer ID cut Last Sync to
+    "2026-10-03 07:" at 80 columns (GAP-2365). The time drops its year
+    first ("10-03 07:45Z"), then the ID is cut ("rs3r8-lon…"). The detail
+    view keeps both in full.
+    """
+
+    def need(table: tuple[tuple[str, ...], ...]) -> int:
+        # DataTable pads every cell by one column on each side; the last
+        # column's right pad may be cut.
+        return sum(max(map(len, column)) + 2 for column in zip(columns, *table, strict=True)) - 1
+
+    if width <= 0 or not rows or need(rows) <= width:
+        return rows
+    last = len(columns) - 1
+    rows = tuple((*row[:last], row[last][5:] if row[last][4:5] == "-" else row[last]) for row in rows)
+    over = need(rows) - width
+    if over <= 0:
+        return rows
+    cells = max(_MIN_ID_CELLS, max(len(row[0]) for row in rows) - over)
+    return tuple((row[0] if len(row[0]) <= cells else f"{row[0][: cells - 1]}…", *row[1:]) for row in rows)
 
 
 def sync_source_intent(source_id: str) -> RegistryCommandIntent:

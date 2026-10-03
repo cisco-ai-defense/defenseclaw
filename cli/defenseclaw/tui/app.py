@@ -4993,7 +4993,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             return self.body_text
         if self.active_panel == "registries":
             self._table_columns = self.registries_model.data_table_columns()
-            self._table_rows = self.registries_model.data_table_rows()
+            # The table spans the body (6 columns of borders and padding).
+            width = int(getattr(self.size, "width", 0) or 0)
+            self._table_rows = self.registries_model.data_table_rows(max(0, width - 6))
             tab = self.registries_model.current_tab.name.title()
             empty = self.registries_model.empty_state()
             suffix = f"\n{rich_escape(empty)}" if empty else ""

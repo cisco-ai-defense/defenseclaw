@@ -347,11 +347,15 @@ def _named_fit(
 
     Counts are compact ("8 Logs⁶⁴"). The Alerts count always shows; the
     other counts take the cells the names leave free, most important tab
-    first, including the room kept for a long open name (GAP-2077). A count
-    that doesn't fit waits; it never costs a name. The counts don't depend
-    on the open tab, so switching panels never relabels a third tab. The
-    open tab reads in full, or "V AI Disco…" when the counts took that room:
-    it is the one label that may change, and its panel title names it.
+    first, including the room kept for a long open name (GAP-2077). The
+    counts of tabs less important than Audit (Activity, AI Discovery, ...)
+    take that room only while every tab still opens under its full name: a
+    new Activity count turned the open "R Registries" into "R Registri…"
+    (GAP-2372). A count that doesn't fit waits; it never costs a name. The
+    counts don't depend on the open tab, so switching panels never relabels
+    a third tab. The open tab reads in full, or "V AI Disco…" when the
+    Alerts, Logs or Audit count took that room: it is the one label that may
+    change, and its panel title names it.
     """
 
     keys = {name: key for name, key, _title in panels}
@@ -362,13 +366,16 @@ def _named_fit(
             name: _label(keys[name], texts[name], unread.get(name, 0) if name in shown else 0, True) for name in keys
         }
 
-    # One cell stays for the "…" of a shortened open name (GAP-1541).
-    spare = 1 if any(named[name] != titles[name] for name in keys) else 0
+    # The longest full name of an open tab, and one cell for the "…" of a
+    # shortened one (GAP-1541).
+    reserve = max(len(titles[name]) - len(named[name]) for name in keys)
+    spare = 1 if reserve else 0
     shown: set[str] = set()
     for name in sorted(
         (name for name in keys if unread.get(name, 0)), key=lambda name: (name != "alerts", _rank(name))
     ):
-        if name == "alerts" or strip_width(tuple(render(named, shown | {name}).values())) + spare <= width:
+        room = spare if _rank(name) <= _rank("audit") else reserve
+        if name == "alerts" or strip_width(tuple(render(named, shown | {name}).values())) + room <= width:
             shown.add(name)
     title = titles[active]
     wants = [title] + [f"{title[:n].rstrip()}…" for n in range(len(title) - 1, 1, -1)]
@@ -685,11 +692,23 @@ def _fit_for_active(
     # 8. Counts dropped or shrunk to make room for a name that later went
     #    (step 7 frees cells) come back while they fit, most important tab
     #    first: "0 Setup" showed a bare "8" with 8 cells free (GAP-2342).
+    #    A dropped count takes other tabs' names, least important first,
+    #    when that is the only way it fits (GAP-2077): Skills read
+    #    "1 Overview ... A" where "1 ... A(1)" fits. The open tab keeps its
+    #    name.
     for name in ranked:
         for shrunk in (no_badge, compact):
             if name in shrunk and unread.get(name, 0):
                 shrunk.discard(name)
-                if width_of(chosen) > width:
+                trial = dict(chosen)
+                for other in reversed(ranked) if shrunk is no_badge else ():
+                    if width_of(trial) <= width:
+                        break
+                    if other != active:
+                        trial[other] = ""
+                if width_of(trial) <= width:
+                    chosen = trial
+                else:
                     shrunk.add(name)
     return render(chosen)
 
