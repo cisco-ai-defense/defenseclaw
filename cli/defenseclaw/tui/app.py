@@ -803,6 +803,13 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         color: TOKEN_TEXT_PRIMARY;
     }
 
+    /* The config editor's aside only describes the focused field; a
+       narrower one gives the Value column room for whole paths at 160
+       columns (GAP-2253). Keep in sync with CONFIG_ASIDE_SHARE. */
+    #panel-split.narrow-aside #panel-aside {
+        width: 28%;
+    }
+
     /* With a nav list the table gets a box titled with the active item,
        sized to its rows (it scrolls past the split's height, or past 60%
        when the aside sits below it). */
@@ -11030,6 +11037,12 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if (table.border_title or "") != table_title:
             table.border_title = table_title or None
         aside_widget.set_class(not layout.aside, "hidden")
+        narrow_aside = layout.aside and panel == "setup" and self._setup_view() == "config"
+        if split.has_class("narrow-aside") != narrow_aside:
+            split.set_class(narrow_aside, "narrow-aside")
+            # The config editor fits its Value column to #panel-main's width:
+            # fit it again once the narrower aside is laid out (GAP-2253).
+            self.call_after_refresh(self._render_chrome)
         if layout.aside and aside is not None:
             title, body = split_aside(aside)
             signature = (panel, title, body)
@@ -11058,7 +11071,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         except NoMatches:
             return
         split.set_class(panel == "overview" or self.help_open, "hidden")
-        split.remove_class("with-nav", "aside-below")
+        split.remove_class("with-nav", "aside-below", "narrow-aside")
         nav.add_class("hidden")
         nav.clear_items()
         aside_widget.add_class("hidden")
@@ -12083,11 +12096,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             main = 0
         if main <= 0:
             # Before the first layout: the body (margins and padding), the
-            # nav and, from ASIDE_MIN_WIDTH, the 38% aside.
+            # nav and, from ASIDE_MIN_WIDTH, the config editor's narrower aside.
             split = self._setup_width() - 6
             main = split - NAV_WIDTH - 1
             if self._setup_width() >= ASIDE_MIN_WIDTH:
-                main -= int(split * 0.38) + 1
+                main -= int(split * CONFIG_ASIDE_SHARE) + 1
         # Table border and scrollbar, then each column's text plus its
         # two padding cells.
         # The column titles count too: "Validation" was cut to "Valid".
@@ -16496,6 +16509,11 @@ def _clamp_int(value: int, lower: int, upper: int) -> int:
     if upper < lower:
         return lower
     return max(lower, min(value, upper))
+
+
+# Share of the split the config editor's aside takes (the
+# "#panel-split.narrow-aside #panel-aside" CSS rule; GAP-2253).
+CONFIG_ASIDE_SHARE = 0.28
 
 
 def _config_display_value(field: Any) -> str:
