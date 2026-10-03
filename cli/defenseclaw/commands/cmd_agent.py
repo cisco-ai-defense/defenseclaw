@@ -1330,7 +1330,17 @@ def discovery_disable(app: AppContext, restart: bool, yes: bool) -> None:
         return
 
     ux.section("Disabling AI discovery")
-    if restart:
+    # GAP-2389: never start a gateway the user stopped. The saved change
+    # applies the next time the gateway starts.
+    gateway_stopped = not _gateway_running(app)
+    if gateway_stopped:
+        restart = False
+        ux.subhead(
+            "The gateway is not running, so it will not be started. AI discovery "
+            "stays off when the gateway next starts.",
+            indent="  ",
+        )
+    elif restart:
         ux.subhead(
             "Will restart the gateway so the discovery service stops immediately.",
             indent="  ",
@@ -3314,6 +3324,16 @@ def _resolve_connectors_for_restart(cfg: Any) -> list[str]:
 
     connector = normalize_connector(_resolve_connector_for_restart(cfg))
     return [connector] if connector else []
+
+
+def _gateway_running(app: AppContext) -> bool:
+    """Whether this user's gateway is running (same probe as cmd_setup._is_pid_alive)."""
+    from defenseclaw.process_liveness import pid_file_alive
+
+    try:
+        return pid_file_alive(os.path.join(app.cfg.data_dir, "gateway.pid"))
+    except Exception:  # noqa: BLE001 - an unreadable PID file means "not running".
+        return False
 
 
 def _live_discovery_enabled(
