@@ -90,7 +90,7 @@ func OpenDaemonStore(dbPath string, warn io.Writer) (*Store, error) {
 
 // ReviewBlockAllowListsHint tells the operator where to check and re-create
 // block/allow entries that a corrupt store lost.
-const ReviewBlockAllowListsHint = "check them with defenseclaw mcp list, skill list, plugin list and tool list, and block or allow them again."
+const ReviewBlockAllowListsHint = "check your MCP, skill, plugin and tool block/allow entries with defenseclaw mcp list, skill list, plugin list and tool list, and block or allow them again."
 
 // carryOverNoteSuffix names the small JSON note next to a moved store that
 // records how many block/allow entries reached the new store, so start, status
@@ -175,7 +175,8 @@ type MovedCorruptStore struct {
 func (store MovedCorruptStore) BlockAllowSummary() string {
 	switch {
 	case !store.CarryOverKnown:
-		return "a new store was started; " + ReviewBlockAllowListsHint
+		return "a new store was started; DefenseClaw cannot tell whether the old block/allow entries were carried over (the store was moved by an earlier version that kept no record), so " +
+			ReviewBlockAllowListsHint
 	case store.CarryOverError == "":
 		return "a new store was started and " + blockAllowEntriesCarriedOver(store.CarriedOver) + "."
 	case store.CarriedOver == 0:
