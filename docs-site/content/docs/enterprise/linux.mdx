@@ -217,7 +217,7 @@ The lifecycle re-owns the file to `root:defenseclaw 0640` when it installs.
 ### 3a. Install the package
 
 ```bash
-VERSION=1.4.0  # the release you deploy
+VERSION=1.0.0  # the release you deploy
 ARCH=amd64     # or arm64
 sudo apt install "./defenseclaw-enterprise-${VERSION}-linux-${ARCH}.deb"
 # RHEL and derivatives:
@@ -239,7 +239,7 @@ Use the tarball on hosts without dpkg or rpm. The payload folder and its
 binaries must be owned by root and not writable by group or others:
 
 ```bash
-VERSION=1.4.0  # the release you deploy
+VERSION=1.0.0  # the release you deploy
 ARCH=amd64     # or arm64
 PAYLOAD="/root/defenseclaw-enterprise-${VERSION}"
 sudo install -d -o root -g root -m 0700 "$PAYLOAD"
