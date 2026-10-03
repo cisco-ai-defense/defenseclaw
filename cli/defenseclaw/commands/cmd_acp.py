@@ -699,9 +699,9 @@ def _log_acp_change(app: AppContext, operation: str, details: str) -> None:
     try:
         app.logger.log_config_change(operation, details)
     except CanonicalObservabilityUnavailableError:
-        click.echo("  ⚠ Change saved. The gateway isn't running, so the audit event was not recorded.", err=True)
+        ux.echo("  ⚠ Change saved. The gateway isn't running, so the audit event was not recorded.", err=True)
     except CanonicalObservabilityError as exc:
-        click.echo(f"  ⚠ Change saved, but the gateway did not confirm the audit event ({exc}).", err=True)
+        ux.echo(f"  ⚠ Change saved, but the gateway did not confirm the audit event ({exc}).", err=True)
 
 
 # The gateway reloads config.yaml about half a second after it changes.

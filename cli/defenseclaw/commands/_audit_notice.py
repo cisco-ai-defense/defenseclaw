@@ -25,6 +25,8 @@ from typing import Any
 
 import click
 
+from defenseclaw import ux
+
 _NOTED = False
 
 GATEWAY_START_HINT = "start it with: defenseclaw-gateway start"
@@ -51,7 +53,7 @@ class _SavedChangeAudit:
         except CanonicalObservabilityUnavailableError:
             if not _NOTED:
                 _NOTED = True
-                click.echo(NOT_RECORDED_WARNING, err=True)
+                ux.echo(NOT_RECORDED_WARNING, err=True)
 
     def log_action(self, *args: Any, **kwargs: Any) -> None:
         self._record("log_action", *args, **kwargs)
@@ -82,8 +84,10 @@ def note_asset_policy_observed(
     source = getattr(decision, "observed_source", "")
     where = f" [{connector}]" if connector else ""
     click.secho(
-        f"  ⚠ asset policy (observe){where}: {reason}; allowed now, "
-        "action mode would block it.",
+        ux.console_text(
+            f"  ⚠ asset policy (observe){where}: {reason}; allowed now, "
+            "action mode would block it."
+        ),
         fg="yellow",
     )
     if logger:
