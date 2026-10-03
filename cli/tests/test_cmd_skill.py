@@ -2189,7 +2189,12 @@ class TestSkillInfo(SkillCommandTestBase):
         # that implies the skill exists.
         result = self.invoke(["info", "definitely-not-a-skill"])
         self.assertEqual(result.exit_code, 1, result.output)
-        self.assertIn("not found", result.output)
+        # GAP-2003: same shape as policy show / mcp scan misses, with a next step.
+        self.assertIn(
+            "Error: skill 'definitely-not-a-skill' not found. "
+            "Run `defenseclaw skill list` to see installed skills.",
+            result.output,
+        )
 
     @patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info", return_value=None)
     def test_info_renders_scan_history_phantom(self, _mock):

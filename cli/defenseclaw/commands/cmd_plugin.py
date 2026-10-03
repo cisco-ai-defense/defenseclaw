@@ -4174,7 +4174,11 @@ def info(app: AppContext, name: str, as_json: bool, connector_flag: str) -> None
                 cards.append(fallback)
 
     if not cards:
-        click.echo(f"error: plugin {name!r} not found", err=True)
+        list_cmd = f"defenseclaw plugin list --connector {connector}" if connector_flag else "defenseclaw plugin list"
+        click.echo(
+            f"Error: plugin {name!r} not found. Run `{list_cmd}` to see installed plugins.",
+            err=True,
+        )
         raise SystemExit(1)
 
     if as_json:
