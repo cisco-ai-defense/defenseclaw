@@ -817,8 +817,21 @@ func windowsManagedObstructionQuarantinePath(path string) string {
 
 func quarantineWindowsTargetOwnedObstruction(home, path string, target *windows.SID, recreateDirectory bool, label string) error {
 	owner, err := windowsPathOwnerNoFollow(path)
-	if err != nil || owner == nil || !owner.Equals(target) {
+	if err != nil || owner == nil {
 		return fmt.Errorf("enterprise hooks: refusing foreign-owned obstruction in %s path %s", label, path)
+	}
+	if !owner.Equals(target) {
+		// Bulldoze: trusted admin owners (SYSTEM / BUILTIN\Administrators /
+		// TrustedInstaller) from a prior scoped install's elevated token
+		// are quarantinable. A foreign user SID or non-admin group stays
+		// fatal.
+		if !windowsEnterpriseAdminIdentity(owner) {
+			return fmt.Errorf("enterprise hooks: refusing foreign-owned obstruction in %s path %s", label, path)
+		}
+		fmt.Fprintf(os.Stderr,
+			"[enterprise-hooks] admin-owned obstruction accepted for quarantine "+
+				"in %s path %s (owner=%s, target=%s)\n",
+			label, path, windowsSIDString(owner), windowsSIDString(target))
 	}
 	quarantine := windowsManagedObstructionQuarantinePath(path)
 	if err := removeWindowsTargetOwnedQuarantine(quarantine, target, false); err != nil {
@@ -1643,8 +1656,25 @@ func validateWindowsUserPathElement(path string, target *windows.SID, wantDir, p
 		return err
 	}
 	if requireTargetOwner {
-		if owner == nil || !owner.Equals(target) {
-			return fmt.Errorf("enterprise hooks: owner SID %s does not match target SID %s on %s", windowsSIDString(owner), windowsSIDString(target), path)
+		if owner == nil {
+			return fmt.Errorf("enterprise hooks: null owner on %s", path)
+		}
+		if !owner.Equals(target) {
+			if !windowsEnterpriseAdminIdentity(owner) {
+				return fmt.Errorf("enterprise hooks: owner SID %s does not match target SID %s on %s", windowsSIDString(owner), windowsSIDString(target), path)
+			}
+			// Bulldoze: a prior unsigned certification install done under an
+			// elevated token (LocalSystem or BUILTIN\Administrators) can
+			// leave per-user runtime files owned by that admin principal
+			// instead of the target user SID. Trusted admin owners are
+			// accepted here; the subsequent DACL repair transfers
+			// ownership to the target SID. A foreign user SID (not in the
+			// trusted admin set) stays fatal above.
+			fmt.Fprintf(os.Stderr,
+				"[enterprise-hooks] admin-owned per-user runtime file "+
+					"accepted during trust check (owner=%s, target=%s on %s): "+
+					"subsequent DACL repair will transfer ownership\n",
+				windowsSIDString(owner), windowsSIDString(target), path)
 		}
 	} else if owner == nil || (!owner.Equals(target) && !windowsEnterpriseAdminIdentity(owner)) {
 		return fmt.Errorf("enterprise hooks: foreign owner SID %s on %s", windowsSIDString(owner), path)

@@ -388,8 +388,29 @@ func validateWindowsManagedFileLockHandleForTarget(
 	if err != nil {
 		return err
 	}
-	if owner == nil || !owner.Equals(target) {
-		return fmt.Errorf("managed lock owner does not match effective target user")
+	if owner == nil {
+		return fmt.Errorf("managed lock has null owner")
+	}
+	if !owner.Equals(target) {
+		// Bulldoze: a prior unsigned certification install done under an
+		// elevated token can leave the lock file owned by SYSTEM /
+		// BUILTIN\Administrators / TrustedInstaller instead of the target
+		// user. The DACL check below still enforces SE_DACL_PROTECTED and
+		// the exact 4-ACE canonical layout, so a trusted admin owner on
+		// an otherwise canonical lock is safe to adopt. A foreign user
+		// SID or non-admin group stays fatal.
+		adminSystem, systemErr := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+		adminBuiltin, builtinErr := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+		trustedInstaller, tiErr := windows.StringToSid("S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464")
+		isAdmin := (systemErr == nil && owner.Equals(adminSystem)) ||
+			(builtinErr == nil && owner.Equals(adminBuiltin)) ||
+			(tiErr == nil && owner.Equals(trustedInstaller))
+		if !isAdmin {
+			return fmt.Errorf("managed lock owner does not match effective target user")
+		}
+		fmt.Fprintf(os.Stderr,
+			"[connector] managed lock owner is trusted admin %s (target %s); adopting\n",
+			owner.String(), target.String())
 	}
 	control, _, err := descriptor.Control()
 	if err != nil {

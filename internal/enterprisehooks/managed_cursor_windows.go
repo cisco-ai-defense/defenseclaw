@@ -1739,7 +1739,47 @@ func CaptureWindowsCursorManagedPolicySnapshot(
 			return nil
 		}
 		if err := windowsCursorOptionsMatch(artifacts.parsed, opts); err != nil {
-			return err
+			// Bulldoze: the Cursor managed artifacts authenticated as OURS
+			// (validateWindowsCursorManagedArtifacts passed above) but their
+			// scoped identity does not match the current install (same
+			// pattern as the IPC orphan-SID and Claude managed-policy
+			// reclaims: prior unsigned certification install with a
+			// different scoped GatewayServiceName left state at the fixed
+			// Cursor managed root, which is independent of --install-root/
+			// --state-root). Call the authenticated deactivate helper on
+			// the on-disk state so hooks.json has only the stale DefenseClaw
+			// entries surgically removed (per the receipt's
+			// ConfigPreexisting / ConfigOriginal), the state/receipt/adapter
+			// are retired, and the capture returns an empty snapshot.
+			// Install then writes a fresh canonical pair; rollback has no
+			// stale snapshot to restore.
+			//
+			// The strict identity check remains for PrepareWindowsCursor...
+			// Teardown / RestoreWindowsCursor... callers where recovery
+			// MUST authenticate the exact prior deployment.
+			fmt.Fprintf(os.Stderr,
+				"[enterprise-hooks] reclaiming identity-drifted Cursor managed "+
+					"artifacts at %s (prior scoped install's identity does not "+
+					"match current scope): %v\n",
+				artifacts.root, err)
+			if deactivateErr := deactivateWindowsCursorManagedPolicyUnlocked(artifacts); deactivateErr != nil {
+				return fmt.Errorf(
+					"enterprise hooks: reclaim identity-drifted Cursor managed policy: %w",
+					deactivateErr,
+				)
+			}
+			// Resnapshot after deactivate so the empty snapshot matches
+			// reality on disk (nothing left to restore on rollback).
+			postArtifacts, postErr := snapshotWindowsCursorManagedArtifacts()
+			if postErr != nil {
+				return postErr
+			}
+			postValidated, postValidateErr := validateWindowsCursorManagedArtifacts(postArtifacts)
+			if postValidateErr != nil {
+				return postValidateErr
+			}
+			snapshot = windowsCursorManagedTeardownSnapshot(postValidated)
+			return nil
 		}
 		snapshot = windowsCursorManagedTeardownSnapshot(artifacts)
 		return nil

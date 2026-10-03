@@ -37,12 +37,40 @@ BOOTSTRAP_ENVIRONMENT_SMOKE = (
     / "enterprise-bootstrap-environment-smoke.ps1"
 )
 UNINSTALL_TRANSACTION_SMOKE = ROOT / "packaging" / "windows" / "tests" / "enterprise-uninstall-transaction-smoke.ps1"
+UNINSTALL_ACL_RECOVERY_SMOKE = (
+    ROOT
+    / "packaging"
+    / "windows"
+    / "tests"
+    / "enterprise-uninstall-acl-recovery-smoke.ps1"
+)
+UNINSTALL_NATIVE_CONTRACT_SMOKE = (
+    ROOT
+    / "packaging"
+    / "windows"
+    / "tests"
+    / "enterprise-uninstall-native-contract-smoke.ps1"
+)
+UNTRUSTED_METADATA_FALLBACK_SMOKE = (
+    ROOT
+    / "packaging"
+    / "windows"
+    / "tests"
+    / "enterprise-untrusted-metadata-fallback-smoke.ps1"
+)
 SELF_UNINSTALL_HELPER_CAPTURE_SMOKE = (
     ROOT
     / "packaging"
     / "windows"
     / "tests"
     / "enterprise-detached-helper-smoke.ps1"
+)
+INSTALL_ACL_SELF_HEAL_SMOKE = (
+    ROOT
+    / "packaging"
+    / "windows"
+    / "tests"
+    / "enterprise-install-acl-self-heal-smoke.ps1"
 )
 DEPLOYMENT_DOC = ROOT / "docs-site" / "content" / "docs" / "setup" / "enterprise-deployment.mdx"
 MATRIX_TEST = ROOT / "internal" / "gateway" / "enterprise_mode_matrix_test.go"
@@ -1444,6 +1472,36 @@ def test_latest_windows_retest_harness_repairs_are_scoped_and_fail_closed() -> N
             ),
         ),
         (
+            UNINSTALL_ACL_RECOVERY_SMOKE,
+            (
+                "canonical_noop",
+                "inherited_acl_repaired",
+                "metadata_bytes_preserved",
+                "hashed_attestation_repaired",
+                "changed_attestation_rejected",
+                "trusted_admin_deny_repaired",
+                "purge_skipped_denied_state_child",
+                "non_purge_rejected_denied_state_child",
+                "foreign_writer_rejected",
+                "explorer_full_control_rejected",
+            ),
+        ),
+        (
+            UNINSTALL_NATIVE_CONTRACT_SMOKE,
+            (
+                "seal_and_delete_bound",
+                "internal_helper_rejected",
+                "absent_delete_idempotent",
+            ),
+        ),
+        (
+            UNTRUSTED_METADATA_FALLBACK_SMOKE,
+            (
+                "partial_dispatch",
+                "protected_evidence_blocks_fallback",
+            ),
+        ),
+        (
             SELF_UNINSTALL_HELPER_CAPTURE_SMOKE,
             (
                 "engine",
@@ -1463,6 +1521,9 @@ def test_latest_windows_retest_harness_repairs_are_scoped_and_fail_closed() -> N
         "bootstrap",
         "bootstrap-environment",
         "uninstall-transaction",
+        "uninstall-acl-recovery",
+        "uninstall-native-contract",
+        "untrusted-metadata-fallback",
         "helper-capture",
     ),
 )
@@ -1682,6 +1743,55 @@ def test_windows_packaging_smokes_run_on_every_available_engine(
         assert report["protected_environment_pinned"] is True
         assert report["module_analysis_cache_disabled"] is True
         assert report["environment_root_retired"] is True
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows PowerShell")
+@pytest.mark.parametrize(
+    "engine",
+    windows_powershell_engines() or (None,),
+    ids=lambda engine: Path(engine).stem if engine else "missing",
+)
+def test_enterprise_install_acl_self_heal_smoke_runs_on_every_available_engine(
+    engine: str | None,
+) -> None:
+    """Regression gate for the orphan NT SERVICE per-service SID install
+    blocker. The smoke stages the exact SID shape that reproduced the QA
+    failure, drives Set-DefenseClawPathAcl -Kind ManagedIPCDirectory, and
+    asserts (a) the orphan ACE is stripped, (b) SE_DACL_PROTECTED is set.
+
+    Its output is a single PASS line, not JSON, so it is not part of the
+    JSON smoke matrix. It still must run on every Windows PowerShell
+    engine the CI exposes (PowerShell 5.1 and PowerShell 7)."""
+    assert engine, "Windows CI must provide Windows PowerShell 5.1 or PowerShell 7"
+    completed = subprocess.run(
+        [
+            engine,
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(INSTALL_ACL_SELF_HEAL_SMOKE),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8-sig",
+        errors="replace",
+        timeout=120,
+        check=False,
+    )
+    assert completed.returncode == 0, (
+        f"install ACL self-heal smoke failed (exit {completed.returncode})\n"
+        f"stdout:\n{completed.stdout}\n"
+        f"stderr:\n{completed.stderr}"
+    )
+    assert "enterprise-install-acl-self-heal-smoke: PASS" in completed.stdout, (
+        "expected PASS line not in stdout\n"
+        f"stdout:\n{completed.stdout}\n"
+        f"stderr:\n{completed.stderr}"
+    )
 
 
 def test_bootstrap_rejects_raw_per_logon_dos_device_aliases() -> None:
