@@ -17,6 +17,7 @@
 package gateway
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -55,5 +56,25 @@ func TestClaudeCodeCodeGuardNoticeNamesTheRule(t *testing.T) {
 		if strings.Contains(agentDisplayReason(bad, notificationSinkPolicy(nil)), "something else") {
 			t.Errorf("untrusted reason %q passed through unredacted", bad)
 		}
+	}
+}
+
+// GAP-2029: a CodeGuard hit on a Claude Code Write left the reason an empty
+// "matched: ", so the notice showed a redaction token instead of the rule.
+func TestClaudeCodeWriteCodeGuardNoticeNamesTheRule(t *testing.T) {
+	api := testAPIServerWithConfig(t, "action")
+	verdict := inspectCodeGuardProofTestRequest(t, api,
+		json.RawMessage(`{"file_path":"/repo/util.py","content":"PARENT = os.path.join(BASE, \"..\", \"data\")"}`))
+	if want := "matched: CG-PATH-001:Potential path traversal"; verdict.Reason != want {
+		t.Fatalf("reason = %q, want %q", verdict.Reason, want)
+	}
+	resp := claudeCodeResponseFor(claudeCodeHookRequest{HookEventName: "PreToolUse", ToolName: "Write"},
+		"alert", "alert", verdict.Severity, verdict.Reason, verdict.Findings, "action", false, notificationSinkPolicy(nil))
+	want := "DefenseClaw observed a MEDIUM Claude Code hook finding: rule CG-PATH-001: Potential path traversal"
+	if resp.AdditionalContext != want {
+		t.Fatalf("notice = %q, want %q", resp.AdditionalContext, want)
+	}
+	if trustedBuiltInMatchReason("matched: CG-PATH-001:something else") {
+		t.Fatal("a CodeGuard label with another title was trusted")
 	}
 }

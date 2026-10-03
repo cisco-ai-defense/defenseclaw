@@ -774,6 +774,14 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 			}
 			reasons = append(reasons, f.RuleID+":"+f.Title)
 		}
+		// A CodeGuard-only hit left the reason an empty "matched: ", which
+		// the agent notice showed as a redaction token (GAP-2029).
+		for _, cf := range cgFindings {
+			if len(reasons) >= 5 {
+				break
+			}
+			reasons = append(reasons, cf.RuleID+":"+cf.Title)
+		}
 
 		findingStrs := FindingStrings(ruleFindings)
 		for _, cf := range cgFindings {
