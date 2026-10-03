@@ -529,6 +529,7 @@ class TestLiveClawInventory(unittest.TestCase):
 
         from defenseclaw.inventory.claw_inventory import (
             _UNVERIFIED_CONNECTOR_NOTES,
+            InventoryCapabilityStatus,
             _not_collected_categories,
         )
 
@@ -550,7 +551,8 @@ class TestLiveClawInventory(unittest.TestCase):
         copilot = {
             "connector": "copilot",
             "limitations": [
-                {"category": cat, "status": "unverified", "reason": note}
+                # Real enum members, as the collector emits them (GAP-2227).
+                {"category": cat, "status": InventoryCapabilityStatus.UNVERIFIED, "reason": note}
                 for (conn, cat), note in _UNVERIFIED_CONNECTOR_NOTES.items()
                 if conn == "copilot"
             ],
