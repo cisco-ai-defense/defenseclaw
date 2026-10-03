@@ -7857,6 +7857,21 @@ def _check_proxy_interception(cfg, r: _DoctorResult, *, live_health: dict | None
     uptime_ms = live_health.get("uptime_ms") if isinstance(live_health, dict) else None
     if (
         not isinstance(info, dict)
+        and "openclaw" in connectors
+        and any(c["status"] == "fail" and c["label"].startswith("OpenClaw gateway") for c in r.checks)
+    ):
+        # GAP-2506: the plugin runs inside the OpenClaw gateway, so it cannot
+        # report while that gateway is unreachable; rerunning doctor won't help.
+        _emit(
+            "fail",
+            label,
+            "no interception self-test: the OpenClaw gateway is not reachable (see the OpenClaw gateway row)",
+            remediation="start or fix the OpenClaw gateway first, then rerun doctor",
+            r=r,
+        )
+        return
+    if (
+        not isinstance(info, dict)
         and isinstance(uptime_ms, int)
         and 0 <= uptime_ms < _INTERCEPTION_FIRST_REPORT_WINDOW.total_seconds() * 1000
     ):
