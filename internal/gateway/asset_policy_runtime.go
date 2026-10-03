@@ -34,6 +34,9 @@ type mcpRuntimeProbe struct {
 	Transport  string
 	Surface    string
 	Matched    bool
+	// WorkspaceDir is the agent's working directory from the hook, used to
+	// resolve a name-only probe to the connector's configured server.
+	WorkspaceDir string
 }
 
 type skillRuntimeProbe struct {
@@ -76,11 +79,13 @@ const (
 
 func (a *APIServer) claudeCodeMCPAssetDecision(ctx context.Context, req claudeCodeHookRequest) (config.AssetPolicyDecision, bool) {
 	probe := mcpProbeFromFields(req.MCPServerName, req.ToolName, req.ToolInput)
+	probe.WorkspaceDir = req.CWD
 	return a.evaluateRuntimeMCPAssetPolicy(ctx, "claudecode", req.HookEventName, probe)
 }
 
 func (a *APIServer) codexMCPAssetDecision(ctx context.Context, req codexHookRequest) (config.AssetPolicyDecision, bool) {
 	probe := mcpProbeFromFields(payloadString(req.Payload, "mcp_server_name"), req.ToolName, req.ToolInput)
+	probe.WorkspaceDir = req.CWD
 	return a.evaluateRuntimeMCPAssetPolicy(ctx, "codex", req.HookEventName, probe)
 }
 
@@ -228,6 +233,7 @@ func (a *APIServer) evaluateRuntimeMCPAssetPolicy(ctx context.Context, connector
 	if probe.Surface == "terminal" && !runtimeDetection.TerminalCommands {
 		return config.AssetPolicyDecision{}, false
 	}
+	probe = a.resolveMCPProbeEndpoint(connector, probe)
 	decision := a.scannerCfg.EvaluateAssetPolicy(config.AssetPolicyInput{
 		TargetType:     "mcp",
 		Name:           probe.ServerName,
@@ -269,6 +275,30 @@ func (a *APIServer) evaluateRuntimeMCPAssetPolicy(ctx context.Context, connector
 	}
 	a.dispatchAssetPolicyNotification(decision, "mcp", connector, hookEvent, evalCtx)
 	return decision, true
+}
+
+// resolveMCPProbeEndpoint fills a name-only hook probe (mcp__<server>__<tool>)
+// with the URL, command and transport the connector has configured for that
+// server. Registry-promoted rules are pinned to URL and transport, so without
+// this an approved server never matched at runtime and registry-required
+// blocked every MCP tool call (GAP-2488). A server the connector does not
+// list keeps the bare name and matches only name-only rules.
+func (a *APIServer) resolveMCPProbeEndpoint(connector string, probe mcpRuntimeProbe) mcpRuntimeProbe {
+	if a == nil || a.scannerCfg == nil || !a.scannerCfg.AssetPolicy.Enabled {
+		return probe
+	}
+	if probe.Surface != "hook" || probe.URL != "" || probe.Command != "" || probe.ServerName == "" {
+		return probe
+	}
+	entry, ok := a.scannerCfg.LookupMCPServerForConnector(connector, probe.WorkspaceDir, probe.ServerName)
+	if !ok {
+		return probe
+	}
+	probe.URL = strings.TrimSpace(entry.URL)
+	probe.Command = strings.TrimSpace(entry.Command)
+	probe.Args = entry.Args
+	probe.Transport = strings.TrimSpace(entry.Transport)
+	return probe
 }
 
 func (a *APIServer) evaluateRuntimeSkillAssetPolicy(ctx context.Context, connector, hookEvent string, probe skillRuntimeProbe) (config.AssetPolicyDecision, bool) {
