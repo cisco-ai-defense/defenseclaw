@@ -59,6 +59,9 @@ from defenseclaw.scanner.plugin_scanner.types import (
     ScanResult,
 )
 
+# The C loader is several times faster on manifests; same safe semantics.
+_YAML_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -335,7 +338,7 @@ def _safe_read_manifest(candidate: str, scan_root: str) -> dict | None:
 
     try:
         if candidate.endswith((".yaml", ".yml")):
-            data = yaml.safe_load(raw_text)
+            data = yaml.load(raw_text, Loader=_YAML_LOADER)
         else:
             data = json.loads(raw_text)
     except (json.JSONDecodeError, ValueError, yaml.YAMLError):

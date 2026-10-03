@@ -25,6 +25,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
+import yaml
 from defenseclaw.models import ScanResult
 from defenseclaw.scanner import rulepack
 
@@ -155,6 +156,24 @@ class TestRequiredLiterals(unittest.TestCase):
         self.assertTrue(pack.rules)
         with_prefilter = [r for r in pack.rules if r.required is not None]
         self.assertGreater(len(with_prefilter), len(pack.rules) * 0.9)
+
+
+class TestPackLoad(unittest.TestCase):
+    def test_c_yaml_loader_gives_the_same_pack(self):
+        """GAP-2070: the pack loads with libyaml when present, same result."""
+        root = os.path.join(os.path.dirname(__file__), "..", "..", "policies", "guardrail", "default")
+        root = os.path.normpath(root)
+
+        def rules(pack):
+            return [(r.rule_id, r.pattern.pattern, r.severity, r.category, r.required) for r in pack.rules]
+
+        fast = rulepack.load_rule_pack(root)
+        with patch.object(rulepack, "_YAML_LOADER", yaml.SafeLoader):
+            slow = rulepack.load_rule_pack(root)
+        self.assertTrue(fast.rules)
+        self.assertEqual(rules(fast), rules(slow))
+        if yaml.__with_libyaml__:
+            self.assertIs(rulepack._YAML_LOADER, yaml.CSafeLoader)
 
 
 class TestOverlayDuration(unittest.TestCase):

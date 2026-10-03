@@ -123,6 +123,10 @@ _WINDOW_MIN_TEXT = 4096
 _WINDOW_SLACK = 512
 _ANCHOR_MIN_LEN = 3
 
+# The C loader parses the default pack several times faster than the pure
+# Python one (GAP-2070); same safe semantics.
+_YAML_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+
 
 @dataclass
 class _CompiledRule:
@@ -420,7 +424,7 @@ def load_rule_pack(dir_path: str) -> RulePack:
         full = os.path.join(rules_dir, entry)
         try:
             with open(full, encoding="utf-8") as fh:
-                raw = yaml.safe_load(fh) or {}
+                raw = yaml.load(fh, Loader=_YAML_LOADER) or {}
         except (OSError, yaml.YAMLError) as exc:
             _log.debug("rule-pack: skip %s (parse error: %s)", full, exc)
             continue
