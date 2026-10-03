@@ -900,9 +900,10 @@ function Assert-InstallRoom([long]$Extra, [string]$ForWhat) {
 
 function Write-KeptUvCache {
     # A failed first install keeps only uv's download cache: say how large it
-    # is and how to remove it (GAP-1883).
+    # is and how to remove it (GAP-1883). Get-TreeSize, not Measure-Object:
+    # under StrictMode an empty or missing cache has no .Sum (GAP-2616).
     $uvDir = Join-Path $DataDir ".uv"
-    $bytes = (Get-ChildItem -LiteralPath $uvDir -Recurse -Force -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+    $bytes = Get-TreeSize $uvDir
     if ($bytes) {
         Write-Info ("The download cache in $uvDir ({0:N0} MB) was kept so the next run is faster; remove it with: cmd /c rd /s /q `"$uvDir`"" -f ([double]$bytes / 1MB))
     }
@@ -1000,9 +1001,13 @@ function Write-HookState {
 function Copy-BinDir([string]$To) {
     New-Item -ItemType Directory -Path $To -Force | Out-Null
     # Remember that there was no bin folder (a first install, DefenseClaw
-    # Setup), so a restore does not leave an empty one behind (GAP-2614).
+    # Setup), and whether ~\.local was missing too, so a restore does not
+    # leave either behind empty (GAP-2614).
     if (-not (Test-Path -LiteralPath $BinDir -PathType Container)) {
-        Set-Content -LiteralPath (Join-Path $To "NO_BINDIR") -Value "" -Encoding Ascii
+        $made = @($BinDir)
+        $parent = Split-Path -Parent $BinDir
+        if (-not (Test-Path -LiteralPath $parent -PathType Container)) { $made += $parent }
+        Set-Content -LiteralPath (Join-Path $To "NO_BINDIR") -Value $made -Encoding UTF8
         return
     }
     foreach ($name in $ManagedFiles) {
@@ -1012,16 +1017,30 @@ function Copy-BinDir([string]$To) {
 }
 
 function Restore-BinDir([string]$From) {
+    $marker = Join-Path $From "NO_BINDIR"
+    if (Test-Path -LiteralPath $marker) {
+        # There was no bin folder: take out this run's files, then the
+        # folders it made (bin first, then ~\.local) when they are empty.
+        foreach ($name in $ManagedFiles) {
+            $live = Join-Path $BinDir $name
+            if (Test-Path -LiteralPath $live) { Remove-Aside $live }
+        }
+        $made = @(Get-Content -LiteralPath $marker | Where-Object { $_ })
+        if (-not $made.Count) { $made = @($BinDir) }
+        foreach ($dir in $made) {
+            if ((Test-Path -LiteralPath $dir -PathType Container) -and
+                -not (Get-ChildItem -LiteralPath $dir -Force -ErrorAction SilentlyContinue | Select-Object -First 1)) {
+                Remove-Item -LiteralPath $dir -Force -ErrorAction SilentlyContinue
+            }
+        }
+        return
+    }
     New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
     foreach ($name in $ManagedFiles) {
         $saved = Join-Path $From $name
         $live = Join-Path $BinDir $name
         if (Test-Path -LiteralPath $saved -PathType Leaf) { Install-File $saved $live }
         elseif (Test-Path -LiteralPath $live) { Remove-Aside $live }
-    }
-    if ((Test-Path -LiteralPath (Join-Path $From "NO_BINDIR")) -and
-        -not (Get-ChildItem -LiteralPath $BinDir -Force -ErrorAction SilentlyContinue | Select-Object -First 1)) {
-        Remove-Item -LiteralPath $BinDir -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -1275,7 +1294,7 @@ function Restore-Snapshot {
         Write-Info "The failed $Ver install and its download cache were removed, so DefenseClaw Setup's gateway can start"
         return
     }
-    $bytes = (Get-ChildItem -LiteralPath $failed -Recurse -Force -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+    $bytes = Get-TreeSize $failed
     Write-Warn ("The failed $Ver install was kept in $failed ({0:N1} MB) for troubleshooting" -f ([double]$bytes / 1MB))
     Write-Info "Your previous install and its data are back; it is safe to remove the copy with: cmd /c rd /s /q `"$failed`""
 }
@@ -1296,7 +1315,7 @@ function Save-RolledBackData {
     $kept = Join-Path $DataDir ("backups\$label-$version-" + (Get-Date -Format "yyyyMMddTHHmmss"))
     New-Item -ItemType Directory -Path (Join-Path $DataDir "backups") -Force | Out-Null
     Move-Path (Join-Path $Previous "data") $kept
-    $bytes = (Get-ChildItem -LiteralPath $kept -Recurse -Force -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+    $bytes = Get-TreeSize $kept
     $what = if ($label -eq "rolled-back") { "the data from before the last rollback" } else { "the audit history DefenseClaw $version recorded" }
     Write-Info ("Kept $what in $kept ({0:N1} MB)" -f ([double]$bytes / 1MB))
     Write-Info "It is not used again; once you no longer need its audit history, remove it with: cmd /c rd /s /q `"$kept`""

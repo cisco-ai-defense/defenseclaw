@@ -179,15 +179,18 @@ def _pid_record_integrity_error(path: str, info: os.stat_result) -> tuple[Eviden
             ancestor = os.path.dirname(os.path.abspath(path)) or os.curdir
             while ancestor:
                 parent = os.path.dirname(ancestor)
-                # A drive/share root cannot itself be renamed. The generic ACL
-                # validator also treats harmless root-level create-child grants
-                # as writes, so stop after validating every replaceable
-                # ancestor below that immutable boundary.
+                # A drive/share root cannot itself be renamed, so stop after
+                # validating every replaceable ancestor below that boundary.
                 if not parent or parent == ancestor:
                     break
+                # Only rights that can rename, delete or re-ACL an existing
+                # child matter on an ancestor. Create-child grants such as the
+                # BUILTIN\\Users (CI)(AD)/(WD) entries a folder inherits from
+                # an NTFS volume root cannot replace the record (GAP-2615).
                 if ancestor_problem := windows_acl_custody_write_error(
                     ancestor,
                     allow_current_user=True,
+                    ancestor_replace_only=True,
                 ):
                     return (
                         "denied",
