@@ -17,7 +17,8 @@ intact when diagnosing a problem.
 
 | Default location | Purpose | Manual editing |
 | --- | --- | --- |
-| `%USERPROFILE%\.local\bin\defenseclaw.cmd` | CLI/TUI launcher for the installed Python environment. | Do not replace or wrap; re-run the installer to repair it. |
+| `%USERPROFILE%\.local\bin\defenseclaw.exe` | CLI/TUI launcher for the installed Python environment; PowerShell and cmd.exe run it for `defenseclaw`. | Do not replace or wrap; re-run the installer to repair it. |
+| `%USERPROFILE%\.local\bin\defenseclaw.cmd` | The same launcher as a batch file, for scripts that call `defenseclaw.cmd` by name. | Do not replace or wrap; re-run the installer to repair it. |
 | `%USERPROFILE%\.local\bin\defenseclaw` | The same launcher for Git Bash, which does not run `.cmd` files by bare name. cmd.exe and PowerShell ignore it. | Do not replace; re-run the installer to repair it. |
 | `%USERPROFILE%\.local\bin\defenseclaw-gateway.exe` | Native gateway and lifecycle command. | Do not replace. |
 | `%USERPROFILE%\.local\bin\defenseclaw-hook.exe` | No-console hook runner that connector registrations record. | Do not invoke with fabricated credentials or replace. |
@@ -231,10 +232,13 @@ residue automatically.
     `defenseclaw doctor` also compares the hook's release with the CLI's.
   </Accordion>
   <Accordion title="Ctrl+C on a running command asks Terminate batch job (Y/N)?">
-    `defenseclaw` runs through the `defenseclaw.cmd` launcher, and cmd.exe asks
-    this question whenever Ctrl+C reaches a batch file. The command has already
-    stopped (`Aborted!`): answer `Y` or `N`, both return you to the prompt.
-    Quitting the `defenseclaw` TUI with Ctrl+C does not ask it.
+    cmd.exe asks this question whenever Ctrl+C reaches a batch file.
+    `defenseclaw` runs `defenseclaw.exe`, so Ctrl+C prints `Aborted!` and
+    returns you to the prompt. You still see the question when you run
+    `defenseclaw.cmd` by name, or on an older install that has no
+    `defenseclaw.exe` in `%USERPROFILE%\.local\bin` (re-run the installer or
+    `defenseclaw upgrade` to add it). The command has already stopped: answer
+    `Y` or `N`, both return you to the prompt.
   </Accordion>
   <Accordion title="An install, upgrade, or rollback fails">
     Read the newest `%USERPROFILE%\.defenseclaw\logs\install-*.log`. A failed

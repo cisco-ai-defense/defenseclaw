@@ -58,7 +58,7 @@ func TestPurgeWindowsUserBinariesRemovesTheFilesFolderAndPathEntry(t *testing.T)
 	}
 	install := func() {
 		t.Helper()
-		for _, name := range []string{"defenseclaw.cmd", "defenseclaw-gateway.exe", "defenseclaw-acp.exe", "skill-scanner.cmd", "mcp-scanner.cmd", ".defenseclaw-source-root"} {
+		for _, name := range []string{"defenseclaw.cmd", "defenseclaw.exe", "defenseclaw-gateway.exe", "defenseclaw-acp.exe", "skill-scanner.cmd", "mcp-scanner.cmd", ".defenseclaw-source-root"} {
 			write(name, name)
 		}
 		write("uv.exe", "uv")

@@ -23,6 +23,7 @@ import (
 // %USERPROFILE%\.local\bin. Every name is DefenseClaw's own.
 var windowsUserBinaryNames = []string{
 	"defenseclaw.cmd",
+	"defenseclaw.exe",
 	"defenseclaw",
 	"defenseclaw-gateway.exe",
 	"defenseclaw-acp.exe",
