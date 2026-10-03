@@ -312,6 +312,7 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 		if !watchOnce(dir, "plugin") {
 			continue
 		}
+		w.watchExistingPluginFolders(dir)
 		if watcherConnectorName(w.cfg) == "claudecode" &&
 			strings.EqualFold(filepath.Base(filepath.Clean(dir)), "cache") {
 			addClaudeCacheWatches(fsw, dir, watchedDirs)
@@ -416,7 +417,9 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 						deferredDirs = append(deferredDirs, entry)
 						continue
 					}
-					watchOnce(entry[0], entry[1])
+					if watchOnce(entry[0], entry[1]) && entry[1] == "plugin" {
+						w.watchExistingPluginFolders(entry[0])
+					}
 				}
 			}
 			w.processPending(ctx)

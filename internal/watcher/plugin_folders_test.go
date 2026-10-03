@@ -81,3 +81,66 @@ func TestLivePluginEventsExpandCategoryAndWaitOnEmptyFolder(t *testing.T) {
 		t.Fatalf("file in category folder queued %q", queued)
 	}
 }
+
+// GAP-2462: category folders that already exist when the watcher starts are
+// watched like live-created ones, so a plugin added to them later reaches
+// admission after a gateway restart.
+func TestWatcherStartWaitsOnExistingCategoryFolders(t *testing.T) {
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	cfg.Guardrail.Connector = "hermes"
+	t.Setenv("HERMES_BUNDLED_PLUGINS", "")
+	home := filepath.Dir(skillDir)
+	user := filepath.Join(home, "plugins")
+	bundled := filepath.Join(home, "hermes-agent", "plugins")
+	write := func(dir string, files ...string) {
+		t.Helper()
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		for _, f := range files {
+			if err := os.WriteFile(filepath.Join(dir, f), []byte("name: x\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	write(filepath.Join(user, "web"))
+	write(filepath.Join(user, "memx", "later"))
+	write(filepath.Join(user, "flat"), "__init__.py")
+	write(filepath.Join(user, "manifested"), "plugin.yaml")
+	write(filepath.Join(bundled, "platforms", "a2a"), "plugin.yaml")
+	w := New(cfg, nil, []string{user, bundled}, store, logger, nil, nil)
+	var watched []string
+	w.addWatch = func(dir string) { watched = append(watched, dir) }
+	w.watchExistingPluginFolders(user)
+	w.watchExistingPluginFolders(bundled)
+
+	for _, dir := range []string{
+		filepath.Join(user, "web"), filepath.Join(user, "memx"),
+		filepath.Join(user, "memx", "later"), filepath.Join(bundled, "platforms"),
+	} {
+		if _, ok := w.pluginWaiting[dir]; !ok {
+			t.Errorf("%s not watched at start (watched %v)", dir, watched)
+		}
+	}
+	for _, dir := range []string{
+		filepath.Join(user, "flat"), filepath.Join(user, "manifested"),
+		filepath.Join(bundled, "platforms", "a2a"),
+	} {
+		if _, ok := w.pluginWaiting[dir]; ok {
+			t.Errorf("plugin %s watched as a category folder", dir)
+		}
+	}
+	post := filepath.Join(user, "web", "post")
+	write(post, "plugin.yaml")
+	if queued, ok := w.waitingPluginEvent(post); !ok || queued != post {
+		t.Fatalf("new plugin in pre-existing category = %q, %v; want %q", queued, ok, post)
+	}
+	if got := pluginEventNames(w.pendingInstallEvents(post)); got["web/post"] != post {
+		t.Fatalf("events = %v, want web/post", got)
+	}
+	bundledNew := filepath.Join(bundled, "platforms", "fresh")
+	write(bundledNew, "plugin.yaml")
+	if queued, ok := w.waitingPluginEvent(bundledNew); !ok || queued != bundledNew {
+		t.Fatalf("new bundled platform plugin = %q, %v; want %q", queued, ok, bundledNew)
+	}
+}

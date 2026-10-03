@@ -142,3 +142,50 @@ func (w *InstallWatcher) pluginFolderEvents(path string) ([]InstallEvent, bool) 
 	}
 	return out, true
 }
+
+// watchExistingPluginFolders waits on the category folders (and their plugin
+// folders still missing a manifest) already in a plugin root when the watcher
+// starts. Live-created ones are watched by pluginFolderEvents; without this a
+// plugin added to ~/.hermes/plugins/<category>/ after a gateway restart, or to
+// a bundled hermes-agent/plugins/<category>/, never reached admission
+// (GAP-2462).
+func (w *InstallWatcher) watchExistingPluginFolders(root string) {
+	if watcherConnectorName(w.cfg) == "claudecode" {
+		return
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if !e.IsDir() || skipPluginChildDir(e.Name()) {
+			continue
+		}
+		dir := filepath.Join(root, e.Name())
+		if hasPluginManifest(dir) || w.isOwnPlugin(dir) {
+			continue
+		}
+		children, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		files := false
+		var subdirs []string
+		for _, c := range children {
+			if !c.IsDir() {
+				files = true
+			} else if !skipPluginChildDir(c.Name()) && !strings.HasPrefix(c.Name(), "_") {
+				subdirs = append(subdirs, filepath.Join(dir, c.Name()))
+			}
+		}
+		if files && len(pluginFolderChildren(dir)) == 0 {
+			continue // a plugin without a manifest, as pluginFolderEvents admits it
+		}
+		w.waitForPluginFolder(dir)
+		for _, sub := range subdirs {
+			if !hasPluginManifest(sub) && !w.isOwnPlugin(sub) {
+				w.waitForPluginFolder(sub)
+			}
+		}
+	}
+}
