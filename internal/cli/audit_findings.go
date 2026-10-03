@@ -49,7 +49,10 @@ This covers asset scans (skill, MCP, plugin, code, AIBOM and inventory
 scans). Guardrail decisions on prompts and tool calls (hook rules, the LLM
 guardrail) are not tracked here; see 'defenseclaw alerts' or
 'defenseclaw-gateway audit export' for those.`,
-	RunE: runAuditFindings,
+	// A bad flag value fails before the audit store opens, so it never
+	// creates or migrates audit.db (GAP-2126), like audit export.
+	PersistentPreRunE: auditFindingsPersistentPreRunE,
+	RunE:              runAuditFindings,
 }
 
 func init() {
@@ -62,28 +65,47 @@ func init() {
 	auditCmd.AddCommand(auditFindingsCmd)
 }
 
-func runAuditFindings(cmd *cobra.Command, _ []string) error {
-	if auditStore == nil {
-		return fmt.Errorf("audit findings: audit store not loaded")
+// auditFindingsPersistentPreRunE checks the flag values, then opens the
+// audit store the same way as the other audit commands.
+func auditFindingsPersistentPreRunE(cmd *cobra.Command, args []string) error {
+	if _, err := checkAuditFindingsFlags(cmd); err != nil {
+		return err
 	}
+	return auditPersistentPreRunE(cmd, args)
+}
+
+// checkAuditFindingsFlags validates --limit, --since, --new-only and
+// --target as usage errors (exit 2) and returns the parsed --since.
+func checkAuditFindingsFlags(cmd *cobra.Command) (*time.Time, error) {
 	if auditFindingsLimit < 1 || auditFindingsLimit > 10_000 {
-		return auditUsageError(cmd, fmt.Errorf("audit findings: --limit must be between 1 and 10000"))
+		return nil, auditUsageError(cmd, fmt.Errorf("audit findings: --limit must be between 1 and 10000"))
 	}
 	since, err := parseAuditFindingsSince(auditFindingsSince)
 	if err != nil {
-		return auditUsageError(cmd, err)
+		return nil, auditUsageError(cmd, err)
 	}
 	if auditFindingsNewOnly && since == nil {
-		return fmt.Errorf("audit findings: --new-only requires --since")
+		return nil, auditUsageError(cmd, fmt.Errorf("audit findings: --new-only requires --since"))
+	}
+	if auditFindingsTarget != "" && scanner.NormalizeFindingStateTarget(auditFindingsTarget) == "" {
+		return nil, auditUsageError(cmd, fmt.Errorf("audit findings: --target must identify a usable scan target"))
+	}
+	return since, nil
+}
+
+func runAuditFindings(cmd *cobra.Command, _ []string) error {
+	since, err := checkAuditFindingsFlags(cmd)
+	if err != nil {
+		return err
+	}
+	if auditStore == nil {
+		return fmt.Errorf("audit findings: audit store not loaded")
 	}
 	if audit.FindingLifecycleExcludesScanner(auditFindingsScanner) {
 		// GAP-1301: a guardrail scanner always reports count 0 here; say why
 		// on stderr so the JSON on stdout stays machine-readable.
 		fmt.Fprintf(cmd.ErrOrStderr(), "note: --scanner %s records guardrail decisions, which audit findings does not track; "+
 			"see 'defenseclaw alerts' or 'defenseclaw-gateway audit export' for them.\n", strings.TrimSpace(auditFindingsScanner))
-	}
-	if auditFindingsTarget != "" && scanner.NormalizeFindingStateTarget(auditFindingsTarget) == "" {
-		return fmt.Errorf("audit findings: --target must identify a usable scan target")
 	}
 	query := audit.FindingStateQuery{
 		Scanner:         auditFindingsScanner,
