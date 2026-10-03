@@ -1,5 +1,5 @@
 ---
-title: OpenClaw integration
+title: OpenClaw end-to-end flow
 description: How DefenseClaw integrates with OpenClaw end-to-end — fetch interceptor, before_tool_call hook, correlation headers, plugin-mediated HITL approvals, and the audit loop.
 keywords:
   - DefenseClaw OpenClaw integration
@@ -108,7 +108,7 @@ DefenseClaw limits its OpenClaw-tree changes to `extensions/defenseclaw/` and
 its managed allow/load entries in `openclaw.json`. Backups are byte-for-byte;
 teardown either restores the file or surgically removes only DefenseClaw
 entries when the file has drifted. Hosts that still carry the removed legacy
-standalone sandbox should run the [legacy cleanup](/docs/setup/sandbox) first.
+standalone sandbox should run the [legacy cleanup](/docs/sandboxes/guide) first.
 
 ## When this is the right connector
 

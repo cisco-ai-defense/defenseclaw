@@ -181,14 +181,14 @@ hooks). Only problems in fields you changed block a save.
 ## Sandboxes panel
 
 Press `7` for **Sandboxes**, the TUI's view of the NVIDIA OpenShell sandboxes
-the DefenseClaw daemon runs (see the [sandbox guide](/docs/setup/sandbox)). It
+the DefenseClaw daemon runs (see the [sandbox guide](/docs/sandboxes/guide)). It
 reads the daemon's `/api/v1/sandbox` API every 5 seconds while the panel is
 open, and every 15 seconds in the background once sandboxes are on, and it
 follows the daemon's live activity feed. When a refresh fails, the panel keeps
 the last good snapshot and says how old it is, so a daemon restart does not
 look like "no sandboxes". Sandboxes run on Linux, and on Apple-silicon Macs in
 OpenShell MicroVMs, where every run works on a copy (see
-[macOS](/docs/setup/sandbox#macos)); on Windows the panel says sandboxes are
+[macOS](/docs/sandboxes/guide#macos)); on Windows the panel says sandboxes are
 not supported. The
 [macOS app](/docs/macos-app#openshell-sandboxes) shows the same sandboxes in
 its menu bar, notifications and Sandboxes panel.
@@ -252,7 +252,7 @@ what needs attention:
   where it watches the folder with inotify, and on its next scan (about every
   5 seconds, longer for a large project) on macOS or when the file-watch
   limit is reached. Until the rename, git on your machine could still read
-  the planted repository; see the [sandbox guide](/docs/setup/sandbox).
+  the planted repository; see the [sandbox guide](/docs/sandboxes/guide).
 - **hooks unreachable**: the harness's hooks cannot reach DefenseClaw, so they
   block every tool call. Run `defenseclaw sandbox doctor`.
 - **silent**: the harness is active, but no DefenseClaw hook has been heard.
@@ -355,7 +355,7 @@ the administrator owns `config.yaml`.
 | `locked` entry `profile`, `yolo`, `workdir.mode`, `workdir.unmask`, `mcp.import` or `mcp.host_ports` | The key of the same name |
 | `locked` entry `resources` | `resources.cpu`, `resources.memory` |
 
-The [policy packs and admin limits](/docs/setup/sandbox-policy) page explains
+The [policy packs and admin limits](/docs/sandboxes/policy-packs) page explains
 what each setting enforces. The macOS app's config editor applies the same
 rules.
 

@@ -1,5 +1,5 @@
 ---
-title: Setup MCP scanner
+title: MCP scanner
 description: Behavioural scan of every Model Context Protocol server an agent might call. DefenseClaw wraps cisco-ai-mcp-scanner to surface hidden tool intents and shadow capabilities, and writes verdicts into the same mcp_actions admission policy as the watcher.
 keywords:
   - DefenseClaw MCP scanner
@@ -195,7 +195,7 @@ Behavioural intent analysis depends on the LLM judge being able to reason about 
 defenseclaw keys set DEFENSECLAW_LLM_KEY
 ```
 
-DefenseClaw injects it into the scanner subprocess via `inject_llm_env`, alongside any [Cisco AI Defense](https://www.cisco.com/site/us/en/products/security/ai-defense/index.html) API key for content classification. See [Setup → Unified LLM key](/docs/setup/unified-llm-key) for the resolution order and Bifrost provider catalog.
+DefenseClaw injects it into the scanner subprocess via `inject_llm_env`, alongside any [Cisco AI Defense](https://www.cisco.com/site/us/en/products/security/ai-defense/index.html) API key for content classification. See [Setup → Unified LLM key](/docs/guardrail/unified-llm-key) for the resolution order and Bifrost provider catalog.
 
 <Callout type="warn" title="A local scan runs the server">
 A local stdio scan starts the server as an ordinary subprocess that runs as
@@ -232,8 +232,8 @@ isn't present; it never crashes the gateway.
 
 ## See also
 
-- [Setup → Skill scanner](/docs/setup/skill-scanner) — sibling scanner for skill bundles, same admission pattern via `skill_actions`
-- [Setup → Unified LLM key](/docs/setup/unified-llm-key) — the env var the LLM-assisted analysis reads
-- [Defaults](/docs/defaults) — the `mcp_actions` table for each shipped rule pack
+- [Setup → Skill scanner](/docs/scanning/skill-scanner) — sibling scanner for skill bundles, same admission pattern via `skill_actions`
+- [Setup → Unified LLM key](/docs/guardrail/unified-llm-key) — the env var the LLM-assisted analysis reads
+- [Defaults](/docs/policies/defaults) — the `mcp_actions` table for each shipped rule pack
 - [Policies](/docs/policies) — the layered architecture
 - [Reference → CLI](/docs/reference/cli) — full `defenseclaw mcp` subcommand reference

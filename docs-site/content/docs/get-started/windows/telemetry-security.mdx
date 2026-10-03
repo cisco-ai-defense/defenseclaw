@@ -80,7 +80,7 @@ is `none`. Therefore:
   captured.
 
 Treat the data directory and any audit export as sensitive user data. Configure
-and verify [redaction profiles](/docs/reference/redaction) before routing
+and verify [redaction profiles](/docs/observability/redaction) before routing
 records to another system. `defenseclaw config show` masks secret values by
 default. Configuration v8 rejects `config show --reveal`; do not rely on that
 legacy flag in diagnostic workflows.
@@ -240,11 +240,11 @@ the elevated command source.
 That path does not provide a machine-scope Setup/MSI, general Windows connector
 guardian, remote gateway, or private distribution credentials. Follow the
 exact prerequisites in
-[Enterprise deployment](/docs/setup/enterprise-deployment#native-windows-claude-code-managed-hooks).
+[Enterprise deployment](/docs/enterprise/secure-client#native-windows-claude-code-managed-hooks).
 Machine-wide deployment with Codex, Claude Code, and Cursor managed hooks is
 the [enterprise deployment](/docs/enterprise) lifecycle, in the
 [standalone profile](/docs/enterprise/windows) or the
-[Secure Client profile](/docs/setup/enterprise-deployment#windows-system-service-layout).
+[Secure Client profile](/docs/enterprise/secure-client#windows-system-service-layout).
 GitHub Copilot machine policy is part of the standalone profile only.
 
 ## Security operations links
@@ -252,7 +252,7 @@ GitHub Copilot machine policy is part of the standalone profile only.
 - [Configuration](/docs/reference/configuration)
 - [Environment variables](/docs/reference/env-vars)
 - [Fail modes](/docs/reference/fail-modes)
-- [Redaction](/docs/reference/redaction)
+- [Redaction](/docs/observability/redaction)
 - [Observability](/docs/observability)
-- [Skill scanner](/docs/setup/skill-scanner)
-- [MCP scanner](/docs/setup/mcp-scanner)
+- [Skill scanner](/docs/scanning/skill-scanner)
+- [MCP scanner](/docs/scanning/mcp-scanner)

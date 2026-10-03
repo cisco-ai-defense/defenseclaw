@@ -1,5 +1,5 @@
 ---
-title: Setup registries
+title: Registries
 description: Subscribe DefenseClaw to public or internal skill / MCP catalogs. Sources are fetched, scanned, and clean entries are auto-promoted into asset_policy so admission decisions can attribute the rule back to its origin.
 keywords:
   - defenseclaw registry
@@ -308,5 +308,5 @@ from the checkout. Use Python 3.11 or newer when MCP scanning is required.
 - [`cli/defenseclaw/commands/cmd_registry.py`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/cli/defenseclaw/commands/cmd_registry.py) — every subcommand, validator, and the lifecycle helpers.
 - [`cli/defenseclaw/registries/`](https://github.com/cisco-ai-defense/defenseclaw/tree/main/cli/defenseclaw/registries) — adapters, manifest schema, sync engine, promotion rules.
 - [Reference → CLI](/docs/reference/cli) — full CLI catalog.
-- [Setup → Skill scanner](/docs/setup/skill-scanner) and [MCP scanner](/docs/setup/mcp-scanner) — what the scanners look at when verdicts get computed.
+- [Setup → Skill scanner](/docs/scanning/skill-scanner) and [MCP scanner](/docs/scanning/mcp-scanner) — what the scanners look at when verdicts get computed.
 - [Policies](/docs/policies) — how `asset_policy` decisions blend with repo policies and the LLM judge.

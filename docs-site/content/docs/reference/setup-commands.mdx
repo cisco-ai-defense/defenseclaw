@@ -1,5 +1,5 @@
 ---
-title: Setup
+title: Setup commands
 description: DefenseClaw setup and configuration surfaces in one place — from the central guardrail wizard to keys, webhooks, registries, observability, legacy sandbox cleanup, and per-connector hooks.
 keywords:
   - defenseclaw setup
@@ -30,7 +30,7 @@ custom LLM key into a guardrail that is already running.
 <Cards>
   <Card
     title="defenseclaw setup guardrail"
-    href="/docs/setup/guardrail"
+    href="/docs/guardrail"
     description="The wizard. Picks the connector, observe vs action mode, scanner backend, hook fail-mode, optional LLM judge, HITL severity, and rule pack — then restarts the gateway."
   />
 </Cards>
@@ -45,19 +45,19 @@ old one. Use the central command when you need the complete guardrail flag
 surface.
 
 <Cards>
-  <Card title="setup openclaw" href="/docs/setup/guardrail/aliases" description="Selects OpenClaw with --connector openclaw and installs the fetch interceptor + before_tool_call plugin." />
-  <Card title="setup zeptoclaw" href="/docs/setup/guardrail/aliases" description="Selects ZeptoClaw with --connector zeptoclaw, redirects api_base, runs scan + response-scan." />
-  <Card title="setup claude-code" href="/docs/setup/guardrail/aliases" description="Adds or reconfigures Claude Code with --connector claudecode and installs its hooks." />
-  <Card title="setup codex" href="/docs/setup/guardrail/aliases" description="Adds or reconfigures Codex with --connector codex and installs hooks, OTel, and notify wiring." />
-  <Card title="setup cursor" href="/docs/setup/guardrail/aliases" description="Adds or reconfigures Cursor with --connector cursor and writes hooks.json plus MCP/skills/rules surfaces." />
-  <Card title="setup devin" href="/docs/setup/guardrail/aliases" description="Adds or reconfigures native Devin CLI lifecycle hooks and documented local customization surfaces." />
-  <Card title="setup copilot" href="/docs/setup/guardrail/aliases" description="Adds or reconfigures GitHub Copilot CLI with --connector copilot and writes hook config." />
-  <Card title="setup openhands" href="/docs/setup/guardrail/aliases" description="Adds or reconfigures OpenHands with --connector openhands and writes lifecycle hooks." />
-  <Card title="setup antigravity" href="/docs/setup/guardrail/aliases" description="Adds or reconfigures Antigravity with --connector antigravity and writes agy lifecycle hooks." />
-  <Card title="setup hermes" href="/docs/setup/guardrail/aliases" description="Adds or reconfigures Hermes with --connector hermes and wires config.yaml hooks." />
-  <Card title="setup opencode" href="/docs/setup/guardrail/aliases" description="Adds or reconfigures OpenCode with --connector opencode and writes the bridge plugin." />
-  <Card title="setup amp" href="/docs/setup/guardrail/aliases" description="Adds or reconfigures Amp with --connector amp and writes the synchronous TypeScript policy plugin." />
-  <Card title="setup omnigent" href="/docs/setup/guardrail/aliases" description="Adds or reconfigures OmniGent with --connector omnigent and installs its custom Python policy bridge." />
+  <Card title="setup openclaw" href="/docs/guardrail/aliases" description="Selects OpenClaw with --connector openclaw and installs the fetch interceptor + before_tool_call plugin." />
+  <Card title="setup zeptoclaw" href="/docs/guardrail/aliases" description="Selects ZeptoClaw with --connector zeptoclaw, redirects api_base, runs scan + response-scan." />
+  <Card title="setup claude-code" href="/docs/guardrail/aliases" description="Adds or reconfigures Claude Code with --connector claudecode and installs its hooks." />
+  <Card title="setup codex" href="/docs/guardrail/aliases" description="Adds or reconfigures Codex with --connector codex and installs hooks, OTel, and notify wiring." />
+  <Card title="setup cursor" href="/docs/guardrail/aliases" description="Adds or reconfigures Cursor with --connector cursor and writes hooks.json plus MCP/skills/rules surfaces." />
+  <Card title="setup devin" href="/docs/guardrail/aliases" description="Adds or reconfigures native Devin CLI lifecycle hooks and documented local customization surfaces." />
+  <Card title="setup copilot" href="/docs/guardrail/aliases" description="Adds or reconfigures GitHub Copilot CLI with --connector copilot and writes hook config." />
+  <Card title="setup openhands" href="/docs/guardrail/aliases" description="Adds or reconfigures OpenHands with --connector openhands and writes lifecycle hooks." />
+  <Card title="setup antigravity" href="/docs/guardrail/aliases" description="Adds or reconfigures Antigravity with --connector antigravity and writes agy lifecycle hooks." />
+  <Card title="setup hermes" href="/docs/guardrail/aliases" description="Adds or reconfigures Hermes with --connector hermes and wires config.yaml hooks." />
+  <Card title="setup opencode" href="/docs/guardrail/aliases" description="Adds or reconfigures OpenCode with --connector opencode and writes the bridge plugin." />
+  <Card title="setup amp" href="/docs/guardrail/aliases" description="Adds or reconfigures Amp with --connector amp and writes the synchronous TypeScript policy plugin." />
+  <Card title="setup omnigent" href="/docs/guardrail/aliases" description="Adds or reconfigures OmniGent with --connector omnigent and installs its custom Python policy bridge." />
 </Cards>
 
 ## Auxiliary configuration commands
@@ -69,22 +69,22 @@ which ones are interactive and which ones are designed for scripts.
 <Cards>
   <Card
     title="defenseclaw keys"
-    href="/docs/setup/unified-llm-key"
+    href="/docs/guardrail/unified-llm-key"
     description="Stash DEFENSECLAW_LLM_KEY (and any per-component overrides) in ~/.defenseclaw/.env. Top-level group: list, set, fill-missing, check. Not a setup subcommand."
   />
   <Card
     title="setup routing"
-    href="/docs/setup/semantic-routing"
+    href="/docs/guardrail/semantic-routing"
     description="Route OpenAI Chat Completions traffic between configured model backends with the managed vLLM Semantic Router sidecar. Proxy connectors only."
   />
   <Card
     title="setup webhook"
-    href="/docs/setup/webhooks"
+    href="/docs/observability/webhooks"
     description="Add Slack, PagerDuty, Webex, or generic HMAC notifiers for high-severity alerts. Test deliveries, list, enable/disable, remove."
   />
   <Card
     title="defenseclaw registry"
-    href="/docs/setup/registries"
+    href="/docs/scanning/registries"
     description="Subscribe to public or internal skill / MCP catalogs (clawhub, smithery, http_yaml, http_json, git, file). Sync, scan, promote into asset_policy."
   />
   <Card
@@ -99,22 +99,22 @@ which ones are interactive and which ones are designed for scripts.
   />
   <Card
     title="setup redaction"
-    href="/docs/reference/redaction"
+    href="/docs/observability/redaction"
     description="Guided v8 policy editor with a simple remove-all choice plus advanced global, bucket, profile, destination, and ordered-route settings."
   />
   <Card
     title="setup skill-scanner"
-    href="/docs/setup/skill-scanner"
+    href="/docs/scanning/skill-scanner"
     description="Wire the cisco-ai-skill-scanner SDK into admission. Optional VirusTotal + LLM second-opinion."
   />
   <Card
     title="setup mcp-scanner"
-    href="/docs/setup/mcp-scanner"
+    href="/docs/scanning/mcp-scanner"
     description="Wire the cisco-ai-mcp-scanner SDK into admission. Behavioral introspection of MCP servers before they're added."
   />
   <Card
     title="defenseclaw sandbox legacy-cleanup"
-    href="/docs/setup/sandbox"
+    href="/docs/sandboxes/guide"
     description="Linux-only removal of the retired standalone OpenShell sandbox (openshell-sandbox 0.0.x). Restores host OpenClaw networking, ownership, and config."
   />
 </Cards>
@@ -125,12 +125,12 @@ which ones are interactive and which ones are designed for scripts.
 to run Claude Code and Codex inside NVIDIA OpenShell 0.1 sandboxes, and
 `defenseclaw sandbox run claude` starts one on the current project folder.
 On a Mac, sandboxes are OpenShell MicroVMs and every run works on a copy (see
-[macOS](/docs/setup/sandbox#macos)).
+[macOS](/docs/sandboxes/guide#macos)).
 The same setup is the **Sandboxes (OpenShell)** wizard in the TUI's Setup
 and the Sandbox wizard in the macOS app; the TUI Sandboxes panel (key 7) shows live activity. Run
 `defenseclaw sandbox --help` for every command.
 `defenseclaw sandbox legacy-cleanup` removes the retired `openshell-sandbox`
-0.0.x install from Linux hosts. The [sandbox guide](/docs/setup/sandbox)
+0.0.x install from Linux hosts. The [sandbox guide](/docs/sandboxes/guide)
 covers setup, runs and legacy cleanup.
 
 ## Deployment and policy references
@@ -141,17 +141,17 @@ than the command cards above.
 <Cards>
   <Card
     title="Secure Client managed deployment"
-    href="/docs/setup/enterprise-deployment"
+    href="/docs/enterprise/secure-client"
     description="DefenseClaw as a Cisco Secure Client module on Windows and macOS. For any other managed deployment, see Enterprise deployment."
   />
   <Card
     title="Sandbox policy packs"
-    href="/docs/setup/sandbox-policy"
+    href="/docs/sandboxes/policy-packs"
     description="The open, balanced, and strict OpenShell sandbox packs, custom packs, openshell.admin limits, and sandbox policy explain."
   />
   <Card
     title="Redaction profiles"
-    href="/docs/reference/redaction"
+    href="/docs/observability/redaction"
     description="Configure and inspect global, bucket, destination, and route-specific v8 redaction profiles."
   />
 </Cards>
@@ -175,7 +175,7 @@ below is the canonical mapping for their interactive and scripted forms.
 | `setup local-observability` | yes | flags + `--non-interactive` | One-shot bring-up; `--down` tears the stack back down. |
 | `setup redaction` | yes (bare command) | subcommands + flags | Simple choices lead into **Show advanced settings?** for all 14 buckets, custom profiles, destinations, and ordered routes. Mutations support `--dry-run`, `--json`, `--yes`, and optional restart. |
 | `setup skill-scanner` / `setup mcp-scanner` | yes | `--non-interactive` + flags | Per-feature toggles; the underlying `cisco-ai-skill-scanner` / `cisco-ai-mcp-scanner` SDKs ship as hard dependencies of `defenseclaw`. |
-| `sandbox setup` | yes (default) | `--non-interactive`, or `--yes` to take every default | One-time setup for OpenShell sandboxes on Linux, or on a Mac with Apple silicon (OpenShell MicroVMs). Run it again at any time; the [sandbox guide](/docs/setup/sandbox) covers the other `sandbox` commands. |
+| `sandbox setup` | yes (default) | `--non-interactive`, or `--yes` to take every default | One-time setup for OpenShell sandboxes on Linux, or on a Mac with Apple silicon (OpenShell MicroVMs). Run it again at any time; the [sandbox guide](/docs/sandboxes/guide) covers the other `sandbox` commands. |
 | `sandbox legacy-cleanup` | yes (prints the plan, then asks once) | `--yes`; `--dry-run` prints the plan only | Linux-only removal of the retired standalone sandbox. |
 
 <Callout title="Redaction is a v8 policy editor, not an on/off toggle">
@@ -200,7 +200,7 @@ exposes effective status, broad profile actions, and **Show advanced settings**
 for the full bucket/profile/destination/route command surface.
 
 <Callout title="See it for yourself">
-The interactive flow for the central command is replayed end-to-end on the [Setup guardrail](/docs/setup/guardrail) page. Interactive auxiliary commands follow the same prompt-or-flag rhythm; use the matrix above for script-only commands.
+The interactive flow for the central command is replayed end-to-end on the [Setup guardrail](/docs/guardrail) page. Interactive auxiliary commands follow the same prompt-or-flag rhythm; use the matrix above for script-only commands.
 </Callout>
 
 ## What gets written where
@@ -217,4 +217,4 @@ Setup and auxiliary configuration commands can write these paths under
   registries/<id>/     # cached manifest + scanner verdicts for each registry source
 ```
 
-Next steps: [`defenseclaw setup guardrail`](/docs/setup/guardrail) is the right starting point if you have not run it yet. Already running? `defenseclaw keys set DEFENSECLAW_LLM_KEY` is the most common follow-up — it unlocks the LLM judge and the LLM-backed scanners. The full guided workflow lives at [Unified LLM key](/docs/setup/unified-llm-key).
+Next steps: [`defenseclaw setup guardrail`](/docs/guardrail) is the right starting point if you have not run it yet. Already running? `defenseclaw keys set DEFENSECLAW_LLM_KEY` is the most common follow-up — it unlocks the LLM judge and the LLM-backed scanners. The full guided workflow lives at [Unified LLM key](/docs/guardrail/unified-llm-key).

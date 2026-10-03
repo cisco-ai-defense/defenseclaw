@@ -21,6 +21,7 @@ import { mkdir, writeFile, readFile, readdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { canonicalUrl } from '../lib/site';
+import { legacyRedirects } from '../lib/redirects';
 
 const CONTENT_ROOT = resolve(process.cwd(), 'content/docs');
 
@@ -149,8 +150,19 @@ async function run() {
     await writeFile(target, header + raw, 'utf-8');
     written++;
   }
+  // Moved pages (lib/redirects.ts) keep serving Markdown at their old
+  // URL: agents that fetch llms.md do not follow the HTML meta refresh.
+  let copied = 0;
+  for (const [oldSlug, target] of Object.entries(legacyRedirects)) {
+    const source = urlToOutPath(outDir, target);
+    if (!existsSync(source)) continue;
+    const dest = urlToOutPath(outDir, `/docs/${oldSlug}/`);
+    await mkdir(dirname(dest), { recursive: true });
+    await writeFile(dest, await readFile(source, 'utf-8'), 'utf-8');
+    copied++;
+  }
   console.log(
-    `[build-page-markdown] wrote ${written} llms.md files alongside ${pages.length} pages.`,
+    `[build-page-markdown] wrote ${written} llms.md files alongside ${pages.length} pages, plus ${copied} for moved pages.`,
   );
 }
 

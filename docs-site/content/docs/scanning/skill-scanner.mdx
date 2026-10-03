@@ -1,5 +1,5 @@
 ---
-title: Setup skill scanner
+title: Skill scanner
 description: Scan configured connector skills before an agent can execute them. DefenseClaw wraps cisco-ai-skill-scanner and writes its verdicts into the same skill_actions admission policy as the watcher.
 keywords:
   - DefenseClaw skill scanner
@@ -155,7 +155,7 @@ Each severity bucket has three independent actions:
 - **`runtime`** — `enable` or `disable`. Whether the agent can invoke the skill at all.
 - **`install`** — `none` or `block`. Whether to refuse a fresh install.
 
-`first_party_allow_list` is a **policy-file** key (not `~/.defenseclaw/config.yaml`) — bundles whose source path contains any of the listed substrings are exempted from `skill_actions`. See [Policies](/docs/policies) for the full schema and [Defaults](/docs/defaults) for what each shipped rule pack sets these to.
+`first_party_allow_list` is a **policy-file** key (not `~/.defenseclaw/config.yaml`) — bundles whose source path contains any of the listed substrings are exempted from `skill_actions`. See [Policies](/docs/policies) for the full schema and [Defaults](/docs/policies/defaults) for what each shipped rule pack sets these to.
 
 Codex's personal and project skill directories both use the shared
 `.agents/skills` namespace. Path alone cannot distinguish a protected install
@@ -193,7 +193,7 @@ LLM-assisted analysis is what catches the *new* malicious skills you don't yet h
 defenseclaw keys set DEFENSECLAW_LLM_KEY
 ```
 
-Under the hood DefenseClaw injects the unified key into the scanner subprocess as `SKILL_SCANNER_LLM_API_KEY` and `SKILL_SCANNER_LLM_MODEL`, plus the matching provider-native variable (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `AWS_BEARER_TOKEN_BEDROCK`, `GOOGLE_API_KEY`, `AZURE_OPENAI_API_KEY`, `GROQ_API_KEY`, etc.) via `inject_llm_env`. See [Setup → Unified LLM key](/docs/setup/unified-llm-key) for the resolution order and Bifrost provider catalog.
+Under the hood DefenseClaw injects the unified key into the scanner subprocess as `SKILL_SCANNER_LLM_API_KEY` and `SKILL_SCANNER_LLM_MODEL`, plus the matching provider-native variable (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `AWS_BEARER_TOKEN_BEDROCK`, `GOOGLE_API_KEY`, `AZURE_OPENAI_API_KEY`, `GROQ_API_KEY`, etc.) via `inject_llm_env`. See [Setup → Unified LLM key](/docs/guardrail/unified-llm-key) for the resolution order and Bifrost provider catalog.
 
 <Callout type="info">
 LLM mode works with any LiteLLM-supported provider. The upstream Skill Scanner SDK auto-detects the provider from the LiteLLM-shaped `provider/model` string in your unified config (e.g. `bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0`, `gemini/gemini-2.5-pro`, `vertex_ai/gemini-1.5-pro`). For self-hosted endpoints (vLLM, LM Studio, LiteLLM proxy) set `llm.base_url` in `~/.defenseclaw/config.yaml`.
@@ -238,8 +238,8 @@ Every action is audited (`skill-block`, `skill-quarantine`, etc.) so the trail i
 
 ## See also
 
-- [Setup → MCP scanner](/docs/setup/mcp-scanner) — sibling scanner for MCP servers, same admission pattern via `mcp_actions`
-- [Setup → Unified LLM key](/docs/setup/unified-llm-key) — the env var the LLM-assisted analysis reads
-- [Defaults](/docs/defaults) — the `skill_actions` table for each shipped rule pack
+- [Setup → MCP scanner](/docs/scanning/mcp-scanner) — sibling scanner for MCP servers, same admission pattern via `mcp_actions`
+- [Setup → Unified LLM key](/docs/guardrail/unified-llm-key) — the env var the LLM-assisted analysis reads
+- [Defaults](/docs/policies/defaults) — the `skill_actions` table for each shipped rule pack
 - [Policies](/docs/policies) — the layered architecture (admission → scanner → action mapping)
 - [Reference → CLI](/docs/reference/cli) — full `defenseclaw skill` subcommand reference

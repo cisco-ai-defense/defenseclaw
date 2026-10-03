@@ -103,7 +103,7 @@ The base install ships everything DefenseClaw needs to talk to the major LLM bac
 | AWS Bedrock | bundled | `boto3` ships in `[project].dependencies` so SigV4, IAM credential modes, and Anthropic-on-Bedrock bearer tokens work without a follow-up `pip install`. |
 | Google Vertex AI | Gateway bundled; Python SDK opt-in | The Go gateway routes Vertex through its bundled Bifrost backend. Python CLI scanner/judge paths use LiteLLM and require the `[vertex]` extra for the Google SDK and supported Vertex authentication; the SDK pulls ~286 MB of transitive dependencies. Source contributors can add it to their isolated checkout with `uv sync --extra vertex`; never modify a release-managed runtime. There is no documented SDK-less Python fallback. |
 | Azure OpenAI | bundled | Routed via LiteLLM's `azure_openai` adapter. |
-| Self-hosted / internal endpoints | bundled | Configure via `defenseclaw setup provider add` → see [Unified LLM key → Custom providers](/docs/setup/unified-llm-key#custom-providers-for-internal-or-self-hosted-endpoints). |
+| Self-hosted / internal endpoints | bundled | Configure via `defenseclaw setup provider add` → see [Unified LLM key → Custom providers](/docs/guardrail/unified-llm-key#custom-providers-for-internal-or-self-hosted-endpoints). |
 
 ## Install from source
 
@@ -314,5 +314,5 @@ launchers from `~/.local/bin`. `--dry-run` previews the plan.
   <Card title="Native Windows" href="/docs/get-started/windows" description="Native hook connectors, verification, and troubleshooting on Windows." />
   <Card title="Quickstart" href="/docs/get-started/quickstart" description="Run init and see your first block in 5 minutes." />
   <Card title="Upgrade" href="/docs/get-started/upgrade" description="One command, automatic migrations, and rollback." />
-  <Card title="Setup Guardrail" href="/docs/setup/guardrail" description="The full configuration surface for the central command." />
+  <Card title="Setup Guardrail" href="/docs/guardrail" description="The full configuration surface for the central command." />
 </Cards>

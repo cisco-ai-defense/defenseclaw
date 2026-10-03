@@ -1,7 +1,7 @@
 {
   "title": "Policies",
   "pages": [
-    "index",
+    "defaults",
     "deterministic-detection",
     "cel",
     "rulepack-validation",

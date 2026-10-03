@@ -1,12 +1,14 @@
 {
   "title": "Connectors",
   "pages": [
-    "index",
+    "capability-matrix",
     "compatibility",
+    "---Agents---",
     "kiro",
     "claudecode",
     "codex",
     "openclaw",
+    "openclaw-integration",
     "cursor",
     "hermes",
     "opencode",

@@ -1,5 +1,5 @@
 ---
-title: Sandbox policy packs and admin controls
+title: Policy packs and admin controls
 description: Pick the open, balanced, or strict OpenShell sandbox policy pack, write a custom pack, and set organization-wide limits with openshell.admin.
 keywords:
   - DefenseClaw sandbox policy
@@ -26,11 +26,11 @@ told which setting stopped them.
 To see the policy a run would get, and where each setting comes from, run
 `defenseclaw sandbox policy explain` in the project folder.
 [Sandbox CLI](/docs/reference/sandbox-cli) lists every command and flag; see
-also [Sandbox](/docs/setup/sandbox).
+also [Sandbox](/docs/sandboxes/guide).
 
 <Callout title="Sandboxes and managed installs">
 Sandboxes run on Linux, and on Macs with Apple silicon in OpenShell
-MicroVMs (see [macOS](/docs/setup/sandbox#macos)), as your own user. A
+MicroVMs (see [macOS](/docs/sandboxes/guide#macos)), as your own user. A
 `managed_enterprise` install doesn't start the sandbox runtime yet. Sandboxes
 therefore run only on installs where the user owns `config.yaml`, and there
 the admin block is enforced but advisory. See
@@ -212,7 +212,7 @@ workload runs as the same user as the hooks, so it could stop a hook
 process. The files it can reach and the network it can use are enforced
 outside the sandbox, by OpenShell and the egress proxy. How far the
 harness's own settings can switch its hooks off depends on the harness's
-tamper tier; see the [capability matrix](/docs/capability-matrix).
+tamper tier; see the [capability matrix](/docs/connectors/capability-matrix).
 
 ## MCP servers in a sandbox
 
@@ -1145,6 +1145,6 @@ What developers get:
   lists every `openshell` key.
 - [Enterprise configuration](/docs/enterprise/configuration) covers
   administrator-owned configuration.
-- [Sandbox](/docs/setup/sandbox), the sandbox setup page.
+- [Sandbox](/docs/sandboxes/guide), the sandbox setup page.
 - [Sandbox CLI](/docs/reference/sandbox-cli) lists every `sandbox` command and
   flag, including `policy explain` and the `pack` commands.

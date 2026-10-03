@@ -14,10 +14,10 @@ keywords:
 `defenseclaw sandbox` runs Claude Code, Codex, and other hook-based coding
 agents in NVIDIA OpenShell 0.1 sandboxes on Linux, and on Macs with Apple
 silicon in OpenShell MicroVMs, where every run works on a copy (see
-[macOS](/docs/setup/sandbox#macos)). This page lists every
-`sandbox` command and flag; see also [Sandbox](/docs/setup/sandbox).
+[macOS](/docs/sandboxes/guide#macos)). This page lists every
+`sandbox` command and flag; see also [Sandbox](/docs/sandboxes/guide).
 Packs and organization limits are covered in
-[Sandbox policy packs and admin controls](/docs/setup/sandbox-policy), and
+[Sandbox policy packs and admin controls](/docs/sandboxes/policy-packs), and
 the `openshell:` keys in
 [Configuration](/docs/reference/configuration#openshell-sandbox-settings).
 
@@ -40,7 +40,7 @@ tree, and a test keeps them in step with it. `defenseclaw sandbox <command>
   MicroVMs, on Apple silicon only: on an Intel Mac every command except
   `teardown` and `legacy-cleanup` stops with exit status 3. A MicroVM mounts
   no host folders, so every run on a Mac works on a copy (see
-  [macOS](/docs/setup/sandbox#macos)).
+  [macOS](/docs/sandboxes/guide#macos)).
 - **The daemon does the work.** Commands that create, change, or read
   sandboxes call the DefenseClaw daemon's
   [sandbox API](/docs/reference/gateway-api#sandbox-api) on the main API
@@ -57,7 +57,7 @@ tree, and a test keeps them in step with it. `defenseclaw sandbox <command>
   Claude Code and Codex; `image rm` removes only the harnesses you name. Amp, Cursor Agent, and Devin CLI are not verified
   end to end yet: their images build, but they never pass the hook check, so
   no sandbox runs them. The
-  [capability matrix](/docs/capability-matrix) says why for each harness.
+  [capability matrix](/docs/connectors/capability-matrix) says why for each harness.
 - **Sandbox names.** A name is lowercase letters, digits, and `-`, at most
   19 characters: OpenShell 0.1.1 refuses to create a sandbox with a longer
   name. Without `--name`, `run` picks `<folder>-<random>`, the folder name cut
@@ -578,7 +578,7 @@ A few rules the flags follow:
   `defenseclaw sandbox run hermes --llm none --credential HERMES_DEFENSECLAW_API_KEY=HOST[:PORT] --env HERMES_DEFENSECLAW_BASE_URL=https://HOST/v1 -- --provider defenseclaw -m MODEL`.
 - `--pack`, `--profile`, `--copy`, `--safe`, `--unmask`, `--host-port`,
   `--no-mcp`, `--cpu`, and `--memory` go through the
-  [sandbox policy](/docs/setup/sandbox-policy). An organization limit can
+  [sandbox policy](/docs/sandboxes/policy-packs). An organization limit can
   refuse them ("blocked by your organization's DefenseClaw policy") or
   lower them ("limited by …; running with X instead of Y"), and
   `sandbox policy explain` shows the outcome before you run. A flag the
@@ -868,7 +868,7 @@ are two different lines. An IPv6 address with its port is bracketed:
 `[fd00:ec2::254]:80`. A blocked destination that can be unblocked shows
 the `unblock` command to run. A large upload is a ⚠ report, made as it crosses the threshold, so it says `more than`
 it (`⚠ large upload to files.example.net (more than 25 MiB)`), or, with
-[the large-upload block](/docs/setup/sandbox-policy#large-upload-alert-threshold)
+[the large-upload block](/docs/sandboxes/policy-packs#large-upload-alert-threshold)
 on, a ✗ that names the threshold, such as `✗ files.example.net (large upload
 blocked: this sandbox tried to send more than 10 MiB to a destination it had
 not contacted before)`, with its `unblock` command. `-f`
@@ -962,7 +962,7 @@ lifted: IP addresses under `open`, and hosts off the allowlist under
 organization's lists can't be unblocked, and neither can anything under
 `strict`, which runs without the egress proxy. With
 `openshell.admin.allow_unblock: false`, nothing can be unblocked. The
-[decision order](/docs/setup/sandbox-policy#how-a-destination-is-decided)
+[decision order](/docs/sandboxes/policy-packs#how-a-destination-is-decided)
 has the details.
 
 An unblock also stops DefenseClaw's destination rules (such as
@@ -1133,7 +1133,7 @@ defenseclaw sandbox pull fix-tests --patch-out fix-tests.patch
 
 The effective sandbox policy combines the pack, your `openshell` keys, the run
 flags, and the organization's `openshell.admin` limits. See
-[How the effective policy is computed](/docs/setup/sandbox-policy#how-the-effective-policy-is-computed).
+[How the effective policy is computed](/docs/sandboxes/policy-packs#how-the-effective-policy-is-computed).
 
 ```bash
 defenseclaw sandbox policy show
@@ -1262,7 +1262,7 @@ because the administrator owns `config.yaml`.
 ### `sandbox pack`
 
 Policy packs set the whole sandbox posture. See
-[Sandbox policy packs](/docs/setup/sandbox-policy).
+[Sandbox policy packs](/docs/sandboxes/policy-packs).
 
 ```bash
 defenseclaw sandbox pack list
@@ -1334,7 +1334,7 @@ the host's OpenClaw networking, ownership, and config. It prints every step
 with its exact commands and asks once, unless you pass `--yes`. Progress is
 recorded in `<data_dir>/legacy-sandbox-cleanup.json`, so running it again only
 does what is left.
-[Detect a legacy install](/docs/setup/sandbox#detect-a-legacy-install) says
+[Detect a legacy install](/docs/sandboxes/guide#detect-a-legacy-install) says
 when you need it.
 
 ```bash

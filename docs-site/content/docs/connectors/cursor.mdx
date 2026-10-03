@@ -73,8 +73,8 @@ enterprise-wide authority or native human approval.
 The table highlights convenience options rather than the complete alias
 surface. The alias also accepts `--mode`, `--rule-pack`, `--fail-mode`,
 approval, block-message, add/replace, workspace, and rule-pack-directory
-options. See the [quick-alias reference](/docs/setup/guardrail/aliases); use
-[full guardrail setup](/docs/setup/guardrail) for scanner, detection-strategy,
+options. See the [quick-alias reference](/docs/guardrail/aliases); use
+[full guardrail setup](/docs/guardrail) for scanner, detection-strategy,
 and judge-provider configuration.
 
 | Flag | Default | What it does |
@@ -152,7 +152,7 @@ defenseclaw setup guardrail \
   --restart
 ```
 
-The alias selects Cursor; the follow-up `setup guardrail --connector cursor` swaps in the strict rule pack, keeps scanning local, and turns the LLM judge on as a second-pass adjudicator on regex-flagged events. Configure the remote scanner separately through [full guardrail setup](/docs/setup/guardrail), which validates its endpoint and API-key environment variable.
+The alias selects Cursor; the follow-up `setup guardrail --connector cursor` swaps in the strict rule pack, keeps scanning local, and turns the LLM judge on as a second-pass adjudicator on regex-flagged events. Configure the remote scanner separately through [full guardrail setup](/docs/guardrail), which validates its endpoint and API-key environment variable.
 
 </Tab>
 
@@ -162,13 +162,13 @@ The alias selects Cursor; the follow-up `setup guardrail --connector cursor` swa
 
 <Cards>
   <Card href="/docs/hitl" title="Human-in-the-loop (HITL)" description="DefenseClaw does not enable Cursor native ask/HITL; confirm verdicts remain attributed alerts." />
-  <Card href="/docs/setup/guardrail#every-flag" title="Full setup guardrail flag reference" description="The complete flag surface for `setup guardrail --connector cursor`." />
-  <Card href="/docs/defaults" title="Defaults & rule packs" description="What permissive / default / strict actually ship, and which one matches your risk tolerance." />
-  <Card href="/docs/setup/guardrail#watch-the-interactive-flow" title="Interactive wizard" description="Animated terminal demo of the prompt-by-prompt setup flow — the safest path the first time." />
+  <Card href="/docs/guardrail#every-flag" title="Full setup guardrail flag reference" description="The complete flag surface for `setup guardrail --connector cursor`." />
+  <Card href="/docs/policies/defaults" title="Defaults & rule packs" description="What permissive / default / strict actually ship, and which one matches your risk tolerance." />
+  <Card href="/docs/guardrail#watch-the-interactive-flow" title="Interactive wizard" description="Animated terminal demo of the prompt-by-prompt setup flow — the safest path the first time." />
 </Cards>
 
 <Callout>
-Not sure what to pick? Run `defenseclaw setup guardrail` (no flags) — the [interactive wizard](/docs/setup/guardrail#watch-the-interactive-flow) walks you through every choice with safe defaults pre-selected and inline help. The [Prompt → flag mapping](/docs/setup/guardrail#prompt-flag-mapping) table gives you the CI-shaped command for the same configuration.
+Not sure what to pick? Run `defenseclaw setup guardrail` (no flags) — the [interactive wizard](/docs/guardrail#watch-the-interactive-flow) walks you through every choice with safe defaults pre-selected and inline help. The [Prompt → flag mapping](/docs/guardrail#prompt-flag-mapping) table gives you the CI-shaped command for the same configuration.
 </Callout>
 
 ## Files DefenseClaw will modify
@@ -270,7 +270,7 @@ image. Remove it with `docker image rm <tag>`; the next prune forgets its
 record.
 </Callout>
 
-The [sandbox guide](/docs/setup/sandbox) covers the `sandbox` commands. What
+The [sandbox guide](/docs/sandboxes/guide) covers the `sandbox` commands. What
 the Cursor Agent image already holds:
 
 - **Managed tier.** The hooks are in root-owned `/etc/cursor/hooks.json`,

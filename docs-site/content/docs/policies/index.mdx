@@ -175,9 +175,9 @@ policy packs extend that base. See the
 the complete inventory, proof boundaries, and source-of-truth paths.
 
 <Cards>
-  <Card title="permissive" href="/docs/defaults" description="Permissive runtime posture: CRITICAL blocks, HIGH alerts, and lower severities allow. Pair with observe mode for a non-enforcing pilot." />
-  <Card title="default" href="/docs/defaults" description="Balanced runtime posture: CRITICAL blocks, HIGH/MEDIUM alert, and LOW allows; HITL can turn eligible HIGH findings into confirm." />
-  <Card title="strict" href="/docs/defaults" description="Strict runtime posture: MEDIUM and above block, LOW alerts. Choose this when false negatives cost more than interruptions." />
+  <Card title="permissive" href="/docs/policies/defaults" description="Permissive runtime posture: CRITICAL blocks, HIGH alerts, and lower severities allow. Pair with observe mode for a non-enforcing pilot." />
+  <Card title="default" href="/docs/policies/defaults" description="Balanced runtime posture: CRITICAL blocks, HIGH/MEDIUM alert, and LOW allows; HITL can turn eligible HIGH findings into confirm." />
+  <Card title="strict" href="/docs/policies/defaults" description="Strict runtime posture: MEDIUM and above block, LOW alerts. Choose this when false negatives cost more than interruptions." />
 </Cards>
 
 Each pack is a directory:
@@ -299,7 +299,7 @@ finding can alert but cannot block by itself. Blocking requires an actionable
 corroborated category or strong structural exfiltration/destruction evidence;
 ordinary authorized coding context therefore does not become a block merely
 because one ambiguous category fired. Read the
-[contextual judge benchmark](/docs/llm-judge-benchmark) for the production-path
+[contextual judge benchmark](/docs/guardrail/llm-judge-benchmark) for the production-path
 F1, false-positive, benign-block, latency, token, and cost results.
 
 Judge configuration is split by detector under `judge/`. For example, the
@@ -322,7 +322,7 @@ single_category_max_severity: HIGH
 min_categories_for_critical: 2
 ```
 
-The judge call goes through the same Bifrost pipeline as everything else and uses the [unified LLM key](/docs/setup/unified-llm-key). Token usage is emitted as a `judge.call` event so you can monitor cost from your dashboards.
+The judge call goes through the same Bifrost pipeline as everything else and uses the [unified LLM key](/docs/guardrail/unified-llm-key). Token usage is emitted as a `judge.call` event so you can monitor cost from your dashboards.
 
 You can target a different model than the rest of the stack by setting `guardrail.judge.llm` in `config.yaml`:
 
@@ -551,7 +551,7 @@ compare custom YAML files with `diff` or another YAML-aware tool.
 
 ## See also
 
-- [Defaults](/docs/defaults) — what each shipped rule pack actually sets, and how to pick one based on risk tolerance
-- [Setup Guardrail](/docs/setup/guardrail) — the CLI that wires the chosen pack into your connectors
-- [Unified LLM key](/docs/setup/unified-llm-key) — how the LLM judge resolves its provider key
+- [Defaults](/docs/policies/defaults) — what each shipped rule pack actually sets, and how to pick one based on risk tolerance
+- [Setup Guardrail](/docs/guardrail) — the CLI that wires the chosen pack into your connectors
+- [Unified LLM key](/docs/guardrail/unified-llm-key) — how the LLM judge resolves its provider key
 - [Reference → Configuration](/docs/reference/configuration) — every config key the policy layer reads

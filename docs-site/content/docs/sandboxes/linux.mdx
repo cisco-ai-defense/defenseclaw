@@ -57,7 +57,7 @@ What is mounted, and how:
 
 For an untrusted repository, `defenseclaw sandbox run claude --copy` works
 on a copy instead, as every run on a Mac does. See
-[work on a copy](/docs/setup/sandbox#work-on-a-copy).
+[work on a copy](/docs/sandboxes/guide#work-on-a-copy).
 
 ## Before you start
 
@@ -157,7 +157,7 @@ Build the Claude Code image now? (the first build downloads about 3 GB; otherwis
 
 Setup is safe to run again. When sandboxes are running, it asks before it
 restarts the shared gateway. `defenseclaw sandbox teardown` undoes it (see
-[tear down](/docs/setup/sandbox#tear-down-and-uninstall)).
+[tear down](/docs/sandboxes/guide#tear-down-and-uninstall)).
 
 </Step>
 
@@ -262,7 +262,7 @@ staging area and the git files the agent could write. It first saves every
 tip the session created or moved, so an undo can be undone too. Files git
 ignores, such as `node_modules/` and `.venv/`, are not in the snapshot:
 undo names each one it cannot restore. See
-[undo the session](/docs/setup/sandbox#undo-the-session).
+[undo the session](/docs/sandboxes/guide#undo-the-session).
 
 ## Only one live mount per folder
 
@@ -288,5 +288,5 @@ defenseclaw sandbox run codex --copy --name docs
 | `the DefenseClaw daemon is not running` | `defenseclaw-gateway start`. With the daemon down, sandbox hooks block every tool call. |
 | `refusing to share /home/alice with a sandbox: it is your home directory` | Run from a project folder inside your home, not from home itself. |
 
-The [troubleshooting table](/docs/setup/sandbox#troubleshooting) in the full
+The [troubleshooting table](/docs/sandboxes/guide#troubleshooting) in the full
 guide covers the rest.
