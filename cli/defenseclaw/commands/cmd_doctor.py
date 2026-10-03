@@ -9329,20 +9329,7 @@ def _check_connector_export_custody(report, r: _DoctorResult, *, configured: set
             r=r,
         )
     if report.unattributed_authentication_failures:
-        _emit(
-            "warn",
-            "Native OTLP credentials",
-            f"invalid credential attempts could not be attributed to a trusted connector; "
-            f"count={report.unattributed_authentication_failures}; "
-            f"last={report.last_unattributed_authentication_failure or 'unknown'}",
-            r=r,
-            remediation=(
-                "the gateway rejected OTLP sent to it without a valid DefenseClaw token (nothing was stored); "
-                "a stale OTEL_EXPORTER_OTLP_* setting in a shell profile or agent config usually causes it. "
-                "Re-run 'defenseclaw setup <connector>' for each agent that exports telemetry; if it keeps "
-                "growing, look for other OTLP senders pointed at the gateway port"
-            ),
-        )
+        _emit_unattributed_otlp_credentials(report, r)
     if report.event_rows_truncated:
         _emit(
             "warn",
@@ -9350,6 +9337,57 @@ def _check_connector_export_custody(report, r: _DoctorResult, *, configured: set
             "recent evidence reached the bounded read limit; drop-only and credential counts are partial",
             r=r,
         )
+
+
+
+def _short_age(seconds: float) -> str:
+    """Compact age for a doctor row: '12 min', '23 h' or '3 d'."""
+    minutes = max(0, int(seconds // 60))
+    if minutes < 60:
+        return f"{minutes} min"
+    hours = minutes // 60
+    return f"{hours} h" if hours < 48 else f"{hours // 24} d"
+
+
+def _emit_unattributed_otlp_credentials(report, r: _DoctorResult, *, now=None) -> None:
+    """Rejected OTLP attempts no trusted connector owns (GAP-2294).
+
+    The count covers a rolling window, so the row names the window and the
+    age of the last attempt. Re-running setup cannot clear old attempts; it
+    is only suggested while attempts are still arriving.
+    """
+    from defenseclaw.observability.custody_status import _format_time, _parse_time
+
+    count = report.unattributed_authentication_failures
+    window = int(getattr(report, "observation_window_hours", 0) or 24)
+    noun = "attempt" if count == 1 else "attempts"
+    last = _parse_time(report.last_unattributed_authentication_failure)
+    current = now or datetime.now(timezone.utc)
+    age = (current - last).total_seconds() if last else None
+    if age is None:
+        when = "last attempt time unknown"
+    else:
+        when = f"last {_short_age(age)} ago ({_format_time(last)})"
+    detail = (
+        f"{count} rejected OTLP {noun} in the last {window} h, {when}; "
+        "the sender had no valid DefenseClaw token, so nothing was stored or attributed to a connector"
+    )
+    if age is not None and age > 3600:
+        clears = _format_time(last + timedelta(hours=window))
+        remediation = (
+            "no new attempts in the last hour; this row clears on its own at "
+            f"{clears} if none arrive. Re-running setup does not clear it. "
+            "If 'defenseclaw doctor' later shows a newer 'last', look for a stale "
+            "OTEL_EXPORTER_OTLP_* setting in a shell profile or agent config"
+        )
+    else:
+        remediation = (
+            "attempts are recent: a stale OTEL_EXPORTER_OTLP_* setting in a shell profile or agent "
+            "config usually causes this. Re-run 'defenseclaw setup <connector>' for each agent that "
+            "exports telemetry; if the count keeps growing, look for other OTLP senders pointed at "
+            "the gateway port"
+        )
+    _emit("warn", "Native OTLP credentials", detail, r=r, remediation=remediation)
 
 
 def _destination_remediation(destination, live) -> str:

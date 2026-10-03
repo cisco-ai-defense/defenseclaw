@@ -836,3 +836,34 @@ def test_pre_first_start_token_and_codex_hook_rows_are_pending(tmp_path) -> None
     cmd_doctor._check_codex_hooks(cfg, running, platform_name="linux")
     assert running.checks[-1]["status"] == "fail"
     assert running.checks[-1]["remediation"] == "re-register the hooks: defenseclaw setup codex --yes"
+
+
+def test_unattributed_otlp_credentials_name_window_and_age() -> None:
+    # GAP-2294: the count covers a rolling window; old attempts clear on
+    # their own, so setup is only suggested while attempts are recent.
+    from datetime import datetime, timezone
+
+    now = datetime(2026, 10, 3, 6, 22, tzinfo=timezone.utc)
+
+    def row(last: str) -> dict:
+        report = ConnectorCustodyReport(
+            state="available",
+            reason="",
+            observation_window_hours=24,
+            unattributed_authentication_failures=9,
+            last_unattributed_authentication_failure=last,
+        )
+        r = _DoctorResult()
+        cmd_doctor._emit_unattributed_otlp_credentials(report, r, now=now)
+        (check,) = r.checks
+        assert check["label"] == "Native OTLP credentials" and check["status"] == "warn"
+        return check
+
+    old = row("2026-10-02T06:44:41Z")
+    assert "9 rejected OTLP attempts in the last 24 h, last 23 h ago" in old["detail"]
+    assert "clears on its own at 2026-10-03T06:44:41Z" in old["remediation"]
+    assert "defenseclaw setup" not in old["remediation"]
+
+    recent = row("2026-10-03T06:10:00Z")
+    assert "last 12 min ago" in recent["detail"]
+    assert "defenseclaw setup <connector>" in recent["remediation"]
