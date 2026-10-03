@@ -446,6 +446,36 @@ class TestInitFirstRunBackend(unittest.TestCase):
                 cmd_init._render_first_run_report(report, renderer)
             self.assertEqual(any(hint in line for line in lines), shown, (host, lines))
 
+    def test_next_for_openclaw_gives_proxy_advice_not_hook_advice(self):
+        # GAP-2427: OpenClaw has no hooks, nothing starts the gateway for it,
+        # and setup <hook connector> replaces it, so the hook lines are wrong.
+        from types import SimpleNamespace
+
+        from defenseclaw.commands import cmd_init
+
+        report = SimpleNamespace(
+            status="ok", connector="openclaw", profile="action", setup=[], readiness=[], next_commands=[]
+        )
+        lines: list[str] = []
+        renderer = SimpleNamespace(
+            title=lambda *a: None, section=lambda *a: None, step=lambda *a: None, echo=lines.append
+        )
+        with (
+            patch.object(cmd_init.platform_support, "host_os", return_value="linux"),
+            patch.object(cmd_init, "_closed_fail_mode_connectors", return_value=["openclaw"]),
+            patch.object(cmd_init, "_sandboxes_possible", return_value=False),
+            patch.object(cmd_init, "_unguarded_acp_summary", return_value=""),
+        ):
+            cmd_init._render_first_run_report(report, renderer)
+        text = "\n".join(lines)
+        self.assertNotIn("hooks", text.replace("hook agent", ""))
+        self.assertNotIn("Adding another agent later", text)
+        self.assertIn("OpenClaw runs alone", text)
+        # GAP-2426 refuses setup <hook connector> on OpenClaw without --replace (GAP-2461).
+        self.assertIn("defenseclaw setup <connector> --replace", text)
+        self.assertIn("OpenClaw model calls fail while the DefenseClaw gateway is down", text)
+        self.assertIn("Nothing starts the gateway for OpenClaw", text)
+
     def test_header_profile_says_mixed_when_connector_modes_differ(self):
         # GAP-1224: one connector in action and the rest in observe is not "profile=observe".
         from defenseclaw.commands import cmd_init
