@@ -917,6 +917,9 @@ class AIDiscoveryPanelModel:
         if key == "r":
             return AIDiscoveryPanelAction(True, self.load_intent())
         if key == "s":
+            if self.snapshot is not None and not self.snapshot.enabled:
+                # A scan only fails with HTTP 503 while discovery is off (GAP-2230).
+                return AIDiscoveryPanelAction(True, hint="AI discovery is off. Press d to turn it on, then s to scan.")
             return AIDiscoveryPanelAction(True, self.scan_intent())
         if key == "/":
             self.filter_text = ""
@@ -927,6 +930,16 @@ class AIDiscoveryPanelModel:
                 hint="Type to filter products and models. Enter applies; Esc clears.",
             )
         return AIDiscoveryPanelAction(False)
+
+    def hint_conditions(self) -> tuple[str, ...]:
+        """Hint bar conditions: ``disabled`` (discovery off), ``all_models``."""
+
+        conditions: list[str] = []
+        if self.snapshot is not None and not self.snapshot.enabled:
+            conditions.append("disabled")
+        if self.show_all_models:
+            conditions.append("all_models")
+        return tuple(conditions)
 
     def toggle_model_scope_action(self) -> AIDiscoveryPanelAction:
         """Toggle model scope independently of keyboard filter input."""

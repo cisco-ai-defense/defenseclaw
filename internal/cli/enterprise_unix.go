@@ -93,7 +93,7 @@ arguments, 75 another lifecycle run holds the lock.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) > 0 {
-				return invalidLifecycleArguments(fmt.Errorf("unknown action %q for %q; run %q for the actions", args[0], cmd.CommandPath(), cmd.CommandPath()+" --help"))
+				return invalidLifecycleArguments(fmt.Errorf("unknown action %q for %q; run %q for the actions", args[0], cmd.CommandPath(), invokedCommandText(cmd, cmd.CommandPath()+" --help")))
 			}
 			return cmd.Help()
 		},
@@ -209,6 +209,24 @@ func newEnterpriseSecretCommand(action, summary string) *cobra.Command {
 		cmd.Flags().DurationVar(&opts.lockWait, "lock-wait", 0, lockWaitUsage)
 	}
 	cmd.Flags().BoolVar(&opts.json, "json", false, "print JSON")
+	if runtime.GOOS != "windows" {
+		// An unknown flag, a malformed value, a stray argument or a missing
+		// --name is invalid arguments: exit 2 with the usage line and the
+		// --help pointer, as on enterprise linux|macos (GAP-2095).
+		cmd.SetFlagErrorFunc(lifecycleFlagError)
+		cmd.Args = func(cmd *cobra.Command, args []string) error {
+			if err := cobra.NoArgs(cmd, args); err != nil {
+				return lifecycleFlagError(cmd, err)
+			}
+			return nil
+		}
+		cmd.PreRunE = func(cmd *cobra.Command, _ []string) error {
+			if err := cmd.ValidateRequiredFlags(); err != nil {
+				return lifecycleFlagError(cmd, err)
+			}
+			return nil
+		}
+	}
 	return cmd
 }
 

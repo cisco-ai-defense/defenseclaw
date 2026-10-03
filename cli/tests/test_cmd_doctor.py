@@ -185,7 +185,7 @@ class DoctorHermesPathTests(unittest.TestCase):
 
 class DoctorGuardrailTests(unittest.TestCase):
     @patch("defenseclaw.commands.cmd_doctor._http_probe", return_value=(200, "ok"))
-    def test_empty_guardrail_model_is_warning_not_failure(self, _mock_probe):
+    def test_empty_guardrail_model_is_not_a_warning(self, _mock_probe):
         cfg = Config(
             data_dir="/tmp/defenseclaw",
             audit_db="/tmp/defenseclaw/audit.db",
@@ -200,11 +200,12 @@ class DoctorGuardrailTests(unittest.TestCase):
 
         _check_guardrail_proxy(cfg, result)
 
+        # Fetch-interceptor routing is how OpenClaw works (GAP-2233):
+        # an empty guardrail.model is not something to warn about.
         self.assertEqual(result.failed, 0)
-        self.assertEqual(result.warned, 1)
+        self.assertEqual(result.warned, 0)
         self.assertEqual(result.passed, 1)
-        warn_checks = [c for c in result.checks if c["status"] == "warn"]
-        self.assertTrue(any("fetch-interceptor" in c["detail"] for c in warn_checks))
+        self.assertNotIn("guardrail.model", " ".join(c["detail"] for c in result.checks))
 
     def test_proxy_interception_fails_when_self_test_misses(self):
         cfg = Config(
@@ -1734,14 +1735,14 @@ class VerifyBedrockTests(unittest.TestCase):
         _verify_bedrock("ASIAEXAMPLETEMPKEY", r)
         self.assertEqual(r.warned, 1, r.checks)
 
-    def test_unrecognized_shape_passes_with_note(self):
-        # If the operator is running a custom gateway that accepts
-        # some other token format, we shouldn't block — just note
-        # the shape isn't one we can probe.
+    def test_unrecognized_shape_warns_with_next_step(self):
+        # GAP-2195: Bedrock rejects keys without a known prefix, so an
+        # unknown shape is a WARN with a next step, never a green check.
         r = _DoctorResult()
-        _verify_bedrock("custom-gateway-token-xyz", r)
-        self.assertEqual(r.passed, 1, r.checks)
-        self.assertIn("not a Bedrock API key format doctor knows", r.checks[0]["detail"])
+        _verify_bedrock("dccert-fake-invalid-key", r)
+        self.assertEqual((r.passed, r.warned, r.failed), (0, 1, 0), r.checks)
+        self.assertIn("does not look like a Bedrock API key", r.checks[0]["detail"])
+        self.assertIn("keys set DEFENSECLAW_LLM_KEY", r.checks[0].get("remediation", ""))
 
     @patch("defenseclaw.commands.cmd_doctor._http_probe", return_value=(200, "{}"))
     def test_short_term_bedrock_api_key_is_probed(self, mock_probe):

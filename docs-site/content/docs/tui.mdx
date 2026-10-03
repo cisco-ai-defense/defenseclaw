@@ -39,11 +39,12 @@ the panels have data to show.
 Switch panels with the number/letter key shown, from any panel (only an open
 Setup form or a `/` search box types digits and letters), or cycle with `Tab` /
 `Shift+Tab`. Press `Ctrl+P` to fuzzy-jump to any panel by name. On a narrow
-terminal every tab stays on screen: the most-used tabs keep their names and
-the rest show only their key. Which tabs keep a name depends only on the
+terminal every tab stays on screen: Overview, Alerts and Policies keep their
+names first, then as many other tabs as fit get a short name (`Inv`, `Log`),
+and the rest show only their key. Which tabs keep a name depends only on the
 terminal width and the unread counts, so switching panels changes only the tab
-you leave and the tab you open; other tabs give up their names before their
-unread counts. Below 80
+you leave and the tab you open. Unread counts stay ahead of names (`8⁶⁴`), and
+some room stays free for the longest panel name when you open it. Below 80
 columns the tab you are on gets as much of its name as fits (`R Regis…`), ahead
 of the other tabs' unread counts; the Alerts count stays. Below about 68
 columns every tab shows only its key, and the panel title names the panel.
@@ -177,7 +178,7 @@ and help beside the table:
 | `/` | Find a field by name or key in any section |
 | `Enter` | Edit the field (text box) or change a choice |
 | `S` | Review the changes and save |
-| `R` | Revert unsaved changes |
+| `r` | Revert unsaved changes (`R` opens Registries) |
 | `w` | Back to the task list |
 
 Keys the TUI can't save show as read-only rows; their hint says where to change
@@ -373,6 +374,7 @@ rules.
 | `Ctrl+K` or `:` | Open the command palette (search-and-run any command; the Risk column marks what changes things) |
 | `Ctrl+P` | Jump to a panel by name |
 | `/` | On Skills, MCPs, Plugins and Runtime: filter the list (`Enter`, `Esc` or `Down` returns to it; `Esc` on the list clears the filter) |
+| `/` on Alerts | Search the alerts: the text matches every column the table shows, including the rule id and title in Details (`Enter` applies, `Esc` clears) |
 | `Ctrl+\` | Theme picker |
 | `D` | Run `defenseclaw doctor` in the background and toast the result (works on every panel) |
 | `Y` | Copy the last command's output (works on every panel) |

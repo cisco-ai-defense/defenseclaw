@@ -844,6 +844,8 @@ class TestAdditiveSetupCommand(unittest.TestCase):
                 setup_group, ["openclaw", "--replace", "--no-restart", "--no-verify"], obj=self.app, input="n\n"
             )
         self.assertIn("--replace removes 2 hook connector(s): codex, cursor", declined.output)
+        # GAP-2117: say when the removed hooks go away, not only in the prompt.
+        self.assertIn("Their hooks stay installed until the gateway restarts (--no-restart).", declined.output)
         self.assertIn("Aborted", declined.output)
         self.assertEqual(set(self.app.cfg.guardrail.connectors), {"codex", "cursor"})
 
@@ -851,6 +853,7 @@ class TestAdditiveSetupCommand(unittest.TestCase):
             result = _invoke(["openclaw", "--replace", "--yes", "--no-restart", "--no-verify"], self.app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
         backend.assert_called_once()
+        self.assertIn("Remove them now with: defenseclaw-gateway restart", result.output)
         gc = self.app.cfg.guardrail
         self.assertEqual(gc.connectors, {})
         self.assertEqual(gc.connector, "openclaw")
@@ -872,6 +875,51 @@ class TestAdditiveSetupCommand(unittest.TestCase):
                 dotenv = handle.read()
         self.assertIn("DEFENSECLAW_GATEWAY_TOKEN=openclaw-side-token", dotenv)
         self.assertIn("OPENCLAW_GATEWAY_TOKEN=openclaw-side-token", dotenv)
+
+    # GAP-2259: the running gateway is stopped with the token it loaded, so its
+    # shutdown API never sees the new one; it then starts on the new token.
+    def test_openclaw_token_swap_stops_gateway_with_old_token(self):
+        oc = os.path.join(self.tmp_dir, "openclaw.json")
+        with open(oc, "w", encoding="utf-8") as handle:
+            json.dump({"gateway": {"auth": {"token": "openclaw-side-token"}}}, handle)
+        self.app.cfg.claw.config_file = oc
+        self.app.cfg.gateway.token = ""
+        self.app.cfg.gateway.token_env = ""
+        dotenv_path = os.path.join(self.app.cfg.data_dir, ".env")
+        alive = {"value": True}
+        seen: list[tuple[str, bool]] = []
+
+        def dotenv_has_new_token() -> bool:
+            if not os.path.exists(dotenv_path):
+                return False
+            with open(dotenv_path, encoding="utf-8") as handle:
+                return "openclaw-side-token" in handle.read()
+
+        def stop(cmd, **_kwargs):
+            seen.append((cmd[-1], dotenv_has_new_token()))
+            alive["value"] = False
+
+        def start(_data_dir, **_kwargs):
+            seen.append(("start", dotenv_has_new_token()))
+            return True
+
+        for restart, expected in ((False, []), (True, [("stop", False), ("start", True)])):
+            seen.clear()
+            alive["value"] = True
+            if os.path.exists(dotenv_path):
+                os.unlink(dotenv_path)
+            with (
+                patch.dict(os.environ, {"DEFENSECLAW_GATEWAY_TOKEN": "defenseclaw-own-token"}),
+                patch.object(cmd_setup, "_is_pid_alive", side_effect=lambda _p: alive["value"]),
+                patch.object(cmd_setup, "_gateway_pid_file_identifies_gateway", return_value=True),
+                patch.object(cmd_setup, "_gateway_lifecycle_executable", return_value="/opt/dc/defenseclaw-gateway"),
+                patch.object(cmd_setup, "run_pinned_executable", side_effect=stop),
+                patch.object(cmd_setup, "_restart_defense_gateway", side_effect=start),
+            ):
+                os.environ.pop("OPENCLAW_GATEWAY_TOKEN", None)
+                cmd_setup._adopt_openclaw_gateway_token(self.app, restart=restart)
+            self.assertEqual(seen, expected)
+            self.assertTrue(dotenv_has_new_token())
 
     # GAP-1524: DefenseClaw dials the OpenClaw gateway on openclaw.json's port.
     def test_openclaw_gateway_port_is_adopted_from_openclaw_json(self):
@@ -1112,6 +1160,22 @@ class TestObservabilitySummaryDisplay(unittest.TestCase):
         self.assertIn("unsupported", out)
         self.assertIn("native OTel:", out)
         self.assertIn("hook-derived audit only", out)
+
+
+    # GAP-2013: a peer the restarted gateway refused is configured but not
+    # guarded, so the Summary must not list it with the guarded connectors.
+    def test_summary_marks_a_refused_peer_not_guarded(self):
+        self._seed_map("claudecode", "codex", "hermes", "opencode")
+        buf = io.StringIO()
+        with click.Context(click.Command("setup")), contextlib.redirect_stdout(buf):
+            cmd_setup._remember_runtime_skipped_peers({"hermes"})
+            _print_observability_summary("opencode", self.app.cfg, mode="action", os_name="posix")
+        out = buf.getvalue()
+
+        self.assertRegex(out, r"connectors:\s+claudecode, codex, opencode\n")
+        self.assertRegex(out, r"not guarded now:\s+hermes ")
+        self.assertIn("This install now has 4 connectors configured; 3 guarded now: claudecode, codex, opencode.", out)
+        self.assertIn("Not guarded now: hermes. To guard it again, run: defenseclaw setup hermes", out)
 
 
 class TestConfiguredConnectorSet(unittest.TestCase):
@@ -1430,6 +1494,26 @@ class TestRemoveConnector(unittest.TestCase):
         self.assertIn("previous connectors, which stay protected", message)
         self.assertNotIn("may not be protected", message)
         self.assertNotIn("defenseclaw-gateway start", message)
+
+    def test_rollback_after_a_still_starting_gateway_names_readiness_timing(self):
+        # GAP-2105: a gateway that was still starting (kept running) ended in
+        # "could not apply the new connector configuration ... Fix that error".
+        self._seed_map("codex")
+        snapshot = cmd_setup._capture_setup_config_snapshot(self.app.cfg)
+        cause = cmd_setup._GatewayRestartFailed(
+            cmd_setup._GATEWAY_KEPT_STARTING_TEXT + ", so the change is not confirmed as applied yet."
+        )
+        with (
+            patch("defenseclaw.commands.cmd_setup._restart_restored_connector_runtime"),
+            self.assertRaises(click.ClickException) as raised,
+        ):
+            cmd_setup._rollback_failed_connector_application(self.app, snapshot, cause)
+
+        message = raised.exception.format_message()
+        self.assertIn("did not become ready in time (it was still starting)", message)
+        self.assertIn("`defenseclaw-gateway status` shows it healthy, run the same setup command again", message)
+        self.assertNotIn("could not apply", message)
+        self.assertNotIn("Fix that error", message)
 
     # D3=A: --no-restart does NOT bounce and warns teardown is deferred.
     def test_remove_no_restart_defers_teardown(self):

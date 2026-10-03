@@ -173,7 +173,12 @@ defenseclaw mcp set context7 --command uvx --args context7-mcp --connector openc
 defenseclaw mcp unset context7 --connector opencode
 defenseclaw mcp block untrusted-fs --reason "exfil tool found"
 defenseclaw mcp allow cisco-internal --reason "first-party"
+defenseclaw mcp unblock cisco-internal                       # remove the block or allow entry
 ```
+
+`mcp unblock` removes a server's block or allow entry, so its scan verdict
+decides again. It says which one it removed and prints the
+`defenseclaw mcp scan <name>` command to scan the server now.
 
 When a server's latest scan failed, `mcp list` shows Verdict `scan failed` and
 Severity `-`; an older result is kept only as `last_good_severity` in `--json`,

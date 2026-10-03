@@ -238,7 +238,19 @@ def scan(
             _plugin_roots_for_connector(app, connector),
             registry_cache=registry_cache,
         )
-        if scan_dir:
+        if scan_dir and not adhoc and _is_bridge_plugin_root(app, connector, scan_dir):
+            matches = [
+                _PluginMatch(connector, entry.path, plugin_id=entry.id)
+                for entry in discover_plugin_directories(
+                    scan_dir,
+                    connector=connector,
+                    registry_cache=registry_cache,
+                )
+            ]
+            if not matches:
+                _report_empty_bridge_plugin_root(scan_dir, connector, as_json=as_json)
+                return
+        elif scan_dir:
             # GAP-1697: report a Hermes plugin under the id plugin list shows.
             plugin_id = (
                 _hermes_plugin_id_for_path(scan_dir) if connector_paths.normalize(connector) == "hermes" else ""
@@ -341,6 +353,32 @@ def scan(
             project_path=match.project_path,
             plugin_id=match.plugin_id,
             adhoc=match.adhoc,
+        )
+
+
+def _is_bridge_plugin_root(app: AppContext, connector: str, path: str) -> bool:
+    """GAP-2099: *path* is an Amp/OpenCode plugin root, which can hold our bridge."""
+    connector = connector_paths.normalize(connector)
+    if connector not in _MANAGED_BRIDGES or not os.path.isdir(path):
+        return False
+    real = os.path.normcase(os.path.realpath(path))
+    return any(
+        real == os.path.normcase(os.path.realpath(root))
+        for root in _plugin_roots_for_connector(app, connector, include_legacy=False)
+    )
+
+
+def _report_empty_bridge_plugin_root(path: str, connector: str, *, as_json: bool) -> None:
+    connector = connector_paths.normalize(connector)
+    if as_json:
+        click.echo(json.dumps({"connector": connector, "results": [], "error": "no_plugin_targets"}, indent=2))
+        return
+    click.echo(f"No plugins found to scan in {path} for connector={connector}.")
+    label, filename = _MANAGED_BRIDGES[connector]
+    if os.path.isfile(os.path.join(path, filename)):
+        click.echo(
+            f"  {filename} is DefenseClaw's own {label} bridge, so it is not scanned. "
+            f"To stop guarding {label}, run: defenseclaw setup remove {connector}"
         )
 
 
@@ -574,7 +612,12 @@ def _print_plugin_scan_policy(name: str, *, connector: str = "", installed: bool
     else:
         text = "the policy would refuse this plugin at install."
     click.echo(f"        policy: rejected — {text}")
-    click.echo(f"          Block it: defenseclaw plugin block {name}{flag}")
+    if installed:
+        # GAP-2111: 'plugin block' only refuses new installs; quarantine moves
+        # the installed copy out (plugin restore brings it back).
+        click.echo(f"          Stop it: defenseclaw plugin quarantine {name}{flag}")
+    else:
+        click.echo(f"          Block it: defenseclaw plugin block {name}{flag}")
 
 
 def _host_plugin_dirs(app: AppContext, connector: str) -> list[str]:
@@ -1487,15 +1530,23 @@ def install(app: AppContext, name_or_path: str, force: bool, take_action: bool, 
         installed_connectors = {_normalize_runtime_connector(c) for c, _root in targets}
         if "hermes" in installed_connectors:
             _echo_hermes_activation_note(plugin_name)
+        if "claudecode" in installed_connectors:
+            _echo_claudecode_install_note(
+                source_path, plugin_name, only_claudecode=installed_connectors == {"claudecode"}
+            )
 
         from defenseclaw.commands import hint
 
         # Only the OpenClaw gateway loads plugins at start; hook connectors
-        # pick a plugin up in their own next session (GAP-1878).
-        hints = ["List plugins:      defenseclaw plugin list"]
+        # pick a plugin up in their own next session (GAP-1878). plugin list
+        # does not show a Claude Code copy, so don't point there (GAP-2084).
+        hints = []
+        if installed_connectors != {"claudecode"}:
+            hints.append("List plugins:      defenseclaw plugin list")
         if "openclaw" in installed_connectors:
             hints.append("Restart gateway:   defenseclaw-gateway restart")
-        hint(*hints)
+        if hints:
+            hint(*hints)
 
     finally:
         if tmpdir:
@@ -1537,8 +1588,8 @@ def _check_plugin_pre_install_admission(
             click.echo(
                 f"error: plugin {plugin_name!r} is on the block list for "
                 f"connector={connector} — run "
-                f"'defenseclaw plugin allow {plugin_name} --connector {connector}' "
-                "to unblock",
+                f"'defenseclaw plugin unblock {plugin_name} --connector {connector}' "
+                "to clear the block",
                 err=True,
             )
             raise SystemExit(1)
@@ -2288,10 +2339,10 @@ def _plugin_status(p: dict[str, Any], action_entry: Any = None) -> str:
 def _plugin_status_display(p: dict[str, Any], action_entry: Any = None) -> str:
     if action_entry and not action_entry.actions.is_empty():
         a = action_entry.actions
+        # GAP-2199: an install block leaves the installed copy loaded, so
+        # it does not change the Status column (Actions shows it).
         if a.file == "quarantine":
             return "\u2717 quarantined"
-        if a.install == "block":
-            return "\u2717 blocked"
         if a.runtime == "disable":
             return "\u2717 disabled"
     if p.get("enabled"):
@@ -2302,7 +2353,7 @@ def _plugin_status_display(p: dict[str, Any], action_entry: Any = None) -> str:
 def _plugin_effectively_enabled(p: dict[str, Any], action_entry: Any = None) -> bool:
     if action_entry and not action_entry.actions.is_empty():
         a = action_entry.actions
-        if a.file == "quarantine" or a.install == "block" or a.runtime == "disable":
+        if a.file == "quarantine" or a.runtime == "disable":
             return False
     return bool(p.get("enabled"))
 
@@ -2387,7 +2438,8 @@ def _print_plugin_list_table(
     table.add_column("Status", style="bold")
     table.add_column("ID")
     table.add_column("Plugin")
-    table.add_column("Description", max_width=50)
+    # GAP-2202: one line per row; Rich cuts a long description with "…".
+    table.add_column("Description", max_width=50, no_wrap=True, overflow="ellipsis")
     table.add_column("Origin")
     table.add_column("Severity")
     table.add_column("Verdict")
@@ -2414,11 +2466,19 @@ def _print_plugin_list_table(
             }.get(severity, "")
 
         actions_str = "-"
+        verdict_action = actions_map.get(pid)
         if pid in actions_map:
-            actions_str = actions_map[pid].actions.summary()
+            state = actions_map[pid].actions
+            actions_str = state.summary()
+            if state.install == "block":
+                # GAP-2199: say what the block covers, and keep the scan
+                # verdict when nothing stops the installed copy.
+                actions_str = actions_str.replace("blocked", "install-blocked")
+                if state.file != "quarantine" and state.runtime != "disable":
+                    verdict_action = None
 
         verdict_label, verdict_style = _compute_verdict(
-            actions_map.get(pid),
+            verdict_action,
             scan_map.get(pid),
         )
 
@@ -2432,7 +2492,7 @@ def _print_plugin_list_table(
             f"[{status_style}]{status_display}[/{status_style}]" if status_style else status_display,
             pid,
             name,
-            desc[:50] + "\u2026" if len(desc) > 50 else desc,
+            desc,
             origin,
             f"[{sev_style}]{severity}[/{sev_style}]" if sev_style else severity,
             f"[{verdict_style}]{verdict_label}[/{verdict_style}]" if verdict_style else verdict_label,
@@ -2779,6 +2839,29 @@ def _hermes_plugin_off_id(plugin_name: str) -> str:
     return ""
 
 
+def _echo_claudecode_install_note(source_path: str, plugin_name: str, *, only_claudecode: bool = True) -> None:
+    """Say that Claude Code will not load a copied plugin (GAP-2084).
+
+    Claude Code loads only plugins it installed from a marketplace (listed in
+    installed_plugins.json), so the copy in its plugin cache is scanned but
+    neither loaded nor shown by plugin list.
+    """
+    click.secho(
+        "  Claude Code loads only plugins installed from a marketplace, so it will not load "
+        "this copy and plugin list will not show it.",
+        fg="yellow",
+    )
+    if not os.path.isfile(os.path.join(source_path, ".claude-plugin", "plugin.json")):
+        click.echo("  This folder is not a Claude Code plugin: it has no .claude-plugin/plugin.json.")
+    click.echo(
+        "  To use a Claude Code plugin, run /plugin marketplace add <marketplace folder or repo>, "
+        "then /plugin install <name>@<marketplace> in Claude Code."
+    )
+    # A bare remove deletes every connector's copy (GAP-2152).
+    scope = " --connector claudecode" if only_claudecode else ""
+    click.echo(f"  Remove this copy: defenseclaw plugin remove {plugin_name}{scope}")
+
+
 def _echo_hermes_activation_note(plugin_name: str) -> None:
     """Explain Hermes' own opt-in next to DefenseClaw's runtime state (GAP-1878)."""
     plugin_id = _hermes_plugin_off_id(plugin_name)
@@ -3095,6 +3178,64 @@ def _list_openclaw_plugins(connector: str = "") -> list[dict]:
     return []
 
 
+def _claude_known_marketplaces(plugins_root: str) -> set[str]:
+    """Lower-cased marketplace names from Claude Code's known_marketplaces.json."""
+    try:
+        with open(os.path.join(plugins_root, "known_marketplaces.json"), encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return set()
+    return {str(key).casefold() for key in data} if isinstance(data, dict) else set()
+
+
+def _install_root_copies(
+    app: AppContext,
+    name: str,
+    connectors: list[str],
+    known_paths: list[str],
+) -> list[tuple[str, str]]:
+    """Copies ``plugin install`` put directly in a connector's install root.
+
+    GAP-2152: install copies the folder to ``<root>/<name>`` (Claude Code
+    and Codex: their plugin cache) and refuses a reinstall while it is
+    there, but discovery reads only the marketplace layout, so remove never
+    found it. Marketplace folders (named in known_marketplaces.json or
+    holding a discovered plugin) are skipped.
+    """
+    known = [os.path.realpath(path) for path in known_paths]
+    found: list[tuple[str, str]] = []
+    for connector in connectors:
+        # Only the root install writes to (see _plugin_install_targets).
+        try:
+            roots = [d for d in app.cfg.plugin_dirs(connector) if d][:1]
+        except Exception:  # noqa: BLE001 — no install root, nothing to find.
+            roots = []
+        for root in roots:
+            try:
+                identities = enumerate_physical_identities(root)
+                discovered = discover_plugin_directories(
+                    root,
+                    connector=connector,
+                    workspace_dir=app.cfg.connector_workspace_dir(),
+                )
+            except (OSError, PluginIdentityError):
+                continue
+            busy = known + [os.path.realpath(entry.path) for entry in discovered]
+            marketplaces = _claude_known_marketplaces(os.path.dirname(os.path.normpath(root)))
+            key = filesystem_identity_key(name, root)
+            for item in identities:
+                if filesystem_identity_key(item.plugin_id, root) != key:
+                    continue
+                if os.path.basename(item.path).casefold() in marketplaces:
+                    continue
+                real = os.path.realpath(item.path)
+                if any(path == real or path.startswith(real + os.sep) for path in busy):
+                    continue
+                found.append((connector, item.path))
+                known.append(real)
+    return found
+
+
 @plugin.command()
 @click.argument("name")
 @click.option(
@@ -3141,6 +3282,15 @@ def remove(app: AppContext, name: str, connector_flag: str) -> None:
         candidates = _plugin_match_dir_scopes(app, safe_name, connectors[0])
     else:
         candidates = _plugin_match_dir_scopes(app, safe_name)
+    candidates = [
+        *[(match.connector, match.path) for match in candidates],
+        *_install_root_copies(
+            app,
+            safe_name,
+            [connectors[0]] if scoped and connectors else _active_plugin_connectors(app),
+            [match.path for match in candidates],
+        ),
+    ]
     for connector, candidate in candidates:
         if is_link_or_reparse(candidate):
             raise click.ClickException(f"refusing to remove linked plugin path: {candidate}")
@@ -3152,8 +3302,8 @@ def remove(app: AppContext, name: str, connector_flag: str) -> None:
         removed.append((connector, candidate))
 
     if not removed:
-        click.echo(f"Plugin not found: {safe_name}")
-        return
+        click.echo(f"error: plugin not found: {safe_name}", err=True)
+        raise SystemExit(1)
 
     for connector, path in removed:
         suffix = f" (connector={connector})" if connector else ""
@@ -3343,6 +3493,27 @@ def _resolve_plugin_quarantine_restore_scopes(
     return [("", global_entry)]
 
 
+def _quarantined_plugin_alias(pe: Any, name: str, connector: str) -> str:
+    """Map a listed name (folder or nested id) to its quarantine key.
+
+    GAP-2163: quarantine is keyed by manifest ID, but Hermes lists the folder
+    (``photon`` for ``platforms/photon`` with manifest ``photon-platform``).
+    Returns the key only when exactly one quarantined plugin matches.
+    """
+    wanted = os.path.normpath((name or "").strip().strip("/\\"))
+    if not wanted or wanted in (".", ".."):
+        return ""
+    hits = {
+        entry.target_name
+        for entry in pe.list_by_type("plugin")
+        if entry.actions.file == "quarantine"
+        and entry.source_path
+        and (not connector or entry.connector == connector)
+        and (os.sep + os.path.normpath(entry.source_path)).endswith(os.sep + wanted)
+    }
+    return next(iter(hits)) if len(hits) == 1 else ""
+
+
 def _plugin_policy_fanout_connectors(
     app: AppContext,
     pe: Any,
@@ -3441,16 +3612,21 @@ def block(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
         plugin_path = hermes_path or _resolve_plugin_path(app, plugin_name, connector)
         if plugin_path:
             pe.set_source_path("plugin", plugin_name, plugin_path, connector)
-        click.secho(
-            f"[plugin] {plugin_name!r} added to block list (connector={connector})",
-            fg="red",
-        )
+        click.secho(f"[plugin] Blocked {plugin_name!r} ({connector}).", fg="red")
     else:
         pe.block("plugin", plugin_name, reason)
         plugin_path = hermes_path or _resolve_plugin_path(app, plugin_name)
         if plugin_path:
             pe.set_source_path("plugin", plugin_name, plugin_path)
-        click.secho(f"[plugin] {plugin_name!r} added to block list", fg="red")
+        click.secho(f"[plugin] Blocked {plugin_name!r} (every connector).", fg="red")
+
+    if plugin_path or _plugin_match_dir_scopes(app, plugin_name, connector):
+        flag = f" --connector {connector}" if connector else ""
+        click.secho(
+            "  The installed copy still loads: block only refuses new installs.\n"
+            f"  To stop it: defenseclaw plugin quarantine {plugin_name}{flag}",
+            fg="yellow",
+        )
 
     if app.logger:
         saved_change_audit(app.logger).log_action(
@@ -3522,11 +3698,19 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
         _plugin_has_connector_enforcement(app, plugin_name, target_connector) for target_connector in targets
     )
     if targets and (has_unscoped_state or has_scoped_state):
+        # GAP-2085: name only the scopes that held state, like skill unblock.
+        owners = [
+            target_connector
+            for target_connector in targets
+            if _plugin_has_connector_enforcement(app, plugin_name, target_connector)
+        ]
         for target_connector in targets:
             pe.remove_action_for_connector("plugin", plugin_name, target_connector)
+        for target_connector in owners:
             click.secho(f"[plugin] Unblocked {plugin_name!r} ({target_connector}).", fg="green")
         if has_unscoped_state:
             pe.remove_action("plugin", plugin_name)
+            click.secho(f"[plugin] Unblocked {plugin_name!r} (every connector).", fg="green")
         click.echo(_PLUGIN_UNBLOCK_NOTE)
         if app.logger:
             saved_change_audit(app.logger).log_action(
@@ -3547,7 +3731,7 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
         return
 
     pe.remove_action("plugin", plugin_name)
-    click.secho(f"[plugin] Unblocked {plugin_name!r}.", fg="green")
+    click.secho(f"[plugin] Unblocked {plugin_name!r} (every connector).", fg="green")
     click.echo(_PLUGIN_UNBLOCK_NOTE)
     if app.logger:
         saved_change_audit(app.logger).log_action("plugin-unblock", plugin_name, "manual unblock via CLI")
@@ -3973,6 +4157,16 @@ def quarantine(app: AppContext, name: str, reason: str, connector_flag: str) -> 
         ]
     else:
         targets = _plugin_match_dir_scopes(app, plugin_name, connector_flag)
+        if not targets:
+            # GAP-2163: Hermes nests plugins (bundled ``platforms/photon``);
+            # accept the id, manifest name or folder 'plugin list' shows.
+            hermes = _hermes_listed_plugin(app, name, resolved_connector)
+            if hermes is not None and hermes[1] and os.path.isdir(hermes[1]):
+                try:
+                    plugin_name = canonical_plugin_id(hermes[1])[0]
+                except PluginIdentityError as exc:
+                    raise click.ClickException(f"invalid plugin identity: {exc}") from exc
+                targets = [("hermes", hermes[1])]
 
     if not targets:
         if not reason:
@@ -4068,6 +4262,18 @@ def restore(app: AppContext, name: str, restore_path: str, connector_flag: str) 
         if pe_enforcer.is_quarantined(plugin_name, target_connector)
     ]
     if not existing_targets:
+        alias = _quarantined_plugin_alias(
+            pe, name, _resolve_connector_scope(app, connector_flag) if connector_flag else ""
+        )
+        if alias and alias != plugin_name:
+            plugin_name = alias
+            targets = _resolve_plugin_quarantine_restore_scopes(app, pe, plugin_name, connector_flag)
+            existing_targets = [
+                (target_connector, entry)
+                for target_connector, entry in targets
+                if pe_enforcer.is_quarantined(plugin_name, target_connector)
+            ]
+    if not existing_targets:
         click.echo(f"error: {plugin_name!r} is not quarantined", err=True)
         raise SystemExit(1)
 
@@ -4087,18 +4293,14 @@ def restore(app: AppContext, name: str, restore_path: str, connector_flag: str) 
         allowed_roots = (
             _plugin_roots_for_connector(app, resolved_connector) if resolved_connector else _all_active_plugin_dirs(app)
         )
-        # Quarantine state is keyed by canonical manifest ID.  Legacy records
-        # may remember a noncanonical alias; restore always converges to the
-        # canonical directory name instead of recreating that ambiguity.  An
-        # explicit configured root retains its documented "restore under this
-        # root" meaning.
+        # GAP-2163/GAP-2164: restore to the recorded (or --path) location
+        # as-is, so a folder named apart from its manifest ID (Hermes
+        # ``platforms/photon``) and a single-file ``.js``/``.ts`` plugin come
+        # back under their original name. An explicit configured root keeps
+        # its documented "restore under this root" meaning.
         if any(os.path.realpath(target_restore_path) == os.path.realpath(root) for root in allowed_roots):
-            target_restore_path = os.path.join(target_restore_path, plugin_name)
-        else:
-            target_restore_path = os.path.join(
-                os.path.dirname(target_restore_path),
-                plugin_name,
-            )
+            original = os.path.basename(os.path.normpath(entry.source_path)) if entry and entry.source_path else ""
+            target_restore_path = os.path.join(target_restore_path, original or plugin_name)
         real_restore = os.path.realpath(target_restore_path)
         if allowed_roots:
             if not any(
@@ -4299,6 +4501,16 @@ def _plugin_info_card(
 
     pe_enforcer = PluginEnforcer(app.cfg.quarantine_dir)
     quarantined = pe_enforcer.is_quarantined(plugin_name, connector)
+    action_name = plugin_name
+    if info_map is None and not quarantined and connector and app.store is not None:
+        from defenseclaw.enforce import PolicyEngine
+
+        alias = _quarantined_plugin_alias(PolicyEngine(app.store), plugin_name, connector)
+        if alias and alias != plugin_name and pe_enforcer.is_quarantined(alias, connector):
+            action_name = alias
+            quarantined = True
+            if scan_entry is None:
+                scan_entry = _latest_plugin_scan_for_connector(app, alias, connector)
 
     if info_map is None:
         if (
@@ -4320,13 +4532,26 @@ def _plugin_info_card(
         info_map["connector"] = connector
     if scan_entry is not None:
         info_map["scan"] = scan_entry
-    if plugin_name in actions_map:
-        ae = actions_map[plugin_name]
+    if action_name in actions_map:
+        ae = actions_map[action_name]
         if not ae.actions.is_empty():
             info_map["actions"] = ae.actions.to_dict()
+    if action_name != plugin_name:
+        info_map["quarantine_id"] = action_name
+    if quarantined:
+        qpath = pe_enforcer._quarantine_path(action_name, connector)
+        if qpath:
+            info_map["quarantine_path"] = qpath
     info_map["quarantined"] = quarantined
     info_map.setdefault("installed", False)
     return info_map
+
+
+_SCAN_SEVERITY_COLORS = {"CRITICAL": "red", "HIGH": "red", "MEDIUM": "yellow", "LOW": "cyan"}
+
+
+def _yes_no(value: Any) -> str:
+    return "yes" if value else "no"
 
 
 def _print_plugin_info_card(
@@ -4344,22 +4569,29 @@ def _print_plugin_info_card(
         click.echo(f"Version:     {info_map['version']}")
     if info_map.get("path"):
         click.echo(f"Path:        {info_map['path']}")
-    click.echo(f"Installed:   {info_map.get('installed', False)}")
-    click.echo(f"Quarantined: {info_map.get('quarantined', False)}")
+    click.echo(f"Installed:   {_yes_no(info_map.get('installed', False))}")
+    click.echo(f"Quarantined: {_yes_no(info_map.get('quarantined', False))}")
+    if info_map.get("quarantine_path"):
+        click.echo(f"Quarantine:  {info_map['quarantine_path']}")
 
     scan_data = info_map.get("scan")
     if scan_data:
         click.echo()
         click.echo("Last Scan:")
+        # GAP-2201: the same Verdict / Findings lines whatever the outcome.
+        # GAP-1507: the count is the total and the severity the maximum;
+        # "2 HIGH findings" read as two HIGH ones (same wording as skill info).
+        n = scan_data.get("total_findings", 0)
+        noun = "finding" if n == 1 else "findings"
         if scan_data.get("clean"):
             click.secho("  Verdict:  CLEAN", fg="green")
+            click.echo("  Findings: 0 findings")
         else:
-            # GAP-1507: the count is the total and the severity the maximum;
-            # "2 HIGH findings" read as two HIGH ones (same wording as skill info).
-            n = scan_data.get("total_findings", 0)
             sev = scan_data.get("max_severity", "INFO")
-            noun = "finding" if n == 1 else "findings"
+            click.secho(f"  Verdict:  {sev}", fg=_SCAN_SEVERITY_COLORS.get(sev))
             click.echo(f"  Findings: {n} {noun} (max severity: {sev})")
+        if scan_data.get("scanned_at"):
+            click.echo(f"  Scanned:  {scan_data['scanned_at']}")
         click.echo(f"  Target:   {scan_data.get('target', '')}")
 
     actions_data = info_map.get("actions")
@@ -4396,12 +4628,27 @@ def _resolve_plugin_path(
 
 def _plugin_scan_payload_from_latest(ls: dict[str, Any]) -> dict[str, Any]:
     finding_count = ls["finding_count"]
-    return {
+    payload = {
         "target": ls["target"],
         "clean": finding_count == 0,
         "max_severity": ls["max_severity"] if finding_count > 0 else "CLEAN",
         "total_findings": finding_count,
     }
+    scanned_at = _format_scan_time(ls.get("timestamp"))
+    if scanned_at:
+        payload["scanned_at"] = scanned_at
+    return payload
+
+
+def _format_scan_time(ts: Any) -> str:
+    """GAP-2201: the scan time as 'YYYY-MM-DD HH:MM:SS UTC' (or "")."""
+    from datetime import datetime, timezone
+
+    if not isinstance(ts, datetime):
+        return ""
+    if ts.tzinfo is not None:
+        ts = ts.astimezone(timezone.utc)
+    return ts.strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
 def _build_plugin_scan_map(store) -> dict:

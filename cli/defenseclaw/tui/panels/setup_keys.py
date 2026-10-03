@@ -77,20 +77,19 @@ SETUP_KEYMAPS: dict[SetupView, tuple[KeySpec, ...]] = {
     # switcher) and a double-click on a task do what its buttons did.
     "wizards": (
         KeySpec("↑/↓", "choose", "Move between setup tasks (on into the next group)", None, ("up", "down", "j", "k")),
+        KeySpec("Enter", "open", "Open the selected task", None, ("enter",)),
         KeySpec(
             "←/→",
             "group",
-            "Previous / next task group (also [ and ]); → after the last group opens the config editor",
+            "Previous / next task group, then the config editor (also [ and ])",
             None,
             ("left", "right", "[", "]"),
         ),
-        KeySpec("Enter", "open", "Open the selected task", None, ("enter",)),
         KeySpec("i", "details", "Readiness checks and what the selected task runs", None, ("i",)),
         KeySpec("c", "config", "Edit config.yaml fields directly (config editor)", None, ("c",)),
         KeySpec("f", "fill missing", "Prompt for every missing required key", None, ("f",), when="credentials"),
         KeySpec("s", "set key", "Set one API key", None, ("s",), when="credentials"),
-        # Shown on the API keys task, where the list it reloads is (GAP-2061).
-        KeySpec("r", "reload", "Reload the list of stored API keys", None, ("r",), when="credentials"),
+        KeySpec("r", "reload keys", "Reload the list of API keys", None, ("r",), when="credentials"),
         *_RESTART,
     ),
     "goals": (
@@ -131,8 +130,9 @@ SETUP_KEYMAPS: dict[SetupView, tuple[KeySpec, ...]] = {
         KeySpec("/", "find field", "Find a field by name or key in any section", None, ("/",)),
         KeySpec("E", "list editor", "Edit this section's list entries", "setup-edit-list", ("E",), when="list_editor"),
         KeySpec("S", "review & save", "Review the changes, then save config.yaml", "setup-save", ("S",)),
-        KeySpec("R", "revert", "Drop unsaved changes", "setup-revert", ("R",)),
-        KeySpec("w", "wizards", "Back to the setup tasks", "setup-mode-wizards", ("w",)),
+        # Lowercase: R is the global Registries key (GAP-2151).
+        KeySpec("r", "revert", "Drop unsaved changes", "setup-revert", ("r",)),
+        KeySpec("Esc/w", "tasks", "Back to the setup tasks (unsaved edits are kept)", "setup-mode-wizards", ("esc", "w")),
         *_RESTART,
     ),
     "first-run": (
@@ -216,8 +216,7 @@ def keys_hint(view: SetupView, conditions: Iterable[str] = ()) -> str:
     On the task list the keys of the selected task (``f``, ``s``, ``G``) win
     over the general ones: those go from the end until the line fits one
     80-column row, and ``? help`` points at the help sheet that still
-    lists them (GAP-1825). ``Enter open`` is the task list's main key, so it
-    stays while ``←/→``, ``i`` and ``c`` give way.
+    lists them (GAP-1825).
     """
 
     specs = [spec for spec in keymap(view, conditions) if spec.in_hint]
@@ -228,14 +227,21 @@ def keys_hint(view: SetupView, conditions: Iterable[str] = ()) -> str:
     text = join(specs)
     if view not in ONE_ROW_VIEWS or len(text) <= HINT_WIDTH:
         return text
-    # The general keys go first, then r (reload) and last Enter.
-    droppable = [spec for spec in reversed(specs[1:]) if not spec.when and spec.key != "Enter"]
-    droppable += [spec for key in ("r", "Enter") for spec in specs[1:] if spec.key == key]
-    for spec in droppable:
+    for spec in reversed(specs[1:]):
+        if spec.when:
+            continue
         specs.remove(spec)
         text = join(specs, MORE_KEYS)
         if len(text) <= HINT_WIDTH:
+            return text
+    # A queued restart on the API keys task: its own keys go from the end
+    # (r first) before the restart key does.
+    for spec in reversed(specs[1:]):
+        if len(text) <= HINT_WIDTH:
             break
+        if spec.when == "credentials":
+            specs.remove(spec)
+            text = join(specs, MORE_KEYS)
     return text
 
 

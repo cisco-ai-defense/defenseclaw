@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
+import click
 import pytest
 from defenseclaw import agent_selection, fail_mode
 from defenseclaw.commands import cmd_doctor, cmd_setup
@@ -604,6 +605,31 @@ def test_restart_services_does_not_wait_for_a_refused_peer_in_the_api(monkeypatc
     cmd_setup._restart_services(str(tmp_path), connector="hermes", wait_for_connector_ready=True)
 
     assert seen == [["hermes", "claudecode"]]
+
+
+def test_setup_wait_remembers_a_refused_peer_for_the_summary(monkeypatch, tmp_path: Path) -> None:
+    """GAP-2013: the closing Summary learns which peer the gateway refused."""
+    cfg = _config(tmp_path)
+    entries = {name: _entry(name, tmp_path) for name in ("amp", "codex", "cursor")}
+    (tmp_path / "hook_contract_lock.json").write_text(
+        json.dumps({"version": 2, "connectors": entries}),
+        encoding="utf-8",
+    )
+    (tmp_path / "active_connector.json").write_text(
+        json.dumps({"version": 3, "names": ["amp", "codex"], "inactive_names": []}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cmd_setup, "load_config", lambda **_kwargs: cfg)
+    monkeypatch.setattr(
+        cmd_doctor, "connector_setup_readiness", lambda _cfg, name: cmd_doctor.ConnectorSetupReadiness(True, name, "ready")
+    )
+
+    with click.Context(click.Command("setup")):
+        result = cmd_setup._wait_for_connector_runtime(
+            str(tmp_path), ["amp", "codex", "cursor"], None, None, timeout=0.5, required={"amp"}
+        )
+        assert result
+        assert cmd_setup._runtime_skipped_setup_peers() == frozenset({"cursor"})
 
 
 def test_restart_services_roster_line_leaves_out_a_refused_peer(monkeypatch, tmp_path: Path) -> None:

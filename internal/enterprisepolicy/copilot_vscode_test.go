@@ -273,3 +273,54 @@ func TestCopilotVSCodeRemovalTakesOutTheFoldersItCreated(t *testing.T) {
 		t.Fatalf("~/.copilot holds %v (%v), want only the user's config.json", entries, err)
 	}
 }
+
+// GAP-2098: an uninstall's presence check finds the Windows Local hook file
+// and plugin (an encoded PowerShell bridge) until they are removed, and
+// never counts a user's own plugin file as DefenseClaw's.
+func TestCopilotVSCodeUserFilesLeftSeesTheWindowsRender(t *testing.T) {
+	home := t.TempDir()
+	const hookBinary = `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`
+	left := func() bool {
+		t.Helper()
+		got, err := CopilotVSCodeUserFilesLeft(home, "windows", hookBinary)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	if left() {
+		t.Fatal("an empty home reported DefenseClaw's Copilot files")
+	}
+	ensure := func(hookFile, plugin bool) {
+		t.Helper()
+		if _, err := EnsureCopilotVSCodeUser(CopilotVSCodeUserRequest{Home: home, GOOS: "windows", HookBinary: hookBinary, HookFile: hookFile, Plugin: plugin}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ensure(true, true)
+	data, err := os.ReadFile(CopilotVSCodeLocalHookFilePath(home))
+	if err != nil || !strings.Contains(string(data), "-EncodedCommand") {
+		t.Fatalf("the Windows render is not the encoded bridge (%v)", err)
+	}
+	if !left() {
+		t.Fatal("the rendered hook file and plugin were not found")
+	}
+	ensure(false, true)
+	if !left() {
+		t.Fatal("the plugin alone was not found")
+	}
+	ensure(false, false)
+	if left() {
+		t.Fatal("files reported after their removal")
+	}
+	own := filepath.Join(CopilotPluginDir(home), "hooks", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(own), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(own, []byte(`{"hooks":{"preToolUse":[{"type":"command","command":"my-own"}]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if left() {
+		t.Fatal("the user's own plugin file was counted as DefenseClaw's")
+	}
+}

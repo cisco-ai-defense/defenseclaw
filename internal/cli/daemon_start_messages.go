@@ -118,9 +118,17 @@ func gatewayExitedBeforeReadinessError(err error, logPath string, offset int64) 
 // configSchemaProblem renders an invalid enum value or a value of the wrong
 // type the way 'defenseclaw config validate' does, 'line 13: guardrail.mode
 // is "x"; allowed values: observe, action' or 'line 11: guardrail.mode:
-// expected a value of type string (got a number)', instead of the raw schema
+// expected a value of type string (got a number)', or an undeclared key as
+// 'line 9: guardrail.mdoe: unknown field (did you mean "mode"?)', instead of the raw schema
 // diagnostic (GAP-1914, GAP-1990).
 func configSchemaProblem(err error) (string, bool) {
+	var yamlErr *config.V8YAMLError
+	if errors.As(err, &yamlErr) && yamlErr.Code == config.V8YAMLErrorDuplicateKey &&
+		yamlErr.Line > 0 && yamlErr.FirstLine > 0 && strings.HasPrefix(yamlErr.Path, "$.") {
+		// A second section header with the same name (GAP-2188).
+		return fmt.Sprintf("%s line %d: %s appears twice; the first one is at line %d. Merge them into one",
+			config.ConfigPath(), yamlErr.Line, strings.TrimPrefix(yamlErr.Path, "$."), yamlErr.FirstLine), true
+	}
 	var schemaErr *config.V8SchemaError
 	if !errors.As(err, &schemaErr) {
 		return "", false
@@ -130,6 +138,14 @@ func configSchemaProblem(err error) (string, bool) {
 		where += fmt.Sprintf(" line %d", schemaErr.Line)
 	}
 	field := strings.TrimPrefix(schemaErr.Path, "$.")
+	if schemaErr.Keyword == "additionalProperties" && field != "" && field != "$" {
+		// A typo'd or undeclared key (GAP-2173).
+		hint := ""
+		if schemaErr.Suggestion != "" {
+			hint = fmt.Sprintf(" (did you mean %q?)", schemaErr.Suggestion)
+		}
+		return fmt.Sprintf("%s: %s: unknown field%s", where, field, hint), true
+	}
 	if schemaErr.Keyword == "type" && schemaErr.Expected != "" {
 		got := ""
 		if noun := configValueClassNoun(schemaErr.ReceivedClass); noun != "" {

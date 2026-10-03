@@ -1987,3 +1987,29 @@ func TestObservabilityClawModeOmittedForSeveralConnectors(t *testing.T) {
 		t.Fatalf("multi-connector claw mode = %q, want it omitted", got)
 	}
 }
+
+// GAP-2100: `defenseclaw-gateway stop` waits 10s for a graceful exit before it
+// signals; the normal close in Run and its deferred retry must both fit in
+// that window when a telemetry collector is down or refuses exports.
+func TestObservabilityV8ShutdownFlushFitsTheGracefulStopWindow(t *testing.T) {
+	const gracefulStopWindow = 10 * time.Second
+	if 2*sidecarObservabilityV8ShutdownTimeout >= gracefulStopWindow {
+		t.Fatalf("two shutdown flushes of %s do not fit in the %s stop window", sidecarObservabilityV8ShutdownTimeout, gracefulStopWindow)
+	}
+}
+
+// GAP-2166: a shutdown flush timeout is a warning that names the bound and the
+// next step, not a "bootstrap failed" error.
+func TestObservabilityV8ShutdownFlushWarningWording(t *testing.T) {
+	got := observabilityV8ShutdownFlushWarning()
+	for _, want := range []string{"WARNING", "did not finish within 4s", "setup observability test", "stopped normally"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("warning %q is missing %q", got, want)
+		}
+	}
+	for _, bad := range []string{"Error:", "bootstrap", "shutdown_degraded"} {
+		if strings.Contains(got, bad) {
+			t.Fatalf("warning %q must not contain %q", got, bad)
+		}
+	}
+}

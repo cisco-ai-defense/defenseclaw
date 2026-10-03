@@ -40,6 +40,10 @@ _ALLOWED_BINARIES = {
 _RETIRED_COPY_RE = re.compile(r"\.(?P<name>.+)\.source-install-old-[0-9a-f]+", re.IGNORECASE)
 _OWNERSHIP_MARKERS = {"config.yaml", "audit.db", ".env", "policies", "quarantine", ".venv"}
 _LAUNCHER_UNWIND_GRACE_SECONDS = 1.0
+# scripts/install.ps1 holds this folder in the data dir while it installs; it
+# and "installer" and ".venv" are what a new install writes there (GAP-2149).
+_INSTALL_LOCK = ".install.lock"
+_NEW_INSTALL_ENTRIES = (_INSTALL_LOCK, "installer", ".venv")
 _LAUNCHER_WAIT_SECONDS = 15.0
 # An interactive cmd.exe that ran the shim stays open; do not wait long on it.
 _SHIM_SHELL_WAIT_SECONDS = 5.0
@@ -272,21 +276,60 @@ def _interpreter_dirs(plan: dict[str, object], data_dir: str) -> list[str]:
 _EMPTY_DIR_RD_TRIES = 30
 
 
-def _result_step(status_path: str, gone: list[str]) -> str:
+class _SupersededError(Exception):
+    """A new install started in the data dir; the cleanup must not touch it."""
+
+
+def _superseded_detail(data_dir: str) -> str:
+    return (
+        f"a new DefenseClaw install started in {data_dir} before this cleanup finished, so the cleanup "
+        "stopped and left that folder and its launchers to the new install; nothing needs to be removed by hand"
+    )
+
+
+def _check_not_superseded(data_dir: str, since: float) -> None:
+    """Stop before deleting anything once an installer holds its lock in data_dir (GAP-2149).
+
+    A lock older than this helper is a leftover, not a new install.
+    """
+    try:
+        changed = os.lstat(os.path.join(data_dir, _INSTALL_LOCK)).st_mtime
+    except OSError:
+        return
+    if changed >= since:
+        raise _SupersededError(_superseded_detail(data_dir))
+
+
+def _result_step(status_path: str, gone: list[str], data_dir: str = "") -> str:
     """cmd.exe step that writes the uninstall result once the after-exit removal ran.
 
     It says failed with the first folder in gone that is still there, else
-    succeeded (GAP-1960).
+    succeeded (GAP-1960). By then the helper had emptied data_dir, so an
+    installer's entry in it means a new install now owns it: superseded, not
+    "remove it by hand" (GAP-2149).
     """
     step = f'(echo {{"status": "succeeded"}}>"{status_path}")'
     for path in reversed(gone):
         detail = json.dumps(f"could not remove {path}; remove it by hand")
         step = f'(if exist "{path}" (echo {{"status": "failed", "detail": {detail}}}>"{status_path}") else {step})'
+    if data_dir:
+        detail = json.dumps(_superseded_detail(data_dir))
+        for name in reversed(_NEW_INSTALL_ENTRIES):
+            marker = os.path.join(data_dir, name)
+            step = (
+                f'(if exist "{marker}" (echo {{"status": "superseded", "detail": {detail}}}>"{status_path}") '
+                f"else {step})"
+            )
     return step
 
 
 def _remove_after_exit(
-    dirs: list[str], empty_dirs: list[str], *, status_path: str = "", gone: list[str] | None = None
+    dirs: list[str],
+    empty_dirs: list[str],
+    *,
+    status_path: str = "",
+    gone: list[str] | None = None,
+    data_dir: str = "",
 ) -> bool:
     """Start cmd.exe to remove dirs (and then empty_dirs, if empty) after this process exits.
 
@@ -327,9 +370,9 @@ def _remove_after_exit(
         if not _CMD_METACHARACTERS & set(path)
     )
     must_go.extend(gone or [])
-    writes_result = bool(status_path) and not _CMD_METACHARACTERS & set(status_path + "".join(must_go))
+    writes_result = bool(status_path) and not _CMD_METACHARACTERS & set(status_path + "".join(must_go) + data_dir)
     if writes_result:
-        steps.append(_result_step(status_path, must_go))
+        steps.append(_result_step(status_path, must_go, data_dir))
     command = " & ".join(steps)
     flags = (
         getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
@@ -407,7 +450,13 @@ def _data_left_detail(plan: dict[str, object], data_dir: str, error: OSError) ->
     held = getattr(error.__cause__, "filename", "") or ""
     shim = os.path.join(str(plan["install_root"]), "defenseclaw.cmd")
     flags = " --binaries" if plan.get("remove_empty_install_root") else ""
-    rerun = f'run "{shim}" uninstall --all{flags} --yes again' if os.path.isfile(shim) else "remove it by hand"
+    # PowerShell (the Windows Terminal default) needs the & call operator
+    # before a quoted command path; Command Prompt rejects it (GAP-2082).
+    rerun = (
+        f'run & "{shim}" uninstall --all{flags} --yes again in PowerShell (in Command Prompt, leave out the &)'
+        if os.path.isfile(shim)
+        else "remove it by hand"
+    )
     if held:
         detail = f"could not remove {data_dir}: {held} is in use by another program. Close that program, then {rerun}."
     else:
@@ -466,6 +515,7 @@ def main() -> int:
     after_exit_empty: list[str] = []
     gone: list[str] = []
     deferred = False
+    started_at = time.time()
     try:
         with open(manifest_path, encoding="utf-8") as stream:
             plan = json.load(stream)
@@ -511,6 +561,7 @@ def main() -> int:
 
             def remove_data() -> None:
                 _validate_plan(plan)
+                _check_not_superseded(data_dir, started_at)
                 _remove_tree(data_dir, marker_names=_OWNERSHIP_MARKERS, skip=set(interpreter_dirs))
 
             # Data first: if it cannot go, the launchers stay, so the
@@ -526,6 +577,7 @@ def main() -> int:
 
             def remove_target(target=target):
                 _validate_plan(targets_plan)
+                _check_not_superseded(data_dir, started_at)
                 os.unlink(target)
 
             _retry(remove_target, f"remove {target}")
@@ -555,6 +607,12 @@ def main() -> int:
             deferred = True
         else:
             _write_json(status_path, {"status": "succeeded"})
+        return 0
+    except _SupersededError as exc:
+        try:
+            _write_json(status_path, {"status": "superseded", "detail": str(exc)})
+        except OSError:
+            pass
         return 0
     except Exception as exc:  # noqa: BLE001 - helper result boundary.
         payload = {"status": "failed", "detail": str(exc)}
@@ -587,7 +645,13 @@ def main() -> int:
             pass
         result: dict[str, object] = {"status": "succeeded"}
         try:
-            if _remove_after_exit(after_exit, after_exit_empty, status_path=status_path if deferred else "", gone=gone):
+            if _remove_after_exit(
+                after_exit,
+                after_exit_empty,
+                status_path=status_path if deferred else "",
+                gone=gone,
+                data_dir=data_dir if gone else "",
+            ):
                 result = {}
         except OSError as exc:
             result = {"status": "failed", "detail": f"could not start the final removal: {exc}"}

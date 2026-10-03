@@ -274,19 +274,33 @@ func windowsManagedHooksStandaloneRegistrationMayRemain(target enterprisehooks.M
 	if !windowsManagedHooksStandaloneEnrolledBefore(target) {
 		return false
 	}
+	return !windowsManagedHooksStandaloneRegistrationGone(target)
+}
+
+// windowsManagedHooksStandaloneRegistrationGone reports whether a read of the
+// user's agent configuration finds no DefenseClaw registration for the
+// target. A read that cannot tell keeps the row.
+func windowsManagedHooksStandaloneRegistrationGone(target enterprisehooks.ManifestTarget) bool {
 	present, err := windowsManagedHooksStandaloneRegistrationPresent(target)
-	return present || err != nil
+	return err == nil && !present
 }
 
 // windowsManagedHooksStandaloneRegistrationPresent is replaceable in tests.
 var windowsManagedHooksStandaloneRegistrationPresent = func(target enterprisehooks.ManifestTarget) (bool, error) {
-	return enterprisehooks.WindowsStandalonePerUserRegistrationPresent(enterprisehooks.InstallOptions{
-		ConnectorName: strings.ToLower(strings.TrimSpace(target.Connector)),
+	name := strings.ToLower(strings.TrimSpace(target.Connector))
+	present, err := enterprisehooks.WindowsStandalonePerUserRegistrationPresent(enterprisehooks.InstallOptions{
+		ConnectorName: name,
 		UserHome:      strings.TrimSpace(target.UserHome),
 		OwnerSID:      strings.TrimSpace(target.SID),
 		DataDir:       strings.TrimSpace(target.DataDir),
 		Registry:      enterpriseHooksCertifiedRegistryFactory(),
 	})
+	if err != nil || present || name != "copilot" {
+		return present, err
+	}
+	// Copilot's registration is also the VS Code Local hook file and plugin,
+	// whose encoded bridge the hook-command search cannot read (GAP-2098).
+	return windowsCopilotVSCodeUserFilesLeft(strings.TrimSpace(target.UserHome))
 }
 
 // windowsManagedHooksStandaloneEnrolledBefore reports whether the target's
@@ -331,13 +345,40 @@ func removeWindowsManagedHooksStandalonePerUserRegistrations(
 		for _, entry := range entries {
 			result.Pending = append(result.Pending, enterpriseHookUserCleanupLabel(entry))
 		}
+		result.Pending = windowsManagedHooksStandaloneRegistrationsLeft(entries, result.Pending)
 		result.Failed = append(result.Failed,
 			windowsManagedHooksRegistrationsNotRemovedPrefix+boundedEnterpriseHookUserCleanupText(err.Error()))
 		return result
 	}
 	_, attempted := runEnterpriseHookUserCleanups(ctx, entries, enterpriseHookWindowsUserCleanupAttempt, now)
 	result.Removed = attempted.Removed
-	result.Pending = attempted.Pending
+	result.Pending = windowsManagedHooksStandaloneRegistrationsLeft(entries, attempted.Pending)
 	result.Failed = append(result.Failed, attempted.Failed...)
 	return result
+}
+
+// windowsManagedHooksStandaloneRegistrationsLeft drops from the pending labels
+// every entry whose user's agent configuration holds no DefenseClaw
+// registration: there is nothing left to remove once the user signs in, so
+// naming it in user_registrations_pending is wrong (GAP-2098: an enrolled
+// OpenCode row without the plugin). An entry the read cannot tell about
+// stays pending.
+func windowsManagedHooksStandaloneRegistrationsLeft(entries []enterpriseHookUserCleanup, pending []string) []string {
+	if len(pending) == 0 {
+		return pending
+	}
+	byLabel := make(map[string]enterpriseHookUserCleanup, len(entries))
+	for _, entry := range entries {
+		byLabel[enterpriseHookUserCleanupLabel(entry)] = entry
+	}
+	left := make([]string, 0, len(pending))
+	for _, label := range pending {
+		if entry, ok := byLabel[label]; ok && windowsManagedHooksStandaloneRegistrationGone(enterprisehooks.ManifestTarget{
+			User: entry.User, UserHome: entry.UserHome, SID: entry.SID, Connector: entry.Connector, DataDir: entry.DataDir,
+		}) {
+			continue
+		}
+		left = append(left, label)
+	}
+	return left
 }

@@ -62,6 +62,11 @@ lifecycle does.`,
 			}
 		}
 		if err := pinStandaloneManagedEnv(); err != nil {
+			// A standard account's refusal (GAP-2114), as discovery gives it.
+			var coded *exitCodeError
+			if enterprisePolicyJSON && errors.As(err, &coded) {
+				writeManagedViewRefusalJSON(cmd.OutOrStdout(), err)
+			}
 			return err
 		}
 		return rootPersistentPreRunNoAuditE(cmd, args)

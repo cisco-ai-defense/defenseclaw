@@ -12,6 +12,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -60,18 +62,60 @@ func usageError(c *cobra.Command, err error) error {
 
 // usageMessage is err with the command's usage line and the --help pointer.
 func usageMessage(c *cobra.Command, err error) string {
-	use := c.UseLine()
+	named := func(text string) string { return invokedCommandText(c, text) }
+	use := named(c.UseLine())
 	if c.HasAvailableSubCommands() {
 		// Show the subcommand form too, as --help does (GAP-1622).
-		group := c.CommandPath() + " [command]"
+		group := named(c.CommandPath()) + " [command]"
 		if c.Runnable() {
 			use += "\n       " + group
 		} else {
 			use = group
 		}
 	}
-	msg := fmt.Sprintf("%s\nUsage: %s\nTry '%s --help' for help.", plainFlagValueError(err), use, c.CommandPath())
+	msg := fmt.Sprintf("%s\nUsage: %s\nTry '%s --help' for help.", plainFlagValueError(err), use, named(c.CommandPath()))
 	return delegatedCommandText(c, msg)
+}
+
+// invokedCommandText names the gateway binary in a command hint as it was
+// run, so the hint runs as typed (GAP-2189, GAP-2240). text starts with the
+// root command name, as c.CommandPath() and c.UseLine() do.
+func invokedCommandText(c *cobra.Command, text string) string {
+	root := c.Root().Name()
+	invoked := invokedGatewayPath(root)
+	if invoked == "" || os.Getenv(delegatedFromEnv) == "defenseclaw" || !strings.HasPrefix(text, root) {
+		return text
+	}
+	return invoked + strings.TrimPrefix(text, root)
+}
+
+// invokedGatewayPath is the absolute path the gateway binary was run by,
+// when it was run by one, so a usage hint runs as typed: the enterprise rpm
+// installs only /opt/defenseclaw/bin, which is not on root's PATH, and a
+// bare "defenseclaw-gateway ... --help" was "command not found" (GAP-2189).
+// A seam for tests.
+var invokedGatewayPath = func(rootName string) string {
+	if runtime.GOOS == "windows" || len(os.Args) == 0 {
+		return ""
+	}
+	arg0 := os.Args[0]
+	if !strings.ContainsRune(arg0, '/') || filepath.Base(arg0) != rootName {
+		// A bare name was found on PATH, so it runs as typed.
+		return ""
+	}
+	if !filepath.IsAbs(arg0) {
+		// "./defenseclaw-gateway" from /opt/defenseclaw/bin: name the
+		// absolute path, which runs from any directory (GAP-2232).
+		abs, err := filepath.Abs(arg0)
+		if err != nil {
+			return ""
+		}
+		arg0 = abs
+	}
+	if strings.ContainsAny(arg0, " '\"\\$`") {
+		return ""
+	}
+	return arg0
 }
 
 // plainFlagValueError names what a typed flag takes instead of pflag's

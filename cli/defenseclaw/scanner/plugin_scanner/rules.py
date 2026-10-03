@@ -102,6 +102,9 @@ COGNITIVE_FILES: set[str] = {
     "TOOLS.md",
     "AGENTS.md",
     "MEMORY.md",
+    # Hermes keeps its curated user memory in USER.md next to MEMORY.md
+    # (GAP-2219).
+    "USER.md",
     "openclaw.json",
     "gateway.json",
     "config.yaml",
@@ -516,8 +519,10 @@ GATEWAY_PATTERNS: list[GatewayPattern] = [
 # Write-function detection (cognitive tampering)
 # ---------------------------------------------------------------------------
 
+# Copy and rename calls overwrite their destination too (GAP-2187).
 WRITE_FUNCTIONS: re.Pattern[str] = re.compile(
-    r"(?:writeFile|appendFile|writeFileSync|appendFileSync|createWriteStream)\s*\("
+    r"(?:writeFile|appendFile|writeFileSync|appendFileSync|createWriteStream"
+    r"|copyFile|copyFileSync|\bcpSync|\bfs\.(?:promises\.)?cp|\brename|renameSync)\s*\("
 )
 
 # ---------------------------------------------------------------------------

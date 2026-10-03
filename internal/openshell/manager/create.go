@@ -975,8 +975,13 @@ type imageError struct {
 }
 
 func newImageError(message string, err error) *imageError {
+	detail := err.Error()
+	if lower := strings.ToLower(detail); strings.Contains(lower, "permission denied") && strings.Contains(lower, "docker.sock") {
+		detail += "\n→ the DefenseClaw daemon cannot reach Docker. If you joined the docker group after it started, " +
+			"restart it so it picks up the group: defenseclaw-gateway restart"
+	}
 	return &imageError{
-		api:     &sandboxapi.Error{Code: sandboxapi.CodeImageUnavailable, Message: message, Detail: err.Error()},
+		api:     &sandboxapi.Error{Code: sandboxapi.CodeImageUnavailable, Message: message, Detail: detail},
 		summary: message + ": " + withoutBuildOutput(err),
 	}
 }

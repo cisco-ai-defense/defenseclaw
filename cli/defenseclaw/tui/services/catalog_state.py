@@ -165,6 +165,8 @@ class CatalogCommandIntent:
     # upgrades a ``"destructive"`` catalog intent to the C1 consequence modal
     # lives in ``app.py`` (the ``tui/app`` lane).
     risk: str = "read-only"
+    # Plain-words effect the confirm modal shows (GAP-2228).
+    consequence: str = ""
 
     @property
     def argv(self) -> tuple[str, ...]:
@@ -1556,7 +1558,7 @@ def plugin_actions(verdict: str, status: str, enabled: bool) -> tuple[CatalogMen
         CatalogMenuAction("i", "Info", "Show full details"),
     ]
     if verdict == "blocked":
-        actions.append(CatalogMenuAction("u", "Unblock", "Remove from block list (runs plugin allow)"))
+        actions.append(CatalogMenuAction("u", "Unblock", "Remove from block list (runs plugin unblock)"))
     elif verdict == "allowed":
         actions.append(CatalogMenuAction("b", "Block", "Add to install block list"))
     else:
@@ -1708,7 +1710,22 @@ def plugin_action_intent(key: str, row: PluginRow, *, origin: str, connector: st
         # N1: plugin remove (``x``) deletes files from disk — flag it so the
         # dispatcher routes it through the destructive/consequence confirm.
         risk="destructive" if key == "x" else "read-only",
+        consequence=_PLUGIN_CONSEQUENCES.get(key, "").format(name=row.display_name),
     )
+
+
+# The confirm said only "This enforce command can change DefenseClaw state."
+# (GAP-2228); block does not stop an installed copy.
+_PLUGIN_CONSEQUENCES: Mapping[str, str] = {
+    "b": (
+        "Block refuses new installs of {name}; the installed copy keeps loading "
+        "until you quarantine or disable it."
+    ),
+    "u": (
+        "Unblock clears DefenseClaw's block, allow, quarantine and disable entries for {name}; "
+        "it keeps the on/off setting from the agent's own config."
+    ),
+}
 
 
 def tool_action_intent(key: str, row: ToolRow, *, origin: str, connector: str = "") -> CatalogCommandIntent | None:
@@ -2013,6 +2030,10 @@ def catalog_row_cells(row: object) -> tuple[str, str, str, str, str]:
         return (row.name, row.status, source, row.actions, _truncate(detail, 72))
     if isinstance(row, PluginRow):
         status = row.status or ("enabled" if row.enabled else "disabled")
+        if status == "blocked":
+            # A block only refuses new installs; Status shows whether the
+            # installed copy loads, Verdict says it is blocked (GAP-2228).
+            status = "enabled" if row.enabled else "disabled"
         detail = row.description or row.origin or row.verdict
         return (row.display_name, status, row.origin, row.verdict or "-", _truncate(detail, 72))
     if isinstance(row, ToolRow):
@@ -2254,9 +2275,10 @@ def _format_plugin_detail(row: PluginRow) -> str:
             )
         )
     if row.verdict == "rejected":
-        # Same meaning as the CLI scan's "policy: rejected" line (GAP-2048).
+        # Same meaning as the CLI scan's "policy: rejected" line (GAP-2048). q is not a
+        # row key (GAP-2111): Quarantine lives in the o actions menu.
         lines.append(
-            "  Verdict    rejected: the policy refuses it at install; this copy still loads until you act (b blocks it)"
+            "  Verdict    rejected: the policy refuses it at install; this copy still loads until you act (o, then Quarantine)"
         )
     elif row.verdict and row.verdict not in {status, row.scan.max_severity if row.scan else ""}:
         lines.append(f"  Verdict    {_esc(row.verdict)}")

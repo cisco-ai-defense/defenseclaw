@@ -73,7 +73,9 @@ func (e *Env) plainConfigProblem(err error, source string, raw []byte) (string, 
 		if _, statErr := os.Lstat(e.P(filepath.Join(e.Layout.SecretsDir, name))); statErr == nil {
 			state = "which is stored but failed the permission check (it must be a regular root-owned file only root can read)"
 		}
-		store := "`" + filepath.Join(e.Layout.BinDir, binGateway) + " enterprise secret set --name " + name + "`"
+		// secret set refuses without a value source (GAP-2241).
+		store := "`printf '%s' \"$VALUE\" | " + filepath.Join(e.Layout.BinDir, binGateway) + " enterprise secret set --name " + name +
+			" --from-stdin` (or --from-file <root-only file>)"
 		return fmt.Sprintf("%s%s: %s uses protected credential %q, %s; store it with %s, or remove the reference",
 			where, lineSuffix(semanticErr.Line), subject, name, state, store), true
 	}

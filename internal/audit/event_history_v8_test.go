@@ -2350,3 +2350,41 @@ func TestEventHistoryWriteFailureLogLineNamesTheCause(t *testing.T) {
 		t.Fatalf("long cause not bounded: %d bytes", len(long))
 	}
 }
+
+// GAP-2192: under strict a setup row's details read as the internal event
+// name (legacy.audit.setup.guardrail). The row now says why they are gone.
+func TestEventHistoryStrictSetupRowDetailsNameTheProfile(t *testing.T) {
+	store := newV8HistoryStore(t)
+	writer, err := NewEventHistoryWriter(store, nil, nil, testLocalProfileResolver{profile: observabilityredaction.ProfileStrict})
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := Event{
+		ID: "setup-guardrail-strict", Timestamp: time.Date(2026, 10, 3, 3, 33, 13, 0, time.UTC),
+		Action: string(ActionSetupGuardrail), Target: "config", Actor: "cli",
+		Details:  "mode=action scanner_mode=both port=4000 model=judge hilt=False",
+		Severity: "INFO",
+	}
+	stampAuditEventEnvelope(&event)
+	record, err := buildCompatibilityAuditV8Record(
+		event, observability.ClassificationContext{RawSeverity: event.Severity},
+		controlPlaneV8Source(event, controlPlaneV8FamilyNone), "persistence", "",
+		RuntimeV8BuildContext{ConfigGeneration: 23, ConfigDigest: testEventHistoryGraphDigest},
+		router.AdmissionOrdinary,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projection := projectV8HistoryRecord(t, record, observabilityredaction.ProfileStrict)
+	ctx := contextWithLegacyEventProjection(context.Background(), event)
+	if err := writer.AppendContext(ctx, record, projection); err != nil {
+		t.Fatal(err)
+	}
+	row := loadV8HistoryRow(t, store, record.RecordID())
+	if strings.HasPrefix(row.Details, "legacy.audit.") || strings.Contains(row.Details, "scanner_mode") {
+		t.Fatalf("strict setup row details = %q, want a profile note without the removed details", row.Details)
+	}
+	if row.Details != "details removed by redaction profile strict" || row.Action != string(ActionSetupGuardrail) {
+		t.Fatalf("strict setup row = %#v", row)
+	}
+}

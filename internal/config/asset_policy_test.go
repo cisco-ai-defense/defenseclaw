@@ -409,3 +409,28 @@ func TestEvaluateAssetPolicyRegistryMatchAllows(t *testing.T) {
 		t.Fatalf("registry_status=%q, want registered", decision.RegistryStatus)
 	}
 }
+
+// GAP-2122: a registry rule pinned to streamable-http admits the same URL
+// server added as http or with no transport; sse stays a different transport.
+func TestEvaluateAssetPolicyRegistryHTTPTransportAliases(t *testing.T) {
+	cfg := &Config{AssetPolicy: DefaultAssetPolicy()}
+	cfg.AssetPolicy.Enabled = true
+	cfg.AssetPolicy.Mode = AssetPolicyModeAction
+	cfg.AssetPolicy.MCP.RegistryRequired = true
+	cfg.AssetPolicy.MCP.Registry = []AssetPolicyRule{{
+		Name:      "deepwiki",
+		URL:       "https://mcp.example.test/mcp",
+		Transport: "streamable-http",
+	}}
+	for transport, want := range map[string]string{"": "allow", "http": "allow", "HTTP": "allow", "sse": "block"} {
+		decision := cfg.EvaluateAssetPolicy(AssetPolicyInput{
+			TargetType: "mcp",
+			Name:       "deepwiki",
+			URL:        "https://mcp.example.test/mcp",
+			Transport:  transport,
+		})
+		if decision.Action != want {
+			t.Fatalf("transport %q: action=%q, want %q", transport, decision.Action, want)
+		}
+	}
+}

@@ -681,9 +681,23 @@ class AlertsPanelModel:
                 else _event_severity_bucket(event, parsed_details=details)
             )
             haystack = f"{severity} {event.severity} {event.action} {event.target} {event.details}".lower()
-            if remaining not in haystack:
+            if remaining not in haystack and not self._matches_shown_text(event, remaining):
                 return False
         return True
+
+    @staticmethod
+    def _matches_shown_text(event: AlertEvent, needle: str) -> bool:
+        """Search what the table shows too: the Details cell and the facts.
+
+        A finding's Details cell (``PATH-AWS-CREDS: AWS credentials file``)
+        comes from its rule fact, not from the raw details, so search missed
+        it (GAP-2128). A hook row's Details cell is its raw details or a
+        fact, so hook details are not parsed again here.
+        """
+
+        if needle in " ".join(value for _, value in event.facts).lower():
+            return True
+        return not _is_hook_event(event) and needle in _alert_details_label(event).lower()
 
     def set_connector_filter(self, connector: str) -> None:
         """Set the shared connector filter ("" = All) and re-apply filters."""

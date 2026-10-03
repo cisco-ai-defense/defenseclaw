@@ -265,6 +265,28 @@ def test_setup_v8_add_with_gateway_down_says_so_without_traceback(
     assert [d["name"] for d in source["observability"]["destinations"]] == ["local"]
 
 
+def test_setup_v8_add_audit_details_name_the_destination(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # GAP-2144: the row read "action=add-v8 preset=otlp", an internal tag
+    # with no destination, so two adds could not be told apart.
+    from defenseclaw.commands.cmd_setup_observability import _setup_observability_add_details
+
+    _stub_canonical_v8_gateway(monkeypatch)
+    app = _setup_app(tmp_path)
+    logged: list[tuple] = []
+    app.logger = SimpleNamespace(log_action=lambda *args, **_k: logged.append(args))
+    args = ["add", "otlp", "--non-interactive", "--name", "manual-o11y", "--endpoint", "127.0.0.1:14317"]
+    result = CliRunner().invoke(observability, [*args, "--protocol", "grpc", "--allow-private-networks"], obj=app)
+
+    assert result.exit_code == 0, result.output
+    assert logged == [("setup-observability", "config", "action=add name=manual-o11y preset=otlp endpoint=127.0.0.1:14317")]
+    assert _setup_observability_add_details(
+        "hec", "splunk-hec", "https://user:pw@splunk.example.test:8088/services/collector?x=1", updated=True
+    ) == "action=update name=hec preset=splunk-hec endpoint=https://splunk.example.test:8088/services/collector"
+
+
 def test_offline_setup_note_is_not_repeated_by_the_setup_callback(tmp_path: Path) -> None:
     # GAP-1369: the offline note already says the gateway is stopped, so the
     # setup result callback must not print a second "not running" notice.
@@ -1480,3 +1502,37 @@ def test_setup_v8_remove_says_the_key_stays_in_dotenv(
     assert "DD_API_KEY is still stored in" in last.output
     assert "defenseclaw keys remove DD_API_KEY" in last.output
     assert dotenv_values(tmp_path / ".env").get("DD_API_KEY") == "dummy-key"
+
+
+@pytest.mark.parametrize(
+    ("preset", "flag", "value", "where"),
+    [
+        ("otlp", "--endpoint", "https://user:pw@127.0.0.1:14318/v1/traces", "headers:"),
+        ("otlp", "--endpoint", "user@collector.example.com:4317", "headers:"),
+        ("splunk-enterprise", "--endpoint", "https://u:p@splunk.example.com:8088/services/collector", "--token"),
+    ],
+)
+def test_setup_v8_add_refuses_endpoint_credentials_in_plain_words(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    preset: str,
+    flag: str,
+    value: str,
+    where: str,
+) -> None:
+    # GAP-2205: the schema said "destinations[2] (oneOf)" and blamed config.yaml.
+    _stub_canonical_v8_gateway(monkeypatch)
+    app = _setup_app(tmp_path)
+    before = (tmp_path / "config.yaml").read_text()
+    args = ["add", preset, "--non-interactive", "--name", "x", flag, value, "--allow-private-networks"]
+    if preset == "otlp":
+        args += ["--protocol", "http"]
+
+    result = CliRunner().invoke(observability, args, obj=app)
+
+    assert result.exit_code == 1, result.output
+    assert f"{flag} must not contain a user name or password" in result.output
+    assert where in result.output
+    for jargon in ("oneOf", "v8", "$.observability", "config.yaml:", "pw@"):
+        assert jargon not in result.output
+    assert (tmp_path / "config.yaml").read_text() == before

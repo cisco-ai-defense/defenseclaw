@@ -278,9 +278,17 @@ class HintEngine:
     def _ai_discovery_hint(self, state: HintState) -> str:
         if hint := self._filter_hint(state):
             return hint
+        # Follow the panel state: no s while discovery is off, and a names
+        # what it switches to (GAP-2230).
+        scope = "a recommended" if "all_models" in state.panel_conditions else "a all models"
+        if "disabled" in state.panel_conditions:
+            return (
+                f"KEYS  j/k move | t switch table | {scope} | Enter detail | r refresh | "
+                "e export | d turn on | / search vendor/product/component."
+            )
         return (
-            "KEYS  j/k move | t switch table | a all models | Enter detail | s scan | r refresh | "
-            "/ search vendor/product/component."
+            f"KEYS  j/k move | t switch table | {scope} | Enter detail | s scan | r refresh | "
+            "e export | d on/off | / search vendor/product/component."
         )
 
     def _registries_hint(self, state: HintState) -> str:

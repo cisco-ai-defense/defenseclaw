@@ -1107,14 +1107,49 @@ func emptyConfigFileMessage(path string) (string, bool) {
 	), true
 }
 
-// previousConfigHint names the config the last version upgrade kept, with its
-// version and date, in the Python CLI's words (cli/defenseclaw/config.py):
-// previous/ is refreshed only by an upgrade to another version, so the copy
-// can be much older than the config just lost (GAP-1786, GAP-1876).
+// newestConfigBackup returns the newest nonempty backups/config.yaml.* copy
+// DefenseClaw wrote, as the Python CLI's _newest_config_backup (GAP-2206).
+func newestConfigBackup(home string) (string, time.Time, bool) {
+	dir := filepath.Join(home, "backups")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", time.Time{}, false
+	}
+	var path string
+	var newest time.Time
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), "config.yaml.") || !entry.Type().IsRegular() {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil || info.Size() == 0 {
+			continue
+		}
+		if path == "" || info.ModTime().After(newest) {
+			path, newest = filepath.Join(dir, entry.Name()), info.ModTime()
+		}
+	}
+	return path, newest, path != ""
+}
+
+// previousConfigHint names the newest copy of the config DefenseClaw kept,
+// with its date, in the Python CLI's words (cli/defenseclaw/config.py): the
+// newest backups/config.yaml.* copy (GAP-2206) or the config the last version
+// upgrade kept. previous/ is refreshed only by an upgrade to another version,
+// so that copy can be much older than the config just lost (GAP-1786, GAP-1876).
 func previousConfigHint(home string) string {
+	const layout = "2006-01-02 15:04 UTC"
 	previous := filepath.Join(home, "previous")
 	kept := filepath.Join(previous, "data", "config.yaml")
 	info, err := os.Stat(kept)
+	if backup, when, ok := newestConfigBackup(home); ok && (err != nil || !when.Before(info.ModTime())) {
+		hint := fmt.Sprintf(" (the newest backup is %s, from %s", backup, when.UTC().Format(layout))
+		if err == nil {
+			hint += fmt.Sprintf("; the last version upgrade kept an older copy from %s in %s",
+				info.ModTime().UTC().Format(layout), kept)
+		}
+		return hint + ")"
+	}
 	if err != nil {
 		return ""
 	}

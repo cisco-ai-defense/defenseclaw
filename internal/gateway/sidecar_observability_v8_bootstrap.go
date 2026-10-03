@@ -47,7 +47,14 @@ import (
 )
 
 const (
-	sidecarObservabilityV8CloseTimeout      = 30 * time.Second
+	sidecarObservabilityV8CloseTimeout = 30 * time.Second
+	// sidecarObservabilityV8ShutdownTimeout bounds each telemetry flush when
+	// the gateway stops. Run may try twice (the normal close, then its deferred
+	// retry), and both must fit in the 10s that `defenseclaw-gateway stop`
+	// waits before it escalates to signals: a down or refusing collector
+	// otherwise held the stop for about 20s and the process was killed
+	// (GAP-2100).
+	sidecarObservabilityV8ShutdownTimeout   = 4 * time.Second
 	sidecarDeliveryHealthPersistenceTimeout = 2 * time.Second
 	sidecarDeliveryHealthAction             = "telemetry-destination"
 )
@@ -711,7 +718,11 @@ func (owner *sidecarOwnedObservabilityV8Runtime) reload(
 }
 
 func (owner *sidecarOwnedObservabilityV8Runtime) closeWithTimeout() error {
-	ctx, cancel := context.WithTimeout(context.Background(), sidecarObservabilityV8CloseTimeout)
+	return owner.closeWithin(sidecarObservabilityV8CloseTimeout)
+}
+
+func (owner *sidecarOwnedObservabilityV8Runtime) closeWithin(timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	return owner.close(ctx)
 }
@@ -763,7 +774,7 @@ func (s *Sidecar) closeOwnedObservabilityV8Runtime() error {
 		s.bindObservabilityV8ConsumersLocked()
 	}
 	s.observabilityV8Mu.Unlock()
-	if err := owner.closeWithTimeout(); err != nil {
+	if err := owner.closeWithin(sidecarObservabilityV8ShutdownTimeout); err != nil {
 		return err
 	}
 	if s.health != nil {
@@ -776,6 +787,16 @@ func (s *Sidecar) closeOwnedObservabilityV8Runtime() error {
 	}
 	s.observabilityV8Mu.Unlock()
 	return nil
+}
+
+// observabilityV8ShutdownFlushWarning is the gateway.log line written when the
+// telemetry runtime cannot finish its flush within the shutdown bound. The stop
+// itself succeeded, so it is a warning, not an "Error:" line (GAP-2166).
+func observabilityV8ShutdownFlushWarning() string {
+	return fmt.Sprintf("[sidecar] WARNING: telemetry flush on shutdown did not finish within %s; "+
+		"unsent telemetry was dropped. A telemetry destination is probably unreachable: "+
+		"check it with 'defenseclaw setup observability test <name>'. The gateway stopped normally.\n",
+		sidecarObservabilityV8ShutdownTimeout)
 }
 
 // observabilityV8ActivePlanDigest returns the plan identity actually owned by

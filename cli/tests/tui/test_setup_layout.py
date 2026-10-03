@@ -101,6 +101,9 @@ async def test_setup_views_keep_primary_content_on_screen_at_80x24(hermetic) -> 
         assert app.setup_model.form_active
         _assert_on_screen(app, app.setup_model.form_fields[0].label, max_body_lines=3)
 
+        await pilot.press("escape")  # back to the goal menu (GAP-2091)
+        await pilot.pause()
+        assert app.setup_model.goal_active
         await pilot.press("escape")
         await pilot.pause()
         await pilot.press("c")  # config editor
@@ -165,7 +168,9 @@ def test_fifteen_tabs_fit_at_120_columns(width: int) -> None:
     assert labels["setup"] == "0 Setup"
     for name, key, _label in FIFTEEN_PANELS:
         assert labels[name].startswith(key)
-    assert labels["alerts"].endswith(("(12)", "¹²"))
+    # The Alerts count stays; it may be compact so more tabs keep a name
+    # (GAP-2150).
+    assert "(12)" in labels["alerts"] or "¹²" in labels["alerts"]
 
 
 def test_tabs_name_the_most_important_panels_first() -> None:
@@ -177,13 +182,12 @@ def test_tabs_name_the_most_important_panels_first() -> None:
     assert full["policies"] == "P Policies"
     assert wide["overview"] == "1 Overview"
     assert strip_width(tuple(wide.values())) <= 120 - 33
-    # A named tab is never less important than a letter-only one.
+    # Overview, Alerts and Policies are named first, then the cheapest names
+    # so the most tabs get one (GAP-2180).
     named = [name for name in LABEL_PRIORITY if name in wide and wide[name] != wide[name][:1]]
     letter_only = [name for name in LABEL_PRIORITY if name in wide and name not in named]
     assert named and letter_only
-    assert max(LABEL_PRIORITY.index(n) for n in named if n != "overview") < min(
-        LABEL_PRIORITY.index(n) for n in letter_only
-    )
+    assert {"overview", "alerts", "policies"} <= set(named)
     # Unknown width (before the first layout) keeps the full labels.
     assert fit_tab_labels(FIFTEEN_PANELS, "overview", {}, 0) == full
 

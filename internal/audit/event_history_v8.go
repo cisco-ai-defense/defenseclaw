@@ -560,7 +560,20 @@ func (writer *EventHistoryWriter) appendContextTxResolvedProfile(
 		record.Outcome() == observability.OutcomeTerminated
 
 	legacyTarget := any(nullStr(target))
+	// A control-plane record names who made the change in
+	// defenseclaw.admin.actor_ref (tui:operator for a TUI save); the actor
+	// column says the same, as CLI rows say cli, instead of the producer
+	// that wrote the record (audit_logger) (GAP-2143). A platform-health
+	// record the audit logger wrote names its subsystem instead (watcher,
+	// gateway, judge_bodies), as watch-start and watch-stop rows otherwise
+	// said audit_logger (GAP-2204).
 	legacyActor := any(provenance.Producer)
+	if actorRef := strings.TrimSpace(projectedCompatibilityString(projection, "defenseclaw.admin.actor_ref")); actorRef != "" {
+		legacyActor = actorRef
+	} else if subsystem := strings.TrimSpace(projectedCompatibilityString(projection, "defenseclaw.health.subsystem")); subsystem != "" &&
+		provenance.Producer == "audit_logger" {
+		legacyActor = subsystem
+	}
 	legacyDetails := any(details)
 	legacyStructured := any(string(payloadJSON))
 	legacySeverity := severityValue
@@ -599,6 +612,10 @@ func (writer *EventHistoryWriter) appendContextTxResolvedProfile(
 		legacyActor = legacy.Actor
 		if value, kept := keptCompatibilityValue(projected, "details", legacy.Details); kept {
 			legacyDetails = value
+		} else if details == string(record.EventName()) {
+			// The profile removed the details: say so rather than show the
+			// internal legacy.audit.* event name as the row text (GAP-2192).
+			legacyDetails = "details removed by redaction profile " + string(expectedProfile)
 		}
 		if encoded, err := json.Marshal(legacy.Structured); len(legacy.Structured) == 0 ||
 			(err == nil && projected["structured_json"] == string(encoded)) {

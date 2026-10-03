@@ -225,18 +225,56 @@ def empty_config_message(path: str | None = None) -> str:
     )
 
 
-def _previous_config_hint(home: str) -> str:
-    """Name the config the last version upgrade kept, with its version and date.
+def _newest_config_backup(home: str) -> tuple[str, float] | None:
+    """The newest nonempty backups/config.yaml.* copy DefenseClaw wrote (GAP-2206)."""
 
-    previous/ is refreshed only by an upgrade to another version, so the copy
-    can be much older than the config just lost (GAP-1786).
+    backups = os.path.join(home, "backups")
+    newest: tuple[str, float] | None = None
+    try:
+        names = os.listdir(backups)
+    except OSError:
+        return None
+    for name in names:
+        if not name.startswith("config.yaml."):
+            continue
+        candidate = os.path.join(backups, name)
+        try:
+            info = os.lstat(candidate)
+        except OSError:
+            continue
+        if not stat.S_ISREG(info.st_mode) or info.st_size == 0:
+            continue
+        if newest is None or info.st_mtime > newest[1]:
+            newest = (candidate, info.st_mtime)
+    return newest
+
+
+def _hint_time(mtime: float) -> str:
+    return datetime.fromtimestamp(mtime, timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+
+def _previous_config_hint(home: str) -> str:
+    """Name the newest copy of the config DefenseClaw kept, with its date.
+
+    That is the newest backups/config.yaml.* copy (GAP-2206) or the config
+    the last version upgrade kept. previous/ is refreshed only by an upgrade
+    to another version, so that copy can be much older than the config just
+    lost (GAP-1786).
     """
 
+    backup = _newest_config_backup(home)
     previous = os.path.join(home, "previous")
     kept = os.path.join(previous, "data", "config.yaml")
     try:
-        mtime = os.stat(kept).st_mtime
+        mtime: float | None = os.stat(kept).st_mtime
     except OSError:
+        mtime = None
+    if backup is not None and (mtime is None or backup[1] >= mtime):
+        hint = f" (the newest backup is {backup[0]}, from {_hint_time(backup[1])}"
+        if mtime is not None:
+            hint += f"; the last version upgrade kept an older copy from {_hint_time(mtime)} in {kept}"
+        return hint + ")"
+    if mtime is None:
         return ""
     try:
         with open(os.path.join(previous, "VERSION"), encoding="utf-8") as stream:
@@ -244,7 +282,7 @@ def _previous_config_hint(home: str) -> str:
     except (OSError, UnicodeError):
         version = ""
     label = f"the DefenseClaw {version} config" if version else "the config"
-    when = datetime.fromtimestamp(mtime, timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    when = _hint_time(mtime)
     return (
         f" (the last version upgrade kept {label} from {when} in {kept}; "
         "it lacks every change made since then)"

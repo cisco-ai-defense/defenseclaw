@@ -199,13 +199,13 @@ class TaskProblem:
 
 
 def _check_name(check: ReadinessCheck) -> str:
-    # "Active Connector: codex" is one row per connector.
+    # "Connector: codex" is one row per connector.
     return check.title.split(":", 1)[0].strip()
 
 
 # Which task owns each readiness check (its fix belongs to that task).
 _READINESS_OWNERS: dict[str, tuple[SetupWizard, ...]] = {
-    "Active Connector": (SetupWizard.CONNECTOR_SETUP,),
+    "Connector": (SetupWizard.CONNECTOR_SETUP,),
     "Gateway / API Health": (SetupWizard.GATEWAY,),
     "Guardrail": (SetupWizard.GUARDRAIL,),
     "Required Credentials": (SetupWizard.CREDENTIALS,),
@@ -213,7 +213,7 @@ _READINESS_OWNERS: dict[str, tuple[SetupWizard, ...]] = {
     "Regional Provider": (SetupWizard.LLM,),
     "Custom-provider Overlay": (SetupWizard.CUSTOM_PROVIDERS,),
     "Scanner Availability": (SetupWizard.SKILL_SCANNER, SetupWizard.MCP_SCANNER),
-    "Observability v8": (SetupWizard.OBSERVABILITY,),
+    "Telemetry": (SetupWizard.OBSERVABILITY,),
     "Registry / Asset Policy": (SetupWizard.REGISTRIES,),
     "Restart Pending": (SetupWizard.GATEWAY,),
 }
@@ -371,7 +371,20 @@ def _observability_status(observability: Any, error: str) -> TaskStatus:
         return TaskStatus("off", "local only")
     if not destinations:
         return TaskStatus("off", "local only")
+    # The list and Overview count the built-in local store too, so say so
+    # here: "2 exports + local", not "2 destinations" next to "3" (GAP-2239).
+    if _has_local_store(observability):
+        return TaskStatus("ok", f"{_plural(len(destinations), 'export')} + local")
     return TaskStatus("ok", _plural(len(destinations), "destination"))
+
+
+def _has_local_store(observability: Any) -> bool:
+    return any(
+        getattr(destination, "enabled", False)
+        and getattr(destination, "generated", False)
+        and getattr(destination, "kind", "") == "sqlite"
+        for destination in getattr(observability, "destinations", ()) or ()
+    )
 
 
 def _redaction_profiles(cfg: Any, observability: Any) -> set[str]:
@@ -513,6 +526,13 @@ def task_status(
     return TaskStatus("na")
 
 
+# Tasks whose base command alone ("defenseclaw setup") is not what they run
+# (GAP-2160).
+_COMMAND_DISPLAY: dict[SetupWizard, str] = {
+    SetupWizard.CONNECTOR_SETUP: "defenseclaw setup <connector> --yes",
+}
+
+
 def setup_detail_pairs(model: object) -> tuple[tuple[str, str], ...]:
     """What ``i`` shows on the wizard list: the selected task, then readiness.
 
@@ -525,7 +545,7 @@ def setup_detail_pairs(model: object) -> tuple[tuple[str, str], ...]:
         ("Task", f"{wizard_label(info.wizard)} ({wizard_group(info.wizard)})"),
         ("What it does", info.description),
         ("How it works", info.how_to),
-        ("Command", " ".join(info.argv)),
+        ("Command", _COMMAND_DISPLAY.get(info.wizard, " ".join(info.argv))),
     ]
     if info.status == "unsupported":
         pairs.append(("Unavailable", model.wizard_unavailable_reason(info.wizard)))  # type: ignore[attr-defined]
@@ -536,15 +556,12 @@ def setup_detail_pairs(model: object) -> tuple[tuple[str, str], ...]:
         fix = getattr(check, "fix", None)
         if fix is not None and check.status != "pass":
             value += f" · fix: {getattr(fix, 'binary', 'defenseclaw')} {' '.join(fix.args)}"
-        # "Active Connector: claudecode" wrapped over two lines in the
-        # 22-cell label column (GAP-2059).
-        label = check.title.replace("Active Connector: ", "Connector ", 1)
-        pairs.append((label, value))
+        pairs.append((check.title, value))
     snapshot = getattr(model, "credential_snapshot", None)
     if getattr(snapshot, "error", ""):
         pairs.append(("API keys", f"Could not list keys: {snapshot.error}"))
     elif not getattr(snapshot, "rows", ()):
-        pairs.append(("API keys", "Not loaded yet; select API keys & secrets and press r to load them."))
+        pairs.append(("API keys", "Not loaded yet; press r on the task list to load them."))
     return tuple(pairs)
 
 

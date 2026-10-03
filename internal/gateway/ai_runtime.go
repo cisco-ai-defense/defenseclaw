@@ -114,6 +114,9 @@ func (s *Sidecar) runAIRuntime(ctx context.Context) error {
 	}
 
 	acquirer := ownAccountProcesses(activeConfig, chooseAcquirer(activeConfig, runtimeConfig))
+	if acquirer.Brokered() {
+		defer inventory.SetProcessAccountLookup(brokeredProcessAccounts(ctx, acquirer))()
+	}
 	service, err := sensor.New(sensor.Options{
 		Config:    runtimeConfig,
 		Acquirer:  acquirer,
@@ -303,6 +306,28 @@ func (s *Sidecar) aiRuntimeSnapshot() *sensor.Service {
 	s.aiRuntimeMu.RLock()
 	defer s.aiRuntimeMu.RUnlock()
 	return s.aiRuntime
+}
+
+// brokeredProcessAccounts lets AI discovery name each process's account from
+// the sensor helper, which reads every process's token. The managed Windows
+// gateway's own restricted token sees neither the token nor the session
+// user of another account's process (GAP-2043).
+func brokeredProcessAccounts(ctx context.Context, acquirer acquire.Acquirer) func() map[int]inventory.ProcessAccount {
+	return func() map[int]inventory.ProcessAccount {
+		readCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		rows, _, err := acquirer.Processes(readCtx)
+		if err != nil {
+			return nil
+		}
+		accounts := make(map[int]inventory.ProcessAccount, len(rows))
+		for _, row := range rows {
+			if row.User != "" {
+				accounts[row.PID] = inventory.ProcessAccount{Name: row.Name, User: row.User}
+			}
+		}
+		return accounts
+	}
 }
 
 // ownAccountProcesses limits a per-user, unmanaged gateway's runtime planes

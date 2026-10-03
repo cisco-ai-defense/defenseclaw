@@ -9,7 +9,67 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 )
+
+// ProcessAccount is the account a process runs as, read by a broker that
+// can open every process's token.
+type ProcessAccount struct {
+	Name string // executable basename
+	User string // account name
+}
+
+// processAccounts names process owners for a managed Windows scan. The
+// gateway service's restricted token can neither open another account's
+// process nor ask Remote Desktop Services who is signed in to a session, so
+// a machine-wide agent (VS Code's copilot-runtime.exe) gets its owner from
+// the LocalSystem sensor helper instead (GAP-2043).
+var processAccounts struct {
+	sync.Mutex
+	generation uint64
+	lookup     func() map[int]ProcessAccount
+}
+
+// SetProcessAccountLookup installs lookup for later scans. The returned
+// function removes it again unless a later call replaced it.
+func SetProcessAccountLookup(lookup func() map[int]ProcessAccount) func() {
+	processAccounts.Lock()
+	defer processAccounts.Unlock()
+	processAccounts.generation++
+	generation := processAccounts.generation
+	processAccounts.lookup = lookup
+	return func() {
+		processAccounts.Lock()
+		defer processAccounts.Unlock()
+		if processAccounts.generation == generation {
+			processAccounts.lookup = nil
+		}
+	}
+}
+
+func brokeredProcessAccounts() map[int]ProcessAccount {
+	processAccounts.Lock()
+	lookup := processAccounts.lookup
+	processAccounts.Unlock()
+	if lookup == nil {
+		return nil
+	}
+	return lookup()
+}
+
+// homeOwnerForAccount returns the one profile owner whose account is user.
+func (s *ContinuousDiscoveryService) homeOwnerForAccount(user string) (discoveryHomeOwner, bool) {
+	user = strings.TrimSpace(user[strings.LastIndex(user, `\`)+1:])
+	var found discoveryHomeOwner
+	matches := 0
+	for _, owner := range s.opts.homeOwners {
+		if user != "" && owner.Home != "" && strings.EqualFold(strings.TrimSpace(owner.UserName), user) {
+			found = owner
+			matches++
+		}
+	}
+	return found, matches == 1
+}
 
 // discoveryHomeOwner names the account that owns one profile root of a
 // service-context scan. On managed Windows the gateway service reads every
@@ -45,6 +105,20 @@ func (s *ContinuousDiscoveryService) homeOwnerForPath(path string) (discoveryHom
 	return best, best.Home != ""
 }
 
+// homeOwnerForSID returns the profile owner whose account is sid.
+func (s *ContinuousDiscoveryService) homeOwnerForSID(sid string) (discoveryHomeOwner, bool) {
+	sid = strings.TrimSpace(sid)
+	if s == nil || sid == "" {
+		return discoveryHomeOwner{}, false
+	}
+	for _, owner := range s.opts.homeOwners {
+		if owner.Home != "" && strings.EqualFold(strings.TrimSpace(owner.UserID), sid) {
+			return owner, true
+		}
+	}
+	return discoveryHomeOwner{}, false
+}
+
 // stampHomeOwner attributes sig to the account whose profile holds path.
 func (s *ContinuousDiscoveryService) stampHomeOwner(sig *AISignal, path string) {
 	if sig == nil || sig.UserID != "" {
@@ -59,6 +133,9 @@ func (s *ContinuousDiscoveryService) stampHomeOwner(sig *AISignal, path string) 
 // its executable. The service cannot open other accounts' processes, so the
 // token owner is unknown, but the image path is not: per-user agents run
 // from the user's profile (~\.local\bin\claude.exe, ~\.codex\...\codex.exe).
+// An agent installed machine-wide (VS Code's copilot-runtime.exe under
+// Program Files) takes the profile owner of its session account, or of the
+// account the sensor helper reads from its token (GAP-2043).
 // A node process outside every profile takes the owner of the nearest
 // attributed ancestor, the agent that launched it.
 func (s *ContinuousDiscoveryService) attributeProcessOwners(procs []processInfo) {
@@ -68,7 +145,28 @@ func (s *ContinuousDiscoveryService) attributeProcessOwners(procs []processInfo)
 	byPID := make(map[int]int, len(procs))
 	for i := range procs {
 		byPID[procs[i].PID] = i
-		if owner, ok := s.homeOwnerForPath(procs[i].Image); ok {
+		owner, ok := s.homeOwnerForPath(procs[i].Image)
+		if !ok {
+			owner, ok = s.homeOwnerForSID(procs[i].SessionOwnerID)
+		}
+		if ok {
+			procs[i].OwnerID, procs[i].OwnerName = owner.UserID, owner.UserName
+		}
+	}
+	var accounts map[int]ProcessAccount
+	asked := false
+	for i := range procs {
+		if procs[i].OwnerID != "" || procs[i].Connector == "" {
+			continue
+		}
+		if !asked {
+			accounts, asked = brokeredProcessAccounts(), true
+		}
+		account, ok := accounts[procs[i].PID]
+		if !ok || windowsProcessBasename(account.Name) != windowsProcessBasename(procs[i].Comm) {
+			continue
+		}
+		if owner, ok := s.homeOwnerForAccount(account.User); ok {
 			procs[i].OwnerID, procs[i].OwnerName = owner.UserID, owner.UserName
 		}
 	}

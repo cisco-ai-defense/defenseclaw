@@ -419,7 +419,7 @@ class ActivityPanelModel:
 
     def _render_mutations(self, *, height: int) -> str:
         if not self.mutations:
-            return "  No activity events in canonical SQLite event history yet."
+            return "  No activity events in the local audit log yet."
         lines: list[str] = []
         max_rows = max(height - 6, 5)
         start = max(0, self.mutation_cursor - max_rows + 1)

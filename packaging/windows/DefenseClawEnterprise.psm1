@@ -9380,33 +9380,46 @@ function Remove-DefenseClawEmptyClaudeManagedSettingsFolders {
     }
 }
 
-# An elevated enterprise CLI run gives PowerShell a protected temp folder,
-# ProgramData\DefenseClaw-PowerShell-<32 hex>, and removes it when PowerShell
-# exits; a run stopped before that leaves it (GAP-1734). A purge removes every
-# such folder except the ones this run uses (its TEMP and the launching CLI's
-# folder, GAP-1853), and writes "path: reason" for each one it kept.
-function Remove-DefenseClawStalePowerShellTempDirectories {
-    param([Parameter(Mandatory)][string]$ProgramData)
+# An elevated enterprise CLI run stages the installer scripts in
+# ProgramData\DefenseClaw-Installer-<32 hex>, gives PowerShell a protected
+# temp folder, ProgramData\DefenseClaw-PowerShell-<32 hex>, and
+# install-enterprise.ps1 moves TEMP into Windows\Temp\DefenseClaw-Bootstrap-<32
+# hex>. Each run removes its own folders when it exits; a run stopped before
+# that leaves them (GAP-1734, GAP-2057). A purge removes every such folder
+# except the ones this run uses (its TEMP, the launching CLI's folder,
+# GAP-1853, and the folder this module was loaded from), and writes
+# "path: reason" for each one it kept.
+function Remove-DefenseClawStaleRunDirectories {
+    param(
+        [Parameter(Mandatory)][string]$ProgramData,
+        [Parameter(Mandatory)][string]$WindowsTemp
+    )
     $inUse = @(
-        @([string]$env:TEMP, [string]$script:DefenseClawLauncherTemp) |
+        @([string]$env:TEMP, [string]$script:DefenseClawLauncherTemp, [string]$PSScriptRoot) |
             Microsoft.PowerShell.Core\Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
             Microsoft.PowerShell.Core\ForEach-Object { $_.TrimEnd('\') + '\' }
     )
-    foreach ($item in @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $ProgramData -Force -Directory -Filter 'DefenseClaw-PowerShell-*' -ErrorAction SilentlyContinue)) {
-        $path = [string]$item.FullName
-        $prefix = $path.TrimEnd('\') + '\'
-        if ([string]$item.Name -cnotmatch '^DefenseClaw-PowerShell-[a-f0-9]{32}$' -or
-            @($inUse | Microsoft.PowerShell.Core\Where-Object {
-                $_.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)
-            }).Count -gt 0) {
-            continue
-        }
-        try {
-            Assert-DefenseClawPathAcl -Path $path -AllowedWriterSIDs @($script:SystemSID, $script:AdministratorsSID)
-            Remove-DefenseClawManagedTree -Path $path -RequiredBase $ProgramData -Label 'stale enterprise PowerShell temp'
-        }
-        catch {
-            "${path}: " + (ConvertTo-DefenseClawBoundedDiagnostic -Value $_.Exception.Message -MaxLength 512)
+    foreach ($scope in @(
+            @($ProgramData, 'DefenseClaw-PowerShell-', 'stale enterprise PowerShell temp'),
+            @($ProgramData, 'DefenseClaw-Installer-', 'stale enterprise installer staging'),
+            @($WindowsTemp, 'DefenseClaw-Bootstrap-', 'stale enterprise bootstrap environment'))) {
+        $parent, $prefix, $label = $scope
+        foreach ($item in @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $parent -Force -Directory -Filter ($prefix + '*') -ErrorAction SilentlyContinue)) {
+            $path = [string]$item.FullName
+            $pathPrefix = $path.TrimEnd('\') + '\'
+            if ([string]$item.Name -cnotmatch ('^' + [regex]::Escape($prefix) + '[a-f0-9]{32}$') -or
+                @($inUse | Microsoft.PowerShell.Core\Where-Object {
+                    $_.StartsWith($pathPrefix, [StringComparison]::OrdinalIgnoreCase)
+                }).Count -gt 0) {
+                continue
+            }
+            try {
+                Assert-DefenseClawPathAcl -Path $path -AllowedWriterSIDs @($script:SystemSID, $script:AdministratorsSID)
+                Remove-DefenseClawManagedTree -Path $path -RequiredBase $parent -Label $label
+            }
+            catch {
+                "${path}: " + (ConvertTo-DefenseClawBoundedDiagnostic -Value $_.Exception.Message -MaxLength 512)
+            }
         }
     }
 }
@@ -21545,7 +21558,7 @@ function Invoke-DefenseClawCommittedUninstallCleanup {
             # uninstall result's warnings.
             $machineStateRemaining = [string[]]@(
                 @($machineStateRemaining) +
-                @(Remove-DefenseClawStalePowerShellTempDirectories -ProgramData $script:ProgramData)
+                @(Remove-DefenseClawStaleRunDirectories -ProgramData $script:ProgramData -WindowsTemp ([IO.Path]::Combine($script:WindowsDirectory, 'Temp')))
             )
             $result |
                 Microsoft.PowerShell.Utility\Add-Member `

@@ -632,6 +632,8 @@ class SetupPanelModel:
         self.goal_cursor = 0
         self.goals: tuple[WizardGoal, ...] = ()
         self.active_goal: WizardGoal | None = None
+        # The open form came from the goal menu, so Esc goes back to it.
+        self.form_from_goal_menu = False
         # What ``sandbox doctor --json`` found (the app runs it when the
         # Sandbox wizard opens); None until it answers.
         self.sandbox_machine: SandboxMachineCheck | None = None
@@ -894,34 +896,6 @@ class SetupPanelModel:
         )
         self.credential_cursor = _clamp(self.credential_cursor, 0, max(0, len(rows) - 1))
 
-    def _stored_credential_choice(self, fields: Sequence[WizardFormField]) -> tuple[WizardFormField, ...]:
-        """Env Name as a pick list of the entries stored in the .env file.
-
-        Remove only deletes entries of ~/.defenseclaw/.env, so offer those
-        instead of a blank text box (GAP-2061). Free text stays when the list
-        is not loaded or holds none.
-        """
-
-        rows = self.credential_snapshot.rows
-        stored = tuple(dict.fromkeys(row.env_name for row in rows if row.source == "dotenv" and row.env_name))
-        if not stored:
-            return tuple(fields)
-        selected = self.selected_credential()
-        first = selected.env_name if selected is not None and selected.env_name in stored else stored[0]
-        return tuple(
-            WizardFormField(
-                "Env Name",
-                "choice",
-                value=first,
-                default=first,
-                options=stored,
-                hint="Stored in ~/.defenseclaw/.env; ←/→ picks the entry to remove.",
-            )
-            if field.label == "Env Name"
-            else field
-            for field in fields
-        )
-
     def selected_credential(self) -> CredentialRow | None:
         rows = self.credential_snapshot.rows
         if 0 <= self.credential_cursor < len(rows):
@@ -1022,7 +996,7 @@ class SetupPanelModel:
         restart_hint = ""
         actions = ["[`] Wizards", "[Arrows] Navigate", "[Enter/Click] Edit/Toggle"]
         if changes:
-            actions.extend(("[S] Review & Save", "[R] Revert"))
+            actions.extend(("[S] Review & Save", "\\[r] Revert"))
         if self.restart_queue.pending:
             restart_hint = "Restart pending: " + self.restart_queue.reason + "  [G] restart now  [C] clear"
             actions.extend(("[G] Restart Now", "[C] Clear Restart"))
@@ -1070,7 +1044,7 @@ class SetupPanelModel:
                     "config",
                     "open_observability_editor",
                     "E",
-                    "Open the canonical destination editor.",
+                    "Open the destination editor.",
                 )
             if section is not None and section.name == "Webhooks":
                 return SetupFocusedRowAction(
@@ -1279,6 +1253,22 @@ class SetupPanelModel:
             return
         goal = self.goals[_clamp(self.goal_cursor, 0, len(self.goals) - 1)]
         self.open_wizard_form(self.active_wizard, goal=goal)
+        self.form_from_goal_menu = True
+
+    def back_to_goal_menu(self) -> bool:
+        """Close a form opened from the goal menu and show that menu again.
+
+        Esc in "Add or configure a connector" went back to the Setup task
+        list, so the next Enter opened another task (GAP-2091). Returns
+        ``False`` when the form was not opened from the goal menu.
+        """
+
+        if not (self.form_active and self.form_from_goal_menu and self.goals):
+            return False
+        goals, cursor = self.goals, self.goal_cursor
+        self.close_wizard_form()
+        self.goals, self.goal_cursor, self.goal_active = goals, cursor, True
+        return True
 
     def open_wizard_form(
         self,
@@ -1288,6 +1278,7 @@ class SetupPanelModel:
     ) -> None:
         if wizard is not None:
             self.active_wizard = SetupWizard(wizard)
+        self.form_from_goal_menu = False
         # Advanced goals carry no presets/filter, so treat them like "no goal".
         self.active_goal = goal if (goal is not None and not goal.is_advanced) else None
         presets = dict(self.active_goal.presets) if self.active_goal else {}
@@ -1309,8 +1300,8 @@ class SetupPanelModel:
         if self.active_goal is not None:
             base = list(_filter_fields_for_goal(base, self.active_goal))
             base = list(_narrow_goal_connectors(base, self.active_goal, self.config))
-        if self.active_wizard == SetupWizard.CREDENTIALS and presets.get("@Action") == "remove":
-            base = list(self._stored_credential_choice(base))
+            if self.active_wizard == SetupWizard.CREDENTIALS and self.active_goal.id == "remove":
+                base = [_stored_key_picker(field, self.config) if field.label == "Env Name" else field for field in base]
         self.form_fields = base
         self.form_active = True
         self.goal_active = False
@@ -1342,6 +1333,7 @@ class SetupPanelModel:
         self.goal_cursor = 0
         self.goals = ()
         self.active_goal = None
+        self.form_from_goal_menu = False
         self.disk_change_pending = False
 
     def recompute_dependent_fields(self) -> None:
@@ -1629,6 +1621,7 @@ class SetupPanelModel:
             connector = wizard_field_value(self.form_fields, "Connector")
             if connector:
                 name += f" ({connector})"
+        keys_run = self.active_wizard == SetupWizard.CREDENTIALS and len(args) > 1
         # Credentials "set" feeds the secret over stdin (hidden prompt) so
         # it never lands in the child's argv. See F-0801.
         secret_stdin: str | None = None
@@ -1661,10 +1654,13 @@ class SetupPanelModel:
         # toast says doctor, and it leaves the wizard's status as it was.
         doctor = tuple(args[:2]) == ("sandbox", "doctor")
         category = "info" if doctor else "setup"
-        label = "sandbox doctor" if doctor else "setup " + name
-        if self.active_wizard == SetupWizard.CREDENTIALS and tuple(args[:1]) == ("keys",):
-            # Name the command that ran ("keys remove"), not "setup Credentials".
-            label = " ".join(args[:2])
+        # "keys remove", not "setup Credentials" (GAP-2061).
+        label = "sandbox doctor" if doctor else (" ".join(args[:2]) if keys_run else "setup " + name)
+        consequence = ""
+        if keys_run and tuple(args[:2]) == ("keys", "remove") and len(args) > 2:
+            from defenseclaw.commands.cmd_keys import required_removal_warning
+
+            consequence = required_removal_warning(self.config, args[2])
         # A cancelled run (or a finished check) puts this status back.
         self._status_before_check[self.active_wizard] = self.wizard_status.get(self.active_wizard, "")
         self.wizard_status[self.active_wizard] = "running..."
@@ -1683,6 +1679,7 @@ class SetupPanelModel:
                 env_overrides=secret_env,
                 risk=risk,
                 terminal=terminal,
+                consequence=consequence,
             ),
         )
 
@@ -1885,7 +1882,7 @@ def build_setup_sections(
         ConfigSection(
             "Observability",
             _v8_observability_fields(observability_status, error=observability_status_error),
-            "Canonical v8 collection, retention, routing, and per-route redaction policy.",
+            "Telemetry collection, retention, routing, and per-route redaction policy.",
             "Read-only effective plan; press E to manage destinations through setup observability.",
         ),
         ConfigSection("Webhooks", tuple(_webhook_summary_fields(cfg)), "Read-only notifier webhook summary."),
@@ -2005,6 +2002,34 @@ def connector_setup_command(wire: str) -> tuple[tuple[str, ...], str]:
 
 def is_guardrail_supporting(connector: str) -> bool:
     return connector.strip().lower() in GUARDRAIL_CONNECTORS
+
+
+def _stored_key_picker(field: WizardFormField, cfg: object | Mapping[str, Any] | None) -> WizardFormField:
+    """The remove form's Env Name as a pick list of the names stored in .env (GAP-2061).
+
+    Only names are read, never values. The gateway's own token stays out of
+    the list (``keys list`` says not to remove it). With nothing stored the
+    field stays free text.
+    """
+
+    from defenseclaw.commands.cmd_keys import _dotenv_names, _gateway_token_names
+
+    data_dir = _llm_data_dir(cfg) or os.path.expanduser("~/.defenseclaw")
+    try:
+        reserved = _gateway_token_names(cfg)
+    except Exception:  # noqa: BLE001 - a partial config still lists the stored names.
+        reserved = {"DEFENSECLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_TOKEN"}
+    names = tuple(sorted(name for name in _dotenv_names(os.path.join(data_dir, ".env")) if name not in reserved))
+    if not names:
+        return replace(field, hint=f"Name of the entry to delete; nothing is stored in {data_dir}/.env yet.")
+    return replace(
+        field,
+        kind="choice",
+        value="",
+        default="",
+        options=("", *names),
+        hint="Pick the stored entry to delete (←/→ or Enter steps through them).",
+    )
 
 
 def _credentials_wizard_fields() -> tuple[WizardFormField, ...]:
@@ -3236,7 +3261,7 @@ def _connector_setup_goals(cfg: object | Mapping[str, Any] | None) -> tuple[Wiza
         WizardGoal(
             "add",
             "Add or configure a connector",
-            summary="Protect one more agent next to the ones already set up (or instead of them).",
+            summary="Protect one more agent next to the ones already set up (or replace them).",
             presets={"@Action": "setup"},
             # The task text promises the guardrail mode; without the field a
             # connector added here always got the CLI default (GAP-1957).
@@ -3244,10 +3269,10 @@ def _connector_setup_goals(cfg: object | Mapping[str, Any] | None) -> tuple[Wiza
         ),
         WizardGoal(
             "proxy-stack",
-            "Set up a proxy connector with the local stack",
-            summary="Bring up the local guardrail/scanner stack for a proxy.",
+            "Set up a connector with local Grafana",
+            summary="Set up a hook connector and start the local Prometheus/Loki/Tempo/Grafana stack.",
             presets={"@Action": "setup", "@Local Stack": "yes"},
-            fields=("Connector", "Guardrail Mode", "Scanner Mode", "Local Stack"),
+            fields=("Connector", "Guardrail Mode", "Local Stack"),
         ),
         WizardGoal(
             "bulk",
@@ -3266,7 +3291,7 @@ def _connector_setup_goals(cfg: object | Mapping[str, Any] | None) -> tuple[Wiza
         WizardGoal(
             "rerun",
             "Re-run setup for a connector",
-            summary="Re-apply guardrail/scanner settings and verify one connector.",
+            summary="Set up one connector again, for example to change its guardrail mode.",
             presets={"@Action": "setup"},
             fields=("Connector", "Action", "Guardrail Mode", "Scanner Mode", "Verify After Setup"),
         ),
@@ -3374,14 +3399,14 @@ def _token_rotation_goals(cfg: object | Mapping[str, Any] | None) -> tuple[Wizar
     return (
         WizardGoal(
             "auto",
-            "Rotate shared token for active connectors",
-            summary="New gateway and hook tokens for every protected agent; the old ones come back if it fails.",
+            "Rotate the gateway token",
+            summary="Make a new gateway token and update every protected agent's hooks; nothing changes if a step fails.",
             fields=("Refresh Hooks",),
         ),
         WizardGoal(
             "specific",
-            "Rotate shared token with connector hint",
-            summary="Same shared token, but only this agent's hooks are rewritten with it.",
+            "Rotate the gateway token, refresh one agent",
+            summary="Same new token for every agent; only the chosen agent's hooks are rewritten now.",
             fields=("Connector", "Refresh Hooks"),
         ),
     )
@@ -3549,28 +3574,28 @@ def _observability_goals(cfg: object | Mapping[str, Any] | None) -> tuple[Wizard
         WizardGoal(
             "list",
             "List destinations",
-            summary="List canonical process-wide destinations.",
+            summary="List the telemetry destinations.",
             presets={"@Action": "list"},
             fields=("Action", "JSON Output"),
         ),
         WizardGoal(
             "enable",
             "Enable a destination",
-            summary="Enable a canonical destination by name.",
+            summary="Enable a destination by name.",
             presets={"@Action": "enable"},
             fields=("Action", "Name"),
         ),
         WizardGoal(
             "disable",
             "Disable a destination",
-            summary="Disable a canonical destination by name.",
+            summary="Disable a destination by name.",
             presets={"@Action": "disable"},
             fields=("Action", "Name"),
         ),
         WizardGoal(
             "remove",
             "Remove a destination",
-            summary="Remove a canonical destination by name.",
+            summary="Remove a destination by name.",
             presets={"@Action": "remove"},
             fields=("Action", "Name"),
         ),
@@ -4055,6 +4080,26 @@ def _seed_parametrized_fields(
     return None
 
 
+def _effective_strategy_text(cfg: object | Mapping[str, Any] | None, strategy: str) -> str:
+    """``strategy`` as the connectors run it.
+
+    A judge strategy with the judge off (or gated to no active connector)
+    scans regex only, as ``defenseclaw guardrail status`` says; the header
+    read "Strategy: regex_judge" there (GAP-2092).
+    """
+
+    if strategy not in {"regex_judge", "judge_first"}:
+        return strategy
+    if not bool(get_config_value(cfg, "guardrail.judge.enabled", False)):
+        return "regex_only (judge off)"
+    gate = get_config_value(cfg, "guardrail.judge.hook_connectors", None) or ()
+    gated = {str(name).strip().lower() for name in gate}
+    connectors = _active_connector_names_for_setup(cfg)
+    if "*" in gated or _any_active_connector_is_proxy(cfg) or not connectors or gated & set(connectors):
+        return strategy
+    return "regex_only (judge on for no active connector)"
+
+
 def wizard_state_summary(wizard: SetupWizard | int, cfg: object | Mapping[str, Any] | None = None) -> str:
     """One-line "here's what's configured today" string for the goal menu.
 
@@ -4080,7 +4125,7 @@ def wizard_state_summary(wizard: SetupWizard | int, cfg: object | Mapping[str, A
         mode = _cfg_str(cfg, "guardrail.mode", "observe") or "observe"
         enabled = "on" if _guardrail_enabled(cfg) else "off"
         strategy = _cfg_str(cfg, "guardrail.detection_strategy", "regex_only") or "regex_only"
-        return f"Guardrail: {enabled}  ·  Mode: {mode}  ·  Strategy: {strategy}"
+        return f"Guardrail: {enabled}  ·  Mode: {mode}  ·  Strategy: {_effective_strategy_text(cfg, strategy)}"
     if wizard == SetupWizard.CONNECTOR_SETUP:
         connectors = _active_connector_names_for_setup(cfg)
         return f"Active connectors: {', '.join(connectors) if connectors else 'not set'}"
@@ -5679,6 +5724,11 @@ def uninstall_intent(option: UninstallOption) -> SetupCommandIntent:
     )
 
 
+# The connector install.sh offers first; the Setup form starts on it when no
+# connector is configured (GAP-2159).
+_DEFAULT_SETUP_CONNECTOR = "codex"
+
+
 def connector_setup_wizard_fields(
     cfg: object | Mapping[str, Any] | None = None,
     os_name: str | None = None,
@@ -5692,8 +5742,10 @@ def connector_setup_wizard_fields(
     else:
         connector = str(get_config_value(cfg, "guardrail.connector", "") or "").strip()
         if not connector:
-            connector = str(get_config_value(cfg, "claw.mode", "openclaw") or "openclaw").strip()
-    connector = connector or "openclaw"
+            connector = str(get_config_value(cfg, "claw.mode", "") or "").strip()
+    # No connector configured: start where install.sh does (codex), not on
+    # openclaw, so Ctrl+R can't set up an agent nobody picked (GAP-2159).
+    connector = connector or _DEFAULT_SETUP_CONNECTOR
     # A stored compatibility mirror can name a proxy connector that this OS
     # can't run (e.g. a config copied from macOS opened on Windows); fall back
     # to the first supported connector rather than offering an unusable default.
@@ -5720,7 +5772,7 @@ def connector_setup_wizard_fields(
             value=connector,
             default=connector,
             options=choices,
-            hint="The agent to protect (←/→ steps through the supported agents).",
+            hint="The agent to protect (←/→ to change).",
         ),
         WizardFormField(
             "Connectors (CSV)",
@@ -5741,7 +5793,7 @@ def connector_setup_wizard_fields(
             value=mode,
             default=mode,
             options=("observe", "action"),
-            hint="observe only logs and alerts on what it finds; action also blocks it.",
+            hint="observe only logs what would be blocked; action blocks it.",
         ),
         WizardFormField(
             "Scanner Mode",
@@ -5749,15 +5801,14 @@ def connector_setup_wizard_fields(
             value=scanner_mode,
             default=scanner_mode,
             options=("local", "remote", "both"),
-            hint="Proxy connectors only (hook connectors ignore it): local scans on this machine, "
-            "remote uses Cisco AI Defense, both uses both.",
+            hint="Where scans run: on this machine, in the Cisco AI Defense cloud, or both.",
         ),
         WizardFormField(
             "Replace Existing",
             "bool",
             value="no",
             default="no",
-            hint="Replace the configured connector set instead of adding this connector as a peer.",
+            hint="yes turns off the agents set up now and protects only this one; no adds it next to them.",
         ),
         WizardFormField(
             "Workspace Dir",
@@ -5769,7 +5820,7 @@ def connector_setup_wizard_fields(
             "bool",
             value="yes",
             default="yes",
-            hint="Restart the gateway so the change takes effect now (no: it applies at the next restart).",
+            hint="Restart the gateway so the change takes effect now.",
         ),
         WizardFormField(
             "Detected Connectors",
@@ -5790,14 +5841,14 @@ def connector_setup_wizard_fields(
             "bool",
             value="no",
             default="no",
-            hint="Also start the local guardrail and scanner services on this machine.",
+            hint="Also start the local Prometheus/Loki/Tempo/Grafana stack.",
         ),
         WizardFormField(
             "Verify After Setup",
             "bool",
             value="yes",
             default="yes",
-            hint="Proxy connectors only: check that guarded traffic flows once setup ends.",
+            hint="Check that the connector reaches the guardrail once setup is done.",
         ),
         WizardFormField(
             "Force Last Connector Removal",
@@ -5807,7 +5858,14 @@ def connector_setup_wizard_fields(
             hint="Allow removing the final connector and fully unconfiguring enforcement.",
         ),
     )
+    if not is_guardrail_supporting(connector):
+        # Only the proxy connectors take --scanner-mode / --verify; the form
+        # offered them for Claude Code too, where they did nothing (GAP-2059).
+        fields = tuple(field for field in fields if field.label not in _PROXY_ONLY_CONNECTOR_FIELDS)
     return _overlay_field_overrides(fields, overrides)
+
+
+_PROXY_ONLY_CONNECTOR_FIELDS = frozenset({"Scanner Mode", "Verify After Setup"})
 
 
 # ---------------------------------------------------------------------------
@@ -5988,23 +6046,23 @@ def _prune_empty_sections(fields: Sequence[WizardFormField]) -> tuple[WizardForm
 
 # Goals that act on a connector that is already set up.
 _CONFIGURED_CONNECTOR_GOALS = frozenset({"rerun", "remove"})
-_CONNECTOR_ACTIONS = ("setup", "batch", "remove")
 
 
 def _pin_goal_action(
     fields: Sequence[WizardFormField], goal: WizardGoal | None
 ) -> tuple[WizardFormField, ...]:
-    """Keep a connector goal's Action row on the goal's own action.
+    """Keep a goal's Action row on the goal's own action.
 
     Each goal shows only the rows its action needs, so cycling Action in
     "Add or configure a connector" to batch asked for Connectors (CSV) or
     Detected/All rows the form never showed, and remove kept the ignored
-    Guardrail Mode and Replace Existing rows (GAP-2026). The other actions
-    have their own goals.
+    Guardrail Mode and Replace Existing rows (GAP-2026). "See which
+    credentials are set" cycled to remove and then asked for an Env Name
+    row it never showed (GAP-2185). The other actions have their own goals.
     """
 
     action = (goal.presets.get("@Action") or "") if goal is not None else ""
-    if action not in _CONNECTOR_ACTIONS:
+    if not action:
         return tuple(fields)
     return tuple(
         replace(
@@ -6014,7 +6072,7 @@ def _pin_goal_action(
             default=action,
             hint="Fixed by this goal.",
         )
-        if field.label == "Action" and field.kind == "choice" and set(field.options) == set(_CONNECTOR_ACTIONS)
+        if field.label == "Action" and field.kind == "choice" and action in field.options
         else field
         for field in fields
     )
@@ -7095,7 +7153,7 @@ def wizard_bool_value(fields: Sequence[WizardFormField], label: str, fallback: s
 
 
 def _build_connector_setup_args(fields: Sequence[WizardFormField]) -> tuple[str, ...]:
-    connector = wizard_field_value(fields, "Connector") or "openclaw"
+    connector = wizard_field_value(fields, "Connector") or _DEFAULT_SETUP_CONNECTOR
     action = wizard_field_value(fields, "Action") or "setup"
     if action == "batch":
         out = ["setup", "--yes"]
@@ -7159,7 +7217,8 @@ def _build_credentials_args(fields: Sequence[WizardFormField]) -> tuple[str, ...
         return ("keys", "fill-missing", "--yes")
     if action == "set":
         args = ["keys", "set"]
-        args.append(wizard_field_value(fields, "Env Name") or "<ENV_NAME>")
+        if env_name := wizard_field_value(fields, "Env Name"):
+            args.append(env_name)
         args.append("--value-stdin")
         # The secret value is intentionally NOT placed in argv (it would be
         # visible in process listings). ``--value-stdin`` makes ``keys set``
@@ -7170,8 +7229,8 @@ def _build_credentials_args(fields: Sequence[WizardFormField]) -> tuple[str, ...
     if action == "remove":
         # The command preview is the confirmation; the CLI prompt can't be
         # answered from the TUI subprocess.
-        # The preview names the missing argument instead of "keys remove ''"
-        # (GAP-2061); Run asks for the field first.
+        # An empty name previews as <ENV_NAME> (the run waits for one), not
+        # as an empty quoted argument (GAP-2061).
         return ("keys", "remove", wizard_field_value(fields, "Env Name") or "<ENV_NAME>", "--yes")
     # The readable table, not --json: this output is read by a person in
     # Activity (GAP-1162). The Setup panel loads its own JSON copy.
@@ -8381,7 +8440,7 @@ def _v8_observability_fields(
     )
     if status is None:
         return (
-            _header("Status", "observability.status", error.strip() or "loading canonical effective plan..."),
+            _header("Status", "observability.status", error.strip() or "loading telemetry destinations\u2026"),
             how_to,
         )
 

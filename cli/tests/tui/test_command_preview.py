@@ -44,3 +44,13 @@ def test_command_preview_shows_origin_and_restart_effect() -> None:
 
     assert preview.origin == "setup"
     assert preview.restart == "possible"
+
+
+def test_command_preview_upgrade_focuses_cancel_by_default() -> None:
+    """GAP-2090: Enter alone must not start an upgrade or rollback."""
+
+    for verb in ("upgrade", "rollback"):
+        preview = build_command_preview(_parsed((verb, "--yes"), category="other"))
+        assert preview.cancel_by_default, verb
+    assert build_command_preview(_parsed(("uninstall", "--all", "--yes"), category="other")).cancel_by_default
+    assert not build_command_preview(_parsed(("setup", "codex", "--yes"))).cancel_by_default

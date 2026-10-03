@@ -233,6 +233,7 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
             token_value = _prompt_secret(preset, app.cfg.data_dir)
 
     inputs: dict[str, str] = {k: str(v) for k, v in raw_inputs.items() if v is not None}
+    _refuse_endpoint_credentials(preset, inputs)
 
     signal_tuple = None
     if signals:
@@ -317,13 +318,63 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
         _log_setup_action(
             app,
             ACTION_SETUP_OBSERVABILITY,
-            f"action=add-v8 preset={preset.id}",
+            _setup_observability_add_details(
+                destination_name,
+                preset.id,
+                _resolve_inputs(preset, resolved_inputs).get("endpoint", ""),
+                updated=existed and result.changed,
+            ),
             allow_offline=True,
             offline_note=(
                 "  Saved. The gateway isn't running; it loads this destination when it starts "
                 "(defenseclaw-gateway start)."
             ),
         )
+
+
+def _refuse_endpoint_credentials(preset: Preset, inputs: dict[str, str]) -> None:
+    """Refuse user:password in --endpoint/--url in plain words (GAP-2205).
+
+    The v8 schema rejects such an endpoint as a failed source shape at
+    destinations[N], which reads as a broken config.yaml.
+    """
+
+    for key in ("endpoint", "url"):
+        value = inputs.get(key, "").strip()
+        scheme, separator, rest = value.partition("://")
+        authority = re.split(r"[/?#]", rest if separator and scheme else value, maxsplit=1)[0]
+        if "@" not in authority:
+            continue
+        where = (
+            f"pass it with --token (stored as {preset.token_env} in ~/.defenseclaw/.env)"
+            if preset.token_env
+            else "add a header to the destination in config.yaml, for example "
+            "headers: {Authorization: {env: OTEL_AUTHORIZATION}}, and put the value in that environment variable"
+        )
+        raise click.ClickException(
+            f"--{key} must not contain a user name or password (user:password@). "
+            f"Nothing was saved. Remove them from the URL and {where}."
+        )
+
+
+def _setup_observability_add_details(name: str, preset_id: str, endpoint: str, *, updated: bool) -> str:
+    """Audit details for ``setup observability add`` (GAP-2144).
+
+    They name the destination, the preset and the endpoint, so two adds can
+    be told apart. The endpoint keeps only its scheme, host, port and path:
+    any user:password and query string are dropped.
+    """
+    details = f"action={'update' if updated else 'add'} name={name} preset={preset_id}"
+    endpoint = (endpoint or "").strip()
+    if endpoint:
+        from urllib.parse import urlsplit
+
+        parts = urlsplit(endpoint if "://" in endpoint else f"//{endpoint}")
+        host = parts.netloc.rsplit("@", 1)[-1]
+        shown = f"{parts.scheme}://{host}{parts.path}" if parts.scheme else f"{host}{parts.path}"
+        if shown:
+            details += f" endpoint={shown}"
+    return details
 
 
 # ---------------------------------------------------------------------------

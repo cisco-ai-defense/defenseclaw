@@ -158,6 +158,18 @@ def _log_bridge_error_json(status: str, message: str) -> None:
     sys.stderr.write(json.dumps(rec) + "\n")
 
 
+# Provider error texts that mean the credential itself was rejected.
+_AUTH_REJECTION_MARKERS = (
+    "bearer token has expired",
+    "invalid api key",
+    "incorrect api key",
+    "security token included in the request is invalid",
+    "security token included in the request is expired",
+    "expiredtokenexception",
+    "unrecognizedclientexception",
+)
+
+
 def _classify_llm_exception(exc: BaseException) -> str:
     name = type(exc).__name__
     mod = type(exc).__module__
@@ -189,6 +201,11 @@ def _classify_llm_exception(exc: BaseException) -> str:
     if "429" in low or "rate limit" in low:
         return "rate_limited"
     if "401" in low or "403" in low or "authentication" in low:
+        return "auth_failed"
+    # LiteLLM raises some provider key rejections (a Bedrock 403 for an
+    # expired or malformed bearer key) as APIConnectionError with no status
+    # in the text; without this they read as "could not be reached" (GAP-2108).
+    if any(marker in low for marker in _AUTH_REJECTION_MARKERS):
         return "auth_failed"
     if "timeout" in low:
         return "timeout"

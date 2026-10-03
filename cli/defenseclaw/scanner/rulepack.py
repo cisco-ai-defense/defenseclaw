@@ -41,6 +41,10 @@ this against the scanner-flip — see session notes):
   Flipping this on is a one-line change if a 1:1 traffic match is later wanted.
 * ``suppressions.yaml`` / ``sensitive-tools.yaml`` / ``judge/*.yaml`` are
   traffic- and LLM-oriented and are not applied to static artifacts here.
+* The data-loss/PII record rules (the ``enterprise-data`` category and the
+  ``pii_data_regexes`` family) are skipped too: they find personal data in
+  traffic, and on source code they match field names and example numbers in
+  help text (GAP-2168).
 
 The overlay is wired into the scan commands via :func:`maybe_wrap`, which wraps
 the underlying scanner so every ``scan()`` call site picks up the overlay with
@@ -61,7 +65,7 @@ from typing import TypeAlias
 import yaml
 
 from defenseclaw.models import Finding
-from defenseclaw.scanner.plugin_scanner.helpers import python_code_views
+from defenseclaw.scanner.plugin_scanner.helpers import PySource, python_source
 from defenseclaw.scanner.plugin_scanner.self_identity import is_first_party_self_target
 
 try:  # Python 3.11+
@@ -91,8 +95,9 @@ _BINARY_EXTS = {
 # module docstring).
 _REGEX_FAMILIES = {
     "injection_regexes": ("HIGH", "RP-INJECTION", "Prompt-injection pattern", "prompt-injection"),
-    "pii_data_regexes": ("MEDIUM", "RP-PII-DATA", "PII data pattern", "pii"),
 }
+# Rule categories that describe data in traffic, not artifact code (GAP-2168).
+_TRAFFIC_DATA_CATEGORIES = frozenset({"enterprise-data"})
 _GO_UNICODE_SCALAR_ESCAPE = re.compile(
     r"(?P<slashes>\\+)x\{(?P<codepoint>[0-9A-Fa-f]{1,6})\}"
 )
@@ -108,6 +113,20 @@ _REPEATS = {"MAX_REPEAT", "MIN_REPEAT", "POSSESSIVE_REPEAT"}
 # letter. Folding them first keeps the prefilter exact for (?i) rules.
 _ASCII_CASE_FOLD = {0x130: "i", 0x131: "i", 0x17F: "s", 0x212A: "k"}
 
+# Windowed search (GAP-2070): in a file over _WINDOW_MIN_TEXT characters a
+# rule is searched only in the lines around its anchor literals (every match
+# contains one), _WINDOW_SLACK characters and one line on each side, and only in windows
+# that hold all of the rule's required literals. Python's re otherwise walks
+# every position of a 400 KB adapter for each prose rule. Small files and
+# rules without a usable anchor get a plain search.
+_WINDOW_MIN_TEXT = 4096
+_WINDOW_SLACK = 512
+_ANCHOR_MIN_LEN = 3
+
+# The C loader parses the default pack several times faster than the pure
+# Python one (GAP-2070); same safe semantics.
+_YAML_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+
 
 @dataclass
 class _CompiledRule:
@@ -120,10 +139,13 @@ class _CompiledRule:
     category: str
     # Literals every match contains (None: no prefilter).
     required: _Required | None = None
-    # Rules whose expression is a file access (write/append/delete of a
-    # path). On Python source they match only outside string literals: a
-    # file name in a data list or a message is not an access (GAP-2069).
-    outside_strings: bool = False
+    # Literals one of which every match contains (None: plain search).
+    anchors: list[str] | None = None
+    # Rules whose expression is a write/append/delete of a path. On Python
+    # source a hit counts only when the matched value reaches a write call:
+    # a file name in a data list or a message is not an access (GAP-2069,
+    # GAP-2124).
+    path_write: bool = False
 
 
 @dataclass
@@ -141,25 +163,37 @@ class RulePack:
 
         With *python* set, a hit is confirmed on the source with comments
         and docstrings blanked, the same view the plugin scanner's source
-        rules use (GAP-1877); ``outside_strings`` rules also skip every
-        string literal (GAP-2069). The view is built only when a rule hits.
+        rules use (GAP-1877); ``path_write`` rules also need the matched
+        value to reach a write call (GAP-2069, GAP-2124). The view is built
+        only when a rule hits.
         """
         if not text:
             return []
         folded = _fold(text)
-        views: tuple[str, str] | None = None
+        py: PySource | None | bool = False  # False: not built yet
+        code = text
         findings: list[Finding] = []
         for rule in self.rules:
             if rule.required is not None and not _holds(rule.required, folded):
                 continue
             source = text
-            m = rule.pattern.search(text)
+            m = _search(rule, text, folded)
             if m is not None and python:
-                if views is None:
-                    lines = python_code_views(text)
-                    views = (text, text) if lines is None else ("\n".join(lines[0]), "\n".join(lines[1]))
-                source = views[1] if rule.outside_strings else views[0]
-                m = rule.pattern.search(source)
+                if py is False:
+                    py = python_source(text)
+                    code = text if py is None else "\n".join(py.code)
+                source = code
+                if rule.path_write and py is not None:
+                    m = next(
+                        (
+                            hit
+                            for hit in rule.pattern.finditer(source)
+                            if py.path_written(source.count("\n", 0, hit.start()))
+                        ),
+                        None,
+                    )
+                else:
+                    m = _search(rule, source, folded)
             if m is None:
                 continue
             line_no = source.count("\n", 0, m.start()) + 1
@@ -223,7 +257,7 @@ def _is_python(path: str) -> bool:
 
 def _fold(text: str) -> str:
     """Lower-case *text* so ASCII literals match it as ``re.IGNORECASE`` does."""
-    if text.isascii():
+    if text.isascii() or not any(chr(c) in text for c in _ASCII_CASE_FOLD):
         return text.lower()
     return text.translate(_ASCII_CASE_FOLD).lower()
 
@@ -232,9 +266,76 @@ def _holds(node: _Required, folded: str) -> bool:
     if isinstance(node, str):
         return node in folded
     op, kids = node
-    if op == "and":
-        return all(_holds(k, folded) for k in kids)
-    return any(_holds(k, folded) for k in kids)
+    # Plain loops: this runs per rule and file, and generator overhead
+    # showed up in the GAP-2070 profile.
+    want = op != "and"
+    for k in kids:
+        if (k in folded if isinstance(k, str) else _holds(k, folded)) is want:
+            return want
+    return not want
+
+
+def _search(rule: _CompiledRule, text: str, folded: str) -> re.Match[str] | None:
+    """``rule.pattern.search(text)``, limited to anchor windows in big files."""
+    if rule.anchors is None or len(text) < _WINDOW_MIN_TEXT or len(folded) != len(text):
+        return rule.pattern.search(text)
+    spans: list[tuple[int, int]] = []
+    for lit in rule.anchors:
+        i = folded.find(lit)
+        while i >= 0:
+            spans.append((i, i + len(lit)))
+            i = folded.find(lit, i + 1)
+    if not spans:
+        return None
+    spans.sort()
+    windows: list[list[int]] = []
+    for lo, hi in spans:
+        # Whole lines, plus one more line on each side, so a match that
+        # spans a long line and the next one (a CSV header and a row) fits.
+        lo = text.rfind("\n", 0, max(lo - _WINDOW_SLACK, 0))
+        lo = text.rfind("\n", 0, lo) + 1 if lo > 0 else 0
+        hi = text.find("\n", min(hi + _WINDOW_SLACK, len(text)))
+        hi = text.find("\n", hi + 1) if hi >= 0 else -1
+        hi = len(text) if hi < 0 else hi
+        if windows and lo <= windows[-1][1]:
+            windows[-1][1] = max(windows[-1][1], hi)
+        else:
+            windows.append([lo, hi])
+    for lo, hi in windows:
+        if rule.required is not None and not _holds(rule.required, folded[lo:hi]):
+            continue
+        m = rule.pattern.search(text, lo, hi)
+        if m is not None:
+            return m
+    return None
+
+
+def _anchors(node: _Required | None, pattern: re.Pattern[str]) -> list[str] | None:
+    """A literal set one of which every match contains, for :func:`_search`.
+
+    None when there is no such set of usable literals, or when the pattern
+    has an end anchor (``$`` / ``\\Z`` without MULTILINE) that a window's
+    end would satisfy falsely.
+    """
+    if node is None:
+        return None
+    if "\\Z" in pattern.pattern or "\\z" in pattern.pattern:
+        return None
+    if "$" in pattern.pattern and not pattern.flags & re.MULTILINE:
+        return None
+    if isinstance(node, str):
+        return [node] if len(node) >= _ANCHOR_MIN_LEN or not node.isascii() else None
+    op, kids = node
+    sets = [_anchors(k, pattern) for k in kids]
+    if op == "or":
+        if any(a is None for a in sets):
+            return None
+        return [lit for a in sets for lit in a]
+    usable = [a for a in sets if a is not None]
+    if not usable:
+        return None
+    # Prefer the child with the longest shortest literal: rarer in text.
+    return max(usable, key=lambda a: (min(len(x) for x in a), -len(a)))
 
 
 def _required_literals(pattern: str) -> _Required | None:
@@ -243,6 +344,11 @@ def _required_literals(pattern: str) -> _Required | None:
         return _required_seq(_sre_parse.parse(pattern))
     except Exception:  # noqa: BLE001 - no prefilter is always safe
         return None
+
+
+def _uncased(cp: int) -> bool:
+    c = chr(cp)
+    return cp >= 0x80 and c.lower() == c == c.upper()
 
 
 def _required_seq(items) -> _Required | None:
@@ -256,12 +362,16 @@ def _required_seq(items) -> _Required | None:
 
     for op, av in items:
         name = getattr(op, "name", str(op))
-        if name == "LITERAL" and av < 0x80:
+        if name == "LITERAL" and (av < 0x80 or _uncased(av)):
             run.append(chr(av))
             continue
         flush()
         sub = None
-        if name == "SUBPATTERN":
+        if name == "IN" and av and all(getattr(o, "name", "") == "LITERAL" and _uncased(v) for o, v in av):
+            # A set of uncased non-ASCII characters, such as zero-width
+            # spaces: rare in text, so a good prefilter.
+            sub = ("or", [chr(v) for _, v in av])
+        elif name == "SUBPATTERN":
             sub = _required_seq(av[-1])
         elif name == "ATOMIC_GROUP":
             sub = _required_seq(av)
@@ -314,7 +424,7 @@ def load_rule_pack(dir_path: str) -> RulePack:
         full = os.path.join(rules_dir, entry)
         try:
             with open(full, encoding="utf-8") as fh:
-                raw = yaml.safe_load(fh) or {}
+                raw = yaml.load(fh, Loader=_YAML_LOADER) or {}
         except (OSError, yaml.YAMLError) as exc:
             _log.debug("rule-pack: skip %s (parse error: %s)", full, exc)
             continue
@@ -332,6 +442,8 @@ def load_rule_pack(dir_path: str) -> RulePack:
 def _compile_rules_file(raw: dict, pack: RulePack) -> None:
     """Compile a ``rules/<category>.yaml`` file into the pack."""
     category = str(raw.get("category", "") or "rule")
+    if category in _TRAFFIC_DATA_CATEGORIES:
+        return
     for rule in raw.get("rules", []) or []:
         if not isinstance(rule, dict):
             continue
@@ -350,6 +462,7 @@ def _compile_rules_file(raw: dict, pack: RulePack) -> None:
         if compiled is None:
             continue
         expression = str(rule.get("expression", "") or "")
+        required = _required_literals(compiled.pattern)
         pack.rules.append(
             _CompiledRule(
                 rule_id=rule_id,
@@ -359,8 +472,11 @@ def _compile_rules_file(raw: dict, pack: RulePack) -> None:
                 confidence=float(rule.get("confidence", 0.0) or 0.0),
                 tags=[str(t) for t in (rule.get("tags") or [])],
                 category=category,
-                required=_required_literals(compiled.pattern),
-                outside_strings="f.paths" in expression and "f.commands" not in expression,
+                required=required,
+                anchors=_anchors(required, compiled),
+                path_write="f.paths" in expression
+                and "f.commands" not in expression
+                and any(f"PATH_ACCESS_{a}" in expression for a in ("WRITE", "APPEND", "DELETE")),
             )
         )
 
@@ -378,6 +494,7 @@ def _compile_local_patterns(raw: dict, pack: RulePack) -> None:
             compiled = _compile(str(pattern), rule_id)
             if compiled is None:
                 continue
+            required = _required_literals(compiled.pattern)
             pack.rules.append(
                 _CompiledRule(
                     rule_id=rule_id,
@@ -387,7 +504,8 @@ def _compile_local_patterns(raw: dict, pack: RulePack) -> None:
                     confidence=0.0,
                     tags=[tag],
                     category="local-pattern",
-                    required=_required_literals(compiled.pattern),
+                    required=required,
+                    anchors=_anchors(required, compiled),
                 )
             )
 

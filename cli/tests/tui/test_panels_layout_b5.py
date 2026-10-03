@@ -123,9 +123,9 @@ def test_setup_rerun_offers_configured_connectors_and_details_keep_names() -> No
         connector = next(field for field in model.form_fields if field.label == "Connector")
         assert connector.options == ("amp", "claudecode", "codex")
         assert connector.value == "amp"
-    # Readiness rows show the whole connector name ("Active Connector: ope…").
+    # Readiness rows show the whole connector name ("Connector: ope…").
     console = Console(width=92, record=True)
-    console.print(DetailModalModel.from_pairs("t", [("Active Connector: openhands", "PASS · configured")]).table())
+    console.print(DetailModalModel.from_pairs("t", [("Connector: openhands", "PASS · configured")]).table())
     assert "openhands" in console.export_text()
 
 

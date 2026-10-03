@@ -32,13 +32,15 @@ from defenseclaw.scanner.plugin_scanner.helpers import (
     _SKIP_DIRS,
     STANDARD_MANIFEST_DIRS,
     PathLinkStatus,
+    PySource,
     collect_files,
     downgrade,
     inspect_path_link,
     is_comment_line,
     is_test_path,
+    js_call_view,
     make_finding,
-    python_code_views,
+    python_source,
     sanitise_evidence,
     strip_comment,
     strip_hash_comment,
@@ -70,6 +72,22 @@ from defenseclaw.scanner.plugin_scanner.rules import (
 )
 from defenseclaw.scanner.plugin_scanner.types import Finding, PluginManifest
 
+# PluginManifest.source holds a schema label; connector manifests live in a
+# dot directory, so map their labels back to the real file (GAP-2214).
+_MANIFEST_SOURCE_PATHS = {
+    "claude.plugin.json": ".claude-plugin/plugin.json",
+    "codex.plugin.json": ".codex-plugin/plugin.json",
+    "cursor.plugin.json": ".cursor-plugin/plugin.json",
+}
+
+
+def _manifest_location(target: str, manifest: PluginManifest, perm: str | None = None) -> str:
+    # A permission merged from another manifest is reported at the file
+    # that declares it, not at the primary manifest (GAP-2243).
+    source = (manifest.permission_sources or {}).get(perm or "") or manifest.source or "package.json"
+    return f"{target}/{_MANIFEST_SOURCE_PATHS.get(source, source)}"
+
+
 # ---------------------------------------------------------------------------
 # Manifest checks
 # ---------------------------------------------------------------------------
@@ -97,7 +115,7 @@ def check_permissions(
                     "No permissions declared in manifest. The plugin may operate without "
                     "restrictions, or permissions may not be documented."
                 ),
-                location=f"{target}/{manifest.source or 'package.json'}",
+                location=f"{_manifest_location(target, manifest)}",
                 remediation=("Declare required permissions explicitly in the manifest to enable policy enforcement."),
             )
         )
@@ -117,7 +135,7 @@ def check_permissions(
                         f'Plugin requests "{perm}" which grants broad {perm.split(":")[0]} access. '
                         "This permission should be scoped more narrowly."
                     ),
-                    location=f"{target}/{manifest.source or 'package.json'}",
+                    location=_manifest_location(target, manifest, perm),
                     remediation=f'Replace "{perm}" with specific, scoped permissions (e.g., "fs:read:/specific/path").',
                 )
             )
@@ -134,7 +152,7 @@ def check_permissions(
                         f'Plugin uses wildcard permission "{perm}". '
                         "Wildcard permissions bypass fine-grained policy enforcement."
                     ),
-                    location=f"{target}/{manifest.source or 'package.json'}",
+                    location=_manifest_location(target, manifest, perm),
                     remediation="Use specific, scoped permissions instead of wildcards.",
                 )
             )
@@ -159,7 +177,7 @@ def check_dependencies(
                     title=f"Risky dependency: {dep}",
                     evidence=f'"{dep}": "{manifest.dependencies[dep]}"',
                     description=f'Plugin depends on "{dep}" which can execute arbitrary commands or code.',
-                    location=f"{target}/{manifest.source or 'package.json'}",
+                    location=f"{_manifest_location(target, manifest)}",
                     remediation=f'Review usage of "{dep}" and ensure it does not process untrusted input.',
                     tags=["supply-chain"],
                 )
@@ -182,7 +200,7 @@ def check_dependencies(
                         f'Dependency "{dep}" uses unpinned version "{version or "(empty)"}". '
                         "Unpinned versions are vulnerable to dependency confusion attacks."
                     ),
-                    location=f"{target}/{manifest.source or 'package.json'}",
+                    location=f"{_manifest_location(target, manifest)}",
                     remediation=f'Pin "{dep}" to a specific version or range (e.g., "^1.2.3").',
                     tags=["supply-chain"],
                 )
@@ -201,7 +219,7 @@ def check_dependencies(
                         f'Dependency "{dep}" uses an unencrypted HTTP URL, '
                         "allowing man-in-the-middle package substitution."
                     ),
-                    location=f"{target}/{manifest.source or 'package.json'}",
+                    location=f"{_manifest_location(target, manifest)}",
                     remediation="Use HTTPS or a registry reference instead.",
                     tags=["supply-chain"],
                 )
@@ -220,7 +238,7 @@ def check_dependencies(
                         f'Dependency "{dep}" references a local file path ("{version}"). '
                         "This may be a path-traversal vector."
                     ),
-                    location=f"{target}/{manifest.source or 'package.json'}",
+                    location=f"{_manifest_location(target, manifest)}",
                     remediation="Use a registry-published package instead of a local file reference.",
                     tags=["supply-chain"],
                 )
@@ -240,7 +258,7 @@ def check_dependencies(
                             f'Dependency "{dep}" references a git source without a commit hash. '
                             "The content can change silently."
                         ),
-                        location=f"{target}/{manifest.source or 'package.json'}",
+                        location=f"{_manifest_location(target, manifest)}",
                         remediation=f'Pin "{dep}" to a specific commit hash (e.g., "github:user/repo#abc1234").',
                         tags=["supply-chain"],
                     )
@@ -272,7 +290,7 @@ def check_install_scripts(
                         f'Plugin defines a "{name}" script that runs automatically during npm install. '
                         "Install scripts are a primary npm supply-chain attack vector."
                     ),
-                    location=f"{target}/{manifest.source or 'package.json'} \u2192 scripts.{name}",
+                    location=f"{_manifest_location(target, manifest)} \u2192 scripts.{name}",
                     remediation=(
                         f'Remove the "{name}" script or replace with explicit build steps that users run manually.'
                     ),
@@ -293,7 +311,7 @@ def check_install_scripts(
                         f'The "{name}" script contains shell command invocations ({value[:80]}). '
                         "Scripts that download or execute external code introduce supply-chain risk."
                     ),
-                    location=f"{target}/{manifest.source or 'package.json'} \u2192 scripts.{name}",
+                    location=f"{_manifest_location(target, manifest)} \u2192 scripts.{name}",
                     remediation="Review the script and remove unnecessary shell invocations.",
                     tags=["supply-chain"],
                 )
@@ -431,8 +449,14 @@ def scan_source_files(
     profile: str,
     source_files_out: list | None = None,
     force_include: list[str] | None = None,
+    python_host: bool = False,
 ) -> tuple[int, int]:
     """Returns (file_count, total_bytes).
+
+    ``python_host`` marks a plugin loaded by a Python agent (a Hermes
+    ``plugin.yaml`` plugin): its JavaScript files run as their own
+    processes, so the gateway-manipulation rules (``process.exit()``,
+    module-system hooks) cannot reach the agent and are skipped (GAP-2168).
 
     If ``source_files_out`` is provided, each successfully read file is
     appended as a ``SourceFile`` instance so downstream analyzers (in
@@ -545,13 +569,14 @@ def scan_source_files(
         if is_py:
             # Python rules skip comments and docstrings; call rules also skip
             # every string literal (warning text, regex data) (GAP-1877).
-            views = python_code_views(content)
-            if views is None:
+            py = python_source(content)
+            if py is None:
                 code_lines = [strip_hash_comment(line) for line in lines]
                 call_lines = code_lines
             else:
-                code_lines, call_lines = views
+                code_lines, call_lines = py.code, py.calls
         else:
+            py = None
             code_lines = [strip_comment(line) for line in lines]
             call_lines = code_lines
 
@@ -573,14 +598,14 @@ def scan_source_files(
         _check_for_hardcoded_secrets(lines, rel_path, findings, in_test)
         _check_for_credential_access(code_lines, rel_path, findings, capabilities, in_test)
         _check_for_exfiltration(lines, content, rel_path, findings, capabilities, in_test)
-        _check_for_ssrf(code_lines, rel_path, findings, in_test, call_lines)
+        _check_for_ssrf(code_lines, rel_path, findings, in_test, call_lines, py, None if is_py else content)
         if not is_py:
             # import()/require()/spawn() and the gateway rules are JavaScript
             # shapes; on Python they match ``from x import (`` and prose.
             _check_for_dynamic_imports(code_lines, rel_path, findings, in_test)
-        _check_for_cognitive_file_tampering(code_lines, content, rel_path, findings)
+        _check_for_cognitive_file_tampering(code_lines, content, rel_path, findings, py)
         _check_for_obfuscation(code_lines, content, rel_path, findings, in_test)
-        if not is_py:
+        if not is_py and not python_host:
             _check_for_gateway_manipulation(code_lines, lines, rel_path, findings, in_test)
         _check_for_cost_runaway(code_lines, rel_path, findings)
 
@@ -772,15 +797,19 @@ def _check_for_cognitive_file_tampering(
     content: str,
     rel_path: str,
     findings: list[Finding],
+    py: PySource | None = None,
 ) -> None:
     for cog_file in COGNITIVE_FILES:
         if cog_file not in content:
             continue
-        if not WRITE_FUNCTIONS.search(content):
+        # JavaScript: a write function anywhere in the file. Python: the
+        # line's value must reach a write/append/delete, so a file name in a
+        # data list is not tampering (GAP-2124, GAP-2069).
+        if py is None and not WRITE_FUNCTIONS.search(content):
             continue
 
         for line_idx, line in enumerate(code_lines):
-            if cog_file in line:
+            if cog_file in line and (py is None or py.path_written(line_idx)):
                 findings.append(
                     make_finding(
                         len(findings) + 1,
@@ -1234,7 +1263,27 @@ def _check_for_ssrf(
     findings: list[Finding],
     in_test_path: bool,
     call_lines: list[str] | None = None,
+    py: PySource | None = None,
+    content: str | None = None,
 ) -> None:
+    calls = call_lines if call_lines is not None else code_lines
+    js: list[tuple[list[str], list[tuple[int, ...]]]] = []
+
+    def in_network_call(i: int) -> bool:
+        # The call must be code, not text in a string (an example URL in a
+        # help message): on this line or on the line opening any bracket
+        # the line sits in (a multi-line call) (GAP-2068, GAP-2125).
+        if py is not None:
+            context = [calls[o] for o in py.openers(i)] + [calls[i]]
+        elif content is not None:
+            if not js:
+                js.append(js_call_view(content))
+            js_calls, js_openers = js[0]
+            context = [js_calls[o] for o in js_openers[i]] + [js_calls[i]] if i < len(js_calls) else []
+        else:
+            context = calls[max(i - 1, 0) : i + 1]
+        return NETWORK_CALL_PATTERN.search("\n".join(context)) is not None
+
     # Cloud metadata endpoints
     for cmp in CLOUD_METADATA_PATTERNS:
         for i, line in enumerate(code_lines):
@@ -1261,10 +1310,10 @@ def _check_for_ssrf(
                 )
                 break
 
-    # Private IP addresses in network contexts
-    net_keyword_re = re.compile(r"\b(?:fetch|http|request|get|post|url|endpoint|host)\b", re.IGNORECASE)
+    # Private IP addresses used by a network call. A loopback allow-list
+    # check or a default bind host is not a request (GAP-2125).
     for i, line in enumerate(code_lines):
-        if PRIVATE_IP_PATTERN.search(line) and net_keyword_re.search(line):
+        if PRIVATE_IP_PATTERN.search(line) and in_network_call(i):
             findings.append(
                 make_finding(
                     len(findings) + 1,
@@ -1284,15 +1333,9 @@ def _check_for_ssrf(
             )
             break
 
-    # Internal hostnames in network calls. The call must be code, not text in
-    # a string (an example URL in a help message), on this line or the line
-    # that opens a multi-line call (GAP-2068).
-    calls = call_lines if call_lines is not None else code_lines
+    # Internal hostnames in network calls (GAP-1982, GAP-2068).
     for i, line in enumerate(code_lines):
-        if not INTERNAL_HOST_PATTERN.search(line):
-            continue
-        call_context = "\n".join(calls[max(i - 1, 0) : i + 1])
-        if NETWORK_CALL_PATTERN.search(call_context):
+        if INTERNAL_HOST_PATTERN.search(line) and in_network_call(i):
             findings.append(
                 make_finding(
                     len(findings) + 1,

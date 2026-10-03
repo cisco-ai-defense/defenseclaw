@@ -4217,10 +4217,7 @@ def block(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
         skill_path = _resolve_path(app, skill_name, connector)
         if skill_path:
             pe.set_source_path("skill", skill_name, skill_path, connector)
-        click.secho(
-            f"[skill] {skill_name!r} added to block list (connector={connector})",
-            fg="red",
-        )
+        click.secho(f"[skill] Blocked {skill_name!r} ({connector}).", fg="red")
     else:
         pe.block("skill", skill_name, reason)
         skill_path = _resolve_path(app, skill_name)
@@ -4230,12 +4227,10 @@ def block(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
             target_connector
             for target_connector, _path in _skill_match_dir_scopes(app, skill_name)
         ]
-        suffix = (
-            f" for {_format_connector_scope_list(affected_connectors)}"
-            if affected_connectors
-            else ""
-        )
-        click.secho(f"[skill] {skill_name!r} added to block list{suffix}", fg="red")
+        # GAP-2085: a bare block is global; name it the way bare unblock does.
+        click.secho(f"[skill] Blocked {skill_name!r} (every connector).", fg="red")
+        if affected_connectors:
+            click.echo(f"  Copies found for {_format_connector_scope_list(affected_connectors)}.")
 
     if app.logger:
         saved_change_audit(app.logger).log_action(
@@ -4243,7 +4238,8 @@ def block(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
         )
 
     from defenseclaw.commands import hint
-    hint(f"Unblock later:  defenseclaw skill unblock {skill_name}")
+    scope_flag = f" --connector {connector}" if connector else ""
+    hint(f"Unblock later:  defenseclaw skill unblock {skill_name}{scope_flag}")
 
 
 # ---------------------------------------------------------------------------
@@ -4355,6 +4351,7 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
             return
         pe.remove_action_for_connector("skill", skill_name, connector)
         click.secho(f"[skill] Unblocked {skill_name!r} ({connector}).", fg="green")
+        click.echo("  It will be scanned on the next check.")
         if physical_records:
             click.echo(
                 "  The skill is unblocked, but its files remain quarantined; "
@@ -4397,7 +4394,7 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
             pe.remove_action("skill", skill_name)
             click.secho(f"[skill] Unblocked {skill_name!r} (every connector).", fg="green")
         click.echo(
-            "  The skill will go through normal scanning on next install."
+            "  It will be scanned on the next check."
         )
         if physical_records:
             click.echo(
@@ -4435,7 +4432,9 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
 
     if runtime_cleared:
         pe.remove_action("skill", skill_name)
-        click.secho(f"[skill] Unblocked {skill_name!r}.", fg="green")
+        # GAP-2085: name the scope the bare block named.
+        click.secho(f"[skill] Unblocked {skill_name!r} (every connector).", fg="green")
+        click.echo("  It will be scanned on the next check.")
     else:
         pe.unblock("skill", skill_name)
         pe.clear_quarantine("skill", skill_name)
@@ -5600,7 +5599,7 @@ def install(app: AppContext, name: str, force: bool, take_action: bool, connecto
                 )
             click.echo(
                 f"error: skill {skill_name!r} is on the block list for connector={connector}"
-                f" — run 'defenseclaw skill allow {skill_name} --connector {connector}' to unblock",
+                f" — run 'defenseclaw skill unblock {skill_name} --connector {connector}' to clear the block",
                 err=True,
             )
             raise SystemExit(1)
