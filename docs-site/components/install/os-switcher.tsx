@@ -2,7 +2,6 @@
 
 import { cn } from '@/lib/utils';
 import { DOWNLOADS, OS_ORDER, type OsId } from '@/data/downloads';
-import { InstallCommand } from './install-command';
 import { useOs } from './use-os';
 import styles from './install.module.css';
 
@@ -32,43 +31,5 @@ export function OsSwitcher({ className, value, onChange }: OsSwitcherProps) {
         </button>
       ))}
     </div>
-  );
-}
-
-/** Switcher plus the matching one-liner and the next command. Used in the landing hero. */
-export function OsInstall({ className }: { className?: string }) {
-  const [os] = useOs();
-  const download = DOWNLOADS[os];
-  return (
-    <div className={cn(styles.osInstall, className)}>
-      <div className={styles.osInstallHead}>
-        <span className={styles.osInstallLabel}>Install</span>
-        <OsSwitcher />
-      </div>
-      <InstallCommandFor os={os} size="lg" />
-      <p className={styles.osInstallNext}>
-        <span>then <code>defenseclaw init</code></span>
-        <span className={styles.osInstallArch}>{download.label} · {download.arch}</span>
-      </p>
-    </div>
-  );
-}
-
-/** The one-liner for the shared OS choice, without a switcher. */
-export function OsInstallCommand({ size = 'md' }: { size?: 'md' | 'lg' }) {
-  const [os] = useOs();
-  return <InstallCommandFor os={os} size={size} />;
-}
-
-
-function InstallCommandFor({ os, size }: { os: OsId; size: 'md' | 'lg' }) {
-  const download = DOWNLOADS[os];
-  return (
-    <InstallCommand
-      command={download.install}
-      prompt={download.shell === 'powershell' ? 'PS>' : '$'}
-      size={size}
-      copyLabel={`Copy the ${download.label} install command`}
-    />
   );
 }

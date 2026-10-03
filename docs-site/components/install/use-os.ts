@@ -3,8 +3,8 @@
 import { useCallback, useSyncExternalStore } from 'react';
 import { OS_ORDER, type OsId } from '@/data/downloads';
 
-// One OS choice shared by every install surface on a page (hero, steps,
-// download tiles, download tabs) and remembered across pages. The server
+// One OS choice shared by every install surface on a page (the landing
+// runbook, the download tabs) and remembered across pages. The server
 // renders macOS (the macOS/Linux command); the browser then switches to the
 // stored choice or to the OS it detects.
 

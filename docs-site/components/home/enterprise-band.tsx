@@ -1,5 +1,4 @@
 import Link from 'next/link';
-import { ArrowRight, Building2 } from 'lucide-react';
 import styles from './home.module.css';
 
 // Facts from content/docs/enterprise (index, machine-policy, mdm). Keep them
@@ -19,16 +18,16 @@ const FACTS = [
   },
 ];
 
+/** The enterprise section; the hero's "Enterprise?" link is the way in, this is the detail. */
 export function EnterpriseBand() {
   return (
-    <section className={`editorial-install ${styles.enterprise}`} aria-labelledby="enterprise-heading">
+    <section id="enterprise" className={styles.enterprise} aria-labelledby="enterprise-heading">
       <div className={`editorial-shell ${styles.enterpriseGrid}`}>
         <div>
-          <p className="editorial-kicker"><Building2 aria-hidden /> Enterprise</p>
-          <h2 id="enterprise-heading">Roll it out to every endpoint.</h2>
+          <h2 id="enterprise-heading">Protection your users can’t turn off.</h2>
           <div className="editorial-actions">
             <Link className="editorial-button editorial-button-primary" href="/docs/enterprise/get-started">
-              Enterprise deployment guide <ArrowRight aria-hidden />
+              Read the enterprise deployment guide
             </Link>
             <Link className="editorial-button" href="/docs/support-matrix#features">
               Compare editions
