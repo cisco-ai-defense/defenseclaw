@@ -148,16 +148,19 @@ func TestForeignHookSessionDenialNamesWhatWasDenied(t *testing.T) {
 	}
 
 	// The hook decision record of the tool denial names the real event too.
+	// Logs export in their own batches, so wait for it as for the spans.
 	toolDecision := false
-	for _, record := range hookModelV8CapturedLogs(capture.logSnapshot()) {
-		var wire struct {
-			Body map[string]any `json:"body"`
-		}
-		if err := json.Unmarshal([]byte(record.Body.GetStringValue()), &wire); err != nil {
-			t.Fatal(err)
-		}
-		if wire.Body["defenseclaw.agent.lifecycle.event"] == "tool_start" {
-			toolDecision = true
+	for deadline := time.Now().Add(5 * time.Second); !toolDecision && time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		for _, record := range hookModelV8CapturedLogs(capture.logSnapshot()) {
+			var wire struct {
+				Body map[string]any `json:"body"`
+			}
+			if err := json.Unmarshal([]byte(record.Body.GetStringValue()), &wire); err != nil {
+				t.Fatal(err)
+			}
+			if wire.Body["defenseclaw.agent.lifecycle.event"] == "tool_start" {
+				toolDecision = true
+			}
 		}
 	}
 	if !toolDecision {

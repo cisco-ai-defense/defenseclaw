@@ -23,6 +23,9 @@ def test_unset_of_a_changed_entry_beside_a_managed_one_is_not_reported_removed(t
     # GAP-2570: another DefenseClaw-written entry is still managed, so the
     # last-entry path that raises was skipped and the unset returned "removed".
     monkeypatch.setenv("HOME", str(tmp_path))
+    # On Windows the conftest points CLAUDE_CONFIG_DIR under HOME; keep the
+    # file at ~/.claude.json on every OS.
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path / "d"))
     settings = tmp_path / ".claude.json"
     set_mcp_server("claudecode", "b35keep", {"type": "http", "url": "https://mcp.example.invalid/mcp"})
