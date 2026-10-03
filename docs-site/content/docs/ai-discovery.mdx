@@ -481,6 +481,16 @@ For OpenClaw, `aibom scan` calls the live `openclaw` binary in parallel for each
 On a multi-connector install, a default `aibom scan` **fans out**: it produces one BOM section per active connector and merges them into a single document, mirroring the rest of the read/inventory commands. Pass `--connector <name>` to scope the BOM to a single connector.
 </Callout>
 
+In the human output, a count of `0` means the category was read and is empty.
+`-` / `not collected` means DefenseClaw cannot read that category for this
+connector (or `--only` left it out). The **Inventory coverage notes** at the end
+say what each connector's inventory covers: `not supported` notes mark a
+category that is not read, `partly checked` notes mark one that is read but
+where some runtime details (for example folder trust or organization policy)
+are not checked. `--summary` folds them into one line such as
+`1 inventory coverage note (plugins); run without --summary to read it.`
+JSON keeps them in `limitations` with `status` `unsupported` or `unverified`.
+
 The output is a custom JSON document. `stamp_aibom_inventory` attaches the
 same v7 provenance quartet to the top-level document and to each list item.
 The `content_hash` is the SHA-256 of the active DefenseClaw configuration and

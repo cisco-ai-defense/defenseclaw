@@ -826,14 +826,15 @@ def format_claw_aibom_human(
                 continue
             render(console, inv.get(key, []))
 
-    limitations = inv.get("limitations", [])
+    # With --only, count and show only the notes of the selected categories (GAP-2227).
+    limitations = [
+        lim for lim in inv.get("limitations", [])
+        if not isinstance(lim, dict) or "category" not in lim or lim["category"] in cats
+    ]
     if summary_only:
         # --summary is the tables only; the caveats are one pointer line (GAP-2037).
         if limitations:
-            console.print(
-                f"[dim]{len(limitations)} unsupported inventory capabilities "
-                "(informational); run without --summary to list them.[/dim]"
-            )
+            console.print(f"[dim]{_limitations_footer(limitations)}[/dim]")
             console.print()
     else:
         _render_limitations(console, limitations)
@@ -1578,12 +1579,32 @@ def _render_limitations(console: Any, limitations: list[dict[str, Any]]) -> None
 
     if not limitations:
         return
-    console.print("[bold cyan]Unsupported inventory capabilities[/bold cyan] [dim](informational)[/dim]:")
+    from rich.padding import Padding
+
+    console.print("[bold cyan]Inventory coverage notes[/bold cyan] [dim](informational)[/dim]:")
     for limitation in limitations:
         category = limitation.get("category", "?")
         reason = limitation.get("reason", "unsupported by this connector")
-        console.print(f"  [cyan]{category}[/cyan] — {reason}")
+        label = _LIMITATION_STATUS_LABELS.get(str(limitation.get("status", "")), "")
+        suffix = f" [dim]({label})[/dim]" if label else ""
+        # Wrapped lines stay indented under the category (GAP-2227).
+        console.print(Padding(f"[cyan]{category}[/cyan]{suffix} — {reason}", (0, 0, 0, 2)))
     console.print()
+
+
+_LIMITATION_STATUS_LABELS = {
+    InventoryCapabilityStatus.UNSUPPORTED.value: "not supported",
+    InventoryCapabilityStatus.UNVERIFIED.value: "partly checked",
+}
+
+
+def _limitations_footer(limitations: list[dict[str, Any]]) -> str:
+    """One --summary pointer line: count, plural and the categories (GAP-2227)."""
+    n = len(limitations)
+    cats = sorted({str(lim.get("category", "?")) for lim in limitations if isinstance(lim, dict)})
+    noun, pronoun = ("note", "it") if n == 1 else ("notes", "them")
+    where = f" ({', '.join(cats)})" if cats else ""
+    return f"{n} inventory coverage {noun}{where}; run without --summary to read {pronoun}."
 
 
 def _trunc(s: str, n: int) -> str:
@@ -1937,57 +1958,50 @@ _PARTIAL_CONNECTOR_NOTES: dict[tuple[str, str], str] = {
     ),
     (
         "copilot",
+        "plugins",
+    ): (
+        "AIBOM does not list Copilot plugins (only the Copilot CLI can); run "
+        "`defenseclaw plugin list --connector copilot` to see them. Plugin "
+        "activation and organization policy are not checked"
+    ),
+}
+
+_UNVERIFIED_CONNECTOR_NOTES: dict[tuple[str, str], str] = {
+    (
+        "copilot",
         "skills",
     ): (
-        "documented local project, inherited, personal, and COPILOT_SKILLS_DIRS "
-        "sources are inventoried; plugin, built-in, and organization/remote "
-        "skills are not expanded from private or remote stores"
+        "project, parent-folder, personal and COPILOT_SKILLS_DIRS skills are "
+        "listed; built-in, plugin and organization/remote skills are not"
     ),
     (
         "copilot",
         "agents",
     ): (
-        "documented local project/ancestor and personal agents plus the "
-        "reviewed Copilot CLI 1.0.77 built-in agent set are inventoried; "
-        "built-ins cannot be shadowed by local files, while plugin-contributed "
-        "agents and remote organization/enterprise agents require "
-        "official-client live-session inspection"
+        "project, parent-folder and personal agents plus the Copilot CLI 1.0.77 "
+        "built-in agent set are listed (built-ins cannot be shadowed by local "
+        "files); plugin-contributed "
+        "agents and organization/enterprise agents are not listed"
     ),
     (
         "copilot",
         "mcp",
     ): (
-        "documented workspace/ancestor and personal MCP configuration is "
-        "inventoried in priority order irrespective of folder trust; effective "
-        "workspace activation requires a trusted folder (or "
-        "GITHUB_COPILOT_PROMPT_MODE_WORKSPACE_MCP=true in untrusted prompt "
-        "mode), while session flag, plugin-contributed, built-in, and remote "
-        "runtime servers require official-client live inspection"
+        "workspace, parent-folder and personal MCP config files are listed "
+        "regardless of folder trust (Copilot starts workspace servers only in a "
+        "trusted folder); servers added per session, by plugins, built in or "
+        "remote are not listed"
     ),
     (
         "copilot",
         "rules",
     ): (
-        "documented personal, repository-root, current-workspace, intermediate, "
-        "nested active-file candidates, modular, imported, and "
-        "COPILOT_CUSTOM_INSTRUCTIONS_DIRS sources are inventoried with no-follow "
-        "file/directory/size bounds and collision metadata; exact active-file "
-        "selection, path-specific applyTo, session enable/disable state, folder "
-        "trust, managed/organization policy, and remote instructions remain "
-        "unverified"
+        "personal, repository and workspace instruction files (including nested, "
+        "modular, imported and COPILOT_CUSTOM_INSTRUCTIONS_DIRS files) are "
+        "listed; which file applies to the active file (applyTo), session "
+        "toggles, folder trust, organization policy and remote instructions are "
+        "not checked"
     ),
-    (
-        "copilot",
-        "plugins",
-    ): (
-        "declared plugins are queried only through the trusted Copilot executable "
-        "with `plugins list --kind plugin --json`, the pinned workspace, and exact "
-        "COPILOT_HOME; semantic activation and managed/organization policy remain "
-        "unverified without live-session evidence"
-    ),
-}
-
-_UNVERIFIED_CONNECTOR_NOTES: dict[tuple[str, str], str] = {
     (
         "opencode",
         "skills",
