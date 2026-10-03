@@ -20,36 +20,48 @@ runtime accept and how a match becomes detection or enforcement evidence.
 
 ## Evaluation pipeline
 
+Each semantic rule is checked on its own. CEL runs only on arguments the
+parser fully understood, and a match is tried a second time against just the
+commands that will really run.
+
 <Flow
   direction="TB"
-  caption="Only authoritative facts enter CEL. Full facts detect the security intent; an execute-only projection and final same-rule proof gate determine whether that evidence can support synchronous enforcement."
+  caption="How one rule is checked. The execute-only view drops previews such as --help or --dry-run. A match also stays detection-only when the connector cannot block or the rule is detection-only."
 >
-  <Node id="boundary" kind="connector">Server-established trusted action boundary</Node>
-  <Node id="analyze" kind="gateway">Parse and normalize tool arguments</Node>
-  <Node id="facts" kind="policy">Authoritative full ActionFacts</Node>
-  <Node id="full" kind="policy">Evaluate owner on full facts</Node>
-  <Node id="execute" kind="policy">Evaluate execute-only projection</Node>
-  <Node id="fallback" kind="policy">Owner-local regex fallback</Node>
-  <Node id="proof" kind="decision">Final same-rule proof gate</Node>
-  <Node id="detect" kind="decision">Detection-only finding</Node>
-  <Node id="enforce" kind="decision">Enforcement-eligible finding</Node>
-  <Node id="none" kind="decision">No owner finding</Node>
-  <Node id="action" kind="decision">Policy profile resolves action</Node>
-  <Edge from="boundary" to="analyze" />
-  <Edge from="analyze" to="facts" label="authoritative" />
-  <Edge from="analyze" to="fallback" label="unsupported or ambiguous" variant="dashed" />
-  <Edge from="facts" to="full" />
+  <Node id="parse" kind="gateway">{`Gateway parses the arguments\ninto ActionFacts`}</Node>
+  <Node id="complete" kind="decision">{`Fully understood?\nno unsupported or ambiguous parts`}</Node>
+  <Node id="full" kind="decision">{`CEL matches all facts?`}</Node>
+  <Node id="regex" kind="policy">{`Regex pattern\nruns instead of CEL`}</Node>
+  <Node id="none" kind="generic">{`No finding\nregex skipped`}</Node>
+  <Node id="exec" kind="decision">{`Matches what really runs?\nexecute-only view`}</Node>
+  <Node id="detect" kind="decision">{`Detection only`}</Node>
+  <Node id="candidate" kind="decision">{`Enforcement candidate\nto the final proof check`}</Node>
+  <Edge from="parse" to="complete" label="checks" />
+  <Edge from="complete" to="full" label="yes" />
+  <Edge from="complete" to="regex" label="no" variant="dashed" />
+  <Edge from="full" to="regex" label="error, over budget" variant="dashed" />
   <Edge from="full" to="none" label="false" />
-  <Edge from="full" to="fallback" label="error or budget" variant="dashed" />
-  <Edge from="full" to="execute" label="true" />
-  <Edge from="execute" to="proof" label="true" />
-  <Edge from="execute" to="detect" label="false" />
-  <Edge from="fallback" to="proof" label="pattern matched" />
-  <Edge from="fallback" to="none" label="no match" />
-  <Edge from="proof" to="enforce" label="complete exact proof + eligible surface" />
-  <Edge from="proof" to="detect" label="raw, partial, unpinned, or ineligible" />
-  <Edge from="detect" to="action" />
-  <Edge from="enforce" to="action" />
+  <Edge from="full" to="exec" label="true" />
+  <Edge from="exec" to="candidate" label="yes" />
+  <Edge from="exec" to="detect" label="no" />
+</Flow>
+
+Every finding, from CEL or from a fallback, then passes one final check before
+it can change the action.
+
+<Flow
+  direction="TB"
+  caption="The final proof check never removes a finding. It only decides whether the finding may change the action."
+>
+  <Node id="cel" kind="policy">{`CEL enforcement candidate`}</Node>
+  <Node id="other" kind="policy">{`Fallback and CodeGuard findings`}</Node>
+  <Node id="gate" kind="decision" emphasis>{`Complete proof for this rule ID?\nand the connector can block`}</Node>
+  <Node id="action" kind="decision">{`Severity picks the action\nallow · alert · confirm · block`}</Node>
+  <Node id="detect" kind="decision">{`Detection only\nrecorded, action unchanged`}</Node>
+  <Edge from="cel" to="gate" label="checked" />
+  <Edge from="other" to="gate" label="checked" />
+  <Edge from="gate" to="action" label="yes" />
+  <Edge from="gate" to="detect" label="no" />
 </Flow>
 
 `ActionFacts` and raw tool arguments stay private to the in-process analysis
@@ -134,7 +146,9 @@ code-owned built-in CodeGuard result from a complete scan, or a bounded exact
 fallback result. Raw regex matches, custom CodeGuard matches, parser-shadow
 evidence, partial or invalid projections, and unpinned results remain visible
 as detection-only findings. The gate never removes a finding; it only prevents
-incomplete evidence from authorizing a block.
+incomplete evidence from authorizing a block. A finding that passes counts
+toward the action through the connector's severity thresholds; a built-in
+owner marked alert-only can raise at most `alert`.
 
 ### Exact-boundary examples
 

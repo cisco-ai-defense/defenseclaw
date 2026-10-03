@@ -98,27 +98,28 @@ shell call are different events; only the actual tool call enters this path.
 
 ## Pending to successful state
 
-A pre-tool hook describes intent, not execution. If DefenseClaw allows a
-proposal on a connector with authoritative pairing, it stores a bounded,
+A pre-tool hook describes intent, not execution. If DefenseClaw does not block
+a proposal on a connector with authoritative pairing, it stores a bounded,
 content-free pending marker or predecessor projection keyed by the connector
 instance, authenticated session, and strongest invocation identity.
 
 <Sequence
-  caption="Intent becomes durable history only after the same connector contract proves identity and success. Failure, cancellation, ambiguity, expiry, and turn cutoffs discard the pending proposal."
+  caption="A pending step becomes history only after the post-tool event for the same call ID reports success. A failed, cancelled, unknown or expired call is discarded. The store is the gateway's SQLite database, and it keeps hashes and step flags, not command text."
   participants={[
-    { id: 'agent', label: 'Agent runtime', kind: 'agent' },
-    { id: 'hook', label: 'Connector hooks', kind: 'connector' },
-    { id: 'gateway', label: 'DefenseClaw gateway', kind: 'gateway' },
-    { id: 'ledger', label: 'State ledger', kind: 'datastore' },
+    { id: 'agent', label: 'Agent', kind: 'agent' },
+    { id: 'hook', label: 'Connector hook', kind: 'connector' },
+    { id: 'gateway', label: 'Gateway', kind: 'gateway' },
+    { id: 'ledger', label: 'State store', kind: 'datastore' },
   ]}
 >
-  <Message from="agent" to="hook" label="tool proposal" />
-  <Message from="hook" to="gateway" label="authenticated pre-tool event + call ID" />
-  <Message from="gateway" to="ledger" label="store content-free pending marker" />
-  <Message from="gateway" to="hook" kind="return" label="allow / alert / confirm / block" />
-  <Message from="agent" to="hook" label="tool outcome" />
-  <Message from="hook" to="gateway" label="matching authoritative result" />
-  <Message from="gateway" to="ledger" label="commit successful predecessor" />
+  <Message from="agent" to="hook" label="about to run a tool" />
+  <Message from="hook" to="gateway" label="pre-tool event + call ID" />
+  <Message from="gateway" to="ledger" label="check earlier successful steps" />
+  <Message from="gateway" to="ledger" label="if not blocked: save a pending step" />
+  <Message from="gateway" to="hook" kind="return" label="allow · alert · confirm · block" />
+  <Message from="agent" to="hook" label="tool finished" />
+  <Message from="hook" to="gateway" label="post-tool result, same call ID" />
+  <Message from="gateway" to="ledger" label="success: keep the step; else discard" />
 </Sequence>
 
 Only authenticated native `/api/v1/{connector}/hook` events can advance this
