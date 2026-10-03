@@ -26,7 +26,7 @@ told which setting stopped them.
 To see the policy a run would get, and where each setting comes from, run
 `defenseclaw sandbox policy explain` in the project folder.
 [Sandbox CLI](/docs/reference/sandbox-cli) lists every command and flag; see
-also [Sandbox](/docs/sandboxes/guide).
+also the [complete sandbox guide](/docs/sandboxes/guide).
 
 <Callout title="Sandboxes and managed installs">
 Sandboxes run on Linux, and on Macs with Apple silicon in OpenShell
@@ -39,7 +39,7 @@ the admin block is enforced but advisory. See
 
 ## The built-in packs at a glance
 
-| Setting | `open` (default) | `balanced` | `strict` |
+| Setting | Open (default) | Balanced | Strict |
 | --- | --- | --- | --- |
 | Web access | Any site by name, except the blocklist, private networks, and this machine | Only the curated developer allowlist | None; only the harness's own model provider |
 | Connection requests | `auto` | `triage` | `manual` |
@@ -65,7 +65,7 @@ The pack files live in the DefenseClaw source tree at
 `policies/sandbox/<name>/pack.yaml` and are embedded in the binary. A custom
 file can never replace them.
 
-### `open`
+### Open
 
 The default. The agent can browse the web and install packages through the
 DefenseClaw egress proxy, which allows destinations by default and blocks:
@@ -89,7 +89,7 @@ the blocklist feed, large-upload reports, masked secrets, and endpoint-bound
 credentials limit the damage. When that isn't enough, move to `balanced` or
 `strict`.
 
-### `balanced`
+### Balanced
 
 A default-deny web. The proxy reaches only a curated developer allowlist:
 
@@ -117,7 +117,7 @@ as serve it. For example, a push to GitHub passes the proxy. The push still
 needs a GitHub credential inside the sandbox.
 </Callout>
 
-### `strict`
+### Strict
 
 No web. The egress proxy is off, so only the harness's model provider is
 reachable. Every connection request is asked (`manual`), unless one of your
@@ -201,8 +201,9 @@ These are the settings each pack controls. The
   for a call that was denied, or that never got a check, is a hook tamper.
   `stop` stops the sandbox; `alert` reports a high-severity finding and
   keeps it running. Both show in the activity feed. `open` alerts;
-  `balanced` and `strict` stop. Claude Code, Codex, Cursor Agent, OpenCode,
-  Amp, Kiro CLI, Copilot CLI and Devin CLI sandboxes get this check. For
+  `balanced` and `strict` stop. Claude Code, Codex, OpenCode, Kiro CLI and
+  GitHub Copilot CLI sandboxes get this check (and Cursor Agent, Amp and
+  Devin CLI will, once they can run in a sandbox). For
   Hermes, OpenHands, Antigravity and OmniGent it is not measured yet which
   call a hook belongs to, so for those DefenseClaw relies on noticing hooks
   that go silent.
@@ -539,7 +540,7 @@ address, so rotating names doesn't get around it). The activity feed shows a
 ✗ with the threshold:
 
 ```
-✗ files.example.net (large upload blocked: this sandbox tried to send more than 10 MiB to a destination it had not contacted before)  → unblock: defenseclaw sandbox unblock files.example.net --sandbox myapp-claude-7f3a
+✗ files.example.net (large upload blocked: this sandbox tried to send more than 10 MiB to a destination it had not contacted before)  → unblock: defenseclaw sandbox unblock files.example.net --sandbox myapp-7f3a
 ```
 
 A later request there, which may send nothing (a `GET`), is refused with
@@ -1145,6 +1146,6 @@ What developers get:
   lists every `openshell` key.
 - [Enterprise configuration](/docs/enterprise/configuration) covers
   administrator-owned configuration.
-- [Sandbox](/docs/sandboxes/guide), the sandbox setup page.
+- [Complete sandbox guide](/docs/sandboxes/guide): setup, runs, the end of a session and troubleshooting.
 - [Sandbox CLI](/docs/reference/sandbox-cli) lists every `sandbox` command and
   flag, including `policy explain` and the `pack` commands.

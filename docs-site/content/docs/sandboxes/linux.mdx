@@ -164,8 +164,6 @@ restarts the shared gateway. `defenseclaw sandbox teardown` undoes it (see
 defenseclaw sandbox doctor
 ```
 
-{/* SCREENSHOT: terminal-doctor-linux.png — `defenseclaw sandbox doctor` on a Linux host after setup, ending with "✓ ready for sandboxes" */}
-
 ```text
   ✓ Platform                   linux/arm64
   ✓ User                       alice (uid 1000)
@@ -242,7 +240,7 @@ When a session on a mounted folder ends, DefenseClaw summarizes it, flags
 the changed files that can run code on your machine, and asks:
 
 ```text
-Keep changes? [Y] keep  [u] undo everything  [d] show diff
+Keep changes? [Y] keep  [u] undo everything  [d] show diff (then Enter)
 ```
 
 Keeping makes the changes the base of the next session. Undo, now or later,
@@ -283,5 +281,5 @@ defenseclaw sandbox run codex --copy --name docs
 | `the DefenseClaw daemon is not running` | `defenseclaw-gateway start`. With the daemon down, sandbox hooks block every tool call. |
 | `refusing to share /home/alice with a sandbox: it is your home directory` | Run from a project folder inside your home, not from home itself. |
 
-The [troubleshooting table](/docs/sandboxes/guide#troubleshooting) in the full
+The [troubleshooting table](/docs/sandboxes/guide#troubleshooting) in the complete
 guide covers the rest.

@@ -20,6 +20,8 @@ Where Linux and macOS differ, the page shows both. The short version: on
 Linux the agent edits your folder live and you can undo it; on a Mac it
 edits a copy and you pull the changes back.
 
+## The session, step by step
+
 <Steps>
 
 <Step>
@@ -111,7 +113,10 @@ defenseclaw sandbox activity -f
 14:06:02 myapp-7f3a ✗ tool Bash blocked: <the rule's reason>
 ```
 
-![defenseclaw sandbox activity -f: sites the agent reached (example.org, pypi.org, registry.npmjs.org, api.github.com) and two blocked ones (webhook.site, pastebin.com), each with its unblock command](/images/sandboxes/screens/terminal-activity-feed.png)
+The same feed from a real session, for a sandbox named with
+`--name myapp-claude`:
+
+![defenseclaw sandbox activity -f: the sandbox's lifecycle lines, sites the agent reached (example.org, pypi.org, registry.npmjs.org, api.github.com) and two blocked ones (webhook.site, pastebin.com), each with its unblock command](/images/sandboxes/screens/terminal-activity-feed.png)
 
 | Mark | Meaning |
 | --- | --- |
@@ -166,8 +171,8 @@ Say the task really needs a site the blocklist covers. Here is what happens:
    with a JSON body that says what was blocked and how you can unblock it.
    For HTTPS a tool sees only a failed connection, so after the tool call
    DefenseClaw's hooks tell the agent which site was blocked and why.
-   Claude Code, Codex, Copilot CLI, Cursor and Devin read that note; for
-   the other harnesses the feed and your terminal report the block.
+   Claude Code, Codex and GitHub Copilot CLI read that note. For the other
+   harnesses, the feed and your terminal report the block.
 2. The feed shows the `✗` line with the unblock command. The macOS app also
    notifies you.
 3. If you decide the site is fine, unblock it for this sandbox only:
@@ -227,7 +232,7 @@ the like.
 Session ended · 57 tool calls (1 blocked: <the rule's reason>) · 23 new sites contacted · 1 site blocked · 8 files changed (+212 −37)
 ✗ DefenseClaw blocked webhook.site (webhook catcher); unblocked since
 ⚠ Changed files that can run code on your machine: package.json, .envrc  → review before running
-Keep changes? [Y] keep  [u] undo everything  [d] show diff
+Keep changes? [Y] keep  [u] undo everything  [d] show diff (then Enter)
   Sandbox kept (stopped) → resume: defenseclaw sandbox connect myapp-7f3a   delete: defenseclaw sandbox delete myapp-7f3a
 ```
 
@@ -252,10 +257,13 @@ Bring the changes back? [A] apply (3-way)  [b] branch dc/myapp-1c2d  [p] patch f
 - `p` writes a patch file.
 - `s` leaves it in the sandbox for a later `sandbox pull`.
 
+The end of a real session on a Mac, for a sandbox started with
+`--name myapp-claude`, after two blocked sites:
+
+![End of a sandbox session on a Mac: 12 tool calls, 4 new sites contacted, 2 sites blocked (webhook.site and pastebin.com, each with its unblock command), 1 file changed, and the question to bring the changes back by apply, branch, patch file or skip](/images/sandboxes/screens/terminal-session-summary.png)
+
 </Tab>
 </Tabs>
-
-![End of a macOS sandbox session: tool calls, sites contacted and blocked, files changed, and the question to bring the changes back by apply, branch or patch](/images/sandboxes/screens/terminal-session-summary.png)
 
 Look again later, with the full list and the diff:
 
@@ -373,5 +381,5 @@ status 69 when not one hook got through.
   how to tighten it.
 - [TUI and macOS app](/docs/sandboxes/apps): the same session, managed from
   a panel.
-- [Full sandbox guide](/docs/sandboxes/guide#during-the-session): nested
+- [Complete sandbox guide](/docs/sandboxes/guide#during-the-session): nested
   repositories, tamper alerts, MCP servers and more.

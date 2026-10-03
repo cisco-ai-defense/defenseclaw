@@ -133,11 +133,11 @@ It ends with:
   ✓ Done →  cd <project> && defenseclaw sandbox run claude
 ```
 
-There is no mounts question and no telemetry question on a Mac. The
-Homebrew gateway runs under launchd, which does not read the `gateway.env`
-file setup edits on Linux, so setup leaves OpenShell's anonymous usage
-telemetry as it is. To turn it off, set `OPENSHELL_TELEMETRY_ENABLED=false`
-in `~/.config/openshell/gateway.env` and run
+There is no mounts question and no telemetry question on a Mac. Setup
+changes OpenShell's anonymous usage telemetry on Linux only, so on a Mac it
+stays on and setup says so. The Homebrew service reads
+`~/.config/openshell/gateway.env`, so you can turn the telemetry off
+yourself: set `OPENSHELL_TELEMETRY_ENABLED=false` in that file, then run
 `brew services restart nvidia/openshell/openshell`.
 
 </Tab>
@@ -180,8 +180,6 @@ defenseclaw sandbox setup --install-openshell
 ```bash
 defenseclaw sandbox doctor
 ```
-
-![defenseclaw sandbox doctor on an Apple-silicon Mac with OpenShell's release binaries and a gateway started by hand, ending with ready for sandboxes](/images/sandboxes/screens/terminal-doctor-macos.png)
 
 On a Mac set up through Homebrew, the output looks like this:
 
@@ -329,7 +327,7 @@ instead. `--rm` does not delete a sandbox whose work was not brought back.
 
 ## MicroVM specifics
 
-| | What to know |
+| Topic | What to know |
 | --- | --- |
 | Resources | Every MicroVM on the gateway gets the same vCPUs, memory and disk, set under `[openshell.drivers.vm]` in `~/.config/openshell/gateway.toml`. The run flags `--cpu` and `--memory` have no effect. The doctor warns when the disk for changes is under 8 GiB. |
 | The sandbox user | Set for the whole gateway: every MicroVM on it runs as your uid and gid. |
@@ -370,5 +368,5 @@ instead. `--rm` does not delete a sandbox whose work was not brought back.
 | The first run seems to hang at `Starting a Claude Code sandbox…` | The first start of an image prepares a MicroVM disk of about 5 GB, which takes about a minute. |
 | **MicroVM resources** warns that an agent that builds code may need more | Raise `vcpus`, `mem_mib` or `overlay_disk_mib` under `[openshell.drivers.vm]` in `~/.config/openshell/gateway.toml`, then restart the gateway (`brew services restart nvidia/openshell/openshell`). |
 
-The [troubleshooting table](/docs/sandboxes/guide#troubleshooting) in the full
+The [troubleshooting table](/docs/sandboxes/guide#troubleshooting) in the complete
 guide covers the rest.

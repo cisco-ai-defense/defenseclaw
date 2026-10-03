@@ -62,10 +62,10 @@ trajectories and replays each full public task instruction as user intent
 before 511 production-format tool decisions.
 
 Tool-risk training and protected tool-risk evaluation corpora are excluded.
-The harness uses the same `RunToolJudge` method, Bifrost provider path, shipped
-rule pack, strict JSON response schema, temperature zero, parser, severity
-mapping, and verdict merger as the gateway. Dataset commands are never
-executed.
+The harness calls the gateway's own tool-judge code and LLM provider layer,
+with the shipped rule pack, the strict JSON response schema, temperature
+zero, and the same parser, severity mapping and verdict merger as the
+gateway. Dataset commands are never executed.
 
 | System | TP / FN | FP / TN | Precision | Recall | F1 | FPR | Attack block recall | Benign block rate |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -76,8 +76,9 @@ executed.
 
 Gemma 4 added 93 detections beyond the deterministic result. Gemma 3's higher
 attack recall came with a 90% benign trajectory alert and block rate, so it is
-not recommended for coding-session enforcement. Granite was removed after
-lower-recall pilots; Qwen 3.5 and Muse were not included in the frozen matrix.
+not recommended for coding-session enforcement. The Granite model was
+dropped after pilots with lower recall, and the Qwen 3.5 and Muse models
+were not included in the frozen matrix.
 
 Stateful labels apply to whole trajectories, not individual tool calls. On the
 benign lane, 1 of 511 hook decisions alerted (0.20%) and none blocked. That is
@@ -142,9 +143,21 @@ exfiltration, destructive host scope, persistence, or hidden execution.
 
 The repository contains corpus preparation, production-path execution,
 scoring scripts, frozen source revisions, and aggregate results under
-`benchmarks/llm_judge/`. Generated corpora, prompts, tool arguments, model
-responses, and prediction rows are not committed. Full run artifacts and
-checksums are retained in the private benchmark dataset.
+[`benchmarks/llm_judge/`](https://github.com/cisco-ai-defense/defenseclaw/tree/main/benchmarks/llm_judge).
+Generated corpora, prompts, tool arguments, model responses, and prediction
+rows are not committed, and the full run artifacts are not public. Outside
+the project you can rebuild the public corpora and run the same path
+yourself, or check the published numbers against the committed aggregate
+results.
+
+To run the Bedrock lane you need:
+
+- an AWS account with Amazon Bedrock access to the Gemma model you name
+  (`google.gemma-4-26b-a4b` above);
+- AWS credentials for it. The script uses your AWS profile (`AWS_PROFILE`,
+  else `default`) and the `us-east-1` region unless you set
+  `DEFENSECLAW_JUDGE_BENCHMARK_BEDROCK_PROFILE` or
+  `DEFENSECLAW_JUDGE_BENCHMARK_BEDROCK_REGION`.
 
 ```bash
 make contextual-judge-test
@@ -156,7 +169,9 @@ DEFENSECLAW_JUDGE_BENCHMARK_CONCURRENCY=16 \
   bedrock/google.gemma-4-26b-a4b
 ```
 
-Read the repository's contextual benchmark README for the corpus-building,
-resume, concurrency, scoring, and batch-lane details. A judge `block` is real
-prevention only when an enabled synchronous pre-tool connector consumes it;
-EventRouter judging is asynchronous and observational.
+Read the
+[contextual benchmark README](https://github.com/cisco-ai-defense/defenseclaw/blob/main/benchmarks/llm_judge/README.md)
+for the corpus-building, resume, concurrency, scoring, and batch-lane
+details. A judge `block` is real prevention only when an enabled synchronous
+pre-tool connector consumes it. Judging of event-stream connectors, which
+report tool calls after the fact, is asynchronous and observational.

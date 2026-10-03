@@ -11,7 +11,6 @@ keywords:
   - sandbox undo
   - OpenShell MicroVM
   - macOS sandbox
-  - legacy-cleanup
 ---
 
 `defenseclaw sandbox` runs a coding agent, such as Claude Code or Codex,
@@ -35,25 +34,14 @@ This page is the full reference. For a shorter, guided path, start with
 
 ## How it works
 
-Think of the sandbox as a locked room that holds only your project folder.
-
-| Inside the room, the agent can | Outside the room, it cannot |
-| --- | --- |
-| Edit your project live (on Linux). You see the changes in your editor as they happen. On a Mac, or with `--copy`, it edits a copy, and your folder changes only when you pull the work back. | See your home directory, `~/.ssh`, `~/.aws`, other repositories, or the rest of the system. |
-| Run tests, build, and install packages. | Reach services on your machine or your local network, unless you approve it. |
-| Browse the web through DefenseClaw's egress proxy. | Reach the sites on DefenseClaw's blocklist: paste sites, file drops, webhook catchers, tunnels and anonymizers. |
-| Use your model credential through a placeholder. | Read the real key: OpenShell adds it only on requests to the model provider. |
-
-Two layers enforce this:
-
-- **OpenShell** builds the room: a container (on Linux) or a MicroVM with a
-  kernel of its own (on a Mac), with no network of its own, Landlock
-  filesystem rules, seccomp, and a non-root user (your own uid, so files
-  keep your ownership). Its only way out is OpenShell's supervisor.
-- **DefenseClaw** adds the judgment: its hooks check every tool call with
-  the same rule packs, guardrails and judge as outside a sandbox, its egress
-  proxy decides and logs every site, and it hides secret files, protects git
-  internals, snapshots the folder, and reviews what changed.
+The sandbox is a locked room that holds only your project folder.
+**OpenShell** builds the room: a container on Linux, or a MicroVM with a
+kernel of its own on a Mac, with no network of its own, Landlock filesystem
+rules, seccomp, and your own uid. **DefenseClaw** adds the judgment: its
+hooks check every tool call, its egress proxy decides and logs every site,
+and it hides secret files, protects git internals, snapshots the folder and
+reviews what changed. [The mental model](/docs/sandboxes#the-mental-model)
+shows what the agent can and cannot reach.
 
 If you don't like what the agent did, `defenseclaw sandbox undo <name>` puts
 the folder back the way it was before the session. When the agent worked on
@@ -93,7 +81,7 @@ Landlock check and ends in an error state, whatever its policy.
 
 What is different on a Mac:
 
-| | Linux (Docker driver) | macOS (MicroVM driver) |
+| Topic | Linux (Docker driver) | macOS (MicroVM driver) |
 | --- | --- | --- |
 | Your folder | Mounted live, with a snapshot for undo. | Always a copy: a MicroVM mounts no host folders. `run` says so in one line (`copy mode: the OpenShell MicroVM (vm) driver mounts no host folders; …`), and the changes come back through the end-of-session question or `defenseclaw sandbox pull` (see [work on a copy](#work-on-a-copy)). |
 | End of a session | Keep or undo the changes. | Bring the changes back (apply, branch or patch) or leave them in the sandbox. Without a terminal, or with `--yes`, nothing is applied: the run ends with `N files changed; nothing was applied` and the `pull` command, and `--rm` keeps a sandbox whose work was not brought back. |
@@ -135,41 +123,18 @@ defenseclaw sandbox setup
 ```
 
 Setup walks through the machine check, the OpenShell install, the gateway
-settings, the harnesses and their images. A first run on Linux looks like
-this (the install plan and the build lines are shortened):
+settings, the harnesses and their images, and asks before each change. A
+first run looks like the transcripts on
+[sandboxes on Linux](/docs/sandboxes/linux#run-setup) and
+[sandboxes on macOS](/docs/sandboxes/macos#set-up). Its `Harnesses` lines
+name the harnesses this run sets up, with the model credential each would
+share, and then the others by the names `--harness` takes:
 
 ```text
-DefenseClaw sandbox setup
-  Checking this machine…  ✓ linux/arm64  ✓ Landlock  ✓ Docker 29.4.0  ✗ OpenShell not installed
-Install OpenShell 0.1.1 with NVIDIA's installer? (sudo; sha256 verified) [y/N] y
-OpenShell install plan
-  Release     v0.1.1 (NVIDIA OpenShell upstream installer)
-  SHA-256     … (verified)
-  Privileges  the script uses sudo to install the openshell package, then enables and
-              starts the openshell-gateway user service (systemd --user)
-Run this plan? [y/N] y
-  ✓ OpenShell 0.1.1 installed, gateway running
-Allow sandboxes to mount the project folder you launch from? (enables bind mounts on your local OpenShell gateway; DefenseClaw only ever mounts the launch folder) [Y/n]
-Disable OpenShell's anonymous usage telemetry? (edits ~/.config/openshell/gateway.env and restarts the OpenShell gateway; no sandbox runs on it now) [Y/n]
-  OpenShell gateway configuration changes
-    edit ~/.config/openshell/gateway.toml (a timestamped backup is kept)
-  …
-  ✓ gateway configured and restarted
   Harnesses (add another with `defenseclaw sandbox setup --harness NAME`):
     Claude Code (claude)  model credential ANTHROPIC_API_KEY ✓
     Codex (codex)         model credential ~/.codex/auth.json ✓
   Other harnesses: agy, amp (not verified yet), copilot, cursor-agent (not verified yet), devin (not verified yet), hermes, kiro, omnigent, opencode, openhands
-  ✓ openshell.enabled is on in ~/.defenseclaw/config.yaml
-Make `claude` and `codex` run sandboxed automatically? (shell wrapper; undo any time) [y/N]
-Build the Claude Code image now? (the first build downloads about 3 GB; otherwise the first `defenseclaw sandbox run claude` builds it) [Y/n]
-  Building the Claude Code image (the first build downloads about 3 GB)…
-  ✓ Claude Code 2.1.156: defenseclaw/sandbox:claudecode-…-u1000, hooks verified (built in 6m10s)
-Build the Codex image now? (the first build downloads about 3 GB; otherwise the first `defenseclaw sandbox run codex` builds it) [Y/n]
-  Building the Codex image (the first build downloads about 3 GB)…
-  ✓ Codex 0.146.0: defenseclaw/sandbox:codex-…-u1000, hooks verified (built in 2m41s)
-  ✓ the daemon runs the sandbox subsystem (ingress 127.0.0.1:18971, egress proxy 127.0.0.1:18972)
-
-  ✓ Done →  cd <project> && defenseclaw sandbox run claude
 ```
 
 On a Mac the gateway questions differ: instead of the mounts and telemetry
@@ -183,7 +148,8 @@ applies one gateway plan with one restart (see step 3 below).
 Open the TUI (`defenseclaw tui`), press `0` for Setup, and pick the
 **Sandboxes (OpenShell)** wizard under **Guardrail & scanning**. It first runs `defenseclaw sandbox doctor`
 to check the machine, then shows every question the command line asks as a
-field: the harnesses (Claude Code and Codex), whether to install OpenShell,
+field: the harnesses (every harness DefenseClaw runs, with Claude Code and
+Codex on by default), whether to install OpenShell,
 project-folder mounts and OpenShell telemetry (Linux only, see steps 3 and 4
 below; neither field is shown on macOS, where every run works on a copy),
 shell wrappers, and whether to build the images now. Your answers are the
@@ -201,8 +167,8 @@ installs OpenShell: if OpenShell is missing, run
 `defenseclaw sandbox setup --install-openshell` in a terminal first (on a Mac
 it installs NVIDIA's `nvidia/openshell` Homebrew formula).
 It has no mounts or telemetry question: on a Mac setup switches the gateway
-to OpenShell's MicroVM driver, every run works on a copy, and setup cannot
-turn OpenShell's telemetry off (see steps 3 and 4 below, and
+to OpenShell's MicroVM driver, every run works on a copy, and setup does
+not change OpenShell's telemetry (see steps 3 and 4 below, and
 [macOS](#macos)). The **doctor** action checks the MicroVM driver too.
 
 </Tab>
@@ -219,7 +185,7 @@ What setup does, in order:
    NVIDIA's installer script is checked against a pinned SHA-256 before it
    runs. An early 0.0.x runtime cannot be upgraded in place, so setup first
    asks whether you backed it up and cleaned it up (see
-   [legacy cleanup](#legacy-sandbox-cleanup)). On a Mac it installs the
+   [legacy cleanup](/docs/sandboxes/legacy-cleanup)). On a Mac it installs the
    `nvidia/openshell` Homebrew formula, without `sudo`; the plan also lists
    what else NVIDIA's script changes: Homebrew may update itself and its
    taps first (its auto-update, which `HOMEBREW_NO_AUTO_UPDATE=1` skips),
@@ -260,16 +226,20 @@ What setup does, in order:
    `defenseclaw sandbox setup --restart-gateway`.
 4. **Turns OpenShell's anonymous usage telemetry off** on Linux, unless you
    keep it (`--upstream-telemetry`). Setup does this in the gateway's
-   `gateway.env`, which only the Linux systemd service reads, so like step 3
-   it restarts the gateway. The question says so before you answer, with the
+   `gateway.env`, so like step 3 it restarts the gateway. The question says so before you answer, with the
    number of sandboxes running on the gateway, and the restart under running
    sandboxes is asked about separately as above. Your answer is recorded in
    `openshell.upstream_telemetry`: once you keep the telemetry, later runs of
-   setup don't ask again (set it to `false` to be asked). On macOS the
-   Homebrew gateway runs under launchd, which ignores that file, so setup
-   cannot turn the telemetry off there: it does not ask, leaves `gateway.env`
-   alone and says the telemetry stays on, and the doctor shows its telemetry
-   check as skipped (`gateway.env is read by the systemd unit only`).
+   setup don't ask again (set it to `false` to be asked).
+
+   On macOS setup does not change the telemetry. It does not ask, leaves
+   `gateway.env` alone and says the telemetry stays on, and the doctor shows
+   its telemetry check as skipped (`DefenseClaw changes it on Linux only; the
+   Homebrew service reads OPENSHELL_TELEMETRY_ENABLED from
+   ~/.config/openshell/gateway.env`). The Homebrew service does read that
+   file, so to turn the telemetry off yourself, set
+   `OPENSHELL_TELEMETRY_ENABLED=false` in it and run
+   `brew services restart nvidia/openshell/openshell`.
 5. **Records the harnesses** in `openshell.harnesses`, then turns
    `openshell.enabled` on. The `Harnesses` lines are information, not a
    checklist: one line for each harness this run sets up, with the model
@@ -300,7 +270,7 @@ What setup does, in order:
 | `--install-openshell` | Install OpenShell without asking. |
 | `--no-mounts` | Leave bind mounts off (Linux); every run works on a copy. A Mac always works on a copy. |
 | `--wrappers` / `--no-wrappers` | Install the shell wrappers without asking, or never offer them. |
-| `--upstream-telemetry` | Keep OpenShell's anonymous usage telemetry on. On macOS it stays on either way. |
+| `--upstream-telemetry` | Keep OpenShell's anonymous usage telemetry on. On macOS setup leaves it on either way. |
 | `--skip-images` | Don't build images now; the first run builds its image. |
 | `--restart-gateway` | Restart the OpenShell gateway to apply its configuration even while sandboxes run on it. |
 | `--non-interactive` | Never prompt: take the defaults and skip steps that need consent. |
@@ -320,8 +290,10 @@ already configured and up-to-date images are left as they are.
 Start a harness with `defenseclaw sandbox run <name>`, using the name from
 the table. DefenseClaw uses a harness image only after proving that
 its hooks fire and block in it, so the unverified harnesses below cannot
-run yet. The TUI and macOS wizards offer Claude Code and Codex. To add
-another, run setup with it (repeat `--harness` for more), for example:
+run yet. The TUI wizard lists every harness, with Claude Code and Codex on
+by default; the macOS app offers Claude Code and Codex. To add another from
+the command line, run setup with it (repeat `--harness` for more), for
+example:
 
 ```bash
 defenseclaw sandbox setup --harness copilot
@@ -531,9 +503,10 @@ For HTTPS, tools show only that the connection failed (`curl: (56) CONNECT
 tunnel failed, response 403`), so DefenseClaw also tells the agent in its
 hooks. After a shell or web-fetch tool call, the next hook answer names each
 destination the proxy just refused, why, and the `sandbox unblock` command
-you can run. Claude Code, Codex, Copilot CLI, Cursor and Devin read this
-note; the other harnesses have no place for it, and there only your
-terminal's notice reports the block. Each block is told once, and only in
+you can run. Claude Code, Codex and GitHub Copilot CLI read this note (and
+Cursor Agent and Devin CLI will, once they can run in a sandbox). The other
+harnesses have no place for it, and there only your terminal's notice
+reports the block. Each block is told once, and only in
 the sandbox that hit it. An upload that
 [the large-upload block](/docs/sandboxes/policy-packs#large-upload-alert-threshold)
 cuts ends the same way for the tool (`curl: (56) Failure when receiving data
@@ -551,16 +524,9 @@ address, and it lets the sandbox reach only what its own policy already
 allows. The proxy uses it to tell sandboxes apart, and it stops working
 when the sandbox is deleted.
 
-<Callout type="warn" title="Open web is a deliberate trade-off">
-The `open` profile lets an agent that has been tricked by a prompt injection
-send your project's code to any site that is not on the blocklist.
-DefenseClaw's tool-call checks, the blocklist, large-upload alerts, hidden
-secrets and endpoint-bound credentials limit the damage. The proxy sees
-HTTPS only as encrypted tunnels, so it cannot tell a download from an
-upload. For sensitive code, run with `--profile balanced` (a curated
-developer allowlist) or `--profile strict` (no web beyond the model
-provider).
-</Callout>
+The `open` profile is a deliberate trade-off: see
+[network and egress](/docs/sandboxes/network#network-profiles) for what it
+risks and when to use `--profile balanced` or `--profile strict` instead.
 
 ### Unblock a destination
 
@@ -719,7 +685,7 @@ go instead (see [work on a copy](#work-on-a-copy)).
 Session ended · 57 tool calls (1 blocked: <the rule's reason>) · 23 new sites contacted · 1 site blocked · 8 files changed (+212 −37)
 ✗ DefenseClaw blocked webhook.site (webhook catcher) → unblock: defenseclaw sandbox unblock webhook.site --sandbox myapp-7f3a
 ⚠ Changed files that can run code on your machine: package.json, .envrc  → review before running
-Keep changes? [Y] keep  [u] undo everything  [d] show diff
+Keep changes? [Y] keep  [u] undo everything  [d] show diff (then Enter)
   Sandbox kept (stopped) → resume: defenseclaw sandbox connect myapp-7f3a   delete: defenseclaw sandbox delete myapp-7f3a
 ```
 
@@ -908,7 +874,7 @@ folder until you bring the work back. At the end of the session you choose
 how:
 
 ```text
-Bring the changes back? [A] apply (3-way)  [b] branch dc/myapp-1c2d  [p] patch file  [s] skip
+Bring the changes back? [A] apply (3-way)  [b] branch dc/myapp-1c2d  [p] patch file  [s] skip (then Enter)
 ```
 
 Changes that can run code on your machine, or that hold what looks like a
@@ -1397,60 +1363,94 @@ images, the shell wrappers and your organization's policy. Every failed
 check names its fix.
 `--fix` applies the fixes that need only your user (such as starting or
 restarting the gateway, or turning bind mounts on), after asking, and reports
-each one by the check's name, as its question does. With no gateway service
-installed (the `nvidia/openshell` formula on a Mac, the `openshell-gateway`
-user unit on Linux) it has no gateway to start: the **Gateway** check's fix
-is then `defenseclaw sandbox setup --install-openshell`, which `--fix` does
-not run. Nor does it restart a gateway for a setting then (such as the
-MicroVM sandbox user or resources): with no gateway running, the check says
-the setting takes effect once the gateway is installed and started, and for
-a gateway you run another way, to restart it the way you started it.
-`--install-openshell` installs nothing where a supported OpenShell CLI is
-already installed. So when OpenShell was installed another way (from the
-release binaries, say), without the formula on a Mac or the user unit on
-Linux, the **Gateway** and **Gateway service** checks name that CLI instead
-(``the OpenShell 0.1.1 at <path> was installed another way``). While its
-gateway answers, **Gateway service** only warns, and setup uses that
-gateway: DefenseClaw cannot start or restart it, so after a gateway change
-you restart it yourself, the way you started it. With no gateway answering,
-the way on is to start it yourself, or, for a gateway DefenseClaw starts and
-restarts, to stop it, remove that OpenShell and run
-`defenseclaw sandbox setup --install-openshell`, which installs the formula
-or runs NVIDIA's installer, which sets the unit up (see
-[Troubleshooting](#troubleshooting)).
-Setup offers the install only where it runs NVIDIA's installer: with no
-OpenShell CLI, or one older than 0.1.1, which it upgrades. It does not
-downgrade a CLI newer than DefenseClaw drives, whose **OpenShell CLI** fix
-is to remove it first. With OpenShell installed, a failing **Gateway**,
-**Gateway service**, registration or mTLS check is not the install's:
-setup prints that check's fix and stops
-(``the OpenShell gateway is not usable yet (Gateway service)``, pointing
-at `defenseclaw sandbox doctor`), with `--install-openshell` too; a
-stopped service's fix is to start it. The TUI shows that fix as the hint
-of **Install OpenShell** and leaves it off, as it does for a failing
-**MicroVM driver** check, whose fix setup makes with the install's consent
-(step 2).
-Nor is the install the fix of a gateway that answers with another release
-than a supported CLI (``the gateway that answers runs OpenShell 0.0.40, not
-the OpenShell 0.1.1 installed here``): that gateway is not the one the
-CLI's install runs, so the **Gateway** check restarts the gateway service
-(the `openshell-gateway` unit, or Homebrew's `nvidia/openshell/openshell`
-service), which `--fix` does where that service runs the gateway. When the
-restarted gateway still answers with another release, the service runs
-another OpenShell's gateway, and `--fix` says so
-(``the openshell-gateway user service runs another OpenShell's gateway: restarted, it still answers with OpenShell 0.0.40``).
-From then on the check's fix is to stop that gateway (`systemctl --user
-stop openshell-gateway`, or `brew services stop nvidia/openshell/openshell`)
-and remove that other OpenShell, then run
-`defenseclaw sandbox setup --install-openshell`, and the doctor does not
-restart the gateway again for the same releases (it records the restart
-in `.defenseclaw-release-restart` in the gateway's configuration
-directory, until the gateway stops answering or answers with the CLI's
-release). With the service stopped while a gateway answers, of any
-release, something else runs that gateway, whose port the service's
-would not get: the **Gateway service** fix is then to stop it, then start
-the service, which `--fix` leaves to you (its start would see the other
-gateway answer and report it fixed).
+each one by the check's name, as its question does. It does not install
+OpenShell. The situations where `--fix` cannot help are below.
+
+### No gateway service installed
+
+**You see:** the **Gateway** check's fix is
+`defenseclaw sandbox setup --install-openshell`.
+
+**Why:** there is no gateway service to start: no `nvidia/openshell` formula
+on a Mac, no `openshell-gateway` user unit on Linux. `--fix` does not install
+one, and it does not restart a gateway for a setting either (such as the
+MicroVM sandbox user or resources). The check says the setting takes effect
+once the gateway is installed and started.
+
+**Do this:** run `defenseclaw sandbox setup --install-openshell`.
+
+### OpenShell installed another way
+
+**You see:** the **Gateway** and **Gateway service** checks name the CLI
+(``the OpenShell 0.1.1 at <path> was installed another way``).
+
+**Why:** OpenShell came from somewhere other than the formula or NVIDIA's
+installer, such as the release binaries. `--install-openshell` installs
+nothing where a supported OpenShell CLI is already installed.
+
+**Do this:**
+
+- While its gateway answers, **Gateway service** only warns and setup uses
+  that gateway. DefenseClaw cannot start or restart it, so after a gateway
+  change, restart it yourself, the way you started it.
+- With no gateway answering, start it yourself.
+- For a gateway DefenseClaw starts and restarts, stop that gateway, remove
+  that OpenShell, then run `defenseclaw sandbox setup --install-openshell`,
+  which installs the formula or runs NVIDIA's installer.
+
+### OpenShell too old, too new, or not usable yet
+
+- **Older than 0.1.1, or missing:** setup offers the install, which upgrades
+  it.
+- **Newer than DefenseClaw drives:** setup does not downgrade it. The
+  **OpenShell CLI** fix is to remove it first.
+- **Installed, but a Gateway, Gateway service, registration or mTLS check
+  fails:** that is not the install's fault. Setup prints that check's fix and
+  stops (``the OpenShell gateway is not usable yet (Gateway service)``,
+  pointing at `defenseclaw sandbox doctor`), with `--install-openshell` too.
+  A stopped service's fix is to start it. The TUI shows that fix as the hint
+  of **Install OpenShell** and leaves the box off, as it does for a failing
+  **MicroVM driver** check, which setup fixes with the install's consent
+  (step 2 of [one-time setup](#one-time-setup)).
+
+### The gateway answers with another release
+
+**You see:** ``the gateway that answers runs OpenShell 0.0.40, not the
+OpenShell 0.1.1 installed here``.
+
+**Why:** the gateway that answers is not the one the CLI's install runs.
+
+**Do this:**
+
+1. Run `defenseclaw sandbox doctor --fix`. The **Gateway** check restarts the
+   gateway service (the `openshell-gateway` unit, or Homebrew's
+   `nvidia/openshell/openshell` service) where that service runs the gateway.
+2. If it still answers with another release, the service runs another
+   OpenShell's gateway, and `--fix` says so (``the openshell-gateway user
+   service runs another OpenShell's gateway: restarted, it still answers with
+   OpenShell 0.0.40``). Stop that gateway (`systemctl --user stop
+   openshell-gateway`, or `brew services stop nvidia/openshell/openshell`),
+   remove that other OpenShell, then run
+   `defenseclaw sandbox setup --install-openshell`.
+
+The doctor does not restart the gateway again for the same releases. It
+records the restart in `.defenseclaw-release-restart` in the gateway's
+configuration directory, until the gateway stops answering or answers with
+the CLI's release.
+
+### Something else holds the gateway's port
+
+**You see:** the gateway service is stopped, yet a gateway answers (of any
+release).
+
+**Why:** something else runs that gateway, so the service would not get its
+port.
+
+**Do this:** stop that gateway, then start the service. `--fix` leaves this
+to you, because its start would see the other gateway answer and report it
+fixed.
+
+### More doctor details
 
 On a Mac the doctor also checks the MicroVM driver: `e2fsprogs` and the
 driver's signature for Apple's Hypervisor (**vm-driver**), that the gateway
@@ -1481,10 +1481,87 @@ pack doesn't allow, and says so.
 `defenseclaw doctor` shows the same checks as rows in its **Sandbox**
 section, and skips them while `openshell.enabled` is off.
 
+### A gateway run another way on macOS
+
+**You see:** the doctor's **Gateway service** check says ``not Homebrew's
+nvidia/openshell/openshell service … DefenseClaw cannot restart it``. Setup
+marks ``⚠ OpenShell 0.1.1 is not from Homebrew's nvidia/openshell formula``
+on its machine line, as the TUI does, then ``⚠ Gateway service: …`` and
+``→ setup uses this gateway as it runs: after a gateway change, restart it
+yourself, the way you started it``.
+
+**Why:** on macOS DefenseClaw starts and restarts only the gateway of NVIDIA's
+`nvidia/openshell` Homebrew formula, with `brew services`. A gateway run
+another way (under launchd, a LaunchAgent of your own, or started by hand,
+which does not start again at login) is used as it runs. The **MicroVM
+driver** check passes on the driver the gateway runs, naming the binary when
+it finds it.
+
+**What setup does:** a gateway change setup needs (the MicroVM sandbox user
+or resources) is shown and asked about with ``Write this change?
+DefenseClaw cannot restart this gateway: …``. Yes writes it without a
+restart, and setup ends with ``restart the OpenShell gateway yourself, the
+way you started it, so it runs on the change above``. No writes nothing and
+lists the change as skipped; where the gateway still runs the docker driver
+on a Docker VM without Landlock, setup ends with ``not ready for sandboxes
+yet: the gateway change was not written, …``.
+
+**Do this:**
+
+- Before you restart the gateway, stop the sandboxes running on it (setup
+  names them) with `defenseclaw sandbox stop NAME`, which flushes their
+  disks. DefenseClaw cannot flush them before a restart it does not make, and
+  what they wrote since their last sync is lost.
+- With no gateway answering, **Gateway service** and **Gateway** fail, and
+  setup stops (``the OpenShell gateway is not usable yet (Gateway)``). Start
+  that gateway yourself, the way you started it before.
+- For a gateway DefenseClaw starts and restarts instead, stop it and remove
+  that OpenShell (DefenseClaw's install step would find its CLI and install
+  nothing), then run `defenseclaw sandbox setup --install-openshell`, which
+  installs the formula.
+
+### A gateway run another way on Linux
+
+**You see:** setup marks ``⚠ OpenShell 0.1.1 has no openshell-gateway user
+service`` on its machine line, as the TUI does, then ``⚠ Gateway service:
+openshell-gateway is not installed; the gateway that answers runs another
+way, so DefenseClaw cannot start or restart it``.
+
+**Why:** on Linux DefenseClaw starts and restarts the gateway through the
+`openshell-gateway` user unit that NVIDIA's installer sets up. OpenShell
+installed another way (for example from its release binaries in
+`~/.local/bin`) has no such unit, and its gateway is used as it runs.
+
+**What setup does:** it asks about bind mounts and telemetry, writes the
+change to `gateway.toml` and `gateway.env` without a restart, and tells you
+to restart the gateway yourself.
+
+- Bind mounts are written only once the gateway that answers refuses a
+  client without a certificate and `gateway.toml` keeps it on loopback.
+- With no unit to read its environment from, the port the gateway was
+  started on (`OPENSHELL_SERVER_PORT=8080`, say) is taken from the
+  registration rather than compared with the default.
+- A gateway you start by hand reads `gateway.env` only if you give it that
+  environment.
+
+**What the doctor shows:** it compares those files with the start of your
+`openshell-gateway` process (found with `pgrep`, its age read with `ps`).
+Until you restart the gateway, **Project bind mounts** and **OpenShell
+telemetry** warn ``… but the gateway has not been restarted since it
+changed``. Where it finds no such process, they warn ``… but DefenseClaw
+cannot tell whether the gateway was restarted on it``.
+
+**Do this:** restart the gateway yourself after a change. With no gateway
+answering, setup stops with the doctor's fix: start it yourself, or stop it,
+remove that OpenShell and run `defenseclaw sandbox setup --install-openshell`,
+which runs NVIDIA's installer and sets up the service.
+
+### Errors and what to do
+
 | You see | Do this |
 | --- | --- |
 | ``OpenShell sandboxes are off; run `defenseclaw sandbox setup` to turn them on`` | Run setup. |
-| `install OpenShell: Homebrew could not install the nvidia/openshell formula` (macOS) | Read Homebrew's `Error:` line just above it. When NVIDIA's tap has no bottle (prebuilt package) for your macOS release, Homebrew builds the formula and first checks your developer tools: it stops when Xcode or the Command Line Tools are older than the oldest it builds with on your macOS release (`Your Xcode (26.2) … is too outdated`). From macOS 26 on that is the release's own (Xcode 27.0 and the Command Line Tools 27.0 on macOS 27); before, its major version is one above the macOS major, and it shipped with that macOS the same year (Xcode 16.0 and the Command Line Tools 16.0 on macOS 15, 15.0 on macOS 14, Xcode 14.1 and the Command Line Tools 14.0 on macOS 13). Update them as Homebrew says (Xcode from the App Store, the Command Line Tools from Software Update in System Settings), then run `defenseclaw sandbox setup` again. Homebrew checks `/Applications/Xcode.app` even when `xcode-select` selects the Command Line Tools: when those are current and that Xcode is older (``Your Xcode (26.2) at /Applications/Xcode.app is too outdated. Please update to Xcode 27.0 (or delete it).``), setup says so (``Homebrew checks Xcode 26.2 at /Applications/Xcode.app even so``), and the fix is to update that Xcode or delete it, as Homebrew says; updating the Command Line Tools does not help. |
+| `install OpenShell: Homebrew could not install the nvidia/openshell formula` (macOS) | Read Homebrew's `Error:` line just above it. Most often your developer tools are older than Homebrew wants for your macOS release (`Your Xcode (26.2) … is too outdated`): update them as Homebrew says, then run `defenseclaw sandbox setup` again. Homebrew checks `/Applications/Xcode.app` even when `xcode-select` selects the Command Line Tools; setup then says ``Homebrew checks Xcode 26.2 at /Applications/Xcode.app even so``, and you update or delete that Xcode. See [developer tools](/docs/sandboxes/macos#developer-tools). |
 | On macOS, the doctor's **Landlock** check reports no Landlock, `sandbox run` refuses with ``no sandbox can start on this gateway: it runs sandboxes on the docker driver``, or a run or start ends with ``sandbox "<name>" is in error state`` and a next line ``→ this gateway runs sandboxes on the docker driver`` | The gateway still runs the Docker driver, and Docker Desktop's Linux VM kernel has no Landlock, which OpenShell needs. Switch it to MicroVMs: run `defenseclaw sandbox setup` (or `defenseclaw sandbox doctor --fix`) and answer yes to the MicroVM question (see [macOS](#macos)). |
 | On macOS, a run ends with ``✗ <Harness> exited with status <code> before any of its hooks reached DefenseClaw: … does not resolve in <name>: its /etc/hosts is empty, as OpenShell's MicroVM driver leaves it, and its image was built before DefenseClaw's images answered localhost themselves`` | The sandbox was made from a harness image built before DefenseClaw's images for MicroVMs answered `localhost`, and a sandbox keeps its image. Do what the next line says (``→ a new sandbox boots a rebuilt image: delete this one (`defenseclaw sandbox delete <name>`) and run it again``): the new sandbox boots a rebuilt image. |
 | On macOS, a run ends with ``✗ <Harness> exited with status <code> before any of its hooks reached DefenseClaw: it could not resolve localhost ("…"). This sandbox's /etc/hosts is empty, as OpenShell's MicroVM driver leaves it, and <Harness> does not use the system resolver, which answers localhost here`` | The harness resolves names on its own (as a Go program built without cgo, or a static musl program, does), so no image can answer `localhost` for it in a MicroVM, whose `/etc/hosts` is empty. Run it on a Linux host, whose Docker driver writes `/etc/hosts` (``→ <Harness> cannot start in an OpenShell MicroVM until OpenShell writes /etc/hosts; a gateway on the docker driver (Linux) runs it``). |
@@ -1497,8 +1574,8 @@ section, and skips them while `openshell.enabled` is off.
 | ``stage the project copy: the copy (files and history) is …, above the … limit`` | Raise `openshell.workdir.max_upload_mb` in `config.yaml`, or make the project smaller (a shallower history: `openshell.workdir.git_depth`). On a Mac a copy is the only way the project runs. |
 | ``the sandbox's own disk is full (no space left on device): a MicroVM writes to an overlay disk …`` | Free space in the sandbox (`defenseclaw sandbox exec <name> -- df -h` shows it), or raise `overlay_disk_mib` under `[openshell.drivers.vm]` for new sandboxes: `defenseclaw sandbox doctor` shows the value and where it is set. |
 | The doctor's **vm-identity** check fails, or a create on a Mac says the MicroVM driver runs sandboxes as another uid | The gateway's `sandbox_uid` and `sandbox_gid` are not your uid and gid, so the harness images DefenseClaw built for you would not match. Run `defenseclaw sandbox doctor --fix`, which sets them and restarts the gateway. |
-| On macOS, with OpenShell installed outside Homebrew (for example from NVIDIA's release binaries), the doctor's **Gateway service** check says ``not Homebrew's nvidia/openshell/openshell service … DefenseClaw cannot restart it``, and setup marks it ``⚠ OpenShell 0.1.1 is not from Homebrew's nvidia/openshell formula`` on its machine line, as the TUI does, then ``⚠ Gateway service: …`` and ``→ setup uses this gateway as it runs: after a gateway change, restart it yourself, the way you started it`` | On macOS DefenseClaw starts and restarts only the gateway of NVIDIA's `nvidia/openshell` Homebrew formula, with `brew services`. A gateway run another way is used as it runs: the **MicroVM driver** check passes on the driver the gateway runs (naming the binary when it finds it), the **Gateway service** check warns and says how the gateway runs (under launchd, a LaunchAgent of your own, or started by hand, which does not start again at login), and setup goes on. A gateway change setup needs (the MicroVM sandbox user or resources) is shown, asked about with ``Write this change? DefenseClaw cannot restart this gateway: …``, and written without a restart; setup then ends with ``restart the OpenShell gateway yourself, the way you started it, so it runs on the change above``. The plan and that line also say that restarting the gateway stops every sandbox on it: DefenseClaw cannot flush the MicroVM sandboxes before a restart it does not make, so first stop the ones running on it (the line names them) with `defenseclaw sandbox stop NAME`, which flushes their disks, or what they wrote since their last sync is lost. Answer no and nothing is written, so a restart alone changes nothing: setup lists the change as skipped and, where the gateway still runs the docker driver on a Docker VM without Landlock, ends with ``not ready for sandboxes yet: the gateway change was not written, … Rerun `defenseclaw sandbox setup` and let it write the change, then restart the OpenShell gateway yourself``. With no gateway answering, **Gateway service** and **Gateway** fail, **MicroVM driver** checks the `openshell-driver-vm` it finds (such as the one next to the `openshell-gateway` on your `PATH`), and setup stops (``the OpenShell gateway is not usable yet (Gateway)``) with the fix: start that gateway yourself, the way you started it before. For a gateway DefenseClaw starts and restarts instead, stop it and remove that OpenShell (DefenseClaw's install step would find its CLI and install nothing), then run `defenseclaw sandbox setup --install-openshell`, which installs the formula. |
-| On Linux, with OpenShell installed without NVIDIA's installer (for example from its release binaries in `~/.local/bin`), setup marks it ``⚠ OpenShell 0.1.1 has no openshell-gateway user service`` on its machine line, as the TUI does, then ``⚠ Gateway service: openshell-gateway is not installed; the gateway that answers runs another way, so DefenseClaw cannot start or restart it`` | On Linux DefenseClaw starts and restarts the gateway through the `openshell-gateway` user unit that NVIDIA's installer sets up. A gateway started by hand is used as it runs, as on a Mac: setup asks about bind mounts and telemetry, writes the change to `gateway.toml` and `gateway.env` without a restart (bind mounts only once the gateway that answers refuses a client without a certificate and `gateway.toml` keeps it on loopback; with no unit to read its environment from, the port it was started on, `OPENSHELL_SERVER_PORT=8080` say, is taken from the registration rather than compared with the default), and tells you to restart the gateway yourself; a gateway you start by hand reads `gateway.env` only if you give it that environment. The doctor then compares those files with the start of your `openshell-gateway` process (found with `pgrep`, its age read with `ps`): until you restart the gateway, **Project bind mounts** and **OpenShell telemetry** warn ``… but the gateway has not been restarted since it changed``, and where it finds no such process they warn ``… but DefenseClaw cannot tell whether the gateway was restarted on it`` rather than report the change loaded. With no gateway answering, setup stops with the doctor's fix: start it yourself, or stop it, remove that OpenShell and run `defenseclaw sandbox setup --install-openshell`, which runs NVIDIA's installer and sets up the service. |
+| On macOS, the **Gateway service** check says ``not Homebrew's nvidia/openshell/openshell service … DefenseClaw cannot restart it``, or setup marks ``⚠ OpenShell 0.1.1 is not from Homebrew's nvidia/openshell formula`` | OpenShell was installed outside Homebrew. See [a gateway run another way on macOS](#a-gateway-run-another-way-on-macos). |
+| On Linux, setup marks ``⚠ OpenShell 0.1.1 has no openshell-gateway user service``, then ``⚠ Gateway service: openshell-gateway is not installed; …`` | OpenShell was installed without NVIDIA's installer. See [a gateway run another way on Linux](#a-gateway-run-another-way-on-linux). |
 | ``the DefenseClaw daemon is not running (start it with `defenseclaw-gateway start`)`` | Start the daemon. With the daemon down, sandbox hooks block every tool call. |
 | ``sandboxes are unavailable: … (see `defenseclaw sandbox doctor`)`` | Run the doctor; `--fix` often starts or restarts the OpenShell gateway. |
 | `DefenseClaw hooks are not reaching the daemon; every tool call is being blocked` | Run the doctor and look at **Sandbox hooks** and **DefenseClaw daemon**, fix the cause, then start the session again. |
@@ -1528,143 +1605,11 @@ DefenseClaw, and a harness's own non-zero status is passed through.
 
 ## Legacy sandbox cleanup
 
-DefenseClaw no longer ships the legacy standalone sandbox integration. That
-integration targeted the standalone `openshell-sandbox` 0.0.x binary and
-OpenClaw only: it ran OpenClaw as a `sandbox` Linux user inside a network
-namespace joined to the host by a veth pair (`10.200.0.1` host,
-`10.200.0.2` sandbox), added iptables NAT rules, installed root systemd units
-and launcher scripts, and changed ownership and ACLs on the OpenClaw home. The
-per-connector sandbox policy it generated was never enforced.
-
-The old `sandbox init` command and the legacy options of `sandbox setup`
-(sandbox and host IPs, auto-pairing, host networking) were removed with it.
-OpenClaw and ZeptoClaw use the `shims` subprocess policy on every platform;
-see the [capability matrix](/docs/connectors/capability-matrix).
-
-### Detect a legacy install
-
-On a host whose DefenseClaw config still says `openshell.mode: standalone`,
-until cleanup runs:
-
-- if `guardrail.host` is non-empty and not `localhost`, the gateway API keeps
-  binding to that host (for example `10.200.0.1`) so `upgrade` health checks
-  keep working; see [Gateway API: bind address](/docs/reference/gateway-api#bind-address);
-- `/health` reports a `sandbox` subsystem in state `degraded` whose
-  `last_error` says a legacy standalone install was detected. On any other
-  host the `sandbox` subsystem is absent only while `openshell.enabled` is
-  `false`; with sandboxes on, it reports the sandbox runtime's state, as the
-  [Gateway API reference](/docs/reference/gateway-api) describes under
-  Health & status; and
-- `defenseclaw doctor` warns about the legacy install and names
-  `defenseclaw sandbox legacy-cleanup` as the remediation.
-
-### Run cleanup
-
-Cleanup is Linux-only. Review the plan first; `--dry-run` prints every step
-and its exact commands without changing anything:
-
-```bash
-defenseclaw sandbox legacy-cleanup --dry-run
-```
-
-Then run it. The plan is printed with every command, and cleanup asks once
-for confirmation unless you pass `--yes`:
-
-```bash
-defenseclaw sandbox legacy-cleanup
-```
-
-| Option | Behavior |
-| --- | --- |
-| `--dry-run` | Print the plan and change nothing. |
-| `--yes` | Apply the plan without asking for confirmation. |
-| `--remove-user` | Also run `userdel -r sandbox`. Refused while that user has running processes, until its ownership and ACLs are gone from the OpenClaw home, or when the account's home is not the configured sandbox home. |
-| `--remove-binary` | Also remove `/usr/local/bin/openshell-sandbox`, only when it reports a 0.0.x version and is not owned by a package. |
-
-Privileged steps run through `sudo`, with binaries resolved only from the
-root-owned `/usr/sbin`, `/usr/bin`, `/sbin`, and `/bin`. Each artifact is
-handled idempotently and recorded in a JSON receipt at
-`<data_dir>/legacy-sandbox-cleanup.json`, so an interrupted run can be
-repeated.
-
-### What cleanup changes
-
-1. **systemd units.** Runs
-   `systemctl disable --now defenseclaw-sandbox.target openshell-sandbox.service`,
-   removes those two unit files from `/etc/systemd/system` and the four
-   `/usr/local/lib/defenseclaw/{pre,start,post,cleanup}-sandbox.sh` launchers
-   only when they are root-owned and DefenseClaw-generated, then runs
-   `systemctl daemon-reload`.
-2. **Nothing still running.** Before any later step, checks that no legacy
-   unit is active (including one cleanup left alone because it is not
-   DefenseClaw-generated), that no PID recorded in `<data_dir>/sandbox.pids`
-   or `<data_dir>/openshell.pid` still runs that program, and that
-   `pgrep -u <sandbox uid>` finds nothing (run through sudo when `/proc` is
-   mounted with `hidepid`, which hides other users' processes from a normal
-   user). Otherwise cleanup stops and changes
-   nothing else. Cleanup never runs the non-systemd launcher itself, because
-   it lives in the operator-writable data directory; stop it first with
-   `sudo <data_dir>/scripts/run-sandbox.sh stop`.
-3. **Networking.** Deletes the recorded network namespace and the host veths
-   whose peer is in it, removes the exact iptables NAT rules the legacy
-   launcher added (each checked with `iptables -C` first), and restores
-   `net.ipv4.conf.all.route_localnet` from the saved value. A veth that
-   carries `10.200.0.1` but cannot be tied to the recorded namespace is
-   reported, not deleted.
-4. **OpenClaw home.** Removes the `sandbox` user's ACLs (access and default
-   entries on the home, and its entries on every ancestor), then restores the
-   home's original ownership from the validated backup, and removes the
-   `/home/sandbox/.openclaw` symlink. On an ancestor, the backup can only
-   clear the `o+x` bit legacy setup added, and only on a directory the home's
-   owner owns; any other recorded mode is reported and left alone. A backup
-   that disagrees with the pinned `claw.openclaw_home_original` (or with the
-   home an earlier cleanup run recorded), names a system path, or carries a
-   non-integer uid/gid is refused and kept. On a host where the old
-   `sandbox setup --disable` already removed the pin and the backup, the
-   ACLs are still removed from `claw.home_dir` (or `~/.openclaw`). If the
-   `sandbox` account was already deleted, its uid is recovered from the
-   unmapped uid that owns or has ACL entries on the home.
-5. **OpenClaw gateway settings.** Once ownership is restored, rewrites
-   `openclaw.json` as the invoking user to bind loopback on port `18789`, and
-   points the provider `baseUrl` back to localhost if it pointed at
-   `10.200.0.1`. Symlinked files are refused. JSON with comments or trailing
-   commas is accepted and written back as plain JSON. A failed rewrite is
-   retried on the next run.
-6. **Group membership.** Removes the invoking user from the `sandbox` group.
-7. **Optional removals.** `--remove-user` and `--remove-binary`, as above.
-   Neither runs by default. The group and user steps only run on a host with
-   legacy evidence, since an account named `sandbox` alone proves nothing.
-8. **DefenseClaw config.** Once the ownership and `openclaw.json` steps are
-   done, clears `openshell.mode`, sets `gateway.host: 127.0.0.1`,
-   `gateway.port: 18789`, and `guardrail.host: localhost`, points
-   `claw.home_dir` and `claw.config_file` back at the original OpenClaw home,
-   and clears `claw.openclaw_home_original`.
-9. **Data-dir artifacts.** Backs up legacy files under the data directory to
-   `<data_dir>/backups/legacy-sandbox-<timestamp>/`, then removes them. Each
-   file an unfinished step still needs (the ownership backup, the PID files,
-   `run-sandbox.sh`) is kept until that step is done.
-10. **Next steps.** Prints the follow-up commands below.
-
-### After cleanup
-
-While sandboxed, the agent could write anywhere in the OpenClaw home,
-including `openclaw.json`, `extensions/`, `skills/`, and `hooks/`. Cleanup
-only resets the gateway settings, so scan what the agent could have left
-before OpenClaw runs on the host again. Then rewire the guardrail, which also
-re-registers the DefenseClaw plugin and restarts the gateway and OpenClaw:
-
-```bash
-defenseclaw skill scan --all
-defenseclaw plugin scan --all
-defenseclaw mcp scan --all
-defenseclaw setup guardrail
-```
-
-The `openshell:` config block stays in `config.yaml`. The legacy keys
-`mode` and `sandbox_home` are read only until cleanup resets them, and
-`policy_dir`, `version`, `auto_pair` and `host_networking` are accepted and
-ignored; see
-[OpenShell sandbox settings](/docs/reference/configuration#openshell-sandbox-settings).
+A Linux host that ran the retired standalone `openshell-sandbox` 0.0.x
+integration needs a one-time cleanup with
+`defenseclaw sandbox legacy-cleanup` before you set up OpenShell 0.1
+sandboxes. See [legacy sandbox cleanup](/docs/sandboxes/legacy-cleanup) for
+how to tell whether you need it and what it changes.
 
 ## Related
 
