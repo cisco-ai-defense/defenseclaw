@@ -876,6 +876,51 @@ class TestAdditiveSetupCommand(unittest.TestCase):
         self.assertIn("DEFENSECLAW_GATEWAY_TOKEN=openclaw-side-token", dotenv)
         self.assertIn("OPENCLAW_GATEWAY_TOKEN=openclaw-side-token", dotenv)
 
+    # GAP-2259: the running gateway is stopped with the token it loaded, so its
+    # shutdown API never sees the new one; it then starts on the new token.
+    def test_openclaw_token_swap_stops_gateway_with_old_token(self):
+        oc = os.path.join(self.tmp_dir, "openclaw.json")
+        with open(oc, "w", encoding="utf-8") as handle:
+            json.dump({"gateway": {"auth": {"token": "openclaw-side-token"}}}, handle)
+        self.app.cfg.claw.config_file = oc
+        self.app.cfg.gateway.token = ""
+        self.app.cfg.gateway.token_env = ""
+        dotenv_path = os.path.join(self.app.cfg.data_dir, ".env")
+        alive = {"value": True}
+        seen: list[tuple[str, bool]] = []
+
+        def dotenv_has_new_token() -> bool:
+            if not os.path.exists(dotenv_path):
+                return False
+            with open(dotenv_path, encoding="utf-8") as handle:
+                return "openclaw-side-token" in handle.read()
+
+        def stop(cmd, **_kwargs):
+            seen.append((cmd[-1], dotenv_has_new_token()))
+            alive["value"] = False
+
+        def start(_data_dir, **_kwargs):
+            seen.append(("start", dotenv_has_new_token()))
+            return True
+
+        for restart, expected in ((False, []), (True, [("stop", False), ("start", True)])):
+            seen.clear()
+            alive["value"] = True
+            if os.path.exists(dotenv_path):
+                os.unlink(dotenv_path)
+            with (
+                patch.dict(os.environ, {"DEFENSECLAW_GATEWAY_TOKEN": "defenseclaw-own-token"}),
+                patch.object(cmd_setup, "_is_pid_alive", side_effect=lambda _p: alive["value"]),
+                patch.object(cmd_setup, "_gateway_pid_file_identifies_gateway", return_value=True),
+                patch.object(cmd_setup, "_gateway_lifecycle_executable", return_value="/opt/dc/defenseclaw-gateway"),
+                patch.object(cmd_setup, "run_pinned_executable", side_effect=stop),
+                patch.object(cmd_setup, "_restart_defense_gateway", side_effect=start),
+            ):
+                os.environ.pop("OPENCLAW_GATEWAY_TOKEN", None)
+                cmd_setup._adopt_openclaw_gateway_token(self.app, restart=restart)
+            self.assertEqual(seen, expected)
+            self.assertTrue(dotenv_has_new_token())
+
     # GAP-1524: DefenseClaw dials the OpenClaw gateway on openclaw.json's port.
     def test_openclaw_gateway_port_is_adopted_from_openclaw_json(self):
         oc = os.path.join(self.tmp_dir, "openclaw.json")

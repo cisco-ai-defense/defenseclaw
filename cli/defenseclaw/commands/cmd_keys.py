@@ -104,6 +104,26 @@ def _gateway_token_names(cfg) -> set[str]:
     return names
 
 
+def required_removal_warning(cfg, env_name: str) -> str:
+    """The line that says removing ``env_name`` breaks a feature in use (GAP-2254).
+
+    Empty when the current config does not REQUIRE the key. ``keys list``
+    marks such a key "● REQUIRED <feature>"; ``keys remove`` and the TUI
+    confirm repeat that before the key is deleted.
+    """
+    try:
+        statuses = classify(cfg)
+    except Exception:  # noqa: BLE001 - a partial config must not block a remove.
+        return ""
+    for status in statuses:
+        if status.resolution.env_name == env_name and status.requirement is Requirement.REQUIRED:
+            return (
+                f"{env_name} is REQUIRED by {status.spec.feature} in the current config; "
+                f"{status.spec.feature} stops working until the key is set again."
+            )
+    return ""
+
+
 def _render_unregistered(app: AppContext, statuses: list[CredentialStatus]) -> None:
     """Name .env entries that are not in the registry so they can be removed."""
     import os
@@ -253,6 +273,8 @@ def keys_remove(app: AppContext, env_name: str, yes: bool) -> None:
             "the CLI and the TUI off from the gateway. It is not removed. "
             "To reset it, run 'defenseclaw setup' or 'defenseclaw init'."
         )
+    if warning := required_removal_warning(app.cfg, env_name):
+        ux.warn(warning)
     if not yes and not click.confirm(f"  Remove {env_name} from {dotenv_path}?", default=False):
         raise click.Abort()
 
