@@ -609,7 +609,8 @@ class TestRegistryApproveReject(RegistryCommandTestBase):
         ], obj=self.app)
         self.assertEqual(result.exit_code, 2, result.output)
         self.assertIn(
-            "corp-skills has no mcp entry 'demo-skill'; it is a skill entry (use --type skill)",
+            "corp-skills has no mcp entry 'demo-skill'; it is a skill entry "
+            "(use skill:demo-skill or demo-skill --type skill)",
             result.output,
         )
         self.assertNotIn("entries: none", result.output)
@@ -626,6 +627,23 @@ class TestRegistryApproveReject(RegistryCommandTestBase):
             "approve", "corp-skills", "skill:demo-skill", "--no-repromote",
         ], obj=self.app)
         self.assertIn("Approved skill:demo-skill from corp-skills.", result.output)
+
+    def test_wrong_type_prefix_hint_names_a_form_that_works(self):
+        # GAP-2457/GAP-2458: the hint must not send the user back into an rc-2 loop.
+        result = self.runner.invoke(registry, [
+            "reject", "corp-skills", "mcp:demo-skill", "--no-repromote",
+        ], obj=self.app)
+        self.assertEqual(result.exit_code, 2, result.output)
+        self.assertIn("(use skill:demo-skill or demo-skill --type skill)", result.output)
+        result = self.runner.invoke(registry, [
+            "reject", "corp-skills", "mcp:demo-skill", "--type", "skill", "--no-repromote",
+        ], obj=self.app)
+        self.assertEqual(result.exit_code, 2, result.output)
+        self.assertIn("the mcp: prefix in 'mcp:demo-skill' does not match --type skill", result.output)
+        self.assertIn("(use skill:demo-skill or demo-skill --type skill)", result.output)
+        for name in ("skill:demo-skill", "demo-skill"):
+            result = self.invoke(["reject", "corp-skills", name, "--type", "skill", "--no-repromote", "--json"])
+            self.assertEqual(result.exit_code, 0, result.output)
 
     def test_approve_in_never_synced_source_says_sync_first(self):
         self.invoke([
