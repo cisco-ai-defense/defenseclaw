@@ -232,11 +232,12 @@ def cli(ctx: click.Context) -> None:
     \b
     Multi-connector:
       One gateway enforces N agent-native connectors (codex, claudecode,
-      hermes, antigravity, omnigent, and others) tracked under guardrail.connectors. Add one
-      with 'defenseclaw setup <connector>' (choose Add when prompted),
-      remove with 'defenseclaw setup remove <name>'. Scope policy per peer
-      with 'defenseclaw guardrail ... --connector X', and inspect the
-      roster with 'defenseclaw status' / 'defenseclaw guardrail status'.
+      hermes, antigravity, omnigent, and others) tracked under
+      guardrail.connectors. Add one with 'defenseclaw setup <connector>'
+      (choose Add when prompted), remove with
+      'defenseclaw setup remove <name>'. Scope policy per peer with
+      'defenseclaw guardrail ... --connector X', and inspect the roster
+      with 'defenseclaw status' / 'defenseclaw guardrail status'.
       Note: OpenClaw/ZeptoClaw use the proxy path and cannot be multi peers.
     """
     ctx.ensure_object(AppContext)
