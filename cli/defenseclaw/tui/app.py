@@ -6764,6 +6764,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 errors = connector_health.errors
             else:
                 requests = inspections = errors = 0
+            # The newest-500-row window only gates the split and names the top
+            # event; the allowed/warned/blocked numbers use the persisted
+            # totals below so they add up to the headline past 500 (GAP-2583).
             allow_count, alert_count, block_decisions, top_hook = self._connector_hook_breakdown_for_connectors(
                 scope_connectors
             )
@@ -6796,9 +6799,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             if allow_count or alert_count or block_decisions:
                 # Words, not "recent a136 w1 b2" codes (GAP-1545).
                 call_detail_parts.append(
-                    f"allowed [{TOKENS.accent_green}]{allow_count}[/] · "
-                    f"warned [{TOKENS.accent_amber}]{alert_count}[/] · "
-                    f"blocked [{TOKENS.accent_red}]{block_decisions}[/]"
+                    f"allowed [{TOKENS.accent_green}]{total_allow}[/] · "
+                    f"warned [{TOKENS.accent_amber}]{total_alert}[/] · "
+                    f"blocked [{TOKENS.accent_red}]{total_block}[/]"
                 )
                 if top_hook:
                     call_detail_parts.append(f"top event: [{TOKENS.accent_cyan}]{top_hook}[/]")
