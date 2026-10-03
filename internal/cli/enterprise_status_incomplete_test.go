@@ -56,3 +56,29 @@ func TestEnterpriseSecurityIncompleteNamesItsReasons(t *testing.T) {
 		t.Fatalf("a complete result got %+v", result.Warnings)
 	}
 }
+
+// GAP-2494: a repair that restored the Cursor adapter still names why
+// security is not complete; a warning that explains it still suppresses it.
+func TestEnterpriseSecurityIncompleteIgnoresInformationalWarnings(t *testing.T) {
+	result := &enterprisestatus.Result{
+		Readiness: enterprisestatus.Readiness{Guardian: true},
+		MachinePolicy: map[string]enterprisestatus.MachinePolicyState{
+			"claudecode": {Ownership: "merge", Lock: "enforce"},
+		},
+	}
+	result.AddWarning("cursor_adapter_restored", "restored")
+	result.AddWarning("stale_lifecycle_journal_removed", "removed")
+	addEnterpriseSecurityIncompleteReasons(result, false)
+	if len(result.Warnings) != 3 || result.Warnings[2].Code != "security_incomplete" ||
+		!strings.Contains(result.Warnings[2].Message, "ATTESTCLAUDEEFFECTIVEPOLICY=1") {
+		t.Fatalf("warnings = %+v", result.Warnings)
+	}
+
+	result.Warnings = nil
+	result.AddWarning("cursor_adapter_restored", "restored")
+	result.AddWarning("user_registrations_pending", "pending")
+	addEnterpriseSecurityIncompleteReasons(result, false)
+	if len(result.Warnings) != 2 {
+		t.Fatalf("an explaining warning did not suppress the reason: %+v", result.Warnings)
+	}
+}
