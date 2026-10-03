@@ -411,6 +411,7 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 		readinessTimeout = hookColdStartReadinessTimeout
 	} else if progress != nil {
 		requirements.reportProgress = progress.report
+		requirements.keepSlowStart = true
 	}
 	snap, _, err := waitForStartedDaemon(
 		d,
@@ -421,6 +422,9 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 		defaultReadinessPollInterval,
 		requirements,
 	)
+	if errors.Is(err, errGatewayStillStarting) {
+		return reportGatewayStillStarting(err, pid, d.LogFile(), cfg, cfgErr)
+	}
 	if err != nil {
 		fmt.Println(Style("FAILED", "fg=red", "bold"))
 		err = gatewayExitedBeforeReadinessError(err, d.LogFile(), logOffset)
@@ -770,6 +774,7 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 	requirements.expectedPID = pid
 	requirements.token = func() string { return daemonGatewayToken(cfg) }
 	requirements.reportProgress = progress.report
+	requirements.keepSlowStart = true
 	snap, _, err := waitForStartedDaemon(
 		d,
 		pid,
@@ -779,6 +784,9 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 		defaultReadinessPollInterval,
 		requirements,
 	)
+	if errors.Is(err, errGatewayStillStarting) {
+		return reportGatewayStillStarting(err, pid, d.LogFile(), cfg, cfgErr)
+	}
 	if err != nil {
 		fmt.Println(Style("FAILED", "fg=red", "bold"))
 		err = gatewayExitedBeforeReadinessError(err, d.LogFile(), logOffset)
@@ -951,6 +959,12 @@ type daemonReadinessRequirements struct {
 	// what a slow start is still waiting for, and lets each connector setup
 	// step extend the readiness timeout up to startReadinessProgressCap.
 	reportProgress func(elapsed time.Duration, step string)
+
+	// keepSlowStart leaves the launched gateway running when an interactive
+	// start or restart reaches the readiness deadline while that process is
+	// still alive (GAP-2022). Stopping it left no gateway and no watchdog on
+	// a loaded host where it would have answered moments later.
+	keepSlowStart bool
 }
 
 const startReadinessReportInterval = 30 * time.Second
@@ -1552,6 +1566,11 @@ func waitForStartedDaemon(d daemonReadinessProcess, pid int, client *http.Client
 	}
 	if err == nil {
 		err = fmt.Errorf("gateway did not reach READY before the startup deadline")
+	}
+	if requirements.keepSlowStart && errors.Is(err, errGatewayReadinessDeadline) {
+		if running, currentPID := d.IsRunning(); running && currentPID == pid {
+			return snap, false, readinessError{err, errGatewayStillStarting}
+		}
 	}
 	stopErr := stopAttemptedGatewayStart(d, pid)
 	if stopErr != nil && !errors.Is(stopErr, daemon.ErrNotRunning) {
@@ -2225,7 +2244,7 @@ func waitForGatewayReadiness(
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
 			if lastProbeErr != nil {
-				return lastSnap, false, fmt.Errorf("gateway did not become ready before timeout (last probe: %v)", lastProbeErr)
+				return lastSnap, false, fmt.Errorf("%w (last probe: %v)", errGatewayReadinessDeadline, lastProbeErr)
 			}
 			if lastSnap.Telemetry.State == gateway.StateError &&
 				strings.TrimSpace(lastSnap.Telemetry.LastError) == "" &&
@@ -2239,12 +2258,15 @@ func waitForGatewayReadiness(
 				)
 			}
 			if lastStep != "" {
-				return lastSnap, false, fmt.Errorf(
+				return lastSnap, false, readinessError{fmt.Errorf(
 					"gateway remained STARTING through the %s readiness timeout (last step: %s)",
 					time.Since(startedWaiting).Round(time.Second), lastStep,
-				)
+				), errGatewayReadinessDeadline}
 			}
-			return lastSnap, false, fmt.Errorf("gateway remained STARTING through the %s readiness timeout", timeout)
+			return lastSnap, false, readinessError{
+				fmt.Errorf("gateway remained STARTING through the %s readiness timeout", timeout),
+				errGatewayReadinessDeadline,
+			}
 		}
 		if requirements.reportProgress != nil && !time.Now().Before(nextReport) {
 			nextReport = time.Now().Add(startReadinessReportInterval)

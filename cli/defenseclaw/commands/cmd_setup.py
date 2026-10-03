@@ -184,6 +184,9 @@ class _ConnectorRuntimeReadiness:
 
 
 _GATEWAY_API_READY_TIMEOUT_SECONDS = 45.0
+# `defenseclaw-gateway start|restart` prints this when its readiness deadline
+# passed but the new gateway is still alive and was kept (GAP-2022).
+_GATEWAY_LEFT_STARTING_MARKER = "is still starting and was left running"
 _GATEWAY_PID_GENERATION_MAX_BYTES = 16 * 1024
 _DEFENSE_GATEWAY_LIFECYCLE_TIMEOUT_SECONDS = 60
 # `defenseclaw-gateway start|restart` stops the old gateway (up to 10 s), waits
@@ -15177,8 +15180,16 @@ def _restart_defense_gateway(
             click.echo(" ✗ (API health timed out)")
             click.echo("    The gateway process started but its sidecar API never became ready.")
             return False
-        click.echo(" ✗")
         err = (result.stderr or result.stdout or "").strip()
+        # GAP-2022: the gateway missed the launcher's readiness deadline but
+        # was left running; give it one more API window before failing.
+        if _GATEWAY_LEFT_STARTING_MARKER in err and _wait_for_defense_gateway_api(
+            data_dir,
+            previous_generation=generation_before,
+        ):
+            click.echo(" ✓ (ready after a slow start)")
+            return True
+        click.echo(" ✗")
         if err:
             for line in err.splitlines()[:3]:
                 click.echo(f"    {line}")
