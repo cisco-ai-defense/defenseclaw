@@ -73,7 +73,7 @@ func TestUsageMessageNamesTheInvokedPath(t *testing.T) {
 		if err != nil || groupCmd.RunE == nil {
 			t.Fatalf("enterprise %s: %v", group, err)
 		}
-		want := `run "/opt/defenseclaw/bin/defenseclaw-gateway enterprise ` + group + ` --help" for the actions`
+		want := "Try '/opt/defenseclaw/bin/defenseclaw-gateway enterprise " + group + " --help' for help."
 		if got := groupCmd.RunE(groupCmd, []string{"frobnicate"}); got == nil || !strings.Contains(got.Error(), want) {
 			t.Errorf("enterprise %s frobnicate: %v, want %q", group, got, want)
 		}
