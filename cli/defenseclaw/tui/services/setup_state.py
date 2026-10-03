@@ -71,6 +71,9 @@ class SetupCommandIntent:
     # ``sandbox setup`` may run the OpenShell installer under sudo and builds
     # images for minutes, which need a real terminal.
     terminal: bool = False
+    # What running it breaks, shown in the confirm modal (e.g. "keys
+    # remove" of a key the current config REQUIRES, GAP-2254).
+    consequence: str = ""
 
     @property
     def argv(self) -> tuple[str, ...]:
