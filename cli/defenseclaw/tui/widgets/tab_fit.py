@@ -299,6 +299,40 @@ def fit_tab_labels(
                 compact.update(saved[0])
                 no_badge.clear()
                 no_badge.update(saved[1])
+        if chosen[active] != title and width >= NARROW_STRIP:
+            # Still short of its full name: the least important other tabs
+            # take their shorter names ("Policy", then "Inv"), then the Alerts
+            # count its compact form, and only then do tabs lose their name.
+            # So a wider strip never reads "R Reg\u2026" where a narrower one
+            # reads "R Registries" (GAP-2020), and no tab is a bare letter
+            # at 160 columns (GAP-1544).
+            saved = (set(compact), set(no_badge))
+
+            def room(trial: dict[str, str], alerts: bool = False) -> bool:
+                steps = [(compact, False), (no_badge, False)] + ([(compact, True)] if alerts else [])
+                if fit_badges(trial, steps):
+                    return True
+                compact.clear()
+                compact.update(saved[0])
+                no_badge.clear()
+                no_badge.update(saved[1])
+                return False
+
+            trial = {**chosen, active: title}
+            done = room(trial)
+            for tier in (1, 0):
+                for name in reversed(ranked):
+                    shorter = _names(name, titles[name])[tier]
+                    if not done and name != active and trial[name] and len(shorter) < len(trial[name]):
+                        trial[name] = shorter
+                        done = room(trial)
+            if done or room(trial, alerts=True):
+                chosen = trial
+            else:
+                squeezed = _squeeze({**chosen, active: title})
+                if squeezed is not None and not KEEP_BADGE & squeezed[2]:
+                    chosen = squeezed[1]
+                    no_badge.update(squeezed[2])
         if chosen[active] == title:
             wanted = [title]
         elif chosen[active]:
