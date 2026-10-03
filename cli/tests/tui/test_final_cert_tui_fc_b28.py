@@ -29,8 +29,6 @@ def test_windows_badges_keep_registries_named_at_200_columns(monkeypatch) -> Non
         assert strip_width(tuple(labels.values())) <= 186, active
         assert title in labels[active], active
         assert labels["alerts"] == "2 Alerts(181)", active
-        if active == "ai":
-            assert labels["registries"] == "R Reg", active
-        else:
-            assert labels["registries"] == "R Registries", active
-            assert labels["ai"] == "V AI(4)", active
+        # Every full name fits, so the counts that don't wait (GAP-2599).
+        assert labels["registries"] == "R Registries", active
+        assert labels["ai"].startswith("V AI Discovery"), active

@@ -31,4 +31,4 @@ def test_ai_badge_shows_beside_free_cells_at_200_columns(monkeypatch) -> None:
         assert labels["registries"] == "R Registries", active
         assert title in labels[active], active
         if active != "ai":
-            assert labels["ai"] == "V AI⁴", active
+            assert labels["ai"] == "V AI Discovery⁴", active  # every full name fits (GAP-2599)
