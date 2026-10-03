@@ -1987,3 +1987,13 @@ func TestObservabilityClawModeOmittedForSeveralConnectors(t *testing.T) {
 		t.Fatalf("multi-connector claw mode = %q, want it omitted", got)
 	}
 }
+
+// GAP-2100: `defenseclaw-gateway stop` waits 10s for a graceful exit before it
+// signals; the normal close in Run and its deferred retry must both fit in
+// that window when a telemetry collector is down or refuses exports.
+func TestObservabilityV8ShutdownFlushFitsTheGracefulStopWindow(t *testing.T) {
+	const gracefulStopWindow = 10 * time.Second
+	if 2*sidecarObservabilityV8ShutdownTimeout >= gracefulStopWindow {
+		t.Fatalf("two shutdown flushes of %s do not fit in the %s stop window", sidecarObservabilityV8ShutdownTimeout, gracefulStopWindow)
+	}
+}

@@ -82,6 +82,11 @@ _ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 # "<sha256>  <name>" line per file. `uninstall --binaries` removes the files
 # that still match it, and keeps a uv that was updated or replaced since.
 _UV_RECORD = "defenseclaw-uv.sha256"
+# `defenseclaw-gateway stop` itself waits up to about 25s (shutdown request,
+# 10s graceful exit, then a signal and 10s more, then a kill), so a shorter
+# wait here failed the whole uninstall while the stop was still working
+# (GAP-2100).
+_GATEWAY_STOP_TIMEOUT_SECONDS = 45
 _UV_NAMES = {"win32": ("uv.exe", "uvx.exe", "uvw.exe")}
 _UV_NAMES_POSIX = ("uv", "uvx")
 _UV_RECORD_MAX_BYTES = 4096
@@ -2353,7 +2358,7 @@ def _stop_gateway(plan: UninstallPlan | None = None) -> None:
             capture_output=True,
             encoding="utf-8",
             errors="replace",
-            timeout=15,
+            timeout=_GATEWAY_STOP_TIMEOUT_SECONDS,
         )
         if watchdog.returncode != 0:
             detail = (watchdog.stderr or watchdog.stdout or "unknown error").strip()
@@ -2363,7 +2368,7 @@ def _stop_gateway(plan: UninstallPlan | None = None) -> None:
             capture_output=True,
             encoding="utf-8",
             errors="replace",
-            timeout=15,
+            timeout=_GATEWAY_STOP_TIMEOUT_SECONDS,
         )
         if proc.returncode != 0 and _managed_host_has_no_own_gateway(plan):
             # On a managed host `stop` refuses whenever this account's own

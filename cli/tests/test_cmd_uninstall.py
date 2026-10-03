@@ -1401,6 +1401,8 @@ class GatewayTeardownOutputTests(unittest.TestCase):
         kwargs = run_mock.call_args.kwargs
         self.assertEqual(kwargs["encoding"], "utf-8")
         self.assertEqual(kwargs["errors"], "replace")
+        # GAP-2100: the gateway's own stop can take about 25s before it kills.
+        self.assertTrue(all(call.kwargs["timeout"] >= 30 for call in run_mock.call_args_list))
 
 
 class RemoveDataDirTests(unittest.TestCase):

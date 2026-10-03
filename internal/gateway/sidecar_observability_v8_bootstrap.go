@@ -47,7 +47,14 @@ import (
 )
 
 const (
-	sidecarObservabilityV8CloseTimeout      = 30 * time.Second
+	sidecarObservabilityV8CloseTimeout = 30 * time.Second
+	// sidecarObservabilityV8ShutdownTimeout bounds each telemetry flush when
+	// the gateway stops. Run may try twice (the normal close, then its deferred
+	// retry), and both must fit in the 10s that `defenseclaw-gateway stop`
+	// waits before it escalates to signals: a down or refusing collector
+	// otherwise held the stop for about 20s and the process was killed
+	// (GAP-2100).
+	sidecarObservabilityV8ShutdownTimeout   = 4 * time.Second
 	sidecarDeliveryHealthPersistenceTimeout = 2 * time.Second
 	sidecarDeliveryHealthAction             = "telemetry-destination"
 )
@@ -711,7 +718,11 @@ func (owner *sidecarOwnedObservabilityV8Runtime) reload(
 }
 
 func (owner *sidecarOwnedObservabilityV8Runtime) closeWithTimeout() error {
-	ctx, cancel := context.WithTimeout(context.Background(), sidecarObservabilityV8CloseTimeout)
+	return owner.closeWithin(sidecarObservabilityV8CloseTimeout)
+}
+
+func (owner *sidecarOwnedObservabilityV8Runtime) closeWithin(timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	return owner.close(ctx)
 }
@@ -763,7 +774,7 @@ func (s *Sidecar) closeOwnedObservabilityV8Runtime() error {
 		s.bindObservabilityV8ConsumersLocked()
 	}
 	s.observabilityV8Mu.Unlock()
-	if err := owner.closeWithTimeout(); err != nil {
+	if err := owner.closeWithin(sidecarObservabilityV8ShutdownTimeout); err != nil {
 		return err
 	}
 	if s.health != nil {
