@@ -31,6 +31,7 @@ command.
 
 from __future__ import annotations
 
+import contextlib
 import json as _json
 import os
 import re
@@ -236,7 +237,44 @@ def _require_cfg(app: AppContext) -> Config:
 
 
 def _emit_json(payload: Any) -> None:
+    ctx = click.get_current_context(silent=True)
+    if ctx is not None:
+        ctx.meta[_JSON_OUTPUT_KEY] = True
     click.echo(_json.dumps(payload, indent=2, sort_keys=True))
+
+
+# GAP-2422: the gateway reads asset_policy only when it starts (its config
+# reload refuses the change), so agent hooks kept the old registry rules until
+# a manual restart. A registry command that changed asset_policy restarts a
+# running gateway on its way out, as `policy activate` does.
+_JSON_OUTPUT_KEY = "defenseclaw.registry.json_output"
+
+
+def _asset_policy_fingerprint(cfg: Any) -> str | None:
+    policy = getattr(cfg, "asset_policy", None)
+    return None if policy is None else repr(policy)
+
+
+def _apply_asset_policy_to_gateway(ctx: click.Context, app: AppContext, before: str) -> None:
+    if _asset_policy_fingerprint(app.cfg) == before:
+        return
+    from defenseclaw.commands import cmd_policy, cmd_setup
+
+    if not cmd_policy._gateway_pid_alive(app):
+        return  # a stopped gateway loads the saved policy when it starts
+    quiet = bool(ctx.meta.get(_JSON_OUTPUT_KEY))
+    # --json keeps stdout a single JSON document; the restart progress goes to stderr.
+    with contextlib.redirect_stdout(sys.stderr) if quiet else contextlib.nullcontext():
+        restarted = cmd_setup._restart_defense_gateway(app.cfg.data_dir, start_if_stopped=False)
+    if restarted:
+        if not quiet:
+            ux.ok("Restarted the gateway; agent hooks use the new asset policy now.")
+        return
+    click.echo(
+        "  \u26a0 The change is saved, but the gateway restart failed, so agent hooks "
+        "still use the old asset policy. Run: defenseclaw-gateway restart",
+        err=True,
+    )
 
 
 def _source_to_dict(source: RegistrySource) -> dict[str, Any]:
@@ -259,7 +297,8 @@ def _source_to_dict(source: RegistrySource) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 @click.group("registry")
-def registry() -> None:
+@click.pass_context
+def registry(ctx: click.Context) -> None:
     """Manage external skill / MCP catalog sources.
 
     A registry source is a fetchable manifest (corporate HTTPS YAML,
@@ -272,6 +311,10 @@ def registry() -> None:
     Start with 'defenseclaw registry wizard', or 'registry add' then
     'registry sync'.
     """
+    app = ctx.find_object(AppContext)
+    before = _asset_policy_fingerprint(getattr(app, "cfg", None))
+    if app is not None and before is not None:
+        ctx.call_on_close(lambda: _apply_asset_policy_to_gateway(ctx, app, before))
 
 
 @registry.command("add")
@@ -999,6 +1042,8 @@ def sync_cmd(  # noqa: PLR0913
 
     if emit_json:
         _emit_json([r.to_dict() for r in reports])
+    elif not reports:
+        _print_nothing_to_sync(cfg)
     else:
         _print_sync_reports(reports)
     if any(not r.ok() for r in reports):
@@ -1040,23 +1085,43 @@ def _promoted_label(skills: int, mcps: int) -> str:
     return ", ".join(parts) or "0"
 
 
+def _print_nothing_to_sync(cfg: Config) -> None:
+    """Say why `sync --all` synced nothing: no sources, or all disabled (GAP-2425)."""
+    disabled = [s.id for s in cfg.registries.sources if not s.enabled]
+    if not cfg.registries.sources:
+        ux.subhead("Nothing to sync: no registry sources are configured.")
+        ux.subhead("Add one with: defenseclaw registry add <id> ... (or defenseclaw registry wizard).")
+        return
+    if disabled:
+        noun = "source is" if len(disabled) == 1 else "sources are"
+        ux.subhead(f"Nothing to sync: {len(disabled)} {noun} disabled ({', '.join(disabled)}).")
+        ux.subhead(
+            "Sync them with: defenseclaw registry sync --all --include-disabled, "
+            "or turn one on with: defenseclaw registry edit <id> --enabled"
+        )
+        return
+    ux.subhead("Nothing to sync.")
+
+
 def _print_sync_reports(reports: list[SyncReport]) -> None:
     if not reports:
         ux.subhead("Nothing to sync.")
         return
     click.echo()
     ux.section("Sync results")
+    # Size SOURCE to the longest id so later columns stay under their headers (GAP-2424).
+    id_w = max([24] + [len(r.source_id) for r in reports])
     click.echo(
-        f"  {'SOURCE':<24} {'FETCHED':<8} {'SCANNED':<8} {'PROMOTED':<20} {'STATUS'}"
+        f"  {'SOURCE':<{id_w}} {'FETCHED':<8} {'SCANNED':<8} {'PROMOTED':<20} {'STATUS'}"
     )
     click.echo(
-        f"  {'-' * 24} {'-' * 8} {'-' * 8} {'-' * 20} {'-' * 32}"
+        f"  {'-' * id_w} {'-' * 8} {'-' * 8} {'-' * 20} {'-' * 32}"
     )
     for r in reports:
         promoted = _promoted_label(r.promoted_skills, r.promoted_mcps)
         status = "ok" if r.ok() else "error"
         click.echo(
-            f"  {r.source_id:<24} {r.fetched:<8} {r.scanned:<8} {promoted:<20} {status}"
+            f"  {r.source_id:<{id_w}} {r.fetched:<8} {r.scanned:<8} {promoted:<20} {status}"
         )
     for r in reports:
         for err in r.errors:
@@ -1442,15 +1507,17 @@ def entries_cmd(
         return
     click.echo()
     ux.section(f"Entries for {source.id}")
+    # A long entry name must not push the other columns out (GAP-2424).
+    name_w = max([32] + [len(v.name) for v in rows])
     click.echo(
-        f"  {'NAME':<32} {'TYPE':<6} {'STATUS':<10} {'SEV':<8} {'A/R'}"
+        f"  {'NAME':<{name_w}} {'TYPE':<6} {'STATUS':<10} {'SEV':<8} {'A/R'}"
     )
-    click.echo(f"  {'-' * 32} {'-' * 6} {'-' * 10} {'-' * 8} {'-' * 3}")
+    click.echo(f"  {'-' * name_w} {'-' * 6} {'-' * 10} {'-' * 8} {'-' * 3}")
     for v in rows:
         a = "A" if v.approved else "-"
         r = "R" if v.rejected else "-"
         click.echo(
-            f"  {v.name:<32} {v.type:<6} {v.status:<10} {(v.severity or '-'):<8} {a}{r}",
+            f"  {v.name:<{name_w}} {v.type:<6} {v.status:<10} {(v.severity or '-'):<8} {a}{r}",
         )
     click.echo()
 
