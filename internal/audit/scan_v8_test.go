@@ -548,6 +548,10 @@ func TestScanV8PluginTargetRefKeepsCategoryFolder(t *testing.T) {
 		{"/opt/hermes/plugins/web/firecrawl", "plugin", "web/firecrawl"},
 		{`C:\Users\u\hermes\plugins\image_gen\openrouter`, "plugin", "image_gen/openrouter"},
 		{"/home/u/.hermes/plugins/notes", "plugin", "notes"},
+		// GAP-2453: Hermes lists its bundled platforms/* plugins by the bare
+		// name; a user-root platforms folder keeps category/name.
+		{"/home/u/.hermes/hermes-agent/plugins/platforms/discord", "plugin", "discord"},
+		{"/home/u/.hermes/plugins/platforms/mine", "plugin", "platforms/mine"},
 		{"/home/u/.claude/skills/review/notes", "skill", "notes"},
 	} {
 		result := &scanner.ScanResult{Target: tc.target, TargetType: tc.targetType}
