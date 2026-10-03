@@ -40,7 +40,8 @@ async def test_uninstall_wipe_shows_its_second_confirmation_at_80x24() -> None:
         # The armed hint and the row being confirmed (with what it deletes)
         # are both visible, and the dialog's right border is on screen.
         assert "press enter / click again to confirm" in text
-        assert "Uninstall and wipe data" in text and "deletes ~/.defenseclaw" in text
+        # GAP-2585 wording wraps the row before the path.
+        assert "Uninstall and wipe data" in text and "deletes" in text and "~/.defenseclaw." in text
         assert all(len(line.rstrip()) <= 80 for line in text.splitlines())
         assert any(line.rstrip().endswith("╮") for line in text.splitlines()[:3])
     assert results == []
