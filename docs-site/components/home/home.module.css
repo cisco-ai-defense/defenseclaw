@@ -555,3 +555,67 @@
     gap: 0.4rem;
   }
 }
+
+/* Enterprise hook above the hero kicker: one clear way in for fleet admins. */
+.enterpriseHook {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.75rem;
+  max-width: 100%;
+  min-height: 2.75rem;
+  margin-bottom: 1.25rem;
+  padding: 0.3rem 0.9rem 0.3rem 0.3rem;
+  border: 1px solid var(--editorial-rule);
+  border-radius: 999px;
+  background: var(--editorial-paper);
+  color: var(--editorial-ink);
+  font-size: 0.9rem;
+  line-height: 1.3;
+  text-decoration: none;
+  transition: border-color 150ms ease, box-shadow 150ms ease;
+}
+
+.enterpriseHook:hover,
+.enterpriseHook:focus-visible {
+  border-color: var(--editorial-blue-bright);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--editorial-blue-bright) 18%, transparent);
+}
+
+.enterpriseHookTag {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.3rem 0.65rem;
+  border-radius: 999px;
+  background: var(--editorial-blue);
+  color: var(--editorial-on-blue);
+  font-weight: 600;
+}
+
+.enterpriseHookTag svg {
+  width: 0.95rem;
+  height: 0.95rem;
+}
+
+.enterpriseHookText {
+  min-width: 0;
+  color: var(--editorial-muted);
+}
+
+.enterpriseHookArrow {
+  flex: none;
+  width: 1rem;
+  height: 1rem;
+  transition: transform 150ms ease;
+}
+
+.enterpriseHook:hover .enterpriseHookArrow {
+  transform: translateX(2px);
+}
+
+@media (max-width: 480px) {
+  .enterpriseHookText {
+    display: none;
+  }
+}

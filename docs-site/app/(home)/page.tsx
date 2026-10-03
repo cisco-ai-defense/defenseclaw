@@ -1,5 +1,5 @@
 import Link from 'next/link';
-import { ArrowRight, Download, Fingerprint } from 'lucide-react';
+import { ArrowRight, Building2, Download, Fingerprint } from 'lucide-react';
 import { SoftwareApplicationSchema } from '@/components/structured-data';
 import { CtaGlowButton } from '@/components/cta-glow-button';
 import { DefenseClawDemo } from '@/components/feature-demo';
@@ -29,6 +29,11 @@ export default function HomePage() {
         <EditorialMotionGrid />
         <div className={`editorial-shell ${styles.heroGrid}`}>
           <div className={styles.heroCopy}>
+            <Link className={styles.enterpriseHook} href="/docs/enterprise/get-started">
+              <span className={styles.enterpriseHookTag}><Building2 aria-hidden /> Enterprise?</span>
+              <span className={styles.enterpriseHookText}>Roll out to every endpoint with Intune or any MDM</span>
+              <ArrowRight aria-hidden className={styles.enterpriseHookArrow} />
+            </Link>
             <p className="editorial-kicker"><span>Cisco AI Defense</span> Open source</p>
             <h1 id="hero-heading" className={styles.heroTitle}>Guardrails for every AI coding agent.</h1>
             <p className={`editorial-lede ${styles.heroLede}`}>
@@ -41,9 +46,6 @@ export default function HomePage() {
               </Link>
               <Link className="editorial-text-link" href="/docs/get-started/download">
                 All downloads <ArrowRight aria-hidden />
-              </Link>
-              <Link className="editorial-text-link" href="/docs/enterprise/get-started">
-                <span>Deploying to a fleet?</span> Enterprise <ArrowRight aria-hidden />
               </Link>
             </div>
             <dl className={`editorial-proof-strip ${styles.heroProof}`}>
