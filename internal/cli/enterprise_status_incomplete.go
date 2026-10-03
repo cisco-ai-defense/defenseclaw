@@ -25,13 +25,28 @@ const claudeAttestationHint = " (it needs an administrator's attestation, and ea
 	"confirm that an enrolled user's Claude Code runs DefenseClaw's hooks, then run Setup /repair ATTESTCLAUDEEFFECTIVEPOLICY=1, " +
 	"or `enterprise windows repair --profile standalone --attest-claude-effective-policy`)"
 
+// enterpriseInformationalWarningCodes are warnings that say what the lifecycle
+// restored by itself, not why security is incomplete.
+var enterpriseInformationalWarningCodes = map[string]bool{
+	"cursor_adapter_restored":         true,
+	"stale_lifecycle_journal_removed": true,
+}
+
 // addEnterpriseSecurityIncompleteReasons names why security is not complete
 // when nothing else in the result does. Windows standalone status and verify
 // reported security_complete:false with empty errors and warnings, so an
 // administrator had to read the guardian log to learn the cause.
+//
+// Notes that only record what the lifecycle repaired on its own do not
+// explain an incomplete result, so they do not suppress the reason (GAP-2494).
 func addEnterpriseSecurityIncompleteReasons(result *enterprisestatus.Result, transactionPending bool) {
-	if result == nil || result.SecurityComplete || len(result.Errors) > 0 || len(result.Warnings) > 0 {
+	if result == nil || result.SecurityComplete || len(result.Errors) > 0 {
 		return
+	}
+	for _, warning := range result.Warnings {
+		if !enterpriseInformationalWarningCodes[warning.Code] {
+			return
+		}
 	}
 	var reasons []string
 	if transactionPending {
