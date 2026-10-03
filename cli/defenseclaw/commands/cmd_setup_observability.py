@@ -105,7 +105,7 @@ _LEGACY_GENERATED_GALILEO_SEND = {
 
 @click.group("observability")
 def observability() -> None:
-    """Configure canonical telemetry destinations.
+    """Configure telemetry destinations.
 
     Supports Splunk Observability Cloud, Splunk HEC, Splunk Enterprise
     HEC, Datadog, Honeycomb, New Relic, Grafana Cloud, Galileo, the local
@@ -412,7 +412,7 @@ def list_cmd(app: AppContext, emit_json: bool) -> None:
 @click.argument("name")
 @pass_ctx
 def enable_cmd(app: AppContext, name: str) -> None:
-    """Enable an optional canonical destination."""
+    """Turn a disabled destination back on."""
     _require_v8_operator_status(app.cfg.data_dir)
     _set_v8_destination_enabled(app.cfg.data_dir, name, True, "")
 
@@ -436,7 +436,7 @@ def disable_cmd(app: AppContext, name: str) -> None:
 @click.option("--yes", is_flag=True, help="Skip confirmation prompt")
 @pass_ctx
 def remove_cmd(app: AppContext, name: str, yes: bool) -> None:
-    """Delete an optional canonical destination."""
+    """Delete a destination you added."""
     _require_v8_operator_status(app.cfg.data_dir)
     # GAP-1707: reject an unknown name before asking to remove it.
     _v8_source_destination_index(app.cfg.data_dir, name)
