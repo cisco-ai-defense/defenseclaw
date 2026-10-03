@@ -255,3 +255,52 @@ func TestRepairOutputSaysItRestartedTheServices(t *testing.T) {
 		t.Fatalf("--no-start repair claims a restart:\n%s", out.String())
 	}
 }
+
+// GAP-2146, GAP-2147: a missing or doubled value source and an invalid
+// --name are argument errors (usage line, --help pointer, exit 2), checked
+// before the value is read or the ensure lifecycle runs.
+func TestEnterpriseSecretArgumentErrorsPrintUsage(t *testing.T) {
+	goos := enterpriseunix.CurrentGOOS()
+	layout, err := managed.StandaloneLayoutFor(goos)
+	if err != nil {
+		t.Skip(err)
+	}
+	root := t.TempDir()
+	previous := newUnixLifecycleEnv
+	newUnixLifecycleEnv = func(goos string) (*enterpriseunix.Env, error) {
+		return &enterpriseunix.Env{GOOS: goos, Root: root, Layout: layout, Geteuid: func() int { return 0 }}, nil
+	}
+	t.Cleanup(func() { newUnixLifecycleEnv = previous })
+
+	cases := []struct {
+		action, want string
+		opts         enterpriseSecretOptions
+	}{
+		{"set", "pass exactly one of --from-stdin or --from-file", enterpriseSecretOptions{name: "ok-name"}},
+		{"set", "pass exactly one of --from-stdin or --from-file", enterpriseSecretOptions{name: "ok-name", fromStdin: true, fromFile: "/etc/hostname"}},
+		{"set", `--name takes lowercase letters, digits and dashes, not "BAD_NAME"`, enterpriseSecretOptions{name: "BAD_NAME", fromStdin: true}},
+		{"remove", `--name takes lowercase letters, digits and dashes, not "BAD_NAME"`, enterpriseSecretOptions{name: "BAD_NAME"}},
+	}
+	for _, tc := range cases {
+		cmd := newEnterpriseSecretCommand(tc.action, "")
+		var out bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetIn(strings.NewReader("")) // an empty value must not win over the name error
+		opts := tc.opts
+		err := runEnterpriseSecret(cmd, tc.action, &opts)
+		if err == nil {
+			t.Fatalf("%s %+v succeeded", tc.action, tc.opts)
+		}
+		msg := err.Error()
+		if !strings.HasPrefix(msg, tc.want) || !strings.Contains(msg, "\nUsage: "+cmd.UseLine()) ||
+			!strings.HasSuffix(msg, "Try '"+cmd.CommandPath()+" --help' for help.") {
+			t.Fatalf("%s %+v: %q", tc.action, tc.opts, msg)
+		}
+		if got := commandExitCode(err); got != enterprisestatus.UnixExitInvalidArgs {
+			t.Fatalf("%s %+v exits %d", tc.action, tc.opts, got)
+		}
+		if out.Len() != 0 {
+			t.Fatalf("%s %+v ran the lifecycle: %q", tc.action, tc.opts, out.String())
+		}
+	}
+}

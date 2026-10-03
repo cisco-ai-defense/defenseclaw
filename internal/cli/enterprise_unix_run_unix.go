@@ -30,6 +30,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/enterpriseunix"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // newUnixLifecycleEnv is a seam for CLI tests.
@@ -297,12 +298,18 @@ func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 		}
 		return nil
 	}
+	// Argument errors are refused like a malformed flag, with the usage line
+	// and exit 2, before the value is read or the lifecycle lock is taken
+	// (GAP-2146, GAP-2147).
+	if !managed.ValidCredentialName(opts.name) {
+		return lifecycleFlagError(cmd, fmt.Errorf("--name takes lowercase letters, digits and dashes, not %q", opts.name))
+	}
+	if action == "set" && opts.fromStdin == (opts.fromFile != "") {
+		return lifecycleFlagError(cmd, errors.New("pass exactly one of --from-stdin or --from-file"))
+	}
 	var mutate func(context.Context) error
 	switch action {
 	case "set":
-		if opts.fromStdin == (opts.fromFile != "") {
-			return withExitCode(errors.New("pass exactly one of --from-stdin or --from-file"), enterprisestatus.UnixExitInvalidArgs)
-		}
 		var source io.Reader = cmd.InOrStdin()
 		if opts.fromFile != "" {
 			file, err := os.Open(opts.fromFile)
