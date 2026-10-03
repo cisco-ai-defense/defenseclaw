@@ -23,6 +23,7 @@ from time import monotonic
 from typing import Any
 
 import requests
+from rich.cells import cell_len
 from rich.console import Group, RenderableType
 from rich.errors import MarkupError, MissingStyle, StyleSyntaxError
 from rich.measure import Measurement
@@ -364,6 +365,40 @@ def _overview_banner_lines(width: int) -> int:
     if width >= _DEFENSECLAW_LOGO_WIDTH:
         return len(_DEFENSECLAW_LOGO.splitlines())
     return 1
+
+
+class _TailKeepingLine:
+    """One row of text cut with "…" before ``tail``, so a key hint survives.
+
+    A plain ``overflow="ellipsis"`` cut the end of the Overview runtime
+    notice at 80 columns, and with it "no findings; N for details" (GAP-2551).
+    """
+
+    def __init__(self, message: str, tail: str) -> None:
+        self.message = message
+        self.tail = tail
+
+    def __rich_measure__(self, console: Any, options: Any) -> Measurement:
+        return Measurement(1, cell_len(self.message))
+
+    def __rich_console__(self, console: Any, options: Any):
+        width = options.max_width
+        text = Text(self.message, no_wrap=True, overflow="ellipsis")
+        if cell_len(self.message) > width and self.message.endswith(self.tail) and cell_len(self.tail) < width - 8:
+            text = Text(self.message[: -len(self.tail)], no_wrap=True, overflow="ellipsis")
+            text.truncate(width - cell_len(self.tail), overflow="ellipsis")
+            text.append(self.tail)
+        yield text
+
+
+def _hanging_text(head: str, tail: str, style: str) -> Table:
+    """``head tail`` whose wrapped lines start under ``tail``, not at the edge (GAP-2550)."""
+
+    grid = Table.grid(padding=(0, 1))
+    grid.add_column(no_wrap=True)
+    grid.add_column(overflow="fold")
+    grid.add_row(Text(head, style=style), Text(tail, style=style))
+    return grid
 
 
 class _OverviewBanner:
@@ -8998,7 +9033,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             line = Table.grid(expand=True)
             line.add_column(no_wrap=True, width=len(icon) + 2)
             line.add_column(ratio=1, no_wrap=short_notices, overflow="ellipsis")
-            line.add_row(Text.assemble(" ", (icon, f"{color} bold"), " "), Text(notice.message))
+            message: RenderableType = Text(notice.message)
+            if short_notices and notice.keep_tail:
+                message = _TailKeepingLine(notice.message, notice.keep_tail)
+            line.add_row(Text.assemble(" ", (icon, f"{color} bold"), " "), message)
             notice_block.append(line)
         if not notice_block:
             quiet = Text(" ")
@@ -9803,19 +9841,20 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         summary = self.overview_model.native_delivery_summary
         if summary is None:
             return [
-                Text(
-                    "Native connector OTLP delivery · bounded evidence loading · "
-                    "collector/runtime health does not prove accepted delivery",
-                    style=TOKENS.text_muted,
+                _hanging_text(
+                    "Native connector OTLP delivery ·",
+                    "bounded evidence loading · collector/runtime health does not prove accepted delivery",
+                    TOKENS.text_muted,
                 )
             ]
         scope = f"bounded {summary.observation_window_hours}h"
         if summary.event_rows_truncated:
             scope += ", truncated; counts partial"
         lines: list[RenderableType] = [
-            Text(
-                f"Native connector OTLP delivery · {scope} · collector/runtime health does not prove accepted delivery",
-                style=TOKENS.text_secondary,
+            _hanging_text(
+                "Native connector OTLP delivery ·",
+                f"{scope} · collector/runtime health does not prove accepted delivery",
+                TOKENS.text_secondary,
             )
         ]
         if not summary.connectors:
@@ -9928,10 +9967,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                     )
                 )
                 prefix.append(
-                    Text(
-                        f"Event history: {storage.local_path} · Judge bodies: {storage.judge_bodies_path}",
-                        style=TOKENS.text_muted,
-                        overflow="ellipsis",
+                    _hanging_text(
+                        "Event history:",
+                        f"{storage.local_path} · Judge bodies: {storage.judge_bodies_path}",
+                        TOKENS.text_muted,
                     )
                 )
             body: RenderableType = Group(

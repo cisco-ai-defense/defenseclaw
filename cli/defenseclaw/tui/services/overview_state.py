@@ -434,6 +434,9 @@ class EnforcementCounts:
 class OverviewNotice:
     level: NoticeLevel
     message: str
+    # The end of ``message`` that a one-row render must keep, such as the
+    # key hint ("; N for details"); the cut goes before it (GAP-2551).
+    keep_tail: str = ""
 
 
 @dataclass(frozen=True)
@@ -959,6 +962,7 @@ class OverviewPanelModel:
                     "info",
                     f"Runtime is {runtime.health_title or 'watching'}{why}: {runtime.processes} processes, "
                     f"{runtime.connections} connections, {tail}",
+                    keep_tail=f", {tail}" if why else "",
                 )
             )
 
