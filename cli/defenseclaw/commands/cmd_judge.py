@@ -140,6 +140,33 @@ def _validate_connector(name: str) -> None:
     )
 
 
+def _refuse_if_observe(app: AppContext, gc, name: str) -> None:
+    """Refuse a gate entry for a configured observe-mode connector (GAP-2083).
+
+    The LLM judge reviews hook calls only for action-mode connectors, and
+    setup prunes observe-mode connectors from the gate (GAP-1333). Accepting
+    one here made ``guardrail status`` show Judge=on until the next setup
+    silently dropped it. Unconfigured connectors keep the existing
+    "entry is kept" behaviour (their mode is decided at setup).
+    """
+    effective_mode = getattr(gc, "effective_mode", None)
+    if not callable(effective_mode):
+        return
+    try:
+        active = {(c or "").strip().lower() for c in app.cfg.active_connectors()}
+    except Exception:  # noqa: BLE001 — older configs; skip the check.
+        return
+    if name not in active or (effective_mode(name) or "").strip().lower() == "action":
+        return
+    setup_name = "claude-code" if name == "claudecode" else name
+    raise click.ClickException(
+        f"'{name}' is in observe mode: the LLM judge reviews hook calls only for "
+        f"action-mode connectors, and setup removes observe-mode connectors from the "
+        f"judge gate. Switch it to action mode with the judge on: "
+        f"defenseclaw setup {setup_name} --mode action --enable-judge --yes"
+    )
+
+
 def _warn_if_inert(app: AppContext, gc) -> None:
     """Surface the two states in which a gate edit silently does nothing."""
     if not gc.enabled:
@@ -358,6 +385,9 @@ def judge_add(
 ) -> None:
     """Opt CONNECTOR into the hook-lane LLM judge ('all' = every hook connector).
 
+    The judge reviews hook calls only for action-mode connectors; adding a
+    configured observe-mode connector is refused.
+
     \b
     Examples:
       defenseclaw guardrail judge add hermes
@@ -366,10 +396,11 @@ def judge_add(
       defenseclaw guardrail judge add opencode --timeout 8
     """
     name = _normalize_target(connector)
+    gc = app.cfg.guardrail
     if name != ALL_CONNECTORS:
         _validate_connector(name)
+        _refuse_if_observe(app, gc, name)
 
-    gc = app.cfg.guardrail
     gate = list(gc.judge.hook_connectors or [])
     previous_gate = ",".join(gate)
 

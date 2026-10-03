@@ -718,6 +718,19 @@ class TestPerConnectorWriteSurface(_BaseSetup):
         self.assertIn("--enable-judge was not applied", res.output)
         self.assertIn("--mode action --enable-judge", res.output)
 
+    def test_observe_setup_says_when_it_prunes_the_judge_gate(self):
+        # GAP-2083: setup drops an observe-mode connector from the gate; it
+        # must say so instead of pruning silently.
+        self._seed_map("codex", "hermes")
+        gc = self.app.cfg.guardrail
+        gc.judge.enabled = True
+        gc.judge.hook_connectors = ["codex", "hermes"]
+        with _stub_side_effects():
+            res = _invoke(["hermes", "--yes", "--no-restart", "--mode", "observe"], self.app)
+        self.assertEqual(res.exit_code, 0, msg=res.output)
+        self.assertEqual(gc.judge.hook_connectors, ["codex"])
+        self.assertIn("hermes was removed from the LLM judge gate", res.output)
+
     def test_no_enable_judge_opts_connector_out_of_concrete_gate(self):
         self._seed_map("codex", "hermes")
         gc = self.app.cfg.guardrail
