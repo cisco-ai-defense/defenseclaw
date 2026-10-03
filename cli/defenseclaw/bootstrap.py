@@ -1063,6 +1063,11 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
     return report
 
 
+def _until_key_ok(detail: str) -> str:
+    """Readiness suffix for a failed key check: a missing key vs a rejected one (GAP-2596)."""
+    return "until the key is set" if "not set" in detail else "until a valid key is set"
+
+
 def targeted_readiness(cfg: Config, options: FirstRunOptions) -> list[StepResult]:
     """Run scoped readiness checks for the choices made during first run."""
     from defenseclaw.config import config_path_for_data_dir
@@ -1141,7 +1146,7 @@ def targeted_readiness(cfg: Config, options: FirstRunOptions) -> list[StepResult
             key_step = StepResult(
                 "LLM API key",
                 "warn",
-                f"{key_step.detail}; the LLM judge stays inactive until the key is set",
+                f"{key_step.detail}; the LLM judge stays inactive {_until_key_ok(key_step.detail)}",
                 f"defenseclaw keys set {env_name}",
             )
         steps.append(key_step)
@@ -1157,7 +1162,7 @@ def targeted_readiness(cfg: Config, options: FirstRunOptions) -> list[StepResult
             aid_step = StepResult(
                 "Cisco AI Defense",
                 "warn",
-                f"{aid_step.detail}; remote scanning stays inactive until the key is set",
+                f"{aid_step.detail}; remote scanning stays inactive {_until_key_ok(aid_step.detail)}",
                 f"defenseclaw keys set {env_name}",
             )
         steps.append(aid_step)
