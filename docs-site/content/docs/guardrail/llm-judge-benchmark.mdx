@@ -33,24 +33,18 @@ coverage, but it adds model latency to every eligible call.
 
 <Flow
   direction="TB"
-  caption="The latest authenticated user-intent hook and a bounded same-session tool history give the judge context without turning model-generated content into trusted intent. Only a synchronous pre-tool connector can enforce a block."
+  caption="The recommended regex_judge path for one proposed tool call. Local rules run first; a result that already blocks or is CRITICAL skips the judge. Otherwise the judge sees the call together with the user's latest prompt and this session's recent tool calls, kept in gateway memory only. Model-generated text never becomes the user's intent. Only a connector with a synchronous pre-tool hook can block; event-stream connectors get the same judgment as an observation."
 >
-  <Node id="intent" kind="generic">Latest user-intent hook</Node>
-  <Node id="tool" kind="generic">Proposed tool call</Node>
-  <Node id="local" kind="policy">Deterministic detection</Node>
-  <Node id="context" kind="datastore">Bounded in-memory context</Node>
-  <Node id="judge" kind="policy">Gemma strict-JSON judge</Node>
-  <Node id="policy" kind="policy">Conservative verdict policy</Node>
-  <Node id="sync" kind="generic">Synchronous pre-tool allow / alert / block</Node>
-  <Node id="async" kind="generic">Asynchronous observation</Node>
-  <Edge from="intent" to="context" />
-  <Edge from="tool" to="local" />
+  <Node id="intent" kind="operator">{`User's latest prompt\nfrom the prompt hook`}</Node>
+  <Node id="tool" kind="agent">{`Agent proposes a tool call\npre-tool hook`}</Node>
+  <Node id="local" kind="policy">{`Local rules check it\ndeterministic detection`}</Node>
+  <Node id="judge" kind="policy">{`LLM judge weighs it\nwith recent calls in session`}</Node>
+  <Node id="sync" kind="generic">{`Hook answers the agent\nallow · alert · block`}</Node>
+  <Edge from="tool" to="local" label="sends" />
   <Edge from="local" to="sync" label="decisive" />
-  <Edge from="local" to="context" label="unresolved" />
-  <Edge from="context" to="judge" />
-  <Edge from="judge" to="policy" />
-  <Edge from="policy" to="sync" label="hook path" />
-  <Edge from="policy" to="async" label="event stream" />
+  <Edge from="local" to="judge" label="unresolved" />
+  <Edge from="intent" to="judge" label="gives intent" />
+  <Edge from="judge" to="sync" label="verdict" />
 </Flow>
 
 `weak_signal` findings are ignored. `needs_review` can alert but cannot block

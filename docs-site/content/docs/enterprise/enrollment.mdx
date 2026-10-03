@@ -15,22 +15,22 @@ work:
 - The **enumerator** finds eligible users and their agents every five
   minutes and writes the protected target manifest.
 - The **guardian** reads that manifest, writes DefenseClaw's hook
-  registration into each enrolled user's agent config, and repairs it every
-  minute.
+  registration into each enrolled user's agent config, and repairs it when
+  it changes. It also re-checks every target once a minute.
 
 <Flow
   direction="TB"
-  caption="Both services are administrator-owned system services. The enumerator writes only the target manifest. On Linux and macOS the guardian changes a user's files through a worker that runs as that user."
+  caption="Both are system services that run as root (SYSTEM on Windows), and the manifest is a file only administrators can change. The guardian writes into a user's agent config as that user: through a worker process on Linux and macOS, and under the user's own signed-in session on Windows."
 >
-  <Node id="dir" kind="generic">{`Accounts, profiles\nand sessions`}</Node>
-  <Node id="enum" kind="generic">{`Enumerator\nevery 5 minutes`}</Node>
-  <Node id="man" kind="policy">{`Target manifest\nadmin-owned`}</Node>
-  <Node id="grd" kind="generic">{`Guardian\nevery minute`}</Node>
-  <Node id="cfg" kind="agent">{`User's agent config\nDefenseClaw hook`}</Node>
-  <Edge from="dir" to="enum" label="lists users" />
-  <Edge from="enum" to="man" label="writes rows" />
-  <Edge from="man" to="grd" label="reads" />
-  <Edge from="grd" to="cfg" label="writes and repairs" />
+  <Node id="dir" kind="generic">{`User accounts\nand installed agents`}</Node>
+  <Node id="enum" kind="generic">{`Enumerator\nlooks every 5 minutes`}</Node>
+  <Node id="man" kind="policy">{`Target manifest\nwho to protect`}</Node>
+  <Node id="grd" kind="generic">{`Guardian\nrepairs on change`}</Node>
+  <Node id="cfg" kind="agent">{`User's agent config\nDefenseClaw hook added`}</Node>
+  <Edge from="dir" to="enum" label="found by" />
+  <Edge from="enum" to="man" label="adds each user" />
+  <Edge from="man" to="grd" label="read by" />
+  <Edge from="grd" to="cfg" label="writes as the user" />
 </Flow>
 
 Machine-policy agents (Codex, Claude Code, Cursor, Copilot, and OpenCode
@@ -413,8 +413,10 @@ avoid lookups.
 ## New, changed and removed users
 
 - **New user.** Enrolled on the next enumerator cycle, within five
-  minutes, once the agent is installed for them. The guardian then
-  writes their registration within its one-minute cycle. Machine-policy
+  minutes, once the agent is installed for them. On Windows a sign-in also
+  starts an extra cycle about 15 seconds later. The guardian sees the
+  manifest change and writes their registration right away; its one-minute
+  check retries a write that has to wait. Machine-policy
   agents run DefenseClaw's hooks from the first call: on Linux and macOS
   the user is inspected (`unenrolled_users: inspect`), and on Windows the
   call is refused until the user is enrolled. Per-user agents are covered

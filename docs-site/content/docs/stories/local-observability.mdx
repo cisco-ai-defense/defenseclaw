@@ -24,7 +24,7 @@ For the full deep-dive on flags, dashboards, and tear-down, see [Observability �
   <Card title="Prometheus" description="Metrics exported through the local OTel Collector." />
   <Card title="Loki" description="Canonical gateway logs with connector and severity attributes." />
   <Card title="Tempo" description="Gateway and connector traces exported through OTLP." />
-  <Card title="Grafana" description="Fourteen provisioned DefenseClaw dashboards backed by Prometheus, Loki, and Tempo." />
+  <Card title="Grafana" description="Sixteen provisioned DefenseClaw dashboards backed by Prometheus, Loki, and Tempo." />
 </Cards>
 
 ## Run it
@@ -80,9 +80,10 @@ warns whenever no-password access is active. The Loki, Tempo, and Prometheus
 developer APIs are still separately loopback-only; do not expose them through
 `HOST_BIND` without an external access-control layer.
 
-Fourteen dashboards are provisioned, including Overview, Traffic, Security,
-Findings, Policy Decisions, HITL, Connectors, Connector Detail, Activity,
-Runtime, Scanners, AI Discovery, Agent Identity, and Agent 360. See
+Sixteen dashboards are provisioned, including Overview, Traffic, Security,
+Findings, Policy Decisions, Blocked Events, HITL, Connectors, Connector Detail,
+Activity, Runtime, Scanners, AI Discovery, AI Discovery Runtime Planes, Agent
+Identity, and Agent 360. See
 [Grafana dashboards](/docs/observability/grafana-dashboards) for their exact
 queries and panels.
 
@@ -116,21 +117,21 @@ Prometheus/Loki/Tempo/Grafana data.
 <Flow
   direction="TB"
   compact
-  caption="The gateway exports three signals. The local stack receives all three and Grafana joins them."
+  caption="The gateway sends logs, metrics and traces over OTLP to the collector, which writes each signal to its own store. Grafana queries the three stores for its dashboards. Every published port is bound to 127.0.0.1."
 >
-  <Node id="gateway" kind="gateway">defenseclaw-gateway</Node>
-  <Node id="collector" kind="connector">{`OTel Collector\n:4317 / :4318`}</Node>
-  <Node id="prom" kind="datastore">{`Prometheus\n:9090`}</Node>
-  <Node id="loki" kind="datastore">{`Loki\n:3100`}</Node>
-  <Node id="tempo" kind="datastore">{`Tempo\n:3200`}</Node>
-  <Node id="graf" kind="datastore">{`Grafana\n:3000`}</Node>
-  <Edge from="gateway" to="collector" label="OTLP logs / metrics / traces" />
-  <Edge from="collector" to="prom" label="metrics" />
-  <Edge from="collector" to="loki" label="logs" />
-  <Edge from="collector" to="tempo" label="traces" />
-  <Edge from="prom" to="graf" />
-  <Edge from="loki" to="graf" />
-  <Edge from="tempo" to="graf" />
+  <Node id="gateway" kind="gateway">{`Gateway\ndefenseclaw-gateway`}</Node>
+  <Node id="collector" kind="generic">{`OTel Collector\n:4317 gRPC · :4318 HTTP`}</Node>
+  <Node id="prom" kind="datastore">{`Prometheus\nmetrics · :9090`}</Node>
+  <Node id="loki" kind="datastore">{`Loki\nlogs · :3100`}</Node>
+  <Node id="tempo" kind="datastore">{`Tempo\ntraces · :3200`}</Node>
+  <Node id="graf" kind="generic">{`Grafana\ndashboards · :3000`}</Node>
+  <Edge from="gateway" to="collector" label="sends OTLP" />
+  <Edge from="collector" to="prom" label="writes" />
+  <Edge from="collector" to="loki" label="writes" />
+  <Edge from="collector" to="tempo" label="writes" />
+  <Edge from="prom" to="graf" label="queried by" variant="dashed" />
+  <Edge from="loki" to="graf" label="queried by" variant="dashed" />
+  <Edge from="tempo" to="graf" label="queried by" variant="dashed" />
 </Flow>
 
 ## When to graduate to your own stack

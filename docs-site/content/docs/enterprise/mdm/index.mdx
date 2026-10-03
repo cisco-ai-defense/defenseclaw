@@ -58,16 +58,16 @@ Remediations scripts under `intune/windows`; see
 
 <Flow
   direction="TB"
-  caption="One MDM run. The wrapper copies the artifact into a folder only SYSTEM or root can write, verifies that copy, installs it, runs ensure, and prints exactly one result document. Its exit code is the lifecycle's exit code."
+  caption="One MDM run of the wrapper. It checks a private copy of the file before anything is installed; a run that fails after that is rolled back. On Windows, Setup /ensure does steps 3 and 4 in one run. Without a file, the wrapper skips steps 2 and 3 and re-applies the installed deployment."
 >
-  <Node id="mdm" kind="operator">{`MDM agent\nSYSTEM or root`}</Node>
-  <Node id="wrap" kind="decision">{`Wrapper\nverifies the pin`}</Node>
-  <Node id="pkg" kind="generic">{`Setup, deb, rpm,\npkg or payload`}</Node>
-  <Node id="life" kind="gateway">{`Lifecycle\nensure`}</Node>
-  <Node id="res" kind="datastore">{`Result document\nand exit code`}</Node>
-  <Edge from="mdm" to="wrap" label="runs" />
-  <Edge from="wrap" to="pkg" label="verified copy" />
-  <Edge from="pkg" to="life" label="installs, then runs" />
+  <Node id="mdm" kind="operator">{`MDM runs the wrapper\nas SYSTEM or root`}</Node>
+  <Node id="wrap" kind="decision">{`Checks the file\nhash pin or signature`}</Node>
+  <Node id="pkg" kind="generic">{`Installs or upgrades\nthe release file`}</Node>
+  <Node id="life" kind="generic">{`Applies your config\nno-op if unchanged`}</Node>
+  <Node id="res" kind="datastore">{`Reports one result\nJSON and exit code`}</Node>
+  <Edge from="mdm" to="wrap" label="makes a private copy" />
+  <Edge from="wrap" to="pkg" label="if it matches" />
+  <Edge from="pkg" to="life" label="then runs ensure" />
   <Edge from="life" to="res" label="prints" />
 </Flow>
 

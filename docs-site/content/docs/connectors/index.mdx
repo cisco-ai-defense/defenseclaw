@@ -112,19 +112,32 @@ shows each harness's image pin, tier and verification.
 
 ## How a connector is structured
 
+Every connector implements the same Go interface, and its methods run at two
+different times. Three run when DefenseClaw wires an agent in or takes it out
+again; two run on every LLM request that reaches the guardrail proxy. A
+connector can report that its agent does not support a capability.
+
 <Flow
   direction="TB"
-  caption="Every connector implements the same Go interface; individual methods may report that an agent does not support that capability."
+  caption="When a connector is installed or removed. The gateway, the connector commands and the enterprise installer call Setup; switching connectors or uninstalling calls Teardown and then VerifyClean."
 >
-  <Node id="setup" kind="connector">{`Setup(ctx, opts)\nwrite hook scripts,\nback up agent files,\nregister routes`}</Node>
-  <Node id="auth" kind="connector">{`Authenticate(r)\nverify gateway token`}</Node>
-  <Node id="route" kind="connector">{`Route(r, body)\nextract upstream + model\n+ stream + headers`}</Node>
-  <Node id="teardown" kind="connector">{`Teardown(ctx, opts)\nrestore agent files`}</Node>
-  <Node id="verify" kind="connector">{`VerifyClean(opts)\nno residual artifacts`}</Node>
-  <Edge from="setup" to="auth" />
-  <Edge from="auth" to="route" />
-  <Edge from="route" to="teardown" />
-  <Edge from="teardown" to="verify" />
+  <Node id="setup" kind="connector">{`Wire the agent in\nSetup backs up the config\nand adds the hooks`}</Node>
+  <Node id="teardown" kind="connector">{`Take it out\nTeardown restores the config`}</Node>
+  <Node id="verify" kind="connector">{`Check it is clean\nVerifyClean finds no leftovers`}</Node>
+  <Edge from="setup" to="teardown" label="on removal" variant="dashed" />
+  <Edge from="teardown" to="verify" label="then" />
 </Flow>
 
-The interface is defined in [`internal/gateway/connector/connector.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/gateway/connector/connector.go); each per-connector file (`claudecode.go`, `codex.go`, `cursor.go` via `hook_only.go`, ...) implements it.
+<Flow
+  direction="TB"
+  caption="On every LLM request through the guardrail proxy. Authenticate accepts the gateway token, the master key, or a loopback caller when no token is set; Route reads the provider, model, stream flag and headers the proxy needs."
+>
+  <Node id="agent" kind="agent">{`Agent\nLLM request`}</Node>
+  <Node id="auth" kind="connector">{`Check the caller\nAuthenticate`}</Node>
+  <Node id="route" kind="connector">{`Read the request\nRoute`}</Node>
+  <Edge from="agent" to="auth" label="proxied" />
+  <Edge from="auth" to="route" label="accepted" />
+</Flow>
+
+The gateway's API server, not `Setup`, registers each connector's hook route
+(for example `/api/v1/codex/hook`) when it starts. The interface is defined in [`internal/gateway/connector/connector.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/gateway/connector/connector.go); each per-connector file (`claudecode.go`, `codex.go`, `cursor.go` via `hook_only.go`, ...) implements it.

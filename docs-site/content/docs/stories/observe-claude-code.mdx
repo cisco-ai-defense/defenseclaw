@@ -151,25 +151,24 @@ runtime.
 
 ## Why this works the way it does
 
-<Sequence
-  caption="The block decision is made by the gateway, not Claude Code. The hook is the messenger."
-  participants={[
-    { id: 'u',  label: 'User',           kind: 'operator' },
-    { id: 'cc', label: 'Claude Code',    kind: 'agent' },
-    { id: 'h',  label: 'PreToolUse',     kind: 'connector' },
-    { id: 'g',  label: 'Gateway',        kind: 'gateway' },
-    { id: 'p',  label: 'Policy',         kind: 'policy' },
-  ]}
+<Flow
+  direction="TB"
+  caption="The gateway makes the decision, not Claude Code; the PreToolUse hook only carries the command and the answer. The same CMD-RM-RF finding is recorded in both modes. Only action mode turns it into a deny, and CRITICAL findings never become an approval prompt."
 >
-  <Message from="u"  to="cc" label="rm -rf /proc" />
-  <Message from="cc" to="h"  label="PreToolUse(command)" />
-  <Message from="h"  to="g"  label="POST /api/v1/claude-code/hook" />
-  <Message from="g"  to="p"  label="evaluate(command)" />
-  <Message from="p"  to="g"  kind="return" label="CRITICAL · CMD-RM-RF" />
-  <Message from="g"  to="h"  kind="return" label="block · recursive delete" />
-  <Message from="h"  to="cc" kind="return" label="block" />
-  <Message from="cc" to="u"  kind="return" label="Tool call denied" />
-</Sequence>
+  <Node id="cc" kind="agent">{`Claude Code\nBash: rm -rf /proc`}</Node>
+  <Node id="hook" kind="connector">{`PreToolUse hook\nruns before the tool`}</Node>
+  <Node id="gw" kind="gateway">{`Gateway\nmatches CMD-RM-RF (CRITICAL)`}</Node>
+  <Node id="audit" kind="datastore">{`Audit log\n~/.defenseclaw/audit.db`}</Node>
+  <Node id="mode" kind="decision">Guardrail mode?</Node>
+  <Node id="obs" kind="generic">{`Observe: allowed\nlogged as would-block`}</Node>
+  <Node id="act" kind="generic">{`Action: denied\nthe shell never starts`}</Node>
+  <Edge from="cc" to="hook" label="calls" />
+  <Edge from="hook" to="gw" label="asks" />
+  <Edge from="gw" to="audit" label="records" />
+  <Edge from="gw" to="mode" label="checks" />
+  <Edge from="mode" to="obs" label="observe" />
+  <Edge from="mode" to="act" label="action" />
+</Flow>
 
 ## Variations
 

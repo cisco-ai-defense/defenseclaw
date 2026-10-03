@@ -14,7 +14,7 @@ keywords:
 A **registry source** is a fetchable manifest of skills and/or MCP servers that DefenseClaw ingests on demand. Public catalogs (clawhub, smithery), internal HTTPS YAMLs / JSONs, git repos, and on-disk YAMLs are all supported. Synced entries flow through the existing skill / MCP scanners; clean ones land in `asset_policy.{skill,mcp}.registry` so a later admission decision can say "approved by registry:`<id>`" instead of "approved by an unattributed rule someone wrote in 2024."
 
 <Callout title="Why registries matter">
-Without a registry, every new skill / MCP that lands on disk is admission-evaluated against ad-hoc operator-authored rules. With one or more registries, the catalog drives admission: clean entries get auto-promoted, suspicious ones are quarantined for review, and toggling `registry_required` flips the asset class to deny-by-default for anything the catalog hasn't blessed.
+Without a registry, every new skill / MCP that lands on disk is admission-evaluated against ad-hoc operator-authored rules. With one or more registries, the catalog drives admission: clean entries get auto-promoted, everything else is held for review, and toggling `registry_required` flips the asset class to deny-by-default for anything the catalog hasn't blessed.
 </Callout>
 
 <DefenseClawDemo scenario="registry-promote-require" variant="clean" />
@@ -113,7 +113,7 @@ defenseclaw registry add smithery-public \
 defenseclaw registry sync smithery-public
 ```
 
-Each entry is run through the MCP scanner (transport probe + behavioral introspection); clean ones land in `asset_policy.mcp.registry` so an MCP listed in the catalog passes admission attribution-clean.
+Each entry is run through the MCP scanner; clean ones land in `asset_policy.mcp.registry` so an MCP listed in the catalog passes admission attribution-clean. Remote (URL) entries are scanned directly. A stdio entry would start the package, so it is scanned only with `registry sync --scan-stdio`; without that flag it stays `pending` and is not promoted.
 
 </Tab>
 
@@ -133,7 +133,7 @@ Each entry is run through the MCP scanner (transport probe + behavioral introspe
     },
     'list': {
       type: 'subcommand',
-      description: 'Tabular listing with cached entry counts (clean/warning/blocked) per source. --json for machine-readable output.',
+      description: 'Tabular listing with cached entry counts (clean/warning/blocked/error) per source. --json for machine-readable output.',
     },
     'show <id>': {
       type: 'subcommand',
@@ -149,7 +149,7 @@ Each entry is run through the MCP scanner (transport probe + behavioral introspe
     },
     'sync [<id>...]': {
       type: 'subcommand',
-      description: 'Fetch + scan + promote one or more sources. --all syncs every enabled source; --no-promote previews without asset_policy writes; --no-scan does a metadata-only refresh.',
+      description: 'Fetch + scan + promote one or more sources. --all syncs every enabled source; --no-promote previews without asset_policy writes; --no-scan does a metadata-only refresh; --scan-stdio also scans stdio MCP entries.',
     },
     'entries <id>': {
       type: 'subcommand',
@@ -157,11 +157,11 @@ Each entry is run through the MCP scanner (transport probe + behavioral introspe
     },
     'approve <id> <name>': {
       type: 'subcommand',
-      description: 'Mark an entry approved (forces promotion next sync, overrides scanner warnings). --type skill|mcp required.',
+      description: 'Mark an entry approved: it is promoted whatever the scanner verdict, right away from the cache unless --no-repromote. --type is needed only when the name is ambiguous.',
     },
     'reject <id> <name>': {
       type: 'subcommand',
-      description: 'Mark an entry rejected (always blocked, even if the scanner is clean). --type skill|mcp required.',
+      description: 'Mark an entry rejected: it is never promoted and is listed as blocked, even if the scanner is clean. --type is needed only when the name is ambiguous.',
     },
     'require --type skill|mcp --enabled|--disabled [--connector <name>]': {
       type: 'subcommand',
@@ -178,28 +178,22 @@ Each entry is run through the MCP scanner (transport probe + behavioral introspe
 
 <Flow
   direction="TB"
-  caption="From `registry add` to admission decision: every entry is fetched, scanned per type (skill or MCP), and either auto-promoted into `asset_policy`, parked for operator review, or hard-blocked."
+  caption="How a registry entry reaches asset policy. Sync fetches the manifest and scans every entry; only a clean entry is promoted on its own. Syncing with --no-promote scans without touching policy. Approve and reject override the scanner either way, and a rejected entry is never promoted."
 >
-  <Node id="add" kind="operator">{`Operator runs\n\`registry add\``}</Node>
-  <Node id="store" kind="generic">{`Source persisted\nto config.yaml`}</Node>
-  <Node id="sync" kind="generic">{`\`registry sync\`\nfetches manifest`}</Node>
-  <Node id="route" kind="decision">{`Per entry:\nskill or MCP?`}</Node>
-  <Node id="skill" kind="policy">{`Skill scanner\nSHA-256 + permissions\n+ LLM second opinion`}</Node>
-  <Node id="mcp" kind="policy">{`MCP scanner\ntransport probe\n+ behavioral introspection`}</Node>
-  <Node id="verdict" kind="decision">Verdict</Node>
-  <Node id="promote" kind="policy">{`Auto-promote to\nasset_policy.{skill,mcp}.registry\nReason='registry:<id>'`}</Node>
-  <Node id="review" kind="operator">{`Cached, NOT promoted.\nOperator reviews via \`entries\`\nand runs \`approve\` / \`reject\`.`}</Node>
-  <Node id="blocked" kind="generic">{`Cached, NEVER promoted\nunless \`approve\` overrides.`}</Node>
-  <Edge from="add" to="store" />
-  <Edge from="store" to="sync" />
-  <Edge from="sync" to="route" />
-  <Edge from="route" to="skill" label="skill" />
-  <Edge from="route" to="mcp" label="mcp" />
-  <Edge from="skill" to="verdict" />
-  <Edge from="mcp" to="verdict" />
+  <Node id="add" kind="operator">{`Add a source\nregistry add\nsaved in config.yaml`}</Node>
+  <Node id="sync" kind="generic">{`Sync the source\nregistry sync\nfetch the manifest`}</Node>
+  <Node id="scan" kind="policy">{`Scan each entry\nskill scanner or MCP scanner`}</Node>
+  <Node id="verdict" kind="decision">Scan result?</Node>
+  <Node id="hold" kind="operator">{`Held for review\nwarning or blocked\nerror or pending`}</Node>
+  <Node id="promote" kind="policy">{`Added to asset policy\nrule tagged registry:<id>`}</Node>
+  <Node id="never" kind="generic">{`Never promoted\nlisted as blocked`}</Node>
+  <Edge from="add" to="sync" />
+  <Edge from="sync" to="scan" />
+  <Edge from="scan" to="verdict" />
   <Edge from="verdict" to="promote" label="clean" />
-  <Edge from="verdict" to="review" label="warning" />
-  <Edge from="verdict" to="blocked" label="blocked" />
+  <Edge from="verdict" to="hold" label="anything else" />
+  <Edge from="hold" to="promote" label="you approve" />
+  <Edge from="hold" to="never" label="you reject" />
 </Flow>
 
 ## Promote and require — the deny-by-default story

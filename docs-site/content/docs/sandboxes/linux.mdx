@@ -18,30 +18,25 @@ lets `defenseclaw sandbox undo` put the folder back.
 
 ## How it fits together
 
-<Flow direction="TB" compact caption="A sandbox on Linux. The workload has no network of its own: hooks reach DefenseClaw's ingress and web traffic leaves through its egress proxy, both at host.openshell.internal. Model calls go straight out through OpenShell, which swaps the credential placeholder for the real key. The main API is never reachable from a sandbox.">
-  <Zone id="host" label="Your machine (your user)" tone="trusted">
-    <Node id="api" kind="gateway">{`DefenseClaw API\n:18970, not exposed`}</Node>
-    <Node id="ingress" kind="gateway">{`Hook ingress\n:18971`}</Node>
-    <Node id="egress" kind="gateway">{`Egress proxy\n:18972`}</Node>
-    <Node id="gw" kind="connector">{`OpenShell gateway\nsystemd user service`}</Node>
-    <Node id="proj" kind="datastore">{`~/code/myapp\nsnapshot for undo`}</Node>
-  </Zone>
+<Flow direction="TB" caption="A sandbox on Linux. The container has no network of its own: OpenShell's supervisor passes hooks and web traffic to DefenseClaw and model calls to the provider. DefenseClaw's main API (port 18970) is never reachable from a sandbox.">
   <Zone id="box" label="Sandbox container (your uid)" tone="untrusted">
-    <Node id="sup" kind="policy">{`OpenShell supervisor\nLandlock · seccomp`}</Node>
-    <Node id="agent" kind="agent">{`Claude Code · Codex\nskip-permissions on`}</Node>
+    <Node id="agent" kind="agent">{`Claude Code or Codex\nskip-permissions on`}</Node>
+    <Node id="proj" kind="datastore">{`Your project folder\nlive at /work/myapp`}</Node>
+    <Node id="sup" kind="policy">{`OpenShell supervisor\nthe only way out`}</Node>
+  </Zone>
+  <Zone id="host" label="Your machine (your user)" tone="trusted">
+    <Node id="dc" kind="gateway">{`DefenseClaw daemon\nchecks hooks, proxies the web`}</Node>
+    <Node id="gw" kind="connector">{`OpenShell gateway\nsystemd user service`}</Node>
   </Zone>
   <Zone id="net" label="Internet" tone="external">
-    <Node id="llm" kind="generic">{`Model provider\napi.anthropic.com`}</Node>
-    <Node id="web" kind="generic">{`Allowed sites\nregistries, docs`}</Node>
+    <Node id="net1" kind="generic">{`The internet\nmodel provider, allowed sites`}</Node>
   </Zone>
-  <Edge from="api" to="gw" label="mTLS" />
-  <Edge from="gw" to="sup" label="creates, sets policy" />
-  <Edge from="proj" to="agent" label="bind mount /work/myapp" variant="bidirectional" />
-  <Edge from="agent" to="sup" label="every connection" />
-  <Edge from="sup" to="ingress" label="hooks" />
-  <Edge from="sup" to="egress" label="web" />
-  <Edge from="egress" to="web" label="allowed" />
-  <Edge from="sup" to="llm" label="real key added" />
+  <Edge from="agent" to="proj" label="edits" />
+  <Edge from="agent" to="sup" label="sends everything" />
+  <Edge from="sup" to="dc" label="hooks :18971 · web :18972" />
+  <Edge from="sup" to="net1" label="model calls, real key added" />
+  <Edge from="dc" to="gw" label="creates sandboxes" />
+  <Edge from="dc" to="net1" label="allowed requests" />
 </Flow>
 
 What is mounted, and how:

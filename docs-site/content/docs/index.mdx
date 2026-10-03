@@ -38,22 +38,17 @@ DefenseClaw combines a **Python operator CLI**, a **Go gateway sidecar**, and an
 
 <Flow
   direction="TB"
-  compact
-  caption="DefenseClaw spans three runtimes — Python CLI, Go gateway sidecar, OpenClaw plugin — and exposes one enforcement contract per connector."
+  caption="Every prompt and tool call takes the same path. The agent's connector (a hook, the OpenClaw plugin, or the LLM proxy) asks the local defenseclaw-gateway, which checks the event against your policy, the scanners and the optional LLM judge, answers allow or block, and records the decision."
 >
-  <Node id="agent" kind="agent">{`Agent runtime\nClaude · Codex ·\nOpenClaw · ...`}</Node>
-  <Node id="connector" kind="connector">{`Connector\nproxy or hooks`}</Node>
-  <Node id="gateway" kind="gateway">{`defenseclaw-gateway\nGo sidecar`}</Node>
-  <Node id="policy" kind="policy">{`Policy + Scanners\n+ optional LLM Judge`}</Node>
-  <Node id="audit" kind="datastore">{`SQLite\n+ optional JSONL`}</Node>
-  <Node id="sinks" kind="datastore">OTLP · Splunk · Webhooks</Node>
-  <Node id="operator" kind="operator">{`Operator\nCLI · TUI · HITL`}</Node>
-  <Edge from="agent" to="connector" />
-  <Edge from="connector" to="gateway" emphasis />
-  <Edge from="gateway" to="policy" />
-  <Edge from="gateway" to="audit" />
-  <Edge from="gateway" to="sinks" />
-  <Edge from="operator" to="gateway" variant="bidirectional" label="setup · approve · audit" />
+  <Node id="agent" kind="agent">{`Your AI agent\nsuch as Claude Code`}</Node>
+  <Node id="connector" kind="connector">{`Connector\nhook, plugin or proxy`}</Node>
+  <Node id="gateway" kind="gateway">{`Gateway\nchecks your policy`}</Node>
+  <Node id="sinks" kind="datastore">{`Your telemetry\nOTLP, Splunk, webhooks`}</Node>
+  <Node id="audit" kind="datastore">{`Audit log\nlocal SQLite database`}</Node>
+  <Edge from="agent" to="connector" label="prompts, tool calls" />
+  <Edge from="connector" to="gateway" label="asks: allow or block?" emphasis />
+  <Edge from="gateway" to="sinks" label="exports" />
+  <Edge from="gateway" to="audit" label="records" />
 </Flow>
 
 ## What's in the box

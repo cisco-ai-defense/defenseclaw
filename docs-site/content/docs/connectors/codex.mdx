@@ -215,24 +215,23 @@ trusted projects. Filesystem inventory reports project entries as
 `trust_required`; it does not infer the client's private trust decision from
 the presence of a file.
 
-## Telemetry channels at boot
+## How Codex reaches the gateway
 
 <Flow
-  direction="LR"
-  compact
-  caption="Three independent channels make Codex one of the most thoroughly inspected agents."
+  direction="TB"
+  caption="Codex reaches the gateway's API port three separate ways. Only the hooks can block: they run on nine lifecycle events (session start, prompt, before and after each tool, permission request, subagent stop, before and after compaction, stop). Codex's own OpenTelemetry exporter and the notify bridge, which reports agent-turn-complete to /api/v1/codex/notify, only record."
 >
   <Node id="codex" kind="agent">Codex</Node>
-  <Node id="hooks" kind="connector">{`SessionStart / prompt / tool / permission /\nsubagent / compact / Stop hooks`}</Node>
-  <Node id="otel" kind="connector">Native OTel exporter</Node>
-  <Node id="notify" kind="connector">{`Notify bridge\nagent-turn-complete`}</Node>
-  <Node id="gateway" kind="gateway">defenseclaw-gateway</Node>
-  <Edge from="codex" to="hooks" />
-  <Edge from="hooks" to="gateway" />
-  <Edge from="codex" to="otel" />
-  <Edge from="otel" to="gateway" />
-  <Edge from="codex" to="notify" />
-  <Edge from="notify" to="gateway" />
+  <Node id="hooks" kind="connector">{`DefenseClaw hooks\nnine lifecycle events`}</Node>
+  <Node id="otel" kind="connector">{`Built-in telemetry\nOpenTelemetry exporter`}</Node>
+  <Node id="notify" kind="connector">{`Notify bridge\nafter each turn`}</Node>
+  <Node id="gateway" kind="gateway">{`DefenseClaw gateway\nAPI port, 18970 by default`}</Node>
+  <Edge from="codex" to="hooks" label="runs" />
+  <Edge from="hooks" to="gateway" label="asks for a verdict" />
+  <Edge from="codex" to="otel" label="exports" />
+  <Edge from="otel" to="gateway" label="logs, traces, metrics" />
+  <Edge from="codex" to="notify" label="runs" />
+  <Edge from="notify" to="gateway" label="reports turn end" />
 </Flow>
 
 ## In an OpenShell sandbox

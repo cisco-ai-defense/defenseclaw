@@ -57,27 +57,18 @@ The guided trace normalizes a connector event, matches a deterministic rule, che
 
 <Flow
   direction="TB"
-  caption="The in-flight guardrail path ends at a connector verdict. The correlator runs afterward over persisted findings and emits a separate synthetic finding; it does not retroactively change the request that just completed."
+  caption="How one prompt, model reply or tool call is decided. A decisive local match skips the judge. Pre-judge strips remove configured text (by default, sender labels such as system or bot) before content is sent to the judge, and finding and tool suppressions drop known-noise judge findings. The connector maps the action onto its own allow/ask/deny. The session correlator runs later, over saved findings (Layer 5)."
 >
-  <Node id="event" kind="generic">Prompt / tool / result</Node>
-  <Node id="rules" kind="policy">Local rules and triage</Node>
-  <Node id="pre" kind="policy">Pre-judge strips</Node>
-  <Node id="judge" kind="policy">Optional LLM judge</Node>
-  <Node id="suppr" kind="policy">Finding and tool suppressions</Node>
-  <Node id="policy" kind="policy">Severity thresholds + HILT policy</Node>
-  <Node id="verdict" kind="generic">allow / alert / confirm / block</Node>
-  <Node id="persist" kind="datastore">Persist finding</Node>
-  <Node id="corr" kind="policy">Session correlator</Node>
-  <Node id="synthetic" kind="generic">Synthetic CORR-* finding</Node>
-  <Edge from="event" to="rules" />
-  <Edge from="rules" to="pre" />
-  <Edge from="pre" to="judge" />
-  <Edge from="judge" to="suppr" />
-  <Edge from="suppr" to="policy" />
-  <Edge from="policy" to="verdict" />
-  <Edge from="verdict" to="persist" />
-  <Edge from="persist" to="corr" />
-  <Edge from="corr" to="synthetic" label="pattern matched" />
+  <Node id="event" kind="generic">{`Prompt, reply or tool call`}</Node>
+  <Node id="rules" kind="policy">{`Local rules check it\nCEL · regex · triage signals`}</Node>
+  <Node id="judge" kind="policy">{`Optional LLM judge\nknown noise removed`}</Node>
+  <Node id="policy" kind="policy">{`Policy picks the action\nseverity thresholds · HITL`}</Node>
+  <Node id="verdict" kind="generic">{`allow · alert · confirm · block`}</Node>
+  <Edge from="event" to="rules" label="scanned" />
+  <Edge from="rules" to="judge" label="unclear" />
+  <Edge from="rules" to="policy" label="decisive" />
+  <Edge from="judge" to="policy" label="adds findings" />
+  <Edge from="policy" to="verdict" label="returns" />
 </Flow>
 
 Structured tool calls first produce normalized operations, arguments, paths,
@@ -143,19 +134,17 @@ You can hand-edit the Rego — the engine is just OPA — but most operators sta
 ### How the engine evaluates
 
 <Sequence
-  caption="Callers query the output rules exported by the selected Rego package. Output shape varies by domain."
+  caption="The policy engine is OPA embedded in the gateway process, not a separate service. It keeps data.json in memory (loaded at start and on reload) and reads the .rego modules from the policy directory on each query. Each package returns its own result shape. If a query fails, admission denies by default and the guardrail falls back to the active profile's severity mapping."
   participants={[
-    { id: 'gw',     label: 'Gateway',             kind: 'gateway' },
-    { id: 'engine', label: 'Policy engine (OPA)', kind: 'policy' },
-    { id: 'rego',   label: 'Rego module',         kind: 'policy' },
-    { id: 'sinks',  label: 'Sinks',               kind: 'datastore' },
+    { id: 'gw',     label: 'Gateway',       kind: 'gateway' },
+    { id: 'engine', label: 'Policy engine', kind: 'policy' },
+    { id: 'files',  label: 'Policy files',  kind: 'datastore' },
   ]}
 >
-  <Message from="gw"     to="engine" label="input" />
-  <Message from="engine" to="rego"   label="query package output rules" />
-  <Message from="rego"   to="engine" kind="return" label="domain-specific result" />
-  <Message from="engine" to="gw"     kind="return" label="normalized caller result" />
-  <Message from="gw"     to="sinks"  label="emit audit / telemetry event" />
+  <Message from="engine" to="files"  label="loads data.json at start and reload" />
+  <Message from="gw"     to="engine" label="asks a package, with input" />
+  <Message from="engine" to="files"  label="reads the .rego modules" />
+  <Message from="engine" to="gw"     kind="return" label="returns that package's result" />
 </Sequence>
 
 Guardrail scanner and hook events separately preserve matching rule IDs, evaluation IDs, reasons, and severity in their structured audit payloads. Those fields power the per-rule breakdowns in [Splunk](/docs/observability/splunk) and [Grafana](/docs/observability/local-observability); they are not a universal `reasons[]` field returned by every Rego package.
@@ -397,16 +386,14 @@ This closes a class of attacks where no single event crosses the action threshol
 
 ### How it runs
 
-<Flow direction="TB" caption="The correlator runs over the last N findings per session on every new finding insert. A match writes a synthetic CORR-<id> row back into scan_findings.">
-  <Node id="events" kind="generic">{`New finding\ninserted`}</Node>
-  <Node id="window" kind="policy">{`Sliding window\nlast N findings in session`}</Node>
-  <Node id="patterns" kind="policy">{`Pattern matcher\naxes · severities · fingerprints`}</Node>
-  <Node id="synth" kind="policy">{`CORR-* meta-finding\nseverity_on_match`}</Node>
-  <Node id="sinks" kind="generic">{`Audit DB\n+ webhook / Splunk / Rego`}</Node>
-  <Edge from="events" to="window" />
-  <Edge from="window" to="patterns" />
-  <Edge from="patterns" to="synth" />
-  <Edge from="synth" to="sinks" />
+<Flow direction="TB" caption="Each time a scan that carries session and agent IDs is saved, the correlator reads that agent's most recent findings in the session (up to the largest pattern window, 30 with the bundled patterns) and checks them against the patterns. A match saves one CORR-* finding per pattern per session, at the pattern's severity (CRITICAL for both bundled patterns), in the local audit database. It never changes the request that completed the pattern.">
+  <Node id="events" kind="generic">{`Scan saved\nwith session and agent IDs`}</Node>
+  <Node id="window" kind="policy">{`Read recent findings\nsame session and agent`}</Node>
+  <Node id="patterns" kind="policy">{`Check the patterns\ndata axes · order · fingerprints`}</Node>
+  <Node id="synth" kind="datastore">{`Save a CORR-* finding\nlocal audit database`}</Node>
+  <Edge from="events" to="window" label="triggers" />
+  <Edge from="window" to="patterns" label="feeds" />
+  <Edge from="patterns" to="synth" label="on match" />
 </Flow>
 
 Every finding DefenseClaw records is tagged with a **data axis** (one or more of `ingress_untrusted`, `sensitive_access`, `egress_external`) and — on the tool-call surface — a **tool capability class** (`read_fs`, `write_fs`, `exec_shell`, `network_fetch`, `send_message`, `none`). Regex rules and judge categories resolve through the canonical mapping in `internal/guardrail/axes.go`, so patterns can reason across detectors without hard-coding rule IDs.
@@ -438,13 +425,13 @@ description: |
     - SRC-FETCH        at 2026-05-12T14:06:18Z
 ```
 
-The same row is emitted to configured observability sinks — Splunk, webhooks,
-and the TUI audit panel. The two bundled patterns currently emit CRITICAL
-findings, so they route to operator attention without per-sink threshold
-changes.
+The row is written only to the local audit database (`scan_findings`, with a
+`scan_results` summary from scanner `correlator`). It does not go through the
+audit logger, so Splunk, OTLP and webhook sinks do not receive it today; query
+the database to act on it.
 
 <Callout>
-The correlator is **post-event detection**, not an in-flight block of the request that completed the pattern. It writes a synthetic scan summary whose verdict is `block` and a CRITICAL `CORR-*` finding for sinks and operator workflows, but it does not retroactively stop the contributing action or automatically quarantine later requests.
+The correlator is **post-event detection**, not an in-flight block of the request that completed the pattern. It writes a synthetic scan summary whose verdict is `block` and a CRITICAL `CORR-*` finding to the local audit database for operator workflows, but it does not retroactively stop the contributing action or automatically quarantine later requests.
 </Callout>
 
 ### Why alert-only, not block
@@ -457,8 +444,7 @@ Promoting a later request in the session to *deny* based on an earlier pattern m
 Ways to act on correlations without changing the gateway runtime:
 
 - Tail `scan_findings` for `rule_id LIKE 'CORR-%'` and invoke a custom script.
-- Wire the existing Splunk / webhook sink to any CRITICAL severity — `CORR-*` inherits automatically.
-- Feed the sink event into an external response workflow that disables a connector, revokes a credential, or opens an incident under your organization's policy.
+- Feed that query into an external response workflow that disables a connector, revokes a credential, or opens an incident under your organization's policy.
 
 ## Authoring custom rule packs
 

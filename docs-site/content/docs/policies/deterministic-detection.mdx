@@ -33,24 +33,22 @@ The YAML and Go files linked below remain authoritative if these counts change.
 
 <Flow
   direction="TB"
-  caption="Lexical and semantic signals can detect broadly. Only complete code-owned proof on an eligible synchronous surface can authorize a block."
+  caption="How a tool call earns the right to be blocked. CEL and regex only pick candidates. A block needs a code-owned proof for the same rule ID (and, for chain rules, the earlier steps of a fixed chain in the same session), complete parsing, and a connector that can block before the tool runs. Without that, the finding is still recorded, but it stays detection-only (never changes the action) or alert-only (at most an alert). For proven findings, the active profile or guardrail.block_at maps severity to the action."
 >
-  <Node id="event" kind="generic">Authenticated tool call or scanned content</Node>
-  <Node id="facts" kind="policy">Normalize trusted fields into ActionFacts</Node>
-  <Node id="select" kind="policy">CEL and bounded RE2 candidate selectors</Node>
-  <Node id="semantic" kind="policy">Code-owned semantic validator</Node>
-  <Node id="chain" kind="policy">Optional bounded same-session chain proof</Node>
-  <Node id="gate" kind="decision">Same-rule enforcement proof gate</Node>
-  <Node id="profile" kind="policy">Permissive / balanced / strict posture</Node>
-  <Node id="action" kind="generic">allow / alert / confirm / block</Node>
-  <Edge from="event" to="facts" />
-  <Edge from="facts" to="select" />
-  <Edge from="select" to="semantic" />
-  <Edge from="semantic" to="chain" label="when sequence context is required" />
-  <Edge from="semantic" to="gate" label="atomic proof" />
-  <Edge from="chain" to="gate" label="complete lineage" />
-  <Edge from="gate" to="profile" />
-  <Edge from="profile" to="action" />
+  <Node id="facts" kind="policy">{`Parse the tool call\ninto ActionFacts`}</Node>
+  <Node id="select" kind="policy">{`Rules flag candidates\nCEL and RE2 regex`}</Node>
+  <Node id="semantic" kind="policy">{`Code checks the effect\nvalidator for the same rule`}</Node>
+  <Node id="chain" kind="policy">{`Check earlier steps\nfixed chains, same session`}</Node>
+  <Node id="gate" kind="decision">{`Proven, and can block?\nconnector blocks before run`}</Node>
+  <Node id="record" kind="generic">{`Recorded, not blocked\ndetection-only or alert-only`}</Node>
+  <Node id="profile" kind="policy">{`Profile picks the action\nallow · alert · confirm · block`}</Node>
+  <Edge from="facts" to="select" label="facts" />
+  <Edge from="select" to="semantic" label="candidate" />
+  <Edge from="semantic" to="gate" label="single call" />
+  <Edge from="semantic" to="chain" label="chain rule" />
+  <Edge from="chain" to="gate" label="chain complete" />
+  <Edge from="gate" to="record" label="no" />
+  <Edge from="gate" to="profile" label="yes" />
 </Flow>
 
 YARA description scanning and the legacy session correlator are parallel

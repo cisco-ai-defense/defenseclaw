@@ -67,30 +67,53 @@ The daemons:
 | `com.cisco.defenseclaw.apply` | root | Runs `ensure --reason path` when `etc/config.yaml`, `etc/secrets` or `etc/policies` changes |
 | `com.cisco.defenseclaw.verify` | root | Runs `verify` every day at 03:17 local time |
 
+How a hook reaches the gateway:
+
 <Flow
   direction="TB"
-  caption="Standalone macOS. launchd hands over sockets only through launch_activate_socket(3), which needs cgo, and release builds do not use cgo. So the gateway binds its own sockets, in a directory only root or its service account can write. The hook checks the listener's owner before it sends anything."
+  caption="macOS. launchd starts the gateway as _defenseclaw, and the gateway opens 127.0.0.1:18970 and run/hook.sock itself. Only _defenseclaw can write the run directory, inside the root-owned install tree, so a user cannot create a look-alike socket. The hook sends nothing until it has checked that root or _defenseclaw owns the socket, and the gateway learns the caller's uid from the kernel."
 >
-  <Zone id="m0" label="Z0 · Admin and MDM (root)" tone="trusted">
-    <Node id="ld" kind="generic">{`launchd\nLaunchDaemons`}</Node>
+  <Zone id="m0" label="Z0 · Admin and OS (root)" tone="trusted">
+    <Node id="ld" kind="generic">{`launchd\nstarts the daemons`}</Node>
+  </Zone>
+  <Zone id="m4" label="Z4 · User session (the user)" tone="untrusted">
+    <Node id="agent" kind="agent">{`AI agent\nruns as the user`}</Node>
+    <Node id="hook" kind="connector">{`defenseclaw-hook\nchecks the socket owner`}</Node>
   </Zone>
   <Zone id="m2" label="Z2 · Gateway (_defenseclaw)" tone="restricted">
-    <Node id="gw" kind="gateway">gateway</Node>
-  </Zone>
-  <Zone id="m1" label="Z1 · Services (root)" tone="privileged">
-    <Node id="grd" kind="generic">hook-guardian</Node>
-    <Node id="wrk" kind="generic">{`per-user worker\nas the user`}</Node>
-  </Zone>
-  <Zone id="m4" label="Z4 · User session (user)" tone="untrusted">
-    <Node id="agent" kind="agent">AI agent</Node>
-    <Node id="hook" kind="connector">defenseclaw-hook</Node>
+    <Node id="gw" kind="gateway">{`Gateway\nallows or blocks`}</Node>
   </Zone>
   <Edge from="ld" to="gw" label="starts as _defenseclaw" />
-  <Edge from="ld" to="grd" label="starts as root" />
-  <Edge from="grd" to="wrk" label="spawns" />
-  <Edge from="wrk" to="agent" label="user config" />
-  <Edge from="agent" to="hook" />
-  <Edge from="hook" to="gw" label="hook.sock, peer uid" />
+  <Edge from="agent" to="hook" label="runs per tool call" />
+  <Edge from="hook" to="gw" label="asks over hook.sock" />
+</Flow>
+
+Unlike systemd on Linux, launchd does not hold the sockets for the gateway.
+launchd hands sockets over only through `launch_activate_socket(3)`, which
+needs cgo, and release builds are built without cgo. The protected socket
+directory and the hook's owner check do the same job.
+
+How the hooks stay in place:
+
+<Flow
+  direction="TB"
+  caption="macOS. The enumerator lists the users to protect in etc/hook-guardian/targets.yaml. Every minute the guardian, which runs as root, starts a short-lived worker as each listed user, and the worker puts back DefenseClaw's hooks in that user's agent config. Root never writes a user's files with its own rights."
+>
+  <Zone id="m1" label="Z1 · Services (root)" tone="privileged">
+    <Node id="enum" kind="generic">{`Enumerator\nlists the users`}</Node>
+    <Node id="grd" kind="generic">{`Guardian\nchecks every minute`}</Node>
+  </Zone>
+  <Zone id="m3" label="Z3 · Admin-owned files" tone="protected">
+    <Node id="tgt" kind="policy">{`Target manifest\ntargets.yaml`}</Node>
+  </Zone>
+  <Zone id="m4" label="Z4 · User session (the user)" tone="untrusted">
+    <Node id="wrk" kind="generic">{`Per-user worker\nruns as the user`}</Node>
+    <Node id="ucfg" kind="agent">{`Agent config\nin the user's home`}</Node>
+  </Zone>
+  <Edge from="enum" to="tgt" label="writes" />
+  <Edge from="grd" to="tgt" label="reads" />
+  <Edge from="grd" to="wrk" label="starts, as the user" />
+  <Edge from="wrk" to="ucfg" label="repairs hooks" />
 </Flow>
 
 See [Threat model](/docs/enterprise/threat-model#trust-zones) for what each
