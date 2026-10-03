@@ -1001,9 +1001,13 @@ function Write-HookState {
 function Copy-BinDir([string]$To) {
     New-Item -ItemType Directory -Path $To -Force | Out-Null
     # Remember that there was no bin folder (a first install, DefenseClaw
-    # Setup), so a restore does not leave an empty one behind (GAP-2614).
+    # Setup), and whether ~\.local was missing too, so a restore does not
+    # leave either behind empty (GAP-2614).
     if (-not (Test-Path -LiteralPath $BinDir -PathType Container)) {
-        Set-Content -LiteralPath (Join-Path $To "NO_BINDIR") -Value "" -Encoding Ascii
+        $made = @($BinDir)
+        $parent = Split-Path -Parent $BinDir
+        if (-not (Test-Path -LiteralPath $parent -PathType Container)) { $made += $parent }
+        Set-Content -LiteralPath (Join-Path $To "NO_BINDIR") -Value $made -Encoding UTF8
         return
     }
     foreach ($name in $ManagedFiles) {
@@ -1013,16 +1017,30 @@ function Copy-BinDir([string]$To) {
 }
 
 function Restore-BinDir([string]$From) {
+    $marker = Join-Path $From "NO_BINDIR"
+    if (Test-Path -LiteralPath $marker) {
+        # There was no bin folder: take out this run's files, then the
+        # folders it made (bin first, then ~\.local) when they are empty.
+        foreach ($name in $ManagedFiles) {
+            $live = Join-Path $BinDir $name
+            if (Test-Path -LiteralPath $live) { Remove-Aside $live }
+        }
+        $made = @(Get-Content -LiteralPath $marker | Where-Object { $_ })
+        if (-not $made.Count) { $made = @($BinDir) }
+        foreach ($dir in $made) {
+            if ((Test-Path -LiteralPath $dir -PathType Container) -and
+                -not (Get-ChildItem -LiteralPath $dir -Force -ErrorAction SilentlyContinue | Select-Object -First 1)) {
+                Remove-Item -LiteralPath $dir -Force -ErrorAction SilentlyContinue
+            }
+        }
+        return
+    }
     New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
     foreach ($name in $ManagedFiles) {
         $saved = Join-Path $From $name
         $live = Join-Path $BinDir $name
         if (Test-Path -LiteralPath $saved -PathType Leaf) { Install-File $saved $live }
         elseif (Test-Path -LiteralPath $live) { Remove-Aside $live }
-    }
-    if ((Test-Path -LiteralPath (Join-Path $From "NO_BINDIR")) -and
-        -not (Get-ChildItem -LiteralPath $BinDir -Force -ErrorAction SilentlyContinue | Select-Object -First 1)) {
-        Remove-Item -LiteralPath $BinDir -Force -ErrorAction SilentlyContinue
     }
 }
 
