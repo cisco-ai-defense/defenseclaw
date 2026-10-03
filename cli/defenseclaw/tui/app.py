@@ -4996,6 +4996,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             tab = self.registries_model.current_tab.name.title()
             empty = self.registries_model.empty_state()
             suffix = f"\n{rich_escape(empty)}" if empty else ""
+            note = self.registries_model.status_note()
+            suffix += f"  [dim]·  {rich_escape(note)}[/]" if note else ""
             # Keys are in the hint bar and the ? sheet; the body stays one
             # line so the table is on screen at 80x24.
             self.body_text = f"[bold #22D3EE]Registries[/]  {tab}{suffix}"
@@ -10663,6 +10665,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         terminal, cutting off a longer task name.
         """
 
+        if self.active_panel == "registries":
+            # Auto-width columns never shrink when rows are patched, so a
+            # status that got shorter after a good sync kept its wide column
+            # until a restart (GAP-2347). The widest cell per column decides.
+            return tuple(max((len(cell) for cell in column), default=0) for column in zip(*self._table_rows))
         if self.active_panel != "setup":
             return False
         model = self.setup_model

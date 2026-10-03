@@ -109,6 +109,19 @@ class RegistrySourceRow:
             return f"cache error: {self.index_error}"
         return self.last_status or "-"
 
+    @property
+    def table_status_label(self) -> str:
+        """The Sources table shows only "error" or "cache error" for a failure.
+
+        A full sync error in the Status column pushed Entries, C/W/B/E and
+        Last Sync off an 80-column screen (GAP-2347). Enter (the detail view)
+        and the A output keep the whole message.
+        """
+
+        label = self.status_label
+        head, sep, _rest = label.partition(":")
+        return head.strip() if sep and head.strip() else label
+
 
 class RegistriesPanelModel:
     """State and parity helpers for the Registries panel.
@@ -338,7 +351,7 @@ class RegistriesPanelModel:
                     row.kind,
                     row.content,
                     row.enabled_label,
-                    row.status_label,
+                    row.table_status_label,
                     str(row.entry_count),
                     f"{row.clean_count}/{row.warning_count}/{row.blocked_count}/{row.error_count}",
                     _short_sync_time(row.last_sync) or "(never)",
@@ -357,6 +370,15 @@ class RegistriesPanelModel:
             )
             for row in self.visible_entries()
         )
+
+    def status_note(self) -> str:
+        """Where to read a failed source's full status (GAP-2347)."""
+
+        if self.current_tab == RegistriesTab.SOURCES and any(
+            row.table_status_label != row.status_label for row in self.sources
+        ):
+            return "Enter on a source shows its full error."
+        return ""
 
     def empty_state(self) -> str:
         if self.row_count() > 0:
