@@ -3789,6 +3789,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		proxy.SetConnectorSwitchState(registry, setupOpts)
 		proxy.SetHILTApprovalManager(s.hilt)
 		proxy.SetNotifier(s.osNotifier)
+		proxy.SetRefreshedGatewayTokenSource(s.client.RefreshedToken)
 		// In managed_enterprise mode, replace the proxy's opensource
 		// AID client (constructed by NewGuardrailProxy from the same
 		// CiscoAIDefenseConfig) with the token-authenticated managed
