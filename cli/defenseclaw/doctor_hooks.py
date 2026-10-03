@@ -153,6 +153,16 @@ _CODEX_TRUSTED_CONTRACTS = frozenset(
     {"codex-hooks-v2", "codex-hooks-v3", "codex-hooks-v3-generic", "codex-hooks-v4"}
 )
 _CODEX_POLICY_TIMEOUT_SECONDS = 20.0
+# A Codex app-server that does not answer in time is slow, not a policy block
+# (GAP-2190): doctor retries it once and then reports a WARN.
+CODEX_PROBE_TIMEOUT_STATE = "probe-timeout"
+
+
+def _codex_probe_timeout_detail(response_id: int) -> str:
+    return (
+        f"Codex app-server did not answer the policy probe within {_CODEX_POLICY_TIMEOUT_SECONDS:g} s "
+        f"(timed out waiting for Codex policy response {response_id}); the host or Codex is slow"
+    )
 _CODEX_POLICY_MESSAGE_LIMIT = 2 * 1024 * 1024
 _CLAUDE_FILE_CHANGED_MATCHER = ".+"
 _REPAIR = {
@@ -1219,15 +1229,15 @@ def _inspect_codex_effective_hook_policy(data_dir: str, config_path: str) -> tup
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise _InspectionError(
-                    "policy-blocked",
-                    diagnostic(f"timed out waiting for Codex policy response {response_id}"),
+                    CODEX_PROBE_TIMEOUT_STATE,
+                    diagnostic(_codex_probe_timeout_detail(response_id)),
                 )
             try:
                 kind, payload = responses.get(timeout=remaining)
             except queue.Empty as exc:
                 raise _InspectionError(
-                    "policy-blocked",
-                    diagnostic(f"timed out waiting for Codex policy response {response_id}"),
+                    CODEX_PROBE_TIMEOUT_STATE,
+                    diagnostic(_codex_probe_timeout_detail(response_id)),
                 ) from exc
             if kind == "error":
                 raise _InspectionError("policy-blocked", diagnostic(str(payload)))
@@ -1346,7 +1356,13 @@ def _validate_codex_effective_hook_policy(data_dir: str, config_path: str) -> st
     """Fail closed when current effective policy ignores this hook source."""
 
     try:
-        managed_only, source = _codex_effective_policy_inspector(data_dir, config_path)
+        try:
+            managed_only, source = _codex_effective_policy_inspector(data_dir, config_path)
+        except _InspectionError as exc:
+            if exc.state != CODEX_PROBE_TIMEOUT_STATE:
+                raise
+            # One retry, like the gateway's slow agent probe (GAP-2190).
+            managed_only, source = _codex_effective_policy_inspector(data_dir, config_path)
     except _InspectionError:
         raise
     except Exception as exc:
@@ -3665,7 +3681,9 @@ def validate_windows_hook_registration(
     except _InspectionError as exc:
         return WindowsHookCheck(
             exc.state,
-            exc.detail if exc.state == "policy-blocked" else _repair_detail(connector, exc.detail),
+            exc.detail
+            if exc.state in {"policy-blocked", CODEX_PROBE_TIMEOUT_STATE}
+            else _repair_detail(connector, exc.detail),
             command,
             target,
             raw_target,
