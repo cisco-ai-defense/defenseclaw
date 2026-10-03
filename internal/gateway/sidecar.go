@@ -882,6 +882,7 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 
 	// Initialize semantic router (managed or remote). Sidecar owns this
 	// instance so repeated in-process runs cannot inherit a stale global router.
+	// Try native SR binary first; fall back to Docker-based managed router.
 	var routingHealthChecker modelRouterHealthChecker
 	var routingHealthDetails map[string]interface{}
 	s.modelRouter = nil
@@ -889,6 +890,8 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 	if s.currentConfig().Routing.Enabled {
 		routingHealthDetails = effectiveRoutingHealthDetails(s.currentConfig().Routing)
 		s.health.SetRouting(StateStarting, "", routingHealthDetails)
+
+		// Generate SR config from defenseclaw config
 		orchCfg := routing.OrchestratorConfig{
 			Enabled:        true,
 			Version:        s.currentConfig().Routing.Version,
@@ -898,7 +901,30 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 			TimeoutMs:      s.currentConfig().Routing.Remote.TimeoutMs,
 			TranslateInput: buildTranslateInput(s.currentConfig()),
 		}
-		result, err := routing.StartManagedRouter(runCtx, orchCfg)
+		srDir := filepath.Join(s.currentConfig().DataDir, "semantic-router")
+		configPath, translateErr := routing.TranslateAndWrite(orchCfg.TranslateInput, srDir)
+
+		// Try native SR binary first
+		var nativeSR *SRNativeManager
+		if translateErr == nil {
+			nativeSR = NewSRNativeManager(configPath)
+			if err := nativeSR.Start(runCtx); err != nil {
+				fmt.Fprintf(os.Stderr, "[routing] native SR failed: %v, trying Docker\n", err)
+				nativeSR = nil
+			}
+		}
+
+		var result *routing.OrchestratorResult
+		var err error
+		if nativeSR != nil {
+			// Native SR started successfully
+			result = &routing.OrchestratorResult{Endpoint: nativeSR.Endpoint()}
+			defer nativeSR.Stop()
+			err = nil
+		} else {
+			// Fall back to Docker-based managed router
+			result, err = routing.StartManagedRouter(runCtx, orchCfg)
+		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[routing] startup failed: %v (routing disabled)\n", err)
 			s.health.SetRouting(StateError, err.Error(), routingHealthDetails)

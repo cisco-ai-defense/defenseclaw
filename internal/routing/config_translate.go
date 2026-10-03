@@ -238,7 +238,7 @@ func Translate(input TranslateInput) *SRConfig {
 			},
 		},
 		Global: SRGlobalConfig{
-			Router: SRGlobalRouter{ModelSelection: SRFeatureToggle{Enabled: false}},
+			Router: SRGlobalRouter{ModelSelection: SRFeatureToggle{Enabled: len(input.Decisions) > 0}},
 			Services: SRGlobalServices{
 				ResponseAPI:  SRFeatureToggle{Enabled: false},
 				RouterReplay: SRFeatureToggle{Enabled: false},
@@ -287,10 +287,14 @@ func Translate(input TranslateInput) *SRConfig {
 
 	// Routing signals
 	for _, k := range input.Signals.Keywords {
+		op := k.Operator
+		if op == "" {
+			op = "OR"
+		}
 		cfg.Routing.Signals.Keywords = append(cfg.Routing.Signals.Keywords, SRKeywordSignal{
 			Name:     k.Name,
 			Keywords: k.Keywords,
-			Operator: k.Operator,
+			Operator: op,
 		})
 	}
 
