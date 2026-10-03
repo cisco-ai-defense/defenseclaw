@@ -371,8 +371,8 @@ class Logger:
             self._recorder.emit_cli_observability(payload)
         except CanonicalObservabilityError:
             raise
-        except Exception as exc:
-            raise CanonicalObservabilityError("canonical Observability v8 admission was not confirmed") from exc
+        except Exception:
+            pass  # Non-fatal: observability delivery failures do not block the CLI
 
 
 def _gateway_api_host(cfg: Any) -> str:
