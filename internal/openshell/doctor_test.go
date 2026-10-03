@@ -68,6 +68,8 @@ type doctorFixture struct {
 	// probe answers ProbeClientAuth; probes counts the calls.
 	probe  error
 	probes int
+	// staleManager answers ServiceDockerGroupMissing.
+	staleManager bool
 	// vmABI, vmKernel and vmErr answer VMLandlockABI (the Docker VM's
 	// kernel, asked off Linux); vmProbes counts the calls.
 	vmABI    int
@@ -159,22 +161,24 @@ func newDoctorFixture(t *testing.T) *doctorFixture {
 			},
 			FlushSandboxes: func(ctx context.Context) error {
 				return openshell.FlushSandboxes(ctx, f.fake.Client(openshell.ClientOptions{}))
-			}},
-		Ports:               []openshell.PortRequirement{{Name: "ingress", Port: 18971}, {Name: "egress", Port: 18972}},
-		LandlockABI:         func() (int, error) { return 6, nil },
-		DockerVMLandlockABI: func(context.Context) (int, string, error) { f.vmProbes++; return f.vmABI, f.vmKernel, f.vmErr },
-		E2fsprogsDirs:       []string{f.e2fsprogs},
-		HostMemory:          func() uint64 { return 32 << 30 },
-		DiskFree:            func(p string) (uint64, error) { f.diskProbed = p; return f.diskFree, f.diskErr },
-		Listen:              f.listen,
-		Geteuid:             func() int { return 1000 },
-		Getegid:             func() int { return 1000 },
-		Username:            func() (string, error) { return "dev", nil },
-		HomeDir:             func() (string, error) { return f.home, nil },
-		DockerDesktop:       func() (*openshell.DockerDesktop, error) { return nil, errors.New("not Docker Desktop") },
-		DockerGroup:         func() (bool, bool, error) { return true, true, nil },
-		SSHShim:             func() (*openshell.SSHShim, error) { return fakeShim, nil },
-		Getenv:              func(k string) string { return f.env[k] },
+			},
+			ServiceDockerGroupMissing: func() bool { return f.staleManager }},
+		Ports:                     []openshell.PortRequirement{{Name: "ingress", Port: 18971}, {Name: "egress", Port: 18972}},
+		LandlockABI:               func() (int, error) { return 6, nil },
+		DockerVMLandlockABI:       func(context.Context) (int, string, error) { f.vmProbes++; return f.vmABI, f.vmKernel, f.vmErr },
+		E2fsprogsDirs:             []string{f.e2fsprogs},
+		HostMemory:                func() uint64 { return 32 << 30 },
+		DiskFree:                  func(p string) (uint64, error) { f.diskProbed = p; return f.diskFree, f.diskErr },
+		Listen:                    f.listen,
+		Geteuid:                   func() int { return 1000 },
+		Getegid:                   func() int { return 1000 },
+		Username:                  func() (string, error) { return "dev", nil },
+		HomeDir:                   func() (string, error) { return f.home, nil },
+		DockerDesktop:             func() (*openshell.DockerDesktop, error) { return nil, errors.New("not Docker Desktop") },
+		DockerGroup:               func() (bool, bool, error) { return true, true, nil },
+		ServiceDockerGroupMissing: func() bool { return f.staleManager },
+		SSHShim:                   func() (*openshell.SSHShim, error) { return fakeShim, nil },
+		Getenv:                    func(k string) string { return f.env[k] },
 	}
 	return f
 }
@@ -1577,5 +1581,27 @@ func TestDoctorFailsWhenTheSSHShimCannotRun(t *testing.T) {
 	}
 	if r.OK() {
 		t.Fatal("the report is OK without an ssh shim that runs")
+	}
+}
+
+// TestDoctorServiceUnderStaleUserManager covers a gateway service whose
+// systemd user manager started before the user joined the docker group
+// (GAP-2169): the Gateway service check fails and names the restart.
+func TestDoctorServiceUnderStaleUserManager(t *testing.T) {
+	f := newDoctorFixture(t)
+	f.staleManager = true
+	c := expectCheck(t, f.run(), openshell.CheckIDGatewayService, openshell.StatusFail, "started before you joined the docker group")
+	if c.Fix == nil || !c.Fix.Sudo || !strings.HasPrefix(c.Fix.Command, "sudo systemctl restart user@") {
+		t.Fatalf("fix = %+v", c.Fix)
+	}
+}
+
+func TestProcStatusGroups(t *testing.T) {
+	groups, ok := openshell.ProcStatusGroups([]byte("Name:\tsystemd\nGroups:\t10 1077 \nNgid:\t0\n"))
+	if !ok || !slices.Equal(groups, []int{10, 1077}) {
+		t.Fatalf("groups = %v, %v", groups, ok)
+	}
+	if _, ok := openshell.ProcStatusGroups([]byte("Name:\tx\n")); ok {
+		t.Fatal("no Groups line parsed as ok")
 	}
 }
