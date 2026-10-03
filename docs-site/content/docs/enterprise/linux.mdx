@@ -90,29 +90,48 @@ The package installs the units in `/usr/lib/systemd/system`. A tarball install
 writes them to `/etc/systemd/system`. Either way, host-specific drop-ins go
 in `/etc/systemd/system/<unit>.d/`.
 
+How a hook reaches the gateway:
+
 <Flow
   direction="TB"
-  caption="Standalone Linux. PID 1 binds the API and hook sockets before any user process runs and keeps them open while the gateway restarts, so a hook that connects during a restart waits for the real gateway."
+  caption="Linux. systemd opens 127.0.0.1:18970 and /run/defenseclaw-hook/hook.sock at boot and keeps them open while the gateway restarts, so a hook that connects mid-restart waits for the real gateway. The hook sends nothing until it has checked that root or defenseclaw owns the socket, and the gateway learns the caller's uid from the kernel."
 >
-  <Zone id="l0" label="Z0 · Admin and MDM (root)" tone="trusted">
+  <Zone id="l0" label="Z0 · Admin and OS (root)" tone="trusted">
     <Node id="sd" kind="generic">{`systemd\nholds both sockets`}</Node>
   </Zone>
+  <Zone id="l4" label="Z4 · User session (the user)" tone="untrusted">
+    <Node id="agent" kind="agent">{`AI agent\nruns as the user`}</Node>
+    <Node id="hook" kind="connector">{`defenseclaw-hook\nchecks the socket owner`}</Node>
+  </Zone>
   <Zone id="l2" label="Z2 · Gateway (defenseclaw)" tone="restricted">
-    <Node id="gw" kind="gateway">gateway.service</Node>
+    <Node id="gw" kind="gateway">{`Gateway\nallows or blocks`}</Node>
   </Zone>
+  <Edge from="sd" to="gw" label="hands over sockets" />
+  <Edge from="agent" to="hook" label="runs per tool call" />
+  <Edge from="hook" to="gw" label="asks over hook.sock" />
+</Flow>
+
+How the hooks stay in place:
+
+<Flow
+  direction="TB"
+  caption="Linux. The enumerator lists the users to protect in /etc/defenseclaw/hook-guardian/targets.yaml. Every minute the guardian, which runs as root, starts a short-lived worker as each listed user, and the worker puts back DefenseClaw's hooks in that user's agent config. Root never writes a user's files with its own rights."
+>
   <Zone id="l1" label="Z1 · Services (root)" tone="privileged">
-    <Node id="grd" kind="generic">hook-guardian</Node>
-    <Node id="wrk" kind="generic">{`per-user worker\nas the user`}</Node>
+    <Node id="enum" kind="generic">{`Enumerator\nlists the users`}</Node>
+    <Node id="grd" kind="generic">{`Guardian\nchecks every minute`}</Node>
   </Zone>
-  <Zone id="l4" label="Z4 · User session (user)" tone="untrusted">
-    <Node id="agent" kind="agent">AI agent</Node>
-    <Node id="hook" kind="connector">defenseclaw-hook</Node>
+  <Zone id="l3" label="Z3 · Admin-owned files" tone="protected">
+    <Node id="tgt" kind="policy">{`Target manifest\ntargets.yaml`}</Node>
   </Zone>
-  <Edge from="sd" to="gw" label="inherited fds" />
-  <Edge from="grd" to="wrk" label="spawns" />
-  <Edge from="wrk" to="agent" label="user config" />
-  <Edge from="agent" to="hook" />
-  <Edge from="hook" to="gw" label="hook.sock, peer uid" />
+  <Zone id="l4" label="Z4 · User session (the user)" tone="untrusted">
+    <Node id="wrk" kind="generic">{`Per-user worker\nruns as the user`}</Node>
+    <Node id="ucfg" kind="agent">{`Agent config\nin the user's home`}</Node>
+  </Zone>
+  <Edge from="enum" to="tgt" label="writes" />
+  <Edge from="grd" to="tgt" label="reads" />
+  <Edge from="grd" to="wrk" label="starts, as the user" />
+  <Edge from="wrk" to="ucfg" label="repairs hooks" />
 </Flow>
 
 See [Threat model](/docs/enterprise/threat-model#trust-zones) for what each
