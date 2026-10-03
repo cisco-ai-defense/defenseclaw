@@ -207,6 +207,10 @@ func TestEvaluateClaudeCodeHook_BlocksUnregisteredMCPPreToolUse(t *testing.T) {
 	if !containsString(resp.Findings, "ASSET-POLICY-MCP") {
 		t.Fatalf("findings=%v, want ASSET-POLICY-MCP", resp.Findings)
 	}
+	// GAP-2489: the tool span takes its rule_id from the response.
+	if len(resp.RuleIDs) == 0 || resp.RuleIDs[0] != "asset_policy.mcp.registry-required" {
+		t.Fatalf("rule_ids=%v, want asset_policy.mcp.registry-required first", resp.RuleIDs)
+	}
 }
 
 func TestEvaluateClaudeCodeHook_BlocksUnregisteredMCPPermissionRequest(t *testing.T) {

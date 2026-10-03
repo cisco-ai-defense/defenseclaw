@@ -6386,6 +6386,29 @@
         }
       ],
       "since": "1.0.0"
+    },
+    {
+      "name": "DEFENSECLAW_SCAN_RECORDED_BY_CALLER",
+      "category": "hook_internal",
+      "purpose": "Set to 1 by the gateway when it runs a defenseclaw plugin scan child whose result it records itself, so the CLI child does not write a second scan row and scan-finding alert (GAP-2482).",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/scanner/plugin.go",
+          "description": "Sets it on the plugin scan child process"
+        },
+        {
+          "location": "cli/defenseclaw/commands/_scan_ui.py",
+          "description": "Skips recording the scan when it is 1"
+        }
+      ],
+      "since": "1.0.0"
     }
   ]
 }
