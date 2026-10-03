@@ -118,6 +118,19 @@ class CodexModelProvidersTests(unittest.TestCase):
         self.assertNotIn("Model providers: none", out)
         self.assertIn("codex:models", out)
 
+    def test_unparsable_config_is_an_mcp_error_not_none_configured(self) -> None:
+        # GAP-2182: the same invalid config.toml read as "MCP servers: none configured".
+        self._write('[mcp_servers.probe]\ncommand = "node"\nmodel = gpt-edge-test\n')
+        from defenseclaw.config import default_config
+
+        inv = claw_inventory.build_claw_aibom(default_config(), categories={"mcp"}, connector="codex")
+        self.assertEqual(inv["mcp"], [])
+        self.assertEqual([e["command"] for e in inv["errors"]], ["codex:mcp"])
+        self.assertIn("config.toml", inv["errors"][0]["error"])
+        out = _render(inv)
+        self.assertIn("MCP servers: not collected", out)
+        self.assertNotIn("none configured", out)
+
 
 class NotCollectedRenderingTests(unittest.TestCase):
     def test_unsupported_empty_category_reads_not_collected(self) -> None:
