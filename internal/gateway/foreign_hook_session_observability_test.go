@@ -134,9 +134,19 @@ func TestForeignHookSessionDenialNamesWhatWasDenied(t *testing.T) {
 		if span.Name == "apply_guardrail inspect session" {
 			sessionSpan = true
 		}
+		if strings.HasPrefix(span.Name, "invoke_agent") {
+			if got := inspectTraceV8ProtoAttributes(span.Attributes)["defenseclaw.guardrail.rule_id"]; got != foreignHookDenialRuleID {
+				t.Errorf("%s rule_id=%v, want %s (GAP-2610)", span.Name, got, foreignHookDenialRuleID)
+			}
+		}
 		if strings.HasPrefix(span.Name, "execute_tool") && span.Status.GetCode() == tracepb.Status_STATUS_CODE_ERROR {
 			if got := inspectTraceV8ProtoAttributes(span.Attributes)["defenseclaw.agent.lifecycle.event"]; got != "tool_start" {
 				t.Errorf("blocked tool span lifecycle.event=%v, want tool_start (GAP-2216)", got)
+			}
+			// GAP-2610: the block names the foreign-hook guard as its rule,
+			// so a dashboard can tell why the call was blocked.
+			if got := inspectTraceV8ProtoAttributes(span.Attributes)["defenseclaw.guardrail.rule_id"]; got != foreignHookDenialRuleID {
+				t.Errorf("blocked tool span rule_id=%v, want %s (GAP-2610)", got, foreignHookDenialRuleID)
 			}
 			for _, event := range span.Events {
 				toolBlocked = toolBlocked || event.Name == "defenseclaw.guardrail.block"

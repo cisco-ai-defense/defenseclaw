@@ -111,6 +111,9 @@ inspect-tool calls and refused hook-socket requests carry the verified
 account (`user.id`, `defenseclaw.user.name`); a refused request also names
 its route and reason. Each tool call the foreign-hook guard denies adds a
 `connector-hook` row with `event: foreign_hook_session` that names the file.
+Its trace spans (and their Galileo metadata) carry
+`defenseclaw.guardrail.rule_id` `ENTERPRISE-FOREIGN-HOOK-BLOCKED`, so a
+dashboard can count foreign-hook blocks apart from rule-pack blocks.
 Scan-finding and scan-verdict rows do not carry the account yet
 ([#921](https://github.com/cisco-ai-defense/defenseclaw/issues/921)); join
 them to the hook decision on `evaluation_id`.
