@@ -23,9 +23,9 @@ Most security teams find that the first useful question DefenseClaw answers isn'
 
 Connector configuration, process, MCP, package, provider-domain, and environment-variable-name signals were classified and deduplicated into one sanitized inventory record. Discovery reports evidence and confidence; it does not prove that every detected component is active or safe.
 
-![DefenseClaw TUI · AI Discovery view showing detected AI connectors, processes, package dependencies, and provider domains with identity and presence confidence scores](/images/tui/ai-discovery.jpg)
+![DefenseClaw TUI AI Discovery panel: a local GGUF model in the Local models table, and Codex, Claude Code and npm and PyPI AI SDK dependencies in the AI products and tools table](/images/tui/ai-discovery.png)
 
-The TUI's `AI Discovery` view (above) is the operator-facing rendering of the same pipeline this page documents. Local models appear in their own compact provenance table above the agent/tool inventory, so high-cardinality model IDs and lineage columns do not make the main discovery table unreadably wide.
+The TUI's **AI Discovery** panel (press `V`, above) shows the same inventory this page documents. Local models get their own table above the agents and tools, so long model IDs do not crowd the main table.
 
 <Cards>
   <Card title="Continuous discovery" description="Go sidecar scanner. Fingerprints local AI artifacts, emits ai_discovery events on new / changed / gone." />
@@ -84,7 +84,7 @@ defenseclaw agent discover --require-otel
 
 ## What gets discovered
 
-The continuous scanner (`internal/inventory/ai_discovery.go`) classifies every signal into one of the wire categories below. `agent discover` is a separate, connector-focused local inventory; the gateway-backed `agent usage` command renders these continuous-discovery signals.
+The continuous scanner in the gateway classifies every signal into one of the wire categories below. `agent discover` is a separate, connector-focused local inventory; the gateway-backed `agent usage` command renders these continuous-discovery signals.
 
 | Category | What it surfaces |
 | --- | --- |
@@ -214,7 +214,7 @@ Loaded-model rows can additionally carry `modality`, `device`, and `pinned`, plu
 
 The country is the ISO 3166-1 alpha-2 country associated with the organization that released the resolved root/base weights—not the quantizer, Hub uploader, local runtime, or download location. The TUI and macOS app derive the flag locally (`CN 🇨🇳`); emoji is never stored on the wire. `base_models`, `quantized`, `distilled`, and `derivation` preserve the detected lineage, while `source` and `confidence` distinguish embedded/runtime evidence from catalog or Hub enrichment. Missing evidence stays absent/unknown rather than becoming a guess.
 
-Canonical v8 `ai_component.*` logs carry this bounded provenance subset for `local_model` signals, but never the installed artifact's model ID and never as metric labels. Publisher, country, derivation flags, source, and confidence are metadata fields. Root/base model names are included only for a reviewed exact lineage or a successful public Hub lookup. Those names and config-derived quantization text are log-only `content` fields so each OTLP destination's selected redaction profile can transform or remove them.
+The `ai_component.*` logs carry this bounded provenance subset for `local_model` signals, but never the installed artifact's model ID and never as metric labels. Publisher, country, derivation flags, source, and confidence are metadata fields. Root/base model names are included only for a reviewed exact lineage or a successful public Hub lookup. Those names and config-derived quantization text are log-only `content` fields so each OTLP destination's selected redaction profile can transform or remove them.
 
 **Optional Hugging Face enrichment.** Set `ai_discovery.lookup_model_provenance_online=true` (or pass `--lookup-model-provenance-online` to `agent discovery enable`) to look up public model-card ancestry. This is off by default because a lookup transmits a model repository ID. The resolver calls only the fixed public Hugging Face model-info endpoint, refuses redirects, bounds responses and recursion, caches positive and negative results, and starts only from an exact ID recovered from a Hugging Face cache path, an explicit `huggingface.co` URL in embedded metadata, or a reviewed exact lineage rule. It does not send local paths or slash-shaped relative aliases, fuzzy-search arbitrary filenames, or use a private Hub token. Transient failures retain a previously resolved result for at most seven days; a definitive not-found response clears it. A fully renamed GGUF can still resolve when its embedded `general.source.*` or `general.base_model.*` repository URL survives conversion; if identifiers and metadata were stripped, discovery reports the provenance as unknown.
 
@@ -379,9 +379,9 @@ The CLI has two distinct discovery paths. `agent discover` runs a connector inve
 defenseclaw agent discover --json --emit-otel
 ```
 
-Walks the connector specs (`KNOWN_CONNECTORS` in
-`cli/defenseclaw/inventory/agent_discovery.py`). The local `--json` output is
-the full `AgentDiscovery` object:
+Checks every connector DefenseClaw knows. The local `--json` output has an
+`agents` object with one entry per connector (`{"agents": {"codex": {...}, ...}}`),
+plus `scanned_at` and the telemetry result. Each entry has:
 
 | Field | What it means |
 | --- | --- |
@@ -435,7 +435,7 @@ defenseclaw agent components show ai-sdk
 defenseclaw agent components history ai-sdk
 ```
 
-Package-dependency view: every AI-adjacent npm/pip/cargo dep across your workspaces. `show` and `history` drill into a single component's identity score and detection trail.
+Package-dependency view: every AI-related npm, PyPI, Go, Cargo, or other package dependency across your workspaces. `--ecosystem` takes the ecosystem name (`npm`, `pypi`, `go`, …). `show` and `history` drill into a single component's identity score and detection trail.
   </Tab>
 </Tabs>
 
@@ -474,9 +474,9 @@ For OpenClaw, `aibom scan` calls the live `openclaw` binary in parallel for each
 On a multi-connector install, a default `aibom scan` **fans out**: it produces one BOM section per active connector and merges them into a single document, mirroring the rest of the read/inventory commands. Pass `--connector <name>` to scope the BOM to a single connector.
 </Callout>
 
-The output is a custom JSON document. `stamp_aibom_inventory` attaches the
-same v7 provenance quartet to the top-level document and to each list item.
-The `content_hash` is the SHA-256 of the active DefenseClaw configuration and
+The output is a custom JSON document. The document and each item carry the
+same `provenance` block: schema version, content hash, configuration
+generation, and DefenseClaw version. The `content_hash` is the SHA-256 of the active DefenseClaw configuration and
 policy inputs; it is **not** a hash of an individual inventory item or of the
 complete BOM:
 
@@ -486,7 +486,7 @@ complete BOM:
     "schema_version": 7,
     "content_hash": "8c3a000000000000000000000000000000000000000000000000000000000000",
     "generation": 0,
-    "binary_version": "0.8.10"
+    "binary_version": "1.0.0"
   },
   "skills": [
     {
@@ -497,7 +497,7 @@ complete BOM:
         "schema_version": 7,
         "content_hash": "8c3a000000000000000000000000000000000000000000000000000000000000",
         "generation": 0,
-        "binary_version": "0.8.10"
+        "binary_version": "1.0.0"
       }
     }
   ],
@@ -515,7 +515,8 @@ Useful flags:
 | --- | --- |
 | `--json` | Machine-readable output (default is a human table) |
 | `--summary` | Counts only — useful for CI gates |
-| `--only` | CSV of categories: `skills,plugins,mcp,agents,models,memory` |
+| `--only` | Comma-separated categories to collect: `skills,plugins,mcp,agents,rules,tools,models,memory`. The others are left out, and the JSON marks them `"collected": false` |
+| `--connector` | Inventory one connector instead of every active one |
 
 <Callout type="info">
 There's no `--sign` or `--format=cyclonedx` today. The stamped provenance
@@ -551,7 +552,7 @@ actions are blocked from operator-configured remote destinations. Mandatory
 SQLite remains authoritative locally, and the generated CMID-authenticated AI
 Defense destination is the only optional exporter allowed to receive those
 actions. That exclusivity applies to the release-owned managed inventory
-actions; canonical `ai_discovery` records continue to follow the compiled v8
+actions; `ai_discovery` records continue to follow the
 destination policy and also reach the generated destination in managed mode.
 
 ### Splunk: AI Discovery Inventory
@@ -607,7 +608,7 @@ Discovery touches the most sensitive parts of the host filesystem. DefenseClaw i
 
 On macOS, enhanced discovery respects the operating system's Transparency, Consent, and Control (TCC) and filesystem permissions. DefenseClaw does not bypass protected folders or trigger access through another application. If one or more roots cannot be read, successful detections are retained but the scan summary reports `result: partial`, increments `errors`, and includes sanitized detector information in `detector_errors`. The macOS app shows a prominent **Partial scan** banner with the error count and detector details; it shows **Scan complete** only when the result is complete. An incomplete root is not treated as proof that a previously observed model was removed. Grant Full Disk Access only when your organization's policy permits that broader local inventory, then restart the gateway and run a fresh scan.
 
-The local `GET /api/v1/ai-usage` response—and therefore `defenseclaw agent usage`—retains the dedicated `model` block so the operator can see what is installed or loaded. Local scan history retains the same block in `inventory.db`. Outbound canonical records follow each v8 destination's field-class redaction profile. Normal discovery sanitization omits extended model metadata plus model basenames/path hashes, and lifecycle correlation uses an installation-scoped HMAC pseudonym rather than a dictionary-testable model ID. Raw filesystem paths require both `ai_discovery.store_raw_local_paths: true` and a selected projection that preserves the `path` field class. The retired v7 `privacy.disable_redaction` control is not a runtime bypass.
+The local `GET /api/v1/ai-usage` response—and therefore `defenseclaw agent usage`—retains the dedicated `model` block so the operator can see what is installed or loaded. Local scan history retains the same block in `inventory.db`. Records sent to a destination follow that destination's redaction profile. Normal discovery sanitization omits extended model metadata plus model basenames/path hashes, and lifecycle correlation uses an installation-scoped HMAC pseudonym rather than a dictionary-testable model ID. Raw filesystem paths require both `ai_discovery.store_raw_local_paths: true` and a selected projection that preserves the `path` field class. The retired `privacy.disable_redaction` setting no longer turns redaction off.
 
 ## Runtime planes: what actually ran
 
@@ -855,7 +856,7 @@ the socket DACL manually:
 
 ```powershell
 Get-Service DefenseClawSensorHelper, DefenseClawGateway
-defenseclaw enterprise windows status --json
+defenseclaw.exe enterprise windows status --json
 defenseclaw agent discovery runtime permissions
 defenseclaw agent discovery runtime selftest
 ```
@@ -1024,7 +1025,7 @@ inventory disagreed.
 
 ### Where the data lands
 
-Three canonical v8 log families under the existing `ai.discovery` bucket, so
+Three log families under the existing `ai.discovery` bucket, so
 presence and behaviour share one bucket, one destination policy, and one set of
 dashboards:
 
@@ -1077,7 +1078,7 @@ A common production pattern:
 
 <Accordions>
   <Accordion title="Audit shadow AI on a developer laptop">
-    `defenseclaw agent discover --json | jq '[.[] | select(.installed)]'` inventories connectors without a gateway. To include standalone models downloaded by known and unknown macOS applications, enable continuous discovery in `enhanced` mode and run `defenseclaw agent usage --refresh --category local_model --detail`.
+    `defenseclaw agent discover --json | jq '[.agents[] | select(.installed)]'` inventories connectors without a gateway. To include standalone models downloaded by known and unknown macOS applications, enable continuous discovery in `enhanced` mode and run `defenseclaw agent usage --refresh --category local_model --detail`.
   </Accordion>
   <Accordion title="Trigger a fresh scan after onboarding a tool">
     `defenseclaw agent discovery scan`. Faster than waiting for the next scheduled rescan, and fires `ai_discovery` events for the new artifacts so your dashboards reflect the install immediately.
