@@ -362,6 +362,33 @@ class TestPluginInstall(PluginCommandTestBase):
         self.assertTrue(os.path.isdir(os.path.join(cache, "mkt")))
 
     @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
+    def test_remove_deletes_the_codex_cache_copy_of_a_fanned_out_install(self, mock_scan):
+        # GAP-2152: a bare install also copies to Codex's cache; bare and
+        # --connector codex remove must find that copy too.
+        mock_scan.return_value = self._clean_result()
+        roots = {
+            "claudecode": os.path.join(self.tmp_dir, "claude-plugins", "cache"),
+            "codex": os.path.join(self.tmp_dir, "codex-plugins", "cache"),
+        }
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+        self.app.cfg.active_connector = lambda: "claudecode"  # type: ignore[method-assign]
+        self.app.cfg.plugin_dirs = lambda connector=None: [roots[connector or "claudecode"]]  # type: ignore[method-assign]
+        src = self._create_plugin_dir("fan-plugin")
+
+        installed = self._invoke_install(["install", src])
+        self.assertEqual(installed.exit_code, 0, installed.output)
+        self.assertIn("Remove this copy: defenseclaw plugin remove fan-plugin\n", installed.output)
+        self.assertEqual(self.invoke(["remove", "fan-plugin"]).exit_code, 0)
+        for root in roots.values():
+            self.assertFalse(os.path.exists(os.path.join(root, "fan-plugin")))
+
+        self.assertEqual(self._invoke_install(["install", src]).exit_code, 0)
+        removed = self.invoke(["remove", "fan-plugin", "--connector", "codex"])
+        self.assertEqual(removed.exit_code, 0, removed.output)
+        self.assertFalse(os.path.exists(os.path.join(roots["codex"], "fan-plugin")))
+        self.assertTrue(os.path.isdir(os.path.join(roots["claudecode"], "fan-plugin")))
+
+    @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
     def test_install_duplicate_without_force(self, mock_scan):
         mock_scan.return_value = self._clean_result()
         src = self._create_plugin_dir("dup-plugin")
