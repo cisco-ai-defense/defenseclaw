@@ -11,6 +11,29 @@ keywords:
   - silent install
 ---
 
+## Pick your MDM
+
+Find your tool, push the file in the third column, and follow its recipe. New
+to enterprise deployment? Start with
+[Deploy to a fleet](/docs/enterprise/get-started).
+
+| MDM | OS | What you push | Recipe |
+| --- | --- | --- | --- |
+| Microsoft Intune | Windows x64 | A Win32 app (`.intunewin`) with the standalone Setup and your config, plus a PowerShell 7 app | [Intune on Windows](/docs/enterprise/mdm/intune-windows) |
+| Microsoft Intune | macOS (Apple silicon) | A root shell script: the kit wrapper, which downloads the `.pkg` | [Intune on macOS](/docs/enterprise/mdm/intune-macos) |
+| Microsoft Intune | Linux (Ubuntu, RHEL) | A root platform script: the kit wrapper, which downloads the `.deb`, `.rpm` or payload archive | [Intune on Linux](/docs/enterprise/mdm/intune-linux) |
+| Jamf Pro | macOS (Apple silicon) | The `.pkg`, with kit scripts that stage the config and run `ensure` | [Jamf Pro](/docs/enterprise/mdm/jamf) |
+| Iru (formerly Kandji) | macOS (Apple silicon) | A Custom App with the `.pkg` and a Custom Script that runs `ensure`, or one script | [Iru](/docs/enterprise/mdm/kandji) |
+| Workspace ONE UEM | Windows, macOS, Linux | A Win32 app from a ZIP, an internal app with the `.pkg`, or the Linux package, with scripts and sensors | [Workspace ONE](/docs/enterprise/mdm/workspace-one) |
+| Configuration Manager | Windows x64 | An application whose content folder holds the standalone Setup and your config | [Configuration Manager](/docs/enterprise/mdm/configmgr) |
+| Ansible, Puppet, Chef, Salt, apt, dnf | Linux | The `.deb` or `.rpm` package and your config | [Linux configuration management](/docs/enterprise/mdm/linux-config-management) |
+| Anything else | Windows, Linux, macOS | The release file and the kit wrapper, run as SYSTEM or root | This page, from [What you deliver](#what-you-deliver) |
+
+The recipes are templates, checked by simulating each MDM's execution context.
+They have not been run in a live tenant.
+
+## The contract every recipe follows
+
 Any MDM, configuration-management tool or administrator shell that can run a
 program as SYSTEM (Windows) or root (Linux, macOS) can deploy the standalone
 profile. This page is the contract that every recipe in this section follows:
@@ -74,7 +97,7 @@ Verify it once on an administrator workstation that has `cosign` and
 `sha256sum`, then read the pin:
 
 ```bash
-VERSION=1.4.0
+VERSION=1.0.0   # the release you deploy
 FILE="defenseclaw-enterprise-$VERSION-linux-amd64.deb"
 BASE="https://github.com/cisco-ai-defense/defenseclaw/releases/download/$VERSION"
 curl -fsSLO "$BASE/checksums.txt"
@@ -187,7 +210,7 @@ On Linux, with a package:
 
 ```bash
 sudo ./defenseclaw-enterprise.sh \
-  --source /var/cache/mdm/defenseclaw-enterprise-1.4.0-linux-amd64.deb \
+  --source /var/cache/mdm/defenseclaw-enterprise-1.0.0-linux-amd64.deb \
   --sha256 "$PIN" \
   --config-file /etc/mdm/defenseclaw/config.yaml
 ```
@@ -197,7 +220,7 @@ archive, and `--source-url https://...` downloads it):
 
 ```bash
 sudo ./defenseclaw-enterprise.sh \
-  --source /Library/Caches/mdm/defenseclaw-enterprise-1.4.0-darwin-arm64.pkg \
+  --source /Library/Caches/mdm/defenseclaw-enterprise-1.0.0-darwin-arm64.pkg \
   --sha256 "$PIN" \
   --config-file /Library/Management/defenseclaw/config.yaml
 ```
@@ -403,7 +426,7 @@ files, hooks and machine policy are intact.
 
 `detect.ps1 [-MinimumVersion X.Y.Z] [-RequireHealthy]` follows Intune's
 custom-detection rules: "detected" is exit `0` with one line on standard
-output (`DefenseClaw Enterprise 1.4.0`) and nothing on standard error; "not
+output (`DefenseClaw Enterprise <version>`) and nothing on standard error; "not
 detected" is exit `1` with the reason on standard error. It reads the marker
 through the 64-bit registry view, so it works in 32-bit Windows PowerShell.
 
@@ -421,8 +444,8 @@ In every format, an unknown argument or a bad `--format` exits `2` and
 prints nothing on standard output.
 
 Versions are dotted releases. A leading `v` and build metadata (`+...`) are
-ignored, and a prerelease sorts before its release (`1.4.0-rc1` is older than
-`1.4.0`).
+ignored, and a prerelease sorts before its release (`1.0.0-rc1` is older than
+`1.0.0`).
 
 When an installed agent runs without DefenseClaw hooks for one account
 (`agent_unprotected`, `hook_contract_unverified`), `verify`, and so the
@@ -537,7 +560,7 @@ from an elevated PowerShell; `C:\DcSim` holds your copy of the script:
 ```powershell
 $sim = 'C:\DcSim'
 $engine = Join-Path $env:WINDIR 'SysWOW64\WindowsPowerShell\v1.0\powershell.exe'
-$command = "/c `"`"$engine`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $sim\detect.ps1 -MinimumVersion 1.4.0 1>$sim\stdout.txt 2>$sim\stderr.txt`""
+$command = "/c `"`"$engine`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $sim\detect.ps1 -MinimumVersion 1.0.0 1>$sim\stdout.txt 2>$sim\stderr.txt`""
 $action = New-ScheduledTaskAction -Execute (Join-Path $env:WINDIR 'System32\cmd.exe') -Argument $command
 $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
 Register-ScheduledTask -TaskName 'DefenseClaw MDM simulation' -Action $action -Principal $principal -Force | Out-Null

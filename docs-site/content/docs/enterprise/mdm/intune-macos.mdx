@@ -11,6 +11,19 @@ keywords:
 
 <Callout title="Template">This recipe is a template, validated by simulating the MDM execution context. It has not been run in a live tenant.</Callout>
 
+<Callout title="At a glance">
+- **You upload:** one shell script that runs as root: your copy of
+  `packaging/mdm/macos/defenseclaw-enterprise.sh` with its settings block and
+  config filled in.
+- **Install:** the script downloads
+  `defenseclaw-enterprise-<version>-darwin-arm64.pkg` from your HTTPS host,
+  installs it when the version differs, and runs `ensure`, every day.
+- **Detection:** a custom attribute from `detect.sh` with `DC_FORMAT="value"`,
+  which reports the installed version, `not-installed`, `outdated` or
+  `unhealthy`, and the script's own run status.
+- **Uninstall:** a root shell script with `packaging/mdm/macos/uninstall.sh`.
+</Callout>
+
 This recipe deploys DefenseClaw to Macs with one Intune shell script that runs
 as root, and reports the installed version with a custom attribute. It follows
 the [MDM contract](/docs/enterprise/mdm); read that first for the exit codes,
@@ -60,10 +73,10 @@ every value goes here:
 
 ```sh
 DC_ACTION=ensure
-DC_SOURCE_URL="https://downloads.example.com/defenseclaw/defenseclaw-enterprise-1.4.0-darwin-arm64.pkg"
+DC_SOURCE_URL="https://downloads.example.com/defenseclaw/defenseclaw-enterprise-1.0.0-darwin-arm64.pkg"
 DC_SOURCE_SHA256="replace-with-the-64-hex-sha256-from-checksums.txt"
 DC_TRUST_MODE=hash_pinned
-DC_PRODUCT_VERSION="1.4.0"
+DC_PRODUCT_VERSION="1.0.0"
 ```
 
 For Developer ID trust on a signed and notarized release pkg, set
@@ -125,7 +138,7 @@ script's run status in Intune is Success for exit `0` and Failed otherwise.
 ### 4. Report the version with a custom attribute
 
 Copy `packaging/mdm/macos/detect.sh` and set `DC_FORMAT="value"` in its
-settings block. Optionally set `DC_MIN_VERSION="1.4.0"` to report `outdated`
+settings block. Optionally set `DC_MIN_VERSION="<version>"` to report `outdated`
 below that version, and `DC_REQUIRE_HEALTHY=1` to run `verify` and report
 `unhealthy` when it fails.
 
