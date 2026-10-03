@@ -481,10 +481,17 @@ func TestHookToolV8BlockedCallCarriesGuardrailBlockOnEveryDestination(t *testing
 		}
 		// GAP-2525: the turn's agent root names the rule as well, so the
 		// blocked turn shows it in Galileo's trace metadata and in Tempo.
+		// The agent span ends after its tool span, so it can come in a later
+		// export batch: wait for it as for the tool span.
 		var agent *tracepb.Span
-		for _, span := range hookModelV8CapturedSpansFromCapture(capture) {
-			if strings.HasPrefix(span.Name, "invoke_agent") && bytes.Equal(span.SpanId, tool.ParentSpanId) {
-				agent = span
+		for deadline := time.Now().Add(3 * time.Second); agent == nil && time.Now().Before(deadline); {
+			for _, span := range hookModelV8CapturedSpansFromCapture(capture) {
+				if strings.HasPrefix(span.Name, "invoke_agent") && bytes.Equal(span.SpanId, tool.ParentSpanId) {
+					agent = span
+				}
+			}
+			if agent == nil {
+				time.Sleep(10 * time.Millisecond)
 			}
 		}
 		if agent == nil {
