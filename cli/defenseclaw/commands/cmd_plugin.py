@@ -3478,6 +3478,27 @@ def _resolve_plugin_quarantine_restore_scopes(
     return [("", global_entry)]
 
 
+def _quarantined_plugin_alias(pe: Any, name: str, connector: str) -> str:
+    """Map a listed name (folder or nested id) to its quarantine key.
+
+    GAP-2163: quarantine is keyed by manifest ID, but Hermes lists the folder
+    (``photon`` for ``platforms/photon`` with manifest ``photon-platform``).
+    Returns the key only when exactly one quarantined plugin matches.
+    """
+    wanted = os.path.normpath((name or "").strip().strip("/\\"))
+    if not wanted or wanted in (".", ".."):
+        return ""
+    hits = {
+        entry.target_name
+        for entry in pe.list_by_type("plugin")
+        if entry.actions.file == "quarantine"
+        and entry.source_path
+        and (not connector or entry.connector == connector)
+        and (os.sep + os.path.normpath(entry.source_path)).endswith(os.sep + wanted)
+    }
+    return next(iter(hits)) if len(hits) == 1 else ""
+
+
 def _plugin_policy_fanout_connectors(
     app: AppContext,
     pe: Any,
@@ -4121,6 +4142,16 @@ def quarantine(app: AppContext, name: str, reason: str, connector_flag: str) -> 
         ]
     else:
         targets = _plugin_match_dir_scopes(app, plugin_name, connector_flag)
+        if not targets:
+            # GAP-2163: Hermes nests plugins (bundled ``platforms/photon``);
+            # accept the id, manifest name or folder 'plugin list' shows.
+            hermes = _hermes_listed_plugin(app, name, resolved_connector)
+            if hermes is not None and hermes[1] and os.path.isdir(hermes[1]):
+                try:
+                    plugin_name = canonical_plugin_id(hermes[1])[0]
+                except PluginIdentityError as exc:
+                    raise click.ClickException(f"invalid plugin identity: {exc}") from exc
+                targets = [("hermes", hermes[1])]
 
     if not targets:
         if not reason:
@@ -4216,6 +4247,18 @@ def restore(app: AppContext, name: str, restore_path: str, connector_flag: str) 
         if pe_enforcer.is_quarantined(plugin_name, target_connector)
     ]
     if not existing_targets:
+        alias = _quarantined_plugin_alias(
+            pe, name, _resolve_connector_scope(app, connector_flag) if connector_flag else ""
+        )
+        if alias and alias != plugin_name:
+            plugin_name = alias
+            targets = _resolve_plugin_quarantine_restore_scopes(app, pe, plugin_name, connector_flag)
+            existing_targets = [
+                (target_connector, entry)
+                for target_connector, entry in targets
+                if pe_enforcer.is_quarantined(plugin_name, target_connector)
+            ]
+    if not existing_targets:
         click.echo(f"error: {plugin_name!r} is not quarantined", err=True)
         raise SystemExit(1)
 
@@ -4235,18 +4278,14 @@ def restore(app: AppContext, name: str, restore_path: str, connector_flag: str) 
         allowed_roots = (
             _plugin_roots_for_connector(app, resolved_connector) if resolved_connector else _all_active_plugin_dirs(app)
         )
-        # Quarantine state is keyed by canonical manifest ID.  Legacy records
-        # may remember a noncanonical alias; restore always converges to the
-        # canonical directory name instead of recreating that ambiguity.  An
-        # explicit configured root retains its documented "restore under this
-        # root" meaning.
+        # GAP-2163/GAP-2164: restore to the recorded (or --path) location
+        # as-is, so a folder named apart from its manifest ID (Hermes
+        # ``platforms/photon``) and a single-file ``.js``/``.ts`` plugin come
+        # back under their original name. An explicit configured root keeps
+        # its documented "restore under this root" meaning.
         if any(os.path.realpath(target_restore_path) == os.path.realpath(root) for root in allowed_roots):
-            target_restore_path = os.path.join(target_restore_path, plugin_name)
-        else:
-            target_restore_path = os.path.join(
-                os.path.dirname(target_restore_path),
-                plugin_name,
-            )
+            original = os.path.basename(os.path.normpath(entry.source_path)) if entry and entry.source_path else ""
+            target_restore_path = os.path.join(target_restore_path, original or plugin_name)
         real_restore = os.path.realpath(target_restore_path)
         if allowed_roots:
             if not any(

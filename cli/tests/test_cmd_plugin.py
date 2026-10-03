@@ -2209,6 +2209,44 @@ class TestPluginRestoreEdgeCases(PluginCommandTestBase):
         self.assertIn("restored", result.output)
 
 
+class TestPluginQuarantineRestoreOriginalPath(PluginCommandTestBase):
+    """GAP-2163/GAP-2164: quarantine finds listed plugins; restore uses the original path."""
+
+    def test_opencode_single_file_round_trip(self):
+        config = os.path.join(self.tmp_dir, "opencode-config")
+        plugins = os.path.join(config, "plugins")
+        os.makedirs(plugins)
+        source = os.path.join(plugins, "probe.js")
+        with open(source, "w", encoding="utf-8") as handle:
+            handle.write("export const Probe = async () => ({});\n")
+        self.app.cfg.active_connectors = lambda: ["opencode"]  # type: ignore[method-assign]
+        with patch.dict(os.environ, {"OPENCODE_CONFIG_DIR": config}, clear=False):
+            result = self.invoke(["quarantine", "probe", "--connector", "opencode"])
+            self.assertEqual(result.exit_code, 0, result.output)
+            self.assertFalse(os.path.exists(source))
+            result = self.invoke(["restore", "probe", "--connector", "opencode"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertTrue(os.path.isfile(source))
+
+    def test_hermes_nested_plugin_by_listed_name(self):
+        root = os.path.join(self.tmp_dir, "hermes-agent", "plugins")
+        path = os.path.join(root, "platforms", "photon")
+        os.makedirs(path)
+        with open(os.path.join(path, "plugin.yaml"), "w", encoding="utf-8") as handle:
+            handle.write("name: photon-platform\n")
+        self.app.cfg.active_connectors = lambda: ["hermes"]  # type: ignore[method-assign]
+        self.app.cfg.plugin_dirs = lambda connector=None: [root]  # type: ignore[method-assign]
+        rows = [{"id": "photon", "name": "photon-platform", "host_path": path}]
+        with patch("defenseclaw.commands.cmd_plugin._list_hermes_plugins", return_value=rows):
+            result = self.invoke(["quarantine", "photon", "--connector", "hermes"])
+            self.assertEqual(result.exit_code, 0, result.output)
+            self.assertFalse(os.path.exists(path))
+            result = self.invoke(["restore", "photon", "--connector", "hermes"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertTrue(os.path.isfile(os.path.join(path, "plugin.yaml")))
+        self.assertFalse(os.path.exists(os.path.join(root, "platforms", "photon-platform")))
+
+
 class TestPluginInfoHelpers(PluginCommandTestBase):
     """Test _build_plugin_scan_map and _build_plugin_actions_map exception handling."""
 
