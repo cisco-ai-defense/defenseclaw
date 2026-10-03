@@ -18,6 +18,37 @@ import (
 // before it answered health.
 var errGatewayExitedBeforeReadiness = errors.New("gateway process exited before readiness")
 
+// errGatewayReadinessDeadline marks a readiness wait that ran out of time
+// while the gateway was not answering yet or was still STARTING.
+var errGatewayReadinessDeadline = errors.New("gateway did not become ready before timeout")
+
+// errGatewayStillStarting marks an interactive start or restart that reached
+// the readiness deadline and left the live gateway running (GAP-2022).
+var errGatewayStillStarting = errors.New("gateway is still starting")
+
+// readinessError keeps a readiness error's text and adds a sentinel kind.
+type readinessError struct {
+	error
+	kind error
+}
+
+func (e readinessError) Is(target error) bool { return target == e.kind }
+func (e readinessError) Unwrap() error        { return e.error }
+
+// reportGatewayStillStarting tells the user that the gateway did not answer
+// within the readiness deadline, that it was left running, and what to run.
+// The watchdog that restart stopped is started again so it reports whether
+// the gateway comes up. The exit code stays non-zero: protection is not
+// confirmed yet.
+func reportGatewayStillStarting(err error, pid int, logPath string, cfg *config.Config, cfgErr error) error {
+	fmt.Println(Style("STILL STARTING", "fg=yellow", "bold"))
+	_ = startConfiguredWatchdog(cfg, cfgErr, false)
+	return fmt.Errorf("the gateway (PID %d) is still starting and was left running: %v. "+
+		"Protection is not confirmed until it answers. Check it with: defenseclaw-gateway status. "+
+		"If it does not become healthy, run: defenseclaw-gateway restart (check %s for errors)",
+		pid, err, logPath)
+}
+
 // gatewayLogExitReasonMaxBytes bounds how much of gateway.log a failed start
 // reads back.
 const gatewayLogExitReasonMaxBytes = 64 << 10

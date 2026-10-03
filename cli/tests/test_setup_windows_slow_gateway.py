@@ -108,3 +108,25 @@ def test_runtime_wait_budget_tolerates_a_loaded_windows_host():
     else:
         assert cmd_setup._CONNECTOR_RUNTIME_READY_TIMEOUT_SECONDS == 60
         assert cmd_setup._CONNECTOR_RUNTIME_READY_ABSOLUTE_CAP_SECONDS == 300
+
+
+def test_restart_accepts_a_gateway_left_starting_that_answers_later(tmp_path):
+    # GAP-2022: the Go launcher keeps a slow gateway past its readiness
+    # deadline (rc 1, "still starting"); setup waits once more for the API.
+    exe = tmp_path / "defenseclaw-gateway"
+    exe.write_bytes(b"")
+    exe.chmod(0o755)
+    go_text = (_REPO / "internal" / "cli" / "daemon_start_messages.go").read_text(encoding="utf-8")
+    assert cmd_setup._GATEWAY_LEFT_STARTING_MARKER in go_text
+    stderr = f"Error: the gateway (PID 7) {cmd_setup._GATEWAY_LEFT_STARTING_MARKER}: timeout"
+
+    def restart(api_ready):
+        with patch.object(cmd_setup, "_gateway_lifecycle_executable", return_value=str(exe)), patch.object(
+            cmd_setup, "run_pinned_executable", return_value=SimpleNamespace(returncode=1, stdout="", stderr=stderr)
+        ), patch.object(cmd_setup, "_wait_for_defense_gateway_api", return_value=api_ready) as wait, patch.object(
+            cmd_setup, "_gateway_runtime_generation_before_restart", return_value=None
+        ), patch("defenseclaw.gateway.packaged_windows_install_root", return_value=None):
+            return cmd_setup._restart_defense_gateway(str(tmp_path)), wait.call_count
+
+    assert restart(True) == (True, 1)
+    assert restart(False) == (False, 1)
