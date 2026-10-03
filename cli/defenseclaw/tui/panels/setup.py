@@ -996,7 +996,7 @@ class SetupPanelModel:
         restart_hint = ""
         actions = ["[`] Wizards", "[Arrows] Navigate", "[Enter/Click] Edit/Toggle"]
         if changes:
-            actions.extend(("[S] Review & Save", "[R] Revert"))
+            actions.extend(("[S] Review & Save", "\\[r] Revert"))
         if self.restart_queue.pending:
             restart_hint = "Restart pending: " + self.restart_queue.reason + "  [G] restart now  [C] clear"
             actions.extend(("[G] Restart Now", "[C] Clear Restart"))

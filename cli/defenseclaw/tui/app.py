@@ -1171,6 +1171,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         self._config_watcher = ConfigChangeWatcher(config_path) if config_path is not None else None
         self._config_poll_running = False
         self._config_reload_count = 0
+        # Set on each config-editor save: saved sections the CLI already applies.
+        self._setup_cli_live_sections = ""
         self.data_dir = _resolve_data_dir(config, data_dir)
         # Operator's persisted session preferences (palette MRU,
         # per-panel "last seen" cursors, last filter, theme).
@@ -2574,15 +2576,12 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             return versioned
         if width >= 120 and self._tabs_fit_next_to(versioned, width):
             return versioned
-        if width >= 96:
+        if width >= 96 and self._tabs_fit_next_to("DefenseClaw", width, tiny=True):
             # The version is on Overview; its cells go to tab names, so a
             # 200-column screen names every tab instead of a bare "R"
-            # (GAP-1283). Around 160 columns the brand alone is what leaves
-            # tabs as bare key letters, so it goes too (GAP-1544).
-            if self._tabs_fit_next_to("", width, tiny=True) and not self._tabs_fit_next_to(
-                "DefenseClaw", width, tiny=True
-            ):
-                return ""
+            # (GAP-1283). The brand stays only while every tab keeps at least
+            # its tiny name beside it: from 140 to 157 columns it kept its 12
+            # cells while five tabs were bare key letters (GAP-1544, GAP-2150).
             return "DefenseClaw"
         # At 80 columns the brand would push tabs off screen; Overview still
         # shows the wordmark.
@@ -6470,15 +6469,17 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             "": "gateway status pending",
         }.get(gateway_state, "gateway offline")
 
-        sev = self._alert_severity_counts_for_connectors(scope_connectors)
+        # Unfiltered, the Findings card counts every alert, as the Alerts
+        # panel (scope All) does: a connector-less alert (galileo export,
+        # gateway) is not "outside" any roster (GAP-2088).
         fleet_sev = self._alert_severity_counts("")
+        sev = self._alert_severity_counts(selected_connector) if selected_connector else fleet_sev
         critical = sev.get("CRITICAL", 0)
         high = sev.get("HIGH", 0)
         medium = sev.get("MEDIUM", 0)
         low = sev.get("LOW", 0)
         total_findings = critical + high + medium + low
         fleet_findings = sum(fleet_sev.values())
-        outside_roster_findings = max(fleet_findings - total_findings, 0) if scope_connectors and not selected_connector else 0
 
         cfg = self.overview_model.cfg
         # Per-connector modes: "observe, 1 action", or the filtered connector's
@@ -6547,7 +6548,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             blocks_value = total_block
             fleet_blocks_value = fleet_total_block
             outside_roster_blocks = max(fleet_blocks_value - blocks_value, 0) if scope_connectors and not selected_connector else 0
-            finding_timestamps = self._finding_event_timestamps_for_connectors(scope_connectors)
+            finding_timestamps = self._finding_event_timestamps_for_connectors((selected_connector,) if selected_connector else ())
 
             call_detail_parts: list[str] = []
             if allow_count or alert_count or block_decisions:
@@ -6640,12 +6641,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 medium,
                 low,
                 connector=selected_connector,
-                connectors=scope_connectors,
             )
             if selected_connector:
                 findings_detail = f"{findings_detail} · all connectors {fleet_findings}"
-            elif outside_roster_findings:
-                findings_detail = f"{findings_detail} · outside roster {outside_roster_findings}"
 
             metrics = (
                 MetricDatum(
@@ -12028,11 +12026,13 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             facts.append(hints.saved_hint)
         if hints.restart_pending:
             reason = hints.restart_reason
-            facts.append(
-                f"Restart the gateway (G) to apply: {reason}"
-                if reason and reason != "config saved in the TUI"
-                else "Restart the gateway (G) to apply it"
-            )
+            cli_live = self._setup_cli_live_sections
+            if reason and reason != "config saved in the TUI":
+                facts.append(f"Restart the gateway (G) to apply: {reason}")
+            elif cli_live:
+                facts.append(f"CLI uses {cli_live} now · G: restart gateway")
+            else:
+                facts.append("Restart the gateway (G) to apply it")
         # From the aside width up, the aside describes the focused field.
         lines = [head] if self._setup_width() >= ASIDE_MIN_WIDTH else [head, second]
         if facts:
@@ -12176,8 +12176,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 return SetupPanelAction(True, hint="Restart queue cleared.", clear_restart_queue=True)
             return SetupPanelAction(True, hint="No restart is queued.")
         if key == "R":
-            self.setup_model.set_config(self.config)
-            return SetupPanelAction(True, hint="Config reverted from current runtime config.")
+            # R is the global Registries key, as the tab strip and ? show.
+            # It used to revert the config from every Setup view, dropping
+            # unsaved edits; the config editor reverts on r (GAP-2151).
+            return SetupPanelAction(False)
         if self.setup_model.mode == "config":
             return self._handle_setup_config_key(key, character=character)
         return self._handle_setup_wizard_key(key)
@@ -12417,6 +12419,15 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         except Exception as exc:  # noqa: BLE001 - user feedback belongs in status.
             return SetupPanelAction(True, hint=f"Config save failed: {exc}")
         self._schedule_config_save_audit(saved_entries)
+        self._setup_cli_live_sections = _cli_live_config_sections(saved_entries)
+        if self._setup_cli_live_sections:
+            return SetupPanelAction(
+                True,
+                hint=(
+                    f"Config changes saved; CLI commands (mcp set, skill and plugin install) use the new "
+                    f"{self._setup_cli_live_sections} now; the gateway applies it after a restart (G)."
+                ),
+            )
         return SetupPanelAction(True, hint="Config changes saved; restart queued if gateway is running.")
 
     def _schedule_config_save_audit(self, entries: tuple[Any, ...]) -> None:
@@ -15538,6 +15549,19 @@ def _typed_character(event: events.Key) -> str | None:
     return None
 
 
+# Config keys the CLI reads from config.yaml on every command, so CLI
+# admission (mcp set, skill and plugin install) enforces a saved change at
+# once; only the gateway's own checks wait for the restart (GAP-2145).
+_CLI_LIVE_CONFIG_SECTIONS = ("asset_policy",)
+
+
+def _cli_live_config_sections(entries: Iterable[Any]) -> str:
+    """The saved sections the CLI already applies ("asset_policy"), or ""."""
+
+    saved = {str(getattr(entry, "key", "")).split(".", 1)[0] for entry in entries}
+    return ", ".join(section for section in _CLI_LIVE_CONFIG_SECTIONS if section in saved)
+
+
 def _typed_seed(key: str, character: str | None) -> str:
     """Text a Setup key should add to a field: the raw character, else ""."""
 
@@ -15607,7 +15631,7 @@ _SETUP_BUTTON_KEYS = {
     "setup-mode-wizards": "w",
     "setup-edit-list": "E",
     "setup-save": "S",
-    "setup-revert": "R",
+    "setup-revert": "r",
     "setup-restart": "G",
     "setup-clear-restart": "C",
     "setup-wizard-run": "ctrl+r",

@@ -23,7 +23,7 @@ Badges show the real count up to 999 and "999+" above that.
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 
 # Every Textual Tab has one cell of padding on each side.
 TAB_GUTTER = 2
@@ -421,9 +421,82 @@ def fit_tab_labels(
                 if name != active:
                     candidate[name] = ""
             chosen = candidate
+
+    def name_bare_tabs(chosen: dict[str, str]) -> dict[str, str]:
+        """7. Above 80 columns, no tab is a bare key while badges could give way.
+
+        The steps above keep the badge reserve and the Logs/Audit badges, so
+        at 124-136 cells five or six tabs stayed bare keys and a wider strip
+        could name fewer tabs than a narrower one (GAP-2150). Give every tab
+        its shortest name ("Log", "Inv") with the minor badges dropped and
+        the Alerts count compact; then win back, while the strip fits, the
+        tiny names, the Alerts count, the minor badges and the longer names.
+        The active tab keeps the name it has.
+        """
+
+        bare = [name for name in ranked if name != active and not chosen[name]]
+        if width <= NARROW_STRIP or not bare:
+            return chosen
+        saved = (set(compact), set(no_badge))
+        minor = [name for name in reversed(ranked) if name not in {active, "alerts"} and unread.get(name, 0)]
+
+        def shortest(name: str) -> str:
+            tiny = _names(name, titles[name])[0]
+            fewer = SINGULAR_LABELS.get(name, "")
+            return fewer if fewer and len(fewer) < len(tiny) else tiny
+
+        trial = {name: (text if name == active or not text else shortest(name)) for name, text in chosen.items()}
+        no_badge.update(minor)
+        if active != "alerts" and unread.get("alerts", 0):
+            compact.add("alerts")
+        for name in bare:
+            candidate = {**trial, name: shortest(name)}
+            if width_of(candidate) > width:
+                break
+            trial = candidate
+        if sum(1 for name in keys if name != active and not trial[name]) >= len(bare):
+            compact.clear()
+            compact.update(saved[0])
+            no_badge.clear()
+            no_badge.update(saved[1])
+            return chosen
+
+        def keep(change: Callable[[], object]) -> None:
+            """Apply ``change`` (a name or badge step); undo it when it overflows."""
+
+            before = (dict(trial), set(compact), set(no_badge))
+            change()
+            if width_of(trial) > width:
+                trial.clear()
+                trial.update(before[0])
+                compact.clear()
+                compact.update(before[1])
+                no_badge.clear()
+                no_badge.update(before[2])
+
+        def rename(name: str, tier: int) -> None:
+            text = _names(name, titles[name])[tier]
+            if len(text) > len(trial[name]):
+                trial[name] = text
+
+        for name in ranked:
+            if name != active and trial[name]:
+                keep(lambda name=name: rename(name, 0))
+        keep(lambda: compact.discard("alerts"))
+        for name in reversed(minor):
+            keep(lambda name=name: (no_badge.discard(name), compact.add(name)))
+        for tier in (1, 2):
+            for name in ranked:
+                if name != active and trial[name]:
+                    keep(lambda name=name, tier=tier: rename(name, tier))
+        for name in reversed(minor):
+            if name not in saved[0]:
+                keep(lambda name=name: compact.discard(name))
+        return trial
+
     if active in keys:
         chosen = longest_active_name(chosen)
-    return render(chosen)
+    return render(name_bare_tabs(chosen))
 
 
 __all__ = [

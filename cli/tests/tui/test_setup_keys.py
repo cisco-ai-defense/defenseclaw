@@ -118,6 +118,21 @@ def test_digits_are_left_for_panel_switching(tmp_path, monkeypatch) -> None:
     assert not app._handle_setup_key("1").handled  # noqa: SLF001
 
 
+def test_capital_r_is_left_for_registries_and_never_reverts(tmp_path, monkeypatch) -> None:
+    """GAP-2151: R switches to Registries from Setup; only r reverts edits."""
+
+    app = _app(tmp_path, monkeypatch)
+    reverts: list[object] = []
+    monkeypatch.setattr(app.setup_model, "set_config", reverts.append)
+    for view in ("wizards", "config"):
+        _enter_view(app, view, setup_keys.SETUP_KEYMAPS[view][0])
+        assert not app._handle_setup_key("R").handled  # noqa: SLF001
+    assert reverts == []
+
+    assert app._handle_setup_key("r").handled  # noqa: SLF001 - config editor revert
+    assert len(reverts) == 1
+
+
 def test_wizard_list_moves_in_display_order(tmp_path, monkeypatch) -> None:
     from defenseclaw.tui.panels import setup_catalog
 

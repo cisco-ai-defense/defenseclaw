@@ -168,7 +168,9 @@ def test_fifteen_tabs_fit_at_120_columns(width: int) -> None:
     assert labels["setup"] == "0 Setup"
     for name, key, _label in FIFTEEN_PANELS:
         assert labels[name].startswith(key)
-    assert "(12)" in labels["alerts"]
+    # The Alerts count stays; it may be compact so more tabs keep a name
+    # (GAP-2150).
+    assert "(12)" in labels["alerts"] or "¹²" in labels["alerts"]
 
 
 def test_tabs_name_the_most_important_panels_first() -> None:
