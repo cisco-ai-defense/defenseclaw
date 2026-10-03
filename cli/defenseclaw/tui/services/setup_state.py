@@ -799,8 +799,10 @@ def looks_like_secret_value(value: str) -> bool:
     if not stripped:
         return False
     lower = stripped.lower()
+    from defenseclaw.llm_keys import looks_like_key_shape  # noqa: PLC0415
+
     if (
-        stripped.startswith(("sk-", "ghp_", "gho_", "ghs_", "AIza", "AKIA", "ASIA", "eyJ"))
+        looks_like_key_shape(stripped)  # GAP-2594: shapes, shared with the CLI
         or "bearer " in lower
         or "-----BEGIN " in stripped
     ):

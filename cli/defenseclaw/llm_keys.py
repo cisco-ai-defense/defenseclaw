@@ -36,7 +36,26 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 from pathlib import Path
+
+# Well-known key and token shapes. Match the shape, not a bare prefix:
+# ASIA_PACIFIC_KEY and AKIA_ROTATED_KEY are env var names, not keys (GAP-2594).
+_KEY_SHAPE_RE = re.compile(
+    r"(?:sk-|ghp_|gho_|ghs_|xoxb-|xoxp-)"
+    r"|(?:AKIA|ASIA)[A-Z0-9]{16}"
+    r"|AIza[0-9A-Za-z_-]{30}"
+    r"|eyJ[A-Za-z0-9_-]+\."
+)
+
+
+def looks_like_key_shape(value: str) -> bool:
+    """True when ``value`` starts like a known API key or token.
+
+    The CLI (setup/init ``--*-api-key-env``) and the TUI both use this, so a
+    value one refuses or redacts as a key is treated the same by the other.
+    """
+    return bool(_KEY_SHAPE_RE.match((value or "").strip()))
 
 
 def detect_api_key_env(model: str) -> str:

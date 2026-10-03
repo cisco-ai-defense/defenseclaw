@@ -54,6 +54,7 @@ from defenseclaw.config import (
     LLMTLSConfig,
     VertexKeyConfig,
 )
+from defenseclaw.llm_keys import looks_like_key_shape
 
 _CATALOG_RESOURCE = "_data/llm/model_catalog.json"
 
@@ -649,11 +650,22 @@ def pick_key_env(
         suggested = suggestions[0] if suggestions else DEFENSECLAW_LLM_KEY_ENV
         if len(suggestions) > 1:
             click.echo(f"    Common env vars: {', '.join(suggestions)}")
-        name = click.prompt(
-            "  API key env var name",
-            default=suggested,
-            show_default=True,
-        ).strip()
+        while True:
+            name = click.prompt(
+                "  API key env var name",
+                default=suggested,
+                show_default=True,
+            ).strip()
+            if not looks_like_key_shape(name):
+                break
+            click.echo(f"    Enter the NAME of the variable that holds the key, e.g. {suggested}.")
+            click.echo(f"    Store the key itself with 'defenseclaw keys set {suggested}'.")
+    if flag_value and looks_like_key_shape(name):
+        raise click.BadParameter(
+            f"takes the NAME of the variable that holds the key, e.g. {DEFENSECLAW_LLM_KEY_ENV}; "
+            f"store the key itself with 'defenseclaw keys set {DEFENSECLAW_LLM_KEY_ENV}'.",
+            param_hint=f"'{flag_name}'",
+        )
     if not _ENV_KEY_RE.match(name):
         raise click.BadParameter(
             f"invalid env var name: {name!r} (must be ASCII [A-Za-z_][A-Za-z0-9_]*)"

@@ -1089,6 +1089,10 @@ def setup_llm(
         )
         return
 
+    if api_key_env is not None:
+        # Refuse a pasted key before anything is written (GAP-2593).
+        api_key_env = _validated_api_key_env_name(api_key_env, "'--api-key-env'", DEFENSECLAW_LLM_KEY_ENV)
+
     previous_llm = _llm_audit_model(cfg.resolve_llm(target_path))
 
     if not non_interactive and provider and model:
@@ -2805,18 +2809,24 @@ def setup_mcp_scanner(
         _log_setup_action(app, ACTION_SETUP_MCP_SCANNER, " ".join(parts), allow_offline=True)
 
 
-def _validated_api_key_env_name(value: str, param_hint: str = "'--api-key-env'") -> str:
+def _validated_api_key_env_name(
+    value: str,
+    param_hint: str = "'--api-key-env'",
+    example: str = "CISCO_AI_DEFENSE_API_KEY",
+) -> str:
     """Refuse a pasted key in --api-key-env, which takes a variable NAME (GAP-2569).
 
     Without this check the key itself was saved to config.yaml as
     cisco_ai_defense.api_key_env. An empty value still clears the field.
     setup guardrail --cisco-api-key-env writes the same field (GAP-2579).
+    The LLM and judge key fields use it too, with example DEFENSECLAW_LLM_KEY
+    (GAP-2593).
     """
     name = value.strip()
     if name and (not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) or _looks_like_secret(name)):
         raise click.BadParameter(
-            "takes the NAME of the variable that holds the key, e.g. CISCO_AI_DEFENSE_API_KEY; "
-            "store the key itself with 'defenseclaw keys set CISCO_AI_DEFENSE_API_KEY'.",
+            f"takes the NAME of the variable that holds the key, e.g. {example}; "
+            f"store the key itself with 'defenseclaw keys set {example}'.",
             param_hint=param_hint,
         )
     return name
@@ -6475,6 +6485,11 @@ def setup_guardrail(
 
     if cisco_api_key_env is not None:
         cisco_api_key_env = _validated_api_key_env_name(cisco_api_key_env, "'--cisco-api-key-env'")
+    if judge_api_key_env is not None:
+        # Same check for the judge key's env var name (GAP-2593).
+        judge_api_key_env = _validated_api_key_env_name(
+            judge_api_key_env, "'--judge-api-key-env'", DEFENSECLAW_LLM_KEY_ENV
+        )
 
     gc = app.cfg.guardrail
     explicit_connector = normalize_connector(agent_name) if agent_name else None
@@ -12930,6 +12945,10 @@ def _make_guardrail_connector_setup_command(connector: str) -> click.Command:
         if cisco_api_key_env is not None:
             # Refuse a pasted key before the alias writes anything (GAP-2579).
             cisco_api_key_env = _validated_api_key_env_name(cisco_api_key_env, "'--cisco-api-key-env'")
+        if judge_api_key_env is not None:
+            judge_api_key_env = _validated_api_key_env_name(
+                judge_api_key_env, "'--judge-api-key-env'", DEFENSECLAW_LLM_KEY_ENV
+            )
         _setup_guardrail_connector_alias(
             app,
             connector=connector,
@@ -16317,17 +16336,15 @@ def _check_openclaw_gateway(host: str = "127.0.0.1", port: int = 18789) -> bool:
 def _looks_like_secret(value: str) -> bool:
     """Detect if a value looks like an actual secret rather than an env var name.
 
-    Keep the key prefixes in step with the TUI's looks_like_secret_value
-    (tui/services/setup_state.py): a value the TUI redacts as a secret must
-    also be refused here (GAP-2581).
+    The key shapes come from llm_keys.looks_like_key_shape, which the TUI's
+    looks_like_secret_value uses too: a value the TUI redacts as a secret must
+    also be refused here (GAP-2581, GAP-2594).
     """
     if not value:
         return False
-    prefixes = (
-        "sk-", "sk-ant-", "sk-proj-", "ghp_", "gho_", "ghs_", "xoxb-", "xoxp-",
-        "AIza", "AKIA", "ASIA", "eyJ",
-    )
-    if any(value.startswith(p) for p in prefixes):
+    from defenseclaw.llm_keys import looks_like_key_shape
+
+    if looks_like_key_shape(value):
         return True
     if "bearer " in value.lower() or "-----BEGIN " in value:
         return True

@@ -854,14 +854,19 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
 
         if connector != "none":
             _apply_first_run_choices(cfg, options, connector, profile, scanner_mode)
-        elif new_config:
-            # A fresh config defaults to OpenClaw. Persist the explicit
-            # "no connector" markers (the state `setup remove --force` leaves)
-            # so status and uninstall do not treat an uninstalled OpenClaw as
-            # the active connector (GAP-1056).
-            cfg.claw.mode = ""
-            cfg.guardrail.connector = ""
-            cfg.guardrail.connectors = {}
+        else:
+            if new_config:
+                # A fresh config defaults to OpenClaw. Persist the explicit
+                # "no connector" markers (the state `setup remove --force`
+                # leaves) so status and uninstall do not treat an uninstalled
+                # OpenClaw as the active connector (GAP-1056).
+                cfg.claw.mode = ""
+                cfg.guardrail.connector = ""
+                cfg.guardrail.connectors = {}
+            # GAP-2592: no connector still saves the scanner mode and the
+            # LLM / Cisco AI Defense flags (llm.* also drives the scanners).
+            cfg.guardrail.scanner_mode = scanner_mode
+            _apply_first_run_llm_choices(cfg, options)
     except BaseException as exc:
         rollback_error = _restore_first_run_selection_transaction(transaction_app, setup_snapshot)
         if rollback_error:
@@ -1479,7 +1484,11 @@ def _apply_first_run_choices(
     elif severity and selected_pc is not None and selected_pc.hilt is not None:
         selected_pc.hilt.min_severity = cfg.guardrail.hilt.min_severity
     pin_cursor_posture(cfg.guardrail, connector)
+    _apply_first_run_llm_choices(cfg, options)
 
+
+def _apply_first_run_llm_choices(cfg: Config, options: FirstRunOptions) -> None:
+    """Save the unified LLM and Cisco AI Defense flags, with or without a connector."""
     if options.llm_provider:
         cfg.llm.provider = options.llm_provider.strip()
     if options.llm_model:
