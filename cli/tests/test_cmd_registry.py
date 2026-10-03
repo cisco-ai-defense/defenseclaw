@@ -524,6 +524,28 @@ class TestRegistryApproveReject(RegistryCommandTestBase):
         self.assertNotEqual(result.exit_code, 0)
 
 
+    def test_approve_missing_entry_in_synced_source_names_entries(self):
+        # GAP-2281: the source was synced; don't tell the operator to sync.
+        result = self.runner.invoke(registry, [
+            "approve", "corp-skills", "no-such-entry", "--no-repromote",
+        ], obj=self.app)
+        self.assertEqual(result.exit_code, 2, result.output)
+        self.assertIn("corp-skills has no skill entry 'no-such-entry'", result.output)
+        self.assertIn("entries: demo-skill", result.output)
+        self.assertNotIn("sync` first", result.output)
+
+    def test_approve_in_never_synced_source_says_sync_first(self):
+        self.invoke([
+            "add", "fresh", "--kind", "http_yaml", "--content", "skill",
+            "--url", "https://catalog.example.com/fresh.yaml", "--non-interactive",
+        ])
+        result = self.runner.invoke(registry, [
+            "reject", "fresh", "demo-skill", "--no-repromote",
+        ], obj=self.app)
+        self.assertEqual(result.exit_code, 2, result.output)
+        self.assertIn("run `defenseclaw registry sync fresh` first", result.output)
+
+
 class TestRegistryRequire(RegistryCommandTestBase):
     def test_require_skill(self):
         result = self.invoke([
@@ -1007,6 +1029,22 @@ class TestFileAdapterPathValidation(RegistryCommandTestBase):
             "--non-interactive",
         ])
         self.assertEqual(result.exit_code, 0, result.output)
+
+    def test_add_file_kind_warns_when_manifest_missing(self):
+        # GAP-2282: register it, but say the path does not exist yet.
+        missing = os.path.join(self.tmp_dir, "nope.yaml")
+        result = self.invoke([
+            "add", "local", "--kind", "file", "--content", "mcp",
+            "--url", missing, "--non-interactive",
+        ])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn(f"{missing} does not exist yet", result.output)
+        present = os.path.join(self.tmp_dir, "present.yaml")
+        with open(present, "w") as fh:
+            fh.write("schema_version: 1\nentries: []\n")
+        result = self.invoke(["edit", "local", "--url", present, "--json"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertNotIn("warning", json.loads(result.output))
 
     def test_add_file_kind_accepts_tilde_expansion(self):
         # ``~/manifest.yaml`` expands to an absolute path so it should
