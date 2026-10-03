@@ -179,6 +179,14 @@ func TestLifecycleFailureOfAnInstalledVerifyNamesRepair(t *testing.T) {
 	if err := lifecycleFailure(result, false, repair); strings.Contains(err.Error(), "repair") {
 		t.Fatalf("not installed: %q, want no repair advice", err)
 	}
+	// GAP-2246: a status that found another run in progress checked nothing.
+	busy := enterprisestatus.New(enterpriseunix.ActionStatus, "standalone", "darwin", "1.0.0")
+	busy.Installed = true
+	busy.AddError("lifecycle_busy", "another DefenseClaw enterprise lifecycle run is in progress")
+	busy.Finish("darwin", enterprisestatus.UnixExitBusy)
+	if err := lifecycleFailure(busy, false, repair); strings.Contains(err.Error(), "repair") {
+		t.Fatalf("busy status: %q, want no repair advice", err)
+	}
 }
 
 // A verify that found another lifecycle run holding the lock printed an

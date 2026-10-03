@@ -153,7 +153,9 @@ func lifecycleFailure(result *enterprisestatus.Result, asJSON bool, repairComman
 		return withExitCode(errors.New(lifecycleErrorSummary(result)), result.ExitCode)
 	}
 	message := fmt.Sprintf("%s failed; see the %s listed above", result.Action, countNoun(len(result.Errors), "problem"))
-	if repairCommand != "" && result.Installed &&
+	// A status that found another run in progress checked nothing, so
+	// repair is not the next step (GAP-2246).
+	if repairCommand != "" && result.Installed && !lifecycleResultHasError(result, "lifecycle_busy") &&
 		(result.Action == enterpriseunix.ActionVerify || result.Action == enterpriseunix.ActionStatus) {
 		target := "them"
 		if len(result.Errors) == 1 {

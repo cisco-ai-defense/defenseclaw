@@ -37,6 +37,15 @@ const codeUnitFailed = "unit_failed"
 // readOnly handles status and verify.
 func (l *lifecycle) readOnly(ctx context.Context) int {
 	env, r := l.env, l.result
+	// status waits for a run that holds the lock the same way, because the
+	// run stops and starts the services (GAP-2246). It still reports the
+	// recorded deployment below, so detection sees it installed.
+	statusBusy := false
+	if l.opts.Action == ActionStatus && env.Geteuid() == 0 {
+		lock, err := env.acquireLock(ctx)
+		statusBusy = errors.Is(err, errLockBusy)
+		lock.release()
+	}
 	if l.opts.Action == ActionVerify {
 		// The daily verify can start while another run changes the
 		// deployment: ensure restarts the timer, and a Persistent timer past
@@ -64,6 +73,14 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 	}
 	if pending, _ := env.loadPending(); pending != nil {
 		r.TransactionPending = true
+	}
+	if statusBusy {
+		if record != nil {
+			r.Installed = true
+			r.InstalledVersion = record.ProductVersion
+		}
+		r.AddError(codeBusy, errLockBusy.Error()+"; it may be stopping or restarting the services, so status checked nothing; "+statusBusyNextStep)
+		return enterprisestatus.BusyExitCode(env.GOOS)
 	}
 	if record == nil {
 		r.Installed = false
