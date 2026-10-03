@@ -18,13 +18,16 @@ from defenseclaw.tui.app import PANELS, _hanging_text
 from defenseclaw.tui.panels.setup import SetupWizard
 from defenseclaw.tui.panels.setup_catalog import task_status
 from defenseclaw.tui.services.overview_state import OverviewConfig, OverviewPanelModel
+from defenseclaw.tui.widgets import tab_fit
 from defenseclaw.tui.widgets.tab_fit import fit_tab_labels
 from rich.console import Console
 
 
-def test_registries_tab_keeps_its_name_on_every_panel_at_200_columns() -> None:
+def test_registries_tab_keeps_its_name_on_every_panel_at_200_columns(monkeypatch) -> None:
     # GAP-2560: at 200 columns (186 strip cells) R read "R Registry" beside 11
-    # free cells and "R Registries" only while it was open.
+    # free cells and "R Registries" only while it was open. Superscript
+    # badges, as on macOS and Linux (Windows uses wider "(181)" badges).
+    monkeypatch.setattr(tab_fit, "_PLAIN_BADGE", False)
     unread = {"alerts": 181, "logs": 1500, "audit": 693, "activity": 2, "ai": 4}
     for active in ("overview", "mcps", "policies", "registries", "ai"):
         counts = {name: 0 if name == active and name != "alerts" else count for name, count in unread.items()}
