@@ -133,7 +133,7 @@ Each entry is run through the MCP scanner (transport probe + behavioral introspe
     },
     'list': {
       type: 'subcommand',
-      description: 'Tabular listing with cached entry counts (clean/warning/blocked) per source. --json for machine-readable output.',
+      description: 'Tabular listing with cached entry counts (clean/warning/blocked/error) per source; a source whose last sync failed is named below the table. --json for machine-readable output.',
     },
     'show <id>': {
       type: 'subcommand',
@@ -216,7 +216,10 @@ The requirement is enforced only while asset policy is on:
 install starts with `enabled: false` and `mode: observe`, so `require` alone
 blocks nothing and the CLI says so. Add `--enforce` to turn both on in the same
 save, or set them in the TUI config editor (Setup → `c` → Asset Policy). In
-`observe` mode an unregistered asset is logged, not blocked.
+`observe` mode an unregistered asset is logged, not blocked. To turn
+enforcement back off, run
+`defenseclaw registry require --type mcp --disabled --no-enforce`
+(`--no-enforce` sets `mode: observe`).
 
 A registry rule that pins `transport` treats `http` and `streamable-http` as
 the same HTTP transport, and a URL server added without `--transport` counts as
@@ -267,7 +270,7 @@ defenseclaw registry reject  corp-skills evil-skill --type skill
 
 ## Sync schedules
 
-Today, syncing is **on demand**. The `--auto-sync` and `--sync-interval-hours` flags on `add` / `edit` are persisted but the runtime does not poll. Run `registry sync --all` from a cron / systemd timer / GitHub Actions schedule until scheduled sync ships in a future release:
+Today, syncing is **on demand**: scheduled sync is not available yet, and `add` / `edit` refuse `--auto-sync` and `--sync-interval-hours`. Run `registry sync --all` from a cron / systemd timer / GitHub Actions schedule until scheduled sync ships in a future release:
 
 ```bash
 # /etc/cron.d/defenseclaw-registry
