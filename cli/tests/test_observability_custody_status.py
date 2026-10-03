@@ -430,8 +430,10 @@ def test_native_delivery_summary_covers_all_states_and_doctor_status_parity(caps
     status_output = capsys.readouterr().out
     assert "collector/runtime health does not prove accepted delivery" in status_output
     assert "bounded 24h, truncated; counts partial" in status_output
-    for label in ("all-drop-only", "partial-drop-only", "accepted", "no-evidence"):
-        assert label in status_output
+    # The detail names the state once; no "accepted — accepted ..." (GAP-2549).
+    for row in summary.connectors:
+        assert f"{row.connector}  {row.detail[:24]}" in status_output
+    assert "partial-drop-only" not in status_output
 
     result = _DoctorResult()
     _check_connector_export_custody(report, result)
