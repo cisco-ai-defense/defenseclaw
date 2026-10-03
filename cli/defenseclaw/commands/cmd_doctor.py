@@ -2839,10 +2839,13 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
                     audit_db = str(getattr(cfg, "audit_db", "") or "")
                     reason = _telemetry_error_reason(details, audit_db) if sub == "telemetry" else ""
                     _, next_step, freed = _audit_write_failure(health, audit_db) if reason else ("", "", False)
+                    # A freed audit disk is a WARN that clears on the next
+                    # event, so do not lead with the raw "error" (GAP-2139).
+                    shown_state = "recovering" if freed else state
                     _emit(
                         "warn" if freed else "fail",
                         f"  └─ {sub}",
-                        f"{state} — {reason}" if reason else state,
+                        f"{shown_state} — {reason}" if reason else state,
                         r=r,
                         remediation=next_step,
                     )
