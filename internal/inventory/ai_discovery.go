@@ -428,12 +428,14 @@ const (
 )
 
 // maxEvidencePerSignal caps the number of evidence rows the engine
-// will accept on a single signal. The bound is generous (manifests
-// + lockfiles + version pins for one component rarely produce more
-// than a dozen rows in practice) but it is finite so a malicious
-// pack cannot DOS the gateway or the SQLite store via a single
-// pathological signal.
-const maxEvidencePerSignal = 32
+// will accept on a single signal. A skills folder is one signal with
+// one row per skill, and a stock Hermes install alone bundles 58, so
+// at 32 every Hermes account stayed partial (cap_exceeded) and half
+// its skills were never named (GAP-2379). The bound matches the
+// per-user report's list limit (maxUserScanField) and stays finite
+// so a malicious pack cannot DOS the gateway or the SQLite store via
+// a single pathological signal.
+const maxEvidencePerSignal = 256
 
 type AIDiscoverySummary struct {
 	ScanID            string            `json:"scan_id"`
@@ -1955,6 +1957,12 @@ func (s *ContinuousDiscoveryService) signalFromMCPConfigPath(sig AISignature, pa
 // "unparseable" from "no servers declared". The plain readMCPServerNames
 // remains for callers that don't need the reason.
 func readMCPServerNamesWithErr(path string) ([]string, error) {
+	// An empty MCP config declares no server; it is not malformed.
+	// Antigravity leaves a 0-byte mcp_config.json, which read as a
+	// parse error and so as an MCP server row (GAP-2337).
+	if isBlankFile(path) {
+		return nil, nil
+	}
 	entries, err := parseMCPConfigForNames(path)
 	if err != nil {
 		return nil, err
@@ -1967,6 +1975,19 @@ func readMCPServerNamesWithErr(path string) ([]string, error) {
 		}
 	}
 	return names, nil
+}
+
+// isBlankFile reports a small regular file holding only whitespace.
+func isBlankFile(path string) bool {
+	st, err := os.Stat(path)
+	if err != nil || !st.Mode().IsRegular() || st.Size() > 4096 {
+		return false
+	}
+	if st.Size() == 0 {
+		return true
+	}
+	raw, err := os.ReadFile(path) // #nosec G304 -- catalog MCP config path
+	return err == nil && strings.TrimSpace(string(raw)) == ""
 }
 
 // readMCPServerNames parses `path` with the appropriate format-specific
