@@ -12687,6 +12687,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             if (field.flag and field.flag in driver_flags) or field.label in driver_labels:
                 self.setup_model.recompute_dependent_fields()
 
+    def _setup_on_first_section(self) -> bool:
+        order = setup_catalog.section_order(self.setup_model.sections)
+        return bool(order) and self.setup_model.active_section == order[0]
+
     def _move_setup_section(self, delta: int) -> None:
         if not self.setup_model.sections:
             return
@@ -12795,6 +12799,12 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             target = step_nav(items, delta)
             if target == setup_center.NAV_CONFIG:
                 setup_center.select_nav(self.setup_model, target)
+                if delta > 0:
+                    # Right enters on the first section, so Left there steps
+                    # straight back to the group it came from (GAP-2559).
+                    order = setup_catalog.section_order(self.setup_model.sections)
+                    if order:
+                        self.setup_model.select_section(order[0])
                 return SetupPanelAction(True, hint="Config editor opened. Esc or w goes back to the tasks.")
             self.setup_model.active_wizard = setup_catalog.step_group(self.setup_model.active_wizard, delta)
             return SetupPanelAction(True)
@@ -12920,6 +12930,13 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if key in {"tab", "right", "]"}:
             self._move_setup_section(1)
             return SetupPanelAction(True)
+        if key in {"left", "["} and self._setup_on_first_section():
+            # Left mirrors the Right that opened the editor: back to the last
+            # task group instead of wrapping to the last section (GAP-2559).
+            items = setup_center.task_nav(self.setup_model, self._setup_task_statuses())
+            group = items[-2] if len(items) > 1 else None
+            if group is not None and setup_center.select_nav(self.setup_model, group.key):
+                return SetupPanelAction(True, hint=f"Back to {group.label}. Tab/Shift+Tab switch config sections.")
         if key in {"shift+tab", "left", "["}:
             self._move_setup_section(-1)
             return SetupPanelAction(True)
