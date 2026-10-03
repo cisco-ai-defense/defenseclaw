@@ -1851,12 +1851,41 @@ func (s *ContinuousDiscoveryService) recordScanIfPossible(report AIDiscoveryRepo
 	}
 }
 
+// serviceListOnlyInstallFolders are the per-user install folders that the
+// managed Windows enumerator grants the gateway service list-only rights on
+// (inventoryDACLListOnlyDirs in internal/enterprisehooks). An agent that
+// updates itself replaces its folder (Amp recreates @ampcode\cli at start),
+// and the new folder lacks the grant until the next enumerator pass. A
+// folder the service is denied still exists, so it is not reported removed
+// and then discovered again with a new first_seen (GAP-2034).
+var serviceListOnlyInstallFolders = map[string]bool{
+	"$LOCALAPPDATA/Kiro-Cli":                 true,
+	"$LOCALAPPDATA/copilot/pkg":              true,
+	"$LOCALAPPDATA/devin/cli":                true,
+	"$APPDATA/npm/node_modules/@ampcode/cli": true,
+	"$LOCALAPPDATA/cursor-agent":             true,
+}
+
+// discoveryConfigStat is os.Stat; tests replace it.
+var discoveryConfigStat = os.Stat
+
+// configPathPresent reports whether a config candidate is on disk. On a
+// service-context scan a list-only install folder the service is denied
+// counts as present (serviceListOnlyInstallFolders).
+func (s *ContinuousDiscoveryService) configPathPresent(candidate, path string) bool {
+	_, err := discoveryConfigStat(path)
+	if err == nil {
+		return true
+	}
+	return len(s.opts.homeOwners) > 0 && serviceListOnlyInstallFolders[candidate] && errors.Is(err, os.ErrPermission)
+}
+
 func (s *ContinuousDiscoveryService) detectConfigPaths() []AISignal {
 	var out []AISignal
 	for _, sig := range s.catalog {
 		for _, candidate := range sig.ConfigPaths {
 			for _, path := range s.expandCandidatePath(candidate) {
-				if pathExists(path) {
+				if s.configPathPresent(candidate, path) {
 					category := SignalWorkspaceArtifact
 					if sig.SupportedConnector != "" {
 						category = SignalSupportedConnector
