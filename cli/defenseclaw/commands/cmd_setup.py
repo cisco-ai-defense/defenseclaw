@@ -12598,6 +12598,35 @@ def _refuse_hook_switch_over_configured_proxy(connector: str | None) -> None:
         _refuse_hook_setup_over_proxy_connector(wanted, proxy)
 
 
+
+def _refuse_hook_set_over_configured_proxy(connectors) -> None:
+    """Refuse a set of hook connectors over a guarded proxy with one message (GAP-2476).
+
+    ``init --observe-all``/``--action-connectors``/discovery can pick several
+    hook connectors; the refusal names all of them instead of the first one.
+    """
+    wanted: list[str] = []
+    for connector in connectors:
+        name = normalize_connector((connector or "").strip())
+        if name and name != "none" and name not in _PROXY_BACKED_CONNECTORS and name not in wanted:
+            wanted.append(name)
+    if len(wanted) <= 1:
+        _refuse_hook_switch_over_configured_proxy(wanted[0] if wanted else None)
+        return
+    proxy = _configured_sole_guarded_proxy_connector()
+    if not proxy:
+        return
+    proxy_label = _CONNECTOR_META.get(proxy, {}).get("label", proxy)
+    labels = sorted(_CONNECTOR_META.get(name, {}).get("label", name) for name in wanted)
+    names = ", ".join(labels[:-1]) + f" and {labels[-1]}"
+    raise click.ClickException(
+        f"this install guards {proxy_label}, which is proxy-backed and cannot run next to hook "
+        f"connectors: setting up {names} would remove the DefenseClaw plugin from {proxy_label} "
+        f"and leave it unguarded. No changes made. To switch this install to hook connectors, run "
+        f"'defenseclaw setup <connector> --replace' for one of them, then run this init command "
+        f"again to add the rest."
+    )
+
 def _hook_peers_of_proxy_connector(gc, connector: str) -> list[str]:
     """Hook connectors configured next to a proxy-backed *connector*.
 
