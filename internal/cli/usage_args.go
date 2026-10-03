@@ -12,6 +12,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -60,18 +62,45 @@ func usageError(c *cobra.Command, err error) error {
 
 // usageMessage is err with the command's usage line and the --help pointer.
 func usageMessage(c *cobra.Command, err error) string {
-	use := c.UseLine()
+	root := c.Root().Name()
+	named := func(text string) string { return text }
+	if invoked := invokedGatewayPath(root); invoked != "" && os.Getenv(delegatedFromEnv) != "defenseclaw" {
+		// Name the binary as it was run, so the hint runs as typed (GAP-2189).
+		named = func(text string) string {
+			if !strings.HasPrefix(text, root) {
+				return text
+			}
+			return invoked + strings.TrimPrefix(text, root)
+		}
+	}
+	use := named(c.UseLine())
 	if c.HasAvailableSubCommands() {
 		// Show the subcommand form too, as --help does (GAP-1622).
-		group := c.CommandPath() + " [command]"
+		group := named(c.CommandPath()) + " [command]"
 		if c.Runnable() {
 			use += "\n       " + group
 		} else {
 			use = group
 		}
 	}
-	msg := fmt.Sprintf("%s\nUsage: %s\nTry '%s --help' for help.", plainFlagValueError(err), use, c.CommandPath())
+	msg := fmt.Sprintf("%s\nUsage: %s\nTry '%s --help' for help.", plainFlagValueError(err), use, named(c.CommandPath()))
 	return delegatedCommandText(c, msg)
+}
+
+// invokedGatewayPath is the absolute path the gateway binary was run by,
+// when it was run by one, so a usage hint runs as typed: the enterprise rpm
+// installs only /opt/defenseclaw/bin, which is not on root's PATH, and a
+// bare "defenseclaw-gateway ... --help" was "command not found" (GAP-2189).
+// A seam for tests.
+var invokedGatewayPath = func(rootName string) string {
+	if runtime.GOOS == "windows" || len(os.Args) == 0 {
+		return ""
+	}
+	arg0 := os.Args[0]
+	if !filepath.IsAbs(arg0) || filepath.Base(arg0) != rootName || strings.ContainsAny(arg0, " '\"\\$`") {
+		return ""
+	}
+	return arg0
 }
 
 // plainFlagValueError names what a typed flag takes instead of pflag's
