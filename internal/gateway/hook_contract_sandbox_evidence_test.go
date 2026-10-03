@@ -79,6 +79,11 @@ func TestSandboxHarnessHookContractRefusals(t *testing.T) {
 	foreignRelease := verifiedClaudeCodeImage()
 	foreignRelease.DefenseClawVersion = "0.8.9"
 
+	// A record whose builder did not record its release cannot be shown to be
+	// this release's evidence.
+	noRelease := verifiedClaudeCodeImage()
+	noRelease.DefenseClawVersion = ""
+
 	// 2.0.0 is below claudecode-hooks-v1's reviewed range (>= 2.1.154), so no
 	// contract claims it; a version above the newest minimum is claimed by that
 	// contract on purpose (see the forward-compatibility test below).
@@ -99,6 +104,7 @@ func TestSandboxHarnessHookContractRefusals(t *testing.T) {
 		{name: "unverified hooks", records: []image.Record{unverified}},
 		{name: "another connector", records: []image.Record{otherConnector}},
 		{name: "another release built it", records: []image.Record{foreignRelease}},
+		{name: "record has no release", records: []image.Record{noRelease}},
 		{name: "harness version below every reviewed range", records: []image.Record{unknownHarness}},
 		{name: "harness version cannot be normalized", records: []image.Record{unparseableHarness}},
 		{name: "record has no harness version", records: []image.Record{noVersion}},

@@ -95,8 +95,10 @@ def verified_harness_contract(
         harness_version = str(record.get("harness_version", "") or "").strip()
         if not harness_version:
             continue
+        # A record that names no release at all cannot be shown to be this
+        # release's evidence, so it is refused like a record from another release.
         image_release = str(record.get("defenseclaw_version", "") or "").strip()
-        if want_release and image_release and image_release != want_release:
+        if want_release and image_release != want_release:
             continue
         compatibility = resolve_connector_contract(name, harness_version, platform_name="linux")
         if compatibility.status != STATUS_KNOWN or compatibility.contract is None:

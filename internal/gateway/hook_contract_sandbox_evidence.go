@@ -80,9 +80,10 @@ func sandboxHarnessHookContractFor(dataDir, connectorName, release string) (sand
 			continue
 		}
 		// An image built by another release carries the hooks that release
-		// rendered. It is not this release's evidence; the operator rebuilds
+		// rendered. A record that names no release at all cannot be shown to be
+		// this release's evidence either. Both are refused; the operator rebuilds
 		// the image instead.
-		if currentRelease != "" && rec.DefenseClawVersion != "" && rec.DefenseClawVersion != currentRelease {
+		if currentRelease != "" && strings.TrimSpace(rec.DefenseClawVersion) != currentRelease {
 			continue
 		}
 		resolution := connector.ResolveSandboxHookContract(rec.Connector, harnessVersion)

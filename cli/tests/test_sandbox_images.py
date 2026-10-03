@@ -62,6 +62,7 @@ class VerifiedHarnessContractTest(unittest.TestCase):
             "unverified hooks": [verified_claudecode_image(hook_fire_verified=False)],
             "another connector": [verified_claudecode_image(connector="codex")],
             "another release built it": [verified_claudecode_image(defenseclaw_version="0.8.9")],
+            "record has no release": [verified_claudecode_image(defenseclaw_version="")],
             # 2.0.0 is below claudecode-hooks-v1's reviewed range (>= 2.1.154).
             "harness version below every reviewed range": [
                 verified_claudecode_image(harness_version="2.0.0")
