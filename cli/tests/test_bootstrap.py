@@ -1353,6 +1353,31 @@ class FirstRunApiPortTests(unittest.TestCase):
             self.assertEqual(bootstrap.choose_first_run_guardrail_port(default_config()), "")
 
     @unittest.skipIf(os.name == "nt", "port claims are a Linux and macOS hint")
+    def test_two_accounts_in_init_at_once_get_different_guardrail_ports(self):
+        # GAP-2198: neither proxy listens yet, so the free-port check alone
+        # gave both accounts 4010; the claim makes the second one move on.
+        import tempfile
+
+        from defenseclaw import bootstrap
+        from defenseclaw.config import default_config
+
+        first, second = default_config(), default_config()
+        with tempfile.TemporaryDirectory() as claims:
+            with (
+                patch.object(bootstrap, "_API_PORT_CLAIM_DIR", claims),
+                patch.object(bootstrap, "_api_port_free", side_effect=lambda _host, port: port != 4000),
+            ):
+                bootstrap.choose_first_run_guardrail_port(first)
+                self.assertTrue(os.path.exists(os.path.join(claims, "defenseclaw-guardrail-port-4010")))
+                with patch.object(bootstrap.os, "getuid", return_value=os.getuid() + 1):
+                    bootstrap.choose_first_run_guardrail_port(second)
+            with patch.object(bootstrap, "_API_PORT_CLAIM_DIR", claims):
+                bootstrap.remove_own_api_port_claims()
+                self.assertEqual(os.listdir(claims), [])
+
+        self.assertEqual((first.guardrail.port, second.guardrail.port), (4010, 4020))
+
+    @unittest.skipIf(os.name == "nt", "port claims are a Linux and macOS hint")
     def test_uninstall_all_removes_only_this_accounts_claims(self):
         import tempfile
 

@@ -766,6 +766,88 @@ func (p *GuardrailProxy) requestLogger(next http.Handler) http.Handler {
 	})
 }
 
+// passthroughUpstreamAuth picks the upstream credential of a passthrough
+// request. Priority: (1) X-AI-Auth from the fetch interceptor (normalized to
+// "Bearer <key>" regardless of the original header), (2) api-key (Azure),
+// (3) x-api-key (Anthropic), (4) Authorization — skipping sk-dc-* master keys.
+func passthroughUpstreamAuth(h http.Header) string {
+	if aiAuth := h.Get("X-AI-Auth"); aiAuth != "" && !strings.HasPrefix(aiAuth, "Bearer sk-dc-") {
+		return aiAuth
+	}
+	if azKey := h.Get("api-key"); azKey != "" {
+		return "Bearer " + azKey
+	}
+	if xKey := h.Get("x-api-key"); xKey != "" {
+		return "Bearer " + xKey
+	}
+	if auth := h.Get("Authorization"); auth != "" && !strings.HasPrefix(auth, "Bearer sk-dc-") {
+		return auth
+	}
+	return ""
+}
+
+// setPassthroughUpstreamAuth sets the single resolved auth header: Anthropic
+// expects x-api-key, Azure expects api-key, others use Authorization.
+func setPassthroughUpstreamAuth(h http.Header, provider, upstreamAuth string) {
+	if upstreamAuth == "" {
+		return
+	}
+	switch provider {
+	case "anthropic":
+		h.Set("x-api-key", strings.TrimPrefix(upstreamAuth, "Bearer "))
+	case "azure":
+		h.Set("api-key", strings.TrimPrefix(upstreamAuth, "Bearer "))
+	default:
+		h.Set("Authorization", upstreamAuth)
+	}
+}
+
+// handleReadOnlyPassthrough forwards a GET or HEAD that the fetch
+// interceptor redirected (model lists, pricing, Ollama /api/tags) to its
+// X-DC-Target-URL. Such a request has no body to inspect, so it is sent on
+// as is. An empty 200 made OpenClaw fail to parse the model list (GAP-2213).
+func (p *GuardrailProxy) handleReadOnlyPassthrough(w http.ResponseWriter, r *http.Request) {
+	if !p.authenticateRequest(w, r) {
+		writeOpenAIError(w, http.StatusUnauthorized, "invalid API key")
+		return
+	}
+	targetOrigin := strings.TrimRight(r.Header.Get("X-DC-Target-URL"), "/")
+	if !isKnownProviderDomain(targetOrigin + r.URL.Path) {
+		fmt.Fprintf(os.Stderr, "[guardrail] BLOCKED %s passthrough to unknown domain: %s (path=%s)\n", r.Method, scrubURLSecrets(targetOrigin), r.URL.Path)
+		writeOpenAIError(w, http.StatusForbidden, "target URL does not match any known LLM provider domain")
+		return
+	}
+	upstreamURL := targetOrigin + r.URL.RequestURI()
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+	defer cancel()
+	upstreamReq, err := http.NewRequestWithContext(ctx, r.Method, upstreamURL, nil)
+	if err != nil {
+		writeOpenAIError(w, http.StatusBadGateway, "failed to create upstream request: "+err.Error())
+		return
+	}
+	if p.cfg != nil && p.cfg.LLM.ForwardCustomHeadersEnabled() {
+		if _, herr := CopyForwardableHeaders(upstreamReq.Header, r.Header); herr != nil {
+			writeOpenAIError(w, httpStatusForHeaderError(herr), "invalid forwarded headers: "+herr.Error())
+			return
+		}
+	}
+	setPassthroughUpstreamAuth(upstreamReq.Header, inferProviderFromURL(targetOrigin+r.URL.Path), passthroughUpstreamAuth(r.Header))
+	fmt.Fprintf(os.Stderr, "[guardrail] %s passthrough → %s\n", r.Method, scrubURLSecrets(upstreamURL))
+	resp, err := doProviderRequest(upstreamReq, p.emitEgress)
+	if err != nil {
+		writeOpenAIError(w, http.StatusBadGateway, upstreamErrorMessage("upstream error: ", err))
+		return
+	}
+	defer resp.Body.Close()
+	for k, vs := range resp.Header {
+		for _, v := range vs {
+			w.Header().Add(k, v)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+	_, _ = io.Copy(w, io.LimitReader(resp.Body, 32*1024*1024))
+}
+
 // handlePassthrough handles provider-native API paths (e.g. /v1/messages for
 // Anthropic, /v1beta/models/*/generateContent for Gemini) that the fetch
 // interceptor redirects to the proxy while preserving the original path.
@@ -774,9 +856,13 @@ func (p *GuardrailProxy) requestLogger(next http.Handler) http.Handler {
 // original request body and headers verbatim to the real upstream URL
 // (from X-DC-Target-URL + original path). No format translation is needed.
 func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Request) {
-	if r.Method == http.MethodGet {
-		// GET on unknown paths (health probes, etc.) — just 200 OK.
-		w.WriteHeader(http.StatusOK)
+	if r.Method == http.MethodGet || r.Method == http.MethodHead {
+		if r.Header.Get("X-DC-Target-URL") == "" {
+			// GET on unknown paths (health probes, etc.) — just 200 OK.
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		p.handleReadOnlyPassthrough(w, r)
 		return
 	}
 	if r.Method != http.MethodPost {
@@ -1222,19 +1308,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	// Priority: (1) X-AI-Auth from the fetch interceptor (normalized to
 	// "Bearer <key>" regardless of the original header), (2) api-key (Azure),
 	// (3) x-api-key (Anthropic), (4) Authorization — skipping sk-dc-* master keys.
-	upstreamAuth := ""
-	if aiAuth := r.Header.Get("X-AI-Auth"); aiAuth != "" && !strings.HasPrefix(aiAuth, "Bearer sk-dc-") {
-		upstreamAuth = aiAuth
-	}
-	if upstreamAuth == "" {
-		if azKey := r.Header.Get("api-key"); azKey != "" {
-			upstreamAuth = "Bearer " + azKey
-		} else if xKey := r.Header.Get("x-api-key"); xKey != "" {
-			upstreamAuth = "Bearer " + xKey
-		} else if auth := r.Header.Get("Authorization"); auth != "" && !strings.HasPrefix(auth, "Bearer sk-dc-") {
-			upstreamAuth = auth
-		}
-	}
+	upstreamAuth := passthroughUpstreamAuth(r.Header)
 	// Fallback: when the caller supplied X-DC-Target-URL but no credential
 	// headers (the "third_party_injected" mode used by ZeptoClaw/PulseClaw),
 	// consult the enterprise token resolver (secrets-sidecar hydrated key)
@@ -1323,17 +1397,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		p.recordProxyForwardedHeadersV8(r.Context(), "passthrough", "ok", int64(forwardedHeaderCount))
 	}
 	// Set the single resolved auth header for the upstream provider.
-	if upstreamAuth != "" {
-		// Anthropic expects x-api-key, Azure expects api-key, others use Authorization.
-		switch provider {
-		case "anthropic":
-			upstreamReq.Header.Set("x-api-key", strings.TrimPrefix(upstreamAuth, "Bearer "))
-		case "azure":
-			upstreamReq.Header.Set("api-key", strings.TrimPrefix(upstreamAuth, "Bearer "))
-		default:
-			upstreamReq.Header.Set("Authorization", upstreamAuth)
-		}
-	}
+	setPassthroughUpstreamAuth(upstreamReq.Header, provider, upstreamAuth)
 
 	fmt.Fprintf(os.Stderr, "[guardrail] passthrough → %s\n", scrubURLSecrets(upstreamURL))
 	resp, err := doProviderRequest(upstreamReq, p.emitEgress)

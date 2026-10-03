@@ -59,7 +59,8 @@ func TestConfigProblemsArePlain(t *testing.T) {
 	got = r.Errors[0].Message
 	if !strings.HasPrefix(got, cred+" line ") ||
 		!strings.Contains(got, `the galileo destination's header Galileo-API-Key uses protected credential "dctest-missing", which is not stored; store it with`) ||
-		!strings.Contains(got, "enterprise secret set --name dctest-missing`, or remove the reference") {
+		!strings.Contains(got, "store it with `printf '%s' \"$VALUE\" | /") ||
+		!strings.Contains(got, "/defenseclaw-gateway enterprise secret set --name dctest-missing --from-stdin` (or --from-file <root-only file>), or remove the reference") {
 		t.Fatalf("credential error = %q", got)
 	}
 	for _, message := range []string{enumMsg, got} {
