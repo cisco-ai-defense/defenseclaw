@@ -985,9 +985,13 @@ func TestReadWindowsManagedHooksLifecycleCursorTargetsRestoresAChangedAdapter(t 
 				return test.restored, test.restoreErr
 			}
 			windowsManagedHooksLifecycleStandaloneProcess = func() bool { return test.standalone }
-			targets, active, err := readWindowsManagedHooksLifecycleCursorTargets(`C:\hook.exe`)
+			targets, active, restored, err := readWindowsManagedHooksLifecycleCursorTargets(`C:\hook.exe`)
 			if calls != test.wantCalls {
 				t.Fatalf("restore calls = %d, want %d", calls, test.wantCalls)
+			}
+			// GAP-2480: the capture report says whether it restored the adapter.
+			if restored != !test.wantErr {
+				t.Fatalf("restored = %t, want %t", restored, !test.wantErr)
 			}
 			if test.wantErr {
 				if !errors.Is(err, changed) {

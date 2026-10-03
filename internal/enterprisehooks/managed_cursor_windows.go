@@ -682,16 +682,16 @@ func windowsCursorManagedAdapterRefresh(
 
 // windowsCursorManagedAdapterDriftCandidate returns current with the adapter
 // replaced by this build's render and the state digest rebound to it. It is
-// for an active deployment whose adapter file was changed in place, so it no
-// longer matches its protected state (GAP-2474). The state must be the exact
-// canonical body DefenseClaw wrote and must name hookExecutable. The caller
-// validates the candidate like any deployment, so the adapter body is the
-// only thing that may differ from a valid policy.
+// for an active deployment whose adapter file was changed in place (GAP-2474)
+// or deleted (GAP-2479), so it no longer matches its protected state. The
+// state must be the exact canonical body DefenseClaw wrote and must name
+// hookExecutable. The caller validates the candidate like any deployment, so
+// the adapter body is the only thing that may differ from a valid policy.
 func windowsCursorManagedAdapterDriftCandidate(
 	current windowsCursorManagedArtifacts,
 	hookExecutable string,
 ) (windowsCursorManagedArtifacts, error) {
-	if !current.state.existed || !current.adapter.existed {
+	if !current.state.existed {
 		return current, errors.New("enterprise hooks: Cursor managed ownership metadata is incomplete")
 	}
 	var state windowsCursorManagedPolicyState
@@ -718,6 +718,7 @@ func windowsCursorManagedAdapterDriftCandidate(
 		return current, err
 	}
 	candidate := current
+	candidate.adapter.existed = true
 	candidate.adapter.data = adapter
 	candidate.state.data = body
 	return candidate, nil
@@ -725,7 +726,8 @@ func windowsCursorManagedAdapterDriftCandidate(
 
 // RefreshWindowsCursorManagedAdapter rewrites the active Cursor enterprise
 // adapter when it is not this build's render: an upgrade changed its
-// template (GAP-2467), or the file was changed in place (GAP-2474). Per-user
+// template (GAP-2467), or the file was changed in place (GAP-2474) or
+// deleted (GAP-2479). Per-user
 // rows verify against the protected state, so without this an upgrade keeps
 // the adapter an earlier release wrote, and a changed adapter fails every
 // verify and repair until it is restored. It reports whether it rewrote the
@@ -735,7 +737,8 @@ func RefreshWindowsCursorManagedAdapter(hookExecutable string) (bool, error) {
 }
 
 // RestoreWindowsCursorManagedAdapter rewrites the active Cursor enterprise
-// adapter only when it no longer matches its protected state (GAP-2474). It
+// adapter only when it no longer matches its protected state or is missing
+// (GAP-2474, GAP-2479). It
 // leaves an earlier release's recorded adapter alone, so a lifecycle snapshot
 // still captures it (GAP-1068). It reports whether it rewrote the adapter.
 func RestoreWindowsCursorManagedAdapter(hookExecutable string) (bool, error) {
@@ -759,8 +762,21 @@ func refreshWindowsCursorManagedAdapter(hookExecutable string, upgradeTemplate b
 			if candidateErr != nil {
 				return err
 			}
+			if !current.adapter.existed {
+				// A deleted adapter (GAP-2479): the trust checks read the
+				// file, so write this build's render first, and remove it
+				// again unless the deployment then validates.
+				if writeErr := windowsManagedPolicyWriter(current.adapter.path, candidate.adapter.data, true); writeErr != nil {
+					return fmt.Errorf("%v (Cursor adapter restore failed: %v)", err, writeErr)
+				}
+			}
 			if artifacts, candidateErr = validateWindowsCursorManagedArtifacts(candidate); candidateErr != nil ||
 				!artifacts.active {
+				if !current.adapter.existed {
+					if removeErr := restoreWindowsCursorManagedFile(current.adapter, current.adapterMetadata); removeErr != nil {
+						return fmt.Errorf("%v (Cursor adapter rollback failed: %v)", err, removeErr)
+					}
+				}
 				return err
 			}
 			// Write over, and roll back to, the adapter that is on disk.

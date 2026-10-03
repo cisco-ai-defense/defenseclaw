@@ -721,10 +721,24 @@ func TestWindowsCursorManagedAdapterDriftCandidateRestoresAChangedAdapter(t *tes
 	if _, err := windowsCursorManagedAdapterDriftCandidate(reformatted, hookExecutable); err == nil {
 		t.Fatal("a state DefenseClaw did not write was accepted")
 	}
+	// GAP-2479: a deleted adapter gets this build's render back too.
 	missing := artifactsFor(current)
 	missing.adapter.existed = false
-	if _, err := windowsCursorManagedAdapterDriftCandidate(missing, hookExecutable); err == nil {
-		t.Fatal("a missing adapter was accepted")
+	missing.adapter.data = nil
+	candidate, err := windowsCursorManagedAdapterDriftCandidate(missing, hookExecutable)
+	if err != nil {
+		t.Fatalf("a deleted adapter was not restored: %v", err)
+	}
+	if !candidate.adapter.existed || !bytes.Equal(candidate.adapter.data, current) {
+		t.Fatal("the restored deleted adapter is not this build's render")
+	}
+	if _, err := validateWindowsCursorManagedStateIdentity(candidate); err != nil {
+		t.Fatalf("the restored deleted adapter and state do not validate: %v", err)
+	}
+	noState := artifactsFor(current)
+	noState.state.existed = false
+	if _, err := windowsCursorManagedAdapterDriftCandidate(noState, hookExecutable); err == nil {
+		t.Fatal("an adapter without ownership state was accepted")
 	}
 }
 
