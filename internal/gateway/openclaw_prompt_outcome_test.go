@@ -74,8 +74,14 @@ func TestOpenClawAllowedTurnNamesTheLocalUser(t *testing.T) {
 	if allowed.outcome != "" {
 		t.Fatalf("an allowed turn was marked %q", allowed.outcome)
 	}
-	if name, _ := eventRouterAgentInputV8(allowed).DefenseClawUserName.Get(); name != wantName {
-		t.Fatalf("allowed turn user = %q, want %q", name, wantName)
+	if allowed.meta.UserName != wantName {
+		t.Fatalf("allowed turn user = %q, want %q", allowed.meta.UserName, wantName)
+	}
+	// A Windows HOST\user name fails the v8 identifier check (GAP-2366).
+	if hookModelV8Identifier(wantName) {
+		if name, _ := eventRouterAgentInputV8(allowed).DefenseClawUserName.Get(); name != wantName {
+			t.Fatalf("allowed turn span user = %q, want %q", name, wantName)
+		}
 	}
 	named := hookModelV8Observation{response: "ok"}
 	named.meta.UserName = "stream-user"
