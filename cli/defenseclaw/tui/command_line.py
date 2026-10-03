@@ -321,6 +321,36 @@ def suggested_next_action(command: str, exit_code: int, *, panel: str = "") -> s
     return ""
 
 
+def _destination_rows(lines: Sequence[str]) -> int:
+    """Rows of the ``setup observability list`` table (NAME header .. Retention)."""
+
+    count = 0
+    in_table = False
+    for line in lines:
+        text = line.strip()
+        if text.startswith("NAME ") and " KIND " in text:
+            in_table = True
+            continue
+        if not in_table:
+            continue
+        if not text or text.startswith(("Retention:", "Plan digest:")):
+            break
+        count += 1
+    return count
+
+
+def is_listing_detail(line: str) -> bool:
+    """True for an output line that is part of a listing, not a result.
+
+    A directory (``C:\\Users\\u\\.agents\\skills``, ``/home/u/.claude/skills``)
+    or a ``Plan digest: <hex>`` line ended the output, and the footer showed
+    it as ``Done: ... · <path>`` (GAP-2184).
+    """
+
+    text = line.strip()
+    return bool(_PATH_LINE_RE.match(text) or _DIGEST_LINE_RE.search(text))
+
+
 def is_command_hint(line: str) -> bool:
     """True for an output line that is a command to run next, not a result.
 
@@ -334,6 +364,9 @@ def is_command_hint(line: str) -> bool:
 
 
 _GATEWAY_PID_RE = re.compile(r"\bOK \(PID (\d+)\)")
+_CONNECTOR_HEADER_RE = re.compile(r"^(?:\u2500\u2500|--) connector: (\S+) (?:\u2500\u2500|--)$")
+_PATH_LINE_RE = re.compile(r"^(?:[A-Za-z]:[\\/]|~[\\/]|/)\S*$")
+_DIGEST_LINE_RE = re.compile(r"\bdigest:\s*[0-9a-f]{16,}$", re.IGNORECASE)
 _SETUP_DONE_RE = re.compile(r"^[\u2713\u2714]\s+(.+ connector setup complete|\d+ connector\(s\) set up)")
 _SETUP_MODE_RE = re.compile(r"^[\u2713\u2714]\s+\S+ mode=(observe|action)$")
 _KEYS_ROW_RE = re.compile(r"^[\u25cf\u25cb\u00b7]\s+([A-Z][A-Z0-9_]*)\s+(.*)$")
@@ -352,6 +385,16 @@ def command_result_summary(command: str, lines: Sequence[str]) -> str:
             if match := _GATEWAY_PID_RE.search(line):
                 return f"Gateway restarted (PID {match.group(1)})"
         return ""
+    connectors = [m.group(1) for line in lines if (m := _CONNECTOR_HEADER_RE.match(line.strip()))]
+    if connectors and "scan" in command.lower():
+        # ``skill scan --all`` (and the other --all scans) print one section
+        # per connector; the last line was a skills directory (GAP-2184).
+        noun = "connector" if len(connectors) == 1 else "connectors"
+        return f"{len(connectors)} {noun} scanned"
+    if any(line.strip() == "Observability v8 destinations" for line in lines):
+        rows = _destination_rows(lines)
+        noun = "destination" if rows == 1 else "destinations"
+        return f"{rows} {noun} listed"
     if command.strip().lower().startswith("setup"):
         done = next((m.group(1) for line in lines if (m := _SETUP_DONE_RE.match(line.strip()))), "")
         mode = next((m.group(1) for line in lines if (m := _SETUP_MODE_RE.match(line.strip()))), "")

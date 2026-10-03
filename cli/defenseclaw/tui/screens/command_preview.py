@@ -191,6 +191,10 @@ def _restart_effect(risk: str, args: tuple[str, ...]) -> str:
     lowered = tuple(arg.lower() for arg in args)
     if risk == "restart" or any(arg in {"restart", "rotate-token"} for arg in lowered):
         return "yes"
+    if risk == "read-only":
+        # ``setup observability list`` read "Risk read-only  Restart
+        # possible" (GAP-2186).
+        return "no"
     if lowered and lowered[0] == "setup" and "--no-restart" not in lowered:
         return "possible"
     return "no"
