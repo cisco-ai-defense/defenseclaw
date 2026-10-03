@@ -3432,6 +3432,10 @@ def block(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
 # plugin unblock
 # ---------------------------------------------------------------------------
 
+# GAP-2049: unblock removes DefenseClaw's own allow/block/quarantine/disable
+# entries; the agent's own enabled/disabled setting is left as it was.
+_PLUGIN_UNBLOCK_NOTE = "  DefenseClaw no longer overrides it; it keeps the on/off setting from the agent's own config."
+
 
 @plugin.command()
 @click.argument("name")
@@ -3464,11 +3468,8 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
             click.echo(f"[plugin] {plugin_name!r} has no enforcement state to clear for {connector}")
             return
         pe.remove_action_for_connector("plugin", plugin_name, connector)
-        click.secho(
-            f"[plugin] {plugin_name!r} all enforcement state cleared "
-            f"(connector={connector}) (allow/block/quarantine/disable)",
-            fg="green",
-        )
+        click.secho(f"[plugin] Unblocked {plugin_name!r} ({connector}).", fg="green")
+        click.echo(_PLUGIN_UNBLOCK_NOTE)
         if app.logger:
             saved_change_audit(app.logger).log_action(
                 "plugin-unblock",
@@ -3491,13 +3492,10 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
     if targets and (has_unscoped_state or has_scoped_state):
         for target_connector in targets:
             pe.remove_action_for_connector("plugin", plugin_name, target_connector)
-            click.secho(
-                f"[plugin] {plugin_name!r} all enforcement state cleared "
-                f"(connector={target_connector}) (allow/block/quarantine/disable)",
-                fg="green",
-            )
+            click.secho(f"[plugin] Unblocked {plugin_name!r} ({target_connector}).", fg="green")
         if has_unscoped_state:
             pe.remove_action("plugin", plugin_name)
+        click.echo(_PLUGIN_UNBLOCK_NOTE)
         if app.logger:
             saved_change_audit(app.logger).log_action(
                 "plugin-unblock",
@@ -3517,10 +3515,8 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
         return
 
     pe.remove_action("plugin", plugin_name)
-    click.secho(
-        f"[plugin] {plugin_name!r} all enforcement state cleared (allow/block/quarantine/disable)",
-        fg="green",
-    )
+    click.secho(f"[plugin] Unblocked {plugin_name!r}.", fg="green")
+    click.echo(_PLUGIN_UNBLOCK_NOTE)
     if app.logger:
         saved_change_audit(app.logger).log_action("plugin-unblock", plugin_name, "manual unblock via CLI")
 

@@ -3469,7 +3469,7 @@ class TestSkillConnectorPolicyValidation(SkillCommandTestBase):
         result = self.invoke(["unblock", "sample"])
 
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("allow/block/quarantine/disable", result.output)
+        self.assertIn("[skill] Unblocked 'sample'", result.output)
         self.assertFalse(self.app.store.has_action("skill", "sample", "install", "allow"))
         self.assertIsNone(self.app.store.get_action("skill", "sample"))
 
@@ -3537,8 +3537,8 @@ class TestSkillConnectorPolicyValidation(SkillCommandTestBase):
         result = self.invoke(["unblock", "sample"])
 
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("connector=hermes", result.output)
-        self.assertIn("connector=codex", result.output)
+        self.assertIn("[skill] Unblocked 'sample' (hermes).", result.output)
+        self.assertIn("[skill] Unblocked 'sample' (codex).", result.output)
         self.assertIsNone(self.app.store.get_action("skill", "sample", "hermes"))
         self.assertIsNone(self.app.store.get_action("skill", "sample", "codex"))
 

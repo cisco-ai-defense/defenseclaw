@@ -1923,17 +1923,10 @@ def unblock(app: AppContext, target: str, connector_flag: str) -> None:
         if targets and (has_unscoped_state or has_scoped_state):
             for target_connector in targets:
                 pe.remove_action_for_connector("mcp", target, target_connector)
-                click.secho(
-                    f"[mcp] {target!r} all enforcement state cleared "
-                    f"(connector={target_connector}) "
-                    f"(allow/block/quarantine/disable)",
-                    fg="green",
-                )
+                click.secho(f"[mcp] Unblocked {target!r} ({target_connector}).", fg="green")
             if has_unscoped_state:
                 pe.remove_action("mcp", target)
-            click.echo(
-                "  The server will go through normal scanning on next check."
-            )
+            click.echo("  It will be scanned on the next check.")
             if app.logger:
                 saved_change_audit(app.logger).log_action(
                     "mcp-unblock", target, "manual unblock via CLI connector=all",
@@ -1949,15 +1942,10 @@ def unblock(app: AppContext, target: str, connector_flag: str) -> None:
         pe.remove_action_for_connector("mcp", target, connector)
     else:
         pe.remove_action("mcp", target)
-    scope = f" (connector={connector})" if connector else ""
-    click.secho(
-        f"[mcp] {target!r} all enforcement state cleared{scope} "
-        f"(allow/block/quarantine/disable)",
-        fg="green",
-    )
-    click.echo(
-        "  The server will go through normal scanning on next check."
-    )
+    # GAP-2049: a plain result, not the internal list of cleared states.
+    scope = f" ({connector})" if connector else ""
+    click.secho(f"[mcp] Unblocked {target!r}{scope}.", fg="green")
+    click.echo("  It will be scanned on the next check.")
 
     if app.logger:
         saved_change_audit(app.logger).log_action(

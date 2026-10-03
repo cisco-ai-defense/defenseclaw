@@ -1692,8 +1692,8 @@ class TestPluginMultiConnectorSemantics(PluginCommandTestBase):
 
         bare_unblock = self.invoke(["unblock", "dc-plugin-final-state"])
         self.assertEqual(bare_unblock.exit_code, 0, bare_unblock.output)
-        self.assertIn("all enforcement state cleared (connector=codex)", bare_unblock.output)
-        self.assertIn("all enforcement state cleared (connector=hermes)", bare_unblock.output)
+        self.assertIn("Unblocked 'dc-plugin-final-state' (codex).", bare_unblock.output)
+        self.assertIn("Unblocked 'dc-plugin-final-state' (hermes).", bare_unblock.output)
 
         codex_info = self.invoke(
             ["info", "dc-plugin-final-state", "--connector", "codex"]
@@ -1721,8 +1721,12 @@ class TestPluginMultiConnectorSemantics(PluginCommandTestBase):
         result = self.invoke(["unblock", "shared"])
 
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("all enforcement state cleared (connector=codex)", result.output)
-        self.assertIn("all enforcement state cleared (connector=hermes)", result.output)
+        # GAP-2049: one plain line per connector plus what "unblocked" means
+        # for the agent's own on/off setting; no internal state list.
+        self.assertIn("[plugin] Unblocked 'shared' (codex).", result.output)
+        self.assertIn("[plugin] Unblocked 'shared' (hermes).", result.output)
+        self.assertEqual(result.output.count("keeps the on/off setting from the agent's own config"), 1)
+        self.assertNotIn("allow/block/quarantine/disable", result.output)
         self.assertIsNone(self.app.store.get_action("plugin", "shared", "codex"))
         self.assertIsNone(self.app.store.get_action("plugin", "shared", "hermes"))
 
