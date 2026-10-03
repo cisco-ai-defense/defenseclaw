@@ -120,6 +120,27 @@ class TestMCPUnblock(MCPCommandTestBase):
         self.assertIn("[mcp] Unblocked 'http://evil.com' (every connector).", result.output)
         self.assertFalse(pe.is_blocked("mcp", "http://evil.com"))
 
+    def test_unblock_allow_only_entry_says_allow_entry_removed(self):
+        # GAP-2225: clearing an allow entry must not claim it was unblocked.
+        allowed = self.invoke(["allow", "http://trusted.example.com"])
+        self.assertIn("[mcp] Allowed 'http://trusted.example.com' (every connector).", allowed.output)
+        result = self.invoke(["unblock", "http://trusted.example.com"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn(
+            "[mcp] Removed the allow entry for 'http://trusted.example.com' (every connector).",
+            result.output,
+        )
+        self.assertNotIn("Unblocked", result.output)
+        self.assertIn("To scan it now, run: defenseclaw mcp scan http://trusted.example.com", result.output)
+        self.assertFalse(PolicyEngine(self.app.store).is_allowed("mcp", "http://trusted.example.com"))
+
+    def test_group_help_lists_unblock_and_says_connector(self):
+        # GAP-2224
+        result = self.invoke(["--help"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("list, scan, block, unblock, allow, set, unset", result.output)
+        self.assertNotIn("peer", result.output)
+
     def test_unblock_no_state(self):
         result = self.invoke(["unblock", "http://clean.com"])
         self.assertEqual(result.exit_code, 0, result.output)
@@ -236,7 +257,7 @@ class TestMCPConnectorScope(MCPCommandTestBase):
     def test_allow_connector_scopes_to_peer(self):
         result = self.invoke(["allow", "http://demo.example.com", "--connector", "codex"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("connector=codex", result.output)
+        self.assertIn("[mcp] Allowed 'http://demo.example.com' (codex).", result.output)
         pe = PolicyEngine(self.app.store)
         self.assertTrue(pe.is_allowed_for_connector("mcp", "http://demo.example.com", "codex"))
         self.assertFalse(pe.is_allowed_for_connector("mcp", "http://demo.example.com", "claudecode"))
@@ -259,8 +280,8 @@ class TestMCPConnectorScope(MCPCommandTestBase):
 
         result = self.invoke(["allow", "ctx7"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("Allowed: ctx7 (connector=claudecode)", result.output)
-        self.assertIn("Allowed: ctx7 (connector=codex)", result.output)
+        self.assertIn("[mcp] Allowed 'ctx7' (claudecode).", result.output)
+        self.assertIn("[mcp] Allowed 'ctx7' (codex).", result.output)
 
         self.assertTrue(pe.is_allowed_for_connector("mcp", "ctx7", "claudecode"))
         self.assertTrue(pe.is_allowed_for_connector("mcp", "ctx7", "codex"))
@@ -288,7 +309,10 @@ class TestMCPConnectorScope(MCPCommandTestBase):
         self.assertEqual(result.exit_code, 0, result.output)
         # GAP-2049: a plain result, not the internal list of cleared states.
         self.assertIn("[mcp] Unblocked 'http://demo.example.com' (codex).", result.output)
-        self.assertIn("It will be scanned on the next check.", result.output)
+        self.assertIn(
+            "To scan it now, run: defenseclaw mcp scan http://demo.example.com --connector codex",
+            result.output,
+        )
         self.assertNotIn("allow/block/quarantine/disable", result.output)
         self.assertFalse(
             self.app.store.has_action("mcp", "http://demo.example.com", "install", "block", "codex")
@@ -329,13 +353,13 @@ class TestMCPConnectorScope(MCPCommandTestBase):
 
         bare_allow = self.invoke(["allow", "ctx7"])
         self.assertEqual(bare_allow.exit_code, 0, bare_allow.output)
-        self.assertIn("Allowed: ctx7 (connector=codex)", bare_allow.output)
-        self.assertIn("Allowed: ctx7 (connector=hermes)", bare_allow.output)
+        self.assertIn("[mcp] Allowed 'ctx7' (codex).", bare_allow.output)
+        self.assertIn("[mcp] Allowed 'ctx7' (hermes).", bare_allow.output)
 
         bare_unblock = self.invoke(["unblock", "ctx7"])
         self.assertEqual(bare_unblock.exit_code, 0, bare_unblock.output)
-        self.assertIn("Unblocked 'ctx7' (codex).", bare_unblock.output)
-        self.assertIn("Unblocked 'ctx7' (hermes).", bare_unblock.output)
+        self.assertIn("Removed the allow entry for 'ctx7' (codex).", bare_unblock.output)
+        self.assertIn("Removed the allow entry for 'ctx7' (hermes).", bare_unblock.output)
 
         self.assertIsNone(self.app.store.get_action("mcp", "ctx7", "codex"))
         self.assertIsNone(self.app.store.get_action("mcp", "ctx7", "hermes"))
