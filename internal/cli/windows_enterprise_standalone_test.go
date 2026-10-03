@@ -1851,3 +1851,23 @@ func TestWindowsEnterpriseUninstalledResultReportsLocalInspectionDisabled(t *tes
 		t.Fatalf("uninstalled result: installed=%v inspection=%+v", result.Installed, result.Inspection)
 	}
 }
+
+// GAP-2285: with the deployment installed but the gateway stopped, nothing
+// inspects verdicts, so local inspection is not reported as active.
+func TestWindowsEnterpriseGatewayDownReportsLocalInspectionUnknown(t *testing.T) {
+	stubWindowsUnprotectedAgents(t, nil, os.ErrNotExist)
+	previousAmp := windowsEnterpriseAmpMachineFolderProblems
+	t.Cleanup(func() { windowsEnterpriseAmpMachineFolderProblems = previousAmp })
+	windowsEnterpriseAmpMachineFolderProblems = func() []string { return nil }
+	for _, ready := range []bool{false, true} {
+		result := newWindowsEnterpriseStandaloneResult("status", &windowsEnterpriseLifecycleOptions{})
+		applyWindowsEnterpriseInstallerReport(result, nil, &windowsEnterpriseInstallerReport{Installed: true, GatewayReady: ready}, windowsEnterpriseStandaloneRun{})
+		want := "unknown"
+		if ready {
+			want = "active"
+		}
+		if result.Inspection.Local != want || result.Readiness.Gateway != ready {
+			t.Fatalf("gateway ready %v: inspection=%+v readiness=%+v, want local=%s", ready, result.Inspection, result.Readiness, want)
+		}
+	}
+}

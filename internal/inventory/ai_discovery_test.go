@@ -735,6 +735,43 @@ func TestContinuousDiscoveryShellHistoryFingerprintIsStable(t *testing.T) {
 	}
 }
 
+// TestContinuousDiscoveryShellHistoryHasNoLastActive: a shell-history
+// substring match says nothing about when the tool last ran, so the scan
+// must not stamp LastActiveAt with the scan time (GAP-2268).
+func TestContinuousDiscoveryShellHistoryHasNoLastActive(t *testing.T) {
+	tmp := t.TempDir()
+	home := filepath.Join(tmp, "home")
+	mustWrite(t, filepath.Join(home, ".zsh_history"), "openai chat --model gpt-4\n")
+	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+		Enabled:             true,
+		Mode:                "enhanced",
+		IncludeShellHistory: true,
+		DataDir:             filepath.Join(tmp, "data"),
+		HomeDir:             home,
+		MaxFilesPerScan:     20,
+		MaxFileBytes:        64 * 1024,
+	}, []AISignature{testAISignature()})
+	cleanupPreparedDiscoveryService(t, svc)
+
+	report, err := svc.runScan(context.Background(), true, "test")
+	if err != nil {
+		t.Fatalf("runScan: %v", err)
+	}
+	found := false
+	for _, sig := range report.Signals {
+		if sig.Detector != "shell_history" {
+			continue
+		}
+		found = true
+		if sig.LastActiveAt != nil {
+			t.Fatalf("shell_history signal %q LastActiveAt = %v, want nil", sig.Product, *sig.LastActiveAt)
+		}
+	}
+	if !found {
+		t.Fatalf("scan produced no shell_history signal: %+v", report.Signals)
+	}
+}
+
 func TestContinuousDiscoveryFullScanEmitsGone(t *testing.T) {
 	tmp := t.TempDir()
 	home := filepath.Join(tmp, "home")
