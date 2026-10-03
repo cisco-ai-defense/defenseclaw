@@ -39,8 +39,8 @@ def test_setup_task_list_hint_fits_one_row_with_task_keys() -> None:
         hint = setup_keys.keys_hint("wizards", conditions)
         assert len(hint) <= setup_keys.HINT_WIDTH, hint
     hint = setup_keys.keys_hint("wizards", ("credentials",))
-    assert "f fill missing" in hint and "s set key" in hint and hint.endswith("? all keys")
-    assert setup_keys.keys_hint("wizards").endswith("r refresh")
+    assert "f fill missing" in hint and "s set key" in hint and hint.endswith("? help")
+    assert setup_keys.keys_hint("wizards").endswith("c config")
 
 
 def test_audit_digits_switch_panels_and_h_l_step_the_chips() -> None:

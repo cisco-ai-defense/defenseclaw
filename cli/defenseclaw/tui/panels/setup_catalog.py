@@ -199,13 +199,13 @@ class TaskProblem:
 
 
 def _check_name(check: ReadinessCheck) -> str:
-    # "Active Connector: codex" is one row per connector.
+    # "Connector: codex" is one row per connector.
     return check.title.split(":", 1)[0].strip()
 
 
 # Which task owns each readiness check (its fix belongs to that task).
 _READINESS_OWNERS: dict[str, tuple[SetupWizard, ...]] = {
-    "Active Connector": (SetupWizard.CONNECTOR_SETUP,),
+    "Connector": (SetupWizard.CONNECTOR_SETUP,),
     "Gateway / API Health": (SetupWizard.GATEWAY,),
     "Guardrail": (SetupWizard.GUARDRAIL,),
     "Required Credentials": (SetupWizard.CREDENTIALS,),

@@ -188,6 +188,7 @@ from defenseclaw.tui.widgets.panel_split import (
     nav_switcher,
     split_aside,
     split_layout,
+    step_nav,
 )
 from defenseclaw.tui.widgets.status_strip import render_status_strip
 from defenseclaw.tui.widgets.tab_fit import (
@@ -1366,8 +1367,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # Command-progress strip state machine. The strip is the single
         # source of truth for command lifecycle messaging — what ran,
         # what it's doing, and what to do next. ``idle`` means hidden;
-        # any other state keeps the strip on screen until the user
-        # explicitly dismisses it (success no longer auto-hides).
+        # a success hides itself after ``STRIP_SUCCESS_SECONDS`` (its hint
+        # says so) and leaves its result on the status line; a failure,
+        # cancellation or rejection stays until the user dismisses it.
         self._strip_state: str = "idle"
         self._strip_label: str = ""
         self._strip_started_at: float = 0.0
@@ -3566,6 +3568,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
     def _close_help(self) -> None:
         self.help_open = False
         self._render_chrome()
+        # The first render runs on the help's layout: the Setup task detail
+        # was fitted to no box and kept its full text (lost "… i details"
+        # behind a scrollbar) until the next key (GAP-2072). Fit it again
+        # once the panel is laid out.
+        self.call_after_refresh(self._render_chrome)
         # Scrolling the help moved the shared scroller; put the panel back
         # where it was once its content is laid out again.
         try:
@@ -3680,9 +3687,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if self.help_open:
             self._close_help()
             return
-        # `q` doubles as the strip's keyboard dismiss. We intentionally
-        # never auto-hide on success per UX decision, so this is the
-        # primary way users return the strip to idle.
+        # `q` doubles as the strip's keyboard dismiss: a failure stays until
+        # dismissed, a success hides itself after STRIP_SUCCESS_SECONDS.
         if self._strip_state != "idle" and self.active_panel != "activity":
             self._strip_clear()
             self._set_status("Cleared command status.")
@@ -8274,7 +8280,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
     #   _strip_clear()          on q-dismiss
     #
     # Per user request:
-    #   * never auto-hide on success — user must explicitly press q
+    #   * a success hides itself after STRIP_SUCCESS_SECONDS (the hint says
+    #     so) and leaves its result on the status line; the rest stay
+    #     until the user presses q (GAP-2058)
     #   * snippet on success is a summary, not a raw last line
     #   * strip is hidden when the user is on the Activity panel (live
     #     stream is right there, the strip would be redundant)
@@ -8441,7 +8449,12 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
 
     def _auto_hide_success_strip(self, token: object) -> None:
         if self._strip_state == "success" and getattr(self, "_strip_auto_hide_token", None) is token:
+            # The result and its "next:" step stay readable on the status
+            # line once the receipt goes (GAP-2058).
+            done = f"Done: {self._strip_label} · {self._strip_summary}" if self._strip_summary else ""
             self._strip_clear()
+            if done:
+                self._set_status(done)
 
     def _strip_json_result_summary(self) -> str:
         """Readable result of a registry ``--json`` run, or "" (GAP-1681)."""
@@ -8602,7 +8615,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
 
         hint = {
             "running": "press A for live output  ·  Ctrl+C or click Cancel to stop",
-            "success": "press A for full output  ·  q or click Dismiss to clear",
+            "success": f"press A for full output  ·  hides in {STRIP_SUCCESS_SECONDS:.0f}s  ·  q or Dismiss clears now",
             "failure": "press A for full output  ·  q or click Dismiss to clear",
             "cancelled": "press A for full output  ·  q or click Dismiss to clear",
             "rejected": "press : to retry  ·  q or click Dismiss to clear",
@@ -12107,11 +12120,17 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if key in {"down", "j"}:
             self.setup_model.active_wizard = setup_catalog.step_wizard(self.setup_model.active_wizard, 1)
             return SetupPanelAction(True)
-        if key in {"left", "["}:
-            self.setup_model.active_wizard = setup_catalog.step_group(self.setup_model.active_wizard, -1)
-            return SetupPanelAction(True)
-        if key in {"right", "]"}:
-            self.setup_model.active_wizard = setup_catalog.step_group(self.setup_model.active_wizard, 1)
+        if key in {"left", "[", "right", "]"}:
+            # Step through the nav as it is listed, so Right on the last
+            # group reaches "Config editor" instead of wrapping past it
+            # (GAP-2060).
+            delta = -1 if key in {"left", "["} else 1
+            items = setup_center.task_nav(self.setup_model, self._setup_task_statuses())
+            target = step_nav(items, delta)
+            if target == setup_center.NAV_CONFIG:
+                setup_center.select_nav(self.setup_model, target)
+                return SetupPanelAction(True, hint="Config editor opened. w goes back to the tasks.")
+            self.setup_model.active_wizard = setup_catalog.step_group(self.setup_model.active_wizard, delta)
             return SetupPanelAction(True)
         if key == "i":
             return SetupPanelAction(True, open_picker="detail")
