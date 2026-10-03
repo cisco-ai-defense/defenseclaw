@@ -247,6 +247,28 @@ class DoctorGuardrailTests(unittest.TestCase):
         self.assertEqual(result.failed, 1, result.checks)
         self.assertIn("has not reported", result.checks[0]["detail"])
 
+    def test_proxy_interception_points_at_an_unreachable_openclaw_gateway(self):
+        # GAP-2506: the plugin cannot report while the OpenClaw gateway is
+        # down, so "rerun doctor in a minute" never helped.
+        cfg = Config(
+            data_dir="/tmp/defenseclaw",
+            audit_db="/tmp/defenseclaw/audit.db",
+            quarantine_dir="/tmp/defenseclaw/quarantine",
+            plugin_dir="/tmp/defenseclaw/plugins",
+            policy_dir="/tmp/defenseclaw/policies",
+            guardrail=GuardrailConfig(enabled=True, model="openai/gpt-4", port=4000, connector="openclaw"),
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
+        )
+        result = _DoctorResult()
+        result.record("fail", "OpenClaw gateway", "not reachable at 127.0.0.1:20497")
+        _check_proxy_interception(cfg, result, live_health={"uptime_ms": 2000})
+        self.assertEqual(result.warned, 0, result.checks)
+        self.assertEqual(result.failed, 2, result.checks)
+        row = result.checks[-1]
+        self.assertIn("OpenClaw gateway is not reachable", row["detail"])
+        self.assertIn("start or fix the OpenClaw gateway first", row["remediation"])
+
     def test_proxy_interception_passes_when_self_test_verified(self):
         cfg = Config(
             data_dir="/tmp/defenseclaw",

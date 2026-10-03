@@ -3750,6 +3750,26 @@ class TestGatewayOfflineStaging(_BaseSetup):
         self.assertIn("Tip: fix the issues above", result.output)
         self.assertNotIn("connects to the new address", result.output)
 
+    def test_stopped_gateway_still_checks_the_openclaw_listener(self):
+        # GAP-2505: with the DefenseClaw gateway stopped, a new port where
+        # nothing listens was saved with only the gateway-not-running note.
+        self.app.logger = MagicMock()
+        self.app.logger.log_action.side_effect = CanonicalObservabilityUnavailableError("gateway is not running")
+        self._seed_map("openclaw")
+        self.app.cfg.gateway.port = 18789
+
+        with patch("defenseclaw.commands.cmd_doctor._check_sidecar") as sidecar_check, patch(
+            "defenseclaw.commands.cmd_doctor._http_probe", return_value=(0, "")
+        ):
+            result = _invoke(["gateway", "--port", "20513", "--non-interactive"], self.app)
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(self.app.cfg.gateway.port, 20513)
+        sidecar_check.assert_not_called()
+        self.assertIn("not reachable at 127.0.0.1:20513", result.output)
+        self.assertIn("the gateway isn't running, so this change takes effect when it starts", result.output)
+        self.assertNotIn("connects to the new address", result.output)
+
     def test_unchanged_gateway_port_still_verifies_a_running_gateway(self):
         self.app.logger = MagicMock()
         self._seed_map("codex")
