@@ -169,6 +169,22 @@ def _validate_file_url(kind: str, url: str) -> None:
         )
 
 
+def _missing_file_warning(kind: str, url: str) -> str | None:
+    """Warn when a kind=file manifest path does not exist yet (GAP-2282).
+
+    The source is still registered (the file may be written later),
+    but the operator learns now instead of at the first sync.
+    """
+    if kind != "file":
+        return None
+    val = (url or "").strip()
+    bare = val[len("file://"):] if val.lower().startswith("file://") else val
+    path = os.path.expanduser(bare)
+    if not bare or os.path.isfile(path):
+        return None
+    return f"{path} does not exist yet; sync will fail until it does."
+
+
 def _find_source(cfg: Config, sid: str) -> RegistrySource:
     sid = sid.strip().lower()
     for s in cfg.registries.sources:
@@ -362,13 +378,19 @@ def add_cmd(  # noqa: PLR0913 - mirrors the prompt surface
     )
     cfg.registries.sources.append(new_source)
     cfg.save()
+    missing_file = _missing_file_warning(kind, url)
 
     add_details = f"id={sid} kind={kind} content={content} url={url}"
     if emit_json:
         _log_registry_action(app, "registry-add", add_details)
-        _emit_json({"action": "add", "source": _source_to_dict(new_source)})
+        payload: dict[str, Any] = {"action": "add", "source": _source_to_dict(new_source)}
+        if missing_file:
+            payload["warning"] = missing_file
+        _emit_json(payload)
         return
     ux.ok(f"Registered registry source {sid!r}.")
+    if missing_file:
+        ux.warn(missing_file)
     # The success line first, then any stopped-gateway note (GAP-1718).
     _log_registry_action(app, "registry-add", add_details)
     # The wizard offers the sync itself and prints this only on "n" (GAP-2075).
@@ -487,12 +509,18 @@ def edit_cmd(  # noqa: PLR0913
     _validate_file_url(source.kind, source.url)
 
     cfg.save()
+    missing_file = _missing_file_warning(source.kind, source.url)
     edit_details = _registry_edit_details(source, before)
     if emit_json:
         _log_registry_action(app, "registry-edit", edit_details)
-        _emit_json({"action": "edit", "source": _source_to_dict(source)})
+        edit_payload: dict[str, Any] = {"action": "edit", "source": _source_to_dict(source)}
+        if missing_file:
+            edit_payload["warning"] = missing_file
+        _emit_json(edit_payload)
         return
     ux.ok(f"Updated registry source {source.id!r}.")
+    if missing_file:
+        ux.warn(missing_file)
     _log_registry_action(app, "registry-edit", edit_details)
 
 
@@ -1479,13 +1507,33 @@ def _resolve_entry_type(
     if len(types) == 1:
         return types[0]
     if not types:
-        raise click.UsageError(
-            f"no cached entry {entry_name!r} in {source.id}; run "
-            f"`defenseclaw registry sync {source.id}` first, or pass --type skill|mcp",
-        )
+        raise click.UsageError(_missing_entry_message(cfg, source, entry_name, None))
     raise click.UsageError(
         f"{entry_name!r} exists as both a skill and an MCP server in {source.id}; "
         "pass --type skill or --type mcp",
+    )
+
+
+def _missing_entry_message(
+    cfg: Config, source: RegistrySource, entry_name: str, entry_type: str | None,
+) -> str:
+    """Explain why approve/reject found no entry (GAP-2281).
+
+    Only a never-synced source gets the "sync first" hint; a synced
+    source names the entries it does have.
+    """
+    idx = load_index(cfg.data_dir, source.id)
+    if not idx.fetched_at and not idx.verdicts:
+        return (
+            f"no cached entries for {source.id}; run "
+            f"`defenseclaw registry sync {source.id}` first"
+        )
+    names = sorted({v.name for v in idx.verdicts if not entry_type or v.type == entry_type})
+    shown = ", ".join(names[:10]) + (", ..." if len(names) > 10 else "")
+    label = f"{entry_type} " if entry_type else ""
+    return (
+        f"{source.id} has no {label}entry {entry_name!r} "
+        f"(entries: {shown or 'none'}; see 'defenseclaw registry entries {source.id}')"
     )
 
 
@@ -1518,8 +1566,7 @@ def _do_manual_verdict(
     )
     if verdict is None:
         click.echo(
-            f"error: no cached entry {entry_type}:{entry_name} in {source.id} "
-            "(run `registry sync` first)",
+            "error: " + _missing_entry_message(cfg, source, entry_name, entry_type.lower()),
             err=True,
         )
         raise SystemExit(2)
