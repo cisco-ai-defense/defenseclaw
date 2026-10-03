@@ -89,9 +89,11 @@ def build_command_preview(command: ParsedCommand) -> CommandPreview:
     summary = _upgrade_summary(command.args) or _risk_summary(risk, command.category)
     changes_state = risk in {"setup", "mutation"}
     if changes_state and restart != "no" and command.args[:1] == ("registry",):
-        when = "restarts" if restart == "yes" else "can change policy, and then restarts"
+        # Sync and remove restart only when they change policy; a sync that
+        # promotes nothing new keeps the gateway up (GAP-2542).
+        when = "" if restart == "yes" else " only if it changes policy,"
         summary = (
-            f"This registries command {when} a running gateway so agent hooks use the new policy. "
+            f"This registries command restarts a running gateway{when} so agent hooks use the new policy. "
             "Runtime traffic may briefly pause."
         )
     elif changes_state and restart == "yes":

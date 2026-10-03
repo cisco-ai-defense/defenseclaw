@@ -335,7 +335,9 @@ carries the decision on its tool span:
   user, and redacted reason.
 - The flat `defenseclaw.guardrail.action`, `defenseclaw.guardrail.rule_id`, and
   `defenseclaw.guardrail.severity` attributes, next to `user.id` and
-  `defenseclaw.user.name`, let you filter spans by one value.
+  `defenseclaw.user.name`, let you filter spans by one value. The tool span's
+  parent `invoke_agent` span carries the same three attributes, so a turn
+  blocked at a tool call shows its rule on the trace as well.
 
 Galileo does not read the OTLP span status or these attributes into its span
 record, so a blocked call's status code there stays `0`. The Galileo preset
@@ -387,7 +389,10 @@ inference spans:
 Prompt, response, document, tool-argument, and tool-result values follow the
 Galileo destination's v8 profile. Fresh v8 configuration exports registered
 content unchanged under `none`; redacting profiles either replace detected
-sensitive substrings or transform/remove whole field classes.
+sensitive substrings or transform/remove whole field classes. Under `content`
+and `strict` the messages keep their structure for Galileo: each message keeps
+a role Galileo accepts (`user` for input, `assistant` or `tool` for output) and
+text parts, while their text is the redaction placeholder or is removed.
 
 The Galileo preset binds the generated `galileo-rich-v2` compatibility profile.
 Eligibility, projected attributes, events, links, instrumentation scope, and
