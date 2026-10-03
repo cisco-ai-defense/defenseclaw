@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -28,6 +29,7 @@ import (
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 	"google.golang.org/protobuf/encoding/protowire"
 
+	"github.com/defenseclaw/defenseclaw/internal/netguard"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/delivery"
 )
@@ -40,8 +42,8 @@ func TestLogTransportFailureNamesCodeAndProxyPath(t *testing.T) {
 	rejectionLogWriter = &out
 	t.Cleanup(func() { rejectionLogWriter = previous })
 
-	logTransportFailure("galileo-gap2299", observability.SignalTraces, delivery.FailureCodeConnectionFailed, 5)
-	logTransportFailure("galileo-gap2299", observability.SignalTraces, delivery.FailureCodeConnectionFailed, 5)
+	logTransportFailure("galileo-gap2299", observability.SignalTraces, delivery.FailureCodeConnectionFailed, 5, "api.example.test:443", true)
+	logTransportFailure("galileo-gap2299", observability.SignalTraces, delivery.FailureCodeConnectionFailed, 5, "api.example.test:443", true)
 
 	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
 	if len(lines) != 1 {
@@ -49,11 +51,58 @@ func TestLogTransportFailureNamesCodeAndProxyPath(t *testing.T) {
 	}
 	for _, want := range []string{
 		"galileo-gap2299 traces export failed: connection_failed (5 spans)",
+		"connects to api.example.test:443 through the proxy",
 		"HTTPS_PROXY/NO_PROXY",
 	} {
 		if !strings.Contains(lines[0], want) {
 			t.Fatalf("line %q lacks %q", lines[0], want)
 		}
+	}
+}
+
+type proxyReportingDialer struct {
+	recordingDialer
+	proxied bool
+}
+
+func (d *proxyReportingDialer) Proxies(*url.URL) (bool, error) { return d.proxied, nil }
+
+// GAP-2375: with no proxy on the route the line says the gateway connects
+// directly to the endpoint and gives no proxy advice; a dialer that proxies
+// the endpoint keeps the proxy advice.
+func TestLogTransportFailureNamesDirectRouteWithoutProxyAdvice(t *testing.T) {
+	var out bytes.Buffer
+	previous := rejectionLogWriter
+	rejectionLogWriter = &out
+	t.Cleanup(func() { rejectionLogWriter = previous })
+
+	endpoint, _ := url.Parse("http://127.0.0.1:19998")
+	for _, dialer := range []any{nil, &recordingDialer{}, &proxyReportingDialer{}} {
+		config := signalConfig{url: endpoint}
+		if dialer != nil {
+			config.dialer = dialer.(netguard.V8Dialer)
+		}
+		if host, proxied := transportRoute(config); host != "127.0.0.1:19998" || proxied {
+			t.Fatalf("transportRoute(%T) = %q, %v; want direct to 127.0.0.1:19998", dialer, host, proxied)
+		}
+	}
+	host, proxied := transportRoute(signalConfig{url: endpoint, dialer: &proxyReportingDialer{proxied: true}})
+	if !proxied {
+		t.Fatal("a dialer that proxies the endpoint must be reported as proxied")
+	}
+
+	logTransportFailure("sf3r8-dead", observability.SignalTraces, delivery.FailureCodeConnectionFailed, 16, host, false)
+	line := out.String()
+	for _, want := range []string{
+		"sf3r8-dead traces export failed: connection_failed (16 spans)",
+		"connects directly to 127.0.0.1:19998 (no proxy)",
+	} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("line %q lacks %q", line, want)
+		}
+	}
+	if strings.Contains(line, "HTTPS_PROXY") || strings.Contains(line, "through the proxy") {
+		t.Fatalf("direct line gives proxy advice: %q", line)
 	}
 }
 
@@ -70,8 +119,8 @@ func TestLogTransportFailureSingularAndCurrentStderr(t *testing.T) {
 	}
 	saved := os.Stderr
 	os.Stderr = w
-	logTransportFailure("galileo-gap2343", observability.SignalTraces, delivery.FailureCodeConnectionFailed, 1)
-	logTransportFailure("galileo-gap2343", observability.SignalLogs, delivery.FailureCodeConnectionFailed, 1)
+	logTransportFailure("galileo-gap2343", observability.SignalTraces, delivery.FailureCodeConnectionFailed, 1, "", false)
+	logTransportFailure("galileo-gap2343", observability.SignalLogs, delivery.FailureCodeConnectionFailed, 1, "", false)
 	os.Stderr = saved
 	_ = w.Close()
 	got, _ := io.ReadAll(r)

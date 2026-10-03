@@ -211,7 +211,8 @@ func (adapter *ProjectedTraceAdapter) deliverHTTP(
 			return failedResult(delivery.OutcomeAmbiguous, delivery.FailureCodeAcknowledgementLost)
 		default:
 			code := transportFailureCode(err)
-			logTransportFailure(adapter.destination, observability.SignalTraces, code, spanCount)
+			endpoint, proxied := transportRoute(adapter.config)
+			logTransportFailure(adapter.destination, observability.SignalTraces, code, spanCount, endpoint, proxied)
 			return failedResult(delivery.OutcomeTransient, code)
 		}
 	}
