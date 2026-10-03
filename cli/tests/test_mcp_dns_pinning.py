@@ -199,6 +199,60 @@ def test_bedrock_llm_analyzer_can_reach_aws_credential_endpoint(provider, model,
                 anyio.run(_run_with_pinned_dns, scanner._api_analyzer.analyze)
 
 
+def test_bedrock_llm_analyzer_trusts_private_vpc_endpoint_for_region():
+    """GAP-2604: a VPC endpoint answers bedrock-runtime with a 10.x address."""
+
+    def fake_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):  # noqa: A002
+        return [(socket.AF_INET, type or socket.SOCK_STREAM, proto, "", ("10.0.2.169", port))]
+
+    def analyzer_for(host: str):
+        class Analyzer:
+            async def analyze(self):
+                return await anyio.getaddrinfo(host, 443)
+
+        return Analyzer()
+
+    def scoped(host: str, region: str):
+        scanner = SimpleNamespace(_api_analyzer=analyzer_for(host), _llm_analyzer=analyzer_for(host))
+        _scope_network_analyzer_dns(
+            scanner,
+            api_endpoint="",
+            llm_base_url="",
+            llm_uses_local_default=False,
+            llm_uses_aws_credentials=True,
+            llm_aws_region=region,
+        )
+        return scanner
+
+    runtime = "bedrock-runtime.eu-west-1.amazonaws.com"
+    with patch.object(socket, "getaddrinfo", fake_getaddrinfo):
+        with pinned_getaddrinfo("mcp.example", 443, "93.184.216.34"):
+            scanner = scoped(runtime, "eu-west-1")
+            results = anyio.run(_run_with_pinned_dns, scanner._llm_analyzer.analyze)
+            assert {info[4][0] for info in results} == {"10.0.2.169"}
+            # Only the LLM analyzer, and only the configured region.
+            with pytest.raises(SSRFError):
+                anyio.run(_run_with_pinned_dns, scanner._api_analyzer.analyze)
+            with pytest.raises(SSRFError):
+                anyio.run(_run_with_pinned_dns, scoped(runtime, "us-east-1")._llm_analyzer.analyze)
+            with pytest.raises(SSRFError):
+                anyio.run(
+                    _run_with_pinned_dns,
+                    scoped("internal.example", "eu-west-1")._llm_analyzer.analyze,
+                )
+
+
+def test_mcp_sdk_config_gets_configured_bedrock_region():
+    """GAP-2604: the SDK region (and so the trusted host) follows the config."""
+    from defenseclaw.config import BedrockKeyConfig
+    from defenseclaw.scanner.mcp import _bedrock_region
+
+    assert _bedrock_region(LLMConfig(provider="bedrock", region="us-west-2")) == "us-west-2"
+    llm = LLMConfig(provider="bedrock", region="us-west-2", bedrock=BedrockKeyConfig(region="eu-west-1"))
+    assert _bedrock_region(llm) == "eu-west-1"
+    assert _bedrock_region(LLMConfig(provider="bedrock")) == ""
+
+
 @contextmanager
 def _serve_mcp(transport: str):
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

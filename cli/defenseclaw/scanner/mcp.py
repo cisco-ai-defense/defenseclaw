@@ -875,6 +875,29 @@ _AWS_CREDENTIAL_ENDPOINT_HOSTS = (
 )
 
 
+def _bedrock_runtime_hosts(region: str) -> tuple[str, ...]:
+    """Bedrock runtime and STS hosts LiteLLM signs requests against.
+
+    A VPC interface endpoint answers these names with private addresses, so
+    the public-IP policy alone would refuse the configured provider (GAP-2604).
+    """
+    region = (region or "").strip().lower()
+    if not region or not all(c.isalnum() or c == "-" for c in region):
+        return ()
+    return (
+        f"bedrock-runtime.{region}.amazonaws.com",
+        f"bedrock-runtime-fips.{region}.amazonaws.com",
+        f"sts.{region}.amazonaws.com",
+        "sts.amazonaws.com",
+    )
+
+
+def _bedrock_region(llm: LLMConfig) -> str:
+    """The Bedrock region set on the LLM config, or "" (the SDK's env default)."""
+    bedrock_region = llm.bedrock.region if llm.bedrock is not None else ""
+    return (bedrock_region or llm.region or "").strip()
+
+
 def _llm_uses_aws_credentials(llm: LLMConfig) -> bool:
     provider = (llm.provider or "").strip().lower()
     return provider in ("bedrock", "amazon-bedrock") or litellm_model(
@@ -889,11 +912,14 @@ def _scope_network_analyzer_dns(
     llm_base_url: str,
     llm_uses_local_default: bool,
     llm_uses_aws_credentials: bool = False,
+    llm_aws_region: str = "",
 ) -> None:
     """Keep analyzer traffic separate without allowing private redirects.
 
     A Bedrock LLM analyzer may also reach the AWS credential endpoints, so
-    instance-role, ECS and EKS credentials work during a pinned scan.
+    instance-role, ECS and EKS credentials work during a pinned scan, and the
+    Bedrock runtime and STS hosts of ``llm_aws_region``, which a VPC
+    interface endpoint resolves to private addresses.
     """
     endpoint_by_analyzer = {
         "_api_analyzer": api_endpoint,
@@ -922,7 +948,11 @@ def _scope_network_analyzer_dns(
         else:
             trusted_hosts = ()
         if attr_name == "_llm_analyzer" and llm_uses_aws_credentials:
-            trusted_hosts = (*trusted_hosts, *_AWS_CREDENTIAL_ENDPOINT_HOSTS)
+            trusted_hosts = (
+                *trusted_hosts,
+                *_AWS_CREDENTIAL_ENDPOINT_HOSTS,
+                *_bedrock_runtime_hosts(llm_aws_region),
+            )
 
         async def run_analyzer(
             *args,
@@ -1105,6 +1135,9 @@ class MCPScannerWrapper:
             llm_base_url=llm.base_url,
             llm_timeout=llm.effective_timeout(),
             llm_max_retries=llm.effective_max_retries(),
+            # The SDK otherwise uses AWS_REGION or us-east-1, not the
+            # configured Bedrock region (GAP-2604).
+            aws_region_name=_bedrock_region(llm) or None,
         )
 
         analyzers = self._parse_analyzers(AnalyzerEnum)
@@ -1130,6 +1163,7 @@ class MCPScannerWrapper:
             llm_base_url=llm.base_url,
             llm_uses_local_default=llm.is_local_provider(),
             llm_uses_aws_credentials=_llm_uses_aws_credentials(llm),
+            llm_aws_region=getattr(sdk_config, "aws_region_name", "") or "",
         )
         # LiteLLM prints "Give Feedback / Get Help" banners on each failed
         # call; the scan reports one warning line instead (GAP-2604).
