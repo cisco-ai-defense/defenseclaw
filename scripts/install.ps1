@@ -187,6 +187,15 @@ function Remove-Tree([string]$Path) {
     }
 }
 
+function Set-DirectoryAcl([string]$Path, $Acl) {
+    # Writes only the parts of $Acl that changed. Set-Acl writes them all and
+    # was refused for a standard user on a second NTFS volume he has full
+    # control of, so a DEFENSECLAW_HOME there failed at once (GAP-2004).
+    $dir = New-Object IO.DirectoryInfo ([IO.Path]::GetFullPath($Path))
+    if ($dir.PSObject.Methods["SetAccessControl"]) { $dir.SetAccessControl($Acl) }
+    else { [IO.FileSystemAclExtensions]::SetAccessControl($dir, $Acl) }
+}
+
 function New-InstallDirectory([string]$Path) {
     # A fresh directory for the venv or install machinery (staging, the
     # rollback slot) that does not inherit the data dir's permissions.
@@ -198,7 +207,7 @@ function New-InstallDirectory([string]$Path) {
     New-Item -ItemType Directory -Path $Path | Out-Null
     $acl = Get-Acl -LiteralPath $Path
     $acl.SetAccessRuleProtection($true, $true)
-    Set-Acl -LiteralPath $Path -AclObject $acl
+    try { Set-DirectoryAcl $Path $acl } catch { Die "Could not set the permissions of ${Path}: $($_.Exception.Message)" }
 }
 
 function Protect-UvDirectory {
@@ -219,7 +228,7 @@ function Protect-UvDirectory {
         Write-Info "Setting the permissions of $uvDir (once; this can take a minute)"
     }
     $acl.SetAccessRuleProtection($true, $true)
-    try { Set-Acl -LiteralPath $uvDir -AclObject $acl } catch {
+    try { Set-DirectoryAcl $uvDir $acl } catch {
         Write-Warn "Could not set the permissions of ${uvDir}: $($_.Exception.Message)"
     }
 }
@@ -843,8 +852,19 @@ function Assert-InstallRoom([long]$Extra, [string]$ForWhat) {
     if ($free -lt 0) { return }
     $data = Get-DataSize
     if ($free -ge $data + $Extra + 100MB) { return }
+    if (-not $PrevVersion) { Write-KeptUvCache }
     Die ("Not enough free disk space next to ${DataDir}: the install needs about {0:N0} MB ({1:N0} MB for a rollback copy of the data folder and {2:N0} MB for $ForWhat), and {3:N0} MB is free. Free up space, then run the installer again; nothing was changed" -f
         ([double]($data + $Extra + 100MB) / 1MB), ([double]$data / 1MB), ([double]$Extra / 1MB), ([double]$free / 1MB))
+}
+
+function Write-KeptUvCache {
+    # A failed first install keeps only uv's download cache: say how large it
+    # is and how to remove it (GAP-1883).
+    $uvDir = Join-Path $DataDir ".uv"
+    $bytes = (Get-ChildItem -LiteralPath $uvDir -Recurse -Force -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+    if ($bytes) {
+        Write-Info ("The download cache in $uvDir ({0:N0} MB) was kept so the next run is faster; remove it with: cmd /c rd /s /q `"$uvDir`"" -f ([double]$bytes / 1MB))
+    }
 }
 
 function Test-DiskFull {
@@ -989,7 +1009,7 @@ function Invoke-UvPipInstall([string[]]$UvArgs) {
         Start-Sleep -Seconds $waits[$i]
         if ((Invoke-Native $Uv $UvArgs) -eq 0) { return $true }
     }
-    Write-Warn "uv kept failing; if it reported a file in use (os error 32), another program held the file: run the same command again"
+    Write-Warn "uv kept failing; if it reported a file in use or access denied (os error 32 or 5), another program held the file: run the same command again"
     return $false
 }
 
@@ -1183,11 +1203,7 @@ function Restore-Snapshot {
         # A first install has nothing to look back at, and the copy it kept
         # (about 2 GB) held a full disk full for every account (GAP-1883).
         Invoke-Quietly { Remove-Tree $failed }
-        $uvDir = Join-Path $DataDir ".uv"
-        $bytes = (Get-ChildItem -LiteralPath $uvDir -Recurse -Force -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
-        if ($bytes) {
-            Write-Info ("The download cache in $uvDir ({0:N0} MB) was kept so the next run is faster; remove it with: cmd /c rd /s /q `"$uvDir`"" -f ([double]$bytes / 1MB))
-        }
+        Write-KeptUvCache
         return
     }
     $bytes = (Get-ChildItem -LiteralPath $failed -Recurse -Force -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
@@ -1658,7 +1674,7 @@ function Invoke-Install {
     if ($acl.GetOwner([Security.Principal.SecurityIdentifier]) -ne $user) {
         # Created by an elevated installer of an older release.
         $acl.SetOwner($user)
-        Set-Acl -LiteralPath $DataDir -AclObject $acl
+        Set-DirectoryAcl $DataDir $acl
     }
     try { New-Item -ItemType Directory -Path $LockDir -ErrorAction Stop | Out-Null } catch {
         $holder = [string](Get-Content -LiteralPath (Join-Path $LockDir "pid") -ErrorAction SilentlyContinue | Select-Object -First 1)
@@ -1763,7 +1779,10 @@ function Invoke-Install {
     # package, then compiles the bytecode: about 7 minutes on a busy Windows
     # host with nothing printed (GAP-1665), so say so up front.
     Write-Info "Building the Python environment (a first install can take several minutes)"
-    if (-not (New-Venv (Join-Path $Staging "venv") "the staging environment")) { Die "Could not install the DefenseClaw $Ver Python package; nothing was changed" }
+    if (-not (New-Venv (Join-Path $Staging "venv") "the staging environment")) {
+        if (-not $PrevVersion) { Write-KeptUvCache }
+        Die "Could not install the DefenseClaw $Ver Python package; nothing was changed"
+    }
     $stagedCli = Join-Path $Staging "venv\Scripts\defenseclaw.exe"
     if (-not (Get-NativeOutput $stagedCli @("--version")).Contains($Ver)) { Die "The staged CLI does not start; nothing was changed" }
     $checkArgs = @("migrate", "--check", "--gateway-binary", $stagedGateway)
@@ -1811,7 +1830,7 @@ function Invoke-Install {
     $Snap = if ($PrevVersion -and $PrevVersion -eq $Ver) { Join-Path $DataDir ".repair" } else { Join-Path $DataDir "previous.new" }
     # Ctrl+C now would leave a half-swapped install; it is ignored until the swap is done.
     try { [Console]::TreatControlCAsInput = $true } catch { }
-    try { $saved = Save-Snapshot } catch { Write-Err $_.Exception.Message; $saved = $false }
+    try { $saved = Save-Snapshot } catch { Write-Err $_.Exception.Message; [void](Test-DiskFull); $saved = $false }
     if (-not $saved) {
         Invoke-Quietly { Undo-Snapshot $Snap }
         Clear-StagedRelease
@@ -1820,7 +1839,7 @@ function Invoke-Install {
         Die "Could not save the current install; nothing was changed"
     }
     $previousLabel = if ($PrevVersion) { $PrevVersion } else { "the previous state" }
-    try { $installed = Install-New } catch { Write-Err $_.Exception.Message; $installed = $false }
+    try { $installed = Install-New } catch { Write-Err $_.Exception.Message; [void](Test-DiskFull); $installed = $false }
     if (-not $installed) {
         Write-Err "Installing $Ver failed; restoring $previousLabel"
         Restore-Snapshot

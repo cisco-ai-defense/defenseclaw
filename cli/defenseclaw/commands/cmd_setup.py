@@ -15033,6 +15033,34 @@ def _refused_gateway_lifecycle_candidate(search_path: str | None = None) -> str:
 # A lifecycle command's own 30 s progress lines go to its captured output, so
 # the caller says the same while it waits (GAP-1858).
 _GATEWAY_LIFECYCLE_PROGRESS_SECONDS = 30.0
+# internal/audit/store.go's pre-1.0 history purge, the one slow audit upgrade
+# (also in scripts/keep-pre-1.0-audit-history.py).
+_AUDIT_PURGE_MIGRATION = 33
+
+
+def _audit_upgrade_note(data_dir: str) -> str:
+    """The note for a gateway start that first upgrades a 0.x audit database.
+
+    The launcher applies that one-time upgrade before it starts the gateway
+    (GAP-1909) and says so, but setup captures its output, so over a large
+    history setup printed only "waiting for the gateway" (GAP-2027).
+    """
+    db = Path(data_dir) / "audit.db"
+    if not db.is_file():
+        return ""
+    try:
+        import sqlite3
+
+        conn = sqlite3.connect(f"{db.resolve().as_uri()}?mode=ro", uri=True)
+        try:
+            version = conn.execute("SELECT COALESCE(MAX(version), 0) FROM schema_version").fetchone()[0]
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001 -- only a progress note; the gateway reports real errors
+        return ""
+    if 0 < version < _AUDIT_PURGE_MIGRATION:
+        return "Upgrading the audit database (one time; a large history can take a few minutes)"
+    return ""
 
 
 class _GatewayLifecycleProgress:
@@ -15042,15 +15070,20 @@ class _GatewayLifecycleProgress:
     the final mark; after a progress line, ``reopen`` starts a fresh one.
     """
 
-    def __init__(self, verb: str, interval: float | None = None) -> None:
+    def __init__(self, verb: str, interval: float | None = None, note: str = "") -> None:
         self.verb = verb
         self.interval = _GATEWAY_LIFECYCLE_PROGRESS_SECONDS if interval is None else interval
+        self.note = note
         self.printed = False
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._started = 0.0
 
     def __enter__(self) -> _GatewayLifecycleProgress:
+        if self.note:
+            click.echo()
+            click.echo(f"    {self.note}...")
+            self.printed = True
         self._started = time.monotonic()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
@@ -15068,7 +15101,10 @@ class _GatewayLifecycleProgress:
                 click.echo()
                 self.printed = True
             elapsed = int(time.monotonic() - self._started)
-            click.echo(f"    still {self.verb} after {elapsed}s: waiting for the gateway to start and answer")
+            waiting = "waiting for the gateway to start and answer"
+            if self.note:
+                waiting = "upgrading the audit database, then starting the gateway"
+            click.echo(f"    still {self.verb} after {elapsed}s: {waiting}")
 
     def reopen(self) -> None:
         if self.printed:
@@ -15157,7 +15193,7 @@ def _restart_defense_gateway(
     generation_before = previous_generation or _gateway_runtime_generation_before_restart(data_dir)
     try:
         # Run the object that passed custody, not whatever the path names now.
-        with _GatewayLifecycleProgress(action):
+        with _GatewayLifecycleProgress(action, note=_audit_upgrade_note(data_dir)):
             result = run_pinned_executable(
                 cmd,
                 capture_output=True,
@@ -15361,7 +15397,9 @@ def _restart_defense_gateway_native(
         # Hold the installed gateway without write or delete sharing until the
         # lifecycle command exits: its controller starts the long-running
         # gateway from this same path, which then still names this file (#643).
-        with pinned_executable(executable), _GatewayLifecycleProgress(f"{action}ing"):
+        with pinned_executable(executable), _GatewayLifecycleProgress(
+            f"{action}ing", note=_audit_upgrade_note(data_dir)
+        ):
             result = runner.run(
                 [executable, action],
                 timeout=_DEFENSE_GATEWAY_LIFECYCLE_TIMEOUT_SECONDS,

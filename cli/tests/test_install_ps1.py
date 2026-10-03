@@ -471,3 +471,36 @@ def test_the_uv_folder_is_protected_before_uv_runs_and_before_a_rollback_starts_
         < rollback.index("Protect-UvDirectory")
         < rollback.index("if ($startAfter -and (Start-Gateway)")
     )
+
+
+def test_install_folders_set_only_the_acl_part_that_changed() -> None:
+    # GAP-2004: Set-Acl writes every part of the security descriptor and was
+    # refused for a standard user on a second NTFS volume, so a
+    # DEFENSECLAW_HOME there died with a raw PowerShell error.
+    helper = _text()[_text().index("function Set-DirectoryAcl(") :][:600]
+    assert "$dir.SetAccessControl($Acl)" in helper
+    assert "[IO.FileSystemAclExtensions]::SetAccessControl($dir, $Acl)" in helper
+    new_dir = _text()[_text().index("function New-InstallDirectory(") :][:900]
+    assert "Set-Acl" not in new_dir
+    assert 'catch { Die "Could not set the permissions of ${Path}:' in new_dir
+    assert "Set-Acl" not in _ps1_function("Protect-UvDirectory")
+    assert "Set-DirectoryAcl $DataDir $acl" in _ps1_function("Invoke-Install")
+
+
+def test_the_last_uv_hint_names_both_lock_errors() -> None:
+    # GAP-2025: a held uv cache file fails with os error 5 as well as 32.
+    assert "file in use or access denied (os error 32 or 5)" in _text()[_text().index("function Invoke-UvPipInstall(") :][:1300]
+
+
+def test_a_failed_first_install_names_the_kept_uv_cache_and_a_full_disk() -> None:
+    # GAP-1883: the space refusal and a staging failure kept the uv cache
+    # silently, and a disk that filled at the binary copy showed only the
+    # raw .NET text.
+    assert "Write-KeptUvCache" in _ps1_function("Restore-Snapshot")
+    room = _text()[_text().index("function Assert-InstallRoom(") :][:1400]
+    assert room.index("if (-not $PrevVersion) { Write-KeptUvCache }") < room.index("Die (")
+    install = _ps1_function("Invoke-Install")
+    staging = install[install.index('(New-Venv (Join-Path $Staging "venv")') :][:300]
+    assert staging.index("Write-KeptUvCache") < staging.index("Die ")
+    assert "Write-Err $_.Exception.Message; [void](Test-DiskFull); $installed = $false" in install
+    assert "Write-Err $_.Exception.Message; [void](Test-DiskFull); $saved = $false" in install
