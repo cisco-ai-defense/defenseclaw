@@ -145,7 +145,10 @@ func emitEventRouterModelUnderAgentV8(
 
 // eventRouterAgentInputV8 is the agent root of one OpenClaw assistant message.
 // The stream reports no lifecycle or execution identity, so the root carries
-// only what the message reports, like the proxy's agent root.
+// only what the message reports, like the proxy's agent root. The message is
+// the turn's reply, so the root's output is that reply, as on the hook
+// connectors' agent spans; without it Galileo showed a blank agent node for
+// every OpenClaw turn (GAP-2495).
 func eventRouterAgentInputV8(observation hookModelV8Observation) observability.SpanAgentInvokeInput {
 	meta := observation.meta
 	envelope := hookModelV8Envelope(observation, "invoke_agent")
@@ -153,6 +156,9 @@ func eventRouterAgentInputV8(observation hookModelV8Observation) observability.S
 	outcome, technicalFailure, errorType := hookModelV8ObservationResult(observation)
 	inputMessages, inputBytes, inputReported, inputState, inputStructured := hookModelV8InputMessages(
 		observation.prompt, observation.promptOriginalBytes, observation.promptTruncated,
+	)
+	outputMessages, outputBytes, outputReported, outputState, outputStructured := hookModelV8OutputMessages(
+		observation.response, observation.finishReasons,
 	)
 	input := observability.SpanAgentInvokeInput{
 		Envelope: envelope, Outcome: outcome, Kind: "INTERNAL",
@@ -162,8 +168,8 @@ func eventRouterAgentInputV8(observation hookModelV8Observation) observability.S
 		DefenseClawAgentType:               observation.agentType,
 		DefenseClawTelemetryInputReported:  inputReported,
 		DefenseClawContentInputState:       inputState,
-		DefenseClawTelemetryOutputReported: false,
-		DefenseClawContentOutputState:      "not_reported",
+		DefenseClawTelemetryOutputReported: outputReported,
+		DefenseClawContentOutputState:      outputState,
 		GenAIOperationName:                 observability.Present("invoke_agent"),
 		ConditionConnectorKnown:            hookModelV8StableToken(meta.Source) != "",
 		ConditionOperationTerminal:         true,
@@ -181,6 +187,13 @@ func eventRouterAgentInputV8(observation hookModelV8Observation) observability.S
 	if inputReported {
 		input.DefenseClawContentInputOriginalBytes = observability.Present(inputBytes)
 		input.DefenseClawContentInputMimeType = observability.Present("text/plain")
+	}
+	if outputStructured {
+		input.GenAIOutputMessages = observability.Present(outputMessages)
+	}
+	if outputReported {
+		input.DefenseClawContentOutputOriginalBytes = observability.Present(outputBytes)
+		input.DefenseClawContentOutputMimeType = observability.Present("text/plain")
 	}
 	input.DefenseClawConnectorSource = hookModelV8OptionalID(meta.Source)
 	input.UserID = hookModelV8OptionalID(meta.UserID)
