@@ -20,16 +20,19 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // GAP-2109: the daemon's pre-run opens the audit store before runSidecar
 // runs, so the "[audit] ..." corrupt-store notice and migration lines must
 // already go through the gateway.log time stamper.
 func TestDaemonPreRunStampsAuditStoreLines(t *testing.T) {
-	home := t.TempDir()
+	// A private dir: the Windows daemon child registers its pid file there.
+	home := testenv.PrivateTempDir(t)
 	t.Setenv("DEFENSECLAW_HOME", home)
 	t.Setenv(managed.ConfigPathEnv, "")
 	t.Setenv(daemon.EnvDaemon, "1")
+	t.Setenv(daemon.EnvDataDir, home)
 	t.Setenv(daemon.EnvLogTimestamps, "")
 	if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte("config_version: 8\n"), 0o600); err != nil {
 		t.Fatal(err)
