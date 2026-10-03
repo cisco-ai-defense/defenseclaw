@@ -459,15 +459,15 @@ def _merge_declared_capabilities(
     parsed: list[tuple[dict, str]],
 ) -> None:
     merged_perms: list[str] = []
-    seen_perms: set[str] = set()
+    perm_sources: dict[str, str] = {}
     merged_tools: list[dict] = []
     merged_entrypoints: list[str] = []
     seen_entrypoints: set[str] = set()
 
-    for raw, _label in parsed:
+    for raw, label in parsed:
         for perm in _manifest_permissions(raw):
-            if perm not in seen_perms:
-                seen_perms.add(perm)
+            if perm not in perm_sources:
+                perm_sources[perm] = label
                 merged_perms.append(perm)
         tools = raw.get("tools")
         if isinstance(tools, list):
@@ -479,6 +479,7 @@ def _merge_declared_capabilities(
 
     if merged_perms:
         manifest.permissions = merged_perms
+        manifest.permission_sources = perm_sources
     if merged_tools:
         manifest.tools = merged_tools
     if merged_entrypoints:

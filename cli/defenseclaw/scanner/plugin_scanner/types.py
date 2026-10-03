@@ -197,6 +197,10 @@ class PluginManifest:
     dependencies: dict[str, str] | None = None
     scripts: dict[str, str] | None = None
     source: str | None = None
+    # Source label of the manifest that declared each permission, set only
+    # when several manifests were merged (F-0362), so a permission finding
+    # names the file that holds it (GAP-2243).
+    permission_sources: dict[str, str] | None = None
     # Declared runtime entrypoint paths (package.json ``main``/``bin``
     # values and connector-manifest entrypoints), relative to the plugin
     # directory. These are force-scanned even when extensionless or under
