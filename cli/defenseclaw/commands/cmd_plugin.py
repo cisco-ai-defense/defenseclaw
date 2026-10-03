@@ -3217,6 +3217,13 @@ def _trusted_copilot_binary(
     return ""
 
 
+def _untrusted_copilot_binary() -> str:
+    """Return the first Copilot on PATH that the trust gate refused, if any."""
+    from defenseclaw.inventory.agent_discovery import _SPECS, _binary_candidates_for_agent
+
+    return next(iter(_binary_candidates_for_agent("copilot", _SPECS["copilot"])), "")
+
+
 # GAP-2415: Copilot CLI 1.0.90 rejects the older ``plugins list --kind
 # plugin`` form; ``plugin list --json`` is the supported read-only command.
 # The older form stays as a fallback for earlier Copilot CLIs.
@@ -3246,41 +3253,59 @@ def _list_copilot_plugins(
     data_dir: str | os.PathLike[str] | None = None,
     workspace_dir: str | os.PathLike[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """List declared plugins in the exact trusted lifecycle context."""
+    """List declared plugins in the exact trusted lifecycle context.
+
+    Copilot runs in the pinned connector workspace, or in the user's home
+    directory when none is pinned (the default config; GAP-2415). Every
+    gate that stops the listing records why in ``_HOST_PLUGIN_LIST_ERRORS``
+    so ``plugin list`` never reports a skipped listing as "no plugins".
+    """
+
+    _HOST_PLUGIN_LIST_ERRORS.pop("copilot", None)
+
+    def _fail(reason: str) -> list[dict[str, Any]]:
+        _HOST_PLUGIN_LIST_ERRORS["copilot"] = reason
+        return []
 
     workspace = str(workspace_dir or "")
+    if not workspace:
+        workspace = os.path.realpath(os.path.expanduser("~"))
     if (
-        not workspace
-        or workspace.strip() != workspace
+        workspace.strip() != workspace
         or not os.path.isabs(workspace)
         or os.path.normpath(workspace) != workspace
     ):
-        return []
+        return _fail(f"workspace {workspace!r} is not a normalized absolute path (claw.workspace_dir)")
     try:
         connector_paths.reject_reparse_path(workspace)
         before = os.stat(workspace, follow_symlinks=False)
         if not os.path.isdir(workspace):
-            return []
+            return _fail(f"workspace {workspace} is not a directory (claw.workspace_dir)")
         if data_dir:
             data_real = os.path.realpath(os.path.abspath(str(data_dir)))
             workspace_real = os.path.realpath(workspace)
             if os.path.normcase(os.path.commonpath((workspace_real, data_real))) == os.path.normcase(
                 data_real
             ):
-                return []
-    except (OSError, ValueError):
-        return []
+                return _fail(f"workspace {workspace} is inside the DefenseClaw data directory")
+    except (OSError, ValueError) as exc:
+        return _fail(f"workspace {workspace} is not usable: {exc}")
 
     copilot = _trusted_copilot_binary(data_dir)
     if not copilot:
+        found = _untrusted_copilot_binary()
+        if found:
+            return _fail(
+                f"copilot at {found} is not in a trusted location; add its install "
+                "prefix to ai_discovery.trusted_binary_prefixes"
+            )
         return []
     try:
         bound_home = connector_paths.copilot_home()
-    except ValueError:
-        return []
+    except ValueError as exc:
+        return _fail(f"COPILOT_HOME is not usable: {exc}")
     env = os.environ.copy()
     env["COPILOT_HOME"] = bound_home
-    _HOST_PLUGIN_LIST_ERRORS.pop("copilot", None)
     proc = None
     failure = ""
     for argv in _COPILOT_PLUGIN_LIST_ARGVS:
@@ -3310,20 +3335,17 @@ def _list_copilot_plugins(
         return []
     try:
         after = os.stat(workspace, follow_symlinks=False)
-    except OSError:
-        return []
-    if (
-        before.st_dev,
-        before.st_ino,
-        before.st_mtime_ns,
-        before.st_ctime_ns,
-    ) != (
-        after.st_dev,
-        after.st_ino,
-        after.st_mtime_ns,
-        after.st_ctime_ns,
-    ):
-        return []
+    except OSError as exc:
+        return _fail(f"workspace {workspace} is not usable: {exc}")
+    def _identity(st: os.stat_result) -> tuple[int, ...]:
+        # Home (the unpinned fallback) gets routine entry churn from other
+        # programs, so only its identity is compared there.
+        if workspace_dir:
+            return (st.st_dev, st.st_ino, st.st_mtime_ns, st.st_ctime_ns)
+        return (st.st_dev, st.st_ino)
+
+    if _identity(before) != _identity(after):
+        return _fail(f"workspace {workspace} changed while copilot was listing plugins")
     try:
         if (proc.stdout or "").strip():
             json.loads(proc.stdout)
