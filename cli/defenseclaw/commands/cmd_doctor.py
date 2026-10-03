@@ -1814,15 +1814,16 @@ def _moved_store_block_allow_summary(moved: Path) -> str:
         error = str(note.get("error") or "")
     except (OSError, ValueError, TypeError, AttributeError):
         return f"started a new store; {_REVIEW_BLOCK_ALLOW_LISTS}"
+    entries = "1 block/allow entry" if kept == 1 else f"{kept} block/allow entries"
     if not error:
-        return f"started a new store and carried over {kept} block/allow entries."
+        return f"started a new store and carried over {entries}."
     if kept == 0:
         return (
             "started a new store, but the old block/allow lists could not be read, so 0 entries were "
             f"carried over and earlier blocks no longer apply; {_REVIEW_BLOCK_ALLOW_LISTS}"
         )
     return (
-        f"started a new store and carried over {kept} block/allow entries, but some could not be read; "
+        f"started a new store and carried over {entries}, but some could not be read; "
         f"{_REVIEW_BLOCK_ALLOW_LISTS}"
     )
 
