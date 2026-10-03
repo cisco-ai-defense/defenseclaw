@@ -2200,7 +2200,10 @@ def list_plugins(app: AppContext, as_json: bool, connector_flag: str) -> None:
     if not shown_any:
         _render_plugin_registry_diagnostics(discovery, hide_missing=len(connectors) > 1)
         if len(connectors) == 1 and _empty_plugin_registry_note(discovery, connectors[0]) is None:
-            click.echo(f"No plugins found. Check your {connectors[0]} installation and plugin directories.")
+            # GAP-2368: no plugins is a normal state, not a broken install.
+            roots = _plugin_roots_for_connector(app, connectors[0])
+            checked = f" (checked: {', '.join(roots)})" if roots else ""
+            click.echo(f"{connectors[0]} has no installed plugins{checked}.")
         return
 
     if shown_any:
