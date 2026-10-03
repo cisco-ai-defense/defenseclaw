@@ -1082,8 +1082,11 @@ def setup_llm(
         click.echo(f"    {ux.dim('api_key_env:')} {key_env} = {key_state}")
         if resolved.base_url:
             click.echo(f"    {ux.dim('base_url:')}    {resolved.base_url}")
-        click.echo(f"    {ux.dim('timeout:')}     {resolved.timeout}s")
-        click.echo(f"    {ux.dim('max_retries:')} {resolved.max_retries}")
+        # Show what callers use: 0 means unset, so print the default (GAP-2613).
+        timeout_note = "" if resolved.timeout > 0 else " (default)"
+        retries_note = "" if resolved.max_retries > 0 else " (default)"
+        click.echo(f"    {ux.dim('timeout:')}     {resolved.effective_timeout()}s{timeout_note}")
+        click.echo(f"    {ux.dim('max_retries:')} {resolved.effective_max_retries()}{retries_note}")
         ux.subhead(
             "To change: run 'defenseclaw setup llm' without --show.",
         )

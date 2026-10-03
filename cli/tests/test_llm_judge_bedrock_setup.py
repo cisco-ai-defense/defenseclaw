@@ -77,6 +77,20 @@ class JudgeBedrockSetupTests(unittest.TestCase):
         self.assertNotIn("has no value", res.output)
         save.assert_called_once()
 
+    def test_setup_llm_show_prints_effective_defaults_when_unset(self) -> None:
+        """GAP-2613: unset timeout/max_retries show the 30 s / 2 defaults, not 0."""
+        self.app.cfg.llm = _instance_role_llm()
+        res = CliRunner().invoke(setup, ["llm", "--show"], obj=self.app, catch_exceptions=False)
+        self.assertEqual(res.exit_code, 0, res.output)
+        self.assertIn("timeout:     30s (default)", res.output)
+        self.assertIn("max_retries: 2 (default)", res.output)
+
+        self.app.cfg.llm.timeout = 45
+        self.app.cfg.llm.max_retries = 4
+        res = CliRunner().invoke(setup, ["llm", "--show"], obj=self.app, catch_exceptions=False)
+        self.assertIn("timeout:     45s\n", res.output)
+        self.assertIn("max_retries: 4\n", res.output)
+
     def test_setup_llm_role_judge_header_names_keyless_auth(self) -> None:
         """GAP-1730: the Current line shows the Bedrock auth, not an API key env."""
         self.app.cfg.guardrail.judge.llm = _instance_role_llm()
