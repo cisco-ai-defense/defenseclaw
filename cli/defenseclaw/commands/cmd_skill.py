@@ -5595,7 +5595,7 @@ def install(app: AppContext, name: str, force: bool, take_action: bool, connecto
                 )
             click.echo(
                 f"error: skill {skill_name!r} is on the block list for connector={connector}"
-                f" — run 'defenseclaw skill allow {skill_name} --connector {connector}' to unblock",
+                f" — run 'defenseclaw skill unblock {skill_name} --connector {connector}' to clear the block",
                 err=True,
             )
             raise SystemExit(1)

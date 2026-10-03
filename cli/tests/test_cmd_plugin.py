@@ -273,6 +273,16 @@ class TestPluginInstall(PluginCommandTestBase):
         self.assertTrue(os.path.isfile(os.path.join(installed, "plugin.py")))
 
     @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
+    def test_install_of_a_blocked_plugin_points_at_unblock(self, mock_scan):
+        # GAP-2112: allow also skips the scan gate; unblock only clears the block.
+        mock_scan.return_value = self._clean_result()
+        PolicyEngine(self.app.store).block("plugin", "held-plugin", "test")
+        result = self._invoke_install(["install", self._create_plugin_dir("held-plugin")])
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("'defenseclaw plugin unblock held-plugin --connector", result.output)
+        self.assertNotIn("plugin allow", result.output)
+
+    @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
     def test_install_claudecode_says_claude_code_will_not_load_it(self, mock_scan):
         # GAP-2084: Claude Code loads only marketplace installs, so the copy
         # is neither loaded nor listed; say so and give the next step.

@@ -1556,7 +1556,7 @@ def plugin_actions(verdict: str, status: str, enabled: bool) -> tuple[CatalogMen
         CatalogMenuAction("i", "Info", "Show full details"),
     ]
     if verdict == "blocked":
-        actions.append(CatalogMenuAction("u", "Unblock", "Remove from block list (runs plugin allow)"))
+        actions.append(CatalogMenuAction("u", "Unblock", "Remove from block list (runs plugin unblock)"))
     elif verdict == "allowed":
         actions.append(CatalogMenuAction("b", "Block", "Add to install block list"))
     else:

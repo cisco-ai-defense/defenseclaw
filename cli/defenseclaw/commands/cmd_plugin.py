@@ -1541,8 +1541,8 @@ def _check_plugin_pre_install_admission(
             click.echo(
                 f"error: plugin {plugin_name!r} is on the block list for "
                 f"connector={connector} — run "
-                f"'defenseclaw plugin allow {plugin_name} --connector {connector}' "
-                "to unblock",
+                f"'defenseclaw plugin unblock {plugin_name} --connector {connector}' "
+                "to clear the block",
                 err=True,
             )
             raise SystemExit(1)
