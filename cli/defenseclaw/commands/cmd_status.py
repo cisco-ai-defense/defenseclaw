@@ -1313,7 +1313,7 @@ def _print_observability_status(cfg, *, config_has_problems: bool = False) -> No
         # the loader's raw diagnostic repeated both (GAP-1995).
         reason = "the config has a problem, listed above" if config_has_problems else str(exc)
         ux.echo("    " + ux._style(f"destination plan unavailable: {reason}", fg="yellow"))
-        _print_native_delivery_status(_native_delivery_summary(cfg))
+        _print_native_delivery_status(_native_delivery_summary(cfg), configured=_configured_connectors(cfg))
         return
 
     retention = "unbounded" if status.unbounded_retention else f"{status.retention_days} days"
@@ -1328,7 +1328,18 @@ def _print_observability_status(cfg, *, config_has_problems: bool = False) -> No
         )
         if destination.endpoint:
             ux.echo(f"      {ux.dim('target:')} {destination.endpoint}")
-    _print_native_delivery_status(_native_delivery_summary(cfg, audit_db=status.local_path))
+    _print_native_delivery_status(
+        _native_delivery_summary(cfg, audit_db=status.local_path),
+        configured=_configured_connectors(cfg),
+    )
+
+
+def _configured_connectors(cfg) -> set[str] | None:
+    """Connectors set up now, as doctor scopes its OTLP rows (GAP-2242)."""
+
+    from defenseclaw.commands.cmd_doctor import _otlp_configured_connectors
+
+    return _otlp_configured_connectors(cfg)
 
 
 def _native_delivery_summary(cfg, *, audit_db: str = ""):
@@ -1355,8 +1366,13 @@ def _native_delivery_summary(cfg, *, audit_db: str = ""):
     return summarize_native_delivery(inspect_connector_custody(database, data_dir))
 
 
-def _print_native_delivery_status(summary) -> None:
-    """Render delivery truth separately from collector/runtime health."""
+def _print_native_delivery_status(summary, *, configured: set[str] | None = None) -> None:
+    """Render delivery truth separately from collector/runtime health.
+
+    ``configured`` (when known) keeps per-connector rows for connectors set up
+    now. Evidence outlives ``setup remove``, so removed connectors fold into
+    one "not configured" line, as doctor does (GAP-2242).
+    """
 
     hours = summary.observation_window_hours
     scope = f"bounded {hours}h"
@@ -1368,15 +1384,25 @@ def _print_native_delivery_status(summary) -> None:
         reason = f"; {summary.reason.replace('_', ' ')}" if summary.reason else ""
         ux.echo(f"      {ux.dim(f'no evidence ({scope}{reason})')}")
         return
+    from defenseclaw.connector_paths import normalize
     from defenseclaw.observability.custody_status import native_delivery_display_rows
 
-    for label, item in native_delivery_display_rows(summary.connectors):
+    connectors = summary.connectors
+    removed: list[str] = []
+    if configured is not None:
+        connectors = tuple(item for item in connectors if normalize(item.connector) in configured)
+        for item in summary.connectors:
+            if normalize(item.connector) not in configured and item.connector not in removed:
+                removed.append(item.connector)
+    for label, item in native_delivery_display_rows(connectors):
         instance = f" ({label})" if label else ""
         state = item.state.replace("_", "-")
         color = "green" if item.state == "accepted" else "yellow"
         if item.state == "no_evidence":
             color = "bright_black"
         ux.echo(f"      {ux.bold(item.connector + instance)}  {ux._style(state, fg=color)} — {item.detail}")
+    if removed:
+        ux.echo("      " + ux.dim("not configured (telemetry history only, not checked): " + ", ".join(removed)))
 
 
 def _scanner_overrides_summary(cfg) -> str:
