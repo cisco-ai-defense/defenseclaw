@@ -560,7 +560,14 @@ func (writer *EventHistoryWriter) appendContextTxResolvedProfile(
 		record.Outcome() == observability.OutcomeTerminated
 
 	legacyTarget := any(nullStr(target))
+	// A control-plane record names who made the change in
+	// defenseclaw.admin.actor_ref (tui:operator for a TUI save); the actor
+	// column says the same, as CLI rows say cli, instead of the producer
+	// that wrote the record (audit_logger) (GAP-2143).
 	legacyActor := any(provenance.Producer)
+	if actorRef := strings.TrimSpace(projectedCompatibilityString(projection, "defenseclaw.admin.actor_ref")); actorRef != "" {
+		legacyActor = actorRef
+	}
 	legacyDetails := any(details)
 	legacyStructured := any(string(payloadJSON))
 	legacySeverity := severityValue

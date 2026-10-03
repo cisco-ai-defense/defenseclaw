@@ -380,6 +380,8 @@ func evaluateHookForeignGuard(name, hookBinary string, policy enterprisepolicy.P
 		Key:          enterprisepolicy.SessionKey{Connector: name, Session: facts.session, Process: hookForeignGuardAgentProcess()},
 		SessionStart: sessionStart,
 		Decision:     decision,
+		Event:        event,
+		Tool:         facts.tool,
 	}
 	if foreignHookSessionLocal(name) {
 		// No gateway exchange is possible for this connector, so the
@@ -473,6 +475,10 @@ type hookPayloadFacts struct {
 	// surface is the hook command's --hook-surface marker when the
 	// connector lists it (the VS Code Local harness reads more sources).
 	surface string
+	// tool is the tool the event is for (tool_name or toolName; "" for
+	// session and prompt events), which labels the gateway's export of a
+	// denial.
+	tool string
 }
 
 // hookForeignGuardSessionKeys name the agent's session ID, in order.
@@ -505,6 +511,13 @@ func captureHookPayloadFacts(opts *hookexec.Options) hookPayloadFacts {
 		var event string
 		if json.Unmarshal(payload[key], &event) == nil && strings.TrimSpace(event) != "" {
 			facts.event = strings.TrimSpace(event)
+			break
+		}
+	}
+	for _, key := range []string{"tool_name", "toolName"} {
+		var tool string
+		if json.Unmarshal(payload[key], &tool) == nil && strings.TrimSpace(tool) != "" {
+			facts.tool = strings.TrimSpace(tool)
 			break
 		}
 	}

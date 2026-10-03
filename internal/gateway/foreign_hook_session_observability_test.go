@@ -13,6 +13,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
+	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 )
 
 // GAP-2044: a foreign-hook guard denial is a guardrail block like any other.
@@ -72,5 +73,64 @@ func TestForeignHookSessionDenialExportsAConnectorHookBlock(t *testing.T) {
 	}
 	if wire.Body["defenseclaw.user.name"] != "dcw-std1" || wire.Body["defenseclaw.guardrail.effective_action"] != "block" {
 		t.Fatalf("hook decision record body=%v", wire.Body)
+	}
+}
+
+// GAP-2142: a denied tool call is a blocked tool span (the decision on the
+// tool span, which Galileo shows), and a session-start denial is an
+// apply_guardrail span named for the session, not "tool_call".
+func TestForeignHookSessionDenialNamesWhatWasDenied(t *testing.T) {
+	if got, tool := foreignHookSessionDenialTarget(enterprisepolicy.SessionExchange{Event: "sessionEnd"}); got != "session" || tool != "" {
+		t.Fatalf("sessionEnd target=%q tool=%q", got, tool)
+	}
+	if got, tool := foreignHookSessionDenialTarget(enterprisepolicy.SessionExchange{Event: "beforeShellExecution"}); got != "tool_call" || tool != "shell" {
+		t.Fatalf("beforeShellExecution target=%q tool=%q", got, tool)
+	}
+	if got, _ := foreignHookSessionDenialTarget(enterprisepolicy.SessionExchange{Event: "beforeSubmitPrompt"}); got != "prompt" {
+		t.Fatalf("beforeSubmitPrompt target=%q", got)
+	}
+
+	api, capture := bindHookModelV8Runtime(t, []string{"traces"})
+	sid := "S-1-5-21-1111-2222-3333-1001"
+	ctx := context.WithValue(context.Background(), verifiedUserScopedIdentityContextKey{}, sid)
+	ctx = ContextWithAgentIdentity(ctx, AgentIdentity{
+		UserID: sid, UserIDKind: useridentity.KindForID(sid), UserName: "dcw-std1",
+	})
+	decision := enterprisepolicy.GuardDecision{Deny: true, Reason: "enterprise_foreign_hook_blocked: project hook"}
+	key := enterprisepolicy.SessionKey{Connector: "cursor", Session: "session-fh-2", Process: "process-1"}
+	api.auditForeignHookSessionDenial(ctx, "cursor", enterprisepolicy.SessionExchange{
+		Key: key, SessionStart: true, Event: "sessionStart", Decision: decision,
+	}, decision)
+	api.auditForeignHookSessionDenial(ctx, "cursor", enterprisepolicy.SessionExchange{
+		Key: key, Event: "preToolUse", Tool: "Write", Decision: decision,
+	}, decision)
+
+	var spans []*tracepb.Span
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		traces, _ := capture.snapshot()
+		if spans = hookModelV8CapturedSpans(traces); len(spans) >= 2 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	var names []string
+	toolBlocked, sessionSpan := false, false
+	for _, span := range spans {
+		names = append(names, span.Name)
+		if span.Name == "apply_guardrail inspect tool_call" {
+			t.Fatalf("a denial is still labelled tool_call: %v", names)
+		}
+		if span.Name == "apply_guardrail inspect session" {
+			sessionSpan = true
+		}
+		if strings.HasPrefix(span.Name, "execute_tool") && span.Status.GetCode() == tracepb.Status_STATUS_CODE_ERROR {
+			for _, event := range span.Events {
+				toolBlocked = toolBlocked || event.Name == "defenseclaw.guardrail.block"
+			}
+		}
+	}
+	if !toolBlocked || !sessionSpan {
+		t.Fatalf("spans=%v, want a blocked execute_tool span and an apply_guardrail session span", names)
 	}
 }
