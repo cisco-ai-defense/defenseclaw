@@ -208,20 +208,18 @@ and redaction profile that file is allowed to receive.
 
 <Flow
   direction="TB"
-  caption="init (guided) and quickstart (scripted) run the same first-run setup. The only difference is whether they prompt."
+  caption="init asks its questions first; quickstart takes safe defaults. From there both run the same steps. init then adds any extra connectors you picked. --skip-gateway (quickstart) or --no-start-gateway (init) skips step 4."
 >
-  <Node id="init" kind="operator">{`defenseclaw init\n(guided wizard)`}</Node>
-  <Node id="quick" kind="operator">{`defenseclaw quickstart\n(zero-prompt)`}</Node>
-  <Node id="bootstrap" kind="generic">{`shared first-run\nsetup`}</Node>
-  <Node id="apply" kind="generic">apply choices to config.yaml</Node>
-  <Node id="env" kind="generic">{`create dirs · audit DB\ncheck scanners`}</Node>
-  <Node id="guard" kind="connector">{`guardrail setup for\nthe chosen connectors`}</Node>
-  <Node id="gw" kind="gateway">{`start defenseclaw-gateway\n(unless --skip-gateway)`}</Node>
-  <Node id="report" kind="generic">first-run report</Node>
-  <Edge from="init" to="bootstrap" />
-  <Edge from="quick" to="bootstrap" />
-  <Edge from="bootstrap" to="apply" />
-  <Edge from="apply" to="env" />
+  <Node id="quick" kind="operator">{`defenseclaw quickstart\nuses safe defaults`}</Node>
+  <Node id="init" kind="operator">{`defenseclaw init\nasks you questions`}</Node>
+  <Node id="config" kind="generic">{`1. Saves your choices\nin config.yaml`}</Node>
+  <Node id="env" kind="generic">{`2. Prepares the data dir\naudit DB, policies, scanners`}</Node>
+  <Node id="guard" kind="connector">{`3. Connects your agent\nhooks, plugin or proxy`}</Node>
+  <Node id="gw" kind="gateway">{`4. Starts the gateway\ndefenseclaw-gateway`}</Node>
+  <Node id="report" kind="generic">{`5. Checks readiness\nprints the report`}</Node>
+  <Edge from="quick" to="config" label="defaults" />
+  <Edge from="init" to="config" label="your answers" />
+  <Edge from="config" to="env" />
   <Edge from="env" to="guard" />
   <Edge from="guard" to="gw" />
   <Edge from="gw" to="report" />

@@ -28,25 +28,27 @@ Inserting an inspection step inside the agent process means every agent has to g
 
 - The agent does not need to be modified — connectors are written *for* the agent (Claude Code's hooks, Codex's `config.toml`, Cursor's `hooks.json`, OpenClaw's plugin).
 - One audit log covers every agent the operator runs.
-- One config file serves every connector — there is exactly one `~/.defenseclaw/config.yaml`. The OPA admission policy is **shared** across all connectors, while guardrail *posture* (mode, fail mode, HILT, block message, rule pack) can optionally be set **per connector** when one gateway serves several hook connectors at once. See [Multi-connector](/docs/setup/guardrail/multi-connector).
+- One config file serves every connector — there is exactly one `~/.defenseclaw/config.yaml`. The OPA admission policy is **shared** across all connectors, while guardrail *posture* (mode, fail mode, HITL, block message, rule pack) can optionally be set **per connector** when one gateway serves several hook connectors at once. See [Multi-connector](/docs/setup/guardrail/multi-connector).
 
 ## Where DefenseClaw sits
 
 <Flow
   direction="TB"
-  compact
-  caption="One Python CLI for the operator. One Go gateway for the data path. One TypeScript plugin per agent that needs in-process integration."
+  caption="You drive the Python defenseclaw CLI (and its TUI), which writes ~/.defenseclaw/config.yaml and starts the Go defenseclaw-gateway. Your agent reaches the same gateway through its connector: a hook, a plugin such as OpenClaw's TypeScript plugin, or the LLM proxy. On connectors that support human approval (HITL), the approval prompt appears in the agent itself."
 >
-  <Node id="op" kind="operator">{`Operator\n(you)`}</Node>
-  <Node id="cli" kind="generic">{`defenseclaw CLI\nPython`}</Node>
-  <Node id="gateway" kind="gateway">{`defenseclaw-gateway\nGo sidecar`}</Node>
-  <Node id="agent" kind="agent">{`Agent\nClaude · Codex ·\nOpenClaw · ...`}</Node>
-  <Node id="sinks" kind="datastore">{`Sinks\nSQLite · JSONL ·\nOTLP · Splunk · webhooks`}</Node>
-  <Edge from="op" to="cli" />
-  <Edge from="cli" to="gateway" label="config · restart" />
-  <Edge from="agent" to="gateway" variant="bidirectional" label="hooks or proxy" />
-  <Edge from="gateway" to="sinks" />
-  <Edge from="op" to="gateway" variant="bidirectional" label="TUI · HITL" />
+  <Node id="op" kind="operator">You</Node>
+  <Node id="agent" kind="agent">{`Your AI agent\nsuch as Claude Code`}</Node>
+  <Node id="cli" kind="operator">{`defenseclaw CLI + TUI\nsets up and reviews`}</Node>
+  <Node id="conn" kind="connector">{`Connector\nhook, plugin or proxy`}</Node>
+  <Node id="gateway" kind="gateway">{`defenseclaw-gateway\ndecides and records`}</Node>
+  <Node id="sinks" kind="datastore">{`Your telemetry\nOTLP, Splunk, webhooks`}</Node>
+  <Node id="audit" kind="datastore">{`Audit log\nlocal SQLite database`}</Node>
+  <Edge from="op" to="cli" label="runs" />
+  <Edge from="agent" to="conn" label="prompts, tool calls" />
+  <Edge from="cli" to="gateway" label="configures, starts" />
+  <Edge from="conn" to="gateway" label="asks: allow or block?" emphasis />
+  <Edge from="gateway" to="sinks" label="exports" />
+  <Edge from="gateway" to="audit" label="records" />
 </Flow>
 
 ## Sandboxed agents
