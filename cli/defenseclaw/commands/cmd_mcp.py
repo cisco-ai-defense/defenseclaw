@@ -809,8 +809,13 @@ def _run_scan(app: AppContext, target: str, analyzers: str,
               connector: str = "",
               json_error_sink: list[dict] | None = None,
               audit_target: str = "",
-              pack_cache: RulePackOverlayCache | None = None) -> ScanResult | None:
-    """Run the MCP scanner on *target*.  Returns None on fatal error."""
+              pack_cache: RulePackOverlayCache | None = None,
+              connect_hint: str = "") -> ScanResult | None:
+    """Run the MCP scanner on *target*.  Returns None on fatal error.
+
+    *connect_hint* replaces the default "then scan again" line printed after a
+    connection error (``mcp set`` says what to run instead, GAP-2398).
+    """
     from dataclasses import replace
 
     from defenseclaw.scanner.mcp import MCPScannerWrapper
@@ -893,7 +898,8 @@ def _run_scan(app: AppContext, target: str, analyzers: str,
             click.echo(f"error: scan failed: {exc}", err=True)
             if "connect" in str(exc).lower():
                 click.echo(
-                    "  Check that the server is running and reachable, then scan again.",
+                    connect_hint
+                    or "  Check that the server is running and reachable, then scan again.",
                     err=True,
                 )
         return None
@@ -1293,6 +1299,26 @@ def _connector_owns_mcp_target(app: AppContext, connector: str, target: str) -> 
         s.name == target or (s.url and s.url == target)
         for s in _collect_mcps_for_connector(app, connector)
     )
+
+
+def _mcp_unconfigured_note(app: AppContext, target: str, connector: str) -> str:
+    """Say when *target* is not configured on the connector(s) in scope (GAP-2397).
+
+    Returns "" when the target is configured (by name or URL) or when the
+    connector config cannot be read, so the policy command never fails on it.
+    """
+    try:
+        # active_connectors(), not resolve_list_connectors(): the latter exits
+        # when nothing is configured, and this runs after the policy write.
+        scope = [connector] if connector else [n for n in app.cfg.active_connectors() if n]
+        if not scope or any(_connector_owns_mcp_target(app, c, target) for c in scope):
+            return ""
+        names = sorted({s.name for c in scope for s in _collect_mcps_for_connector(app, c)})
+    except Exception:  # noqa: BLE001 - the note is advisory only
+        return ""
+    where = f"on {connector}" if connector else f"on any configured connector ({', '.join(scope)})"
+    shown = ", ".join(names[:8]) + (", ..." if len(names) > 8 else "") if names else "none"
+    return f"{target!r} is not configured {where}. Configured MCP servers: {shown}."
 
 
 def _mcp_policy_fanout_connectors(
@@ -1796,6 +1822,14 @@ def block(app: AppContext, target: str, reason: str, connector_flag: str) -> Non
             "block-mcp", target, f"reason={reason} connector={connector}",
         )
 
+    note = _mcp_unconfigured_note(app, target, connector)
+    if note:
+        # GAP-2397: a typo must not look like it blocked the intended server.
+        list_cmd = "defenseclaw mcp list" + (f" --connector {connector}" if connector else "")
+        click.secho(f"  Note: {note}", fg="yellow")
+        click.echo("  The block applies if a server with this name or URL is added later.")
+        click.echo(f"  Check the name with: {list_cmd}")
+
 
 @mcp.command()
 @click.argument("target")
@@ -1897,9 +1931,14 @@ def _mcp_unblock_line(target: str, connector: str, only_allow: bool) -> str:
     return f"[mcp] Unblocked {target!r}{scope}."
 
 
-def _mcp_rescan_hint(target: str, connector: str) -> None:
+def _mcp_rescan_hint(app: AppContext, target: str, connector: str) -> None:
     import shlex
 
+    note = _mcp_unconfigured_note(app, target, connector)
+    if note:
+        # GAP-2397: no scan hint for a server that is not configured.
+        click.echo(f"  {note} There is nothing to scan.")
+        return
     cmd = f"defenseclaw mcp scan {shlex.quote(target)}"
     if connector:
         cmd += f" --connector {connector}"
@@ -1972,7 +2011,7 @@ def unblock(app: AppContext, target: str, connector_flag: str) -> None:
             for line in lines:
                 click.secho(line, fg="green")
             only_one = len(scoped) == 1 and not has_unscoped_state
-            _mcp_rescan_hint(target, scoped[0] if only_one else "")
+            _mcp_rescan_hint(app, target, scoped[0] if only_one else "")
             if app.logger:
                 saved_change_audit(app.logger).log_action(
                     "mcp-unblock", target, "manual unblock via CLI connector=all",
@@ -1994,7 +2033,7 @@ def unblock(app: AppContext, target: str, connector_flag: str) -> None:
     else:
         pe.remove_action("mcp", target)
     click.secho(line, fg="green")
-    _mcp_rescan_hint(target, connector)
+    _mcp_rescan_hint(app, target, connector)
 
     if app.logger:
         saved_change_audit(app.logger).log_action(
@@ -2288,9 +2327,15 @@ def set_server(
         result = _run_scan(
             app, url or name, "", False, False, False,
             server_entry=scan_entry, audit_target=audit_target,
+            connect_hint="  Check that the server is running and reachable.",
         )
         if result is None:
-            click.secho("Scan failed — use --skip-scan to add anyway.", fg="yellow")
+            # GAP-2398: say the server was not added and what to run next.
+            click.secho(
+                f"{name!r} was not added. Run 'defenseclaw mcp set' again once the "
+                "server can be scanned, or add it unscanned with --skip-scan.",
+                fg="yellow",
+            )
             raise SystemExit(1)
         _print_scan_result(result, as_json=False)
 

@@ -131,7 +131,9 @@ class TestMCPUnblock(MCPCommandTestBase):
             result.output,
         )
         self.assertNotIn("Unblocked", result.output)
-        self.assertIn("To scan it now, run: defenseclaw mcp scan http://trusted.example.com", result.output)
+        # GAP-2397: the URL is not configured, so there is no scan hint.
+        self.assertIn("is not configured", result.output)
+        self.assertNotIn("To scan it now", result.output)
         self.assertFalse(PolicyEngine(self.app.store).is_allowed("mcp", "http://trusted.example.com"))
 
     def test_group_help_lists_unblock_and_says_connector(self):
@@ -309,7 +311,73 @@ class TestMCPConnectorScope(MCPCommandTestBase):
             self.app.store.has_action("mcp", "http://demo.example.com", "install", "block", "claudecode")
         )
 
+    def _serve(self, by_connector: dict[str, list[str]]) -> None:
+        def _servers(connector=None, **_):
+            return [
+                MCPServerEntry(name=n, url=f"https://{connector}.example/{n}", transport="sse")
+                for n in by_connector.get(connector, [])
+            ]
+
+        self.app.cfg.mcp_servers = _servers  # type: ignore[method-assign]
+
+    def test_block_unknown_name_says_not_configured(self):
+        # GAP-2397: a typo still records the block but says the name is unknown.
+        self._serve({"claudecode": ["deepwiki"]})
+        result = self.invoke(["block", "deepwkii", "--connector", "codex"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("[mcp] Blocked 'deepwkii' (codex).", result.output)
+        self.assertIn(
+            "Note: 'deepwkii' is not configured on codex. Configured MCP servers: none.",
+            result.output,
+        )
+        self.assertIn("Check the name with: defenseclaw mcp list --connector codex", result.output)
+
+        bare = self.invoke(["block", "deepwkii"])
+        self.assertIn(
+            "'deepwkii' is not configured on any configured connector (claudecode, codex). "
+            "Configured MCP servers: deepwiki.",
+            bare.output,
+        )
+
+        unblock = self.invoke(["unblock", "deepwkii", "--connector", "codex"])
+        self.assertEqual(unblock.exit_code, 0, unblock.output)
+        self.assertIn("[mcp] Unblocked 'deepwkii' (codex).", unblock.output)
+        self.assertIn("There is nothing to scan.", unblock.output)
+        self.assertNotIn("To scan it now", unblock.output)
+
+    def test_block_configured_name_has_no_note(self):
+        self._serve({"claudecode": ["deepwiki"]})
+        result = self.invoke(["block", "deepwiki", "--connector", "claudecode"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertNotIn("not configured", result.output)
+        unblock = self.invoke(["unblock", "deepwiki", "--connector", "claudecode"])
+        self.assertIn(
+            "To scan it now, run: defenseclaw mcp scan deepwiki --connector claudecode",
+            unblock.output,
+        )
+
+    @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")
+    @patch("defenseclaw.scanner.mcp.MCPScannerWrapper.scan")
+    def test_set_unreachable_says_not_added(self, mock_scan, mock_set):
+        # GAP-2398: one clear result and the right next step.
+        mock_scan.side_effect = RuntimeError(
+            "Connection to MCP server at http://example.com/mcp was cancelled."
+        )
+        result = self.invoke(
+            ["set", "plain", "--url", "http://example.com/mcp", "--connector", "codex"]
+        )
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("'plain' was not added.", result.output)
+        self.assertIn("--skip-scan", result.output)
+        self.assertNotIn("then scan again", result.output)
+        self.assertNotIn("Scan failed", result.output)
+        mock_set.assert_not_called()
+
     def test_bare_unblock_clears_connector_scoped_block(self):
+        self.app.cfg.mcp_servers = lambda connector=None, **_: (  # type: ignore[method-assign]
+            [MCPServerEntry(name="demo", url="http://demo.example.com", transport="sse")]
+            if connector == "codex" else []
+        )
         pe = PolicyEngine(self.app.store)
         pe.block_for_connector("mcp", "http://demo.example.com", "codex", "x")
         result = self.invoke(["unblock", "http://demo.example.com"])

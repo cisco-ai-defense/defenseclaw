@@ -90,7 +90,22 @@ def scan(
 
     cats: set[str] | None = None
     if categories:
-        cats = {c.strip().lower() for c in categories.split(",") if c.strip()}
+        from defenseclaw.inventory.claw_inventory import _CATEGORY_ALIASES, ALL_CATEGORIES
+
+        cats = set()
+        for raw in categories.split(","):
+            c = raw.strip().lower()
+            if not c:
+                continue
+            c = _CATEGORY_ALIASES.get(c, c)
+            if c not in ALL_CATEGORIES:
+                # GAP-2399: an unknown category is a usage error, not "all".
+                valid = "skills, plugins, mcp, agents, rules, tools, models, memory"
+                raise click.BadParameter(
+                    f"unknown category {raw.strip()!r} (valid: {valid})",
+                    param_hint="'--only'",
+                )
+            cats.add(c)
 
     # Resolve which connector(s) to inventory.
     #   --connector X  → just X
