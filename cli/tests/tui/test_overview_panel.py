@@ -1278,3 +1278,59 @@ def test_guardrail_detail_names_a_failing_judge() -> None:
         )
     )
     assert "judge failing: 10/10 calls failed" in model.guardrail_detail()
+
+
+def test_telemetry_detail_names_full_disk_and_marks_local_sqlite_failing(monkeypatch) -> None:
+    """GAP-2215: the sink still says healthy, so the Overview must lead with the gateway's cause."""
+    import shutil
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(shutil, "disk_usage", lambda _path: SimpleNamespace(total=100, used=100, free=0))
+    model = _model()
+    model.set_observability_status(
+        V8OperatorStatus(
+            source="/tmp/config.yaml",
+            data_dir="/tmp/dc",
+            plan_digest="a" * 64,
+            bucket_catalog_version=1,
+            retention_days=7,
+            local_path="/tmp/dc/audit.db",
+            judge_bodies_path="",
+            destinations=(
+                V8DestinationStatus(
+                    name="local-sqlite",
+                    kind="sqlite",
+                    enabled=True,
+                    generated=True,
+                    capabilities=("logs",),
+                    selected_signals=("logs",),
+                    policy_form="implicit_local",
+                    endpoint="/tmp/dc/audit.db",
+                    route_count=1,
+                    buckets=("compliance.activity",),
+                    redaction_profiles=("none",),
+                ),
+            ),
+            buckets=(V8BucketStatus("compliance.activity", ("logs",), "none"),),
+            warnings=(),
+        )
+    )
+    details = {
+        "event_history_failure": "sqlite_write_failed",
+        "event_history_last_sqlite_class": "full",
+        "destinations": [{"name": "local-sqlite", "health_state": "healthy", "reason": "activated"}],
+    }
+    model.set_health(HealthSnapshot(telemetry=SubsystemHealth(state="error", details=details)))
+
+    assert model.telemetry_detail() == (
+        "audit events cannot be written: the disk holding the audit database is full; "
+        "1 destination: local-sqlite (failing)"
+    )
+    (row,) = model.observability_destination_rows()
+    assert (row.state, row.health_reason) == (
+        "failing",
+        "audit events cannot be written: the disk holding the audit database is full",
+    )
+
+    model.set_health(HealthSnapshot(telemetry=SubsystemHealth(state="running", details=details)))
+    assert model.telemetry_detail() == "1 destination: local-sqlite (healthy)"

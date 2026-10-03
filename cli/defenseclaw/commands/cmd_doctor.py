@@ -5117,16 +5117,6 @@ def _check_codex_otel_alignment(cfg, r: _DoctorResult) -> None:
         )
 
 
-_EVENT_HISTORY_SQLITE_CLASSES = {
-    "full": "the disk holding the audit database is full",
-    "busy_locked": "another process keeps the audit database locked",
-    "deadline": "audit database writes time out",
-    "io": "the disk returned an I/O error",
-    "readonly_cantopen": "the audit database is read-only or cannot be opened",
-    "constraint_corrupt": "the audit database is damaged",
-}
-
-
 _EVENT_HISTORY_SQLITE_REMEDIATION = {
     "full": "free space on the disk that holds the audit database; the gateway resumes writing audit events "
     "once there is room",
@@ -5169,18 +5159,9 @@ def _audit_disk_freed(details, audit_db: str) -> bool:
 
 def _telemetry_error_reason(details, audit_db: str = "") -> str:
     """Plain words for the gateway's event-history failure tokens (GAP-1308)."""
-    if not isinstance(details, dict):
-        return ""
-    if details.get("event_history_failure") != "sqlite_write_failed":
-        return ""
-    if _audit_disk_freed(details, audit_db):
-        return (
-            "audit events could not be written while the disk holding the audit database was full; "
-            "it has room again, and this clears with the next audit event"
-        )
-    sqlite_class = str(details.get("event_history_last_sqlite_class") or "")
-    cause = _EVENT_HISTORY_SQLITE_CLASSES.get(sqlite_class, "the audit database rejects writes")
-    return f"audit events cannot be written: {cause}"
+    from defenseclaw.audit_capacity import audit_write_failure_reason
+
+    return audit_write_failure_reason(details, audit_db)
 
 
 def _check_hermes_hooks(

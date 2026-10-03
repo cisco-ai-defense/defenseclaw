@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
+from defenseclaw.audit_capacity import audit_write_failure_reason
 from defenseclaw.connector_paths import (
     connector_config_files,
     connector_home,
@@ -1492,7 +1493,21 @@ class OverviewPanelModel:
         labels = [f"{row.name} ({row.state})" for row in rows if row.policy_state == "enabled"]
         count = len(labels)
         suffix = f": {', '.join(labels)}" if labels else ""
-        return f"{count} destination{'s' if count != 1 else ''}{suffix}"
+        summary = f"{count} destination{'s' if count != 1 else ''}{suffix}"
+        # Lead with the cause, as doctor and gateway status do (GAP-2215).
+        if failure := self.audit_write_failure():
+            return f"{failure}; {summary}"
+        return summary
+
+    def audit_write_failure(self) -> str:
+        """Plain words when the live gateway reports failing audit writes, else ""."""
+
+        if self.health is None or self.health.telemetry.state.strip().lower() in {"running", "healthy", "disabled"}:
+            return ""
+        audit_db = self.observability_status.local_path if self.observability_status is not None else ""
+        if not audit_db and self.cfg is not None and self.cfg.data_dir:
+            audit_db = os.path.join(self.cfg.data_dir, "audit.db")
+        return audit_write_failure_reason(self.health.telemetry.details, audit_db)
 
     def observability_destination_rows(self) -> tuple[ObservabilityDestinationRow, ...]:
         """Return the canonical v8 destination inventory."""
@@ -1515,6 +1530,7 @@ class OverviewPanelModel:
         health = destination_health_from_gateway(
             {"details": self.health.telemetry.details} if self.health is not None else None
         )
+        write_failure = self.audit_write_failure()
         rows: list[ObservabilityDestinationRow] = []
         for destination in status.destinations:
             live = health.get(destination.name)
@@ -1524,6 +1540,11 @@ class OverviewPanelModel:
             reason = ""
             if live is not None:
                 reason = live.reason or live.last_error_class
+            if write_failure and destination.enabled and destination.kind == "sqlite":
+                # The sink's own counters lag the gateway's audit-write
+                # failure and still say healthy (GAP-2002, GAP-2215).
+                freed = not write_failure.startswith("audit events cannot be written")
+                state, reason = ("degraded" if freed else "failing"), write_failure
             endpoint = destination.endpoint or "—"
             display_endpoint = (
                 endpoint if destination.kind in {"sqlite", "jsonl"} else redact_endpoint_for_display(endpoint)
