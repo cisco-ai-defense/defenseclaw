@@ -184,6 +184,9 @@ class _ConnectorRuntimeReadiness:
 
 
 _GATEWAY_API_READY_TIMEOUT_SECONDS = 45.0
+# `defenseclaw-gateway start|restart` prints this when its readiness deadline
+# passed but the new gateway is still alive and was kept (GAP-2022).
+_GATEWAY_LEFT_STARTING_MARKER = "is still starting and was left running"
 _GATEWAY_PID_GENERATION_MAX_BYTES = 16 * 1024
 _DEFENSE_GATEWAY_LIFECYCLE_TIMEOUT_SECONDS = 60
 # `defenseclaw-gateway start|restart` stops the old gateway (up to 10 s), waits
@@ -6870,13 +6873,9 @@ def setup_guardrail(
                     f"{str(bool(hilt_c.enabled)).lower()} (min {hilt_c.min_severity or 'HIGH'})",
                 )
             )
-        rows += [
-            ("guardrail.port", str(gc.port)),
-            ("guardrail.model", gc.model),
-            ("guardrail.model_name", gc.model_name),
-            ("guardrail.api_key_env", gc.api_key_env),
-            ("guardrail.detection_strategy", gc.detection_strategy),
-        ]
+        rows.append(("guardrail.port", str(gc.port)))
+        rows += _legacy_guardrail_llm_rows(gc)
+        rows.append(("guardrail.detection_strategy", gc.detection_strategy))
         if gc.api_base:
             rows.append(("guardrail.api_base", gc.api_base[:60] + "..." if len(gc.api_base) > 60 else gc.api_base))
     else:
@@ -6885,9 +6884,7 @@ def setup_guardrail(
             ("scope", scope_val),
             ("guardrail.mode", gc.mode),
             ("guardrail.port", str(gc.port)),
-            ("guardrail.model", gc.model),
-            ("guardrail.model_name", gc.model_name),
-            ("guardrail.api_key_env", gc.api_key_env),
+            *_legacy_guardrail_llm_rows(gc),
             ("guardrail.detection_strategy", gc.detection_strategy),
             ("guardrail.rule_pack_dir", gc.rule_pack_dir),
         ]
@@ -6901,13 +6898,17 @@ def setup_guardrail(
         rows.append(("guardrail.hilt.min_severity", gc.hilt.min_severity or "HIGH"))
     if gc.judge.enabled:
         rows.append(("guardrail.judge.enabled", "true"))
-        rows.append(("guardrail.judge.model", gc.judge.model))
-        if gc.judge.api_base:
-            judge_api_base = gc.judge.api_base
-            if len(judge_api_base) > 60:
-                judge_api_base = judge_api_base[:60] + "..."
-            rows.append(("guardrail.judge.api_base", judge_api_base))
-        rows.append(("guardrail.judge.api_key_env", gc.judge.api_key_env))
+        # GAP-2056: show the judge LLM in use (guardrail.judge.llm layered on
+        # llm), not the deprecated guardrail.judge.{model,api_base,api_key_env}
+        # fields the judge step clears.
+        judge_llm = app.cfg.resolve_llm("guardrail.judge")
+        rows.append(("guardrail.judge.llm.model", judge_llm.model))
+        if judge_llm.base_url:
+            judge_base_url = judge_llm.base_url
+            if len(judge_base_url) > 60:
+                judge_base_url = judge_base_url[:60] + "..."
+            rows.append(("guardrail.judge.llm.base_url", judge_base_url))
+        rows.append(("judge credentials", _judge_llm_credentials(judge_llm)))
         hook_gate = gc.judge.hook_connectors or []
         rows.append(
             (
@@ -12926,6 +12927,32 @@ def _apply_judge_runtime_defaults(gc) -> None:
         gc.detection_strategy_completion = "regex_only"
 
 
+def _judge_llm_credentials(resolved) -> str:
+    """Name what the judge LLM authenticates with (an env var, AWS auth, or nothing)."""
+    if resolved.needs_api_key():
+        return resolved.api_key_env or DEFENSECLAW_LLM_KEY_ENV
+    if resolved.bedrock is not None:
+        return f"AWS {resolved.bedrock.auth_mode}"
+    return "none needed"
+
+
+def _legacy_guardrail_llm_rows(gc) -> list[tuple[str, str]]:
+    """The proxy-lane guardrail.{model,model_name,api_key_env} rows that are set.
+
+    Hook connectors leave them empty, and three empty rows read as a missing
+    model (GAP-2056).
+    """
+    return [
+        (key, val)
+        for key, val in (
+            ("guardrail.model", gc.model),
+            ("guardrail.model_name", gc.model_name),
+            ("guardrail.api_key_env", gc.api_key_env),
+        )
+        if val
+    ]
+
+
 def _prompt_judge_model_config(
     app: AppContext,
     gc,
@@ -12946,12 +12973,7 @@ def _prompt_judge_model_config(
     usable = bool(resolved.model) and (bool(resolved.resolved_api_key()) or not resolved.needs_api_key())
     reuse = False
     if usable:
-        if resolved.needs_api_key():
-            credentials = resolved.api_key_env or DEFENSECLAW_LLM_KEY_ENV
-        elif resolved.bedrock is not None:
-            credentials = f"AWS {resolved.bedrock.auth_mode}"
-        else:
-            credentials = "none needed"
+        credentials = _judge_llm_credentials(resolved)
         click.echo("  The judge can use the LLM already configured:")
         click.echo(f"    model:       {resolved.model}")
         if resolved.base_url:
@@ -15213,8 +15235,16 @@ def _restart_defense_gateway(
             click.echo(" ✗ (API health timed out)")
             click.echo("    The gateway process started but its sidecar API never became ready.")
             return False
-        click.echo(" ✗")
         err = (result.stderr or result.stdout or "").strip()
+        # GAP-2022: the gateway missed the launcher's readiness deadline but
+        # was left running; give it one more API window before failing.
+        if _GATEWAY_LEFT_STARTING_MARKER in err and _wait_for_defense_gateway_api(
+            data_dir,
+            previous_generation=generation_before,
+        ):
+            click.echo(" ✓ (ready after a slow start)")
+            return True
+        click.echo(" ✗")
         if err:
             for line in err.splitlines()[:3]:
                 click.echo(f"    {line}")

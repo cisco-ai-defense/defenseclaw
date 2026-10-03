@@ -292,10 +292,18 @@ def _child_directories(root: str) -> list[tuple[str, str]]:
 
 
 def _amp_plugin_files(root: str, connector: str) -> list[tuple[str, str]]:
-    """Return bounded direct ``*.ts`` Amp plugins without following links."""
+    """Return bounded direct ``*.ts`` Amp plugins, excluding our exact bridge."""
 
     if (connector or "").casefold().replace("-", "") != "amp":
         return []
+    # ``~/.config/amp/plugins/defenseclaw.ts`` is DefenseClaw's lifecycle-owned
+    # policy bridge, not an operator plugin (as with the OpenCode bridge). A
+    # same-named project plugin in ``.amp/plugins`` stays eligible.
+    managed_bridge = os.path.normcase(
+        os.path.abspath(
+            os.path.join(str(Path.home()), ".config", "amp", "plugins", "defenseclaw.ts")
+        )
+    )
     try:
         entries = sorted(os.scandir(root), key=lambda entry: entry.name.casefold())
     except OSError:
@@ -312,6 +320,8 @@ def _amp_plugin_files(root: str, connector: str) -> list[tuple[str, str]]:
         except OSError:
             continue
         if not is_within_roots(entry.path, root):
+            continue
+        if os.path.normcase(os.path.abspath(entry.path)) == managed_bridge:
             continue
         plugin_id = entry.name[:-3].strip()
         if plugin_id:

@@ -185,6 +185,13 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
         summary = json.loads(result.output)
         self.assertEqual(summary["profile"], "observe")
 
+    def test_skip_gateway_summary_names_the_flag_quickstart_has(self):
+        # GAP-2052: the Sidecar row named init's --no-start-gateway.
+        result = self._invoke(["--connector", "codex", "--skip-gateway", "--json-summary"])
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        setup = {step["name"]: step for step in json.loads(result.output)["setup"]}
+        self.assertEqual(setup["Sidecar"]["detail"], "not started (--skip-gateway)")
+
     def test_windows_opencode_observe_and_action_use_one_exact_selection(self):
         for mode in ("observe", "action"):
             with self.subTest(mode=mode):

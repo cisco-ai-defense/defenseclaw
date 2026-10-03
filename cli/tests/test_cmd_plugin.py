@@ -192,6 +192,55 @@ class TestOpenCodeManagedBridgeProtection(PluginCommandTestBase):
         self.assertTrue(os.path.isfile(self.managed))
 
 
+class TestAmpManagedBridgeProtection(PluginCommandTestBase):
+    """GAP-2047: the Amp policy bridge is connector configuration, like OpenCode's."""
+
+    def setUp(self):
+        super().setUp()
+        self.home = os.path.join(self.tmp_dir, "home")
+        self.amp_plugins = os.path.join(self.home, ".config", "amp", "plugins")
+        os.makedirs(self.amp_plugins)
+        self.managed = os.path.join(self.amp_plugins, "defenseclaw.ts")
+        with open(self.managed, "w", encoding="utf-8") as handle:
+            handle.write("// managed bridge\n")
+        with open(os.path.join(self.amp_plugins, "architect.ts"), "w", encoding="utf-8") as handle:
+            handle.write("export default function architect() {}\n")
+        self.app.cfg.active_connector = lambda: "amp"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["amp"]  # type: ignore[method-assign]
+        self.app.cfg.plugin_dirs = lambda c=None: [self.amp_plugins] if c in (None, "amp") else []  # type: ignore[method-assign]
+        home_env = patch.dict(os.environ, {"HOME": self.home, "USERPROFILE": self.home}, clear=False)
+        home_env.start()
+        self.addCleanup(home_env.stop)
+
+    def test_bridge_is_not_an_ordinary_amp_plugin(self):
+        entries = discover_plugin_directories(self.amp_plugins, connector="amp")
+        self.assertEqual([entry.id for entry in entries], ["architect"])
+
+    def test_lifecycle_actions_refuse_bridge_with_setup_remove_pointer(self):
+        commands = (
+            ["remove", "defenseclaw", "--connector", "amp"],
+            ["block", "defenseclaw", "--connector", "amp"],
+            ["disable", "defenseclaw", "--connector", "amp"],
+            ["quarantine", "defenseclaw", "--connector", "amp"],
+            ["quarantine", self.managed, "--connector", "amp"],
+            ["scan", self.managed, "--connector", "amp"],
+        )
+        for args in commands:
+            result = self.invoke(args)
+            self.assertNotEqual(result.exit_code, 0, (args, result.output))
+            self.assertIn("managed Amp defenseclaw.ts bridge", result.output, args)
+            self.assertIn("defenseclaw setup remove amp", result.output, args)
+        self.assertTrue(os.path.isfile(self.managed))
+
+    def test_remove_deletes_an_ordinary_amp_file_plugin(self):
+        """GAP-2063: direct Amp plugins are files, not directories."""
+        result = self.invoke(["remove", "architect", "--connector", "amp"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("removed from", result.output)
+        self.assertFalse(os.path.exists(os.path.join(self.amp_plugins, "architect.ts")))
+        self.assertTrue(os.path.isfile(self.managed))
+
+
 class TestPluginInstall(PluginCommandTestBase):
     """Local directory installs — scanner mocked to return clean."""
 
@@ -1697,8 +1746,8 @@ class TestPluginMultiConnectorSemantics(PluginCommandTestBase):
 
         bare_unblock = self.invoke(["unblock", "dc-plugin-final-state"])
         self.assertEqual(bare_unblock.exit_code, 0, bare_unblock.output)
-        self.assertIn("all enforcement state cleared (connector=codex)", bare_unblock.output)
-        self.assertIn("all enforcement state cleared (connector=hermes)", bare_unblock.output)
+        self.assertIn("Unblocked 'dc-plugin-final-state' (codex).", bare_unblock.output)
+        self.assertIn("Unblocked 'dc-plugin-final-state' (hermes).", bare_unblock.output)
 
         codex_info = self.invoke(
             ["info", "dc-plugin-final-state", "--connector", "codex"]
@@ -1726,8 +1775,12 @@ class TestPluginMultiConnectorSemantics(PluginCommandTestBase):
         result = self.invoke(["unblock", "shared"])
 
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("all enforcement state cleared (connector=codex)", result.output)
-        self.assertIn("all enforcement state cleared (connector=hermes)", result.output)
+        # GAP-2049: one plain line per connector plus what "unblocked" means
+        # for the agent's own on/off setting; no internal state list.
+        self.assertIn("[plugin] Unblocked 'shared' (codex).", result.output)
+        self.assertIn("[plugin] Unblocked 'shared' (hermes).", result.output)
+        self.assertEqual(result.output.count("keeps the on/off setting from the agent's own config"), 1)
+        self.assertNotIn("allow/block/quarantine/disable", result.output)
         self.assertIsNone(self.app.store.get_action("plugin", "shared", "codex"))
         self.assertIsNone(self.app.store.get_action("plugin", "shared", "hermes"))
 

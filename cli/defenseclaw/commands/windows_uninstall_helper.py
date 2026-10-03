@@ -399,7 +399,25 @@ def _retry(action, description: str) -> None:
         except (OSError, ValueError) as exc:
             last_error = exc
             time.sleep(0.125)
-    raise OSError(f"{description} failed after waiting for file release: {last_error}")
+    raise OSError(f"{description} failed after waiting for file release: {last_error}") from last_error
+
+
+def _data_left_detail(plan: dict[str, object], data_dir: str, error: OSError) -> str:
+    """Say what is left of a data folder that could not go and what to do (GAP-2055)."""
+    held = getattr(error.__cause__, "filename", "") or ""
+    shim = os.path.join(str(plan["install_root"]), "defenseclaw.cmd")
+    flags = " --binaries" if plan.get("remove_empty_install_root") else ""
+    rerun = f'run "{shim}" uninstall --all{flags} --yes again' if os.path.isfile(shim) else "remove it by hand"
+    if held:
+        detail = f"could not remove {data_dir}: {held} is in use by another program. Close that program, then {rerun}."
+    else:
+        detail = f"could not remove {data_dir}: {error.__cause__ or error}. To finish, {rerun}."
+    try:
+        left = sorted(os.listdir(data_dir))
+    except OSError:
+        left = []
+    names = ", ".join(f"{name} (holds API keys)" if name == ".env" else name for name in left)
+    return f"{detail} Still there: {names}." if names else detail
 
 
 def _remove_earlier_results(status_path: str) -> None:
@@ -460,6 +478,17 @@ def main() -> int:
             launchers = _open_launchers(plan)
         except OSError:
             launchers = []
+        # The CLI prints this path once it sees ready, so it exists from then
+        # on and is the only result file in TEMP (GAP-2054).
+        _write_json(
+            status_path,
+            {
+                "status": "scheduled",
+                "detail": "cleanup starts when the uninstall command exits; "
+                "this file says succeeded or failed when it finishes",
+            },
+        )
+        _remove_earlier_results(status_path)
         _write_json(ready_path, {"status": "ready"})
 
         kernel32 = _kernel32()
@@ -478,10 +507,25 @@ def main() -> int:
         time.sleep(_LAUNCHER_UNWIND_GRACE_SECONDS)
 
         install_root, data_dir, targets = _validate_plan(plan)
+        if bool(plan.get("remove_data_dir")) and os.path.lexists(data_dir):
+
+            def remove_data() -> None:
+                _validate_plan(plan)
+                _remove_tree(data_dir, marker_names=_OWNERSHIP_MARKERS, skip=set(interpreter_dirs))
+
+            # Data first: if it cannot go, the launchers stay, so the
+            # uninstall can run again (GAP-2055).
+            try:
+                _retry(remove_data, f"remove {data_dir}")
+            except OSError as exc:
+                raise OSError(_data_left_detail(plan, data_dir, exc)) from exc
+        # The data dir is gone (or only the helper's .uv is left in it), so
+        # the ownership-marker check no longer applies.
+        targets_plan = {**plan, "remove_data_dir": False}
         for target in targets:
 
             def remove_target(target=target):
-                _validate_plan(plan)
+                _validate_plan(targets_plan)
                 os.unlink(target)
 
             _retry(remove_target, f"remove {target}")
@@ -491,13 +535,6 @@ def main() -> int:
                 os.rmdir(install_root)
             except OSError:
                 pass
-        if bool(plan.get("remove_data_dir")) and os.path.lexists(data_dir):
-
-            def remove_data() -> None:
-                _validate_plan(plan)
-                _remove_tree(data_dir, marker_names=_OWNERSHIP_MARKERS, skip=set(interpreter_dirs))
-
-            _retry(remove_data, f"remove {data_dir}")
         after_exit = interpreter_dirs
         after_exit_empty = [data_dir] if bool(plan.get("remove_data_dir")) else []
         after_exit_empty.extend(
@@ -518,7 +555,6 @@ def main() -> int:
             deferred = True
         else:
             _write_json(status_path, {"status": "succeeded"})
-        _remove_earlier_results(status_path)
         return 0
     except Exception as exc:  # noqa: BLE001 - helper result boundary.
         payload = {"status": "failed", "detail": str(exc)}

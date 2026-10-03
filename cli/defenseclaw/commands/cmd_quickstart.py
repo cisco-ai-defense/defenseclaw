@@ -265,6 +265,12 @@ def quickstart_cmd(
             hilt_min_severity=hilt_min_severity or "",
         )
     )
+    if skip_gateway:
+        # GAP-2052: bootstrap words a skipped start with init's flag; name
+        # the one quickstart has.
+        for step in report.setup:
+            if step.name == "Sidecar" and step.status == "skip":
+                step.detail = "not started (--skip-gateway)"
     _require_operational_success(
         report,
         gateway_requested=not skip_gateway,

@@ -15,8 +15,10 @@ package cli
 import (
 	"bytes"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -203,5 +205,53 @@ func TestLifecycleBusyVerifyOmitsTheReadinessLine(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "installed=false") {
 		t.Fatalf("a checked verify lost its readiness line:\n%s", out.String())
+	}
+}
+
+// GAP-2028: an out-of-range --lock-wait names the cap as --help does ("15m",
+// not "15m0s") and adds the usage line and --help pointer, exit 2.
+func TestUnixLifecycleLockWaitOutOfRange(t *testing.T) {
+	platform := "linux"
+	if runtime.GOOS == "darwin" {
+		platform = "macos"
+	}
+	cmd, _, err := rootCmd.Find([]string{"enterprise", platform, "ensure"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for wait, want := range map[time.Duration]string{
+		20 * time.Minute: "--lock-wait takes at most 15m, not 20m\nUsage: ",
+		-time.Second:     "--lock-wait takes a duration from 0 to 15m, not -1s\nUsage: ",
+	} {
+		runErr := runUnixLifecycle(cmd, platform, "ensure", &unixLifecycleOptions{lockWait: wait})
+		if runErr == nil || commandExitCode(runErr) != 2 || !strings.HasPrefix(runErr.Error(), want) ||
+			!strings.HasSuffix(runErr.Error(), "Try '"+cmd.CommandPath()+" --help' for help.") {
+			t.Fatalf("--lock-wait %s: %v (exit %d)", wait, runErr, commandExitCode(runErr))
+		}
+	}
+}
+
+// GAP-2030: repair restarts the services even on a healthy deployment, and
+// its output says so; with --no-start (not_started) it does not claim it.
+func TestRepairOutputSaysItRestartedTheServices(t *testing.T) {
+	const note = "restarted the DefenseClaw services to re-apply the deployment"
+	healthy := enterprisestatus.New(enterpriseunix.ActionRepair, "standalone", "linux", "1.0.0")
+	healthy.Finish("linux", 0)
+	var out bytes.Buffer
+	if err := printLifecycleResult(&out, healthy, false); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "nothing to repair") || !strings.Contains(out.String(), note) {
+		t.Fatalf("healthy repair output:\n%s", out.String())
+	}
+	stopped := enterprisestatus.New(enterpriseunix.ActionRepair, "standalone", "linux", "1.0.0")
+	stopped.AddWarning("not_started", "installed without starting the services (--no-start)")
+	stopped.Finish("linux", 0)
+	out.Reset()
+	if err := printLifecycleResult(&out, stopped, false); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out.String(), note) {
+		t.Fatalf("--no-start repair claims a restart:\n%s", out.String())
 	}
 }

@@ -222,9 +222,10 @@ func verifyWindowsManagedHooksStandalonePerUserClean(targets []windowsManagedHoo
 // cleanups it recorded for signed-out users, and enabled manifest rows that
 // were not deferred. A deferred row the guardian never protected has
 // nothing to remove unless an earlier install enrolled that user, which
-// left the user's DefenseClaw data folder: its registrations may still be
-// there, so it is attempted and, without an active session, reported as
-// pending instead of silently kept (GAP-1795).
+// left the user's DefenseClaw data folder, and DefenseClaw's registration
+// is still in the user's agent configuration: then it is attempted and,
+// without an active session, reported as pending instead of silently kept
+// (GAP-1795, GAP-2023).
 func windowsManagedHooksStandaloneUserCleanups(
 	runtimeDir string,
 	manifest enterprisehooks.Manifest,
@@ -238,7 +239,7 @@ func windowsManagedHooksStandaloneUserCleanups(
 		rows = append(rows, authorization.ProtectedTargets...)
 	}
 	for _, target := range manifest.Targets {
-		if !target.IsEnabled() || (target.IsDeferred() && !windowsManagedHooksStandaloneEnrolledBefore(target)) {
+		if !target.IsEnabled() || (target.IsDeferred() && !windowsManagedHooksStandaloneRegistrationMayRemain(target)) {
 			continue
 		}
 		rows = append(rows, enterpriseHookReconcileRow{
@@ -261,6 +262,31 @@ func windowsManagedHooksStandaloneUserCleanups(
 	}
 	nobody := func(string, string) bool { return false }
 	return planEnterpriseHookUserCleanups(pending, rows, nobody, windowsStandalonePerUserCleanupConnector, now), problems
+}
+
+// windowsManagedHooksStandaloneRegistrationMayRemain reports whether a
+// deferred row may still hold an earlier install's registration: the user's
+// DefenseClaw data folder is there and a read of the user's agent
+// configuration finds DefenseClaw's registration, or cannot tell. A user
+// whose registrations an earlier uninstall already removed has nothing to
+// report (GAP-2023).
+func windowsManagedHooksStandaloneRegistrationMayRemain(target enterprisehooks.ManifestTarget) bool {
+	if !windowsManagedHooksStandaloneEnrolledBefore(target) {
+		return false
+	}
+	present, err := windowsManagedHooksStandaloneRegistrationPresent(target)
+	return present || err != nil
+}
+
+// windowsManagedHooksStandaloneRegistrationPresent is replaceable in tests.
+var windowsManagedHooksStandaloneRegistrationPresent = func(target enterprisehooks.ManifestTarget) (bool, error) {
+	return enterprisehooks.WindowsStandalonePerUserRegistrationPresent(enterprisehooks.InstallOptions{
+		ConnectorName: strings.ToLower(strings.TrimSpace(target.Connector)),
+		UserHome:      strings.TrimSpace(target.UserHome),
+		OwnerSID:      strings.TrimSpace(target.SID),
+		DataDir:       strings.TrimSpace(target.DataDir),
+		Registry:      enterpriseHooksCertifiedRegistryFactory(),
+	})
 }
 
 // windowsManagedHooksStandaloneEnrolledBefore reports whether the target's

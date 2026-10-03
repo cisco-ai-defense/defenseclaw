@@ -38,14 +38,14 @@ const verifyBusyNextStep = "wait for it to finish, then rerun verify"
 // a run given --lock-wait 1s is not told to pass --lock-wait (GAP-1722).
 func lockBusyNextStep(waited time.Duration) string {
 	if waited >= MaxLockWait {
-		return "waited " + formatLockWait(waited) + " for it; wait for it to finish, then rerun"
+		return "waited " + FormatLockWait(waited) + " for it; wait for it to finish, then rerun"
 	}
-	return "waited " + formatLockWait(waited) + " for it; wait for it to finish, then rerun, or pass a longer --lock-wait <duration> (at most " +
-		formatLockWait(MaxLockWait) + ") to wait longer"
+	return "waited " + FormatLockWait(waited) + " for it; wait for it to finish, then rerun, or pass a longer --lock-wait <duration> (at most " +
+		FormatLockWait(MaxLockWait) + ") to wait longer"
 }
 
-// formatLockWait prints a whole number of minutes as "10m", not "10m0s".
-func formatLockWait(wait time.Duration) string {
+// FormatLockWait prints a whole number of minutes as "10m", not "10m0s".
+func FormatLockWait(wait time.Duration) string {
 	if wait >= time.Minute && wait%time.Minute == 0 {
 		return fmt.Sprintf("%dm", int(wait/time.Minute))
 	}

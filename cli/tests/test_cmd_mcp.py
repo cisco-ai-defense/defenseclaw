@@ -116,7 +116,7 @@ class TestMCPUnblock(MCPCommandTestBase):
 
         result = self.invoke(["unblock", "http://evil.com"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("cleared", result.output)
+        self.assertIn("[mcp] Unblocked 'http://evil.com'.", result.output)
         self.assertFalse(pe.is_blocked("mcp", "http://evil.com"))
 
     def test_unblock_no_state(self):
@@ -273,7 +273,7 @@ class TestMCPConnectorScope(MCPCommandTestBase):
 
         result = self.invoke(["unblock", "http://demo.example.com", "--connector", "codex"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("cleared", result.output)
+        self.assertIn("Unblocked 'http://demo.example.com' (codex).", result.output)
         self.assertFalse(pe.is_blocked_for_connector("mcp", "http://demo.example.com", "codex"))
         # claudecode's scoped block survives the codex-scoped unblock.
         self.assertTrue(
@@ -285,7 +285,10 @@ class TestMCPConnectorScope(MCPCommandTestBase):
         pe.block_for_connector("mcp", "http://demo.example.com", "codex", "x")
         result = self.invoke(["unblock", "http://demo.example.com"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("all enforcement state cleared (connector=codex)", result.output)
+        # GAP-2049: a plain result, not the internal list of cleared states.
+        self.assertIn("[mcp] Unblocked 'http://demo.example.com' (codex).", result.output)
+        self.assertIn("It will be scanned on the next check.", result.output)
+        self.assertNotIn("allow/block/quarantine/disable", result.output)
         self.assertFalse(
             self.app.store.has_action("mcp", "http://demo.example.com", "install", "block", "codex")
         )
@@ -330,8 +333,8 @@ class TestMCPConnectorScope(MCPCommandTestBase):
 
         bare_unblock = self.invoke(["unblock", "ctx7"])
         self.assertEqual(bare_unblock.exit_code, 0, bare_unblock.output)
-        self.assertIn("all enforcement state cleared (connector=codex)", bare_unblock.output)
-        self.assertIn("all enforcement state cleared (connector=hermes)", bare_unblock.output)
+        self.assertIn("Unblocked 'ctx7' (codex).", bare_unblock.output)
+        self.assertIn("Unblocked 'ctx7' (hermes).", bare_unblock.output)
 
         self.assertIsNone(self.app.store.get_action("mcp", "ctx7", "codex"))
         self.assertIsNone(self.app.store.get_action("mcp", "ctx7", "hermes"))

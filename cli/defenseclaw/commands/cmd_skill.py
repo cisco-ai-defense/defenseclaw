@@ -4354,11 +4354,7 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
                 )
             return
         pe.remove_action_for_connector("skill", skill_name, connector)
-        click.secho(
-            f"[skill] {skill_name!r} all enforcement state cleared "
-            f"(connector={connector}) (allow/block/quarantine/disable)",
-            fg="green",
-        )
+        click.secho(f"[skill] Unblocked {skill_name!r} ({connector}).", fg="green")
         if physical_records:
             click.echo(
                 "  The skill is unblocked, but its files remain quarantined; "
@@ -4396,18 +4392,10 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
         for target_connector in targets:
             pe.remove_action_for_connector("skill", skill_name, target_connector)
         for target_connector in owners:
-            click.secho(
-                f"[skill] {skill_name!r} all enforcement state cleared "
-                f"(connector={target_connector}) (allow/block/quarantine/disable)",
-                fg="green",
-            )
+            click.secho(f"[skill] Unblocked {skill_name!r} ({target_connector}).", fg="green")
         if has_unscoped_state:
             pe.remove_action("skill", skill_name)
-            click.secho(
-                f"[skill] {skill_name!r} all enforcement state cleared "
-                "(global, every connector) (allow/block/quarantine/disable)",
-                fg="green",
-            )
+            click.secho(f"[skill] Unblocked {skill_name!r} (every connector).", fg="green")
         click.echo(
             "  The skill will go through normal scanning on next install."
         )
@@ -4447,11 +4435,7 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
 
     if runtime_cleared:
         pe.remove_action("skill", skill_name)
-        click.secho(
-            f"[skill] {skill_name!r} all enforcement state cleared "
-            "(allow/block/quarantine/disable)",
-            fg="green",
-        )
+        click.secho(f"[skill] Unblocked {skill_name!r}.", fg="green")
     else:
         pe.unblock("skill", skill_name)
         pe.clear_quarantine("skill", skill_name)
