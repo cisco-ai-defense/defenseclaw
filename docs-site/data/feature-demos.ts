@@ -542,8 +542,8 @@ scanner:
   },
   {
     id: 'skill-quarantine',
-    title: 'Stop a malicious skill before an agent can load it',
-    summary: 'The watcher quarantines first, then static and optional intent checks feed the skill admission policy.',
+    title: 'Catch a malicious skill and quarantine it',
+    summary: 'The watcher scans a new skill where it landed; static and optional intent checks feed the skill admission policy, which quarantines it.',
     syntheticDataNotice: 'Guided example · Synthetic skill bundle',
     connectorIds: ['claudecode'],
     tabs: [
@@ -561,41 +561,41 @@ tools:
 install_state: quarantined` },
       { id: 'skill-actions', label: 'skill-actions.yaml', language: 'yaml', source: `skill_actions:
   critical:
-    quarantine: retain
+    file: quarantine
     runtime: disable
     install: block
-llm_intent_analysis: optional` },
+# LLM intent analysis is optional` },
       { id: 'skill-result', label: 'scan-result.json', language: 'json', source: `{
   "skill": "workspace-helper",
   "severity": "critical",
   "findings": ["path_escape", "external_exfiltration_intent"],
-  "quarantine": "retained",
+  "file": "quarantined",
   "runtime": "disabled",
   "install": "blocked"
 }` },
     ],
     evidence: [
       { id: 'skill-detected', label: 'Watcher', value: 'New skill detected', detail: 'A configured connector directory changed.', tone: 'info' },
-      { id: 'skill-first', label: 'Ordering guarantee', value: 'Quarantine before scan', detail: 'The bundle leaves the agent-visible path before inspection.', tone: 'warning' },
+      { id: 'skill-first', label: 'Ordering', value: 'Scan in place', detail: 'The skill stays in its folder while it is scanned; the watcher acts on the verdict.', tone: 'warning' },
       { id: 'skill-static', label: 'Static checks', value: 'Manifest · tools · paths', detail: 'Deterministic checks run without an LLM key.', tone: 'danger' },
       { id: 'skill-intent', label: 'Optional analysis', value: 'Instruction intent', detail: 'LLM-assisted analysis is optional and not the only scanner.', tone: 'info' },
       { id: 'skill-critical', label: 'Consolidated severity', value: 'CRITICAL', detail: 'The findings reach the highest severity.', tone: 'danger' },
-      { id: 'skill-map', label: 'skill_actions', value: 'Retain + disable + block', detail: 'OPA maps the result through admission policy.', tone: 'danger' },
+      { id: 'skill-map', label: 'skill_actions', value: 'Quarantine + disable + block', detail: 'OPA maps the result through admission policy.', tone: 'danger' },
       { id: 'skill-audit', label: 'Evidence', value: 'Action + reason audited', detail: 'Manual restore or allow would also create an audit trail.', tone: 'success' },
     ],
-    outcomes: [{ id: 'skill-retained', kind: 'quarantine', label: 'Retain quarantine', reason: 'CRITICAL skill findings', action: 'Disable runtime, block install, write audit event' }],
+    outcomes: [{ id: 'skill-retained', kind: 'quarantine', label: 'Quarantine', reason: 'CRITICAL skill findings', action: 'Move to quarantine, disable runtime, block install, write audit event' }],
     steps: [
       step('skill-appears', 'Detect', 'A new skill appears in a configured connector directory.', 'skill-manifest', ['skill-detected'], [{ tabId: 'skill-manifest', start: 1, end: 5, tone: 'info' }]),
-      step('skill-quarantine', 'Quarantine', 'The watcher moves it out of the agent-visible path first.', 'skill-manifest', ['skill-detected', 'skill-first'], [{ tabId: 'skill-manifest', start: 6, end: 6, tone: 'warning' }]),
-      step('skill-scan', 'Scan statically', 'Inspect manifest, tool declarations, paths, and instructions.', 'skill-file', ['skill-first', 'skill-static'], [{ tabId: 'skill-file', start: 3, end: 6, tone: 'danger' }]),
+      step('skill-scan', 'Scan statically', 'Not on a block or allow list, so the watcher scans it in place: manifest, tool declarations, paths, and instructions.', 'skill-file', ['skill-detected', 'skill-first', 'skill-static'], [{ tabId: 'skill-file', start: 3, end: 6, tone: 'danger' }]),
       step('skill-llm', 'Optional intent check', 'Optional LLM analysis evaluates instruction intent.', 'skill-actions', ['skill-static', 'skill-intent'], [{ tabId: 'skill-actions', start: 6, end: 6, tone: 'info' }]),
       step('skill-score', 'Consolidate', 'Static and optional findings consolidate to CRITICAL.', 'skill-result', ['skill-intent', 'skill-critical'], [{ tabId: 'skill-result', start: 2, end: 4, tone: 'danger' }]),
-      step('skill-policy', 'Resolve policy', 'skill_actions retains quarantine, disables runtime, and blocks install.', 'skill-actions', ['skill-critical', 'skill-map'], [{ tabId: 'skill-actions', start: 1, end: 5, tone: 'danger' }]),
+      step('skill-policy', 'Resolve policy', 'skill_actions for CRITICAL: quarantine the files, disable runtime, block install.', 'skill-actions', ['skill-critical', 'skill-map'], [{ tabId: 'skill-actions', start: 1, end: 5, tone: 'danger' }]),
+      step('skill-quarantine', 'Quarantine', 'The watcher moves the skill out of the agent\'s skill folder into quarantine.', 'skill-manifest', ['skill-map'], [{ tabId: 'skill-manifest', start: 6, end: 6, tone: 'warning' }]),
       step('skill-record', 'Record', 'The final action and reason enter the audit trail.', 'skill-result', ['skill-map', 'skill-audit'], [{ tabId: 'skill-result', start: 4, end: 7, tone: 'success' }], 'skill-retained'),
     ],
     boundaries: {
-      did: ['Quarantine before scanning', 'Combine deterministic checks with optional LLM analysis', 'Map severity through skill_actions'],
-      didNot: ['Expose the unscanned skill to the agent', 'Treat LLM analysis as mandatory or sufficient alone', 'Skip the audit trail for a manual allow'],
+      did: ['Scan the skill where it was installed', 'Combine deterministic checks with optional LLM analysis', 'Quarantine on the skill_actions verdict'],
+      didNot: ['Hide the skill from the agent while the scan runs', 'Treat LLM analysis as mandatory or sufficient alone', 'Skip the audit trail for a manual allow'],
     },
   },
   {
