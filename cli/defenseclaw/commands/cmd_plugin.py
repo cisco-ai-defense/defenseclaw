@@ -2339,10 +2339,10 @@ def _plugin_status(p: dict[str, Any], action_entry: Any = None) -> str:
 def _plugin_status_display(p: dict[str, Any], action_entry: Any = None) -> str:
     if action_entry and not action_entry.actions.is_empty():
         a = action_entry.actions
+        # GAP-2199: an install block leaves the installed copy loaded, so
+        # it does not change the Status column (Actions shows it).
         if a.file == "quarantine":
             return "\u2717 quarantined"
-        if a.install == "block":
-            return "\u2717 blocked"
         if a.runtime == "disable":
             return "\u2717 disabled"
     if p.get("enabled"):
@@ -2353,7 +2353,7 @@ def _plugin_status_display(p: dict[str, Any], action_entry: Any = None) -> str:
 def _plugin_effectively_enabled(p: dict[str, Any], action_entry: Any = None) -> bool:
     if action_entry and not action_entry.actions.is_empty():
         a = action_entry.actions
-        if a.file == "quarantine" or a.install == "block" or a.runtime == "disable":
+        if a.file == "quarantine" or a.runtime == "disable":
             return False
     return bool(p.get("enabled"))
 
@@ -2438,7 +2438,8 @@ def _print_plugin_list_table(
     table.add_column("Status", style="bold")
     table.add_column("ID")
     table.add_column("Plugin")
-    table.add_column("Description", max_width=50)
+    # GAP-2202: one line per row; Rich cuts a long description with "…".
+    table.add_column("Description", max_width=50, no_wrap=True, overflow="ellipsis")
     table.add_column("Origin")
     table.add_column("Severity")
     table.add_column("Verdict")
@@ -2465,11 +2466,19 @@ def _print_plugin_list_table(
             }.get(severity, "")
 
         actions_str = "-"
+        verdict_action = actions_map.get(pid)
         if pid in actions_map:
-            actions_str = actions_map[pid].actions.summary()
+            state = actions_map[pid].actions
+            actions_str = state.summary()
+            if state.install == "block":
+                # GAP-2199: say what the block covers, and keep the scan
+                # verdict when nothing stops the installed copy.
+                actions_str = actions_str.replace("blocked", "install-blocked")
+                if state.file != "quarantine" and state.runtime != "disable":
+                    verdict_action = None
 
         verdict_label, verdict_style = _compute_verdict(
-            actions_map.get(pid),
+            verdict_action,
             scan_map.get(pid),
         )
 
@@ -2483,7 +2492,7 @@ def _print_plugin_list_table(
             f"[{status_style}]{status_display}[/{status_style}]" if status_style else status_display,
             pid,
             name,
-            desc[:50] + "\u2026" if len(desc) > 50 else desc,
+            desc,
             origin,
             f"[{sev_style}]{severity}[/{sev_style}]" if sev_style else severity,
             f"[{verdict_style}]{verdict_label}[/{verdict_style}]" if verdict_style else verdict_label,
@@ -4492,6 +4501,16 @@ def _plugin_info_card(
 
     pe_enforcer = PluginEnforcer(app.cfg.quarantine_dir)
     quarantined = pe_enforcer.is_quarantined(plugin_name, connector)
+    action_name = plugin_name
+    if info_map is None and not quarantined and connector and app.store is not None:
+        from defenseclaw.enforce import PolicyEngine
+
+        alias = _quarantined_plugin_alias(PolicyEngine(app.store), plugin_name, connector)
+        if alias and alias != plugin_name and pe_enforcer.is_quarantined(alias, connector):
+            action_name = alias
+            quarantined = True
+            if scan_entry is None:
+                scan_entry = _latest_plugin_scan_for_connector(app, alias, connector)
 
     if info_map is None:
         if (
@@ -4513,13 +4532,26 @@ def _plugin_info_card(
         info_map["connector"] = connector
     if scan_entry is not None:
         info_map["scan"] = scan_entry
-    if plugin_name in actions_map:
-        ae = actions_map[plugin_name]
+    if action_name in actions_map:
+        ae = actions_map[action_name]
         if not ae.actions.is_empty():
             info_map["actions"] = ae.actions.to_dict()
+    if action_name != plugin_name:
+        info_map["quarantine_id"] = action_name
+    if quarantined:
+        qpath = pe_enforcer._quarantine_path(action_name, connector)
+        if qpath:
+            info_map["quarantine_path"] = qpath
     info_map["quarantined"] = quarantined
     info_map.setdefault("installed", False)
     return info_map
+
+
+_SCAN_SEVERITY_COLORS = {"CRITICAL": "red", "HIGH": "red", "MEDIUM": "yellow", "LOW": "cyan"}
+
+
+def _yes_no(value: Any) -> str:
+    return "yes" if value else "no"
 
 
 def _print_plugin_info_card(
@@ -4537,22 +4569,29 @@ def _print_plugin_info_card(
         click.echo(f"Version:     {info_map['version']}")
     if info_map.get("path"):
         click.echo(f"Path:        {info_map['path']}")
-    click.echo(f"Installed:   {info_map.get('installed', False)}")
-    click.echo(f"Quarantined: {info_map.get('quarantined', False)}")
+    click.echo(f"Installed:   {_yes_no(info_map.get('installed', False))}")
+    click.echo(f"Quarantined: {_yes_no(info_map.get('quarantined', False))}")
+    if info_map.get("quarantine_path"):
+        click.echo(f"Quarantine:  {info_map['quarantine_path']}")
 
     scan_data = info_map.get("scan")
     if scan_data:
         click.echo()
         click.echo("Last Scan:")
+        # GAP-2201: the same Verdict / Findings lines whatever the outcome.
+        # GAP-1507: the count is the total and the severity the maximum;
+        # "2 HIGH findings" read as two HIGH ones (same wording as skill info).
+        n = scan_data.get("total_findings", 0)
+        noun = "finding" if n == 1 else "findings"
         if scan_data.get("clean"):
             click.secho("  Verdict:  CLEAN", fg="green")
+            click.echo("  Findings: 0 findings")
         else:
-            # GAP-1507: the count is the total and the severity the maximum;
-            # "2 HIGH findings" read as two HIGH ones (same wording as skill info).
-            n = scan_data.get("total_findings", 0)
             sev = scan_data.get("max_severity", "INFO")
-            noun = "finding" if n == 1 else "findings"
+            click.secho(f"  Verdict:  {sev}", fg=_SCAN_SEVERITY_COLORS.get(sev))
             click.echo(f"  Findings: {n} {noun} (max severity: {sev})")
+        if scan_data.get("scanned_at"):
+            click.echo(f"  Scanned:  {scan_data['scanned_at']}")
         click.echo(f"  Target:   {scan_data.get('target', '')}")
 
     actions_data = info_map.get("actions")
@@ -4589,12 +4628,27 @@ def _resolve_plugin_path(
 
 def _plugin_scan_payload_from_latest(ls: dict[str, Any]) -> dict[str, Any]:
     finding_count = ls["finding_count"]
-    return {
+    payload = {
         "target": ls["target"],
         "clean": finding_count == 0,
         "max_severity": ls["max_severity"] if finding_count > 0 else "CLEAN",
         "total_findings": finding_count,
     }
+    scanned_at = _format_scan_time(ls.get("timestamp"))
+    if scanned_at:
+        payload["scanned_at"] = scanned_at
+    return payload
+
+
+def _format_scan_time(ts: Any) -> str:
+    """GAP-2201: the scan time as 'YYYY-MM-DD HH:MM:SS UTC' (or "")."""
+    from datetime import datetime, timezone
+
+    if not isinstance(ts, datetime):
+        return ""
+    if ts.tzinfo is not None:
+        ts = ts.astimezone(timezone.utc)
+    return ts.strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
 def _build_plugin_scan_map(store) -> dict:
