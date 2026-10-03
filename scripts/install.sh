@@ -750,6 +750,23 @@ if [[ "${WAS_RUNNING}" == true ]]; then
     restart_openclaw
 fi
 
+# True when the config sets guardrail.enabled to false, as 'uninstall' and
+# 'setup guardrail --disable' write it (a direct child of the top-level block).
+guardrail_off() {
+    local config="${DEFENSECLAW_CONFIG:-${DEFENSECLAW_HOME}/config.yaml}"
+    [[ -f "${config}" ]] || return 1
+    awk '
+        /^guardrail:[ \t]*$/ { block = 1; indent = 0; next }
+        block && /^[^ \t#]/ { block = 0 }
+        block && /^[ \t]+[^ \t#]/ {
+            match($0, /^[ \t]+/)
+            if (!indent) indent = RLENGTH
+            if (RLENGTH == indent && $0 ~ /^[ \t]+enabled:[ \t]*false[ \t]*(#.*)?\r?$/) off = 1
+        }
+        END { exit !off }
+    ' "${config}"
+}
+
 if [[ -z "${PREV_VERSION}" ]]; then
     first_install_extras
 elif [[ "${RUN_QUICKSTART}" == true && ! -f "${DEFENSECLAW_HOME}/config.yaml" && -z "${DEFENSECLAW_CONFIG:-}" ]]; then
@@ -776,8 +793,15 @@ fi
 if [[ -n "${PREV_VERSION}" && -z "$(gateway_pid || true)" ]] \
     && [[ -f "${DEFENSECLAW_HOME}/config.yaml" || -n "${DEFENSECLAW_CONFIG:-}" ]]; then
     # GAP-1496: it was not running before the upgrade, so it was not started.
-    warn "The gateway is not running, so agent hooks are not guarded until it is"
-    printf "  Start it with: ${CYAN}defenseclaw-gateway start${NC}\n"
+    if guardrail_off; then
+        # GAP-2481: 'uninstall --binaries' turned the guardrail off and tore the
+        # connector hooks down; a gateway start alone does not set them up again.
+        warn "Protection is off in the kept config (guardrail.enabled = false), so agent hooks are not guarded"
+        printf "  Turn it back on with: ${CYAN}defenseclaw setup guardrail${NC}\n"
+    else
+        warn "The gateway is not running, so agent hooks are not guarded until it is"
+        printf "  Start it with: ${CYAN}defenseclaw-gateway start${NC}\n"
+    fi
 fi
 if [[ -n "${PREV_VERSION}" && "${RUN_QUICKSTART}" != true && ! -f "${DEFENSECLAW_HOME}/config.yaml" && -z "${DEFENSECLAW_CONFIG:-}" ]]; then
     # An earlier install that was never initialized: say how to start, as a
