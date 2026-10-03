@@ -363,6 +363,7 @@ func TestProxyManagedAIDOnly_PreservesHistoryWithoutDuplication(t *testing.T) {
 // before tool calls were carried. A provider's tool fields are raw (here an
 // Ollama call: object arguments, no id), and one malformed entry fails the
 // whole request, so they stay local; only the hook lane sends tool calls.
+// Every strategy calls AID from its own site, so each is covered.
 func TestProxyAIDLane_ProviderToolCallsStayLocal(t *testing.T) {
 	var gotBody []byte
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -372,13 +373,15 @@ func TestProxyAIDLane_ProviderToolCallsStayLocal(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
+	// Long enough for the injection judge to ask its provider.
+	const prompt = "thanks, now summarize that weather report"
 	history := []ChatMessage{
 		{Role: "system", Content: "You are helpful."},
 		{Role: "user", Content: "list files", Name: "alice"},
 		{Role: "assistant", ToolCalls: json.RawMessage(
 			`[{"function":{"name":"get_weather","arguments":{"city":"Paris"}}}]`)},
 		{Role: "tool", Content: "22C", ToolCallID: "call_1"},
-		{Role: "user", Content: "thanks"},
+		{Role: "user", Content: prompt},
 	}
 	before := append([]ChatMessage(nil), history...)
 
@@ -391,16 +394,34 @@ func TestProxyAIDLane_ProviderToolCallsStayLocal(t *testing.T) {
 	if managedClient == nil {
 		t.Fatal("expected managed client")
 	}
+	apiKey := func(strategy string, judge *LLMJudge) func() *GuardrailInspector {
+		return func() *GuardrailInspector {
+			g := NewGuardrailInspector("remote", apiKeyClient, judge, "")
+			g.SetDetectionStrategy(strategy, "", "", "", false)
+			return g
+		}
+	}
+	text := func(content string) interface{} { return content }
+	// A judge that answers, with every label false, so judge_first takes its
+	// judged path rather than the fallback.
+	judgeProvider := &mockLLMProvider{response: &ChatResponse{Choices: []ChatChoice{{Message: &ChatMessage{
+		Content: `{"Instruction Manipulation":{"label":false},"Context Manipulation":{"label":false},` +
+			`"Obfuscation":{"label":false},"Semantic Manipulation":{"label":false},"Token Exploitation":{"label":false}}`,
+	}}}}}
+	judge := &LLMJudge{
+		cfg:      &config.JudgeConfig{Enabled: true, Injection: true, Model: "test/m"},
+		provider: judgeProvider,
+		rp:       mustLoadRulePack(t, ""),
+	}
 	for _, lane := range []struct {
 		name      string
 		guardrail func() *GuardrailInspector
 		content   func(string) interface{}
 	}{
-		{
-			name:      "api-key",
-			guardrail: func() *GuardrailInspector { return NewGuardrailInspector("remote", apiKeyClient, nil, "") },
-			content:   func(text string) interface{} { return text },
-		},
+		{name: "api-key/regex_only", guardrail: apiKey("regex_only", nil), content: text},
+		{name: "api-key/regex_judge", guardrail: apiKey("regex_judge", nil), content: text},
+		{name: "api-key/judge_first/fallback", guardrail: apiKey("judge_first", nil), content: text},
+		{name: "api-key/judge_first/judged", guardrail: apiKey("judge_first", judge), content: text},
 		{
 			name: "managed",
 			guardrail: func() *GuardrailInspector {
@@ -414,7 +435,7 @@ func TestProxyAIDLane_ProviderToolCallsStayLocal(t *testing.T) {
 	} {
 		t.Run(lane.name, func(t *testing.T) {
 			gotBody = nil
-			lane.guardrail().Inspect(t.Context(), "prompt", "thanks", history, "provider/model", "action")
+			lane.guardrail().Inspect(t.Context(), "prompt", prompt, history, "provider/model", "action")
 			var payload struct {
 				Messages []map[string]interface{} `json:"messages"`
 			}
@@ -432,6 +453,9 @@ func TestProxyAIDLane_ProviderToolCallsStayLocal(t *testing.T) {
 				t.Fatalf("caller messages mutated: got %#v, want %#v", history, before)
 			}
 		})
+	}
+	if len(judgeProvider.captured) == 0 {
+		t.Error("the judged path never asked the judge")
 	}
 }
 
