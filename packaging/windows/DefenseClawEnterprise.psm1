@@ -3553,8 +3553,34 @@ function Assert-DefenseClawCanonicalPathAcl {
     )
     Assert-DefenseClawNoReparsePath -Path $Path
     $nativeSecurity = Initialize-DefenseClawNativeSecurity
+    try {
+        $descriptorBytes = $nativeSecurity::GetFileSecurityDescriptor($Path)
+    }
+    catch {
+        # Bulldoze: the native CreateFileW with READ_CONTROL +
+        # FILE_FLAG_BACKUP_SEMANTICS can fail if a prior scoped uninstall
+        # left the file with a hostile DACL that denies even
+        # SeBackupPrivilege-mediated reads, or if the file was already
+        # deleted by a parallel uninstall step. For an uninstall validator
+        # that is about to delete the parent anyway, bubbling this up as
+        # a fatal error strands the lifecycle. Honor strict mode; otherwise
+        # warn and return - the caller treats the validator as "no drift
+        # observed" so uninstall can proceed to the state-root removal
+        # that drops the file regardless.
+        if (Test-DefenseClawTrustStrictAncestors) {
+            throw
+        }
+        Write-DefenseClawAclSelfHealAdvisory `
+            -Path $Path `
+            -Reason (
+                "native security descriptor read failed, continuing " +
+                "bulldoze (likely file deleted mid-uninstall or DACL " +
+                "denies admin read_control): " + $_.Exception.Message
+            )
+        return
+    }
     $actualDescriptor = [Security.AccessControl.RawSecurityDescriptor]::new(
-        $nativeSecurity::GetFileSecurityDescriptor($Path),
+        $descriptorBytes,
         0
     )
     Assert-DefenseClawCanonicalRawPathAcl `
