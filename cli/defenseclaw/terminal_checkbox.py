@@ -72,15 +72,49 @@ def checkbox_key_name(ch: str) -> str:
         return "enter"
     if ch in (" ", "\t"):
         return "toggle"
-    if ch in ("\x1b[A", "\x00H", "\xe0H", "k", "K"):
+    if ch in ("\x1b[A", "\x1bOA", "\x00H", "\xe0H", "k", "K"):
         return "up"
-    if ch in ("\x1b[B", "\x00P", "\xe0P", "j", "J"):
+    if ch in ("\x1b[B", "\x1bOB", "\x00P", "\xe0P", "j", "J"):
         return "down"
     if ch == "a":
         return "all"
     if ch == "n":
         return "none"
     return ""
+
+
+def split_checkbox_keys(chunk: str) -> list[str]:
+    """Split one ``click.getchar`` read into single key sequences.
+
+    On POSIX ``click.getchar`` returns everything the terminal had buffered
+    (up to 32 bytes), so a fast typist, a held-down arrow or a pasted burst
+    arrives as ``"\\x1b[B\\x1b[B"`` or ``"jj"``. Each key in the chunk must
+    move or toggle once instead of the whole chunk being ignored.
+    """
+
+    keys: list[str] = []
+    i = 0
+    while i < len(chunk):
+        ch = chunk[i]
+        if ch == "\x1b" and i + 2 < len(chunk) and chunk[i + 1] in "[O":
+            end = i + 2
+            # CSI parameters (digits, ';') come before the final byte.
+            while end < len(chunk) and (chunk[end].isdigit() or chunk[end] == ";"):
+                end += 1
+            keys.append(chunk[i : end + 1])
+            i = end + 1
+            continue
+        if ch in ("\x00", "\xe0") and i + 1 < len(chunk):
+            keys.append(chunk[i : i + 2])
+            i += 2
+            continue
+        if ch == "\r" and chunk[i + 1 : i + 2] == "\n":
+            keys.append("\r")
+            i += 2
+            continue
+        keys.append(ch)
+        i += 1
+    return keys
 
 
 def render_checkbox_menu(
@@ -258,8 +292,8 @@ def prompt_checkbox_selection(
     cursor = 0
     ux.subhead(title)
     ux.subhead(
-        "  Up/Down or j/k moves, Space toggles, a selects all, "
-        "n clears, Enter continues."
+        # Fits 80 columns with the subhead indent.
+        "  Up/Down or j/k moves, Space toggles, a all, n none, Enter continues."
     )
 
     if redraw is None:
@@ -300,31 +334,53 @@ def prompt_checkbox_selection(
                     ux.warn(warning, indent="  ")
                     warning, warning_rows = "", 1
 
-            key = checkbox_key_name(read_key())
-            if key == "enter":
-                if selected or empty_ok:
-                    if not redraw:
+            # A key read in the same chunk as Enter (Space Enter in one burst)
+            # changes the menu after the last render; redraw it before
+            # returning so the final screen shows what was chosen (GAP-1263).
+            changed = False
+            for key in [checkbox_key_name(k) for k in split_checkbox_keys(read_key())]:
+                if key == "enter":
+                    if selected or empty_ok:
+                        if redraw and changed:
+                            render_checkbox_menu(
+                                options,
+                                selected,
+                                cursor,
+                                redraw=True,
+                                rows_below=warning_rows,
+                            )
+                            if warning_rows:
+                                click.echo("\r\x1b[2K", nl=False, color=True)
+                        elif not redraw:
+                            if changed:
+                                status_width = _render_non_redraw_status(
+                                    options,
+                                    selected,
+                                    cursor,
+                                    status_width,
+                                )
+                            click.echo()
+                        return [name for name in options if name in selected]
+                    if redraw:
+                        warning = "Select at least one connector."
+                    else:
                         click.echo()
-                    return [name for name in options if name in selected]
-                if redraw:
-                    warning = "Select at least one connector."
-                else:
-                    click.echo()
-                    ux.warn("Select at least one connector.", indent="  ")
-            elif key == "toggle":
-                name = options[cursor]
-                if name in selected:
-                    selected.remove(name)
-                else:
-                    selected.add(name)
-            elif key == "up":
-                cursor = (cursor - 1) % len(options)
-            elif key == "down":
-                cursor = (cursor + 1) % len(options)
-            elif key == "all":
-                selected = set(options)
-            elif key == "none":
-                selected.clear()
+                        ux.warn("Select at least one connector.", indent="  ")
+                elif key == "toggle":
+                    name = options[cursor]
+                    if name in selected:
+                        selected.remove(name)
+                    else:
+                        selected.add(name)
+                elif key == "up":
+                    cursor = (cursor - 1) % len(options)
+                elif key == "down":
+                    cursor = (cursor + 1) % len(options)
+                elif key == "all":
+                    selected = set(options)
+                elif key == "none":
+                    selected.clear()
+                changed = changed or key in ("toggle", "up", "down", "all", "none")
 
             if not redraw:
                 status_width = _render_non_redraw_status(

@@ -203,6 +203,15 @@ defenseclaw setup galileo enable
 defenseclaw setup galileo remove --yes
 ```
 
+If the key is missing (for example, removed from `~/.defenseclaw/.env`), the
+gateway keeps running with the config it started with, but it cannot restart.
+`defenseclaw status` and `defenseclaw-gateway status` still show the gateway
+and name the missing key, and exit `1`. Every `setup` command, including
+`setup galileo disable` and `remove`, checks the whole file first and refuses.
+Save the key with `defenseclaw keys set GALILEO_API_KEY`, or delete the
+`galileo` destination from `config.yaml`, then run
+`defenseclaw-gateway restart`.
+
 Destination names are identities. A new name appends a route; the same name
 updates only that route. The dedicated Galileo command always manages the
 destination named `galileo`, so rerunning it reports `UPDATE` and never replaces
@@ -247,6 +256,11 @@ in compiled-plan order. If more than four are enabled, doctor leaves their
 runtime-health checks in place and emits a bounded coverage warning instead of
 adding unbounded sequential network latency. Every doctor invocation can
 therefore create up to four diagnostic traces in Galileo.
+Each diagnostic trace (from `doctor` or `defenseclaw setup galileo test`) is an
+`invoke_agent diagnostic` root with one `chat defenseclaw-diagnostic` span. It
+names no real vendor model, and its user_metadata carries
+`defenseclaw.telemetry.canary: "true"`. Filter on that key to leave these
+traces out of model, cost and latency views.
 
 ## What you see in Galileo
 
@@ -284,6 +298,18 @@ Completed chat and tool operations carry their measured duration and are sent
 as soon as the connector exposes completion, so operators do not need to wait
 for a final Stop event to see a multi-hour agent's progress.
 
+### Tool calls that end after their turn was sent
+
+Galileo closes a trace when it ingests the request that carries the trace's
+root span, and drops spans of that trace that arrive in a later request. An
+OpenClaw turn's `invoke_agent openclaw` root is sent when the model message
+arrives, so a tool call that runs for more than a moment ends after Galileo
+closed its trace. The Galileo destination therefore sends such a span as the
+root of its own Galileo trace and adds the original trace ID to the span's
+metadata as `defenseclaw.trace.id`; filter on that key to find the rest of the
+turn. Local observability and other OTLP destinations keep the span in its
+original trace.
+
 ### Model detail: inspect input, output, latency, and reported usage
 
 ![Galileo model span detail showing rendered input and assistant output inside a long-running agent session](/images/galileo/model-input-output.png)
@@ -309,7 +335,9 @@ carries the decision on its tool span:
   user, and redacted reason.
 - The flat `defenseclaw.guardrail.action`, `defenseclaw.guardrail.rule_id`, and
   `defenseclaw.guardrail.severity` attributes, next to `user.id` and
-  `defenseclaw.user.name`, let you filter spans by one value.
+  `defenseclaw.user.name`, let you filter spans by one value. The tool span's
+  parent `invoke_agent` span carries the same three attributes, so a turn
+  blocked at a tool call shows its rule on the trace as well.
 
 Galileo does not read the OTLP span status or these attributes into its span
 record, so a blocked call's status code there stays `0`. The Galileo preset
@@ -320,7 +348,14 @@ and `status: ERROR` for a block. Filter Galileo spans on those metadata keys.
 Decisions that do not belong to a tool call, such as a blocked prompt, produce
 an `apply_guardrail` span with the same status, event, and attributes. Galileo
 has no span type for it, so it reaches local observability and other OTLP
-destinations but not Galileo.
+destinations but not Galileo. The turn's `invoke_agent` and `chat` spans
+instead carry the decision for Galileo: the outcome `blocked` and the same
+three flat `defenseclaw.guardrail.*` attributes, which Galileo shows in the
+span's metadata as `defenseclaw.outcome: blocked` next to the guardrail
+fields. A prompt block therefore shows its rule and severity on the turn, for
+OpenClaw and for the hook connectors (Claude Code, Codex and the others),
+whose blocked prompt ends its turn with the block message as the reply.
+Filter on `defenseclaw.outcome` to find every blocked turn.
 
 Galileo and Agent360 are complementary rather than competing views:
 
@@ -354,7 +389,18 @@ inference spans:
 Prompt, response, document, tool-argument, and tool-result values follow the
 Galileo destination's v8 profile. Fresh v8 configuration exports registered
 content unchanged under `none`; redacting profiles either replace detected
-sensitive substrings or transform/remove whole field classes.
+sensitive substrings or transform/remove whole field classes. Under `content`
+and `strict` the messages keep their structure for Galileo: each message keeps
+a role Galileo accepts (`user` for input, `assistant` or `tool` for output) and
+text parts, while their text is the redaction placeholder or is removed.
+The input of a Claude Code `tool_batch` span lists the calls of the batch by
+tool name and call ID. Those are identifiers, as on the span of each call, so
+`content` keeps them in clear.
+
+On Bedrock, a Claude Code chat span names the model ID
+(`chat anthropic.claude-haiku-4-5-20251001-v1:0`), not the cross-region
+inference profile from `ANTHROPIC_MODEL` (`us.anthropic...`). It names the same
+model before and after a gateway restart and on a resumed session.
 
 The Galileo preset binds the generated `galileo-rich-v2` compatibility profile.
 Eligibility, projected attributes, events, links, instrumentation scope, and

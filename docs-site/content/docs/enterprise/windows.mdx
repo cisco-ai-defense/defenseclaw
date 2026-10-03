@@ -30,6 +30,7 @@ the same Setup and the same config.
 | PowerShell 7 | A stable PowerShell 7 x64, installed from Microsoft's MSI. The lifecycle finds it only through `HKLM\SOFTWARE\Microsoft\PowerShellCore\InstalledVersions`, requires it under Program Files with a valid Microsoft signature, and ignores `PATH`. Without it, the run stops with `powershell7_required`. Install 7.4 or later: the lifecycle accepts any stable 7.x, but the MDM wrapper requires 7.4. |
 | Language mode | PowerShell FullLanguage mode. Under a WDAC or AppLocker script policy, allow the DefenseClaw signer, or the run stops with `powershell_constrained_language`. |
 | Privileges | An elevated administrator token, or SYSTEM (for example an MDM agent). |
+| Disk space | Free space on the ProgramData volume for about three copies of the Setup payload plus 256 MB to install, upgrade, repair or ensure (one copy plus 256 MB for the other actions). Setup refuses at once, before it stages anything, and names the volume, its free space and the space it needs. |
 | Other profiles | No Secure Client DefenseClaw deployment. The two profiles share service names, so the lifecycle refuses with `profile_conflict`. |
 
 ## Layout
@@ -160,7 +161,9 @@ Without `guardrail.rule_pack_dir` or `policy_dir`, as here, the gateway uses
 the rule packs built into it. A rule-pack directory you name must exist, be
 writable only by administrators, and be readable by the gateway service
 account `NT SERVICE\DefenseClawGateway` (for example, leave the inherited
-`Users` read and execute entry in place). Every parent folder of it needs
+`Users` read and execute entry in place, and add no Deny entry for that
+account). Setup checks this before it changes anything and names the
+folder and an `icacls` command that fixes it. Every parent folder of it needs
 Read & execute for that account too, because the gateway reads each
 parent's permissions and lists it. So do not put the rule pack inside the
 locked staging folder below; give it its own folder:
@@ -229,7 +232,7 @@ dashes, so `ALLOWEDSIGNERS=` and `allowed-signers=` are the same.
 | `ALLOWEDSIGNERS=<sha256>,<sha256>` | Accept only these Authenticode signer certificates (SHA-256 thumbprints). Applies to a signed Setup. |
 | `JSON=1` | Print the result document on standard output |
 | `NOSTART=1` | Install or update with the services stopped and disabled. A later `/repair` starts them. |
-| `PURGE=1` | With `/uninstall`, also remove the state under `C:\ProgramData\Cisco\DefenseClaw`, each enrolled account's `%USERPROFILE%\.defenseclaw`, and the DefenseClaw files of a per-user install in `%USERPROFILE%\.local\bin` with that folder's user `Path` entry once it is empty. The result names each account |
+| `PURGE=1` | With `/uninstall`, also remove each enrolled account's `%USERPROFILE%\.defenseclaw`, and the DefenseClaw files of a per-user install in `%USERPROFILE%\.local\bin` with that folder's user `Path` entry once it is empty. The result names each account |
 | `TIMEOUTSECONDS=<n>` | Lifecycle timeout, from 60 to 7200 seconds. The default is 1800. |
 
 The other actions are `/install`, `/upgrade`, `/repair`, `/reconcile`,
@@ -420,6 +423,35 @@ yet; it takes the permissions of its folder, so write it to a folder only
 administrators can read. Treat it as sensitive: it can hold prompt and tool
 content.
 
+## Review AI Discovery
+
+With `ai_discovery.enabled: true` in the deployment config, the gateway
+service scans each user profile for AI agents and apps, skills, MCP servers,
+plugins and running AI processes, and sends what it finds to your
+observability destinations. To read the inventory on the computer, run the
+read-only `discovery` view from an elevated Administrator prompt, or as
+LocalSystem from an MDM script:
+
+```powershell title="Elevated Administrator prompt"
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows discovery
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows discovery --user <account> --json
+```
+
+It lists each account's signals by category (`--user` lists one account's
+signals; it takes the account name or SID), then the runtime discovery
+planes (`ai_discovery.runtime`) with their state, last poll and findings.
+Standard accounts cannot run it.
+
+Skills and MCP servers are inventoried, not scanned: a managed deployment
+does not run the skill or MCP scanners. The `discovery` view names each
+skill and MCP server per user. Your observability destinations get the
+`ai_component.discovered`, `changed` and `removed` records with the user
+(`user.id`, `defenseclaw.user.name`) but without the skill or MCP server
+name: the per-entry `ai_component.observed` records stay in the local
+inventory, so read the names with `discovery --user <account> --json`. See
+[AI Discovery](/docs/ai-discovery#per-user-scans-in-standalone-enterprise)
+for the folders the service may read in each profile.
+
 ## Inspect machine policy
 
 Run the policy commands from an elevated Administrator prompt, or as
@@ -488,7 +520,9 @@ registrations stay and point at the removed hook binary, and each account is
 named with "because Setup did not run as LocalSystem". Only the failed run's
 result lists them, because a later `/status` finds no deployment, so keep
 that result. Fix the cause of the failure, then run `/ensure` and
-`/uninstall` as LocalSystem while the accounts are signed in, as in [Run
+`/uninstall` as LocalSystem while the accounts have an active (connected)
+session (a signed-in account whose session is disconnected counts as signed
+out), as in [Run
 Setup as LocalSystem](#run-setup-as-localsystem). An empty
 `C:\Program Files\ClaudeCode\managed-settings.d` can also stay; see
 [Remove](#remove).
@@ -624,14 +658,22 @@ Or with the installed CLI:
 ```
 
 Uninstall removes DefenseClaw's hook registrations and machine-policy
-entries, the four services and the binaries. It keeps the config, secrets,
-data and service logs under `C:\ProgramData\Cisco\DefenseClaw`. To remove
-those too, add `PURGE=1` to Setup or `--purge` to the CLI. After a successful
+entries, the four services, the binaries, and the machine state under
+`C:\ProgramData\Cisco\DefenseClaw` (config, secrets, data and service logs).
+Each user keeps `%USERPROFILE%\.defenseclaw` and the per-user binaries. To
+remove those too, add `PURGE=1` to Setup or `--purge` to the CLI. After a successful
 uninstall, the marker key, the Add/Remove Programs entry and a
 `DisableSelfUpdate` value that the lifecycle wrote are gone, and so are their
 parent keys and `C:\Program Files\Cisco` when nothing else is left in them.
 The lifecycle log in `%WINDIR%\Logs\DefenseClaw` stays. On a computer without DefenseClaw,
 uninstall succeeds and changes nothing.
+
+Run the CLI uninstall with `defenseclaw.exe`. The other installed binaries,
+such as `defenseclaw-gateway.exe`, refuse it (exit 1639) without changing
+anything, because a running binary keeps its own folder in use. If an
+uninstall reports that it committed but could not finish, run the same
+`defenseclaw.exe` uninstall (or the MDM `uninstall.ps1`) again: it finishes
+the cleanup.
 
 ### Per-user registrations at uninstall
 
@@ -650,9 +692,11 @@ Add/Remove Programs, cannot act as other users, so it removes no per-user
 registrations. Users who are signed out during the uninstall keep theirs as
 well: no guardian is left to clean them at their next sign-in. The uninstall
 result names what stays: the `user_registrations_pending` warning lists each
-connector and user SID it could not act as, and `user_registrations_failed`
+account and its connectors it could not act as, and `user_registrations_failed`
 lists removals that failed, including a registration that a connector's
 removal left in the user's agent configuration (the message names the file).
+An uninstall that did not run as LocalSystem attempts no removal, so it
+reports only `user_registrations_pending`.
 To clean every user, run the uninstall as LocalSystem while they are signed
 in (see [Run Setup as LocalSystem](#run-setup-as-localsystem)).
 
@@ -663,7 +707,11 @@ SYSTEM, not Administrators, so this also needs the uninstall to run as
 LocalSystem. As on Linux and macOS, the whole folder goes: the hook
 scripts, and the account's own hooks that the foreign-hook policy moved
 aside (`foreign-hooks-backup`; copy it first if the account wants them
-back). The purge also removes the DefenseClaw launchers, binaries, the `uv`
+back). A `%USERPROFILE%\.defenseclaw.rollback-<random>` copy that a
+rolled-back enrollment kept aside goes too. The purge also removes the
+allow-only `defenseclaw-hook.ps1` placeholder and its lock file, which the
+default uninstall keeps in `C:\ProgramData\Cursor` for Cursor windows that
+are still open, and the DefenseClaw launchers, binaries, the `uv`
 the per-user installer added (when unchanged) and its bookkeeping from
 `%USERPROFILE%\.local\bin`. When that leaves the folder empty, the folder
 goes, and so does its entry in the account's user `Path`; a folder other
@@ -673,12 +721,22 @@ each account whose data the purge removed. The `per_user_state_remaining` warnin
 folder the purge could not remove and why: the uninstall did not run as
 LocalSystem, a file in it could not be removed, or the account's roaming or
 container profile is not on the computer while it is signed out. Remove
-what it names as LocalSystem.
+what it names as LocalSystem. A purge that did not run as LocalSystem
+removes the machine deployment but none of these folders, so it fails
+(non-zero exit) and names each account: run Setup `/ensure` and then
+`/uninstall PURGE=1`, both as LocalSystem while the accounts have an active
+(connected) session.
 
 The agents' shared machine folders stay while they hold anything else,
 because another product can use them. Setup removes its own files from them.
 A purge also removes `C:\Program Files\ClaudeCode\managed-settings.d`, and
 then `C:\Program Files\ClaudeCode`, when nothing else is left in them.
+It also removes the folders an interrupted elevated DefenseClaw command
+left: `C:\ProgramData\DefenseClaw-PowerShell-<32 hex>`,
+`C:\ProgramData\DefenseClaw-Installer-<32 hex>` and
+`C:\Windows\Temp\DefenseClaw-Bootstrap-<32 hex>`; every uninstall does this,
+not only a purge. The `machine_state_remaining` warning names any of these
+folders it could not remove, and why.
 
 What stays is inert. Uninstall has already revoked every enrollment. The
 OpenCode and Amp plugins stop enforcing once uninstall removes
@@ -841,7 +899,7 @@ Limits:
 | OpenCode | Machine policy | `%ProgramData%\opencode` loads the managed plugin, plus a per-user hook runtime. Falls back to the per-user plugin while the managed plugin is not in force |
 | Antigravity, Devin, Hermes | Per user | The guardian registers `defenseclaw-hook.exe` in each user's agent config |
 | Amp | Per user | The guardian registers an in-agent plugin that calls the gateway after the listener proves it can derive the user's credential |
-| Kiro | Per user | The guardian writes `defenseclaw-hook.exe` into each user's global `%USERPROFILE%\.kiro\hooks\defenseclaw.json` (Kiro IDE 1.0.182 and later, `kiro-cli --v3`) and the CLI 2.x `defenseclaw` agent, pinned to a reviewed Windows hook contract (kiro-cli 2.24.1 and later, Kiro IDE 1.0.182 and later). A kiro-cli that has never run is reported until its first run. See [Kiro](/docs/connectors/kiro#enterprise-standalone-profile). The [ACP guard](/docs/acp-guard) stays available |
+| Kiro | Per user | The guardian writes `defenseclaw-hook.exe` into each user's global `%USERPROFILE%\.kiro\hooks\defenseclaw.json` (Kiro IDE 1.0.182 and later, `kiro-cli --v3`) and the CLI 2.x `defenseclaw` agent, pinned to a reviewed Windows hook contract (kiro-cli 2.24.1 and later, Kiro IDE 1.0.182 and later). A kiro-cli that has never run is enrolled at 2.24.1 until its first run names its version. See [Kiro](/docs/connectors/kiro#enterprise-standalone-profile). The [ACP guard](/docs/acp-guard) stays available |
 | OpenHands, OmniGent, OpenClaw, ZeptoClaw | Not managed | The enumerator writes no targets for them, so they are not protected. A target manifest row that names one is refused with a reason. |
 
 Windows handles machine policy differently from Linux and macOS. See

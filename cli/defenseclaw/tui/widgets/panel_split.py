@@ -40,12 +40,12 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from rich.console import Console, ConsoleOptions, RenderableType, RenderResult
-from rich.markup import escape
 from rich.text import Text
 from textual import events
 from textual.message import Message
 from textual.widgets import Static
 
+from defenseclaw.tui.markup_safe import escape
 from defenseclaw.tui.theme import DEFAULT_TOKENS
 
 TOKENS = DEFAULT_TOKENS
@@ -123,10 +123,16 @@ def step_nav(items: Sequence[NavItem], delta: int, *, wrap: bool = True) -> str 
 
 @dataclass(frozen=True)
 class Aside:
-    """Detail content with a title; the pane shows ``title`` in its border."""
+    """Detail content with a title; the pane shows ``title`` in its border.
+
+    ``more`` names the key that shows the whole detail elsewhere (Setup's
+    ``i details``). A pane below the table that is too short for ``body``
+    then cuts it with ``fit_rows`` instead of scrolling it out of sight.
+    """
 
     title: str
     body: RenderableType
+    more: str = ""
 
     def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
         yield Text(self.title, style=f"bold {TOKENS.accent_violet}")
@@ -139,6 +145,34 @@ def split_aside(content: RenderableType) -> tuple[str, RenderableType]:
     if isinstance(content, Aside):
         return content.title, content.body
     return "", content
+
+
+def fit_rows(body: Text, console: Console, width: int, rows: int, more: str = "") -> Text:
+    """``body`` wrapped to ``width`` columns and cut to ``rows`` lines.
+
+    A cut ends the last kept line with ``… <more>``, so a short pane says it
+    holds more and which key shows it instead of stopping mid-sentence at its
+    border (GAP-1999). ``body`` comes back unchanged when it fits.
+    """
+
+    if width <= 0 or rows <= 0:
+        return body
+    lines = body.wrap(console, width)
+    if len(lines) <= rows:
+        return body
+    kept = [line.copy() for line in lines[:rows]]
+    for line in kept:
+        line.rstrip()
+    suffix = f" … {more}" if more else " …"
+    last = kept[-1]
+    room = max(0, width - len(suffix))
+    if last.cell_len > room:
+        # Cut at a word break when one is near, not mid-word.
+        space = last.plain.rfind(" ", 0, room + 1)
+        last.truncate(space if space > room // 2 else room)
+        last.rstrip()
+    last.append(suffix, style=TOKENS.text_muted)
+    return Text("\n").join(kept)
 
 
 # --- nav list ---------------------------------------------------------------
@@ -392,6 +426,7 @@ __all__ = [
     "PanelNav",
     "SplitLayout",
     "active_item",
+    "fit_rows",
     "nav_key_at",
     "nav_lines",
     "nav_switcher",

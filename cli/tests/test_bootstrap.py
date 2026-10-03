@@ -24,7 +24,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -158,11 +158,84 @@ class BootstrapEnvTests(unittest.TestCase):
         with open(os.path.join(hermes_home, "config.yaml"), "w", encoding="utf-8") as fh:
             fh.write("hooks: {}\n")
 
+        from defenseclaw import bootstrap
+
         with patch.dict(os.environ, {"HERMES_HOME": hermes_home}):
-            result = _connector_readiness(cfg, "hermes")
+            with patch.object(bootstrap, "_hermes_installed", return_value=True):
+                result = _connector_readiness(cfg, "hermes")
+            # GAP-2354: the config.yaml setup writes is not an installed Hermes.
+            with patch.object(bootstrap, "_hermes_installed", return_value=False):
+                missing = _connector_readiness(cfg, "hermes")
 
         self.assertEqual(result.status, "pass")
         self.assertIn("Hermes config found", result.detail)
+        self.assertEqual((missing.status, missing.detail), ("warn", "Hermes is not installed (hermes is not on PATH)"))
+
+    def test_missing_hermes_action_next_step_names_the_install_first(self):
+        # GAP-2383: the first Next line was "setup hermes --mode action",
+        # which cannot work before Hermes is installed.
+        from defenseclaw import bootstrap
+
+        cfg = _cfg_for(os.path.join(self._tmp.name, "dchome"))
+        with patch.object(bootstrap, "_hermes_installed", return_value=False):
+            setup = bootstrap._connector_mode_warning_steps([bootstrap._action_downgrade_record("hermes")])
+            readiness = [_connector_readiness(cfg, "hermes")]
+        commands = bootstrap._next_commands(setup, readiness, cfg, "observe")
+
+        self.assertEqual(
+            commands[0],
+            "install Hermes (https://github.com/NousResearch/hermes-agent), then run: defenseclaw setup hermes --mode action",
+        )
+        self.assertIn("Hermes is not installed", setup[0].detail)
+        self.assertFalse([c for c in commands if c.startswith("defenseclaw setup hermes")])
+
+    def test_openclaw_setup_and_readiness_agree_before_openclaw_json_exists(self):
+        # GAP-1523: Guardrail skipped ("OpenClaw config not found ... skipped
+        # connector patch") while Readiness passed on the openclaw.json the
+        # gateway writes at start, also when OpenClaw was not installed.
+        from defenseclaw import bootstrap
+
+        cfg = _cfg_for(os.path.join(self._tmp.name, "dchome"))
+        cfg.claw.config_file = os.path.join(self._tmp.name, "oc", "openclaw.json")
+        with patch("defenseclaw.commands.cmd_setup.execute_guardrail_setup", return_value=(True, [])) as setup:
+            step = bootstrap._quiet_guardrail_setup(SimpleNamespace(cfg=cfg), "openclaw", verbose=False)
+        setup.assert_called_once()
+        self.assertEqual(step.status, "pass", step.detail)
+
+        os.makedirs(os.path.dirname(cfg.claw.config_file))
+        with open(cfg.claw.config_file, "w", encoding="utf-8") as fh:
+            fh.write("{}\n")
+        with patch.object(bootstrap.shutil, "which", return_value=None):
+            missing = _connector_readiness(cfg, "openclaw")
+        with patch.object(bootstrap.shutil, "which", return_value="/home/u/.local/bin/openclaw"):
+            found = _connector_readiness(cfg, "openclaw")
+        self.assertEqual((missing.status, missing.detail), ("warn", "OpenClaw is not installed (openclaw is not on PATH)"))
+        self.assertEqual(found.status, "pass")
+
+    def test_openclaw_first_run_adopts_openclaw_json_gateway_port(self):
+        # GAP-1778: init after `openclaw onboard --gateway-port 19347` kept
+        # gateway.port 18789, so the sidecar never reached OpenClaw.
+        from defenseclaw import bootstrap
+
+        cfg = _cfg_for(os.path.join(self._tmp.name, "dchome"))
+        cfg.claw.config_file = os.path.join(self._tmp.name, "oc", "openclaw.json")
+        os.makedirs(os.path.dirname(cfg.claw.config_file))
+        with open(cfg.claw.config_file, "w", encoding="utf-8") as fh:
+            json.dump({"gateway": {"mode": "local", "port": 19347}}, fh)
+        cfg.gateway.host = "127.0.0.1"
+        cfg.gateway.port = 18789
+        seen_ports = []
+
+        def fake_setup(app, save_config):
+            seen_ports.append(app.cfg.gateway.port)
+            return True, []
+
+        with patch("defenseclaw.commands.cmd_setup.execute_guardrail_setup", side_effect=fake_setup):
+            step = bootstrap._quiet_guardrail_setup(SimpleNamespace(cfg=cfg), "openclaw", verbose=False)
+        self.assertEqual(seen_ports, [19347], "the port must be adopted before setup saves the config")
+        self.assertEqual(cfg.gateway.port, 19347)
+        self.assertEqual(step.status, "pass", step.detail)
+        self.assertIn("OpenClaw gateway port 19347 from openclaw.json", step.detail)
 
     def test_opencode_readiness_honors_custom_config_dir(self):
         cfg = _cfg_for(os.path.join(self._tmp.name, "dchome"))
@@ -340,6 +413,29 @@ class FreshMigrationCursorTests(unittest.TestCase):
         self.assertEqual(preserved.claw.mode, "claudecode")
         self.assertEqual(preserved.guardrail.connector, "claudecode")
         self.assertEqual(preserved.guardrail.mode, "action")
+
+    def test_no_connector_fresh_first_run_persists_no_active_connector(self):
+        # GAP-1056: init --connector none on a fresh home left the OpenClaw
+        # default active, so status listed it and uninstall planned its teardown.
+        from defenseclaw.bootstrap import FirstRunOptions, run_first_run
+        from defenseclaw.config import load
+
+        data_dir = os.path.join(self._tmp_root, "none-fresh")
+        with patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}):
+            report = run_first_run(
+                FirstRunOptions(
+                    connector="none",
+                    profile="observe",
+                    skip_install=True,
+                    start_gateway=False,
+                    verify=False,
+                )
+            )
+            cfg = load()
+
+        self.assertNotEqual(report.status, "needs_attention")
+        self.assertFalse(cfg.has_connector_configured())
+        self.assertEqual(cfg.active_connectors(), [])
 
     def test_no_connector_first_run_preserves_unloadable_existing_config(self):
         from defenseclaw.bootstrap import FirstRunOptions, run_first_run
@@ -809,6 +905,23 @@ class StartGatewayStructuredDriftTests(unittest.TestCase):
         self.assertEqual(len(recorder), 1, "exactly one subprocess invocation expected on drift")
         self.assertEqual(recorder[0][1], "restart", "must call `defenseclaw-gateway restart`, not `start`")
 
+    def test_hook_fail_mode_change_restarts_without_roster_drift(self):
+        # GAP-1551: quickstart --fail-mode open on a running gateway with the
+        # same roster must restart it so the hooks are rewritten fail-open.
+        from defenseclaw.bootstrap import _start_gateway_structured
+
+        self.cfg.guardrail.connector = "openclaw"
+        self._write_pid_file()
+        self._write_active_connector("openclaw")
+
+        recorder: list = []
+        with self._patch_subprocess(recorder, returncode=0):
+            result = _start_gateway_structured(self.cfg, hook_fail_mode_changed=True)
+
+        self.assertEqual(result.status, "pass")
+        self.assertEqual(result.detail, "restarted to apply the new hook fail mode")
+        self.assertEqual([cmd[1] for cmd in recorder], ["restart"])
+
     def test_drift_restart_failure_surfaces_warn_with_remediation(self):
         from defenseclaw.bootstrap import _start_gateway_structured
 
@@ -851,6 +964,63 @@ class StartGatewayStructuredDriftTests(unittest.TestCase):
             "missing active_connector.json must NEVER trigger a restart; legacy 'already running' behavior wins",
         )
 
+    def test_removed_connector_restart_names_the_dropped_connector(self):
+        from defenseclaw.bootstrap import _start_gateway_structured
+        from defenseclaw.config import PerConnectorGuardrailConfig
+
+        # GAP-1938: init dropped hermes; the summary only said "3 selected".
+        self.cfg.guardrail.connector = "codex"
+        self.cfg.claw.mode = "codex"
+        self.cfg.guardrail.connectors = {
+            name: PerConnectorGuardrailConfig() for name in ("claudecode", "codex", "opencode")
+        }
+        self._write_pid_file()
+        with open(os.path.join(self.data_dir, "active_connector.json"), "w", encoding="utf-8") as fh:
+            json.dump(
+                {"version": 2, "names": ["claudecode", "codex", "hermes", "opencode"], "name": "claudecode"},
+                fh,
+            )
+        recorder: list = []
+        with self._patch_subprocess(recorder, returncode=0):
+            result = _start_gateway_structured(self.cfg)
+        self.assertEqual(result.status, "pass")
+        self.assertEqual(
+            result.detail, "restarted to load the 3 selected connectors; no longer guarding hermes",
+        )
+
+    def test_added_connector_with_same_primary_restarts_on_the_new_roster(self):
+        from defenseclaw.bootstrap import _start_gateway_structured
+        from defenseclaw.config import PerConnectorGuardrailConfig
+
+        # GAP-1270: re-running init to add cursor keeps the primary (codex);
+        # the gateway is still on its old roster and must be restarted.
+        self.cfg.guardrail.connector = "codex"
+        self.cfg.claw.mode = "codex"
+        self.cfg.guardrail.connectors = {
+            "codex": PerConnectorGuardrailConfig(),
+            "hermes": PerConnectorGuardrailConfig(),
+            "cursor": PerConnectorGuardrailConfig(),
+        }
+        self._write_pid_file()
+        with open(os.path.join(self.data_dir, "active_connector.json"), "w", encoding="utf-8") as fh:
+            json.dump({"version": 2, "names": ["codex", "hermes"], "name": "codex"}, fh)
+
+        recorder: list = []
+        with self._patch_subprocess(recorder, returncode=0):
+            result = _start_gateway_structured(self.cfg)
+        self.assertEqual(result.status, "pass")
+        self.assertEqual(result.detail, "restarted to load the 3 selected connectors")
+        self.assertEqual([c[1] for c in recorder], ["restart"])
+
+        # Same roster: no restart, although "name" mirrors the alphabetical
+        # first entry rather than the primary.
+        with open(os.path.join(self.data_dir, "active_connector.json"), "w", encoding="utf-8") as fh:
+            json.dump({"version": 2, "names": ["codex", "cursor", "hermes"], "name": "codex"}, fh)
+        recorder = []
+        with self._patch_subprocess(recorder):
+            result = _start_gateway_structured(self.cfg)
+        self.assertEqual((result.detail, recorder), ("already running", []))
+
     def test_not_running_calls_start_not_restart(self):
         from defenseclaw.bootstrap import _start_gateway_structured
 
@@ -869,7 +1039,7 @@ class StartGatewayStructuredDriftTests(unittest.TestCase):
     def test_windows_live_unrelated_reused_pid_does_not_suppress_start(self):
         import subprocess
 
-        from defenseclaw.bootstrap import _start_gateway_structured
+        from defenseclaw.bootstrap import _GATEWAY_START_TIMEOUT, _start_gateway_structured
 
         self._write_pid_file()
         completed = subprocess.CompletedProcess(
@@ -913,7 +1083,7 @@ class StartGatewayStructuredDriftTests(unittest.TestCase):
             ],
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=_GATEWAY_START_TIMEOUT,
         )
 
     def test_windows_verified_gateway_still_counts_as_running(self):
@@ -1086,6 +1256,27 @@ def test_devin_readiness_uses_pinned_workspace_hook_not_ambient_home(
     assert result.status == "pass"
 
 
+
+def test_devin_readiness_without_workspace_checks_user_global_hooks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MAC-U3-08: init told every user to pin a Devin workspace, which
+    re-scopes all connectors; Devin is guarded by its user-global hooks."""
+    from defenseclaw import bootstrap
+
+    config = tmp_path / "config.json"
+    monkeypatch.setattr(bootstrap, "devin_user_config_path", lambda: str(config))
+    cfg = SimpleNamespace(claw=SimpleNamespace(workspace_dir=""))
+
+    config.write_text('{"theme": "dark"}', encoding="utf-8")
+    missing = _connector_readiness(cfg, "devin")
+    assert (missing.status, missing.next_command) == ("warn", "defenseclaw setup devin")
+
+    hook = '{"hooks": {"PreToolUse": [{"command": "~/.defenseclaw/hooks/devin-hook.sh"}]}}'
+    config.write_text(hook, encoding="utf-8")
+    assert _connector_readiness(cfg, "devin").status == "pass"
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -1104,6 +1295,164 @@ class FirstRunApiPortTests(unittest.TestCase):
 
         self.assertEqual(cfg.gateway.api_port, 18980)
         self.assertIn("uses port 18980", note)
+
+    @unittest.skipIf(os.name == "nt", "port claims are a Linux and macOS hint")
+    def test_new_config_skips_a_free_port_another_account_configured(self):
+        # GAP-1261: another account's gateway is down, so 18970 is free, but
+        # its start left a claim on it.
+        import tempfile
+
+        from defenseclaw import bootstrap
+        from defenseclaw.config import default_config
+
+        cfg = default_config()
+        with tempfile.TemporaryDirectory() as claims:
+            open(os.path.join(claims, "defenseclaw-api-port-18970"), "w").close()
+            with (
+                patch.object(bootstrap, "_API_PORT_CLAIM_DIR", claims),
+                patch.object(bootstrap, "_api_port_free", return_value=True),
+            ):
+                bootstrap.choose_first_run_api_port(cfg)
+                self.assertEqual(cfg.gateway.api_port, 18970, "this account's own claim moved it")
+                with patch.object(bootstrap.os, "getuid", return_value=os.getuid() + 1):
+                    note = bootstrap.choose_first_run_api_port(cfg)
+
+        self.assertEqual(cfg.gateway.api_port, 18980)
+        self.assertIn("configured by another account", note)
+
+    @unittest.skipIf(os.name == "nt", "port claims are a Linux and macOS hint")
+    def test_new_config_skips_a_port_a_deleted_account_claimed(self):
+        # GAP-1704: nobody can replace a deleted account's claim, so a port
+        # it holds went to two accounts and the first one's gateway could not start.
+        import pwd
+        import tempfile
+
+        from defenseclaw import bootstrap
+        from defenseclaw.config import default_config
+
+        cfg = default_config()
+        with tempfile.TemporaryDirectory() as claims:
+            open(os.path.join(claims, "defenseclaw-api-port-18970"), "w").close()
+            with (
+                patch.object(bootstrap, "_API_PORT_CLAIM_DIR", claims),
+                patch.object(bootstrap, "_api_port_free", return_value=True),
+                patch.object(bootstrap.os, "getuid", return_value=os.getuid() + 1),
+                patch.object(pwd, "getpwuid", side_effect=KeyError("deleted account")),
+            ):
+                bootstrap.choose_first_run_api_port(cfg)
+
+        self.assertEqual(cfg.gateway.api_port, 18980)
+
+    @unittest.skipIf(os.name == "nt", "port claims are a Linux and macOS hint")
+    def test_new_config_claims_its_port_so_a_concurrent_init_skips_it(self):
+        # GAP-1462: two accounts' inits must not pick the same free port.
+        import tempfile
+
+        from defenseclaw import bootstrap
+        from defenseclaw.config import default_config
+
+        first, second = default_config(), default_config()
+        with tempfile.TemporaryDirectory() as claims:
+            with (
+                patch.object(bootstrap, "_API_PORT_CLAIM_DIR", claims),
+                patch.object(bootstrap, "_api_port_free", side_effect=lambda _host, port: port != 18970),
+            ):
+                bootstrap.choose_first_run_api_port(first)
+                self.assertTrue(os.path.exists(os.path.join(claims, "defenseclaw-api-port-18980")))
+                with patch.object(bootstrap.os, "getuid", return_value=os.getuid() + 1):
+                    bootstrap.choose_first_run_api_port(second)
+
+        self.assertEqual((first.gateway.api_port, second.gateway.api_port), (18980, 18990))
+
+    def test_new_config_moves_the_guardrail_proxy_port_off_a_held_4000(self):
+        # GAP-1701: a second account's OpenClaw proxy cannot listen on 4000.
+        from defenseclaw import bootstrap
+        from defenseclaw.config import default_config
+
+        cfg = default_config()
+        with patch.object(bootstrap, "_api_port_free", side_effect=lambda _host, port: port != 4000):
+            note = bootstrap.choose_first_run_guardrail_port(cfg)
+        self.assertEqual(cfg.guardrail.port, 4010)
+        self.assertIn("uses port 4010", note)
+        with patch.object(bootstrap, "_api_port_free", return_value=True):
+            self.assertEqual(bootstrap.choose_first_run_guardrail_port(default_config()), "")
+
+    @unittest.skipIf(os.name == "nt", "port claims are a Linux and macOS hint")
+    def test_two_accounts_in_init_at_once_get_different_guardrail_ports(self):
+        # GAP-2198: neither proxy listens yet, so the free-port check alone
+        # gave both accounts 4010; the claim makes the second one move on.
+        import tempfile
+
+        from defenseclaw import bootstrap
+        from defenseclaw.config import default_config
+
+        first, second = default_config(), default_config()
+        with tempfile.TemporaryDirectory() as claims:
+            with (
+                patch.object(bootstrap, "_API_PORT_CLAIM_DIR", claims),
+                patch.object(bootstrap, "_api_port_free", side_effect=lambda _host, port: port != 4000),
+            ):
+                bootstrap.choose_first_run_guardrail_port(first)
+                self.assertTrue(os.path.exists(os.path.join(claims, "defenseclaw-guardrail-port-4010")))
+                with patch.object(bootstrap.os, "getuid", return_value=os.getuid() + 1):
+                    note = bootstrap.choose_first_run_guardrail_port(second)
+            # GAP-2283: 4010 is only claimed (nothing listens), so the note
+            # must not send the user looking for a process on it.
+            self.assertIn("in use or claimed by another account's DefenseClaw install", note)
+            self.assertNotIn("often", note)
+            with patch.object(bootstrap, "_API_PORT_CLAIM_DIR", claims):
+                bootstrap.remove_own_api_port_claims()
+                self.assertEqual(os.listdir(claims), [])
+
+        self.assertEqual((first.guardrail.port, second.guardrail.port), (4010, 4020))
+
+    @unittest.skipIf(os.name == "nt", "port claims are a Linux and macOS hint")
+    def test_uninstall_all_removes_only_this_accounts_claims(self):
+        import tempfile
+
+        from defenseclaw import bootstrap
+
+        with tempfile.TemporaryDirectory() as claims:
+            for name in ("defenseclaw-api-port-18970", "unrelated"):
+                open(os.path.join(claims, name), "w").close()
+            with patch.object(bootstrap, "_API_PORT_CLAIM_DIR", claims):
+                bootstrap.remove_own_api_port_claims()
+            self.assertEqual(os.listdir(claims), ["unrelated"])
+
+    def test_windows_claims_hold_the_account_sid(self):
+        # GAP-1569: on Windows the claims are in %ProgramData% and name the
+        # claiming account's SID.
+        import tempfile
+
+        from defenseclaw import bootstrap
+
+        own, other = "S-1-5-21-1-2-3-1001", "S-1-5-21-1-2-3-1002"
+        with tempfile.TemporaryDirectory() as claims:
+            for port, sid in ((18970, other), (18980, own)):
+                with open(os.path.join(claims, f"defenseclaw-api-port-{port}"), "w") as handle:
+                    handle.write(sid)
+            with (
+                patch.object(bootstrap.platform_support, "host_os", return_value="windows"),
+                patch.dict(os.environ, {"ProgramData": claims}),
+                patch.object(bootstrap, "_windows_own_sid", return_value=own),
+            ):
+                # Also when the SID's account was deleted: no other account
+                # can remove its claim from %ProgramData% (GAP-1704).
+                self.assertTrue(bootstrap._api_port_claimed_by_other_account(18970))
+                self.assertFalse(bootstrap._api_port_claimed_by_other_account(18980), "own claim")
+                self.assertFalse(bootstrap._api_port_claimed_by_other_account(18990), "no claim")
+                bootstrap.remove_own_api_port_claims()
+            self.assertEqual(os.listdir(claims), ["defenseclaw-api-port-18970"])
+
+    def test_suggested_port_leaves_its_sandbox_ports_free(self):
+        # GAP-1706: the same rule as the gateway's suggestion, so doctor,
+        # status and start name the same port.
+        from defenseclaw import bootstrap
+
+        with patch.object(bootstrap, "_api_port_available", return_value=True), patch.object(
+            bootstrap, "_api_port_free", side_effect=lambda _host, port: port != 18982
+        ):
+            self.assertEqual(bootstrap.suggest_free_api_port("127.0.0.1", 18970), 18990)
 
     def test_windows_also_moves_and_probes_the_port_exclusively(self):
         import socket
@@ -1149,3 +1498,90 @@ def test_hooks_missing_because_the_gateway_did_not_start_point_at_the_start():
         "defenseclaw-gateway start",
         "defenseclaw setup devin --workspace <project>",
     ]
+
+
+def test_hooks_pending_a_gateway_not_started_on_purpose_are_not_warnings():
+    # GAP-1491: with --no-start-gateway every connector read "! not found yet"
+    # and Next listed `defenseclaw setup <connector>` for each of them.
+    from defenseclaw.bootstrap import StepResult, _defer_hooks_to_gateway_start, _next_commands, _rollup_status
+
+    setup = [StepResult("Sidecar", "skip", "not started (--no-start-gateway)", "defenseclaw-gateway start")]
+    readiness = [StepResult("Connector", "warn", "Amp system policy plugin not found at /p", "defenseclaw setup amp")]
+    _defer_hooks_to_gateway_start(setup, readiness)
+
+    assert readiness[0].status == "skip"
+    assert readiness[0].detail.endswith("written when the gateway starts")
+    assert _rollup_status(setup, readiness) == "ready"
+    assert "defenseclaw setup amp" not in _next_commands(setup, readiness, object(), "action")
+
+
+def test_a_gateway_start_that_outlasts_init_says_it_is_still_starting(tmp_path, monkeypatch):
+    # GAP-1382: init gave up after 30 s and printed "start timed out" on
+    # Windows, though the gateway was up seconds later.
+    import subprocess
+
+    from defenseclaw import bootstrap
+
+    cfg = MagicMock()
+    cfg.data_dir = str(tmp_path)
+    monkeypatch.setattr(bootstrap.shutil, "which", lambda _name: "/bin/defenseclaw-gateway")
+    running = iter([False, True])
+    monkeypatch.setattr(bootstrap, "_pid_file_running", lambda _path: next(running))
+
+    def slow(argv, **kwargs):
+        assert kwargs["timeout"] >= 90
+        raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+
+    monkeypatch.setattr(bootstrap.subprocess, "run", slow)
+    step = bootstrap._start_gateway_structured(cfg)
+
+    assert step.status == "warn"
+    assert step.detail.startswith("still starting")
+    assert step.next_command == "defenseclaw-gateway status"
+
+
+def test_a_failed_first_start_names_the_error_not_the_migration_banner(tmp_path, monkeypatch):
+    # GAP-2341: on a fresh home the first stderr line is an audit migration
+    # banner, and init showed it as the Sidecar failure.
+    import subprocess
+
+    from defenseclaw import bootstrap
+
+    cfg = MagicMock()
+    cfg.data_dir = str(tmp_path)
+    monkeypatch.setattr(bootstrap.shutil, "which", lambda _name: "/bin/defenseclaw-gateway")
+    monkeypatch.setattr(bootstrap, "_pid_file_running", lambda _path: False)
+    stderr = (
+        "[audit] applying migration 1: initial schema: audit_events, scan_results\n"
+        "[judge_body] applying migration 1: initial schema\n"
+        "Error: start daemon readiness: hermes hook config: handler has a tampered DefenseClaw command\n"
+    )
+    monkeypatch.setattr(
+        bootstrap.subprocess, "run", lambda argv, **_kw: subprocess.CompletedProcess(argv, 1, "", stderr)
+    )
+    step = bootstrap._start_gateway_structured(cfg)
+
+    assert step.status == "warn"
+    assert step.detail == "Error: start daemon readiness: hermes hook config: handler has a tampered DefenseClaw command"
+    banner_only = subprocess.CompletedProcess([], 1, "", "[audit] applying migration 1: x\ngateway exited\n")
+    assert bootstrap.gateway_failure_detail(banner_only, "start failed") == "gateway exited"
+    assert bootstrap.gateway_failure_detail(subprocess.CompletedProcess([], 1, "", ""), "start failed") == "start failed"
+
+
+def test_init_waits_past_the_windows_gateway_readiness_wait():
+    # GAP-1346: init killed `defenseclaw-gateway start` before its own Windows
+    # readiness wait (240 s) ended, so the watchdog never started.
+    import inspect
+
+    from defenseclaw import bootstrap
+    from defenseclaw.commands import cmd_init
+
+    assert "_GATEWAY_START_TIMEOUT = (660 if os.name == \"nt\" else 210) + _GATEWAY_AUDIT_UPGRADE_ALLOWANCE" in inspect.getsource(
+        bootstrap
+    )
+    # GAP-1909: the launcher applies a pending audit upgrade before its wait.
+    assert bootstrap._GATEWAY_AUDIT_UPGRADE_ALLOWANCE >= 300
+    for fn in (bootstrap._start_gateway_structured, cmd_init._start_gateway, cmd_init._restart_gateway_quiet):
+        src = inspect.getsource(fn)
+        assert "timeout=_GATEWAY_START_TIMEOUT" in src
+        assert "timeout=15" not in src and "timeout=30" not in src

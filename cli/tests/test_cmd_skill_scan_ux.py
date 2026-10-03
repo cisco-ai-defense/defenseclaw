@@ -211,6 +211,122 @@ class TestSingleTargetUX(_SkillScanUXBase):
         mock_sidecar.return_value.disable_skill.assert_called_once_with("demo-skill")
 
 
+    @patch("defenseclaw.commands._scan_ui._SCAN_NOT_RECORDED_NOTED", False)
+    @patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info", return_value=None)
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
+    def test_gateway_not_running_still_prints_the_result(self, mock_cls, _mock_info) -> None:
+        # GAP-1672: before the first gateway start the scan printed only a traceback, rc=1.
+        from defenseclaw.logger import CanonicalObservabilityUnavailableError
+
+        mock_cls.return_value.scan.return_value = self._blocked_result(self.skill_dir)
+        self.app.logger.log_scan = MagicMock(
+            side_effect=CanonicalObservabilityUnavailableError("gateway authentication is unavailable"),
+        )
+        runner = make_separate_stderr_runner()
+        result = runner.invoke(
+            skill, ["scan", "demo-skill", "--path", self.skill_dir], obj=self.app, catch_exceptions=False,
+        )
+        self.assertNotIsInstance(result.exception, CanonicalObservabilityUnavailableError)
+        self.assertIn("Suspicious shell invocation", result.stdout)
+        self.assertIn("HIGH", result.stdout)
+        self.assertIn("gateway isn't running, so this scan result was not recorded", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+
+class TestPathTargetUX(_SkillScanUXBase):
+    """GAP-1599: ``skill scan <folder>`` outside every connector's skill dirs."""
+
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
+    def test_folder_target_is_adhoc_and_not_called_loaded(self, mock_cls) -> None:
+        self.app.cfg.skill_actions.high = SeverityAction(install="block")
+        mock_scanner = MagicMock()
+        mock_scanner.scan.return_value = self._blocked_result(self.skill_dir)
+        mock_cls.return_value = mock_scanner
+        with patch.object(type(self.app.cfg), "skill_dirs", lambda _self, _c=None: []):
+            result = self.invoke(["scan", self.skill_dir])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Scanning 1 skill at a path (not from a connector config)", result.output)
+        self.assertIn(f"Source: {self.skill_dir}", result.output)
+        self.assertIn("the policy would refuse this skill at install.", result.output)
+        self.assertNotIn("stays loaded", result.output)
+        self.assertIn("Block it: defenseclaw skill block demo-skill\n", result.output)
+
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
+    def test_folder_target_with_no_connector_is_adhoc_not_openclaw(self, mock_cls) -> None:
+        # GAP-1715: after "init --connector none" the banner must not say "on openclaw".
+        self.app.cfg.guardrail.connector = ""
+        self.app.cfg.guardrail.connectors = {}
+        self.app.cfg.claw.mode = ""
+        mock_cls.return_value.scan.return_value = self._clean_result(self.skill_dir)
+        result = self.invoke(["scan", self.skill_dir])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Scanning 1 skill at a path (not from a connector config)", result.output)
+        self.assertNotIn("on openclaw", result.output)
+
+
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
+    def test_folder_target_json_names_no_connector(self, mock_cls) -> None:
+        # GAP-1766: the JSON matches the banner, not "connector": "openclaw".
+        self.app.cfg.guardrail.connector = ""
+        self.app.cfg.guardrail.connectors = {}
+        self.app.cfg.claw.mode = ""
+        mock_cls.return_value.scan.return_value = self._clean_result(self.skill_dir)
+        result = self.invoke(["scan", self.skill_dir, "--json"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output[result.output.index("{"):])
+        self.assertNotIn("connector", payload)
+
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
+    def test_folder_target_records_no_connector(self, mock_cls) -> None:
+        # GAP-1919: the audit record (alert, finding.observed) names no connector either.
+        self.app.cfg.guardrail.connector = "claudecode"
+        mock_cls.return_value.scan.return_value = self._blocked_result(self.skill_dir)
+        self.app.logger.log_scan = MagicMock()
+        with patch.object(type(self.app.cfg), "skill_dirs", lambda _self, _c=None: []):
+            result = self.invoke(["scan", self.skill_dir])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("(not from a connector config)", result.output)
+        self.app.logger.log_scan.assert_called_once()
+        self.assertIsNone(self.app.logger.log_scan.call_args.kwargs.get("connector"))
+
+
+class TestScanArgumentErrors(_SkillScanUXBase):
+    """GAP-1771: argument errors agree with the help."""
+
+    def test_missing_folder_is_named_not_use_path(self) -> None:
+        missing = os.path.join(self.tmp_dir, "no-such-dir")
+        for args in (["scan", missing], ["scan", "--path", missing]):
+            result = self.invoke(args)
+            self.assertEqual(result.exit_code, 1, result.output)
+            self.assertIn(f"{missing} does not exist", result.output)
+            self.assertNotIn("use --path", result.output)
+            self.assertNotIn("Missing argument", result.output)
+
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
+    def test_path_option_needs_no_target(self, mock_cls) -> None:
+        mock_cls.return_value.scan.return_value = self._clean_result(self.skill_dir)
+        with patch.object(type(self.app.cfg), "skill_dirs", lambda _self, _c=None: []):
+            result = self.invoke(["scan", "--path", self.skill_dir])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertNotIn("Missing argument", result.output)
+        mock_cls.return_value.scan.assert_called_once()
+
+
+def test_skill_finding_line_counts_front_matter(tmp_path) -> None:
+    # GAP-1599: the SDK numbers SKILL.md lines after the front matter.
+    from defenseclaw.scanner.skill import _snippet_file_line
+
+    (tmp_path / "SKILL.md").write_text("---\nname: x\ndescription: y\nlicense: MIT\n---\nMarker text here.\n")
+    assert _snippet_file_line(str(tmp_path), "SKILL.md", 1, "Marker text here.") == 6
+    assert _snippet_file_line(str(tmp_path), "SKILL.md", 2, "") == 2
+    assert _snippet_file_line(str(tmp_path), "SKILL.md", 6, "Marker text") == 6
+    assert _snippet_file_line(str(tmp_path), "missing.md", 3, "Marker") == 3
+
+
 class TestSingleTargetJsonMode(_SkillScanUXBase):
     @patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info", return_value=None)
     @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
@@ -347,6 +463,36 @@ class TestScanAllUX(_SkillScanUXBase):
         self.assertIn("clean=2", result.output)
         self.assertIn("blocked=0", result.output)
         self.assertIn("findings=1", result.output)
+
+    @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full", return_value=None)
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
+    def test_scan_all_counts_block_listed_skill_as_blocked(self, mock_cls, _mock_list) -> None:
+        # GAP-1320: a block-listed skill reads BLOCKED and the Summary counts it.
+        from defenseclaw.enforce import PolicyEngine
+
+        root = self._make_skills_dir(["alpha", "beta"])
+        self.app.cfg.skill_dirs = lambda connector=None: [root]
+        PolicyEngine(self.app.store).block("skill", "beta", "test block")
+        responses = {
+            os.path.join(root, "alpha"): self._clean_result(os.path.join(root, "alpha")),
+            os.path.join(root, "beta"): self._blocked_result(os.path.join(root, "beta")),
+        }
+        mock_scanner = MagicMock()
+        mock_scanner.scan.side_effect = lambda p: responses[p]
+        mock_cls.return_value = mock_scanner
+
+        result = self.invoke(["scan", "--all"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("[BLOCKED] beta", result.output)
+        self.assertIn("clean=1", result.output)
+        self.assertIn("blocked=1", result.output)
+        self.assertIn("defenseclaw skill unblock beta", result.output)
+
+        single = self.runner.invoke(skill, ["scan", "beta", "--path", os.path.join(root, "beta")], obj=self.app)
+        self.assertEqual(single.exit_code, 2, single.output)
+        self.assertIn("is on the block list", single.output)
+        self.assertIn("skill scan --all", single.output)
+        self.assertIn("defenseclaw skill unblock beta", single.output)
 
     @patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info", return_value=None)
     @patch(
@@ -502,6 +648,29 @@ class TestScanAllUX(_SkillScanUXBase):
             "(no skill directories configured for connector='omnigent')",
             result.output,
         )
+        mock_cls.return_value.scan.assert_not_called()
+
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
+    def test_scan_all_reports_skipped_vendor_bundled_skills(self, mock_cls) -> None:
+        """GAP-1085: 'No skills found' while skill list showed bundled skills."""
+        self.app.cfg.active_connector = lambda: "hermes"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["hermes"]  # type: ignore[method-assign]
+        self.app.cfg.skill_dirs = lambda connector=None: [self.tmp_dir]  # type: ignore[method-assign]
+        listing = {
+            "skills": [
+                {"name": "arxiv", "baseDir": os.path.join(self.tmp_dir, "arxiv"), "bundled": True},
+                {"name": "notes", "baseDir": os.path.join(self.tmp_dir, "notes"), "bundled": True},
+            ]
+        }
+        with patch(
+            "defenseclaw.commands.cmd_skill._list_openclaw_skills_full",
+            return_value=listing,
+        ):
+            result = self.invoke(["scan", "--all"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertNotIn("No skills found", result.output)
+        self.assertIn("2 vendor-bundled skill(s) skipped for connector='hermes'", result.output)
         mock_cls.return_value.scan.assert_not_called()
 
     @patch("defenseclaw.scanner.skill.SkillScannerWrapper")

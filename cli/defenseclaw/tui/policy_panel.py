@@ -40,9 +40,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from rich.console import RenderableType
-from rich.markup import escape as rich_escape
 
 from defenseclaw.platform_support import openshell_sandboxes_supported
+from defenseclaw.tui.markup_safe import escape as rich_escape
 from defenseclaw.tui.screens.consequence import (
     ConsequenceAction,
     ConsequenceModalModel,
@@ -379,11 +379,11 @@ class PolicyPanelMixin:
         return Aside(title, "\n".join(rich_escape(line) for line in lines))
 
     def _select_policy_nav(self, key: str) -> bool:
-        """A click on a nav item or switcher segment: the same as its 1-7 key."""
+        """A click on a nav item or switcher segment opens that view."""
         model = self.policy_model
         if key not in model.views() or key == model.view:
             return False
-        action = model.handle_key(str(model.views().index(key) + 1))
+        action = model.select_view(key)
         if action.kind == "load_sandbox_packs":
             self._schedule_policy_load(sandbox=True)
         return True
@@ -899,7 +899,7 @@ def policy_threshold_modal(kind: str, level: str, policy: Any) -> ConsequenceMod
     ]
     if not active:
         details.append(f"The {name} policy isn't active, so nothing changes until you activate it (Enter).")
-    if getattr(policy, "builtin", False):
+    if getattr(policy, "builtin", False) and not getattr(policy, "edited", False):
         details.append(f"The built-in {name} policy is copied to your policy folder first.")
     details.append(_run_line(intent, "; the gateway reloads the policy." if active else ""))
     consequence = f"This weakens protection: the policy {verb} {level} instead of {old}." if weaker else ""

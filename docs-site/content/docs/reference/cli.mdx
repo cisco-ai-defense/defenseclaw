@@ -12,7 +12,7 @@ keywords:
   - defenseclaw-gateway
 ---
 
-Authoritative source for any flag is `defenseclaw <command> --help`. These groupings are curated for browsing.
+Authoritative source for any flag is `defenseclaw <command> --help` (or `-h`). These groupings are curated for browsing.
 
 <Callout title="Command availability is platform-specific">
 A registered command or connector alias is not, by itself, a native Windows
@@ -72,6 +72,18 @@ restart potential, and platform. The top-level `outcome` and `exit_code`
 combine health and repair results without adding repair failures to health
 counters.
 
+Doctor is the command that reaches out: the `LLM reachable` check sends one
+request to the configured provider, and on Windows the Codex check starts
+Codex's own app-server, which reads Codex's cloud requirements from OpenAI
+(Codex may also contact its model provider, such as Amazon Bedrock, while it
+starts). On Windows, setting up the Codex connector runs the same Codex check,
+so `defenseclaw-gateway start` and `restart`, Codex setup, and the installers
+that start the gateway make those calls too, once per start and before any
+Codex hook is written: a Codex policy that allows only managed hooks
+(`allow_managed_hooks_only`) would otherwise ignore the DefenseClaw hooks.
+`defenseclaw status` makes no calls to model vendors; it reads local state
+and the local gateway only.
+
 Use `--passive` to suppress synthetic telemetry, LLM, and
 inspection-content-submitting probes. Every `--fix --dry-run` is passive and
 runs planners only, so it cannot mutate disk or restart a service.
@@ -91,8 +103,9 @@ for token, audit, identity, compatibility, and recovery safety boundaries.
 | `defenseclaw acp catalog` | Show the pinned ACP schema and built-in client/agent inventory. |
 | `defenseclaw acp setup --client zed\|jetbrains --agent <name> [--activate]` | Install or reconfigure a managed guarded entry. Defaults to observe mode. |
 | `defenseclaw acp setup --managed ... --runtime-data-dir <dir> --token-file <path>` | Install only user-side editor/lock files for a centrally authorized enterprise enrollment. |
-| `defenseclaw acp status` | Show the ACP posture and configured bindings. |
+| `defenseclaw acp status` | Show the ACP posture and configured bindings (`--json` for the machine-readable document). |
 | `defenseclaw acp remove --client <client> --agent <agent>` | Remove only the DefenseClaw-owned entry. |
+| `defenseclaw acp refresh [--from-sha256 <digest>]` | Re-pin the upgraded `defenseclaw-acp` guard in configured editor entries (the installer runs it after an upgrade). A changed agent binary or editor entry still needs `acp setup`. |
 | `defenseclaw-gateway enterprise acp enroll\|verify\|revoke ...` | Manage the protected per-principal/client/agent/profile credential and its private user copy. |
 
 Hook setup aliases (`setup codex`, `setup claude-code`, `setup hermes`, and the rest) add or reconfigure one connector. On a host with another hook connector already active, choose **Add** to join the active roster; choose **Replace** only when you want to return to one wired connector. Proxy connectors (`openclaw`, `zeptoclaw`) own the traffic plane and do not join the hook-connector roster.
@@ -188,6 +201,7 @@ Per-connector guardrail controls. `--connector X` is the explicit scope selector
 | `defenseclaw guardrail protection list [--json]` | Read-only. Lists the opt-in protection packs (five selectable, one staged) and which scope (the global pack or an active connector) has which on. See [Opt-in protection packs](#opt-in-protection-packs). |
 | `defenseclaw guardrail protection enable NAME [--connector X] [--no-validate] [--no-restart] [--json]` | Turn an opt-in protection pack on for the global rule pack or for one connector. Composes, validates, and switches to `~/.defenseclaw/policies/guardrail/protected-<scope>/`; an invalid composition (exit `1`) or an unavailable validator (exit `2`, unless `--no-validate`) switches nothing. Staged and unknown packs are refused (exit `1`). |
 | `defenseclaw guardrail protection disable NAME [--connector X] [--no-restart] [--json]` | Turn it off again. The scope's pack is recomposed without it; when no opt-in pack is left, the scope goes back to its base pack. |
+| `defenseclaw guardrail allow-private-upstream [HOST\|IP ...] [--remove] [--no-restart]` | Let the guardrail proxy reach an LLM endpoint on a private address, such as an AWS PrivateLink (VPC interface) endpoint for Bedrock, whose hostname resolves to private IPs. A hostname is resolved now and its private addresses are stored in `guardrail.allow_private_upstreams`; run it again if the endpoint's addresses change. Run bare it lists the entries. Loopback, link-local and cloud metadata addresses are never allowed. A running gateway is restarted so the proxy uses the change at once (`--no-restart` to skip). |
 | `defenseclaw guardrail validate-pack PATH [--json]` | Validate a rule pack offline with the gateway's own validator. Exit `1` means invalid, `2` means the validator is unavailable. |
 
 ```bash
@@ -324,17 +338,18 @@ Named security policies (`default`, `strict`, `permissive`, plus any you create)
 
 | Command | Use it for |
 | --- | --- |
-| `defenseclaw policy list [--json]` | List built-in and custom policies and mark the active one. `--json` prints `{"version": 1, "active": "<name>", "policies": [...]}`; each policy reports `block_at`, `alert_at`, `install_block_at` (`CRITICAL`, `HIGH+`, `MEDIUM+`, `LOW+` or `none`), `firewall_default`, `hilt`, `scanner_overrides`, and whether activating it replaces webhooks (`replaces_webhooks`) or changes Cisco AI Defense settings (`sets_cisco`). |
+| `defenseclaw policy list [--json]` | List built-in and custom policies and mark the active one. `--json` prints `{"version": 1, "active": "<name>", "policies": [...]}`; each policy reports `block_at`, `alert_at`, `install_block_at` (`CRITICAL`, `HIGH+`, `MEDIUM+`, `LOW+` or `none`), `firewall_default`, `hilt`, `scanner_overrides`, whether activating it adds webhooks of its own (`adds_webhooks`; your configured webhooks are always kept) or changes Cisco AI Defense settings (`sets_cisco`), and whether a built-in was edited (`edited`; shown as `[built-in, edited]`). |
 | `defenseclaw policy show NAME [--json]` | Show one policy. `--json` prints `{"version": 1, "policy": {...}}` with the same fields; exits `1` if the policy doesn't exist. |
-| `defenseclaw policy activate NAME [--reload/--no-reload]` | Apply a policy to `config.yaml` and the OPA `data.json`, then (by default) ask the running gateway to reload it. If the gateway isn't running, the policy is saved and loads when the gateway starts (exit `0`). If the gateway rejects the reload, the command exits `1`; run `defenseclaw policy validate` to find the problem. |
-| `defenseclaw policy edit guardrail\|actions\|scanner\|firewall … [-p NAME] [--reload/--no-reload]` | Edit one section of a policy (the active one unless `-p NAME`); editing a built-in saves a user copy first. When the edited policy is the active one, the change is synced to the OPA `data.json` and, by default, the running gateway is asked to reload it, with the same outcomes as `policy activate`. Editing any other policy only saves the draft. `policy edit guardrail --block-threshold N --alert-threshold N` takes severity ranks (4 = CRITICAL, 3 = HIGH, 2 = MEDIUM, 1 = LOW) and applies to every connector that uses the policy. |
+| `defenseclaw policy activate NAME [--reload/--no-reload]` | Apply a policy to `config.yaml` and the OPA `data.json`, then (by default) ask the running gateway to reload it. If the gateway isn't running, the policy is saved and loads when the gateway starts (exit `0`). A policy with webhooks of its own adds each one whose name and URL are new and prints `Added webhook <name> from the policy`; one that collides with a configured webhook is skipped with `Skipped webhook <name>: ...`. If the gateway rejects the reload, the command exits `1`; run `defenseclaw policy validate` to find the problem. |
+| `defenseclaw policy edit guardrail\|actions\|scanner\|firewall … [-p NAME] [--reload/--no-reload]` | Edit one section of a policy (the active one unless `-p NAME`); editing a built-in saves a user copy first, and `defenseclaw policy delete NAME` removes that copy to restore the built-in. When the edited policy is the active one, the change is applied and, by default, the running gateway is asked to reload it, with the same outcomes as `policy activate`. Editing any other policy only saves the draft. `policy edit guardrail --block-threshold LEVEL --alert-threshold LEVEL` takes a severity, `LOW`, `MEDIUM`, `HIGH` or `CRITICAL` (any case), or its rank 1-4. These thresholds govern LLM traffic through the guardrail proxy; tool calls from hook connectors are blocked at the level set with `defenseclaw guardrail block-at` / `alert-at` (optionally `--connector NAME`). |
 
 ```bash
 defenseclaw policy list --json | jq -r '.active'
 defenseclaw policy show strict --json
 defenseclaw policy activate strict              # save + live reload
 defenseclaw policy activate strict --no-reload  # save only
-defenseclaw policy edit guardrail --block-threshold 3   # active policy blocks HIGH+ now
+defenseclaw policy edit guardrail --block-threshold HIGH   # guardrail proxy blocks HIGH+ LLM traffic now
+defenseclaw guardrail block-at HIGH --connector claudecode   # hook tool calls: block HIGH+
 ```
 
 ## Credentials
@@ -343,6 +358,7 @@ defenseclaw policy edit guardrail --block-threshold 3   # active policy blocks H
 | --- | --- |
 | `defenseclaw keys list [--json]` | Show every credential DefenseClaw knows about and where its value comes from. |
 | `defenseclaw keys set NAME [--value V \| --value-stdin]` | Save a credential to `~/.defenseclaw/.env`. Without a value option it prompts with hidden input. `--value-stdin` reads the first line of standard input (trailing newline removed) and never echoes it, so the secret stays out of shell history and process listings; an empty line exits `1`. `--value` and `--value-stdin` can't be combined. |
+| `defenseclaw keys remove NAME [--yes]` | Delete a stored credential from `~/.defenseclaw/.env` (any name, including ones outside the registry). It asks for confirmation unless `--yes` is given; a value exported in your shell is left alone. `keys list` names any `.env` entries that are not in the registry. |
 
 ```bash
 printf '%s\n' "$VT_KEY" | defenseclaw keys set VIRUSTOTAL_API_KEY --value-stdin
@@ -371,12 +387,13 @@ These list/inventory verbs read across the full active roster:
 
 | Command | Use it for |
 | --- | --- |
-| `defenseclaw tui` | Interactive Textual dashboard — audit, alerts, logs, inventory, and setup panels. The recommended live view. |
-| `defenseclaw alerts [--connector X]` | Snapshot of recent alerts (default 25) as a table. `--connector X` filters by per-event connector attribution; `--limit N` widens the scan window, and `--show <n>` prints the full record. |
+| `defenseclaw tui` | Interactive terminal dashboard — audit, alerts, logs, inventory, and setup panels. The recommended live view. |
+| `defenseclaw alerts [--connector X] [--json]` | Snapshot of recent alerts (default 25) as a table. `--connector X` filters by per-event connector attribution; `--limit N` widens the scan window, and `--show <n>` prints the full record. A finding row names its target, decision (`blocked`, `would block (observe mode)`, ...), rule and scanner, and an ACP finding its route (`ACP session/prompt (client zed)`); `--json` prints the same fields (`target`, `decision`, `rule`, `scanner`, `location`, `route`, `path`, `moved_to` for quarantine rows) next to the raw `details`. |
 | `defenseclaw alerts acknowledge` / `dismiss` | Acknowledge or dismiss alerts (writes an `audit_log_activity` mutation). `--severity all\|CRITICAL\|HIGH\|MEDIUM\|LOW`. |
-| `defenseclaw audit log-activity --payload-file <f>` | Record a config/operator mutation through the gateway's audit logger. Used internally by the TUI on save. |
-| `defenseclaw-gateway audit export` (or `defenseclaw audit export`, which runs it with the same options) | JSONL export of `audit_events` from the SQLite DB, including `structured` when `structured_json` is present. Rows are emitted oldest-first; `--limit N` returns the earliest N matching rows, and with `--newest` the most recent N (still written oldest-first). `--since` (inclusive) and `--until` (exclusive) take an RFC3339 time or a duration ago such as `30m` or `2h`. `--connector` keeps one connector's rows. `--include-activity` also dumps `activity_events`, within the same window. |
-| `defenseclaw-gateway audit findings [--since RFC3339] [--new-only] [--include-resolved] [--scanner NAME] [--target PATH] [--limit N]` | Report the deduplicated finding lifecycle. Active current findings are the default; `--include-resolved` adds resolved state, while `--since` selects lifecycle changes and `--new-only` narrows that window to fingerprints first observed since the timestamp. JSON reports both the total distinct count and the returned page. |
+| `defenseclaw audit log-activity --payload-file <f>` | Internal helper, hidden from `defenseclaw audit --help`: records a config change from a JSON payload as an audit event. You don't need to run it. |
+| `defenseclaw-gateway audit export` (or `defenseclaw audit export`, which runs it with the same options) | JSONL export of `audit_events` from the SQLite DB, including `structured` when `structured_json` is present. Rows are emitted oldest-first; `--limit N` returns the earliest N matching rows, and with `--newest` the most recent N (still written oldest-first). `--since` (inclusive) and `--until` (exclusive) take an RFC3339 time or a duration ago such as `30m` or `2h`. `--connector` keeps one connector's rows. Configuration changes and operator actions are audit rows in this export (action `config-update` and others); `--include-activity` also appends rows of the `activity_events` table, which holds only history from releases before 1.0, within the same window. |
+| `defenseclaw audit logs [--source gateway\|watchdog] [-n N] [--grep TEXT]` | Print the newest lines of `~/.defenseclaw/gateway.log` (or `watchdog.log`), the same log the TUI Logs panel shows. `-n` defaults to 50; `--grep` keeps lines that contain the text (case-insensitive). For config changes and operator actions use `defenseclaw audit export --since 1h`: they are audit rows with action `config-update` and others. |
+| `defenseclaw-gateway audit findings [--since RFC3339] [--new-only] [--include-resolved] [--scanner NAME] [--target PATH] [--limit N]` (or `defenseclaw audit findings`, which runs it with the same options) | Report the deduplicated finding lifecycle. Active current findings are the default; `--include-resolved` adds resolved state, while `--since` selects lifecycle changes and `--new-only` narrows that window to fingerprints first observed since the timestamp. JSON reports both the total distinct count and the returned page. |
 | `tail -f ~/.defenseclaw/gateway.jsonl \| jq` | Tail the optional v8 JSONL destination when configured at that path. Mandatory local history is SQLite; JSONL is not an implicit mirror. |
 
 ## AI discovery
@@ -392,7 +409,7 @@ Enhanced mode expands the bounded roots searched for models; it does not relax w
 | `defenseclaw agent discover [--refresh] [--no-cache] [--json] [--emit-otel/--no-emit-otel]` | Inspect known connector configs and binaries without requiring the gateway. This does not run the continuous local-model scan. |
 | `defenseclaw agent discovery enable [--mode passive\|enhanced] [--scan-roots ROOTS] [--include-network-domains/--no-include-network-domains] [--lookup-model-provenance-online/--no-lookup-model-provenance-online] [--restart/--no-restart] [--scan/--no-scan]` | Enable and tune the sidecar scanner. `passive` limits model-file coverage to known stores plus narrower configured roots and suppresses an exact user-home/`~` root; `enhanced` also honors the broad home root and adds bounded macOS application-storage and app-resource roots for unknown applications. Vetted loopback model API reads follow `include_network_domains`; filesystem model discovery runs independently. Public Hugging Face lineage lookup is a separate opt-in because it transmits recovered model repository IDs. |
 | `defenseclaw agent discovery setup\|status\|scan\|disable` | Configure discovery interactively, inspect on-disk/live state, trigger a full scan, or disable the service. |
-| `defenseclaw agent usage [--refresh] [--detail] [--state STATE] [--category CAT] [--product NAME] [--component NAME] [--show-gone] [--by-detector] [--json]` | Read the sidecar snapshot. Local-model rows show model ID, `installed`/`loaded` status, and format; `--component` also matches model IDs. `active` remains an alias for the steady `seen` lifecycle state. JSON output is the unfiltered API payload. |
+| `defenseclaw agent usage [--refresh] [--detail] [--state STATE] [--category CAT] [--product NAME] [--component NAME] [--show-gone] [--by-detector] [--wide] [--json]` | Read the sidecar snapshot. Local-model rows show model ID and `installed`/`loaded` status (`--wide` adds format, version and identity/presence confidence); `--component` also matches model IDs. `active` remains an alias for the steady `seen` lifecycle state. JSON output is the unfiltered API payload. |
 | `defenseclaw agent processes [--refresh] [--json] [--limit N]` | List live AI process signals with PID, user, command name, and uptime. |
 | `defenseclaw agent components [--refresh] [--json] [--ecosystem ECO] [--name NEEDLE]` | Show the deduplicated package/SDK component rollup and confidence scores. |
 
@@ -415,7 +432,7 @@ The Python CLI exposes one scan group per asset family — there is no top-level
 | `defenseclaw skill scan [target] [--connector X] [--all] [--path] [--remote] [--action]` | `defenseclaw` | Scan a configured skill, a path, a URL (`https://…` / `clawhub://…`), or every configured skill with `--all`. A bare skill name searches matching configured connector copies; `--connector X` narrows. `--all --json` always emits one top-level result array, including per-skill error rows, before returning nonzero for scanner failures; a telemetry-recording warning never discards or fails a completed scan. |
 | `defenseclaw mcp scan [target] [--connector X] [--all] [--scan-prompts] [--scan-resources] [--scan-instructions]` | `defenseclaw` | Scan one MCP server by name or URL, every configured server with `--all`, or every server on one connector with `--connector X`. |
 | `defenseclaw plugin scan [name_or_path] [--all] [--connector X] [--profile default\|strict] [--use-llm] [--include-self]` | `defenseclaw` | Scan one plugin/extension package, or all discovered plugins with `--all`. `--connector X` narrows discovery or duplicate plugin names to one connector. Exact first-party DefenseClaw package/connector artifacts are excluded by default; `--include-self` opts into scanning them for product development. Ordinary third-party `dist/` trees and plugins merely named `defenseclaw` remain in scope. |
-| `defenseclaw aibom scan [--connector X] [--json] [--summary] [--only <cat>]` | `defenseclaw` | Build the agent SBOM (skills, MCP, plugins, models, sinks) for every active connector by default, or one connector when scoped. |
+| `defenseclaw aibom scan [--connector X] [--json] [--summary] [--only <cat>]` | `defenseclaw` | Build the agent SBOM (skills, MCP, plugins, models, sinks) for every active connector by default, or one connector when scoped. `--only` takes a comma-separated list of `skills`, `plugins`, `mcp`, `agents`, `rules`, `tools`, `models`, `memory`; an unknown name exits 2. |
 | `defenseclaw registry sync [source...] [--all] [--scan]` | `defenseclaw` | Sync registries; with `--scan`, runs the scanner pipeline against every fetched entry. |
 | `defenseclaw codeguard {status,install,install-skill} [--connector X]` | `defenseclaw` | Manage the CodeGuard skill/rule install across active connectors by default, or one connector when scoped. |
 | `defenseclaw-gateway scan code <path> [--json] [--no-redact] [--schema]` | `defenseclaw-gateway` | Scan source files in `<path>` using the bundled CodeGuard rule pack. The version-7 CLI schema preserves safe context in its declared `location`/`line_number` fields while replacing detected sensitive substrings; detached REST/API responses may additionally expose a structured `file` field. `--no-redact` is an explicit local-stdout-only opt-in, requires `--json`, and prints a warning; the REST API remains protected. Runs in-process and does **not** require the sidecar daemon. |
@@ -449,7 +466,7 @@ The sidecar is the Go binary; the Python CLI does not own a `gateway` group. Mos
 | `defenseclaw-gateway start` | `defenseclaw-gateway` | Start the sidecar as a background daemon. |
 | `defenseclaw-gateway stop` | `defenseclaw-gateway` | Stop the running sidecar. |
 | `defenseclaw-gateway restart` | `defenseclaw-gateway` | Restart the sidecar. |
-| `defenseclaw-gateway status` | `defenseclaw-gateway` | Health snapshot of the running daemon. On a multi-connector install it also renders a per-connector **"Connector Mode"** section (one row per active connector) sourced from the `/status` endpoint's `connector_modes` array. |
+| `defenseclaw-gateway status` | `defenseclaw-gateway` | Health snapshot of the running daemon. On a multi-connector install it also renders a per-connector **"Connector Mode"** section (one row per active connector) sourced from the `/status` endpoint's `connector_modes` array. `--json` prints one JSON document (`running`, `endpoint`, the `/health` snapshot as `health`, or `error` and `hint`); it exits `1` when the gateway does not answer. |
 | `defenseclaw-gateway policy reload` | `defenseclaw-gateway` | Re-read OPA policies from disk without bouncing the daemon. |
 | `defenseclaw-gateway watchdog [start\|stop\|status]` | `defenseclaw-gateway` | Health-watchdog daemon that notifies when the gateway is down. |
 | `tail -f ~/.defenseclaw/gateway.jsonl \| jq` | shell | Tail a configured `kind: jsonl` destination. It contains only records selected for that destination; mandatory complete local log history remains SQLite. |
@@ -466,7 +483,7 @@ The sidecar is the Go binary; the Python CLI does not own a `gateway` group. Mos
 | --- | --- |
 | `defenseclaw upgrade [--version X] [--yes]` | Download the latest (or the given) release's installer, check it against that release's `checksums.txt`, and run it. The installer keeps your configuration and data, migrates them, restarts the gateway, and restores the previous install if anything fails. See [Upgrade DefenseClaw](/docs/get-started/upgrade). |
 | `defenseclaw rollback [--yes]` | Swap the live install with the one the last upgrade replaced. Run it again to roll forward. |
-| `defenseclaw migrate [--check] [--from-version X] [--json]` | Bring configuration and data to this version's schema. The installer runs it on every upgrade; `--check` changes nothing. Exits `2` for a configuration written by a newer release. |
+| `defenseclaw migrate [--check] [--from-version X] [--json]` | Bring configuration and data to this version's schema. The installer runs it on every upgrade; `--check` changes nothing. Exits `2` for a configuration written by a newer release. `--from-version` names the release that wrote the data; a value newer than this release prints a warning. An empty `config.yaml` is refused (exit `1`) with the repair: restore your copy or remove it and run `defenseclaw init`. |
 
 ## Uninstall / disable
 
@@ -527,7 +544,7 @@ Every mutating action is a transaction that rolls back on failure. See
 | --- | --- |
 | `install` | Install the deployment. Refuses when one is already installed |
 | `upgrade` | Upgrade an installed deployment from a new payload or package |
-| `repair` | Re-apply the installed deployment's files, modes, and services |
+| `repair` | Re-apply the installed deployment's files, modes, and services (restarts the services) |
 | `ensure` | Install, upgrade, or repair as needed. Does nothing when nothing changed |
 | `reconcile` | Run one immediate hook guardian reconcile |
 | `rotate-credentials` | Replace the key every user's per-user credentials derive from. Every user moves to the new key before it takes effect. See [Rotate per-user credentials](/docs/enterprise/operations#rotate-per-user-credentials) |
@@ -546,7 +563,7 @@ Every mutating action is a transaction that rolls back on failure. See
 | `--adopt-existing` | install, ensure | Back up and take over an unmanaged DefenseClaw layout |
 | `--reason <text>` | ensure | Why `ensure` runs. Recorded in the result |
 | `--lock-wait <duration>` | install, upgrade, repair, reconcile, rotate-credentials, ensure, uninstall | Wait up to this long (default `5s`, at most `15m`) for another lifecycle run before exiting `75` |
-| `--purge` | uninstall | Also remove each enrolled account's `~/.defenseclaw`, the empty agent folders DefenseClaw created in its home, and its per-user binaries and launcher links in `~/.local/bin`, after stopping its per-user gateway and watchdog. The result names every account whose data it removed, and every account it left alone with the reason (home not trusted or not available, a hook removal that failed); fix the cause and rerun. Without `--purge`, uninstall already removes the config, credentials, state, logs and the service account |
+| `--purge` | uninstall | Also remove each enrolled account's `~/.defenseclaw`, the empty agent folders DefenseClaw created in its home, its per-user binaries and launcher links in `~/.local/bin`, and the DefenseClaw entries in its uv cache (`~/.cache/uv`), after stopping its per-user gateway and watchdog. The result names every account whose data it removed, and every account it left alone with the reason (home not trusted or not available, a hook removal that failed); fix the cause and rerun. Without `--purge`, uninstall already removes the config, credentials, state, logs and the service account |
 | `--keep-state` | uninstall | Keep the config, credentials, state, logs and the service account, so a reinstall resumes with them. Not with `--purge` |
 | `--keep-service-account` | uninstall | Keep the gateway service account, which uninstall deletes otherwise |
 | `--remove-service-account` | uninstall | Delete the gateway service account. This is the default now; the flag is kept for older scripts |
@@ -573,7 +590,7 @@ its transaction on PowerShell 7, which must be installed.
 | `ensure` | Standalone only | Install, upgrade, or repair as needed. Refuses to downgrade (`downgrade_refused`) |
 | `reconcile` | Secure Client, standalone | Restart the guardian and wait for a fresh reconcile |
 | `status`, `verify` | Secure Client, standalone | Read-only state, and the full check |
-| `uninstall` | Secure Client, standalone | Remove the services and every account's hooks. Keeps state and each account's `%USERPROFILE%\.defenseclaw` unless `--purge` |
+| `uninstall` | Secure Client, standalone | Remove the services and every account's hooks. Standalone also removes the machine state; Secure Client keeps it unless `--purge`. Each account keeps `%USERPROFILE%\.defenseclaw` unless `--purge` |
 
 | Flag | Meaning |
 | --- | --- |
@@ -587,7 +604,7 @@ its transaction on PowerShell 7, which must be installed.
 | `--broker-binary` | Secure Client only: the source credential broker |
 | `--installer <file>` | An explicit `install-enterprise.ps1` |
 | `--no-start` | Install, upgrade, repair, ensure: stage the services disabled and stopped |
-| `--purge` | Uninstall: also remove managed state and (standalone) each enrolled account's `%USERPROFILE%\.defenseclaw` and DefenseClaw files in `%USERPROFILE%\.local\bin`, with that folder's user `Path` entry once it is empty. The result names each account. A signed-out account keeps its `Path` entry, and the result says so |
+| `--purge` | Uninstall: also remove managed state (Secure Client; standalone removes it without `--purge`) and (standalone) each enrolled account's `%USERPROFILE%\.defenseclaw` and DefenseClaw files in `%USERPROFILE%\.local\bin`, with that folder's user `Path` entry once it is empty. The result names each account. A signed-out account keeps its `Path` entry, and the result says so |
 | `--attest-claude-effective-policy` | Install, upgrade, repair: record that an administrator confirmed that Claude Code runs DefenseClaw's managed hooks |
 | `--json` | Print the result as JSON |
 
@@ -647,7 +664,7 @@ sudo DEFENSECLAW_CONFIG=/opt/cisco/defenseclaw/etc/config.yaml /opt/cisco/defens
 
 | Command | Use it for |
 | --- | --- |
-| `defenseclaw-gateway enterprise secret set --name N` | Store a credential. Pass exactly one of `--from-stdin` or `--from-file F`. The value is never printed |
+| `defenseclaw-gateway enterprise secret set --name N` | Store a credential. Pass exactly one of `--from-stdin` or `--from-file F`. The value is never printed. On Linux and macOS, `--lock-wait D` (set and remove) waits up to D (at most 15m) for another lifecycle run instead of exiting 75 |
 | `defenseclaw-gateway enterprise secret status` | List stored credentials with a digest prefix and modification time, never the value |
 | `defenseclaw-gateway enterprise secret remove --name N` | Remove a credential |
 

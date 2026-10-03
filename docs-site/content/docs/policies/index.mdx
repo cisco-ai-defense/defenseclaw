@@ -536,7 +536,7 @@ defenseclaw policy create my-policy -d "Production policy"
 defenseclaw policy activate my-policy         # set as active
 defenseclaw policy delete my-policy           # remove
 defenseclaw policy validate                   # validates data.json schema + compiles bundled Rego
-defenseclaw policy test --verbose             # runs `opa test` against the bundled Rego (requires `opa` on PATH)
+defenseclaw policy test --verbose             # runs the Rego unit tests (uses `opa` if on PATH, else defenseclaw-gateway)
 defenseclaw policy edit actions --severity high --runtime disable --policy-name my-policy
 ```
 

@@ -128,12 +128,16 @@ func TestHookContractAdmissionRefreshesCompatibleAgentUpdate(t *testing.T) {
 
 func TestHookContractAdmissionStillRefusesUpstreamAgentDrift(t *testing.T) {
 	for name, mutate := range map[string]func(*connector.HookContractLockEntry){
-		"same DefenseClaw release": func(entry *connector.HookContractLockEntry) {
+		// Strict resolution (Secure Client) refuses every agent change.
+		"agent update under strict resolution": func(entry *connector.HookContractLockEntry) {
+			entry.RawAgentVersion = "Claude Code v1.0.0"
+			entry.NormalizedAgentVersion = "1.0.0"
 			entry.ContractID = "claudecode-hooks-retired"
-			entry.DefenseClawVersion = version.Current().BinaryVersion
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
+			connector.SetStrictHookContractResolution(true)
+			t.Cleanup(func() { connector.SetStrictHookContractResolution(false) })
 			s := admissionSidecar(t)
 			previous := stageAdmissionFixture(t, s.cfg.DataDir)
 			mutate(&previous)
@@ -199,11 +203,15 @@ func TestRunActiveGuardrailReportsSingleConnectorAdmissionRefusal(t *testing.T) 
 		health: NewSidecarHealth(),
 		router: routerWithDefaultRulePack(t),
 	}
-	// A compatible agent update is admitted, so the refused drift is a
-	// contract change this same release recorded for the same agent version.
+	// A compatible agent update is admitted unless resolution is strict
+	// (Secure Client), so the refused drift is an agent update under strict
+	// resolution.
+	connector.SetStrictHookContractResolution(true)
+	t.Cleanup(func() { connector.SetStrictHookContractResolution(false) })
 	previous := stageAdmissionFixture(t, dataDir)
+	previous.RawAgentVersion = "Claude Code v1.0.0"
+	previous.NormalizedAgentVersion = "1.0.0"
 	previous.ContractID = "claudecode-hooks-retired"
-	previous.DefenseClawVersion = version.Current().BinaryVersion
 	if err := connector.SaveHookContractLockEntry(dataDir, previous); err != nil {
 		t.Fatal(err)
 	}

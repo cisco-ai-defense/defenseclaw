@@ -37,6 +37,15 @@ const codeUnitFailed = "unit_failed"
 // readOnly handles status and verify.
 func (l *lifecycle) readOnly(ctx context.Context) int {
 	env, r := l.env, l.result
+	// status waits for a run that holds the lock the same way, because the
+	// run stops and starts the services (GAP-2246). It still reports the
+	// recorded deployment below, so detection sees it installed.
+	statusBusy := false
+	if l.opts.Action == ActionStatus && env.Geteuid() == 0 {
+		lock, err := env.acquireLock(ctx)
+		statusBusy = errors.Is(err, errLockBusy)
+		lock.release()
+	}
 	if l.opts.Action == ActionVerify {
 		// The daily verify can start while another run changes the
 		// deployment: ensure restarts the timer, and a Persistent timer past
@@ -45,26 +54,47 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 		// change; a run that outlasts the wait is busy, not a failed check.
 		lock, err := env.acquireLock(ctx)
 		if errors.Is(err, errLockBusy) {
-			r.AddError(codeBusy, err.Error())
+			r.AddError(codeBusy, err.Error()+"; "+readOnlyBusyNextStep(env.LockTimeout, ActionVerify))
 			return enterprisestatus.BusyExitCode(env.GOOS)
 		}
 		lock.release()
 	}
 	record, err := env.loadDeployment()
 	if err != nil {
+		if errors.Is(err, os.ErrPermission) && env.Geteuid() != 0 {
+			// A standard user cannot read the root-only deployment record;
+			// the lstat error and installed=false read as a missing
+			// deployment (GAP-1201).
+			r.AddError(codeNotRoot, "run this command as root (sudo or the MDM agent); a standard user cannot read the deployment record")
+			return 0
+		}
 		r.AddError(codeState, err.Error())
 		return 0
 	}
 	if pending, _ := env.loadPending(); pending != nil {
 		r.TransactionPending = true
 	}
+	if statusBusy {
+		if record != nil {
+			r.Installed = true
+			r.InstalledVersion = record.ProductVersion
+		}
+		r.AddError(codeBusy, errLockBusy.Error()+"; "+readOnlyBusyNextStep(env.LockTimeout, ActionStatus))
+		return enterprisestatus.BusyExitCode(env.GOOS)
+	}
 	if record == nil {
 		r.Installed = false
+		failure := env.lastPackageInstallFailure()
 		if l.opts.Action == ActionVerify {
-			r.AddError(codeNotInstalled, "DefenseClaw enterprise is not installed")
+			message := "DefenseClaw enterprise is not installed"
+			if failure != "" {
+				message += "; the package's own install run failed (see the " + codePackageInstallFailed + " warning)"
+			}
+			r.AddError(codeNotInstalled, message)
 		}
+		env.warnPackageInstallFailed(r, failure)
 		if leftovers := env.unmanagedLeftovers(env.Services, ChannelPayload); len(leftovers) > 0 {
-			r.AddWarning(codeLeftovers, "DefenseClaw machine state exists without a committed deployment: "+strings.Join(leftovers, ", ")+"; "+env.leftoversNextStep(ctx))
+			r.AddWarning(codeLeftovers, "DefenseClaw machine state exists without a committed deployment: "+strings.Join(leftovers, ", ")+"; "+env.leftoversNextStep(ctx, failure != ""))
 		}
 		return 0
 	}
@@ -242,6 +272,13 @@ func (l *lifecycle) verifyDeployment(ctx context.Context, record *Deployment, st
 				add("%s keeps capabilities %q; want none", unitGateway, caps)
 			}
 		}
+		// A running job an administrator disabled keeps working until the
+		// next boot, where launchd does not start it (GAP-1802).
+		for _, unit := range env.Services.Units() {
+			if unit.Activate && unitDisabled(ctx, env.Services, unit) {
+				add("%s is disabled and will not start after a reboot; run `%s`", unit.Name, env.lifecycleCommand("repair"))
+			}
+		}
 		if problem := l.ledgerProblem(); problem != "" {
 			add("%s", problem)
 		}
@@ -322,6 +359,10 @@ func (e *Env) installedModeProblems(record *Deployment, skipConfig bool) []strin
 // lifecycleCommand is the administrator command line for a lifecycle
 // action on this host, with the absolute gateway path (sudo's secure_path
 // does not include the install directory).
+// LifecycleCommand is the full `defenseclaw-gateway enterprise <os> <action>`
+// command line of this host, for next-step advice.
+func (e *Env) LifecycleCommand(action string) string { return e.lifecycleCommand(action) }
+
 func (e *Env) lifecycleCommand(action string) string {
 	group := "linux"
 	if e.GOOS == "darwin" {
@@ -330,12 +371,76 @@ func (e *Env) lifecycleCommand(action string) string {
 	return filepath.Join(e.Layout.BinDir, binGateway) + " enterprise " + group + " " + action
 }
 
+// codePackageInstallFailed names the failed ensure of the package's own
+// postinstall when no deployment is committed (GAP-1744).
+const codePackageInstallFailed = "package_install_failed"
+
+// lastPackageResultFile is the result the deb/rpm and the macOS pkg
+// postinstall keep of their own `ensure --from-package` run.
+const lastPackageResultFile = "last-package-result.json"
+
+// lastPackageInstallFailure returns "code: message" of the first error of the
+// package postinstall's failed install run, or "" when there is none. dnf
+// printed only "run verify", and verify then said not_installed without the
+// cause (a missing protected credential) that the result names (GAP-1744).
+func (e *Env) lastPackageInstallFailure() string {
+	raw, err := readBounded(e.P(filepath.Join(e.Layout.LifecycleDir, lastPackageResultFile)), maxInputBytes)
+	if err != nil {
+		return ""
+	}
+	var last struct {
+		OK     bool                       `json:"ok"`
+		Action string                     `json:"action"`
+		Errors []enterprisestatus.Message `json:"errors"`
+	}
+	if json.Unmarshal(raw, &last) != nil || last.OK || len(last.Errors) == 0 {
+		return ""
+	}
+	switch last.Action {
+	case ActionEnsure, ActionInstall, ActionUpgrade:
+	default:
+		return ""
+	}
+	first := last.Errors[0]
+	return strings.TrimSpace(first.Code + ": " + first.Message)
+}
+
+// warnPackageInstallFailed adds the package_install_failed warning that
+// names why the package's own install run failed and how to finish the
+// install. status, verify and an uninstall that found nothing to remove all
+// give it, so their unmanaged_leftovers hint can defer to it (GAP-2410).
+func (e *Env) warnPackageInstallFailed(r *enterprisestatus.Result, failure string) {
+	if failure == "" {
+		return
+	}
+	next := "fix that, then finish the install with `" + e.lifecycleCommand(ActionEnsure) + " --from-package`"
+	if e.GOOS == "darwin" {
+		// A failed pkg install records no receipt, and ensure does not
+		// write one, so receipt-based MDM inventory keeps reporting the
+		// Mac as not installed (GAP-2359).
+		next = "fix that, then install the package again, which also records the pkg receipt that MDM inventory reads (`" +
+			e.lifecycleCommand(ActionEnsure) + " --from-package` finishes the install but records no receipt)"
+	}
+	opening := "the package was installed, but its own install run did not complete, so no deployment is active: "
+	if e.GOOS == "darwin" {
+		// pkgutil keeps no receipt for a pkg whose postinstall failed.
+		opening = "the package's files were copied, but its postinstall did not complete, so macOS recorded no pkg receipt and no deployment is active: "
+	}
+	r.AddWarning(codePackageInstallFailed, opening+failure+"; "+next)
+}
+
 // leftoversNextStep tells the administrator what to do about machine state
 // no committed deployment owns, typically after a lifecycle uninstall that
 // kept the package installed: remove the package, or activate it again.
-func (e *Env) leftoversNextStep(ctx context.Context) string {
+// After the package's own install run failed, the package_install_failed
+// warning already names the finish step (on macOS: install the pkg again,
+// for its receipt), so the activate hint defers to it (GAP-2380).
+func (e *Env) leftoversNextStep(ctx context.Context, packageInstallFailed bool) string {
 	gateway := filepath.Join(e.Layout.BinDir, binGateway)
 	reactivate := "`" + e.lifecycleCommand("ensure") + " --from-package --config <file>`"
+	if packageInstallFailed {
+		reactivate = "finish the install as the " + codePackageInstallFailed + " warning says"
+	}
 	if e.GOOS == "linux" {
 		remove := ""
 		if _, err := e.Runner.Run(ctx, "dpkg", "-S", gateway); err == nil {
@@ -349,8 +454,14 @@ func (e *Env) leftoversNextStep(ctx context.Context) string {
 			remove = "dnf remove defenseclaw-enterprise"
 		}
 		if remove != "" {
+			if packageInstallFailed {
+				return "the defenseclaw-enterprise package is still installed: remove it with `" + remove + "` (or the MDM uninstall.sh), or " + reactivate
+			}
 			return "the defenseclaw-enterprise package is still installed: remove it with `" + remove + "` (or the MDM uninstall.sh), or activate the deployment again with " + reactivate
 		}
+	}
+	if packageInstallFailed {
+		return "remove it with `" + e.lifecycleCommand("uninstall") + " --purge` (this also deletes the kept config and state), or " + reactivate
 	}
 	return "remove it with `" + e.lifecycleCommand("uninstall") + " --purge` (this also deletes the kept config and state), or activate the deployment again with " + reactivate + " (package) or `--payload <dir>` (payload archive)"
 }
@@ -464,6 +575,10 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 	l.describeHookContracts(ctx)
 	l.describeUnprotectedAgents()
 	l.describeGuardianCleanups()
+	l.describeDeletedEnrolledAccounts()
+	if record != nil {
+		l.describePerUserGateways(ctx)
+	}
 	if exists(env.rotationIntentPath()) {
 		r.AddWarning(codeRotationIncomplete, "a credential rotation did not finish; run rotate-credentials, or any other lifecycle action, to complete it or roll it back")
 	}

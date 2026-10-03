@@ -26,19 +26,22 @@ snapshot instead of flashing every panel empty.
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from time import monotonic
+from types import SimpleNamespace
 
 from defenseclaw.db import Store
 from defenseclaw.models import ActionEntry, Counts, Event
 from defenseclaw.tui.panels.activity import (
     activity_mutations_from_v8_history,
 )
-from defenseclaw.tui.panels.alerts import AlertEvent, alerts_from_v8_history
+from defenseclaw.tui.panels.alerts import AlertEvent, alerts_from_v8_history, with_hook_decisions
+from defenseclaw.tui.panels.audit import with_older_blocks
 from defenseclaw.tui.services.event_models import ActivityMutation, EgressEvent
 from defenseclaw.tui.services.gateway_log_views import (
     GatewayLogViews,
@@ -54,6 +57,14 @@ _HISTORY_LIMIT = 1000
 _PANEL_LIMIT = 500
 _SLOW_COMPONENT_TTL_SECONDS = 15.0
 _MAX_RETRY_SECONDS = 60.0
+# A history read that took d seconds (at least the minimum) waits d * factor,
+# at most the cap, before the next unforced one, so a huge audit.db can't keep
+# a core busy (GAP-1816). Quick reads on a normal database are not delayed.
+_BUSY_MIN_SECONDS = 0.25
+_BUSY_BACKOFF_FACTOR = 4.0
+_MAX_BUSY_BACKOFF_SECONDS = 30.0
+# Block rows for the Audit panel are read incrementally (GAP-1816); a full
+# read runs only when held rows were pruned from a full window (GAP-2007).
 
 
 @dataclass(frozen=True)
@@ -113,6 +124,9 @@ class TUIReadRepository:
         self._last_error = ""
         self._hook_stats: tuple[ConnectorHookStat, ...] = ()
         self._slow_components_loaded_at = 0.0
+        self._next_history_at = 0.0
+        self._blocks_mark: int | None = None
+        self._blocks: tuple[Event, ...] = ()
 
     async def refresh(
         self,
@@ -138,6 +152,15 @@ class TUIReadRepository:
         if self._closed:
             return
         self._closed = True
+        # A first read of a large audit.db runs for a minute or more, and the
+        # interpreter joins this thread at exit: Ctrl+Q then left the process
+        # spinning until the query ended (GAP-1240). Stop the running query.
+        store = self._store
+        if store is not None:
+            try:
+                store.db.interrupt()
+            except Exception:  # noqa: BLE001 - teardown is best-effort.
+                pass
         try:
             self._executor.submit(self._close_sync)
         except RuntimeError:
@@ -160,6 +183,8 @@ class TUIReadRepository:
         now = monotonic()
         if not force and self._last_error and now < self._next_retry_at:
             return TUIReadResult(self._snapshot, False, self._last_error)
+        if not force and self._snapshot is not None and now < self._next_history_at:
+            return TUIReadResult(self._snapshot, False)
         try:
             store = self._ensure_open()
             data_version = int(store.db.execute("PRAGMA data_version").fetchone()[0])
@@ -180,12 +205,25 @@ class TUIReadRepository:
 
         previous = self._snapshot
         errors: list[str] = []
+        # Only the slow components are due: the audit rows are unchanged, so
+        # keep the history instead of re-running the full alert scan (GAP-1816).
+        if (
+            not force
+            and previous is not None
+            and self._successful_data_version == data_version
+            and previous.session_scan_since == scan_since
+        ):
+            return self._refresh_slow_components(store, previous, now)
 
         history_error_count = len(errors)
-        history, alert_history = self._component(
+        history, alert_history, mutation_history = self._component(
             "history",
-            lambda: self._history_reader.load_views(_HISTORY_LIMIT, _PANEL_LIMIT) if self._history_reader else ((), ()),
-            (previous.history if previous else (), ()),
+            lambda: (
+                self._history_reader.load_views_and_mutations(_HISTORY_LIMIT, _PANEL_LIMIT, _PANEL_LIMIT)
+                if self._history_reader
+                else ((), (), ())
+            ),
+            (previous.history if previous else (), (), ()),
             errors,
         )
         history_failed = len(errors) != history_error_count
@@ -196,14 +234,22 @@ class TUIReadRepository:
             mutations = previous.mutations
         else:
             panel_history = history[:_PANEL_LIMIT]
-            alert_events = alerts_from_v8_history(alert_history)
+            # Same decision lookup as AlertsPanelModel.refresh: without it the
+            # list read "allow" for a would-block or post-tool finding after
+            # every background refresh (GAP-1456, GAP-1560).
+            alert_events = tuple(with_hook_decisions(store, list(alerts_from_v8_history(alert_history, history))))
             log_views = project_v8_log_views(history)
             egress_events = project_v8_egress_events(panel_history)
-            mutations = activity_mutations_from_v8_history(panel_history)
+            mutations = activity_mutations_from_v8_history(mutation_history)
 
         audit_events = self._component(
             "audit",
-            lambda: tuple(store.list_event_summaries(_PANEL_LIMIT)),
+            lambda: tuple(
+                with_older_blocks(
+                    SimpleNamespace(list_block_event_summaries=lambda limit: self._block_summaries(store, limit)),
+                    store.list_event_summaries(_PANEL_LIMIT),
+                )
+            ),
             previous.audit_events if previous else (),
             errors,
         )
@@ -281,7 +327,75 @@ class TUIReadRepository:
         self._last_error = ""
         self._next_retry_at = 0.0
         self._retry_seconds = 1.0
+        finished = monotonic()
+        elapsed = finished - now
+        if elapsed >= _BUSY_MIN_SECONDS:
+            self._next_history_at = finished + min(_MAX_BUSY_BACKOFF_SECONDS, elapsed * _BUSY_BACKOFF_FACTOR)
         return TUIReadResult(self._snapshot, changed)
+
+    def _refresh_slow_components(self, store: Store, previous: TUIReadSnapshot, now: float) -> TUIReadResult:
+        errors: list[str] = []
+        tool_actions = self._component(
+            "tools", lambda: tuple(store.list_actions_by_type("tool")), previous.tool_actions, errors
+        )
+        enforcement_counts = self._component(
+            "counts", store.get_enforcement_counts, previous.enforcement_counts, errors
+        )
+        if not errors:
+            self._slow_components_loaded_at = now
+        candidate = replace(
+            previous,
+            tool_actions=tool_actions,
+            enforcement_counts=enforcement_counts,
+            session_scan_count=(
+                enforcement_counts.total_scans if previous.session_scan_since is None else previous.session_scan_count
+            ),
+        )
+        changed = candidate != previous
+        if changed:
+            self._revision += 1
+            self._snapshot = replace(candidate, revision=self._revision)
+        if errors:
+            error = "; ".join(errors)
+            self._record_failure(error)
+            return TUIReadResult(self._snapshot, changed, error)
+        self._last_error = ""
+        self._next_retry_at = 0.0
+        self._retry_seconds = 1.0
+        return TUIReadResult(self._snapshot, changed)
+
+    def _block_summaries(self, store: Store, limit: int) -> list[Event]:
+        """Block/deny rows for the Audit panel, reading only rows added since.
+
+        The block filter walks every audit row; after each gateway write that
+        cost a large audit.db seconds of CPU (GAP-1816). Audit rows are
+        append-only, so the newer rows go in front of the ones already read.
+        """
+
+        mark = int(store.db.execute("SELECT COALESCE(MAX(rowid), 0) FROM audit_events").fetchone()[0])
+        held = self._blocks
+        if held:
+            # Drop held rows that retention pruned: a primary-key lookup,
+            # not the timed full read that walked every row (GAP-2007).
+            kept = {
+                str(row[0])
+                for row in store.db.execute(
+                    "SELECT id FROM audit_events WHERE id IN (SELECT value FROM json_each(?))",
+                    (json.dumps([event.id for event in held]),),
+                )
+            }
+            held = tuple(event for event in held if event.id in kept)
+        if self._blocks_mark is None or mark < self._blocks_mark or len(self._blocks) >= limit > len(held):
+            # First read, a reset table, or a full window lost rows that
+            # older blocks may now fill.
+            rows = store.list_block_event_summaries(limit)
+        else:
+            newer = store.list_block_event_summaries(limit, after_rowid=self._blocks_mark)
+            seen = {event.id for event in newer}
+            rows = [*newer, *(event for event in held if event.id not in seen)][:limit]
+        self._blocks_mark = mark
+        self._blocks = tuple(rows)
+        return rows
 
     def _load_hook_stats(
         self,
@@ -310,8 +424,10 @@ class TUIReadRepository:
             self._hook_stats = loaded
         return loaded
 
-    @staticmethod
-    def _component(name: str, loader, fallback, errors: list[str]):  # type: ignore[no-untyped-def]
+    def _component(self, name: str, loader, fallback, errors: list[str]):  # type: ignore[no-untyped-def]
+        if self._closed:
+            # Closing: skip the remaining queries of this refresh.
+            return fallback
         try:
             return loader()
         except (OSError, sqlite3.Error, ValueError, TypeError) as exc:

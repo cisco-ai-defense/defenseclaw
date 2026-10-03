@@ -126,7 +126,7 @@ class HintEngine:
         # callers that haven't been updated yet.
         if status.missing_keys:
             return (
-                "Required credentials are missing. Open Credentials setup, press f to fill missing, or r refresh."
+                "Required API keys missing: select API keys & secrets, press f to fill missing."
             )
         segments = (status.gateway, status.watchdog, status.guardrail)
         for segment in segments:
@@ -135,11 +135,13 @@ class HintEngine:
             has_secret = any(token in text for token in ("credential", "api key", "key", "token", "secret"))
             if has_missing and has_secret:
                 return (
-                    "Required credentials are missing. Open Credentials setup, press f to fill missing, or r refresh."
+                    "Required API keys missing: select API keys & secrets, press f to fill missing."
                 )
         return ""
 
     def _overview_hint(self, state: HintState, status: StatusModel | None) -> str:
+        if state.not_configured:
+            return "DefenseClaw is not set up yet. Press 0 for Setup, or run: defenseclaw init"
         if status:
             gateway_state = status.gateway.state.strip().lower()
             if gateway_state in {"starting", "reconnecting"}:
@@ -154,7 +156,7 @@ class HintEngine:
             if gateway_state in {"", "unknown"}:
                 return "Gateway status is not available yet. Health checks will retry automatically."
             if gateway_state in {"offline", "stopped", "down"}:
-                return 'Gateway is offline. Open the command palette and run "doctor" to diagnose.'
+                return 'Gateway is not running. Press : and run "start", or run "doctor" to diagnose.'
         if status and status.guardrail.state in {"disabled", "offline", "unknown"}:
             return 'LLM guardrail is not configured. Press "g" to set it up.'
         if state.critical_alerts > 0:
@@ -164,6 +166,14 @@ class HintEngine:
                 f"{state.critical_alerts} recent critical/high alert {noun} {verb} review. "
                 "Press 2 for Alerts."
             )
+        if state.hidden_critical_alerts > 0 and state.connector_filter:
+            # Alerts would open empty under the filter; say how to see them.
+            count = state.hidden_critical_alerts
+            noun = "alert" if count == 1 else "alerts"
+            return (
+                f"{count} critical/high {noun} outside the {state.connector_filter} filter. "
+                "Press m and pick All connectors, then 2 for Alerts."
+            )
         if state.unscanned_skills > 0:
             return f"{state.unscanned_skills} skills have not been scanned. Press s to scan all."
         return self.next_tip()
@@ -171,26 +181,37 @@ class HintEngine:
     def _alerts_hint(self, state: HintState) -> str:
         if state.total_alerts == 0:
             return "No active alerts. DefenseClaw is monitoring for scan findings."
+        scope, _sep, search = state.filter_active.partition(", search ")
+        if scope == "All severities":
+            # All is not a filter; name the way back to the default queue
+            # (GAP-1875), with or without a search (GAP-2074).
+            if search:
+                return f"Showing all severities matching {search}. Esc clears the search; h goes back to Actionable."
+            return "Showing alerts of all severities. Press h or Esc for Actionable; / searches."
+        if search:
+            # Esc clears the search first; the severity chip stays (GAP-2074).
+            return f"Alerts filtered to {scope}, search {search}. Esc clears the search; / changes it."
         if state.filter_active:
-            return f"Alerts filtered to {state.filter_active}. Click All or press Esc to clear; / changes search."
+            return f"Alerts filtered to {scope}. Esc goes back to Actionable; click All for every severity."
         if state.critical_alerts > 0:
+            scope = f" for {state.connector_filter}" if state.connector_filter else ""
             return (
-                f"{state.critical_alerts} critical/high alert(s). Click severity chips or press 1-5, "
+                f"{state.critical_alerts} critical/high alert(s){scope}. Click severity chips or press h/l, "
                 "Enter opens details, Dismiss filtered clears the view."
             )
         return (
-            "KEYS  j/k move | Enter detail | 1-5 severity | Space select | x ack selected | "
+            "KEYS  j/k move | Enter detail | h/l severity | Space select | x ack selected | "
             "d dismiss | c dismiss filtered | / search."
         )
 
     def _audit_hint(self, state: HintState) -> str:
         if state.filter_active:
             return (
-                f"Audit filtered to {state.filter_active}. Click All or press Esc to clear; "
-                "Same target/run correlates rows."
+                f"Audit filtered to {state.filter_active}. Esc clears every filter; "
+                "t / u show the same target / run."
             )
         return (
-            "KEYS  j/k move | Enter detail | 1 all 2 risk 3 blocks 4 scans 5 keys | / search field:value | "
+            "KEYS  j/k move | Enter detail | h/l filter chips | / search field:value | "
             "t same target | u same run | e export | Esc close."
         )
 
@@ -204,7 +225,7 @@ class HintEngine:
             )
         return (
             "KEYS  j/k move | Enter detail | o actions | s scan | b block | "
-            "a allow | u unblock | R registries | r refresh | / filter."
+            "a allow | u unblock | R registry entry | r refresh | / filter."
         )
 
     def _mcps_hint(self, state: HintState) -> str:
@@ -212,7 +233,7 @@ class HintEngine:
             return hint
         return (
             "KEYS  j/k move | Enter detail | o actions | s scan | b block | "
-            "a allow | u unblock | n add server | R registries."
+            "a allow | u unblock | n add server | R registry entry."
         )
 
     def _plugins_hint(self, state: HintState) -> str:
@@ -227,7 +248,7 @@ class HintEngine:
         if hint := self._filter_hint(state):
             return hint
         return (
-            "KEYS  h/l sub-tab | j/k move | Enter detail | 1 all, 2-4 filter Skills/Plugins | "
+            "KEYS  h/l sub-tab | j/k move | Enter detail | 1-4 filter (Skills/Plugins only) | "
             "o fast scan scope | r scan."
         )
 
@@ -235,7 +256,7 @@ class HintEngine:
         if state.logs_paused:
             return f"Paused. Space resumes. New lines since pause: +{state.new_lines_since_pause}."
         return (
-            "KEYS  h/l source | 1-8 filter | Space pause | / search | e errors | w warnings | "
+            "KEYS  h/l source | f filter | Space pause | / search | e errors | w warnings | "
             "Enter detail | g/G top/end."
         )
 
@@ -257,17 +278,32 @@ class HintEngine:
     def _ai_discovery_hint(self, state: HintState) -> str:
         if hint := self._filter_hint(state):
             return hint
+        # Follow the panel state: no s while discovery is off, and a names
+        # what it switches to (GAP-2230).
+        scope = "a recommended" if "all_models" in state.panel_conditions else "a all models"
+        if "restart_pending" in state.panel_conditions:
+            # The panel says "Press d to restart it"; "d turn on" did not
+            # match (GAP-2278).
+            return (
+                f"KEYS  j/k move | t switch table | {scope} | Enter detail | r refresh | "
+                "e export | d restart gateway | / search vendor/product/component."
+            )
+        if "disabled" in state.panel_conditions:
+            return (
+                f"KEYS  j/k move | t switch table | {scope} | Enter detail | r refresh | "
+                "e export | d turn on | / search vendor/product/component."
+            )
         return (
-            "KEYS  j/k move | t switch table | a all models | Enter detail | s scan | r refresh | "
-            "/ search vendor/product/component."
+            f"KEYS  j/k move | t switch table | {scope} | Enter detail | s scan | r refresh | "
+            "e export | d on/off | / search vendor/product/component."
         )
 
     def _registries_hint(self, state: HintState) -> str:
         if hint := self._filter_hint(state):
             return hint
         return (
-            "KEYS  1/2/3 sources/entries/approved | j/k move | Enter detail | s sync | S sync all | "
-            "a approve | x reject | d remove source."
+            "KEYS  h/l sources/entries/approved | j/k move | Enter detail | s sync | S sync all | "
+            "a approve | x reject | e require approval | d remove source."
         )
 
     def _runtime_hint(self, state: HintState) -> str:
@@ -338,5 +374,45 @@ class HintBar(_Static):
         hint = self.engine.hint_for(state, status)
         if hint == self._rendered_hint:
             return
-        self.update(hint)
         self._rendered_hint = hint
+        self._paint()
+
+    def on_resize(self, _event: object) -> None:
+        self._paint()
+
+    def _paint(self) -> None:
+        try:  # 0 before the bar is laid out: paint the hint as is.
+            width = int(self.content_size.width)
+        except Exception:  # noqa: BLE001 - no app or layout yet.
+            width = 0
+        self.update(pack_hint_items(self._rendered_hint or "", width, max_lines=2))
+
+
+def pack_hint_items(hint: str, width: int, *, max_lines: int = 2) -> str:
+    """Break a ``key label · key label`` hint between items, never inside one.
+
+    Word wrap split "r refresh keys" over two rows at 80 columns (GAP-1912).
+    The panel ``KEYS  a | b`` hints are packed the same way, so no row ends
+    in a bare key or starts with ``|`` (GAP-2032). Items that don't fit in
+    ``max_lines`` rows are dropped whole. Plain sentences, and any hint that
+    fits, are left to the normal wrap.
+    """
+
+    from rich.cells import cell_len
+
+    if width <= 0 or cell_len(hint) <= width:
+        return hint
+    sep = next((sep for sep in (" · ", " | ") if sep in hint), "")
+    if not sep:
+        return hint
+    lines: list[str] = []
+    line = ""
+    for item in hint.split(sep):
+        joined = f"{line}{sep}{item}" if line else item
+        if not line or cell_len(joined) <= width:
+            line = joined
+            continue
+        lines.append(line)
+        line = item
+    lines.append(line)
+    return "\n".join(lines[:max_lines])

@@ -175,7 +175,13 @@ func (p *GuardrailProxy) emitGuardrailScanVerdictFindings(
 	if p.logger == nil {
 		return hookEvaluationContext{}
 	}
-	evalID, scanID, err := p.logger.LogInspectFindingsWithCorrelation(ctx, src, ScanCorrelationFromContext(ctx))
+	corr := ScanCorrelationFromContext(ctx)
+	if corr.Connector == "" && p.connector != nil {
+		// Proxy requests carry no connector in their envelope; name the
+		// proxy's connector so alerts --connector finds the row (GAP-2295).
+		corr.Connector = p.connector.Name()
+	}
+	evalID, scanID, err := p.logger.LogInspectFindingsWithCorrelation(ctx, src, corr)
 	if err != nil {
 		metricRuntime, _ := p.observabilityV8TraceRuntime().(hookLifecycleMetricV8Runtime)
 		recordScanErrorV8(ctx, metricRuntime, "gateway.runtime.findings", src.Scanner, src.TargetType, errorReason)

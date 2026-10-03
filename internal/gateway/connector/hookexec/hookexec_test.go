@@ -878,7 +878,9 @@ func TestUnreachable(t *testing.T) {
 		if r.code != 2 {
 			t.Fatalf("code = %d, want 2", r.code)
 		}
-		if r.stdout != `{"decision":"deny","reason":"DefenseClaw hook failed closed"}`+"\n" {
+		// GAP-1337: the denial names the stopped gateway and the start command.
+		if !strings.HasPrefix(r.stdout, `{"decision":"deny","reason":"DefenseClaw blocked this `) ||
+			!strings.Contains(r.stdout, "defenseclaw-gateway start") {
 			t.Errorf("stdout = %q", r.stdout)
 		}
 	})
@@ -1208,7 +1210,9 @@ func TestMissingToken(t *testing.T) {
 		if r.code != 2 {
 			t.Fatalf("code = %d, want 2", r.code)
 		}
-		if !strings.Contains(r.stderr, "missing gateway token") {
+		// GAP-1425: name the file, not an env var the scoped hook ignores.
+		if !strings.Contains(r.stderr, ".hook-claudecode.token not found") ||
+			strings.Contains(r.stderr, "DEFENSECLAW_GATEWAY_TOKEN") {
 			t.Errorf("stderr = %q", r.stderr)
 		}
 	})
@@ -2195,6 +2199,11 @@ func TestCodexSessionEndDeadlineCancelsBlockingTransport(t *testing.T) {
 	}
 }
 
+// gatewayDownReason is the per-user denial text of an unreachable gateway (GAP-1337).
+func gatewayDownReason(event string) string {
+	return mustJSONString(perUserGatewayDownText(Options{Event: event}, "gateway unreachable"))
+}
+
 func TestCodexFailClosedUsesEventSpecificControlSchema(t *testing.T) {
 	tests := []struct {
 		event      string
@@ -2202,19 +2211,24 @@ func TestCodexFailClosedUsesEventSpecificControlSchema(t *testing.T) {
 	}{
 		{
 			event:      "SessionStart",
-			wantStdout: `{"continue":false,"stopReason":"DefenseClaw hook failed closed"}` + "\n",
+			wantStdout: `{"continue":false,"stopReason":` + gatewayDownReason("SessionStart") + "}\n",
 		},
 		{
 			event:      "PreCompact",
-			wantStdout: `{"continue":false,"stopReason":"DefenseClaw hook failed closed"}` + "\n",
+			wantStdout: `{"continue":false,"stopReason":` + gatewayDownReason("PreCompact") + "}\n",
 		},
 		{
 			event:      "PostCompact",
-			wantStdout: `{"continue":false,"stopReason":"DefenseClaw hook failed closed"}` + "\n",
+			wantStdout: `{"continue":false,"stopReason":` + gatewayDownReason("PostCompact") + "}\n",
 		},
 		{
 			event:      "SubagentStop",
-			wantStdout: `{"decision":"block","reason":"DefenseClaw hook failed closed"}` + "\n",
+			wantStdout: `{"decision":"block","reason":` + gatewayDownReason("SubagentStop") + "}\n",
+		},
+		{
+			event: "PreToolUse",
+			wantStdout: `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny",` +
+				`"permissionDecisionReason":` + gatewayDownReason("PreToolUse") + "}}\n",
 		},
 		{
 			event:      "SessionEnd",
@@ -2246,7 +2260,7 @@ func TestCodexV3GenericFailClosedUsesLifecycleControl(t *testing.T) {
 		opts.FailMode = "closed"
 		opts.StrictAvailability = true
 	})
-	wantStdout := `{"continue":false,"stopReason":"DefenseClaw hook failed closed"}` + "\n"
+	wantStdout := `{"continue":false,"stopReason":` + gatewayDownReason("SessionStart") + "}\n"
 	if result.code != 0 || result.stdout != wantStdout {
 		t.Fatalf("code=%d stdout=%q want %q stderr=%q", result.code, result.stdout, wantStdout, result.stderr)
 	}
@@ -2560,5 +2574,25 @@ func TestManagedCopilotHookDeniesWhenDefenseClawCannotDecide(t *testing.T) {
 	opts.Event = "sessionStart"
 	if code := failUnreachable(opts, sp, "closed", "x"); code != 0 || stdout.Len() != 0 {
 		t.Fatalf("sessionStart = %d %q", code, stdout.String())
+	}
+}
+
+// A per-user hook names the next step after "gateway unreachable" instead of
+// repeating it; a managed hook and any other reason keep the reason (GAP-1204).
+func TestUnreachableDetailNamesTheNextStep(t *testing.T) {
+	const next = "check `defenseclaw-gateway status`, or run `defenseclaw-gateway restart`"
+	for _, tc := range []struct {
+		opts   Options
+		reason string
+		want   string
+	}{
+		{Options{}, "gateway unreachable", next},
+		{Options{}, "gateway returned HTTP 502", "gateway returned HTTP 502"},
+		{Options{ManagedEnterprise: true}, "gateway unreachable", "gateway unreachable"},
+		{Options{ManagedUnixSocket: "/run/defenseclaw/hook.sock"}, "gateway unreachable", "gateway unreachable"},
+	} {
+		if got := unreachableDetail(tc.opts, tc.reason); got != tc.want {
+			t.Errorf("unreachableDetail(%+v, %q) = %q, want %q", tc.opts, tc.reason, got, tc.want)
+		}
 	}
 }

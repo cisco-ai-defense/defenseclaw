@@ -31,7 +31,7 @@ same config.
 | --- | --- |
 | macOS | macOS 13.0 or later. The pkg refuses older versions. |
 | Hardware | Apple silicon only. The pkg is `arm64`-only, and releases build no Intel macOS binaries, so neither the pkg nor the tarball runs on an Intel Mac. |
-| Privileges | root, through `sudo` or an MDM agent. Only `enterprise macos status` works without root. |
+| Privileges | root, through `sudo` or an MDM agent. Every `enterprise macos` action, status included, needs root: a standard user gets `not_root`. Per-user commands such as `defenseclaw-gateway status` and `audit export` answer that the computer is managed and name the administrator command. |
 | Other profiles | No Secure Client DefenseClaw module. The pkg's pre-install script refuses when `/opt/cisco/secureclient/defenseclaw` or a `com.cisco.secureclient.defenseclaw*` LaunchDaemon exists. |
 | Gatekeeper | Only the pkg can be Developer ID-signed and notarized. It is signed only when the release pipeline has Apple signing credentials, and notarized only when it also has notary credentials, so a release can be signed but not notarized. Releases currently ship it unsigned and hash-pinned by `checksums.txt` (see step 1 under Install). The tarball's binaries are never Developer ID-signed. On Macs that require notarized software, use the pkg and check it first with `spctl --assess --type install --verbose=2 <pkg>`. |
 
@@ -162,6 +162,30 @@ Each key under `guardrail.connectors` turns on protection for that agent. See
 [Choose the agents to protect](/docs/enterprise/configuration#choose-the-agents-to-protect)
 and the [settings reference](/docs/enterprise/configuration#settings-reference).
 
+AI Discovery (each enrolled user's inventory scan in `ai-discovery/`, and the
+skill, MCP and AI component records it feeds) is off unless the config sets
+it. A config you write is read as written, so add this block to turn it on:
+
+```yaml
+ai_discovery:
+  enabled: true
+```
+
+See [Per-user scans](/docs/ai-discovery#per-user-scans-in-standalone-enterprise).
+To read the inventory on the host, run the read-only `discovery` view as root:
+
+```bash
+sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos discovery
+sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos discovery --user <account> --json
+```
+
+Skills and MCP servers are inventoried, not scanned: a managed deployment
+does not run the skill or MCP scanners. The inventory names each skill and
+MCP server per user, and its `ai_component` and per-entry skill and MCP
+records go to your observability destinations. The gateway's `/skills`,
+`/mcps` and `/tools/catalog` API routes read an OpenClaw gateway, which a
+managed deployment does not run, so they answer `501`.
+
 Put it where the lifecycle reads it. A config staged before the install is
 used as is; it does not count as an unmanaged layout:
 
@@ -186,8 +210,12 @@ post-install script runs
 creates `_defenseclaw`, validates the config, lays out the files, writes the
 LaunchDaemons, starts them in order, verifies, and rolls back on any failure.
 A failed apply fails the pkg install, so `installer` and your MDM report it.
-The result is in `last-package-result.json`. The pkg receipt is
-`com.cisco.defenseclaw.enterprise`.
+The result is in `last-package-result.json`, and `/var/log/install.log`
+names its first error. Fix it, then install the pkg again (or let your MDM
+redeploy it). The pkg receipt is `com.cisco.defenseclaw.enterprise`, and a
+failed install records none. `ensure --from-package` also finishes the
+install, but it records no receipt either, so receipt-based inventory
+reports the Mac as not installed until the pkg installs successfully.
 
 If you did not stage a config, the pkg installs the default, which protects
 nothing. Apply your config afterward. Either copy it to
@@ -313,6 +341,10 @@ each user remove their per-user install with `defenseclaw uninstall --binaries -
 Add `--all` to also delete `~/.defenseclaw`. See
 [Uninstall](/docs/get-started/install#uninstall).
 
+A per-user gateway that was already running keeps running until it is
+stopped. The install, `status` and `verify` name each such account with the
+`per_user_gateway_running` warning and the `kill` command that stops it.
+
 ## Remove
 
 | Goal | Command |
@@ -325,10 +357,13 @@ Add `--all` to also delete `~/.defenseclaw`. See
 Run these as root from `/opt/cisco/defenseclaw/bin`. Uninstall removes each
 user's DefenseClaw hook registrations and DefenseClaw's own machine-policy
 entries first. Administrator entries in those files stay as they were.
-Each user keeps `~/.defenseclaw` unless you purge. With `--purge` it also
+Each user keeps `~/.defenseclaw` unless you purge; the result's `kept:` line
+names the accounts that still have `~/.defenseclaw` or per-user binaries in
+`~/.local/bin`. With `--purge` it also
 stops each enrolled user's per-user gateway and removes all of that user's
 `~/.defenseclaw`, the empty agent folders DefenseClaw created in that home,
-and the per-user binaries and launcher links in `~/.local/bin`, and the
+the per-user binaries and launcher links in `~/.local/bin`, and the
+DefenseClaw wheels earlier per-user installs left in `~/.cache/uv`, and the
 result names every user it purged or left alone.
 See [Uninstall](/docs/enterprise/lifecycle#uninstall).
 
@@ -382,6 +417,46 @@ Full Disk Access (`SystemPolicyAllFiles`) to
 `/opt/cisco/defenseclaw/bin/defenseclaw-gateway`. That one binary runs the
 gateway, the guardian (`enterprise hooks watch`) and the enumerator. Identify
 it by its Developer ID code requirement, which needs a signed build.
+
+### AI Discovery Plane C (Endpoint Security)
+
+Runtime Plane C (`ai_discovery.runtime.enable_host_plane: true` with `c` in
+`planes`) reads process and file events through Apple's `eslogger`. On a
+managed Mac the root sensor helper,
+`/opt/cisco/defenseclaw/bin/defenseclaw-sensor-helper`
+(`com.cisco.defenseclaw.sensor-helper`), runs `eslogger`. launchd starts the
+helper directly, so macOS treats the helper as the responsible process, and
+the helper is the binary that needs Full Disk Access. Without it, Endpoint
+Security refuses the client (`ES_NEW_CLIENT_RESULT_ERR_NOT_PERMITTED`), Plane C
+reports `running: false` with that reason, and the runtime snapshot stays
+degraded. Planes A and B keep working.
+
+Grant the access with a PPPC payload (`com.apple.TCC.configuration-profile-policy`)
+under `SystemPolicyAllFiles`:
+
+```xml
+<key>Services</key>
+<dict>
+  <key>SystemPolicyAllFiles</key>
+  <array>
+    <dict>
+      <key>Identifier</key>
+      <string>/opt/cisco/defenseclaw/bin/defenseclaw-sensor-helper</string>
+      <key>IdentifierType</key>
+      <string>path</string>
+      <key>CodeRequirement</key>
+      <string>(the designated requirement printed by codesign -dr - on that path)</string>
+      <key>Allowed</key>
+      <true/>
+    </dict>
+  </array>
+</dict>
+```
+
+The code requirement needs a signed build. On an unsigned test build, grant
+Full Disk Access to that path by hand in System Settings > Privacy & Security >
+Full Disk Access. Then restart the helper with
+`sudo launchctl kickstart -k system/com.cisco.defenseclaw.sensor-helper`.
 
 ## Machine policy
 

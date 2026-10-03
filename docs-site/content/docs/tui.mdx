@@ -37,10 +37,23 @@ the panels have data to show.
 ## Panels
 
 Switch panels with the number/letter key shown, from any panel (only an open
-Setup form or the config editor types digits), or cycle with `Tab` /
+Setup form or a `/` search box types digits and letters), or cycle with `Tab` /
 `Shift+Tab`. Press `Ctrl+P` to fuzzy-jump to any panel by name. On a narrow
-terminal every tab stays on screen: the most-used tabs keep their names and
-the rest show only their key.
+terminal every tab stays on screen: Overview, Alerts and Policies keep their
+names first, then as many other tabs as fit get a short name (`Inv`, `Log`),
+and the rest show only their key. Which tabs keep a name depends only on the
+terminal width and the unread counts, so switching panels changes only the tab
+you leave and the tab you open. Unread counts stay ahead of names (`8⁶⁴`), and
+some room stays free for the longest panel name when you open it. Below 80
+columns the tab you are on gets as much of its name as fits (`R Regis…`), ahead
+of the other tabs' unread counts; the Alerts count stays. Below about 68
+columns every tab shows only its key, and the panel title names the panel.
+
+With two or more connectors set up, `m` filters Overview, Alerts, Audit, Logs,
+Skills, MCPs, Plugins, Tools and Inventory by connector. With one connector,
+`m` on Overview switches the active connector (it re-runs that connector's
+setup after a confirm), and on Alerts, Audit and Logs it says there is nothing
+to filter.
 
 | Key | Panel | What it shows |
 | --- | --- | --- |
@@ -48,12 +61,13 @@ the rest show only their key.
 | `2` | Alerts | Recent guardrail and hook alerts |
 | `3` | Skills | Scanned skill inventory |
 | `4` | MCPs | Scanned MCP servers |
-| `5` | Plugins | Scanned plugins |
+| `5` | Plugins | Installed plugins and their scan results for every connector that has plugins (Amp, Hermes, OpenClaw and others) |
+| `T` | Tools | The tool block/allow list (capital `T`; lowercase `t` is a panel key). To add the first rule, press `:` and type `tool block <tool-name> --connector <connector>` (or `tool allow`) |
 | `6` | Inventory | Combined inventory view |
 | `7` | Sandboxes | OpenShell sandboxes, their live activity feed, and the rare asks ([below](#sandboxes-panel)) |
-| `8` | Logs | Live gateway logs with filter presets |
-| `9` | Audit | Audit trail |
-| `A` | Activity | Live output from commands you run |
+| `8` | Logs | Live gateway logs with filter presets. The view opens on the newest line and follows new lines until you move the cursor |
+| `9` | Audit | Audit trail. `3` (Blocks) lists the calls DefenseClaw blocked, hook and guardrail blocks included, from the whole trail; the other views load the newest 500 events (the header says since when; use `defenseclaw audit export` for older ones). A row's detail names the connector, decision, mode and rule. `e` writes the rows of the current view to a new `defenseclaw-audit-export-<date>-<time>.json` in the data directory; an earlier export is never replaced |
+| `A` | Activity | Live output from commands you run; `l` (Mutations; `h` goes back to Commands) lists config and policy changes with what changed (for example `/.env/NAME: unset -> set`) |
 | `V` | AI Discovery | Discovered AI agents, components, and local models, including model status and format |
 | `N` | Runtime | What actually ran: the [runtime planes](/docs/ai-discovery#runtime-planes-what-actually-ran) and their findings |
 | `R` | Registries | Configured registries |
@@ -86,7 +100,7 @@ for the on-disk format.
 Press `P` (or `p` on Overview) to open **Policies**. The header sums up your
 protection, for example `● default policy · default pack · 1 of 5 opt-in packs
 · 26 chains (4 can block)`. Pick a view from the list on the left (or press
-`1`-`7`); the pane on the right (below the table on narrower terminals, and on
+`←`/`→` or `[`/`]`); the pane on the right (below the table on narrower terminals, and on
 `i` at 80x24) explains the highlighted row and what you can do with it.
 
 | View | What it shows |
@@ -149,7 +163,11 @@ you enter for **API keys & secrets** reach `defenseclaw keys set --value-stdin`
 on standard input, never on the command line. Follow-up commands run only after
 the previous one succeeds.
 
-Press `c` for the **config editor**. On wide terminals its sections are listed
+A successful run's result card hides itself after 8 seconds (its footer says
+so) and leaves the result on the status line; `q` or **Dismiss** clears it
+sooner. A failed run's card stays until you dismiss it.
+
+Press `c` for the **config editor** (or `→` past the last group). On wide terminals its sections are listed
 on the left, grouped (Core, Protection, …), with the highlighted field's value
 and help beside the table:
 
@@ -160,7 +178,7 @@ and help beside the table:
 | `/` | Find a field by name or key in any section |
 | `Enter` | Edit the field (text box) or change a choice |
 | `S` | Review the changes and save |
-| `R` | Revert unsaved changes |
+| `r` | Revert unsaved changes (`R` opens Registries) |
 | `w` | Back to the task list |
 
 Keys the TUI can't save show as read-only rows; their hint says where to change
@@ -355,9 +373,13 @@ rules.
 | `?` | Toggle the help overlay (scroll it with `j`/`k` or `PgUp`/`PgDn`) |
 | `Ctrl+K` or `:` | Open the command palette (search-and-run any command; the Risk column marks what changes things) |
 | `Ctrl+P` | Jump to a panel by name |
-| `/` | On Skills, MCPs, Plugins and Runtime: filter the list (`Enter`, `Esc` or `Down` returns to it) |
+| `/` | On Skills, MCPs, Plugins and Runtime: filter the list (`Enter`, `Esc` or `Down` returns to it; `Esc` on the list clears the filter) |
+| `/` on Alerts | Search the alerts: the text matches every column the table shows, including the rule id and title in Details (`Enter` applies, `Esc` clears) |
 | `Ctrl+\` | Theme picker |
 | `D` | Run `defenseclaw doctor` in the background and toast the result (works on every panel) |
 | `Y` | Copy the last command's output (works on every panel) |
 | `Ctrl+S` | Save the last run to a log file |
-| `Ctrl+C` | Quit the TUI |
+| `Ctrl+C` | Quit the TUI (it cancels a running command first) |
+| `q` | Close the open drawer or overlay; it does not quit |
+| `b` | On Overview and Logs: turn desktop notifications on or off |
+| `e` | On Registries: require (or stop requiring) registry approval for the selected entry's type. Registry actions (sync, approve, reject, require) keep the Registries panel in front and report the result in the status bar; their full output is in Activity |

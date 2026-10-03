@@ -23,6 +23,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/hookruntime"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winfolders"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
@@ -38,6 +39,18 @@ func canonicalNativeWindowsInstallRoot() string {
 		return ""
 	}
 	return filepath.Join(programs, "DefenseClaw")
+}
+
+// canonicalStandaloneWindowsHookBinary is the standalone enterprise hook
+// launcher under the trusted Program Files root, which the managed per-user
+// connectors register. The uninstall runs from a maintenance copy outside
+// that tree, so teardown must still recognize the registration (GAP-1932).
+func canonicalStandaloneWindowsHookBinary() string {
+	layout, err := managed.StandaloneWindowsLayout()
+	if err != nil || strings.TrimSpace(layout.BinDir) == "" {
+		return ""
+	}
+	return filepath.Join(layout.BinDir, windowsHookBinaryName)
 }
 
 // canonicalNativeWindowsHookBinary is the stable launcher path native Setup

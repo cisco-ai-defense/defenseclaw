@@ -278,7 +278,7 @@ def test_alerts_filter_selection_and_counts() -> None:
     model.deselect_all()
     assert model.selected_ids == set()
 
-    action = model.handle_key("2")
+    action = model.handle_key("h")  # High -> Critical
     assert action.filter_change is not None
     assert action.filter_change.panel == "alerts"
     assert action.filter_change.filter_type == "severity"
@@ -372,7 +372,7 @@ def test_alerts_default_hides_low_signal_rows_until_all_opt_in() -> None:
     assert "In scope 4" in model.summary_text()
     assert "No actionable" not in model.empty_state()
 
-    assert model.handle_key("1").handled is True
+    assert model.handle_key("l").handled is True
     assert model.active_scope_key() == "all"
     assert model.active_filter_label() == "All severities"
     assert {row.event.id for row in model.filtered} == {"a1", "a2", "a3", "a4"}
@@ -822,3 +822,69 @@ def test_alerts_connector_hook_copy_text_uses_structured_rows() -> None:
     # truth.
     assert "Summary:" not in copied
     assert "Details: connector=" not in copied
+
+
+def test_hook_finding_detail_shows_the_decision_from_its_evaluation() -> None:
+    """GAP-0999: the finding row has no action; the hook decision for the same
+    evaluation says the call was blocked."""
+
+    finding = _v8_alert_row(
+        "finding",
+        bucket="security.finding",
+        event_name="finding.observed",
+        severity="CRITICAL",
+        action="scan-finding",
+        payload={"defenseclaw.evaluation.id": "ev-1", "defenseclaw.scan.scanner": "hook-rules"},
+    )
+    decision = _v8_alert_row(
+        "decision",
+        bucket="guardrail.evaluation",
+        event_name="hook_decision",
+        payload={"defenseclaw.evaluation.id": "ev-1", "defenseclaw.guardrail.effective_action": "block"},
+    )
+
+    (alert,) = alerts_from_v8_history((finding,), (decision,))
+
+    assert ("Decision", "block") in alert.facts
+    assert ("Decision", "block") not in alerts_from_v8_history((finding,))[0].facts
+
+
+def test_post_tool_finding_reads_like_the_cli(monkeypatch) -> None:
+    """GAP-1456: list and detail show the hook decision and the pack title,
+    not the evaluation's "allow", "Secret finding" or a redacted summary."""
+
+    import defenseclaw.commands.cmd_alerts as cmd_alerts
+
+    monkeypatch.setattr(cmd_alerts, "_rule_pack_titles", lambda: {"SEC-AWS-KEY": "AWS access key"})
+    finding = _v8_alert_row(
+        "f1",
+        bucket="security.finding",
+        event_name="finding.observed",
+        severity="HIGH",
+        action="scan-finding",
+        payload={
+            "defenseclaw.evaluation.id": "ev-1",
+            "defenseclaw.finding.rule_id": "SEC-AWS-KEY",
+            "defenseclaw.finding.title": "Secret finding",
+            "defenseclaw.finding.target_ref": "claudecode:PostToolUse",
+            "defenseclaw.finding.evidence_summary": "<redacted-sensitive len=20>",
+        },
+    )
+    decision = _v8_alert_row(
+        "d1",
+        bucket="guardrail.evaluation",
+        event_name="hook_decision",
+        payload={"defenseclaw.evaluation.id": "ev-1", "defenseclaw.guardrail.effective_action": "allow"},
+    )
+    store = SimpleNamespace(
+        hook_details_for_alerts=lambda ids: {"f1": ["action=allow raw_action=block would_block=true mode=action"]},
+    )
+
+    (alert,) = alerts_panel._with_hook_decisions(store, list(alerts_from_v8_history((finding,), (decision,))))
+
+    assert ("Rule", "SEC-AWS-KEY: AWS access key") in alert.facts
+    assert ("Decision", "detected after the tool ran (cannot block)") in alert.facts
+    assert ("Decision", "allow") not in alert.facts
+    label = alerts_panel._alert_details_label(alert)
+    assert "redacted" not in label
+    assert label.startswith("SEC-AWS-KEY: AWS access key")

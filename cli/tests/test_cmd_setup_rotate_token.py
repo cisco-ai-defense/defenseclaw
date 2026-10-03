@@ -634,6 +634,63 @@ with locked_file_update(lock_base):
             self.assertIn(b"KEEP=exact\r\n", body)
             self.assertIn(b"DEFENSECLAW_GATEWAY_TOKEN=" + b"b" * 64, body)
 
+    def test_failed_recovery_names_the_cause_and_how_to_start_the_gateway(self) -> None:
+        # GAP-1514: no internal A/B wording; say what failed, that the old
+        # credentials are back, that the gateway is stopped, and what to run.
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as td:
+            app = _make_rotate_ctx(td, ["codex"])
+            with open(os.path.join(td, ".env"), "wb") as fh:
+                fh.write(b"DEFENSECLAW_GATEWAY_TOKEN=" + b"a" * 64 + b"\n")
+
+            def lifecycle(_data_dir, action, *, token, config_file, connector_state=None, cleanup=False):
+                del token, config_file, connector_state
+                if action == "start" and not cleanup:
+                    raise cmd_setup._RotateTokenLifecycleError(
+                        "Gateway start failed during the token-rotation transaction: "
+                        "connector openhands scoped OTLP credential is unavailable"
+                    )
+
+            with (
+                mock.patch.object(cmd_setup, "_is_pid_alive", return_value=True),
+                mock.patch.object(cmd_setup, "_run_rotate_token_lifecycle", side_effect=lifecycle),
+                mock.patch.object(cmd_setup.secrets, "token_hex", return_value="b" * 64),
+            ):
+                result = CliRunner().invoke(cmd_setup.rotate_token_cmd, ["--yes"], obj=app)
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("openhands scoped OTLP credential is unavailable", result.output)
+        self.assertIn("previous credentials were restored", result.output)
+        self.assertIn("defenseclaw-gateway start", result.output)
+        self.assertNotIn("gateway A", result.output)
+        self.assertNotIn("b" * 64, result.output)
+
+    def test_lifecycle_failure_relays_only_the_masked_gateway_error_line(self) -> None:
+        secret = "f" * 64
+        completed = subprocess.CompletedProcess(
+            [],
+            1,
+            stdout="noise " + secret,
+            stderr=f"debug {secret}\nError: start daemon readiness: probe {secret} failed\n",
+        )
+        with (
+            mock.patch.object(cmd_setup, "_gateway_lifecycle_executable", return_value="gateway-fixture"),
+            mock.patch.object(cmd_setup.subprocess, "run", return_value=completed),
+            self.assertRaises(cmd_setup._RotateTokenLifecycleError) as raised,
+        ):
+            cmd_setup._run_rotate_token_lifecycle(
+                "D:\\fixture-data",
+                "start",
+                token="explicit-a-value",
+                config_file="D:\\fixture-data\\config.yaml",
+                connector_state='{"connectors":[],"version":1}',
+            )
+        message = str(raised.exception)
+        self.assertIn("start daemon readiness: probe <redacted> failed", message)
+        self.assertNotIn(secret, message)
+        self.assertNotIn("debug", message)
+
     def test_safe_lifecycle_failure_retries_once_with_fresh_gateway_token(self) -> None:
         from tempfile import TemporaryDirectory
 
@@ -1393,6 +1450,35 @@ with locked_file_update(lock_base):
         self.assertNotEqual(result.exit_code, 0)
         lifecycle.assert_not_called()
         self.assertIn("missing its scoped hook credential", result.output)
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "needs POSIX folder permissions as a non-root user")
+    def test_unwritable_hooks_folder_refuses_before_stop(self) -> None:
+        # GAP-1636: the gateway was stopped first, then the write failed and
+        # the error claimed the prior credentials could not all be restored.
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as td:
+            app = _make_rotate_ctx(td, ["codex"])
+            hooks = Path(td, "hooks")
+            before = Path(hooks, ".hook-codex.token").read_bytes()
+            lifecycle = mock.Mock()
+            hooks.chmod(0o500)
+            try:
+                with (
+                    mock.patch.object(cmd_setup, "_is_pid_alive", return_value=True),
+                    mock.patch.object(cmd_setup, "_run_rotate_token_lifecycle", lifecycle),
+                ):
+                    result = CliRunner().invoke(cmd_setup.rotate_token_cmd, ["--yes"], obj=app)
+            finally:
+                hooks.chmod(0o700)
+            self.assertEqual(Path(hooks, ".hook-codex.token").read_bytes(), before)
+            self.assertEqual(sorted(p.name for p in hooks.iterdir()), [".hook-codex.token"])
+
+        self.assertEqual(result.exit_code, 1, result.output)
+        lifecycle.assert_not_called()
+        self.assertIn("cannot write to", result.output)
+        self.assertIn("the gateway was not stopped", result.output)
+        self.assertNotIn("could not all be restored", result.output)
 
     def test_audit_failure_stops_b_restores_exact_a_and_restarts_a(self) -> None:
         from tempfile import TemporaryDirectory

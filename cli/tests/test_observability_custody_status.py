@@ -181,6 +181,57 @@ def test_custody_status_detects_managed_exporter_drift_without_repair(tmp_path: 
     assert target.read_bytes() == before
 
 
+def test_codex_folder_trust_write_is_not_exporter_drift(tmp_path: Path) -> None:
+    # GAP-1330: Codex appends [projects."<dir>"] after setup; the managed
+    # [otel] exporters are unchanged, so this is not drift.
+    db_path = tmp_path / "audit.db"
+    db = _database(db_path)
+    _instance(db, "019b0000-0000-7000-8000-000000000001", "codex", "defenseclaw")
+    db.commit()
+    db.close()
+    managed = _codex_otel_block()
+    target = tmp_path / "config.toml"
+    target.write_text(managed)
+    _managed_backup(tmp_path, "codex", target)
+    target.write_text(managed + '\n[projects."/home/u/work"]\ntrust_level = "trusted"\n')
+    assert inspect_connector_custody(db_path, tmp_path, now=NOW).instances[0].managed_config_state == "verified"
+    state = inspect_connector_custody(db_path, tmp_path, now=NOW, api_addr="127.0.0.1:18970")
+    assert state.instances[0].managed_config_state == "verified"
+
+    target.write_text('[projects."/home/u/work"]\ntrust_level = "trusted"\n')
+    assert inspect_connector_custody(db_path, tmp_path, now=NOW).instances[0].managed_config_state == "drifted"
+
+
+def _codex_otel_block(port: int = 18970, trace_port: int | None = None) -> str:
+    headers = '{ x-defenseclaw-source = "codex", x-defenseclaw-client = "codex-otel/1.0" }'
+    return "".join(
+        f'[otel.{name}.otlp-http]\nendpoint = "http://127.0.0.1:{trace_port if name == "trace_exporter" and trace_port else port}'
+        f'/v1/{signal}"\nprotocol = "binary"\nheaders = {headers}\n'
+        for name, signal in (("exporter", "logs"), ("trace_exporter", "traces"), ("metrics_exporter", "metrics"))
+    )
+
+
+def test_codex_exporter_endpoint_edit_is_drift(tmp_path: Path) -> None:
+    # GAP-2345: a managed exporter repointed to another port must not pass
+    # the GAP-1330 folder-trust fallback as "managed-exporter verified".
+    db_path = tmp_path / "audit.db"
+    db = _database(db_path)
+    _instance(db, "019b0000-0000-7000-8000-000000000001", "codex", "defenseclaw")
+    db.commit()
+    db.close()
+    target = tmp_path / "config.toml"
+    target.write_text(_codex_otel_block())
+    _managed_backup(tmp_path, "codex", target)
+
+    target.write_text(_codex_otel_block(trace_port=19999))
+    assert inspect_connector_custody(db_path, tmp_path, now=NOW).instances[0].managed_config_state == "drifted"
+
+    target.write_text(_codex_otel_block(port=19999))
+    assert inspect_connector_custody(db_path, tmp_path, now=NOW).instances[0].managed_config_state == "verified"
+    state = inspect_connector_custody(db_path, tmp_path, now=NOW, api_addr="127.0.0.1:18970")
+    assert state.instances[0].managed_config_state == "drifted"
+
+
 def test_custody_status_missing_ledger_is_bounded_and_does_not_initialize(tmp_path: Path) -> None:
     missing = tmp_path / "missing.db"
     report = inspect_connector_custody(missing, tmp_path, now=NOW)
@@ -378,15 +429,22 @@ def test_native_delivery_summary_covers_all_states_and_doctor_status_parity(caps
     _print_native_delivery_status(summary)
     status_output = capsys.readouterr().out
     assert "collector/runtime health does not prove accepted delivery" in status_output
-    assert "bounded 24h, truncated; counts partial" in status_output
-    for label in ("all-drop-only", "partial-drop-only", "accepted", "no-evidence"):
-        assert label in status_output
+    assert "bounded 24h, newest 4096 events" in status_output
+    # The detail names the state once; no "accepted — accepted ..." (GAP-2549).
+    for row in summary.connectors:
+        assert f"{row.connector}  {row.detail[:24]}" in status_output
+    assert "partial-drop-only" not in status_output
 
     result = _DoctorResult()
     _check_connector_export_custody(report, result)
     doctor = {item["label"]: item["detail"] for item in result.checks}
     for row in summary.connectors:
         assert row.detail in doctor[f"Connector OTLP: {row.connector}"]
+    # GAP-2555: the read cap on a busy install is a sample note, not a warning.
+    cap = next(item for item in result.checks if item["label"] == "Connector OTLP evidence")
+    assert cap["status"] == "pass"
+    assert "newest 4096 events of the last 24 h; nothing to do" in cap["detail"]
+    assert "bounded read limit" not in cap["detail"]
 
 
 def test_native_delivery_missing_evidence_is_bounded_not_failed(capsys) -> None:
@@ -399,3 +457,26 @@ def test_native_delivery_missing_evidence_is_bounded_not_failed(capsys) -> None:
     assert "no evidence" in output
     assert "database missing" in output
     assert "fail" not in output.lower()
+
+
+def test_status_folds_native_delivery_rows_of_unconfigured_connectors(capsys) -> None:
+    # GAP-2242: evidence outlives `setup remove`; status scopes rows like doctor.
+    summary = summarize_native_delivery(
+        ConnectorCustodyReport(
+            "available",
+            "",
+            24,
+            (
+                ConnectorCustodyStatus("019b0001", "claudecode", "defenseclaw", "v1", True, normalized_batches=88),
+                ConnectorCustodyStatus("019b0002", "omnigent", "defenseclaw", "v1", True),
+                ConnectorCustodyStatus("019b0003", "codex", "defenseclaw", "v1", True, normalized_batches=4),
+            ),
+        )
+    )
+
+    _print_native_delivery_status(summary, configured={"codex"})
+    output = capsys.readouterr().out
+    assert "codex  accepted" in output
+    assert "claudecode  accepted" not in output
+    assert "omnigent  no-evidence" not in output
+    assert "not configured (telemetry history only, not checked): claudecode, omnigent" in output

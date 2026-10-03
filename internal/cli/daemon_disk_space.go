@@ -1,0 +1,95 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+package cli
+
+import (
+	"fmt"
+	"os"
+
+	"github.com/defenseclaw/defenseclaw/internal/daemon"
+)
+
+// gatewayMinFreeDiskBytes is the free space a gateway start needs on the disk
+// that holds its data folder (pid and state files, the audit database and its
+// WAL, gateway.log).
+const gatewayMinFreeDiskBytes uint64 = 32 << 20
+
+// gatewayDiskProbeBytes is written (and removed) in the data folder before a
+// start or restart. APFS reports tens of MB free that no file can use: dd
+// already fails with ENOSPC at 32-62 MB reported free, so the reported number
+// alone let a restart stop the gateway on a full disk (GAP-1813).
+const gatewayDiskProbeBytes = 4 << 20
+
+// dataDirFreeBytes reports the free space for dir; tests replace it.
+var dataDirFreeBytes = platformFreeDiskBytes
+
+// dataDirWriteProbe writes a small temporary file in dir; tests replace it.
+var dataDirWriteProbe = probeDataDirWrite
+
+func probeDataDirWrite(dir string) error {
+	file, err := os.CreateTemp(dir, ".disk-probe-*")
+	if err != nil {
+		return err
+	}
+	name := file.Name()
+	defer os.Remove(name)
+	_, err = file.Write(make([]byte, gatewayDiskProbeBytes))
+	if err == nil {
+		err = file.Sync()
+	}
+	if closeErr := file.Close(); err == nil {
+		err = closeErr
+	}
+	return err
+}
+
+// gatewayLowDiskProblem describes a disk too full for the gateway, or "" when
+// there is enough space or the free space cannot be read.
+func gatewayLowDiskProblem(dataDir string) string {
+	free, err := dataDirFreeBytes(dataDir)
+	if err != nil {
+		return ""
+	}
+	if free < gatewayMinFreeDiskBytes {
+		return fmt.Sprintf("the disk holding %s is full (%d MB free; the gateway needs at least %d MB)",
+			dataDir, free>>20, gatewayMinFreeDiskBytes>>20)
+	}
+	// Only a full disk refuses: a probe that fails for any other reason (a
+	// missing or read-only folder) leaves the start to report that itself.
+	if err := dataDirWriteProbe(dataDir); err != nil && isDiskFullError(err) {
+		return fmt.Sprintf("the disk holding %s is full (%d MB reported free, but a %d MB test file could not be written)",
+			dataDir, free>>20, gatewayDiskProbeBytes>>20)
+	}
+	return ""
+}
+
+// gatewayDiskFullError refuses start and restart before they stop or launch
+// anything when the data disk is full. A restart used to stop the healthy
+// gateway and then fail to write its pid file, which left every agent session
+// without a gateway (GAP-1813).
+func gatewayDiskFullError(verb, dataDir string) error {
+	problem := gatewayLowDiskProblem(dataDir)
+	if problem == "" {
+		return nil
+	}
+	untouched := ""
+	if verb == "restart" {
+		untouched = " Nothing was stopped."
+	}
+	if running, pid := daemon.New(dataDir).IsRunning(); running {
+		untouched += fmt.Sprintf(" The gateway (PID %d) is still running.", pid)
+	}
+	return fmt.Errorf("cannot %s the gateway: %s.%s Free some space on that disk, then run: defenseclaw-gateway %s",
+		verb, problem, untouched, verb)
+}
+
+// gatewayStartFailureDiskNote names a full disk after a failed start, whose
+// own error (a pid write, the audit store open, an agent's state database)
+// does not always say so (GAP-1813).
+func gatewayStartFailureDiskNote(dataDir string) string {
+	if problem := gatewayLowDiskProblem(dataDir); problem != "" {
+		return "; " + problem + ": free some space, then run: defenseclaw-gateway start"
+	}
+	return ""
+}

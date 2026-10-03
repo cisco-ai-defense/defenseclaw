@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
@@ -163,9 +164,8 @@ func emitDestinationCircuitTransitionV8(
 		severity = observability.SeverityHigh
 		healthState = "degraded"
 		errorCode = observability.Present("destination_circuit_open")
-		errorSummary = observability.Present(fmt.Sprintf(
-			"destination_kind=%s consecutive_failures=%d last_failure_class=%s",
-			destinationKind, consecutiveFailures, string(lastFailureClass),
+		errorSummary = observability.Present(destinationCircuitOpenSummary(
+			destinationKind, consecutiveFailures, lastFailureClass,
 		))
 	}
 
@@ -232,4 +232,37 @@ func emitDestinationCircuitTransitionV8(
 		})
 	})
 	return err
+}
+
+// destinationCircuitOpenSummary is the operator-facing reason on a
+// circuit_breaker_open alert, for example
+// "otlp export paused after 1 failure (authentication: check the API key or token)".
+func destinationCircuitOpenSummary(
+	destinationKind string,
+	consecutiveFailures uint64,
+	lastFailureClass delivery.FailureClass,
+) string {
+	failures := "failures"
+	if consecutiveFailures == 1 {
+		failures = "failure"
+	}
+	reason := string(lastFailureClass)
+	switch lastFailureClass {
+	case delivery.FailureClassAuthentication:
+		reason = "authentication: check the API key or token"
+	case delivery.FailureClassTransient:
+		reason = "the destination was unreachable or busy"
+	case delivery.FailureClassUnsafeEndpoint:
+		reason = "the endpoint is not allowed by the egress policy"
+	case delivery.FailureClassPermanentPayload:
+		reason = "the destination rejected the data"
+	}
+	kind := strings.TrimSpace(destinationKind)
+	if kind == "" {
+		kind = "telemetry"
+	}
+	if reason == "" {
+		return fmt.Sprintf("%s export paused after %d %s", kind, consecutiveFailures, failures)
+	}
+	return fmt.Sprintf("%s export paused after %d %s (%s)", kind, consecutiveFailures, failures, reason)
 }

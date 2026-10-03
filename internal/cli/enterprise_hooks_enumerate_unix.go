@@ -308,6 +308,7 @@ func runEnterpriseHooksEnumerateCycle(
 		DiscoverStaticSurfaces:  enterpriseHooksEnumerateDiscoverStaticSurfaces,
 		PreviousRefusedSurfaces: readEnterpriseHookRefusedSurfaces(current.DataDir, stderr),
 		MachineVersion:          enterprisehooks.DiscoverUnixMachineAgentVersion,
+		OutsideDiscovery:        enterprisehooks.UnixAgentOutsideDiscovery,
 		State:                   state,
 		Logger: func(subject, reason string) {
 			fmt.Fprintf(stderr, "[hook-enumerator] %s: %s\n", subject, reason)
@@ -539,6 +540,12 @@ func writeEnterpriseHookRefusedSurfaces(dataDir string, refused []enterprisehook
 	dir := managed.HookGuardianAuthorizationDir(dataDir)
 	path := filepath.Join(dir, managed.HookGuardianRefusedSurfacesFile)
 	if len(refused) == 0 {
+		// Nothing to withdraw when no list was ever published. Checking
+		// first keeps a read-only parent (EROFS on unlink) from warning on
+		// every cycle (GAP-1441).
+		if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}

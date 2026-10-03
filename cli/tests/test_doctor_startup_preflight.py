@@ -79,13 +79,15 @@ def test_doctor_renders_raw_validation_when_runtime_config_load_fails() -> None:
 
     assert result.exit_code == 1, result.output
     payload = json.loads(result.output)
-    assert payload["failed"] >= 2
+    # One problem, one failure: the Config load row only says why doctor
+    # stopped (GAP-1692).
+    assert payload["failed"] == 1
     checks = payload["checks"]
     assert any(item["label"] == "Config validation" and "guardrail.port" in item["detail"] for item in checks)
     load_failure = next(item for item in checks if item["label"] == "Config load")
-    assert load_failure["status"] == "fail"
-    assert "no startup mutation or automatic repair was attempted" in load_failure["detail"]
-    assert "defenseclaw config validate" in load_failure["detail"]
+    assert load_failure["status"] == "skip"
+    assert "nothing was changed or repaired" in load_failure["detail"]
+    assert "TypeError" not in load_failure["detail"]
     validate.assert_called_once_with()
     store.assert_not_called()
 
@@ -141,7 +143,7 @@ def test_doctor_config_load_failure_replaces_stale_green_cache(
     assert saved["schema_version"] == 2
     assert saved["outcome"] == "failed"
     assert saved["exit_code"] == 1
-    assert saved["failed"] >= 2
+    assert saved["failed"] == 1
 
 
 def test_doctor_on_an_uninitialized_install_points_to_init_only(
@@ -220,7 +222,8 @@ def test_invalid_config_guidance_does_not_claim_doctor_can_repair_it() -> None:
         ),
         patch("defenseclaw.db.Store") as store,
     ):
-        result = CliRunner().invoke(cli, ["status"])
+        # status now reports past a bad config (GAP-1788); alerts still stops.
+        result = CliRunner().invoke(cli, ["alerts"])
 
     assert result.exit_code == 1, result.output
     assert "defenseclaw config validate" in result.output

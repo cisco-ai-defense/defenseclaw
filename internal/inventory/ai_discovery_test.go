@@ -735,6 +735,43 @@ func TestContinuousDiscoveryShellHistoryFingerprintIsStable(t *testing.T) {
 	}
 }
 
+// TestContinuousDiscoveryShellHistoryHasNoLastActive: a shell-history
+// substring match says nothing about when the tool last ran, so the scan
+// must not stamp LastActiveAt with the scan time (GAP-2268).
+func TestContinuousDiscoveryShellHistoryHasNoLastActive(t *testing.T) {
+	tmp := t.TempDir()
+	home := filepath.Join(tmp, "home")
+	mustWrite(t, filepath.Join(home, ".zsh_history"), "openai chat --model gpt-4\n")
+	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+		Enabled:             true,
+		Mode:                "enhanced",
+		IncludeShellHistory: true,
+		DataDir:             filepath.Join(tmp, "data"),
+		HomeDir:             home,
+		MaxFilesPerScan:     20,
+		MaxFileBytes:        64 * 1024,
+	}, []AISignature{testAISignature()})
+	cleanupPreparedDiscoveryService(t, svc)
+
+	report, err := svc.runScan(context.Background(), true, "test")
+	if err != nil {
+		t.Fatalf("runScan: %v", err)
+	}
+	found := false
+	for _, sig := range report.Signals {
+		if sig.Detector != "shell_history" {
+			continue
+		}
+		found = true
+		if sig.LastActiveAt != nil {
+			t.Fatalf("shell_history signal %q LastActiveAt = %v, want nil", sig.Product, *sig.LastActiveAt)
+		}
+	}
+	if !found {
+		t.Fatalf("scan produced no shell_history signal: %+v", report.Signals)
+	}
+}
+
 func TestContinuousDiscoveryFullScanEmitsGone(t *testing.T) {
 	tmp := t.TempDir()
 	home := filepath.Join(tmp, "home")
@@ -1177,6 +1214,53 @@ func TestScanUserHomeKeepsOwnProcessesUnderATruncatedUserName(t *testing.T) {
 		}
 	}
 	t.Fatalf("signals = %+v, want the account's own process", report.Signals)
+}
+
+// cursor-agent runs node under its own argv[0], and Node renames the main
+// thread, so comm is "mainthread". The per-user scan still reports it, with
+// a real last_seen time (GAP-1207).
+func TestScanUserHomeFindsARenamedMainThreadByArgv0(t *testing.T) {
+	signature := AISignature{ID: "cursor", Name: "Cursor", Category: "supported_connector", Confidence: 0.95, ProcessNames: []string{"cursor", "Cursor"}}
+	stubProcessSnapshotSource(t, func() ([]processInfo, error) {
+		return []processInfo{{PID: os.Getpid(), User: "alice", Comm: "mainthread", Argv0: "cursor-agent"}}, nil
+	})
+	report := ScanUserHome(context.Background(), t.TempDir(), "alice", os.Getuid(), UserScanOptions{}, []AISignature{signature})
+	for _, sig := range report.Signals {
+		if sig.Runtime != nil && sig.Runtime.PID == os.Getpid() {
+			if sig.LastSeen.IsZero() || sig.FirstSeen.IsZero() || sig.Runtime.Comm != "cursor-agent" {
+				t.Fatalf("signal = %+v, want cursor-agent with first/last seen set", sig)
+			}
+			return
+		}
+	}
+	t.Fatalf("signals = %+v, want an active_process signal for cursor-agent", report.Signals)
+}
+
+// Cursor's `agent` alias is a symlink to .../cursor-agent; argv[0]'s basename
+// is "agent", which the catalog leaves out (ssh-agent, gpg-agent), so the
+// resolved name is what matches (GAP-1865).
+func TestScanUserHomeFindsCursorStartedThroughItsAgentAlias(t *testing.T) {
+	signature := AISignature{ID: "cursor", Name: "Cursor", Category: "supported_connector", Confidence: 0.95, ProcessNames: []string{"cursor", "Cursor"}}
+	stubProcessSnapshotSource(t, func() ([]processInfo, error) {
+		return []processInfo{
+			{PID: os.Getpid(), User: "alice", Comm: "mainthread", Argv0: "agent", Argv0Target: "cursor-agent"},
+			{PID: os.Getpid() + 1, User: "alice", Comm: "ssh-agent"},
+		}, nil
+	})
+	report := ScanUserHome(context.Background(), t.TempDir(), "alice", os.Getuid(), UserScanOptions{}, []AISignature{signature})
+	found := false
+	for _, sig := range report.Signals {
+		if sig.Runtime == nil {
+			continue
+		}
+		if sig.Runtime.PID != os.Getpid() || sig.Runtime.Comm != "cursor-agent" {
+			t.Fatalf("signal = %+v, want only the cursor-agent alias process", sig)
+		}
+		found = true
+	}
+	if !found {
+		t.Fatalf("signals = %+v, want an active_process signal for the agent alias", report.Signals)
+	}
 }
 
 // A partial per-user scan names the detector that failed. Only the process

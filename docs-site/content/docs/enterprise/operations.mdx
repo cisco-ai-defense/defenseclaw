@@ -58,6 +58,9 @@ from any shell.
 On Linux and macOS, `verify` first waits up to 5 seconds for another
 lifecycle run to finish, and holds no lock while it checks. If that run is
 still going, `verify` skips its checks and exits `75` with `lifecycle_busy`.
+`status` run as root waits the same way; if the run is still going, it
+reports the installed version but skips its checks, because that run may be
+restarting the services, and exits `75` with `lifecycle_busy`.
 The Linux verify unit accepts that exit, so a daily run that met an
 administrator's change is not left failed. On Windows, `verify` does not
 wait: while another run's transaction is pending, it fails (`1603`); run it
@@ -100,8 +103,8 @@ sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway audit export --since 2h --co
 | --- | --- |
 | `status` | The gateway's health, its subsystems, and its connectors and their modes |
 | `enterprise hooks status` | The guardian's summary, then an Enrollment section: one line per account with each connector's state from the last reconcile (enrolled, pending or failed). `--json` adds the same list as `enrollment` |
-| `audit export` | The audit records as JSONL, oldest first. `--since` and `--until` take an RFC3339 time or a duration ago (`30m`, `2h`). `--limit N` keeps the first N matching rows, or with `--newest` the N most recent ones. `--connector` keeps one agent's rows, and `--output` writes a file instead of standard output |
-| `audit findings` | The distinct scan findings that are current |
+| `audit export` | The audit records as JSONL, oldest first. `--since` and `--until` take an RFC3339 time or a duration ago (`30m`, `2h`). `--limit N` keeps the first N matching rows, or with `--newest` the N most recent ones. `--connector` keeps one agent's rows, and `--output` writes a file instead of standard output (it refuses to replace an existing file unless you pass `--force`, and reports how many lines it wrote) |
+| `audit findings` | The distinct scan findings that are current: skill, MCP, plugin, code, AIBOM and inventory scans. Guardrail decisions (hook rules, the LLM guardrail) are not tracked here; use `alerts` or `audit export` for them |
 
 On a standalone host, hook decisions, rejected connector hooks, direct
 inspect-tool calls and refused hook-socket requests carry the verified
@@ -134,7 +137,7 @@ The MDM wrapper scripts print the same document.
 | `coverage_complete` | The core services are ready (definition per OS below) |
 | `security_complete` | Everything `coverage_complete` needs, plus the extra conditions below |
 | `machine_policy.<connector>` | `ownership`, `lock`, `effective_lock`, `owned_entries`, `foreign_entries`, and any `higher_precedence` sources or `conflicts` |
-| `enrollment` | `targets`, `pending`, `failed`, `exempt` (see the note below the next table) |
+| `enrollment` | `targets`, `pending`, `failed`, `exempt` (see the note below the next table); on Windows standalone also `accounts`: each enrolled account (`account`, `sid`) with each connector's state from the guardian's last reconcile (`enrolled`, `pending` or `failed`), which status and verify also print one line per account |
 | `inspection` | `local` and `ai_defense` (see the note below the next table) |
 | `errors[]`, `warnings[]` | Each has a stable `code` and a human `message`. See [Troubleshooting](/docs/enterprise/troubleshooting) |
 | `api_port_holders[]` | Windows, with error `api_port_held`: each process other than the gateway that listens where the gateway API binds, with its `address` and `pid`, and its `image` and `account` when the account running the command can identify it |
@@ -155,8 +158,11 @@ The two summary fields are computed differently on each OS:
   always `0`.
 - **Inspection.** On Windows, `inspection.ai_defense` is `ok` when AI Defense
   is enabled in the config and the gateway is ready. It does not test the key
-  or the network. On Linux and macOS the lifecycle reads both fields from the
-  gateway's `/health`: `local` is `active`, `disabled` or `unknown`, and
+  or the network. `inspection.local` is `active` when the gateway is ready,
+  `unknown` while it is not (for example while its service is stopped), and
+  `disabled` when no deployment is installed. On Linux and macOS the
+  lifecycle reads both fields from the gateway's `/health`: `local` is
+  `active`, `disabled` or `unknown`, and
   `ai_defense` is `disabled`, `ok`, `unavailable:<code>` or `unknown` (the
   gateway did not answer). The gateway's own
   `/health` guardrail detail carries `ai_defense_available` when AI Defense
@@ -219,12 +225,16 @@ $env:DEFENSECLAW_CONFIG = 'C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml'
 - `policy verify --live` runs the real client as a user and proves that it
   loads DefenseClaw's hooks. It needs `--user`, exactly one `--connector`
   (`codex` or `claudecode`), and `--agent-binary` with the client's absolute
-  path. The default timeout is 90 seconds (`--timeout`). On Windows, run it
-  from the target user's own session.
+  path. For Codex, pass the native executable, not the npm `codex` launcher
+  (`codex.js` needs `node`, which is not on the probe's minimal `PATH`): for
+  a global npm install it is
+  `node_modules/@openai/codex/node_modules/@openai/codex-<platform>/vendor/<target>/bin/codex`.
+  The default timeout is 90 seconds (`--timeout`). On Windows, run it from
+  the target user's own session.
 
 ```bash title="Linux: live check for one user"
 sudo DEFENSECLAW_CONFIG=/etc/defenseclaw/config.yaml /opt/defenseclaw/bin/defenseclaw-gateway enterprise policy verify \
-  --live --user alice --connector codex --agent-binary /usr/local/bin/codex --json
+  --live --user alice --connector codex --agent-binary /usr/local/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex --json
 ```
 
 ## Per-user connector state

@@ -74,6 +74,7 @@ var commandCandidates = map[string][]string{
 	"dscl":             {"/usr/bin/dscl"},
 	"pkgutil":          {"/usr/sbin/pkgutil"},
 	"lsof":             {"/usr/sbin/lsof", "/usr/bin/lsof"},
+	"ps":               {"/bin/ps", "/usr/bin/ps"},
 }
 
 // ExecRunner is the production Runner.
@@ -199,6 +200,9 @@ type Env struct {
 	// connectorName, over the route the standalone plugins use, and returns
 	// the proof (see rotation.go).
 	ListenerProof func(ctx context.Context, connectorName, keyID, nonce string) (string, error)
+	// ProcessExecPath returns the executable path the kernel recorded when
+	// process pid started (macOS only; see gatewayProcesses).
+	ProcessExecPath func(pid int) (string, error)
 
 	// ProductVersion is the version of the running lifecycle binary.
 	ProductVersion string
@@ -300,6 +304,9 @@ func (e *Env) fillDefaults() {
 		e.ListenerProof = func(ctx context.Context, connectorName, keyID, nonce string) (string, error) {
 			return listenerProof(ctx, addr, connectorName, keyID, nonce)
 		}
+	}
+	if e.ProcessExecPath == nil {
+		e.ProcessExecPath = processExecPath
 	}
 	if e.Services == nil {
 		e.Services = newServiceManager(e)

@@ -11,6 +11,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -647,5 +648,47 @@ func TestEnterpriseUnverifiedVersions(t *testing.T) {
 		if err := validateV8Schema("unverified.yaml", document); (err == nil) != ok {
 			t.Fatalf("schema on %q: err = %v, want ok=%v", doc, err, ok)
 		}
+	}
+}
+
+// The Windows managed-hook lifecycle snapshot reads only listener settings
+// from the protected config, also while a rollback restores the previous
+// deployment under a new config whose rule pack the gateway service cannot
+// read. Refusing that config there failed the rollback and left every
+// service stopped (GAP-1291). Root-only: managed config trust needs a
+// root-owned path.
+func TestLoadManagedFileForLifecycleRecoverySkipsPolicyInputChecks(t *testing.T) {
+	if runtime.GOOS != "linux" || os.Geteuid() != 0 {
+		t.Skip("needs root on Linux: a managed config must sit on a root-owned path")
+	}
+	root, err := os.MkdirTemp("/var/lib", "dc-config-recovery-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	if err := os.Chmod(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pack := filepath.Join(root, "pack")
+	if err := os.Mkdir(pack, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chown(pack, 65534, 65534); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "config.yaml")
+	body := fmt.Sprintf("deployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\ndata_dir: %s\nguardrail:\n  rule_pack_dir: %s\n", root, pack)
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadFromFile(path); err == nil || !strings.Contains(err.Error(), "rule_pack_dir") {
+		t.Fatalf("strict load of a user-owned rule pack: err = %v, want the policy-input refusal", err)
+	}
+	cfg, err := LoadManagedFileForLifecycleRecovery(path)
+	if err != nil {
+		t.Fatalf("lifecycle recovery load: %v", err)
+	}
+	if cfg.Gateway.APIPort == 0 {
+		t.Fatal("lifecycle recovery load has no gateway API port")
 	}
 }

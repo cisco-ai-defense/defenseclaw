@@ -117,6 +117,19 @@ def test_systemd_root_hook_units_keep_setid_capabilities_under_a_syscall_filter(
         assert "User=root" in lines and "NoNewPrivileges=true" in lines, name
 
 
+def test_systemd_enumerator_can_publish_refused_surfaces():
+    # The enumerator writes refused-surfaces.json into the guardian data dir;
+    # under ProtectSystem=strict that dir must be writable or every cycle
+    # fails with EROFS and the gateway never sees the refusals (GAP-1441).
+    lines = _unit("defenseclaw-hook-enumerator.service")
+    assert "ProtectSystem=strict" in lines
+    assert "/var/lib/defenseclaw-hook-guardian" in _unit_values(lines, "ReadWritePaths")
+    assert "Environment=DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR=/var/lib/defenseclaw-hook-guardian" in lines
+    # The file is chowned root:defenseclaw so the gateway can read it; without
+    # CAP_CHOWN the chown fails and every hook call is refused 503 (GAP-1760).
+    assert "CAP_CHOWN" in _unit_values(lines, "CapabilityBoundingSet")
+
+
 def test_launchd_standalone_daemons():
     directory = ROOT / "packaging" / "launchd-standalone"
     labels = sorted(p.stem for p in directory.glob("*.plist"))
@@ -646,7 +659,13 @@ def _rooted(text: str, replacements: dict[str, str]) -> str:
 class _Host:
     """A temporary host: stub tools on PATH, a stub gateway and a call log."""
 
-    def __init__(self, tmp_path: Path, gateway_rc: int = 0, apply_path_active: bool = False):
+    def __init__(
+        self,
+        tmp_path: Path,
+        gateway_rc: int = 0,
+        apply_path_active: bool = False,
+        gateway_out: str = '{"schema_version":2,"ok":true}',
+    ):
         self.tmp = tmp_path
         self.bin = tmp_path / "bin"
         self.bin.mkdir()
@@ -667,7 +686,9 @@ esac""")
         for tool in ("systemd-sysusers", "systemd-tmpfiles"):
             _write_stub(self.bin, tool, f"""echo "{tool} $*" >>'{self.log}'""")
         _write_stub(self.tmp, "defenseclaw-gateway", f"""echo "gateway $*" >>'{self.log}'
-echo '{{"schema_version":2,"ok":true}}'
+cat <<'JSON'
+{gateway_out}
+JSON
 exit {gateway_rc}""")
 
     def run(self, script: str, *args: str) -> subprocess.CompletedProcess[str]:
@@ -719,6 +740,37 @@ def test_linux_postinstall_reports_a_lifecycle_problem_and_restores_the_trigger(
     assert host.calls()[-1] == f"systemctl start {APPLY_PATH}"
 
 
+# GAP-1744: dnf printed only "run verify"; the cause (a missing protected
+# credential) was only in last-package-result.json.
+# `ensure --json` writes indented JSON (Go SetIndent), so the
+# cause must be found in the multi-line form too, not only a compact line.
+@pytest.mark.parametrize("indent", [None, 2])
+def test_linux_postinstall_names_the_lifecycle_error_and_the_finish_step(tmp_path: Path, indent: int | None) -> None:
+    document = {
+        "schema_version": 2,
+        "ok": False,
+        "action": "ensure",
+        "errors": [
+            {
+                "code": "config_invalid",
+                "message": 'protected credential "galileo-api-key" is not stored; '
+                "store it with `enterprise secret set --name galileo-api-key`",
+            }
+        ],
+        "warnings": [{"code": "unmanaged_leftovers", "message": "not the cause"}],
+    }
+    separators = (",", ":") if indent is None else None
+    result_line = json.dumps(document, indent=indent, separators=separators)
+    host = _Host(tmp_path, gateway_rc=1, gateway_out=result_line)
+    result = host.run(_linux_scriptlet(host, "postinstall.sh"), "configure")
+    assert result.returncode == 0
+    assert (
+        'config_invalid: protected credential "galileo-api-key" is not stored; store it with '
+        "`enterprise secret set --name galileo-api-key`"
+    ) in result.stderr
+    assert f"finish the install with: sudo {host.gateway} enterprise linux ensure --from-package" in result.stderr
+
+
 # Preremove ran uninstall with the 5 s default and exited 0
 # on busy (75), so dpkg/rpm deleted the binaries and units while machine
 # policy, per-user hooks and the running gateway still named them.
@@ -766,6 +818,95 @@ def test_macos_pkg_postinstall_waits_for_the_lock(tmp_path: Path, rc: int) -> No
 
 MDM = ROOT / "packaging" / "mdm"
 SCHEMA = MDM / "contract" / "lifecycle-result.schema.json"
+
+
+def _macos_pkg_preinstall(host: _Host, version: str) -> str:
+    builder = (ROOT / "scripts" / "build-macos-enterprise-pkg.sh").read_text(encoding="utf-8")
+    match = re.search(r"cat >\"\$SCRIPTS/preinstall\" <<'EOF'\n(.*?)\nEOF\n", builder, re.DOTALL)
+    assert match, "the pkg preinstall heredoc was not found"
+    _write_stub(host.bin, "stat", "echo 0")  # the record and marker are root-owned
+    return _rooted(
+        match.group(1) + "\n",
+        {
+            "state=/opt/cisco/defenseclaw/lifecycle": f"state={host.state}",
+            "gateway=/opt/cisco/defenseclaw/bin/defenseclaw-gateway": f"gateway={host.gateway}",
+            "@DC_PKG_VERSION@": version,
+        },
+    )
+
+
+# GAP-1199: a refused downgrade showed only the Installer's generic error,
+# and last-package-result.json still held the previous success. The
+# refusal now rewrites the result with downgrade_refused and the next step.
+@pytest.mark.parametrize("version", ["1.0.0", "1.0.2"])
+def test_macos_pkg_preinstall_records_a_refused_downgrade(tmp_path: Path, version: str) -> None:
+    host = _Host(tmp_path)
+    host.state.mkdir()
+    result_path = host.state / "last-package-result.json"
+    result_path.write_text('{"ok":true}', encoding="utf-8")
+    (host.state / "deployment.json").write_text('{"product_version": "1.0.1"}', encoding="utf-8")
+    result = host.run(_macos_pkg_preinstall(host, version))
+    if version == "1.0.2":
+        assert result.returncode == 0, result.stderr
+        assert result_path.read_text(encoding="utf-8") == '{"ok":true}'
+        return
+    assert result.returncode == 1
+    assert str(result_path) in result.stderr
+    document = json.loads(result_path.read_text(encoding="utf-8"))
+    assert document["ok"] is False and document["installed_version"] == "1.0.1"
+    assert document["errors"][0]["code"] == "downgrade_refused"
+    assert "allow-downgrade" in document["errors"][0]["message"]
+    assert result_path.stat().st_mode & 0o077 == 0
+    try:
+        import jsonschema
+    except ImportError:
+        return
+    validator = jsonschema.Draft202012Validator(json.loads(SCHEMA.read_text(encoding="utf-8")))
+    assert not sorted(validator.iter_errors(document), key=str)
+
+
+def _validate_lifecycle_result(document: dict) -> None:
+    try:
+        import jsonschema
+    except ImportError:
+        return
+    validator = jsonschema.Draft202012Validator(json.loads(SCHEMA.read_text(encoding="utf-8")))
+    assert not sorted(validator.iter_errors(document), key=str)
+
+
+# GAP-1428: the refusal wrote a fixed document saying every service was down
+# and inspection unknown, while the installed version kept running healthy.
+# The result now carries the running deployment's status, as the installed
+# gateway prints it (indented JSON), plus the refusal.
+@pytest.mark.parametrize("standing_errors", [[], [{"code": "verify_failed", "message": "a target drifted"}]])
+def test_macos_pkg_preinstall_refusal_keeps_the_running_deployment_facts(tmp_path: Path, standing_errors: list) -> None:
+    host = _Host(tmp_path)
+    host.state.mkdir()
+    (host.state / "deployment.json").write_text('{"product_version": "1.0.6"}', encoding="utf-8")
+    service = {"name": "com.cisco.defenseclaw.gateway", "kind": "gateway", "state": "running", "pid": 42, "required": True}
+    status = {
+        "schema_version": 2, "ok": not standing_errors, "action": "status", "noop": False, "profile": "standalone",
+        "platform": "darwin", "product_version": "1.0.6", "installed_version": "1.0.6", "installed": True,
+        "transaction_pending": False, "services": [service],
+        "readiness": {"gateway": True, "guardian": True, "enumerator": True, "sensor_helper": True},
+        "inspection": {"local": "active", "ai_defense": "disabled"}, "machine_policy": {},
+        "enrollment": {"targets": 2, "pending": 0, "failed": 0, "exempt": 0},
+        "coverage_complete": True, "security_complete": True, "errors": standing_errors,
+        "exit_code": 1 if standing_errors else 0,
+    }
+    (tmp_path / "status.json").write_text(json.dumps(status, indent=2) + "\n", encoding="utf-8")
+    _write_stub(host.tmp, "defenseclaw-gateway", f"""echo "gateway $*" >>'{host.log}'
+cat '{tmp_path / "status.json"}'""")
+    result = host.run(_macos_pkg_preinstall(host, "1.0.5"))
+    assert result.returncode == 1
+    assert host.calls() == ["gateway enterprise macos status --json"]
+    document = json.loads((host.state / "last-package-result.json").read_text(encoding="utf-8"))
+    assert document["ok"] is False and document["action"] == "ensure" and document["exit_code"] == 1
+    assert document["product_version"] == "1.0.5" and document["installed_version"] == "1.0.6"
+    assert document["readiness"] == status["readiness"] and document["services"] == [service]
+    assert document["inspection"]["local"] == "active"
+    assert [e["code"] for e in document["errors"]] == ["downgrade_refused"] + [e["code"] for e in standing_errors]
+    _validate_lifecycle_result(document)
 
 
 def _shell_function(text: str, name: str) -> str:
@@ -898,3 +1039,77 @@ def test_linux_preremove_keeps_its_result_only_when_the_uninstall_failed(tmp_pat
         assert (host.state / "last-package-result.json").is_file()
     else:
         assert not host.state.exists()
+
+
+# GAP-1254, GAP-1258: the wrapper applied the config before it stored
+# --secret-name, so a config that references the credential never applied,
+# and the store then failed busy against the apply its own config change
+# started. It now stores the credential first and both steps wait.
+@pytest.mark.parametrize("os_dir", ["linux", "macos"])
+@pytest.mark.parametrize("secret_rc", [0, 75])
+def test_unix_wrapper_stores_the_credential_before_it_applies_the_config(tmp_path: Path, os_dir: str, secret_rc: int) -> None:
+    wrapper = (MDM / os_dir / "defenseclaw-enterprise.sh").read_text(encoding="utf-8")
+    functions = "\n".join(_shell_function(wrapper, name) for name in ("dc_run_lifecycle", "dc_main"))
+    log = tmp_path / "calls.log"
+    gateway = tmp_path / "defenseclaw-gateway"
+    gateway.write_text(f"""#!/bin/sh
+echo "$*" >>'{log}'
+case "$2" in secret) cat >/dev/null; echo secret-busy >&2; exit {secret_rc} ;; esac
+echo '{{"ok":true}}'
+""", encoding="utf-8")
+    gateway.chmod(0o755)
+    (tmp_path / "config.yaml").write_text("x: 1\n", encoding="utf-8")
+    (tmp_path / "key").write_text("value\n", encoding="utf-8")
+    group = "macos" if os_dir == "macos" else "linux"
+    script = f"""
+DC_SCRIPT_OS={"darwin" if os_dir == "macos" else "linux"}
+DC_EXIT_FAILURE=1 DC_EXIT_INVALID=2 DC_MAX_CONFIG_BYTES=4096 DC_MAX_SECRET_BYTES=4096
+dc_parse_args() {{ DC_ACTION=ensure DC_CONFIG_STDIN=0 DC_CONFIG_FILE='{tmp_path}/config.yaml' DC_SECRET_NAME=k DC_SECRET_STDIN=0 DC_SECRET_FILE='{tmp_path}/key' DC_SOURCE='' DC_SOURCE_URL='' DC_PRODUCT_VERSION=''; }}
+dc_platform() {{ echo "$DC_SCRIPT_OS"; }}
+dc_layout() {{ DC_GATEWAY='{gateway}' DC_OS_GROUP={group}; }}
+dc_validate_args() {{ :; }}
+id() {{ echo 0; }}
+mktemp() {{ command mktemp -d '{tmp_path}/stage.XXXXXX'; }}
+dc_cleanup() {{ :; }}
+dc_stat_uid() {{ echo 0; }}
+dc_log() {{ :; }}
+dc_trusted_path() {{ :; }}
+dc_stage_file() {{ cp "$1" "$2"; }}
+dc_annotate_package_step() {{ :; }}
+dc_emit_result() {{ cat "$DC_RESULT"; }}
+dc_fail_result() {{ echo "FAIL $2: $3"; exit "$1"; }}
+{functions}
+dc_main
+"""
+    result = subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=60)
+    calls = log.read_text(encoding="utf-8").splitlines()
+    assert result.returncode == secret_rc, result.stdout + result.stderr
+    assert calls[0] == "enterprise secret set --name k --from-stdin --lock-wait 10m --json"
+    if secret_rc:
+        assert calls == calls[:1], calls
+        assert "FAIL mdm_secret_failed" in result.stdout and "config was not applied" in result.stdout
+        return
+    assert len(calls) == 2 and re.fullmatch(
+        rf"enterprise {group} ensure --reason mdm --lock-wait 10m --config=.*/stage\.\w+/config\.yaml --json", calls[1]
+    ), calls
+
+
+
+# GAP-2331: the pkg postinstall logged only "did not apply (exit 1); see
+# last-package-result.json"; install.log must name the first error and the
+# finish step, as the Linux postinstall does (GAP-1744).
+def test_macos_pkg_postinstall_names_the_lifecycle_error_and_the_finish_step(tmp_path: Path) -> None:
+    document = {
+        "schema_version": 2,
+        "ok": False,
+        "errors": [{"code": "config_invalid", "message": 'config guardrail.rule_pack_dir "/x/cert-s3" does not exist'}],
+    }
+    host = _Host(tmp_path, gateway_rc=1, gateway_out=json.dumps(document, indent=2))
+    result = host.run(_macos_pkg_postinstall(host))
+    assert result.returncode == 1
+    assert 'DefenseClaw: config_invalid: config guardrail.rule_pack_dir "/x/cert-s3" does not exist' in result.stderr
+    # GAP-2359: a failed install records no pkg receipt and ensure adds
+    # none, so the finish step is to install the pkg again.
+    assert "fix that, then install the package again" in result.stderr
+    assert "records the pkg receipt" in result.stderr
+    assert f"sudo {host.gateway} enterprise macos ensure --from-package also finishes the install, but records no pkg receipt" in result.stderr

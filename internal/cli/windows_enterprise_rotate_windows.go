@@ -33,7 +33,7 @@ import (
 var errWindowsCredentialRotationUnavailable = errors.New(
 	"rotate-credentials is not available for Windows managed deployments yet: the Windows lifecycle cannot move " +
 		"every user to a new per-user credential key before the key takes effect, because its hook guardian " +
-		"renders a user's credentials only while that user is signed in. Nothing was changed")
+		"renders a user's credentials only while that user is signed in. Nothing was changed.")
 
 func newWindowsRotateCredentialsCommand() *cobra.Command {
 	return &cobra.Command{

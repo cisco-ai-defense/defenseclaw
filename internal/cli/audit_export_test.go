@@ -250,6 +250,32 @@ func TestRunAuditExport_ConnectorFilter(t *testing.T) {
 			t.Fatalf("non-codex row leaked through filter: %s", ln)
 		}
 	}
+
+	// GAP-1398: a second export to the same file names the way out, and
+	// --force overwrites it.
+	err = runAuditExport(nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "already exists; pass --force") {
+		t.Fatalf("second export error = %v, want an 'already exists; pass --force' hint", err)
+	}
+	prevForce := auditExportForce
+	t.Cleanup(func() { auditExportForce = prevForce })
+	auditExportForce = true
+	if err := runAuditExport(nil, nil); err != nil {
+		t.Fatalf("runAuditExport --force: %v", err)
+	}
+	if raw2, _ := os.ReadFile(outPath); string(raw2) != string(raw) {
+		t.Fatalf("--force output differs:\n%s\nvs\n%s", raw2, raw)
+	}
+}
+
+func TestLineCountWriterCountsLines(t *testing.T) {
+	var buf strings.Builder
+	lc := &lineCountWriter{w: &buf}
+	_, _ = lc.Write([]byte("a\nb\n"))
+	_, _ = lc.Write([]byte("c\n"))
+	if lc.lines != 3 {
+		t.Fatalf("lines = %d, want 3", lc.lines)
+	}
 }
 
 // sqlNullableConnector maps an empty connector to a SQL NULL so test rows
@@ -286,7 +312,7 @@ func TestBuildAuditEventLineIncludesStructuredPayload(t *testing.T) {
 		"shell",
 		"tool-1",
 		"policy-1",
-		"codex",
+		"codex", "",
 		version.Provenance{SchemaVersion: 7, ContentHash: "hash-1", Generation: 2, BinaryVersion: "0.0.0-test"},
 	)
 	if err != nil {
@@ -386,5 +412,55 @@ func TestManagedAuditStoreOpensReadOnly(t *testing.T) {
 	managedAuditStoreTrustCheck = func(string) error { return errors.New("owner uid 1000 is not trusted") }
 	if _, err := openManagedAuditStoreReadOnly(path); err == nil || !strings.Contains(err.Error(), "managed audit store") {
 		t.Fatalf("an untrusted managed audit store opened: %v", err)
+	}
+}
+
+// GAP-2203: a v8 runtime record keeps the action of its telemetry family
+// (telemetry-destination, circuit_breaker_open, config.change.applied, and
+// the llm_prompt, lifecycle and correlation rows of GAP-2220);
+// only legacy rows with an unregistered action are rewritten to "action".
+func TestBuildAuditEventLineKeepsV8RecordAction(t *testing.T) {
+	build := func(action, eventName string) map[string]any {
+		t.Helper()
+		line, err := buildAuditEventLine(
+			"00000000-0000-0000-0000-000000000002", "2026-10-03T04:00:00Z", action,
+			"otlp", "destination=otlp", "HIGH", "run-1", "",
+			"", "", "gateway.destination_circuit",
+			"", "", "", "",
+			sql.NullInt64{Int64: 8, Valid: true}, "", sql.NullInt64{}, "",
+			"", "", "", "",
+			"", eventName,
+			version.Provenance{SchemaVersion: 8},
+		)
+		if err != nil {
+			t.Fatalf("buildAuditEventLine(%q, %q): %v", action, eventName, err)
+		}
+		var ev map[string]any
+		if err := json.Unmarshal(line, &ev); err != nil {
+			t.Fatal(err)
+		}
+		return ev
+	}
+	for action, eventName := range map[string]string{
+		"circuit_breaker_open":  "subsystem.degraded",
+		"telemetry-destination": "subsystem.degraded",
+		"config.change.applied": "config.change.applied",
+		// GAP-2220: OpenClaw event-router and correlation rows.
+		"llm_prompt":                       "model.request",
+		"llm_response":                     "model.response",
+		"lifecycle":                        "agent.run.observed",
+		"tool_invocation":                  "tool.invocation.requested",
+		"correlation.relationship.changed": "correlation.relationship.changed",
+	} {
+		ev := build(action, eventName)
+		if ev["action"] != action || ev["details"] != "destination=otlp" {
+			t.Errorf("v8 record %q exported action=%v details=%v, want the action kept", action, ev["action"], ev["details"])
+		}
+	}
+	for _, eventName := range []string{"", "legacy.audit.action"} {
+		ev := build("circuit_breaker_open", eventName)
+		if ev["action"] != "action" || ev["details"] != "legacy_action=circuit_breaker_open | destination=otlp" {
+			t.Errorf("legacy row (event_name %q) exported action=%v details=%v", eventName, ev["action"], ev["details"])
+		}
 	}
 }

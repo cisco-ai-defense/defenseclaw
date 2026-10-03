@@ -300,6 +300,10 @@ const (
 	ActionRegistryAdd              Action = "registry-add"
 	ActionRegistryEdit             Action = "registry-edit"
 	ActionRegistryRemove           Action = "registry-remove"
+	ActionRegistrySync             Action = "registry-sync"
+	ActionRegistryRequire          Action = "registry-require"
+	ActionRegistryApprove          Action = "registry-approve"
+	ActionRegistryReject           Action = "registry-reject"
 	ActionScanEnforced             Action = "scan-enforced"
 	ActionScanFinding              Action = "scan-finding"
 	ActionDismissAlert             Action = "dismiss-alert"
@@ -318,6 +322,7 @@ const (
 	ActionPluginEnable             Action = "plugin-enable"
 	ActionPluginQuarantine         Action = "plugin-quarantine"
 	ActionPluginRestore            Action = "plugin-restore"
+	ActionPluginUnblock            Action = "plugin-unblock"
 	ActionBlockMCP                 Action = "block-mcp"
 	ActionAllowMCP                 Action = "allow-mcp"
 	ActionMCPUnblock               Action = "mcp-unblock"
@@ -515,6 +520,10 @@ func AllActions() []Action {
 		ActionRegistryAdd,
 		ActionRegistryEdit,
 		ActionRegistryRemove,
+		ActionRegistrySync,
+		ActionRegistryRequire,
+		ActionRegistryApprove,
+		ActionRegistryReject,
 		ActionScanEnforced,
 		ActionScanFinding,
 		ActionDismissAlert,
@@ -533,6 +542,7 @@ func AllActions() []Action {
 		ActionPluginEnable,
 		ActionPluginQuarantine,
 		ActionPluginRestore,
+		ActionPluginUnblock,
 		ActionBlockMCP,
 		ActionAllowMCP,
 		ActionMCPUnblock,

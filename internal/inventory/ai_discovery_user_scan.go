@@ -233,6 +233,8 @@ func ScanUserHome(ctx context.Context, home, account string, uid int, opts UserS
 	scanID := newScanID()
 	signals, stats := svc.scanSignals(ctx, scanID, &aiDiscoveryScanObservation{}, true, nil)
 	out := make([]AISignal, 0, len(signals))
+	// No state store stamps these here; an unset time read as 0001-01-01.
+	seen := time.Now().UTC()
 	for _, sig := range signals {
 		if sig.Detector == "application" || !evidenceInsideHome(sig.Evidence, homeRoots) {
 			continue
@@ -251,6 +253,12 @@ func ScanUserHome(ctx context.Context, home, account string, uid int, opts UserS
 		sig.SignalID = stableSignalID(sig.Fingerprint)
 		sig.Source = AISourceUserScan
 		sig.State = AIStateSeen
+		if sig.FirstSeen.IsZero() {
+			sig.FirstSeen = seen
+		}
+		if sig.LastSeen.IsZero() {
+			sig.LastSeen = seen
+		}
 		out = append(out, sig)
 	}
 	if len(out) > MaxUserScanSignals {
@@ -465,6 +473,18 @@ func (s *ContinuousDiscoveryService) detectUserScans(now time.Time) ([]AISignal,
 		}
 	}
 	return out, files, errs
+}
+
+// ReadUserScanRecord reads one spool record (<uid>.json) with the checks the
+// gateway applies: a root-owned regular file within the size limit, the
+// current schema, and the uid its file name gives. The administrator's
+// discovery view reads the spool with it.
+func ReadUserScanRecord(path string) (UserScanRecord, error) {
+	record, err := readUserScanRecord(path)
+	if err == nil && strconv.Itoa(record.UID)+".json" != filepath.Base(path) {
+		err = errors.New("the record names another uid")
+	}
+	return record, err
 }
 
 func readUserScanRecord(path string) (UserScanRecord, error) {

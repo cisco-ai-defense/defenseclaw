@@ -88,7 +88,7 @@ func writeMachineVersion(w io.Writer) error {
 	})
 }
 
-func rootPersistentPreRunE(cmd *cobra.Command, _ []string) error {
+func rootPersistentPreRunE(cmd *cobra.Command, _ []string) (err error) {
 	if versionJSON {
 		return nil
 	}
@@ -109,6 +109,14 @@ func rootPersistentPreRunE(cmd *cobra.Command, _ []string) error {
 	// deployment pin, and before the config load and audit store open that
 	// would create ~/.defenseclaw/audit.db.
 	if cmd != nil && !cmd.HasParent() {
+		// Stamp gateway.log before the config load and the audit store open
+		// write to it, so their lines carry a time too (GAP-2109).
+		startDaemonLogStamp()
+		defer func() {
+			if err != nil {
+				stopDaemonLogStamp()
+			}
+		}()
 		if err := refuseGatewayLifecycleOnManagedHost(); err != nil {
 			return err
 		}
@@ -123,7 +131,6 @@ func rootPersistentPreRunE(cmd *cobra.Command, _ []string) error {
 	}
 	activeObservabilityV8Startup = nil
 	loadDotEnvIntoOS(filepath.Join(config.DefaultDataPath(), ".env"))
-	var err error
 	cfgPath := config.ConfigPath()
 	cfg, activeObservabilityV8Startup, err = loadGatewayConfigV8(cfgPath)
 	if err != nil {
@@ -165,15 +172,22 @@ func rootPersistentPreRunE(cmd *cobra.Command, _ []string) error {
 			return fmt.Errorf("failed to open audit store: %w", err)
 		}
 	} else {
-		auditStore, err = audit.NewStore(cfg.AuditDB)
+		auditStore, err = openCommandAuditStore(cfg.AuditDB)
 		if err != nil {
-			return fmt.Errorf("failed to open audit store: %w", err)
-		}
-		if err := auditStore.Init(); err != nil {
-			return fmt.Errorf("failed to init audit store: %w", err)
+			if cmd == nil || cmd.Annotations[auditOptionalAnnotation] != "true" {
+				return err
+			}
+			// Connector teardown and verify never write audit events. A
+			// damaged audit DB must not block restoring the agent's config
+			// (uninstall aborted on it, GAP-1048).
+			fmt.Fprintf(cmd.ErrOrStderr(), "warning: %v; continuing without the audit store\n", err)
+			auditStore = nil
 		}
 	}
-	auditLog = audit.NewLogger(auditStore)
+	auditLog = nil
+	if auditStore != nil {
+		auditLog = audit.NewLogger(auditStore)
+	}
 	installCorrelator(auditStore, os.Stderr)
 	if resolved := filepath.Join(cfg.DataDir, ".env"); resolved != filepath.Join(config.DefaultDataPath(), ".env") {
 		loadDotEnvIntoOS(resolved)
@@ -181,14 +195,39 @@ func rootPersistentPreRunE(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
+// auditOptionalAnnotation marks a subcommand that writes no audit events, so
+// an audit store that does not open is a warning instead of an error.
+const auditOptionalAnnotation = "defenseclaw.audit-optional"
+
+// openCommandAuditStore opens and initializes the audit store for a CLI
+// subcommand (the daemon uses audit.OpenDaemonStore instead).
+func openCommandAuditStore(path string) (*audit.Store, error) {
+	store, err := audit.NewStore(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open audit store: %w", err)
+	}
+	if err := store.Init(); err != nil {
+		store.Close()
+		return nil, fmt.Errorf("failed to init audit store: %w", err)
+	}
+	return store, nil
+}
+
 var rootCmd = &cobra.Command{
 	Use:   "defenseclaw-gateway",
 	Short: "DefenseClaw gateway sidecar daemon",
-	Long: `DefenseClaw gateway sidecar — connects to the OpenClaw gateway WebSocket,
-monitors tool_call and tool_result events, enforces policy in real time,
-and exposes a local REST API for the Python CLI.
+	Long: `DefenseClaw gateway sidecar - the per-user policy runtime. It answers the
+hook calls of connected agents (Claude Code, Codex, Cursor, ...), runs the
+guardrail proxy for LLM traffic, writes the audit log, and exposes the local
+REST API used by the defenseclaw CLI and TUI. With OpenClaw configured it also
+monitors the OpenClaw gateway WebSocket.
 
-Run without arguments to start the sidecar daemon.`,
+On a managed enterprise host it runs as a system service for every enrolled
+account; administrators use 'defenseclaw-gateway enterprise linux|macos|windows'
+(status, verify, repair, ...).
+
+Run without arguments to start the sidecar daemon in the foreground; use
+'defenseclaw-gateway start' to run it in the background.`,
 	PersistentPreRunE: rootPersistentPreRunE,
 	PersistentPostRun: func(_ *cobra.Command, _ []string) {
 		if auditLog != nil {
@@ -199,6 +238,8 @@ Run without arguments to start the sidecar daemon.`,
 		}
 	},
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// Drain the gateway.log stamper before cobra prints an error.
+		defer stopDaemonLogStamp()
 		if versionJSON {
 			return writeMachineVersion(cmd.OutOrStdout())
 		}
@@ -398,7 +439,14 @@ func ExecuteContext(ctx context.Context) int {
 		ctx = context.Background()
 	}
 	addManagedWindowsSetupAnswer(rootCmd)
+	addManagedHostHelp(rootCmd)
+	installUsageArgChecks(rootCmd)
+	pendingUnknownSubcommand = nil
 	err := rootCmd.ExecuteContext(ctx)
+	if err == nil && pendingUnknownSubcommand != nil {
+		err, pendingUnknownSubcommand = pendingUnknownSubcommand, nil
+		rootCmd.PrintErrln(rootCmd.ErrPrefix(), err.Error())
+	}
 	if err == nil {
 		return 0
 	}
@@ -412,7 +460,15 @@ func ExecuteContext(ctx context.Context) int {
 		return rc
 	}
 	// integration-branch withExitCode helper.
-	return commandExitCode(err)
+	if rc := commandExitCode(err); rc != 1 {
+		return rc
+	}
+	// An unknown top-level command is a usage error, as in the Python CLI
+	// (GAP-1549).
+	if isUnknownRootCommand(rootCmd, err) {
+		return 2
+	}
+	return 1
 }
 
 // exitCodeFor is the pure error-to-int mapping for the scrub subcommand.

@@ -11,13 +11,13 @@
 # CLI to be the exact symlink for this checkout, then atomically records source
 # ownership so a later same-checkout rebuild stays idempotent. `ensure-dir`
 # reserves the source-owned install directory; `publish-cli`,
-# `publish-gateway`, and `publish-acp` perform create-new publication under
-# that claim.
+# `publish-gateway`, `publish-acp`, and (Windows builds only) `publish-hook`
+# perform create-new publication under that claim.
 
 set -euo pipefail
 
 usage() {
-    echo "usage: $0 <check|claim|ensure-dir|publish-cli|publish-gateway|publish-acp> REPO_ROOT INSTALL_DIR VENV_BIN CLI_NAME GATEWAY_NAME" >&2
+    echo "usage: $0 <check|claim|ensure-dir|publish-cli|publish-gateway|publish-acp|publish-hook> REPO_ROOT INSTALL_DIR VENV_BIN CLI_NAME GATEWAY_NAME" >&2
     exit 64
 }
 
@@ -56,10 +56,10 @@ fi
 
 DEV_RECLAIM_SOURCE=0
 case "${REQUESTED_MODE}" in
-    check|claim|ensure-dir|publish-cli|publish-gateway|publish-acp)
+    check|claim|ensure-dir|publish-cli|publish-gateway|publish-acp|publish-hook)
         MODE="${REQUESTED_MODE}"
         ;;
-    dev-check|dev-claim|dev-ensure-dir|dev-publish-cli|dev-publish-gateway|dev-publish-acp)
+    dev-check|dev-claim|dev-ensure-dir|dev-publish-cli|dev-publish-gateway|dev-publish-acp|dev-publish-hook)
         DEV_RECLAIM_SOURCE=1
         MODE="${REQUESTED_MODE#dev-}"
         ;;
@@ -71,20 +71,38 @@ FOREIGN_INSTALL=0
 refuse() {
     echo "error: source install refused: $1" >&2
     case "${MODE}" in
-        publish-gateway|publish-acp|claim)
+        publish-gateway|publish-acp|publish-hook|claim)
             echo "This step changed nothing; earlier make all steps may already have published the CLI." >&2
             ;;
         *) echo "No installed files or services were changed." >&2 ;;
     esac
     echo "Release installs upgrade with: defenseclaw upgrade (or re-run the release install.sh / install.ps1)." >&2
     if [[ "${FOREIGN_INSTALL}" -eq 1 && "${IS_WINDOWS}" -eq 0 ]]; then
-        echo "To develop from this checkout instead, remove the installed binaries (this keeps ~/.defenseclaw: config, audit log and secrets), then build again:" >&2
-        echo "  defenseclaw uninstall --binaries --yes && make all" >&2
+        echo "To develop from this checkout instead, stop the gateway and remove the installed binaries (this keeps ~/.defenseclaw: config, audit log and secrets), then build again:" >&2
+        if [[ -f "${INSTALL_DIR:-}/defenseclaw-uv.sha256" ]]; then
+            # The uninstall removes the uv the release installer recorded, and
+            # make all needs uv (GAP-1783). Without its record uv stays.
+            echo "  defenseclaw-gateway stop; rm -f '${INSTALL_DIR}/defenseclaw-uv.sha256'; defenseclaw uninstall --binaries --yes && make all" >&2
+            echo "(Removing defenseclaw-uv.sha256 keeps the uv the release installer added; make all needs it.)" >&2
+        else
+            echo "  defenseclaw-gateway stop; defenseclaw uninstall --binaries --yes && make all" >&2
+        fi
+        # A 0.8.x uninstall can time out on every retry; the direct teardown
+        # of the connector it names finishes in seconds (GAP-2001).
+        echo "If the uninstall stops on a connector teardown timeout (older releases with a large audit log), tear that connector down directly, then run the uninstall again:" >&2
+        echo "  defenseclaw-gateway connector teardown --connector <name> --data-dir '${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}'" >&2
     elif [[ "${FOREIGN_INSTALL}" -eq 1 ]]; then
         # Windows finishes removing binaries a moment after the CLI exits.
         echo "To develop from this checkout instead, remove the installed binaries (this keeps ~/.defenseclaw: config, audit log and secrets), wait a few seconds, then build again:" >&2
-        echo "  defenseclaw.cmd uninstall --binaries --yes" >&2
-        echo "  make all" >&2
+        if [[ -f "${INSTALL_DIR:-}/defenseclaw-uv.sha256" ]]; then
+            # As above: keep the uv install.ps1 recorded (GAP-1783, GAP-1843).
+            echo "  rm -f '${INSTALL_DIR}/defenseclaw-uv.sha256'; defenseclaw.cmd uninstall --binaries --yes" >&2
+            echo "  make all" >&2
+            echo "(Removing defenseclaw-uv.sha256 keeps the uv the release installer added; make all needs it.)" >&2
+        else
+            echo "  defenseclaw.cmd uninstall --binaries --yes" >&2
+            echo "  make all" >&2
+        fi
     else
         echo "Developer state already owned by this exact checkout may use 'make all'; otherwise keep the checkout and state unchanged, use an isolated fresh developer HOME/install directory, or contact DefenseClaw support." >&2
     fi
@@ -162,6 +180,16 @@ fi
 readonly ACP_NAME
 readonly ACP_PATH="${INSTALL_DIR}/${ACP_NAME}"
 readonly EXPECTED_ACP="${REPO_ROOT}/${ACP_NAME}"
+# Windows builds also ship the GUI-subsystem hook launcher next to the
+# gateway; connector hooks registered by init point at that path. Unix hooks
+# run the gateway itself, so there is no per-user hook launcher there.
+HOOK_NAME=""
+if [[ "${GATEWAY_NAME}" == *.exe ]]; then
+    HOOK_NAME="${GATEWAY_NAME%-gateway.exe}-hook.exe"
+fi
+readonly HOOK_NAME
+readonly HOOK_PATH="${INSTALL_DIR}/${HOOK_NAME}"
+readonly EXPECTED_HOOK="${REPO_ROOT}/${HOOK_NAME}"
 readonly MANAGED_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
 readonly PATH_COMMAND="${CLI_NAME%.exe}"
 readonly PUBLISH_HELPER="${REPO_ROOT}/scripts/source-install-publish.py"
@@ -169,6 +197,7 @@ readonly PUBLISH_MODULE="${REPO_ROOT}/cli/defenseclaw/install_publish.py"
 readonly SOURCE_IDENTITY_HELPER="${REPO_ROOT}/scripts/source_release_identity.py"
 VERIFIED_GATEWAY_DIGEST=""
 VERIFIED_ACP_DIGEST=""
+VERIFIED_HOOK_DIGEST=""
 VERIFIED_MARKER_DIGEST=""
 SOURCE_RELEASE=""
 SOURCE_INSTALL_COMPATIBILITY_EPOCH=""
@@ -241,6 +270,23 @@ bind_dev_acp() {
     fi
     [[ "${VERIFIED_ACP_DIGEST}" =~ ^[0-9a-f]{64}$ ]] \
         || refuse "the developer-owned ACP guard returned an invalid digest"
+}
+
+bind_dev_hook() {
+    [[ -n "${HOOK_NAME}" ]] || return 0
+    [[ -e "${HOOK_PATH}" || -L "${HOOK_PATH}" ]] || return 0
+    if ! VERIFIED_HOOK_DIGEST="$(sha256_regular "${HOOK_PATH}" --require-executable)"; then
+        refuse "the developer-owned hook launcher is missing or no longer a regular executable"
+    fi
+    [[ "${VERIFIED_HOOK_DIGEST}" =~ ^[0-9a-f]{64}$ ]] \
+        || refuse "the developer-owned hook launcher returned an invalid digest"
+}
+
+# The ACP guard and the Windows hook launcher are published beside the gateway
+# under the same ownership claim.
+bind_dev_companions() {
+    bind_dev_acp
+    bind_dev_hook
 }
 
 check_owner() {
@@ -340,7 +386,7 @@ check_owner() {
 
     if [[ "${marker_owned}" -eq 1 ]]; then
         check_recorded_gateway "${marker_gateway_digest}"
-        bind_dev_acp
+        bind_dev_companions
     elif [[ "${cli_owned}" -eq 1 ]]; then
         # A markerless exact CLI can be a first-install crash. Direct install
         # targets still fail closed when managed state exists because the
@@ -351,14 +397,14 @@ check_owner() {
         if [[ "${DEV_RECLAIM_SOURCE}" -eq 1 \
            && ( "${marker_reclaim}" -eq 1 || -e "${MANAGED_HOME}" || -L "${MANAGED_HOME}" ) ]]; then
             bind_dev_gateway
-            bind_dev_acp
+            bind_dev_companions
         elif [[ -e "${MANAGED_HOME}" || -L "${MANAGED_HOME}" ]]; then
             refuse "managed state exists beside a markerless source CLI, so its original release identity is unknowable"
         elif [[ -e "${GATEWAY_PATH}" || -L "${GATEWAY_PATH}" ]]; then
             check_gateway_claim
-            bind_dev_acp
+            bind_dev_companions
         else
-            bind_dev_acp
+            bind_dev_companions
         fi
     elif [[ "${owned}" -ne 1 ]]; then
         if [[ -e "${GATEWAY_PATH}" || -L "${GATEWAY_PATH}" ]]; then
@@ -366,6 +412,9 @@ check_owner() {
         fi
         if [[ -e "${ACP_PATH}" || -L "${ACP_PATH}" ]]; then
             refuse_foreign "an unowned ACP guard already exists at ${ACP_PATH}"
+        fi
+        if [[ -n "${HOOK_NAME}" ]] && [[ -e "${HOOK_PATH}" || -L "${HOOK_PATH}" ]]; then
+            refuse_foreign "an unowned hook launcher already exists at ${HOOK_PATH}"
         fi
         # `make all` is the explicit developer takeover surface. Existing
         # user state alone is not evidence of a conflicting executable and is
@@ -473,6 +522,27 @@ case "${MODE}" in
         fi
         python3 "${PUBLISH_HELPER}" "${publish_args[@]}" \
             || refuse "the source ACP guard destination changed after preflight"
+        ;;
+    publish-hook)
+        [[ -n "${HOOK_NAME}" ]] \
+            || refuse "the hook launcher is published only for Windows builds"
+        if ! SOURCE_HOOK_DIGEST="$(sha256_regular "${EXPECTED_HOOK}" --require-executable)"; then
+            refuse "this checkout's built hook launcher is unavailable for publication"
+        fi
+        readonly SOURCE_HOOK_DIGEST
+        if [[ -e "${HOOK_PATH}" || -L "${HOOK_PATH}" ]]; then
+            [[ -n "${VERIFIED_HOOK_DIGEST}" ]] \
+                || refuse "the installed hook launcher was not bound to the completed ownership check"
+        fi
+        publish_args=(
+            regular "${EXPECTED_HOOK}" "${HOOK_PATH}"
+            --expected-source-sha256 "${SOURCE_HOOK_DIGEST}"
+        )
+        if [[ -n "${VERIFIED_HOOK_DIGEST}" ]]; then
+            publish_args+=(--expected-current-sha256 "${VERIFIED_HOOK_DIGEST}")
+        fi
+        python3 "${PUBLISH_HELPER}" "${publish_args[@]}" \
+            || refuse "the source hook launcher destination changed after preflight"
         ;;
     claim)
         if [[ "${IS_WINDOWS}" -eq 1 ]]; then

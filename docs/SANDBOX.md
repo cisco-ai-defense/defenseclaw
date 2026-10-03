@@ -623,18 +623,21 @@ Hook handlers then treat a sandbox request differently from a host request
 - Nothing runs git or a subprocess scanner against the agent-writable tree on
   the host.
 - A verdict that is not a plain allow carries a plain reason
-  (`internal/gateway/sandbox_verdict_reason.go`), for example
-  `Blocked by DefenseClaw rule <ID>: <title>. <what to do instead>`. It is
+  (`internal/gateway/sandbox_verdict_reason.go`) in the words a host hook
+  uses for the same rule, for example `DefenseClaw policy blocked this action
+  (rule <ID>: <title>). Do not retry it in another form.` or `DefenseClaw
+  policy needs your confirmation for this action (rule <ID>: <title>).` It is
   built only from the static metadata of the deciding rules, looked up by rule
   ID in the connector's guardrail catalog and the built-in CodeGuard rules:
-  the ID, the title, and a remediation for the rule's category (CodeGuard
-  rules carry their own). A rule-pack title that its own rule or a secret
-  rule would match is left out, and so are IDs no catalog knows. The reason
-  never quotes matched content, whatever the redaction policy, so the agent
-  can adapt instead of seeing `<redacted len=… sha=…>`. The same text becomes
-  the sandbox's `last_blocked` and its `tool.blocked` activity entry; the
-  audit sinks keep the source reason and redact it as before. Finding labels
-  are left out of the response body; the rule IDs travel in `rule_ids`.
+  the ID and the title. A rule-pack title that its own rule or a secret rule
+  would match is left out, and so are IDs no catalog knows. The reason never
+  quotes matched content, whatever the redaction policy, so the agent can
+  adapt instead of seeing `<redacted len=… sha=…>`. The same text becomes the
+  sandbox's `last_blocked` and the reason of its `tool.blocked` activity
+  entry, whose line names the rule only (`✗ Bash blocked by DefenseClaw:
+  <ID> (<title>)`); the audit sinks keep the source reason and redact it as
+  before. Finding labels are left out of the response body; the rule IDs
+  travel in `rule_ids`.
 - An unblock also lifts DefenseClaw's destination rules for that host
   (`internal/gateway/sandbox_egress_unblock.go`, #954). The egress proxy and
   these rules are two controls over one destination: the feed refuses

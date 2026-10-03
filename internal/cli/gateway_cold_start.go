@@ -8,7 +8,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 // A per-user Linux or macOS gateway has no service unit, so nothing starts it
@@ -29,11 +32,17 @@ const (
 	gatewayStartLockName = "gateway.start.lock"
 	// installLockName is install.sh's upgrade lock directory.
 	installLockName = ".install.lock"
+	// gatewayLoginPathName records the PATH of the last start or restart run
+	// from the account's own session. A hook cold start runs with the hook's
+	// locked-down PATH, and the gateway it starts needs the account's PATH to
+	// run the agents' CLIs (Codex's launcher needs node, often outside /usr/bin).
+	gatewayLoginPathName = "gateway.path"
+	maxGatewayLoginPath  = 32 * 1024
 
 	hookColdStartBackoff          = 60 * time.Second
 	hookColdStartReadinessTimeout = 30 * time.Second
 	hookColdStartLockWait         = hookColdStartReadinessTimeout + 10*time.Second
-	gatewayStartLockWait          = defaultStartReadinessTimeout + 15*time.Second
+	gatewayStartLockWait          = startReadinessProgressFactor*defaultStartReadinessTimeout + 15*time.Second
 )
 
 var errHookColdStartUnsupported = errors.New(
@@ -76,6 +85,83 @@ func markGatewayStopped(dataDir string) {
 func clearGatewayColdStartState(dataDir string) {
 	_ = os.Remove(gatewayStoppedMarkerPath(dataDir))
 	_ = os.Remove(gatewayColdStartFailedPath(dataDir))
+}
+
+// recordGatewayLoginPath saves this process's PATH for later hook cold starts.
+// Best effort: only absolute entries are kept.
+func recordGatewayLoginPath(dataDir string) {
+	if !hookColdStartSupported {
+		return
+	}
+	if info, err := os.Stat(dataDir); err != nil || !info.IsDir() {
+		return
+	}
+	path := absolutePathEntries(os.Getenv("PATH"))
+	if path == "" || len(path) > maxGatewayLoginPath {
+		return
+	}
+	target := filepath.Join(dataDir, gatewayLoginPathName)
+	if existing, err := safefile.ReadRegularFileBounded(target, maxGatewayLoginPath+1); err == nil &&
+		strings.TrimSpace(string(existing)) == path {
+		return
+	}
+	tmp, err := os.CreateTemp(dataDir, gatewayLoginPathName+".*.tmp")
+	if err != nil {
+		return
+	}
+	_, err = tmp.WriteString(path + "\n")
+	if closeErr := tmp.Close(); err == nil {
+		err = closeErr
+	}
+	if err == nil {
+		err = os.Chmod(tmp.Name(), 0o600)
+	}
+	if err == nil {
+		err = os.Rename(tmp.Name(), target)
+	}
+	if err != nil {
+		_ = os.Remove(tmp.Name())
+	}
+}
+
+// restoreGatewayLoginPath puts the recorded PATH in front of the hook's PATH
+// for a hook cold start, so the gateway it starts sees the same tools as one
+// started from the account's shell (GAP-1229).
+func restoreGatewayLoginPath(dataDir string) {
+	data, err := safefile.ReadRegularFileBounded(filepath.Join(dataDir, gatewayLoginPathName), maxGatewayLoginPath+1)
+	if err != nil {
+		return
+	}
+	recorded := absolutePathEntries(strings.TrimSpace(string(data)))
+	if recorded == "" {
+		return
+	}
+	merged := strings.Split(recorded, string(os.PathListSeparator))
+	seen := make(map[string]bool, len(merged))
+	for _, entry := range merged {
+		seen[entry] = true
+	}
+	for _, entry := range filepath.SplitList(os.Getenv("PATH")) {
+		if entry != "" && !seen[entry] {
+			seen[entry] = true
+			merged = append(merged, entry)
+		}
+	}
+	_ = os.Setenv("PATH", strings.Join(merged, string(os.PathListSeparator)))
+}
+
+// absolutePathEntries drops empty, relative and malformed PATH entries.
+func absolutePathEntries(path string) string {
+	if strings.ContainsAny(path, "\x00\r\n") {
+		return ""
+	}
+	kept := make([]string, 0, 16)
+	for _, entry := range filepath.SplitList(path) {
+		if filepath.IsAbs(entry) {
+			kept = append(kept, entry)
+		}
+	}
+	return strings.Join(kept, string(os.PathListSeparator))
 }
 
 func recordHookColdStartFailure(dataDir string) {

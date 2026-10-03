@@ -87,6 +87,83 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
         )
 
 
+    def test_explicit_connector_refuses_to_narrow_existing_roster(self):
+        # GAP-1078: quickstart --connector X on a multi-connector install
+        # must not rebuild the roster around X and orphan the others' hooks.
+        forbidden = AssertionError("quickstart narrowed an existing roster")
+        with (
+            patch(
+                "defenseclaw.commands.cmd_quickstart._configured_quickstart_connectors",
+                return_value=["codex", "claudecode", "hermes"],
+            ),
+            patch("defenseclaw.bootstrap.run_first_run", side_effect=forbidden) as first_run,
+        ):
+            result = self._invoke(["--connector", "claudecode", "--mode", "action", "--skip-gateway"])
+
+        self.assertEqual(result.exit_code, 2, result.output)
+        output = result.output + (result.stderr or "")
+        self.assertIn("already guards: codex, claudecode, hermes", output)
+        self.assertIn("defenseclaw setup claude-code --yes --mode action", output)
+        first_run.assert_not_called()
+
+    def test_hook_connector_over_guarded_openclaw_is_refused(self):
+        # GAP-2452: the roster check skipped OpenClaw, so quickstart --connector
+        # codex silently removed a guarded OpenClaw's plugin.
+        from types import SimpleNamespace
+
+        from defenseclaw.commands import cmd_quickstart
+
+        cfg_path = os.path.join(self.tmp_dir, "config.yaml")
+        with open(cfg_path, "w", encoding="utf-8"):
+            pass
+        loaded = SimpleNamespace(
+            guardrail=SimpleNamespace(enabled=True, connector="openclaw", connectors={}),
+            active_connector=lambda: "openclaw",
+        )
+        cfg_mod = SimpleNamespace(config_path=lambda: cfg_path, require_v8_config=lambda: None, load=lambda: loaded)
+        self.assertEqual(cmd_quickstart._configured_quickstart_connectors(cfg_mod), ["openclaw"])
+        loaded.guardrail.enabled = False
+        self.assertEqual(cmd_quickstart._configured_quickstart_connectors(cfg_mod), [])
+
+        forbidden = AssertionError("quickstart replaced a guarded OpenClaw")
+        with (
+            patch.object(cmd_quickstart, "_configured_quickstart_connectors", return_value=["openclaw"]),
+            patch("defenseclaw.bootstrap.run_first_run", side_effect=forbidden) as first_run,
+        ):
+            result = self._invoke(["--connector", "codex", "--mode", "action", "--skip-gateway"])
+
+        self.assertEqual(result.exit_code, 2, result.output)
+        output = " ".join((result.output + (result.stderr or "")).split())
+        self.assertIn("No changes made", output)
+        self.assertIn("defenseclaw setup codex --replace --mode action", output)
+        first_run.assert_not_called()
+
+    def test_openclaw_on_a_hook_roster_suggests_commands_that_work(self):
+        # GAP-1407: "setup openclaw --yes" is refused next to hook connectors;
+        # GAP-1455: "setup openclaw --replace" switches in one command.
+        forbidden = AssertionError("quickstart narrowed an existing roster")
+        with (
+            patch("defenseclaw.platform_support.host_os", return_value="macos"),
+            patch(
+                "defenseclaw.commands.cmd_quickstart._configured_quickstart_connectors",
+                return_value=["claudecode", "codex"],
+            ),
+            patch("defenseclaw.bootstrap.run_first_run", side_effect=forbidden),
+        ):
+            result = self._invoke(["--connector", "openclaw", "--mode", "action", "--skip-gateway"])
+
+        self.assertEqual(result.exit_code, 2, result.output)
+        output = result.output + (result.stderr or "")
+        self.assertIn("defenseclaw setup openclaw --replace --mode action", output)
+        self.assertNotIn("--yes --mode action", output)
+
+    def test_explicit_connector_matching_existing_roster_is_allowed(self):
+        from defenseclaw import config as cfg_mod
+        from defenseclaw.commands import cmd_quickstart
+
+        with patch.object(cmd_quickstart, "_configured_quickstart_connectors", return_value=["claudecode"]):
+            self.assertIsNone(cmd_quickstart._refuse_roster_narrowing(cfg_mod, "claudecode"))
+
     def test_openclaw_defaults_to_observe_profile(self):
         with patch("defenseclaw.platform_support.host_os", return_value="linux"):
             result = self._invoke([
@@ -139,6 +216,13 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
         summary = json.loads(result.output)
         self.assertEqual(summary["profile"], "observe")
+
+    def test_skip_gateway_summary_names_the_flag_quickstart_has(self):
+        # GAP-2052: the Sidecar row named init's --no-start-gateway.
+        result = self._invoke(["--connector", "codex", "--skip-gateway", "--json-summary"])
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        setup = {step["name"]: step for step in json.loads(result.output)["setup"]}
+        self.assertEqual(setup["Sidecar"]["detail"], "not started (--skip-gateway)")
 
     def test_windows_opencode_observe_and_action_use_one_exact_selection(self):
         for mode in ("observe", "action"):
@@ -278,6 +362,11 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
         result = self.runner.invoke(quickstart_cmd, ["--help"])
         self.assertEqual(result.exit_code, 0)
         self.assertIn("--fail-mode", result.output)
+        # GAP-1251: a new install resolves to closed, so the help must not
+        # call open the default.
+        text = " ".join(result.output.split())
+        self.assertNotIn("'open' (default)", text)
+        self.assertIn("'closed' (the default on a new install)", text)
 
     def test_fail_mode_closed_persists_to_config(self):
         result = self._invoke([
@@ -416,6 +505,31 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
         readiness = {step["name"]: step for step in summary["readiness"]}
         self.assertEqual(readiness["Connector"]["status"], "fail")
         self.assertEqual(readiness["Connector"]["detail"], "Codex config not found yet")
+
+    def test_connector_the_running_gateway_does_not_guard_is_nonzero(self):
+        # GAP-1589: "OK Guardrail" and "OK Sidecar already running" with rc 0
+        # while status showed claudecode DEGRADED and Claude Code ran unguarded.
+        with (
+            patch(
+                "defenseclaw.bootstrap._start_gateway_structured",
+                return_value=StepResult("Sidecar", "pass", "already running"),
+            ),
+            patch("defenseclaw.bootstrap._pid_file_running", return_value=True),
+            patch(
+                "defenseclaw.hook_integrity.hook_registration_problems",
+                return_value=["no DefenseClaw hooks in /home/u/.claude/settings.json"],
+            ),
+        ):
+            result = self._invoke(["--connector", "claudecode", "--json-summary"])
+
+        self.assertEqual(result.exit_code, 1, result.output + (result.stderr or ""))
+        summary = json.loads(result.output)
+        self.assertEqual(summary["status"], "needs_attention")
+        readiness = {step["name"]: step for step in summary["readiness"]}
+        runtime = readiness["Connector runtime"]
+        self.assertEqual(runtime["status"], "fail")
+        self.assertIn("is not guarded: no DefenseClaw hooks", runtime["detail"])
+        self.assertEqual(runtime["next_command"], "defenseclaw setup claude-code")
 
     def test_optional_warning_only_remains_partial_and_zero(self):
         advisory = [StepResult("Skill scanner", "warn", "optional scanner unavailable")]
@@ -565,6 +679,10 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
         self.assertIn("Multiple connectors detected/configured", output)
         self.assertIn("codex, hermes", output)
         self.assertNotIn('"connector": "codex"', result.output)
+        # GAP-1352: --connector would be refused here; name the setup command.
+        self.assertIn("This install already guards: codex, hermes", output)
+        self.assertIn("defenseclaw setup <connector> --yes", output)
+        self.assertNotIn("Re-run with --connector", output)
 
 
 if __name__ == "__main__":

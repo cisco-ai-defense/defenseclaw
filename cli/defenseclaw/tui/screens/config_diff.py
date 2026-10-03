@@ -25,7 +25,7 @@ from textual.widgets import Button, Static
 from defenseclaw.tui.services.setup_state import ConfigDiffEntry
 from defenseclaw.tui.theme import DEFAULT_TOKENS
 
-DEFAULT_RESTART_REASON = "config saved from Textual TUI"
+DEFAULT_RESTART_REASON = "config saved in the TUI"
 
 
 @dataclass(frozen=True)

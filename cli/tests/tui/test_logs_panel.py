@@ -404,7 +404,7 @@ def test_logs_view_metadata_exposes_tabs_chips_search_status_and_styles() -> Non
     groups = {group.group: group for group in panel.chip_groups()}
     assert set(groups) == {"preset", "action", "type", "severity"}
     assert [chip.label for chip in groups["preset"].chips if chip.active] == ["Errors"]
-    assert [chip.shortcut for chip in groups["preset"].chips[:3]] == ["1", "2", "3"]
+    assert [chip.shortcut for chip in groups["preset"].chips[:3]] == ["", "", ""]
     assert [chip.label for chip in groups["action"].chips if chip.active] == ["Block"]
     assert [chip.label for chip in groups["type"].chips if chip.active] == ["Judge"]
     assert [chip.label for chip in groups["severity"].chips if chip.active] == ["High+"]
@@ -461,12 +461,12 @@ def test_logs_has_no_retired_global_redaction_state() -> None:
 
 def test_logs_filter_change_metadata_and_modal_hooks() -> None:
     panel = LogsPanelModel()
-    action = panel.handle_key("1")
+    action = panel.handle_key("e")
     assert action.filter_change is not None
     assert action.filter_change.panel == "logs"
     assert action.filter_change.filter_type == FILTER_TYPE_PRESET
     assert action.filter_change.old == "no-noise"
-    assert action.filter_change.new == ""
+    assert action.filter_change.new == "errors"
 
     panel.source = "verdicts"
     action = panel.handle_key("s")
@@ -482,7 +482,8 @@ def test_logs_filter_change_metadata_and_modal_hooks() -> None:
 
     panel.searching = False
     assert panel.handle_key("R").modal is None
-    assert panel.handle_key("N").modal == "notifications"
+    assert panel.handle_key("b").modal == "notifications"
+    assert panel.handle_key("N").modal is None  # N is the Runtime tab (GAP-1159)
     assert panel.handle_key("J").modal == "judge-history"
 
 

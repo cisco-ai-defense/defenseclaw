@@ -83,7 +83,7 @@ def test_audit_default_hides_low_signal_rows_until_all_opt_in() -> None:
 
     assert [event.id for event in panel.filtered] == ["high", "failure"]
 
-    assert panel.handle_key("1").handled is True
+    assert panel.handle_key("l").handled is True
     assert [event.id for event in panel.filtered] == ["info", "medium", "high", "failure"]
 
 

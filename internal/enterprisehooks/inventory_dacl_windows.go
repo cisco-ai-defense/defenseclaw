@@ -31,6 +31,10 @@ var inventoryDACLDotdirs = append([]string{
 	".codex",
 	".cursor",
 	".gemini",
+	// Antigravity CLI's own folder (skills, plugins). It is not on the
+	// Antigravity hook path, so it is granted even where the guardian owns
+	// .gemini (GAP-1863).
+	`.gemini\antigravity-cli`,
 	".openhands",
 	".openclaw",
 	".hermes",
@@ -38,7 +42,52 @@ var inventoryDACLDotdirs = append([]string{
 	".opencode",
 	".agents",
 	".config",
+	".kiro",
+	// Hermes keeps its home in %LOCALAPPDATA%\hermes on Windows. Only its
+	// skills and plugins folders are granted: the home also holds the
+	// agent's install (about 130,000 objects), which an inherited grant
+	// would rewrite on every account. Without them the scanner never found
+	// Hermes for any user.
+	`AppData\Local\hermes\skills`,
+	`AppData\Local\hermes\plugins`,
 }, legacyconnector.InventoryDotDirs...)
+
+// inventoryDACLGuardianOwnedDotdirs maps a dotdir to the connectors whose
+// enrollment puts it on that user's managed hook path (Kiro: .kiro\settings;
+// Amp and OpenCode: .config\<agent>\plugins; Antigravity:
+// .gemini\config\hooks.json). The guardian keeps every element of that path
+// at its exact protected DACL, so an inventory grant there is drift that the
+// next ensure or repair removes, and the protected children never inherit
+// it. Such a dotdir is not granted while the user has an enabled row for one
+// of its connectors (GAP-1210, GAP-1863).
+var inventoryDACLGuardianOwnedDotdirs = map[string][]string{
+	".kiro":   {"kiro"},
+	".config": {"amp", "opencode"},
+	".gemini": {"antigravity"},
+}
+
+// inventoryDACLListOnlyDirs are per-user install folders the scanner only
+// needs to see. The service gets list and read-attributes rights on the
+// folder itself, with no inheritance, so it can tell the agent is installed
+// without reading what the folder holds. Kiro CLI installs into
+// %LOCALAPPDATA%\Kiro-Cli, whose data.sqlite3 holds the user's session and
+// sign-in state; this is how a user whose .kiro the guardian protects is
+// still discovered. Copilot CLI and Devin CLI are the same case: their hook
+// files (.copilot\hooks, AppData\Roaming\devin\config.json) put those
+// folders on the guardian's protected path, so the service sees their
+// install folders instead, Copilot CLI's package cache and Devin CLI's
+// install (GAP-1739). Amp keeps its settings in .config\amp, which stays
+// protected for a user enrolled for Amp, so the service sees its npm install
+// folder (GAP-1963). Cursor's hooks are machine-level on a managed computer,
+// so a user without ~\.cursor\mcp.json is seen by cursor-agent's install
+// folder (GAP-1739).
+var inventoryDACLListOnlyDirs = []string{
+	`AppData\Local\Kiro-Cli`,
+	`AppData\Local\copilot\pkg`,
+	`AppData\Local\devin\cli`,
+	`AppData\Roaming\npm\node_modules\@ampcode\cli`,
+	`AppData\Local\cursor-agent`,
+}
 
 // gatewayServiceNamePattern matches the certification-scoped gateway service
 // name. The scope suffix (10 lowercase hex chars) is generated at install time
@@ -89,6 +138,7 @@ func GrantGatewayInventoryReadForManifest(manifest Manifest, gatewayServiceName 
 	}
 
 	granted, skipped, failed := 0, 0, 0
+	guardianOwned := inventoryDACLGuardianOwnedByHome(manifest)
 	seenHome := map[string]struct{}{}
 	for _, target := range manifest.Targets {
 		home := filepath.Clean(strings.TrimSpace(target.UserHome))
@@ -100,9 +150,23 @@ func GrantGatewayInventoryReadForManifest(manifest Manifest, gatewayServiceName 
 			continue
 		}
 		seenHome[key] = struct{}{}
+		type grant struct {
+			dir    string
+			ensure func(string, *windows.SID) (inventoryDACLResult, error)
+		}
+		grants := make([]grant, 0, len(inventoryDACLDotdirs)+len(inventoryDACLListOnlyDirs))
 		for _, dotdir := range inventoryDACLDotdirs {
+			if _, owned := guardianOwned[key][dotdir]; !owned {
+				grants = append(grants, grant{dotdir, ensureInventoryReadACE})
+			}
+		}
+		for _, dir := range inventoryDACLListOnlyDirs {
+			grants = append(grants, grant{dir, ensureInventoryListACE})
+		}
+		for _, g := range grants {
+			dotdir := g.dir
 			path := filepath.Join(home, dotdir)
-			result, err := ensureInventoryReadACE(path, sid)
+			result, err := g.ensure(path, sid)
 			switch {
 			case err != nil:
 				failed++
@@ -123,6 +187,30 @@ func GrantGatewayInventoryReadForManifest(manifest Manifest, gatewayServiceName 
 	return nil
 }
 
+// inventoryDACLGuardianOwnedByHome returns, per lowercased home, the dotdirs
+// the guardian owns there (inventoryDACLGuardianOwnedDotdirs).
+func inventoryDACLGuardianOwnedByHome(manifest Manifest) map[string]map[string]struct{} {
+	owned := map[string]map[string]struct{}{}
+	for _, target := range manifest.Targets {
+		if target.Enabled != nil && !*target.Enabled {
+			continue
+		}
+		home := strings.ToLower(filepath.Clean(strings.TrimSpace(target.UserHome)))
+		for dotdir, connectorNames := range inventoryDACLGuardianOwnedDotdirs {
+			for _, connectorName := range connectorNames {
+				if !strings.EqualFold(strings.TrimSpace(target.Connector), connectorName) {
+					continue
+				}
+				if owned[home] == nil {
+					owned[home] = map[string]struct{}{}
+				}
+				owned[home][dotdir] = struct{}{}
+			}
+		}
+	}
+	return owned
+}
+
 type inventoryDACLResult int
 
 const (
@@ -136,6 +224,20 @@ const (
 // or isn't a directory, silently succeed — the user may not have started the
 // corresponding CLI yet; the next tick retries.
 func ensureInventoryReadACE(path string, sid *windows.SID) (inventoryDACLResult, error) {
+	return ensureInventoryACE(path, sid, windows.GENERIC_READ|windows.GENERIC_EXECUTE, windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT)
+}
+
+// inventoryListMask lets the service list a folder and read its own
+// attributes, and nothing below it.
+const inventoryListMask = windows.FILE_LIST_DIRECTORY | windows.FILE_READ_ATTRIBUTES | windows.SYNCHRONIZE
+
+// ensureInventoryListACE grants `sid` inventoryListMask on `path` alone
+// (inventoryDACLListOnlyDirs).
+func ensureInventoryListACE(path string, sid *windows.SID) (inventoryDACLResult, error) {
+	return ensureInventoryACE(path, sid, inventoryListMask, windows.NO_INHERITANCE)
+}
+
+func ensureInventoryACE(path string, sid *windows.SID, mask windows.ACCESS_MASK, inheritance uint32) (inventoryDACLResult, error) {
 	fi, err := os.Stat(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -174,13 +276,17 @@ func ensureInventoryReadACE(path string, sid *windows.SID) (inventoryDACLResult,
 	if existing == nil {
 		return inventoryDACLSkippedMissing, fmt.Errorf("null DACL on %s; refusing to replace with sole gateway-service ACE", path)
 	}
-	if daclContainsInventoryReadACE(existing, sid) {
+	present := daclContainsInventoryReadACE(existing, sid)
+	if inheritance == windows.NO_INHERITANCE {
+		present = daclContainsInventoryListACE(existing, sid)
+	}
+	if present {
 		return inventoryDACLAlreadyPresent, nil
 	}
 	entry := windows.EXPLICIT_ACCESS{
-		AccessPermissions: windows.GENERIC_READ | windows.GENERIC_EXECUTE,
+		AccessPermissions: mask,
 		AccessMode:        windows.GRANT_ACCESS,
-		Inheritance:       windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+		Inheritance:       inheritance,
 		Trustee: windows.TRUSTEE{
 			TrusteeForm:  windows.TRUSTEE_IS_SID,
 			TrusteeType:  windows.TRUSTEE_IS_USER,
@@ -202,28 +308,25 @@ func ensureInventoryReadACE(path string, sid *windows.SID) (inventoryDACLResult,
 	return inventoryDACLGranted, nil
 }
 
-// daclContainsInventoryReadACE reports whether `acl` already contains an
-// allow-access ACE granting `sid` at least Read+Execute with the same
-// inheritance semantics we would install. Used as an idempotency short-circuit
-// so repeat ticks skip the (get, merge, set) round-trip when the ACE is
-// already present in the exact shape we need.
+// daclContainsInventoryReadACE reports whether `acl` already grants `sid`
+// at least Read+Execute on the folder itself and, inherited, on everything
+// below it. Used as an idempotency short-circuit so repeat ticks skip the
+// (get, merge, set) round-trip, which rewrites the inherited ACEs of every
+// object under the folder.
 //
-// Inheritance requirements match the `SUB_CONTAINERS_AND_OBJECTS_INHERIT` flag
-// set we pass to `ACLFromEntries`: both OBJECT_INHERIT_ACE (files) and
-// CONTAINER_INHERIT_ACE (subdirs) must be present, and neither
-// NO_PROPAGATE_INHERIT_ACE nor INHERIT_ONLY_ACE may be set — an ACE that
-// grants the parent but does not propagate to children is NOT equivalent for
-// our purposes (the scanner reads files INSIDE the dotdirs, not the dotdir
-// itself), and an INHERIT_ONLY_ACE that doesn't apply to the parent leaves
-// the traversal grant absent. Rebuilding the ACL is preferable to leaving a
-// half-configured ACE in place.
+// Windows stores the grant ensureInventoryReadACE writes as two ACEs: one
+// with the generic rights mapped to file rights for the folder, and an
+// INHERIT_ONLY_ACE with the generic rights for its children. Both shapes,
+// and a single ACE that covers both, count (GAP-1863: matching only the
+// unsplit generic shape re-granted every folder on every pass). An ACE
+// with NO_PROPAGATE_INHERIT_ACE does not cover the children.
 func daclContainsInventoryReadACE(acl *windows.ACL, sid *windows.SID) bool {
 	if acl == nil || sid == nil {
 		return false
 	}
-	const wantMask = uint32(windows.GENERIC_READ | windows.GENERIC_EXECUTE)
-	const requiredInherit = uint8(windows.OBJECT_INHERIT_ACE | windows.CONTAINER_INHERIT_ACE)
-	const forbiddenInherit = uint8(windows.NO_PROPAGATE_INHERIT_ACE | windows.INHERIT_ONLY_ACE)
+	want := mapWindowsUserPathGenericMask(windows.GENERIC_READ | windows.GENERIC_EXECUTE)
+	const inherit = uint8(windows.OBJECT_INHERIT_ACE | windows.CONTAINER_INHERIT_ACE)
+	self, children := false, false
 	for i := uint32(0); i < uint32(acl.AceCount); i++ {
 		var ace *windows.ACCESS_ALLOWED_ACE
 		if err := windows.GetAce(acl, i, &ace); err != nil || ace == nil {
@@ -236,17 +339,40 @@ func daclContainsInventoryReadACE(acl *windows.ACL, sid *windows.SID) bool {
 		if aceSID == nil || !windows.EqualSid(aceSID, sid) {
 			continue
 		}
-		if uint32(ace.Mask)&wantMask != wantMask {
+		if mapWindowsUserPathGenericMask(ace.Mask)&want != want {
 			continue
 		}
 		flags := ace.Header.AceFlags
-		if flags&requiredInherit != requiredInherit {
+		if flags&windows.INHERIT_ONLY_ACE == 0 {
+			self = true
+		}
+		if flags&inherit == inherit && flags&windows.NO_PROPAGATE_INHERIT_ACE == 0 {
+			children = true
+		}
+	}
+	return self && children
+}
+
+// daclContainsInventoryListACE reports whether `acl` already grants `sid`
+// inventoryListMask on the object itself.
+func daclContainsInventoryListACE(acl *windows.ACL, sid *windows.SID) bool {
+	if acl == nil || sid == nil {
+		return false
+	}
+	for i := uint32(0); i < uint32(acl.AceCount); i++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(acl, i, &ace); err != nil || ace == nil {
 			continue
 		}
-		if flags&forbiddenInherit != 0 {
+		if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE ||
+			ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0 {
 			continue
 		}
-		return true
+		aceSID := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+		if aceSID != nil && windows.EqualSid(aceSID, sid) &&
+			uint32(ace.Mask)&uint32(inventoryListMask) == uint32(inventoryListMask) {
+			return true
+		}
 	}
 	return false
 }

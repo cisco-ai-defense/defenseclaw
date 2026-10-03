@@ -82,7 +82,15 @@ func TestUninstallStopsRepairersBeforeRemovingRegistrations(t *testing.T) {
 				policyRemoved = true
 				check("machine policy removal")
 			}}
+			before := len(h.services.calls)
 			requireOK(t, h.run(Options{Action: ActionUninstall}))
+			// GAP-1443: a macOS disable writes a launchd override that no
+			// command deletes; the definitions are removed instead.
+			for _, call := range h.services.calls[before:] {
+				if goos == "darwin" && strings.HasPrefix(call, "disable ") {
+					t.Fatalf("uninstall ran %q, which leaves a launchd override", call)
+				}
+			}
 			if !removeAll || !policyRemoved {
 				t.Fatalf("uninstall skipped a registration removal: per-user=%v machine-policy=%v", removeAll, policyRemoved)
 			}
@@ -220,5 +228,46 @@ func TestUninstallKeepsTheBinariesWhilePerUserHooksRemain(t *testing.T) {
 				t.Fatalf("the purge report does not say it removed everything: %v", done.Changes)
 			}
 		})
+	}
+}
+
+// GAP-1444: uninstall --purge said every enrolled account lost per-user
+// binaries and a per-user gateway, also an account that never had a
+// per-user install. Each account's line now names only what was removed.
+func TestUninstallPurgeNamesOnlyWhatEachAccountHad(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	h.env.Runner = removeAllRunner{Runner: h.runner, answer: func(string) (CommandResult, error) {
+		return CommandResult{Stdout: []byte(`{"ok":true,"purged":["alice","bob"],` +
+			`"purged_detail":{"alice":{"data":true},"bob":{"data":true,"binaries":true,"gateway":true}}}`)}, nil
+	}}
+	done := h.run(Options{Action: ActionUninstall, Purge: true})
+	requireOK(t, done)
+	lines := map[string]string{}
+	for _, change := range done.Changes {
+		for _, user := range []string{"alice", "bob"} {
+			if strings.Contains(change, "of user "+user+" ") {
+				lines[user] = change
+			}
+		}
+	}
+	if alice := lines["alice"]; !strings.Contains(alice, "~/.defenseclaw") ||
+		strings.Contains(alice, "~/.local/bin") || strings.Contains(alice, "gateway") {
+		t.Fatalf("alice had only ~/.defenseclaw: %q", alice)
+	}
+	if bob := lines["bob"]; !strings.Contains(bob, "launcher links in ~/.local/bin") ||
+		!strings.HasSuffix(bob, "after stopping its per-user gateway") {
+		t.Fatalf("bob had a full per-user install: %q", bob)
+	}
+	if got := purgedUserChange("carol", &purgedUserDetail{}); got != "found no DefenseClaw per-user data or binaries of user carol to remove" {
+		t.Fatalf("an account with nothing to remove: %q", got)
+	}
+	// GAP-1947: the uv cache entries the purge removed are named too.
+	if got := purgedUserChange("dave", &purgedUserDetail{Data: true, UVCache: true}); !strings.Contains(got, "~/.defenseclaw") ||
+		!strings.HasSuffix(got, "and DefenseClaw's entries in its uv cache (~/.cache/uv)") {
+		t.Fatalf("an account with uv cache entries: %q", got)
+	}
+	if got := purgedUserChange("erin", &purgedUserDetail{UVCache: true}); got != "removed DefenseClaw's entries in the uv cache (~/.cache/uv) of user erin" {
+		t.Fatalf("an account with only uv cache entries: %q", got)
 	}
 }

@@ -2,9 +2,14 @@ BINARY      := defenseclaw
 GATEWAY     := defenseclaw-gateway
 ACP_GUARD   := defenseclaw-acp
 HOOK_LAUNCHER := defenseclaw-hook
-VERSION     := 0.8.10
+VERSION     := 1.0.0
 .DEFAULT_GOAL := help
-GOFLAGS     := -ldflags "-X main.version=$(VERSION)"
+# Stamp the source commit and build time so `defenseclaw version` names the
+# build (goreleaser does the same for releases).
+GIT_COMMIT  := $(or $(shell git rev-parse --short HEAD 2>/dev/null),unknown)
+BUILD_DATE  := $(or $(shell date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null),unknown)
+BUILD_INFO_LDFLAGS := -X main.commit=$(GIT_COMMIT) -X main.date=$(BUILD_DATE)
+GOFLAGS     := -ldflags "-X main.version=$(VERSION) $(BUILD_INFO_LDFLAGS)"
 VENV        := .venv
 GOBIN       := $(shell go env GOPATH)/bin
 PLUGIN_DIR  := extensions/defenseclaw
@@ -50,6 +55,8 @@ endif
 INSTALL_DIR := $(USER_HOME)/.local/bin
 DC_EXT_DIR  := $(USER_HOME)/.defenseclaw/extensions/defenseclaw
 OC_EXT_DIR  := $(USER_HOME)/.openclaw/extensions/defenseclaw
+# Set when make all stopped a running Windows gateway to replace it (GAP-1784).
+SOURCE_GATEWAY_STOPPED := $(or $(DEFENSECLAW_HOME),$(USER_HOME)/.defenseclaw)/.make-all-stopped-gateway
 
 # _bundle-data is a prerequisite of the target that creates $(VENV), so a
 # fresh checkout cannot use the project interpreter while staging its first
@@ -71,7 +78,7 @@ BOOTSTRAP_PYTHON := $(shell if [ -x "$(VENV_BIN)/python$(EXE)" ]; then printf '%
         test-verbose test-file lint py-lint go-lint go-mod-no-toolchain check-quiet-startup repro-flags-parity assemble-parity ts-test rego-test clean \
         check check-audit-actions check-error-codes check-schemas telemetry-generate telemetry-check generate-guardrail-catalog check-guardrail-catalog check-grafana-dashboards check-observability-v8-hard-cut check-v7 check-provider-coverage check-llm-catalog check-llm-catalog-live check-version-sync \
         set-version \
-        _bundle-data _stage-extension-fingerprint _checkout-write-preflight _source-install-preflight _source-install-dev-preflight _source-dev-install \
+        _bundle-data _stage-extension-fingerprint _checkout-write-preflight _source-install-preflight _source-install-dev-preflight _source-dev-install source-migrate source-restart-gateway \
         proto proto-check proto-tools \
         dist dist-cli dist-gateway dist-installers dist-requirements dist-test dist-checksums dist-clean
 
@@ -143,7 +150,15 @@ check-version-sync:
 # We also honour NO_QUICKSTART=1 and NO_PATH=1 as escape hatches for
 # CI jobs that only want the binaries.
 all: _source-install-dev-preflight
+	@# 1.0 deletes a 0.x audit history when its gateway first opens it; keep a
+	@# copy first, as the release installers do (GAP-1469).
+	@$(HOST_PYTHON) ./scripts/keep-pre-1.0-audit-history.py
 	@$(MAKE) --no-print-directory _source-dev-install
+	@$(MAKE) --no-print-directory source-migrate
+	@$(MAKE) --no-print-directory source-restart-gateway
+	@# Pre-1.0 installers left their retired binaries behind; install.sh
+	@# removes them, so a source install must too (GAP-0053).
+	@$(HOST_PYTHON) ./scripts/sweep-pre-1.0-install-custody.py
 	@$(MAKE) --no-print-directory path
 	@$(MAKE) --no-print-directory quickstart
 	@$(MAKE) --no-print-directory llm-setup
@@ -162,12 +177,44 @@ all: _source-install-dev-preflight
 		echo "  defenseclaw-gateway status   # shows why, and the fix"; \
 		echo "  defenseclaw-gateway start    # start it"; \
 	fi
+	@echo "  Built DefenseClaw $(VERSION) (commit $(GIT_COMMIT)) from this checkout."
 	@echo ""
 	@echo "Try it out:"
 	@echo "  defenseclaw            # launch the TUI"
 	@echo "  defenseclaw doctor     # health check"
 	@echo "  defenseclaw version    # CLI / gateway / plugin versions"
 	@echo ""
+
+# Bring existing data (for example from a release install this checkout
+# replaced) to this checkout's config schema and seeded rule packs, as the
+# release upgrade does. migrate is idempotent and keeps edited rule packs.
+source-migrate: _source-install-preflight
+	@data_dir="$${DEFENSECLAW_HOME:-$$HOME/.defenseclaw}"; \
+	if [ -f "$$data_dir/config.yaml" ]; then \
+		if ! "$(INSTALL_DIR)/defenseclaw$(EXE)" migrate; then \
+			echo "  Could not migrate the existing config — fix the error above, then re-run: defenseclaw migrate"; \
+			exit 1; \
+		fi; \
+	fi
+
+# A running gateway keeps the binary it started with after make all replaced
+# it, so the CLI and the gateway differed and doctor called the old process a
+# stranger on the port (GAP-1575). Restart it to load this build.
+source-restart-gateway: _source-install-preflight
+	@if [ -f "$(SOURCE_GATEWAY_STOPPED)" ]; then \
+		rm -f "$(SOURCE_GATEWAY_STOPPED)"; \
+		if "$(INSTALL_DIR)/$(GATEWAY)$(EXE)" start >/dev/null 2>&1; then \
+			echo "  ✓ Started the gateway again on this build"; \
+		else \
+			echo "  ! Could not start the gateway on this build. Run: defenseclaw-gateway start"; \
+		fi; \
+	elif "$(INSTALL_DIR)/$(GATEWAY)$(EXE)" status >/dev/null 2>&1; then \
+		if "$(INSTALL_DIR)/$(GATEWAY)$(EXE)" restart >/dev/null 2>&1; then \
+			echo "  ✓ Restarted the running gateway so it runs this build"; \
+		else \
+			echo "  ! Could not restart the running gateway; it still runs the previous build. Run: defenseclaw-gateway restart"; \
+		fi; \
+	fi
 
 path: _source-install-preflight
 	@if [ "$${NO_PATH:-0}" = "1" ]; then \
@@ -218,7 +265,7 @@ quickstart: _source-install-preflight
 		elif [ -z "$${PROFILE:-}" ] && [ -f "$$cfg_file" ]; then \
 			echo "  • Existing config kept ($$cfg_file); change connectors or modes with: defenseclaw init"; \
 			if ! "$$dc_bin" setup --add-detected --yes --restart; then \
-				echo "  Could not add newly detected connectors — run 'defenseclaw agent discover --refresh' to investigate"; \
+				echo "  Could not add newly detected connectors — fix the error above, then re-run: defenseclaw setup --add-detected --yes"; \
 				exit 1; \
 			fi; \
 		elif [ -t 0 ] && [ -t 1 ] && [ "$${CI:-}" != "true" ]; then \
@@ -237,7 +284,7 @@ quickstart: _source-install-preflight
 				exit 1; \
 			fi; \
 			if ! "$$dc_bin" setup --add-detected --yes --restart; then \
-				echo "  Could not add newly detected connectors — run 'defenseclaw agent discover --refresh' to investigate"; \
+				echo "  Could not add newly detected connectors — fix the error above, then re-run: defenseclaw setup --add-detected --yes"; \
 				exit 1; \
 			fi; \
 		fi; \
@@ -313,7 +360,8 @@ install: _source-install-preflight cli-install gateway-install $(SOURCE_PLUGIN_I
 	@echo "  • Python CLI   → $(VENV_BIN)/defenseclaw$(EXE)  (activate with: source $(VENV_BIN)/activate)"
 	@echo "  • Go gateway   → $(INSTALL_DIR)/$(GATEWAY)$(EXE)"
 	@echo "  • ACP guard    → $(INSTALL_DIR)/$(ACP_GUARD)$(EXE)"
-	@if [ "$${CONNECTOR:-codex}" = "openclaw" ]; then \
+	$(if $(filter Windows_NT,$(OS)),@echo "  • Hook launcher → $(INSTALL_DIR)/$(HOOK_LAUNCHER).exe",)
+	@if [ "$${CONNECTOR:-}" = "openclaw" ]; then \
 		echo "  • OpenClaw plugin → ~/.defenseclaw/extensions/defenseclaw/"; \
 	else \
 		echo "  • OpenClaw plugin skipped (set CONNECTOR=openclaw to install it)"; \
@@ -326,11 +374,11 @@ install: _source-install-preflight cli-install gateway-install $(SOURCE_PLUGIN_I
 	@echo "  defenseclaw --help       # see all CLI commands"
 	@echo ""
 
+# The install summary already reports a skipped plugin, so stay quiet here
+# (an unset CONNECTOR was echoed as "CONNECTOR=codex", GAP-2050).
 maybe-openclaw-plugin-install: _source-install-preflight
-	@if [ "$${CONNECTOR:-codex}" = "openclaw" ]; then \
+	@if [ "$${CONNECTOR:-}" = "openclaw" ]; then \
 		$(MAKE) plugin-install; \
-	else \
-		echo "Skipping OpenClaw plugin install (CONNECTOR=$${CONNECTOR:-codex})."; \
 	fi
 
 # ---------------------------------------------------------------------------
@@ -591,12 +639,30 @@ _source-dev-install: _source-install-dev-preflight
 	@if [ "$$(uname -s)" = "Darwin" ]; then \
 		/usr/bin/codesign -f -s - -i com.cisco.defenseclaw.gateway $(GATEWAY)$(EXE) || exit 1; \
 	fi
+ifeq ($(OS),Windows_NT)
+	@# Windows lets a running gateway's file be renamed but keeps the process
+	@# on the old copy, which this account then could not stop or restart
+	@# (GAP-1784). Stop it before the swap; source-restart-gateway starts it.
+	@if "$(INSTALL_DIR)/$(GATEWAY)$(EXE)" status >/dev/null 2>&1; then \
+		echo "  Stopping the running gateway so this build can replace it (make all starts it again)"; \
+		if ! "$(INSTALL_DIR)/$(GATEWAY)$(EXE)" stop >/dev/null 2>&1; then \
+			echo "  Could not stop the running gateway; stop it with 'defenseclaw-gateway stop', then build again"; \
+			exit 1; \
+		fi; \
+		touch "$(SOURCE_GATEWAY_STOPPED)"; \
+	fi
+endif
 	@./scripts/source-install-preflight.sh dev-publish-gateway \
 		"$(CURDIR)" "$(INSTALL_DIR)" "$(VENV_BIN)" \
 		"defenseclaw$(EXE)" "$(GATEWAY)$(EXE)"
 	@./scripts/source-install-preflight.sh dev-publish-acp \
 		"$(CURDIR)" "$(INSTALL_DIR)" "$(VENV_BIN)" \
 		"defenseclaw$(EXE)" "$(GATEWAY)$(EXE)"
+ifeq ($(OS),Windows_NT)
+	@./scripts/source-install-preflight.sh dev-publish-hook \
+		"$(CURDIR)" "$(INSTALL_DIR)" "$(VENV_BIN)" \
+		"defenseclaw$(EXE)" "$(GATEWAY)$(EXE)"
+endif
 	@./scripts/source-install-preflight.sh dev-claim \
 		"$(CURDIR)" "$(INSTALL_DIR)" "$(VENV_BIN)" \
 		"defenseclaw$(EXE)" "$(GATEWAY)$(EXE)"
@@ -606,7 +672,8 @@ _source-dev-install: _source-install-dev-preflight
 	@echo "  • Python CLI   → $(VENV_BIN)/defenseclaw$(EXE)  (activate with: source $(VENV_BIN)/activate)"
 	@echo "  • Go gateway   → $(INSTALL_DIR)/$(GATEWAY)$(EXE)"
 	@echo "  • ACP guard    → $(INSTALL_DIR)/$(ACP_GUARD)$(EXE)"
-	@if [ "$${CONNECTOR:-codex}" = "openclaw" ]; then \
+	$(if $(filter Windows_NT,$(OS)),@echo "  • Hook launcher → $(INSTALL_DIR)/$(HOOK_LAUNCHER).exe",)
+	@if [ "$${CONNECTOR:-}" = "openclaw" ]; then \
 		echo "  • OpenClaw plugin → ~/.defenseclaw/extensions/defenseclaw/"; \
 	else \
 		echo "  • OpenClaw plugin skipped (set CONNECTOR=openclaw to install it)"; \
@@ -659,17 +726,20 @@ gateway-install: _source-install-preflight cli-install
 	@./scripts/source-install-preflight.sh publish-acp \
 		"$(CURDIR)" "$(INSTALL_DIR)" "$(VENV_BIN)" \
 		"defenseclaw$(EXE)" "$(GATEWAY)$(EXE)"
+ifeq ($(OS),Windows_NT)
+	@./scripts/source-install-preflight.sh publish-hook \
+		"$(CURDIR)" "$(INSTALL_DIR)" "$(VENV_BIN)" \
+		"defenseclaw$(EXE)" "$(GATEWAY)$(EXE)"
+endif
 	@./scripts/source-install-preflight.sh claim \
 		"$(CURDIR)" "$(INSTALL_DIR)" "$(VENV_BIN)" \
 		"defenseclaw$(EXE)" "$(GATEWAY)$(EXE)"
 	@echo "Installed $(GATEWAY)$(EXE) to $(INSTALL_DIR)"
 	@# On Unix, a running sidecar kept the old inode; tell the operator so
 	@# they know a restart is needed to pick up the new build.
-	@# Use pgrep -x against the *basename* only — `pgrep -f "$(GATEWAY)"`
-	@# matches this very make invocation ("make gateway-install") and
-	@# any editor/tail window with the binary path on its cmdline, so
-	@# it would fire a false "sidecar is running" hint on every build.
-	@if [ "$(OS)" != "Windows_NT" ] && pgrep -x "$(GATEWAY)" >/dev/null 2>&1; then \
+	@# Ask this account's gateway, not pgrep: `pgrep -f` matches this make
+	@# invocation, and macOS truncates the name `pgrep -x` sees (GAP-1575).
+	@if [ "$(OS)" != "Windows_NT" ] && "$(INSTALL_DIR)/$(GATEWAY)$(EXE)" status >/dev/null 2>&1; then \
 		echo "  Gateway sidecar is running an older build — restart with:"; \
 		echo "    $(INSTALL_DIR)/$(GATEWAY)$(EXE) restart"; \
 	fi
@@ -812,7 +882,7 @@ packaging-linux-enterprise:
 # Unsigned unless MACOS_APP_SIGN_IDENTITY / MACOS_INSTALLER_SIGN_IDENTITY
 # are set; see scripts/build-macos-enterprise-pkg.sh.
 packaging-macos-enterprise:
-	@scripts/build-macos-enterprise-pkg.sh --version "$(VERSION)" --dist-dir "$(DIST_DIR)"
+	@GIT_COMMIT="$(GIT_COMMIT)" BUILD_DATE="$(BUILD_DATE)" scripts/build-macos-enterprise-pkg.sh --version "$(VERSION)" --dist-dir "$(DIST_DIR)"
 
 # The managed-enterprise Windows build is split so a macOS release box (which
 # has SSH access to cisco-aispg/ai-common) prepares the -tags cmid gateway
@@ -1218,6 +1288,8 @@ _bundle-data: _checkout-write-preflight
 	@rm -rf cli/defenseclaw/_data/policies/guardrail/strict
 	@rm -rf cli/defenseclaw/_data/policies/guardrail/permissive
 	@rm -rf cli/defenseclaw/_data/policies/guardrail-use-cases
+	@rm -rf cli/defenseclaw/_data/policies/yara
+	@mkdir -p cli/defenseclaw/_data/policies/yara
 	@rm -rf cli/defenseclaw/_data/splunk_o11y_dashboards
 	cp policies/rego/*.rego cli/defenseclaw/_data/policies/rego/
 	rm -f cli/defenseclaw/_data/policies/rego/*_test.rego
@@ -1228,6 +1300,7 @@ _bundle-data: _checkout-write-preflight
 	cp -r policies/guardrail/permissive cli/defenseclaw/_data/policies/guardrail/
 	cp policies/guardrail/tool-chains.json cli/defenseclaw/_data/policies/guardrail/
 	cp -r policies/guardrail-use-cases cli/defenseclaw/_data/policies/
+	cp -r policies/yara/mcp-tools cli/defenseclaw/_data/policies/yara/
 	@# Use the canonical generator without repairing tracked docs before CI checks.
 	$(PYTHON) scripts/gen_envvars_docs.py --bundle-only
 	cp -r skills/codeguard cli/defenseclaw/_data/skills/
@@ -1299,12 +1372,12 @@ dist-gateway: _checkout-write-preflight sync-openclaw-extension
 		goos=$${pair%%/*}; goarch=$${pair##*/}; exe=""; [ "$$goos" = windows ] && exe=.exe; \
 		stage="$$(mktemp -d)"; \
 		echo "Building gateway $${goos}/$${goarch}..."; \
-		CGO_ENABLED=0 GOOS=$$goos GOARCH=$$goarch go build -trimpath -ldflags "-s -w -X main.version=$(VERSION)" \
+		CGO_ENABLED=0 GOOS=$$goos GOARCH=$$goarch go build -trimpath -ldflags "-s -w -X main.version=$(VERSION) $(BUILD_INFO_LDFLAGS)" \
 			-o "$$stage/defenseclaw-gateway$$exe" ./cmd/defenseclaw; \
-		CGO_ENABLED=0 GOOS=$$goos GOARCH=$$goarch go build -trimpath -ldflags "-s -w -X main.version=$(VERSION)" \
+		CGO_ENABLED=0 GOOS=$$goos GOARCH=$$goarch go build -trimpath -ldflags "-s -w -X main.version=$(VERSION) $(BUILD_INFO_LDFLAGS)" \
 			-o "$$stage/defenseclaw-acp$$exe" ./cmd/defenseclaw-acp; \
 		if [ "$$goos" = windows ]; then \
-			CGO_ENABLED=0 GOOS=$$goos GOARCH=$$goarch go build -trimpath -ldflags "-s -w -H=windowsgui -X main.version=$(VERSION)" \
+			CGO_ENABLED=0 GOOS=$$goos GOARCH=$$goarch go build -trimpath -ldflags "-s -w -H=windowsgui -X main.version=$(VERSION) $(BUILD_INFO_LDFLAGS)" \
 				-o "$$stage/defenseclaw-hook.exe" ./cmd/defenseclaw-hook; \
 			rm -f "$$out/defenseclaw-$(VERSION)-$$goos-$$goarch.zip"; \
 			(cd "$$stage" && zip -q "$$out/defenseclaw-$(VERSION)-$$goos-$$goarch.zip" ./*); \

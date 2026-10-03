@@ -1910,6 +1910,9 @@ def test_activation_rollback_and_guardian_failure_contracts_are_durable() -> Non
     assert "PSObject.Properties['authorization_error']" in guardian_failure
     assert "ConvertTo-DefenseClawBoundedDiagnostic" in guardian_failure
     assert "verification failed without a target error" in guardian_failure
+    # GAP-1940: pending rows of signed-out accounts are counted, not failures.
+    assert "PSObject.Properties['pending']" in guardian_failure
+    assert "are pending " in guardian_failure
     assert "ready = $ready" in guardian_probe
     assert "return [bool]$readiness.ready" in guardian_boolean
     assert "Get-DefenseClawGuardianReadinessProbe `" in deployment_assertion
@@ -5251,6 +5254,27 @@ def test_uninstall_returns_shared_vendor_directories_to_their_prior_state() -> N
     assert "CodexManagedHooksLockPath" in module
     assert "ClaudeManagedHooksLockPath" in module
     assert "Remove-DefenseClawCommittedManagedHooksSerializationLocks -Layout $Layout" in module
+    # A standalone purge then removes the Claude Code folders Setup created
+    # once they are empty (GAP-0100), and stale protected PowerShell temp
+    # folders (GAP-1734), and reports what it kept (behaviour in
+    # enterprise-standalone-machine-leftovers-purge-smoke.ps1).
+    assert (
+        "Remove-DefenseClawCommittedManagedHooksSerializationLocks -Layout $Layout\n"
+        "    $machineStateRemaining = [string[]]@()\n"
+        "    if ($Purge -and (Test-DefenseClawStandaloneProfile)) {\n"
+        "        $machineStateRemaining = [string[]]@(Remove-DefenseClawEmptyClaudeManagedSettingsFolders"
+    ) in module
+    # GAP-2057: stale installer staging and bootstrap folders go too.
+    assert (
+        "@(Remove-DefenseClawStaleRunDirectories -ProgramData $script:ProgramData "
+        "-WindowsTemp ([IO.Path]::Combine($script:WindowsDirectory, 'Temp')))"
+    ) in module
+    sweep = module[module.index("function Remove-DefenseClawStaleRunDirectories") :]
+    sweep = sweep[: sweep.index("\nfunction ", 1)]
+    for prefix in ("DefenseClaw-PowerShell-", "DefenseClaw-Installer-", "DefenseClaw-Bootstrap-"):
+        assert f"'{prefix}'" in sweep
+    assert "[string]$PSScriptRoot" in sweep
+    assert "-Name machine_state_remaining" in module
 
     # The traverse grant names a virtual account that only exists while the
     # service does, so it is dropped by the caller that deleted the service.
@@ -5338,3 +5362,46 @@ def test_state_absent_purge_uses_only_exact_pinned_scope() -> None:
 
     assert "Invoke-DefenseClawNamespaceSweep" not in module
     assert "Remove-DefenseClawSweepPath" not in module
+
+
+def test_uninstall_tombstone_names_the_removed_release() -> None:
+    """GAP-1074: installed_version after an uninstall is the removed release."""
+    module = read(MODULE)
+    uninstall = module[
+        module.index("function Invoke-DefenseClawUninstallLifecycle") :
+        module.index("Write-DefenseClawJsonAtomic -Value $tombstone -Path $Layout.MetadataPath")
+    ]
+    tombstone = uninstall[uninstall.index("$tombstone = New-DefenseClawDeploymentMetadata") :]
+    assert "$tombstone.Contains('product_version')" in tombstone
+    assert "$metadata.PSObject.Properties['product_version']" in tombstone
+    assert "$tombstone['product_version'] = [string]$removedVersion.Value" in tombstone
+    assert "$tombstone.Remove('product_version')" in tombstone
+
+
+def test_install_after_cli_purge_does_not_return_the_purge_result() -> None:
+    """GAP-1079: only Uninstall reports a finished self-uninstall purge."""
+    module = read(MODULE)
+    recovery = module[
+        module.index("function Invoke-DefenseClawSelfUninstallRecovery") :
+        module.index("function Complete-DefenseClawSelfUninstallRetirement")
+    ]
+    tail = recovery[recovery.rindex("Remove-DefenseClawSelfUninstallEvidence") :]
+    assert "if ($Action -eq 'Uninstall' -and\n        [bool]$receipt.purge_requested" in tail
+
+
+def test_self_uninstall_finalizer_helper_keeps_its_call_on_one_line() -> None:
+    # The helper is an expandable here-string, where a backtick before a
+    # newline is an escape, not a continuation. A split call ran
+    # Complete-DefenseClawSelfUninstallRetirement without -ReceiptPath, so
+    # the finalizer exited and left the ARP entry, HKLM key and retired
+    # install root behind (GAP-1373).
+    module = read(MODULE)
+    builder = module[
+        module.index("function Get-DefenseClawSelfUninstallHelperContent") :
+        module.index("function Assert-DefenseClawSelfUninstallHelper")
+    ]
+    helper = builder[builder.index('return @"') : builder.index('\n"@')]
+    assert not [line for line in helper.splitlines() if line.rstrip().endswith("`")]
+    call = next(line for line in helper.splitlines() if "Complete-DefenseClawSelfUninstallRetirement" in line)
+    assert "-ReceiptPath `$ProtectedReceiptPath" in call
+    assert "-WaitForCallerExit" in call

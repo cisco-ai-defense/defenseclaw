@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -77,6 +78,7 @@ def test_v8_setup_writes_trace_destination_and_secret_outside_yaml(tmp_path, mon
 
     assert result.exit_code == 0, result.output
     assert "Action:      ADD" in result.output
+    assert "not saved" not in result.output
     source = (tmp_path / "config.yaml").read_text(encoding="utf-8")
     assert "must-never-print" not in source + result.output
     assert "# operator comment" in source
@@ -116,6 +118,9 @@ def test_v8_setup_is_idempotent_and_reports_update(tmp_path, monkeypatch) -> Non
     assert first.exit_code == 0, first.output
     assert second.exit_code == 0, second.output
     assert "Action:      ADD" in first.output
+    # GAP-1299: an environment-only key is not saved; say so and how to fix it.
+    assert "GALILEO_API_KEY was read from this shell and not saved" in first.output
+    assert "defenseclaw keys set GALILEO_API_KEY" in first.output
     assert "Action:      UPDATE" in second.output
     assert "already configured" in second.output
     assert (tmp_path / "config.yaml").read_text(encoding="utf-8") == after_first
@@ -217,6 +222,46 @@ def test_v8_status_uses_masked_plan_and_sanitized_health(tmp_path, monkeypatch) 
     assert "do-not-print" not in result.output
 
 
+def test_v8_status_text_is_readable_and_names_next_step_when_failing(tmp_path, monkeypatch) -> None:
+    app = _app(tmp_path, monkeypatch)
+    monkeypatch.setenv("GALILEO_API_KEY", "do-not-print")
+    health = {
+        "telemetry": {
+            "details": {
+                "destinations": [
+                    {
+                        "name": "galileo",
+                        "state": "failing",
+                        "reason": "circuit_open",
+                        "queue": {"items": 0, "max_items": 2048, "dropped": 0},
+                        "last_failure": "2026-10-02T05:03:18Z",
+                        "last_error_class": "queue_rejected",
+                    }
+                ]
+            }
+        }
+    }
+    with (
+        patch(
+            "defenseclaw.commands.cmd_setup_galileo._require_v8_operator_status",
+            return_value=_status(configured=True),
+        ),
+        patch("defenseclaw.commands.cmd_setup_galileo._gateway_health_snapshot", return_value=health),
+    ):
+        result = CliRunner().invoke(galileo, ["status"], obj=app)
+
+    assert result.exit_code == 0, result.output
+    out = result.output
+    assert "{" not in out and "True" not in out
+    assert "Signals         traces" in out
+    assert "Config version  8" in out
+    assert "Health          failing (circuit_open)" in out
+    assert "Queue           0 / 2048 items, 0 dropped" in out
+    assert "Last failure    2026-10-02T05:03:18Z (queue_rejected)" in out
+    assert "Next step:" in out and "defenseclaw setup galileo test" in out
+    assert "do-not-print" not in out
+
+
 @pytest.mark.parametrize(
     ("arguments", "helper", "expected"),
     [
@@ -286,6 +331,71 @@ def test_destination_test_fails_safely_when_runtime_does_not_acknowledge(tmp_pat
     assert "gateway_rejected" in result.output
     assert "did not acknowledge" in result.output
     assert "--deployment self-hosted --trace-endpoint" in result.output
+
+
+def test_destination_test_names_the_delivery_failure_the_gateway_recorded(tmp_path, monkeypatch) -> None:
+    # GAP-1318: a DNS failure was reported with the API-key hint.
+    from datetime import datetime, timedelta, timezone
+
+    app = _app(tmp_path, monkeypatch)
+    now = datetime.now(timezone.utc)
+    # Date the config change a minute back: Windows can stamp the file just
+    # after "now", which would hide this run's alerts.
+    changed = (now - timedelta(minutes=1)).timestamp()
+    os.utime(tmp_path / "config.yaml", (changed, changed))
+    app.store = SimpleNamespace(
+        list_alerts=lambda _limit: [
+            SimpleNamespace(details="observability_runtime failed: reload_initialization_failed", timestamp=now),
+            SimpleNamespace(details="galileo/traces failed: resolution_failed", timestamp=now),
+            SimpleNamespace(details="galileo/traces failed: http_authentication", timestamp=now - timedelta(hours=2)),
+        ]
+    )
+    with (
+        patch("defenseclaw.commands.cmd_setup_galileo._require_v8_operator_status", return_value=_status(configured=True)),
+        patch(
+            "defenseclaw.commands.cmd_setup_galileo.run_trace_canary",
+            side_effect=TraceCanaryError("gateway_rejected"),
+        ),
+    ):
+        result = CliRunner().invoke(galileo, ["test"], obj=app)
+
+    assert result.exit_code != 0
+    assert "export failure" in result.output and "resolution_failed" in result.output
+    assert "check the endpoint and DNS" in result.output
+    assert "API key" not in result.output
+
+
+def test_destination_test_ignores_alerts_from_before_the_config_change_and_waits(tmp_path, monkeypatch) -> None:
+    # GAP-1318 reopen: an alert from the previous config was named, and this
+    # run's alert landed just after the CLI looked.
+    import os
+    from datetime import datetime, timedelta, timezone
+
+    app = _app(tmp_path, monkeypatch)
+    now = datetime.now(timezone.utc)
+    os.utime(tmp_path / "config.yaml", (now.timestamp() - 60, now.timestamp() - 60))
+    old = SimpleNamespace(details="galileo/traces failed: http_authentication", timestamp=now - timedelta(minutes=3))
+    new = SimpleNamespace(details="galileo/traces failed: resolution_failed", timestamp=now)
+    calls = []
+
+    def list_alerts(_limit):
+        calls.append(1)
+        return [new, old] if len(calls) > 1 else [old]
+
+    app.store = SimpleNamespace(list_alerts=list_alerts)
+    monkeypatch.setattr("defenseclaw.commands.cmd_setup_galileo._GALILEO_ALERT_WAIT_SECONDS", 2.0)
+    with (
+        patch("defenseclaw.commands.cmd_setup_galileo._require_v8_operator_status", return_value=_status(configured=True)),
+        patch(
+            "defenseclaw.commands.cmd_setup_galileo.run_trace_canary",
+            side_effect=TraceCanaryError("gateway_rejected"),
+        ),
+    ):
+        result = CliRunner().invoke(galileo, ["test"], obj=app)
+
+    assert result.exit_code != 0
+    assert "resolution_failed" in result.output and "http_authentication" not in result.output
+    assert len(calls) >= 2
 
 
 def test_destination_test_refuses_disabled_galileo_before_canary(tmp_path, monkeypatch) -> None:

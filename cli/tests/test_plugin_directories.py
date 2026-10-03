@@ -1165,3 +1165,15 @@ def test_plugin_directory_entries_filters_and_sorts(tmp_path: Path) -> None:
         ("alpha", os.fspath(tmp_path / "alpha")),
         ("zeta", os.fspath(tmp_path / "zeta")),
     ]
+
+
+def test_hermes_plugin_root_skips_python_bytecode_cache(tmp_path: Path) -> None:
+    """GAP-1086: Hermes' __pycache__ was listed as an enabled plugin."""
+    root = tmp_path / "hermes-agent" / "plugins"
+    (root / "browser").mkdir(parents=True)
+    (root / "__pycache__").mkdir()
+    (root / "__pycache__" / "x.cpython-312.pyc").write_bytes(b"")
+
+    found = discover_plugin_directories(str(root), connector="hermes")
+
+    assert [entry.id for entry in found] == ["browser"]

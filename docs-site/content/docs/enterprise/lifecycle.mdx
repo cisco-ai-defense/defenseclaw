@@ -258,7 +258,10 @@ sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos repair --js
   changed: the files it rewrote or whose mode or owner it restored, the
   services it started because they were not running, DefenseClaw's machine
   policy entries it rewrote, and the users and agents whose hooks the
-  guardian rewrote. On a healthy deployment it says `nothing to repair`. The
+  guardian rewrote. On a healthy deployment it says `nothing to repair`.
+  `repair` always re-applies the deployment, so it stops and restarts every
+  DefenseClaw service (the gateway and the hook guardian are down for a few
+  seconds) and says so; `ensure` leaves a healthy deployment running. The
   `--json` result carries the list as `changes`, and an `ensure` that
   re-applies the deployment lists its changes the same way.
 - **Linux and macOS, payload installs.** `repair` keeps the installed binaries.
@@ -328,9 +331,10 @@ Uninstall does the following on every OS:
   entries stay. On Linux and macOS it restores the preimages it recorded.
 - It stops and removes the services.
 
-Config, credentials, state, and logs stay unless you purge, and so does
-each user's DefenseClaw folder (`~/.defenseclaw`). A purge removes
-everything, each enrolled user's folder and per-user binaries included.
+It also removes the machine state: the config, credentials, state and logs.
+Each user's DefenseClaw folder (`~/.defenseclaw`) and per-user binaries stay.
+A purge removes everything, each enrolled user's folder and per-user binaries
+included. The Secure Client profile keeps its machine state unless you purge.
 
 On Linux and macOS, the default uninstall removes the deployment and its
 machine state: the config, credentials, gateway and guardian state, logs,

@@ -23,13 +23,16 @@ from defenseclaw.context import AppContext, pass_context
 
 @click.group("audit")
 def audit() -> None:
-    """Audit trail helpers (export and activity logging).
+    """Audit trail helpers: export, findings and gateway logs.
 
     \b
-    Export the audit log (incl. per-connector filtering):
-        defenseclaw audit export [--connector X]
-    It runs 'defenseclaw-gateway audit export' with the same options.
-    'log-activity' records operator/config activity.
+    Export the audit log, config changes included (action config-update):
+        defenseclaw audit export [--connector X] [--since 1h]
+    Report the current distinct skill/MCP/plugin/code scan findings (JSON):
+        defenseclaw audit findings [--scanner NAME] [--since 30m]
+    'export' and 'findings' run 'defenseclaw-gateway audit <command>' with the
+    same options. Show the newest gateway or watchdog log lines:
+        defenseclaw audit logs [--source watchdog] [-n 50] [--grep TEXT]
     """
 
 
@@ -54,6 +57,9 @@ def run_gateway(argv: Sequence[str]) -> NoReturn:
         raise click.ClickException(str(exc)) from exc
     if not binary:
         raise click.ClickException(_GATEWAY_MISSING)
+    # Usage errors then name 'defenseclaw audit ...', the command the user
+    # typed, instead of 'defenseclaw-gateway audit ...' (GAP-1644).
+    os.environ["DEFENSECLAW_DELEGATED_FROM"] = "defenseclaw"
     for stream in (sys.stdout, sys.stderr):
         try:
             stream.flush()
@@ -85,16 +91,80 @@ def audit_export(gateway_args: tuple[str, ...]) -> None:
     run_gateway(("audit", "export", *gateway_args))
 
 
-@audit.command("log-activity")
+@audit.command(
+    "findings",
+    context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
+    add_help_option=False,
+)
+@click.argument("gateway_args", nargs=-1, type=click.UNPROCESSED)
+def audit_findings(gateway_args: tuple[str, ...]) -> None:
+    """Report distinct current scan findings (runs 'defenseclaw-gateway audit findings').
+
+    Every argument goes to 'defenseclaw-gateway audit findings'; see
+    'defenseclaw audit findings --help' for its options.
+    """
+    run_gateway(("audit", "findings", *gateway_args))
+
+
+_LOG_FILES = {"gateway": "gateway.log", "watchdog": "watchdog.log"}
+
+
+@audit.command("logs")
+@click.option(
+    "--source",
+    type=click.Choice(sorted(_LOG_FILES)),
+    default="gateway",
+    show_default=True,
+    help="Which log to read.",
+)
+@click.option("-n", "--lines", "line_count", type=click.IntRange(1, 5000), default=50, show_default=True,
+              help="Number of newest lines to show.")
+@click.option("--grep", "pattern", default=None, help="Only lines containing this text (case-insensitive).")
+@pass_context
+def audit_logs(app: AppContext, source: str, line_count: int, pattern: str | None) -> None:
+    """Show the newest lines of the gateway or watchdog log (as the TUI Logs panel does)."""
+    path = Path(app.cfg.data_dir) / _LOG_FILES[source]
+    try:
+        with path.open("rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            start = max(0, fh.tell() - 1024 * 1024)
+            fh.seek(start)
+            text = fh.read().decode("utf-8", errors="replace")
+    except FileNotFoundError:
+        raise click.ClickException(
+            f"no {source} log yet at {path}; start the gateway with 'defenseclaw-gateway start'"
+        ) from None
+    except OSError as exc:
+        raise click.ClickException(f"could not read {path}: {exc.strerror or exc}") from exc
+    lines = text.splitlines()
+    if start and lines:
+        lines = lines[1:]  # drop the partial first line of the window
+    if pattern:
+        needle = pattern.lower()
+        lines = [line for line in lines if needle in line.lower()]
+        if not lines:
+            # GAP-1494: an empty match used to print nothing at all.
+            click.echo(
+                f"No {source} log lines match {pattern!r} in {path} "
+                "(searched the newest 1 MiB).",
+                err=True,
+            )
+            return
+    for line in lines[-line_count:]:
+        click.echo(line)
+
+
+# Internal helper (it used to back TUI config saves); hidden from --help.
+@audit.command("log-activity", hidden=True)
 @click.option(
     "--payload-file",
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
     required=True,
-    help="JSON payload written by the TUI on config save (before/after snapshots).",
+    help="JSON file with the change: action, target and before/after snapshots.",
 )
 @pass_context
 def audit_log_activity(app: AppContext, payload_file: Path) -> None:
-    """Record a config or operator mutation via Logger.log_activity."""
+    """Record a config change from a JSON payload as an audit event (internal)."""
     raw = payload_file.read_text(encoding="utf-8")
     try:
         data = json.loads(raw)

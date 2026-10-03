@@ -33,6 +33,7 @@ import sys
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -153,7 +154,7 @@ def source_config_version(*, path: str | None = None) -> int | None:
     except FileNotFoundError:
         return None
     except (OSError, UnicodeError, yaml.YAMLError) as exc:
-        raise ConfigVersionError("unable to read configuration schema version") from exc
+        raise ConfigVersionError(_unreadable_config_message(cfg_file, exc)) from exc
     if not isinstance(root, yaml.MappingNode):
         return 0
     version_nodes = [
@@ -165,6 +166,127 @@ def source_config_version(*, path: str | None = None) -> int | None:
     if node.tag == "tag:yaml.org,2002:bool":
         return 0
     return _exact_config_version(node.value)
+
+
+def _unreadable_config_message(cfg_file: str, exc: BaseException) -> str:
+    """Name the file, the problem and its position, and the next step."""
+
+    if isinstance(exc, yaml.YAMLError):
+        from defenseclaw.observability.v8_config import yaml_error_mark
+
+        problem = str(getattr(exc, "problem", "") or "") or "malformed YAML"
+        mark = yaml_error_mark(exc)
+        where = f" at line {mark.line + 1}, column {mark.column + 1}" if mark is not None else ""
+        detail = f"invalid YAML{where} ({problem})"
+        fix = "Fix that line"
+    elif isinstance(exc, UnicodeError):
+        detail = "the file is not valid UTF-8 text"
+    else:
+        detail = getattr(exc, "strerror", None) or type(exc).__name__
+    if not isinstance(exc, yaml.YAMLError):
+        fix = "Fix the file"
+    return (
+        f"Cannot read the DefenseClaw configuration {cfg_file}: {detail}. "
+        f"{fix}, then check it with 'defenseclaw config validate' "
+        "('defenseclaw doctor' also reports it)."
+    )
+
+
+_EMPTY_CONFIG_PROBE_BYTES = 64 << 10
+
+
+def config_is_empty(path: str | None = None) -> bool:
+    """Whether config.yaml exists but holds no settings (0 bytes, blank or comments only)."""
+
+    cfg_file = path or str(config_path())
+    try:
+        with open(cfg_file, "rb") as stream:
+            raw = stream.read(_EMPTY_CONFIG_PROBE_BYTES + 1)
+    except OSError:
+        return False
+    if len(raw) > _EMPTY_CONFIG_PROBE_BYTES:
+        return False
+    try:
+        return yaml.compose(raw) is None
+    except yaml.YAMLError:
+        return False
+
+
+def empty_config_message(path: str | None = None) -> str:
+    """An empty config.yaml is not an older config: say so and name the repair (GAP-1633)."""
+
+    cfg_file = path or str(config_path())
+    home = os.path.dirname(cfg_file) or "."
+    return (
+        f"{cfg_file} is empty: it holds no settings (as after a crash or a full disk). "
+        "It is not an older configuration, and nothing was changed. Restore your copy of config.yaml"
+        f"{_previous_config_hint(home)}, "
+        "or remove the empty file and run 'defenseclaw init'."
+    )
+
+
+def _newest_config_backup(home: str) -> tuple[str, float] | None:
+    """The newest nonempty backups/config.yaml.* copy DefenseClaw wrote (GAP-2206)."""
+
+    backups = os.path.join(home, "backups")
+    newest: tuple[str, float] | None = None
+    try:
+        names = os.listdir(backups)
+    except OSError:
+        return None
+    for name in names:
+        if not name.startswith("config.yaml."):
+            continue
+        candidate = os.path.join(backups, name)
+        try:
+            info = os.lstat(candidate)
+        except OSError:
+            continue
+        if not stat.S_ISREG(info.st_mode) or info.st_size == 0:
+            continue
+        if newest is None or info.st_mtime > newest[1]:
+            newest = (candidate, info.st_mtime)
+    return newest
+
+
+def _hint_time(mtime: float) -> str:
+    return datetime.fromtimestamp(mtime, timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+
+def _previous_config_hint(home: str) -> str:
+    """Name the newest copy of the config DefenseClaw kept, with its date.
+
+    That is the newest backups/config.yaml.* copy (GAP-2206) or the config
+    the last version upgrade kept. previous/ is refreshed only by an upgrade
+    to another version, so that copy can be much older than the config just
+    lost (GAP-1786).
+    """
+
+    backup = _newest_config_backup(home)
+    previous = os.path.join(home, "previous")
+    kept = os.path.join(previous, "data", "config.yaml")
+    try:
+        mtime: float | None = os.stat(kept).st_mtime
+    except OSError:
+        mtime = None
+    if backup is not None and (mtime is None or backup[1] >= mtime):
+        hint = f" (the newest backup is {backup[0]}, from {_hint_time(backup[1])}"
+        if mtime is not None:
+            hint += f"; the last version upgrade kept an older copy from {_hint_time(mtime)} in {kept}"
+        return hint + ")"
+    if mtime is None:
+        return ""
+    try:
+        with open(os.path.join(previous, "VERSION"), encoding="utf-8") as stream:
+            version = stream.read(64).strip()
+    except (OSError, UnicodeError):
+        version = ""
+    label = f"the DefenseClaw {version} config" if version else "the config"
+    when = _hint_time(mtime)
+    return (
+        f" (the last version upgrade kept {label} from {when} in {kept}; "
+        "it lacks every change made since then)"
+    )
 
 
 def require_current_config(*, path: str | None = None, allow_missing: bool = False) -> None:
@@ -181,6 +303,8 @@ def require_current_config(*, path: str | None = None, allow_missing: bool = Fal
             "run 'defenseclaw upgrade', or 'defenseclaw rollback' to restore the previous install."
         )
     if version != CURRENT_CONFIG_VERSION:
+        if version == 0 and config_is_empty(path):
+            raise ConfigVersionError(empty_config_message(path))
         raise ConfigVersionError("Configuration schema v8 is required — run 'defenseclaw migrate' first.")
 
 
@@ -829,6 +953,18 @@ class LLMConfig:
             return self.model.split("/", 1)[0].strip().lower()
         return ""
 
+    def keyless_auth_mode(self) -> str:
+        """Return the Bedrock auth mode when it needs no API key, else "".
+
+        ``instance_role``, ``profile`` and ``iam_credentials`` authenticate
+        with the AWS credential chain, so an unset ``api_key_env`` is
+        expected and must not be reported as a missing key.
+        """
+        if self.provider_prefix() not in ("bedrock", "amazon-bedrock") or self.bedrock is None:
+            return ""
+        mode = (self.bedrock.auth_mode or "").strip().lower() or "api_key"
+        return "" if mode == "api_key" else mode
+
     def is_local_provider(self) -> bool:
         """Return True when the resolved provider runs on-box and
         doesn't need an API key (ollama, vllm, lm_studio) or when the
@@ -840,6 +976,15 @@ class LLMConfig:
             if "127.0.0.1" in host or "localhost" in host or "[::1]" in host or host.startswith("unix:"):
                 return True
         return False
+
+    def needs_api_key(self) -> bool:
+        """Return False when the provider authenticates without an API key.
+
+        On-box runtimes take no key, and Bedrock with ``iam_credentials``,
+        ``profile`` or ``instance_role`` auth signs requests with AWS
+        credentials (the gateway's judge accepts an empty key for Bedrock).
+        """
+        return not (self.is_local_provider() or self.keyless_auth_mode())
 
 
 @dataclass
@@ -913,11 +1058,15 @@ class SkillScannerConfig:
     virustotal_api_key_env: str = ""
 
     def resolved_virustotal_api_key(self) -> str:
-        """Return VirusTotal key from env var (if set) or direct value."""
-        if self.virustotal_api_key_env:
-            val = os.environ.get(self.virustotal_api_key_env, "")
-            if val:
-                return val
+        """Return VirusTotal key from env var (if set) or direct value.
+
+        An empty ``virustotal_api_key_env`` falls back to
+        ``VIRUSTOTAL_API_KEY``, the gateway's default and the name
+        ``defenseclaw keys set`` stores (GAP-1936).
+        """
+        val = os.environ.get(self.virustotal_api_key_env or "VIRUSTOTAL_API_KEY", "")
+        if val:
+            return val
         return self.virustotal_api_key
 
 
@@ -1372,15 +1521,22 @@ class OTelConfig:
 @dataclass
 class GatewayWatcherSkillConfig:
     enabled: bool = True
-    take_action: bool = False
+    # Same default as the gateway's viper default (GAP-2357).
+    take_action: bool = True
     dirs: list[str] = field(default_factory=list)
 
 
 @dataclass
 class GatewayWatcherPluginConfig:
     enabled: bool = True
-    take_action: bool = False
+    take_action: bool = True
     dirs: list[str] = field(default_factory=list)
+
+
+@dataclass
+class GatewayWatcherMCPConfig:
+    # Same default as the gateway's viper default (GAP-2382).
+    take_action: bool = True
 
 
 @dataclass
@@ -1388,6 +1544,7 @@ class GatewayWatcherConfig:
     enabled: bool = True
     skill: GatewayWatcherSkillConfig = field(default_factory=GatewayWatcherSkillConfig)
     plugin: GatewayWatcherPluginConfig = field(default_factory=GatewayWatcherPluginConfig)
+    mcp: GatewayWatcherMCPConfig = field(default_factory=GatewayWatcherMCPConfig)
 
 
 @dataclass
@@ -3228,7 +3385,11 @@ class Config:
         # Load already moved a retired connector ID in memory; apply the same
         # rename to the on-disk document so any save persists it.
         legacy_connector.migrate_raw_config(existing, path)
-        merged = _merge_v8_modeled_changes(existing, dataclass_data, self._loaded_v8_modeled_snapshot)
+        merged = _merge_v8_modeled_changes(
+            existing,
+            dataclass_data,
+            _baseline_keeping_migrated_llm_slots(dataclass_data, self._loaded_v8_modeled_snapshot),
+        )
         merged["config_version"] = 8
         merged.setdefault("observability", {})
         # The Go runtime requires an explicit profile selector whenever ACP is
@@ -3768,6 +3929,50 @@ _V8_UNMODELED_OR_REMOVED_TOP_LEVEL = frozenset(
     {"audit_db", "audit_sinks", "otel", "privacy", "splunk", "observability"}
 )
 _V8_MISSING = object()
+
+# v4 LLM field -> the v5 slot that _migrate_llm_fields() copies it into.
+_LEGACY_LLM_SLOT_PAIRS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
+    (("guardrail", "judge", "model"), ("guardrail", "judge", "llm", "model")),
+    (("guardrail", "judge", "api_key_env"), ("guardrail", "judge", "llm", "api_key_env")),
+    (("guardrail", "judge", "api_base"), ("guardrail", "judge", "llm", "base_url")),
+    (("guardrail", "model"), ("guardrail", "llm", "model")),
+    (("guardrail", "api_key_env"), ("guardrail", "llm", "api_key_env")),
+    (("guardrail", "api_base"), ("guardrail", "llm", "base_url")),
+    (("default_llm_model",), ("llm", "model")),
+    (("default_llm_api_key_env",), ("llm", "api_key_env")),
+    (("inspect_llm", "model"), ("llm", "model")),
+    (("inspect_llm", "api_key_env"), ("llm", "api_key_env")),
+    (("inspect_llm", "api_key"), ("llm", "api_key")),
+    (("inspect_llm", "provider"), ("llm", "provider")),
+    (("inspect_llm", "base_url"), ("llm", "base_url")),
+)
+
+
+def _dig(data: Any, path: tuple[str, ...]) -> Any:
+    for key in path:
+        if not isinstance(data, dict):
+            return None
+        data = data.get(key)
+    return data
+
+
+def _baseline_keeping_migrated_llm_slots(current: dict[str, Any], baseline: dict[str, Any]) -> dict[str, Any]:
+    """Make a cleared v4 LLM field persist the v5 copy load made of it (GAP-2176).
+
+    Load copies v4 LLM values into the v5 slots before it takes the save
+    baseline, so the v5 copy looks unchanged and the modeled delta would write
+    only the cleared v4 field: the value would be lost on disk. Drop those v5
+    slots from the baseline so the delta writes them as well.
+    """
+    adjusted: dict[str, Any] | None = None
+    for legacy, unified in _LEGACY_LLM_SLOT_PAIRS:
+        if _dig(baseline, legacy) and not _dig(current, legacy) and _dig(current, unified):
+            if adjusted is None:
+                adjusted = copy.deepcopy(baseline)
+            parent = _dig(adjusted, unified[:-1])
+            if isinstance(parent, dict):
+                parent.pop(unified[-1], None)
+    return baseline if adjusted is None else adjusted
 
 
 def _merge_v8_modeled_changes(
@@ -5212,17 +5417,21 @@ def _merge_gateway_watcher(raw: dict[str, Any] | None) -> GatewayWatcherConfig:
         return GatewayWatcherConfig()
     skill_raw = raw.get("skill", {})
     plugin_raw = raw.get("plugin", {})
+    mcp_raw = raw.get("mcp") or {}
     return GatewayWatcherConfig(
         enabled=raw.get("enabled", True),
         skill=GatewayWatcherSkillConfig(
             enabled=skill_raw.get("enabled", True),
-            take_action=skill_raw.get("take_action", False),
+            take_action=skill_raw.get("take_action", True),
             dirs=skill_raw.get("dirs", []),
         ),
         plugin=GatewayWatcherPluginConfig(
             enabled=plugin_raw.get("enabled", True),
-            take_action=plugin_raw.get("take_action", False),
+            take_action=plugin_raw.get("take_action", True),
             dirs=plugin_raw.get("dirs", []),
+        ),
+        mcp=GatewayWatcherMCPConfig(
+            take_action=mcp_raw.get("take_action", True),
         ),
     )
 
@@ -5327,9 +5536,12 @@ def _apply_instance_overlay(out: LLMConfig, data_dir: str) -> None:
 def _load_dotenv_into_os(data_dir: str) -> None:
     """Load KEY=VALUE pairs from ~/.defenseclaw/.env into os.environ.
 
-    Existing environment variables are never overwritten.  This ensures
+    Variables the shell exported are never overwritten.  This ensures
     secrets stored by ``defenseclaw setup`` are available to the Python CLI
-    even when not exported in the user's shell profile.
+    even when not exported in the user's shell profile.  A value an earlier
+    load copied from this file is refreshed, so a long-lived process (the
+    TUI) picks up a rotated gateway token instead of keeping the one it read
+    at launch (GAP-2547).
     """
     env_path = os.path.join(data_dir, ".env")
     credential_provenance.begin_dotenv_load(data_dir, env_path)
@@ -5360,7 +5572,8 @@ def _load_dotenv_into_os(data_dir: str) -> None:
                 value = value[1:-1]
             if key and key not in seen_keys:
                 seen_keys.add(key)
-                injected = key not in os.environ
+                current = os.environ.get(key)
+                injected = current is None or credential_provenance.holds_injected_value(data_dir, key, current)
                 if injected:
                     os.environ[key] = value
                 credential_provenance.note_dotenv_candidate(

@@ -18,6 +18,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -126,6 +127,9 @@ func TestSandboxCommandTreeCoversThePlan(t *testing.T) {
 		cmd, _, err := sandboxCmd.Find(strings.Fields(path))
 		if err != nil || cmd.Flags().Lookup("output") == nil {
 			t.Errorf("sandbox %s has no --output", path)
+		}
+		if err == nil && cmd.Flags().Lookup("json") == nil {
+			t.Errorf("sandbox %s has no --json (GAP-1247)", path)
 		}
 	}
 }
@@ -434,5 +438,55 @@ func TestSandboxPackCommandsWithoutAConfig(t *testing.T) {
 	show, _, _ := sandboxCmd.Find([]string{"pack", "show"})
 	if err := sandboxPreRun(show, nil); err == nil {
 		t.Fatal("a broken config.yaml was ignored")
+	}
+}
+
+// GAP-1247: --json is the same as --output json.
+func TestSandboxJSONFlagSelectsJSONOutput(t *testing.T) {
+	cmd := &cobra.Command{Use: "x"}
+	out := outputFlag(cmd)
+	if err := cmd.Flags().Parse([]string{"--json"}); err != nil {
+		t.Fatal(err)
+	}
+	if *out != "json" {
+		t.Fatalf("--json gave output %q", *out)
+	}
+}
+
+// GAP-1817: with sandboxes off, list/policy show --json still print JSON
+// (like `sandbox status --json`) and keep the non-zero exit; text output is
+// unchanged.
+func TestSandboxDisabledJSONOutput(t *testing.T) {
+	fail := sandboxRunE(func(_ context.Context, _ *sandboxcli.App, _ *cobra.Command, _ []string) error {
+		return &sandboxcli.DisabledError{Message: "OpenShell sandboxes are disabled"}
+	})
+	for _, args := range [][]string{{"--json"}, {}} {
+		cmd := &cobra.Command{Use: "list"}
+		outputFlag(cmd)
+		var stdout, stderr bytes.Buffer
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&stderr)
+		if err := cmd.Flags().Parse(args); err != nil {
+			t.Fatal(err)
+		}
+		if err := fail(cmd, nil); err == nil {
+			t.Fatalf("%v: disabled sandboxes returned no error", args)
+		}
+		if !strings.Contains(stderr.String(), "OpenShell sandboxes are disabled") {
+			t.Fatalf("%v: stderr = %q", args, stderr.String())
+		}
+		if len(args) == 0 {
+			if stdout.Len() != 0 {
+				t.Fatalf("text output wrote stdout: %q", stdout.String())
+			}
+			continue
+		}
+		var got map[string]any
+		if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+			t.Fatalf("--json stdout is not JSON: %v: %q", err, stdout.String())
+		}
+		if got["enabled"] != false || got["reason"] != "OpenShell sandboxes are disabled" {
+			t.Fatalf("--json stdout = %v", got)
+		}
 	}
 }

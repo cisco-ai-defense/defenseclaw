@@ -592,12 +592,21 @@ func nestedCommand(argv []string, program string) (string, Dialect, bool, bool) 
 			case "-encodedcommand", "-enc", "-e", "-file", "-f":
 				return "", DialectPowerShell, false, true
 			case "-command", "-c":
-				if !noProfileSeen || i+2 != len(argv) ||
+				if !noProfileSeen || i+1 >= len(argv) ||
 					strings.TrimSpace(argv[i+1]) == "" ||
 					argv[i+1] == "-" {
 					return "", DialectPowerShell, false, true
 				}
-				return argv[i+1], DialectPowerShell, true, false
+				// PowerShell joins every argument after -Command with spaces
+				// into the body, so `pwsh -Command echo marker` runs
+				// "echo marker" (GAP-2079). An empty argument is passed
+				// differently across PowerShell versions, so it stays opaque.
+				for _, argument := range argv[i+2:] {
+					if argument == "" {
+						return "", DialectPowerShell, false, true
+					}
+				}
+				return strings.Join(argv[i+1:], " "), DialectPowerShell, true, false
 			case "-noprofile":
 				if noProfileSeen {
 					return "", DialectPowerShell, false, true

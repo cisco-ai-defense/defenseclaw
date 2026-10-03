@@ -628,6 +628,39 @@ func TestConnectorReconcileRefreshesOnlySelectedRegistration(t *testing.T) {
 	}
 }
 
+func TestConnectorReconcileRecordsConnectorInActiveRoster(t *testing.T) {
+	// GAP-1650: an offline reconcile before the first gateway start must leave
+	// the roster the gateway needs to reconcile that lock entry later.
+	dataDir := testenv.PrivateTempDir(t)
+	seedCodexSelectionForTest(t, dataDir)
+	codexPath := filepath.Join(testenv.PrivateTempDir(t), ".codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(codexPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	originalCodexPath := connector.CodexConfigPathOverride
+	connector.CodexConfigPathOverride = codexPath
+	t.Cleanup(func() { connector.CodexConfigPathOverride = originalCodexPath })
+	defer withConnectorState(t, dataDir, "codex")()
+	cfg.Guardrail.Enabled = true
+	cfg.Guardrail.HookFailMode = "open"
+
+	_, stderr, _ := runConnectorCmd(t, "reconcile", "--connector", "codex", "--json")
+	assertConnectorReconcileStderr(t, "codex", stderr)
+	names, err := connector.LoadProtectedActiveConnectors(dataDir)
+	if err != nil || len(names) != 1 || names[0] != "codex" {
+		t.Fatalf("protected roster after first reconcile = %v, %v; want [codex]", names, err)
+	}
+
+	if err := connector.SaveActiveConnectors(dataDir, []string{"claudecode"}); err != nil {
+		t.Fatal(err)
+	}
+	_, stderr, _ = runConnectorCmd(t, "reconcile", "--connector", "codex", "--json")
+	assertConnectorReconcileStderr(t, "codex", stderr)
+	if got := connector.LoadActiveConnectors(dataDir); strings.Join(got, ",") != "claudecode,codex" {
+		t.Fatalf("roster after reconcile = %v; want claudecode and codex", got)
+	}
+}
+
 func TestConnectorReconcilePreservesClaudeCustodyAcrossPeerSetupAndRosterRefresh(t *testing.T) {
 	dataDir := testenv.PrivateTempDir(t)
 	seedCodexSelectionForTest(t, dataDir)
@@ -1487,6 +1520,53 @@ func TestConnectorTeardownMarksConnectorInactiveBeforeRemoval(t *testing.T) {
 	}
 	if err := conn.VerifyClean(opts); err != nil {
 		t.Fatalf("cursor residue after teardown: %v", err)
+	}
+}
+
+// GAP-1979: when Codex rewrites config.toml after Setup, teardown takes the
+// surgical path, which removes otel.environment only if it knows the value.
+func TestConnectorTeardownRemovesCodexOtelEnvironmentAfterDrift(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses the POSIX hook layout")
+	}
+	dir := testenv.PrivateTempDir(t)
+	defer withConnectorState(t, dir, "codex")()
+	cfg.Environment = "windows"
+
+	codexPath := filepath.Join(testenv.PrivateTempDir(t), "config.toml")
+	if err := os.WriteFile(codexPath, []byte("model = \"gpt-5\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previous := connector.CodexConfigPathOverride
+	connector.CodexConfigPathOverride = codexPath
+	t.Cleanup(func() { connector.CodexConfigPathOverride = previous })
+
+	conn := connector.NewCodexConnector()
+	opts := connector.SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", APIToken: "test-token", CodexOtelEnvironment: "windows"}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("codex setup: %v", err)
+	}
+	f, err := os.OpenFile(codexPath, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("\n[notice.model_migrations]\nseen = 1\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, stderr, exitCode := runConnectorCmd(t, "teardown", "--connector", "codex")
+	if exitCode != 0 || !strings.Contains(stdout, "teardown complete") {
+		t.Fatalf("teardown failed: exit=%d stdout=%q stderr=%q", exitCode, stdout, stderr)
+	}
+	data, err := os.ReadFile(codexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "otel") || strings.Contains(string(data), "environment") {
+		t.Fatalf("codex config.toml keeps DefenseClaw [otel] after teardown:\n%s", data)
 	}
 }
 

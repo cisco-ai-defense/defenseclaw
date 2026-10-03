@@ -17,6 +17,7 @@
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import unittest
@@ -47,6 +48,30 @@ class CliSmokeTests(unittest.TestCase):
         self.assertIn("Commands:", result.output)
         self.assertIn("init", result.output)
         self.assertIn("skill", result.output)
+
+    def test_top_level_help_fits_80_columns(self):
+        # GAP-2138: the Multi-connector paragraph is a \b block, so click
+        # keeps its hand wrapping; every line must fit an 80-column terminal.
+        from defenseclaw.main import cli
+
+        result = CliRunner().invoke(cli, ["--help"], terminal_width=80)
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("tracked under\n", result.output)
+        wide = [line for line in result.output.splitlines() if len(line) > 80]
+        self.assertEqual(wide, [])
+    def test_group_help_rows_show_whole_summaries(self):
+        # GAP-2036: Click cut command summaries off with '...' at 80 columns.
+        import click
+        from defenseclaw.main import cli
+
+        for group in ("mcp", "skill", "setup", "guardrail", "audit"):
+            command = cli.commands[group]
+            text = command.get_help(click.Context(command, info_name=group, terminal_width=80))
+            commands = text.split("Commands:", 1)[1]
+            self.assertNotIn("...", commands, f"{group}: {commands}")
+            if group == "mcp":
+                self.assertIn("in the configured connector(s)' MCP config.", " ".join(commands.split()))
 
     def test_init_help_works(self):
         from defenseclaw.main import cli
@@ -93,6 +118,11 @@ class CliSmokeTests(unittest.TestCase):
             self.assertFalse((home / "audit.db").exists())
 
     def test_trusted_path_bootstrap_survives_init_and_authorizes_codex_receipt(self):
+        # setup gateway refuses a port another process holds, so use one
+        # that is free now instead of a fixed port a parallel job may own.
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.bind(("127.0.0.1", 0))
+            api_port = probe.getsockname()[1]
         from defenseclaw.bootstrap import StepResult
         from defenseclaw.commands.cmd_config import ValidationResult
         from defenseclaw.main import cli
@@ -176,7 +206,7 @@ class CliSmokeTests(unittest.TestCase):
                         "setup",
                         "gateway",
                         "--api-port",
-                        "19091",
+                        str(api_port),
                         "--non-interactive",
                         "--no-verify",
                     ],
@@ -195,8 +225,8 @@ class CliSmokeTests(unittest.TestCase):
                 document["ai_discovery"]["trusted_binary_prefixes"],
                 [expected_root],
             )
-            self.assertEqual(document["gateway"]["api_port"], 19091)
-            self.assertEqual(json.loads(shown.output)["gateway"]["api_port"], 19091)
+            self.assertEqual(document["gateway"]["api_port"], api_port)
+            self.assertEqual(json.loads(shown.output)["gateway"]["api_port"], api_port)
             initialized_selection = initialized_receipt["selections"]["codex"]
             self.assertEqual(initialized_selection["executable"], expected_codex)
             receipt = json.loads((home / "agent_selection.json").read_text())

@@ -598,6 +598,7 @@ def test_every_lifecycle_action_uses_the_same_controller(controller) -> None:
     assert up.readiness_verified is True
     assert "Readiness:" in status
     assert "ready" in status
+    assert subject.status_ready is True
     assert _compose_call(runner, "up")[-2:] == ("up", "--detach")
     assert _compose_call(runner, "logs")[-5:] == (
         "logs",
@@ -793,7 +794,7 @@ def test_contract_and_environment_are_stable() -> None:
         "OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:4317",
         "OTEL_EXPORTER_OTLP_PROTOCOL": "grpc",
         "OTEL_SERVICE_NAME": "defenseclaw",
-        "OTEL_RESOURCE_ATTRIBUTES": ("service.namespace=defenseclaw,deployment.environment=local-dev"),
+        "OTEL_RESOURCE_ATTRIBUTES": ("service.namespace=defenseclaw,deployment.environment.name=local-dev"),
     }
 
 
@@ -808,8 +809,18 @@ def test_docker_cli_compose_daemon_and_linux_mode_failures(stack: Path, docker: 
 
     daemon_runner = FakeRunner()
     daemon_runner.add((str(docker.resolve()), "info"), returncode=1, stderr="daemon unavailable")
-    with pytest.raises(LocalStackError, match="daemon is not reachable"):
+    with pytest.raises(LocalStackError, match="daemon is not reachable. Start it"):
         LocalStackController(stack, docker_path=docker, runner=daemon_runner, os_name="linux").preflight()
+    # GAP-1335: a socket permission error on Linux is not "start Docker Desktop".
+    socket_runner = FakeRunner()
+    socket_runner.add(
+        (str(docker.resolve()), "info"),
+        returncode=1,
+        stderr="permission denied while trying to connect to the docker API at unix:///var/run/docker.sock",
+    )
+    with pytest.raises(LocalStackError, match="docker group") as raised:
+        LocalStackController(stack, docker_path=docker, runner=socket_runner, os_name="linux").preflight()
+    assert "Docker Desktop" not in str(raised.value)
 
     mode_runner = FakeRunner()
     mode_runner.info["OSType"] = "windows"
@@ -994,8 +1005,27 @@ def test_owned_container_requires_exact_project_service_and_paths(controller) ->
     subject.verify_container_ownership()
 
     labels_by_name["defenseclaw-grafana"]["com.docker.compose.project.working_dir"] = str(subject.stack_dir.parent)
-    with pytest.raises(LocalStackError, match="collision"):
+    # GAP-1335: a copy started from another directory is named as such.
+    with pytest.raises(LocalStackError, match="collision") as raised:
         subject.verify_container_ownership()
+    assert f"another copy of the {COMPOSE_PROJECT} stack, started from {subject.stack_dir.parent}" in str(raised.value)
+    with patch.object(subject, "probe_all", return_value=[ProbeResult("all", "local", True)]):
+        status = subject.status()
+    assert subject.status_ready is False and "Note: container name collision" in status
+    assert subject.status_foreign is True
+
+
+def test_missing_docker_on_windows_server_does_not_say_install_docker_desktop() -> None:
+    # GAP-1368: Docker Desktop does not run on Windows Server.
+    from defenseclaw.observability import local_stack
+
+    with patch.object(local_stack.platform, "win32_edition", create=True, return_value="ServerDatacenter"):
+        server = local_stack.docker_cli_missing_message("windows")
+    with patch.object(local_stack.platform, "win32_edition", create=True, return_value="Professional"):
+        desktop = local_stack.docker_cli_missing_message("windows")
+    assert "Docker Desktop and retry" not in server
+    assert "Linux containers" in server and "defenseclaw setup observability add otlp" in server
+    assert desktop.endswith("Install Docker Desktop and retry.")
 
 
 def test_reset_rejects_foreign_volume_and_requires_confirmation(controller) -> None:
@@ -1336,3 +1366,29 @@ func main() {
     assert "down --volumes" in recorded
     assert Path.home() == profile
     assert str(profile).startswith(str(tmp_path))
+
+
+def test_cli_help_lists_env_without_repo_history() -> None:
+    from click.testing import CliRunner
+    from defenseclaw.commands.cmd_setup_local_observability import local_observability
+
+    result = CliRunner().invoke(local_observability, ["--help"])
+
+    assert result.exit_code == 0, result.output
+    assert "historically" not in result.output and "``" not in result.output
+    assert "env      Print OTEL_" in result.output
+
+
+def test_cli_url_and_env_warn_when_docker_is_missing() -> None:
+    from click.testing import CliRunner
+    from defenseclaw.commands import cmd_setup_local_observability as module
+
+    with patch.object(module, "resolve_native_docker_executable", return_value=""):
+        url = CliRunner().invoke(module.local_observability, ["url"])
+        env = CliRunner().invoke(module.local_observability, ["env"])
+
+    for result in (url, env):
+        assert result.exit_code == 0, result.output
+        assert "Docker CLI was not found" in result.stderr
+        assert "Docker" not in result.stdout
+    assert "deployment.environment.name=local-dev" in env.stdout

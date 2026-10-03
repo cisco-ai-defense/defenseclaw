@@ -287,6 +287,7 @@ upgrade_lane() {
     # brings back (checked when the installer under test ran the swap).
     if [[ "${forward}" == "${DC_HOME}/previous/installer/install.sh" ]]; then
         grep -q "comes back if you roll back again" <<<"${fwd_out}" || fail "roll forward misdescribed the data kept in previous/"
+        grep -q "Rolling forward to DefenseClaw ${TARGET}" <<<"${fwd_out}" || fail "roll forward was headed as a rollback"
     fi
     assert_versions "${TARGET}"
     assert_healthy

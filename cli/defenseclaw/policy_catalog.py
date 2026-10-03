@@ -96,8 +96,11 @@ class PolicySummary:
     firewall_default: str
     hilt: bool | None
     scanner_overrides: int
-    replaces_webhooks: bool
+    adds_webhooks: bool
     sets_cisco: bool
+    # A built-in name served from the user policy dir: ``policy edit`` saved
+    # a copy that shadows the bundled file (``policy delete`` reverts it).
+    edited: bool = False
 
     def to_json(self) -> dict[str, object]:
         return asdict(self)
@@ -194,6 +197,7 @@ def summarize_policy(
     path: str,
     builtin: bool,
     active: bool,
+    edited: bool = False,
 ) -> PolicySummary:
     """Build a :class:`PolicySummary` from an already-loaded policy mapping."""
     guardrail = data.get("guardrail")
@@ -218,8 +222,9 @@ def summarize_policy(
         firewall_default=fw_default,
         hilt=_hilt(guardrail),
         scanner_overrides=_scanner_override_count(data.get("scanner_overrides")),
-        replaces_webhooks="webhooks" in data,
+        adds_webhooks=isinstance(data.get("webhooks"), list) and bool(data.get("webhooks")),
         sets_cisco="cisco_ai_defense" in data,
+        edited=edited,
     )
 
 
@@ -310,6 +315,7 @@ def _summaries(policy_dir: str | os.PathLike[str] | None) -> list[PolicySummary]
             continue
         loaded.append((stem, data, path, is_bundled))
     stems = {stem for stem, *_ in loaded}
+    bundled_stems = set(_yaml_files(_bundled_dir()))
     out: list[PolicySummary] = []
     for stem, data, path, is_bundled in loaded:
         if stem == active:
@@ -325,8 +331,9 @@ def _summaries(policy_dir: str | os.PathLike[str] | None) -> list[PolicySummary]
                 stem,
                 data,
                 path=path,
-                builtin=is_bundled and stem in BUILTIN_POLICY_NAMES,
+                builtin=stem in BUILTIN_POLICY_NAMES and stem in bundled_stems,
                 active=bool(active) and is_active,
+                edited=not is_bundled and stem in BUILTIN_POLICY_NAMES and stem in bundled_stems,
             )
         )
     return out

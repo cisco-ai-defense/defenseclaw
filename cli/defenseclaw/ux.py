@@ -34,8 +34,11 @@ recomputed on every call so a test that monkey-patches
 
 from __future__ import annotations
 
+import atexit
 import os
+import re
 import sys
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 
@@ -64,7 +67,17 @@ _ASCII_PRESENTATION_TRANSLATION = str.maketrans(
         "━": "-",
         "═": "=",
         "│": "|",
+        "┃": "|",
         "║": "|",
+        "┏": "+",
+        "┓": "+",
+        "┗": "+",
+        "┛": "+",
+        "┳": "+",
+        "┻": "+",
+        "┡": "+",
+        "┩": "+",
+        "╇": "+",
         "┌": "+",
         "┐": "+",
         "└": "\\",
@@ -83,6 +96,11 @@ _ASCII_PRESENTATION_TRANSLATION = str.maketrans(
         "→": "->",
         "←": "<-",
         "↪": "->",
+        "↳": "->",
+        "⇒": "=>",
+        "ℹ": "i",
+        "≤": "<=",
+        "≥": ">=",
         "…": "...",
         "•": "*",
         "·": "-",
@@ -90,6 +108,54 @@ _ASCII_PRESENTATION_TRANSLATION = str.maketrans(
         "○": "o",
     }
 )
+
+
+# Table rows are cut at these; a border line holds only these and spaces.
+_TABLE_VERTICALS = "│┃║"
+_TABLE_ROW_SPLIT = re.compile(f"([{_TABLE_VERTICALS}])")
+_TABLE_BORDER_CHARS = frozenset("─━═┌┐└┘├┤┬┴┼┏┓┗┛┳┻┡┩╇╭╮╯╰ ")
+
+
+def _fit_ascii_cell(cell: str, width: int) -> str:
+    """Shrink a translated table cell back to its rendered width."""
+
+    body = cell.rstrip(" ")
+    if len(body) <= width:
+        # The cell's right padding absorbs the extra characters.
+        return body + " " * (width - len(body))
+    right_pad = 1 if cell.endswith(" ") else 0
+    room = max(width - right_pad, 0)
+    if body.endswith("...") and room >= 3:
+        body = body[: room - 3].rstrip(" ") + "..."
+    else:
+        body = body[:room]
+    return body + " " * (width - len(body))
+
+
+def _ascii_presentation_line(line: str) -> str:
+    """Translate one line; table cells and borders keep their widths."""
+
+    stripped = line.strip()
+    if stripped and set(stripped) <= _TABLE_BORDER_CHARS:
+        # A tree branch "└─ x" stays "\- x"; a table's bottom-left corner is "+".
+        return line.replace("└", "+").translate(_ASCII_PRESENTATION_TRANSLATION)
+    if not any(ch in line for ch in _TABLE_VERTICALS):
+        return line.translate(_ASCII_PRESENTATION_TRANSLATION)
+    out = []
+    for part in _TABLE_ROW_SPLIT.split(line):
+        new = part.translate(_ASCII_PRESENTATION_TRANSLATION)
+        if len(new) > len(part) and part not in _TABLE_VERTICALS:
+            new = _fit_ascii_cell(new, len(part))
+        out.append(new)
+    return "".join(out)
+
+
+def ascii_presentation_text(text: str) -> str:
+    """Downgrade presentation glyphs to ASCII, keeping table columns aligned."""
+
+    if not any(ch in text for ch in _TABLE_VERTICALS) and "└" not in text:
+        return text.translate(_ASCII_PRESENTATION_TRANSLATION)
+    return "".join(_ascii_presentation_line(line) for line in text.splitlines(keepends=True))
 
 
 def _stream_is_tty(stream: object) -> bool:
@@ -154,7 +220,7 @@ def console_text(text: str) -> str:
 
     if unicode_output_enabled():
         return text
-    return text.translate(_ASCII_PRESENTATION_TRANSLATION)
+    return ascii_presentation_text(text)
 
 
 def _console_output_code_page() -> int:
@@ -169,15 +235,39 @@ def _console_output_code_page() -> int:
 
 
 class _ASCIIPresentationStream:
-    """Text stream proxy that writes presentation glyphs as ASCII."""
+    """Text stream proxy that writes presentation glyphs as ASCII.
+
+    Rich sizes table columns before the glyphs are swapped, so a table row is
+    held until its newline arrives and its cells are then fitted back to their
+    widths (GAP-1757). Rich's Windows renderer writes a row piece by piece.
+    """
 
     def __init__(self, stream: Any) -> None:
         self._stream = stream
+        self._pending = ""
+        atexit.register(self._drain)
 
     def write(self, text: Any) -> int:
-        if isinstance(text, str):
-            text = text.translate(_ASCII_PRESENTATION_TRANSLATION)
-        return self._stream.write(text)
+        if not isinstance(text, str):
+            return self._stream.write(text)
+        data = self._pending + text
+        self._pending = ""
+        head, newline, tail = data.rpartition("\n")
+        if tail and any(ch in tail for ch in _TABLE_VERTICALS):
+            self._pending = tail
+            data = head + newline
+        if data:
+            self._stream.write(ascii_presentation_text(data))
+        return len(text)
+
+    def _drain(self) -> None:
+        if self._pending:
+            pending, self._pending = self._pending, ""
+            try:
+                self._stream.write(ascii_presentation_text(pending))
+                self._stream.flush()
+            except (OSError, ValueError):
+                pass
 
     def writelines(self, lines: Any) -> None:
         for line in lines:
@@ -202,6 +292,19 @@ def ascii_safe_redirected_stream(stream: Any) -> Any:
     if _console_output_code_page() in (0, 65001):
         return stream
     return _ASCIIPresentationStream(stream)
+
+
+def table_cell_text(text: str) -> str:
+    """A Rich table cell as the output stream will print it.
+
+    Behind :func:`ascii_safe_redirected_stream` a glyph turns into wider
+    ASCII ("✓" -> "OK") after Rich sized the column, which can eat the
+    cell's right padding (GAP-1972). Swapping first sizes the column right.
+    """
+
+    if isinstance(sys.stdout, _ASCIIPresentationStream):
+        return ascii_presentation_text(text)
+    return text
 
 
 def echo(message: object | None = None, **kwargs: object) -> None:
@@ -466,6 +569,37 @@ def err(text: str, *, indent: str = "  ", marker: str = "✗") -> None:
     :func:`click.echo` with ``err=True`` directly.
     """
     echo(f"{indent}{_style(marker, fg='red', bold=True)} {_style(text, fg='red')}")
+
+
+def not_found_message(
+    kind: str,
+    name: str,
+    available: Iterable[object],
+    list_command: str,
+    *,
+    empty: str = "",
+    empty_hint: str = "",
+    limit: int = 12,
+) -> str:
+    """One wording for an unknown name on show/enable/... commands (GAP-1818, GAP-1928).
+
+    ``kind 'name' not found. Available: a, b. Run `<list_command>` for details.``
+    Callers add the ``Error:`` prefix (``click.ClickException`` does) and exit 1.
+    ``empty_hint`` replaces the list-command hint when nothing is configured,
+    since pointing at a list that is known to be empty is no help (GAP-2392).
+    """
+    names = sorted({str(item) for item in available if item is not None and str(item)})
+    text = f"{kind} '{name}' not found."
+    if names:
+        shown = ", ".join(names[:limit])
+        if len(names) > limit:
+            shown += f" and {len(names) - limit} more"
+        text += f" Available: {shown}."
+    else:
+        text += " " + (empty or f"No {kind}s are configured.")
+        if empty_hint:
+            return f"{text} {empty_hint}"
+    return f"{text} Run `{list_command}` for details."
 
 
 def kv(

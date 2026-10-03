@@ -36,8 +36,10 @@ The installer:
 If any step fails, the installer puts the previous version back, restarts it,
 and keeps the failed attempt in `~/.defenseclaw/.failed-<time>` for
 troubleshooting. Your configuration (`config.yaml`, `.env`, policies), audit
-and inventory databases, device key, and connector setup are kept. Every run
-writes a log to `~/.defenseclaw/logs/`.
+and inventory databases, device key, and connector setup are kept (an upgrade
+from 0.x starts a new audit history; see
+[Upgrading from 0.x to 1.0](#upgrading-from-0x-to-10)). Every run writes a log
+to `~/.defenseclaw/logs/`.
 
 | Command | What it does |
 | --- | --- |
@@ -45,7 +47,7 @@ writes a log to `~/.defenseclaw/logs/`.
 | `defenseclaw upgrade --yes` | The same, without prompting. |
 | `defenseclaw upgrade --version 1.2.3` | Install a specific release, newer or older. |
 | `defenseclaw rollback` | Put back the install that the last upgrade replaced. Run it again to undo the rollback. |
-| `defenseclaw migrate --check` | Report pending config migrations without changing anything. |
+| `defenseclaw migrate --check` | List pending config migrations by name without changing anything. Exits 0 when they can be applied, 1 when they cannot, 2 when the config is from a newer release; `--json` lists them under `pending`. |
 
 If the `defenseclaw` command itself does not start, run the install command
 again. It repairs any install and keeps your data:
@@ -90,8 +92,26 @@ installed. Every path keeps your configuration and data.
   (its program folder, sign-in start entry, Add/Remove Programs entry, and
   `PATH` entry). The old program files are kept in
   `~/.defenseclaw/previous/legacy-setup`.
-- To go back to 0.8.x afterwards, run `defenseclaw rollback`. To return to 1.x
-  from there, run the install command again.
+- 1.0 starts a new audit history. The first time 1.0 opens the audit
+  database, it deletes the audit events, scan results and findings that 0.x
+  recorded (a one-time privacy cutover: 0.x history can hold unredacted
+  content). The installer says so before it upgrades and again in its summary.
+  Configuration, inventory and connector setup are kept. The 0.x database stays
+  in `~/.defenseclaw/previous/data/audit.db`, and `defenseclaw rollback` brings
+  it back. Your next upgrade moves it to
+  `~/.defenseclaw/backups/audit-history-<version>-<time>`; remove that folder
+  once you no longer need the old history. `make all` from a source checkout
+  over a 0.x install keeps a copy in
+  `~/.defenseclaw/backups/audit-history-<time>.db` and says so.
+- To go back to 0.8.x afterwards, run `defenseclaw rollback`. 0.8.x has no
+  rollback command, so to return to 1.x from there, run the command the
+  rollback prints:
+
+  ```bash
+  bash ~/.defenseclaw/previous/installer/install.sh --rollback
+  ```
+
+  Running the install command again also works.
 
 ## Rollback
 
@@ -101,7 +121,24 @@ were at upgrade time. Anything written since then moves into
 `~/.defenseclaw/previous` and comes back if you roll forward; if you upgrade
 again instead, it is kept in `~/.defenseclaw/backups/rolled-back-<version>-<time>`.
 One previous install is kept, and rolling back needs no network. Reinstalling
-the same version does not replace the rollback copy.
+the same version does not replace the rollback copy. Running it again rolls
+forward (its header then reads `Rolling forward to DefenseClaw <version>`).
+
+The rollback starts the restored gateway when it was running and waits for it.
+A 0.8.x gateway on a large audit database can take a few minutes to start, so
+the rollback waits up to 3 minutes for it. If the gateway does not come up,
+the rollback says so (`Now running DefenseClaw <version>, but its gateway is
+not up`) and exits `1`: the swap is done, but agent hooks are not guarded
+until `defenseclaw-gateway start` succeeds.
+
+When an upgrade's new gateway does not become healthy, the installer puts the
+previous install back and starts its gateway again. The first start of a 1.x
+gateway over a large audit database can take longer than its 60-second
+readiness check, so the installer waits up to 3 more minutes while that gateway
+is still starting. If the previous gateway does not start again after a failed
+upgrade, the installer says so (`Your previous install is back, but its gateway
+is not running`): agent hooks are not guarded until `defenseclaw-gateway start`
+succeeds.
 
 If an upgrade or rollback is interrupted (the terminal closes or the machine
 loses power), run the same command again. The installer first restores the

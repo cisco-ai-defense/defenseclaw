@@ -24,7 +24,7 @@ The judge runs in two lanes with different control models:
 * **Hook lane** (hermes, opencode, claudecode, …): gated per connector by
   ``guardrail.judge.hook_connectors``, **default off**. The gate ships
   empty deliberately — the judge adds latency (up to
-  ``guardrail.judge.hook_timeout``, default 5s) and LLM cost per inspected
+  ``guardrail.judge.hook_timeout``, default 8s) and LLM cost per inspected
   hook call, so upgrades must not silently change behavior. The cost of
   that safety default is that every operator must perform an explicit
   opt-in, and before this command the only way to do that was hand-editing
@@ -56,6 +56,7 @@ from __future__ import annotations
 import click
 
 from defenseclaw import connector_paths, ux
+from defenseclaw.commands._audit_notice import saved_change_audit
 from defenseclaw.context import AppContext, pass_ctx
 
 #: Sentinel accepted by the Go gate meaning "every hook connector".
@@ -136,6 +137,59 @@ def _validate_connector(name: str) -> None:
     raise click.ClickException(
         f"unknown connector '{name}'. Hook-based connectors: "
         f"{', '.join(sorted(hook_enforced))} (or 'all')."
+    )
+
+
+def _refuse_if_observe(app: AppContext, gc, name: str) -> None:
+    """Refuse a gate entry for a configured observe-mode connector (GAP-2083).
+
+    The LLM judge reviews hook calls only for action-mode connectors, and
+    setup prunes observe-mode connectors from the gate (GAP-1333). Accepting
+    one here made ``guardrail status`` show Judge=on until the next setup
+    silently dropped it. Unconfigured connectors keep the existing
+    "entry is kept" behaviour (their mode is decided at setup).
+    """
+    if name not in _configured_observe_connectors(app, gc):
+        return
+    raise click.ClickException(
+        f"'{name}' is in observe mode: the LLM judge reviews hook calls only for "
+        f"action-mode connectors, and setup removes observe-mode connectors from the "
+        f"judge gate. Switch it to action mode with the judge on: "
+        f"{_action_judge_command(name)}"
+    )
+
+
+def _action_judge_command(name: str) -> str:
+    setup_name = "claude-code" if name == "claudecode" else name
+    return f"defenseclaw setup {setup_name} --mode action --enable-judge --yes"
+
+
+def _configured_observe_connectors(app: AppContext, gc) -> list[str]:
+    """Configured hook connectors whose effective mode is not action (GAP-2083)."""
+    effective_mode = getattr(gc, "effective_mode", None)
+    if not callable(effective_mode):
+        return []
+    try:
+        active = {(c or "").strip().lower() for c in app.cfg.active_connectors()}
+    except Exception:  # noqa: BLE001 — older configs; skip the check.
+        return []
+    hook_enforced, _proxy = _connector_sets()
+    return sorted(
+        c for c in active if c in hook_enforced and (effective_mode(c) or "").strip().lower() != "action"
+    )
+
+
+def _warn_all_covers_observe(app: AppContext, gc) -> None:
+    """'all' is accepted, but say which configured connectors are observe (GAP-2083)."""
+    observe = _configured_observe_connectors(app, gc)
+    if not observe:
+        return
+    ux.warn(
+        f"{', '.join(observe)} {'is' if len(observe) == 1 else 'are'} in observe mode: the LLM judge is "
+        f"meant for action-mode connectors, and 'defenseclaw setup <connector>' removes an observe-mode "
+        f"connector from the gate. To judge one, switch it to action mode: "
+        f"defenseclaw setup <connector> --mode action --enable-judge --yes",
+        indent="  ",
     )
 
 
@@ -247,19 +301,39 @@ def _ensure_enabled_hook_judge_strategies(gc) -> bool:
     return changed
 
 
-def _save_and_restart(app: AppContext, gc, *, restart: bool, action: str) -> None:
+def _gateway_running(app: AppContext) -> bool:
+    """Same PID-file probe as ``cmd_guardrail._gateway_running``."""
+    import os
+
+    from defenseclaw.process_liveness import pid_file_alive
+
+    try:
+        return pid_file_alive(os.path.join(app.cfg.data_dir, "gateway.pid"))
+    except Exception:  # noqa: BLE001 - an unreadable PID file means "not running".
+        return False
+
+
+def _save_and_restart(app: AppContext, gc, *, restart: bool, action: str, previous: str = "") -> None:
     try:
         app.cfg.save()
-        ux.ok(
-            f"Config saved (guardrail.judge.hook_connectors: "
-            f"{_gate_label(gc.judge.hook_connectors)})",
-            indent="  ",
-        )
     except OSError as exc:
         ux.err(f"Failed to save config: {exc}", indent="  ")
         raise click.Abort() from exc
+    # Outside the try: an output error (a closed pipe) is not a save failure
+    # (GAP-1313).
+    ux.ok(
+        f"Config saved (guardrail.judge.hook_connectors: "
+        f"{_gate_label(gc.judge.hook_connectors)})",
+        indent="  ",
+    )
 
     _warn_if_inert(app, gc)
+
+    if not restart and gc.enabled and _gateway_running(app):
+        # The judge gate is read at gateway start (GAP-1476). A stopped
+        # gateway reads the new gate when it starts; the audit note says how
+        # to start it (GAP-1978).
+        ux.subhead("The running gateway keeps the old gate until: defenseclaw-gateway restart", indent="  ")
 
     if restart and gc.enabled:
         # Lazy import — see module docstring. The judge instance and its
@@ -277,10 +351,12 @@ def _save_and_restart(app: AppContext, gc, *, restart: bool, action: str) -> Non
         )
 
     if app.logger:
-        app.logger.log_action(
-            "judge-hooks",
-            "config",
-            f"{action} hook_connectors={gc.judge.hook_connectors} restart={restart}",
+        connectors = ",".join(gc.judge.hook_connectors or []) or "(none)"
+        # An Activity mutation names the new gate (hook_connectors: -> a,b);
+        # a plain config-update action lost it (GAP-1325).
+        # With the old gate too: "hook_connectors: (none) -> claudecode" (GAP-1511).
+        saved_change_audit(app.logger).log_config_change(
+            f"judge-hooks-{action}", f"hook_connectors={connectors} previous={previous or '(none)'}"
         )
 
 
@@ -304,7 +380,7 @@ def judge() -> None:
     default=None,
     help=(
         "Also set guardrail.judge.hook_timeout (seconds). Caps the judge "
-        "round-trip on the hook lane; 0/unset = gateway default (5s). The "
+        "round-trip on the hook lane; 0/unset = gateway default (8s). The "
         "hook scripts allow 10s total, so values above ~8s risk the agent "
         "hanging up before a verdict lands."
     ),
@@ -335,6 +411,9 @@ def judge_add(
 ) -> None:
     """Opt CONNECTOR into the hook-lane LLM judge ('all' = every hook connector).
 
+    The judge reviews hook calls only for action-mode connectors; adding a
+    configured observe-mode connector is refused.
+
     \b
     Examples:
       defenseclaw guardrail judge add hermes
@@ -343,11 +422,13 @@ def judge_add(
       defenseclaw guardrail judge add opencode --timeout 8
     """
     name = _normalize_target(connector)
+    gc = app.cfg.guardrail
     if name != ALL_CONNECTORS:
         _validate_connector(name)
+        _refuse_if_observe(app, gc, name)
 
-    gc = app.cfg.guardrail
     gate = list(gc.judge.hook_connectors or [])
+    previous_gate = ",".join(gate)
 
     timeout_changed = False
     if hook_timeout is not None:
@@ -429,7 +510,9 @@ def judge_add(
         click.echo("  " + ux.dim(f"{noop_reason} — saving {' + '.join(saved)} only."))
 
     _warn_if_unconfigured(app, name)
-    _save_and_restart(app, gc, restart=restart, action=f"add {name}")
+    if name == ALL_CONNECTORS:
+        _warn_all_covers_observe(app, gc)
+    _save_and_restart(app, gc, restart=restart, action=f"add {name}", previous=previous_gate)
     click.echo()
 
 
@@ -459,6 +542,7 @@ def judge_remove(app: AppContext, connector: str, restart: bool) -> None:
 
     gc = app.cfg.guardrail
     gate = list(gc.judge.hook_connectors or [])
+    previous_gate = ",".join(gate)
 
     click.echo()
     if name == ALL_CONNECTORS:
@@ -496,7 +580,7 @@ def judge_remove(app: AppContext, connector: str, restart: bool) -> None:
         click.echo()
         return
 
-    _save_and_restart(app, gc, restart=restart, action=f"remove {name}")
+    _save_and_restart(app, gc, restart=restart, action=f"remove {name}", previous=previous_gate)
     click.echo()
 
 
@@ -512,7 +596,7 @@ def judge_list(app: AppContext) -> None:
     click.echo(f"  {ux.bold('guardrail.judge.enabled:')}         {ux.accent(str(bool(gc.judge.enabled)).lower())}")
     click.echo(f"  {ux.bold('guardrail.judge.hook_connectors:')} {ux.accent(_gate_label(gate))}")
     timeout = gc.judge.hook_timeout or 0
-    timeout_label = f"{timeout:g}s" if timeout else "5s (gateway default)"
+    timeout_label = f"{timeout:g}s" if timeout else "8s (gateway default)"
     click.echo(f"  {ux.bold('guardrail.judge.hook_timeout:')}    {ux.accent(timeout_label)}")
     click.echo()
 
@@ -526,6 +610,7 @@ def judge_list(app: AppContext) -> None:
         return
 
     judged_prereqs = bool(gc.enabled) and bool(gc.judge.enabled)
+    observe = set(_configured_observe_connectors(app, gc))
     click.echo("  " + ux.bold("effective state per connector:"))
     for nm in actives:
         if nm in proxy_backed:
@@ -574,8 +659,14 @@ def judge_list(app: AppContext) -> None:
                     if not gc.enabled
                     else " — judge disabled"
                 )
+            elif nm in observe:
+                # judge add refuses an observe-mode connector (GAP-2083).
+                state = "regex + AID only"
+                note = f" — observe mode; to opt in: {_action_judge_command(nm)}"
             else:
                 state = "regex + AID only"
                 note = f" — opt in: defenseclaw guardrail judge add {nm}"
+            if gated and nm in observe and nm in hook_enforced:
+                note += " (observe mode: verdicts only alert; setup removes it from the gate)"
         click.echo(f"      - {nm}: {ux.accent(state)}{ux.dim(note)}")
     click.echo()

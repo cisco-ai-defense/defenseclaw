@@ -452,6 +452,22 @@ func TestVerifyFailsWhileTheCopilotLocalHookFileIsMissing(t *testing.T) {
 	eligible := filepath.Join(filepath.Dir(h.env.Layout.ManifestPath), "eligible-accounts.json")
 	writeHostFile(t, h, eligible, `{"version": 1, "accounts": [{"user": "alice", "uid": 501, "home": "/home/alice"}]}`)
 	hookFile := enterprisepolicy.CopilotVSCodeLocalHookFilePath("/home/alice")
+	if err := os.MkdirAll(h.env.P("/home/alice"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Before the guardian's first pass for alice the file is pending: a
+	// warning, not a failure (GAP-1267).
+	for _, action := range []string{ActionStatus, ActionVerify} {
+		got := h.run(Options{Action: action})
+		requireOK(t, got)
+		if !strings.Contains(messagesOf(got.Warnings, codeGuardianUserFilePending), hookFile) {
+			t.Fatalf("%s must warn that the Local hook file is pending: %+v", action, got.Warnings)
+		}
+	}
+	// The guardian records alice in its data directory, where it writes
+	// the record (GAP-1761).
+	writeHostFile(t, h, filepath.Join(h.env.Layout.GuardianAuthDir, "copilot-vscode-accounts.json"),
+		`{"version": 1, "accounts": [{"user": "alice", "uid": 501, "home": "/home/alice"}]}`)
 	for _, action := range []string{ActionStatus, ActionVerify} {
 		got := h.run(Options{Action: action})
 		requireError(t, got, codeVerify)
@@ -466,4 +482,14 @@ func TestVerifyFailsWhileTheCopilotLocalHookFileIsMissing(t *testing.T) {
 	writeHostFile(t, h, hookFile, string(hooks))
 	requireOK(t, h.run(Options{Action: ActionStatus}))
 	requireOK(t, h.run(Options{Action: ActionVerify}))
+	// A deleted account's home is gone: nothing to rewrite, no failure
+	// (GAP-1209).
+	if err := os.RemoveAll(h.env.P("/home/alice")); err != nil {
+		t.Fatal(err)
+	}
+	if got := h.run(Options{Action: ActionStatus}); hasWarning(got, codeGuardianUserFilePending) {
+		t.Fatalf("a removed home is reported pending: %+v", got.Warnings)
+	} else {
+		requireOK(t, got)
+	}
 }

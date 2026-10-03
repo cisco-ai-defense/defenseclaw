@@ -652,7 +652,12 @@ class TestMergeFunctions(unittest.TestCase):
         gw = _merge_gateway_watcher(None)
         self.assertTrue(gw.enabled)
         self.assertTrue(gw.skill.enabled)
-        self.assertFalse(gw.skill.take_action)
+        # GAP-2357: same default as the gateway (viper gateway.watcher.*.take_action).
+        self.assertTrue(gw.skill.take_action)
+        self.assertTrue(gw.plugin.take_action)
+        # GAP-2382: the mcp watcher block is modeled with the gateway default too.
+        self.assertTrue(gw.mcp.take_action)
+        self.assertFalse(_merge_gateway_watcher({"mcp": {"take_action": False}}).mcp.take_action)
 
     def test_merge_gateway_watcher_with_data(self):
         gw = _merge_gateway_watcher({"enabled": True, "skill": {"enabled": False, "dirs": ["/tmp"]}})
@@ -701,7 +706,7 @@ class TestDefaultConfig(unittest.TestCase):
         self.assertEqual(cfg.gateway.api_port, 18970)
         self.assertTrue(cfg.gateway.watcher.enabled)
         self.assertTrue(cfg.gateway.watcher.skill.enabled)
-        self.assertFalse(cfg.gateway.watcher.skill.take_action)
+        self.assertTrue(cfg.gateway.watcher.skill.take_action)
         self.assertTrue(cfg.gateway.watchdog.enabled)
         self.assertEqual(cfg.gateway.watchdog.interval, 30)
         self.assertEqual(cfg.gateway.watchdog.debounce, 2)
@@ -747,6 +752,33 @@ class TestDefaultConfig(unittest.TestCase):
 
 
 class TestConfigLoadSave(unittest.TestCase):
+    def test_clearing_v4_judge_fields_keeps_migrated_v5_values_on_disk(self):
+        # GAP-2176: load copies v4 judge.{model,api_key_env,api_base} into
+        # judge.llm; clearing the v4 fields and saving must not lose them.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = os.path.realpath(tmpdir)
+            Path(data_dir, "config.yaml").write_text(
+                "config_version: 8\n"
+                f"data_dir: {data_dir}\n"
+                "guardrail:\n"
+                "  judge:\n"
+                "    model: judge-v4-model\n"
+                "    api_key_env: DC_V4_JUDGE_KEY\n"
+                "    api_base: https://judge-v4.example\n",
+                encoding="utf-8",
+            )
+            cfg = load(data_dir=data_dir)
+            judge = cfg.guardrail.judge
+            judge.model = judge.api_key_env = judge.api_base = ""
+            cfg.save()
+
+            judge = load(data_dir=data_dir).guardrail.judge
+
+        self.assertEqual((judge.model, judge.api_key_env, judge.api_base), ("", "", ""))
+        self.assertEqual(judge.llm.model, "judge-v4-model")
+        self.assertEqual(judge.llm.api_key_env, "DC_V4_JUDGE_KEY")
+        self.assertEqual(judge.llm.base_url, "https://judge-v4.example")
+
     def test_load_missing_config_returns_defaults(self):
         with patch("defenseclaw.config.default_data_path") as mock_dp:
             mock_dp.return_value = Path(tempfile.mkdtemp()) / ".defenseclaw"

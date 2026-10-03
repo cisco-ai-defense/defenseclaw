@@ -332,7 +332,7 @@ only in the image; nothing on your host changes.
   blocked: the reason goes to the model as the tool's error, and the terminal
   shows only `preparing terminal…`. A root-owned module in the image prints
   the reason under that line, the way Hermes prints its own tool lines, for
-  example `┊ ✗ terminal blocked by DefenseClaw rule <ID>: <title>. …`. It
+  example `┊ ✗ terminal blocked: DefenseClaw policy blocked this action (rule <ID>: <title>). …`. It
   prints only to a terminal, and what the model gets is unchanged.
 - **Known gaps.** An agent can still start a second Hermes from a tool call,
   for example by running the pinned binary directly. That start skips the

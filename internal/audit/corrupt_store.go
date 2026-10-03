@@ -78,13 +78,47 @@ func OpenDaemonStore(dbPath string, warn io.Writer) (*Store, error) {
 		return nil, fmt.Errorf("audit: create a new store after moving the corrupt one to %s: %w", moved, freshErr)
 	}
 	kept, keepErr := store.carryOverActions(moved)
+	writeCarryOverNote(moved, kept, keepErr)
 	fmt.Fprintf(warn, "[audit] WARNING: the audit store was corrupt (%v). It was moved to %s and a new store was created; block/allow entries carried over: %d.",
 		err, moved, kept)
 	if keepErr != nil {
-		fmt.Fprintf(warn, " Some entries could not be read (%v): check them with defenseclaw tool list and the skill, plugin and mcp list commands.", keepErr)
+		fmt.Fprintf(warn, " Some entries could not be read (%v): %s", keepErr, ReviewBlockAllowListsHint)
 	}
 	fmt.Fprintf(warn, " Older audit records stay in the moved file; recover them with: sqlite3 %s .recover\n", moved)
 	return store, nil
+}
+
+// ReviewBlockAllowListsHint tells the operator where to check and re-create
+// block/allow entries that a corrupt store lost.
+const ReviewBlockAllowListsHint = "check your MCP, skill, plugin and tool block/allow entries with defenseclaw mcp list, skill list, plugin list and tool list, and block or allow them again."
+
+// carryOverNoteSuffix names the small JSON note next to a moved store that
+// records how many block/allow entries reached the new store, so start, status
+// and doctor report what happened instead of assuming they were kept.
+const carryOverNoteSuffix = ".carryover.json"
+
+type carryOverNote struct {
+	CarriedOver int    `json:"carried_over"`
+	Error       string `json:"error,omitempty"`
+}
+
+func writeCarryOverNote(moved string, kept int, keepErr error) {
+	note := carryOverNote{CarriedOver: kept}
+	if keepErr != nil {
+		note.Error = keepErr.Error()
+	}
+	if encoded, err := json.Marshal(note); err == nil {
+		_ = os.WriteFile(moved+carryOverNoteSuffix, encoded, 0o600)
+	}
+}
+
+func readCarryOverNote(moved string) (carryOverNote, bool) {
+	var note carryOverNote
+	encoded, err := os.ReadFile(moved + carryOverNoteSuffix)
+	if err != nil || json.Unmarshal(encoded, &note) != nil {
+		return carryOverNote{}, false
+	}
+	return note, true
 }
 
 func openCheckedStore(dbPath string, warn io.Writer) (*Store, error) {
@@ -129,6 +163,38 @@ func (s *Store) startupQuickCheck(warn io.Writer) error {
 type MovedCorruptStore struct {
 	Path    string
 	MovedAt time.Time
+	// CarryOverKnown is false for stores moved by a gateway that kept no note.
+	CarryOverKnown bool
+	CarriedOver    int
+	// CarryOverError says why some or all block/allow entries were not read.
+	CarryOverError string
+}
+
+// BlockAllowSummary says what happened to the block/allow lists of a moved
+// store, for start, status and doctor.
+func (store MovedCorruptStore) BlockAllowSummary() string {
+	switch {
+	case !store.CarryOverKnown:
+		return "a new store was started; DefenseClaw cannot tell whether the old block/allow entries were carried over (the store was moved by an earlier version that kept no record), so " +
+			ReviewBlockAllowListsHint
+	case store.CarryOverError == "":
+		return "a new store was started and " + blockAllowEntriesCarriedOver(store.CarriedOver) + "."
+	case store.CarriedOver == 0:
+		return "a new store was started, but the old block/allow lists could not be read, so 0 entries were carried over and earlier blocks no longer apply; " +
+			ReviewBlockAllowListsHint
+	default:
+		return "a new store was started and " + blockAllowEntriesCarriedOver(store.CarriedOver) +
+			", but some could not be read; " + ReviewBlockAllowListsHint
+	}
+}
+
+// blockAllowEntriesCarriedOver says "1 block/allow entry was carried over" or
+// "N block/allow entries were carried over" (GAP-2053).
+func blockAllowEntriesCarriedOver(count int) string {
+	if count == 1 {
+		return "1 block/allow entry was carried over"
+	}
+	return fmt.Sprintf("%d block/allow entries were carried over", count)
 }
 
 const movedCorruptStoreTimeLayout = "20060102T150405Z"
@@ -146,7 +212,7 @@ func MovedCorruptStores(dbPath string) []MovedCorruptStore {
 	names, _ := filepath.Glob(absolute + ".corrupt-*")
 	var stores []MovedCorruptStore
 	for _, name := range names {
-		if hasAuditDBSidecarSuffix(name) {
+		if hasAuditDBSidecarSuffix(name) || strings.HasSuffix(name, carryOverNoteSuffix) {
 			continue
 		}
 		stamp := strings.TrimPrefix(name, absolute+".corrupt-")
@@ -160,7 +226,11 @@ func MovedCorruptStores(dbPath string) []MovedCorruptStore {
 		if info, err := os.Lstat(name); err != nil || !info.Mode().IsRegular() {
 			continue
 		}
-		stores = append(stores, MovedCorruptStore{Path: name, MovedAt: movedAt})
+		store := MovedCorruptStore{Path: name, MovedAt: movedAt}
+		if note, ok := readCarryOverNote(name); ok {
+			store.CarryOverKnown, store.CarriedOver, store.CarryOverError = true, note.CarriedOver, note.Error
+		}
+		stores = append(stores, store)
 	}
 	sort.Slice(stores, func(i, j int) bool { return stores[i].MovedAt.Before(stores[j].MovedAt) })
 	return stores

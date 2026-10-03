@@ -18,6 +18,7 @@ package gateway
 
 import (
 	"regexp"
+	"slices"
 	"strings"
 	"sync/atomic"
 
@@ -67,7 +68,7 @@ func agentDisplayReason(reason string, policy redaction.SinkPolicy) string {
 	if policy != redaction.SinkPolicyDefault {
 		return redaction.ReasonForSink(reason, policy)
 	}
-	if trustedBuiltInMatchReason(reason) {
+	if trustedBuiltInMatchReason(reason) || trustedCodeGuardHookReason(reason) {
 		return reason
 	}
 	return redaction.ReasonForAgent(reason)
@@ -75,10 +76,24 @@ func agentDisplayReason(reason string, policy redaction.SinkPolicy) string {
 
 // notificationDisplayReason applies the same narrow catalog carve-out to OS
 // notifications only under the default compatibility policy. An explicit
-// managed-enterprise redact directive remains authoritative.
+// managed-enterprise redact directive remains authoritative. An LLM judge
+// verdict (alone or after a rule match) is worded the way the agent reads it
+// ("LLM judge: personal data or credentials"), not as raw judge labels with
+// redaction tokens (GAP-1981).
 func notificationDisplayReason(reason string, policy redaction.SinkPolicy) string {
-	if policy == redaction.SinkPolicyDefault && trustedBuiltInMatchReason(reason) {
+	if policy == redaction.SinkPolicyDefault && (trustedBuiltInMatchReason(reason) || trustedCodeGuardHookReason(reason)) {
 		return reason
+	}
+	if policy == redaction.SinkPolicyDefault && !managedEnterpriseActive.Load() {
+		if subject := agentAssetPolicySubject(reason); subject != "" {
+			return subject
+		}
+		if subject := agentJudgeSubject(reason); subject != "" {
+			return subject
+		}
+		if subject := agentRuleAndJudgeSubject(reason); subject != "" {
+			return subject
+		}
 	}
 	return redaction.ReasonForSink(reason, policy)
 }
@@ -86,7 +101,7 @@ func notificationDisplayReason(reason string, policy redaction.SinkPolicy) strin
 // defaultSinkDisplayReason applies the catalog carve-out to compatibility
 // response bodies only when no managed override is active.
 func defaultSinkDisplayReason(reason string, policy redaction.SinkPolicy) string {
-	if policy == redaction.SinkPolicyDefault && trustedBuiltInMatchReason(reason) {
+	if policy == redaction.SinkPolicyDefault && (trustedBuiltInMatchReason(reason) || trustedCodeGuardHookReason(reason)) {
 		return reason
 	}
 	return redaction.ReasonForSink(reason, policy)
@@ -136,6 +151,19 @@ func agentVerdictReason(action, sourceReason, displayReason string, policy redac
 	if managedEnterpriseActive.Load() || policy != redaction.SinkPolicyDefault {
 		return displayReason
 	}
+	subject := agentBlockListSubject(sourceReason)
+	if subject == "" {
+		subject = agentAssetPolicySubject(sourceReason)
+	}
+	if subject == "" {
+		subject = agentJudgeSubject(sourceReason)
+	}
+	if subject == "" {
+		subject = agentRuleAndJudgeSubject(sourceReason)
+	}
+	if action == "block" && subject != "" {
+		return agentBlockSentence(subject)
+	}
 	if displayReason == sourceReason && !trustedBuiltInMatchReason(sourceReason) {
 		return displayReason
 	}
@@ -145,20 +173,186 @@ func agentVerdictReason(action, sourceReason, displayReason string, policy redac
 	}
 	standalone := standaloneEnterpriseActive.Load()
 	switch {
-	case action == "block" && standalone:
-		return "DefenseClaw blocked this action under your organization's policy (" + rules + "). " +
-			agentBlockNoRetry + " Contact your administrator if you need it allowed."
 	case action == "block":
-		return "DefenseClaw policy blocked this action (" + rules + "). " + agentBlockNoRetry
+		return agentBlockSentence(rules)
 	case action == agentReviewAction && standalone:
 		return "DefenseClaw flagged this action for review under your organization's policy (" + rules + ")."
 	case action == agentReviewAction:
 		return "DefenseClaw policy flagged this action for review (" + rules + ")."
-	case standalone:
-		return "DefenseClaw needs your confirmation for this action under your organization's policy (" + rules + ")."
 	default:
-		return "DefenseClaw policy needs your confirmation for this action (" + rules + ")."
+		return agentConfirmSentence(rules)
 	}
+}
+
+// agentBlockSentence is the block an agent and its user read for subject
+// (the deciding rules, a judge verdict or a block-list entry; "" when none
+// can be named). Host hooks (agentVerdictReason) and sandbox hooks
+// (sandboxVerdictReason) share it, so one rule reads the same wherever the
+// connector runs (GAP-1885).
+func agentBlockSentence(subject string) string {
+	detail := ""
+	if subject != "" {
+		detail = " (" + subject + ")"
+	}
+	if standaloneEnterpriseActive.Load() {
+		return "DefenseClaw blocked this action under your organization's policy" + detail + ". " +
+			agentBlockNoRetry + " Contact your administrator if you need it allowed."
+	}
+	return "DefenseClaw policy blocked this action" + detail + ". " + agentBlockNoRetry
+}
+
+// agentConfirmSentence is agentBlockSentence for a confirmation.
+func agentConfirmSentence(subject string) string {
+	detail := ""
+	if subject != "" {
+		detail = " (" + subject + ")"
+	}
+	if standaloneEnterpriseActive.Load() {
+		return "DefenseClaw needs your confirmation for this action under your organization's policy" + detail + "."
+	}
+	return "DefenseClaw policy needs your confirmation for this action" + detail + "."
+}
+
+// agentObservedReason names the rules of a finding DefenseClaw lets through
+// (observe mode, or an alert) the way agentVerdictReason names them in a
+// block: "rule R1: Title". The observe notice used to show a rule pack's
+// title as a "<redacted len=N sha=...>" token while the action-mode block
+// printed it (GAP-1187). The gates are agentVerdictReason's: a managed
+// deployment or an explicit redaction directive keeps displayReason, and so
+// does any reason that is not a plain local rule match.
+func agentObservedReason(action, sourceReason, displayReason string, policy redaction.SinkPolicy) string {
+	if action == "block" || action == "confirm" || action == agentReviewAction {
+		return displayReason
+	}
+	if managedEnterpriseActive.Load() || policy != redaction.SinkPolicyDefault {
+		return displayReason
+	}
+	if displayReason == sourceReason && !trustedBuiltInMatchReason(sourceReason) {
+		return displayReason
+	}
+	if rules := agentMatchedRules(sourceReason); rules != "" {
+		return rules
+	}
+	return displayReason
+}
+
+// agentBlockListReasonPattern matches the two ship-authored block-list
+// reasons (inspect.go): `tool "<name>" is on the static block list` and
+// `mcp server "<name>" is blocked`. The name is the tool or server the agent
+// itself called; any other text fails the match and stays redacted.
+var agentBlockListReasonPattern = regexp.MustCompile(
+	`^(tool|mcp server) "([A-Za-z0-9][A-Za-z0-9._:@/-]{0,127})" (?:is on the static block list|is blocked)$`)
+
+// agentJudgeKinds words the LLM judge reasons (llm_judge.go) for the agent.
+// The judge's own text can quote the prompt, so only its kind is named.
+var agentJudgeKinds = []struct{ prefix, words string }{
+	{"judge-pii: ", "personal data or credentials"},
+	{"judge-exfil: ", "possible data exfiltration"},
+	{"judge-injection: ", "prompt injection"},
+	{"judge-tool-injection: ", "tool-call injection"},
+}
+
+// agentJudgeSubject words a reason that starts with an LLM judge verdict
+// ("LLM judge: personal data or credentials, possible data exfiltration"),
+// or returns "" for any other reason. The redacted judge text read like a
+// broken hook ("judge-pii: Password: <redacted len=22 sha=...>") (GAP-1564).
+func agentJudgeSubject(reason string) string {
+	if !strings.HasPrefix(reason, "judge-") {
+		return ""
+	}
+	var kinds []string
+	for _, part := range strings.Split(reason, "; ") {
+		for _, kind := range agentJudgeKinds {
+			if strings.HasPrefix(part, kind.prefix) && !slices.Contains(kinds, kind.words) {
+				kinds = append(kinds, kind.words)
+			}
+		}
+	}
+	if len(kinds) == 0 {
+		return ""
+	}
+	return "LLM judge: " + strings.Join(kinds, ", ")
+}
+
+// agentRuleAndJudgeSubject words a local rule match that the LLM judge also
+// flagged ("matched: R:Title; judge-pii: ...") as "rule R: Title; LLM judge:
+// personal data or credentials", or returns "" when either half is not one
+// agentMatchedRules or agentJudgeSubject words. The mixed reason fell back to
+// the redacted text with its raw labels (GAP-1824).
+func agentRuleAndJudgeSubject(reason string) string {
+	local, judge, found := strings.Cut(reason, "; judge-")
+	if !found {
+		return ""
+	}
+	rules := agentMatchedRules(local)
+	judgeSubject := agentJudgeSubject("judge-" + judge)
+	if rules == "" || judgeSubject == "" {
+		return ""
+	}
+	return rules + "; " + judgeSubject
+}
+
+// agentBlockListSubject words a block-list reason for the agent ("tool Write
+// is on the block list"), or returns "" for any other reason. The redacted
+// reason read like a broken hook ("hook error: <redacted ...>") (GAP-1099).
+func agentBlockListSubject(reason string) string {
+	m := agentBlockListReasonPattern.FindStringSubmatch(reason)
+	if m == nil {
+		return ""
+	}
+	if m[1] == "tool" {
+		return "tool " + m[2] + " is on the block list"
+	}
+	return "MCP server " + m[2] + " is on the block list"
+}
+
+// agentAssetPolicyKinds words the asset types of an asset-policy reason.
+var agentAssetPolicyKinds = map[string]string{"mcp": "MCP server", "skill": "skill", "plugin": "plugin"}
+
+// agentAssetPolicyKeys are the fields assetPolicyResponseReason emits.
+var agentAssetPolicyKeys = []string{
+	"reason_code", "source", "asset_type", "asset_name", "connector",
+	"registry_status", "registry_configured", "surface",
+}
+
+// agentAssetPolicyValuePattern is the shape of a value an asset-policy reason
+// may show the agent: the asset name the agent itself asked for, or an enum.
+var agentAssetPolicyValuePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$`)
+
+// agentAssetPolicySubject words an asset-policy block reason
+// (assetPolicyResponseReason: "ASSET-POLICY reason_code=... asset_name=...")
+// for the agent ("MCP server github is not in the approved registry"), or
+// returns "" for any other reason. The redacted key=value reason read like a
+// broken hook and hid the server name (GAP-2423). Every field must be a known
+// key with a plain value; anything else stays redacted.
+func agentAssetPolicySubject(reason string) string {
+	fields := strings.Split(reason, " ")
+	if len(fields) < 2 || fields[0] != "ASSET-POLICY" {
+		return ""
+	}
+	values := make(map[string]string, len(fields)-1)
+	for _, field := range fields[1:] {
+		key, value, ok := strings.Cut(field, "=")
+		if !ok || !slices.Contains(agentAssetPolicyKeys, key) || !agentAssetPolicyValuePattern.MatchString(value) {
+			return ""
+		}
+		values[key] = value
+	}
+	kind, name := agentAssetPolicyKinds[values["asset_type"]], values["asset_name"]
+	if kind == "" || name == "" {
+		return ""
+	}
+	switch values["reason_code"] {
+	case "not-in-approved-registry":
+		return kind + " " + name + " is not in the approved registry"
+	case "registry-required-but-empty":
+		return kind + " " + name + " needs an approved registry, and none is configured"
+	case "default-deny":
+		return kind + " " + name + " is denied by the default asset policy"
+	case "admin-deny":
+		return kind + " " + name + " is denied by asset policy"
+	}
+	return ""
 }
 
 // agentOrderedRulePrefix starts the note an ordered tool-call chain match

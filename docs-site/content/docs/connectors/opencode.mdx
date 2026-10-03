@@ -65,7 +65,9 @@ contract lock, and active connector marker as one current registration. A
 failure rolls back newly published OpenCode state instead of leaving a plugin
 for a later setup to repair. This proves registration consistency, not that a
 client process has loaded it; the post-restart load heartbeat is the separate
-runtime signal.
+runtime signal. Until OpenCode starts and sends it, `defenseclaw status` shows
+OpenCode as `IDLE` and `defenseclaw doctor` skips the load check: both are
+normal while OpenCode is closed.
 
 OpenCode's [Windows guide](https://opencode.ai/docs/windows-wsl/) says that
 OpenCode can run directly on Windows while recommending WSL for the best
@@ -155,10 +157,12 @@ fail-mode result. Generic lifecycle delivery is non-awaited. Neither path
 becomes enforceable when fail mode is closed.
 
 The plugin also emits a secret-free `defenseclaw.plugin.loaded` heartbeat from
-its awaited config hook. Doctor reports a warning when the managed file digest
-is current but the running sidecar has no heartbeat: OpenCode may be stopped or
-running with `--pure`/external plugins disabled. File presence alone is not
-reported as runtime health.
+its awaited config hook. When the managed file digest is current but the
+running gateway has no heartbeat yet, Doctor shows a skip row: that is normal
+while OpenCode is closed. Open OpenCode and run `defenseclaw doctor` again to
+confirm the plugin loads; if the row still shows no heartbeat, OpenCode may be
+running with `--pure`/external plugins disabled. A stale heartbeat is a warning.
+File presence alone is not reported as runtime health.
 
 ## Local surfaces
 

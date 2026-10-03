@@ -17,6 +17,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -106,6 +107,11 @@ func TestManagedWindowsSetupAnswer(t *testing.T) {
 	if err := root.Execute(); err == nil || !strings.Contains(err.Error(), "managed by your organization") {
 		t.Fatalf("doctor on a managed Windows computer: %v", err)
 	}
+	// GAP-1719: `upgrade` was a bare unknown command.
+	root.SetArgs([]string{"upgrade"})
+	if err := root.Execute(); err == nil || !strings.Contains(err.Error(), "upgrades are installed by your organization") {
+		t.Fatalf("upgrade on a managed Windows computer: %v", err)
+	}
 	t.Setenv(managed.DeploymentModeEnv, "")
 	t.Setenv(managed.ConfigPathEnv, "")
 	missing := fmt.Errorf("read v8 config C:\\Users\\u\\.defenseclaw\\config.yaml: %w", fs.ErrNotExist)
@@ -114,6 +120,48 @@ func TestManagedWindowsSetupAnswer(t *testing.T) {
 	if err := managedWindowsConfigLoadError(status, missing); err == missing ||
 		!strings.Contains(err.Error(), "`status` has no per-user deployment") {
 		t.Fatalf("status on a managed Windows computer: %v", err)
+	}
+}
+
+// GAP-1317: status on a managed Linux/macOS host without a per-user config
+// gave the raw "read v8 config ... no such file" error.
+func TestManagedUnixConfigLoadErrorNamesTheManagedDeployment(t *testing.T) {
+	descriptor := filepath.Join(t.TempDir(), "managed-runtime.json")
+	restore, restoreWindows, restoreTrust := managedHostDescriptorPath, managedHostWindowsStandalone, managedHostRecordTrusted
+	managedHostDescriptorPath = func() string { return descriptor }
+	managedHostWindowsStandalone = func() (string, bool) { return "", false }
+	managedHostRecordTrusted = func(string) error { return nil }
+	defer func() {
+		managedHostDescriptorPath, managedHostWindowsStandalone, managedHostRecordTrusted = restore, restoreWindows, restoreTrust
+	}()
+	t.Setenv(managed.DeploymentModeEnv, "")
+	t.Setenv(managed.ConfigPathEnv, "")
+	root := &cobra.Command{Use: "defenseclaw-gateway"}
+	status := &cobra.Command{Use: "status"}
+	root.AddCommand(status)
+	missing := fmt.Errorf("read v8 config /home/u/.defenseclaw/config.yaml: %w", fs.ErrNotExist)
+
+	if err := managedWindowsConfigLoadError(status, missing); err != missing {
+		t.Fatalf("an unmanaged host changed the error: %v", err)
+	}
+	if err := os.WriteFile(descriptor, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := managedWindowsConfigLoadError(status, missing)
+	if err == missing || !strings.Contains(err.Error(), "managed by your organization ("+descriptor+")") ||
+		!strings.Contains(err.Error(), "`status` has no per-user gateway") ||
+		!strings.Contains(err.Error(), "enterprise ") {
+		t.Fatalf("status on a managed unix host: %v", err)
+	}
+	// GAP-1196: audit export names its administrator form.
+	audit := &cobra.Command{Use: "audit"}
+	export := &cobra.Command{Use: "export"}
+	root.AddCommand(audit)
+	audit.AddCommand(export)
+	err = managedWindowsConfigLoadError(export, missing)
+	if err == missing || !strings.Contains(err.Error(), "`audit export` has no per-user gateway") ||
+		!strings.Contains(err.Error(), "defenseclaw-gateway audit export`") {
+		t.Fatalf("audit export on a managed unix host: %v", err)
 	}
 }
 
@@ -349,7 +397,108 @@ func TestManagedWindowsConfigOnlyAnswerNamesTheCommand(t *testing.T) {
 	t.Setenv("DEFENSECLAW_HOME", filepath.Join(t.TempDir(), "absent"))
 	err := loadGatewayCommandConfigFor(statusCmd)
 	if err == nil || !strings.Contains(err.Error(), "`status` has no per-user deployment") ||
-		!strings.Contains(err.Error(), "enterprise policy show --user HOST\\std1") {
+		!strings.Contains(err.Error(), "enterprise policy show --user std1`") {
 		t.Fatalf("status on a managed Windows computer: %v", err)
+	}
+	// GAP-1183: the hints run as typed (the installed CLI, not a bare
+	// defenseclaw-gateway that is not on PATH) and are an administrator's.
+	for _, want := range []string{"your administrator can check", "elevated PowerShell prompt",
+		"& '" + managedWindowsAdminCLI() + "' enterprise windows status --profile standalone"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("status answer lacks %q: %v", want, err)
+		}
+	}
+	if strings.Contains(err.Error(), "`defenseclaw-gateway ") {
+		t.Fatalf("status answer names a command that is not on PATH: %v", err)
+	}
+}
+
+// GAP-1182, GAP-1192: --help on a managed computer describes the managed
+// gateway and hides the per-user daemon commands it refuses.
+func TestManagedHostHelpDescribesTheManagedGateway(t *testing.T) {
+	restore := managedHostWindowsStandalone
+	t.Cleanup(func() { managedHostWindowsStandalone = restore })
+	t.Setenv(managed.DeploymentModeEnv, "")
+	newRoot := func() *cobra.Command {
+		root := &cobra.Command{Use: "defenseclaw-gateway", Long: "per-user sidecar"}
+		for _, name := range []string{"start", "stop", "restart", "watchdog", "sandbox", "status", "enterprise", "audit", "connector"} {
+			root.AddCommand(&cobra.Command{Use: name, Run: func(*cobra.Command, []string) {}})
+		}
+		for _, command := range root.Commands() {
+			switch command.Name() {
+			case "connector":
+				command.PersistentFlags().String("connector", "", "resolved from guardrail.connector / openclaw")
+			case "enterprise":
+				for _, platform := range []string{"linux", "macos", "windows", "policy"} {
+					command.AddCommand(&cobra.Command{Use: platform, Run: func(*cobra.Command, []string) {}})
+				}
+			}
+		}
+		return root
+	}
+
+	managedHostWindowsStandalone = func() (string, bool) { return "", false }
+	restoreDescriptor := managedHostDescriptorPath
+	t.Cleanup(func() { managedHostDescriptorPath = restoreDescriptor })
+	managedHostDescriptorPath = func() string { return filepath.Join(t.TempDir(), "absent.json") }
+	plain := newRoot()
+	if applyManagedHostHelp(plain) || plain.Long != "per-user sidecar" {
+		t.Fatalf("an unmanaged host changed the help: %q", plain.Long)
+	}
+
+	managedHostWindowsStandalone = func() (string, bool) { return `HKLM\SOFTWARE\Cisco\DefenseClaw\Enterprise`, true }
+	root := newRoot()
+	if !applyManagedHostHelp(root) {
+		t.Fatal("a managed host kept the per-user help")
+	}
+	for _, want := range []string{"managed gateway", "not available here", "enterprise windows status --profile standalone"} {
+		if !strings.Contains(root.Long, want) {
+			t.Fatalf("managed help lacks %q:\n%s", want, root.Long)
+		}
+	}
+	if strings.Contains(root.Long, "Run without arguments") || strings.Contains(root.Long, "Python CLI") {
+		t.Fatalf("managed help still describes the per-user daemon:\n%s", root.Long)
+	}
+	for _, command := range root.Commands() {
+		if command.Hidden != managedHostPerUserDaemonCommands[command.Name()] {
+			t.Fatalf("command %s hidden=%t", command.Name(), command.Hidden)
+		}
+		if command.Name() == "status" && command.Short != managedHostStatusShort {
+			t.Fatalf("managed status row = %q", command.Short)
+		}
+	}
+	// GAP-1719: the subcommand help describes the managed deployment too.
+	sub := map[string]*cobra.Command{}
+	for _, command := range root.Commands() {
+		sub[command.Name()] = command
+	}
+	for _, name := range []string{"status", "enterprise"} {
+		if !strings.Contains(sub[name].Long, "enterprise windows status --profile standalone") ||
+			strings.Contains(sub[name].Long, "sidecar") || strings.Contains(sub[name].Long, "root/MDM/systemd") {
+			t.Fatalf("managed %s help:\n%s", name, sub[name].Long)
+		}
+	}
+	for _, unwanted := range []string{"defenseclaw setup", "defenseclaw.yaml", "openclaw", "S7"} {
+		if strings.Contains(sub["connector"].Long, unwanted) {
+			t.Fatalf("managed connector help mentions %q:\n%s", unwanted, sub["connector"].Long)
+		}
+	}
+	if flag := sub["connector"].PersistentFlags().Lookup("connector"); strings.Contains(flag.Usage, "openclaw") {
+		t.Fatalf("managed --connector usage = %q", flag.Usage)
+	}
+	for _, platform := range sub["enterprise"].Commands() {
+		if platform.Hidden != managedHostOtherPlatforms()[platform.Name()] {
+			t.Fatalf("enterprise %s hidden=%t on %s", platform.Name(), platform.Hidden, runtime.GOOS)
+		}
+	}
+	// GAP-1359: the record path is on a line of its own, and the prose
+	// wraps at the usual width.
+	if !strings.Contains(root.Long, "\n  HKLM\\SOFTWARE\\Cisco\\DefenseClaw\\Enterprise\n") {
+		t.Fatalf("record path is not on its own line:\n%s", root.Long)
+	}
+	for _, line := range strings.Split(root.Long, "\n") {
+		if !strings.HasPrefix(line, "  ") && len(line) > 80 {
+			t.Fatalf("description line is %d columns: %q", len(line), line)
+		}
 	}
 }

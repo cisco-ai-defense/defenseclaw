@@ -24,7 +24,6 @@ import os
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
-from rich.markup import escape as rich_escape
 from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -32,6 +31,7 @@ from textual.containers import Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Input, Static
 
+from defenseclaw.tui.markup_safe import escape as rich_escape
 from defenseclaw.tui.services.policy_state import PackValidation, fit
 from defenseclaw.tui.theme import DEFAULT_TOKENS
 

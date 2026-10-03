@@ -8,9 +8,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -95,6 +97,13 @@ type cliObservabilityV8Scan struct {
 	Timestamp  time.Time                   `json:"timestamp"`
 	Findings   []cliObservabilityV8Finding `json:"findings"`
 	DurationMS int64                       `json:"duration_ms"`
+	// Error is set when the scan could not finish; it is recorded as
+	// scan.failed so failed scans are visible in audit and OTLP (GAP-1504).
+	Error string `json:"error,omitempty"`
+	// Connector is the connector whose skill, plugin or MCP server the CLI
+	// scanned (skill scan --connector claudecode), so scan.completed and
+	// finding.observed say which agent the asset belongs to (GAP-1381).
+	Connector string `json:"connector,omitempty"`
 }
 
 // cliObservabilityV8Finding deliberately mirrors Finding.to_dict in the
@@ -155,6 +164,9 @@ func (a *APIServer) handleCLIObservabilityV8(w http.ResponseWriter, r *http.Requ
 	if err := a.emitCLIObservabilityV8(ctx, request, envelope); err != nil {
 		// The response is intentionally content-free: runtime, database, route,
 		// exporter, and source-payload errors must not cross this API boundary.
+		// The CLI tells the operator gateway.log has the cause, so log it here
+		// (GAP-2381).
+		fmt.Fprintf(os.Stderr, "[api] CLI %s event was not recorded: %v\n", request.Kind, err)
 		http.Error(w, `{"error":"canonical observability emission failed"}`, http.StatusServiceUnavailable)
 		return
 	}
@@ -276,10 +288,12 @@ func (observation cliObservabilityV8WebhookDelivery) validate() error {
 
 func (scan cliObservabilityV8Scan) validate() error {
 	if !cliObservabilityV8Identifier(scan.Scanner, true) ||
+		!cliObservabilityV8Identifier(scan.Connector, false) ||
 		!cliObservabilityV8Text(scan.Target, cliObservabilityV8MaxTargetBytes, true) ||
 		scan.Timestamp.IsZero() || scan.Timestamp.Year() < 1 || scan.Timestamp.Year() > 9999 ||
 		scan.DurationMS < 0 || scan.DurationMS > math.MaxInt64/int64(time.Millisecond) ||
-		len(scan.Findings) > cliObservabilityV8MaxFindings {
+		len(scan.Findings) > cliObservabilityV8MaxFindings ||
+		!cliObservabilityV8Text(scan.Error, cliObservabilityV8MaxTitleBytes, false) {
 		return errors.New("invalid scan fields")
 	}
 	duration := time.Duration(scan.DurationMS) * time.Millisecond
@@ -454,11 +468,19 @@ func (a *APIServer) emitCLIObservabilityV8(
 			Scanner: scan.Scanner, Target: scan.Target, Timestamp: scan.Timestamp,
 			Findings: findings, Duration: time.Duration(scan.DurationMS) * time.Millisecond,
 		}
+		if strings.TrimSpace(scan.Error) != "" {
+			result.ScanError = scan.Error
+			result.ExitCode = 1
+		}
+		connector := envelope.Connector
+		if connector == "" {
+			connector = scan.Connector
+		}
 		return a.logger.LogScanWithCorrelation(ctx, result, "", audit.ScanCorrelation{
 			RunID: envelope.RunID, RequestID: envelope.RequestID,
 			SessionID: envelope.SessionID, TraceID: envelope.TraceID,
 			AgentID: envelope.AgentID, AgentName: envelope.AgentName,
-			AgentInstanceID: envelope.AgentInstanceID, Connector: envelope.Connector,
+			AgentInstanceID: envelope.AgentInstanceID, Connector: connector,
 		})
 	case "llm_bridge":
 		return a.emitCLILLMBridgeV8(ctx, *request.LLMBridge)

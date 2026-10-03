@@ -289,6 +289,29 @@ func TestInstallRefusals(t *testing.T) {
 	requireError(t, fresh.run(Options{Action: ActionInstall, PayloadDir: fresh.payload("1.0.0")}), codeNotRoot)
 }
 
+// GAP-1201: status by a standard user that cannot read the deployment
+// record asks for root instead of reporting state_unreadable.
+func TestStatusAsAStandardUserAsksForRoot(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads any mode")
+	}
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	dir := h.env.P(h.env.Layout.LifecycleDir)
+	if err := os.Chmod(dir, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	h.env.Geteuid = func() int { return 1000 }
+	r := h.run(Options{Action: ActionStatus})
+	requireError(t, r, codeNotRoot)
+	for _, e := range r.Errors {
+		if e.Code == codeState {
+			t.Fatalf("status still reports %s: %s", codeState, e.Message)
+		}
+	}
+}
+
 func TestLeftoversNeedAdoption(t *testing.T) {
 	h := newTestHost(t, "linux")
 	legacy := h.env.P("/etc/systemd/system/defenseclaw-hook-guardian@.service")
@@ -468,13 +491,15 @@ func TestConfigErrorsNameTheAdministratorFileAndAFixOnTheHost(t *testing.T) {
 }
 
 // A rule pack the gateway cannot load, or one inside the service-writable
-// data_dir, is refused before any change instead of failing activation.
+// data_dir, is refused before any change instead of failing activation. A
+// missing pack names a source that exists before the first install
+// (GAP-1429: the hint named the vendor folder only an install creates).
 func TestRulePackDirsAreValidatedBeforeAnyChange(t *testing.T) {
 	cases := map[string]struct {
 		replace, with, want string
 		packMode            os.FileMode
 	}{
-		"missing admin pack":   {"rule_pack_dir: /opt/defenseclaw/share/policies/guardrail/default", "rule_pack_dir: /etc/defenseclaw/policies/guardrail/custom", "does not exist", 0},
+		"missing admin pack":   {"rule_pack_dir: /opt/defenseclaw/share/policies/guardrail/default", "rule_pack_dir: /etc/defenseclaw/policies/guardrail/custom", "does not exist; create the pack there before you apply the config, starting from a copy of policies/guardrail/default in the DefenseClaw source release", 0},
 		"pack under umask 077": {"rule_pack_dir: /opt/defenseclaw/share/policies/guardrail/default", "rule_pack_dir: /etc/defenseclaw/policies/guardrail/custom", "service account cannot read the rule pack", 0o700},
 		"service-writable":     {"rule_pack_dir: /opt/defenseclaw/share/policies/guardrail/default", "rule_pack_dir: /var/lib/defenseclaw/packs/custom", "inside data_dir", 0},
 		"unknown vendor pack":  {"guardrail/default", "guardrail/nonexistent", "not a rule pack the product ships", 0},
@@ -558,6 +583,19 @@ func TestUninstallRemovesTheMachineStateUnlessKeepState(t *testing.T) {
 	install()
 	r := h.run(Options{Action: ActionUninstall})
 	requireOK(t, r)
+	// GAP-1227: the result says what went and what stayed.
+	summary := strings.Join(r.Changes, "\n")
+	for _, want := range []string{"stopped and removed the DefenseClaw services", "removed the machine state",
+		"and the service account", "kept: each enrolled account's DefenseClaw per-user data (~/.defenseclaw)", "--purge"} {
+		if !strings.Contains(summary, want) {
+			t.Fatalf("uninstall summary lacks %q:\n%s", want, summary)
+		}
+	}
+	// GAP-1721: the binaries are gone, so the kept line does not tell the
+	// administrator to run the removed gateway binary.
+	if !strings.Contains(summary, "install the DefenseClaw enterprise package again and run") || strings.Contains(summary, "--purge` removes them too") {
+		t.Fatalf("the kept line names a removed binary:\n%s", summary)
+	}
 	if exists(h.env.P(filepath.Join(l.BinDir, binGateway))) || exists(h.env.P(l.DescriptorPath)) ||
 		exists(h.env.P("/etc/systemd/system/"+unitGateway)) || exists(h.env.deploymentPath()) {
 		t.Fatal("uninstall left deployment files behind")
@@ -593,7 +631,11 @@ func TestUninstallRemovesTheMachineStateUnlessKeepState(t *testing.T) {
 
 	// --keep-state keeps all of it, and the account.
 	install()
-	requireOK(t, h.run(Options{Action: ActionUninstall, KeepState: true}))
+	kept := h.run(Options{Action: ActionUninstall, KeepState: true})
+	requireOK(t, kept)
+	if summary := strings.Join(kept.Changes, "\n"); !strings.Contains(summary, "kept for a reinstall") || strings.Contains(summary, "removed the machine state") {
+		t.Fatalf("uninstall --keep-state summary:\n%s", summary)
+	}
 	if !exists(h.env.P(l.ConfigPath)) || !exists(h.env.P(filepath.Join(l.DataDir, "audit.db"))) || !exists(h.env.P(filepath.Join(l.LogDir, "gateway.log"))) {
 		t.Fatal("uninstall --keep-state removed the machine state")
 	}
@@ -604,6 +646,10 @@ func TestUninstallRemovesTheMachineStateUnlessKeepState(t *testing.T) {
 	// --keep-service-account keeps only the account; a purge removes the rest.
 	purge := h.run(Options{Action: ActionUninstall, Purge: true, KeepServiceAccount: true})
 	requireOK(t, purge)
+	if summary := strings.Join(purge.Changes, "\n"); !strings.Contains(summary, "removed the machine state") ||
+		!strings.Contains(summary, "kept the service account") || strings.Contains(summary, "kept: each enrolled account") {
+		t.Fatalf("purge summary:\n%s", summary)
+	}
 	for _, dir := range []string{l.ConfigDir, l.DataDir, l.LifecycleDir, l.InstallRoot, l.GuardianAuthDir} {
 		if exists(h.env.P(dir)) {
 			t.Fatalf("purge left %s", dir)
@@ -633,6 +679,18 @@ func TestLifecycleLockIsExclusive(t *testing.T) {
 	defer held.release()
 	r := h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")})
 	requireError(t, r, codeBusy)
+	if msg := r.Errors[len(r.Errors)-1].Message; !strings.Contains(msg, "--lock-wait <duration>") ||
+		!strings.Contains(msg, "waited "+FormatLockWait(h.env.LockTimeout)+" for it") {
+		t.Fatalf("busy must name the wait done and the next step (GAP-1427, GAP-1722): %q", msg)
+	}
+	// GAP-1722: a run that already waited the longest allowed time is not
+	// told to wait longer.
+	if got := lockBusyNextStep(MaxLockWait); got != "waited 15m for it; wait for it to finish, then rerun" {
+		t.Fatalf("busy after the longest wait: %q", got)
+	}
+	if got := lockBusyNextStep(time.Second); !strings.HasPrefix(got, "waited 1s for it;") || !strings.Contains(got, "a longer --lock-wait <duration> (at most 15m)") {
+		t.Fatalf("busy after --lock-wait 1s: %q", got)
+	}
 	if r.ExitCode != enterprisestatus.UnixExitBusy {
 		t.Fatalf("busy exit %d, want %d", r.ExitCode, enterprisestatus.UnixExitBusy)
 	}
@@ -640,6 +698,10 @@ func TestLifecycleLockIsExclusive(t *testing.T) {
 	// unit accepts, instead of failing on the half-changed deployment.
 	verify := h.run(Options{Action: ActionVerify})
 	requireError(t, verify, codeBusy)
+	if msg := verify.Errors[len(verify.Errors)-1].Message; !strings.Contains(msg, "rerun verify") ||
+		!strings.Contains(msg, "; waited "+FormatLockWait(h.env.LockTimeout)+" for it;") {
+		t.Fatalf("busy verify must name the next step: %q", msg)
+	}
 	if verify.ExitCode != enterprisestatus.UnixExitBusy {
 		t.Fatalf("verify busy exit %d, want %d", verify.ExitCode, enterprisestatus.UnixExitBusy)
 	}
@@ -649,6 +711,34 @@ func TestLifecycleLockIsExclusive(t *testing.T) {
 	}
 	if !strings.Contains(string(unit), "\nSuccessExitStatus=75\n") {
 		t.Fatalf("a busy verify leaves its unit failed:\n%s", unit)
+	}
+}
+
+// GAP-2246: status during another run (a repair restarting the services)
+// says the run is in progress instead of listing every stopped service and
+// naming repair; it still reports the recorded deployment, so MDM
+// detection sees it installed.
+func TestStatusDuringAnotherRunReportsBusy(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+			held, err := h.env.acquireLock(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			status := h.run(Options{Action: ActionStatus})
+			held.release()
+			requireError(t, status, codeBusy)
+			// GAP-2409: it says how long it waited, as ensure does.
+			if len(status.Errors) != 1 || !strings.Contains(status.Errors[0].Message, "rerun status") ||
+				!strings.Contains(status.Errors[0].Message, "; waited "+FormatLockWait(h.env.LockTimeout)+" for it;") {
+				t.Fatalf("busy status must be the one busy error naming its next step: %+v", status.Errors)
+			}
+			if !status.Installed || status.InstalledVersion != "1.0.0" || status.ExitCode != enterprisestatus.UnixExitBusy {
+				t.Fatalf("busy status: installed=%v version=%q exit=%d", status.Installed, status.InstalledVersion, status.ExitCode)
+			}
+		})
 	}
 }
 
@@ -1210,5 +1300,19 @@ func TestInstallUnderRestrictiveUmaskKeepsDirectoryModes(t *testing.T) {
 	}
 	if got := h.mode(filepath.Join(l.VendorPolicyDir, "guardrail", "default", "rules", "secrets.yaml")); got != 0o644 {
 		t.Fatalf("vendor rule mode %04o under umask 077", got)
+	}
+}
+
+// GAP-1193: a connector that inherits the global rule pack is not checked
+// again, so a refusal names guardrail.rule_pack_dir.
+func TestRulePackCheckOrderNamesTheGlobalKey(t *testing.T) {
+	got := rulePackCheckOrder(map[string]string{
+		"guardrail.rule_pack_dir":                  "/etc/defenseclaw/policies/guardrail/custom",
+		"guardrail.connectors.amp.rule_pack_dir":   "/etc/defenseclaw/policies/guardrail/custom",
+		"guardrail.connectors.codex.rule_pack_dir": "/etc/defenseclaw/policies/guardrail/codex",
+	})
+	want := []string{"guardrail.rule_pack_dir", "guardrail.connectors.codex.rule_pack_dir"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("order = %v, want %v", got, want)
 	}
 }

@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
+import click
 import pytest
 from defenseclaw import agent_selection, fail_mode
 from defenseclaw.commands import cmd_doctor, cmd_setup
@@ -477,6 +478,7 @@ def test_setup_wait_commits_truthful_hermes_pending_reload(monkeypatch, tmp_path
             "runtime_state=pending-reload; running Hermes hosts are unverified; live=false",
         ),
     )
+    monkeypatch.setattr(cmd_doctor, "_hermes_host_running", lambda: True)
 
     readiness = cmd_setup._wait_for_connector_runtime(
         str(tmp_path),
@@ -489,6 +491,166 @@ def test_setup_wait_commits_truthful_hermes_pending_reload(monkeypatch, tmp_path
     assert readiness
     assert (readiness.connector, readiness.invariant) == ("hermes", "pending-reload")
     assert "live=false" in readiness.detail
+
+    # GAP-1235: with no Hermes host running there is nothing to reload, as doctor says.
+    monkeypatch.setattr(cmd_doctor, "_hermes_host_running", lambda: False)
+    readiness = cmd_setup._wait_for_connector_runtime(str(tmp_path), ["hermes"], None, None, timeout=0.5)
+    assert readiness
+    assert readiness.invariant != "pending-reload"
+
+
+@pytest.mark.parametrize(
+    ("invariant", "detail"),
+    [
+        (
+            "live-runtime",
+            "OpenCode hooks: warn: managed plugin digest current; runtime load unverified: "
+            "no authenticated load heartbeat; OpenCode may be stopped or idle",
+        ),
+        # GAP-1763: right after the restart the status has no OpenCode row yet.
+        (
+            "digest",
+            "OpenCode hooks: warn: plugin installed at ~/.config/opencode/plugins/defenseclaw.js "
+            "(digest current); runtime load unverified: authenticated status has no OpenCode connector row",
+        ),
+    ],
+)
+def test_setup_wait_does_not_skip_an_idle_opencode_peer(
+    monkeypatch, tmp_path: Path, capsys, invariant: str, detail: str
+) -> None:
+    """GAP-1271: a stopped OpenCode peer is not 'skipped' with a re-run hint."""
+    cfg = _config(tmp_path)
+    entries = {name: _entry(name, tmp_path) for name in ("codex", "opencode")}
+    (tmp_path / "hook_contract_lock.json").write_text(
+        json.dumps({"version": 2, "connectors": entries}),
+        encoding="utf-8",
+    )
+    (tmp_path / "active_connector.json").write_text(
+        json.dumps({"version": 3, "names": ["codex", "opencode"], "inactive_names": []}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cmd_setup, "load_config", lambda **_kwargs: cfg)
+
+    def readiness(_cfg, name):
+        if name == "opencode":
+            return cmd_doctor.ConnectorSetupReadiness(False, "opencode", invariant, detail)
+        return cmd_doctor.ConnectorSetupReadiness(True, name, "ready")
+
+    monkeypatch.setattr(cmd_doctor, "connector_setup_readiness", readiness)
+
+    result = cmd_setup._wait_for_connector_runtime(
+        str(tmp_path), ["codex", "opencode"], None, None, timeout=0.5, required={"codex"}
+    )
+
+    assert result
+    output = capsys.readouterr().out
+    assert "skipping opencode" not in output
+    assert "Re-run setup" not in output
+
+
+def test_setup_wait_skips_a_peer_the_restarted_gateway_refused(monkeypatch, tmp_path: Path, capsys) -> None:
+    """GAP-1710: a fresh roster without Cursor must not fail and roll back setup amp."""
+    cfg = _config(tmp_path)
+    entries = {name: _entry(name, tmp_path) for name in ("amp", "codex", "cursor")}
+    (tmp_path / "hook_contract_lock.json").write_text(
+        json.dumps({"version": 2, "connectors": entries}),
+        encoding="utf-8",
+    )
+    (tmp_path / "active_connector.json").write_text(
+        json.dumps({"version": 3, "names": ["amp", "codex"], "inactive_names": []}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cmd_setup, "load_config", lambda **_kwargs: cfg)
+    monkeypatch.setattr(
+        cmd_doctor, "connector_setup_readiness", lambda _cfg, name: cmd_doctor.ConnectorSetupReadiness(True, name, "ready")
+    )
+
+    result = cmd_setup._wait_for_connector_runtime(
+        str(tmp_path), ["amp", "codex", "cursor"], None, None, timeout=0.5, required={"amp"}
+    )
+
+    assert result
+    assert result.skipped == frozenset({"cursor"})
+    output = capsys.readouterr().out
+    assert "skipping cursor: the restarted gateway did not activate it" in output
+    assert "defenseclaw setup cursor" in output
+    # The connector being set up is never skipped.
+    (tmp_path / "active_connector.json").write_text(
+        json.dumps({"version": 3, "names": ["codex"], "inactive_names": []}),
+        encoding="utf-8",
+    )
+    assert not cmd_setup._wait_for_connector_runtime(
+        str(tmp_path), ["amp", "codex"], None, None, timeout=0.3, required={"amp"}
+    )
+
+
+def test_restart_services_does_not_wait_for_a_refused_peer_in_the_api(monkeypatch, tmp_path: Path) -> None:
+    """GAP-1710: the API wait must not expect a peer the runtime wait skipped."""
+    seen: list[list[str]] = []
+    monkeypatch.setattr(cmd_setup, "_restart_defense_gateway", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(cmd_setup, "_hook_runtime_wait_targets", lambda *_args: ["hermes", "claudecode", "copilot"])
+    monkeypatch.setattr(cmd_setup, "_unverified_setup_peers", frozenset)
+    monkeypatch.setattr(
+        cmd_setup,
+        "_wait_for_connector_runtime",
+        lambda *_args, **_kwargs: cmd_setup._ConnectorRuntimeReadiness(True, skipped=frozenset({"copilot"})),
+    )
+
+    def api_wait(*_args, expected_connectors=(), **_kwargs):
+        seen.append(list(expected_connectors))
+        return True
+
+    monkeypatch.setattr(cmd_setup, "_wait_for_defense_gateway_api", api_wait)
+
+    cmd_setup._restart_services(str(tmp_path), connector="hermes", wait_for_connector_ready=True)
+
+    assert seen == [["hermes", "claudecode"]]
+
+
+def test_setup_wait_remembers_a_refused_peer_for_the_summary(monkeypatch, tmp_path: Path) -> None:
+    """GAP-2013: the closing Summary learns which peer the gateway refused."""
+    cfg = _config(tmp_path)
+    entries = {name: _entry(name, tmp_path) for name in ("amp", "codex", "cursor")}
+    (tmp_path / "hook_contract_lock.json").write_text(
+        json.dumps({"version": 2, "connectors": entries}),
+        encoding="utf-8",
+    )
+    (tmp_path / "active_connector.json").write_text(
+        json.dumps({"version": 3, "names": ["amp", "codex"], "inactive_names": []}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cmd_setup, "load_config", lambda **_kwargs: cfg)
+    monkeypatch.setattr(
+        cmd_doctor, "connector_setup_readiness", lambda _cfg, name: cmd_doctor.ConnectorSetupReadiness(True, name, "ready")
+    )
+
+    with click.Context(click.Command("setup")):
+        result = cmd_setup._wait_for_connector_runtime(
+            str(tmp_path), ["amp", "codex", "cursor"], None, None, timeout=0.5, required={"amp"}
+        )
+        assert result
+        assert cmd_setup._runtime_skipped_setup_peers() == frozenset({"cursor"})
+
+
+def test_restart_services_roster_line_leaves_out_a_refused_peer(monkeypatch, tmp_path: Path) -> None:
+    """GAP-2013: a peer setup skipped is not named as protected in the closing line."""
+    hints: list[str] = []
+    roster = ["claudecode", "codex", "hermes", "opencode"]
+    monkeypatch.setattr(cmd_setup, "_restart_defense_gateway", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(cmd_setup, "_hook_runtime_wait_targets", lambda *_args: list(roster))
+    monkeypatch.setattr(cmd_setup, "_unverified_setup_peers", frozenset)
+    monkeypatch.setattr(cmd_setup, "_wait_for_defense_gateway_api", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        cmd_setup,
+        "_wait_for_connector_runtime",
+        lambda *_args, **_kwargs: cmd_setup._ConnectorRuntimeReadiness(True, skipped=frozenset({"hermes"})),
+    )
+    monkeypatch.setattr(cmd_setup.ux, "subhead", hints.append)
+
+    cmd_setup._restart_services(str(tmp_path), connector="opencode", connectors=roster, wait_for_connector_ready=True)
+
+    assert any(hint.startswith("3 hook connectors (claudecode, codex, opencode):") for hint in hints), hints
+    assert not any("hermes" in hint for hint in hints), hints
 
 
 def test_restart_services_labels_hermes_pending_reload_without_live_claim(
@@ -518,9 +680,12 @@ def test_restart_services_labels_hermes_pending_reload_without_live_claim(
     )
 
     output = capsys.readouterr().out
-    assert "hermes: pending-reload" in output
+    assert "waiting for verified setup... ! (restart any open Hermes session" in output
     assert "connector runtime: waiting for verified setup... ✓" not in output
-    assert any("runtime_state=pending-reload" in hint and "live=false" in hint for hint in hints)
+    assert any("keeps its old hooks until it is restarted" in hint for hint in hints)
+    # GAP-1782: no internal state names in user output.
+    for text in [output, *hints]:
+        assert "live=false" not in text and "pending-reload" not in text and "--passive" not in text
 
 
 def test_upstream_fail_open_remains_distinct_from_configured_mode(monkeypatch, tmp_path: Path) -> None:
@@ -882,6 +1047,16 @@ class TestLockContractFailureDetail:
         detail = cmd_setup._lock_contract_failure_detail("devin", newer, invariant)
         assert "predates" in detail and "defenseclaw-gateway restart" in detail
 
+    def test_unversioned_agent_names_a_missing_install(self) -> None:
+        # GAP-1285: OpenCode not installed for the account reports no version.
+        entry = {"connector": "opencode", "compatibility_status": "unversioned", "hook_fail_mode": "open"}
+        invariant = connector_lock_contract_invariant("opencode", entry)
+        if invariant != "version":
+            pytest.skip("opencode now has a default contract for an unversioned agent")
+        detail = cmd_setup._lock_contract_failure_detail("opencode", entry, invariant)
+        assert "installed and on PATH" in detail and "defenseclaw setup opencode" in detail
+        assert "invalid" not in detail
+
     def test_malformed_entry_still_reads_as_invalid(self) -> None:
         # A lock whose recorded connector does not match, or whose fields are
         # nonsense, is a genuine integrity failure and must keep saying so.
@@ -982,3 +1157,21 @@ class TestUnconvergeablePeersAreSkipped:
         )
         assert keep == {"kiro"}
         assert tolerated == frozenset({"devin"})
+
+
+def test_hermes_summary_skips_reload_advice_when_no_host_runs(monkeypatch, capsys) -> None:
+    # GAP-1339: with no Hermes host running there is nothing to reload.
+    def summary() -> str:
+        cmd_setup._print_observability_summary("hermes", None, mode="observe", os_name="posix")
+        return capsys.readouterr().out
+
+    monkeypatch.setattr(cmd_doctor, "_hermes_host_running", lambda: False)
+    idle = summary()
+    assert "unverified; reload/restart required" not in idle
+    assert "Reload/restart every running Hermes" not in idle
+    assert "the next one starts with the DefenseClaw hooks" in idle
+
+    monkeypatch.setattr(cmd_doctor, "_hermes_host_running", lambda: True)
+    running = summary()
+    assert "unverified; reload/restart required" in running
+    assert "Reload/restart every running Hermes" in running

@@ -162,6 +162,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 		actionTool, resourceIdentity := trustedToolActionFromContext(
 			ctx, "claudecode", toolName, toolName,
 		)
+		actionTool = claudeCodeTrustedActionTool(toolName, actionTool)
 		toolRequest := &ToolInspectRequest{
 			Tool:          toolName,
 			Args:          toolArgs,
@@ -269,8 +270,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	// Done before dispatchClaudeCodeHookNotification so the OS toast
 	// can carry the same evaluation_id + rule_ids that the audit
 	// row + HTTP response will surface.
-	evalCtx := a.emitHookRuleFindings(ctx, "claudecode", req.HookEventName, verdict,
-		hookTargetTypeForEvent(req.HookEventName), time.Since(t0))
+	evalCtx := a.emitClaudeCodeHookRuleFindings(ctx, req, verdict, time.Since(t0))
 	if !hookNotificationCoveredByAssetPolicy(rawActionBeforeAssets, assetDecisions) {
 		a.dispatchClaudeCodeHookNotification(req, action, rawAction, verdict.Severity, verdict.Reason, wouldBlock, evalCtx,
 			sinkPolicyFor(ctx, verdict.RedactionEnabled))
@@ -284,7 +284,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	// the audit envelope (HookAuditEnvelope.EvaluationID / RuleIDs)
 	// both see them without a second pass.
 	resp.EvaluationID = evalCtx.EvaluationID
-	resp.RuleIDs = evalCtx.RuleIDs
+	resp.RuleIDs = hookResponseRuleIDs(evalCtx.RuleIDs, rawActionBeforeAssets, assetDecisions)
 	resp.RedactionEnabled = verdict.RedactionEnabled
 	resp.laneVerdict = verdict.laneVerdict
 	return resp
@@ -314,6 +314,9 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 // notifications.block_would_block=false silences all observe-mode
 // noise without affecting real native asks.
 func (a *APIServer) dispatchClaudeCodeHookNotification(req claudeCodeHookRequest, action, rawAction, severity, reason string, wouldBlock bool, evalCtx hookEvaluationContext, policy ...redaction.SinkPolicy) {
+	if action == "block" {
+		a.dispatchHookBlockWebhook("claudecode", req.ToolName, req.HookEventName, severity, reason, evalCtx.RuleIDs)
+	}
 	if a == nil || a.notifier == nil {
 		return
 	}
@@ -420,6 +423,7 @@ func claudeCodeResponseFor(req claudeCodeHookRequest, action, rawAction, severit
 	}
 	safeReason := agentDisplayReason(reason, notificationSinkPolicy(policy))
 	safeReason = agentVerdictReason(action, reason, safeReason, notificationSinkPolicy(policy))
+	safeReason = agentObservedReason(action, reason, safeReason, notificationSinkPolicy(policy))
 	// wouldBlock remains a shadow-telemetry signal for post-result events, but
 	// the connector cannot enforce those events. Do not describe an advisory
 	// result as something Claude would block in action mode.
@@ -565,6 +569,24 @@ func reasonOrDefaultClaudeCode(reason string) string {
 		return "Blocked by DefenseClaw Claude Code policy."
 	}
 	return reason
+}
+
+// claudeCodeOmniGentShellTool is OmniGent's shell tool as Claude Code names
+// it when OmniGent's claude harness runs Claude Code: the MCP tool
+// sys_os_shell of the "omnigent" server, {"command": "..."}.
+const claudeCodeOmniGentShellTool = "mcp__omnigent__sys_os_shell"
+
+// claudeCodeTrustedActionTool names the tool the trusted-action parser sees.
+// OmniGent's MCP shell tool is the same shell shape under another name;
+// unmapped, its commands parsed to no command facts, so a CRITICAL command
+// rule stayed an unproven candidate and the nested Claude Code PreToolUse
+// allowed the call (GAP-1055; only OmniGent's own hook blocked it). This is a
+// name alias like agentHookTrustedActionTool's, not a capability grant.
+func claudeCodeTrustedActionTool(toolName, actionTool string) string {
+	if strings.TrimSpace(toolName) == claudeCodeOmniGentShellTool {
+		return "shell"
+	}
+	return actionTool
 }
 
 func claudeCodeToolName(req claudeCodeHookRequest) string {
@@ -891,7 +913,7 @@ func (a *APIServer) scanClaudeCodeEventFile(ctx context.Context, req claudeCodeH
 	return &ToolInspectVerdict{
 		Action:   action,
 		Severity: string(maxSeverity),
-		Reason:   fmt.Sprintf("CodeGuard found %d finding(s) in Claude Code %s file", len(findings), req.HookEventName),
+		Reason:   codeGuardHookReason(claudeCodeCodeGuardEventPlace(req.HookEventName), findings),
 		Findings: findings,
 	}
 }
@@ -945,7 +967,7 @@ func (a *APIServer) scanClaudeCodeChangedFiles(ctx context.Context, req claudeCo
 	return &ToolInspectVerdict{
 		Action:   action,
 		Severity: string(maxSeverity),
-		Reason:   fmt.Sprintf("CodeGuard found %d finding(s) in Claude Code changed files", len(findings)),
+		Reason:   codeGuardHookReason(codeGuardPlaceClaudeChanged, findings),
 		Findings: findings,
 	}
 }

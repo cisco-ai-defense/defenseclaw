@@ -116,6 +116,9 @@ type windowsManagedHooksTeardownReport struct {
 // tests.
 var windowsManagedHooksStandaloneUserRegistrationRemover = removeWindowsManagedHooksStandalonePerUserRegistrations
 
+// windowsManagedHooksStandaloneInventoryACERevoker is replaceable in tests.
+var windowsManagedHooksStandaloneInventoryACERevoker = enterprisehooks.RevokeGatewayInventoryReadForManifest
+
 // completeWindowsManagedHooksTeardownUserCleanup runs after a successful
 // standalone finalize: the uninstall has committed, so DefenseClaw's own
 // registrations are removed from users' agent configurations and the
@@ -129,10 +132,18 @@ func completeWindowsManagedHooksTeardownUserCleanup(
 	if !enterprisehooks.WindowsStandaloneProcess() {
 		return
 	}
+	// The gateway's AI-discovery read ACEs go first: on folders that are
+	// also on a managed hook path (~\.config, ~\.gemini) the removal trust
+	// check refuses a DACL that still carries them (GAP-1765).
+	revokeErr := windowsManagedHooksStandaloneInventoryACERevoker(manifest)
 	cleanup := windowsManagedHooksStandaloneUserRegistrationRemover(context.Background(), runtimeDir, manifest)
 	report.UserRegistrationsRemoved = len(cleanup.Removed)
 	report.UserRegistrationsPending = cleanup.Pending
 	report.UserRegistrationsFailed = cleanup.Failed
+	if revokeErr != nil {
+		report.UserRegistrationsFailed = append(report.UserRegistrationsFailed,
+			"gateway/AI discovery read access on users' agent folders: "+boundedEnterpriseHookUserCleanupText(revokeErr.Error()))
+	}
 	purge := os.Getenv(windowsManagedHooksPurgeUserStateEnv) == "1"
 	report.UserStateRemaining, report.UserStatePurged = windowsManagedHooksStandaloneUserState(manifest, purge, windowsManagedHooksAccountsKeepingRegistrations(cleanup))
 	if purge {
@@ -140,8 +151,22 @@ func completeWindowsManagedHooksTeardownUserCleanup(
 			report.UserRegistrationsFailed = append(report.UserRegistrationsFailed,
 				"claudecode/machine policy: the Claude Code version floor: "+boundedEnterpriseHookUserCleanupText(err.Error()))
 		}
+		// The default uninstall keeps an allow-only Cursor hook tombstone for
+		// Cursor processes still running; the purge removes it (GAP-1567).
+		if err := windowsManagedHooksStandaloneCursorTombstonePurger(); err != nil {
+			report.UserRegistrationsFailed = append(report.UserRegistrationsFailed,
+				"cursor/machine policy: the Cursor hook tombstone in ProgramData\\Cursor: "+boundedEnterpriseHookUserCleanupText(err.Error()))
+		}
 	}
 }
+
+// windowsManagedHooksStandaloneCursorTombstonePurger is replaceable in tests.
+var windowsManagedHooksStandaloneCursorTombstonePurger = enterprisehooks.PurgeWindowsCursorManagedTombstone
+
+// windowsManagedHooksNotLocalSystemReason ends a user_state_remaining entry
+// whose folder a purge left because it did not run as LocalSystem; the
+// lifecycle result fails on it.
+const windowsManagedHooksNotLocalSystemReason = "the uninstall did not run as LocalSystem"
 
 // windowsManagedHooksPurgeUserStateEnv is set to 1 by the lifecycle for an
 // uninstall with purge (Setup PURGE=1, --purge). A flag would fail the
@@ -236,16 +261,17 @@ func windowsManagedHooksStandaloneUserState(
 			}
 			reason = "the account's profile folder is not on this computer while it is signed out"
 		case identityErr != nil:
-			reason = "the uninstall did not run as LocalSystem"
+			reason = windowsManagedHooksNotLocalSystemReason
 		case keepsRegistrations(sid):
 			reason = "kept: the account's agent registrations were not all removed, and its connector_backups restore them"
 		default:
 			err := windowsManagedHooksStandaloneUserStatePurger(home, sid, target.DataDir)
+			var binaries []string
 			if err == nil {
-				_, err = windowsManagedHooksStandaloneUserBinariesPurger(home, sid)
+				binaries, err = windowsManagedHooksStandaloneUserBinariesPurger(home, sid)
 			}
 			if err == nil {
-				purged = append(purged, label)
+				purged = append(purged, windowsManagedHooksPurgedLabel(label, binaries))
 				continue
 			}
 			reason = boundedEnterpriseHookUserCleanupText(err.Error())

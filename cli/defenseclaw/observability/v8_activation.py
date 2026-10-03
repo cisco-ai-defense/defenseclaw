@@ -3231,7 +3231,7 @@ def _remove_unexpected_xattrs(descriptor: int, expected: frozenset[str]) -> None
     current = _read_xattrs(descriptor, "staged replacement")
     remove = getattr(os, "removexattr", None)
     for name, _value in current:
-        if name in expected:
+        if name in expected or name in _KERNEL_LABEL_XATTRS:
             continue
         if remove is not None:
             remove(descriptor, name)
@@ -3564,13 +3564,29 @@ def _xattrs_match(
 ) -> bool:
     if actual == expected:
         return True
-    if not allow_platform_xattrs or sys.platform != "darwin":
+    platform_names = _platform_xattr_names()
+    if not allow_platform_xattrs or not platform_names:
         return False
     expected_map = dict(expected)
     actual_map = dict(actual)
     return all(
-        name in {"com.apple.provenance"} or expected_map.get(name) == value for name, value in actual_map.items()
+        name in platform_names or expected_map.get(name) == value for name, value in actual_map.items()
     ) and all(actual_map.get(name) == value for name, value in expected_map.items())
+
+
+# Attributes the OS attaches to every new file. A brand-new private file may
+# carry them even though there was no prior file to copy them from, and an
+# unprivileged user cannot remove the SELinux label (EACCES), so they are
+# never stripped from a staged replacement.
+_KERNEL_LABEL_XATTRS = frozenset({"security.selinux"})
+
+
+def _platform_xattr_names() -> frozenset[str]:
+    if sys.platform == "darwin":
+        return frozenset({"com.apple.provenance"})
+    if sys.platform.startswith("linux"):
+        return _KERNEL_LABEL_XATTRS
+    return frozenset()
 
 
 def _assert_private_file_parent_trust(target: str, owner_root: str, trusted_uids: frozenset[int]) -> None:

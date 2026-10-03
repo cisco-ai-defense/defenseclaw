@@ -130,6 +130,13 @@ type lifecycle struct {
 	// reportChanges is set while a repair or ensure re-applies an installed
 	// deployment: the result then lists what the transaction changed.
 	reportChanges bool
+	// perUserRemoved counts the per-user hook registrations an uninstall
+	// removed, for its summary.
+	perUserRemoved int
+	// keptPerUser is what each enrolled account keeps after a default
+	// uninstall; keptKnown is false when the accounts record was unreadable.
+	keptPerUser []perUserKept
+	keptKnown   bool
 }
 
 // noteChange records one change a repair or ensure made to an installed
@@ -219,7 +226,7 @@ func (l *lifecycle) run(ctx context.Context) int {
 	lock, err := env.acquireLock(ctx)
 	if err != nil {
 		if errors.Is(err, errLockBusy) {
-			r.AddError(codeBusy, err.Error())
+			r.AddError(codeBusy, err.Error()+"; "+lockBusyNextStep(env.LockTimeout))
 			return enterprisestatus.BusyExitCode(env.GOOS)
 		}
 		r.AddError(codeState, err.Error())
@@ -276,7 +283,10 @@ func (l *lifecycle) run(ctx context.Context) int {
 			r.AddError(codeInvalidArguments, "a protected-state change can only be applied by ensure")
 			return enterprisestatus.InvalidArgsExitCode(env.GOOS)
 		}
-		if err := l.opts.Mutate(ctx); err != nil {
+		resume := l.pauseApplyTrigger(ctx)
+		err := l.opts.Mutate(ctx)
+		resume()
+		if err != nil {
 			r.AddError(codeChange, err.Error())
 			return 0
 		}
@@ -347,6 +357,23 @@ func (l *lifecycle) run(ctx context.Context) int {
 		return l.uninstall(ctx, record)
 	}
 	return 0
+}
+
+// pauseApplyTrigger stops the Linux apply path unit while a protected-state
+// change (enterprise secret set or remove) writes under this run's lock, and
+// returns the function that starts it again. This run applies the change
+// itself. Left watching, the path unit started the apply service on that
+// write, and its redundant ensure held the lock for several seconds after
+// this run returned, so a lifecycle command typed right after it failed
+// lifecycle_busy (GAP-2261). The transaction stops the path unit anyway
+// while it applies (quiesce) and starts it again when it activates.
+func (l *lifecycle) pauseApplyTrigger(ctx context.Context) func() {
+	env := l.env
+	unit := Unit{Name: unitApplyPath, Kind: "path"}
+	if env.GOOS != "linux" || !env.Services.Active(ctx, unit) || env.Services.Stop(ctx, unit) != nil {
+		return func() {}
+	}
+	return func() { _ = env.Services.Start(context.WithoutCancel(ctx), unit) }
 }
 
 // codeSuperseded names an apply run that stood down for a newer binary.
@@ -434,7 +461,8 @@ func (l *lifecycle) freshInstall(ctx context.Context) int {
 		channel = ChannelPackage
 	}
 	if l.opts.PayloadDir == "" && !l.opts.FromPackage {
-		r.AddError(codeInvalidArguments, "install needs --payload or --from-package")
+		r.AddError(codeInvalidArguments, "install needs --payload <dir> or --from-package; to apply the installed package, run `"+
+			env.lifecycleCommand(ActionEnsure)+" --from-package`")
 		return enterprisestatus.InvalidArgsExitCode(env.GOOS)
 	}
 	var adopting *adoption
@@ -778,6 +806,9 @@ func recordBinaries(env *Env, record *Deployment) map[string]string {
 func (l *lifecycle) configBytes() (data []byte, fromInstalled bool, err error) {
 	env := l.env
 	if l.opts.ConfigFile != "" {
+		if err := trustedInputFile(l.opts.ConfigFile, "--config"); err != nil {
+			return nil, false, err
+		}
 		data, err = readBounded(l.opts.ConfigFile, maxInputBytes)
 		return data, false, err
 	}
@@ -1315,8 +1346,12 @@ func (l *lifecycle) activate(ctx context.Context, units []Unit, restartSockets m
 		if !unit.Activate {
 			continue
 		}
+		wasDisabled := unitDisabled(ctx, env.Services, unit)
 		if err := env.Services.Enable(ctx, unit); err != nil {
 			return fmt.Errorf("enable %s: %w", unit.Name, err)
+		}
+		if wasDisabled {
+			l.noteChange("re-enabled %s, which was disabled and would not start after a reboot", unit.Name)
 		}
 		if unit.Name == env.SelfUnit {
 			// Already running: this transaction executes inside it.
@@ -1594,17 +1629,38 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	if record == nil && !l.opts.Purge {
 		r.Noop = true
 		r.NoopReason = "not_installed"
+		// After a failed first package install, give the same finish step
+		// as status and verify (GAP-2410).
+		failure := env.lastPackageInstallFailure()
+		env.warnPackageInstallFailed(r, failure)
 		if leftovers := env.unmanagedLeftovers(env.Services, ChannelPayload); len(leftovers) > 0 {
-			r.AddWarning(codeLeftovers, "no committed deployment, but DefenseClaw machine state exists ("+strings.Join(leftovers, ", ")+"); "+env.leftoversNextStep(ctx))
+			r.AddWarning(codeLeftovers, "no committed deployment, but DefenseClaw machine state exists ("+strings.Join(leftovers, ", ")+"); "+env.leftoversNextStep(ctx, failure != ""))
 		}
 		return 0
+	}
+	if !l.opts.Purge {
+		// Read before the machine state, and the accounts record with it, go.
+		l.keptPerUser, l.keptKnown = env.perUserLeftovers()
 	}
 	ordered := append([]Unit{}, units...)
 	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Stage > ordered[j].Stage })
 	stopUnit := func(unit Unit) {
 		_ = env.Services.Stop(ctx, unit)
-		if unit.Activate {
+		// On macOS launchctl disable writes an override into launchd's
+		// database that no command can delete (GAP-1443). The definitions
+		// are removed below; one that stays is disabled there.
+		if unit.Activate && env.GOOS != "darwin" {
 			_ = env.Services.Disable(ctx, unit)
+		}
+	}
+	disableKeptDefinitions := func() {
+		if env.GOOS != "darwin" {
+			return
+		}
+		for _, unit := range units {
+			if unit.Activate && exists(env.P(env.Services.DefinitionPath(unit, ChannelPayload))) {
+				_ = env.Services.Disable(ctx, unit)
+			}
 		}
 	}
 	// The guardian repairs any DefenseClaw registration that goes missing
@@ -1646,6 +1702,7 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 		}
 	}
 	if perUserLeft {
+		disableKeptDefinitions()
 		// Some users' agents still name the hook binary. Removing it now
 		// would leave those registrations calling a program that no longer
 		// exists, with nothing left to remove them: the binaries, the
@@ -1706,16 +1763,17 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	}
 	if env.GOOS == "darwin" {
 		// launchctl disable writes an override to launchd's database that
-		// outlives the job, so every removed label stayed listed as
-		// disabled. launchctl cannot delete an override; once a label's
-		// definition is gone, put it back to launchd's default, enabled
-		// (the state install leaves). A definition that is still there
-		// stays disabled, so a reboot does not start it.
+		// outlives the job, and launchctl cannot delete one. A label that an
+		// older version or --no-start disabled goes back to launchd's
+		// default, enabled, once its definition is gone (Enable writes
+		// nothing for a label that is not disabled). A definition that is
+		// still there is disabled, so a reboot does not start it.
 		for _, unit := range units {
 			if unit.Activate && !exists(env.P(env.Services.DefinitionPath(unit, ChannelPayload))) {
 				_ = env.Services.Enable(ctx, unit)
 			}
 		}
+		disableKeptDefinitions()
 	}
 	_ = os.RemoveAll(env.P(env.Layout.HookSocketDir))
 	// Runtime leftovers of the stopped services: the sensor helper's socket
@@ -1810,7 +1868,44 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 		}
 	}
 	r.Installed = false
+	r.Changes = append(r.Changes, l.uninstallSummary(record)...)
 	return 0
+}
+
+// uninstallSummary says what a completed uninstall removed and kept, like
+// the change list of ensure and repair. A bare "uninstall: done" did not
+// tell the administrator what happened to the machine state or to the
+// users' own data (GAP-1227).
+func (l *lifecycle) uninstallSummary(record *Deployment) []string {
+	env, r := l.env, l.result
+	layout := env.Layout
+	removed := "stopped and removed the DefenseClaw services, binaries and deployment record"
+	if record != nil && record.Channel == ChannelPackage && env.GOOS == "linux" {
+		removed = "stopped and removed the DefenseClaw services and deployment record (the package manager removes the package's files)"
+	}
+	lines := []string{removed}
+	if l.perUserRemoved > 0 {
+		lines = append(lines, fmt.Sprintf("removed %d DefenseClaw per-user hook registrations from the enrolled accounts", l.perUserRemoved))
+	}
+	if len(r.MachinePolicy) > 0 {
+		lines = append(lines, "removed DefenseClaw's machine policy entries for "+strings.Join(sortedKeys(r.MachinePolicy), ", "))
+	}
+	state := fmt.Sprintf("the managed config and secrets (%s), the gateway and guardian state (%s, %s), the logs (%s)",
+		layout.ConfigDir, layout.DataDir, layout.GuardianAuthDir, layout.LogDir)
+	switch {
+	case l.opts.KeepState:
+		lines = append(lines, "kept for a reinstall: "+state+" and the service account "+layout.ServiceUser)
+	case l.opts.KeepServiceAccount:
+		lines = append(lines, "removed the machine state: "+state+" and the lifecycle state ("+layout.LifecycleDir+"); kept the service account "+layout.ServiceUser)
+	default:
+		lines = append(lines, "removed the machine state: "+state+", the lifecycle state ("+layout.LifecycleDir+") and the service account "+layout.ServiceUser)
+	}
+	if !l.opts.Purge {
+		if kept := l.keptPerUserLine(record); kept != "" {
+			lines = append(lines, kept)
+		}
+	}
+	return lines
 }
 
 // removePerUserRegistrations runs `enterprise hooks remove-all` (with
@@ -1836,10 +1931,14 @@ func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 		Failed      []string `json:"failed"`
 		StateFailed []string `json:"state_failed"`
 		Purged      []string `json:"purged"`
+		Removed     int      `json:"removed"`
+		// PurgedDetail is absent from an installed binary that predates it.
+		PurgedDetail map[string]purgedUserDetail `json:"purged_detail"`
 	}
 	if jsonErr := json.Unmarshal(out.Stdout, &report); jsonErr != nil && err == nil {
 		return false
 	}
+	l.perUserRemoved = report.Removed
 	rerun := "`" + l.uninstallCommand() + "`"
 	left := false
 	for _, entry := range report.Failed {
@@ -1869,9 +1968,54 @@ func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 	// A purge deletes data an account created before the install; name each
 	// account, instead of a bare "done".
 	for _, user := range report.Purged {
-		r.Changes = append(r.Changes, fmt.Sprintf("removed all DefenseClaw per-user data of user %s (~/.defenseclaw, including its hook scripts and the foreign-hooks-backup folder) and its per-user binaries and launcher links in ~/.local/bin, after stopping its per-user gateway", user))
+		var detail *purgedUserDetail
+		if found, ok := report.PurgedDetail[user]; ok {
+			detail = &found
+		}
+		r.Changes = append(r.Changes, purgedUserChange(user, detail))
 	}
 	return left
+}
+
+// purgedUserDetail is what the purge found and removed for one account.
+type purgedUserDetail struct {
+	Data     bool `json:"data"`
+	Binaries bool `json:"binaries"`
+	Gateway  bool `json:"gateway"`
+	UVCache  bool `json:"uv_cache"`
+}
+
+// purgedUserChange names what the purge removed for user: only what it
+// found, so an account that never had a per-user install is not said to
+// have lost per-user binaries and a gateway (GAP-1444). Without detail (an
+// installed binary from before it) it names everything the purge covers.
+func purgedUserChange(user string, detail *purgedUserDetail) string {
+	const data = "all DefenseClaw per-user data of user %s (~/.defenseclaw, including its hook scripts and the foreign-hooks-backup folder)"
+	if detail == nil {
+		return fmt.Sprintf("removed "+data+" and its per-user binaries and launcher links in ~/.local/bin, after stopping its per-user gateway", user)
+	}
+	var text string
+	switch {
+	case detail.Data && detail.Binaries:
+		text = fmt.Sprintf("removed "+data+" and its per-user binaries and launcher links in ~/.local/bin", user)
+	case detail.Data:
+		text = fmt.Sprintf("removed "+data, user)
+	case detail.Binaries:
+		text = fmt.Sprintf("removed the DefenseClaw per-user binaries and launcher links of user %s in ~/.local/bin", user)
+	case detail.UVCache:
+		text = fmt.Sprintf("removed DefenseClaw's entries in the uv cache (~/.cache/uv) of user %s", user)
+	default:
+		text = fmt.Sprintf("found no DefenseClaw per-user data or binaries of user %s to remove", user)
+	}
+	// Earlier per-user installers left a DefenseClaw wheel in the account's
+	// uv cache per install; the purge removes those too (GAP-1947).
+	if detail.UVCache && (detail.Data || detail.Binaries) {
+		text += ", and DefenseClaw's entries in its uv cache (~/.cache/uv)"
+	}
+	if detail.Gateway {
+		text += ", after stopping its per-user gateway"
+	}
+	return text
 }
 
 // uninstallCommand is this run's uninstall command line, for a rerun.

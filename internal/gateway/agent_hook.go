@@ -112,7 +112,7 @@ type agentHookRequest struct {
 	CorrelationValues           map[connector.CorrelationTarget]connector.CorrelationValue
 	CorrelationIdentifiers      []connector.CorrelationValue
 	SuppressCorrelationEmit     bool
-	CorrelationUnavailable      bool // correlation failed, not a replay: not exported, still audited
+	CorrelationUnavailable      bool // correlation failed, not a replay: decision exported without join IDs, still audited
 	CorrelationReceipt          *audit.CorrelationReceiptLocator
 	CWD                         string
 	ToolName                    string
@@ -386,11 +386,11 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		defer cancelCompletion()
 		ctx, correlatedReq, correlationErr := a.correlateHookOccurrence(ctx, profile, req, b)
 		if correlationErr != nil {
-			// Correlation persistence is fail-closed for export, not for policy
-			// enforcement. The hook must still be evaluated if the local ledger is
-			// temporarily unavailable; runtime export receives no incomplete
-			// occurrence envelope and therefore cannot publish a partial join.
-			// The verdict still gets its local audit row (finalizeAgentHook).
+			// Correlation persistence is fail-closed for the cross-call join IDs,
+			// not for policy enforcement or export. The hook must still be
+			// evaluated if the local ledger is temporarily unavailable; the
+			// verdict keeps its local audit row, its decision export
+			// (finalizeAgentHook) and its LLM event (hookLLMEventExportable).
 			fmt.Fprintf(os.Stderr, "[gateway] hook correlation unavailable connector=%s event=%s: %v\n",
 				connectorName, req.HookEventName, correlationErr)
 			req.SuppressCorrelationEmit, req.CorrelationUnavailable = true, true
@@ -510,7 +510,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// the emit stays BEFORE the evaluator (audit-honest ordering) and
 		// behavior is byte-for-byte unchanged.
 		deferManagedHookEmit := managedEnterpriseActive.Load()
-		if !deferManagedHookEmit && !req.SuppressCorrelationEmit {
+		if !deferManagedHookEmit && hookLLMEventExportable(req) {
 			runtime.EmitLLMEvent(a, ctx, req, b, payload, rawEventIDs)
 		}
 
@@ -594,7 +594,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// still precedes the hook_decision event, preserving the OSS event
 		// ordering. Fails closed to redact when the AID lane returned no
 		// directive (resp.RedactionEnabled == nil).
-		if deferManagedHookEmit && !req.SuppressCorrelationEmit {
+		if deferManagedHookEmit && hookLLMEventExportable(req) {
 			runtime.EmitLLMEvent(a, ctx, req, b, payload, rawEventIDs)
 		}
 
@@ -645,6 +645,16 @@ func validAntigravityHookEvent(event string) bool {
 	default:
 		return false
 	}
+}
+
+// hookLLMEventExportable reports whether the hook's prompt/tool/response
+// event (the invoke_agent and execute_tool spans Galileo receives) is
+// exported. A hook whose correlation ledger write failed (disk full) is
+// exported without the cross-call join IDs, like its decision: otherwise
+// Galileo gets nothing while the local audit store is down (GAP-1536). Only
+// an exact replay of an already exported delivery stays unexported.
+func hookLLMEventExportable(req agentHookRequest) bool {
+	return !req.SuppressCorrelationEmit || req.CorrelationUnavailable
 }
 
 func (a *APIServer) finalizeAgentHook(
@@ -730,7 +740,11 @@ func (a *APIServer) finalizeAgentHook(
 		a.observeSandboxHookDecision(ctx, req, resp)
 	})
 
-	if !req.SuppressCorrelationEmit {
+	// A hook whose correlation ledger write failed (disk full) still exports
+	// its decision, without the cross-call join IDs: otherwise every allow
+	// and block disappears from Grafana and Galileo exactly while the local
+	// audit is down (GAP-1536). Only an exact replay stays unexported.
+	if !req.SuppressCorrelationEmit || req.CorrelationUnavailable {
 		safeSection("observability_v8", func() {
 			a.emitHookDecisionObservabilityV8(ctx, req, resp, env, panicked)
 			if !panicked {
@@ -740,7 +754,7 @@ func (a *APIServer) finalizeAgentHook(
 	}
 	// Every verdict has its audit row, save the exact replay of a delivery
 	// whose row is already persisted: a hook whose correlation failed is
-	// not exported (no partial join), but it is audited.
+	// audited too.
 	if !req.SuppressCorrelationEmit || req.CorrelationUnavailable {
 		safeSection("audit", func() {
 			auditPersisted = a.logConnectorHookAuditEnvelope(ctx, env) == nil
@@ -972,6 +986,8 @@ func (a *APIServer) handleAgentHookSynthetic(ctx context.Context, connectorName 
 	var rawEventIDs []string
 	if !req.SuppressCorrelationEmit {
 		rawEventIDs = a.rememberHookRawEvents(req)
+	}
+	if hookLLMEventExportable(req) {
 		a.emitAgentHookLLMEvent(ctx, req, rawBody)
 	}
 
@@ -1032,7 +1048,7 @@ func (a *APIServer) handleAgentHookSynthetic(ctx context.Context, connectorName 
 	}
 	a.stampHookEnvelopeIdentity(ctx, connectorName, &env, req, resp)
 	enrichConnectorHookIdentitySpan(ctx, env.StepIdx, env.Enforced, env.RulePackDir)
-	if !req.SuppressCorrelationEmit {
+	if !req.SuppressCorrelationEmit || req.CorrelationUnavailable {
 		a.emitHookDecisionObservabilityV8(ctx, req, resp, env, panicked)
 	}
 	// As in finalizeAgentHook: only an exact replay goes without its row.
@@ -2039,7 +2055,8 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 		fallbackTool := agentHookTrustedActionTool(
 			req.ConnectorName, req.ToolName, runtime.GOOS,
 		)
-		if req.ConnectorName == "copilot" && req.HookSurface == connector.CopilotHookSurfaceVSCodeLocal {
+		if req.ConnectorName == "copilot" && (req.HookSurface == connector.CopilotHookSurfaceVSCodeLocal ||
+			connector.CopilotVSCodeLocalTool(req.ToolName)) {
 			fallbackTool = connector.CopilotVSCodeLocalActionTool(req.ToolName)
 		}
 		actionTool, resourceIdentity := trustedToolActionFromContext(
@@ -2149,7 +2166,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	// / RuleIDs), and the scan_finding events all join on the same
 	// evaluation_id.
 	resp.EvaluationID = evalCtx.EvaluationID
-	resp.RuleIDs = evalCtx.RuleIDs
+	resp.RuleIDs = hookResponseRuleIDs(evalCtx.RuleIDs, rawActionBeforeAssets, assetDecisions)
 	resp.RedactionEnabled = verdict.RedactionEnabled
 	resp.laneVerdict = verdict.laneVerdict
 	return resp
@@ -2315,6 +2332,7 @@ func (a *APIServer) agentHookMCPAssetDecision(ctx context.Context, req agentHook
 		return a.evaluateRuntimeMCPAssetPolicy(ctx, req.ConnectorName, req.HookEventName, probe)
 	}
 	probe := mcpProbeFromFields(payloadString(req.Payload, "mcp_server_name"), req.ToolName, toolInput)
+	probe.WorkspaceDir = req.CWD
 	return a.evaluateRuntimeMCPAssetPolicy(ctx, req.ConnectorName, req.HookEventName, probe)
 }
 
@@ -2373,6 +2391,9 @@ func decodeAgentHookToolInput(raw json.RawMessage) map[string]interface{} {
 // PreToolUse" — operators paging through toasts can attribute each
 // one to a specific framework without opening the audit log.
 func (a *APIServer) dispatchAgentHookNotification(req agentHookRequest, action, rawAction, severity, reason string, wouldBlock bool, evalCtx hookEvaluationContext, policy ...redaction.SinkPolicy) {
+	if action == "block" {
+		a.dispatchHookBlockWebhook(req.ConnectorName, req.ToolName, req.HookEventName, severity, reason, evalCtx.RuleIDs)
+	}
 	if a == nil || a.notifier == nil {
 		return
 	}
@@ -2590,6 +2611,7 @@ func agentHookResponseForProfile(profile connector.HookProfile, req agentHookReq
 		verdictAction = agentReviewAction
 	}
 	safeReason = agentVerdictReason(verdictAction, reason, safeReason, notificationSinkPolicy(policy))
+	safeReason = agentObservedReason(verdictAction, reason, safeReason, notificationSinkPolicy(policy))
 	additional := genericHookAdditionalContext(req.ConnectorName, req.HookEventName, mode, rawAction, severity, safeReason, wouldBlock)
 	if agent := confirmWithoutAskAgent(req.ConnectorName, rawAction, mode, req.HookEventName); action == "block" && agent != "" {
 		safeReason = agentConfirmUnavailableReason(agent, reason, agentDisplayReason(reason, notificationSinkPolicy(policy)), notificationSinkPolicy(policy))

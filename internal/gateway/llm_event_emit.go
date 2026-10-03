@@ -649,6 +649,7 @@ func (a *APIServer) emitCodexHookLLMEvent(ctx context.Context, req codexHookRequ
 		promptID := a.emitLLMPromptEventV8(ctx, meta, req.Prompt, rawPayload)
 		a.rememberHookPromptID(ctx, "codex", req.SessionID, req.TurnID, promptID)
 		a.rememberHookLLMSpanPrompt(meta, req.Prompt)
+		captureHookPrompt(ctx, meta)
 		a.rememberHookSessionState(ctx, meta)
 	case "SubagentStart":
 		prompt := firstString(req.Payload, "task", "prompt", "description")
@@ -757,6 +758,7 @@ func (a *APIServer) emitAgentHookLLMEvent(ctx context.Context, req agentHookRequ
 		promptID := a.emitLLMPromptEventV8(ctx, meta, prompt, rawPayload)
 		a.rememberHookPromptID(ctx, source, req.SessionID, req.TurnID, promptID)
 		a.rememberHookLLMSpanPrompt(meta, prompt)
+		captureHookPrompt(ctx, meta)
 		a.rememberHookSessionState(ctx, meta)
 	case isModelCompletionEvent(req.HookEventName), isStopCompletionEvent(req.HookEventName):
 		response := strings.TrimSpace(req.Content)
@@ -822,6 +824,12 @@ func (a *APIServer) emitClaudeCodeHookLLMEvent(ctx context.Context, req claudeCo
 	meta = a.inferAndEmitHookSpawnStart(ctx, meta)
 	meta = a.reconcileHookParent(meta)
 	meta = a.mergeHookSessionLifecycle(meta)
+	if strings.TrimSpace(meta.Model) == "" {
+		// After a gateway restart or on a resumed session the gateway no
+		// longer knows the session model (GAP-2511); the transcript does.
+		meta.Model = claudeCodeTranscriptModel(req.TranscriptPath)
+	}
+	meta.Model = claudeCodeSessionModel(meta.Model)
 	meta.TraceEventID = hookTraceEventID(ctx, meta)
 	meta = finalizeHookEventCorrelation(meta, req.Payload)
 	meta, recordLifecycle := a.prepareHookLifecycleTransition(meta)
@@ -846,6 +854,7 @@ func (a *APIServer) emitClaudeCodeHookLLMEvent(ctx context.Context, req claudeCo
 		promptID := a.emitLLMPromptEventV8(ctx, meta, prompt, rawPayload)
 		a.rememberHookPromptID(ctx, "claudecode", req.SessionID, "", promptID)
 		a.rememberHookLLMSpanPrompt(meta, prompt)
+		captureHookPrompt(ctx, meta)
 		a.rememberHookSessionState(ctx, meta)
 	case "MessageDisplay":
 		if strings.TrimSpace(req.Delta) == "" {
@@ -1772,6 +1781,11 @@ func (a *APIServer) mergeHookSessionLifecycle(meta llmEventMeta) llmEventMeta {
 	meta.SessionResumed = meta.SessionResumed || snapshot.meta.SessionResumed
 	meta.UserID = firstNonEmpty(meta.UserID, snapshot.meta.UserID)
 	meta.UserName = firstNonEmpty(meta.UserName, snapshot.meta.UserName)
+	// Claude Code reports the model only on SessionStart. The first turn
+	// used to consume it with that event's usage, so every later turn had
+	// no model and no chat span (GAP-2511). The session keeps it; an event
+	// that reports a model still wins.
+	meta.Model = firstNonEmpty(meta.Model, snapshot.meta.Model)
 	return meta
 }
 

@@ -28,7 +28,10 @@ func (r *EventRouter) streamScanCorrelation(sessionKey string) audit.ScanCorrela
 		AgentID:         env.AgentID,
 		AgentName:       env.AgentName,
 		AgentInstanceID: env.AgentInstanceID,
-		Connector:       env.Connector,
+		// The stream envelope names no connector; this sidecar serves one
+		// connector, so name it and let alerts --connector find the row
+		// (GAP-2295).
+		Connector: firstNonEmpty(env.Connector, r.connectorName()),
 	}
 }
 

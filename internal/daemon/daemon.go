@@ -67,9 +67,11 @@ const (
 	// childPIDRegistrationTimeout bounds the wait for a Windows child to
 	// publish its PID record. A first launch of a new binary on a busy host
 	// (antivirus scans it before it runs) took longer than 5 seconds, so an
-	// upgrade rolled back a healthy gateway. A child that exits ends the
-	// wait at once.
-	childPIDRegistrationTimeout = 60 * time.Second
+	// upgrade rolled back a healthy gateway. Right after an upgrade on a host
+	// running several per-user gateways it took over 60 s, three starts in a
+	// row (GAP-1556), so it matches the 240 s Windows readiness wait. A child
+	// that exits ends the wait at once. Only Windows children register.
+	childPIDRegistrationTimeout = 240 * time.Second
 	// legacyStartIdentityWindow is how far the native start second of a
 	// darwin process may be from the start time recorded just before
 	// cmd.Start, for a PID record written by an older release.
@@ -89,6 +91,20 @@ type Daemon struct {
 	pidFile string
 	logFile string
 	started pidInfo
+	// progress, when set, is called every startProgressInterval while Start
+	// waits for the child to register its PID (GAP-1858).
+	progress func(elapsed time.Duration, step string)
+}
+
+// startProgressInterval is how often Start reports a slow child PID
+// registration, the same 30 s as the CLI's readiness progress lines.
+var startProgressInterval = 30 * time.Second
+
+// SetStartProgress makes Start call report every 30 s while it waits for the
+// gateway child to register, so an interactive start or restart does not
+// look hung (GAP-1858). nil turns it off.
+func (d *Daemon) SetStartProgress(report func(elapsed time.Duration, step string)) {
+	d.progress = report
 }
 
 func New(dataDir string) *Daemon {
@@ -681,9 +697,15 @@ func (d *Daemon) waitForChildPIDRegistration(
 	defer deadline.Stop()
 	ticker := time.NewTicker(childPIDRegistrationPoll)
 	defer ticker.Stop()
+	waitStarted := time.Now()
+	nextReport := waitStarted.Add(startProgressInterval)
 
 	var lastErr error
 	for {
+		if d.progress != nil && !time.Now().Before(nextReport) {
+			nextReport = time.Now().Add(startProgressInterval)
+			d.progress(time.Since(waitStarted), "waiting for the gateway process to register")
+		}
 		info, err := d.readPIDInfo()
 		if err == nil {
 			switch {

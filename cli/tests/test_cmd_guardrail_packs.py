@@ -130,6 +130,19 @@ def test_connector_scope_leaves_peers_alone(env):
     assert gc.rule_pack_dir == str(root / "default")
 
 
+def test_bare_name_selects_installed_pack_over_cwd_folder(env, tmp_path, monkeypatch):
+    """GAP-1576: an unrelated ./vsg2 folder does not shadow the installed vsg2 pack."""
+    app, root, _custom = env
+    (root / "vsg2" / "rules").mkdir(parents=True)
+    workdir = tmp_path / "work"
+    (workdir / "vsg2").mkdir(parents=True)
+    monkeypatch.chdir(workdir)
+    result = _run(app, ["use-pack", "vsg2", "--json"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["path"] == str(root / "vsg2")
+    assert app.cfg.guardrail.rule_pack_dir == str(root / "vsg2")
+
+
 def test_unknown_connector_refused(env):
     app, _root, _custom = env
     result = _run(app, ["use-pack", "strict", "--connector", "claudecode"])

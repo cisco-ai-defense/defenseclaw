@@ -274,6 +274,24 @@ def test_profile_show_reads_compiler_owned_redaction_profile_catalog(
     assert payload["field_classes"]["content"] == "detect"
 
 
+def test_profile_show_unknown_name_lists_the_profiles(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # GAP-1928: "no compiled profile named X" named no valid profile.
+    monkeypatch.setattr(
+        cmd_setup_redaction,
+        "_effective",
+        lambda _app: {"redaction_profiles": [{"name": n} for n in ("none", "sensitive", "content", "strict")]},
+    )
+
+    result = CliRunner().invoke(redaction, ["profile", "show", "nope"], obj=_app(tmp_path))
+
+    assert result.exit_code == 1, result.output
+    assert "compiled" not in result.output
+    assert (
+        "Error: redaction profile 'nope' not found. Available: content, none, sensitive, strict. "
+        "Run `defenseclaw setup redaction profile list` for details."
+    ) in result.output
+
+
 def test_execute_mutations_binds_write_to_preview_and_verifies_plan(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -604,3 +622,23 @@ def test_json_mutation_requires_noninteractive_confirmation(tmp_path: Path) -> N
 
     assert result.exit_code == 2
     assert "--json mutations require --yes or --dry-run" in result.output
+
+
+def test_status_discloses_unredacted_judge_body_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # GAP-1693: judge_bodies.db sits outside every redaction profile, so
+    # status must say it keeps raw judge text and how to turn it off.
+    monkeypatch.setattr(cmd_setup_redaction, "_operator_status", lambda _app: _status(tmp_path))
+
+    text = CliRunner().invoke(redaction, ["status"], obj=_app(tmp_path), catch_exceptions=False)
+    assert text.exit_code == 0, text.output
+    assert "Local judge-body store (not covered by redaction profiles)" in text.output
+    assert "unredacted (it can quote secrets from prompts), for 90 days." in text.output
+    assert "set guardrail.retain_judge_bodies: false" in text.output
+
+    raw = CliRunner().invoke(redaction, ["status", "--json"], obj=_app(tmp_path), catch_exceptions=False)
+    assert json.loads(raw.output)["judge_bodies"] == {
+        "capture": True,
+        "path": str(tmp_path / "judge_bodies.db"),
+        "redacted": False,
+        "retention_days": 90,
+    }

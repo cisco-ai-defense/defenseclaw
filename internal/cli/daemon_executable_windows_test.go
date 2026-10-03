@@ -89,7 +89,7 @@ observability: {}
 	if startExit == 0 {
 		t.Fatalf("start LASTEXITCODE = 0, want nonzero on foreign collision; output:\n%s", startOutput)
 	}
-	if !strings.Contains(startOutput, "foreign process PID") || strings.Contains(startOutput, "STARTING") {
+	if !executableOutputHas(startOutput, "not by this account's gateway") || strings.Contains(startOutput, "STARTING") {
 		t.Fatalf("start output does not report terminal collision failure:\n%s", startOutput)
 	}
 	assertExecutableTestListenerOwner(t, port, foreignPID)
@@ -188,7 +188,7 @@ observability: {}
 	if changedRestartExit == 0 {
 		t.Fatalf("changed-config restart LASTEXITCODE = 0, want nonzero on foreign collision; output:\n%s", changedRestartOutput)
 	}
-	if !strings.Contains(changedRestartOutput, "foreign process PID") || strings.Contains(changedRestartOutput, "OK (PID") {
+	if !executableOutputHas(changedRestartOutput, "not by this account's gateway") || strings.Contains(changedRestartOutput, "OK (PID") {
 		t.Fatalf("changed-config restart was not a truthful terminal collision failure:\n%s", changedRestartOutput)
 	}
 	assertExecutableTestListenerOwner(t, foreignConfigPort, os.Getpid())
@@ -409,6 +409,14 @@ func buildGatewayExecutable(t *testing.T) string {
 		t.Fatalf("build gateway executable: %v\n%s", err, output)
 	}
 	return binary
+}
+
+// executableOutputHas reports whether out contains want, ignoring
+// whitespace: PowerShell wraps a native command's error text to the console
+// width, which can break a phrase across lines.
+func executableOutputHas(out, want string) bool {
+	squash := func(s string) string { return strings.Join(strings.Fields(s), "") }
+	return strings.Contains(squash(out), squash(want))
 }
 
 func runGatewayExecutablePowerShell(t *testing.T, binary, home, command string) (string, int) {

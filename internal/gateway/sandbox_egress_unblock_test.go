@@ -237,7 +237,7 @@ func TestSandboxUnblockLiftsADestinationBlock(t *testing.T) {
 	out, _ := resp["claude_code_output"].(map[string]interface{})
 	specific, _ := out["hookSpecificOutput"].(map[string]interface{})
 	if resp["action"] != "block" || specific["permissionDecision"] != "deny" ||
-		!strings.HasPrefix(resp["reason"].(string), "Blocked by DefenseClaw rule C2-WEBHOOK-SITE") {
+		!strings.HasPrefix(resp["reason"].(string), "DefenseClaw policy blocked this action (rule C2-WEBHOOK-SITE") {
 		t.Fatalf("before the unblock = %v", resp)
 	}
 	unblocks.set("dc-claude-app", "webhook.site")

@@ -63,6 +63,9 @@ if [[ -n "${SELF_TMP}" && -n "$(find "${SELF_TMP}" -mindepth 1 -maxdepth 1 \
 fi
 [[ -z "${SELF_TMP}" ]] || trap 'rm -rf "${SELF_TMP}"' EXIT
 readonly OPENCLAW_VERSION="2026.3.24"
+# The PATH the user's shell has. Installing uv adds BIN_DIR to this process's
+# PATH, so the PATH hint at the end checks this copy instead.
+readonly CALLER_PATH="${PATH}"
 readonly MACOS_SYSCTL_BIN="/usr/sbin/sysctl"
 # Real files in BIN_DIR. Connector hooks record these paths, so they never move.
 readonly MANAGED_BINARIES="defenseclaw-gateway defenseclaw-acp"
@@ -156,6 +159,9 @@ NO_OPENCLAW=false
 RUN_QUICKSTART=false
 QUICKSTART_MODE=""
 QUICKSTART_RC=0
+OPENCLAW_MISSING=false
+OPENCLAW_INSTALLED=false
+OPENCLAW_NEXT=""
 QUICKSTART_RERUN=""
 INSTALL_SANDBOX=false
 PASSTHROUGH=()
@@ -360,9 +366,13 @@ if [[ -n "${TARGET_VERSION}" && "${TARGET_VERSION}" != "${VERSION}" && "${ROLLBA
     run_release_installer "${TARGET_VERSION}" ${FORWARD[@]+"${FORWARD[@]}"}
 fi
 
+[[ "${ROLLBACK}" == true ]] || require_free_space
+
 # ── Lock and log ─────────────────────────────────────────────────────────────
 
-mkdir -p "${DEFENSECLAW_HOME}" "${DEFENSECLAW_HOME}/logs"
+LOCK_HINT="check the free space (df -h ${DEFENSECLAW_HOME%/*}) and that $(id -un) can write there; nothing was changed"
+mkdir -p "${DEFENSECLAW_HOME}" "${DEFENSECLAW_HOME}/logs" 2>/dev/null \
+    || die "Could not create ${DEFENSECLAW_HOME}/logs: ${LOCK_HINT}"
 chmod 700 "${DEFENSECLAW_HOME}" 2>/dev/null || true
 if ! mkdir "${LOCK_DIR}" 2>/dev/null; then
     holder="$(cat "${LOCK_DIR}/pid" 2>/dev/null || true)"
@@ -370,11 +380,16 @@ if ! mkdir "${LOCK_DIR}" 2>/dev/null; then
         die "Another DefenseClaw install is running (pid ${holder})"
     fi
     rm -rf "${LOCK_DIR}"
-    mkdir "${LOCK_DIR}" || die "Could not take the install lock at ${LOCK_DIR}"
+    mkdir "${LOCK_DIR}" 2>/dev/null || die "Could not create the install lock ${LOCK_DIR}: ${LOCK_HINT}"
 fi
-echo $$ > "${LOCK_DIR}/pid"
+if ! { echo $$ > "${LOCK_DIR}/pid"; } 2>/dev/null; then
+    rm -rf "${LOCK_DIR}"
+    die "Could not write the install lock ${LOCK_DIR}/pid: ${LOCK_HINT}"
+fi
 LOG="${DEFENSECLAW_HOME}/logs/install-$(date +%Y%m%dT%H%M%S).log"
-exec > >(tee -a "${LOG}") 2>&1
+# tee ignores Ctrl+C: it went down with the installer's process group, and the
+# cancel message then died on a broken pipe (exit 141, GAP-1901).
+exec > >(trap '' INT TERM; exec tee -a "${LOG}") 2>&1
 trap 'rm -rf "${LOCK_DIR}" ${SELF_TMP:+"${SELF_TMP}"}' EXIT
 trap 'printf "\n"; err "Cancelled."; exit 130' INT TERM
 
@@ -395,16 +410,23 @@ gateway_pid() {
 }
 
 installed_version() {
-    local info
+    # The gateway on PATH is the install that runs. A `make all` source install
+    # replaces it (and the CLI link) but leaves an older release venv behind, so
+    # that venv's version is only the fallback (GAP-2454).
+    local info version=""
+    if [[ -x "${BIN_DIR}/defenseclaw-gateway" ]]; then
+        version="$("${BIN_DIR}/defenseclaw-gateway" --version 2>/dev/null | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+    fi
+    if [[ -n "${version}" ]]; then
+        printf '%s' "${version}"
+        return
+    fi
     for info in "${VENV}"/lib/python*/site-packages/defenseclaw-*.dist-info; do
         [[ -d "${info}" ]] || continue
         info="${info##*/defenseclaw-}"
         printf '%s' "${info%.dist-info}"
         return
     done
-    if [[ -x "${BIN_DIR}/defenseclaw-gateway" ]]; then
-        "${BIN_DIR}/defenseclaw-gateway" --version 2>/dev/null | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true
-    fi
 }
 
 stop_gateway() {
@@ -448,18 +470,27 @@ recover_interrupted_run
 # ── Rollback-only mode ───────────────────────────────────────────────────────
 
 if [[ "${ROLLBACK}" == true ]]; then
-    step "Rolling back"
-    [[ -s "${PREVIOUS}/VERSION" ]] || die "No previous install to roll back to (${PREVIOUS} is missing)"
+    [[ -s "${PREVIOUS}/VERSION" ]] || { step "Rolling back"; die "No previous install to roll back to (${PREVIOUS} is missing)"; }
     back_to="$(cat "${PREVIOUS}/VERSION")"
     current="$(installed_version)"
-    ask_yes_no "Replace DefenseClaw ${current:-?} with the previous install (${back_to})?" \
-        || die "Rollback cancelled; nothing was changed"
+    # Run again after a rollback, this goes forward to the newer install.
+    if [[ -n "${current}" ]] && version_lt "${current}" "${back_to}"; then
+        step "Rolling forward to DefenseClaw ${back_to}"
+        question="Replace DefenseClaw ${current} with DefenseClaw ${back_to} (the install you rolled back from)?"
+    else
+        step "Rolling back to DefenseClaw ${back_to}"
+        question="Replace DefenseClaw ${current:-?} with the previous install (${back_to})?"
+    fi
+    ask_yes_no "${question}" || die "Rollback cancelled; nothing was changed"
     was_running=false
     [[ -n "$(gateway_pid || true)" ]] && was_running=true
     # The swap overwrites previous/GATEWAY_WAS_RUNNING with this install's state.
     restart="${was_running}"
     [[ "$(cat "${PREVIOUS}/GATEWAY_WAS_RUNNING" 2>/dev/null)" == true ]] && restart=true
     stop_gateway "${BIN_DIR}/defenseclaw-gateway" || die "The gateway did not stop; nothing was changed"
+    if [[ -n "${current}" ]] && version_lt "${back_to}" 1.0.0 && ! version_lt "${current}" 1.0.0; then
+        remove_connector_registrations_for_legacy
+    fi
     swapped=0
     swap_with_previous || swapped=$?
     if [[ "${swapped}" -ne 0 ]]; then
@@ -467,14 +498,27 @@ if [[ "${ROLLBACK}" == true ]]; then
         [[ "${swapped}" -eq 1 && "${was_running}" == true ]] && { start_gateway || true; }
         die "Rollback failed part-way; see ${LOG}"
     fi
+    rollback_rc=0
     if [[ "${restart}" == true ]]; then
-        start_gateway && restart_openclaw \
-            || warn_not_started
+        start_gateway || rollback_rc=$?
+        case "${rollback_rc}" in
+            0) restart_openclaw ;;
+            3) warn "A connector needs attention before it is guarded again (see the gateway output above)"; restart_openclaw ;;
+            *) rollback_rc=1 ;;
+        esac
+    fi
+    if [[ ${rollback_rc} -eq 1 ]]; then
+        # The swap is done, but the hooks are unguarded: say so, and exit 1.
+        warn "Now running DefenseClaw ${back_to}, but its gateway is not up, so agent hooks are not guarded until it is"
+        # A start that said why it failed already printed the command that fixes it.
+        [[ -n "${START_EXPLAINED:-}" ]] || info "Start it with: defenseclaw-gateway start (its log: ${DEFENSECLAW_HOME}/gateway.log)"
+    else
+        ok "Now running DefenseClaw ${back_to}."
     fi
     if version_lt "${back_to}" 1.0.0; then
-        ok "Now running DefenseClaw ${back_to}. To return to ${current:-1.x}, run: bash ${PREVIOUS}/installer/install.sh --rollback"
+        info "To return to ${current:-1.x}, run: bash ${PREVIOUS}/installer/install.sh --rollback"
     else
-        ok "Now running DefenseClaw ${back_to}. Run 'defenseclaw rollback' again to return to ${current:-the other install}."
+        info "Run 'defenseclaw rollback' again to return to ${current:-the other install}."
     fi
     # The swap keeps the install just left, with its data, in previous/.
     if [[ -z "${current}" ]] || version_lt "${back_to}" "${current}"; then
@@ -482,7 +526,7 @@ if [[ "${ROLLBACK}" == true ]]; then
     else
         info "Data written while ${current} ran is kept in ${PREVIOUS} and comes back if you roll back again."
     fi
-    exit 0
+    exit "${rollback_rc}"
 fi
 
 # ── Stage: nothing live changes until the swap ───────────────────────────────
@@ -502,22 +546,47 @@ export UV_NO_CONFIG=1
 # dir, so `uninstall --all` leaves nothing of them in ~/.cache or ~/.local.
 export UV_CACHE_DIR="${UV_CACHE_DIR:-${DEFENSECLAW_HOME}/.uv/cache}"
 export UV_PYTHON_INSTALL_DIR="${UV_PYTHON_INSTALL_DIR:-${DEFENSECLAW_HOME}/.uv/python}"
+UV_DIR_NEW=""
+UV_INSTALLED=""
+[[ -e "${DEFENSECLAW_HOME}/.uv" ]] || UV_DIR_NEW=1
+# A uv already in BIN_DIR belongs to the user (or an earlier run) even when
+# BIN_DIR is not on this shell's PATH yet: use it, never overwrite it.
+if ! has uv && [[ -x "${BIN_DIR}/uv" && ! -d "${BIN_DIR}/uv" ]]; then
+    export PATH="${BIN_DIR}:${PATH}"
+fi
 if ! has uv; then
     info "Installing uv ${UV_VERSION} (Python package manager)"
     install_uv || die "Could not install uv; install it from https://docs.astral.sh/uv/ and retry"
+    UV_INSTALLED=1
     export PATH="${BIN_DIR}:${PATH}"
     has uv || die "uv was installed but is not on PATH"
 fi
 
 rm -rf "${STAGING}"
 mkdir -p "${STAGING}/bin"
+# Ctrl+C before the swap: drop what this run staged and fetched (GAP-1901).
+trap 'printf "\n"; rm -rf "${STAGING}"; [[ -z "${UV_DIR_NEW}" ]] || rm -rf "${DEFENSECLAW_HOME}/.uv"; [[ -z "${UV_INSTALLED}" ]] || rm -f "${BIN_DIR}/uv" "${BIN_DIR}/uvx" "${BIN_DIR}/defenseclaw-uv.sha256"; err "Cancelled; nothing was changed"; exit 130' INT TERM
 ARCHIVE="defenseclaw-${VERSION}-${OS}-${ARCH}.tar.gz"
 WHEEL="defenseclaw-${VERSION}-py3-none-any.whl"
 REQUIREMENTS="defenseclaw-${VERSION}-requirements.txt"
 APP_ZIP="DefenseClawMac-${VERSION}-macos-arm64.zip"
 
+# A copy or download that fails removes what it staged. When the filesystem
+# filled up meanwhile (other writers, a free-space figure the preflight could
+# not read), say so instead of "Could not get" (GAP-1307).
+fetch_failed() {
+    local asset="$1" free_kb need_kb="${space_needed_kb:-$((400 * 1024))}"
+    rm -rf "${STAGING}"
+    free_kb="$(df -Pk "${DEFENSECLAW_HOME}" 2>/dev/null | awk 'NR==2{print $4}')"
+    if [[ "${free_kb}" =~ ^[0-9]+$ && "${free_kb}" -lt "${need_kb}" ]]; then
+        err "Ran out of disk space next to ${DEFENSECLAW_HOME} while staging ${asset}: the install needs about $((need_kb / 1024)) MB and $((free_kb / 1024)) MB is free"
+        die "Free at least $(((need_kb - free_kb + 1023) / 1024)) MB on that filesystem (df -h ${DEFENSECLAW_HOME}), then rerun; nothing was changed"
+    fi
+    die "Could not get ${asset} for ${VERSION}; nothing was changed"
+}
+
 info "Downloading and verifying release assets"
-fetch checksums.txt "${STAGING}/checksums.txt" || die "Could not get checksums.txt for ${VERSION}"
+fetch checksums.txt "${STAGING}/checksums.txt" || fetch_failed checksums.txt
 checksum_ok() {
     local file="$1" name expected
     name="${2:-$(basename "${file}")}"
@@ -547,11 +616,11 @@ elif [[ -z "${LOCAL_DIR}" ]]; then
     info "cosign 2.0 or later is not installed; downloads are checked against checksums.txt only"
 fi
 for asset in "${ARCHIVE}" "${WHEEL}" "${REQUIREMENTS}"; do
-    fetch "${asset}" "${STAGING}/${asset}" || die "Could not get ${asset} for ${VERSION}"
+    fetch "${asset}" "${STAGING}/${asset}" || fetch_failed "${asset}"
     verify "${STAGING}/${asset}"
 done
 if [[ -n "${APP_PATH}" ]]; then
-    fetch "${APP_ZIP}" "${STAGING}/${APP_ZIP}" || die "Could not get ${APP_ZIP} for ${VERSION}"
+    fetch "${APP_ZIP}" "${STAGING}/${APP_ZIP}" || fetch_failed "${APP_ZIP}"
     verify "${STAGING}/${APP_ZIP}"
 fi
 ok "Assets match checksums.txt"
@@ -569,7 +638,7 @@ done
 "${STAGING}/bin/defenseclaw-gateway" --version 2>/dev/null | grep -qF "${VERSION}" \
     || die "The downloaded gateway does not report version ${VERSION}"
 
-info "Building the Python environment"
+info "Building the Python environment (a first install can take several minutes)"
 make_venv() {
     local venv="$1"
     rm -rf "${venv}"
@@ -582,7 +651,15 @@ make_venv() {
     uv pip install --quiet --compile-bytecode --python "${venv}/bin/python" --require-hashes --no-deps -r "${STAGING}/${REQUIREMENTS}" \
         && uv pip install --quiet --compile-bytecode --python "${venv}/bin/python" --no-deps "${STAGING}/${WHEEL}"
 }
-make_venv "${STAGING}/venv" || die "Could not install the DefenseClaw ${VERSION} Python package; nothing was changed"
+if ! make_venv "${STAGING}/venv"; then
+    # Leave nothing of a failed build behind, and name what stays (GAP-1438).
+    rm -rf "${STAGING}"
+    drop_new_uv
+    if [[ -z "${UV_DIR_NEW}" && -d "${DEFENSECLAW_HOME}/.uv" ]]; then
+        die "Could not install the DefenseClaw ${VERSION} Python package. Nothing else was changed, but uv's download cache ${DEFENSECLAW_HOME}/.uv ($(du -sm "${DEFENSECLAW_HOME}/.uv" 2>/dev/null | awk '{print $1}') MB) is kept; delete it to free that space"
+    fi
+    die "Could not install the DefenseClaw ${VERSION} Python package; nothing was changed"
+fi
 "${STAGING}/venv/bin/defenseclaw" --version 2>/dev/null | grep -qF "${VERSION}" \
     || die "The staged CLI does not start; nothing was changed"
 
@@ -605,6 +682,11 @@ ok "DefenseClaw ${VERSION} is staged and checked"
 if [[ -n "${PREV_VERSION}" && "${PREV_VERSION}" == "${VERSION}" ]]; then
     ask_yes_no "Reinstall DefenseClaw ${VERSION}?" || die "Cancelled; nothing was changed"
 elif [[ -n "${PREV_VERSION}" ]]; then
+    if version_lt "${PREV_VERSION}" 1.0.0 && [[ -f "${DEFENSECLAW_HOME}/audit.db" ]]; then
+        # Audit migration 33 (privacy cutover) empties the pre-1.0 history.
+        warn "DefenseClaw 1.0 starts a new audit history: the audit events, scan results and findings ${PREV_VERSION} recorded (${DEFENSECLAW_HOME}/audit.db, $(du -sh "${DEFENSECLAW_HOME}/audit.db" 2>/dev/null | awk '{print $1}')) are deleted when DefenseClaw ${VERSION} first opens its audit database"
+        info "A copy is kept in ${PREVIOUS}/data/audit.db; 'defenseclaw rollback' brings it back, and later upgrades keep it in ${DEFENSECLAW_HOME}/backups"
+    fi
     ask_yes_no "Upgrade DefenseClaw ${PREV_VERSION} → ${VERSION}?" || die "Cancelled; nothing was changed"
 fi
 if [[ -z "${PREV_VERSION}" ]] && [[ "${YES}" != true ]] && [[ -z "${CONNECTOR}" ]]; then
@@ -612,6 +694,7 @@ if [[ -z "${PREV_VERSION}" ]] && [[ "${YES}" != true ]] && [[ -z "${CONNECTOR}" 
 fi
 
 WAS_RUNNING=false
+RESTORED_NOTE="Your previous install is back."
 [[ -n "$(gateway_pid || true)" ]] && WAS_RUNNING=true
 if [[ "${WAS_RUNNING}" == true ]]; then
     info "Stopping the gateway"
@@ -625,12 +708,18 @@ else
 fi
 trap 'warn "Interrupted; finishing or undoing the swap before exiting"' INT TERM
 trap '' HUP PIPE
-snapshot || { undo_snapshot; restart_old; die "Could not save the current install; nothing was changed"; }
+if ! snapshot; then
+    undo_snapshot
+    restart_old
+    rm -rf "${STAGING}"
+    drop_new_uv
+    die "Could not save the current install; nothing was changed"
+fi
 
 if ! swap_in; then
     err "Installing ${VERSION} failed; restoring ${PREV_VERSION:-the previous state}"
     restore_snapshot
-    die "DefenseClaw ${VERSION} was not installed. Your previous install is back. Log: ${LOG}"
+    die "DefenseClaw ${VERSION} was not installed. ${RESTORED_NOTE} Log: ${LOG}"
 fi
 START_RC=0
 if [[ "${WAS_RUNNING}" == true && ! -f "${DEFENSECLAW_HOME}/config.yaml" && -z "${DEFENSECLAW_CONFIG:-}" ]]; then
@@ -647,7 +736,7 @@ if [[ "${WAS_RUNNING}" == true ]]; then
         err "The ${VERSION} gateway did not become healthy; restoring ${PREV_VERSION:-the previous state}"
         stop_gateway "${BIN_DIR}/defenseclaw-gateway" || true
         restore_snapshot
-        die "DefenseClaw ${VERSION} was not installed. Your previous install is back. Log: ${LOG}"
+        die "DefenseClaw ${VERSION} was not installed. ${RESTORED_NOTE} Log: ${LOG}"
     fi
 fi
 finish_swap
@@ -660,6 +749,23 @@ fi
 if [[ "${WAS_RUNNING}" == true ]]; then
     restart_openclaw
 fi
+
+# True when the config sets guardrail.enabled to false, as 'uninstall' and
+# 'setup guardrail --disable' write it (a direct child of the top-level block).
+guardrail_off() {
+    local config="${DEFENSECLAW_CONFIG:-${DEFENSECLAW_HOME}/config.yaml}"
+    [[ -f "${config}" ]] || return 1
+    awk '
+        /^guardrail:[ \t]*$/ { block = 1; indent = 0; next }
+        block && /^[^ \t#]/ { block = 0 }
+        block && /^[ \t]+[^ \t#]/ {
+            match($0, /^[ \t]+/)
+            if (!indent) indent = RLENGTH
+            if (RLENGTH == indent && $0 ~ /^[ \t]+enabled:[ \t]*false[ \t]*(#.*)?\r?$/) off = 1
+        }
+        END { exit !off }
+    ' "${config}"
+}
 
 if [[ -z "${PREV_VERSION}" ]]; then
     first_install_extras
@@ -677,8 +783,37 @@ ensure_path_hint
 printf "\n${BOLD}${GREEN}  DefenseClaw ${VERSION} is installed.${NC}\n"
 if [[ -n "${PREV_VERSION}" && "${PREV_VERSION}" != "${VERSION}" ]]; then
     printf "  Upgraded from ${PREV_VERSION}. Undo with: ${CYAN}defenseclaw rollback${NC}\n"
+    if version_lt "${PREV_VERSION}" 1.0.0 && [[ -f "${PREVIOUS}/data/audit.db" ]]; then
+        printf "  The audit history ${PREV_VERSION} recorded is not carried over to 1.0; a copy is in ${PREVIOUS}/data/audit.db\n"
+    fi
     if pgrep -f "${VENV}/bin/defenseclaw" >/dev/null 2>&1; then
         warn "Restart the DefenseClaw TUI and any other open DefenseClaw commands; they still run ${PREV_VERSION}"
+    fi
+fi
+if [[ -n "${PREV_VERSION}" && -z "$(gateway_pid || true)" ]] \
+    && [[ -f "${DEFENSECLAW_HOME}/config.yaml" || -n "${DEFENSECLAW_CONFIG:-}" ]]; then
+    # GAP-1496: it was not running before the upgrade, so it was not started.
+    if guardrail_off; then
+        # GAP-2481: 'uninstall --binaries' turned the guardrail off and tore the
+        # connector hooks down; a gateway start alone does not set them up again.
+        warn "Protection is off in the kept config (guardrail.enabled = false), so agent hooks are not guarded"
+        printf "  Turn it back on with: ${CYAN}defenseclaw setup guardrail${NC}\n"
+    else
+        warn "The gateway is not running, so agent hooks are not guarded until it is"
+        printf "  Start it with: ${CYAN}defenseclaw-gateway start${NC}\n"
+    fi
+fi
+if [[ -n "${PREV_VERSION}" && "${RUN_QUICKSTART}" != true && ! -f "${DEFENSECLAW_HOME}/config.yaml" && -z "${DEFENSECLAW_CONFIG:-}" ]]; then
+    # An earlier install that was never initialized: say how to start, as a
+    # fresh install does, with the connector picked back then.
+    NEXT_CONNECTOR="${CONNECTOR}"
+    if [[ -z "${NEXT_CONNECTOR}" && -f "${DEFENSECLAW_HOME}/picked_connector" ]]; then
+        NEXT_CONNECTOR="$(head -n 1 "${DEFENSECLAW_HOME}/picked_connector" | tr -cd 'a-z0-9_-')"
+    fi
+    if [[ -n "${NEXT_CONNECTOR}" && "${NEXT_CONNECTOR}" != none ]]; then
+        printf "  DefenseClaw is not set up yet. Next: ${CYAN}defenseclaw init --connector %s${NC}\n" "${NEXT_CONNECTOR}"
+    else
+        printf "  DefenseClaw is not set up yet. Next: ${CYAN}defenseclaw init${NC}\n"
     fi
 fi
 if [[ -n "${APP_RELAUNCH:-}" ]]; then
@@ -686,9 +821,24 @@ if [[ -n "${APP_RELAUNCH:-}" ]]; then
 fi
 printf "\n"
 if [[ -n "${QUICKSTART_RERUN}" ]]; then
-    err "Quickstart failed (exit ${QUICKSTART_RC}): DefenseClaw ${VERSION} is installed, but ${CONNECTOR} is not set up yet"
-    printf "  Fix what quickstart reported above ('defenseclaw doctor' helps), then run:\n    ${CYAN}%s${NC}\n\n" "${QUICKSTART_RERUN}"
+    if [[ "${CONNECTOR}" == hermes ]] && ! PATH="${BIN_DIR}:${PATH}" has hermes; then
+        # GAP-2383: the agent itself is missing, so say how to get it.
+        err "Quickstart failed (exit ${QUICKSTART_RC}): DefenseClaw ${VERSION} is installed, but Hermes is not installed yet"
+        printf "  Install Hermes (https://github.com/NousResearch/hermes-agent), then run:\n    ${CYAN}%s${NC}\n\n" "${QUICKSTART_RERUN}"
+    else
+        err "Quickstart failed (exit ${QUICKSTART_RC}): DefenseClaw ${VERSION} is installed, but ${CONNECTOR} is not set up yet"
+        printf "  Fix what quickstart reported above ('defenseclaw doctor' helps), then run:\n    ${CYAN}%s${NC}\n\n" "${QUICKSTART_RERUN}"
+    fi
     exit 4
+fi
+if [[ "${OPENCLAW_MISSING}" == true ]]; then
+    # GAP-1523: OpenClaw is the connector asked for and is not installed.
+    warn "OpenClaw is not installed, so it is not guarded yet. Install it as shown above, then run: ${OPENCLAW_NEXT:-defenseclaw setup openclaw}"
+    exit 3
+fi
+if [[ "${OPENCLAW_INSTALLED}" == true ]]; then
+    # A new OpenClaw has no model or gateway yet (GAP-1523).
+    printf "  Next: set up OpenClaw itself with: ${CYAN}openclaw onboard${NC}\n\n"
 fi
 exit ${START_RC}
 
@@ -715,6 +865,8 @@ install_uv() {
         linux/arm64) target=aarch64-unknown-linux-musl ;;
         *) return 1 ;;
     esac
+    # Never replace a uv or uvx this installer did not just download.
+    [[ -e "${BIN_DIR}/uv" || -e "${BIN_DIR}/uvx" ]] && return 1
     asset="uv-${target}.tar.gz"
     tmp="$(mktemp -d)" || return 1
     if curl -fsSL --retry 3 --proto '=https' --tlsv1.2 -o "${tmp}/${asset}" \
@@ -735,6 +887,13 @@ install_uv() {
     return 1
 }
 
+# A failed install removes what it added for uv: the uv and uvx it
+# downloaded, and uv's cache and Python when this run created them (GAP-1438).
+drop_new_uv() {
+    [[ -z "${UV_DIR_NEW}" ]] || rm -rf "${DEFENSECLAW_HOME}/.uv"
+    [[ -z "${UV_INSTALLED}" ]] || rm -f "${BIN_DIR}/uv" "${BIN_DIR}/uvx" "${BIN_DIR}/defenseclaw-uv.sha256"
+}
+
 is_machinery() {
     local name="$1" pattern
     for pattern in ${NOT_DATA}; do
@@ -753,6 +912,51 @@ data_entries() {
         [[ -S "${path}" || -p "${path}" ]] && continue
         printf '%s\n' "${name}"
     done
+}
+
+# require_free_space refuses before anything is written when the disk cannot
+# hold the install: uv's cache, the Python it fetches and the new environment
+# (about 1100 MB on a first install, down to 400 MB once the cache holds the
+# packages) plus, over an existing install, the rollback copy of the data that
+# the swap saves. Runs before the lock and before the gateway is stopped
+# (GAP-1249, GAP-1527, GAP-1538).
+require_free_space() {
+    local cache="${UV_CACHE_DIR:-${DEFENSECLAW_HOME}/.uv/cache}" dir="${DEFENSECLAW_HOME}"
+    local free_kb need_kb copy_kb=0 size name biggest="" biggest_kb=0 cache_kb=0
+    # An empty or partly filled cache saves only what it holds (GAP-1438).
+    if [[ -d "${cache}" ]]; then
+        cache_kb="$(du -sk "${cache}" 2>/dev/null | awk '{print $1}')"
+    fi
+    [[ "${cache_kb}" =~ ^[0-9]+$ ]] || cache_kb=0
+    cache_kb=$((cache_kb / 1024 * 1024))
+    [[ "${cache_kb}" -le $((700 * 1024)) ]] || cache_kb=$((700 * 1024))
+    space_needed_kb=$((1100 * 1024 - cache_kb))
+    while [[ ! -d "${dir}" && "${dir}" == */* ]]; do dir="${dir%/*}"; done
+    free_kb="$(df -Pk "${dir:-/}" 2>/dev/null | awk 'NR==2{print $4}')"
+    [[ "${free_kb}" =~ ^[0-9]+$ ]] || return 0
+    # A .staging left by an interrupted run is replaced, so its space counts as free.
+    if [[ -d "${STAGING}" ]]; then
+        size="$(du -sk "${STAGING}" 2>/dev/null | awk '{print $1}')"
+        free_kb=$((free_kb + ${size:-0}))
+    fi
+    if [[ -d "${VENV}" ]]; then
+        while IFS= read -r name; do
+            size="$(du -sk "${DEFENSECLAW_HOME}/${name}" 2>/dev/null | awk '{print $1}')"
+            size="${size:-0}"
+            copy_kb=$((copy_kb + size))
+            if [[ "${size}" -gt "${biggest_kb}" ]]; then biggest="${name}" biggest_kb="${size}"; fi
+        done < <(data_entries)
+        copy_kb=$((copy_kb + 102400))
+    fi
+    need_kb=$((space_needed_kb + copy_kb))
+    [[ "${free_kb}" -lt "${need_kb}" ]] || return 0
+    if [[ ${copy_kb} -gt 0 ]]; then
+        err "Not enough free disk space next to ${DEFENSECLAW_HOME}: the upgrade needs about $(((need_kb + 1023) / 1024)) MB ($((space_needed_kb / 1024)) MB for the new version and $(((copy_kb + 1023) / 1024)) MB for a rollback copy of your data) and $((free_kb / 1024)) MB is free"
+        [[ -z "${biggest}" ]] || err "The largest item is ${DEFENSECLAW_HOME}/${biggest} ($(((biggest_kb + 1023) / 1024)) MB)"
+    else
+        err "Not enough free disk space next to ${DEFENSECLAW_HOME}: the install needs about $((need_kb / 1024)) MB and $((free_kb / 1024)) MB is free"
+    fi
+    die "Free at least $(((need_kb - free_kb + 1023) / 1024)) MB on that filesystem (df -h ${dir}), then rerun; nothing was changed"
 }
 
 snapshot() {
@@ -916,6 +1120,11 @@ swap_in() {
         # contract lock and doctor can check compatibility. Best effort.
         info "Refreshing agent discovery"
         "${VENV}/bin/defenseclaw" agent discover --refresh --no-emit-otel >/dev/null 2>&1 || true
+        # The new defenseclaw-acp has a new digest: re-pin it in configured
+        # editor entries, which would otherwise fail closed. Best effort.
+        if [[ -f "${SNAP}/bin/defenseclaw-acp" ]]; then
+            "${VENV}/bin/defenseclaw" acp refresh --from-sha256 "$(sha256_of "${SNAP}/bin/defenseclaw-acp")" || true
+        fi
     fi
 }
 
@@ -981,25 +1190,58 @@ restore_snapshot() {
 
 restart_old() {
     if [[ "${WAS_RUNNING}" == true ]]; then
-        start_gateway >/dev/null 2>&1 || warn "The gateway did not restart; run 'defenseclaw-gateway start'"
+        start_gateway >/dev/null 2>&1 && return 0
+        # Say plainly that the gateway that ran before is down now (GAP-1349).
+        RESTORED_NOTE="Your previous install is back, but its gateway is not running (see above)."
+        warn "The gateway that was running before did not start again, so agent hooks are not guarded until it runs (connectors in fail-closed mode block tool calls)"
+        info "Start it with: defenseclaw-gateway start (log: ${DEFENSECLAW_HOME}/gateway.log). On a large audit database its first start can take several minutes"
     fi
 }
 
+# A 1.0.0 gateway cannot start on a WAL-mode audit.db whose 5-second startup
+# check times out (a large store): SQLite drops and recreates audit.db-wal,
+# and 1.0.0 refuses the new file (fixed in 1.0.1). In rollback-journal mode
+# it starts, and switches the database back to WAL itself (GAP-1988).
+AUDIT_JOURNAL_PY="import sqlite3,sys;c=sqlite3.connect(sys.argv[1],timeout=10);c.execute('pragma journal_mode').fetchone()[0]=='wal' and c.execute('pragma journal_mode=delete').fetchone();c.close()"
+
+reset_audit_journal_mode() {
+    local db="${DEFENSECLAW_HOME}/audit.db"
+    [[ -f "${db}" && -x "${VENV}/bin/python" ]] || return 0
+    "${VENV}/bin/python" -c "${AUDIT_JOURNAL_PY}" "${db}" >/dev/null 2>&1 || true
+}
+
 start_gateway() {
-    local log="${DEFENSECLAW_HOME}/gateway.log" from=0 rc=0 waited=0 up=0
+    local log="${DEFENSECLAW_HOME}/gateway.log" from=0 rc=0 deadline up=0 version delegate=""
     info "Starting the gateway"
+    # A 0.8.x start gives up after 60 seconds and stops the gateway it
+    # launched, so one restored on a large audit database is stopped before it
+    # is ready or can log why it would stop. Its upgrade-controller mode only
+    # launches the gateway; the loop below then waits for it.
+    version="$("${BIN_DIR}/defenseclaw-gateway" --version 2>/dev/null | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+    if [[ -n "${version}" ]] && version_lt "${version}" 1.0.0; then delegate=1; fi
+    if [[ -n "${version}" ]] && version_lt "${version}" 1.0.1; then reset_audit_journal_mode; fi
     [[ -f "${log}" ]] && from="$(wc -c < "${log}" | tr -d ' ')"
-    PATH="${BIN_DIR}:${PATH}" "${BIN_DIR}/defenseclaw-gateway" start || rc=$?
-    [[ ${rc} -eq 0 || ${rc} -eq 3 ]] && return "${rc}"
-    explain_start_failure "${log}" "${from}"
-    # A readiness timeout leaves the gateway running. A restored older release
-    # checks a large audit database before it logs anything, and only then
-    # says why it stops, so wait for it before falling back to generic advice.
-    [[ -z "${START_EXPLAINED:-}" && -n "$(gateway_pid || true)" ]] || return "${rc}"
-    info "The gateway is still starting (a large audit database takes a while); waiting up to 3 minutes"
-    while [[ -z "${START_EXPLAINED:-}" && ${waited} -lt 180 && -n "$(gateway_pid || true)" ]]; do
+    if [[ -n "${delegate}" ]]; then
+        PATH="${BIN_DIR}:${PATH}" DEFENSECLAW_UPGRADE_FRESH_PROCESS=1 "${BIN_DIR}/defenseclaw-gateway" start || rc=$?
+    else
+        PATH="${BIN_DIR}:${PATH}" "${BIN_DIR}/defenseclaw-gateway" start || rc=$?
+    fi
+    if [[ -n "${delegate}" && ${rc} -eq 0 ]]; then
+        # Launched, not yet ready: it is up only once the loop below says so.
+        rc=1
+        info "Waiting up to 3 minutes for the gateway to finish starting (a large audit database takes a while)"
+    else
+        [[ ${rc} -eq 0 || ${rc} -eq 3 ]] && return "${rc}"
+        explain_start_failure "${log}" "${from}"
+        # A gateway still running after its start gave up may yet log why it
+        # stops, so wait for it before falling back to generic advice.
+        [[ -z "${START_EXPLAINED:-}" && -n "$(gateway_pid || true)" ]] || return "${rc}"
+        info "The gateway is still starting (a large audit database takes a while); waiting up to 3 minutes"
+    fi
+    # Wall-clock: a status probe of a gateway that does not answer takes seconds.
+    deadline=$((SECONDS + 180))
+    while [[ -z "${START_EXPLAINED:-}" && ${SECONDS} -lt ${deadline} && -n "$(gateway_pid || true)" ]]; do
         sleep 3
-        waited=$((waited + 3))
         explain_start_failure "${log}" "${from}"
         if [[ -z "${START_EXPLAINED:-}" ]] && "${BIN_DIR}/defenseclaw-gateway" status >/dev/null 2>&1; then
             # Answering twice in a row, without a refusal in between: it is up.
@@ -1009,6 +1251,11 @@ start_gateway() {
             up=0
         fi
     done
+    [[ -n "${START_EXPLAINED:-}" ]] || explain_start_failure "${log}" "${from}"
+    if [[ -z "${START_EXPLAINED:-}" && -n "$(gateway_pid || true)" ]]; then
+        warn "The gateway is still starting after 3 minutes; check it with: defenseclaw-gateway status"
+        START_EXPLAINED=1
+    fi
     return "${rc}"
 }
 
@@ -1034,7 +1281,9 @@ explain_start_failure() {
         after="$(printf '%s' "${reason}" | sed -nE 's/.*current version="([^"]*)".*/\1/p')"
         warn "The gateway refused to start: ${conn:-a connector}'s agent changed (${before:-?} -> ${after:-?}) after this DefenseClaw recorded its hook contract lock"
         if [[ "${reason}" == *DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1* ]]; then
-            info "To accept the new agent version and refresh the lock, start it once with: DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 defenseclaw-gateway start"
+            # restart, not start: a gateway that refused its connector can
+            # still be running, and start then only says it is (GAP-0012).
+            info "To accept the new agent version and refresh the lock, restart it once with: DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 defenseclaw-gateway restart"
         else
             info "Refresh the lock with: defenseclaw setup ${conn:-<connector>}"
         fi
@@ -1074,14 +1323,23 @@ finish_swap() {
     ok "Installed DefenseClaw ${VERSION}"
 }
 
-# A rollback parks the data written since the upgrade in previous/. Keep it
-# when a later upgrade reuses the slot: it can hold audit history.
+# A rollback parks the data written since the upgrade in previous/, and a 0.x
+# install kept there holds the only copy of the audit history 1.0 does not
+# carry over (GAP-1360). Keep either when a later upgrade reuses the slot.
 keep_rolled_back_data() {
-    [[ -f "${PREVIOUS}/ROLLED_BACK" && -d "${PREVIOUS}/data" ]] || return 0
-    local kept
-    kept="${DEFENSECLAW_HOME}/backups/rolled-back-$(cat "${PREVIOUS}/VERSION" 2>/dev/null || echo unknown)-$(date +%Y%m%dT%H%M%S)"
+    [[ -d "${PREVIOUS}/data" ]] || return 0
+    local kept version label what
+    version="$(cat "${PREVIOUS}/VERSION" 2>/dev/null || echo unknown)"
+    if [[ -f "${PREVIOUS}/ROLLED_BACK" ]]; then
+        label=rolled-back what="the data from before the last rollback"
+    elif is_version "${version}" && version_lt "${version}" 1.0.0 && [[ -f "${PREVIOUS}/data/audit.db" ]]; then
+        label=audit-history what="the audit history DefenseClaw ${version} recorded"
+    else
+        return 0
+    fi
+    kept="${DEFENSECLAW_HOME}/backups/${label}-${version}-$(date +%Y%m%dT%H%M%S)"
     mkdir -p "${DEFENSECLAW_HOME}/backups" && mv "${PREVIOUS}/data" "${kept}" || return 1
-    info "Kept the data from before the last rollback in ${kept} ($(du -sh "${kept}" 2>/dev/null | awk '{print $1}'))"
+    info "Kept ${what} in ${kept} ($(du -sh "${kept}" 2>/dev/null | awk '{print $1}'))"
     info "It is not used again; once you no longer need its audit history, remove it with: rm -rf '${kept}'"
 }
 
@@ -1202,12 +1460,64 @@ swap_with_previous() {
     mv "${hold}" "${PREVIOUS}"
 }
 
+# A 0.x release does not know the agent-side registrations 1.0 writes (hook
+# entries with --event, the OpenCode plugin, the Hermes rendering), so its
+# gateway adds its own next to them and runs every hook twice (GAP-1521).
+# Remove them with this install's own teardown before the swap; the restored
+# gateway registers its own when it starts. active_connector.json is put back,
+# so the data kept for a roll forward still names the same connectors. So are
+# the connector OTLP tokens teardown revokes: a roll forward that minted new
+# ones left an agent exporter still holding the old token rejected, and doctor
+# warned about an unattributed OTLP credential (GAP-1925).
+remove_connector_registrations_for_legacy() {
+    local state="${DEFENSECLAW_HOME}/active_connector.json" gateway="${BIN_DIR}/defenseclaw-gateway" saved name names
+    local hooks="${DEFENSECLAW_HOME}/hooks" tokens token
+    [[ -f "${state}" && -x "${VENV}/bin/python" && -x "${gateway}" ]] || return 0
+    names="$("${VENV}/bin/python" -I - "${state}" <<'PY' 2>/dev/null
+import json, re, sys
+state = json.load(open(sys.argv[1], encoding="utf-8"))
+names = state.get("names") or [state.get("name")]
+print(" ".join(n for n in names if isinstance(n, str) and re.fullmatch(r"[a-z0-9_-]+", n) and n != "openclaw"))
+PY
+)" || return 0
+    [[ -n "${names}" ]] || return 0
+    saved="$(mktemp)" || return 0
+    cp -p "${state}" "${saved}" || { rm -f "${saved}"; return 0; }
+    tokens="$(mktemp -d)" || { rm -f "${saved}"; return 0; }
+    for token in "${hooks}"/.otlp-*.token; do
+        [[ -f "${token}" && ! -L "${token}" ]] && cp -p "${token}" "${tokens}/"
+    done
+    info "Removing the connector registrations of DefenseClaw ${current}; ${back_to} writes its own when its gateway starts"
+    for name in ${names}; do
+        "${gateway}" connector teardown --connector "${name}" >>"${LOG}" 2>&1 \
+            || warn "Could not remove the ${name} registrations of DefenseClaw ${current}; ${back_to} may run its ${name} hooks twice until you run: defenseclaw setup ${name}"
+    done
+    cp -p "${saved}" "${state}" || warn "Could not restore ${state}; run 'defenseclaw init' if a roll forward leaves a connector unguarded"
+    for token in "${tokens}"/.otlp-*.token; do
+        [[ -f "${token}" ]] || continue
+        { mkdir -p -m 700 "${hooks}" && cp -p "${token}" "${hooks}/"; } \
+            || warn "Could not keep $(basename "${token}"); after a roll forward run 'defenseclaw setup' for that connector"
+    done
+    rm -rf "${saved}" "${tokens}"
+}
+
 # The gateway writes the OpenClaw plugin when it starts; OpenClaw loads it only
 # when its own gateway restarts.
 restart_openclaw() {
     openclaw_connector_active && has openclaw || return 0
-    openclaw gateway restart >/dev/null 2>&1 && ok "OpenClaw gateway restarted" \
-        || warn "Restart the OpenClaw gateway to load the updated plugin: openclaw gateway restart"
+    local out
+    if ! out="$(openclaw gateway restart 2>&1)"; then
+        warn "Restart the OpenClaw gateway to load the updated plugin: openclaw gateway restart"
+        return 0
+    fi
+    # OpenClaw exits 0 but restarts nothing when no gateway service is
+    # installed ("Gateway service disabled"), for example a foreground
+    # `openclaw gateway`. Don't claim a restart (GAP-2207, as GAP-1408 in setup).
+    if grep -Eqi 'openclaw gateway install|service (is )?(disabled|not (loaded|enabled|installed|registered|found))' <<<"${out}"; then
+        warn "No OpenClaw gateway service to restart. Restart the OpenClaw gateway to load the updated plugin: if it runs in a terminal, restart 'openclaw gateway' there"
+        return 0
+    fi
+    ok "OpenClaw gateway restarted"
 }
 
 openclaw_connector_active() {
@@ -1254,7 +1564,13 @@ first_install_extras() {
             local args=(quickstart --non-interactive --yes --connector "${CONNECTOR}")
             [[ -n "${QUICKSTART_MODE}" ]] && args+=(--mode "${QUICKSTART_MODE}")
             local rc=0
-            PATH="${BIN_DIR}:${PATH}" "${VENV}/bin/defenseclaw" "${args[@]}" || rc=$?
+            if [[ "${OPENCLAW_MISSING}" == true ]]; then
+                # GAP-1798: quickstart cannot set up an agent that is not
+                # installed; the summary names it as the step after OpenClaw.
+                OPENCLAW_NEXT="defenseclaw ${args[*]}"
+            else
+                PATH="${BIN_DIR}:${PATH}" "${VENV}/bin/defenseclaw" "${args[@]}" || rc=$?
+            fi
             if [[ ${rc} -ne 0 ]]; then
                 # The install stays; the summary names the failure and the re-run.
                 QUICKSTART_RC=${rc}
@@ -1270,6 +1586,12 @@ first_install_extras() {
 
 ensure_openclaw() {
     local found
+    # GAP-1523: a system Node (/usr, /opt/node22) has a root-owned global
+    # prefix; a standard user installs into ~/.local, whose bin is BIN_DIR.
+    # GAP-1798: every hint names the command this run would use.
+    local cmd=(npm install -g)
+    if has npm && ! npm_global_prefix_writable; then cmd+=(--prefix "${HOME}/.local"); fi
+    cmd+=("openclaw@${OPENCLAW_VERSION}")
     if has openclaw; then
         found="$(openclaw --version 2>/dev/null | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
         if [[ -n "${found}" ]] && ! version_lt "${found}" "${OPENCLAW_VERSION}"; then
@@ -1277,15 +1599,31 @@ ensure_openclaw() {
         fi
         ask_yes_no "Update OpenClaw ${found:-?} to ${OPENCLAW_VERSION}?" || { warn "Keeping OpenClaw ${found:-?}"; return; }
     else
-        ask_yes_no "Install OpenClaw ${OPENCLAW_VERSION}?" || { warn "Skipping OpenClaw; install it later with npm install -g openclaw@${OPENCLAW_VERSION}"; return; }
+        ask_yes_no "Install OpenClaw ${OPENCLAW_VERSION}?" || { warn "Skipping OpenClaw; install it later with: ${cmd[*]}"; OPENCLAW_MISSING=true; return; }
     fi
-    has npm || { warn "npm is not installed; install OpenClaw with: npm install -g openclaw@${OPENCLAW_VERSION}"; return; }
-    npm install -g "openclaw@${OPENCLAW_VERSION}" --loglevel=error \
-        || warn "Could not install OpenClaw; run: npm install -g openclaw@${OPENCLAW_VERSION}"
+    has npm || { warn "npm is not installed; install Node.js with npm, then run: ${cmd[*]}"; OPENCLAW_MISSING=true; return; }
+    info "Installing OpenClaw ${OPENCLAW_VERSION} with npm (this can take a minute)"
+    if "${cmd[@]}" --no-fund --no-audit --no-update-notifier --loglevel=error; then
+        OPENCLAW_INSTALLED=true
+    else
+        warn "Could not install OpenClaw; run: ${cmd[*]}"
+        PATH="${BIN_DIR}:${PATH}" has openclaw || OPENCLAW_MISSING=true
+    fi
+}
+
+npm_global_prefix_writable() {
+    local prefix dir
+    prefix="$(npm prefix -g 2>/dev/null)" || return 0
+    [[ -n "${prefix}" ]] || return 0
+    for dir in "${prefix}/lib/node_modules" "${prefix}/bin"; do
+        [[ -e "${dir}" ]] || dir="${prefix}"
+        [[ -w "${dir}" ]] || return 1
+    done
+    return 0
 }
 
 ensure_path_hint() {
-    case ":${PATH}:" in *":${BIN_DIR}:"*) return ;; esac
+    case ":${CALLER_PATH}:" in *":${BIN_DIR}:"*) return ;; esac
     local rc="${HOME}/.profile"
     case "${SHELL:-}" in */zsh) rc="${HOME}/.zshrc" ;; */bash) rc="${HOME}/.bashrc" ;; esac
     printf "\n  Add DefenseClaw to your PATH (then open a new shell):\n"

@@ -20,8 +20,6 @@ package notify
 
 import (
 	"fmt"
-	"io"
-	"os"
 	"runtime"
 	"strings"
 	"sync"
@@ -32,8 +30,6 @@ import (
 
 	"golang.org/x/sys/windows"
 )
-
-var fallbackWriter io.Writer = os.Stderr
 
 const (
 	nimAdd        = 0x00000000

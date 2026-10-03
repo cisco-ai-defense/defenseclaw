@@ -188,7 +188,7 @@ class TestPlaygroundEndToEnd(unittest.TestCase):
             "TEST_AID_KEY_ENV",
         )
 
-        # Webhooks — wholesale list replacement on activate.
+        # Webhooks — the policy's entries are added to the configured list.
         self.assertEqual(len(self.app.cfg.webhooks), 1)
         wh = self.app.cfg.webhooks[0]
         self.assertEqual(getattr(wh, "name", None), "soc-channel")

@@ -11,10 +11,10 @@
 package cli
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -61,6 +61,12 @@ lifecycle does.`,
 			}
 		}
 		if err := pinStandaloneManagedEnv(); err != nil {
+			// A standard account's refusal (GAP-2114), as discovery gives it.
+			var coded *exitCodeError
+			if enterprisePolicyJSON && errors.As(err, &coded) {
+				writeManagedViewRefusalJSON(cmd.OutOrStdout(), err)
+				silenceJSONReportedError(cmd, true, err)
+			}
 			return err
 		}
 		return rootPersistentPreRunNoAuditE(cmd, args)
@@ -144,6 +150,8 @@ var standaloneEnterprisePolicyOptions = func() (enterprisePolicyContext, error) 
 	if err != nil {
 		return enterprisePolicyContext{}, err
 	}
+	opts.CopilotUserHomes = standaloneEnrolledHomes(layout)
+	opts.ClaudeMachineHookContract = standaloneClaudeMachineHookContract(layout)
 	return enterprisePolicyContext{layout: layout, opts: opts, connectors: enterprisepolicy.StandaloneConnectors(cfg)}, nil
 }
 
@@ -197,6 +205,9 @@ type enterprisePolicyReport struct {
 	// (Windows). Each runs without DefenseClaw hooks for that account only,
 	// so it does not change machine-policy coverage.
 	Unprotected []enterprisehooks.UnprotectedAgent `json:"unprotected_agents,omitempty"`
+	// Errors carries the failure (an unknown --user, an unreadable policy
+	// source) for a --json caller, which gets no "Error:" line (GAP-2456).
+	Errors []string `json:"errors,omitempty"`
 	// goos is the host the report describes; it only changes wording.
 	goos string
 }
@@ -350,6 +361,7 @@ func runEnterprisePolicyShow(cmd *cobra.Command, _ []string) error {
 		return errors.New("--project must be an absolute path")
 	}
 	report, reportErr := buildEnterprisePolicyReport(ctx, connectors, project)
+	recordEnterprisePolicyReportError(cmd, &report, reportErr)
 	if err := writeEnterprisePolicyReport(cmd.OutOrStdout(), report); err != nil {
 		return err
 	}
@@ -390,6 +402,7 @@ func runEnterprisePolicyVerify(cmd *cobra.Command, _ []string) error {
 			report.Complete = false
 		}
 	}
+	recordEnterprisePolicyReportError(cmd, &report, reportErr)
 	if err := writeEnterprisePolicyReport(cmd.OutOrStdout(), report); err != nil {
 		return err
 	}
@@ -434,9 +447,33 @@ func enterprisePolicyAuditDBPath() string {
 	return strings.TrimSpace(cfg.AuditDB)
 }
 
+// enterprisePolicyRowUnguarded reports whether state is a per-user agent
+// that no foreign-hook guard covers (OpenHands, Antigravity, OmniGent, Kiro,
+// Hermes on Windows): its foreign_hooks setting is not enforced and its
+// foreign entries are not counted.
+func enterprisePolicyRowUnguarded(report enterprisePolicyReport, state enterprisepolicy.State) bool {
+	if state.Route != enterprisepolicy.RoutePerUser || state.ForeignHooks == config.ForeignHooksAllow {
+		return false
+	}
+	guard, ok := report.Guard[state.Connector]
+	return ok && !guard.Guard
+}
+
+// recordEnterprisePolicyReportError puts a show or verify failure into the
+// --json report and keeps cobra's "Error: ..." line off stderr, so a script
+// that merges the streams reads one JSON document; the exit code stays 1
+// (GAP-2456). Text mode prints the error line as before.
+func recordEnterprisePolicyReportError(cmd *cobra.Command, report *enterprisePolicyReport, err error) {
+	if err == nil || !enterprisePolicyJSON {
+		return
+	}
+	report.Errors = append(report.Errors, err.Error())
+	cmd.SilenceErrors = true
+}
+
 func writeEnterprisePolicyReport(out io.Writer, report enterprisePolicyReport) error {
 	if enterprisePolicyJSON {
-		encoder := json.NewEncoder(out)
+		encoder := newEnterpriseJSONEncoder(out)
 		encoder.SetIndent("", "  ")
 		return encoder.Encode(report)
 	}
@@ -462,9 +499,25 @@ func writeEnterprisePolicyReport(out io.Writer, report enterprisePolicyReport) e
 		if lock == "" {
 			lock = "-"
 		}
-		fmt.Fprintf(out, "%-12s %-15s %-12s lock=%-8s foreign_hooks=%-7s owned=%d foreign=%d\n",
-			state.Connector, state.Route, status, lock, dashIfEmpty(state.ForeignHooks), state.OwnedEntries, state.ForeignEntries)
+		foreignHooks, foreign := dashIfEmpty(state.ForeignHooks), strconv.Itoa(state.ForeignEntries)
+		unguarded := enterprisePolicyRowUnguarded(report, state)
+		if unguarded {
+			// Nothing checks or removes other hooks for this agent, so
+			// "foreign_hooks=remove foreign=0" would claim an enforcement
+			// and a count that do not exist (GAP-1472).
+			foreignHooks, foreign = "n/a", "-"
+		}
+		fmt.Fprintf(out, "%-12s %-15s %-12s lock=%-8s foreign_hooks=%-7s owned=%d foreign=%s\n",
+			state.Connector, state.Route, status, lock, foreignHooks, state.OwnedEntries, foreign)
 		for _, path := range state.Paths {
+			// A source the agent would read but that does not exist, such
+			// as Claude Code's base managed-settings.json next to
+			// DefenseClaw's drop-in, is not part of the policy in force
+			// (GAP-1445).
+			if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+				fmt.Fprintf(out, "    file:      %s (not present)\n", path)
+				continue
+			}
 			fmt.Fprintf(out, "    file:      %s\n", path)
 		}
 		if state.VersionFloor != nil {
@@ -481,6 +534,8 @@ func writeEnterprisePolicyReport(out io.Writer, report enterprisePolicyReport) e
 		}
 		if guard, ok := report.Guard[state.Connector]; ok && guard.Guard {
 			fmt.Fprintf(out, "    guard:     foreign hooks %s (%d allowlisted)\n", guard.ForeignHooks, len(guard.AllowedHooks))
+		} else if unguarded {
+			fmt.Fprintf(out, "    note:      no foreign-hook guard for %s: hooks a user or project adds run next to DefenseClaw's and are not counted or removed (see the foreign-hook guard guide)\n", state.Connector)
 		}
 	}
 	if len(report.Unprotected) != 0 {

@@ -113,7 +113,7 @@ class TestStatusCommand(unittest.TestCase):
         result = self.runner.invoke(status, ["--json"], obj=self.app, catch_exceptions=False)
         self.assertEqual(result.exit_code, 0, result.output)
         payload = json.loads(result.output)
-        self.assertEqual(payload["sandbox"], {"available": False, "legacy_standalone": True})
+        self.assertEqual(payload["sandbox"], {"available": False, "enabled": False, "legacy_standalone": True})
 
     @patch("defenseclaw.gateway.OrchestratorClient")
     def test_status_sandbox_not_configured_on_host_mode(self, mock_client_cls):
@@ -126,7 +126,27 @@ class TestStatusCommand(unittest.TestCase):
         result = self.runner.invoke(status, ["--json"], obj=self.app, catch_exceptions=False)
         self.assertEqual(result.exit_code, 0, result.output)
         payload = json.loads(result.output)
-        self.assertEqual(payload["sandbox"], {"available": False, "legacy_standalone": False})
+        self.assertEqual(payload["sandbox"], {"available": False, "enabled": False, "legacy_standalone": False})
+        # Windows shows "not supported on Windows" instead.
+        with patch("defenseclaw.commands.cmd_status._host_is_windows", return_value=False):
+            result = self.runner.invoke(status, [], obj=self.app, catch_exceptions=False)
+        self.assertIn("off (set up with: defenseclaw sandbox setup)", result.output)
+
+    @patch("defenseclaw.gateway.OrchestratorClient")
+    def test_status_sandbox_row_reflects_enabled_sandboxes(self, mock_client_cls):
+        # GAP-1619: the row was hard-coded to "not configured".
+        from defenseclaw.commands import cmd_status
+
+        mock_client = MagicMock()
+        mock_client.is_running.return_value = False
+        mock_client_cls.return_value = mock_client
+        self.app.cfg.openshell.enabled = True
+
+        with patch.object(cmd_status, "_host_is_windows", return_value=False):
+            result = self.runner.invoke(cmd_status.status, [], obj=self.app, catch_exceptions=False)
+            self.assertIn("details: defenseclaw sandbox status", result.output)
+            result = self.runner.invoke(cmd_status.status, ["--json"], obj=self.app, catch_exceptions=False)
+        self.assertTrue(json.loads(result.output)["sandbox"]["enabled"])
 
 
 # ---------------------------------------------------------------------------
@@ -208,6 +228,47 @@ class TestAlertsCommand(unittest.TestCase):
         self.assertIn("HIGH", result.output)
         self.assertIn("/skills/bad", result.output)
 
+    def test_alerts_show_telemetry_destination_names_next_step(self):
+        from unittest.mock import patch
+
+        from defenseclaw.commands.cmd_alerts import alerts
+
+        event = Event(id="a1", action="telemetry-destination", severity="HIGH",
+                      details="galileo/traces failed: request_timeout")
+        with patch.object(self.app.store, "list_alerts", return_value=[event]):
+            result = self.runner.invoke(alerts, ["--no-tui", "--show", "1"], obj=self.app,
+                                        catch_exceptions=False)
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("galileo/traces failed: request_timeout", result.output)
+        self.assertIn("defenseclaw setup galileo status", result.output)
+        self.assertIn("defenseclaw alerts dismiss --id a1", result.output)
+
+    def test_alerts_show_delivery_and_circuit_alerts_explain_the_cause(self):
+        from unittest.mock import patch
+
+        from defenseclaw.commands.cmd_alerts import alerts
+
+        events = [
+            Event(id="a2", action="circuit_breaker_open", severity="HIGH",
+                  details="galileo degraded: otlp export paused after 1 failure "
+                          "(authentication: check the API key or token)"),
+            Event(id="a3", action="telemetry-destination", severity="HIGH",
+                  details="galileo/traces failed: http_authentication"),
+        ]
+        with patch.object(self.app.store, "list_alerts", return_value=events):
+            circuit = self.runner.invoke(alerts, ["--no-tui", "--show", "1"], obj=self.app,
+                                         catch_exceptions=False)
+            delivery = self.runner.invoke(alerts, ["--no-tui", "--show", "2"], obj=self.app,
+                                          catch_exceptions=False)
+        self.assertEqual(circuit.exit_code, 0, circuit.output)
+        self.assertIn("galileo degraded: otlp export paused after 1 failure (authentication", circuit.output)
+        self.assertNotIn("degraded:\n", circuit.output)
+        self.assertIn("defenseclaw setup galileo status", circuit.output)
+        self.assertIn("defenseclaw alerts dismiss --id a2", circuit.output)
+        self.assertEqual(delivery.exit_code, 0, delivery.output)
+        self.assertIn("rejected the credentials (HTTP 401/403)", delivery.output)
+        self.assertIn("defenseclaw alerts dismiss --id a3", delivery.output)
+
     def test_alerts_show_out_of_range(self):
         from defenseclaw.commands.cmd_alerts import alerts
 
@@ -257,10 +318,12 @@ class TestAlertsCommand(unittest.TestCase):
         from defenseclaw.commands.cmd_alerts import alerts
         self._seed_two_connectors()
 
-        result = self.runner.invoke(alerts, ["--no-tui", "--connector", "nope"],
+        # A known connector without alerts; an unknown name exits 1 (GAP-2130,
+        # covered in test_alerts_connector_ux_b2.py).
+        result = self.runner.invoke(alerts, ["--no-tui", "--connector", "cursor"],
                                     obj=self.app, catch_exceptions=False)
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("No alerts from connector 'nope'", result.output)
+        self.assertIn("No alerts from connector 'cursor'", result.output)
 
     def test_alerts_connector_filter_show_indexes_filtered_set(self):
         from defenseclaw.commands.cmd_alerts import alerts
@@ -916,7 +979,8 @@ class TestSetupGuardrailUnifiedLLMSharing(unittest.TestCase):
         result = self._invoke_guardrail("--judge-api-key-env", "CUSTOM_TEAM_KEY")
         self.assertEqual(result.exit_code, 0, result.output)
 
-        self.assertEqual(self.app.cfg.guardrail.judge.api_key_env, "CUSTOM_TEAM_KEY")
+        self.assertEqual(self.app.cfg.guardrail.judge.llm.api_key_env, "CUSTOM_TEAM_KEY")
+        self.assertEqual(self.app.cfg.guardrail.judge.api_key_env, "")  # GAP-2176: no v4 write
         self.assertEqual(self.app.cfg.llm.api_key_env, "CUSTOM_TEAM_KEY")
         self.assertEqual(self.app.cfg.default_llm_api_key_env, "")
 
@@ -931,7 +995,7 @@ class TestSetupGuardrailUnifiedLLMSharing(unittest.TestCase):
         result = self._invoke_guardrail("--judge-api-key-env", "DEFENSECLAW_LLM_KEY")
         self.assertEqual(result.exit_code, 0, result.output)
 
-        self.assertEqual(self.app.cfg.guardrail.judge.api_key_env, "DEFENSECLAW_LLM_KEY")
+        self.assertEqual(self.app.cfg.guardrail.judge.llm.api_key_env, "DEFENSECLAW_LLM_KEY")
         self.assertEqual(self.app.cfg.llm.api_key_env, "")
         self.assertEqual(self.app.cfg.default_llm_api_key_env, "")
 
@@ -944,9 +1008,88 @@ class TestSetupGuardrailUnifiedLLMSharing(unittest.TestCase):
         result = self._invoke_guardrail("--judge-api-key-env", "JUDGE_ONLY_KEY")
         self.assertEqual(result.exit_code, 0, result.output)
 
-        self.assertEqual(self.app.cfg.guardrail.judge.api_key_env, "JUDGE_ONLY_KEY")
+        self.assertEqual(self.app.cfg.guardrail.judge.llm.api_key_env, "JUDGE_ONLY_KEY")
         self.assertEqual(self.app.cfg.llm.api_key_env, "EXISTING_SHARED_KEY")
         self.assertEqual(self.app.cfg.default_llm_api_key_env, "")
+
+
+
+class TestSetupGuardrailJudgeFlagsObserveMode(unittest.TestCase):
+    """GAP-2175 / GAP-2176: ``setup guardrail`` judge flags, non-interactive."""
+
+    def setUp(self):
+        self.app, self.tmp_dir, self.db_path = make_app_context()
+        self.runner = CliRunner()
+
+    def tearDown(self):
+        cleanup_app(self.app, self.db_path, self.tmp_dir)
+
+    def _invoke(self, mode, *extra):
+        from defenseclaw.commands.cmd_setup import setup
+
+        with patch(
+            "defenseclaw.commands.cmd_setup.execute_guardrail_setup",
+            return_value=(True, []),
+        ) as execute, patch(
+            "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+            return_value=True,
+        ), patch(
+            # Windows verifies the agent executable first; the runner has none.
+            "defenseclaw.commands.cmd_setup._record_windows_setup_agent_selections",
+            return_value=None,
+        ):
+            result = self.runner.invoke(
+                setup,
+                [
+                    "guardrail",
+                    "--non-interactive",
+                    "--no-restart",
+                    "--no-verify",
+                    "--connector", "claudecode",
+                    "--mode", mode,
+                    "--judge-model", "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+                    *extra,
+                ],
+                obj=self.app,
+            )
+        return result, execute
+
+    def test_explicit_observe_hook_connector_is_refused_before_save(self):
+        result, execute = self._invoke("observe", "--judge-hook-connectors", "claudecode")
+        self.assertEqual(result.exit_code, 2, result.output)
+        self.assertIn("--judge-hook-connectors was not applied", result.output)
+        self.assertIn("defenseclaw setup claude-code --mode action --enable-judge --yes", result.output)
+        execute.assert_not_called()
+
+    def test_all_gate_on_observe_connector_warns_once_without_judge_add_hint(self):
+        # GAP-2297: an 'all' gate pruned to nothing gave two warnings, one with
+        # a 'guardrail judge add' hint that refuses observe-mode connectors.
+        self.app.cfg.guardrail.judge.hook_connectors = ["*"]
+        result, _ = self._invoke("observe")
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(result.output.count("The LLM judge"), 1, result.output)
+        self.assertIn("The LLM judge is off", result.output)
+        self.assertIn("defenseclaw setup claude-code --mode action --enable-judge --yes", result.output)
+        self.assertNotIn("judge add", result.output)
+        self.assertFalse(self.app.cfg.guardrail.judge.enabled)
+
+    def test_action_connector_keeps_judge_and_writes_only_v5_fields(self):
+        judge = self.app.cfg.guardrail.judge
+        judge.model, judge.api_base, judge.api_key_env = "old-model", "https://old.example", "OLD_KEY"
+        result, _ = self._invoke(
+            "action",
+            "--judge-hook-connectors", "claudecode",
+            "--judge-api-base", "https://judge.example",
+            "--judge-api-key-env", "DEFENSECLAW_LLM_KEY",
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertNotIn("not enabled", result.output)
+        self.assertTrue(judge.enabled)
+        self.assertEqual(judge.hook_connectors, ["claudecode"])
+        self.assertEqual(judge.llm.model, "us.anthropic.claude-haiku-4-5-20251001-v1:0")
+        self.assertEqual(judge.llm.base_url, "https://judge.example")
+        self.assertEqual(judge.llm.api_key_env, "DEFENSECLAW_LLM_KEY")
+        self.assertEqual((judge.model, judge.api_base, judge.api_key_env), ("", "", ""))
 
 
 class TestSetupHelpers(unittest.TestCase):
@@ -956,10 +1099,8 @@ class TestSetupHelpers(unittest.TestCase):
 
     def test_mask_long_key(self):
         from defenseclaw.commands.cmd_setup import _mask
-        result = _mask("abcdefghijklmnop")
-        self.assertTrue(result.startswith("abcd"))
-        self.assertTrue(result.endswith("mnop"))
-        self.assertIn("...", result)
+        # GAP-1366: the last four only, as keys set/list show.
+        self.assertEqual(_mask("abcdefghijklmnop"), "...mnop")
 
 
 class TestSetupSkillScannerCommonConfig(unittest.TestCase):

@@ -38,6 +38,7 @@ RuleProfile = str  # "default" | "strict"
 # ---------------------------------------------------------------------------
 
 DANGEROUS_PERMISSIONS: set[str] = {
+    "*",  # full wildcard: every capability (GAP-2277)
     "fs:write",
     "fs:*",
     "net:*",
@@ -102,6 +103,9 @@ COGNITIVE_FILES: set[str] = {
     "TOOLS.md",
     "AGENTS.md",
     "MEMORY.md",
+    # Hermes keeps its curated user memory in USER.md next to MEMORY.md
+    # (GAP-2219).
+    "USER.md",
     "openclaw.json",
     "gateway.json",
     "config.yaml",
@@ -160,6 +164,8 @@ class SourcePatternRule:
     profiles: list[str]  # list of RuleProfile
     tags: list[str] = field(default_factory=list)
     capability: str | None = None
+    # Source languages the rule applies to: "js" (JS/TS) and/or "py".
+    languages: tuple[str, ...] = ("js",)
 
 
 SOURCE_PATTERN_RULES: list[SourcePatternRule] = [
@@ -173,6 +179,7 @@ SOURCE_PATTERN_RULES: list[SourcePatternRule] = [
         profiles=["default", "strict"],
         tags=["code-execution"],
         capability="eval",
+        languages=("js", "py"),
     ),
     SourcePatternRule(
         id="SRC-NEW-FUNC",
@@ -211,6 +218,22 @@ SOURCE_PATTERN_RULES: list[SourcePatternRule] = [
         profiles=["default", "strict"],
         tags=["code-execution"],
         capability="child-process",
+        languages=("js", "py"),
+    ),
+    # Python plugins (Hermes): the subprocess/os counterparts of child_process.
+    SourcePatternRule(
+        id="SRC-PY-SUBPROCESS",
+        pattern=re.compile(
+            r"\b(?:subprocess\.(?:run|call|check_call|check_output|Popen|getoutput|getstatusoutput)"
+            r"|os\.(?:system|popen|spawn[lv]p?e?|exec[lv]p?e?))\s*\("
+        ),
+        title="Runs a subprocess (Python)",
+        severity="MEDIUM",
+        confidence=0.7,
+        profiles=["default", "strict"],
+        tags=["code-execution"],
+        capability="child-process",
+        languages=("py",),
     ),
     SourcePatternRule(
         id="SRC-DENO-RUN",
@@ -497,8 +520,10 @@ GATEWAY_PATTERNS: list[GatewayPattern] = [
 # Write-function detection (cognitive tampering)
 # ---------------------------------------------------------------------------
 
+# Copy and rename calls overwrite their destination too (GAP-2187).
 WRITE_FUNCTIONS: re.Pattern[str] = re.compile(
-    r"(?:writeFile|appendFile|writeFileSync|appendFileSync|createWriteStream)\s*\("
+    r"(?:writeFile|appendFile|writeFileSync|appendFileSync|createWriteStream"
+    r"|copyFile|copyFileSync|\bcpSync|\bfs\.(?:promises\.)?cp|\brename|renameSync)\s*\("
 )
 
 # ---------------------------------------------------------------------------
@@ -551,10 +576,24 @@ PRIVATE_IP_PATTERN: re.Pattern[str] = re.compile(
     r"(?:^|\b)(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|127\.\d{1,3}\.\d{1,3}\.\d{1,3})(?:\b|$)"
 )
 
-INTERNAL_HOSTNAME_PATTERNS: re.Pattern[str] = re.compile(
-    r"\b(?:localhost|internal|corp|local|intranet|private)\b.*\b(?:fetch|http|request|get|post)\b|\b(?:fetch|http|request|get|post)\b.*\b(?:localhost|internal|corp|local|intranet|private)\b",
-    re.IGNORECASE,
+# An internal host is hostname-shaped: ``localhost``, an internal word in a
+# URL's host, or a quoted host with an internal suffix (``"db.corp"``). Bare
+# identifiers (``local = ...``, ``Preset.PRIVATE``, ``corp=%s``) are not hosts,
+# and ``.get(`` / ``.post(`` count only on an HTTP client, not on a dict
+# (GAP-1982). A URL's own ``http://`` scheme is not a network call, so an
+# example URL in a message doesn't satisfy the call side (GAP-2068).
+_INTERNAL_HOST = (
+    r"(?:\blocalhost\b"
+    r"|://[^\s/\"'`]*\b(?:internal|corp|local|intranet|private)\b"
+    r"|[\"'`/@][\w-]+(?:\.[\w-]+)*\.(?:internal|corp|local|intranet|lan|localdomain)\b)"
 )
+_NETWORK_CALL = (
+    r"(?:\b(?:fetch|https?(?!://)|requests?|urlopen|axios|httpx|aiohttp|curl|wget)\b"
+    r"|(?<![\w.])(?:get|post)\b"
+    r"|\b(?:requests|httpx|axios|session|client|http)\.(?:get|post)\b)"
+)
+INTERNAL_HOST_PATTERN: re.Pattern[str] = re.compile(_INTERNAL_HOST, re.IGNORECASE)
+NETWORK_CALL_PATTERN: re.Pattern[str] = re.compile(_NETWORK_CALL, re.IGNORECASE)
 
 # ---------------------------------------------------------------------------
 # Dynamic import / require patterns

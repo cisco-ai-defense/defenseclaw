@@ -11,6 +11,7 @@
 package enterprisestatus
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -48,5 +49,25 @@ func TestResultExitCodesAndJSON(t *testing.T) {
 		if !strings.Contains(string(empty), key) {
 			t.Fatalf("empty result must render %s: %s", key, empty)
 		}
+	}
+}
+
+// GAP-2504: the PowerShell call operator in a message stays a literal & when
+// the CLI encodes a Result with SetEscapeHTML(false).
+func TestResultMarshalJSONKeepsAmpersandLiteral(t *testing.T) {
+	r := New("status", "standalone", "windows", "1.0.0")
+	r.AddError("elevation_required", "run `& 'C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw.exe' enterprise windows status`")
+	var buf bytes.Buffer
+	encoder := json.NewEncoder(&buf)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(r); err != nil {
+		t.Fatal(err)
+	}
+	if out := buf.String(); strings.Contains(out, `\u0026`) || !strings.Contains(out, "`& '") {
+		t.Fatalf("message must keep a literal &: %s", out)
+	}
+	var back Result
+	if err := json.Unmarshal(buf.Bytes(), &back); err != nil || len(back.Errors) != 1 {
+		t.Fatalf("round trip: %v %+v", err, back.Errors)
 	}
 }

@@ -25,13 +25,28 @@ const claudeAttestationHint = " (it needs an administrator's attestation, and ea
 	"confirm that an enrolled user's Claude Code runs DefenseClaw's hooks, then run Setup /repair ATTESTCLAUDEEFFECTIVEPOLICY=1, " +
 	"or `enterprise windows repair --profile standalone --attest-claude-effective-policy`)"
 
+// enterpriseInformationalWarningCodes are warnings that say what the lifecycle
+// restored by itself, not why security is incomplete.
+var enterpriseInformationalWarningCodes = map[string]bool{
+	"cursor_adapter_restored":         true,
+	"stale_lifecycle_journal_removed": true,
+}
+
 // addEnterpriseSecurityIncompleteReasons names why security is not complete
 // when nothing else in the result does. Windows standalone status and verify
 // reported security_complete:false with empty errors and warnings, so an
 // administrator had to read the guardian log to learn the cause.
+//
+// Notes that only record what the lifecycle repaired on its own do not
+// explain an incomplete result, so they do not suppress the reason (GAP-2494).
 func addEnterpriseSecurityIncompleteReasons(result *enterprisestatus.Result, transactionPending bool) {
-	if result == nil || result.SecurityComplete || len(result.Errors) > 0 || len(result.Warnings) > 0 {
+	if result == nil || result.SecurityComplete || len(result.Errors) > 0 {
 		return
+	}
+	for _, warning := range result.Warnings {
+		if !enterpriseInformationalWarningCodes[warning.Code] {
+			return
+		}
 	}
 	var reasons []string
 	if transactionPending {
@@ -55,15 +70,26 @@ func addEnterpriseSecurityIncompleteReasons(result *enterprisestatus.Result, tra
 			reasons = append(reasons, reason)
 		}
 	}
-	if pending := result.Enrollment.Pending; pending > 0 {
-		reasons = append(reasons, fmt.Sprintf("%d per-user enrollment(s) are pending", pending))
+	pending, failed := result.Enrollment.Pending, result.Enrollment.Failed
+	if pending > 0 {
+		reasons = append(reasons, fmt.Sprintf("%d per-user enrollment(s) are pending (waiting for an active, connected session of that account)", pending))
 	}
-	if failed := result.Enrollment.Failed; failed > 0 {
+	if failed > 0 {
 		reasons = append(reasons, fmt.Sprintf("%d per-user enrollment(s) failed", failed))
 	}
-	if len(reasons) == 0 {
+	noReason := len(reasons) == 0
+	if noReason {
 		reasons = append(reasons, "the installer gave no reason")
 	}
-	result.AddWarning("security_incomplete", "security is not complete: "+strings.Join(reasons, "; ")+
-		"; the guardian log and each account's detail name the cause")
+	// Point at per-account detail only when an account is pending or
+	// failed, and at the guardian log only when the guardian is the cause
+	// or nothing else is named (GAP-1733).
+	where := ""
+	switch {
+	case pending > 0 || failed > 0:
+		where = "; each pending or failed account's Account line (enrollment.accounts[].reason in --json) says why"
+	case !result.Readiness.Guardian || noReason:
+		where = "; the guardian log names the cause"
+	}
+	result.AddWarning("security_incomplete", "security is not complete: "+strings.Join(reasons, "; ")+where)
 }

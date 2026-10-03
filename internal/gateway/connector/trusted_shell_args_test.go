@@ -182,6 +182,12 @@ func TestTrustedShellArgs(t *testing.T) {
 		{"kiro-summary", "kiro", "execute_bash", `{"command":"ls","summary":"list","working_dir":"/w"}`, `{"command":"ls"}`, "/w", true},
 		{"copilot-sync", "copilot", "bash", `{"command":"ls","description":"list","mode":"sync","initial_wait":30}`, `{"command":"ls"}`, "", true},
 		{"copilot-async", "copilot", "powershell", `{"command":"ls","description":"list","mode":"async","detach":true}`, `{"command":"ls"}`, "", true},
+		// GAP-1450: OpenClaw exec's execution controls.
+		{"openclaw-exec", "openclaw", "exec",
+			`{"command":"ls","yieldMs":10000,"background":false,"timeout":30,"pty":false,"ask":"off","security":"full","workdir":"/w"}`,
+			`{"command":"ls"}`, "/w", true},
+		{"openclaw-exec-elevated", "openclaw", "exec", `{"command":"ls","yieldMs":10000,"elevated":true,"host":"gateway"}`,
+			`{"command":"ls","elevated":true,"host":"gateway"}`, "", true},
 		// Arguments that change where or how the command runs stay for the
 		// parser, which does not prove them.
 		{"devin-shell-and-env", "devin", "exec", `{"command":"ls","shell_id":"s1","env":{"A":"1"},"shell_flavor":"zsh","timeout":5}`,

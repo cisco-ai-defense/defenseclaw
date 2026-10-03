@@ -215,6 +215,33 @@ def test_windows_output_piped_through_a_legacy_console_uses_ascii_glyphs() -> No
         assert ux.ascii_safe_redirected_stream(console) is console
     stream.write("restarting... ✓ — Málaga")
     assert piped.getvalue() == "restarting... OK - Málaga"
+    # The uninstall plan bullets and setup galileo's batch delay (WIN2-U3-13).
+    stream.write(" • wipe (≤1s, ≥2)")
+    assert piped.getvalue().endswith(" * wipe (<=1s, >=2)")
+
+
+def test_alerts_table_stays_aligned_when_piped_through_ascii_stream() -> None:
+    # WIN2-U3-13 item 1: the stream turned a 1-cell "…" into "..." after Rich
+    # sized the columns, so cut cells overran the border.
+    from datetime import datetime
+    from types import SimpleNamespace
+
+    from defenseclaw.commands import cmd_alerts
+
+    event = SimpleNamespace(
+        severity="HIGH",
+        timestamp=datetime(2026, 10, 2, 4, 5),
+        action="guardrail-degraded-subsystem",
+        target="C:/Users/dcw-std1/.codex/hooks/very/long/target/path.json",
+        details="subsystem.degraded=" + "x" * 120,
+    )
+    out = io.StringIO()
+    with _render_mode(False), redirect_stdout(out):
+        cmd_alerts._render_table([event], store=None)
+    text = out.getvalue().translate(ux._ASCII_PRESENTATION_TRANSLATION)
+    rows = [line for line in text.splitlines() if line[:1] in "|+"]
+    assert rows and len({len(line) for line in rows}) == 1
+    assert "..." in text and not any(glyph in out.getvalue() for glyph in "…└┏┃")
 
 
 def test_main_snapshots_capability_before_utf8_reconfigure() -> None:
@@ -268,6 +295,49 @@ def test_implicit_tui_launches_on_capable_terminal() -> None:
         assert main_mod._try_launch_tui() is True
 
     run_tui.assert_called_once_with()
+
+
+def test_unknown_top_level_option_goes_to_click_not_the_dashboard() -> None:
+    # GAP-1769: "defenseclaw --no-such-flag" opened the dashboard and exited 0.
+    with (
+        _render_mode(True),
+        mock.patch.object(sys, "stdin", _Stream(tty=True)),
+        mock.patch.object(sys, "stdout", _Stream(tty=True)),
+        mock.patch.object(sys, "argv", ["defenseclaw", "--no-such-flag-xyz"]),
+        mock.patch("defenseclaw.tui.run_textual_tui") as run_tui,
+    ):
+        assert main_mod._try_launch_tui() is False
+    run_tui.assert_not_called()
+    result = CliRunner().invoke(main_mod.cli, ["--no-such-flag-xyz"])
+    assert result.exit_code == 2
+    assert "No such option" in result.output
+
+
+def test_piped_rich_table_keeps_its_columns_after_the_ascii_swap() -> None:
+    # GAP-1757: glyphs were swapped after Rich sized the cells, and Rich's
+    # Windows renderer writes a row piece by piece.
+    from rich.console import Console
+    from rich.table import Table
+
+    table = Table(title="Skills")
+    table.add_column("Status", no_wrap=True)
+    table.add_column("Description", no_wrap=True, overflow="ellipsis", max_width=14)
+    table.add_row("✓ ready", "A harmless demo skill used for a test")
+    rendered = io.StringIO()
+    Console(file=rendered, width=60, color_system=None, legacy_windows=False).print(table)
+    piped = _Stream(tty=False)
+    with (
+        mock.patch.object(ux.sys, "platform", "win32"),
+        mock.patch.object(ux, "_console_output_code_page", return_value=437),
+    ):
+        stream = ux.ascii_safe_redirected_stream(piped)
+    for char in rendered.getvalue():
+        stream.write(char)
+    text = piped.getvalue()
+    rows = [line for line in text.splitlines() if line[:1] in "|+"]
+    assert len(rows) == 5 and len({len(line) for line in rows}) == 1, text
+    assert "OK ready" in text and "..." in text
+    assert "\\" not in text and not any(ord(c) > 127 for c in text)
 
 
 def test_explicit_tui_uses_the_same_capability_guard() -> None:

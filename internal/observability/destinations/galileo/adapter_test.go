@@ -962,7 +962,7 @@ func makeResult(
 		if operation == "invoke_agent" {
 			name = "invoke_agent diagnostic"
 		} else {
-			name = "chat gpt-4o-mini"
+			name = "chat defenseclaw-diagnostic"
 		}
 	}
 	attributes["defenseclaw.bucket"] = string(bucket)

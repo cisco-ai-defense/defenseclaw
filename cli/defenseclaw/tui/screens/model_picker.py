@@ -27,7 +27,6 @@ and writes back the model id the screen dismisses with.
 
 from __future__ import annotations
 
-from rich.markup import escape as rich_escape
 from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -36,6 +35,7 @@ from textual.reactive import reactive
 from textual.screen import ModalScreen
 from textual.widgets import Input, Static
 
+from defenseclaw.tui.markup_safe import escape as rich_escape
 from defenseclaw.tui.theme import DEFAULT_TOKENS
 from defenseclaw.tui.widgets.list_window import rows_that_fit, window_lines
 

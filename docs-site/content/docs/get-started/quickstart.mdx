@@ -40,7 +40,9 @@ defenseclaw init
 
 On a TTY this runs the guided path (`_prompt_first_run`). It runs local agent discovery, **pre-selects every installed hook connector**, and configures them **all in `observe` (log-only) mode** by default — pressing Enter through the connector prompt brings up everything you have. Rather than asking observe-vs-action for each one, it asks a single question, **"Action-mode connector(s)"**, naming the subset that should enforce. Leave it blank and every connector stays in observe.
 
-The action-only policy knobs — hook fail-mode (`open`/`closed`) and HITL human-approval plus its minimum severity — are asked **once** and shared across every connector you promote to action; observe connectors never see them. Proxy connectors (`openclaw`, `zeptoclaw`) are detected but excluded from the observe-all set — they own the single LLM proxy port and can't be multi-connector peers — so the wizard prints a one-line note pointing you to `defenseclaw setup <proxy>` for them.
+The action-only policy knobs — hook fail-mode (`open`/`closed`) and HITL human-approval plus its minimum severity — are asked **once** and shared across every connector you promote to action; observe connectors never see them.
+
+Near the end the wizard asks **Start gateway after setup?** (default Yes: the hooks need a running gateway). `--start-gateway` or `--no-start-gateway` answers it, so it is not asked. When you add the optional LLM judge on AWS Bedrock, the wizard asks the region and auth mode first and asks for an API key only for the `api_key` auth mode. On macOS, an OpenHands installed with `uv tool` sits outside the trusted prefixes; the wizard offers to trust its directory instead of skipping it. Proxy connectors (`openclaw`, `zeptoclaw`) are detected but excluded from the observe-all set — they own the single LLM proxy port and can't be multi-connector peers — so the wizard prints a one-line note pointing you to `defenseclaw setup <proxy>` for them.
 
 <Callout type="warn">
 An agent version newer than DefenseClaw's tested versions keeps action mode and is reported as an untested newer version. An action connector whose installed version has no hook contract (below the tested floor, on the known-broken list, or an unmatched exact build) is **downgraded to observe** with a warning — the same gate the gateway applies at boot. Override only for exploratory testing with `DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1`. See [Version policy](/docs/connectors/compatibility#version-policy).
@@ -90,7 +92,10 @@ boundary. Other platforms also offer proxy and additional hook connectors.
 skip `--connector`, it uses the single configured or detected connector; if
 more than one connector is configured/detected, or the installer hint disagrees
 with the detected connector, it exits and asks you to rerun with `--connector
-<name>`.
+<name>`. On an install that already guards other connectors, `quickstart
+--connector <name>` exits without changes instead of dropping them: use
+`defenseclaw setup <name> --yes` to add it alongside the others, or
+`defenseclaw init` to change the whole set.
 
 </Step>
 
@@ -191,7 +196,7 @@ and redaction profile that file is allowed to receive.
     },
     "--fail-mode": {
       type: "open|closed",
-      description: "Hook fail-mode for delivery, authentication, and invalid gateway responses. Defaults to preserving whatever the connector already had.",
+      description: "Hook fail-mode for delivery, authentication, and invalid gateway responses. Omitted, it keeps the current setting, which is `closed` on a new install: hooks block the agent's tools while the gateway is down. The summary's Guardrail line shows the result.",
     },
     "--human-approval / --no-human-approval": {
       type: "flag",

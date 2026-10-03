@@ -96,12 +96,30 @@ def test_active_panel_never_shows_badge() -> None:
     assert app._panel_unread_count("audit") == 0
 
 
-def test_unread_count_caps_at_99() -> None:
+def test_unread_count_is_not_capped_and_the_badge_caps_visibly() -> None:
+    from defenseclaw.tui.widgets.tab_fit import fit_tab_labels
+
     app = DefenseClawTUI(config=_config_for())
     app.audit_model.items = [object()] * 500  # type: ignore[attr-defined]
     app.state_store.record_seen_count("audit", 0)
     app.active_panel = "overview"
-    assert app._panel_unread_count("audit") == 99
+    assert app._panel_unread_count("audit") == 500
+    panels = (("overview", "1", "Overview"), ("alerts", "2", "Alerts"))
+    assert fit_tab_labels(panels, "overview", {"alerts": 1200}, 0)["alerts"] == "2 Alerts (999+)"
+
+
+def test_alerts_badge_is_the_open_alert_count_not_unread_delta() -> None:
+    """WIN2-U2-11 / GAP-0978: the Alerts tab shows the same count as
+    Overview and the status bar, even after the panel was visited and
+    above 99 alerts."""
+
+    app = DefenseClawTUI(config=_config_for())
+    app.alerts_model.total_count = lambda: 118  # type: ignore[method-assign]
+    app.state_store.record_seen_count("alerts", 107)
+    app.active_panel = "overview"
+    assert app._panel_unread_count("alerts") == 118
+    app.alerts_model.total_count = lambda: 5  # type: ignore[method-assign]
+    assert app._panel_unread_count("alerts") == 5
 
 
 def test_panel_total_count_sums_alerts_streams() -> None:

@@ -25,6 +25,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"go.opentelemetry.io/otel/trace"
 
@@ -263,6 +264,7 @@ func emitJudge(
 	if js := activeJudgeStore(); js != nil {
 		_ = js.PersistJudgeEvent(ctx, direction, payload, opts.ToolName, opts.ToolID, opts.PolicyID, opts.DestinationApp)
 	}
+	judgeHealth.record(action == "error", failureSummary, time.Now())
 
 }
 

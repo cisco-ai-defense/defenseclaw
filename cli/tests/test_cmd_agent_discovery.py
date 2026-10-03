@@ -188,13 +188,40 @@ class DiscoveryEnableTests(unittest.TestCase):
     def test_already_enabled_short_circuits(self):
         runner = CliRunner()
         app = _make_ctx(enabled=True)
-        with patch("defenseclaw.commands.cmd_setup._restart_services") as restart_mock:
+        with patch("defenseclaw.commands.cmd_setup._restart_services") as restart_mock, \
+                patch.object(cmd_agent, "_live_discovery_enabled", return_value=True):
             result = runner.invoke(cmd_agent.discovery_enable, ["--yes", "--no-scan"], obj=app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertIn("already enabled", result.output)
         # Idempotent path must not bounce the gateway or rewrite YAML —
         # otherwise re-running the wizard would cause needless sidecar
         # downtime.
+        restart_mock.assert_not_called()
+        app.cfg.save.assert_not_called()
+
+    def test_restart_pending_restarts_instead_of_already_enabled(self):
+        # GAP-2260: on in config, but the gateway started before the change.
+        runner = CliRunner()
+        app = _make_ctx(enabled=True)
+        with patch.object(cmd_agent, "_live_discovery_enabled", return_value=False), \
+                patch("defenseclaw.commands.cmd_setup._restart_services") as restart_mock, \
+                patch.object(cmd_agent, "_trigger_post_enable_scan") as scan_mock:
+            result = runner.invoke(cmd_agent.discovery_enable, ["--yes"], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertNotIn("already enabled", result.output)
+        self.assertIn("Starting AI discovery", result.output)
+        restart_mock.assert_called_once()
+        scan_mock.assert_called_once()
+
+    def test_restart_pending_with_no_restart_names_the_restart(self):
+        runner = CliRunner()
+        app = _make_ctx(enabled=True)
+        with patch.object(cmd_agent, "_live_discovery_enabled", return_value=False), \
+                patch("defenseclaw.commands.cmd_setup._restart_services") as restart_mock:
+            result = runner.invoke(cmd_agent.discovery_enable, ["--yes", "--no-restart"], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("defenseclaw-gateway restart", result.output)
+        self.assertNotIn("already enabled", result.output)
         restart_mock.assert_not_called()
         app.cfg.save.assert_not_called()
 
@@ -386,6 +413,27 @@ class DiscoveryEnableTests(unittest.TestCase):
 
 
 class DiscoveryDisableTests(unittest.TestCase):
+    def setUp(self):
+        running = patch.object(cmd_agent, "_gateway_running", return_value=True)
+        running.start()
+        self.addCleanup(running.stop)
+
+    def test_stopped_gateway_is_not_started(self):
+        # GAP-2389: the user stopped the gateway; disable saves the change
+        # without starting it and without claiming a restart.
+        runner = CliRunner()
+        app = _make_ctx(enabled=True)
+        with patch.object(cmd_agent, "_gateway_running", return_value=False), \
+                patch("defenseclaw.commands.cmd_setup._restart_services") as restart_mock:
+            result = runner.invoke(cmd_agent.discovery_disable, input="y\n", obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertFalse(app.cfg.ai_discovery.enabled)
+        app.cfg.save.assert_called_once()
+        restart_mock.assert_not_called()
+        self.assertIn("gateway is not running", result.output)
+        self.assertNotIn("Will restart", result.output)
+        self.assertNotIn("restarted", result.output)
+
     def test_already_disabled_short_circuits(self):
         runner = CliRunner()
         app = _make_ctx(enabled=False)
@@ -484,7 +532,8 @@ class DiscoveryConnectorConfigRoundTripTests(unittest.TestCase):
                 app.logger = MagicMock()
                 with patch(
                     "defenseclaw.commands.cmd_setup._restart_services"
-                ) as restart_mock, patch.object(cmd_agent, "_trigger_post_enable_scan"):
+                ) as restart_mock, patch.object(cmd_agent, "_trigger_post_enable_scan"), \
+                        patch.object(cmd_agent, "_gateway_running", return_value=True):
                     result = CliRunner().invoke(command, args, obj=app)
 
                 with open(config_path, encoding="utf-8") as handle:
@@ -684,7 +733,7 @@ class DiscoveryStatusTests(unittest.TestCase):
                 catch_exceptions=False,
             )
         self.assertEqual(result.exit_code, 0, msg=result.output)
-        self.assertIn("sidecar unavailable", result.output)
+        self.assertIn("gateway is not running", result.output)
         # Unreachable means we cannot detect drift — the warning must
         # NOT fire (it would be noise when the operator already knows
         # the sidecar is down).
@@ -887,6 +936,19 @@ class DiscoveryHelperTests(unittest.TestCase):
     silently-clobbered fields or no-op detection regressions.
     """
 
+    def test_scan_clause_labels_the_process_refresh(self):
+        # GAP-1482: the 60 s process tick reads no files; "files=0" there is
+        # not the last full scan's count.
+        full = cmd_agent._discovery_scan_clause(
+            {"source": "api", "scanned_at": "T1", "files_scanned": 968},
+        )
+        self.assertEqual(full, "scanned T1, files=968")
+        tick = cmd_agent._discovery_scan_clause(
+            {"source": "process", "scanned_at": "T2", "files_scanned": 0},
+        )
+        self.assertIn("process refresh T2", tick)
+        self.assertNotIn("files=0", tick)
+
     def test_build_skips_none_fields(self):
         out = cmd_agent._build_discovery_overrides(
             mode="passive",
@@ -1023,7 +1085,8 @@ class DiscoveryEnableFlagsTests(unittest.TestCase):
         # Update path uses the dedicated audit action so SIEMs can
         # tell "discovery toggled" from "discovery tuned".
         details = app.logger.log_action.call_args.args
-        self.assertEqual(details[0], "ai_discovery-update")
+        self.assertEqual(details[0], "config-update")
+        self.assertTrue(details[2].startswith("ai_discovery-update "))
 
     def test_already_enabled_without_diff_short_circuits(self):
         runner = CliRunner()
@@ -1059,7 +1122,8 @@ class DiscoveryEnableFlagsTests(unittest.TestCase):
         app.cfg.save.assert_called_once()
         restart_mock.assert_called_once()
         scan_mock.assert_not_called()
-        self.assertEqual(app.logger.log_action.call_args.args[0], "ai_discovery-update")
+        self.assertEqual(app.logger.log_action.call_args.args[0], "config-update")
+        self.assertTrue(app.logger.log_action.call_args.args[2].startswith("ai_discovery-update "))
 
     def test_host_plane_requires_explicit_opt_in(self):
         runner = CliRunner()
@@ -1377,7 +1441,7 @@ class DiscoveryScanTests(unittest.TestCase):
                 patch("defenseclaw.commands.cmd_agent.OrchestratorClient", FakeClient):
             result = runner.invoke(cmd_agent.discovery_scan, [], obj=app)
         self.assertNotEqual(result.exit_code, 0)
-        self.assertIn("sidecar unavailable", result.output)
+        self.assertIn("gateway is not running", result.output)
 
 
 class AgentProcessesTests(unittest.TestCase):
@@ -1476,3 +1540,26 @@ class AgentProcessesTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_processes_last_active_uses_newest_product_activity():
+    # GAP-1503: a process signal's last_active_at is its start; show the
+    # product's newest activity (what 'agent usage' shows) instead.
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+    started = (now - timedelta(minutes=32)).isoformat()
+    prompted = (now - timedelta(minutes=2)).isoformat()
+    signals = [
+        {"product": "Claude Code", "last_active_at": started,
+         "runtime": {"pid": 7549, "uptime_sec": 1904, "comm": "claude"}},
+        {"product": "Claude Code", "last_active_at": prompted},
+    ]
+
+    out = cmd_agent._render_ai_processes_table(
+        signals[:1], product_last_active=cmd_agent._product_last_active(signals),
+    )
+
+    assert "2m ago" in out
+    assert "32m ago" not in out
+    assert "newest activity seen for that product" in out

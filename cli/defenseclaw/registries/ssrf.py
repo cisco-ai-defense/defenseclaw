@@ -178,7 +178,11 @@ def _default_resolver(host: str) -> list[str]:
     # for both AF_INET (str) and AF_INET6 (str). Cast explicitly so the
     # set is typed as Set[str] for mypy — getaddrinfo()'s stub returns
     # Tuple[Any, ...] which leaks an Any/int union otherwise.
-    return list({str(info[4][0]) for info in infos})
+    # Keep getaddrinfo's order (RFC 6724: IPv4 first on a host without IPv6
+    # routing). A set shuffled it per process, so resolve_and_pin sometimes
+    # pinned an unreachable IPv6 address and remote MCP scans failed with
+    # "connection was cancelled" (GAP-1311).
+    return list(dict.fromkeys(str(info[4][0]) for info in infos))
 
 
 def guard_url(

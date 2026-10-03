@@ -549,3 +549,57 @@ def test_overview_metrics_do_not_label_health_errors_offline() -> None:
 
     assert "gateway health error" in metrics["hook_calls"].detail
     assert "gateway offline" not in metrics["hook_calls"].detail
+
+
+def test_missing_pid_file_reads_as_not_running_with_start_hint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GAP-1110: a stopped per-user gateway is 'not running', not an identity error."""
+
+    monkeypatch.setattr(
+        "defenseclaw.commands.cmd_doctor._trusted_gateway_listener",
+        lambda _config: SimpleNamespace(
+            trusted=False, pid=0, code="missing", detail="the gateway is not running (PID file is missing)"
+        ),
+    )
+    result = _fetch_gateway_health(_config())
+
+    assert result.state == "offline"
+    assert "managed" not in result.detail
+    model = OverviewPanelModel()
+    model.set_gateway_probe(result.state, result.detail)
+    messages = [notice.message for notice in model.build_notices()]
+    assert any("not running" in m and "start" in m for m in messages), messages
+
+
+def test_restarting_gateway_without_listener_reads_as_starting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GAP-2513: right after a restart the status bar said 'listener identity is unverified'."""
+
+    import time
+
+    def trust(started: float) -> SimpleNamespace:
+        return SimpleNamespace(
+            trusted=False,
+            pid=4242,
+            code="missing_listener",
+            detail="no listener on the configured API endpoint",
+            record=SimpleNamespace(start_time=str(int(started))),
+        )
+
+    monkeypatch.setattr(
+        "defenseclaw.commands.cmd_doctor._trusted_gateway_listener",
+        lambda _config: trust(time.time() - 3),
+    )
+    result = _fetch_gateway_health(_config())
+    assert (result.state, result.detail) == ("starting", "starting")
+
+    # A gateway that has been up for minutes without its listener is a real fault.
+    monkeypatch.setattr(
+        "defenseclaw.commands.cmd_doctor._trusted_gateway_listener",
+        lambda _config: trust(time.time() - 600),
+    )
+    stuck = _fetch_gateway_health(_config())
+    assert stuck.state == "error"
+    assert "no listener on the configured API endpoint" in stuck.detail

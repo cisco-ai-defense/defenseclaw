@@ -70,6 +70,42 @@ def _iter_detail_tokens(value: str) -> Iterator[tuple[str, str]]:
         yield key, text[value_start:i]
 
 
+# Hook events that fire after the tool already ran: a finding there cannot
+# block the call, whatever the connector's mode (GAP-1303).
+_POST_TOOL_HOOK_EVENTS = frozenset({
+    "posttooluse", "posttoolusefailure", "posttoolbatch", "toolresult",
+    "aftertool", "aftershellexecution", "aftermcpexecution", "afterfileedit",
+})
+
+
+# Hook events that only observe text already on screen: Claude Code runs
+# MessageDisplay async, so a finding there cannot block either (GAP-1531).
+_DISPLAY_HOOK_EVENTS = frozenset({"messagedisplay"})
+
+POST_TOOL_DECISION = "detected after the tool ran (cannot block)"
+DISPLAY_DECISION = "detected in the displayed reply (cannot block)"
+
+
+def detection_only_hook_label(event: str) -> str:
+    """Decision label of a finding on a hook event that cannot block, else "".
+
+    Accepts a bare event name or a ``connector:Event`` hook target."""
+    name = str(event or "").strip().rsplit(":", 1)[-1].strip().lower()
+    if name in _POST_TOOL_HOOK_EVENTS:
+        return POST_TOOL_DECISION
+    if name in _DISPLAY_HOOK_EVENTS:
+        return DISPLAY_DECISION
+    return ""
+
+
+def is_post_tool_hook_event(event: str) -> bool:
+    """True for a hook event that runs after the tool call (PostToolUse, ...).
+
+    Accepts a bare event name or a ``connector:Event`` hook target."""
+    name = str(event or "").strip().rsplit(":", 1)[-1].strip().lower()
+    return name in _POST_TOOL_HOOK_EVENTS
+
+
 def parse_detail_tokens(value: str) -> dict[str, str]:
     """Parse exact whitespace-delimited ``key=value`` tokens.
 
@@ -150,6 +186,28 @@ def connector_hook_decision(
     if raw_action in _BLOCK_ACTIONS or would_block:
         return "alert"
     return "allow"
+
+
+def hook_decision_may_block_sql(details: str, structured: str, enforced: str) -> str:
+    """SQL pre-check to put before ``dc_hook_decision(...) = 'block'``.
+
+    A block needs an enforced flag or a block/deny ``action`` value. Checking
+    for them in SQLite first keeps the per-row Python classifier off rows that
+    can't block: on a 1.27 GB audit.db of legacy rows it ran for minutes
+    (GAP-1487), and legacy hook rows carry ``action=allow`` in their details,
+    so a bare ``action`` test still let every one through (GAP-1674). LIKE is
+    case-insensitive, as the classifier is on values; a quoted value is left
+    to the classifier.
+    """
+
+    return (
+        f"(CAST(COALESCE({enforced}, 0) AS TEXT) NOT IN ('0', '')"
+        f" OR {details} LIKE '%action=block%'"
+        f" OR {details} LIKE '%action=deny%'"
+        f" OR {details} LIKE '%action=\"%'"
+        f" OR instr(COALESCE({structured}, ''), 'action') > 0"
+        f" OR instr(COALESCE({structured}, ''), 'enforced') > 0)"
+    )
 
 
 def aggregate_connector_hook_decision(

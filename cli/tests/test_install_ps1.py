@@ -110,11 +110,12 @@ def test_connector_choices_are_the_windows_supported_connectors() -> None:
 def test_uninstall_owns_every_file_the_installer_writes_to_local_bin() -> None:
     hook_state = re.search(r'\$HookState = "([^"]+)"', _text())
     posix_shim = re.search(r'\$PosixShim = "([^"]+)"', _text())
-    assert hook_state is not None and posix_shim is not None
+    cli_launcher = re.search(r'\$CliLauncher = "([^"]+)"', _text())
+    assert hook_state is not None and posix_shim is not None and cli_launcher is not None
     written = (
         set(_list("ManagedBinaries"))
         | {f"{shim}.cmd" for shim in _list("ManagedShims")}
-        | {hook_state.group(1), posix_shim.group(1)}
+        | {hook_state.group(1), posix_shim.group(1), cli_launcher.group(1)}
     )
     _root, targets = cmd_uninstall._owned_binary_targets("win32")
     assert written == {re.split(r"[\\/]", target)[-1] for target in targets}
@@ -124,6 +125,29 @@ def test_uninstall_owns_every_file_the_installer_writes_to_local_bin() -> None:
     uv_written = set(re.findall(r'"([^"]+)"', uv.group(1))) | {cmd_uninstall._UV_RECORD}
     assert uv_written == set(cmd_uninstall._UV_NAMES["win32"]) | {cmd_uninstall._UV_RECORD}
     assert written | uv_written == windows_uninstall_helper._ALLOWED_BINARIES
+
+
+def test_a_release_install_removes_the_developer_install_files() -> None:
+    # GAP-1493: defenseclaw.exe from `make all` shadows the release
+    # defenseclaw.cmd (PATHEXT), so the release install removes what make all
+    # published beyond the managed binaries, once the swap is done.
+    # Its defenseclaw.exe is replaced by the installer's launcher (GAP-2237).
+    developer = set(cmd_uninstall._WINDOWS_DEVELOPER_FILES) - set(_list("ManagedBinaries")) - {"defenseclaw.exe"}
+    assert set(_list("DeveloperFiles")) == developer
+    text = _text()
+    assert '(Join-Path $BinDir ".defenseclaw-source-root") -PathType Leaf' in text
+    assert "    Complete-Swap\n    Remove-DeveloperFiles\n" in text
+
+
+def test_powershell_runs_a_native_cli_launcher() -> None:
+    # GAP-2237: through defenseclaw.cmd, cmd.exe asked "Terminate batch job
+    # (Y/N)?" after Ctrl+C. PATHEXT runs .exe before .cmd, so the installer
+    # puts the venv's own launcher beside the shim, and rollback keeps it.
+    text = _text()
+    assert '$CliLauncher = "defenseclaw.exe"' in text
+    assert "@($PosixShim, $CliLauncher, $HookState)" in text
+    assert "Write-PosixShim $target; Install-File $target (Join-Path $BinDir $CliLauncher)" in text
+    assert "defenseclaw.exe" not in _list("DeveloperFiles")
 
 
 def test_cli_shim_is_the_one_uninstall_recognizes() -> None:
@@ -210,3 +234,358 @@ def test_the_upgrade_window_keeps_the_outcome_on_screen_with_yes() -> None:
     assert "[Console]::KeyAvailable" in body and "$Run.Log" in body
     # Windows PowerShell 5.1 runs this installer and has no [uint] accelerator.
     assert '"uint[]"' not in body
+    # GAP-1570: `& install.ps1` typed into the user's own shell returns at once;
+    # only a console started for the script waits before closing.
+    started_for_script = (
+        "[Environment]::CommandLine.IndexOf($scriptName, [StringComparison]::OrdinalIgnoreCase) -lt 0) { return }"
+    )
+    assert body.index("$Run.Log") < body.index(started_for_script) < body.index("if (-not $Yes)")
+
+
+def test_the_suggested_cleanup_removes_the_read_only_key_copy() -> None:
+    # GAP-1645: Remove-Item -Force first resets each file's attributes, which the
+    # read-only redaction key copy refuses; rd /s /q deletes it through the folder.
+    text = _text()
+    assert "Remove-Item -Recurse -Force '" not in text
+    assert text.count('cmd /c rd /s /q `"') == 3
+    # The installer's own cleanup deletes through .NET first, which is also much
+    # faster than Remove-Item in Windows PowerShell 5.1 (GAP-1600).
+    body = text[text.index("function Remove-Tree") : text.index("function New-InstallDirectory")]
+    assert body.index("[IO.Directory]::Delete(") < body.index("-Recurse -Force -ErrorAction SilentlyContinue")
+
+
+def test_remove_tree_retries_without_logging_a_terminating_error() -> None:
+    # WIN2-U3-13 item 10: a caught Remove-Item -ErrorAction Stop still wrote
+    # "TerminatingError(Remove-Item)" into the upgrade transcript.
+    text = _text()
+    body = text[text.index("function Remove-Tree") : text.index("function New-InstallDirectory")]
+    retry = body[: body.index("if ($attempt -ge 30)")] + body[body.index("Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue") :]
+    assert "-ErrorAction Stop" not in retry
+    assert "if ($attempt -ge 30) { Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop; return }" in body
+
+
+def test_architecture_check_avoids_the_psreadline_polyfill() -> None:
+    # GAP-1054: in an interactive Windows PowerShell 5.1 console (`irm | iex`)
+    # [Runtime.InteropServices.RuntimeInformation] is PSReadLine's polyfill.
+    text = _text()
+    assert "[Runtime.InteropServices.RuntimeInformation]::OSArchitecture" not in text
+    assert "switch (Get-OSArchitectureName) {" in text
+    body = text[text.index("function Get-OSArchitectureName {") :][:900]
+    assert '[object].Assembly.GetType("System.Runtime.InteropServices.RuntimeInformation")' in body
+    assert "$env:PROCESSOR_ARCHITEW6432" in body and "$env:PROCESSOR_ARCHITECTURE" in body
+
+
+def test_a_uv_in_the_bin_folder_is_used_not_replaced() -> None:
+    # GAP-1125: a uv.exe in %USERPROFILE%\\.local\\bin that is not on PATH yet is
+    # the user's; the installer must not overwrite and record it.
+    text = _text()
+    lookup = text[text.index("$Uv = [string](Get-Command uv.exe") :][:600]
+    assert '(Test-Path -LiteralPath (Join-Path $BinDir "uv.exe") -PathType Leaf)) { $Uv = Join-Path $BinDir "uv.exe" }' in lookup
+    assert lookup.index("Join-Path $BinDir") < lookup.index("$Uv = Install-Uv")
+
+
+def test_the_locked_package_install_is_retried_with_backoff() -> None:
+    # GAP-1315: a sharing violation (os error 32) on uv's cache rename failed
+    # the whole Windows install.
+    # The DefenseClaw wheel install hit the same hold, so both uv pip steps
+    # go through the retry helper.
+    start = _text().index("function New-Venv")
+    body = _text()[start : _text().index("function Invoke-UvPipInstall")]
+    assert body.count("Invoke-UvPipInstall") == 2
+    assert "Invoke-Native $Uv @(\"pip\"" not in body
+    # GAP-1941: on a busy host one retry hit the same hold on the next
+    # package, so it backs off several times, checks for a full disk before
+    # each attempt, and the last failure says to run the command again.
+    helper = _text()[_text().index("function Invoke-UvPipInstall(") :][:1200]
+    assert "$waits = @(5, 15, 30)" in helper
+    assert helper.index("Test-DiskFull") > helper.index("for ($i = 0")
+    assert "Start-Sleep -Seconds $waits[$i]" in helper
+    assert "run the same command again" in helper
+
+
+def _ps1_function(name: str) -> str:
+    text = _text()
+    start = text.index(f"function {name} ")
+    return text[start : text.index("\n}\n", start) + 3]
+
+
+_GUARDRAIL_CONFIGS = {
+    # What 'uninstall --binaries' and 'setup guardrail --disable' save.
+    "off": ("guardrail:\n  enabled: false\n  mode: action\n  judge:\n    enabled: true\ngateway:\n  port: 18970\n", True),
+    "on": ("guardrail:\n  enabled: true\n  judge:\n    enabled: false\n", False),
+    "other-section": ("guardrail:\n  mode: action\nwebhook:\n  enabled: false\n", False),
+    "no-guardrail": ("gateway:\n  enabled: false\n", False),
+}
+
+
+def test_reinstall_over_a_disabled_guardrail_names_setup_guardrail() -> None:
+    # GAP-2481: after 'uninstall --binaries' (guardrail off, hooks torn down)
+    # the reinstall said only "Start it with: defenseclaw-gateway start".
+    install = _ps1_function("Invoke-Install")
+    branch = install[install.index("if (Test-GuardrailOff) {") :]
+    assert branch.index("Turn it back on with: defenseclaw setup guardrail") < branch.index(
+        "Start it with: defenseclaw-gateway start"
+    )
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize("name", sorted(_GUARDRAIL_CONFIGS))
+def test_test_guardrail_off_reads_the_kept_config(tmp_path: Path, name: str) -> None:
+    body, expected = _GUARDRAIL_CONFIGS[name]
+    (tmp_path / "config.yaml").write_text(body, encoding="utf-8")
+    script = f"$DataDir = '{tmp_path}'\n{_ps1_function('Test-GuardrailOff')}\nif (Test-GuardrailOff) {{ 'off' }} else {{ 'on' }}\n"
+    env = {k: v for k, v in os.environ.items() if k != "DEFENSECLAW_CONFIG"}
+    completed = subprocess.run(
+        [POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", script],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env=env,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert completed.stdout.strip() == ("off" if expected else "on")
+
+
+def test_a_slow_first_start_is_waited_for_before_restoring() -> None:
+    # GAP-1348: a 1.x gateway over a large audit database outlasted start's
+    # 60-second readiness wait, and the upgrade rolled back while it was
+    # still starting.
+    body = _ps1_function("Start-Gateway")
+    assert "if ($rc -in @(0, 3) -or -not (Get-GatewayProcess)) { return $rc }" in body
+    assert "$deadline = (Get-Date).AddMinutes(3)" in body
+    assert 'Invoke-Native $gateway @("status") -Quiet' in body
+    assert 'Write-Ok "The gateway finished starting"; return 0' in body
+
+
+def test_a_restore_that_leaves_the_old_gateway_down_says_so() -> None:
+    # GAP-1349: "Your previous install is back" while the gateway that ran
+    # before stayed down and fail-closed connectors blocked every tool call.
+    body = _ps1_function("Restart-Old")
+    assert "$Run.OldGatewayDown = $WasRunning -and -not (Get-GatewayProcess)" in body
+    assert "did not start again, so agent hooks are not guarded" in body
+    assert "but its gateway is not running" in _ps1_function("Get-RestoredNote")
+    text = _text()
+    assert text.count("$(Get-RestoredNote) Log: $($Run.Log)") == 2
+    assert "Your previous install is back. Log:" not in text
+
+
+def test_a_later_upgrade_keeps_the_0_x_audit_history() -> None:
+    # GAP-1360: previous\ held the only copy of the 0.x audit history, and the
+    # next upgrade replaced it.
+    body = _ps1_function("Save-RolledBackData")
+    assert '$label = "audit-history"' in body
+    assert '[version]$version -lt [version]"1.0.0"' in body
+    assert "backups\\$label-$version-" in body
+
+
+def test_the_rollback_copy_states_its_size_and_the_free_space() -> None:
+    # GAP-1519: an upgrade with a 1.3 GB audit.db never said how much it copied.
+    body = _text()[_text().index("function Save-Snapshot") :][:1400]
+    assert "Saving a rollback copy of the data folder ({0:N0} MB needed{1})" in body
+    assert body.index("Saving a rollback copy") < body.index("Not enough free disk space")
+
+
+def test_a_pending_uninstall_cleanup_is_waited_for_before_the_data_dir_is_touched() -> None:
+    # GAP-1647: an install started right after `uninstall --all` lost its
+    # .staging to the deferred cleanup, which runs after the CLI exits.
+    start = _text().index("function Wait-UninstallCleanup(")
+    body = _text()[start : _text().index("\n}\n", start)]
+    assert '-Filter "defenseclaw-uninstall-*"' in body and '"plan.json"' in body
+    assert '"interpreter_dirs"' in body
+    assert "AddMinutes(-10)" in body
+    assert "wait a minute, then run the installer again. Nothing was changed." in body
+    install = _ps1_function("Invoke-Install")
+    assert install.index("Wait-UninstallCleanup") < install.index('Join-Path $DataDir "logs"')
+    # The helper's folder names match what uninstall writes.
+    uninstall = (ROOT / "cli" / "defenseclaw" / "commands" / "cmd_uninstall.py").read_text(encoding="utf-8")
+    assert 'tempfile.mkdtemp(prefix=f"defenseclaw-uninstall-{token}-")' in uninstall
+    assert 'os.path.join(helper_dir, "plan.json")' in uninstall
+    assert '"interpreter_dirs"' in uninstall
+
+
+def test_uv_gets_load_tolerant_timeouts_and_they_are_restored() -> None:
+    # GAP-1776: uv's 60 s bytecode and 30 s HTTP limits failed installs on a
+    # busy Windows host.
+    install = _ps1_function("Invoke-Install")
+    assert 'if (-not $env:UV_COMPILE_BYTECODE_TIMEOUT) { $env:UV_COMPILE_BYTECODE_TIMEOUT = "600" }' in install
+    assert 'if (-not $env:UV_HTTP_TIMEOUT) { $env:UV_HTTP_TIMEOUT = "300" }' in install
+    restore = _text()[_text().index("$savedEnv = @{}") :][:400]
+    assert '"UV_COMPILE_BYTECODE_TIMEOUT", "UV_HTTP_TIMEOUT"' in restore
+
+
+def test_a_first_install_does_not_mention_a_previous_install() -> None:
+    # GAP-1827: a first install printed "Saving a rollback copy ... (0 MB needed)"
+    # and "Cleaning up the previous install's files".
+    assert "if ($PrevVersion -or $need -gt 0) {" in _ps1_function("Save-Snapshot")
+    swap = _ps1_function("Complete-Swap")
+    assert "if ($PrevVersion) { Write-Info \"Cleaning up the previous install's files" in swap
+    assert 'else { Write-Info "Removing the staging files" }' in swap
+
+
+def test_the_install_log_can_time_a_failed_gateway_start() -> None:
+    # GAP-1797: no line of the install log (a transcript) had a time.
+    text = _text()
+    assert '"--- $Message  [$(Get-UtcClock)]"' in text
+    assert 'Write-Info "Starting the gateway [$(Get-UtcClock)]"' in _ps1_function("Start-Gateway")
+    assert "did not become healthy within {0:N0} s [{1}]" in text
+
+
+def test_the_previous_watchdog_is_stopped_even_when_the_gateway_is_down() -> None:
+    # GAP-1833: with the gateway down the old watchdog kept running from the
+    # renamed binary and held its ownership lock against the new one.
+    body = _ps1_function("Stop-Watchdog")
+    assert '$image = Join-Path $BinDir "defenseclaw-gateway.exe"' in body
+    assert "Get-ProcessesUnder @($image)" in body  # a prefix: .old-* too
+    assert 'Invoke-Native $image @("watchdog", "stop") -Quiet' in body
+    assert "Stop-Process -Id $_.ProcessId -Force" in body
+    # Rollback and recovery stop the gateway through Stop-Gateway, running or not.
+    stop_gateway = _ps1_function("Stop-Gateway")
+    assert "if (-not $process) { Stop-Watchdog; return $true }" in stop_gateway
+    assert stop_gateway.count("Stop-Watchdog") == 2
+    install = _ps1_function("Invoke-Install")
+    stop = install.index("    Stop-Watchdog\n")
+    assert install.index('Write-Info "Stopping the gateway') < stop < install.index("Save-Snapshot")
+    assert not install[install.index("if ($WasRunning) {") : stop].count("Stop-Watchdog")
+
+
+def test_disk_room_is_checked_before_staging_and_before_the_gateway_stops() -> None:
+    # GAP-1841: only the rollback copy was checked, after staging and after
+    # the gateway was stopped. GAP-1839: the staging and environment sizes
+    # were never counted.
+    text = _text()
+    room = text[text.index("function Assert-InstallRoom(") :][:1400]
+    assert "$data = Get-DataSize" in room
+    assert "$free -ge $data + $Extra + 100MB" in room
+    assert "nothing was changed" in room
+    install = _ps1_function("Invoke-Install")
+    first = install.index('Assert-InstallRoom $InstallRoom "the new version"')
+    assert first < install.index("New-InstallDirectory $Staging")
+    second = install.index('Assert-InstallRoom $FinalEnvRoom "the final Python environment"')
+    assert install.index("is staged and checked") < second < install.index('Write-Info "Stopping the gateway')
+
+
+def test_a_stopped_or_undone_install_frees_the_staged_release_first() -> None:
+    # GAP-1839/GAP-1841: the 873 MB .staging left no room for the restore or
+    # for the old gateway's restart.
+    clear = _ps1_function("Clear-StagedRelease")
+    assert 'Where-Object { $_.Name -ne "hook-runtime-state.json" }' in clear
+    restore = _ps1_function("Restore-Snapshot")
+    assert restore.index("Clear-StagedRelease") < restore.index("Restore-Slot $Snap")
+    assert "run the installer again to finish restoring it" in restore
+    install = _ps1_function("Invoke-Install")
+    failed = install[install.index("if (-not $saved) {") :][:500]
+    assert failed.index("Clear-StagedRelease") < failed.index("Restart-Old")
+    assert "it was not changed, but its gateway is not running" in failed
+    final = _text()[_text().index("if ($Run.Lock) {") :][:200]
+    assert "Invoke-Quietly { Clear-StagedRelease }" in final
+
+
+def test_a_first_install_on_a_full_disk_says_so_and_keeps_no_failed_copy() -> None:
+    # GAP-1883: the uv retry blamed a busy host, and a failed first install
+    # kept about 2 GB (.failed-*, .venv) that held the disk full.
+    uv = _text()[_text().index("function Invoke-UvPipInstall(") :][:1200]
+    assert uv.index("if (Test-DiskFull) { return $false }") < uv.index("Retrying the Python package install")
+    full = _ps1_function("Test-DiskFull")
+    assert "$free -ge 300MB" in full and "then run the installer again" in full
+    restore = _ps1_function("Restore-Snapshot")
+    first = restore[restore.index("if (-not $PrevVersion) {") :]
+    assert first.index("Remove-Tree $failed") < first.index("return") < first.index("was kept in $failed")
+    assert 'if (-not $PrevVersion) { return "Nothing was left installed." }' in _ps1_function("Get-RestoredNote")
+
+
+def test_an_interrupted_setup_upgrade_restarts_the_setup_gateway() -> None:
+    # GAP-1839: recovery ran ~\.local\bin\defenseclaw-gateway.exe, which a
+    # DefenseClaw Setup install never had ("is not recognized").
+    start = _ps1_function("Start-Gateway")
+    assert "if (-not (Test-Path -LiteralPath $gateway -PathType Leaf))" in start
+    assert start.index("Test-Path -LiteralPath $gateway") < start.index('Invoke-Native $gateway @("start")')
+    resume = _ps1_function("Resume-InterruptedRun")
+    assert "Start-SetupGateway $setupInstall.Root" in resume
+    assert "Start-SetupGateway $Setup.Root" in _ps1_function("Restore-SetupInstall")
+
+
+def test_the_uv_folder_is_protected_before_uv_runs_and_before_a_rollback_starts_the_gateway() -> None:
+    # GAP-1988: the uv cache and Python in the data dir inherited its
+    # permissions, so the 1.0.0 gateway, which re-applies them on every private
+    # write, missed its 5-second start window after a rollback to 1.0.0.
+    protect = _ps1_function("Protect-UvDirectory")
+    assert protect.index("if (-not $Create) { return }") < protect.index("New-Item -ItemType Directory")
+    assert "if ($acl.AreAccessRulesProtected) { return }" in protect
+    assert "$acl.SetAccessRuleProtection($true, $true)" in protect
+    install = _ps1_function("Invoke-Install")
+    uv_env = install.index('$env:UV_PYTHON_INSTALL_DIR = Join-Path $DataDir ".uv\\python"')
+    assert uv_env < install.index("Protect-UvDirectory -Create") < install.index("$Uv = Install-Uv")
+    rollback = _ps1_function("Invoke-Rollback")
+    assert (
+        rollback.index("Switch-WithPrevious")
+        < rollback.index("Protect-UvDirectory")
+        < rollback.index("if ($startAfter -and (Start-Gateway)")
+    )
+
+
+def test_a_rollback_to_1_0_0_starts_its_gateway_on_a_large_wal_audit_db(tmp_path: Path) -> None:
+    # GAP-1988: the 1.0.0 gateway refuses a WAL-mode audit.db whose 5-second
+    # startup check times out ("SQLite sidecar -wal changed before secure
+    # open"), so the installers put the store in rollback-journal mode before
+    # they start a gateway older than 1.0.1.
+    import sqlite3
+    import sys
+
+    ps1 = re.search(r'^\$AuditJournalPy = "([^"]+)"$', _text(), re.M)
+    sh_text = (Path(__file__).resolve().parents[2] / "scripts" / "install.sh").read_text(encoding="utf-8")
+    sh = re.search(r'^AUDIT_JOURNAL_PY="([^"]+)"$', sh_text, re.M)
+    assert ps1 and sh and ps1.group(1) == sh.group(1)
+    db = tmp_path / "audit.db"
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+        conn.execute("CREATE TABLE audit_events (id TEXT)")
+        conn.execute("INSERT INTO audit_events VALUES ('kept')")
+    conn.close()
+    for _ in range(2):  # a store already in rollback-journal mode is left as it is
+        subprocess.run([sys.executable, "-c", ps1.group(1), str(db)], check=True)
+        conn = sqlite3.connect(db)
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
+        assert conn.execute("SELECT id FROM audit_events").fetchall() == [("kept",)]
+        conn.close()
+        assert not (tmp_path / "audit.db-wal").exists()
+    start = _ps1_function("Start-Gateway")
+    guard = 'if ((Test-Version $version) -and [version]$version -lt [version]"1.0.1") { Reset-AuditJournalMode }'
+    assert start.index(guard) < start.index('Invoke-Native $gateway @("start")')
+    sh_start = sh_text[sh_text.index("\nstart_gateway() {") :]
+    assert sh_start.index('version_lt "${version}" 1.0.1; then reset_audit_journal_mode; fi') < sh_start.index(
+        '"${BIN_DIR}/defenseclaw-gateway" start'
+    )
+
+
+def test_install_folders_set_only_the_acl_part_that_changed() -> None:
+    # GAP-2004: Set-Acl writes every part of the security descriptor and was
+    # refused for a standard user on a second NTFS volume, so a
+    # DEFENSECLAW_HOME there died with a raw PowerShell error.
+    helper = _text()[_text().index("function Set-DirectoryAcl(") :][:600]
+    assert "$dir.SetAccessControl($Acl)" in helper
+    assert "[IO.FileSystemAclExtensions]::SetAccessControl($dir, $Acl)" in helper
+    new_dir = _text()[_text().index("function New-InstallDirectory(") :][:900]
+    assert "Set-Acl" not in new_dir
+    assert 'catch { Die "Could not set the permissions of ${Path}:' in new_dir
+    assert "Set-Acl" not in _ps1_function("Protect-UvDirectory")
+    assert "Set-DirectoryAcl $DataDir $acl" in _ps1_function("Invoke-Install")
+
+
+def test_the_last_uv_hint_names_both_lock_errors() -> None:
+    # GAP-2025: a held uv cache file fails with os error 5 as well as 32.
+    assert "file in use or access denied (os error 32 or 5)" in _text()[_text().index("function Invoke-UvPipInstall(") :][:1300]
+
+
+def test_a_failed_first_install_names_the_kept_uv_cache_and_a_full_disk() -> None:
+    # GAP-1883: the space refusal and a staging failure kept the uv cache
+    # silently, and a disk that filled at the binary copy showed only the
+    # raw .NET text.
+    assert "Write-KeptUvCache" in _ps1_function("Restore-Snapshot")
+    room = _text()[_text().index("function Assert-InstallRoom(") :][:1400]
+    assert room.index("if (-not $PrevVersion) { Write-KeptUvCache }") < room.index("Die (")
+    install = _ps1_function("Invoke-Install")
+    staging = install[install.index('(New-Venv (Join-Path $Staging "venv")') :][:300]
+    assert staging.index("Write-KeptUvCache") < staging.index("Die ")
+    assert "Write-Err $_.Exception.Message; [void](Test-DiskFull); $installed = $false" in install
+    assert "Write-Err $_.Exception.Message; [void](Test-DiskFull); $saved = $false" in install

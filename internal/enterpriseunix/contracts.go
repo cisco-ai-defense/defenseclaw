@@ -14,9 +14,12 @@ package enterpriseunix
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -333,6 +336,17 @@ func (l *lifecycle) describeGuardianCleanups() {
 		if account == "" {
 			account = strings.TrimSpace(entry.UserHome)
 		}
+		if home := strings.TrimSpace(entry.UserHome); home != "" {
+			if _, err := os.Lstat(env.P(home)); errors.Is(err, os.ErrNotExist) {
+				// A deleted account took its home and the registration with
+				// it; the guardian drops the entry once the directory no
+				// longer knows the account (GAP-1205).
+				r.AddWarning(codeGuardianCleanupPending, fmt.Sprintf(
+					"%s for user %s: the home %s no longer exists (the account was deleted), so no hook registration is left there; the hook guardian drops this entry on its next pass once the account lookup reports it gone",
+					entry.Connector, account, home))
+				continue
+			}
+		}
 		message := fmt.Sprintf("%s for user %s is no longer enrolled, but DefenseClaw's hook registration is still in %s and the gateway refuses its hooks; ",
 			entry.Connector, account, entry.UserHome)
 		if reason := strings.TrimSpace(entry.LastError); reason != "" {
@@ -341,6 +355,49 @@ func (l *lifecycle) describeGuardianCleanups() {
 			message += "the hook guardian removes it as that user once the home is available"
 		}
 		r.AddWarning(codeGuardianCleanupPending, message)
+	}
+}
+
+// codeEnrolledAccountDeleted names an account targets.yaml still enrolls
+// whose home no longer exists: the account was deleted, and its enrollment
+// lasts until the hook enumerator's next pass no longer finds the account.
+// It is a warning: verify and security_complete do not fail on it.
+const codeEnrolledAccountDeleted = "enrolled_account_deleted"
+
+// describeDeletedEnrolledAccounts names each enrolled account whose home is
+// gone. Until the enumerator's next pass drops it, status listed it among
+// the healthy targets with its agents pending and said nothing about the
+// deletion (GAP-1867).
+func (l *lifecycle) describeDeletedEnrolledAccounts() {
+	env, r := l.env, l.result
+	manifest, err := enterprisehooks.LoadManifest(env.P(env.Layout.ManifestPath))
+	if err != nil {
+		return
+	}
+	connectors := map[string][]string{}
+	var accounts []string
+	for _, target := range manifest.Targets {
+		home := strings.TrimSpace(target.UserHome)
+		if home == "" || (target.Enabled != nil && !*target.Enabled) {
+			continue
+		}
+		if _, err := os.Lstat(env.P(home)); !errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		account := cmp.Or(strings.TrimSpace(target.User), home)
+		key := account + " (home " + home + ")"
+		if _, seen := connectors[key]; !seen {
+			accounts = append(accounts, key)
+		}
+		connectors[key] = append(connectors[key], strings.TrimSpace(target.Connector))
+	}
+	sort.Strings(accounts)
+	for _, account := range accounts {
+		names := connectors[account]
+		sort.Strings(names)
+		r.AddWarning(codeEnrolledAccountDeleted, fmt.Sprintf(
+			"user %s was deleted: its home no longer exists, but it is still enrolled for %s until the hook enumerator's next pass drops it (the hook guardian then removes it as well); nothing is left to protect in that home",
+			account, strings.Join(names, ", ")))
 	}
 }
 

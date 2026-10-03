@@ -163,6 +163,27 @@ first-party allow-list for additional containment.
 Not sure what to pick? Run `defenseclaw setup guardrail` (no flags) — the [interactive wizard](/docs/setup/guardrail#watch-the-interactive-flow) walks you through every choice with safe defaults pre-selected and inline help. The [Prompt → flag mapping](/docs/setup/guardrail#prompt-flag-mapping) table gives you the CI-shaped command for the same configuration.
 </Callout>
 
+### Bedrock through a VPC endpoint
+
+When `bedrock-runtime.<region>.amazonaws.com` resolves to an AWS PrivateLink
+(VPC interface) endpoint, the guardrail proxy refuses the private address and
+every turn fails. The agent shows `DefenseClaw refused a private LLM endpoint;
+if you trust it, run: defenseclaw guardrail allow-private-upstream <host>`, and
+`defenseclaw doctor` warns with a **Private upstream** row naming the host.
+Allow the endpoint; the command restarts a running gateway so the next turn
+goes through:
+
+```bash
+defenseclaw guardrail allow-private-upstream bedrock-runtime.us-east-1.amazonaws.com
+```
+
+### OpenClaw gateway on another port
+
+`defenseclaw setup openclaw` reads the OpenClaw gateway port from
+`openclaw.json` (`gateway.port`). If you onboard OpenClaw on another port
+later, run `defenseclaw setup openclaw` again or
+`defenseclaw setup gateway --port <port>`.
+
 ## Files DefenseClaw will modify
 
 <Files>

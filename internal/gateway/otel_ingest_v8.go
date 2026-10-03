@@ -385,6 +385,10 @@ func buildOTLPIngestGeneratedLog(
 		severity = observability.Present(observability.SeverityMedium)
 		logLevel = observability.Present(observability.LogLevelWarn)
 	}
+	if otlpDropIsExpectedUnmapped(event.eventName, event.reasonClass) {
+		severity = observability.Present(observability.SeverityInfo)
+		logLevel = observability.Present(observability.LogLevelInfo)
+	}
 	switch event.eventName {
 	case observability.EventName(observability.TelemetryEventTelemetryBatchAccepted):
 		return builder.BuildLogTelemetryBatchAccepted(observability.LogTelemetryBatchAcceptedInput{
@@ -437,6 +441,16 @@ func buildOTLPIngestGeneratedLog(
 	}
 }
 
+// otlpDropIsExpectedUnmapped reports a drop of native records that match no
+// inbound binding (unsupported_identity). Native Claude Code and Codex
+// exporters send many record types DefenseClaw does not import; counting them
+// is by design, so their per-batch drop event is INFO, not a WARN stream
+// (GAP-1165). Every other drop class stays a WARN.
+func otlpDropIsExpectedUnmapped(eventName observability.EventName, reasonClass string) bool {
+	return eventName == observability.EventName(observability.TelemetryEventTelemetryRecordsDropped) &&
+		reasonClass == string(otlpInboundUnsupportedIdentity)
+}
+
 func (a *APIServer) emitOTLPBatchAccountingV8(
 	ctx context.Context,
 	signal otelIngestSignal,
@@ -462,9 +476,13 @@ func (a *APIServer) emitOTLPBatchAccountingV8(
 		return err
 	}
 	for _, reason := range accounting.permanentDropReasons() {
+		rawSeverity := "WARN"
+		if otlpDropIsExpectedUnmapped("telemetry.records.dropped", string(reason.reason)) {
+			rawSeverity = "INFO"
+		}
 		_, dropErr := a.emitOTLPIngestV8(ctx, otlpIngestV8Event{
 			producerKey: otlpIngestProducerKey(signal), eventName: "telemetry.records.dropped",
-			rawSeverity: "WARN", phase: "normalization", outcome: observability.OutcomePartial,
+			rawSeverity: rawSeverity, phase: "normalization", outcome: observability.OutcomePartial,
 			signal: signal, connector: connector, payloadFormat: payloadFormat,
 			reasonClass: string(reason.reason), records: reason.count,
 			resources: stats.Resources, wireBytes: wireBytes, normalizedBytes: normalizedBytes,

@@ -303,7 +303,13 @@ def pick_model(
             click.echo(f"    [{idx}] {m}")
         click.echo("    [c] type a custom model id")
         click.echo()
-        default = current if current in models else models[0]
+        # Keep the saved model as the default even when it is not in the
+        # suggested list (an older or custom id), so pressing Enter keeps
+        # it. A live runtime list is authoritative: only installed models.
+        if current and (current in models or live_models is None):
+            default = current
+        else:
+            default = models[0]
         while True:
             raw = click.prompt("  Pick model", default=default, show_default=True).strip()
             if raw.isdigit():
@@ -901,7 +907,8 @@ def _mask(value: str) -> str:
         return "(unset)"
     if len(value) <= 8:
         return "****"
-    return f"{value[:4]}…{value[-4:]}"
+    # Last four only, like keys set/list (GAP-1366).
+    return f"…{value[-4:]}"
 
 
 def summary_panel(
@@ -926,12 +933,18 @@ def summary_panel(
         rows.append(("base_url", llm.base_url))
     if llm.region:
         rows.append(("region", llm.region))
-    rows.append(("api_key_env", llm.api_key_env or DEFENSECLAW_LLM_KEY_ENV))
-    rows.append(("api_key", _mask(llm.resolved_api_key())))
+    bedrock_auth = ((llm.bedrock.auth_mode if llm.bedrock else "") or "").strip().lower()
+    if bedrock_auth in ("", "api_key"):
+        # Bedrock IAM, profile and instance-role auth use AWS credentials,
+        # not an API key, so a key row would only mislead (GAP-1476).
+        rows.append(("api_key_env", llm.api_key_env or DEFENSECLAW_LLM_KEY_ENV))
+        rows.append(("api_key", _mask(llm.resolved_api_key())))
     if llm.bedrock and any(asdict(llm.bedrock).values()):
         rows.append(("bedrock.auth_mode", llm.bedrock.auth_mode))
         if llm.bedrock.region:
             rows.append(("bedrock.region", llm.bedrock.region))
+        if bedrock_auth == "profile":
+            rows.append(("bedrock.profile_name", llm.bedrock.profile_name or "(default)"))
     if llm.vertex and any(asdict(llm.vertex).values()):
         rows.append(("vertex.project_id", llm.vertex.project_id))
         rows.append(("vertex.region", llm.vertex.region))

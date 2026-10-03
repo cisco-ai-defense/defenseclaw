@@ -1493,9 +1493,9 @@ def provider_add(
         if app and getattr(app, "logger", None):
             try:
                 app.logger.log_action(
-                    "setup-provider",
+                    "config-update",
                     "warning",
-                    f"insecure_skip_verify=true for {clean_name!r}",
+                    f"setup-provider insecure_skip_verify=true for {clean_name!r}",
                 )
             except Exception:
                 pass

@@ -1663,27 +1663,47 @@ func teardownWindowsGenericManagedTarget(
 	if !perUser {
 		return nil
 	}
-	var remaining []string
+	remaining, kiroLeft, err := windowsStandalonePerUserRegistrationLeft(target.conn, target.setup, configPaths)
+	if err != nil {
+		return err
+	}
+	if kiroLeft != nil {
+		return fmt.Errorf("enterprise hooks: connector %s teardown left DefenseClaw's registration: %w", name, kiroLeft)
+	}
+	if len(remaining) != 0 {
+		return fmt.Errorf("enterprise hooks: connector %s teardown left DefenseClaw's registration in %s", name, strings.Join(remaining, ", "))
+	}
+	return nil
+}
+
+// windowsStandalonePerUserRegistrationLeft reads what of DefenseClaw's
+// registration for a standalone per-user connector is still in the user's
+// agent configuration: the remaining files or entries, or Kiro's own
+// VerifyClean failure. It only reads.
+func windowsStandalonePerUserRegistrationLeft(
+	conn connector.Connector,
+	setup connector.SetupOpts,
+	configPaths []string,
+) (remaining []string, kiroLeft error, err error) {
+	name := conn.Name()
 	if windowsStandaloneInAgentPluginConnector(name) {
 		// DefenseClaw's whole-file plugin is its registration.
 		for _, path := range configPaths {
 			if _, err := os.Lstat(path); err == nil {
 				remaining = append(remaining, path)
 			} else if !errors.Is(err, os.ErrNotExist) {
-				return fmt.Errorf("enterprise hooks: inspect connector %s plugin %s after teardown: %w", name, path, err)
+				return nil, nil, fmt.Errorf("enterprise hooks: inspect connector %s plugin %s after teardown: %w", name, path, err)
 			}
 		}
 	} else if name == "kiro" {
 		// Kiro's Windows hook command carries the hook binary inside an
 		// encoded PowerShell bridge, which the generic command needles
 		// cannot find; its own check reads every file it registers in.
-		if err := target.conn.VerifyClean(target.setup); err != nil {
-			return fmt.Errorf("enterprise hooks: connector %s teardown left DefenseClaw's registration: %w", name, err)
-		}
+		kiroLeft = conn.VerifyClean(setup)
 	} else {
 		var err error
-		if remaining, err = connector.OwnedHookConfigReferences(target.conn, target.setup); err != nil {
-			return fmt.Errorf("enterprise hooks: inspect connector %s hook config after teardown: %w", name, err)
+		if remaining, err = connector.OwnedHookConfigReferences(conn, setup); err != nil {
+			return nil, nil, fmt.Errorf("enterprise hooks: inspect connector %s hook config after teardown: %w", name, err)
 		}
 		// Antigravity entries are DefenseClaw's by their outer key, also when
 		// they run a command this release no longer renders.
@@ -1691,7 +1711,7 @@ func teardownWindowsGenericManagedTarget(
 			for _, path := range configPaths {
 				owned, err := connector.AntigravityHooksHoldOwnedEntries(path)
 				if err != nil {
-					return fmt.Errorf("enterprise hooks: inspect connector %s hook config after teardown: %w", name, err)
+					return nil, nil, fmt.Errorf("enterprise hooks: inspect connector %s hook config after teardown: %w", name, err)
 				}
 				if owned {
 					remaining = append(remaining, path)
@@ -1699,10 +1719,57 @@ func teardownWindowsGenericManagedTarget(
 			}
 		}
 	}
-	if len(remaining) != 0 {
-		return fmt.Errorf("enterprise hooks: connector %s teardown left DefenseClaw's registration in %s", name, strings.Join(remaining, ", "))
+	return remaining, kiroLeft, nil
+}
+
+// WindowsStandalonePerUserRegistrationPresent reports whether DefenseClaw's
+// registration for a standalone per-user connector is still in the user's
+// agent configuration. It reads as the calling service, without the user's
+// session, so an uninstall can skip a disconnected user who has nothing left
+// to remove instead of reporting that user as pending (GAP-2023). An error
+// means it could not tell.
+func WindowsStandalonePerUserRegistrationPresent(opts InstallOptions) (bool, error) {
+	name := strings.ToLower(strings.TrimSpace(opts.ConnectorName))
+	if _, perUser := windowsStandalonePerUserConnector(name); !perUser {
+		return false, fmt.Errorf("enterprise hooks: connector %q is not a standalone per-user connector", name)
 	}
-	return nil
+	reg := opts.Registry
+	if reg == nil {
+		reg = newWindowsEnterpriseConnectorRegistry()
+	}
+	conn, ok := reg.Get(name)
+	if !ok {
+		return false, fmt.Errorf("enterprise hooks: unknown connector %q", name)
+	}
+	if err := windowsEnterpriseConnectorCertification(name, conn); err != nil {
+		return false, err
+	}
+	home, _, err := validateWindowsEnterpriseHome(opts.UserHome, opts.OwnerSID)
+	if err != nil {
+		return false, err
+	}
+	dataDir, err := resolveWindowsEnterpriseDataDir(home, opts.DataDir)
+	if err != nil {
+		return false, err
+	}
+	// The hook command names the hook binary; without it the check could
+	// miss a registration.
+	hookExecutable, err := windowsEnterpriseHookExecutable()
+	if err != nil {
+		return false, err
+	}
+	setup := connector.SetupOpts{DataDir: dataDir, ManagedEnterprise: true, HookExecutable: filepath.Clean(hookExecutable)}
+	var remaining []string
+	var kiroLeft error
+	err = connector.WithUserHomeDir(home, func() error {
+		var err error
+		remaining, kiroLeft, err = windowsStandalonePerUserRegistrationLeft(conn, setup, connector.HookConfigPathsForConnector(conn, setup))
+		return err
+	})
+	if err != nil {
+		return false, err
+	}
+	return len(remaining) != 0 || kiroLeft != nil, nil
 }
 
 func validateWindowsGenericRemovalFootprint(
@@ -1827,6 +1894,10 @@ func validateWindowsEnterpriseHome(raw, rawSID string) (string, *windows.SID, er
 	}
 	home = filepath.Clean(abs)
 	info, err := os.Lstat(home)
+	if errors.Is(err, os.ErrNotExist) {
+		// Name the cause, not the raw Win32 lookup error (GAP-1940).
+		return "", nil, fmt.Errorf("enterprise hooks: user home %s no longer exists: the account was deleted or its profile folder removed; run Setup /ensure again (%w)", home, os.ErrNotExist)
+	}
 	if err != nil {
 		return "", nil, fmt.Errorf("enterprise hooks: inspect user home %s: %w", home, err)
 	}

@@ -129,6 +129,81 @@ class TestRestartFailsClosed(unittest.TestCase):
 
         self.assertIs(_restart_openclaw_gateway(), False)
 
+    def test_gap1408_openclaw_service_not_loaded_is_not_a_restart(self):
+        import contextlib
+        import io
+
+        from defenseclaw.commands.cmd_setup import _restart_openclaw_gateway
+
+        done = subprocess.CompletedProcess(
+            ["openclaw"], 0, stdout="Gateway service not loaded. Start with: openclaw gateway install\n", stderr=""
+        )
+        with patch("defenseclaw.commands.cmd_setup.subprocess.run", return_value=done):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                self.assertIs(_restart_openclaw_gateway(), True)
+            text = buf.getvalue()
+        self.assertNotIn("✓", text)
+        self.assertIn("no OpenClaw gateway service", text)
+        # Linux (systemd) words it differently (GAP-1408 on RHEL).
+        done.stdout = "Gateway service not enabled.\n"
+        with patch("defenseclaw.commands.cmd_setup.subprocess.run", return_value=done):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                _restart_openclaw_gateway()
+        self.assertNotIn("✓", buf.getvalue())
+
+    def test_gap1470_rollback_to_empty_roster_skips_openclaw(self):
+        from types import SimpleNamespace
+
+        from defenseclaw.commands import cmd_setup
+
+        cfg = SimpleNamespace(
+            data_dir="/nonexistent",
+            gateway=SimpleNamespace(host="127.0.0.1", port=18789),
+            active_connectors=lambda: [],
+            active_connector=lambda: "openclaw",
+        )
+        with patch.object(cmd_setup, "_restart_services") as restart:
+            cmd_setup._restart_restored_connector_runtime(SimpleNamespace(cfg=cfg))
+        self.assertEqual(restart.call_args.kwargs["connector"], "")
+
+    def test_gap1702_openclaw_gateway_down_names_it_and_rollback_does_not_wait_again(self):
+        from types import SimpleNamespace
+
+        import click
+        from defenseclaw.commands import cmd_setup
+
+        with self.assertRaises(cmd_setup._OpenClawGatewayNotRunning) as raised:
+            cmd_setup._fail_if_restart_failed(["openclaw-gateway"])
+        cause = raised.exception
+        self.assertIn("openclaw gateway run", cause.message)
+        self.assertNotIn("defenseclaw-gateway start", cause.message)
+
+        cfg = SimpleNamespace(
+            data_dir="/nonexistent",
+            gateway=SimpleNamespace(host="127.0.0.1", port=18789),
+            active_connectors=lambda: ["openclaw"],
+            active_connector=lambda: "openclaw",
+        )
+        app = SimpleNamespace(cfg=cfg)
+        with patch.object(cmd_setup, "_restart_services") as restart:
+            cmd_setup._restart_restored_connector_runtime(app, skip_openclaw=True)
+        self.assertEqual(restart.call_args.kwargs["connector"], "")
+
+        with (
+            patch.object(cmd_setup, "_restore_setup_config_snapshot"),
+            patch.object(cmd_setup, "_restart_restored_connector_runtime") as reconcile,
+            self.assertRaises(click.ClickException) as final,
+        ):
+            cmd_setup._rollback_failed_connector_application(app, SimpleNamespace(applied_runtime=None), cause)
+        reconcile.assert_called_once_with(app, skip_openclaw=True)
+        message = final.exception.message
+        self.assertIn("openclaw gateway run", message)
+        self.assertIn("restored the prior connector configuration and runtime", message)
+        self.assertNotIn("rollback was incomplete", message)
+        self.assertNotIn("defenseclaw-gateway start", message)
+
 
 class TestInitDirPermissions(unittest.TestCase):
     """F-0122: first-run init must create operator-private dirs 0700."""
@@ -168,3 +243,37 @@ class TestInitDirPermissions(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_gap1826_rollback_keeps_the_failed_generation_lock_for_the_gateway() -> None:
+    """The gateway needs the failed generation's lock entry to switch back."""
+    import pytest
+    from defenseclaw.commands import cmd_setup
+    from defenseclaw.file_permissions import atomic_write_private_bytes
+
+    from tests.helpers import cleanup_app, make_app_context
+
+    app, tmp_dir, db_path = make_app_context()
+    try:
+        lock_path = os.path.join(app.cfg.data_dir, "hook_contract_lock.json")
+        atomic_write_private_bytes(lock_path, b'{"version":2,"connectors":{"claudecode":{}}}\n')
+        snapshot = cmd_setup._capture_setup_config_snapshot(app.cfg)
+        failed_lock = b'{"version":2,"connectors":{"openclaw":{}}}\n'
+        atomic_write_private_bytes(lock_path, failed_lock)
+        seen: list[bytes] = []
+
+        def restart(_app, **_kwargs):
+            with open(lock_path, "rb") as handle:
+                seen.append(handle.read())
+
+        cause = cmd_setup._OpenClawGatewayNotRunning("The OpenClaw gateway is not running.")
+        with (
+            patch.object(cmd_setup, "_sync_guardrail_hilt_to_opa"),
+            patch.object(cmd_setup, "_restart_restored_connector_runtime", side_effect=restart),
+            pytest.raises(click.ClickException) as raised,
+        ):
+            cmd_setup._rollback_failed_connector_application(app, snapshot, cause)
+        assert seen == [failed_lock]
+        assert "rollback was incomplete" not in str(raised.value)
+    finally:
+        cleanup_app(app, db_path, tmp_dir)

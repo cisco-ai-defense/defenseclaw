@@ -17,6 +17,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -24,7 +25,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 # Checked-in source fixtures and published documentation share one release
 # identity so native repair/upgrade comparisons remain monotonic.
-CURRENT_RELEASE = "0.8.10"
+CURRENT_RELEASE = "1.0.0"
 CURRENT_PUBLISHED_RELEASE = "0.8.10"
 LATEST_POSIX_INSTALL_URL = (
     "https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.sh"
@@ -544,6 +545,40 @@ def test_failed_gateway_install_does_not_claim_source_ownership(tmp_path: Path) 
     assert not (install_dir / ".defenseclaw-source-root").exists()
 
 
+def test_preflight_skips_a_python3_that_does_not_run(tmp_path: Path) -> None:
+    # WIN-R1-27: on Windows python3 is often the Store alias, which only prints
+    # a hint. The preflight must use the next working Python, or say plainly
+    # that none runs instead of blaming the checkout.
+    bash = shutil.which("bash")
+    python = shutil.which("python3")
+    assert bash and python
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    _write_executable(fake / "python3", "#!/bin/sh\necho 'Python was not found' >&2\nexit 9\n")
+    script = ROOT / "scripts" / "source-install-preflight.sh"
+    args = [bash, str(script), "no-such-mode", str(ROOT), str(tmp_path), str(tmp_path), "defenseclaw", "gw"]
+
+    # Windows Python cannot start without SYSTEMROOT, so keep it.
+    env = {"PATH": str(fake), **{k: v for k, v in os.environ.items() if k.upper() == "SYSTEMROOT"}}
+    none = subprocess.run(args, capture_output=True, text=True, check=False, env=env)
+    assert none.returncode == 1
+    assert "no working Python 3 interpreter" in none.stderr
+    assert "identity" not in none.stderr
+
+    # A wrapper, not a symlink: a Windows venv python.exe reached through a
+    # symlink in another folder cannot find its pyvenv.cfg.
+    _write_executable(fake / "python", f'#!/bin/sh\nexec "{Path(sys.executable).as_posix()}" "$@"\n')
+    found = subprocess.run(args, capture_output=True, text=True, check=False, env=env)
+    assert "no working Python 3 interpreter" not in found.stderr
+    assert found.returncode == 64, found.stderr  # detection passed; then the bad mode is refused
+
+
+def test_install_docs_cover_the_windows_source_build() -> None:
+    text = " ".join((ROOT / "docs-site/content/docs/get-started/install.mdx").read_text(encoding="utf-8").split())
+    assert "Build from source on Windows" in text
+    assert "Git Bash" in text and "py -3" in text and "core.autocrlf=false" in text
+
+
 def test_source_install_docs_are_developer_only_and_point_existing_hosts_to_resolver() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     install = (ROOT / "docs/INSTALL.md").read_text(encoding="utf-8")
@@ -911,3 +946,34 @@ def test_policy_overview_matches_atomic_invalid_regex_rejection() -> None:
     assert "/docs/policies/rulepack-validation" in overview
     assert "invalid Go regular expression" in validation
     assert "does not silently discard the bad file" in " ".join(validation.split())
+
+
+def test_enterprise_docs_say_how_to_turn_on_ai_discovery() -> None:
+    # GAP-1191: ai_discovery.enabled defaults to false, so the managed
+    # install pages and every sample config must turn it on explicitly.
+    for page in ("linux.mdx", "macos.mdx"):
+        text = (ROOT / "docs-site/content/docs/enterprise" / page).read_text()
+        assert "ai_discovery:\n  enabled: true" in text, page
+    configuration = (ROOT / "docs-site/content/docs/enterprise/configuration.mdx").read_text()
+    samples = configuration[configuration.index("## Sample configs"):]
+    assert samples.count("ai_discovery:\n  enabled: true") == 3
+
+
+def test_threat_model_r7_matches_linux_socket_dependency() -> None:
+    # GAP-1198: on Linux the gateway service requires both socket units, so
+    # a held port keeps the whole gateway (hook socket included) down.
+    model = (ROOT / "docs/ENTERPRISE-THREAT-MODEL.md").read_text()
+    unit = (ROOT / "packaging/systemd/defenseclaw-gateway.service").read_text()
+    assert "Requires=defenseclaw-gateway-api.socket defenseclaw-gateway-hook.socket" in unit
+    assert "which the gateway serves independently of the TCP port" not in model
+    assert "does not start at all, and every hook on the host fails closed" in model
+    assert "| R34 |" in model and "logger -t defenseclaw-gateway" in model
+
+
+def test_first_guardrail_initializes_before_setup() -> None:
+    # GAP-1613: the installer does not initialize DefenseClaw, so the
+    # walkthrough must run init before any other defenseclaw command.
+    text = (ROOT / "docs-site/content/docs/get-started/first-guardrail.mdx").read_text()
+    commands = re.findall(r"^defenseclaw(?:-gateway)? [a-z-]+", text, re.MULTILINE)
+    assert commands[0] == "defenseclaw init", commands
+    assert "defenseclaw init --connector claudecode" in text

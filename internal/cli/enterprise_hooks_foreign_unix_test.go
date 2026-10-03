@@ -82,11 +82,11 @@ func TestWorkerForeignCleanupRemovesTheUsersForeignHook(t *testing.T) {
 	// a retried removal restores from).
 	previousPurger, previousStop := enterpriseHookWorkerPurger, enterpriseHookWorkerStopPerUser
 	t.Cleanup(func() { enterpriseHookWorkerPurger, enterpriseHookWorkerStopPerUser = previousPurger, previousStop })
-	enterpriseHookWorkerStopPerUser = func(enterprisehooks.InstallOptions) error { return nil }
+	enterpriseHookWorkerStopPerUser = func(enterprisehooks.InstallOptions) (bool, error) { return false, nil }
 	var purged []string
-	enterpriseHookWorkerPurger = func(_ context.Context, opts enterprisehooks.InstallOptions) error {
+	enterpriseHookWorkerPurger = func(_ context.Context, opts enterprisehooks.InstallOptions) (enterprisehooks.PurgeSummary, error) {
 		purged = append(purged, opts.DataDir)
-		return nil
+		return enterprisehooks.PurgeSummary{}, nil
 	}
 	purgeRequest := enterpriseHookWorkerRequest{
 		Home: "/home/alice", UID: 1001, GID: 1001,
@@ -203,7 +203,7 @@ func TestStandaloneForeignCleanupCoversMachinePolicyOnlyUsers(t *testing.T) {
 	}
 	// A repository-hook block never reaches the gateway; the guardian log
 	// is where an administrator sees it, with user-written fields defanged.
-	if !strings.Contains(log.String(), "blocked cursor preToolUse 3 time(s)") || !strings.Contains(log.String(), "/home/alice/repo/.cursor/hooks.json forged line") ||
+	if !strings.Contains(log.String(), "blocked 3 cursor hook call(s) (preToolUse 3)") || !strings.Contains(log.String(), "/home/alice/repo/.cursor/hooks.json forged line") ||
 		strings.Contains(log.String(), "\nforged line") {
 		t.Fatalf("recorded blocks must be logged on one line each:\n%s", log.String())
 	}

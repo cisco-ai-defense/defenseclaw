@@ -1908,6 +1908,7 @@ func (s *Store) Init() error {
 		return fmt.Errorf("audit: read schema version: %w", err)
 	}
 
+	purgedHistory := false
 	for i := current; i < len(migrations); i++ {
 		m := migrations[i]
 		ver := i + 1
@@ -1915,6 +1916,10 @@ func (s *Store) Init() error {
 		if err := s.applyMigration(ver, m); err != nil {
 			return err
 		}
+		purgedHistory = purgedHistory || (current > 0 && m.description == historicalEvidencePurgeMigrationDescription)
+	}
+	if purgedHistory {
+		s.reclaimPurgedHistory()
 	}
 	if err := ensureJudgeBodyTimestampUnixNano(s.db, legacyJudgeTimestampUnixNanoIndex); err != nil {
 		return fmt.Errorf("audit: verify judge timestamp retention index: %w", err)
@@ -4071,10 +4076,10 @@ func (s *Store) LatestScansByScanner(scannerName string) ([]LatestScanInfo, erro
 		INNER JOIN (
 			SELECT target, MAX(timestamp) as max_ts
 			FROM scan_results
-			WHERE scanner = ?
+			WHERE scanner = ? AND COALESCE(exit_code, 0) = 0 AND COALESCE(error, '') = ''
 			GROUP BY target
 		) latest ON sr.target = latest.target AND sr.timestamp = latest.max_ts
-		WHERE sr.scanner = ?
+		WHERE sr.scanner = ? AND COALESCE(sr.exit_code, 0) = 0 AND COALESCE(sr.error, '') = ''
 	`, scannerName, scannerName)
 	if err != nil {
 		return nil, fmt.Errorf("audit: latest scans by scanner: %w", err)
@@ -4294,6 +4299,26 @@ func (s *Store) CountBlockedEgress() (int, error) {
 		return 0, fmt.Errorf("audit: count blocked egress: %w", err)
 	}
 	return count, nil
+}
+
+// ListTargetSnapshotPaths returns the paths of every stored baseline
+// snapshot of targetType.
+func (s *Store) ListTargetSnapshotPaths(targetType string) ([]string, error) {
+	rows, err := s.queryDB(context.Background(), "list_target_snapshot_paths",
+		`SELECT target_path FROM target_snapshots WHERE target_type = ?`, targetType)
+	if err != nil {
+		return nil, fmt.Errorf("audit: list target snapshot paths: %w", err)
+	}
+	defer rows.Close()
+	var paths []string
+	for rows.Next() {
+		var path string
+		if err := rows.Scan(&path); err != nil {
+			return nil, fmt.Errorf("audit: list target snapshot paths: %w", err)
+		}
+		paths = append(paths, path)
+	}
+	return paths, rows.Err()
 }
 
 // GetTargetSnapshot loads the stored baseline snapshot for a target.

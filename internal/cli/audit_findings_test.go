@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -140,5 +141,104 @@ func TestRunAuditFindingsValidatesDeltaFlags(t *testing.T) {
 	if err := runAuditFindings(&cobra.Command{}, nil); err == nil ||
 		!strings.Contains(err.Error(), "usable scan target") {
 		t.Fatalf("blank target error=%v", err)
+	}
+}
+
+// GAP-1232: --since takes the same forms as audit export, and a bad value
+// gets a plain message instead of Go's time-layout error.
+func TestParseAuditFindingsSinceAcceptsDurations(t *testing.T) {
+	before := time.Now().Add(-30 * time.Minute)
+	parsed, err := parseAuditFindingsSince("30m")
+	if err != nil || parsed == nil || parsed.Before(before.Add(-time.Minute)) || parsed.After(time.Now()) {
+		t.Fatalf("30m: parsed=%v err=%v", parsed, err)
+	}
+	if parsed, err := parseAuditFindingsSince("2026-09-27T18:30:00Z"); err != nil || parsed == nil {
+		t.Fatalf("RFC3339: parsed=%v err=%v", parsed, err)
+	}
+	_, err = parseAuditFindingsSince("yesterday")
+	if err == nil || strings.Contains(err.Error(), "2006-01-02") || !strings.Contains(err.Error(), "30m") {
+		t.Fatalf("bad value error = %v", err)
+	}
+}
+
+// GAP-1237: an unknown --connector says so on stderr instead of a silent empty export.
+func TestNoteUnmatchedAuditConnectorNamesKnownConnectors(t *testing.T) {
+	var buf bytes.Buffer
+	noteUnmatchedAuditConnector(&buf, "nosuch", map[string]struct{}{"codex": {}, "claudecode": {}})
+	if got := buf.String(); !strings.Contains(got, `"nosuch"`) || !strings.Contains(got, "claudecode, codex") {
+		t.Fatalf("note = %q", got)
+	}
+}
+
+// GAP-1301: a guardrail scanner gets a stderr note saying audit findings does
+// not track it; the JSON report on stdout is unchanged.
+func TestRunAuditFindingsNotesGuardrailScanner(t *testing.T) {
+	store, err := audit.NewStore(t.TempDir() + "/audit.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Init(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	previousStore, previousScanner := auditStore, auditFindingsScanner
+	previousSince, previousNewOnly, previousLimit := auditFindingsSince, auditFindingsNewOnly, auditFindingsLimit
+	t.Cleanup(func() {
+		auditStore, auditFindingsScanner = previousStore, previousScanner
+		auditFindingsSince, auditFindingsNewOnly, auditFindingsLimit = previousSince, previousNewOnly, previousLimit
+	})
+	auditStore, auditFindingsSince, auditFindingsNewOnly, auditFindingsLimit = store, "", false, 100
+	for scannerName, wantNote := range map[string]bool{"hook-rules": true, "skill-scanner": false} {
+		auditFindingsScanner = scannerName
+		var stdout, stderr bytes.Buffer
+		cmd := &cobra.Command{}
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&stderr)
+		if err := runAuditFindings(cmd, nil); err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Contains(stderr.String(), "does not track"); got != wantNote {
+			t.Errorf("--scanner %s: note=%v, stderr=%q", scannerName, got, stderr.String())
+		}
+		var report auditFindingsReport
+		if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+			t.Fatalf("--scanner %s: stdout is not the JSON report: %v", scannerName, err)
+		}
+	}
+}
+
+// GAP-2126: a bad flag value is a usage error (exit 2) raised before the
+// audit store opens, so it never creates or migrates audit.db.
+func TestAuditFindingsBadFlagFailsBeforeStoreOpens(t *testing.T) {
+	previousStore, previousCfg := auditStore, cfg
+	previousTarget := auditFindingsTarget
+	previousSince, previousNewOnly, previousLimit := auditFindingsSince, auditFindingsNewOnly, auditFindingsLimit
+	t.Cleanup(func() {
+		auditStore, cfg = previousStore, previousCfg
+		auditFindingsTarget = previousTarget
+		auditFindingsSince, auditFindingsNewOnly, auditFindingsLimit = previousSince, previousNewOnly, previousLimit
+	})
+	home := t.TempDir()
+	t.Setenv("DEFENSECLAW_HOME", home)
+	auditStore, cfg = nil, nil
+	auditFindingsTarget, auditFindingsNewOnly = "", false
+	cases := []struct {
+		since   string
+		newOnly bool
+		limit   int
+		target  string
+	}{{since: "yesterday", limit: 100}, {limit: 0}, {newOnly: true, limit: 100}, {limit: 100, target: "   "}}
+	for _, c := range cases {
+		auditFindingsSince, auditFindingsNewOnly, auditFindingsLimit, auditFindingsTarget = c.since, c.newOnly, c.limit, c.target
+		err := auditFindingsPersistentPreRunE(auditFindingsCmd, nil)
+		if commandExitCode(err) != 2 || !strings.Contains(err.Error(), "--help") {
+			t.Errorf("%+v = %v (exit %d), want a usage error with exit 2", c, err, commandExitCode(err))
+		}
+		if auditStore != nil {
+			t.Fatalf("%+v opened the audit store", c)
+		}
+		if entries, _ := os.ReadDir(home); len(entries) != 0 {
+			t.Fatalf("%+v wrote %d entries under DEFENSECLAW_HOME", c, len(entries))
+		}
 	}
 }

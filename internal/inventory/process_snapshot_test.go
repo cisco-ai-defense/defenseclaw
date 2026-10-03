@@ -61,7 +61,7 @@ func TestCollectWindowsSnapshotAndClassifyAgents(t *testing.T) {
 	started := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
 	reader := fakeWindowsSnapshotReader{
 		entries: []windowsProcessEntry{
-			{PID: 10, PPID: 1, Comm: `C:\tools\CoDeX.ExE`},
+			{PID: 10, PPID: 1, Comm: `C:\tools\CoDeX.ExE`, SessionOwnerID: "S-1-5-21-7-1001"},
 			{PID: 16, PPID: 10, Comm: "cmd.exe"},
 			{PID: 11, PPID: 16, Comm: "node.exe"},
 			{PID: 12, PPID: 1, Comm: "CLAUDE.CMD"},
@@ -94,7 +94,7 @@ func TestCollectWindowsSnapshotAndClassifyAgents(t *testing.T) {
 			t.Errorf("false positive PID %d classified as %q", pid, got[pid])
 		}
 	}
-	if procs[0].User != `WORKSTATION\kevin` || !procs[0].StartedAt.Equal(started) || !procs[0].Windows {
+	if procs[0].User != `WORKSTATION\kevin` || !procs[0].StartedAt.Equal(started) || !procs[0].Windows || procs[0].SessionOwnerID != "S-1-5-21-7-1001" {
 		t.Fatalf("metadata not preserved: %+v", procs[0])
 	}
 }
@@ -106,6 +106,8 @@ func TestClassifyWindowsProcessesMapsUniqueCatalogAliases(t *testing.T) {
 		{PID: 3, Comm: "LM Studio.exe", Windows: true},
 		{PID: 4, Comm: "Claude.exe", Windows: true},
 		{PID: 5, Comm: "shared-helper.exe", Windows: true},
+		{PID: 6, Comm: "claude.exe", Image: `C:\Users\kevin\.local\bin\claude.exe`, Windows: true},
+		{PID: 7, Comm: "claude.exe", Image: `C:\Users\kevin\AppData\Local\AnthropicClaude\app-1.0.0\claude.exe`, Windows: true},
 	}
 	classifyWindowsProcesses(procs, windowsProcessParityCatalog())
 
@@ -118,6 +120,10 @@ func TestClassifyWindowsProcessesMapsUniqueCatalogAliases(t *testing.T) {
 		4: "",
 		// Every cross-signature collision fails closed.
 		5: "",
+		// Claude Code's native install path settles the shared basename
+		// (GAP-1440); Claude Desktop's own folder stays unclassified.
+		6: "claudecode",
+		7: "",
 	}
 	for _, proc := range procs {
 		if proc.Connector != want[proc.PID] {
@@ -273,5 +279,109 @@ func TestProcessSnapshotFailureIsStructuredInScanSummary(t *testing.T) {
 	}
 	if got := report.Summary.DetectorErrors["process"]; got != "process snapshot: enumeration failed" {
 		t.Fatalf("structured process error = %q", got)
+	}
+}
+
+func TestDetectProcessesClaimsEachPOSIXProcessOnce(t *testing.T) {
+	old := processSnapshotSource
+	t.Cleanup(func() { processSnapshotSource = old })
+	started := time.Now().UTC().Add(-5 * time.Minute).Truncate(time.Second)
+	cliOnly := []processInfo{{PID: 93283, PPID: 93242, Comm: "claude", User: "kevin", StartedAt: started}}
+	processSnapshotSource = func() ([]processInfo, error) { return cliOnly, nil }
+	catalog := []AISignature{
+		{ID: "claudecode", Name: "Claude Code", ProcessNames: []string{"claude"}},
+		{ID: "claude-desktop", Name: "Claude Desktop", ProcessNames: []string{"Claude"}},
+	}
+	svc := &ContinuousDiscoveryService{catalog: catalog}
+	signals, err := svc.detectProcesses()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(signals) != 1 || signals[0].SignatureID != "claudecode" {
+		t.Fatalf("claude CLI signals = %+v, want one Claude Code row", signals)
+	}
+
+	both := append(cliOnly, processInfo{PID: 500, PPID: 1, Comm: "Claude", User: "kevin", StartedAt: started.Add(-time.Hour)})
+	processSnapshotSource = func() ([]processInfo, error) { return both, nil }
+	signals, err = svc.detectProcesses()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]int{}
+	for _, signal := range signals {
+		got[signal.SignatureID] = signal.Runtime.PID
+	}
+	if len(signals) != 2 || got["claudecode"] != 93283 || got["claude-desktop"] != 500 {
+		t.Fatalf("CLI plus app signals = %v, want claudecode=93283 claude-desktop=500", got)
+	}
+}
+
+// GAP-1738: cursor-agent runs as its own node.exe on Windows; that image is
+// Cursor, any other node.exe is not.
+func TestClassifyWindowsProcessesFindsCursorAgentNode(t *testing.T) {
+	catalog := append(windowsAgentCatalog(), AISignature{ID: "cursor", Name: "Cursor", ProcessNames: []string{"cursor", "Cursor"}})
+	procs := []processInfo{
+		{PID: 1, Comm: "node.exe", Image: `C:\Users\kevin\AppData\Local\cursor-agent\versions\2026.10.01-14929f9\node.exe`, Windows: true},
+		{PID: 2, Comm: "node.exe", Image: `C:\Program Files\nodejs\node.exe`, Windows: true},
+		{PID: 3, Comm: "rg.exe", Image: `C:\Users\kevin\AppData\Local\cursor-agent\versions\2026.10.01-14929f9\rg.exe`, Windows: true},
+	}
+	classifyWindowsProcesses(procs, catalog)
+	if procs[0].Connector != "cursor" || procs[1].Connector != "" || procs[2].Connector != "" {
+		t.Fatalf("connectors = %q %q %q", procs[0].Connector, procs[1].Connector, procs[2].Connector)
+	}
+}
+
+// GAP-1849: cursor-agent's worker-server node.exe child is folded into its
+// parent, so one cursor-agent run is one Cursor process.
+func TestClassifyWindowsProcessesFoldsCursorWorkerServer(t *testing.T) {
+	catalog := append(windowsAgentCatalog(), AISignature{ID: "cursor", Name: "Cursor", ProcessNames: []string{"cursor", "Cursor"}})
+	image := `C:\Users\kevin\AppData\Local\cursor-agent\versions\2026.10.01-14929f9\node.exe`
+	procs := []processInfo{
+		{PID: 2144, PPID: 900, Comm: "node.exe", Image: image, Windows: true},
+		{PID: 15344, PPID: 2144, Comm: "node.exe", Image: image, Windows: true},
+		{PID: 3000, PPID: 901, Comm: "node.exe", Image: image, Windows: true},
+	}
+	classifyWindowsProcesses(procs, catalog)
+	if procs[0].Connector != "cursor" || procs[1].Connector != "" || procs[2].Connector != "cursor" {
+		t.Fatalf("connectors = %q %q %q", procs[0].Connector, procs[1].Connector, procs[2].Connector)
+	}
+}
+
+// GAP-1965: Amp's plugin runtimes are amp.exe children of the amp.exe run;
+// they are folded into it, so one Amp session is one Amp process.
+func TestClassifyWindowsProcessesFoldsAmpPluginRuntimes(t *testing.T) {
+	catalog := append(windowsAgentCatalog(), AISignature{ID: "amp", Name: "Amp", ProcessNames: []string{"amp"}})
+	image := `C:\Users\kevin\AppData\Roaming\npm\node_modules\@ampcode\cli\bin\amp.exe`
+	procs := []processInfo{
+		{PID: 12196, PPID: 900, Comm: "amp.exe", Image: image, Windows: true},
+		{PID: 3032, PPID: 12196, Comm: "amp.exe", Image: image, Windows: true},
+		{PID: 13156, PPID: 12196, Comm: "amp.exe", Image: image, Windows: true},
+		{PID: 4000, PPID: 901, Comm: "amp.exe", Image: image, Windows: true},
+	}
+	classifyWindowsProcesses(procs, catalog)
+	if procs[0].Connector != "amp" || procs[1].Connector != "" || procs[2].Connector != "" || procs[3].Connector != "amp" {
+		t.Fatalf("connectors = %q %q %q %q", procs[0].Connector, procs[1].Connector, procs[2].Connector, procs[3].Connector)
+	}
+}
+
+// GAP-2043: VS Code Copilot Chat runs its agent host as copilot-runtime.exe
+// (under Code.exe), which runs DefenseClaw's Copilot hooks: it is a Copilot
+// process. The Copilot CLI's own copilot-runtime.exe engine child is folded
+// into its run, so one CLI session stays one process.
+func TestClassifyWindowsProcessesFindsTheVSCodeCopilotAgentHost(t *testing.T) {
+	catalog, err := LoadAISignatures()
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeImage := `c:\Program Files\Microsoft VS Code\07f806f999\resources\app\node_modules.asar.unpacked\@github\copilot-sdk-win32-x64\prebuilds\win32-x64\copilot-runtime.exe`
+	procs := []processInfo{
+		{PID: 13728, PPID: 15252, Comm: "copilot-runtime.exe", Image: runtimeImage, Windows: true},
+		{PID: 15252, PPID: 900, Comm: "Code.exe", Image: `c:\Program Files\Microsoft VS Code\Code.exe`, Windows: true},
+		{PID: 5000, PPID: 901, Comm: "copilot.exe", Image: `C:\Users\u\AppData\Roaming\npm\copilot.exe`, Windows: true},
+		{PID: 5001, PPID: 5000, Comm: "copilot-runtime.exe", Image: `C:\Users\u\AppData\Local\copilot\pkg\copilot-runtime.exe`, Windows: true},
+	}
+	classifyWindowsProcesses(procs, catalog)
+	if procs[0].Connector != "copilot" || procs[1].Connector != "" || procs[2].Connector != "copilot" || procs[3].Connector != "" {
+		t.Fatalf("connectors = %q %q %q %q", procs[0].Connector, procs[1].Connector, procs[2].Connector, procs[3].Connector)
 	}
 }

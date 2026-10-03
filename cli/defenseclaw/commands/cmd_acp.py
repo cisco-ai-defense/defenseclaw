@@ -14,6 +14,7 @@ import os
 import secrets
 import shutil
 import stat
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -217,6 +218,8 @@ def _client_contract_snapshots(data_dir: str, client: str, agent: str) -> list[t
 
 def _refresh_client_contract_digests(data_dir: str, client: str, client_path: Path) -> None:
     """Atomically re-pin every DefenseClaw entry sharing one editor file."""
+    if not client_path.is_file():
+        return
     digest = _sha256_file(str(client_path))
     for pair_client, pair_agent in sorted(_managed_pairs()):
         if pair_client != client:
@@ -260,13 +263,26 @@ def _set_client_entry(client: str, agent: str, command: str, args: list[str]) ->
     return path
 
 
+def _has_client_entry(client: str, agent: str) -> bool:
+    servers = _read_json_object(_client_path(client)).get("agent_servers")
+    return isinstance(servers, dict) and _managed_name(agent) in servers
+
+
 def _remove_client_entry(client: str, agent: str) -> Path:
     path = _client_path(client)
     document = _read_json_object(path)
     servers = document.get("agent_servers")
-    if isinstance(servers, dict):
-        servers.pop(_managed_name(agent), None)
-    _write_json(path, document)
+    if not isinstance(servers, dict) or _managed_name(agent) not in servers:
+        return path
+    servers.pop(_managed_name(agent))
+    if not servers:
+        # Don't leave an empty agent_servers object (or a file that setup
+        # created only for DefenseClaw) behind once the last entry is gone.
+        document.pop("agent_servers")
+    if document:
+        _write_json(path, document)
+    elif path.is_file() and not path.is_symlink():
+        path.unlink()
     return path
 
 
@@ -383,7 +399,10 @@ def _verify_binding(
             and lock_guard.get("managed_custody") is True
             and _managed_guard_custody_is_trusted(path_value)
         ):
-            problems.append(f"{key} executable digest has drifted")
+            problems.append(
+                f"{key} executable digest has drifted"
+                + ("; after a DefenseClaw upgrade run: defenseclaw acp refresh" if key == "guard" else "")
+            )
     # Policy drift. The guard carries its profile and mode in argv, pinned
     # here at setup, and the gateway refuses a request whose profile the
     # configuration no longer assigns to this pair. Editing
@@ -429,11 +448,30 @@ def catalog_cmd() -> None:
     click.echo(json.dumps(_REGISTRY, indent=2, sort_keys=True))
 
 
+def _progress(enabled: bool, message: str) -> None:
+    """Print one step of a slow ACP change, so it does not look hung (GAP-1835).
+
+    Setup and remove hash executables, rewrite editor files and config.yaml
+    and wait for the gateway's audit acknowledgement; on a busy Windows host
+    that took about two minutes with no output at all. The lines go to
+    stderr, so --json output stays one document.
+    """
+    if enabled:
+        click.echo(f"  {message}", err=True)
+
+
 @acp_cmd.command("setup")
-@click.option("--client", type=click.Choice(sorted(_CLIENTS)), required=True)
-@click.option("--agent", type=click.Choice(sorted(_AGENTS)), required=True)
-@click.option("--profile", default="default", show_default=True)
-@click.option("--guard-binary", default="defenseclaw-acp", show_default=True)
+@click.option("--client", type=click.Choice(sorted(_CLIENTS)), required=True, help="Editor that runs the agent.")
+@click.option("--agent", type=click.Choice(sorted(_AGENTS)), required=True, help="ACP agent to guard.")
+@click.option(
+    "--profile", default="default", show_default=True, help="ACP policy profile (acp.profiles) the guard enforces."
+)
+@click.option(
+    "--guard-binary",
+    default="defenseclaw-acp",
+    show_default=True,
+    help="DefenseClaw ACP guard executable the editor entry starts.",
+)
 @click.option("--agent-binary", default="", help="Override the catalog agent executable.")
 @click.option("--activate", is_flag=True, help="Enable action mode; setup otherwise observes only.")
 @click.option(
@@ -453,7 +491,7 @@ def catalog_cmd() -> None:
     type=click.Path(dir_okay=False, path_type=Path),
     help="Administrator-provisioned managed token; must equal <runtime-data-dir>/acp/<client>-<agent>.token.",
 )
-@click.option("--json-output", "json_output", is_flag=True)
+@click.option("--json-output", "--json", "json_output", is_flag=True, help="Print the result as JSON.")
 @pass_ctx
 def setup_cmd(
     app: AppContext,
@@ -471,6 +509,8 @@ def setup_cmd(
     """Install a guarded agent entry into Zed or JetBrains."""
     if not app.cfg:
         raise click.ClickException("configuration is unavailable")
+    show = not json_output
+    _progress(show, f"Setting up {client}/{agent}: checking the guard and agent executables...")
     guard = _resolve_executable(guard_binary, "DefenseClaw ACP guard")
     catalog_command, catalog_args = _AGENTS[agent]
     agent_executable = _resolve_executable(agent_binary or catalog_command, agent)
@@ -558,7 +598,9 @@ def setup_cmd(
         *catalog_args,
     ]
     try:
+        _progress(show, f"Writing the DefenseClaw {agent} entry to {client_path}...")
         path = _set_client_entry(client, agent, guard, args)
+        _progress(show, "Pinning the guard and agent executable digests...")
         lock_path = _write_contract_lock(
             data_dir=data_dir,
             client=client,
@@ -603,6 +645,7 @@ def setup_cmd(
             profile_value.allowed_clients = sorted(set(profile_value.allowed_clients) | {client})
             profile_value.allowed_agents = sorted(set(profile_value.allowed_agents) | {agent})
             app.cfg.acp.profiles[profile] = profile_value
+            _progress(show, "Saving the ACP policy to the DefenseClaw config...")
             app.cfg.save()
     except Exception as exc:
         app.cfg.acp = acp_snapshot
@@ -627,6 +670,16 @@ def setup_cmd(
         "contract_lock": str(lock_path),
         "managed": managed,
     }
+    prior = acp_snapshot.bindings.get(pair_key)
+    prior_profile = acp_snapshot.profiles.get(prior.profile) if prior is not None else None
+    _progress(show, "Recording the change with the gateway...")
+    _log_acp_change(
+        app,
+        "acp-setup",
+        f"scope={client}/{agent} mode={mode} previous={getattr(prior_profile, 'mode', '') or ''}",
+    )
+    if not managed:
+        _wait_for_gateway_acp(app, profile, mode, show)
     click.echo(
         json.dumps(result, sort_keys=True)
         if json_output
@@ -634,11 +687,82 @@ def setup_cmd(
     )
 
 
+def _log_acp_change(app: AppContext, operation: str, details: str) -> None:
+    """Record an ACP entry change as an Activity mutation that names it (GAP-1511).
+
+    The change is saved first; a stopped gateway only skips the audit event.
+    """
+    if not getattr(app, "logger", None):
+        return
+    from defenseclaw.logger import CanonicalObservabilityError, CanonicalObservabilityUnavailableError
+
+    try:
+        app.logger.log_config_change(operation, details)
+    except CanonicalObservabilityUnavailableError:
+        ux.echo("  ⚠ Change saved. The gateway isn't running, so the audit event was not recorded.", err=True)
+    except CanonicalObservabilityError as exc:
+        ux.echo(f"  ⚠ Change saved, but the gateway did not confirm the audit event ({exc}).", err=True)
+
+
+# The gateway reloads config.yaml about half a second after it changes.
+_GATEWAY_ACP_APPLY_SECONDS = 10.0
+
+
+def _wait_for_gateway_acp(app: AppContext, profile: str, mode: str, show: bool) -> None:
+    """Return once the running gateway has loaded this setup (GAP-2135).
+
+    An editor session started before the reload was refused with HTTP 503
+    ("ACP guard is not enabled") right after setup said Configured. A gateway
+    that is stopped, or does not answer this request, is not waited for.
+    """
+    from defenseclaw.gateway import OrchestratorClient, gateway_api_client_host
+
+    try:
+        client = OrchestratorClient(
+            host=gateway_api_client_host(app.cfg),
+            port=app.cfg.gateway.api_port,
+            token=app.cfg.gateway.resolved_token(),
+            timeout=2,
+        )
+    except Exception:  # noqa: BLE001 - the wait is best effort
+        return
+    deadline = time.monotonic() + _GATEWAY_ACP_APPLY_SECONDS
+    announced = False
+    try:
+        while True:
+            try:
+                loaded = client.acp_profiles()
+            except Exception:  # noqa: BLE001 - stopped or older gateway: nothing to wait for
+                return
+            profiles = loaded.get("profiles")
+            entry = profiles.get(profile) if isinstance(profiles, dict) else None
+            if loaded.get("enabled") is True and isinstance(entry, dict) and entry.get("mode") == mode:
+                return
+            if time.monotonic() >= deadline:
+                click.echo(
+                    "  ⚠ Change saved, but the gateway has not loaded it yet; an editor session started "
+                    "in the next few seconds may be refused. Wait a moment before you start it.",
+                    err=True,
+                )
+                return
+            if not announced:
+                _progress(show, "Waiting for the gateway to load the ACP policy...")
+                announced = True
+            time.sleep(0.25)
+    finally:
+        client.close()
+
+
 @acp_cmd.command("remove")
-@click.option("--client", type=click.Choice(sorted(_CLIENTS)), required=True)
-@click.option("--agent", type=click.Choice(sorted(_AGENTS)), required=True)
+@click.option("--client", type=click.Choice(sorted(_CLIENTS)), required=True, help="Editor that runs the agent.")
+@click.option("--agent", type=click.Choice(sorted(_AGENTS)), required=True, help="ACP agent to guard.")
 @click.option("--managed", is_flag=True, help="Remove only user-side enterprise enrollment files.")
-@click.option("--runtime-data-dir", default=None, type=click.Path(file_okay=False, path_type=Path))
+@click.option(
+    "--runtime-data-dir",
+    default=None,
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Per-user ACP runtime directory of a managed enrollment.",
+)
 @pass_ctx
 def remove_cmd(app: AppContext, client: str, agent: str, managed: bool, runtime_data_dir: Path | None) -> None:
     """Remove one DefenseClaw-owned editor entry without touching foreign agents."""
@@ -653,8 +777,14 @@ def remove_cmd(app: AppContext, client: str, agent: str, managed: bool, runtime_
         raise click.ClickException("--runtime-data-dir is a managed-enrollment option")
     lock_path = _contract_lock_path(data_dir, client, agent)
     lock_snapshots = _client_contract_snapshots(data_dir, client, agent)
+    had_entry = _has_client_entry(client, agent)
+    had_policy = not managed and app.cfg.acp.binding_key(client, agent) in app.cfg.acp.bindings
+    if not (had_entry or had_policy or lock_path.exists()):
+        click.echo(f"Nothing to remove: no DefenseClaw {agent} entry is configured for {client} ({path})")
+        return
     acp_snapshot = copy.deepcopy(app.cfg.acp)
     try:
+        _progress(True, f"Removing the DefenseClaw {agent} entry from {path}...")
         path = _remove_client_entry(client, agent)
         remaining = _managed_pairs()
         if not managed:
@@ -679,6 +809,7 @@ def remove_cmd(app: AppContext, client: str, agent: str, managed: bool, runtime_
                     value for value in profile_value.allowed_agents if value in active_agents
                 ]
             app.cfg.acp.enabled = bool(active_clients and active_agents)
+            _progress(True, "Saving the ACP policy to the DefenseClaw config...")
             app.cfg.save()
     except Exception as exc:
         app.cfg.acp = acp_snapshot
@@ -690,13 +821,24 @@ def remove_cmd(app: AppContext, client: str, agent: str, managed: bool, runtime_
                 rollback_errors.append(f"{managed_path}: {type(rollback_exc).__name__}")
         suffix = f"; rollback problems: {', '.join(rollback_errors)}" if rollback_errors else ""
         raise click.ClickException(f"ACP removal was rolled back: {exc}{suffix}") from exc
-    click.echo(f"Removed the DefenseClaw {agent} entry from {path}")
+    _progress(True, "Recording the change with the gateway...")
+    _log_acp_change(app, "acp-remove", f"scope={client}/{agent} entry=removed previous=configured")
+    if had_entry:
+        click.echo(f"Removed the DefenseClaw {agent} entry from {path}")
+    else:
+        click.echo(f"Removed leftover DefenseClaw {client}/{agent} state; {path} had no {agent} entry")
 
 
 @acp_cmd.command("status")
-@click.option("--runtime-data-dir", default=None, type=click.Path(file_okay=False, path_type=Path))
+@click.option(
+    "--runtime-data-dir",
+    default=None,
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Per-user ACP runtime directory of a managed enrollment.",
+)
+@click.option("--json-output", "--json", "json_output", is_flag=True, help="Print the result as JSON.")
 @pass_ctx
-def status_cmd(app: AppContext, runtime_data_dir: Path | None) -> None:
+def status_cmd(app: AppContext, runtime_data_dir: Path | None, json_output: bool = False) -> None:
     """Show configured ACP posture and editor paths."""
     if not app.cfg:
         raise click.ClickException("configuration is unavailable")
@@ -720,37 +862,148 @@ def status_cmd(app: AppContext, runtime_data_dir: Path | None) -> None:
                 else "inherited"
             ),
         }
-    click.echo(
-        json.dumps(
-            {
-                "enabled": app.cfg.acp.enabled,
-                "mode": app.cfg.acp.mode,
-                "default_profile": app.cfg.acp.default_profile,
-                "clients": {name: str(_client_path(name)) for name in sorted(_CLIENTS)},
-                "configured_clients": sorted(app.cfg.acp.clients),
-                "configured_agents": sorted(app.cfg.acp.agents),
-                "bindings": bindings,
-            },
-            indent=2,
-            sort_keys=True,
-        )
-    )
+    payload = {
+        "enabled": app.cfg.acp.enabled,
+        "mode": app.cfg.acp.mode,
+        "default_profile": app.cfg.acp.default_profile,
+        "clients": {name: str(_client_path(name)) for name in sorted(_CLIENTS)},
+        "configured_clients": sorted(app.cfg.acp.clients),
+        "configured_agents": sorted(app.cfg.acp.agents),
+        "bindings": bindings,
+    }
+    if json_output:
+        click.echo(json.dumps(payload, indent=2, sort_keys=True))
+        return
+    _print_acp_status(payload)
+
+
+def _print_acp_status(payload: dict) -> None:
+    """Readable ACP posture for 'acp status' (GAP-1501); --json keeps the document."""
+    state = "on" if payload["enabled"] else "off"
+    bindings = payload["bindings"]
+    # Mode and profile are per binding (rows below). The top-level acp.mode /
+    # default_profile only seed the first setup, so showing them here
+    # described a past setup call rather than the guard (GAP-1732).
+    count = len(bindings)
+    click.echo(f"ACP guard: {state} ({count} binding{'' if count == 1 else 's'})")
+    if not bindings:
+        click.echo("  No guarded editor/agent pairs yet.")
+        ux.subhead("Add one with: defenseclaw acp setup --client <editor> --agent <agent>", indent="  ")
+        return
+    click.echo("  Bindings:")
+    for pair, info in sorted(bindings.items()):
+        health = "healthy" if info["healthy"] else "NEEDS ATTENTION"
+        source = "" if info["profile_source"] == "binding" else ", inherited"
+        click.echo(f"    {pair:<20} {health:<16} profile {info['profile']} ({info['mode']}{source})")
+        for problem in info["problems"]:
+            ux.warn(str(problem), indent="      ")
+    if any(not info["healthy"] for info in bindings.values()):
+        ux.subhead("Fix with: defenseclaw acp verify, then re-run defenseclaw acp setup for that pair", indent="  ")
+    clients = payload["configured_clients"]
+    for name in clients:
+        click.echo(f"  {name} config: {payload['clients'].get(name, '')}")
+    ux.subhead("Machine-readable output: defenseclaw acp status --json", indent="  ")
 
 
 @acp_cmd.command("verify")
-@click.option("--client", type=click.Choice(sorted(_CLIENTS)), required=True)
-@click.option("--agent", type=click.Choice(sorted(_AGENTS)), required=True)
-@click.option("--runtime-data-dir", default=None, type=click.Path(file_okay=False, path_type=Path))
+@click.option(
+    "--client",
+    type=click.Choice(sorted(_CLIENTS)),
+    default=None,
+    help="Editor that runs the agent (default: every configured binding).",
+)
+@click.option(
+    "--agent",
+    type=click.Choice(sorted(_AGENTS)),
+    default=None,
+    help="ACP agent to guard (default: every configured binding).",
+)
+@click.option(
+    "--runtime-data-dir",
+    default=None,
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Per-user ACP runtime directory of a managed enrollment.",
+)
 @pass_ctx
-def verify_cmd(app: AppContext, client: str, agent: str, runtime_data_dir: Path | None) -> None:
-    """Fail if a managed editor entry or executable digest has drifted."""
+def verify_cmd(app: AppContext, client: str | None, agent: str | None, runtime_data_dir: Path | None) -> None:
+    """Fail if a managed editor entry or executable digest has drifted.
+
+    With no --client/--agent, every configured binding is verified.
+    """
     if not app.cfg:
         raise click.ClickException("configuration is unavailable")
     data_dir = str((runtime_data_dir or Path(app.cfg.data_dir)).expanduser().resolve())
-    problems = _verify_binding(data_dir, client, agent, app.cfg.acp)
-    if problems:
-        raise click.ClickException("ACP binding verification failed: " + "; ".join(problems))
-    click.echo(f"Verified {client}/{agent}: editor entry and executable digests match")
+    if client and agent:
+        pairs = [(client, agent)]
+    else:
+        pairs = sorted(
+            (pair_client, pair_agent)
+            for pair_client, pair_agent in _managed_pairs()
+            if (client is None or pair_client == client) and (agent is None or pair_agent == agent)
+        )
+        if not pairs:
+            raise click.ClickException(
+                "No DefenseClaw ACP bindings are configured"
+                + (f" for {client or agent}" if client or agent else "")
+                + "; run 'defenseclaw acp setup --client <editor> --agent <agent>' first"
+            )
+    failures: list[str] = []
+    for pair_client, pair_agent in pairs:
+        problems = _verify_binding(data_dir, pair_client, pair_agent, app.cfg.acp)
+        if problems:
+            failures.append(f"{pair_client}/{pair_agent}: " + "; ".join(problems))
+        else:
+            click.echo(f"Verified {pair_client}/{pair_agent}: editor entry and executable digests match")
+    if failures:
+        raise click.ClickException("ACP binding verification failed: " + " | ".join(failures))
+
+
+@acp_cmd.command("refresh")
+@click.option(
+    "--from-sha256",
+    "from_sha256",
+    default="",
+    help="Re-pin only locks that pinned this guard digest (the installer passes the guard it replaced).",
+)
+@pass_ctx
+def refresh_cmd(app: AppContext, from_sha256: str) -> None:
+    """Re-pin the DefenseClaw ACP guard in every editor entry after an upgrade.
+
+    An upgrade replaces defenseclaw-acp, so each contract lock still names the
+    old guard digest and the editor entry fails closed. This re-pins only
+    DefenseClaw's own guard and the protocol schema; a changed agent binary or
+    editor entry still needs 'defenseclaw acp setup'. The installer runs it.
+    """
+    if not app.cfg:
+        raise click.ClickException("configuration is unavailable")
+    data_dir = str(Path(app.cfg.data_dir).expanduser().resolve())
+    protocol = {"schema_version": _SCHEMA_VERSION, "schema_sha256": _SCHEMA_SHA256}
+    for client, agent in sorted(_managed_pairs()):
+        lock_path = _contract_lock_path(data_dir, client, agent)
+        try:
+            if lock_path.is_symlink() or not lock_path.is_file() or lock_path.stat().st_size > 64 << 10:
+                continue
+            document = json.loads(lock_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        guard = document.get("guard") if isinstance(document, dict) else None
+        guard_path = guard.get("path") if isinstance(guard, dict) else None
+        if (
+            not isinstance(guard_path, str)
+            or guard.get("managed_custody") is True
+            or Path(guard_path).name.lower() not in _GUARD_BASENAMES
+            or not Path(guard_path).is_file()
+        ):
+            continue
+        if from_sha256 and str(guard.get("sha256", "")).lower() != from_sha256.strip().lower():
+            continue
+        digest = _sha256_file(guard_path)
+        if guard.get("sha256") == digest and document.get("protocol") == protocol:
+            continue
+        guard["sha256"] = digest
+        document["protocol"] = protocol
+        atomic_write_private_bytes(lock_path, (json.dumps(document, indent=2, sort_keys=True) + "\n").encode())
+        click.echo(f"Re-pinned the DefenseClaw ACP guard for {client}/{agent}")
 
 
 # --- ACP discovery and takeover -------------------------------------------
@@ -905,7 +1158,7 @@ def _point_entry_at_guard(client: str, entry_name: str, guard: str, args: list[s
 
 
 @acp_cmd.command("detect")
-@click.option("--json-output", "json_output", is_flag=True)
+@click.option("--json-output", "--json", "json_output", is_flag=True, help="Print the result as JSON.")
 def detect_cmd(json_output: bool) -> None:
     """Report which ACP clients are guarded, unguarded, or unconfigured."""
     findings = _detect_acp_clients()
@@ -940,11 +1193,25 @@ def detect_cmd(json_output: bool) -> None:
 
 @acp_cmd.command("adopt")
 @click.option("--client", type=click.Choice(sorted(_CLIENTS)), default=None, help="Limit to one client.")
-@click.option("--profile", default="default", show_default=True)
-@click.option("--guard-binary", default="defenseclaw-acp", show_default=True)
+@click.option(
+    "--profile", default="default", show_default=True, help="ACP policy profile (acp.profiles) the guard enforces."
+)
+@click.option(
+    "--guard-binary",
+    default="defenseclaw-acp",
+    show_default=True,
+    help="DefenseClaw ACP guard executable the editor entry starts.",
+)
 @click.option("--activate", is_flag=True, help="Enable action mode; adoption otherwise observes only.")
-@click.option("--yes", "assume_yes", is_flag=True, help="Adopt without the confirmation prompt.")
-@click.option("--json-output", "json_output", is_flag=True)
+@click.option(
+    "--yes",
+    "--non-interactive",
+    "--accept-defaults",
+    "assume_yes",
+    is_flag=True,
+    help="Adopt without the confirmation prompt (--non-interactive and --accept-defaults are aliases).",
+)
+@click.option("--json-output", "--json", "json_output", is_flag=True, help="Print the result as JSON.")
 @click.pass_context
 def adopt_cmd(
     ctx: click.Context,

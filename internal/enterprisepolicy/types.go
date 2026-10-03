@@ -92,6 +92,13 @@ type Options struct {
 	// ClaudeVersionFloor is enterprise.machine_policy.connectors.claudecode.version_floor
 	// (enforce, report or off); "" means the default, enforce.
 	ClaudeVersionFloor string
+	// ClaudeMachineHookContract is the Claude Code hook contract the
+	// machine-wide hook drop-in is rendered from when another lifecycle
+	// renders it (standalone Windows: the oldest enrolled contract). The
+	// version floor rises to that contract's lowest version, so no build the
+	// floor lets start finds hook events in the drop-in it does not know
+	// (GAP-1555). Empty: the floor is ClaudeVersionFloor().
+	ClaudeMachineHookContract string
 	// WSL is enterprise.machine_policy.windows_wsl (Windows only); empty
 	// knobs take their defaults.
 	WSL config.EnterpriseWindowsWSLPolicy

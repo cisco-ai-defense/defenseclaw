@@ -123,7 +123,10 @@ missing cache is normal before the first Doctor run.
 The shape below shows the normal source-authoring surface. Every block is
 optional, and setup commands preserve comments and unrelated hand edits. Use
 `defenseclaw config reference observability` for the generated all-knobs
-reference instead of copying every default into this file.
+observability reference instead of copying every default into this file, and
+`defenseclaw config reference --format json-schema` for the schema of every
+section (each field with its allowed values). `defenseclaw config validate`
+points to the JSON schema when a field is wrong.
 
 ```yaml
 config_version: 8             # strict current schema; upgrade migrates supported v7 files
@@ -143,6 +146,18 @@ gateway:
   api_bind: ""                 # REST API bind override; normally 127.0.0.1 when empty
   config_reload:
     mode: hot                  # hot | restart; omitted means hot
+  watcher:                     # install watcher for new skills, plugins and MCP servers
+    enabled: true
+    skill:
+      enabled: true
+      take_action: true        # apply skill_actions (quarantine/block) to a rejected new skill; false = alert only
+      dirs: []                 # non-empty replaces the connector's own skill folders
+    plugin:
+      enabled: true
+      take_action: true        # same for new plugins (plugin_actions)
+      dirs: []
+    mcp:
+      take_action: true        # block a rejected new MCP server in the connector's MCP config
 
 # One observability graph owns collection, local history, routing, redaction,
 # sampling, metrics policy, and every optional destination. Defaults collect
@@ -995,6 +1010,16 @@ data directory. Configure the sidecar API listener with `gateway.api_bind` and
 upstream agent-gateway address. Set log verbosity through the sidecar's
 `--log-level` flag (see `defenseclaw-gateway start --help`).
 
+**Proxy variables.** The gateway's telemetry exporters (OTLP, Galileo, Splunk
+HEC, HTTP JSONL) follow `HTTPS_PROXY` and `NO_PROXY` from the gateway's
+environment (an `enterprise.network.https_proxy` takes precedence); loopback
+destinations always connect directly. The proxy URL must be
+`http(s)://host[:port]`: with a user name or password the gateway logs a
+warning and the exporters connect directly. Restart the gateway from a shell
+that has the variables set after changing them. Whenever a proxy variable is
+set, the CLI and the gateway add the instance-metadata endpoints
+(`169.254.169.254`, `169.254.170.2`, `fd00:ec2::254`) to `NO_PROXY`.
+
 ## Per-connector source-of-truth files
 
 | Connector | File DefenseClaw mutates |
@@ -1022,7 +1047,7 @@ when the current file still matches the recorded managed-file identity. If the
 file has drifted, connector-specific teardown removes only DefenseClaw-owned
 entries and preserves unrelated operator edits.
 
-Hook connectors default to global/user scope. `claw.workspace_dir` is empty unless you pass `--workspace`; when set, OpenHands uses it for repo-local `.openhands/hooks.json`, `.agents/skills`, and deprecated `.openhands/skills` discovery while still scanning global user skills and the OpenHands public skills cache. Copilot uses it for `.github/hooks/defenseclaw.json` and workspace-local component discovery. Re-run `defenseclaw setup <connector>` without `--workspace` to return to global scope.
+Hook connectors default to global/user scope. `claw.workspace_dir` is empty unless you pass `--workspace`; when set, OpenHands uses it for repo-local `.openhands/hooks.json`, `.agents/skills`, and deprecated `.openhands/skills` discovery while still scanning global user skills and the OpenHands public skills cache. Copilot uses it for `.github/hooks/defenseclaw.json` and workspace-local component discovery. Re-run `defenseclaw setup <connector>` without `--workspace` to return to global scope. The workspace is one value for the whole install, so `defenseclaw setup <connector> --workspace` refuses while other connectors are configured (their hooks would move into that folder and stop guarding the rest); use `defenseclaw setup guardrail --workspace <dir>` to scope every connector to one folder on purpose.
 
 Every hook setup also writes the resolved connector path contract to `~/.defenseclaw/hook_contract_lock.json`. The `locations` block records the pinned workspace, hook config file, generated hook script, and the MCP/skills/rules/plugins/agents surfaces that DefenseClaw will scan for that connector. Use `defenseclaw doctor` to compare that lock against the files the active SDK can actually load.
 

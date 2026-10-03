@@ -40,10 +40,12 @@ type Compiler struct {
 
 // Program is an immutable, reusable checked CEL program.
 type Program struct {
-	program               cel.Program
-	staticCost            uint64
-	redirectReductionSafe bool
-	listReductionSafe     bool
+	program                 cel.Program
+	staticCost              uint64
+	redirectReductionSafe   bool
+	listReductionSafe       bool
+	subsetReductionSafe     bool
+	argvSubsetReductionSafe bool
 }
 
 // NewCompiler constructs an isolated compiler for one rulepack candidate.
@@ -143,10 +145,12 @@ func (c *Compiler) compile(expression string) (*Program, CompileCode) {
 		return nil, CompileProgram
 	}
 	return &Program{
-		program:               evaluable,
-		staticCost:            estimate.Max,
-		redirectReductionSafe: redirectReductionSafe(checked),
-		listReductionSafe:     listReductionSafe(checked),
+		program:                 evaluable,
+		staticCost:              estimate.Max,
+		redirectReductionSafe:   redirectReductionSafe(checked),
+		listReductionSafe:       listReductionSafe(checked),
+		subsetReductionSafe:     subsetReductionSafe(checked),
+		argvSubsetReductionSafe: argvSubsetReductionSafe(checked),
 	}, CompileOK
 }
 

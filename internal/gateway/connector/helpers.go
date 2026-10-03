@@ -1107,6 +1107,7 @@ func nativeHookBinaryOwnershipCandidates() []string {
 		hookBinaries,
 		canonicalNativeWindowsHookBinary(),
 		canonicalNativeWindowsInstalledHookBinary(),
+		canonicalStandaloneWindowsHookBinary(),
 		filepath.Join(userHomeDir(), ".local", "bin", windowsHookBinaryName),
 	))
 }
@@ -1155,6 +1156,34 @@ func isDefenseClawManagedHookExecutable(exe string) bool {
 		canonicalNativeWindowsInstalledHookBinary(),
 	}) {
 		if sameManagedHookExecutablePath(exe, owned) {
+			return true
+		}
+	}
+	return false
+}
+
+// isRenamedDefenseClawHookExecutable recognizes a DefenseClaw launcher path
+// that was edited in place (GAP-1364): an absolute defenseclaw-* executable in
+// the same directory as one of DefenseClaw's own launchers. Callers must still
+// require DefenseClaw's exact hook argv. A defenseclaw-* executable in any
+// other directory is never claimed.
+func isRenamedDefenseClawHookExecutable(exe string) bool {
+	exe = strings.TrimSpace(exe)
+	if exe == "" || (!filepath.IsAbs(exe) && !isWindowsDriveAbsolutePath(exe)) {
+		return false
+	}
+	if !strings.HasPrefix(strings.ToLower(filepath.Base(exe)), "defenseclaw-") {
+		return false
+	}
+	for _, owned := range uniqueNonEmptyStrings([]string{
+		defenseclawHookBinary(),
+		canonicalNativeWindowsHookBinary(),
+		canonicalNativeWindowsInstalledHookBinary(),
+	}) {
+		if !filepath.IsAbs(owned) && !isWindowsDriveAbsolutePath(owned) {
+			continue
+		}
+		if pathidentity.Same(filepath.Dir(exe), filepath.Dir(owned)) {
 			return true
 		}
 	}

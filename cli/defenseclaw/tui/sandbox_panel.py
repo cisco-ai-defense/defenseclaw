@@ -41,11 +41,11 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-from rich.markup import escape as rich_escape
 from textual import events
 
 from defenseclaw.gateway import SandboxAPIError
 from defenseclaw.platform_support import openshell_sandboxes_supported
+from defenseclaw.tui.markup_safe import escape as rich_escape
 from defenseclaw.tui.screens.sandbox_detail import SandboxDetailScreen
 from defenseclaw.tui.screens.sandbox_launch import (
     SandboxLaunch,
@@ -973,19 +973,31 @@ class SandboxPanelMixin:
         return all(row.name != name for row in self.sandbox_model.rows)
 
     async def _sandbox_wrappers_menu(self) -> None:
+        if not self._sandbox_supported():
+            # The menu offered "Turn on: defenseclaw sandbox enable claude" on
+            # Windows, which the command refuses (GAP-1328); say it like n/t do.
+            self._set_status("OpenShell sandboxes run on Linux and macOS only.")  # type: ignore[attr-defined]
+            return
         model = self.sandbox_model
         names = model.harnesses or DEFAULT_SANDBOX_HARNESSES
+        # A wrapper runs `sandbox run`, so while sandboxes cannot run the
+        # plain command would fail in every new shell; enable refuses then.
+        blocked = {
+            "off": "Sandboxes are off; run the Sandbox wizard (0 Setup) first",
+            "unavailable": "Sandboxes are unavailable; see: defenseclaw sandbox doctor",
+            # Before the first snapshot the state is unknown; offering "Turn
+            # on" then ran an enable the command refused (GAP-1371).
+            "waiting": "Sandbox status is still loading; try again in a moment",
+            "unreachable": "The DefenseClaw daemon is not answering; check: defenseclaw sandbox doctor",
+        }.get(model.state(), "")
         actions = []
         for name in names:
             command = harness_command(name)
             on = name in model.wrappers
-            actions.append(
-                MenuAction(
-                    name,
-                    f"`{command}` sandboxed: {'on' if on else 'off'}",
-                    f"Turn {'off' if on else 'on'}: defenseclaw sandbox {'disable' if on else 'enable'} {command}",
-                )
-            )
+            hint = f"Turn {'off' if on else 'on'}: defenseclaw sandbox {'disable' if on else 'enable'} {command}"
+            if blocked and not on:
+                hint = blocked
+            actions.append(MenuAction(name, f"`{command}` sandboxed: {'on' if on else 'off'}", hint))
         actions.append(MenuAction("cancel", "Cancel"))
         choice = await self.push_screen_wait(  # type: ignore[attr-defined]
             ActionMenuScreen(
@@ -999,6 +1011,9 @@ class SandboxPanelMixin:
         if choice in (None, "cancel"):
             return
         verb = "disable" if choice in model.wrappers else "enable"
+        if verb == "enable" and blocked:
+            self.notify_toast("info", f"{blocked}.")  # type: ignore[attr-defined]
+            return
         command = harness_command(choice)
         await self._run_command(  # type: ignore[attr-defined]
             "defenseclaw", ("sandbox", verb, command), display_name=f"sandbox {verb} {command}"

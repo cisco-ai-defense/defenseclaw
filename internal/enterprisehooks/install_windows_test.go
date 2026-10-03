@@ -2978,3 +2978,15 @@ func TestWindowsEnterpriseManagedAgentVersionMinimums(t *testing.T) {
 		})
 	}
 }
+
+// GAP-1940: an account deleted with its profile during Setup is named as
+// such, not as the raw Win32 lookup error, and still reads as not-exist.
+func TestValidateWindowsEnterpriseHomeNamesAVanishedProfile(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "dcw-gone")
+	_, _, err := validateWindowsEnterpriseHome(home, "")
+	if err == nil || !errors.Is(err, os.ErrNotExist) ||
+		!strings.Contains(err.Error(), "no longer exists: the account was deleted or its profile folder removed") ||
+		strings.Contains(err.Error(), "GetFileAttributesEx") {
+		t.Fatalf("vanished profile error = %v", err)
+	}
+}

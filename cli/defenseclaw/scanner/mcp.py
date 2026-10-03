@@ -1044,7 +1044,7 @@ class MCPScannerWrapper:
                 pinned_target = (host, port, ip)
             except SSRFError as exc:
                 raise ValueError(
-                    f"refusing to scan remote MCP target {target!r}: {exc}"
+                    f"refusing to scan MCP URL {target!r}: {exc}"
                 ) from exc
 
         if not is_local:
@@ -1317,7 +1317,25 @@ class MCPScannerWrapper:
 
     def _scan_remote(self, scanner: object, target: str,
                      analyzers: list | None) -> list[object]:
-        """Scan a remote MCP server by URL."""
+        """Scan a remote MCP server by URL.
+
+        The SDK logs a failed connect as its own timestamped ERROR line before
+        raising; capture it so the CLI prints one error (GAP-1484).
+        """
+        errors: list[tuple[str, str]] = []
+        with _capture_sdk_error_logs(errors):
+            findings = self._scan_remote_uncaptured(scanner, target, analyzers)
+        llm_errors = [m for (name, m) in errors if _is_llm_backend_error(name, m, self._llm)]
+        if llm_errors:
+            print(
+                f"warning: LLM skipped (backend unreachable) while scanning "
+                f"{target!r}: {llm_errors[0]}",
+                file=sys.stderr,
+            )
+        return findings
+
+    def _scan_remote_uncaptured(self, scanner: object, target: str,
+                                analyzers: list | None) -> list[object]:
         cfg = self.config
         all_findings: list[object] = []
 

@@ -32,7 +32,7 @@ the same config.
 | Architecture | x86_64 (`amd64`) or `arm64`. Each release has a package and a tarball for both. |
 | Package format | `.deb` (Debian, Ubuntu) or `.rpm` (RHEL and derivatives). Hosts without a package manager use the payload tarball. |
 | SELinux | Supported. After each change the lifecycle runs `restorecon -R` on `/opt/defenseclaw` and `/etc/defenseclaw`, and reports a `selinux_relabel` warning if that fails. |
-| Privileges | root. Only `enterprise linux status` works without root. |
+| Privileges | root. Every `enterprise linux` action, status included, needs root: a standard user gets `not_root`. Per-user commands such as `defenseclaw-gateway status` and `audit export` answer that the computer is managed and name the administrator command. |
 | Other profiles | No Secure Client DefenseClaw layout at `/opt/cisco/secureclient/defenseclaw`. The lifecycle refuses with `profile_conflict`. |
 
 The systemd version decides how the gateway reads secrets:
@@ -83,7 +83,7 @@ The units:
 | `defenseclaw-hook-guardian-reconcile.service` | root | One immediate reconcile, on demand |
 | `defenseclaw-hook-enumerator.service` | root, homes read-only | Rewrites the target manifest every five minutes (in the default `auto` enrollment mode) |
 | `defenseclaw-sensor-helper.service` | root, acquisition capabilities | Answers the gateway's fixed AI Discovery requests |
-| `defenseclaw-enterprise-apply.path` | PID 1 | Runs `ensure --reason path` when `/etc/defenseclaw/config.yaml`, `/etc/defenseclaw/secrets` or `/etc/defenseclaw/policies` changes |
+| `defenseclaw-enterprise-apply.path` | PID 1 | Runs `ensure --reason path` when `/etc/defenseclaw/config.yaml`, `/etc/defenseclaw/secrets` or `/etc/defenseclaw/policies` changes. `enterprise secret set` and `remove` pause it while they write the credential, because they apply the change themselves |
 | `defenseclaw-enterprise-verify.timer` | PID 1 | Runs `verify` daily, with up to one hour of random delay |
 
 The package installs the units in `/usr/lib/systemd/system`. A tarball install
@@ -179,6 +179,30 @@ guardrail:
 Each key under `guardrail.connectors` turns on protection for that agent. See
 [Choose the agents to protect](/docs/enterprise/configuration#choose-the-agents-to-protect)
 and the [settings reference](/docs/enterprise/configuration#settings-reference).
+
+AI Discovery (each enrolled user's inventory scan in `ai-discovery/`, and the
+skill, MCP and AI component records it feeds) is off unless the config sets
+it. A config you write is read as written, so add this block to turn it on:
+
+```yaml
+ai_discovery:
+  enabled: true
+```
+
+See [Per-user scans](/docs/ai-discovery#per-user-scans-in-standalone-enterprise).
+To read the inventory on the host, run the read-only `discovery` view as root:
+
+```bash
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux discovery
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux discovery --user <account> --json
+```
+
+Skills and MCP servers are inventoried, not scanned: a managed deployment
+does not run the skill or MCP scanners. The inventory names each skill and
+MCP server per user, and its `ai_component` and per-entry skill and MCP
+records go to your observability destinations. The gateway's `/skills`,
+`/mcps` and `/tools/catalog` API routes read an OpenClaw gateway, which a
+managed deployment does not run, so they answer `501`.
 
 Put it where the lifecycle reads it. A config staged before the install is
 used as is; it does not count as an unmanaged layout:
@@ -349,7 +373,8 @@ module, mount, raw-I/O, reboot and swap calls. Config, binaries and the ledger
 are read-only to it; it can write only its data, log and runtime directories.
 The guardian runs as root bounded to `CAP_CHOWN CAP_DAC_OVERRIDE
 CAP_DAC_READ_SEARCH CAP_KILL CAP_SETGID CAP_SETUID`, and the enumerator to
-`CAP_DAC_READ_SEARCH CAP_KILL CAP_SETGID CAP_SETUID` with homes read-only.
+`CAP_CHOWN CAP_DAC_READ_SEARCH CAP_KILL CAP_SETGID CAP_SETUID` with homes
+read-only.
 Do not edit the units; `verify` reports local overrides. Put host-specific
 settings in a drop-in, and never widen the gateway sandbox: user discovery and
 hook repair are the guardian's job.
@@ -425,6 +450,10 @@ each user remove their per-user install with `defenseclaw uninstall --binaries -
 Add `--all` to also delete `~/.defenseclaw`. See
 [Uninstall](/docs/get-started/install#uninstall).
 
+A per-user gateway that was already running keeps running until it is
+stopped. The install, `status` and `verify` name each such account with the
+`per_user_gateway_running` warning and the `kill` command that stops it.
+
 ## Remove
 
 | Goal | Command |
@@ -437,10 +466,13 @@ Add `--all` to also delete `~/.defenseclaw`. See
 Run these as root from `/opt/defenseclaw/bin`. Uninstall removes each user's
 DefenseClaw hook registrations and DefenseClaw's own machine-policy entries
 first. Administrator entries in those files stay as they were.
-Each user keeps `~/.defenseclaw` unless you purge. With `--purge` it also
+Each user keeps `~/.defenseclaw` unless you purge; the result's `kept:` line
+names the accounts that still have `~/.defenseclaw` or per-user binaries in
+`~/.local/bin`. With `--purge` it also
 stops each enrolled user's per-user gateway and removes all of that user's
 `~/.defenseclaw`, the empty agent folders DefenseClaw created in that home,
-and the per-user binaries and launcher links in `~/.local/bin`, and the
+the per-user binaries and launcher links in `~/.local/bin`, and the
+DefenseClaw wheels earlier per-user installs left in `~/.cache/uv`, and the
 result names every user it purged or left alone. If uninstall reports an
 error, it keeps the deployment record, the config and the state, so you can
 fix the cause and rerun it.

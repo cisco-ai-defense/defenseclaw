@@ -143,7 +143,8 @@ func watchdogProcessExecutableMatches(info watchdogPIDInfo) bool {
 	if err := windows.QueryFullProcessImageName(h, 0, &buffer[0], &size); err != nil || size == 0 {
 		return false
 	}
-	return pathidentity.Same(windows.UTF16ToString(buffer[:size]), info.Executable)
+	image := windows.UTF16ToString(buffer[:size])
+	return pathidentity.Same(image, info.Executable) || watchdogImageRenamedAside(image, info.Executable)
 }
 
 // The control event lives in the Global namespace. Local\ is per Windows

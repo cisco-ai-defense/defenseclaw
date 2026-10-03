@@ -120,6 +120,55 @@ def test_darwin_openhands_uv_tool_symlink_refusal_names_trusted_paths_add(
         agent_selection._select_agent_executable(str(tmp_path / "state"), "openhands")
 
 
+def test_selection_probe_gets_load_tolerant_budget_and_plain_timeout(tmp_path: Path, monkeypatch) -> None:
+    # GAP-1620: the selection probe reused discovery's 8 s budget and failed
+    # right after discovery had verified the same agent.
+    executable = tmp_path / "amp"
+    executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    seen: dict[str, object] = {}
+
+    def slow_probe(*_args, **kwargs):
+        seen.update(kwargs)
+        return "", agent_selection.agent_discovery.VERSION_PROBE_TIMED_OUT
+
+    monkeypatch.setattr(agent_selection, "_setup_agent_candidates", lambda *_args: (str(executable),))
+    monkeypatch.setattr(agent_selection, "is_setup_trusted_binary", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(agent_selection.agent_discovery, "_version_for_agent_binary", slow_probe)
+
+    with pytest.raises(OSError, match=r"did not answer its version probe within 90 s .*re-run setup"):
+        agent_selection._select_agent_executable(str(tmp_path / "state"), "amp")
+    assert seen["timeout_override"] == agent_selection.SELECTION_VERSION_TIMEOUT_SECONDS
+
+    budgets: list[float] = []
+
+    def fake_run(*_args, timeout, **_kwargs):
+        budgets.append(timeout)
+        return subprocess.CompletedProcess([], 0, b"amp 1.0\n", b"")
+
+    monkeypatch.setattr(agent_selection.agent_discovery.subprocess, "run", fake_run)
+    agent_selection.agent_discovery._version_for_binary(str(executable), (), require_trusted_binary_paths=False)
+    agent_selection.agent_discovery._version_for_binary(
+        str(executable), (), require_trusted_binary_paths=False, timeout_override=90.0
+    )
+    assert budgets == [agent_selection.agent_discovery.VERSION_TIMEOUT_SECONDS, 90.0]
+
+
+def test_windows_cmd_shim_refusal_names_native_install_not_trusted_paths(tmp_path: Path, monkeypatch) -> None:
+    # GAP-1612: npm's claude.cmd sits in a default-trusted prefix but is a
+    # script wrapper; trusted-paths add answered "already trusted".
+    shim = tmp_path / "npm" / "claude.cmd"
+    shim.parent.mkdir()
+    shim.write_text("@echo off\n", encoding="utf-8")
+    monkeypatch.setattr(agent_selection, "_setup_agent_candidates", lambda *_args: (str(shim),))
+    monkeypatch.setattr(agent_selection, "is_setup_trusted_binary", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(agent_selection.os, "name", "nt")
+
+    with pytest.raises(OSError, match="claude.cmd is a script wrapper") as raised:
+        agent_selection._select_agent_executable(str(tmp_path / "state"), "claudecode")
+    assert "claude install" in str(raised.value)
+    assert "trusted-paths add" not in str(raised.value)
+
+
 @pytest.mark.skipif(os.name == "nt", reason="Darwin POSIX executable custody")
 def test_darwin_openhands_selection_rejects_identity_change_during_hash(
     tmp_path: Path,
@@ -274,6 +323,10 @@ def test_amp_setup_candidates_enumerate_only_native_amp_exe(tmp_path: Path, monk
     packaged = trusted.joinpath("node_modules", "@ampcode", "cli", "bin", "amp.exe")
     packaged.parent.mkdir(parents=True)
     packaged.write_bytes(b"native Amp from npm")
+    # `npm i -g @sourcegraph/amp` nests the same image (GAP-1437).
+    nested = trusted.joinpath("node_modules", "@sourcegraph", "amp", "node_modules", "@ampcode", "cli", "bin", "amp.exe")
+    nested.parent.mkdir(parents=True)
+    nested.write_bytes(b"native Amp from the sourcegraph package")
     monkeypatch.setattr(agent_selection, "_builtin_setup_trusted_prefixes", lambda: (str(trusted),))
     monkeypatch.setattr(
         agent_selection.agent_discovery,
@@ -293,7 +346,7 @@ def test_amp_setup_candidates_enumerate_only_native_amp_exe(tmp_path: Path, monk
         str(tmp_path / "state"),
     )
 
-    assert candidates == (str(native), str(packaged))
+    assert candidates == (str(native), str(packaged), str(nested))
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows native Amp selection authority")

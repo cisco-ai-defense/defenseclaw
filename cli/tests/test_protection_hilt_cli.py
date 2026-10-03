@@ -56,3 +56,14 @@ def test_a_saved_change_exits_0_when_the_audit_event_cannot_be_written(app, conn
     assert "the audit event was not recorded" in result.output
     hilt = app.cfg.guardrail.effective_hilt(connector or "")
     assert (hilt.enabled, hilt.min_severity) == (True, "HIGH")
+
+
+def test_fail_mode_exits_0_with_a_plain_note_when_the_gateway_is_stopped(app) -> None:
+    """GAP-1250: after defenseclaw-gateway stop, fail-mode saved the value, then crashed."""
+    result = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, ["open", "--yes"], obj=app)
+    assert result.exit_code == 0, result.output
+    assert result.exception is None
+    assert app.cfg.guardrail.hook_fail_mode == "open"
+    # GAP-1718: one stopped-gateway note that also names the skipped audit event.
+    assert result.output.count("gateway isn't running") == 1, result.output
+    assert "the audit event was not recorded" in result.output

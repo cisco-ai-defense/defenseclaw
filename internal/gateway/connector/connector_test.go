@@ -7448,6 +7448,38 @@ func TestHookScripts_TokenedHooks_FailOpen_OnMissingToken(t *testing.T) {
 	}
 }
 
+func TestHookScripts_MissingTokenNamesTheFile(t *testing.T) {
+	// GAP-1425: the block line said ".token absent and DEFENSECLAW_GATEWAY_TOKEN
+	// unset" instead of naming the file to restore.
+	if runtime.GOOS == "windows" {
+		t.Skip("hook scripts are POSIX shell")
+	}
+	dir := t.TempDir()
+	if err := WriteHookScriptsWithToken(dir, "127.0.0.1:18970", "tok-test"); err != nil {
+		t.Fatalf("WriteHookScriptsWithToken: %v", err)
+	}
+	if err := os.Remove(filepath.Join(dir, ".token")); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("bash", filepath.Join(dir, "codex-hook.sh"),
+		"--event", "UserPromptSubmit", "--hook-contract", "codex-hooks-v4")
+	env := []string{"DEFENSECLAW_HOME=" + t.TempDir(), "DEFENSECLAW_STRICT_AVAILABILITY=1"}
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "DEFENSECLAW_") {
+			env = append(env, kv)
+		}
+	}
+	cmd.Env = env
+	cmd.Stdin = strings.NewReader(`{"hook_event_name":"UserPromptSubmit"}`)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	_ = cmd.Run()
+	want := "missing gateway token: " + filepath.Join(dir, ".token") + " not found"
+	if got := stderr.String(); !strings.Contains(got, want) || strings.Contains(got, "DEFENSECLAW_GATEWAY_TOKEN") {
+		t.Fatalf("stderr = %q, want it to contain %q", got, want)
+	}
+}
+
 // runHookAndReturnCurlArgsWithHome is the sentinel-aware variant of
 // runHookAndReturnCurlArgs. It takes an explicit DEFENSECLAW_HOME so
 // tests can drive the .disabled / missing-home branches deterministically
@@ -9060,6 +9092,73 @@ func TestClaudeCode_Teardown_PreservesManagedEnvChangedAfterSetup(t *testing.T) 
 	}
 }
 
+// RHEL-U4-01: an operator snapshot that holds only an earlier release's
+// prompt-capture flag (an older teardown removed the rest of its block) must
+// not bring the flag back on uninstall. A flag next to the operator's own
+// telemetry settings stays.
+func TestClaudeCode_TeardownDropsOrphanedEarlierReleasePromptFlag(t *testing.T) {
+	for name, tc := range map[string]struct {
+		pristine string
+		want     map[string]interface{}
+	}{
+		"orphaned flag": {
+			pristine: `{"env":{"AWS_REGION":"us-east-1","OTEL_LOG_USER_PROMPTS":"1"}}`,
+			want:     map[string]interface{}{"AWS_REGION": "us-east-1"},
+		},
+		"operator telemetry": {
+			pristine: `{"env":{"CLAUDE_CODE_ENABLE_TELEMETRY":"1","OTEL_LOG_USER_PROMPTS":"1"}}`,
+			want:     map[string]interface{}{"CLAUDE_CODE_ENABLE_TELEMETRY": "1", "OTEL_LOG_USER_PROMPTS": "1"},
+		},
+		// GAP-1107: what an earlier teardown left of a DefenseClaw block
+		// (loopback endpoints and the capture pins, telemetry not enabled).
+		"orphaned loopback block": {
+			pristine: `{"env":{"AWS_REGION":"us-east-1",` +
+				`"OTEL_EXPORTER_OTLP_ENDPOINT":"http://127.0.0.1:18971",` +
+				`"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT":"http://127.0.0.1:18971/v1/logs",` +
+				`"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT":"http://127.0.0.1:18971/v1/metrics",` +
+				`"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT":"http://127.0.0.1:18971/v1/traces",` +
+				`"OTEL_LOG_ASSISTANT_RESPONSES":"0","OTEL_LOG_RAW_API_BODIES":"0","OTEL_LOG_TOOL_CONTENT":"0",` +
+				`"OTEL_LOG_TOOL_DETAILS":"0","OTEL_LOG_USER_PROMPTS":"0"}}`,
+			want: map[string]interface{}{"AWS_REGION": "us-east-1"},
+		},
+		"operator loopback collector": {
+			pristine: `{"env":{"CLAUDE_CODE_ENABLE_TELEMETRY":"1",` +
+				`"OTEL_EXPORTER_OTLP_ENDPOINT":"http://127.0.0.1:4318","OTEL_LOG_TOOL_DETAILS":"0"}}`,
+			want: map[string]interface{}{"CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+				"OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:4318", "OTEL_LOG_TOOL_DETAILS": "0"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			settingsPath := filepath.Join(dir, "settings.json")
+			if err := os.WriteFile(settingsPath, []byte(tc.pristine), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			ClaudeCodeSettingsPathOverride = settingsPath
+			t.Cleanup(func() { ClaudeCodeSettingsPathOverride = "" })
+			c := NewClaudeCodeConnector()
+			opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970", APIToken: "test-token"}
+			if err := c.Setup(context.Background(), opts); err != nil {
+				t.Fatalf("Setup: %v", err)
+			}
+			if err := c.Teardown(context.Background(), opts); err != nil {
+				t.Fatalf("Teardown: %v", err)
+			}
+			data, err := os.ReadFile(settingsPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var settings map[string]interface{}
+			if err := json.Unmarshal(data, &settings); err != nil {
+				t.Fatal(err)
+			}
+			if got := settings["env"]; !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("env after teardown = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 // RHEL-U3-06 (uninstall env): a stale earlier-release block put back over a
 // pristine file must not leave its fail mode or prompt-capture value behind.
 func TestClaudeCode_TeardownRemovesStaleEarlierReleaseEnv(t *testing.T) {
@@ -9506,6 +9605,44 @@ func TestHookScript_FailClosedOnUnreachable_Default(t *testing.T) {
 		if !strings.Contains(logText, want) {
 			t.Errorf("hook failure log missing %q:\n%s", want, logText)
 		}
+	}
+}
+
+// TestHookScript_FailureLogWriteErrorStaysQuiet: when the failure log cannot
+// be written (full disk, unwritable home), the block reason the agent shows
+// holds only DefenseClaw's own sentence, never a shell diagnostic naming the
+// hook script and line (GAP-1974).
+func TestHookScript_FailureLogWriteErrorStaysQuiet(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell scripts not supported on windows")
+	}
+	dir := t.TempDir()
+	if err := WriteHookScriptsWithToken(dir, "127.0.0.1:1", "tok-test"); err != nil {
+		t.Fatalf("WriteHookScriptsWithToken: %v", err)
+	}
+	dcHome := t.TempDir()
+	// A directory where the log file should be makes the append fail.
+	if err := os.MkdirAll(filepath.Join(dcHome, "logs", "hook-failures.jsonl"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	cmd := exec.Command("bash", filepath.Join(dir, "claude-code-hook.sh"))
+	cmd.Stdin = strings.NewReader(`{"hook_event_name":"test"}`)
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	cmd.Env = append(os.Environ(), "PATH="+os.Getenv("PATH"), "DEFENSECLAW_HOME="+dcHome)
+	err := cmd.Run()
+	if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.ExitCode() != 2 {
+		t.Fatalf("hook should still fail closed (exit 2), got: %v", err)
+	}
+	out := stdout.String() + stderr.String()
+	for _, leak := range []string{"hook-failures.jsonl", "_hardening.sh", "Is a directory"} {
+		if strings.Contains(out, leak) {
+			t.Errorf("block output leaks %q:\n%s", leak, out)
+		}
+	}
+	if !strings.Contains(out, "defenseclaw") {
+		t.Errorf("block output lost DefenseClaw's own sentence:\n%s", out)
 	}
 }
 
@@ -11760,4 +11897,99 @@ func TestZeptoClawHomeDir(t *testing.T) {
 			t.Errorf("zeptoClawHomeDir() = %q, want %q", got, want)
 		}
 	})
+}
+
+// GAP-1463: an edit the user makes to openclaw.json while enrolled survives
+// teardown, even after a later Setup (every gateway start) re-registers the
+// plugin; only DefenseClaw's own entries are removed.
+func TestOpenClaw_Teardown_KeepsUserEditsMadeWhileEnrolled(t *testing.T) {
+	requireOpenClawExtensionBundle(t)
+
+	dir := t.TempDir()
+	ocHome := filepath.Join(dir, "openclaw-home")
+	os.MkdirAll(ocHome, 0o755)
+	configPath := filepath.Join(ocHome, "openclaw.json")
+	os.WriteFile(configPath, []byte(`{"agents":{"defaults":{"model":{"primary":"first"}}}}`), 0o644)
+
+	OpenClawHomeOverride = ocHome
+	defer func() { OpenClawHomeOverride = "" }()
+
+	c := NewOpenClawConnector()
+	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	var cfg map[string]interface{}
+	data, _ := os.ReadFile(configPath)
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	cfg["agents"] = map[string]interface{}{"defaults": map[string]interface{}{"model": map[string]interface{}{"primary": "second"}}}
+	edited, _ := json.MarshalIndent(cfg, "", "  ")
+	os.WriteFile(configPath, edited, 0o644)
+
+	// The gateway restarts (Setup again), then the user leaves OpenClaw mode.
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("second Setup: %v", err)
+	}
+	if err := c.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+
+	cfg = map[string]interface{}{}
+	data, _ = os.ReadFile(configPath)
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	agents, _ := cfg["agents"].(map[string]interface{})
+	defaults, _ := agents["defaults"].(map[string]interface{})
+	model, _ := defaults["model"].(map[string]interface{})
+	if model["primary"] != "second" {
+		t.Fatalf("teardown reverted the user's edit: primary = %v, want second", model["primary"])
+	}
+	if openClawConfigRegistersDefenseClaw(configPath) {
+		t.Fatalf("teardown left the DefenseClaw plugin registered: %s", data)
+	}
+	if _, err := os.Stat(filepath.Join(ocHome, "extensions", "defenseclaw")); !os.IsNotExist(err) {
+		t.Fatalf("extension dir still present after Teardown: err=%v", err)
+	}
+}
+
+// GAP-1525: DefenseClaw's own OpenClaw plugin, as Setup writes it, is
+// recognized; a changed or added file makes it an ordinary plugin again.
+func TestOpenClaw_IsBundledPlugin(t *testing.T) {
+	requireOpenClawExtensionBundle(t)
+
+	dir := t.TempDir()
+	ocHome := filepath.Join(dir, "openclaw-home")
+	os.MkdirAll(ocHome, 0o755)
+	os.WriteFile(filepath.Join(ocHome, "openclaw.json"), []byte(`{}`), 0o644)
+	OpenClawHomeOverride = ocHome
+	defer func() { OpenClawHomeOverride = "" }()
+
+	c := NewOpenClawConnector()
+	if err := c.Setup(context.Background(), SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	extDir := filepath.Join(ocHome, "extensions", "defenseclaw")
+	if !c.IsBundledPlugin(extDir) {
+		t.Fatal("the plugin Setup wrote is not recognized as DefenseClaw's own")
+	}
+	other := filepath.Join(ocHome, "extensions", "other")
+	os.MkdirAll(other, 0o755)
+	if c.IsBundledPlugin(other) {
+		t.Fatal("another plugin directory was recognized as DefenseClaw's own")
+	}
+	extra := filepath.Join(extDir, "extra.js")
+	os.WriteFile(extra, []byte("module.exports = 1\n"), 0o644)
+	if c.IsBundledPlugin(extDir) {
+		t.Fatal("a plugin with an added file was recognized as DefenseClaw's own")
+	}
+	os.Remove(extra)
+	pkg := filepath.Join(extDir, "package.json")
+	data, _ := os.ReadFile(pkg)
+	os.WriteFile(pkg, append(data, ' '), 0o644)
+	if c.IsBundledPlugin(extDir) {
+		t.Fatal("a plugin with a changed file was recognized as DefenseClaw's own")
+	}
 }

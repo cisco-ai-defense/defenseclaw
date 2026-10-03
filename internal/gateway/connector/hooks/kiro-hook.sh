@@ -127,7 +127,7 @@ fail_response() {
   exit 2
 }
 {{else}}if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
-  defenseclaw_handle_missing_token kiro kiro-hook "kiro hook"
+  defenseclaw_handle_missing_token kiro kiro-hook "kiro hook" "${HOOK_DIR}/{{.TokenFile}}"
 fi
 
 PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
@@ -201,11 +201,14 @@ RESPONSE="$(defenseclaw_sandbox_post "/api/v1/kiro/hook" "$PAYLOAD" \
   "${TRACE_HEADER_ARGS[@]+"${TRACE_HEADER_ARGS[@]}"}" \
   "${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}")" || {
   fail_unreachable "sandbox ingress unreachable"
-}{{else}}# A refused connection means this account's gateway is not running (after
+}{{else}}if defenseclaw_api_listener_foreign "$API_ADDR"; then
+  fail_unreachable "${API_ADDR} is held by another account while this account's gateway is not running; no token was sent. Run \`defenseclaw-gateway start\` for the fix"
+fi
+# A refused connection means this account's gateway is not running (after
 # a reboot, for example): start it once and retry. See
 # defenseclaw_gateway_cold_start in _hardening.sh.
 defenseclaw_hook_post() {
-  curl -s -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/kiro/hook" \
+  curl -s --noproxy '*' -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/kiro/hook" \
     -H "Content-Type: application/json" \
     -H "X-DefenseClaw-Client: kiro-hook/1.0" \
     "${SURFACE_HEADER_ARGS[@]+"${SURFACE_HEADER_ARGS[@]}"}" \

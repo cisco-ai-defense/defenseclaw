@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from defenseclaw.tui.app import PANEL_SHORTCUTS, PANELS
+from defenseclaw.tui.app import CASE_SENSITIVE_PANEL_SHORTCUTS, PANEL_SHORTCUTS, PANELS
 from defenseclaw.tui.panels.runtime import (
     RuntimePanelAction,
     RuntimePanelModel,
@@ -85,7 +85,9 @@ def _model() -> RuntimePanelModel:
 
 def test_panel_is_registered_with_its_own_shortcut() -> None:
     assert ("runtime", "N", "Runtime") in PANELS
-    assert PANEL_SHORTCUTS["n"] == "runtime"
+    # Letter panel keys are capitals only (GAP-2438).
+    assert CASE_SENSITIVE_PANEL_SHORTCUTS["N"] == "runtime"
+    assert "n" not in PANEL_SHORTCUTS
 
 
 def test_findings_sort_worst_first() -> None:
@@ -374,3 +376,54 @@ def test_the_app_defines_every_render_method_the_runtime_loader_calls() -> None:
             f"_load_runtime_model calls self.{method}(), which does not exist; "
             "the worker raises AttributeError and Textual exits the app"
         )
+
+
+def test_a_limited_running_plane_is_partial_not_up() -> None:
+    """GAP-1377: Plane B on a non-elevated gateway is PARTIAL, with a next step."""
+    model = RuntimePanelModel(platform="win32")
+    model.set_snapshot(
+        {
+            "enabled": True,
+            "scanned_at": "2026-10-02T19:00:00Z",
+            "degraded": True,
+            "planes": [
+                {"plane": "a", "name": "inference heartbeat", "available": True, "running": True,
+                 "mechanism": "Toolhelp32 snapshot"},
+                {"plane": "b", "name": "shadow egress", "available": True, "running": True,
+                 "mechanism": "GetExtendedTcpTable",
+                 "reason": "egress attribution is limited to this process's own sockets"},
+            ],
+        }
+    )
+    plane_a, plane_b = model.snapshot.planes
+    assert plane_a.badge == "up" and model.plane_fix(plane_a) == ""
+    assert plane_b.badge == "partial"
+    assert "partial via GetExtendedTcpTable" in plane_b.summary
+    assert "Permissions" in model.plane_fix(plane_b)
+    assert "1 partially watching" in model.health_explanation()
+
+
+def test_an_unselected_plane_is_off_and_says_how_to_turn_it_on() -> None:
+    """GAP-2102: a plane left out of ai_discovery.runtime.planes is 'off', not 'blind'."""
+    model = RuntimePanelModel(platform="win32")
+    model.set_snapshot(
+        {
+            "enabled": True,
+            "scanned_at": "2026-10-03T01:50:53Z",
+            "degraded": True,
+            "planes": [
+                {"plane": "a", "name": "inference heartbeat", "available": True, "running": True,
+                 "mechanism": "Toolhelp32 snapshot"},
+                {"plane": "c", "name": "agent actions", "available": False, "running": False,
+                 "reason": "not selected in ai_discovery.runtime.planes"},
+            ],
+        }
+    )
+    model.handle_key("p")
+    assert "agent actions: off" in model.plane_strip()
+    explanation = model.health_explanation()
+    assert "(1 watching, 1 not selected)" in explanation
+    assert "Agent actions is off (not selected)" in explanation
+    assert "runtime enable --enable-host-plane" in explanation
+    assert explanation.endswith("runtime enable --enable-host-plane")
+    assert "1 not selected" in model.health_explanation(short=True)

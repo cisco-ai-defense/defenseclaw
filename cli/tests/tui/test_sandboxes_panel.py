@@ -39,7 +39,7 @@ from defenseclaw.tui.screens.sandbox_launch import (
     SandboxLaunchValues,
     harness_choices,
 )
-from defenseclaw.tui.services.sandbox_state import TOAST_DEDUPE_SECONDS, host_port
+from defenseclaw.tui.services.sandbox_state import TOAST_DEDUPE_SECONDS, host_port, verdict_reason
 
 STATUS = {
     "enabled": True,
@@ -489,9 +489,9 @@ TOOL_BLOCK = {
     "kind": "tool.blocked",
     "sandbox": "myapp-claude-7f3a",
     "tool": "Bash",
-    "reason": "Blocked by DefenseClaw rule E2E-SANDBOX-MARKER: E2E sandbox marker command. "
-    "Try another approach that does not need this action, or ask the user to review the DefenseClaw policy.",
-    "message": "✗ Bash blocked by DefenseClaw: Blocked by DefenseClaw rule E2E-SANDBOX-MARKER: ...",
+    "reason": "DefenseClaw policy blocked this action (rule E2E-SANDBOX-MARKER: E2E sandbox marker command). "
+    "Do not retry it in another form.",
+    "message": "✗ Bash blocked by DefenseClaw: E2E-SANDBOX-MARKER (E2E sandbox marker command)",
 }
 
 
@@ -574,7 +574,9 @@ def test_feed_rows_use_plain_labels_and_no_advice_for_the_agent() -> None:
     assert all("_" not in event and "ask the user" not in event for event in events)
     model.cursor = 0
     pairs = dict(model.detail_pairs()[1])
-    assert pairs["Reason"] == "Blocked by DefenseClaw rule E2E-SANDBOX-MARKER: E2E sandbox marker command"
+    assert pairs["Reason"] == (
+        "DefenseClaw policy blocked this action (rule E2E-SANDBOX-MARKER: E2E sandbox marker command)"
+    )
     model.cursor = 2
     pairs = dict(model.detail_pairs()[1])
     assert pairs["Category"] == "webhook catcher" and pairs["Reason"].startswith("Webhook catchers record")
@@ -588,8 +590,11 @@ def test_feed_rows_use_plain_labels_and_no_advice_for_the_agent() -> None:
     model.view = "sandboxes"
     model.cursor = 0
     assert dict(model.detail_pairs()[1])["Last tool block"] == (
-        "Blocked by DefenseClaw rule E2E-SANDBOX-MARKER: E2E sandbox marker command"
+        "DefenseClaw policy blocked this action (rule E2E-SANDBOX-MARKER: E2E sandbox marker command)"
     )
+    # A gateway from before GAP-1885 still reads without its advice.
+    old = "Blocked by DefenseClaw rule E2E-SANDBOX-MARKER: E2E sandbox marker command. Try another approach."
+    assert verdict_reason(old) == "Blocked by DefenseClaw rule E2E-SANDBOX-MARKER: E2E sandbox marker command"
 
 
 @pytest.mark.asyncio
@@ -1556,6 +1561,34 @@ async def test_the_wrapper_toggle_runs_enable_or_disable(fetch, monkeypatch) -> 
         ("defenseclaw", ("sandbox", "enable", "claude")),
         ("defenseclaw", ("sandbox", "disable", "claude")),
     ]
+
+
+@pytest.mark.asyncio
+async def test_the_wrapper_toggle_does_not_enable_while_sandboxes_are_off(fetch, monkeypatch) -> None:
+    """GAP-1219: a wrapper while sandboxes are off breaks the plain command."""
+    app = DefenseClawTUI(config=_config())
+    commands: list[tuple[str, ...]] = []
+    menus: list[tuple[str, ...]] = []
+    toasts: list[str] = []
+
+    async def run_command(binary: str, args: tuple[str, ...], *, display_name: str | None = None) -> None:
+        commands.append(args)
+
+    async def answer(screen):
+        menus.append(tuple(action.description for action in screen.actions))
+        return "claudecode"
+
+    monkeypatch.setattr(app, "_run_command", run_command)
+    monkeypatch.setattr(app, "push_screen_wait", answer)
+    monkeypatch.setattr(app, "notify_toast", lambda level, message: toasts.append(message))
+    async with app.run_test(size=(160, 44)):
+        monkeypatch.setattr(app.sandbox_model, "state", lambda: "off")
+        await app._sandbox_wrappers_menu()  # noqa: SLF001
+        app.sandbox_model.wrappers = ("claudecode",)
+        await app._sandbox_wrappers_menu()  # noqa: SLF001
+    assert "Sandboxes are off; run the Sandbox wizard (0 Setup) first" in menus[0]
+    assert toasts == ["Sandboxes are off; run the Sandbox wizard (0 Setup) first."]
+    assert commands == [("sandbox", "disable", "claude")]
 
 
 @pytest.mark.asyncio

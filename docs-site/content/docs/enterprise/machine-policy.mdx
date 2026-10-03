@@ -485,7 +485,7 @@ sudo DEFENSECLAW_CONFIG=/etc/defenseclaw/config.yaml /opt/defenseclaw/bin/defens
 sudo DEFENSECLAW_CONFIG=/etc/defenseclaw/config.yaml /opt/defenseclaw/bin/defenseclaw-gateway enterprise policy show --user alice --project /home/alice/repo
 sudo DEFENSECLAW_CONFIG=/etc/defenseclaw/config.yaml /opt/defenseclaw/bin/defenseclaw-gateway enterprise policy export --connector codex --format toml
 sudo DEFENSECLAW_CONFIG=/etc/defenseclaw/config.yaml /opt/defenseclaw/bin/defenseclaw-gateway enterprise policy verify --json
-sudo DEFENSECLAW_CONFIG=/etc/defenseclaw/config.yaml /opt/defenseclaw/bin/defenseclaw-gateway enterprise policy verify --live --user alice --connector codex --agent-binary /usr/local/bin/codex
+sudo DEFENSECLAW_CONFIG=/etc/defenseclaw/config.yaml /opt/defenseclaw/bin/defenseclaw-gateway enterprise policy verify --live --user alice --connector codex --agent-binary /usr/local/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex
 ```
 
 ```bash title="macOS"
@@ -525,7 +525,17 @@ $env:DEFENSECLAW_CONFIG = 'C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml'
 - **`verify --live`** runs the real Codex or Claude Code client as a user
   and proves that it loads DefenseClaw's hooks. It needs `--user`, exactly
   one `--connector` (`codex` or `claudecode`) and `--agent-binary` with
-  the client's absolute path. `--timeout` defaults to 90 seconds. For
+  the client's absolute path. `--timeout` defaults to 90 seconds. The
+  client runs with a minimal environment whose `PATH` holds only the
+  client's folder, `/usr/bin` and `/bin`, so name the native executable,
+  not a launcher script: the npm `codex` command is `codex.js`, which needs
+  `node` on that `PATH`; the native Codex binary is inside the package
+  under `node_modules/@openai/codex-<platform>/vendor/<target>/bin/codex`.
+  When the client ends early, the result shows its exit status and what it
+  printed. Claude Code is pointed at a local stub through command-line
+  settings, which outrank the user's settings, so a user whose settings
+  use Amazon Bedrock, Vertex AI or another base URL makes no model call; a
+  provider that managed settings force makes the check fail. For
   Claude Code, the proof is the gateway's `tool.invocation.requested` record
   of a canary tool call in its event history, so the gateway must be running
   and collecting tool activity; `--audit-db` names the gateway's audit
@@ -548,10 +558,11 @@ the vendor's own managed settings.
 
 These come from the agents themselves:
 
-- **Claude Code.** `claude --bare` and `CLAUDE_CODE_SIMPLE=1` skip managed
-  `SessionStart` and `UserPromptSubmit` hooks. `PreToolUse` and later tool
-  hooks still run, so tool calls stay inspected; prompt inspection is best
-  effort.
+- **Claude Code.** `claude --bare` and `CLAUDE_CODE_SIMPLE=1` skip the
+  managed `SessionStart` hook. Claude Code 2.1.287 still runs the managed
+  `UserPromptSubmit`, `PreToolUse` and later tool hooks in both modes; other
+  releases may skip `UserPromptSubmit` too, so tool calls stay inspected and
+  prompt inspection is best effort.
 - **Claude Code before 2.1.163.** These builds do not read
   `requiredMinimumVersion`, so no floor stops them, DefenseClaw's or yours.
   Those that read `managed-settings.d`, such as 2.1.153, still run
@@ -573,8 +584,10 @@ These come from the agents themselves:
   `/etc/github-copilot/policy.d`, and its tool calls run with no audit
   record. Use application control to allow only Copilot CLI at or above the
   floor.
-- **Copilot.** A command hook that times out fails open, including policy
-  hooks. On Windows, Copilot also loads policy hooks from
+- **Copilot.** What a command hook that times out means, policy hooks
+  included, is not a documented contract. Earlier Copilot CLI releases ran
+  the call; Copilot CLI 1.0.91 denies it ("hook errored"). Re-check each
+  release you deploy. On Windows, Copilot also loads policy hooks from
   `HKLM\Software\Policies\GitHub\Copilot`; those run beside DefenseClaw's
   drop-in.
 - **OpenCode.** The order in which OpenCode runs plugins is not a

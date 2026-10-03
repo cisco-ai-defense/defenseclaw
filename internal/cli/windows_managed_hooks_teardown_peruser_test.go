@@ -92,6 +92,10 @@ func TestRemoveWindowsManagedHooksStandalonePerUserRegistrationsCoversEveryRecor
 		return enterpriseHookUserCleanupDone, nil
 	}
 	enterpriseHookWindowsUserCleanupIdentity = func() error { return nil }
+	originalPresent := windowsManagedHooksStandaloneRegistrationPresent
+	t.Cleanup(func() { windowsManagedHooksStandaloneRegistrationPresent = originalPresent })
+	registrationsPresent := func(enterprisehooks.ManifestTarget) (bool, error) { return true, nil }
+	windowsManagedHooksStandaloneRegistrationPresent = registrationsPresent
 
 	result := removeWindowsManagedHooksStandalonePerUserRegistrations(context.Background(), dataDir, manifest)
 	want := "amp/" + userCleanupSIDB + ",devin/" + userCleanupSIDA + ",opencode/" + userCleanupSIDB
@@ -100,6 +104,43 @@ func TestRemoveWindowsManagedHooksStandalonePerUserRegistrationsCoversEveryRecor
 	}
 	if len(result.Removed) != 2 || strings.Join(result.Pending, ",") != "opencode/"+userCleanupSIDB || len(result.Failed) != 0 {
 		t.Fatalf("result = %+v", result)
+	}
+
+	// GAP-1795: a deferred row of a user an earlier install enrolled (its
+	// DefenseClaw data folder is still there) may still hold that install's
+	// registrations, so it is attempted and reported, not skipped.
+	if err := os.MkdirAll(filepath.Join(homeB, ".defenseclaw"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, probe := range []struct {
+		present bool
+		err     error
+	}{{true, nil}, {false, errors.New("unreadable")}} {
+		windowsManagedHooksStandaloneRegistrationPresent = func(enterprisehooks.ManifestTarget) (bool, error) {
+			return probe.present, probe.err
+		}
+		attempted = nil
+		result = removeWindowsManagedHooksStandalonePerUserRegistrations(context.Background(), dataDir, manifest)
+		if want := "amp/" + userCleanupSIDB + ",devin/" + userCleanupSIDA + ",hermes/" + userCleanupSIDB + ",opencode/" + userCleanupSIDB; strings.Join(attempted, ",") != want {
+			t.Fatalf("probe %+v: attempted %v, want %s", probe, attempted, want)
+		}
+	}
+	// GAP-2023: an earlier uninstall already removed that user's
+	// registration (the data folder stays), so there is nothing to report.
+	// GAP-2098: the enrolled OpenCode row of the signed-out user holds no
+	// plugin either, so it is attempted but not reported as pending.
+	windowsManagedHooksStandaloneRegistrationPresent = func(enterprisehooks.ManifestTarget) (bool, error) { return false, nil }
+	attempted = nil
+	result = removeWindowsManagedHooksStandalonePerUserRegistrations(context.Background(), dataDir, manifest)
+	if want := "amp/" + userCleanupSIDB + ",devin/" + userCleanupSIDA + ",opencode/" + userCleanupSIDB; strings.Join(attempted, ",") != want {
+		t.Fatalf("no registration left: attempted %v, want %s", attempted, want)
+	}
+	if len(result.Pending) != 0 {
+		t.Fatalf("no registration left: pending %v", result.Pending)
+	}
+	windowsManagedHooksStandaloneRegistrationPresent = registrationsPresent
+	if err := os.RemoveAll(filepath.Join(homeB, ".defenseclaw")); err != nil {
+		t.Fatal(err)
 	}
 
 	attempted = nil
@@ -205,6 +246,18 @@ func TestCompleteWindowsManagedHooksTeardownUserCleanupIsStandaloneOnly(t *testi
 
 	// A purge removes each folder as LocalSystem, whether or not the account
 	// is signed in, and names each one that stays with the reason.
+	// GAP-1567: only a purge removes the Cursor hook tombstone.
+	originalCursor := windowsManagedHooksStandaloneCursorTombstonePurger
+	t.Cleanup(func() { windowsManagedHooksStandaloneCursorTombstonePurger = originalCursor })
+	cursorPurges := 0
+	windowsManagedHooksStandaloneCursorTombstonePurger = func() error {
+		cursorPurges++
+		return nil
+	}
+	completeWindowsManagedHooksTeardownUserCleanup(&report, `C:\ProgramData\DefenseClaw\runtime`, manifest)
+	if cursorPurges != 0 {
+		t.Fatal("an uninstall without purge removed the Cursor hook tombstone")
+	}
 	t.Setenv(windowsManagedHooksPurgeUserStateEnv, "1")
 	originalIdentity, originalPurger := enterpriseHookWindowsUserCleanupIdentity, windowsManagedHooksStandaloneUserStatePurger
 	originalBinaries := windowsManagedHooksStandaloneUserBinariesPurger
@@ -232,8 +285,18 @@ func TestCompleteWindowsManagedHooksTeardownUserCleanupIsStandaloneOnly(t *testi
 	if purged != 1 || binaries != 1 || len(report.UserStateRemaining) != 0 {
 		t.Fatalf("purge ran %d/%d time(s), remaining %v", purged, binaries, report.UserStateRemaining)
 	}
+	if cursorPurges != 1 {
+		t.Fatalf("the purge removed the Cursor hook tombstone %d time(s)", cursorPurges)
+	}
+	windowsManagedHooksStandaloneCursorTombstonePurger = func() error { return errors.New("access denied") }
+	completeWindowsManagedHooksTeardownUserCleanup(&report, `C:\ProgramData\DefenseClaw\runtime`, manifest)
+	if len(report.UserRegistrationsFailed) == 0 ||
+		!strings.Contains(strings.Join(report.UserRegistrationsFailed, ";"), "cursor/machine policy: the Cursor hook tombstone") {
+		t.Fatalf("a tombstone that stays is not named: %v", report.UserRegistrationsFailed)
+	}
+	windowsManagedHooksStandaloneCursorTombstonePurger = func() error { return nil }
 	// The report names each account whose data went.
-	if len(report.UserStatePurged) != 1 || !strings.HasSuffix(report.UserStatePurged[0], `\.defenseclaw`) {
+	if len(report.UserStatePurged) != 1 || !strings.HasSuffix(report.UserStatePurged[0], `\.defenseclaw`+windowsManagedHooksPurgedBinariesMarker+"defenseclaw.cmd") {
 		t.Fatalf("purged accounts = %v", report.UserStatePurged)
 	}
 	if body, _ := json.Marshal(report); !strings.Contains(string(body), `"user_state_purged":[`) {
@@ -337,5 +400,44 @@ func TestRemoveEmptyWindowsClaudeManagedSettingsFolders(t *testing.T) {
 	removeEmptyWindowsClaudeManagedSettingsFolders(programFiles)
 	if _, err := os.Lstat(filepath.Join(programFiles, "ClaudeCode")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("the empty ClaudeCode folder stayed: %v", err)
+	}
+}
+
+// GAP-1765: finalize revokes the gateway's AI-discovery read ACEs before it
+// removes users' registrations, and names a revoke failure.
+func TestCompleteWindowsManagedHooksTeardownUserCleanupRevokesInventoryACEsFirst(t *testing.T) {
+	originalRemover := windowsManagedHooksStandaloneUserRegistrationRemover
+	originalRevoker := windowsManagedHooksStandaloneInventoryACERevoker
+	t.Cleanup(func() {
+		windowsManagedHooksStandaloneUserRegistrationRemover = originalRemover
+		windowsManagedHooksStandaloneInventoryACERevoker = originalRevoker
+	})
+	var order []string
+	windowsManagedHooksStandaloneInventoryACERevoker = func(manifest enterprisehooks.Manifest) error {
+		order = append(order, "revoke")
+		if len(manifest.Targets) != 1 {
+			t.Fatalf("revoker got %+v", manifest)
+		}
+		return errors.New("set DACL: access denied")
+	}
+	windowsManagedHooksStandaloneUserRegistrationRemover = func(
+		_ context.Context,
+		_ string,
+		_ enterprisehooks.Manifest,
+	) enterpriseHookUserCleanupResult {
+		order = append(order, "remove")
+		return enterpriseHookUserCleanupResult{Removed: []string{"amp/" + userCleanupSIDA}}
+	}
+	manifest := perUserTeardownManifest("amp")
+	manifest.Targets[0].UserHome = t.TempDir()
+	t.Setenv(managed.EnterpriseProfileEnv, managed.ProfileStandalone)
+	var report windowsManagedHooksTeardownReport
+	completeWindowsManagedHooksTeardownUserCleanup(&report, `C:\ProgramData\DefenseClaw\runtime`, manifest)
+	if strings.Join(order, ",") != "revoke,remove" || report.UserRegistrationsRemoved != 1 {
+		t.Fatalf("order %v report %+v", order, report)
+	}
+	if len(report.UserRegistrationsFailed) != 1 ||
+		!strings.Contains(report.UserRegistrationsFailed[0], "read access on users' agent folders: set DACL: access denied") {
+		t.Fatalf("failed = %v", report.UserRegistrationsFailed)
 	}
 }

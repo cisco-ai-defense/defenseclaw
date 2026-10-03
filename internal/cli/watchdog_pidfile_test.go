@@ -337,3 +337,23 @@ func TestVerifyWatchdogProcess_DeadPIDRejected(t *testing.T) {
 		t.Fatal("verifyWatchdogProcess accepted PID 0")
 	}
 }
+
+// GAP-1819: a foreground watchdog that finds a background one running names
+// its PID and the stop command instead of the raw lock errno.
+func TestWatchdogForegroundAcquireErrorNamesRunningWatchdog(t *testing.T) {
+	pidPath := filepath.Join(t.TempDir(), watchdogPIDFile)
+	held, err := acquireWatchdogPIDFile(pidPath, watchdogPIDInfo{PID: 4242})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	defer held.Close()
+	_, lockErr := acquireWatchdogPIDFile(pidPath, watchdogPIDInfo{PID: os.Getpid()})
+	if lockErr == nil {
+		t.Fatal("second acquire succeeded")
+	}
+	msg := watchdogForegroundAcquireError(pidPath, lockErr).Error()
+	want := "the watchdog already runs in the background (PID 4242). Stop it first to run it in the foreground: defenseclaw-gateway watchdog stop"
+	if msg != want {
+		t.Fatalf("message = %q, want %q", msg, want)
+	}
+}

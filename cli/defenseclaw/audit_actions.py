@@ -264,6 +264,10 @@ ACTION_POLICY_DELETE: Final[str] = "policy-delete"
 ACTION_REGISTRY_ADD: Final[str] = "registry-add"
 ACTION_REGISTRY_EDIT: Final[str] = "registry-edit"
 ACTION_REGISTRY_REMOVE: Final[str] = "registry-remove"
+ACTION_REGISTRY_SYNC: Final[str] = "registry-sync"
+ACTION_REGISTRY_REQUIRE: Final[str] = "registry-require"
+ACTION_REGISTRY_APPROVE: Final[str] = "registry-approve"
+ACTION_REGISTRY_REJECT: Final[str] = "registry-reject"
 ACTION_SCAN_ENFORCED: Final[str] = "scan-enforced"
 ACTION_SCAN_FINDING: Final[str] = "scan-finding"
 ACTION_DISMISS_ALERT: Final[str] = "dismiss-alert"
@@ -282,6 +286,7 @@ ACTION_PLUGIN_DISABLE: Final[str] = "plugin-disable"
 ACTION_PLUGIN_ENABLE: Final[str] = "plugin-enable"
 ACTION_PLUGIN_QUARANTINE: Final[str] = "plugin-quarantine"
 ACTION_PLUGIN_RESTORE: Final[str] = "plugin-restore"
+ACTION_PLUGIN_UNBLOCK: Final[str] = "plugin-unblock"
 ACTION_BLOCK_MCP: Final[str] = "block-mcp"
 ACTION_ALLOW_MCP: Final[str] = "allow-mcp"
 ACTION_MCP_UNBLOCK: Final[str] = "mcp-unblock"
@@ -475,6 +480,10 @@ ALL_ACTIONS: Final[tuple[str, ...]] = (
     ACTION_REGISTRY_ADD,
     ACTION_REGISTRY_EDIT,
     ACTION_REGISTRY_REMOVE,
+    ACTION_REGISTRY_SYNC,
+    ACTION_REGISTRY_REQUIRE,
+    ACTION_REGISTRY_APPROVE,
+    ACTION_REGISTRY_REJECT,
     ACTION_SCAN_ENFORCED,
     ACTION_SCAN_FINDING,
     ACTION_DISMISS_ALERT,
@@ -493,6 +502,7 @@ ALL_ACTIONS: Final[tuple[str, ...]] = (
     ACTION_PLUGIN_ENABLE,
     ACTION_PLUGIN_QUARANTINE,
     ACTION_PLUGIN_RESTORE,
+    ACTION_PLUGIN_UNBLOCK,
     ACTION_BLOCK_MCP,
     ACTION_ALLOW_MCP,
     ACTION_MCP_UNBLOCK,

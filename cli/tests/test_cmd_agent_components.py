@@ -293,6 +293,9 @@ class ResolveComponentTests(unittest.TestCase):
             client, name="not-real", ecosystem=None)
         self.assertEqual(comp, {})
         self.assertIn("not found", err)
+        # GAP-1928: name the components and the list command.
+        self.assertIn("Available: anthropic, openai.", err)
+        self.assertIn("Run `defenseclaw agent components` for details.", err)
 
     def test_request_failures_surface_as_errors(self):
         client = MagicMock()
@@ -300,7 +303,7 @@ class ResolveComponentTests(unittest.TestCase):
         comp, err = cmd_agent._resolve_component(
             client, name="anything", ecosystem=None)
         self.assertEqual(comp, {})
-        self.assertIn("sidecar unavailable", err)
+        self.assertIn("gateway is not running", err)
 
 
 # ---------------------------------------------------------------------------
@@ -485,6 +488,22 @@ class ComponentsListingTests(unittest.TestCase):
         # below the threshold.
         self.assertEqual(names, {("pypi", "openai")})
 
+    def test_disabled_discovery_says_how_to_enable_it(self):
+        runner = CliRunner()
+        app = _make_ctx()
+
+        class DisabledClient(_FakeClient):
+            components_payload = {"enabled": False, "components": []}
+
+        with patch("defenseclaw.commands.cmd_agent._resolve_gateway_target",
+                   side_effect=_resolve_target_stub), \
+                patch("defenseclaw.commands.cmd_agent.OrchestratorClient", DisabledClient):
+            result = runner.invoke(cmd_agent.components_cmd, [], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("AI discovery is disabled", result.output)
+        self.assertIn("defenseclaw agent discovery enable", result.output)
+        self.assertNotIn("AI components (0 unique)", result.output)
+
     def test_listing_does_not_crash_on_unreachable_sidecar(self):
         runner = CliRunner()
         app = _make_ctx()
@@ -500,7 +519,7 @@ class ComponentsListingTests(unittest.TestCase):
         # Non-zero exit is the contract — operator scripts can pipeline
         # `defenseclaw agent components || alert ...`.
         self.assertNotEqual(result.exit_code, 0)
-        self.assertIn("sidecar unavailable", result.output)
+        self.assertIn("gateway is not running", result.output)
 
 
 class ComponentsShowTests(unittest.TestCase):
@@ -865,6 +884,38 @@ class UsageDetailEvidenceTests(unittest.TestCase):
         # Identity / Presence columns must light up too.
         self.assertIn("Identity", result.output)
 
+
+
+class DiscoveryOffAndWordingTests(unittest.TestCase):
+    """GAP-1195: say discovery is off, and name the runtime planes plainly."""
+
+    class _DisabledUsageClient(_FakeClient):
+        def ai_usage(self):
+            return {"enabled": False, "summary": {}, "signals": []}
+
+    def _invoke(self, command):
+        with patch("defenseclaw.commands.cmd_agent._resolve_gateway_target",
+                   side_effect=_resolve_target_stub), \
+                patch("defenseclaw.commands.cmd_agent.OrchestratorClient", self._DisabledUsageClient):
+            return CliRunner().invoke(command, [], obj=_make_ctx())
+
+    def test_processes_and_usage_say_discovery_is_disabled(self):
+        for command, empty_table in ((cmd_agent.processes, "AI processes (0 live)"),
+                                     (cmd_agent.usage, "AI visibility")):
+            result = self._invoke(command)
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            self.assertIn("AI discovery is disabled", result.output)
+            self.assertIn("defenseclaw agent discovery enable", result.output)
+            self.assertNotIn(empty_table, result.output)
+
+    def test_runtime_plane_changes_read_as_plain_words(self):
+        self.assertEqual(
+            cmd_agent._runtime_change_line("planes", [], ["a", "b"]),
+            "Runtime planes: none → A inference heartbeat, B per-process egress",
+        )
+        self.assertEqual(cmd_agent._runtime_change_line("enabled", False, True),
+                         "Runtime monitoring: off → on")
+        self.assertNotIn("['a', 'b']", cmd_agent._runtime_planes_saved_phrase(False))
 
 if __name__ == "__main__":
     unittest.main()

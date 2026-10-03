@@ -252,6 +252,31 @@ class TestLLMPickerNonInteractive(unittest.TestCase):
                 non_interactive=True,
             )
 
+    def test_model_default_keeps_saved_non_catalog_model(self) -> None:
+        saved = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+        with mock.patch.object(_llm_picker.click, "prompt", side_effect=lambda *a, **kw: kw["default"]) as prompt:
+            out = _llm_picker.pick_model(
+                current=saved,
+                provider="bedrock",
+                instance={"available_models": ["us.anthropic.claude-opus-4-8"]},
+                flag_value=None,
+                non_interactive=False,
+            )
+        self.assertEqual(out, saved)
+        self.assertEqual(prompt.call_args.kwargs["default"], saved)
+
+    def test_model_default_live_list_skips_missing_saved_model(self) -> None:
+        with mock.patch.object(_llm_picker.click, "prompt", side_effect=lambda *a, **kw: kw["default"]):
+            out = _llm_picker.pick_model(
+                current="gone:latest",
+                provider="ollama",
+                instance=None,
+                flag_value=None,
+                non_interactive=False,
+                live_models=["qwen3.5:9b"],
+            )
+        self.assertEqual(out, "qwen3.5:9b")
+
     def test_region_required_in_non_interactive(self) -> None:
         with self.assertRaises(click.UsageError):
             _llm_picker.pick_region(
@@ -347,6 +372,26 @@ class TestSetupLLMNonInteractiveFlags(unittest.TestCase):
         self.assertEqual(cfg.llm.bedrock.region, "us-east-1")
         self.assertEqual(cfg.llm.bedrock.auth_mode, "iam_credentials")
         self.assertEqual(cfg.llm.bedrock.inference_profile, "us.")
+
+    def test_provider_and_model_flags_skip_the_prompts(self) -> None:
+        # GAP-1290: without --non-interactive the flags still answer the prompts.
+        res = self.runner.invoke(
+            setup,
+            [
+                "llm",
+                "--provider", "bedrock",
+                "--model", "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+                "--bedrock-region", "us-east-1",
+                "--bedrock-auth-mode", "instance_role",
+            ],
+            obj=self.app,
+            input="",
+            catch_exceptions=False,
+        )
+        self.assertEqual(res.exit_code, 0, res.output)
+        self.assertNotIn("Pick provider", res.output)
+        self.assertEqual(self.app.cfg.llm.provider, "bedrock")
+        self.assertEqual(self.app.cfg.llm.model, "us.anthropic.claude-haiku-4-5-20251001-v1:0")
 
     def test_instance_name_flag_persists(self) -> None:
         res = self.runner.invoke(

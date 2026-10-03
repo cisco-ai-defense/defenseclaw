@@ -58,18 +58,18 @@ func TestStopPerUserGatewayForPurgeStopsTheRunningGateway(t *testing.T) {
 		t.Fatal("the probe gateway is not running")
 	}
 
-	if err := stopPerUserGatewayForPurge(enterprisehooks.InstallOptions{UserHome: home}); err != nil {
-		t.Fatalf("stopPerUserGatewayForPurge: %v", err)
+	if stopped, err := stopPerUserGatewayForPurge(enterprisehooks.InstallOptions{UserHome: home}); err != nil || !stopped {
+		t.Fatalf("stopPerUserGatewayForPurge: stopped=%v, %v", stopped, err)
 	}
 	if running, pid := daemon.New(dataDir).IsRunning(); running {
 		t.Fatalf("the per-user gateway (PID %d) still runs after the purge stop", pid)
 	}
 	// Nothing left to stop, or no data directory at all, is not an error.
-	if err := stopPerUserGatewayForPurge(enterprisehooks.InstallOptions{UserHome: home, DataDir: dataDir}); err != nil {
-		t.Fatalf("second stop: %v", err)
+	if stopped, err := stopPerUserGatewayForPurge(enterprisehooks.InstallOptions{UserHome: home, DataDir: dataDir}); err != nil || stopped {
+		t.Fatalf("second stop: stopped=%v, %v", stopped, err)
 	}
-	if err := stopPerUserGatewayForPurge(enterprisehooks.InstallOptions{UserHome: t.TempDir()}); err != nil {
-		t.Fatalf("stop without a data directory: %v", err)
+	if stopped, err := stopPerUserGatewayForPurge(enterprisehooks.InstallOptions{UserHome: t.TempDir()}); err != nil || stopped {
+		t.Fatalf("stop without a data directory: stopped=%v, %v", stopped, err)
 	}
 }
 
@@ -80,13 +80,13 @@ func TestEnterpriseHookWorkerPurgeStopsThePerUserGatewayFirst(t *testing.T) {
 	t.Cleanup(func() { enterpriseHookWorkerStopPerUser, enterpriseHookWorkerPurger = previousStop, previousPurger })
 	var calls []string
 	stopErr := error(nil)
-	enterpriseHookWorkerStopPerUser = func(opts enterprisehooks.InstallOptions) error {
+	enterpriseHookWorkerStopPerUser = func(opts enterprisehooks.InstallOptions) (bool, error) {
 		calls = append(calls, "stop "+opts.DataDir)
-		return stopErr
+		return false, stopErr
 	}
-	enterpriseHookWorkerPurger = func(_ context.Context, opts enterprisehooks.InstallOptions) error {
+	enterpriseHookWorkerPurger = func(_ context.Context, opts enterprisehooks.InstallOptions) (enterprisehooks.PurgeSummary, error) {
 		calls = append(calls, "purge "+opts.DataDir)
-		return nil
+		return enterprisehooks.PurgeSummary{Data: true}, nil
 	}
 	home := t.TempDir()
 	request := enterpriseHookWorkerRequest{
@@ -98,6 +98,11 @@ func TestEnterpriseHookWorkerPurgeStopsThePerUserGatewayFirst(t *testing.T) {
 	response := runEnterpriseHookWorkerApply(context.Background(), request)
 	if len(response.Targets) != 1 || !response.Targets[0].OK {
 		t.Fatalf("purge response %+v", response)
+	}
+	// The worker reports only what it found: here the data folder, but no
+	// running gateway and no per-user binaries (GAP-1444).
+	if got := response.Targets[0].Purged; got == nil || *got != (enterpriseHookPurgeDetail{Data: true}) {
+		t.Fatalf("purge detail %+v", got)
 	}
 	want := "stop " + filepath.Join(home, ".defenseclaw") + ",purge " + filepath.Join(home, ".defenseclaw")
 	if got := strings.Join(calls, ","); got != want {
@@ -158,5 +163,34 @@ func TestAddEnterpriseHookStatePurgesListsAccountsItCannotPurge(t *testing.T) {
 	}
 	if purges != 1 || len(jobs[1004].Request.Targets) != 0 {
 		t.Fatalf("alice purges %d, dave targets %+v", purges, jobs[1004].Request.Targets)
+	}
+}
+
+// GAP-1502: the purge removes the account's per-user install, so its gateway
+// port claims go too; other accounts' init would keep skipping that port.
+func TestStopPerUserGatewayForPurgeDropsTheAccountsPortClaims(t *testing.T) {
+	claims := t.TempDir()
+	previous := gatewayPortClaimDir
+	gatewayPortClaimDir = claims
+	t.Cleanup(func() { gatewayPortClaimDir = previous })
+	claim := filepath.Join(claims, gatewayPortClaimPrefix+"19126")
+	other := filepath.Join(claims, "unrelated-file")
+	for _, path := range []string{claim, other} {
+		if err := os.WriteFile(path, nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dataDir := filepath.Join(t.TempDir(), ".defenseclaw")
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if stopped, err := stopPerUserGatewayForPurge(enterprisehooks.InstallOptions{DataDir: dataDir}); err != nil || stopped {
+		t.Fatalf("stopPerUserGatewayForPurge = %v, %v; want false, nil", stopped, err)
+	}
+	if _, err := os.Lstat(claim); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the account's port claim is still there: %v", err)
+	}
+	if _, err := os.Lstat(other); err != nil {
+		t.Fatalf("an unrelated file went: %v", err)
 	}
 }

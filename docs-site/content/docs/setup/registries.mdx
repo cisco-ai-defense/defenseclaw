@@ -133,7 +133,7 @@ Each entry is run through the MCP scanner (transport probe + behavioral introspe
     },
     'list': {
       type: 'subcommand',
-      description: 'Tabular listing with cached entry counts (clean/warning/blocked) per source. --json for machine-readable output.',
+      description: 'Tabular listing with cached entry counts (clean/warning/blocked/error/rejected) per source; a rejected entry is only kept out of policy, it is not blocked; a source whose last sync failed is named below the table. --json for machine-readable output.',
     },
     'show <id>': {
       type: 'subcommand',
@@ -141,7 +141,7 @@ Each entry is run through the MCP scanner (transport probe + behavioral introspe
     },
     'remove <id>': {
       type: 'subcommand',
-      description: 'Delete the source AND any asset_policy rules it promoted (Reason="registry:<id>"). --keep-cache leaves the on-disk manifest behind.',
+      description: 'Delete the source AND any asset_policy rules it promoted (Reason="registry:<id>"). --keep-cache leaves the on-disk manifest behind; --yes (or --non-interactive) skips the confirmation prompt.',
     },
     'test <id>': {
       type: 'subcommand',
@@ -153,7 +153,7 @@ Each entry is run through the MCP scanner (transport probe + behavioral introspe
     },
     'entries <id>': {
       type: 'subcommand',
-      description: 'Show cached entries with their scanner verdict. Filter by --type skill|mcp|all, --status pending|clean|warning|blocked|error|all, --approved, --rejected.',
+      description: 'Show cached entries with their scanner verdict. Filter by --type skill|mcp|all, --status pending|clean|warning|blocked|error|rejected|all, --approved, --rejected.',
     },
     'approve <id> <name>': {
       type: 'subcommand',
@@ -161,7 +161,7 @@ Each entry is run through the MCP scanner (transport probe + behavioral introspe
     },
     'reject <id> <name>': {
       type: 'subcommand',
-      description: 'Mark an entry rejected (always blocked, even if the scanner is clean). --type skill|mcp required.',
+      description: 'Mark an entry rejected: it is never promoted into asset policy, even if the scanner is clean. Its status reads rejected, not blocked. --type skill|mcp required.',
     },
     'require --type skill|mcp --enabled|--disabled [--connector <name>]': {
       type: 'subcommand',
@@ -208,8 +208,22 @@ Once entries are flowing in, `asset_policy.<type>.registry_required` flips the c
 
 ```bash
 defenseclaw registry require --type skill --enabled
-defenseclaw registry require --type mcp   --enabled
+defenseclaw registry require --type mcp   --enabled --enforce
 ```
+
+The requirement is enforced only while asset policy is on:
+`asset_policy.enabled: true` and `asset_policy.mode: action`. A per-user
+install starts with `enabled: false` and `mode: observe`, so `require` alone
+blocks nothing and the CLI says so. Add `--enforce` to turn both on in the same
+save, or set them in the TUI config editor (Setup → `c` → Asset Policy). In
+`observe` mode an unregistered asset is logged, not blocked. To turn
+enforcement back off, run
+`defenseclaw registry require --type mcp --disabled --no-enforce`
+(`--no-enforce` sets `mode: observe`).
+
+A registry rule that pins `transport` treats `http` and `streamable-http` as
+the same HTTP transport, and a URL server added without `--transport` counts as
+`http`.
 
 An unscoped operation is broad operator intent: it updates the global default
 and clears only the targeted `registry_required` override on every active
@@ -252,11 +266,11 @@ defenseclaw registry approve corp-skills my-skill --type skill
 defenseclaw registry reject  corp-skills evil-skill --type skill
 ```
 
-`approve` and `reject` re-promote against the cached manifest immediately by default, so the new rule lands without a network round-trip. Pass `--no-repromote` if you want to defer the change to the next `registry sync`.
+`approve` and `reject` re-promote against the cached manifest immediately by default, so the new rule lands without a network round-trip. Pass `--no-repromote` if you want to defer the change to the next `registry sync`. `--type` is optional when the source holds one content type (`--content skill` or `--content mcp`) or the entry name exists under one type only.
 
 ## Sync schedules
 
-Today, syncing is **on demand**. The `--auto-sync` and `--sync-interval-hours` flags on `add` / `edit` are persisted but the runtime does not poll. Run `registry sync --all` from a cron / systemd timer / GitHub Actions schedule until scheduled sync ships in a future release:
+Today, syncing is **on demand**: scheduled sync is not available yet, and `add` / `edit` refuse `--auto-sync` and `--sync-interval-hours`. Run `registry sync --all` from a cron / systemd timer / GitHub Actions schedule until scheduled sync ships in a future release:
 
 ```bash
 # /etc/cron.d/defenseclaw-registry

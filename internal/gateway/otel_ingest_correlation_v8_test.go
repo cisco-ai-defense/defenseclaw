@@ -1126,3 +1126,50 @@ func containsCorrelationTarget(values []connector.CorrelationValue, target conne
 	}
 	return false
 }
+
+// GAP-1331: in a live gateway the same conversation has both a durable prompt
+// cursor (whose agent is the correlation ledger's minted agent) and the hook
+// lifecycle snapshot (whose agent is the telemetry root agent). A native Codex
+// record that only inherits the cursor's agent must take the live hook
+// identity, not be dropped as invalid_mapped_field.
+func TestNativeOTLPCodexCursorDerivedAgentYieldsToLiveHookLifecycle(t *testing.T) {
+	installCorrelationHMACForTest()
+	fixture := newCodexNativeOTLPFixture(t)
+	hookAPI := &APIServer{store: fixture.store}
+	prompt := correlateCodexActivePromptBoundary(
+		t, t.Context(), hookAPI, "conversation-native-1", "codex-hook-turn-1", "",
+	)
+	meta := llmEventMeta{
+		Source: "codex", SessionID: "conversation-native-1", TurnID: prompt.TurnID,
+		AgentID: stableLLMEventID("agent", "codex", "conversation-native-1", "root"), AgentType: "codex",
+	}
+	if meta.AgentID == prompt.AgentID {
+		t.Fatalf("fixture needs distinct ledger and telemetry agents, both %q", meta.AgentID)
+	}
+	key := hookSessionStateKey(meta)
+	nativeAPI := &APIServer{
+		store:                 fixture.store,
+		hookSessionStates:     map[string]hookSessionState{key: {meta: meta}},
+		hookSessionStateOrder: []string{key},
+	}
+	nativeAPI.bindOTLPObservabilityRuntime(fixture.runtime)
+	now := time.Now().UTC().Truncate(time.Nanosecond)
+	accounting, err := nativeAPI.importDecodedOTLPRequestV8(
+		t.Context(), codexCorrelationResponseRequest(now, ""), otelSignalLogs, "codex", now,
+	)
+	if err != nil || !accounting.valid() || accounting.invalidMappedField != 0 || accounting.importedAndDerived != 1 {
+		t.Fatalf("native response with live hook state accounting=%+v err=%v", accounting, err)
+	}
+	database := openCorrelationDB(t, fixture.path)
+	var projected int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM correlation_observations observation
+		JOIN correlation_events event ON event.semantic_event_id=observation.semantic_event_id
+		WHERE event.source_rail='native_otlp' AND observation.signal='logs'
+		  AND observation.event_name<>'correlation.relationship.changed'
+		  AND observation.agent_id=? AND observation.turn_id=?`, meta.AgentID, prompt.TurnID).Scan(&projected); err != nil {
+		t.Fatal(err)
+	}
+	if projected == 0 {
+		t.Fatal("native response was not projected onto the live hook agent and turn")
+	}
+}

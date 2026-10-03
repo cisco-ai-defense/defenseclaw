@@ -122,7 +122,25 @@ func (m *Manager) ObserveHookDecision(d HookDecision) {
 	}
 	b.hooks.countEvent(event)
 	if !toolEvent {
+		prompt := blocked && isPromptEvent(d.Event)
+		if prompt {
+			b.hooks.promptBlocked++
+		}
 		m.mu.Unlock()
+		if blocked {
+			// A blocked prompt (or other non-tool hook event) is a block
+			// of the session too: the feed shows every DefenseClaw block.
+			what := "prompt"
+			if !prompt {
+				what = firstNonEmpty(event, "a hook event")
+			}
+			msg := "✗ " + what + " blocked by DefenseClaw"
+			if label := sandboxapi.VerdictRuleLabel(reason); label != "" {
+				msg += ": " + truncate(label, 200)
+			}
+			m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityHookBlocked, Sandbox: d.SandboxName,
+				Event: d.Event, Severity: d.Severity, Reason: truncate(reason, 300), Message: msg})
+		}
 		return
 	}
 	tamper := tamperNone
@@ -152,8 +170,8 @@ func (m *Manager) ObserveHookDecision(d HookDecision) {
 		if d.Tool != "" {
 			msg = "✗ " + d.Tool + " blocked by DefenseClaw"
 		}
-		if reason != "" {
-			msg += ": " + truncate(reason, 200)
+		if label := sandboxapi.VerdictRuleLabel(reason); label != "" {
+			msg += ": " + truncate(label, 200)
 		}
 		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityToolBlocked, Sandbox: d.SandboxName, Tool: d.Tool,
 			Event: d.Event, Severity: d.Severity, Reason: truncate(reason, 300), Message: msg})
@@ -163,8 +181,8 @@ func (m *Manager) ObserveHookDecision(d HookDecision) {
 		if d.Tool != "" {
 			msg = "? DefenseClaw asked you to confirm " + d.Tool
 		}
-		if reason != "" {
-			msg += ": " + truncate(reason, 200)
+		if label := sandboxapi.VerdictRuleLabel(reason); label != "" {
+			msg += ": " + truncate(label, 200)
 		}
 		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityToolAsked, Sandbox: d.SandboxName, Tool: d.Tool,
 			Event: d.Event, Severity: d.Severity, Reason: truncate(reason, 300), Message: msg})
@@ -175,8 +193,9 @@ func (m *Manager) ObserveHookDecision(d HookDecision) {
 		// session: the feed shows every one.
 		what := firstNonEmpty(d.Tool, d.Event, "a hook event")
 		msg := "⚠ " + what + " allowed but flagged by DefenseClaw"
-		if reason != "" {
-			msg = "⚠ " + what + ": " + truncate(reason, 300)
+		if label := sandboxapi.VerdictRuleLabel(reason); label != "" {
+			// The rule, not the reason's sentence to the agent (GAP-2018).
+			msg += ": " + truncate(label, 200)
 		}
 		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityFinding, Sandbox: d.SandboxName, Tool: d.Tool,
 			Event: d.Event, Severity: severity, Reason: sandboxapi.ReasonHookFinding, Message: msg})
@@ -282,6 +301,12 @@ func isToolEvent(event string) bool {
 		return true
 	}
 	return false
+}
+
+// isPromptEvent reports whether a hook event is a harness's prompt
+// submission (UserPromptSubmit, userPromptSubmitted, beforeSubmitPrompt).
+func isPromptEvent(event string) bool {
+	return strings.Contains(strings.ToLower(event), "prompt")
 }
 
 func isBlockAction(action string) bool {

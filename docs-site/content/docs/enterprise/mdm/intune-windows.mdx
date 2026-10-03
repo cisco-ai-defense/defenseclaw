@@ -273,8 +273,9 @@ Assign the Win32 app as **Uninstall** to the device group. Intune runs the
 uninstall command, `DefenseClawSetup-Enterprise-Standalone-x64.exe /uninstall
 JSON=1`, which stops and deletes the services, removes DefenseClaw's hooks and
 machine-policy entries (administrator entries stay), and removes the
-Add/Remove Programs entry and the marker. Add `PURGE=1` to the uninstall
-command to also remove the config, the key and the state.
+Add/Remove Programs entry and the marker, and removes the config, the key and
+the machine state. Add `PURGE=1` to the uninstall command to also remove each
+enrolled account's `%USERPROFILE%\.defenseclaw` and per-user binaries.
 
 `packaging/mdm/windows/uninstall.ps1 [-Purge]` does the same from any
 PowerShell, as a platform script for example. Both are idempotent.

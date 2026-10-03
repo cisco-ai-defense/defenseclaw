@@ -35,6 +35,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+import yaml
 
 try:
     import tomllib
@@ -403,10 +404,68 @@ class TestClaudeCodeWrites:
         external["mcpServers"]["managed"] = {"command": "operator-replacement"}
         settings.write_text(json.dumps(external), encoding="utf-8")
 
-        unset_mcp_server("claudecode", "managed")
+        # GAP-1400: the entry stays, and the unset says so.
+        with pytest.raises(connector_paths.MCPServerNotRemovedError, match="claude mcp remove managed -s user"):
+            unset_mcp_server("claudecode", "managed")
 
         result = json.loads(settings.read_text(encoding="utf-8"))
         assert result["mcpServers"]["managed"] == {"command": "operator-replacement"}
+
+    def test_unset_after_claude_rewrites_settings_removes_unchanged_entry(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        # GAP-2541: Claude Code rewrites ~/.claude.json as it runs (a new file
+        # with its own state added). An entry still exactly as DefenseClaw
+        # wrote it is removed; Claude Code's own state stays.
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path / "defenseclaw-home"))
+        settings = tmp_path / ".claude.json"
+
+        set_mcp_server("claudecode", "deepwiki", {"type": "http", "url": "https://mcp.example.invalid/mcp"})
+        set_mcp_server("claudecode", "other", {"command": "inert-other"})
+        rewritten = json.loads(settings.read_text(encoding="utf-8"))
+        rewritten["numStartups"] = 3
+        staged = settings.with_name(".claude.json.tmp")
+        staged.write_text(json.dumps(rewritten, indent=2), encoding="utf-8")
+        os.replace(staged, settings)
+
+        unset_mcp_server("claudecode", "deepwiki")
+        result = json.loads(settings.read_text(encoding="utf-8"))
+        assert result["numStartups"] == 3
+        assert result["mcpServers"] == {"other": {"command": "inert-other"}}
+        # A second rewrite still leaves the other managed entry removable.
+        os.replace(settings, staged)
+        os.replace(staged, settings)
+        unset_mcp_server("claudecode", "other")
+        assert "other" not in json.loads(settings.read_text(encoding="utf-8")).get("mcpServers", {})
+
+    def test_unset_after_claude_rewrites_changed_entry_reports_entry_kept(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        # GAP-1400: a rewrite that also changed the entry leaves it in place,
+        # and unset (and a repeat unset) says so.
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path / "defenseclaw-home"))
+        settings = tmp_path / ".claude.json"
+
+        set_mcp_server("claudecode", "deepwiki", {"url": "https://mcp.example.invalid/mcp"})
+        rewritten = json.loads(settings.read_text(encoding="utf-8"))
+        rewritten["numStartups"] = 3
+        rewritten["mcpServers"]["deepwiki"] = {"url": "https://operator.example.invalid/mcp"}
+        staged = settings.with_name(".claude.json.tmp")
+        staged.write_text(json.dumps(rewritten, indent=2), encoding="utf-8")
+        os.replace(staged, settings)
+
+        for _ in range(2):
+            with pytest.raises(connector_paths.MCPServerNotRemovedError, match="claude mcp remove deepwiki -s user"):
+                unset_mcp_server("claudecode", "deepwiki")
+        assert json.loads(settings.read_text(encoding="utf-8"))["mcpServers"]["deepwiki"] == {
+            "url": "https://operator.example.invalid/mcp",
+        }
 
     @pytest.mark.parametrize("first_unset", ["first", "second"])
     def test_multiple_managed_servers_restore_only_after_last_unset(
@@ -688,7 +747,9 @@ class TestClaudeCodeWrites:
         unset_mcp_server("claudecode", "demo")
         assert settings.read_bytes() == original
         assert _claude_released_names(data_home) == {"demo"}
-        unset_mcp_server("claudecode", "demo")
+        # The operator's own entry stays, and a repeat unset says so (GAP-1400).
+        with pytest.raises(connector_paths.MCPServerNotRemovedError, match="no longer owns"):
+            unset_mcp_server("claudecode", "demo")
         assert settings.read_bytes() == original
         assert _claude_released_names(data_home) == {"demo"}
 
@@ -762,10 +823,14 @@ class TestClaudeCodeWrites:
             "_finalize_claude_mcp_transaction",
             finalize,
         )
-        unset_mcp_server("claudecode", "demo")
+        # Recovery restores the operator's entry; it stays, and unset says so
+        # rather than report it removed (GAP-1400).
+        with pytest.raises(connector_paths.MCPServerNotRemovedError, match="no longer owns"):
+            unset_mcp_server("claudecode", "demo")
         assert settings.read_bytes() == original
         assert _claude_released_names(data_home) == {"demo"}
-        unset_mcp_server("claudecode", "demo")
+        with pytest.raises(connector_paths.MCPServerNotRemovedError, match="no longer owns"):
+            unset_mcp_server("claudecode", "demo")
         assert settings.read_bytes() == original
 
     def test_native_publication_race_preserves_operator_bytes(self, tmp_path, monkeypatch):
@@ -916,6 +981,29 @@ class TestClaudeCodeWrites:
                 metadata=replace(snapshot, **metadata_change),
             )
         assert settings.read_bytes() == original
+
+    @pytest.mark.skipif(os.name != "nt", reason="Windows owner binding contract")
+    def test_new_settings_accept_system_owned_profile_parent(self, tmp_path, monkeypatch):
+        # GAP-1686: C:\Users\<user> is owned by SYSTEM, not the user.
+        from defenseclaw import windows_acl
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path / "d"))
+        settings = tmp_path / ".claude.json"
+        capture = windows_acl.capture_path
+        local_system = bytes([1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0])  # S-1-5-18
+
+        def capture_with_system_settings_parent(path, *, directory=False):
+            security = capture(path, directory=directory)
+            if directory and os.path.normcase(os.path.abspath(path)) == os.path.normcase(
+                os.path.abspath(settings.parent),
+            ):
+                return replace(security, owner=local_system)
+            return security
+
+        monkeypatch.setattr(windows_acl, "capture_path", capture_with_system_settings_parent)
+        set_mcp_server("claudecode", "demo", {"command": "inert-demo"})
+        assert "demo" in json.loads(settings.read_text(encoding="utf-8"))["mcpServers"]
 
     @pytest.mark.skipif(os.name != "nt", reason="Windows owner binding contract")
     def test_new_settings_reject_foreign_owned_parent(self, tmp_path, monkeypatch):
@@ -1828,11 +1916,16 @@ class TestClaudeCodeWrites:
         replacement.write_bytes(managed_bytes)
         os.replace(replacement, settings)
 
+        # GAP-2541: the replaced file is never deleted or restored wholesale,
+        # but the entry DefenseClaw wrote (still unchanged) is removed.
         unset_mcp_server("claudecode", "demo")
 
         assert settings.exists()
-        assert settings.read_bytes() == managed_bytes
-        assert _claude_released_names(data_home) == {"demo"}
+        result = json.loads(settings.read_text(encoding="utf-8"))
+        assert "demo" not in result.get("mcpServers", {})
+        if preexisting:
+            assert result["theme"] == "operator"
+        assert _claude_ownership_files(data_home) == []
 
     @pytest.mark.parametrize("preexisting", [False, True])
     def test_same_byte_replacement_between_publish_and_observation_is_never_owned(
@@ -2457,6 +2550,54 @@ class TestHermesWrites:
         unset_mcp_server("hermes", "demo")
 
         assert connector_paths.mcp_servers("hermes") == []
+
+    def test_set_uses_native_key_and_keeps_comments(self, tmp_path, monkeypatch):
+        # GAP-1591: Hermes loads top-level mcp_servers (what `hermes mcp add`
+        # writes). GAP-1586: set/unset edit only that entry, so the stock
+        # config's comments, non-ASCII text and CRLF endings survive.
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        config = tmp_path / "config.yaml"
+        original = (
+            "# Hermes config \u2014 self-documenting\r\n"
+            "model:\r\n"
+            "  default: demo-model  # inline note\r\n"
+            "toolsets:\r\n"
+            "- web\r\n"
+            "# mcp_servers:\r\n"
+            "#   example: {}\r\n"
+            "mcp:\r\n"
+            "  servers:\r\n"
+            "    old: {command: legacy-mcp}\r\n"
+        ).encode("utf-8")
+        config.write_bytes(original)
+
+        set_mcp_server("hermes", "deepwiki", {"url": "https://mcp.example.invalid/mcp"})
+        set_mcp_server("hermes", "other", {"command": "inert-other"})
+        text = config.read_bytes().decode("utf-8")
+        assert text.startswith(original.decode("utf-8").split("mcp:\r\n")[0])
+        assert "\n" not in text.replace("\r\n", "")
+        data = yaml.safe_load(text)
+        assert data["mcp_servers"] == {
+            "deepwiki": {"url": "https://mcp.example.invalid/mcp"},
+            "other": {"command": "inert-other"},
+        }
+        assert sorted(e.name for e in connector_paths.mcp_servers("hermes")) == ["deepwiki", "old", "other"]
+
+        # Unset also removes the copy older builds wrote under mcp.servers.
+        unset_mcp_server("hermes", "old")
+        unset_mcp_server("hermes", "deepwiki")
+        unset_mcp_server("hermes", "other")
+        assert config.read_bytes() == original.split(b"mcp:\r\n")[0]
+
+    def test_unparseable_layout_is_refused_untouched(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        config = tmp_path / "config.yaml"
+        original = b"# keep me\nmcp_servers: {a: {command: x}}\n"
+        config.write_bytes(original)
+
+        with pytest.raises(MCPWriteUnsupportedError, match="hermes mcp add"):
+            set_mcp_server("hermes", "b", {"command": "y"})
+        assert config.read_bytes() == original
 
 
 # ---------------------------------------------------------------------------

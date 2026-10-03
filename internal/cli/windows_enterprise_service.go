@@ -248,7 +248,7 @@ func newWindowsEnterpriseLifecycleCommand(action string) *cobra.Command {
 	flags.BoolVar(&opts.attestAgentApplicationControl, "attest-agent-application-control", false, "attest that approved-client WDAC or AppLocker rules are live")
 	flags.BoolVar(&opts.attestClaudeEffectivePolicy, "attest-claude-effective-policy", false, "refresh live proof that DefenseClaw is Claude's effective managed-policy source")
 	flags.BoolVar(&opts.noStart, "no-start", false, "stage with both services disabled and stopped; activate with a later repair")
-	flags.BoolVar(&opts.purge, "purge", false, "remove managed state as well as services and binaries, and each enrolled account's %USERPROFILE%\\.defenseclaw and per-user binaries in %USERPROFILE%\\.local\\bin, naming each account in the result (authenticated purge or fail-closed exact-scope recovery)")
+	flags.BoolVar(&opts.purge, "purge", false, "also remove managed state (Secure Client; a standalone uninstall always removes it) and each enrolled account's %USERPROFILE%\\.defenseclaw and per-user binaries in %USERPROFILE%\\.local\\bin, naming each account in the result (authenticated purge or fail-closed exact-scope recovery)")
 	flags.BoolVar(&opts.allowUnsigned, "allow-unsigned", false, "allow unsigned artifacts only for controlled test builds")
 	// Spec 003 Workstream B: UCB-friendly late-config install.
 	// Requires managed-enterprise deployment mode; enforced by the
@@ -270,7 +270,25 @@ func newWindowsEnterpriseLifecycleCommand(action string) *cobra.Command {
 		"standalone: SHA-256 thumbprint of an accepted Authenticode signer certificate (repeatable)")
 	flags.StringVar(&opts.productVersion, "product-version", "",
 		"standalone: version recorded for this deployment (default: this CLI's version)")
+	if action == "status" || action == "verify" {
+		// Status and verify only read the deployment. The install,
+		// upgrade, uninstall and certification inputs stay accepted but
+		// out of their help (GAP-1073).
+		for _, name := range windowsEnterpriseInspectionHiddenFlags {
+			_ = flags.MarkHidden(name)
+		}
+	}
 	return cmd
+}
+
+// windowsEnterpriseInspectionHiddenFlags are the lifecycle flags status and
+// verify leave out of their help.
+var windowsEnterpriseInspectionHiddenFlags = []string{
+	"broker-binary", "gateway-binary", "acp-binary", "hook-binary", "sensor-helper-binary", "cli-binary",
+	"install-root", "state-root", "gateway-service-name", "guardian-service-name",
+	"certification-codex-home", "core-hardening-certification",
+	"attest-agent-application-control", "attest-claude-effective-policy",
+	"no-start", "purge", "deferred-config", "mode", "connector", "product-version",
 }
 
 func windowsEnterpriseLifecycleSummary(action string) string {
@@ -288,7 +306,7 @@ func windowsEnterpriseLifecycleSummary(action string) string {
 	case "verify":
 		return "Verify files, DACLs, service policy, mode pin, and readiness"
 	case "uninstall":
-		return "Remove enterprise services while preserving state by default"
+		return "Remove enterprise services, hooks and (standalone) machine state; users keep their data unless --purge"
 	case "ensure":
 		return "Converge a standalone deployment: install, upgrade, repair, or no-op"
 	default:
@@ -315,7 +333,7 @@ func runWindowsEnterpriseLifecycle(
 		return failPreflight(errors.New("Windows enterprise lifecycle options are unavailable"))
 	}
 	if err := resolveWindowsEnterpriseLifecycleProfile(action, opts); err != nil {
-		if windowsEnterpriseStandaloneRequested(opts) {
+		if windowsEnterpriseStandaloneRequested(opts) || windowsEnterpriseUnknownProfileRequested(opts) {
 			return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts, err)
 		}
 		return failPreflight(err)
@@ -420,12 +438,34 @@ func runWindowsEnterpriseLifecycle(
 					"or omit --cli-binary",
 			))
 		}
+		if windowsEnterpriseStandalone(opts) &&
+			windowsEnterpriseInstalledNonCLIUninstallCaller(action, script, executable) {
+			return failPreflight(windowsEnterpriseInvalidArguments(
+				"only the installed CLI can uninstall from its own folder: %s would keep that folder "+
+					"in use, so the uninstall would stop halfway. From a prompt whose folder is outside %s "+
+					"(for example, cd /d C:\\ first), run \"%s\" enterprise windows uninstall --profile standalone, "+
+					"or run DefenseClawSetup-Enterprise-Standalone-x64.exe /uninstall",
+				filepath.Base(executable),
+				filepath.Dir(filepath.Dir(executable)),
+				filepath.Join(filepath.Dir(executable), "defenseclaw.exe"),
+			))
+		}
 		if callerPID, ok := windowsEnterpriseSelfUninstallCaller(
 			action,
 			script,
 			executable,
 			os.Getpid(),
 		); ok {
+			if windowsEnterpriseStandalone(opts) {
+				installRoot := filepath.Dir(filepath.Dir(executable))
+				started, _ := os.Getwd()
+				if err := windowsEnterpriseLeaveInstallRoot(installRoot); err != nil {
+					return failPreflight(err)
+				}
+				if err := windowsEnterpriseInstallRootStillInUse(installRoot, started); err != nil {
+					return failPreflight(err)
+				}
+			}
 			args = append(
 				args,
 				"-SelfUninstallCallerPID",
@@ -465,13 +505,18 @@ func writeWindowsEnterpriseLifecyclePreflightFailure(
 		Error:         cause.Error(),
 		Errors:        []string{cause.Error()},
 	}
-	if err := json.NewEncoder(cmd.OutOrStdout()).Encode(report); err != nil {
+	if err := newEnterpriseJSONEncoder(cmd.OutOrStdout()).Encode(report); err != nil {
 		return fmt.Errorf(
 			"Windows enterprise %s preflight failed and its JSON report could not be encoded: %w",
 			report.Action,
 			err,
 		)
 	}
+	// A coded caller error (naming the Secure Client profile on a standalone
+	// computer, exit 1639) is answered by this JSON alone, as the standalone
+	// results are (GAP-2445). Uncoded Secure Client failures keep their
+	// historical stderr line.
+	silenceJSONReportedError(cmd, true, cause)
 	return cause
 }
 
@@ -595,6 +640,117 @@ func windowsEnterpriseSelfUninstallCaller(
 		return 0, false
 	}
 	return uint32(processID), true
+}
+
+// windowsEnterpriseInstalledNonCLIUninstallCaller reports an uninstall that
+// runs from an installed image other than bin\defenseclaw.exe, such as
+// bin\defenseclaw-gateway.exe. Only the installed CLI hands its running image
+// to the detached self-uninstall finalizer; any other running image inside
+// InstallRoot keeps the folder from being retired, so the uninstall committed
+// and then failed 1603 halfway (GAP-1679).
+func windowsEnterpriseInstalledNonCLIUninstallCaller(action, installer, executable string) bool {
+	if !strings.EqualFold(strings.TrimSpace(action), "uninstall") {
+		return false
+	}
+	cleanInstaller, err := filepath.Abs(strings.TrimSpace(installer))
+	if err != nil ||
+		!strings.EqualFold(filepath.Base(cleanInstaller), "install-enterprise.ps1") ||
+		!strings.EqualFold(filepath.Base(filepath.Dir(cleanInstaller)), "libexec") {
+		return false
+	}
+	cleanExecutable, err := filepath.Abs(strings.TrimSpace(executable))
+	if err != nil {
+		return false
+	}
+	installRoot := filepath.Dir(filepath.Dir(cleanInstaller))
+	if !windowsEnterprisePathWithin(cleanExecutable, installRoot) {
+		return false
+	}
+	return !strings.EqualFold(
+		filepath.Clean(cleanExecutable),
+		filepath.Join(installRoot, "bin", "defenseclaw.exe"),
+	)
+}
+
+// windowsEnterprisePathWithin reports whether path is root or inside it.
+func windowsEnterprisePathWithin(path, root string) bool {
+	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(path))
+	if err != nil || filepath.IsAbs(rel) {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// windowsEnterpriseUninstallWorkingDirectory is replaceable in tests.
+var windowsEnterpriseUninstallWorkingDirectory = trustedWindowsEnterpriseWorkingDirectory
+
+// windowsEnterpriseLeaveInstallRoot moves the CLI's working directory out of
+// installRoot before a self-uninstall. A working directory inside InstallRoot
+// (the MDM uninstall script started the CLI in its bin folder, or an
+// administrator ran it from there) is an open handle that keeps the folder
+// from being renamed aside, so the uninstall committed and then failed 1603
+// (GAP-1684).
+func windowsEnterpriseLeaveInstallRoot(installRoot string) error {
+	current, err := os.Getwd()
+	if err != nil || !windowsEnterprisePathWithin(current, installRoot) {
+		return nil
+	}
+	directory, err := windowsEnterpriseUninstallWorkingDirectory()
+	if err != nil {
+		return err
+	}
+	if err := os.Chdir(directory); err != nil {
+		return fmt.Errorf("leave the install folder before the uninstall: %w", err)
+	}
+	return nil
+}
+
+// windowsEnterpriseDirectoryInUse is replaceable in tests.
+var windowsEnterpriseDirectoryInUse = windowsDirectoryOpenWithoutDeleteSharing
+
+// windowsEnterpriseInstallRootStillInUse refuses a self-uninstall started in a
+// folder inside installRoot that another process still uses once the CLI has
+// left it. That is usually the prompt it was typed into (cmd.exe after
+// cd /d ...\bin): the CLI can move only its own working folder, and the
+// prompt's keeps InstallRoot from being renamed aside, so the uninstall
+// committed and then failed 1603, and so did every retry from that prompt
+// (GAP-1794). Nothing has changed yet when this refuses.
+func windowsEnterpriseInstallRootStillInUse(installRoot, started string) error {
+	if started == "" || !windowsEnterprisePathWithin(started, installRoot) || !windowsEnterpriseDirectoryInUse(started) {
+		return nil
+	}
+	return windowsEnterpriseInvalidArguments(
+		"another program, usually the prompt this was run from, is using %s as its working folder, "+
+			"so the uninstall could not remove %s and would stop halfway. Nothing was changed. "+
+			"Change that prompt to a folder outside %s (for example, cd /d C:\\) and run the uninstall again",
+		started,
+		installRoot,
+		installRoot,
+	)
+}
+
+// windowsDirectoryOpenWithoutDeleteSharing reports whether another handle to
+// the directory denies delete sharing, as a process's working-folder handle
+// does. Any other failure (access denied, missing) is not reported as in use.
+func windowsDirectoryOpenWithoutDeleteSharing(path string) bool {
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return false
+	}
+	handle, err := windows.CreateFile(
+		name,
+		windows.DELETE,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil,
+		windows.OPEN_EXISTING,
+		windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT,
+		0,
+	)
+	if err != nil {
+		return errors.Is(err, windows.ERROR_SHARING_VIOLATION)
+	}
+	_ = windows.CloseHandle(handle)
+	return false
 }
 
 func windowsEnterprisePowerShellArgs(action string, opts *windowsEnterpriseLifecycleOptions) []string {
@@ -1103,6 +1259,11 @@ func prepareWindowsEnterprisePowerShellTempWithOps(
 	}
 	cleanup := func() error {
 		if err := ops.validate(path); err != nil {
+			// An uninstall can remove the folder with the rest of
+			// DefenseClaw's ProgramData state; nothing is left to clean.
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
 			return fmt.Errorf("refusing unsafe temp cleanup: %w", err)
 		}
 		if err := ops.removeAll(path); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -1354,14 +1515,14 @@ func newWindowsServiceConfigValidationCommand() *cobra.Command {
 			report, err := validateWindowsServiceConfig(configPath, dataDir, serviceAccount)
 			if jsonOutput {
 				if err != nil {
-					_ = json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{
+					_ = newEnterpriseJSONEncoder(cmd.OutOrStdout()).Encode(map[string]any{
 						"schema_version": 1,
 						"ok":             false,
 						"error":          err.Error(),
 					})
 					return errors.New("Windows enterprise service config validation failed")
 				}
-				return json.NewEncoder(cmd.OutOrStdout()).Encode(report)
+				return newEnterpriseJSONEncoder(cmd.OutOrStdout()).Encode(report)
 			}
 			if err != nil {
 				return err

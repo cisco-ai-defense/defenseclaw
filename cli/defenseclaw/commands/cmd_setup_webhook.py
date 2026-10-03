@@ -42,7 +42,7 @@ from __future__ import annotations
 
 import json as _json
 import os
-from typing import Any
+from typing import Any, NoReturn
 
 import click
 
@@ -240,13 +240,8 @@ def add_webhook(  # noqa: PLR0913 — mirrors the prompt surface
 
     _print_write_result(result, connector=connector_name)
 
-    if app.logger and not dry_run:
-        app.logger.log_action(
-            ACTION_SETUP_WEBHOOK,
-            "config",
-            f"action=add type={result.type} name={result.name}"
-            + (f" connector={connector_name}" if connector_name else ""),
-        )
+    if not dry_run:
+        _record_webhook_change(app, "Webhook saved", result.name, connector_name, "added", "")
 
 
 # ---------------------------------------------------------------------------
@@ -303,6 +298,13 @@ def list_cmd(app: AppContext, emit_json: bool, connector: str | None) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _webhook_not_found(name: str, entries: dict[str, Any]) -> NoReturn:
+    """Name the configured webhooks for an unknown name, then exit 1 (GAP-1928)."""
+    message = ux.not_found_message("webhook", name, entries, "defenseclaw setup webhook list")
+    click.echo(f"Error: {message}", err=True)
+    raise SystemExit(1)
+
+
 @webhook.command("show")
 @click.argument("name")
 @click.option("--json", "emit_json", is_flag=True, help="Emit JSON")
@@ -312,8 +314,7 @@ def show_cmd(app: AppContext, name: str, emit_json: bool) -> None:
     entries = {v.name: v for v in list_webhooks(app.cfg.data_dir)}
     v = entries.get(name)
     if v is None:
-        click.echo(f"error: no webhook named {name!r}", err=True)
-        raise SystemExit(2)
+        _webhook_not_found(name, entries)
     if emit_json:
         click.echo(_json.dumps(_view_to_dict(v), indent=2))
         return
@@ -358,6 +359,7 @@ def enable_cmd(app: AppContext, name: str, connector: str | None) -> None:
         click.echo(f"error: {exc}", err=True)
         raise SystemExit(2) from exc
     _print_write_result(result, connector=connector_name)
+    _record_webhook_change(app, "Webhook enabled", name, connector_name, "enabled", "disabled")
 
 
 @webhook.command("disable")
@@ -376,6 +378,7 @@ def disable_cmd(app: AppContext, name: str, connector: str | None) -> None:
         click.echo(f"error: {exc}", err=True)
         raise SystemExit(2) from exc
     _print_write_result(result, connector=connector_name)
+    _record_webhook_change(app, "Webhook disabled", name, connector_name, "disabled", "enabled")
 
 
 # ---------------------------------------------------------------------------
@@ -404,6 +407,7 @@ def remove_cmd(app: AppContext, name: str, connector: str | None, yes: bool) -> 
         click.echo(f"error: {exc}", err=True)
         raise SystemExit(2) from exc
     _print_write_result(result, connector=connector_name)
+    _record_webhook_change(app, "Webhook removed", name, connector_name, "removed", "configured")
 
 
 # ---------------------------------------------------------------------------
@@ -426,11 +430,7 @@ def test_cmd(app: AppContext, name: str, dry_run: bool, timeout: float) -> None:
     entries = {v.name: v for v in list_webhooks(app.cfg.data_dir)}
     v = entries.get(name)
     if v is None:
-        click.echo(f"error: no webhook named {name!r}", err=True)
-        click.echo("  Known webhooks:", err=True)
-        for k in sorted(entries):
-            click.echo(f"    - {k}", err=True)
-        raise SystemExit(2)
+        _webhook_not_found(name, entries)
 
     secret_value = ""
     if v.secret_env:
@@ -462,7 +462,7 @@ def test_cmd(app: AppContext, name: str, dry_run: bool, timeout: float) -> None:
     click.echo()
     click.echo(
         f"  {ux.bold('Testing webhook')} {ux.bold(v.name)} [{v.type}] "
-        f"{ux.dim('→')} {v.url}"
+        f"{ux.dim('→')} {redact_webhook_url(v.url)}"
     )
     if dry_run:
         ux.subhead("(dry-run) formatting only, no delivery")
@@ -499,18 +499,22 @@ def test_cmd(app: AppContext, name: str, dry_run: bool, timeout: float) -> None:
     # Log the outcome *before* possibly exiting non-zero so failed
     # dispatches still leave an audit trail.
     if app.logger and not dry_run:
-        app.logger.log_webhook_delivery(
-            webhook_kind=v.type,
-            target_url=v.url,
-            status_code=result.status_code or 0,
-            duration_ms=result.duration_ms,
-            succeeded=result.ok,
-        )
-        app.logger.log_action(
-            ACTION_SETUP_WEBHOOK,
-            "test",
-            f"name={v.name} type={v.type} ok={result.ok}",
-        )
+
+        def _record_test() -> None:
+            app.logger.log_webhook_delivery(
+                webhook_kind=v.type,
+                target_url=v.url,
+                status_code=result.status_code or 0,
+                duration_ms=result.duration_ms,
+                succeeded=result.ok,
+            )
+            app.logger.log_action(
+                ACTION_SETUP_WEBHOOK,
+                "test",
+                f"name={v.name} type={v.type} ok={result.ok}",
+            )
+
+        _record_audit("Test delivery done", _record_test)
 
     if not dry_run and not result.ok:
         raise SystemExit(1)
@@ -519,6 +523,44 @@ def test_cmd(app: AppContext, name: str, dry_run: bool, timeout: float) -> None:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _record_webhook_change(
+    app: AppContext, done: str, name: str, connector: str, state: str, previous: str
+) -> None:
+    """Record a webhook change as an Activity mutation that names it (GAP-1511).
+
+    Activity showed only "defenseclaw config-update" with no field change for
+    add, enable, disable and remove: ``config:webhook:<name>`` and
+    ``webhook: enabled -> disabled`` say what changed.
+    """
+    if not app.logger:
+        return
+    scope = f"{connector}/{name}" if connector else name
+    _record_audit(
+        done,
+        lambda: app.logger.log_config_change("webhook", f"scope={scope} webhook={state} previous={previous}"),
+    )
+
+
+def _record_audit(done: str, record: Any) -> None:
+    """Record the audit event of a finished change; a stopped gateway only skips it.
+
+    The change is already on disk (or the test already sent), so a stopped or
+    refusing gateway prints one plain line instead of a traceback and rc=1,
+    like ``keys set`` and ``guardrail fail-mode`` (GAP-1250, GAP-1399).
+    """
+    from defenseclaw.logger import CanonicalObservabilityError, CanonicalObservabilityUnavailableError
+
+    try:
+        record()
+    except CanonicalObservabilityUnavailableError:
+        ux.echo(
+            f"  ⚠ {done}. The gateway isn't running, so the audit event was not recorded.",
+            err=True,
+        )
+    except CanonicalObservabilityError as exc:
+        ux.echo(f"  ⚠ {done}, but the gateway did not confirm the audit event ({exc}).", err=True)
 
 
 def _prompt_missing(

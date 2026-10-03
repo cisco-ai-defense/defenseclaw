@@ -143,16 +143,19 @@ decides alone. To use it, the config names the credential
 (`enterprise.inspection.ai_defense.credential`) and turns the feature on;
 see [Cisco AI Defense key](/docs/enterprise/ai-defense-key).
 
-Store the key **after** the deployment is installed. The key never goes on a
-command line, in an MDM script body, or in the config.
+The key never goes on a command line, in an MDM script body, or in the config.
 
 | OS | In the same wrapper run | Directly |
 | --- | --- | --- |
 | Linux, macOS | `--secret-name ai-defense-api-key` with `--secret-file /root-only/file` or `--secret-stdin` | `enterprise secret set --name ai-defense-api-key --from-stdin`, as root |
 | Windows | `-SecretName ai-defense-api-key` with `-SecretPath C:\admin-only\file` or `-SecretFromStdin` | The installed CLI's `enterprise secret set --name ai-defense-api-key --from-stdin`, elevated |
 
-The wrapper stores the key only after `ensure` succeeds. If storing fails, the
-deployment stays applied and the run fails with `mdm_secret_failed`. The
+On Linux and macOS the wrapper stores the key before it applies the config,
+so a config that references it deploys in the same run; if storing fails,
+the config is not applied and the run fails with `mdm_secret_failed`. On
+Windows the wrapper stores the key only after `ensure` succeeds; if storing
+fails, the deployment stays applied and the run fails with
+`mdm_secret_failed`. The
 wrapper deletes its own staging copy of the key (on Windows it overwrites it
 first), but not your source file: delete that yourself.
 
@@ -302,7 +305,7 @@ are accepted and ignored.
 | `ALLOWEDSIGNERS=` | Comma-separated SHA-256 thumbprints of accepted Authenticode signers, for a signed Setup. |
 | `JSON=1` | Print the result document on standard output. Always set it from an MDM. |
 | `NOSTART=1` | Install with the services stopped (mutating actions only). |
-| `PURGE=1` | With `/uninstall`, also remove the config, credentials and state. |
+| `PURGE=1` | With `/uninstall`, also remove each enrolled account's DefenseClaw data and per-user binaries. Uninstall always removes the config, credentials and machine state. |
 | `TIMEOUTSECONDS=` | Lifecycle timeout, 60 to 7200 seconds. Default 1800. |
 | `ATTESTCLAUDEEFFECTIVEPOLICY=1` | With `/repair`: record the administrator's attestation that Claude Code runs DefenseClaw's managed hooks. See [Claude Code on Windows](#claude-code-on-windows). |
 
@@ -346,9 +349,10 @@ so put `JSON=1` before the other properties. The wrappers turn it into a schema-
 the code `mdm_lifecycle_no_result`.
 
 Error codes that start with `mdm_` come from the kit's scripts. Most mean the
-wrapper stopped before the lifecycle ran; `mdm_secret_failed`, and
-`mdm_not_installed` after an apply, are reported after the lifecycle
-succeeded. In every `mdm_` document, `"installed": false` means "not
+wrapper stopped before the lifecycle ran; `mdm_not_installed` after an
+apply, and `mdm_secret_failed` on Windows, are reported after the lifecycle
+succeeded (on Linux and macOS `mdm_secret_failed` means the config was not
+applied). In every `mdm_` document, `"installed": false` means "not
 evaluated". The Windows wrapper's parameters are checked by PowerShell itself:
 an unknown parameter, or starting the wrapper in Windows PowerShell 5.1, stops
 it with exit `1` before it prints a result document. Run the `status` action to inspect the host. Every other code
@@ -370,7 +374,7 @@ comes from the lifecycle; see [Troubleshooting](/docs/enterprise/troubleshooting
 | `mdm_download_failed`, `mdm_download_unavailable` | — / `1` | The HTTPS download failed, or neither curl nor wget is installed. |
 | `mdm_not_installed` | `1603` / `1` | A read-only action, or `ensure` without an artifact, found no installed deployment. |
 | `mdm_lifecycle_no_result`, `mdm_lifecycle_launch_failed` | Setup's code or `1603` / the lifecycle's code or `1` | The lifecycle did not start or printed no result document. |
-| `mdm_secret_failed` | `1603` / `1`, `2` or `75` | The deployment applied, but storing the key failed. On Linux and macOS the exit code is the one `secret set` returned. |
+| `mdm_secret_failed` | `1603` / `1`, `2` or `75` | Storing the key failed. On Windows the deployment applied; on Linux and macOS the key is stored first, so the config was not applied, and the exit code is the one `secret set` returned. |
 | `mdm_staging_untrusted`, `mdm_package_incomplete` | `1603` / `1` | The private staging folder, or the Intune Win32 app content (Windows), is not as expected. |
 | `unsupported_architecture`, `powershell_constrained_language`, `loader_environment_present`, `powershell7_untrusted` | `1603` / — | The PowerShell 7 wrapper refused its host. The lifecycle applies the same checks. |
 
@@ -387,7 +391,10 @@ MDMs ask two different questions. Answer each with the mechanism that fits.
 
 The Windows marker is written only after a successful lifecycle run. The
 Linux package database records the package even when its post-install
-`ensure` failed, so use `detect.sh` or `verify` for the real state. Standard
+`ensure` failed, so use `detect.sh` or `verify` for the real state. The
+macOS pkg receipt is the reverse: a pkg whose post-install `ensure` failed
+records no receipt, and finishing with `ensure --from-package` adds none, so
+after you fix the cause install the pkg again (or redeploy it). Standard
 users cannot write any of the markers. Only `verify` proves that the services, protected
 files, hooks and machine policy are intact.
 
@@ -501,7 +508,7 @@ a no-op result and exit `0`.
 | --- | --- | --- |
 | Linux | `uninstall.sh [--purge] [--keep-package] [--log FILE]`, or `DC_PURGE=1` and `DC_KEEP_PACKAGE=1` in its settings block | The services, DefenseClaw's hooks and machine-policy entries (administrator entries stay), then the deb or rpm unless `--keep-package`. `--purge` also removes `/etc/defenseclaw` (config, policies, keys), the state under `/var/lib` and the logs. The `defenseclaw` service account stays. |
 | macOS | `uninstall.sh [--purge] [--log FILE]` | The same, and the lifecycle forgets the pkg receipt. `--purge` also removes `/opt/cisco/defenseclaw` and the logs. |
-| Windows | `uninstall.ps1 [-Purge]` (runs in Windows PowerShell 5.1 or PowerShell 7), or `DefenseClawSetup-Enterprise-Standalone-x64.exe /uninstall JSON=1` with optional `PURGE=1` | The services, hooks, machine-policy entries, the Add/Remove Programs entry and the marker. Purge also removes the managed state. |
+| Windows | `uninstall.ps1 [-Purge]` (runs in Windows PowerShell 5.1 or PowerShell 7), or `DefenseClawSetup-Enterprise-Standalone-x64.exe /uninstall JSON=1` with optional `PURGE=1` | The services, hooks, machine-policy entries, the managed machine state, the Add/Remove Programs entry and the marker. Purge also removes each enrolled account's DefenseClaw data and per-user binaries. |
 
 See [Uninstall](/docs/enterprise/lifecycle#uninstall) for what stays behind and
 how to remove the service account.

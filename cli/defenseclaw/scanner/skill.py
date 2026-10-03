@@ -47,6 +47,46 @@ if TYPE_CHECKING:
 _log = logging.getLogger(__name__)
 
 
+def _frontmatter_yara_analyzers(analyzers: list) -> list:
+    """YARA-scan the SKILL.md frontmatter description too (GAP-1376).
+
+    The SDK's static analyzer runs YARA on the SKILL.md body only, but the
+    description is the text an agent always loads, so an instruction-override
+    phrase there must be found like the same phrase in the body.
+    """
+    try:
+        from skill_scanner.core.analyzers.base import BaseAnalyzer
+        from skill_scanner.core.analyzers.static import StaticAnalyzer
+    except ImportError:
+        return []
+    static = next(
+        (
+            a for a in analyzers
+            if isinstance(a, StaticAnalyzer) and getattr(a, "yara_scanner", None) is not None
+        ),
+        None,
+    )
+    if static is None:
+        return []
+
+    class _FrontmatterYaraAnalyzer(BaseAnalyzer):
+        def __init__(self) -> None:
+            super().__init__("static_frontmatter", policy=static.policy)
+
+        def analyze(self, skill):  # type: ignore[no-untyped-def]
+            text = getattr(skill, "description", "") or ""
+            if not text.strip():
+                return []
+            findings = []
+            for match in static.yara_scanner.scan_content(text, "SKILL.md"):
+                if not static._is_rule_enabled(match.get("rule_name", "")):
+                    continue
+                findings.extend(static._create_findings_from_yara_match(match, skill))
+            return findings
+
+    return [_FrontmatterYaraAnalyzer()]
+
+
 def _inspect_to_llm(il: InspectLLMConfig) -> LLMConfig:
     """Back-compat shim — mirrors the one in ``mcp.py``. Kept local so
     each scanner can be deleted independently when we fully retire the
@@ -187,6 +227,7 @@ class SkillScannerWrapper:
             build_kwargs["use_aidefense"] = True
 
         analyzers = build_analyzers(**build_kwargs)
+        analyzers.extend(_frontmatter_yara_analyzers(analyzers))
         scanner = SkillScanner(analyzers=analyzers, policy=policy)
 
         start = time.monotonic()
@@ -231,6 +272,7 @@ class SkillScannerWrapper:
             location = getattr(sf, "file_path", "") or ""
             line = getattr(sf, "line_number", None)
             if line and location:
+                line = _snippet_file_line(target, location, line, getattr(sf, "snippet", ""))
                 location = f"{location}:{line}"
 
             tags: list[str] = []
@@ -252,6 +294,10 @@ class SkillScannerWrapper:
                 description=getattr(sf, "description", ""),
                 location=location,
                 remediation=getattr(sf, "remediation", "") or "",
+                # The scanner's own rule id (COMMAND_INJECTION_EVAL, ...), the
+                # same one the watcher files; without it the gateway made up
+                # a title slug for path scans (GAP-1683).
+                rule_id=str(getattr(sf, "rule_id", "") or ""),
                 # Canonical finding identity names the producer, not the
                 # upstream SDK's internal analyzer, which remains in tags.
                 scanner=scanner_name,
@@ -265,3 +311,29 @@ class SkillScannerWrapper:
             findings=findings,
             duration=timedelta(seconds=elapsed),
         )
+
+
+def _snippet_file_line(target: str, file_path: str, line: int, snippet: object) -> int:
+    """The file line that holds *snippet*, when the SDK's line is off.
+
+    GAP-1599: the SDK counts SKILL.md lines from the end of the front
+    matter, so a match on line 6 of the file read "SKILL.md:1". Keep the
+    SDK's line when it already holds the snippet or the snippet is not found.
+    """
+    first = next((ln.strip() for ln in str(snippet or "").splitlines() if ln.strip()), "")
+    if not first:
+        return line
+    path = file_path if os.path.isabs(file_path) else os.path.join(target, file_path)
+    try:
+        if os.path.getsize(path) > 2_000_000:
+            return line
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            lines = fh.read().splitlines()
+    except (OSError, ValueError):
+        return line
+    if 0 < line <= len(lines) and first in lines[line - 1]:
+        return line
+    for idx, text in enumerate(lines, start=1):
+        if first in text:
+            return idx
+    return line

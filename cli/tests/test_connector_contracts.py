@@ -305,6 +305,19 @@ class TestConnectorContractManifest(unittest.TestCase):
         self.assertIn("scoped bearer + source header on /v1/<signal>", rendered)
         self.assertNotIn("/otlp/codex/<token>", rendered)
 
+    def test_setup_banner_prints_the_gateway_hook_route(self) -> None:
+        # GAP-1611: the gateway serves Claude Code on /api/v1/claude-code/hook.
+        for connector, route in (
+            ("claudecode", "/api/v1/claude-code/hook"),
+            ("codex", "/api/v1/codex/hook"),
+            ("cursor", "/api/v1/cursor/hook"),
+        ):
+            with self.subTest(connector=connector):
+                with patch("defenseclaw.commands.cmd_setup.click.echo") as echo:
+                    _print_connector_observability_banner(connector)
+                rendered = "\n".join(str(call.args[0]) for call in echo.call_args_list if call.args)
+                self.assertIn(f"→ {route}", rendered)
+
     def test_claude_aliases_resolve_to_claudecode(self) -> None:
         compat = resolve_connector_contract("claude-code", "Claude Code 2.1.154")
         self.assertEqual(compat.status, STATUS_KNOWN)

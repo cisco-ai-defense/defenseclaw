@@ -94,10 +94,23 @@ func (e *Env) validateConfig(raw []byte) (*validatedConfig, error) {
 func (e *Env) validateConfigSource(raw []byte, source string) (*validatedConfig, error) {
 	validated, err := e.checkConfig(raw)
 	if err != nil {
+		if plain, ok := e.plainConfigProblem(err, source, raw); ok {
+			return nil, &plainConfigError{msg: plain, err: err}
+		}
 		return nil, e.explainConfigError(err, source)
 	}
 	return validated, nil
 }
+
+// plainConfigError is a config problem in plain words; it keeps the
+// diagnostic for errors.As.
+type plainConfigError struct {
+	msg string
+	err error
+}
+
+func (e *plainConfigError) Error() string { return e.msg }
+func (e *plainConfigError) Unwrap() error { return e.err }
 
 // explainConfigError rewrites a config error for the managed host: it names
 // the administrator's file, and a config_version problem says how to fix the
@@ -236,7 +249,7 @@ func (e *Env) checkRulePackDirs(cfg *config.Config) error {
 	if err != nil {
 		return fmt.Errorf("embedded vendor policies: %w", err)
 	}
-	for _, label := range sortedKeys(dirs) {
+	for _, label := range rulePackCheckOrder(dirs) {
 		dir := strings.TrimSpace(dirs[label])
 		if dir == "" {
 			continue
@@ -252,7 +265,11 @@ func (e *Env) checkRulePackDirs(cfg *config.Config) error {
 			continue
 		}
 		if info, err := os.Stat(e.P(clean)); err != nil || !info.IsDir() {
-			return fmt.Errorf("config %s %q does not exist; install the rule pack first or use %s", label, dir, filepath.Join(e.Layout.VendorPolicyDir, "guardrail", "default"))
+			// The shipped packs exist under the vendor folder only once a
+			// deployment is installed, so a first install cannot copy from
+			// there (GAP-1429): the source release has the same packs.
+			shipped := filepath.Join(e.Layout.VendorPolicyDir, "guardrail", "default")
+			return fmt.Errorf("config %s %q does not exist; create the pack there before you apply the config, starting from a copy of policies/guardrail/default in the DefenseClaw source release (installed hosts also have it at %s), or set it to %s, which the deployment installs", label, dir, shipped, shipped)
 		}
 	}
 	return nil
@@ -264,7 +281,7 @@ func (e *Env) checkRulePackDirs(cfg *config.Config) error {
 // failed only when the gateway started; an unset rule_pack_dir resolves to
 // the same <policy_dir>/guardrail/default folder, so the rollback failed too.
 func (e *Env) checkRulePacksReadable(v *validatedConfig, account Account) error {
-	for _, label := range sortedKeys(v.RulePacks) {
+	for _, label := range rulePackCheckOrder(v.RulePacks) {
 		dir := v.RulePacks[label]
 		if dir == e.Layout.VendorPolicyDir || strings.HasPrefix(dir, e.Layout.VendorPolicyDir+"/") {
 			continue
@@ -338,6 +355,32 @@ func accountMayAccess(uid, gid int, mode os.FileMode, account Account, need os.F
 		perm >>= 3
 	}
 	return perm&need == need
+}
+
+// rulePackCheckOrder orders the rule-pack settings for a check:
+// guardrail.rule_pack_dir first, then each connector setting whose pack
+// differs from it. A connector that only inherits the global pack is not
+// checked again, so a refusal names the key the administrator wrote: it
+// named guardrail.connectors.amp.rule_pack_dir, which sorts first, for a
+// config that set only guardrail.rule_pack_dir (GAP-1193).
+func rulePackCheckOrder(dirs map[string]string) []string {
+	const global = "guardrail.rule_pack_dir"
+	globalDir, hasGlobal := dirs[global]
+	globalDir = strings.TrimSpace(globalDir)
+	order := []string{}
+	if hasGlobal {
+		order = append(order, global)
+	}
+	for _, label := range sortedKeys(dirs) {
+		if label == global {
+			continue
+		}
+		if dir := strings.TrimSpace(dirs[label]); hasGlobal && globalDir != "" && filepath.Clean(dir) == filepath.Clean(globalDir) {
+			continue
+		}
+		order = append(order, label)
+	}
+	return order
 }
 
 // effectiveRulePackDirs maps each rule-pack setting of cfg to the pack the

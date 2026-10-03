@@ -91,29 +91,35 @@ func (a *APIServer) importDecodedOTLPRequestV8(
 	}
 	defer batch.Close()
 
+	addPrimary := func(leaf otlpDecodedLeaf, disposition otlpInboundPrimaryDisposition) error {
+		if disposition == otlpInboundInvalidRecord {
+			logInvalidInboundLeafV8(leaf, authenticatedSource)
+		}
+		return accounting.addPrimary(disposition)
+	}
 	_, walkErr := walkDecodedOTLPLeaves(message, signal, func(leaf otlpDecodedLeaf) error {
 		classification, classifyErr := classifier.classify(leaf, authenticatedSource)
 		if classifyErr != nil {
-			return accounting.addPrimary(otlpInboundInvalidRecord)
+			return addPrimary(leaf, otlpInboundInvalidRecord)
 		}
 		if disposition, terminal := inboundTerminalDisposition(classifier, leaf, classification); terminal {
-			return accounting.addPrimary(disposition)
+			return addPrimary(leaf, disposition)
 		}
 		correlated, correlationErr := a.correlateNativeOTLPLeafV8(
 			ctx, leaf, classification.match, authenticatedSource, receipt,
 		)
 		if correlationErr != nil {
 			if errors.Is(correlationErr, errNativeOTLPCorrelationInputV8) {
-				return accounting.addPrimary(otlpInboundInvalidMappedField)
+				return addPrimary(leaf, otlpInboundInvalidMappedField)
 			}
 			// Correlation state is part of local acceptance in v8. Never hand a
 			// leaf to the runtime/provider after the occurrence transaction has
 			// failed; account the leaf through the existing bounded local failure
 			// disposition so batch acknowledgement remains mathematically exact.
-			return accounting.addPrimary(otlpInboundLocalPersistenceFailed)
+			return addPrimary(leaf, otlpInboundLocalPersistenceFailed)
 		}
 		if correlated.suppressEmission {
-			return accounting.addPrimary(otlpInboundExactReplaySuppressed)
+			return addPrimary(leaf, otlpInboundExactReplaySuppressed)
 		}
 		leafResult := a.importClassifiedOTLPLeafV8(
 			correlated.ctx, batch, leaf, classification.match, classifier.catalog.WireContract(),
@@ -121,7 +127,7 @@ func (a *APIServer) importDecodedOTLPRequestV8(
 		)
 		if nativeOTLPLeafCanarySucceeded(leafResult) {
 			if finalizeErr := a.finalizeNativeOTLPCustodyV8(correlated.ctx, correlated); finalizeErr != nil {
-				return accounting.addPrimary(otlpInboundLocalPersistenceFailed)
+				return addPrimary(leaf, otlpInboundLocalPersistenceFailed)
 			}
 		}
 		for _, derivative := range leafResult.derivatives {
@@ -169,7 +175,7 @@ func (a *APIServer) importDecodedOTLPRequestV8(
 		if err := accounting.addUnknownFieldsDropped(unknownDropped); err != nil {
 			return err
 		}
-		return accounting.addPrimary(primaryDispositionForInboundLeaf(leafResult))
+		return addPrimary(leaf, primaryDispositionForInboundLeaf(leafResult))
 	})
 	if walkErr != nil || !accounting.valid() {
 		return accounting, errOTLPInboundMappingV8
@@ -338,6 +344,7 @@ func inboundCorrelationWithSnapshotV8(
 // record without that identity remains un-attributed rather than receiving a
 // guessed root agent.
 func (a *APIServer) enrichInboundWithHookLifecycleV8(
+	ctx context.Context,
 	leaf otlpDecodedLeaf,
 	target observability.InboundTarget,
 	authenticatedSource string,
@@ -356,19 +363,26 @@ func (a *APIServer) enrichInboundWithHookLifecycleV8(
 	if !found {
 		return fields, false, nil
 	}
-	mergeCorrelation := func(current *string, source string) bool {
+	// An agent or turn the native rail only inferred from the durable prompt
+	// cursor is not a sender report. The cursor carries the correlation
+	// ledger's agent, while the live hook snapshot carries the telemetry agent
+	// every hook record of this conversation uses, so the two differ by design.
+	// The exact conversation join makes the snapshot the authority: take it
+	// instead of dropping the record as invalid_mapped_field (GAP-1331).
+	derived := nativeOTLPCursorDerivedTargetsV8(ctx, authenticatedSource)
+	mergeCorrelation := func(current *string, source string, target connector.CorrelationTarget) bool {
 		if source == "" {
 			return true
 		}
-		if *current != "" && *current != source {
+		if *current != "" && *current != source && !derived[target] {
 			return false
 		}
 		*current = source
 		return true
 	}
-	if !mergeCorrelation(&correlation.SessionID, conversationID) ||
-		!mergeCorrelation(&correlation.AgentID, meta.AgentID) ||
-		!mergeCorrelation(&correlation.TurnID, meta.TurnID) {
+	if !mergeCorrelation(&correlation.SessionID, conversationID, connector.CorrelationTargetSession) ||
+		!mergeCorrelation(&correlation.AgentID, meta.AgentID, connector.CorrelationTargetAgent) ||
+		!mergeCorrelation(&correlation.TurnID, meta.TurnID, connector.CorrelationTargetTurn) {
 		return nil, false, errOTLPInboundMappingV8
 	}
 	if selected == nil {
@@ -1009,7 +1023,7 @@ func (a *APIServer) mapInboundLogV8(
 		}
 	}
 	fields, _, err = a.enrichInboundWithHookLifecycleV8(
-		leaf, target, authenticatedSource, &input.Correlation, fields, selected,
+		ctx, leaf, target, authenticatedSource, &input.Correlation, fields, selected,
 	)
 	if err != nil {
 		return observability.InboundImportedLogInput{}, err

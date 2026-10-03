@@ -18,6 +18,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
@@ -32,6 +33,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -47,7 +49,7 @@ import (
 
 const (
 	defaultStopTimeout               = 10 * time.Second
-	defaultStartReadinessTimeout     = 60 * time.Second
+	defaultStartReadinessTimeout     = platformStartReadinessTimeout
 	defaultReadinessPollInterval     = 100 * time.Millisecond
 	defaultReadinessHTTPTimeout      = time.Second
 	gracefulShutdownHTTPTimeout      = 3 * time.Second
@@ -196,6 +198,12 @@ func (fingerprints *rotationHookTokenFingerprints) UnmarshalJSON(data []byte) er
 
 var errGatewayIdentityMismatch = errors.New("gateway identity mismatch")
 
+// errManagedGatewayOffConfiguredPort: this account's gateway runs but does not
+// listen on the configured API port, because the port changed since it
+// started (setup gateway --api-port). Restart stops it and starts it on the
+// new port (GAP-1573); start says to restart.
+var errManagedGatewayOffConfiguredPort = errors.New("this account's gateway does not listen on the configured API port")
+
 func init() {
 	// Override PersistentPreRunE to skip config/audit loading for daemon management commands
 	startCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error { return nil }
@@ -247,6 +255,9 @@ func runStart(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("hook cold start skipped: %w", err)
 		}
 		liftHookResourceLimits()
+		restoreGatewayLoginPath(dataDir)
+	} else {
+		recordGatewayLoginPath(dataDir)
 	}
 	lockWait := gatewayStartLockWait
 	if coldStart {
@@ -300,6 +311,9 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 	if rotationTransaction && cfgLoadErr != nil {
 		return fmt.Errorf("rotation start requires valid configuration: %w", cfgLoadErr)
 	}
+	if err := daemonConfigLoadError("start", cfgLoadErr); err != nil {
+		return err
+	}
 	if rotationTransaction {
 		if err := verifyRotationConfigState(cfg, expectedConnectorState); err != nil {
 			return fmt.Errorf("rotation start configuration does not match gateway A: %w", err)
@@ -324,24 +338,44 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 		if note := otherGatewayBinaryNote(d.RecordedExecutable()); note != "" {
 			fmt.Println(note)
 		}
+		if _, healthErr := fetchSidecarHealth(client, sidecarHealthURL(cfg)); healthErr != nil {
+			// GAP-1342: a hung gateway; status and start pointed at each other.
+			fmt.Println("It does not answer /health. If it stays that way, restart it with: defenseclaw-gateway restart")
+			return nil
+		}
 		fmt.Println("Use 'defenseclaw-gateway status' to check health")
 		return nil
+	}
+	if err := gatewayDiskFullError("start", config.DefaultDataPath()); err != nil {
+		return err
 	}
 	if !rotationTransaction {
 		if problem := foreignGatewayListener(cfg); problem != "" {
 			return fmt.Errorf("cannot start the gateway: %s. %s", problem, foreignGatewayListenerFix(cfg))
 		}
 	}
+	if !coldStart {
+		upgradeAuditStoreBeforeStart(cfg, os.Stdout, os.Stderr)
+	}
+	claimGatewayAPIPort(cfg)
 
 	fmt.Print("Starting gateway sidecar daemon... ")
 
 	// Pass through relevant flags to the daemon process
 	args := collectDaemonArgs(cmd)
+	// One printer for the PID registration wait and the readiness wait, so
+	// a slow start reports progress from the first 30 s on (GAP-1858).
+	var progress *startProgressPrinter
+	if !coldStart && !rotationTransaction {
+		progress = newStartProgressPrinter()
+		d.SetStartProgress(progress.report)
+	}
 	startAttemptedAt := time.Now()
+	logOffset := gatewayLogSize(d.LogFile())
 	pid, err = d.Start(args)
 	if err != nil {
 		fmt.Println(Style("FAILED", "fg=red", "bold"))
-		return fmt.Errorf("start daemon: %w", err)
+		return fmt.Errorf("start daemon: %w%s", err, gatewayStartFailureDiskNote(config.DefaultDataPath()))
 	}
 
 	cfg, cfgErr = loadDaemonConfig(cmd)
@@ -375,6 +409,9 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 	readinessTimeout := defaultStartReadinessTimeout
 	if coldStart {
 		readinessTimeout = hookColdStartReadinessTimeout
+	} else if progress != nil {
+		requirements.reportProgress = progress.report
+		requirements.keepSlowStart = true
 	}
 	snap, _, err := waitForStartedDaemon(
 		d,
@@ -385,9 +422,17 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 		defaultReadinessPollInterval,
 		requirements,
 	)
+	if errors.Is(err, errGatewayStillStarting) {
+		return reportGatewayStillStarting(err, pid, d.LogFile(), cfg, cfgErr)
+	}
 	if err != nil {
 		fmt.Println(Style("FAILED", "fg=red", "bold"))
-		return fmt.Errorf("start daemon readiness: %w (check %s for errors)", err, d.LogFile())
+		err = gatewayExitedBeforeReadinessError(err, d.LogFile(), logOffset)
+		if !rotationTransaction {
+			err = explainForeignListenerAtReadiness(cfg, err)
+		}
+		return fmt.Errorf("start daemon readiness: %w (check %s for errors)%s", err, d.LogFile(),
+			gatewayStartFailureDiskNote(config.DefaultDataPath()))
 	}
 	clearGatewayColdStartState(config.DefaultDataPath())
 
@@ -395,6 +440,7 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 	if admissionRefused {
 		fmt.Printf("%s (PID %d)\n", Style("DEGRADED", "fg=yellow", "bold"), pid)
 		fmt.Printf("  Health: %s\n", summarizeHealthSnapshot(snap))
+		printConnectorsNotStarted(snap)
 	} else {
 		printDaemonStartResult(pid, snap)
 	}
@@ -667,6 +713,7 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	defer release()
+	recordGatewayLoginPath(config.DefaultDataPath())
 	d := daemon.New(config.DefaultDataPath())
 	// Restart may stop an otherwise healthy managed gateway. Validate every
 	// process-identity artifact before that first side effect so malformed or
@@ -674,11 +721,18 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 	if err := d.ValidateStartIdentityFiles(); err != nil {
 		return err
 	}
-	cfg, _ := loadDaemonConfig(cmd)
+	cfg, cfgLoadErr := loadDaemonConfig(cmd)
+	// Refuse before stopping anything: the new gateway could not start.
+	if err := daemonConfigLoadError("restart", cfgLoadErr); err != nil {
+		return err
+	}
+	if err := gatewayDiskFullError("restart", config.DefaultDataPath()); err != nil {
+		return err
+	}
 	var cfgErr error
 	client := &http.Client{Timeout: defaultReadinessHTTPTimeout}
 
-	running, pid, err := inspectConfiguredListener(d, cfg, client)
+	running, pid, err := inspectRestartTarget(d, cfg, client)
 	if err != nil {
 		return err
 	}
@@ -699,21 +753,28 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 	if problem := foreignGatewayListener(cfg); problem != "" {
 		return fmt.Errorf("cannot restart the gateway: %s. %s", problem, foreignGatewayListenerFix(cfg))
 	}
+	upgradeAuditStoreBeforeStart(cfg, os.Stdout, os.Stderr)
+	claimGatewayAPIPort(cfg)
 
 	fmt.Print("Starting gateway sidecar daemon... ")
 
 	args := collectDaemonArgs(cmd)
+	progress := newStartProgressPrinter()
+	d.SetStartProgress(progress.report)
 	startAttemptedAt := time.Now()
+	logOffset := gatewayLogSize(d.LogFile())
 	pid, err = d.Start(args)
 	if err != nil {
 		fmt.Println(Style("FAILED", "fg=red", "bold"))
-		return fmt.Errorf("start daemon: %w", err)
+		return fmt.Errorf("start daemon: %w%s", err, gatewayStartFailureDiskNote(config.DefaultDataPath()))
 	}
 
 	cfg, cfgErr = loadDaemonConfig(cmd)
 	requirements := daemonReadinessRequirementsFromConfig(cfg, startAttemptedAt)
 	requirements.expectedPID = pid
 	requirements.token = func() string { return daemonGatewayToken(cfg) }
+	requirements.reportProgress = progress.report
+	requirements.keepSlowStart = true
 	snap, _, err := waitForStartedDaemon(
 		d,
 		pid,
@@ -723,9 +784,15 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 		defaultReadinessPollInterval,
 		requirements,
 	)
+	if errors.Is(err, errGatewayStillStarting) {
+		return reportGatewayStillStarting(err, pid, d.LogFile(), cfg, cfgErr)
+	}
 	if err != nil {
 		fmt.Println(Style("FAILED", "fg=red", "bold"))
-		return fmt.Errorf("restart daemon readiness: %w (check %s for errors)", err, d.LogFile())
+		err = gatewayExitedBeforeReadinessError(err, d.LogFile(), logOffset)
+		err = explainForeignListenerAtReadiness(cfg, err)
+		return fmt.Errorf("restart daemon readiness: %w (check %s for errors)%s", err, d.LogFile(),
+			gatewayStartFailureDiskNote(config.DefaultDataPath()))
 	}
 	clearGatewayColdStartState(config.DefaultDataPath())
 
@@ -875,11 +942,237 @@ type daemonReadinessRequirements struct {
 	listenerPort                int
 	listenerOwner               func(string, int) (int, error)
 	requireOwnership            bool
+	// portHolder and portAnswers name the API port's listener on Linux and
+	// macOS, where listenerOwner cannot, so readiness sends the gateway
+	// token only to the launched gateway (GAP-1967). tokenHost is the host
+	// the token goes to.
+	portHolder  func(string, int) (daemon.PortHolder, error)
+	portAnswers func(string) bool
+	tokenHost   string
 
 	// allowHookContractAdmissionRefusal lets an ordinary start accept a
 	// guardrail that stopped only because the hook-contract admission gate
 	// refused upstream agent drift. Every other subsystem must still be ready.
 	allowHookContractAdmissionRefusal bool
+
+	// reportProgress, when set, is told every startReadinessReportInterval
+	// what a slow start is still waiting for, and lets each connector setup
+	// step extend the readiness timeout up to startReadinessProgressCap.
+	reportProgress func(elapsed time.Duration, step string)
+
+	// keepSlowStart leaves the launched gateway running when an interactive
+	// start or restart reaches the readiness deadline while that process is
+	// still alive (GAP-2022). Stopping it left no gateway and no watchdog on
+	// a loaded host where it would have answered moments later.
+	keepSlowStart bool
+}
+
+const startReadinessReportInterval = 30 * time.Second
+
+// readinessProgressFactor is startReadinessProgressFactor; tests change it.
+var readinessProgressFactor time.Duration = startReadinessProgressFactor
+
+func startReadinessProgressCap(timeout time.Duration) time.Duration {
+	return readinessProgressFactor * timeout
+}
+
+// connectorSetupStep describes the connector the gateway is setting up, from
+// the guardrail health it publishes before each one, or "" when it reports
+// no setup step.
+func connectorSetupStep(guardrail gateway.SubsystemHealth) string {
+	if guardrail.State != gateway.StateStarting {
+		return ""
+	}
+	name, _ := guardrail.Details["setup_connector"].(string)
+	step, _ := guardrail.Details["setup_step"].(float64)
+	total, _ := guardrail.Details["setup_total"].(float64)
+	if strings.TrimSpace(name) == "" || step < 1 || total < step {
+		return ""
+	}
+	text := fmt.Sprintf("setting up connector %s (%d of %d)", name, int(step), int(total))
+	// A retried slow agent probe is a new step, so readiness keeps waiting
+	// (GAP-1850).
+	if attempt, _ := guardrail.Details["setup_attempt"].(float64); attempt > 1 {
+		text += fmt.Sprintf(", attempt %d", int(attempt))
+	}
+	return text
+}
+
+// startProgressPrinter prints a slow start's progress under the
+// "Starting gateway sidecar daemon... " line. With started set it counts
+// from there, so the PID registration and readiness waits share one clock.
+type startProgressPrinter struct {
+	printed bool
+	started time.Time
+}
+
+func newStartProgressPrinter() *startProgressPrinter {
+	return &startProgressPrinter{started: time.Now()}
+}
+
+func (p *startProgressPrinter) report(elapsed time.Duration, step string) {
+	if !p.started.IsZero() {
+		elapsed = time.Since(p.started)
+	}
+	if !p.printed {
+		fmt.Println()
+		p.printed = true
+	}
+	fmt.Printf("  still starting after %s: %s\n", elapsed.Round(time.Second), step)
+}
+
+// missingObservabilitySecretError explains a configuration that does not load
+// because an observability destination's secret is unavailable. The gateway
+// refuses such a configuration, and the default configuration loadDaemonConfig
+// falls back to would point start at the default port and blame its holder.
+func missingObservabilitySecretError(verb string, err error) error {
+	var secretErr *config.V8SecretReferenceError
+	if !errors.As(err, &secretErr) {
+		return nil
+	}
+	if secretErr.Credential {
+		return fmt.Errorf("cannot %s the gateway: %w", verb, secretErr)
+	}
+	return fmt.Errorf(
+		"cannot %s the gateway: observability destination %q needs %s, which is not set. "+
+			"Set it with: defenseclaw keys set %s (or remove that destination from %s), then run: defenseclaw-gateway %s",
+		verb, secretErr.Destination, secretErr.Reference, secretErr.Reference, config.ConfigPath(), verb,
+	)
+}
+
+// daemonConfigLoadError refuses start and restart when config.yaml does not
+// load. The gateway child would exit on the same error, and the default
+// configuration loadDaemonConfig falls back to points at the default port, so
+// continuing used to stop a healthy gateway and then blame that port's holder
+// (GAP-1174).
+func daemonConfigLoadError(verb string, err error) error {
+	if err == nil {
+		return nil
+	}
+	if secretErr := missingObservabilitySecretError(verb, err); secretErr != nil {
+		return secretErr
+	}
+	untouched := ""
+	next := verb
+	if verb == "restart" {
+		untouched = " Nothing was stopped."
+	}
+	// A running gateway keeps enforcing the config it started with; say so
+	// rather than read as "protection is off" (GAP-1634).
+	running, pid := daemon.New(config.DefaultDataPath()).IsRunning()
+	if running {
+		untouched += fmt.Sprintf(" The gateway (PID %d) is still running with the config it started with.", pid)
+	}
+	if message, empty := emptyConfigFileMessage(config.ConfigPath()); empty {
+		return fmt.Errorf("cannot %s the gateway: %s%s", verb, message, untouched)
+	}
+	if running && verb == "start" {
+		untouched += " Nothing was changed."
+		next = "restart"
+	}
+	if problem, ok := configSchemaProblem(err); ok {
+		return fmt.Errorf(
+			"cannot %s the gateway: %s.%s Fix the file (check it with: defenseclaw config validate), then run: defenseclaw-gateway %s",
+			verb, problem, untouched, next,
+		)
+	}
+	return fmt.Errorf(
+		"cannot %s the gateway: %s does not load: %w.%s Fix the file (check it with: defenseclaw config validate), then run: defenseclaw-gateway %s",
+		verb, config.ConfigPath(), err, untouched, next,
+	)
+}
+
+// emptyConfigProbeBytes matches the Python CLI's _EMPTY_CONFIG_PROBE_BYTES.
+const emptyConfigProbeBytes = 64 << 10
+
+// emptyConfigFileMessage reports a config.yaml that exists but holds no
+// settings (0 bytes, blank or comments only) in the Python CLI's words
+// (GAP-1633). The YAML loader calls it a root that must be a mapping and told
+// the user to write config_version by hand (GAP-1785).
+func emptyConfigFileMessage(path string) (string, bool) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", false
+	}
+	defer file.Close()
+	raw, err := io.ReadAll(io.LimitReader(file, emptyConfigProbeBytes+1))
+	if err != nil || len(raw) > emptyConfigProbeBytes || !onlyYAMLComments(raw) {
+		return "", false
+	}
+	return fmt.Sprintf(
+		"%s is empty: it holds no settings (as after a crash or a full disk). "+
+			"It is not an older configuration, and nothing was changed. Restore your copy of config.yaml%s, "+
+			"or remove the empty file and run 'defenseclaw init'.",
+		path, previousConfigHint(filepath.Dir(path)),
+	), true
+}
+
+// newestConfigBackup returns the newest nonempty backups/config.yaml.* copy
+// DefenseClaw wrote, as the Python CLI's _newest_config_backup (GAP-2206).
+func newestConfigBackup(home string) (string, time.Time, bool) {
+	dir := filepath.Join(home, "backups")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", time.Time{}, false
+	}
+	var path string
+	var newest time.Time
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), "config.yaml.") || !entry.Type().IsRegular() {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil || info.Size() == 0 {
+			continue
+		}
+		if path == "" || info.ModTime().After(newest) {
+			path, newest = filepath.Join(dir, entry.Name()), info.ModTime()
+		}
+	}
+	return path, newest, path != ""
+}
+
+// previousConfigHint names the newest copy of the config DefenseClaw kept,
+// with its date, in the Python CLI's words (cli/defenseclaw/config.py): the
+// newest backups/config.yaml.* copy (GAP-2206) or the config the last version
+// upgrade kept. previous/ is refreshed only by an upgrade to another version,
+// so that copy can be much older than the config just lost (GAP-1786, GAP-1876).
+func previousConfigHint(home string) string {
+	const layout = "2006-01-02 15:04 UTC"
+	previous := filepath.Join(home, "previous")
+	kept := filepath.Join(previous, "data", "config.yaml")
+	info, err := os.Stat(kept)
+	if backup, when, ok := newestConfigBackup(home); ok && (err != nil || !when.Before(info.ModTime())) {
+		hint := fmt.Sprintf(" (the newest backup is %s, from %s", backup, when.UTC().Format(layout))
+		if err == nil {
+			hint += fmt.Sprintf("; the last version upgrade kept an older copy from %s in %s",
+				info.ModTime().UTC().Format(layout), kept)
+		}
+		return hint + ")"
+	}
+	if err != nil {
+		return ""
+	}
+	label := "the config"
+	if file, err := os.Open(filepath.Join(previous, "VERSION")); err == nil {
+		raw, _ := io.ReadAll(io.LimitReader(file, 64))
+		_ = file.Close()
+		if version := strings.TrimSpace(string(raw)); version != "" {
+			label = "the DefenseClaw " + version + " config"
+		}
+	}
+	return fmt.Sprintf(" (the last version upgrade kept %s from %s in %s; it lacks every change made since then)",
+		label, info.ModTime().UTC().Format("2006-01-02 15:04 UTC"), kept)
+}
+
+func onlyYAMLComments(raw []byte) bool {
+	for _, line := range bytes.Split(raw, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if len(line) > 0 && line[0] != '#' {
+			return false
+		}
+	}
+	return true
 }
 
 func loadDaemonConfig(_ *cobra.Command) (*config.Config, error) {
@@ -990,6 +1283,18 @@ func daemonDotenvValue(env map[string]string, key string) string {
 	return ""
 }
 
+// inspectRestartTarget is inspectConfiguredListener for restart. When the API
+// port changed while this account's gateway ran on the old one, restart stops
+// that gateway (stop verifies its own PID record) and starts it on the new
+// port, instead of failing and leaving it on the old port (GAP-1573).
+func inspectRestartTarget(d daemonState, cfg *config.Config, client *http.Client) (bool, int, error) {
+	running, pid, err := inspectConfiguredListener(d, cfg, client)
+	if errors.Is(err, errManagedGatewayOffConfiguredPort) {
+		return true, pid, nil
+	}
+	return running, pid, err
+}
+
 func inspectConfiguredListener(d daemonState, cfg *config.Config, client *http.Client) (bool, int, error) {
 	running, managedPID := d.IsRunning()
 	if !requireStartupListenerOwnership {
@@ -998,7 +1303,11 @@ func inspectConfiguredListener(d daemonState, cfg *config.Config, client *http.C
 	ownerPID, err := startupListenerOwner(gatewayBindHost(cfg), cfg.Gateway.APIPort)
 	if errors.Is(err, daemon.ErrNoListener) {
 		if running {
-			return false, 0, fmt.Errorf("configured gateway port has no listener for managed PID %d", managedPID)
+			return false, managedPID, fmt.Errorf(
+				"%w: the gateway (PID %d) is not listening on port %d, probably because the port changed after it started; "+
+					"apply the change with: defenseclaw-gateway restart",
+				errManagedGatewayOffConfiguredPort, managedPID, cfg.Gateway.APIPort,
+			)
 		}
 		return false, 0, nil
 	}
@@ -1006,7 +1315,14 @@ func inspectConfiguredListener(d daemonState, cfg *config.Config, client *http.C
 		return false, 0, fmt.Errorf("inspect configured gateway listener: %w", err)
 	}
 	if !running || managedPID != ownerPID {
-		return false, 0, fmt.Errorf("configured gateway port %d is occupied by foreign process PID %d (often another account's gateway); choose a free port with: defenseclaw setup gateway --api-port <free port> --non-interactive", cfg.Gateway.APIPort, ownerPID)
+		// GAP-1345: name the holder's program (and account when Windows shows
+		// it) and a port that is free right now, as Linux and macOS do.
+		holder := fmt.Sprintf("PID %d", ownerPID)
+		if label := listenerProcessLabel(ownerPID); label != "" {
+			holder += " (" + label + ")"
+		}
+		return false, 0, fmt.Errorf("configured gateway port %d is held by %s, not by this account's gateway. %s",
+			cfg.Gateway.APIPort, holder, foreignGatewayListenerFix(cfg))
 	}
 	authenticatedMigration := false
 	if identity, ok := d.(managedProcessIdentity); ok && !identity.HasManagedProcessIdentity(managedPID) {
@@ -1026,14 +1342,55 @@ func inspectConfiguredListener(d daemonState, cfg *config.Config, client *http.C
 			)
 		}
 	}
-	status, err := fetchSidecarStatus(client, sidecarStatusURL(cfg), daemonGatewayToken(cfg))
+	status, err := fetchListenerIdentityStatus(client, sidecarStatusURL(cfg), daemonGatewayToken(cfg))
 	if err != nil {
+		if isHTTPTimeout(err) {
+			// GAP-1668: a busy host's gateway answered after the 1 s readiness
+			// poll timeout, and the slow answer was called an auth failure.
+			return false, 0, fmt.Errorf(
+				"gateway PID %d did not answer its status check within %s (%d tries); the host may be busy: retry, or check it with: defenseclaw-gateway status",
+				managedPID, listenerIdentityHTTPTimeout, listenerIdentityAttempts,
+			)
+		}
 		return false, 0, fmt.Errorf("managed gateway listener authentication failed: %w", err)
 	}
 	if err := verifyGatewayRuntimeIdentity(status, managedPID, cfg.DataDir); err != nil {
 		return false, 0, err
 	}
 	return true, managedPID, nil
+}
+
+const (
+	listenerIdentityHTTPTimeout = 10 * time.Second
+	listenerIdentityAttempts    = 3
+)
+
+// fetchListenerIdentityStatus reads a running gateway's authenticated status
+// before start or restart act on it. It allows a loaded host's gateway
+// longer than a readiness poll and retries only timeouts.
+func fetchListenerIdentityStatus(client *http.Client, addr, token string) (gatewayStatusEnvelope, error) {
+	probe := &http.Client{Timeout: listenerIdentityHTTPTimeout}
+	if client != nil {
+		copied := *client
+		if copied.Timeout > 0 && copied.Timeout < listenerIdentityHTTPTimeout {
+			copied.Timeout = listenerIdentityHTTPTimeout
+		}
+		probe = &copied
+	}
+	var status gatewayStatusEnvelope
+	var err error
+	for attempt := 0; attempt < listenerIdentityAttempts; attempt++ {
+		status, err = fetchSidecarStatus(probe, addr, token)
+		if err == nil || !isHTTPTimeout(err) {
+			return status, err
+		}
+	}
+	return status, err
+}
+
+func isHTTPTimeout(err error) bool {
+	var netErr net.Error
+	return errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout())
 }
 
 func waitForConfiguredPortFree(cfg *config.Config, stoppedPID int, timeout, pollInterval time.Duration) error {
@@ -1058,6 +1415,63 @@ func waitForConfiguredPortFree(cfg *config.Config, stoppedPID int, timeout, poll
 		}
 		time.Sleep(pollInterval)
 	}
+}
+
+var (
+	errReadinessListenerInspection = errors.New("inspect gateway listener ownership")
+	errReadinessListenerNotUp      = errors.New("the gateway API listener is not up yet")
+)
+
+// readinessListenerIsLaunchedGateway returns nil when the API port's
+// listener is the launched gateway, so readiness may send it the gateway
+// token (GAP-1967). It returns errReadinessListenerNotUp while no listener
+// this account can see is up, and an errGatewayIdentityMismatch error when
+// another process holds the port. Platforms that cannot name a listener's
+// process keep the authenticated status check alone.
+func readinessListenerIsLaunchedGateway(r daemonReadinessRequirements) error {
+	if r.requireOwnership {
+		ownerPID, err := r.listenerOwner(r.listenerHost, r.listenerPort)
+		switch {
+		case errors.Is(err, daemon.ErrNoListener):
+			return errReadinessListenerNotUp
+		case err != nil:
+			return fmt.Errorf("%w: %w", errReadinessListenerInspection, err)
+		case ownerPID != r.expectedPID:
+			return fmt.Errorf("%w: configured listener PID %d does not match launched PID %d; the gateway token was not sent",
+				errGatewayIdentityMismatch, ownerPID, r.expectedPID)
+		}
+		return nil
+	}
+	if r.portHolder == nil {
+		return nil
+	}
+	addr := net.JoinHostPort(r.tokenHost, strconv.Itoa(r.listenerPort))
+	foreign := fmt.Errorf("%w: another process holds %s, not the launched gateway (PID %d); the gateway token was not sent",
+		errGatewayIdentityMismatch, addr, r.expectedPID)
+	for attempt := 0; attempt < 2; attempt++ {
+		holder, err := r.portHolder(r.tokenHost, r.listenerPort)
+		switch {
+		case errors.Is(err, daemon.ErrListenerInspectionUnavailable):
+			return nil
+		case err == nil && holder.UID >= 0 && holder.UID != os.Getuid():
+			return foreign
+		case err == nil && holder.PID > 0 && holder.PID != r.expectedPID:
+			return foreign
+		case err == nil && holder.PID == r.expectedPID:
+			return nil
+		case err == nil:
+			// This account's socket whose process is not visible yet.
+			return errReadinessListenerNotUp
+		}
+		// No listener this account can see. lsof on macOS does not list
+		// another account's sockets, so a port that answers belongs to
+		// someone else unless the gateway bound it since the lookup: look
+		// once more before calling it foreign.
+		if r.portAnswers == nil || !r.portAnswers(addr) {
+			return errReadinessListenerNotUp
+		}
+	}
+	return foreign
 }
 
 func fetchSidecarStatus(client *http.Client, addr, token string) (gatewayStatusEnvelope, error) {
@@ -1188,6 +1602,11 @@ func waitForStartedDaemon(d daemonReadinessProcess, pid int, client *http.Client
 	if err == nil {
 		err = fmt.Errorf("gateway did not reach READY before the startup deadline")
 	}
+	if requirements.keepSlowStart && errors.Is(err, errGatewayReadinessDeadline) {
+		if running, currentPID := d.IsRunning(); running && currentPID == pid {
+			return snap, false, readinessError{err, errGatewayStillStarting}
+		}
+	}
 	stopErr := stopAttemptedGatewayStart(d, pid)
 	if stopErr != nil && !errors.Is(stopErr, daemon.ErrNotRunning) {
 		return snap, false, fmt.Errorf("%w; cleanup failed: %v", err, stopErr)
@@ -1213,6 +1632,11 @@ func daemonReadinessRequirementsFromConfig(cfg *config.Config, startedNotBefore 
 		listenerPort:     cfg.Gateway.APIPort,
 		listenerOwner:    startupListenerOwner,
 		requireOwnership: requireStartupListenerOwnership,
+		tokenHost:        gatewayClientHost(cfg),
+	}
+	if !requireStartupListenerOwnership {
+		requirements.portHolder = gatewayPortHolder
+		requirements.portAnswers = gatewayPortAnswers
 	}
 	return requirements
 }
@@ -1670,6 +2094,12 @@ func verifyRotationConnectorOTLPAuthentication(
 			return fmt.Errorf("connector %s scoped OTLP credential is unavailable: %w", name, loadErr)
 		}
 		token = strings.TrimSpace(token)
+		if token == "" && scope == connector.OTLPScopeOpenHands {
+			// GAP-1513: OpenHands exports native OTLP only on macOS. Elsewhere
+			// setup mints no scoped OTLP credential, so there is nothing for
+			// the rotated gateway to converge on.
+			continue
+		}
 		if token == "" {
 			return fmt.Errorf("connector %s scoped OTLP credential is unavailable", name)
 		}
@@ -1679,7 +2109,7 @@ func verifyRotationConnectorOTLPAuthentication(
 		probeURL.RawQuery = ""
 		probeURL.Fragment = ""
 		switch scope {
-		case connector.OTLPScopeCodex, connector.OTLPScopeClaude:
+		case connector.OTLPScopeCodex, connector.OTLPScopeClaude, connector.OTLPScopeOpenHands:
 			probeURL.Path = "/v1/logs"
 		default:
 			return fmt.Errorf("connector %s has no rotation OTLP authentication contract", name)
@@ -1690,7 +2120,8 @@ func verifyRotationConnectorOTLPAuthentication(
 			return fmt.Errorf("connector %s scoped OTLP authentication probe could not be created", name)
 		}
 		req.Header.Set("X-DefenseClaw-Client", "daemon-rotation-convergence")
-		if scope == connector.OTLPScopeCodex || scope == connector.OTLPScopeClaude {
+		if scope == connector.OTLPScopeCodex || scope == connector.OTLPScopeClaude ||
+			scope == connector.OTLPScopeOpenHands {
 			req.Header.Set("Authorization", "Bearer "+token)
 			req.Header.Set("X-DefenseClaw-Source", name)
 		}
@@ -1762,7 +2193,15 @@ func waitForGatewayReadiness(
 	if pollInterval <= 0 {
 		pollInterval = defaultReadinessPollInterval
 	}
-	deadline := time.Now().Add(timeout)
+	startedWaiting := time.Now()
+	deadline := startedWaiting.Add(timeout)
+	// GAP-1556: on a loaded Windows host connector setup alone took longer
+	// than the readiness timeout, so start stopped a gateway that was still
+	// making progress. Each finished setup step gives the gateway another
+	// timeout window, up to the cap; a stalled start still fails on time.
+	progressCap := startedWaiting.Add(startReadinessProgressCap(timeout))
+	lastStep := ""
+	nextReport := startedWaiting.Add(startReadinessReportInterval)
 	var lastSnap gateway.HealthSnapshot
 	var lastProbeErr error
 
@@ -1770,11 +2209,11 @@ func waitForGatewayReadiness(
 		if processRunning != nil && !processRunning() {
 			if lastProbeErr != nil {
 				return lastSnap, false, fmt.Errorf(
-					"gateway process exited before readiness (last health probe: %v)",
-					lastProbeErr,
+					"%w (last health probe: %v)",
+					errGatewayExitedBeforeReadiness, lastProbeErr,
 				)
 			}
-			return lastSnap, false, fmt.Errorf("gateway process exited before readiness")
+			return lastSnap, false, errGatewayExitedBeforeReadiness
 		}
 
 		var snap gateway.HealthSnapshot
@@ -1784,8 +2223,14 @@ func waitForGatewayReadiness(
 			if requirements.token != nil {
 				token = requirements.token()
 			}
+			// The token goes only to the launched gateway's listener:
+			// another account's process can take the port after the start
+			// check, before the gateway binds it (GAP-1967).
 			var status gatewayStatusEnvelope
-			status, err = fetchSidecarStatus(client, healthURL, token)
+			err = readinessListenerIsLaunchedGateway(requirements)
+			if err == nil {
+				status, err = fetchSidecarStatus(client, healthURL, token)
+			}
 			if err == nil {
 				err = verifyGatewayRuntimeIdentity(status, requirements.expectedPID, requirements.expectedDataDir)
 				snap = status.Health
@@ -1795,16 +2240,8 @@ func waitForGatewayReadiness(
 					return snap, false, fmt.Errorf("rotation connector state mismatch: %w", stateErr)
 				}
 			}
-			if err == nil && requirements.requireOwnership {
-				ownerPID, ownerErr := requirements.listenerOwner(requirements.listenerHost, requirements.listenerPort)
-				switch {
-				case errors.Is(ownerErr, daemon.ErrNoListener):
-					err = ownerErr
-				case ownerErr != nil:
-					return lastSnap, false, fmt.Errorf("inspect gateway listener ownership: %w", ownerErr)
-				case ownerPID != requirements.expectedPID:
-					return lastSnap, false, fmt.Errorf("%w: configured listener PID %d does not match launched PID %d", errGatewayIdentityMismatch, ownerPID, requirements.expectedPID)
-				}
+			if errors.Is(err, errReadinessListenerInspection) {
+				return lastSnap, false, err
 			}
 		} else {
 			snap, err = fetchSidecarHealth(client, healthURL)
@@ -1812,6 +2249,17 @@ func waitForGatewayReadiness(
 		if err == nil {
 			lastSnap = snap
 			lastProbeErr = nil
+			if step := connectorSetupStep(snap.Guardrail); step != "" && step != lastStep {
+				lastStep = step
+				// Only an interactive start or restart (it reports progress)
+				// waits longer; hook cold starts and rotation checks do not.
+				if extended := time.Now().Add(timeout); requirements.reportProgress != nil && extended.After(deadline) {
+					deadline = extended
+					if deadline.After(progressCap) {
+						deadline = progressCap
+					}
+				}
+			}
 			ready, readinessErr := gatewaySnapshotReady(snap, requirements)
 			if readinessErr != nil {
 				return snap, false, readinessErr
@@ -1831,17 +2279,40 @@ func waitForGatewayReadiness(
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
 			if lastProbeErr != nil {
-				return lastSnap, false, fmt.Errorf("gateway did not become ready before timeout (last probe: %v)", lastProbeErr)
+				return lastSnap, false, fmt.Errorf("%w (last probe: %v)", errGatewayReadinessDeadline, lastProbeErr)
 			}
 			if lastSnap.Telemetry.State == gateway.StateError &&
 				strings.TrimSpace(lastSnap.Telemetry.LastError) == "" &&
 				telemetryReadinessRetryableSQLiteContention(lastSnap.Telemetry.Details) {
-				detail := telemetryReadinessFailureDetail(lastSnap.Telemetry.Details)
+				detail := "error (" + telemetryReadinessFailureDetail(lastSnap.Telemetry.Details) + ")"
+				if problem := eventHistoryProblem(lastSnap.Telemetry.Details); problem != "" {
+					detail += ": " + problem
+				}
 				return lastSnap, false, fmt.Errorf(
-					"gateway telemetry did not recover before the startup deadline: error (%s)", detail,
+					"gateway telemetry did not recover before the startup deadline: %s", detail,
 				)
 			}
-			return lastSnap, false, fmt.Errorf("gateway remained STARTING through the %s readiness timeout", timeout)
+			if lastStep != "" {
+				return lastSnap, false, readinessError{fmt.Errorf(
+					"gateway remained STARTING through the %s readiness timeout (last step: %s)",
+					time.Since(startedWaiting).Round(time.Second), lastStep,
+				), errGatewayReadinessDeadline}
+			}
+			return lastSnap, false, readinessError{
+				fmt.Errorf("gateway remained STARTING through the %s readiness timeout", timeout),
+				errGatewayReadinessDeadline,
+			}
+		}
+		if requirements.reportProgress != nil && !time.Now().Before(nextReport) {
+			nextReport = time.Now().Add(startReadinessReportInterval)
+			step := lastStep
+			if step == "" {
+				step = "waiting for the gateway to answer"
+				if lastProbeErr == nil && lastSnap.API.State == gateway.StateRunning {
+					step = "waiting for its subsystems"
+				}
+			}
+			requirements.reportProgress(time.Since(startedWaiting), step)
 		}
 		delay := pollInterval
 		if remaining < delay {
@@ -1937,6 +2408,10 @@ func gatewaySnapshotReady(
 			if subsystem.name == "telemetry" {
 				if diagnosis := telemetryReadinessFailureDetail(subsystem.health.Details); diagnosis != "" {
 					detail += " (" + diagnosis + ")"
+				}
+				// GAP-1603: say why in plain words, not only the token.
+				if problem := eventHistoryProblem(subsystem.health.Details); problem != "" {
+					detail += ": " + problem
 				}
 			}
 		}
@@ -2055,8 +2530,24 @@ func telemetryReadinessRetryableSQLiteContention(details map[string]interface{})
 	failure, failureOK := details["event_history_failure"].(string)
 	class, classOK := details["event_history_last_sqlite_class"].(string)
 	primary, primaryOK := details["event_history_last_sqlite_primary_code"].(float64)
-	if !failureOK || failure != "sqlite_write_failed" || !classOK || class != "busy_locked" ||
-		!primaryOK || primary != float64(uint8(primary)) || (primary != 5 && primary != 6) {
+	if _, present := details["event_history_last_sqlite_primary_code"]; !present && class == "deadline" {
+		// Health omits a zero primary code, and a deadline is usually primary
+		// 0, so a missing code means 0 here (GAP-1796).
+		primary, primaryOK = 0, true
+	}
+	if !failureOK || failure != "sqlite_write_failed" || !classOK || !primaryOK ||
+		primary != float64(uint8(primary)) {
+		return false
+	}
+	busyLocked := class == "busy_locked" && (primary == 5 || primary == 6)
+	transientIO := startupRetriesSQLiteIO && class == "io" && primary == 10
+	// A write that ran out of time behind a long hold on a large audit.db
+	// (class deadline, primary 0 or SQLITE_INTERRUPT) also clears after the
+	// writer's next commit (GAP-1519, GAP-1646). A large audit.db is slow on
+	// every OS, not only under a Windows antivirus scan: a macOS start with a
+	// 1.3 GB audit.db failed this way and the next start worked (GAP-1790).
+	transientDeadline := class == "deadline" && (primary == 0 || primary == 9)
+	if !busyLocked && !transientIO && !transientDeadline {
 		return false
 	}
 	generation, generationOK := details["generation"].(float64)
@@ -2067,7 +2558,7 @@ func telemetryReadinessRetryableSQLiteContention(details map[string]interface{})
 	}
 	// Reuse the closed diagnostic projection so a concurrent destination or
 	// retention failure cannot be hidden behind otherwise-retryable contention.
-	want := fmt.Sprintf("generation=%d; event_history=sqlite_write_failed", uint64(generation))
+	want := fmt.Sprintf("generation=%d; event_history=sqlite_write_failed/%s", uint64(generation), class)
 	return telemetryReadinessFailureDetail(details) == want
 }
 
@@ -2100,6 +2591,8 @@ func telemetryReadinessFailureDetail(details map[string]interface{}) string {
 	retentionStates := allowed("", "waiting_for_readiness", "healthy", "degraded", "disabled", "stopped")
 	retentionFailures := allowed("", "run_failed", "scheduler_failed")
 	historyFailures := allowed("", "projection_rejected", "integrity_unsigned", "integrity_signing_failed", "sqlite_write_failed")
+	historyClasses := allowed("busy_locked", "deadline", "full", "io", "readonly_cantopen", "constraint_corrupt",
+		"unavailable", "other")
 	closed := func(values map[string]interface{}, key string, vocabulary map[string]bool) (string, bool) {
 		raw, exists := values[key]
 		if !exists {
@@ -2177,6 +2670,12 @@ func telemetryReadinessFailureDetail(details map[string]interface{}) string {
 		parts = append(parts, "retention="+strings.TrimSuffix(retentionState+"/"+retentionFailure, "/"))
 	}
 	if historyFailure != "" {
+		// The SQLite class tells a slow or locked write from a full or damaged
+		// store; gateway.log does not record it (GAP-1519).
+		if class, _ := details["event_history_last_sqlite_class"].(string); historyFailure == "sqlite_write_failed" &&
+			historyClasses[class] {
+			historyFailure += "/" + class
+		}
 		parts = append(parts, "event_history="+historyFailure)
 	}
 	detail := strings.Join(parts, "; ")
@@ -2222,6 +2721,18 @@ func subsystemMatchesConfiguredState(state gateway.SubsystemState, enabled bool)
 func printDaemonStartResult(pid int, snap gateway.HealthSnapshot) {
 	fmt.Printf("%s (PID %d)\n", Style("OK", "fg=green", "bold"), pid)
 	fmt.Printf("  Health: %s\n", summarizeHealthSnapshot(snap))
+	printConnectorsNotStarted(snap)
+}
+
+// printConnectorsNotStarted names each configured connector whose setup
+// failed during this start. The gateway runs without it, so "OK" alone hid
+// that the connector is not enforced (GAP-1860).
+func printConnectorsNotStarted(snap gateway.HealthSnapshot) {
+	for _, name := range guardrailConnectorsNotStarted(snap.Guardrail.Details) {
+		fmt.Printf("  %s %s (%s) was skipped: its setup failed, so it is not enforced. "+
+			"See gateway.log for the reason, then run: defenseclaw setup %s\n",
+			Style("!", "fg=yellow", "bold"), friendlyConnectorName(name), name, name)
+	}
 }
 
 func summarizeHealthSnapshot(snap gateway.HealthSnapshot) string {

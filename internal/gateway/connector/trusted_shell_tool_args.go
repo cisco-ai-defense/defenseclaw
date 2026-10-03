@@ -65,10 +65,13 @@ var copilotShellArgs = map[string]trustedShellArg{
 //     execute_bash (also --v3): also summary, and cwd, description and
 //     timeout, which v3 sends unset (null).
 //   - Copilot CLI 1.0.8x bash and powershell: copilotShellArgs.
+//   - OpenClaw 2026.3 exec (judged through /api/v1/inspect/tool): workdir;
+//     yieldMs, background, timeout, pty, and OpenClaw's own approval modes
+//     ask and security.
 //
 // Arguments that change where or how the command runs are left for the
 // parser, which does not prove them: Devin's env, shell_flavor and shell_id,
-// and Copilot's shellId. Claude Code's and Codex's shell calls take their
+// Copilot's shellId, and OpenClaw's env, elevated, host and node. Claude Code's and Codex's shell calls take their
 // own hook paths (Codex passes its hooks only the command); OpenHands'
 // terminal, agy's run_command and Hermes' process have their own
 // projections, and OmniGent's sys_os_shell has only the command.
@@ -90,6 +93,11 @@ var trustedShellTools = map[string]map[string]map[string]trustedShellArg{
 		},
 	},
 	"copilot": {"bash": copilotShellArgs, "powershell": copilotShellArgs},
+	"openclaw": {"exec": {
+		"workdir": trustedShellWorkdir, "yieldMs": trustedShellNumber, "background": trustedShellFlag,
+		"timeout": trustedShellNumber, "pty": trustedShellFlag,
+		"ask": trustedShellLabel, "security": trustedShellLabel,
+	}},
 }
 
 // TrustedShellArgs takes the arguments trustedShellTools lists out of a
@@ -191,6 +199,7 @@ var shellCommandKeys = map[string]map[string]string{
 	"omnigent":    {"sys_os_shell": "command"},
 	"claudecode":  {"Bash": "command"},
 	"codex":       {"Bash": "command"},
+	"openclaw":    {"exec": "command"},
 }
 
 // ShellCommandArgs reduces a shell tool call to its command, in the shell

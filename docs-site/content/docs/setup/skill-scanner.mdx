@@ -166,6 +166,10 @@ those remain scan-required. Only the exact vendor cache at
 `$CODEX_HOME/skills/.system` is discovery-only and excluded from every scanner
 and enforcement entrypoint. An unrelated `.system` directory receives no
 exemption.
+In `aibom scan`, such skills count as discovery-only, not eligible: the
+skills table is titled `Skills (6): 1 eligible, 5 discovery-only`, and in
+`--json` each skill's `scan_eligible` matches `summary.skills.eligible`
+(`eligible` still means the agent loads the skill).
 
 Hermes mixes installer-synced and operator-authored skills under
 `$HERMES_HOME/skills`. DefenseClaw grants discovery-only status only when the
@@ -227,6 +231,8 @@ defenseclaw skill info my-skill                       # detailed view
 ```
 
 Without `--connector`, policy and runtime commands apply to matching configured connector copies where present or the unscoped fallback policy where that command uses one. Pass `--connector <name>` when the same skill exists under more than one connector and you want only that connector's copy.
+
+`skill list`, `skill info`, `skill scan` and the AIBOM inventory report the same policy verdict: `blocked`, `quarantined` or `allowed` from an explicit action, otherwise `rejected`, `warning` or `clean` from the latest scan and the `skill_actions` mapping. The list's Status column only says whether the skill is loaded (`ready`), removed from disk (`removed`) or missing. A `rejected` verdict means the policy refuses the skill at install time. A copy that is already on disk stays loaded until you run `skill block`, `skill disable` or `skill quarantine`, or accept it with `skill allow`.
 
 Every action is audited (`skill-block`, `skill-quarantine`, etc.) so the trail is intact even when the manual override contradicts the watcher.
 

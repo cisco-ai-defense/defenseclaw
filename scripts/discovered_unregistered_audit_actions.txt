@@ -92,12 +92,17 @@ plugin-install
 plugin-quarantine
 plugin-remove
 plugin-restore
+plugin-unblock
 policy-activate
 policy-create
 policy-delete
 registry-add
+registry-approve
 registry-edit
+registry-reject
 registry-remove
+registry-require
+registry-sync
 scan-enforced
 scan-finding
 setup-connector-mode

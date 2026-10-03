@@ -81,7 +81,8 @@ each level); the effective order remains unverified pending official-client
 evidence.
 
 Read-only plugin inventory uses the official
-`copilot plugins list --kind plugin --json` command. DefenseClaw does not use
+`copilot plugin list --json` command (older Copilot CLIs: `copilot plugins
+list --kind plugin --json`). DefenseClaw does not use
 that inventory path to install, enable, disable, or remove Copilot plugins.
 
 #### What `setup copilot` actually does
@@ -272,6 +273,13 @@ auto-approves the call. A fail-closed `PreToolUse` or `UserPromptSubmit`
 denies with exit code 0; `Stop` never fails closed. Without the flag, a
 Copilot hook keeps the Copilot CLI contract.
 
+**Per-user hook file in the Local harness.** The Local harness also runs the
+per-user Copilot CLI hook file (`~/.copilot/hooks/defenseclaw.json`) and then
+sends a Copilot CLI-shaped body with its own tool names. The gateway maps the
+same reviewed Local tool names there, so a per-user `run_in_terminal` call is
+judged as a shell command, and a `PreToolUse` deny or ask carries both the CLI
+`permissionDecision` and the Local `hookSpecificOutput`.
+
 **Device policies (enterprise, standalone profile).** With
 `ownership: merge`, the Copilot machine policy also enables the VS Code
 policies `ChatHooks` (a user cannot turn hooks off with `chat.useHooks`) and
@@ -308,9 +316,13 @@ files it rendered and keeps any other file at those paths, reporting it;
 verify reports their drift, and uninstall removes only DefenseClaw's copies.
 
 Copilot CLI also reads `~/.copilot/hooks` and runs the file's `command`, and
-VS Code runs both the file and the plugin. The gateway therefore answers a
-second delivery of the same tool call with the first verdict, so the call is
-evaluated and audited once. It matches deliveries by `tool_use_id`, or, for
+VS Code runs both the file and the plugin. When the Copilot CLI runs the
+Local hook file while DefenseClaw's Copilot machine policy is in force, the
+command allows the event without asking the gateway: the machine policy hook
+already evaluates it. That includes VS Code's Copilot CLI agent host, whose
+engine is `copilot-runtime`. Otherwise the gateway
+answers a second delivery of the same tool call with the first verdict, so
+the call is evaluated and audited once. It matches deliveries by `tool_use_id`, or, for
 the two Copilot CLI formats, by the same session, event, tool and arguments
 within a few seconds.
 
@@ -355,8 +367,6 @@ directory cannot be verified, so the guard treats it as an unreadable source.
 - VS Code 1.140 and later keep plugin records in `~/.copilot/config.json`,
   which DefenseClaw does not write yet, so the lock is not set for them.
 - `retire` does not yet pick the editor's harness for the user.
-- Per-user Copilot hook files written in the Copilot CLI format are not
-  decoded correctly when the Local harness runs them.
 - VS Code publishes no list of built-in tool names. The mapped names above
   follow the current tool set and are confirmed live with an audit-only hook.
 

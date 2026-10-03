@@ -527,14 +527,14 @@ def test_readiness_renders_every_active_connector_without_setup_filtering() -> N
     checks = build_readiness_checks(cfg, None, None, (), RestartQueue())
     titles = [check.title for check in checks]
 
-    assert "Active Connector: codex" in titles
-    assert "Active Connector: hermes" in titles
-    assert "Active Connector" not in titles
+    assert "Connector: codex" in titles
+    assert "Connector: hermes" in titles
+    assert "Connector" not in titles
 
     model = SetupPanelModel(cfg)
     model_titles = [check.title for check in model.readiness_checks]
-    assert "Active Connector: codex" in model_titles
-    assert "Active Connector: hermes" in model_titles
+    assert "Connector: codex" in model_titles
+    assert "Connector: hermes" in model_titles
 
 
 def test_connector_wizard_builds_go_argv_for_supported_connectors() -> None:
@@ -543,7 +543,8 @@ def test_connector_wizard_builds_go_argv_for_supported_connectors() -> None:
         "setup claude-code",
     )
 
-    fields = connector_setup_wizard_fields({})
+    # Linux: Windows has no openclaw, so the form would open on a hook connector.
+    fields = connector_setup_wizard_fields({"guardrail": {"connector": "openclaw"}}, "linux")
     fields = _with_field(fields, "Connector", "openclaw")
     fields = _with_field(fields, "Guardrail Mode", "action")
     fields = _with_field(fields, "Scanner Mode", "both")
@@ -983,10 +984,35 @@ def test_guardrail_wizard_promotes_strategy_when_judge_model_configured() -> Non
     assert wizard_field_value(_guardrail_wizard_fields_for({}, cfg_inherit), "Strategy") == "regex_only"
 
 
+
+def test_guardrail_wizard_prefills_judge_bedrock_region() -> None:
+    # GAP-2298: Region stayed blank although guardrail.judge.llm.bedrock.region was set.
+    cfg = {
+        "guardrail": {
+            "judge": {"llm": {"provider": "bedrock", "model": "m", "bedrock": {"region": "us-east-1"}}},
+        },
+    }
+    assert wizard_field_value(_guardrail_wizard_fields_for({}, cfg), "Region") == "us-east-1"
+
+
+def test_guardrail_wizard_prefills_v5_judge_llm_block() -> None:
+    # GAP-2176: setup guardrail now writes only guardrail.judge.llm, so the
+    # wizard must read the judge model from there (v4 judge.model stays a fallback).
+    cfg = {
+        "guardrail": {
+            "detection_strategy": "regex_only",
+            "judge": {"llm": {"provider": "bedrock", "model": "us.anthropic.claude-haiku-4-5-20251001-v1:0"}},
+        },
+    }
+    fields = _guardrail_wizard_fields_for({}, cfg)
+    assert wizard_field_value(fields, "Model") == "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+    assert wizard_field_value(fields, "Strategy") == "regex_judge"
+
+
 def test_credentials_matrix_actions_are_data_only_and_validate_required_fields() -> None:
     fields = wizard_form_defs(SetupWizard.CREDENTIALS)
 
-    assert build_wizard_args(SetupWizard.CREDENTIALS, fields) == ("keys", "list", "--json")
+    assert build_wizard_args(SetupWizard.CREDENTIALS, fields) == ("keys", "list")
     assert build_wizard_args(SetupWizard.CREDENTIALS, _with_field(fields, "Action", "check")) == ("keys", "check")
     assert build_wizard_args(SetupWizard.CREDENTIALS, _with_field(fields, "Action", "fill-missing")) == (
         "keys",
@@ -1008,6 +1034,12 @@ def test_credentials_matrix_actions_are_data_only_and_validate_required_fields()
     assert "sk-live" not in built
     assert render_wizard_value(set_fields[2]) == "****live"
     assert render_wizard_value(set_fields[2], reveal=True) == "sk-live"
+
+    # GAP-1176: a stored credential can be removed from the wizard.
+    remove_fields = _with_field(fields, "Action", "remove")
+    assert missing_required_fields(SetupWizard.CREDENTIALS, remove_fields) == ("Env Name",)
+    remove_fields = _with_field(remove_fields, "Env Name", "VIRUSTOTAL_API_KEY")
+    assert build_wizard_args(SetupWizard.CREDENTIALS, remove_fields) == ("keys", "remove", "VIRUSTOTAL_API_KEY", "--yes")
 
 
 def test_guardrail_wizard_inherits_unified_llm_without_forcing_override() -> None:
@@ -1410,7 +1442,7 @@ def test_setup_review_save_action_and_saved_hint_are_model_level() -> None:
 
     model.mark_saved(datetime(2026, 5, 20, 12, 0, tzinfo=timezone.utc))
     hints = model.save_restart_hints()
-    assert hints.saved_hint == "Saved at 2026-05-20T12:00:00+00:00"
+    assert hints.saved_hint == "Saved 12:00 UTC"
     assert hints.saved_hint in hints.action_bar
 
 

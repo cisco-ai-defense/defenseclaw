@@ -53,19 +53,14 @@ var connectorCmd = &cobra.Command{
 	Short: "Inspect and manage individual connector lifecycle state",
 	Long: `Low-level connector lifecycle commands.
 
-These subcommands operate on a single connector adapter (openclaw, codex,
-claudecode, amp, zeptoclaw, or any plugin connector) and intentionally bypass
-the interactive 'defenseclaw setup' flow. They are primarily intended for
-the 'defenseclaw uninstall' flow and for operator debugging when a
-connector handoff (S7) leaves residual state behind.
+These subcommands work on one connector (for example claudecode, codex,
+cursor or opencode) and bypass the interactive 'defenseclaw setup' flow.
+'defenseclaw uninstall' uses them, and they help clean up state that a
+connector switch left behind.
 
-Each subcommand accepts an optional --connector flag. When omitted, the
-active connector is resolved in this order:
-
-  1. <data-dir>/active_connector.json (written by the sidecar after a
-     successful connector boot).
-  2. guardrail.connector from defenseclaw.yaml.
-  3. "openclaw" (legacy default).
+Each subcommand accepts --connector. When omitted, it uses the active
+connector: the one the gateway last started, else guardrail.connector in
+config.yaml. 'defenseclaw guardrail status' lists the connector names.
 `,
 }
 
@@ -109,7 +104,8 @@ gateway token, or the audit DB. It is the idempotent inverse of
 Connector.Setup() for a single connector. It marks that connector inactive in
 the runtime state before removing files so a still-running hook guard cannot
 immediately reinstall the configuration being deliberately torn down.`,
-	RunE: runConnectorTeardown,
+	Annotations: map[string]string{auditOptionalAnnotation: "true"},
+	RunE:        runConnectorTeardown,
 }
 
 var connectorVerifyCmd = &cobra.Command{
@@ -127,6 +123,7 @@ Exit codes:
   0   connector is clean
   1   connector has residual state (details printed to stderr)
   2   connector unknown / config error`,
+	Annotations:       map[string]string{auditOptionalAnnotation: "true"},
 	PersistentPreRunE: runConnectorVerifyPersistentPreRunE,
 	RunE:              runConnectorVerify,
 }
@@ -144,6 +141,8 @@ mutations. It does not restart the gateway and does not setup peer connectors.`,
 var connectorLaunchCmd = &cobra.Command{
 	Use:   "launch -- [openhands arguments...]",
 	Short: "Launch the protected OpenHands executable with scoped native telemetry",
+	// OpenHands is not a supported connector on Windows (GAP-1719).
+	Hidden: runtime.GOOS == "windows",
 	Long: `Launch the exact OpenHands executable selected and sealed by setup.
 
 This Darwin-only boundary revalidates the protected executable and hook
@@ -183,11 +182,11 @@ Pass --json for a structured payload suitable for piping into 'jq'.`,
 
 func init() {
 	connectorCmd.PersistentFlags().StringVar(&connectorFlagName, "connector", "",
-		"Connector name (defaults to the active connector resolved from active_connector.json / guardrail.connector / openclaw)")
+		"Connector name (default: the active connector; 'defenseclaw guardrail status' lists them)")
 	connectorCmd.PersistentFlags().BoolVar(&connectorFlagJSON, "json", false,
 		"Emit machine-readable JSON instead of the human-readable view")
 	connectorCmd.PersistentFlags().StringVar(&connectorFlagDataDir, "data-dir", "",
-		"Override the data directory (defaults to cfg.DataDir)")
+		"Use this DefenseClaw data directory (default: data_dir in config.yaml, usually ~/.defenseclaw)")
 	connectorCmd.PersistentFlags().StringVar(&connectorFlagConfigHome, "config-home", "",
 		"Bind native connector maintenance to an installer-validated configuration home")
 	_ = connectorCmd.PersistentFlags().MarkHidden("config-home")
@@ -467,6 +466,9 @@ func resolveConnectorOpts(dataDir string) connector.SetupOpts {
 		opts.ProxyAddr = fmt.Sprintf("127.0.0.1:%d", cfg.Guardrail.Port)
 	}
 	opts.WorkspaceDir = cfg.ConnectorWorkspaceDir()
+	// Setup writes this into Codex's [otel] table; a surgical teardown only
+	// removes it when it knows the same value (GAP-1979).
+	opts.CodexOtelEnvironment = cfg.Environment
 	opts.AgentExecutable = connector.LoadCachedAgentExecutable(dataDir, name)
 	opts.APIToken = cfg.Gateway.ResolvedToken()
 	return opts
@@ -632,6 +634,11 @@ func runConnectorReconcile(cmd *cobra.Command, _ []string) error {
 			return fmt.Errorf("connector reconcile %s lock: %w", name, err)
 		}
 	}
+	if name != "opencode" && !opts.ManagedEnterprise {
+		if err := publishReconciledConnectorActive(dataDir, name); err != nil {
+			return fmt.Errorf("connector reconcile %s: publish active runtime state: %w", name, err)
+		}
+	}
 	if connectorFlagJSON {
 		return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{
 			"connector": name,
@@ -642,6 +649,25 @@ func runConnectorReconcile(cmd *cobra.Command, _ []string) error {
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "  %s %s runtime reconciled\n", Style("✓", "fg=green", "bold"), name)
 	return nil
+}
+
+// publishReconciledConnectorActive records name in the active roster, as the
+// OpenCode path does. A reconcile with the gateway stopped (fail mode with no
+// gateway running) writes hooks and a lock entry; when the roster does not
+// name that connector, the gateway later finds a lock-only registration it
+// has no authority to reconcile and can never start (GAP-1650). An unreadable
+// roster is left for the gateway to report.
+func publishReconciledConnectorActive(dataDir, name string) error {
+	active, _, err := connector.ReadActiveConnectorState(dataDir)
+	if err != nil {
+		return nil
+	}
+	for _, existing := range active {
+		if strings.EqualFold(existing, name) {
+			return nil
+		}
+	}
+	return connector.SaveActiveConnectors(dataDir, append(active, name))
 }
 
 func reconcileAmpRegistration(

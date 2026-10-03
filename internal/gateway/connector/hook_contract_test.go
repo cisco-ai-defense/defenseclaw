@@ -2375,10 +2375,13 @@ func TestHookContractChangedByDefenseClawReleaseOnlyForContractIDChanges(t *test
 			want:   true,
 		},
 		{
-			name: "same release",
+			// GAP-1467: a source build of the next release still reports the
+			// checked-in version of the last one.
+			name: "source build with the previous release's version string",
 			mutate: func(previous, current *HookContractLockEntry) {
 				current.DefenseClawVersion = previous.DefenseClawVersion
 			},
+			want: true,
 		},
 		{
 			name: "raw agent version changed",
@@ -3389,5 +3392,21 @@ func TestDevinContractPinsArePerOS(t *testing.T) {
 		if got := resolveHookContractForOS("devin", "3000.4.24", goos).Status; got != HookCompatibilityUnknown {
 			t.Fatalf("devin 3000.4.24 on %s: status %s", goos, got)
 		}
+	}
+}
+
+// GAP-1726: a Hermes git build is an untested newer build of the newest
+// contract; the commit hash is never read as a version (it gave 5.0.0).
+func TestHookContractGitBuildVersion(t *testing.T) {
+	got := ResolveHookContract("hermes", "Hermes Agent vgit.5bba024 (2026.9.24) \u00b7 upstream 5bba024d")
+	if got.Status != HookCompatibilityKnown || !got.UntestedVersion || got.Contract.ContractID != "hermes-hooks-v2" ||
+		got.NormalizedVersion != "" || strings.Contains(got.Reason, "5.0.0") || !strings.Contains(got.Reason, "git build") {
+		t.Fatalf("hermes git build = %+v", got)
+	}
+	if strict := ResolveHookContractStrict("hermes", "Hermes Agent vgit.5bba024 (2026.9.24)"); strict.Status != HookCompatibilityUnknown {
+		t.Fatalf("strict hermes git build = %+v", strict)
+	}
+	if got := ResolveHookContract("hermes", "Hermes Agent v0.21.5+4977"); got.UntestedVersion || got.NormalizedVersion != "0.21.5" {
+		t.Fatalf("hermes release = %+v", got)
 	}
 }

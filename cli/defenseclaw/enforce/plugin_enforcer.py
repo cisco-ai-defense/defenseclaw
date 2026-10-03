@@ -32,6 +32,9 @@ from defenseclaw.inventory.plugin_identity import (
     validate_plugin_id,
 )
 
+# Quarantine tree of plugins in a Hermes category folder, next to plugins/.
+PLUGIN_CATEGORY_QUARANTINE_DIR = "plugin-categories"
+
 
 class PluginEnforcer:
     def __init__(self, quarantine_dir: str) -> None:
@@ -46,17 +49,27 @@ class PluginEnforcer:
         return safe
 
     def _quarantine_path(self, plugin_name: str, connector: str = "") -> str | None:
-        safe_name = self._safe_segment(plugin_name)
-        if safe_name is None:
+        # GAP-2464: a Hermes plugin in a category folder is quarantined by the
+        # gateway watcher as <connector>/<category>/<name>, in its own tree
+        # (GAP-2470): inside plugins/ it would sit in the slot of a flat
+        # plugin named like the category, and restoring that one would bring
+        # the category plugin back with it (internal/watcher
+        # pluginCategoryQuarantineDir).
+        parts = [self._safe_segment(part) for part in plugin_name.split("/")]
+        if len(parts) > 2 or None in parts:
             return None
+        safe_name = os.path.join(*parts)
+        base = self.quarantine_dir
+        if len(parts) == 2:
+            base = os.path.join(os.path.dirname(self.quarantine_dir), PLUGIN_CATEGORY_QUARANTINE_DIR)
         if connector:
             safe_connector = self._safe_segment(connector)
             if safe_connector is None:
                 return None
-            dest = os.path.join(self.quarantine_dir, safe_connector, safe_name)
+            dest = os.path.join(base, safe_connector, safe_name)
         else:
-            dest = os.path.join(self.quarantine_dir, safe_name)
-        if not os.path.realpath(dest).startswith(os.path.realpath(self.quarantine_dir) + os.sep):
+            dest = os.path.join(base, safe_name)
+        if not os.path.realpath(dest).startswith(os.path.realpath(base) + os.sep):
             return None
         return dest
 
@@ -113,11 +126,23 @@ class PluginEnforcer:
         if is_link_or_reparse(src) or not os.path.exists(src):
             return False
         try:
-            source_id, _manifest = canonical_plugin_id(src)
-            if filesystem_identity_key(source_id, os.path.dirname(src)) != filesystem_identity_key(
-                validate_plugin_id(plugin_name), os.path.dirname(src)
-            ):
-                return False
+            if "/" in plugin_name:
+                # GAP-2464: a category plugin is keyed by its listed
+                # <category>/<folder> id, which the slot path already is.
+                for part in plugin_name.split("/"):
+                    validate_plugin_id(part)
+            else:
+                # GAP-2164: a single-file OpenCode/Amp plugin is quarantined as
+                # a file named by its ID; it has no manifest directory to read.
+                source_id = (
+                    validate_plugin_id(os.path.basename(src))
+                    if os.path.isfile(src)
+                    else canonical_plugin_id(src)[0]
+                )
+                if filesystem_identity_key(source_id, os.path.dirname(src)) != filesystem_identity_key(
+                    validate_plugin_id(plugin_name), os.path.dirname(src)
+                ):
+                    return False
         except PluginIdentityError:
             return False
         real_dest = os.path.realpath(restore_path)

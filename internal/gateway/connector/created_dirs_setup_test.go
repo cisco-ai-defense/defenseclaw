@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"slices"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 // createdDirsConnector writes its config file below the home on Setup and a
@@ -119,6 +121,46 @@ func TestPrepareOpenCodePluginArtifactDestinationRecordsTheFoldersItCreates(t *t
 	removeWatcherCreatedDirs(dataDir, filepath.Join(home, ".config", "opencode"))
 	if _, err := os.Lstat(filepath.Dir(plugin)); !os.IsNotExist(err) {
 		t.Fatalf("the teardown must remove the empty plugin folder: %v", err)
+	}
+}
+
+// GAP-1106: an earlier release made the plugin folder for its plugin without
+// listing it, so uninstall left it. A folder that holds only DefenseClaw's
+// plugin (or nothing) is recorded now; one with other plugins is not.
+func TestPrepareOpenCodePluginArtifactDestinationRecordsAnEarlierReleasesFolder(t *testing.T) {
+	for name, entries := range map[string][]string{
+		"only the plugin": {"defenseclaw.js"},
+		"empty":           nil,
+		"other plugins":   {"defenseclaw.js", "mine.ts"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			home := t.TempDir()
+			dataDir := filepath.Join(home, ".defenseclaw")
+			plugins := filepath.Join(home, ".config", "opencode", "plugins")
+			if err := os.MkdirAll(plugins, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			// Private, as a DefenseClaw-written plugin is: Windows refuses an
+			// inherited DACL on the managed plugin target.
+			for _, entry := range entries {
+				if err := safefile.WritePrivate(filepath.Join(plugins, entry), []byte("x")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			plugin := filepath.Join(plugins, "defenseclaw.js")
+			err := WithUserHomeDir(home, func() error { return prepareOpenCodePluginArtifactDestination(plugin, dataDir) })
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := readWatcherCreatedDirs(filepath.Join(dataDir, watcherCreatedDirsFile)).Dirs
+			var want []string
+			if name != "other plugins" {
+				want = []string{plugins}
+			}
+			if !slices.Equal(got, want) {
+				t.Fatalf("recorded %v, want %v", got, want)
+			}
+		})
 	}
 }
 

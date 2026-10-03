@@ -28,6 +28,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"reflect"
 	"strings"
 	"sync"
@@ -429,7 +430,7 @@ func (writer *EventHistoryWriter) AppendContext(
 				_ = tx.Rollback()
 				return appendErr
 			}
-			if commitErr := writer.commitAppendTransaction(tx, outcome); commitErr != nil {
+			if commitErr := writer.commitAppendTransactionContext(ctx, tx, outcome); commitErr != nil {
 				_ = tx.Rollback()
 				return eventHistoryFailure(
 					EventHistoryHealthWriteFailed,
@@ -443,7 +444,7 @@ func (writer *EventHistoryWriter) AppendContext(
 		// Health reporters may persist their own mandatory record through the
 		// same single-connection Store. Every failed attempt has ended before
 		// invoking external code so failure reporting cannot self-deadlock.
-		writer.stageAppendError(err)
+		writer.stageAppendErrorClass(err, eventHistoryCallerGaveUpClass(ctx, err))
 		releaseReady()
 		writer.flushHealth()
 		return err
@@ -537,6 +538,12 @@ func (writer *EventHistoryWriter) appendContextTxResolvedProfile(
 	metadata := projection.Metadata()
 	target := projectedCompatibilityTarget(projection)
 	details := projectedCompatibilityDetails(projection, string(record.EventName()))
+	if target == "" && details == string(record.EventName()) && correlation.EvaluationID != "" &&
+		record.EventName() == observability.EventName(observability.TelemetryEventEnforcementBlockApplied) {
+		if blockTarget, blockDetails := enforcementBlockCompatibility(ctx, tx, correlation.EvaluationID); blockDetails != "" {
+			target, details = blockTarget, blockDetails
+		}
+	}
 	severity, hasSeverity := record.Severity()
 	var severityValue any
 	if hasSeverity {
@@ -553,7 +560,20 @@ func (writer *EventHistoryWriter) appendContextTxResolvedProfile(
 		record.Outcome() == observability.OutcomeTerminated
 
 	legacyTarget := any(nullStr(target))
+	// A control-plane record names who made the change in
+	// defenseclaw.admin.actor_ref (tui:operator for a TUI save); the actor
+	// column says the same, as CLI rows say cli, instead of the producer
+	// that wrote the record (audit_logger) (GAP-2143). A platform-health
+	// record the audit logger wrote names its subsystem instead (watcher,
+	// gateway, judge_bodies), as watch-start and watch-stop rows otherwise
+	// said audit_logger (GAP-2204).
 	legacyActor := any(provenance.Producer)
+	if actorRef := strings.TrimSpace(projectedCompatibilityString(projection, "defenseclaw.admin.actor_ref")); actorRef != "" {
+		legacyActor = actorRef
+	} else if subsystem := strings.TrimSpace(projectedCompatibilityString(projection, "defenseclaw.health.subsystem")); subsystem != "" &&
+		provenance.Producer == "audit_logger" {
+		legacyActor = subsystem
+	}
 	legacyDetails := any(details)
 	legacyStructured := any(string(payloadJSON))
 	legacySeverity := severityValue
@@ -582,10 +602,25 @@ func (writer *EventHistoryWriter) appendContextTxResolvedProfile(
 		if encodeErr != nil {
 			return eventHistoryAppendOutcome{}, eventHistoryFailure(EventHistoryHealthProjectionRejected, encodeErr)
 		}
-		legacyTarget = nullStr(legacy.Target)
+		// The source values fill the historical columns only where the local
+		// profile kept them unchanged; otherwise the projected value is kept,
+		// so a strict store never holds the content it removed (GAP-1945).
+		projected, _ := projection.Payload().Object()
+		if value, kept := keptCompatibilityValue(projected, "target", legacy.Target); kept {
+			legacyTarget = nullStr(value)
+		}
 		legacyActor = legacy.Actor
-		legacyDetails = legacy.Details
-		legacyStructured = structured
+		if value, kept := keptCompatibilityValue(projected, "details", legacy.Details); kept {
+			legacyDetails = value
+		} else if details == string(record.EventName()) {
+			// The profile removed the details: say so rather than show the
+			// internal legacy.audit.* event name as the row text (GAP-2192).
+			legacyDetails = "details removed by redaction profile " + string(expectedProfile)
+		}
+		if encoded, err := json.Marshal(legacy.Structured); len(legacy.Structured) == 0 ||
+			(err == nil && projected["structured_json"] == string(encoded)) {
+			legacyStructured = structured
+		}
 		legacySeverity = nullStr(legacy.Severity)
 		legacySchemaVersion = nullInt(legacy.SchemaVersion)
 		legacyContentHash = nullStr(legacy.ContentHash)
@@ -757,16 +792,48 @@ func (writer *EventHistoryWriter) reportAppendError(err error) {
 }
 
 func (writer *EventHistoryWriter) stageAppendError(err error) {
+	writer.stageAppendErrorClass(err, "")
+}
+
+func (writer *EventHistoryWriter) stageAppendErrorClass(err error, classOverride EventHistorySQLiteClass) {
 	var healthErr *eventHistoryHealthError
 	if errors.As(err, &healthErr) {
-		writer.stageHealthFailure(healthErr.code, err, "")
+		writer.stageHealthFailure(healthErr.code, err, classOverride)
 	}
+}
+
+// eventHistoryCallerGaveUpClass is class deadline for a write that failed
+// because its caller stopped waiting. An OTLP exporter that times out behind
+// a slow write on a large audit.db cancels its request; the write then fails
+// with context.Canceled or sql.ErrTxDone, which classify as other, and start
+// treated that as a broken store (GAP-1790). It is a timed-out write: start
+// waits it out like any deadline and the next commit clears it. A failure
+// with a real SQLite class (busy, full, I/O, ...) keeps that class.
+func eventHistoryCallerGaveUpClass(ctx context.Context, err error) EventHistorySQLiteClass {
+	if ctx == nil || ctx.Err() == nil {
+		return ""
+	}
+	if class, _ := classifyEventHistorySQLiteFailure(err); class != EventHistorySQLiteOther {
+		return ""
+	}
+	return EventHistorySQLiteDeadline
 }
 
 // commitAppendTransaction serializes commit order with signed/unsigned health
 // state staging. It never invokes external reporter code; callers must release
 // Store lifecycle ownership before flushHealth.
 func (writer *EventHistoryWriter) commitAppendTransaction(
+	tx *sql.Tx,
+	outcome eventHistoryAppendOutcome,
+) error {
+	return writer.commitAppendTransactionContext(context.Background(), tx, outcome)
+}
+
+// commitAppendTransactionContext is commitAppendTransaction for a transaction
+// begun with ctx, so a commit that failed because ctx ended is reported as a
+// timed-out write (GAP-1790).
+func (writer *EventHistoryWriter) commitAppendTransactionContext(
+	ctx context.Context,
 	tx *sql.Tx,
 	outcome eventHistoryAppendOutcome,
 ) error {
@@ -777,7 +844,8 @@ func (writer *EventHistoryWriter) commitAppendTransaction(
 	defer writer.appendCommitMu.Unlock()
 	if err := tx.Commit(); err != nil {
 		writer.enqueueHealthFailure(
-			writer.nextHealthSequence(), EventHistoryHealthWriteFailed, err, "",
+			writer.nextHealthSequence(), EventHistoryHealthWriteFailed, err,
+			eventHistoryCallerGaveUpClass(ctx, err),
 		)
 		return err
 	}
@@ -796,10 +864,15 @@ func (writer *EventHistoryWriter) stageAppendOutcome(
 	defer writer.healthMu.Unlock()
 	if outcome.signed {
 		writer.unsignedReported = false
-		if outcome.mandatory {
-			writer.enqueueHealthTransitionLocked(writer.healthTransition(
-				sequence, EventHistoryHealthRecovered, EventHistoryHealthWriteFailed, "", 0,
-			))
+		// Any signed commit after a write failure proves the SQLite write
+		// path works again. Waiting for a mandatory record left the gateway
+		// reporting "audit events cannot be written" long after writes
+		// resumed (GAP-1537, GAP-1660).
+		failed := writer.writeHealthKnown && writer.writeHealthState == EventHistoryHealthFailed
+		if (outcome.mandatory || failed) && writer.enqueueHealthTransitionLocked(writer.healthTransition(
+			sequence, EventHistoryHealthRecovered, EventHistoryHealthWriteFailed, "", 0,
+		)) && failed {
+			fmt.Fprintf(os.Stderr, "[audit] event-history writes recovered\n")
 		}
 		return
 	}
@@ -881,19 +954,43 @@ func (writer *EventHistoryWriter) enqueueHealthFailure(
 		sequence, EventHistoryHealthFailed, code, sqliteClass, primary,
 	)
 	writer.healthMu.Lock()
-	defer writer.healthMu.Unlock()
-	writer.enqueueHealthTransitionLocked(transition)
+	accepted := writer.enqueueHealthTransitionLocked(transition)
+	writer.healthMu.Unlock()
+	if accepted && code == EventHistoryHealthWriteFailed {
+		// One line per state change (not per failed write), so gateway.log
+		// says which write failed and why (GAP-1660).
+		fmt.Fprintln(os.Stderr, eventHistoryWriteFailureLogLine(sqliteClass, primary, err))
+	}
 }
 
+// eventHistoryWriteFailureLogLine adds the driver's (or Go's) own error to the
+// class and code. eventHistoryWriteError.Error() is a fixed string so health
+// never carries driver text, which left a class=other code=0 failure with no
+// cause in gateway.log (GAP-1831). The cause is one bounded line.
+func eventHistoryWriteFailureLogLine(class EventHistorySQLiteClass, primary uint8, err error) string {
+	line := fmt.Sprintf("[audit] event-history write failed (sqlite class=%s code=%d): %v", class, primary, err)
+	var writeErr *eventHistoryWriteError
+	if errors.As(err, &writeErr) && writeErr.cause != nil {
+		cause := strings.Join(strings.Fields(writeErr.cause.Error()), " ")
+		if len(cause) > 300 {
+			cause = strings.ToValidUTF8(cause[:300], "") + "..."
+		}
+		line += ": " + cause
+	}
+	return line
+}
+
+// enqueueHealthTransitionLocked reports whether the transition changed the
+// tracked health state (a duplicate of the current state returns false).
 func (writer *EventHistoryWriter) enqueueHealthTransitionLocked(
 	transition EventHistoryHealthTransition,
-) {
+) bool {
 	if writer.healthReporter == nil || !validEventHistoryHealthTransition(transition) {
-		return
+		return false
 	}
 	if transition.Code == EventHistoryHealthWriteFailed {
 		if transition.Sequence <= writer.writeHealthSeq {
-			return
+			return false
 		}
 		previousState := writer.writeHealthState
 		previousClass := writer.writeHealthClass
@@ -905,7 +1002,7 @@ func (writer *EventHistoryWriter) enqueueHealthTransitionLocked(
 		if writer.writeHealthKnown && previousState == transition.State &&
 			(transition.State == EventHistoryHealthRecovered ||
 				previousClass == transition.SQLiteClass && previousPrimary == transition.SQLitePrimaryCode) {
-			return
+			return false
 		}
 		writer.writeHealthKnown = true
 	}
@@ -930,10 +1027,10 @@ func (writer *EventHistoryWriter) enqueueHealthTransitionLocked(
 		}
 		writer.healthQueue = queue
 		if len(writer.healthQueue) >= 5 {
-			return
+			return true // the state changed even though the full queue drops this delivery
 		}
 		writer.healthQueue = append(writer.healthQueue, transition)
-		return
+		return true
 	}
 
 	// The active callback is separate. Behind it, retain only the latest
@@ -946,14 +1043,15 @@ func (writer *EventHistoryWriter) enqueueHealthTransitionLocked(
 		}
 		if pending.Generation > transition.Generation ||
 			pending.Generation == transition.Generation && pending.Sequence >= transition.Sequence {
-			return
+			return false
 		}
 		writer.healthQueue = append(writer.healthQueue[:index], writer.healthQueue[index+1:]...)
 	}
 	if len(writer.healthQueue) >= 5 {
-		return
+		return false
 	}
 	writer.healthQueue = append(writer.healthQueue, transition)
+	return true
 }
 
 func (writer *EventHistoryWriter) flushHealth() {
@@ -1085,8 +1183,17 @@ func projectedCompatibilityTarget(projection observabilityredaction.Projection) 
 	if err != nil {
 		return ""
 	}
-	target, _ := payload["target"].(string)
-	return target
+	if target, _ := payload["target"].(string); target != "" {
+		return target
+	}
+	// Scan and finding records name the asset only in their typed target
+	// reference; without this a plugin scan row had no target (GAP-2272).
+	for _, field := range []string{"defenseclaw.scan.target_ref", "defenseclaw.finding.target_ref"} {
+		if target, _ := payload[field].(string); strings.TrimSpace(target) != "" {
+			return target
+		}
+	}
+	return ""
 }
 
 func projectedCompatibilityDetails(projection observabilityredaction.Projection, fallback string) string {
@@ -1110,9 +1217,93 @@ func projectedCompatibilityDetails(projection observabilityredaction.Projection,
 		if summary, ok := payload["defenseclaw.health.error_summary"].(string); ok && strings.TrimSpace(summary) != "" {
 			return label + ": " + strings.TrimSpace(summary)
 		}
+		// Delivery failures carry only a stable failure code (for example
+		// request_timeout); name it so the alert says why it fired.
+		if code, ok := payload["defenseclaw.schema.error_code"].(string); ok && strings.TrimSpace(code) != "" {
+			return label + ": " + strings.TrimSpace(code)
+		}
+		return label
+	}
+	// Scan summaries carry no message: say what the scanner found, as the
+	// pre-v8 scan rows did, instead of only "scan.completed" (GAP-2272).
+	if scannerName, ok := payload["defenseclaw.scan.scanner"].(string); ok && scannerName != "" {
+		label := "scanner=" + scannerName
+		for _, field := range []struct{ key, name string }{
+			{"defenseclaw.scan.target_type", "target_type"},
+			{"defenseclaw.scan.finding_count", "findings"},
+			{"defenseclaw.scan.severity_max", "max_severity"},
+			{"defenseclaw.scan.verdict", "verdict"},
+		} {
+			if value, present := payload[field.key]; present && value != nil && fmt.Sprint(value) != "" {
+				label += " " + field.name + "=" + fmt.Sprint(value)
+			}
+		}
 		return label
 	}
 	return fallback
+}
+
+// enforcementBlockCompatibility names what a generated enforcement.block.applied
+// row blocked and why. That family carries only identifiers, so a guardrail
+// proxy prompt block was listed in alerts as "block | | enforcement.block.applied"
+// (GAP-1895). Its guardrail evaluation row (same evaluation_id, already
+// projected into this table) holds the direction, rule ids and reason.
+func enforcementBlockCompatibility(ctx context.Context, tx *sql.Tx, evaluationID string) (string, string) {
+	var payload string
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COALESCE(payload_json, '') FROM audit_events
+		WHERE evaluation_id = ? AND event_name = ?
+		ORDER BY rowid DESC LIMIT 1`,
+		evaluationID, observability.TelemetryEventGuardrailEvaluationCompleted,
+	).Scan(&payload); err != nil {
+		return "", ""
+	}
+	var fields map[string]any
+	if json.Unmarshal([]byte(payload), &fields) != nil {
+		return "", ""
+	}
+	text := func(key string) string {
+		value, _ := fields[key].(string)
+		return strings.TrimSpace(value)
+	}
+	direction := text("defenseclaw.guardrail.target_type")
+	parts := []string{"decision=blocked"}
+	if direction != "" {
+		parts = append(parts, "direction="+direction)
+	}
+	if reason := text("defenseclaw.guardrail.reason"); reason != "" {
+		parts = append(parts, "reason="+reason)
+	} else if ids, ok := fields["defenseclaw.guardrail.rule_ids"].([]any); ok && len(ids) > 0 {
+		rules := make([]string, 0, len(ids))
+		for _, id := range ids {
+			if value, ok := id.(string); ok && value != "" {
+				rules = append(rules, value)
+			}
+		}
+		if len(rules) > 0 {
+			parts = append(parts, "rule="+strings.Join(rules, ","))
+		}
+	}
+	if len(parts) == 1 {
+		return "", ""
+	}
+	return direction, strings.Join(parts, " ")
+}
+
+// keptCompatibilityValue returns the value a historical column may hold for a
+// compatibility-only body field: the source value when the profile kept it,
+// the projected value when the profile rewrote it, and false when the profile
+// removed it (the caller keeps its projected default).
+func keptCompatibilityValue(projected map[string]any, field, source string) (string, bool) {
+	value, present := projected[field].(string)
+	switch {
+	case source == "" || value == source:
+		return source, true
+	case present:
+		return value, true
+	default:
+		return "", false
+	}
 }
 
 func projectedCompatibilityString(

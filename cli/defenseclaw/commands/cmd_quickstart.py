@@ -60,11 +60,12 @@ import click
     default=None,
     help=(
         "Hook fail-mode for delivery, authentication, and invalid gateway responses. "
-        "'open' (default) allows + logs; 'closed' blocks where the hook supports it. "
+        "'closed' (the default on a new install) blocks where the hook supports it, "
+        "so the agent's tools are blocked while the gateway is down; 'open' allows + logs. "
+        "Omit it to keep the current setting. "
         "DEFENSECLAW_STRICT_AVAILABILITY=1 additionally forces transport and "
         "missing-token failures closed. "
-        "Quickstart is non-interactive — pick 'closed' here to opt the agent into a "
-        "stricter posture without later running `defenseclaw guardrail fail-mode`."
+        "Change it later with `defenseclaw guardrail fail-mode open|closed`."
     ),
 )
 @click.option(
@@ -138,7 +139,7 @@ import click
     is_flag=True,
     help="Do not start the sidecar at the end of quickstart.",
 )
-@click.option("--json-summary", is_flag=True, help="Emit the first-run summary as JSON.")
+@click.option("--json-summary", "--json", "json_summary", is_flag=True, help="Emit the first-run summary as JSON.")
 def quickstart_cmd(
     mode: str | None,
     scanner_mode: str,
@@ -173,6 +174,7 @@ def quickstart_cmd(
     connector_source: dict[str, str] = {}
     if agent_name:
         connector = agent_name
+        _refuse_roster_narrowing(cfg_mod, connector, mode)
     else:
         data_dir = str(cfg_mod.default_data_path())
         picked_path = os.path.join(data_dir, "picked_connector")
@@ -180,6 +182,39 @@ def quickstart_cmd(
         detected = _detect_installed_connectors()
         configured = _configured_quickstart_connectors(cfg_mod)
         candidates = sorted({name for name in [*configured, *detected] if name})
+        proxy = next((c for c in configured if c in _PROXY_CONNECTORS), "")
+        if len(candidates) > 1 and proxy:
+            # GAP-2466: no hook connector can join a guarded OpenClaw/ZeptoClaw
+            # ('setup <c> --yes' and 'init' are refused), so offer only the
+            # commands that work: reconfigure it or switch with --replace.
+            label = _connector_label(proxy)
+            click.echo(
+                "  \u2717 Multiple connectors detected/configured: "
+                f"{_connector_labels(candidates)}.\n"
+                f"    This install guards {label}, which is proxy-backed and cannot run next to hook connectors.\n"
+                "    Quickstart configures one connector on a new install. No changes made.\n"
+                f"    Reconfigure {label}: defenseclaw setup {proxy}\n"
+                f"    Switch this install to a hook connector and remove {label}: "
+                "defenseclaw setup <connector> --replace\n"
+                "    See what is guarded now: defenseclaw status",
+                err=True,
+            )
+            sys.exit(2)
+        if len(candidates) > 1 and configured:
+            # GAP-1352: on an install that already guards connectors,
+            # 'quickstart --connector X' refuses (it would narrow the roster),
+            # so point at the commands that keep the roster.
+            click.echo(
+                "  ✗ Multiple connectors detected/configured: "
+                f"{', '.join(candidates)}.\n"
+                f"    This install already guards: {', '.join(dict.fromkeys(configured))}.\n"
+                "    Quickstart configures one connector on a new install.\n"
+                "    Add or reconfigure one and keep the rest: defenseclaw setup <connector> --yes\n"
+                "    Change the whole set: defenseclaw init\n"
+                "    See what is guarded now: defenseclaw status",
+                err=True,
+            )
+            sys.exit(2)
         if len(candidates) > 1:
             click.echo(
                 "  ✗ Multiple connectors detected/configured: "
@@ -248,6 +283,12 @@ def quickstart_cmd(
             hilt_min_severity=hilt_min_severity or "",
         )
     )
+    if skip_gateway:
+        # GAP-2052: bootstrap words a skipped start with init's flag; name
+        # the one quickstart has.
+        for step in report.setup:
+            if step.name == "Sidecar" and step.status == "skip":
+                step.detail = "not started (--skip-gateway)"
     _require_operational_success(
         report,
         gateway_requested=not skip_gateway,
@@ -280,10 +321,88 @@ def _require_operational_success(report, *, gateway_requested: bool) -> None:
 
     if gateway_requested:
         for step in report.setup + report.readiness:
-            if step.name in {"Connector", "Sidecar"} and step.status == "warn":
+            if step.name in {"Connector", "Connector runtime", "Sidecar"} and step.status == "warn":
                 step.status = "fail"
 
     report.status = _rollup_status(report.setup, report.readiness)
+
+
+def _refuse_roster_narrowing(cfg_mod, connector: str, mode: str | None = None) -> None:
+    """Stop ``quickstart --connector X`` from silently dropping other connectors.
+
+    First-run setup rebuilds the roster around the one connector it is
+    given, so on an install that already guards other connectors quickstart
+    would leave their hooks installed while the gateway stops enforcing them
+    (GAP-1078). Refuse and point at the commands that keep (or deliberately
+    change) the roster instead.
+    """
+    from defenseclaw import connector_paths
+
+    wanted = connector_paths.normalize(connector)
+    configured = list(dict.fromkeys(connector_paths.normalize(c) for c in _configured_quickstart_connectors(cfg_mod)))
+    if not [c for c in configured if c and c != wanted]:
+        return
+    slug = "claude-code" if wanted == "claudecode" else wanted
+    mode_flag = f" --mode {mode}" if mode else ""
+    proxies = [c for c in configured if c in _PROXY_CONNECTORS]
+    if proxies and wanted not in _PROXY_CONNECTORS:
+        # GAP-2452: a hook connector would remove the guarded proxy
+        # connector's plugin and leave it unguarded (as 'setup <c>', GAP-2426).
+        # GAP-2466: display names, as the setup/init refusal.
+        proxy_label = _connector_label(proxies[0])
+        click.echo(
+            f"  \u2717 This install already guards: {_connector_labels(configured)}.\n"
+            f"    {proxy_label} is proxy-backed and cannot run next to hook connectors, so quickstart\n"
+            f"    would remove its DefenseClaw plugin and leave it unguarded. No changes made.\n"
+            f"    Switch this install to {_connector_label(wanted)}: defenseclaw setup {slug} --replace{mode_flag}",
+            err=True,
+        )
+        sys.exit(2)
+    if wanted in _PROXY_CONNECTORS:
+        # Proxy-backed connectors cannot run next to hook connectors, so
+        # "keep the rest" is refused (GAP-1407); --replace switches (GAP-1455).
+        others = [c for c in configured if c and c != wanted]
+        if len(others) == 1:
+            target = pronoun = _connector_label(others[0])
+        else:
+            target, pronoun = "these connectors", "them"
+        lines = [
+            f"  \u2717 This install already guards: {_connector_labels(configured)}.",
+            f"    {_connector_label(wanted)} is proxy-backed and cannot run next to {target}. No changes made.",
+            f"    Switch to it and remove {pronoun}: defenseclaw setup {slug} --replace{mode_flag}",
+        ]
+        guarded_proxy = next((c for c in others if c in _PROXY_CONNECTORS), "")
+        if guarded_proxy:
+            # GAP-2468: init does not switch a proxy install to the other
+            # proxy connector, so offer to keep the guarded one instead.
+            lines.append(f"    Keep guarding {_connector_label(guarded_proxy)}: defenseclaw setup {guarded_proxy}")
+        else:
+            lines.append("    Change the whole set instead: defenseclaw init")
+        click.echo("\n".join(lines), err=True)
+        sys.exit(2)
+    click.echo(
+        f"  \u2717 This install already guards: {', '.join(configured)}.\n"
+        "    Quickstart configures one connector and would stop guarding the others.\n"
+        f"    Add or reconfigure {wanted} and keep the rest: defenseclaw setup {slug} --yes{mode_flag}\n"
+        f"    Guard only {wanted} and remove the others: defenseclaw setup {slug} --replace{mode_flag}\n"
+        "    Change the whole set: defenseclaw init",
+        err=True,
+    )
+    sys.exit(2)
+
+
+_PROXY_CONNECTORS = frozenset({"openclaw", "zeptoclaw"})
+
+
+def _connector_label(name: str) -> str:
+    """Display name of a connector (OpenClaw, Claude Code), as setup prints it."""
+    from defenseclaw.commands.cmd_setup import _CONNECTOR_META
+
+    return _CONNECTOR_META.get(name, {}).get("label", name)
+
+
+def _connector_labels(names) -> str:
+    return ", ".join(_connector_label(n) for n in names)
 
 
 def _configured_quickstart_connectors(cfg_mod) -> list[str]:
@@ -303,4 +422,9 @@ def _configured_quickstart_connectors(cfg_mod) -> list[str]:
         active = cfg.active_connector()
     except Exception:
         return []
-    return [] if active == "openclaw" else [active]
+    if active == "openclaw" and not (
+        getattr(cfg.guardrail, "enabled", False) and (cfg.guardrail.connector or "").strip()
+    ):
+        # The implicit "openclaw" default, not a guarded OpenClaw (GAP-2452).
+        return []
+    return [active]

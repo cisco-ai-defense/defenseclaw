@@ -200,6 +200,39 @@ class TestCodexOtelAlignment(unittest.TestCase):
         self.assertEqual(result.checks[1]["status"], "fail")
         self.assertIn("telemetry state is 'stopped'", result.checks[1]["detail"])
 
+    def test_audit_write_failure_is_not_a_codex_failure(self) -> None:
+        # GAP-1927: a full audit disk already FAILs its own rows.
+        payload = {
+            "runtime": {"environment": "linux"},
+            "health": {
+                "telemetry": {
+                    "state": "error",
+                    "details": {
+                        "event_history_failure": "sqlite_write_failed",
+                        "event_history_last_sqlite_class": "full",
+                    },
+                }
+            },
+        }
+        with tempfile.TemporaryDirectory() as home, patch.dict(
+            os.environ,
+            {"CODEX_HOME": home},
+            clear=False,
+        ), patch(
+            "defenseclaw.commands.cmd_doctor._http_probe",
+            return_value=(200, json.dumps(payload)),
+        ), patch("defenseclaw.audit_capacity.audit_disk_freed", return_value=False):
+            self._write_codex_config(home, '[otel]\nenvironment = "linux"\n')
+            result = _DoctorResult()
+            _check_codex_otel_alignment(self._cfg("linux"), result)
+
+        row = result.checks[1]
+        self.assertEqual(row["status"], "warn")
+        self.assertNotIn("but telemetry state is", row["detail"])
+        self.assertIn("settings are correct", row["detail"])
+        self.assertIn("disk holding the audit database is full", row["detail"])
+        self.assertIn("audit storage", row["remediation"])
+
 
 from defenseclaw.rulepack_validation import (
     RulePackValidationBridgeError,
@@ -303,7 +336,8 @@ class TestCheckConnectorInventory(unittest.TestCase):
         self.assertEqual(skill_check["status"], "pass")
         self.assertIn("1/1 present", skill_check["detail"])
 
-    def test_skill_paths_warn_when_no_directory_exists(self) -> None:
+    def test_skill_paths_skip_when_no_directory_exists(self) -> None:
+        # No skill folder yet is a healthy setup, not a warning (GAP-1814).
         cfg = self._cfg(
             skill_dirs=["/nonexistent/path/for/test"],
             plugin_dirs=[],
@@ -312,8 +346,10 @@ class TestCheckConnectorInventory(unittest.TestCase):
         r = _DoctorResult()
         _check_connector_inventory(cfg, "codex", r)
         skill_check = next(c for c in r.checks if c["label"] == "Skill paths")
-        self.assertEqual(skill_check["status"], "warn")
+        self.assertEqual(skill_check["status"], "skip")
         self.assertIn("0/1 present", skill_check["detail"])
+        self.assertIn("no skills installed yet", skill_check["detail"])
+        self.assertEqual(r.warned, 0)
 
     def test_skill_paths_skip_when_empty_list(self) -> None:
         cfg = self._cfg(skill_dirs=[], plugin_dirs=[], servers=[])
@@ -1292,6 +1328,7 @@ class TestCheckHookContractLock(unittest.TestCase):
         check = r.checks[-1]
         self.assertEqual(check["status"], "fail")
         self.assertIn("exact_setup_executable_evidence=missing", check["detail"])
+        self.assertIn("run `defenseclaw setup opencode --yes`", check["detail"])
 
     def test_windows_opencode_known_lock_with_digest_drift_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1323,6 +1360,8 @@ class TestCheckHookContractLock(unittest.TestCase):
         check = r.checks[-1]
         self.assertEqual(check["status"], "fail")
         self.assertIn("exact_setup_executable_evidence=invalid:digest", check["detail"])
+        self.assertIn("executable changed since setup sealed it", check["detail"])
+        self.assertIn("run `defenseclaw setup opencode --yes` to re-seal it", check["detail"])
 
     def test_non_windows_opencode_seal_does_not_suppress_version_drift(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1941,6 +1980,12 @@ class TestCheckHookHealth(unittest.TestCase):
             ("vim notes.txt", False),
             ("claude --system-prompt You are polly, not hermes", False),
             ("claude hermes help", False),
+            # GAP-1804: arguments of another Python program are its own.
+            ("/u/.defenseclaw/.venv/bin/python -m defenseclaw.main plugin list --json --connector hermes", False),
+            ("python3 -c import --connector hermes", False),
+            ("python3 -u /u/.local/bin/hermes chat", True),
+            ("python3 -Wignore -m hermes_cli", None),
+            ("/u/.hermes/hermes-agent/venv/bin/python -m gateway.run", None),
         ):
             listing = f"{os.getpid()} {uid} defenseclaw doctor --connector hermes\n4242 {uid} {args}\n"
             done = subprocess.CompletedProcess([], 0, stdout=listing, stderr="")
@@ -2027,9 +2072,8 @@ class TestCheckHookHealth(unittest.TestCase):
                 _check_hook_health(cfg, "opencode", r)
         self.assertEqual(r.checks[-1]["status"], "pass")
         self.assertEqual(r.checks[-1]["label"], "OpenCode hooks")
-        # Windows wording only on Windows.
-        self.assertEqual("Windows DACL" in r.checks[-1]["detail"], os.name == "nt")
-        self.assertIn("not tamper-proof", r.checks[-1]["detail"])
+        self.assertNotIn("DACL", r.checks[-1]["detail"])
+        self.assertIn("plugin installed at", r.checks[-1]["detail"])
         self.assertIn("authenticated load heartbeat is fresh", r.checks[-1]["detail"])
 
     @unittest.skipIf(os.name == "nt", "POSIX folder modes")
@@ -2089,9 +2133,12 @@ class TestCheckHookHealth(unittest.TestCase):
             ):
                 _check_hook_health(cfg, "opencode", r)
 
-        self.assertEqual(r.checks[-1]["status"], "warn")
-        self.assertIn("no authenticated load heartbeat", r.checks[-1]["detail"])
-        self.assertNotIn("--pure", r.checks[-1]["detail"])
+        # GAP-1565: an idle OpenCode is normal, not a warning.
+        self.assertEqual(r.checks[-1]["status"], "skip")
+        self.assertIn("normal while OpenCode is closed", r.checks[-1]["detail"])
+        self.assertIn("no load heartbeat yet", r.checks[-1]["detail"])
+        for internal in ("--pure", "DACL", "tamper-proof", "authenticated"):
+            self.assertNotIn(internal, r.checks[-1]["detail"])
 
     def test_opencode_runtime_status_rejects_stale_and_malformed_heartbeat(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3435,7 +3482,11 @@ class TestDetectionStrategyRow(unittest.TestCase):
         # judge enabled but this hook connector is NOT in hook_connectors →
         # surfaces root #4: the judge won't actually fire for it.
         row = self._detection_row(self._cfg(judge_enabled=True, hook_connectors=["hermes"]), "codex")
-        self.assertIn("NOT gated", row["detail"])
+        self.assertIn("not turned on for this connector's hook lane", row["detail"])
+        # GAP-1731: the next step is the CLI command, not a config key.
+        self.assertIn("opt in: defenseclaw guardrail judge add codex", row["detail"])
+        self.assertNotIn("hook_connectors", row["detail"])
+        self.assertIn("Cisco AI Defense", row["detail"])
 
     def test_hook_connector_gated_explicit(self):
         row = self._detection_row(self._cfg(judge_enabled=True, hook_connectors=["codex"]), "codex")

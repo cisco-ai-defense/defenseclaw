@@ -140,7 +140,7 @@ type copilotVSCodeLocalProjection struct {
 var copilotVSCodeLocalProjections = map[string]copilotVSCodeLocalProjection{
 	"run_in_terminal": {
 		action: "shell",
-		keys:   []string{"command", "explanation", "goal", "isBackground", "timeout"},
+		keys:   []string{"command", "explanation", "goal", "isBackground", "mode", "timeout"},
 		fields: map[string]string{"command": "command"},
 	},
 	"read_file": {
@@ -168,6 +168,17 @@ var copilotVSCodeLocalProjections = map[string]copilotVSCodeLocalProjection{
 		keys:   []string{"filePath", "code", "explanation"},
 		fields: map[string]string{"filePath": "path", "code": "content"},
 	},
+}
+
+// CopilotVSCodeLocalTool reports a VS Code Local agent tool DefenseClaw
+// projects. The Local harness also runs the per-user Copilot CLI hook file
+// (~/.copilot/hooks) and then sends a CLI-shaped body (toolName, toolArgs)
+// with these tool names, which the Copilot CLI never uses, so the CLI
+// dialect projects them the same way (GAP-1903).
+func CopilotVSCodeLocalTool(toolName string) bool {
+	toolName = strings.TrimSpace(toolName)
+	_, ok := copilotVSCodeLocalProjections[toolName]
+	return ok || toolName == "fetch_webpage"
 }
 
 // CopilotVSCodeLocalActionTool is the ActionFacts tool name for a VS Code

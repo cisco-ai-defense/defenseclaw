@@ -89,6 +89,12 @@ func TestTrustedActionBlocksCommandRuleWithRuntimeExpandedRedirectTarget(t *test
 			redirectReductionMarker,
 			`f.commands.exists(c, c.argv_complete && c.argv.exists(a, a == "`+redirectReductionMarker+`"))`,
 		),
+		// An expanded word may be any argument, so negation over argv is unsafe.
+		redirectReductionRule(
+			"TEST-MARKER-NOT-N",
+			redirectReductionMarker,
+			`f.commands.exists(c, "`+redirectReductionMarker+`" in c.argv && !c.argv.exists(a, a == "-n"))`,
+		),
 	)
 
 	const (
@@ -102,9 +108,45 @@ func TestTrustedActionBlocksCommandRuleWithRuntimeExpandedRedirectTarget(t *test
 		want    map[string]string
 	}{
 		{
+			// A lone command's "~/" target resolves in the trusted home
+			// (GAP-1666), so the analysis is complete and sees the redirect.
 			name:    "tilde target",
 			command: "echo " + redirectReductionMarker + " > ~/dc-x.txt",
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-NO-STDOUT-REDIRECT": absent, "TEST-MARKER-COMPLETE-ARGV": blocks},
+		},
+		{
+			// GAP-0029: a parameter after a static directory is a file path.
+			name:    "static directory target with a parameter",
+			command: "echo " + redirectReductionMarker + " > /tmp/dc-x-$USER.txt",
 			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly, "TEST-MARKER-COMPLETE-ARGV": blocks},
+		},
+		{
+			// GAP-0029: the static echo runs whatever the runtime-expanded
+			// words elsewhere expand to, so a rule over its argv blocks.
+			name:    "command substitution in the target",
+			command: "echo " + redirectReductionMarker + " > /var/tmp/dc-x-$(id -u).txt",
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly, "TEST-MARKER-COMPLETE-ARGV": blocks},
+		},
+		{
+			name:    "PWD target",
+			command: "echo " + redirectReductionMarker + " > $PWD/dc-x.txt",
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly, "TEST-MARKER-COMPLETE-ARGV": blocks},
+		},
+		{
+			name:    "expansion in another command of the pipeline",
+			command: "echo " + redirectReductionMarker + " | tee /var/tmp/dc-x-$USER.txt",
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly, "TEST-MARKER-COMPLETE-ARGV": blocks},
+		},
+		{
+			// A runtime cd or a function could change what the echo runs.
+			name:    "after a runtime-expanded cd",
+			command: "cd $DIR; echo " + redirectReductionMarker + " > $PWD/dc-x.txt",
+			want:    map[string]string{"TEST-MARKER-BLOCK": detectionOnly, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly, "TEST-MARKER-COMPLETE-ARGV": detectionOnly},
+		},
+		{
+			name:    "after a function definition",
+			command: "echo() { :; }; echo " + redirectReductionMarker + " > $PWD/dc-x.txt",
+			want:    map[string]string{"TEST-MARKER-BLOCK": detectionOnly, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly, "TEST-MARKER-COMPLETE-ARGV": detectionOnly},
 		},
 		{
 			name:    "no redirect",
@@ -112,9 +154,33 @@ func TestTrustedActionBlocksCommandRuleWithRuntimeExpandedRedirectTarget(t *test
 			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-NO-STDOUT-REDIRECT": blocks, "TEST-MARKER-COMPLETE-ARGV": blocks},
 		},
 		{
-			// An expanding argument is not reduced: the argv is not static.
+			// GAP-0029: a runtime-expanded argument becomes zero or more
+			// words, so the static marker is still an argument of echo. Its
+			// argv is not complete.
 			name:    "expanding argument",
-			command: "echo " + redirectReductionMarker + " $SUFFIX > ~/dc-x.txt",
+			command: "echo " + redirectReductionMarker + " $USER > /var/tmp/dc-x.txt",
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly, "TEST-MARKER-COMPLETE-ARGV": detectionOnly, "TEST-MARKER-NOT-N": detectionOnly},
+		},
+		{
+			name:    "quoted expanding argument",
+			command: "echo " + redirectReductionMarker + ` "$USER" > /var/tmp/dc-x.txt`,
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly, "TEST-MARKER-COMPLETE-ARGV": detectionOnly},
+		},
+		{
+			name:    "expanding argument and target",
+			command: "echo " + redirectReductionMarker + " $USER > ~/dc-x.txt",
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly, "TEST-MARKER-COMPLETE-ARGV": detectionOnly},
+		},
+		{
+			// The program itself expands: nothing certain runs.
+			name:    "expanding program",
+			command: "$CMD " + redirectReductionMarker,
+			want:    map[string]string{"TEST-MARKER-BLOCK": detectionOnly, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly, "TEST-MARKER-COMPLETE-ARGV": detectionOnly},
+		},
+		{
+			// A runtime-expanded export could change what echo runs.
+			name:    "after a runtime-expanded export",
+			command: "export PATH=$DIR; echo " + redirectReductionMarker + " $USER",
 			want:    map[string]string{"TEST-MARKER-BLOCK": detectionOnly, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly, "TEST-MARKER-COMPLETE-ARGV": detectionOnly},
 		},
 		{
@@ -144,6 +210,79 @@ func TestTrustedActionBlocksCommandRuleWithRuntimeExpandedRedirectTarget(t *test
 			name:    "background list",
 			command: "cd /tmp && echo " + redirectReductionMarker + " &",
 			want:    map[string]string{"TEST-MARKER-BLOCK": detectionOnly, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly, "TEST-MARKER-COMPLETE-ARGV": detectionOnly},
+		},
+		{
+			// GAP-0029: an && or || list member with a runtime-expanded
+			// argument is judged as the same list with static words is.
+			name:    "expanding argument first in an && list",
+			command: "echo " + redirectReductionMarker + " $USER && echo done",
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-COMPLETE-ARGV": detectionOnly, "TEST-MARKER-NOT-N": detectionOnly},
+		},
+		{
+			name:    "expanding argument after && with a target",
+			command: "true && echo " + redirectReductionMarker + " $USER > /var/tmp/dc-x.txt",
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-COMPLETE-ARGV": detectionOnly},
+		},
+		{
+			name:    "expanding argument between static cd and echo",
+			command: "cd /var/tmp && echo " + redirectReductionMarker + " $USER > dc-x.txt && echo done",
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-COMPLETE-ARGV": detectionOnly},
+		},
+		{
+			name:    "expanding argument after ||",
+			command: "false || echo " + redirectReductionMarker + " $USER",
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks},
+		},
+		{
+			name:    "expanding argument after a runtime cd in an && list",
+			command: "cd $DIR && echo " + redirectReductionMarker + " $USER",
+			want:    map[string]string{"TEST-MARKER-BLOCK": detectionOnly},
+		},
+		{
+			// GAP-1639: a PowerShell profile runs only before the body, so
+			// the body's match counts without -NoProfile.
+			name:    "pwsh -Command without -NoProfile",
+			command: `pwsh -Command "echo ` + redirectReductionMarker + ` > C:/Users/alice/dc-x.txt"`,
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly, "TEST-MARKER-COMPLETE-ARGV": blocks},
+		},
+		{
+			name:    "powershell -NoLogo -Command without -NoProfile",
+			command: `powershell -NoLogo -Command "echo ` + redirectReductionMarker + `"`,
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-COMPLETE-ARGV": blocks},
+		},
+		{
+			// GAP-2079: PowerShell joins the arguments after -Command, so an
+			// unquoted body is judged as the quoted one.
+			name:    "pwsh -Command with an unquoted body and a redirect",
+			command: "pwsh -Command echo " + redirectReductionMarker + " > C:/Users/alice/dc-x.txt",
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly, "TEST-MARKER-COMPLETE-ARGV": blocks},
+		},
+		{
+			name:    "pwsh -NoProfile -Command with an unquoted body",
+			command: "pwsh -NoProfile -Command echo " + redirectReductionMarker,
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-COMPLETE-ARGV": blocks},
+		},
+		{
+			// GAP-1868: a redirect outside the quotes or a following list
+			// member does not undo the body's match either.
+			name:    "pwsh -Command with a redirect outside the quotes",
+			command: `pwsh -Command "echo ` + redirectReductionMarker + `" > C:/Users/alice/dc-x.txt`,
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly, "TEST-MARKER-COMPLETE-ARGV": blocks},
+		},
+		{
+			name:    "pwsh -Command followed by another command",
+			command: `pwsh -Command "echo ` + redirectReductionMarker + ` > C:/Users/alice/dc-x.txt"; echo done`,
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-COMPLETE-ARGV": blocks},
+		},
+		{
+			name:    "pwsh -Command in a list",
+			command: `cd $DIR; pwsh -Command "echo ` + redirectReductionMarker + `"`,
+			want:    map[string]string{"TEST-MARKER-BLOCK": detectionOnly},
+		},
+		{
+			name:    "expanding argument under if",
+			command: "if test -n \"$X\"; then echo " + redirectReductionMarker + " $USER; fi",
+			want:    map[string]string{"TEST-MARKER-BLOCK": detectionOnly},
 		},
 	}
 	for _, test := range tests {
@@ -359,5 +498,75 @@ func TestTrustedActionCorpusBlocksWithRuntimeExpandedRedirectTarget(t *testing.T
 				}
 			}
 		})
+	}
+}
+
+// GAP-1450: OpenClaw's exec tool reaches /api/v1/inspect/tool with its
+// execution controls next to the command. An argv_complete block rule must
+// block the call with yieldMs as it does without.
+func TestInspectToolBlocksOpenClawExecWithControls(t *testing.T) {
+	api := testAPIServerWithConfig(t, "action")
+	installRedirectReductionRules(t, "openclaw", redirectReductionRule(
+		"TEST-MARKER-BLOCK", redirectReductionMarker,
+		`f.commands.exists(c, c.argv_complete && c.argv.exists(a, a == "`+redirectReductionMarker+`"))`,
+	))
+	for _, args := range []string{
+		`{"command":"echo dc-block-marker > /tmp/dc-x.txt"}`,
+		`{"command":"echo dc-block-marker > /tmp/dc-x.txt","yieldMs":10000}`,
+		`{"command":"echo dc-block-marker > /tmp/dc-x.txt","timeout":30,"background":true,"workdir":"/tmp"}`,
+		// GAP-1450: arguments left for the parser (env, elevated) keep the
+		// call's parse partial; the command judged on its own still blocks.
+		`{"command":"echo dc-block-marker > /tmp/dc-x.txt","env":{"DCX":"1"},"yieldMs":5000}`,
+		`{"command":"echo dc-block-marker > /tmp/dc-x.txt","elevated":false}`,
+	} {
+		_, verdict := postInspectForConnector(t, api, "openclaw", `{"tool":"exec","args":`+args+`}`)
+		if verdict.Action != guardrailActionBlock || verdict.Severity != "CRITICAL" {
+			t.Errorf("exec %s = %s %s (%s), want a CRITICAL block", args, verdict.Action, verdict.Severity, verdict.Reason)
+		}
+	}
+	_, verdict := postInspectForConnector(t, api, "openclaw",
+		`{"tool":"exec","args":{"command":"echo hello > /tmp/dc-x.txt","env":{"DCX":"1"}}}`)
+	if verdict.Action == guardrailActionBlock {
+		t.Errorf("benign exec with env = %s (%s), want no block", verdict.Action, verdict.Reason)
+	}
+}
+
+// GAP-1451: an OpenClaw block is a finding attributed to connector openclaw
+// with target openclaw:exec, and its inspect-tool-block row carries the
+// verdict's severity.
+func TestInspectToolBlockAttributesOpenClawFinding(t *testing.T) {
+	api := testAPIServerWithConfig(t, "action")
+	installRedirectReductionRules(t, "openclaw", redirectReductionRule(
+		"TEST-MARKER-BLOCK", redirectReductionMarker,
+		`f.commands.exists(c, c.argv.exists(a, a == "`+redirectReductionMarker+`"))`,
+	))
+	_, verdict := postInspectForConnector(t, api, "openclaw",
+		`{"tool":"exec","args":{"command":"echo dc-block-marker > /tmp/dc-x.txt"}}`)
+	if verdict.Action != guardrailActionBlock {
+		t.Fatalf("verdict = %s, want block", verdict.Action)
+	}
+	events, err := api.store.ListEvents(50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var finding, block bool
+	for _, event := range events {
+		switch event.Action {
+		case "scan-finding":
+			finding = true
+			target := auditStringValue(event.Structured["defenseclaw.finding.target_ref"])
+			if event.Connector != "openclaw" || target != "openclaw:exec" || event.Severity != "CRITICAL" {
+				t.Errorf("scan-finding connector=%q target=%q severity=%q, want openclaw, openclaw:exec, CRITICAL",
+					event.Connector, target, event.Severity)
+			}
+		case "inspect-tool-block":
+			block = true
+			if event.Connector != "openclaw" || event.Severity != "CRITICAL" {
+				t.Errorf("inspect-tool-block connector=%q severity=%q, want openclaw, CRITICAL", event.Connector, event.Severity)
+			}
+		}
+	}
+	if !finding || !block {
+		t.Fatalf("finding=%t block=%t, want both rows", finding, block)
 	}
 }

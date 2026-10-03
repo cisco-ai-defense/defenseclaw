@@ -23,7 +23,7 @@ import "context"
 // plugin setup contract through the platform no-op admission implementation.
 func (c *AMPConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	if err := validateAmpWindowsSetupAdmission(opts); err != nil {
-		return err
+		return executableAdmissionRefused(err)
 	}
 	return c.hookOnlyConnector.Setup(ctx, opts)
 }

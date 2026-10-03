@@ -854,6 +854,8 @@ _SPECS: dict[str, _AgentSpec] = {
     "devin": _AgentSpec((), "devin", ("--version",)),
     "copilot": _AgentSpec(
         (
+            # GAP-1481: the user-level hooks file DefenseClaw writes.
+            "~/.copilot/hooks/defenseclaw.json",
             "~/.copilot/mcp-config.json",
             ".github/hooks/defenseclaw.json",
             ".github/mcp.json",
@@ -975,6 +977,11 @@ def discover_agents(
     if use_cache and not refresh:
         cached = _read_cache(data_dir=data_dir)
         if cached is not None:
+            # Binary and version probes are what the cache saves; config
+            # files are re-checked so Configured/Config match the disk.
+            for agent_name, signal in cached.agents.items():
+                signal.config_path = _agent_config_path(agent_name, include_workspace_config=False)
+                signal.configured = bool(signal.config_path)
             return cached
 
     scanned_at = _format_rfc3339(_now_utc())
@@ -1004,6 +1011,7 @@ def discover_agents(
             )
         )
     agents = {signal.name: signal for signal in signals}
+    _keep_versions_of_slow_unchanged_agents(agents, data_dir=data_dir)
     discovery = AgentDiscovery(scanned_at=scanned_at, agents=agents, cache_hit=False)
     if shared is not None:
         shared[shared_key] = discovery
@@ -1013,6 +1021,56 @@ def discover_agents(
     if persist_cache:
         _write_cache(discovery, data_dir=data_dir)
     return discovery
+
+
+def _keep_versions_of_slow_unchanged_agents(
+    agents: dict[str, AgentSignal],
+    *,
+    data_dir: str | os.PathLike[str] | None = None,
+) -> None:
+    """Keep the last observed version of a CLI whose probe only timed out.
+
+    Setup rescans every agent and republishes this cache, and the gateway
+    reads each peer's version from it when it restarts. On a busy host one
+    slow ``--version`` used to erase a version seen minutes earlier, so action
+    mode refused that peer and setup of an unrelated connector failed to
+    converge (RHEL-U3-13). The old version is kept only for the same binary
+    path, and only if that file has not changed since the earlier scan.
+    """
+    slow = [
+        signal
+        for signal in agents.values()
+        if signal.binary_path and not signal.version and VERSION_PROBE_TIMED_OUT in (signal.error or "")
+    ]
+    if not slow:
+        return
+    try:
+        with open(_cache_path(data_dir=data_dir), encoding="utf-8") as fh:
+            payload = json.load(fh)
+    except Exception:
+        return
+    if not isinstance(payload, dict) or payload.get("version") != CACHE_SCHEMA_VERSION:
+        return
+    previous_scan = _parse_rfc3339(str(payload.get("scanned_at") or ""))
+    previous_agents = payload.get("agents")
+    if previous_scan is None or not isinstance(previous_agents, dict):
+        return
+    for signal in slow:
+        previous = previous_agents.get(signal.name)
+        if not isinstance(previous, dict):
+            continue
+        version = str(previous.get("version") or "")
+        if not version or str(previous.get("binary_path") or "") != signal.binary_path:
+            continue
+        try:
+            changed_at = os.stat(os.path.realpath(signal.binary_path)).st_mtime
+        except OSError:
+            continue
+        if changed_at >= previous_scan.timestamp():
+            continue
+        signal.version = version
+        signal.error = ""
+        signal.installed = True
 
 
 def first_installed(disc: AgentDiscovery, fallback: str = "codex") -> str:
@@ -1060,6 +1118,13 @@ def apply_config_state(disc: AgentDiscovery, cfg: Any) -> AgentDiscovery:
     return disc
 
 
+def _display_version(version: str) -> str:
+    """Return a version for display: some CLIs end their banner with a period
+    ("GitHub Copilot CLI 1.0.90."). The raw value stays untouched for the
+    connector-contract gate."""
+    return (version or "").strip().rstrip(".")
+
+
 def render_discovery_table(disc: AgentDiscovery) -> str:
     """Render discovery as a Rich table string suitable for click.echo."""
     try:
@@ -1082,7 +1147,7 @@ def render_discovery_table(disc: AgentDiscovery) -> str:
 
     for name in _ordered_connector_names(disc):
         signal = disc.agents[name]
-        detail = signal.version or signal.error
+        detail = _display_version(signal.version) or signal.error
         table.add_row(
             signal.name,
             "yes" if signal.installed else "no",
@@ -1097,13 +1162,13 @@ def render_discovery_table(disc: AgentDiscovery) -> str:
     return stream.getvalue()
 
 
-def _scan_agent(
-    name: str,
-    *,
-    data_dir: str | os.PathLike[str] | None = None,
-    require_trusted_binary_paths: bool = False,
-    include_workspace_config: bool = True,
-) -> AgentSignal:
+def _agent_config_path(name: str, *, include_workspace_config: bool = True) -> str:
+    """Return the first existing config/hook file for ``name``, or "".
+
+    It is a cheap file check, so a cached discovery recomputes it on every
+    read: setup and setup remove change these files after the cache was
+    written (GAP-1627).
+    """
     spec = _SPECS.get(name, _AgentSpec((), "", ("--version",)))
     config_candidates = spec.config_candidates
     if name == "codex":
@@ -1158,7 +1223,18 @@ def _scan_agent(
                 *connector_config_files("devin", workspace_dir=workspace),
             )
         )
-    config_path = _first_existing_file(config_candidates)
+    return _first_existing_file(config_candidates)
+
+
+def _scan_agent(
+    name: str,
+    *,
+    data_dir: str | os.PathLike[str] | None = None,
+    require_trusted_binary_paths: bool = False,
+    include_workspace_config: bool = True,
+) -> AgentSignal:
+    spec = _SPECS.get(name, _AgentSpec((), "", ("--version",)))
+    config_path = _agent_config_path(name, include_workspace_config=include_workspace_config)
     binary_candidates = _binary_candidates_for_agent(name, spec)
     binary_path = binary_candidates[0] if binary_candidates else ""
     version = ""
@@ -1765,6 +1841,7 @@ def _version_for_binary(
     *,
     require_trusted_binary_paths: bool = True,
     data_dir: str | os.PathLike[str] | None = None,
+    timeout_override: float | None = None,
 ) -> tuple[str, str]:
     # M-4: the value of ``binary_path`` is sourced from
     # ``shutil.which(binary_name)`` which honours $PATH — an attacker
@@ -1776,10 +1853,12 @@ def _version_for_binary(
     binary_name = _binary_command_name(binary_path)
     env = None
     timeout = VERSION_TIMEOUT_SECONDS
-    if binary_name == "openhands":
-        # Its --version loads the whole Python agent stack: 15 s idle on Linux.
+    if binary_name in {"openhands", "hermes"}:
+        # OpenHands' --version loads the whole Python agent stack (15 s idle
+        # on Linux); Hermes' runs a synchronous update check (17.5 s on
+        # Windows), and a timeout made init drop an enrolled Hermes (GAP-1604).
         timeout = 30.0
-    elif binary_name in {"claude", "hermes", "omnigent"} or (
+    elif binary_name in {"claude", "omnigent"} or (
         os.name == "nt" and binary_name in {"amp", "agent", "copilot", "cursor-agent"}
     ):
         timeout = 8.0
@@ -1792,6 +1871,8 @@ def _version_for_binary(
         timeout = 10.0
     if binary_name == "openhands":
         env = {**os.environ, "OPENHANDS_SUPPRESS_BANNER": "1"}
+    if timeout_override is not None:
+        timeout = max(timeout, timeout_override)
 
     try:
         result = subprocess.run(
@@ -1826,8 +1907,14 @@ def _version_for_agent_binary(
     *,
     require_trusted_binary_paths: bool = True,
     data_dir: str | os.PathLike[str] | None = None,
+    timeout_override: float | None = None,
 ) -> tuple[str, str]:
-    """Probe a CLI, or read metadata for a GUI that must not be launched."""
+    """Probe a CLI, or read metadata for a GUI that must not be launched.
+
+    ``timeout_override`` raises the probe budget (never lowers it); setup's
+    protected selection uses it so a busy host does not fail a probe that
+    discovery just passed (GAP-1620).
+    """
 
     spec = _SPECS.get(name)
     bundle_relatives = spec.macos_bundle_binaries if spec is not None else ()
@@ -1848,6 +1935,7 @@ def _version_for_agent_binary(
             version_args,
             require_trusted_binary_paths=True,
             data_dir=data_dir,
+            timeout_override=timeout_override,
         )
         if error:
             return version, error
@@ -1866,6 +1954,7 @@ def _version_for_agent_binary(
             True if name == "devin" and _is_windows_host() else require_trusted_binary_paths
         ),
         data_dir=data_dir,
+        timeout_override=timeout_override,
     )
     if name == "devin" and not error:
         version = _normalize_devin_cli_version_output(version)
@@ -2479,7 +2568,7 @@ def _render_plain_table(disc: AgentDiscovery) -> str:
                     signal.mode if signal.active else "no",
                     _display_path(signal.config_path),
                     _display_path(signal.binary_path),
-                    signal.version or signal.error,
+                    _display_version(signal.version) or signal.error,
                 ]
             )
         )

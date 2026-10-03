@@ -320,6 +320,49 @@ def test_uv_python_with_other_pythons_stays(per_user_install) -> None:
 
 
 @posix_only
+def test_uv_cache_stays_when_the_installer_kept_uv_in_the_data_dir(per_user_install) -> None:
+    # GAP-1125: the current installer keeps uv's cache in data_dir/.uv, so
+    # ~/.cache/uv is the account's own.
+    cache = per_user_install.home / ".cache" / "uv"
+    cache.mkdir(parents=True)
+    (per_user_install.data_dir / ".uv" / "cache").mkdir(parents=True)
+    with patch.dict(os.environ, {"PATH": str(per_user_install.bin_dir), "XDG_CACHE_HOME": ""}):
+        os.environ.pop("UV_CACHE_DIR", None)
+        leftovers = cmd_uninstall._installer_uv_leftovers(
+            str(per_user_install.bin_dir), (str(per_user_install.bin_dir / "uv"),), str(per_user_install.data_dir), "linux"
+        )
+    assert leftovers == ()
+
+
+@posix_only
+def test_all_binaries_removes_old_uv_cache_entries_and_hook_scratch(per_user_install, tmp_path: Path) -> None:
+    # GAP-1411: a 0.8.x installer's uv left DefenseClaw in the account's own
+    # uv cache, and hooks that were killed left their scratch HOMEs in TMPDIR.
+    home, bin_dir = per_user_install.home, per_user_install.bin_dir
+    (per_user_install.data_dir / ".uv" / "cache").mkdir(parents=True)
+    cache = home / ".cache" / "uv"
+    (cache / "archive-v0" / "a1" / "defenseclaw-0.8.10.dist-info").mkdir(parents=True)
+    log = tmp_path / "uv-args"
+    (bin_dir / "uv").write_text(f'#!/bin/sh\necho "$UV_CACHE_DIR $*" > {log}\n', encoding="utf-8")
+    (bin_dir / "uv").chmod(0o755)
+    scratch_root = tmp_path / "tmp"
+    scratch = scratch_root / "defenseclaw-hook.Ab12Cd34"
+    (scratch / "sub").mkdir(parents=True)
+    (scratch_root / "defenseclaw-hook-notes").mkdir()
+    with (
+        patch.dict(os.environ, {"PATH": str(bin_dir), "XDG_CACHE_HOME": ""}),
+        patch.object(cmd_uninstall, "_hook_temp_roots", return_value=(str(scratch_root),)),
+    ):
+        os.environ.pop("UV_CACHE_DIR", None)
+        result = CliRunner().invoke(cmd_uninstall.uninstall_cmd, ["--all", "--binaries", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    assert "uv cache clean defenseclaw" in result.output
+    assert log.read_text(encoding="utf-8").split() == [str(cache), "cache", "clean", "defenseclaw"]
+    assert _entries(scratch_root) == ["defenseclaw-hook-notes"]
+
+
+@posix_only
 def test_all_binaries_removes_an_emptied_local_bin(per_user_install) -> None:
     (per_user_install.bin_dir / "rg").unlink()
 
@@ -351,3 +394,35 @@ def test_remove_created_dirs_keeps_folders_with_content(tmp_path: Path) -> None:
 
 def test_reset_keeps_the_installer_uv() -> None:
     assert ".uv" in cmd_uninstall._RESET_PRESERVED_ENTRIES
+
+
+@posix_only
+def test_all_binaries_removes_uv_editable_builds_of_defenseclaw(per_user_install) -> None:
+    # GAP-1873: `uv cache clean defenseclaw` leaves the editable build a
+    # `make all` made; uninstall removes it and keeps other projects' entries.
+    home, bin_dir = per_user_install.home, per_user_install.bin_dir
+    (per_user_install.data_dir / ".uv" / "cache").mkdir(parents=True)
+    cache = home / ".cache" / "uv"
+    editable = cache / "sdists-v9" / "editable" / "fd4b0bc0ea720841"
+    (editable / "PMWiJyLN").mkdir(parents=True)
+    (editable / "PMWiJyLN" / "defenseclaw-0.8.10-0.editable-py3-none-any.whl").write_bytes(b"whl")
+    (editable / "revision.rev").write_bytes(b"")
+    archive = cache / "archive-v0" / "SAh7Zu"
+    (archive / "defenseclaw-0.8.10.dist-info").mkdir(parents=True)
+    (archive / "__editable__.defenseclaw-0.8.10.pth").write_text("/gone/cli\n", encoding="utf-8")
+    other = cache / "archive-v0" / "Other1" / "click-8.1.7.dist-info"
+    other.mkdir(parents=True)
+    (bin_dir / "uv").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (bin_dir / "uv").chmod(0o755)
+    with (
+        patch.dict(os.environ, {"PATH": str(bin_dir), "XDG_CACHE_HOME": ""}),
+        patch.object(cmd_uninstall, "_hook_temp_roots", return_value=()),
+    ):
+        os.environ.pop("UV_CACHE_DIR", None)
+        result = CliRunner().invoke(cmd_uninstall.uninstall_cmd, ["--all", "--binaries", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    assert not editable.exists()
+    assert not archive.exists()
+    assert other.is_dir()
+    assert "removed DefenseClaw's entries from uv's cache" in result.output

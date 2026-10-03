@@ -257,6 +257,31 @@ block, ask, or decision authority.
   <Edge from="otel" to="gateway" />
 </Flow>
 
+**Behind an HTTP proxy.** DefenseClaw's hooks reach the gateway on 127.0.0.1
+directly and ignore `HTTP_PROXY` and `HTTPS_PROXY`. Claude Code's own OTel
+exporter follows those variables, so its telemetry to the gateway, with its
+OTLP credential, goes to the proxy unless the loopback is excluded, and it is
+lost when the proxy cannot reach your machine's loopback. The exporter has no
+proxy option of its own, so set `NO_PROXY=127.0.0.1,localhost` (and
+`no_proxy`) in the shell that starts Claude Code, for example in `~/.bashrc`
+or `~/.zshrc`. On Windows run
+`setx NO_PROXY 127.0.0.1,localhost` once and open a new terminal.
+
+**Another account on the gateway port.** Per-user installs on Linux, macOS and
+Windows point Claude Code's OTel exporter at this account's gateway API port (for
+example `http://127.0.0.1:18970`) with the Claude-scoped OTLP bearer in
+`~/.claude/settings.json`. DefenseClaw's hooks and CLI check who owns that port
+and send nothing to another account's listener, but Claude Code's exporter
+cannot: if another account holds the port while this account's gateway is
+stopped, that listener receives Claude Code's OTLP logs and metrics and the
+Claude-scoped OTLP bearer. The bearer only lets it post Claude Code OTLP logs
+and metrics into this account's gateway; it never authenticates hooks,
+inspection, management or another connector. This is a known residual for
+1.0. To reduce it, give each account its own gateway port
+(`defenseclaw setup gateway --api-port <port>`), keep the gateway running while
+Claude Code runs, and treat Claude Code telemetry attribution as advisory after
+the gateway was down. See [Residual risks](/docs/enterprise/threat-model#residual-risks).
+
 ## In an OpenShell sandbox
 
 `defenseclaw sandbox run claude` runs Claude Code in an NVIDIA OpenShell

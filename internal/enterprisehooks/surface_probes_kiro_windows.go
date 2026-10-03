@@ -29,8 +29,8 @@ import (
 // but each run copies the build to run\chat-cli-<version>.exe, so the
 // active version is the run copy whose size matches kiro-cli.exe (the
 // highest such version when several match), as for the native Claude
-// installer. A kiro-cli that has never run has no copy: it is reported as
-// installed with an unreadable version.
+// installer. A kiro-cli that has never run has no copy: it is enrolled at
+// the standalone floor until its first run names the version.
 //
 // The Kiro IDE reads the global %USERPROFILE%\.kiro\hooks file from
 // KiroIDEGlobalHooksFloor. Its version is the resources\app\product.json of
@@ -48,10 +48,28 @@ func discoverWindowsKiroAgentVersion(profileHome string) string {
 		return cli
 	}
 	ide, _ := discoverWindowsKiroIDEVersion(profileHome)
-	if ide == "" || kiroIDEBelowGlobalHooksFloor(ide) {
-		return ""
+	if ide != "" && !kiroIDEBelowGlobalHooksFloor(ide) {
+		return ide + KiroIDEVersionSuffix
 	}
-	return ide + KiroIDEVersionSuffix
+	// A kiro-cli that has never run names no version yet. Enroll it at the
+	// standalone floor so its first chat already runs with the DefenseClaw
+	// agent and hooks; the run copy names the real version on the next
+	// cycle, which then re-admits or reports it.
+	if windowsKiroCLILauncherPresent(profileHome) {
+		return standaloneNotGatedAgentFloor("kiro")
+	}
+	return ""
+}
+
+// windowsKiroCLILauncherPresent reports a regular kiro-cli.exe under a plain
+// %LOCALAPPDATA%\Kiro-Cli folder.
+func windowsKiroCLILauncherPresent(profileHome string) bool {
+	root := filepath.Join(profileHome, "AppData", "Local", "Kiro-Cli")
+	if winpath.RejectReparseChain(root) != nil {
+		return false
+	}
+	launcher, err := os.Lstat(filepath.Join(root, "kiro-cli.exe"))
+	return err == nil && launcher.Mode().IsRegular()
 }
 
 func discoverWindowsKiroCLIVersion(profileHome string) string {

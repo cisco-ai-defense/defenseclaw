@@ -138,6 +138,9 @@ root-owned gateway for its status, and reports `not-installed` otherwise.
 
 The pkg receipt is the other inventory signal:
 `pkgutil --pkg-info com.cisco.defenseclaw.enterprise` prints `version: X.Y.Z`.
+A pkg whose post-install step failed records no receipt, even after
+`ensure --from-package` finishes the install, so install the pkg again once
+you fix the cause.
 
 ## Route B: macOS app (PKG)
 

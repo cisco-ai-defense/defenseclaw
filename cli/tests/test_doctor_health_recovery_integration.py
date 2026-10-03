@@ -712,6 +712,43 @@ def test_audit_store_moved_aside_by_the_gateway_is_reported(tmp_path) -> None:
     assert store["status"] == "pass"
     assert notice["status"] == "warn" and notice["reason_code"] == "audit-db-moved-aside"
     assert f"sqlite3 {moved} .recover" in notice["detail"]
+    assert "defenseclaw mcp list" in notice["detail"] and "kept the block/allow" not in notice["detail"]
+
+
+def test_moved_audit_store_with_unreadable_block_lists_says_none_were_carried_over(tmp_path) -> None:
+    # GAP-1958: doctor said the block/allow lists were kept when 0 were.
+    data_dir = _private_data_dir(tmp_path)
+    cfg = _cfg(data_dir)
+    moved = cfg.audit_db + ".corrupt-20261002T222056Z"
+    Path(moved).write_bytes(b"x")
+    Path(moved + ".carryover.json").write_text(
+        '{"carried_over": 0, "error": "file is not a database"}', encoding="utf-8"
+    )
+
+    result = _DoctorResult()
+    cmd_doctor._check_moved_aside_audit_stores(cfg.audit_db, result)
+
+    (notice,) = result.checks
+    assert notice["detail"].startswith("the audit store was corrupt and was moved aside")
+    assert "0 entries were carried over and earlier blocks no longer apply" in notice["detail"]
+    assert "kept the block/allow" not in notice["detail"]
+
+
+def test_moved_audit_store_with_one_carried_over_entry_uses_singular(tmp_path) -> None:
+    # GAP-2053: "carried over 1 block/allow entries" read wrong.
+    moved = tmp_path / "audit.db.corrupt-20261002T222056Z"
+    Path(str(moved) + ".carryover.json").write_text('{"carried_over": 1}', encoding="utf-8")
+    assert cmd_doctor._moved_store_block_allow_summary(moved) == (
+        "started a new store and carried over 1 block/allow entry."
+    )
+
+
+def test_moved_audit_store_without_note_names_the_block_allow_entries(tmp_path) -> None:
+    # GAP-2429: a store moved by an earlier build has no note; "check them" had no antecedent.
+    summary = cmd_doctor._moved_store_block_allow_summary(tmp_path / "audit.db.corrupt-20261002T044914Z")
+    assert "cannot tell whether the old block/allow entries were carried over" in summary
+    assert "check your MCP, skill, plugin and tool block/allow entries with defenseclaw mcp list" in summary
+    assert "check them" not in summary
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX mode custody regression")

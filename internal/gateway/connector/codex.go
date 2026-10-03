@@ -1704,7 +1704,16 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 		exactBackupSafe := true
 		if err := atomicTransformFileWithStateDir(configPath, opts.DataDir, 0o600, func(raw []byte, exists bool) (atomicTransformResult, error) {
 			if !managedFileBackupMatchesSnapshot(managedBackup, raw, exists) {
-				exactBackupSafe = false
+				// Codex writes its own entries (folder trust, model choice) to
+				// config.toml, so the record drifts in normal use. Re-record the
+				// current bytes instead of dropping the record: teardown filters
+				// DefenseClaw's fields out of an exact restore, so the outside
+				// edit survives either way, and doctor keeps drift detection
+				// after a plain gateway restart (GAP-2300).
+				managedBackup = recaptureManagedFileBackup(
+					opts.DataDir, c.Name(), "config.toml", configPath, raw, exists,
+				)
+				exactBackupSafe = managedBackup != nil
 			}
 			if err := render(raw); err != nil {
 				return atomicTransformResult{}, err
@@ -2430,7 +2439,9 @@ func writeCodexNotifyBridge(opts SetupOpts) error {
 		"JSON=\n" +
 		"CURL_CONFIG_TOKEN=\n" +
 		"unset API_TOKEN JSON CURL_CONFIG_TOKEN USER_ID USER_NAME DEFENSECLAW_GATEWAY_TOKEN\n" +
-		"curl --silent --show-error --max-time 5 \\\n" +
+		// --noproxy keeps the loopback POST (bearer and turn payload) away from
+		// an inherited HTTP(S)_PROXY, like the connector hook scripts.
+		"curl --silent --show-error --noproxy '*' --max-time 5 \\\n" +
 		"  --header 'Content-Type: application/json' \\\n" +
 		transport +
 		// X-DefenseClaw-Client is required by the gateway's CSRF gate;

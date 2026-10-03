@@ -198,6 +198,11 @@ func TestWindowsStandaloneEnrollmentCountsOnlyPendingTargets(t *testing.T) {
 	if err != nil || enrollment.Targets != 2 || enrollment.Pending != 1 {
 		t.Fatalf("enrollment = %+v, %v; want 2 targets, 1 pending", enrollment, err)
 	}
+	// Each account and its connectors' states (GAP-1073).
+	if len(enrollment.Accounts) != 2 || enrollment.Accounts[0].Connectors["codex"] != "enrolled" ||
+		enrollment.Accounts[1].Connectors["codex"] != "pending" {
+		t.Fatalf("enrollment accounts = %+v", enrollment.Accounts)
+	}
 }
 
 // Status and verify of a computer with a pending transaction name it and the
@@ -288,8 +293,39 @@ func TestWindowsStandaloneStatusNamesAPIPortHolders(t *testing.T) {
 		t.Fatalf("holders = %+v, message %q; want this process twice and the hidden holder, not the gateway", status.APIPortHolders, message)
 	}
 
+	// A lifecycle that failed before it read the deployment (a CLI from
+	// another build, GAP-1658) names no gateway service: the installed
+	// DefenseClawGateway service is still not a holder of its own port, and
+	// the error names the build mismatch and the installed CLI instead.
+	uninstall := enterprisestatus.New("uninstall", managed.ProfileStandalone, "windows", "1.0.0")
+	applyWindowsEnterpriseInstallerReport(uninstall, &windowsEnterpriseLifecycleOptions{}, &windowsEnterpriseInstallerReport{
+		Error: `DefenseClaw enterprise installer rejected its module before import: DefenseClaw enterprise installer module SHA-256 ` +
+			`does not match the pinned payload manifest: C:\ProgramData\DefenseClaw-Installer-0f\DefenseClawEnterprise.psm1`,
+	}, windowsEnterpriseStandaloneRun{ExitCode: 1603})
+	if len(uninstall.Errors) == 0 || uninstall.Errors[0].Code != "installer_build_mismatch" ||
+		!strings.Contains(uninstall.Errors[0].Message, "enterprise windows uninstall --profile standalone") {
+		t.Fatalf("mismatched CLI uninstall errors = %+v", uninstall.Errors)
+	}
+	for _, e := range uninstall.Errors {
+		if e.Code == "api_port_held" {
+			t.Fatalf("a lifecycle that never started a gateway named a port holder: %+v", uninstall.Errors)
+		}
+	}
+	// A failed lifecycle whose report names no service still does not name
+	// the installed gateway service as a holder of its own port.
+	failed := enterprisestatus.New("repair", managed.ProfileStandalone, "windows", "1.0.0")
+	applyWindowsEnterpriseInstallerReport(failed, &windowsEnterpriseLifecycleOptions{}, &windowsEnterpriseInstallerReport{
+		Error: "enterprise readiness timed out: broker_ready=True gateway_ready=False guardian_ready=False",
+	}, windowsEnterpriseStandaloneRun{ExitCode: 1603})
+	for _, e := range failed.Errors {
+		if e.Code == "api_port_held" && strings.Contains(e.Message, "pid 7 ") {
+			t.Fatalf("the installed gateway service was named a port holder: %+v", failed.Errors)
+		}
+	}
+
 	// A first install that timed out waiting for the gateway names the
 	// holders too; with no gateway running, every listener is one.
+	windowsEnterpriseServicePID = func(string) int { return 0 }
 	ensure := enterprisestatus.New("ensure", managed.ProfileStandalone, "windows", "1.0.0")
 	applyWindowsEnterpriseInstallerReport(ensure, &windowsEnterpriseLifecycleOptions{}, &windowsEnterpriseInstallerReport{
 		Error: "enterprise readiness timed out: broker_ready=True gateway_ready=False guardian_ready=False",

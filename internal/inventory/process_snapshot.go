@@ -23,7 +23,9 @@ import (
 )
 
 // processInfo is deliberately data-minimized. In particular, it never holds a
-// command line, arguments, environment, or full executable path.
+// command line, arguments or environment. Image, the Windows executable path,
+// is read only to attribute a service-context scan's process to the profile
+// it runs from (attributeProcessOwners) and never leaves the detector.
 type processInfo struct {
 	PID       int
 	PPID      int
@@ -32,17 +34,39 @@ type processInfo struct {
 	StartedAt time.Time
 	Connector string
 	Windows   bool
+	Image     string
+	// OwnerID (a SID) and OwnerName name the account whose profile holds
+	// Image.
+	OwnerID   string
+	OwnerName string
+	// SessionOwnerID (Windows) is the SID of the account the process runs
+	// as, from Remote Desktop Services: its token SID where visible, else
+	// the account signed in to its session. Empty in session 0.
+	SessionOwnerID string
+	// Argv0 is the basename of argv[0] on Linux, kept only when it differs
+	// from Comm. A runtime that renames its main thread hides the command
+	// from comm: cursor-agent runs `exec -a "$0" node ...` and Node names
+	// the thread MainThread (GAP-1207). Never any other argument.
+	Argv0 string
+	// Argv0Target is the basename argv[0] resolves to when it is an absolute
+	// symlink, kept only when it differs (Cursor's `agent` alias, GAP-1865).
+	Argv0Target string
 }
 
 type windowsProcessEntry struct {
 	PID  int
 	PPID int
 	Comm string
+	// SessionOwnerID: see processInfo.SessionOwnerID.
+	SessionOwnerID string
 }
 
 type windowsProcessDetails struct {
 	User      string
 	StartedAt time.Time
+	// Image is the executable's path, which Windows reports without opening
+	// the process, so it is known even where the token owner is not.
+	Image string
 }
 
 type windowsSnapshotReader interface {
@@ -67,7 +91,8 @@ func collectWindowsSnapshot(reader windowsSnapshotReader) ([]processInfo, error)
 		details, _ := reader.Details(entry.PID)
 		infos = append(infos, processInfo{
 			PID: entry.PID, PPID: entry.PPID, Comm: comm,
-			User: details.User, StartedAt: details.StartedAt, Windows: true,
+			User: details.User, StartedAt: details.StartedAt, Image: details.Image, Windows: true,
+			SessionOwnerID: entry.SessionOwnerID,
 		})
 	}
 	return infos, nil
@@ -83,17 +108,48 @@ var processSnapshotSource = platformProcessSnapshot
 // intentionally narrow; an unrelated command whose arguments mention an AI
 // product is never visible to this classifier. Ambiguous catalog aliases fail
 // closed: for example, a basename-only Claude.exe observation cannot safely
-// distinguish Claude Code from Claude Desktop. A node child may inherit only a
+// distinguish Claude Code from Claude Desktop, so that one basename is settled
+// by its executable path (windowsClaudeCodeImage). A node child may inherit only a
 // Codex or Claude Code parent, which covers managed npm launchers without
 // turning desktop-app helper processes into additional product instances.
 func classifyWindowsProcesses(procs []processInfo, catalog []AISignature) {
 	aliases := windowsProcessAliases(catalog)
+	claudeCode, cursor := false, false
+	for _, sig := range catalog {
+		claudeCode = claudeCode || normalizeAIID(sig.ID) == "claudecode"
+		cursor = cursor || normalizeAIID(sig.ID) == "cursor"
+	}
 	byPID := make(map[int]*processInfo, len(procs))
 	for i := range procs {
 		byPID[procs[i].PID] = &procs[i]
-		if connector := aliases[normalizedWindowsProcessName(procs[i].Comm)]; connector != "" {
+		name := normalizedWindowsProcessName(procs[i].Comm)
+		if connector := aliases[name]; connector != "" {
 			procs[i].Connector = connector
+		} else if name == "claude" && claudeCode && windowsClaudeCodeImage(procs[i].Image) {
+			procs[i].Connector = "claudecode"
+		} else if name == "node" && cursor && windowsCursorAgentImage(procs[i].Image) {
+			procs[i].Connector = "cursor"
 		}
+	}
+	// A helper an agent starts from its own executable is part of that run:
+	// cursor-agent's worker-server is a second cursor-agent node.exe
+	// (GAP-1849) and Amp's plugin runtimes are amp.exe children of amp.exe
+	// (GAP-1965). Fold each into its parent so one run is one process.
+	// The Copilot CLI runs its engine as a copilot-runtime.exe child; that
+	// engine alone is VS Code Copilot Chat's agent host (GAP-2043).
+	var helpers []int
+	for i := range procs {
+		if procs[i].Connector == "" {
+			continue
+		}
+		name := normalizedWindowsProcessName(procs[i].Comm)
+		if parent := byPID[procs[i].PPID]; parent != nil && parent.PID != procs[i].PID && parent.Connector == procs[i].Connector &&
+			(normalizedWindowsProcessName(parent.Comm) == name || name == "copilot-runtime") {
+			helpers = append(helpers, i)
+		}
+	}
+	for _, i := range helpers {
+		procs[i].Connector = ""
 	}
 	for i := 0; i < len(procs); i++ {
 		if procs[i].Connector != "" || normalizedWindowsProcessName(procs[i].Comm) != "node" {
@@ -165,6 +221,28 @@ func windowsProcessAliases(catalog []AISignature) map[string]string {
 		}
 	}
 	return resolved
+}
+
+// windowsClaudeCodeImage resolves the claude.exe basename that Claude Code
+// and Claude Desktop share by the executable path: Claude Code's native
+// installer and its npm package keep claude.exe under these folders, which
+// Claude Desktop never uses. Any other path stays ambiguous and unclassified.
+func windowsClaudeCodeImage(image string) bool {
+	image = strings.ToLower(strings.ReplaceAll(image, "/", `\`))
+	for _, marker := range []string{`\.local\bin\`, `\.local\share\claude\`, `\node_modules\@anthropic-ai\claude-code\`} {
+		if strings.Contains(image, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// windowsCursorAgentImage reports the node.exe that cursor-agent ships and
+// runs as on Windows (%LOCALAPPDATA%\cursor-agent\versions\<version>\node.exe),
+// so its runs are discovered like other agents' (GAP-1738).
+func windowsCursorAgentImage(image string) bool {
+	image = strings.ToLower(strings.ReplaceAll(image, "/", `\`))
+	return strings.Contains(image, `\appdata\local\cursor-agent\versions\`) && strings.HasSuffix(image, `\node.exe`)
 }
 
 func windowsNodeParentConnector(connector string) bool {

@@ -115,7 +115,7 @@ func renderClaudeHigherPrecedence(opts Options, policy config.ResolvedConnectorP
 	if err != nil || opts.claudeVersionFloorMode() != config.ClaudeVersionFloorEnforce {
 		return rendered, err
 	}
-	floor := ClaudeVersionFloor()
+	floor := claudeVersionFloorFor(opts)
 	if floor == "" {
 		return rendered, nil
 	}
@@ -378,7 +378,7 @@ func inspectClaude(opts Options, policy config.ResolvedConnectorPolicy, state *S
 		state.conflict("Claude Code version floor: %v", err)
 	}
 	state.detail("server-managed settings from the claude.ai console are not visible locally; `enterprise policy verify --live --connector claudecode --user <user>` proves the effective hooks")
-	state.detail("residual: `claude --bare` and CLAUDE_CODE_SIMPLE=1 skip managed SessionStart and UserPromptSubmit hooks (PreToolUse and later tool hooks still run); Claude Code offers no managed control for this")
+	state.detail("residual: `claude --bare` and CLAUDE_CODE_SIMPLE=1 skip the managed SessionStart hook (Claude Code 2.1.287 still runs UserPromptSubmit, PreToolUse and later tool hooks; other releases may skip UserPromptSubmit too); Claude Code offers no managed control for this")
 	return nil
 }
 

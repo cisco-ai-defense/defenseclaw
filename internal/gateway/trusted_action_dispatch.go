@@ -29,7 +29,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
@@ -39,10 +38,13 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 )
 
-const (
-	trustedActionDispatchTimeout = 50 * time.Millisecond
-	trustedActionDispatchMaxCost = uint64(24_000_000)
-)
+// trustedActionDispatchMaxCost bounds the semantic rules' total CEL cost per
+// action (each program also has its own cost limit). The bound is on cost,
+// not wall-clock time: a 50 ms deadline here skipped every semantic rule
+// left when a loaded host stalled the gateway, so a CRITICAL command rule
+// only alerted and the call ran (GAP-2140). The caller's context still
+// cancels the evaluation.
+const trustedActionDispatchMaxCost = uint64(24_000_000)
 
 // trustedActionRequest is private so a remote payload cannot assert that an
 // arbitrary body is a trusted or enforcement-capable action. Only adapters
@@ -115,8 +117,7 @@ func dispatchTrustedAction(
 
 	facts = actionfacts.Analyze(request.Input)
 	analyzed = true
-	ctx, cancel := context.WithTimeout(parent, trustedActionDispatchTimeout)
-	defer cancel()
+	ctx := parent
 
 	generation := snapshotRulePackGeneration(request.Connector)
 	options := ruleScanOptions{
@@ -163,11 +164,24 @@ func dispatchTrustedAction(
 	// staticTargetTwin is the complete analysis a redirect-target view was
 	// cut from, with the placeholder targets' redirect and path facts.
 	var staticTargetTwin *actionfacts.Facts
+	// subsetView is set when semanticFacts keeps only the action's static,
+	// certain commands; as on a redirect-target view, only a match counts.
+	subsetView := false
 	if !facts.Authoritative() {
 		if view, twin, ok := actionfacts.DynamicRedirectTargetReduction(request.Input, facts); ok {
 			semanticFacts, staticTargetTwin, viewCandidate = view, &twin, redirectReductionCandidate
 		} else if view, ok := actionfacts.ShortCircuitListReduction(request.Input, facts); ok {
 			semanticFacts, viewCandidate = view, listReductionCandidate
+		} else if view, ok := actionfacts.PowerShellProfileWrapperReduction(request.Input, facts); ok {
+			// pwsh -Command "<body>" without -NoProfile, alone or first in a
+			// list: a profile only runs more commands before the body, so a
+			// match on the body counts.
+			semanticFacts, viewCandidate, subsetView = view, subsetReductionCandidate, true
+		} else if view, partialArgv, ok := actionfacts.StaticCommandSubsetReduction(request.Input, facts); ok {
+			semanticFacts, viewCandidate, subsetView = view, subsetReductionCandidate, true
+			if partialArgv {
+				viewCandidate = argvSubsetReductionCandidate
+			}
 		} else {
 			var fallbackTelemetry trustedActionTelemetry
 			findings, fallbackTelemetry = dispatchTrustedFallback(
@@ -181,7 +195,7 @@ func dispatchTrustedAction(
 		}
 	}
 	// matchOnly is set when only a match on the view counts.
-	matchOnly := staticTargetTwin != nil
+	matchOnly := staticTargetTwin != nil || subsetView
 	fullProjection, projectionCode := semantic.Project(semanticFacts)
 	if projectionCode != semantic.ProjectionOK {
 		var fallbackTelemetry trustedActionTelemetry
@@ -406,6 +420,7 @@ func dispatchTrustedAction(
 	}
 	findings = append(semanticFindings, legacyFindings...)
 	finalized := finalizeTrustedActionFindings(generation, request, contextFacts, findings)
+	finalized = appendTrustedHomeResolvedSSHKeyWriteFinding(finalized, generation, request, facts)
 	if staticTargetTwin == nil {
 		return finalized
 	}
@@ -476,6 +491,24 @@ func withSequenceProvenFindings(findings, sequence []RuleFinding) []RuleFinding 
 // fallback, as for any other partial action.
 func redirectReductionCandidate(candidate compiledSemanticRule) bool {
 	return candidate.program.RedirectReductionSafe()
+}
+
+// subsetReductionCandidate reports whether a match of candidate on the view
+// from actionfacts.StaticCommandSubsetReduction may stand for the whole
+// action: the expression must be one that more commands and facts cannot turn
+// off (semantic.Program.StaticCommandSubsetSafe), and the rule must have no
+// code-owned prerequisite, a Go check written for complete facts. Other rules
+// keep their legacy fallback.
+func subsetReductionCandidate(candidate compiledSemanticRule) bool {
+	return candidate.owner.prerequisite == nil &&
+		candidate.program.StaticCommandSubsetSafe()
+}
+
+// argvSubsetReductionCandidate is subsetReductionCandidate for a view that
+// also keeps commands with partial argv (semantic.Program.StaticArgvSubsetSafe).
+func argvSubsetReductionCandidate(candidate compiledSemanticRule) bool {
+	return candidate.owner.prerequisite == nil &&
+		candidate.program.StaticArgvSubsetSafe()
 }
 
 // listReductionCandidate reports whether a result of candidate on the view
@@ -1968,12 +2001,8 @@ func dispatchTrustedFallback(
 		facts,
 		request.EnforcementCapable,
 	)
-	return finalizeTrustedActionFindings(
-		generation,
-		request,
-		facts,
-		findings,
-	), fallbackTelemetry
+	findings = finalizeTrustedActionFindings(generation, request, facts, findings)
+	return appendTrustedHomeResolvedSSHKeyWriteFinding(findings, generation, request, facts), fallbackTelemetry
 }
 
 // neutralizeTrustedSecretStoreValue keeps credential detectors focused on
@@ -2899,7 +2928,7 @@ func trustedLegacyCommandRuleMatches(
 			if !ok {
 				continue
 			}
-			scanCommand.Argv = staticArgv
+			scanCommand.Argv = withTrustedDynamicEvalOperand(command, staticArgv)
 			scanCommand.ArgvComplete = true
 		} else if command.Effect != actionfacts.EffectExecute {
 			continue
@@ -2989,6 +3018,22 @@ func trustedLegacyCommandRuleMatches(
 		}
 	}
 	return matchesByID
+}
+
+// withTrustedDynamicEvalOperand keeps the shape CMD-EVAL names: eval whose
+// first operand expands at runtime (eval "$(...)", eval "$VAR"). The static
+// argv stops at that operand, which left a bare "eval" that no command rule
+// can match, so the rule never fired on a real tool call (GAP-2575). A "$"
+// stands in for the runtime value; nothing else about the argv changes.
+func withTrustedDynamicEvalOperand(
+	command actionfacts.CommandFact,
+	argv []string,
+) []string {
+	if command.Program != "eval" || len(argv) != 1 ||
+		len(command.Arguments) < 2 || !command.Arguments[1].Expands {
+		return argv
+	}
+	return append(argv, "$")
 }
 
 func trustedStaticCommandArgv(

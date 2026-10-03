@@ -27,11 +27,13 @@ existing aliases/scripts keep working.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import os
 import re
 import uuid
+from pathlib import Path
 
 import click
 import requests
@@ -56,26 +58,48 @@ _W_FIXED    = _W_IDX + _W_SEV + _W_TIME + _W_ACTION + _W_TARGET  # = 43
 _SEV_ORDER  = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
 
 
+def _ellipsis() -> str:
+    # Piped or legacy-code-page output is written as ASCII, where the stream
+    # turns "…" into "..." after Rich sized the column (WIN2-U3-13), so
+    # truncate with the ASCII form there and size it correctly.
+    return "…" if ux.unicode_output_enabled() else "..."
+
+
 def _trunc(s: str, width: int) -> str:
     s = s.strip()
     if len(s) <= width:
         return s
-    return s[: width - 1] + "…"
+    ell = _ellipsis()
+    return s[: max(0, width - len(ell))] + ell
 
 
 def _trunc_path(s: str, width: int) -> str:
     s = s.strip()
     if len(s) <= width:
         return s
-    parts = s.rstrip("/").split("/")
+    ell = _ellipsis()
+    # Windows paths split on "\\" (GAP-1590).
+    sep = "\\" if "\\" in s and "/" not in s else "/"
+    parts = s.rstrip(sep).split(sep)
     for n in range(1, len(parts) + 1):
-        candidate = "/".join(parts[-n:])
-        if len(candidate) + 2 <= width:
-            return "…/" + candidate
+        candidate = sep.join(parts[-n:])
+        if len(candidate) + len(ell) + 1 <= width:
+            return ell + sep + candidate
     tail = parts[-1]
-    if len(tail) + 2 <= width:
-        return "…/" + tail
-    return "…" + s[-(width - 1):]
+    if len(tail) + len(ell) + 1 <= width:
+        return ell + sep + tail
+    return ell + s[-max(1, width - len(ell)):]
+
+
+_ABS_PATH = re.compile(r"^(?:[A-Za-z]:[\\/]|[/\\~])")
+
+
+def _path_name(target: str) -> str:
+    """The last part of a file system path (the skill or file name); other targets as is."""
+    target = target.strip()
+    if not _ABS_PATH.match(target):
+        return target
+    return re.split(r"[\\/]", target.rstrip("\\/"))[-1] or target
 
 
 _DETAIL_KEY = re.compile(r"[A-Za-z_][\w.]*")
@@ -92,7 +116,15 @@ def _detail_tokens(raw: str) -> list[str]:
     return tokens
 
 
+def _strip_details_json(raw: str) -> str:
+    """Drop the trailing ``details_json=`` blob; it repeats the key=value fields."""
+    if raw.startswith("details_json="):
+        return ""
+    return raw.split(" details_json=", 1)[0]
+
+
 def _humanize_details(raw: str) -> str:
+    raw = _strip_details_json(raw or "")
     if not raw:
         return ""
     tokens = _detail_tokens(raw)
@@ -135,7 +167,7 @@ def _humanize_details(raw: str) -> str:
 
 
 def _findings_json(findings: list[dict], width: int) -> str:
-    suffix = "…"
+    suffix = _ellipsis()
     close = "]"
     parts: list[str] = []
     for f in findings:
@@ -182,16 +214,304 @@ def _event_connector(event) -> str:
     return _kv(event.details or "").get("connector", "").lower()
 
 
+def _hook_decision(hook_details: list[str], hook_event: str = "") -> str:
+    """Decision of the connector-hook rows recorded for the same request.
+
+    A post-tool finding (PostToolUse, ...) cannot block the call that already
+    ran, so it is not labelled observe mode on an action-mode connector
+    (GAP-1303)."""
+    from defenseclaw.hook_metrics import detection_only_hook_label  # noqa: PLC0415
+
+    decision = ""
+    for raw in hook_details:
+        kv = _kv(_strip_details_json(raw))
+        action = kv.get("action", "").lower()
+        if action == "block":
+            return "blocked"
+        # Observe mode records action=allow raw_action=block, with or without
+        # would_block=true; both are "would block" (GAP-1213).
+        observed_block = action == "allow" and kv.get("raw_action", "").lower() == "block"
+        if kv.get("would_block", "").lower() == "true" or observed_block:
+            # A post-tool or MessageDisplay finding cannot block, whatever
+            # the connector's mode (GAP-1303, GAP-1531).
+            decision = detection_only_hook_label(hook_event) or "would block (observe mode)"
+        elif not decision and action:
+            decision = action
+    return decision
+
+
+def _acp_route(hook_details: list[str]) -> str:
+    """``ACP session/prompt (client zed)`` from the guardrail-verdict row of an ACP finding."""
+    for raw in hook_details:
+        kv = _kv(raw)
+        if method := kv.get("acp_method", ""):
+            client = kv.get("acp_client", "")
+            return f"ACP {method} (client {client})" if client else f"ACP {method}"
+    return ""
+
+
+# The audit store replaces the title of every finding classed as a secret
+# with this placeholder, including rules tagged "credential" whose pack title
+# names no secret (GAP-1223).
+_REDACTED_SECRET_TITLE = "Secret finding"
+_RULE_FILE_LIMIT = 1024 * 1024
+
+
+def _rule_pack_dirs() -> list[Path]:
+    """Rule packs to read titles from: configured, seeded copies, then bundled."""
+    dirs: list[Path] = []
+    try:
+        from defenseclaw import config as config_module  # noqa: PLC0415
+
+        cfg = config_module.load()
+        gc = cfg.guardrail
+        if str(getattr(gc, "rule_pack_dir", "") or "").strip():
+            dirs.append(Path(gc.rule_pack_dir).expanduser())
+        policy_dir = str(getattr(cfg, "policy_dir", "") or "").strip()
+        if policy_dir:
+            seeded = Path(policy_dir).expanduser() / "guardrail"
+            if seeded.is_dir():
+                dirs.extend(sorted(p for p in seeded.iterdir() if p.is_dir()))
+    except Exception:  # noqa: BLE001 - titles are a display nicety.
+        pass
+    from defenseclaw.paths import bundled_guardrail_profiles_dir  # noqa: PLC0415
+
+    bundled = bundled_guardrail_profiles_dir()
+    if bundled is not None:
+        dirs.extend(sorted(p for p in bundled.iterdir() if p.is_dir()))
+    return dirs
+
+
+@functools.lru_cache(maxsize=1)
+def _rule_pack_titles() -> dict[str, str]:
+    """Rule id -> title from the local rule packs (static catalog text)."""
+    import yaml  # noqa: PLC0415
+
+    titles: dict[str, str] = {}
+    for pack in _rule_pack_dirs():
+        rules_dir = pack / "rules"
+        try:
+            files = sorted(rules_dir.glob("*.yaml")) if rules_dir.is_dir() else []
+        except OSError:
+            continue
+        for path in files:
+            try:
+                if path.stat().st_size > _RULE_FILE_LIMIT:
+                    continue
+                data = yaml.safe_load(path.read_text(encoding="utf-8"))
+            except Exception:  # noqa: BLE001 - skip an unreadable or broken file.
+                continue
+            rules = data.get("rules") if isinstance(data, dict) else None
+            for rule in rules if isinstance(rules, list) else []:
+                if isinstance(rule, dict) and isinstance(rule.get("id"), str) and isinstance(rule.get("title"), str):
+                    titles.setdefault(rule["id"].strip(), rule["title"].strip())
+    return titles
+
+
+def _finding_title(rule_id: str, title: str) -> str:
+    """The pack's own title for a rule whose stored title was redacted.
+
+    A title that only repeats the rule ID is dropped: an LLM-judge finding
+    read "JUDGE-EXFIL-FILE: JUDGE-EXFIL-FILE" (GAP-1886)."""
+    if title == _REDACTED_SECRET_TITLE and rule_id:
+        return _rule_pack_titles().get(rule_id, title) or title
+    if title == rule_id:
+        return ""
+    return title
+
+
+# Finding tags of the hook lanes that are not local rules (gateway
+# mergeWithLaneVerdict); their findings share the hook-rules scan.
+_HOOK_LANE_TAGS = ("llm-judge", "ai-defense")
+
+
+def _finding_scanner(structured: dict, rule_id: str) -> str:
+    """The detector of a finding: the hook lane for a judge or AI Defense
+    finding, which reported "Scanner: hook-rules" like a regex rule (GAP-1886)."""
+    scanner = str(structured.get("defenseclaw.scan.scanner") or "").strip()
+    value = structured.get("defenseclaw.finding.tags")
+    if isinstance(value, str):
+        value = value.strip("[]").split(",")
+    tags = {str(tag).strip().strip("\"'").lower() for tag in value or () if str(tag).strip()}
+    for lane in _HOOK_LANE_TAGS:
+        if lane in tags:
+            return lane
+    # A PII finding's tags are rewritten when it is stored ("pii", "redacted").
+    if scanner == "hook-rules" and rule_id.upper().startswith("JUDGE-"):
+        return "llm-judge"
+    return scanner
+
+
+def _finding_facts(
+    e,
+    hook_details: dict[str, list[str]],
+    targets: dict[str, dict[str, str]] | None = None,
+) -> dict[str, str] | None:
+    """Readable facts for a canonical finding row (GAP-1080).
+
+    The audit row behind a hook-rule finding has an empty target and only
+    ``finding.observed`` as details; the rule, target and scanner live in its
+    structured payload and the decision in the connector-hook row of the same
+    request.
+    """
+    structured = getattr(e, "structured", None)
+    if e.action not in ("scan-finding", "sandbox-finding") or not isinstance(structured, dict):
+        return None
+    rule_id = str(structured.get("defenseclaw.finding.rule_id") or "").strip()
+    if not rule_id:
+        return None
+    title = _finding_title(rule_id, str(structured.get("defenseclaw.finding.title") or "").strip())
+    # A skill or path scan finding keeps its path in the scan result (GAP-1590).
+    scanned = (targets or {}).get(e.id, {})
+    target = (
+        e.target or str(structured.get("defenseclaw.finding.target_ref") or "").strip() or scanned.get("target", "")
+    )
+    if e.action == "sandbox-finding":
+        # GAP-1303: a sandbox finding row has no target and only
+        # ``finding.observed`` as details; name the sandbox (or the
+        # destination) and the OpenShell disposition ("FINDING:BLOCKED ...").
+        sandbox = str(structured.get("defenseclaw.sandbox.name") or "").strip()
+        evidence = str(structured.get("defenseclaw.guardrail.evidence_summary") or "")
+        disposition = re.match(r"FINDING:([A-Z_]+)\b", evidence.strip())
+        return {
+            "target": target or sandbox,
+            "decision": disposition.group(1).lower().replace("_", " ") if disposition else "",
+            "connector": _event_connector(e),
+            "rule": f"{rule_id}: {title}" if title else rule_id,
+            "sandbox": sandbox if sandbox != (target or sandbox) else "",
+        }
+    facts = {
+        "target": target,
+        "decision": _hook_decision(hook_details.get(e.id, []), target),
+        "connector": _event_connector(e),
+        "rule": f"{rule_id}: {title}" if title else rule_id,
+        "scanner": _finding_scanner(structured, rule_id),
+        # GAP-1525: the file (and line) inside the scanned plugin or skill.
+        "location": _readable_location(structured.get("defenseclaw.finding.location"), target),
+        "route": _acp_route(hook_details.get(e.id, [])),
+        "path": scanned.get("path", "") if scanned.get("path", "") != target else "",
+    }
+    return facts
+
+
+def _quarantine_facts(e, targets: dict[str, dict[str, str]]) -> dict[str, str] | None:
+    """Name the skill or plugin of a quarantine row (GAP-1590).
+
+    The ``enforcement.quarantine.applied`` row has no target; the
+    ``asset.quarantined`` row of the same enforcement names the asset."""
+    if e.action != "quarantine" or e.target:
+        return None
+    found = targets.get(e.id)
+    if not found:
+        return None
+    moved_to = found.get("path", "")
+    if moved_to.startswith("<"):
+        # A redacted path with no quarantine record names nothing (GAP-1924).
+        moved_to = ""
+    facts = {"target": found.get("target", ""), "moved_to": moved_to}
+    if found.get("type") in ("skill", "plugin") and facts["target"]:
+        facts["restore"] = f"defenseclaw {found['type']} restore {facts['target']}"
+    return facts
+
+
+def _alert_targets_for(store, alert_list: list) -> dict[str, dict[str, str]]:
+    lookup = getattr(store, "alert_targets_for", None)
+    ids = [
+        e.id for e in alert_list
+        if not (e.target or "").strip() and e.action in ("scan-finding", "quarantine") and getattr(e, "id", "")
+    ]
+    if lookup is None or not ids:
+        return {}
+    try:
+        result = lookup(ids)
+    except Exception:  # noqa: BLE001 - an older or locked audit DB only loses the target
+        return {}
+    return result if isinstance(result, dict) else {}
+
+
+_HOOK_EVENT_LOCATION = re.compile(r"[A-Za-z0-9_-]+:[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _readable_location(value: object, target: str = "") -> str:
+    """A file and line, or "" for a hook location that is not one.
+
+    Hook-rule findings store a redacted or hashed placeholder (GAP-1676) or
+    the hook event itself (``openclaw:exec``, ``claudecode:PreToolUse``),
+    which repeats the Target and names no file (GAP-1691)."""
+    text = str(value or "").strip()
+    if text.startswith("<") or text == target.strip() or _HOOK_EVENT_LOCATION.fullmatch(text):
+        return ""
+    return text
+
+
+def _short_hook_target(target: str, connector: str) -> str:
+    """``claudecode:PostToolUse`` -> ``PostToolUse``; Details already names the connector."""
+    prefix = f"{connector}:" if connector else ""
+    if prefix and target.lower().startswith(prefix.lower()) and len(target) > len(prefix):
+        return target[len(prefix):]
+    return target
+
+
+def _finding_details(facts: dict[str, str]) -> str:
+    return " ".join(
+        f"{key}={facts[key]}" for key in ("decision", "connector", "rule", "scanner", "sandbox") if facts.get(key)
+    )
+
+
+def _hook_details_for(store, alert_list: list) -> dict[str, list[str]]:
+    lookup = getattr(store, "hook_details_for_alerts", None)
+    ids = [e.id for e in alert_list if e.action == "scan-finding" and getattr(e, "id", "")]
+    if lookup is None or not ids:
+        return {}
+    try:
+        result = lookup(ids)
+    except Exception:  # an older or locked audit DB only loses the decision
+        return {}
+    return result if isinstance(result, dict) else {}
+
+
+def _connector_needle(connector: str | None) -> str:
+    """The --connector value as a stored connector name: ``claude-code`` (the
+    name 'defenseclaw setup claude-code' takes) matches ``claudecode`` (GAP-2130)."""
+    from defenseclaw.connector_contracts import normalize_connector
+
+    return normalize_connector(connector)
+
+
 def _filter_by_connector(alert_list: list, connector: str | None) -> list:
     """Keep only alerts whose connector matches ``connector`` (substring,
     case-insensitive — same match rule as the TUI ``connector:`` token).
 
     An empty/None ``connector`` is a no-op so single-connector and unfiltered
     invocations behave exactly as before."""
-    needle = (connector or "").strip().lower()
+    needle = _connector_needle(connector)
     if not needle:
         return alert_list
     return [e for e in alert_list if needle in _event_connector(e)]
+
+
+def _exit_if_unknown_connector(app: AppContext, needle: str, pool: list) -> None:
+    """Exit 1 when ``needle`` names no connector, listing the active ones, so a
+    typo does not read as a clean "no alerts" (GAP-2130)."""
+    from defenseclaw.connector_contracts import HOOK_CONTRACTS, PROXY_CONNECTORS, normalize_connector
+
+    active: list[str] = []
+    try:
+        active = sorted({normalize_connector(n) for n in app.cfg.active_connectors() if n})
+    except Exception:  # noqa: BLE001 - an old or missing config only drops the list
+        active = []
+    seen = {c for c in (_event_connector(e) for e in pool) if c}
+    known = set(HOOK_CONTRACTS) | set(PROXY_CONNECTORS) | set(active) | seen
+    if any(needle in name for name in known):
+        return
+    ux.err(f"No connector matches {needle!r}.")
+    if active:
+        ux.subhead("Active connectors: " + ", ".join(active), indent="    ")
+    elif seen:
+        ux.subhead("Connectors with alerts: " + ", ".join(sorted(seen)), indent="    ")
+    else:
+        ux.subhead("No connector is configured; run 'defenseclaw setup <connector>'.", indent="    ")
+    raise SystemExit(1)
 
 
 def _render_table(alert_list: list, store, connector: str | None = None) -> None:
@@ -199,22 +519,28 @@ def _render_table(alert_list: list, store, connector: str | None = None) -> None
     was retired in P3-#20. Kept in a helper so the deprecated
     ``--tui`` flag can fall through here without duplicating the
     column/width logic."""
+    from rich import box
     from rich.console import Console
     from rich.markup import escape
     from rich.table import Table
 
     console = Console()
     term_width = console.size.width
-    w_details = max(11, term_width - _OVERHEAD - _W_FIXED)
+    # A wide terminal shows the whole hook event (UserPromptSubmit,
+    # PostToolBatch); 11 columns cut it to "...ptSubmit" (GAP-1535).
+    w_target = _W_TARGET if term_width < 100 else 18
+    w_details = max(11, term_width - _OVERHEAD - _W_FIXED - (w_target - _W_TARGET))
 
     scope = f" — connector={connector}" if (connector or "").strip() else ""
     table = Table(
         title=f"Security Alerts (last {len(alert_list)}){scope}",
         caption=(
-            "Run [bold]defenseclaw alerts --show #[/bold] for full details, "
+            "Run [bold]defenseclaw alerts --show #[/bold] for full details and the alert ID "
+            "(for [bold]alerts acknowledge/dismiss --id[/bold]), "
             "or [bold]defenseclaw tui[/bold] for the interactive Alerts panel."
         ),
         show_lines=False,
+        box=box.HEAVY_HEAD if ux.unicode_output_enabled() else box.ASCII,
     )
     table.add_column("#",         no_wrap=True)
     table.add_column("Severity",  style="bold", no_wrap=True)
@@ -230,15 +556,26 @@ def _render_table(alert_list: list, store, connector: str | None = None) -> None
         "LOW":      "cyan",
     }
 
+    hook_details = _hook_details_for(store, alert_list)
+    targets = _alert_targets_for(store, alert_list)
     for idx, e in enumerate(alert_list, 1):
         sev_style = sev_styles.get(e.severity, "")
         sev_cell = f"[{sev_style}]{e.severity}[/{sev_style}]" if sev_style else e.severity
         ts     = e.timestamp.strftime("%H:%M") if e.timestamp else ""
         action = _trunc(e.action or "", _W_ACTION)
-        target = _trunc_path(e.target or "", _W_TARGET)
+        target = _trunc_path(e.target or "", w_target)
         kv_map = _kv(e.details or "")
         scanner_name = kv_map.get("scanner", "")
-        if e.action == "scan" and scanner_name and e.target:
+        facts = _finding_facts(e, hook_details, targets)
+        quarantined = _quarantine_facts(e, targets)
+        if facts is not None:
+            short = _path_name(_short_hook_target(facts["target"], facts.get("connector", "")))
+            target = _trunc_path(short, w_target)
+            raw_details = _finding_details(facts)
+        elif quarantined is not None:
+            target = _trunc_path(quarantined["target"], w_target)
+            raw_details = f"quarantined to {quarantined['moved_to']}" if quarantined["moved_to"] else "quarantined"
+        elif e.action == "scan" and scanner_name and e.target:
             findings = store.get_findings_for_target(e.target, scanner_name)
             raw_details = _findings_json(findings, w_details) if findings else _humanize_details(e.details or "")
         else:
@@ -265,20 +602,18 @@ def _render_table(alert_list: list, store, connector: str | None = None) -> None
     "connector",
     default=None,
     help=(
-        "Filter alerts by connector attribution (optional on any install). "
-        "Only show alerts attributed to this connector (e.g. codex, "
-        "claudecode, antigravity). Matches the per-event connector= field, "
-        "mirroring the TUI's `connector:` search token."
+        "Only show alerts from this connector (for example codex, claudecode or "
+        "claude-code, antigravity); the same match as the TUI's connector: search. "
+        "A name that matches no connector exits 1 and lists the active connectors."
     ),
 )
 @click.option(
     "--tui/--no-tui",
     default=False,
-    help=(
-        "Deprecated: the interactive TUI moved to `defenseclaw tui` in P3-#20. "
-        "This flag now prints a deprecation notice and falls back to the table."
-    ),
+    hidden=True,
+    help="Retired: use 'defenseclaw tui' (Alerts panel). Prints a notice and shows the table.",
 )
+@click.option("--json", "as_json", is_flag=True, help="Print the alerts as a JSON list.")
 @click.pass_context
 def alerts(
     ctx: click.Context,
@@ -286,6 +621,7 @@ def alerts(
     show_idx: int | None,
     connector: str | None,
     tui: bool,
+    as_json: bool,
 ) -> None:
     """View and manage security alerts."""
     if ctx.invoked_subcommand is not None:
@@ -293,7 +629,99 @@ def alerts(
     app = ctx.find_object(AppContext)
     if app is None:
         raise click.ClickException("internal error: AppContext missing")
+    if as_json:
+        _alerts_json(app, limit, connector)
+        return
     _alerts_default(app, limit, show_idx, tui, connector)
+
+
+# Delivery failure codes (internal/observability/delivery) in plain words.
+_DELIVERY_FAILURE_REASONS = {
+    "http_authentication": "the destination rejected the credentials (HTTP 401/403); check the API key or token",
+    "hec_ack_authentication": "the destination rejected the credentials; check the HEC token",
+    "http_retryable": "the destination was busy or failing (HTTP 408, 429 or 5xx)",
+    "hec_ack_retryable": "the destination was busy and asked for a retry",
+    "http_rejected": "the destination rejected the data (HTTP 4xx); gateway.log names the status code and reason",
+    "hec_ack_rejected": "the destination rejected the data",
+    "resolution_failed": "the endpoint host name did not resolve; check the endpoint and DNS",
+    "connection_failed": "could not connect to the endpoint; check the endpoint and the network",
+    "request_timeout": "the export timed out",
+    "request_canceled": "the export was canceled (usually a gateway restart)",
+    "acknowledgement_lost": "the export was sent but no reply arrived",
+    "transport_failed": "a network error interrupted the export",
+    "endpoint_prohibited": "the endpoint is blocked by the egress policy",
+    "queue_full": "the export queue was full, so records were dropped",
+}
+
+
+def _alert_next_step(event) -> str:
+    """Return a next step for alerts whose details alone do not say what to do."""
+    details = (event.details or "").strip()
+    if event.action == "telemetry-destination":
+        destination = details.split("/", 1)[0].strip()
+        code = details.rsplit(":", 1)[1].strip() if ":" in details else ""
+        reason = _DELIVERY_FAILURE_REASONS.get(code, "")
+        lead = "the gateway retries on its own"
+    elif event.action == "circuit_breaker_open":
+        destination = details.split(" ", 1)[0].strip()
+        reason = ""
+        lead = "the gateway paused exports to this destination and retries on its own"
+    else:
+        return ""
+    status_cmd = (
+        "defenseclaw setup galileo status"
+        if destination == "galileo"
+        else "defenseclaw setup observability list"
+    )
+    selector = f"--id {event.id}" if event.id else "--severity HIGH"
+    prefix = f"{reason[0].upper()}{reason[1:]}. " if reason else ""
+    return (
+        f"{prefix}Run '{status_cmd}' to see whether delivery has recovered ({lead}). "
+        "This alert records the failure and stays listed after recovery; clear it "
+        f"with 'defenseclaw alerts dismiss {selector}'."
+    )
+
+
+def _alerts_json(app: AppContext, limit: int, connector: str | None) -> None:
+    """``alerts --json``: the same rows as the table, newest first."""
+    import json  # noqa: PLC0415
+
+    if not app.store:
+        raise click.ClickException("No audit store available. Run 'defenseclaw init' first.")
+    needle = _connector_needle(connector)
+    if needle:
+        pool = app.store.list_alerts(max(limit, _CONNECTOR_SCAN_POOL))
+        alert_list = _filter_by_connector(pool, needle)[:limit]
+        if not alert_list:
+            _exit_if_unknown_connector(app, needle, pool)
+    else:
+        alert_list = app.store.list_alerts(limit)
+    hook_details = _hook_details_for(app.store, alert_list)
+    targets = _alert_targets_for(app.store, alert_list)
+    rows = []
+    for e in alert_list:
+        row = {
+            "id": e.id,
+            "timestamp": e.timestamp.isoformat() if e.timestamp else "",
+            "severity": e.severity,
+            "action": e.action,
+            "target": e.target,
+            "actor": e.actor,
+            "connector": _event_connector(e),
+            "details": e.details,
+        }
+        # The same facts the table and --show print: a finding row's own
+        # target and details are empty or only "finding.observed" (GAP-1615).
+        facts = _finding_facts(e, hook_details, targets) or _quarantine_facts(e, targets) or {}
+        if facts.get("target"):
+            row["target"] = facts["target"]
+        for key in ("decision", "route", "rule", "scanner", "location", "sandbox", "path", "moved_to"):
+            if facts.get(key):
+                row[key] = facts[key]
+        if "moved_to" in facts:
+            row.setdefault("decision", "quarantined")
+        rows.append(row)
+    click.echo(json.dumps(rows, indent=2, sort_keys=True))
 
 
 def _alerts_default(
@@ -307,12 +735,31 @@ def _alerts_default(
     if not app.store:
         ux.warn("No audit store available. Run 'defenseclaw init' first.")
         return
+    from defenseclaw.audit_capacity import audit_disk_full_notice
 
-    needle = (connector or "").strip()
+    # A full disk drops new alerts silently while enforcement goes on (GAP-1528).
+    notice = audit_disk_full_notice(str(getattr(app.cfg, "audit_db", "") or ""))
+    if not notice and app.cfg is not None:
+        # Some full volumes still report free space; the gateway knows its
+        # writes fail.
+        from defenseclaw.commands.cmd_status import gateway_audit_write_failure
+
+        failure = gateway_audit_write_failure(app.cfg)
+        if failure:
+            notice = (
+                f"{failure}: new alerts and audit events are not being recorded; "
+                "free space on the disk holding the audit database and run 'defenseclaw doctor'"
+            )
+    if notice:
+        ux.warn(notice[0].upper() + notice[1:])
+
+    needle = _connector_needle(connector)
     if needle:
         # Scan a wider window, then keep up to --limit matching the connector.
         pool = app.store.list_alerts(max(limit, _CONNECTOR_SCAN_POOL))
         alert_list = _filter_by_connector(pool, needle)[:limit]
+        if not alert_list:
+            _exit_if_unknown_connector(app, needle, pool)
     else:
         alert_list = app.store.list_alerts(limit)
 
@@ -338,18 +785,41 @@ def _alerts_default(
             "LOW": "cyan",
             "INFO": "white",
         }.get(e.severity, "bright_black")
+        def label(name: str) -> str:
+            return ux._style(f"{name}:".ljust(10), fg="bright_black", bold=True)
+
+        targets = _alert_targets_for(app.store, [e])
+        facts = _finding_facts(e, _hook_details_for(app.store, [e]), targets)
+        quarantined = _quarantine_facts(e, targets)
         click.echo(f"{ux.bold(f'Alert #{show_idx}')}")
-        click.echo(f"  {ux._style('Severity:', fg='bright_black', bold=True)}  ", nl=False)
+        if e.id:
+            click.echo(f"  {label('ID')} {e.id}")
+        click.echo(f"  {label('Severity')} ", nl=False)
         click.echo(ux._style(e.severity, fg=sev_fg, bold=e.severity in ("CRITICAL", "HIGH")))
         ts = e.timestamp.strftime("%Y-%m-%d %H:%M:%S") if e.timestamp else ""
-        click.echo(f"  {ux._style('Timestamp:', fg='bright_black', bold=True)} {ts}")
-        click.echo(f"  {ux._style('Action:', fg='bright_black', bold=True)}    {e.action}")
-        if e.target:
-            click.echo(f"  {ux._style('Target:', fg='bright_black', bold=True)}    {e.target}")
-        if e.details:
+        click.echo(f"  {label('Timestamp')} {ts}")
+        click.echo(f"  {label('Action')} {e.action}")
+        target = facts["target"] if facts else (quarantined["target"] if quarantined else e.target)
+        if target:
+            click.echo(f"  {label('Target')} {target}")
+        if facts:
+            for key, name in (("decision", "Decision"), ("route", "Route"), ("connector", "Connector"),
+                              ("rule", "Rule"), ("scanner", "Scanner"), ("location", "Location"),
+                              ("sandbox", "Sandbox"), ("path", "Path")):
+                if facts.get(key):
+                    click.echo(f"  {label(name)} {facts[key]}")
+        elif quarantined:
+            click.echo(f"  {label('Decision')} quarantined")
+            if quarantined["moved_to"]:
+                click.echo(f"  {label('Moved to')} {quarantined['moved_to']}")
+            if quarantined.get("restore"):
+                click.echo(f"  {label('Restore')} {quarantined['restore']}")
+        elif e.details:
+            if connector_name := _event_connector(e):
+                click.echo(f"  {label('Connector')} {connector_name}")
             human = _humanize_details(e.details)
             if human:
-                click.echo(f"  {ux._style('Details:', fg='bright_black', bold=True)}   {human}")
+                click.echo(f"  {label('Details')} {human}")
         kv_map = _kv(e.details or "")
         scanner_name = kv_map.get("scanner", "")
         if e.action == "scan" and scanner_name and e.target:
@@ -368,6 +838,11 @@ def _alerts_default(
                     click.echo(f"    {ux._style(tag, fg=sev_tag_fg, bold=True)}", nl=False)
                     loc = f"  {f['location']}" if f["location"] else ""
                     click.echo(f" {f['title']}{loc}")
+        hint = _alert_next_step(e)
+        if hint:
+            click.echo(f"  {ux._style('Next:', fg='bright_black', bold=True)}      {hint}")
+        if e.id:
+            click.echo(ux.dim(f"  Acknowledge: defenseclaw alerts acknowledge --id {e.id}"))
         return
 
     if tui:
@@ -411,7 +886,7 @@ def alerts_acknowledge(
     dry_run: bool,
     yes: bool,
 ) -> None:
-    """Mark alerts acknowledged through the canonical protected-state API."""
+    """Mark alerts as acknowledged (seen by an operator)."""
     n = _set_alert_disposition(
         app,
         "acknowledged",
@@ -460,7 +935,7 @@ def alerts_dismiss(
     dry_run: bool,
     yes: bool,
 ) -> None:
-    """Dismiss alerts through the canonical protected-state API."""
+    """Dismiss alerts so they no longer show in the active alert list."""
     n = _set_alert_disposition(
         app,
         "dismissed",
@@ -511,7 +986,7 @@ def _alert_selector(
         return {"ids": ids}
     selector: dict[str, object] = {}
     if connector and connector.strip():
-        selector["connector"] = connector.strip()
+        selector["connector"] = _connector_needle(connector)
     if target and target.strip():
         selector["target"] = target.strip()
     if severity != "all":
@@ -621,14 +1096,15 @@ def _set_alert_disposition(
         selection_digest = preview.get("selection_digest")
         if not isinstance(selection_digest, str) or not selection_digest.startswith("sha256:v1:"):
             raise click.ClickException("Gateway returned a malformed alert selection preview.")
-        click.echo(f"Preview: {matched} alert(s) matched; digest={selection_digest}")
+        # The selection digest and projection versions are the gateway's
+        # concurrency check, not something to read; the IDs are listed only
+        # for --dry-run, which promises them (GAP-1512).
+        click.echo(f"Preview: {matched} alert(s) matched.")
         targets = preview.get("targets", [])
-        if isinstance(targets, list):
+        if dry_run and isinstance(targets, list):
             for item in targets[:20]:
                 if isinstance(item, dict):
-                    click.echo(
-                        f"  {item.get('id', '')} version={item.get('projection_version', '')}"
-                    )
+                    click.echo(f"  {item.get('id', '')}")
             if len(targets) > 20:
                 click.echo(f"  … and {len(targets) - 20} more")
         if dry_run:

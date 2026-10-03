@@ -109,6 +109,22 @@ def _inject_supported_connector_host(request, monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.fixture(autouse=True)
+def _private_api_port_claims(tmp_path_factory, monkeypatch: pytest.MonkeyPatch):
+    """Keep first-run port claims (GAP-1462) out of the shared /var/tmp."""
+    from defenseclaw import bootstrap
+
+    monkeypatch.setattr(bootstrap, "_API_PORT_CLAIM_DIR", str(tmp_path_factory.mktemp("port-claims")))
+
+
+@pytest.fixture(autouse=True)
+def _no_shared_hook_temp_dirs(monkeypatch: pytest.MonkeyPatch):
+    """Keep uninstall from sweeping the host's real temp folders (GAP-1411)."""
+    from defenseclaw.commands import cmd_uninstall
+
+    monkeypatch.setattr(cmd_uninstall, "_hook_temp_roots", lambda: ())
+
+
+@pytest.fixture(autouse=True)
 def _no_live_gateway_policy_reload(monkeypatch: pytest.MonkeyPatch):
     """Keep ``policy activate`` (reload on by default) off any real gateway.
 

@@ -411,11 +411,15 @@ func inventoryHomeOwner(connectorName, home string) llmEventUser {
 	return owner
 }
 
-// discoveryUserIDKind is the id namespace of the account a per-user scan
-// ran as: a uid, the only id those scans carry.
+// discoveryUserIDKind is the id namespace of the account a signal belongs
+// to: a uid from a Unix per-user scan, or the profile's SID from a managed
+// Windows scan.
 func discoveryUserIDKind(userID string) string {
 	if userID == "" {
 		return ""
+	}
+	if strings.HasPrefix(strings.ToUpper(userID), "S-1-") {
+		return useridentity.KindWindowsSID
 	}
 	return useridentity.KindPOSIXUID
 }

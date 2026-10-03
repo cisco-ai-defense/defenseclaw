@@ -124,6 +124,76 @@ def test_codeguard_skill_install_is_idempotent(tmp_path, monkeypatch):
     assert second.startswith("already installed at ")
 
 
+def test_codeguard_skill_install_skips_bytecode_cache(tmp_path, monkeypatch):
+    import shutil
+
+    from defenseclaw import codeguard_skill
+
+    source = tmp_path / "pkg" / "codeguard"
+    shutil.copytree(Path(__file__).resolve().parents[2] / "skills" / "codeguard", source)
+    (source / "__pycache__").mkdir()
+    (source / "__pycache__" / "main.cpython-312.pyc").write_bytes(b"cache")
+    monkeypatch.setattr(codeguard_skill, "_find_skill_source", lambda: str(source))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    cfg = _cfg("claudecode", tmp_path)
+
+    first = install_codeguard_asset(cfg, connector="claudecode", target="skill")
+    assert first.startswith("installed to ")
+    installed = Path(first.removeprefix("installed to ").split(" (")[0])
+    assert not (installed / "__pycache__").exists()
+    assert codeguard_status(cfg, connector="claudecode", target="skill").status == "installed"
+
+    # A cache that only the installed copy has is not the shipped skill.
+    (installed / "__pycache__").mkdir()
+    (installed / "__pycache__" / "main.cpython-312.pyc").write_bytes(b"other")
+    assert codeguard_status(cfg, connector="claudecode", target="skill").status == "conflict"
+
+
+def test_codeguard_skill_from_earlier_release_is_outdated_and_updates(tmp_path, monkeypatch):
+    """GAP-1594: an earlier DefenseClaw copy is ours to update, not a conflict."""
+    from defenseclaw import codeguard_skill
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    cfg = _cfg("claudecode", tmp_path)
+    install_codeguard_asset(cfg, connector="claudecode", target="skill")
+    installed = tmp_path / "home" / ".claude" / "skills" / "codeguard"
+    # Recreate the 1.0.x tree: no license/compatibility lines, plus a cache.
+    manifest = installed / "SKILL.md"
+    manifest.write_text(
+        "".join(
+            line
+            for line in manifest.read_text(encoding="utf-8").splitlines(keepends=True)
+            if not line.startswith(("license:", "compatibility:"))
+        ),
+        encoding="utf-8",
+    )
+    (installed / "__pycache__").mkdir()
+    (installed / "__pycache__" / "main.cpython-312.pyc").write_bytes(b"old cache")
+    assert codeguard_skill._dir_signature(str(installed), skip_bytecode=True) in (
+        codeguard_skill._PRIOR_SKILL_SIGNATURES
+    )
+
+    assert codeguard_status(cfg, connector="claudecode", target="skill").status == "outdated"
+    msg = install_codeguard_asset(cfg, connector="claudecode", target="skill")
+    assert msg.startswith("updated the earlier DefenseClaw copy at "), msg
+    assert codeguard_status(cfg, connector="claudecode", target="skill").status == "installed"
+
+    # Any other change is still a conflict that needs --replace.
+    (installed / "USER.md").write_text("mine", encoding="utf-8")
+    assert codeguard_status(cfg, connector="claudecode", target="skill").status == "conflict"
+
+
+def test_bundled_codeguard_skill_declares_license_and_network():
+    manifest = (Path(__file__).resolve().parents[2] / "skills" / "codeguard" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    front = manifest.split("---", 2)[1]
+    assert "license: Apache-2.0" in front
+    assert "compatibility:" in front and "network" in front
+
+
 def test_amp_codeguard_skill_uses_pinned_workspace_write_scope(tmp_path, monkeypatch):
     fake_home = tmp_path / "home"
     workspace = tmp_path / "repo"
@@ -297,6 +367,27 @@ def test_codeguard_install_hint_uses_standard_absolute_gateway(tmp_path, monkeyp
     assert hints == [_expected_scan_hint(trusted_gateway)]
     assert str(hostile_gateway) not in hints[0]
     assert "defenseclaw scan code" not in hints[0]
+
+
+def test_codeguard_install_hint_is_short_when_path_gateway_is_trusted(tmp_path, monkeypatch):
+    # GAP-1595: the gateway on PATH is the trusted one, so print the short command.
+    gateway_name = "defenseclaw-gateway.exe" if os.name == "nt" else gateway.GATEWAY_BIN_NAME
+    trusted_dir = tmp_path / ".local" / "bin"
+    trusted_gateway = trusted_dir / gateway_name
+    _make_runnable(trusted_gateway)
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+    monkeypatch.delenv("DEFENSECLAW_INSTALL_ROOT", raising=False)
+    monkeypatch.delenv("DEFENSECLAW_GATEWAY_BIN", raising=False)
+    monkeypatch.setattr(gateway, "_CANONICAL_INSTALL_DIR", str(trusted_dir))
+    monkeypatch.setattr(gateway.shutil, "which", lambda _name: str(trusted_gateway))
+    hints = _capture_hints(monkeypatch)
+
+    app = AppContext()
+    app.cfg = _multi_cfg(["codex"], tmp_path)
+    result = CliRunner().invoke(codeguard, ["install", "--target", "skill"], obj=app)
+
+    assert result.exit_code == 0, result.output
+    assert hints == ["Scan code now:  defenseclaw-gateway scan code <path to scan>"]
 
 
 def test_codeguard_install_hint_accepts_absolute_gateway_override(tmp_path, monkeypatch):

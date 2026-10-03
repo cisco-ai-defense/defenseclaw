@@ -36,9 +36,22 @@ package notify
 import (
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"runtime"
 	"strings"
 )
+
+// fallbackWriter receives the terminal fallback line. It resolves os.Stderr
+// at write time: the detached gateway and watchdog replace os.Stderr with
+// the pipe that puts an RFC 3339 time on each gateway.log and watchdog.log
+// line after this package is initialised, and a writer bound at init
+// skipped that pipe, so fallback lines carried no time (GAP-1696).
+var fallbackWriter io.Writer = currentStderr{}
+
+type currentStderr struct{}
+
+func (currentStderr) Write(p []byte) (int, error) { return os.Stderr.Write(p) }
 
 // ErrDesktopUnsupported is returned when the current platform has no native
 // desktop notification implementation. Callers may still receive the message

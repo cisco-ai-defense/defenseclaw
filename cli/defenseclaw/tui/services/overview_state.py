@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
+from defenseclaw.audit_capacity import audit_write_failure_reason
 from defenseclaw.connector_paths import (
     connector_config_files,
     connector_home,
@@ -42,7 +43,14 @@ NoticeLevel = Literal["info", "warn", "error"]
 STALENESS_WINDOW = timedelta(minutes=15)
 DOCTOR_CLOCK_SKEW_TOLERANCE = timedelta(minutes=5)
 MAX_AI_DISCOVERY_OVERVIEW_ROWS = 8
-_CURSOR_PRIORITY_CONFLICT_DISCLOSURE = "priority-conflict-detection=unavailable (none inferred)"
+# Cursor merges hooks Enterprise > Team > Project > User and has no API to
+# detect a higher-priority file, so DefenseClaw infers none. Plain words, not
+# the old "priority-conflict-detection=unavailable" token (GAP-2561).
+_CURSOR_PRIORITY_CONFLICT_DISCLOSURE = "overrides by Enterprise, Team or Project hooks can't be detected"
+_CURSOR_PRIORITY_CONFLICT_NOTICE = (
+    "DefenseClaw can't tell whether an Enterprise, Team or Project Cursor hooks file "
+    "overrides its user hooks (Cursor has no API for this)."
+)
 
 
 @dataclass(frozen=True)
@@ -115,6 +123,34 @@ class HealthSnapshot:
     connectors: tuple[ConnectorHealth, ...] = ()
 
 
+# Probe states that mean the sidecar is not running.
+_GATEWAY_DOWN_STATES = frozenset({"offline", "stopped", "down"})
+
+# SERVICES rows the gateway process reports on; they go offline with it.
+_GATEWAY_HOSTED_SERVICES = frozenset(
+    {"agent", "watcher", "guardrail", "api", "sinks", "telemetry", "ai_discovery", "sandbox"}
+)
+
+# Connectors enforced through their own hook/plugin surface; they never use
+# the guardrail proxy port. Mirrors ``cmd_doctor._HOOK_ENFORCED_CONNECTORS``.
+_HOOK_ENFORCED_CONNECTORS = frozenset(
+    {
+        "codex",
+        "claudecode",
+        "hermes",
+        "cursor",
+        "devin",
+        "copilot",
+        "openhands",
+        "antigravity",
+        "opencode",
+        "amp",
+        "omnigent",
+        "kiro",
+    }
+)
+
+
 @dataclass(frozen=True)
 class OverviewConfig:
     data_dir: str = ""
@@ -181,12 +217,30 @@ class OverviewConfig:
     # roster silently collapsing (chip vanishes, ``m`` stops cycling, tiles
     # disappear). Empty (the common case) renders nothing.
     roster_error: str = ""
+    # ``openshell.enabled``: a sandbox is set up. Without one the Sandbox
+    # row reads "disabled" whether or not the gateway runs (GAP-2361).
+    sandbox_enabled: bool = False
+    # ``ai_discovery.enabled``: discovery is turned on. Off, the AI Discovery
+    # row reads "disabled" whether or not the gateway runs (GAP-2378).
+    ai_discovery_enabled: bool = False
 
     def connector_is_disabled(self, name: str) -> bool:
         """True when ``name`` is in the roster but enforcement is disabled."""
 
         want = (name or "").strip().lower()
         return any(want == d.strip().lower() for d in self.connector_disabled)
+
+
+    def uses_guardrail_proxy_port(self) -> bool:
+        """Whether any active connector routes through the guardrail proxy port.
+
+        Hook- and plugin-enforced connectors talk to their provider directly,
+        so the proxy port is intentionally closed for them (doctor says so);
+        the Overview must not show it as if it were listening (GAP-1158).
+        """
+
+        names = [c for c, _m in self.connector_modes if c] or [self.guardrail_connector or self.claw_mode]
+        return any((name or "").strip().lower() not in _HOOK_ENFORCED_CONNECTORS for name in names)
 
 
 @dataclass(frozen=True)
@@ -387,6 +441,9 @@ class EnforcementCounts:
 class OverviewNotice:
     level: NoticeLevel
     message: str
+    # The end of ``message`` that a one-row render must keep, such as the
+    # key hint ("; N for details"); the cut goes before it (GAP-2551).
+    keep_tail: str = ""
 
 
 @dataclass(frozen=True)
@@ -419,6 +476,28 @@ class ObservabilityDestinationRow:
     activity: str = ""
     health_reason: str = ""
 
+    @property
+    def health_label(self) -> str:
+        """HEALTH in plain words: "healthy", or "degraded (queue full)".
+
+        A healthy exporter reports "activated" at start and
+        "delivery_recovered" after every successful export, failure or not,
+        so "healthy (delivery_recovered)" showed after a plain restart
+        (GAP-2523). Those codes are not shown; other codes lose the "_".
+        """
+
+        reason = self.health_reason.strip()
+        if not reason or (self.state == "healthy" and reason in _ROUTINE_HEALTH_REASONS):
+            return self.state
+        if reason.isidentifier() and reason.islower():
+            reason = reason.replace("_", " ")
+        return f"{self.state} ({reason})"
+
+
+# Lifecycle codes a healthy destination reports on start and after each
+# successful export; they are not news (GAP-2523).
+_ROUTINE_HEALTH_REASONS = frozenset({"activated", "delivery_recovered", "scrape_recovered"})
+
 
 @dataclass(frozen=True)
 class ObservabilityStorageStatus:
@@ -449,6 +528,7 @@ class DoctorBoxState:
     recovered: bool = False
     checks: tuple[RenderedDoctorCheck, ...] = ()
     all_green: bool = False
+    note: str = ""
 
 
 @dataclass(frozen=True)
@@ -494,11 +574,13 @@ QUICK_ACTIONS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("s", "Scan all", ("skill", "scan", "--all")),
     ("d", "Doctor", ("doctor",)),
     ("i", "Inventory", ("aibom", "scan", "--json")),
-    ("g", "Guardrail", ("setup", "guardrail")),
+    # The app opens Setup's Guardrail goals for g (GAP-2323); this is the
+    # non-interactive fallback for any other caller.
+    ("g", "Guardrail", ("setup", "guardrail", "--non-interactive")),
     ("m", "Mode", ("setup", "connector")),
     # ``p`` switches to the Policies panel (app.py), so it has no command here.
     ("l", "Logs", ("logs",)),
-    ("N", "Notify", ("setup", "notifications")),
+    ("b", "Notify", ("setup", "notifications")),
     ("u", "Upgrade", ("upgrade",)),
     ("X", "Uninstall", ("uninstall",)),
     # NOTE: ``?`` is intentionally NOT mapped here. Routing ``?``
@@ -515,6 +597,8 @@ class OverviewPanelModel:
     def __init__(self, cfg: OverviewConfig | None = None, *, version: str = "") -> None:
         self.cfg = cfg
         self.version = version
+        # Set by the app when no config.yaml was loaded (GAP-1163).
+        self.not_configured = False
         self.active_policy: object | None = None
         self.health: HealthSnapshot | None = None
         # Availability of the sidecar management endpoint is deliberately
@@ -532,6 +616,9 @@ class OverviewPanelModel:
         self.observability_status_error = ""
         self.native_delivery_summary: NativeDeliverySummary | None = None
         self.runtime = RuntimeOverview()
+        # True until the first audit-history read finishes; a large audit.db
+        # can take a minute, and the counts read 0 until then (GAP-1240).
+        self.history_loading = False
 
     def set_cfg(self, cfg: OverviewConfig | None) -> None:
         """Hot-swap the cached config snapshot (e.g. after ``setup``).
@@ -567,6 +654,17 @@ class OverviewPanelModel:
             # out so callers show the sidecar's own detail (uptime) instead.
             return SubsystemHealth(state="running")
         return availability
+
+    def gateway_down(self) -> bool:
+        """True when the sidecar probe says the gateway is not running.
+
+        The last ``/health`` payload is kept across a failed probe, so the
+        services the gateway hosts must not keep reading "running" from it
+        (GAP-1262, GAP-1280).
+        """
+
+        probe = self.gateway_probe
+        return probe is not None and probe.state.strip().lower() in _GATEWAY_DOWN_STATES
 
     def set_doctor_cache(self, cache: DoctorCache | None) -> None:
         self.doctor = cache
@@ -634,7 +732,24 @@ class OverviewPanelModel:
         gateway_standalone = self.health is not None and self.health.gateway.state.strip().lower() == "disabled"
         guardrail_off = self.cfg is None or not self.cfg.guardrail_enabled
 
-        if gateway_broken and guardrail_off and not self.skill_scanner_available:
+        if self.history_loading and not self.not_configured:
+            notices.append(
+                OverviewNotice(
+                    "info",
+                    "Loading the audit history - alert and hook counts show 0 until it finishes",
+                )
+            )
+        if self.not_configured:
+            # No config.yaml (first run, wizard declined): say so instead of
+            # implying the gateway will show up on its own (GAP-1163).
+            notices.append(
+                OverviewNotice(
+                    "warn",
+                    "DefenseClaw is not set up yet (no config.yaml). "
+                    "Press 0 for Setup, or run: defenseclaw init",
+                )
+            )
+        elif gateway_broken and guardrail_off and not self.skill_scanner_available:
             notices.append(
                 OverviewNotice(
                     "info",
@@ -647,9 +762,15 @@ class OverviewPanelModel:
                 suffix = f": {detail}" if detail else ""
                 notices.append(OverviewNotice("error", f"Gateway health check failed{suffix}"))
             elif gateway_state == "unknown":
-                notices.append(OverviewNotice("warn", "Gateway status is not available yet"))
+                if not self.not_configured:
+                    notices.append(OverviewNotice("warn", "Gateway status is not available yet"))
             else:
-                notices.append(OverviewNotice("error", 'Gateway is offline - press : then "start" to launch'))
+                notices.append(
+                    OverviewNotice(
+                        "error",
+                        'Gateway is not running - press : and run "start" (or run defenseclaw-gateway start)',
+                    )
+                )
         elif gateway_state in {"starting", "reconnecting"}:
             notices.append(OverviewNotice("info", "Gateway is starting - health checks will retry automatically"))
         elif gateway_standalone:
@@ -666,7 +787,15 @@ class OverviewPanelModel:
                 )
             )
         if self.cfg is not None and guardrail_off:
-            notices.append(OverviewNotice("warn", "LLM guardrail not configured - press [g] to set up"))
+            if self.cfg.connector_modes:
+                # Connectors are set up but the guardrail is off, as after
+                # "defenseclaw uninstall": say that nothing is guarded
+                # (GAP-1561).
+                notices.append(
+                    OverviewNotice("warn", "Guardrail is off - no connector is guarded; press [g] to set up")
+                )
+            else:
+                notices.append(OverviewNotice("warn", "LLM guardrail not configured - press [g] to set up"))
         if not self.skill_scanner_available:
             notices.append(
                 OverviewNotice(
@@ -681,9 +810,20 @@ class OverviewPanelModel:
                     f"{self.silent_bypass} silent LLM bypass event(s) in the last 5m - see Alerts -> egress",
                 )
             )
+        failing_exports = () if self.gateway_down() else self.failing_export_destinations()
+        if failing_exports:
+            names = ", ".join(failing_exports[:2]) + keys_overflow_suffix(len(failing_exports), 2)
+            notices.append(
+                OverviewNotice(
+                    "warn",
+                    f"Telemetry export failing: {names} - check it with: "
+                    f"defenseclaw setup observability test {failing_exports[0]}",
+                )
+            )
 
         if self.doctor is not None and not self.doctor.is_empty():
-            _, contradicted = partition_doctor_checks(self.doctor.checks, self.health)
+            contradicted = tuple(check for check in self.doctor.checks if self.doctor_check_stale_reason(check))
+            removed = tuple(check for check in contradicted if self._doctor_destination_removed(check))
             stale_failures = sum(1 for check in contradicted if check.status == "fail")
             effective_failed = max(self.doctor.failed - stale_failures, 0)
             if effective_failed > 0:
@@ -691,6 +831,16 @@ class OverviewPanelModel:
                     OverviewNotice(
                         "error",
                         f"Doctor found {effective_failed} failure(s) - see the DOCTOR panel or run: defenseclaw doctor",
+                    )
+                )
+            elif contradicted and len(removed) == len(contradicted):
+                # A failing check for a destination that was removed since
+                # the run is not a current failure (GAP-2431).
+                notices.append(
+                    OverviewNotice(
+                        "info",
+                        f"The last doctor run ({format_age(self.doctor.age(now=now))}) checked "
+                        f"{len(removed)} telemetry destination(s) that no longer exist - press [d] to refresh",
                     )
                 )
             elif contradicted:
@@ -719,7 +869,14 @@ class OverviewPanelModel:
                         "see the DOCTOR panel or rerun the selected repair",
                     )
                 )
-            elif self.doctor.outcome_state(now=now) == "failed" and effective_failed == 0:
+            elif (
+                self.doctor.outcome_state(now=now) == "failed"
+                and effective_failed == 0
+                and not removed
+                and not self._doctor_failed_only_stale(stale_failures, effective_failed, now=now)
+            ):
+                # Not for a run whose only failures are stale: that showed a
+                # red banner beside "1 stale failure(s)" (GAP-2518).
                 notices.append(
                     OverviewNotice(
                         "error",
@@ -747,21 +904,41 @@ class OverviewPanelModel:
                     )
                 )
 
-        if self.health is not None and self.health.connector is not None and self.cfg is not None:
+        # A stopped gateway leaves its last /health payload behind; notices
+        # read from it ("since the gateway started 3m ago") would be stale.
+        live_health = self.health is not None and not self.gateway_down()
+        if live_health and self.health.connector is not None and self.cfg is not None:
             live = self.health.connector.name.strip()
             configured = self.cfg.claw_mode.strip()
-            if live and configured and live != configured:
+            roster = {c.strip().lower() for c, _m in self.cfg.connector_modes if c}
+            # In a multi-connector install the gateway's primary connector can
+            # be any rostered one; that is not drift (GAP-1220).
+            if live and configured and live != configured and live.lower() not in roster:
                 notices.append(
                     OverviewNotice(
                         "warn",
                         "Connector drift: configured "
-                        f"{friendly_connector_name(configured)} but gateway is routing for "
-                        f"{friendly_connector_name(live)} - restart the sidecar after editing claw.mode",
+                        f"{friendly_connector_name(configured)} but the gateway is routing for "
+                        f"{friendly_connector_name(live)} - run: defenseclaw-gateway restart",
                     )
                 )
             uptime = timedelta(milliseconds=self.health.uptime_ms)
-            if self.health.connector.requests == 0 and uptime > timedelta(minutes=1):
-                notices.append(OverviewNotice("info", zero_connector_requests_notice(live, uptime)))
+            if uptime > timedelta(minutes=1):
+                if self._is_multi_connector() and self.health.connectors:
+                    # One idle connector out of several is normal; only say
+                    # something when none of them has seen a hook event.
+                    if not any(_connector_saw_traffic(conn) for conn in self.health.connectors):
+                        notices.append(
+                            OverviewNotice(
+                                "info",
+                                # One line at 80 columns: the wrapped rest fell
+                                # below the fold and read as cut off (GAP-1775).
+                                f"No hook events in {format_duration(uptime)} - normal until an "
+                                "agent runs; d runs Doctor",
+                            )
+                        )
+                elif not _connector_saw_traffic(self.health.connector):
+                    notices.append(OverviewNotice("info", zero_connector_requests_notice(live, uptime)))
 
         probe_detail = gateway_availability.last_error.strip().lower()
         if not gateway_broken and "elevated sidecar" in probe_detail:
@@ -781,13 +958,18 @@ class OverviewPanelModel:
                     "Open AI Discovery and press Scan now so Runtime can correlate them.",
                 )
             )
-        elif runtime.scanned and runtime.findings == 0 and runtime.processes:
+        elif runtime.scanned and runtime.findings == 0 and runtime.processes and not self.gateway_down():
+            # One short line like the other notices; the Runtime panel (N)
+            # carries the full reason and what to do about it (GAP-2533).
+            why, tail = "", "no findings above the reporting floor"
+            if runtime.degraded_reason:
+                why, tail = f" ({runtime.degraded_reason})", "no findings; N for details"
             notices.append(
                 OverviewNotice(
                     "info",
-                    f"Runtime is {runtime.health_title or 'watching'}: "
-                    f"{runtime.processes} processes and {runtime.connections} connections, "
-                    "no findings above the reporting floor.",
+                    f"Runtime is {runtime.health_title or 'watching'}{why}: {runtime.processes} processes, "
+                    f"{runtime.connections} connections, {tail}",
+                    keep_tail=f", {tail}" if why else "",
                 )
             )
 
@@ -820,19 +1002,38 @@ class OverviewPanelModel:
             )
         return tuple(cards)
 
+    def _doctor_destination_removed(self, check: DoctorCheck) -> bool:
+        """A failing "Destination: <name>" check for a destination since removed (GAP-2431)."""
+
+        status = self.observability_status
+        label = check.label.strip()
+        if status is None or check.status not in {"fail", "warn"} or not label.lower().startswith("destination:"):
+            return False
+        name = label.split(":", 1)[1].strip()
+        return bool(name) and name not in {destination.name for destination in status.destinations}
+
+    def doctor_check_stale_reason(self, check: DoctorCheck) -> str:
+        """Why a cached doctor check no longer describes the live state, or ""."""
+
+        # The last /health payload is kept while the gateway is down, so it
+        # cannot clear a check that the gateway being down explains.
+        if not self.gateway_down() and live_health_contradicts(check, self.health):
+            return "live state OK"
+        if self._doctor_destination_removed(check):
+            return "destination removed"
+        return ""
+
     def doctor_box(self, *, now: datetime | None = None) -> DoctorBoxState:
         now = now or datetime.now(timezone.utc)
         if self.doctor is None or self.doctor.is_empty():
             return DoctorBoxState(empty=True)
 
-        stale_checks = tuple(
-            check for check in self.doctor.top_failures(3) if live_health_contradicts(check, self.health)
-        )
+        stale_checks = tuple(check for check in self.doctor.top_failures(3) if self.doctor_check_stale_reason(check))
         stale_failures = sum(
-            1 for check in self.doctor.checks if check.status == "fail" and live_health_contradicts(check, self.health)
+            1 for check in self.doctor.checks if check.status == "fail" and self.doctor_check_stale_reason(check)
         )
         stale_warnings = sum(
-            1 for check in self.doctor.checks if check.status == "warn" and live_health_contradicts(check, self.health)
+            1 for check in self.doctor.checks if check.status == "warn" and self.doctor_check_stale_reason(check)
         )
         effective_failed = max(self.doctor.failed - stale_failures, 0)
         effective_warned = max(self.doctor.warned - stale_warnings, 0)
@@ -854,20 +1055,51 @@ class OverviewPanelModel:
         for check in self.doctor.top_failures(3):
             stale = check in stale_checks
             badge = "STALE" if stale else check.status.upper()
-            detail = f"{check.detail} (live state OK)" if stale and check.detail else check.detail
+            reason = self.doctor_check_stale_reason(check)
+            detail = check.detail
+            if reason == "destination removed":
+                detail = f"{check.detail} ({reason})".strip() if check.detail else f"({reason})"
+            elif stale and check.detail:
+                detail = f"{check.detail} (live state OK)"
             rendered.append(RenderedDoctorCheck(badge=badge, label=check.label, detail=detail, stale=stale))
 
         outcome = self.doctor.outcome_state(now=now)
+        stale = self.doctor.is_stale(now=now)
+        note = ""
+        if self._doctor_failed_only_stale(stale_failures, effective_failed, now=now):
+            # The only failures are ones /health now contradicts, so the run
+            # is out of date, not failed (GAP-2518).
+            outcome = "stale"
+        all_green = not rendered and outcome in {"", "healthy"}
+        if all_green and self.gateway_down():
+            # A passing run from before the gateway stopped read "HEALTHY /
+            # All checks passing" beside an all-offline SERVICES (GAP-2518).
+            outcome, stale, all_green = "stale", True, False
+            note = "The gateway stopped after this run."
         return DoctorBoxState(
             empty=False,
             summary_parts=tuple(parts),
             repair_summary_parts=self.doctor.repair_summary_parts(),
             run_outcome=outcome,
             age_label=format_age(self.doctor.age(now=now)),
-            stale=self.doctor.is_stale(now=now),
+            stale=stale,
             recovered=stale_count > 0,
             checks=tuple(rendered),
-            all_green=not rendered and outcome in {"", "healthy"},
+            all_green=all_green,
+            note=note,
+        )
+
+    def _doctor_failed_only_stale(self, stale_failures: int, effective_failed: int, *, now: datetime) -> bool:
+        """The run failed only on checks the live state now contradicts."""
+
+        doctor = self.doctor
+        return (
+            doctor is not None
+            and stale_failures > 0
+            and effective_failed == 0
+            and not doctor.repair_count("failed")
+            and not doctor.repair_count("blocked")
+            and doctor.outcome_state(now=now) == "failed"
         )
 
     def keys_status(self) -> KeysStatus:
@@ -941,6 +1173,23 @@ class OverviewPanelModel:
         )
 
     def subsystem_state(self, key: str) -> str:
+        if key == "gateway" and (self.health is None or self.gateway_down()):
+            # Match the "Gateway is not running" banner instead of "unknown".
+            return self.gateway_availability().state if self.gateway_probe is not None else "unknown"
+        if key == "sinks" and (self.health is None or self.health.sinks.state.strip().lower() in {"", "unknown"}):
+            # The gateway does not report sink health, so SERVICES hides the
+            # row; the stopped-gateway fallback showed "Sinks offline" only
+            # then (GAP-1158, GAP-2396).
+            return "unknown"
+        if self.gateway_down() and key in _GATEWAY_HOSTED_SERVICES:
+            # A sandbox that is not set up, or AI discovery that is turned
+            # off, is not a service that went down with the gateway: it
+            # reads "disabled" in both states (GAP-2361, GAP-2378).
+            if key == "sandbox" and self.cfg is not None and not self.cfg.sandbox_enabled:
+                return "disabled"
+            if key == "ai_discovery" and self.cfg is not None and not self.cfg.ai_discovery_enabled:
+                return "disabled"
+            return "offline"
         if self.health is None:
             return "unknown"
         match key:
@@ -972,7 +1221,12 @@ class OverviewPanelModel:
             case "sinks":
                 return self.health.sinks.state
             case "telemetry":
-                return self.health.telemetry.state
+                state = self.health.telemetry.state
+                if state.strip().lower() in {"running", "healthy"} and self.failing_export_destinations():
+                    # Setup said "needs attention" while this row stayed
+                    # green for a failing export (GAP-2432).
+                    return "degraded"
+                return state
             case "ai_discovery":
                 return self.health.ai_discovery.state
             case "api":
@@ -1006,6 +1260,11 @@ class OverviewPanelModel:
                 return None
 
     def service_detail(self, key: str) -> str:
+        if self.gateway_down():
+            if key == "gateway":
+                return "not running"
+            if key in _GATEWAY_HOSTED_SERVICES:
+                return ""
         match key:
             case "gateway":
                 return self.gateway_detail()
@@ -1109,6 +1368,13 @@ class OverviewPanelModel:
             return _CURSOR_PRIORITY_CONFLICT_DISCLOSURE
         return ""
 
+    @staticmethod
+    def connector_priority_conflict_notice(connector: str) -> str:
+        """The sentence the CONNECTORS panel shows under its table, or ``""``."""
+        if connector.strip().lower() == "cursor":
+            return _CURSOR_PRIORITY_CONFLICT_NOTICE
+        return ""
+
     def multi_connector_rows(self) -> list[tuple[str, str]]:
         """Per-connector ``(label, detail)`` rows for the Overview.
 
@@ -1146,6 +1412,9 @@ class OverviewPanelModel:
         return rows
 
     _RUNNING_STATES = frozenset({"running", "active", "enabled"})
+    # A connector whose agent is simply not open (OpenCode before it loads
+    # its plugin) is idle, not a degraded service (GAP-1608).
+    _READY_STATES = _RUNNING_STATES | {"idle"}
 
     def _effective_connector_runtime(self, connector: ConnectorHealth) -> tuple[str, str]:
         state = (connector.state or "").strip().lower() or "unknown"
@@ -1156,7 +1425,7 @@ class OverviewPanelModel:
 
         health = self.health
         availability = self.gateway_availability().state.strip().lower()
-        return _opencode_runtime_truth(
+        state, detail = _opencode_runtime_truth(
             {
                 "name": connector.name,
                 "state": connector.state,
@@ -1166,6 +1435,11 @@ class OverviewPanelModel:
             gateway_started_at=health.started_at if health is not None else "",
             gateway_available=availability == "running",
         )
+        if state in {"degraded", "idle"} and "no authenticated load heartbeat" in detail:
+            # OpenCode reports the load when it starts, so a closed OpenCode
+            # is normal, as doctor says (GAP-1565, GAP-1608).
+            return "idle", "idle: OpenCode is not open; it loads the plugin when it starts"
+        return state, detail
 
     def _is_multi_connector(self) -> bool:
         return self.cfg is not None and len([c for c, _m in self.cfg.connector_modes if c]) > 1
@@ -1198,8 +1472,9 @@ class OverviewPanelModel:
                     return "disabled"
             return "unknown"
         running = [state for state in states if state in self._RUNNING_STATES]
-        if len(running) == len(states):
-            return "running"
+        ready = [state for state in states if state in self._READY_STATES]
+        if len(ready) == len(states):
+            return "running" if running else "idle"
         if running:
             return "degraded"
         return states[0] or "unknown"
@@ -1217,20 +1492,20 @@ class OverviewPanelModel:
             disabled_n = sum(1 for c, _m in self.cfg.connector_modes if c and self.cfg.connector_is_disabled(c))
             enabled_total = max(total - disabled_n, 0)
             live = self.health.connectors if self.health else ()
-            running = sum(1 for conn in live if self._effective_connector_runtime(conn)[0] in self._RUNNING_STATES)
+            running = sum(1 for conn in live if self._effective_connector_runtime(conn)[0] in self._READY_STATES)
             if not disabled_n:
                 # No kill switches → original phrasing, unchanged.
                 if not live:
                     return f"{total} connectors configured"
                 if running == total:
-                    return f"{total} connectors active"
-                return f"{running}/{total} connectors running"
+                    return f"{total} connectors active{self._idle_suffix()}"
+                return f"{running}/{total} connectors running{self._not_running_suffix()}"
             # One or more connectors disabled: report them separately.
             suffix = f" · {disabled_n} disabled"
             if enabled_total == 0:
                 return f"0 active{suffix}"
             if live and running < enabled_total:
-                return f"{running}/{enabled_total} running{suffix}"
+                return f"{running}/{enabled_total} running{suffix}{self._not_running_suffix()}"
             return f"{enabled_total} active{suffix}"
         if self.health is None or self.health.connector is None:
             if not configured:
@@ -1247,33 +1522,90 @@ class OverviewPanelModel:
         if runtime_detail:
             parts.append(runtime_detail)
         if connector.tool_inspection_mode:
-            parts.append(connector.tool_inspection_mode)
+            # Same wording as `defenseclaw setup` ("Tool inspection: ...").
+            mode = connector.tool_inspection_mode
+            parts.append("pre-execution + response-scan" if mode == "both" else mode)
         if connector.requests:
             parts.append(f"{connector.requests} req")
         if connector.tool_blocks:
-            parts.append(f"{connector.tool_blocks} tool blocks")
+            n = connector.tool_blocks
+            parts.append(f"{n} tool block{'' if n == 1 else 's'}")
         if connector.subprocess_blocks:
-            parts.append(f"{connector.subprocess_blocks} subprocess blocks")
+            n = connector.subprocess_blocks
+            parts.append(f"{n} subprocess block{'' if n == 1 else 's'}")
         return " - ".join(parts)
+
+    def _not_running_suffix(self) -> str:
+        """`` · not running: OpenCode`` for the enabled connectors that are down."""
+
+        if self.cfg is None:
+            return ""
+        live = {
+            conn.name.strip().lower(): conn for conn in (self.health.connectors if self.health else ())
+        }
+        down: list[str] = []
+        for connector, _mode in self.cfg.connector_modes:
+            name = (connector or "").strip().lower()
+            if not name or self.cfg.connector_is_disabled(name):
+                continue
+            conn = live.get(name)
+            if conn is None or self._effective_connector_runtime(conn)[0] not in self._READY_STATES:
+                down.append(friendly_connector_name(name))
+        return f" · not running: {', '.join(down)}" if down else ""
+
+    def _idle_suffix(self) -> str:
+        """`` · idle: OpenCode (not open)`` for connectors waiting on their agent."""
+
+        idle = [
+            friendly_connector_name(conn.name)
+            for conn in (self.health.connectors if self.health else ())
+            if self._effective_connector_runtime(conn)[0] == "idle"
+        ]
+        return f" · idle: {', '.join(idle)} (not open)" if idle else ""
 
     def watchdog_detail(self) -> str:
         if self.health is None:
             return ""
         details = self.health.watcher.details
         parts: list[str] = []
-        if "skill_dirs" in details:
-            parts.append(f"{details['skill_dirs']} skill dirs")
-        if "plugin_dirs" in details:
-            parts.append(f"{details['plugin_dirs']} plugin dirs")
+        for key, noun in (("skill_dirs", "skill dir"), ("plugin_dirs", "plugin dir")):
+            if key in details:
+                count = details[key]
+                # "1 plugin dir", not "1 plugin dirs" (GAP-2526).
+                parts.append(f"{count} {noun}" if str(count).strip() == "1" else f"{count} {noun}s")
         return ", ".join(parts)
+
+    def guardrail_mode_label(self, connector: str = "") -> str:
+        """The guardrail mode, with per-connector exceptions counted.
+
+        ``observe`` for one mode; ``observe, 1 action`` when one rostered
+        connector runs in action mode and the rest observe (GAP-1220).
+        ``connector`` narrows it to that connector's own mode.
+        """
+
+        if self.cfg is None:
+            return ""
+        base = (self.cfg.guardrail_mode or "").strip()
+        modes = {c.strip().lower(): (m or base).strip() for c, m in self.cfg.connector_modes if c}
+        if connector:
+            return modes.get(connector.strip().lower(), base)
+        enabled = [mode for name, mode in modes.items() if mode and not self.cfg.connector_is_disabled(name)]
+        if len(set(enabled)) <= 1:
+            return enabled[0] if enabled else base
+        counts: dict[str, int] = {}
+        for mode in enabled:
+            counts[mode] = counts.get(mode, 0) + 1
+        main = base if base in counts else max(counts, key=counts.__getitem__)
+        others = [f"{counts[mode]} {mode}" for mode in sorted(counts) if mode != main]
+        return ", ".join([main, *others])
 
     def guardrail_detail(self) -> str:
         if self.cfg is None or not self.cfg.guardrail_enabled:
             return ""
         parts: list[str] = []
-        if self.cfg.guardrail_mode:
-            parts.append(self.cfg.guardrail_mode)
-        if self.cfg.guardrail_port:
+        if mode := self.guardrail_mode_label():
+            parts.append(mode)
+        if self.cfg.guardrail_port and self.cfg.uses_guardrail_proxy_port():
             parts.append(f"port {self.cfg.guardrail_port}")
         # The rule pack, not guardrail_strategy: that is read from a
         # "strategy" key the config doesn't have, so it always said "default".
@@ -1282,6 +1614,13 @@ class OverviewPanelModel:
             parts.append(f"{pack} pack")
         if self.cfg.guardrail_judge_enabled and self.cfg.guardrail_judge_model:
             parts.append(f"judge:{self.cfg.guardrail_judge_model}")
+        # Recent judge calls that failed (gateway judge_* details, GAP-1288).
+        details = self.health.guardrail.details if self.health else {}
+        judge_state = str(details.get("judge_state") or "")
+        if judge_state in ("failing", "degraded"):
+            failed = details.get("judge_failed_calls", 0)
+            total = details.get("judge_recent_calls", 0)
+            parts.append(f"judge {judge_state}: {failed}/{total} calls failed")
         return ", ".join(parts)
 
     def ai_discovery_detail(self) -> str:
@@ -1301,12 +1640,35 @@ class OverviewPanelModel:
         """Summarize compiler-owned canonical v8 destinations."""
 
         if self.observability_status is None:
-            return "canonical destination plan loading"
+            return "loading telemetry destinations\u2026"
         rows = self._v8_observability_destination_rows()
         labels = [f"{row.name} ({row.state})" for row in rows if row.policy_state == "enabled"]
         count = len(labels)
         suffix = f": {', '.join(labels)}" if labels else ""
-        return f"{count} destination{'s' if count != 1 else ''}{suffix}"
+        summary = f"{count} destination{'s' if count != 1 else ''}{suffix}"
+        # Lead with the cause, as doctor and gateway status do (GAP-2215).
+        if failure := self.audit_write_failure():
+            return f"{failure}; {summary}"
+        return summary
+
+    def failing_export_destinations(self) -> tuple[str, ...]:
+        """Names of enabled export destinations the gateway reports as failing."""
+
+        return tuple(
+            row.name
+            for row in self._v8_observability_destination_rows()
+            if row.policy_state == "enabled" and row.kind != "sqlite" and row.state in {"failing", "degraded"}
+        )
+
+    def audit_write_failure(self) -> str:
+        """Plain words when the live gateway reports failing audit writes, else ""."""
+
+        if self.health is None or self.health.telemetry.state.strip().lower() in {"running", "healthy", "disabled"}:
+            return ""
+        audit_db = self.observability_status.local_path if self.observability_status is not None else ""
+        if not audit_db and self.cfg is not None and self.cfg.data_dir:
+            audit_db = os.path.join(self.cfg.data_dir, "audit.db")
+        return audit_write_failure_reason(self.health.telemetry.details, audit_db)
 
     def observability_destination_rows(self) -> tuple[ObservabilityDestinationRow, ...]:
         """Return the canonical v8 destination inventory."""
@@ -1329,6 +1691,7 @@ class OverviewPanelModel:
         health = destination_health_from_gateway(
             {"details": self.health.telemetry.details} if self.health is not None else None
         )
+        write_failure = self.audit_write_failure()
         rows: list[ObservabilityDestinationRow] = []
         for destination in status.destinations:
             live = health.get(destination.name)
@@ -1338,6 +1701,11 @@ class OverviewPanelModel:
             reason = ""
             if live is not None:
                 reason = live.reason or live.last_error_class
+            if write_failure and destination.enabled and destination.kind == "sqlite":
+                # The sink's own counters lag the gateway's audit-write
+                # failure and still say healthy (GAP-2002, GAP-2215).
+                freed = not write_failure.startswith("audit events cannot be written")
+                state, reason = ("degraded" if freed else "failing"), write_failure
             endpoint = destination.endpoint or "—"
             display_endpoint = (
                 endpoint if destination.kind in {"sqlite", "jsonl"} else redact_endpoint_for_display(endpoint)
@@ -1465,34 +1833,50 @@ def keys_overflow_suffix(total: int, shown: int) -> str:
     return f" (+{total - shown} more)"
 
 
+def _connector_saw_traffic(connector: ConnectorHealth) -> bool:
+    """Any guarded traffic since the gateway started.
+
+    OpenClaw's exec checks go through /api/v1/inspect/tool and count as tool
+    inspections, not requests; the notice said "0 requests ... verify your
+    agent is dialing the gateway port" after six guarded turns (GAP-1617).
+    """
+
+    return bool(
+        connector.requests
+        or connector.tool_inspections
+        or connector.tool_blocks
+        or connector.subprocess_blocks
+    )
+
+
 def zero_connector_requests_notice(connector_name: str, uptime: timedelta) -> str:
     name = friendly_connector_name(connector_name)
     formatted = format_duration(uptime)
     match connector_name.strip().lower():
         case "codex":
             return (
-                f"{name} connector has seen 0 hook events after {formatted} - "
+                f"{name} connector has seen 0 hook events since the gateway started {formatted} ago - "
                 "normal until Codex emits a hook/notify event; verify "
                 f"{connector_config_files('codex')[0]} hooks if this persists"
             )
         case "claudecode":
             return (
-                f"{name} connector has seen 0 hook events after {formatted} - "
+                f"{name} connector has seen 0 hook events since the gateway started {formatted} ago - "
                 "normal until Claude Code emits a hook event; verify Claude Code hooks if this persists"
             )
         case "omnigent":
             return (
-                f"{name} connector has seen 0 policy events after {formatted} - "
+                f"{name} connector has seen 0 policy events since the gateway started {formatted} ago - "
                 "normal until OmniGent emits a supported policy callback; verify OmniGent policy setup if this persists"
             )
         case "hermes" | "cursor" | "devin" | "copilot" | "openhands" | "antigravity" | "opencode" | "amp":
             return (
-                f"{name} connector has seen 0 hook events after {formatted} - "
+                f"{name} connector has seen 0 hook events since the gateway started {formatted} ago - "
                 "normal until the agent emits a supported hook; verify connector hook setup if this persists"
             )
         case _:
             return (
-                f"{name} connector has seen 0 requests after {formatted} - "
+                f"{name} connector has seen 0 requests since the gateway started {formatted} ago - "
                 "verify your agent is dialing the gateway port (gateway.port)"
             )
 
@@ -1607,7 +1991,7 @@ def connector_source_label(connector: str, category: str) -> str:
             "./.codex/config.toml ([mcp_servers]; trusted projects only)",
         ),
         ("zeptoclaw", "mcps"): ("~/.zeptoclaw/config.json (mcp.servers)", "./.mcp.json"),
-        ("hermes", "mcps"): (f"{hermes_config} (mcp.servers)",),
+        ("hermes", "mcps"): (f"{hermes_config} (mcp_servers)",),
         ("cursor", "mcps"): ("./.cursor/mcp.json", "~/.cursor/mcp.json"),
         ("devin", "mcps"): (
             *tuple(devin_configs),
@@ -1644,7 +2028,7 @@ def connector_source_label(connector: str, category: str) -> str:
         ),
         ("cursor", "plugins"): ("unsupported",),
         ("devin", "plugins"): ("unsupported (closed beta; no general plugin claim)",),
-        ("copilot", "plugins"): ("copilot plugins list --kind plugin --json",),
+        ("copilot", "plugins"): ("copilot plugin list --json",),
         ("openhands", "plugins"): ("unsupported",),
         ("antigravity", "plugins"): (
             "~/.gemini/config/plugins/<plugin>/ (read/write)",

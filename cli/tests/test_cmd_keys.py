@@ -87,6 +87,21 @@ class KeysListTests(unittest.TestCase):
                 self.assertIn("env_name", item)
                 self.assertIn("requirement", item)
 
+    def test_list_header_lines_up_with_the_columns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = _make_app_context(tmp)
+            result = CliRunner().invoke(keys_cmd, ["list"], obj=app)
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            lines = result.output.splitlines()
+            header = next(line for line in lines if "ENV NAME" in line)
+            rule = lines[lines.index(header) + 1]
+            row = lines[lines.index(header) + 2]
+            col = header.index("ENV NAME")
+            self.assertEqual(rule[col - 2:col], "  ")
+            self.assertEqual(rule[col], "─")
+            self.assertNotEqual(row[col], " ")
+            self.assertEqual(row[col - 1], " ")
+
     def test_list_missing_only_filters_to_required_unset(self):
         with tempfile.TemporaryDirectory() as tmp:
             # Guardrail on + scanner_mode=remote → CISCO key becomes REQUIRED.
@@ -168,7 +183,7 @@ class KeysProvenanceCliTests(unittest.TestCase):
                 self.assertEqual(listed.exit_code, 0, msg=listed.output)
                 entry = self._entry(listed.output)
                 self.assertEqual(entry["source"], "env")
-                self.assertEqual(entry["value_masked"], "expo…only")
+                self.assertEqual(entry["value_masked"], "…only")
                 self.assertNotIn(dotenv_secret, listed.output)
                 self.assertNotIn(exported_secret, listed.output)
 
@@ -200,10 +215,24 @@ class KeysSetTests(unittest.TestCase):
             self.assertEqual(result.exit_code, 0, msg=result.output)
             dotenv_path = os.path.join(tmp, ".env")
             self.assertTrue(os.path.isfile(dotenv_path))
+            # GAP-1297: the same path keys remove prints (no mixed separators).
+            self.assertIn(f"to {dotenv_path}", result.output)
             with open(dotenv_path, encoding="utf-8") as fh:
                 body = fh.read()
             self.assertIn("DEFENSECLAW_TEST_KEY", body)
             self.assertIn("s3cret", body)
+
+    def test_set_confirmation_shows_only_the_last_four_characters(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = _make_app_context(tmp)
+            result = CliRunner().invoke(
+                keys_cmd,
+                ["set", "DEFENSECLAW_TEST_KEY", "--value", "abcd-secret-wxyz"],
+                obj=app,
+            )
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            self.assertIn("DEFENSECLAW_TEST_KEY = …wxyz", result.output)
+            self.assertNotIn("abcd", result.output)
 
     def test_set_rejects_empty_value(self):
         with tempfile.TemporaryDirectory() as tmp:

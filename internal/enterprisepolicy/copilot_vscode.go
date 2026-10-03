@@ -102,13 +102,19 @@ func renderCopilotPluginManifest() ([]byte, error) {
 }
 
 // copilotVSCodeLocalCommandOwned reports whether command is exactly the
-// Local harness command DefenseClaw renders for one of its events.
+// Local harness command DefenseClaw renders for one of its events, or the
+// one an earlier build rendered for the same binary (GAP-1098: a managed
+// 1.0.2 install kept the earlier plugin and then blocked every Copilot CLI
+// call as a foreign hook).
 func copilotVSCodeLocalCommandOwned(goos, hookBinary, command string) bool {
 	if strings.TrimSpace(hookBinary) == "" || command == "" {
 		return false
 	}
 	for _, event := range connector.CopilotVSCodeLocalHookEvents {
 		if command == strings.TrimSpace(connector.CopilotVSCodeLocalManagedHookCommand(goos, hookBinary, event)) {
+			return true
+		}
+		if legacy := strings.TrimSpace(connector.CopilotVSCodeLocalLegacyManagedHookCommand(goos, hookBinary, event)); legacy != "" && command == legacy {
 			return true
 		}
 	}
@@ -424,6 +430,15 @@ func inertHooksDocument(data []byte) bool {
 		}
 	}
 	return true
+}
+
+// CopilotVSCodeUserFilesLeft reports, read-only, whether home still holds
+// DefenseClaw's Local hook file or plugin: what removing the user's Copilot
+// row takes out. Their hook command is an encoded PowerShell bridge on
+// Windows, which the generic hook-command search cannot read (GAP-2098).
+func CopilotVSCodeUserFilesLeft(home, goos, hookBinary string) (bool, error) {
+	result, err := EnsureCopilotVSCodeUser(CopilotVSCodeUserRequest{Home: home, GOOS: goos, HookBinary: hookBinary, DryRun: true})
+	return len(result.Removed) > 0, err
 }
 
 // CopilotVSCodeUserState reports, read-only, whether home holds

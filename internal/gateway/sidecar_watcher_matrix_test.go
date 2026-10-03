@@ -48,6 +48,35 @@ func TestRunWatcherWithoutConfiguredDirectoriesRemainsHealthy(t *testing.T) {
 	}
 }
 
+func TestRunWatcherWithNoConnectorDoesNotCreateOpenClawFolders(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	cfg := config.DefaultConfig()
+	cfg.Claw.Mode = ""
+	cfg.Claw.HomeDir = filepath.Join(home, ".openclaw")
+	cfg.Guardrail.Connector = ""
+	cfg.Guardrail.Connectors = nil
+	cfg.Gateway.Watcher.Enabled = true
+	cfg.Gateway.Watcher.Skill.Enabled = true
+	cfg.Gateway.Watcher.Plugin.Enabled = true
+
+	health := NewSidecarHealth()
+	sidecar := &Sidecar{cfg: cfg, health: health}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := sidecar.runWatcher(ctx); err != nil {
+		t.Fatalf("runWatcher() error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".openclaw")); !os.IsNotExist(err) {
+		t.Fatalf("watcher created OpenClaw folders with no connector configured (stat err = %v)", err)
+	}
+	if got := health.Snapshot().Watcher.Details["idle"]; got != "no directories configured" {
+		t.Fatalf("watcher idle detail = %v", got)
+	}
+}
+
 // TestResolveWatcherDirs_PerConnectorMatrix is the C4 / S1.3 matrix
 // test the plan calls for: prove that for every built-in connector,
 // runWatcher's dir-resolution helper actually pulls the directories

@@ -610,6 +610,8 @@ def test_devin_canonical_user_mcp_file_is_configuration_evidence(
         ("cursor", (".cursor", "hooks.json")),
         ("devin", (".devin", "hooks.v1.json")),
         ("copilot", (".copilot", "mcp-config.json")),
+        # GAP-1481: the user-level hooks file DefenseClaw writes for Copilot.
+        ("copilot", (".copilot", "hooks", "defenseclaw.json")),
         ("openhands", (".openhands", "hooks.json")),
         ("antigravity", (".gemini", "config", "hooks.json")),
         ("opencode", (".config", "opencode", "opencode.json")),
@@ -2134,7 +2136,8 @@ def test_hermes_version_probe_gets_longer_timeout(monkeypatch, tmp_path):
     assert error == ""
     assert version == "Hermes Agent v0.20.0 (2026.8.3)"
     _, kwargs = calls[0]
-    assert kwargs["timeout"] == 8.0
+    # GAP-1604: its --version runs an update check (17.5 s on Windows).
+    assert kwargs["timeout"] == 30.0
 
 
 @pytest.mark.parametrize(
@@ -2715,3 +2718,59 @@ def test_render_discovery_table_includes_connectors_and_cache_state():
     assert "cached" in rendered
     assert "codex" in rendered
     assert "yes" in rendered
+
+
+def test_timed_out_probe_keeps_version_of_unchanged_binary(monkeypatch, tmp_path):
+    """RHEL-U3-13: one slow --version on a busy host erased a peer's version,
+    so the gateway refused that peer in action mode and setup of another
+    connector did not converge."""
+    binary = tmp_path / "amp"
+    binary.write_text("#!/bin/sh\n", encoding="utf-8")
+    old = os.stat(binary).st_mtime - 600
+    os.utime(binary, (old, old))
+
+    def scan(version: str, error: str):
+        def fake(name: str, **_kwargs) -> ad.AgentSignal:
+            if name != "amp":
+                return _signal(name)
+            return ad.AgentSignal(
+                name=name, installed=True, config_path="", binary_path=str(binary),
+                version=version, error=error,
+            )
+        return fake
+
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: False)
+    monkeypatch.setattr(ad, "_scan_agent", scan("amp 0.0.1", ""))
+    ad.discover_agents(use_cache=False, refresh=True, data_dir=tmp_path)
+
+    monkeypatch.setattr(ad, "_scan_agent", scan("", f"{binary}: {ad.VERSION_PROBE_TIMED_OUT}"))
+    slow = ad.discover_agents(use_cache=False, refresh=True, data_dir=tmp_path)
+    assert (slow.agents["amp"].version, slow.agents["amp"].error) == ("amp 0.0.1", "")
+    assert ad._read_cache(data_dir=tmp_path).agents["amp"].version == "amp 0.0.1"
+
+    os.utime(binary, None)  # replaced after the earlier scan: no stale version
+    changed = ad.discover_agents(use_cache=False, refresh=True, data_dir=tmp_path)
+    assert changed.agents["amp"].version == ""
+
+
+def test_cached_discovery_rechecks_config_files(monkeypatch, tmp_path):
+    """GAP-1627: setup / setup remove change hook files after the cache was written."""
+    _pin_home(monkeypatch, tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(ad, "_scan_agent", lambda name, **_kwargs: _signal(name, name == "copilot"))
+    hooks = tmp_path / ".copilot" / "hooks" / "defenseclaw.json"
+
+    ad.discover_agents()
+    hooks.parent.mkdir(parents=True)
+    hooks.write_text("{}\n")
+    monkeypatch.setattr(ad, "_scan_agent", lambda name, **_kwargs: (_ for _ in ()).throw(AssertionError(name)))
+
+    cached = ad.discover_agents()
+    assert cached.cache_hit is True
+    assert cached.agents["copilot"].configured is True
+    assert Path(cached.agents["copilot"].config_path) == hooks
+
+    hooks.unlink()
+    removed = ad.discover_agents()
+    assert removed.agents["copilot"].configured is False
+    assert removed.agents["copilot"].config_path == ""

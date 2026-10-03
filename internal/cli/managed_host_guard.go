@@ -49,7 +49,7 @@ func refusePerUserGatewayOnManagedHost() error {
 	}
 	if where, present := managedHostWindowsStandalone(); present {
 		return fmt.Errorf("this computer's DefenseClaw is managed by your organization (%s), so the per-user gateway is disabled; "+
-			"an administrator can check the managed deployment with `defenseclaw-gateway enterprise windows status --profile standalone`", where)
+			"an administrator can check the managed deployment %s", where, managedWindowsAdminStatusHint())
 	}
 	path, present := managedHostUnixRecord(os.Stderr)
 	if !present {
@@ -91,6 +91,25 @@ func addManagedWindowsSetupAnswer(root *cobra.Command) {
 			},
 		})
 	}
+	hasUpgrade := false
+	for _, command := range root.Commands() {
+		if command.Name() == "upgrade" {
+			hasUpgrade = true
+		}
+	}
+	if !hasUpgrade {
+		// `upgrade` was a bare "unknown command" rc 2 here (GAP-1719).
+		root.AddCommand(&cobra.Command{
+			Use:                "upgrade",
+			Hidden:             true,
+			DisableFlagParsing: true,
+			SilenceUsage:       true,
+			Annotations:        map[string]string{"defenseclaw.skip-daemon-bootstrap": "true"},
+			RunE: func(_ *cobra.Command, _ []string) error {
+				return managedWindowsUpgradeAnswer(where)
+			},
+		})
+	}
 	for _, command := range root.Commands() {
 		if command.Name() == "setup" {
 			return
@@ -117,10 +136,172 @@ func addManagedWindowsSetupAnswer(root *cobra.Command) {
 // deployment status has no per-account detail.
 func managedWindowsAdminCommandAnswer(where, command string) error {
 	return fmt.Errorf("this computer's DefenseClaw is managed by your organization (%s), so `%s` has no per-user "+
-		"deployment to check; an administrator can check the managed deployment with "+
-		"`defenseclaw-gateway enterprise windows status --profile standalone`, and your account's agents with "+
-		"`defenseclaw-gateway enterprise policy show --user %s`. Nothing was changed", where, command, managedHostCurrentAccount())
+		"deployment to check and nothing for you to do; your administrator can check the managed deployment %s, "+
+		"and your account's agents with `& '%s' enterprise policy show --user %s`. Nothing was changed.",
+		where, command, managedWindowsAdminStatusHint(), managedWindowsAdminCLI(), managedHostCurrentAccountName())
 }
+
+// managedWindowsUpgradeAnswer tells a user on a managed Windows computer that
+// the organization installs DefenseClaw upgrades.
+func managedWindowsUpgradeAnswer(where string) error {
+	return fmt.Errorf("this computer's DefenseClaw is managed by your organization (%s), so upgrades are installed "+
+		"by your organization, not with `upgrade`; there is nothing for you to do. Your administrator can check "+
+		"the installed version %s. Nothing was changed.",
+		where, managedWindowsAdminStatusHint())
+}
+
+// managedWindowsAdminCLI is the managed CLI an administrator runs on a
+// Windows standalone computer. Setup puts no DefenseClaw command on PATH and
+// the docs name this path, so a hint naming a bare `defenseclaw-gateway` was
+// "not recognized" (GAP-1183). A seam for tests.
+var managedWindowsAdminCLI = func() string {
+	root := strings.TrimRight(strings.TrimSpace(os.Getenv("ProgramFiles")), `\`)
+	if root == "" {
+		root = `C:\Program Files`
+	}
+	return root + `\Cisco\DefenseClaw\bin\defenseclaw.exe`
+}
+
+// managedWindowsAdminStatusHint is the administrator's status check on a
+// managed Windows computer, as a PowerShell command that runs as typed.
+func managedWindowsAdminStatusHint() string {
+	return "from an elevated PowerShell prompt with `& '" + managedWindowsAdminCLI() + "' enterprise windows status --profile standalone`"
+}
+
+// managedHostPerUserDaemonCommands are the per-user gateway commands a
+// managed computer refuses; its root help hides them.
+var managedHostPerUserDaemonCommands = map[string]bool{
+	"start": true, "stop": true, "restart": true, "watchdog": true, "sandbox": true,
+}
+
+// managedHostHelpInstalled keeps addManagedHostHelp from wrapping the help
+// function twice when the command tree is executed more than once.
+var managedHostHelpInstalled bool
+
+// addManagedHostHelp makes the root --help on a managed computer describe
+// the managed gateway. It described the per-user runtime ("Run without
+// arguments to start the sidecar daemon") and listed start, stop, restart,
+// watchdog and sandbox, all of which a managed computer refuses (GAP-1182,
+// GAP-1192). The managed-host check runs only when the root help is shown.
+func addManagedHostHelp(root *cobra.Command) {
+	if managedHostHelpInstalled {
+		return
+	}
+	managedHostHelpInstalled = true
+	defaultHelp := root.HelpFunc()
+	root.SetHelpFunc(func(cmd *cobra.Command, args []string) {
+		// Subcommand help inherits this function, so `status --help` and
+		// the others get the managed wording too (GAP-1719).
+		applyManagedHostHelp(root)
+		defaultHelp(cmd, args)
+	})
+}
+
+// applyManagedHostHelp rewrites root's description for a managed computer
+// and hides the per-user daemon commands. It reports whether it did. The
+// managed services themselves (the managed_enterprise pin) keep the
+// per-user text, which is never shown to anyone there.
+func applyManagedHostHelp(root *cobra.Command) bool {
+	if managed.IsManagedEnterprise(os.Getenv(managed.DeploymentModeEnv)) {
+		return false
+	}
+	admin, adminLead := "", "An administrator checks the deployment with:"
+	where, present := managedHostWindowsStandalone()
+	if present {
+		admin = "& '" + managedWindowsAdminCLI() + "' enterprise windows status --profile standalone"
+		adminLead = "An administrator checks it from an elevated PowerShell prompt with:"
+	} else if where, present = managedHostUnixRecord(nil); present {
+		admin = "sudo " + managedHostGatewayCommand() + " enterprise " + managedHostPlatform() + " status"
+	}
+	if !present {
+		return false
+	}
+	root.Short = "DefenseClaw managed gateway"
+	// The record path and the admin command sit on lines of their own: in
+	// the first sentence they made a 110-column line among 75-column ones
+	// (GAP-1359).
+	root.Long = fmt.Sprintf(`DefenseClaw managed gateway. Your organization manages DefenseClaw on this
+computer: the gateway runs as a system service, answers the hooks of the
+enrolled agents and enforces the managed policy. The per-user daemon
+commands (start, stop, restart, watchdog, sandbox) are not available here.
+
+Managed deployment record:
+  %s
+
+%s
+  %s`, where, adminLead, admin)
+	for _, command := range root.Commands() {
+		if managedHostPerUserDaemonCommands[command.Name()] {
+			command.Hidden = true
+		}
+		if command.Name() == "status" {
+			command.Short = managedHostStatusShort
+		}
+	}
+	applyManagedHostSubcommandHelp(root, adminLead, admin)
+	return true
+}
+
+// managedHostOtherPlatforms are the `enterprise` subcommands for other
+// operating systems, hidden from a managed computer's help.
+func managedHostOtherPlatforms() map[string]bool {
+	other := map[string]bool{"linux": true, "macos": true, "windows": true}
+	switch runtime.GOOS {
+	case "windows":
+		delete(other, "windows")
+	case "darwin":
+		delete(other, "macos")
+	default:
+		delete(other, "linux")
+	}
+	return other
+}
+
+// applyManagedHostSubcommandHelp rewrites the subcommand help a user reads
+// on a managed computer. It described the per-user sidecar, the
+// 'defenseclaw setup' flow and defenseclaw.yaml, and listed the enterprise
+// commands of the other operating systems (GAP-1719).
+func applyManagedHostSubcommandHelp(root *cobra.Command, adminLead, admin string) {
+	for _, command := range root.Commands() {
+		switch command.Name() {
+		case "status":
+			command.Long = fmt.Sprintf(`Show the health of the managed gateway service: gateway connection, skill
+watcher and API server. Your organization runs the gateway as a system
+service on this computer; nothing here starts or stops it.
+
+%s
+  %s`, adminLead, admin)
+		case "connector":
+			command.Long = `Low-level connector lifecycle commands for administrators.
+
+Your organization sets up and removes the agent connectors on this
+computer, so you don't need these commands for normal use. An administrator
+uses them to inspect or repair one connector's state.
+
+Each subcommand accepts an optional --connector flag. When it is omitted,
+the active connector recorded by the gateway service is used.`
+			if flag := command.PersistentFlags().Lookup("connector"); flag != nil {
+				flag.Usage = "Connector name (defaults to the active connector recorded by the gateway service)"
+			}
+		case "enterprise":
+			command.Long = fmt.Sprintf(`Maintenance commands for this computer's managed DefenseClaw deployment.
+They are for administrators, not for standard users.
+
+%s
+  %s`, adminLead, admin)
+			other := managedHostOtherPlatforms()
+			for _, sub := range command.Commands() {
+				if other[sub.Name()] {
+					sub.Hidden = true
+				}
+			}
+		}
+	}
+}
+
+// managedHostStatusShort is the status row of the managed root help, which
+// said "the running sidecar" although a managed computer has none (GAP-1359).
+const managedHostStatusShort = "Show health of the gateway service's subsystems"
 
 // managedHostCurrentAccount names the signed-in account for the answer above.
 var managedHostCurrentAccount = func() string {
@@ -141,15 +322,30 @@ func managedWindowsConfigLoadError(cmd *cobra.Command, err error) error {
 	if strings.TrimSpace(os.Getenv(managed.ConfigPathEnv)) != "" {
 		return err
 	}
-	where, present := managedHostWindowsStandalone()
-	if !present {
-		return err
-	}
 	command := "this command"
 	if cmd != nil {
 		if name := strings.TrimSpace(strings.TrimPrefix(cmd.CommandPath(), cmd.Root().Name())); name != "" {
 			command = name
 		}
+	}
+	where, present := managedHostWindowsStandalone()
+	if !present {
+		// GAP-1317: a standard user on a managed Linux or macOS host has no
+		// per-user config either; give the answer start gives.
+		record, unixPresent := managedHostUnixRecord(nil)
+		if !unixPresent {
+			return err
+		}
+		// GAP-1196: name the administrator's form of the command too, so
+		// `audit export` reads as an administrator command here.
+		asAdmin := ""
+		if command != "this command" {
+			asAdmin = fmt.Sprintf("run `sudo %s %s` or ", managedHostGatewayCommand(), command)
+		}
+		return fmt.Errorf("this computer's DefenseClaw is managed by your organization (%s), so `%s` has no "+
+			"per-user gateway to check; an administrator can %scheck the managed deployment with "+
+			"`sudo %s enterprise %s status`. Nothing was changed.",
+			record, command, asAdmin, managedHostGatewayCommand(), managedHostPlatform())
 	}
 	return managedWindowsAdminCommandAnswer(where, command)
 }
@@ -165,7 +361,7 @@ func managedWindowsSetupRefusal(where string, args []string) error {
 	}
 	return fmt.Errorf("this computer's DefenseClaw is managed by your organization (%s), so per-user setup "+
 		"commands are not available; your administrator manages its connectors and credentials. "+
-		"%sNothing was changed", where, detail)
+		"%sNothing was changed.", where, detail)
 }
 
 func managedHostUnixRecord(warn io.Writer) (string, bool) {

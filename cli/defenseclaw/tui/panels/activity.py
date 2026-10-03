@@ -12,44 +12,91 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
-from rich.markup import escape as rich_escape
-
+from defenseclaw.tui.markup_safe import escape as rich_escape
 from defenseclaw.tui.services.event_models import ActivityMutation, timestamp_label
 from defenseclaw.tui.services.v8_event_history import (
     V8EventHistoryRow,
-    load_v8_event_history,
+    load_v8_mutation_history,
     payload_text,
 )
 
 ActivityTab = Literal["commands", "mutations"]
 
 
+def _mutation_diff(row: V8EventHistoryRow) -> tuple[dict[str, Any], ...]:
+    """Field changes from ``defenseclaw.admin.diff`` (a JSON list), else before/after state."""
+
+    raw = row.payload.get("defenseclaw.admin.diff")
+    if isinstance(raw, str) and raw.strip():
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            raw = None
+    if isinstance(raw, list):
+        items = tuple(item for item in raw if isinstance(item, dict))
+        if items:
+            return items
+    before = payload_text(row.payload, "defenseclaw.admin.before_state")
+    after = payload_text(row.payload, "defenseclaw.admin.after_state")
+    if before or after:
+        return ({"op": "replace", "path": "", "before": before, "after": after},)
+    return ()
+
+
+def _mutation_reason(row: V8EventHistoryRow) -> str:
+    reason = payload_text(
+        row.payload,
+        "defenseclaw.guardrail.reason",
+        "defenseclaw.enforcement.failure_class",
+        "defenseclaw.error.summary",
+        "details",
+    ) or row.details
+    if reason in {row.event_name, row.action}:
+        # "config.change.applied" repeated the event name; say what ran instead.
+        operation = payload_text(row.payload, "defenseclaw.admin.operation")
+        return operation.replace("_", " ") if operation and operation != row.action else ""
+    return reason
+
+
 def activity_mutations_from_v8_history(
     rows: tuple[V8EventHistoryRow, ...],
 ) -> tuple[ActivityMutation, ...]:
-    """Project Activity mutations without touching SQLite."""
+    """Project Activity mutations without touching SQLite.
+
+    Rows name what changed (``config:dotenv:NAME``, the policy, the webhook)
+    and carry the field diff, instead of "compliance.activity:config.change.
+    applied" and "(no structured diff)" (GAP-1217).
+    """
 
     return tuple(
         ActivityMutation(
-            actor=payload_text(row.payload, "defenseclaw.operator.id", "enduser.id")
+            actor=payload_text(
+                row.payload,
+                "defenseclaw.operator.id",
+                "enduser.id",
+                "defenseclaw.admin.actor_ref",
+                "actor",
+            )
             or row.actor
             or row.source,
             action=row.action or row.event_name,
-            target_type=row.bucket,
+            target_type="",
             target_id=payload_text(
                 row.payload,
+                "defenseclaw.admin.target_ref",
                 "defenseclaw.config.path",
                 "defenseclaw.policy.id",
                 "defenseclaw.approval.id",
                 "defenseclaw.enforcement.id",
                 "defenseclaw.finding.target_ref",
-            )
-            or row.event_name,
+                "target",
+            ),
             version_from=payload_text(
                 row.payload,
                 "defenseclaw.config.generation.previous",
@@ -60,13 +107,8 @@ def activity_mutations_from_v8_history(
                 "defenseclaw.config.generation",
                 "defenseclaw.policy.version",
             ),
-            reason=payload_text(
-                row.payload,
-                "defenseclaw.guardrail.reason",
-                "defenseclaw.enforcement.failure_class",
-                "defenseclaw.error.summary",
-            )
-            or row.details,
+            reason=_mutation_reason(row),
+            diff=_mutation_diff(row),
             timestamp=row.timestamp,
         )
         for row in rows
@@ -100,16 +142,20 @@ class ActivityEntry:
     restart_completed: bool = False
     doctor_cache_refreshed: bool = False
     suggested_next_action: str = ""
+    # ``command`` is the redacted text every view shows (GAP-1889). Rerun
+    # needs the real command and its hidden inputs; they stay in memory only.
+    rerun_command: str = field(default="", repr=False)
+    rerun_stdin: str | None = field(default=None, repr=False)
+    rerun_env: tuple[tuple[str, str], ...] = field(default=(), repr=False)
 
     @property
     def status_label(self) -> str:
         if not self.done:
             return "running"
+        took = f"{self.duration.total_seconds():.1f}s"
         if self.cancelled:
-            return f"cancelled ({self.duration})"
-        if self.exit_code == 0:
-            return f"exit 0 ({self.duration})"
-        return f"exit {self.exit_code} ({self.duration})"
+            return f"cancelled ({took})"
+        return f"exit {self.exit_code} ({took})"
 
     @property
     def meta_footer(self) -> str:
@@ -174,6 +220,16 @@ class ActivityPanelModel:
     def is_running(self) -> bool:
         return bool(self.entries and not self.entries[-1].done)
 
+    @property
+    def shows_finished_output(self) -> bool:
+        """The body shows a finished command's whole output (the drawer log
+        would only repeat it, GAP-2326)."""
+
+        if self.tab != "commands" or not self.term_mode or not self.entries:
+            return False
+        index = self.cursor if 0 <= self.cursor < len(self.entries) else len(self.entries) - 1
+        return self.entries[index].done
+
     def set_tab(self, tab: ActivityTab) -> None:
         self.tab = tab
 
@@ -183,22 +239,34 @@ class ActivityPanelModel:
         *,
         started_at: datetime | None = None,
         masked_argv: tuple[str, ...] | None = None,
+        rerun_command: str = "",
+        rerun_stdin: str | None = None,
+        rerun_env: tuple[tuple[str, str], ...] = (),
     ) -> None:
         self.entries.append(
             ActivityEntry(
                 command=command,
                 started_at=started_at or datetime.now(timezone.utc),
                 masked_argv=tuple(masked_argv) if masked_argv else (),
+                rerun_command=rerun_command,
+                rerun_stdin=rerun_stdin,
+                rerun_env=tuple(rerun_env),
             )
         )
         self.cursor = len(self.entries) - 1
         self.term_mode = True
         self.term_scroll = 0
 
-    def append_output(self, line: str) -> None:
+    def append_output(self, line: str, *, continues: bool = False) -> None:
         if not self.entries:
             return
-        self.entries[-1].output.append(line)
+        output = self.entries[-1].output
+        if continues and output:
+            # The rest of a line already shown, such as the mark after
+            # "restarting..." (GAP-2284).
+            output[-1] += line
+        else:
+            output.append(line)
 
     def finish_entry(
         self,
@@ -262,10 +330,12 @@ class ActivityPanelModel:
         self.select_entry(self.cursor + delta)
 
     def handle_key(self, key: str) -> None:
-        if key == "1":
+        # h/l switch the sub-tabs (as on Inventory and Logs); the digits stay
+        # panel keys, so 1 opens Overview from here too (GAP-1607).
+        if key in {"h", "left"}:
             self.set_tab("commands")
             return
-        if key == "2":
+        if key in {"l", "right"}:
             self.set_tab("mutations")
             return
         if self.tab == "mutations":
@@ -306,7 +376,7 @@ class ActivityPanelModel:
                 self.diff_open.add(self.mutation_cursor)
 
     def load_mutations(self) -> None:
-        rows = load_v8_event_history(self.store, limit=500)
+        rows = load_v8_mutation_history(self.store, limit=500)
         self.apply_v8_history(rows)
 
     def apply_v8_history(self, rows: tuple[V8EventHistoryRow, ...]) -> None:
@@ -322,7 +392,8 @@ class ActivityPanelModel:
             self.mutation_cursor = max(len(self.mutations) - 1, 0)
 
     def render_text(self, *, height: int = 24) -> str:
-        tab_bar = "  [1] Commands   [2] Mutations (gateway activity)\n"
+        marks = {name: "▸" if self.tab == name else " " for name in ("commands", "mutations")}
+        tab_bar = f"  {marks['commands']} Commands   {marks['mutations']} Mutations (gateway activity)   h/l switch\n"
         if self.tab == "mutations":
             return tab_bar + self._render_mutations(height=height)
         if not self.entries:
@@ -364,28 +435,46 @@ class ActivityPanelModel:
 
     def _render_mutations(self, *, height: int) -> str:
         if not self.mutations:
-            return "  No activity events in canonical SQLite event history yet."
+            return "  No activity events in the local audit log yet."
         lines: list[str] = []
         max_rows = max(height - 6, 5)
         start = max(0, self.mutation_cursor - max_rows + 1)
         for index, mutation in enumerate(self.mutations[start : start + max_rows], start=start):
             prefix = "▸ " if index == self.mutation_cursor else "  "
-            from_version = mutation.version_from or "∅"
-            to_version = mutation.version_to or "∅"
-            reason = f" -- {mutation.reason[:40]}" if mutation.reason else ""
-            lines.append(
-                prefix
-                + rich_escape(
-                    f"{timestamp_label(mutation.timestamp)}  {mutation.actor}  {mutation.action}  "
-                    f"{mutation.target_label}  {from_version} -> {to_version}{reason}"
-                )
-            )
+            parts = [timestamp_label(mutation.timestamp), mutation.actor, mutation.action]
+            if mutation.target_label:
+                parts.append(mutation.target_label)
+            if mutation.version_from or mutation.version_to:
+                parts.append(f"v{mutation.version_from or '?'} -> v{mutation.version_to or '?'}")
+            if len(mutation.diff) == 1:
+                parts.append(_diff_line(mutation.diff[0]))
+            elif mutation.diff:
+                parts.append(f"{len(mutation.diff)} changes")
+            elif mutation.reason:
+                parts.append(mutation.reason[:60])
+            lines.append(prefix + rich_escape("  ".join(part for part in parts if part)))
             if index in self.diff_open:
                 if mutation.diff:
-                    lines.extend(
-                        "      " + rich_escape(f"{item.get('op', '')} {item.get('path', '')}") for item in mutation.diff
-                    )
+                    lines.extend("      " + rich_escape(_diff_line(item)) for item in mutation.diff)
+                    if mutation.reason:
+                        lines.append("      " + rich_escape(mutation.reason))
+                elif mutation.reason:
+                    lines.append("      " + rich_escape(mutation.reason))
                 else:
-                    lines.append("      (no structured diff)")
-        lines.append("\n  [Enter] expand diff")
+                    lines.append("      No field-level change was recorded for this event.")
+        lines.append("\n  [Enter] show the change")
         return "\n".join(lines)
+
+
+def _diff_line(item: dict[str, Any]) -> str:
+    """``/.env/NAME: unset -> set`` for one diff entry."""
+
+    path = str(item.get("path", "") or "")
+    before = item.get("before")
+    after = item.get("after")
+    change = ""
+    if before is not None or after is not None:
+        change = f"{'' if before is None else before} -> {'' if after is None else after}".strip()
+    op = str(item.get("op", "") or "")
+    label = path or op
+    return f"{label}: {change}" if change and label else (change or f"{op} {path}".strip())

@@ -77,13 +77,19 @@ SETUP_KEYMAPS: dict[SetupView, tuple[KeySpec, ...]] = {
     # switcher) and a double-click on a task do what its buttons did.
     "wizards": (
         KeySpec("↑/↓", "choose", "Move between setup tasks (on into the next group)", None, ("up", "down", "j", "k")),
-        KeySpec("←/→", "group", "Previous / next task group (also [ and ])", None, ("left", "right", "[", "]")),
         KeySpec("Enter", "open", "Open the selected task", None, ("enter",)),
+        KeySpec(
+            "←/→",
+            "group",
+            "Previous / next task group, then the config editor (also [ and ])",
+            None,
+            ("left", "right", "[", "]"),
+        ),
         KeySpec("i", "details", "Readiness checks and what the selected task runs", None, ("i",)),
-        KeySpec("c", "config editor", "Edit config.yaml fields directly", None, ("c",)),
-        KeySpec("f", "fill missing keys", "Prompt for every missing required key", None, ("f",), when="credentials"),
-        KeySpec("s", "set a key", "Set one API key", None, ("s",), when="credentials"),
-        KeySpec("r", "refresh keys", "Reload the list of API keys", None, ("r",)),
+        KeySpec("c", "config", "Edit config.yaml fields directly (config editor)", None, ("c",)),
+        KeySpec("f", "fill missing", "Prompt for every missing required key", None, ("f",), when="credentials"),
+        KeySpec("s", "set key", "Set one API key", None, ("s",), when="credentials"),
+        KeySpec("r", "reload keys", "Reload the list of API keys", None, ("r",), when="credentials"),
         *_RESTART,
     ),
     "goals": (
@@ -116,7 +122,7 @@ SETUP_KEYMAPS: dict[SetupView, tuple[KeySpec, ...]] = {
         KeySpec(
             "Tab/Shift+Tab",
             "section",
-            "Next / previous section (also ←/→)",
+            "Next / previous section (also ←/→; ← on the first section goes back to the tasks)",
             None,
             ("tab", "shift+tab", "left", "right"),
         ),
@@ -124,8 +130,9 @@ SETUP_KEYMAPS: dict[SetupView, tuple[KeySpec, ...]] = {
         KeySpec("/", "find field", "Find a field by name or key in any section", None, ("/",)),
         KeySpec("E", "list editor", "Edit this section's list entries", "setup-edit-list", ("E",), when="list_editor"),
         KeySpec("S", "review & save", "Review the changes, then save config.yaml", "setup-save", ("S",)),
-        KeySpec("R", "revert", "Drop unsaved changes", "setup-revert", ("R",)),
-        KeySpec("w", "wizards", "Back to the setup tasks", "setup-mode-wizards", ("w",)),
+        # Lowercase: R is the global Registries key (GAP-2151).
+        KeySpec("r", "revert", "Drop unsaved changes", "setup-revert", ("r",)),
+        KeySpec("Esc/w", "tasks", "Back to the setup tasks (unsaved edits are kept)", "setup-mode-wizards", ("esc", "w")),
         *_RESTART,
     ),
     "first-run": (
@@ -195,10 +202,47 @@ def keymap(view: SetupView, conditions: Iterable[str] = ()) -> tuple[KeySpec, ..
     return tuple(spec for spec in SETUP_KEYMAPS[view] if not spec.when or spec.when in held)
 
 
-def keys_hint(view: SetupView, conditions: Iterable[str] = ()) -> str:
-    """Hint bar text: ``↑/↓ choose · Enter open · …``."""
+# The task list's hint is one row at 80 columns (the bar pads one cell on
+# each side); it has no button bar to fall back on.
+HINT_WIDTH = 78
+ONE_ROW_VIEWS: frozenset[str] = frozenset({"wizards"})
+# "? all keys" read as "show all API keys" on the API keys task (GAP-2061).
+MORE_KEYS = "? help"
 
-    return " · ".join(f"{spec.key} {spec.label}" for spec in keymap(view, conditions) if spec.in_hint)
+
+def keys_hint(view: SetupView, conditions: Iterable[str] = ()) -> str:
+    """Hint bar text: ``↑/↓ choose · Enter open · …``.
+
+    On the task list the keys of the selected task (``f``, ``s``, ``G``) win
+    over the general ones: those go from the end until the line fits one
+    80-column row, and ``? help`` points at the help sheet that still
+    lists them (GAP-1825).
+    """
+
+    specs = [spec for spec in keymap(view, conditions) if spec.in_hint]
+
+    def join(items: list[KeySpec], *more: str) -> str:
+        return " · ".join([*(f"{spec.key} {spec.label}" for spec in items), *more])
+
+    text = join(specs)
+    if view not in ONE_ROW_VIEWS or len(text) <= HINT_WIDTH:
+        return text
+    for spec in reversed(specs[1:]):
+        if spec.when:
+            continue
+        specs.remove(spec)
+        text = join(specs, MORE_KEYS)
+        if len(text) <= HINT_WIDTH:
+            return text
+    # A queued restart on the API keys task: its own keys go from the end
+    # (r first) before the restart key does.
+    for spec in reversed(specs[1:]):
+        if len(text) <= HINT_WIDTH:
+            break
+        if spec.when == "credentials":
+            specs.remove(spec)
+            text = join(specs, MORE_KEYS)
+    return text
 
 
 def help_rows(view: SetupView, conditions: Iterable[str] = ()) -> list[tuple[str, str]]:

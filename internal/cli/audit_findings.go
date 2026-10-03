@@ -40,38 +40,72 @@ var auditFindingsCmd = &cobra.Command{
 	Use:   "findings",
 	Short: "Report distinct current scan findings",
 	Long: `Report the deduplicated scan-finding lifecycle as JSON. Active current
-state is the default. --since selects findings observed at/after an RFC3339
-timestamp and, with --include-resolved, resolutions in that interval. Combine
---new-only with --since to select only fingerprints first observed then.`,
-	RunE: runAuditFindings,
+state is the default. --since selects findings observed at/after a time
+(RFC3339, or a duration ago such as 30m or 2h) and, with --include-resolved,
+resolutions in that interval. Combine --new-only with --since to select only
+fingerprints first observed then.
+
+This covers asset scans (skill, MCP, plugin, code, AIBOM and inventory
+scans). Guardrail decisions on prompts and tool calls (hook rules, the LLM
+guardrail) are not tracked here; see 'defenseclaw alerts' or
+'defenseclaw-gateway audit export' for those.`,
+	// A bad flag value fails before the audit store opens, so it never
+	// creates or migrates audit.db (GAP-2126), like audit export.
+	PersistentPreRunE: auditFindingsPersistentPreRunE,
+	RunE:              runAuditFindings,
 }
 
 func init() {
 	auditFindingsCmd.Flags().StringVar(&auditFindingsScanner, "scanner", "", "Only findings from this scanner")
 	auditFindingsCmd.Flags().StringVar(&auditFindingsTarget, "target", "", "Only findings for this exact normalized scan target")
-	auditFindingsCmd.Flags().StringVar(&auditFindingsSince, "since", "", "Only lifecycle changes at/after this RFC3339 timestamp")
+	auditFindingsCmd.Flags().StringVar(&auditFindingsSince, "since", "", "Only lifecycle changes at or after this time: RFC3339 (2026-09-27T18:30:00Z) or a duration ago (30m, 2h)")
 	auditFindingsCmd.Flags().BoolVar(&auditFindingsNewOnly, "new-only", false, "Only fingerprints first observed since --since")
 	auditFindingsCmd.Flags().BoolVar(&auditFindingsIncludeResolved, "include-resolved", false, "Include resolved findings (active current state is the default)")
 	auditFindingsCmd.Flags().IntVar(&auditFindingsLimit, "limit", 100, "Maximum distinct findings to return (1-10000)")
 	auditCmd.AddCommand(auditFindingsCmd)
 }
 
-func runAuditFindings(cmd *cobra.Command, _ []string) error {
-	if auditStore == nil {
-		return fmt.Errorf("audit findings: audit store not loaded")
+// auditFindingsPersistentPreRunE checks the flag values, then opens the
+// audit store the same way as the other audit commands.
+func auditFindingsPersistentPreRunE(cmd *cobra.Command, args []string) error {
+	if _, err := checkAuditFindingsFlags(cmd); err != nil {
+		return err
 	}
+	return auditPersistentPreRunE(cmd, args)
+}
+
+// checkAuditFindingsFlags validates --limit, --since, --new-only and
+// --target as usage errors (exit 2) and returns the parsed --since.
+func checkAuditFindingsFlags(cmd *cobra.Command) (*time.Time, error) {
 	if auditFindingsLimit < 1 || auditFindingsLimit > 10_000 {
-		return fmt.Errorf("audit findings: --limit must be between 1 and 10000")
+		return nil, auditUsageError(cmd, fmt.Errorf("audit findings: --limit must be between 1 and 10000"))
 	}
 	since, err := parseAuditFindingsSince(auditFindingsSince)
 	if err != nil {
-		return err
+		return nil, auditUsageError(cmd, err)
 	}
 	if auditFindingsNewOnly && since == nil {
-		return fmt.Errorf("audit findings: --new-only requires --since")
+		return nil, auditUsageError(cmd, fmt.Errorf("audit findings: --new-only requires --since"))
 	}
 	if auditFindingsTarget != "" && scanner.NormalizeFindingStateTarget(auditFindingsTarget) == "" {
-		return fmt.Errorf("audit findings: --target must identify a usable scan target")
+		return nil, auditUsageError(cmd, fmt.Errorf("audit findings: --target must identify a usable scan target"))
+	}
+	return since, nil
+}
+
+func runAuditFindings(cmd *cobra.Command, _ []string) error {
+	since, err := checkAuditFindingsFlags(cmd)
+	if err != nil {
+		return err
+	}
+	if auditStore == nil {
+		return fmt.Errorf("audit findings: audit store not loaded")
+	}
+	if audit.FindingLifecycleExcludesScanner(auditFindingsScanner) {
+		// GAP-1301: a guardrail scanner always reports count 0 here; say why
+		// on stderr so the JSON on stdout stays machine-readable.
+		fmt.Fprintf(cmd.ErrOrStderr(), "note: --scanner %s records guardrail decisions, which audit findings does not track; "+
+			"see 'defenseclaw alerts' or 'defenseclaw-gateway audit export' for them.\n", strings.TrimSpace(auditFindingsScanner))
 	}
 	query := audit.FindingStateQuery{
 		Scanner:         auditFindingsScanner,
@@ -113,10 +147,10 @@ func parseAuditFindingsSince(value string) (*time.Time, error) {
 	if value == "" {
 		return nil, nil
 	}
-	parsed, err := time.Parse(time.RFC3339Nano, value)
+	// Same forms as audit export --since (GAP-1232).
+	parsed, err := parseAuditExportTime("--since", value, time.Now())
 	if err != nil {
-		return nil, fmt.Errorf("audit findings: invalid --since %q (expected RFC3339): %w", value, err)
+		return nil, fmt.Errorf("audit findings: invalid --since %q (use an RFC3339 time such as 2026-09-27T18:30:00Z or a duration such as 30m)", value)
 	}
-	parsed = parsed.UTC()
-	return &parsed, nil
+	return parsed, nil
 }

@@ -225,7 +225,7 @@ func TestV8TargetedCanaryBypassesSamplingExactlyAndDebugIsSafe(t *testing.T) {
 			attribute.Int64("defenseclaw.span.family_schema_version", v8CanaryFamilySchemaVersion),
 		)...),
 	)
-	_, unmarkedChild := provider.tracer.Start(rootCtx, "chat gpt-4o-mini",
+	_, unmarkedChild := provider.tracer.Start(rootCtx, "chat defenseclaw-diagnostic",
 		trace.WithAttributes(append(provider.v8StartAttributes(observability.BucketModelIO),
 			attribute.String("defenseclaw.span.family", observability.TelemetryFamilyModelChat),
 			attribute.Int64("defenseclaw.span.family_schema_version", v8CanaryFamilySchemaVersion),
@@ -241,7 +241,7 @@ func TestV8TargetedCanaryBypassesSamplingExactlyAndDebugIsSafe(t *testing.T) {
 			observability.BucketAgentLifecycle, observability.TelemetryFamilyAgentInvoke, "galileo",
 		)...),
 	)
-	_, targetedChild := provider.tracer.Start(targetedRootCtx, "chat gpt-4o-mini",
+	_, targetedChild := provider.tracer.Start(targetedRootCtx, "chat defenseclaw-diagnostic",
 		trace.WithAttributes(provider.v8CanaryStartAttributes(
 			observability.BucketModelIO, observability.TelemetryFamilyModelChat, "galileo",
 		)...),

@@ -53,6 +53,10 @@ func NewClient(baseURL, token string) *Client {
 	return &Client{BaseURL: strings.TrimRight(baseURL, "/"), Token: token}
 }
 
+// ErrNoGatewayToken is returned by ClientForConfig before the gateway is set
+// up (no gateway token is configured yet).
+var ErrNoGatewayToken = errors.New("the DefenseClaw gateway is not set up yet; run `defenseclaw setup gateway`, then `defenseclaw-gateway start`")
+
 // ClientForConfig returns a client for the daemon cfg describes: its API
 // bind host and port and the resolved gateway token.
 func ClientForConfig(cfg *config.Config) (*Client, error) {
@@ -61,7 +65,7 @@ func ClientForConfig(cfg *config.Config) (*Client, error) {
 	}
 	token := cfg.Gateway.ResolvedToken()
 	if token == "" {
-		return nil, errors.New("sandboxapi: no gateway token configured; is the DefenseClaw daemon set up?")
+		return nil, ErrNoGatewayToken
 	}
 	port := cfg.Gateway.APIPort
 	if port <= 0 {

@@ -136,7 +136,7 @@ DEFENSECLAW_HOOK_NAME="codex-hook"
 export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 
 {{if .Sandbox}}defenseclaw_sandbox_require_token codex codex-hook "codex tool"{{else}}if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
-  defenseclaw_handle_missing_token codex codex-hook "codex tool"
+  defenseclaw_handle_missing_token codex codex-hook "codex tool" "${HOOK_DIR}/{{.TokenFile}}"
 fi{{end}}
 
 # Drop inherited export attributes before these names receive private values.
@@ -199,7 +199,15 @@ fail_unreachable() {
   if defenseclaw_should_fail_closed_on_unreachable; then
     exit 2
   fi
-  exit 0
+{{if not .Sandbox}}  # Codex does not show stderr of a hook that exits 0: say on screen that
+  # this account's gateway is down and how to start it again. Codex shows a
+  # systemMessage for these two events.
+  if [ "$1" = "gateway unreachable" ]; then
+    case "$BOUND_EVENT" in
+      SessionStart|PreToolUse) defenseclaw_unreachable_notice_json ;;
+    esac
+  fi
+{{end}}  exit 0
 }
 
 # Response-layer failure: gateway answered but the answer was bad
@@ -308,6 +316,10 @@ API_TOKEN=
 PAYLOAD=
 unset API_TOKEN PAYLOAD
 
+if defenseclaw_api_listener_foreign "$API_ADDR"; then
+  fail_unreachable "${API_ADDR} is held by another account while this account's gateway is not running; no token was sent. Run \`defenseclaw-gateway start\` for the fix"
+fi
+
 # Each attempt opens fresh descriptors, because curl consumes them.
 codex_gateway_post() {
   local status=0
@@ -315,7 +327,7 @@ codex_gateway_post() {
     exec 8< <(printf '%s\n' "header = \"Authorization: Bearer ${_DC_CURL_CONFIG_TOKEN}\"")
   fi
   exec 9< <(printf '%s' "${_DC_HOOK_PAYLOAD}")
-  RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/codex/hook" \
+  RESPONSE=$(curl -s --noproxy '*' -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/codex/hook" \
     -H "Content-Type: application/json" \
     -H "X-DefenseClaw-Client: codex-hook/1.0" \
     -H "X-DefenseClaw-Hook-Event: ${BOUND_EVENT}" \

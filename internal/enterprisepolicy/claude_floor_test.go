@@ -897,3 +897,39 @@ func TestClaudeVersionFloorAdministratorValueAddedAfterInstall(t *testing.T) {
 		})
 	}
 }
+
+// GAP-1555: a machine-wide hook drop-in rendered from a newer hook contract
+// (standalone Windows renders it from the oldest enrolled one) raises the
+// floor to that contract's lowest version, and the report says why; back on
+// the oldest contract the floor returns to the lowest verified version.
+func TestClaudeVersionFloorFollowsTheMachineHookContract(t *testing.T) {
+	withHigherSources(t)
+	opts := testOptions(t)
+	opts.ClaudeMachineHookContract = "claudecode-hooks-v2"
+
+	state := reconcileClaude(t, opts)
+	mustNoConflicts(t, state)
+	if got, want := readFile(t, claudeFloorFile(t, opts)), "{\n  \"requiredMinimumVersion\": \"2.1.219\"\n}\n"; got != want {
+		t.Fatalf("floor drop-in = %q, want %q", got, want)
+	}
+	floor := state.VersionFloor
+	if floor == nil || floor.Floor != "2.1.219" || floor.Value != "2.1.219" || !strings.Contains(floor.Reason, "claudecode-hooks-v2") {
+		t.Fatalf("floor state: %+v", floor)
+	}
+	if !strings.Contains(floor.Summary(), "claudecode-hooks-v2") || !hasDetail(state, "2.1.219, not 2.1.154") {
+		t.Fatalf("status must name why the floor is 2.1.219: %s / %v", floor.Summary(), state.Details)
+	}
+	if again := reconcileClaude(t, opts); again.Changed {
+		t.Fatalf("a second reconcile must be a no-op: %+v", again)
+	}
+
+	opts.ClaudeMachineHookContract = "claudecode-hooks-v1"
+	state = reconcileClaude(t, opts)
+	mustNoConflicts(t, state)
+	if got := readFile(t, claudeFloorFile(t, opts)); got != wantClaudeFloorBytes {
+		t.Fatalf("floor drop-in on the v1 contract = %q, want %q", got, wantClaudeFloorBytes)
+	}
+	if state.VersionFloor == nil || state.VersionFloor.Reason != "" {
+		t.Fatalf("no reason on the lowest contract: %+v", state.VersionFloor)
+	}
+}

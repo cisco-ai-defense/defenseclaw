@@ -196,9 +196,13 @@ class ActionMenuScreen(ModalScreen[str | None]):
     """
 
     BINDINGS = [
-        Binding("up,k", "cursor_up", "Previous", show=False),
-        Binding("down,j", "cursor_down", "Next", show=False),
-        Binding("enter", "choose", "Choose", show=False),
+        # Priority bindings run in typing order as keys are read. As plain
+        # bindings, a quick "Down Down Enter" let the focused row's Enter win
+        # before the queued Downs moved the selection, so the old row was
+        # chosen again (GAP-1775).
+        Binding("up,k", "cursor_up", "Previous", show=False, priority=True),
+        Binding("down,j", "cursor_down", "Next", show=False, priority=True),
+        Binding("enter", "choose", "Choose", show=False, priority=True),
         Binding("escape,q", "cancel", "Cancel", show=False),
     ]
 

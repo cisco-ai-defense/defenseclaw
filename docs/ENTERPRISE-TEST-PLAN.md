@@ -646,7 +646,7 @@ failure drills). The Windows result is for Setup `/ensure CONFIG=<file>`:
 | Change | Linux and macOS (`ensure --config <file> --json`) | Windows |
 | --- | --- | --- |
 | `data_dir: /tmp/x` | Exit `1`, `config_invalid`; installed config unchanged | N/A (leave `data_dir` unset) |
-| `guardrail.mode: blockall` | Exit `1`, `config_invalid` | Exit `1639` before any change: "the gateway cannot load `<file>` at `<path>`: `<reason>`; fix the config and run again (nothing was changed)" |
+| `guardrail.mode: blockall` | Exit `1`, `config_invalid` | Exit `1639` before any change: "the gateway cannot load `<file>` at `<path>`: `<reason>`; fix it and run again (nothing was changed)" |
 | `gateway.api_bind: 0.0.0.0` | Exit `1`, `config_invalid` | Refused; record whether Setup's preflight (`1639`) or the lifecycle (`1603`, rolled back) refuses it |
 | `enterprise.profile: secure_client` on a standalone host | Refused (`config_invalid` or `profile_conflict`); record which | Refused: the profile cannot change in place |
 | An inline `cisco_ai_defense.api_key` | Refused | Refused; the Intune packager also refuses a config with an `api_key:` line |
@@ -956,7 +956,7 @@ used; `setsid -w` drops the controlling terminal. The documented form is
 | Another apt or dnf holds the package lock | `mdm_package_manager_busy`, exit `75` |
 | `--action verify --source <file>` | Refused (status and verify take no source), exit `2` |
 | `ensure` with no source on a clean host | `mdm_not_installed`, exit `1` |
-| `--secret-file` writable by others | `mdm_untrusted_input`. A valid file whose `secret set` fails after apply: `mdm_secret_failed` with the `secret set` exit code |
+| `--secret-file` writable by others | `mdm_untrusted_input`. A valid file whose `secret set` fails (Linux and macOS store it before the config apply): `mdm_secret_failed` with the `secret set` exit code, config not applied |
 
 Wrapper options: `--action ensure|status|verify`, `--source FILE` or
 `--source-url https://...`, `--sha256 HEX`, `--trust-mode hash_pinned|signed`,
@@ -2521,11 +2521,11 @@ the build and OS, and does not file a bug unless the behavior differs from the r
 | Row(s) | What a tester will see | Where |
 | --- | --- | --- |
 | R1, L-34, M-26, Linux residual 7, macOS residual 1, Windows residual 20 | A per-user agent started with another config root or a mode that skips user configuration runs with no DefenseClaw hook and no audit row, while status/verify keep the user's target ready: Amp (`XDG_CONFIG_HOME`, `HOME`), Devin (`XDG_CONFIG_HOME`, `devin --config <copy>`), Antigravity (`HOME`), Hermes (`--safe-mode`, `HERMES_HOME`, a replacing `HERMES_MANAGED_DIR` config), OpenHands (`HOME`), OpenCode on the per-user route (`OPENCODE_CONFIG_DIR`). Hermes `--ignore-user-config` alone keeps the hooks; `DEFENSECLAW_*` overrides do not remove them. A path a user breaks in their own home is only the warning `guardian_target_user_path` | Per-user connectors, every OS |
-| R2 | Claude Code `--bare` and `CLAUDE_CODE_SIMPLE=1` skip managed `SessionStart`/`UserPromptSubmit` hooks; `PreToolUse` still runs | Claude Code |
+| R2 | Claude Code `--bare` and `CLAUDE_CODE_SIMPLE=1` skip the managed `SessionStart` hook; in 2.1.287 `UserPromptSubmit` and `PreToolUse` still run (other releases may skip `UserPromptSubmit`) | Claude Code |
 | R3 | Amp: no machine plugin path, undefined handler order; another config dir loads no DefenseClaw plugin | Amp |
 | R4 | OpenCode: plugin order undefined on the per-user route; `--pure`, `OPENCODE_PURE=1`, `OPENCODE_TEST_MANAGED_CONFIG_DIR` start without any DefenseClaw plugin | OpenCode |
 | R5 | Hermes blocks only on a valid block answer (and exit 2 from 0.21); other failures and a timeout let the call run (some builds block on a stalled hook timeout, undocumented) | Hermes |
-| R6 | Copilot command hooks that time out fail open | Copilot CLI |
+| R6 | Copilot command hooks that time out: earlier releases ran the call, Copilot CLI 1.0.91 denies it ("hook errored"); record the version | Copilot CLI |
 | R7, L residual 3, macOS residual 6, Windows residual 5 | A user can hold the API port while the gateway restarts (every restart on macOS and Windows; on Linux only after an admin stops the socket unit): availability loss; hooks are unaffected (peer/PID check), but the native OTLP exporters of Codex, Claude Code, OpenHands and OmniGent send telemetry and the sender's per-user telemetry credential to the holder; the Windows Amp and per-user OpenCode listener proof is a separate request from the hook POST | Every OS |
 | R8, Windows residual 13, macOS residual 4 | Hash-pinned (unsigned) payloads do not satisfy publisher-signature application control or Gatekeeper | Windows, macOS |
 | Windows residual 4 | Application control and vendor MDM/GPO policy can add protection against old or copied clients, but are optional | Windows |
@@ -2545,7 +2545,7 @@ the build and OS, and does not file a bug unless the behavior differs from the r
 | R19, Linux residual 9, Windows residual 15 | Agents installed outside the known locations (custom `NVM_DIR`, `PNPM_HOME`, `--prefix`, arbitrary folders) are neither enrolled nor reported | Every OS |
 | R20, L-26, Linux residual 11 | `unprivileged_user_namespaces` warning on stock Ubuntu 24.04 and RHEL 9; the sysctl remedies also restrict agent sandboxes (Codex's bubblewrap already fails on stock Ubuntu 24.04) | Linux |
 | R21 | Admin-triggered windows: a hot reload just before the lifecycle rejects an in-place edit (`config_rejected`); an upgrade that changes a socket unit releases the listener | Linux, macOS |
-| R22 | Kiro is advisory: neither kiro-cli engine vetoes prompts (`--v3` sends a blocked prompt to the model with the reason attached; the audit records the block); another agent, a moved `KIRO_HOME` or cloud config sync run without the hook; on Windows a kiro-cli that has never run is reported and not enrolled until its first run | Kiro |
+| R22 | Kiro is advisory: neither kiro-cli engine vetoes prompts (`--v3` sends a blocked prompt to the model with the reason attached; the audit records the block); another agent, a moved `KIRO_HOME` or cloud config sync run without the hook; on Windows a kiro-cli that has never run is enrolled at 2.24.1 until its first run names the version | Kiro |
 | R23 | Cursor applies enterprise `hooks.json` only on plans that support it | Cursor |
 | R24 | Antigravity, OpenHands, OmniGent (and Hermes on Windows) have no lock and no foreign-hook guard; Hermes gaps on Linux/macOS: hooks re-read on plugin reload, Python plugins, a session that never loads DefenseClaw's hook | Those connectors |
 | R25, W-57, L-27, M-18 | Desktop-app or editor-extension-only users are not enrolled (#912) | Every OS |

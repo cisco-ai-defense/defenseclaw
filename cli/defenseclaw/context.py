@@ -21,6 +21,9 @@ from __future__ import annotations
 import click
 
 SETUP_RESTART_HANDLED_META_KEY = "defenseclaw._setup_restart_handled"
+# Set when a setup command changed a stored key in ~/.defenseclaw/.env, so
+# the setup group restarts the gateway although config.yaml did not change.
+SETUP_SECRET_CHANGED_META_KEY = "defenseclaw._setup_secret_changed"
 
 
 class AppContext:
@@ -39,6 +42,9 @@ class AppContext:
         # its nested child command. Direct command-unit invocations retain
         # their existing already-initialized AppContext contract.
         self.setup_runtime_deferred = False
+        # Config validation problems that ``status`` reports after rendering
+        # (GAP-1788); every other command exits before running instead.
+        self.config_problems: list[str] = []
 
 
 pass_ctx = click.make_pass_decorator(AppContext, ensure=True)
@@ -56,3 +62,16 @@ def mark_setup_restart_handled() -> None:
         ctx = None
     if ctx is not None:
         ctx.meta[SETUP_RESTART_HANDLED_META_KEY] = True
+
+
+def mark_setup_secret_changed() -> None:
+    """Ask the setup group's result hook to restart the gateway (GAP-2356)."""
+
+    ctx = click.get_current_context(silent=True)
+    if ctx is not None:
+        ctx.meta[SETUP_SECRET_CHANGED_META_KEY] = True
+
+
+def setup_secret_changed() -> bool:
+    ctx = click.get_current_context(silent=True)
+    return bool(ctx is not None and ctx.meta.get(SETUP_SECRET_CHANGED_META_KEY))

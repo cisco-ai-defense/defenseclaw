@@ -130,7 +130,7 @@ func (a *APIServer) auditForeignHookSessionDenial(
 	exchange enterprisepolicy.SessionExchange,
 	decision enterprisepolicy.GuardDecision,
 ) {
-	if a == nil || a.logger == nil {
+	if a == nil {
 		return
 	}
 	block := "call"
@@ -164,7 +164,7 @@ func (a *APIServer) auditForeignHookSessionDenial(
 		break
 	}
 	reason := clipForeignHookAuditField(decision.Reason, foreignHookAuditReasonLimit)
-	_ = a.logConnectorHookAuditEnvelope(ctx, HookAuditEnvelope{
+	env := HookAuditEnvelope{
 		Connector:  connectorName,
 		Event:      "foreign_hook_session",
 		Result:     "ok",
@@ -176,7 +176,114 @@ func (a *APIServer) auditForeignHookSessionDenial(
 		WouldBlock: true,
 		Enforced:   true,
 		Extra:      extra,
-	})
+	}
+	// The denial is a guardrail block like any other, so it is exported as
+	// one: a hook decision record naming the user, the connector-hook block
+	// metrics and an apply_guardrail block span. Before, it reached only the
+	// audit row, and dashboards, alerts and traces that count blocks never
+	// saw it (GAP-2044).
+	a.emitForeignHookSessionDenialV8(ctx, connectorName, exchange, env)
+	if a.logger != nil {
+		_ = a.logConnectorHookAuditEnvelope(ctx, env)
+	}
+}
+
+// emitForeignHookSessionDenialV8 exports one foreign-hook guard denial
+// through the same v8 families as a connector-hook block.
+func (a *APIServer) emitForeignHookSessionDenialV8(
+	ctx context.Context,
+	connectorName string,
+	exchange enterprisepolicy.SessionExchange,
+	env HookAuditEnvelope,
+) {
+	if ctx == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	// The hook event the agent sent names the decision's lifecycle event
+	// (tool_start for a tool call), as for any other hook block; without it
+	// every denial said lifecycle.event "event" (GAP-2216).
+	event := clipForeignHookAuditField(strings.TrimSpace(exchange.Event), foreignHookAuditFieldLimit)
+	req := agentHookRequest{
+		ConnectorName: connectorName,
+		HookEventName: firstNonEmpty(event, env.Event),
+		SessionID:     exchange.Key.Session,
+	}
+	// An enforced block, as a hook response reports it: would_block marks an
+	// observe-mode decision only.
+	resp := agentHookResponse{
+		Action: env.Action, RawAction: env.RawAction, Severity: env.Severity,
+		Mode: env.Mode, Reason: env.Reason,
+	}
+	a.emitHookDecisionObservabilityV8(ctx, req, resp, env, false)
+	// A denied tool call carries the block on its tool span, like any other
+	// blocked call, so every trace destination (Galileo included) shows it;
+	// a session or prompt event gets an apply_guardrail span named for what
+	// was denied, never "tool_call" (GAP-2142).
+	targetType, tool := foreignHookSessionDenialTarget(exchange)
+	if tool != "" {
+		if outcome, ok := hookGuardrailOutcomeFor(resp.Action, resp.Severity, resp.Reason, env.RuleIDs); ok {
+			meta := hookLLMEventMeta(ctx, connectorName, exchange.Key.Session, "", "", connectorName, "", "", "", nil)
+			meta = applyHookEventMeta(meta, event, nil)
+			meta.Guardrail = outcome
+			meta.LifecycleOutcome = "blocked"
+			a.emitHookToolSpanFor(ctx, meta, tool, "", "", outcome.Reason, nil)
+			return
+		}
+	}
+	a.emitGuardrailApplyTraceV8(ctx, connectorName, "", targetType, &ToolInspectVerdict{
+		Action: resp.Action, RawAction: resp.RawAction, Severity: resp.Severity,
+		Reason: resp.Reason, Mode: resp.Mode,
+	}, 0, hookEvaluationContext{})
+}
+
+// foreignHookSessionDenialTarget names what a foreign-hook denial was for:
+// the apply_guardrail target type, and the tool when the event is a tool
+// call. An exchange from a hook that sends no event name keeps the earlier
+// "tool_call" label unless it is a session start.
+func foreignHookSessionDenialTarget(exchange enterprisepolicy.SessionExchange) (targetType, tool string) {
+	event := strings.TrimSpace(exchange.Event)
+	if event == "" {
+		if exchange.SessionStart {
+			return "session", ""
+		}
+		return "tool_call", ""
+	}
+	switch canonicalHookLifecycleEvent(event) {
+	case "tool_start", "tool_end":
+		tool = clipForeignHookAuditField(strings.TrimSpace(exchange.Tool), foreignHookAuditFieldLimit)
+		if tool == "" {
+			// Cursor's shell, MCP and file events name no tool.
+			tool = "tool"
+			if strings.EqualFold(event, "beforeShellExecution") {
+				tool = "shell"
+			}
+		}
+		return "tool_call", tool
+	case "session_start", "session_end", "subagent_start", "subagent_stop":
+		return "session", ""
+	case "turn_start":
+		return "prompt", ""
+	case "turn_end":
+		return "completion", ""
+	case "compact_start", "compact_end":
+		return "compaction", ""
+	}
+	// Cursor's workspaceOpen opens the session and afterAgentThought is
+	// agent output; neither is a lifecycle event of its own (GAP-2216).
+	switch canonicalEvent(event) {
+	case "workspaceopen":
+		return "session", ""
+	case "afteragentthought":
+		return "completion", ""
+	}
+	if exchange.SessionStart {
+		return "session", ""
+	}
+	if isPromptLikeEvent(event) {
+		return "prompt", ""
+	}
+	return "event", ""
 }
 
 // foreignHookRemovalCache holds the guardian's foreign-hook removal ledger

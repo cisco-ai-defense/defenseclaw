@@ -87,10 +87,20 @@ $ManagedShims = @("defenseclaw", "skill-scanner", "mcp-scanner")
 # runs this extensionless script. cmd.exe and PowerShell ignore it: it has no
 # PATHEXT extension.
 $PosixShim = "defenseclaw"
+# PowerShell and cmd.exe run `defenseclaw` through this copy of the venv's
+# native console-script launcher: PATHEXT puts .exe before .cmd. Through the
+# .cmd shim, cmd.exe asked "Terminate batch job (Y/N)?" after every Ctrl+C
+# (GAP-2237); defenseclaw.cmd stays for callers that name it.
+$CliLauncher = "defenseclaw.exe"
 # defenseclaw-hook.exe reads its data dir from the state file beside it, never
 # from the environment an agent runs it with (a custom DEFENSECLAW_HOME too).
 $HookState = "defenseclaw-hook-state.json"
-$ManagedFiles = $ManagedBinaries + @($ManagedShims | ForEach-Object { "$_.cmd" }) + @($PosixShim, $HookState)
+$ManagedFiles = $ManagedBinaries + @($ManagedShims | ForEach-Object { "$_.cmd" }) + @($PosixShim, $CliLauncher, $HookState)
+# What a `make all` developer install publishes to BinDir besides the managed
+# binaries (cmd_uninstall._WINDOWS_DEVELOPER_FILES), except its defenseclaw.exe,
+# which Install-New replaces with $CliLauncher. These must go.
+$DeveloperFiles = @("litellm.exe", "skill-scanner.exe", "skill-scanner-api.exe",
+    "skill-scanner-pre-commit.exe", "mcp-scanner.exe", "mcp-scanner-api.exe", ".defenseclaw-source-root")
 # Data-dir entries that are install machinery, not user data.
 $NotData = @(".venv", ".venv.busy", ".uv", "previous", "previous.new", ".repair", ".staging", ".failed-*",
     "installer", "logs", ".install.lock", "backups", ".rollback-hold", ".rollback-hold.done")
@@ -108,17 +118,31 @@ if ($RunAsFile -and $PSVersionTable.PSEdition -ne "Core" -and $env:PSModulePath)
     if ($modulePath -notcontains (Join-Path $PSHOME "Modules")) { $modulePath += Join-Path $PSHOME "Modules" }
     $env:PSModulePath = $modulePath -join ";"
 }
-$Run = @{ Lock = $false; Transcript = $false; Log = ""; Owner = [IntPtr]::Zero; QuickstartRerun = ""; QuickstartRc = 0 }
+$Run = @{ Lock = $false; Transcript = $false; Log = ""; Owner = [IntPtr]::Zero; QuickstartRerun = ""; QuickstartRc = 0; OldGatewayDown = $false }
 
 function Write-Info([string]$Message) { Write-Host "  > $Message" -ForegroundColor Blue }
 function Write-Ok([string]$Message) { Write-Host "  + $Message" -ForegroundColor Green }
 function Write-Warn([string]$Message) { Write-Host "  ! $Message" -ForegroundColor Yellow }
 function Write-Err([string]$Message) { Write-Host "  x $Message" -ForegroundColor Red }
-function Write-Step([string]$Message) { Write-Host ""; Write-Host "--- $Message" -ForegroundColor Cyan }
+function Get-UtcClock { return (Get-Date).ToUniversalTime().ToString("HH:mm:ss") + "Z" }
+# Step headers and gateway lines carry the UTC time, so the install log can time a run (GAP-1797).
+function Write-Step([string]$Message) { Write-Host ""; Write-Host "--- $Message  [$(Get-UtcClock)]" -ForegroundColor Cyan }
 function Die([string]$Message) { throw $Message }
 
 function Test-Version([string]$Value) {
     return $Value -match '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+}
+
+function Get-OSArchitectureName {
+    # In an interactive Windows PowerShell 5.1 console (the `irm | iex` path)
+    # [Runtime.InteropServices.RuntimeInformation] resolves to PSReadLine's
+    # polyfill, which has no OSArchitecture. Ask the core library instead.
+    $type = [object].Assembly.GetType("System.Runtime.InteropServices.RuntimeInformation")
+    $property = if ($type) { $type.GetProperty("OSArchitecture") } else { $null }
+    if ($property) { return $property.GetValue($null).ToString().ToUpperInvariant() }
+    $name = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { [string]$env:PROCESSOR_ARCHITECTURE }
+    if ($name -eq "AMD64") { return "X64" }
+    return $name.ToUpperInvariant()
 }
 
 function Confirm-Step([string]$Prompt) {
@@ -152,14 +176,29 @@ function Remove-Tree([string]$Path) {
     # so a delete that fails is retried for up to 30 seconds. Windows PowerShell
     # cannot delete below MAX_PATH (a venv's bundled data goes deeper under a
     # long profile path), so a failed attempt retries through the \\?\ path.
+    # Only the last attempt may stop: a caught stopping error on an earlier one still
+    # lands in the run log as a TerminatingError although the retry worked.
+    # The .NET delete goes first: Remove-Item took minutes for a venv in Windows
+    # PowerShell 5.1 (GAP-1600), and its -Force first resets each file's
+    # attributes, which a read-only key copy refuses (GAP-1645). Remove-Item then
+    # takes what .NET leaves (read-only files).
     for ($attempt = 1; Test-Path -LiteralPath $Path; $attempt++) {
-        try { Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop } catch {
-            try { [IO.Directory]::Delete("\\?\" + [IO.Path]::GetFullPath($Path), $true) } catch { }
-            if (-not (Test-Path -LiteralPath $Path)) { return }
-            if ($attempt -ge 30) { throw }
-            Start-Sleep -Seconds 1
-        }
+        if ($attempt -ge 30) { Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop; return }
+        try { [IO.Directory]::Delete("\\?\" + [IO.Path]::GetFullPath($Path), $true) } catch { }
+        if (-not (Test-Path -LiteralPath $Path)) { return }
+        Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue
+        if (-not (Test-Path -LiteralPath $Path)) { return }
+        Start-Sleep -Seconds 1
     }
+}
+
+function Set-DirectoryAcl([string]$Path, $Acl) {
+    # Writes only the parts of $Acl that changed. Set-Acl writes them all and
+    # was refused for a standard user on a second NTFS volume he has full
+    # control of, so a DEFENSECLAW_HOME there failed at once (GAP-2004).
+    $dir = New-Object IO.DirectoryInfo ([IO.Path]::GetFullPath($Path))
+    if ($dir.PSObject.Methods["SetAccessControl"]) { $dir.SetAccessControl($Acl) }
+    else { [IO.FileSystemAclExtensions]::SetAccessControl($dir, $Acl) }
 }
 
 function New-InstallDirectory([string]$Path) {
@@ -173,7 +212,30 @@ function New-InstallDirectory([string]$Path) {
     New-Item -ItemType Directory -Path $Path | Out-Null
     $acl = Get-Acl -LiteralPath $Path
     $acl.SetAccessRuleProtection($true, $true)
-    Set-Acl -LiteralPath $Path -AclObject $acl
+    try { Set-DirectoryAcl $Path $acl } catch { Die "Could not set the permissions of ${Path}: $($_.Exception.Message)" }
+}
+
+function Protect-UvDirectory {
+    param([switch]$Create)
+    # New-InstallDirectory for the uv folder, which must keep its contents.
+    # Its cache and Python (about 23,000 files) inherited the data dir's
+    # permissions, so a 1.0.0 gateway, which re-applies those on every private
+    # write, missed its 5-second start window after a rollback (GAP-1988).
+    # Empty, this is instant; the first run over a full folder takes a while.
+    $uvDir = Join-Path $DataDir ".uv"
+    if (-not (Test-Path -LiteralPath $uvDir -PathType Container)) {
+        if (-not $Create) { return }
+        New-Item -ItemType Directory -Path $uvDir | Out-Null
+    }
+    $acl = Get-Acl -LiteralPath $uvDir
+    if ($acl.AreAccessRulesProtected) { return }
+    if (Get-ChildItem -LiteralPath $uvDir -Force -ErrorAction SilentlyContinue | Select-Object -First 1) {
+        Write-Info "Setting the permissions of $uvDir (once; this can take a minute)"
+    }
+    $acl.SetAccessRuleProtection($true, $true)
+    try { Set-DirectoryAcl $uvDir $acl } catch {
+        Write-Warn "Could not set the permissions of ${uvDir}: $($_.Exception.Message)"
+    }
 }
 
 function Repair-DataOwner {
@@ -490,6 +552,11 @@ function Wait-BeforeClose([int]$Code) {
         # and the catch below closed the window at once.
         if ([DefenseClawInstall.Native]::GetConsoleProcessList((New-Object "uint32[]" 4), 4) -ne 1) { return }
         if ($Run.Log) { Write-Host "  Install log: $($Run.Log)" }
+        # A shell the user typed `& install.ps1` into is alone on its console as
+        # well (Windows Terminal), but it stays open: only a process started for
+        # this script (-File, or Explorer's "Run with PowerShell") closes with it.
+        $scriptName = Split-Path -Leaf $PSCommandPath
+        if ([Environment]::CommandLine.IndexOf($scriptName, [StringComparison]::OrdinalIgnoreCase) -lt 0) { return }
         if (-not $Yes) {
             [void](Read-Host "  Press Enter to close this window")
             return
@@ -507,13 +574,15 @@ function Wait-BeforeClose([int]$Code) {
 # -- Existing install ---------------------------------------------------------
 
 function Get-InstalledVersion {
-    $info = Get-ChildItem -LiteralPath (Join-Path $Venv "Lib\site-packages") -Filter "defenseclaw-*.dist-info" `
-        -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($info) { return $info.Name -replace '^defenseclaw-', '' -replace '\.dist-info$', '' }
+    # The gateway on PATH is the install that runs; a source install leaves an
+    # older release venv behind, so its version is only the fallback (GAP-2454).
     $gateway = Join-Path $BinDir "defenseclaw-gateway.exe"
     if ((Test-Path -LiteralPath $gateway) -and (Get-NativeOutput $gateway @("--version")) -match '\d+\.\d+\.\d+') {
         return $Matches[0]
     }
+    $info = Get-ChildItem -LiteralPath (Join-Path $Venv "Lib\site-packages") -Filter "defenseclaw-*.dist-info" `
+        -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($info) { return $info.Name -replace '^defenseclaw-', '' -replace '\.dist-info$', '' }
     return ""
 }
 
@@ -542,7 +611,7 @@ function Stop-Gateway {
     # the file before it exits, and while it runs Windows will not let the
     # migration replace the config it holds open.
     $process = Get-GatewayProcess
-    if (-not $process) { return $true }
+    if (-not $process) { Stop-Watchdog; return $true }
     $image = $process.Path
     Invoke-Native $image @("stop") -Quiet | Out-Null
     if (-not $process.WaitForExit(15000)) {
@@ -556,14 +625,72 @@ function Stop-Gateway {
         if ($waited -eq 5) { $left | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } }
         Start-Sleep -Seconds 1
     }
+    Stop-Watchdog
     return $process.HasExited -and -not (Get-GatewayProcess)
+}
+
+function Stop-Watchdog {
+    # The watchdog outlives a gateway that crashed or was stopped. Left running
+    # from the old binary (which the swap renames aside), it keeps its
+    # ownership lock, and the new gateway's watchdog cannot start (GAP-1833).
+    # The prefix also matches a binary an earlier run renamed aside.
+    $image = Join-Path $BinDir "defenseclaw-gateway.exe"
+    if (-not @(Get-ProcessesUnder @($image)).Count) { return }
+    Write-Info "Stopping the watchdog"
+    if (Test-Path -LiteralPath $image -PathType Leaf) { Invoke-Native $image @("watchdog", "stop") -Quiet | Out-Null }
+    for ($waited = 0; $waited -lt 10; $waited++) {
+        $left = @(Get-ProcessesUnder @($image))
+        if (-not $left.Count) { return }
+        if ($waited -eq 3) { $left | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } }
+        Start-Sleep -Seconds 1
+    }
+    Write-Warn "The previous watchdog is still running; stop it with: defenseclaw-gateway watchdog stop"
+}
+
+# A 1.0.0 gateway cannot start on a WAL-mode audit.db whose 5-second startup
+# check times out (a large store): SQLite drops and recreates audit.db-wal,
+# and 1.0.0 refuses the new file (fixed in 1.0.1). In rollback-journal mode
+# it starts, and switches the database back to WAL itself (GAP-1988).
+$AuditJournalPy = "import sqlite3,sys;c=sqlite3.connect(sys.argv[1],timeout=10);c.execute('pragma journal_mode').fetchone()[0]=='wal' and c.execute('pragma journal_mode=delete').fetchone();c.close()"
+
+function Reset-AuditJournalMode {
+    $db = Join-Path $DataDir "audit.db"
+    $python = Join-Path $Venv "Scripts\python.exe"
+    if ((Test-Path -LiteralPath $db -PathType Leaf) -and (Test-Path -LiteralPath $python -PathType Leaf)) {
+        [void](Invoke-Native $python @("-c", $AuditJournalPy, $db) -Quiet)
+    }
 }
 
 function Start-Gateway {
     # Its readiness wait is the health check. Exit code 3: running, but a
     # connector refused admission (upgrading again would not change that).
-    Write-Info "Starting the gateway"
-    return Invoke-Native (Join-Path $BinDir "defenseclaw-gateway.exe") @("start")
+    Write-Info "Starting the gateway [$(Get-UtcClock)]"
+    $gateway = Join-Path $BinDir "defenseclaw-gateway.exe"
+    if (-not (Test-Path -LiteralPath $gateway -PathType Leaf)) {
+        # A restored DefenseClaw Setup install has its gateway elsewhere (GAP-1839).
+        Write-Warn "$gateway is missing, so the gateway was not started"
+        return 1
+    }
+    $version = Get-InstalledVersion
+    if ((Test-Version $version) -and [version]$version -lt [version]"1.0.1") { Reset-AuditJournalMode }
+    $rc = Invoke-Native $gateway @("start")
+    if ($rc -in @(0, 3) -or -not (Get-GatewayProcess)) { return $rc }
+    # A first start over a large audit database can outlast start's own
+    # 60-second readiness wait while the gateway keeps starting (GAP-1348).
+    # Wall-clock wait; up once status answers twice in a row.
+    Write-Info "The gateway is still starting (a large audit database takes a while); waiting up to 3 minutes"
+    $deadline = (Get-Date).AddMinutes(3)
+    $up = 0
+    while ((Get-Date) -lt $deadline -and (Get-GatewayProcess)) {
+        Start-Sleep -Seconds 3
+        if ((Invoke-Native $gateway @("status") -Quiet) -eq 0) {
+            $up++
+            if ($up -ge 2) { Write-Ok "The gateway finished starting"; return 0 }
+        } else {
+            $up = 0
+        }
+    }
+    return $rc
 }
 
 function Get-ProcessesUnder([string[]]$Prefixes) {
@@ -571,8 +698,12 @@ function Get-ProcessesUnder([string[]]$Prefixes) {
     # user signed in over the network (an SSH session). Get-Process then still
     # reads the image of this account's own processes, the only ones that can
     # run from this install.
-    $all = try { @(Get-CimInstance Win32_Process -ErrorAction Stop) } catch {
-        @(Get-Process | ForEach-Object {
+    # The refusal is expected: SilentlyContinue keeps it out of the run log,
+    # where a caught -ErrorAction Stop error reads as a TerminatingError (GAP-1347).
+    $cimError = $null
+    try { $all = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue -ErrorVariable cimError) } catch { $cimError = $_; $all = @() }
+    if ($cimError -or -not $all.Count) {
+        $all = @(Get-Process | ForEach-Object {
             [pscustomobject]@{ ProcessId = $_.Id; Name = "$($_.ProcessName).exe"; ExecutablePath = $_.Path }
         })
     }
@@ -653,12 +784,15 @@ function Disable-SetupHooks {
 function Restore-SetupInstall {
     $state = Join-Path $Staging "hook-runtime-state.json"
     if (Test-Path -LiteralPath $state) { Move-Path $state $SetupHookState }
-    if (-not $WasRunning) { return }
-    $startup = Join-Path $Setup.Root "bin\defenseclaw-startup.exe"
+    if ($WasRunning) { Start-SetupGateway $Setup.Root }
+}
+
+function Start-SetupGateway([string]$Root) {
+    $startup = Join-Path $Root "bin\defenseclaw-startup.exe"
     if (Test-Path -LiteralPath $startup) {
         [void][Diagnostics.Process]::Start($startup).WaitForExit(120000)
     } else {
-        Invoke-Native (Join-Path $Setup.Root "bin\defenseclaw-gateway.exe") @("start") -Quiet | Out-Null
+        Invoke-Native (Join-Path $Root "bin\defenseclaw-gateway.exe") @("start") -Quiet | Out-Null
     }
 }
 
@@ -704,6 +838,24 @@ function Remove-SetupInstall {
     }
 }
 
+# True when the config sets guardrail.enabled to false, as 'uninstall' and
+# 'setup guardrail --disable' write it (a direct child of the top-level block).
+function Test-GuardrailOff {
+    $path = if ($env:DEFENSECLAW_CONFIG) { $env:DEFENSECLAW_CONFIG } else { Join-Path $DataDir "config.yaml" }
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $false }
+    $block = $false
+    $indent = 0
+    foreach ($line in [IO.File]::ReadAllLines($path)) {
+        if ($line -match '^guardrail:\s*$') { $block = $true; $indent = 0; continue }
+        if (-not $block) { continue }
+        if ($line -match '^[^\s#]') { $block = $false; continue }
+        if ($line -notmatch '^([ \t]+)[^\s#]') { continue }
+        if (-not $indent) { $indent = $Matches[1].Length }
+        if ($Matches[1].Length -eq $indent -and $line -match '^\s+enabled:\s*false\s*(#.*)?$') { return $true }
+    }
+    return $false
+}
+
 function Test-ConnectorConfigured {
     $state = Read-Json (Join-Path $DataDir "active_connector.json")
     return @(@(Get-Field $state "names") + @(Get-Field $state "name") | Where-Object { $_ -and $_ -ne "none" }).Count -gt 0
@@ -716,6 +868,66 @@ function Get-DataEntries {
         $name = $_.Name
         -not @($NotData | Where-Object { $name -like $_ }).Count
     })
+}
+
+# What an install writes besides the rollback copy of the data folder: the
+# staged release with its check environment, the final environment, and the
+# uv cache and Python they come from (about 1.4 GB on a first install).
+$InstallRoom = 1500MB
+# The final environment alone, built after the release is staged.
+$FinalEnvRoom = 600MB
+
+function Get-DataSize {
+    $size = [long]0
+    if (-not (Test-Path -LiteralPath $DataDir -PathType Container)) { return $size }
+    foreach ($entry in Get-DataEntries) { $size += Get-TreeSize $entry.FullName }
+    return $size
+}
+
+function Assert-InstallRoom([long]$Extra, [string]$ForWhat) {
+    # Checked before the step that needs the room, while nothing has changed
+    # and the gateway still runs (GAP-1839, GAP-1841). Save-Snapshot checks
+    # the rollback copy once more.
+    $free = [long]-1
+    try { $free = ([IO.DriveInfo][IO.Path]::GetPathRoot([IO.Path]::GetFullPath($DataDir))).AvailableFreeSpace } catch { }
+    if ($free -lt 0) { return }
+    $data = Get-DataSize
+    if ($free -ge $data + $Extra + 100MB) { return }
+    if (-not $PrevVersion) { Write-KeptUvCache }
+    Die ("Not enough free disk space next to ${DataDir}: the install needs about {0:N0} MB ({1:N0} MB for a rollback copy of the data folder and {2:N0} MB for $ForWhat), and {3:N0} MB is free. Free up space, then run the installer again; nothing was changed" -f
+        ([double]($data + $Extra + 100MB) / 1MB), ([double]$data / 1MB), ([double]$Extra / 1MB), ([double]$free / 1MB))
+}
+
+function Write-KeptUvCache {
+    # A failed first install keeps only uv's download cache: say how large it
+    # is and how to remove it (GAP-1883).
+    $uvDir = Join-Path $DataDir ".uv"
+    $bytes = (Get-ChildItem -LiteralPath $uvDir -Recurse -Force -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+    if ($bytes) {
+        Write-Info ("The download cache in $uvDir ({0:N0} MB) was kept so the next run is faster; remove it with: cmd /c rd /s /q `"$uvDir`"" -f ([double]$bytes / 1MB))
+    }
+}
+
+function Test-DiskFull {
+    $free = [long]-1
+    try { $root = [IO.Path]::GetPathRoot([IO.Path]::GetFullPath($DataDir)); $free = ([IO.DriveInfo]$root).AvailableFreeSpace } catch { }
+    if ($free -lt 0 -or $free -ge 300MB) { return $false }
+    Write-Err ("The disk $root is full ({0:N0} MB free). Free at least {1:N0} MB on it, then run the installer again" -f
+        ([double]$free / 1MB), ([double]((Get-DataSize) + $InstallRoom + 100MB) / 1MB))
+    return $true
+}
+
+function Clear-StagedRelease {
+    # The staged release (about 900 MB) is not needed once the install stops
+    # or is undone, and on a full disk the restore and the old gateway need
+    # its room (GAP-1839, GAP-1841). DefenseClaw Setup's hook state parked
+    # there stays until it is put back.
+    foreach ($item in @(Get-ChildItem -LiteralPath $Staging -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne "hook-runtime-state.json" })) {
+        Invoke-Quietly { Remove-Tree $item.FullName }
+    }
+    if ((Test-Path -LiteralPath $Staging) -and -not @(Get-ChildItem -LiteralPath $Staging -Force -ErrorAction SilentlyContinue).Count) {
+        Invoke-Quietly { Remove-Tree $Staging }
+    }
 }
 
 function Get-TreeSize([string]$Path) {
@@ -731,6 +943,17 @@ function Remove-Aside([string]$Path) {
     Remove-Item -LiteralPath $aside -Force -ErrorAction SilentlyContinue
 }
 
+function Remove-DeveloperFiles {
+    # The source ownership marker proves the files came from `make all`.
+    if (-not (Test-Path -LiteralPath (Join-Path $BinDir ".defenseclaw-source-root") -PathType Leaf)) { return }
+    $removed = @()
+    foreach ($name in $DeveloperFiles) {
+        $path = Join-Path $BinDir $name
+        if (Test-Path -LiteralPath $path -PathType Leaf) { Remove-Aside $path; $removed += $name }
+    }
+    if ($removed) { Write-Info "Removed the developer install ('make all') files from ${BinDir}: $($removed -join ', ')" }
+}
+
 function Install-File([string]$Source, [string]$Destination) {
     if ((Test-Path -LiteralPath $Destination) -and (Get-Sha256 $Source) -eq (Get-Sha256 $Destination)) { return }
     Copy-Item -LiteralPath $Source -Destination "$Destination.new" -Force
@@ -741,7 +964,7 @@ function Install-File([string]$Source, [string]$Destination) {
 function Write-PosixShim([string]$Target) {
     # `defenseclaw uninstall` recognizes this launcher by its exec line.
     $path = Join-Path $BinDir $PosixShim
-    $text = "#!/bin/sh`n# Git Bash runs this; cmd.exe and PowerShell run defenseclaw.cmd.`nexec `"$($Target -replace '\\', '/')`" `"`$@`"`n"
+    $text = "#!/bin/sh`n# Git Bash runs this; cmd.exe and PowerShell run defenseclaw.exe.`nexec `"$($Target -replace '\\', '/')`" `"`$@`"`n"
     if ((Test-Path -LiteralPath $path) -and [IO.File]::ReadAllText($path) -ceq $text) { return }
     [IO.File]::WriteAllText("$path.new", $text, (New-Object Text.UTF8Encoding $false))
     if (Test-Path -LiteralPath $path) { Remove-Aside $path }
@@ -792,7 +1015,9 @@ function Restore-BinDir([string]$From) {
     }
 }
 
-function New-Venv([string]$Path) {
+# $Where names the environment in the progress lines: the installer builds
+# a staging one to check the release, then the final one (GAP-1727).
+function New-Venv([string]$Path, [string]$Where) {
     $python = Join-Path $Path "Scripts\python.exe"
     New-InstallDirectory $Path
     if ((Invoke-Native $Uv @("venv", $Path, "--quiet", "--python", "3.12") -Quiet) -ne 0) {
@@ -803,9 +1028,30 @@ function New-Venv([string]$Path) {
     # Compile the bytecode now: uv skips it by default, and the first start of
     # the CLI and the scanners would otherwise compile thousands of modules
     # (over a minute on a Windows host while the files are also first scanned).
-    if ((Invoke-Native $Uv @("pip", "install", "--quiet", "--compile-bytecode", "--python", $python, "--require-hashes", "--no-deps",
-            "-r", (Join-Path $Staging $Requirements))) -ne 0) { return $false }
-    return (Invoke-Native $Uv @("pip", "install", "--quiet", "--compile-bytecode", "--python", $python, "--no-deps", (Join-Path $Staging $Wheel))) -eq 0
+    $lockArgs = @("pip", "install", "--quiet", "--compile-bytecode", "--python", $python, "--require-hashes", "--no-deps",
+        "-r", (Join-Path $Staging $Requirements))
+    Write-Info "Installing the Python packages into $Where"
+    if (-not (Invoke-UvPipInstall $lockArgs)) { return $false }
+    Write-Info "Installing the DefenseClaw package into $Where and compiling it"
+    return (Invoke-UvPipInstall @("pip", "install", "--quiet", "--compile-bytecode", "--python", $python, "--no-deps", (Join-Path $Staging $Wheel)))
+}
+
+function Invoke-UvPipInstall([string[]]$UvArgs) {
+    if ((Invoke-Native $Uv $UvArgs) -eq 0) { return $true }
+    # A scanner holding a file uv just wrote fails its cache rename with
+    # os error 32 or 5 (GAP-1315). On a busy host that hits the next package
+    # too (GAP-1941), so back off a few times; what reached the cache stays
+    # there, so each attempt gets further.
+    $waits = @(5, 15, 30)
+    for ($i = 0; $i -lt $waits.Count; $i++) {
+        # A disk that filled up is not a busy host, and a retry cannot help (GAP-1883).
+        if (Test-DiskFull) { return $false }
+        Write-Warn ("Retrying the Python package install in {0} s (attempt {1} of {2}; a busy host can hold uv's cache files)" -f $waits[$i], ($i + 2), ($waits.Count + 1))
+        Start-Sleep -Seconds $waits[$i]
+        if ((Invoke-Native $Uv $UvArgs) -eq 0) { return $true }
+    }
+    Write-Warn "uv kept failing; if it reported a file in use or access denied (os error 32 or 5), another program held the file: run the same command again"
+    return $false
 }
 
 function Save-Snapshot {
@@ -816,6 +1062,12 @@ function Save-Snapshot {
     foreach ($entry in $entries) { $need += Get-TreeSize $entry.FullName }
     $free = [long]-1
     try { $free = ([IO.DriveInfo][IO.Path]::GetPathRoot([IO.Path]::GetFullPath($DataDir))).AvailableFreeSpace } catch { }
+    # A large audit.db makes this copy (and the antivirus scan of it) slow;
+    # say how big it is and what is free (GAP-1519).
+    $freeText = if ($free -ge 0) { ", {0:N0} MB free" -f ([double]$free / 1MB) } else { "" }
+    if ($PrevVersion -or $need -gt 0) {
+        Write-Info ("Saving a rollback copy of the data folder ({0:N0} MB needed{1})" -f ([double]$need / 1MB), $freeText)
+    }
     if ($free -ge 0 -and $free -lt $need + 100MB) {
         Write-Err "Not enough free disk space next to $DataDir for a rollback copy"
         return $false
@@ -871,7 +1123,8 @@ function Protect-BinDir {
 
 function Install-New {
     Write-Info "Installing DefenseClaw $Ver"
-    if (-not (New-Venv $Venv)) { return $false }
+    Write-Info "Building the final Python environment in $Venv (the checked packages come from the uv cache)"
+    if (-not (New-Venv $Venv "the final environment")) { return $false }
     New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
     Protect-BinDir
     # Binaries an earlier run renamed aside while they were running.
@@ -888,8 +1141,12 @@ function Install-New {
         elseif (Test-Path -LiteralPath (Join-Path $BinDir "$name.cmd")) { Remove-Aside (Join-Path $BinDir "$name.cmd") }
     }
     $target = Join-Path $Venv "Scripts\defenseclaw.exe"
-    if (Test-Path -LiteralPath $target) { Write-PosixShim $target }
-    elseif (Test-Path -LiteralPath (Join-Path $BinDir $PosixShim)) { Remove-Aside (Join-Path $BinDir $PosixShim) }
+    if (Test-Path -LiteralPath $target) { Write-PosixShim $target; Install-File $target (Join-Path $BinDir $CliLauncher) }
+    else {
+        foreach ($name in @($PosixShim, $CliLauncher)) {
+            if (Test-Path -LiteralPath (Join-Path $BinDir $name)) { Remove-Aside (Join-Path $BinDir $name) }
+        }
+    }
     Write-HookState
     if ((Test-Path -LiteralPath (Join-Path $DataDir "config.yaml")) -or $env:DEFENSECLAW_CONFIG) {
         Write-Info "Migrating config and data"
@@ -904,15 +1161,30 @@ function Install-New {
         # contract lock and doctor can check compatibility. Best effort.
         Write-Info "Refreshing agent discovery"
         Invoke-Native (Join-Path $Venv "Scripts\defenseclaw.exe") @("agent", "discover", "--refresh", "--no-emit-otel") -Quiet | Out-Null
+        # The new defenseclaw-acp has a new digest: re-pin it in configured
+        # editor entries, which would otherwise fail closed. Best effort.
+        $oldGuard = Join-Path $Snap "bin\defenseclaw-acp.exe"
+        if (Test-Path -LiteralPath $oldGuard) {
+            Invoke-Native (Join-Path $Venv "Scripts\defenseclaw.exe") @("acp", "refresh", "--from-sha256", (Get-Sha256 $oldGuard)) | Out-Null
+        }
     }
     return $true
 }
 
 function Restart-Old {
-    if ($Setup) { Restore-SetupInstall; return }
-    if ($WasRunning -and (Start-Gateway) -notin @(0, 3)) {
-        Write-Warn "The gateway did not restart; run 'defenseclaw-gateway start'"
+    if ($Setup) { Restore-SetupInstall } elseif ($WasRunning) { [void](Start-Gateway) }
+    # Say plainly when the gateway that ran before is down now (GAP-1349).
+    $Run.OldGatewayDown = $WasRunning -and -not (Get-GatewayProcess)
+    if ($Run.OldGatewayDown) {
+        Write-Warn "The gateway that was running before did not start again, so agent hooks are not guarded until it runs (connectors in fail-closed mode block tool calls)"
+        Write-Info "Start it with: defenseclaw-gateway start (log: $(Join-Path $DataDir 'gateway.log')). On a large audit database its first start can take several minutes"
     }
+}
+
+function Get-RestoredNote {
+    if (-not $PrevVersion) { return "Nothing was left installed." }
+    if ($Run.OldGatewayDown) { return "Your previous install is back, but its gateway is not running (see above)." }
+    return "Your previous install is back."
 }
 
 function Get-ExternalConfig {
@@ -965,24 +1237,45 @@ function Restore-Slot([string]$Slot) {
 }
 
 function Restore-Snapshot {
-    $failed = Restore-Slot $Snap
+    Clear-StagedRelease
+    try { $failed = Restore-Slot $Snap } catch {
+        # The snapshot stays marked complete, so the next run restores it.
+        Write-Err $_.Exception.Message
+        Die "Could not restore $previousLabel; run the installer again to finish restoring it. Log: $($Run.Log)"
+    }
     Restart-Old
+    if (-not $PrevVersion) {
+        # A first install has nothing to look back at, and the copy it kept
+        # (about 2 GB) held a full disk full for every account (GAP-1883).
+        Invoke-Quietly { Remove-Tree $failed }
+        Write-KeptUvCache
+        return
+    }
     $bytes = (Get-ChildItem -LiteralPath $failed -Recurse -Force -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
     Write-Warn ("The failed $Ver install was kept in $failed ({0:N1} MB) for troubleshooting" -f ([double]$bytes / 1MB))
-    Write-Info "Your previous install and its data are back; it is safe to remove the copy with: Remove-Item -Recurse -Force '$failed'"
+    Write-Info "Your previous install and its data are back; it is safe to remove the copy with: cmd /c rd /s /q `"$failed`""
 }
 
 function Save-RolledBackData {
-    # A rollback parks the data written since the upgrade in previous\. Keep it
-    # when a later upgrade reuses the slot: it can hold audit history.
-    if (-not (Test-Path -LiteralPath (Join-Path $Previous "ROLLED_BACK")) -or -not (Test-Path -LiteralPath (Join-Path $Previous "data"))) { return }
+    # A rollback parks the data written since the upgrade in previous\, and a
+    # 0.x install kept there holds the only copy of the audit history 1.0 does
+    # not carry over (GAP-1360). Keep either when a later upgrade reuses the slot.
+    if (-not (Test-Path -LiteralPath (Join-Path $Previous "data"))) { return }
     $version = Read-Text (Join-Path $Previous "VERSION")
-    $kept = Join-Path $DataDir ("backups\rolled-back-$version-" + (Get-Date -Format "yyyyMMddTHHmmss"))
+    if (Test-Path -LiteralPath (Join-Path $Previous "ROLLED_BACK")) {
+        $label = "rolled-back"
+    } elseif ((Test-Version $version) -and [version]$version -lt [version]"1.0.0" -and (Test-Path -LiteralPath (Join-Path $Previous "data\audit.db"))) {
+        $label = "audit-history"
+    } else {
+        return
+    }
+    $kept = Join-Path $DataDir ("backups\$label-$version-" + (Get-Date -Format "yyyyMMddTHHmmss"))
     New-Item -ItemType Directory -Path (Join-Path $DataDir "backups") -Force | Out-Null
     Move-Path (Join-Path $Previous "data") $kept
     $bytes = (Get-ChildItem -LiteralPath $kept -Recurse -Force -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
-    Write-Info ("Kept the data from before the last rollback in $kept ({0:N1} MB)" -f ([double]$bytes / 1MB))
-    Write-Info "It is not used again; once you no longer need its audit history, remove it with: Remove-Item -Recurse -Force '$kept'"
+    $what = if ($label -eq "rolled-back") { "the data from before the last rollback" } else { "the audit history DefenseClaw $version recorded" }
+    Write-Info ("Kept $what in $kept ({0:N1} MB)" -f ([double]$bytes / 1MB))
+    Write-Info "It is not used again; once you no longer need its audit history, remove it with: cmd /c rd /s /q `"$kept`""
 }
 
 function Save-Live([string]$Slot) {
@@ -1037,7 +1330,13 @@ function Resume-InterruptedRun {
             $state = Join-Path $Staging "hook-runtime-state.json"
             if ((Test-Path -LiteralPath $state) -and -not (Test-Path -LiteralPath $SetupHookState)) { Move-Path $state $SetupHookState }
             $failed = Restore-Slot $slot
-            if ($wasRunning) { [void](Start-Gateway) }
+            # A DefenseClaw Setup install that was replaced runs its own gateway (GAP-1839).
+            $setupInstall = Find-SetupInstall
+            if ($wasRunning -and $setupInstall -and -not (Test-Path -LiteralPath (Join-Path $BinDir "defenseclaw-gateway.exe"))) {
+                Start-SetupGateway $setupInstall.Root
+            } elseif ($wasRunning) {
+                [void](Start-Gateway)
+            }
             Write-Warn "The interrupted install was kept in $failed"
         } else {
             # The snapshot never finished, so live data was only copied, not changed.
@@ -1101,6 +1400,10 @@ function Save-Installer {
 function Complete-Swap {
     # The new install is live: a run killed from here on must not restore the old one.
     Remove-Item -LiteralPath (Join-Path $Snap "COMPLETE") -Force
+    # Deleting the old venv and staging copies takes a minute or two on Windows (GAP-1347).
+    # A first install has no previous install, only its staging copies (GAP-1827).
+    if ($PrevVersion) { Write-Info "Cleaning up the previous install's files (this can take a minute or two)" }
+    else { Write-Info "Removing the staging files" }
     Invoke-Quietly {
         if ($Snap -eq (Join-Path $DataDir "previous.new") -and $PrevVersion) {
             Save-RolledBackData
@@ -1240,16 +1543,24 @@ Environment:
 # -- Main ---------------------------------------------------------------------
 
 function Invoke-Rollback {
-    Write-Step "Rolling back"
     $backTo = Read-Text (Join-Path $Previous "VERSION")
-    if (-not (Test-Version $backTo)) { Die "No previous install to roll back to ($Previous is missing)" }
+    if (-not (Test-Version $backTo)) { Write-Step "Rolling back"; Die "No previous install to roll back to ($Previous is missing)" }
     if (Test-Path -LiteralPath (Join-Path $Previous "legacy-setup")) {
-        Die ("The previous install is DefenseClaw Setup $backTo, which cannot be restored automatically. Its files and " +
-            "your data from before the upgrade are in $Previous; nothing was changed")
+        Die ("The previous install is DefenseClaw Setup $backTo, which cannot be restored automatically. To go back to it, " +
+            "run 'defenseclaw uninstall', then download DefenseClawSetup-x64.exe from https://github.com/$Repo/releases/tag/$backTo " +
+            "and run it in your desktop session. Its files and your data from before the upgrade are in $Previous; nothing was changed")
     }
     $current = Get-InstalledVersion
     $currentLabel = if ($current) { $current } else { "?" }
-    if (-not (Confirm-Step "Replace DefenseClaw $currentLabel with the previous install ($backTo)?")) {
+    # Run again after a rollback, this goes forward to the newer install (GAP-1497).
+    if ($current -and (Test-Version $current) -and [version]$current -lt [version]$backTo) {
+        Write-Step "Rolling forward to DefenseClaw $backTo"
+        $question = "Replace DefenseClaw $current with DefenseClaw $backTo (the install you rolled back from)?"
+    } else {
+        Write-Step "Rolling back to DefenseClaw $backTo"
+        $question = "Replace DefenseClaw $currentLabel with the previous install ($backTo)?"
+    }
+    if (-not (Confirm-Step $question)) {
         Die "Rollback cancelled; nothing was changed"
     }
     Wait-VenvFree
@@ -1262,6 +1573,8 @@ function Invoke-Rollback {
         if ($swapped -eq 1 -and $wasRunning) { [void](Start-Gateway) }
         Die "Rollback failed part-way; see $($Run.Log)"
     }
+    # Homes upgraded before the uv folder was protected (GAP-1988).
+    Protect-UvDirectory
     if ($startAfter -and (Start-Gateway) -notin @(0, 3)) {
         Write-Warn "The gateway did not start; run 'defenseclaw-gateway start' and check its log"
     }
@@ -1274,6 +1587,37 @@ function Invoke-Rollback {
         Write-Ok "Now running DefenseClaw $backTo. Run 'defenseclaw rollback' again to return to $forward."
     }
     return 0
+}
+
+# On Windows `defenseclaw uninstall` finishes in a helper that runs after the
+# CLI exits: it deletes the data dir while %TEMP%\defenseclaw-uninstall-*\
+# plan.json exists, then a cmd.exe renames the helper's own Python folders
+# (plan.json interpreter_dirs) aside. An install started sooner lost its
+# files to that cleanup (GAP-1647), so wait for both. A plan.json older than
+# 10 minutes is a helper that died, not one that is still running.
+function Wait-UninstallCleanup([int]$Seconds = 300) {
+    $temp = [IO.Path]::GetTempPath()
+    $deadline = (Get-Date).AddSeconds($Seconds)
+    $waiting = $false
+    $folders = @()
+    while ($true) {
+        $plans = @(Get-ChildItem -LiteralPath $temp -Directory -Filter "defenseclaw-uninstall-*" -ErrorAction SilentlyContinue |
+            ForEach-Object { Get-Item -LiteralPath (Join-Path $_.FullName "plan.json") -ErrorAction SilentlyContinue } |
+            Where-Object { $_ -and $_.LastWriteTime -gt (Get-Date).AddMinutes(-10) } | ForEach-Object { $_.FullName })
+        foreach ($plan in $plans) {
+            $folders += @(Get-Field (Read-Json $plan) "interpreter_dirs") |
+                Where-Object { $_ -and ([string]$_).StartsWith($DataDir, [StringComparison]::OrdinalIgnoreCase) }
+        }
+        $folders = @($folders | Select-Object -Unique)
+        $pending = @($plans) + @($folders | Where-Object { Test-Path -LiteralPath $_ })
+        if (-not $pending.Count) { break }
+        if (-not $waiting) { Write-Info "Waiting for the cleanup of an earlier 'defenseclaw uninstall' to finish"; $waiting = $true }
+        if ((Get-Date) -gt $deadline) {
+            Die "An earlier 'defenseclaw uninstall' is still cleaning up ($($pending[0])); wait a minute, then run the installer again. Nothing was changed."
+        }
+        Start-Sleep -Seconds 2
+    }
+    if ($waiting) { Write-Ok "The earlier uninstall finished" }
 }
 
 function Invoke-Install {
@@ -1299,7 +1643,7 @@ function Invoke-Install {
 
     if ($env:OS -ne "Windows_NT") { Die "This installer is for Windows; use install.sh on macOS and Linux" }
     # The OS, not this process: x64 PowerShell also runs, emulated, on Windows ARM64.
-    switch ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToUpperInvariant()) {
+    switch (Get-OSArchitectureName) {
         "X64" { }
         "ARM64" { Die "Windows ARM64 is not certified, including x64 emulation; use Windows x64. Nothing was changed." }
         default { Die "Unsupported architecture: $_ (DefenseClaw for Windows needs x64). Nothing was changed." }
@@ -1367,13 +1711,15 @@ function Invoke-Install {
         return Invoke-ReleaseInstaller $TargetVersion $Forward
     }
 
+    Wait-UninstallCleanup
+
     # Lock and log.
     New-Item -ItemType Directory -Path (Join-Path $DataDir "logs") -Force | Out-Null
     $acl = Get-Acl -LiteralPath $DataDir
     if ($acl.GetOwner([Security.Principal.SecurityIdentifier]) -ne $user) {
         # Created by an elevated installer of an older release.
         $acl.SetOwner($user)
-        Set-Acl -LiteralPath $DataDir -AclObject $acl
+        Set-DirectoryAcl $DataDir $acl
     }
     try { New-Item -ItemType Directory -Path $LockDir -ErrorAction Stop | Out-Null } catch {
         $holder = [string](Get-Content -LiteralPath (Join-Path $LockDir "pid") -ErrorAction SilentlyContinue | Select-Object -First 1)
@@ -1419,13 +1765,22 @@ function Invoke-Install {
     # data dir, so `uninstall --all` leaves nothing of them in AppData.
     if (-not $env:UV_CACHE_DIR) { $env:UV_CACHE_DIR = Join-Path $DataDir ".uv\cache" }
     if (-not $env:UV_PYTHON_INSTALL_DIR) { $env:UV_PYTHON_INSTALL_DIR = Join-Path $DataDir ".uv\python" }
+    Protect-UvDirectory -Create
+    # uv's defaults (60 s to compile one file, 30 s per download read) fail
+    # on a Windows host busy with Defender and other accounts (GAP-1776).
+    if (-not $env:UV_COMPILE_BYTECODE_TIMEOUT) { $env:UV_COMPILE_BYTECODE_TIMEOUT = "600" }
+    if (-not $env:UV_HTTP_TIMEOUT) { $env:UV_HTTP_TIMEOUT = "300" }
     $Uv = [string](Get-Command uv.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Source)
+    # A uv already in the bin folder belongs to the user (or an earlier run)
+    # even when that folder is not on PATH yet: use it, never overwrite it.
+    if (-not $Uv -and (Test-Path -LiteralPath (Join-Path $BinDir "uv.exe") -PathType Leaf)) { $Uv = Join-Path $BinDir "uv.exe" }
     if (-not $Uv) {
         Write-Info "Installing uv $UvVersion (Python package manager)"
         $Uv = Install-Uv
         if (-not $Uv) { Die "Could not install uv; install it from https://docs.astral.sh/uv/ and retry" }
     }
 
+    Assert-InstallRoom $InstallRoom "the new version"
     New-InstallDirectory $Staging
     New-Item -ItemType Directory -Path (Join-Path $Staging "bin") | Out-Null
     $Archive = "defenseclaw-$Ver-windows-amd64.zip"
@@ -1465,8 +1820,14 @@ function Invoke-Install {
     if (-not (Test-Path -LiteralPath $stagedGateway)) { Die "$Archive has no defenseclaw-gateway.exe" }
     if (-not (Get-NativeOutput $stagedGateway @("--version")).Contains($Ver)) { Die "The downloaded gateway does not report version $Ver" }
 
-    Write-Info "Building the Python environment"
-    if (-not (New-Venv (Join-Path $Staging "venv"))) { Die "Could not install the DefenseClaw $Ver Python package; nothing was changed" }
+    # A first install with an empty uv cache downloads Python and every
+    # package, then compiles the bytecode: about 7 minutes on a busy Windows
+    # host with nothing printed (GAP-1665), so say so up front.
+    Write-Info "Building the Python environment (a first install can take several minutes)"
+    if (-not (New-Venv (Join-Path $Staging "venv") "the staging environment")) {
+        if (-not $PrevVersion) { Write-KeptUvCache }
+        Die "Could not install the DefenseClaw $Ver Python package; nothing was changed"
+    }
     $stagedCli = Join-Path $Staging "venv\Scripts\defenseclaw.exe"
     if (-not (Get-NativeOutput $stagedCli @("--version")).Contains($Ver)) { Die "The staged CLI does not start; nothing was changed" }
     $checkArgs = @("migrate", "--check", "--gateway-binary", $stagedGateway)
@@ -1482,10 +1843,18 @@ function Invoke-Install {
     if ($PrevVersion -and $PrevVersion -eq $Ver) {
         if (-not (Confirm-Step "Reinstall DefenseClaw ${Ver}?")) { Die "Cancelled; nothing was changed" }
     } elseif ($PrevVersion) {
+        $auditDb = Join-Path $DataDir "audit.db"
+        if ([version]$PrevVersion -lt [version]"1.0.0" -and (Test-Path -LiteralPath $auditDb)) {
+            # Audit migration 33 (privacy cutover) empties the pre-1.0 history.
+            $auditMb = "{0:N0} MB" -f ((Get-Item -LiteralPath $auditDb).Length / 1MB)
+            Write-Warn "DefenseClaw 1.0 starts a new audit history: the audit events, scan results and findings $PrevVersion recorded ($auditDb, $auditMb) are deleted when DefenseClaw $Ver first opens its audit database"
+            Write-Info "A copy is kept in $(Join-Path $Previous 'data\audit.db'); 'defenseclaw rollback' brings it back, and later upgrades keep it in $(Join-Path $DataDir 'backups')"
+        }
         if (-not (Confirm-Step "Upgrade DefenseClaw $PrevVersion -> ${Ver}?")) { Die "Cancelled; nothing was changed" }
     }
     if (-not $PrevVersion -and -not $Yes -and -not $Connector) { $Connector = Select-Connector }
 
+    Assert-InstallRoom $FinalEnvRoom "the final Python environment"
     Wait-VenvFree
     if ($Setup) {
         Disable-SetupHooks
@@ -1494,29 +1863,32 @@ function Invoke-Install {
     }
     $WasRunning = [bool](Get-GatewayProcess)
     if ($WasRunning) {
-        Write-Info "Stopping the gateway"
+        Write-Info "Stopping the gateway [$(Get-UtcClock)]"
         if (-not (Stop-Gateway)) {
             if ($Setup) { Restore-SetupInstall }
             Die "The running gateway did not stop; nothing was changed"
         }
     }
+    Stop-Watchdog
     if ($Setup) { Stop-ProcessesUnder $Setup.Root }
 
     $Snap = if ($PrevVersion -and $PrevVersion -eq $Ver) { Join-Path $DataDir ".repair" } else { Join-Path $DataDir "previous.new" }
     # Ctrl+C now would leave a half-swapped install; it is ignored until the swap is done.
     try { [Console]::TreatControlCAsInput = $true } catch { }
-    try { $saved = Save-Snapshot } catch { Write-Err $_.Exception.Message; $saved = $false }
+    try { $saved = Save-Snapshot } catch { Write-Err $_.Exception.Message; [void](Test-DiskFull); $saved = $false }
     if (-not $saved) {
         Invoke-Quietly { Undo-Snapshot $Snap }
+        Clear-StagedRelease
         Restart-Old
+        if ($Run.OldGatewayDown) { Die "Could not save the current install; it was not changed, but its gateway is not running (see above)" }
         Die "Could not save the current install; nothing was changed"
     }
     $previousLabel = if ($PrevVersion) { $PrevVersion } else { "the previous state" }
-    try { $installed = Install-New } catch { Write-Err $_.Exception.Message; $installed = $false }
+    try { $installed = Install-New } catch { Write-Err $_.Exception.Message; [void](Test-DiskFull); $installed = $false }
     if (-not $installed) {
         Write-Err "Installing $Ver failed; restoring $previousLabel"
         Restore-Snapshot
-        Die "DefenseClaw $Ver was not installed. Your previous install is back. Log: $($Run.Log)"
+        Die "DefenseClaw $Ver was not installed. $(Get-RestoredNote) Log: $($Run.Log)"
     }
     $startRc = 0
     # A 0.x import leaves the agent executables its connectors run in a receipt
@@ -1533,6 +1905,7 @@ function Invoke-Install {
         Write-Warn "The gateway was running without a configuration; run 'defenseclaw init' to set it up"
     }
     if ($startNew) {
+        $startedAt = Get-Date
         $startRc = Start-Gateway
         if ($sealOnly) {
             [void](Stop-Gateway)
@@ -1541,13 +1914,14 @@ function Invoke-Install {
                 $startRc = 0
             }
         } elseif ($startRc -ne 0 -and $startRc -ne 3) {
-            Write-Err "The $Ver gateway did not become healthy; restoring $previousLabel"
+            Write-Err ("The $Ver gateway did not become healthy within {0:N0} s [{1}]; restoring $previousLabel" -f ((Get-Date) - $startedAt).TotalSeconds, (Get-UtcClock))
             [void](Stop-Gateway)
             Restore-Snapshot
-            Die "DefenseClaw $Ver was not installed. Your previous install is back. Log: $($Run.Log)"
+            Die "DefenseClaw $Ver was not installed. $(Get-RestoredNote) Log: $($Run.Log)"
         }
     }
     Complete-Swap
+    Remove-DeveloperFiles
     try { [Console]::TreatControlCAsInput = $false } catch { }
 
     if ($startRc -eq 3) { Write-Warn "A connector needs attention before it is guarded again (see the gateway output above)" }
@@ -1572,6 +1946,35 @@ function Invoke-Install {
     } elseif ($PrevVersion -and $PrevVersion -ne $Ver) {
         Write-Host "  Upgraded from $PrevVersion. Undo with: defenseclaw rollback"
     }
+    if ($PrevVersion -and $configured -and -not (Get-GatewayProcess)) {
+        # GAP-1496: it was not running before the upgrade, so it was not started.
+        if (Test-GuardrailOff) {
+            # GAP-2481: 'uninstall --binaries' turned the guardrail off and tore the
+            # connector hooks down; a gateway start alone does not set them up again.
+            Write-Warn "Protection is off in the kept config (guardrail.enabled = false), so agent hooks are not guarded"
+            Write-Host "  Turn it back on with: defenseclaw setup guardrail" -ForegroundColor Cyan
+        } else {
+            Write-Warn "The gateway is not running, so agent hooks are not guarded until it is"
+            Write-Host "  Start it with: defenseclaw-gateway start" -ForegroundColor Cyan
+        }
+    }
+    if ($PrevVersion -and -not $Setup -and -not $Quickstart -and -not $configured) {
+        # An earlier install that was never initialized: say how to start, as a
+        # fresh install does, with the connector picked back then.
+        $nextConnector = $Connector
+        $pickedPath = Join-Path $DataDir "picked_connector"
+        if (-not $nextConnector -and (Test-Path -LiteralPath $pickedPath)) {
+            $nextConnector = ([string](Get-Content -LiteralPath $pickedPath -TotalCount 1)) -replace '[^a-z0-9_-]', ''
+        }
+        if ($nextConnector -and $nextConnector -ne "none") {
+            Write-Host "  DefenseClaw is not set up yet. Next: defenseclaw init --connector $nextConnector" -ForegroundColor Cyan
+        } else {
+            Write-Host "  DefenseClaw is not set up yet. Next: defenseclaw init" -ForegroundColor Cyan
+        }
+    }
+    if ($PrevVersion -and [version]$PrevVersion -lt [version]"1.0.0" -and (Test-Path -LiteralPath (Join-Path $Previous "data\audit.db"))) {
+        Write-Host "  The audit history $PrevVersion recorded is not carried over to 1.0; a copy is in $(Join-Path $Previous 'data\audit.db')"
+    }
     if ($NoPersistPath) {
         Write-Host "  Add $BinDir to your PATH to run defenseclaw from any terminal."
     } elseif ($pathChanged -and $RunAsFile) {
@@ -1589,7 +1992,8 @@ function Invoke-Install {
 }
 
 $savedEnv = @{}
-foreach ($name in @("UV_NO_CONFIG", "UV_CACHE_DIR", "UV_PYTHON_INSTALL_DIR", "UV_INSTALL_DIR", "UV_NO_MODIFY_PATH", "DEFENSECLAW_GATEWAY_BIN",
+foreach ($name in @("UV_NO_CONFIG", "UV_CACHE_DIR", "UV_PYTHON_INSTALL_DIR", "UV_INSTALL_DIR", "UV_NO_MODIFY_PATH",
+        "UV_COMPILE_BYTECODE_TIMEOUT", "UV_HTTP_TIMEOUT", "DEFENSECLAW_GATEWAY_BIN",
         "DEFENSECLAW_UPGRADE_FRESH_PROCESS", "CODEX_HOME", "CLAUDE_CONFIG_DIR")) {
     $savedEnv[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
 }
@@ -1603,7 +2007,10 @@ try {
 } finally {
     try { [Console]::TreatControlCAsInput = $false } catch { }
     if ($Run.Transcript) { try { Stop-Transcript | Out-Null } catch { } }
-    if ($Run.Lock) { Invoke-Quietly { Remove-Tree $LockDir } }
+    if ($Run.Lock) {
+        Invoke-Quietly { Clear-StagedRelease }
+        Invoke-Quietly { Remove-Tree $LockDir }
+    }
     if ($Run.Owner -ne [IntPtr]::Zero) { [void][DefenseClawInstall.Native]::SwapDefaultOwner($Run.Owner) }
     # A variable that was unset stays unset. PowerShell 7 passes $null to
     # SetEnvironmentVariable as "", which leaves an empty variable behind

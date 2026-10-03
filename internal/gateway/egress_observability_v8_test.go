@@ -199,3 +199,70 @@ func TestGatewayEgressV8StickyDetachDoesNotInvokeFallthroughHooks(t *testing.T) 
 		t.Fatalf("detached v8 occurrence invoked fallthrough hooks: counter=%t alert=%t", calledCounter, calledAlert)
 	}
 }
+
+// GAP-1896: the plugin's intercepted (undici) requests became no log at all,
+// and the self-test probe printed "generated egress log failed" every minute.
+func TestGatewayEgressV8LogsInterceptedPluginEgressAndSkipsSelfTest(t *testing.T) {
+	fixture := newSidecarV8BootstrapFixture(t, 8, "")
+	bound, err := fixture.sidecar.BootstrapObservabilityRuntime(t.Context(), fixture.configPath, fixture.raw)
+	if err != nil || !bound {
+		t.Fatalf("bootstrap bound=%t err=%v", bound, err)
+	}
+	owner, ok := fixture.sidecar.observabilityV8.(*sidecarOwnedObservabilityV8Runtime)
+	if !ok || owner == nil {
+		t.Fatalf("owned runtime=%T", fixture.sidecar.observabilityV8)
+	}
+	if err := owner.runtime.FlushReports(t.Context()); err != nil {
+		t.Fatalf("flush bootstrap report: %v", err)
+	}
+	runtime := &recordingGatewayEgressRuntime{gatewayEgressV8Runtime: owner}
+	proxy := &GuardrailProxy{}
+	proxy.observabilityV8Mu.Lock()
+	proxy.observabilityV8Egress = runtime
+	proxy.observabilityV8EgressAuthoritative = true
+	proxy.observabilityV8Mu.Unlock()
+
+	proxy.emitEgress(ContextWithRequestID(t.Context(), "request-undici-1"), gatewaylog.EgressPayload{
+		TargetHost: "api.example.com", TargetPath: "/v1/chat/completions", BodyShape: "none",
+		LooksLikeLLM: true, Branch: "undici", Decision: "intercept", Reason: "undici-dispatcher", Source: "ts",
+	})
+	if runtime.emitErr != nil {
+		t.Fatalf("intercepted egress log failed: %v", runtime.emitErr)
+	}
+	proxy.emitEgress(ContextWithRequestID(t.Context(), "request-selftest-1"), gatewaylog.EgressPayload{
+		TargetHost: "api.openai.com", TargetPath: "/v1/chat/completions", BodyShape: "messages",
+		LooksLikeLLM: true, Branch: "selftest", Decision: "intercept", Reason: "interception-self-test", Source: "ts",
+	})
+	if runtime.emitErr != nil {
+		t.Fatalf("self-test egress log ran: %v", runtime.emitErr)
+	}
+
+	rows, err := fixture.store.ListEvents(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var undici *audit.Event
+	for index := range rows {
+		switch rows[index].RequestID {
+		case "request-undici-1":
+			undici = &rows[index]
+		case "request-selftest-1":
+			t.Fatalf("self-test probe logged as egress: %+v", rows[index])
+		}
+	}
+	if undici == nil {
+		t.Fatalf("intercepted egress row not found in rows=%+v", rows)
+	}
+	if got := undici.Structured["defenseclaw.network.decision"]; got != "allow" {
+		t.Fatalf("decision=%#v", got)
+	}
+	if got := undici.Structured["defenseclaw.network.reason"]; got != "undici-dispatcher" {
+		t.Fatalf("reason=%#v", got)
+	}
+	if _, present := undici.Structured["defenseclaw.network.branch"]; present {
+		t.Fatalf("unlisted branch written: %#v", undici.Structured)
+	}
+	if got := runtime.metricFamilies(); len(got) != 2 {
+		t.Fatalf("metric families=%v, want one per event", got)
+	}
+}

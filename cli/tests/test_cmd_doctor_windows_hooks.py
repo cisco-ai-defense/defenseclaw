@@ -838,6 +838,26 @@ class WindowsHookDoctorTests(unittest.TestCase):
         self.assertFalse(inconsistent.healthy)
         self.assertIn("inconsistent DefenseClaw approval", inconsistent.detail)
 
+    def test_hermes_ignores_a_foreign_powershell_allowlist_approval(self) -> None:
+        # GAP-1304: a user's own `pwsh -NoProfile -File x.ps1` approval made
+        # every Hermes setup fail with "unsupported launcher arguments".
+        runtime = self._runtime()
+        command = f'"{runtime}" hook --connector hermes'
+        config = self._config("hermes", command)
+        allowlist = config.parent / "shell-hooks-allowlist.json"
+        document = json.loads(allowlist.read_text(encoding="utf-8"))
+        document["approvals"].append(
+            {
+                "event": next(iter(doctor_hooks._HERMES_REQUIRED_HOOKS)),
+                "command": "pwsh -NoProfile -File C:/Users/u/hooks/own-hook.ps1",
+            }
+        )
+        allowlist.write_text(json.dumps(document), encoding="utf-8")
+
+        result = self._validate("hermes", config)
+        self.assertNotIn("launcher arguments", result.detail)
+        self.assertIn("registration is valid", result.detail)
+
     def _validate(
         self,
         connector: str,
@@ -2703,7 +2723,7 @@ class WindowsHookDoctorTests(unittest.TestCase):
                 self.assertIn(f"runtime_state={expected_state}", detail)
                 self.assertIn(evidence, detail)
                 self.assertIn("setup codex --yes --restart", detail)
-                self.assertIn(detail, human)
+                self.assertIn(cmd_doctor._plain_commands(detail), human)
                 self.assertNotRegex(
                     detail.lower(),
                     r"inspect-tool\.sh|codex-hook\.sh|claude-code-hook\.sh|\bbash\b|\bwsl\b|\bchmod\b",
@@ -2763,16 +2783,19 @@ class WindowsHookDoctorTests(unittest.TestCase):
         )
         result = _DoctorResult()
 
-        _check_hook_contract_lock(
-            self.cfg,
-            "hermes",
-            result,
-            platform_name="nt",
-            config_path=str(config),
-            install_root=str(self.install),
-            search_path=str(self.install),
-            pathext=".EXE;.CMD",
-        )
+        # A Hermes host that may be running keeps the pending-reload state;
+        # an idle Hermes is healthy (GAP-1298).
+        with patch.object(cmd_doctor, "_hermes_host_running", return_value=None):
+            _check_hook_contract_lock(
+                self.cfg,
+                "hermes",
+                result,
+                platform_name="nt",
+                config_path=str(config),
+                install_root=str(self.install),
+                search_path=str(self.install),
+                pathext=".EXE;.CMD",
+            )
 
         self.assertEqual(result.checks[-1]["status"], "fail", result.checks[-1])
         self.assertIn("pending-reload", result.checks[-1]["detail"])

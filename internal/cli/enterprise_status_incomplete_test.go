@@ -35,14 +35,50 @@ func TestEnterpriseSecurityIncompleteNamesItsReasons(t *testing.T) {
 	message := result.Warnings[0].Message
 	if !strings.Contains(message, "claudecode machine policy") || strings.Contains(message, "codex machine policy") ||
 		!strings.Contains(message, "/repair ATTESTCLAUDEEFFECTIVEPOLICY=1") ||
-		!strings.Contains(message, "4 per-user enrollment(s) are pending") {
+		!strings.Contains(message, "4 per-user enrollment(s) are pending (waiting for an active, connected session") ||
+		!strings.Contains(message, "each pending or failed account's Account line (enrollment.accounts[].reason in --json) says why") {
 		t.Fatalf("message = %q", message)
 	}
+	// GAP-1733: with nothing pending, only the attestation is named, not a
+	// per-account cause.
+	result.Enrollment.Pending = 0
+	result.Warnings = nil
+	addEnterpriseSecurityIncompleteReasons(result, false)
+	if message := result.Warnings[0].Message; strings.Contains(message, "account") || strings.Contains(message, "guardian log") {
+		t.Fatalf("nothing pending, message = %q", message)
+	}
+	result.Enrollment.Pending = 4
 
 	result.SecurityComplete = true
 	result.Warnings = nil
 	addEnterpriseSecurityIncompleteReasons(result, false)
 	if len(result.Warnings) != 0 {
 		t.Fatalf("a complete result got %+v", result.Warnings)
+	}
+}
+
+// GAP-2494: a repair that restored the Cursor adapter still names why
+// security is not complete; a warning that explains it still suppresses it.
+func TestEnterpriseSecurityIncompleteIgnoresInformationalWarnings(t *testing.T) {
+	result := &enterprisestatus.Result{
+		Readiness: enterprisestatus.Readiness{Guardian: true},
+		MachinePolicy: map[string]enterprisestatus.MachinePolicyState{
+			"claudecode": {Ownership: "merge", Lock: "enforce"},
+		},
+	}
+	result.AddWarning("cursor_adapter_restored", "restored")
+	result.AddWarning("stale_lifecycle_journal_removed", "removed")
+	addEnterpriseSecurityIncompleteReasons(result, false)
+	if len(result.Warnings) != 3 || result.Warnings[2].Code != "security_incomplete" ||
+		!strings.Contains(result.Warnings[2].Message, "ATTESTCLAUDEEFFECTIVEPOLICY=1") {
+		t.Fatalf("warnings = %+v", result.Warnings)
+	}
+
+	result.Warnings = nil
+	result.AddWarning("cursor_adapter_restored", "restored")
+	result.AddWarning("user_registrations_pending", "pending")
+	addEnterpriseSecurityIncompleteReasons(result, false)
+	if len(result.Warnings) != 2 {
+		t.Fatalf("an explaining warning did not suppress the reason: %+v", result.Warnings)
 	}
 }

@@ -210,6 +210,12 @@ class RegistryStructureTests(unittest.TestCase):
                 "`unset`",
                 "`absolute file path`, `unset`",
             ),
+            # GAP-1393: defenseclaw-gateway validates Rego, so OPA is optional.
+            "DEFENSECLAW_POLICY_VALIDATE_ALLOW_NO_OPA": (
+                "**medium**",
+                "`unset` (validation needs opa or defenseclaw-gateway)",
+                "`1`, `unset`",
+            ),
             "DEFENSECLAW_WINDOWS_PROCESS_HELPER": (
                 "—",
                 "`unset`",

@@ -26,6 +26,10 @@ func platformDiscoveryHomeDirs(_ bool) []string {
 	return nil
 }
 
+func platformDiscoveryHomeOwners(_ bool) []discoveryHomeOwner {
+	return nil
+}
+
 func platformDiscoveryVariable(name, _ string) (string, bool) {
 	return os.LookupEnv(name)
 }

@@ -28,6 +28,8 @@ import os
 import stat
 import time
 
+import yaml
+
 from defenseclaw.scanner.plugin_scanner.analyzer import ScanContext
 from defenseclaw.scanner.plugin_scanner.analyzer_factory import build_analyzers
 from defenseclaw.scanner.plugin_scanner.analyzers import has_install_scripts
@@ -56,6 +58,9 @@ from defenseclaw.scanner.plugin_scanner.types import (
     ScanMetadata,
     ScanResult,
 )
+
+# The C loader is several times faster on manifests; same safe semantics.
+_YAML_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -115,6 +120,13 @@ def scan_plugin(
     # --- Load manifest ---
     manifest = _load_manifest(target)
     manifest_missing_finding: Finding | None = None
+    if manifest is None and os.path.isfile(target):
+        # OpenCode and Amp plugins are one plain .js/.ts file: there is no
+        # manifest to look for, so its absence is not a finding (GAP-2165).
+        manifest = PluginManifest(
+            name=os.path.splitext(os.path.basename(target))[0],
+            source="none",
+        )
     if manifest is None:
         manifest_missing_finding = make_finding(
             1,
@@ -125,14 +137,17 @@ def scan_plugin(
             description=(
                 "Plugin directory lacks a recognised manifest "
                 "(package.json, manifest.json, plugin.json, "
-                "openclaw.plugin.json, .codex-plugin/plugin.json, "
+                "openclaw.plugin.json, plugin.yaml, .codex-plugin/plugin.json, "
                 ".claude-plugin/plugin.json, or .cursor-plugin/plugin.json). "
                 "Cannot verify plugin "
                 "identity, version, or declared permissions. Source "
                 "scanning will still run."
             ),
             location=target,
-            remediation="Add a package.json with name, version, and permissions fields.",
+            remediation=(
+                "Add the manifest your agent expects (for example package.json, "
+                "plugin.json or plugin.yaml) with the plugin's name and version."
+            ),
             tags=["supply-chain"],
         )
         # Synthetic manifest so the analyzer pipeline still runs
@@ -263,6 +278,13 @@ _MANIFEST_CANDIDATES: tuple[tuple[str, str], ...] = (
     (os.path.join(".claude-plugin", "plugin.json"), "claude.plugin.json"),
     (os.path.join(".codex-plugin", "plugin.json"), "codex.plugin.json"),
     (os.path.join(".cursor-plugin", "plugin.json"), "cursor.plugin.json"),
+    # Hermes plugins declare themselves in a YAML plugin.yaml (name,
+    # version, description, kind); it has no permissions field. It comes
+    # last: a plugin.yaml-primary plugin is treated as loaded by a Python
+    # host, so an extra plugin.yaml must not shadow the manifest a Claude
+    # Code, Codex or Cursor plugin is loaded from (GAP-2196).
+    ("plugin.yaml", "plugin.yaml"),
+    ("plugin.yml", "plugin.yml"),
 )
 
 
@@ -318,8 +340,11 @@ def _safe_read_manifest(candidate: str, scan_root: str) -> dict | None:
                 pass
 
     try:
-        data = json.loads(raw_text)
-    except (json.JSONDecodeError, ValueError):
+        if candidate.endswith((".yaml", ".yml")):
+            data = yaml.load(raw_text, Loader=_YAML_LOADER)
+        else:
+            data = json.loads(raw_text)
+    except (json.JSONDecodeError, ValueError, yaml.YAMLError):
         return None
     return data if isinstance(data, dict) else None
 
@@ -434,15 +459,15 @@ def _merge_declared_capabilities(
     parsed: list[tuple[dict, str]],
 ) -> None:
     merged_perms: list[str] = []
-    seen_perms: set[str] = set()
+    perm_sources: dict[str, str] = {}
     merged_tools: list[dict] = []
     merged_entrypoints: list[str] = []
     seen_entrypoints: set[str] = set()
 
-    for raw, _label in parsed:
+    for raw, label in parsed:
         for perm in _manifest_permissions(raw):
-            if perm not in seen_perms:
-                seen_perms.add(perm)
+            if perm not in perm_sources:
+                perm_sources[perm] = label
                 merged_perms.append(perm)
         tools = raw.get("tools")
         if isinstance(tools, list):
@@ -454,6 +479,7 @@ def _merge_declared_capabilities(
 
     if merged_perms:
         manifest.permissions = merged_perms
+        manifest.permission_sources = perm_sources
     if merged_tools:
         manifest.tools = merged_tools
     if merged_entrypoints:

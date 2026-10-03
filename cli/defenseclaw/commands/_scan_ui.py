@@ -56,12 +56,15 @@ output path).
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
 import click
+
+from defenseclaw import ux
 
 # ---------------------------------------------------------------------------
 # Component / category definitions
@@ -178,6 +181,10 @@ class ScanContext:
     categories: tuple[str, ...] = ()
     as_json: bool = False
     click_ctx: click.Context | None = None
+    # Replaces "on <connector>" in the preamble when the target does not come
+    # from a connector's config (GAP-1506: an ad-hoc ``mcp scan <url>``;
+    # GAP-1640/1599: a skill or plugin folder outside every connector root).
+    where: str = ""
 
     def __post_init__(self) -> None:
         # Normalize. Operators routinely paste connector names with
@@ -189,30 +196,39 @@ class ScanContext:
     # -- convenience constructors -------------------------------------
 
     @classmethod
-    def for_plugin(cls, *, connector: str, paths: Iterable[str], as_json: bool = False) -> ScanContext:
+    def for_plugin(
+        cls, *, connector: str, paths: Iterable[str], as_json: bool = False, where: str = "",
+    ) -> ScanContext:
         return cls(
             component=COMPONENT_PLUGIN,
             connector=connector,
             paths=list(paths),
             as_json=as_json,
+            where=where,
         )
 
     @classmethod
-    def for_skill(cls, *, connector: str, paths: Iterable[str], as_json: bool = False) -> ScanContext:
+    def for_skill(
+        cls, *, connector: str, paths: Iterable[str], as_json: bool = False, where: str = "",
+    ) -> ScanContext:
         return cls(
             component=COMPONENT_SKILL,
             connector=connector,
             paths=list(paths),
             as_json=as_json,
+            where=where,
         )
 
     @classmethod
-    def for_mcp(cls, *, connector: str, paths: Iterable[str], as_json: bool = False) -> ScanContext:
+    def for_mcp(
+        cls, *, connector: str, paths: Iterable[str], as_json: bool = False, where: str = "",
+    ) -> ScanContext:
         return cls(
             component=COMPONENT_MCP,
             connector=connector,
             paths=list(paths),
             as_json=as_json,
+            where=where,
         )
 
     # -- helpers ------------------------------------------------------
@@ -221,6 +237,10 @@ class ScanContext:
         """Return the human-readable component label, optionally pluralized."""
         sing, plur = _COMPONENT_LABELS.get(self.component, (self.component, self.component + "s"))
         return plur if plural else sing
+
+
+# Preamble wording for a skill/plugin folder that no connector root holds.
+WHERE_ADHOC_PATH = "at a path (not from a connector config)"
 
 
 # ---------------------------------------------------------------------------
@@ -239,7 +259,7 @@ def render_preamble(ctx: ScanContext, target_count: int) -> None:
     label = ctx.label(plural=target_count != 1)
     click.echo()
     click.echo(
-        f"  Scanning {target_count} {label} on {ctx.connector} for:"
+        f"  Scanning {target_count} {label} {ctx.where or 'on ' + ctx.connector} for:"
     )
     for cat in ctx.categories:
         click.echo(f"    - {cat}")
@@ -285,8 +305,12 @@ def render_summary(
     total: int,
     findings: int = 0,
     duration_ms: int | None = None,
+    warning: int | None = None,
 ) -> None:
     """Print the final tally line.
+
+    ``warning`` (GAP-2336) counts targets shown as [WARN]/[INFO], so the
+    counts add up to the total; callers that track it pass it.
 
     No-ops in JSON mode (the JSON document carries the same numbers
     in its ``summary`` block).
@@ -297,8 +321,10 @@ def render_summary(
     parts = [
         f"  Summary: {total} {ctx.label(plural=total != 1)} scanned",
         f"clean={clean}",
-        f"blocked={blocked}",
     ]
+    if warning is not None:
+        parts.append(f"warning={warning}")
+    parts.append(f"blocked={blocked}")
     if findings:
         parts.append(f"findings={findings}")
     if errored:
@@ -378,3 +404,32 @@ def categories_for(component: str) -> tuple[str, ...]:
 def supported_components() -> tuple[str, ...]:
     """Return the stable list of scan components."""
     return (COMPONENT_PLUGIN, COMPONENT_SKILL, COMPONENT_MCP)
+
+
+_SCAN_NOT_RECORDED_NOTED = False
+
+
+def record_scan(logger: Any, result: Any, **kwargs: Any) -> None:
+    """Record a finished scan; a stopped gateway only skips the record.
+
+    A scan is local, so a gateway that is not running yet (for example right
+    after ``init --no-start-gateway``) must not hide the result behind a
+    traceback (GAP-1672). The note is printed once per command. Any other
+    admission failure still raises.
+    """
+    global _SCAN_NOT_RECORDED_NOTED
+    from defenseclaw.logger import CanonicalObservabilityUnavailableError
+
+    if not logger:
+        return
+    # The gateway spawned this scan and records the result itself (GAP-2482).
+    if os.environ.get("DEFENSECLAW_SCAN_RECORDED_BY_CALLER") == "1":
+        return
+    try:
+        logger.log_scan(result, **kwargs)
+    except CanonicalObservabilityUnavailableError:
+        if not _SCAN_NOT_RECORDED_NOTED:
+            _SCAN_NOT_RECORDED_NOTED = True
+            from defenseclaw.commands._audit_notice import not_recorded_warning
+
+            ux.echo(not_recorded_warning("this scan result"), err=True)

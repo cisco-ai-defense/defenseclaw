@@ -16,6 +16,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"slices"
 	"testing"
 )
 
@@ -65,10 +66,34 @@ func TestFailedSecretChangeAppliesNothing(t *testing.T) {
 	if r.OK || len(r.Errors) == 0 || r.Errors[0].Code != codeChange {
 		t.Fatalf("result %+v", r)
 	}
-	if len(h.services.calls) != before {
-		t.Fatalf("a failed change touched services: %v", h.services.calls[before:])
+	// Only the apply watcher's pause around the change (GAP-2261).
+	if got, want := h.services.calls[before:], []string{"stop " + unitApplyPath, "start " + unitApplyPath}; !slices.Equal(got, want) {
+		t.Fatalf("a failed change touched services: %v", got)
 	}
 	if r := h.run(Options{Action: ActionRepair, Mutate: func(context.Context) error { return nil }}); r.OK {
 		t.Fatal("a change outside ensure must be refused")
+	}
+}
+
+// The apply watcher does not see the change's own write: it would start a
+// redundant ensure that holds the lock after this run returns, so a command
+// typed right after secret set failed lifecycle_busy (GAP-2261).
+func TestSecretChangePausesTheApplyWatcher(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	if !h.services.isActive(unitApplyPath) {
+		t.Fatal("the apply watcher should run after install")
+	}
+	watching := true
+	r := h.run(Options{Action: ActionEnsure, Reason: "secret", Mutate: func(ctx context.Context) error {
+		watching = h.services.isActive(unitApplyPath)
+		return h.env.WriteSecret(ctx, "ai-defense-api-key", []byte("s3cr3t"))
+	}})
+	requireOK(t, r)
+	if watching {
+		t.Fatal("the apply watcher was watching while the credential was written")
+	}
+	if !h.services.isActive(unitApplyPath) {
+		t.Fatal("the apply watcher was not started again")
 	}
 }

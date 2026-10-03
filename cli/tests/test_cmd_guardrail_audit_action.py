@@ -25,6 +25,6 @@ def test_guardrail_changes_use_a_registered_audit_action() -> None:
     app = SimpleNamespace(logger=MagicMock())
     for operation in ("guardrail-use-pack", "guardrail-protection", "guardrail-mode", "guardrail-block-at"):
         cmd_guardrail._log_guardrail_change(app, operation, "scope=codex")  # noqa: SLF001
-        action, target, details = app.logger.log_action.call_args.args
-        assert is_known_action(action), action
-        assert (target, details) == ("config", f"{operation} scope=codex")
+        # Recorded as a config-update Activity mutation that names the setting (GAP-1217).
+        assert app.logger.log_config_change.call_args.args == (operation, "scope=codex")
+    assert is_known_action("config-update")

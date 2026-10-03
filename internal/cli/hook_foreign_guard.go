@@ -380,6 +380,21 @@ func evaluateHookForeignGuard(name, hookBinary string, policy enterprisepolicy.P
 		Key:          enterprisepolicy.SessionKey{Connector: name, Session: facts.session, Process: hookForeignGuardAgentProcess()},
 		SessionStart: sessionStart,
 		Decision:     decision,
+		Event:        event,
+		Tool:         facts.tool,
+	}
+	if foreignHookSessionLocal(name) {
+		// No gateway exchange is possible for this connector, so the
+		// session record lives under the account's home, as on hosts
+		// without the standalone gateway path.
+		decision = enterprisepolicy.ApplyForeignHookSession(enterprisepolicy.SessionUpdate{
+			AccountHome:  accountHome,
+			Key:          update.Key,
+			SessionStart: sessionStart,
+			Decision:     decision,
+			Now:          now,
+		})
+		return decision, accountHome
 	}
 	decision, err := hookForeignGuardExchange(name, event, deadline, update)
 	if err != nil {
@@ -394,6 +409,20 @@ func evaluateHookForeignGuard(name, hookBinary string, policy enterprisepolicy.P
 		}
 	}
 	return decision, accountHome
+}
+
+// hookForeignGuardGOOS is runtime.GOOS (replaceable in tests).
+var hookForeignGuardGOOS = runtime.GOOS
+
+// foreignHookSessionLocal reports a connector whose foreign-hook check cannot
+// reach the gateway's session store. On Windows the Amp plugin calls the
+// gateway with its own per-user token and has no hook-binary runtime
+// generation, so `hook --connector amp --foreign-hook-check` has no
+// credential for the exchange; every check failed closed and blocked each
+// Amp tool call. The plugin itself keeps the session.load
+// decision for the life of the Amp process.
+func foreignHookSessionLocal(name string) bool {
+	return hookForeignGuardGOOS == "windows" && strings.EqualFold(strings.TrimSpace(name), "amp")
 }
 
 func exchangeForeignHookSession(name, event string, scanDeadline time.Time, update enterprisepolicy.SessionExchange) (enterprisepolicy.GuardDecision, error) {
@@ -446,6 +475,10 @@ type hookPayloadFacts struct {
 	// surface is the hook command's --hook-surface marker when the
 	// connector lists it (the VS Code Local harness reads more sources).
 	surface string
+	// tool is the tool the event is for (tool_name or toolName; "" for
+	// session and prompt events), which labels the gateway's export of a
+	// denial.
+	tool string
 }
 
 // hookForeignGuardSessionKeys name the agent's session ID, in order.
@@ -478,6 +511,13 @@ func captureHookPayloadFacts(opts *hookexec.Options) hookPayloadFacts {
 		var event string
 		if json.Unmarshal(payload[key], &event) == nil && strings.TrimSpace(event) != "" {
 			facts.event = strings.TrimSpace(event)
+			break
+		}
+	}
+	for _, key := range []string{"tool_name", "toolName"} {
+		var tool string
+		if json.Unmarshal(payload[key], &tool) == nil && strings.TrimSpace(tool) != "" {
+			facts.tool = strings.TrimSpace(tool)
 			break
 		}
 	}

@@ -22,8 +22,10 @@ mirroring the Cobra root command in internal/cli/root.go.
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
+import re
 import sys
 from types import SimpleNamespace
 
@@ -188,7 +190,7 @@ def _is_config_optional_sandbox_command(ctx: click.Context) -> bool:
 
 
 def _is_audit_export(ctx: click.Context) -> bool:
-    """Return whether this is the ``audit export`` alias for the gateway command.
+    """Return whether this is the ``audit export``/``findings`` gateway alias.
 
     The gateway binary loads the configuration and opens the audit database
     read-only itself, so the CLI must not open the store for writing first.
@@ -200,7 +202,7 @@ def _is_audit_export(ctx: click.Context) -> bool:
         index = argv.index("audit")
     except ValueError:
         return False
-    return index + 1 < len(argv) and argv[index + 1] == "export"
+    return index + 1 < len(argv) and argv[index + 1] in {"export", "findings"}
 
 
 def _emit_version_json(ctx: click.Context, _param: click.Parameter | None, value: bool) -> None:
@@ -211,7 +213,9 @@ def _emit_version_json(ctx: click.Context, _param: click.Parameter | None, value
     ctx.exit()
 
 
-@click.group()
+# -h is the short form of --help on every command, as on defenseclaw-gateway
+# (GAP-2170). Child contexts inherit help_option_names from this group.
+@click.group(context_settings={"help_option_names": ["-h", "--help"]})
 @click.version_option(version=__version__, prog_name="defenseclaw")
 @click.option(
     "--version-json",
@@ -231,11 +235,12 @@ def cli(ctx: click.Context) -> None:
     \b
     Multi-connector:
       One gateway enforces N agent-native connectors (codex, claudecode,
-      hermes, antigravity, omnigent, and others) tracked under guardrail.connectors. Add one
-      with 'defenseclaw setup <connector>' (choose Add when prompted),
-      remove with 'defenseclaw setup remove <name>'. Scope policy per peer
-      with 'defenseclaw guardrail ... --connector X', and inspect the
-      roster with 'defenseclaw status' / 'defenseclaw guardrail status'.
+      hermes, antigravity, omnigent, and others) tracked under
+      guardrail.connectors. Add one with 'defenseclaw setup <connector>'
+      (choose Add when prompted), remove with
+      'defenseclaw setup remove <name>'. Scope policy per peer with
+      'defenseclaw guardrail ... --connector X', and inspect the roster
+      with 'defenseclaw status' / 'defenseclaw guardrail status'.
       Note: OpenClaw/ZeptoClaw use the proxy path and cannot be multi peers.
     """
     ctx.ensure_object(AppContext)
@@ -279,6 +284,18 @@ def cli(ctx: click.Context) -> None:
         except cfg_mod.ConfigVersionError as exc:
             ux.echo(str(exc), err=True)
             raise SystemExit(1) from exc
+
+    if invoked == "doctor" and cfg_mod.config_is_empty():
+        # An empty config.yaml loads as built-in defaults; judging the install
+        # against them printed wrong FAIL rows. Stop at the config rows, as for
+        # a malformed file (GAP-1633).
+        from defenseclaw.doctor_preflight import inspect_doctor_config_load_failure
+
+        app.doctor_startup_diagnostics = inspect_doctor_config_load_failure(
+            cfg_mod.ConfigVersionError(cfg_mod.empty_config_message())
+        )
+        app.cfg = SimpleNamespace(data_dir=str(cfg_mod.default_data_path()))
+        return
 
     try:
         app.cfg = cfg_mod.load()
@@ -330,17 +347,33 @@ def cli(ctx: click.Context) -> None:
 
         result = validate_config()
         if not result.ok:
-            ux.echo("Config validation failed:", err=True)
+            timed_out = getattr(result, "timed_out", False)
+            # GAP-1788: status is read-only and config.yaml loaded, so it
+            # still shows the gateway and connectors, flags the problem, and
+            # exits 1 at the end.
+            status_continues = invoked == "status" and not timed_out and not result.parse_error
+            ux.echo("Config check did not finish:" if timed_out else "Config validation failed:", err=True)
             if result.parse_error:
                 ux.echo(f"  ✗ {result.parse_error}", err=True)
             for issue in result.errors:
                 ux.echo(f"  ✗ {issue}", err=True)
-            ux.echo(
-                "  Run 'defenseclaw config validate' for details, repair or upgrade the configuration, "
-                "then rerun the command.",
-                err=True,
-            )
-            raise SystemExit(1)
+            if timed_out:
+                ux.echo("  Nothing was changed; re-run the command.", err=True)
+            elif status_continues:
+                ux.echo(
+                    "  A gateway that is already running keeps the config it started with; "
+                    "its status follows. Fix the problem above, then run: defenseclaw-gateway restart",
+                    err=True,
+                )
+            else:
+                ux.echo(
+                    "  Run 'defenseclaw config validate' for details, repair or upgrade the configuration, "
+                    "then rerun the command.",
+                    err=True,
+                )
+            if not status_continues:
+                raise SystemExit(1)
+            app.config_problems = list(result.errors) or ["config.yaml does not validate"]
 
     # The setup group must inspect its child command before deciding whether
     # gateway-backed canonical validation and runtime/audit initialization are
@@ -358,7 +391,10 @@ def cli(ctx: click.Context) -> None:
         ux.echo(f"Failed to open audit store: {exc}", err=True)
         raise SystemExit(1)
 
-    app.logger = Logger.from_config(app.cfg) if source_is_v8 else Logger.no_runtime()
+    if source_is_v8 and not getattr(app, "config_problems", None):
+        app.logger = Logger.from_config(app.cfg)
+    else:
+        app.logger = Logger.no_runtime()
 
 
 @cli.result_callback()
@@ -405,25 +441,114 @@ cli.add_command(reset_cmd, "reset")
 cli.add_command(version_cmd, "version")
 
 
+_RST_LITERAL = re.compile(r"``([^`]+?)``")
+_MD_BOLD = re.compile(r"\*\*([^*]+?)\*\*")
+
+
+def _plain_help(text: str | None) -> str | None:
+    """Show RST literals (``x``) as 'x' and drop **bold** markers (GAP-2310).
+
+    Click prints help verbatim, so markup would show as typed.
+    """
+    if not text or ("``" not in text and "**" not in text):
+        return text
+    return _MD_BOLD.sub(r"\1", _RST_LITERAL.sub(r"'\1'", text))
+
+
+def _first_sentence(text: str | None) -> str | None:
+    """The first sentence of *text*, for a group's Commands list.
+
+    Without an explicit short_help Click cuts the summary off at the terminal
+    width with '...' (GAP-2036); the whole sentence wraps instead.
+    """
+    if not text:
+        return None
+    words = inspect.cleandoc(text).split("\n\n", 1)[0].split()
+    if words and words[0] == "\b":
+        words = words[1:]
+    for i, word in enumerate(words):
+        if word.endswith("."):
+            return " ".join(words[: i + 1])
+    return " ".join(words) or None
+
+
+def _plain_help_tree(command: click.Command, seen: set[int] | None = None) -> None:
+    """Clean the help text of every command and option once, at import."""
+    seen = set() if seen is None else seen
+    if id(command) in seen:
+        return
+    seen.add(id(command))
+    command.help = _plain_help(command.help)
+    command.short_help = _plain_help(command.short_help) or _first_sentence(command.help)
+    for param in command.params:
+        if isinstance(param, click.Option):
+            param.help = _plain_help(param.help)
+    for sub in (getattr(command, "commands", None) or {}).values():
+        _plain_help_tree(sub, seen)
+
+
+_plain_help_tree(cli)
+
+
+_NB_HYPHEN = "\u2011"
+
+
+class _HelpFormatter(click.HelpFormatter):
+    """Help output that never wraps a line at a hyphen.
+
+    Click's wrapper splits 'defenseclaw-gateway', '~/.defenseclaw/last-run.log'
+    or 'log-activity' across two lines, so they can't be read or copied whole.
+    Hyphens are non-breaking while a block wraps and plain again in the output.
+    """
+
+    def write_text(self, text: str) -> None:
+        start = len(self.buffer)
+        super().write_text(text.replace("-", _NB_HYPHEN))
+        self._restore_hyphens(start)
+
+    def write_dl(self, rows, col_max: int = 30, col_spacing: int = 2) -> None:
+        start = len(self.buffer)
+        super().write_dl([(term, desc.replace("-", _NB_HYPHEN)) for term, desc in rows], col_max, col_spacing)
+        self._restore_hyphens(start)
+
+    def _restore_hyphens(self, start: int) -> None:
+        self.buffer[start:] = [part.replace(_NB_HYPHEN, "-") for part in self.buffer[start:]]
+
+
+class _HelpContext(click.Context):
+    formatter_class = _HelpFormatter
+
+
+def _whole_words_help_tree(command: click.Command, seen: set[int] | None = None) -> None:
+    """Give every command the help formatter that keeps hyphenated words whole."""
+    seen = set() if seen is None else seen
+    if id(command) in seen:
+        return
+    seen.add(id(command))
+    command.context_class = _HelpContext
+    for sub in (getattr(command, "commands", None) or {}).values():
+        _whole_words_help_tree(sub, seen)
+
+
+_whole_words_help_tree(cli)
+
+
 def _ensure_codeguard_skill(cfg) -> None:
     """Deprecated no-op: native CodeGuard assets are explicit opt-in only."""
     _ = cfg
 
 
 def _try_launch_tui() -> bool:
-    """When invoked with no subcommand on a TTY, launch the Textual TUI.
+    """When invoked with no arguments on a TTY, launch the Textual TUI.
 
-    We only fall through to the Click CLI when stdin is not a TTY, when
-    the user passed an actual subcommand, or when ``--help``/``--version``
-    is on the command line.
+    Any argument goes to the Click CLI: a subcommand, ``--help``/``--version``,
+    and a mistyped option too, which Click rejects with its usage error and
+    exit code 2 instead of opening the dashboard (GAP-1769).
     """
     if not sys.stdin.isatty():
         return False
 
-    argv = sys.argv[1:]
-    if argv and not all(a.startswith("-") for a in argv):
-        return False
-    if any(a in {"-h", "--help", "--version", "--version-json"} for a in argv):
+    if sys.argv[1:]:
         return False
 
     if not ux.terminal_supports_tui():
@@ -459,12 +584,114 @@ def _force_utf8_io() -> None:
     sys.stderr = ux.ascii_safe_redirected_stream(sys.stderr)
 
 
+def _attached_console_width() -> int:
+    """Columns of the terminal this process runs in, even when stdout is piped; 0 if none."""
+    for fd in (0, 1, 2):
+        try:
+            return os.get_terminal_size(fd).columns
+        except (OSError, ValueError):
+            continue
+    if os.name != "nt":
+        return 0
+    try:
+        # CONOUT$ is the console screen buffer even when every standard
+        # stream is redirected (PowerShell '2>&1 | Select ...').
+        with open("CONOUT$", "w") as console:
+            return os.get_terminal_size(console.fileno()).columns
+    except (OSError, ValueError):
+        return 0
+
+
+def _keep_console_width_when_piped() -> None:
+    """Keep the terminal's width for tables when stdout is piped (GAP-1682).
+
+    Rich and Click fall back to 80 columns when stdout is not a terminal.
+    Rich on Windows asks only stdout and stderr, so in a 220-column
+    PowerShell ``defenseclaw skill list 2>&1 | Select -First 50`` cut every
+    table to 80 ASCII columns ('St...', 'Se...'). Export the console's width
+    as COLUMNS, which both honour, unless the user already set it.
+    """
+    stdout = sys.__stdout__
+    try:
+        if os.environ.get("COLUMNS") or stdout is None or stdout.isatty():
+            return
+    except (OSError, ValueError):
+        return
+    width = _attached_console_width()
+    if width > 0:
+        os.environ["COLUMNS"] = str(width)
+
+
+def _output_pipe_closed(exc: OSError) -> bool:
+    """Whether *exc* means the reader of stdout went away.
+
+    Click already ends quietly on EPIPE. Windows reports a pipe closed by
+    the reader (``| Select -First 2``) as EINVAL instead, so that printed a
+    traceback (GAP-1313). EINVAL counts only when stdout itself can no
+    longer be flushed.
+    """
+    import errno
+
+    if isinstance(exc, BrokenPipeError) or exc.errno == errno.EPIPE:
+        return True
+    if sys.platform != "win32" or exc.errno != errno.EINVAL:
+        return False
+    try:
+        sys.stdout.flush()
+    except OSError:
+        return True
+    return False
+
+
+def _silence_closed_stdout() -> None:
+    """Point stdout at the null device so exit-time flushes stay quiet."""
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.__stdout__.fileno())
+    except (OSError, AttributeError, ValueError):
+        pass
+
+
 def main() -> None:
     """Entrypoint: try TUI handoff first, fall back to Click CLI."""
     ux.configure_console_output()
+    _keep_console_width_when_piped()
     _force_utf8_io()
-    if not _try_launch_tui():
-        cli()
+    from defenseclaw.logger import CanonicalObservabilityError, CanonicalObservabilityUnavailableError
+
+    try:
+        if not _try_launch_tui():
+            cli()
+    except CanonicalObservabilityUnavailableError as exc:
+        # The command's audit event needs the gateway (for example after
+        # init --no-start-gateway): one line with the fix, no traceback
+        # (GAP-1689).
+        click.echo(
+            f"Error: the audit event was not recorded: {exc}. Start the gateway with "
+            "'defenseclaw-gateway start' (or run 'defenseclaw setup gateway' to configure it), "
+            "then run the command again.",
+            err=True,
+        )
+        sys.exit(1)
+    except CanonicalObservabilityError as exc:
+        click.echo(f"Error: the audit event was not recorded: {exc}.", err=True)
+        sys.exit(1)
+    except OSError as exc:
+        if _output_pipe_closed(exc):
+            _silence_closed_stdout()
+            sys.exit(1)
+        import errno
+
+        if exc.errno != errno.ENOSPC:
+            raise
+        # GAP-1838: a full disk is an environment problem, not a crash.
+        target = f" {exc.filename}" if exc.filename else " a file"
+        click.echo(
+            f"Error: the disk is full, so DefenseClaw could not write{target}. "
+            "Free some space and run the command again.",
+            err=True,
+        )
+        sys.exit(1)
 
 
 if __name__ == "__main__":

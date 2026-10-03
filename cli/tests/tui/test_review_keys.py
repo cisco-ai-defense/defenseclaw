@@ -127,6 +127,8 @@ async def test_a_failed_catalog_load_replaces_the_loading_status(tmp_path, monke
     monkeypatch.setattr(app_module, "_communicate_captured", failing)
     app = snapshot_app(tmp_path)
     async with app.run_test(size=(80, 24)) as pilot:
+        # Load status belongs to the panel on screen (GAP-1402).
+        app.action_switch_panel("skills")
         await pilot.pause()
         await app._load_catalog_model("skills")
         assert "Loading" not in app.status_text

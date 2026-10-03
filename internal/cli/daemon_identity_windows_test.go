@@ -46,7 +46,7 @@ func TestNativeWindowsDisposableForeignCollisionPreflight(t *testing.T) {
 	cfg.Gateway.APIPort = listener.Addr().(*net.TCPAddr).Port
 	withStartupListenerInspector(t, daemon.ListenerOwnerPID)
 	_, _, err = inspectConfiguredListener(fakeDaemonState{}, cfg, http.DefaultClient)
-	if err == nil || !strings.Contains(err.Error(), "foreign process") {
+	if err == nil || !strings.Contains(err.Error(), "not by this account's gateway") {
 		t.Fatalf("error = %v, want native foreign-listener rejection", err)
 	}
 }
@@ -89,7 +89,7 @@ func TestNativeWindowsDisposableLifecycleCollisionHasNoSideEffects(t *testing.T)
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := tc.run()
-			if err == nil || !strings.Contains(err.Error(), "foreign process") {
+			if err == nil || !strings.Contains(err.Error(), "not by this account's gateway") {
 				t.Fatalf("error = %v, want foreign collision", err)
 			}
 			if _, err := os.Stat(filepath.Join(home, daemon.PIDFileName)); !os.IsNotExist(err) {

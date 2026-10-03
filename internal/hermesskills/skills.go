@@ -24,6 +24,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -44,6 +46,12 @@ const (
 )
 
 var ErrDirectoryLimit = errors.New("Hermes skill discovery directory limit exceeded")
+
+// Seams for tests of a service account's denied profile folders.
+var (
+	evalSymlinks           = filepath.EvalSymlinks
+	readRegularFileBounded = safefile.ReadRegularFileBounded
+)
 
 // Entry is one actual SKILL.md directory, not a Hermes category container.
 type Entry struct {
@@ -74,11 +82,56 @@ func Discover(root string, directoryLimit int) ([]Entry, error) {
 	if !IsRoot(root) {
 		return nil, fmt.Errorf("not the resolved Hermes skills root: %s", root)
 	}
-	if directoryLimit <= 0 {
-		directoryLimit = DefaultDirectoryLimit
-	}
 	if !canonicalPath(root) {
 		return nil, fmt.Errorf("Hermes skills root is linked or unavailable: %s", root)
+	}
+	return discover(root, directoryLimit)
+}
+
+// DiscoverProfileRoot is Discover for the Hermes skills root of a profile
+// the caller resolved itself: a service-context scan (managed Windows)
+// reads every user's profile, while IsRoot resolves only this process's
+// own Hermes home. Provenance is decided the same way, against that
+// profile's own manifest and Hermes checkout.
+func DiscoverProfileRoot(root string, directoryLimit int) ([]Entry, error) {
+	if filepath.Base(filepath.Clean(root)) != "skills" {
+		return nil, fmt.Errorf("not a Hermes skills root: %s", root)
+	}
+	if !profileRootUnlinked(root) {
+		return nil, fmt.Errorf("Hermes skills root is linked or unavailable: %s", root)
+	}
+	return discover(root, directoryLimit)
+}
+
+// profileRootUnlinked is canonicalPath for a profile's skills root. The
+// managed Windows gateway runs as a virtual service account that is
+// granted read on the skills folder only, not list on the profile folders
+// above it, so resolving the path is denied and every user's Hermes skills
+// went unlisted (GAP-2263). On that denial the root itself must still be a
+// plain directory; the walk below it skips links.
+func profileRootUnlinked(root string) bool {
+	absolute, err := filepath.Abs(filepath.Clean(root))
+	if err != nil {
+		return false
+	}
+	resolved, err := evalSymlinks(absolute)
+	if err == nil {
+		return samePath(absolute, resolved)
+	}
+	if !errors.Is(err, fs.ErrPermission) {
+		return false
+	}
+	return plainDirectory(absolute)
+}
+
+func plainDirectory(path string) bool {
+	info, err := os.Lstat(path)
+	return err == nil && info.IsDir() && info.Mode()&(os.ModeSymlink|os.ModeIrregular) == 0
+}
+
+func discover(root string, directoryLimit int) ([]Entry, error) {
+	if directoryLimit <= 0 {
+		directoryLimit = DefaultDirectoryLimit
 	}
 	manifest := readManifest(root)
 	entries := make([]Entry, 0)
@@ -203,10 +256,7 @@ func readManifest(root string) map[string]string {
 }
 
 func readSkillName(skillDir string) (string, bool) {
-	payload, err := safefile.ReadRegularFileBounded(
-		filepath.Join(skillDir, "SKILL.md"),
-		markerMaxBytes,
-	)
+	payload, err := readSkillFile(filepath.Join(skillDir, "SKILL.md"))
 	if err != nil {
 		return "", false
 	}
@@ -229,6 +279,44 @@ func readSkillName(skillDir string) (string, bool) {
 		}
 	}
 	return fallback, true
+}
+
+// readSkillFile reads a SKILL.md with safefile. safefile checks every
+// folder above the file for reparse points, which a service account
+// granted read on the skills folder only is denied (GAP-2263); then the
+// file itself must be a regular file, read as the same file it stat'ed.
+func readSkillFile(path string) ([]byte, error) {
+	payload, err := readRegularFileBounded(path, markerMaxBytes)
+	if err == nil || !errors.Is(err, fs.ErrPermission) {
+		return payload, err
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() || info.Size() > markerMaxBytes {
+		return nil, fmt.Errorf("not a regular skill file within %d bytes: %s", markerMaxBytes, path)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !os.SameFile(info, opened) {
+		return nil, fmt.Errorf("skill file changed while opening: %s", path)
+	}
+	payload, err = io.ReadAll(io.LimitReader(file, markerMaxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(payload) > markerMaxBytes {
+		return nil, fmt.Errorf("skill file exceeds %d bytes: %s", markerMaxBytes, path)
+	}
+	return payload, nil
 }
 
 func treeMD5(root string) (string, error) {
