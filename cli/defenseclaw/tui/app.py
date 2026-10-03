@@ -2792,8 +2792,21 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # The nav list and aside appear and disappear at width thresholds.
         if self.is_running and not self.help_open and len(self.screen_stack) <= 1:
             panel = self.active_panel
-            if panel == "setup" or self._panel_nav(panel) or self._panel_aside(panel) is not None:
+            # An open detail is sized for the old terminal too: without a
+            # re-render it kept that height until the next refresh tick
+            # (~15 s), clipped under KEYS or leaving blank rows (GAP-2603).
+            if (
+                panel == "setup"
+                or self._panel_nav(panel)
+                or self._panel_aside(panel) is not None
+                or self.detail_text
+            ):
                 self.call_after_refresh(self._render_chrome)
+                if self.detail_text:
+                    # That render can still measure the old layout: grown
+                    # from 80x24 the box stayed 16 rows under blank rows.
+                    # Measure the free rows again once the layout settles.
+                    self.set_timer(0.25, self._recheck_detail_box)
             elif panel == "overview":
                 # Overview's cards are built for the current width (GAP-2509).
                 self.call_after_refresh(self._update_body_only)
@@ -11497,6 +11510,12 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             # Discovery showed Codex while OpenCode's detail was open
             # (GAP-1596).
             self.call_after_refresh(self._keep_table_cursor_visible)
+
+    def _recheck_detail_box(self) -> None:
+        if not self.is_running or self.help_open or not self.detail_text or self._detail_max_height is None:
+            return
+        if max(16, self._aside_below_box()[0]) != self._detail_max_height:
+            self._render_detail_panel()
 
     def _recheck_aside_below_box(self) -> None:
         self._aside_box_recheck = False
