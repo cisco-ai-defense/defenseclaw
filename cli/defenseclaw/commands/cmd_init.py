@@ -2522,7 +2522,14 @@ def _render_first_run_report(report, renderer, *, connectors: list[str] | None =
     renderer.section("Next")
     for cmd in report.next_commands[:5]:
         renderer.echo(f"  {cmd}")
-    renderer.echo("  Adding another agent later: defenseclaw setup <connector>")
+    if (report.connector or "").strip().lower() in {"openclaw", "zeptoclaw"}:
+        # GAP-2426: a proxy connector cannot run next to hook connectors.
+        renderer.echo(
+            "  Switching to a hook agent later: defenseclaw setup <connector> --replace "
+            "(this connector cannot run next to hook agents)"
+        )
+    else:
+        renderer.echo("  Adding another agent later: defenseclaw setup <connector>")
     if _closed_fail_mode_connectors(report, connectors):
         # --non-interactive keeps the closed default the wizard asks about
         # (GAP-1424): say what it means and how to change it.
