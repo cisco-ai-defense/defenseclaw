@@ -94,6 +94,26 @@ class AgentsAdapterTests(unittest.TestCase):
             self.assertEqual(entry["kind"], "subagent")
             self.assertTrue(entry["source"].endswith(".md"))
 
+    def test_claudecode_user_agent_with_digits_is_listed_and_supported(self):
+        # GAP-2436: "sf1r10-helper" was dropped and the BOM said Claude Code
+        # has no agents.
+        from defenseclaw.config import default_config
+        from defenseclaw.inventory.claw_inventory import build_claw_aibom
+
+        inv = build_claw_aibom(default_config(), categories={"agents"}, connector="claudecode")
+        self.assertEqual(inv["agents"], [])
+        self.assertEqual(
+            [(lim["category"], lim["status"]) for lim in inv["limitations"]],
+            [("agents", "unverified")],
+        )
+        agents_dir = os.path.join(self.tmp, ".claude", "agents")
+        os.makedirs(agents_dir)
+        with open(os.path.join(agents_dir, "sf1r10-helper.md"), "w") as fh:
+            fh.write("---\nname: sf1r10-helper\ndescription: test helper\n---\nReply.\n")
+        inv = build_claw_aibom(default_config(), categories={"agents"}, connector="claudecode")
+        self.assertEqual([a["id"] for a in inv["agents"]], ["sf1r10-helper"])
+        self.assertNotIn("first-class", str(inv["limitations"]))
+
     def test_claudecode_agents_include_explicit_project_markdown_only(self):
         project = os.path.join(self.tmp, "project")
         agents_dir = os.path.join(project, ".claude", "agents")

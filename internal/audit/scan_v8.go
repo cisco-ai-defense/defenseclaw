@@ -231,7 +231,7 @@ func scanFindingV8Operation(
 			DefenseClawFindingCategory:            optionalScanV8Text(finding.Category),
 			DefenseClawSecuritySeverity:           string(finding.Severity),
 			DefenseClawFindingConfidence:          confidence,
-			DefenseClawFindingTargetRef:           scanV8TargetRef(result.Target),
+			DefenseClawFindingTargetRef:           scanV8ResultTargetRef(result),
 			DefenseClawGuardrailEvidenceSummary:   scanFindingV8EvidenceSummary(finding, result),
 			DefenseClawFindingTitle:               optionalScanV8Text(finding.Title),
 			DefenseClawFindingDescription:         optionalScanV8Text(finding.Description),
@@ -371,7 +371,7 @@ func scanSummaryV8Operation(
 			Envelope: envelope, Severity: severity, LogLevel: logLevel, Outcome: outcome,
 			DefenseClawEvaluationID: optionalScanV8Identifier(correlation.EvaluationID),
 			DefenseClawScanID:       scanID, DefenseClawScanScanner: result.Scanner,
-			DefenseClawScanTargetRef:     scanV8TargetRef(result.Target),
+			DefenseClawScanTargetRef:     scanV8ResultTargetRef(result),
 			DefenseClawScanTargetType:    optionalScanV8Text(scanner.NormalizeTargetTypeEnum(result.EffectiveTargetType())),
 			DefenseClawScanDurationMs:    observability.Present(result.Duration.Milliseconds()),
 			DefenseClawScanFindingCount:  observability.Present(int64(len(result.Findings))),
@@ -612,6 +612,27 @@ func scanV8TargetRef(target string) observability.Optional[string] {
 		name = name[:256]
 	}
 	return optionalScanV8Identifier(name)
+}
+
+// scanV8ResultTargetRef is scanV8TargetRef for a scan result. A plugin in a
+// category folder under a plugins root keeps the path below that root, so
+// Hermes's bundled browser/firecrawl and web/firecrawl stay distinct in audit
+// instead of both reading "firecrawl" (GAP-2440).
+func scanV8ResultTargetRef(result *scanner.ScanResult) observability.Optional[string] {
+	if scanner.NormalizeTargetTypeEnum(result.EffectiveTargetType()) == "plugin" {
+		parts := strings.FieldsFunc(strings.TrimSpace(result.Target), func(r rune) bool {
+			return r == '/' || r == '\\'
+		})
+		for i := len(parts) - 3; i >= 0; i-- {
+			if strings.EqualFold(parts[i], "plugins") {
+				if ref := optionalScanV8Identifier(strings.Join(parts[i+1:], "/")); ref.IsPresent() {
+					return ref
+				}
+				break
+			}
+		}
+	}
+	return scanV8TargetRef(result.Target)
 }
 
 // scanV8Verdict keeps an explicit admission verdict. Without one (CLI and
