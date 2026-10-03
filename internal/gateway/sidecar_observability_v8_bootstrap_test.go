@@ -1997,3 +1997,19 @@ func TestObservabilityV8ShutdownFlushFitsTheGracefulStopWindow(t *testing.T) {
 		t.Fatalf("two shutdown flushes of %s do not fit in the %s stop window", sidecarObservabilityV8ShutdownTimeout, gracefulStopWindow)
 	}
 }
+
+// GAP-2166: a shutdown flush timeout is a warning that names the bound and the
+// next step, not a "bootstrap failed" error.
+func TestObservabilityV8ShutdownFlushWarningWording(t *testing.T) {
+	got := observabilityV8ShutdownFlushWarning()
+	for _, want := range []string{"WARNING", "did not finish within 4s", "setup observability test", "stopped normally"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("warning %q is missing %q", got, want)
+		}
+	}
+	for _, bad := range []string{"Error:", "bootstrap", "shutdown_degraded"} {
+		if strings.Contains(got, bad) {
+			t.Fatalf("warning %q must not contain %q", got, bad)
+		}
+	}
+}
