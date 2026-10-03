@@ -168,7 +168,7 @@ func generatedOTLPCanaryPair(t *testing.T) (tracetest.SpanStub, tracetest.SpanSt
 		Resource:   resource, InstrumentationScope: scope,
 	}
 	child := tracetest.SpanStub{
-		Name: "chat gpt-4o-mini", SpanContext: childContext, Parent: rootContext, SpanKind: trace.SpanKindClient,
+		Name: "chat defenseclaw-diagnostic", SpanContext: childContext, Parent: rootContext, SpanKind: trace.SpanKindClient,
 		StartTime: now.Add(-time.Millisecond), EndTime: now, Status: sdktrace.Status{Code: codes.Ok},
 		Attributes: base(string(observability.BucketModelIO), observability.TelemetryFamilyModelChat, "chat"),
 		Resource:   resource, InstrumentationScope: scope,

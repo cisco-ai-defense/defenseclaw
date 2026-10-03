@@ -1157,7 +1157,7 @@ var resourceMetadataKeys = []string{"deployment.environment.name", "host.name", 
 // call showed status_code 0 and no rule or user there, and no span said
 // which deployment sent it.
 func setSpanMetadata(attributes map[string]any, status any, resource any) {
-	metadata := make(map[string]string, len(resourceMetadataKeys)+len(userMetadataKeys)+len(guardrailMetadataKeys)+1)
+	metadata := make(map[string]string, len(resourceMetadataKeys)+len(userMetadataKeys)+len(guardrailMetadataKeys)+3)
 	if projected, ok := object(resource); ok {
 		if resourceAttributes, ok := object(projected["attributes"]); ok {
 			for _, key := range resourceMetadataKeys {
@@ -1195,6 +1195,12 @@ func setSpanMetadata(attributes map[string]any, status any, resource any) {
 	if outcome, ok := stringAttribute(attributes, "defenseclaw.outcome"); ok &&
 		(outcome == string(observability.OutcomeBlocked) || outcome == string(observability.OutcomeDenied)) {
 		metadata["defenseclaw.outcome"] = outcome
+	}
+	// The runtime pipeline canary (doctor and "setup galileo test") says so,
+	// so one filter separates it from real agent traffic (GAP-2534).
+	if present, valid := generatedCanaryMetadata(attributes); present && valid {
+		metadata[canaryMarkerKey] = "true"
+		metadata[canaryOperationKey] = canaryOperationValue
 	}
 	if len(metadata) == 0 {
 		return

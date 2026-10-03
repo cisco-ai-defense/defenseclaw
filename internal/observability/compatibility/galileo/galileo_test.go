@@ -1059,7 +1059,7 @@ func TestProjectCanarySurfaceIsExact(t *testing.T) {
 			canaryMarkerKey: true, canaryOperationKey: canaryOperationValue, canaryDestinationKey: "galileo",
 		}
 	}
-	valid := projectRecord(t, observability.BucketModelIO, observability.EventName(observability.TelemetryFamilyModelChat), "chat gpt-4o-mini", map[string]any{
+	valid := projectRecord(t, observability.BucketModelIO, observability.EventName(observability.TelemetryFamilyModelChat), "chat defenseclaw-diagnostic", map[string]any{
 		"kind": "CLIENT", "attributes": base(),
 	}, redaction.ProfileNone)
 	result := Project(valid, Limits{})
@@ -1070,6 +1070,13 @@ func TestProjectCanarySurfaceIsExact(t *testing.T) {
 	if wire["bucket"] != string(observability.BucketModelIO) ||
 		wire["event_name"] != observability.TelemetryFamilyModelChat {
 		t.Fatalf("canonical canary identity was rewritten: %#v", wire)
+	}
+	// GAP-2534: Galileo shows only user_metadata, so the canary must say so there.
+	attributes := wire["body"].(map[string]any)["attributes"].(map[string]any)
+	var metadata map[string]string
+	if err := json.Unmarshal([]byte(attributes["metadata"].(string)), &metadata); err != nil ||
+		metadata[canaryMarkerKey] != "true" || metadata[canaryOperationKey] != canaryOperationValue {
+		t.Fatalf("canary user_metadata = %#v (%v)", attributes["metadata"], err)
 	}
 	for name, mutation := range map[string]func(map[string]any){
 		"missing marker":      func(attributes map[string]any) { delete(attributes, canaryMarkerKey) },
@@ -1083,7 +1090,7 @@ func TestProjectCanarySurfaceIsExact(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			attributes := base()
 			mutation(attributes)
-			projection := projectRecord(t, observability.BucketModelIO, observability.EventName(observability.TelemetryFamilyModelChat), "chat gpt-4o-mini", map[string]any{
+			projection := projectRecord(t, observability.BucketModelIO, observability.EventName(observability.TelemetryFamilyModelChat), "chat defenseclaw-diagnostic", map[string]any{
 				"kind": "CLIENT", "attributes": attributes,
 			}, redaction.ProfileNone)
 			if result := Project(projection, Limits{}); result.Reason() != ReasonUnsupportedShape {
