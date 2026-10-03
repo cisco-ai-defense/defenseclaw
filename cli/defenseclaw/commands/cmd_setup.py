@@ -16315,11 +16315,21 @@ def _check_openclaw_gateway(host: str = "127.0.0.1", port: int = 18789) -> bool:
 
 
 def _looks_like_secret(value: str) -> bool:
-    """Detect if a value looks like an actual secret rather than an env var name."""
+    """Detect if a value looks like an actual secret rather than an env var name.
+
+    Keep the key prefixes in step with the TUI's looks_like_secret_value
+    (tui/services/setup_state.py): a value the TUI redacts as a secret must
+    also be refused here (GAP-2581).
+    """
     if not value:
         return False
-    prefixes = ("sk-", "sk-ant-", "sk-proj-", "ghp_", "gho_", "xoxb-", "xoxp-")
+    prefixes = (
+        "sk-", "sk-ant-", "sk-proj-", "ghp_", "gho_", "ghs_", "xoxb-", "xoxp-",
+        "AIza", "AKIA", "ASIA", "eyJ",
+    )
     if any(value.startswith(p) for p in prefixes):
+        return True
+    if "bearer " in value.lower() or "-----BEGIN " in value:
         return True
     if len(value) > 30 and not value.isupper():
         return True
