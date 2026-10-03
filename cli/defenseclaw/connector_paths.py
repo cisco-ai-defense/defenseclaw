@@ -7942,6 +7942,11 @@ def _unset_claudecode_mcp_server(path: str, name: str) -> bool | str:
 
         if not changed:
             _commit_claude_state_without_config(path, next_state, raw, released)
+            if target_was_owned:
+                # Other entries are still DefenseClaw's, but this one changed
+                # after DefenseClaw wrote it: say so, as the last-entry case
+                # does, rather than let the caller report it removed (GAP-2570).
+                _raise_claude_mcp_not_removed(path, name, data, _CLAUDE_ENTRY_CHANGED)
             return False
 
         if not next_state["managed"]:
