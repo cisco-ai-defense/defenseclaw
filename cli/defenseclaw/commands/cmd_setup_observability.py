@@ -47,7 +47,7 @@ from defenseclaw import ux
 from defenseclaw.audit_actions import ACTION_SETUP_OBSERVABILITY
 from defenseclaw.config import config_path_for_data_dir
 from defenseclaw.config_inspect import ConfigInspectError
-from defenseclaw.context import AppContext, pass_ctx
+from defenseclaw.context import AppContext, mark_setup_secret_changed, pass_ctx, setup_secret_changed
 from defenseclaw.observability import (
     PRESETS,
     Preset,
@@ -58,6 +58,7 @@ from defenseclaw.observability.v8_presets import (
     DESTINATION_NAME_RE as _SINK_NAME_RE,
 )
 from defenseclaw.observability.v8_presets import (
+    _load_dotenv,
     adapter_destination_fields,
     secret_note_is_info,
 )
@@ -307,7 +308,7 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
         raise click.ClickException(message) from exc
     mode = "DRY-RUN " if dry_run else ""
     if not result.changed:
-        changed = "already configured"
+        changed = "key updated, already configured" if setup_secret_changed() else "already configured"
     else:
         changed = "updated" if existed else "added"
     # GAP-1336: the generated name is what every later command takes.
@@ -572,7 +573,12 @@ def _add_v8_destination(
             warnings.append(
                 "GRAFANA_OTLP_TOKEN must contain the complete Authorization value, including the Basic prefix"
             )
+    secret_before = _stored_secret(data_dir, preset.token_env)
     warnings.extend(_apply_secret(data_dir, preset, stored_secret, dry_run=dry_run))
+    if not dry_run and _stored_secret(data_dir, preset.token_env) != secret_before:
+        # GAP-2356: the running gateway still holds the old key, and
+        # config.yaml may be unchanged, so the restart has to be asked for.
+        mark_setup_secret_changed()
     validator = None
     if dry_run and stored_secret and preset.token_env:
         validator = _staged_secret_validator({preset.token_env: stored_secret})
@@ -584,6 +590,18 @@ def _add_v8_destination(
         dry_run=dry_run,
     )
     return result, warnings
+
+
+def _stored_secret(data_dir: str, key: str) -> str | None:
+    """The value of key in ~/.defenseclaw/.env, or None."""
+
+    if not key:
+        return None
+    try:
+        with open(os.path.join(data_dir, ".env"), "rb") as handle:
+            return _load_dotenv(handle.read()).get(key)
+    except (OSError, UnicodeDecodeError):
+        return None
 
 
 def _staged_secret_validator(overrides: dict[str, str]):
