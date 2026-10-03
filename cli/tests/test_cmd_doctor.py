@@ -2893,6 +2893,23 @@ class GuardrailProxyMultiConnectorTests(unittest.TestCase):
         cfg.guardrail = SimpleNamespace(mode=mode)
         return cfg
 
+    @patch("defenseclaw.commands.cmd_doctor._http_probe")
+    def test_no_active_connector_skips_proxy_probe(self, mock_probe):
+        # GAP-2291: after the last connector is removed nothing needs the
+        # proxy, so doctor must not FAIL (and exit 1) on a closed port.
+        from defenseclaw.commands.cmd_doctor import _check_guardrail_proxy
+
+        cfg = self._cfg([])
+        cfg.guardrail = SimpleNamespace(enabled=True, mode="observe", port=4000)
+        result = _DoctorResult()
+
+        _check_guardrail_proxy(cfg, result)
+
+        mock_probe.assert_not_called()
+        self.assertEqual(result.failed, 0)
+        self.assertEqual(result.checks[0]["status"], "skip")
+        self.assertIn("no active connector", result.checks[0]["detail"])
+
     def test_all_hook_enforced_reports_closed(self):
         from defenseclaw.commands.cmd_doctor import (
             _guardrail_proxy_intentionally_closed,

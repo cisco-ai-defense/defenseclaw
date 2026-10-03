@@ -7789,6 +7789,17 @@ def _check_guardrail_proxy(cfg, r: _DoctorResult) -> None:
         _emit("skip", "Guardrail proxy", "disabled", r=r)
         return
 
+    # With no active connector nothing routes through the proxy, so a closed
+    # port is expected (GAP-2291); the Connectors row already says what to run.
+    if not _doctor_active_connectors(cfg):
+        _emit(
+            "skip",
+            "Guardrail proxy",
+            "no active connector; proxy not needed - run 'defenseclaw setup <connector>'",
+            r=r,
+        )
+        return
+
     closed_detail = _guardrail_proxy_intentionally_closed(cfg)
     if closed_detail:
         _emit("pass", "Guardrail proxy", closed_detail, r=r)
