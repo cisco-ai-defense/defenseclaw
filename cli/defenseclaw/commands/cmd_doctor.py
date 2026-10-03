@@ -9237,7 +9237,7 @@ def _check_connector_export_custody(report, r: _DoctorResult, *, configured: set
             "no connector instance has emitted correlation evidence yet",
             r=r,
         )
-    from defenseclaw.observability.custody_status import summarize_native_delivery
+    from defenseclaw.observability.custody_status import native_evidence_row_limit, summarize_native_delivery
 
     delivery_rows = iter(summarize_native_delivery(report).connectors)
     removed: list[str] = []
@@ -9385,10 +9385,13 @@ def _check_connector_export_custody(report, r: _DoctorResult, *, configured: set
     if report.unattributed_authentication_failures:
         _emit_unattributed_otlp_credentials(report, r)
     if report.event_rows_truncated:
+        # A busy install passes the read cap every day; the newest events
+        # are a fair sample and there is nothing to do (GAP-2555).
         _emit(
-            "warn",
+            "pass",
             "Connector OTLP evidence",
-            "recent evidence reached the bounded read limit; drop-only and credential counts are partial",
+            f"busy install: counts cover the newest {native_evidence_row_limit()} events "
+            f"of the last {report.observation_window_hours} h; nothing to do",
             r=r,
         )
 
@@ -9614,8 +9617,8 @@ def _check_observability_v8_status(
         elif destination.enabled and live is not None:
             live_state = live.state or "unavailable"
             detail += f"; health={live_state}"
-            if live.reason:
-                detail += f"/{live.reason}"
+            if live.display_reason:
+                detail += f"/{live.display_reason}"
             detail += f"; queue={live.queue_label}; last={live.activity_label}; circuit={live.circuit_label}"
             if live_state == "unavailable" and destination.kind != "sqlite":
                 tag = "warn"

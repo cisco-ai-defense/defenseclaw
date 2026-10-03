@@ -1377,10 +1377,9 @@ def _print_native_delivery_status(summary, *, configured: set[str] | None = None
     one "not configured" line, as doctor does (GAP-2242).
     """
 
-    hours = summary.observation_window_hours
-    scope = f"bounded {hours}h"
-    if summary.event_rows_truncated:
-        scope += ", truncated; counts partial"
+    from defenseclaw.observability.custody_status import native_evidence_scope
+
+    scope = native_evidence_scope(summary.observation_window_hours, summary.event_rows_truncated)
     delivery_context = f"native OTLP delivery ({scope}; collector/runtime health does not prove accepted delivery):"
     ux.echo("    " + ux.dim(delivery_context))
     if not summary.connectors:

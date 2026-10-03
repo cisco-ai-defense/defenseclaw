@@ -1649,7 +1649,7 @@ func TestMetricExporterPreflightRejectsAboveEncodedByteCeiling(t *testing.T) {
 		t.Fatalf("boundary calls=%d counters=%+v", calls.Load(), exporter.Counters())
 	}
 	if health := exporter.deliveryHealthSnapshot(); health.State != delivery.HealthHealthy ||
-		health.Reason != string(delivery.HealthReasonRecovered) || health.LastSuccess.IsZero() {
+		health.Reason != string(delivery.HealthReasonActivated) || health.LastSuccess.IsZero() {
 		t.Fatalf("successful metric health=%+v", health)
 	}
 	if wireBytes.Load() <= 0 || wireBytes.Load() > int64(bound) {

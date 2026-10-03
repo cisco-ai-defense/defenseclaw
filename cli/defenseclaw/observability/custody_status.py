@@ -157,6 +157,21 @@ class NativeDeliverySummary:
         }
 
 
+def native_evidence_row_limit() -> int:
+    """How many recent evidence events the custody report reads."""
+
+    return _MAX_EVENT_ROWS
+
+
+def native_evidence_scope(hours: int, truncated: bool) -> str:
+    """Scope text for the delivery line: "bounded 24h[, newest N events]"."""
+
+    scope = f"bounded {hours}h"
+    if truncated:
+        scope += f", newest {_MAX_EVENT_ROWS} events"
+    return scope
+
+
 def native_delivery_display_rows(
     connectors: tuple[NativeDeliveryStatus, ...] | list[NativeDeliveryStatus],
 ) -> list[tuple[str, NativeDeliveryStatus]]:

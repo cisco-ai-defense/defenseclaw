@@ -9847,9 +9847,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                     TOKENS.text_muted,
                 )
             ]
-        scope = f"bounded {summary.observation_window_hours}h"
-        if summary.event_rows_truncated:
-            scope += ", truncated; counts partial"
+        from defenseclaw.observability.custody_status import native_evidence_scope
+
+        scope = native_evidence_scope(summary.observation_window_hours, summary.event_rows_truncated)
         lines: list[RenderableType] = [
             _hanging_text(
                 "Native connector OTLP delivery ·",
@@ -10049,9 +10049,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 "collector/runtime health does not prove accepted delivery"
             )
         else:
-            scope = f"bounded {summary.observation_window_hours}h"
-            if summary.event_rows_truncated:
-                scope += ", truncated; counts partial"
+            from defenseclaw.observability.custody_status import native_evidence_scope
+
+            scope = native_evidence_scope(summary.observation_window_hours, summary.event_rows_truncated)
             delivery_lines.append(
                 f"  Native connector OTLP delivery · {scope} · "
                 "collector/runtime health does not prove accepted delivery"
