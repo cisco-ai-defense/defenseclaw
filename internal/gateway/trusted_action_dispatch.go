@@ -168,7 +168,11 @@ func dispatchTrustedAction(
 	// certain commands; as on a redirect-target view, only a match counts.
 	subsetView := false
 	if !facts.Authoritative() {
-		if view, twin, ok := actionfacts.DynamicRedirectTargetReduction(request.Input, facts); ok {
+		if view, ok := actionfacts.PowerShellCommandSubsetReduction(request.Input, facts); ok {
+			// The original action remains partial. Only independently parsed
+			// inner argv may support a monotone rule's positive match.
+			semanticFacts, viewCandidate, subsetView = view, argvSubsetReductionCandidate, true
+		} else if view, twin, ok := actionfacts.DynamicRedirectTargetReduction(request.Input, facts); ok {
 			semanticFacts, staticTargetTwin, viewCandidate = view, &twin, redirectReductionCandidate
 		} else if view, ok := actionfacts.ShortCircuitListReduction(request.Input, facts); ok {
 			semanticFacts, viewCandidate = view, listReductionCandidate
