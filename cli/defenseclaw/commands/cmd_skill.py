@@ -36,7 +36,7 @@ import click
 
 from defenseclaw import ux
 from defenseclaw.commands import compute_verdict as _compute_verdict
-from defenseclaw.commands._audit_notice import saved_change_audit
+from defenseclaw.commands._audit_notice import note_asset_policy_observed, saved_change_audit
 from defenseclaw.commands._scan_ui import record_scan as _record_scan
 from defenseclaw.context import AppContext, pass_ctx
 
@@ -5615,6 +5615,10 @@ def install(app: AppContext, name: str, force: bool, take_action: bool, connecto
                 err=True,
             )
             raise SystemExit(1)
+
+        note_asset_policy_observed(
+            app.logger, decision, target_type="skill", name=skill_name, connector=connector,
+        )
 
     # Install via clawhub
     click.echo(

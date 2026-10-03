@@ -1373,6 +1373,33 @@ class TestMCPScan(MCPCommandTestBase):
         self.assertIn("not in the approved registry", rows[0].details)
 
     @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")
+    def test_set_observe_mode_off_registry_server_is_warned_and_audited(self, mock_set):
+        # GAP-2390: observe mode added an off-registry server with no warning
+        # and only a plain mcp-set audit row.
+        from defenseclaw.config import AssetPolicyConfig, AssetPolicyRule, AssetTypePolicy
+
+        self.app.cfg.active_connectors = lambda: ["hermes"]  # type: ignore[method-assign]
+        self.app.cfg.asset_policy = AssetPolicyConfig(
+            enabled=True, mode="observe",
+            mcp=AssetTypePolicy(
+                registry_required=True,
+                registry=[AssetPolicyRule(name="approved", url="https://ok.example/mcp")],
+            ),
+        )
+
+        result = self.invoke(["set", "offreg", "--url", "https://x/mcp", "--skip-scan"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        mock_set.assert_called_once()
+        self.assertIn("asset policy (observe) [hermes]", result.output)
+        self.assertIn("not in the approved registry", result.output)
+        rows = [e for e in self.app.store.list_events(50) if e.action == "install-warning"]
+        self.assertEqual(len(rows), 1, [(e.action, e.target) for e in self.app.store.list_events(50)])
+        self.assertEqual(rows[0].target, "offreg")
+        self.assertIn("connector=hermes", rows[0].details)
+        self.assertIn("source=asset-policy-registry-required-observe", rows[0].details)
+
+    @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")
     @patch("defenseclaw.commands.cmd_mcp._run_scan")
     @patch("defenseclaw.enforce.admission.evaluate_admission")
     def test_set_post_scan_allow_records_connector_scoped_allow(

@@ -42,7 +42,7 @@ import click
 
 from defenseclaw import connector_paths, ux
 from defenseclaw.commands import compute_verdict as _compute_verdict
-from defenseclaw.commands._audit_notice import saved_change_audit
+from defenseclaw.commands._audit_notice import note_asset_policy_observed, saved_change_audit
 from defenseclaw.commands._scan_ui import record_scan as _record_scan
 from defenseclaw.config import MCPServerEntry
 from defenseclaw.context import AppContext, pass_ctx
@@ -2454,6 +2454,9 @@ def set_server(
         try:
             _set_mcp_via_connector(app.cfg, name, entry, connector=c)
             applied.append(c)
+            note_asset_policy_observed(
+                app.logger, pre_c, target_type="mcp", name=name, connector=c,
+            )
             if allow_record:
                 pe.allow_for_connector("mcp", name, c, "scan clean or within policy")
         except connector_paths.MCPWriteUnsupportedError as exc:
