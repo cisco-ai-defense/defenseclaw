@@ -2613,7 +2613,8 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                     self.app.cfg = copy.deepcopy(original_cfg)
                     gc = self.app.cfg.guardrail
                     gc.enabled = True
-                    gc.connector = "opencode" if target_case == "configured" else "openclaw"
+                    # A guarded OpenClaw refuses --connector opencode first (GAP-2452).
+                    gc.connector = {"configured": "opencode", "explicit": "codex"}.get(target_case, "openclaw")
                     gc.mode = "observe"
                     gc.scanner_mode = "both"
                     gc.hilt.enabled = False
