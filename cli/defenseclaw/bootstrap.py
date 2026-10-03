@@ -1740,6 +1740,26 @@ def _running_connectors_from_state_file(data_dir: str) -> list[str] | None:
 _GATEWAY_AUDIT_UPGRADE_ALLOWANCE = 600
 _GATEWAY_START_TIMEOUT = (660 if os.name == "nt" else 210) + _GATEWAY_AUDIT_UPGRADE_ALLOWANCE
 
+# Progress banners the gateway prints before it fails, e.g.
+# "[audit] applying migration 1: initial schema: ...".
+_GATEWAY_PROGRESS_LINE = re.compile(r"^\[[\w.-]+\] applying migration \d+")
+
+
+def gateway_failure_detail(result: subprocess.CompletedProcess, default: str) -> str:
+    """The output line that explains a failed gateway start or restart.
+
+    On a fresh home the gateway prints audit migration banners first, so
+    the first line hid the real cause (GAP-2341). Use the last ``Error:``
+    line, else the first line that is not a migration banner.
+    """
+    text = "\n".join(part for part in (result.stderr, result.stdout) if part)
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    errors = [line for line in lines if line.startswith("Error:")]
+    if errors:
+        return errors[-1]
+    useful = [line for line in lines if not _GATEWAY_PROGRESS_LINE.match(line)]
+    return useful[0] if useful else default
+
 
 def _start_gateway_structured(cfg: Config, *, hook_fail_mode_changed: bool = False) -> StepResult:
     """Start (or restart) the defenseclaw-gateway sidecar to match
@@ -1828,12 +1848,11 @@ def _start_gateway_structured(cfg: Config, *, hook_fail_mode_changed: bool = Fal
                 if dropped and len(active) > 1:
                     detail += f"; no longer guarding {', '.join(dropped)}"
                 return StepResult("Sidecar", "pass", detail)
-            detail = (result.stderr or result.stdout or "restart failed").strip().splitlines()
             return StepResult(
                 "Sidecar",
                 "warn",
                 f"connector drift detected ({running} → {desired}) but restart failed: "
-                f"{detail[0] if detail else 'restart failed'}",
+                f"{gateway_failure_detail(result, 'restart failed')}",
                 "defenseclaw-gateway restart",
             )
         if hook_fail_mode_changed:
@@ -1860,8 +1879,7 @@ def _start_gateway_structured(cfg: Config, *, hook_fail_mode_changed: bool = Fal
         return StepResult("Sidecar", "warn", str(exc), "defenseclaw-gateway status")
     if result.returncode == 0:
         return StepResult("Sidecar", "pass", "started")
-    detail = (result.stderr or result.stdout or "start failed").strip().splitlines()
-    first = detail[0] if detail else "start failed"
+    first = gateway_failure_detail(result, "start failed")
     # A port held by another account names its own fix; lead with it.
     port_fix = re.search(r"with: (defenseclaw setup gateway --api-port \d+)", first)
     return StepResult("Sidecar", "warn", first, port_fix.group(1) if port_fix else "defenseclaw-gateway status")
@@ -1894,8 +1912,7 @@ def _restart_for_hook_fail_mode(gw: str) -> StepResult:
         return StepResult("Sidecar", "warn", f"restart failed ({exc}); {stale}", "defenseclaw-gateway restart")
     if result.returncode == 0:
         return StepResult("Sidecar", "pass", "restarted to apply the new hook fail mode")
-    detail = (result.stderr or result.stdout or "restart failed").strip().splitlines()
-    first = detail[0] if detail else "restart failed"
+    first = gateway_failure_detail(result, "restart failed")
     return StepResult("Sidecar", "warn", f"restart failed: {first}; {stale}", "defenseclaw-gateway restart")
 
 

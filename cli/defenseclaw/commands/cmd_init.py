@@ -1999,8 +1999,9 @@ def _prompt_first_run_judge_llm_config(
         )
         return provider, model, "", "", base_url, {}
 
+    same_provider = (provider or "").strip().lower() == (llm_provider or "").strip().lower()
     model = pick_model(
-        current=llm_model or "",
+        current=(llm_model or "") if same_provider else "",
         provider=provider,
         instance=None,
         flag_value=None,
@@ -3509,10 +3510,12 @@ def _start_gateway(cfg, logger) -> None:
             started = True
         else:
             click.echo(" " + ux._style("✗", fg="red", bold=True))
-            err = (result.stderr or result.stdout or "").strip()
+            from defenseclaw.bootstrap import gateway_failure_detail
+
+            # GAP-2341: show the cause, not the audit migration banners.
+            err = gateway_failure_detail(result, "")
             if err:
-                for line in err.splitlines()[:3]:
-                    click.echo(f"                 {ux.dim(line)}")
+                click.echo(f"                 {ux.dim(err)}")
             click.echo("                 " + ux.dim("check: defenseclaw-gateway status"))
     except FileNotFoundError:
         click.echo(" " + ux._style("✗", fg="red", bold=True) + ux.dim(" (binary not found)"))

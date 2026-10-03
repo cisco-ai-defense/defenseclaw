@@ -33,6 +33,7 @@ from defenseclaw.observability.custody_status import (
     inspect_connector_custody,
 )
 from defenseclaw.observability.destination_test import (
+    NETWORK_FAILURE_CLASSES,
     NETWORK_PATH_NOTE,
     DestinationTestError,
     canonical_local_compliance_recorder,
@@ -57,7 +58,6 @@ _BUCKETS = (
 )
 _SIGNALS = ("logs", "traces", "metrics")
 _SEVERITY_RANK = {"INFO": 1, "LOW": 2, "MEDIUM": 3, "HIGH": 4, "CRITICAL": 5}
-_NETWORK_FAILURES = frozenset({"connection_failed", "dns_failed", "timeout", "tls_failed", "protocol_failed"})
 
 
 @dataclass(frozen=True)
@@ -123,7 +123,7 @@ def observability_destination_test(name: str, write_probe: bool, timeout: float)
         raise click.ClickException(str(exc)) from exc
     except DestinationTestError as exc:
         message = f"destination test failed ({exc.failure_class}): {exc.message}"
-        if exc.failure_class in _NETWORK_FAILURES:
+        if exc.failure_class in NETWORK_FAILURE_CLASSES:
             message += f"\n{NETWORK_PATH_NOTE}"
         raise click.ClickException(message) from exc
 

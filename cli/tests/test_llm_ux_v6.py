@@ -252,6 +252,31 @@ class TestLLMPickerNonInteractive(unittest.TestCase):
                 non_interactive=True,
             )
 
+    def test_model_default_keeps_saved_non_catalog_model(self) -> None:
+        saved = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+        with mock.patch.object(_llm_picker.click, "prompt", side_effect=lambda *a, **kw: kw["default"]) as prompt:
+            out = _llm_picker.pick_model(
+                current=saved,
+                provider="bedrock",
+                instance={"available_models": ["us.anthropic.claude-opus-4-8"]},
+                flag_value=None,
+                non_interactive=False,
+            )
+        self.assertEqual(out, saved)
+        self.assertEqual(prompt.call_args.kwargs["default"], saved)
+
+    def test_model_default_live_list_skips_missing_saved_model(self) -> None:
+        with mock.patch.object(_llm_picker.click, "prompt", side_effect=lambda *a, **kw: kw["default"]):
+            out = _llm_picker.pick_model(
+                current="gone:latest",
+                provider="ollama",
+                instance=None,
+                flag_value=None,
+                non_interactive=False,
+                live_models=["qwen3.5:9b"],
+            )
+        self.assertEqual(out, "qwen3.5:9b")
+
     def test_region_required_in_non_interactive(self) -> None:
         with self.assertRaises(click.UsageError):
             _llm_picker.pick_region(

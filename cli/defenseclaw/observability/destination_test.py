@@ -139,6 +139,12 @@ NETWORK_PATH_NOTE: Final = (
 )
 
 
+# Failure classes where the direct-vs-gateway network path matters.
+NETWORK_FAILURE_CLASSES: Final = frozenset(
+    {"connection_failed", "dns_failed", "timeout", "tls_failed", "protocol_failed"}
+)
+
+
 class DestinationTestError(RuntimeError):
     """A bounded, display-safe destination-test failure."""
 
