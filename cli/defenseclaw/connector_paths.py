@@ -203,6 +203,9 @@ class MCPServerEntry:
     source_scope: str = ""
     trust_required: bool = False
     bundled: bool = False
+    # Why the agent itself skips this entry ("" = it loads). Set for Claude
+    # Code entries it rejects, so list/scan/doctor do not call them live.
+    load_problem: str = ""
 
 
 @dataclass(frozen=True)
@@ -377,6 +380,31 @@ def _claude_mcp_entry(entry: dict[str, Any]) -> dict[str, Any]:
     else:
         return out
     return {"type": kind, **out}
+
+
+def _flag_claude_unloadable(
+    entries: list[MCPServerEntry], servers: Any, path: str,
+) -> list[MCPServerEntry]:
+    """Mark the entries Claude Code skips as not loaded (GAP-2514).
+
+    Claude Code skips a ``url`` entry without ``type`` ("has a \"url\" but
+    no \"type\""), the shape ``mcp set`` wrote before GAP-1837. The entry
+    stays listed (so ``mcp unset`` and the repair still find it) but carries
+    ``load_problem`` instead of passing as a live server.
+    """
+    if not isinstance(servers, dict):
+        return entries
+    out: list[MCPServerEntry] = []
+    for entry in entries:
+        cfg = servers.get(entry.name)
+        if (
+            isinstance(cfg, dict)
+            and str(cfg.get("url", "") or "").strip()
+            and not str(cfg.get("type", "") or "").strip()
+        ):
+            entry = replace(entry, load_problem=f'has a "url" but no "type" in {path}')
+        out.append(entry)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -3590,7 +3618,9 @@ def _claudecode_mcp_servers(
     )
     if project_mcp:
         entries.extend(
-            _read_dotmcp_json(project_mcp, diagnostic_sink=diagnostic_sink)
+            _read_dotmcp_json(
+                project_mcp, diagnostic_sink=diagnostic_sink, claude_schema=True,
+            )
         )
     entries.extend(user_entries)
 
@@ -3655,10 +3685,16 @@ def _read_claude_mcp_state(
             )
             if normalized_key != normalized_workspace:
                 continue
-            local_entries = _parse_mcp_servers_value(project_state.get("mcpServers"))
+            local_servers = project_state.get("mcpServers")
+            local_entries = _flag_claude_unloadable(
+                _parse_mcp_servers_value(local_servers), local_servers, path,
+            )
             break
 
-    user_entries = _parse_mcp_servers_value(data.get("mcpServers"))
+    user_servers = data.get("mcpServers")
+    user_entries = _flag_claude_unloadable(
+        _parse_mcp_servers_value(user_servers), user_servers, path,
+    )
     return local_entries, user_entries
 
 
@@ -4603,6 +4639,7 @@ def _read_dotmcp_json(
     *,
     source_scope: str = "",
     diagnostic_sink: list[MCPSourceDiagnostic] | None = None,
+    claude_schema: bool = False,
 ) -> list[MCPServerEntry]:
     """Parse a project-local ``.mcp.json``.
 
@@ -4624,10 +4661,10 @@ def _read_dotmcp_json(
     if not isinstance(data, dict):
         return []
     inner = data.get("mcpServers")
-    if isinstance(inner, dict):
-        entries = _parse_mcp_servers_dict(inner)
-    else:
-        entries = _parse_mcp_servers_dict(data)
+    servers = inner if isinstance(inner, dict) else data
+    entries = _parse_mcp_servers_dict(servers)
+    if claude_schema:
+        entries = _flag_claude_unloadable(entries, servers, path)
     if source_scope:
         return [
             replace(entry, source=path, source_scope=source_scope)

@@ -216,6 +216,7 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
     undiscoverable: list[str] = []
     source_diagnostics: list[tuple[str, connector_paths.MCPSourceDiagnostic]] = []
     failed_rows: list[tuple[str, str, str, str]] = []
+    not_loaded: list[tuple[str, MCPServerEntry]] = []
     # GAP-1907: on a fan-out listing, a connector with no MCP servers is a
     # normal state. Collect those into one short line instead of a warning
     # (with every checked path) per connector; --connector X keeps the detail.
@@ -257,6 +258,7 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
             allow_legacy_plain=allow_legacy_plain_scans,
         )
         _print_mcp_list_table(servers, scan_map, actions_map, connector, failed_map)
+        not_loaded.extend((connector, s) for s in servers if s.load_problem)
         urls = {s.name: s.url or "" for s in servers}
         failed_rows.extend(
             (connector, name, row.get("error", ""), urls.get(name, "")) for name, row in failed_map.items()
@@ -284,12 +286,29 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
                 f"... and {len(failed_rows) - _FAILED_SCAN_HINT_LIMIT} more; "
                 "each server's last_scan_error is in: defenseclaw mcp list --json"
             )
+    if not_loaded:
+        # GAP-2514: the agent skips these entries, so they are not live.
+        ux.warn(
+            f"{len(not_loaded)} MCP server(s) are not loaded by the agent: "
+            + ", ".join(f"{s.name} ({connector})" for connector, s in not_loaded)
+        )
+        for connector, s in not_loaded:
+            ux.subhead(f"{s.name} ({connector}): {_mcp_not_loaded_next_step(s, connector)}")
     if shown_any:
         from defenseclaw.commands import hint
         hint("Scan all servers:  defenseclaw mcp scan --all")
 
     if undiscoverable or source_diagnostics:
         raise SystemExit(1)
+
+
+def _mcp_not_loaded_next_step(s: MCPServerEntry, connector: str) -> str:
+    """Explain why the agent skips *s* and how to repair it (GAP-2514)."""
+    return (
+        f"Claude Code skips it: it {s.load_problem}. Repair it with: "
+        f"defenseclaw mcp set {s.name} --url {s.url} --connector {connector} "
+        f'(or add "type": "http" to the entry)'
+    )
 
 
 def _collect_mcps_for_connector(
@@ -453,6 +472,9 @@ def _mcp_list_json_items(
         if connector_paths.is_bundled_mcp_server(s, connector=connector):
             entry["bundled"] = True
             verdict_label = "bundled"
+        if s.load_problem:
+            entry["not_loaded"] = s.load_problem
+            verdict_label = "not loaded"
         entry["verdict"] = verdict_label
         out.append(entry)
     return out
@@ -506,6 +528,8 @@ def _print_mcp_list_table(
             verdict_label, verdict_style = "scan failed", "yellow"
         if connector_paths.is_bundled_mcp_server(s, connector=connector):
             verdict_label, verdict_style = "bundled", "cyan"
+        if s.load_problem:
+            verdict_label, verdict_style = "not loaded", "yellow"
 
         table.add_row(
             s.name,
@@ -1238,6 +1262,14 @@ def _scan_all_mcp(
                     err=True,
                 )
             continue
+        if s.load_problem:
+            if not as_json:
+                click.echo(
+                    f"NOT LOADED: {s.name} — skipping; "
+                    f"{_mcp_not_loaded_next_step(s, connector)}",
+                    err=True,
+                )
+            continue
         # N2: honor a per-connector block — resolve most-specific-wins for the
         # connector being scanned (connector-scoped entry, else global), so a
         # block scoped to a different peer doesn't skip this connector's scan.
@@ -1256,7 +1288,7 @@ def _scan_all_mcp(
         if not as_json:
             click.echo(
                 f"No scannable MCP servers for connector={connector!r} "
-                "(all bundled, blocked, or none configured)."
+                "(all bundled, blocked, not loaded, or none configured)."
             )
         if diagnostics and error_count_sink is not None:
             error_count_sink.append(len(diagnostics))

@@ -12267,7 +12267,20 @@ def _check_connector_inventory(
     if count:
         names = ", ".join(s.name for s in servers[:5])
         more = f" (+{count - 5} more)" if count > 5 else ""
-        _emit("pass", "MCP servers", f"{count} configured: {names}{more}", r=r)
+        not_loaded = [
+            s.name for s in servers
+            if isinstance(getattr(s, "load_problem", None), str) and s.load_problem
+        ]
+        if not_loaded:
+            # GAP-2514: an entry the agent skips is not a configured server.
+            _emit(
+                "warn", "MCP servers",
+                f"{count} configured: {names}{more}; not loaded by the agent: "
+                f"{', '.join(not_loaded)} (repair: defenseclaw mcp list --connector {connector})",
+                r=r,
+            )
+        else:
+            _emit("pass", "MCP servers", f"{count} configured: {names}{more}", r=r)
     else:
         _emit("skip", "MCP servers", "no MCP servers registered", r=r)
 
