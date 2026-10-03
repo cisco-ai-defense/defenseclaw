@@ -9,14 +9,34 @@ keywords:
   - unblock sandbox destination
 ---
 
-DefenseClaw for macOS is a native SwiftUI companion app for Apple Silicon Macs
-running macOS 14 or newer. It adds a menu-bar status view, native dashboards
-and setup flows, and a runtime installer. It connects only to the local
-DefenseClaw installation: the gateway REST API on `127.0.0.1`, the audit
-database, logs and configuration under `~/.defenseclaw`. Actions that change
-something run through the `defenseclaw` CLI, and their output appears in the
-**Activity** panel. Sandbox unblocks and ask decisions go straight to the
-DefenseClaw daemon's API instead.
+DefenseClaw for macOS is a native companion app for Apple-silicon Macs
+running macOS 14 or newer. It adds a menu-bar status view, dashboards, setup
+forms, and one-click install and update of the DefenseClaw runtime. It works
+only with the DefenseClaw installation on this Mac: the gateway API on
+`127.0.0.1`, and the audit database, logs, and configuration under
+`~/.defenseclaw`. Actions that change something run the `defenseclaw` CLI,
+and their output appears in the **Activity** panel. Sandbox unblocks and ask
+answers go straight to the DefenseClaw daemon's API instead.
+
+## Install
+
+1. Download `DefenseClawMac-<version>-macos-arm64.dmg` from the
+   [Download](/docs/get-started/download) page (it is attached to each GitHub
+   release).
+2. Open the DMG, drag **DefenseClawMac** to **Applications**, and launch it.
+3. If the DefenseClaw CLI and gateway are not installed yet, the **Set Up
+   DefenseClaw** window offers **Install DefenseClaw Runtime**. It downloads
+   the matching release's `install.sh`, checks it against the release's
+   `checksums.txt`, and installs the CLI and gateway into `~/.defenseclaw`
+   and `~/.local/bin`. Progress shows in **Activity**. If you already
+   installed DefenseClaw with `install.sh`, the app uses that installation.
+4. The same window then sets up the agents to guard: detected agents are
+   pre-selected, and you pick observe or action mode.
+
+Releases are signed and notarized when the release has Apple signing set up;
+otherwise the app is only ad-hoc signed and macOS Gatekeeper asks before the
+first launch. **Update** in the app installs the latest release the same way
+and keeps your configuration, tokens, and audit database.
 
 ## Panels
 
@@ -24,13 +44,19 @@ The main window's sidebar groups the panels:
 
 | Group | Panels |
 | --- | --- |
-| Monitor | Overview, Alerts, Logs, Audit, Activity |
-| Govern | Skills, MCPs, Plugins, Tools, [Sandboxes](#sandboxes-panel) |
-| Discover | Inventory, AI Discovery, Runtime, Registries |
-| Configure | Setup: the [setup wizards](#sandbox-wizard) and the config editor |
+| Monitor | **Overview** (gateway health, connectors, enforcement counts, Doctor, AI Discovery), **Alerts**, **Logs**, **Audit**, **Activity** (output of the commands the app runs) |
+| Govern | **Skills**, **MCPs**, **Plugins**, **Tools**, [**Sandboxes**](#sandboxes-panel) |
+| Discover | **Inventory**, **AI Discovery**, **Runtime** (what actually ran), **Registries** |
+| Configure | **Setup**: the setup forms, including the [Sandbox wizard](#sandbox-wizard), and the config editor |
 
-They mirror the [TUI](/docs/tui) panels. **Settings** has General,
-Monitoring, Notifications and Connection tabs.
+Most panels match the [TUI](/docs/tui) panels. The app has no Policies panel:
+manage policies and rule packs in the TUI (`P`) or with the CLI.
+**Settings** has General, Monitoring, Notifications, and Connection tabs.
+
+The menu-bar popover shows the gateway state, each connector's mode with its
+call and block counts, and recent events, with **Open DefenseClaw**,
+**Ack All**, **Pause** (stops monitoring until you resume), and **Quit**.
+Closing the main window keeps DefenseClaw running in the menu bar.
 
 ## OpenShell sandboxes
 
@@ -39,9 +65,13 @@ Docker Desktop's Linux VM kernel has no Landlock, so on a Mac DefenseClaw runs
 sandboxes in OpenShell MicroVMs (OpenShell's `vm` driver: Apple silicon only,
 experimental upstream). A MicroVM mounts no host folders, so every run works
 on a copy of your project, and `defenseclaw sandbox pull <name>` brings the
-changes back (see [macOS](/docs/sandboxes/guide#macos)). The status line names
+changes back (see [sandboxes on macOS](/docs/sandboxes/macos)). The status line names
 the gateway's driver: `(MicroVM)`, or `(docker)`.
 </Callout>
+
+For a task-by-task summary, see
+[Sandboxes in the TUI and macOS app](/docs/sandboxes/apps#the-macos-app). This
+section is the full reference.
 
 When sandboxes are on (see the [sandbox guide](/docs/sandboxes/guide)), the app
 shows the sandboxes the DefenseClaw daemon runs in four places: the menu bar,

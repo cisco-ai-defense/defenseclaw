@@ -12,7 +12,24 @@ The ACP guard is a local, protocol-aware security boundary between an editor
 and an agent. It lets Zed, JetBrains, or another ACP client keep its native
 agent UX while every JSON-RPC frame passes through DefenseClaw policy.
 
-![DefenseClaw ACP guard architecture](/images/acp-guard.png)
+<Flow
+  direction="TB"
+  caption="The editor starts defenseclaw-acp instead of the agent. Every message between the editor and the agent passes through the guard, which asks the local gateway for a verdict before it forwards the message. An agent entry that the editor launches directly does not pass through the guard."
+>
+  <Node id="editor" kind="operator">{`Editor\nZed or JetBrains`}</Node>
+  <Node id="guard" kind="connector" emphasis>{`ACP guard\ndefenseclaw-acp`}</Node>
+  <Node id="bypass" kind="generic">{`Direct agent entry\nnot guarded`}</Node>
+  <Node id="agent" kind="agent">{`ACP agent\nKiro, Cursor, …`}</Node>
+  <Node id="gateway" kind="gateway">{`Gateway on loopback\nchecks each message`}</Node>
+  <Node id="policy" kind="policy">{`Policy\nrules, scanners, judge`}</Node>
+  <Node id="audit" kind="datastore">{`Audit and telemetry\nlocal SQLite, OTLP`}</Node>
+  <Edge from="editor" to="guard" label="starts, stdio" variant="bidirectional" />
+  <Edge from="editor" to="bypass" label="if set up separately" variant="dashed" />
+  <Edge from="guard" to="agent" label="checked messages" variant="bidirectional" />
+  <Edge from="guard" to="gateway" label="asks, encrypted" />
+  <Edge from="gateway" to="policy" label="evaluates" />
+  <Edge from="gateway" to="audit" label="records" />
+</Flow>
 
 ## Use cases
 
@@ -20,8 +37,8 @@ agent UX while every JSON-RPC frame passes through DefenseClaw policy.
   process.
 - Apply one guardrail profile to several native ACP agents instead of building
   a different extension for every IDE/agent pair.
-- Observe prompt, output, permission, filesystem, terminal, tool, and
-  vendor-extension traffic with canonical observability v8 records.
+- Record prompt, output, permission, filesystem, terminal, tool, and
+  vendor-extension traffic in the audit log and your telemetry.
 - Block a denied method or unsafe content before it crosses the editor-agent
   boundary.
 - Let an organization allow only selected client/agent pairs, such as
@@ -33,8 +50,8 @@ filesystem and terminal callbacks that a hook contract may not expose.
 
 ## Quick start: Kiro in Zed
 
-Build or install DefenseClaw, start the gateway, and configure the managed
-entry:
+[Install DefenseClaw](/docs/get-started/install), start the gateway, and add
+a guarded Kiro entry to Zed:
 
 ```bash
 defenseclaw-gateway start
@@ -107,8 +124,8 @@ in the client. `detect` keeps reporting it for exactly that reason.
 
 ## Several guarded agents in one editor
 
-Nothing stops an operator from guarding more than one agent in the same
-editor. Run setup once per agent:
+You can guard more than one agent in the same editor. Run setup once per
+agent:
 
 ```bash
 defenseclaw acp setup --client zed --agent kiro
@@ -124,7 +141,18 @@ pending-ID accounting. A block in one does not interrupt the other.
 
 Policy is **per pair**. Each `<client>/<agent>` binding resolves its own
 profile, so one editor can run one agent in action mode while another stays in
-observe:
+observe. Give each pair its own profile with `--profile` at setup (without it,
+both pairs share the `default` profile, and setup refuses to change that
+profile's mode for one pair only):
+
+```bash
+defenseclaw acp setup --client zed --agent kiro --profile locked --activate
+defenseclaw acp setup --client zed --agent devin --profile watch
+```
+
+Setup writes the binding, the profile, and the client and agent switches.
+The resulting configuration looks like this, and you can tighten a profile
+further by hand (here, `denied_methods`):
 
 ```yaml
 acp:
@@ -205,15 +233,10 @@ Other consequences worth planning around:
 
 ## Managed enterprise enrollment
 
-Managed deployments keep ACP policy and credential authority in the protected
-machine data directory. Each enrollment receives a unique credential scoped to
-one OS principal, client, agent, and profile. Before sending ACP content, the
-guard verifies a fresh, nonce-bound gateway challenge. It then encrypts the
-evaluation with AES-256-GCM under a challenge-derived key and HMAC-authenticates
-the ciphertext; the gateway HMAC-authenticates the exact verdict status and
-body. The credential and plaintext ACP content never cross an unauthenticated
-loopback socket. The gateway rejects a request whose declared binding differs
-from the machine-owned enrollment record.
+In a managed deployment, the administrator owns ACP policy and credentials,
+in the protected machine data directory. Each enrollment gets its own
+credential for one user, client, agent, and profile, and the gateway refuses a
+request whose client, agent, or profile differs from the enrollment.
 
 An administrator or guardian first provisions the service record and the
 target user's private copy:
@@ -240,16 +263,10 @@ sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise acp revoke \
   --user alice --client zed --agent kiro --profile kiro-only
 ```
 
-Revocation deletes the service-side authority first. A copied or cached bearer
-therefore stops authenticating even if user-side cleanup is interrupted. Linux
-and macOS guardians drop to the exact target uid/gid for the private copy;
-Windows uses the exact active-session SID token when the LocalSystem guardian
-targets another user. A user running the command for their own matching SID is
-also supported for controlled validation. Re-enrollment after revocation mints
-a different bearer, even when the protected service-owned credential directory
-already exists. Enrollment, rotation, and revocation hold a persistent OS file
-lock across the complete record/index transaction, so independent gateway,
-guardian, and administrator processes cannot interleave credential state.
+Revocation deletes the service-side credential first, so a copied or cached
+token stops working even if the user-side cleanup is interrupted. The user's
+private copy is written as that user. Enrolling again after a revocation
+issues a new credential.
 
 The managed Windows payload, the macOS managed runtime and the Linux deb, rpm
 and payload archive include `defenseclaw-acp` as a separately hashed and
@@ -262,7 +279,7 @@ protected executable (`/opt/defenseclaw/bin/defenseclaw-acp` on Linux).
 | Credential | One private local ACP token | Unique principal + client + agent + profile credential, with a private per-user copy |
 | Enforcement rollout | Observe by default; `--activate` selects action | Central profile chooses observe/action; the user cannot activate or downgrade it |
 | Revocation | Remove the guarded editor entry | Remove service authority first, then the user copy; stale bearers fail immediately |
-| Readiness | Private local token and configured binding | Complete bounded record/index inventory and configured binding |
+| Readiness | Private local token and configured binding | Every enrollment record valid, and the binding configured |
 
 ## What is guarded
 
@@ -291,14 +308,13 @@ connector hooks in action mode next to the guard. If the gateway does not answer
 not check this step because the gateway did not answer"; the session stays
 open.
 
-The guard launches the agent with literal argv—never a shell. It connects only
-to a literal loopback address, disables environment proxying and redirects,
-and authenticates the gateway with a fresh HMAC challenge before encrypting
-each request with AES-256-GCM. The ACP-scoped credential has no authority on
-other API routes. A process that wins the configured loopback port sees neither
-the credential nor ACP plaintext and cannot forge an authenticated verdict, so
-the guard fails closed instead of trusting an impersonated gateway. The
-contract lock pins the selected guard and agent executable paths
+The guard starts the agent directly, never through a shell. It talks only to
+the gateway on a loopback address, ignores proxy settings and redirects, and
+checks that it is talking to the real gateway before it sends anything. Each
+request is encrypted (AES-256-GCM) and each verdict is authenticated (HMAC),
+so another process that takes the gateway's port sees neither the credential
+nor the content and cannot fake a verdict; the guard fails closed instead. The
+ACP credential works for the ACP routes only. The contract lock pins the selected guard and agent executable paths
 and SHA-256 digests, the exact client configuration path and digest, plus ACP
 [schema-v1.21.0](https://github.com/agentclientprotocol/agent-client-protocol/releases/tag/schema-v1.21.0).
 An upgrade replaces the guard, and the installer then re-pins the new guard in
@@ -315,8 +331,8 @@ setup to make an observe-to-action promotion explicit.
 
 ## Observability
 
-Every guarded decision is emitted as a canonical
-`guardrail.evaluation.completed` v8 event carrying these ACP dimensions:
+Every guarded decision is recorded as a `guardrail.evaluation.completed`
+event with these ACP attributes:
 
 | Attribute | Example |
 | --- | --- |
@@ -403,25 +419,19 @@ In `managed_enterprise`, `allowed_clients` and `allowed_agents` must explicitly
 name the enrolled pair; an empty wildcard allow-list is deliberately rejected
 by enrollment even though it remains valid for ordinary local profiles.
 
-## Inventory and certification
+## Supported agents
 
-ACP has a separate registry because client/agent protocol compatibility is not
-the same lifecycle as connector hooks or environment variables. The packaged
-snapshot records each entry point as native or bridge, its primary source, its
-upstream ACP Registry ID when one exists, and its DefenseClaw evidence level:
+DefenseClaw ships its own list of ACP clients and agents, kept separately
+from connector hooks. For each agent it records whether the entry point is
+native or a bridge, where it is documented, and its ID in the upstream
+[ACP Registry](https://agentclientprotocol.com/get-started/registry) when it has one.
+`defenseclaw acp catalog` prints the list.
 
-- `internal/inventory/acp_registry.json` inventories the pinned protocol,
-  clients, native/bridge agents, every DefenseClaw connector's ACP coverage,
-  and the upstream registry version/date used for review.
-- `internal/inventory/acp_certifications.json` defines evidence required before
-  an integration can be called certified.
-- `cli/defenseclaw/inventory/hook_contracts.json` records Kiro native hooks,
-  which are installed as an independent second enforcement path. Their veto
-  surface is resolved per request from the hook config that invoked them, not
-  from the release. See [Kiro](/docs/connectors/kiro); ACP needs none of that
-  and vetoes every surface in the table above on its own.
-- ACP adds no secret environment variable. Agent-owned credentials remain in
-  their existing stores; the guard token is a private file referenced by argv.
+Kiro's native hooks are a separate, second enforcement path; see
+[Kiro](/docs/connectors/kiro). The ACP guard needs none of that and covers
+every surface in the table above on its own. ACP adds no secret environment
+variable: agents keep their own credentials, and the guard token is a private
+file named on the guard's command line.
 
 | DefenseClaw connector | ACP form | Entry point |
 | --- | --- | --- |
@@ -440,14 +450,12 @@ release cadence DefenseClaw does not control, which is the wrong place for a
 security boundary to depend on. Every other DefenseClaw connector therefore
 reports no ACP claim and is guarded through its native hook surface instead.
 
-Listing an entry point means it was checked against primary documentation or
-the upstream ACP Registry. It does not mean DefenseClaw has executed that
-client/agent pair. Per-integration evidence states live in
-`acp_certifications.json`, and the CLI never silently upgrades one based on a
-live upstream registry response.
+A listed entry point was checked against the vendor's documentation or the
+ACP Registry; that alone does not mean DefenseClaw tested that editor and
+agent together.
 
-The CLI uses the packaged registry as its only executable inventory. It does
-not download or execute commands from the network registry during setup. Every
+Setup uses only the list that ships with DefenseClaw. It never downloads or
+runs commands from the online registry. Every
 selected guard and agent executable is resolved to an absolute path, hashed,
 and bound into the client-specific contract lock before the editor can launch
 it.
@@ -462,17 +470,8 @@ it.
 | `GET /v1/acp/profiles` | Effective profile inventory |
 | `GET /health` | ACP enabled/mode/schema/configuration/token readiness |
 
-For managed mode, `scoped_token_ready` means the complete bounded enterprise
-credential inventory is private and structurally valid. One malformed,
-unexpected, or over-limit record fails the inventory closed.
-
-The Kiro/Zed test binding has been exercised in both normal user mode and
-`managed_enterprise`. Managed action and observe runs were completed on Linux
-and native Windows, including live credential revocation, rotation, route
-isolation, OS ownership/permission checks, and v8 evidence. macOS uses the same
-protocol implementation and has release/package/trust tests; a real managed
-run still requires a root-owned LaunchDaemon installation rather than a
-user-owned development config.
+In managed mode, `scoped_token_ready` is true only when every enrollment
+record is private and valid; one bad record makes it false.
 
 Use `defenseclaw acp catalog` for the local catalog and
 `defenseclaw acp remove --client zed --agent kiro` for surgical removal.
