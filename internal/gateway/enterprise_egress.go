@@ -115,6 +115,13 @@ func (d telemetryEgressDialer) DialContext(ctx context.Context, network, address
 	return telemetryEgress.Load().Dial(ctx, d.direct, network, address)
 }
 
+// Proxies reports whether the current telemetry route sends target through
+// a proxy, so an exporter's connection-failure line can name the path it
+// took (GAP-2375).
+func (d telemetryEgressDialer) Proxies(target *url.URL) (bool, error) {
+	return telemetryEgress.Load().Proxies(target)
+}
+
 // enterpriseEgressDialer connects through the current enterprise route over
 // direct. It is the whole connection layer of clients that have no
 // destination check of their own (the remote model router).

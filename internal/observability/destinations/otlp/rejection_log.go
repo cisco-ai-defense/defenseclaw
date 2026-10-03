@@ -23,6 +23,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"net/url"
 	"os"
 	"regexp"
 	"strings"
@@ -182,22 +183,56 @@ func rejectionLogAdmit(key string) (int, bool) {
 // logTransportFailure writes one gateway.log line when an export gets no
 // HTTP response at all (DNS, connect, proxy or timeout), so a destination
 // that doctor shows as delivery_failed also leaves a trace in gateway.log
-// (GAP-2299). The gateway dials through the proxy it was started with, which
-// is often not the proxy of the shell where 'destination test' runs. At most
-// one line per destination, signal and failure code per minute.
-func logTransportFailure(destination string, signal observability.Signal, code delivery.FailureCode, itemCount int) {
+// (GAP-2299). The line names the endpoint and the path the gateway took to
+// it: through the proxy it was started with, which is often not the proxy of
+// the shell where 'destination test' runs, or directly when no proxy covers
+// the endpoint, where proxy advice would mislead (GAP-2375). At most one
+// line per destination, signal and failure code per minute.
+func logTransportFailure(destination string, signal observability.Signal, code delivery.FailureCode, itemCount int, endpoint string, proxied bool) {
 	suppressed, ok := rejectionLogAdmit(fmt.Sprintf("%s/%s/%s", destination, signal, code))
 	if !ok {
 		return
 	}
-	line := fmt.Sprintf("[observability] %s %s export failed: %s (%d %s); the gateway connects through "+
-		"the proxy it was started with (HTTPS_PROXY/NO_PROXY), so check that path and restart the gateway "+
-		"from a shell with the right proxy settings", safeLogToken(destination), signal, code, itemCount,
-		itemUnit(signal, itemCount))
+	target := "the endpoint"
+	if endpoint != "" {
+		target = endpoint
+	}
+	line := fmt.Sprintf("[observability] %s %s export failed: %s (%d %s); ", safeLogToken(destination), signal,
+		code, itemCount, itemUnit(signal, itemCount))
+	if proxied {
+		line += "the gateway connects to " + target + " through the proxy it was started with " +
+			"(HTTPS_PROXY/NO_PROXY), so check that path and restart the gateway from a shell with the " +
+			"right proxy settings"
+	} else {
+		line += "the gateway connects directly to " + target + " (no proxy), so check that the " +
+			"collector is running there and reachable from this host"
+	}
 	if suppressed > 0 {
 		line += fmt.Sprintf(" [%d similar in the last minute not logged]", suppressed)
 	}
 	_, _ = fmt.Fprintln(rejectionLogOutput(), line)
+}
+
+// proxyReporter is a dialer that can say whether it reaches a destination
+// through a proxy (the gateway's telemetry egress dialer).
+type proxyReporter interface {
+	Proxies(target *url.URL) (bool, error)
+}
+
+// transportRoute returns the endpoint host:port of config and whether its
+// dialer sends that endpoint through a proxy. The HTTP transport never uses
+// a proxy itself, so a dialer that cannot tell connects directly.
+func transportRoute(config signalConfig) (string, bool) {
+	if config.url == nil {
+		return "", false
+	}
+	endpoint := config.url.Host
+	reporter, ok := config.dialer.(proxyReporter)
+	if !ok {
+		return endpoint, false
+	}
+	proxied, err := reporter.Proxies(&url.URL{Scheme: "https", Host: endpoint})
+	return endpoint, err == nil && proxied
 }
 
 // rejectionReason extracts a short, scrubbed reason from an OTLP error body:

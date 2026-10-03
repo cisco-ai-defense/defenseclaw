@@ -4993,7 +4993,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             return self.body_text
         if self.active_panel == "registries":
             self._table_columns = self.registries_model.data_table_columns()
-            self._table_rows = self.registries_model.data_table_rows()
+            # The table spans the body (6 columns of borders and padding).
+            width = int(getattr(self.size, "width", 0) or 0)
+            self._table_rows = self.registries_model.data_table_rows(max(0, width - 6))
             tab = self.registries_model.current_tab.name.title()
             empty = self.registries_model.empty_state()
             suffix = f"\n{rich_escape(empty)}" if empty else ""
@@ -15788,6 +15790,9 @@ def _overview_config(config: object | None) -> OverviewConfig | None:
         # A sandbox that is not set up reads "disabled" with the gateway
         # down too, not "offline" (GAP-2361). Identity check, as status.
         sandbox_enabled=getattr(getattr(config, "openshell", None), "enabled", False) is True,
+        # AI discovery that is off reads "disabled" with the gateway down
+        # too, not "offline" (GAP-2378).
+        ai_discovery_enabled=getattr(getattr(config, "ai_discovery", None), "enabled", False) is True,
         # A2: visible diagnostic when the roster enumeration failed.
         roster_error=roster_error,
         # N3: active-policy scanner action overrides (data.json), so the
