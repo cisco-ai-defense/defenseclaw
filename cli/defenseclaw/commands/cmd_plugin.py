@@ -35,7 +35,7 @@ import click
 
 from defenseclaw import connector_paths
 from defenseclaw.commands import compute_verdict as _compute_verdict
-from defenseclaw.commands._audit_notice import saved_change_audit
+from defenseclaw.commands._audit_notice import note_asset_policy_observed, saved_change_audit
 from defenseclaw.commands._scan_ui import record_scan as _record_scan
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.inventory.plugin_directories import (
@@ -1648,6 +1648,10 @@ def _check_plugin_pre_install_admission(
                 err=True,
             )
             raise SystemExit(1)
+
+        note_asset_policy_observed(
+            app.logger, decision, target_type="plugin", name=plugin_name, connector=connector,
+        )
 
     return pre_decisions
 
