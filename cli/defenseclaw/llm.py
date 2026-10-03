@@ -574,6 +574,47 @@ def _bedrock_config_region(llm_config: Any) -> str:
     return ""
 
 
+def env_proxy(llm_config: Any) -> tuple[str, str] | None:
+    """The proxy this shell routes the LLM call through, as ``(url, source)``.
+
+    LiteLLM (httpx) honours HTTPS_PROXY/ALL_PROXY/NO_PROXY and, on macOS, the
+    system proxy settings. ``source`` names the variable ("HTTPS_PROXY") or
+    "the system proxy settings"; the URL has no user:password part. None when
+    the call goes direct (GAP-2421).
+    """
+    import urllib.parse  # noqa: PLC0415
+    import urllib.request  # noqa: PLC0415
+
+    base_url = (getattr(llm_config, "base_url", "") or "").strip()
+    provider = (getattr(llm_config, "provider", "") or "").strip().lower()
+    model = (getattr(llm_config, "model", "") or "").strip()
+    host = ""
+    scheme = "https"
+    if base_url:
+        parsed = urllib.parse.urlsplit(base_url if "://" in base_url else f"https://{base_url}")
+        host, scheme = parsed.hostname or "", parsed.scheme or "https"
+    elif provider in ("bedrock", "amazon-bedrock") or model.startswith("bedrock/"):
+        region = _bedrock_config_region(llm_config) or os.environ.get("AWS_REGION", "") or "us-east-1"
+        host = f"bedrock-runtime.{region}.amazonaws.com"
+    try:
+        proxies = urllib.request.getproxies()
+        url = proxies.get(scheme) or proxies.get("all") or ""
+        if not url or (host and urllib.request.proxy_bypass(host)):
+            return None
+    except Exception:
+        return None
+    source = "the system proxy settings"
+    for name in (f"{scheme}_proxy", f"{scheme.upper()}_PROXY", "all_proxy", "ALL_PROXY"):
+        if os.environ.get(name, "").strip() == url.strip():
+            source = name.upper()
+            break
+    parts = urllib.parse.urlsplit(url if "://" in url else f"http://{url}")
+    netloc = parts.hostname or ""
+    if parts.port:
+        netloc = f"{netloc}:{parts.port}"
+    return (urllib.parse.urlunsplit((parts.scheme, netloc, parts.path.rstrip("/"), "", "")), source)
+
+
 def _plain_provider_error(exc: BaseException) -> str:
     """The provider's own message without LiteLLM's class-name prefixes.
 
@@ -714,6 +755,12 @@ def ping(llm_config: Any, *, timeout: int = 5) -> tuple[bool, str]:
         st = _classify_llm_exception(exc)
         what = _PING_FAILURE_WORDS.get(st, "rejected the request")
         label = _provider_label(provider or (model.split("/", 1)[0] if "/" in model else ""))
+        if st in ("network_error", "timeout"):
+            # A dead or wrong shell proxy reads like the provider being down;
+            # name the proxy the call went through (GAP-2421).
+            proxy = env_proxy(llm_config)
+            if proxy is not None:
+                what = f"{what} through the proxy {proxy[0]} (from {proxy[1]})"
         return (False, f"{label} {what}: {_plain_provider_error(exc)}"[:240])
 
     try:

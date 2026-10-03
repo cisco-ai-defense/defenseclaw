@@ -8364,6 +8364,20 @@ def _check_llm_reachable(cfg, r: _DoctorResult) -> None:
                 "(or defenseclaw setup llm --role judge), then defenseclaw-gateway restart"
             ),
         )
+    elif " through the proxy " in msg and (proxy := _llm.env_proxy(llm)) is not None:
+        # Doctor's probe uses this shell's proxy; say how to fix or skip it (GAP-2421).
+        source = proxy[1] if proxy[1].endswith("_PROXY") else "the system proxy"
+        _emit(
+            "warn",
+            "LLM reachable",
+            prefix + msg,
+            r=r,
+            remediation=(
+                f"check that the proxy at {proxy[0]} is running, or unset {source} (or add the provider "
+                "host to NO_PROXY) in this shell and rerun 'defenseclaw doctor'; the gateway uses the "
+                "proxy settings it was started with"
+            ),
+        )
     else:
         _emit("warn", "LLM reachable", prefix + msg, r=r)
 
