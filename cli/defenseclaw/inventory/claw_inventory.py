@@ -806,9 +806,14 @@ def format_claw_aibom_human(
             ("models", _render_models, "model_providers"),
             ("memory", _render_memory, "memory"),
         )
+        not_collected = _not_collected_categories(inv)
         for cat, render, key in sections:
-            if cat in cats:
-                render(console, inv.get(key, []))
+            if cat not in cats:
+                continue
+            if cat in not_collected and not inv.get(key):
+                console.print(f"[dim]{_CATEGORY_LABELS[cat]}: not collected[/dim]\n")
+                continue
+            render(console, inv.get(key, []))
 
     limitations = inv.get("limitations", [])
     if summary_only:
@@ -993,6 +998,30 @@ def _collect_mcp_config_files(connector: str, cfg: Config) -> list[str]:
 
 _SUMMARY_KEY_CATEGORY = {"model_providers": "models"}
 
+_CATEGORY_LABELS = {
+    "skills": "Skills",
+    "plugins": "Plugins",
+    "mcp": "MCP servers",
+    "agents": "Agents",
+    "rules": "Rules",
+    "tools": "Tools",
+    "models": "Model providers",
+    "memory": "Memory stores",
+}
+
+
+def _not_collected_categories(inv: dict[str, Any]) -> set[str]:
+    """Categories this connector cannot inventory (an UNSUPPORTED limitation).
+
+    When such a category is empty it means "not collected", not "none"
+    (GAP-2101, the same rule as GAP-1483 for ``--only``).
+    """
+    return {
+        str(lim.get("category"))
+        for lim in inv.get("limitations") or []
+        if isinstance(lim, dict) and lim.get("status") == InventoryCapabilityStatus.UNSUPPORTED
+    }
+
 
 def _mark_collected_categories(inv: dict[str, Any], cats: frozenset[str]) -> None:
     """Flag the categories an ``--only`` run did not collect (GAP-1483).
@@ -1127,7 +1156,10 @@ def _render_summary(
         ("models", "Model providers", str(data.get("model_providers", {}).get("count", 0)), ""),
         ("memory", "Memory stores", str(data.get("memory", {}).get("count", 0)), ""),
     ])
+    not_collected = _not_collected_categories(inv)
     for cat, name, count, detail in rows:
+        if cat in not_collected and count == "0":
+            count, detail = "-", "[dim]not collected[/dim]"
         if cat in cats:
             table.add_row(name, count, detail)
     console.print(table)
@@ -1414,6 +1446,8 @@ def _render_models(console: Any, providers: list[dict[str, Any]]) -> None:
     auth_rows = [p for p in providers if p.get("source") == "auth"]
     plugin_rows = [p for p in providers if str(p.get("source", "")).startswith("plugin:")]
     model_rows = [p for p in providers if p.get("source") == "models list"]
+    openclaw_rows = {id(p) for p in (*config_rows, *auth_rows, *plugin_rows, *model_rows)}
+    other_rows = [p for p in providers if id(p) not in openclaw_rows]
 
     if config_rows:
         c = config_rows[0]
@@ -1461,6 +1495,19 @@ def _render_models(console: Any, providers: list[dict[str, Any]]) -> None:
         console.print(f"  [dim]Provider plugins ({len(enabled)} loaded): {names}[/dim]")
         if disabled:
             console.print(f"  [dim]+ {len(disabled)} disabled provider plugins[/dim]")
+        console.print()
+
+    if other_rows:
+        table = Table(title=f"Model Providers ({len(other_rows)})")
+        table.add_column("Provider", style="bold")
+        table.add_column("Model")
+        table.add_column("Base URL")
+        for prov in other_rows:
+            label = str(prov.get("id", ""))
+            if prov.get("active"):
+                label += " (active)"
+            table.add_row(label, str(prov.get("model") or "-"), str(prov.get("base_url") or "-"))
+        console.print(table)
         console.print()
 
 
@@ -2726,7 +2773,9 @@ def _model_providers_for_connector(
     """Per-connector model-provider enumeration.
 
     * claudecode — ``ANTHROPIC_BASE_URL`` env + the resolved key store
-    * codex      — ``OPENAI_BASE_URL`` env + key store
+    * codex      — ``~/.codex/config.toml`` ``model`` / ``model_provider`` /
+                   ``[model_providers.*]`` (GAP-2101), falling back to the
+                   ``OPENAI_BASE_URL`` / ``OPENAI_API_KEY`` env
     * zeptoclaw  — re-parse ``~/.zeptoclaw/config.json`` providers map
                    (the Setup-time snapshot is held in-process by
                    the Go connector; offline AIBOM doesn't have it,
@@ -2742,12 +2791,23 @@ def _model_providers_for_connector(
             default_base_url="https://api.anthropic.com",
         )
     if name == "codex":
-        return _providers_from_env(
+        rows = _providers_from_codex_config(
+            os.path.join(connector_paths.connector_home(name), "config.toml"),
+        )
+        env_rows = _providers_from_env(
             "OPENAI_BASE_URL",
             "OPENAI_API_KEY",
             default_provider="openai",
             default_base_url="https://api.openai.com/v1",
         )
+        if not rows:
+            return env_rows
+        for row in rows:
+            # The built-in openai provider has no table; the env supplies it.
+            if row["id"] == "openai" and env_rows and not row.get("base_url"):
+                row["base_url"] = env_rows[0]["base_url"]
+                row["api_key_present"] = env_rows[0]["api_key_present"]
+        return rows
     if name == "zeptoclaw":
         return _providers_from_zeptoclaw_config(
             os.path.join(home, ".zeptoclaw", "config.json"),
@@ -3810,14 +3870,14 @@ def _tools_from_claude_settings(path: str) -> list[dict[str, Any]]:
     return rows
 
 
-def _tools_from_codex_config(path: str) -> list[dict[str, Any]]:
-    """Codex's ``[tools]`` table — TOML."""
+def _load_toml_dict(path: str) -> dict[str, Any] | None:
+    """Read a TOML file; return None when it is missing or unreadable."""
     if not os.path.isfile(path):
-        return []
+        return None
     try:
         # tomllib ships in the stdlib on Python 3.11+. On 3.10 (still an
         # advertised target) it is absent, so fall back to the tomli
-        # backport rather than silently dropping Codex tool definitions.
+        # backport rather than silently dropping Codex definitions.
         try:
             import tomllib
         except ModuleNotFoundError:
@@ -3826,8 +3886,81 @@ def _tools_from_codex_config(path: str) -> list[dict[str, Any]]:
         with open(path, "rb") as fh:
             raw = tomllib.load(fh)
     except (OSError, ValueError, ModuleNotFoundError):
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
+def _providers_from_codex_config(path: str) -> list[dict[str, Any]]:
+    """Codex's ``model`` / ``model_provider`` / ``[model_providers.*]`` (GAP-2101).
+
+    Only names, endpoints and the *name* of the key env var are reported;
+    header and token values are never copied into the BOM.
+    """
+    raw = _load_toml_dict(path)
+    if raw is None:
         return []
-    tools = raw.get("tools") if isinstance(raw, dict) else None
+    model = str(raw.get("model") or "").strip()
+    active = str(raw.get("model_provider") or "").strip()
+    if model and not active:
+        active = "openai"  # Codex's built-in default provider
+    tables = raw.get("model_providers")
+    if not isinstance(tables, dict):
+        tables = {}
+    rows: list[dict[str, Any]] = []
+    for pid, body in tables.items():
+        if not isinstance(body, dict):
+            continue
+        env_key = str(body.get("env_key") or "").strip()
+        row: dict[str, Any] = {
+            "id": str(pid),
+            "name": str(body.get("name") or pid),
+            "base_url": _strip_url_userinfo(str(body.get("base_url") or "")),
+            "active": str(pid) == active,
+            "api_key_present": bool(
+                (env_key and os.environ.get(env_key, "").strip())
+                or body.get("experimental_bearer_token")
+            ),
+            "source": path,
+        }
+        if env_key:
+            row["env_key"] = env_key
+        if body.get("wire_api"):
+            row["wire_api"] = str(body["wire_api"])
+        if row["active"] and model:
+            row["model"] = model
+        rows.append(row)
+    if active and active not in tables:
+        builtin: dict[str, Any] = {
+            "id": active,
+            "name": active,
+            "base_url": "",
+            "active": True,
+            "builtin": True,
+            "source": path,
+        }
+        if model:
+            builtin["model"] = model
+        rows.insert(0, builtin)
+    return rows
+
+
+def _strip_url_userinfo(url: str) -> str:
+    """Drop ``user:pass@`` from an endpoint URL before it lands in the BOM."""
+    from urllib.parse import urlsplit, urlunsplit
+
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return ""
+    if "@" not in parts.netloc:
+        return url
+    return urlunsplit(parts._replace(netloc=parts.netloc.rsplit("@", 1)[1]))
+
+
+def _tools_from_codex_config(path: str) -> list[dict[str, Any]]:
+    """Codex's ``[tools]`` table — TOML."""
+    raw = _load_toml_dict(path)
+    tools = raw.get("tools") if raw is not None else None
     if not isinstance(tools, dict):
         return []
     rows: list[dict[str, Any]] = []
@@ -4485,7 +4618,7 @@ def _build_aibom_from_filesystem(
                     }
                 )
     for cat_key, note in _FILESYSTEM_ONLY_CONNECTOR_NOTES.items():
-        if connector == "codex" and cat_key == "agents":
+        if connector == "codex" and cat_key in ("agents", "models"):
             continue
         if cat_key not in cats:
             continue
