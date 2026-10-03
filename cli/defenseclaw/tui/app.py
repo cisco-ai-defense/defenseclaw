@@ -14988,6 +14988,10 @@ def _fetch_ai_usage(config: object | None) -> AIUsageSnapshot | None:
         return None
     payload = dict(payload)
     payload.setdefault("fetched_at", datetime.now(timezone.utc).isoformat())
+    # GAP-2260: tell "off in config" apart from "on in config, gateway not restarted".
+    ai_cfg = getattr(config, "ai_discovery", None)
+    if ai_cfg is not None:
+        payload.setdefault("configured_enabled", bool(getattr(ai_cfg, "enabled", False)))
     try:
         return AIUsageSnapshot.from_mapping(payload)
     except Exception:  # noqa: BLE001
