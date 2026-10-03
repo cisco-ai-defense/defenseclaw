@@ -1679,7 +1679,9 @@ func TestWindowsEnterpriseResultNamesRemovedStaleLifecycleJournal(t *testing.T) 
 // config; it gets the elevation_required refusal (exit 5) that status and
 // verify give, not a raw "Access is denied" with exit 1603. GAP-1962: an
 // unknown --profile exits 1639 (invalid arguments) like every other
-// argument error.
+// argument error; GAP-2040: as one line that claims no profile. GAP-2041:
+// naming the Secure Client profile on a standalone computer is a caller
+// error (1639) that names the profile to use, not a fatal install (1603).
 func TestWindowsEnterpriseLifecycleCallerErrorsExitCodes(t *testing.T) {
 	stubWindowsEnterpriseDeployments(t, map[string]winpath.EnterpriseDeploymentState{"standalone": winpath.EnterpriseDeploymentInstalled})
 	originalObserver := windowsEnterpriseStandaloneObserver
@@ -1711,7 +1713,7 @@ func TestWindowsEnterpriseLifecycleCallerErrorsExitCodes(t *testing.T) {
 		exit                        int
 	}{
 		{"repair", "standalone", "elevation_required", "a standard account cannot repair the managed deployment", 5},
-		{"verify", "nope", "invalid_arguments", "--profile must be secure_client or standalone", 1639},
+		{"verify", "nope", "invalid_arguments", `invalid --profile "nope": use standalone or secure_client`, 1639},
 	} {
 		for _, jsonOutput := range []bool{false, true} {
 			var stdout bytes.Buffer
@@ -1722,8 +1724,14 @@ func TestWindowsEnterpriseLifecycleCallerErrorsExitCodes(t *testing.T) {
 			if got := commandExitCode(err); got != tc.exit {
 				t.Fatalf("%s --profile %s (json %t): exit %d, want %d (%v)", tc.action, tc.profile, jsonOutput, got, tc.exit, err)
 			}
+			if !jsonOutput && tc.profile == "nope" {
+				if stdout.Len() != 0 || err.Error() != tc.text {
+					t.Fatalf("%s --profile nope: output %q, error %q", tc.action, stdout.String(), err)
+				}
+				continue
+			}
 			if !jsonOutput {
-				if want := "error " + tc.code + ": "; !strings.Contains(stdout.String(), want+tc.text) && !strings.Contains(stdout.String(), want+"invalid arguments: "+tc.text) {
+				if want := "error " + tc.code + ": " + tc.text; !strings.Contains(stdout.String(), want) {
 					t.Fatalf("%s: output %q", tc.action, stdout.String())
 				}
 				if strings.Contains(stdout.String(), "Access is denied") {
@@ -1741,9 +1749,15 @@ func TestWindowsEnterpriseLifecycleCallerErrorsExitCodes(t *testing.T) {
 		}
 	}
 
+	err := runWindowsEnterpriseLifecycle(context.Background(), &cobra.Command{}, "verify",
+		&windowsEnterpriseLifecycleOptions{profile: "secure_client"})
+	if commandExitCode(err) != 1639 || !strings.Contains(fmt.Sprint(err), "This computer runs the standalone profile: use --profile standalone, or omit --profile") {
+		t.Fatalf("verify --profile secure_client on a standalone host: exit %d, %v", commandExitCode(err), err)
+	}
+
 	// An administrator who cannot read the config still sees the real error.
 	windowsEnterpriseIsElevated = func() bool { return true }
-	err := resolveWindowsEnterpriseLifecycleProfile("repair", &windowsEnterpriseLifecycleOptions{profile: "standalone"})
+	err = resolveWindowsEnterpriseLifecycleProfile("repair", &windowsEnterpriseLifecycleOptions{profile: "standalone"})
 	if err == nil || !strings.Contains(err.Error(), "read enterprise.trust from") {
 		t.Fatalf("elevated repair: %v", err)
 	}

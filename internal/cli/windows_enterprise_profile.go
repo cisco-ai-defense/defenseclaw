@@ -25,6 +25,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
@@ -161,6 +162,15 @@ func resolveWindowsEnterpriseLifecycleProfile(action string, opts *windowsEnterp
 		switch {
 		case len(live) > 1:
 			return errors.New("profile_conflict: both Secure Client and standalone enterprise deployments are recorded on this host")
+		case len(live) == 1 && profile != "" && profile != live[0] && live[0] == managed.ProfileStandalone:
+			// Naming the other profile on a standalone computer is the
+			// caller's mistake, not a failed install: answer it with the
+			// invalid-arguments code and the profile to use (GAP-2041).
+			return withExitCode(fmt.Errorf(
+				"profile_conflict: this host carries a %s enterprise deployment; %s of the %s profile is refused because the profiles share service names. "+
+					"This computer runs the %s profile: use --profile %s, or omit --profile",
+				live[0], action, profile, live[0], live[0],
+			), enterprisestatus.WindowsExitInvalidArgs)
 		case len(live) == 1 && profile != "" && profile != live[0]:
 			return fmt.Errorf(
 				"profile_conflict: this host carries a %s enterprise deployment; %s of the %s profile is refused because the profiles share service names",

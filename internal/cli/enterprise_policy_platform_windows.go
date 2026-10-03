@@ -33,10 +33,10 @@ import (
 // account is told to use an elevated prompt: the managed config is
 // administrator-only.
 func pinStandaloneManagedEnv() error {
-	return pinManagedAdministratorEnvironment(
-		"enterprise policy",
-		"this host has a managed DefenseClaw deployment; its machine policy can be inspected only from an elevated Administrator prompt or by the MDM agent",
-	)
+	return pinManagedAdministratorEnvironment("enterprise policy", func() string {
+		return windowsManagedStandardUserViewAnswer("the machine policy",
+			"enterprise policy show --user "+managedHostCurrentAccount())
+	})
 }
 
 // standaloneEnrolledHomes is empty on Windows: the Copilot VS Code lock is

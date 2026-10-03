@@ -242,6 +242,12 @@ var enterpriseDiscoveryGatewayReport = func() (enterpriseGatewayAIUsage, string,
 func writeWindowsEnterpriseDiscovery(w io.Writer, user string, asJSON bool) error {
 	usage, host, err := enterpriseDiscoveryGatewayReport()
 	if err != nil {
+		// A refusal with its own exit code (elevation_required) is already
+		// the whole answer (GAP-2039).
+		var coded *exitCodeError
+		if errors.As(err, &coded) {
+			return err
+		}
 		return fmt.Errorf("read the AI Discovery inventory: %w", err)
 	}
 	report := enterpriseDiscoveryReport{Gateway: host, Accounts: []enterpriseDiscoveryAccount{}}

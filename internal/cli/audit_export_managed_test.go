@@ -5,7 +5,10 @@
 package cli
 
 import (
+	"fmt"
+	"io"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -53,5 +56,39 @@ func TestAuditExportManagedEnvironmentPointsAnAdministratorAtTheDeployment(t *te
 		if got := os.Getenv(key); got != value {
 			t.Fatalf("%s = %q, want %q", key, got, value)
 		}
+	}
+}
+
+// GAP-2039: a standard account's read-only managed view (AI Discovery,
+// machine policy, audit export) gets the elevation_required answer and
+// exit 5 that status and verify give, naming the elevated command, and
+// the discovery view does not wrap it in an internal prefix.
+func TestManagedAdministratorViewRefusesAStandardAccountWithElevationRequired(t *testing.T) {
+	withAuditExportManagedSeams(t, true, false)
+	restoreAccount, restoreReport := managedHostCurrentAccount, enterpriseDiscoveryGatewayReport
+	t.Cleanup(func() { managedHostCurrentAccount, enterpriseDiscoveryGatewayReport = restoreAccount, restoreReport })
+	managedHostCurrentAccount = func() string { return `HOST\dcw-std1` }
+	refusal := func() string {
+		return windowsManagedStandardUserViewAnswer("the AI Discovery inventory",
+			"enterprise windows discovery --user "+managedHostCurrentAccountName())
+	}
+	err := pinManagedAdministratorEnvironment("enterprise windows discovery", refusal)
+	if err == nil || commandExitCode(err) != 5 {
+		t.Fatalf("refusal = %v (exit %d), want exit 5", err, commandExitCode(err))
+	}
+	for _, want := range []string{"elevation_required: the AI Discovery inventory", "enterprise windows discovery --user dcw-std1`", "Nothing was changed."} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("refusal lacks %q: %q", want, err)
+		}
+	}
+	if err := prepareManagedAuditExportEnvironment(); commandExitCode(err) != 5 || !strings.Contains(fmt.Sprint(err), "audit export -o <file>") {
+		t.Fatalf("audit export refusal = %v", err)
+	}
+	enterpriseDiscoveryGatewayReport = func() (enterpriseGatewayAIUsage, string, error) {
+		return enterpriseGatewayAIUsage{}, "", pinManagedAdministratorEnvironment("enterprise windows discovery", refusal)
+	}
+	err = writeWindowsEnterpriseDiscovery(io.Discard, "", false)
+	if commandExitCode(err) != 5 || !strings.HasPrefix(err.Error(), "elevation_required: ") {
+		t.Fatalf("discovery = %v (exit %d)", err, commandExitCode(err))
 	}
 }
