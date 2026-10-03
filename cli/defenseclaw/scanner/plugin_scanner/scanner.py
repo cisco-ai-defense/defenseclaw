@@ -117,6 +117,13 @@ def scan_plugin(
     # --- Load manifest ---
     manifest = _load_manifest(target)
     manifest_missing_finding: Finding | None = None
+    if manifest is None and os.path.isfile(target):
+        # OpenCode and Amp plugins are one plain .js/.ts file: there is no
+        # manifest to look for, so its absence is not a finding (GAP-2165).
+        manifest = PluginManifest(
+            name=os.path.splitext(os.path.basename(target))[0],
+            source="none",
+        )
     if manifest is None:
         manifest_missing_finding = make_finding(
             1,
