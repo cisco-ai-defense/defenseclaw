@@ -1758,7 +1758,7 @@ def build_setup_sections(
                 _field(cfg, "Plugin Dir", "plugin_dir", hint="Directory DefenseClaw scans for installed plugins."),
                 _field(cfg, "Policy Dir", "policy_dir", hint="Root of policy packs."),
                 _field(cfg, "Environment", "environment", hint="Free-form deployment label."),
-                _header(".. Unified LLM (shared by scanners + guardrail) .."),
+                _header(".. Unified LLM (for scanners + guardrail) .."),
                 _field(cfg, "Provider", "llm.provider", "choice", LLM_PROVIDERS, "LLM provider family."),
                 _field(cfg, "Model", "llm.model", hint="Model identifier."),
                 _field(cfg, "API Key Env", "llm.api_key_env", hint="Env var NAME holding the unified key."),

@@ -215,7 +215,7 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
     shown_any = False
     undiscoverable: list[str] = []
     source_diagnostics: list[tuple[str, connector_paths.MCPSourceDiagnostic]] = []
-    failed_rows: list[tuple[str, str]] = []
+    failed_rows: list[tuple[str, str, str, str]] = []
     # GAP-1907: on a fan-out listing, a connector with no MCP servers is a
     # normal state. Collect those into one short line instead of a warning
     # (with every checked path) per connector; --connector X keeps the detail.
@@ -257,7 +257,10 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
             allow_legacy_plain=allow_legacy_plain_scans,
         )
         _print_mcp_list_table(servers, scan_map, actions_map, connector, failed_map)
-        failed_rows.extend((connector, name, row.get("error", "")) for name, row in failed_map.items())
+        urls = {s.name: s.url or "" for s in servers}
+        failed_rows.extend(
+            (connector, name, row.get("error", ""), urls.get(name, "")) for name, row in failed_map.items()
+        )
         shown_any = True
 
     if empty_connectors:
@@ -270,12 +273,12 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
         # GAP-1906: a server whose last scan failed is unverified, not "never scanned".
         ux.warn(
             f"{len(failed_rows)} MCP server(s) could not be scanned (last scan failed): "
-            + ", ".join(f"{name} ({connector})" for connector, name, _ in failed_rows)
+            + ", ".join(f"{name} ({connector})" for connector, name, _, _ in failed_rows)
         )
         # GAP-1992: the next step follows each server's stored error; a
         # policy refusal is not fixed by "fix reachability".
-        for connector, name, error in failed_rows[:_FAILED_SCAN_HINT_LIMIT]:
-            ux.subhead(f"{name} ({connector}): {_failed_scan_next_step(name, connector, error)}")
+        for connector, name, error, url in failed_rows[:_FAILED_SCAN_HINT_LIMIT]:
+            ux.subhead(f"{name} ({connector}): {_failed_scan_next_step(name, connector, error, url)}")
         if len(failed_rows) > _FAILED_SCAN_HINT_LIMIT:
             ux.subhead(
                 f"... and {len(failed_rows) - _FAILED_SCAN_HINT_LIMIT} more; "
@@ -626,9 +629,49 @@ def _mcp_scan_target_name(
 _FAILED_SCAN_HINT_LIMIT = 5
 
 
-def _failed_scan_next_step(name: str, connector: str, error: str) -> str:
+def _mcp_url_needs_allow_private(url: str | None) -> bool:
+    """True when the scanner refuses *url* unless --allow-private is passed (GAP-2498).
+
+    Checks localhost and IP literals with the scanner's own SSRF rules; a
+    host name is not resolved just to word a hint.
+    """
+    if not url or "://" not in url:
+        return False
+    import ipaddress
+
+    from defenseclaw.registries.ssrf import SSRFError, guard_url
+
+    def _literal_only(host: str) -> list[str]:
+        try:
+            ipaddress.ip_address(host)
+        except ValueError:
+            return []
+        return [host]
+
+    try:
+        guard_url(url, resolver=_literal_only)
+    except SSRFError as exc:
+        return "--allow-private" in str(exc)
+    except Exception:  # noqa: BLE001 - the hint is advisory only
+        return False
+    return False
+
+
+def _mcp_scan_command(name: str, connector: str = "", url: str | None = None) -> str:
+    """The ``mcp scan`` command for one server, with --allow-private when its URL needs it."""
+    import shlex
+
+    cmd = f"defenseclaw mcp scan {shlex.quote(name)}"
+    if connector:
+        cmd += f" --connector {connector}"
+    if _mcp_url_needs_allow_private(url):
+        cmd += " --allow-private"
+    return cmd
+
+
+def _failed_scan_next_step(name: str, connector: str, error: str, url: str = "") -> str:
     """Say what to do about one failed scan, based on its stored error (GAP-1992)."""
-    cmd = f"defenseclaw mcp scan {name} --connector {connector}"
+    cmd = _mcp_scan_command(name, connector)
     err = (error or "").lower()
     if "--allow-private" in err:
         return f"refused, the URL is a private or loopback address; to scan it anyway: {cmd} --allow-private"
@@ -642,7 +685,7 @@ def _failed_scan_next_step(name: str, connector: str, error: str) -> str:
             "refused, the URL resolves to an address the scanner never connects to; "
             "point it at a public or private host"
         )
-    return f"fix reachability, then scan again: {cmd}"
+    return f"fix reachability, then scan again: {_mcp_scan_command(name, connector, url)}"
 
 
 def _mcp_list_severity(
@@ -1226,6 +1269,7 @@ def _scan_all_mcp(
     _scan_ui.render_preamble(ctx, target_count=len(scan_targets))
 
     clean = blocked = errored = 0
+    private_refused: list[MCPServerEntry] = []
     json_rows: list[dict] = list(source_error_rows)
     started = time.monotonic()
 
@@ -1243,6 +1287,8 @@ def _scan_all_mcp(
         )
         if result is None:
             errored += 1
+            if not allow_private and _mcp_url_needs_allow_private(s.url):
+                private_refused.append(s)
             if as_json:
                 json_rows.extend(json_errors)
             else:
@@ -1283,6 +1329,14 @@ def _scan_all_mcp(
         from defenseclaw.commands import hint
         if blocked:
             hint("View alerts:  defenseclaw alerts")
+        if private_refused:
+            # GAP-2498: a loopback/private URL is refused without the opt-in.
+            only = private_refused[0] if len(private_refused) == 1 else None
+            cmd = (
+                _mcp_scan_command(only.name, connector, only.url) if only
+                else f"defenseclaw mcp scan --connector {connector} --allow-private"
+            )
+            hint(f"Private or loopback servers need --allow-private:  {cmd}")
     if error_count_sink is not None:
         error_count_sink.append(errored + len(diagnostics))
     return json_rows
@@ -1979,17 +2033,28 @@ def _mcp_scan_state(app: AppContext, target: str, connector: str) -> str:
     return "verdict" if good else "unscanned"
 
 
-def _mcp_rescan_hint(app: AppContext, target: str, connector: str) -> None:
-    import shlex
+def _mcp_target_url(app: AppContext, target: str, connector: str) -> str:
+    """The configured URL of MCP server *target* ("" when unknown or stdio)."""
+    if "://" in target:
+        return target
+    try:
+        scope = [connector] if connector else [n for n in app.cfg.active_connectors() if n]
+        for c in scope:
+            for s in _collect_mcps_for_connector(app, c):
+                if s.name == target and s.url:
+                    return s.url
+    except Exception:  # noqa: BLE001 - the hint is advisory only
+        return ""
+    return ""
 
+
+def _mcp_rescan_hint(app: AppContext, target: str, connector: str) -> None:
     note = _mcp_unconfigured_note(app, target, connector)
     if note:
         # GAP-2397: no scan hint for a server that is not configured.
         click.echo(f"  {note} There is nothing to scan.")
         return
-    cmd = f"defenseclaw mcp scan {shlex.quote(target)}"
-    if connector:
-        cmd += f" --connector {connector}"
+    cmd = _mcp_scan_command(target, connector, _mcp_target_url(app, target, connector))
     state = _mcp_scan_state(app, target, connector)
     if state == "failed":
         click.echo("  It has no scan verdict yet (its last scan failed).")
@@ -2569,15 +2634,11 @@ def set_server(
             )
         raise SystemExit(1)
 
-    import shlex
-
     from defenseclaw.commands import hint
 
-    scan_cmd = f"defenseclaw mcp scan {shlex.quote(name)}"
-    if connector_flag and len(applied) == 1:
-        # GAP-2311: keep the --connector the user passed, as unblock does.
-        scan_cmd += f" --connector {applied[0]}"
-    hint(f"Scan it now:  {scan_cmd}")
+    # GAP-2311: keep the --connector the user passed, as unblock does.
+    scan_connector = applied[0] if connector_flag and len(applied) == 1 else ""
+    hint(f"Scan it now:  {_mcp_scan_command(name, scan_connector, url)}")
 
 
 @mcp.command("unset")

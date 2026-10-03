@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from fixtures import snapshot_app  # noqa: E402
 
-_UNIFIED = ".. Unified LLM (shared by scanners + guardrail) .."
+_UNIFIED = ".. Unified LLM (for scanners + guardrail) .."
 
 
 def _plain(renderable: object) -> str:
@@ -65,7 +65,8 @@ def test_group_header_continues_in_the_value_cell() -> None:
     # GAP-2362: ".. Unified LLM (sha…" with the Value cell empty.
     header = SimpleNamespace(label=_UNIFIED, kind="header", value="")
     label, value = _config_label_cells(header, 20, 34)
-    assert (label, value) == (".. Unified LLM", "(shared by scanners + guardrail) ..")
+    # GAP-2493: the "(...)" note moves whole, so no phrase spans the column gap.
+    assert (label, value) == (".. Unified LLM ..", "for scanners + guardrail")
     assert _config_label_cells(SimpleNamespace(label=".. Paths ..", kind="header", value=""), 20, 34) == (
         ".. Paths ..",
         "",
@@ -86,4 +87,4 @@ async def test_config_editor_group_header_readable_at_80x24(tmp_path, monkeypatc
         assert app.setup_model.sections[app.setup_model.active_section].name == "General"
         _columns, rows = app._setup_table()  # noqa: SLF001
         row = next(row for row in rows if row[0].startswith(".. Unified LLM"))
-        assert " ".join(cell for cell in row[:2] if cell) == _UNIFIED
+        assert row[:2] == (".. Unified LLM ..", "for scanners + guardrail")
