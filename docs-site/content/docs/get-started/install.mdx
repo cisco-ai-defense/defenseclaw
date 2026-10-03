@@ -103,7 +103,7 @@ The base install ships everything DefenseClaw needs to talk to the major LLM bac
 | AWS Bedrock | bundled | `boto3` ships in `[project].dependencies` so SigV4, IAM credential modes, and Anthropic-on-Bedrock bearer tokens work without a follow-up `pip install`. |
 | Google Vertex AI | Gateway bundled; Python SDK opt-in | The Go gateway routes Vertex through its bundled Bifrost backend. Python CLI scanner/judge paths use LiteLLM and require the `[vertex]` extra for the Google SDK and supported Vertex authentication; the SDK pulls ~286 MB of transitive dependencies. Source contributors can add it to their isolated checkout with `uv sync --extra vertex`; never modify a release-managed runtime. There is no documented SDK-less Python fallback. |
 | Azure OpenAI | bundled | Routed via LiteLLM's `azure_openai` adapter. |
-| Self-hosted / internal endpoints | bundled | Configure via `defenseclaw setup provider add` → see [Unified LLM key → Custom providers](/docs/setup/unified-llm-key#custom-providers-internal-self-hosted-endpoints). |
+| Self-hosted / internal endpoints | bundled | Configure via `defenseclaw setup provider add` → see [Unified LLM key → Custom providers](/docs/setup/unified-llm-key#custom-providers-for-internal-or-self-hosted-endpoints). |
 
 ## Install from source
 
