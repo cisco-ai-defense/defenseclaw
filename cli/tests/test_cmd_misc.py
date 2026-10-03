@@ -1033,6 +1033,10 @@ class TestSetupGuardrailJudgeFlagsObserveMode(unittest.TestCase):
         ) as execute, patch(
             "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
             return_value=True,
+        ), patch(
+            # Windows verifies the agent executable first; the runner has none.
+            "defenseclaw.commands.cmd_setup._record_windows_setup_agent_selections",
+            return_value=None,
         ):
             result = self.runner.invoke(
                 setup,
