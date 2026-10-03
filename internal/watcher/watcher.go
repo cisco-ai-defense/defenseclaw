@@ -1068,6 +1068,10 @@ func (w *InstallWatcher) enforceBlockWith(ctx context.Context, evt InstallEvent,
 	}
 }
 
+// pluginCategoryQuarantineDir is the quarantine tree of plugins in a Hermes
+// category folder (cli/defenseclaw/enforce/plugin_enforcer.py mirrors it).
+const pluginCategoryQuarantineDir = "plugin-categories"
+
 func (w *InstallWatcher) quarantineAsset(ctx context.Context, evt InstallEvent) {
 	w.quarantineAssetWith(ctx, evt, true)
 }
@@ -1098,11 +1102,15 @@ func (w *InstallWatcher) quarantineAssetWith(ctx context.Context, evt InstallEve
 		return
 	}
 	if category, _, nested := strings.Cut(evt.Name, "/"); nested && evt.Type == InstallPlugin {
-		// A plugin in a category folder keeps its category in quarantine
-		// (plugins/<connector>/<category>/<name>), so "plugin restore
-		// <category>/<name>" finds it and web/x and memx/x don't share one
-		// slot (GAP-2464).
-		plan.QuarantinePath = filepath.Join(filepath.Dir(plan.QuarantinePath), filepath.Base(category), physicalName)
+		// A plugin in a category folder keeps its category in quarantine, so
+		// "plugin restore <category>/<name>" finds it and web/x and memx/x
+		// don't share one slot (GAP-2464). It lives in its own tree
+		// (plugin-categories/<connector>/<category>/<name>), not inside the
+		// slot of a flat plugin named like the category, which "plugin
+		// restore <category>" would otherwise restore with it (GAP-2470).
+		plan.QuarantinePath = filepath.Join(
+			plan.QuarantineRoot, pluginCategoryQuarantineDir, connector, filepath.Base(category), physicalName,
+		)
 	}
 	record, err := w.store.CreateQuarantineRecord(ctx, audit.CreateQuarantineRecordInput{
 		TargetType: evt.Type.String(), TargetName: evt.Name,
