@@ -242,7 +242,8 @@ describe('feature demo catalog', () => {
   it('preserves admission workflow boundaries', () => {
     const skill = featureDemos.find((scenario) => scenario.id === 'skill-quarantine');
     const skillIds = skill!.steps.map((current) => current.id);
-    assert.ok(skillIds.indexOf('skill-quarantine') < skillIds.indexOf('skill-scan'));
+    // The watcher scans in place and quarantines on the verdict (internal/watcher/watcher.go).
+    assert.ok(skillIds.indexOf('skill-scan') < skillIds.indexOf('skill-quarantine'));
 
     const mcp = featureDemos.find((scenario) => scenario.id === 'mcp-shadow-capability');
     assert.match(mcp!.tabs.map((tab) => tab.source).join('\n'), /local_stdio|stdio/);

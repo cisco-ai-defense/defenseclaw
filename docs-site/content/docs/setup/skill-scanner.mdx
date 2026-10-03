@@ -1,6 +1,6 @@
 ---
 title: Setup skill scanner
-description: Scan configured connector skills before an agent can execute them. DefenseClaw wraps cisco-ai-skill-scanner and writes its verdicts into the same skill_actions admission policy as the watcher.
+description: Scan connector skills on demand and whenever one is installed or changed. DefenseClaw wraps cisco-ai-skill-scanner and writes its verdicts into the same skill_actions admission policy as the watcher.
 keywords:
   - DefenseClaw skill scanner
   - cisco-ai-skill-scanner
@@ -13,13 +13,13 @@ keywords:
 
 Agents are getting comfortable installing skills. A "skill" is a small bundle — instructions, optional tools, sometimes auto-applied — that an LLM picks up and follows. The same shape is also a great place to hide a prompt-injection or an exfiltration tool.
 
-DefenseClaw integrates Cisco's open-source [`cisco-ai-skill-scanner`](https://github.com/cisco-ai-defense/skill-scanner) so operator-installed and modified skills get a deterministic + LLM-assisted review before an agent is allowed to use them. Verdicts feed the `skill_actions` admission policy by severity bucket, and the install watcher quarantines new skills until the scan resolves. Exact proven vendor bundles remain visible as discovery-only inventory and do not enter scanner or enforcement paths.
+DefenseClaw integrates Cisco's open-source [`cisco-ai-skill-scanner`](https://github.com/cisco-ai-defense/skill-scanner) so operator-installed and modified skills get a deterministic + LLM-assisted review. Verdicts feed the `skill_actions` admission policy by severity bucket, and the install watcher scans every new or changed skill and quarantines it when the policy says so. Exact proven vendor bundles remain visible as discovery-only inventory and do not enter scanner or enforcement paths.
 
 <DefenseClawDemo scenario="skill-quarantine" variant="critical" />
 
 ## What you just saw
 
-The watcher moved a new skill out of the agent-visible path **before** scanning it. Deterministic checks and optional LLM-assisted intent analysis produced a CRITICAL result, which `skill_actions` mapped to retained quarantine, disabled runtime, blocked installation, and an audit event.
+The watcher scanned a new skill where it was installed. Deterministic checks and optional LLM-assisted intent analysis produced a CRITICAL result, which `skill_actions` mapped to quarantine (the files move out of the skill folder), disabled runtime, blocked installation, and an audit event.
 
 ## What it scans
 
@@ -84,32 +84,32 @@ defenseclaw skill scan my-skill --remote
 
 ## Continuous protection: the install watcher
 
-Running a one-shot scan is a starting point. The real value is the **install watcher** that ships with `defenseclaw setup guardrail`:
+Running a one-shot scan is a starting point. The real value is the **install watcher**. It runs inside the gateway, is on by default, and watches the skill folders of every configured connector:
 
-<Sequence
-  caption="block → scan → release: the agent never sees a skill that hasn't been evaluated. Watcher is `defenseclaw-gateway`'s install watcher; Scanner is `cisco-ai-skill-scanner`."
-  participants={[
-    { id: 'agent',   label: 'Agent',          kind: 'agent' },
-    { id: 'fs',      label: 'Skill dir',      kind: 'datastore' },
-    { id: 'watcher', label: 'Watcher',        kind: 'gateway' },
-    { id: 'scanner', label: 'Scanner',        kind: 'connector' },
-    { id: 'policy',  label: 'OPA policy',     kind: 'policy' },
-  ]}
+<Flow
+  direction="TB"
+  caption="What the watcher does with a new or changed skill. The skill stays in its folder while it is scanned; it moves to the quarantine folder only on a block-list match, a failed scan, or a skill_actions verdict that blocks it (HIGH and CRITICAL in the default policy). Every outcome is written to the audit log. The scanner is cisco-ai-skill-scanner; the policy step is OPA, with a built-in fallback."
 >
-  <Message from="agent"   to="fs"      label="install / update skill" />
-  <Message from="fs"      to="watcher" kind="return" label="fsnotify event" />
-  <Message from="watcher" to="watcher" label="1. quarantine while scanning" />
-  <Message from="watcher" to="scanner" label="ScanSkill(skill)" />
-  <Message from="scanner" to="watcher" kind="return" label="ScanResult" />
-  <Message from="watcher" to="policy"  label="severity → skill_actions" />
-  <Message from="policy"  to="watcher" kind="return" label="file · runtime · install verdict" />
-  <Message from="watcher" to="fs"      label="if file=none: 3. release" />
-  <Message from="watcher" to="fs"      label="if file=quarantine: hold + emit event" />
-</Sequence>
+  <Node id="new" kind="datastore">{`New or changed skill\nin a watched folder`}</Node>
+  <Node id="lists" kind="decision">{`Block or allow list?\nchecked before scanning`}</Node>
+  <Node id="ok" kind="generic">{`Allowed\nnot scanned`}</Node>
+  <Node id="scan" kind="connector">{`Skill scanner\nstatic + optional LLM`}</Node>
+  <Node id="policy" kind="policy">{`skill_actions\nmaps the top severity`}</Node>
+  <Node id="keep" kind="generic">{`Stays installed\nclean, or a warning`}</Node>
+  <Node id="q" kind="gateway">{`Quarantined\nand install blocked`}</Node>
+  <Edge from="new" to="lists" label="watcher checks" />
+  <Edge from="lists" to="ok" label="allow list" />
+  <Edge from="lists" to="scan" label="neither" />
+  <Edge from="lists" to="q" label="block list" />
+  <Edge from="scan" to="policy" label="severity" />
+  <Edge from="scan" to="q" label="scan fails" />
+  <Edge from="policy" to="keep" label="no block" />
+  <Edge from="policy" to="q" label="block" />
+</Flow>
 
-The flow is **quarantine → scan → release-or-keep-quarantined**, not the other way around — the skill never executes against the agent until the scan completes. Watcher implementation lives in [`internal/watcher/watcher.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/watcher/watcher.go).
+The order is **check the lists → scan in place → act on the verdict**. The skill is not hidden while the scan runs (scans time out after five minutes), so an agent session that is already open can see it in that window. A scan that fails counts as a block. Watcher implementation lives in [`internal/watcher/watcher.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/watcher/watcher.go).
 
-You don't have to wire any of that yourself. `defenseclaw setup guardrail` enables the watcher for the connectors you select.
+You don't have to wire any of that yourself. To record the severity verdicts without acting on them, set `gateway.watcher.skill.take_action: false` in `~/.defenseclaw/config.yaml`; block-list matches and failed scans are still quarantined.
 
 ## Configure the action mapping
 
