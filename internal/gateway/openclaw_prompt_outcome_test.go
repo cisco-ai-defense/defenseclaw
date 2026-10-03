@@ -123,3 +123,30 @@ func TestBareAccountNameKeepsTheV8UserName(t *testing.T) {
 		t.Fatal("bare Windows account name fails the v8 identifier check")
 	}
 }
+
+// TestOpenClawAgentSpanCarriesTheReply pins GAP-2495: the invoke_agent
+// openclaw root carries the turn's reply as its output, as the chat span
+// does, so the agent node in Galileo is not blank.
+func TestOpenClawAgentSpanCarriesTheReply(t *testing.T) {
+	turn := hookModelV8Observation{response: `[{"type":"text","text":"ready"}]`}
+	agent := eventRouterAgentInputV8(turn)
+	if !agent.DefenseClawTelemetryOutputReported || agent.DefenseClawContentOutputState != "preserved" {
+		t.Fatalf("agent output reported=%v state=%q, want true/preserved",
+			agent.DefenseClawTelemetryOutputReported, agent.DefenseClawContentOutputState)
+	}
+	got, ok := agent.GenAIOutputMessages.Get()
+	want, _ := hookModelV8ModelInput(turn).GenAIOutputMessages.Get()
+	if !ok || len(got.Items) != 1 || len(got.Items[0].Parts.Items) == 0 {
+		t.Fatalf("agent output messages = %+v, want the reply", got)
+	}
+	gotJSON, _ := json.Marshal(got)
+	wantJSON, _ := json.Marshal(want)
+	if string(gotJSON) != string(wantJSON) {
+		t.Fatalf("agent output = %s, want the chat output %s", gotJSON, wantJSON)
+	}
+
+	silent := eventRouterAgentInputV8(hookModelV8Observation{})
+	if silent.DefenseClawTelemetryOutputReported || silent.GenAIOutputMessages.IsPresent() {
+		t.Fatalf("an empty reply was reported as output")
+	}
+}
