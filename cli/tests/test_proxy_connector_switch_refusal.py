@@ -120,6 +120,26 @@ class GuardedOpenClawSwitchTests(unittest.TestCase):
                 self._assert_refused(result)
                 first_run.assert_not_called()
 
+    def test_init_observe_all_refusal_names_the_whole_set(self):
+        # GAP-2476: the refusal named only the first connector ("setting up Codex").
+        picked = [{"connector": name, "profile": "observe", "fail_mode": None,
+                   "human_approval": None, "hilt_min_severity": None}
+                  for name in ("codex", "claudecode", "amp")]
+        with patch(
+            "defenseclaw.commands.cmd_init._build_noninteractive_connector_settings",
+            return_value=picked,
+        ), patch("defenseclaw.bootstrap.run_first_run", side_effect=AssertionError("replaced")):
+            result = CliRunner().invoke(
+                init_cmd, ["--observe-all", "--yes"], obj=AppContext(),
+                env={"DEFENSECLAW_HOME": self.tmp_dir},
+            )
+        output = result.output + (result.stderr or "")
+        self.assertNotEqual(result.exit_code, 0, output)
+        self.assertIn("setting up Amp, Claude Code and Codex would remove", output)
+        self.assertIn("defenseclaw setup <connector> --replace", output)
+        self.assertNotIn("setup codex --replace", output)
+        self.assertEqual(self.cfg_file.read_bytes(), self.before)
+
     def test_interactive_init_asks_before_replacing_openclaw(self):
         started = RuntimeError("wizard started")
         with patch("defenseclaw.commands.cmd_init._stdin_is_tty", return_value=True), patch(

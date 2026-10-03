@@ -708,10 +708,10 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
         )
         # GAP-2455: discovery, --observe-all and --action-connectors pick hook
         # connectors too; never let them silently replace a guarded OpenClaw.
-        from defenseclaw.commands.cmd_setup import _refuse_hook_switch_over_configured_proxy
+        # GAP-2476: one refusal that names the whole set, not its first entry.
+        from defenseclaw.commands.cmd_setup import _refuse_hook_set_over_configured_proxy
 
-        for setting in connector_settings:
-            _refuse_hook_switch_over_configured_proxy(setting["connector"])
+        _refuse_hook_set_over_configured_proxy(setting["connector"] for setting in connector_settings)
     if start_gateway is None:
         # GAP-1539: a running gateway loads its connector set only at start,
         # so a scripted re-init reconciles (restarts) it instead of leaving
