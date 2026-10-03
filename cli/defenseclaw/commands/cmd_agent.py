@@ -1159,7 +1159,26 @@ def discovery_enable(
 
     diff = _preview_discovery_changes(ad, pending)
     runtime_diff = _preview_runtime_planes(ad, enable_host_plane=enable_host_plane)
+    restart_pending = False
     if ad.enabled and not diff and not runtime_diff:
+        # GAP-2260: on in config but the running gateway started before
+        # that change, so discovery is not running. Restart instead of
+        # answering "already enabled" and scanning a sidecar that 503s.
+        restart_pending = _live_discovery_enabled(
+            app,
+            gateway_host=gateway_host,
+            gateway_port=gateway_port,
+            gateway_token_env=gateway_token_env,
+        ) is False
+        if restart_pending and not restart:
+            ux.warn(
+                "AI discovery is on in config, but the running gateway started "
+                "before that change, so it is not running yet.",
+                indent="  ",
+            )
+            ux.subhead("Restart the gateway to start it: defenseclaw-gateway restart", indent="  ")
+            return
+    if ad.enabled and not diff and not runtime_diff and not restart_pending:
         # If the operator passed tuning flags alongside --yes, treat
         # this as an idempotent "apply these new settings" rather
         # than a no-op. Runtime planes are part of the same enable
@@ -1178,7 +1197,14 @@ def discovery_enable(
             )
         return
 
-    if ad.enabled:
+    if restart_pending:
+        ux.section("Starting AI discovery")
+        ux.subhead(
+            "AI discovery is on in config, but the running gateway started before "
+            "that change, so it is not running yet.",
+            indent="  ",
+        )
+    elif ad.enabled:
         ux.section("Updating AI discovery settings")
     else:
         ux.section("Enabling AI discovery")
@@ -3288,6 +3314,29 @@ def _resolve_connectors_for_restart(cfg: Any) -> list[str]:
 
     connector = normalize_connector(_resolve_connector_for_restart(cfg))
     return [connector] if connector else []
+
+
+def _live_discovery_enabled(
+    app: AppContext,
+    *,
+    gateway_host: str | None,
+    gateway_port: int | None,
+    gateway_token_env: str | None,
+) -> bool | None:
+    """Return the running gateway's ai_discovery state; None when it can't be read."""
+
+    try:
+        client = _usage_client(
+            app,
+            gateway_host=gateway_host,
+            gateway_port=gateway_port,
+            gateway_token_env=gateway_token_env,
+        )
+        payload = client.ai_usage()
+    except Exception:  # noqa: BLE001 - best-effort probe; callers keep the old path.
+        return None
+    enabled = payload.get("enabled") if isinstance(payload, dict) else None
+    return enabled if isinstance(enabled, bool) else None
 
 
 def _trigger_post_enable_scan(
