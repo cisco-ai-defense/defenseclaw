@@ -230,9 +230,15 @@ def _rollback(*, yes: bool) -> int:
     name = _installer_name()
     installer = os.path.join(home, "installer", name)
     if not os.path.isfile(installer):
+        # A source ('make all') install saves no installer. After a rollback to
+        # one, the install it replaced (now in previous/) still has its own, and
+        # that one rolls forward again (GAP-2459).
+        installer = os.path.join(home, "previous", "installer", name)
+    if not os.path.isfile(installer):
+        saved = os.path.join(home, "installer")
         raise ShimError(
-            f"no saved installer at {installer}; download {name} from the release you want and run it "
-            "with --rollback"
+            f"no saved installer in {saved} or {os.path.join(home, 'previous', 'installer')}; "
+            f"download {name} from the release you want and run it with --rollback"
         )
     previous = os.path.join(home, "previous")
     if os.name == "nt" and os.path.isdir(os.path.join(previous, "legacy-setup")):
