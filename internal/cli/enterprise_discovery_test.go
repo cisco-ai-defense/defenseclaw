@@ -215,7 +215,9 @@ func TestWindowsEnterpriseDiscoveryGroupsTheGatewayReportByAccount(t *testing.T)
 		return enterpriseGatewayAIUsage{Enabled: true, Summary: inventory.AIDiscoverySummary{ScannedAt: scanned, Result: "ok"}, Signals: []inventory.AISignal{
 			{Name: "Amp", Category: "supported_connector", SupportedConnector: "amp", Detector: "config", UserName: "dcw-std2", UserID: "S-1-5-21-2", LastSeen: scanned},
 			{Name: "dccert-mcp", Category: "mcp_server", SupportedConnector: "codex", UserName: "dcw-std1", UserID: "S-1-5-21-1", LastSeen: scanned},
-			{Name: "dccert-skill", Category: "skill", UserName: "dcw-std1", UserID: "S-1-5-21-1", LastSeen: scanned},
+			{Name: "dccert-skill", Category: "skill", UserName: "dcw-std1", UserID: "S-1-5-21-1", LastSeen: scanned,
+				Basenames: []string{"skills", "ewr6-hello2"}, Evidence: []inventory.AIEvidence{
+					{Type: "skill", Basename: "skills"}, {Type: "skill_entry", Basename: "ewr6-hello2"}}},
 			{Name: "Ollama", Category: "local_ai_app", LastSeen: scanned},
 		}}, "127.0.0.1:18970", nil
 	}
@@ -244,6 +246,10 @@ func TestWindowsEnterpriseDiscoveryGroupsTheGatewayReportByAccount(t *testing.T)
 	}
 	if got := one.String(); !strings.Contains(got, "dccert-mcp") || strings.Contains(got, "Amp") {
 		t.Fatalf("--user dcw-std1 output:\n%s", got)
+	}
+	// GAP-2263: a skill row names the skills, not the skills folder itself.
+	if got := one.String(); !strings.Contains(got, "  ewr6-hello2\n") || strings.Contains(got, "skills,") {
+		t.Fatalf("--user dcw-std1 skill row:\n%s", got)
 	}
 
 	var asJSON bytes.Buffer
