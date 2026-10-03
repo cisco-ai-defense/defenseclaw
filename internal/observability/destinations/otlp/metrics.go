@@ -512,6 +512,7 @@ func (exporter *MetricExporter) recordHealthAt(
 ) {
 	exporter.healthMu.Lock()
 	previous, previousReason := exporter.health, exporter.healthReason
+	reason = delivery.SettledHealthReason(previous, previousReason, state, reason)
 	exporter.health = state
 	exporter.healthReason = reason
 	if success {

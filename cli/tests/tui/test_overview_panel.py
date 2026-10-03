@@ -133,7 +133,7 @@ def test_overview_keeps_runtime_health_separate_from_native_delivery_truth() -> 
     view = type("OverviewView", (), {"overview_model": model})()
     rendered = DefenseClawTUI._overview_observability_text(view)
     assert "collector/runtime health does not prove accepted delivery" in rendered
-    assert "bounded 24h, truncated; counts partial" in rendered
+    assert "bounded 24h, newest 4096 events" in rendered
     assert "Claude Code (claudecode): partial drop-only evidence (1/3 batches)" in rendered
     assert "OpenCode (opencode): accepted native delivery observed (3 batches)" in rendered
 

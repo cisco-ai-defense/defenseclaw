@@ -648,6 +648,7 @@ func (exporter *SpanExporter) recordHealthAt(
 		return
 	}
 	exporter.healthMu.Lock()
+	reason = delivery.SettledHealthReason(exporter.health, exporter.healthReason, state, reason)
 	exporter.health = state
 	exporter.healthReason = reason
 	if success {

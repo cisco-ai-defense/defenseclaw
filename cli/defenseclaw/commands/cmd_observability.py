@@ -31,6 +31,7 @@ from defenseclaw.config_inspect import ConfigInspectError, inspect_v8_config
 from defenseclaw.observability.custody_status import (
     ConnectorCustodyReport,
     inspect_connector_custody,
+    native_evidence_row_limit,
 )
 from defenseclaw.observability.destination_test import (
     NETWORK_FAILURE_CLASSES,
@@ -581,7 +582,7 @@ def _render_custody_table(report: ConnectorCustodyReport) -> None:
             f"last={report.last_unattributed_authentication_failure or 'unknown'}"
         )
     if report.event_rows_truncated:
-        click.echo("  warning: recent ingest evidence reached the bounded read limit")
+        click.echo(f"  note: counts cover the newest {native_evidence_row_limit()} evidence events")
 
 
 def _table_compatibility(row: dict[str, Any]) -> str:

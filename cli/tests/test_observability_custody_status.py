@@ -429,7 +429,7 @@ def test_native_delivery_summary_covers_all_states_and_doctor_status_parity(caps
     _print_native_delivery_status(summary)
     status_output = capsys.readouterr().out
     assert "collector/runtime health does not prove accepted delivery" in status_output
-    assert "bounded 24h, truncated; counts partial" in status_output
+    assert "bounded 24h, newest 4096 events" in status_output
     for label in ("all-drop-only", "partial-drop-only", "accepted", "no-evidence"):
         assert label in status_output
 
@@ -438,6 +438,11 @@ def test_native_delivery_summary_covers_all_states_and_doctor_status_parity(caps
     doctor = {item["label"]: item["detail"] for item in result.checks}
     for row in summary.connectors:
         assert row.detail in doctor[f"Connector OTLP: {row.connector}"]
+    # GAP-2555: the read cap on a busy install is a sample note, not a warning.
+    cap = next(item for item in result.checks if item["label"] == "Connector OTLP evidence")
+    assert cap["status"] == "pass"
+    assert "newest 4096 events of the last 24 h; nothing to do" in cap["detail"]
+    assert "bounded read limit" not in cap["detail"]
 
 
 def test_native_delivery_missing_evidence_is_bounded_not_failed(capsys) -> None:
