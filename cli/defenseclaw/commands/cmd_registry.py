@@ -257,14 +257,9 @@ def registry() -> None:
 @click.option("--auth-env", default=None,
               help="ENV VAR NAME holding a bearer token (never the literal token)")
 @click.option("--enabled/--disabled", default=True, help="Mark source enabled or disabled")
-@click.option("--auto-sync/--no-auto-sync", default=False,
-              help="RESERVED: scheduled sync is not implemented yet. "
-                   "The flag is persisted so a future release can pick it "
-                   "up without a config rewrite. Run `defenseclaw registry "
-                   "sync --all` (or schedule it via cron) for now.")
-@click.option("--sync-interval-hours", type=int, default=24,
-              help="RESERVED: paired with --auto-sync above; ignored at "
-                   "runtime today.")
+# Scheduled sync is not implemented: the options are hidden and refused (GAP-2209).
+@click.option("--auto-sync/--no-auto-sync", default=None, hidden=True)
+@click.option("--sync-interval-hours", type=int, default=None, hidden=True)
 @click.option("--non-interactive", is_flag=True,
               help="Skip prompts; required flags must be present")
 @click.option("--json", "emit_json", is_flag=True, help="Emit JSON")
@@ -277,8 +272,8 @@ def add_cmd(  # noqa: PLR0913 - mirrors the prompt surface
     content: str | None,
     auth_env: str | None,
     enabled: bool,
-    auto_sync: bool,
-    sync_interval_hours: int,
+    auto_sync: bool | None,
+    sync_interval_hours: int | None,
     non_interactive: bool,
     emit_json: bool,
 ) -> None:
@@ -304,6 +299,7 @@ def add_cmd(  # noqa: PLR0913 - mirrors the prompt surface
     \b
       defenseclaw registry add clawhub --kind clawhub --content skill --non-interactive
     """
+    _refuse_scheduled_sync(auto_sync, sync_interval_hours)
     cfg = _require_cfg(app)
 
     if not non_interactive:
@@ -363,8 +359,6 @@ def add_cmd(  # noqa: PLR0913 - mirrors the prompt surface
         content=content,
         auth_env=auth_env,
         enabled=enabled,
-        auto_sync=auto_sync,
-        sync_interval_hours=max(0, int(sync_interval_hours or 0)),
     )
     cfg.registries.sources.append(new_source)
     cfg.save()
@@ -385,6 +379,15 @@ def add_cmd(  # noqa: PLR0913 - mirrors the prompt surface
 _WIZARD_SYNC_PROMPT_KEY = "defenseclaw.registry.wizard_offers_sync"
 
 
+def _refuse_scheduled_sync(auto_sync: bool | None, sync_interval_hours: int | None) -> None:
+    """Refuse --auto-sync / --sync-interval-hours: nothing runs a schedule yet (GAP-2209)."""
+    if auto_sync or sync_interval_hours is not None:
+        raise click.UsageError(
+            "scheduled sync is not available yet. Run 'defenseclaw registry sync "
+            "<id>' (or 'registry sync --all' from cron) to sync a source."
+        )
+
+
 def _print_sync_hint(sid: str) -> None:
     ux.subhead(
         f"Run `defenseclaw registry sync {sid}` to fetch + scan + promote entries."
@@ -403,10 +406,8 @@ def _print_sync_hint(sid: str) -> None:
 @click.option("--clear-auth-env", is_flag=True, help="Drop auth_env back to empty")
 @click.option("--enabled/--disabled", default=None,
               help="Toggle the enabled flag")
-@click.option("--auto-sync/--no-auto-sync", default=None,
-              help="RESERVED: scheduled sync is not implemented yet.")
-@click.option("--sync-interval-hours", type=int, default=None,
-              help="RESERVED: paired with --auto-sync; ignored today.")
+@click.option("--auto-sync/--no-auto-sync", default=None, hidden=True)
+@click.option("--sync-interval-hours", type=int, default=None, hidden=True)
 @click.option("--non-interactive", is_flag=True, help="Never prompt; fail if a required value is missing.")
 @click.option("--json", "emit_json", is_flag=True, help="Print the result as JSON.")
 @pass_ctx
@@ -431,12 +432,12 @@ def edit_cmd(  # noqa: PLR0913
     the default. As soon as **any** mutating flag is passed
     (``--kind`` / ``--url`` / ``--content`` / ``--auth-env`` /
     ``--clear-auth-env`` / ``--enabled`` / ``--disabled`` /
-    ``--auto-sync`` / ``--no-auto-sync`` / ``--sync-interval-hours``
-    / ``--non-interactive``), prompts are suppressed entirely so the
+    ``--non-interactive``), prompts are suppressed entirely so the
     docstring promise — "only the flags you pass are changed" —
     holds. Use the bare form (no flags) when you want to re-confirm
     every field.
     """
+    _refuse_scheduled_sync(auto_sync, sync_interval_hours)
     cfg = _require_cfg(app)
     source = _find_source(cfg, source_id)
 
@@ -476,10 +477,8 @@ def edit_cmd(  # noqa: PLR0913
         source.auth_env = _validate_auth_env(auth_env)
     if enabled is not None:
         source.enabled = enabled
-    if auto_sync is not None:
-        source.auto_sync = auto_sync
-    if sync_interval_hours is not None:
-        source.sync_interval_hours = max(0, int(sync_interval_hours))
+    if auto_sync is False:
+        source.auto_sync = False
 
     # Validate the post-edit (kind, url) pair so flipping an
     # ``http_yaml`` source to ``kind=file`` without re-supplying the
@@ -506,8 +505,9 @@ def list_cmd(app: AppContext, emit_json: bool) -> None:
     """List configured registry sources.
 
     The ``ENTRIES`` column reports cached counts as
-    ``total (clean/warning/blocked)`` from the on-disk index — a
-    dash means the source has never been synced. Counts are
+    ``total (clean/warning/blocked/error)`` from the on-disk index — a
+    dash means the source has never been synced. A source whose last
+    sync failed is named below the table. Counts are
     deliberately read fresh from ``index.json`` rather than the
     config file so manual ``approve`` / ``reject`` calls (which
     rewrite the index) are reflected without forcing an additional
@@ -560,14 +560,21 @@ def list_cmd(app: AppContext, emit_json: bool) -> None:
         else:
             entries = (
                 f"{idx.entry_count} "
-                f"({idx.clean_count}/{idx.warning_count}/{idx.blocked_count})"
+                f"({idx.clean_count}/{idx.warning_count}/{idx.blocked_count}/{idx.error_count})"
             )
         click.echo(
             f"  {s.id:<24} {s.kind:<12} {s.content:<8} {on:<3} "
             f"{entries:<18} {last:<22} {url}"
         )
     click.echo()
-    ux.subhead("ENTRIES column: total (clean/warning/blocked)")
+    ux.subhead("ENTRIES column: total (clean/warning/blocked/error)")
+    # A failed last sync must not look like a healthy one (GAP-2210).
+    for s in sources:
+        if (s.last_status or "").startswith("error"):
+            ux.warn(
+                f"The last sync of {s.id} failed. "
+                f"Run 'defenseclaw registry show {s.id}' for the error."
+            )
 
 
 @registry.command("show")
@@ -771,7 +778,8 @@ def test_cmd(
     click.echo(f"  {ux.dim('Bytes fetched:')}  {len(raw):,}")
     click.echo(
         f"  {ux.dim('Entries:')}        {len(filtered)} "
-        f"({skill_count} skills, {mcp_count} mcps)"
+        f"({skill_count} {'skill' if skill_count == 1 else 'skills'}, "
+        f"{mcp_count} {'MCP server' if mcp_count == 1 else 'MCP servers'})"
     )
     if show_entries and filtered:
         click.echo()
@@ -1573,9 +1581,10 @@ def _registry_required_payload(result: RegistryRequiredResult) -> dict[str, Any]
          "override). Omit to set it for every connector.",
 )
 @click.option(
-    "--enforce", is_flag=True,
-    help="Also turn asset policy enforcement on (asset_policy.enabled=true, "
-         "mode=action). Without it nothing is blocked while asset policy is off.",
+    "--enforce/--no-enforce", default=None,
+    help="--enforce also turns asset policy enforcement on (asset_policy.enabled=true, "
+         "mode=action); without it nothing is blocked while asset policy is off. "
+         "--no-enforce turns it back off (mode=observe: logged, not blocked).",
 )
 @click.option("--json", "emit_json", is_flag=True, help="Print the result as JSON.")
 @pass_ctx
@@ -1584,7 +1593,7 @@ def require_cmd(
     asset_type: str,
     enabled: bool,
     connector: str,
-    enforce: bool,
+    enforce: bool | None,
     emit_json: bool,
 ) -> None:
     """Toggle ``asset_policy.<type>.registry_required``.
@@ -1603,7 +1612,7 @@ def require_cmd(
 
     The requirement is enforced only while asset policy is on
     (``asset_policy.enabled=true`` and ``mode=action``). --enforce turns
-    both on in the same save.
+    both on in the same save; --no-enforce sets ``mode=observe`` again.
     """
     cfg = _require_cfg(app)
     asset = asset_type.lower()
@@ -1656,7 +1665,8 @@ def require_cmd(
         app.logger.log_action(
             "registry-edit", "config",
             f"require scope={scope_label}.registry required={'true' if enabled else 'false'} "
-            f"connectors={affected}" + (" enforce=true" if enforce else ""),
+            f"connectors={affected}"
+            + ("" if enforce is None else f" enforce={'true' if enforce else 'false'}"),
         )
 
     # Messaging reads the *effective* per-type policy for the scope: rule
@@ -1702,10 +1712,16 @@ def require_cmd(
             + ", ".join(result.preserved_inactive_connectors)
             + "."
         )
+    if enforce is False:
+        ux.subhead(
+            f"Asset policy enforcement is off (mode={policy_mode}): "
+            "assets are logged, not blocked."
+        )
     if not enabled:
         return
     if enforce:
         ux.subhead("Asset policy enforcement is on (asset_policy.enabled=true, mode=action).")
+        ux.subhead(f"Turn it off with: defenseclaw registry require --type {asset} --disabled --no-enforce")
     if not policy_on:
         ux.warn(
             "Asset policy is off (asset_policy.enabled=false): nothing is blocked "
@@ -1806,8 +1822,8 @@ def wizard_cmd(ctx: click.Context, app: AppContext) -> None:
         content=content,
         auth_env=auth_env or None,
         enabled=True,
-        auto_sync=False,
-        sync_interval_hours=24,
+        auto_sync=None,
+        sync_interval_hours=None,
         non_interactive=True,
         emit_json=False,
     )
