@@ -81,6 +81,11 @@ type EventRouter struct {
 
 	contextTracker *ContextTracker
 
+	// promptScanEcho remembers the last id-less user prompt per session so
+	// its id-bearing copy is not counted twice (countPromptScanMetric).
+	promptScanEchoMu sync.Mutex
+	promptScanEcho   map[string]promptScanEchoEntry
+
 	// defaultAgentName is the fallback for agent_name when the
 	// incoming event doesn't supply one. Populated from
 	// cfg.Claw.Mode at sidecar bootstrap via SetDefaultAgentName.
@@ -822,12 +827,14 @@ func (r *EventRouter) scanInboundPrompt(sessionKey, messageID, model, content st
 		categories,
 		latencyMs,
 	)
-	meta := streamLLMEventMeta(r, sessionKey, "", "builtin", model, "")
-	meta.MessageID = messageID
-	r.recordEventRouterGuardrailMetricsV8(vctx, eventRouterGuardrailMetricObservation{
-		meta: meta, action: verdict.Action, severity: verdict.Severity,
-		alertType: "prompt-injection", alertSource: "local-pattern", observedAt: time.Now().UTC(),
-	})
+	if r.countPromptScanMetric(sessionKey, messageID, content) {
+		meta := streamLLMEventMeta(r, sessionKey, "", "builtin", model, "")
+		meta.MessageID = messageID
+		r.recordEventRouterGuardrailMetricsV8(vctx, eventRouterGuardrailMetricObservation{
+			meta: meta, action: verdict.Action, severity: verdict.Severity,
+			alertType: "prompt-injection", alertSource: "local-pattern", observedAt: time.Now().UTC(),
+		})
+	}
 
 	// Preserve the source reason for canonical per-destination redaction. The
 	// stderr summary below omits it; only log-injection controls are removed

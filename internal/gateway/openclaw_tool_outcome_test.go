@@ -90,3 +90,27 @@ func TestOpenClawBlockLandsOnTheToolSpan(t *testing.T) {
 		t.Fatalf("expired decision taken: %+v", late.meta.Guardrail)
 	}
 }
+
+// TestOpenClawAllowedToolSpanNamesTheLocalUser pins GAP-2358: an allowed
+// OpenClaw tool call (no remembered decision) names the gateway's own user
+// on an unmanaged install, as the blocked call and the turn's agent and chat
+// spans do; a user the stream named is kept.
+func TestOpenClawAllowedToolSpanNamesTheLocalUser(t *testing.T) {
+	_, wantName := localProcessUser()
+	if wantName == "" {
+		t.Skip("no local process user on this host")
+	}
+	allowed := generatedToolV8Observation{tool: "write", meta: llmEventMeta{Source: "openclaw", RunID: "run-allowed-2358"}}
+	applyOpenClawToolOutcome(&allowed)
+	if allowed.meta.Guardrail.Action != "" {
+		t.Fatalf("an allowed call took a decision: %+v", allowed.meta.Guardrail)
+	}
+	if allowed.meta.UserName != wantName {
+		t.Fatalf("allowed tool span user = %q, want %q", allowed.meta.UserName, wantName)
+	}
+	named := generatedToolV8Observation{tool: "exec", meta: llmEventMeta{Source: "openclaw", UserName: "stream-user"}}
+	applyOpenClawToolOutcome(&named)
+	if named.meta.UserName != "stream-user" {
+		t.Fatalf("stream user replaced by %q", named.meta.UserName)
+	}
+}
