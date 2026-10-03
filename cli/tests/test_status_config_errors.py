@@ -137,3 +137,32 @@ def test_guardrail_status_disabled_has_no_drift_or_proxy_port(
     assert "disabled (guardrail off)" in disabled.output
     assert "runtime fail-mode drift" not in disabled.output
     assert "port:" not in enabled.output and "port:" not in disabled.output
+
+
+def test_empty_config_hint_names_the_newest_backup(data_dir: Path) -> None:
+    # GAP-2206: a newer full backup beats the day-old copy the upgrade kept.
+    path = data_dir / "config.yaml"
+    path.write_text("", encoding="utf-8")
+    kept = data_dir / "previous" / "data" / "config.yaml"
+    kept.parent.mkdir(parents=True)
+    kept.write_text("config_version: 7\n", encoding="utf-8")
+    os.utime(kept, (1790916000, 1790916000))  # 2026-10-02 04:40 UTC
+    backups = data_dir / "backups"
+    backups.mkdir()
+    (backups / "config.yaml.empty").write_text("", encoding="utf-8")
+    os.utime(backups / "config.yaml.empty", (1790990000, 1790990000))
+    older = backups / "config.yaml.before-redaction-1"
+    older.write_text("config_version: 8\n", encoding="utf-8")
+    os.utime(older, (1790920000, 1790920000))
+    newest = backups / "config.yaml.before-redaction-2"
+    newest.write_text("config_version: 8\n", encoding="utf-8")
+    os.utime(newest, (1790931480, 1790931480))  # 2026-10-02 08:58 UTC
+
+    message = dcconfig.empty_config_message(str(path))
+
+    assert f"(the newest backup is {newest}, from 2026-10-02 08:58 UTC; " in message
+    assert f"the last version upgrade kept an older copy from 2026-10-02 04:40 UTC in {kept})" in message
+    assert "config.yaml.empty" not in message
+
+    os.utime(kept, (1790999000, 1790999000))  # the upgrade copy is now the newest
+    assert "the newest backup" not in dcconfig.empty_config_message(str(path))
