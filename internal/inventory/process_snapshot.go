@@ -39,6 +39,10 @@ type processInfo struct {
 	// Image.
 	OwnerID   string
 	OwnerName string
+	// SessionOwnerID (Windows) is the SID of the account the process runs
+	// as, from Remote Desktop Services: its token SID where visible, else
+	// the account signed in to its session. Empty in session 0.
+	SessionOwnerID string
 	// Argv0 is the basename of argv[0] on Linux, kept only when it differs
 	// from Comm. A runtime that renames its main thread hides the command
 	// from comm: cursor-agent runs `exec -a "$0" node ...` and Node names
@@ -53,6 +57,8 @@ type windowsProcessEntry struct {
 	PID  int
 	PPID int
 	Comm string
+	// SessionOwnerID: see processInfo.SessionOwnerID.
+	SessionOwnerID string
 }
 
 type windowsProcessDetails struct {
@@ -86,6 +92,7 @@ func collectWindowsSnapshot(reader windowsSnapshotReader) ([]processInfo, error)
 		infos = append(infos, processInfo{
 			PID: entry.PID, PPID: entry.PPID, Comm: comm,
 			User: details.User, StartedAt: details.StartedAt, Image: details.Image, Windows: true,
+			SessionOwnerID: entry.SessionOwnerID,
 		})
 	}
 	return infos, nil
