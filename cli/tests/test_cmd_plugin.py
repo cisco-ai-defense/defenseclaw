@@ -262,6 +262,24 @@ class TestAmpManagedBridgeProtection(PluginCommandTestBase):
         self.assertIn("defenseclaw.ts is DefenseClaw's own Amp bridge", only_bridge.output)
         self.assertIn("defenseclaw setup remove amp", only_bridge.output)
 
+    @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
+    def test_scan_audit_names_the_connector(self, mock_scan):
+        # GAP-2272: the scan row says whose plugin it was, so
+        # 'audit export --connector amp' includes it.
+        from datetime import datetime, timedelta, timezone
+
+        from defenseclaw.models import ScanResult
+
+        mock_scan.side_effect = lambda target, **_kw: ScanResult(
+            scanner="plugin-scanner", target=target, timestamp=datetime.now(timezone.utc),
+            findings=[], duration=timedelta(seconds=0),
+        )
+        with patch.object(self.app.logger, "log_scan") as log_scan:
+            result = self.invoke(["scan", self.amp_plugins, "--connector", "amp"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertTrue(log_scan.call_args_list, result.output)
+        self.assertTrue(all(c.kwargs.get("connector") == "amp" for c in log_scan.call_args_list))
+
     def test_remove_deletes_an_ordinary_amp_file_plugin(self):
         """GAP-2063: direct Amp plugins are files, not directories."""
         result = self.invoke(["remove", "architect", "--connector", "amp"])
@@ -717,25 +735,25 @@ class TestPluginList(PluginCommandTestBase):
 
                 text_result = self.invoke(["list", "--connector", "claudecode"])
                 self.assertEqual(text_result.exit_code, 0, text_result.output)
-                self.assertIn(registry, text_result.output)
                 if expected_state == "missing":
+                    self.assertIn(registry, text_result.output)
                     # GAP-2274: plain wording, no internal "registry source" text.
                     self.assertIn("claudecode has no installed plugins", text_result.output)
                     self.assertNotIn("registry source", text_result.output)
                     # GAP-2290: no second "check your installation" line.
                     self.assertNotIn("No plugins found", text_result.output)
                 else:
-                    self.assertIn(f"— {expected_state}; entries=0", text_result.output)
-                    self.assertIn("No plugins found", text_result.output)
+                    # GAP-2317: a valid but empty registry reads the same way.
+                    self.assertIn("claudecode has no installed plugins.", text_result.output)
+                    self.assertNotIn("entries=0", text_result.output)
+                    self.assertNotIn("No plugins found", text_result.output)
 
                 json_result = self.invoke(
                     ["list", "--connector", "claudecode", "--json"]
                 )
                 self.assertEqual(json_result.exit_code, 0, json_result.output)
                 self.assertEqual(json.loads(json_result.stdout), [])
-                self.assertIn(registry, json_result.stderr)
-                if expected_state == "valid":
-                    self.assertIn(f"— {expected_state}; entries=0", json_result.stderr)
+                self.assertIn("claudecode has no installed plugins", json_result.stderr)
 
 
 class TestPluginScanAllMissingClaudeRegistry(PluginCommandTestBase):
@@ -993,6 +1011,33 @@ class TestPluginListMultiConnectorDefault(PluginCommandTestBase):
                     self.assertIn("defenseclaw plugin info <id>", listed.output)
                 else:
                     self.assertIn("Description", listed.output)
+
+    def test_list_below_70_columns_hides_actions_instead_of_squeezing(self):
+        """GAP-2333/GAP-2334: Actions hides (and is named) before Status/Verdict are cut."""
+        from defenseclaw.commands.cmd_plugin import _fit_plugin_list_table
+        from rich.console import Console
+
+        rows = [
+            {"Status": status, "ID": pid, "Plugin": pid, "Description": "A plugin", "Origin": "bundled",
+             "Severity": sev, "Verdict": verdict, "Actions": actions}
+            for status, pid, sev, verdict, actions in (
+                ("\u2717 disabled", "cron_providers/chronos", "-", "-", "disabled"),
+                ("\u2713 enabled", "dashboard_auth/self_hosted", "-", "-", "-"),
+                ("\u2717 quarantined", "photon", "MEDIUM", "warning", "quarantined"),
+            )
+        ]
+        for width in (60, 80):
+            with self.subTest(width=width):
+                console = Console(width=width, record=True)
+                table, hidden = _fit_plugin_list_table(console, "Plugins", rows)
+                console.print(table)
+                text = console.export_text()
+                self.assertEqual(hidden, ["Description", "Origin", "Plugin", "Actions"])
+                self.assertNotIn("\u2026", text, text)
+                self.assertNotIn("\u2503\u2503", text, text)
+                for cell in ("\u2717 disabled", "\u2717 quarantined", "Severity", "Verdict", "warning"):
+                    self.assertIn(cell, text)
+                self.assertTrue(all(len(line) <= width for line in text.splitlines()), text)
 
     @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
     def test_hermes_nested_block_is_keyed_by_listed_id(self, _mock_oc):

@@ -148,7 +148,7 @@ This is not an unrestricted content crawl. The scanner:
 - preserves recognized model stores as specialized evidence and accepts high-signal GGUF/GGML, safetensors, Core ML, and Q4NX artifacts on format evidence;
 - outside those stores, admits ambiguous ONNX/ORT, TFLite, PyTorch/checkpoint, and generic binary formats only when they have explicit model context (for example, a model/weights/checkpoint/format directory, a semantic model name in a non-cache application support/container/resource scope, or a nearby bounded metadata sidecar) **and** a meaningful, non-opaque identity from the artifact or model directory;
 - rejects generic identities such as `model`, `weights`, and `runtime`, opaque hex/UUID-like cache keys, and version-only identities. Known Chrome Optimization Guide/OptGuide payload paths are rejected for these ambiguous formats; this targeted suppression does not exclude high-signal formats or recognized model stores;
-- skips common source, dependency, build, browser-noise, and runtime-noise trees while allowing application-scoped caches to participate;
+- skips common source, dependency, build, browser-noise, and runtime-noise trees, plus DefenseClaw's own data directory (`~/.defenseclaw` and the configured `data_dir`, which hold its bundled dependencies and models), while allowing application-scoped caches to participate;
 - applies global and per-root traversal limits, rotates roots, and resumes incomplete roots on later scans; and
 - reads only bounded metadata such as a GGUF header prefix or a small adjacent manifest/configuration file, never tensor payloads.
 

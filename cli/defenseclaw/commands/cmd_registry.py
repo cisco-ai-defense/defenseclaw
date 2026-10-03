@@ -388,7 +388,7 @@ def add_cmd(  # noqa: PLR0913 - mirrors the prompt surface
 
     add_details = f"id={sid} kind={kind} content={content} url={url}"
     if emit_json:
-        _log_registry_action(app, "registry-add", add_details)
+        _log_registry_action(app, "registry-add", sid, add_details)
         payload: dict[str, Any] = {"action": "add", "source": _source_to_dict(new_source)}
         if missing_file:
             payload["warning"] = missing_file
@@ -398,7 +398,7 @@ def add_cmd(  # noqa: PLR0913 - mirrors the prompt surface
     if missing_file:
         ux.warn(missing_file)
     # The success line first, then any stopped-gateway note (GAP-1718).
-    _log_registry_action(app, "registry-add", add_details)
+    _log_registry_action(app, "registry-add", sid, add_details)
     # The wizard offers the sync itself and prints this only on "n" (GAP-2075).
     if not click.get_current_context().meta.get(_WIZARD_SYNC_PROMPT_KEY):
         _print_sync_hint(sid)
@@ -518,7 +518,7 @@ def edit_cmd(  # noqa: PLR0913
     missing_file = _missing_file_warning(source.kind, source.url)
     edit_details = _registry_edit_details(source, before)
     if emit_json:
-        _log_registry_action(app, "registry-edit", edit_details)
+        _log_registry_action(app, "registry-edit", source.id, edit_details)
         edit_payload: dict[str, Any] = {"action": "edit", "source": _source_to_dict(source)}
         if missing_file:
             edit_payload["warning"] = missing_file
@@ -527,7 +527,7 @@ def edit_cmd(  # noqa: PLR0913
     ux.ok(f"Updated registry source {source.id!r}.")
     if missing_file:
         ux.warn(missing_file)
-    _log_registry_action(app, "registry-edit", edit_details)
+    _log_registry_action(app, "registry-edit", source.id, edit_details)
 
 
 # The fields `registry edit` can change, in the order its audit row names them.
@@ -670,18 +670,20 @@ def show_cmd(app: AppContext, source_id: str, emit_json: bool) -> None:
     click.echo()
 
 
-def _log_registry_action(app: AppContext, action: str, details: str) -> None:
+def _log_registry_action(app: AppContext, action: str, target: str, details: str) -> None:
     """Record a saved registry change; a stopped gateway only skips the audit event.
 
     The config is already saved, so a stopped gateway prints one warning on
     stderr instead of a traceback and rc=1 (like policy and setup webhook).
+    The target is the source id, entry or policy scope the change is about,
+    so audit filters find it without parsing details (GAP-2280).
     """
     if not app.logger:
         return
     from defenseclaw.logger import CanonicalObservabilityUnavailableError
 
     try:
-        app.logger.log_action(action, "config", details)
+        app.logger.log_action(action, target or "config", details)
     except CanonicalObservabilityUnavailableError:
         click.echo(
             "  ⚠ The gateway isn't running, so the audit event was not recorded "
@@ -735,11 +737,11 @@ def remove_cmd(
         remove_source_cache(cfg.data_dir, sid)
 
     if emit_json:
-        _log_registry_action(app, "registry-remove", f"id={sid}")
+        _log_registry_action(app, "registry-remove", sid, f"id={sid}")
         _emit_json({"action": "remove", "source_id": sid})
         return
     ux.ok(f"Removed registry source {sid!r}.")
-    _log_registry_action(app, "registry-remove", f"id={sid}")
+    _log_registry_action(app, "registry-remove", sid, f"id={sid}")
 
 
 # ---------------------------------------------------------------------------
@@ -911,6 +913,11 @@ def sync_cmd(  # noqa: PLR0913
         _make_scan_callback(app, allow_private=allow_private, scan_stdio=scan_stdio)
         if scan else None
     )
+    # GAP-2327: a fetch plus a remote MCP scan can take 10 s or more; say
+    # what is running on an interactive stderr so the CLI does not look hung.
+    progress = not emit_json and _stderr_is_tty()
+    if progress and callback is not None:
+        callback = _with_scan_progress(callback, scan_stdio=scan_stdio)
 
     if sync_all_flag:
         if source_ids:
@@ -919,6 +926,8 @@ def sync_cmd(  # noqa: PLR0913
                 err=True,
             )
             raise SystemExit(2)
+        if progress:
+            click.echo("Syncing all enabled registry sources ...", err=True)
         reports = sync_all(
             cfg,
             cfg.data_dir,
@@ -937,6 +946,8 @@ def sync_cmd(  # noqa: PLR0913
         reports = []
         for sid in source_ids:
             source = _find_source(cfg, sid)
+            if progress:
+                click.echo(f"Fetching {source.id} ...", err=True)
             reports.append(sync_source(
                 cfg,
                 cfg.data_dir,
@@ -949,17 +960,17 @@ def sync_cmd(  # noqa: PLR0913
         cfg.save()
 
     # A sync can promote entries into asset_policy.<type>.registry, which
-    # admission reads: audit every run with what it changed (GAP-1518). The
-    # gateway admits only registered actions, so it is a registry-edit whose
-    # details start with "sync" (GAP-1653). The config is already saved, so a
-    # stopped gateway only skips the events, with one warning (GAP-2236).
+    # admission reads: audit every run with what it changed (GAP-1518), as its
+    # own registry-sync action on the source (GAP-2280). The config is already
+    # saved, so a stopped gateway only skips the events, with one warning
+    # (GAP-2236).
     if app.logger:
         from defenseclaw.commands._audit_notice import saved_change_audit
 
         audit = saved_change_audit(app.logger)
         for r in reports:
             audit.log_action(
-                "registry-edit", "config",
+                "registry-sync", r.source_id,
                 f"sync id={r.source_id} fetched={r.fetched} scanned={r.scanned} "
                 f"promoted_skills={r.promoted_skills} promoted_mcps={r.promoted_mcps} "
                 f"blocked={r.blocked} errors={len(r.errors)} promote={'off' if no_promote else 'on'}",
@@ -972,6 +983,30 @@ def sync_cmd(  # noqa: PLR0913
     if any(not r.ok() for r in reports):
         # A failed fetch or entry scan is not a successful sync (GAP-1357).
         raise SystemExit(1)
+
+
+def _stderr_is_tty() -> bool:
+    try:
+        return sys.stderr.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
+def _with_scan_progress(callback: ScanCallback, *, scan_stdio: bool) -> ScanCallback:
+    """Print one stderr line before each entry scan (GAP-2327)."""
+
+    def _scan(source: RegistrySource, entry: ManifestEntry):  # type: ignore[no-untyped-def]
+        note = ""
+        if entry.is_mcp():
+            if (entry.transport or "stdio") != "stdio":
+                note = " (remote, can take up to a minute)"
+            elif not scan_stdio:
+                # The callback prints its own "skipping stdio MCP scan" notice.
+                return callback(source, entry)
+        click.echo(f"  scanning {entry.type}:{entry.name}{note} ...", err=True)
+        return callback(source, entry)
+
+    return _scan
 
 
 def _promoted_label(skills: int, mcps: int) -> str:
@@ -1598,8 +1633,10 @@ def _do_manual_verdict(
         )
 
     entry_details = f"{action_label} id={source.id} {entry_type}:{entry_name}"
+    entry_action = "registry-approve" if approved else "registry-reject"
+    entry_target = f"{entry_type}:{entry_name}"
     if emit_json:
-        _log_registry_action(app, "registry-edit", entry_details)
+        _log_registry_action(app, entry_action, entry_target, entry_details)
         out: dict[str, Any] = {
             "action": action_label,
             "verdict": verdict.to_dict(),
@@ -1617,7 +1654,7 @@ def _do_manual_verdict(
 
     label = "Approved" if approved else "Rejected"
     ux.ok(f"{label} {entry_type}:{entry_name} from {source.id}.")
-    _log_registry_action(app, "registry-edit", entry_details)
+    _log_registry_action(app, entry_action, entry_target, entry_details)
     if repromote and promoted is None:
         ux.subhead(
             "No cached manifest yet — run `defenseclaw registry sync "
@@ -1756,12 +1793,12 @@ def require_cmd(
         else f"asset_policy.{asset}"
     )
     # Turning the requirement on can block every asset at admission: audit
-    # each toggle like the other registry changes (GAP-1518), as a registered
-    # registry-edit whose details start with "require" (GAP-1653). The change
-    # is already saved, so a stopped gateway only skips the event (GAP-2236).
+    # each toggle like the other registry changes (GAP-1518), as its own
+    # registry-require action on the policy scope (GAP-2280). The change is
+    # already saved, so a stopped gateway only skips the event (GAP-2236).
     affected = ",".join(f"{c.connector}:{c.status}" for c in result.connectors) or "-"
     _log_registry_action(
-        app, "registry-edit",
+        app, "registry-require", f"{scope_label}.registry",
         f"require scope={scope_label}.registry required={'true' if enabled else 'false'} "
         f"connectors={affected}"
         + ("" if enforce is None else f" enforce={'true' if enforce else 'false'}"),

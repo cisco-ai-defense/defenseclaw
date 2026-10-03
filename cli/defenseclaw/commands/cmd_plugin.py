@@ -479,7 +479,7 @@ def _scan_one_plugin_dir(
         click.echo(f"error: scan failed: {exc}", err=True)
         raise SystemExit(1)
 
-    _record_scan(app.logger, result)
+    _record_scan(app.logger, result, connector=connector or None)
 
     if as_json:
         # Preserve the ScanResult keys automation already parses, while adding
@@ -516,6 +516,7 @@ def _scan_one_plugin_dir(
         _scan_ui.render_summary(
             ctx,
             clean=1,
+            warning=0,
             blocked=0,
             errored=0,
             total=1,
@@ -550,6 +551,7 @@ def _scan_one_plugin_dir(
     _scan_ui.render_summary(
         ctx,
         clean=0,
+        warning=0 if verdict == _scan_ui.VERDICT_BLOCKED else 1,
         blocked=1 if verdict == _scan_ui.VERDICT_BLOCKED else 0,
         errored=0,
         total=1,
@@ -770,6 +772,11 @@ def _render_plugin_registry_diagnostics(
                         err=force_stderr,
                     )
                 continue
+            if probe.state == PluginRegistryState.VALID and not probe.entries:
+                # GAP-2317: an empty registry is the same normal "none yet".
+                if not hide_missing:
+                    click.echo(f"{connector} has no installed plugins.", err=force_stderr)
+                continue
             suffix = f" ({probe.detail})" if probe.detail else ""
             click.echo(
                 "Plugin discovery source "
@@ -779,16 +786,22 @@ def _render_plugin_registry_diagnostics(
             )
 
 
-def _missing_plugin_registry(
+def _empty_plugin_registry_note(
     diagnostics: dict[str, list[PluginRegistryProbe]],
     connector: str,
-) -> str:
-    """Path of the connector's not-found plugin registry, or ""."""
+) -> str | None:
+    """Why the connector's plugin registry lists nothing, or None.
+
+    A missing registry gives "(<path> not found)" (GAP-2290); a valid but
+    empty one gives "" (GAP-2317).
+    """
 
     for probe in diagnostics.get(connector) or []:
         if probe.state == PluginRegistryState.MISSING:
-            return str(probe.source_path)
-    return ""
+            return f"({probe.source_path} not found)"
+        if probe.state == PluginRegistryState.VALID and not probe.entries:
+            return ""
+    return None
 
 
 def _fail_on_plugin_registry_errors(
@@ -1196,7 +1209,7 @@ def _scan_all_plugins(
         )
         _scan_ui.render_preamble(ctx, target_count=len(targets))
 
-        clean = blocked = errored = findings_total = 0
+        clean = warned = blocked = errored = findings_total = 0
         # Summary time is the wall time of the sweep, not the sum of the
         # base scanner's durations (GAP-2070).
         sweep_started = time.monotonic()
@@ -1209,7 +1222,7 @@ def _scan_all_plugins(
                 if not as_json:
                     click.echo(f"  error: scan failed for {pid!r}: {exc}", err=True)
                 continue
-            _record_scan(app.logger, result)
+            _record_scan(app.logger, result, connector=connector or None)
             if as_json:
                 payload = json.loads(result.to_json())
                 payload["connector"] = connector
@@ -1237,6 +1250,8 @@ def _scan_all_plugins(
                 )
                 if verdict == _scan_ui.VERDICT_BLOCKED:
                     blocked += 1
+                else:
+                    warned += 1
                 _scan_ui.render_per_target_status(
                     ctx,
                     target=target_label,
@@ -1252,6 +1267,7 @@ def _scan_all_plugins(
             _scan_ui.render_summary(
                 ctx,
                 clean=clean,
+                warning=warned,
                 blocked=blocked,
                 errored=errored,
                 total=len(targets),
@@ -1545,8 +1561,8 @@ def install(app: AppContext, name_or_path: str, force: bool, take_action: bool, 
             raise
 
         if app.logger:
-            for result in scan_results.values():
-                saved_change_audit(app.logger).log_scan(result)
+            for scanned_connector, result in scan_results.items():
+                saved_change_audit(app.logger).log_scan(result, connector=scanned_connector)
         transaction.finalize()
         if deferred_enforcement_failure:
             raise SystemExit(1)
@@ -1928,7 +1944,7 @@ def _scan_installed_plugin_for_connector(
 
     if post_decision.verdict == "allowed":
         if app.logger and not defer_scan_log:
-            saved_change_audit(app.logger).log_scan(result)
+            saved_change_audit(app.logger).log_scan(result, connector=connector)
         click.echo(
             f"[install] {plugin_name!r} became allow-listed for connector={connector} — skipping post-scan enforcement"
         )
@@ -1943,7 +1959,7 @@ def _scan_installed_plugin_for_connector(
 
     if post_decision.verdict == "clean":
         if app.logger and not defer_scan_log:
-            saved_change_audit(app.logger).log_scan(result)
+            saved_change_audit(app.logger).log_scan(result, connector=connector)
         click.echo(f"[install] {plugin_name!r} installed and clean (connector={connector})")
         pe.set_source_path("plugin", plugin_name, plugin_path, connector)
         if app.logger:
@@ -1984,7 +2000,7 @@ def _scan_installed_plugin_for_connector(
             f"(connector={connector}; no action taken — pass --action to enforce)"
         )
         if app.logger and not defer_scan_log:
-            saved_change_audit(app.logger).log_scan(result)
+            saved_change_audit(app.logger).log_scan(result, connector=connector)
         pe.set_source_path("plugin", plugin_name, plugin_path, connector)
         if app.logger:
             saved_change_audit(app.logger).log_action("install-warning", plugin_name, detail)
@@ -1992,7 +2008,7 @@ def _scan_installed_plugin_for_connector(
 
     action_cfg = post_decision.action
     if app.logger and not defer_scan_log:
-        saved_change_audit(app.logger).log_scan(result)
+        saved_change_audit(app.logger).log_scan(result, connector=connector)
     enforcement_reason = f"post-install scan: {len(result.findings)} findings, max={sev}"
     applied_actions: list[str] = []
 
@@ -2086,7 +2102,7 @@ def _print_install_result(name: str, result) -> None:
 def list_plugins(app: AppContext, as_json: bool, connector_flag: str) -> None:
     """List installed plugins with scan severity.
 
-    By default this lists **every configured connector's** plugins — each
+    By default this lists every configured connector's plugins — each
     connector gets its own connector-tagged table — so the output reads
     the same whether one or many connectors are configured. ``--connector
     <name>`` narrows the listing to one configured peer.
@@ -2168,10 +2184,10 @@ def list_plugins(app: AppContext, as_json: bool, connector_flag: str) -> None:
             if len(connectors) > 1:
                 # GAP-2290: a missing registry is the normal "none yet" case;
                 # say it on this connector's own line.
-                missing = _missing_plugin_registry(discovery, connector)
-                if missing:
+                note = _empty_plugin_registry_note(discovery, connector)
+                if note is not None:
                     click.echo(
-                        f"Plugins (connector={connector}): no installed plugins ({missing} not found)"
+                        f"Plugins (connector={connector}): no installed plugins {note}".rstrip()
                     )
                 else:
                     click.echo(f"Plugins (connector={connector}): no plugins found")
@@ -2183,7 +2199,7 @@ def list_plugins(app: AppContext, as_json: bool, connector_flag: str) -> None:
 
     if not shown_any:
         _render_plugin_registry_diagnostics(discovery, hide_missing=len(connectors) > 1)
-        if len(connectors) == 1 and not _missing_plugin_registry(discovery, connectors[0]):
+        if len(connectors) == 1 and _empty_plugin_registry_note(discovery, connectors[0]) is None:
             click.echo(f"No plugins found. Check your {connectors[0]} installation and plugin directories.")
         return
 
@@ -2583,7 +2599,9 @@ def _print_plugin_list_table(
 # GAP-2292: the column order, and which columns may be hidden (first to last)
 # when the terminal is too narrow for one line per row.
 _PLUGIN_LIST_COLUMNS = ("Status", "ID", "Plugin", "Description", "Origin", "Severity", "Verdict", "Actions")
-_PLUGIN_LIST_OPTIONAL = ("Description", "Origin", "Plugin")
+# GAP-2333/GAP-2334: Actions hides last, and is named in "Hidden to fit",
+# instead of being squeezed to "quarantin…" or to a zero-width column.
+_PLUGIN_LIST_OPTIONAL = ("Description", "Origin", "Plugin", "Actions")
 _PLUGIN_LIST_DESC_MAX = 50
 _PLUGIN_LIST_DESC_MIN = 16
 
@@ -2594,7 +2612,7 @@ def _fit_plugin_list_table(console: Any, title: str, rows: list[dict[str, str]])
     Rich never shrinks a ``no_wrap`` column, so a fixed-width Description
     squeezed Status, ID and Verdict to "…" on 80/120-column terminals
     (GAP-2292). Instead the Description narrows first, then Description,
-    Origin and Plugin are hidden in that order. Returns (table, hidden).
+    Origin, Plugin and Actions are hidden in that order. Returns (table, hidden).
     """
     from rich.cells import cell_len
     from rich.measure import Measurement
@@ -2607,8 +2625,12 @@ def _fit_plugin_list_table(console: Any, title: str, rows: list[dict[str, str]])
                 continue
             if col == "Description":
                 table.add_column(col, max_width=desc_width, no_wrap=True, overflow="ellipsis")
-            elif col in ("Plugin", "Origin", "Actions"):
+            elif col in ("Plugin", "Origin"):
                 table.add_column(col)
+            elif col == "ID":
+                # GAP-2333: when even the required columns overflow, a long ID
+                # folds onto a second line rather than squeezing Status/Verdict.
+                table.add_column(col, overflow="fold")
             else:
                 table.add_column(col, no_wrap=True, style="bold" if col == "Status" else "")
         for row in rows:
@@ -3652,6 +3674,21 @@ def _quarantined_plugin_alias(pe: Any, name: str, connector: str) -> str:
     return next(iter(hits)) if len(hits) == 1 else ""
 
 
+def _hermes_listed_id(path: str, connector: str) -> str:
+    """The id 'plugin list' shows for a Hermes plugin folder, or "" (GAP-2308)."""
+    if not path or not connector or connector_paths.normalize(connector) != "hermes":
+        return ""
+    from defenseclaw.inventory.claw_inventory import hermes_listed_identity
+
+    identity = hermes_listed_identity(path)
+    return identity[0] if identity else ""
+
+
+def _plugin_label(listed: str, key: str) -> str:
+    """``'photon' (photon-platform)`` when the listed id and quarantine key differ."""
+    return f"{listed!r} ({key})" if listed and listed != key else repr(key)
+
+
 def _plugin_policy_fanout_connectors(
     app: AppContext,
     pe: Any,
@@ -3701,6 +3738,23 @@ def _plugin_has_connector_enforcement(
         or app.store.has_action("plugin", plugin_name, "runtime", "disable", connector)
         or app.store.has_action("plugin", plugin_name, "runtime", "enable", connector)
     )
+
+
+def _plugin_copies_disabled(app: AppContext, plugin_name: str, connector: str) -> bool:
+    """True when every listed copy of *plugin_name* in scope is off (GAP-2313)."""
+    states: list[bool] = []
+    for c in [connector] if connector else _active_plugin_connectors(app):
+        try:
+            rows = _merge_all_plugins(app.cfg.plugin_dir, c, cfg=app.cfg)
+        except Exception:  # noqa: BLE001 - keep the generic "still loads" note.
+            return False
+        actions_map = _build_plugin_actions_map(app.store, c)
+        states.extend(
+            _plugin_effectively_enabled(p, _row_action(p, actions_map))
+            for p in rows
+            if plugin_name in (p.get("id"), p.get("name"))
+        )
+    return bool(states) and not any(states)
 
 
 @plugin.command()
@@ -3758,7 +3812,14 @@ def block(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
             pe.set_source_path("plugin", plugin_name, plugin_path)
         click.secho(f"[plugin] Blocked {plugin_name!r} (every connector).", fg="red")
 
-    if plugin_path or _plugin_match_dir_scopes(app, plugin_name, connector):
+    installed = bool(plugin_path or _plugin_match_dir_scopes(app, plugin_name, connector))
+    if installed and _plugin_copies_disabled(app, plugin_name, connector):
+        # GAP-2313: a disabled copy does not load; don't tell the user it does.
+        click.secho(
+            "  The installed copy is disabled, so it does not load; new installs are refused.",
+            fg="yellow",
+        )
+    elif installed:
         flag = f" --connector {connector}" if connector else ""
         click.secho(
             "  The installed copy still loads: block only refuses new installs.\n"
@@ -4385,7 +4446,8 @@ def quarantine(app: AppContext, name: str, reason: str, connector_flag: str) -> 
             raise SystemExit(1)
 
         suffix = f" (connector={target_connector})" if target_connector else ""
-        click.echo(f"[plugin] {plugin_name!r} quarantined to {dest}{suffix}")
+        listed = _hermes_listed_id(plugin_path, target_connector)
+        click.echo(f"[plugin] {_plugin_label(listed, plugin_name)} quarantined to {dest}{suffix}")
 
         if target_connector:
             pe.quarantine_for_connector("plugin", plugin_name, target_connector, reason)
@@ -4397,8 +4459,9 @@ def quarantine(app: AppContext, name: str, reason: str, connector_flag: str) -> 
         if app.logger:
             saved_change_audit(app.logger).log_action(
                 "plugin-quarantine",
-                plugin_name,
-                f"reason={reason}, dest={dest} connector={target_connector}",
+                listed or plugin_name,
+                f"reason={reason}, dest={dest} connector={target_connector}"
+                + (f" quarantine_id={plugin_name}" if listed and listed != plugin_name else ""),
             )
 
 
@@ -4524,7 +4587,11 @@ def restore(app: AppContext, name: str, restore_path: str, connector_flag: str) 
             raise SystemExit(1)
 
         suffix = f" (connector={resolved_connector})" if resolved_connector else ""
-        click.echo(f"[plugin] {plugin_name!r} restored to {target_restore_path}{suffix}")
+        listed = _hermes_listed_id(
+            (entry.source_path if entry is not None else "") or target_restore_path,
+            resolved_connector,
+        )
+        click.echo(f"[plugin] {_plugin_label(listed, plugin_name)} restored to {target_restore_path}{suffix}")
 
         if resolved_connector:
             pe.clear_quarantine_for_connector("plugin", plugin_name, resolved_connector)
@@ -4536,8 +4603,9 @@ def restore(app: AppContext, name: str, restore_path: str, connector_flag: str) 
         if app.logger:
             saved_change_audit(app.logger).log_action(
                 "plugin-restore",
-                plugin_name,
-                f"restored to {target_restore_path} connector={resolved_connector}",
+                listed or plugin_name,
+                f"restored to {target_restore_path} connector={resolved_connector}"
+                + (f" quarantine_id={plugin_name}" if listed and listed != plugin_name else ""),
             )
 
 
@@ -4696,6 +4764,13 @@ def _plugin_info_card(
             quarantined = True
             if scan_entry is None:
                 scan_entry = _latest_plugin_scan_for_connector(app, alias, connector)
+    if quarantined and scan_entry is None and connector:
+        # GAP-2308: scans of a Hermes plugin are keyed by its listed id
+        # (photon), its quarantine by the manifest name (photon-platform).
+        q_entry = actions_map.get(action_name)
+        listed = _hermes_listed_id(getattr(q_entry, "source_path", "") or "", connector)
+        if listed and listed != action_name:
+            scan_entry = _latest_plugin_scan_for_connector(app, listed, connector)
 
     if info_map is None:
         if (

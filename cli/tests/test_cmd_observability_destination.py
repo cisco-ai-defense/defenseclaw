@@ -1000,3 +1000,106 @@ def test_doctor_destination_hint_names_the_gateway_proxy_path() -> None:
     )
     assert "'defenseclaw observability destination test galileo'" in hint
     assert "HTTPS_PROXY/NO_PROXY" in hint
+
+
+class _CredentialTransport(_Transport):
+    def __init__(self, error: destination_test.DestinationTestError | None = None) -> None:
+        super().__init__()
+        self.checks: list[tuple[object, object]] = []
+        self.check_error = error
+
+    def check_credentials(self, destination: object, target: object, *, probe_id: str, timeout: float) -> None:
+        self.checks.append((destination, target))
+        if self.check_error is not None:
+            raise self.check_error
+
+
+def _galileo_like() -> dict:
+    return _destination(
+        "galileo",
+        kind="otlp",
+        protocol="http/protobuf",
+        endpoint="https://api.galileo.example.test/otel/traces",
+        headers={"Galileo-API-Key": {"env": "SOC_TOKEN"}},
+        selected_signals=["traces"],
+    )
+
+
+def test_otlp_http_handshake_checks_the_key_with_an_empty_export() -> None:
+    # GAP-2289: the handshake alone passed for a key the endpoint rejects.
+    transport = _CredentialTransport()
+    result = destination_test.run_destination_test(
+        _effective(_galileo_like()),
+        name="galileo",
+        data_dir="/data",
+        timeout=2.5,
+        write_probe=False,
+        compliance=_Compliance(),
+        transport=transport,
+        credential_resolver=_resolve,
+        probe_id_factory=lambda: "cred-1",
+    )
+    assert result.mode == "handshake"
+    assert result.authentication_verified is True
+    assert len(transport.checks) == 1
+    assert transport.checks[0][1].request_target == "/otel/traces"
+
+    compliance = _Compliance()
+    rejected = _CredentialTransport(
+        destination_test.DestinationTestError("authentication_failed", "the destination rejected the configured credentials")
+    )
+    with pytest.raises(destination_test.DestinationTestError) as captured:
+        destination_test.run_destination_test(
+            _effective(_galileo_like()),
+            name="galileo",
+            data_dir="/data",
+            timeout=2.5,
+            write_probe=False,
+            compliance=compliance,
+            transport=rejected,
+            credential_resolver=_resolve,
+            probe_id_factory=lambda: "cred-2",
+        )
+    assert captured.value.failure_class == "authentication_failed"
+    assert compliance.activities[-1].failure_class == "authentication_failed"
+
+
+def test_empty_export_classifies_401_as_authentication_failed() -> None:
+    import http.server
+    import threading
+
+    seen: dict[str, object] = {}
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802
+            seen["length"] = self.headers.get("Content-Length")
+            seen["key"] = self.headers.get("Galileo-API-Key")
+            self.send_response(401)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *_args: object) -> None:
+            return
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), _Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        target = destination_test._Target(
+            scheme="http", host="127.0.0.1", port=server.server_address[1], request_target="/otel/traces",
+            protocol="http", safety=destination_test._NetworkSafety(allow_private_networks=True),
+            tls=destination_test._TLSSettings(insecure=True),
+        )
+        destination = destination_test._Destination(
+            name="galileo", kind="otlp", protocol="http/protobuf", targets=(target,), method="POST",
+            headers={"Galileo-API-Key": "k-test"}, token="", index="",
+        )
+        with pytest.raises(destination_test.DestinationTestError) as captured:
+            destination_test.SocketProbeTransport().check_credentials(
+                destination, target, probe_id="cred-3", timeout=5
+            )
+    finally:
+        server.shutdown()
+    assert captured.value.failure_class == "authentication_failed"
+    assert "HTTP 401" in captured.value.message
+    assert seen == {"length": "0", "key": "k-test"}

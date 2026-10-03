@@ -183,8 +183,7 @@ class TestScanUXSummary(_PluginScanUXBase):
         result = self.invoke(["scan", self.plugin_name])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Summary: 1 plugin scanned", result.output)
-        self.assertIn("clean=1", result.output)
-        self.assertIn("blocked=0", result.output)
+        self.assertIn("clean=1, warning=0, blocked=0", result.output)
 
     @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
     def test_summary_rejected_is_not_blocked(self, mock_scan) -> None:
@@ -222,8 +221,8 @@ class TestScanUXSummary(_PluginScanUXBase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertNotIn("[BLOCKED]", result.output)
         self.assertIn("[WARN]", result.output)
-        self.assertIn("blocked=0", result.output)
-        self.assertIn("findings=1", result.output)
+        # GAP-2336: the [WARN] plugin is counted, so the counts add up.
+        self.assertIn("Summary: 1 plugin scanned, clean=0, warning=1, blocked=0, findings=1", result.output)
 
     @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
     def test_summary_includes_duration_ms(self, mock_scan) -> None:
@@ -482,12 +481,9 @@ class TestScanAllSweep(_PluginScanUXBase):
                     ["scan", "--all", "--connector", "claudecode"]
                 )
                 self.assertEqual(text_result.exit_code, 0, text_result.output)
-                if expected_state == "valid":
-                    self.assertIn(registry, text_result.output)
-                    self.assertIn(f"— {expected_state}; entries=0", text_result.output)
-                else:
-                    # GAP-2274: a missing registry only means no plugins yet.
-                    self.assertNotIn(registry, text_result.output)
+                # GAP-2274/GAP-2317: a missing or empty registry only means no plugins yet.
+                self.assertNotIn(registry, text_result.output)
+                self.assertNotIn("entries=0", text_result.output)
                 self.assertIn("No plugins found to scan", text_result.output)
 
                 json_result = self.invoke(

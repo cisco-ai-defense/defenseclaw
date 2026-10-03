@@ -99,6 +99,7 @@ from defenseclaw.tui.services.setup_state import (
     build_readiness_checks,
     config_diff,
     get_config_value,
+    guardrail_mode_label,
     is_python_modeled,
     looks_like_secret_value,
     mask_secret,
@@ -4165,7 +4166,7 @@ def wizard_state_summary(wizard: SetupWizard | int, cfg: object | Mapping[str, A
         posture = "unredacted" if profile == "none" else "redacted"
         return f"Default profile: {profile} ({posture})  ·  Each observability destination can set its own profile"
     if wizard == SetupWizard.GUARDRAIL:
-        mode = _cfg_str(cfg, "guardrail.mode", "observe") or "observe"
+        mode = guardrail_mode_label(cfg)
         enabled = "on" if _guardrail_enabled(cfg) else "off"
         strategy = _cfg_str(cfg, "guardrail.detection_strategy", "regex_only") or "regex_only"
         return f"Guardrail: {enabled}  ·  Mode: {mode}  ·  Strategy: {_effective_strategy_text(cfg, strategy)}"

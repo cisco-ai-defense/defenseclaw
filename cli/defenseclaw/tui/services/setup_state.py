@@ -358,12 +358,16 @@ def build_readiness_checks(
                 "Guardrail",
                 "Guardrail is disabled or config is unavailable.",
                 "warn",
-                _intent("defenseclaw", ("setup", "guardrail"), "setup guardrail", "setup"),
+                _intent(
+                    "defenseclaw",
+                    ("setup", "guardrail", "--non-interactive"),
+                    "setup guardrail",
+                    "setup",
+                ),
             ),
         )
     else:
-        mode = str(_get_path(cfg, "guardrail.mode", "") or "observe")
-        checks.append(ReadinessCheck("Guardrail", f"enabled in {mode} mode", "pass"))
+        checks.append(ReadinessCheck("Guardrail", f"enabled in {guardrail_mode_label(cfg)} mode", "pass"))
 
     missing = list(missing_credential_rows(credentials))
     # The doctor result is only a fallback before the keys list has loaded;
@@ -746,6 +750,33 @@ def looks_like_secret_value(value: str) -> bool:
 
 def get_config_value(cfg: object | Mapping[str, Any] | None, key: str, default: Any = "") -> Any:
     return _get_path(cfg, key, default)
+
+
+def guardrail_mode_overrides(cfg: object | Mapping[str, Any] | None) -> tuple[str, tuple[tuple[str, str], ...]]:
+    """The global guardrail mode and the connectors whose own mode differs."""
+
+    mode = str(_get_path(cfg, "guardrail.mode", "") or "").strip() or "observe"
+    overrides: list[tuple[str, str]] = []
+    connectors = _get_path(cfg, "guardrail.connectors", None)
+    if isinstance(connectors, Mapping):
+        for name in sorted(connectors, key=lambda key: str(key).lower()):
+            own = str(_get_path(connectors[name], "mode", "") or "").strip()
+            if own and own != mode:
+                overrides.append((str(name), own))
+    return mode, tuple(overrides)
+
+
+def guardrail_mode_label(cfg: object | Mapping[str, Any] | None) -> str:
+    """The guardrail mode with per-connector overrides: ``action (opencode observe)``.
+
+    Setup said only "action" after ``setup guardrail --connector opencode
+    --mode observe`` (GAP-2325).
+    """
+
+    mode, overrides = guardrail_mode_overrides(cfg)
+    if not overrides:
+        return mode
+    return f"{mode} ({', '.join(f'{name} {own}' for name, own in overrides)})"
 
 
 def set_config_value(cfg: object | dict[str, Any], key: str, value: Any) -> None:

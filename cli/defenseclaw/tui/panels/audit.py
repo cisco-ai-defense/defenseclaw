@@ -1157,6 +1157,11 @@ def _is_low_signal_event(event: Event) -> bool:
         return False
     if severity not in AUDIT_LOW_SIGNAL_SEVERITIES:
         return False
+    if event.actor.strip().lower().startswith("cli:"):
+        # An operator's own change (cli:operator config-update) is not
+        # routine: the default view read "0 shown" right after a judge
+        # model change (GAP-2322).
+        return False
     haystack = _event_haystack(event)
     return not any(token in haystack for token in AUDIT_ACTIONABLE_TOKENS)
 

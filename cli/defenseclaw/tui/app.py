@@ -165,7 +165,6 @@ from defenseclaw.tui.services.overview_state import (
     ConnectorOverviewRow,
     HealthSnapshot,
     SubsystemHealth,
-    format_scan_age,
 )
 from defenseclaw.tui.services.read_repository import (
     TUIReadRepository,
@@ -857,6 +856,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         color: TOKEN_TEXT_PRIMARY;
         background: TOKEN_SURFACE_SELECTED;
         text-style: bold;
+    }
+
+    #panel-table.ai-step-aside {
+        display: none;
     }
 
     #ai-model-table.hidden,
@@ -2857,7 +2860,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         except NoMatches:
             return
 
-        activity.set_class(panel != "activity", "hidden")
+        activity.set_class(panel != "activity" or self.activity_model.shows_finished_output, "hidden")
         overview_visible = panel == "overview"
         scroller.set_class(overview_visible or self.help_open, "overview-scroll")
         # The acknowledgement frame is intentionally cheap, but any control
@@ -4533,7 +4536,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             body_widget = self.query_one("#body", Static)
         except NoMatches:
             return
-        activity.set_class(self.active_panel != "activity", "hidden")
+        activity.set_class(
+            self.active_panel != "activity" or self.activity_model.shows_finished_output, "hidden"
+        )
         # On short terminals the 11-row output log left the Activity history
         # (the 1/2 tabs, command list and gateway activity) no rows at all.
         activity.set_class(0 < self.size.height < 30, "compact")
@@ -5201,7 +5206,20 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         model_label_visible = (
             ai_visible and bool(self.ai_discovery_model.model_rows) and not product_detail_short
         )
-        product_label.set_class(not ai_visible, "hidden")
+        # The same at 80x24 for a local-model detail: the products table
+        # left the detail only its top border (GAP-2321), so it steps aside.
+        model_detail_short = (
+            ai_visible
+            and 0 < self.size.height < 30
+            and self.ai_discovery_model.detail_open
+            and self.ai_discovery_model.active_table == "models"
+            and bool(rows)
+        )
+        try:
+            self.query_one("#panel-table", DataTable).set_class(model_detail_short, "ai-step-aside")
+        except NoMatches:
+            pass
+        product_label.set_class(not ai_visible or model_detail_short, "hidden")
         model_label.set_class(not model_label_visible, "hidden")
         if model_label_visible:
             scope_label = self.ai_discovery_model.model_scope_label()
@@ -5588,6 +5606,18 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # Enable; the existing CLI flag is idempotent so this is safe.
         snapshot_known = snapshot is not None
         self._set_button_visible("#ai-enable", (not enabled) or (not snapshot_known))
+        # On in config but the gateway predates it: the same command restarts
+        # the gateway, so say that, as the hint and the d key do (GAP-2320).
+        enable_button = self.query_one("#ai-enable", Button)
+        if getattr(snapshot, "restart_pending", False):
+            enable_button.label = "Apply (restart gateway)"
+            enable_button.tooltip = (
+                "Restart the gateway so AI discovery starts: "
+                "`defenseclaw agent discovery enable --yes` (d)"
+            )
+        else:
+            enable_button.label = "Enable AI Discovery"
+            enable_button.tooltip = "Run `defenseclaw agent discovery enable --yes` (d)"
         self._set_button_visible("#ai-disable", enabled)
         # Scan only makes sense when discovery is on — discover requires
         # the daemon to be running, otherwise the CLI errors out.
@@ -5829,6 +5859,25 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if button_id == "overview-keys-fill":
             self._submit_command_text("defenseclaw keys fill-missing")
             return
+
+    def _open_setup_guardrail_goals(self) -> None:
+        """Overview g: open Setup's Guardrail goals.
+
+        It ran the interactive ``setup guardrail`` wizard, whose connector
+        checkbox reads the terminal, not the Activity input, so the command
+        hung until Ctrl+C (GAP-2323). The goal forms run it non-interactively.
+        """
+
+        self.action_switch_panel("setup")
+        self.setup_model.active_wizard = SetupWizard.GUARDRAIL
+        opened = self.setup_model.open_goal_menu(SetupWizard.GUARDRAIL)
+        self._render_chrome()
+        if opened:
+            self._set_status("Guardrail setup: choose what you want to do, then Enter.")
+        elif self.setup_model.form_active:
+            self._set_status("Guardrail setup form opened. Tab between fields, Ctrl+R to run.")
+        else:
+            self._set_status(self.setup_model.form_error or "Guardrail setup is not available.")
 
     def _handle_alert_control(self, button_id: str) -> None:
         if button_id == "alerts-filter-actionable":
@@ -8771,7 +8820,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
 
         banner = _OverviewBanner(f"bold {TOKENS.accent_cyan}")
         uptime_suffix = ""
-        if health is not None and health.uptime_ms:
+        # The last /health payload is kept while the gateway is down, so its
+        # uptime would read "uptime=91s" frozen beside "gateway not running"
+        # (GAP-2302).
+        if health is not None and health.uptime_ms and not self.overview_model.gateway_down():
             uptime_suffix = f"  uptime={health.uptime_ms // 1000}s"
         tagline = Text(
             f"  Enterprise AI Governance  v{__version__}{uptime_suffix}",
@@ -8864,8 +8916,15 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         selected_scan: dict[str, int] | None = None
 
         cfg_table = Table.grid(padding=(0, 2), expand=True)
-        cfg_table.add_column(width=17, no_wrap=True)
-        cfg_table.add_column(overflow="fold")
+        if narrow_services:
+            # Below 100 columns the value column was about 12 wide, so values
+            # broke mid-word and mid-path ("per-connecto|r packs"); a value
+            # that does not fit beside its label goes on the line under it
+            # (GAP-2324).
+            cfg_table.add_column(overflow="fold")
+        else:
+            cfg_table.add_column(width=17, no_wrap=True)
+            cfg_table.add_column(overflow="fold")
         if selected_connector:
             cfg_rows: list[tuple[str, RenderableType]] = [
                 (label, Text(value)) for label, value in self._connector_configuration_lines(selected_connector)
@@ -8888,8 +8947,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                     ),
                 ),
                 ("Environment", Text((cfg.environment if cfg else "") or "unknown")),
-                ("Policy dir", Text((cfg.policy_dir if cfg else "") or "—")),
-                ("Data dir", Text((cfg.data_dir if cfg else "") or "—")),
+                ("Policy dir", Text(_home_short((cfg.policy_dir if cfg else "") or "—"))),
+                ("Data dir", Text(_home_short((cfg.data_dir if cfg else "") or "—"))),
             ]
             # 8.13: when more than one connector is active, replace the
             # primary-only "Agent: <connector>" line with a concise
@@ -8922,8 +8981,24 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             api_addr = string_detail(health.api.details, "addr")
             if api_addr:
                 cfg_rows.append(("API", Text(api_addr)))
+        # The CONFIGURATION card's inner width: half the body less borders.
+        cfg_inner = max(20, (int(getattr(self.size, "width", 0) or 0) - 8) // 2 - 5)
         for label, value in cfg_rows:
-            cfg_table.add_row(Text(label, style=TOKENS.text_secondary), value)
+            if not narrow_services:
+                cfg_table.add_row(Text(label, style=TOKENS.text_secondary), value)
+                continue
+            value_text = value if isinstance(value, Text) else Text(str(value))
+            if len(label) + 2 + value_text.cell_len <= cfg_inner:
+                cell = Text(label, style=TOKENS.text_secondary)
+                cell.append("  ")
+                cell.append_text(value_text)
+                cfg_table.add_row(cell)
+                continue
+            indented = Table.grid()
+            indented.add_column(width=2)
+            indented.add_column(overflow="fold")
+            indented.add_row("", value_text)
+            cfg_table.add_row(Group(Text(label, style=TOKENS.text_secondary), indented))
 
         enf_table = Table.grid(padding=(0, 2), expand=True)
         enf_table.add_column(width=12, no_wrap=True)
@@ -9364,8 +9439,13 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         stable_text = re.sub(r"\b\d+(?:s|m|h|d) ago\b", "<live> ago", stable_text)
         return ("overview", self.help_open, stable_text)
 
-    def _runtime_sample_age(self) -> str:
-        """How old the last runtime sample is ("4m ago"), or ""."""
+    def _runtime_sample_time(self) -> str:
+        """When the last runtime sample was taken ("14:02:11", "Oct 02 14:02"), or "".
+
+        A clock time, not an age: Overview redraws only when its content
+        changes, so "34s ago" stayed "34s ago" while the gateway was down
+        (GAP-2302).
+        """
 
         raw = getattr(getattr(self.runtime_model, "snapshot", None), "scanned_at", "") or ""
         try:
@@ -9374,7 +9454,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             return ""
         if stamp.tzinfo is None:
             stamp = stamp.replace(tzinfo=timezone.utc)
-        return format_scan_age(stamp)
+        local = stamp.astimezone()
+        if local.date() == datetime.now(local.tzinfo).date():
+            return local.strftime("%H:%M:%S")
+        return local.strftime("%b %d %H:%M")
 
     def _overview_runtime_panel(self) -> RenderableType:
         """Always-visible Runtime coverage so Overview is not a services-only wall."""
@@ -9393,8 +9476,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             # sample ("DEGRADED · 17 processes · inference heartbeat: up")
             # read as live beside an all-offline SERVICES list (GAP-2248).
             table.add_row(Text("○ NO DATA - gateway not running", style=f"bold {TOKENS.text_muted}"))
-            age = self._runtime_sample_age()
-            last = f"Last sample {age}; it" if age else "Runtime coverage"
+            taken = self._runtime_sample_time()
+            last = f"Last sample at {taken}; it" if taken else "Runtime coverage"
             table.add_row(
                 Text(
                     f"{last} updates again once the gateway runs: press : and run \"start\".",
@@ -10025,7 +10108,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             ai_lines.append(f"  {ai_box.message or 'no AI agents detected yet'}")
 
         uptime = ""
-        if health is not None and health.uptime_ms:
+        if health is not None and health.uptime_ms and not self.overview_model.gateway_down():
             uptime = f"  uptime={health.uptime_ms // 1000}s"
         keys = self.overview_model.keys_status()
         if keys.available:
@@ -11394,6 +11477,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 return True
             if key in {"i", "l", "p"}:
                 self.action_switch_panel({"i": "inventory", "l": "logs", "p": "policies"}[key])
+                return True
+            if key == "g":
+                self._open_setup_guardrail_goals()
                 return True
             # ``b`` (bell), not ``N``: N is the Runtime tab key (GAP-1159).
             if key in {"b", "X"}:
@@ -16273,6 +16359,15 @@ def _palette_row_for_entry(entry: CmdEntry) -> tuple[str, str, str, str]:
     return entry.tui_name, badge, preview, hint
 
 
+def _home_short(path: str) -> str:
+    """``path`` with the home directory shown as ``~`` (display only)."""
+
+    home = os.path.expanduser("~").rstrip("/\\")
+    if home and len(home) > 1 and (path == home or path.startswith((home + "/", home + "\\"))):
+        return "~" + path[len(home) :]
+    return path
+
+
 def _diagnose_summary_line(lines: list[str]) -> str:
     """Pick the most informative summary line from ``defenseclaw doctor``.
 
@@ -16495,10 +16590,7 @@ def _config_display_value(field: Any) -> str:
     # Paths under the home directory read "~/..." so they fit the Value
     # column ("/Users/dcm-fc3/.d…" at 160 columns, GAP-2253); the side
     # pane and the edit box keep the full path.
-    home = os.path.expanduser("~").rstrip("/\\")
-    if home and len(home) > 1 and (value == home or value.startswith((home + "/", home + "\\"))):
-        return "~" + value[len(home) :]
-    return value
+    return _home_short(value)
 
 
 def _validation_label(field: Any) -> str:

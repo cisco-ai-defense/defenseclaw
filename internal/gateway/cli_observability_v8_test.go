@@ -487,3 +487,35 @@ func TestCLIObservabilityV8ScanNamesConnectorAndSkill(t *testing.T) {
 		t.Fatalf("scan records=%d, want scan.completed and finding.observed", seen)
 	}
 }
+
+// GAP-2272: a plugin scan row names the plugin and the connector in the
+// target, connector and details columns, so audit export --connector finds it.
+func TestCLIObservabilityV8PluginScanRowNamesTargetAndConnector(t *testing.T) {
+	fixture, api, _ := newCLIObservabilityV8Fixture(t)
+	body := `{"kind":"scan","run_id":"gap-2272","scan":{"scanner":"plugin-scanner","target":"/home/dcr-u/.hermes/plugins/web/ddgs","connector":"hermes","timestamp":"2026-07-06T00:00:00Z","duration_ms":5,"findings":[{"id":"rule-1","severity":"MEDIUM","title":"Network access","description":"network","location":"plugin.py","remediation":"review","scanner":"plugin-scanner","tags":[],"rule_id":"plugin.rule-1"}]}}`
+	request := httptest.NewRequest(http.MethodPost, cliObservabilityV8Path, bytes.NewBufferString(body))
+	response := httptest.NewRecorder()
+	api.handleCLIObservabilityV8(response, request)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("status=%d response=%q", response.Code, response.Body.String())
+	}
+	database, err := sql.Open("sqlite", fixture.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var target, connector, details string
+	if err := database.QueryRow(`SELECT COALESCE(target,''), COALESCE(connector,''), COALESCE(details,'')
+		FROM audit_events WHERE run_id = 'gap-2272' AND event_name = 'scan.completed'`,
+	).Scan(&target, &connector, &details); err != nil {
+		t.Fatal(err)
+	}
+	if target != "ddgs" || connector != "hermes" {
+		t.Fatalf("scan row target=%q connector=%q, want ddgs and hermes", target, connector)
+	}
+	for _, want := range []string{"scanner=plugin-scanner", "target_type=plugin", "findings=1", "verdict=warn"} {
+		if !strings.Contains(details, want) {
+			t.Errorf("scan row details %q lack %q", details, want)
+		}
+	}
+}

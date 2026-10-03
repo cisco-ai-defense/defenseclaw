@@ -1183,8 +1183,17 @@ func projectedCompatibilityTarget(projection observabilityredaction.Projection) 
 	if err != nil {
 		return ""
 	}
-	target, _ := payload["target"].(string)
-	return target
+	if target, _ := payload["target"].(string); target != "" {
+		return target
+	}
+	// Scan and finding records name the asset only in their typed target
+	// reference; without this a plugin scan row had no target (GAP-2272).
+	for _, field := range []string{"defenseclaw.scan.target_ref", "defenseclaw.finding.target_ref"} {
+		if target, _ := payload[field].(string); strings.TrimSpace(target) != "" {
+			return target
+		}
+	}
+	return ""
 }
 
 func projectedCompatibilityDetails(projection observabilityredaction.Projection, fallback string) string {
@@ -1212,6 +1221,22 @@ func projectedCompatibilityDetails(projection observabilityredaction.Projection,
 		// request_timeout); name it so the alert says why it fired.
 		if code, ok := payload["defenseclaw.schema.error_code"].(string); ok && strings.TrimSpace(code) != "" {
 			return label + ": " + strings.TrimSpace(code)
+		}
+		return label
+	}
+	// Scan summaries carry no message: say what the scanner found, as the
+	// pre-v8 scan rows did, instead of only "scan.completed" (GAP-2272).
+	if scannerName, ok := payload["defenseclaw.scan.scanner"].(string); ok && scannerName != "" {
+		label := "scanner=" + scannerName
+		for _, field := range []struct{ key, name string }{
+			{"defenseclaw.scan.target_type", "target_type"},
+			{"defenseclaw.scan.finding_count", "findings"},
+			{"defenseclaw.scan.severity_max", "max_severity"},
+			{"defenseclaw.scan.verdict", "verdict"},
+		} {
+			if value, present := payload[field.key]; present && value != nil && fmt.Sprint(value) != "" {
+				label += " " + field.name + "=" + fmt.Sprint(value)
+			}
 		}
 		return label
 	}
