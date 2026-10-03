@@ -574,21 +574,20 @@ PRIVATE_IP_PATTERN: re.Pattern[str] = re.compile(
 # URL's host, or a quoted host with an internal suffix (``"db.corp"``). Bare
 # identifiers (``local = ...``, ``Preset.PRIVATE``, ``corp=%s``) are not hosts,
 # and ``.get(`` / ``.post(`` count only on an HTTP client, not on a dict
-# (GAP-1982).
+# (GAP-1982). A URL's own ``http://`` scheme is not a network call, so an
+# example URL in a message doesn't satisfy the call side (GAP-2068).
 _INTERNAL_HOST = (
     r"(?:\blocalhost\b"
     r"|://[^\s/\"'`]*\b(?:internal|corp|local|intranet|private)\b"
     r"|[\"'`/@][\w-]+(?:\.[\w-]+)*\.(?:internal|corp|local|intranet|lan|localdomain)\b)"
 )
 _NETWORK_CALL = (
-    r"(?:\b(?:fetch|https?|requests?|urlopen|axios|httpx|aiohttp|curl|wget)\b"
+    r"(?:\b(?:fetch|https?(?!://)|requests?|urlopen|axios|httpx|aiohttp|curl|wget)\b"
     r"|(?<![\w.])(?:get|post)\b"
     r"|\b(?:requests|httpx|axios|session|client|http)\.(?:get|post)\b)"
 )
-INTERNAL_HOSTNAME_PATTERNS: re.Pattern[str] = re.compile(
-    rf"{_INTERNAL_HOST}.*{_NETWORK_CALL}|{_NETWORK_CALL}.*{_INTERNAL_HOST}",
-    re.IGNORECASE,
-)
+INTERNAL_HOST_PATTERN: re.Pattern[str] = re.compile(_INTERNAL_HOST, re.IGNORECASE)
+NETWORK_CALL_PATTERN: re.Pattern[str] = re.compile(_NETWORK_CALL, re.IGNORECASE)
 
 # ---------------------------------------------------------------------------
 # Dynamic import / require patterns

@@ -130,6 +130,19 @@ def python_code_lines(content: str, *, keep_strings: bool = False) -> list[str] 
     line numbers still match ``content.split("\n")``. Returns ``None``
     when the file doesn't tokenize, so the caller can fall back.
     """
+    views = python_code_views(content)
+    if views is None:
+        return None
+    return views[0] if keep_strings else views[1]
+
+
+def python_code_views(content: str) -> tuple[list[str], list[str]] | None:
+    """Return both :func:`python_code_lines` views from one tokenize pass.
+
+    The first view keeps non-docstring string literals, the second blanks
+    every string literal. Tokenizing is the costly part of a plugin scan
+    (GAP-2070), so callers that need both views should use this.
+    """
     try:
         toks = list(tokenize.generate_tokens(io.StringIO(content).readline))
     except (tokenize.TokenError, SyntaxError):
@@ -137,32 +150,42 @@ def python_code_lines(content: str, *, keep_strings: bool = False) -> list[str] 
     string_types = {tokenize.STRING}
     if hasattr(tokenize, "FSTRING_MIDDLE"):
         string_types.add(tokenize.FSTRING_MIDDLE)
-    spans = []
+    doc_spans = []
+    string_spans = []
     stmt_start = True
     for i, tok in enumerate(toks):
-        if tok.type == tokenize.COMMENT or (tok.type in string_types and not keep_strings):
-            spans.append(tok)
-        elif tok.type == tokenize.STRING and stmt_start:
-            # A bare string statement (docstring): strings up to NEWLINE.
-            j = i + 1
-            while j < len(toks) and toks[j].type in (tokenize.STRING, tokenize.NL, tokenize.COMMENT):
-                j += 1
-            if j == len(toks) or toks[j].type in (tokenize.NEWLINE, tokenize.ENDMARKER):
-                spans.extend(t for t in toks[i:j] if t.type == tokenize.STRING)
+        if tok.type == tokenize.COMMENT:
+            doc_spans.append(tok)
+        elif tok.type in string_types:
+            string_spans.append(tok)
+            if tok.type == tokenize.STRING and stmt_start:
+                # A bare string statement (docstring): strings up to NEWLINE.
+                j = i + 1
+                while j < len(toks) and toks[j].type in (tokenize.STRING, tokenize.NL, tokenize.COMMENT):
+                    j += 1
+                if j == len(toks) or toks[j].type in (tokenize.NEWLINE, tokenize.ENDMARKER):
+                    doc_spans.extend(t for t in toks[i:j] if t.type == tokenize.STRING)
         if tok.type in (tokenize.NEWLINE, tokenize.INDENT, tokenize.DEDENT):
             stmt_start = True
         elif tok.type not in (tokenize.NL, tokenize.COMMENT):
             stmt_start = False
-    rows = [list(r) for r in content.split("\n")]
+    rows = content.split("\n")
+    _blank_spans(rows, doc_spans)
+    code = [r.rstrip() for r in rows]
+    _blank_spans(rows, string_spans)
+    return code, [r.rstrip() for r in rows]
+
+
+def _blank_spans(rows: list[str], spans) -> None:
+    """Replace each token span in *rows* with spaces, keeping columns."""
     for tok in spans:
         (sr, sc), (er, ec) = tok.start, tok.end
         for r in range(sr - 1, min(er, len(rows))):
             row = rows[r]
             lo = sc if r == sr - 1 else 0
-            hi = ec if r == er - 1 else len(row)
-            for c in range(lo, min(hi, len(row))):
-                row[c] = " "
-    return ["".join(r).rstrip() for r in rows]
+            hi = min(ec if r == er - 1 else len(row), len(row))
+            if hi > lo:
+                rows[r] = row[:lo] + " " * (hi - lo) + row[hi:]
 
 
 def is_comment_line(line: str) -> bool:
