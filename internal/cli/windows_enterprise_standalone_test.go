@@ -1725,13 +1725,24 @@ func TestWindowsEnterpriseLifecycleCallerErrorsExitCodes(t *testing.T) {
 		{"verify", "nope", "invalid_arguments", `invalid --profile "nope": use standalone or secure_client`, 1639},
 	} {
 		for _, jsonOutput := range []bool{false, true} {
-			var stdout bytes.Buffer
-			command := &cobra.Command{}
+			var stdout, stderr bytes.Buffer
+			var err error
+			command := &cobra.Command{Use: tc.action, SilenceUsage: true, RunE: func(c *cobra.Command, _ []string) error {
+				err = runWindowsEnterpriseLifecycle(context.Background(), c, tc.action,
+					&windowsEnterpriseLifecycleOptions{profile: tc.profile, jsonOutput: jsonOutput})
+				return err
+			}}
+			command.SetArgs([]string{})
 			command.SetOut(&stdout)
-			err := runWindowsEnterpriseLifecycle(context.Background(), command, tc.action,
-				&windowsEnterpriseLifecycleOptions{profile: tc.profile, jsonOutput: jsonOutput})
+			command.SetErr(&stderr)
+			_ = command.Execute()
 			if got := commandExitCode(err); got != tc.exit {
 				t.Fatalf("%s --profile %s (json %t): exit %d, want %d (%v)", tc.action, tc.profile, jsonOutput, got, tc.exit, err)
+			}
+			// GAP-2445: --json prints only the JSON result, whose errors[]
+			// carry the refusal; text mode prints the one Error line.
+			if want := "Error: " + err.Error() + "\n"; (jsonOutput && stderr.Len() != 0) || (!jsonOutput && stderr.String() != want) {
+				t.Fatalf("%s --profile %s (json %t): stderr %q", tc.action, tc.profile, jsonOutput, stderr.String())
 			}
 			if !jsonOutput && tc.profile == "nope" {
 				if stdout.Len() != 0 || err.Error() != tc.text {
