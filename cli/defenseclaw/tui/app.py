@@ -205,6 +205,10 @@ from defenseclaw.tui.widgets.tab_fit import (
 from defenseclaw.tui.widgets.toasts import ToastLevel, ToastManager, ToastStack
 from defenseclaw.tui.windows_clipboard import ClipboardError, copy_windows_clipboard
 
+# Connectors guarded by the LLM proxy rather than hooks: their calls are
+# guardrail inspections (tool inspections and LLM evaluations) (GAP-2496).
+_PROXY_CONNECTORS = frozenset({"openclaw", "zeptoclaw"})
+
 
 def _write_owner_only_text(path: Path, text: str, *, protect_parent: bool = False) -> None:
     """Atomically write sensitive TUI output with the private policy ACL."""
@@ -6695,6 +6699,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             outside_roster_blocks = max(fleet_blocks_value - blocks_value, 0) if scope_connectors and not selected_connector else 0
             finding_timestamps = self._finding_event_timestamps_for_connectors((selected_connector,) if selected_connector else ())
 
+            proxy_scope = self._proxy_only_scope(scope_connectors or (connector,))
+            calls_word = "Inspections" if proxy_scope else "Hook Calls"
             call_detail_parts: list[str] = []
             if allow_count or alert_count or block_decisions:
                 # Words, not "recent a136 w1 b2" codes (GAP-1545).
@@ -6709,6 +6715,13 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                     call_detail_parts.append(f"all connectors {fleet_hook_calls}")
                 elif outside_roster_hook_calls:
                     call_detail_parts.append(f"outside roster {outside_roster_hook_calls}")
+            elif proxy_scope and hook_calls and (requests or inspections):
+                # The count is tool inspections plus LLM evaluations; name both
+                # instead of "3 inspected" under a larger number (GAP-2496).
+                if requests:
+                    call_detail_parts.append(f"[{TOKENS.accent_blue}]{requests}[/] LLM req")
+                if inspections:
+                    call_detail_parts.append(f"[{TOKENS.accent_blue}]{inspections}[/] tool calls")
             elif inspections or errors:
                 if inspections:
                     call_detail_parts.append(f"[{TOKENS.accent_blue}]{inspections}[/] inspected")
@@ -6753,11 +6766,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             # replace the detail sub-lines with a per-connector split and
             # relabel the Hook Calls tile to the connector count. No-op for
             # single-connector installs (helpers return empty).
-            hook_calls_label = f"Hook Calls ({connector})"
+            hook_calls_label = f"{calls_word} ({connector})"
             blocks_label = "Blocks"
             findings_label = "Findings"
             if selected_connector:
-                hook_calls_label = f"Hook Calls ({selected_connector})"
+                hook_calls_label = f"{calls_word} ({selected_connector})"
                 blocks_label = f"Blocks ({selected_connector})"
                 findings_label = f"Findings ({selected_connector})"
             elif multi_connectors:
@@ -7374,7 +7387,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         action = (getattr(event, "action", "") or "").lower()
         if action == "connector-hook":
             return DefenseClawTUI._hook_decision(event) == "block"
-        return action in {"block", "guardrail-block", "deny", "quarantine"}
+        return action in {"block", "guardrail-block", "inspect-tool-block", "deny", "quarantine"}
 
     def _findings_metric_detail(
         self,
@@ -7475,6 +7488,18 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         """
 
         return self._enforcement_scope_breakdown((connector,))
+
+    def _proxy_only_scope(self, connectors: Iterable[str]) -> bool:
+        """True when every connector in scope is guarded by the LLM proxy."""
+
+        names = {str(name or "").strip().lower() for name in connectors} - {""}
+        return bool(names) and names <= _PROXY_CONNECTORS
+
+    def _enforcement_calls_label(self, connectors: Iterable[str]) -> str:
+        """ENFORCEMENT row label: proxy connectors count inspections, not hooks."""
+
+        scope = tuple(connectors) or (self.overview_model.active_connector_name(),)
+        return "Inspections" if self._proxy_only_scope(scope) else "Hook calls"
 
     def _enforcement_scope_breakdown(self, connectors: Iterable[str]) -> tuple[int, int, int]:
         """Authoritative persisted ``(calls, alerts, blocks)`` for a scope."""
@@ -8923,8 +8948,13 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             notice_block.append(line)
         if not notice_block:
             quiet = Text(" ")
-            quiet.append("[OK]", style=f"{TOKENS.accent_green} bold")
-            quiet.append(" Runtime signals are quiet.")
+            review = self._overview_alert_review_notice()
+            if review:
+                quiet.append("[*]", style=f"{TOKENS.accent_amber} bold")
+                quiet.append(" " + review)
+            else:
+                quiet.append("[OK]", style=f"{TOKENS.accent_green} bold")
+                quiet.append(" Runtime signals are quiet.")
             notice_block.append(quiet)
 
         # Below 100 columns the card is too narrow for a detail column (it
@@ -9099,7 +9129,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 Text.from_markup(f"[{alerts_color} bold]{alert_n:<3}[/] {_mini_bar(alert_n, 20)}"),
             )
             enf_table.add_row(
-                Text("Hook calls", style=TOKENS.text_secondary),
+                Text(self._enforcement_calls_label((enf_selected,)), style=TOKENS.text_secondary),
                 Text.from_markup(f"[{TOKENS.accent_green}]{calls_n}[/]"),
             )
             blocks_color = TOKENS.accent_red if block_n else TOKENS.text_secondary
@@ -9119,7 +9149,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 ),
             )
             enf_table.add_row(
-                Text("Hook calls", style=TOKENS.text_secondary),
+                Text(
+                    self._enforcement_calls_label(self._active_connector_names()),
+                    style=TOKENS.text_secondary,
+                ),
                 Text.from_markup(f"[{TOKENS.accent_green}]{calls_n}[/]"),
             )
             blocks_color = TOKENS.accent_red if block_n else TOKENS.text_secondary
@@ -9994,6 +10027,16 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             + "\n\n"
         )
 
+    def _overview_alert_review_notice(self) -> str:
+        """Replaces "Runtime signals are quiet" while critical/high alerts wait (GAP-2496)."""
+
+        model = getattr(self, "alerts_model", None)
+        count = model.critical_count() if model is not None else 0
+        if not count:
+            return ""
+        noun = "alert needs" if count == 1 else "alerts need"
+        return f"{count} critical/high {noun} review - press 2 for Alerts."
+
     def _overview_body_text(self, service_cards: tuple[Any, ...]) -> str:
         notices = self.overview_model.build_notices()
         doctor = self.overview_model.doctor_box()
@@ -10019,7 +10062,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 f"[{color}][{notice.level.upper()}][/] {rich_escape(notice.message)}"
             )
         if not notice_lines:
-            notice_lines.append(f"[{TOKENS.accent_green}][OK][/] Runtime signals are quiet.")
+            review = self._overview_alert_review_notice()
+            if review:
+                notice_lines.append(f"[{TOKENS.accent_amber}][WARN][/] {review}")
+            else:
+                notice_lines.append(f"[{TOKENS.accent_green}][OK][/] Runtime signals are quiet.")
 
         enf_selected = self._connector_filter()
         if enf_selected:
@@ -10115,7 +10162,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 )
             enforcement_text = (
                 f"  Alerts           [{alert_color} bold]{alert_n}[/]   "
-                f"Hook calls [{TOKENS.accent_green}]{calls_n}[/]   "
+                f"{self._enforcement_calls_label((enf_selected,))} [{TOKENS.accent_green}]{calls_n}[/]   "
                 f"Blocks [{block_color} bold]{block_n}[/]\n"
                 + silent_line
                 + scan_lines
@@ -10130,7 +10177,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 f"  Active alerts    [{alert_color} bold]{counts.active_alerts}[/]   "
                 f"Total scans [{TOKENS.accent_green}]{counts.total_scans}[/]\n"
                 + silent_line
-                + f"  Hook calls       [{TOKENS.accent_green}]{calls_n}[/]   "
+                + f"  {self._enforcement_calls_label(self._active_connector_names()):<17}"
+                f"[{TOKENS.accent_green}]{calls_n}[/]   "
                 f"Blocks [{block_color} bold]{block_n}[/]\n"
                 + f"  Skills           [{TOKENS.accent_red}]{counts.blocked_skills}[/] blocked   "
                 f"[{TOKENS.accent_green}]{counts.allowed_skills}[/] allowed\n"
