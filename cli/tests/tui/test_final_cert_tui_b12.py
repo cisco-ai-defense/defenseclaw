@@ -41,7 +41,10 @@ def test_tab_labels_stay_put_and_keep_unread_counts_on_wide_strips(monkeypatch) 
             for other, other_labels in fits.items():
                 for name, _key, _label in PANELS:
                     if name not in {active, other}:
-                        assert labels[name] == other_labels[name], (width, active, other, name)
+                        # A tab may give up its name (never take another one)
+                        # while a longer open name needs its cells (GAP-2491).
+                        bare = " " not in labels[name] or " " not in other_labels[name]
+                        assert bare or labels[name] == other_labels[name], (width, active, other, name)
         # The Logs and Audit counts show at every width (GAP-2193: the queue
         # merge dropped them at 80-146 cells).
         assert fits["registries"]["logs"].endswith(("⁶⁴", "(64)")), width

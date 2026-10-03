@@ -223,6 +223,30 @@ class DoctorGuardrailTests(unittest.TestCase):
         self.assertEqual(result.failed, 1, result.checks)
         self.assertIn("not being intercepted", result.checks[0]["detail"])
 
+    def test_proxy_interception_waits_for_first_report_after_restart(self):
+        # GAP-2487: right after a sidecar restart the plugin has not reported
+        # yet; it does within a minute, so this is not a FAIL.
+        cfg = Config(
+            data_dir="/tmp/defenseclaw",
+            audit_db="/tmp/defenseclaw/audit.db",
+            quarantine_dir="/tmp/defenseclaw/quarantine",
+            plugin_dir="/tmp/defenseclaw/plugins",
+            policy_dir="/tmp/defenseclaw/policies",
+            guardrail=GuardrailConfig(enabled=True, model="openai/gpt-4", port=4000, connector="openclaw"),
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
+        )
+        result = _DoctorResult()
+        _check_proxy_interception(cfg, result, live_health={"uptime_ms": 2000})
+        self.assertEqual(result.failed, 0, result.checks)
+        self.assertEqual(result.warned, 1, result.checks)
+        self.assertIn("waiting for the OpenClaw plugin", result.checks[0]["detail"])
+
+        result = _DoctorResult()
+        _check_proxy_interception(cfg, result, live_health={"uptime_ms": 600000})
+        self.assertEqual(result.failed, 1, result.checks)
+        self.assertIn("has not reported", result.checks[0]["detail"])
+
     def test_proxy_interception_passes_when_self_test_verified(self):
         cfg = Config(
             data_dir="/tmp/defenseclaw",

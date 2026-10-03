@@ -1639,7 +1639,7 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
         # Plugin removal is OpenClaw-specific. For other connectors the
         # gateway sentinel teardown above already removed their hook
         # scripts and config patches. This helper is idempotent and
-        # reports "not installed" when OpenClaw was never used.
+        # reports "already removed" when the teardown already removed it.
         run_phase("plugin removal", lambda: _remove_plugin(plan))
     if plan.setup_leftovers:
         # After connector teardown, so no agent hook still runs the launcher.
@@ -2727,7 +2727,10 @@ def _remove_plugin(plan: UninstallPlan) -> None:
     elif result == "manual":
         ux.ok("plugin directory removed")
     elif result == "":
-        ux.subhead("plugin was not installed")
+        # This step runs right after the openclaw connector teardown, which
+        # normally removes the plugin itself; "not installed" read as if it
+        # never had been (GAP-2497).
+        ux.ok("DefenseClaw OpenClaw plugin already removed (nothing left to remove)")
     else:
         raise click.ClickException("plugin uninstall failed (check permissions)")
 

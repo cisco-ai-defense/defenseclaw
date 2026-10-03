@@ -3724,10 +3724,31 @@ class TestGatewayOfflineStaging(_BaseSetup):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(self.app.cfg.gateway.port, 20477)
         sidecar_check.assert_not_called()
-        openclaw_check.assert_not_called()
+        # GAP-2486: the OpenClaw listener at the new address is still checked.
+        openclaw_check.assert_called_once()
         restart.assert_called_once()
         self.assertNotIn("Tip: fix the issues above", result.output)
         self.assertIn("connects to the new address after the restart", result.output)
+
+    def test_new_gateway_port_with_no_openclaw_listener_fails_the_row(self):
+        # GAP-2486: nothing listened on the new port, yet the run said the
+        # gateway connects there and only a later doctor showed the FAIL.
+        self.app.logger = MagicMock()
+        self._seed_map("openclaw")
+        self.app.cfg.gateway.port = 18789
+
+        with patch("defenseclaw.commands.cmd_setup._is_pid_alive", return_value=True), patch(
+            "defenseclaw.commands.cmd_setup._restart_defense_gateway", return_value=True
+        ), patch("defenseclaw.commands.cmd_doctor._check_sidecar") as sidecar_check, patch(
+            "defenseclaw.commands.cmd_doctor._http_probe", return_value=(0, "")
+        ):
+            result = _invoke(["gateway", "--port", "20491", "--non-interactive"], self.app)
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        sidecar_check.assert_not_called()
+        self.assertIn("not reachable at 127.0.0.1:20491", result.output)
+        self.assertIn("Tip: fix the issues above", result.output)
+        self.assertNotIn("connects to the new address", result.output)
 
     def test_unchanged_gateway_port_still_verifies_a_running_gateway(self):
         self.app.logger = MagicMock()

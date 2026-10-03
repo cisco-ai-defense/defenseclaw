@@ -281,7 +281,11 @@ class WindowsManagedVenvResetTests(unittest.TestCase):
                 spec = importlib.util.spec_from_file_location("helper", {str(source)!r})
                 helper = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(helper)
-                plan = {{"managed_venv": {str(managed_venv)!r}, "parent_pid": os.getpid()}}
+                plan = {{
+                    "managed_venv": {str(managed_venv)!r},
+                    "install_root": {str(Path(tmp) / "bin")!r},
+                    "parent_pid": os.getpid(),
+                }}
                 print([limit for _handle, limit in helper._open_launchers(plan)])
                 """
             )

@@ -2661,12 +2661,20 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         """True when every visible tab keeps its full (or tiny) name beside ``title``."""
 
         strip = max(0, width - 2 - (len(title) + 1 if title else 0) - 12)
+        visible = [(name, key, label) for name, key, label in PANELS if not self._panel_hidden(name)]
         labels = [
             f"{key} {TINY_LABELS.get(name, SHORT_LABELS.get(name, label)) if tiny else label}"
-            for name, key, label in PANELS
-            if not self._panel_hidden(name)
+            for name, key, label in visible
         ]
-        return strip_width(labels) + BADGE_RESERVE <= strip
+        if not visible or strip_width(labels) + BADGE_RESERVE > strip:
+            return False
+        # The brand goes before any tab loses its name, counts and the room
+        # for the longest open name included: at 170 columns it stayed while
+        # "R" was bare, though 165 columns named every tab (GAP-2491).
+        unread = {name: self._panel_unread_count(name) for name, _key, _label in visible}
+        widest = max(visible, key=lambda row: len(row[2]))[0]
+        fitted = fit_tab_labels(visible, widest, unread, strip)
+        return all(fitted[name].startswith(f"{key} ") for name, key, _label in visible)
 
     def _sync_header_title(self) -> None:
         title = self._header_title()
@@ -9064,7 +9072,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if overview_connector_rows and not selected_connector:
             cfg_rows[0] = (
                 "Agents",
-                Text(_agents_summary(cfg, len(overview_connector_rows)), style=TOKENS.text_secondary),
+                Text(
+                    _agents_summary(cfg, len(overview_connector_rows), self.overview_model.gateway_down()),
+                    style=TOKENS.text_secondary,
+                ),
             )
         llm_provider = (cfg.llm_provider if cfg else "") or (cfg.inspect_llm_provider if cfg else "")
         llm_model = (cfg.llm_model if cfg else "") or (cfg.inspect_llm_model if cfg else "")
@@ -10089,7 +10100,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             # Multi: replace the redundant "Agent: <primary>" line (index 0)
             # with a unified "Agents: N active" header. The per-connector
             # detail lives in the CONNECTORS section appended below.
-            config_lines[0] = ("Agents", _agents_summary(cfg, len(overview_connector_rows)))
+            config_lines[0] = (
+                "Agents",
+                _agents_summary(cfg, len(overview_connector_rows), self.overview_model.gateway_down()),
+            )
         config_text = "\n".join(f"  {key:<16} {value}" for key, value in config_lines)
 
         connectors_text = self._overview_connectors_text(overview_connector_rows)
@@ -12198,7 +12212,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 # Values longer than the room left end with "…": a path cut
                 # at the edge ("/Users/dcm-fc3/.defensecl") looked like a
                 # wrong path (GAP-1554).
-                # Group headers (".. Unified LLM (shared by scanners ...) ..")
+                # Group headers (".. Unified LLM (for scanners ...) ..")
                 # sized the Field column, cutting paths to "/Users/dcm-fc3/.d…"
                 # at 160 columns (GAP-2253): they take the fields' width.
                 fields_width = max(
@@ -12206,7 +12220,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 )
                 header_room = max(20, min(34, fields_width))
                 # A long group header continues in its empty Value cell
-                # (".. Unified LLM" + "(shared by scanners + guardrail) ..")
+                # (".. Unified LLM .." + "for scanners + guardrail")
                 # instead of ".. Unified LLM (sha…" (GAP-2362).
                 cells = [_config_label_cells(field, header_room, 34) for field in section.fields]
                 labels = [label for label, _value in cells]
@@ -16740,11 +16754,17 @@ def _enforcement_label(cfg: OverviewConfig | None) -> str:
     return f"{connector} {surface} {posture} ({mode})"
 
 
-def _agents_summary(cfg: OverviewConfig | None, count: int) -> str:
-    """``"6 active"``, or the CLI status wording when the guardrail is off."""
+def _agents_summary(cfg: OverviewConfig | None, count: int, gateway_down: bool = False) -> str:
+    """``"6 active"``, or the CLI status wording when the guardrail is off.
+
+    With the gateway stopped nothing is live, so the row says so beside the
+    offline SERVICES list instead of "9 active" (GAP-2492).
+    """
 
     if cfg is not None and not cfg.guardrail_enabled:
         return f"{count} configured, guardrail off (nothing is guarded)"
+    if gateway_down:
+        return f"{count} configured (gateway not running)"
     return f"{count} active"
 
 
@@ -16784,9 +16804,12 @@ def _config_display_value(field: Any) -> str:
 def _config_label_cells(field: Any, header_room: int, label_room: int) -> tuple[str, str]:
     """The config editor's Field and Value cells for one row.
 
-    A group header (".. Unified LLM (shared by scanners + guardrail) ..") has
+    A group header (".. Unified LLM (for scanners + guardrail) ..") has
     no value, so the words that do not fit the Field column move to the Value
-    cell at a word boundary instead of ending in "…" (GAP-2362).
+    cell at a word boundary instead of ending in "…" (GAP-2362). A trailing
+    "(...)" note moves whole: ".. Unified LLM .." and "for scanners +
+    guardrail", as a phrase split at the column gap read ".. Unified LLM
+    (shared by" with a run of spaces in it (GAP-2493).
     """
 
     label = str(getattr(field, "label", "") or "")
@@ -16795,6 +16818,9 @@ def _config_label_cells(field: Any, header_room: int, label_room: int) -> tuple[
         return _truncate_ellipsis(label, label_room), _config_display_value(field)
     if len(label) <= header_room:
         return label, ""
+    name, paren, note = label.removesuffix("..").rstrip().partition(" (")
+    if paren and note.endswith(")") and len(f"{name} ..") <= header_room:
+        return f"{name} ..", note[:-1]
     cut = label.rfind(" ", 0, header_room + 1)
     if cut <= 2:
         return _truncate_ellipsis(label, header_room), ""
