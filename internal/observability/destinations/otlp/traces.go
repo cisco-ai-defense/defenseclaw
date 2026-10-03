@@ -291,8 +291,8 @@ func completeOTLPCanaryTrace(spans []sdktrace.ReadOnlySpan, destination string) 
 		}
 	}
 	if root == nil || child == nil || rootContract.generation != childContract.generation ||
-		root.Name() != "invoke_agent diagnostic" ||
-		child.Name() != "chat gpt-4o-mini" || root.SpanKind() != trace.SpanKindInternal ||
+		root.Name() != observability.RuntimeCanaryAgentSpanName ||
+		child.Name() != observability.RuntimeCanaryModelSpanName || root.SpanKind() != trace.SpanKindInternal ||
 		child.SpanKind() != trace.SpanKindClient || root.Status().Code != codes.Ok ||
 		child.Status().Code != codes.Ok || root.Parent().IsValid() ||
 		root.SpanContext().SpanID() == child.SpanContext().SpanID() {
