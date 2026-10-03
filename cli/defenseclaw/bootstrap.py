@@ -269,6 +269,9 @@ def _api_port_free(host: str, port: int) -> bool:
 # the claiming account's SID (gateway_port_claim_windows.go, GAP-1569).
 _API_PORT_CLAIM_DIR = "/var/tmp"
 _API_PORT_CLAIM_PREFIX = "defenseclaw-api-port-"
+# init claims a guardrail proxy port the same way, so two accounts that run
+# init at the same time don't both pick it (GAP-2198). Only init writes these.
+_GUARDRAIL_PORT_CLAIM_PREFIX = "defenseclaw-guardrail-port-"
 _WINDOWS_CLAIM_SID = re.compile(r"S-1-[0-9]+(?:-[0-9]+)+")
 
 
@@ -304,8 +307,8 @@ def _windows_own_sid() -> str:
         return ""
 
 
-def _api_port_claimed_by_other_account(port: int) -> bool:
-    path = os.path.join(_api_port_claim_dir(), f"{_API_PORT_CLAIM_PREFIX}{port}")
+def _api_port_claimed_by_other_account(port: int, prefix: str = _API_PORT_CLAIM_PREFIX) -> bool:
+    path = os.path.join(_api_port_claim_dir(), f"{prefix}{port}")
     if _windows_port_claims():
         sid = _windows_claim_sid(path)
         own = _windows_own_sid()
@@ -335,7 +338,7 @@ def remove_own_api_port_claims() -> None:
         return
     own = _windows_own_sid() if windows else ""
     for name in names:
-        if not name.startswith(_API_PORT_CLAIM_PREFIX):
+        if not name.startswith((_API_PORT_CLAIM_PREFIX, _GUARDRAIL_PORT_CLAIM_PREFIX)):
             continue
         path = os.path.join(claim_dir, name)
         if windows:
@@ -356,7 +359,7 @@ def _api_port_available(host: str, port: int) -> bool:
     return _api_port_free(host, port) and not _api_port_claimed_by_other_account(port)
 
 
-def _reserve_api_port(port: int) -> bool:
+def _reserve_api_port(port: int, prefix: str = _API_PORT_CLAIM_PREFIX) -> bool:
     """Claim ``port`` for this account now, as its gateway start would.
 
     Two accounts running init at the same time could otherwise both pick a
@@ -369,13 +372,13 @@ def _reserve_api_port(port: int) -> bool:
     try:
         os.close(
             os.open(
-                os.path.join(_API_PORT_CLAIM_DIR, f"{_API_PORT_CLAIM_PREFIX}{port}"),
+                os.path.join(_API_PORT_CLAIM_DIR, f"{prefix}{port}"),
                 os.O_CREAT | os.O_EXCL | os.O_WRONLY,
                 0o644,
             )
         )
     except FileExistsError:
-        return not _api_port_claimed_by_other_account(port)
+        return not _api_port_claimed_by_other_account(port, prefix)
     except OSError:
         return True  # a claim is only a hint
     return True
@@ -438,12 +441,23 @@ def choose_first_run_api_port(cfg: Config) -> str:
 _DEFAULT_GUARDRAIL_PORT = 4000
 
 
+def _guardrail_port_available(host: str, port: int) -> bool:
+    """``port`` is free, not claimed by another account, and now claimed by this one."""
+    return (
+        _api_port_free(host, port)
+        and not _api_port_claimed_by_other_account(port, _GUARDRAIL_PORT_CLAIM_PREFIX)
+        and _reserve_api_port(port, _GUARDRAIL_PORT_CLAIM_PREFIX)
+    )
+
+
 def choose_first_run_guardrail_port(cfg: Config) -> str:
     """Move a new config's guardrail proxy port off 4000 when something holds it.
 
     Like the API port: a second account's proxy (OpenClaw) on the same host
     could not listen on the first account's 4000, so its gateway never
-    started (GAP-1701). Returns a line for the first-run output, or "".
+    started (GAP-1701). The chosen port is claimed like the API port, so two
+    accounts that run init at the same time get different ports (GAP-2198).
+    Returns a line for the first-run output, or "".
     """
     gc = cfg.guardrail
     if int(getattr(gc, "port", 0) or 0) != _DEFAULT_GUARDRAIL_PORT:
@@ -451,11 +465,11 @@ def choose_first_run_guardrail_port(cfg: Config) -> str:
     host = str(getattr(gc, "host", "") or "").strip().strip("[]")
     if host.lower() in {"", "localhost", "::1"}:
         host = "127.0.0.1"
-    if _api_port_free(host, _DEFAULT_GUARDRAIL_PORT):
+    if _guardrail_port_available(host, _DEFAULT_GUARDRAIL_PORT):
         return ""
     for step in range(1, _FIRST_RUN_API_PORT_TRIES + 1):
         port = _DEFAULT_GUARDRAIL_PORT + step * _FIRST_RUN_API_PORT_STEP
-        if _api_port_free(host, port):
+        if _guardrail_port_available(host, port):
             gc.port = port
             return (
                 f"{host}:{_DEFAULT_GUARDRAIL_PORT} is in use (often another account's DefenseClaw guardrail "
