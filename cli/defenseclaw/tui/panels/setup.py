@@ -1828,8 +1828,8 @@ def build_setup_sections(
                     supported_connector_choices(os_name),
                     "Legacy single-agent setting; set up each connector in Setup tasks instead.",
                 ),
-                _field(cfg, "Home Dir", "claw.home_dir", hint="Legacy: home directory for the Mode agent."),
-                _field(cfg, "Config File", "claw.config_file", hint="Legacy: main config file for the Mode agent."),
+                _openclaw_path_field(cfg, "Home Dir", "claw.home_dir", "Legacy: OpenClaw home directory."),
+                _openclaw_path_field(cfg, "Config File", "claw.config_file", "Legacy: OpenClaw main config file."),
             ),
             "Legacy single-agent setting (claw.mode). Connectors are set up one by one in "
             "Setup tasks; these fields matter only to installs that still use one agent.",
@@ -1910,12 +1910,12 @@ def build_setup_sections(
         ConfigSection(
             "Inspect LLM (legacy - read-only)",
             (
-                _header("Provider", value=_value(cfg, "inspect_llm.provider")),
-                _header("Model", value=_value(cfg, "inspect_llm.model")),
-                _header("API Key Env", value=_value(cfg, "inspect_llm.api_key_env")),
-                _header("Base URL", value=_value(cfg, "inspect_llm.base_url")),
-                _header("Timeout (s)", value=_value(cfg, "inspect_llm.timeout")),
-                _header("Max Retries", value=_value(cfg, "inspect_llm.max_retries")),
+                _header("Provider", value=_value(cfg, "inspect_llm.provider") or UNSET_VALUE),
+                _header("Model", value=_value(cfg, "inspect_llm.model") or UNSET_VALUE),
+                _header("API Key Env", value=_value(cfg, "inspect_llm.api_key_env") or UNSET_VALUE),
+                _header("Base URL", value=_value(cfg, "inspect_llm.base_url") or UNSET_VALUE),
+                _header("Timeout (s)", value=_value(cfg, "inspect_llm.timeout") or UNSET_VALUE),
+                _header("Max Retries", value=_value(cfg, "inspect_llm.max_retries") or UNSET_VALUE),
             ),
             "Deprecated v4 block. Edit the Unified LLM section instead.",
         ),
@@ -1963,6 +1963,28 @@ UNSET_VALUE = "(unset)"
 def _read_only_row(field: ConfigField, hint: str) -> ConfigField:
     shown = field.value or UNSET_VALUE
     return ConfigField(label=field.label, key=field.key, kind="header", value=shown, original=shown, hint=hint)
+
+
+def _openclaw_path_field(cfg: object | Mapping[str, Any] | None, label: str, key: str, hint: str) -> ConfigField:
+    """claw.home_dir / claw.config_file: only the OpenClaw connector reads them.
+
+    With Mode codex (or amp) and no OpenClaw connector the default
+    ~/.openclaw paths looked like that agent's paths (GAP-2253), so they are
+    shown read-only as unused instead.
+    """
+
+    mode = _active_connector(cfg) or "openclaw"
+    if mode == "openclaw" or "openclaw" in _active_connector_names_for_setup(cfg):
+        return _field(cfg, label, key, hint=hint)
+    shown = f"(not used: Mode is {mode})"
+    return ConfigField(
+        label=label,
+        key=key,
+        kind="header",
+        value=shown,
+        original=shown,
+        hint="Only OpenClaw reads this path. To edit it, set Mode to openclaw, save, and reopen the editor.",
+    )
 
 
 def action_matrix_fields(prefix: str, cfg: object | Mapping[str, Any] | None) -> tuple[ConfigField, ...]:
