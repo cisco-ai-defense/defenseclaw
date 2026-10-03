@@ -84,7 +84,17 @@ ALL_CATEGORIES: frozenset[str] = frozenset(
     ["skills", "plugins", "mcp", "agents", "rules", "tools", "models", "memory"]
 )
 
-_CATEGORY_ALIASES: dict[str, str] = {"model_providers": "models"}
+_CATEGORY_ALIASES: dict[str, str] = {
+    "model_providers": "models",
+    # Singular spellings (GAP-2399).
+    "skill": "skills",
+    "plugin": "plugins",
+    "mcps": "mcp",
+    "agent": "agents",
+    "rule": "rules",
+    "tool": "tools",
+    "model": "models",
+}
 
 _COMMANDS: dict[str, tuple[str, ...]] = {
     "skills_list": ("skills", "list"),
@@ -2012,109 +2022,109 @@ _UNVERIFIED_CONNECTOR_NOTES: dict[tuple[str, str], str] = {
         "opencode",
         "skills",
     ): (
-        "local project-through-worktree, global, compatibility, and active "
-        "OPENCODE_CONFIG_DIR skills are inventoried; built-in, remote, and "
-        "runtime permission-filtered availability are not scanned"
+        "project skills (up to the git worktree root), global skills, compatible "
+        "skill folders and OPENCODE_CONFIG_DIR skills are listed; built-in and "
+        "remote skills, and skills hidden by permissions at runtime, are not checked"
     ),
     (
         "opencode",
         "plugins",
     ): (
-        "operator-authored direct JS/TS plugins and local config plugin specs "
-        "are inventoried; the exact DefenseClaw-managed bridge is connector "
-        "configuration and is excluded from ordinary plugin scanning"
+        "JS/TS plugin files and plugins named in the OpenCode config are listed; "
+        "the DefenseClaw plugin that connects OpenCode to DefenseClaw is part of "
+        "the connector setup, so it is not listed or scanned as a plugin"
     ),
     (
         "opencode",
         "agents",
     ): (
-        "local singular/plural Markdown agents and config agent maps are "
-        "inventoried; built-in and remote/managed agents remain unverified"
+        "Markdown agents (agent/ and agents/ folders) and agents defined in the "
+        "OpenCode config are listed; built-in, remote and managed agents are not checked"
     ),
     (
         "opencode",
         "rules",
     ): (
-        "local AGENTS.md/CLAUDE.md fallback and config instruction files are "
-        "inventoried without fetching remote instruction URLs"
+        "AGENTS.md (or CLAUDE.md when there is no AGENTS.md) and instruction "
+        "files named in the config are listed; remote instruction URLs are not fetched"
     ),
     (
         "opencode",
         "tools",
     ): (
-        "local singular/plural JS/TS tools and Markdown/config commands are "
-        "inventoried; the legacy config tools permission map is not a custom-tool registry"
+        "JS/TS custom tools (tool/ and tools/ folders) and Markdown or config "
+        "commands are listed; the old 'tools' config setting only sets "
+        "permissions, so its entries are not listed as tools"
     ),
     (
         "devin",
         "skills",
     ): (
-        "documented user config-root and ~/.agents skills plus pinned project "
-        ".devin/.agents skills are inventoried locally; remote or managed "
-        "activation requires official-client evidence"
+        "user config-folder and ~/.agents skills plus the project's .devin and "
+        ".agents skills are listed; remote and managed skills, and whether Devin "
+        "loads them, are not checked"
     ),
     (
         "devin",
         "rules",
     ): (
-        "documented config-root AGENT(S).md, project/nested AGENT(S).md and "
-        "AGENTS.local.md, and project .devin rules are inventoried with bounded "
-        "no-follow discovery; effective runtime precedence is unverified"
+        "AGENT.md/AGENTS.md in the config folder and the project (nested ones "
+        "too), AGENTS.local.md and project .devin rules are listed (links are not "
+        "followed); which rule wins at runtime is not checked"
     ),
     (
         "devin",
         "mcp",
     ): (
-        "canonical user/project mcp_config.json registries and read-only "
-        "mcp_config.local.json plus legacy config*.json sources are inventoried; "
-        "live server activation is unverified"
+        "user and project mcp_config.json, mcp_config.local.json and older "
+        "config*.json files are listed; whether Devin starts each server is not checked"
     ),
     (
         "devin",
         "agents",
     ): (
-        "pinned-project .devin/agents and .agents/agents Markdown agents are "
-        "inventoried locally; runtime activation and precedence are unverified"
+        "Markdown agents in the project's .devin/agents and .agents/agents "
+        "folders are listed; which agents Devin loads, and which one wins, are not checked"
     ),
     (
         "cursor",
         "skills",
     ): (
-        "local project/user Cursor, Agents, Claude, and Codex skill roots plus "
-        "nested project Cursor/Agents roots are scanned recursively and without "
-        "following aliases; multi-root, cloud, team/private, marketplace, and "
-        "dynamic plugin skill activation require official-client evidence"
+        "project and user skill folders for Cursor, .agents, Claude and Codex "
+        "(nested project folders too; links are not followed) are listed; skills "
+        "from multi-root workspaces, cloud, team or private sources, the "
+        "marketplace and plugins are not checked"
     ),
     (
         "cursor",
         "plugins",
     ): (
-        "only the documented local plugin directory is inspectable; marketplace, "
-        "team/private, cloud, and dynamically registered plugins are unverified"
+        "only the local plugin folder is listed; marketplace, team or private, "
+        "cloud and dynamically added plugins are not checked"
     ),
     (
         "cursor",
         "mcp",
     ): (
-        "project and user mcp.json candidates are retained without inventing a "
-        "same-name winner; extension-registered dynamic servers, cloud/team "
-        "sources, multi-root activation, and the effective runtime selection are unverified"
+        "project and user mcp.json files are listed (a name in both is listed "
+        "twice); servers added by extensions, cloud or team settings, multi-root "
+        "workspaces, and which copy Cursor actually uses are not checked"
     ),
     (
         "cursor",
         "agents",
     ): (
-        "project/user .cursor, .claude, and .codex subagent files are inventoried "
-        "with documented scope precedence; multi-root, cloud, team/private, "
-        "marketplace/dynamic, and runtime-only subagents are unverified"
+        "project and user subagent files in .cursor, .claude and .codex are "
+        "listed (project first); subagents from multi-root workspaces, cloud, "
+        "team or private sources, the marketplace, or only at runtime are not checked"
     ),
     (
         "cursor",
         "rules",
     ): (
-        "local .cursor/rules/**/*.mdc and root/nested AGENTS.md are inventoried; "
-        "user UI rules, team/private rules, cloud state, multi-root activation, "
-        "and effective runtime ordering are unverified"
+        "local .cursor/rules .mdc files and root or nested AGENTS.md files are "
+        "listed; rules set in the Cursor UI, team or private rules, cloud "
+        "settings, multi-root workspaces and the order Cursor applies them are not checked"
     ),
 }
 
@@ -4636,21 +4646,22 @@ def _build_aibom_from_filesystem(
     if connector_paths.normalize(connector) == "hermes":
         hermes_notes = {
             "skills": (
-                "default-profile HERMES_HOME/skills and existing skills.external_dirs are inventoried; "
-                "named/multiplex profiles and session/project-conditional skill sources are unsupported or unverified"
+                "the default profile's HERMES_HOME/skills and skills.external_dirs folders are listed; "
+                "named profiles and skills that depend on the session or project are not checked"
             ),
             "plugins": (
-                "default-profile user, vendor bundled/Nix override, and official Hermes-venv entry-point metadata are "
-                "inventoried with config-derived activation provenance; runtime activation and project plugins "
-                "conditional on the Hermes process CWD plus HERMES_ENABLE_PROJECT_PLUGINS remain unverified"
+                "the default profile's user plugins, bundled (or Nix override) plugins and plugins installed in "
+                "the Hermes Python environment are listed, with whether the config enables them; whether they load "
+                "at runtime, and project plugins (which depend on the folder Hermes runs in and "
+                "HERMES_ENABLE_PROJECT_PLUGINS), are not checked"
             ),
             "rules": (
-                "default-profile SOUL.md is inventoried as identity; project AGENTS.md, CLAUDE.md, .hermes.md, and "
-                ".cursorrules depend on the Hermes session CWD and remain unverified"
+                "the default profile's SOUL.md is listed as identity; project AGENTS.md, CLAUDE.md, .hermes.md and "
+                ".cursorrules depend on the folder Hermes runs in and are not checked"
             ),
             "memory": (
-                "default-profile MEMORY.md/USER.md and configured memory.provider are inventoried; provider-owned "
-                "external state requires loading the provider and remains unverified"
+                "the default profile's MEMORY.md and USER.md and the configured memory.provider are listed; data "
+                "the provider stores elsewhere is not checked"
             ),
         }
         for category, reason in hermes_notes.items():
