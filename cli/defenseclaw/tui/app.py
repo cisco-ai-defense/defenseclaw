@@ -9970,12 +9970,13 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 retention_health = storage.retention_health or "unavailable"
                 if storage.retention_failure:
                     retention_health += f" ({storage.retention_failure})"
+                # Wraps under its text like the lines below it (GAP-2567).
                 prefix.append(
-                    Text(
-                        "Local SQLite · "
+                    _hanging_text(
+                        "Local SQLite ·",
                         f"retention={storage.retention} · controller={retention_health} · "
                         f"judge capture={storage.judge_capture}",
-                        style=TOKENS.text_secondary,
+                        TOKENS.text_secondary,
                     )
                 )
                 prefix.append(
