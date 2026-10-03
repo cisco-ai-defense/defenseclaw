@@ -175,6 +175,31 @@ func normalizeFindingString(raw, source, verdictSeverity string) NormalizedFindi
 	return nf
 }
 
+// activeRulePackRuleID reports whether ruleID names a rule of a loaded rule
+// pack (the global generation or a connector's).
+func activeRulePackRuleID(ruleID string) bool {
+	ruleID = strings.ToUpper(strings.TrimSpace(ruleID))
+	if ruleID == "" {
+		return false
+	}
+	ruleCategoriesMu.RLock()
+	defer ruleCategoriesMu.RUnlock()
+	if allRuleGeneration != nil {
+		if _, ok := allRuleGeneration.ruleIdentityTitles[ruleID]; ok {
+			return true
+		}
+	}
+	for _, generation := range connectorRuleGenerations {
+		if generation == nil {
+			continue
+		}
+		if _, ok := generation.ruleIdentityTitles[ruleID]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 func activeLocalPatternRuleIdentity(ruleID, title string) bool {
 	ruleID = strings.ToUpper(strings.TrimSpace(ruleID))
 	title = strings.TrimSpace(title)
@@ -398,6 +423,13 @@ func canonicalIDFromRuleID(ruleID string) string {
 	}
 	if canonical, ok := canonicalDottedRuleID(ruleID); ok {
 		return canonical
+	}
+
+	// A rule of a loaded rule pack (for example a local rule such as
+	// R7-PROMPT-MARKER) keeps its own ID instead of UNKNOWN-<id>, so scan
+	// findings name the same rule as the block decision (GAP-2295).
+	if activeRulePackRuleID(upper) {
+		return upper
 	}
 
 	// Local pattern match strings: map to canonical.
