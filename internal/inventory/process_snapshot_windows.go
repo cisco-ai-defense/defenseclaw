@@ -137,9 +137,11 @@ const (
 // it runs as. The gateway service cannot open another account's process,
 // so neither its token nor (for a machine-wide install such as VS Code's
 // copilot-runtime.exe under Program Files) its image path names the owner
-// (GAP-2043). Remote Desktop Services answers any caller with every
-// process's session and every session's user, and with the token SID of
-// the processes the caller may see; session 0 has no user.
+// (GAP-2043). Remote Desktop Services answers an unrestricted caller with
+// every process's session and every session's user, and with the token SID
+// of the processes the caller may see; session 0 has no user. It refuses
+// the managed gateway's restricted service token, which gets the owner from
+// the sensor helper instead (SetProcessAccountLookup).
 func windowsProcessSessionOwners() map[int]string {
 	var info *wtsProcessInfo
 	var count uint32

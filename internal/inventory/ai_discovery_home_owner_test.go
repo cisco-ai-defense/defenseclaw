@@ -138,3 +138,42 @@ func TestPerUserScanLeavesSignalsUnattributed(t *testing.T) {
 		t.Fatalf("per-user scan signal attributed to %q/%q", sig.UserID, sig.UserName)
 	}
 }
+
+// GAP-2043: the managed gateway's restricted token sees neither the token
+// nor the session user of a machine-wide agent, so its owner comes from the
+// sensor helper's process table; a recycled pid (another name) or an account
+// without a profile attributes nothing.
+func TestBrokeredProcessAccountOwnsAMachineWideAgent(t *testing.T) {
+	root := t.TempDir()
+	s := &ContinuousDiscoveryService{opts: AIDiscoveryOptions{homeOwners: []discoveryHomeOwner{
+		{Home: filepath.Join(root, "Users", "alice"), UserID: "S-1-5-21-1-2-3-1001", UserName: "alice"},
+		{Home: filepath.Join(root, "Users", "bob"), UserID: "S-1-5-21-1-2-3-1002", UserName: "bob"},
+	}}}
+	image := filepath.Join(root, "Program Files", "Microsoft VS Code", "copilot-runtime.exe")
+	procs := []processInfo{
+		{PID: 40, Comm: "copilot-runtime.exe", Image: image, Windows: true, Connector: "copilot"},
+		{PID: 41, Comm: "copilot-runtime.exe", Image: image, Windows: true, Connector: "copilot"},
+		{PID: 42, Comm: "copilot-runtime.exe", Image: image, Windows: true, Connector: "copilot"},
+		{PID: 43, Comm: "copilot-runtime.exe", Image: image, Windows: true, Connector: "copilot"},
+	}
+	clear := SetProcessAccountLookup(func() map[int]ProcessAccount {
+		return map[int]ProcessAccount{
+			40: {Name: "copilot-runtime.exe", User: "bob"},
+			41: {Name: "Copilot-Runtime.exe", User: `HOST\alice`},
+			42: {Name: "other.exe", User: "alice"},
+			43: {Name: "copilot-runtime.exe", User: "SYSTEM"},
+		}
+	})
+	defer clear()
+	s.attributeProcessOwners(procs)
+	for i, want := range []string{"S-1-5-21-1-2-3-1002", "S-1-5-21-1-2-3-1001", "", ""} {
+		if procs[i].OwnerID != want {
+			t.Fatalf("process %d owner = %q, want %q", procs[i].PID, procs[i].OwnerID, want)
+		}
+	}
+	SetProcessAccountLookup(nil)
+	clear() // a later call replaced the lookup; clearing the old one is a no-op
+	if brokeredProcessAccounts() != nil {
+		t.Fatal("lookup still installed")
+	}
+}
