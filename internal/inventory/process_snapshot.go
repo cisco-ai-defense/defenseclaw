@@ -148,6 +148,33 @@ func classifyWindowsProcesses(procs []processInfo, catalog []AISignature) {
 			helpers = append(helpers, i)
 		}
 	}
+	// Siblings from the same executable (same image and account) whose
+	// parent has exited are one run as well: Codex's app-server daemon and
+	// its pid-update-loop helper are two codex.exe processes whose launcher
+	// is gone (GAP-2021). The earliest started one stays. Without a known
+	// image nothing proves they are the same executable.
+	type orphanRun struct {
+		ppid                         int
+		connector, name, image, user string
+	}
+	firstOrphan := map[orphanRun]int{}
+	for i := range procs {
+		if procs[i].Connector == "" || procs[i].PPID <= 0 || byPID[procs[i].PPID] != nil || strings.TrimSpace(procs[i].Image) == "" {
+			continue
+		}
+		run := orphanRun{procs[i].PPID, procs[i].Connector, normalizedWindowsProcessName(procs[i].Comm),
+			strings.ToLower(procs[i].Image), strings.ToLower(procs[i].User)}
+		first, seen := firstOrphan[run]
+		switch {
+		case !seen:
+			firstOrphan[run] = i
+		case windowsProcessStartedBefore(procs[i], procs[first]):
+			firstOrphan[run] = i
+			helpers = append(helpers, first)
+		default:
+			helpers = append(helpers, i)
+		}
+	}
 	for _, i := range helpers {
 		procs[i].Connector = ""
 	}
@@ -166,6 +193,15 @@ func classifyWindowsProcesses(procs []processInfo, catalog []AISignature) {
 			}
 		}
 	}
+}
+
+// windowsProcessStartedBefore orders two processes by start time, then by
+// PID when a start time is unknown or equal, so every scan keeps the same one.
+func windowsProcessStartedBefore(a, b processInfo) bool {
+	if !a.StartedAt.IsZero() && !b.StartedAt.IsZero() && !a.StartedAt.Equal(b.StartedAt) {
+		return a.StartedAt.Before(b.StartedAt)
+	}
+	return a.PID < b.PID
 }
 
 // windowsProcessAliases builds one exact basename index for every catalog

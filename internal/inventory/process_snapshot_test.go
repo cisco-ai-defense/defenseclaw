@@ -347,6 +347,28 @@ func TestClassifyWindowsProcessesFoldsCursorWorkerServer(t *testing.T) {
 	}
 }
 
+// GAP-2021: Codex's app-server daemon and its pid-update-loop helper share a
+// launcher that has exited; they are one Codex process. A Codex run under a
+// live shell, or one with a different exited parent, stays its own.
+func TestClassifyWindowsProcessesFoldsOrphanedCodexDaemonHelpers(t *testing.T) {
+	image := `C:\Users\kevin\AppData\Roaming\npm\node_modules\@openai\codex\vendor\codex.exe`
+	started := time.Date(2026, 10, 2, 5, 33, 0, 0, time.UTC)
+	procs := []processInfo{
+		{PID: 452, PPID: 9220, Comm: "codex.exe", Image: image, StartedAt: started.Add(time.Second), Windows: true},
+		{PID: 11104, PPID: 9220, Comm: "codex.exe", Image: image, StartedAt: started, Windows: true},
+		{PID: 700, PPID: 0, Comm: "pwsh.exe", Windows: true},
+		{PID: 701, PPID: 700, Comm: "codex.exe", Image: image, Windows: true},
+		{PID: 702, PPID: 700, Comm: "codex.exe", Image: image, Windows: true},
+		{PID: 800, PPID: 9300, Comm: "codex.exe", Image: image, Windows: true},
+	}
+	classifyWindowsProcesses(procs, windowsAgentCatalog())
+	for i, want := range []string{"", "codex", "", "codex", "codex", "codex"} {
+		if procs[i].Connector != want {
+			t.Fatalf("pid %d: connector %q, want %q", procs[i].PID, procs[i].Connector, want)
+		}
+	}
+}
+
 // GAP-1965: Amp's plugin runtimes are amp.exe children of the amp.exe run;
 // they are folded into it, so one Amp session is one Amp process.
 func TestClassifyWindowsProcessesFoldsAmpPluginRuntimes(t *testing.T) {
