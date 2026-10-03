@@ -133,12 +133,22 @@ def scan(
     if as_json:
         return
 
-    if not as_json:
-        from defenseclaw.commands import hint
-        hint(
-            "View alerts:  defenseclaw alerts",
-            "Scan skills:  defenseclaw skill scan all",
-        )
+    from defenseclaw.commands import hint
+    hint("View alerts:  defenseclaw alerts", *_scan_hints(cats))
+
+
+# Next-step scan hint per scanned category; --only limits them (GAP-2037).
+_SCAN_HINTS = (
+    ("skills", "Scan skills:  defenseclaw skill scan all"),
+    ("mcp", "Scan MCP servers:  defenseclaw mcp scan --all"),
+    ("plugins", "Scan plugins:  defenseclaw plugin scan --all"),
+)
+
+
+def _scan_hints(cats: set[str] | None) -> list[str]:
+    if cats is None:
+        return [_SCAN_HINTS[0][1]]
+    return [text for cat, text in _SCAN_HINTS if cat in cats]
 
 
 def _scan_one_connector(

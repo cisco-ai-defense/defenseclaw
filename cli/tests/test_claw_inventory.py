@@ -476,6 +476,56 @@ class TestLiveClawInventory(unittest.TestCase):
         self.assertIn("Config:    /h/.config/opencode/opencode.json", out.getvalue())
         self.assertNotIn("defenseclaw.js", out.getvalue())
 
+    def test_human_kiro_config_is_kiro_settings_not_defenseclaw_hook(self):
+        # GAP-2038: DefenseClaw-written hook/agent files are not Kiro's config.
+        import contextlib
+        import io
+
+        inv = {
+            "connector": "kiro",
+            "connector_config_files": [
+                "/h/.kiro/hooks/defenseclaw.json",
+                "/h/.kiro/agents/defenseclaw.json",
+                "/h/.kiro/settings/cli.json",
+            ],
+        }
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            format_claw_aibom_human(inv, summary_only=True)
+        self.assertIn("Config:    /h/.kiro/settings/cli.json", out.getvalue())
+        self.assertNotIn("defenseclaw.json", out.getvalue())
+
+    def test_human_summary_folds_limitations_into_one_line(self):
+        # GAP-2037: --summary is the tables only; caveats become one pointer line.
+        import contextlib
+        import io
+
+        inv = {
+            "connector": "codex",
+            "limitations": [
+                {"category": "rules", "reason": "long internal caveat text"},
+                {"category": "memory", "reason": "another caveat"},
+            ],
+        }
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            format_claw_aibom_human(inv, summary_only=True)
+        text = out.getvalue()
+        self.assertIn("2 unsupported inventory capabilities", text)
+        self.assertNotIn("long internal caveat text", text)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            format_claw_aibom_human(inv)
+        self.assertIn("long internal caveat text", out.getvalue())
+
+    def test_scan_hints_follow_only_categories(self):
+        # GAP-2037: --only mcp points at the MCP scanner, not the skill scanner.
+        from defenseclaw.commands.cmd_aibom import _scan_hints
+
+        self.assertEqual(_scan_hints({"mcp"}), ["Scan MCP servers:  defenseclaw mcp scan --all"])
+        self.assertEqual(_scan_hints(None), ["Scan skills:  defenseclaw skill scan all"])
+        self.assertEqual(_scan_hints({"models"}), [])
+
     @patch("defenseclaw.inventory.claw_inventory.subprocess.run", side_effect=FileNotFoundError)
     def test_fallback_when_openclaw_missing(self, _):
         inv = build_claw_aibom(self.cfg, live=True)

@@ -739,6 +739,28 @@ def _build_scan_map_for_type(store: Any, scanner_name: str) -> dict[str, dict[st
     return scan_map
 
 
+def _is_defenseclaw_written(path: str) -> bool:
+    """True for files DefenseClaw setup writes (``.../defenseclaw.json`` and kin)."""
+    return os.path.basename(path).lower().startswith("defenseclaw")
+
+
+def aibom_display_config(inv: dict[str, Any]) -> str:
+    """Return the agent's own config file for the AIBOM ``Config:`` line.
+
+    DefenseClaw's hook/bridge files (``~/.kiro/hooks/defenseclaw.json``,
+    ``plugins/defenseclaw.js``) are never presented as the agent's
+    configuration (GAP-1358, GAP-2038). Returns "" when none is known.
+    """
+    connector = str(inv.get("connector") or inv.get("claw_mode") or "openclaw").lower()
+    config_files = inv.get("connector_config_files") or [inv.get("openclaw_config", "")]
+    if connector == "opencode" and inv.get("connector_mcp_files"):
+        # The inventory reads OpenCode's opencode.json (GAP-1358).
+        mcp_files = [c for c in inv["connector_mcp_files"] if c]
+        config_files = [c for c in mcp_files if os.path.isfile(c)] or mcp_files
+    agent_files = [c for c in config_files if c and not _is_defenseclaw_written(c)]
+    return agent_files[0] if agent_files else ""
+
+
 def format_claw_aibom_human(
     inv: dict[str, Any],
     *,
@@ -758,13 +780,7 @@ def format_claw_aibom_human(
     connector = str(inv.get("connector") or inv.get("claw_mode") or "openclaw")
     title = "OpenClaw AIBOM" if connector.lower() == "openclaw" else f"{connector} AIBOM"
     home = inv.get("connector_home") or inv.get("claw_home", "")
-    config_files = inv.get("connector_config_files") or [inv.get("openclaw_config", "")]
-    if connector.lower() == "opencode" and inv.get("connector_mcp_files"):
-        # DefenseClaw's own bridge plugin is the first lifecycle file; the
-        # inventory reads OpenCode's opencode.json (GAP-1358).
-        mcp_files = [c for c in inv["connector_mcp_files"] if c]
-        config_files = [c for c in mcp_files if os.path.isfile(c)] or mcp_files
-    primary_config = next((c for c in config_files if c), "")
+    primary_config = aibom_display_config(inv)
     cats = _resolve_categories(categories)
     console.print()
     console.print(f"[bold]{title}[/bold]  (source: {mode})")
@@ -794,7 +810,17 @@ def format_claw_aibom_human(
             if cat in cats:
                 render(console, inv.get(key, []))
 
-    _render_limitations(console, inv.get("limitations", []))
+    limitations = inv.get("limitations", [])
+    if summary_only:
+        # --summary is the tables only; the caveats are one pointer line (GAP-2037).
+        if limitations:
+            console.print(
+                f"[dim]{len(limitations)} unsupported inventory capabilities "
+                "(informational); run without --summary to list them.[/dim]"
+            )
+            console.print()
+    else:
+        _render_limitations(console, limitations)
     _render_errors(console, inv.get("errors", []))
 
 

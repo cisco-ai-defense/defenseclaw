@@ -1201,6 +1201,8 @@ def _skill_status_display(
     # a skill with findings is still loaded, and a deleted one is removed.
     if s.get("eligible"):
         return "✓ ready"
+    if s.get("files_quarantined"):
+        return "✗ quarantined"
     if s.get("source") in ("enforcement", "scan-history"):
         return "✗ removed"
     return "✗ missing"
@@ -1354,6 +1356,28 @@ def _skill_policy_verdicts(
     return out
 
 
+def _mark_quarantined_phantoms(app: AppContext, skills: list[dict[str, Any]]) -> None:
+    """Flag off-disk skills whose files are held in quarantine.
+
+    After a bare ``skill unblock`` the files stay quarantined until an
+    explicit restore; ``skill list`` must say so, not "removed" (GAP-2008).
+    """
+    phantoms = [s for s in skills if s.get("source") in ("enforcement", "scan-history")]
+    if not phantoms or app.store is None:
+        return
+    try:
+        held = {
+            record.target_name
+            for record in app.store.list_quarantine_records("skill")
+            if record.state in ("pending", "active")
+        }
+    except Exception:
+        return
+    for s in phantoms:
+        if s.get("name", "") in held:
+            s["files_quarantined"] = True
+
+
 def _collect_skills_for_connector(
     app: AppContext,
     connector: str,
@@ -1408,6 +1432,8 @@ def _collect_skills_for_connector(
                 "homepage": "",
             })
             known_names.add(name)
+
+    _mark_quarantined_phantoms(app, skills)
 
     for discovered in skills:
         name = discovered.get("name", "")
