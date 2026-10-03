@@ -1044,7 +1044,7 @@ class MCPScannerWrapper:
                 pinned_target = (host, port, ip)
             except SSRFError as exc:
                 raise ValueError(
-                    f"refusing to scan remote MCP target {target!r}: {exc}"
+                    f"refusing to scan MCP URL {target!r}: {exc}"
                 ) from exc
 
         if not is_local:

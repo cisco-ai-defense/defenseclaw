@@ -427,6 +427,32 @@ def _mini_bar(value: int, max_value: int, width: int = 14) -> str:
     return "▰" * filled + "▱" * (width - filled)
 
 
+def _wrap_at_separators(value: str, width: int) -> str:
+    """``value`` in lines of at most ``width`` cells, broken after "." or "/".
+
+    A piece longer than a line is still cut, as ``overflow="fold"`` would.
+    """
+
+    if width <= 0 or len(value) <= width:
+        return value
+    lines: list[str] = []
+    line = ""
+    for piece in re.split(r"(?<=[./])", value):
+        while len(piece) > width:
+            if line:
+                lines.append(line)
+                line = ""
+            lines.append(piece[:width])
+            piece = piece[width:]
+        if len(line) + len(piece) > width:
+            lines.append(line)
+            line = ""
+        line += piece
+    if line:
+        lines.append(line)
+    return "\n".join(lines)
+
+
 # Stores opened by background readers; shutdown interrupts their queries.
 _LIVE_WORKER_STORES: weakref.WeakSet[Any] = weakref.WeakSet()
 
@@ -449,11 +475,19 @@ PANELS = (
     ("setup", "0", "Setup"),
 )
 
-# Panel keys that only work in the exact case shown: lowercase ``t`` stays
-# free for panel-local use (AI Discovery and Sandboxes use it).
-CASE_SENSITIVE_PANEL_KEYS = frozenset({"T"})
+# Letter panel keys work only in the case the tab strip and ? help show
+# (T A V N R P). Lowercase letters used to switch panels too, so the word
+# "krea" typed on Activity went r -> Registries, e -> registry require
+# (GAP-2438); lowercase ``t`` was already free for panel-local use.
+CASE_SENSITIVE_PANEL_KEYS = frozenset(key for _name, key, _label in PANELS if key.isalpha())
 PANEL_SHORTCUTS = {key.lower(): name for name, key, _label in PANELS if key not in CASE_SENSITIVE_PANEL_KEYS}
 CASE_SENSITIVE_PANEL_SHORTCUTS = {key: name for name, key, _label in PANELS if key in CASE_SENSITIVE_PANEL_KEYS}
+# Panels whose own action takes the capital letter keep the lowercase letter
+# as the way to that panel: Sandboxes pulls a copy on P and p opens Policies.
+LOWERCASE_PANEL_FALLBACK: dict[str, frozenset[str]] = {"sandboxes": frozenset({"p", "r"})}
+# The DISCOVERED AI AGENTS name keeps up to this many cells while the vendor
+# and confidence columns are dropped (GAP-2434).
+AI_AGENT_NAME_MIN = 40
 
 # How long a successful command's progress strip stays before hiding itself.
 STRIP_SUCCESS_SECONDS = 8.0
@@ -2377,7 +2411,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             event.prevent_default()
             return
 
-        panel = CASE_SENSITIVE_PANEL_SHORTCUTS.get(event.character or "") or PANEL_SHORTCUTS.get(event.key.lower())
+        character = event.character or ""
+        panel = CASE_SENSITIVE_PANEL_SHORTCUTS.get(character) or PANEL_SHORTCUTS.get(event.key.lower())
+        if panel is None and character in LOWERCASE_PANEL_FALLBACK.get(self.active_panel, frozenset()):
+            panel = CASE_SENSITIVE_PANEL_SHORTCUTS.get(character.upper())
         if panel is None:
             return
 
@@ -2545,7 +2582,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             # so the same number appears everywhere (WIN2-U2-11). It stays
             # on the open Alerts tab too: dropping it there freed two cells
             # and relabelled other tabs ("4 MCP" -> "4 MCPs", GAP-2247).
-            return max(0, self.alerts_model.total_count())
+            # Under a connector scope, the scoped count (GAP-2441).
+            return max(0, self.alerts_model.connector_scope_count())
         if panel == self.active_panel:
             return 0
         total = self._panel_total_count(panel)
@@ -7632,6 +7670,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 pass
             if hasattr(model, "connector_focus_enabled"):
                 model.connector_focus_enabled = focus_enabled
+        # The status bar and the Alerts tab badge count the alerts in this
+        # scope, so both change as the scope is picked (GAP-2441).
+        multi = len(self._active_connector_names()) > 1
+        self.alerts_model.set_connector_filter(connector if multi else "")
         if connector:
             friendly = friendly_connector_name(connector)
             self._set_status(f"Filtered to {friendly} ({connector}).")
@@ -7644,6 +7686,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         overview_active = self.active_panel == "overview" and not self.help_open
         if overview_active:
             self._render_overview_scope_indicator()
+            self._update_tab_labels()
             self._schedule_overview_deferred_render()
             return
         self._render_chrome()
@@ -9025,6 +9068,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 cell.append_text(value_text)
                 cfg_table.add_row(cell)
                 continue
+            if not value_text.spans and value_text.cell_len > cfg_inner - 2:
+                # Break a URL or path after "." or "/", not mid-word
+                # ("https://us.api.inspect.aidefe" / "nse...", GAP-2443).
+                value_text = Text(_wrap_at_separators(value_text.plain, cfg_inner - 2), style=value_text.style)
             indented = Table.grid()
             indented.add_column(width=2)
             indented.add_column(overflow="fold")
@@ -9320,10 +9367,12 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if ai_box.rows:
             # Fixed 26/20-wide columns overflowed 80 columns, so Rich shrank
             # them all ("[OK…", "s…" / "3m" / "a…"). Like CONNECTORS, the rows
-            # stay one line and drop vendor, then confidence (GAP-2414).
+            # stay one line and drop vendor, then confidence (GAP-2414). The
+            # name counts in full while they are dropped: a 12-cell minimum
+            # cut "Tabby Terminal AI Integra…" beside the vendor (GAP-2434).
             ai_columns = (
                 FitColumn("STATE"),
-                FitColumn("AGENT", flex_min=12),
+                FitColumn("AGENT", flex_min=AI_AGENT_NAME_MIN),
                 FitColumn("VENDOR", priority=1),
                 FitColumn("CONF", priority=2, justify="right"),
                 FitColumn("LAST SEEN"),
@@ -10659,7 +10708,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             redaction_on=redaction_on,
             policy_posture=policy_posture,
             commands_run=int(self.commands_run),
-            active_alerts=self.alerts_model.total_count() or self.overview_model.enforcement.active_alerts,
+            active_alerts=(
+                self.alerts_model.connector_scope_count()
+                if self.alerts_model.connector_filter
+                else self.alerts_model.total_count() or self.overview_model.enforcement.active_alerts
+            ),
             command_running=self.command_running,
             version=__version__,
         )
@@ -12248,15 +12301,16 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         return setup_center.task_statuses(self.setup_model)
 
     def _setup_header(self) -> str:
-        """``Setup · 19 ok · 1 needs attention — i readiness details``.
+        """``Setup · 19 tasks ok · 1 needs attention — i readiness checks``.
 
         Tasks by status (see setup_catalog.task_status), then the ``i`` hint
-        when it fits.
+        when it fits. The count says "tasks": "11 ok — i readiness details"
+        read as the number of readiness checks, which differs (GAP-2444).
         """
 
         statuses = self._setup_task_statuses()
         ok, attention = setup_center.header_counts(statuses)
-        parts = [(f"{ok} ok", TOKENS.accent_green)]
+        parts = [(f"{ok} task{'' if ok == 1 else 's'} ok", TOKENS.accent_green)]
         if attention:
             parts.append((f"{attention} need{'s' if attention == 1 else ''} attention", TOKENS.accent_amber))
         if self.setup_model.restart_queue.pending:
@@ -12264,7 +12318,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         room = self._body_width() - len("Setup · ")
         plain = " · ".join(text for text, _style in parts)
         tail = next(
-            (tail for tail in (" — i readiness details", " — i details", "") if len(plain) + len(tail) <= room),
+            (tail for tail in (" — i readiness checks", " — i checks", "") if len(plain) + len(tail) <= room),
             "",
         )
         counts = " · ".join("[" + style + "]" + rich_escape(text) + "[/]" for text, style in parts)
@@ -12773,7 +12827,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                     f"{self._setup_cli_live_sections} now; the gateway applies it after a restart (G)."
                 ),
             )
-        return SetupPanelAction(True, hint="Config changes saved; restart queued if gateway is running.")
+        # Say what happens next for the gateway state the TUI knows, not
+        # "restart queued if gateway is running" (GAP-2433).
+        if self.overview_model.gateway_down():
+            return SetupPanelAction(True, hint="Config changes saved; they apply when the gateway starts.")
+        return SetupPanelAction(True, hint="Config changes saved. Restart the gateway (G) to apply them.")
 
     def _schedule_config_save_audit(self, entries: tuple[Any, ...]) -> None:
         """Record the saved keys as a config-update audit event (GAP-2121).

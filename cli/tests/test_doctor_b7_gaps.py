@@ -117,3 +117,30 @@ def test_llm_reachable_names_the_shell_proxy(tmp_path, monkeypatch) -> None:
     with mock.patch("litellm.completion", side_effect=refused):
         cmd_doctor._check_llm_reachable(cfg, r)
     assert "proxy" not in r.checks[-1]["detail"] and not r.checks[-1].get("remediation")
+
+
+def test_llm_reachable_proxy_names_lowercase_var_and_plain_timeout(tmp_path, monkeypatch) -> None:
+    # GAP-2446: a lowercase https_proxy was reported (and "unset") as HTTPS_PROXY.
+    # GAP-2447: a proxy timeout ended with "litellm.Timeout: ... after None seconds".
+    import os
+
+    import litellm
+    import requests
+
+    for name in ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy", "DEFENSECLAW_LLM_MODEL"):
+        monkeypatch.delenv(name, raising=False)
+    var = "HTTPS_PROXY" if os.name == "nt" else "https_proxy"  # Windows env names ignore case
+    cfg = _bedrock_judge_cfg(tmp_path, "api_key")
+    monkeypatch.setenv("https_proxy", "http://127.0.0.1:18508")
+    r = _DoctorResult()
+    with mock.patch("litellm.completion", side_effect=requests.ConnectionError("[Errno 61] Connection refused")):
+        cmd_doctor._check_llm_reachable(cfg, r)
+    row = r.checks[-1]
+    assert f"(from {var})" in row["detail"] and f"unset {var}" in row["remediation"]
+    timeout = litellm.Timeout(message="Connection timed out after None seconds.", model="m", llm_provider="bedrock")
+    r = _DoctorResult()
+    with mock.patch("litellm.completion", side_effect=timeout):
+        cmd_doctor._check_llm_reachable(cfg, r)
+    detail = r.checks[-1]["detail"]
+    assert f"Bedrock timed out after 5 s through the proxy http://127.0.0.1:18508 (from {var})" in detail
+    assert "litellm" not in detail and "None seconds" not in detail

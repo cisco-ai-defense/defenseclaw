@@ -2358,6 +2358,11 @@ def _assert_connector_plugin_identities_unambiguous(
     registry_cache: PluginRegistryCache | None = None,
 ) -> None:
     """Preflight all configured roots without collapsing physical aliases."""
+    if connector_paths.normalize(connector) == "hermes":
+        # GAP-2463: Hermes lists its own plugin sources: category folders
+        # (~/.hermes/plugins/platforms) are containers, not plugins, and a
+        # user plugin overrides a bundled one with the same id.
+        return
     claimed = PluginInstallClaims()
     for root in _plugin_roots_for_connector(app, connector):
         for entry in discover_plugin_directories(
@@ -3217,6 +3222,13 @@ def _trusted_copilot_binary(
     return ""
 
 
+def _untrusted_copilot_binary() -> str:
+    """Return the first Copilot on PATH that the trust gate refused, if any."""
+    from defenseclaw.inventory.agent_discovery import _SPECS, _binary_candidates_for_agent
+
+    return next(iter(_binary_candidates_for_agent("copilot", _SPECS["copilot"])), "")
+
+
 # GAP-2415: Copilot CLI 1.0.90 rejects the older ``plugins list --kind
 # plugin`` form; ``plugin list --json`` is the supported read-only command.
 # The older form stays as a fallback for earlier Copilot CLIs.
@@ -3246,41 +3258,59 @@ def _list_copilot_plugins(
     data_dir: str | os.PathLike[str] | None = None,
     workspace_dir: str | os.PathLike[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """List declared plugins in the exact trusted lifecycle context."""
+    """List declared plugins in the exact trusted lifecycle context.
+
+    Copilot runs in the pinned connector workspace, or in the user's home
+    directory when none is pinned (the default config; GAP-2415). Every
+    gate that stops the listing records why in ``_HOST_PLUGIN_LIST_ERRORS``
+    so ``plugin list`` never reports a skipped listing as "no plugins".
+    """
+
+    _HOST_PLUGIN_LIST_ERRORS.pop("copilot", None)
+
+    def _fail(reason: str) -> list[dict[str, Any]]:
+        _HOST_PLUGIN_LIST_ERRORS["copilot"] = reason
+        return []
 
     workspace = str(workspace_dir or "")
+    if not workspace:
+        workspace = os.path.realpath(os.path.expanduser("~"))
     if (
-        not workspace
-        or workspace.strip() != workspace
+        workspace.strip() != workspace
         or not os.path.isabs(workspace)
         or os.path.normpath(workspace) != workspace
     ):
-        return []
+        return _fail(f"workspace {workspace!r} is not a normalized absolute path (claw.workspace_dir)")
     try:
         connector_paths.reject_reparse_path(workspace)
         before = os.stat(workspace, follow_symlinks=False)
         if not os.path.isdir(workspace):
-            return []
+            return _fail(f"workspace {workspace} is not a directory (claw.workspace_dir)")
         if data_dir:
             data_real = os.path.realpath(os.path.abspath(str(data_dir)))
             workspace_real = os.path.realpath(workspace)
             if os.path.normcase(os.path.commonpath((workspace_real, data_real))) == os.path.normcase(
                 data_real
             ):
-                return []
-    except (OSError, ValueError):
-        return []
+                return _fail(f"workspace {workspace} is inside the DefenseClaw data directory")
+    except (OSError, ValueError) as exc:
+        return _fail(f"workspace {workspace} is not usable: {exc}")
 
     copilot = _trusted_copilot_binary(data_dir)
     if not copilot:
+        found = _untrusted_copilot_binary()
+        if found:
+            return _fail(
+                f"copilot at {found} is not in a trusted location; add its install "
+                "prefix to ai_discovery.trusted_binary_prefixes"
+            )
         return []
     try:
         bound_home = connector_paths.copilot_home()
-    except ValueError:
-        return []
+    except ValueError as exc:
+        return _fail(f"COPILOT_HOME is not usable: {exc}")
     env = os.environ.copy()
     env["COPILOT_HOME"] = bound_home
-    _HOST_PLUGIN_LIST_ERRORS.pop("copilot", None)
     proc = None
     failure = ""
     for argv in _COPILOT_PLUGIN_LIST_ARGVS:
@@ -3310,20 +3340,17 @@ def _list_copilot_plugins(
         return []
     try:
         after = os.stat(workspace, follow_symlinks=False)
-    except OSError:
-        return []
-    if (
-        before.st_dev,
-        before.st_ino,
-        before.st_mtime_ns,
-        before.st_ctime_ns,
-    ) != (
-        after.st_dev,
-        after.st_ino,
-        after.st_mtime_ns,
-        after.st_ctime_ns,
-    ):
-        return []
+    except OSError as exc:
+        return _fail(f"workspace {workspace} is not usable: {exc}")
+    def _identity(st: os.stat_result) -> tuple[int, ...]:
+        # Home (the unpinned fallback) gets routine entry churn from other
+        # programs, so only its identity is compared there.
+        if workspace_dir:
+            return (st.st_dev, st.st_ino, st.st_mtime_ns, st.st_ctime_ns)
+        return (st.st_dev, st.st_ino)
+
+    if _identity(before) != _identity(after):
+        return _fail(f"workspace {workspace} changed while copilot was listing plugins")
     try:
         if (proc.stdout or "").strip():
             json.loads(proc.stdout)
@@ -4589,6 +4616,10 @@ def restore(app: AppContext, name: str, restore_path: str, connector_flag: str) 
     plugin_name = _validated_plugin_argument(name)
 
     pe = PolicyEngine(app.store)
+    alias_scope = _resolve_connector_scope(app, connector_flag) if connector_flag else ""
+    if "/" in name.strip("/\\"):
+        # GAP-2464: "web/x" names the category plugin itself, not a flat "x".
+        plugin_name = _quarantined_plugin_alias(pe, name, alias_scope) or plugin_name
     targets = _resolve_plugin_quarantine_restore_scopes(
         app,
         pe,
@@ -4604,28 +4635,35 @@ def restore(app: AppContext, name: str, restore_path: str, connector_flag: str) 
         raise SystemExit(1)
 
     pe_enforcer = PluginEnforcer(app.cfg.quarantine_dir)
-    existing_targets = [
-        (target_connector, entry)
-        for target_connector, entry in targets
-        if pe_enforcer.is_quarantined(plugin_name, target_connector)
-    ]
+
+    def quarantined_targets() -> list[tuple[str, Any, str]]:
+        """(action scope, entry, connector folder holding the copy)."""
+        scoped = {target_connector for target_connector, _ in targets}
+        found = []
+        for target_connector, entry in targets:
+            slot = target_connector if pe_enforcer.is_quarantined(plugin_name, target_connector) else None
+            if slot is None and not target_connector and entry is not None and entry.source_path:
+                # GAP-2464: the gateway watcher records a global action but
+                # keeps the copy under the connector it watches for.
+                owner = _connector_for_plugin_path(app, entry.source_path)
+                if owner and owner not in scoped and pe_enforcer.is_quarantined(plugin_name, owner):
+                    slot = owner
+            if slot is not None:
+                found.append((target_connector, entry, slot))
+        return found
+
+    existing_targets = quarantined_targets()
     if not existing_targets:
-        alias = _quarantined_plugin_alias(
-            pe, name, _resolve_connector_scope(app, connector_flag) if connector_flag else ""
-        )
+        alias = _quarantined_plugin_alias(pe, name, alias_scope)
         if alias and alias != plugin_name:
             plugin_name = alias
             targets = _resolve_plugin_quarantine_restore_scopes(app, pe, plugin_name, connector_flag)
-            existing_targets = [
-                (target_connector, entry)
-                for target_connector, entry in targets
-                if pe_enforcer.is_quarantined(plugin_name, target_connector)
-            ]
+            existing_targets = quarantined_targets()
     if not existing_targets:
         click.echo(f"error: {plugin_name!r} is not quarantined", err=True)
         raise SystemExit(1)
 
-    for resolved_connector, entry in existing_targets:
+    for resolved_connector, entry, slot_connector in existing_targets:
         target_restore_path = restore_path
         if not target_restore_path:
             if entry is None or not entry.source_path:
@@ -4661,8 +4699,12 @@ def restore(app: AppContext, name: str, restore_path: str, connector_flag: str) 
                 )
                 raise SystemExit(1)
         try:
+            # A category plugin (web/x) has no root-level identity to collide
+            # with; restore still refuses an existing destination.
             existing = [
-                match for root in allowed_roots if (match := resolve_plugin_identity(root, plugin_name)) is not None
+                match
+                for root in allowed_roots
+                if "/" not in plugin_name and (match := resolve_plugin_identity(root, plugin_name)) is not None
             ]
         except PluginIdentityError as exc:
             raise click.ClickException(str(exc)) from exc
@@ -4677,7 +4719,7 @@ def restore(app: AppContext, name: str, restore_path: str, connector_flag: str) 
             plugin_name,
             target_restore_path,
             allowed_roots=allowed_roots,
-            connector=resolved_connector,
+            connector=slot_connector,
         ):
             click.echo(
                 f"error: restore failed for {plugin_name!r}"
@@ -4689,7 +4731,7 @@ def restore(app: AppContext, name: str, restore_path: str, connector_flag: str) 
         suffix = f" (connector={resolved_connector})" if resolved_connector else ""
         listed = _hermes_listed_id(
             (entry.source_path if entry is not None else "") or target_restore_path,
-            resolved_connector,
+            slot_connector,
         )
         click.echo(f"[plugin] {_plugin_label(listed, plugin_name)} restored to {target_restore_path}{suffix}")
 

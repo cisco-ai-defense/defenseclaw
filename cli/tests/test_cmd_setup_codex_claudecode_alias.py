@@ -456,6 +456,8 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
             ):
                 self.app.cfg.claw.mode = "openclaw"
                 self.app.cfg.guardrail.connector = "openclaw"
+                # An unguarded OpenClaw default; a guarded one needs --replace (GAP-2426).
+                self.app.cfg.guardrail.enabled = False
                 result = _invoke([connector, "--yes", "--no-restart"], self.app)
 
                 self.assertEqual(result.exit_code, 0, msg=result.output)
@@ -513,6 +515,7 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
             ):
                 self.app.cfg.claw.mode = "openclaw"
                 self.app.cfg.guardrail.connector = "openclaw"
+                self.app.cfg.guardrail.enabled = False
                 self.app.cfg.guardrail.mode = "observe"
                 result = _invoke([connector, "--yes", "--mode", "action", "--no-restart"], self.app)
 
@@ -838,6 +841,7 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
             ):
                 self.app.cfg.claw.mode = "openclaw"
                 self.app.cfg.guardrail.connector = "openclaw"
+                self.app.cfg.guardrail.enabled = False
                 self.app.cfg.guardrail.connectors = {}
                 result = _invoke([connector, "--yes", "--no-restart"], self.app)
 

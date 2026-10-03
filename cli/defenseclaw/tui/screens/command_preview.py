@@ -67,6 +67,11 @@ class CommandPreview:
 
         if self.risk in {"destructive", "secret", "restart"}:
             return True
+        args = tuple(arg.lower() for arg in self.masked_argv[1:])
+        if args[:2] == ("registry", "require"):
+            # It turns registry approval on or off for every connector; a
+            # stray Enter ran it from Run (GAP-2438).
+            return True
         return bool(_upgrade_summary(self.masked_argv[1:]))
 
 

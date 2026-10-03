@@ -1187,6 +1187,8 @@ func finishWindowsEnterpriseStandalone(
 		if err := json.NewEncoder(cmd.OutOrStdout()).Encode(result); err != nil {
 			return withExitCode(fmt.Errorf("encode the standalone lifecycle result: %w", err), enterprisestatus.WindowsExitFailure)
 		}
+		// The JSON result carries every error in errors[] (GAP-2445).
+		cmd.SilenceErrors = true
 	} else if !oneLine {
 		writeWindowsEnterpriseStandaloneSummary(cmd.OutOrStdout(), result)
 	}

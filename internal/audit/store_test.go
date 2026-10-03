@@ -679,6 +679,16 @@ func TestBlockAllowSummaryUsesSingularForOneEntry(t *testing.T) {
 	}
 }
 
+// GAP-2429: a store moved without a carry-over note says what to check, not "check them".
+func TestBlockAllowSummaryWithoutNoteNamesTheEntries(t *testing.T) {
+	got := MovedCorruptStore{}.BlockAllowSummary()
+	if !strings.Contains(got, "cannot tell whether the old block/allow entries were carried over") ||
+		!strings.Contains(got, "check your MCP, skill, plugin and tool block/allow entries with defenseclaw mcp list") ||
+		strings.Contains(got, "check them") {
+		t.Fatalf("summary = %q", got)
+	}
+}
+
 func TestAlertAcknowledgementTargetsUseExactEligibility(t *testing.T) {
 	store, err := NewStore(":memory:")
 	if err != nil {

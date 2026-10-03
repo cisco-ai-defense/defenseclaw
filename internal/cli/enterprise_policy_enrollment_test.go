@@ -13,10 +13,13 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	osuser "os/user"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
@@ -84,6 +87,46 @@ func TestEnterprisePolicyShowSaysWhyTheUserIsNotEnrolled(t *testing.T) {
 	out, _ = runPolicyCommand(t, runEnterprisePolicyShow)
 	if !strings.Contains(out, "enrollment: excluded by enterprise.enrollment.exclude_users") {
 		t.Fatalf("a differently typed name of an excluded account must still show the exclusion:\n%s", out)
+	}
+}
+
+// GAP-2456: `enterprise policy show --user <unknown> --json` printed the
+// report and then cobra's "Error: look up user ..." line; the report now
+// carries the failure in errors[] and the line is silenced, exit 1 stays.
+// Text mode keeps the line.
+func TestEnterprisePolicyJSONUnknownUserPrintsOnlyJSON(t *testing.T) {
+	resetEnterprisePolicyFlags(t)
+	ctx := withEnterprisePolicyTree(t)
+	if _, err := enterprisepolicy.Publish(ctx.opts, ctx.connectors); err != nil {
+		t.Fatal(err)
+	}
+	previous := cfg
+	t.Cleanup(func() { cfg = previous })
+	cfg = &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}
+	cfg.Enterprise.Profile = managed.ProfileStandalone
+	enterprisePolicyUser = "dc-no-such-user-gap2456"
+	for _, run := range []func(*cobra.Command, []string) error{runEnterprisePolicyShow, runEnterprisePolicyVerify} {
+		for _, asJSON := range []bool{false, true} {
+			enterprisePolicyJSON = asJSON
+			var out bytes.Buffer
+			cmd := &cobra.Command{}
+			cmd.SetOut(&out)
+			err := run(cmd, nil)
+			if err == nil || !strings.Contains(err.Error(), "dc-no-such-user-gap2456") || commandExitCode(err) != 1 {
+				t.Fatalf("json %t: error %v", asJSON, err)
+			}
+			if cmd.SilenceErrors != asJSON {
+				t.Fatalf("json %t: SilenceErrors %t", asJSON, cmd.SilenceErrors)
+			}
+			if !asJSON {
+				continue
+			}
+			var report enterprisePolicyReport
+			if jsonErr := json.Unmarshal(out.Bytes(), &report); jsonErr != nil || report.Complete ||
+				len(report.Errors) != 1 || report.Errors[0] != err.Error() {
+				t.Fatalf("--json report: %v\n%s", jsonErr, out.String())
+			}
+		}
 	}
 }
 

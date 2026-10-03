@@ -471,6 +471,8 @@ class TestInitFirstRunBackend(unittest.TestCase):
         self.assertNotIn("hooks", text.replace("hook agent", ""))
         self.assertNotIn("Adding another agent later", text)
         self.assertIn("OpenClaw runs alone", text)
+        # GAP-2426 refuses setup <hook connector> on OpenClaw without --replace (GAP-2461).
+        self.assertIn("defenseclaw setup <connector> --replace", text)
         self.assertIn("OpenClaw model calls fail while the DefenseClaw gateway is down", text)
         self.assertIn("Nothing starts the gateway for OpenClaw", text)
 

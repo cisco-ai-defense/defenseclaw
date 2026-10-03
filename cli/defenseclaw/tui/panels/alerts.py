@@ -903,6 +903,21 @@ class AlertsPanelModel:
 
         return sum(1 for row in self.flat_rows() if row.kind != "scan_finding")
 
+    def connector_scope_count(self) -> int:
+        """Top-level rows in the shared connector scope, ignoring search and severity.
+
+        The tab badge and status bar use it, so under a connector scope they
+        read the same 15 as the Alerts panel, not the unscoped 24 (GAP-2441).
+        """
+
+        if not self.connector_filter:
+            return self.total_count()
+        return sum(
+            1
+            for row in self.flat_rows()
+            if row.kind != "scan_finding" and self._row_matches_context_filters(row, ("", ""))
+        )
+
     def critical_count(self) -> int:
         counts = self.severity_counts()
         return counts["CRITICAL"] + counts["HIGH"]

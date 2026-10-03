@@ -267,13 +267,13 @@ func writeWindowsEnterpriseDiscovery(w io.Writer, user string, asJSON bool) erro
 		// A refusal with its own exit code (elevation_required) is already
 		// the whole answer (GAP-2039).
 		var coded *exitCodeError
-		if errors.As(err, &coded) {
-			if asJSON {
-				writeManagedViewRefusalJSON(w, err)
-			}
-			return err
+		if !errors.As(err, &coded) {
+			err = withExitCode(fmt.Errorf("read the AI Discovery inventory: %w", err), 1)
 		}
-		return fmt.Errorf("read the AI Discovery inventory: %w", err)
+		if asJSON {
+			writeManagedViewRefusalJSON(w, err)
+		}
+		return err
 	}
 	report := enterpriseDiscoveryReport{Gateway: host, Accounts: []enterpriseDiscoveryAccount{}}
 	byUser := map[string]int{}
@@ -296,7 +296,13 @@ func writeWindowsEnterpriseDiscovery(w io.Writer, user string, asJSON bool) erro
 		return strings.ToLower(report.Accounts[i].User) < strings.ToLower(report.Accounts[j].User)
 	})
 	if user != "" && len(report.Accounts) == 0 {
-		return fmt.Errorf("no AI Discovery signal for account %q in the gateway's scan; the account has no AI agent, skill or MCP server found yet, or ai_discovery is off", user)
+		// A --json caller reads this as JSON too, not an empty stdout (GAP-2456).
+		err := withExitCode(&managedViewRefusal{code: "account_not_found", message: fmt.Sprintf(
+			"no AI Discovery signal for account %q in the gateway's scan; the account has no AI agent, skill or MCP server found yet, or ai_discovery is off", user)}, 1)
+		if asJSON {
+			writeManagedViewRefusalJSON(w, err)
+		}
+		return err
 	}
 	heading := fmt.Sprintf("AI Discovery inventory from the gateway's scan of each user profile (gateway %s)", host)
 	return writeEnterpriseDiscoveryReport(w, report, user, asJSON, heading)

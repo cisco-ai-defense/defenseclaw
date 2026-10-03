@@ -152,6 +152,10 @@ BADGE_RESERVE = 6
 # already counted, so the other tabs take shorter names instead.
 OPEN_COUNT_RESERVE = 11
 
+# The same room for bracket counts (Windows): three "(999+)" counts less the
+# one Alerts digit already counted.
+PLAIN_COUNT_RESERVE = 17
+
 
 def _names(name: str, label: str) -> tuple[str, str, str]:
     """The tiny, short and full name of one tab."""
@@ -333,7 +337,12 @@ def _every_tab_named(panels: Sequence[tuple[str, str, str]], width: int) -> dict
         )
         return strip_width(tuple(labels.values())) + reserve + alerts
 
-    if cost() > width:
+    # Windows' bracket counts ("2 Alerts(24)", "8 Log(205)") cost more than
+    # superscript digits. When even the shortest names leave no room for
+    # them beside a full open name, ``_wide_labels`` leaves the least
+    # important tabs bare instead: "6 Invento…" and "A Activi…" opened at
+    # 160 columns (GAP-2442).
+    if cost() + (PLAIN_COUNT_RESERVE if _PLAIN_BADGE else 0) > width:
         return None
     for tier in range(3):
         for name in sorted(keys, key=_rank):
@@ -362,9 +371,9 @@ def _named_fit(
     beside a Logs and Audit backlog (GAP-2403), turned the open
     "R Registries" into "R Registri…". A count that doesn't fit waits; it
     never costs a name. The counts don't depend on the open tab, so switching
-    panels never relabels a third tab. The open tab reads in full, or
-    "V AI Disco…" when the Alerts, Logs or Audit count took that room: it is
-    the one label that may change, and its panel title names it.
+    panels never relabels a third tab. The open tab reads in full: when the
+    Alerts, Logs or Audit count took that room, the least important tabs
+    become bare keys instead, whichever tab is open (GAP-2460).
     """
 
     keys = {name: key for name, key, _title in panels}
@@ -387,6 +396,25 @@ def _named_fit(
         room = spare if name in _OPEN_NAME_COUNTS else reserve
         if name == "alerts" or strip_width(tuple(render(named, shown | {name}).values())) + room <= width:
             shown.add(name)
+    # When the Alerts, Logs and Audit counts leave no room for the longest
+    # full name, the least important tabs go bare first, whichever tab is
+    # open, so the open tab still reads in full: "R Regist…" and "V AI Di…"
+    # opened beside Alerts²⁹, Log⁹⁹⁹⁺ and Audit⁵⁰⁶ at 160 columns (GAP-2460).
+    named = dict(named)
+
+    def short_of() -> int:
+        room = max(len(_label(keys[name], titles[name], 0)) - len(_label(keys[name], named[name], 0)) for name in keys)
+        return strip_width(tuple(render(named, shown).values())) + room - width
+
+    for name in sorted(keys, key=_rank, reverse=True):
+        if short_of() <= 0:
+            break
+        if name in KEEP_BADGE or name == "overview" or not named[name]:
+            continue
+        before, deficit = named[name], short_of()
+        named[name] = ""
+        if short_of() > deficit - 2:
+            named[name] = before
     title = titles[active]
     wants = [title] + [f"{title[:n].rstrip()}…" for n in range(len(title) - 1, 1, -1)]
     for want in [want for want in wants if len(want) > len(named[active])] + [named[active]]:

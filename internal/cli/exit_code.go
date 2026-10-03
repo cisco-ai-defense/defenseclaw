@@ -42,6 +42,17 @@ func withExitCode(err error, code int) error {
 	return &exitCodeError{code: code, err: err}
 }
 
+// silenceJSONReportedError keeps cobra from printing "Error: ..." on stderr
+// for a coded failure whose --json result on stdout already carries it in
+// errors[], so a script that merges the streams still reads one JSON
+// document (GAP-2445).
+func silenceJSONReportedError(cmd *cobra.Command, jsonOutput bool, err error) {
+	var coded *exitCodeError
+	if cmd != nil && jsonOutput && errors.As(err, &coded) {
+		cmd.SilenceErrors = true
+	}
+}
+
 // commandExitCode reports the exit code a failure asked for, defaulting to the
 // generic failure result.
 func commandExitCode(err error) int {

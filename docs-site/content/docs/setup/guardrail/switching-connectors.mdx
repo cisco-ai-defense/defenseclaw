@@ -69,6 +69,12 @@ OpenClaw and ZeptoClaw are proxy-backed and cannot run next to hook connectors, 
 defenseclaw setup openclaw --replace --mode action
 ```
 
+The reverse works the same way: when the install guards OpenClaw or ZeptoClaw, a hook connector's setup (for example `defenseclaw setup claude-code`) refuses and changes nothing, because it would remove the DefenseClaw plugin from OpenClaw. Pass `--replace` to switch; setup names the proxy connector it removes and asks first unless `--yes` is given:
+
+```bash
+defenseclaw setup claude-code --replace --mode action
+```
+
 ## Verify
 
 ```bash

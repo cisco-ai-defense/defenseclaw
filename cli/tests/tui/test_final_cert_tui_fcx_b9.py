@@ -51,7 +51,11 @@ def test_badges_never_blank_or_rename_tabs_at_160_columns(monkeypatch) -> None:
             assert strip_width(tuple(labels.values())) <= 146
             for name, label in labels.items():
                 if name != active:
-                    assert _COUNT.sub("", label) == names[name], (unread, active, label)
+                    # A Logs backlog may leave the least important tab a bare
+                    # key so the open tab reads in full (GAP-2460); a tab is
+                    # never renamed.
+                    bare = "logs" in unread and _COUNT.sub("", label) == label.split(" ")[0]
+                    assert bare or _COUNT.sub("", label) == names[name], (unread, active, label)
         assert fits["overview"]["alerts"] == "2 Alerts²²"
     assert fits["overview"]["logs"] == "8 Log³⁷"
 

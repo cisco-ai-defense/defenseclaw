@@ -131,6 +131,13 @@ type InstallWatcher struct {
 	mu      sync.Mutex
 	pending map[string]time.Time // path → first-seen, for debounce
 
+	// pluginWaiting holds plugin-root folders that had nothing to admit yet
+	// (empty or category folders) and are watched for what lands in them;
+	// addWatch adds such a watch. Both are used on the Run goroutine only
+	// (GAP-2449).
+	pluginWaiting map[string]struct{}
+	addWatch      func(dir string)
+
 	observabilityV8Mu sync.RWMutex
 	observabilityV8   ObservabilityV8Runtime
 
@@ -256,6 +263,7 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 
 	watched := 0
 	watchedDirs := make(map[string]struct{})
+	w.addWatch = func(dir string) { addDirWatches(fsw, dir, 0, watchedDirs) }
 	var deferredDirs [][2]string // {dir, kind} not created because an agent installer owns them
 	watchOnce := func(dir, kind string) bool {
 		absolute, absErr := filepath.Abs(dir)
@@ -304,6 +312,7 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 		if !watchOnce(dir, "plugin") {
 			continue
 		}
+		w.watchExistingPluginFolders(dir)
 		if watcherConnectorName(w.cfg) == "claudecode" &&
 			strings.EqualFold(filepath.Base(filepath.Clean(dir)), "cache") {
 			addClaudeCacheWatches(fsw, dir, watchedDirs)
@@ -374,17 +383,21 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 					continue
 				}
 			}
+			queued := event.Name
 			if !w.isDirectChildDir(event.Name) {
-				continue
+				var ok bool
+				if queued, ok = w.waitingPluginEvent(event.Name); !ok {
+					continue
+				}
 			}
 			evtType := "create"
 			if event.Op&fsnotify.Rename != 0 {
 				evtType = "rename"
 			}
-			w.recordWatcherEvent(ctx, evtType, w.classifyEvent(event.Name).Type.String(), "")
+			w.recordWatcherEvent(ctx, evtType, w.classifyEvent(queued).Type.String(), "")
 			w.mu.Lock()
-			if _, exists := w.pending[event.Name]; !exists {
-				w.pending[event.Name] = time.Now()
+			if _, exists := w.pending[queued]; !exists {
+				w.pending[queued] = time.Now()
 			}
 			w.mu.Unlock()
 
@@ -404,7 +417,9 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 						deferredDirs = append(deferredDirs, entry)
 						continue
 					}
-					watchOnce(entry[0], entry[1])
+					if watchOnce(entry[0], entry[1]) && entry[1] == "plugin" {
+						w.watchExistingPluginFolders(entry[0])
+					}
 				}
 			}
 			w.processPending(ctx)
@@ -456,6 +471,11 @@ func (w *InstallWatcher) pendingInstallEvents(path string) []InstallEvent {
 			out = append(out, evt)
 		}
 		return out
+	}
+	if fallback.Type == InstallPlugin {
+		if events, ok := w.pluginFolderEvents(path); ok {
+			return events
+		}
 	}
 	for _, root := range w.skillDirs {
 		if !hermesskills.IsRoot(root) || !watcherPathAtOrBelow(path, root) {
@@ -1076,6 +1096,13 @@ func (w *InstallWatcher) quarantineAssetWith(ctx context.Context, evt InstallEve
 	if err != nil {
 		w.emitQuarantineFailure(ctx, evt.Path, err)
 		return
+	}
+	if category, _, nested := strings.Cut(evt.Name, "/"); nested && evt.Type == InstallPlugin {
+		// A plugin in a category folder keeps its category in quarantine
+		// (plugins/<connector>/<category>/<name>), so "plugin restore
+		// <category>/<name>" finds it and web/x and memx/x don't share one
+		// slot (GAP-2464).
+		plan.QuarantinePath = filepath.Join(filepath.Dir(plan.QuarantinePath), filepath.Base(category), physicalName)
 	}
 	record, err := w.store.CreateQuarantineRecord(ctx, audit.CreateQuarantineRecordInput{
 		TargetType: evt.Type.String(), TargetName: evt.Name,

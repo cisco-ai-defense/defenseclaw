@@ -301,6 +301,11 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
                 f"connector {requested!r} is {support.status} on "
                 f"{platform_support.host_os()}: {support.reason}"
             )
+    if connector:
+        from defenseclaw.commands.cmd_setup import _refuse_hook_switch_over_configured_proxy
+
+        # GAP-2455: never silently replace a guarded OpenClaw/ZeptoClaw.
+        _refuse_hook_switch_over_configured_proxy(_normalize_connector_arg(connector))
 
     if _use_guided_first_run(
         non_interactive=non_interactive,
@@ -2526,9 +2531,11 @@ def _render_first_run_report(report, renderer, *, connectors: list[str] | None =
     if proxy:
         # GAP-2427: a proxy connector has no hooks. Its model calls go through
         # the gateway, nothing restarts the gateway for it, and it cannot run
-        # next to hook connectors, so the hook advice below is wrong for it.
+        # next to hook connectors (setup <hook> needs --replace, GAP-2426), so
+        # the hook advice below is wrong for it.
         renderer.echo(
-            f"  {proxy} runs alone: defenseclaw setup <connector> for a hook agent replaces {proxy}'s guardrail"
+            f"  {proxy} runs alone: defenseclaw setup <connector> --replace for a hook agent"
+            f" replaces {proxy}'s guardrail"
         )
         renderer.echo(f"  {proxy} model calls fail while the DefenseClaw gateway is down (fail-closed)")
         if platform_support.host_os() in {"linux", "darwin"}:

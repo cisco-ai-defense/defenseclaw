@@ -46,9 +46,12 @@ class PluginEnforcer:
         return safe
 
     def _quarantine_path(self, plugin_name: str, connector: str = "") -> str | None:
-        safe_name = self._safe_segment(plugin_name)
-        if safe_name is None:
+        # GAP-2464: a Hermes plugin in a category folder is quarantined by the
+        # gateway watcher as <connector>/<category>/<name>.
+        parts = [self._safe_segment(part) for part in plugin_name.split("/")]
+        if len(parts) > 2 or None in parts:
             return None
+        safe_name = os.path.join(*parts)
         if connector:
             safe_connector = self._safe_segment(connector)
             if safe_connector is None:
@@ -113,17 +116,23 @@ class PluginEnforcer:
         if is_link_or_reparse(src) or not os.path.exists(src):
             return False
         try:
-            # GAP-2164: a single-file OpenCode/Amp plugin is quarantined as a
-            # file named by its ID; it has no manifest directory to read.
-            source_id = (
-                validate_plugin_id(os.path.basename(src))
-                if os.path.isfile(src)
-                else canonical_plugin_id(src)[0]
-            )
-            if filesystem_identity_key(source_id, os.path.dirname(src)) != filesystem_identity_key(
-                validate_plugin_id(plugin_name), os.path.dirname(src)
-            ):
-                return False
+            if "/" in plugin_name:
+                # GAP-2464: a category plugin is keyed by its listed
+                # <category>/<folder> id, which the slot path already is.
+                for part in plugin_name.split("/"):
+                    validate_plugin_id(part)
+            else:
+                # GAP-2164: a single-file OpenCode/Amp plugin is quarantined as
+                # a file named by its ID; it has no manifest directory to read.
+                source_id = (
+                    validate_plugin_id(os.path.basename(src))
+                    if os.path.isfile(src)
+                    else canonical_plugin_id(src)[0]
+                )
+                if filesystem_identity_key(source_id, os.path.dirname(src)) != filesystem_identity_key(
+                    validate_plugin_id(plugin_name), os.path.dirname(src)
+                ):
+                    return False
         except PluginIdentityError:
             return False
         real_dest = os.path.realpath(restore_path)

@@ -182,6 +182,24 @@ def quickstart_cmd(
         detected = _detect_installed_connectors()
         configured = _configured_quickstart_connectors(cfg_mod)
         candidates = sorted({name for name in [*configured, *detected] if name})
+        proxy = next((c for c in configured if c in _PROXY_CONNECTORS), "")
+        if len(candidates) > 1 and proxy:
+            # GAP-2466: no hook connector can join a guarded OpenClaw/ZeptoClaw
+            # ('setup <c> --yes' and 'init' are refused), so offer only the
+            # commands that work: reconfigure it or switch with --replace.
+            label = _connector_label(proxy)
+            click.echo(
+                "  \u2717 Multiple connectors detected/configured: "
+                f"{_connector_labels(candidates)}.\n"
+                f"    This install guards {label}, which is proxy-backed and cannot run next to hook connectors.\n"
+                "    Quickstart configures one connector on a new install. No changes made.\n"
+                f"    Reconfigure {label}: defenseclaw setup {proxy}\n"
+                f"    Switch this install to a hook connector and remove {label}: "
+                "defenseclaw setup <connector> --replace\n"
+                "    See what is guarded now: defenseclaw status",
+                err=True,
+            )
+            sys.exit(2)
         if len(candidates) > 1 and configured:
             # GAP-1352: on an install that already guards connectors,
             # 'quickstart --connector X' refuses (it would narrow the roster),
@@ -326,16 +344,41 @@ def _refuse_roster_narrowing(cfg_mod, connector: str, mode: str | None = None) -
         return
     slug = "claude-code" if wanted == "claudecode" else wanted
     mode_flag = f" --mode {mode}" if mode else ""
-    if wanted in {"openclaw", "zeptoclaw"}:
-        # Proxy-backed connectors cannot run next to hook connectors, so
-        # "keep the rest" is refused (GAP-1407); --replace switches (GAP-1455).
+    proxies = [c for c in configured if c in _PROXY_CONNECTORS]
+    if proxies and wanted not in _PROXY_CONNECTORS:
+        # GAP-2452: a hook connector would remove the guarded proxy
+        # connector's plugin and leave it unguarded (as 'setup <c>', GAP-2426).
+        # GAP-2466: display names, as the setup/init refusal.
+        proxy_label = _connector_label(proxies[0])
         click.echo(
-            f"  \u2717 This install already guards: {', '.join(configured)}.\n"
-            f"    {wanted} is proxy-backed and cannot run next to these connectors.\n"
-            f"    Switch to it and remove them: defenseclaw setup {slug} --replace{mode_flag}\n"
-            "    Change the whole set instead: defenseclaw init",
+            f"  \u2717 This install already guards: {_connector_labels(configured)}.\n"
+            f"    {proxy_label} is proxy-backed and cannot run next to hook connectors, so quickstart\n"
+            f"    would remove its DefenseClaw plugin and leave it unguarded. No changes made.\n"
+            f"    Switch this install to {_connector_label(wanted)}: defenseclaw setup {slug} --replace{mode_flag}",
             err=True,
         )
+        sys.exit(2)
+    if wanted in _PROXY_CONNECTORS:
+        # Proxy-backed connectors cannot run next to hook connectors, so
+        # "keep the rest" is refused (GAP-1407); --replace switches (GAP-1455).
+        others = [c for c in configured if c and c != wanted]
+        if len(others) == 1:
+            target = pronoun = _connector_label(others[0])
+        else:
+            target, pronoun = "these connectors", "them"
+        lines = [
+            f"  \u2717 This install already guards: {_connector_labels(configured)}.",
+            f"    {_connector_label(wanted)} is proxy-backed and cannot run next to {target}. No changes made.",
+            f"    Switch to it and remove {pronoun}: defenseclaw setup {slug} --replace{mode_flag}",
+        ]
+        guarded_proxy = next((c for c in others if c in _PROXY_CONNECTORS), "")
+        if guarded_proxy:
+            # GAP-2468: init does not switch a proxy install to the other
+            # proxy connector, so offer to keep the guarded one instead.
+            lines.append(f"    Keep guarding {_connector_label(guarded_proxy)}: defenseclaw setup {guarded_proxy}")
+        else:
+            lines.append("    Change the whole set instead: defenseclaw init")
+        click.echo("\n".join(lines), err=True)
         sys.exit(2)
     click.echo(
         f"  \u2717 This install already guards: {', '.join(configured)}.\n"
@@ -346,6 +389,20 @@ def _refuse_roster_narrowing(cfg_mod, connector: str, mode: str | None = None) -
         err=True,
     )
     sys.exit(2)
+
+
+_PROXY_CONNECTORS = frozenset({"openclaw", "zeptoclaw"})
+
+
+def _connector_label(name: str) -> str:
+    """Display name of a connector (OpenClaw, Claude Code), as setup prints it."""
+    from defenseclaw.commands.cmd_setup import _CONNECTOR_META
+
+    return _CONNECTOR_META.get(name, {}).get("label", name)
+
+
+def _connector_labels(names) -> str:
+    return ", ".join(_connector_label(n) for n in names)
 
 
 def _configured_quickstart_connectors(cfg_mod) -> list[str]:
@@ -365,4 +422,9 @@ def _configured_quickstart_connectors(cfg_mod) -> list[str]:
         active = cfg.active_connector()
     except Exception:
         return []
-    return [] if active == "openclaw" else [active]
+    if active == "openclaw" and not (
+        getattr(cfg.guardrail, "enabled", False) and (cfg.guardrail.connector or "").strip()
+    ):
+        # The implicit "openclaw" default, not a guarded OpenClaw (GAP-2452).
+        return []
+    return [active]

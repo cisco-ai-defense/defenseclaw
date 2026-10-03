@@ -2273,17 +2273,31 @@ PLUGIN_DESCRIPTION_MAX = 160
 PLUGIN_DESCRIPTION_MORE = "  Full description: press o, then Info, then A for its output"
 
 
+# A plugin scan younger than this is "just scanned": the detail neither
+# offers a rescan nor sends the user to s to see its findings (GAP-2437).
+PLUGIN_RECENT_SCAN_MINUTES = 60
+
+
+def _scan_age_minutes(scanned_at: str, now: datetime | None = None) -> int | None:
+    """Minutes since a plugin scan time, or None when it doesn't parse."""
+
+    try:
+        when = datetime.strptime(scanned_at, "%Y-%m-%d %H:%M:%S UTC").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    return max(0, int(((now or datetime.now(timezone.utc)) - when).total_seconds() // 60))
+
+
 def _scanned_line(scanned_at: str, now: datetime | None = None) -> str:
     """``2026-10-02 16:53Z (15 h ago)`` for a plugin scan time, or "".
 
     A verdict from a scan many builds old read as current (GAP-2401).
     """
 
-    try:
-        when = datetime.strptime(scanned_at, "%Y-%m-%d %H:%M:%S UTC").replace(tzinfo=timezone.utc)
-    except ValueError:
+    minutes = _scan_age_minutes(scanned_at, now)
+    if minutes is None:
         return _esc(scanned_at)
-    minutes = max(0, int(((now or datetime.now(timezone.utc)) - when).total_seconds() // 60))
+    when = datetime.strptime(scanned_at, "%Y-%m-%d %H:%M:%S UTC").replace(tzinfo=timezone.utc)
     if minutes < 60:
         age = f"{minutes} min"
     elif minutes < 48 * 60:
@@ -2293,7 +2307,7 @@ def _scanned_line(scanned_at: str, now: datetime | None = None) -> str:
     return f"{when:%Y-%m-%d %H:%M}Z ({age} ago)"
 
 
-def _format_plugin_detail(row: PluginRow) -> str:
+def _format_plugin_detail(row: PluginRow, now: datetime | None = None) -> str:
     status = _plugin_status(row)
     status_line = f"  Status     {_format_status(status)}"
     # "Status enabled  Enabled yes" said the same thing twice (GAP-2048).
@@ -2304,6 +2318,8 @@ def _format_plugin_detail(row: PluginRow) -> str:
         lines.append(f"  Version    {_esc(row.version)}")
     if row.origin:
         lines.append(f"  Origin     {_esc(row.origin)}")
+    age = _scan_age_minutes(row.scan.scanned_at, now) if row.scan is not None and row.scan.scanned_at else None
+    recent_scan = age is not None and age < PLUGIN_RECENT_SCAN_MINUTES
     if row.scan is not None:
         # E4i: plugin scans carry the same per-severity breakdown; reuse
         # ``_scan_line`` (no target for plugins) so the rendering matches
@@ -2319,7 +2335,10 @@ def _format_plugin_detail(row: PluginRow) -> str:
             )
         )
         if row.scan.scanned_at:
-            lines.append(f"  Scanned    {_scanned_line(row.scan.scanned_at)} · press s to rescan with this build")
+            scanned = f"  Scanned    {_scanned_line(row.scan.scanned_at, now)}"
+            if not recent_scan:
+                scanned += " · press s to rescan with this build"
+            lines.append(scanned)
     if row.verdict == "rejected":
         # Same meaning as the CLI scan's "policy: rejected" line (GAP-2048). q is not a
         # row key (GAP-2111): Quarantine lives in the o actions menu.
@@ -2331,7 +2350,12 @@ def _format_plugin_detail(row: PluginRow) -> str:
     if row.scan is not None and row.scan.total_findings > 0:
         # The list payload has only the counts; say where the findings are.
         flag = f" --connector {row.connector}" if row.connector else ""
-        lines.append(f"  Findings   press s, or run: defenseclaw plugin scan {_esc(row.id)}{_esc(flag)}")
+        command = f"defenseclaw plugin scan {_esc(row.id)}{_esc(flag)}"
+        if recent_scan:
+            # A scan run from here prints them in Activity (GAP-2437).
+            lines.append(f"  Findings   listed in the scan output (A), or run: {command}")
+        else:
+            lines.append(f"  Findings   press s to rescan and list them, or run: {command}")
     if row.description:
         description = " ".join(row.description.split())
         cut_off = len(description) > PLUGIN_DESCRIPTION_MAX

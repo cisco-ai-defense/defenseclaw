@@ -3429,21 +3429,36 @@ class HostPluginEnumerationTests(unittest.TestCase):
     @patch("defenseclaw.commands.cmd_plugin.subprocess.run")
     @patch("defenseclaw.commands.cmd_plugin._trusted_copilot_binary", return_value="")
     def test_list_copilot_plugins_does_not_execute_untrusted_path(self, _trusted, run):
-        from defenseclaw.commands.cmd_plugin import _list_copilot_plugins
+        from defenseclaw.commands import cmd_plugin
 
-        self.assertEqual(_list_copilot_plugins(workspace_dir=self.tmp_dir), [])
+        with patch.object(cmd_plugin, "_untrusted_copilot_binary", return_value="/opt/agents/bin/copilot"):
+            self.assertEqual(cmd_plugin._list_copilot_plugins(workspace_dir=self.tmp_dir), [])
         run.assert_not_called()
+        # GAP-2415: a refused binary is reported, not shown as "no plugins".
+        reason = cmd_plugin._HOST_PLUGIN_LIST_ERRORS.pop("copilot")
+        self.assertIn("/opt/agents/bin/copilot is not in a trusted location", reason)
+        self.assertIn("ai_discovery.trusted_binary_prefixes", reason)
 
     @patch("defenseclaw.commands.cmd_plugin.subprocess.run")
     @patch(
         "defenseclaw.commands.cmd_plugin._trusted_copilot_binary",
         return_value=r"C:\Tools\copilot.exe",
     )
-    def test_list_copilot_plugins_requires_pinned_workspace(self, _trusted, run):
-        from defenseclaw.commands.cmd_plugin import _list_copilot_plugins
+    def test_list_copilot_plugins_without_pinned_workspace_runs_in_home(self, _trusted, run):
+        """GAP-2415: the default config (no claw.workspace_dir) still lists."""
+        from defenseclaw.commands import cmd_plugin
 
-        self.assertEqual(_list_copilot_plugins(), [])
-        run.assert_not_called()
+        run.return_value = SimpleNamespace(
+            returncode=0,
+            stdout='[{"name":"p","marketplace":"m","enabled":true}]',
+            stderr="",
+        )
+        with patch.dict(os.environ, {"HOME": self.tmp_dir, "USERPROFILE": self.tmp_dir}):
+            rows = cmd_plugin._list_copilot_plugins()
+
+        self.assertEqual([r["id"] for r in rows], ["p@m"])
+        self.assertEqual(run.call_args.kwargs["cwd"], os.path.realpath(self.tmp_dir))
+        self.assertNotIn("copilot", cmd_plugin._HOST_PLUGIN_LIST_ERRORS)
 
 
 class MergeAllPluginsHostBranchTests(unittest.TestCase):

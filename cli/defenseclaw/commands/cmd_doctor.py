@@ -1808,7 +1808,8 @@ def _check_audit_db(cfg, r: _DoctorResult) -> None:
 
 _CARRY_OVER_NOTE_SUFFIX = ".carryover.json"
 _REVIEW_BLOCK_ALLOW_LISTS = (
-    "check them with defenseclaw mcp list, skill list, plugin list and tool list, and block or allow them again."
+    "check your MCP, skill, plugin and tool block/allow entries with defenseclaw mcp list, skill list,"
+    " plugin list and tool list, and block or allow them again."
 )
 
 
@@ -1820,7 +1821,10 @@ def _moved_store_block_allow_summary(moved: Path) -> str:
         kept = int(note.get("carried_over", 0))
         error = str(note.get("error") or "")
     except (OSError, ValueError, TypeError, AttributeError):
-        return f"started a new store; {_REVIEW_BLOCK_ALLOW_LISTS}"
+        return (
+            "started a new store; DefenseClaw cannot tell whether the old block/allow entries were carried over"
+            f" (the store was moved by an earlier version that kept no record), so {_REVIEW_BLOCK_ALLOW_LISTS}"
+        )
     entries = "1 block/allow entry" if kept == 1 else f"{kept} block/allow entries"
     if not error:
         return f"started a new store and carried over {entries}."
@@ -8366,7 +8370,7 @@ def _check_llm_reachable(cfg, r: _DoctorResult) -> None:
         )
     elif " through the proxy " in msg and (proxy := _llm.env_proxy(llm)) is not None:
         # Doctor's probe uses this shell's proxy; say how to fix or skip it (GAP-2421).
-        source = proxy[1] if proxy[1].endswith("_PROXY") else "the system proxy"
+        source = proxy[1] if proxy[1].upper().endswith("_PROXY") else "the system proxy"
         _emit(
             "warn",
             "LLM reachable",

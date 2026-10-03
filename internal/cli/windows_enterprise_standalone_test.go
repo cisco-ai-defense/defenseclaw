@@ -1725,13 +1725,24 @@ func TestWindowsEnterpriseLifecycleCallerErrorsExitCodes(t *testing.T) {
 		{"verify", "nope", "invalid_arguments", `invalid --profile "nope": use standalone or secure_client`, 1639},
 	} {
 		for _, jsonOutput := range []bool{false, true} {
-			var stdout bytes.Buffer
-			command := &cobra.Command{}
+			var stdout, stderr bytes.Buffer
+			var err error
+			command := &cobra.Command{Use: tc.action, SilenceUsage: true, RunE: func(c *cobra.Command, _ []string) error {
+				err = runWindowsEnterpriseLifecycle(context.Background(), c, tc.action,
+					&windowsEnterpriseLifecycleOptions{profile: tc.profile, jsonOutput: jsonOutput})
+				return err
+			}}
+			command.SetArgs([]string{})
 			command.SetOut(&stdout)
-			err := runWindowsEnterpriseLifecycle(context.Background(), command, tc.action,
-				&windowsEnterpriseLifecycleOptions{profile: tc.profile, jsonOutput: jsonOutput})
+			command.SetErr(&stderr)
+			_ = command.Execute()
 			if got := commandExitCode(err); got != tc.exit {
 				t.Fatalf("%s --profile %s (json %t): exit %d, want %d (%v)", tc.action, tc.profile, jsonOutput, got, tc.exit, err)
+			}
+			// GAP-2445: --json prints only the JSON result, whose errors[]
+			// carry the refusal; text mode prints the one Error line.
+			if want := "Error: " + err.Error() + "\n"; (jsonOutput && stderr.Len() != 0) || (!jsonOutput && stderr.String() != want) {
+				t.Fatalf("%s --profile %s (json %t): stderr %q", tc.action, tc.profile, jsonOutput, stderr.String())
 			}
 			if !jsonOutput && tc.profile == "nope" {
 				if stdout.Len() != 0 || err.Error() != tc.text {
@@ -1776,6 +1787,25 @@ func TestWindowsEnterpriseLifecycleCallerErrorsExitCodes(t *testing.T) {
 		&windowsEnterpriseLifecycleOptions{profile: "secure_client"})
 	if commandExitCode(err) != 1639 || !strings.Contains(fmt.Sprint(err), "This computer runs the standalone profile: use --profile standalone, or omit --profile") {
 		t.Fatalf("verify --profile secure_client on a standalone host: exit %d, %v", commandExitCode(err), err)
+	}
+	// GAP-2445: with --json the preflight JSON is the whole answer; cobra's
+	// "Error: profile_conflict: ..." line no longer follows it.
+	for _, action := range []string{"verify", "status"} {
+		var stdout, stderr bytes.Buffer
+		command := &cobra.Command{Use: action, SilenceUsage: true, RunE: func(c *cobra.Command, _ []string) error {
+			err = runWindowsEnterpriseLifecycle(context.Background(), c, action,
+				&windowsEnterpriseLifecycleOptions{profile: "secure_client", jsonOutput: true})
+			return err
+		}}
+		command.SetArgs([]string{})
+		command.SetOut(&stdout)
+		command.SetErr(&stderr)
+		_ = command.Execute()
+		var preflight windowsEnterpriseLifecyclePreflightFailure
+		if jsonErr := json.Unmarshal(stdout.Bytes(), &preflight); jsonErr != nil || preflight.OK ||
+			!strings.HasPrefix(preflight.Error, "profile_conflict: ") || commandExitCode(err) != 1639 || stderr.Len() != 0 {
+			t.Fatalf("%s --profile secure_client --json: exit %d, stdout %q, stderr %q", action, commandExitCode(err), stdout.String(), stderr.String())
+		}
 	}
 
 	// An administrator who cannot read the config still sees the real error.
