@@ -477,5 +477,16 @@ def test_registry_result_summary_reads_the_json_result() -> None:
     reject = {"action": "reject", "verdict": {"name": "wiki", "type": "mcp", "status": "blocked"}}
     assert registry_result_summary(json.dumps(reject)) == "mcp:wiki rejected"
     assert registry_result_summary("not json") == ""
+    # GAP-2499: stderr's gateway restart line came after the JSON, so the
+    # toast showed only "defenseclaw-gateway: restarting... \u2713".
+    restarted = json.dumps(reject, indent=2) + "\n  defenseclaw-gateway: restarting... \u2713"
+    assert registry_result_summary(restarted) == "mcp:wiki rejected · gateway restarted"
+    failed = (
+        "  defenseclaw-gateway: restarting... \u2717\n" + json.dumps(approve) + "\n"
+        "  \u26a0 The change is saved, but the gateway restart failed, so agent hooks still use the old"
+    )
+    assert registry_result_summary(failed).endswith(
+        "status pending until the next sync scans it · gateway restart failed; run: defenseclaw-gateway restart"
+    )
     assert entry_status_label("pending").startswith("pending (no scan verdict yet")
     assert entry_status_label("clean") == "clean"

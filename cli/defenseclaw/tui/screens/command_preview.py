@@ -87,7 +87,14 @@ def build_command_preview(command: ParsedCommand) -> CommandPreview:
         risk = inferred
     restart = _restart_effect(risk, command.args)
     summary = _upgrade_summary(command.args) or _risk_summary(risk, command.category)
-    if restart == "yes" and risk in {"setup", "mutation"}:
+    changes_state = risk in {"setup", "mutation"}
+    if changes_state and restart != "no" and command.args[:1] == ("registry",):
+        when = "restarts" if restart == "yes" else "can change policy, and then restarts"
+        summary = (
+            f"This registries command {when} a running gateway so agent hooks use the new policy. "
+            "Runtime traffic may briefly pause."
+        )
+    elif changes_state and restart == "yes":
         summary = f"This {command.category} command restarts the gateway. Runtime traffic may briefly pause."
     return CommandPreview(
         title=command.display_name,
@@ -236,6 +243,15 @@ def _restart_effect(risk: str, args: tuple[str, ...]) -> str:
         verbs = {arg for arg in lowered[2:4] if not arg.startswith("-")}
         if verbs & {"enable", "disable", "setup"}:
             return "yes"
+    if lowered[:1] == ("registry",):
+        # A registry command that changes asset_policy restarts a running
+        # gateway (GAP-2422); approve/reject/require always change it, sync
+        # and remove only when they promote or drop rules (GAP-2499).
+        verb = lowered[1] if len(lowered) > 1 else ""
+        if verb in {"approve", "reject", "require"} and "--no-repromote" not in lowered:
+            return "yes"
+        if verb in {"sync", "remove"} and "--no-promote" not in lowered:
+            return "possible"
     if lowered and lowered[0] == "setup" and "--no-restart" not in lowered:
         return "possible"
     return "no"
