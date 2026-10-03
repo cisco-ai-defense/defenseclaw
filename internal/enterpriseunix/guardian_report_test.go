@@ -126,6 +126,52 @@ func TestInstallWaitsForTheGuardianWithoutTargets(t *testing.T) {
 	}
 }
 
+// The guardian's first reconcile writes its ledger and target report before
+// its credential attestation. The CI pkg lane read in between and reported
+// readiness.guardian false (GAP-2577); the read now retries a missing
+// attestation like any other torn read.
+func TestInstallWaitsForTheFirstGuardianAttestation(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	h.env.GuardianReportTimeout = 10 * time.Second
+	h.env.PollInterval = 50 * time.Millisecond
+	guardian := unitOf("darwin", "guardian")
+	published := make(chan error, 1)
+	started := false
+	h.env.Services = &hookedServices{fakeServices: h.services, onStart: func(unit string) {
+		if unit != guardian || started {
+			return
+		}
+		started = true
+		go func() {
+			data, _ := json.Marshal(map[string]any{"version": 1, "updated_at": h.env.Now().UTC().Format(time.RFC3339), "ok": true})
+			h.publishLedger(data)
+			attestation := h.env.attestationPath()
+			body, err := os.ReadFile(attestation)
+			if err == nil {
+				err = os.Remove(attestation)
+			}
+			if err == nil {
+				err = writeGuardianState(h, time.Now(), nil)
+			}
+			if err == nil {
+				time.Sleep(100 * time.Millisecond)
+				err = os.WriteFile(attestation, body, 0o600)
+			}
+			published <- err
+		}()
+	}}
+	t.Cleanup(func() {
+		if err := <-published; err != nil {
+			t.Error(err)
+		}
+	})
+	r := h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")})
+	requireOK(t, r)
+	if !r.Readiness.Guardian || !r.CoverageComplete {
+		t.Fatalf("install result read the guardian before its first attestation: %+v", r.Readiness)
+	}
+}
+
 // An earlier success the authorization ledger carries forward is not
 // current readiness: verify needs the guardian's root-only credential
 // attestation from the reconcile that wrote the ledger, and names a target

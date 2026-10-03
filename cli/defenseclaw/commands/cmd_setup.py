@@ -2805,20 +2805,32 @@ def setup_mcp_scanner(
         _log_setup_action(app, ACTION_SETUP_MCP_SCANNER, " ".join(parts), allow_offline=True)
 
 
-def _validated_api_key_env_name(value: str) -> str:
+def _validated_api_key_env_name(value: str, param_hint: str = "'--api-key-env'") -> str:
     """Refuse a pasted key in --api-key-env, which takes a variable NAME (GAP-2569).
 
     Without this check the key itself was saved to config.yaml as
     cisco_ai_defense.api_key_env. An empty value still clears the field.
+    setup guardrail --cisco-api-key-env writes the same field (GAP-2579).
     """
     name = value.strip()
     if name and (not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) or _looks_like_secret(name)):
         raise click.BadParameter(
             "takes the NAME of the variable that holds the key, e.g. CISCO_AI_DEFENSE_API_KEY; "
             "store the key itself with 'defenseclaw keys set CISCO_AI_DEFENSE_API_KEY'.",
-            param_hint="'--api-key-env'",
+            param_hint=param_hint,
         )
     return name
+
+
+def _prompt_cisco_api_key_env_name(default: str) -> str:
+    """Ask for the Cisco AI Defense key's env var NAME; re-ask on a pasted key (GAP-2579)."""
+    while True:
+        value = click.prompt("  API key env var name", default=default)
+        try:
+            return _validated_api_key_env_name(value)
+        except click.BadParameter:
+            click.echo("  Enter the NAME of the variable that holds the key, e.g. CISCO_AI_DEFENSE_API_KEY.")
+            click.echo("  Store the key itself with 'defenseclaw keys set CISCO_AI_DEFENSE_API_KEY'.")
 
 
 def _interactive_mcp_setup(mc, cfg) -> None:
@@ -6460,6 +6472,9 @@ def setup_guardrail(
 
     Use --disable to turn off the guardrail and restore direct LLM access.
     """
+
+    if cisco_api_key_env is not None:
+        cisco_api_key_env = _validated_api_key_env_name(cisco_api_key_env, "'--cisco-api-key-env'")
 
     gc = app.cfg.guardrail
     explicit_connector = normalize_connector(agent_name) if agent_name else None
@@ -12912,6 +12927,9 @@ def _make_guardrail_connector_setup_command(connector: str) -> click.Command:
         verify: bool,
         replace: bool,
     ) -> None:
+        if cisco_api_key_env is not None:
+            # Refuse a pasted key before the alias writes anything (GAP-2579).
+            cisco_api_key_env = _validated_api_key_env_name(cisco_api_key_env, "'--cisco-api-key-env'")
         _setup_guardrail_connector_alias(
             app,
             connector=connector,
@@ -13790,16 +13808,18 @@ def _interactive_guardrail_setup(
             default=aid.endpoint,
         )
         cisco_key_env = aid.api_key_env or "CISCO_AI_DEFENSE_API_KEY"
+        try:
+            _validated_api_key_env_name(cisco_key_env)
+        except click.BadParameter:
+            # A key saved here by an older build is neither shown nor offered (GAP-2579).
+            cisco_key_env = "CISCO_AI_DEFENSE_API_KEY"
         env_val = os.environ.get(cisco_key_env, "")
         if env_val:
             click.echo(f"  API key env var: {cisco_key_env} ({_mask(env_val)})")
         else:
             click.echo(f"  API key env var: {cisco_key_env} (not set)")
             click.echo(f"    Set it before starting: export {cisco_key_env}=your-key")
-        aid.api_key_env = click.prompt(
-            "  API key env var name",
-            default=cisco_key_env,
-        )
+        aid.api_key_env = _prompt_cisco_api_key_env_name(cisco_key_env)
         aid.timeout_ms = click.prompt(
             "  Timeout (ms)",
             default=aid.timeout_ms,

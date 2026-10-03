@@ -322,10 +322,13 @@ func (e *Env) readAttestation() (enterprisehooks.CredentialAttestation, error) {
 // credential-bearing target to the credential a key the gateway holds
 // derives for it. torn is set when it is from another reconcile or another
 // roster, which a read between the guardian's writes (or between the
-// enumerator's rewrite and the guardian's next reconcile) also sees.
+// enumerator's rewrite and the guardian's next reconcile) also sees. A
+// missing attestation is torn too: the guardian's first reconcile publishes
+// its ledger and target report before the attestation, so a package install
+// that read in between saw the guardian as not ready (GAP-2577).
 func (e *Env) attestationProblem(ledger []byte) (problem string, torn bool) {
 	if _, err := os.Lstat(e.attestationPath()); errors.Is(err, os.ErrNotExist) {
-		return "the hook guardian has not published its credential attestation yet", false
+		return "the hook guardian has not published its credential attestation yet", true
 	}
 	attestation, err := e.readAttestation()
 	if err != nil {

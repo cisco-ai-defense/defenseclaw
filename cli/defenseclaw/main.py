@@ -661,7 +661,9 @@ def main() -> None:
 
     try:
         if not _try_launch_tui():
-            cli()
+            # GAP-2580: the TUI runs "python -m defenseclaw.main"; usage errors
+            # must still name the command the user types.
+            cli(prog_name="defenseclaw")
     except CanonicalObservabilityUnavailableError as exc:
         # The command's audit event needs the gateway (for example after
         # init --no-start-gateway): one line with the fix, no traceback
