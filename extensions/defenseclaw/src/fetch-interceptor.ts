@@ -1247,8 +1247,12 @@ export function createFetchInterceptor(
     // (so our operator-added domains merge into the shared list) and
     // return without re-wrapping fetch/https/http/undici.
     if (_shared.installed) {
+      // Pass the sidecar token like the first instance does: the
+      // endpoint is authenticated, and an unauthenticated call is
+      // logged as an api-auth-failure security event.
       void bootstrapProviderOverlay(guardrailPort, {
         fetchImpl: globalThis.fetch,
+        token: loadSidecarConfig().token,
       });
       return;
     }

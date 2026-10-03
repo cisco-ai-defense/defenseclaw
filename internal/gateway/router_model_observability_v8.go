@@ -75,6 +75,7 @@ func (r *EventRouter) emitEventRouterModelV8(
 		toolCallCount: toolCallCount,
 		finishReasons: hookModelV8FinishReasons(finishReasons),
 	}
+	applyOpenClawPromptBlock(&observation)
 	input := hookModelV8ModelInput(observation)
 	input.Envelope.Provenance.Producer = eventRouterModelV8Producer
 	metricRuntime, _ := emitter.(hookLifecycleMetricV8Runtime)
@@ -171,6 +172,9 @@ func eventRouterAgentInputV8(observation hookModelV8Observation) observability.S
 		input.Status = observability.NewTraceStatusError(input.ErrorType)
 	}
 	input.DefenseClawConnectorSource = hookModelV8OptionalID(meta.Source)
+	input.UserID = hookModelV8OptionalID(meta.UserID)
+	input.DefenseClawUserIDKind = v8UserIDKind(meta.UserIDKind)
+	input.DefenseClawUserName = hookModelV8OptionalID(meta.UserName)
 	input.DefenseClawRunID = hookModelV8OptionalID(meta.RunID)
 	input.DefenseClawTurnID = hookModelV8OptionalID(meta.TurnID)
 	input.DefenseClawPolicyID = hookModelV8OptionalID(meta.PolicyID)
