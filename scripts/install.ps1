@@ -838,6 +838,24 @@ function Remove-SetupInstall {
     }
 }
 
+# True when the config sets guardrail.enabled to false, as 'uninstall' and
+# 'setup guardrail --disable' write it (a direct child of the top-level block).
+function Test-GuardrailOff {
+    $path = if ($env:DEFENSECLAW_CONFIG) { $env:DEFENSECLAW_CONFIG } else { Join-Path $DataDir "config.yaml" }
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $false }
+    $block = $false
+    $indent = 0
+    foreach ($line in [IO.File]::ReadAllLines($path)) {
+        if ($line -match '^guardrail:\s*$') { $block = $true; $indent = 0; continue }
+        if (-not $block) { continue }
+        if ($line -match '^[^\s#]') { $block = $false; continue }
+        if ($line -notmatch '^([ \t]+)[^\s#]') { continue }
+        if (-not $indent) { $indent = $Matches[1].Length }
+        if ($Matches[1].Length -eq $indent -and $line -match '^\s+enabled:\s*false\s*(#.*)?$') { return $true }
+    }
+    return $false
+}
+
 function Test-ConnectorConfigured {
     $state = Read-Json (Join-Path $DataDir "active_connector.json")
     return @(@(Get-Field $state "names") + @(Get-Field $state "name") | Where-Object { $_ -and $_ -ne "none" }).Count -gt 0
@@ -1930,8 +1948,15 @@ function Invoke-Install {
     }
     if ($PrevVersion -and $configured -and -not (Get-GatewayProcess)) {
         # GAP-1496: it was not running before the upgrade, so it was not started.
-        Write-Warn "The gateway is not running, so agent hooks are not guarded until it is"
-        Write-Host "  Start it with: defenseclaw-gateway start" -ForegroundColor Cyan
+        if (Test-GuardrailOff) {
+            # GAP-2481: 'uninstall --binaries' turned the guardrail off and tore the
+            # connector hooks down; a gateway start alone does not set them up again.
+            Write-Warn "Protection is off in the kept config (guardrail.enabled = false), so agent hooks are not guarded"
+            Write-Host "  Turn it back on with: defenseclaw setup guardrail" -ForegroundColor Cyan
+        } else {
+            Write-Warn "The gateway is not running, so agent hooks are not guarded until it is"
+            Write-Host "  Start it with: defenseclaw-gateway start" -ForegroundColor Cyan
+        }
     }
     if ($PrevVersion -and -not $Setup -and -not $Quickstart -and -not $configured) {
         # An earlier install that was never initialized: say how to start, as a

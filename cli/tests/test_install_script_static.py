@@ -703,6 +703,38 @@ def test_both_installers_say_when_an_upgrade_leaves_the_gateway_stopped() -> Non
     for path in (INSTALL_SH, ROOT / "scripts" / "install.ps1"):
         text = path.read_text(encoding="utf-8")
         assert "The gateway is not running, so agent hooks are not guarded until it is" in text, path
+        # GAP-2481: after 'uninstall --binaries' the guardrail is off, and a
+        # gateway start alone does not guard the hooks again.
+        assert "Turn it back on with:" in text and "defenseclaw setup guardrail" in text, path
+
+_GUARDRAIL_CONFIGS = {
+    # What 'uninstall --binaries' and 'setup guardrail --disable' save.
+    "off": ("guardrail:\n  enabled: false\n  mode: action\n  judge:\n    enabled: true\ngateway:\n  port: 18970\n", True),
+    "on": ("guardrail:\n  enabled: true\n  judge:\n    enabled: false\n", False),
+    "other-section": ("guardrail:\n  mode: action\nwebhook:\n  enabled: false\n", False),
+    "no-guardrail": ("gateway:\n  enabled: false\n", False),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_GUARDRAIL_CONFIGS))
+def test_install_sh_reads_guardrail_off_from_the_kept_config(tmp_path: Path, name: str) -> None:
+    # GAP-2481: the reinstall after 'uninstall --binaries' said only "Start it
+    # with: defenseclaw-gateway start" over a config with the guardrail off.
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    start = text.index("guardrail_off() {")
+    func = text[start : text.index("\n}\n", start) + 3]
+    body, expected = _GUARDRAIL_CONFIGS[name]
+    (tmp_path / "config.yaml").write_text(body, encoding="utf-8")
+    script = tmp_path / "g.sh"
+    script.write_text(
+        f'set -euo pipefail\n{func}DEFENSECLAW_HOME="{tmp_path}"\nif guardrail_off; then echo off; else echo on; fi\n',
+        encoding="utf-8",
+    )
+    env = {k: v for k, v in os.environ.items() if k != "DEFENSECLAW_CONFIG"}
+    out = subprocess.run(["bash", str(script)], capture_output=True, text=True, env=env, check=True).stdout
+    assert out.strip() == ("off" if expected else "on")
+    branch = text[text.index("if guardrail_off; then") :]
+    assert branch.index("defenseclaw setup guardrail") < branch.index("defenseclaw-gateway start")
 
 
 def test_a_rollback_copy_that_does_not_fit_says_how_much_to_free(tmp_path: Path) -> None:

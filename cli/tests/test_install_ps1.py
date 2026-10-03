@@ -309,6 +309,44 @@ def _ps1_function(name: str) -> str:
     return text[start : text.index("\n}\n", start) + 3]
 
 
+_GUARDRAIL_CONFIGS = {
+    # What 'uninstall --binaries' and 'setup guardrail --disable' save.
+    "off": ("guardrail:\n  enabled: false\n  mode: action\n  judge:\n    enabled: true\ngateway:\n  port: 18970\n", True),
+    "on": ("guardrail:\n  enabled: true\n  judge:\n    enabled: false\n", False),
+    "other-section": ("guardrail:\n  mode: action\nwebhook:\n  enabled: false\n", False),
+    "no-guardrail": ("gateway:\n  enabled: false\n", False),
+}
+
+
+def test_reinstall_over_a_disabled_guardrail_names_setup_guardrail() -> None:
+    # GAP-2481: after 'uninstall --binaries' (guardrail off, hooks torn down)
+    # the reinstall said only "Start it with: defenseclaw-gateway start".
+    install = _ps1_function("Invoke-Install")
+    branch = install[install.index("if (Test-GuardrailOff) {") :]
+    assert branch.index("Turn it back on with: defenseclaw setup guardrail") < branch.index(
+        "Start it with: defenseclaw-gateway start"
+    )
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize("name", sorted(_GUARDRAIL_CONFIGS))
+def test_test_guardrail_off_reads_the_kept_config(tmp_path: Path, name: str) -> None:
+    body, expected = _GUARDRAIL_CONFIGS[name]
+    (tmp_path / "config.yaml").write_text(body, encoding="utf-8")
+    script = f"$DataDir = '{tmp_path}'\n{_ps1_function('Test-GuardrailOff')}\nif (Test-GuardrailOff) {{ 'off' }} else {{ 'on' }}\n"
+    env = {k: v for k, v in os.environ.items() if k != "DEFENSECLAW_CONFIG"}
+    completed = subprocess.run(
+        [POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", script],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env=env,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert completed.stdout.strip() == ("off" if expected else "on")
+
+
 def test_a_slow_first_start_is_waited_for_before_restoring() -> None:
     # GAP-1348: a 1.x gateway over a large audit database outlasted start's
     # 60-second readiness wait, and the upgrade rolled back while it was
