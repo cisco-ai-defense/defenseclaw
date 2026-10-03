@@ -324,7 +324,11 @@ class RegistriesPanelModel:
                 return RegistryPanelAction(True, hint="(registry require supports skill/mcp only)")
             return RegistryPanelAction(
                 True,
-                require_type_intent(asset_type, currently_required=self._registry_required(asset_type)),
+                require_type_intent(
+                    asset_type,
+                    currently_required=self._registry_required(asset_type),
+                    **self._asset_policy_state(),
+                ),
             )
         if key == "d":
             if self.current_tab != RegistriesTab.SOURCES:
@@ -411,6 +415,22 @@ class RegistriesPanelModel:
             entry_type, name = self._filter_entry_key
             rows = [row for row in rows if row.type == entry_type and row.name == name]
         return tuple(rows)
+
+    def _asset_policy_state(self) -> dict[str, Any]:
+        """The live asset policy on/off, mode and active connector count."""
+        asset_policy = _get_attr(self.config, "asset_policy", "AssetPolicy", default=None)
+        enabled = bool(_get_attr(asset_policy, "enabled", "Enabled", default=False))
+        effective_mode = getattr(asset_policy, "effective_mode", None)
+        try:
+            mode = str(effective_mode("") if callable(effective_mode) else "observe")
+        except (AttributeError, TypeError, ValueError):
+            mode = "observe"
+        active_connectors = getattr(self.config, "active_connectors", None)
+        try:
+            count = len(tuple(active_connectors())) if callable(active_connectors) else 0
+        except (AttributeError, TypeError, ValueError):
+            count = 0
+        return {"policy_enabled": enabled, "policy_mode": mode, "connector_count": count}
 
     def _registry_required(self, asset_type: str) -> bool:
         """Return whether every active connector effectively requires it.
@@ -569,7 +589,14 @@ def require_entry_intent(row: RegistryEntryRow, *, currently_required: bool) -> 
     return require_type_intent(row.type, currently_required=currently_required)
 
 
-def require_type_intent(asset_type: str, *, currently_required: bool) -> RegistryCommandIntent:
+def require_type_intent(
+    asset_type: str,
+    *,
+    currently_required: bool,
+    policy_enabled: bool = True,
+    policy_mode: str = "action",
+    connector_count: int = 0,
+) -> RegistryCommandIntent:
     """Toggle ``asset_policy.<type>.registry_required`` for the row's asset type (E4h).
 
     Parity with the ``registry require`` CLI (``cmd_registry.py``): the TUI
@@ -580,19 +607,40 @@ def require_type_intent(asset_type: str, *, currently_required: bool) -> Registr
     otherwise. ``registry require`` only supports skill/mcp (the sync/promote
     pipeline never populates the plugin registry), so the caller gates on the
     asset type before building this intent.
+
+    ``policy_enabled``/``policy_mode`` are the live asset policy: the
+    requirement only refuses anything while the policy is on in action mode,
+    so the confirm says so as the CLI does (GAP-2119, GAP-2512).
     """
     flag = "--disabled" if currently_required else "--enabled"
+    enforcing = policy_enabled and policy_mode.strip().lower() == "action"
+    scope = (
+        f" Applies to every active connector ({connector_count})." if connector_count > 1 else ""
+    )
     if currently_required:
         hint = f"Making registry approval optional for {asset_type} assets"
-    else:
+        consequence = f"{hint}.{scope}"
+    elif enforcing:
         hint = f"Requiring registry approval: any {asset_type} not approved in a registry will be refused"
+        consequence = f"{hint}.{scope}"
+    else:
+        hint = f"Requiring registry approval for {asset_type} assets"
+        noun = "an MCP server" if asset_type == "mcp" else f"a {asset_type}"
+        if not policy_enabled:
+            state = "Asset policy is off: nothing is blocked yet, and"
+        else:
+            state = f"Asset policy mode is {policy_mode or 'observe'}: nothing is blocked yet, and"
+        consequence = (
+            f"{hint}.{scope} {state} {noun} not in a registry is still added. "
+            f"Turn enforcement on with: defenseclaw registry require --type {asset_type} --enabled --enforce"
+        )
     return RegistryCommandIntent(
         label=f"registry require --type {asset_type} {flag}",
         args=("registry", "require", "--type", asset_type, flag, "--json"),
         hint=hint,
         # The status bar is hidden behind the modal, so the modal itself
         # names the consequence (GAP-1281).
-        consequence=f"{hint}.",
+        consequence=consequence,
     )
 
 
@@ -722,7 +770,14 @@ def _registry_data_summary(data: Any) -> str:
         return f"removed source {data['source_id']}"
     if "registry_required" in data and data.get("asset_type"):
         state = "required" if data["registry_required"] else "optional"
-        return f"registry approval now {state} for {data['asset_type']} assets"
+        text = f"registry approval now {state} for {data['asset_type']} assets"
+        if data["registry_required"] and data.get("enforcing") is False:
+            # GAP-2512: nothing is refused while asset policy is off/observe.
+            if data.get("asset_policy_enabled") is False:
+                text += " · not enforced: asset policy is off"
+            else:
+                text += f" · not enforced: asset policy mode is {data.get('asset_policy_mode') or 'observe'}"
+        return text
     return ""
 
 

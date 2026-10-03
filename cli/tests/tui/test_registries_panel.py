@@ -336,6 +336,8 @@ def test_registries_panel_mixed_effective_state_toggles_broad_enforcement_on(tmp
             "claudecode": PerConnectorGuardrailConfig(),
         },
     )
+    cfg.asset_policy.enabled = True
+    cfg.asset_policy.mode = "action"
     cfg.asset_policy.skill.registry_required = True
     cfg.asset_policy.connectors["codex"] = PerConnectorAssetPolicy(
         skill=PerConnectorAssetTypePolicy(registry_required=False),
@@ -351,6 +353,50 @@ def test_registries_panel_mixed_effective_state_toggles_broad_enforcement_on(tmp
     )
     assert action.intent.risk == "mutation"
     assert "refused" in action.intent.hint
+
+
+def test_registries_require_confirm_and_toast_say_nothing_is_refused_while_policy_is_off(
+    tmp_path: Path,
+) -> None:
+    """GAP-2512: asset policy off/observe refuses nothing; the TUI said it would."""
+    from defenseclaw.tui.panels.registries import registry_result_summary
+
+    write_index(
+        tmp_path,
+        "smithery-public",
+        {"verdicts": [{"name": "deepwiki", "type": "mcp", "status": "clean"}]},
+    )
+    panel = new_panel(tmp_path)
+    panel.config.asset_policy.enabled = False
+    panel.config.asset_policy.mode = "observe"
+    panel.set_tab(RegistriesTab.ENTRIES)
+
+    intent = panel.handle_key("e").intent
+
+    assert intent is not None
+    assert intent.args == ("registry", "require", "--type", "mcp", "--enabled", "--json")
+    assert "refused" not in intent.hint
+    assert "refused" not in intent.consequence
+    assert "Asset policy is off: nothing is blocked yet" in intent.consequence
+    assert "registry require --type mcp --enabled --enforce" in intent.consequence
+
+    panel.config.asset_policy.enabled = True
+    observe = panel.handle_key("e").intent
+    assert observe is not None
+    assert "Asset policy mode is observe" in observe.consequence
+
+    panel.config.asset_policy.mode = "action"
+    armed = panel.handle_key("e").intent
+    assert armed is not None
+    assert "will be refused" in armed.consequence
+
+    off = {"status": "ok", "asset_type": "mcp", "registry_required": True, "enforcing": False,
+           "asset_policy_enabled": False, "asset_policy_mode": "observe"}
+    assert registry_result_summary(json.dumps(off)) == (
+        "registry approval now required for mcp assets · not enforced: asset policy is off"
+    )
+    on = dict(off, enforcing=True, asset_policy_enabled=True, asset_policy_mode="action")
+    assert registry_result_summary(json.dumps(on)) == "registry approval now required for mcp assets"
 
 
 def test_registries_tab_key_and_sync_are_not_read_only(tmp_path: Path) -> None:
