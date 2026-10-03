@@ -12175,8 +12175,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 return SetupPanelAction(True, hint="Restart queue cleared.", clear_restart_queue=True)
             return SetupPanelAction(True, hint="No restart is queued.")
         if key == "R":
-            self.setup_model.set_config(self.config)
-            return SetupPanelAction(True, hint="Config reverted from current runtime config.")
+            # R is the global Registries key, as the tab strip and ? show.
+            # It used to revert the config from every Setup view, dropping
+            # unsaved edits; the config editor reverts on r (GAP-2151).
+            return SetupPanelAction(False)
         if self.setup_model.mode == "config":
             return self._handle_setup_config_key(key, character=character)
         return self._handle_setup_wizard_key(key)
@@ -15606,7 +15608,7 @@ _SETUP_BUTTON_KEYS = {
     "setup-mode-wizards": "w",
     "setup-edit-list": "E",
     "setup-save": "S",
-    "setup-revert": "R",
+    "setup-revert": "r",
     "setup-restart": "G",
     "setup-clear-restart": "C",
     "setup-wizard-run": "ctrl+r",
