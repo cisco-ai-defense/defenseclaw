@@ -205,6 +205,12 @@ func runAuditExport(cmd *cobra.Command, _ []string) (err error) {
 	if cfg == nil {
 		return fmt.Errorf("audit export: config not loaded")
 	}
+	// A bad --since/--until is a usage error (exit 2, GAP-2110), checked
+	// before the database is opened or an -o file is created.
+	window, err := parseAuditExportWindow(time.Now())
+	if err != nil {
+		return auditUsageError(cmd, err)
+	}
 	version.SetBinaryVersion(appVersion)
 	prov := version.Current()
 
@@ -264,10 +270,6 @@ func runAuditExport(cmd *cobra.Command, _ []string) (err error) {
 	}
 
 	connFilter := strings.ToLower(strings.TrimSpace(auditExportConnector))
-	window, err := parseAuditExportWindow(time.Now())
-	if err != nil {
-		return err
-	}
 
 	where, args := window.sqlPredicate()
 	q := `SELECT id, timestamp, action, target, actor, details, structured_json, severity, run_id,
@@ -428,6 +430,15 @@ type auditExportWindow struct {
 	since, until *time.Time
 	limit        int
 	newest       bool
+}
+
+// auditUsageError gives a bad flag value the usage-error shape and exit
+// status 2, like unknown flags and unparsable numbers (GAP-2110).
+func auditUsageError(cmd *cobra.Command, err error) error {
+	if cmd == nil {
+		return withExitCode(err, 2)
+	}
+	return usageError(cmd, err)
 }
 
 // parseAuditExportWindow reads --since, --until, --limit and --newest.

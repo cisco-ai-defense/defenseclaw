@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -202,6 +203,42 @@ func TestRunAuditFindingsNotesGuardrailScanner(t *testing.T) {
 		var report auditFindingsReport
 		if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 			t.Fatalf("--scanner %s: stdout is not the JSON report: %v", scannerName, err)
+		}
+	}
+}
+
+// GAP-2126: a bad flag value is a usage error (exit 2) raised before the
+// audit store opens, so it never creates or migrates audit.db.
+func TestAuditFindingsBadFlagFailsBeforeStoreOpens(t *testing.T) {
+	previousStore, previousCfg := auditStore, cfg
+	previousTarget := auditFindingsTarget
+	previousSince, previousNewOnly, previousLimit := auditFindingsSince, auditFindingsNewOnly, auditFindingsLimit
+	t.Cleanup(func() {
+		auditStore, cfg = previousStore, previousCfg
+		auditFindingsTarget = previousTarget
+		auditFindingsSince, auditFindingsNewOnly, auditFindingsLimit = previousSince, previousNewOnly, previousLimit
+	})
+	home := t.TempDir()
+	t.Setenv("DEFENSECLAW_HOME", home)
+	auditStore, cfg = nil, nil
+	auditFindingsTarget, auditFindingsNewOnly = "", false
+	cases := []struct {
+		since   string
+		newOnly bool
+		limit   int
+		target  string
+	}{{since: "yesterday", limit: 100}, {limit: 0}, {newOnly: true, limit: 100}, {limit: 100, target: "   "}}
+	for _, c := range cases {
+		auditFindingsSince, auditFindingsNewOnly, auditFindingsLimit, auditFindingsTarget = c.since, c.newOnly, c.limit, c.target
+		err := auditFindingsPersistentPreRunE(auditFindingsCmd, nil)
+		if commandExitCode(err) != 2 || !strings.Contains(err.Error(), "--help") {
+			t.Errorf("%+v = %v (exit %d), want a usage error with exit 2", c, err, commandExitCode(err))
+		}
+		if auditStore != nil {
+			t.Fatalf("%+v opened the audit store", c)
+		}
+		if entries, _ := os.ReadDir(home); len(entries) != 0 {
+			t.Fatalf("%+v wrote %d entries under DEFENSECLAW_HOME", c, len(entries))
 		}
 	}
 }

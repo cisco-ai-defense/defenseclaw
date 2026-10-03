@@ -232,6 +232,36 @@ class TestAmpManagedBridgeProtection(PluginCommandTestBase):
             self.assertIn("defenseclaw setup remove amp", result.output, args)
         self.assertTrue(os.path.isfile(self.managed))
 
+    @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
+    def test_scan_of_the_plugin_root_scans_each_plugin_and_skips_the_bridge(self, mock_scan):
+        # GAP-2099: the root was scanned as one plugin named "plugins",
+        # bridge included, with a "plugin block plugins" suggestion.
+        from datetime import datetime, timedelta, timezone
+
+        from defenseclaw.models import ScanResult
+
+        mock_scan.side_effect = lambda target, **_kw: ScanResult(
+            scanner="plugin-scanner", target=target, timestamp=datetime.now(timezone.utc),
+            findings=[], duration=timedelta(seconds=0),
+        )
+        result = self.invoke(["scan", self.amp_plugins])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(
+            [call.args[0] for call in mock_scan.call_args_list],
+            [os.path.join(self.amp_plugins, "architect.ts")],
+        )
+        self.assertIn("architect", result.output)
+        self.assertNotIn("plugin block plugins", result.output)
+
+        os.remove(os.path.join(self.amp_plugins, "architect.ts"))
+        mock_scan.reset_mock()
+        only_bridge = self.invoke(["scan", self.amp_plugins, "--connector", "amp"])
+        self.assertEqual(only_bridge.exit_code, 0, only_bridge.output)
+        mock_scan.assert_not_called()
+        self.assertIn("No plugins found to scan in", only_bridge.output)
+        self.assertIn("defenseclaw.ts is DefenseClaw's own Amp bridge", only_bridge.output)
+        self.assertIn("defenseclaw setup remove amp", only_bridge.output)
+
     def test_remove_deletes_an_ordinary_amp_file_plugin(self):
         """GAP-2063: direct Amp plugins are files, not directories."""
         result = self.invoke(["remove", "architect", "--connector", "amp"])
@@ -271,6 +301,16 @@ class TestPluginInstall(PluginCommandTestBase):
         installed = self._connector_plugin_path("my-plugin")
         self.assertTrue(os.path.isdir(installed))
         self.assertTrue(os.path.isfile(os.path.join(installed, "plugin.py")))
+
+    @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
+    def test_install_of_a_blocked_plugin_points_at_unblock(self, mock_scan):
+        # GAP-2112: allow also skips the scan gate; unblock only clears the block.
+        mock_scan.return_value = self._clean_result()
+        PolicyEngine(self.app.store).block("plugin", "held-plugin", "test")
+        result = self._invoke_install(["install", self._create_plugin_dir("held-plugin")])
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("'defenseclaw plugin unblock held-plugin --connector", result.output)
+        self.assertNotIn("plugin allow", result.output)
 
     @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
     def test_install_claudecode_says_claude_code_will_not_load_it(self, mock_scan):
@@ -937,9 +977,10 @@ class TestPluginRemove(PluginCommandTestBase):
         self.assertFalse(os.path.exists(os.path.join(self.app.cfg.plugin_dir, "removable")))
 
     def test_remove_nonexistent(self):
+        # GAP-2099: removing nothing is an error, as for skill remove.
         result = self.invoke(["remove", "ghost-plugin"])
-        self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("not found", result.output)
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("error: plugin not found: ghost-plugin", result.output)
 
     def test_remove_logs_action(self):
         self._install_plugin("to-remove")
@@ -1021,7 +1062,7 @@ class TestPluginRemovePathTraversal(PluginCommandTestBase):
     def test_remove_rejects_parent_traversal(self):
         """../../etc -> basename 'etc' -> resolves safely inside plugin_dir -> not found."""
         result = self.invoke(["remove", "../../etc"])
-        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(result.exit_code, 1)
         self.assertIn("not found", result.output)
 
     def test_remove_rejects_dotdot(self):
@@ -1083,6 +1124,15 @@ class TestPluginBlock(PluginCommandTestBase):
         self.assertTrue(PolicyEngine(self.app.store).is_blocked("plugin", "blocked-one"))
         events = [e for e in self.app.store.list_events(10) if e.action == "plugin-block"]
         self.assertEqual(len(events), 1)
+
+    def test_block_of_an_installed_plugin_says_it_still_loads(self):
+        # GAP-2111: block refuses new installs only; name quarantine.
+        self._install_plugin("loaded-one")
+        result = self.invoke(["block", "loaded-one"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("The installed copy still loads", result.output)
+        self.assertIn("defenseclaw plugin quarantine loaded-one", result.output)
+        self.assertNotIn("still loads", self.invoke(["block", "never-installed"]).output)
 
     def test_block_custom_reason_in_audit_log(self):
         self.invoke(["block", "r1", "--reason", "CVE-1234"])

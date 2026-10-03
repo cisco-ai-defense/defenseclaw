@@ -632,6 +632,8 @@ class SetupPanelModel:
         self.goal_cursor = 0
         self.goals: tuple[WizardGoal, ...] = ()
         self.active_goal: WizardGoal | None = None
+        # The open form came from the goal menu, so Esc goes back to it.
+        self.form_from_goal_menu = False
         # What ``sandbox doctor --json`` found (the app runs it when the
         # Sandbox wizard opens); None until it answers.
         self.sandbox_machine: SandboxMachineCheck | None = None
@@ -1251,6 +1253,22 @@ class SetupPanelModel:
             return
         goal = self.goals[_clamp(self.goal_cursor, 0, len(self.goals) - 1)]
         self.open_wizard_form(self.active_wizard, goal=goal)
+        self.form_from_goal_menu = True
+
+    def back_to_goal_menu(self) -> bool:
+        """Close a form opened from the goal menu and show that menu again.
+
+        Esc in "Add or configure a connector" went back to the Setup task
+        list, so the next Enter opened another task (GAP-2091). Returns
+        ``False`` when the form was not opened from the goal menu.
+        """
+
+        if not (self.form_active and self.form_from_goal_menu and self.goals):
+            return False
+        goals, cursor = self.goals, self.goal_cursor
+        self.close_wizard_form()
+        self.goals, self.goal_cursor, self.goal_active = goals, cursor, True
+        return True
 
     def open_wizard_form(
         self,
@@ -1260,6 +1278,7 @@ class SetupPanelModel:
     ) -> None:
         if wizard is not None:
             self.active_wizard = SetupWizard(wizard)
+        self.form_from_goal_menu = False
         # Advanced goals carry no presets/filter, so treat them like "no goal".
         self.active_goal = goal if (goal is not None and not goal.is_advanced) else None
         presets = dict(self.active_goal.presets) if self.active_goal else {}
@@ -1314,6 +1333,7 @@ class SetupPanelModel:
         self.goal_cursor = 0
         self.goals = ()
         self.active_goal = None
+        self.form_from_goal_menu = False
         self.disk_change_pending = False
 
     def recompute_dependent_fields(self) -> None:
@@ -4054,6 +4074,26 @@ def _seed_parametrized_fields(
     return None
 
 
+def _effective_strategy_text(cfg: object | Mapping[str, Any] | None, strategy: str) -> str:
+    """``strategy`` as the connectors run it.
+
+    A judge strategy with the judge off (or gated to no active connector)
+    scans regex only, as ``defenseclaw guardrail status`` says; the header
+    read "Strategy: regex_judge" there (GAP-2092).
+    """
+
+    if strategy not in {"regex_judge", "judge_first"}:
+        return strategy
+    if not bool(get_config_value(cfg, "guardrail.judge.enabled", False)):
+        return "regex_only (judge off)"
+    gate = get_config_value(cfg, "guardrail.judge.hook_connectors", None) or ()
+    gated = {str(name).strip().lower() for name in gate}
+    connectors = _active_connector_names_for_setup(cfg)
+    if "*" in gated or _any_active_connector_is_proxy(cfg) or not connectors or gated & set(connectors):
+        return strategy
+    return "regex_only (judge on for no active connector)"
+
+
 def wizard_state_summary(wizard: SetupWizard | int, cfg: object | Mapping[str, Any] | None = None) -> str:
     """One-line "here's what's configured today" string for the goal menu.
 
@@ -4079,7 +4119,7 @@ def wizard_state_summary(wizard: SetupWizard | int, cfg: object | Mapping[str, A
         mode = _cfg_str(cfg, "guardrail.mode", "observe") or "observe"
         enabled = "on" if _guardrail_enabled(cfg) else "off"
         strategy = _cfg_str(cfg, "guardrail.detection_strategy", "regex_only") or "regex_only"
-        return f"Guardrail: {enabled}  ·  Mode: {mode}  ·  Strategy: {strategy}"
+        return f"Guardrail: {enabled}  ·  Mode: {mode}  ·  Strategy: {_effective_strategy_text(cfg, strategy)}"
     if wizard == SetupWizard.CONNECTOR_SETUP:
         connectors = _active_connector_names_for_setup(cfg)
         return f"Active connectors: {', '.join(connectors) if connectors else 'not set'}"

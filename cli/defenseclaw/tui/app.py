@@ -1615,14 +1615,14 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                         id="ai-enable",
                         compact=True,
                         variant="success",
-                        tooltip="Run `defenseclaw agent discovery enable --yes`",
+                        tooltip="Run `defenseclaw agent discovery enable --yes` (d)",
                     )
                     yield Button(
                         "Disable AI Discovery",
                         id="ai-disable",
                         compact=True,
                         variant="warning",
-                        tooltip="Run `defenseclaw agent discovery disable --yes`",
+                        tooltip="Run `defenseclaw agent discovery disable --yes` (d)",
                     )
                     yield Button(
                         "Scan now",
@@ -1652,7 +1652,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                         "Export JSON",
                         id="ai-export",
                         compact=True,
-                        tooltip="Save the AI usage snapshot to disk",
+                        tooltip="Save the AI usage snapshot to disk (e)",
                     )
                 with Horizontal(id="runtime-controls", classes="panel-controls hidden"):
                     yield Button(
@@ -4727,6 +4727,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             "skills": [
                 ("j/k or Up/Down", "Navigate items"),
                 ("Enter / Esc", "Open / close the detail pane"),
+                ("PgUp / PgDn", "Scroll the open detail"),
                 ("/", "Filter (Enter or Esc returns to the list)"),
                 ("s / b / a / u", "Scan / block / allow / unblock selected"),
                 ("o", "Open the action menu (every action for the row)"),
@@ -4736,6 +4737,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             "mcps": [
                 ("j/k or Up/Down", "Navigate items"),
                 ("Enter / Esc", "Open / close the detail pane"),
+                ("PgUp / PgDn", "Scroll the open detail"),
                 ("/", "Filter (Enter or Esc returns to the list)"),
                 ("s / b / a / u", "Scan / block / allow / unblock selected"),
                 ("n", "Add or update an MCP server"),
@@ -4746,6 +4748,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             "plugins": [
                 ("j/k or Up/Down", "Navigate items"),
                 ("Enter / Esc", "Open / close the detail pane"),
+                ("PgUp / PgDn", "Scroll the open detail"),
                 ("/", "Filter (Enter or Esc returns to the list)"),
                 ("s / b / a / u", "Scan / block / allow / unblock selected"),
                 ("o", "Open the action menu (every action for the row)"),
@@ -4798,6 +4801,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 ("a", "Show all / recommended models"),
                 ("s", "Scan now"),
                 ("r", "Refresh discovery"),
+                ("e", "Export the snapshot to JSON"),
+                ("d", "Turn AI Discovery on / off"),
             ],
             "runtime": [
                 ("j/k or Up/Down", "Navigate findings"),
@@ -6884,7 +6889,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 if bucket in counts:
                     seen.add(self._event_count_key(row.event))
                     counts[bucket] += 1
-        for event in self._recent_hook_scope_summary(scope, since=since)["finding_events"]:
+        for event in self._supplemental_hook_finding_events(scope, since):
             key = self._event_count_key(event)
             if key in seen:
                 continue
@@ -6893,6 +6898,36 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 seen.add(key)
                 counts[bucket] += 1
         return counts
+
+    def _alerts_view_is_canonical(self) -> bool:
+        """True when the Alerts model reads the audit store's alert view.
+
+        That view already lists every hook block and rule finding once (a
+        block that a finding explains is the finding row), so the Overview
+        must count its rows and not add connector-hook rows on top: each
+        block was counted twice (GAP-2088).
+        """
+
+        return self.alerts_model is not None and getattr(self.alerts_model, "store", None) is not None
+
+    def _supplemental_hook_finding_events(self, scope: tuple[str, ...], since: datetime | None) -> list[Any]:
+        """Hook rows that stand in for alerts when no alert view is loaded."""
+
+        if self._alerts_view_is_canonical():
+            return []
+        return list(self._recent_hook_scope_summary(scope, since=since)["finding_events"])
+
+    def _connector_alert_count(self, connector: str, hook_alerts: int) -> int:
+        """ALERTS for one CONNECTORS row: what its Alerts scope lists (GAP-2089)."""
+
+        if not self._alerts_view_is_canonical():
+            return hook_alerts
+        scope = (connector.strip().lower(),)
+        return sum(
+            1
+            for row in self.alerts_model.flat_rows()
+            if row.kind != "scan_finding" and self._cached_event_matches_scope(row.event, scope)
+        )
 
     @staticmethod
     def _normalize_connector_scope(connectors: Iterable[str]) -> tuple[str, ...]:
@@ -7884,10 +7919,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             if not connector:
                 continue
             health_row = self._connector_health_for_metric(connector, use_single=True)
-            allow, alerts, blocks, _newest = self._connector_hook_stats_for_connectors(
+            allow, hook_alerts, blocks, _newest = self._connector_hook_stats_for_connectors(
                 (connector,)
             )
-            calls = allow + alerts + blocks
+            calls = allow + hook_alerts + blocks
+            alerts = self._connector_alert_count(connector, hook_alerts)
             last = self._connector_last_activity(
                 connector,
                 health_row=health_row,
@@ -8126,7 +8162,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             ):
                 stamps.append(event.timestamp)
                 seen.add(self._event_count_key(event))
-        for event in self._recent_hook_scope_summary(scope, since=since)["finding_events"]:
+        for event in self._supplemental_hook_finding_events(scope, since):
             key = self._event_count_key(event)
             if key in seen:
                 continue
@@ -8215,7 +8251,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         for event in alert_events:
             seen.add(self._event_count_key(event))
             consider(event)
-        for event in self._recent_hook_scope_summary(scope, since=since)["finding_events"]:
+        for event in self._supplemental_hook_finding_events(scope, since):
             key = self._event_count_key(event)
             if key in seen:
                 continue
@@ -11129,6 +11165,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 return self._focus_catalog_filter(self.active_panel)
             catalog_key = _catalog_key(key)
             model = self.catalog_models[self.active_panel]
+            if model.detail_open and key in {"pagedown", "page_down", "pageup", "page_up"}:
+                # At 80x24 the detail pane stops after the Scan line; PgUp/PgDn
+                # reach the verdict, findings and Actions lines (GAP-2087).
+                return self._scroll_detail_panel(key)
             if catalog_key == "esc" and not model.detail_open and model.filter_text:
                 # The hint says "Esc clears the filter"; Esc on the list did
                 # nothing (GAP-1379, GAP-1402).
@@ -11187,6 +11227,15 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             return self._apply_inventory_action(action)
 
         if self.active_panel == "ai":
+            if not self.ai_discovery_model.filtering and key in {"e", "d"}:
+                # GAP-2103: Export JSON and Enable/Disable had no key.
+                if key == "e":
+                    self._handle_ai_control("ai-export")
+                else:
+                    snapshot = self.ai_discovery_model.snapshot
+                    enabled = bool(snapshot and snapshot.enabled)
+                    self._handle_ai_control("ai-disable" if enabled else "ai-enable")
+                return True
             action = self.ai_discovery_model.handle_key(_vim_key(key))
             return self._apply_ai_discovery_action(action)
         if self.active_panel == "activity":
@@ -12187,6 +12236,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # ``q`` on a text row starts typing (a value can begin with q);
         # elsewhere it closes the form like Esc.
         if key in {"esc", "escape"} or (key == "q" and not text_row):
+            if self.setup_model.back_to_goal_menu():
+                return SetupPanelAction(True, hint="Back to the goal list.")
             self.setup_model.close_wizard_form()
             return SetupPanelAction(True, hint="Setup wizard form closed.")
         if key in {"tab", "down"}:
@@ -12316,6 +12367,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             return SetupPanelAction(True, hint=f"Fix config validation: {errors[0]}")
         if not self.setup_model.has_changes():
             return SetupPanelAction(True, hint="No config changes to save.")
+        saved_entries = self.setup_model.config_diff()
         try:
             self.setup_model.apply_changes_to_config()
             save = getattr(self.config, "save", None)
@@ -12341,7 +12393,33 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             self.setup_model.mark_saved()
         except Exception as exc:  # noqa: BLE001 - user feedback belongs in status.
             return SetupPanelAction(True, hint=f"Config save failed: {exc}")
+        self._schedule_config_save_audit(saved_entries)
         return SetupPanelAction(True, hint="Config changes saved; restart queued if gateway is running.")
+
+    def _schedule_config_save_audit(self, entries: tuple[Any, ...]) -> None:
+        """Record the saved keys as a config-update audit event (GAP-2121).
+
+        The gateway hand-off is an HTTP call, so it runs in a thread worker;
+        before the app is mounted (model-level callers) it runs inline.
+        """
+
+        from defenseclaw.tui.services.config_audit import record_config_save
+
+        cfg = self.config
+
+        def record() -> None:
+            if not record_config_save(cfg, entries) and self.is_running:
+                self.call_from_thread(
+                    self._set_status,
+                    "Config changes saved; the audit event was not recorded (is the gateway running?).",
+                )
+
+        if not entries:
+            return
+        if not self.is_running:
+            record_config_save(cfg, entries)
+            return
+        self.run_worker(record, thread=True, exclusive=False, group="config-save-audit")
 
     async def _open_config_diff(self) -> None:
         result = await self.push_screen_wait(ConfigDiffScreen(self.setup_model.config_diff()))

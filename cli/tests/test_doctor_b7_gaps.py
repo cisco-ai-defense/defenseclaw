@@ -26,15 +26,17 @@ def test_idle_additional_instances_fold_into_one_pass_row() -> None:
     # GAP-2104: one WARN row per past sandbox run with migration advice.
     instances = [_instance(0, default=True, custody="defenseclaw", managed_config_state="verified", normalized_batches=4)]
     instances += [_instance(n) for n in range(1, 8)]
-    instances += [_instance(n, custody="defenseclaw", managed_config_state="verified") for n in range(8, 14)]
+    instances += [_instance(n, custody="defenseclaw", managed_config_state="verified") for n in range(8, 12)]
+    instances += [_instance(n, custody="hook_only") for n in range(12, 14)]
     instances.append(_instance(14, credential_state="invalid", authentication_failures=2))
     report = ConnectorCustodyReport(state="available", reason="", observation_window_hours=24, instances=tuple(instances))
     r = _DoctorResult()
     cmd_doctor._check_connector_export_custody(report, r)
     rows = [c for c in r.checks if c["label"].startswith("Connector OTLP")]
-    folded = [c for c in rows if c["label"] == "Connector OTLP: claudecode (additional instances)"]
+    # 13 idle additional instances (external, defenseclaw and hook-only custody).
+    folded = [c for c in rows if c["label"] == "Connector OTLP: claudecode (13 additional instances)"]
     assert len(folded) == 1 and folded[0]["status"] == "pass"
-    assert "13 inactive additional instances" in folded[0]["detail"]
+    assert "nothing to do" in folded[0]["detail"]
     # Only the default row, the folded row and the instance with failures remain.
     assert len(rows) == 3
     assert [c["status"] for c in rows if "/" in c["label"]] == ["fail"]

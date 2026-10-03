@@ -101,6 +101,9 @@ async def test_setup_views_keep_primary_content_on_screen_at_80x24(hermetic) -> 
         assert app.setup_model.form_active
         _assert_on_screen(app, app.setup_model.form_fields[0].label, max_body_lines=3)
 
+        await pilot.press("escape")  # back to the goal menu (GAP-2091)
+        await pilot.pause()
+        assert app.setup_model.goal_active
         await pilot.press("escape")
         await pilot.pause()
         await pilot.press("c")  # config editor

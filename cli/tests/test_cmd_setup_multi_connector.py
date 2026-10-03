@@ -829,6 +829,8 @@ class TestAdditiveSetupCommand(unittest.TestCase):
                 setup_group, ["openclaw", "--replace", "--no-restart", "--no-verify"], obj=self.app, input="n\n"
             )
         self.assertIn("--replace removes 2 hook connector(s): codex, cursor", declined.output)
+        # GAP-2117: say when the removed hooks go away, not only in the prompt.
+        self.assertIn("Their hooks stay installed until the gateway restarts (--no-restart).", declined.output)
         self.assertIn("Aborted", declined.output)
         self.assertEqual(set(self.app.cfg.guardrail.connectors), {"codex", "cursor"})
 
@@ -836,6 +838,7 @@ class TestAdditiveSetupCommand(unittest.TestCase):
             result = _invoke(["openclaw", "--replace", "--yes", "--no-restart", "--no-verify"], self.app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
         backend.assert_called_once()
+        self.assertIn("Remove them now with: defenseclaw-gateway restart", result.output)
         gc = self.app.cfg.guardrail
         self.assertEqual(gc.connectors, {})
         self.assertEqual(gc.connector, "openclaw")
@@ -1097,6 +1100,22 @@ class TestObservabilitySummaryDisplay(unittest.TestCase):
         self.assertIn("unsupported", out)
         self.assertIn("native OTel:", out)
         self.assertIn("hook-derived audit only", out)
+
+
+    # GAP-2013: a peer the restarted gateway refused is configured but not
+    # guarded, so the Summary must not list it with the guarded connectors.
+    def test_summary_marks_a_refused_peer_not_guarded(self):
+        self._seed_map("claudecode", "codex", "hermes", "opencode")
+        buf = io.StringIO()
+        with click.Context(click.Command("setup")), contextlib.redirect_stdout(buf):
+            cmd_setup._remember_runtime_skipped_peers({"hermes"})
+            _print_observability_summary("opencode", self.app.cfg, mode="action", os_name="posix")
+        out = buf.getvalue()
+
+        self.assertRegex(out, r"connectors:\s+claudecode, codex, opencode\n")
+        self.assertRegex(out, r"not guarded now:\s+hermes ")
+        self.assertIn("This install now has 4 connectors configured; 3 guarded now: claudecode, codex, opencode.", out)
+        self.assertIn("Not guarded now: hermes. To guard it again, run: defenseclaw setup hermes", out)
 
 
 class TestConfiguredConnectorSet(unittest.TestCase):
@@ -1415,6 +1434,26 @@ class TestRemoveConnector(unittest.TestCase):
         self.assertIn("previous connectors, which stay protected", message)
         self.assertNotIn("may not be protected", message)
         self.assertNotIn("defenseclaw-gateway start", message)
+
+    def test_rollback_after_a_still_starting_gateway_names_readiness_timing(self):
+        # GAP-2105: a gateway that was still starting (kept running) ended in
+        # "could not apply the new connector configuration ... Fix that error".
+        self._seed_map("codex")
+        snapshot = cmd_setup._capture_setup_config_snapshot(self.app.cfg)
+        cause = cmd_setup._GatewayRestartFailed(
+            cmd_setup._GATEWAY_KEPT_STARTING_TEXT + ", so the change is not confirmed as applied yet."
+        )
+        with (
+            patch("defenseclaw.commands.cmd_setup._restart_restored_connector_runtime"),
+            self.assertRaises(click.ClickException) as raised,
+        ):
+            cmd_setup._rollback_failed_connector_application(self.app, snapshot, cause)
+
+        message = raised.exception.format_message()
+        self.assertIn("did not become ready in time (it was still starting)", message)
+        self.assertIn("`defenseclaw-gateway status` shows it healthy, run the same setup command again", message)
+        self.assertNotIn("could not apply", message)
+        self.assertNotIn("Fix that error", message)
 
     # D3=A: --no-restart does NOT bounce and warns teardown is deferred.
     def test_remove_no_restart_defers_teardown(self):

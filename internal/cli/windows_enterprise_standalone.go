@@ -1162,16 +1162,19 @@ func finishWindowsEnterpriseStandalone(
 ) error {
 	exitCode := result.Finish("windows", failureCode)
 	result.LogPath = windowsEnterpriseStandaloneObserver(result, opts)
+	unknownProfile := windowsEnterpriseUnknownProfileRequested(opts) && exitCode != 0 && len(result.Errors) != 0
 	if opts.jsonOutput {
 		if err := json.NewEncoder(cmd.OutOrStdout()).Encode(result); err != nil {
 			return withExitCode(fmt.Errorf("encode the standalone lifecycle result: %w", err), enterprisestatus.WindowsExitFailure)
 		}
-	} else if windowsEnterpriseUnknownProfileRequested(opts) && exitCode != 0 && len(result.Errors) != 0 {
-		// An unknown --profile selected no profile: one error line, not a
-		// "(standalone): FAILED" summary of a profile never chosen (GAP-2040).
-		return withExitCode(errors.New(result.Errors[0].Message), exitCode)
-	} else {
+	} else if !unknownProfile {
 		writeWindowsEnterpriseStandaloneSummary(cmd.OutOrStdout(), result)
+	}
+	if unknownProfile {
+		// An unknown --profile selected no profile: one error line, not a
+		// "(standalone): FAILED" summary or "the standalone enterprise ...
+		// failed" of a profile never chosen (GAP-2040, GAP-2113).
+		return withExitCode(errors.New(result.Errors[0].Message), exitCode)
 	}
 	if exitCode == 0 {
 		return nil
@@ -1259,10 +1262,82 @@ func writeWindowsEnterpriseStandalonePreflightFailure(
 			// the text the Secure Client profile pins.
 			message = fmt.Sprintf("invalid --profile %q: use %s or %s",
 				strings.TrimSpace(opts.profile), managed.ProfileStandalone, managed.ProfileSecureClient)
+			applyWindowsEnterpriseRecordedDeployment(result)
 		}
 	}
 	result.AddError(code, message)
 	return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+}
+
+// windowsEnterpriseServiceState is a service's state as the installer
+// names it (running, stopped, absent, ...); tests replace it.
+var windowsEnterpriseServiceState = windowsEnterpriseSCMServiceState
+
+// applyWindowsEnterpriseRecordedDeployment gives a refused request's result
+// the deployment this computer records and its services' states. An unknown
+// --profile selects no profile and inspects nothing, so its --json result
+// reported an installed computer as installed=false with no services
+// (GAP-2113).
+func applyWindowsEnterpriseRecordedDeployment(result *enterprisestatus.Result) {
+	for _, profile := range []string{managed.ProfileStandalone, managed.ProfileSecureClient} {
+		deployment, err := windowsEnterpriseDeploymentInspector(profile)
+		if err != nil || deployment.State != winpath.EnterpriseDeploymentInstalled {
+			continue
+		}
+		result.Profile, result.Installed, result.InstalledVersion = profile, true, deployment.ProductVersion
+		for _, service := range []struct{ name, kind string }{
+			{"DefenseClawGateway", "gateway"},
+			{"DefenseClawHookGuardian", "guardian"},
+			{"DefenseClawHookEnumerator", "enumerator"},
+			{"DefenseClawSensorHelper", "sensor_helper"},
+		} {
+			if state := windowsEnterpriseServiceState(service.name); state != "absent" {
+				result.Services = append(result.Services, enterprisestatus.Service{
+					Name: service.name, Kind: service.kind, State: state, Required: true,
+				})
+			}
+		}
+		return
+	}
+}
+
+// windowsEnterpriseSCMServiceState reads a service's state from the service
+// manager, which any account may query.
+func windowsEnterpriseSCMServiceState(name string) string {
+	manager, err := windows.OpenSCManager(nil, nil, windows.SC_MANAGER_CONNECT)
+	if err != nil {
+		return "unknown"
+	}
+	defer windows.CloseServiceHandle(manager)
+	namePointer, err := windows.UTF16PtrFromString(name)
+	if err != nil {
+		return "unknown"
+	}
+	service, err := windows.OpenService(manager, namePointer, windows.SERVICE_QUERY_STATUS)
+	if errors.Is(err, windows.ERROR_SERVICE_DOES_NOT_EXIST) {
+		return "absent"
+	}
+	if err != nil {
+		return "unknown"
+	}
+	defer windows.CloseServiceHandle(service)
+	var status windows.SERVICE_STATUS
+	if err := windows.QueryServiceStatus(service, &status); err != nil {
+		return "unknown"
+	}
+	switch status.CurrentState {
+	case windows.SERVICE_RUNNING:
+		return "running"
+	case windows.SERVICE_STOPPED:
+		return "stopped"
+	case windows.SERVICE_START_PENDING:
+		return "startpending"
+	case windows.SERVICE_STOP_PENDING:
+		return "stoppending"
+	case windows.SERVICE_PAUSED:
+		return "paused"
+	}
+	return "unknown"
 }
 
 // windowsEnterpriseStandaloneFootprintPresent reports any standalone

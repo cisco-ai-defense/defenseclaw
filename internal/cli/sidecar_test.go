@@ -11,6 +11,7 @@
 package cli
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -152,5 +153,26 @@ func TestFormatDetailValue_NonScalarsAreSkipped(t *testing.T) {
 				t.Fatalf("ok = true (got=%q), want false — non-scalar must be skipped", got)
 			}
 		})
+	}
+}
+
+func TestGuardrailBannerLinesShowJudgeNotBlankProxyRows(t *testing.T) {
+	// GAP-2107: hook-only installs printed "Model:  → " and an empty "API key:".
+	cfg := &config.Config{}
+	cfg.Guardrail.Enabled = true
+	cfg.Guardrail.Port = 4000
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Judge.Enabled = true
+	cfg.Guardrail.Judge.LLM.Model = "bedrock/judge-model"
+	got := strings.Join(guardrailBannerLines(cfg), "\n")
+	if strings.Contains(got, "Model:") || strings.Contains(got, "API key:") {
+		t.Fatalf("blank proxy rows in banner:\n%s", got)
+	}
+	if !strings.Contains(got, "Judge:      bedrock/judge-model") {
+		t.Fatalf("judge model missing from banner:\n%s", got)
+	}
+	cfg.Guardrail.Model = "openai/gpt"
+	if got := strings.Join(guardrailBannerLines(cfg), "\n"); !strings.Contains(got, "Model:      openai/gpt") {
+		t.Fatalf("proxy model row missing:\n%s", got)
 	}
 }

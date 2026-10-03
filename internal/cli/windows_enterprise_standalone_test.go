@@ -1682,6 +1682,7 @@ func TestWindowsEnterpriseResultNamesRemovedStaleLifecycleJournal(t *testing.T) 
 // argument error; GAP-2040: as one line that claims no profile. GAP-2041:
 // naming the Secure Client profile on a standalone computer is a caller
 // error (1639) that names the profile to use, not a fatal install (1603).
+// GAP-2113: its --json result reports the installed deployment.
 func TestWindowsEnterpriseLifecycleCallerErrorsExitCodes(t *testing.T) {
 	stubWindowsEnterpriseDeployments(t, map[string]winpath.EnterpriseDeploymentState{"standalone": winpath.EnterpriseDeploymentInstalled})
 	originalObserver := windowsEnterpriseStandaloneObserver
@@ -1692,6 +1693,14 @@ func TestWindowsEnterpriseLifecycleCallerErrorsExitCodes(t *testing.T) {
 	})
 	windowsEnterpriseStandaloneObserver = func(*enterprisestatus.Result, *windowsEnterpriseLifecycleOptions) string { return "" }
 	windowsEnterpriseIsElevated = func() bool { return false }
+	originalServiceState := windowsEnterpriseServiceState
+	t.Cleanup(func() { windowsEnterpriseServiceState = originalServiceState })
+	windowsEnterpriseServiceState = func(name string) string {
+		if name == "DefenseClawSensorHelper" {
+			return "absent"
+		}
+		return "running"
+	}
 
 	// The installed config is readable only by administrators.
 	installed := `C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml`
@@ -1745,6 +1754,11 @@ func TestWindowsEnterpriseLifecycleCallerErrorsExitCodes(t *testing.T) {
 			}
 			if result.OK || len(result.Errors) != 1 || result.Errors[0].Code != tc.code || result.ExitCode != tc.exit {
 				t.Fatalf("%s: result %+v", tc.action, result)
+			}
+			// GAP-2113: the refusal reports the installed deployment, and
+			// stderr is the one line text mode prints.
+			if tc.profile == "nope" && (!result.Installed || len(result.Services) != 3 || result.Services[0].State != "running" || err.Error() != tc.text) {
+				t.Fatalf("verify --profile nope --json: result %+v, error %q", result, err)
 			}
 		}
 	}

@@ -1172,3 +1172,74 @@ def test_overview_body_renders_scanner_override_summary() -> None:
 
     assert "overrides" in body
     assert "secrets: HIGH file=block" in body
+
+
+def test_overview_findings_and_connector_alerts_match_the_alerts_view() -> None:
+    """GAP-2088/2089: one count per alert, the same numbers as the Alerts panel."""
+
+    from defenseclaw.tui.panels.alerts import AlertEvent, AlertsPanelModel
+
+    now = datetime.now(timezone.utc)
+    cfg = OverviewConfig(
+        data_dir="/tmp/dc",
+        claw_mode="claudecode",
+        guardrail_connector="claudecode",
+        connector_modes=(("claudecode", "action"), ("codex", "action")),
+    )
+    overview = OverviewPanelModel(cfg, version="test")
+    overview.set_health(HealthSnapshot(gateway=SubsystemHealth(state="running")))
+    # Each claudecode block is a hook row plus the finding row that explains it.
+    hooks = [
+        Event(
+            id=f"hook-{i}",
+            timestamp=now,
+            action="connector-hook",
+            target="PreToolUse",
+            severity="INFO",
+            details="connector=claudecode action=block severity=CRITICAL",
+        )
+        for i in range(2)
+    ]
+
+    class HookStore:
+        def list_connector_hook_event_summaries(self, limit: int = 500) -> list[Event]:
+            return list(hooks[:limit])
+
+        def count_scan_results_since(self, _since: datetime | None) -> int:
+            return 0
+
+    store = HookStore()
+    alerts = AlertsPanelModel(store=store)
+    alerts.set_events(
+        [
+            *(
+                AlertEvent(
+                    id=f"finding-{i}",
+                    severity="CRITICAL",
+                    action="scan-finding",
+                    target="PreToolUse",
+                    timestamp=now,
+                    connector="claudecode",
+                )
+                for i in range(2)
+            ),
+            AlertEvent(
+                id="degraded-1",
+                severity="HIGH",
+                action="guardrail-degraded",
+                target="codex",
+                timestamp=now,
+                connector="codex",
+            ),
+        ]
+    )
+    app = DefenseClawTUI(overview_model=overview, audit_model=AuditPanelModel(store), alerts_model=alerts)
+
+    with app._connector_hook_event_render_cache():
+        metrics = {metric.key: metric.value for metric in app._overview_metric_data()}
+        rows = {row.connector: row for row in app._overview_connector_rows()}
+
+    assert metrics["findings"] == 3
+    assert rows["claudecode"].blocks == 2
+    assert rows["claudecode"].alerts == 2
+    assert rows["codex"].alerts == 1

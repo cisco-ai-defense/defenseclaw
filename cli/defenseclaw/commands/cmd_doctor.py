@@ -9190,9 +9190,10 @@ def _check_connector_export_custody(report, r: _DoctorResult, *, configured: set
             and (delivery is None or delivery.state == "no_evidence")
             and item.credential_state not in {"invalid", "recovered"}
         ):
-            # An additional instance (one per past sandbox run) that sends
-            # nothing outlives its sandbox; one row each buried the real
-            # rows, as in status (GAP-2065, GAP-2104).
+            # An additional instance (one per OpenShell sandbox run) with no
+            # evidence is an idle or deleted sandbox, not a custody problem:
+            # fold it into one line per connector, as status does (GAP-2097).
+            # Hook-only ones fold too: they are the same past runs (GAP-2104).
             idle[item.connector] = idle.get(item.connector, 0) + 1
             continue
         if item.custody == "external":
@@ -9305,9 +9306,8 @@ def _check_connector_export_custody(report, r: _DoctorResult, *, configured: set
         noun = "instance" if count == 1 else "instances"
         _emit(
             "pass",
-            f"Connector OTLP: {connector} (additional instances)",
-            f"{count} inactive additional {noun} (for example past sandbox runs); "
-            "no recent native delivery evidence, nothing to do",
+            f"Connector OTLP: {connector} ({count} additional {noun})",
+            "inactive (for example past sandbox runs); no recent native delivery evidence, nothing to do",
             r=r,
         )
     if removed:

@@ -48,6 +48,17 @@ TINY_LABELS: dict[str, str] = {
     "policies": "Policy",
 }
 
+# One cell more, used only when even the tiny names, the dropped minor
+# badges and the compact Alerts count leave the active tab short of its full
+# name: "8 Log" reads better than three bare key letters (GAP-2086).
+SINGULAR_LABELS: dict[str, str] = {
+    "logs": "Log",
+    "tools": "Tool",
+    "plugins": "Plugin",
+    "mcps": "MCP",
+    "skills": "Skill",
+}
+
 
 # Which tabs get a readable name first when the strip is tight.
 LABEL_PRIORITY: tuple[str, ...] = (
@@ -326,7 +337,13 @@ def fit_tab_labels(
                     if not done and name != active and trial[name] and len(shorter) < len(trial[name]):
                         trial[name] = shorter
                         done = room(trial)
-            if done or room(trial, alerts=True):
+            done = done or room(trial, alerts=True)
+            for name in reversed(ranked):
+                fewer = SINGULAR_LABELS.get(name, "")
+                if not done and name != active and fewer and len(fewer) < len(trial[name]):
+                    trial[name] = fewer
+                    done = room(trial, alerts=True)
+            if done:
                 chosen = trial
             else:
                 squeezed = _squeeze({**chosen, active: title})
@@ -414,6 +431,7 @@ __all__ = [
     "BADGE_RESERVE",
     "LABEL_PRIORITY",
     "SHORT_LABELS",
+    "SINGULAR_LABELS",
     "TAB_GUTTER",
     "TINY_LABELS",
     "fit_tab_labels",

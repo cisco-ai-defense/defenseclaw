@@ -2256,6 +2256,13 @@ def set_server(
         if pre_c.verdict == "blocked":
             click.secho(f"  blocked [{c}]: {pre_c.reason}", fg="red")
             policy_blocked.append(c)
+            # GAP-2120: an admission refusal (block list or asset policy) is
+            # audited like plugin/skill install refusals, per connector.
+            if app.logger:
+                saved_change_audit(app.logger).log_action(
+                    "install-rejected", name,
+                    f"connector={c} source={pre_c.source or 'policy'} reason={pre_c.reason}",
+                )
             continue
         # M5 security gate (opencode only): opencode EXECUTES the command[] it
         # stores, so validate/sanitise the server name + command and block an

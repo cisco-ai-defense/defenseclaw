@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 )
 
@@ -257,5 +258,21 @@ func TestWindowsEnterpriseDiscoveryGroupsTheGatewayReportByAccount(t *testing.T)
 
 	if err := writeWindowsEnterpriseDiscovery(&bytes.Buffer{}, "nobody", false); err == nil || !strings.Contains(err.Error(), `no AI Discovery signal for account "nobody"`) {
 		t.Fatalf("an unknown account = %v", err)
+	}
+
+	// GAP-2114: a standard account's --json refusal is JSON on stdout too.
+	enterpriseDiscoveryGatewayReport = func() (enterpriseGatewayAIUsage, string, error) {
+		return enterpriseGatewayAIUsage{}, "", withExitCode(errors.New("elevation_required: ask your administrator"), 5)
+	}
+	var refused bytes.Buffer
+	err := writeWindowsEnterpriseDiscovery(&refused, "", true)
+	var refusal struct {
+		OK       bool                       `json:"ok"`
+		Errors   []enterprisestatus.Message `json:"errors"`
+		ExitCode int                        `json:"exit_code"`
+	}
+	if commandExitCode(err) != 5 || json.Unmarshal(refused.Bytes(), &refusal) != nil || refusal.OK || refusal.ExitCode != 5 ||
+		len(refusal.Errors) != 1 || refusal.Errors[0].Code != "elevation_required" || refusal.Errors[0].Message != "ask your administrator" {
+		t.Fatalf("--json refusal = %q (%v)", refused.String(), err)
 	}
 }

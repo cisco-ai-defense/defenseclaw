@@ -61,7 +61,7 @@ func TestCollectWindowsSnapshotAndClassifyAgents(t *testing.T) {
 	started := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
 	reader := fakeWindowsSnapshotReader{
 		entries: []windowsProcessEntry{
-			{PID: 10, PPID: 1, Comm: `C:\tools\CoDeX.ExE`},
+			{PID: 10, PPID: 1, Comm: `C:\tools\CoDeX.ExE`, SessionOwnerID: "S-1-5-21-7-1001"},
 			{PID: 16, PPID: 10, Comm: "cmd.exe"},
 			{PID: 11, PPID: 16, Comm: "node.exe"},
 			{PID: 12, PPID: 1, Comm: "CLAUDE.CMD"},
@@ -94,7 +94,7 @@ func TestCollectWindowsSnapshotAndClassifyAgents(t *testing.T) {
 			t.Errorf("false positive PID %d classified as %q", pid, got[pid])
 		}
 	}
-	if procs[0].User != `WORKSTATION\kevin` || !procs[0].StartedAt.Equal(started) || !procs[0].Windows {
+	if procs[0].User != `WORKSTATION\kevin` || !procs[0].StartedAt.Equal(started) || !procs[0].Windows || procs[0].SessionOwnerID != "S-1-5-21-7-1001" {
 		t.Fatalf("metadata not preserved: %+v", procs[0])
 	}
 }

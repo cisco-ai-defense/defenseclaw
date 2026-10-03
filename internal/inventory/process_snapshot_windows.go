@@ -52,11 +52,13 @@ func (nativeWindowsSnapshotReader) List() ([]windowsProcessEntry, error) {
 		}
 		return nil, fmt.Errorf("Process32First: %w", err)
 	}
+	owners := windowsProcessSessionOwners()
 	var entries []windowsProcessEntry
 	for {
 		entries = append(entries, windowsProcessEntry{
 			PID: int(entry.ProcessID), PPID: int(entry.ParentProcessID),
-			Comm: windows.UTF16ToString(entry.ExeFile[:]),
+			Comm:           windows.UTF16ToString(entry.ExeFile[:]),
+			SessionOwnerID: owners[int(entry.ProcessID)],
 		})
 		entry.Size = uint32(unsafe.Sizeof(windows.ProcessEntry32{}))
 		if err := windows.Process32Next(snapshot, &entry); err != nil {
@@ -109,6 +111,87 @@ func (nativeWindowsSnapshotReader) Details(pid int) (windowsProcessDetails, erro
 		return details, fmt.Errorf("partial process metadata: %w", errors.Join(errs...))
 	}
 	return details, nil
+}
+
+var (
+	modWTSAPI32                     = windows.NewLazySystemDLL("wtsapi32.dll")
+	procWTSEnumerateProcessesW      = modWTSAPI32.NewProc("WTSEnumerateProcessesW")
+	procWTSQuerySessionInformationW = modWTSAPI32.NewProc("WTSQuerySessionInformationW")
+)
+
+// wtsProcessInfo is WTS_PROCESS_INFOW.
+type wtsProcessInfo struct {
+	SessionID   uint32
+	ProcessID   uint32
+	ProcessName *uint16
+	UserSid     *windows.SID
+}
+
+// WTS_INFO_CLASS values.
+const (
+	wtsUserName   = 5
+	wtsDomainName = 7
+)
+
+// windowsProcessSessionOwners maps each process to the SID of the account
+// it runs as. The gateway service cannot open another account's process,
+// so neither its token nor (for a machine-wide install such as VS Code's
+// copilot-runtime.exe under Program Files) its image path names the owner
+// (GAP-2043). Remote Desktop Services answers any caller with every
+// process's session and every session's user, and with the token SID of
+// the processes the caller may see; session 0 has no user.
+func windowsProcessSessionOwners() map[int]string {
+	var info *wtsProcessInfo
+	var count uint32
+	if r, _, _ := procWTSEnumerateProcessesW.Call(0, 0, 1, uintptr(unsafe.Pointer(&info)), uintptr(unsafe.Pointer(&count))); r == 0 || info == nil {
+		return nil
+	}
+	defer windows.WTSFreeMemory(uintptr(unsafe.Pointer(info)))
+	sessions := map[uint32]string{}
+	owners := make(map[int]string, count)
+	for _, row := range unsafe.Slice(info, count) {
+		sid := ""
+		if row.UserSid != nil && row.UserSid.IsValid() {
+			sid = row.UserSid.String()
+		} else if row.SessionID != 0 {
+			cached, ok := sessions[row.SessionID]
+			if !ok {
+				cached = windowsSessionUserSID(row.SessionID)
+				sessions[row.SessionID] = cached
+			}
+			sid = cached
+		}
+		if sid != "" {
+			owners[int(row.ProcessID)] = sid
+		}
+	}
+	return owners
+}
+
+// windowsSessionUserSID is the SID of the account signed in to session, or "".
+func windowsSessionUserSID(session uint32) string {
+	user := windowsSessionString(session, wtsUserName)
+	if user == "" {
+		return ""
+	}
+	if domain := windowsSessionString(session, wtsDomainName); domain != "" {
+		user = domain + `\` + user
+	}
+	sid, _, _, err := windows.LookupSID("", user)
+	if err != nil {
+		return ""
+	}
+	return sid.String()
+}
+
+func windowsSessionString(session uint32, class uintptr) string {
+	var buf *uint16
+	var size uint32
+	if r, _, _ := procWTSQuerySessionInformationW.Call(0, uintptr(session), class, uintptr(unsafe.Pointer(&buf)), uintptr(unsafe.Pointer(&size))); r == 0 || buf == nil {
+		return ""
+	}
+	defer windows.WTSFreeMemory(uintptr(unsafe.Pointer(buf)))
+	return windows.UTF16PtrToString(buf)
 }
 
 // systemProcessIDInformation is SYSTEM_PROCESS_ID_INFORMATION, the

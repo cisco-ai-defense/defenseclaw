@@ -237,7 +237,19 @@ def scan(
             _plugin_roots_for_connector(app, connector),
             registry_cache=registry_cache,
         )
-        if scan_dir:
+        if scan_dir and not adhoc and _is_bridge_plugin_root(app, connector, scan_dir):
+            matches = [
+                _PluginMatch(connector, entry.path, plugin_id=entry.id)
+                for entry in discover_plugin_directories(
+                    scan_dir,
+                    connector=connector,
+                    registry_cache=registry_cache,
+                )
+            ]
+            if not matches:
+                _report_empty_bridge_plugin_root(scan_dir, connector, as_json=as_json)
+                return
+        elif scan_dir:
             # GAP-1697: report a Hermes plugin under the id plugin list shows.
             plugin_id = (
                 _hermes_plugin_id_for_path(scan_dir) if connector_paths.normalize(connector) == "hermes" else ""
@@ -340,6 +352,32 @@ def scan(
             project_path=match.project_path,
             plugin_id=match.plugin_id,
             adhoc=match.adhoc,
+        )
+
+
+def _is_bridge_plugin_root(app: AppContext, connector: str, path: str) -> bool:
+    """GAP-2099: *path* is an Amp/OpenCode plugin root, which can hold our bridge."""
+    connector = connector_paths.normalize(connector)
+    if connector not in _MANAGED_BRIDGES or not os.path.isdir(path):
+        return False
+    real = os.path.normcase(os.path.realpath(path))
+    return any(
+        real == os.path.normcase(os.path.realpath(root))
+        for root in _plugin_roots_for_connector(app, connector, include_legacy=False)
+    )
+
+
+def _report_empty_bridge_plugin_root(path: str, connector: str, *, as_json: bool) -> None:
+    connector = connector_paths.normalize(connector)
+    if as_json:
+        click.echo(json.dumps({"connector": connector, "results": [], "error": "no_plugin_targets"}, indent=2))
+        return
+    click.echo(f"No plugins found to scan in {path} for connector={connector}.")
+    label, filename = _MANAGED_BRIDGES[connector]
+    if os.path.isfile(os.path.join(path, filename)):
+        click.echo(
+            f"  {filename} is DefenseClaw's own {label} bridge, so it is not scanned. "
+            f"To stop guarding {label}, run: defenseclaw setup remove {connector}"
         )
 
 
@@ -573,7 +611,12 @@ def _print_plugin_scan_policy(name: str, *, connector: str = "", installed: bool
     else:
         text = "the policy would refuse this plugin at install."
     click.echo(f"        policy: rejected — {text}")
-    click.echo(f"          Block it: defenseclaw plugin block {name}{flag}")
+    if installed:
+        # GAP-2111: 'plugin block' only refuses new installs; quarantine moves
+        # the installed copy out (plugin restore brings it back).
+        click.echo(f"          Stop it: defenseclaw plugin quarantine {name}{flag}")
+    else:
+        click.echo(f"          Block it: defenseclaw plugin block {name}{flag}")
 
 
 def _host_plugin_dirs(app: AppContext, connector: str) -> list[str]:
@@ -1541,8 +1584,8 @@ def _check_plugin_pre_install_admission(
             click.echo(
                 f"error: plugin {plugin_name!r} is on the block list for "
                 f"connector={connector} — run "
-                f"'defenseclaw plugin allow {plugin_name} --connector {connector}' "
-                "to unblock",
+                f"'defenseclaw plugin unblock {plugin_name} --connector {connector}' "
+                "to clear the block",
                 err=True,
             )
             raise SystemExit(1)
@@ -3176,8 +3219,8 @@ def remove(app: AppContext, name: str, connector_flag: str) -> None:
         removed.append((connector, candidate))
 
     if not removed:
-        click.echo(f"Plugin not found: {safe_name}")
-        return
+        click.echo(f"error: plugin not found: {safe_name}", err=True)
+        raise SystemExit(1)
 
     for connector, path in removed:
         suffix = f" (connector={connector})" if connector else ""
@@ -3472,6 +3515,14 @@ def block(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
         if plugin_path:
             pe.set_source_path("plugin", plugin_name, plugin_path)
         click.secho(f"[plugin] Blocked {plugin_name!r} (every connector).", fg="red")
+
+    if plugin_path or _plugin_match_dir_scopes(app, plugin_name, connector):
+        flag = f" --connector {connector}" if connector else ""
+        click.secho(
+            "  The installed copy still loads: block only refuses new installs.\n"
+            f"  To stop it: defenseclaw plugin quarantine {plugin_name}{flag}",
+            fg="yellow",
+        )
 
     if app.logger:
         saved_change_audit(app.logger).log_action(
