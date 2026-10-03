@@ -106,12 +106,19 @@ func gatewayStatusRelaxedConfig(err error) *config.Config {
 		return nil
 	}
 	for range 8 {
-		relaxed, loadErr := config.LoadRuntimeV8FromBytes(path, raw)
-		if loadErr == nil {
+		// Check the schema before the typed decode: a wrong-type value
+		// (a list for a string, text for a boolean or integer) fails the
+		// decode with no schema path to drop (GAP-2118).
+		schemaCheck := config.ValidateV8SchemaBytes(path, raw)
+		if schemaCheck == nil {
+			relaxed, loadErr := config.LoadRuntimeV8FromBytes(path, raw)
+			if loadErr != nil {
+				return nil
+			}
 			return relaxed
 		}
 		var schemaErr *config.V8SchemaError
-		if !gatewayStatusDroppableValue(loadErr) || !errors.As(loadErr, &schemaErr) {
+		if !gatewayStatusDroppableValue(schemaCheck) || !errors.As(schemaCheck, &schemaErr) {
 			return nil
 		}
 		next, ok := yamlWithoutPath(raw, schemaErr.Path)

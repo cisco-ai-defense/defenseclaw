@@ -165,6 +165,40 @@ guardrail:
 	}
 }
 
+// GAP-2118: a value of the wrong type (alone or next to an invalid enum)
+// does not hide the running gateway either.
+func TestGatewayStatusWrongTypeValueStillFindsGateway(t *testing.T) {
+	for name, extra := range map[string]string{
+		"list for string":   "  block_message: [1, 2]\n",
+		"text for boolean":  "  enabled: maybe\n",
+		"text for integer":  "  port: notaport\n",
+		"enum plus boolean": "  mode: enforce-everything\n  enabled: maybe\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			home := t.TempDir()
+			configPath := filepath.Join(t.TempDir(), "config.yaml")
+			t.Setenv("DEFENSECLAW_HOME", home)
+			t.Setenv("DEFENSECLAW_CONFIG", configPath)
+			raw := fmt.Sprintf("config_version: 8\ndata_dir: %s\ngateway:\n  api_bind: 127.0.0.1\n  api_port: 19133\nguardrail:\n%s",
+				filepath.ToSlash(home), extra)
+			if err := os.WriteFile(configPath, []byte(raw), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			previous := cfg
+			t.Cleanup(func() { cfg = previous; gatewayStatusConfigProblem = nil })
+
+			loadErr := loadGatewayCommandConfigFor(statusCmd)
+			if loadErr == nil {
+				t.Fatal("config with a wrong-type value loaded")
+			}
+			relaxed := gatewayStatusRelaxedConfig(loadErr)
+			if relaxed == nil || relaxed.Gateway.APIPort != 19133 {
+				t.Fatalf("relaxed config = %+v (load error %v)", relaxed, loadErr)
+			}
+		})
+	}
+}
+
 func TestYAMLWithoutPath(t *testing.T) {
 	out, ok := yamlWithoutPath([]byte("a:\n  b: 1\n  c: [x, y]\n"), "$.a.c[0]")
 	if !ok || strings.Contains(string(out), "x") || !strings.Contains(string(out), "b: 1") {
