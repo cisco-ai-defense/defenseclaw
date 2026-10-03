@@ -643,3 +643,23 @@ func TestMergeAssetDecisionDefaultsTargetTypeToASSET(t *testing.T) {
 		t.Fatalf("findings = %v, want trailing ASSET-POLICY-ASSET fallback", findings)
 	}
 }
+
+// TestHookResponseRuleIDsCarriesAssetPolicyRule pins GAP-2489: an asset
+// policy block names its rule on the hook response (and so on the tool
+// span's defenseclaw.guardrail.rule_id); a hook-rule block keeps its own
+// rule first.
+func TestHookResponseRuleIDsCarriesAssetPolicyRule(t *testing.T) {
+	assets := []runtimeAssetDecision{
+		{targetType: "mcp", decision: config.AssetPolicyDecision{RawAction: "block", Source: "registry-required"}},
+		{targetType: "skill", decision: config.AssetPolicyDecision{RawAction: "allow", Source: "admin-allow"}},
+	}
+	if got := hookResponseRuleIDs(nil, "allow", assets); len(got) != 1 || got[0] != "asset_policy.mcp.registry-required" {
+		t.Fatalf("asset block rule IDs = %v", got)
+	}
+	if got := hookResponseRuleIDs([]string{"CMD-1"}, "block", assets); len(got) != 2 || got[0] != "CMD-1" {
+		t.Fatalf("hook block rule IDs = %v, want CMD-1 first", got)
+	}
+	if got := hookResponseRuleIDs([]string{"CMD-1"}, "allow", nil); len(got) != 1 || got[0] != "CMD-1" {
+		t.Fatalf("no-asset rule IDs = %v", got)
+	}
+}
