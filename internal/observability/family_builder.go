@@ -221,6 +221,9 @@ func (builder *FamilyBuilder) buildGeneratedTrace(
 	if err != nil {
 		return Record{}, err
 	}
+	if input.importProvenance == nil {
+		classifyToolBatchCallIdentifiers(attributeClasses, attributes, input.envelope.Connector)
+	}
 	if err := validateFamilyCrossFieldValues(base.crossFieldRelations, attributes); err != nil {
 		return Record{}, err
 	}
