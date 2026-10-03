@@ -472,11 +472,14 @@ def choose_first_run_guardrail_port(cfg: Config) -> str:
         if _guardrail_port_available(host, port):
             gc.port = port
             return (
-                f"{host}:{_DEFAULT_GUARDRAIL_PORT} is in use (often another account's DefenseClaw guardrail "
-                f"proxy), so this account's guardrail proxy uses port {port}"
+                # A claim by another account's init has no listener yet, so
+                # "in use" alone sent users looking for one (GAP-2283).
+                f"{host}:{_DEFAULT_GUARDRAIL_PORT} is in use or claimed by another account's DefenseClaw install, "
+                f"so this account's guardrail proxy uses port {port}"
             )
     return (
-        f"{host}:{_DEFAULT_GUARDRAIL_PORT} is in use; choose a free guardrail proxy port with "
+        f"{host}:{_DEFAULT_GUARDRAIL_PORT} and the next {_FIRST_RUN_API_PORT_TRIES} candidate ports are in use or "
+        "claimed by other accounts; choose a free guardrail proxy port with "
         "`defenseclaw setup guardrail --port <free port> --non-interactive`"
     )
 
