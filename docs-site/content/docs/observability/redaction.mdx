@@ -60,7 +60,8 @@ signal changes, calls out newly unredacted legs, and asks for confirmation.
 ### macOS, Linux, and native Windows
 
 The command surface and policy semantics are the same on macOS, Linux, and the
-native Windows x64 package. On macOS/Linux, run it from a POSIX shell:
+native Windows x64 package. Run the same commands in a POSIX shell, PowerShell,
+or cmd:
 
 ```bash
 defenseclaw setup redaction status
@@ -68,19 +69,15 @@ defenseclaw setup redaction remove-all --dry-run
 defenseclaw setup redaction
 ```
 
-On Windows, run the same commands in PowerShell, cmd, or the packaged TUI:
+In the TUI, open **0 Setup → Guardrail & scanning → Redaction**. Its status
+shows the default profile, and **Enter** opens the goals below. Quick actions
+default mutations to dry-run. **Show advanced settings** exposes every scripted
+bucket, collection, custom-profile, destination, selector, and ordered-route
+action; **Open the complete guided workflow** runs the prompt-driven editor in
+Activity. The TUI streams prompts and accepts stdin on both POSIX terminals
+and native Windows.
 
-```powershell
-defenseclaw setup redaction status
-defenseclaw setup redaction remove-all --dry-run
-defenseclaw setup redaction
-```
-
-In the TUI, open **Setup → Redaction Policy**. Quick actions default mutations
-to dry-run. **Show advanced settings** exposes every scripted bucket, collection,
-custom-profile, destination, selector, and ordered-route action; **Open the
-complete guided workflow** runs the prompt-driven editor in Activity. The TUI
-streams prompts and accepts stdin on both POSIX terminals and native Windows.
+![DefenseClaw TUI Setup, Guardrail and scanning, Redaction: the default profile none (unredacted) and the goals Inspect effective redaction, Remove all configurable redaction, Apply one profile everywhere, Change the global baseline, Show advanced settings, and Open the complete guided workflow](/images/tui/setup-redaction.png)
 
 In the macOS app, open **Logs → Redaction policy…**. The sheet provides effective
 status, one-click broad profiles, and a **Show advanced settings** disclosure for

@@ -31,36 +31,55 @@ before locating or editing Windows state.
 <Files>
   <Folder name="~/.defenseclaw" defaultOpen>
     <File name="config.yaml" />
-    <File name="audit.db" />
     <File name=".env" />
+    <File name="audit.db" />
+    <File name="device.key" />
     <File name="doctor_cache.json" />
     <File name="picked_connector" />
+    <File name="hook_contract_lock.json" />
+    <File name="custom-providers.json (optional)" />
+    <File name="judge_bodies.db (when judge bodies are retained)" />
+    <File name="gateway.log" />
+    <File name="watchdog.log" />
     <Folder name=".venv">
       <File name="…" />
     </Folder>
     <Folder name="hooks">
       <File name="<connector>-hook.sh" />
     </Folder>
+    <Folder name="logs">
+      <File name="hook-failures.jsonl" />
+    </Folder>
     <Folder name="policies" defaultOpen>
-      <Folder name="guardrail">
-        <Folder name="default">
+      <Folder name="guardrail" defaultOpen>
+        <Folder name="default" defaultOpen>
           <Folder name="rules">
+            <File name="c2.yaml" />
+            <File name="cognitive.yaml" />
             <File name="commands.yaml" />
+            <File name="enterprise-data.yaml" />
+            <File name="local-patterns.yaml" />
             <File name="secrets.yaml" />
             <File name="sensitive-paths.yaml" />
+            <File name="trust-exploit.yaml" />
           </Folder>
           <Folder name="judge">
             <File name="injection.yaml" />
             <File name="pii.yaml" />
             <File name="tool-injection.yaml" />
           </Folder>
+          <File name="sensitive-tools.yaml" />
           <File name="suppressions.yaml" />
         </Folder>
         <Folder name="strict" />
         <Folder name="permissive" />
       </Folder>
-      <Folder name="codeguard" />
+      <Folder name="rego" />
     </Folder>
+    <Folder name="codeguard-rules" />
+    <Folder name="plugins" />
+    <Folder name="quarantine" />
+    <Folder name="backups" />
     <Folder name="connector_backups">
       <Folder name="<connector>">
         <File name="<logical-name>.json" />
@@ -68,6 +87,10 @@ before locating or editing Windows state.
     </Folder>
   </Folder>
 </Files>
+
+`hooks/`, `hook_contract_lock.json`, and `connector_backups/` appear once a
+connector is set up; `backups/` holds the timestamped copies that commands
+such as `setup redaction` write before they change `config.yaml`.
 
 ## Doctor cache
 
@@ -231,7 +254,7 @@ observability:
 # for the connector-aware variant.
 llm:
   provider: anthropic          # anthropic | openai | bedrock | vertex_ai | azure | custom
-  model: claude-sonnet-4-5
+  model: claude-sonnet-4-6
   api_key_env: DEFENSECLAW_LLM_KEY
   base_url: ""                 # optional override; LiteLLM picks a default per provider
   role: unified                # unified | agent | judge
@@ -294,7 +317,7 @@ routing:
   models:
     - name: fast              # classifier alias; unique within this catalog
       provider: openai
-      model: gpt-4o-mini
+      model: gpt-5.4-mini
       base_url: https://api.openai.com
       api_key_env: OPENAI_API_KEY
       capabilities: [general]
@@ -322,7 +345,7 @@ guardrail:
   alert_at: ""                 # same values; never above block_at
   port: 4000                   # guardrail proxy port
   block_message: ""            # custom; empty -> default
-  detection_strategy: regex_only  # regex_only | regex_judge | judge_first
+  detection_strategy: regex_judge  # default; regex_only | regex_judge | judge_first
 
   cisco:
     endpoint: ""
@@ -335,7 +358,7 @@ guardrail:
   # changing what the agent talks to.
   judge:
     enabled: false
-    model: anthropic/claude-sonnet-4-20250514
+    model: anthropic/claude-sonnet-4-6
     api_base: ""
     api_key_env: DEFENSECLAW_LLM_KEY
     llm: {}                    # same shape as top-level `llm:` above
@@ -929,7 +952,7 @@ Custom-provider instances live in a separate JSON overlay so the same instance d
         "profile_name": "",
         "inference_profile": "us.",
         "deployment_aliases": {
-          "fast": "anthropic.claude-3-haiku-20240307-v1:0"
+          "fast": "us.anthropic.claude-haiku-4-5-20251001-v1:0"
         }
       },
 
@@ -945,7 +968,7 @@ Custom-provider instances live in a separate JSON overlay so the same instance d
         "api_version": "2024-10-21",
         "auth_mode": "api_key",
         "deployment_aliases": {
-          "gpt-4o": "prod-gpt4o-eus"
+          "gpt-5.4": "prod-gpt54-eus"
         }
       }
     }
@@ -995,8 +1018,10 @@ There is **no** `DEFENSECLAW_GATEWAY_BIND`, `DEFENSECLAW_DATA_DIR`, or
 data directory. Configure the sidecar API listener with `gateway.api_bind` and
 `gateway.api_port`, and the separate guardrail proxy listener with
 `guardrail.host` and `guardrail.port`; `gateway.host`/`gateway.port` are the
-upstream agent-gateway address. Set log verbosity through the sidecar's
-`--log-level` flag (see `defenseclaw-gateway start --help`).
+upstream agent-gateway address. The gateway has no log-level flag; for extra
+diagnostics, set one of the variables under **Debug / verbose logging** in
+[Environment variables](/docs/reference/env-vars), such as
+`DEFENSECLAW_SIDECAR_DIAG=1`, in the gateway's environment and restart it.
 
 **Proxy variables.** The gateway's telemetry exporters (OTLP, Galileo, Splunk
 HEC, HTTP JSONL) follow `HTTPS_PROXY` and `NO_PROXY` from the gateway's
