@@ -444,6 +444,9 @@ class InventorySnapshot:
             raw = json.loads(text)
         except json.JSONDecodeError as exc:
             raise ValueError(f"parse inventory json: {exc}") from exc
+        if raw == []:
+            # aibom scan --json with no connector configured (GAP-2073).
+            raw = {}
         if not isinstance(raw, Mapping):
             raise ValueError("parse inventory json: expected object")
         return cls.from_mapping(raw)
