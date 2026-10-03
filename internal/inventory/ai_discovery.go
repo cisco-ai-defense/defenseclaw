@@ -2890,6 +2890,7 @@ func (s *ContinuousDiscoveryService) detectPackageManifests(ctx context.Context)
 	var out []AISignal
 	files := 0
 	walkErrs := 0
+	ownDataDirs := s.ownDataDirs()
 	// Walk each scan root; collect entries grouped by dir so we can
 	// compute lockfile-based version indexes once per dir.
 	for _, root := range s.scanRoots() {
@@ -2934,7 +2935,7 @@ func (s *ContinuousDiscoveryService) detectPackageManifests(ctx context.Context)
 				return filepath.SkipAll
 			}
 			if d.IsDir() {
-				if shouldSkipDiscoveryDir(d.Name()) && path != root {
+				if path != root && (shouldSkipDiscoveryDir(d.Name()) || modelPathInSet(path, ownDataDirs)) {
 					return filepath.SkipDir
 				}
 				return nil
