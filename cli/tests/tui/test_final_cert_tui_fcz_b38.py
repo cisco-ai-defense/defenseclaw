@@ -24,9 +24,10 @@ sys.path.insert(0, str(Path(__file__).parent))
 from fixtures import screen_text, settle_panel, snapshot_app  # noqa: E402
 
 
-@pytest.mark.parametrize("size", [(80, 24), (200, 50)])
+@pytest.mark.parametrize("size", [(80, 24)])
 async def test_registries_source_detail_scrolls_with_page_down(tmp_path, size) -> None:
     # GAP-2591: the detail cut Blocked/Errors/Rejected and PgDn did nothing.
+    # (At 200x50 the box now grows to fit, GAP-2600.)
     from textual.containers import VerticalScroll
 
     app = snapshot_app(tmp_path)

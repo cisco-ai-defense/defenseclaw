@@ -10804,6 +10804,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             return self.policy_model.view
         if self.active_panel == "setup":
             return self._setup_view()
+        if active_panel == "registries" and self.registries_model.detail_open:
+            return "detail"
         return ""
 
     def _active_filter_label(self) -> str:
@@ -11428,6 +11430,12 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         panel.set_class(below is not None, "aside-below")
         height, rows, width = self._aside_below_box() if below is not None else (0, 0, 0)
         self._aside_box = (height, rows, width)
+        if detail and not panel.has_class("compact"):
+            # A tall terminal left ~17 rows empty above a 16-row detail whose
+            # last lines (Registries Blocked/Errors/Rejected) were hidden with
+            # only a one-cell scrollbar thumb as a cue (GAP-2600): grow into
+            # the rows the table does not need, never below the CSS cap.
+            height = max(16, self._aside_below_box()[0])
         if below is not None and not self._aside_box_recheck:
             # The box is measured before a panel switch's layout settles (the
             # Setup card took the old panel's height, then grew by a row the
