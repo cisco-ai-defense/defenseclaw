@@ -295,6 +295,18 @@ class TestRegistryEdit(RegistryCommandTestBase):
             "id=corp-skills unchanged",
         ])
 
+    def test_edit_that_changes_nothing_says_so(self):
+        # GAP-2339: a no-op edit must not claim "Updated".
+        result = self.invoke(["edit", "corp-skills", "--enabled", "--non-interactive"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn(
+            "No changes: registry source 'corp-skills' already has these settings.",
+            result.output,
+        )
+        self.assertNotIn("Updated", result.output)
+        result = self.invoke(["edit", "corp-skills", "--disabled", "--non-interactive"])
+        self.assertIn("Updated registry source 'corp-skills'.", result.output)
+
 
 class TestRegistryRemove(RegistryCommandTestBase):
     def setUp(self):
