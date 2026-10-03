@@ -241,10 +241,15 @@ defenseclaw policy list                  # all policies on disk + which is activ
 defenseclaw policy show default          # normalized summary of one named policy
 ```
 
-For configuration v8, `config show` renders the canonical effective
-observability view by default; use `--source` for the masked source document,
-or `--effective --provenance` for explicit compiler annotations. V8 rejects
-`--reveal`; neither source nor effective output resolves secret values.
+For configuration v8, `config show` renders the resolved configuration - every
+section the operator can set - with the observability section taken from the
+canonical Go effective plan. Use `--source` for the masked source document,
+`--section <name>` to limit the output to one section, or
+`--effective --provenance` for explicit compiler annotations on the
+observability section. V8 rejects `--reveal`; neither source nor effective
+output resolves secret values. Keys the v8 schema removed (`otel`,
+`audit_sinks`, `privacy`, `splunk`, `audit_db`) are not printed, because an
+exact-v8 document cannot carry them.
 
 `policy show <name>` prints a normalized summary of the named file (`default`,
 `strict`, `permissive`, or any custom `policies/<name>.yaml` you've added).
