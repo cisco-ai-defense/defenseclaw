@@ -156,6 +156,40 @@ class NativeDeliverySummary:
         }
 
 
+def native_delivery_display_rows(
+    connectors: tuple[NativeDeliveryStatus, ...] | list[NativeDeliveryStatus],
+) -> list[tuple[str, NativeDeliveryStatus]]:
+    """``(instance label, row)`` pairs for the text renderers (GAP-2065).
+
+    Additional (non-default) instances, such as one per OpenShell sandbox
+    run, never get evidence of their own and outlive the sandbox. Listing each
+    one as an anonymous "no evidence" line buried the real rows, so idle ones
+    fold into one line per connector. JSON output keeps every instance.
+    """
+
+    rows: list[tuple[str, NativeDeliveryStatus]] = []
+    idle: dict[str, int] = {}
+    for item in connectors:
+        if not item.default and item.state == "no_evidence":
+            idle[item.connector] = idle.get(item.connector, 0) + 1
+            continue
+        rows.append(("" if item.default else "additional instance", item))
+    for connector, count in idle.items():
+        noun = "instance" if count == 1 else "instances"
+        folded = NativeDeliveryStatus(
+            connector=connector,
+            default=False,
+            state="no_evidence",
+            normalized_batches=0,
+            drop_only_batches=0,
+            detail="inactive (for example past sandbox runs); no recent native delivery evidence, nothing to do",
+        )
+        # Keep the folded line next to that connector's other rows.
+        at = max((i + 1 for i, (_label, row) in enumerate(rows) if row.connector == connector), default=len(rows))
+        rows.insert(at, (f"{count} additional {noun}", folded))
+    return rows
+
+
 def summarize_native_delivery(report: ConnectorCustodyReport) -> NativeDeliverySummary:
     """Classify accepted versus drop-only native OTLP evidence.
 

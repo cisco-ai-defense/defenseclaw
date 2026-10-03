@@ -359,3 +359,21 @@ def test_a_strict_base_stays_strict_after_layering(env) -> None:
     assert pc.pack_profile(payload["pack_path"]) == "strict"
     assert app.cfg.guardrail.connectors["codex"].rule_pack_dir == str(composed)
     assert pc.pack_name_for_path(app.cfg, str(composed)) == ("protected-codex", "custom")
+
+
+def test_gateway_kept_starting_is_not_reported_as_a_failed_restart(env, monkeypatch) -> None:
+    # GAP-2080: the gateway was left running; "restart failed, run restart" was wrong.
+    app, _root, _validator = env
+
+    def _restart(*_a, **_k):
+        cmd_setup._gateway_left_starting = True
+        return False
+
+    monkeypatch.setattr(cmd_setup, "_gateway_left_starting", False)
+    monkeypatch.setattr(cmd_guardrail, "_gateway_running", lambda _app: True)
+    monkeypatch.setattr(cmd_setup, "_restart_defense_gateway", _restart)
+    text = _run(app, "enable", DB)
+    assert text.exit_code == 1
+    assert "still starting and was kept running" in text.output and "defenseclaw-gateway status" in text.output
+    assert "restart failed" not in text.output and "✗" not in text.output
+    assert _json(_run(app, "disable", DB, "--json"))["gateway"] == "still_starting"
