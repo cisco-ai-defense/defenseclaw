@@ -72,6 +72,20 @@ from defenseclaw.scanner.plugin_scanner.rules import (
 )
 from defenseclaw.scanner.plugin_scanner.types import Finding, PluginManifest
 
+# PluginManifest.source holds a schema label; connector manifests live in a
+# dot directory, so map their labels back to the real file (GAP-2214).
+_MANIFEST_SOURCE_PATHS = {
+    "claude.plugin.json": ".claude-plugin/plugin.json",
+    "codex.plugin.json": ".codex-plugin/plugin.json",
+    "cursor.plugin.json": ".cursor-plugin/plugin.json",
+}
+
+
+def _manifest_location(target: str, manifest: PluginManifest) -> str:
+    source = manifest.source or "package.json"
+    return f"{target}/{_MANIFEST_SOURCE_PATHS.get(source, source)}"
+
+
 # ---------------------------------------------------------------------------
 # Manifest checks
 # ---------------------------------------------------------------------------
@@ -99,7 +113,7 @@ def check_permissions(
                     "No permissions declared in manifest. The plugin may operate without "
                     "restrictions, or permissions may not be documented."
                 ),
-                location=f"{target}/{manifest.source or 'package.json'}",
+                location=f"{_manifest_location(target, manifest)}",
                 remediation=("Declare required permissions explicitly in the manifest to enable policy enforcement."),
             )
         )
@@ -119,7 +133,7 @@ def check_permissions(
                         f'Plugin requests "{perm}" which grants broad {perm.split(":")[0]} access. '
                         "This permission should be scoped more narrowly."
                     ),
-                    location=f"{target}/{manifest.source or 'package.json'}",
+                    location=f"{_manifest_location(target, manifest)}",
                     remediation=f'Replace "{perm}" with specific, scoped permissions (e.g., "fs:read:/specific/path").',
                 )
             )
@@ -136,7 +150,7 @@ def check_permissions(
                         f'Plugin uses wildcard permission "{perm}". '
                         "Wildcard permissions bypass fine-grained policy enforcement."
                     ),
-                    location=f"{target}/{manifest.source or 'package.json'}",
+                    location=f"{_manifest_location(target, manifest)}",
                     remediation="Use specific, scoped permissions instead of wildcards.",
                 )
             )
@@ -161,7 +175,7 @@ def check_dependencies(
                     title=f"Risky dependency: {dep}",
                     evidence=f'"{dep}": "{manifest.dependencies[dep]}"',
                     description=f'Plugin depends on "{dep}" which can execute arbitrary commands or code.',
-                    location=f"{target}/{manifest.source or 'package.json'}",
+                    location=f"{_manifest_location(target, manifest)}",
                     remediation=f'Review usage of "{dep}" and ensure it does not process untrusted input.',
                     tags=["supply-chain"],
                 )
@@ -184,7 +198,7 @@ def check_dependencies(
                         f'Dependency "{dep}" uses unpinned version "{version or "(empty)"}". '
                         "Unpinned versions are vulnerable to dependency confusion attacks."
                     ),
-                    location=f"{target}/{manifest.source or 'package.json'}",
+                    location=f"{_manifest_location(target, manifest)}",
                     remediation=f'Pin "{dep}" to a specific version or range (e.g., "^1.2.3").',
                     tags=["supply-chain"],
                 )
@@ -203,7 +217,7 @@ def check_dependencies(
                         f'Dependency "{dep}" uses an unencrypted HTTP URL, '
                         "allowing man-in-the-middle package substitution."
                     ),
-                    location=f"{target}/{manifest.source or 'package.json'}",
+                    location=f"{_manifest_location(target, manifest)}",
                     remediation="Use HTTPS or a registry reference instead.",
                     tags=["supply-chain"],
                 )
@@ -222,7 +236,7 @@ def check_dependencies(
                         f'Dependency "{dep}" references a local file path ("{version}"). '
                         "This may be a path-traversal vector."
                     ),
-                    location=f"{target}/{manifest.source or 'package.json'}",
+                    location=f"{_manifest_location(target, manifest)}",
                     remediation="Use a registry-published package instead of a local file reference.",
                     tags=["supply-chain"],
                 )
@@ -242,7 +256,7 @@ def check_dependencies(
                             f'Dependency "{dep}" references a git source without a commit hash. '
                             "The content can change silently."
                         ),
-                        location=f"{target}/{manifest.source or 'package.json'}",
+                        location=f"{_manifest_location(target, manifest)}",
                         remediation=f'Pin "{dep}" to a specific commit hash (e.g., "github:user/repo#abc1234").',
                         tags=["supply-chain"],
                     )
@@ -274,7 +288,7 @@ def check_install_scripts(
                         f'Plugin defines a "{name}" script that runs automatically during npm install. '
                         "Install scripts are a primary npm supply-chain attack vector."
                     ),
-                    location=f"{target}/{manifest.source or 'package.json'} \u2192 scripts.{name}",
+                    location=f"{_manifest_location(target, manifest)} \u2192 scripts.{name}",
                     remediation=(
                         f'Remove the "{name}" script or replace with explicit build steps that users run manually.'
                     ),
@@ -295,7 +309,7 @@ def check_install_scripts(
                         f'The "{name}" script contains shell command invocations ({value[:80]}). '
                         "Scripts that download or execute external code introduce supply-chain risk."
                     ),
-                    location=f"{target}/{manifest.source or 'package.json'} \u2192 scripts.{name}",
+                    location=f"{_manifest_location(target, manifest)} \u2192 scripts.{name}",
                     remediation="Review the script and remove unnecessary shell invocations.",
                     tags=["supply-chain"],
                 )
