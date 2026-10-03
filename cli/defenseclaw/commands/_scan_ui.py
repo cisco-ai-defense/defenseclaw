@@ -56,6 +56,7 @@ output path).
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -418,6 +419,9 @@ def record_scan(logger: Any, result: Any, **kwargs: Any) -> None:
     from defenseclaw.logger import CanonicalObservabilityUnavailableError
 
     if not logger:
+        return
+    # The gateway spawned this scan and records the result itself (GAP-2482).
+    if os.environ.get("DEFENSECLAW_SCAN_RECORDED_BY_CALLER") == "1":
         return
     try:
         logger.log_scan(result, **kwargs)
