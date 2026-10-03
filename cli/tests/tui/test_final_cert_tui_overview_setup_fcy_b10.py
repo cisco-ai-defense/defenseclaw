@@ -51,7 +51,7 @@ def test_overview_connectors_keep_names_and_numbers_at_80_columns() -> None:
     ]
     fake = SimpleNamespace(
         _connector_filter=lambda: "",
-        overview_model=SimpleNamespace(connector_priority_conflict_disclosure=lambda _name: ""),
+        overview_model=SimpleNamespace(connector_priority_conflict_notice=lambda _name: ""),
     )
     panel = DefenseClawTUI._overview_connectors_panel(fake, rows)
     narrow = _render(panel, 76)
