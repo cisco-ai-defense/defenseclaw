@@ -170,7 +170,7 @@ def sync_source(
     try:
         manifest, raw = fetch_manifest(source, allow_private=allow_private)
     except (IngestError, ManifestError) as exc:
-        report.errors.append(f"fetch failed: {exc}")
+        report.errors.append(str(exc) if isinstance(exc, ManifestError) else f"fetch failed: {exc}")
         source.last_status = f"error: {exc}"[:240]
         source.last_sync = report.started_at
         report.finished_at = _now_iso()
