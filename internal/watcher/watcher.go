@@ -124,12 +124,15 @@ type InstallWatcher struct {
 	// startupAdmitRoots are the skill and plugin roots that already held
 	// baselines when the startup rescan began (rescan goroutine only).
 	startupAdmitRoots map[InstallType][]string
-	store             *audit.Store
-	logger            *audit.Logger
-	opa               *policy.Engine
-	webhooks          WebhookDispatcher
-	debounce          time.Duration
-	onAdmit           OnAdmission
+	// markedWatchRoots caches the root markers written by this process
+	// (rescan goroutine only).
+	markedWatchRoots map[string]bool
+	store            *audit.Store
+	logger           *audit.Logger
+	opa              *policy.Engine
+	webhooks         WebhookDispatcher
+	debounce         time.Duration
+	onAdmit          OnAdmission
 
 	mu      sync.Mutex
 	pending map[string]time.Time // path → first-seen, for debounce
