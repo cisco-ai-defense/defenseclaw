@@ -1502,6 +1502,23 @@ class TestMCPScan(MCPCommandTestBase):
         self.assertIn("not applied: zeptoclaw", result.output)
 
     @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")
+    def test_set_existing_name_says_updated(self, _mock_set):
+        # GAP-2417: re-setting a server the connector already has is an update.
+        self.app.cfg.active_connectors = lambda: ["codex"]  # type: ignore[method-assign]
+        self.app.cfg.mcp_servers = MagicMock(
+            return_value=[MCPServerEntry(name="ctx7", url="https://old/mcp", transport="sse")]
+        )
+
+        updated = self.invoke(["set", "ctx7", "--url", "https://new/mcp", "--skip-scan", "--connector", "codex"])
+        added = self.invoke(["set", "ctx8", "--url", "https://new/mcp", "--skip-scan", "--connector", "codex"])
+
+        self.assertEqual(updated.exit_code, 0, updated.output)
+        self.assertIn("[mcp] Updated 'ctx7' (codex).", updated.output)
+        self.assertNotIn("Added", updated.output)
+        self.assertEqual(added.exit_code, 0, added.output)
+        self.assertIn("[mcp] Added 'ctx8' (codex).", added.output)
+
+    @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")
     def test_set_isolates_unexpected_write_failure_and_exits_nonzero(self, mock_set):
         # Distinct from MCPWriteUnsupportedError (a benign skip, exit 0): an
         # *unexpected* write error (disk full, locked config) on one connector
