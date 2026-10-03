@@ -79,12 +79,12 @@ Upgrade with the channel you installed from. A host where the package owns
 the binaries refuses a payload upgrade (`package_owned_binaries`).
 
 ```bash title="Debian and Ubuntu package"
-VERSION=1.4.0   # the release you deploy
+VERSION=1.0.0   # the release you deploy
 sudo apt install "./defenseclaw-enterprise-${VERSION}-linux-amd64.deb"
 ```
 
 ```bash title="RHEL package"
-VERSION=1.4.0
+VERSION=1.0.0   # the release you deploy
 sudo dnf upgrade "./defenseclaw-enterprise-${VERSION}-linux-amd64.rpm"
 ```
 
@@ -94,7 +94,7 @@ script never fails the package transaction, so read that file or run `verify`
 afterwards.
 
 ```bash title="Payload archive"
-VERSION=1.4.0
+VERSION=1.0.0   # the release you deploy
 sudo mkdir -p "/var/tmp/defenseclaw-${VERSION}"
 sudo tar -xzf "defenseclaw-enterprise-${VERSION}-linux-amd64.tar.gz" -C "/var/tmp/defenseclaw-${VERSION}" --no-same-owner
 cd "/var/tmp/defenseclaw-${VERSION}"
@@ -111,7 +111,7 @@ the lifecycle fails, the script fails the installation, so your MDM reports
 it.
 
 ```bash
-VERSION=1.4.0
+VERSION=1.0.0   # the release you deploy
 sudo installer -pkg "./defenseclaw-enterprise-${VERSION}-darwin-arm64.pkg" -target /
 sudo cat /opt/cisco/defenseclaw/lifecycle/last-package-result.json
 ```

@@ -116,7 +116,7 @@ Check the signature on `checksums.txt` with
 the file against it, then the pkg's own signature:
 
 ```bash
-VERSION=1.4.0  # the release you deploy
+VERSION=1.0.0  # the release you deploy
 cosign verify-blob --bundle checksums.txt.bundle \
   --certificate-identity "https://github.com/cisco-ai-defense/defenseclaw/.github/workflows/release.yaml@refs/heads/main" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
@@ -199,7 +199,7 @@ The lifecycle re-owns the file to `root:_defenseclaw 0640` when it installs.
 ### 3a. Install the pkg
 
 ```bash
-VERSION=1.4.0  # the release you deploy
+VERSION=1.0.0  # the release you deploy
 sudo installer -pkg "defenseclaw-enterprise-${VERSION}-darwin-arm64.pkg" -target /
 sudo cat /opt/cisco/defenseclaw/lifecycle/last-package-result.json
 ```
@@ -229,7 +229,7 @@ The payload folder and its binaries must be owned by root and not writable
 by group or others:
 
 ```bash
-VERSION=1.4.0  # the release you deploy
+VERSION=1.0.0  # the release you deploy
 PAYLOAD="/var/root/defenseclaw-enterprise-${VERSION}"
 sudo install -d -o root -g wheel -m 0700 "$PAYLOAD"
 sudo tar -xzf "defenseclaw-enterprise-${VERSION}-darwin-arm64.tar.gz" \

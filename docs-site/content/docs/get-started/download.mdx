@@ -1,0 +1,164 @@
+---
+title: Download
+description: Install DefenseClaw on macOS, Linux or Windows with one command, or get the enterprise packages for a fleet of machines.
+keywords:
+  - download DefenseClaw
+  - DefenseClaw install command
+  - DefenseClaw install.sh
+  - DefenseClaw install.ps1
+  - DefenseClaw enterprise package
+---
+
+DefenseClaw installs for your own account with one command, and you don't need
+administrator rights. The installer downloads the latest release, checks every
+file against the release's `checksums.txt` and installs `uv` if you don't have
+it. `uv` provides the Python runtime, so you don't need anything else.
+
+## Install for your OS
+
+<Tabs items={['macOS', 'Linux', 'Windows']}>
+
+<Tab value="macOS">
+
+**Requires** a Mac with Apple silicon (`arm64`). Intel Macs are unsupported,
+and the installer stops before it changes anything.
+
+```bash
+curl -LsSf https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.sh | bash
+```
+
+To install, guard one agent and run first-time setup in a single step:
+
+```bash
+curl -LsSf https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.sh | bash -s -- --connector claudecode --quickstart
+```
+
+**Menu-bar app (optional).** Download `DefenseClawMac-<version>-macos-arm64.dmg`
+from the [latest release](https://github.com/cisco-ai-defense/defenseclaw/releases/latest).
+After that, the installer and `defenseclaw upgrade` keep an installed app up to
+date, but they don't install it for you. See [macOS app](/docs/macos-app).
+
+</Tab>
+
+<Tab value="Linux">
+
+**Requires** Linux on `x86_64` or `arm64`.
+
+```bash
+curl -LsSf https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.sh | bash
+```
+
+To install, guard one agent and run first-time setup in a single step:
+
+```bash
+curl -LsSf https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.sh | bash -s -- --connector claudecode --quickstart
+```
+
+If the installer says `~/.local/bin` isn't on your `PATH`, run the line it
+prints, then open a new shell.
+
+</Tab>
+
+<Tab value="Windows">
+
+**Requires** Windows on `x64`, with Windows PowerShell 5.1 or PowerShell 7.
+Windows on ARM64 isn't certified, even with x64 emulation, so the installer
+stops there. Run it as the user who uses DefenseClaw, not as an administrator.
+
+```powershell
+irm https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.ps1 | iex
+```
+
+To install, guard one agent and run first-time setup in a single step:
+
+```powershell
+& ([scriptblock]::Create((irm https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.ps1))) -Connector claudecode -Quickstart
+```
+
+The installer adds `%USERPROFILE%\.local\bin` to your user `PATH`. If it tells
+you to open a new terminal, do that before you run `defenseclaw`. The
+[native Windows guide](/docs/get-started/windows) covers the Windows lanes and
+troubleshooting.
+
+</Tab>
+
+</Tabs>
+
+Then run `defenseclaw init`. The [5-minute quickstart](/docs/get-started/quickstart)
+takes you from there to your first blocked tool call.
+
+<Callout title="Which agents work on my OS?">
+The [support matrix](/docs/support-matrix) shows each agent on macOS, Linux and
+Windows, and what was verified for this release.
+</Callout>
+
+## Managing many machines?
+
+The standalone enterprise packages install DefenseClaw as operating-system
+services that belong to the administrator, so users can't turn the protection
+off. Your MDM or configuration management delivers them. (Cisco Secure Client
+customers use the [Secure Client profile](/docs/setup/enterprise-deployment)
+instead.) Every file is on the
+[latest release](https://github.com/cisco-ai-defense/defenseclaw/releases/latest)
+page. `<version>` is the release number without the `v`.
+
+| Platform | Release file | Guide |
+| --- | --- | --- |
+| Windows x64 | `DefenseClawSetup-Enterprise-Standalone-x64.exe`, with its `DefenseClawSetup-Enterprise-Standalone-x64.payload-manifest.json` | [Windows](/docs/enterprise/windows) |
+| macOS (Apple silicon) | `defenseclaw-enterprise-<version>-darwin-arm64.pkg` | [macOS](/docs/enterprise/macos) |
+| Linux, RPM | `defenseclaw-enterprise-<version>-linux-amd64.rpm` or `-linux-arm64.rpm` | [Linux](/docs/enterprise/linux) |
+| Linux, DEB (preview: not certified in this release) | `defenseclaw-enterprise-<version>-linux-amd64.deb` or `-linux-arm64.deb` | [Linux](/docs/enterprise/linux) |
+| Archive | `defenseclaw-enterprise-<version>-linux-amd64.tar.gz`, `-linux-arm64.tar.gz` or `-darwin-arm64.tar.gz` | [Linux](/docs/enterprise/linux), [macOS](/docs/enterprise/macos) |
+
+Start with [Deploy to a fleet](/docs/enterprise/get-started). It walks through
+picking a profile, your agents and your MDM.
+
+## Verify the download
+
+The one-line installers check every file they download against the release's
+`checksums.txt`. If `cosign` 2.0 or later is installed, they also verify the
+Sigstore signature on `checksums.txt`. Either check failing stops the install
+before it changes anything.
+
+For a file you download yourself, such as the `.dmg` or an enterprise package,
+download `checksums.txt` and `checksums.txt.bundle` from the same release.
+Then, in the download folder, verify the signature and the file's hash:
+
+```bash
+FILE=name-of-the-downloaded-file
+cosign verify-blob --bundle checksums.txt.bundle \
+  --certificate-identity "https://github.com/cisco-ai-defense/defenseclaw/.github/workflows/release.yaml@refs/heads/main" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  checksums.txt
+grep "  $FILE\$" checksums.txt | sha256sum -c -    # on macOS: shasum -a 256 -c -
+```
+
+On Windows, compare the file's hash with its line in `checksums.txt`:
+
+```powershell
+(Get-FileHash .\DefenseClawSetup-Enterprise-Standalone-x64.exe -Algorithm SHA256).Hash.ToLower()
+Select-String -Path .\checksums.txt -Pattern 'DefenseClawSetup-Enterprise-Standalone-x64\.exe$'
+```
+
+## Upgrade, roll back or uninstall
+
+```bash
+defenseclaw upgrade                 # install the latest release; config and data are kept
+defenseclaw rollback                # restore the install the last upgrade replaced
+defenseclaw uninstall               # remove connector hooks; keep ~/.defenseclaw and the binaries
+defenseclaw uninstall --all --binaries --yes   # remove everything, without a prompt
+```
+
+Running the one-line installer again also upgrades or repairs an install and
+keeps your configuration. For a specific release, use
+`defenseclaw upgrade --version X.Y.Z`. [Upgrade](/docs/get-started/upgrade)
+explains what an upgrade does, and [Install](/docs/get-started/install#uninstall)
+lists every uninstall option.
+
+## Next
+
+<Cards>
+  <Card title="5-minute quickstart" href="/docs/get-started/quickstart" description="Install, run init and watch DefenseClaw block a test command." />
+  <Card title="Install options and exit codes" href="/docs/get-started/install" description="Installer flags, exit codes, source builds and what the install creates." />
+  <Card title="Deploy to a fleet" href="/docs/enterprise/get-started" description="Enterprise packages, MDM delivery and admin-owned services." />
+</Cards>

@@ -1,194 +1,23 @@
 ---
-title: First guardrail in 5 minutes
-description: An end-to-end walkthrough — install, pick Claude Code, switch to action mode, and see a block with a harmless test rule.
+title: First guardrail, next steps
+description: After the quickstart block. Pause risky calls for your approval with HITL, see how the block works end to end, and the safe ways to allow something a rule blocks.
 keywords:
   - first DefenseClaw guardrail
-  - block destructive command claude code
+  - DefenseClaw human approval
+  - DefenseClaw HITL
+  - allow a blocked command
   - DefenseClaw walkthrough
-  - DefenseClaw demo
 ---
 
-This walkthrough ends with DefenseClaw blocking a harmless command,
-`echo defenseclaw-demo-marker`, through a one-rule test pack that you add on
-top of the default pack. It uses a marker because coding agents refuse to run
-the destructive commands the default rules exist for, such as `rm -rf /proc`,
-and a command the agent never attempts can't be blocked.
+This page picks up where the [5-minute quickstart](/docs/get-started/quickstart)
+ends: Claude Code is in action mode, the `first-guardrail` test pack is active
+and `echo defenseclaw-demo-marker` was blocked. If you haven't done the
+quickstart yet, start there. It has macOS, Linux and Windows steps.
 
-<Callout type="info" title="macOS/Linux walkthrough">
-The steps below use a POSIX shell (`cp`, a heredoc) and `jq`; they are not
-native Windows commands.
-On Windows, complete the connector page's Windows setup tab and use the
-[native Windows post-install checklist](/docs/get-started/windows/paths-troubleshooting#post-install-checklist)
-to verify the gateway, connector hook, audit, and repair path without inventing
-a Windows policy rule that the default pack does not ship.
-</Callout>
-
-<Steps>
-
-<Step>
-
-### Install
-
-```bash
-curl -LsSf https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.sh | bash -s -- --connector claudecode
-```
-
-The installer only installs the binaries. It ends with
-`Next: defenseclaw init --connector claudecode`, which is the next step.
-
-</Step>
-
-<Step>
-
-### Initialize DefenseClaw for Claude Code
-
-```bash
-defenseclaw init --connector claudecode
-```
-
-Press Enter to accept each default, and leave `claudecode` unchecked at the
-action enforcement prompt. `init` writes `~/.defenseclaw/config.yaml`, starts
-the gateway and wires Claude Code in
-[observe mode](/docs/connectors/claudecode): DefenseClaw collects telemetry but
-does not yet block. We start here so we know the data path is healthy before
-flipping enforcement on.
-
-To re-apply the Claude Code hooks later, run `defenseclaw setup claude-code`.
-
-</Step>
-
-<Step>
-
-### Confirm telemetry is flowing
-
-In one terminal, open the live dashboard (audit + alerts + logs panels):
-
-```bash
-defenseclaw tui
-```
-
-Or take a scripted snapshot from mandatory SQLite event history:
-
-```bash
-defenseclaw-gateway audit export --output - \
-  | jq -c 'select(.connector == "claudecode")' \
-  | tail -n 200
-```
-
-In Claude Code, ask the assistant to run any tool call (e.g. "list files in this directory"). New rows should appear within a second or two. If nothing shows up, run `defenseclaw doctor` — it will diagnose hook script presence, gateway port binding, and config drift.
-
-</Step>
-
-<Step>
-
-### Promote to action mode
-
-```bash
-defenseclaw setup guardrail --connector claudecode --mode action --human-approval --restart
-```
-
-Two things just changed:
-
-- `guardrail.mode` flipped to `action`. CRITICAL findings now block via the `PreToolUse` hook's deny verdict.
-- `guardrail.hilt.enabled` flipped to `true`. HIGH findings will pause for operator approval (Claude Code supports native PreToolUse ask, so the prompt appears inside the agent UI).
-
-</Step>
-
-<Step>
-
-### Add a test rule
-
-Copy the default pack and add one CRITICAL rule that matches only a command
-with the argument `defenseclaw-demo-marker`:
-
-```bash
-PACK=~/.defenseclaw/policies/guardrail/first-guardrail
-cp -R ~/.defenseclaw/policies/guardrail/default "$PACK"
-cat > "$PACK/rules/first-guardrail.yaml" <<'EOF'
-version: 1
-category: first-guardrail
-rules:
-  - id: DEMO-MARKER-BLOCK
-    tool_call_only: true
-    expression: >-
-      f.commands.exists(c, 'defenseclaw-demo-marker' in c.argv)
-    pattern: '\bdefenseclaw-demo-marker\b'
-    title: "First-guardrail demo marker"
-    severity: CRITICAL
-    confidence: 0.99
-    tags: [demo]
-EOF
-defenseclaw guardrail validate-pack "$PACK"
-defenseclaw guardrail use-pack first-guardrail --connector claudecode
-```
-
-The copy keeps every default rule. `use-pack` validates the pack, points Claude
-Code at it and restarts the gateway so it enforces the pack now.
-
-</Step>
-
-<Step>
-
-### Trigger the rule
-
-Ask Claude Code:
-
-> Please run `echo defenseclaw-demo-marker`.
-
-The PreToolUse hook sends the command to the gateway, `DEMO-MARKER-BLOCK`
-matches at CRITICAL, the hook returns `block`, and Claude Code reports that
-DefenseClaw blocked the command. It does not run.
-
-The default pack's own rules block the same way. For example, `CMD-RM-RF`
-blocks a recursive force delete of `/`, of your home directory, or of a
-critical top-level directory itself, such as `/etc`, `/var`, `/home` or
-`/proc`. A path below one of them (`/var/tmp/build`, `/etc/example-app`), a
-relative path or a home subdirectory is not matched merely because `rm -rf`
-is present, so routine cleanup keeps working.
-
-In a second terminal, list recent alerts:
-
-```bash
-defenseclaw alerts --limit 10
-```
-
-```
-| #  | Severity | Time  | Action       | Target      | Details [--show #]                                                                                          |
-|----+----------+-------+--------------+-------------+-------------------------------------------------------------------------------------------------------------|
-| 1  | CRITICAL | 14:02 | scan-finding | ...eToolUse | decision=blocked connector=claudecode rule=DEMO-MARKER-BLOCK: First-guardrail demo marker scanner=hook-rules |
-```
-
-Use `defenseclaw alerts --show 1` for the full record (rule path, scanner,
-evidence). For a scriptable SQLite snapshot filtered to high-severity rows:
-
-```bash
-defenseclaw-gateway audit export --output - \
-  | jq -c 'select(.connector == "claudecode" and (.severity == "HIGH" or .severity == "CRITICAL"))' \
-  | tail -n 200
-```
-
-</Step>
-
-<Step>
-
-### What if you wanted to allow it?
-
-Three safer options:
-
-- **Remove the test rule** — `defenseclaw guardrail use-pack --clear --connector claudecode` puts Claude Code back on the global pack; then delete `~/.defenseclaw/policies/guardrail/first-guardrail`.
-- **Customize a copied rule pack** — change or remove rules in a copied pack, as above, and select it with `use-pack`. Editing a bundled pack in place makes upgrades harder to review.
-- **Switch to observe mode** — `defenseclaw setup guardrail --mode observe`. Use this for the first week of every new connector.
-
-CRITICAL findings are not eligible for HITL approval.
-
-</Step>
-
-</Steps>
-
-## What you just built
+## How the block worked
 
 <Sequence
-  caption="A complete enforcement loop. Claude Code asks the agent's PreToolUse hook; the hook calls the gateway; the gateway scores the command and either allows, blocks, or pauses for HITL."
+  caption="A complete enforcement loop. Claude Code calls its PreToolUse hook, the hook asks the gateway, and the gateway scores the command and allows it, blocks it or pauses it for HITL."
   participants={[
     { id: 'u',  label: 'User',           kind: 'operator' },
     { id: 'cc', label: 'Claude Code',    kind: 'agent' },
@@ -207,9 +36,64 @@ CRITICAL findings are not eligible for HITL approval.
   <Message from="cc" to="u"  kind="return" label="I can't run that — DefenseClaw blocked it." />
 </Sequence>
 
+The default pack's own rules block the same way. For example, `CMD-RM-RF`
+blocks a recursive force delete of `/`, of your home directory, or of a
+critical top-level directory itself, such as `/etc`, `/var`, `/home` or
+`/proc`. A path below one of them (`/var/tmp/build`, `/etc/example-app`), a
+relative path or a home subdirectory isn't matched just because `rm -rf` is
+present, so routine cleanup keeps working.
+
+## Ask before risky calls (HITL)
+
+Blocking is all or nothing. Human approval (HITL) pauses a risky call and asks
+you instead:
+
+```bash
+defenseclaw setup guardrail --connector claudecode --mode action --human-approval --restart
+```
+
+Two settings change:
+
+- `guardrail.mode` is `action`, so CRITICAL findings still block through the
+  `PreToolUse` hook's deny verdict.
+- `guardrail.hilt.enabled` is `true`, so HIGH findings pause for your approval.
+  Claude Code supports a native PreToolUse ask, so the prompt appears inside
+  the agent.
+
+CRITICAL findings are never eligible for approval: they always block.
+`--hilt-min-severity` sets the lowest severity that asks. See
+[Human-in-the-loop](/docs/hitl) for how approval works.
+
+## Look at the evidence
+
+`defenseclaw alerts --show 1` prints the full alert record: the rule, the
+scanner and the evidence. For a scriptable SQLite snapshot of high-severity
+Claude Code events:
+
+```bash
+defenseclaw-gateway audit export --output - \
+  | jq -c 'select(.connector == "claudecode" and (.severity == "HIGH" or .severity == "CRITICAL"))' \
+  | tail -n 200
+```
+
+## What if you wanted to allow it?
+
+Three safe options:
+
+- **Remove the test rule.** `defenseclaw guardrail use-pack --clear --connector claudecode`
+  puts Claude Code back on the global pack. Then delete
+  `~/.defenseclaw/policies/guardrail/first-guardrail`.
+- **Customize a copied rule pack.** Change or remove rules in a copied pack, as
+  the quickstart did, and select it with `use-pack`. Editing a bundled pack in
+  place makes upgrades harder to review.
+- **Switch the agent to observe.** `defenseclaw guardrail mode observe --connector claudecode`
+  logs findings without blocking. Use observe for the first week of every new
+  agent.
+
 ## Next
 
 <Cards>
-  <Card title="Setup Guardrail (full reference)" href="/docs/setup/guardrail" description="Every flag, every option, every consequence." />
-  <Card title="Stop a destructive Claude Code command" href="/docs/stories/observe-claude-code" description="The same flow, with the policy walkthrough and exact rule boundaries." />
+  <Card title="Setup Guardrail (full reference)" href="/docs/setup/guardrail" description="Every flag, every option and what each one changes." />
+  <Card title="Stop a destructive Claude Code command" href="/docs/stories/observe-claude-code" description="The same flow, with the policy walkthrough and the exact rule boundaries." />
+  <Card title="Rule packs and policies" href="/docs/policies" description="Write, test and select your own rules." />
 </Cards>
