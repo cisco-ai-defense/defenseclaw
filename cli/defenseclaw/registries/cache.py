@@ -45,7 +45,7 @@ class EntryVerdict:
 
     name: str
     type: str
-    status: str = "pending"   # pending | clean | warning | blocked | error
+    status: str = "pending"   # pending | clean | warning | blocked | error | rejected
     severity: str = ""
     findings: int = 0
     scan_id: str = ""
@@ -102,6 +102,7 @@ class SourceIndex:
     warning_count: int = 0
     blocked_count: int = 0
     error_count: int = 0
+    rejected_count: int = 0
     verdicts: list[EntryVerdict] = field(default_factory=list)
 
     def recount(self) -> None:
@@ -110,6 +111,7 @@ class SourceIndex:
         self.warning_count = sum(1 for v in self.verdicts if v.status == "warning")
         self.blocked_count = sum(1 for v in self.verdicts if v.status == "blocked")
         self.error_count = sum(1 for v in self.verdicts if v.status == "error")
+        self.rejected_count = sum(1 for v in self.verdicts if v.status == "rejected")
 
     def find(self, type_: str, name: str) -> EntryVerdict | None:
         for v in self.verdicts:
@@ -151,6 +153,14 @@ def manifest_path(data_dir: str, source_id: str) -> Path:
 # Index read / write
 # ---------------------------------------------------------------------------
 
+def _entry_status(raw: dict[str, Any]) -> str:
+    """Stored status; an older reject saved "blocked", read it as "rejected" (GAP-2371)."""
+    status = str(raw.get("status", "pending"))
+    if status == "blocked" and raw.get("rejected"):
+        return "rejected"
+    return status
+
+
 def load_index(data_dir: str, source_id: str) -> SourceIndex:
     """Load the cached :class:`SourceIndex` for *source_id*.
 
@@ -174,7 +184,7 @@ def load_index(data_dir: str, source_id: str) -> SourceIndex:
         verdicts.append(EntryVerdict(
             name=str(raw.get("name", "")),
             type=str(raw.get("type", "")),
-            status=str(raw.get("status", "pending")),
+            status=_entry_status(raw),
             severity=str(raw.get("severity", "")),
             findings=int(raw.get("findings", 0) or 0),
             scan_id=str(raw.get("scan_id", "")),
@@ -291,7 +301,7 @@ def merge_manifest_into_index(
                 # Preserve operator overrides + last successful scan.
                 fresh.approved = prior.approved
                 fresh.rejected = prior.rejected
-                if prior.status in {"clean", "warning", "blocked"}:
+                if prior.status in {"clean", "warning", "blocked", "rejected"}:
                     fresh.status = prior.status
                     fresh.severity = prior.severity
                     fresh.findings = prior.findings

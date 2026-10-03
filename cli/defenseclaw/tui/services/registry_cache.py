@@ -77,6 +77,7 @@ class SourceIndex:
     warning_count: int = 0
     blocked_count: int = 0
     error_count: int = 0
+    rejected_count: int = 0
     verdicts: tuple[RegistryEntryRow, ...] = ()
 
 
@@ -131,8 +132,14 @@ def load_registry_index(data_dir: str | Path, source_id: str) -> SourceIndex:
         entry_count=_int(payload.get("entry_count"), len(verdicts)),
         clean_count=_int(payload.get("clean_count"), _count_status(verdicts, "clean")),
         warning_count=_int(payload.get("warning_count"), _count_status(verdicts, "warning")),
-        blocked_count=_int(payload.get("blocked_count"), _count_status(verdicts, "blocked")),
+        # GAP-2371: an older index counted rejected entries as blocked.
+        blocked_count=(
+            _int(payload.get("blocked_count"), _count_status(verdicts, "blocked"))
+            if "rejected_count" in payload
+            else _count_status(verdicts, "blocked")
+        ),
         error_count=_int(payload.get("error_count"), _count_status(verdicts, "error")),
+        rejected_count=_count_status(verdicts, "rejected"),
         verdicts=verdicts,
     )
 
@@ -143,7 +150,7 @@ def _entry_from_raw(source_id: str, raw: dict[str, Any]) -> RegistryEntryRow:
         source_id=source_id,
         type=_str(raw.get("type")),
         name=_str(raw.get("name")),
-        status=_str(raw.get("status")),
+        status=_entry_status(raw),
         severity=_str(raw.get("severity")),
         findings=_int(raw.get("findings"), 0),
         approved=_bool(raw.get("approved")),
@@ -160,6 +167,14 @@ def _dict_items(value: object) -> tuple[dict[str, Any], ...]:
     if not isinstance(value, list):
         return ()
     return tuple(item for item in value if isinstance(item, dict))
+
+
+def _entry_status(raw: dict[str, Any]) -> str:
+    """An older reject stored "blocked"; it reads as "rejected" (GAP-2371)."""
+    status = _str(raw.get("status"))
+    if status == "blocked" and _bool(raw.get("rejected")):
+        return "rejected"
+    return status
 
 
 def _count_status(verdicts: tuple[RegistryEntryRow, ...], status: str) -> int:

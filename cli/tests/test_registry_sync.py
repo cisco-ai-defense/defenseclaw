@@ -260,7 +260,7 @@ class TestManualVerdictStatusFlip(SyncTestBase):
     to wait for the next scan run to see the row turn red.
     """
 
-    def test_reject_flips_status_to_blocked(self):
+    def test_reject_flips_status_to_rejected(self):
         manifest = _fresh_skill_manifest()
         self.stub_fetch(manifest)
 
@@ -275,12 +275,14 @@ class TestManualVerdictStatusFlip(SyncTestBase):
         )
         self.assertIsNotNone(verdict)
         self.assertTrue(verdict.rejected)
-        self.assertEqual(verdict.status, "blocked")
+        # GAP-2371: "rejected", not "blocked" — reject only stops promotion.
+        self.assertEqual(verdict.status, "rejected")
 
-        # And it survives a reload from disk.
+        # And it survives a reload from disk, counted apart from blocked.
         idx = load_index(self.cfg.data_dir, self.source.id)
         v = idx.find("skill", "demo-skill")
-        self.assertEqual(v.status, "blocked")
+        self.assertEqual(v.status, "rejected")
+        self.assertEqual((idx.blocked_count, idx.rejected_count), (0, 1))
 
     def test_unreject_clears_synthetic_blocked_status(self):
         # Reject then un-reject. The synthetic ``status="blocked"``
@@ -348,7 +350,7 @@ class TestDecisionKeepsScanVerdict(SyncTestBase):
             auto_promote=False, save=False,
         )
         args = (self.cfg.data_dir, self.source.id, "skill", "demo-skill")
-        self.assertEqual(manual_set_verdict(*args, rejected=True).status, "blocked")
+        self.assertEqual(manual_set_verdict(*args, rejected=True).status, "rejected")
         self.assertEqual(manual_set_verdict(*args, approved=True).status, "clean")
         manual_set_verdict(*args, rejected=True)
         self.assertEqual(manual_set_verdict(*args, rejected=False).status, "clean")

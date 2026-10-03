@@ -97,6 +97,7 @@ class RegistrySourceRow:
     warning_count: int = 0
     blocked_count: int = 0
     error_count: int = 0
+    rejected_count: int = 0
     index_error: str = ""
 
     @property
@@ -624,6 +625,7 @@ def source_detail_info(source: RegistrySourceRow, data_dir: str | Path | None = 
             ("Warnings", str(source.warning_count)),
             ("Blocked", str(source.blocked_count)),
             ("Errors", str(source.error_count)),
+            ("Rejected", str(source.rejected_count)),
         )
     )
     if source.index_error:
@@ -763,6 +765,7 @@ def _attach_index(row: RegistrySourceRow, index: SourceIndex | None, index_error
         warning_count=index.warning_count,
         blocked_count=index.blocked_count,
         error_count=index.error_count,
+        rejected_count=index.rejected_count,
         index_error=index_error,
     )
 

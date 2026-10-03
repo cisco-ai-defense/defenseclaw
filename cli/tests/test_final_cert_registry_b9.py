@@ -82,7 +82,7 @@ def test_list_names_a_source_whose_last_sync_failed(registry_app, monkeypatch) -
     monkeypatch.setattr(cmd_registry, "load_index", lambda _d, sid: SourceIndex(source_id=sid, **counts[sid]))
     result = _run(registry_app, "list")
     assert result.exit_code == 0, result.output
-    assert "1 (0/0/0/1)" in result.output and "total (clean/warning/blocked/error)" in result.output
+    assert "1 (0/0/0/1/0)" in result.output and "total (clean/warning/blocked/error/rejected)" in result.output
     assert "The last sync of bad-src failed" in result.output and "registry show bad-src" in result.output
     assert "last sync of ok-src" not in result.output
 
