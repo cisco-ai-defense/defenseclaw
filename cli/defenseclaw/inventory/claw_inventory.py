@@ -1011,16 +1011,25 @@ _CATEGORY_LABELS = {
 
 
 def _not_collected_categories(inv: dict[str, Any]) -> set[str]:
-    """Categories this connector cannot inventory (an UNSUPPORTED limitation).
+    """Categories this connector cannot inventory (an UNSUPPORTED limitation),
+    or whose collector failed (an entry in ``errors``).
 
     When such a category is empty it means "not collected", not "none"
     (GAP-2101, the same rule as GAP-1483 for ``--only``).
     """
-    return {
+    unsupported = {
         str(lim.get("category"))
         for lim in inv.get("limitations") or []
         if isinstance(lim, dict) and lim.get("status") == InventoryCapabilityStatus.UNSUPPORTED
     }
+    # A collector that failed ("<connector>:<category>" in errors) did not
+    # collect either; its empty list is not "none" (GAP-2148).
+    failed = {
+        str(err.get("command", "")).rpartition(":")[2]
+        for err in inv.get("errors") or []
+        if isinstance(err, dict)
+    }
+    return unsupported | (failed & set(_CATEGORY_LABELS))
 
 
 def _mark_collected_categories(inv: dict[str, Any], cats: frozenset[str]) -> None:
@@ -3870,8 +3879,12 @@ def _tools_from_claude_settings(path: str) -> list[dict[str, Any]]:
     return rows
 
 
-def _load_toml_dict(path: str) -> dict[str, Any] | None:
-    """Read a TOML file; return None when it is missing or unreadable."""
+def _load_toml_dict(path: str, *, strict: bool = False) -> dict[str, Any] | None:
+    """Read a TOML file; return None when it is missing or unreadable.
+
+    With strict, a file that exists but cannot be read or parsed raises, so
+    the collector lands in ``errors`` instead of reading as empty (GAP-2148).
+    """
     if not os.path.isfile(path):
         return None
     try:
@@ -3885,7 +3898,9 @@ def _load_toml_dict(path: str) -> dict[str, Any] | None:
 
         with open(path, "rb") as fh:
             raw = tomllib.load(fh)
-    except (OSError, ValueError, ModuleNotFoundError):
+    except (OSError, ValueError, ModuleNotFoundError) as exc:
+        if strict:
+            raise ValueError(f"could not read {path}: {exc}") from exc
         return None
     return raw if isinstance(raw, dict) else None
 
@@ -3896,7 +3911,7 @@ def _providers_from_codex_config(path: str) -> list[dict[str, Any]]:
     Only names, endpoints and the *name* of the key env var are reported;
     header and token values are never copied into the BOM.
     """
-    raw = _load_toml_dict(path)
+    raw = _load_toml_dict(path, strict=True)
     if raw is None:
         return []
     model = str(raw.get("model") or "").strip()

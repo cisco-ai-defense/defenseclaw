@@ -104,6 +104,21 @@ class CodexModelProvidersTests(unittest.TestCase):
         self.assertNotIn("Model providers: none", out)
 
 
+    def test_unparsable_config_is_an_error_not_zero_providers(self) -> None:
+        # GAP-2148: an invalid config.toml read as "Model providers: none".
+        self._write("model = gpt-edge-test\n")
+        from defenseclaw.config import default_config
+
+        inv = claw_inventory.build_claw_aibom(default_config(), categories={"models"}, connector="codex")
+        self.assertEqual(inv["model_providers"], [])
+        self.assertEqual([e["command"] for e in inv["errors"]], ["codex:models"])
+        self.assertIn("config.toml", inv["errors"][0]["error"])
+        out = _render(inv)
+        self.assertIn("Model providers: not collected", out)
+        self.assertNotIn("Model providers: none", out)
+        self.assertIn("codex:models", out)
+
+
 class NotCollectedRenderingTests(unittest.TestCase):
     def test_unsupported_empty_category_reads_not_collected(self) -> None:
         inv = {
