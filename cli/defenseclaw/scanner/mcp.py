@@ -864,14 +864,63 @@ def _inspect_to_llm(il: InspectLLMConfig) -> LLMConfig:
     )
 
 
+# botocore's instance-role, ECS and EKS Pod Identity credential providers
+# (GAP-2604). The Bedrock analyzer needs them to sign its requests.
+_AWS_CREDENTIAL_ENDPOINT_HOSTS = (
+    "169.254.169.254",
+    "fd00:ec2::254",
+    "169.254.170.2",
+    "169.254.170.23",
+    "fd00:ec2::23",
+)
+
+
+def _bedrock_runtime_hosts(region: str) -> tuple[str, ...]:
+    """Bedrock runtime and STS hosts LiteLLM signs requests against.
+
+    A VPC interface endpoint answers these names with private addresses, so
+    the public-IP policy alone would refuse the configured provider (GAP-2604).
+    """
+    region = (region or "").strip().lower()
+    if not region or not all(c.isalnum() or c == "-" for c in region):
+        return ()
+    return (
+        f"bedrock-runtime.{region}.amazonaws.com",
+        f"bedrock-runtime-fips.{region}.amazonaws.com",
+        f"sts.{region}.amazonaws.com",
+        "sts.amazonaws.com",
+    )
+
+
+def _bedrock_region(llm: LLMConfig) -> str:
+    """The Bedrock region set on the LLM config, or "" (the SDK's env default)."""
+    bedrock_region = llm.bedrock.region if llm.bedrock is not None else ""
+    return (bedrock_region or llm.region or "").strip()
+
+
+def _llm_uses_aws_credentials(llm: LLMConfig) -> bool:
+    provider = (llm.provider or "").strip().lower()
+    return provider in ("bedrock", "amazon-bedrock") or litellm_model(
+        llm
+    ).lower().startswith("bedrock/")
+
+
 def _scope_network_analyzer_dns(
     scanner: object,
     *,
     api_endpoint: str,
     llm_base_url: str,
     llm_uses_local_default: bool,
+    llm_uses_aws_credentials: bool = False,
+    llm_aws_region: str = "",
 ) -> None:
-    """Keep analyzer traffic separate without allowing private redirects."""
+    """Keep analyzer traffic separate without allowing private redirects.
+
+    A Bedrock LLM analyzer may also reach the AWS credential endpoints, so
+    instance-role, ECS and EKS credentials work during a pinned scan, and the
+    Bedrock runtime and STS hosts of ``llm_aws_region``, which a VPC
+    interface endpoint resolves to private addresses.
+    """
     endpoint_by_analyzer = {
         "_api_analyzer": api_endpoint,
         "_llm_analyzer": llm_base_url,
@@ -898,6 +947,12 @@ def _scope_network_analyzer_dns(
             loopback_only_hosts = ("localhost", "127.0.0.1", "::1")
         else:
             trusted_hosts = ()
+        if attr_name == "_llm_analyzer" and llm_uses_aws_credentials:
+            trusted_hosts = (
+                *trusted_hosts,
+                *_AWS_CREDENTIAL_ENDPOINT_HOSTS,
+                *_bedrock_runtime_hosts(llm_aws_region),
+            )
 
         async def run_analyzer(
             *args,
@@ -1080,6 +1135,9 @@ class MCPScannerWrapper:
             llm_base_url=llm.base_url,
             llm_timeout=llm.effective_timeout(),
             llm_max_retries=llm.effective_max_retries(),
+            # The SDK otherwise uses AWS_REGION or us-east-1, not the
+            # configured Bedrock region (GAP-2604).
+            aws_region_name=_bedrock_region(llm) or None,
         )
 
         analyzers = self._parse_analyzers(AnalyzerEnum)
@@ -1104,7 +1162,18 @@ class MCPScannerWrapper:
             api_endpoint=aid.endpoint,
             llm_base_url=llm.base_url,
             llm_uses_local_default=llm.is_local_provider(),
+            llm_uses_aws_credentials=_llm_uses_aws_credentials(llm),
+            llm_aws_region=getattr(sdk_config, "aws_region_name", "") or "",
         )
+        # LiteLLM prints "Give Feedback / Get Help" banners on each failed
+        # call; the scan reports one warning line instead (GAP-2604).
+        try:
+            import litellm
+
+            litellm.suppress_debug_info = True
+        except ImportError:
+            pass
+        self._llm_skipped = ""
         start = time.monotonic()
 
         if is_local:
@@ -1119,7 +1188,10 @@ class MCPScannerWrapper:
             all_findings = self._scan_remote(scanner, target, analyzers)
 
         elapsed = time.monotonic() - start
-        return self._convert(all_findings, target, elapsed)
+        result = self._convert(all_findings, target, elapsed)
+        if self._llm_skipped:
+            result.notes.append(self._llm_skipped)
+        return result
 
     def _parse_analyzers(self, analyzer_enum_cls: type) -> list | None:
         """Resolve configured analyzer names into SDK enum values.
@@ -1293,11 +1365,7 @@ class MCPScannerWrapper:
                 # Graceful degrade: keep the YARA findings, surface a skip
                 # notice so the operator knows semantic analysis was
                 # skipped (rather than silently passing).
-                print(
-                    f"warning: LLM skipped (backend unreachable) while scanning "
-                    f"{entry.name!r}: {llm_errors[0]}",
-                    file=sys.stderr,
-                )
+                self._warn_llm_skipped(entry.name, llm_errors[0])
             if not results and other_errors:
                 raise RuntimeError(
                     f"scan failed for local server {entry.name!r} "
@@ -1327,12 +1395,20 @@ class MCPScannerWrapper:
             findings = self._scan_remote_uncaptured(scanner, target, analyzers)
         llm_errors = [m for (name, m) in errors if _is_llm_backend_error(name, m, self._llm)]
         if llm_errors:
-            print(
-                f"warning: LLM skipped (backend unreachable) while scanning "
-                f"{target!r}: {llm_errors[0]}",
-                file=sys.stderr,
-            )
+            self._warn_llm_skipped(target, llm_errors[0])
         return findings
+
+    def _warn_llm_skipped(self, target: str, error: str) -> None:
+        """Print one bounded skip line and mark the scan result partial."""
+        detail = " ".join(str(error).split())
+        if len(detail) > 200:
+            detail = detail[:197] + "..."
+        self._llm_skipped = f"LLM analysis skipped (backend unreachable): {detail}"
+        print(
+            f"warning: LLM skipped (backend unreachable) while scanning "
+            f"{target!r}: {detail}",
+            file=sys.stderr,
+        )
 
     def _scan_remote_uncaptured(self, scanner: object, target: str,
                                 analyzers: list | None) -> list[object]:
@@ -1594,7 +1670,16 @@ def _capture_sdk_error_logs(
     message-only handler, then restore the exact logger state.
     """
     handler = _ErrorCapture(errors)
-    loggers = [logging.getLogger(name) for name in _SDK_ERROR_LOGGER_NAMES]
+    names = set(_SDK_ERROR_LOGGER_NAMES)
+    # Analyzer loggers are named per class (for example
+    # ``mcpscanner.core.analyzers.base.LLMAnalyzer``, GAP-2604).
+    names.update(
+        name
+        for name, logger in list(logging.root.manager.loggerDict.items())
+        if isinstance(logger, logging.Logger)
+        and any(name.startswith(f"{root}.") for root in ("mcpscanner", "mcp"))
+    )
+    loggers = [logging.getLogger(name) for name in sorted(names)]
     states = [
         (logger, list(logger.handlers), logger.propagate, logger.level)
         for logger in loggers

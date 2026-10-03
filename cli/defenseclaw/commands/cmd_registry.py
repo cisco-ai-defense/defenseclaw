@@ -1119,13 +1119,15 @@ def _print_sync_reports(reports: list[SyncReport]) -> None:
     )
     for r in reports:
         promoted = _promoted_label(r.promoted_skills, r.promoted_mcps)
-        status = "ok" if r.ok() else "error"
+        status = "error" if not r.ok() else ("partial" if getattr(r, "partial", ()) else "ok")
         click.echo(
             f"  {r.source_id:<{id_w}} {r.fetched:<8} {r.scanned:<8} {promoted:<20} {status}"
         )
     for r in reports:
         for err in r.errors:
             click.echo(f"  {ux.dim('!')} {r.source_id}: {err}")
+        for note in getattr(r, "partial", ()):
+            click.echo(f"  {ux.dim('!')} {r.source_id}: {note}")
     click.echo()
 
 

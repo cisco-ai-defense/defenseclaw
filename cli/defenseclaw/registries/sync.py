@@ -96,6 +96,8 @@ class SyncReport:
     blocked: int = 0
     warnings: int = 0
     errors: list[str] = field(default_factory=list)
+    # Entries scanned without every analyzer (for example LLM skipped).
+    partial: list[str] = field(default_factory=list)
     started_at: str = ""
     finished_at: str = ""
 
@@ -112,6 +114,7 @@ class SyncReport:
             "blocked": self.blocked,
             "warnings": self.warnings,
             "errors": list(self.errors),
+            "partial": list(self.partial),
             "started_at": self.started_at,
             "finished_at": self.finished_at,
             "ok": self.ok(),
@@ -302,6 +305,8 @@ def _run_scans(
         verdict.last_scanned_at = _now_iso()
         verdict.severity = scan_result.max_severity()
         verdict.error = ""
+        for note in getattr(scan_result, "notes", None) or []:
+            report.partial.append(f"{entry.type}:{entry.name}: {note}")
         if scan_result.is_clean():
             verdict.status = "clean"
         elif verdict.severity in _BLOCKING_SEVERITIES:
