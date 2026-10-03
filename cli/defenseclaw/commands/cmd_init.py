@@ -257,6 +257,8 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
 
     # Refuse a pasted key before anything is written (GAP-2589).
     cisco_api_key_env = _validated_api_key_env_name(cisco_api_key_env, "'--cisco-api-key-env'")
+    # GAP-2593: the LLM key's env var name too.
+    llm_api_key_env = _validated_api_key_env_name(llm_api_key_env, "'--llm-api-key-env'", "DEFENSECLAW_LLM_KEY")
     requested_connectors = []
     if connector:
         requested_connectors.append(_normalize_connector_arg(connector))

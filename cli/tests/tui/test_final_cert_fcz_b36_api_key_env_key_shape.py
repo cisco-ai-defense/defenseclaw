@@ -17,8 +17,14 @@ from click.testing import CliRunner
 from defenseclaw.commands.cmd_setup import _looks_like_secret
 from defenseclaw.tui.services.setup_state import looks_like_secret_value
 
-# Fake key-shaped values that pass the env-name regex [A-Za-z_][A-Za-z0-9_]*.
-_KEY_SHAPED = ("AKIAFAKEB36EXAMPLE0123", "ASIAFAKEB36EXAMPLE0123", "AIzaFAKEB36", "eyJFAKEB36", "ghs_FAKEB36")
+# Fake key-shaped values (GAP-2594: real key shapes, not bare prefixes).
+_KEY_SHAPED = (
+    "AKIAFAKEB36EXAMPLE0123",
+    "ASIAFAKEB36EXAMPLE0123",
+    "AIzaFAKEB36" + "0" * 30,
+    "eyJGQUtFQjM2.e30",
+    "ghs_FAKEB36",
+)
 
 
 @pytest.mark.parametrize("value", [*_KEY_SHAPED, "CISCO_AI_DEFENSE_API_KEY", "ANTHROPIC_API_KEY", "MY_KEY"])
