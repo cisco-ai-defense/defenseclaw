@@ -1620,6 +1620,25 @@ def reject_cmd(
     )
 
 
+def _split_typed_name(
+    cfg: Config, source: RegistrySource, entry_name: str, entry_type: str | None,
+) -> tuple[str, str | None]:
+    """Accept the ``mcp:<name>`` / ``skill:<name>`` form sync and approve print (GAP-2450).
+
+    The prefix is stripped only when it agrees with ``--type`` (if given)
+    and no cached entry literally carries the prefixed name.
+    """
+    prefix, sep, bare = entry_name.partition(":")
+    prefix = prefix.lower()
+    if not sep or not bare or prefix not in ("skill", "mcp"):
+        return entry_name, entry_type
+    if entry_type and entry_type.lower() != prefix:
+        return entry_name, entry_type
+    if any(v.name == entry_name for v in load_index(cfg.data_dir, source.id).verdicts):
+        return entry_name, entry_type
+    return bare, prefix
+
+
 def _resolve_entry_type(
     cfg: Config, source: RegistrySource, entry_name: str, entry_type: str | None,
 ) -> str:
@@ -1707,6 +1726,7 @@ def _do_manual_verdict(
     """
     cfg = _require_cfg(app)
     source = _find_source(cfg, source_id)
+    entry_name, entry_type = _split_typed_name(cfg, source, entry_name, entry_type)
     entry_type = _resolve_entry_type(cfg, source, entry_name, entry_type)
     verdict = manual_set_verdict(
         cfg.data_dir, source.id, entry_type.lower(), entry_name,
