@@ -121,6 +121,9 @@ type InstallWatcher struct {
 	// startupRescanDone is set after the first rescan cycle (rescan goroutine
 	// only).
 	startupRescanDone bool
+	// startupAdmitRoots are the skill and plugin roots that already held
+	// baselines when the startup rescan began (rescan goroutine only).
+	startupAdmitRoots map[InstallType][]string
 	store             *audit.Store
 	logger            *audit.Logger
 	opa               *policy.Engine
