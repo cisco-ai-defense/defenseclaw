@@ -927,6 +927,59 @@ func TestProjectBlockedTurnMetadataNamesTheRule(t *testing.T) {
 	}
 }
 
+// GAP-2524: a structured message is content as a whole, so the "content"
+// profile replaced its role and part types with redaction tokens and
+// "strict" removed them; Galileo rejected every such span because the role
+// is an enum. The projection keeps a role Galileo accepts and text parts,
+// with the content still replaced.
+func TestProjectRedactedMessagesKeepARoleGalileoAccepts(t *testing.T) {
+	t.Parallel()
+	structured := func(role, text string) []any {
+		return []any{map[string]any{"role": role, "parts": []any{map[string]any{"type": "text", "content": text}}}}
+	}
+	for _, profile := range []redaction.ProfileName{redaction.ProfileContent, redaction.ProfileStrict} {
+		body := map[string]any{"kind": "INTERNAL", "attributes": map[string]any{
+			"gen_ai.operation.name": "invoke_agent", "gen_ai.agent.name": "openclaw", "gen_ai.provider.name": "amazon-bedrock",
+			"gen_ai.input.messages":  structured("user", "Reply with exactly one word: quokka"),
+			"gen_ai.output.messages": structured("assistant", "quokka"),
+		}}
+		record := newTraceRecordWith(t, observability.BucketAgentLifecycle, "span.agent.invoke", "invoke_agent openclaw", body,
+			func(input *observability.RecordInput) {
+				// As the generated builders classify a structured field: every
+				// leaf of a message has the field's content class.
+				for pointer := range input.FieldClasses {
+					if strings.HasPrefix(pointer, "/attributes/gen_ai.") && strings.Contains(pointer, ".messages/") {
+						input.FieldClasses[pointer] = observability.FieldClassContent
+					}
+				}
+			})
+		result := Project(redactRecord(t, record, profile), Limits{})
+		if !result.Eligible() {
+			t.Fatalf("%s: reason = %q, missing %v", profile, result.Reason(), result.MissingFields())
+		}
+		attributes := resultAttributes(t, result)
+		for direction, want := range map[string]string{"input": "user", "output": "assistant"} {
+			raw, _ := attributes["gen_ai."+direction+".messages"].(string)
+			var got []map[string]any
+			if err := json.Unmarshal([]byte(raw), &got); err != nil || len(got) != 1 {
+				t.Fatalf("%s: %s messages %q: %v", profile, direction, raw, err)
+			}
+			if got[0]["role"] != want {
+				t.Errorf("%s: %s role = %v, want %q (%s)", profile, direction, got[0]["role"], want, raw)
+			}
+			if strings.Contains(raw, "quokka") {
+				t.Errorf("%s: %s messages kept the content: %s", profile, direction, raw)
+			}
+			parts, _ := got[0]["parts"].([]any)
+			for _, candidate := range parts {
+				if part, _ := candidate.(map[string]any); part == nil || part["type"] != "text" {
+					t.Errorf("%s: %s part = %v, want a text part", profile, direction, candidate)
+				}
+			}
+		}
+	}
+}
+
 func TestProjectRejectsForgedResourceAttributes(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

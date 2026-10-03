@@ -384,7 +384,10 @@ inference spans:
 Prompt, response, document, tool-argument, and tool-result values follow the
 Galileo destination's v8 profile. Fresh v8 configuration exports registered
 content unchanged under `none`; redacting profiles either replace detected
-sensitive substrings or transform/remove whole field classes.
+sensitive substrings or transform/remove whole field classes. Under `content`
+and `strict` the messages keep their structure for Galileo: each message keeps
+a role Galileo accepts (`user` for input, `assistant` or `tool` for output) and
+text parts, while their text is the redaction placeholder or is removed.
 
 The Galileo preset binds the generated `galileo-rich-v2` compatibility profile.
 Eligibility, projected attributes, events, links, instrumentation scope, and

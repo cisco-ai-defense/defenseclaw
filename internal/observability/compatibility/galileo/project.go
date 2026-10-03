@@ -773,7 +773,7 @@ func ensureMessages(attributes map[string]any, direction, role string, fallback 
 		value = []any{map[string]any{"role": role, "content": fallback}}
 		supplied = true
 	}
-	encoded, state, reported := normalizeMessages(value, supplied, limits)
+	encoded, state, reported := normalizeMessages(value, supplied, role, limits)
 	if hasReportedOverride && !reportedOverride {
 		encoded, state, reported = "[]", "not_reported", false
 	}
@@ -862,7 +862,7 @@ func openInferenceMessageValue(encoded string, reported bool) (string, string) {
 	return strings.Join(lines, "\n"), "text/plain"
 }
 
-func normalizeMessages(value any, supplied bool, limits Limits) (string, string, bool) {
+func normalizeMessages(value any, supplied bool, role string, limits Limits) (string, string, bool) {
 	if !supplied {
 		return "[]", "not_reported", false
 	}
@@ -884,6 +884,7 @@ func normalizeMessages(value any, supplied bool, limits Limits) (string, string,
 		messages = messages[:limits.MaxMessageItems]
 		state = "truncated"
 	}
+	restoreMessageShape(messages, role)
 	encoded, err := json.Marshal(messages)
 	if err != nil || len(encoded) > limits.MaxAttributeValueBytes {
 		return "[]", "failed_closed", true
@@ -892,6 +893,52 @@ func normalizeMessages(value any, supplied bool, limits Limits) (string, string,
 		state = redactionState(string(encoded))
 	}
 	return string(encoded), state, true
+}
+
+// galileoMessageRoles are the message roles Galileo's trace ingest accepts.
+var galileoMessageRoles = map[string]struct{}{
+	"agent": {}, "assistant": {}, "developer": {}, "function": {}, "system": {}, "tool": {}, "user": {},
+}
+
+// restoreMessageShape puts back the message structure a redaction profile
+// replaced. A structured message is content as a whole, so the "content"
+// profile turned its role and part types into redaction tokens too (and
+// "strict" removed them), and Galileo rejected every such span: its role is
+// an enum (GAP-2524). A role Galileo does not know becomes the direction's
+// role, a redacted part type becomes text and a removed part is dropped; the
+// content stays exactly as the redaction left it.
+func restoreMessageShape(messages []any, role string) {
+	for _, candidate := range messages {
+		message, ok := candidate.(map[string]any)
+		if !ok {
+			continue
+		}
+		if current, _ := message["role"].(string); !knownGalileoRole(current) {
+			message["role"] = role
+		}
+		parts, ok := message["parts"].([]any)
+		if !ok {
+			continue
+		}
+		kept := make([]any, 0, len(parts))
+		for _, candidatePart := range parts {
+			if candidatePart == nil {
+				continue
+			}
+			if part, isPart := candidatePart.(map[string]any); isPart {
+				if partType, _ := part["type"].(string); strings.HasPrefix(partType, "<redacted") {
+					part["type"] = "text"
+				}
+			}
+			kept = append(kept, candidatePart)
+		}
+		message["parts"] = kept
+	}
+}
+
+func knownGalileoRole(role string) bool {
+	_, ok := galileoMessageRoles[role]
+	return ok
 }
 
 func redactionState(value string) string {
