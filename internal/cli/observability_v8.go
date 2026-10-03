@@ -323,6 +323,12 @@ func requestTraceCanary(
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, traceCanaryMaxResponseBytes))
+		if response.StatusCode == http.StatusBadGateway {
+			// handleTelemetryCanary answers 502 when the gateway accepted the
+			// request but its own export to the destination failed or was not
+			// acknowledged. That is a delivery failure, not a refusal.
+			return traceCanaryFailure(destination, "delivery_failed")
+		}
 		return traceCanaryFailure(destination, "gateway_rejected")
 	}
 	raw, err := io.ReadAll(io.LimitReader(response.Body, traceCanaryMaxResponseBytes+1))

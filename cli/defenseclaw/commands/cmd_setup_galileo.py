@@ -260,6 +260,9 @@ def _recent_galileo_delivery_failure(store, since) -> tuple[str, str]:
 # How long a failed canary waits for the gateway to record this run's
 # delivery alert; it lands a few seconds after the canary returns (GAP-1318).
 _GALILEO_ALERT_WAIT_SECONDS = 6.0
+# Canary failures where the gateway took the request but its export failed.
+# "gateway_rejected" stays here for helpers older than "delivery_failed".
+_GALILEO_DELIVERY_CLASSES = frozenset({"delivery_failed", "gateway_rejected"})
 
 
 def _galileo_alert_floor(data_dir: str):
@@ -294,7 +297,7 @@ def _test_galileo_trace_canary(data_dir: str, timeout: float, *, store=None) -> 
     except TraceCanaryError as exc:
         hint = ""
         delivery, when = "", ""
-        if exc.failure_class == "gateway_rejected" and store is not None:
+        if exc.failure_class in _GALILEO_DELIVERY_CLASSES and store is not None:
             deadline = time.monotonic() + _GALILEO_ALERT_WAIT_SECONDS
             while True:
                 delivery, when = _recent_galileo_delivery_failure(store, since)
@@ -307,7 +310,7 @@ def _test_galileo_trace_canary(data_dir: str, timeout: float, *, store=None) -> 
                 f"{_GALILEO_DELIVERY_HINTS[delivery]}. Fix it with 'defenseclaw setup galileo', "
                 "then run this test again"
             )
-        elif exc.failure_class == "gateway_rejected":
+        elif exc.failure_class in _GALILEO_DELIVERY_CLASSES:
             hint = (
                 ". Galileo did not accept the export: check that the API key and project belong to "
                 "this deployment. For a dedicated or self-hosted deployment, run 'defenseclaw setup "
