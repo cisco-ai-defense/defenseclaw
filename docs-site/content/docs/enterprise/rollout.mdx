@@ -120,7 +120,7 @@ Three cases to plan for:
 
 ## Step 3: Pilot in observe mode
 
-Pick a pilot ring of a few dozen endpoints that covers every OS, every agent
+Pick a pilot ring of about 50 endpoints that covers every OS, every agent
 you chose, and some IT staff. Deploy with `guardrail.mode: observe`. In
 observe mode policy verdicts never block: DefenseClaw records every decision,
 including what it would have blocked. The deployment's own checks still apply:
@@ -199,9 +199,9 @@ possible plan for 5,000 endpoints:
 
 | Ring | Endpoints | Mode | Move on when |
 | --- | --- | --- | --- |
-| Pilot | About 50, every OS and agent | `observe` | Every install exits `0`, `verify` passes, and the decisions are reviewed |
-| Early | About 500 | `observe`, then `action` | No unexpected blocks for a week in `action` mode |
-| Broad | About 2,000 | `action` | Detection and health stay green |
+| Pilot | About 50 (1%), every OS and agent | `observe` | Every install exits `0`, `verify` passes, and the decisions are reviewed |
+| Early | About 500 (10%) | `observe`, then `action` | No unexpected blocks for a week in `action` mode |
+| Broad | About 2,000 (40%) | `action` | Detection and health stay green |
 | Everyone | The rest | `action` | |
 
 Watch these on every ring:

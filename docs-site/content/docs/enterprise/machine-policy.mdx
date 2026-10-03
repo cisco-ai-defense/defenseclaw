@@ -79,14 +79,44 @@ The per-user registrations differ by OS:
 
 ## Machine policy files
 
-| Connector | Linux | macOS | Windows |
-| --- | --- | --- | --- |
-| Codex | `/etc/codex/requirements.toml` | `/etc/codex/requirements.toml` | `%ProgramData%\OpenAI\Codex\requirements.toml` |
-| Claude Code | `/etc/claude-code/managed-settings.d/90-defenseclaw.json` | `/Library/Application Support/ClaudeCode/managed-settings.d/90-defenseclaw.json` | `C:\Program Files\ClaudeCode\managed-settings.d\90-defenseclaw.json` |
-| Cursor | `/etc/cursor/hooks.json` | `/Library/Application Support/Cursor/hooks.json` | `%ProgramData%\Cursor\hooks.json` |
-| Copilot | `/etc/github-copilot/policy.d/90-defenseclaw.json` | `/etc/github-copilot/policy.d/90-defenseclaw.json` | `%ProgramData%\GitHub\Copilot\policy.d\90-defenseclaw.json` |
-| OpenCode | `/etc/opencode/opencode.json` | `/Library/Application Support/opencode/opencode.json` | `%ProgramData%\opencode\opencode.json` |
-| Devin Desktop Cascade (`devincascade`) | `/etc/devin/hooks.json` | `/Library/Application Support/Devin/hooks.json` | `%ProgramData%\Devin\hooks.json` |
+<Tabs items={['Linux', 'macOS', 'Windows']}>
+  <Tab value="Linux">
+
+| Connector | File |
+| --- | --- |
+| Codex | `/etc/codex/requirements.toml` |
+| Claude Code | `/etc/claude-code/managed-settings.d/90-defenseclaw.json` |
+| Cursor | `/etc/cursor/hooks.json` |
+| Copilot | `/etc/github-copilot/policy.d/90-defenseclaw.json` |
+| OpenCode | `/etc/opencode/opencode.json` |
+| Devin Desktop Cascade (`devincascade`) | `/etc/devin/hooks.json` |
+
+  </Tab>
+  <Tab value="macOS">
+
+| Connector | File |
+| --- | --- |
+| Codex | `/etc/codex/requirements.toml` |
+| Claude Code | `/Library/Application Support/ClaudeCode/managed-settings.d/90-defenseclaw.json` |
+| Cursor | `/Library/Application Support/Cursor/hooks.json` |
+| Copilot | `/etc/github-copilot/policy.d/90-defenseclaw.json` |
+| OpenCode | `/Library/Application Support/opencode/opencode.json` |
+| Devin Desktop Cascade (`devincascade`) | `/Library/Application Support/Devin/hooks.json` |
+
+  </Tab>
+  <Tab value="Windows">
+
+| Connector | File |
+| --- | --- |
+| Codex | `%ProgramData%\OpenAI\Codex\requirements.toml` |
+| Claude Code | `C:\Program Files\ClaudeCode\managed-settings.d\90-defenseclaw.json` |
+| Cursor | `%ProgramData%\Cursor\hooks.json` |
+| Copilot | `%ProgramData%\GitHub\Copilot\policy.d\90-defenseclaw.json` |
+| OpenCode | `%ProgramData%\opencode\opencode.json` |
+| Devin Desktop Cascade (`devincascade`) | `%ProgramData%\Devin\hooks.json` |
+
+  </Tab>
+</Tabs>
 
 For OpenCode, DefenseClaw uses an existing `opencode.jsonc` instead of
 `opencode.json`, as long as it holds no comments. The Cascade refusal goes
@@ -339,18 +369,18 @@ writes the Claude Code hook drop-in, `90-defenseclaw.json`, whatever
 
 ## Claude Code version floor
 
-Claude Code refuses to start when its version is below the managed
-`requiredMinimumVersion`, but only Claude Code 2.1.163 and later read that
-setting. Older builds ignore it and start. DefenseClaw sets it to the lowest
-Claude Code version it has a verified hook contract for (2.1.154). Every
-build below 2.1.154 is older than 2.1.163, so this floor does not stop any
-build: 2.1.153, for example, starts with the floor in place. A value of
-2.1.163 or later, such as one you set yourself, stops only the builds from
-2.1.163 that are below it. To keep older builds off a host, use application
-control (see
-[Vendor limits](#vendor-limits); tracked in
-[#920](https://github.com/cisco-ai-defense/defenseclaw/issues/920)). The
-value is in its own drop-in, `00-defenseclaw-version-floor.json`, next to
+**Today the floor stops no Claude Code build.** DefenseClaw sets Claude
+Code's managed `requiredMinimumVersion` to 2.1.154, the lowest version it
+has a verified hook contract for, but Claude Code reads that setting only
+from 2.1.163. Every build below 2.1.154 is older than 2.1.163, so it ignores
+the floor and starts. To keep older builds off a host, use application
+control (see [Vendor limits](#vendor-limits); tracked in
+[#920](https://github.com/cisco-ai-defense/defenseclaw/issues/920)).
+
+The floor still matters for later values: Claude Code 2.1.163 and later
+refuse to start below the managed value, so a floor of 2.1.163 or later,
+such as one you set yourself, stops the builds from 2.1.163 that are below
+it. DefenseClaw's value is in its own drop-in, `00-defenseclaw-version-floor.json`, next to
 `90-defenseclaw.json`; the hook drop-in does not change.
 
 ```yaml title="config.yaml (excerpt)"
@@ -477,25 +507,24 @@ the Claude Code drop-in while that value is set, whatever this setting says.
 
 These commands read the managed config and machine policy. They never write
 machine policy; the lifecycle and the guardian do. Run them as root (Linux
-and macOS) or from an elevated PowerShell 7 session (Windows), and name the
-managed config explicitly with `DEFENSECLAW_CONFIG`.
+and macOS) or from an elevated PowerShell 7 session (Windows). They find the
+managed config themselves and need no environment variables.
 
 ```bash title="Linux"
-sudo DEFENSECLAW_CONFIG=/etc/defenseclaw/config.yaml /opt/defenseclaw/bin/defenseclaw-gateway enterprise policy show
-sudo DEFENSECLAW_CONFIG=/etc/defenseclaw/config.yaml /opt/defenseclaw/bin/defenseclaw-gateway enterprise policy show --user alice --project /home/alice/repo
-sudo DEFENSECLAW_CONFIG=/etc/defenseclaw/config.yaml /opt/defenseclaw/bin/defenseclaw-gateway enterprise policy export --connector codex --format toml
-sudo DEFENSECLAW_CONFIG=/etc/defenseclaw/config.yaml /opt/defenseclaw/bin/defenseclaw-gateway enterprise policy verify --json
-sudo DEFENSECLAW_CONFIG=/etc/defenseclaw/config.yaml /opt/defenseclaw/bin/defenseclaw-gateway enterprise policy verify --live --user alice --connector codex --agent-binary /usr/local/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise policy show
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise policy show --user alice --project /home/alice/repo
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise policy export --connector codex --format toml
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise policy verify --json
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise policy verify --live --user alice --connector codex --agent-binary /usr/local/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex
 ```
 
 ```bash title="macOS"
-sudo DEFENSECLAW_CONFIG=/opt/cisco/defenseclaw/etc/config.yaml /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise policy show
-sudo DEFENSECLAW_CONFIG=/opt/cisco/defenseclaw/etc/config.yaml /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise policy export --connector codex --format plist
-sudo DEFENSECLAW_CONFIG=/opt/cisco/defenseclaw/etc/config.yaml /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise policy export --connector claudecode --format plist
+sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise policy show
+sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise policy export --connector codex --format plist
+sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise policy export --connector claudecode --format plist
 ```
 
 ```powershell title="Windows (elevated PowerShell 7)"
-$env:DEFENSECLAW_CONFIG = 'C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml'
 & 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise policy show
 & 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise policy export --connector copilot
 ```
@@ -518,6 +547,7 @@ $env:DEFENSECLAW_CONFIG = 'C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml'
 | `copilot` | `json`: the `policy.d` drop-in |
 | `opencode` | `json`: a managed OpenCode config that loads `<install root>/share/opencode/defenseclaw.js`. Deploy it only where that plugin is installed. |
 | `devincascade` | `json`: the Cascade `hooks.json` that turns Cascade off |
+| `wsl` | Windows. `reg` (default), `json`, `intune`: the Claude Desktop `disableWslSessions` gate and, with `platform: disable`, `AllowWSL=0`. See [Agent sessions in WSL](/docs/enterprise/windows#agent-sessions-in-wsl) |
 
 - **`verify`** checks coverage and exits 1 when any machine-policy
   connector is not covered, or when `--user` finds a foreign hook that

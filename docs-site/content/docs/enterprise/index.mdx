@@ -52,13 +52,13 @@ A managed deployment runs in one of two
 [profiles](/docs/enterprise/concepts#profile). Pick the one that matches how
 you deploy software.
 
-| | Secure Client | Standalone |
+| | Standalone | Secure Client |
 | --- | --- | --- |
-| Choose it when | You run Cisco Secure Client and want DefenseClaw as one of its modules | You deploy with Intune or any other MDM, a `.deb`, `.rpm` or `.pkg` package, configuration management, or an administrator shell |
-| Platforms | Windows, macOS | Windows, Linux, macOS |
-| Who decides on each tool call | Cisco AI Defense only. The local detectors are off | The local policy engine (rule packs, policy, CodeGuard). Cisco AI Defense is added when you turn it on and store an API key |
-| If Cisco AI Defense is unreachable | The Secure Client posture applies | The local verdict stands |
-| Documented in | [Secure Client managed deployment](/docs/enterprise/secure-client) | This section |
+| Choose it when | You deploy with Intune or any other MDM, a `.deb`, `.rpm` or `.pkg` package, configuration management, or an administrator shell | You run Cisco Secure Client and want DefenseClaw as one of its modules |
+| Platforms | Windows, Linux, macOS | Windows, macOS |
+| Who decides on each tool call | The local policy engine (rule packs, policy, CodeGuard). Cisco AI Defense is added when you turn it on and store an API key | Cisco AI Defense only. The local detectors are off |
+| If Cisco AI Defense is unreachable | The local verdict stands | The Secure Client posture applies |
+| Documented in | This section | [Secure Client managed deployment](/docs/enterprise/secure-client) |
 
 Rules that apply to both:
 
@@ -138,19 +138,45 @@ The services and their identities on each OS:
 The guardian reconciles every minute and the enumerator runs every five
 minutes on every OS. The gateway listens only on `127.0.0.1:18970`. On Linux
 and macOS, hooks and DefenseClaw's in-agent plugins reach the gateway only
-through its local hook socket (`/run/defenseclaw-hook/hook.sock`,
-`/opt/cisco/defenseclaw/run/hook.sock`), which tells the gateway each
+through its local hook socket (`/run/defenseclaw-hook/hook.sock` on Linux,
+`/opt/cisco/defenseclaw/run/hook.sock` on macOS), which tells the gateway each
 caller's uid; there is no TCP fallback. On Windows they use the loopback
 address with credentials bound to the user's SID.
 
 The same parts mapped to the [trust zones](/docs/enterprise/concepts#trust-zones):
 
-| Zone | Windows | Linux | macOS |
-| --- | --- | --- | --- |
-| Z1 Privileged services | Guardian, enumerator, sensor helper as LocalSystem | Guardian, enumerator, sensor helper as root | Guardian, enumerator, sensor helper as root |
-| Z2 Restricted gateway | `NT SERVICE\DefenseClawGateway` | `defenseclaw` | `_defenseclaw` |
-| Z3 Administrator-owned state | `C:\Program Files\Cisco\DefenseClaw`, `C:\ProgramData\Cisco\DefenseClaw`, `C:\ProgramData\Cisco\DefenseClaw-HookRuntime`. Vendor policy: `%ProgramData%\OpenAI\Codex`, `%ProgramFiles%\ClaudeCode\managed-settings.d`, `%ProgramData%\Cursor`, `%ProgramData%\GitHub\Copilot\policy.d`, `%ProgramData%\opencode` | `/opt/defenseclaw`, `/etc/defenseclaw`, `/var/lib/defenseclaw-hook-guardian`, `/var/lib/defenseclaw-enterprise`. Vendor policy: `/etc/codex`, `/etc/claude-code`, `/etc/cursor`, `/etc/github-copilot`, `/etc/opencode` | `/opt/cisco/defenseclaw`, `/Library/Logs/Cisco/DefenseClaw`. Vendor policy: `/etc/codex`, `/Library/Application Support/ClaudeCode`, `/Library/Application Support/Cursor`, `/etc/github-copilot`, `/Library/Application Support/opencode` |
-| Z4 User session | The agent and `defenseclaw-hook.exe` | The agent and `/opt/defenseclaw/bin/defenseclaw-hook` | The agent and `/opt/cisco/defenseclaw/bin/defenseclaw-hook` |
+<Tabs items={['Windows', 'Linux', 'macOS']}>
+  <Tab value="Windows">
+
+| Zone | Windows |
+| --- | --- |
+| Z1 Privileged services | Guardian, enumerator, sensor helper as LocalSystem |
+| Z2 Restricted gateway | `NT SERVICE\DefenseClawGateway` |
+| Z3 Administrator-owned state | `C:\Program Files\Cisco\DefenseClaw`, `C:\ProgramData\Cisco\DefenseClaw`, `C:\ProgramData\Cisco\DefenseClaw-HookRuntime`. Vendor policy: `%ProgramData%\OpenAI\Codex`, `%ProgramFiles%\ClaudeCode\managed-settings.d`, `%ProgramData%\Cursor`, `%ProgramData%\GitHub\Copilot\policy.d`, `%ProgramData%\opencode` |
+| Z4 User session | The agent and `defenseclaw-hook.exe` |
+
+  </Tab>
+  <Tab value="Linux">
+
+| Zone | Linux |
+| --- | --- |
+| Z1 Privileged services | Guardian, enumerator, sensor helper as root |
+| Z2 Restricted gateway | `defenseclaw` |
+| Z3 Administrator-owned state | `/opt/defenseclaw`, `/etc/defenseclaw`, `/var/lib/defenseclaw-hook-guardian`, `/var/lib/defenseclaw-enterprise`. Vendor policy: `/etc/codex`, `/etc/claude-code`, `/etc/cursor`, `/etc/github-copilot`, `/etc/opencode` |
+| Z4 User session | The agent and `/opt/defenseclaw/bin/defenseclaw-hook` |
+
+  </Tab>
+  <Tab value="macOS">
+
+| Zone | macOS |
+| --- | --- |
+| Z1 Privileged services | Guardian, enumerator, sensor helper as root |
+| Z2 Restricted gateway | `_defenseclaw` |
+| Z3 Administrator-owned state | `/opt/cisco/defenseclaw`, `/Library/Logs/Cisco/DefenseClaw`. Vendor policy: `/etc/codex`, `/Library/Application Support/ClaudeCode`, `/Library/Application Support/Cursor`, `/etc/github-copilot`, `/Library/Application Support/opencode` |
+| Z4 User session | The agent and `/opt/cisco/defenseclaw/bin/defenseclaw-hook` |
+
+  </Tab>
+</Tabs>
 
 Inside the Z3 folders, the gateway account writes only its own data, log and
 socket folders (for example `runtime`). Everything else there is written by
@@ -163,12 +189,17 @@ The full layout of each OS is on its install page:
 
 ## Who can change what
 
-| | Config | Policies | Secrets | Binaries and services | Per-user hook config | Vendor machine policy | Audit logs |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| Administrator or MDM | Writes | Writes | Writes | Installs, upgrades, removes | Not needed: the guardian manages DefenseClaw's entries | Writes. DefenseClaw changes only its own entries | Reads |
-| DefenseClaw services | Gateway reads | Gateway reads | Gateway reads the one it needs | Run them | Guardian writes DefenseClaw's entries, as the user | Linux and macOS: the lifecycle writes DefenseClaw's own entries. Windows: the lifecycle writes Codex's; the guardian writes Claude Code's, Cursor's, Copilot's and OpenCode's. See [Who writes machine policy](/docs/enterprise/machine-policy#who-writes-machine-policy) | Gateway writes |
-| Standard user | No write | No write | No access | Runs the hook; cannot stop, change or replace a service | Owns the files; the guardian repairs its entries | Agent reads it; no write | No access |
-| AI agent a prompt can steer | Same as the user it runs as | Same as the user | Same as the user | Same as the user | Same as the user; the [foreign-hook guard](/docs/enterprise/foreign-hook-guard) handles hooks it adds | Same as the user | Same as the user |
+| What | Administrator or MDM | DefenseClaw services | Standard user, and any agent they run |
+| --- | --- | --- | --- |
+| Config and policies | Writes | The gateway reads them | No write |
+| Secrets | Writes | The gateway reads the one it needs | No access |
+| Binaries and services | Installs, upgrades, removes | Run them | Runs the hook; cannot stop, change or replace a service |
+| Per-user hook config | Not needed: the guardian manages DefenseClaw's entries | The guardian writes DefenseClaw's entries, as the user | Owns the files; the guardian repairs its entries, and the [foreign-hook guard](/docs/enterprise/foreign-hook-guard) handles hooks the user adds |
+| Vendor machine policy | Writes. DefenseClaw changes only its own entries | The lifecycle or the guardian writes DefenseClaw's own entries; see [Who writes machine policy](/docs/enterprise/machine-policy#who-writes-machine-policy) | The agent reads it; no write |
+| Audit logs | Reads | The gateway writes them | No access |
+
+An AI agent that a prompt can steer has exactly the rights of the user it
+runs as.
 
 DefenseClaw does not defend a computer from its own administrators. An agent
 that runs with unrestricted `sudo` or administrator rights is an
@@ -229,12 +260,10 @@ are on each [connector page](/docs/connectors#platform-support).
 ## A minimal config
 
 The administrator config is one YAML file. The example below protects Codex
-and Claude Code in observe mode, so policy verdicts do not block yet. The
-Linux and macOS tabs install as written with `ensure --config`. They leave
-`guardrail.rule_pack_dir` out, so the gateway uses a rule pack you put in
-`<policy_dir>/guardrail/default`, and otherwise the default pack that ships
-with DefenseClaw. If you create that folder after installing, run `ensure`:
-it notices the new pack and restarts the gateway with it.
+and Claude Code in observe mode, so policy verdicts do not block yet, and
+installs as written with `ensure --config`. `rule_pack_dir: ""` selects the
+rule packs built into the gateway; to use your own, see
+[Custom rule packs](/docs/enterprise/configuration#custom-rule-packs).
 
 <Tabs items={['Linux', 'macOS', 'Windows']}>
   <Tab value="Linux">
@@ -251,6 +280,7 @@ gateway:
   api_port: 18970
 guardrail:
   enabled: true
+  rule_pack_dir: ""                     # use the built-in rule packs
   mode: observe                         # observe | action
   connectors:
     codex: {}
@@ -272,6 +302,7 @@ gateway:
   api_port: 18970
 guardrail:
   enabled: true
+  rule_pack_dir: ""                        # use the built-in rule packs
   mode: observe                            # observe | action
   connectors:
     codex: {}
@@ -348,7 +379,7 @@ install, as [Cisco AI Defense key](/docs/enterprise/ai-defense-key) shows.
   <Card title="Windows" href="/docs/enterprise/windows" description="Install the four standalone services with the Setup program or PowerShell 7." />
   <Card title="Linux" href="/docs/enterprise/linux" description="Install the systemd units with the deb or rpm package, or from a payload directory." />
   <Card title="macOS" href="/docs/enterprise/macos" description="Install the LaunchDaemons and the hidden service user from the pkg." />
-  <Card title="Install with an MDM" href="/docs/enterprise/mdm" description="The MDM contract and recipes for Intune, Jamf, Kandji, Workspace ONE, Configuration Manager, and Linux configuration management." />
+  <Card title="Install with an MDM" href="/docs/enterprise/mdm" description="The MDM contract and recipes for Intune, Jamf, Iru (formerly Kandji), Workspace ONE, Configuration Manager, and Linux configuration management." />
   <Card title="Configure" href="/docs/enterprise/configuration" description="Where the config lives, how to choose agents, and every enterprise setting." />
   <Card title="Operate" href="/docs/enterprise/operations" description="Check status and health, read logs and events, and verify machine policy." />
 </Cards>

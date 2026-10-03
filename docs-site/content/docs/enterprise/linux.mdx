@@ -219,9 +219,9 @@ sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux discovery --user 
 Skills and MCP servers are inventoried, not scanned: a managed deployment
 does not run the skill or MCP scanners. The inventory names each skill and
 MCP server per user, and its `ai_component` and per-entry skill and MCP
-records go to your observability destinations. The gateway's `/skills`,
-`/mcps` and `/tools/catalog` API routes read an OpenClaw gateway, which a
-managed deployment does not run, so they answer `501`.
+records go to your observability destinations. The gateway's skill, MCP and
+tool-catalog API routes are not available on a managed host (they answer
+`501`); use the `discovery` view above instead.
 
 Put it where the lifecycle reads it. A config staged before the install is
 used as is; it does not count as an unmanaged layout:

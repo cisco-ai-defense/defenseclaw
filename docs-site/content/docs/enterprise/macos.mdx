@@ -20,7 +20,7 @@ used on this page, see [Concepts](/docs/enterprise/concepts).
 
 <Callout title="Deploying with an MDM?">
 This page installs on one Mac from an administrator shell. To deploy with
-Jamf Pro, Kandji, Intune, Workspace ONE or another MDM, start with
+Jamf Pro, Iru (formerly Kandji), Intune, Workspace ONE or another MDM, start with
 [Install with an MDM](/docs/enterprise/mdm). It uses the same pkg and the
 same config.
 </Callout>
@@ -205,9 +205,9 @@ sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos discovery -
 Skills and MCP servers are inventoried, not scanned: a managed deployment
 does not run the skill or MCP scanners. The inventory names each skill and
 MCP server per user, and its `ai_component` and per-entry skill and MCP
-records go to your observability destinations. The gateway's `/skills`,
-`/mcps` and `/tools/catalog` API routes read an OpenClaw gateway, which a
-managed deployment does not run, so they answer `501`.
+records go to your observability destinations. The gateway's skill, MCP and
+tool-catalog API routes are not available on a managed host (they answer
+`501`); use the `discovery` view above instead.
 
 Put it where the lifecycle reads it. A config staged before the install is
 used as is; it does not count as an unmanaged layout:
@@ -439,8 +439,12 @@ it by its Developer ID code requirement, which needs a signed build.
 
 ### AI Discovery Plane C (Endpoint Security)
 
-Runtime Plane C (`ai_discovery.runtime.enable_host_plane: true` with `c` in
-`planes`) reads process and file events through Apple's `eslogger`. On a
+AI Discovery's runtime detection has three *planes*: A watches for
+inference compute, B attributes network traffic to processes, and C records
+agent actions from kernel events (see
+[Runtime planes](/docs/ai-discovery#runtime-planes-what-actually-ran)).
+Plane C (`ai_discovery.runtime.enable_host_plane: true` with `c` in
+`ai_discovery.runtime.planes`) reads process and file events through Apple's `eslogger`. On a
 managed Mac the root sensor helper,
 `/opt/cisco/defenseclaw/bin/defenseclaw-sensor-helper`
 (`com.cisco.defenseclaw.sensor-helper`), runs `eslogger`. launchd starts the
@@ -480,29 +484,12 @@ Full Disk Access. Then restart the helper with
 ## Machine policy
 
 For Codex, Claude Code, Cursor, GitHub Copilot and OpenCode, DefenseClaw adds
-its hooks to the vendor's machine policy files:
-
-| Connector | File |
-| --- | --- |
-| Codex | `/etc/codex/requirements.toml` |
-| Claude Code | `/Library/Application Support/ClaudeCode/managed-settings.d/` |
-| Cursor | `/Library/Application Support/Cursor/hooks.json` |
-| GitHub Copilot | `/etc/github-copilot/policy.d/` |
-| OpenCode | `/Library/Application Support/opencode/opencode.json`, which loads the managed plugin |
-
-An MDM configuration profile outranks these files: a Codex profile for
-`com.openai.codex` with `requirements_toml_base64`, or a Claude Code profile
-for `com.anthropic.claudecode`. `enterprise policy show` reports such a
-profile as a higher-precedence source. Export DefenseClaw's entries in plist
-form and add them to your profile:
-
-```bash
-sudo DEFENSECLAW_CONFIG=/opt/cisco/defenseclaw/etc/config.yaml \
-  /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise policy show
-sudo DEFENSECLAW_CONFIG=/opt/cisco/defenseclaw/etc/config.yaml \
-  /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise policy export --connector codex --format plist
-```
-
-Use `--connector claudecode --format plist` for Claude Code. The policy
-commands only read. See [Machine policy](/docs/enterprise/machine-policy)
-for ownership, conflicts and the foreign-hook guard.
+its hooks to the vendor's machine policy files under `/etc` and
+`/Library/Application Support`. The files are listed in
+[Machine policy files](/docs/enterprise/machine-policy#machine-policy-files).
+An MDM configuration profile for `com.openai.codex` or
+`com.anthropic.claudecode` outranks those files; export DefenseClaw's
+entries in plist form and add them to your profile, as
+[Higher-precedence sources](/docs/enterprise/machine-policy#higher-precedence-sources)
+and [Inspect, export and verify](/docs/enterprise/machine-policy#inspect-export-and-verify)
+show.

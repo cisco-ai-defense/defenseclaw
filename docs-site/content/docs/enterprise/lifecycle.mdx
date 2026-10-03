@@ -95,14 +95,19 @@ afterwards.
 
 ```bash title="Payload archive"
 VERSION=1.0.0   # the release you deploy
-sudo mkdir -p "/var/tmp/defenseclaw-${VERSION}"
-sudo tar -xzf "defenseclaw-enterprise-${VERSION}-linux-amd64.tar.gz" -C "/var/tmp/defenseclaw-${VERSION}" --no-same-owner
-cd "/var/tmp/defenseclaw-${VERSION}"
-sudo ./defenseclaw-gateway enterprise linux upgrade --payload "$PWD" --json
+ARCH=amd64      # or arm64
+PAYLOAD="/root/defenseclaw-enterprise-${VERSION}"
+sudo install -d -o root -g root -m 0700 "$PAYLOAD"
+sudo tar -xzf "defenseclaw-enterprise-${VERSION}-linux-${ARCH}.tar.gz" \
+  -C "$PAYLOAD" --no-same-owner --no-same-permissions
+sudo chmod -R go-w "$PAYLOAD"
+sudo "$PAYLOAD/defenseclaw-gateway" enterprise linux upgrade --payload "$PAYLOAD" --json
 ```
 
-Run the new release's `defenseclaw-gateway` from the extracted directory. The
-payload must be owned by root and must not be writable by group or others.
+Run the new release's `defenseclaw-gateway` from the extracted folder. The
+payload must be owned by root and must not be writable by group or others,
+so extract it into a root-only folder, as above, never into a shared one
+such as `/var/tmp`.
 
 ### macOS
 
@@ -145,7 +150,7 @@ Every lifecycle refuses an older release unless you ask for the rollback
 | Windows | `/ensure` refuses to install an older version (`downgrade_refused`, exit `1603`). Run the older release's Setup with `/upgrade JSON=1`: an explicit `upgrade` does not compare versions. Uninstalling and installing the older release also works |
 | Debian and Ubuntu | `sudo apt install --allow-downgrades ./defenseclaw-enterprise-<older>-linux-amd64.deb`, then `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux ensure --from-package --allow-downgrade --json` |
 | RHEL | `rpm -U` refuses an older package. Use `sudo dnf downgrade ./defenseclaw-enterprise-<older>-linux-amd64.rpm`, then run the same `ensure --from-package --allow-downgrade` |
-| Linux payload | From the older release's extracted payload, run `sudo ./defenseclaw-gateway enterprise linux upgrade --payload "$PWD" --allow-downgrade --json` |
+| Linux payload | Extract the older release as in [Upgrade](#linux), then run `sudo "$PAYLOAD/defenseclaw-gateway" enterprise linux upgrade --payload "$PAYLOAD" --allow-downgrade --json` |
 | macOS | Create the root-owned rollback marker, then install the older package: `sudo touch /opt/cisco/defenseclaw/lifecycle/allow-downgrade`, then `sudo installer -pkg ./defenseclaw-enterprise-<older>-darwin-arm64.pkg -target /` |
 
 - **Linux packages.** The package's install script runs
@@ -389,7 +394,7 @@ to keep the machine state for a reinstall instead.
 - **Windows per-user registrations.** Acting as a user needs that user's
   session token, which only LocalSystem can obtain. An MDM uninstall runs as
   LocalSystem and removes DefenseClaw's hooks and plugins (Amp, Antigravity,
-  Devin, Hermes, OpenCode, and a DefenseClaw Copilot user hook file) from
+  Devin, Hermes, Kiro, OpenCode, and a DefenseClaw Copilot user hook file) from
   every signed-in user's agent config. An uninstall from an elevated
   administrator prompt or from Add/Remove Programs removes none, and users
   who are signed out keep theirs. The result lists them in the

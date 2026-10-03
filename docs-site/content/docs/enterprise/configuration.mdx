@@ -164,45 +164,74 @@ Use the map instead.
 
 ## Settings reference
 
-This table lists every key under `enterprise`. An unset key takes the
-default shown. "Linux and macOS" means the key has no effect on Windows.
+The keys below sit under `enterprise`. An unset key takes the default
+shown. A note in bold at the start of a description names the OS the key
+acts on; a key without one applies on every OS.
 
-| Key | Values | Default | Applies on | What it does |
-| --- | --- | --- | --- | --- |
-| `profile` | `standalone`, `secure_client` | Linux: `standalone`. Windows and macOS: `secure_client` | All | Selects the profile. Must match the profile the services were installed with. Set `standalone`. |
-| `inspection.ai_defense.enabled` | `true`, `false` | `false` | All | Adds Cisco AI Defense to the local engine. See [AI Defense key](/docs/enterprise/ai-defense-key). |
-| `inspection.ai_defense.credential` | A credential name: lowercase letters, digits and dashes, starting with a letter or digit, up to 63 characters | None | All | Names the stored key. Required when `enabled` is `true`. |
-| `enrollment.mode` | `auto`, `manifest` | `auto` | All | `manifest` stops the enumerator; you write the target manifest yourself. On Windows the first install then needs `--manifest` (Setup: `MANIFEST=`). |
-| `enrollment.include_users` | List of user names | Empty | All, with different meanings | Linux and macOS: also enroll these accounts. Windows: accepted, but every profile is already a candidate, so it changes nothing. |
-| `enrollment.exclude_users` | List of user names (Linux and macOS: or numeric uids) | Empty | All | Never enroll these accounts. Wins over every include. |
-| `enrollment.include_groups` | Linux and macOS: group names or numeric IDs. Windows: group names or SIDs | Empty | All | When not empty, enroll only members of these groups. Windows covers local, Active Directory and Microsoft Entra ID groups; see [Enrollment](/docs/enterprise/enrollment#group-filters-on-windows). |
-| `enrollment.exclude_groups` | As `include_groups` | Empty | All | Never enroll members. Wins over `include_groups`. |
-| `enrollment.exempt_users` | List of user names (Linux and macOS: or numeric uids) | Empty | All, with different meanings | Linux and macOS: not enrolled, but their calls are allowed, inspected and logged. Windows: the machine-policy agents keep their rows, so the user is inspected; per-user agents get no new rows. |
-| `enrollment.unenrolled_users` | `inspect`, `deny` | `inspect` | Linux and macOS | How the gateway treats a user without an enrollment who calls a machine-policy agent's hook. |
-| `enrollment.unverified_versions` | `report`, `refuse` | `report` | Linux, macOS, Windows | How a desktop app or editor extension whose hook delivery DefenseClaw has not live-verified is treated; see [Desktop apps and editor extensions](/docs/enterprise/enrollment#desktop-apps-and-editor-extensions). |
-| `enrollment.unverified_versions_by_connector` | map of connector to `report` or `refuse` | empty | Linux, macOS, Windows | Per-connector override of `unverified_versions`. |
-| `enrollment.root` | `inspect`, `deny`, `exempt` | `inspect` | Linux and macOS | How the gateway treats calls from uid 0. `exempt` is accepted and currently behaves like `inspect`. |
-| `enrollment.uid_min` | Integer, 0 or more | `0` | Linux and macOS | Lowest uid the enumerator considers. `0` means Linux reads `UID_MIN` from `/etc/login.defs` (1000 if absent) and macOS uses 501. |
-| `enrollment.uid_max` | Integer, 0 or more, not below `uid_min` | `0` | Linux and macOS | Highest uid enrolled, for local and directory accounts. `0` means login.defs `UID_MAX` bounds only local accounts in `/etc/passwd`, so directory accounts above it are still enrolled. |
-| `enrollment.home_roots` | List of absolute directories | Empty | Linux and macOS | Extra parents of home directories, beyond `/home` and `/var/home` (Linux) or `/Users` (macOS). |
-| `enrollment.agent_prefixes` | List of absolute directories outside homes and temporary directories | Empty | Linux and macOS | Extra administrator install prefixes (for example an npm `--prefix`) where the enumerator and guardian look for agent CLIs. |
-| `machine_policy.default.ownership` | `merge`, `verify_only`, `off` | `merge` | Linux and macOS; Copilot, OpenCode and the Claude Code version floor on Windows | Whether DefenseClaw writes its entries, only checks them, or leaves the agent's machine policy alone. |
-| `machine_policy.default.managed_hooks_only` | `enforce`, `preserve` | `enforce` | Codex and Claude Code; see note for Windows | Sets the vendor lock that stops user and project hooks. |
-| `machine_policy.default.foreign_hooks` | `remove`, `report`, `allow` | `remove` | All | What the [foreign-hook guard](/docs/enterprise/foreign-hook-guard) does with unapproved hooks. |
-| `machine_policy.default.higher_precedence_sources` | `fail`, `warn` | `fail` | macOS (Codex, Claude Code); Windows (Claude Code, in `policy show` and `verify` only) | Whether a policy source that outranks DefenseClaw's file counts as a coverage failure or only a warning. |
-| `machine_policy.default.allowed_hooks` | List of SHA-256 digests, 64 hex characters, with or without `sha256:` | Empty | All | Hooks the foreign-hook guard approves. |
-| `machine_policy.connectors.<name>.*` | The same five keys | Inherit | As above | Overrides for one connector. Each key falls back to `default`, then to the built-in value. `allowed_hooks` lists are merged. |
-| `machine_policy.connectors.claudecode.version_floor` | `enforce`, `report`, `off` | `enforce` | All | Whether DefenseClaw sets Claude Code's `requiredMinimumVersion` to its lowest verified hook contract while no other source sets it. Only `connectors.claudecode` takes this key; it does not inherit from `default`. See [Claude Code version floor](/docs/enterprise/machine-policy#claude-code-version-floor). |
-| `machine_policy.windows_wsl.agent_sessions` | `block`, `allow` | `block` | Windows | `block` keeps Claude Desktop WSL sessions off through `HKLM\SOFTWARE\Policies\Claude\disableWslSessions` and makes `policy verify` fail on each WSL gap that is known to let a session escape (an administrator value that turns WSL sessions on, `wslInheritsWindowsSettings`, the Codex extension's WSL mode, or a Claude Desktop policy key a standard account can change). An unset gate on an empty key is reported as pending, not a failure. `allow` accepts agent sessions in WSL running without DefenseClaw. See [Agent sessions in WSL](/docs/enterprise/windows#agent-sessions-in-wsl). |
-| `machine_policy.windows_wsl.platform` | `leave`, `disable` | `leave` | Windows | `disable` sets `HKLM\SOFTWARE\Policies\WSL\AllowWSL=0`, which turns WSL off for every account, including other WSL tooling such as Docker Desktop's WSL backend. |
-| `machine_policy.windows_wsl.editor_settings` | `repair`, `report`, `allow` | `repair` | Windows | What the guardian does with `chatgpt.runCodexInWindowsSubsystemForLinux: true` in enrolled users' VS Code, VS Code Insiders and Cursor settings: reset it to `false`, only report it, or ignore it. |
-| `machine_policy.windows_wsl.claude_desktop_key` | `merge`, `create` | `merge` | Windows | `merge` adds `disableWslSessions` only where `HKLM\SOFTWARE\Policies\Claude` already holds machine policy. `create` also writes it to an empty key, which makes Claude Desktop ignore every account's HKCU policy and local third-party configuration. |
-| `trust.mode` | `authenticode`, `hash_pinned` | None | Windows | `authenticode` refuses any hash-pinned (unsigned) payload. `hash_pinned`, `""` or unset admits both. See [Payload trust](#payload-trust). |
-| `trust.allowed_signers` | List of SHA-256 certificate thumbprints | Empty | Windows | Accept only payloads signed by these certificates, like `--allowed-signer`. |
-| `coexistence.per_user_install` | `migrate`, `block`, `ignore` | None | Reserved | Reserved: accepted and validated, no effect in this release. |
-| `coexistence.disable_self_update` | `true`, `false` | `true` | Windows | Sets the Windows `DisableSelfUpdate` policy value. See below. |
-| `network.https_proxy` | `http://host[:port]` or `https://host[:port]` | Empty | All | Proxy for outbound HTTPS. See [Network proxy](#network-proxy). |
-| `network.no_proxy` | Comma-separated hosts, domains, IP addresses or CIDR ranges | Empty | All | Destinations that bypass the proxy. |
+### Profile and Cisco AI Defense
+
+| Key | Values and default | What it does |
+| --- | --- | --- |
+| `profile` | `standalone`, `secure_client`. Default: Linux: `standalone`. Windows and macOS: `secure_client` | Selects the profile. Must match the profile the services were installed with. Set `standalone`. |
+| `inspection.ai_defense.enabled` | `true`, `false`. Default: `false` | Adds Cisco AI Defense to the local engine. See [AI Defense key](/docs/enterprise/ai-defense-key). |
+| `inspection.ai_defense.credential` | A credential name: lowercase letters, digits and dashes, starting with a letter or digit, up to 63 characters. No default | Names the stored key. Required when `enabled` is `true`. |
+
+### Enrollment
+
+Under `enterprise.enrollment`. See [Enrollment](/docs/enterprise/enrollment).
+
+| Key | Values and default | What it does |
+| --- | --- | --- |
+| `mode` | `auto`, `manifest`. Default: `auto` | `manifest` stops the enumerator; you write the target manifest yourself. On Windows the first install then needs `--manifest` (Setup: `MANIFEST=`). |
+| `include_users` | List of user names. Default: empty | Linux and macOS: also enroll these accounts. Windows: accepted, but every profile is already a candidate, so it changes nothing. |
+| `exclude_users` | List of user names (Linux and macOS: or numeric uids). Default: empty | Never enroll these accounts. Wins over every include. |
+| `include_groups` | Linux and macOS: group names or numeric IDs. Windows: group names or SIDs. Default: empty | When not empty, enroll only members of these groups. Windows covers local, Active Directory and Microsoft Entra ID groups; see [Enrollment](/docs/enterprise/enrollment#group-filters-on-windows). |
+| `exclude_groups` | As `include_groups`. Default: empty | Never enroll members. Wins over `include_groups`. |
+| `exempt_users` | List of user names (Linux and macOS: or numeric uids). Default: empty | Linux and macOS: not enrolled, but their calls are allowed, inspected and logged. Windows: the machine-policy agents keep their rows, so the user is inspected; per-user agents get no new rows. |
+| `unenrolled_users` | `inspect`, `deny`. Default: `inspect` | **Linux and macOS.** How the gateway treats a user without an enrollment who calls a machine-policy agent's hook. |
+| `unverified_versions` | `report`, `refuse`. Default: `report` | How a desktop app or editor extension whose hook delivery DefenseClaw has not live-verified is treated; see [Desktop apps and editor extensions](/docs/enterprise/enrollment#desktop-apps-and-editor-extensions). |
+| `unverified_versions_by_connector` | map of connector to `report` or `refuse`. Default: empty | Per-connector override of `unverified_versions`. |
+| `root` | `inspect`, `deny`, `exempt`. Default: `inspect` | **Linux and macOS.** How the gateway treats calls from uid 0. `exempt` is accepted and currently behaves like `inspect`. |
+| `uid_min` | Integer, 0 or more. Default: `0` | **Linux and macOS.** Lowest uid the enumerator considers. `0` means Linux reads `UID_MIN` from `/etc/login.defs` (1000 if absent) and macOS uses 501. |
+| `uid_max` | Integer, 0 or more, not below `uid_min`. Default: `0` | **Linux and macOS.** Highest uid enrolled, for local and directory accounts. `0` means login.defs `UID_MAX` bounds only local accounts in `/etc/passwd`, so directory accounts above it are still enrolled. |
+| `home_roots` | List of absolute directories. Default: empty | **Linux and macOS.** Extra parents of home directories, beyond `/home` and `/var/home` (Linux) or `/Users` (macOS). |
+| `agent_prefixes` | List of absolute directories outside homes and temporary directories. Default: empty | **Linux and macOS.** Extra administrator install prefixes (for example an npm `--prefix`) where the enumerator and guardian look for agent CLIs. |
+
+### Machine policy
+
+Under `enterprise.machine_policy`. See [Machine policy](/docs/enterprise/machine-policy).
+
+| Key | Values and default | What it does |
+| --- | --- | --- |
+| `default.ownership` | `merge`, `verify_only`, `off`. Default: `merge` | **Linux and macOS; Copilot, OpenCode and the Claude Code version floor on Windows.** Whether DefenseClaw writes its entries, only checks them, or leaves the agent's machine policy alone. |
+| `default.managed_hooks_only` | `enforce`, `preserve`. Default: `enforce` | **Codex and Claude Code** (see [`managed_hooks_only` on Windows](#managed_hooks_only-on-windows)). Sets the vendor lock that stops user and project hooks. |
+| `default.foreign_hooks` | `remove`, `report`, `allow`. Default: `remove` | What the [foreign-hook guard](/docs/enterprise/foreign-hook-guard) does with unapproved hooks. |
+| `default.higher_precedence_sources` | `fail`, `warn`. Default: `fail` | **macOS (Codex, Claude Code); Windows (Claude Code, in `policy show` and `verify` only).** Whether a policy source that outranks DefenseClaw's file counts as a coverage failure or only a warning. |
+| `default.allowed_hooks` | List of SHA-256 digests, 64 hex characters, with or without `sha256:`. Default: empty | Hooks the foreign-hook guard approves. |
+| `connectors.<name>.*` | The same five keys. Default: inherited | Overrides for one connector. Each key falls back to `default`, then to the built-in value. `allowed_hooks` lists are merged. |
+| `connectors.claudecode.version_floor` | `enforce`, `report`, `off`. Default: `enforce` | Whether DefenseClaw sets Claude Code's `requiredMinimumVersion` to its lowest verified hook contract while no other source sets it. Only `connectors.claudecode` takes this key; it does not inherit from `default`. See [Claude Code version floor](/docs/enterprise/machine-policy#claude-code-version-floor). |
+
+### Agent sessions in WSL (Windows)
+
+Under `enterprise.machine_policy.windows_wsl`. See [Agent sessions in WSL](/docs/enterprise/windows#agent-sessions-in-wsl).
+
+| Key | Values and default | What it does |
+| --- | --- | --- |
+| `agent_sessions` | `block`, `allow`. Default: `block` | **Windows.** `block` keeps Claude Desktop WSL sessions off through `HKLM\SOFTWARE\Policies\Claude\disableWslSessions` and makes `policy verify` fail on each WSL gap that is known to let a session escape (an administrator value that turns WSL sessions on, `wslInheritsWindowsSettings`, the Codex extension's WSL mode, or a Claude Desktop policy key a standard account can change). An unset gate on an empty key is reported as pending, not a failure. `allow` accepts agent sessions in WSL running without DefenseClaw. See [Agent sessions in WSL](/docs/enterprise/windows#agent-sessions-in-wsl). |
+| `platform` | `leave`, `disable`. Default: `leave` | **Windows.** `disable` sets `HKLM\SOFTWARE\Policies\WSL\AllowWSL=0`, which turns WSL off for every account, including other WSL tooling such as Docker Desktop's WSL backend. |
+| `editor_settings` | `repair`, `report`, `allow`. Default: `repair` | **Windows.** What the guardian does with `chatgpt.runCodexInWindowsSubsystemForLinux: true` in enrolled users' VS Code, VS Code Insiders and Cursor settings: reset it to `false`, only report it, or ignore it. |
+| `claude_desktop_key` | `merge`, `create`. Default: `merge` | **Windows.** `merge` adds `disableWslSessions` only where `HKLM\SOFTWARE\Policies\Claude` already holds machine policy. `create` also writes it to an empty key, which makes Claude Desktop ignore every account's HKCU policy and local third-party configuration. |
+
+### Trust, coexistence and network
+
+| Key | Values and default | What it does |
+| --- | --- | --- |
+| `trust.mode` | `authenticode`, `hash_pinned`. No default | **Windows.** `authenticode` refuses any hash-pinned (unsigned) payload. `hash_pinned`, `""` or unset admits both. See [Payload trust](#payload-trust). |
+| `trust.allowed_signers` | List of SHA-256 certificate thumbprints. Default: empty | **Windows.** Accept only payloads signed by these certificates, like `--allowed-signer`. |
+| `coexistence.per_user_install` | `migrate`, `block`, `ignore`. No default | Reserved: accepted and validated, no effect in this release. |
+| `coexistence.disable_self_update` | `true`, `false`. Default: `true` | **Windows.** Sets the Windows `DisableSelfUpdate` policy value. See below. |
+| `network.https_proxy` | `http://host[:port]` or `https://host[:port]`. Default: empty | Proxy for outbound HTTPS. See [Network proxy](#network-proxy). |
+| `network.no_proxy` | Comma-separated hosts, domains, IP addresses or CIDR ranges. Default: empty | Destinations that bypass the proxy. |
 
 ### Payload trust
 
@@ -286,8 +315,9 @@ rules on Linux and macOS:
    `data_dir`, which the gateway can write.
 2. **Name the folder for the block threshold you want.** The pack folder's
    name selects the thresholds: `strict` blocks findings of MEDIUM severity
-   and above, `permissive` only CRITICAL ones, and any other name, `default`
-   included, CRITICAL ones.
+   and above and alerts on LOW ones. `permissive` blocks only CRITICAL
+   findings and alerts on HIGH ones. Any other name, `default` included,
+   blocks CRITICAL findings and alerts on HIGH and MEDIUM ones.
 3. **Validate the pack** with the gateway's own loader:
 
    ```bash
@@ -433,86 +463,19 @@ destination that uses one is refused.
 
 ## Sandbox policy pushdown
 
-The `openshell.admin` block of the managed config sets organization-wide
-limits for agents that run inside NVIDIA OpenShell sandboxes. Examples are the
-pack every run must use, the loosest network profile, and whether
-skip-permissions mode, live project mounts, host ports, or unblocking are
-allowed. With `deployment_mode: managed_enterprise`, users can't write
-`config.yaml`, so the admin block is **authoritative**. On any other install it
-is advisory, because the user owns the file.
-
-<Callout type="warn" title="Managed installs don't run sandboxes yet">
-A `managed_enterprise` install doesn't start the sandbox runtime:
-`/health` reports the `sandbox` subsystem as `disabled`, and
-`defenseclaw sandbox setup` and `defenseclaw sandbox run` refuse to start.
-The managed config still accepts and validates the `openshell.admin` block, so
-you can stage it. On installs where the developer owns `config.yaml`, where
-sandboxes do run, the same block is enforced but advisory.
-</Callout>
-
-```yaml
-deployment_mode: managed_enterprise
-openshell:
-  enabled: true
-  admin:
-    required_pack: balanced
-    allow_unblock: false
-    allowed_harnesses: [claudecode, codex]
-    egress_block:
-      - files.example.net
-    require_copy_for:
-      - /Users/*/code/customers    # macOS home directories
-      - /home/*/code/customers     # Linux home directories
-    max_resources:
-      cpu: "4"
-      memory: 8Gi
-    locked: [workdir.unmask, mcp.host_ports]
-```
-
-Use absolute paths in `require_copy_for`, as above. A `~/` path expands to the
-home directory of the account that computes the policy, which in a managed
-install may be the service account rather than the developer.
-
-Push the change through the same administrator channel as any other managed
-edit ([Change the config](/docs/enterprise/lifecycle#change-the-config)).
-The gateway reloads the `openshell` block in place in both
-`gateway.config_reload.mode` settings, so it needs no restart; on Windows the
-lifecycle restarts the services anyway.
-
-Where sandboxes run, a request the admin block forbids is replaced with the
-allowed value or refused. The message starts with
-"blocked by your organization's DefenseClaw policy" and names the setting;
-`defenseclaw sandbox policy explain` shows the constraint behind each
-clamped setting.
-
-To require your own pack instead of a built-in one, set `required_pack` to an
-absolute path and pin its content with `required_pack_digest`. In
-`managed_enterprise`, DefenseClaw loads a custom required pack only when it is
-as protected as the config. On macOS and Linux, the file and every directory
-above it must be owned by root, not writable by group or others, and free of
-symbolic links, such as `/opt/acme/sandbox-packs/acme-dev/pack.yaml`. On
-macOS, an ACL entry that grants write access is refused too. On Windows, the
-file must be on a local NTFS drive, owned together with every folder above it
-by Administrators, LocalSystem, or TrustedInstaller, and no other account may
-be able to change or replace it. Keep the file readable by the accounts that
-run sandboxes. The default pack directory inside the service's data directory
-doesn't qualify. Built-in packs are always trusted.
-
-<Callout title="Where sandboxes run">
-OpenShell's gateway is a per-user service, so OpenShell sandboxes run under
-the developer's own account, with the DefenseClaw gateway running as that
-account too, not as the DefenseClaw service account. That is why managed
-installs don't run them yet. See also [Sandbox](/docs/sandboxes/guide).
-</Callout>
-
-Every admin key, the built-in packs, custom packs, and two complete
-organization examples are in
-[Sandbox policy packs and admin controls](/docs/sandboxes/policy-packs).
+A managed config also accepts the `openshell.admin` block, the
+organization-wide limits for agents that run in NVIDIA OpenShell sandboxes.
+The lifecycle validates it, so you can stage it, but a `managed_enterprise`
+install does not run sandboxes yet: `/health` reports the `sandbox`
+subsystem as `disabled`, and `defenseclaw sandbox setup` and `run` refuse
+to start. The keys, the trust rules for a custom required pack on a managed
+host, and two complete examples are in
+[Sandbox policy packs and admin controls](/docs/sandboxes/policy-packs#admin-constraints).
 
 ## Sample configs
 
 Each sample is an observe-mode starter: it inspects Codex, Claude Code,
-Cursor and Copilot (and OpenCode on Linux and macOS), logs every verdict and
+Cursor, Copilot and OpenCode, logs every verdict and
 does not block on policy verdicts. Change `guardrail.mode` to
 `action` when you are ready to block. Each sample also turns on AI Discovery
 (`ai_discovery.enabled: true`), which is off when the key is not set.
@@ -586,7 +549,7 @@ guardrail:
     copilot: {}
     opencode: {}
 ai_discovery:
-  enabled: true                         # AI Discovery is off without it
+  enabled: true                             # AI Discovery is off without it
 enterprise:
   profile: standalone                       # macOS otherwise means Secure Client
   inspection:
@@ -614,7 +577,7 @@ enterprise:
   </Tab>
   <Tab value="Windows">
 
-```yaml title="C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml"
+```yaml title="config.yaml (Windows: the file you pass to ensure)"
 config_version: 8
 deployment_mode: managed_enterprise
 gateway:
@@ -629,6 +592,7 @@ guardrail:
     claudecode: {}
     cursor: {}
     copilot: {}
+    opencode: {}
 ai_discovery:
   enabled: true                         # AI Discovery is off without it
 enterprise:
