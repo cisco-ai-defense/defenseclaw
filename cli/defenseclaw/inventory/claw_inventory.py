@@ -135,6 +135,17 @@ class _FilesystemCollectionResult(NamedTuple):
     error: dict[str, str] | None
 
 
+class _PartialCollectionError(ValueError):
+    """A collector read some sources but could not read others.
+
+    ``items`` keeps what was read; the message names the failed sources.
+    """
+
+    def __init__(self, message: str, items: list[dict[str, Any]]) -> None:
+        super().__init__(message)
+        self.items = items
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -2104,7 +2115,7 @@ def _collect_filesystem_category(
         return _FilesystemCollectionResult(collector(), None)
     except Exception as exc:  # noqa: BLE001 - partial inventory records the failure.
         return _FilesystemCollectionResult(
-            [],
+            exc.items if isinstance(exc, _PartialCollectionError) else [],
             {"command": f"{connector}:{category}", "error": str(exc)},
         )
 
@@ -5312,7 +5323,8 @@ def _enumerate_mcp_filesystem(
     """
     rows: list[dict[str, Any]] = []
     resolved = connector or cfg.active_connector()
-    entries = cfg.mcp_servers(connector)
+    diagnostics: list[connector_paths.MCPSourceDiagnostic] = []
+    entries = cfg.mcp_servers(connector, diagnostic_sink=diagnostics)
     cursor_names: dict[str, int] = {}
     if connector_paths.normalize(resolved) == "cursor":
         for entry in entries:
@@ -5344,6 +5356,11 @@ def _enumerate_mcp_filesystem(
                 row["selection_conflict"] = True
                 row["activation_state"] = "unverified-same-name-scope-conflict"
         rows.append(row)
+    if diagnostics:
+        # An MCP config that exists but cannot be read or parsed is an error,
+        # not "none configured" (GAP-2182, the MCP side of GAP-2148).
+        failed = "; ".join(f"could not read {d.source} ({d.problem})" for d in diagnostics)
+        raise _PartialCollectionError(failed, rows)
     return rows
 
 

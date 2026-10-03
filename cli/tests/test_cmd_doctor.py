@@ -1734,14 +1734,14 @@ class VerifyBedrockTests(unittest.TestCase):
         _verify_bedrock("ASIAEXAMPLETEMPKEY", r)
         self.assertEqual(r.warned, 1, r.checks)
 
-    def test_unrecognized_shape_passes_with_note(self):
-        # If the operator is running a custom gateway that accepts
-        # some other token format, we shouldn't block — just note
-        # the shape isn't one we can probe.
+    def test_unrecognized_shape_warns_with_next_step(self):
+        # GAP-2195: Bedrock rejects keys without a known prefix, so an
+        # unknown shape is a WARN with a next step, never a green check.
         r = _DoctorResult()
-        _verify_bedrock("custom-gateway-token-xyz", r)
-        self.assertEqual(r.passed, 1, r.checks)
-        self.assertIn("not a Bedrock API key format doctor knows", r.checks[0]["detail"])
+        _verify_bedrock("dccert-fake-invalid-key", r)
+        self.assertEqual((r.passed, r.warned, r.failed), (0, 1, 0), r.checks)
+        self.assertIn("does not look like a Bedrock API key", r.checks[0]["detail"])
+        self.assertIn("keys set DEFENSECLAW_LLM_KEY", r.checks[0].get("remediation", ""))
 
     @patch("defenseclaw.commands.cmd_doctor._http_probe", return_value=(200, "{}"))
     def test_short_term_bedrock_api_key_is_probed(self, mock_probe):

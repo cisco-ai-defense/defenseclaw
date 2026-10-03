@@ -426,6 +426,35 @@ def test_windows_hermes_idle_is_healthy_not_pending_reload() -> None:
         assert cmd_doctor._hermes_idle_native_check(pending, _DoctorResult(passive=True)) is pending
     with mock.patch.object(cmd_doctor, "_hermes_host_running", return_value=True):
         assert cmd_doctor._hermes_idle_native_check(pending, _DoctorResult()) is pending
+    # GAP-2190: an unknown listing (slow host right after an upgrade) is retried once.
+    with mock.patch.object(cmd_doctor, "_hermes_host_running", side_effect=[None, False]):
+        assert cmd_doctor._hermes_idle_native_check(pending, _DoctorResult()).healthy
+
+
+def test_slow_codex_policy_probe_is_retried_then_a_warning(tmp_path) -> None:
+    # GAP-2190: a Codex app-server that does not answer in time is slow, not policy-blocked.
+    from defenseclaw import doctor_hooks
+    from defenseclaw.doctor_hooks import CODEX_PROBE_TIMEOUT_STATE, WindowsHookCheck, _InspectionError
+
+    config = str(tmp_path / "config.toml")
+    slow = _InspectionError(CODEX_PROBE_TIMEOUT_STATE, "timed out waiting for Codex policy response 1")
+    with mock.patch.object(doctor_hooks, "_codex_effective_policy_inspector", side_effect=[slow, (False, "src")]) as m:
+        doctor_hooks._validate_codex_effective_hook_policy(str(tmp_path), config)
+    assert m.call_count == 2
+    with mock.patch.object(doctor_hooks, "_codex_effective_policy_inspector", side_effect=[slow, slow]):
+        try:
+            doctor_hooks._validate_codex_effective_hook_policy(str(tmp_path), config)
+        except _InspectionError as exc:
+            assert exc.state == CODEX_PROBE_TIMEOUT_STATE
+        else:
+            raise AssertionError("a second timeout must still be reported")
+
+    r = _DoctorResult()
+    check = WindowsHookCheck(CODEX_PROBE_TIMEOUT_STATE, "Codex app-server did not answer the policy probe")
+    with mock.patch.object(cmd_doctor, "_windows_native_hook_check", return_value=check):
+        _render(lambda: cmd_doctor._check_windows_native_hooks(mock.MagicMock(), "codex", "Codex hooks", r))
+    assert (r.passed, r.warned, r.failed) == (0, 1, 0), r.checks
+    assert "rerun defenseclaw doctor" in r.checks[0]["remediation"]
 
 
 def test_hook_only_doctor_rows_skip_fleet_and_windows_wording_and_flag_bad_mode() -> None:
