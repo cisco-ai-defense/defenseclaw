@@ -2659,7 +2659,25 @@ def _fit_plugin_list_table(console: Any, title: str, rows: list[dict[str, str]])
         table = build(hidden, _PLUGIN_LIST_DESC_MAX)
         if natural(table) <= width or count == len(_PLUGIN_LIST_OPTIONAL):
             break
+    if natural(table) > width:
+        # GAP-2364: even Status, ID, Severity and Verdict overflow, and a
+        # squeezed ID broke mid-word ("whatsap" / "p"). List each plugin
+        # with its whole ID on its own line instead.
+        table = _stacked_plugin_list(title, rows)
     return table, [col for col in hidden if col != "Description" or has_desc]
+
+
+def _stacked_plugin_list(title: str, rows: list[dict[str, str]]) -> Any:
+    """One block per plugin: the whole ID, then Status, Severity and Verdict."""
+    from rich.console import Group
+    from rich.text import Text
+
+    legend = Text("ID, then Status \u00b7 Severity \u00b7 Verdict", style="dim")
+    parts: list[Any] = [Text(title, style="italic"), legend]
+    for row in rows:
+        parts.append(Text(row["ID"], style="bold", overflow="fold"))
+        parts.append(Text.from_markup(f"  {row['Status']} \u00b7 {row['Severity']} \u00b7 {row['Verdict']}"))
+    return Group(*parts)
 
 
 def _looks_like_explicit_path(value: str) -> bool:
@@ -4765,6 +4783,7 @@ def _plugin_info_card(
     pe_enforcer = PluginEnforcer(app.cfg.quarantine_dir)
     quarantined = pe_enforcer.is_quarantined(plugin_name, connector)
     action_name = plugin_name
+    display_name = plugin_name
     if info_map is None and not quarantined and connector and app.store is not None:
         from defenseclaw.enforce import PolicyEngine
 
@@ -4774,13 +4793,17 @@ def _plugin_info_card(
             quarantined = True
             if scan_entry is None:
                 scan_entry = _latest_plugin_scan_for_connector(app, alias, connector)
-    if quarantined and scan_entry is None and connector:
+    if quarantined and connector:
         # GAP-2308: scans of a Hermes plugin are keyed by its listed id
         # (photon), its quarantine by the manifest name (photon-platform).
         q_entry = actions_map.get(action_name)
         listed = _hermes_listed_id(getattr(q_entry, "source_path", "") or "", connector)
         if listed and listed != action_name:
-            scan_entry = _latest_plugin_scan_for_connector(app, listed, connector)
+            if scan_entry is None:
+                scan_entry = _latest_plugin_scan_for_connector(app, listed, connector)
+            # GAP-2355: the header shows the id 'plugin list' shows, whichever
+            # name was typed, as it does for the installed copy.
+            display_name = listed
 
     if info_map is None:
         if (
@@ -4794,7 +4817,7 @@ def _plugin_info_card(
             return None
         if scan_entry is None and plugin_name not in actions_map and not quarantined:
             return None
-        info_map = {"name": plugin_name, "installed": False}
+        info_map = {"name": display_name, "installed": False}
     else:
         info_map = dict(info_map)
 
@@ -4806,7 +4829,7 @@ def _plugin_info_card(
         ae = actions_map[action_name]
         if not ae.actions.is_empty():
             info_map["actions"] = ae.actions.to_dict()
-    if action_name != plugin_name:
+    if action_name != info_map["name"]:
         info_map["quarantine_id"] = action_name
     if quarantined:
         qpath = pe_enforcer._quarantine_path(action_name, connector)
