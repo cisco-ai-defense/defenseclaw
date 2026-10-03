@@ -514,17 +514,26 @@ def edit_cmd(  # noqa: PLR0913
     # ``--url`` (or vice versa) fails before the next sync.
     _validate_file_url(source.kind, source.url)
 
-    cfg.save()
+    # A no-op edit says so instead of "Updated" (GAP-2339); the audit row
+    # still records it as "unchanged".
+    changed = any(before[field] != getattr(source, field) for field in _EDIT_AUDIT_FIELDS)
+    if changed:
+        cfg.save()
     missing_file = _missing_file_warning(source.kind, source.url)
     edit_details = _registry_edit_details(source, before)
     if emit_json:
         _log_registry_action(app, "registry-edit", source.id, edit_details)
-        edit_payload: dict[str, Any] = {"action": "edit", "source": _source_to_dict(source)}
+        edit_payload: dict[str, Any] = {
+            "action": "edit", "changed": changed, "source": _source_to_dict(source),
+        }
         if missing_file:
             edit_payload["warning"] = missing_file
         _emit_json(edit_payload)
         return
-    ux.ok(f"Updated registry source {source.id!r}.")
+    if changed:
+        ux.ok(f"Updated registry source {source.id!r}.")
+    else:
+        ux.ok(f"No changes: registry source {source.id!r} already has these settings.")
     if missing_file:
         ux.warn(missing_file)
     _log_registry_action(app, "registry-edit", source.id, edit_details)
