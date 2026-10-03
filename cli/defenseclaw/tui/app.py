@@ -1171,6 +1171,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         self._config_watcher = ConfigChangeWatcher(config_path) if config_path is not None else None
         self._config_poll_running = False
         self._config_reload_count = 0
+        # Set on each config-editor save: saved sections the CLI already applies.
+        self._setup_cli_live_sections = ""
         self.data_dir = _resolve_data_dir(config, data_dir)
         # Operator's persisted session preferences (palette MRU,
         # per-panel "last seen" cursors, last filter, theme).
@@ -12027,11 +12029,13 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             facts.append(hints.saved_hint)
         if hints.restart_pending:
             reason = hints.restart_reason
-            facts.append(
-                f"Restart the gateway (G) to apply: {reason}"
-                if reason and reason != "config saved in the TUI"
-                else "Restart the gateway (G) to apply it"
-            )
+            cli_live = self._setup_cli_live_sections
+            if reason and reason != "config saved in the TUI":
+                facts.append(f"Restart the gateway (G) to apply: {reason}")
+            elif cli_live:
+                facts.append(f"CLI uses {cli_live} now · G: restart gateway")
+            else:
+                facts.append("Restart the gateway (G) to apply it")
         # From the aside width up, the aside describes the focused field.
         lines = [head] if self._setup_width() >= ASIDE_MIN_WIDTH else [head, second]
         if facts:
@@ -12418,6 +12422,15 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         except Exception as exc:  # noqa: BLE001 - user feedback belongs in status.
             return SetupPanelAction(True, hint=f"Config save failed: {exc}")
         self._schedule_config_save_audit(saved_entries)
+        self._setup_cli_live_sections = _cli_live_config_sections(saved_entries)
+        if self._setup_cli_live_sections:
+            return SetupPanelAction(
+                True,
+                hint=(
+                    f"Config changes saved; CLI commands (mcp set, skill and plugin install) use the new "
+                    f"{self._setup_cli_live_sections} now; the gateway applies it after a restart (G)."
+                ),
+            )
         return SetupPanelAction(True, hint="Config changes saved; restart queued if gateway is running.")
 
     def _schedule_config_save_audit(self, entries: tuple[Any, ...]) -> None:
@@ -15537,6 +15550,19 @@ def _typed_character(event: events.Key) -> str | None:
     if character and len(character) == 1 and character.isprintable():
         return character
     return None
+
+
+# Config keys the CLI reads from config.yaml on every command, so CLI
+# admission (mcp set, skill and plugin install) enforces a saved change at
+# once; only the gateway's own checks wait for the restart (GAP-2145).
+_CLI_LIVE_CONFIG_SECTIONS = ("asset_policy",)
+
+
+def _cli_live_config_sections(entries: Iterable[Any]) -> str:
+    """The saved sections the CLI already applies ("asset_policy"), or ""."""
+
+    saved = {str(getattr(entry, "key", "")).split(".", 1)[0] for entry in entries}
+    return ", ".join(section for section in _CLI_LIVE_CONFIG_SECTIONS if section in saved)
 
 
 def _typed_seed(key: str, character: str | None) -> str:
