@@ -660,11 +660,44 @@ def registry_result_summary(output: str) -> str:
     The TUI runs registry commands with ``--json``, so the last output line
     is a bare ``]`` or ``}`` (GAP-1681). Returns "" when ``output`` is not a
     registry result.
+
+    The output also holds stderr, so a change to asset_policy adds the
+    gateway restart line next to the JSON; the summary keeps the result and
+    adds the restart outcome (GAP-2499).
     """
-    try:
-        data = json.loads(output)
-    except ValueError:
+    found = _json_document(output)
+    if found is None:
         return ""
+    data, other = found
+    text = _registry_data_summary(data)
+    if not text:
+        return ""
+    if "gateway restart failed" in other:
+        return f"{text} · gateway restart failed; run: defenseclaw-gateway restart"
+    if "defenseclaw-gateway: restarting" in other:
+        return f"{text} · gateway restarted"
+    return text
+
+
+def _json_document(output: str) -> tuple[Any, str] | None:
+    """The first JSON document in ``output`` and the text around it."""
+    decoder = json.JSONDecoder()
+    offset = 0
+    for line in output.splitlines(keepends=True):
+        stripped = line.lstrip()
+        if stripped[:1] in ("{", "["):
+            start = offset + len(line) - len(stripped)
+            try:
+                data, end = decoder.raw_decode(output, start)
+            except ValueError:
+                pass
+            else:
+                return data, output[:start] + output[end:]
+        offset += len(line)
+    return None
+
+
+def _registry_data_summary(data: Any) -> str:
     if isinstance(data, list):
         if not data:
             return "nothing to sync"

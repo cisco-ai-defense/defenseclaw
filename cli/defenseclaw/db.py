@@ -890,6 +890,36 @@ class Store:
             entry["alerts"] = int(entry["alerts"]) + int(alerts or 0)
             if newest and str(newest) > str(entry["newest"]):
                 entry["newest"] = newest
+        # Proxy connectors (OpenClaw, ZeptoClaw) write no connector-hook rows:
+        # their guardrail records tool inspections (inspect-tool-*) and LLM
+        # evaluations (guardrail-verdict), and a blocked LLM turn adds a
+        # ``block`` row. Without them an OpenClaw-only Overview read "Blocks 0"
+        # after a tool block and a prompt block (GAP-2496).
+        cur = self.db.execute(
+            """SELECT LOWER(TRIM(connector)) AS connector_name,
+                      SUM(CASE WHEN action IN ('inspect-tool-allow', 'inspect-tool-alert',
+                                               'inspect-tool-confirm', 'inspect-tool-block',
+                                               'guardrail-verdict')
+                               THEN 1 ELSE 0 END) AS calls,
+                      SUM(CASE WHEN action IN ('inspect-tool-block', 'block', 'guardrail-block')
+                               THEN 1 ELSE 0 END) AS blocks,
+                      SUM(CASE WHEN action IN ('inspect-tool-alert', 'inspect-tool-confirm')
+                               THEN 1 ELSE 0 END) AS alerts,
+                      MAX(timestamp) AS newest
+                 FROM audit_events
+                WHERE action IN ('inspect-tool-allow', 'inspect-tool-alert', 'inspect-tool-confirm',
+                                 'inspect-tool-block', 'guardrail-verdict', 'block', 'guardrail-block')
+                  AND LOWER(TRIM(COALESCE(connector, ''))) IN ('openclaw', 'zeptoclaw')
+                GROUP BY connector_name"""
+        )
+        for connector, calls, blocks, alerts, newest in cur.fetchall():
+            key = str(connector or "").strip().lower()
+            entry = stats.setdefault(key, {"calls": 0, "blocks": 0, "alerts": 0, "newest": ""})
+            entry["calls"] = int(entry["calls"]) + int(calls or 0)
+            entry["blocks"] = int(entry["blocks"]) + int(blocks or 0)
+            entry["alerts"] = int(entry["alerts"]) + int(alerts or 0)
+            if newest and str(newest) > str(entry["newest"]):
+                entry["newest"] = newest
         return stats
 
     def audit_data_version(self) -> tuple[int, int]:
