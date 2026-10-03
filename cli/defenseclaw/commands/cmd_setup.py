@@ -4439,8 +4439,9 @@ def setup_gateway(
     api_port_changed = gw.api_port != previous_api_port
     # A gateway that was never started (or was stopped) has nothing to
     # verify yet and cannot record the audit event; the change applies when
-    # it starts (GAP-2009).
-    gateway_stopped = not api_port_changed and not _is_pid_alive(os.path.join(data_dir, "gateway.pid"))
+    # it starts (GAP-2009). That holds for a new API port too, so a stopped
+    # gateway gets the same single note (GAP-2153).
+    gateway_stopped = not _is_pid_alive(os.path.join(data_dir, "gateway.pid"))
     _print_gateway_summary(gw, openclaw=uses_openclaw)
 
     if verify and not api_port_changed and not gateway_stopped:
@@ -4470,12 +4471,12 @@ def setup_gateway(
         # The start hint follows from the setup restart step; say only what
         # the missing gateway means for this change.
         offline_note=(
-            "  Note: nothing listens on the new API port until the gateway restarts, so this change "
-            "was not written to the audit log."
-            if api_port_changed
-            else "  Note: the gateway isn't running, so this change takes effect when it starts and was not "
+            "  Note: the gateway isn't running, so this change takes effect when it starts and was not "
             "written to the audit log. Start it with: defenseclaw-gateway start"
             if gateway_stopped
+            else "  Note: nothing listens on the new API port until the gateway restarts, so this change "
+            "was not written to the audit log."
+            if api_port_changed
             else "  Note: the gateway could not be reached, so this change was not written to the audit log."
         ),
     )
