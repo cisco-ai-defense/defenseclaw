@@ -652,7 +652,9 @@ class TestMergeFunctions(unittest.TestCase):
         gw = _merge_gateway_watcher(None)
         self.assertTrue(gw.enabled)
         self.assertTrue(gw.skill.enabled)
-        self.assertFalse(gw.skill.take_action)
+        # GAP-2357: same default as the gateway (viper gateway.watcher.*.take_action).
+        self.assertTrue(gw.skill.take_action)
+        self.assertTrue(gw.plugin.take_action)
 
     def test_merge_gateway_watcher_with_data(self):
         gw = _merge_gateway_watcher({"enabled": True, "skill": {"enabled": False, "dirs": ["/tmp"]}})
@@ -701,7 +703,7 @@ class TestDefaultConfig(unittest.TestCase):
         self.assertEqual(cfg.gateway.api_port, 18970)
         self.assertTrue(cfg.gateway.watcher.enabled)
         self.assertTrue(cfg.gateway.watcher.skill.enabled)
-        self.assertFalse(cfg.gateway.watcher.skill.take_action)
+        self.assertTrue(cfg.gateway.watcher.skill.take_action)
         self.assertTrue(cfg.gateway.watchdog.enabled)
         self.assertEqual(cfg.gateway.watchdog.interval, 30)
         self.assertEqual(cfg.gateway.watchdog.debounce, 2)

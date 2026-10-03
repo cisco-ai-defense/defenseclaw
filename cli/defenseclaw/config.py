@@ -1521,14 +1521,15 @@ class OTelConfig:
 @dataclass
 class GatewayWatcherSkillConfig:
     enabled: bool = True
-    take_action: bool = False
+    # Same default as the gateway's viper default (GAP-2357).
+    take_action: bool = True
     dirs: list[str] = field(default_factory=list)
 
 
 @dataclass
 class GatewayWatcherPluginConfig:
     enabled: bool = True
-    take_action: bool = False
+    take_action: bool = True
     dirs: list[str] = field(default_factory=list)
 
 
@@ -5413,12 +5414,12 @@ def _merge_gateway_watcher(raw: dict[str, Any] | None) -> GatewayWatcherConfig:
         enabled=raw.get("enabled", True),
         skill=GatewayWatcherSkillConfig(
             enabled=skill_raw.get("enabled", True),
-            take_action=skill_raw.get("take_action", False),
+            take_action=skill_raw.get("take_action", True),
             dirs=skill_raw.get("dirs", []),
         ),
         plugin=GatewayWatcherPluginConfig(
             enabled=plugin_raw.get("enabled", True),
-            take_action=plugin_raw.get("take_action", False),
+            take_action=plugin_raw.get("take_action", True),
             dirs=plugin_raw.get("dirs", []),
         ),
     )

@@ -256,6 +256,7 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 
 	watched := 0
 	watchedDirs := make(map[string]struct{})
+	var deferredDirs [][2]string // {dir, kind} not created because an agent installer owns them
 	watchOnce := func(dir, kind string) bool {
 		absolute, absErr := filepath.Abs(dir)
 		if absErr != nil {
@@ -264,6 +265,12 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 		key := strings.ToLower(filepath.Clean(absolute))
 		if _, exists := watchedDirs[key]; exists {
 			return true
+		}
+		if createsAgentOwnedDir(dir) {
+			// Watched once the agent's own installer creates it (GAP-2354).
+			deferredDirs = append(deferredDirs, [2]string{dir, kind})
+			fmt.Printf("[watch] %s dir %s does not exist yet; watching it once the agent creates it\n", kind, dir)
+			return false
 		}
 		created, err := ensureAndWatch(fsw, dir)
 		if len(created) > 0 {
@@ -389,6 +396,17 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 			fmt.Fprintf(os.Stderr, "[watch] fsnotify error: %v\n", err)
 
 		case <-ticker.C:
+			if len(deferredDirs) > 0 {
+				waiting := deferredDirs
+				deferredDirs = nil
+				for _, entry := range waiting {
+					if _, statErr := os.Lstat(entry[0]); statErr != nil {
+						deferredDirs = append(deferredDirs, entry)
+						continue
+					}
+					watchOnce(entry[0], entry[1])
+				}
+			}
 			w.processPending(ctx)
 		}
 	}
@@ -1474,6 +1492,33 @@ func toFindingInputs(findings []scanner.Finding) []policy.FindingInput {
 		})
 	}
 	return out
+}
+
+// agentOwnedDirNames are folders an agent's own installer creates and expects
+// to be absent: the Hermes installer refuses an existing ~/.hermes/hermes-agent
+// that is not its git checkout (GAP-2354).
+var agentOwnedDirNames = map[string]struct{}{"hermes-agent": {}}
+
+// createsAgentOwnedDir reports whether creating dir would also create one of
+// agentOwnedDirNames (dir itself or a missing parent).
+func createsAgentOwnedDir(dir string) bool {
+	current, err := filepath.Abs(dir)
+	if err != nil {
+		return false
+	}
+	for {
+		if _, err := os.Lstat(current); !errors.Is(err, fs.ErrNotExist) {
+			return false
+		}
+		if _, owned := agentOwnedDirNames[strings.ToLower(filepath.Base(current))]; owned {
+			return true
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return false
+		}
+		current = parent
+	}
 }
 
 // ensureAndWatch creates dir when it is missing and watches it. It returns

@@ -395,6 +395,42 @@ _KEYS_SET_RE = re.compile(r"(?:\u2713|\u2714|\bOK) set\b")
 _SCAN_DONE_RE = re.compile(r"^(?:[\u2713\u2714]|OK)?\s*(Scan complete: .+)$")
 
 
+def _plugin_info_summary(lines: Sequence[str]) -> str:
+    """``a2a: clean, 0 findings, not quarantined`` for ``plugin info``.
+
+    The card showed the last line, ``Actions: -`` (GAP-2370).
+    """
+
+    fields: dict[str, str] = {}
+    in_scan = False
+    for line in lines:
+        text = line.strip()
+        key, sep, value = text.partition(":")
+        if not sep:
+            continue
+        key, value = key.strip(), value.strip()
+        if key == "Last Scan":
+            in_scan = True
+        elif key in {"Plugin", "Quarantined"} and not in_scan:
+            fields.setdefault(key, value)
+        elif key in {"Verdict", "Findings"} and in_scan:
+            fields.setdefault(key, value)
+        elif key == "Actions":
+            fields["Actions"] = value
+    name = fields.get("Plugin", "")
+    if not name:
+        return ""
+    parts = [fields.get("Verdict", "not scanned")]
+    if fields.get("Findings"):
+        parts.append(fields["Findings"])
+    if "Quarantined" in fields:
+        parts.append("quarantined" if fields["Quarantined"] == "yes" else "not quarantined")
+    actions = fields.get("Actions", "-").split(" (", 1)[0].strip()
+    if actions and actions != "-":
+        parts.append(f"actions: {actions}")
+    return f"{name}: {', '.join(parts)}"
+
+
 def command_result_summary(command: str, lines: Sequence[str]) -> str:
     """The result of a finished command, or "" to fall back to its last line.
 
@@ -426,6 +462,8 @@ def command_result_summary(command: str, lines: Sequence[str]) -> str:
             if match := _GATEWAY_PID_RE.search(line):
                 return f"Gateway restarted (PID {match.group(1)})"
         return ""
+    if lowered.startswith(("info plugin", "plugin info")):
+        return _plugin_info_summary(lines)
     if "discovery scan" in lowered:
         # ``agent discovery scan`` ends with a hint about other commands;
         # the receipt showed that hint instead of the counts (GAP-2319).

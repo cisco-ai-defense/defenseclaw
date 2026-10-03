@@ -1971,6 +1971,14 @@ def _file_mentions_defenseclaw(path: str) -> bool:
         return False
 
 
+def _hermes_installed() -> bool:
+    spec = agent_discovery._SPECS["hermes"]
+    if agent_discovery._binary_path_for_agent("hermes", spec):
+        return True
+    # The upstream installer links ~/.local/bin/hermes, which may not be on PATH yet.
+    return os.path.isfile(os.path.expanduser("~/.local/bin/hermes"))
+
+
 def _connector_readiness(cfg: Config, connector: str) -> StepResult:
     if connector == "none":
         return StepResult("Connector", "skip", "no connector requested")
@@ -2008,6 +2016,15 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
             return StepResult("Connector", "pass", "ZeptoClaw config found")
         return StepResult("Connector", "warn", "ZeptoClaw config not found yet", "defenseclaw setup zeptoclaw")
     if connector == "hermes":
+        if not _hermes_installed():
+            # Setup writes Hermes' config.yaml hooks even before Hermes is
+            # installed, so the file alone is not readiness (GAP-2354).
+            return StepResult(
+                "Connector",
+                "warn",
+                "Hermes is not installed (hermes is not on PATH)",
+                "install Hermes, then run defenseclaw setup hermes",
+            )
         path = hermes_config_path()
         if os.path.isfile(path):
             return StepResult("Connector", "pass", "Hermes config found")
