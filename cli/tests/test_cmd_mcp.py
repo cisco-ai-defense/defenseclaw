@@ -401,6 +401,20 @@ class TestMCPConnectorScope(MCPCommandTestBase):
         self.assertNotIn("Scan failed", result.output)
         mock_set.assert_not_called()
 
+    @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")
+    @patch("defenseclaw.scanner.mcp.MCPScannerWrapper.scan")
+    def test_set_allow_private_reaches_pre_add_scan(self, mock_scan, mock_set):
+        # GAP-2435: the --allow-private hint must name an option mcp set accepts.
+        mock_scan.side_effect = RuntimeError("connection refused")
+        args = ["set", "loop", "--url", "http://127.0.0.1:9/mcp", "--connector", "codex"]
+        result = self.invoke(args + ["--allow-private"])
+        self.assertNotIn("No such option", result.output)
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertTrue(mock_scan.call_args.kwargs.get("allow_private"))
+        self.invoke(args)
+        self.assertFalse(mock_scan.call_args.kwargs.get("allow_private"))
+        mock_set.assert_not_called()
+
     def test_bare_unblock_clears_connector_scoped_block(self):
         self.app.cfg.mcp_servers = lambda connector=None, **_: (  # type: ignore[method-assign]
             [MCPServerEntry(name="demo", url="http://demo.example.com", transport="sse")]

@@ -1545,7 +1545,7 @@ def _scan_one_resolved(
 @click.option(
     "--allow-private", "allow_private", is_flag=True,
     help=(
-        "Opt in to scanning remote MCP targets that resolve to private, "
+        "Opt in to scanning MCP URLs that resolve to private, "
         "loopback, link-local or CGNAT addresses (blocked by default to "
         "prevent SSRF)."
     ),
@@ -2241,6 +2241,13 @@ def _opencode_command_trust_error(cmd: str) -> str | None:
 @click.option("--env", "env_pairs", multiple=True, help="Env vars as KEY=VAL (repeatable)")
 @click.option("--skip-scan", is_flag=True, help="Skip security scan before adding")
 @click.option(
+    "--allow-private", "allow_private", is_flag=True,
+    help=(
+        "Let the pre-add scan reach a --url that resolves to a private, "
+        "loopback, link-local or CGNAT address (blocked by default to prevent SSRF)."
+    ),
+)
+@click.option(
     "--force-untrusted-command",
     is_flag=True,
     help="For opencode only: write a command outside trusted install prefixes.",
@@ -2259,6 +2266,7 @@ def set_server(
     transport: str,
     env_pairs: tuple[str, ...],
     skip_scan: bool,
+    allow_private: bool,
     force_untrusted_command: bool,
     connector_flag: str,
 ) -> None:
@@ -2277,6 +2285,7 @@ def set_server(
       defenseclaw mcp set myserver --command npx --args '["-y", "@myorg/mcp-server"]'
       defenseclaw mcp set myserver --command node --args server.js --env API_KEY=xxx
       defenseclaw mcp set untrusted --url http://example.com/mcp --skip-scan
+      defenseclaw mcp set local --url http://127.0.0.1:8080/mcp --allow-private
     """
     from defenseclaw.commands import resolve_list_connectors
     from defenseclaw.enforce import PolicyEngine
@@ -2381,6 +2390,7 @@ def set_server(
         result = _run_scan(
             app, url or name, "", False, False, False,
             server_entry=scan_entry, audit_target=audit_target,
+            allow_private=allow_private,
             connect_hint="  Check that the server is running and reachable.",
         )
         if result is None:
