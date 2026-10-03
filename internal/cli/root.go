@@ -88,7 +88,7 @@ func writeMachineVersion(w io.Writer) error {
 	})
 }
 
-func rootPersistentPreRunE(cmd *cobra.Command, _ []string) error {
+func rootPersistentPreRunE(cmd *cobra.Command, _ []string) (err error) {
 	if versionJSON {
 		return nil
 	}
@@ -109,6 +109,14 @@ func rootPersistentPreRunE(cmd *cobra.Command, _ []string) error {
 	// deployment pin, and before the config load and audit store open that
 	// would create ~/.defenseclaw/audit.db.
 	if cmd != nil && !cmd.HasParent() {
+		// Stamp gateway.log before the config load and the audit store open
+		// write to it, so their lines carry a time too (GAP-2109).
+		startDaemonLogStamp()
+		defer func() {
+			if err != nil {
+				stopDaemonLogStamp()
+			}
+		}()
 		if err := refuseGatewayLifecycleOnManagedHost(); err != nil {
 			return err
 		}
@@ -123,7 +131,6 @@ func rootPersistentPreRunE(cmd *cobra.Command, _ []string) error {
 	}
 	activeObservabilityV8Startup = nil
 	loadDotEnvIntoOS(filepath.Join(config.DefaultDataPath(), ".env"))
-	var err error
 	cfgPath := config.ConfigPath()
 	cfg, activeObservabilityV8Startup, err = loadGatewayConfigV8(cfgPath)
 	if err != nil {
@@ -231,6 +238,8 @@ Run without arguments to start the sidecar daemon in the foreground; use
 		}
 	},
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// Drain the gateway.log stamper before cobra prints an error.
+		defer stopDaemonLogStamp()
 		if versionJSON {
 			return writeMachineVersion(cmd.OutOrStdout())
 		}

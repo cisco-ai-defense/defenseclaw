@@ -27,7 +27,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
-	"github.com/defenseclaw/defenseclaw/internal/daemon"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks/guardianstate"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/ipc"
@@ -64,8 +63,10 @@ func init() {
 }
 
 func runSidecar(cmd *cobra.Command, _ []string) error {
-	// A detached gateway's gateway.log lines carry a time (GAP-1319).
-	defer daemon.StampChildLog()()
+	// A detached gateway's gateway.log lines carry a time (GAP-1319). The
+	// root pre-run usually started the stamper already (GAP-2109).
+	startDaemonLogStamp()
+	defer stopDaemonLogStamp()
 	// Before any outbound client exists: a standalone gateway routes its
 	// outbound clients through enterprise.network.
 	if err := applyStandaloneEgress(cfg); err != nil {
