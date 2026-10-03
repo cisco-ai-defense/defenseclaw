@@ -39,6 +39,17 @@ func bindEventRouterToolV8RuntimeFixture(
 	traces, metrics bool,
 ) (*EventRouter, *hookModelV8OTLPCapture, sidecarV8BootstrapFixture) {
 	t.Helper()
+	// The OpenClaw inspect decisions are process-wide and match a later call
+	// by tool name; one left by an earlier test (a blocked "shell") would
+	// mark these calls blocked.
+	openClawToolOutcomes.mu.Lock()
+	openClawToolOutcomes.entries = nil
+	openClawToolOutcomes.mu.Unlock()
+	t.Cleanup(func() {
+		openClawToolOutcomes.mu.Lock()
+		openClawToolOutcomes.entries = nil
+		openClawToolOutcomes.mu.Unlock()
+	})
 	capture := &hookModelV8OTLPCapture{}
 	server := httptest.NewServer(http.HandlerFunc(capture.handler))
 	t.Cleanup(server.Close)
