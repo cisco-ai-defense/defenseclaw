@@ -122,7 +122,7 @@ SETUP_KEYMAPS: dict[SetupView, tuple[KeySpec, ...]] = {
         KeySpec(
             "Tab/Shift+Tab",
             "section",
-            "Next / previous section (also ←/→)",
+            "Next / previous section (also ←/→; ← on the first section goes back to the tasks)",
             None,
             ("tab", "shift+tab", "left", "right"),
         ),
