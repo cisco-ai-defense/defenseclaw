@@ -1411,12 +1411,13 @@ def entries_cmd(
     """Show cached entries for a source. Run after ``registry sync``.
 
     The ``--approved`` / ``--rejected`` flags filter on the
-    operator-override bits stored alongside the scanner verdict;
-    these are independent of ``--status`` so combinations like
-    ``--rejected --status warning`` still work (operator rejected
-    an entry the scanner had only warned about). Both flags
-    together returns the empty set by definition because
-    ``approve`` clears ``rejected`` and vice versa.
+    operator-override bits. An approved entry keeps its scanner
+    verdict, so ``--approved --status warning`` lists entries an
+    operator approved although the scanner warned. A rejected
+    entry's status is ``rejected`` (the scanner verdict is not
+    kept), so ``--rejected`` already means ``--status rejected``.
+    Both flags together returns the empty set by definition
+    because ``approve`` clears ``rejected`` and vice versa.
     """
     cfg = _require_cfg(app)
     source = _find_source(cfg, source_id)
@@ -1435,6 +1436,9 @@ def entries_cmd(
         if rejected:
             bits.append("rejected")
         ux.subhead(f"No matching entries ({', '.join(bits)}).")
+        if rejected and status.lower() not in ("all", "rejected"):
+            # GAP-2416: a rejected entry's status is always "rejected".
+            ux.subhead("A rejected entry's status is 'rejected'; drop --status to list them.")
         return
     click.echo()
     ux.section(f"Entries for {source.id}")

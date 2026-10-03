@@ -1220,6 +1220,20 @@ class TestRegistryEntriesFilters(RegistryCommandTestBase):
         # so the operator's call survives both filter shapes.
         self.assertEqual(rows[0]["status"], "rejected")
 
+    def test_rejected_with_a_scan_status_explains_the_empty_result(self):
+        # GAP-2416: a rejected entry's status is "rejected", so the help no
+        # longer offers "--rejected --status warning" and the empty result
+        # says why.
+        result = self.invoke([
+            "entries", "corp-skills", "--rejected", "--status", "clean",
+        ])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("No matching entries", result.output)
+        self.assertIn("drop --status to list them", result.output)
+        help_text = " ".join(self.invoke(["entries", "--help"]).output.split())
+        self.assertNotIn("--rejected --status warning", help_text)
+        self.assertRegex(help_text, r"already means \W*--status rejected")
+
     def test_entries_status_rejected_not_blocked(self):
         # GAP-2371: a rejected entry is on ``--status rejected``, not on
         # ``--status blocked`` (reject does not block the server itself).
