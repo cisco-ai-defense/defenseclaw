@@ -2358,6 +2358,11 @@ def _assert_connector_plugin_identities_unambiguous(
     registry_cache: PluginRegistryCache | None = None,
 ) -> None:
     """Preflight all configured roots without collapsing physical aliases."""
+    if connector_paths.normalize(connector) == "hermes":
+        # GAP-2463: Hermes lists its own plugin sources: category folders
+        # (~/.hermes/plugins/platforms) are containers, not plugins, and a
+        # user plugin overrides a bundled one with the same id.
+        return
     claimed = PluginInstallClaims()
     for root in _plugin_roots_for_connector(app, connector):
         for entry in discover_plugin_directories(

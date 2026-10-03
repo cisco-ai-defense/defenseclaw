@@ -36,6 +36,17 @@ class TestHermesCategoryPlugins(PluginCommandTestBase):
         env.start()
         self.addCleanup(env.stop)
 
+    def test_list_with_category_folder_shared_by_both_roots(self, _mock_oc):
+        """GAP-2463: a user category folder named like a bundled one is no identity conflict."""
+        _write_plugin(os.path.join(self.user, "platforms", "demo"), "demo")
+        _write_plugin(os.path.join(self.user, "web", "extra"), "extra")
+        _write_plugin(os.path.join(self.bundled, "platforms", "a2a"), "a2a")
+        _write_plugin(os.path.join(self.bundled, "web", "ddgs"), "ddgs")
+        result = self.invoke(["list", "--connector", "hermes", "--json"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        ids = {item["id"] for item in json.loads(result.output)}
+        self.assertTrue({"platforms/demo", "web/extra", "a2a", "web/ddgs"} <= ids, ids)
+
     def _watcher_quarantine(self, listed_id: str) -> str:
         """The state the gateway watcher leaves: a global action, the copy under hermes/."""
         source = os.path.join(self.user, *listed_id.split("/"))
