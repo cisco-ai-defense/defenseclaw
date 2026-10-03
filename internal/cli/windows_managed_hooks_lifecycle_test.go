@@ -940,3 +940,64 @@ func TestWindowsManagedHooksLifecycleRetirementAllowsOnlyRestoredPendingJournal(
 		})
 	}
 }
+
+// GAP-2474: a standalone capture writes a changed Cursor adapter back before
+// it reads the target registry; a Secure Client capture, or a failure the
+// restore cannot fix, still fails with the original error.
+func TestReadWindowsManagedHooksLifecycleCursorTargetsRestoresAChangedAdapter(t *testing.T) {
+	previousTargets := windowsManagedHooksLifecycleCursorTargets
+	previousRestore := windowsManagedHooksLifecycleCursorRestore
+	previousStandalone := windowsManagedHooksLifecycleStandaloneProcess
+	t.Cleanup(func() {
+		windowsManagedHooksLifecycleCursorTargets = previousTargets
+		windowsManagedHooksLifecycleCursorRestore = previousRestore
+		windowsManagedHooksLifecycleStandaloneProcess = previousStandalone
+	})
+	changed := errors.New("enterprise hooks: Cursor enterprise adapter identity changed")
+	target := enterprisehooks.WindowsCursorManagedRuntimeTarget{SID: "S-1-5-21-1-2-3-1001", DataDir: `C:\Users\u\.defenseclaw`}
+	for name, test := range map[string]struct {
+		standalone bool
+		restored   bool
+		restoreErr error
+		wantErr    bool
+		wantCalls  int
+	}{
+		"standalone restores": {standalone: true, restored: true, wantCalls: 1},
+		"secure client":       {standalone: false, wantErr: true},
+		"nothing to restore":  {standalone: true, wantErr: true, wantCalls: 1},
+		"restore fails":       {standalone: true, restoreErr: errors.New("not LocalSystem"), wantErr: true, wantCalls: 1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			adapterOK := false
+			windowsManagedHooksLifecycleCursorTargets = func() ([]enterprisehooks.WindowsCursorManagedRuntimeTarget, bool, error) {
+				if !adapterOK {
+					return nil, true, changed
+				}
+				return []enterprisehooks.WindowsCursorManagedRuntimeTarget{target}, true, nil
+			}
+			calls := 0
+			windowsManagedHooksLifecycleCursorRestore = func(hook string) (bool, error) {
+				calls++
+				if hook != `C:\hook.exe` {
+					t.Fatalf("restore got hook %q", hook)
+				}
+				adapterOK = test.restored
+				return test.restored, test.restoreErr
+			}
+			windowsManagedHooksLifecycleStandaloneProcess = func() bool { return test.standalone }
+			targets, active, err := readWindowsManagedHooksLifecycleCursorTargets(`C:\hook.exe`)
+			if calls != test.wantCalls {
+				t.Fatalf("restore calls = %d, want %d", calls, test.wantCalls)
+			}
+			if test.wantErr {
+				if !errors.Is(err, changed) {
+					t.Fatalf("error = %v, want the original read error", err)
+				}
+				return
+			}
+			if err != nil || !active || len(targets) != 1 || targets[0] != target {
+				t.Fatalf("targets=%v active=%t err=%v", targets, active, err)
+			}
+		})
+	}
+}
