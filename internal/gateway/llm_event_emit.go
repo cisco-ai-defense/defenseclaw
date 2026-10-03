@@ -584,7 +584,7 @@ func proxyLLMEventMeta(p *GuardrailProxy, r *http.Request, req *ChatRequest, pro
 	return llmEventMeta{
 		Source:         p.connectorName(),
 		Provider:       provider,
-		Model:          req.Model,
+		Model:          telemetryModelID(req.Model),
 		SessionID:      sessionID,
 		RequestID:      requestID,
 		RunID:          env.RunID,
@@ -604,7 +604,7 @@ func streamLLMEventMeta(r *EventRouter, sessionID, runID, provider, model, agent
 	return llmEventMeta{
 		Source:    "openclaw",
 		Provider:  provider,
-		Model:     model,
+		Model:     telemetryModelID(model),
 		SessionID: sessionID,
 		RunID:     firstNonEmpty(runID, gatewaylog.ProcessRunID()),
 		AgentID:   SharedAgentRegistry().AgentID(),
@@ -829,7 +829,7 @@ func (a *APIServer) emitClaudeCodeHookLLMEvent(ctx context.Context, req claudeCo
 		// longer knows the session model (GAP-2511); the transcript does.
 		meta.Model = claudeCodeTranscriptModel(req.TranscriptPath)
 	}
-	meta.Model = claudeCodeSessionModel(meta.Model)
+	meta.Model = telemetryModelID(meta.Model)
 	meta.TraceEventID = hookTraceEventID(ctx, meta)
 	meta = finalizeHookEventCorrelation(meta, req.Payload)
 	meta, recordLifecycle := a.prepareHookLifecycleTransition(meta)
@@ -1029,7 +1029,7 @@ func hookLLMEventMeta(ctx context.Context, source, sessionID, turnID, model, hoo
 	return llmEventMeta{
 		Source:    source,
 		Provider:  provider,
-		Model:     model,
+		Model:     telemetryModelID(model),
 		SessionID: sessionID,
 		TurnID:    turnID,
 		AgentID:   agentID,

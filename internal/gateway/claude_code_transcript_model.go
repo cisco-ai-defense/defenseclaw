@@ -94,13 +94,16 @@ func claudeCodeTranscriptModel(path string) string {
 // model ID it routes to ("anthropic.claude-haiku-4-5-20251001-v1:0").
 var bedrockInferenceProfileModel = regexp.MustCompile(`^(?:us|us-gov|eu|apac|ca|jp|au|global)\.(anthropic\..+)$`)
 
-// claudeCodeSessionModel gives one Claude Code session one model ID. On
+// telemetryModelID gives one model one ID on every connector's telemetry. On
 // Bedrock the startup SessionStart names the inference profile the user
 // configured ("us.anthropic..."), while the transcript, which names the model
 // after a gateway restart or on a resumed session (GAP-2511), records the
 // model ID Bedrock answered with ("anthropic..."). The same session then
-// showed up under two models in Galileo (GAP-2556). Both now use the model ID.
-func claudeCodeSessionModel(model string) string {
+// showed up under two models in Galileo (GAP-2556). OpenClaw, the other hook
+// connectors and the proxy report the profile too, so they kept the prefix
+// while Claude Code dropped it (GAP-2584). Every connector now uses the model
+// ID. The request sent to the provider is unchanged.
+func telemetryModelID(model string) string {
 	if match := bedrockInferenceProfileModel.FindStringSubmatch(model); match != nil {
 		return match[1]
 	}
