@@ -214,6 +214,36 @@ func (c *Config) ReadMCPServersForConnector(connector string) ([]MCPServerEntry,
 	if c != nil {
 		workspaceDir = c.ConnectorWorkspaceDir()
 	}
+	return c.readMCPServersForConnectorIn(connector, workspaceDir)
+}
+
+// LookupMCPServerForConnector returns the connector's configured MCP server
+// called name, read from the agent's working directory (when given) or the
+// configured workspace. Runtime hooks carry only the server name; this gives
+// the gateway the server's URL, command and transport so URL-pinned registry
+// rules match at runtime the same way they do at admission (GAP-2488).
+func (c *Config) LookupMCPServerForConnector(connector, workspaceDir, name string) (MCPServerEntry, bool) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return MCPServerEntry{}, false
+	}
+	workspaceDir = strings.TrimSpace(workspaceDir)
+	if workspaceDir == "" && c != nil {
+		workspaceDir = c.ConnectorWorkspaceDir()
+	}
+	entries, err := c.readMCPServersForConnectorIn(connector, workspaceDir)
+	if err != nil {
+		return MCPServerEntry{}, false
+	}
+	for _, e := range entries {
+		if e.Name == name {
+			return e, true
+		}
+	}
+	return MCPServerEntry{}, false
+}
+
+func (c *Config) readMCPServersForConnectorIn(connector, workspaceDir string) ([]MCPServerEntry, error) {
 	switch normalizeConnectorKey(connector) {
 	case "claudecode":
 		return readMCPServersClaudeCode(workspaceDir)
@@ -240,6 +270,9 @@ func (c *Config) ReadMCPServersForConnector(connector string) ([]MCPServerEntry,
 	case "omnigent":
 		return nil, nil
 	default:
+		if c == nil {
+			return nil, nil
+		}
 		return readMCPServersOpenClaw(c.Claw.ConfigFile)
 	}
 }
