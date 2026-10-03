@@ -815,6 +815,9 @@ class TestAdditiveSetupCommand(unittest.TestCase):
         self.assertNotEqual(result.exit_code, 0, msg=result.output)
         self.assertIn("cannot run next to hook connectors", result.output)
         self.assertIn("setup remove", result.output)
+        # GAP-2407: a refused run prints no intro that announces a change.
+        self.assertNotIn("Sets up DefenseClaw guardrails", result.output)
+        self.assertNotIn("claw.mode", result.output)
         gc = self.app.cfg.guardrail
         self.assertEqual(set(gc.connectors), {"codex", "cursor"})
         self.assertEqual(gc.connector, "codex")
@@ -854,6 +857,8 @@ class TestAdditiveSetupCommand(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, msg=result.output)
         backend.assert_called_once()
         self.assertIn("Remove them now with: defenseclaw-gateway restart", result.output)
+        self.assertIn("Sets up DefenseClaw guardrails for OpenClaw.", result.output)
+        self.assertNotIn("claw.mode", result.output)
         gc = self.app.cfg.guardrail
         self.assertEqual(gc.connectors, {})
         self.assertEqual(gc.connector, "openclaw")
