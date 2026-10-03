@@ -28,9 +28,11 @@ import (
 // PowerShellCommandSubsetReduction projects statically supplied commands of
 // a PowerShell -Command or -EncodedCommand body. The original action remains
 // partial: profiles, outer shell operators, and some body operators cannot be
-// represented as a complete action. The view contains only independently
-// parsed inner commands. A caller may use a match only for a monotone argv
-// subset rule; a non-match proves nothing about the original action.
+// represented as a complete action. The view contains the action's static
+// top-level commands (outer redirects dropped) and the independently parsed
+// inner commands of each exact body. A caller may use a match only for a
+// monotone argv subset rule, as an extra pass next to any other view of the
+// action; a non-match proves nothing about the original action.
 func PowerShellCommandSubsetReduction(input Input, facts Facts) (view Facts, ok bool) {
 	defer func() {
 		if recover() != nil {
@@ -57,6 +59,7 @@ func PowerShellCommandSubsetReduction(input Input, facts Facts) (view Facts, ok 
 		ActiveHome: facts.ActiveHome,
 		Parse:      ParseResult{Status: StatusComplete, Dialect: DialectMixed},
 	}
+	inner := 0
 	for _, outer := range facts.Commands {
 		if outer.ParentCommandID != 0 {
 			continue
@@ -64,12 +67,26 @@ func PowerShellCommandSubsetReduction(input Input, facts Facts) (view Facts, ok 
 		if !staticCertainPOSIXProcess(outer) {
 			return Facts{}, false
 		}
+		if shellStateBuiltins[strings.ToLower(outer.Program)] {
+			return Facts{}, false
+		}
+		// Every top-level command is static and certain (or a plain list
+		// member, judged as if it runs), so it stays in the view: a benign
+		// wrapper must not hide a matching command next to it.
+		if len(view.Commands)+1 > maxCommands {
+			return Facts{}, false
+		}
+		kept := outer
+		kept.ID = int64(len(view.Commands) + 1)
+		kept.ParentCommandID = 0
+		kept.PipelineID = 0
+		kept.ControlFlowUncertain = false
+		kept.ControlFlowOperator = ControlFlowOperatorNone
+		kept.Redirects = nil
+		view.Commands = append(view.Commands, kept)
 		switch strings.ToLower(outer.Program) {
 		case "pwsh", "pwsh.exe", "powershell", "powershell.exe":
 		default:
-			if shellStateBuiltins[strings.ToLower(outer.Program)] {
-				return Facts{}, false
-			}
 			continue
 		}
 		body, valid := exactPowerShellCommandBody(outer.Argv)
@@ -102,9 +119,10 @@ func PowerShellCommandSubsetReduction(input Input, facts Facts) (view Facts, ok 
 			command.ControlFlowOperator = ControlFlowOperatorNone
 			command.Wrappers = nil
 			view.Commands = append(view.Commands, command)
+			inner++
 		}
 	}
-	if len(view.Commands) == 0 {
+	if inner == 0 {
 		return Facts{}, false
 	}
 	return view, true

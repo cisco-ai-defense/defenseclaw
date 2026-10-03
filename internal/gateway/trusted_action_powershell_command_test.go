@@ -61,6 +61,12 @@ func TestTrustedActionPowerShellCommandBodyReduction(t *testing.T) {
 		{"wrapper after short circuit", `echo ready && powershell -c "echo ` + marker + `"`, true},
 		{"body descriptor duplication", `pwsh -Command "echo ` + marker + ` 2>&1"`, true},
 		{"marker after benign body statement", `pwsh -Command "echo ready; echo ` + marker + `"`, true},
+		// A benign wrapper must not hide a marker command next to it.
+		{"marker after benign wrapper", `pwsh -Command "echo safe"; echo ` + marker, true},
+		{"marker after benign wrapper short circuit", `pwsh -Command "echo safe" && echo ` + marker, true},
+		{"marker piped into benign wrapper", `echo ` + marker + ` | pwsh -Command "Out-Null"`, true},
+		{"marker with runtime redirect before benign wrapper", `echo ` + marker + ` > ~/x.txt; pwsh -Command "echo safe"`, true},
+		{"benign wrapper with runtime redirect before marker", `pwsh -Command "echo safe" > ~/x.txt; echo ` + marker, true},
 		{"benign statement list", `pwsh -Command "echo safe; echo done"`, false},
 		{"quoted marker text", `pwsh -Command "echo 'safe; echo ` + marker + `'; echo done"`, false},
 		{"unreachable after exit", `pwsh -Command "exit; echo ` + marker + `"`, false},

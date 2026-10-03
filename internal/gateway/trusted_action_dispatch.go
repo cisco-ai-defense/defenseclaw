@@ -167,12 +167,18 @@ func dispatchTrustedAction(
 	// subsetView is set when semanticFacts keeps only the action's static,
 	// certain commands; as on a redirect-target view, only a match counts.
 	subsetView := false
+	// powerShellView keeps the independently parsed commands of exact
+	// pwsh -Command / -EncodedCommand bodies next to the action's static
+	// top-level commands. The original action remains partial. The view
+	// never replaces a view chosen below, whose rule classes and non-matches
+	// keep their meaning: it is an extra pass where only a monotone argv
+	// rule's match counts.
+	var powerShellView *actionfacts.Facts
 	if !facts.Authoritative() {
 		if view, ok := actionfacts.PowerShellCommandSubsetReduction(request.Input, facts); ok {
-			// The original action remains partial. Only independently parsed
-			// inner argv may support a monotone rule's positive match.
-			semanticFacts, viewCandidate, subsetView = view, argvSubsetReductionCandidate, true
-		} else if view, twin, ok := actionfacts.DynamicRedirectTargetReduction(request.Input, facts); ok {
+			powerShellView = &view
+		}
+		if view, twin, ok := actionfacts.DynamicRedirectTargetReduction(request.Input, facts); ok {
 			semanticFacts, staticTargetTwin, viewCandidate = view, &twin, redirectReductionCandidate
 		} else if view, ok := actionfacts.ShortCircuitListReduction(request.Input, facts); ok {
 			semanticFacts, viewCandidate = view, listReductionCandidate
@@ -186,6 +192,9 @@ func dispatchTrustedAction(
 			if partialArgv {
 				viewCandidate = argvSubsetReductionCandidate
 			}
+		} else if powerShellView != nil {
+			semanticFacts, viewCandidate, subsetView = *powerShellView, argvSubsetReductionCandidate, true
+			powerShellView = nil
 		} else {
 			var fallbackTelemetry trustedActionTelemetry
 			findings, fallbackTelemetry = dispatchTrustedFallback(
@@ -216,116 +225,148 @@ func dispatchTrustedAction(
 	excluded := make(map[string]struct{})
 	semanticFindings := make([]RuleFinding, 0, len(generation.semanticRules))
 	matchedSemanticOwnerIDs := make(map[string]struct{})
-	var enforcementFacts actionfacts.Facts
-	var enforcementProjection *semanticpb.Facts
-	enforcementProjected := false
 	var consumedCost uint64
-	fallbackAllOwners := false
 
-	for _, candidate := range generation.semanticRules {
-		if ctx.Err() != nil ||
-			consumedCost >= trustedActionDispatchMaxCost {
-			break
-		}
-		if _, alreadyMatched := matchedSemanticOwnerIDs[candidate.rule.ID]; alreadyMatched {
-			continue
-		}
-		if viewCandidate != nil && !viewCandidate(candidate) {
-			continue
-		}
-		if !candidate.owner.eligible(semanticFacts) {
-			if !matchOnly && candidate.owner.suppressFallback != nil &&
-				candidate.owner.suppressFallback(semanticFacts) {
-				excludeSemanticOwner(excluded, candidate.owner, false)
-			}
-			continue
-		}
-		if staticTargetTwin != nil && !candidate.owner.eligible(*staticTargetTwin) {
-			continue
-		}
-		result, evalCode := candidate.program.EvalBool(ctx, fullProjection)
-		consumedCost += result.Cost
-		if consumedCost > trustedActionDispatchMaxCost {
-			break
-		}
-		if evalCode != semantic.EvalOK {
-			if ctx.Err() != nil {
+	// evaluateSemanticRules runs the semantic rules that candidateOK admits
+	// on view (projection is its projection) and reports whether the view's
+	// enforcement projection failed, in which case no finding was added
+	// after the failure and the caller decides what that means.
+	evaluateSemanticRules := func(
+		view actionfacts.Facts,
+		projection *semanticpb.Facts,
+		candidateOK func(compiledSemanticRule) bool,
+		matchOnly bool,
+		staticTargetTwin *actionfacts.Facts,
+	) (projectionFailed bool) {
+		var enforcementFacts actionfacts.Facts
+		var enforcementProjection *semanticpb.Facts
+		enforcementProjected := false
+		projectionCode := semantic.ProjectionOK
+		for _, candidate := range generation.semanticRules {
+			if ctx.Err() != nil ||
+				consumedCost >= trustedActionDispatchMaxCost {
 				break
 			}
-			continue
-		}
-		if !result.Matched {
-			if !matchOnly {
-				excludeSemanticOwner(excluded, candidate.owner, false)
+			if _, alreadyMatched := matchedSemanticOwnerIDs[candidate.rule.ID]; alreadyMatched {
+				continue
 			}
-			continue
-		}
-
-		if !enforcementProjected {
-			enforcementFacts = semanticFacts.EnforcementProjection()
-			enforcementProjection, projectionCode = semantic.Project(enforcementFacts)
-			enforcementProjected = true
-		}
-		if projectionCode != semantic.ProjectionOK {
-			fallbackAllOwners = true
-			break
-		}
-		enforcementResult, enforcementCode := candidate.program.EvalBool(
-			ctx,
-			enforcementProjection,
-		)
-		consumedCost += enforcementResult.Cost
-		if consumedCost > trustedActionDispatchMaxCost {
-			break
-		}
-		if enforcementCode != semantic.EvalOK {
-			if ctx.Err() != nil {
+			if candidateOK != nil && !candidateOK(candidate) {
+				continue
+			}
+			if !candidate.owner.eligible(view) {
+				if !matchOnly && candidate.owner.suppressFallback != nil &&
+					candidate.owner.suppressFallback(view) {
+					excludeSemanticOwner(excluded, candidate.owner, false)
+				}
+				continue
+			}
+			if staticTargetTwin != nil && !candidate.owner.eligible(*staticTargetTwin) {
+				continue
+			}
+			result, evalCode := candidate.program.EvalBool(ctx, projection)
+			consumedCost += result.Cost
+			if consumedCost > trustedActionDispatchMaxCost {
 				break
 			}
-			continue
-		}
+			if evalCode != semantic.EvalOK {
+				if ctx.Err() != nil {
+					break
+				}
+				continue
+			}
+			if !result.Matched {
+				if !matchOnly {
+					excludeSemanticOwner(excluded, candidate.owner, false)
+				}
+				continue
+			}
 
-		excludeSemanticOwner(excluded, candidate.owner, true)
-		for _, claimedID := range candidate.owner.claimedIDs(true) {
-			matchedSemanticOwnerIDs[claimedID] = struct{}{}
+			if !enforcementProjected {
+				enforcementFacts = view.EnforcementProjection()
+				enforcementProjection, projectionCode = semantic.Project(enforcementFacts)
+				enforcementProjected = true
+			}
+			if projectionCode != semantic.ProjectionOK {
+				return true
+			}
+			enforcementResult, enforcementCode := candidate.program.EvalBool(
+				ctx,
+				enforcementProjection,
+			)
+			consumedCost += enforcementResult.Cost
+			if consumedCost > trustedActionDispatchMaxCost {
+				break
+			}
+			if enforcementCode != semantic.EvalOK {
+				if ctx.Err() != nil {
+					break
+				}
+				continue
+			}
+
+			excludeSemanticOwner(excluded, candidate.owner, true)
+			for _, claimedID := range candidate.owner.claimedIDs(true) {
+				matchedSemanticOwnerIDs[claimedID] = struct{}{}
+			}
+			finding := RuleFinding{
+				RuleID:      candidate.rule.ID,
+				Title:       candidate.rule.Title,
+				Severity:    candidate.rule.Severity,
+				Confidence:  candidate.rule.Confidence,
+				Tags:        append([]string(nil), candidate.rule.Tags...),
+				enforcement: findingEnforcementAllowed,
+			}
+			if !request.EnforcementCapable ||
+				candidate.owner.detectionOnly || candidate.owner.alertOnly ||
+				!enforcementFacts.EnforcementEligible() ||
+				!enforcementResult.Matched {
+				finding.enforcement = findingEnforcementDetectionOnly
+			}
+			if request.EnforcementCapable && candidate.owner.alertOnly {
+				finding.enforcement = findingEnforcementAlertOnly
+			}
+			finding = finding.withTrustedActionProof(
+				newActionFactsSemanticFindingProof(
+					candidate.rule.ID,
+					actionFactsSemanticProofInput{
+						FactsAuthoritative:  view.Authoritative(),
+						EnforcementEligible: enforcementFacts.EnforcementEligible(),
+						ProjectionComplete:  projectionCode == semantic.ProjectionOK,
+						EvaluationComplete:  enforcementCode == semantic.EvalOK,
+						Matched:             enforcementResult.Matched,
+					},
+				),
+			)
+			semanticFindings = append(
+				semanticFindings,
+				adjustConfidence(request.Input.Tool, finding),
+			)
 		}
-		finding := RuleFinding{
-			RuleID:      candidate.rule.ID,
-			Title:       candidate.rule.Title,
-			Severity:    candidate.rule.Severity,
-			Confidence:  candidate.rule.Confidence,
-			Tags:        append([]string(nil), candidate.rule.Tags...),
-			enforcement: findingEnforcementAllowed,
-		}
-		if !request.EnforcementCapable ||
-			candidate.owner.detectionOnly || candidate.owner.alertOnly ||
-			!enforcementFacts.EnforcementEligible() ||
-			!enforcementResult.Matched {
-			finding.enforcement = findingEnforcementDetectionOnly
-		}
-		if request.EnforcementCapable && candidate.owner.alertOnly {
-			finding.enforcement = findingEnforcementAlertOnly
-		}
-		finding = finding.withTrustedActionProof(
-			newActionFactsSemanticFindingProof(
-				candidate.rule.ID,
-				actionFactsSemanticProofInput{
-					FactsAuthoritative:  semanticFacts.Authoritative(),
-					EnforcementEligible: enforcementFacts.EnforcementEligible(),
-					ProjectionComplete:  projectionCode == semantic.ProjectionOK,
-					EvaluationComplete:  enforcementCode == semantic.EvalOK,
-					Matched:             enforcementResult.Matched,
-				},
-			),
-		)
-		semanticFindings = append(
-			semanticFindings,
-			adjustConfidence(request.Input.Tool, finding),
-		)
+		return false
 	}
-	if fallbackAllOwners {
+
+	if evaluateSemanticRules(
+		semanticFacts,
+		fullProjection,
+		viewCandidate,
+		matchOnly,
+		staticTargetTwin,
+	) {
 		clear(excluded)
 		semanticFindings = semanticFindings[:0]
+	}
+	// The PowerShell body view adds positive argv matches only. A failed
+	// projection there adds nothing and leaves the result above unchanged.
+	if powerShellView != nil {
+		if projection, code := semantic.Project(*powerShellView); code == semantic.ProjectionOK {
+			evaluateSemanticRules(
+				*powerShellView,
+				projection,
+				argvSubsetReductionCandidate,
+				true,
+				nil,
+			)
+		}
 	}
 	restoreTrustedUnresolvedReadFallbacks(
 		excluded,
