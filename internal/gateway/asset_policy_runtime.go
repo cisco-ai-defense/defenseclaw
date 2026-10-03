@@ -547,6 +547,28 @@ func hookNotificationCoveredByAssetPolicy(rawActionBeforeAssets string, assetDec
 	}
 }
 
+// hookResponseRuleIDs are the rule IDs a hook response carries: the hook
+// rules' own IDs plus the asset_policy.<type>.<source> ID of every blocking
+// asset decision, as the asset-policy audit row records them. The tool span
+// takes its defenseclaw.guardrail.rule_id from the first ID, so the asset
+// rule leads when asset policy, not a hook rule, raised the block
+// (GAP-2489).
+func hookResponseRuleIDs(hookRuleIDs []string, rawActionBeforeAssets string, assetDecisions []runtimeAssetDecision) []string {
+	var assetRuleIDs []string
+	for _, asset := range assetDecisions {
+		if asset.decision.RawAction == "block" {
+			assetRuleIDs = append(assetRuleIDs, assetPolicyDecisionRuleID(asset.decision, asset.targetType))
+		}
+	}
+	if len(assetRuleIDs) == 0 {
+		return hookRuleIDs
+	}
+	if normalizeCodexAction(rawActionBeforeAssets) == "block" {
+		return mergeBoundedRuleIDs(8, hookRuleIDs, assetRuleIDs)
+	}
+	return mergeBoundedRuleIDs(8, assetRuleIDs, hookRuleIDs)
+}
+
 // dispatchAssetPolicyNotification fires an OS toast for an asset
 // policy block / would-block decision. Only the runtime evaluators
 // call this helper, and only after they have already decided the

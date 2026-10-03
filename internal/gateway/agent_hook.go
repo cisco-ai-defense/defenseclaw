@@ -2166,7 +2166,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	// / RuleIDs), and the scan_finding events all join on the same
 	// evaluation_id.
 	resp.EvaluationID = evalCtx.EvaluationID
-	resp.RuleIDs = evalCtx.RuleIDs
+	resp.RuleIDs = hookResponseRuleIDs(evalCtx.RuleIDs, rawActionBeforeAssets, assetDecisions)
 	resp.RedactionEnabled = verdict.RedactionEnabled
 	resp.laneVerdict = verdict.laneVerdict
 	return resp
