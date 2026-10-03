@@ -1214,11 +1214,11 @@ class TestCLIIntegration(unittest.TestCase):
                     self.assertEqual(data["errors"], [])
                     self.assertEqual(
                         len(data["limitations"]),
-                        3 if connector == "codex" else 4,
+                        2 if connector == "codex" else 4,
                     )
                     self.assertNotIn("failed", result.stderr.lower())
 
-    def test_combined_codex_claude_has_four_limitations_without_warning(self):
+    def test_combined_codex_claude_has_three_limitations_without_warning(self):
         from defenseclaw.commands.cmd_aibom import aibom
 
         runner = CliRunner()
@@ -1238,7 +1238,7 @@ class TestCLIIntegration(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         data = json.loads(result.stdout)
         self.assertEqual(len(data), 2)
-        self.assertEqual(sum(len(inv["limitations"]) for inv in data), 4)
+        self.assertEqual(sum(len(inv["limitations"]) for inv in data), 3)
         self.assertTrue(all(inv["errors"] == [] for inv in data))
         self.assertNotIn("failed", result.stderr.lower())
 
@@ -1283,7 +1283,7 @@ class TestCLIIntegration(unittest.TestCase):
         self.assertGreaterEqual(json_start, 0)
         data = json.loads(result.stdout[json_start:])
         self.assertEqual(len(data["errors"]), 1)
-        self.assertEqual(len(data["limitations"]), 3)
+        self.assertEqual(len(data["limitations"]), 2)
         self.assertIn("1 connector inventory command(s) failed", result.output)
 
 
@@ -3977,10 +3977,10 @@ class TestBuildAibomFromFilesystem(unittest.TestCase):
         self.assertEqual(inv["memory"], [])
         self.assertEqual(inv["errors"], [])
         self.assertEqual(inv["summary"]["errors"], 0)
-        self.assertEqual(inv["summary"]["limitations"], 3)
+        self.assertEqual(inv["summary"]["limitations"], 2)
         self.assertEqual(
             {item["category"] for item in inv["limitations"]},
-            {"tools", "models", "memory"},
+            {"tools", "memory"},
         )
         self.assertTrue(all(item["connector"] == "codex" for item in inv["limitations"]))
         self.assertTrue(all(item["status"] == "unsupported" for item in inv["limitations"]))
@@ -4015,9 +4015,9 @@ class TestBuildAibomFromFilesystem(unittest.TestCase):
         self.assertEqual(len(inv["errors"]), 1)
         self.assertEqual(inv["errors"][0]["command"], "codex:skills")
         self.assertIn("denied", inv["errors"][0]["error"])
-        self.assertEqual(len(inv["limitations"]), 3)
+        self.assertEqual(len(inv["limitations"]), 2)
         self.assertEqual(inv["summary"]["errors"], 1)
-        self.assertEqual(inv["summary"]["limitations"], 3)
+        self.assertEqual(inv["summary"]["limitations"], 2)
 
     def test_skill_eligibility_requires_marker(self):
         cfg = _make_cfg_for_connector(self.tmp, "codex")
