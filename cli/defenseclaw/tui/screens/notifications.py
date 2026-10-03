@@ -21,6 +21,10 @@ from defenseclaw.tui.screens.consequence import (
 )
 from defenseclaw.tui.theme import DEFAULT_TOKENS
 
+# One label per state, so the OFF->ON modal reads as the exact reverse of ON->OFF.
+NOTIFICATIONS_ON_LABEL = "ON (toasts for blocks and approvals)"
+NOTIFICATIONS_OFF_LABEL = "OFF (no toasts; audit unchanged)"
+
 
 def desired_notifications_action(currently_enabled: bool) -> str:
     """Return the `setup notifications` subcommand for the next state."""
@@ -68,8 +72,8 @@ def build_notifications_model(currently_enabled: bool, system: str | None = None
         )
 
     desired = desired_notifications_action(currently_enabled)
-    current_label = "ON (toasts on every block / approval)" if currently_enabled else "OFF (audit unchanged)"
-    desired_label = "OFF (no toasts; audit unchanged)" if currently_enabled else "ON (block / approval toasts)"
+    current_label = NOTIFICATIONS_ON_LABEL if currently_enabled else NOTIFICATIONS_OFF_LABEL
+    desired_label = NOTIFICATIONS_OFF_LABEL if currently_enabled else NOTIFICATIONS_ON_LABEL
     if desired == "on":
         details = (
             "Turning notifications ON surfaces:",
