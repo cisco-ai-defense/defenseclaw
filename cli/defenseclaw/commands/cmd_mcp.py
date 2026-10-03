@@ -1268,14 +1268,14 @@ def _scan_all_mcp(
         scan_target = s.url or s.name
         if s.bundled or connector_paths.is_bundled_mcp_server(s, connector=connector):
             if not as_json:
-                click.echo(
+                ux.echo(
                     f"BUNDLED: {s.name} — skipping vendor-managed MCP server",
                     err=True,
                 )
             continue
         if s.load_problem:
             if not as_json:
-                click.echo(
+                ux.echo(
                     f"NOT LOADED: {s.name} — skipping; "
                     f"{_mcp_not_loaded_next_step(s, connector)}",
                     err=True,
@@ -1288,7 +1288,7 @@ def _scan_all_mcp(
             "mcp", s.name, connector
         ) or pe.is_blocked_for_connector("mcp", scan_target, connector):
             if not as_json:
-                click.echo(
+                ux.echo(
                     f"BLOCKED: {s.name} — skipping (remove from block list first)",
                     err=True,
                 )
@@ -1545,7 +1545,7 @@ def _scan_one_resolved(
                 "reason": "vendor_bundled",
             }, indent=2))
         else:
-            click.echo(
+            ux.echo(
                 f"BUNDLED: {entry.name} — skipping vendor-managed MCP server"
             )
         return "bundled-skipped"
@@ -1556,7 +1556,7 @@ def _scan_one_resolved(
     # global) so a peer-scoped block only skips the scan for that peer.
     for blocked_key in {target, resolved}:
         if pe.is_blocked_for_connector("mcp", blocked_key, connector):
-            click.echo(
+            ux.echo(
                 f"BLOCKED: {blocked_key} — remove from block list first",
                 err=True,
             )
@@ -1793,7 +1793,7 @@ def scan(
     errored = False
     for c in owners:
         if not as_json:
-            click.secho(f"\n── connector: {c} ──", fg="cyan")
+            ux.secho(f"\n── connector: {c} ──", fg="cyan")
         try:
             if _scan_one_resolved(app, c, target, emit_hints=False, **common) == "error":
                 errored = True
@@ -2570,7 +2570,7 @@ def set_server(
             post_c = _admit(c, scan_result=result)
             if post_c.verdict == "rejected":
                 sev = result.max_severity()
-                click.secho(
+                ux.secho(
                     f"  blocked [{c}]: {sev} findings — rejected by mcp_actions policy "
                     "(use --skip-scan to override)",
                     fg="red",

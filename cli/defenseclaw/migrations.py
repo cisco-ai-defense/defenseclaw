@@ -900,7 +900,7 @@ def _migrate_0_4_0(ctx: MigrationContext) -> None:
         # version that never finished its first ``defenseclaw setup``.
         # Nothing to migrate; the new sidecar will bootstrap on
         # first boot via the same firstboot.go path.
-        click.echo(f"    (no data dir at {ctx.data_dir} — fresh install will bootstrap)")
+        ux.echo(f"    (no data dir at {ctx.data_dir} — fresh install will bootstrap)")
         return
 
     _migrate_0_4_0_token_bootstrap(ctx)
@@ -914,9 +914,9 @@ def _migrate_0_4_0(ctx: MigrationContext) -> None:
     if ctx.changes:
         click.echo(f"    applied {len(ctx.changes)} change(s):")
         for c in ctx.changes:
-            click.echo(f"      • {c}")
+            ux.echo(f"      • {c}")
     else:
-        click.echo("    (already on connector-v3 layout — no changes needed)")
+        ux.echo("    (already on connector-v3 layout — no changes needed)")
 
 
 def _migrate_0_4_0_token_bootstrap(ctx: MigrationContext) -> None:
@@ -3495,7 +3495,7 @@ def migrate(
     if steps:
         _tighten_group_writable(ctx, [config_path, os.path.join(data_dir, ".env")])
     for name, step in steps:
-        click.echo(f"  {ux.dim('→')} {display_step_name(name)}")
+        ux.echo(f"  {ux.dim('→')} {display_step_name(name)}")
         try:
             step(ctx)
         except Exception as exc:  # noqa: BLE001 - surfaced to the installer, which rolls back

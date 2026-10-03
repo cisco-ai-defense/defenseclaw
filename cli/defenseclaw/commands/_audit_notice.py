@@ -23,8 +23,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import click
-
 from defenseclaw import ux
 
 _NOTED = False
@@ -83,7 +81,7 @@ def note_asset_policy_observed(
         return
     source = getattr(decision, "observed_source", "")
     where = f" [{connector}]" if connector else ""
-    click.secho(
+    ux.secho(
         ux.console_text(
             f"  ⚠ asset policy (observe){where}: {reason}; allowed now, "
             "action mode would block it."

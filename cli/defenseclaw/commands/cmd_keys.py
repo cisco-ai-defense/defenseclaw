@@ -58,7 +58,7 @@ def _emit_bound_endpoint_hint(spec: CredentialSpec | None, cfg, *, indent: str) 
     endpoint = spec.resolve_bound_endpoint(cfg)
     if not endpoint:
         return
-    click.echo(f"{indent}{ux.dim('↪ bound to ' + endpoint)}")
+    ux.echo(f"{indent}{ux.dim('↪ bound to ' + endpoint)}")
     click.echo(f"{indent}{ux.dim('  change region/host: defenseclaw setup')}")
 
 
@@ -238,7 +238,7 @@ def keys_set(app: AppContext, env_name: str, value: str | None, value_stdin: boo
         except CanonicalObservabilityUnavailableError:
             # Same offline rule as policy activate: the key is saved, only the
             # audit event can't be admitted while the gateway is down.
-            click.echo(
+            ux.echo(
                 "  ⚠ Key saved, but the gateway runtime is unavailable; the audit event was not recorded.",
                 err=True,
             )
@@ -306,7 +306,7 @@ def keys_remove(app: AppContext, env_name: str, yes: bool) -> None:
                 diff=[{"path": f"/.env/{env_name}", "op": "remove", "before": "set", "after": "unset"}],
             )
         except CanonicalObservabilityUnavailableError:
-            click.echo(
+            ux.echo(
                 "  ⚠ Key removed, but the gateway runtime is unavailable; the audit event was not recorded.",
                 err=True,
             )
@@ -370,7 +370,7 @@ def keys_fill_missing(app: AppContext, yes: bool) -> None:
 
     ux.warn(f"{len(statuses)} required credential(s) are unset:")
     for s in statuses:
-        click.echo(
+        ux.echo(
             f"    {ux.dim('•')} {ux.bold(s.resolution.env_name)}  "
             f"{ux.dim('—')}  {s.spec.description}"
         )
@@ -451,7 +451,7 @@ def _render_table(statuses: list[CredentialStatus], show_values: bool) -> None:
     # Pad before styling: ANSI codes count toward str.ljust widths.
     hdr = "  " + "  ".join(ux.bold(h.ljust(widths[i])) for i, h in enumerate(headers))
     click.echo(hdr)
-    click.echo("  " + "  ".join(ux.dim("─" * widths[i]) for i in range(len(headers))))
+    ux.echo("  " + "  ".join(ux.dim("─" * widths[i]) for i in range(len(headers))))
     for r in rows:
         click.echo("  " + "  ".join(r[i].ljust(widths[i]) for i in range(len(headers))))
     click.echo()
@@ -481,7 +481,7 @@ def _format_row(s: CredentialStatus, show_values: bool) -> list[str]:
 
 
 def _render_legend() -> None:
-    click.echo(
+    ux.echo(
         f"  {ux.bold('Legend:')}  ● required   ○ optional   · not used by current config"
     )
     click.echo(

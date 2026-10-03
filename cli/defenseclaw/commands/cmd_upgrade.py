@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import click
 
+from defenseclaw import ux
+
 
 def _managed_enterprise_profile() -> str | None:
     """The machine-wide managed deployment on this host, or None.
@@ -43,7 +45,7 @@ def _managed_enterprise_profile() -> str | None:
 def _refuse_on_managed_host(command: str) -> None:
     profile = _managed_enterprise_profile()
     if profile:
-        click.echo(
+        ux.echo(
             f"  ✗ A managed DefenseClaw enterprise deployment ({profile}) is installed on this computer; "
             f"'defenseclaw {command}' is disabled. Use the managed deployment channel.",
             err=True,

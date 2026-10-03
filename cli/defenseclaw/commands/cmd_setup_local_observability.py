@@ -182,7 +182,7 @@ def up_cmd(
             controller=controller,
         )
 
-    click.echo(f"  {ux.dim('→')} Starting local observability stack (this takes ~30s)...")
+    ux.echo(f"  {ux.dim('→')} Starting local observability stack (this takes ~30s)...")
     # Bundle refresh may replace the controller's Compose file. Resolve a fresh
     # controller so every platform launches the verified active copy.
     controller = _resolve_controller(app.cfg.data_dir)
@@ -208,7 +208,7 @@ def up_cmd(
 
     logs_enabled = False
     if not no_config and not started.readiness_verified:
-        click.echo(
+        ux.echo(
             f"  {ux.dim('→')} Stack readiness was not verified; "
             "config.yaml was not changed. Run without --no-wait after the "
             "stack is ready to enable export."
@@ -482,7 +482,7 @@ def _refresh_and_maybe_restart_local_observability(
     was_running = _run_native_controller(controller.is_running, "Docker project check")
     stopped = False
     if was_running:
-        click.echo(f"  {ux.dim('→')} Stopping running observability stack to refresh bundle...")
+        ux.echo(f"  {ux.dim('→')} Stopping running observability stack to refresh bundle...")
         _run_native_controller(
             controller.down,
             "Docker Compose down before refresh",
@@ -497,13 +497,13 @@ def _refresh_and_maybe_restart_local_observability(
     result.stopped = stopped
 
     if result.skipped_reason:
-        click.echo(f"  {ux.dim('→')} Bundle refresh skipped: {result.skipped_reason}")
+        ux.echo(f"  {ux.dim('→')} Bundle refresh skipped: {result.skipped_reason}")
         return result
     if result.errors:
         for err in result.errors[:3]:
             click.echo(f"  warning: refresh: {err}")
         if stopped:
-            click.echo(f"  {ux.dim('→')} Restarting previously running observability stack after refresh failure...")
+            ux.echo(f"  {ux.dim('→')} Restarting previously running observability stack after refresh failure...")
             _run_native_controller(
                 lambda: controller.up(timeout=180, wait=False),
                 "Docker Compose restart after refresh failure",
@@ -517,12 +517,12 @@ def _refresh_and_maybe_restart_local_observability(
             f"{preserved_count} preserved)"
         )
     else:
-        click.echo(f"  {ux.dim('→')} Bundle refresh: no changes (seeded copy already matches bundle)")
+        ux.echo(f"  {ux.dim('→')} Bundle refresh: no changes (seeded copy already matches bundle)")
     if result.preserved_paths and not refresh_config:
         preserved = ", ".join(sorted(result.preserved_paths)[:5])
         if len(result.preserved_paths) > 5:
             preserved = f"{preserved}, ..."
-        click.echo(
+        ux.echo(
             "  "
             + ux.dim("→")
             + " Preserved local observability config: "

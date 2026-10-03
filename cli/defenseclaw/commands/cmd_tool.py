@@ -290,7 +290,7 @@ def block(app: AppContext, name: str, connector: str, source: str, reason: str) 
             f"{reason} (scoped audit; runtime enforces as unscoped fallback)",
         )
         log_scope = _target_name(name, source)
-        click.echo(
+        ux.echo(
             f"{ux._style('[tool]', fg='red', bold=True)} {name!r} "
             f"{ux._style('added to block list', fg='red')} (unscoped fallback; "
             f"--source {source!r} kept for audit but is not runtime-enforced — "

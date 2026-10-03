@@ -347,7 +347,7 @@ def _print_v8_setup_result(
     click.echo(f"  Project:     {project}")
     click.echo(f"  Log stream:  {logstream}")
     click.echo("  Signals:     traces")
-    click.echo("  Delivery:    real-time after each completed model/tool operation (≤1s batch delay)")
+    ux.echo("  Delivery:    real-time after each completed model/tool operation (≤1s batch delay)")
     click.echo(f"  Config:      v8 ({'changed' if result.changed else 'already configured'})")
     echo_setup_notes(resolve_preset("galileo"), warnings)
     if not dry_run and not key_saved:

@@ -1688,17 +1688,22 @@ class OverviewPanelModel:
         status = self.observability_status
         if status is None:
             return ()
+        # The last /health payload outlives a stopped gateway, so its
+        # "healthy" rows and queue figures read as live (GAP-2586).
+        gateway_down = self.gateway_down()
         health = destination_health_from_gateway(
-            {"details": self.health.telemetry.details} if self.health is not None else None
+            {"details": self.health.telemetry.details} if self.health is not None and not gateway_down else None
         )
-        write_failure = self.audit_write_failure()
+        write_failure = "" if gateway_down else self.audit_write_failure()
         rows: list[ObservabilityDestinationRow] = []
         for destination in status.destinations:
             live = health.get(destination.name)
             state = live.state if live is not None and live.state else ""
+            reason = ""
             if not state:
                 state = "disabled" if not destination.enabled else "unavailable"
-            reason = ""
+                if destination.enabled and gateway_down:
+                    state, reason = "offline", "gateway not running"
             if live is not None:
                 reason = live.reason or live.last_error_class
             if write_failure and destination.enabled and destination.kind == "sqlite":
@@ -1736,9 +1741,13 @@ class OverviewPanelModel:
         status = self.observability_status
         if status is None:
             return None
-        health_state, health_failure = retention_health_from_gateway(
-            {"details": self.health.telemetry.details} if self.health is not None else None
-        )
+        if self.gateway_down():
+            # Not the last snapshot's "controller=healthy" (GAP-2586).
+            health_state, health_failure = "offline", "gateway not running"
+        else:
+            health_state, health_failure = retention_health_from_gateway(
+                {"details": self.health.telemetry.details} if self.health is not None else None
+            )
         retention = "unbounded" if status.unbounded_retention else f"{status.retention_days} days"
         return ObservabilityStorageStatus(
             retention=retention,

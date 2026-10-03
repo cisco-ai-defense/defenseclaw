@@ -495,7 +495,7 @@ def judge_add(
         strategy_changed = _ensure_enabled_hook_judge_strategies(gc)
 
     if not gate_changed and not timeout_changed and not enable_changed and not strategy_changed:
-        click.echo("  " + ux.dim(f"{noop_reason} — nothing to do."))
+        ux.echo("  " + ux.dim(f"{noop_reason} — nothing to do."))
         _warn_if_inert(app, gc)
         click.echo()
         return
@@ -507,7 +507,7 @@ def judge_add(
             saved.append("detection_strategy")
         if timeout_changed:
             saved.append("hook_timeout")
-        click.echo("  " + ux.dim(f"{noop_reason} — saving {' + '.join(saved)} only."))
+        ux.echo("  " + ux.dim(f"{noop_reason} — saving {' + '.join(saved)} only."))
 
     _warn_if_unconfigured(app, name)
     if name == ALL_CONNECTORS:
@@ -547,7 +547,7 @@ def judge_remove(app: AppContext, connector: str, restart: bool) -> None:
     click.echo()
     if name == ALL_CONNECTORS:
         if not gate:
-            click.echo("  " + ux.dim("hook_connectors is already empty — nothing to do."))
+            ux.echo("  " + ux.dim("hook_connectors is already empty — nothing to do."))
             click.echo()
             return
         gc.judge.hook_connectors = []
@@ -563,7 +563,7 @@ def judge_remove(app: AppContext, connector: str, restart: bool) -> None:
         hook_enforced, _ = _connector_sets()
         gate = sorted(hook_enforced - {name})
         gc.judge.hook_connectors = gate
-        click.echo(
+        ux.echo(
             "  "
             + ux.dim(
                 f"hook_connectors was all — expanded to every hook "
@@ -574,9 +574,9 @@ def judge_remove(app: AppContext, connector: str, restart: bool) -> None:
         gate = _gate_without(gate, name)
         gc.judge.hook_connectors = gate
         if not gate:
-            click.echo("  " + ux.dim("hook_connectors is now empty — hook-lane judge off."))
+            ux.echo("  " + ux.dim("hook_connectors is now empty — hook-lane judge off."))
     else:
-        click.echo("  " + ux.dim(f"'{name}' is not in hook_connectors — nothing to do."))
+        ux.echo("  " + ux.dim(f"'{name}' is not in hook_connectors — nothing to do."))
         click.echo()
         return
 

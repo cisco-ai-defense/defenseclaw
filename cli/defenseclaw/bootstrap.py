@@ -1050,6 +1050,16 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
         report._protected_selection = None
         if rollback_error:
             report.setup.append(StepResult("First-run rollback", "fail", rollback_error, "defenseclaw init"))
+        else:
+            # The OK rows above describe the run, not what was kept (GAP-2590).
+            report.setup.append(
+                StepResult(
+                    "First-run rollback",
+                    "fail",
+                    "a step failed, so init restored the previous config; nothing was saved",
+                    "fix the failed step, then run defenseclaw init again",
+                )
+            )
     return report
 
 
@@ -1139,7 +1149,18 @@ def targeted_readiness(cfg: Config, options: FirstRunOptions) -> list[StepResult
         steps.append(StepResult("LLM API", "skip", "not configured"))
 
     if cfg.guardrail.enabled and cfg.guardrail.scanner_mode in ("remote", "both"):
-        steps.append(_doctor_check("_check_cisco_ai_defense", cfg, "Cisco AI Defense"))
+        aid_step = _doctor_check("_check_cisco_ai_defense", cfg, "Cisco AI Defense")
+        if aid_step.status == "fail":
+            # Like the LLM key (GAP-1057): a missing or rejected Cisco key is
+            # set afterwards and must not roll back this run's config (GAP-2590).
+            env_name = cfg.cisco_ai_defense.api_key_env or "CISCO_AI_DEFENSE_API_KEY"
+            aid_step = StepResult(
+                "Cisco AI Defense",
+                "warn",
+                f"{aid_step.detail}; remote scanning stays inactive until the key is set",
+                f"defenseclaw keys set {env_name}",
+            )
+        steps.append(aid_step)
     else:
         steps.append(StepResult("Cisco AI Defense", "skip", "scanner_mode is local"))
 

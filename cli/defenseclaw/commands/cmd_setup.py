@@ -521,7 +521,7 @@ def setup(
         # A subcommand (setup codex, setup guardrail, …) will run; the
         # group-level batch flags only apply to the bare `setup` form.
         if batch_connectors or batch_detected or batch_add_detected or batch_all:
-            click.echo(
+            ux.echo(
                 "  ⚠ --connector/--detected/--add-detected/--all are ignored when a setup "
                 "subcommand is given; use them with bare `defenseclaw setup`.",
                 err=True,
@@ -4403,7 +4403,7 @@ def rotate_token_cmd(app: AppContext, connector: str | None, no_restart: bool, y
         f"action=rotate-token active_connectors={len(actives)} scoped_hook_tokens={len(scoped_actives)} restart=true"
     )
     target_summary = ", ".join(actives) if actives else "no active connectors"
-    click.echo(f"  {ux.dim('Rotating gateway and scoped hook credentials for')} {target_summary}…")
+    ux.echo(f"  {ux.dim('Rotating gateway and scoped hook credentials for')} {target_summary}…")
     # The transaction lets this typed error escape only before mutation or
     # after generation A's exact snapshots and required ready runtime have
     # been restored. Unsafe rollback/recovery failures become fatal Click errors.
@@ -4521,7 +4521,7 @@ def setup_gateway(
                 click.echo("error: failed to fetch token from SSM", err=True)
                 raise SystemExit(1)
         elif remote and not gw.resolved_token():
-            click.echo("  ⚠ --remote specified but no auth token configured", err=True)
+            ux.echo("  ⚠ --remote specified but no auth token configured", err=True)
             click.echo("    Provide --token or --ssm-param, or set OPENCLAW_GATEWAY_TOKEN", err=True)
         elif not gw.resolved_token():
             detected = _detect_openclaw_gateway_token(app.cfg.claw.config_file)
@@ -4712,7 +4712,7 @@ def _interactive_gateway_remote(gw, data_dir: str) -> None:
     gw.token_env = "OPENCLAW_GATEWAY_TOKEN"
 
     if not gw.resolved_token():
-        click.echo("  warning: no token set — sidecar will fail to connect to a remote gateway", err=True)
+        ux.echo("  warning: no token set — sidecar will fail to connect to a remote gateway", err=True)
 
 
 def _detect_openclaw_gateway_token(openclaw_config_file: str) -> str:
@@ -5206,7 +5206,7 @@ def _select_connector_interactive(current: str, data_dir: str | None = None) -> 
         meta = _CONNECTOR_META[name]
         marker = " *" if name == default else ""
         label = _connector_presentation_label(name)
-        click.echo(f"    {i}. {label:<22s} — {meta['description']}{marker}")
+        ux.echo(f"    {i}. {label:<22s} — {meta['description']}{marker}")
     click.echo()
     default_idx = _CONNECTOR_NAMES.index(default) + 1 if default in _CONNECTOR_NAMES else None
     raw = click.prompt(
@@ -5231,7 +5231,7 @@ def _print_connector_info(name: str) -> None:
     click.echo(f"    Connector:         {_connector_presentation_label(name)} ({name})")
     # Keep the status visible even for stable connectors when this detail view
     # is explicitly requested; it makes preview classification auditable.
-    click.echo(f"    Platform support:  {support.status} — {support.reason}")
+    ux.echo(f"    Platform support:  {support.status} — {support.reason}")
     click.echo(f"    Tool inspection:   {tool_display}")
     click.echo(f"    Subprocess policy: {meta['subprocess_policy']}")
     click.echo()
@@ -6879,14 +6879,14 @@ def setup_guardrail(
             key_env = aid.api_key_env or "CISCO_AI_DEFENSE_API_KEY"
             if scanner_mode:
                 if not aid.endpoint:
-                    click.echo("  ✗ --scanner-mode=remote requires --cisco-endpoint or a configured endpoint", err=True)
+                    ux.echo("  ✗ --scanner-mode=remote requires --cisco-endpoint or a configured endpoint", err=True)
                     raise SystemExit(1)
                 if not os.environ.get(key_env):
-                    click.echo(f"  ✗ --scanner-mode=remote but ${key_env} is not set", err=True)
+                    ux.echo(f"  ✗ --scanner-mode=remote but ${key_env} is not set", err=True)
                     raise SystemExit(1)
             elif not aid.endpoint or not os.environ.get(key_env):
                 gc.scanner_mode = "local"
-                click.echo("  ℹ Cisco AI Defense credentials not configured — using local scanner only")
+                ux.echo("  ℹ Cisco AI Defense credentials not configured — using local scanner only")
     else:
         secret_collection_failure_code: str | None = None
         if guard_mode or human_approval is not None or hilt_min_severity:
@@ -7336,7 +7336,7 @@ def _write_picked_connector_hint(data_dir: str | None, connector: str) -> None:
         path = os.path.join(data_dir, _PICKED_CONNECTOR_FILENAME)
         atomic_write_private_bytes(path, (connector + "\n").encode("utf-8"))
     except OSError as exc:
-        click.echo(
+        ux.echo(
             f"  ⚠ Failed to update picked_connector hint: {exc}",
             err=True,
         )
@@ -9327,9 +9327,9 @@ def _prompt_add_replace_cancel(connector: str, others: list[str]) -> str | None:
     click.echo()
     click.echo(f"  DefenseClaw is already configured for: {others_label}")
     click.echo(f"  You are setting up: {connector}")
-    click.echo("    [a] Add     — run it alongside the existing connector(s) (multi-connector)")
-    click.echo("    [r] Replace — switch to only this connector")
-    click.echo("    [c] Cancel  — make no changes")
+    ux.echo("    [a] Add     — run it alongside the existing connector(s) (multi-connector)")
+    ux.echo("    [r] Replace — switch to only this connector")
+    ux.echo("    [c] Cancel  — make no changes")
     choice = click.prompt(
         "  Choose",
         type=click.Choice(["a", "r", "c"], case_sensitive=False),
@@ -9397,7 +9397,7 @@ def _write_connector_identity(
         override = _existing_connector_override(gc, connector)
         if override is not None and override.enabled is False:
             override.enabled = None
-            click.echo(f"  ✓ {connector} guardrail re-enabled (it was turned off with guardrail disable --connector)")
+            ux.echo(f"  ✓ {connector} guardrail re-enabled (it was turned off with guardrail disable --connector)")
         primary = (
             existing_primary if preserve_primary and existing_primary in gc.connectors else sorted(gc.connectors)[0]
         )
@@ -9576,7 +9576,7 @@ def _apply_hook_connector_setup(
     # rejects at load, so an un-normalized write would brick config loading.
     connector = normalize_connector(connector)
     if connector not in _HOOK_ENFORCED_CONNECTORS:
-        click.echo(
+        ux.echo(
             f"  ✗ hook-driven setup is only supported for {sorted(_HOOK_ENFORCED_CONNECTORS)} (got {connector!r})",
             err=True,
         )
@@ -9623,14 +9623,14 @@ def _apply_hook_connector_setup(
         setup_snapshot = _capture_setup_config_snapshot(app.cfg, capture_runtime=_windows_runtime_rollback(restart))
     except _SetupGatewayNoAnswerError as exc:
         # Same next step as the busy-gateway restart check (GAP-1668).
-        click.echo(
+        ux.echo(
             f"  ✗ Setup did not start: {exc}; the host may be busy.\n"
             "    Nothing was changed. Retry, or check it with: defenseclaw-gateway status",
             err=True,
         )
         return False
     except OSError as exc:
-        click.echo(
+        ux.echo(
             f"  ✗ Cannot establish connector setup rollback point: {exc}\n"
             f"    {_SETUP_ROLLBACK_POINT_NEXT_STEP}",
             err=True,
@@ -9729,10 +9729,10 @@ def _apply_hook_connector_setup(
         pack_label = rule_pack if rule_pack is not None else (pack_dir or "(cleared — inherits global)")
         if write_mode == "add" and connector in gc.connectors:
             gc.connectors[connector].rule_pack_dir = pack_dir
-            click.echo(f"  ✓ {connector} rule pack: {pack_label} (per-connector override)")
+            ux.echo(f"  ✓ {connector} rule pack: {pack_label} (per-connector override)")
         else:
             gc.rule_pack_dir = pack_dir
-            click.echo(f"  ✓ rule pack: {pack_label} (global)")
+            ux.echo(f"  ✓ rule pack: {pack_label} (global)")
     gc.enabled = True
     # SU-01/G1: write the guardrail mode PER-CONNECTOR when this connector owns
     # an override block (the multi/add shape), so flipping one connector to
@@ -9769,7 +9769,7 @@ def _apply_hook_connector_setup(
         if connector == "cursor":
             mode_fail = "closed" if desired_mode == "action" else "open"
             if fail_mode is not None and normalized_fail != mode_fail:
-                click.echo(
+                ux.echo(
                     f"  ⚠ Cursor {desired_mode} mode pins hook failures={mode_fail}; "
                     f"ignoring --fail-mode {normalized_fail}."
                 )
@@ -9787,13 +9787,13 @@ def _apply_hook_connector_setup(
         if _batch_summary is not None:
             _batch_summary.setdefault("fail_open", []).append(connector)
         else:
-            click.echo(
+            ux.echo(
                 f"  ⚠ {connector} hook failures are fail-open: while the gateway is down or "
                 "unreachable, tool calls run uninspected. Pass --fail-mode closed to block them."
             )
     if connector == "cursor":
         if hilt:
-            click.echo("  ⚠ Cursor native human approval is not implemented; disabling it for this connector.")
+            ux.echo("  ⚠ Cursor native human approval is not implemented; disabling it for this connector.")
         hilt = False
     _apply_hilt_setup(
         gc,
@@ -9881,7 +9881,7 @@ def _apply_hook_connector_setup(
     try:
         cfg.save()
         if _batch_summary is None:
-            click.echo("  ✓ Config saved to ~/.defenseclaw/config.yaml")
+            ux.echo("  ✓ Config saved to ~/.defenseclaw/config.yaml")
     except OSError as exc:
         try:
             _restore_setup_config_snapshot(app, setup_snapshot)
@@ -9889,7 +9889,7 @@ def _apply_hook_connector_setup(
             raise click.ClickException(
                 f"connector {connector!r} config save failed ({exc}); rollback was incomplete: {rollback_exc}"
             ) from exc
-        click.echo(f"  ✗ Failed to save config: {exc}", err=True)
+        ux.echo(f"  ✗ Failed to save config: {exc}", err=True)
         return False
 
     try:
@@ -9903,7 +9903,7 @@ def _apply_hook_connector_setup(
                 f"connector {connector!r} setup failed after saving desired config ({exc}); "
                 f"prior desired state restoration failed: {rollback_exc}"
             ) from exc
-        click.echo(
+        ux.echo(
             f"  ✗ Connector setup failed after saving desired config: {exc}; "
             "restored the prior desired connector state",
             err=True,
@@ -9914,29 +9914,29 @@ def _apply_hook_connector_setup(
         _batch_summary.setdefault("modes", {})[connector] = desired_mode
         _batch_summary["workspace"] = workspace
     elif len(_actives) > 1:
-        click.echo(
+        ux.echo(
             f"  ✓ Desired roster staged for {connector!r} — "
             f"{len(_actives)} connectors selected: {', '.join(_actives)}"
         )
     else:
-        click.echo(f"  ✓ Desired connector {connector!r} staged")
+        ux.echo(f"  ✓ Desired connector {connector!r} staged")
     if _batch_summary is None:
         if workspace:
-            click.echo(f"  ✓ Workspace root pinned to {workspace}")
+            ux.echo(f"  ✓ Workspace root pinned to {workspace}")
         else:
-            click.echo("  ✓ Scope: global user config (no workspace pinned)")
+            ux.echo("  ✓ Scope: global user config (no workspace pinned)")
         # Hook connector setup should describe mode in connector terms. The
         # first connector may still be represented through legacy global
         # fields on disk, but presenting that as guardrail.mode nudges users
         # toward unsafe global edits on multi-connector installs.
-        click.echo(f"  ✓ {connector} mode={desired_mode}")
+        ux.echo(f"  ✓ {connector} mode={desired_mode}")
     if connector == "cursor":
         effective_fail_mode = "closed" if desired_mode == "action" else "open"
-        click.echo(
+        ux.echo(
             f"  ✓ cursor hook failures={effective_fail_mode} "
             f"(failClosed={'true' if desired_mode == 'action' else 'false'})"
         )
-        click.echo(
+        ux.echo(
             "  ℹ Cursor runs all matching hooks and merges Enterprise > Team > Project > User; "
             "DefenseClaw cannot safely detect an actual higher-priority conflict, so none is inferred"
         )
@@ -9956,25 +9956,25 @@ def _apply_hook_connector_setup(
         except Exception as exc:  # noqa: BLE001 — readiness failure triggers transaction rollback.
             _rollback_failed_connector_application(app, setup_snapshot, exc)
         if connector == "hermes":
-            click.echo("  ✓ Hermes on-disk hook registration staged")
+            ux.echo("  ✓ Hermes on-disk hook registration staged")
             if _hermes_hosts_idle():
-                click.echo("  ✓ No Hermes host is running, so the next one starts with the DefenseClaw hooks")
+                ux.echo("  ✓ No Hermes host is running, so the next one starts with the DefenseClaw hooks")
             else:
                 ux.warn(
                     "Hermes callbacks are not live-verified: reload or restart every running "
                     "Hermes CLI, TUI, gateway, desktop, and service host before relying on registration changes."
                 )
         elif connector == "omnigent":
-            click.echo("  ✓ OmniGent on-disk policy registration staged")
+            ux.echo("  ✓ OmniGent on-disk policy registration staged")
             ux.warn(
                 "OmniGent does not expose a loaded policy generation/module/config identity. "
                 "Reload or restart every running OmniGent server; action/fail-closed enforcement "
                 "remains unverified until then."
             )
         else:
-            click.echo(f"  ✓ {_CONNECTOR_META[connector]['label']} connector setup complete")
+            ux.echo(f"  ✓ {_CONNECTOR_META[connector]['label']} connector setup complete")
     elif _batch_summary is None:
-        click.echo(
+        ux.echo(
             "  ℹ Saved. It takes effect once the gateway restarts and confirms the connector "
             "(defenseclaw-gateway restart)."
         )
@@ -9994,24 +9994,24 @@ def _echo_batch_setup_summary(applied: list[str], summary: dict[str, Any], *, re
     """One summary for a multi-connector setup run (GAP-1781)."""
     modes: dict[str, str] = summary.get("modes", {})
     click.echo()
-    click.echo("  ✓ Config saved to ~/.defenseclaw/config.yaml")
-    click.echo(f"  ✓ {len(applied)} connector(s) set up:")
+    ux.echo("  ✓ Config saved to ~/.defenseclaw/config.yaml")
+    ux.echo(f"  ✓ {len(applied)} connector(s) set up:")
     for name in applied:
         click.echo(f"      - {name}: {modes.get(name, 'observe')}")
     workspace = summary.get("workspace")
     if workspace:
-        click.echo(f"  ✓ Workspace root pinned to {workspace}")
+        ux.echo(f"  ✓ Workspace root pinned to {workspace}")
     else:
-        click.echo("  ✓ Scope: global user config (no workspace pinned)")
+        ux.echo("  ✓ Scope: global user config (no workspace pinned)")
     fail_open = summary.get("fail_open") or []
     if fail_open:
-        click.echo(
+        ux.echo(
             f"  ⚠ Hook failures are fail-open for {', '.join(fail_open)}: while the gateway is down or "
             "unreachable, their tool calls run uninspected. Block them with: "
             "defenseclaw guardrail fail-mode closed"
         )
     if not restart:
-        click.echo(
+        ux.echo(
             "  ℹ Saved. It takes effect once the gateway restarts and confirms the connectors "
             "(defenseclaw-gateway restart)."
         )
@@ -10040,8 +10040,8 @@ def _print_connector_observability_banner(connector: str, *, mode: str = "observ
     setup_slug = "claude-code" if connector == "claudecode" else connector
     label = _CONNECTOR_META[connector]["label"]
     click.echo()
-    click.echo(f"  DefenseClaw — {label} {mode} setup")
-    click.echo("  ─────────────────────────────────────────────────────────")
+    ux.echo(f"  DefenseClaw — {label} {mode} setup")
+    ux.echo("  ─────────────────────────────────────────────────────────")
     click.echo()
     if connector == "amp":
         click.echo("  This installs DefenseClaw as Amp's system TypeScript policy")
@@ -10081,35 +10081,35 @@ def _print_connector_observability_banner(connector: str, *, mode: str = "observ
     click.echo()
     click.echo("  Telemetry channels:")
     if connector == "amp":
-        click.echo("    • Plugin API — session/agent/tool lifecycle → /api/v1/amp/hook")
-        click.echo("    • Enforcement — synchronous tool.call execution gate + model-bound tool.result output gate")
-        click.echo(
+        ux.echo("    • Plugin API — session/agent/tool lifecycle → /api/v1/amp/hook")
+        ux.echo("    • Enforcement — synchronous tool.call execution gate + model-bound tool.result output gate")
+        ux.echo(
             "    • Agent360 / Galileo — correlated session, turn, tool, outcome, "
             "decision, audit, log, metric, and trace views"
         )
     elif connector == "omnigent":
-        click.echo("    • Policy API — six request/tool/model phases → /api/v1/omnigent/hook")
+        ux.echo("    • Policy API — six request/tool/model phases → /api/v1/omnigent/hook")
     elif connector == "hermes":
-        click.echo("    • Hooks      — 23 classified v0.19 events → /api/v1/hermes/hook")
+        ux.echo("    • Hooks      — 23 classified v0.19 events → /api/v1/hermes/hook")
     elif connector == "antigravity":
-        click.echo("    • Hooks      — five bound lifecycle events → /api/v1/antigravity/hook")
+        ux.echo("    • Hooks      — five bound lifecycle events → /api/v1/antigravity/hook")
         click.echo("                   only PreToolUse carries documented ask/deny output")
     else:
-        click.echo(f"    • Hooks      — tool calls, prompt-submit, agent stop → {_hook_api_path(connector)}")
+        ux.echo(f"    • Hooks      — tool calls, prompt-submit, agent stop → {_hook_api_path(connector)}")
     native_otel_connectors = {"codex", "claudecode", "omnigent"}
     if connector in native_otel_connectors:
         if connector == "omnigent":
-            click.echo(
+            ux.echo(
                 "    • Native OTel — optional; inactive until OTEL_* variables are exported for the OmniGent process"
             )
         elif connector == "codex":
-            click.echo("    • Native OTel — logs, metrics, and traces → scoped bearer + source header on /v1/<signal>")
+            ux.echo("    • Native OTel — logs, metrics, and traces → scoped bearer + source header on /v1/<signal>")
         else:
-            click.echo("    • Native OTel — documented agent telemetry → /v1/logs, /v1/metrics, and/or /v1/traces")
+            ux.echo("    • Native OTel — documented agent telemetry → /v1/logs, /v1/metrics, and/or /v1/traces")
     if connector == "codex":
-        click.echo("    • Notify     — agent-turn-complete events → /api/v1/codex/notify")
+        ux.echo("    • Notify     — agent-turn-complete events → /api/v1/codex/notify")
     if connector == "amp":
-        click.echo("    • Headless   — use `amp -x ... --plugin-ready-timeout 30` for complete lifecycle telemetry")
+        ux.echo("    • Headless   — use `amp -x ... --plugin-ready-timeout 30` for complete lifecycle telemetry")
     click.echo()
     if mode == "observe":
         click.echo("  To later turn enforcement on:")
@@ -10140,28 +10140,28 @@ def _print_connector_next_steps(connector: str, *, os_name: str | None = None) -
         os_name = os.name
 
     click.echo("  Next steps:")
-    click.echo(
+    ux.echo(
         "    • Check the gateway has the connector: defenseclaw-gateway status "
         "(start it with defenseclaw-gateway start if it is stopped)"
     )
-    click.echo("    • Optionally launch the bundled local stack: defenseclaw setup local-observability up")
+    ux.echo("    • Optionally launch the bundled local stack: defenseclaw setup local-observability up")
     if connector == "hermes" and not _hermes_hosts_idle():
-        click.echo(
+        ux.echo(
             "    • Reload/restart every running Hermes CLI, TUI, gateway, desktop, and service host; "
             "DefenseClaw does not manage Hermes PortableGit terminal behavior"
         )
     elif connector == "omnigent":
-        click.echo(
+        ux.echo(
             "    • Reload/restart every running OmniGent server; OmniGent does not expose "
             "loaded policy generation/module/config identity for live verification"
         )
     if os_name == "nt":
-        click.echo("    • Watch decisions live: defenseclaw tui")
-        click.echo(f"    • Recent alerts for this connector: defenseclaw alerts --limit 25 --connector {connector}")
+        ux.echo("    • Watch decisions live: defenseclaw tui")
+        ux.echo(f"    • Recent alerts for this connector: defenseclaw alerts --limit 25 --connector {connector}")
         return
 
-    click.echo("    • Watch decisions live: defenseclaw tui  (Logs and Alerts read canonical SQLite history)")
-    click.echo(f"    • Recent alerts for this connector: defenseclaw alerts --limit 25 --connector {connector}")
+    ux.echo("    • Watch decisions live: defenseclaw tui  (Logs and Alerts read canonical SQLite history)")
+    ux.echo(f"    • Recent alerts for this connector: defenseclaw alerts --limit 25 --connector {connector}")
 
 
 def _print_observability_summary(
@@ -10223,7 +10223,7 @@ def _print_observability_summary(
 
     click.echo()
     click.echo("  Summary")
-    click.echo("  ───────")
+    ux.echo("  ───────")
     if multi:
         mode_row = ("connectors", ", ".join(guarded))
     else:
@@ -10287,7 +10287,7 @@ def _print_observability_summary(
     click.echo()
     _print_connector_next_steps(connector, os_name=os_name)
     if multi:
-        click.echo(f"    • Change this connector's mode: defenseclaw setup {setup_slug} --mode observe|action")
+        ux.echo(f"    • Change this connector's mode: defenseclaw setup {setup_slug} --mode observe|action")
     click.echo()
     if multi:
         if unguarded:
@@ -10344,7 +10344,7 @@ def _maybe_bring_up_local_stack(app: AppContext, *, auto: bool) -> None:
         return
 
     if _local_observability_already_up(app.cfg.data_dir):
-        click.echo("  ✓ Local observability stack already reachable on :3000 (skipping `up`)")
+        ux.echo("  ✓ Local observability stack already reachable on :3000 (skipping `up`)")
         return
 
     try:
@@ -10352,7 +10352,7 @@ def _maybe_bring_up_local_stack(app: AppContext, *, auto: bool) -> None:
             up_cmd,
         )
     except ImportError as exc:
-        click.echo(
+        ux.echo(
             f"  ⚠ Could not load local-observability bridge: {exc}",
             err=True,
         )
@@ -10377,7 +10377,7 @@ def _maybe_bring_up_local_stack(app: AppContext, *, auto: bool) -> None:
         # Don't propagate — observability mode is still useful without
         # the local stack (operators can target a remote SIEM via
         # ``defenseclaw setup observability add ...``). Just warn.
-        click.echo(
+        ux.echo(
             "  ⚠ Local stack failed to start; continuing without it. "
             "Re-run `defenseclaw setup local-observability up` after "
             "fixing Docker.",
@@ -10408,10 +10408,10 @@ def _prompt_connector_mode(connector: str, *, default_mode: str) -> str:
     action while still letting the operator confirm or change it.
     """
     ux.section(f"Enforcement mode for {_CONNECTOR_META[connector]['label']}")
-    click.echo(
+    ux.echo(
         "    " + ux.bold("[1] observe") + " — scan and report findings, never block " + ux.dim("(recommended to start)")
     )
-    click.echo(
+    ux.echo(
         "    "
         + ux.bold("[2] action ")
         + " — scan and block/confirm when policy requires "
@@ -10585,7 +10585,7 @@ def _setup_observability_alias(
             f"  {label} is already configured; re-apply its hooks (mode={normalized_mode})?",
             default=True,
         ):
-            click.echo("  Aborted — no changes made.")
+            ux.echo("  Aborted — no changes made.")
             return
         write_mode = "add" if _existing_connector_override(gc, connector) is not None else "replace"
     elif proxy_active:
@@ -10597,7 +10597,7 @@ def _setup_observability_alias(
             f"  Replace {proxy_label} with {label}? {proxy_label} stops being guarded by DefenseClaw.",
             default=False,
         ):
-            click.echo("  Aborted — no changes made.")
+            ux.echo("  Aborted — no changes made.")
             return
         write_mode = "replace"
     elif not existing_others:
@@ -10607,7 +10607,7 @@ def _setup_observability_alias(
                 f"  Configure DefenseClaw for {label} {verb} now?",
                 default=True,
             ):
-                click.echo("  Aborted — no changes made.")
+                ux.echo("  Aborted — no changes made.")
                 return
         # Preserve an existing per-connector override block on re-run;
         # otherwise pin as the sole connector.
@@ -10622,7 +10622,7 @@ def _setup_observability_alias(
             f"  Replace {', '.join(existing_others)} with {connector}? This removes the other connector(s).",
             default=False,
         ):
-            click.echo("  Aborted — no changes made.")
+            ux.echo("  Aborted — no changes made.")
             return
         write_mode = "replace"
     elif yes:
@@ -10632,7 +10632,7 @@ def _setup_observability_alias(
     else:
         write_mode = _prompt_add_replace_cancel(connector, existing_others)
         if write_mode is None:
-            click.echo("  Aborted — no changes made.")
+            ux.echo("  Aborted — no changes made.")
             return
 
     # SU-07: judge-enable prompt. Asked after the operator commits to
@@ -10680,7 +10680,7 @@ def _setup_observability_alias(
             _prompt_judge_model_config(app, app.cfg.guardrail)
             try:
                 app.cfg.save()
-                click.echo("  ✓ Judge LLM config saved to ~/.defenseclaw/config.yaml")
+                ux.echo("  ✓ Judge LLM config saved to ~/.defenseclaw/config.yaml")
             except OSError as exc:
                 raise click.ClickException(f"failed to save judge LLM config: {exc}") from exc
 
@@ -10859,9 +10859,9 @@ def _prompt_batch_scan_strategy(gc) -> str:
     ux.subhead(
         "You can also configure provider/model/key later with `defenseclaw setup guardrail` or `defenseclaw setup llm`."
     )
-    click.echo("    " + ux.bold("[1] regex only") + "   — rules and regex scanning, no LLM judge calls")
-    click.echo("    " + ux.bold("[2] regex + judge") + " — rules first, then LLM judge review")
-    click.echo("    " + ux.bold("[3] judge first") + "  — LLM judge first, with regex fallback")
+    ux.echo("    " + ux.bold("[1] regex only") + "   — rules and regex scanning, no LLM judge calls")
+    ux.echo("    " + ux.bold("[2] regex + judge") + " — rules first, then LLM judge review")
+    ux.echo("    " + ux.bold("[3] judge first") + "  — LLM judge first, with regex fallback")
     current = (getattr(gc, "detection_strategy", "") or "regex_only").strip().lower()
     default = {"regex_only": "1", "regex_judge": "2", "judge_first": "3"}.get(current, "1")
     choice = click.prompt(
@@ -11437,7 +11437,7 @@ def _dispatch_bare_setup(
             return
         targets = _run_setup_picker(app)
         if not targets:
-            click.echo("  Aborted — no connectors selected.")
+            ux.echo("  Aborted — no connectors selected.")
             return
 
     setup_snapshot = _capture_setup_config_snapshot(app.cfg, capture_runtime=_windows_runtime_rollback(restart))
@@ -11951,7 +11951,7 @@ def _remove_connector(
     gc = cfg.guardrail
     requested = (connector or "").strip()
     if not requested:
-        click.echo("  ✗ No connector specified.", err=True)
+        ux.echo("  ✗ No connector specified.", err=True)
         return False
     requested_norm = normalize_connector(requested)
 
@@ -11961,10 +11961,10 @@ def _remove_connector(
     match = next((c for c in configured if normalize_connector(c) == requested_norm), None)
     if match is None:
         if requested_norm in _CONNECTOR_META:
-            click.echo(f"  ✓ Connector {requested_norm!r} is already absent; no changes made.")
+            ux.echo(f"  ✓ Connector {requested_norm!r} is already absent; no changes made.")
             return True
         configured_label = ", ".join(configured) if configured else "(none configured)"
-        click.echo(
+        ux.echo(
             f"  ✗ {requested!r} is not a configured connector. Configured: {configured_label}",
             err=True,
         )
@@ -11981,7 +11981,7 @@ def _remove_connector(
     # removing it does not need --force.
     if not remaining:
         if not force and not unshipped:
-            click.echo(
+            ux.echo(
                 f"  ✗ Refusing to remove the last connector ({match!r}) — the gateway would enforce nothing.",
                 err=True,
             )
@@ -12012,7 +12012,7 @@ def _remove_connector(
         try:
             setup_snapshot = _capture_setup_config_snapshot(cfg, capture_runtime=True)
         except OSError as exc:
-            click.echo(
+            ux.echo(
                 f"  ✗ Cannot establish connector removal rollback point [ref {_setup_runtime_ref(type(exc).__name__)}]",
                 err=True,
             )
@@ -12044,28 +12044,28 @@ def _remove_connector(
     except OSError as exc:
         if setup_snapshot is not None:
             _rollback_failed_connector_application(app, setup_snapshot, exc)
-        click.echo(f"  ✗ Failed to save config [ref {_setup_runtime_ref(type(exc).__name__)}]", err=True)
+        ux.echo(f"  ✗ Failed to save config [ref {_setup_runtime_ref(type(exc).__name__)}]", err=True)
         return False
 
-    click.echo(f"  ✓ Removed connector {match!r}")
+    ux.echo(f"  ✓ Removed connector {match!r}")
     if unshipped:
-        click.echo(
+        ux.echo(
             f"  ⚠ {match!r} is not a connector this DefenseClaw build ships, so DefenseClaw "
             "did not change that agent's config files. Remove any DefenseClaw hook entries "
             "there by hand; see Upgrade → Renamed and removed connectors in the docs.",
             err=True,
         )
     if remaining:
-        click.echo(f"  ✓ Remaining connector(s): {', '.join(sorted(remaining))}")
+        ux.echo(f"  ✓ Remaining connector(s): {', '.join(sorted(remaining))}")
     else:
-        click.echo("  ✓ No connectors configured — DefenseClaw enforces nothing until you run `setup` again.")
+        ux.echo("  ✓ No connectors configured — DefenseClaw enforces nothing until you run `setup` again.")
 
     if restart:
         click.echo()
         if unshipped:
-            click.echo("  Restarting gateway so it drops the removed connector's DefenseClaw state…")
+            ux.echo("  Restarting gateway so it drops the removed connector's DefenseClaw state…")
         else:
-            click.echo("  Restarting gateway so the removed connector's hooks are torn down…")
+            ux.echo("  Restarting gateway so the removed connector's hooks are torn down…")
         # The set-difference teardown (WU6b) runs at gateway boot and is
         # connector-agnostic, so a plain defense-gateway bounce is the
         # precise primitive here. _restart_defense_gateway also marks the
@@ -12496,8 +12496,8 @@ def _setup_guardrail_connector_alias(
         _refuse_proxy_next_to_hook_connectors(app.cfg.guardrail, connector)
 
     click.echo()
-    click.echo(f"  DefenseClaw — {label} guardrail setup")
-    click.echo("  ─────────────────────────────────────────────────────────")
+    ux.echo(f"  DefenseClaw — {label} guardrail setup")
+    ux.echo("  ─────────────────────────────────────────────────────────")
     click.echo()
     click.echo(f"  Sets up DefenseClaw guardrails for {label}.")
     click.echo()
@@ -12520,7 +12520,7 @@ def _setup_guardrail_connector_alias(
         else:
             proceed = click.confirm(f"  Configure {label} guardrail now?", default=True)
         if not proceed:
-            click.echo("  Aborted — no changes made.")
+            ux.echo("  Aborted — no changes made.")
             return
 
     # Take the rollback point before switching the connector below: a
@@ -13044,7 +13044,7 @@ def setup_notifications(
         effective = capability.effective_enabled(current)
         click.echo(f"    {ux.dim('native desktop delivery:')} {'ACTIVE' if effective else 'INACTIVE'}")
         if not capability.supported:
-            click.echo(f"    {ux.dim('capability:')} UNSUPPORTED — {capability.unsupported_reason}")
+            ux.echo(f"    {ux.dim('capability:')} UNSUPPORTED — {capability.unsupported_reason}")
             if current:
                 click.echo("    Legacy configured ON is retained, but native desktop delivery is not active.")
             click.echo("    Delivery failures use a labelled terminal fallback; they are never desktop success.")
@@ -13076,7 +13076,7 @@ def setup_notifications(
 
     if desired == current:
         state = "ON" if current else "OFF"
-        click.echo(f"  • Notifications are already {state}; nothing to change.")
+        ux.echo(f"  • Notifications are already {state}; nothing to change.")
         return
 
     nc.enabled = desired
@@ -13377,11 +13377,11 @@ def _prompt_hook_fail_mode(gc) -> None:
     ux.subhead("How hooks behave when delivery/authentication fails or")
     ux.subhead("the gateway returns 4xx, malformed JSON, or no action.")
     click.echo()
-    click.echo(
+    ux.echo(
         "    " + ux.bold("[1] open  ") + " — allow the tool/prompt and log the failure " + ux.dim("(recommended)")
     )
     click.echo("                 " + ux.dim("A misbehaving gateway won't brick your agent."))
-    click.echo("    " + ux.bold("[2] closed") + " — block supported events when inspection is unavailable")
+    ux.echo("    " + ux.bold("[2] closed") + " — block supported events when inspection is unavailable")
     click.echo("                 " + ux.dim("Choose for regulated workflows where every"))
     click.echo("                 " + ux.dim("prompt MUST be inspected."))
     click.echo()
@@ -13475,7 +13475,7 @@ def _prompt_judge_model_config(
         reuse = click.confirm("  Use this LLM for the judge?", default=True)
 
     if reuse:
-        click.echo(f"  ✓ Judge will use {resolved.model}.")
+        ux.echo(f"  ✓ Judge will use {resolved.model}.")
     else:
         _configure_llm(
             app.cfg,
@@ -13545,10 +13545,10 @@ def _interactive_guardrail_setup(
     ux.section("LLM Guardrail Setup")
     click.echo()
     click.echo("  " + ux.bold("Scans every LLM prompt and response for:"))
-    click.echo("    • " + ux.dim("Prompt injection and jailbreak attempts"))
-    click.echo("    • " + ux.dim("Secrets, API keys, and credentials"))
-    click.echo("    • " + ux.dim("PII leakage (names, emails, SSNs, credit cards)"))
-    click.echo(
+    ux.echo("    • " + ux.dim("Prompt injection and jailbreak attempts"))
+    ux.echo("    • " + ux.dim("Secrets, API keys, and credentials"))
+    ux.echo("    • " + ux.dim("PII leakage (names, emails, SSNs, credit cards)"))
+    ux.echo(
         "    • "
         + ux.dim("Data exfiltration: credential-file reads (/etc/passwd, ~/.ssh, ~/.aws), out-of-band channels")
     )
@@ -13657,7 +13657,7 @@ def _interactive_guardrail_setup(
         # everywhere it is rendered.
         gateway_cfg = getattr(app.cfg, "gateway", None)
         api_port = getattr(gateway_cfg, "api_port", 18970) if gateway_cfg else 18970
-        click.echo(
+        ux.echo(
             f"  API port:      {api_port} "
             "(hook endpoint — PreToolUse deny is the enforcement surface; "
             "no LLM proxy binding)"
@@ -13687,13 +13687,13 @@ def _interactive_guardrail_setup(
     else:
         ux.section("Enforcement mode")
         ux.subhead("Rule/regex scanning applies in both modes.")
-        click.echo(
+        ux.echo(
             "    "
             + ux.bold("[1] observe")
             + " — scan and report findings, never block "
             + ux.dim("(recommended to start)")
         )
-        click.echo("    " + ux.bold("[2] action ") + " — scan and block/confirm when policy requires")
+        ux.echo("    " + ux.bold("[2] action ") + " — scan and block/confirm when policy requires")
         # The one active connector may carry its own mode (setup <connector>
         # --mode action writes a per-connector override): offer that mode as
         # the default and keep the override in step with the choice, so
@@ -13780,10 +13780,10 @@ def _interactive_guardrail_setup(
         )
 
     ux.section("Scanner engine")
-    click.echo(
+    ux.echo(
         "    " + ux.bold("[1] local ") + "  — built-in pattern matching, no network calls " + ux.dim("(fastest)")
     )
-    click.echo(
+    ux.echo(
         "    "
         + ux.bold("[2] remote")
         + "  — Cisco AI Defense cloud API "
@@ -13839,9 +13839,9 @@ def _interactive_guardrail_setup(
     ux.subhead("Works with any OpenAI-compatible API (Bifrost, OpenAI, Anthropic, etc.)")
     click.echo()
     click.echo("  " + ux.bold("Three judge kinds run on every prompt when enabled:"))
-    click.echo("    • " + ux.dim("injection — overrides / jailbreaks (kind=injection)"))
-    click.echo("    • " + ux.dim("pii       — names, emails, SSNs, secrets (kind=pii)"))
-    click.echo("    • " + ux.dim("exfil     — credential-file reads & out-of-band channels (kind=exfil)"))
+    ux.echo("    • " + ux.dim("injection — overrides / jailbreaks (kind=injection)"))
+    ux.echo("    • " + ux.dim("pii       — names, emails, SSNs, secrets (kind=pii)"))
+    ux.echo("    • " + ux.dim("exfil     — credential-file reads & out-of-band channels (kind=exfil)"))
     click.echo("  " + ux.dim("Tool calls additionally run the tool_injection judge."))
     click.echo()
 
@@ -13876,7 +13876,7 @@ def _interactive_guardrail_setup(
         # implicit defaults.
         default_role = gc.llm_role or connector_llm_role(gc.connector or "")
         if connector_llm_role(gc.connector or "") == "judge_only":
-            click.echo(
+            ux.echo(
                 "  "
                 + ux.dim(
                     "This connector uses its own LLM — DefenseClaw will use the LLM "
@@ -13886,12 +13886,12 @@ def _interactive_guardrail_setup(
             gc.llm_role = "judge_only"
         else:
             click.echo("  " + ux.bold("How should DefenseClaw use the LLM?"))
-            click.echo(
+            ux.echo(
                 "    "
                 + ux.bold("[1] Judge only          ")
                 + ux.dim("— keep your existing agent LLM, use DefenseClaw only for the judge")
             )
-            click.echo(
+            ux.echo(
                 "    "
                 + ux.bold("[2] Judge AND agent     ")
                 + ux.dim("— route the agent's LLM through DefenseClaw too (recommended)")
@@ -13953,9 +13953,9 @@ def _disable_guardrail(app: AppContext, gc, *, restart: bool = False) -> None:
 
     try:
         app.cfg.save()
-        click.echo("  ✓ Config saved (guardrail.enabled = false)")
+        ux.echo("  ✓ Config saved (guardrail.enabled = false)")
     except OSError as exc:
-        click.echo(f"  ✗ Failed to save config: {exc}")
+        ux.echo(f"  ✗ Failed to save config: {exc}")
         click.echo("    Guardrail may re-enable on next run")
 
     # Restart the gateway so it runs conn.Teardown() — the sidecar checks
@@ -13970,7 +13970,7 @@ def _disable_guardrail(app: AppContext, gc, *, restart: bool = False) -> None:
         app.cfg.gateway.port,
         connector=connector_name,
     )
-    click.echo(f"  ✓ {meta.get('label', connector_name)} connector teardown complete")
+    ux.echo(f"  ✓ {meta.get('label', connector_name)} connector teardown complete")
     click.echo()
 
     if app.logger:
@@ -14024,7 +14024,7 @@ def _sync_guardrail_hilt_to_opa(policy_dir: str, gc) -> None:
         with open(data_json) as f:
             opa_data = json.load(f)
     except (OSError, json.JSONDecodeError) as exc:
-        click.echo(f"  ⚠ Failed to read {data_json}: {exc}")
+        ux.echo(f"  ⚠ Failed to read {data_json}: {exc}")
         return
 
     desired = {
@@ -14040,18 +14040,18 @@ def _sync_guardrail_hilt_to_opa(policy_dir: str, gc) -> None:
         with open(data_json, "w") as f:
             json.dump(opa_data, f, indent=2)
             f.write("\n")
-        click.echo(f"  ✓ HILT synced to OPA: enabled={desired['enabled']} min_severity={desired['min_severity']}")
+        ux.echo(f"  ✓ HILT synced to OPA: enabled={desired['enabled']} min_severity={desired['min_severity']}")
     except OSError as exc:
-        click.echo(f"  ⚠ Failed to write {data_json}: {exc}")
+        ux.echo(f"  ⚠ Failed to write {data_json}: {exc}")
 
 
 def _print_guardrail_summary(gc, openclaw_config_file: str, *, restart: bool = False) -> None:
     click.echo()
-    click.echo("  ✓ Config saved to ~/.defenseclaw/config.yaml")
-    click.echo("  ✓ Guardrail proxy configured (built into Go binary)")
-    click.echo(f"  ✓ OpenClaw config patched: {openclaw_config_file}")
+    ux.echo("  ✓ Config saved to ~/.defenseclaw/config.yaml")
+    ux.echo("  ✓ Guardrail proxy configured (built into Go binary)")
+    ux.echo(f"  ✓ OpenClaw config patched: {openclaw_config_file}")
     if gc.original_model:
-        click.echo(f"  ✓ Original model saved for revert: {gc.original_model}")
+        ux.echo(f"  ✓ Original model saved for revert: {gc.original_model}")
     click.echo()
 
     rows = [
@@ -14318,10 +14318,10 @@ def _restart_services(
             # names (--passive, live=false) (GAP-1782).
             click.echo(f" ! ({_pending_reload_hint(getattr(readiness, 'connector', ''))})")
         elif readiness:
-            click.echo(" ✓")
+            ux.echo(" ✓")
             connector_registration_verified = True
         else:
-            click.echo(f" ✗{f' ({diagnostic})' if diagnostic else ''}")
+            ux.echo(f" ✗{f' ({diagnostic})' if diagnostic else ''}")
             failed.append(f"{readiness_label} readiness")
 
     # Multi-connector global change: every active hook connector is affected
@@ -16151,9 +16151,9 @@ def _auto_restart_sidecar_after_setup(ctx: click.Context, *_args, **_kwargs) -> 
     if batch_targets:
         click.echo("")
         if "omnigent" in batch_targets:
-            click.echo("  Starting/restarting defenseclaw-gateway and verifying connector registration…")
+            ux.echo("  Starting/restarting defenseclaw-gateway and verifying connector registration…")
         else:
-            click.echo("  Starting/restarting defenseclaw-gateway and verifying connector readiness…")
+            ux.echo("  Starting/restarting defenseclaw-gateway and verifying connector readiness…")
         required_raw = ctx.meta.get(_SETUP_BATCH_REQUIRED_KEY)
         focus = [
             name
@@ -16191,7 +16191,7 @@ def _auto_restart_sidecar_after_setup(ctx: click.Context, *_args, **_kwargs) -> 
                 _rollback_failed_connector_application(app, snapshot, exc)
             raise
         if "omnigent" in batch_targets:
-            click.echo(
+            ux.echo(
                 f"  ✓ Configured {len(focus)} connector(s); DefenseClaw gateway roster and "
                 "hook-contract evidence are ready"
             )
@@ -16200,7 +16200,7 @@ def _auto_restart_sidecar_after_setup(ctx: click.Context, *_args, **_kwargs) -> 
                 "OmniGent server before relying on action/fail-closed enforcement."
             )
         else:
-            click.echo(
+            ux.echo(
                 f"  ✓ Configured {len(focus)} connector(s); runtime roster and hook-contract evidence are ready"
             )
         return
@@ -16210,12 +16210,12 @@ def _auto_restart_sidecar_after_setup(ctx: click.Context, *_args, **_kwargs) -> 
         if ctx.meta.get(_SETUP_OFFLINE_NOTED_KEY):
             return
         click.echo("")
-        click.echo("  Config updated. Gateway is not running — changes will take effect on next start.")
+        ux.echo("  Config updated. Gateway is not running — changes will take effect on next start.")
         click.echo("    Start it with: defenseclaw-gateway start")
         return
 
     click.echo("")
-    click.echo("  Auto-restarting defenseclaw-gateway to apply config changes…")
+    ux.echo("  Auto-restarting defenseclaw-gateway to apply config changes…")
     if not _restart_defense_gateway(data_dir, start_if_stopped=False):
         # GAP-1573: a failed restart left the change unapplied but exited 0.
         _fail_if_restart_failed(["defenseclaw-gateway"])
@@ -16285,7 +16285,7 @@ def _check_openclaw_gateway(host: str = "127.0.0.1", port: int = 18789) -> bool:
         time.sleep(poll_interval)
         if not _openclaw_gateway_healthy(host, port):
             went_unhealthy = True
-            click.echo(" → restarting...", nl=False)
+            ux.echo(" → restarting...", nl=False)
             break
 
     if not went_unhealthy:
@@ -16308,7 +16308,7 @@ def _check_openclaw_gateway(host: str = "127.0.0.1", port: int = 18789) -> bool:
         ux.echo(f" ✓ (recovered after restart, {elapsed}s)")
         return True
     elapsed = int(time.monotonic() - start)
-    click.echo(f" ✗ (unhealthy after {elapsed}s)")
+    ux.echo(f" ✗ (unhealthy after {elapsed}s)")
     click.echo(f"    The OpenClaw gateway at {host}:{port} did not recover after its config-triggered restart.")
     click.echo("    Check: openclaw gateway status")
     return False
@@ -16615,7 +16615,7 @@ def setup_splunk(
         # a one-line notice so operators are not surprised when the
         # Docker pre-flight checks below run.
         if not enable_logs:
-            click.echo(
+            ux.echo(
                 "  note: --s3-export implies --logs (the S3 exporter is a "
                 "sidecar to the local Splunk stack). Running Docker pre-flight "
                 "checks…"
@@ -16851,7 +16851,7 @@ def _interactive_splunk_setup(
 ) -> None:
     click.echo()
     click.echo("  Splunk Integration Setup")
-    click.echo("  ────────────────────────")
+    ux.echo("  ────────────────────────")
     click.echo()
     click.echo("  DefenseClaw supports three Splunk pipelines. You can enable any combination.")
     click.echo()
@@ -16989,7 +16989,7 @@ def _interactive_o11y(
 ) -> None:
     click.echo()
     click.echo("  Splunk Observability Cloud")
-    click.echo("  ──────────────────────────")
+    ux.echo("  ──────────────────────────")
     click.echo()
 
     realm = click.prompt("  Realm (e.g. us1, us0, eu0)", default=realm or "us1")
@@ -17016,7 +17016,7 @@ def _interactive_o11y(
 def _interactive_o11y_dashboards(app: AppContext) -> bool:
     click.echo()
     click.echo("  Splunk O11y Dashboards")
-    click.echo("  ──────────────────────")
+    ux.echo("  ──────────────────────")
     click.echo()
     if not click.confirm("  Install Splunk Observability Cloud dashboards now?", default=False):
         return False
@@ -17089,7 +17089,7 @@ def _prompt_splunk_hec_token(current: str | None) -> str:
 def _interactive_logs(app: AppContext) -> bool:
     click.echo()
     click.echo("  Local Splunk")
-    click.echo("  ────────────")
+    ux.echo("  ────────────")
     click.echo()
 
     if not _accept_splunk_license_interactive():
@@ -17112,7 +17112,7 @@ def _interactive_logs(app: AppContext) -> bool:
 def _interactive_enterprise(app: AppContext, *, skip_test: bool = False) -> None:
     click.echo()
     click.echo("  Splunk Enterprise")
-    click.echo("  ─────────────────")
+    ux.echo("  ─────────────────")
     click.echo()
 
     endpoint = click.prompt(
@@ -17840,7 +17840,7 @@ def _refresh_and_maybe_restart_splunk_bridge(
     )
     stopped = False
     if was_running:
-        click.echo(f"  {ux.dim('→')} Stopping running local Splunk stack to refresh bundle...")
+        ux.echo(f"  {ux.dim('→')} Stopping running local Splunk stack to refresh bundle...")
         bridge = _resolve_bridge_bin(data_dir)
         if bridge:
             try:
@@ -17859,7 +17859,7 @@ def _refresh_and_maybe_restart_splunk_bridge(
             except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
                 click.echo(f"    warning: could not stop stack: {exc}")
         else:
-            click.echo(
+            ux.echo(
                 "    warning: bridge binary missing — cannot stop stack cleanly. Run 'defenseclaw init' to seed."
             )
 
@@ -17868,7 +17868,7 @@ def _refresh_and_maybe_restart_splunk_bridge(
     result.stopped = stopped
 
     if result.skipped_reason:
-        click.echo(f"  {ux.dim('→')} Bundle refresh skipped: {result.skipped_reason}")
+        ux.echo(f"  {ux.dim('→')} Bundle refresh skipped: {result.skipped_reason}")
         return result
     if result.errors:
         for err in result.errors[:3]:
@@ -17882,7 +17882,7 @@ def _refresh_and_maybe_restart_splunk_bridge(
             f"{preserved_count} preserved)"
         )
     else:
-        click.echo(f"  {ux.dim('→')} Bundle refresh: no changes (seeded copy already matches bundle)")
+        ux.echo(f"  {ux.dim('→')} Bundle refresh: no changes (seeded copy already matches bundle)")
     return result
 
 
@@ -17974,7 +17974,7 @@ def _bootstrap_bridge(
         click.echo("    Username:  admin")
         env_file = os.path.join(data_dir, "splunk-bridge", "env", ".env")
         click.echo(f"    Password:  (stored in {env_file})")
-        click.echo("    Note: Free mode may still show a login page — use these credentials")
+        ux.echo("    Note: Free mode may still show a login page — use these credentials")
         return contract
     except subprocess.TimeoutExpired:
         click.echo("  Bridge startup timed out after 5 minutes")
@@ -18528,7 +18528,7 @@ def _show_splunk_credentials(data_dir: str) -> None:
     click.echo()
     if native:
         click.echo("  Local Splunk Generated Secrets")
-        click.echo("  ──────────────────────────────")
+        ux.echo("  ──────────────────────────────")
         click.echo("    URL:       http://127.0.0.1:8000")
         click.echo("    Web auth:  disabled in Splunk Free mode (no login credentials)")
         if hec_token:
@@ -18538,7 +18538,7 @@ def _show_splunk_credentials(data_dir: str) -> None:
             click.echo("    Note: this secret is required by the container at startup; it is not a Web login.")
     else:
         click.echo("  Splunk Web Credentials")
-        click.echo("  ──────────────────────")
+        ux.echo("  ──────────────────────")
         click.echo("    URL:       http://127.0.0.1:8000")
         click.echo("    Username:  admin")
         click.echo(f"    Password:  {password}")
@@ -18620,9 +18620,9 @@ def setup_routing(app: AppContext, enable: bool, disable: bool, status: bool, ye
                 detail = (docker_result.stderr or docker_result.stdout).strip()
                 suffix = f": {detail}" if detail else ""
                 raise click.ClickException(f"Docker is required for managed routing but is not running{suffix}")
-            click.echo("  ✓ Docker is running")
+            ux.echo("  ✓ Docker is running")
         else:
-            click.echo(f"  ✓ Remote router configured: {remote_endpoint}")
+            ux.echo(f"  ✓ Remote router configured: {remote_endpoint}")
 
         # Only save after local prerequisites succeed. A failed Docker check
         # must not leave the desired config enabled but inactive.
@@ -18631,7 +18631,7 @@ def setup_routing(app: AppContext, enable: bool, disable: bool, status: bool, ye
         except OSError as exc:
             raise click.ClickException(f"failed to save config: {exc}") from exc
         click.echo()
-        click.echo("  ✓ Semantic routing configured")
+        ux.echo("  ✓ Semantic routing configured")
         click.echo(f"    Mode:       {mode}")
         if not remote_endpoint:
             click.echo(f"    Version:    {app.cfg.routing.version}")
@@ -18672,7 +18672,7 @@ def setup_routing(app: AppContext, enable: bool, disable: bool, status: bool, ye
         except OSError as exc:
             raise click.ClickException(f"failed to save config: {exc}") from exc
         click.echo()
-        click.echo("  ✓ Semantic routing disabled")
+        ux.echo("  ✓ Semantic routing disabled")
         click.echo("    All requests will use the default provider.")
         click.echo("    Activation: gateway restart required")
 
@@ -18687,7 +18687,7 @@ def setup_routing(app: AppContext, enable: bool, disable: bool, status: bool, ye
 def _print_routing_status(app: AppContext) -> None:
     click.echo()
     click.echo("  Semantic Router Status")
-    click.echo("  ══════════════════════")
+    ux.echo("  ══════════════════════")
     if not app.cfg.routing.enabled:
         click.echo("    Configured: disabled")
         click.echo()
