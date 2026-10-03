@@ -64,6 +64,17 @@ func TestUsageMessageNamesTheInvokedPath(t *testing.T) {
 	if got != want {
 		t.Errorf("usage message = %q, want %q", got, want)
 	}
+	// GAP-2240: the unknown-action hint of a lifecycle group too.
+	for _, group := range []string{"linux", "macos"} {
+		groupCmd, _, err := rootCmd.Find([]string{"enterprise", group})
+		if err != nil || groupCmd.RunE == nil {
+			t.Fatalf("enterprise %s: %v", group, err)
+		}
+		want := `run "/opt/defenseclaw/bin/defenseclaw-gateway enterprise ` + group + ` --help" for the actions`
+		if got := groupCmd.RunE(groupCmd, []string{"frobnicate"}); got == nil || !strings.Contains(got.Error(), want) {
+			t.Errorf("enterprise %s frobnicate: %v, want %q", group, got, want)
+		}
+	}
 	t.Setenv(delegatedFromEnv, "defenseclaw")
 	if got := usageMessage(set, errors.New("bad flag")); !strings.Contains(got, "Try 'defenseclaw set --help'") {
 		t.Errorf("delegated usage message = %q, want the defenseclaw command", got)

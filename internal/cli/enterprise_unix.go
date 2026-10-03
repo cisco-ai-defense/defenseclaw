@@ -93,7 +93,7 @@ arguments, 75 another lifecycle run holds the lock.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) > 0 {
-				return invalidLifecycleArguments(fmt.Errorf("unknown action %q for %q; run %q for the actions", args[0], cmd.CommandPath(), cmd.CommandPath()+" --help"))
+				return invalidLifecycleArguments(fmt.Errorf("unknown action %q for %q; run %q for the actions", args[0], cmd.CommandPath(), invokedCommandText(cmd, cmd.CommandPath()+" --help")))
 			}
 			return cmd.Help()
 		},

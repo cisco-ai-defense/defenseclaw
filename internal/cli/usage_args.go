@@ -62,17 +62,7 @@ func usageError(c *cobra.Command, err error) error {
 
 // usageMessage is err with the command's usage line and the --help pointer.
 func usageMessage(c *cobra.Command, err error) string {
-	root := c.Root().Name()
-	named := func(text string) string { return text }
-	if invoked := invokedGatewayPath(root); invoked != "" && os.Getenv(delegatedFromEnv) != "defenseclaw" {
-		// Name the binary as it was run, so the hint runs as typed (GAP-2189).
-		named = func(text string) string {
-			if !strings.HasPrefix(text, root) {
-				return text
-			}
-			return invoked + strings.TrimPrefix(text, root)
-		}
-	}
+	named := func(text string) string { return invokedCommandText(c, text) }
 	use := named(c.UseLine())
 	if c.HasAvailableSubCommands() {
 		// Show the subcommand form too, as --help does (GAP-1622).
@@ -85,6 +75,18 @@ func usageMessage(c *cobra.Command, err error) string {
 	}
 	msg := fmt.Sprintf("%s\nUsage: %s\nTry '%s --help' for help.", plainFlagValueError(err), use, named(c.CommandPath()))
 	return delegatedCommandText(c, msg)
+}
+
+// invokedCommandText names the gateway binary in a command hint as it was
+// run, so the hint runs as typed (GAP-2189, GAP-2240). text starts with the
+// root command name, as c.CommandPath() and c.UseLine() do.
+func invokedCommandText(c *cobra.Command, text string) string {
+	root := c.Root().Name()
+	invoked := invokedGatewayPath(root)
+	if invoked == "" || os.Getenv(delegatedFromEnv) == "defenseclaw" || !strings.HasPrefix(text, root) {
+		return text
+	}
+	return invoked + strings.TrimPrefix(text, root)
 }
 
 // invokedGatewayPath is the absolute path the gateway binary was run by,
