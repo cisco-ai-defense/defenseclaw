@@ -3408,15 +3408,24 @@ function Assert-DefenseClawCanonicalRawPathAcl {
         [Security.AccessControl.ControlFlags]::DiscretionaryAclProtected
     )
     if (([int]$Actual.ControlFlags -band $protectedFlag) -eq 0) {
-        if (-not $AllowSelfHeal) {
-            # Drift-detection / validation-only caller: throw immediately.
-            # The caller expects to see the exact drift state and route
-            # into its own deeper check pipeline (lifecycle refuses the
-            # manifest-publish step, repair escalates to ancestor + hash
-            # checks). Only stamp-and-verify callers opt in via
-            # -AllowSelfHeal.
+        if (Test-DefenseClawTrustStrictAncestors) {
+            # Strict mode (DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS=1):
+            # restore pre-bulldoze refuse-on-drift behavior. Also used by
+            # unit tests that pin the strict path.
             throw "managed DACL is not protected after exact ACL replacement: $Path"
         }
+        # Previously this throw also fired for callers that did not opt
+        # into -AllowSelfHeal. That split (validation-only paths see raw
+        # drift; stamp paths opt into repair) made sense when the drift
+        # was benign, but it stranded the user on uninstall every time an
+        # on-disk DACL came back without SE_DACL_PROTECTED. The one-shot
+        # icacls /inheritance:r + native re-read below is non-destructive
+        # if the DACL is already protected (idempotent) and converges to a
+        # protected shape otherwise. Running it on validation-only paths
+        # too may mask drift the deeper tamper-check pipeline wanted to
+        # see; the AclSelfHealAdvisory warning emitted on persistent
+        # drift is the forensic trail for that case.
+        $AllowSelfHeal = $true  # keep the variable live for the branch below
         # Self-heal: PowerShell's native Set-Acl can silently drop
         # PROTECTED_DACL_SECURITY_INFORMATION even when the input
         # descriptor had SetAccessRuleProtection($true, $false). Force
