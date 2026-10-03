@@ -620,7 +620,7 @@ func TestOpenDaemonStoreMovesCorruptStoreAsideAndKeepsBlocks(t *testing.T) {
 		filepath.Base(listed[0].Path) == filepath.Base(dbPath) {
 		t.Fatalf("MovedCorruptStores = %+v; want the one moved store", listed)
 	} else if !listed[0].CarryOverKnown || listed[0].CarriedOver != 1 ||
-		!strings.Contains(listed[0].BlockAllowSummary(), "1 block/allow entries were carried over, but some could not be read") {
+		!strings.Contains(listed[0].BlockAllowSummary(), "1 block/allow entry was carried over, but some could not be read") {
 		t.Fatalf("carry-over note = %+v (%s)", listed[0], listed[0].BlockAllowSummary())
 	}
 }
@@ -666,6 +666,16 @@ func TestOpenDaemonStoreReportsBlockListsLostWithAnUnreadableStore(t *testing.T)
 		!strings.Contains(summary, "0 entries were carried over") || strings.Contains(summary, "kept") ||
 		!strings.Contains(summary, "defenseclaw mcp list") {
 		t.Fatalf("summary = %q for %+v", summary, listed[0])
+	}
+}
+
+// GAP-2053: one carried-over entry reads "1 block/allow entry was", not "1 ... entries were".
+func TestBlockAllowSummaryUsesSingularForOneEntry(t *testing.T) {
+	one := MovedCorruptStore{CarryOverKnown: true, CarriedOver: 1}.BlockAllowSummary()
+	two := MovedCorruptStore{CarryOverKnown: true, CarriedOver: 2}.BlockAllowSummary()
+	if one != "a new store was started and 1 block/allow entry was carried over." ||
+		two != "a new store was started and 2 block/allow entries were carried over." {
+		t.Fatalf("summaries = %q / %q", one, two)
 	}
 }
 

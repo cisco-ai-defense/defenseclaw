@@ -734,6 +734,15 @@ def test_moved_audit_store_with_unreadable_block_lists_says_none_were_carried_ov
     assert "kept the block/allow" not in notice["detail"]
 
 
+def test_moved_audit_store_with_one_carried_over_entry_uses_singular(tmp_path) -> None:
+    # GAP-2053: "carried over 1 block/allow entries" read wrong.
+    moved = tmp_path / "audit.db.corrupt-20261002T222056Z"
+    Path(str(moved) + ".carryover.json").write_text('{"carried_over": 1}', encoding="utf-8")
+    assert cmd_doctor._moved_store_block_allow_summary(moved) == (
+        "started a new store and carried over 1 block/allow entry."
+    )
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX mode custody regression")
 def test_audit_check_and_repair_plan_reject_world_readable_database(tmp_path) -> None:
     data_dir = _private_data_dir(tmp_path)

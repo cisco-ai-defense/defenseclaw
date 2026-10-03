@@ -177,14 +177,23 @@ func (store MovedCorruptStore) BlockAllowSummary() string {
 	case !store.CarryOverKnown:
 		return "a new store was started; " + ReviewBlockAllowListsHint
 	case store.CarryOverError == "":
-		return fmt.Sprintf("a new store was started and %d block/allow entries were carried over.", store.CarriedOver)
+		return "a new store was started and " + blockAllowEntriesCarriedOver(store.CarriedOver) + "."
 	case store.CarriedOver == 0:
 		return "a new store was started, but the old block/allow lists could not be read, so 0 entries were carried over and earlier blocks no longer apply; " +
 			ReviewBlockAllowListsHint
 	default:
-		return fmt.Sprintf("a new store was started and %d block/allow entries were carried over, but some could not be read; %s",
-			store.CarriedOver, ReviewBlockAllowListsHint)
+		return "a new store was started and " + blockAllowEntriesCarriedOver(store.CarriedOver) +
+			", but some could not be read; " + ReviewBlockAllowListsHint
 	}
+}
+
+// blockAllowEntriesCarriedOver says "1 block/allow entry was carried over" or
+// "N block/allow entries were carried over" (GAP-2053).
+func blockAllowEntriesCarriedOver(count int) string {
+	if count == 1 {
+		return "1 block/allow entry was carried over"
+	}
+	return fmt.Sprintf("%d block/allow entries were carried over", count)
 }
 
 const movedCorruptStoreTimeLayout = "20060102T150405Z"
