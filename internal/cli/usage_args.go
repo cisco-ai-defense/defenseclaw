@@ -202,11 +202,25 @@ func strayArgumentError(c *cobra.Command, args []string) error {
 	if c.HasSubCommands() {
 		kind = "unknown command"
 	}
-	msg := fmt.Sprintf("%s %q for %q", kind, args[0], c.CommandPath())
-	if suggestions := c.SuggestionsFor(args[0]); len(suggestions) > 0 {
-		msg += "\nDid you mean " + strings.Join(suggestions, " or ") + "?"
+	return fmt.Errorf("%s %q for %q%s", kind, args[0], c.CommandPath(), didYouMean(c, args[0]))
+}
+
+// didYouMean is the "Did you mean X?" line for a mistyped subcommand of c,
+// or "". cobra.SuggestionsFor treats an unset minimum distance as 0, so only
+// prefixes matched and "acp verfy" got no suggestion; cobra itself defaults
+// it to 2 (GAP-2374).
+func didYouMean(c *cobra.Command, typed string) string {
+	if c.DisableSuggestions {
+		return ""
 	}
-	return fmt.Errorf("%s", msg)
+	if c.SuggestionsMinimumDistance <= 0 {
+		c.SuggestionsMinimumDistance = 2
+	}
+	suggestions := c.SuggestionsFor(typed)
+	if len(suggestions) == 0 {
+		return ""
+	}
+	return "\nDid you mean " + strings.Join(suggestions, " or ") + "?"
 }
 
 // isCobraNoArgs reports whether a command's validator is cobra.NoArgs,
@@ -263,6 +277,13 @@ func installUsageArgChecks(root *cobra.Command) {
 		}
 	}
 	walk(root)
+	// A mistyped top-level command gets the same error, suggestion, usage
+	// and --help lines as a mistyped subcommand, not the raw cobra "Did you
+	// mean this?" block (GAP-2374). cobra already rejects every positional
+	// argument on the root, so only the message changes.
+	if root.Args == nil {
+		root.Args = unexpectedArgs
+	}
 	help := root.HelpFunc()
 	root.SetHelpFunc(func(cmd *cobra.Command, args []string) {
 		if err := unknownSubcommand(cmd); err != nil {

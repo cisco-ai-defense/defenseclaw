@@ -147,3 +147,41 @@ func TestStrayArgumentsAreUsageErrors(t *testing.T) {
 		t.Fatalf("bogus-cmd: rc %d, want 2 (%s)", rc, stderr.String())
 	}
 }
+
+// GAP-2374: a mistyped subcommand gets one shape everywhere: the error, a
+// "Did you mean X?" line for a near miss (not only a prefix), the usage line
+// and the --help pointer. enterprise linux|macos said "unknown action" with
+// no suggestion, "enterprise acp verfy" had no suggestion, and a root typo
+// printed the raw cobra "Did you mean this?" block.
+func TestMistypedSubcommandSuggestsAndShowsUsage(t *testing.T) {
+	group, _, err := rootCmd.Find([]string{"enterprise", "macos"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg := fmt.Sprint(group.RunE(group, []string{"ensur"}))
+	if !strings.HasPrefix(msg, `unknown action "ensur" for "defenseclaw-gateway enterprise macos"`+"\nDid you mean ensure?\nUsage: ") ||
+		!strings.HasSuffix(msg, "Try 'defenseclaw-gateway enterprise macos --help' for help.") {
+		t.Fatalf("enterprise macos ensur: %q", msg)
+	}
+
+	var stderr strings.Builder
+	rootCmd.SetErr(&stderr)
+	t.Cleanup(func() { rootCmd.SetArgs(nil); rootCmd.SetErr(nil) })
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"enterprise", "acp", "verfy"}, "unknown command \"verfy\" for \"defenseclaw-gateway enterprise acp\"\nDid you mean verify?\nUsage: defenseclaw-gateway enterprise acp [command]\n"},
+		{[]string{"enterpris"}, "unknown command \"enterpris\" for \"defenseclaw-gateway\"\nDid you mean enterprise?\nUsage: defenseclaw-gateway [flags]\n"},
+	} {
+		stderr.Reset()
+		rootCmd.SetArgs(tc.args)
+		if rc := ExecuteContext(context.Background()); rc != 2 {
+			t.Fatalf("%v: rc %d, want 2 (%s)", tc.args, rc, stderr.String())
+		}
+		if got := stderr.String(); !strings.Contains(got, tc.want) || strings.Contains(got, "Did you mean this?") ||
+			!strings.Contains(got, "Try 'defenseclaw-gateway") {
+			t.Fatalf("%v stderr = %q", tc.args, got)
+		}
+	}
+}
