@@ -194,7 +194,7 @@ class DeferredHelperResultFileTests(unittest.TestCase):
             shim_kept = (root / "bin" / "defenseclaw.cmd").exists()
         self.assertEqual(result["status"], "failed")
         detail = result["detail"]
-        self.assertIn(f"{held} is in use by another program. Close that program, then run ", detail)
+        self.assertIn(f"{os.path.normcase(held)} is in use by another program. Close that program, then run ", detail)
         self.assertIn(f'"{root / "bin" / "defenseclaw.cmd"}" uninstall --all --binaries --yes again', detail)
         self.assertIn(".env (holds API keys)", detail)
         self.assertIn("config.yaml", detail)

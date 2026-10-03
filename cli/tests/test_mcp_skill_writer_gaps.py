@@ -224,6 +224,6 @@ class TestSharedSkillDirGlobalWatcherBlock(TestSharedSkillDirScope):
         pe = self._watcher_state()
         unblocked = self.invoke(["unblock", "review"])
         self.assertEqual(unblocked.exit_code, 0, unblocked.output)
-        self.assertIn("cleared (global, every connector)", unblocked.output)
+        self.assertIn("Unblocked 'review' (every connector).", unblocked.output)
         self.assertNotIn("connector=amp", unblocked.output)
         self.assertFalse(pe.is_blocked("skill", "review"))
