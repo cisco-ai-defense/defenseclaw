@@ -34,3 +34,20 @@ def test_connector_over_guarded_openclaw_uses_display_names():
     assert rc == 2, out
     assert "already guards: OpenClaw. OpenClaw is proxy-backed" in out
     assert "Switch this install to Claude Code: defenseclaw setup claude-code --replace --mode action" in out
+
+
+def test_zeptoclaw_over_guarded_openclaw_offers_only_working_commands():
+    # GAP-2468: proxy-to-proxy refusal, singular wording and no init advice.
+    rc, out = _run(["--connector", "zeptoclaw", "--yes", "--skip-gateway"], ["openclaw"], [])
+    assert rc == 2, out
+    assert "ZeptoClaw is proxy-backed and cannot run next to OpenClaw" in out
+    assert "Switch to it and remove OpenClaw: defenseclaw setup zeptoclaw --replace" in out
+    assert "Keep guarding OpenClaw: defenseclaw setup openclaw" in out
+    assert "defenseclaw init" not in out and "these connectors" not in out
+
+
+def test_zeptoclaw_over_hook_roster_keeps_plural_wording():
+    rc, out = _run(["--connector", "zeptoclaw", "--skip-gateway"], ["claudecode", "codex"], [])
+    assert rc == 2, out
+    assert "cannot run next to these connectors" in out and "remove them" in out
+    assert "defenseclaw init" in out

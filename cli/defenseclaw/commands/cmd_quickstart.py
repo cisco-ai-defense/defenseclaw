@@ -361,13 +361,24 @@ def _refuse_roster_narrowing(cfg_mod, connector: str, mode: str | None = None) -
     if wanted in _PROXY_CONNECTORS:
         # Proxy-backed connectors cannot run next to hook connectors, so
         # "keep the rest" is refused (GAP-1407); --replace switches (GAP-1455).
-        click.echo(
-            f"  \u2717 This install already guards: {_connector_labels(configured)}.\n"
-            f"    {_connector_label(wanted)} is proxy-backed and cannot run next to these connectors.\n"
-            f"    Switch to it and remove them: defenseclaw setup {slug} --replace{mode_flag}\n"
-            "    Change the whole set instead: defenseclaw init",
-            err=True,
-        )
+        others = [c for c in configured if c and c != wanted]
+        if len(others) == 1:
+            target = pronoun = _connector_label(others[0])
+        else:
+            target, pronoun = "these connectors", "them"
+        lines = [
+            f"  \u2717 This install already guards: {_connector_labels(configured)}.",
+            f"    {_connector_label(wanted)} is proxy-backed and cannot run next to {target}. No changes made.",
+            f"    Switch to it and remove {pronoun}: defenseclaw setup {slug} --replace{mode_flag}",
+        ]
+        guarded_proxy = next((c for c in others if c in _PROXY_CONNECTORS), "")
+        if guarded_proxy:
+            # GAP-2468: init does not switch a proxy install to the other
+            # proxy connector, so offer to keep the guarded one instead.
+            lines.append(f"    Keep guarding {_connector_label(guarded_proxy)}: defenseclaw setup {guarded_proxy}")
+        else:
+            lines.append("    Change the whole set instead: defenseclaw init")
+        click.echo("\n".join(lines), err=True)
         sys.exit(2)
     click.echo(
         f"  \u2717 This install already guards: {', '.join(configured)}.\n"
