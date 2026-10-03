@@ -283,7 +283,10 @@ func (l *lifecycle) run(ctx context.Context) int {
 			r.AddError(codeInvalidArguments, "a protected-state change can only be applied by ensure")
 			return enterprisestatus.InvalidArgsExitCode(env.GOOS)
 		}
-		if err := l.opts.Mutate(ctx); err != nil {
+		resume := l.pauseApplyTrigger(ctx)
+		err := l.opts.Mutate(ctx)
+		resume()
+		if err != nil {
 			r.AddError(codeChange, err.Error())
 			return 0
 		}
@@ -354,6 +357,23 @@ func (l *lifecycle) run(ctx context.Context) int {
 		return l.uninstall(ctx, record)
 	}
 	return 0
+}
+
+// pauseApplyTrigger stops the Linux apply path unit while a protected-state
+// change (enterprise secret set or remove) writes under this run's lock, and
+// returns the function that starts it again. This run applies the change
+// itself. Left watching, the path unit started the apply service on that
+// write, and its redundant ensure held the lock for several seconds after
+// this run returned, so a lifecycle command typed right after it failed
+// lifecycle_busy (GAP-2261). The transaction stops the path unit anyway
+// while it applies (quiesce) and starts it again when it activates.
+func (l *lifecycle) pauseApplyTrigger(ctx context.Context) func() {
+	env := l.env
+	unit := Unit{Name: unitApplyPath, Kind: "path"}
+	if env.GOOS != "linux" || !env.Services.Active(ctx, unit) || env.Services.Stop(ctx, unit) != nil {
+		return func() {}
+	}
+	return func() { _ = env.Services.Start(context.WithoutCancel(ctx), unit) }
 }
 
 // codeSuperseded names an apply run that stood down for a newer binary.
