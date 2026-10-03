@@ -211,7 +211,11 @@ if [ "$status" -ne 0 ]; then
     if [ -n "$cause" ]; then
         echo "DefenseClaw: $cause" >&2
     fi
-    echo "DefenseClaw: fix that, then finish the install with: sudo $gateway enterprise macos ensure --from-package" >&2
+    # A failed install records no pkg receipt, and ensure does not write
+    # one, so receipt-based MDM inventory reports the Mac as not
+    # installed until the pkg installs again (GAP-2359).
+    echo "DefenseClaw: fix that, then install the package again. That finishes the install and records the pkg receipt that MDM inventory reads." >&2
+    echo "DefenseClaw: sudo $gateway enterprise macos ensure --from-package also finishes the install, but records no pkg receipt." >&2
     echo "DefenseClaw: the full result is in $state/last-package-result.json." >&2
 fi
 exit "$status"

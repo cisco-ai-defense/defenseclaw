@@ -47,7 +47,7 @@ the installed config's SHA-256.
 
 | Mechanism | Value |
 | --- | --- |
-| pkg receipt | `pkgutil --pkg-info com.cisco.defenseclaw.enterprise` reports `version: X.Y.Z`. The lifecycle forgets the receipt when you uninstall. |
+| pkg receipt | `pkgutil --pkg-info com.cisco.defenseclaw.enterprise` reports `version: X.Y.Z`. The lifecycle forgets the receipt when you uninstall. A pkg whose postinstall failed records no receipt, and `ensure --from-package` adds none: after you fix the cause, install the pkg again. |
 | Script | `macos/detect.sh`, the same options as on Linux. For Intune custom attributes use `--format value` (String), and for Jamf Pro extension attributes use `--format jamf`. |
 | Health | `detect.sh --require-healthy`, or `defenseclaw-enterprise.sh --action verify` exits 0. |
 | Last package result | `/opt/cisco/defenseclaw/lifecycle/last-package-result.json`. |
