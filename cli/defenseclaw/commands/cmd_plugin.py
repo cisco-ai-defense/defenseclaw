@@ -516,6 +516,7 @@ def _scan_one_plugin_dir(
         _scan_ui.render_summary(
             ctx,
             clean=1,
+            warning=0,
             blocked=0,
             errored=0,
             total=1,
@@ -550,6 +551,7 @@ def _scan_one_plugin_dir(
     _scan_ui.render_summary(
         ctx,
         clean=0,
+        warning=0 if verdict == _scan_ui.VERDICT_BLOCKED else 1,
         blocked=1 if verdict == _scan_ui.VERDICT_BLOCKED else 0,
         errored=0,
         total=1,
@@ -1196,7 +1198,7 @@ def _scan_all_plugins(
         )
         _scan_ui.render_preamble(ctx, target_count=len(targets))
 
-        clean = blocked = errored = findings_total = 0
+        clean = warned = blocked = errored = findings_total = 0
         # Summary time is the wall time of the sweep, not the sum of the
         # base scanner's durations (GAP-2070).
         sweep_started = time.monotonic()
@@ -1237,6 +1239,8 @@ def _scan_all_plugins(
                 )
                 if verdict == _scan_ui.VERDICT_BLOCKED:
                     blocked += 1
+                else:
+                    warned += 1
                 _scan_ui.render_per_target_status(
                     ctx,
                     target=target_label,
@@ -1252,6 +1256,7 @@ def _scan_all_plugins(
             _scan_ui.render_summary(
                 ctx,
                 clean=clean,
+                warning=warned,
                 blocked=blocked,
                 errored=errored,
                 total=len(targets),
