@@ -23496,6 +23496,29 @@ function Invoke-DefenseClawNuclearUninstall {
         try { $null = & $script:ScExe 'delete' $name 2>&1 } catch {}
     }
 
+    # 1b. Force-kill any surviving DefenseClaw process by image name. sc.exe
+    #     stop is cooperative - a service whose stop handler hangs or whose
+    #     process is wedged holding open file handles keeps the installed
+    #     EXE and the broker's log open, blocking the subsequent
+    #     Remove-Item -Recurse. taskkill /F /IM is non-cooperative and
+    #     releases the handles so delete can proceed. The image name list
+    #     is the EXACT set of binaries the installer ships; a stray EXE
+    #     outside this list cannot be killed by name here.
+    $taskkillExe = [IO.Path]::Combine($script:System32, 'taskkill.exe')
+    foreach ($image in @(
+        'defenseclaw-cmid-broker.exe',
+        'defenseclaw-gateway.exe',
+        'defenseclaw-hook.exe',
+        'defenseclaw.exe'
+    )) {
+        try { $null = & $taskkillExe '/F' '/IM' $image '/T' 2>&1 } catch {}
+    }
+
+    # 1c. Short settle delay so NT closes the released handles before the
+    #     Remove-Item -Recurse starts walking the trees. 500 ms is enough
+    #     in practice; Remove-Item still retries up to 3 times below.
+    Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds 500
+
     # 2. Nuke InstallRoot + StateRoot. Each path must pass the safe-root
     #    scope guard before any takeown/icacls/delete runs. The two bases
     #    are HARDCODED here so a caller cannot subvert the hammer by
