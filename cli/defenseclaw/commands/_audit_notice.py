@@ -66,3 +66,29 @@ class _SavedChangeAudit:
 def saved_change_audit(logger: Any) -> _SavedChangeAudit:
     """Wrap *logger* for the audit event of an already applied change."""
     return _SavedChangeAudit(logger)
+
+
+def note_asset_policy_observed(
+    logger: Any, decision: Any, *, target_type: str, name: str, connector: str = "",
+) -> None:
+    """Warn and audit an asset-policy would-block in observe mode (GAP-2390).
+
+    Observe mode admits the asset, but operators must still see what action
+    mode would refuse, both on screen and in the audit trail.
+    """
+    reason = getattr(decision, "observed_reason", "")
+    if not reason:
+        return
+    source = getattr(decision, "observed_source", "")
+    where = f" [{connector}]" if connector else ""
+    click.secho(
+        f"  ⚠ asset policy (observe){where}: {reason}; allowed now, "
+        "action mode would block it.",
+        fg="yellow",
+    )
+    if logger:
+        saved_change_audit(logger).log_action(
+            "install-warning", name,
+            f"type={target_type} connector={connector} mode=observe would-block "
+            f"source={source} reason={reason}",
+        )

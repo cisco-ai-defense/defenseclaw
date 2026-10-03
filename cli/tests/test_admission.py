@@ -408,6 +408,27 @@ class TestEvaluateAdmissionAssetPolicy(_StoreTestBase):
         self.assertEqual(d.verdict, "scan")
         self.assertEqual(d.source, "scan-required")
 
+    def test_observe_mode_keeps_the_would_block_on_the_decision(self):
+        # GAP-2390: observe mode must still report what action mode refuses.
+        policy = self._asset_policy(
+            mode="observe", registry_required=True,
+            registry=[SimpleNamespace(name="approved")],
+        )
+        d = evaluate_admission(
+            self.pe, policy_dir=self.policy_dir,
+            target_type="mcp", name="offreg",
+            asset_policy=policy,
+        )
+        self.assertEqual(d.verdict, "scan")
+        self.assertEqual(d.observed_source, "asset-policy-registry-required-observe")
+        self.assertIn("not in the approved registry", d.observed_reason)
+        allowed = evaluate_admission(
+            self.pe, policy_dir=self.policy_dir,
+            target_type="mcp", name="approved",
+            asset_policy=policy,
+        )
+        self.assertEqual(allowed.observed_reason, "")
+
     def _mcp_registry_rule(self):
         # A registry rule pinning the full command and exact argv.
         return SimpleNamespace(
