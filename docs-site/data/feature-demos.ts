@@ -170,6 +170,7 @@ const scenarios: ScenarioDefinition[] = [
       {
         id: 'guardrail', label: 'guardrail.yaml', language: 'yaml',
         source: `mode: action
+block_at: HIGH
 human_approval: true
 hitl_min_severity: high
 critical_behavior: always_block
@@ -203,17 +204,17 @@ connector:
     evidence: [
       { id: 'mode-event', label: 'Finding', value: 'system.path-change · HIGH', detail: 'The same pending action is used for every mode.', tone: 'warning' },
       { id: 'mode-observe', label: 'Observe', value: 'Allow + log', detail: 'Observe mode records evidence but cannot block.', tone: 'info' },
-      { id: 'mode-action', label: 'Action', value: 'Block', detail: 'Action mode enforces the HIGH finding.', tone: 'danger' },
+      { id: 'mode-action', label: 'Action', value: 'Block', detail: 'Blocks because the demo sets block_at to HIGH. The shipped default blocks CRITICAL and alerts on HIGH.', tone: 'danger' },
       { id: 'mode-hitl', label: 'Action + HITL', value: 'Native pause', detail: 'Claude Code supports ask on PreToolUse.', tone: 'warning' },
     ],
     outcomes: [
       { id: 'observe-result', kind: 'observe', label: 'Allow and observe', reason: 'Observe mode never blocks', action: 'Emit evidence' },
-      { id: 'action-result', kind: 'block', label: 'Block action', reason: 'HIGH meets the action threshold', action: 'Return denial' },
+      { id: 'action-result', kind: 'block', label: 'Block action', reason: 'HIGH meets block_at: HIGH', action: 'Return denial' },
       { id: 'hitl-result', kind: 'pause', label: 'Pause for approval', reason: 'Action mode + HITL + native ask support', action: 'Wait for operator' },
     ],
     steps: [
       step('mode-input', 'Inspect action', 'Claude Code sends a HIGH-risk action through PreToolUse.', 'pretool', ['mode-event'], [{ tabId: 'pretool', start: 2, end: 7, tone: 'warning' }]),
-      step('mode-pause', 'Resolve mode', 'Action mode with HITL maps this HIGH finding to native ask.', 'guardrail', ['mode-event', 'mode-hitl'], [{ tabId: 'guardrail', start: 1, end: 7, tone: 'warning' }]),
+      step('mode-pause', 'Resolve mode', 'Action mode with HITL maps this HIGH finding to native ask.', 'guardrail', ['mode-event', 'mode-hitl'], [{ tabId: 'guardrail', start: 1, end: 8, tone: 'warning' }]),
       step('mode-record', 'Return verdict', 'Claude Code pauses before execution and receives the operator outcome.', 'decision', ['mode-hitl'], [{ tabId: 'decision', start: 2, end: 7, tone: 'success' }], 'hitl-result'),
     ],
     variants: [
@@ -225,17 +226,17 @@ connector:
         ],
       },
       {
-        id: 'action', label: 'Action', description: 'Enforce the HIGH threshold immediately.',
+        id: 'action', label: 'Action', description: 'Block at the HIGH level set with guardrail block-at.',
         steps: [
           step('action-input', 'Inspect action', 'The HIGH-risk action reaches the guardrail.', 'pretool', ['mode-event'], [{ tabId: 'pretool', start: 2, end: 7, tone: 'warning' }]),
-          step('action-decision', 'Block', 'Action mode enforces the HIGH finding.', 'guardrail', ['mode-event', 'mode-action'], [{ tabId: 'guardrail', start: 1, end: 4, tone: 'danger' }], 'action-result'),
+          step('action-decision', 'Block', 'With block_at set to HIGH, action mode blocks the finding.', 'guardrail', ['mode-event', 'mode-action'], [{ tabId: 'guardrail', start: 1, end: 2, tone: 'danger' }], 'action-result'),
         ],
       },
       {
         id: 'hitl', label: 'Action + HITL', description: 'Pause through Claude Code native ask.',
         steps: [
           step('hitl-input', 'Inspect action', 'The HIGH-risk action reaches the guardrail.', 'pretool', ['mode-event'], [{ tabId: 'pretool', start: 2, end: 7, tone: 'warning' }]),
-          step('hitl-decision', 'Pause', 'HITL is enabled and Claude Code supports native ask.', 'guardrail', ['mode-event', 'mode-hitl'], [{ tabId: 'guardrail', start: 1, end: 7, tone: 'warning' }], 'hitl-result'),
+          step('hitl-decision', 'Pause', 'HITL is enabled and Claude Code supports native ask.', 'guardrail', ['mode-event', 'mode-hitl'], [{ tabId: 'guardrail', start: 1, end: 8, tone: 'warning' }], 'hitl-result'),
         ],
       },
     ],

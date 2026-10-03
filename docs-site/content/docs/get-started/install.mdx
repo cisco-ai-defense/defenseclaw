@@ -134,16 +134,14 @@ updates your PATH, and normally runs quickstart. The example sets
 to run quickstart itself. The OpenClaw plugin is installed when
 `CONNECTOR=openclaw` is selected.
 
-Source builds are development tooling, not a packaged upgrade path. `make all`
-is the explicit developer reinstall workflow: it may reclaim markerless or
-older source state only when the installed CLI belongs to this exact checkout.
-It validates marker ownership, rejects foreign and newer source identities,
-and records the current strict marker after a successful rebuild. Direct
-`make install`, `scripts/install-dev.sh`, and release-managed hosts remain
-fail-closed. Release installations must use `defenseclaw upgrade`; do not aim a
-raw `pip`, `uv`, or editable install at a release-managed virtual environment.
-The lower-level install targets are for fresh or isolated development homes,
-not the normal repeated-development path.
+Source builds are for developing DefenseClaw, not for upgrading a release
+install. Running `make all` again in the same checkout reinstalls over your
+earlier source build. It refuses to replace an install from a different
+checkout, a newer source build or a release install. The lower-level
+`make install` and `scripts/install-dev.sh` only install into a fresh or
+separate development home. To upgrade a release install, use
+`defenseclaw upgrade`, and don't point `pip`, `uv` or an editable install at
+its Python environment.
 
 ### Build from source on Windows
 
@@ -171,35 +169,43 @@ and Python 3.10-3.13 from python.org.
 <Files>
   <Folder name="~/.defenseclaw" defaultOpen>
     <Folder name=".venv">
-      <File name="…" />
+      <File name="… (the CLI's Python environment)" />
     </Folder>
     <File name="config.yaml" />
     <File name="audit.db" />
-    <Folder name="hooks">
+    <File name="device.key" />
+    <Folder name="hooks" defaultOpen>
+      <File name="claude-code-hook.sh" />
       <File name="codex-hook.sh" />
-      <File name="claudecode-hook.sh" />
-      <File name="cursor-hook.sh" />
-      <File name="…" />
+      <File name="… (one script per agent you set up)" />
     </Folder>
-    <Folder name="policies">
-      <Folder name="guardrail">
+    <Folder name="policies" defaultOpen>
+      <Folder name="guardrail" defaultOpen>
         <Folder name="default" />
         <Folder name="strict" />
         <Folder name="permissive" />
       </Folder>
+      <Folder name="rego" />
     </Folder>
+    <Folder name="installer" />
+    <Folder name="logs" />
+    <Folder name="previous" />
   </Folder>
-  <Folder name="~/.local/bin">
+  <Folder name="~/.local/bin" defaultOpen>
     <File name="defenseclaw" />
     <File name="defenseclaw-gateway" />
+    <File name="defenseclaw-acp" />
     <File name="skill-scanner" />
+    <File name="mcp-scanner" />
   </Folder>
 </Files>
 
-The installer also keeps `~/.defenseclaw/installer/` (the installer that
-performed the current install, used by `defenseclaw rollback`),
-`~/.defenseclaw/previous/` (the install the last upgrade replaced), and
-`~/.defenseclaw/logs/`.
+`config.yaml`, `audit.db` and `device.key` are created by `defenseclaw init` or
+`quickstart`, and the hook scripts by setting up an agent. The installer keeps
+`installer/` (the installer that performed the current install, used by
+`defenseclaw rollback`), `previous/` (the install the last upgrade replaced)
+and `logs/`. When the installer installs `uv` for you, `uv` and `uvx` are in
+`~/.local/bin` too.
 
 On Windows the same layout lives under `%USERPROFILE%`:
 `%USERPROFILE%\.defenseclaw\` holds configuration, data, and the Python
@@ -218,7 +224,8 @@ login item. Instead, when the gateway is not running (after a reboot or a
 sign-out that ended your processes), the next agent hook call starts it with
 `defenseclaw-gateway start` and then sends its request. This applies to the
 shell hooks of Claude Code, Codex, Cursor, GitHub Copilot, Devin, Hermes, Kiro,
-OpenHands, and Antigravity; the OpenCode and Amp plugins do not start it.
+OpenHands, and Antigravity. The OpenCode and Amp plugins and the OmniGent
+policy do not start it.
 
 A hook does not start the gateway:
 
@@ -249,41 +256,40 @@ Doctor verifies:
 
 | Check | What it verifies |
 | --- | --- |
-| Configuration | The canonical config exists, loads, and validates. |
-| Audit and identity state | File custody, SQLite integrity and required schema, storage capacity, device-key custody, and HMAC-bound provenance. |
-| Components and connectors | CLI/gateway/plugin alignment and active connector versions against registered compatibility contracts. |
-| Gateway | Managed process and listener identity, public health, and authenticated `/status` using the locally resolved token. |
-| Guardrail, scanners, and credentials | Enabled service reachability, required scanner binaries, and configured credential availability without printing secret values. |
-| Observability | Effective destination routes, queue/delivery health, and each destination/signal circuit while mandatory local SQLite remains available. |
+| Configuration | `config.yaml` exists, loads and passes validation. |
+| Audit database and device key | The audit database is intact, has the tables it needs and has room to grow; the device key and its provenance record are intact. |
+| Components and connectors | The CLI and gateway versions match, and each agent you set up runs a version DefenseClaw supports. |
+| Gateway | The running gateway is the one DefenseClaw started, answers its health check, and accepts the local API token. |
+| Guardrail, scanners and credentials | Enabled services are reachable, the scanner programs run, and configured keys are present. Doctor never prints a secret. |
+| Observability | Each configured destination is reachable and delivering. The local SQLite history keeps working when a destination fails. |
 
 Useful modes:
 
 ```bash
-# Avoid billable, content-submitting, and synthetic probes
+# Skip checks that cost money, send content, or send test traffic
 defenseclaw doctor --passive
 
 # Machine-readable schema v2
 defenseclaw doctor --json-output
 
-# Preview eligible repairs without mutation
+# Show the repairs doctor would make, without changing anything
 defenseclaw doctor --fix --dry-run
 
-# Apply eligible safe and disruptive repairs
+# Make every repair doctor can, including ones that restart services
 defenseclaw doctor --fix --yes
 
-# Select one repair and its declared dependencies
+# Make one repair (and the repairs it depends on)
 defenseclaw doctor --fix --fix-id doctor.state.audit-db.initialize
 
-# Identity recovery is always attended; do not add --yes
+# Recreating the device key always asks first; don't add --yes
 defenseclaw doctor --fix --fix-id doctor.identity.device-key.initialize
 ```
 
-Doctor executes `skill-scanner --version` through the resolved installed
-launcher. A stale launcher or interpreter mismatch is therefore reported as a
-failure instead of appearing merely "installed" because a file exists.
+Doctor runs `skill-scanner --version` rather than only checking that the file
+exists, so a broken launcher shows up as a failure.
 
-`--fix` applies selected repairs before the health pass, so its summary
-describes post-repair state. A failed health check or failed or blocked repair
+`--fix` makes its repairs before the checks run, so the summary describes the
+repaired state. A failed health check or failed or blocked repair
 exits 1. See the [Doctor CLI reference](/docs/reference/cli#doctor) for the
 machine contract and [Reporting and diagnosis](/docs/reference/fail-modes#reporting-and-diagnosis)
 for token, recovery, compatibility, and approval boundaries.
@@ -291,22 +297,27 @@ for token, recovery, compatibility, and approval boundaries.
 ## Uninstall
 
 ```bash
-defenseclaw uninstall              # reversible — keeps ~/.defenseclaw/ and binaries
+defenseclaw uninstall              # reversible: keeps ~/.defenseclaw/ and the binaries
 defenseclaw uninstall --all        # also delete ~/.defenseclaw/ (audit log, config, secrets)
-defenseclaw uninstall --binaries   # also remove managed CLI and scanner launchers
-defenseclaw uninstall --all --binaries --yes   # full nuke, no confirm prompt
+defenseclaw uninstall --binaries   # also remove the CLI, gateway, ACP guard and helper binaries
+defenseclaw uninstall --all --binaries --yes   # remove everything, without a prompt
+defenseclaw uninstall --dry-run    # show what would be removed, change nothing
 ```
 
-The default tears down connector integrations and **leaves
-`~/.defenseclaw/` and the installed binaries on disk** so a subsequent
-`defenseclaw setup guardrail` can pick up where you left off. An unchanged
-managed connector file is restored byte-for-byte from its hash-checked
-snapshot; after user edits, connector-specific cleanup removes only
-DefenseClaw-owned entries and preserves unrelated changes. Use `--all` and/or
-`--binaries` to make the removal total. On POSIX installs, `--binaries` also
-removes the managed `skill-scanner`, `skill-scanner-api`,
-`skill-scanner-pre-commit`, `mcp-scanner`, `mcp-scanner-api`, and `litellm`
-launchers from `~/.local/bin`. `--dry-run` previews the plan.
+The default tears down the connector integrations and **leaves
+`~/.defenseclaw/` and the installed binaries on disk**, so a later
+`defenseclaw setup guardrail` can pick up where you left off. An agent config
+file you haven't changed since setup is restored exactly from its checked
+backup. If you edited it, only DefenseClaw's entries are removed and your
+changes stay. Use `--all` and `--binaries` to remove everything. On macOS and
+Linux, `--binaries` removes `defenseclaw`, `defenseclaw-gateway`,
+`defenseclaw-acp` and the scanner launchers (`skill-scanner`,
+`skill-scanner-api`, `skill-scanner-pre-commit`, `mcp-scanner`,
+`mcp-scanner-api` and `litellm`) from `~/.local/bin`.
+
+Uninstall also removes DefenseClaw's OpenShell sandboxes and images. When
+Docker or OpenShell is gone or broken, add `--skip-sandbox-teardown` to leave
+them, and remove them later with `defenseclaw-gateway sandbox teardown`.
 
 ## Next
 

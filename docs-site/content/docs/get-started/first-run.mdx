@@ -46,9 +46,9 @@ On a terminal this runs the guided wizard. It runs local agent discovery,
 **pre-selects every installed hook connector** and configures them **all in
 `observe` (log-only) mode** by default, so pressing Enter through the connector
 prompt brings up everything you have. Rather than asking observe or action for
-each one, it asks a single question, **"Action-mode connector(s)"**, which names
-the subset that should enforce. Leave it blank and every connector stays in
-observe.
+each one, it shows one checklist, **Select connector(s) for action
+enforcement**, where you tick the agents that should block. Leave every box
+unchecked and every connector stays in observe.
 
 The action-only policy settings, the hook fail mode (`open` or `closed`) and
 HITL human approval with its minimum severity, are asked **once** and shared by
@@ -132,37 +132,7 @@ exits without changes instead of dropping them: use
 
 Both commands end with the same first-run report:
 
-```text
-  DefenseClaw First-Run
-  status=ready connector=claudecode profile=observe
-  ────────────────────────────────────────────────────────
-
-  Setup
-  ✓ Config  created defaults
-  ✓ Bootstrap  ~/.defenseclaw
-  ✓ Skill scanner  ~/.local/bin/skill-scanner
-  ✓ MCP scanner  ~/.local/bin/mcp-scanner
-  ✓ Guardrail  claudecode, mode=observe, fail mode=open
-  ✓ Sidecar  started
-
-  Readiness
-  ✓ Config file  ~/.defenseclaw/config.yaml
-  ✓ Audit database  ~/.defenseclaw/audit.db
-  ✓ Device key  ~/.defenseclaw/device.key
-  ✓ Skill scanner  ~/.local/bin/skill-scanner
-  ✓ MCP scanner  ~/.local/bin/mcp-scanner
-  ✓ Connector  Claude Code settings found
-  ✓ Sidecar  running
-  - LLM API  not configured
-  - Cisco AI Defense  scanner_mode is local
-  ✓ Gateway binary  found on PATH
-
-  Next
-  defenseclaw doctor
-  defenseclaw keys list
-  Adding another agent later: defenseclaw setup <connector>
-  After a reboot, agent hooks start the gateway on their next call; after defenseclaw-gateway stop, run: defenseclaw-gateway start
-```
+<include>../../snippets/first-run-report.mdx</include>
 
 The first line holds the result: `status`, the connector (or `connectors=N`
 when several were set up) and the profile. **Setup** lists what the command
@@ -172,9 +142,13 @@ machine already uses the default port and this account's gateway gets a
 different one. When a connector is in action mode with a closed fail mode,
 **Next** also says how to open it.
 
-If the status isn't `ready`, the command exits non-zero and the report names
-what needs attention (a missing API key, a gateway port in use and so on) with
-the command to run next. `--json-summary` prints the same report as JSON.
+If the status isn't `ready`, the report names what needs attention (a missing
+API key, a gateway port in use and so on) and the command to run next.
+`quickstart` exits `0` when the status is `ready` or `partial`, `1` when it is
+`needs_attention`, and `2` when it stops before changing anything (for example
+when it can't tell which connector you mean). `--json-summary` prints the same
+report as JSON; in CI, check its `status` field rather than only the exit
+code, because a `partial` setup also exits `0`.
 
 </Step>
 
@@ -190,15 +164,14 @@ decisions arrive in the live dashboard:
 defenseclaw tui
 ```
 
-Or take a snapshot you can script from the SQLite event history:
+Or take a snapshot of the latest 200 audit events that you can script:
 
 ```bash
-defenseclaw-gateway audit export --output - | tail -n 200 | jq .
+defenseclaw-gateway audit export --newest --limit 200 | jq .
 ```
 
-JSONL is no longer an implicit mirror. If you need a continuous external file,
-configure an explicit v8 `kind: jsonl` destination with the buckets, signals
-and redaction profile that file is allowed to receive.
+To also write events to a JSONL file as they happen, add a JSONL destination
+(see [Observability → Destinations](/docs/observability#destination-capabilities-and-fan-out)).
 
 </Step>
 
@@ -230,8 +203,8 @@ and redaction profile that file is allowed to receive.
 <TypeTable
   type={{
     "--connector / --agent": {
-      type: "claudecode|codex|copilot|cursor|devin|antigravity|kiro|opencode|amp|hermes|openhands|omnigent|…",
-      description: "Agent connector; defenseclaw quickstart --help lists every name. Required when more than one connector is configured or detected. Otherwise quickstart uses the single configured or detected connector, then the installer's hint if none can be detected.",
+      type: "connector name",
+      description: "Agent connector: claudecode, codex, copilot, cursor, devin, antigravity, kiro, opencode, amp, hermes, openhands or omnigent (defenseclaw quickstart --help lists every name). Required when more than one connector is configured or detected. Otherwise quickstart uses the single configured or detected connector, then the installer's hint if none can be detected.",
     },
     "--mode": {
       type: "observe|action",
@@ -261,7 +234,7 @@ and redaction profile that file is allowed to receive.
     },
     "--non-interactive": {
       type: "flag",
-      description: "Never prompt. Same as --yes; kept for installer compatibility.",
+      description: "Never prompt. The same as --yes; kept so older install scripts keep working.",
     },
     "--yes": {
       type: "flag",
@@ -289,7 +262,7 @@ and redaction profile that file is allowed to receive.
 | First-time setup at a terminal | `defenseclaw init` |
 | You want to be asked questions and shown defaults | `defenseclaw init` |
 | Installer hand-off or unattended provisioning | `defenseclaw quickstart --connector <x>` |
-| CI pipeline (no terminal, deterministic config) | `defenseclaw quickstart --connector <x> --non-interactive --yes --json-summary` |
+| CI pipeline (no terminal, deterministic config) | `defenseclaw quickstart --connector <x> --yes --json-summary` |
 | Scripted demo or repeatable test fixture | `defenseclaw quickstart --connector <x> --force` |
 
 ## Next

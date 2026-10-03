@@ -1,70 +1,58 @@
 ---
 title: Overview
-description: DefenseClaw is the Cisco governance layer for AI coding agents — scan capabilities before they run, inspect runtime traffic, and export durable audit evidence across thirteen first-class connectors.
+description: DefenseClaw is the Cisco governance layer for AI coding agents. It scans what an agent installs, checks every prompt and tool call at runtime, and keeps an audit trail you can export.
 keywords:
   - DefenseClaw overview
   - Cisco
   - AI agent guardrail
   - AI coding agent security
-  - OpenClaw governance
   - Claude Code guardrail
   - Codex guardrail
+  - AI agent audit log
 ---
 
-DefenseClaw is the **Cisco** governance layer for AI coding agents. It enforces one rule: untrusted agent capabilities are scanned, governed, logged, and blocked when policy says they are unsafe.
+DefenseClaw enforces one rule: untrusted agent capabilities are scanned,
+governed, logged, and blocked when policy says they are unsafe.
 
 <DefenseClawDemo scenario="modes-same-event" variant="hitl" />
 
 ## What you just saw
 
-The same synthetic Claude Code `PreToolUse` event produces three deliberately different results. **Observe** allows execution and records evidence. **Action** blocks at the configured HIGH threshold. **Action + HITL** returns a native pause because Claude Code exposes an approval-capable pre-execution hook. CRITICAL findings always block, regardless of HITL.
+The demo sends one synthetic Claude Code `PreToolUse` event with a HIGH finding
+through three modes:
+
+- **Observe** lets the call run and records the evidence.
+- **Action** blocks it. The demo sets the block level to HIGH with
+  `defenseclaw guardrail block-at HIGH`. With the shipped default, action mode
+  blocks CRITICAL findings and only alerts on HIGH.
+- **Action + HITL** pauses the call and asks you inside Claude Code, because
+  Claude Code's `PreToolUse` hook supports a native approval prompt.
+
+CRITICAL findings always block, with or without HITL.
 
 <Cards>
-  <Card title="Quickstart in 5 minutes" href="/docs/get-started/quickstart" description="Install, pick a connector, watch a guardrail block a destructive command." />
-  <Card title="Setup Guardrail" href="/docs/guardrail" description="The central command. Modes, scanner backends, rule packs, judge, HITL." />
-  <Card title="Capability Matrix" href="/docs/connectors/capability-matrix" description="Which connectors can block, which can ask, which support fail-closed." />
-  <Card title="Stories" href="/docs/stories" description="Concrete walkthroughs — stop rm -rf on Claude Code, catch prompt injection on Codex, and more." />
+  <Card title="Quickstart in 5 minutes" href="/docs/get-started/quickstart" description="Install, set up an agent and watch DefenseClaw block a test command." />
+  <Card title="What is DefenseClaw?" href="/docs/get-started/what-is-defenseclaw" description="How the CLI, the gateway and your agent's hooks fit together, and what DefenseClaw doesn't do." />
+  <Card title="Capability matrix" href="/docs/connectors/capability-matrix" description="Which connectors can block, which can ask, which support fail-closed." />
+  <Card title="Stories" href="/docs/stories" description="Walkthroughs such as stopping rm -rf in Claude Code and catching prompt injection in Codex." />
 </Cards>
 
-## Three jobs, one runtime
+## How it works
 
-| Govern | Inspect | Prove |
-| --- | --- | --- |
-| Skills, MCP servers, plugins, and generated code before they run | Prompts, completions, and tool calls at runtime | SQLite audit history, JSONL, OTLP, Splunk, webhooks, and TUI views |
-
-DefenseClaw combines a **Python operator CLI**, a **Go gateway sidecar**, and an **OpenClaw TypeScript plugin**. The CLI configures and inspects; the gateway runs the data path; the plugin wires the loop closed inside OpenClaw.
-
-## Architecture
-
-<Flow
-  direction="TB"
-  caption="Every prompt and tool call takes the same path. The agent's connector (a hook, the OpenClaw plugin, or the LLM proxy) asks the local defenseclaw-gateway, which checks the event against your policy, the scanners and the optional LLM judge, answers allow or block, and records the decision."
->
-  <Node id="agent" kind="agent">{`Your AI agent\nsuch as Claude Code`}</Node>
-  <Node id="connector" kind="connector">{`Connector\nhook, plugin or proxy`}</Node>
-  <Node id="gateway" kind="gateway">{`Gateway\nchecks your policy`}</Node>
-  <Node id="sinks" kind="datastore">{`Your telemetry\nOTLP, Splunk, webhooks`}</Node>
-  <Node id="audit" kind="datastore">{`Audit log\nlocal SQLite database`}</Node>
-  <Edge from="agent" to="connector" label="prompts, tool calls" />
-  <Edge from="connector" to="gateway" label="asks: allow or block?" emphasis />
-  <Edge from="gateway" to="sinks" label="exports" />
-  <Edge from="gateway" to="audit" label="records" />
-</Flow>
+DefenseClaw has three parts: the `defenseclaw` CLI, which sets everything up and
+shows you what happened; the `defenseclaw-gateway` sidecar, which makes every
+decision and records it; and a connector for each agent, the hooks or plugin
+that send the agent's prompts and tool calls to the gateway.
+[What is DefenseClaw?](/docs/get-started/what-is-defenseclaw) shows the
+architecture and explains what DefenseClaw doesn't protect against.
 
 ## What's in the box
 
 <Cards>
-  <Card title="13 connectors" href="/docs/connectors" description="OpenClaw, ZeptoClaw, Claude Code, Codex, Cursor, Devin, GitHub Copilot CLI, OpenHands, Antigravity, Hermes, OpenCode, Amp, OmniGent." />
-  <Card title="OpenShell sandboxes" href="/docs/sandboxes" description="Run Claude Code or Codex in skip-permissions mode inside an NVIDIA OpenShell sandbox on Linux or an Apple-silicon Mac." />
-  <Card title="Observe → Action → HITL" href="/docs/hitl" description="Three operating modes that compose. Start safe, earn enforcement, escalate to a human only when needed." />
-  <Card title="OpenClaw integration" href="/docs/connectors/openclaw-integration" description="The reference proxy connector. Fetch interceptor, before_tool_call hook, plugin-mediated approvals." />
-  <Card title="Reference" href="/docs/reference" description="CLI commands, gateway API, configuration files, environment variables." />
+  <Card title="Connectors" href="/docs/connectors" description="Claude Code, Codex, GitHub Copilot CLI, Cursor, Devin, OpenCode, Amp, Hermes, OpenHands, Antigravity, Kiro and OmniGent." />
+  <Card title="Guardrail" href="/docs/guardrail" description="The central setup command: modes, scanner backends, rule packs, the LLM judge and HITL." />
+  <Card title="Observe, action and HITL" href="/docs/hitl" description="Three modes that build on each other. Start by logging, then block, then ask a person when needed." />
+  <Card title="OpenShell sandboxes" href="/docs/sandboxes" description="Preview: run a coding agent inside an NVIDIA OpenShell sandbox on Linux or an Apple-silicon Mac." />
+  <Card title="Support matrix" href="/docs/support-matrix" description="Which agents and features work on Linux, macOS and Windows, in each edition." />
+  <Card title="Reference" href="/docs/reference" description="CLI commands, gateway API, configuration files and environment variables." />
 </Cards>
-
-## Scope and limitations
-
-DefenseClaw improves safety by combining scanner results, runtime inspection, policy decisions, and audit trails. It does **not** prove that an agent, skill, plugin, or model interaction is risk-free.
-
-<Callout type="warn">
-High-risk deployments should pair DefenseClaw with human review, least-privilege credentials, sandboxing, CI gates, and production monitoring. In observe mode, findings are logged without blocking. In action mode, configured HIGH and CRITICAL findings can block prompts, tool calls, or component admission.
-</Callout>

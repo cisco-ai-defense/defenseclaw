@@ -47,31 +47,34 @@ Blocking is all or nothing. Human approval (HITL) pauses a risky call and asks
 you instead:
 
 ```bash
-defenseclaw setup guardrail --connector claudecode --mode action --human-approval --restart
+defenseclaw guardrail hilt on --min-severity HIGH
 ```
 
-Two settings change:
+The command (spelled `hilt`, like its config key) asks you to confirm, then
+restarts the gateway. Claude Code stays
+in action mode with the test pack, and from now on:
 
-- `guardrail.mode` is `action`, so CRITICAL findings still block through the
-  `PreToolUse` hook's deny verdict.
-- `guardrail.hilt.enabled` is `true`, so HIGH findings pause for your approval.
-  Claude Code supports a native PreToolUse ask, so the prompt appears inside
-  the agent.
+- CRITICAL findings, such as the demo marker, still block through the
+  `PreToolUse` hook's deny verdict. They are never eligible for approval.
+- HIGH findings, which the default rules only alert on, now pause the call
+  and ask you. Claude Code supports a native
+  `PreToolUse` ask, so the approval prompt appears inside Claude Code, and the
+  call runs only if you approve it.
 
-CRITICAL findings are never eligible for approval: they always block.
-`--hilt-min-severity` sets the lowest severity that asks. See
-[Human-in-the-loop](/docs/hitl) for how approval works.
+`defenseclaw guardrail hilt off` turns it off again, and `--min-severity`
+changes the lowest severity that asks. With several agents set up,
+`--connector claudecode` limits the change to Claude Code. See
+[Human-in-the-loop](/docs/hitl) for how approval works on each agent.
 
 ## Look at the evidence
 
 `defenseclaw alerts --show 1` prints the full alert record: the rule, the
-scanner and the evidence. For a scriptable SQLite snapshot of high-severity
+scanner and the decision. For a scriptable SQLite snapshot of high-severity
 Claude Code events:
 
 ```bash
-defenseclaw-gateway audit export --output - \
-  | jq -c 'select(.connector == "claudecode" and (.severity == "HIGH" or .severity == "CRITICAL"))' \
-  | tail -n 200
+defenseclaw-gateway audit export --connector claudecode --newest --limit 200 \
+  | jq -c 'select(.severity == "HIGH" or .severity == "CRITICAL")'
 ```
 
 ## What if you wanted to allow it?

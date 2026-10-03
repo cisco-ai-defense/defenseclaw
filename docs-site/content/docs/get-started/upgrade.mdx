@@ -52,13 +52,7 @@ to `~/.defenseclaw/logs/`.
 If the `defenseclaw` command itself does not start, run the install command
 again. It repairs any install and keeps your data:
 
-```bash
-curl -LsSf https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.sh | bash
-```
-
-```powershell
-irm https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.ps1 | iex
-```
+<include>../../snippets/install-commands.mdx</include>
 
 ## Update notices
 
@@ -155,12 +149,30 @@ installer runs it after every swap; running it again is safe.
 | `1` | A step failed; the installer restores the previous install |
 | `2` | The configuration was written by a newer DefenseClaw than this one |
 
+## Troubleshooting
+
+| Message | What to do |
+| --- | --- |
+| `Your configuration is from a newer DefenseClaw than X` | You are installing an older release over data from a newer one. Run `defenseclaw rollback`, or install the newer release again. |
+| `A connector needs attention before it is guarded again` | The upgrade finished (installer exit code `3`), but a connector refused to start, usually because the agent itself was updated. Run `defenseclaw doctor`. |
+| `The running gateway did not stop` | Stop it with `defenseclaw-gateway stop` and run the upgrade again. Nothing was changed. |
+| `Another DefenseClaw install is running` | Wait for it to finish. A stale lock from a crashed run is cleared automatically. |
+
 ## Renamed and removed connectors
 
-Two connectors changed in this release. One is migrated for you; the other
-needs a one-time manual cleanup.
+This applies only if you used Windsurf or Gemini CLI before 1.0:
 
-### Windsurf is now Devin
+- **Windsurf is now Devin.** The upgrade moves your `windsurf` settings to the
+  [`devin` connector](/docs/connectors/devin) and replaces the old hooks. You
+  don't need to do anything.
+- **Gemini CLI was removed.** Use [Antigravity](/docs/connectors/antigravity)
+  instead. Remove DefenseClaw's hooks from Gemini CLI's settings once (the
+  steps are below). If Gemini CLI was your only connector, the upgrade stops
+  before it changes anything until you remove it.
+
+<Accordions type="multiple">
+
+<Accordion title="Windsurf is now Devin: what the upgrade changes" id="windsurf-is-now-devin">
 
 Windsurf was renamed **Devin Desktop** (Cognition). DefenseClaw now protects it
 with the [`devin` connector](/docs/connectors/devin), which covers Devin CLI and
@@ -204,7 +216,9 @@ removed Cascade; its tabs run Devin Local, which is protected.
 To confirm, run `defenseclaw doctor` and check that the Devin hook row passes,
 then open a new Devin Desktop tab or Devin CLI session.
 
-### Gemini CLI was removed
+</Accordion>
+
+<Accordion title="Gemini CLI was removed: cleanup steps" id="gemini-cli-was-removed">
 
 DefenseClaw no longer ships a Gemini CLI connector. For Google's agent, use
 [Antigravity](/docs/connectors/antigravity) instead.
@@ -308,7 +322,9 @@ error points to this section. Step 1 fixes that. If a plugin directory is
 configured and plugin discovery fails, the gateway keeps names it cannot
 resolve and retries their teardown later instead of dropping them.
 
-#### Native Windows installs from pre-release builds
+</Accordion>
+
+<Accordion title="Native Windows installs from pre-release builds" id="native-windows-installs-from-pre-release-builds">
 
 Native Windows Setup builds made after 0.8.10 and before this release could
 select Windsurf or Gemini CLI. This release's Setup and uninstaller still read
@@ -326,11 +342,6 @@ Telemetry schemas no longer accept `geminicli` as a connector value. Rows that
 an older release exported with that value do not validate against the current
 schemas if you re-export them.
 
-## Troubleshooting
+</Accordion>
 
-| Message | What to do |
-| --- | --- |
-| `Your configuration is from a newer DefenseClaw than X` | You are installing an older release over data from a newer one. Run `defenseclaw rollback`, or install the newer release again. |
-| `A connector needs attention before it is guarded again` | The upgrade finished (installer exit code `3`), but a connector refused to start, usually because the agent itself was updated. Run `defenseclaw doctor`. |
-| `The running gateway did not stop` | Stop it with `defenseclaw-gateway stop` and run the upgrade again. Nothing was changed. |
-| `Another DefenseClaw install is running` | Wait for it to finish. A stale lock from a crashed run is cleared automatically. |
+</Accordions>

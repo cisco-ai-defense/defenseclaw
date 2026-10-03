@@ -450,9 +450,13 @@ export function buildCommand(
     }
   }
 
+  // The rule pack applies in both modes: setup guardrail writes
+  // guardrail.rule_pack_dir whatever the mode, and observe mode logs the
+  // findings of that pack.
+  lines.push(`--rule-pack ${s.rulePack}`);
+
   // Action-mode-only enforcement knobs.
   if (s.mode === 'action') {
-    lines.push(`--rule-pack ${s.rulePack}`);
     if (s.blockMessage.trim()) {
       lines.push(`--block-message ${quote(s.blockMessage)}`);
     }
@@ -463,7 +467,7 @@ export function buildCommand(
       lines.push('--no-human-approval');
     }
   } else {
-    // Observe mode silently ignores HITL / rule-pack / block-message
+    // Observe mode silently ignores HITL / block-message
     // server-side. Warn here so the operator notices.
     if (s.humanApproval) {
       warnings.push(
@@ -961,8 +965,8 @@ export function CommandGenerator() {
           title="Rule pack"
           subtitle={
             state.mode === 'action'
-              ? 'Bundled rule-pack profile. Picks the directory under ~/.defenseclaw/policies/guardrail/.'
-              : 'Rule packs only apply when --mode is action.'
+              ? 'Bundled rule-pack profile under ~/.defenseclaw/policies/guardrail/. In action mode it decides what blocks and what alerts.'
+              : 'Bundled rule-pack profile under ~/.defenseclaw/policies/guardrail/. In observe mode it decides what gets logged.'
           }
         >
           <SegmentedControl<RulePack>
@@ -974,7 +978,6 @@ export function CommandGenerator() {
             ]}
             value={state.rulePack}
             onChange={(v) => update('rulePack', v)}
-            disabled={state.mode !== 'action'}
           />
         </Section>
 
