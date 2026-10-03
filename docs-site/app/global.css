@@ -517,7 +517,7 @@ article#nd-page > h1 {
 
 article#nd-page > h1 + p {
   max-width: 68rem;
-  margin-bottom: clamp(2.75rem, 5vw, 4.75rem);
+  margin-bottom: clamp(2rem, 3.5vw, 3rem);
   color: var(--color-fd-muted-foreground);
   font-size: clamp(1.02rem, 1.35vw, 1.2rem);
   line-height: 1.55;
@@ -624,6 +624,120 @@ article#nd-page :where(table, thead, tbody, tr, th, td) {
 
 article#nd-page table thead tr {
   box-shadow: inset 0 2px 0 color-mix(in oklab, var(--brand-cisco) 68%, transparent);
+}
+
+/* Reading polish ------------------------------------------------------- */
+
+/* The first section heading follows the lead paragraph directly, so it
+ * doesn't need the full section gap on top of the lead's own margin. */
+article#nd-page .prose > h2:first-child {
+  margin-top: 0.5rem;
+}
+
+article#nd-page .prose > :where(p, ul, ol) {
+  line-height: 1.7;
+}
+
+/* Markdown tables (the ResponsiveTable wrapper only, so component tables
+ * such as the capability and support matrices keep their own styling):
+ * denser rows, top-aligned cells so a long note doesn't float the label
+ * to the middle, and a quiet header band. */
+article#nd-page :where(div.overflow-auto.prose-no-margin) > table {
+  font-size: 0.9rem;
+  line-height: 1.55;
+}
+
+article#nd-page :where(div.overflow-auto.prose-no-margin) > table :where(th, td) {
+  padding: 0.6rem 0.85rem;
+  vertical-align: top;
+}
+
+article#nd-page :where(div.overflow-auto.prose-no-margin) > table th {
+  background: var(--color-fd-muted);
+  color: var(--color-fd-foreground);
+  font-size: 0.8rem;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+  text-align: start;
+}
+
+article#nd-page :where(div.overflow-auto.prose-no-margin) > table tbody tr {
+  transition: background-color 120ms ease-out;
+}
+
+article#nd-page :where(div.overflow-auto.prose-no-margin) > table tbody tr:hover {
+  background: color-mix(in oklab, var(--brand-cisco) 3.5%, transparent);
+}
+
+article#nd-page :where(div.overflow-auto.prose-no-margin) > table :where(code) {
+  font-size: 0.84em;
+}
+
+/* Code blocks share the square editorial geometry of callouts, tabs and
+ * diagrams instead of the library's rounded, floating card. */
+article#nd-page figure.shiki {
+  border-radius: 3px;
+  box-shadow: none;
+}
+
+article#nd-page figure.shiki pre {
+  line-height: 1.65;
+}
+
+article#nd-page .prose :where(code):not(pre code) {
+  font-size: 0.86em;
+}
+
+/* Callouts: a solid accent rule and slightly roomier text so a note
+ * reads as a note, without the drop shadow. */
+.editorial-callout {
+  gap: 0.6rem !important;
+  padding: 0.85rem 1rem 0.85rem 0 !important;
+  font-size: 0.92rem !important;
+  line-height: 1.6;
+}
+
+.editorial-callout > [role='none'] {
+  width: 3px;
+  border-radius: 0;
+  background: var(--callout-color);
+}
+
+.editorial-callout > div > p:first-child {
+  font-weight: 640;
+}
+
+/* Home navigation: keep two-word links ("Get started", "Support
+ * matrix") on one line between the lg and xl breakpoints. */
+#nd-nav :where(a, button) {
+  white-space: nowrap;
+}
+
+/* Between lg (where the link bar appears) and xl the bar is too narrow
+ * for every icon. Cisco AI Defense and Discord stay one click away in
+ * the footer's Community column; GitHub keeps its icon. */
+#nd-nav [aria-label='Toggle Theme'] {
+  flex-shrink: 0;
+}
+
+@media (max-width: 1279px) {
+  #nd-nav a[aria-label^='Cisco AI Defense'],
+  #nd-nav a[aria-label='Discord community'] {
+    display: none;
+  }
+}
+
+/* Sidebar group labels (`---Label---` in meta.json) use the same mono
+ * kicker as the "On this page" title, so groups read as structure and
+ * not as links. */
+:is(#nd-sidebar, #nd-sidebar-mobile) p.inline-flex.mt-6 {
+  margin-top: 1.4rem;
+  color: var(--brand-cisco-strong);
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
 /* The built-in Fumadocs rail was previously suppressed by full-width

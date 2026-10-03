@@ -1,6 +1,17 @@
 import type { BaseLayoutProps } from 'fumadocs-ui/layouts/shared';
 import type { DocsLayoutProps } from 'fumadocs-ui/layouts/docs';
 import Image from 'next/image';
+import {
+  BookOpen,
+  Building2,
+  Download,
+  Grid3x3,
+  Plug,
+  Rocket,
+  SquareTerminal,
+  WandSparkles,
+  Wrench,
+} from 'lucide-react';
 import { source } from '@/lib/source';
 import { site, basePath } from '@/lib/site';
 import RepoStats from '@/components/repo-stats';
@@ -35,41 +46,74 @@ export const baseOptions: BaseLayoutProps = {
     ),
     url: '/',
   },
-  // Top-right links — keep small and high-signal. The "Discord" and
-  // "GitHub" entries match the README's official surfaces so users
-  // hopping between project artifacts hit a consistent set.
+  // Primary navigation, left to right, follows the reader's path: get
+  // started, download, pick a connector, check what works on which OS,
+  // roll out to a fleet. The interactive tools sit in one menu so the
+  // bar stays short. Icons show in the docs sidebar and the mobile menu;
+  // the desktop home bar renders the text only.
   links: [
     {
       type: 'main',
-      text: 'Docs',
-      url: '/docs',
-      active: 'nested-url',
+      text: 'Get started',
+      icon: <Rocket />,
+      url: '/docs/get-started/quickstart',
+      active: 'url',
+    },
+    {
+      type: 'main',
+      text: 'Download',
+      icon: <Download />,
+      url: '/docs/get-started/download',
+      active: 'url',
     },
     {
       type: 'main',
       text: 'Connectors',
+      icon: <Plug />,
       url: '/docs/connectors',
       active: 'nested-url',
     },
     {
       type: 'main',
-      text: 'Stories',
-      url: '/docs/stories',
-      active: 'nested-url',
+      text: 'Support matrix',
+      icon: <Grid3x3 />,
+      url: '/docs/support-matrix',
+      active: 'url',
     },
     {
       type: 'main',
-      text: 'Command',
-      description: 'Build a non-interactive setup command.',
-      url: '/docs/command-generator',
+      text: 'Enterprise',
+      icon: <Building2 />,
+      url: '/docs/enterprise',
       active: 'nested-url',
     },
     {
-      type: 'main',
-      text: 'Policy',
-      description: 'Author and evaluate a policy in the browser.',
-      url: '/docs/policies/creator',
-      active: 'nested-url',
+      type: 'menu',
+      text: 'Tools',
+      icon: <Wrench />,
+      items: [
+        {
+          text: 'Command builder',
+          description: 'Build a non-interactive setup command.',
+          icon: <SquareTerminal />,
+          url: '/docs/command-generator',
+          active: 'url',
+        },
+        {
+          text: 'Policy creator',
+          description: 'Author and evaluate a policy in the browser.',
+          icon: <WandSparkles />,
+          url: '/docs/policies/creator',
+          active: 'url',
+        },
+        {
+          text: 'Stories',
+          description: 'Step-by-step walkthroughs of common protections.',
+          icon: <BookOpen />,
+          url: '/docs/stories',
+          active: 'nested-url',
+        },
+      ],
     },
     // Secondary nav anchors the project to its sibling community
     // surfaces. Order is intentional: parent-org → Discord → repo
@@ -118,10 +162,12 @@ export const baseOptions: BaseLayoutProps = {
     // is fetched at build time (and refreshed on mount client-side)
     // so anonymous visitors never feel a layout shift. See
     // components/repo-stats.tsx for the fetch + caching policy.
+    // Hidden below 1280px so the six primary links fit on one line
+    // between the lg breakpoint (where the bar appears) and xl.
     {
       type: 'custom',
       secondary: true,
-      children: <li className="flex items-center"><RepoStats variant="nav" /></li>,
+      children: <li className="hidden items-center xl:flex"><RepoStats variant="nav" /></li>,
     },
     {
       type: 'icon',
