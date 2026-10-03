@@ -283,15 +283,16 @@ def scan(
             if hermes_match is not None and hermes_match[1]:
                 matches = [_PluginMatch("hermes", hermes_match[1], plugin_id=hermes_match[0])]
 
-    _refuse_managed_opencode_bridge_action(
+    _refuse_managed_bridge_action(
         app,
         name_or_path,
         connector_flag,
         action="scan",
     )
     for _connector, scan_dir in matches:
-        if _is_exact_managed_opencode_bridge(scan_dir):
-            _raise_managed_opencode_bridge_refusal("scan")
+        bridge = _managed_bridge_connector(scan_dir)
+        if bridge:
+            _raise_managed_bridge_refusal("scan", bridge)
 
     if not matches:
         scope = f" for connector {connector_flag!r}" if connector_flag else " across configured connectors"
@@ -911,35 +912,52 @@ def _plugin_match_dir_scopes(
     return matches
 
 
-def _managed_opencode_bridge_path() -> str:
-    """Return the exact connector-owned OpenCode bridge path."""
+_MANAGED_BRIDGES: dict[str, tuple[str, str]] = {
+    "opencode": ("OpenCode", "defenseclaw.js"),
+    "amp": ("Amp", "defenseclaw.ts"),
+}
+
+
+def _managed_bridge_path(connector: str) -> str:
+    """Return the exact connector-owned bridge path for OpenCode or Amp."""
 
     try:
-        return os.path.abspath(connector_paths.connector_config_files("opencode")[0])
+        if connector == "opencode":
+            return os.path.abspath(connector_paths.connector_config_files("opencode")[0])
+        if connector == "amp":
+            return os.path.abspath(connector_paths.amp_policy_plugin_path())
     except (IndexError, OSError, ValueError):
+        pass
+    return ""
+
+
+def _managed_bridge_connector(path: str) -> str:
+    """Name the connector whose exact bridge *path* is, never a same-named sibling."""
+
+    if not path:
         return ""
-
-
-def _is_exact_managed_opencode_bridge(path: str) -> bool:
-    """Match only the connector-owned bridge, never a same-named sibling."""
-
-    managed = _managed_opencode_bridge_path()
-    if not managed or not path:
-        return False
     try:
-        return os.path.normcase(os.path.abspath(path)) == os.path.normcase(managed)
+        target = os.path.normcase(os.path.abspath(path))
     except (OSError, ValueError):
-        return False
+        return ""
+    for connector in _MANAGED_BRIDGES:
+        managed = _managed_bridge_path(connector)
+        if managed and target == os.path.normcase(managed):
+            return connector
+    return ""
 
 
-def _raise_managed_opencode_bridge_refusal(action: str) -> None:
+def _raise_managed_bridge_refusal(action: str, connector: str) -> None:
+    label, filename = _MANAGED_BRIDGES[connector]
     raise click.ClickException(
-        f"refusing to {action} the managed OpenCode defenseclaw.js bridge; "
-        "it is connector lifecycle configuration, not an operator plugin"
+        f"refusing to {action} the managed {label} {filename} bridge; "
+        "it is connector lifecycle configuration, not an operator plugin, "
+        f"and {label} runs unguarded without it. To stop guarding {label}, "
+        f"run: defenseclaw setup remove {connector}"
     )
 
 
-def _refuse_managed_opencode_bridge_action(
+def _refuse_managed_bridge_action(
     app: AppContext,
     target: str,
     connector: str,
@@ -949,23 +967,25 @@ def _refuse_managed_opencode_bridge_action(
     """Refuse lifecycle actions only when they resolve to our exact bridge."""
 
     if _looks_like_explicit_path(target):
-        if _is_exact_managed_opencode_bridge(target):
-            _raise_managed_opencode_bridge_refusal(action)
+        bridge = _managed_bridge_connector(target)
+        if bridge:
+            _raise_managed_bridge_refusal(action, bridge)
         return
     requested = os.path.splitext(os.path.basename(target))[0].casefold()
     if requested != "defenseclaw":
         return
     scoped = _normalize_runtime_connector(connector) if connector else ""
     connectors = [scoped] if scoped else _active_plugin_connectors(app)
-    if "opencode" not in connectors:
-        return
-    # A project/user plugin with the same basename is an ordinary eligible
-    # asset. Discovery excludes only the exact managed global bridge.
-    if _plugin_match_dir_scopes(app, "defenseclaw", "opencode"):
-        return
-    managed = _managed_opencode_bridge_path()
-    if managed and os.path.isfile(managed):
-        _raise_managed_opencode_bridge_refusal(action)
+    for bridge in _MANAGED_BRIDGES:
+        if bridge not in connectors:
+            continue
+        # A project/user plugin with the same basename is an ordinary eligible
+        # asset. Discovery excludes only the exact managed global bridge.
+        if _plugin_match_dir_scopes(app, "defenseclaw", bridge):
+            continue
+        managed = _managed_bridge_path(bridge)
+        if managed and os.path.isfile(managed):
+            _raise_managed_bridge_refusal(action, bridge)
 
 
 def _scan_all_plugins(
@@ -3107,6 +3127,12 @@ def remove(app: AppContext, name: str, connector_flag: str) -> None:
 
     connectors = resolve_list_connectors(app, connector_flag)
     scoped = bool(connector_flag and connector_flag.strip())
+    _refuse_managed_bridge_action(
+        app,
+        name,
+        connectors[0] if scoped and connectors else "",
+        action="remove",
+    )
 
     removed: list[tuple[str, str]] = []
     if scoped:
@@ -3380,7 +3406,7 @@ def block(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
     from defenseclaw.enforce import PolicyEngine
 
     connector = _resolve_connector_scope(app, connector_flag)
-    _refuse_managed_opencode_bridge_action(
+    _refuse_managed_bridge_action(
         app,
         name,
         connector,
@@ -3697,7 +3723,7 @@ def disable(app: AppContext, name: str, reason: str, connector_flag: str) -> Non
     from defenseclaw.enforce import PolicyEngine
 
     connector = _normalize_runtime_connector(resolve_list_connector(app, connector_flag))
-    _refuse_managed_opencode_bridge_action(
+    _refuse_managed_bridge_action(
         app,
         name,
         connector,
@@ -3900,7 +3926,7 @@ def quarantine(app: AppContext, name: str, reason: str, connector_flag: str) -> 
     from defenseclaw.enforce.plugin_enforcer import PluginEnforcer
 
     resolved_connector = _resolve_connector_scope(app, connector_flag)
-    _refuse_managed_opencode_bridge_action(
+    _refuse_managed_bridge_action(
         app,
         name,
         resolved_connector,
