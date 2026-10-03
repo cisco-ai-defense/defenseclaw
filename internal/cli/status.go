@@ -92,7 +92,8 @@ var gatewayStatusConfigProblem error
 // observability destinations when err is only a missing destination secret,
 // so status can still find and query the gateway. An invalid enum or type
 // value is dropped for the same purpose, so status shows the running
-// gateway before the problem in both cases (GAP-2062). It returns nil
+// gateway before the problem in both cases (GAP-2062); so is an undeclared
+// key (GAP-2173). It returns nil
 // otherwise.
 func gatewayStatusRelaxedConfig(err error) *config.Config {
 	var secretErr *config.V8SecretReferenceError
@@ -130,15 +131,16 @@ func gatewayStatusRelaxedConfig(err error) *config.Config {
 	return nil
 }
 
-// gatewayStatusDroppableValue reports a schema error about one scalar value
-// (an unknown enum choice or a wrong type), whose removal leaves the rest of
+// gatewayStatusDroppableValue reports a schema error about one value (an
+// unknown enum choice, a wrong type or an undeclared key), whose removal leaves the rest of
 // config.yaml, including the gateway address, as written.
 func gatewayStatusDroppableValue(err error) bool {
 	var schemaErr *config.V8SchemaError
 	if !errors.As(err, &schemaErr) || schemaErr.Path == "" || schemaErr.Path == "$" {
 		return false
 	}
-	return schemaErr.Keyword == "enum" || schemaErr.Keyword == "type"
+	// An unknown (typo'd) key is dropped too (GAP-2173).
+	return schemaErr.Keyword == "enum" || schemaErr.Keyword == "type" || schemaErr.Keyword == "additionalProperties"
 }
 
 var yamlPathSegment = regexp.MustCompile(`^(?:\.([A-Za-z0-9_-]+)|\[([0-9]+)\])`)

@@ -208,3 +208,41 @@ func TestYAMLWithoutPath(t *testing.T) {
 		t.Error("a missing path was removed")
 	}
 }
+
+// GAP-2173: an undeclared (typo'd) key does not hide the running gateway
+// either, and the problem reads like the enum and type ones.
+func TestGatewayStatusUnknownKeyStillFindsGateway(t *testing.T) {
+	for name, tc := range map[string]struct{ extra, want string }{
+		"guardrail key": {"guardrail:\n  bogus_key_v2173: 1\n", "guardrail.bogus_key_v2173: unknown field"},
+		"top-level key": {"bogus_top_v2173: 1\n", "bogus_top_v2173: unknown field"},
+		"typo of mode":  {"guardrail:\n  mdoe: action\n", `guardrail.mdoe: unknown field (did you mean "mode"?)`},
+		"key plus type": {"guardrail:\n  bogus_key_v2173: 1\n  enabled: maybe\n", "guardrail.enabled: expected a value of type boolean"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			home := t.TempDir()
+			configPath := filepath.Join(t.TempDir(), "config.yaml")
+			t.Setenv("DEFENSECLAW_HOME", home)
+			t.Setenv("DEFENSECLAW_CONFIG", configPath)
+			raw := fmt.Sprintf("config_version: 8\ndata_dir: %s\ngateway:\n  api_bind: 127.0.0.1\n  api_port: 19134\n%s",
+				filepath.ToSlash(home), tc.extra)
+			if err := os.WriteFile(configPath, []byte(raw), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			previous := cfg
+			t.Cleanup(func() { cfg = previous; gatewayStatusConfigProblem = nil })
+
+			loadErr := loadGatewayCommandConfigFor(statusCmd)
+			if loadErr == nil {
+				t.Fatal("config with an unknown key loaded")
+			}
+			relaxed := gatewayStatusRelaxedConfig(loadErr)
+			if relaxed == nil || relaxed.Gateway.APIPort != 19134 {
+				t.Fatalf("relaxed config = %+v (load error %v)", relaxed, loadErr)
+			}
+			msg := gatewayStatusConfigLoadError(loadErr).Error()
+			if !strings.Contains(msg, tc.want) || strings.Contains(msg, "additionalProperties") {
+				t.Errorf("status error %q does not contain %q in plain words", msg, tc.want)
+			}
+		})
+	}
+}
