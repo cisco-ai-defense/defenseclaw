@@ -291,6 +291,67 @@ def test_runtime_no_restart_says_the_change_is_not_live(
     assert "--no-restart" in result.output
 
 
+def test_runtime_hints_name_a_command_that_exists(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    restart_spy: _RestartSpy,
+) -> None:
+    """GAP-2548: 'defenseclaw setup restart' does not exist."""
+    monkeypatch.chdir(tmp_path)
+    cfg = _config_with_runtime(tmp_path, monkeypatch)
+    cfg.ai_discovery.runtime.enabled = False
+
+    result = _invoke("enable", "--yes", "--no-restart")
+
+    assert "setup restart" not in result.output
+    assert "defenseclaw-gateway restart" in result.output
+
+
+def test_runtime_enable_with_only_openclaw_gateway_down_is_not_a_failure(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GAP-2548: defenseclaw-gateway restarted, so the planes are live."""
+    from defenseclaw.commands import cmd_setup
+
+    def openclaw_down(*_a: Any, **_k: Any) -> None:
+        raise cmd_setup._OpenClawGatewayNotRunning("The OpenClaw gateway is not running.")
+
+    monkeypatch.setattr(cmd_setup, "_restart_services", openclaw_down)
+    monkeypatch.chdir(tmp_path)
+    cfg = _config_with_runtime(tmp_path, monkeypatch)
+    cfg.ai_discovery.runtime.enabled = False
+
+    result = _invoke("enable", "--yes", "--no-enable-host-plane")
+
+    assert result.exit_code == 0, result.output
+    assert "Gateway restart failed" not in result.output
+    assert "openclaw gateway run" in result.output
+    assert "runtime planes are live" in result.output
+
+
+def test_runtime_enable_real_restart_failure_names_an_existing_command(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from defenseclaw.commands import cmd_setup
+
+    def gateway_down(*_a: Any, **_k: Any) -> None:
+        raise cmd_setup._GatewayRestartFailed("gateway restart/readiness failed")
+
+    monkeypatch.setattr(cmd_setup, "_restart_services", gateway_down)
+    monkeypatch.chdir(tmp_path)
+    cfg = _config_with_runtime(tmp_path, monkeypatch)
+    cfg.ai_discovery.runtime.enabled = False
+
+    result = _invoke("enable", "--yes")
+
+    assert result.exit_code == 1, result.output
+    assert "Gateway restart failed" in result.output
+    assert "setup restart" not in result.output
+    assert "defenseclaw-gateway restart" in result.output
+
+
 def test_severity_filter_narrows_the_table_and_tolerates_unknown_bands(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
