@@ -2848,6 +2848,10 @@ def _print_mcp_summary(mc, llm, aid) -> None:
             rows.append(("llm", "base_url", llm.base_url))
     if aid.endpoint:
         rows.append(("cisco_ai_defense", "endpoint", aid.endpoint))
+        # --api-key-env and --api-timeout-ms are saved too (GAP-2539).
+        if aid.api_key_env:
+            rows.append(("cisco_ai_defense", "api_key_env", aid.api_key_env))
+        rows.append(("cisco_ai_defense", "timeout_ms", str(aid.timeout_ms)))
     if mc.scan_prompts:
         rows.append(("scanners.mcp_scanner", "scan_prompts", "true"))
     if mc.scan_resources:
