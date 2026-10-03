@@ -299,7 +299,15 @@ def env_name_value_in_clear(flag: str, value: str) -> bool:
     the field by mistake) stays redacted.
     """
 
-    return flag.lower().replace("-", "_").endswith("_env") and bool(_ENV_VAR_NAME_RE.match(value))
+    from defenseclaw.tui.services.setup_state import looks_like_secret_value  # noqa: PLC0415
+
+    # A long mixed-case token is a valid name by syntax but is a pasted
+    # key, so it stays redacted too (GAP-2569).
+    return (
+        flag.lower().replace("-", "_").endswith("_env")
+        and bool(_ENV_VAR_NAME_RE.match(value))
+        and not looks_like_secret_value(value)
+    )
 
 
 def _flag_is_secret(flag: str) -> bool:
