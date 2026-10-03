@@ -185,7 +185,7 @@ class DoctorHermesPathTests(unittest.TestCase):
 
 class DoctorGuardrailTests(unittest.TestCase):
     @patch("defenseclaw.commands.cmd_doctor._http_probe", return_value=(200, "ok"))
-    def test_empty_guardrail_model_is_warning_not_failure(self, _mock_probe):
+    def test_empty_guardrail_model_is_not_a_warning(self, _mock_probe):
         cfg = Config(
             data_dir="/tmp/defenseclaw",
             audit_db="/tmp/defenseclaw/audit.db",
@@ -200,11 +200,12 @@ class DoctorGuardrailTests(unittest.TestCase):
 
         _check_guardrail_proxy(cfg, result)
 
+        # Fetch-interceptor routing is how OpenClaw works (GAP-2233):
+        # an empty guardrail.model is not something to warn about.
         self.assertEqual(result.failed, 0)
-        self.assertEqual(result.warned, 1)
+        self.assertEqual(result.warned, 0)
         self.assertEqual(result.passed, 1)
-        warn_checks = [c for c in result.checks if c["status"] == "warn"]
-        self.assertTrue(any("fetch-interceptor" in c["detail"] for c in warn_checks))
+        self.assertNotIn("guardrail.model", " ".join(c["detail"] for c in result.checks))
 
     def test_proxy_interception_fails_when_self_test_misses(self):
         cfg = Config(
