@@ -34,9 +34,10 @@ def test_160_columns_on_registries_names_every_tab(monkeypatch) -> None:
         labels = fit_tab_labels(PANELS, "registries", badges, width)
         assert strip_width(tuple(labels.values())) <= width
         assert labels["registries"] == "R Registries"
-        assert all(
-            label.strip("⁰¹²³⁴⁵⁶⁷⁸⁹") != key for (_n, key, _t), label in zip(PANELS, labels.values(), strict=True)
-        )
+        bare = [key for (_n, key, _t), label in zip(PANELS, labels.values(), strict=True) if " " not in label]
+        # The Audit count stays (GAP-2077), which can cost one name (GAP-2193).
+        assert len(bare) <= (1 if "audit" in badges else 0), (width, labels)
+    assert "¹³" in fit_tab_labels(PANELS, "registries", {"alerts": 16, "audit": 13}, 146)["audit"]
 
 
 async def test_plugin_detail_scrolls_with_page_down_at_80x24(tmp_path) -> None:
