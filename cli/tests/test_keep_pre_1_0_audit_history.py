@@ -27,9 +27,10 @@ def _audit_db(home: Path, version: int, rows: int) -> None:
     conn.close()
 
 
-def _run(home: Path) -> subprocess.CompletedProcess[str]:
+def _run(home: Path, *args: str) -> subprocess.CompletedProcess[str]:
     env = {**os.environ, "DEFENSECLAW_HOME": str(home)}
-    return subprocess.run([sys.executable, str(SCRIPT)], capture_output=True, text=True, env=env, timeout=60, check=False)
+    cmd = [sys.executable, str(SCRIPT), *args]
+    return subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=60, check=False)
 
 
 def test_a_0_x_history_is_copied_once_before_make_all_installs_1_0(tmp_path: Path) -> None:
@@ -59,6 +60,26 @@ def test_a_1_x_or_empty_history_needs_no_copy(tmp_path: Path) -> None:
         assert result.returncode == 0 and result.stdout == "", result.stdout + result.stderr
         assert not (home / "backups").exists()
     assert _run(tmp_path / "missing").returncode == 0
+
+
+def test_pending_says_whether_the_next_gateway_start_purges_a_history(tmp_path: Path) -> None:
+    for name, version, rows, want in (("old", 29, 3, 0), ("current", 33, 5, 1), ("empty", 29, 0, 1)):
+        home = tmp_path / name
+        _audit_db(home, version, rows)
+        result = _run(home, "--pending")
+        assert (result.returncode, result.stdout) == (want, ""), name + result.stderr
+        assert not (home / "backups").exists()
+    assert _run(tmp_path / "missing", "--pending").returncode == 1
+
+
+def test_make_all_says_so_before_its_quiet_gateway_start_upgrades_the_audit_db() -> None:
+    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+    recipe = makefile[makefile.index("\nsource-restart-gateway:") : makefile.index("\npath:")]
+    assert "keep-pre-1.0-audit-history.py --pending" in recipe
+    assert "Upgrading the audit database before the gateway starts (one time" in recipe
+    start = recipe.index('$(EXE)" start >/dev/null')
+    restart = recipe.index('$(EXE)" restart >/dev/null')
+    assert recipe.index("upgrade_note;") < start < recipe.rindex("upgrade_note;") < restart
 
 
 def test_make_all_keeps_it_before_installing() -> None:
