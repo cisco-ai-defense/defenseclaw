@@ -34,6 +34,7 @@ from __future__ import annotations
 import json as _json
 import os
 import re
+import shutil
 import sys
 from dataclasses import asdict
 from typing import Any
@@ -575,7 +576,7 @@ def list_cmd(app: AppContext, emit_json: bool) -> None:
     """List configured registry sources.
 
     The ``ENTRIES`` column reports cached counts as
-    ``total (clean/warning/blocked/error)`` from the on-disk index — a
+    ``total (clean/warning/blocked/error/rejected)`` from the on-disk index — a
     dash means the source has never been synced. A source whose last
     sync failed is named below the table. Counts are
     deliberately read fresh from ``index.json`` rather than the
@@ -600,6 +601,7 @@ def list_cmd(app: AppContext, emit_json: bool) -> None:
                     "warning": idx.warning_count,
                     "blocked": idx.blocked_count,
                     "error": idx.error_count,
+                    "rejected": idx.rejected_count,
                 }
             out.append(d)
         _emit_json(out)
@@ -610,34 +612,42 @@ def list_cmd(app: AppContext, emit_json: bool) -> None:
         return
     click.echo()
     ux.section("Registry sources")
+    # Size the ID column to the longest ID and give the URL the rest of the
+    # terminal, so a long ID never shifts the row (GAP-2405).
+    id_w = max([24] + [len(s.id) for s in sources])
+    fixed_w = 2 + id_w + 1 + 13 + 9 + 4 + 19 + 23
+    url_w = max(32, shutil.get_terminal_size((120, 24)).columns - fixed_w - 1)
+    longest_url = max([3] + [len(s.url or "") for s in sources])
     click.echo(
-        f"  {'ID':<24} {'KIND':<12} {'CONTENT':<8} {'ON':<3} "
+        f"  {'ID':<{id_w}} {'KIND':<12} {'CONTENT':<8} {'ON':<3} "
         f"{'ENTRIES':<18} {'LAST SYNC':<22} URL"
     )
     click.echo(
-        f"  {'-' * 24} {'-' * 12} {'-' * 8} {'-' * 3} "
-        f"{'-' * 18} {'-' * 22} {'-' * 32}"
+        f"  {'-' * id_w} {'-' * 12} {'-' * 8} {'-' * 3} "
+        f"{'-' * 18} {'-' * 22} {'-' * min(url_w, longest_url)}"
     )
     for s in sources:
         on = "yes" if s.enabled else "no"
         last = s.last_sync or "-"
         url = s.url or ""
-        if len(url) > 32:
-            url = url[:29] + "..."
+        if len(url) > url_w:
+            url = url[: url_w - 3] + "..."
         idx = indices.get(s.id)
         if idx is None or idx.entry_count == 0 and not s.last_sync:
             entries = "-"
         else:
             entries = (
                 f"{idx.entry_count} "
-                f"({idx.clean_count}/{idx.warning_count}/{idx.blocked_count}/{idx.error_count})"
+                f"({idx.clean_count}/{idx.warning_count}/{idx.blocked_count}/{idx.error_count}"
+                f"/{idx.rejected_count})"
             )
         click.echo(
-            f"  {s.id:<24} {s.kind:<12} {s.content:<8} {on:<3} "
+            f"  {s.id:<{id_w}} {s.kind:<12} {s.content:<8} {on:<3} "
             f"{entries:<18} {last:<22} {url}"
         )
     click.echo()
-    ux.subhead("ENTRIES column: total (clean/warning/blocked/error)")
+    # GAP-2371: a reject only stops promotion, so it is not counted as blocked.
+    ux.subhead("ENTRIES column: total (clean/warning/blocked/error/rejected)")
     # A failed last sync must not look like a healthy one (GAP-2210).
     for s in sources:
         if (s.last_status or "").startswith("error"):
@@ -674,7 +684,7 @@ def show_cmd(app: AppContext, source_id: str, emit_json: bool) -> None:
     click.echo(
         f"    {ux.dim('Verdicts:')}       "
         f"{idx.clean_count} clean, {idx.warning_count} warning, "
-        f"{idx.blocked_count} blocked, {idx.error_count} error",
+        f"{idx.blocked_count} blocked, {idx.error_count} error, {idx.rejected_count} rejected",
     )
     click.echo()
 
@@ -1379,9 +1389,10 @@ def _registry_mcp_url_allowed(url: str, *, allow_private: bool = False) -> bool:
               type=click.Choice(["skill", "mcp", "all"], case_sensitive=False),
               default="all", help="Show only skills or MCP servers")
 @click.option("--status",
-              type=click.Choice(["pending", "clean", "warning", "blocked", "error", "all"],
+              type=click.Choice(["pending", "clean", "warning", "blocked", "error", "rejected", "all"],
                                 case_sensitive=False),
-              default="all", help="Show only entries with this scan status")
+              default="all",
+              help="Show only entries with this status (rejected: an operator reject, never promoted)")
 @click.option("--approved", is_flag=True,
               help="Show only operator-approved entries")
 @click.option("--rejected", is_flag=True,

@@ -1897,13 +1897,59 @@ def _mcp_unblock_line(target: str, connector: str, only_allow: bool) -> str:
     return f"[mcp] Unblocked {target!r}{scope}."
 
 
-def _mcp_rescan_hint(target: str, connector: str) -> None:
+def _mcp_scan_state(app: AppContext, target: str, connector: str) -> str:
+    """``verdict``, ``failed`` or ``unscanned`` for the target's newest scan (GAP-2367)."""
+    store = app.store
+    if store is None:
+        return "verdict"
+    names = {target}
+    norm = connector_paths.normalize(connector) if connector else ""
+    if connector:
+        try:
+            names.update(
+                s.url for s in _collect_mcps_for_connector(app, connector)
+                if s.name == target and s.url
+            )
+        except Exception:  # noqa: BLE001 - the hint must never break unblock.
+            pass
+
+    def _matches(stored: str) -> bool:
+        if stored in names:
+            return True
+        scoped_connector, scoped_name = _parse_mcp_scoped_scan_target(stored)
+        return scoped_name == target and (not norm or scoped_connector == norm)
+
+    try:
+        good = [r.get("timestamp") for r in store.latest_scans_by_scanner("mcp-scanner") if _matches(r["target"])]
+        failed = [
+            r.get("timestamp") for r in store.latest_failed_scans_by_scanner("mcp-scanner")
+            if _matches(r["target"])
+        ]
+    except Exception:  # noqa: BLE001
+        return "verdict"
+    if failed:
+        try:
+            if good and max(t for t in good if t is not None) > max(t for t in failed if t is not None):
+                return "verdict"
+        except (TypeError, ValueError):
+            pass
+        return "failed"
+    return "verdict" if good else "unscanned"
+
+
+def _mcp_rescan_hint(app: AppContext, target: str, connector: str) -> None:
     import shlex
 
     cmd = f"defenseclaw mcp scan {shlex.quote(target)}"
     if connector:
         cmd += f" --connector {connector}"
-    click.echo("  Its scan verdict applies again.")
+    state = _mcp_scan_state(app, target, connector)
+    if state == "failed":
+        click.echo("  It has no scan verdict yet (its last scan failed).")
+    elif state == "unscanned":
+        click.echo("  It has no scan verdict yet (it has not been scanned).")
+    else:
+        click.echo("  Its scan verdict applies again.")
     click.echo(f"  To scan it now, run: {cmd}")
 
 
@@ -1972,7 +2018,7 @@ def unblock(app: AppContext, target: str, connector_flag: str) -> None:
             for line in lines:
                 click.secho(line, fg="green")
             only_one = len(scoped) == 1 and not has_unscoped_state
-            _mcp_rescan_hint(target, scoped[0] if only_one else "")
+            _mcp_rescan_hint(app, target, scoped[0] if only_one else "")
             if app.logger:
                 saved_change_audit(app.logger).log_action(
                     "mcp-unblock", target, "manual unblock via CLI connector=all",
@@ -1994,7 +2040,7 @@ def unblock(app: AppContext, target: str, connector_flag: str) -> None:
     else:
         pe.remove_action("mcp", target)
     click.secho(line, fg="green")
-    _mcp_rescan_hint(target, connector)
+    _mcp_rescan_hint(app, target, connector)
 
     if app.logger:
         saved_change_audit(app.logger).log_action(

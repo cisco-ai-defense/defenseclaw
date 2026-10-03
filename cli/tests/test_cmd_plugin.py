@@ -522,7 +522,7 @@ class TestPluginList(PluginCommandTestBase):
     def test_list_empty(self, _mock_oc):
         result = self.invoke(["list"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("No plugins found", result.output)
+        self.assertIn("has no installed plugins", result.output)
 
     @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
     def test_list_with_plugins(self, _mock_oc):
@@ -1159,6 +1159,22 @@ class TestPluginListMultiConnectorDefault(PluginCommandTestBase):
         self.assertNotIn("Check your opencode", result.output)
 
     @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
+    def test_single_connector_without_plugins_is_a_plain_empty_state(self, _mock_oc):
+        """GAP-2368: no plugins is normal; don't hint at a broken install."""
+        codex_dir = os.path.join(self.tmp_dir, "codex-empty-plugins")
+        os.makedirs(codex_dir)
+        self.app.cfg.active_connectors = lambda: ["codex"]  # type: ignore[method-assign]
+        self.app.cfg.active_connector = lambda: "codex"  # type: ignore[method-assign]
+        self.app.cfg.plugin_dirs = lambda connector=None: [codex_dir]  # type: ignore[method-assign]
+
+        result = self.invoke(["list", "--connector", "codex"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn(f"codex has no installed plugins (checked: {codex_dir}", result.output)
+        self.assertNotIn("Check your", result.output)
+        self.assertNotIn("installation", result.output)
+
+    @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
     def test_default_puts_missing_claude_registry_on_its_own_line(self, _mock_oc):
         """GAP-2290: the not-found note replaces claudecode's summary line."""
         plugin_root = os.path.join(self.tmp_dir, "noclaude", "plugins")
@@ -1328,7 +1344,7 @@ class TestPluginLifecycle(PluginCommandTestBase):
         self.invoke(["remove", "lifecycle"])
 
         result = self.invoke(["list"])
-        self.assertIn("No plugins found", result.output)
+        self.assertIn("has no installed plugins", result.output)
 
 
 class TestPluginBlock(PluginCommandTestBase):

@@ -133,7 +133,7 @@ Each entry is run through the MCP scanner (transport probe + behavioral introspe
     },
     'list': {
       type: 'subcommand',
-      description: 'Tabular listing with cached entry counts (clean/warning/blocked/error) per source; a source whose last sync failed is named below the table. --json for machine-readable output.',
+      description: 'Tabular listing with cached entry counts (clean/warning/blocked/error/rejected) per source; a rejected entry is only kept out of policy, it is not blocked; a source whose last sync failed is named below the table. --json for machine-readable output.',
     },
     'show <id>': {
       type: 'subcommand',
@@ -153,7 +153,7 @@ Each entry is run through the MCP scanner (transport probe + behavioral introspe
     },
     'entries <id>': {
       type: 'subcommand',
-      description: 'Show cached entries with their scanner verdict. Filter by --type skill|mcp|all, --status pending|clean|warning|blocked|error|all, --approved, --rejected.',
+      description: 'Show cached entries with their scanner verdict. Filter by --type skill|mcp|all, --status pending|clean|warning|blocked|error|rejected|all, --approved, --rejected.',
     },
     'approve <id> <name>': {
       type: 'subcommand',
@@ -161,7 +161,7 @@ Each entry is run through the MCP scanner (transport probe + behavioral introspe
     },
     'reject <id> <name>': {
       type: 'subcommand',
-      description: 'Mark an entry rejected (always blocked, even if the scanner is clean). --type skill|mcp required.',
+      description: 'Mark an entry rejected: it is never promoted into asset policy, even if the scanner is clean. Its status reads rejected, not blocked. --type skill|mcp required.',
     },
     'require --type skill|mcp --enabled|--disabled [--connector <name>]': {
       type: 'subcommand',
