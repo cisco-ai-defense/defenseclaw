@@ -16431,6 +16431,12 @@ def _config_display_value(field: Any) -> str:
     value = str(getattr(field, "value", "") or "")
     if getattr(field, "kind", "") == "password":
         return "(empty)" if not value else "****"
+    # Paths under the home directory read "~/..." so they fit the Value
+    # column ("/Users/dcm-fc3/.d…" at 160 columns, GAP-2253); the side
+    # pane and the edit box keep the full path.
+    home = os.path.expanduser("~").rstrip("/\\")
+    if home and len(home) > 1 and (value == home or value.startswith((home + "/", home + "\\"))):
+        return "~" + value[len(home) :]
     return value
 
 
