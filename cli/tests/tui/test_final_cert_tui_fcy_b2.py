@@ -147,7 +147,9 @@ async def test_datadog_run_keeps_the_key_off_argv_and_out_of_activity(tmp_path) 
         assert MARK not in repr(entry)
         app._handle_activity_key("!")
         await app.workers.wait_for_complete()
-        assert calls[-1][0] == typed
+        # GAP-2010: the typed key runs from the child's env, not argv.
+        assert calls[-1][0] == typed[:-2]
+        assert dict(calls[-1][1]["env_overrides"]) == {"DEFENSECLAW_SETUP_OBSERVABILITY_TOKEN": MARK}
 
 
 def _alert_ids(reader: V8EventHistoryReader, alert_limit: int = 500) -> list[str]:
