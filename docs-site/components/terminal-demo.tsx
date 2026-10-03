@@ -169,17 +169,17 @@ export function TerminalDemo() {
     // "  ✓ …" success lines while letting the long install curl URL
     // (no spaces) break at any character so it never side-scrolls.
     <div
-      className="terminal-window w-full min-w-0 overflow-hidden rounded-2xl backdrop-blur"
+      className="terminal-window w-full min-w-0 overflow-hidden rounded-2xl"
       role="img"
       aria-label={`Terminal demo: installing DefenseClaw and configuring the ${connector.label} connector.`}
     >
-      <div className="flex items-center gap-2 border-b border-fd-border/60 bg-fd-card/60 px-4 py-2 text-xs text-fd-muted-foreground">
+      <div className="flex items-center gap-2 border-b border-[var(--term-border)] bg-[var(--term-chrome)] px-4 py-2 text-xs text-[var(--term-muted)]">
         <span aria-hidden className="size-3 rounded-full bg-red-500/80" />
         <span aria-hidden className="size-3 rounded-full bg-yellow-500/80" />
         <span aria-hidden className="size-3 rounded-full bg-green-500/80" />
         <span className="ml-3 font-mono">~/projects/agent-gateway</span>
       </div>
-      <pre className="m-0 whitespace-pre-wrap wrap-anywhere p-5 font-mono text-[13px] leading-6 text-fd-foreground">
+      <pre className="m-0 whitespace-pre-wrap wrap-anywhere p-5 font-mono text-[13px] leading-6 text-[var(--term-text)]">
         {headerVisible.map((line, i) => (
           <Line key={`h-${i}`} kind={line.kind} text={line.text} />
         ))}
@@ -192,7 +192,7 @@ export function TerminalDemo() {
           ))}
         </div>
         {showCursor && (
-          <span aria-hidden className="terminal-cursor inline-block w-2 bg-[var(--brand-cisco)]">
+          <span aria-hidden className="terminal-cursor inline-block w-2 bg-[var(--term-prompt)]">
             &nbsp;
           </span>
         )}
@@ -205,16 +205,16 @@ function Line({ kind, text }: { kind: LineKind; text: string }) {
   if (kind === 'cmd') {
     return (
       <div>
-        <span className="text-[var(--brand-cisco)]">$ </span>
-        <span>{text}</span>
+        <span className="text-[var(--term-prompt)]">$ </span>
+        <span className="text-[var(--term-fg)]">{text}</span>
       </div>
     );
   }
   if (kind === 'ok') {
-    return <div className="text-emerald-500">{text}</div>;
+    return <div className="text-[var(--term-ok)]">{text}</div>;
   }
   if (kind === 'dim') {
-    return <div className="text-fd-muted-foreground">{text}</div>;
+    return <div className="text-[var(--term-muted)]">{text}</div>;
   }
   return <div>{text}</div>;
 }

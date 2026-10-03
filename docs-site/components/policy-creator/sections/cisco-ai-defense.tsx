@@ -83,7 +83,7 @@ export function CiscoAIDefenseSection({
             hint="Env var NAME (UPPER_SNAKE). The gateway reads the actual secret via os.Getenv at boot — never paste the literal key here, it would land in YAML and share URLs."
           />
           {aid.api_key_env && !/^[A-Z_][A-Z0-9_]{2,63}$/.test(aid.api_key_env) && (
-            <p className="mt-1 text-[10px] leading-snug text-red-500">
+            <p className="mt-1 text-[10px] leading-snug text-red-700 dark:text-red-400">
               Doesn&apos;t look like an env-var name. Expected
               UPPER_SNAKE matching <code>[A-Z_][A-Z0-9_]+</code>. If you
               pasted an actual API key, clear the field and use the env

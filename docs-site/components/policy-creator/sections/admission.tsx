@@ -127,7 +127,7 @@ export function AdmissionSection({
                     type="button"
                     onClick={() => removeAllow(idx)}
                     aria-label="Remove"
-                    className="rounded-md border border-fd-border bg-fd-background px-2 py-1 text-[11px] text-fd-muted-foreground hover:border-red-500 hover:text-red-500"
+                    className="rounded-md border border-fd-border bg-fd-background px-2 py-1 text-[11px] text-fd-muted-foreground hover:border-red-500 hover:text-red-700 dark:hover:text-red-400"
                   >
                     ×
                   </button>

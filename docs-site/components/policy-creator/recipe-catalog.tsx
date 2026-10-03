@@ -68,7 +68,7 @@ export function RecipeCatalog() {
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           placeholder={`Search ${ALL.length} recipes…`}
-          className="flex-1 rounded-md border border-fd-border bg-fd-background px-2.5 py-1.5 text-sm text-fd-foreground placeholder:text-fd-muted-foreground/60 focus:border-[var(--brand-cisco)] focus:outline-none focus:ring-1 focus:ring-[var(--brand-cisco)]"
+          className="flex-1 rounded-md border border-fd-border bg-fd-background px-2.5 py-1.5 text-sm text-fd-foreground placeholder:text-fd-muted-foreground focus:border-[var(--brand-cisco)] focus:outline-none focus:ring-1 focus:ring-[var(--brand-cisco)]"
         />
         <select
           aria-label="Filter by recipe kind"

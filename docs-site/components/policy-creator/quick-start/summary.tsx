@@ -132,7 +132,7 @@ function Row({ label, value, hint }: { label: string; value: string; hint?: stri
         <span className="text-right font-medium tabular-nums">{value}</span>
       </div>
       {hint && (
-        <span className="text-[10px] leading-tight text-fd-muted-foreground/80">{hint}</span>
+        <span className="text-[10px] leading-tight text-fd-muted-foreground">{hint}</span>
       )}
     </li>
   );

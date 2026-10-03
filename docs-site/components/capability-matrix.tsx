@@ -55,7 +55,7 @@ function Tick({ on }: { on: boolean }) {
       aria-label={on ? 'yes' : 'no'}
       className={
         on
-          ? 'inline-flex size-5 items-center justify-center rounded-full bg-emerald-500/15 text-emerald-500'
+          ? 'inline-flex size-5 items-center justify-center rounded-full bg-emerald-500/15 text-emerald-700 dark:text-emerald-400'
           : 'inline-flex size-5 items-center justify-center rounded-full bg-fd-muted text-fd-muted-foreground'
       }
     >
@@ -142,7 +142,7 @@ export function SandboxHarnessTable() {
               <Td className="max-w-[240px] break-all font-mono text-[11px] text-fd-muted-foreground">{c.sandbox.hookConfig}</Td>
               <Td className="max-w-[320px] text-xs leading-relaxed">
                 {c.sandbox.verified === 'verified' ? (
-                  <span className="font-medium text-emerald-600 dark:text-emerald-400">Verified end to end</span>
+                  <span className="font-medium text-emerald-700 dark:text-emerald-400">Verified end to end</span>
                 ) : (
                   <>
                     <span className="font-medium text-[var(--brand-cisco-strong)]">Unverified: cannot run yet.</span>{' '}

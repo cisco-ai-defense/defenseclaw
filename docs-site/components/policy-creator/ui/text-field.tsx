@@ -37,7 +37,7 @@ export function TextField({
         inputMode={inputMode}
         onChange={(e) => onChange(e.target.value)}
         className={[
-          'rounded-md border bg-fd-background px-2 py-1.5 text-xs text-fd-foreground placeholder:text-fd-muted-foreground/60',
+          'rounded-md border bg-fd-background px-2 py-1.5 text-xs text-fd-foreground placeholder:text-fd-muted-foreground',
           'focus:outline-none focus:ring-1',
           error
             ? 'border-red-500 focus:border-red-500 focus:ring-red-500'
@@ -46,7 +46,7 @@ export function TextField({
         ].join(' ')}
       />
       {error ? (
-        <span className="text-[11px] text-red-500">{error}</span>
+        <span className="text-[11px] text-red-700 dark:text-red-400">{error}</span>
       ) : hint ? (
         <span className="text-[11px] text-fd-muted-foreground">{hint}</span>
       ) : null}
@@ -83,7 +83,7 @@ export function TextArea({
         placeholder={placeholder}
         onChange={(e) => onChange(e.target.value)}
         className={[
-          'rounded-md border border-fd-border bg-fd-background px-2 py-1.5 text-xs text-fd-foreground placeholder:text-fd-muted-foreground/60',
+          'rounded-md border border-fd-border bg-fd-background px-2 py-1.5 text-xs text-fd-foreground placeholder:text-fd-muted-foreground',
           'focus:border-[var(--brand-cisco)] focus:outline-none focus:ring-1 focus:ring-[var(--brand-cisco)]',
           monospace ? 'font-mono' : '',
           disabled ? 'cursor-not-allowed opacity-60' : '',

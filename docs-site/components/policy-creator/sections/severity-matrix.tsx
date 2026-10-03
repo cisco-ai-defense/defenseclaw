@@ -91,7 +91,7 @@ export function SeverityMatrixSection({
           <button
             type="button"
             onClick={() => clearOverrides(scanner)}
-            className="ml-auto rounded-md border border-fd-border bg-fd-background px-2 py-1 text-[11px] text-fd-muted-foreground hover:border-red-500 hover:text-red-500"
+            className="ml-auto rounded-md border border-fd-border bg-fd-background px-2 py-1 text-[11px] text-fd-muted-foreground hover:border-red-500 hover:text-red-700 dark:hover:text-red-400"
           >
             Reset {scanner} overrides
           </button>

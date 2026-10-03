@@ -199,7 +199,7 @@ function PreJudgeEditor({
                 <button
                   type="button"
                   onClick={() => remove(idx)}
-                  className="text-[11px] text-fd-muted-foreground hover:text-red-500"
+                  className="text-[11px] text-fd-muted-foreground hover:text-red-700 dark:hover:text-red-400"
                 >
                   Remove this strip
                 </button>
@@ -327,7 +327,7 @@ function FindingEditor({
                 <button
                   type="button"
                   onClick={() => remove(idx)}
-                  className="text-[11px] text-fd-muted-foreground hover:text-red-500"
+                  className="text-[11px] text-fd-muted-foreground hover:text-red-700 dark:hover:text-red-400"
                 >
                   Remove this suppression
                 </button>
@@ -426,7 +426,7 @@ function ToolEditor({
                 <button
                   type="button"
                   onClick={() => remove(idx)}
-                  className="text-[11px] text-fd-muted-foreground hover:text-red-500"
+                  className="text-[11px] text-fd-muted-foreground hover:text-red-700 dark:hover:text-red-400"
                 >
                   Remove this suppression
                 </button>
