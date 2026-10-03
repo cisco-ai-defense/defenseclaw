@@ -424,8 +424,6 @@ def record_scan(logger: Any, result: Any, **kwargs: Any) -> None:
     except CanonicalObservabilityUnavailableError:
         if not _SCAN_NOT_RECORDED_NOTED:
             _SCAN_NOT_RECORDED_NOTED = True
-            click.echo(
-                "  \u26a0 The gateway isn't running, so this scan result was not recorded "
-                "(start it: defenseclaw-gateway start).",
-                err=True,
-            )
+            from defenseclaw.commands._audit_notice import not_recorded_warning
+
+            click.echo(not_recorded_warning("this scan result"), err=True)

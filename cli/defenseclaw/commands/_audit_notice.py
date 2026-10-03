@@ -27,10 +27,15 @@ import click
 
 _NOTED = False
 
-NOT_RECORDED_WARNING = (
-    "  ⚠ The gateway isn't running, so the audit event was not recorded "
-    "(start it with 'defenseclaw-gateway start')."
-)
+GATEWAY_START_HINT = "start it with: defenseclaw-gateway start"
+
+
+def not_recorded_warning(what: str = "the audit event") -> str:
+    """The one wording for "the gateway is stopped, so *what* was skipped" (GAP-2267)."""
+    return f"  ⚠ The gateway isn't running, so {what} was not recorded ({GATEWAY_START_HINT})."
+
+
+NOT_RECORDED_WARNING = not_recorded_warning()
 
 
 class _SavedChangeAudit:
