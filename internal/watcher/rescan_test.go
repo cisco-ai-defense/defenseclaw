@@ -867,6 +867,47 @@ func TestPluginRootExpandsCategoryFolders(t *testing.T) {
 	}
 }
 
+// GAP-2439: Hermes lists its bundled platforms/* plugins by the bare folder
+// name ("a2a"), so the rescan log must too, or "plugin scan platforms/a2a"
+// fails. Other categories and the user plugin root keep category/name.
+func TestHermesBundledPlatformPluginsUseBareID(t *testing.T) {
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	cfg.Guardrail.Connector = "hermes"
+	t.Setenv("HERMES_BUNDLED_PLUGINS", "")
+	home := filepath.Dir(skillDir)
+	bundled := filepath.Join(home, "hermes-agent", "plugins")
+	user := filepath.Join(home, "plugins")
+	dirs := map[string]string{
+		"a2a":                 filepath.Join(bundled, "platforms", "a2a"),
+		"browser/browser_use": filepath.Join(bundled, "browser", "browser_use"),
+		"platforms/mine":      filepath.Join(user, "platforms", "mine"),
+	}
+	for _, d := range dirs {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(d, "plugin.yaml"), []byte("name: x\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w := New(cfg, nil, []string{user, bundled}, store, logger, nil, nil)
+
+	got := map[string]string{}
+	for _, target := range w.enumerateTargets() {
+		if target.Type == InstallPlugin {
+			got[target.Name] = target.Path
+		}
+	}
+	if len(got) != len(dirs) {
+		t.Fatalf("rescan plugin targets = %v, want %v", got, dirs)
+	}
+	for name, path := range dirs {
+		if got[name] != path {
+			t.Fatalf("rescan plugin targets = %v, want %v", got, dirs)
+		}
+	}
+}
+
 // GAP-1525: on an upgrade the old copy of DefenseClaw's own OpenClaw plugin
 // is still on disk when the startup rescan runs; connector setup replaces it
 // moments later. The startup cycle must not scan that dir, while a later
