@@ -7670,6 +7670,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 pass
             if hasattr(model, "connector_focus_enabled"):
                 model.connector_focus_enabled = focus_enabled
+        # The status bar and the Alerts tab badge count the alerts in this
+        # scope, so both change as the scope is picked (GAP-2441).
+        multi = len(self._active_connector_names()) > 1
+        self.alerts_model.set_connector_filter(connector if multi else "")
         if connector:
             friendly = friendly_connector_name(connector)
             self._set_status(f"Filtered to {friendly} ({connector}).")
@@ -7682,6 +7686,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         overview_active = self.active_panel == "overview" and not self.help_open
         if overview_active:
             self._render_overview_scope_indicator()
+            self._update_tab_labels()
             self._schedule_overview_deferred_render()
             return
         self._render_chrome()
