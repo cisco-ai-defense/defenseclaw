@@ -1466,6 +1466,33 @@ class RemoveDataDirTests(unittest.TestCase):
             self.assertEqual(list(data_dir.iterdir()), [])
             self.assertIn("mount point", out.getvalue())
 
+    def test_binary_phase_accepts_the_emptied_mount_point(self):
+        # GAP-1980: the binary phase re-validates the plan; the kept, empty
+        # mount point must not fail the ownership-marker check.
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / ".defenseclaw"
+            data_dir.mkdir()
+            bin_dir = Path(tmp) / "bin"
+            bin_dir.mkdir()
+            gateway = bin_dir / "defenseclaw-gateway"
+            gateway.write_text("bin", encoding="utf-8")
+            plan = cmd_uninstall.UninstallPlan(
+                platform_name="linux",
+                data_dir=str(data_dir),
+                install_root=str(bin_dir),
+                gateway_path=str(gateway),
+                binary_targets=(str(gateway),),
+                remove_data_dir=True,
+                remove_binaries=True,
+            )
+            # data_dir is what the data phase leaves on a mount point: empty.
+            with contextlib.redirect_stdout(io.StringIO()):
+                cmd_uninstall._remove_binaries(plan)
+            self.assertFalse(gateway.exists())
+            (data_dir / "unrelated.txt").write_text("x", encoding="utf-8")
+            with self.assertRaises(click.ClickException):
+                cmd_uninstall._validate_plan(plan)
+
     def test_reset_rejects_symlinked_preserved_venv(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

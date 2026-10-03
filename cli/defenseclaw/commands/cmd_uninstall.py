@@ -1943,6 +1943,14 @@ def _validate_windows_binary_ownership(plan: UninstallPlan) -> None:
         raise click.ClickException("refusing Windows binary removal: CLI shim targets an unrelated runtime")
 
 
+def _is_empty_dir(path: str) -> bool:
+    try:
+        with os.scandir(path) as entries:
+            return next(entries, None) is None
+    except OSError:
+        return False
+
+
 def _validate_plan(plan: UninstallPlan) -> None:
     """Validate every destructive root and exact artifact before mutation."""
     if plan.remove_data_dir:
@@ -1959,7 +1967,9 @@ def _validate_plan(plan: UninstallPlan) -> None:
         if os.path.normcase(os.path.realpath(plan.data_dir)) in protected:
             raise click.ClickException(f"refusing protected data path: {plan.data_dir}")
         ownership_markers = ("config.yaml", "audit.db", ".env", "policies", "quarantine", ".venv")
-        if os.path.isdir(plan.data_dir) and not any(
+        # An empty folder holds nothing to remove; it is what the data phase
+        # leaves when the data dir is a mount point (GAP-1980).
+        if os.path.isdir(plan.data_dir) and not _is_empty_dir(plan.data_dir) and not any(
             os.path.exists(os.path.join(plan.data_dir, marker))
             and not _is_reparse_path(os.path.join(plan.data_dir, marker))
             for marker in ownership_markers
@@ -2774,7 +2784,7 @@ def _remove_data_dir(
         "quarantine",
         ".venv",
     )
-    if not any(os.path.exists(os.path.join(data_dir, m)) for m in markers):
+    if not _is_empty_dir(data_dir) and not any(os.path.exists(os.path.join(data_dir, m)) for m in markers):
         raise click.ClickException(
             f"refusing to remove {data_dir}: path does not look like a DefenseClaw data directory"
         )
