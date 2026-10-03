@@ -244,21 +244,20 @@ The added `DirectoryAdded` hook is synchronous, matcherless, bounded to 30
 seconds, and observation-only: it runs after the directory is added and has no
 block, ask, or decision authority.
 
-## Telemetry channels at boot
+## How Claude Code reaches the gateway
 
 <Flow
-  direction="LR"
-  compact
-  caption="Two telemetry channels: hooks for per-tool-call decisions and native OTel for model/token metrics plus privacy-gated events."
+  direction="TB"
+  caption="Claude Code reaches the gateway's API port two ways. The hook sends each event and gets a verdict back, which can block or ask on the events that allow a decision; Claude Code's own OpenTelemetry exporter only records logs and metrics, with traces, prompts and tool content switched off. Setup writes both into Claude Code's settings."
 >
   <Node id="cc" kind="agent">Claude Code</Node>
-  <Node id="hooks" kind="connector">{`Version-selected 28/29-event\nhook contract`}</Node>
-  <Node id="otel" kind="connector">{`Native OTel exporter\n(env-driven)`}</Node>
-  <Node id="gateway" kind="gateway">defenseclaw-gateway</Node>
-  <Edge from="cc" to="hooks" />
-  <Edge from="hooks" to="gateway" />
-  <Edge from="cc" to="otel" />
-  <Edge from="otel" to="gateway" />
+  <Node id="hooks" kind="connector">{`DefenseClaw hook\nruns on each hook event`}</Node>
+  <Node id="otel" kind="connector">{`Built-in telemetry\nOpenTelemetry exporter`}</Node>
+  <Node id="gateway" kind="gateway">{`DefenseClaw gateway\nAPI port, 18970 by default`}</Node>
+  <Edge from="cc" to="hooks" label="runs" />
+  <Edge from="hooks" to="gateway" label="asks for a verdict" />
+  <Edge from="cc" to="otel" label="exports" />
+  <Edge from="otel" to="gateway" label="logs + metrics" />
 </Flow>
 
 **Behind an HTTP proxy.** DefenseClaw's hooks reach the gateway on 127.0.0.1

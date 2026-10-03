@@ -31,31 +31,47 @@ The DefenseClaw gateway client speaks the OpenClaw WebSocket handshake across th
 
 ## End-to-end flow
 
+The plugin hands two kinds of work to `defenseclaw-gateway`: model calls, which
+go through the guardrail proxy, and tool calls, which wait for a verdict from
+the inspect API.
+
+### A model call
+
 <Sequence
-  caption="The plugin proxies LLM fetches through the guardrail and sends before_tool_call events to the sidecar. Native approval requests are returned to OpenClaw; OpenClaw owns the operator decision."
+  caption="The plugin's fetch interceptor sends each recognized LLM request to the guardrail proxy (port 4000 by default), keeping the original address in the X-DC-Target-URL header. The proxy checks the request before it forwards it and the response before it returns it."
   participants={[
-    { id: 'u',  label: 'User / approver',     kind: 'operator' },
-    { id: 'oc', label: 'OpenClaw',            kind: 'agent' },
-    { id: 'p',  label: 'DefenseClaw plugin',  kind: 'connector' },
-    { id: 'g',  label: 'DefenseClaw sidecar', kind: 'gateway' },
-    { id: 'm',  label: 'Model provider',       kind: 'agent' },
+    { id: 'oc', label: 'OpenClaw', kind: 'agent' },
+    { id: 'p',  label: 'Plugin',   kind: 'connector' },
+    { id: 'g',  label: 'Gateway',  kind: 'gateway' },
+    { id: 'm',  label: 'Model',    kind: 'generic' },
   ]}
 >
-  <Message from="u"  to="oc" label="prompt" />
-  <Message from="oc" to="p"  label="fetch (LLM request)" />
-  <Message from="p"  to="g"  label="redirect through guardrail proxy" />
-  <Message from="g"  to="m"  label="forward allowed request" />
+  <Message from="oc" to="p"  label="calls the model" />
+  <Message from="p"  to="g"  label="redirects to the proxy" />
+  <Message from="g"  to="m"  label="forwards if allowed" />
   <Message from="m"  to="g"  kind="return" label="model response" />
-  <Message from="g"  to="p"  kind="return" label="scanned response (or block)" />
-  <Message from="p"  to="oc" kind="return" label="fetch response" />
-  <Message from="oc" to="p"  label="before_tool_call(name, args)" />
+  <Message from="g"  to="p"  kind="return" label="checked response, or a block" />
+  <Message from="p"  to="oc" kind="return" label="response" />
+</Sequence>
+
+### A tool call
+
+<Sequence
+  caption="Before each tool runs, the plugin posts it to the inspect API (port 18970 by default). In action mode a block verdict stops the tool and a confirm verdict becomes OpenClaw's requireApproval, which denies on timeout; allow and alert let the tool run. OpenClaw asks the user and applies the answer; the plugin only logs it."
+  participants={[
+    { id: 'u',  label: 'User',     kind: 'operator' },
+    { id: 'oc', label: 'OpenClaw', kind: 'agent' },
+    { id: 'p',  label: 'Plugin',   kind: 'connector' },
+    { id: 'g',  label: 'Gateway',  kind: 'gateway' },
+  ]}
+>
+  <Message from="oc" to="p"  label="about to run a tool" />
   <Message from="p"  to="g"  label="POST /api/v1/inspect/tool" />
-  <Message from="g"  to="p"  kind="return" label="allow / block / confirm" />
-  <Message from="p"  to="oc" kind="return" label="allow / block / requireApproval" />
-  <Message from="oc" to="u"  label="native approval request (confirm only)" />
-  <Message from="u"  to="oc" kind="return" label="approve / deny" />
-  <Message from="oc" to="p"  label="resolution callback (log only)" />
-  <Message from="oc" to="u"  label="response" />
+  <Message from="g"  to="p"  kind="return" label="allow · alert · confirm · block" />
+  <Message from="p"  to="oc" kind="return" label="run, block, or requireApproval" />
+  <Message from="oc" to="u"  label="asks for approval (confirm only)" />
+  <Message from="u"  to="oc" kind="return" label="approve or deny" />
+  <Message from="oc" to="p"  label="reports the answer (logged)" />
 </Sequence>
 
 ## Correlation headers
