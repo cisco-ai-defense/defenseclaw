@@ -23496,20 +23496,24 @@ function Invoke-DefenseClawNuclearUninstall {
         try { $null = & $script:ScExe 'delete' $name 2>&1 } catch {}
     }
 
-    # 1b. Force-kill any surviving DefenseClaw process by image name. sc.exe
-    #     stop is cooperative - a service whose stop handler hangs or whose
-    #     process is wedged holding open file handles keeps the installed
-    #     EXE and the broker's log open, blocking the subsequent
-    #     Remove-Item -Recurse. taskkill /F /IM is non-cooperative and
-    #     releases the handles so delete can proceed. The image name list
-    #     is the EXACT set of binaries the installer ships; a stray EXE
-    #     outside this list cannot be killed by name here.
+    # 1b. Force-kill the two SERVICE-WORKER binaries that hold persistent
+    #     file handles on the install tree. sc.exe stop is cooperative;
+    #     if the service's stop handler hangs or the worker is wedged
+    #     holding its log file open, Remove-Item -Recurse fails with
+    #     "being used by another process".
+    #
+    #     DO NOT include defenseclaw.exe or defenseclaw-hook.exe in this
+    #     list. defenseclaw.exe is the Setup EXE trailer-extracted
+    #     bootstrap binary that spawns the PowerShell host running THIS
+    #     code; taskkill /F /IM defenseclaw.exe /T would kill its entire
+    #     tree including our own PowerShell, aborting the uninstall mid-
+    #     flight with Windows exit 1603 and a WER crash dialog.
+    #     defenseclaw-hook.exe is a short-lived per-event CLI that holds
+    #     no persistent handles.
     $taskkillExe = [IO.Path]::Combine($script:System32, 'taskkill.exe')
     foreach ($image in @(
         'defenseclaw-cmid-broker.exe',
-        'defenseclaw-gateway.exe',
-        'defenseclaw-hook.exe',
-        'defenseclaw.exe'
+        'defenseclaw-gateway.exe'
     )) {
         try { $null = & $taskkillExe '/F' '/IM' $image '/T' 2>&1 } catch {}
     }
@@ -24301,6 +24305,29 @@ function Invoke-DefenseClawEnterpriseLifecycle {
     $recoverProductionUninstallAcl = [bool](
         $Action -eq 'Uninstall' -and -not $certificationServiceScope
     )
+    # Managed-mode nuclear uninstall shortcut. --purge in non-strict mode
+    # means "clean slate; the next install must succeed on an empty
+    # machine, regardless of the current state's ACL / identity drift".
+    # The ordinary pre-layout recovery (Invoke-DefenseClawPreLayoutRecovery)
+    # runs forensic-grade native descriptor checks on sibling scoped
+    # install roots before the main uninstall lifecycle even starts; a
+    # corrupted sibling from a prior test cycle hangs the recovery with
+    # "Windows namespace purge object has a foreign descriptor". The
+    # nuclear path intentionally skips that check and tears down the
+    # current scope + agent-config residue via takeown + icacls /reset
+    # + Remove-Item. Strict mode
+    # (DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS=1) restores the full
+    # forensic pipeline for hardened production deployments.
+    if ($Action -eq 'Uninstall' -and $Purge -and
+        -not (Test-DefenseClawTrustStrictAncestors)) {
+        return Invoke-DefenseClawNuclearUninstall `
+            -Layout @{
+                InstallRoot = $InstallRoot
+                StateRoot   = $StateRoot
+            } `
+            -GatewayServiceName $GatewayServiceName `
+            -GuardianServiceName $GuardianServiceName
+    }
     if ($certificationServiceScope -and
         $Action -in @('Install', 'Upgrade', 'Repair') -and
         -not $AllowUnsigned) {
