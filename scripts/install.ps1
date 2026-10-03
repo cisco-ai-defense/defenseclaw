@@ -999,6 +999,12 @@ function Write-HookState {
 
 function Copy-BinDir([string]$To) {
     New-Item -ItemType Directory -Path $To -Force | Out-Null
+    # Remember that there was no bin folder (a first install, DefenseClaw
+    # Setup), so a restore does not leave an empty one behind (GAP-2614).
+    if (-not (Test-Path -LiteralPath $BinDir -PathType Container)) {
+        Set-Content -LiteralPath (Join-Path $To "NO_BINDIR") -Value "" -Encoding Ascii
+        return
+    }
     foreach ($name in $ManagedFiles) {
         $live = Join-Path $BinDir $name
         if (Test-Path -LiteralPath $live -PathType Leaf) { Copy-Item -LiteralPath $live -Destination (Join-Path $To $name) }
@@ -1012,6 +1018,10 @@ function Restore-BinDir([string]$From) {
         $live = Join-Path $BinDir $name
         if (Test-Path -LiteralPath $saved -PathType Leaf) { Install-File $saved $live }
         elseif (Test-Path -LiteralPath $live) { Remove-Aside $live }
+    }
+    if ((Test-Path -LiteralPath (Join-Path $From "NO_BINDIR")) -and
+        -not (Get-ChildItem -LiteralPath $BinDir -Force -ErrorAction SilentlyContinue | Select-Object -First 1)) {
+        Remove-Item -LiteralPath $BinDir -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -1775,6 +1785,9 @@ function Invoke-Install {
         Write-Warn "Found a broken DefenseClaw install ($BinDir\defenseclaw.cmd without its venv); repairing it"
     }
 
+    # Before anything is created (the uv folder, uv itself), so a refusal
+    # really changes nothing (GAP-2614).
+    Assert-InstallRoom $InstallRoom "the new version"
     # Never pick up uv settings (overrides, indexes) from a project in the cwd.
     $env:UV_NO_CONFIG = "1"
     # The download cache and the Python uv fetches for the venv stay in the
@@ -1796,7 +1809,6 @@ function Invoke-Install {
         if (-not $Uv) { Die "Could not install uv; install it from https://docs.astral.sh/uv/ and retry" }
     }
 
-    Assert-InstallRoom $InstallRoom "the new version"
     New-InstallDirectory $Staging
     New-Item -ItemType Directory -Path (Join-Path $Staging "bin") | Out-Null
     $Archive = "defenseclaw-$Ver-windows-amd64.zip"

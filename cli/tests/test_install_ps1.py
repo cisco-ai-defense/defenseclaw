@@ -465,6 +465,67 @@ def test_disk_room_is_checked_before_staging_and_before_the_gateway_stops() -> N
     assert install.index("is staged and checked") < second < install.index('Write-Info "Stopping the gateway')
 
 
+def test_a_room_refusal_runs_before_the_uv_folder_or_uv_is_created() -> None:
+    # GAP-2614: "nothing was changed", but the refusal came after
+    # Protect-UvDirectory -Create had made an empty .uv in the data folder.
+    install = _ps1_function("Invoke-Install")
+    room = install.index('Assert-InstallRoom $InstallRoom "the new version"')
+    assert room < install.index("Protect-UvDirectory -Create") < install.index("$Uv = Install-Uv")
+
+
+def _bin_dir_functions() -> str:
+    text = _text()
+    out = []
+    for name in ("Copy-BinDir", "Restore-BinDir"):
+        start = text.index(f"function {name}(")
+        out.append(text[start : text.index("\n}\n", start) + 3])
+    return "\n".join(out)
+
+
+def test_a_restore_removes_the_bin_folder_only_when_the_run_created_it() -> None:
+    # GAP-2614: "Nothing was left installed." / "Your previous install is
+    # back." left an empty ~\.local\bin after a failed first install or a
+    # restored DefenseClaw Setup upgrade.
+    body = _bin_dir_functions()
+    copy = body[: body.index("function Restore-BinDir(")]
+    assert copy.index('(Join-Path $To "NO_BINDIR")') < copy.index("foreach ($name in $ManagedFiles)")
+    restore = body[body.index("function Restore-BinDir(") :]
+    assert restore.index("foreach ($name in $ManagedFiles)") < restore.index('(Join-Path $From "NO_BINDIR")')
+    assert "Remove-Item -LiteralPath $BinDir -Force" in restore
+    assert "-Recurse" not in restore
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize("existed", [False, True])
+def test_restore_bin_dir_puts_the_bin_folder_back_as_it_was(tmp_path: Path, existed: bool) -> None:
+    bin_dir, slot = tmp_path / "bin", tmp_path / "slot"
+    if existed:
+        bin_dir.mkdir()
+    script = f"""
+$ErrorActionPreference = 'Stop'
+$BinDir = '{bin_dir}'
+$ManagedFiles = @('defenseclaw-gateway.exe')
+function Install-File([string]$From, [string]$To) {{ Copy-Item -LiteralPath $From -Destination $To -Force }}
+function Remove-Aside([string]$Path) {{ Remove-Item -LiteralPath $Path -Force }}
+{_bin_dir_functions()}
+Copy-BinDir '{slot}'
+New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
+Set-Content -LiteralPath (Join-Path $BinDir 'defenseclaw-gateway.exe') -Value 'new'
+Restore-BinDir '{slot}'
+"""
+    completed = subprocess.run(
+        [POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", script],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert bin_dir.is_dir() is existed
+    if existed:
+        assert list(bin_dir.iterdir()) == []
+
+
 def test_a_stopped_or_undone_install_frees_the_staged_release_first() -> None:
     # GAP-1839/GAP-1841: the 873 MB .staging left no room for the restore or
     # for the old gateway's restart.
