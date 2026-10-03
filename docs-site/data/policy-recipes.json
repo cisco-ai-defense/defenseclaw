@@ -7365,33 +7365,22 @@
       ]
     },
     {
-      "id": "RECIPE-SUPP-TOOL-COSMETIC-SHELL",
-      "title": "Suppress cosmetic shell commands (git status / log / diff)",
+      "id": "RECIPE-SUPP-TOOL-1",
+      "title": "Status check tools return expected system metadata",
       "kind": "tool_suppression",
       "body": {
-        "tool_pattern": "^(shell|bash|sh)\\.execute$",
+        "tool_pattern": "^(graph_auth_status|session_status|get_status)$",
         "suppress_findings": [
-          "JUDGE-INJ-DESTRUCTIVE"
+          "JUDGE-PII-USER"
         ],
-        "reason": "Cosmetic shell commands (git status, ls, pwd) generate noise without security risk"
+        "reason": "Status check tools return expected system metadata"
       },
-      "why": "Tool suppressions let you silence findings on tools whose name matches a regex. Use this to drop noisy verdicts on read-only commands while keeping write/destructive commands surfaced.",
-      "examples": [
-        "shell.execute",
-        "bash.execute"
-      ],
-      "counterexamples": [
-        "shell.write",
-        "fs.unlink"
-      ],
-      "source": "docs-site/scripts/build-policy-assets.ts (illustrative)",
+      "why": "Tool suppression shipped in the bundled default pack. Drops JUDGE-PII-USER PII-judge findings for matching tool names; regex and CEL rule findings are unaffected.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/default/suppressions.yaml",
       "tags": [
-        "tool",
-        "shell",
-        "noise-reduction"
-      ],
-      "tool_capability_class": [
-        "exec_shell"
+        "tool"
       ]
     }
   ]

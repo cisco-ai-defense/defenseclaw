@@ -25,12 +25,19 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
-const FOOTER = (name: string) => `
-# Activate the new policy.
+const FOOTER = (name: string, packName: string | null) => `
+# Activate the new policy. This switches the OPA policy only.
 defenseclaw policy activate ${shellQuote(name)}
 echo
 printf 'Activated policy: %s\\n' ${shellQuote(name)}
-`;
+${packName === null ? '' : `
+# The guardrail rule pack is written but not switched on: switching it
+# restarts a running gateway, so the script leaves that step to you.
+echo
+printf 'Rule pack written to %s. Connectors keep their current pack until you run:\\n' "\${POLICIES_ROOT}/guardrail/"${shellQuote(packName)}
+printf '  defenseclaw guardrail validate-pack %s\\n' "\${POLICIES_ROOT}/guardrail/"${shellQuote(packName)}
+printf '  defenseclaw guardrail use-pack %s\\n' ${shellQuote(packName)}
+`}`;
 
 // Strip the leading "~/.defenseclaw/policies/" path prefix that emit()
 // produces; the bash script uses POLICIES_ROOT instead.
@@ -60,7 +67,9 @@ export function emitInstallScript(policy: Policy): string {
       return `# ${f.description}\n${heredoc(`\${POLICIES_ROOT}/${rel}`, f.contents)}`;
     })
     .join('\n');
-  return `${HEADER}\n${body}\n${FOOTER(policy.name)}`;
+  const packFile = files.find((f) => f.path.startsWith('~/.defenseclaw/policies/guardrail/'));
+  const packName = packFile ? packFile.path.split('/')[4] : null;
+  return `${HEADER}\n${body}\n${FOOTER(policy.name, packName)}`;
 }
 
 export function emitTarball(): string {

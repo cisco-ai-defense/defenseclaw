@@ -247,7 +247,7 @@ connector:
   {
     id: 'policy-decision-trace',
     title: 'Trace a runtime verdict from event to action',
-    summary: 'Follow normalization, deterministic matching, suppressions, severity, and the active action mapping.',
+    summary: 'Follow normalization, a bundled rule match, suppressions, severity, and the default pack mapping.',
     syntheticDataNotice: 'Guided example · Synthetic runtime event',
     connectorIds: ['claudecode'],
     tabs: [
@@ -255,43 +255,50 @@ connector:
   "connector": "claudecode",
   "kind": "tool_call",
   "tool": "Bash",
-  "command": "send [sensitive-artifact] to collector.example.invalid"
+  "command": "ls ~/.gnupg/"
 }` },
-      { id: 'rule-pack', label: 'rule-pack.yaml', language: 'yaml', source: `rules:
-  - id: shell.data-egress
-    match: sensitive_source_and_external_destination
-    severity: high
-judge:
-  enabled: false
-suppressions:
-  trusted_destinations: []
-actions:
-  high: block` },
+      { id: 'rule-pack', label: 'rules/sensitive-paths.yaml', language: 'yaml', source: `# policies/guardrail/default/rules/sensitive-paths.yaml (excerpt)
+version: 1
+category: sensitive-path
+rules:
+  - id: PATH-GNUPG
+    pattern: '(?:~|\\$\\{?HOME\\}?|/home/\\w+|/root|/Users/\\w+)/\\.gnupg/'
+    title: "GPG keyring access"
+    severity: HIGH
+    confidence: 0.95
+    tags: [credential, file-sensitive]` },
+      { id: 'policy-config', label: 'config.yaml', language: 'yaml', source: `# ~/.defenseclaw/config.yaml (excerpt)
+guardrail:
+  mode: action           # observe mode never blocks
+  judge:
+    enabled: false       # the optional LLM judge is off by default
+  # No block_at is set, so the default pack decides:
+  # CRITICAL blocks, HIGH and MEDIUM alert, LOW allows.` },
       { id: 'policy-log', label: 'decision.log', language: 'json', source: `{
   "normalized": true,
-  "matched_rule": "shell.data-egress",
+  "matched_rule": "PATH-GNUPG",
   "suppressed": false,
   "judge": "skipped",
-  "severity": "high",
-  "action": "block"
+  "severity": "HIGH",
+  "action": "alert"
 }` },
     ],
     evidence: [
       { id: 'normalized', label: 'Stage 1', value: 'Event normalized', detail: 'Connector-specific input becomes a common tool event.', tone: 'info' },
-      { id: 'matched', label: 'Stage 2', value: 'shell.data-egress', detail: 'A bundled deterministic rule matches.', tone: 'warning' },
-      { id: 'not-suppressed', label: 'Stage 3', value: 'No suppression', detail: 'The destination is not trusted.', tone: 'neutral' },
+      { id: 'matched', label: 'Stage 2', value: 'PATH-GNUPG', detail: 'A bundled rule from the default pack matches the keyring path.', tone: 'warning' },
+      { id: 'not-suppressed', label: 'Stage 3', value: 'No suppression', detail: 'Suppressions filter only LLM-judge findings, never a rule finding.', tone: 'neutral' },
       { id: 'judge-skipped', label: 'Optional stage', value: 'Judge skipped', detail: 'The optional judge runs only when enabled.', tone: 'info' },
       { id: 'severity-high', label: 'Stage 5', value: 'Severity · HIGH', detail: 'The rule contributes a HIGH finding.', tone: 'warning' },
-      { id: 'runtime-action', label: 'Runtime mapping', value: 'high → block', detail: 'This is a guardrail mapping, not a skill or MCP admission action.', tone: 'danger' },
+      { id: 'runtime-action', label: 'Runtime mapping', value: 'HIGH → alert', detail: 'The default pack alerts on HIGH. The strict pack, or guardrail block-at HIGH, would block it.', tone: 'warning' },
     ],
-    outcomes: [{ id: 'policy-block', kind: 'block', label: 'Block runtime action', reason: 'HIGH runtime finding maps to block', action: 'Emit decision record' }],
+    outcomes: [{ id: 'policy-alert', kind: 'audit', label: 'Alert and allow the call', reason: 'HIGH maps to alert under the default pack', action: 'Emit decision record' }],
     steps: [
       step('normalize', 'Normalize', 'Convert the connector hook into a common event.', 'policy-event', ['normalized'], [{ tabId: 'policy-event', start: 2, end: 5, tone: 'info' }]),
-      step('match', 'Match rule', 'A deterministic exfiltration rule matches the event.', 'rule-pack', ['normalized', 'matched'], [{ tabId: 'rule-pack', start: 1, end: 4, tone: 'warning' }]),
-      step('suppress', 'Check suppressions', 'No trusted-destination suppression applies.', 'rule-pack', ['matched', 'not-suppressed'], [{ tabId: 'rule-pack', start: 7, end: 8, tone: 'info' }]),
-      step('judge', 'Optional judge', 'The LLM judge is disabled, so the deterministic result continues.', 'rule-pack', ['not-suppressed', 'judge-skipped'], [{ tabId: 'rule-pack', start: 5, end: 6, tone: 'info' }]),
+      step('match', 'Match rule', 'The bundled PATH-GNUPG rule matches the GPG keyring path.', 'rule-pack', ['normalized', 'matched'], [{ tabId: 'rule-pack', start: 5, end: 8, tone: 'warning' }]),
+      step('suppress', 'Check suppressions', 'Suppressions only filter LLM-judge findings, so this rule finding stays.', 'policy-log', ['matched', 'not-suppressed'], [{ tabId: 'policy-log', start: 4, end: 4, tone: 'info' }]),
+      step('judge', 'Optional judge', 'The LLM judge is disabled, so the rule result continues.', 'policy-config', ['not-suppressed', 'judge-skipped'], [{ tabId: 'policy-config', start: 4, end: 5, tone: 'info' }]),
       step('severity', 'Assign severity', 'The matching rule contributes HIGH severity.', 'policy-log', ['judge-skipped', 'severity-high'], [{ tabId: 'policy-log', start: 3, end: 7, tone: 'warning' }]),
-      step('mapping', 'Resolve action', 'The runtime HIGH mapping resolves to block.', 'rule-pack', ['severity-high', 'runtime-action'], [{ tabId: 'rule-pack', start: 9, end: 10, tone: 'danger' }], 'policy-block'),
+      step('mapping', 'Resolve action', 'Under the default pack, HIGH resolves to alert.', 'policy-config', ['severity-high', 'runtime-action'], [{ tabId: 'policy-config', start: 6, end: 7, tone: 'warning' }], 'policy-alert'),
     ],
     boundaries: {
       did: ['Show the ordered stages that assemble a runtime verdict', 'Distinguish the optional judge from deterministic rules'],
