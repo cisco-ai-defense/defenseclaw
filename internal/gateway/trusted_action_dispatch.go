@@ -29,7 +29,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
@@ -39,10 +38,13 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 )
 
-const (
-	trustedActionDispatchTimeout = 50 * time.Millisecond
-	trustedActionDispatchMaxCost = uint64(24_000_000)
-)
+// trustedActionDispatchMaxCost bounds the semantic rules' total CEL cost per
+// action (each program also has its own cost limit). The bound is on cost,
+// not wall-clock time: a 50 ms deadline here skipped every semantic rule
+// left when a loaded host stalled the gateway, so a CRITICAL command rule
+// only alerted and the call ran (GAP-2140). The caller's context still
+// cancels the evaluation.
+const trustedActionDispatchMaxCost = uint64(24_000_000)
 
 // trustedActionRequest is private so a remote payload cannot assert that an
 // arbitrary body is a trusted or enforcement-capable action. Only adapters
@@ -115,8 +117,7 @@ func dispatchTrustedAction(
 
 	facts = actionfacts.Analyze(request.Input)
 	analyzed = true
-	ctx, cancel := context.WithTimeout(parent, trustedActionDispatchTimeout)
-	defer cancel()
+	ctx := parent
 
 	generation := snapshotRulePackGeneration(request.Connector)
 	options := ruleScanOptions{
