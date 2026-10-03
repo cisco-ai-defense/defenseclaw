@@ -10492,8 +10492,10 @@ def _setup_observability_alias(
             return
         write_mode = "add" if _existing_connector_override(gc, connector) is not None else "replace"
     elif proxy_active:
-        # --replace over a guarded proxy connector: confirm the switch.
+        # --replace over a guarded proxy connector: confirm the switch. Name
+        # what is removed in every mode, not only in the prompt (GAP-2418).
         proxy_label = _CONNECTOR_META.get(proxy_active, {}).get("label", proxy_active)
+        click.echo(f"  --replace removes {proxy_label}: DefenseClaw stops guarding it.")
         if not yes and not click.confirm(
             f"  Replace {proxy_label} with {label}? {proxy_label} stops being guarded by DefenseClaw.",
             default=False,

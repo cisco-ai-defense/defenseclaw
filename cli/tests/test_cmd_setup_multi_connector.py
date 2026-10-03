@@ -988,6 +988,8 @@ class TestAdditiveSetupCommand(unittest.TestCase):
         with _setup_patches():
             result = _invoke(["codex", "--replace", "--yes", "--no-restart"], self.app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
+        # GAP-2418: --yes skips the question, so the output must still name OpenClaw.
+        self.assertIn("--replace removes OpenClaw: DefenseClaw stops guarding it.", result.output)
         self.assertEqual(self.app.cfg.guardrail.connector, "codex")
         self.assertEqual(self.app.cfg.claw.mode, "codex")
 
