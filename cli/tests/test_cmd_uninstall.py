@@ -24,6 +24,7 @@ import hashlib
 import io
 import json
 import os
+import shlex
 import sys
 import tempfile
 import unittest
@@ -1768,7 +1769,7 @@ class LauncherRemovedNextStepsTests(unittest.TestCase):
                 cmd_uninstall._render_kept_and_next_steps(plan)
         text = buf.getvalue()
         self.assertIn(f"{bin_dir}: defenseclaw-gateway (the defenseclaw command went with the data)", text)
-        self.assertIn(f"rm -f {gateway}", text)
+        self.assertIn(f"rm -f {shlex.quote(str(gateway))}", text)
         self.assertIn("install.sh | bash", text)
         self.assertNotIn("the DefenseClaw commands", text)
         self.assertNotIn("  • set DefenseClaw up again:  defenseclaw", text)
