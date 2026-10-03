@@ -14,19 +14,22 @@ words. We evaluated that design across public malicious-command, PII,
 tool-injection, and honest agent-trajectory datasets.
 
 <Callout type="info" title="How to read these results">
-Balanced is the public name for the runtime `default` profile. Coverage and
-authored conformance results are kept separate from binary accuracy. A
-successful attack trajectory does not make every tool call a malicious true
-positive.
+The **Profile** column is the guardrail rule-pack profile (`default`,
+`permissive` or `strict`, see
+[profile posture](/docs/policies/deterministic-detection#profile-posture)).
+These are not the `open`, `balanced` and `strict` network profiles of
+[OpenShell sandboxes](/docs/sandboxes/network#network-profiles).
+Balanced is the public name for the `default` rule pack. A false positive
+(FP) is any finding on a benign call, an alert included; **Benign blocks**
+counts only the benign calls that were blocked. Coverage and authored
+conformance results are kept separate from binary accuracy. A successful
+attack trajectory does not make every tool call a malicious true positive.
 </Callout>
 
-<Cards>
-  <Card
-    title="Contextual LLM judge benchmark"
-    href="/docs/guardrail/llm-judge-benchmark"
-    description="Gemma 4 production-path F1, false positives, benign blocking, latency, tokens, cost, and connector intent context."
-  />
-</Cards>
+For the model-based judge that covers what these rules leave unresolved,
+see the [contextual LLM judge benchmark](/docs/guardrail/llm-judge-benchmark):
+Gemma 4 production-path F1, false positives, benign blocking, latency,
+tokens, cost, and connector intent context.
 
 ## Headline validation results
 
@@ -38,6 +41,9 @@ positive.
 | English privacy pack | All profiles | 5,929/13,018/0/1,454 | **89.08%** | **0%** | 0/13,018 |
 | Ylemis independent PII holdout | All profiles | 4,190/1,756/0/270 | **96.88%** | **0%** | 0/1,756 |
 | InjecAgent YARA | Scanner validation | 7/53/0/2 | **87.50%** | **0%** | Not a blocking lane |
+
+On Strict, the eight false positives are alerts, not blocks: Strict trades
+more alert visibility for more noise, and no benign call was blocked.
 
 The exact-proof command result has only nine positives. Its 100% recall point
 estimate therefore has a 95% Wilson lower bound of 70.09%. The observed

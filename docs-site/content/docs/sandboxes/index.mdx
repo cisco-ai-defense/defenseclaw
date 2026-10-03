@@ -28,7 +28,26 @@ cd ~/code/myapp
 defenseclaw sandbox run claude
 ```
 
+On a Mac, the run looks like this. The capture is from a real session whose
+sandbox was named with `--name myapp-claude` (without `--name` it would be
+`myapp-` plus a random suffix) and whose model credential was an Amazon
+Bedrock key. Below the banner, Claude Code starts as usual.
+
 ![defenseclaw sandbox run claude on a Mac: the copy is made with .env held back, then the banner shows the sandbox, the project copy, the model credential bound to its endpoint, and where asks appear, before Claude Code starts](/images/sandboxes/screens/terminal-run-banner.png)
+
+The banner's lines, as text, for a default-named sandbox with an Anthropic
+API key:
+
+```text
+Sandbox myapp-1c2d · Claude Code · skip-permissions ON · network: open + blocklist
+  Project   ~/code/myapp → /sandbox/work/myapp (copy)   changes come back with `defenseclaw sandbox pull myapp-1c2d`
+            Not visible: everything else on this machine
+  Model     ANTHROPIC_API_KEY → api.anthropic.com only (the sandbox sees a placeholder)
+  Asks      announced in this terminal's title as they come; answer them in another terminal: defenseclaw sandbox approvals --sandbox myapp-1c2d (or `defenseclaw tui`: 7, then t)
+```
+
+[Read the banner](/docs/sandboxes/first-session#read-the-banner) explains
+each line.
 
 ## The mental model
 
@@ -66,7 +85,7 @@ Sandboxes run on Linux (amd64 and arm64) and on Macs with Apple silicon. They
 are not supported on Windows or WSL2, on Intel Macs, in `managed_enterprise`
 deployments, or when you run DefenseClaw as root.
 
-| | Linux | macOS (Apple silicon) |
+| Topic | Linux | macOS (Apple silicon) |
 | --- | --- | --- |
 | OpenShell driver | Docker driver: one container per sandbox | MicroVM driver (`vm`): one virtual machine per sandbox, on Apple's Hypervisor. OpenShell calls it experimental. |
 | Isolation | Linux namespaces, Landlock (kernel 6.2 or newer), seccomp, your uid | The same, inside a MicroVM with its own Linux kernel |
@@ -99,7 +118,7 @@ images.
   <Card title="Your first session" href="/docs/sandboxes/first-session" description="A guided tour: the banner, the activity feed, a block and its unblock, the end-of-session review, then undo or pull." />
   <Card title="Network and egress" href="/docs/sandboxes/network" description="How the egress proxy decides each site, the open, balanced and strict packs, unblocks, asks and large uploads." />
   <Card title="TUI and macOS app" href="/docs/sandboxes/apps" description="Watch and manage sandboxes from the terminal UI's Sandboxes panel or the macOS app." />
-  <Card title="Full sandbox guide" href="/docs/sandboxes/guide" description="Every option, variation and troubleshooting entry in one long reference guide." />
+  <Card title="Complete sandbox guide" href="/docs/sandboxes/guide" description="Every option, variation and troubleshooting entry in one long reference guide." />
 </Cards>
 
 ## The session lifecycle
@@ -145,7 +164,7 @@ and the [capability matrix](/docs/connectors/capability-matrix).
 
 ## Where to go next
 
-- [Full sandbox guide](/docs/sandboxes/guide): every run flag, copy mode,
+- [Complete sandbox guide](/docs/sandboxes/guide): every run flag, copy mode,
   parallel runs, MCP servers, shell wrappers, teardown and troubleshooting.
 - [Sandbox policy packs and admin controls](/docs/sandboxes/policy-packs):
   write a custom pack and set organization-wide limits.

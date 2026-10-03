@@ -84,7 +84,7 @@ lists every step in full, including your organization's settings.
 Every sandbox runs one policy pack. The built-in packs set the network
 profile and more:
 
-| | `open` (default) | `balanced` | `strict` |
+| Setting | Open (default) | Balanced | Strict |
 | --- | --- | --- | --- |
 | Web access | Any site by name, except the blocklist, private networks and this machine | Only a curated developer allowlist: package registries, source hosting, toolchains and documentation | None: only the harness's model provider |
 | Banner | `network: open + blocklist` | `network: allowlist (balanced)` | `network: provider hosts only (strict)` |
@@ -243,8 +243,12 @@ upload is reported the same way.
 
 | Harness | Gets the note from the hooks |
 | --- | --- |
-| Claude Code, Codex, GitHub Copilot CLI, Cursor, Devin | Yes |
+| Claude Code, Codex, GitHub Copilot CLI | Yes |
 | Other harnesses | No: the activity feed and your terminal report the block |
+
+Cursor Agent and Devin CLI hooks read the note too, but neither harness can
+run in a sandbox until it is verified (see
+[which harnesses can run](/docs/sandboxes/guide#which-harnesses-can-run)).
 
 Each block is told once, and only to the sandbox that hit it.
 
