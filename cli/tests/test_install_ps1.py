@@ -652,6 +652,40 @@ def test_the_last_uv_hint_names_both_lock_errors() -> None:
     assert "file in use or access denied (os error 32 or 5)" in _text()[_text().index("function Invoke-UvPipInstall(") :][:1300]
 
 
+def test_tree_sizes_do_not_read_sum_from_measure_object() -> None:
+    # GAP-2616: under StrictMode, Measure-Object over no files has no .Sum, so
+    # the space refusal on a fresh first install (no or an empty .uv) crashed.
+    assert "Measure-Object -Property Length -Sum" not in _text()
+    assert "$bytes = Get-TreeSize $uvDir" in _ps1_function("Write-KeptUvCache")
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize("cache", ["missing", "empty", "one-file"])
+def test_write_kept_uv_cache_runs_under_strict_mode(tmp_path: Path, cache: str) -> None:
+    if cache != "missing":
+        (tmp_path / ".uv").mkdir()
+    if cache == "one-file":
+        (tmp_path / ".uv" / "wheel").write_bytes(b"x" * 2048)
+    tree = _text()[_text().index("function Get-TreeSize(") :]
+    tree = tree[: tree.index("\n}\n") + 3]
+    script = (
+        "Set-StrictMode -Version Latest\n$ErrorActionPreference = 'Stop'\n"
+        f"$DataDir = '{tmp_path}'\nfunction Write-Info([string]$m) {{ 'info: ' + $m }}\n"
+        f"{tree}\n{_ps1_function('Write-KeptUvCache')}\nWrite-KeptUvCache\n'done'\n"
+    )
+    completed = subprocess.run(
+        [POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", script],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    lines = completed.stdout.strip().splitlines()
+    assert lines[-1] == "done"
+    assert any("download cache" in line for line in lines) == (cache == "one-file")
+
+
 def test_a_failed_first_install_names_the_kept_uv_cache_and_a_full_disk() -> None:
     # GAP-1883: the space refusal and a staging failure kept the uv cache
     # silently, and a disk that filled at the binary copy showed only the
