@@ -1364,9 +1364,9 @@ func TestTrustedToolCallDynamicEvalAlerts(t *testing.T) {
 		if index < 0 {
 			t.Fatalf("%s: findings=%v, want CMD-EVAL", command, findingIDs(findings))
 		}
-		if f := findings[index]; f.Severity != "HIGH" || f.contributesToEnforcement() {
-			t.Fatalf("%s: CMD-EVAL severity=%s enforcing=%v, want HIGH detection only",
-				command, f.Severity, f.contributesToEnforcement())
+		if f := findings[index]; f.Severity != "HIGH" || f.contributesToEnforcement() || !f.contributesToAlertOnly() {
+			t.Fatalf("%s: CMD-EVAL severity=%s enforcing=%v alertOnly=%v, want HIGH alert only",
+				command, f.Severity, f.contributesToEnforcement(), f.contributesToAlertOnly())
 		}
 	}
 	for _, command := range []string{
