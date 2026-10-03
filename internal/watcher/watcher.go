@@ -1340,7 +1340,7 @@ func (w *InstallWatcher) isDirectChildDir(path string) bool {
 	for _, dir := range w.pluginDirs {
 		dirAbs, _ := filepath.Abs(dir)
 		if parentAbs == dirAbs {
-			return true
+			return !skipPluginChildDir(filepath.Base(path))
 		}
 	}
 	if watcherConnectorName(w.cfg) == "claudecode" {
