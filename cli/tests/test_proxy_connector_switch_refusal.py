@@ -129,16 +129,6 @@ class SetupGuardrailSwitchTests(unittest.TestCase):
                 self.assertEqual(self.app.cfg.guardrail.connector, "openclaw")
                 self.assertEqual(self.app.cfg.claw.mode, "openclaw")
 
-    def test_setup_guardrail_ignores_stale_picked_hint_on_guarded_openclaw(self):
-        Path(self.app.cfg.data_dir, "picked_connector").write_text("codex\n", encoding="utf-8")
-        with patch(
-            "defenseclaw.commands.cmd_setup._ensure_connector_available",
-            side_effect=click.ClickException("stop after connector resolution"),
-        ) as available:
-            CliRunner().invoke(setup_group, ["guardrail", "--non-interactive", "--no-restart"], obj=self.app)
-        available.assert_called_once_with("openclaw")
-        self.assertEqual(self.app.cfg.guardrail.connector, "openclaw")
-
 
 if __name__ == "__main__":
     unittest.main()

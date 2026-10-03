@@ -6550,9 +6550,7 @@ def setup_guardrail(
         target_connector = explicit_connector or ""
         if explicit_connector:
             target_connector = explicit_connector
-        elif (not gc.connector or gc.connector == "openclaw") and not _guarded_proxy_connector(gc):
-            # A guarded OpenClaw is a real choice, not the historical default:
-            # a stale picked_connector hint must not switch it (GAP-2455).
+        elif not gc.connector or gc.connector == "openclaw":
             picked = _read_picked_connector(getattr(app.cfg, "data_dir", None))
             if picked:
                 target_connector = normalize_connector(picked)
