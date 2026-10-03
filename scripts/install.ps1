@@ -569,13 +569,15 @@ function Wait-BeforeClose([int]$Code) {
 # -- Existing install ---------------------------------------------------------
 
 function Get-InstalledVersion {
-    $info = Get-ChildItem -LiteralPath (Join-Path $Venv "Lib\site-packages") -Filter "defenseclaw-*.dist-info" `
-        -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($info) { return $info.Name -replace '^defenseclaw-', '' -replace '\.dist-info$', '' }
+    # The gateway on PATH is the install that runs; a source install leaves an
+    # older release venv behind, so its version is only the fallback (GAP-2454).
     $gateway = Join-Path $BinDir "defenseclaw-gateway.exe"
     if ((Test-Path -LiteralPath $gateway) -and (Get-NativeOutput $gateway @("--version")) -match '\d+\.\d+\.\d+') {
         return $Matches[0]
     }
+    $info = Get-ChildItem -LiteralPath (Join-Path $Venv "Lib\site-packages") -Filter "defenseclaw-*.dist-info" `
+        -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($info) { return $info.Name -replace '^defenseclaw-', '' -replace '\.dist-info$', '' }
     return ""
 }
 
