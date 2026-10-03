@@ -332,6 +332,7 @@ def _toggle_connector_guardrail(
             app.cfg.gateway.host,
             app.cfg.gateway.port,
             connector=key,
+            teardown=not enable,
         )
         ux.ok(f"{label} connector {action} complete", indent="  ")
         click.echo()
@@ -911,7 +912,9 @@ def disable_cmd(
             app.cfg.gateway.host,
             app.cfg.gateway.port,
             connector=connector,
-            connectors=_active_connector_set(app.cfg, connector),
+            connectors=_actives,
+            summary_exclude=frozenset(_already_off),
+            teardown=True,
         )
         # In a multi-connector install the gateway boot loop tears down
         # every active connector on restart, so report them all rather
