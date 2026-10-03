@@ -122,6 +122,13 @@ func gatewayExitedBeforeReadinessError(err error, logPath string, offset int64) 
 // 'line 9: guardrail.mdoe: unknown field (did you mean "mode"?)', instead of the raw schema
 // diagnostic (GAP-1914, GAP-1990).
 func configSchemaProblem(err error) (string, bool) {
+	var yamlErr *config.V8YAMLError
+	if errors.As(err, &yamlErr) && yamlErr.Code == config.V8YAMLErrorDuplicateKey &&
+		yamlErr.Line > 0 && yamlErr.FirstLine > 0 && strings.HasPrefix(yamlErr.Path, "$.") {
+		// A second section header with the same name (GAP-2188).
+		return fmt.Sprintf("%s line %d: %s appears twice; the first one is at line %d. Merge them into one",
+			config.ConfigPath(), yamlErr.Line, strings.TrimPrefix(yamlErr.Path, "$."), yamlErr.FirstLine), true
+	}
 	var schemaErr *config.V8SchemaError
 	if !errors.As(err, &schemaErr) {
 		return "", false

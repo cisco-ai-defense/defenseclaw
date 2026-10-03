@@ -200,11 +200,11 @@ func TestGatewayStatusWrongTypeValueStillFindsGateway(t *testing.T) {
 }
 
 func TestYAMLWithoutPath(t *testing.T) {
-	out, ok := yamlWithoutPath([]byte("a:\n  b: 1\n  c: [x, y]\n"), "$.a.c[0]")
+	out, ok := yamlWithoutPath([]byte("a:\n  b: 1\n  c: [x, y]\n"), "$.a.c[0]", 0)
 	if !ok || strings.Contains(string(out), "x") || !strings.Contains(string(out), "b: 1") {
 		t.Fatalf("yamlWithoutPath = %q, %v", out, ok)
 	}
-	if _, ok := yamlWithoutPath([]byte("a: 1\n"), "$.missing"); ok {
+	if _, ok := yamlWithoutPath([]byte("a: 1\n"), "$.missing", 0); ok {
 		t.Error("a missing path was removed")
 	}
 }
@@ -217,6 +217,11 @@ func TestGatewayStatusUnknownKeyStillFindsGateway(t *testing.T) {
 		"top-level key": {"bogus_top_v2173: 1\n", "bogus_top_v2173: unknown field"},
 		"typo of mode":  {"guardrail:\n  mdoe: action\n", `guardrail.mdoe: unknown field (did you mean "mode"?)`},
 		"key plus type": {"guardrail:\n  bogus_key_v2173: 1\n  enabled: maybe\n", "guardrail.enabled: expected a value of type boolean"},
+		// Two undeclared keys name the first one, not its section (GAP-2173).
+		"two top-level keys": {"bogus_x: 1\nbogus_y: 2\n", "line 6: bogus_x: unknown field"},
+		"two typos":          {"guardrail:\n  mdoe: observe\n  scaner_mode: local\n", `line 7: guardrail.mdoe: unknown field (did you mean "mode"?)`},
+		// A second section of the same name keeps the first (GAP-2188).
+		"duplicate section": {"gateway:\n  api_port: 19999\n", "line 6: gateway appears twice; the first one is at line 3. Merge them into one"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			home := t.TempDir()
@@ -240,7 +245,7 @@ func TestGatewayStatusUnknownKeyStillFindsGateway(t *testing.T) {
 				t.Fatalf("relaxed config = %+v (load error %v)", relaxed, loadErr)
 			}
 			msg := gatewayStatusConfigLoadError(loadErr).Error()
-			if !strings.Contains(msg, tc.want) || strings.Contains(msg, "additionalProperties") {
+			if !strings.Contains(msg, tc.want) || strings.Contains(msg, "additionalProperties") || strings.Contains(msg, "yaml_duplicate_key") {
 				t.Errorf("status error %q does not contain %q in plain words", msg, tc.want)
 			}
 		})

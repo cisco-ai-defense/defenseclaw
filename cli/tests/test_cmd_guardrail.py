@@ -1003,7 +1003,7 @@ class PerConnectorFailModeTests(unittest.TestCase):
         self.assertEqual(app.cfg.guardrail.connectors["codex"].hook_fail_mode, "open")
         self.assertEqual(app.cfg.guardrail.effective_hook_fail_mode("cursor"), "closed")
         self.assertIn("stays closed", result.output)
-        self.assertIn("1 active connector overrides = open; Cursor stays closed)", result.output)
+        self.assertIn("1 connector overrides = open; Cursor stays closed)", result.output)
 
         result = runner.invoke(cmd_guardrail.fail_mode_cmd, ["open", "--connector", "cursor", "--yes"], obj=app)
         self.assertEqual(result.exit_code, 1, msg=result.output)

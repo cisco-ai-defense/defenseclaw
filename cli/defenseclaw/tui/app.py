@@ -47,6 +47,7 @@ from defenseclaw.tui.command_line import (
     command_result_summary,
     infer_command_risk,
     is_command_hint,
+    is_listing_detail,
     parse_command_line,
     suggested_next_action,
 )
@@ -8452,7 +8453,13 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             result = result or command_result_summary(self._strip_label, self._strip_output_lines)
             if result:
                 self._strip_summary = result
-            elif tail and len(tail) <= 120 and not _is_bare_json_punctuation(tail) and not is_command_hint(tail):
+            elif (
+                tail
+                and len(tail) <= 120
+                and not _is_bare_json_punctuation(tail)
+                and not is_command_hint(tail)
+                and not is_listing_detail(tail)
+            ):
                 self._strip_summary = tail
             else:
                 self._strip_summary = "exit 0 · finished cleanly"
@@ -8878,6 +8885,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         enf_selected = selected_connector
         if enf_selected:
             calls_n, alert_n, block_n = self._enforcement_connector_breakdown(enf_selected)
+            # Same count as the Alerts panel in this scope, not only the
+            # hook "alert" verdicts: blocks with findings read "Alerts 0"
+            # next to "Critical 8" (GAP-2183).
+            alert_n = self._connector_alert_count(enf_selected, alert_n)
             alerts_color = TOKENS.accent_red if alert_n else TOKENS.accent_green
             enf_table.add_row(
                 Text("Alerts", style=TOKENS.text_secondary),
@@ -9852,6 +9863,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             # lazily, so show "scan pending" + trigger a one-shot load).
             self._request_enforcement_inventory(enf_selected)
             calls_n, alert_n, block_n = self._enforcement_connector_breakdown(enf_selected)
+            alert_n = self._connector_alert_count(enf_selected, alert_n)  # GAP-2183
             alert_color = TOKENS.accent_red if alert_n else TOKENS.accent_green
             block_color = TOKENS.accent_red if block_n else TOKENS.text_secondary
             selected_scan = self._connector_scan_metrics(enf_selected)

@@ -114,6 +114,7 @@ from defenseclaw.doctor_gateway import (
     trusted_lsof_path,
 )
 from defenseclaw.doctor_hooks import (
+    CODEX_PROBE_TIMEOUT_STATE,
     WindowsHookCheck,
     _packaged_windows_install_root,
     validate_windows_copilot_hook_registration,
@@ -4623,8 +4624,14 @@ def _check_windows_native_hooks(
     )
     if connector == "hermes":
         check = _hermes_idle_native_check(check, r)
+    if check.state == CODEX_PROBE_TIMEOUT_STATE:
+        _emit("warn", label, f"{check.state}: {check.detail}", r=r, remediation=_CODEX_PROBE_TIMEOUT_STEP)
+        return
     status = "pass" if check.healthy else "fail"
     _emit(status, label, f"{check.state}: {check.detail}", r=r)
+
+
+_CODEX_PROBE_TIMEOUT_STEP = "rerun defenseclaw doctor in a minute; Codex answers faster once the host is less busy"
 
 
 def _windows_native_hook_check(
@@ -6901,7 +6908,14 @@ def _hermes_idle_native_check(check: WindowsHookCheck, r: _DoctorResult) -> Wind
     is nothing to reload. --passive does not list processes and keeps the
     pending-reload state.
     """
-    if check.state != "pending-reload" or r.passive or _hermes_host_running() is not False:
+    if check.state != "pending-reload" or r.passive:
+        return check
+    running = _hermes_host_running()
+    if running is None:
+        # The process listing can time out right after an upgrade on a busy
+        # host; one retry keeps a transient probe from failing doctor (GAP-2190).
+        running = _hermes_host_running()
+    if running is not False:
         return check
     detail = check.detail.split("; running Hermes", 1)[0]
     return WindowsHookCheck(
@@ -8883,8 +8897,9 @@ def _verify_bedrock(api_key: str, r: _DoctorResult, *, key_env: str = "DEFENSECL
     * ``AKIA…``  → SigV4 credentials; we can't verify without signing,
                   which would pull in botocore just for the doctor.
                   Emit a ``warn`` pointing at ``aws sts get-caller-identity``.
-    * anything else → shape we don't recognize; pass with a note, same
-                      as the generic fallback in ``_check_llm_api_key``.
+    * anything else → not a Bedrock key shape; warn with a next step
+                      (Bedrock rejects it with "Must start with pre-defined
+                      prefix", GAP-2195), and don't probe it.
 
     The foundation-models list endpoint is a cheap GET that returns
     the list of models enabled for the account. ``200`` confirms auth
@@ -8901,10 +8916,15 @@ def _verify_bedrock(api_key: str, r: _DoctorResult, *, key_env: str = "DEFENSECL
         return
     if not api_key.startswith(("ABSK", "bedrock-api-key-")):
         _emit(
-            "pass",
+            "warn",
             "LLM API key (Bedrock)",
-            f"key is set ({len(api_key)} chars) but is not a Bedrock API key format doctor knows, so it is not checked",
+            f"key is set ({len(api_key)} chars) but does not look like a Bedrock API key "
+            "(ABSK... or bedrock-api-key-...), so it is not checked",
             r=r,
+            remediation=(
+                f"replace it: defenseclaw keys set {key_env} --value-stdin "
+                "(or defenseclaw setup llm), then defenseclaw-gateway restart"
+            ),
         )
         return
     region = _bedrock_region()
@@ -12506,6 +12526,8 @@ def _check_hook_contract_lock(
         action = "re-seal" if windows_protected_authority_invalid else "seal"
         detail += f"; run `{setup_command(connector)} --yes` to {action} it"
         _emit("fail", "Hook contract", detail, r=r)
+    elif native_runtime is not None and native_runtime.state == CODEX_PROBE_TIMEOUT_STATE:
+        _emit("warn", "Hook contract", detail, r=r, remediation=_CODEX_PROBE_TIMEOUT_STEP)
     elif native_runtime is not None and not native_runtime.healthy:
         _emit("fail", "Hook contract", detail, r=r)
     elif status == "unknown":

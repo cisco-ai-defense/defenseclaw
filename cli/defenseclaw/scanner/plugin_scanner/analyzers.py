@@ -38,6 +38,7 @@ from defenseclaw.scanner.plugin_scanner.helpers import (
     inspect_path_link,
     is_comment_line,
     is_test_path,
+    js_call_view,
     make_finding,
     python_source,
     sanitise_evidence,
@@ -581,7 +582,7 @@ def scan_source_files(
         _check_for_hardcoded_secrets(lines, rel_path, findings, in_test)
         _check_for_credential_access(code_lines, rel_path, findings, capabilities, in_test)
         _check_for_exfiltration(lines, content, rel_path, findings, capabilities, in_test)
-        _check_for_ssrf(code_lines, rel_path, findings, in_test, call_lines, py)
+        _check_for_ssrf(code_lines, rel_path, findings, in_test, call_lines, py, None if is_py else content)
         if not is_py:
             # import()/require()/spawn() and the gateway rules are JavaScript
             # shapes; on Python they match ``from x import (`` and prose.
@@ -1247,16 +1248,22 @@ def _check_for_ssrf(
     in_test_path: bool,
     call_lines: list[str] | None = None,
     py: PySource | None = None,
+    content: str | None = None,
 ) -> None:
     calls = call_lines if call_lines is not None else code_lines
+    js: list[tuple[list[str], list[tuple[int, ...]]]] = []
 
     def in_network_call(i: int) -> bool:
         # The call must be code, not text in a string (an example URL in a
-        # help message): on this line or, in Python, on the line opening any
-        # bracket the line sits in (a multi-line call); elsewhere the line
-        # before (GAP-2068, GAP-2125).
+        # help message): on this line or on the line opening any bracket
+        # the line sits in (a multi-line call) (GAP-2068, GAP-2125).
         if py is not None:
             context = [calls[o] for o in py.openers(i)] + [calls[i]]
+        elif content is not None:
+            if not js:
+                js.append(js_call_view(content))
+            js_calls, js_openers = js[0]
+            context = [js_calls[o] for o in js_openers[i]] + [js_calls[i]] if i < len(js_calls) else []
         else:
             context = calls[max(i - 1, 0) : i + 1]
         return NETWORK_CALL_PATTERN.search("\n".join(context)) is not None

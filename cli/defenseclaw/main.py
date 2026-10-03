@@ -213,7 +213,9 @@ def _emit_version_json(ctx: click.Context, _param: click.Parameter | None, value
     ctx.exit()
 
 
-@click.group()
+# -h is the short form of --help on every command, as on defenseclaw-gateway
+# (GAP-2170). Child contexts inherit help_option_names from this group.
+@click.group(context_settings={"help_option_names": ["-h", "--help"]})
 @click.version_option(version=__version__, prog_name="defenseclaw")
 @click.option(
     "--version-json",

@@ -275,13 +275,16 @@ _MANIFEST_CANDIDATES: tuple[tuple[str, str], ...] = (
     # for stability; none takes precedence over another in practice
     # because each lives in a distinct plugin layout.
     ("openclaw.plugin.json", "openclaw.plugin.json"),
-    # Hermes plugins declare themselves in a YAML plugin.yaml (name,
-    # version, description, kind); it has no permissions field.
-    ("plugin.yaml", "plugin.yaml"),
-    ("plugin.yml", "plugin.yml"),
     (os.path.join(".claude-plugin", "plugin.json"), "claude.plugin.json"),
     (os.path.join(".codex-plugin", "plugin.json"), "codex.plugin.json"),
     (os.path.join(".cursor-plugin", "plugin.json"), "cursor.plugin.json"),
+    # Hermes plugins declare themselves in a YAML plugin.yaml (name,
+    # version, description, kind); it has no permissions field. It comes
+    # last: a plugin.yaml-primary plugin is treated as loaded by a Python
+    # host, so an extra plugin.yaml must not shadow the manifest a Claude
+    # Code, Codex or Cursor plugin is loaded from (GAP-2196).
+    ("plugin.yaml", "plugin.yaml"),
+    ("plugin.yml", "plugin.yml"),
 )
 
 
