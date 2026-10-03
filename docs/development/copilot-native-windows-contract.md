@@ -94,7 +94,8 @@ official-client validation must confirm the effective order before any live
 evidence or certification claim can be recorded.
 
 The official read-only inventory command is
-`copilot plugins list --kind plugin --json`. DefenseClaw uses it only to
+`copilot plugin list --json` (older Copilot CLIs: `copilot plugins list --kind
+plugin --json`, used as a fallback). DefenseClaw uses it only to
 discover Copilot-owned plugins. It does not install, enable, disable, remove,
 back up, or restore plugins through that command.
 

@@ -1293,6 +1293,14 @@ def _connector_has_server(app: AppContext, connector: str, name: str) -> bool:
     return any(s.name == name for s in _collect_mcps_for_connector(app, connector))
 
 
+def _connector_has_server_quiet(app: AppContext, connector: str, name: str) -> bool:
+    """Like :func:`_connector_has_server`, but an unreadable config means no."""
+    try:
+        return _connector_has_server(app, connector, name)
+    except Exception:  # noqa: BLE001 — only picks the Added/Updated wording.
+        return False
+
+
 def _connector_owns_mcp_target(app: AppContext, connector: str, target: str) -> bool:
     """True when *connector* registers *target* as an MCP name or URL."""
     return any(
@@ -2391,6 +2399,7 @@ def set_server(
     scan_rejected: list[str] = []    # rejected by scan-findings policy
     invalid_input: list[str] = []    # opencode name/command failed validation
     write_failed: list[tuple[str, Exception]] = []  # unexpected write error
+    updated: list[str] = []          # applied connectors that already had it
     for c in connectors:
         pre_c = pre[c]
         if pre_c.verdict == "blocked":
@@ -2452,11 +2461,14 @@ def set_server(
                 continue
             allow_record = post_c.action.install == "allow"
         try:
+            existed = _connector_has_server_quiet(app, c, name)
             _set_mcp_via_connector(app.cfg, name, entry, connector=c)
             applied.append(c)
             note_asset_policy_observed(
                 app.logger, pre_c, target_type="mcp", name=name, connector=c,
             )
+            if existed:
+                updated.append(c)
             if allow_record:
                 pe.allow_for_connector("mcp", name, c, "scan clean or within policy")
         except connector_paths.MCPWriteUnsupportedError as exc:
@@ -2515,19 +2527,22 @@ def set_server(
     not_applied_suffix = (
         f" ({len(not_applied)} not applied: {', '.join(not_applied)})" if not_applied else ""
     )
+    # GAP-2417: re-setting an existing server name is an update, not an add.
+    verb = "Updated" if len(updated) == len(applied) else "Added"
+    if updated and verb == "Added":
+        not_applied_suffix += f" (updated: {', '.join(updated)})"
     if len(applied) > 1:
+        prep = "on" if verb == "Updated" else "to"
         click.secho(
-            f"[mcp] Added {name!r} to {len(applied)} connectors: "
+            f"[mcp] {verb} {name!r} {prep} {len(applied)} connectors: "
             f"{', '.join(applied)}{not_applied_suffix}.",
             fg="green",
         )
-    elif not_applied:
+    else:
         click.secho(
-            f"[mcp] Added {name!r} ({applied[0]}){not_applied_suffix}.",
+            f"[mcp] {verb} {name!r} ({applied[0]}){not_applied_suffix}.",
             fg="green",
         )
-    else:
-        click.secho(f"[mcp] Added {name!r} ({applied[0]}).", fg="green")
 
     if app.logger:
         saved_change_audit(app.logger).log_action(
