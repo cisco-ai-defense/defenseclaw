@@ -368,6 +368,19 @@ func describeSecretChange(result *enterprisestatus.Result, action, name string, 
 			change = "credential " + name + " was not stored; nothing to remove"
 		}
 	}
+	if result.Noop && result.NoopReason == "not_installed" {
+		// Stored before the first install, a documented step: the
+		// headline says the change was stored, not "nothing to do" with a
+		// warning (GAP-2353). The JSON document keeps the noop and warning.
+		shown.Noop, shown.NoopReason = false, ""
+		shown.Warnings = nil
+		for _, warning := range result.Warnings {
+			if warning.Code != "not_installed" {
+				shown.Warnings = append(shown.Warnings, warning)
+			}
+		}
+		change += "; DefenseClaw enterprise is not installed yet, so the first install applies it"
+	}
 	shown.Changes = append([]string{change}, result.Changes...)
 	return &shown
 }

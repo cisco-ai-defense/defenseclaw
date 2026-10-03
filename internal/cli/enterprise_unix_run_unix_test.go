@@ -352,6 +352,26 @@ func TestSecretChangeOutputNamesTheCommandAndCredential(t *testing.T) {
 	}
 }
 
+// secret set before the first install stored the credential but headlined
+// "! secret set: nothing to do (not_installed), 1 warning" (GAP-2353).
+func TestSecretSetBeforeInstallSaysStored(t *testing.T) {
+	result := enterprisestatus.New(enterpriseunix.ActionEnsure, "standalone", "darwin", "1.0.0")
+	result.OK = true
+	result.Noop, result.NoopReason = true, "not_installed"
+	result.AddWarning("not_installed", "DefenseClaw enterprise is not installed yet; the change is stored and the first install applies it")
+	var out bytes.Buffer
+	if err := printLifecycleResult(&out, describeSecretChange(result, "set", "dctest-cred", false), false); err != nil {
+		t.Fatal(err)
+	}
+	want := "✓ secret set: done\n  - stored credential dctest-cred; DefenseClaw enterprise is not installed yet, so the first install applies it\n"
+	if out.String() != want {
+		t.Fatalf("output = %q, want %q", out.String(), want)
+	}
+	if !result.Noop || len(result.Warnings) != 1 {
+		t.Fatalf("the JSON result changed: %+v", result)
+	}
+}
+
 // GAP-2329: a malformed --lock-wait gives examples inside the 15m cap, and
 // the cap error names the value as typed ("not 1h", not "not 60m").
 func TestUnixLifecycleLockWaitMessagesStayInsideTheCap(t *testing.T) {
