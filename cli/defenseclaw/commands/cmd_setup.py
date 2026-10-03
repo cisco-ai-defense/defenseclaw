@@ -4431,9 +4431,13 @@ def setup_gateway(
     # succeed until then, and the gateway may be down precisely because the
     # old port was taken.
     api_port_changed = gw.api_port != previous_api_port
+    # A gateway that was never started (or was stopped) has nothing to
+    # verify yet and cannot record the audit event; the change applies when
+    # it starts (GAP-2009).
+    gateway_stopped = not api_port_changed and not _is_pid_alive(os.path.join(data_dir, "gateway.pid"))
     _print_gateway_summary(gw, openclaw=uses_openclaw)
 
-    if verify and not api_port_changed:
+    if verify and not api_port_changed and not gateway_stopped:
         from defenseclaw.commands.cmd_doctor import _check_openclaw_gateway, _check_sidecar, _DoctorResult
 
         ux.section("Verifying gateway connectivity")
@@ -4456,13 +4460,16 @@ def setup_gateway(
         # the sidecar has started. Suppress only definite runtime
         # unavailability; server rejections and every other admission failure
         # remain fatal through _log_setup_action.
-        allow_offline=not verify or api_port_changed,
+        allow_offline=not verify or api_port_changed or gateway_stopped,
         # The start hint follows from the setup restart step; say only what
         # the missing gateway means for this change.
         offline_note=(
             "  Note: nothing listens on the new API port until the gateway restarts, so this change "
             "was not written to the audit log."
             if api_port_changed
+            else "  Note: the gateway isn't running, so this change takes effect when it starts and was not "
+            "written to the audit log. Start it with: defenseclaw-gateway start"
+            if gateway_stopped
             else "  Note: the gateway could not be reached, so this change was not written to the audit log."
         ),
     )
@@ -13780,6 +13787,9 @@ def _restart_services(
 
     connector_registration_verified = False
     connector_runtime_pending_reload = False
+    # Peers the restarted gateway refused: setup skipped them, so they are
+    # not guarded now and the closing roster line leaves them out (GAP-2013).
+    runtime_skipped: frozenset[str] = frozenset()
     if wait_for_connector_ready and wait_targets and gateway_restarted:
         readiness_label = "DefenseClaw gateway registration" if "omnigent" in wait_targets else "connector runtime"
         click.echo(f"  {readiness_label}: waiting for verified setup...", nl=False)
@@ -13806,7 +13816,8 @@ def _restart_services(
             # old process that remained reachable while runtime files changed.
             # A peer the restarted gateway refused was skipped by the runtime
             # wait; the API never reports it running either (GAP-1710).
-            not_expected = unverified_peers | getattr(readiness, "skipped", frozenset())
+            runtime_skipped = frozenset(getattr(readiness, "skipped", frozenset()))
+            not_expected = unverified_peers | runtime_skipped
             if not _wait_for_defense_gateway_api(
                 data_dir,
                 previous_generation=gateway_generation_before,
@@ -13848,8 +13859,9 @@ def _restart_services(
         click.echo()
         _fail_if_restart_failed(failed)
     if connector != "openclaw" and len(hook_multi) > 1:
-        names = ", ".join(sorted(c for c in hook_multi if c not in summary_exclude))
-        shown = [c for c in hook_multi if c not in summary_exclude]
+        excluded = summary_exclude | runtime_skipped
+        names = ", ".join(sorted(c for c in hook_multi if c not in excluded))
+        shown = [c for c in hook_multi if c not in excluded]
         roster = f"{_count_label(len(shown))} ({names})"
         if "omnigent" in hook_multi:
             registration_state = (
@@ -13858,7 +13870,7 @@ def _restart_services(
                 else "DefenseClaw gateway registration is not verified"
             )
             ux.subhead(
-                f"{len(hook_multi)} hook/policy connectors ({names}): {registration_state} "
+                f"{len(shown)} hook/policy connectors ({names}): {registration_state} "
                 "on the sidecar API port; OmniGent loaded policy generation "
                 "remains unverified pending reload/restart. No proxy listener — each talks directly "
                 "to its native upstream."

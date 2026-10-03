@@ -193,8 +193,9 @@ func (m *Manager) ObserveHookDecision(d HookDecision) {
 		// session: the feed shows every one.
 		what := firstNonEmpty(d.Tool, d.Event, "a hook event")
 		msg := "⚠ " + what + " allowed but flagged by DefenseClaw"
-		if reason != "" {
-			msg = "⚠ " + what + ": " + truncate(reason, 300)
+		if label := sandboxapi.VerdictRuleLabel(reason); label != "" {
+			// The rule, not the reason's sentence to the agent (GAP-2018).
+			msg += ": " + truncate(label, 200)
 		}
 		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityFinding, Sandbox: d.SandboxName, Tool: d.Tool,
 			Event: d.Event, Severity: severity, Reason: sandboxapi.ReasonHookFinding, Message: msg})
