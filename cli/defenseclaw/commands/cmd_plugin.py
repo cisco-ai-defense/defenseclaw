@@ -479,7 +479,7 @@ def _scan_one_plugin_dir(
         click.echo(f"error: scan failed: {exc}", err=True)
         raise SystemExit(1)
 
-    _record_scan(app.logger, result)
+    _record_scan(app.logger, result, connector=connector or None)
 
     if as_json:
         # Preserve the ScanResult keys automation already parses, while adding
@@ -1197,7 +1197,7 @@ def _scan_all_plugins(
                 if not as_json:
                     click.echo(f"  error: scan failed for {pid!r}: {exc}", err=True)
                 continue
-            _record_scan(app.logger, result)
+            _record_scan(app.logger, result, connector=connector or None)
             if as_json:
                 payload = json.loads(result.to_json())
                 payload["connector"] = connector
@@ -1533,8 +1533,8 @@ def install(app: AppContext, name_or_path: str, force: bool, take_action: bool, 
             raise
 
         if app.logger:
-            for result in scan_results.values():
-                saved_change_audit(app.logger).log_scan(result)
+            for scanned_connector, result in scan_results.items():
+                saved_change_audit(app.logger).log_scan(result, connector=scanned_connector)
         transaction.finalize()
         if deferred_enforcement_failure:
             raise SystemExit(1)
@@ -1916,7 +1916,7 @@ def _scan_installed_plugin_for_connector(
 
     if post_decision.verdict == "allowed":
         if app.logger and not defer_scan_log:
-            saved_change_audit(app.logger).log_scan(result)
+            saved_change_audit(app.logger).log_scan(result, connector=connector)
         click.echo(
             f"[install] {plugin_name!r} became allow-listed for connector={connector} — skipping post-scan enforcement"
         )
@@ -1931,7 +1931,7 @@ def _scan_installed_plugin_for_connector(
 
     if post_decision.verdict == "clean":
         if app.logger and not defer_scan_log:
-            saved_change_audit(app.logger).log_scan(result)
+            saved_change_audit(app.logger).log_scan(result, connector=connector)
         click.echo(f"[install] {plugin_name!r} installed and clean (connector={connector})")
         pe.set_source_path("plugin", plugin_name, plugin_path, connector)
         if app.logger:
@@ -1972,7 +1972,7 @@ def _scan_installed_plugin_for_connector(
             f"(connector={connector}; no action taken — pass --action to enforce)"
         )
         if app.logger and not defer_scan_log:
-            saved_change_audit(app.logger).log_scan(result)
+            saved_change_audit(app.logger).log_scan(result, connector=connector)
         pe.set_source_path("plugin", plugin_name, plugin_path, connector)
         if app.logger:
             saved_change_audit(app.logger).log_action("install-warning", plugin_name, detail)
@@ -1980,7 +1980,7 @@ def _scan_installed_plugin_for_connector(
 
     action_cfg = post_decision.action
     if app.logger and not defer_scan_log:
-        saved_change_audit(app.logger).log_scan(result)
+        saved_change_audit(app.logger).log_scan(result, connector=connector)
     enforcement_reason = f"post-install scan: {len(result.findings)} findings, max={sev}"
     applied_actions: list[str] = []
 
