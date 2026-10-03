@@ -29,12 +29,17 @@ const lockFileName = "lifecycle.lock"
 // errLockBusy reports that another lifecycle run holds the lock.
 var errLockBusy = errors.New("another DefenseClaw enterprise lifecycle run is in progress")
 
-// verifyBusyNextStep is what an administrator does about errLockBusy on
-// verify, which has no --lock-wait.
-const verifyBusyNextStep = "wait for it to finish, then rerun verify"
-
-// statusBusyNextStep is the same for status (GAP-2246).
-const statusBusyNextStep = "wait for it to finish, then rerun status"
+// readOnlyBusyNextStep is what an administrator does about errLockBusy on
+// verify or status, which have no --lock-wait. It names the wait this run
+// already did, as lockBusyNextStep does (GAP-2409); status also says why it
+// checked nothing (GAP-2246).
+func readOnlyBusyNextStep(waited time.Duration, action string) string {
+	next := "waited " + FormatLockWait(waited) + " for it; "
+	if action == ActionStatus {
+		next += "it may be stopping or restarting the services, so status checked nothing but the installed version; "
+	}
+	return next + "wait for it to finish, then rerun " + action
+}
 
 // lockBusyNextStep is what an administrator does about errLockBusy on an
 // action that takes --lock-wait. It names the wait this run already did, so

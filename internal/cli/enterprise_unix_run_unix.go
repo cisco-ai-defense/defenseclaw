@@ -232,6 +232,11 @@ func printLifecycleResult(w io.Writer, result *enterprisestatus.Result, asJSON b
 			fmt.Fprintf(w, "  %-46s %s\n", service.Name, service.State)
 		}
 	}
+	// A busy status checked nothing else, but still reports the recorded
+	// deployment's version, as the docs say (GAP-2409).
+	if result.Action == enterpriseunix.ActionStatus && result.Installed && lifecycleResultHasError(result, "lifecycle_busy") {
+		fmt.Fprintf(w, "  installed=true version=%s\n", result.InstalledVersion)
+	}
 	return nil
 }
 

@@ -117,11 +117,13 @@ def test_failed_doctor_drawer_names_the_check() -> None:
 def _service_names(app: DefenseClawTUI, width: int) -> set[str]:
     console = Console(width=width, record=True, color_system=None, file=io.StringIO())
     console.print(app._overview_renderable())  # noqa: SLF001
-    return {
+    names = {
         line[1:].split("│")[0][1:].lstrip("●○ ").split("  ")[0].strip()
         for line in console.export_text().splitlines()
         if line.startswith(("│ ●", "│ ○"))
     }
+    # At 80 columns one space follows "AI Discovery" (GAP-2412).
+    return {"AI Discovery" if name.startswith("AI Discovery") else name for name in names}
 
 
 @pytest.mark.parametrize("width", [160, 80])

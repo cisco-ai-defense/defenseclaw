@@ -63,3 +63,31 @@ func TestFailedPkgInstallVerifyNextStepsAgree(t *testing.T) {
 		t.Fatalf("unmanaged_leftovers warning = %q, want it to defer to the %s advice", leftovers, codePackageInstallFailed)
 	}
 }
+
+// GAP-2410: uninstall (no --purge) after a failed first pkg install found
+// nothing to remove and still said to activate the deployment with `ensure
+// --from-package --config <file>`; it gives the finish step status and
+// verify give: install the pkg again, for its receipt.
+func TestFailedPkgInstallUninstallNoopNextStepsAgree(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	dir := h.env.P(h.env.Layout.LifecycleDir)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	last := `{"ok":false,"action":"ensure","errors":[{"code":"config_invalid","message":"rule pack missing"}]}`
+	if err := os.WriteFile(filepath.Join(dir, lastPackageResultFile), []byte(last), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeHostFile(t, h, h.env.Layout.DescriptorPath, "{}")
+	r := h.run(Options{Action: ActionUninstall})
+	if !r.Noop || r.NoopReason != "not_installed" {
+		t.Fatalf("uninstall noop=%v reason=%q, want a not_installed no-op", r.Noop, r.NoopReason)
+	}
+	if failed := messagesOf(r.Warnings, codePackageInstallFailed); !strings.Contains(failed, "install the package again") {
+		t.Fatalf("package_install_failed warning = %q", failed)
+	}
+	leftovers := messagesOf(r.Warnings, codeLeftovers)
+	if leftovers == "" || strings.Contains(leftovers, "--config <file>") || !strings.Contains(leftovers, "as the "+codePackageInstallFailed+" warning says") {
+		t.Fatalf("unmanaged_leftovers warning = %q, want it to defer to the %s advice", leftovers, codePackageInstallFailed)
+	}
+}
