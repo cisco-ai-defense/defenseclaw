@@ -318,10 +318,12 @@ class TestAlertsCommand(unittest.TestCase):
         from defenseclaw.commands.cmd_alerts import alerts
         self._seed_two_connectors()
 
-        result = self.runner.invoke(alerts, ["--no-tui", "--connector", "nope"],
+        # A known connector without alerts; an unknown name exits 1 (GAP-2130,
+        # covered in test_alerts_connector_ux_b2.py).
+        result = self.runner.invoke(alerts, ["--no-tui", "--connector", "cursor"],
                                     obj=self.app, catch_exceptions=False)
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("No alerts from connector 'nope'", result.output)
+        self.assertIn("No alerts from connector 'cursor'", result.output)
 
     def test_alerts_connector_filter_show_indexes_filtered_set(self):
         from defenseclaw.commands.cmd_alerts import alerts
