@@ -788,7 +788,7 @@ a[data-card='true'].editorial-card:focus-visible {
   box-shadow: none !important;
 }
 
-.editorial-card > h3 {
+.editorial-card > .editorial-card-title {
   font-size: 0.92rem !important;
   font-weight: 650 !important;
   letter-spacing: -0.012em;
@@ -2010,7 +2010,9 @@ article#nd-page .prose :where(code):not(pre code) {
   inset: 0;
   z-index: -1;
   transform-origin: left;
-  background: color-mix(in oklab, currentcolor 4%, transparent);
+  /* Strong enough to read on the theme's own code background, so the line
+   * an evidence arrow points at is visibly marked. */
+  background: color-mix(in oklab, currentcolor 12%, transparent);
   border-right: 2px solid currentcolor;
 }
 
@@ -2626,4 +2628,89 @@ pre,
 kbd,
 samp {
   font-variant-ligatures: none;
+}
+
+/* Docs-wide QA fixes ---------------------------------------------------- */
+
+/* Scroll cue: edge shadows on any box that scrolls sideways, drawn with the
+ * box's own surface colour so they only show while there is more content in
+ * that direction (the `local` covers move with the content). Tables, code
+ * blocks and the terminal animation use it. */
+.dc-scroll-cue {
+  --cue-bg: var(--color-fd-background);
+  --cue-shadow: color-mix(in oklab, var(--color-fd-foreground) 24%, transparent);
+  background:
+    linear-gradient(to right, var(--cue-bg) 35%, transparent) left center / 2.25rem 100% no-repeat local,
+    linear-gradient(to left, var(--cue-bg) 35%, transparent) right center / 2.25rem 100% no-repeat local,
+    radial-gradient(farthest-side at 0 50%, var(--cue-shadow), transparent) left center / 0.8rem 100% no-repeat scroll,
+    radial-gradient(farthest-side at 100% 50%, var(--cue-shadow), transparent) right center / 0.8rem 100% no-repeat scroll;
+  background-color: var(--cue-bg);
+}
+
+figure.shiki .dc-scroll-cue {
+  --cue-bg: var(--color-fd-card);
+}
+
+figure.shiki.bg-fd-secondary .dc-scroll-cue {
+  --cue-bg: var(--color-fd-secondary);
+}
+
+.terminal-window .dc-scroll-cue {
+  --cue-bg: var(--term-bg);
+  --cue-shadow: rgb(0 0 0 / 0.6);
+}
+
+/* The table's own fill would hide the scroll cue drawn on its box. */
+.responsive-table > .dc-scroll-cue > table {
+  background-color: transparent;
+}
+
+/* Wide tables: a one-line hint above, in the diagram scroll hint's voice. */
+.responsive-table-hint {
+  margin: 0 0 0.4rem !important;
+  color: var(--color-fd-muted-foreground);
+  font-size: 0.76rem;
+  line-height: 1.45;
+}
+
+.responsive-table > [role='group']:focus-visible {
+  outline: 2px solid var(--color-fd-ring);
+  outline-offset: 2px;
+}
+
+/* Untitled code blocks: the copy button floats over the top-right corner, so
+ * keep a gutter there and the first line never runs under it. */
+figure.shiki:not(:has(figcaption)) > .fd-scroll-container {
+  margin-inline-end: 2.25rem;
+}
+
+/* Blank lines in a code block are empty flex items with no height, so
+ * `text` output lost its paragraph breaks. Give every line one line box. */
+figure.shiki pre > code > .line {
+  min-height: 1lh;
+}
+
+/* Inline code (InlineCode in mdx-components.tsx): short chips such as
+ * `--json` never break at a hyphen; long paths and URLs may break anywhere
+ * rather than overflow a phone screen. */
+article#nd-page :not(pre) > code[data-inline='short'] {
+  white-space: nowrap;
+}
+
+article#nd-page :not(pre) > code[data-inline='long'] {
+  overflow-wrap: anywhere;
+}
+
+/* "On this page" code chips inherit the link colour instead of the faint
+ * default chip text, which was hard to read in dark mode. */
+#nd-toc a code {
+  color: inherit;
+}
+
+/* Print: the diagram entrance animations must not leave messages or nodes
+ * at their starting opacity on paper. */
+@media print {
+  [data-animate] * {
+    animation: none !important;
+  }
 }

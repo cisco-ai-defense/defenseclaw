@@ -255,11 +255,13 @@ export function TerminalAnimation({
     >
       <div className="terminal-window overflow-hidden rounded-2xl shadow-lg">
         <div className="flex items-center gap-2 border-b border-[var(--term-border)] bg-[var(--term-chrome)] px-4 py-2 text-xs text-[var(--term-muted)]">
-          <span aria-hidden className="size-3 rounded-full bg-red-500/80" />
-          <span aria-hidden className="size-3 rounded-full bg-yellow-500/80" />
-          <span aria-hidden className="size-3 rounded-full bg-green-500/80" />
-          <span className="ml-3 font-mono text-[var(--term-muted)]">{cwd}</span>
-          <div className="ml-auto flex items-center gap-2">
+          <span aria-hidden className="size-3 shrink-0 rounded-full bg-red-500/80" />
+          <span aria-hidden className="size-3 shrink-0 rounded-full bg-yellow-500/80" />
+          <span aria-hidden className="size-3 shrink-0 rounded-full bg-green-500/80" />
+          <span className="ml-3 min-w-0 truncate font-mono text-[var(--term-muted)]" title={cwd}>
+            {cwd}
+          </span>
+          <div className="ml-auto flex shrink-0 items-center gap-2">
             <span
               aria-live="polite"
               className="hidden font-mono text-[10px] uppercase tracking-wider text-[var(--term-muted)] sm:inline"
@@ -289,7 +291,7 @@ export function TerminalAnimation({
           tabIndex={0}
           aria-label="Animated terminal output"
           style={{ maxHeight: height, minHeight: Math.min(220, height) }}
-          className="m-0 overflow-x-auto overflow-y-auto p-5 font-mono text-[13px] leading-6 text-[var(--term-text)]"
+          className="dc-scroll-cue m-0 overflow-x-auto overflow-y-auto p-5 font-mono text-[13px] leading-6 text-[var(--term-text)]"
         >
           {rendered.map((line, i) => (
             <Line key={i} line={line} shell={shell} />
@@ -310,10 +312,26 @@ export function TerminalAnimation({
       </div>
       {caption ? (
         <figcaption className="mt-2 text-center text-xs text-fd-muted-foreground">
-          {caption}
+          <CaptionText text={caption} />
         </figcaption>
       ) : null}
     </figure>
+  );
+}
+
+// Captions are plain strings in MDX props, so `backticks` would show
+// literally. Render the backticked parts as inline code.
+function CaptionText({ text }: { text: string }) {
+  return (
+    <>
+      {text.split(/(`[^`]+`)/).map((part, i) =>
+        part.startsWith('`') && part.endsWith('`') && part.length > 2 ? (
+          <code key={i}>{part.slice(1, -1)}</code>
+        ) : (
+          part
+        ),
+      )}
+    </>
   );
 }
 
