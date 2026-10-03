@@ -1531,7 +1531,9 @@ def install(app: AppContext, name_or_path: str, force: bool, take_action: bool, 
         if "hermes" in installed_connectors:
             _echo_hermes_activation_note(plugin_name)
         if "claudecode" in installed_connectors:
-            _echo_claudecode_install_note(source_path, plugin_name)
+            _echo_claudecode_install_note(
+                source_path, plugin_name, only_claudecode=installed_connectors == {"claudecode"}
+            )
 
         from defenseclaw.commands import hint
 
@@ -2828,7 +2830,7 @@ def _hermes_plugin_off_id(plugin_name: str) -> str:
     return ""
 
 
-def _echo_claudecode_install_note(source_path: str, plugin_name: str) -> None:
+def _echo_claudecode_install_note(source_path: str, plugin_name: str, *, only_claudecode: bool = True) -> None:
     """Say that Claude Code will not load a copied plugin (GAP-2084).
 
     Claude Code loads only plugins it installed from a marketplace (listed in
@@ -2846,7 +2848,9 @@ def _echo_claudecode_install_note(source_path: str, plugin_name: str) -> None:
         "  To use a Claude Code plugin, run /plugin marketplace add <marketplace folder or repo>, "
         "then /plugin install <name>@<marketplace> in Claude Code."
     )
-    click.echo(f"  Remove this copy: defenseclaw plugin remove {plugin_name} --connector claudecode")
+    # A bare remove deletes every connector's copy (GAP-2152).
+    scope = " --connector claudecode" if only_claudecode else ""
+    click.echo(f"  Remove this copy: defenseclaw plugin remove {plugin_name}{scope}")
 
 
 def _echo_hermes_activation_note(plugin_name: str) -> None:
@@ -3175,27 +3179,29 @@ def _claude_known_marketplaces(plugins_root: str) -> set[str]:
     return {str(key).casefold() for key in data} if isinstance(data, dict) else set()
 
 
-def _claude_cache_install_copies(
+def _install_root_copies(
     app: AppContext,
     name: str,
     connectors: list[str],
     known_paths: list[str],
 ) -> list[tuple[str, str]]:
-    """Copies ``plugin install --connector claudecode`` put in Claude's cache.
+    """Copies ``plugin install`` put directly in a connector's install root.
 
-    GAP-2152: install copies the folder to ``<cache>/<name>`` (and refuses a
-    reinstall while it is there), but discovery reads only the marketplace
-    layout, so remove never found it. Marketplace folders (named in
-    known_marketplaces.json or holding a discovered plugin) are skipped.
+    GAP-2152: install copies the folder to ``<root>/<name>`` (Claude Code
+    and Codex: their plugin cache) and refuses a reinstall while it is
+    there, but discovery reads only the marketplace layout, so remove never
+    found it. Marketplace folders (named in known_marketplaces.json or
+    holding a discovered plugin) are skipped.
     """
     known = [os.path.realpath(path) for path in known_paths]
     found: list[tuple[str, str]] = []
     for connector in connectors:
-        if _normalize_runtime_connector(connector) != "claudecode":
-            continue
-        for root in _plugin_roots_for_connector(app, connector, include_legacy=False):
-            if os.path.basename(os.path.normpath(root)).casefold() != "cache":
-                continue
+        # Only the root install writes to (see _plugin_install_targets).
+        try:
+            roots = [d for d in app.cfg.plugin_dirs(connector) if d][:1]
+        except Exception:  # noqa: BLE001 — no install root, nothing to find.
+            roots = []
+        for root in roots:
             try:
                 identities = enumerate_physical_identities(root)
                 discovered = discover_plugin_directories(
@@ -3269,7 +3275,7 @@ def remove(app: AppContext, name: str, connector_flag: str) -> None:
         candidates = _plugin_match_dir_scopes(app, safe_name)
     candidates = [
         *[(match.connector, match.path) for match in candidates],
-        *_claude_cache_install_copies(
+        *_install_root_copies(
             app,
             safe_name,
             [connectors[0]] if scoped and connectors else _active_plugin_connectors(app),

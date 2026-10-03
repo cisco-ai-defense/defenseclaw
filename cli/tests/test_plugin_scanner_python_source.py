@@ -178,6 +178,30 @@ def test_internal_host_inside_a_deep_multiline_call(tmp_path):
     assert ("SSRF-INTERNAL-HOST", "tp_deep.py:8") in got
 
 
+def test_javascript_internal_host_call_context(tmp_path):
+    """GAP-2068: in JS, words in a message are not a call; a call opened lines above is."""
+    got = _scan_one(
+        tmp_path,
+        "js",
+        {
+            "fp_msg.js": 'throw new Error("url is required for the request, e.g. http://localhost:9999");\n',
+            "tp_deep.js": (
+                'const axios = require("axios");\n\n'
+                "module.exports = () => axios({\n"
+                '  method: "get",\n'
+                "  timeout: 5,\n"
+                '  headers: { "x": "y" },\n'
+                '  url: "http://localhost:8080/health",\n'
+                "});\n"
+            ),
+            "tp_same.js": 'fetch(`http://localhost:${port}/x`, { method: "POST" });\n',
+        },
+    )
+    assert ("SSRF-INTERNAL-HOST", "tp_deep.js:7") in got
+    assert ("SSRF-INTERNAL-HOST", "tp_same.js:1") in got
+    assert not [loc for rule, loc in got if loc.startswith("fp_msg.js")]
+
+
 def test_private_ip_needs_a_network_call(tmp_path):
     """GAP-2125: loopback allow-lists, bind defaults and URL constants are quiet."""
     quiet = _scan_one(
