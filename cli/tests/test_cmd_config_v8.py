@@ -283,6 +283,33 @@ def test_v8_provenance_rejects_source_view(tmp_path: Path) -> None:
     assert "cannot be combined with --source" in result.output
 
 
+def test_v8_provenance_rejects_a_non_observability_section(tmp_path: Path) -> None:
+    """Only the Go observability plan has provenance; other sections never do.
+
+    Accepting the flag there printed ``basis: canonical_go_effective_plan`` with
+    an empty annotation list and no plan behind it - a claim the command cannot
+    support for a section the Go compiler does not own.
+    """
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "config_version: 8\nobservability: {}\nopenshell:\n  enabled: true\n",
+        encoding="utf-8",
+    )
+    with (
+        patch.object(cmd_config.config_module, "config_path", return_value=config_path),
+        patch.object(cmd_config, "inspect_v8_config") as inspect,
+    ):
+        rejected = CliRunner().invoke(
+            cmd_config.config_cmd,
+            ["show", "--effective", "--section", "openshell", "--provenance", "--format", "json"],
+            env={"DEFENSECLAW_CONFIG": str(config_path)},
+        )
+
+    assert rejected.exit_code == 2
+    assert "--provenance is only supported for the observability section" in rejected.output
+    inspect.assert_not_called()
+
+
 def test_reference_uses_go_artifact_and_writes_atomically(tmp_path: Path) -> None:
     output = tmp_path / "reference.yaml"
     with patch.object(cmd_config, "config_v8_reference", return_value="# generated\nobservability: {}\n") as reference:

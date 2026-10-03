@@ -184,6 +184,11 @@ def config_show(
 
     cfg_path = str(config_module.config_path())
     v8 = _looks_like_v8_config(cfg_path)
+    if v8 and provenance and section is not None and section.lower() != "observability":
+        # ``--provenance`` annotates the Go observability plan; no other section
+        # has one, so accepting it would print ``basis:
+        # canonical_go_effective_plan`` with no plan behind it.
+        raise click.UsageError("--provenance is only supported for the observability section")
     if v8:
         if reveal:
             raise click.UsageError("--reveal is not supported for configuration v8 output")
