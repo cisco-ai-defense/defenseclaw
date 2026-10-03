@@ -4626,6 +4626,16 @@ def _plugin_metadata_from_path(plugin_name: str, candidate: str) -> dict[str, An
             info_map["description"] = pkg.get("description", "")
         except (OSError, json.JSONDecodeError):
             pass
+    if not info_map.get("description"):
+        # Hermes plugins describe themselves in plugin.yaml; info showed no
+        # description while the TUI detail cut it off (GAP-2314).
+        from defenseclaw.inventory.claw_inventory import _read_hermes_plugin_manifest
+
+        manifest = _read_hermes_plugin_manifest(os.path.join(candidate, "plugin.yaml")) or {}
+        if manifest.get("description"):
+            info_map["description"] = " ".join(str(manifest["description"]).split())
+        if manifest.get("version") and not info_map.get("version"):
+            info_map["version"] = str(manifest["version"])
     return info_map
 
 

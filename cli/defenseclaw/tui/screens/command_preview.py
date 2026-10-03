@@ -74,7 +74,12 @@ def build_command_preview(command: ParsedCommand) -> CommandPreview:
     """Build preview copy for a parsed command."""
 
     argv = (command.binary, *command.args)
-    risk = command.risk if command.risk != "read-only" else classify_risk(command.category, command.args)
+    inferred = classify_risk(command.category, command.args)
+    risk = command.risk if command.risk != "read-only" else inferred
+    if risk == "mutation" and inferred == "destructive":
+        # Registries "d remove source" said "Risk mutation" and focused Run,
+        # so one Enter removed the source (GAP-2309).
+        risk = inferred
     restart = _restart_effect(risk, command.args)
     summary = _upgrade_summary(command.args) or _risk_summary(risk, command.category)
     if restart == "yes" and risk in {"setup", "mutation"}:

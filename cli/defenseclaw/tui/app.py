@@ -2642,6 +2642,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # in-between size does not stay ("R Registry…" with room left, GAP-1751).
         self.call_after_refresh(self._update_tab_labels)
         self.call_after_refresh(self._mark_overflowing_controls)
+        # The bars may get their new width only after that refresh: resized
+        # on Registries, 80x24 showed no "… more" marker (GAP-2315). Check
+        # once more after the layout has settled.
+        self.set_timer(0.25, self._mark_overflowing_controls)
         # The nav list and aside appear and disappear at width thresholds.
         if self.is_running and not self.help_open and len(self.screen_stack) <= 1:
             panel = self.active_panel
