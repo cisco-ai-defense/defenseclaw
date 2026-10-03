@@ -408,7 +408,7 @@ class TestRegistrySync(RegistryCommandTestBase):
                     result = self.invoke(["sync", "corp-skills"])
         self.assertEqual(result.exit_code, 0, result.output)
         logger.log_action.assert_any_call(
-            "registry-edit", "config",
+            "registry-sync", "corp-skills",
             "sync id=corp-skills fetched=1 scanned=1 promoted_skills=1 promoted_mcps=0 "
             "blocked=0 errors=0 promote=on",
         )
@@ -506,6 +506,23 @@ class TestRegistryApproveReject(RegistryCommandTestBase):
         payload = json.loads(result.output)
         self.assertTrue(payload["verdict"]["rejected"])
 
+    def test_registry_audit_rows_name_their_operation_and_target(self):
+        # GAP-2280: approve and reject are their own actions on the entry,
+        # and source changes name the source instead of "config".
+        with patch.object(self.app, "logger", MagicMock()) as logger:
+            for verb in ("approve", "reject"):
+                result = self.invoke([verb, "corp-skills", "demo-skill", "--type", "skill", "--no-repromote"])
+                self.assertEqual(result.exit_code, 0, result.output)
+            self.invoke(["edit", "corp-skills", "--disabled", "--non-interactive"])
+            self.invoke(["remove", "corp-skills", "--non-interactive"])
+        rows = [c.args[:2] for c in logger.log_action.call_args_list]
+        self.assertEqual(rows, [
+            ("registry-approve", "skill:demo-skill"),
+            ("registry-reject", "skill:demo-skill"),
+            ("registry-edit", "corp-skills"),
+            ("registry-remove", "corp-skills"),
+        ])
+
     def test_approve_infers_type_from_source_content(self):
         # GAP-1384: a source with content=skill implies --type skill.
         result = self.invoke([
@@ -583,9 +600,10 @@ class TestRegistryRequire(RegistryCommandTestBase):
             self.assertEqual(result.exit_code, 0, result.output)
             actions = [
                 c.args for c in logger.log_action.call_args_list
-                if c.args[0] == "registry-edit" and c.args[2].startswith("require ")
+                if c.args[0] == "registry-require" and c.args[2].startswith("require ")
             ]
             self.assertEqual(len(actions), 1, actions)
+            self.assertEqual(actions[0][1], "asset_policy.connectors.openhands.mcp.registry")
             self.assertIn(f"require scope=asset_policy.connectors.openhands.mcp.registry required={state}", actions[0][2])
 
     def test_require_with_gateway_down_saves_warns_and_exits_zero(self):

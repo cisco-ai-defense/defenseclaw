@@ -138,10 +138,12 @@ def observability_destination_test(name: str, write_probe: bool, timeout: float)
     click.echo(f"probe ID: {result.probe_id}")
     if result.mode == "write_probe":
         click.echo("write probe: accepted by the named destination")
-    if result.authentication_verified:
+    if result.mode == "write_probe" and result.authentication_verified:
         click.echo("authentication: configured credential accepted with the synthetic write probe")
     elif result.mode == "write_probe":
         click.echo("authentication: no credential configured")
+    elif result.authentication_verified:
+        click.echo("authentication: configured credential accepted by an empty OTLP export (nothing written)")
     else:
         click.echo("authentication: resolved locally; not transmitted by the non-mutating handshake")
     click.echo("compliance activity: attempt and outcome recorded locally")

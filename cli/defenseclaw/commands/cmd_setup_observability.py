@@ -313,6 +313,12 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
     # GAP-1336: the generated name is what every later command takes.
     click.echo(f"  {mode}{preset.display_name}: {changed} as destination '{destination_name}'")
     echo_setup_notes(preset, warnings)
+    if preset.id == "galileo" and not inputs.get("endpoint"):
+        # GAP-2289: the default endpoint only serves Galileo Cloud keys.
+        click.echo(
+            "  Endpoint: Galileo Cloud (api.galileo.ai) by default; for another Galileo cluster "
+            "add --endpoint <https://<cluster>/otel/traces>"
+        )
     if not dry_run:
         click.echo(f"  Test it with: defenseclaw setup observability test {destination_name}")
 
@@ -1082,11 +1088,33 @@ def _test_v8_destination(
         message = f"destination test failed ({exc.failure_class}): {exc.message}"
         if exc.failure_class == "not_found":
             message = _unknown_destination_message(name, inspected.effective or {})
+        elif exc.failure_class == "authentication_failed" and _is_galileo_destination(
+            inspected.effective or {}, name
+        ):
+            # GAP-2289: a key from another Galileo cluster gets 401 at the default endpoint.
+            message += (
+                ". For a Galileo cluster other than api.galileo.ai, run 'defenseclaw setup observability "
+                "add galileo' again with --endpoint <https://<cluster>/otel/traces>"
+            )
         raise click.ClickException(message) from exc
     click.echo(f"  {result.destination}: {result.mode} succeeded")
+    if result.mode == "handshake" and result.authentication_verified:
+        click.echo("  authentication: credentials accepted (empty export; nothing was written)")
     click.echo(f"  protocol={result.protocol}; endpoints={result.endpoint_count}")
     click.echo(f"  probe_id={result.probe_id}; compliance activity recorded locally")
     click.echo(f"  {NETWORK_PATH_NOTE}")
+
+
+def _is_galileo_destination(effective: dict, name: str) -> bool:
+    destinations = effective.get("destinations") if isinstance(effective, dict) else None
+    for item in destinations or []:
+        if isinstance(item, dict) and item.get("name") == name:
+            transport = item.get("transport") if isinstance(item.get("transport"), dict) else {}
+            headers = transport.get("headers") if isinstance(transport.get("headers"), dict) else {}
+            return item.get("preset") == "galileo" or any(
+                str(key).lower() == "galileo-api-key" for key in headers
+            )
+    return False
 
 
 def _unknown_destination_message(name: str, effective: dict) -> str:

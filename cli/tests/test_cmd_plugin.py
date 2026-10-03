@@ -262,6 +262,24 @@ class TestAmpManagedBridgeProtection(PluginCommandTestBase):
         self.assertIn("defenseclaw.ts is DefenseClaw's own Amp bridge", only_bridge.output)
         self.assertIn("defenseclaw setup remove amp", only_bridge.output)
 
+    @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
+    def test_scan_audit_names_the_connector(self, mock_scan):
+        # GAP-2272: the scan row says whose plugin it was, so
+        # 'audit export --connector amp' includes it.
+        from datetime import datetime, timedelta, timezone
+
+        from defenseclaw.models import ScanResult
+
+        mock_scan.side_effect = lambda target, **_kw: ScanResult(
+            scanner="plugin-scanner", target=target, timestamp=datetime.now(timezone.utc),
+            findings=[], duration=timedelta(seconds=0),
+        )
+        with patch.object(self.app.logger, "log_scan") as log_scan:
+            result = self.invoke(["scan", self.amp_plugins, "--connector", "amp"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertTrue(log_scan.call_args_list, result.output)
+        self.assertTrue(all(c.kwargs.get("connector") == "amp" for c in log_scan.call_args_list))
+
     def test_remove_deletes_an_ordinary_amp_file_plugin(self):
         """GAP-2063: direct Amp plugins are files, not directories."""
         result = self.invoke(["remove", "architect", "--connector", "amp"])
