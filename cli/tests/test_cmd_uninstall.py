@@ -327,6 +327,7 @@ class WindowsOwnedCleanupTests(unittest.TestCase):
             tuple(Path(path).name for path in plan.binary_targets),
             (
                 "defenseclaw.cmd",
+                "defenseclaw.exe",
                 "defenseclaw",
                 "defenseclaw-gateway.exe",
                 "defenseclaw-acp.exe",
@@ -337,7 +338,6 @@ class WindowsOwnedCleanupTests(unittest.TestCase):
             ),
         )
         self.assertEqual(plan.managed_venv, os.path.join(plan.data_dir, ".venv"))
-        self.assertNotIn("defenseclaw.exe", tuple(Path(path).name for path in plan.binary_targets))
 
     def test_binary_only_removes_exact_targets_and_preserves_unrelated_files(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -613,6 +613,48 @@ class WindowsOwnedCleanupTests(unittest.TestCase):
         unlink.assert_called_once_with(gateway)
         self.assertEqual([p.binary_targets for p in scheduled], [(shim,)])
         self.assertFalse(scheduled[0].remove_data_dir)
+
+    def test_binaries_only_leaves_the_running_cli_launchers_to_the_helper(self):
+        # GAP-2237: PowerShell runs the installer's defenseclaw.exe, which
+        # Windows keeps while it runs; it goes with the shim after the CLI exits.
+        root = "C:\\Users\\test\\.local\\bin"
+        shim, launcher, gateway = (root + "\\" + name for name in ("defenseclaw.cmd", "defenseclaw.exe", "defenseclaw-gateway.exe"))
+        plan = cmd_uninstall.UninstallPlan(
+            platform_name="win32",
+            install_root=root,
+            gateway_path=gateway,
+            binary_targets=(shim, launcher, gateway),
+            data_dir="C:\\Users\\test\\.defenseclaw",
+            managed_venv="C:\\Users\\test\\.defenseclaw\\.venv",
+            remove_binaries=True,
+        )
+        scheduled = []
+        with (
+            patch.object(cmd_uninstall, "_validate_plan"),
+            patch.object(cmd_uninstall, "_running_from_managed_venv", return_value=True),
+            patch.object(cmd_uninstall, "_schedule_deferred_cleanup", side_effect=scheduled.append),
+            patch.object(cmd_uninstall.os.path, "lexists", return_value=True),
+            patch.object(cmd_uninstall.os, "unlink") as unlink,
+            patch.object(cmd_uninstall, "_remove_install_bookkeeping"),
+            patch.object(cmd_uninstall.shutil, "which", return_value=launcher),
+            capture_click_output() as output,
+        ):
+            cmd_uninstall._remove_binaries(plan)
+
+        unlink.assert_called_once_with(gateway)
+        self.assertEqual([p.binary_targets for p in scheduled], [(shim, launcher)])
+        self.assertIn(f"{launcher} is removed right after this command exits", output.getvalue())
+        self.assertNotIn("another defenseclaw remains", output.getvalue())
+
+    def test_installer_cli_launcher_is_bound_to_the_data_dir_venv(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = os.path.join(tmp, ".defenseclaw")
+            launcher = Path(tmp) / "defenseclaw.exe"
+            python = os.path.join(cmd_uninstall._normalized(os.path.join(data_dir, ".venv")), "Scripts", "python.exe")
+            launcher.write_bytes(b"MZ\0trampoline" + python.upper().encode("utf-8") + b"PK\0script")
+            self.assertTrue(cmd_uninstall._is_data_bound_launcher(str(launcher), data_dir, "win32"))
+            launcher.write_bytes(b"MZ\0trampoline C:\\Other\\.venv\\Scripts\\python.exe")
+            self.assertFalse(cmd_uninstall._is_data_bound_launcher(str(launcher), data_dir, "win32"))
 
     def test_deferred_scheduling_failure_is_nonzero_and_stops_cleanup(self):
         plan = cmd_uninstall.UninstallPlan(

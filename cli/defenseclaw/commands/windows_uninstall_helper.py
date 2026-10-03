@@ -22,6 +22,8 @@ from pathlib import Path
 
 _ALLOWED_BINARIES = {
     "defenseclaw.cmd",
+    # The installer's copy of the venv's launcher (GAP-2237).
+    "defenseclaw.exe",
     "defenseclaw",
     "defenseclaw-gateway.exe",
     "defenseclaw-acp.exe",
@@ -221,10 +223,14 @@ def _open_launchers(plan: dict[str, object]) -> list[tuple[int, float]]:
     Ancestors whose image lives in the managed runtime's Scripts folder are
     opened, then the cmd.exe running the shim (a shorter wait, since an
     interactive prompt stays open); the walk stops at any other process.
+    PowerShell and cmd.exe start the installer's defenseclaw.exe instead of
+    the shim (GAP-2237): it is opened too, and the walk ends there, since no
+    batch file is read after it.
     Each entry is (handle, seconds to wait at most).
     """
     kernel32 = _kernel32()
     scripts = _norm(os.path.join(str(plan["managed_venv"]), "Scripts")) + os.sep
+    cli_launcher = _norm(os.path.join(str(plan["install_root"]), "defenseclaw.exe"))
     parents = _parent_pids(kernel32)
     handles: list[tuple[int, float]] = []
     process_id = parents.get(int(plan["parent_pid"]), 0)
@@ -243,6 +249,9 @@ def _open_launchers(plan: dict[str, object]) -> list[tuple[int, float]]:
             handles.append((handle, _LAUNCHER_WAIT_SECONDS))
             process_id = parents.get(process_id, 0)
             continue
+        if _norm(image.value) == cli_launcher:
+            handles.append((handle, _LAUNCHER_WAIT_SECONDS))
+            break
         if handles and os.path.basename(_norm(image.value)) == "cmd.exe":
             handles.append((handle, _SHIM_SHELL_WAIT_SECONDS))
         else:

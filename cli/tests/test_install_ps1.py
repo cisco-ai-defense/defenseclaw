@@ -110,11 +110,12 @@ def test_connector_choices_are_the_windows_supported_connectors() -> None:
 def test_uninstall_owns_every_file_the_installer_writes_to_local_bin() -> None:
     hook_state = re.search(r'\$HookState = "([^"]+)"', _text())
     posix_shim = re.search(r'\$PosixShim = "([^"]+)"', _text())
-    assert hook_state is not None and posix_shim is not None
+    cli_launcher = re.search(r'\$CliLauncher = "([^"]+)"', _text())
+    assert hook_state is not None and posix_shim is not None and cli_launcher is not None
     written = (
         set(_list("ManagedBinaries"))
         | {f"{shim}.cmd" for shim in _list("ManagedShims")}
-        | {hook_state.group(1), posix_shim.group(1)}
+        | {hook_state.group(1), posix_shim.group(1), cli_launcher.group(1)}
     )
     _root, targets = cmd_uninstall._owned_binary_targets("win32")
     assert written == {re.split(r"[\\/]", target)[-1] for target in targets}
@@ -130,11 +131,23 @@ def test_a_release_install_removes_the_developer_install_files() -> None:
     # GAP-1493: defenseclaw.exe from `make all` shadows the release
     # defenseclaw.cmd (PATHEXT), so the release install removes what make all
     # published beyond the managed binaries, once the swap is done.
-    developer = set(cmd_uninstall._WINDOWS_DEVELOPER_FILES) - set(_list("ManagedBinaries"))
+    # Its defenseclaw.exe is replaced by the installer's launcher (GAP-2237).
+    developer = set(cmd_uninstall._WINDOWS_DEVELOPER_FILES) - set(_list("ManagedBinaries")) - {"defenseclaw.exe"}
     assert set(_list("DeveloperFiles")) == developer
     text = _text()
     assert '(Join-Path $BinDir ".defenseclaw-source-root") -PathType Leaf' in text
     assert "    Complete-Swap\n    Remove-DeveloperFiles\n" in text
+
+
+def test_powershell_runs_a_native_cli_launcher() -> None:
+    # GAP-2237: through defenseclaw.cmd, cmd.exe asked "Terminate batch job
+    # (Y/N)?" after Ctrl+C. PATHEXT runs .exe before .cmd, so the installer
+    # puts the venv's own launcher beside the shim, and rollback keeps it.
+    text = _text()
+    assert '$CliLauncher = "defenseclaw.exe"' in text
+    assert "@($PosixShim, $CliLauncher, $HookState)" in text
+    assert "Write-PosixShim $target; Install-File $target (Join-Path $BinDir $CliLauncher)" in text
+    assert "defenseclaw.exe" not in _list("DeveloperFiles")
 
 
 def test_cli_shim_is_the_one_uninstall_recognizes() -> None:
