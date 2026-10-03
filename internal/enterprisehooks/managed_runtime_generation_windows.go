@@ -1003,13 +1003,33 @@ func loadUnselectedWindowsManagedRuntimeBundle(
 		return entry, nil, err
 	}
 	if bundle.GenerationID != generationID || bundle.Connector != opts.Connector ||
-		bundle.TargetSID != opts.TargetSID || bundle.DataDir != opts.DataDir ||
-		!sameWindowsEnterprisePath(bundle.DataDir, opts.DataDir) ||
-		bundle.HookExecutable != opts.HookExecutable ||
-		!sameWindowsEnterprisePath(bundle.HookExecutable, opts.HookExecutable) {
+		bundle.TargetSID != opts.TargetSID {
+		// Connector + TargetSID + GenerationID mismatch is structural
+		// (caller asked for the wrong bundle). Stays fatal.
 		return entry, nil, errors.New(
 			"enterprise hooks: refusing to collect a managed runtime bundle with a foreign identity",
 		)
+	}
+	if bundle.DataDir != opts.DataDir ||
+		!sameWindowsEnterprisePath(bundle.DataDir, opts.DataDir) ||
+		bundle.HookExecutable != opts.HookExecutable ||
+		!sameWindowsEnterprisePath(bundle.HookExecutable, opts.HookExecutable) {
+		// Bulldoze: a bundle whose Connector + TargetSID + GenerationID
+		// identify it as ours but whose DataDir / HookExecutable point at
+		// a prior scoped install's layout is an orphan from an unsigned
+		// certification cycle. Log a diagnostic and overwrite the bundle
+		// fields with the current install's canonical values. The
+		// subsequent generation stamp rewrites the on-disk bundle with
+		// the corrected scope.
+		fmt.Fprintf(os.Stderr,
+			"[enterprise-hooks] reclaiming identity-drifted managed runtime bundle "+
+				"for %s/%s/%s: bundle DataDir=%q HookExecutable=%q, current "+
+				"install DataDir=%q HookExecutable=%q\n",
+			opts.Connector, opts.TargetSID, generationID,
+			bundle.DataDir, bundle.HookExecutable,
+			opts.DataDir, opts.HookExecutable)
+		bundle.DataDir = opts.DataDir
+		bundle.HookExecutable = opts.HookExecutable
 	}
 	desired := WindowsManagedRuntimeGenerationDesired{
 		Connector:                  bundle.Connector,

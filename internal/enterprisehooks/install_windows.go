@@ -817,8 +817,21 @@ func windowsManagedObstructionQuarantinePath(path string) string {
 
 func quarantineWindowsTargetOwnedObstruction(home, path string, target *windows.SID, recreateDirectory bool, label string) error {
 	owner, err := windowsPathOwnerNoFollow(path)
-	if err != nil || owner == nil || !owner.Equals(target) {
+	if err != nil || owner == nil {
 		return fmt.Errorf("enterprise hooks: refusing foreign-owned obstruction in %s path %s", label, path)
+	}
+	if !owner.Equals(target) {
+		// Bulldoze: trusted admin owners (SYSTEM / BUILTIN\Administrators /
+		// TrustedInstaller) from a prior scoped install's elevated token
+		// are quarantinable. A foreign user SID or non-admin group stays
+		// fatal.
+		if !windowsEnterpriseAdminIdentity(owner) {
+			return fmt.Errorf("enterprise hooks: refusing foreign-owned obstruction in %s path %s", label, path)
+		}
+		fmt.Fprintf(os.Stderr,
+			"[enterprise-hooks] admin-owned obstruction accepted for quarantine "+
+				"in %s path %s (owner=%s, target=%s)\n",
+			label, path, windowsSIDString(owner), windowsSIDString(target))
 	}
 	quarantine := windowsManagedObstructionQuarantinePath(path)
 	if err := removeWindowsTargetOwnedQuarantine(quarantine, target, false); err != nil {
