@@ -6511,6 +6511,18 @@ def setup_guardrail(
         proxy_active = _guarded_proxy_connector(gc)
         if proxy_active and explicit_connector not in _PROXY_BACKED_CONNECTORS:
             _refuse_hook_setup_over_proxy_connector(explicit_connector, proxy_active)
+    elif (
+        non_interactive
+        and not app.cfg.has_connector_configured()
+        and not _read_picked_connector(getattr(app.cfg, "data_dir", None))
+    ):
+        # GAP-2609: on a no-connector install (init --connector none) the
+        # fallback below enrolled OpenClaw, an agent the operator never chose.
+        raise click.ClickException(
+            "no agent connector is configured, so setup guardrail has nothing to protect. "
+            "Pass --connector <agent> (for example --connector claudecode), "
+            "or run defenseclaw setup <connector> first."
+        )
 
     try:
         # `setup openclaw|zeptoclaw` switches the connector in memory before it

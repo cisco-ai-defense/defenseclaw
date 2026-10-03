@@ -105,6 +105,13 @@ const (
 	foreignHookAuditFieldLimit  = 512
 )
 
+// foreignHookDenialRuleID is the rule ID every foreign-hook guard denial
+// carries. The guard matches no rule pack, so its blocks had action and
+// severity but no rule_id on their tool, agent and apply_guardrail spans and
+// in Galileo, and a dashboard could not tell them from any other block
+// (GAP-2610). The reason stays on the audit row and the hook decision record.
+const foreignHookDenialRuleID = "ENTERPRISE-FOREIGN-HOOK-BLOCKED"
+
 // clipForeignHookAuditField drops control characters and bounds value to
 // limit bytes on a rune boundary.
 func clipForeignHookAuditField(value string, limit int) string {
@@ -173,6 +180,7 @@ func (a *APIServer) auditForeignHookSessionDenial(
 		Severity:   "HIGH",
 		Mode:       "action",
 		Reason:     reason,
+		RuleIDs:    []string{foreignHookDenialRuleID},
 		WouldBlock: true,
 		Enforced:   true,
 		Extra:      extra,
@@ -213,7 +221,7 @@ func (a *APIServer) emitForeignHookSessionDenialV8(
 	// observe-mode decision only.
 	resp := agentHookResponse{
 		Action: env.Action, RawAction: env.RawAction, Severity: env.Severity,
-		Mode: env.Mode, Reason: env.Reason,
+		Mode: env.Mode, Reason: env.Reason, RuleIDs: env.RuleIDs,
 	}
 	a.emitHookDecisionObservabilityV8(ctx, req, resp, env, false)
 	// A denied tool call carries the block on its tool span, like any other
@@ -234,7 +242,7 @@ func (a *APIServer) emitForeignHookSessionDenialV8(
 	a.emitGuardrailApplyTraceV8(ctx, connectorName, "", targetType, &ToolInspectVerdict{
 		Action: resp.Action, RawAction: resp.RawAction, Severity: resp.Severity,
 		Reason: resp.Reason, Mode: resp.Mode,
-	}, 0, hookEvaluationContext{})
+	}, 0, hookEvaluationContext{RuleIDs: env.RuleIDs})
 }
 
 // foreignHookSessionDenialTarget names what a foreign-hook denial was for:
