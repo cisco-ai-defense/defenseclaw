@@ -505,6 +505,20 @@ def test_an_interrupted_setup_upgrade_restarts_the_setup_gateway() -> None:
     assert "Start-SetupGateway $Setup.Root" in _ps1_function("Restore-SetupInstall")
 
 
+def test_a_restored_setup_install_keeps_no_failed_copy_or_uv_cache_in_its_data_dir() -> None:
+    # GAP-1839: the failed 1.0 copy and the uv cache stayed in Setup's data
+    # dir, and Setup's gateway, which walks it all before it starts, then
+    # timed out on every start.
+    clear = _text()[_text().index("function Clear-SetupDataDir(") :][:600]
+    assert "Remove-Tree $Failed" in clear
+    assert 'Remove-Tree (Join-Path $DataDir ".uv")' in clear
+    restore = _ps1_function("Restore-Snapshot")
+    assert restore.index("Restore-Slot $Snap") < restore.index("Clear-SetupDataDir $failed") < restore.index("Restart-Old")
+    resume = _ps1_function("Resume-InterruptedRun")
+    assert resume.index("Clear-SetupDataDir $failed") < resume.index("Start-SetupGateway $setupInstall.Root")
+    assert 'if (-not $setupBack) { Write-Warn "The interrupted install was kept in $failed" }' in resume
+
+
 def test_the_uv_folder_is_protected_before_uv_runs_and_before_a_rollback_starts_the_gateway() -> None:
     # GAP-1988: the uv cache and Python in the data dir inherited its
     # permissions, so the 1.0.0 gateway, which re-applies them on every private
