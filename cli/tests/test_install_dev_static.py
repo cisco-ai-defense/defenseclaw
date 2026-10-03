@@ -203,3 +203,13 @@ def test_skip_install_never_publishes_unclaimed_shared_cli() -> None:
     assert guard < publish < alternate < skipped
     assert 'SKIP_INSTALL="${skip_install}"' in text
     assert "export SKIP_INSTALL" in text
+
+
+def test_make_all_does_not_invent_a_connector_when_skipping_openclaw() -> None:
+    # GAP-2050: an unset CONNECTOR was echoed as "CONNECTOR=codex".
+    text = MAKEFILE.read_text(encoding="utf-8")
+    assert "CONNECTOR:-codex" not in text
+    start = text.index("\nmaybe-openclaw-plugin-install:")
+    recipe = text[start : text.index("\n\n", start)]
+    assert "echo" not in recipe
+    assert "OpenClaw plugin skipped (set CONNECTOR=openclaw to install it)" in text

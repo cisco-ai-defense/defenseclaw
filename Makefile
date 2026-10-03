@@ -361,7 +361,7 @@ install: _source-install-preflight cli-install gateway-install $(SOURCE_PLUGIN_I
 	@echo "  • Go gateway   → $(INSTALL_DIR)/$(GATEWAY)$(EXE)"
 	@echo "  • ACP guard    → $(INSTALL_DIR)/$(ACP_GUARD)$(EXE)"
 	$(if $(filter Windows_NT,$(OS)),@echo "  • Hook launcher → $(INSTALL_DIR)/$(HOOK_LAUNCHER).exe",)
-	@if [ "$${CONNECTOR:-codex}" = "openclaw" ]; then \
+	@if [ "$${CONNECTOR:-}" = "openclaw" ]; then \
 		echo "  • OpenClaw plugin → ~/.defenseclaw/extensions/defenseclaw/"; \
 	else \
 		echo "  • OpenClaw plugin skipped (set CONNECTOR=openclaw to install it)"; \
@@ -374,11 +374,11 @@ install: _source-install-preflight cli-install gateway-install $(SOURCE_PLUGIN_I
 	@echo "  defenseclaw --help       # see all CLI commands"
 	@echo ""
 
+# The install summary already reports a skipped plugin, so stay quiet here
+# (an unset CONNECTOR was echoed as "CONNECTOR=codex", GAP-2050).
 maybe-openclaw-plugin-install: _source-install-preflight
-	@if [ "$${CONNECTOR:-codex}" = "openclaw" ]; then \
+	@if [ "$${CONNECTOR:-}" = "openclaw" ]; then \
 		$(MAKE) plugin-install; \
-	else \
-		echo "Skipping OpenClaw plugin install (CONNECTOR=$${CONNECTOR:-codex})."; \
 	fi
 
 # ---------------------------------------------------------------------------
@@ -673,7 +673,7 @@ endif
 	@echo "  • Go gateway   → $(INSTALL_DIR)/$(GATEWAY)$(EXE)"
 	@echo "  • ACP guard    → $(INSTALL_DIR)/$(ACP_GUARD)$(EXE)"
 	$(if $(filter Windows_NT,$(OS)),@echo "  • Hook launcher → $(INSTALL_DIR)/$(HOOK_LAUNCHER).exe",)
-	@if [ "$${CONNECTOR:-codex}" = "openclaw" ]; then \
+	@if [ "$${CONNECTOR:-}" = "openclaw" ]; then \
 		echo "  • OpenClaw plugin → ~/.defenseclaw/extensions/defenseclaw/"; \
 	else \
 		echo "  • OpenClaw plugin skipped (set CONNECTOR=openclaw to install it)"; \
