@@ -10,11 +10,6 @@ keywords:
 
 Prompt injection can arrive in a user message or in content an agent reads. DefenseClaw scans Codex lifecycle events at both boundaries: `UserPromptSubmit` for submitted prompts, `PreToolUse` before a proposed action, and `PostToolUse` after tool output returns.
 
-<Video
-  src="codex"
-  caption="Codex sends a synthetic injection prompt to DefenseClaw. The bundled CRITICAL trust rule blocks it at UserPromptSubmit; later tool-call gates remain available for actions proposed from untrusted content."
-/>
-
 <Steps>
 
 <Step>
@@ -79,15 +74,15 @@ The bundled `TRUST-IGNORE-PREVIOUS` rule is CRITICAL. The `UserPromptSubmit` hoo
 
 ```bash
 defenseclaw alerts --limit 10
-# or inspect the latest structured events from mandatory SQLite history:
-defenseclaw-gateway audit export --connector codex --output - \
-  | tail -n 200 \
-  | jq 'select(.connector == "codex" and .severity == "CRITICAL")'
+# or read the hook decisions from the last 30 minutes of audit history:
+defenseclaw-gateway audit export --connector codex --since 30m \
+  | jq 'select(.action == "connector-hook" and .structured.action == "block")
+        | {timestamp, severity, event: .structured.event, rule_ids: .structured.rule_ids}'
 ```
 
-Look for the matching rule, connector `codex`, event `UserPromptSubmit`, and an
-effective block action. Filter on stable top-level connector and severity fields
-before drilling into the canonical structured body.
+Look for event `UserPromptSubmit` with `structured.action` set to `block` and
+`TRUST-IGNORE-PREVIOUS` in `structured.rule_ids`. IDs and timestamps differ on
+every run.
 
 </Step>
 

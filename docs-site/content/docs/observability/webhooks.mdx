@@ -41,7 +41,7 @@ Pick the surface that matches the consumer. Most installs run one notifier (Slac
     },
     'generic': {
       type: 'webhook',
-      description: 'POSTs the event JSON to any endpoint. Optional HMAC-SHA256 signature header (X-DefenseClaw-Signature) when --secret-env is set.',
+      description: 'POSTs the event JSON to any endpoint. With --secret-env set, signs the body with HMAC-SHA256 in the X-Hub-Signature-256 header.',
     },
   }}
 />
@@ -98,12 +98,12 @@ defenseclaw setup webhook add generic \
   --name siem \
   --url https://siem.example.com/defenseclaw \
   --secret-env DEFENSECLAW_SIEM_SECRET \
-  --events policy_block,judge_block,asset_policy_deny \
+  --events block,guardrail \
   --min-severity MEDIUM \
   --non-interactive
 ```
 
-The receiver validates the HMAC by recomputing `HMAC-SHA256(secret, body)` and comparing it to the `X-DefenseClaw-Signature` header.
+The receiver validates the signature by recomputing the hex `HMAC-SHA256(secret, body)` and comparing it to the `X-Hub-Signature-256` header, which has the form `sha256=<hex>`.
 
 A connector-hook block names the rule that fired. The event's `details` carry `rule=<id>` next to the redacted reason, and `defenseclaw_rule` gives the same label the agent sees, for example `rule VB2-MARKER-BLOCK: Marker command`. Titles appear only for compiled-in and loaded rule-pack rules; the matched content stays redacted.
 
@@ -137,7 +137,7 @@ A connector-hook block names the rule that fired. The event's `details` carry `r
     },
     'remove <name>': {
       type: 'subcommand',
-      description: 'Delete the entry. Confirms first; --yes for scripts.',
+      description: 'Delete the entry. Confirms first; --yes for scripts, --connector for a per-connector webhook.',
     },
     'test <name>': {
       type: 'subcommand',
@@ -154,11 +154,12 @@ A connector-hook block names the rule that fired. The event's `details` carry `r
 | `--url <url>` | (required) | Validated against the SSRF guard at write time and again at delivery. |
 | `--secret-env <ENV>` | type-specific (see below) | The **name** of an env var, never the literal secret. The CLI rejects values that look like real secrets. |
 | `--room-id <id>` | (required for `webex`) | Webex room/space identifier. |
-| `--min-severity LOW\|MEDIUM\|HIGH\|CRITICAL` | `HIGH` | Events below the floor are dropped. |
-| `--events a,b,c` | (all categories) | Allow-list — useful when a receiver only cares about, say, `policy_block`. |
-| `--timeout-seconds <n>` | `5` | Per-delivery timeout. |
+| `--min-severity info\|low\|medium\|high\|critical` | `high` | Events below the floor are dropped. |
+| `--events a,b,c` | all categories | Allow-list of `block`, `scan`, `guardrail`, `drift`, and `health`, useful when a receiver only cares about, say, `block`. |
+| `--timeout-seconds <n>` | `10` | Per-delivery timeout. |
 | `--cooldown-seconds <n>` | `300` (runtime default) | Dedup window. `0` disables dedup; omit to use the runtime default. |
 | `--enabled` / `--disabled` | `--enabled` | Initial state. |
+| `--connector <name>` | global | Scope the webhook to one connector. That connector's events go to its own webhooks, and fall back to the global ones when it has none. |
 | `--dry-run` | off | Print the YAML diff without writing. |
 | `--non-interactive` | off | Required for CI; missing required fields exit non-zero with a `error: --foo is required` message. |
 
@@ -194,7 +195,7 @@ The output includes:
 - The formatted payload bytes count and a 160-byte preview.
 - Every header DefenseClaw sent (including any HMAC signature for `generic`).
 - The HTTP status returned by the receiver.
-- An audit-log entry tagged `setup-webhook test name=pd-prod ok=true`.
+- A `setup-webhook` audit event with `name=pd-prod type=pagerduty ok=true`, recorded when the gateway is running.
 
 For the dry-run rehearsal:
 
@@ -257,4 +258,4 @@ The TUI (`defenseclaw tui` → Setup tab → Webhooks) calls these subcommands w
 - [`cli/defenseclaw/commands/cmd_setup_webhook.py`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/cli/defenseclaw/commands/cmd_setup_webhook.py) — every subcommand, validator, and helper.
 - `internal/gateway/webhook.go` — the dispatcher, dedup logic, and HMAC implementation.
 - [Reference → CLI](/docs/reference/cli) — the CLI command catalog.
-- [Observability → Splunk](/docs/observability/splunk) — for the **audit-sink** path (every event, no severity floor).
+- [Observability → Splunk](/docs/observability/splunk) — to export every event, with no severity floor, as a telemetry destination.

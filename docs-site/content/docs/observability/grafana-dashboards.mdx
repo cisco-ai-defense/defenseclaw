@@ -15,6 +15,9 @@ duplicating the same analysis across several boards.
 
 ## Start here
 
+These links open the dashboards in your own Grafana at `localhost:3000`, so
+start the stack first with `defenseclaw setup local-observability up`.
+
 <Cards>
   <Card title="Platform overview" href="http://localhost:3000/d/defenseclaw-overview" description="Health, guardrails, findings, errors, and the links into every specialist board." />
   <Card title="Live agent activity" href="http://localhost:3000/d/defenseclaw-activity" description="Cross-agent prompts, model usage, tools, destinations, and session correlation." />
@@ -33,6 +36,7 @@ duplicating the same analysis across several boards.
 | **Agent360** (`defenseclaw-agent-360`) | What happened inside this agent, execution, or full descendant tree? | Developer, SOC, AI platform | Prometheus, Loki, Tempo | The deepest correlated drill-down: lifecycle phases, initial/grouped follow-up prompts, decisions and recovery, tokens, cost, network activity, per-agent provider/model and tool-family summaries, and trace waterfall. |
 | **Blocked Events & Analysis** (`defenseclaw-blocked-events`) | What was blocked, which rules drove it, and which events recur? | SOC, policy owner, incident responder | Prometheus, Loki | Enforced versus observe-mode decisions, all exported verdict rule IDs, projected tool context, exact recurring signatures, and correlation pivots into Agent360, Findings, and Policy Decisions. |
 | **AI Agent Usage & Detection** (`defenseclaw-ai-discovery`) | Which AI products, skills, MCP servers, and dependencies exist? | Asset owner, security | Prometheus, Loki, Tempo | Continuous discovery inventory, confidence, detector health, and scan traces. |
+| **AI Discovery Runtime Planes** (`defenseclaw-ai-runtime`) | What did those AI runtimes actually run on this host? | Security, incident responder | Prometheus, Loki | Runtime-plane coverage first, so a blind host is not read as clean, then runtime findings and host-level agent activity next to the discovery inventory. |
 | **Hook Connectors** (`defenseclaw-connectors`) | Which connectors are active, quiet, slow, or drifting? | Operator, integration owner | Prometheus, Loki | Cross-connector comparison and the route into Connector Detail. |
 | **Connector Detail** (`defenseclaw-connector-detail`) | Why is one connector behaving differently? | Integration owner | Prometheus, Loki | Connector-scoped hooks, latency, outcomes, tokens, findings, and recent events. |
 | **Guardrail Evaluations** (`defenseclaw-security`) | What did guardrails allow, alert, confirm, or block? | SOC, policy owner | Prometheus, Loki | Verdict funnel, severity, latency, connector comparison, and raw decision detail. |
@@ -69,23 +73,33 @@ zero from an unrelated metric is more dangerous than an honest absence.
 
 ## How the drill-down works
 
-```mermaid
-flowchart LR
-  O[Overview] --> C[Hook Connectors]
-  C --> CD[Connector Detail]
-  O --> A[Agent Activity]
-  O --> I[Agent identity]
-  I --> A360[Agent360]
-  A360 --> T[Tempo trace waterfall]
-  O --> G[Guardrail Evaluations]
-  G --> P[Policy decisions]
-  G --> H[HITL]
-  O --> S[Scanners]
-  S --> F[Findings]
-  O --> R[Runtime & Reliability]
-```
+<Flow
+  direction="TB"
+  caption="The main investigation paths, each one a link on the board above it. Every board also links back to Overview and across to related boards, and Agent360 opens a selected trace in its Tempo waterfall panel."
+>
+  <Node id="o" kind="generic" emphasis>{`Overview\nhealth and KPIs`}</Node>
+  <Node id="c" kind="generic">Hook Connectors</Node>
+  <Node id="i" kind="generic">Agent identity</Node>
+  <Node id="b" kind="generic">Blocked Events</Node>
+  <Node id="d" kind="generic">{`AI discovery\nUsage & Detection`}</Node>
+  <Node id="cd" kind="generic">Connector Detail</Node>
+  <Node id="a" kind="generic">Agent360</Node>
+  <Node id="p" kind="generic">Policy decisions</Node>
+  <Node id="r" kind="generic">{`Runtime Planes\nwhat actually ran`}</Node>
+  <Node id="t" kind="datastore">{`Tempo waterfall\none selected trace`}</Node>
+  <Edge from="o" to="c" />
+  <Edge from="o" to="i" />
+  <Edge from="o" to="b" />
+  <Edge from="o" to="d" />
+  <Edge from="c" to="cd" label="pick a connector" />
+  <Edge from="i" to="a" label="pick an agent" />
+  <Edge from="b" to="a" />
+  <Edge from="b" to="p" />
+  <Edge from="d" to="r" />
+  <Edge from="a" to="t" label="pick a trace" />
+</Flow>
 
-![Agent360 overview with a selected agent and lifecycle analytics](/images/grafana/agent360-overview.jpg)
+![Agent360 for a Claude Code agent: the Agent Directory, the KPI strip with turns, model and tool calls, tokens and cost marked Not reported, and the execution phase timeline](/images/grafana/agent360-overview.jpg)
 
 Agent and trace identifiers are rendered as direct data links. Selecting an
 Agent ID preserves the time range and opens the reusable Agent360 board.
@@ -93,35 +107,12 @@ Selecting a Trace ID sets the `trace` variable on the same dashboard and
 populates the Tempo waterfall without losing the connector, agent, lifecycle,
 or execution filters.
 
-The Agent360 lifecycle DAG is also interactive. Clicking a node or edge exposes
-its total count, grouping key, available lineage, session, lifecycle/execution,
-sequence, operation/call, outcome, connector, and trace fields plus
-time-range-preserving drill-down links. Session and durable lineage anchors may
-use the prior 24 hours to keep selected-range boundary edges renderable; a
-recovered lineage edge appears only when that child has graph-eligible activity
-in the selected range. Agent parentage comes only from active typed `parent_of`
-or inverse `delegated_by` relationship records, never a raw parent field or trace
-parentage.
-Repeated model calls are summarized per
-owning agent, provider, and model. Tool calls are summarized per owning agent as
-Bash, MCP, Skills, Collaboration, File edits, Web/browser, Visual, or Task control;
-an unrecognized tool keeps its reported name. Exact
-`collaboration.send_message` requests are excluded from the generic
-Collaboration summary and appear only as message groups; other collaboration tools
-remain in that family. Filtered links retain access to every exact raw canonical
-OTEL record. Stable agent nodes use agent/root/parent identity, name, type, depth,
-and connector; optional session fields stay in lifecycle/session/ordered/raw
-detail rather than splitting totals. One per-root **Prompt inputs** node counts distinct
-depth-zero `model.request` facts, deduplicated by turn, model-request, request,
-operation, then occurrence identity; the ordered/raw views retain the individual
-initial and follow-up records. Session start stays
-a distinct lifecycle anchor and is not mislabeled as prompt content. Real
-`collaboration.send_message` updates to `/root` or `/root/*` collapse into
-one **Messages to root** node per sender, resolving the exported root agent ID
-while exact paths/calls remain in ordered/raw drill-downs. Non-root targets remain
-exact groups without fabricating an agent-ID edge.
+The Agent360 lifecycle DAG is interactive too: click a node or edge to see its
+count, grouping key, and links to the exact raw records, with the time range
+preserved. The [Agent360 guide](/docs/observability/agent360#inspect-the-lifecycle-dag)
+explains how agents, models, tools, and messages are grouped.
 
-![Agent360 directed lifecycle DAG and trace drill-down](/images/grafana/agent360-topology.jpg)
+![Agent360 lifecycle DAG for a Codex agent tree: the prompt start, the root agent at depth 0, three depth-1 subagents, grouped tool-family and model nodes, and a terminal outcome](/images/grafana/agent360-topology.jpg)
 
 ## Which backend owns each answer
 
