@@ -76,6 +76,9 @@ type hookToolCallCapture struct {
 	// invocationID names the pending call this request remembered.
 	invocationID string
 	ok           bool
+	// promptMeta is the prompt this request remembered for its turn.
+	promptMeta llmEventMeta
+	promptOK   bool
 }
 
 type hookToolCallCaptureKey struct{}
@@ -90,6 +93,17 @@ func captureHookToolCall(ctx context.Context, meta llmEventMeta, tool, arguments
 	}
 	if capture, _ := ctx.Value(hookToolCallCaptureKey{}).(*hookToolCallCapture); capture != nil {
 		*capture = hookToolCallCapture{meta: meta, tool: tool, arguments: arguments, invocationID: invocationID, ok: true}
+	}
+}
+
+// captureHookPrompt records the prompt a hook request remembered for its
+// turn, so a block of that prompt can end the turn.
+func captureHookPrompt(ctx context.Context, meta llmEventMeta) {
+	if ctx == nil {
+		return
+	}
+	if capture, _ := ctx.Value(hookToolCallCaptureKey{}).(*hookToolCallCapture); capture != nil {
+		capture.promptMeta, capture.promptOK = meta, true
 	}
 }
 
@@ -112,7 +126,8 @@ func (a *APIServer) emitHookGuardrailOutcomeV8(
 	if !ok {
 		return
 	}
-	if capture, _ := ctx.Value(hookToolCallCaptureKey{}).(*hookToolCallCapture); capture != nil && capture.ok {
+	capture, _ := ctx.Value(hookToolCallCaptureKey{}).(*hookToolCallCapture)
+	if capture != nil && capture.ok {
 		meta := capture.meta
 		meta.Guardrail = outcome
 		if outcome.Action == "block" {
@@ -130,6 +145,20 @@ func (a *APIServer) emitHookGuardrailOutcomeV8(
 	evaluation := hookEvaluationContext{EvaluationID: resp.EvaluationID, RuleIDs: resp.RuleIDs}
 	a.emitGuardrailApplyTraceV8(ctx, req.ConnectorName, req.ToolName,
 		hookTargetTypeForEvent(req.HookEventName), verdict, elapsed, evaluation)
+	if capture != nil && capture.promptOK && outcome.Action == "block" {
+		// A blocked prompt never reaches the model, so no Stop ends its turn
+		// and Galileo, which has no span type for apply_guardrail, showed
+		// nothing (GAP-2485). The turn ends now with the block on its agent
+		// and chat spans and the block message as the reply the user saw.
+		meta := capture.promptMeta
+		meta.Guardrail = outcome
+		meta.LifecycleOutcome = "blocked"
+		reply := strings.TrimSpace(redaction.ForSinkReason(resp.Reason))
+		if reply == "" {
+			reply = "DefenseClaw blocked this prompt"
+		}
+		a.emitHookLLMSpan(ctx, meta, reply)
+	}
 }
 
 // annotateHookToolInvocation attaches an ask or alert decision to the tool

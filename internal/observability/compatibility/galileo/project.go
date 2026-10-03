@@ -1188,11 +1188,12 @@ func setSpanMetadata(attributes map[string]any, status any, resource any) {
 				metadata["status"] = "ERROR"
 			}
 		}
-	} else if outcome, ok := stringAttribute(attributes, "defenseclaw.outcome"); ok &&
+	}
+	// A blocked or denied operation says so, with or without guardrail fields
+	// of its own (the agent span of an ACP decision, GAP-1836), so one filter
+	// on defenseclaw.outcome finds every blocked turn (GAP-2484).
+	if outcome, ok := stringAttribute(attributes, "defenseclaw.outcome"); ok &&
 		(outcome == string(observability.OutcomeBlocked) || outcome == string(observability.OutcomeDenied)) {
-		// A span with no guardrail fields of its own, such as the agent span
-		// of an ACP decision, still says that the operation was blocked
-		// (GAP-1836).
 		metadata["defenseclaw.outcome"] = outcome
 	}
 	if len(metadata) == 0 {

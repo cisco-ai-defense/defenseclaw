@@ -649,6 +649,7 @@ func (a *APIServer) emitCodexHookLLMEvent(ctx context.Context, req codexHookRequ
 		promptID := a.emitLLMPromptEventV8(ctx, meta, req.Prompt, rawPayload)
 		a.rememberHookPromptID(ctx, "codex", req.SessionID, req.TurnID, promptID)
 		a.rememberHookLLMSpanPrompt(meta, req.Prompt)
+		captureHookPrompt(ctx, meta)
 		a.rememberHookSessionState(ctx, meta)
 	case "SubagentStart":
 		prompt := firstString(req.Payload, "task", "prompt", "description")
@@ -757,6 +758,7 @@ func (a *APIServer) emitAgentHookLLMEvent(ctx context.Context, req agentHookRequ
 		promptID := a.emitLLMPromptEventV8(ctx, meta, prompt, rawPayload)
 		a.rememberHookPromptID(ctx, source, req.SessionID, req.TurnID, promptID)
 		a.rememberHookLLMSpanPrompt(meta, prompt)
+		captureHookPrompt(ctx, meta)
 		a.rememberHookSessionState(ctx, meta)
 	case isModelCompletionEvent(req.HookEventName), isStopCompletionEvent(req.HookEventName):
 		response := strings.TrimSpace(req.Content)
@@ -846,6 +848,7 @@ func (a *APIServer) emitClaudeCodeHookLLMEvent(ctx context.Context, req claudeCo
 		promptID := a.emitLLMPromptEventV8(ctx, meta, prompt, rawPayload)
 		a.rememberHookPromptID(ctx, "claudecode", req.SessionID, "", promptID)
 		a.rememberHookLLMSpanPrompt(meta, prompt)
+		captureHookPrompt(ctx, meta)
 		a.rememberHookSessionState(ctx, meta)
 	case "MessageDisplay":
 		if strings.TrimSpace(req.Delta) == "" {

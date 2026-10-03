@@ -344,8 +344,11 @@ has no span type for it, so it reaches local observability and other OTLP
 destinations but not Galileo. The turn's `invoke_agent` and `chat` spans
 instead carry the decision for Galileo: the outcome `blocked` and the same
 three flat `defenseclaw.guardrail.*` attributes, which Galileo shows in the
-span's metadata. A prompt block therefore shows its rule and severity on the
-turn.
+span's metadata as `defenseclaw.outcome: blocked` next to the guardrail
+fields. A prompt block therefore shows its rule and severity on the turn, for
+OpenClaw and for the hook connectors (Claude Code, Codex and the others),
+whose blocked prompt ends its turn with the block message as the reply.
+Filter on `defenseclaw.outcome` to find every blocked turn.
 
 Galileo and Agent360 are complementary rather than competing views:
 
