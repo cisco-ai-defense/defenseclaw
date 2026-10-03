@@ -317,13 +317,38 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
         _log_setup_action(
             app,
             ACTION_SETUP_OBSERVABILITY,
-            f"action=add-v8 preset={preset.id}",
+            _setup_observability_add_details(
+                destination_name,
+                preset.id,
+                _resolve_inputs(preset, resolved_inputs).get("endpoint", ""),
+                updated=existed and result.changed,
+            ),
             allow_offline=True,
             offline_note=(
                 "  Saved. The gateway isn't running; it loads this destination when it starts "
                 "(defenseclaw-gateway start)."
             ),
         )
+
+
+def _setup_observability_add_details(name: str, preset_id: str, endpoint: str, *, updated: bool) -> str:
+    """Audit details for ``setup observability add`` (GAP-2144).
+
+    They name the destination, the preset and the endpoint, so two adds can
+    be told apart. The endpoint keeps only its scheme, host, port and path:
+    any user:password and query string are dropped.
+    """
+    details = f"action={'update' if updated else 'add'} name={name} preset={preset_id}"
+    endpoint = (endpoint or "").strip()
+    if endpoint:
+        from urllib.parse import urlsplit
+
+        parts = urlsplit(endpoint if "://" in endpoint else f"//{endpoint}")
+        host = parts.netloc.rsplit("@", 1)[-1]
+        shown = f"{parts.scheme}://{host}{parts.path}" if parts.scheme else f"{host}{parts.path}"
+        if shown:
+            details += f" endpoint={shown}"
+    return details
 
 
 # ---------------------------------------------------------------------------
