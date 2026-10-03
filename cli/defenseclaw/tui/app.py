@@ -893,6 +893,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
        short terminal; it scrolls. */
     #detail-panel.compact.aside-below {
         max-height: 5;
+        /* One blank row between the table and the card below it (GAP-2167). */
+        margin-top: 1;
     }
 
     #detail-panel-body {
@@ -1204,6 +1206,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         self._nav_switcher_hit: tuple[str, int, NavSwitcher] | None = None
         self._panel_aside_below: RenderableType | None = None
         self._detail_max_height: int | None = None
+        self._aside_box: tuple[int, int, int] = (0, 0, 0)
+        self._aside_box_recheck = False
         self._last_aside_signature: tuple[object, ...] | None = None
         self.detail_text = ""
         self.status_text = ""
@@ -8500,8 +8504,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             done = f"Done: {self._strip_label} · {self._strip_summary}" if self._strip_summary else ""
             if done:
                 # The status line cuts at its right edge, which took the
-                # next step first at 80x24 (GAP-2133).
-                done = _fit_keeping_next_step(done, max(24, self.size.width - 2))
+                # next step first at 80x24 (GAP-2133). Textual drops the last
+                # cell of a line that fills the status row exactly, so leave one.
+                done = _fit_keeping_next_step(done, max(24, self.size.width - 3))
             self._strip_clear()
             if done:
                 self._set_status(done)
@@ -10130,6 +10135,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         self.status_text = text
         strip = render_status_strip(self._hint_status_model())
         rendered = f"{text}  [#444444]│[/]  {strip}"
+        if _status_text_fills_line(text, self.size.width):
+            # A "Done: ..." fitted to the line lost its last cell to the "…"
+            # of the cut-off health strip ("press i for readines…", GAP-2133).
+            rendered = text
         # ``text`` is operator-supplied via every ``_set_status`` caller —
         # including ``self.audit_model.active_filter_label()`` and the
         # logs search prompt — both of which echo whatever was typed
@@ -10914,6 +10923,13 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         below = None if detail else self._panel_aside_below
         panel.set_class(below is not None, "aside-below")
         height, rows, width = self._aside_below_box() if below is not None else (0, 0, 0)
+        self._aside_box = (height, rows, width)
+        if below is not None and not self._aside_box_recheck:
+            # The box is measured before a panel switch's layout settles (the
+            # Setup card took the old panel's height, then grew by a row the
+            # next time help closed, GAP-2167). Measure again once it has.
+            self._aside_box_recheck = True
+            self.call_after_refresh(self._recheck_aside_below_box)
         if self._detail_max_height != (height or None):
             # Inline beats the CSS cap; None hands the cap back to the CSS.
             panel.styles.max_height = height or None
@@ -10969,6 +10985,13 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             # Discovery showed Codex while OpenCode's detail was open
             # (GAP-1596).
             self.call_after_refresh(self._keep_table_cursor_visible)
+
+    def _recheck_aside_below_box(self) -> None:
+        self._aside_box_recheck = False
+        if self._panel_aside_below is None or self.help_open:
+            return
+        if self._aside_below_box() != self._aside_box:
+            self._render_detail_panel()
 
     def _aside_below_box(self) -> tuple[int, int, int]:
         """``(height, rows, width)`` of ``#detail-panel`` showing an aside.
@@ -15912,6 +15935,18 @@ def _truncate_for_strip(value: str, width: int) -> str:
 
 
 _NEXT_STEP_SEP = " · next: "
+
+
+def _status_text_fills_line(text: str, width: int) -> bool:
+    """True when ``text`` leaves no room for the status line's health strip."""
+
+    try:
+        cells = Text.from_markup(text).cell_len
+    except Exception:  # noqa: BLE001 - not markup; count it as typed.
+        cells = len(text)
+    # The status line pads one cell on each side; the strip needs its
+    # "  │  " separator and a few cells to say anything.
+    return cells + 12 > max(0, width - 2)
 
 
 def _fit_keeping_next_step(value: str, limit: int) -> str:
