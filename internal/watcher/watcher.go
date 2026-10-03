@@ -89,6 +89,9 @@ type AdmissionResult struct {
 	InstallAction string
 	FileAction    string
 	RuntimeAction string
+	// ScanID is the scan_results row admission recorded, or "" when no
+	// scan was logged. It becomes the rescan baseline's scan (GAP-2507).
+	ScanID string
 }
 
 // OnAdmission is called after each install event is processed.
@@ -455,7 +458,9 @@ func (w *InstallWatcher) processPending(ctx context.Context) {
 			continue
 		}
 		for _, evt := range w.pendingInstallEvents(path) {
+			snap := w.admissionSnapshot(evt)
 			result := w.runAdmission(ctx, evt)
+			w.recordAdmissionBaseline(evt, snap, result.ScanID)
 			if w.onAdmit != nil {
 				w.onAdmit(result)
 			}
@@ -803,11 +808,12 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		reason := fmt.Sprintf("%s %q is on the block list — rejected", targetType, evt.Name)
 		_ = w.logger.LogAction(string(audit.ActionInstallRejected), evt.Path,
 			fmt.Sprintf("type=%s reason=blocked-post-scan", targetType))
-		_ = w.logScan(ctx, evt, result, "blocked")
+		scanID := w.logScanID(ctx, evt, result, "blocked")
 		w.enforceBlock(ctx, evt)
 		w.recordAdmission(ctx, "blocked", targetType)
 		res = AdmissionResult{
-			Event: evt, Verdict: VerdictBlocked, Reason: reason,
+			ScanID: scanID,
+			Event:  evt, Verdict: VerdictBlocked, Reason: reason,
 			MaxSeverity: string(result.MaxSeverity()), FindingCount: len(result.Findings),
 			InstallAction: "block",
 		}
@@ -817,10 +823,11 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		reason := fmt.Sprintf("scan found findings but %s %q is allow-listed — skipping enforcement", targetType, evt.Name)
 		_ = w.logger.LogAction(string(audit.ActionInstallAllowed), evt.Path,
 			fmt.Sprintf("type=%s reason=allow-listed-post-scan", targetType))
-		_ = w.logScan(ctx, evt, result, "allowed")
+		scanID := w.logScanID(ctx, evt, result, "allowed")
 		w.recordAdmission(ctx, "allowed", targetType)
 		res = AdmissionResult{
-			Event: evt, Verdict: VerdictAllowed, Reason: reason,
+			ScanID: scanID,
+			Event:  evt, Verdict: VerdictAllowed, Reason: reason,
 			MaxSeverity: string(result.MaxSeverity()), FindingCount: len(result.Findings),
 			InstallAction: "allow",
 		}
@@ -846,10 +853,11 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		out, evalErr := w.opa.Evaluate(ctx, input)
 		if evalErr == nil {
 			w.applyPostScanEnforcement(ctx, pe, out, evt, targetType, result, s.Name())
-			_ = w.logScan(ctx, evt, result, out.Verdict)
+			scanID := w.logScanID(ctx, evt, result, out.Verdict)
 			w.recordAdmission(ctx, out.Verdict, targetType)
 			res = AdmissionResult{
-				Event: evt, Verdict: toVerdict(out.Verdict), Reason: out.Reason,
+				ScanID: scanID,
+				Event:  evt, Verdict: toVerdict(out.Verdict), Reason: out.Reason,
 				MaxSeverity: string(result.MaxSeverity()), FindingCount: len(result.Findings),
 				InstallAction: out.InstallAction,
 				FileAction:    out.FileAction,
@@ -875,10 +883,11 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		ScanResult: scanInput,
 	}, fallbackProfile)
 	w.applyPostScanEnforcement(ctx, pe, out, evt, targetType, result, s.Name())
-	_ = w.logScan(ctx, evt, result, out.Verdict)
+	scanID := w.logScanID(ctx, evt, result, out.Verdict)
 	w.recordAdmission(ctx, out.Verdict, targetType)
 	res = AdmissionResult{
-		Event: evt, Verdict: toVerdict(out.Verdict), Reason: out.Reason,
+		ScanID: scanID,
+		Event:  evt, Verdict: toVerdict(out.Verdict), Reason: out.Reason,
 		MaxSeverity: string(result.MaxSeverity()), FindingCount: len(result.Findings),
 		InstallAction: out.InstallAction,
 		FileAction:    out.FileAction,
@@ -1455,6 +1464,15 @@ func (w *InstallWatcher) recordScanError(
 	if w != nil && w.logger != nil {
 		_ = w.logger.RecordWatcherScanErrorMetric(ctx, scannerName, targetType, errorType)
 	}
+}
+
+// logScanID logs an admission scan and returns its scan id, or "" when the
+// scan row was not written.
+func (w *InstallWatcher) logScanID(ctx context.Context, evt InstallEvent, result *scanner.ScanResult, verdict string) string {
+	if err := w.logScan(ctx, evt, result, verdict); err != nil {
+		return ""
+	}
+	return result.ScanID
 }
 
 func (w *InstallWatcher) logScan(

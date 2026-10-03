@@ -637,8 +637,9 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 					w.onAdmit(res)
 				}
 				if _, statErr := os.Lstat(evt.Path); statErr == nil {
-					// No scan id: the next cycle records the scan baseline.
-					w.persistSnapshot(evt, currentSnap, "", fingerprint)
+					// The admission scan is the baseline scan, so the next
+					// start skips the unchanged target (GAP-2507).
+					w.persistSnapshot(evt, currentSnap, res.ScanID, fingerprint)
 				}
 				return rescanScanned
 			}
@@ -750,6 +751,37 @@ func (w *InstallWatcher) scanAndEmit(ctx context.Context, evt InstallEvent) (*sc
 		return nil, ""
 	}
 	return result, w.emitRescanResult(scanCtx, result)
+}
+
+// admissionSnapshot hashes a live-watcher target before admission scans it,
+// so the baseline describes the content that was scanned. It returns nil
+// when periodic rescan is off or the target can't be snapshotted.
+func (w *InstallWatcher) admissionSnapshot(evt InstallEvent) *TargetSnapshot {
+	if w.store == nil || !w.cfg.Watch.RescanEnabled ||
+		(evt.Type != InstallSkill && evt.Type != InstallPlugin) {
+		return nil
+	}
+	snap, err := w.snapshotForEvent(evt)
+	if err != nil {
+		return nil
+	}
+	return snap
+}
+
+// recordAdmissionBaseline writes the rescan baseline for a target the live
+// watcher admitted with a logged scan. Without it the next gateway start
+// re-admitted the unchanged target as new, and the start after that scanned
+// it again for lack of a baseline scan: three scans and three scan-finding
+// alerts for one install (GAP-2507). A target admission moved away gets no
+// baseline.
+func (w *InstallWatcher) recordAdmissionBaseline(evt InstallEvent, snap *TargetSnapshot, scanID string) {
+	if snap == nil || scanID == "" {
+		return
+	}
+	if _, err := os.Lstat(evt.Path); err != nil {
+		return
+	}
+	w.persistSnapshot(evt, snap, scanID, w.scannerFingerprint(evt))
 }
 
 // persistSnapshot upserts the baseline snapshot (content/dep/config/endpoint
