@@ -25,12 +25,14 @@ vi.mock("node:os", () => ({
 
 vi.mock("node:fs", () => ({
   readFileSync: vi.fn(),
+  statSync: vi.fn(),
 }));
 
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { loadSidecarConfig, _resetSidecarConfigCache } from "../sidecar-config.js";
 
 const mockReadFileSync = vi.mocked(readFileSync);
+const mockStatSync = vi.mocked(statSync);
 
 describe("loadSidecarConfig", () => {
   const savedDefenseClawHome = process.env.DEFENSECLAW_HOME;
@@ -39,6 +41,10 @@ describe("loadSidecarConfig", () => {
   beforeEach(() => {
     _resetSidecarConfigCache();
     mockReadFileSync.mockReset();
+    mockStatSync.mockReset();
+    mockStatSync.mockImplementation(() => {
+      throw new Error("ENOENT");
+    });
     delete process.env.DEFENSECLAW_HOME;
     delete process.env.E2E_GATEWAY_TOKEN;
   });
@@ -332,6 +338,33 @@ describe("loadSidecarConfig", () => {
       });
       const cfg = loadSidecarConfig();
       expect(cfg.token).toBe("");
+    });
+
+    it("picks up a token rewritten in .env without a restart (GAP-2286)", () => {
+      let dotenv = "DEFENSECLAW_GATEWAY_TOKEN=old-token\n";
+      let envMtime = 1000;
+      mockReadFileSync.mockImplementation((path) => {
+        const p = String(path);
+        if (p.endsWith("config.yaml")) return "gateway:\n  api_port: 18970\n";
+        if (p.endsWith(".env")) return dotenv;
+        throw new Error("ENOENT: " + p);
+      });
+      mockStatSync.mockImplementation((path) => {
+        const p = String(path);
+        const st = p.endsWith(".env")
+          ? { mtimeMs: envMtime, size: dotenv.length }
+          : { mtimeMs: 1, size: 25 };
+        return st as ReturnType<typeof statSync>;
+      });
+
+      expect(loadSidecarConfig().token).toBe("old-token");
+      expect(loadSidecarConfig().token).toBe("old-token");
+
+      // `setup openclaw` adopts the OpenClaw gateway token: same length,
+      // new mtime.
+      dotenv = "DEFENSECLAW_GATEWAY_TOKEN=new-token\n";
+      envMtime = 2000;
+      expect(loadSidecarConfig().token).toBe("new-token");
     });
 
     it("respects gateway.token_env override and reads that name from dotenv", () => {
