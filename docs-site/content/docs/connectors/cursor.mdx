@@ -21,8 +21,9 @@ safe API for detecting an actual higher-priority conflict. DefenseClaw reports
 that limitation and does not infer a conflict. Ordinary user-hook action mode
 returns the documented native deny response on supported pre-action events and
 writes `failClosed: true`; observe remains allow/`would_block` with
-`failClosed: false`. Native ask/HITL is not enabled. No Enterprise or Team hook
-system is implemented by this connector.
+`failClosed: false`. Native ask/HITL is not enabled. The per-user connector
+writes no Enterprise or Team hooks; the enterprise standalone profile writes
+the Enterprise hooks file (see [Enterprise](#enterprise-standalone-profile)).
 
 ## Platform support
 
@@ -31,7 +32,7 @@ system is implemented by this connector.
 | Platform | Status | Connector path |
 | --- | --- | --- |
 | macOS and Linux | **Supported** | User-scoped command hooks invoke the portable DefenseClaw hook. |
-| Native Windows x64 | **Supported** | User-scoped command hooks invoke the managed `cursor-hook.ps1` pipeline adapter and protected `defenseclaw-hook.exe`. Validation metadata remains empty and `live=false`; the support label does not fabricate certification evidence. |
+| Native Windows x64 | **Supported** | User-scoped command hooks invoke the managed `cursor-hook.ps1` pipeline adapter and protected `defenseclaw-hook.exe`. |
 
 ## Setup
 
@@ -168,7 +169,7 @@ The alias selects Cursor; the follow-up `setup guardrail --connector cursor` swa
 </Cards>
 
 <Callout>
-Not sure what to pick? Run `defenseclaw setup guardrail` (no flags) — the [interactive wizard](/docs/guardrail#watch-the-interactive-flow) walks you through every choice with safe defaults pre-selected and inline help. The [Prompt → flag mapping](/docs/guardrail#prompt-flag-mapping) table gives you the CI-shaped command for the same configuration.
+Not sure what to pick? Run `defenseclaw setup guardrail` (no flags) — the [interactive wizard](/docs/guardrail#watch-the-interactive-flow) walks you through every choice with safe defaults pre-selected and inline help. The [Prompt → flag mapping](/docs/guardrail#prompt--flag-mapping) table gives you the CI-shaped command for the same configuration.
 </Callout>
 
 ## Files DefenseClaw will modify
@@ -182,6 +183,9 @@ Not sure what to pick? Run `defenseclaw setup guardrail` (no flags) — the [int
       <File name="cursor-hook.sh (macOS and Linux)" />
       <File name="cursor-hook.ps1 (native Windows)" />
     </Folder>
+  </Folder>
+  <Folder name="%LOCALAPPDATA%\DefenseClaw\HookRuntime (native Windows)">
+    <File name="defenseclaw-hook.exe" />
   </Folder>
 </Files>
 
@@ -228,10 +232,12 @@ Observe maps the same policy findings to allow plus `would_block` audit state.
 `sessionStart` and `sessionEnd` are not gates. `stop` and `subagentStop` accept
 only a follow-up message and are not blocking surfaces.
 
-The hook payload's `cursor_version` is the Cursor application/Desktop version.
-It is not Agent CLI evidence. The connector keeps `agent --version` contract
-selection separate and remains pinned to the exact reviewed Agent build; no
-Desktop release number is promoted into that Agent contract.
+The hook payload's `cursor_version` is the Cursor application version, not the
+Agent CLI version, so DefenseClaw does not use it to pick a contract. The
+contract comes from `agent --version`: Agent `2.4.0` up to `4.0.0`, or the
+reviewed Agent build `2026.07.23-e383d2b`. A later Agent build runs as an
+untested newer version
+([version policy](/docs/connectors/compatibility#version-policy)).
 
 Cursor spawns command-hook processes and automatically reloads `hooks.json`.
 If a change is not loaded, restart Cursor. Teardown therefore restores the
@@ -249,6 +255,28 @@ dialog does not hand the terminal back. The folder is trusted at that point, so
 close the tab and start `cursor-agent` again. To avoid the dialog, start it in
 a new folder with `cursor-agent --trust`.
 </Callout>
+
+## Enterprise (standalone profile)
+
+In the [enterprise standalone profile](/docs/enterprise/machine-policy),
+Cursor gets machine policy instead of the per-user `~/.cursor/hooks.json`.
+DefenseClaw merges one entry per event into Cursor's Enterprise hooks file and
+keeps every other key, event and entry in it:
+
+| OS | Enterprise hooks file |
+| --- | --- |
+| Linux | `/etc/cursor/hooks.json` |
+| macOS | `/Library/Application Support/Cursor/hooks.json` |
+| Windows | `%ProgramData%\Cursor\hooks.json`, with the `defenseclaw-hook.ps1` adapter beside it |
+
+Each entry runs the administrator's hook binary with
+`hook --connector cursor --enterprise-managed` and sets `failClosed: true`.
+Cursor still runs Team, Project and User hooks, and a deny from any of them
+wins, so they cannot allow what DefenseClaw denies; a foreign `preToolUse`
+hook can still rewrite tool input. Cursor applies the Enterprise file only on
+plans that support enterprise hooks, so check with a real Cursor session that
+DefenseClaw records its hook events. The macOS route is a preview in this
+release (not verified live).
 
 ## In an OpenShell sandbox
 
@@ -300,6 +328,20 @@ the Cursor Agent image already holds:
 
 ## Disable
 
+If Cursor is the only connector DefenseClaw guards, turn the guardrail off:
+
+```bash
+defenseclaw guardrail disable --yes
+```
+
+If other connectors are configured too, turn off Cursor alone and keep the
+rest running:
+
 ```bash
 defenseclaw guardrail disable --connector cursor --yes
 ```
+
+Both keep Cursor's settings, so `defenseclaw guardrail enable` (with the same
+`--connector`) turns it back on. To drop Cursor from the configured
+connectors instead, run `defenseclaw setup remove cursor --yes`; add `--force`
+when it is the last connector.

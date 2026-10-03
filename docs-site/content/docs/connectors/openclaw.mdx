@@ -160,7 +160,7 @@ first-party allow-list for additional containment.
 </Cards>
 
 <Callout>
-Not sure what to pick? Run `defenseclaw setup guardrail` (no flags) — the [interactive wizard](/docs/guardrail#watch-the-interactive-flow) walks you through every choice with safe defaults pre-selected and inline help. The [Prompt → flag mapping](/docs/guardrail#prompt-flag-mapping) table gives you the CI-shaped command for the same configuration.
+Not sure what to pick? Run `defenseclaw setup guardrail` (no flags) — the [interactive wizard](/docs/guardrail#watch-the-interactive-flow) walks you through every choice with safe defaults pre-selected and inline help. The [Prompt → flag mapping](/docs/guardrail#prompt--flag-mapping) table gives you the CI-shaped command for the same configuration.
 </Callout>
 
 ### Bedrock through a VPC endpoint
@@ -237,7 +237,7 @@ interception** row when the plugin self-test cannot prove a rewrite onto
 The plugin loads inside OpenClaw and hands two kinds of work to the gateway.
 Recognized LLM calls go through the guardrail proxy, which checks the request
 and the response. Before each tool call, the plugin asks the inspect API for a
-verdict. The [OpenClaw integration page](/docs/openclaw#end-to-end-flow) walks
+verdict. The [OpenClaw integration page](/docs/connectors/openclaw-integration#end-to-end-flow) walks
 through both as sequences, including approvals.
 
 <Flow

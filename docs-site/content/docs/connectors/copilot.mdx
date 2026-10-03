@@ -10,7 +10,7 @@ keywords:
 
 import { ConnectorSupport } from '@/components/support-matrix';
 
-The GitHub Copilot CLI connector wires DefenseClaw into [Copilot CLI hooks](https://docs.github.com/copilot/) globally under `~/.copilot/hooks/` by default, with an optional workspace mode for `<workspace>/.github/hooks/`. Native ask is supported on `preToolUse`, so HITL approvals surface inside the agent UI.
+The GitHub Copilot CLI connector wires DefenseClaw into [Copilot CLI hooks](https://docs.github.com/en/copilot/reference/hooks-reference) globally under `~/.copilot/hooks/` by default, with an optional workspace mode for `<workspace>/.github/hooks/`. Native ask is supported on `preToolUse`, so HITL approvals surface inside the agent UI.
 
 ## Platform support
 
@@ -19,7 +19,7 @@ The GitHub Copilot CLI connector wires DefenseClaw into [Copilot CLI hooks](http
 | Platform | Status | Connector path |
 | --- | --- | --- |
 | macOS and Linux | **Supported** | Global or workspace command hooks using the portable DefenseClaw hook. |
-| Native Windows x64 | **Supported** | Copilot's official `powershell` hook field synchronously invokes the protected `defenseclaw-hook.exe`; `preToolUse` supports native ask. Provider authentication remains required, while authenticated official-client HITL/live evidence and validation metadata remain unrecorded with `live=false`. |
+| Native Windows x64 | **Supported** | Copilot's official `powershell` hook field synchronously invokes the protected `defenseclaw-hook.exe`; `preToolUse` supports native ask. You still sign in to GitHub as usual. |
 
 ## Setup
 
@@ -56,6 +56,11 @@ By default this is **global/user-scoped**: DefenseClaw writes hook entries into 
 
 If `COPILOT_HOME` is set, DefenseClaw uses that official Copilot configuration root instead of `~/.copilot` for hooks, MCP, skills, and agents.
 
+DefenseClaw also inventories, without changing them, Copilot's agents, skills, MCP servers and plugins; see [AI Discovery](/docs/ai-discovery) for how inventory works.
+
+<Accordions>
+<Accordion title="What DefenseClaw inventories for Copilot CLI">
+
 With an explicitly pinned workspace, inventory follows Copilot's documented
 precedence instead of the DefenseClaw daemon's current directory. It reads
 `.github/agents` and `.claude/agents` at each ancestor through the Git root;
@@ -87,6 +92,9 @@ evidence.
 Read-only plugin inventory uses the official
 `copilot plugins list --kind plugin --json` command. DefenseClaw does not use
 that inventory path to install, enable, disable, or remove Copilot plugins.
+
+</Accordion>
+</Accordions>
 
 #### What `setup copilot` actually does
 
@@ -192,7 +200,7 @@ infers Copilot event identity from stdin fields.
 </Cards>
 
 <Callout>
-Not sure what to pick? Run `defenseclaw setup guardrail` (no flags) — the [interactive wizard](/docs/guardrail#watch-the-interactive-flow) walks you through every choice with safe defaults pre-selected and inline help. The [Prompt → flag mapping](/docs/guardrail#prompt-flag-mapping) table gives you the CI-shaped command for the same configuration.
+Not sure what to pick? Run `defenseclaw setup guardrail` (no flags) — the [interactive wizard](/docs/guardrail#watch-the-interactive-flow) walks you through every choice with safe defaults pre-selected and inline help. The [Prompt → flag mapping](/docs/guardrail#prompt--flag-mapping) table gives you the CI-shaped command for the same configuration.
 </Callout>
 
 ## Files DefenseClaw will modify
@@ -235,8 +243,7 @@ runtime's decision back to Copilot unchanged. It normalizes Windows
 PowerShell 5.1's leading encoding marker and uses UTF-8 without a BOM for the
 child streams. It does not require Bash or WSL. See the
 [recorded upstream Windows contract](https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/development/copilot-native-windows-contract.md)
-for source URLs, version/date evidence, event semantics, and the remaining
-authentic-client validation work.
+for source URLs, version and date evidence, and event semantics.
 
 Copilot upstream now documents optional OpenTelemetry traces and metrics.
 DefenseClaw does **not** configure or certify that native exporter in this
@@ -448,9 +455,23 @@ replaces that list, so name every harness you want:
 
 ## Disable
 
+If Copilot CLI is the only connector DefenseClaw guards, turn the guardrail off:
+
+```bash
+defenseclaw guardrail disable --yes
+```
+
+If other connectors are configured too, turn off Copilot CLI alone and keep the
+rest running:
+
 ```bash
 defenseclaw guardrail disable --connector copilot --yes
 ```
+
+Both keep Copilot CLI's settings, so `defenseclaw guardrail enable` (with the same
+`--connector`) turns it back on. To drop Copilot CLI from the configured
+connectors instead, run `defenseclaw setup remove copilot --yes`; add `--force`
+when it is the last connector.
 
 Teardown restores the exact pre-Setup hook document when its managed copy is
 unchanged. If an operator edits the file after Setup, DefenseClaw removes only

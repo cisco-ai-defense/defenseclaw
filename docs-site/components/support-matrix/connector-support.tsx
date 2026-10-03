@@ -41,8 +41,12 @@ function enterpriseSummary(id: string) {
   const parts = [...byRoute.entries()].map(([route, list]) =>
     list.length === OS_IDS.length ? route : `${route} on ${joinOs(list)}`,
   );
-  const preview = OS_IDS.filter((os) => row.enterprise[os].status === 'preview');
-  return `${parts.join('; ')}${preview.length ? ` (preview on ${joinOs(preview)})` : ''}`;
+  const routed = OS_IDS.filter((os) => row.enterprise[os].route !== 'unsupported');
+  const preview = routed.filter((os) => row.enterprise[os].status === 'preview');
+  if (preview.length === 0) return parts.join('; ');
+  // Every routed OS is a preview: say so once instead of repeating the OS list.
+  if (preview.length === routed.length) return `${parts.join('; ')}, preview`;
+  return `${parts.join('; ')} (preview on ${joinOs(preview)})`;
 }
 
 // One-line support strip for the top of a connector page's "Platform

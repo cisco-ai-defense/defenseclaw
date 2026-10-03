@@ -28,7 +28,7 @@ are not proxy-intercepted.
 | Platform | Status | Connector path |
 | --- | --- | --- |
 | macOS and Linux | **Supported** | Portable command hooks, native OTel, and the notify bridge. |
-| Native Windows x64 | **Supported** | Event- and contract-bound PowerShell `-EncodedCommand` bridge to the protected `defenseclaw-hook.exe`, plus native OTel and notify configuration. Validation version, date, and run metadata remain empty and `live=false`. |
+| Native Windows x64 | **Supported** | A system PowerShell bridge starts the protected `defenseclaw-hook.exe` for each registered event, plus native OTel and the notify bridge. |
 
 ## Setup
 
@@ -101,8 +101,9 @@ once on the [Defaults page](/docs/policies/defaults).
 
 `%CODEX_HOME%\config.toml` carries the DefenseClaw hook matrix, its hook trust
 entries, and DefenseClaw-marked OTLP and notify fields.
-Generated runtime and protected connector credentials live below
-`%USERPROFILE%\.defenseclaw\hooks`. Use setup/teardown commands; do not edit or
+The hook runtime, `defenseclaw-hook.exe`, lives in
+`%LOCALAPPDATA%\DefenseClaw\HookRuntime`; protected connector credentials
+and adapters live in `%USERPROFILE%\.defenseclaw\hooks`. Use setup/teardown commands; do not edit or
 copy those entries manually. See the
 [Windows path reference](/docs/get-started/windows/paths-troubleshooting#filesystem-reference).
 
@@ -132,20 +133,17 @@ owned entries.
 
 <HookEventsList connector="codex" />
 
-Action-mode responses follow each event's official control or feedback
-contract; the events do not all have the same effect:
-
 Each native hook request must exactly match the registered event and its stdin
 `hook_event_name`. Before policy evaluation, the gateway also compares that
 event and its contract ID with the protected contract lock; mismatches or
 tampering are rejected.
 
-The lifecycle-control rows marked **v3/v4** below are contract-supported only
-for Codex `>=0.133`: v3 covers `0.133` through `0.144`, and v4 covers
-`>=0.145`. This version boundary is not release certification; native Windows
-support does not populate authentic official-client validation metadata.
-DefenseClaw does not infer or backfill these matcher/control semantics onto the
-smaller v1/v2 contracts.
+The rows marked **v3/v4** need Codex `0.133` or later: the v3 contracts cover
+`0.133` through `0.144`, and v4 covers `0.145` and later. DefenseClaw does not
+apply these controls to the older v1/v2 contracts.
+
+In action mode each event answers with its own official control or feedback
+response, so the events do not all have the same effect:
 
 | Event | DefenseClaw-owned action response |
 | --- | --- |
@@ -186,8 +184,7 @@ DefenseClaw follows the current Codex layouts rather than Claude Code's
   transport, or other added field, is not exempt. Codex's generated
   `node_repl` currently has no stable published provenance/schema contract, so
   it intentionally remains scan-eligible even when the observed local runtime
-  binary is OpenAI-signed. MCP manifests shipped inside Amp skills are also
-  user/workspace assets and remain scan-eligible.
+  binary is OpenAI-signed.
 - Custom agents: standalone `.toml` files in candidate project
   `.codex/agents/` layers and `$CODEX_HOME/agents/`. Inventory validates the
   required `name`, `description`, and `developer_instructions` fields without
@@ -219,10 +216,10 @@ the presence of a file.
 
 <Flow
   direction="TB"
-  caption="Codex reaches the gateway's API port three separate ways. Only the hooks can block: they run on nine lifecycle events (session start, prompt, before and after each tool, permission request, subagent stop, before and after compaction, stop). Codex's own OpenTelemetry exporter and the notify bridge, which reports agent-turn-complete to /api/v1/codex/notify, only record."
+  caption="Codex reaches the gateway's API port three separate ways. Only the hooks can block. They run on up to eleven lifecycle events, depending on the Codex version, and nine of them can block: session start, prompt, before and after each tool, permission request, subagent stop, before and after compaction, and stop. Codex's own OpenTelemetry exporter and the notify bridge, which reports agent-turn-complete to /api/v1/codex/notify, only record."
 >
   <Node id="codex" kind="agent">Codex</Node>
-  <Node id="hooks" kind="connector">{`DefenseClaw hooks\nnine lifecycle events`}</Node>
+  <Node id="hooks" kind="connector">{`DefenseClaw hooks\nup to eleven events`}</Node>
   <Node id="otel" kind="connector">{`Built-in telemetry\nOpenTelemetry exporter`}</Node>
   <Node id="notify" kind="connector">{`Notify bridge\nafter each turn`}</Node>
   <Node id="gateway" kind="gateway">{`DefenseClaw gateway\nAPI port, 18970 by default`}</Node>
@@ -338,6 +335,20 @@ your own Codex configuration does not change.
 
 ## Disable
 
+If Codex is the only connector DefenseClaw guards, turn the guardrail off:
+
+```bash
+defenseclaw guardrail disable --yes
+```
+
+If other connectors are configured too, turn off Codex alone and keep the
+rest running:
+
 ```bash
 defenseclaw guardrail disable --connector codex --yes
 ```
+
+Both keep Codex's settings, so `defenseclaw guardrail enable` (with the same
+`--connector`) turns it back on. To drop Codex from the configured
+connectors instead, run `defenseclaw setup remove codex --yes`; add `--force`
+when it is the last connector.

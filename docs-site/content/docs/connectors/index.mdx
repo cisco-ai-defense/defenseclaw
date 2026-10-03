@@ -1,6 +1,6 @@
 ---
 title: Connectors
-description: Fifteen active connectors share one adapter interface while exposing connector-specific proxy, hook, ACP, policy, telemetry, and approval capabilities.
+description: Every DefenseClaw connector shares one adapter interface, and each one exposes only the hook, plugin, policy, ACP, telemetry and approval capabilities its agent offers.
 keywords:
   - DefenseClaw connectors
   - Claude Code connector
@@ -140,4 +140,4 @@ connector can report that its agent does not support a capability.
 </Flow>
 
 The gateway's API server, not `Setup`, registers each connector's hook route
-(for example `/api/v1/codex/hook`) when it starts. The interface is defined in [`internal/gateway/connector/connector.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/gateway/connector/connector.go); each per-connector file (`claudecode.go`, `codex.go`, `cursor.go` via `hook_only.go`, ...) implements it.
+(for example `/api/v1/codex/hook`) when it starts. The interface is defined in [`internal/gateway/connector/connector.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/gateway/connector/connector.go); each connector implements it in its own file (`claudecode.go`, `codex.go`, `devin.go`, ...), and Cursor and the other hook-only connectors share `hook_only.go`.

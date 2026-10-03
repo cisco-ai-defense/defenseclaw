@@ -34,14 +34,14 @@ wrote for the old app. See
 | Devin Desktop before 3.9.19, legacy **Cascade** agent | **No; turned off under the standalone enterprise profile** | Devin Desktop 3.9.19 [removed Cascade](https://docs.devin.ai/desktop/changelog). Cascade used a separate hook contract that DefenseClaw does not inspect. On a standalone enterprise host, DefenseClaw instead puts a refusal on every blocking Cascade event in the machine-level Cascade hooks file, so builds from 3.0.12 up to (not including) 3.9.19 refuse every Cascade prompt, file access, command and MCP call (see [Cascade on older builds](#cascade-on-older-builds)). Elsewhere, keep Devin Desktop at 3.9.19 or later (enterprise threat model [R28](https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/ENTERPRISE-THREAT-MODEL.md#residual-risks)). |
 | Cloud Devin sessions | **No** | Cloud execution does not run local hooks. |
 
-The supported hook contract is pinned to Devin CLI `3000.4.25` on Windows,
-macOS, and Linux, from source review. On Linux it is also pinned to
-`3000.11.3`, which delivers the `SessionStart`, `UserPromptSubmit`,
-`PreToolUse`, `PostToolUse`, `Stop` and `SessionEnd` events under these names
-and honors exit-code-2 blocks on `UserPromptSubmit` and `PreToolUse`
-(`PermissionRequest` and `PostCompaction` are not verified). Other Devin
-CLI versions from `3000.4.25` on use the same contract as untested newer
-versions unless they are known broken
+The hook contract was reviewed against Devin CLI `3000.4.25` on Windows,
+macOS and Linux. On Linux it is also pinned to `3000.11.3`, which a live check
+showed delivers the `SessionStart`, `UserPromptSubmit`, `PreToolUse`,
+`PostToolUse`, `Stop` and `SessionEnd` events under these names and honors
+exit-code-2 blocks on `UserPromptSubmit` and `PreToolUse` (`PermissionRequest`
+and `PostCompaction` are not verified). Any other Devin CLI version from
+`3000.4.25` on, on every OS, uses the same contract as an untested newer
+version unless it is known broken
 ([version policy](/docs/connectors/compatibility#version-policy)).
 
 ## Platform support
@@ -51,7 +51,7 @@ versions unless they are known broken
 | Platform | Status | Notes |
 | --- | --- | --- |
 | macOS and Linux | **Supported** | The native `devin-hooks-v1` contract manages user hooks under `~/.config/devin` or an explicitly pinned project hook document. |
-| Native Windows x64 | **Supported** | Setup admits only the current user's exact Devin CLI `3000.4.25` executable at its official LocalAppData path with a valid `Exafunction, Inc.` Authenticode signer. DefenseClaw adds no Bash or WSL dependency; Devin's own Windows hook runner invokes the protected native hook executable directly. |
+| Native Windows x64 | **Supported** | Native user hooks in `%APPDATA%\devin\config.json`. Devin's own Windows hook runner starts the protected `defenseclaw-hook.exe` directly; DefenseClaw adds no Bash or WSL dependency. Newer CLI builds than `3000.4.25`, such as `3000.11.x`, run as untested newer versions. |
 
 ## Setup
 
@@ -82,13 +82,13 @@ The connector can join an existing hook-connector roster. After setup, restart
 any open Devin CLI session and reopen Devin Desktop tabs so they load the new
 hooks.
 
-### Native Windows admission
+### Native Windows
 
-Native Windows Setup accepts only the current user's official CLI at
-`%LOCALAPPDATA%\devin\cli\bin\devin.exe`. The executable must be a regular,
-non-reparse file, report exactly `3000.4.25`, have a valid Authenticode chain,
-and be signed by `Exafunction, Inc.`. Setup does not trust a different
-PATH-resolved `devin.exe`.
+On Windows the contract is pinned to Devin CLI `3000.4.25`; the extra
+`3000.11.3` pin is Linux only. A newer CLI, such as `3000.11.x`, uses the same
+contract, and setup reports it as an untested newer version. A CLI older than
+`3000.4.25` has no contract, so setup keeps it in observe mode and refuses
+action mode.
 
 Devin evaluates hook commands through its own Bash execution path on Windows.
 DefenseClaw therefore registers the protected `defenseclaw-hook.exe` as a
@@ -229,6 +229,10 @@ which DefenseClaw does not rely on. Cross-event tool pairing is therefore
 detection-only. A `confirm` finding remains available in audit but cannot
 pause and resume in the DefenseClaw TUI.
 
+## Hook capabilities
+
+<HookEventsList connector="devin" />
+
 ## Local customization surfaces
 
 Read/write MCP custody is limited to the canonical user and project
@@ -330,8 +334,20 @@ the Devin CLI image already holds:
 
 ## Disable
 
+If Devin is the only connector DefenseClaw guards, turn the guardrail off:
+
+```bash
+defenseclaw guardrail disable --yes
+```
+
+If other connectors are configured too, turn off Devin alone and keep the
+rest running:
+
 ```bash
 defenseclaw guardrail disable --connector devin --yes
 ```
 
-<HookEventsList connector="devin" />
+Both keep Devin's settings, so `defenseclaw guardrail enable` (with the same
+`--connector`) turns it back on. To drop Devin from the configured
+connectors instead, run `defenseclaw setup remove devin --yes`; add `--force`
+when it is the last connector.

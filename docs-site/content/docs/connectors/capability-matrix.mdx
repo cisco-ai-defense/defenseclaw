@@ -54,15 +54,15 @@ The component renders from `data/capability-matrix.json`, which is the single ed
 The Antigravity contract documents native ask and hard deny only on
 `PreToolUse`. `PreInvocation` and `PostInvocation` are context-transform
 surfaces, `PostToolUse` is observation-only, and DefenseClaw returns the
-documented allow shape for `Stop`. No permission-bypass override is claimed
-without persisted official-client evidence.
+documented allow shape for `Stop`. DefenseClaw does not claim that its answer
+overrides a permission bypass you turn on in `agy`.
 </Callout>
 
 ## Common patterns
 
 ### "I want maximum safety on a single connector"
 
-Pick a row with **proxy family**, **block: yes**, **native ask: yes**, **fail-closed: yes**. That's [OpenClaw](/docs/connectors/openclaw) today.
+Pick a row with **block: yes**, **native ask: yes** and **fail-closed: yes**: [Claude Code](/docs/connectors/claudecode), [Amp](/docs/connectors/amp) or [OmniGent](/docs/connectors/omnigent). Each can deny before the action runs, ask you inside the agent on its pre-action events, and block when it cannot reach the gateway.
 
 ### "I want enforcement on Claude Code without the proxy"
 

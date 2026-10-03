@@ -23,7 +23,7 @@ The OpenCode connector wires DefenseClaw into [OpenCode](https://opencode.ai). O
 | Platform | Status | Notes |
 | --- | --- | --- |
 | macOS and Linux | **Supported** | The global bridge plugin is supported for the reviewed OpenCode `>=1.18.10,<1.19.0` contract. |
-| Native Windows x64 | **Supported** | DefenseClaw supports only direct native execution and admits the protected current-user `SST.opencode` WinGet executable or the native `opencode.exe` of the npm `opencode-ai` package. OpenCode recommends WSL but does not require it; mixed WSL/native paths, other package identities, Desktop sidecars, and ARM64 are outside this connector contract. Official-client validation metadata remains empty with `live=false`. |
+| Native Windows x64 | **Supported** | DefenseClaw supports only direct native execution and admits the protected current-user `SST.opencode` WinGet executable or the native `opencode.exe` of the npm `opencode-ai` package. OpenCode recommends WSL but does not require it; mixed WSL/native paths, other package identities, Desktop sidecars, and ARM64 are outside this connector contract. |
 
 ## Setup
 
@@ -75,8 +75,8 @@ normal while OpenCode is closed.
 
 OpenCode's [Windows guide](https://opencode.ai/docs/windows-wsl/) says that
 OpenCode can run directly on Windows while recommending WSL for the best
-experience. WSL is **recommended, not required**. DefenseClaw's packaged
-Windows setup admits two images for the current user: the official `SST.opencode` WinGet
+experience. WSL is **recommended, not required**. DefenseClaw's
+Windows setup accepts two executables for the current user: the official `SST.opencode` WinGet
 package at `%LOCALAPPDATA%\Microsoft\WinGet\Packages\SST.opencode_Microsoft.Winget.Source_8wekyb3d8bbwe\opencode.exe`,
 and the native image of the npm `opencode-ai` package (`npm install -g opencode-ai`) at
 `%APPDATA%\npm\node_modules\opencode-ai\bin\opencode.exe`. When both exist, WinGet wins.
@@ -93,20 +93,21 @@ and judge configuration.
 #### Version contract
 
 The current contract is `opencode-hooks-v1` / bridge `v7`, source-reviewed for
-`>=1.18.10,<1.19.0` with current pin `1.18.33`. The 1.18.33 plugin hook
-signatures used by this contract (`config`, `event`, `tool.execute.before`,
-`tool.execute.after`) match the 1.18.19 types; a thrown `Error` from
-`tool.execute.before` remains the block surface. A detected OpenCode version outside that bounded
-range is refused before connector config, plugin, lock, or active-roster
-publication in both observe and action mode unless the explicit exploratory
-drift override is set. Unversioned builds retain the general observe-warning /
-action-fail-closed policy and are not promoted to source-reviewed compatibility.
-The review pins the official
-[`v1.18.33` release](https://github.com/anomalyco/opencode/releases/tag/v1.18.33)
-and its plugin/config/MCP source. This is source
-compatibility evidence only: packaged Setup and authentic official-client
-Windows validation remain unrecorded and `live` remains `false`; supported
-availability does not alter those evidence fields.
+`>=1.18.10, <1.19.0` and pinned at the official
+[`v1.18.33` release](https://github.com/anomalyco/opencode/releases/tag/v1.18.33).
+The plugin hook signatures it uses (`config`, `event`, `tool.execute.before`,
+`tool.execute.after`) match the 1.18.19 types, and a thrown `Error` from
+`tool.execute.before` remains the block surface.
+
+- **Older than 1.18.10, or a known-broken version:** setup refuses OpenCode in
+  both observe and action mode, before it writes any config, plugin or lock,
+  unless the exploratory `DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1` override is
+  set.
+- **Newer, such as 1.19.x:** setup uses the v1 contract and reports an
+  untested newer version
+  ([version policy](/docs/connectors/compatibility#version-policy)).
+- **Version not readable:** observe mode continues with a warning, and action
+  mode is refused.
 
 ## Lifecycle events
 
@@ -179,6 +180,11 @@ File presence alone is not reported as runtime health.
   </Folder>
 </Files>
 
+Setup writes only `defenseclaw.js`. DefenseClaw also reads OpenCode's config layers, MCP servers, skills, plugins, agents, instructions, tools and commands for inventory, and `defenseclaw mcp` can edit the top-level `mcp` map.
+
+<Accordions>
+<Accordion title="How DefenseClaw reads OpenCode's config and local assets">
+
 DefenseClaw resolves the non-enterprise v1.18.10-v1.18.33 config layers in effective
 order: authenticated remote `.well-known` provenance (typed unverified; never
 fetched offline), global `config.json`/`opencode.json`/`opencode.jsonc`,
@@ -193,10 +199,12 @@ available, never against the daemon's unrelated cwd.
 `defenseclaw mcp list --connector opencode`, `mcp set`, and `mcp unset` operate
 on the top-level `mcp` map. Writes refuse while `OPENCODE_CONFIG_CONTENT` is
 active because an inline higher-precedence layer cannot be changed or restored
-atomically. Windows ProgramData managed config, MDM, Team/Program/cloud
-dashboard state, and other enterprise layers are excluded from this PR and
-typed as unverified; local results must not be read as final enterprise
-precedence. For runtime server-scoped policy, bridge v7 mirrors OpenCode's
+atomically. Per-user inventory does not read OpenCode's managed config,
+MDM or Team/cloud dashboard layers, so do not read local results as the final
+enterprise precedence. In the enterprise standalone profile DefenseClaw
+installs its plugin through OpenCode's managed config (`/etc/opencode`,
+`/Library/Application Support/opencode` or `%ProgramData%\opencode`); see
+[Machine policy](/docs/enterprise/machine-policy). For runtime server-scoped policy, bridge v7 mirrors OpenCode's
 official server/tool sanitizer, maps the effective enabled MCP server names,
 and rejects sanitizer collisions or prefix ambiguity instead of guessing.
 
@@ -228,6 +236,9 @@ pinned, otherwise `$OPENCODE_CONFIG_DIR/skills` (default
 `~/.config/opencode/skills`). Plugin/config assets remain discovery-only;
 DefenseClaw does not install third-party OpenCode plugins or rewrite those
 asset declarations.
+
+</Accordion>
+</Accordions>
 
 ## Hook capabilities
 
@@ -306,9 +317,23 @@ replaces that list, so name every harness you want:
 
 ## Disable
 
+If OpenCode is the only connector DefenseClaw guards, turn the guardrail off:
+
+```bash
+defenseclaw guardrail disable --yes
+```
+
+If other connectors are configured too, turn off OpenCode alone and keep the
+rest running:
+
 ```bash
 defenseclaw guardrail disable --connector opencode --yes
 ```
+
+Both keep OpenCode's settings, so `defenseclaw guardrail enable` (with the same
+`--connector`) turns it back on. To drop OpenCode from the configured
+connectors instead, run `defenseclaw setup remove opencode --yes`; add `--force`
+when it is the last connector.
 
 Teardown removes the managed plugin when it is unchanged since Setup. If the
 owning user or an administrator changes it, Doctor reports digest drift and
