@@ -272,7 +272,31 @@ func WriteTargetsManifestAtomic(path string, m Manifest) (changed bool, err erro
 	if _, statErr := os.Lstat(path); statErr == nil {
 		destinationExists = true
 		if err := validateWindowsTargetsManifestObject(path, false); err != nil {
-			return false, fmt.Errorf("enterprise hooks: validate existing hook guardian manifest: %w", err)
+			// Bulldoze: an existing manifest with a non-canonical owner or
+			// DACL (left behind by a prior unsigned certification install
+			// whose scoped guardian wrote it under a different token) must
+			// be re-protected before the reconcile cycle gives up. Call
+			// the authenticated protect helper (which has SeTakeOwnership /
+			// SeRestore privilege from the LocalSystem guardian token) to
+			// transfer ownership to Administrators and stamp the exact
+			// AdminFile DACL. If the second validate still fails after
+			// repair, propagate the original error.
+			fmt.Fprintf(os.Stderr,
+				"[enterprise-hooks] hook guardian manifest %s failed canonical "+
+					"validation (%v); re-stamping before replace\n",
+				path, err)
+			if protectErr := windowsTargetsManifestProtect(path, false); protectErr != nil {
+				return false, fmt.Errorf(
+					"enterprise hooks: validate existing hook guardian manifest: %w (repair also failed: %v)",
+					err, protectErr,
+				)
+			}
+			if revalidateErr := validateWindowsTargetsManifestObject(path, false); revalidateErr != nil {
+				return false, fmt.Errorf(
+					"enterprise hooks: validate existing hook guardian manifest: %w (after repair: %v)",
+					err, revalidateErr,
+				)
+			}
 		}
 	} else if !errors.Is(statErr, os.ErrNotExist) {
 		return false, fmt.Errorf("enterprise hooks: inspect existing manifest %s: %w", path, statErr)
