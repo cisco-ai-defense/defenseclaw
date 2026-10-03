@@ -4493,19 +4493,21 @@ def setup_gateway(
     target_changed = (gw.host, gw.port) != previous_target
     _print_gateway_summary(gw, openclaw=uses_openclaw)
 
-    if verify and target_changed and not api_port_changed and not gateway_stopped:
-        click.echo()
-        click.echo("  The gateway connects to the new address after the restart below.")
-        click.echo("  Check it then with: defenseclaw doctor")
-    elif verify and not api_port_changed and not gateway_stopped:
+    if verify and not api_port_changed and not gateway_stopped:
         from defenseclaw.commands.cmd_doctor import _check_openclaw_gateway, _check_sidecar, _DoctorResult
 
         ux.section("Verifying gateway connectivity")
         r = _DoctorResult()
-        # Hook-only installs have no OpenClaw gateway to reach.
+        # Hook-only installs have no OpenClaw gateway to reach. The OpenClaw
+        # listener check does not depend on the running sidecar, so it runs
+        # for a new address too (GAP-2486).
         if uses_openclaw:
             _check_openclaw_gateway(app.cfg, r)
-        _check_sidecar(app.cfg, r)
+        if not target_changed:
+            _check_sidecar(app.cfg, r)
+        elif not r.failed:
+            click.echo("  The gateway connects to the new address after the restart below.")
+            click.echo("  Check it then with: defenseclaw doctor")
         click.echo()
         if r.failed:
             click.echo("  Tip: fix the issues above, then run 'defenseclaw doctor' to re-check.")

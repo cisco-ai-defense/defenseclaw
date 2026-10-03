@@ -7827,6 +7827,9 @@ def _check_guardrail_proxy(cfg, r: _DoctorResult) -> None:
 _PROXY_DOCTOR_CONNECTORS = frozenset({"openclaw"})
 # Three 60s plugin cadences. A stopped interceptor must not keep doctor green.
 _INTERCEPTION_SELF_TEST_FRESHNESS = timedelta(minutes=3)
+# The plugin reports every 60 s and a restarted sidecar starts with no
+# report, so a fresh sidecar gets two cadences before a missing one fails.
+_INTERCEPTION_FIRST_REPORT_WINDOW = timedelta(minutes=2)
 
 
 def _check_proxy_interception(cfg, r: _DoctorResult, *, live_health: dict | None = None) -> None:
@@ -7851,6 +7854,23 @@ def _check_proxy_interception(cfg, r: _DoctorResult, *, live_health: dict | None
 
     label = "OpenClaw interception" if connectors == ["openclaw"] else "Proxy interception"
     info = live_health.get("interception") if isinstance(live_health, dict) else None
+    uptime_ms = live_health.get("uptime_ms") if isinstance(live_health, dict) else None
+    if (
+        not isinstance(info, dict)
+        and isinstance(uptime_ms, int)
+        and 0 <= uptime_ms < _INTERCEPTION_FIRST_REPORT_WINDOW.total_seconds() * 1000
+    ):
+        # GAP-2487: the sidecar just (re)started and the plugin has not
+        # reported yet; it does so within a minute without an OpenClaw restart.
+        _emit(
+            "warn",
+            label,
+            f"the DefenseClaw gateway started {uptime_ms // 1000} s ago; waiting for the OpenClaw plugin "
+            "to report its interception self-test (it reports every 60 s)",
+            remediation="rerun doctor in a minute",
+            r=r,
+        )
+        return
     if not isinstance(info, dict):
         _emit(
             "fail",
