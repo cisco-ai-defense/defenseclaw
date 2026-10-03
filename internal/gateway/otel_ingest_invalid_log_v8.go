@@ -15,9 +15,10 @@ import (
 
 const invalidInboundLeafLogInterval = time.Minute
 
-// invalidInboundLeafLogWriter is gateway.log (the gateway's stderr); tests
-// replace it.
-var invalidInboundLeafLogWriter io.Writer = os.Stderr
+// invalidInboundLeafLogWriter is set by tests. Otherwise lines go to
+// os.Stderr, read at write time so they pass through the gateway.log
+// time-stamping pipe the daemon installs after init (GAP-2343).
+var invalidInboundLeafLogWriter io.Writer
 
 var invalidInboundLeafLogLimiter = struct {
 	sync.Mutex
@@ -42,7 +43,11 @@ func logInvalidInboundLeafV8(leaf otlpDecodedLeaf, source string) {
 	}
 	invalidInboundLeafLogLimiter.last[key] = now
 	invalidInboundLeafLogLimiter.Unlock()
-	_, _ = fmt.Fprintf(invalidInboundLeafLogWriter,
+	out := invalidInboundLeafLogWriter
+	if out == nil {
+		out = os.Stderr
+	}
+	_, _ = fmt.Fprintf(out,
 		"[otel-ingest] dropped an invalid %s record from %s: %s (telemetry.records.dropped class=invalid_record)\n",
 		leaf.signal, boundedLogLabel(source), name)
 }

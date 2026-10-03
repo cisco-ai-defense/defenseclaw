@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 
@@ -52,6 +53,31 @@ func TestLogTransportFailureNamesCodeAndProxyPath(t *testing.T) {
 	} {
 		if !strings.Contains(lines[0], want) {
 			t.Fatalf("line %q lacks %q", lines[0], want)
+		}
+	}
+}
+
+// GAP-2343: one item is singular, and with no test writer the line goes to
+// the os.Stderr of the moment (the daemon's time-stamping pipe), not the
+// os.Stderr captured at package init.
+func TestLogTransportFailureSingularAndCurrentStderr(t *testing.T) {
+	previous := rejectionLogWriter
+	rejectionLogWriter = nil
+	t.Cleanup(func() { rejectionLogWriter = previous })
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved := os.Stderr
+	os.Stderr = w
+	logTransportFailure("galileo-gap2343", observability.SignalTraces, delivery.FailureCodeConnectionFailed, 1)
+	logTransportFailure("galileo-gap2343", observability.SignalLogs, delivery.FailureCodeConnectionFailed, 1)
+	os.Stderr = saved
+	_ = w.Close()
+	got, _ := io.ReadAll(r)
+	for _, want := range []string{"traces export failed: connection_failed (1 span);", "logs export failed: connection_failed (1 record);"} {
+		if !strings.Contains(string(got), want) {
+			t.Fatalf("stderr %q lacks %q", got, want)
 		}
 	}
 }
