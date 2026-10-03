@@ -9341,8 +9341,10 @@ def _check_connector_export_custody(report, r: _DoctorResult, *, configured: set
 
 
 def _short_age(seconds: float) -> str:
-    """Compact age for a doctor row: '12 min', '23 h' or '3 d'."""
-    minutes = max(0, int(seconds // 60))
+    """Compact age for a doctor row: 'under a minute', '12 min', '23 h' or '3 d'."""
+    if seconds < 60:
+        return "under a minute"
+    minutes = int(seconds // 60)
     if minutes < 60:
         return f"{minutes} min"
     hours = minutes // 60
