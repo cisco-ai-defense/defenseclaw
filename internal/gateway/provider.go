@@ -13,8 +13,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/maximhq/bifrost/core/schemas"
-
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/configs"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
@@ -190,23 +188,30 @@ type LLMProvider interface {
 	ChatCompletionStream(ctx context.Context, req *ChatRequest, chunkCb func(StreamChunk)) (*ChatUsage, error)
 }
 
+// litellmSidecarURL is set by the sidecar startup after the LiteLLM
+// manager becomes healthy. Factory functions use it as the default
+// base URL for litellmProvider instances.
+var litellmSidecarURL string
+
+func resolveLiteLLMBaseURL() string {
+	if litellmSidecarURL != "" {
+		return litellmSidecarURL
+	}
+	if v := os.Getenv("DEFENSECLAW_LITELLM_URL"); v != "" {
+		return v
+	}
+	return "http://127.0.0.1:4001"
+}
+
 // NewProvider creates an LLM provider adapter based on the model string.
 // The model format is "provider/model-name" (e.g. "anthropic/claude-opus-4-5").
-// All provider routing and API translation is handled by the Bifrost Go SDK.
+// LiteLLM handles all provider routing and API translation.
 func NewProvider(model string, apiKey string) (LLMProvider, error) {
-	provider, modelID := splitModel(model)
-	if provider == "" {
-		provider = inferProvider(modelID, apiKey)
-	}
-
-	providerKey, err := mapProviderKey(provider)
-	if err != nil {
-		return nil, err
-	}
-	return &bifrostProvider{
-		providerKey: providerKey,
-		model:       modelID,
-		apiKey:      apiKey,
+	baseURL := resolveLiteLLMBaseURL()
+	return &litellmProvider{
+		model:   model,
+		apiKey:  apiKey,
+		baseURL: baseURL,
 	}, nil
 }
 
@@ -238,23 +243,10 @@ func NewProviderWithBase(model string, apiKey string, baseURL string) (LLMProvid
 	if baseURL == "" {
 		return NewProvider(model, apiKey)
 	}
-
-	baseURL = strings.TrimRight(baseURL, "/")
-
-	provider, modelID := splitModel(model)
-	if provider == "" {
-		provider = inferProvider(modelID, apiKey)
-	}
-
-	providerKey, err := mapProviderKey(provider)
-	if err != nil {
-		return nil, err
-	}
-	return &bifrostProvider{
-		providerKey: providerKey,
-		model:       modelID,
-		apiKey:      apiKey,
-		baseURL:     baseURL,
+	return &litellmProvider{
+		model:   model,
+		apiKey:  apiKey,
+		baseURL: strings.TrimRight(baseURL, "/"),
 	}, nil
 }
 
@@ -342,110 +334,26 @@ func buildProviderFromEffective(llm *config.LLMConfig, inst *configs.Provider) (
 	model := llm.Model
 	apiKey := llm.ResolvedAPIKey()
 	baseURL := strings.TrimRight(strings.TrimSpace(llm.BaseURL), "/")
-	// Provider type precedence: explicit role config > overlay's
-	// base_provider_type > known model prefix > infer. The
-	// LLMConfig.Provider field is the only "explicit role family"
-	// signal — the prefix in Model can carry a *custom instance
-	// name* (e.g. "acme-internal/some-model") which is not a real
-	// provider family, so we deliberately do not honor it as a
-	// family hint when the overlay has a base_provider_type.
-	providerType := strings.ToLower(strings.TrimSpace(llm.Provider))
-
-	// Effective sub-blocks: role wins, overlay fills blanks. Sub-block
-	// pointer-nil-ness is treated as "operator did not specify".
-	effBedrock := llm.Bedrock
-	effVertex := llm.Vertex
-	effAzure := llm.Azure
-	var tls tlsOverrides
-	if llm.TLS != nil {
-		tls = tlsOverrides{
-			CACertPEM:          llm.TLS.CACertPEM,
-			InsecureSkipVerify: llm.TLS.InsecureSkipVerify,
-		}
-	}
-
 	extraHeaders := llm.ExtraHeaders
 	if inst != nil {
 		if baseURL == "" {
 			baseURL = strings.TrimRight(inst.BaseURL, "/")
 		}
-		if providerType == "" {
-			providerType = inst.BaseProviderType
-		}
-		if tls.isZero() && inst.TLS != nil {
-			tls = tlsOverrides{
-				CACertPEM:          inst.TLS.CACertPEM,
-				InsecureSkipVerify: inst.TLS.InsecureSkipVerify,
-			}
-		}
 		if len(inst.ExtraHeaders) > 0 && len(extraHeaders) == 0 {
 			extraHeaders = inst.ExtraHeaders
 		}
-		if effBedrock == nil && inst.Bedrock != nil {
-			effBedrock = &config.BedrockKeyConfig{
-				Region:            inst.Bedrock.Region,
-				AuthMode:          inst.Bedrock.AuthMode,
-				AccessKeyEnv:      inst.Bedrock.AccessKeyEnv,
-				SecretKeyEnv:      inst.Bedrock.SecretKeyEnv,
-				SessionTokenEnv:   inst.Bedrock.SessionTokenEnv,
-				ProfileName:       inst.Bedrock.ProfileName,
-				InferenceProfile:  inst.Bedrock.InferenceProfile,
-				DeploymentAliases: inst.Bedrock.DeploymentAliases,
-			}
-		}
-		if effVertex == nil && inst.Vertex != nil {
-			effVertex = &config.VertexKeyConfig{
-				ProjectID:             inst.Vertex.ProjectID,
-				Region:                inst.Vertex.Region,
-				AuthMode:              inst.Vertex.AuthMode,
-				ServiceAccountJSONEnv: inst.Vertex.ServiceAccountJSONEnv,
-			}
-		}
-		if effAzure == nil && inst.Azure != nil {
-			effAzure = &config.AzureKeyConfig{
-				Endpoint:          inst.Azure.Endpoint,
-				APIVersion:        inst.Azure.APIVersion,
-				AuthMode:          inst.Azure.AuthMode,
-				DeploymentAliases: inst.Azure.DeploymentAliases,
-			}
-		}
 	}
 
-	if providerType == "" {
-		if p, _ := splitModel(model); p != "" {
-			providerType = p
-		} else {
-			providerType = inferProvider(model, apiKey)
-		}
-	}
-	providerKey, err := mapProviderKey(providerType)
-	if err != nil {
-		return nil, fmt.Errorf("gateway: unsupported provider type %q: %w", providerType, err)
+	effectiveBase := resolveLiteLLMBaseURL()
+	if baseURL != "" {
+		effectiveBase = baseURL
 	}
 
-	_, modelID := splitModel(model)
-	if modelID == "" {
-		modelID = model
-	}
-	// Bedrock inference_profile injects a region prefix onto the model
-	// id before dispatch. Bifrost has no field for it; this is how
-	// the role path (--bedrock-inference-profile us.) already works.
-	if providerKey == schemas.Bedrock && effBedrock != nil && effBedrock.InferenceProfile != "" {
-		if !strings.HasPrefix(modelID, effBedrock.InferenceProfile) {
-			modelID = effBedrock.InferenceProfile + modelID
-		}
-	}
-
-	return &bifrostProvider{
-		providerKey:  providerKey,
-		model:        modelID,
+	return &litellmProvider{
+		model:        model,
 		apiKey:       apiKey,
-		baseURL:      baseURL,
-		tls:          tls,
+		baseURL:      effectiveBase,
 		extraHeaders: extraHeaders,
-		bedrock:      effBedrock,
-		vertex:       effVertex,
-		azure:        effAzure,
 	}, nil
 }
 

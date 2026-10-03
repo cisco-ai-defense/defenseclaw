@@ -99,6 +99,7 @@ type Sidecar struct {
 	osNotifier    *notifier.Dispatcher
 	configMgr     *ConfigManager
 	modelRouter   ModelRouter
+	litellm       *LiteLLMManager
 
 	// ipcRunner is injected by the CLI layer to avoid a gateway/ipc import
 	// cycle. A nil runner disables the managed UDS server.
@@ -866,6 +867,20 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 	netguard.SetAllowedPrivateIPs(allowedIPs)
 	if len(allowedIPs) > 0 {
 		fmt.Fprintf(os.Stderr, "[sidecar] private-upstream allowlist: %d IPs configured\n", len(allowedIPs))
+	}
+
+	// Start LiteLLM managed sidecar. The manager launches the process,
+	// waits for health, then pushes models from config via REST API.
+	s.litellm = NewLiteLLMManager(s.currentConfig())
+	if err := s.litellm.Start(runCtx); err != nil {
+		fmt.Fprintf(os.Stderr, "[litellm] startup failed: %v (LiteLLM disabled)\n", err)
+		s.litellm = nil
+	} else {
+		litellmSidecarURL = s.litellm.BaseURL()
+		if err := s.litellm.PushModels(s.currentConfig()); err != nil {
+			fmt.Fprintf(os.Stderr, "[litellm] model push failed: %v\n", err)
+		}
+		defer s.litellm.Stop()
 	}
 
 	// Initialize semantic router (managed or remote). Sidecar owns this
