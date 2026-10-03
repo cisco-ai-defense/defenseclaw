@@ -101,7 +101,7 @@ rules:
     confidence: 0.99
     tags: [execution, download-exec, bounded-lineage]
   - id: CMD-EVAL
-    pattern: '(?i)(?:^|[;&|\r\n]\s*)eval\s+["''\$\(]'
+    pattern: '(?i)(?:^|[;&|\r\n"]\s*)eval\s+\\?["''\$\(]'
     title: "Shell eval with dynamic input"
     severity: HIGH
     confidence: 0.85

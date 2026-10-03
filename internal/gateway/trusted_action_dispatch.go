@@ -2928,7 +2928,7 @@ func trustedLegacyCommandRuleMatches(
 			if !ok {
 				continue
 			}
-			scanCommand.Argv = staticArgv
+			scanCommand.Argv = withTrustedDynamicEvalOperand(command, staticArgv)
 			scanCommand.ArgvComplete = true
 		} else if command.Effect != actionfacts.EffectExecute {
 			continue
@@ -3018,6 +3018,22 @@ func trustedLegacyCommandRuleMatches(
 		}
 	}
 	return matchesByID
+}
+
+// withTrustedDynamicEvalOperand keeps the shape CMD-EVAL names: eval whose
+// first operand expands at runtime (eval "$(...)", eval "$VAR"). The static
+// argv stops at that operand, which left a bare "eval" that no command rule
+// can match, so the rule never fired on a real tool call (GAP-2575). A "$"
+// stands in for the runtime value; nothing else about the argv changes.
+func withTrustedDynamicEvalOperand(
+	command actionfacts.CommandFact,
+	argv []string,
+) []string {
+	if command.Program != "eval" || len(argv) != 1 ||
+		len(command.Arguments) < 2 || !command.Arguments[1].Expands {
+		return argv
+	}
+	return append(argv, "$")
 }
 
 func trustedStaticCommandArgv(
