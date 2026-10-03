@@ -297,16 +297,32 @@ READINESS_HINT = "press 0 (Setup), then i for readiness"
 
 # A doctor row that needs attention: "[WARN] Connector OTLP: codex  -  ..."
 # (plain) or "⚠ Connector OTLP: codex  —  ..." (color), label only.
-_DOCTOR_ATTENTION_RE = re.compile(r"^(?:\[(?:WARN|FAIL)\]|[\u26a0\u2717])\s+(.+?)(?:\s{2,}[\u2014-]\s{2,}.*)?$")
+_DOCTOR_ATTENTION_RE = re.compile(r"^(\[(?:WARN|FAIL)\]|[\u26a0\u2717])\s+(.+?)(?:\s{2,}[\u2014-]\s{2,}.*)?$")
 DOCTOR_DETAILS_HINT = "press A (Activity) for the check details"
 
 
-def doctor_attention_rows(lines: Sequence[str]) -> list[str]:
-    """Labels of the doctor checks that warned or failed, in output order."""
+def doctor_attention_checks(lines: Sequence[str]) -> list[tuple[bool, str]]:
+    """``(failed, label)`` of each doctor check that failed or warned.
 
-    labels = (m.group(1).strip() for line in lines if (m := _DOCTOR_ATTENTION_RE.match(line.strip())))
-    # "⚠ Fix the failures above, then re-run" is doctor's footer, not a check.
-    return list(dict.fromkeys(label for label in labels if not label.startswith("Fix the failures above")))
+    Failures come first, then warnings, each in output order: a failure
+    after two warnings was hidden behind "and 1 more" (GAP-2419).
+    """
+
+    checks: dict[str, bool] = {}
+    for line in lines:
+        if not (match := _DOCTOR_ATTENTION_RE.match(line.strip())):
+            continue
+        label = match.group(2).strip()
+        # "⚠ Fix the failures above, then re-run" is doctor's footer, not a check.
+        if not label.startswith("Fix the failures above"):
+            checks[label] = checks.get(label, False) or match.group(1) in ("[FAIL]", "\u2717")
+    return sorted(((failed, label) for label, failed in checks.items()), key=lambda check: not check[0])
+
+
+def doctor_attention_rows(lines: Sequence[str]) -> list[str]:
+    """Labels of the doctor checks that failed or warned, failures first."""
+
+    return [label for _failed, label in doctor_attention_checks(lines)]
 
 
 def suggested_next_action(
@@ -464,13 +480,16 @@ def command_result_summary(command: str, lines: Sequence[str]) -> str:
                 return text.lstrip("\u2192 ").strip()
         return ""
     if "doctor" in lowered:
-        attention = doctor_attention_rows(lines)
+        attention = doctor_attention_checks(lines)
         health = next((line.strip() for line in reversed(lines) if line.strip().startswith("Health:")), "")
         if health and attention:
             # "Health: 129 passed, 1 warning" did not say which check warned
-            # (GAP-2252).
-            more = f" and {len(attention) - 2} more" if len(attention) > 2 else ""
-            return f"{health} · check: {', '.join(attention[:2])}{more}"
+            # (GAP-2252). Failures lead, and say so when warnings follow, so
+            # the failing check is never cut or hidden (GAP-2419).
+            mixed = len({failed for failed, _label in attention}) > 1
+            named = [f"{'failed' if failed else 'warning'} {label}" if mixed else label for failed, label in attention]
+            more = f" and {len(named) - 2} more" if len(named) > 2 else ""
+            return f"{health} · check: {', '.join(named[:2])}{more}"
         return ""
     if "restart" in lowered:
         for line in lines:
