@@ -512,6 +512,11 @@ func writeWindowsEnterpriseLifecyclePreflightFailure(
 			err,
 		)
 	}
+	// A coded caller error (naming the Secure Client profile on a standalone
+	// computer, exit 1639) is answered by this JSON alone, as the standalone
+	// results are (GAP-2445). Uncoded Secure Client failures keep their
+	// historical stderr line.
+	silenceJSONReportedError(cmd, true, cause)
 	return cause
 }
 
