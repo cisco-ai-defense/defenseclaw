@@ -344,6 +344,9 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 			if !ok {
 				return nil
 			}
+			if event.Op&(fsnotify.Rename|fsnotify.Remove) != 0 {
+				forgetDirWatches(fsw, event.Name, watchedDirs)
+			}
 			if event.Op&(fsnotify.Create|fsnotify.Rename) == 0 {
 				continue
 			}
@@ -1068,6 +1071,10 @@ func (w *InstallWatcher) enforceBlockWith(ctx context.Context, evt InstallEvent,
 	}
 }
 
+// pluginCategoryQuarantineDir is the quarantine tree of plugins in a Hermes
+// category folder (cli/defenseclaw/enforce/plugin_enforcer.py mirrors it).
+const pluginCategoryQuarantineDir = "plugin-categories"
+
 func (w *InstallWatcher) quarantineAsset(ctx context.Context, evt InstallEvent) {
 	w.quarantineAssetWith(ctx, evt, true)
 }
@@ -1098,11 +1105,15 @@ func (w *InstallWatcher) quarantineAssetWith(ctx context.Context, evt InstallEve
 		return
 	}
 	if category, _, nested := strings.Cut(evt.Name, "/"); nested && evt.Type == InstallPlugin {
-		// A plugin in a category folder keeps its category in quarantine
-		// (plugins/<connector>/<category>/<name>), so "plugin restore
-		// <category>/<name>" finds it and web/x and memx/x don't share one
-		// slot (GAP-2464).
-		plan.QuarantinePath = filepath.Join(filepath.Dir(plan.QuarantinePath), filepath.Base(category), physicalName)
+		// A plugin in a category folder keeps its category in quarantine, so
+		// "plugin restore <category>/<name>" finds it and web/x and memx/x
+		// don't share one slot (GAP-2464). It lives in its own tree
+		// (plugin-categories/<connector>/<category>/<name>), not inside the
+		// slot of a flat plugin named like the category, which "plugin
+		// restore <category>" would otherwise restore with it (GAP-2470).
+		plan.QuarantinePath = filepath.Join(
+			plan.QuarantineRoot, pluginCategoryQuarantineDir, connector, filepath.Base(category), physicalName,
+		)
 	}
 	record, err := w.store.CreateQuarantineRecord(ctx, audit.CreateQuarantineRecordInput{
 		TargetType: evt.Type.String(), TargetName: evt.Name,
@@ -1582,6 +1593,33 @@ func addClaudeCacheWatches(
 	watched map[string]struct{},
 ) {
 	addDirWatches(fsw, root, 2, watched)
+}
+
+// forgetDirWatches drops the watches of path and the folders below it once
+// path was moved (to quarantine) or removed. fsnotify drops the watch of the
+// moved folder itself, but watchedDirs kept its key, so addDirWatches skipped
+// a folder re-created at the same path and nothing added to it reached
+// admission (GAP-2469). Watches of sub-folders that moved along are removed
+// too, so events inside quarantine aren't reported under the old path.
+func forgetDirWatches(fsw *fsnotify.Watcher, path string, watched map[string]struct{}) {
+	key := strings.ToLower(filepath.Clean(path))
+	if _, ok := watched[key]; !ok {
+		return
+	}
+	below := func(p string) bool {
+		p = strings.ToLower(filepath.Clean(p))
+		return p == key || strings.HasPrefix(p, key+string(filepath.Separator))
+	}
+	for k := range watched {
+		if below(k) {
+			delete(watched, k)
+		}
+	}
+	for _, p := range fsw.WatchList() {
+		if below(p) {
+			_ = fsw.Remove(p)
+		}
+	}
 }
 
 // addDirWatches watches root and its real (non-symlink) subfolders down to

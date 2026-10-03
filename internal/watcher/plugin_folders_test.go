@@ -49,8 +49,17 @@ func TestLivePluginEventsExpandCategoryAndWaitOnEmptyFolder(t *testing.T) {
 		got["a2a"] == "" {
 		t.Fatalf("bundled platforms events = %v, want a2a", got)
 	}
-	// A flat plugin without a manifest is still one plugin for the scanner.
-	if got := pluginEventNames(w.pendingInstallEvents(filepath.Join(user, "flat"))); len(got) != 1 || got["flat"] == "" {
+	// Hermes loads a folder only with its manifest (GAP-2471): it waits
+	// until plugin.yaml lands, then it is one plugin.
+	flat := filepath.Join(user, "flat")
+	if events := w.pendingInstallEvents(flat); len(events) != 0 {
+		t.Fatalf("flat folder without manifest events = %v, want none", events)
+	}
+	write(flat, "plugin.yaml")
+	if queued, ok := w.waitingPluginEvent(filepath.Join(flat, "plugin.yaml")); !ok || queued != flat {
+		t.Fatalf("manifest in waiting flat folder = %q, %v; want %q", queued, ok, flat)
+	}
+	if got := pluginEventNames(w.pendingInstallEvents(flat)); len(got) != 1 || got["flat"] != flat {
 		t.Fatalf("flat plugin events = %v, want flat", got)
 	}
 
@@ -117,14 +126,14 @@ func TestWatcherStartWaitsOnExistingCategoryFolders(t *testing.T) {
 	for _, dir := range []string{
 		filepath.Join(user, "web"), filepath.Join(user, "memx"),
 		filepath.Join(user, "memx", "later"), filepath.Join(bundled, "platforms"),
+		filepath.Join(user, "flat"),
 	} {
 		if _, ok := w.pluginWaiting[dir]; !ok {
 			t.Errorf("%s not watched at start (watched %v)", dir, watched)
 		}
 	}
 	for _, dir := range []string{
-		filepath.Join(user, "flat"), filepath.Join(user, "manifested"),
-		filepath.Join(bundled, "platforms", "a2a"),
+		filepath.Join(user, "manifested"), filepath.Join(bundled, "platforms", "a2a"),
 	} {
 		if _, ok := w.pluginWaiting[dir]; ok {
 			t.Errorf("plugin %s watched as a category folder", dir)
@@ -142,5 +151,57 @@ func TestWatcherStartWaitsOnExistingCategoryFolders(t *testing.T) {
 	write(bundledNew, "plugin.yaml")
 	if queued, ok := w.waitingPluginEvent(bundledNew); !ok || queued != bundledNew {
 		t.Fatalf("new bundled platform plugin = %q, %v; want %q", queued, ok, bundledNew)
+	}
+}
+
+// GAP-2471: a Hermes folder that holds only notes is an empty category, as
+// Hermes scan_directory sees it: created live it is watched, not admitted and
+// quarantined as a plugin; present at start it is watched too, so a plugin
+// added to it later is admitted by its category/name id. The rescan skips it.
+func TestHermesNotesOnlyFolderIsACategory(t *testing.T) {
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	cfg.Guardrail.Connector = "hermes"
+	t.Setenv("HERMES_BUNDLED_PLUGINS", "")
+	user := filepath.Join(filepath.Dir(skillDir), "plugins")
+	write := func(dir string, files ...string) {
+		t.Helper()
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		for _, f := range files {
+			if err := os.WriteFile(filepath.Join(dir, f), []byte("name: x\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	live := filepath.Join(user, "notesonly")
+	write(live, "NOTES.txt")
+	atStart := filepath.Join(user, "notes2")
+	write(atStart, "NOTES.txt")
+	w := New(cfg, nil, []string{user}, store, logger, nil, nil)
+	w.addWatch = func(string) {}
+	w.watchExistingPluginFolders(user)
+	if _, ok := w.pluginWaiting[atStart]; !ok {
+		t.Fatalf("notes-only folder at start not watched")
+	}
+	if events := w.pendingInstallEvents(live); len(events) != 0 {
+		t.Fatalf("notes-only folder events = %v, want none (an empty category)", events)
+	}
+	if _, ok := w.pluginWaiting[live]; !ok {
+		t.Fatalf("live notes-only folder not watched")
+	}
+	for _, target := range w.enumerateTargets() {
+		if target.Path == live || target.Path == atStart {
+			t.Fatalf("rescan target %s is a category folder", target.Path)
+		}
+	}
+	added := filepath.Join(atStart, "vb14n")
+	write(added, "plugin.yaml", "__init__.py")
+	queued, ok := w.waitingPluginEvent(added)
+	if !ok || queued != added {
+		t.Fatalf("plugin in notes-only category = %q, %v; want %q", queued, ok, added)
+	}
+	if got := pluginEventNames(w.pendingInstallEvents(queued)); len(got) != 1 || got["notes2/vb14n"] != added {
+		t.Fatalf("events = %v, want notes2/vb14n", got)
 	}
 }
