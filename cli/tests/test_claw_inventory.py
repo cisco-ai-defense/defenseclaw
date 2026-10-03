@@ -1236,6 +1236,41 @@ class TestCLIIntegration(unittest.TestCase):
         self.assertEqual(data["plugins"], [])
         self.assertEqual(data["memory"], [])
 
+    def test_scan_only_rejects_unknown_category(self):
+        # GAP-2399: an unknown --only category is a usage error (rc 2).
+        from defenseclaw.commands.cmd_aibom import aibom
+        runner = CliRunner()
+        for arg in ("bogus", "mcp,bogus"):
+            with self.subTest(arg=arg):
+                result = runner.invoke(aibom, ["scan", "--only", arg], obj=self.app)
+                self.assertEqual(result.exit_code, 2, result.output)
+                self.assertIn("unknown category 'bogus'", result.output)
+                self.assertIn("valid: skills, plugins, mcp", result.output)
+
+    @patch("defenseclaw.inventory.claw_inventory.subprocess.run", side_effect=_mock_run)
+    def test_scan_only_accepts_singular(self, _):
+        from defenseclaw.commands.cmd_aibom import aibom
+        runner = CliRunner()
+        result = runner.invoke(aibom, ["scan", "--json", "--only", "skill"], obj=self.app)
+        self.assertEqual(result.exit_code, 0, result.output)
+        data = json.loads(result.stdout)
+        self.assertEqual(len(data["skills"]), 2)
+        self.assertEqual(data["mcp"], [])
+
+    def test_coverage_notes_avoid_internal_jargon(self):
+        # GAP-2400: notes say what was listed and what was not, in plain words.
+        from defenseclaw.inventory.claw_inventory import _UNVERIFIED_CONNECTOR_NOTES
+
+        jargon = (
+            "same-name winner", "official-client evidence", "project-through-worktree",
+            "activation provenance", "singular/plural", "custom-tool registry",
+            "no-follow", "inventoried",
+        )
+        for key, note in _UNVERIFIED_CONNECTOR_NOTES.items():
+            for word in jargon:
+                with self.subTest(key=key, word=word):
+                    self.assertNotIn(word, note)
+
     @patch("defenseclaw.inventory.claw_inventory.subprocess.run", side_effect=FileNotFoundError)
     def test_scan_with_errors_shows_warning(self, _):
         from defenseclaw.commands.cmd_aibom import aibom
@@ -2951,8 +2986,8 @@ class TestBuildAibomFromFilesystem(unittest.TestCase):
             {category: limitations[category]["status"] for category in ("mcp", "rules", "skills")},
             {"mcp": "unverified", "rules": "unverified", "skills": "unverified"},
         )
-        self.assertIn("legacy config*.json", limitations["mcp"]["reason"])
-        self.assertIn("runtime precedence", limitations["rules"]["reason"])
+        self.assertIn("older config*.json", limitations["mcp"]["reason"])
+        self.assertIn("which rule wins at runtime", limitations["rules"]["reason"])
 
     def test_codex_agents_and_rules_reject_reparse_ancestry(self):
         cfg = _make_cfg_for_connector(self.tmp, "codex")

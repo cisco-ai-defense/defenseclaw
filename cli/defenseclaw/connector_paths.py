@@ -708,8 +708,9 @@ def claude_auto_memory_resolution(
     if not workspace:
         return ClaudeAutoMemoryResolution(
             limitation=(
-                "Claude auto-memory project identity is unresolved because no "
-                "connector workspace/session CWD is available"
+                "Claude auto-memory is not listed: no project folder is set "
+                "(claw.workspace_dir), so DefenseClaw cannot tell which "
+                "project's memory Claude Code uses"
             ),
         )
     project_root, project_limitation = _claude_project_root(workspace)
