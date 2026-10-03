@@ -22,6 +22,7 @@ mirroring the Cobra root command in internal/cli/root.go.
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import re
@@ -447,6 +448,23 @@ def _plain_help(text: str | None) -> str | None:
     return _RST_LITERAL.sub(r"'\1'", text)
 
 
+def _first_sentence(text: str | None) -> str | None:
+    """The first sentence of *text*, for a group's Commands list.
+
+    Without an explicit short_help Click cuts the summary off at the terminal
+    width with '...' (GAP-2036); the whole sentence wraps instead.
+    """
+    if not text:
+        return None
+    words = inspect.cleandoc(text).split("\n\n", 1)[0].split()
+    if words and words[0] == "\b":
+        words = words[1:]
+    for i, word in enumerate(words):
+        if word.endswith("."):
+            return " ".join(words[: i + 1])
+    return " ".join(words) or None
+
+
 def _plain_help_tree(command: click.Command, seen: set[int] | None = None) -> None:
     """Clean the help text of every command and option once, at import."""
     seen = set() if seen is None else seen
@@ -454,7 +472,7 @@ def _plain_help_tree(command: click.Command, seen: set[int] | None = None) -> No
         return
     seen.add(id(command))
     command.help = _plain_help(command.help)
-    command.short_help = _plain_help(command.short_help)
+    command.short_help = _plain_help(command.short_help) or _first_sentence(command.help)
     for param in command.params:
         if isinstance(param, click.Option):
             param.help = _plain_help(param.help)
@@ -606,7 +624,7 @@ def main() -> None:
         )
         sys.exit(1)
     except CanonicalObservabilityError as exc:
-        click.echo(f"Error: the gateway did not confirm the audit event: {exc}", err=True)
+        click.echo(f"Error: the audit event was not recorded: {exc}.", err=True)
         sys.exit(1)
     except OSError as exc:
         if _output_pipe_closed(exc):
