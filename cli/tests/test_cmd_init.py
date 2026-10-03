@@ -1831,7 +1831,7 @@ class TestInitShowsGatewayDefaults(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Watcher:", result.output)
         self.assertIn("enabled=True", result.output)
-        self.assertIn("take_action=False", result.output)
+        self.assertIn("take_action=True", result.output)  # GAP-2357: gateway default
 
     @patch("defenseclaw.commands.cmd_init.shutil.which", return_value=None)
     @patch("defenseclaw.commands.cmd_init._install_guardrail")
@@ -1863,7 +1863,7 @@ class TestInitShowsGatewayDefaults(unittest.TestCase):
         self.assertEqual(gateway.port, 18789)
         self.assertEqual(gateway.api_port, 18970)
         self.assertTrue(gateway.watcher.enabled)
-        self.assertFalse(gateway.watcher.skill.take_action)
+        self.assertTrue(gateway.watcher.skill.take_action)
 
     @patch("defenseclaw.commands.cmd_init._resolve_openclaw_gateway",
            return_value={"host": "127.0.0.1", "port": 18789, "token": ""})

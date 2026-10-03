@@ -146,6 +146,18 @@ gateway:
   api_bind: ""                 # REST API bind override; normally 127.0.0.1 when empty
   config_reload:
     mode: hot                  # hot | restart; omitted means hot
+  watcher:                     # install watcher for new skills, plugins and MCP servers
+    enabled: true
+    skill:
+      enabled: true
+      take_action: true        # apply skill_actions (quarantine/block) to a rejected new skill; false = alert only
+      dirs: []                 # non-empty replaces the connector's own skill folders
+    plugin:
+      enabled: true
+      take_action: true        # same for new plugins (plugin_actions)
+      dirs: []
+    mcp:
+      take_action: true        # block a rejected new MCP server in the connector's MCP config
 
 # One observability graph owns collection, local history, routing, redaction,
 # sampling, metrics policy, and every optional destination. Defaults collect
