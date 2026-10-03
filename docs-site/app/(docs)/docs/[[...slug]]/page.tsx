@@ -51,6 +51,9 @@ export default async function Page({ params }: PageParams) {
       tableOfContent={{
         enabled: page.data.toc.length > 0,
         style: 'clerk',
+        // A labelled landmark, so the rail's links are not loose content
+        // outside every landmark (axe region).
+        container: { role: 'complementary', 'aria-label': 'On this page' },
       }}
       role="main"
     >

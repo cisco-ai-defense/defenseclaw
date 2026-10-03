@@ -1999,6 +1999,9 @@ article#nd-page .prose :where(code):not(pre code) {
 
 .scenario-code-line {
   position: relative;
+  /* Own stacking context, so the z-index:-1 highlight paints above the code
+   * theme's background instead of behind it. */
+  isolation: isolate;
   display: grid;
   grid-template-columns: 3.5rem minmax(max-content, 1fr) 1.5rem;
   min-height: 1.75em;
@@ -2638,12 +2641,12 @@ samp {
  * blocks and the terminal animation use it. */
 .dc-scroll-cue {
   --cue-bg: var(--color-fd-background);
-  --cue-shadow: color-mix(in oklab, var(--color-fd-foreground) 24%, transparent);
+  --cue-shadow: color-mix(in oklab, var(--color-fd-foreground) 16%, transparent);
   background:
     linear-gradient(to right, var(--cue-bg) 35%, transparent) left center / 2.25rem 100% no-repeat local,
     linear-gradient(to left, var(--cue-bg) 35%, transparent) right center / 2.25rem 100% no-repeat local,
-    radial-gradient(farthest-side at 0 50%, var(--cue-shadow), transparent) left center / 0.8rem 100% no-repeat scroll,
-    radial-gradient(farthest-side at 100% 50%, var(--cue-shadow), transparent) right center / 0.8rem 100% no-repeat scroll;
+    linear-gradient(to right, var(--cue-shadow), transparent) left center / 0.9rem 100% no-repeat scroll,
+    linear-gradient(to left, var(--cue-shadow), transparent) right center / 0.9rem 100% no-repeat scroll;
   background-color: var(--cue-bg);
 }
 
@@ -2705,6 +2708,16 @@ article#nd-page :not(pre) > code[data-inline='long'] {
  * default chip text, which was hard to read in dark mode. */
 #nd-toc a code {
   color: inherit;
+}
+
+/* Guided demo code uses GitHub's comment grey, which misses 4.5:1 on the
+ * demo's code surfaces in both themes. */
+.scenario-code-theme-light span[style*='color:#6A737D' i] {
+  color: #57606a !important;
+}
+
+.scenario-code-theme-dark span[style*='color:#6A737D' i] {
+  color: #8b949e !important;
 }
 
 /* Print: the diagram entrance animations must not leave messages or nodes

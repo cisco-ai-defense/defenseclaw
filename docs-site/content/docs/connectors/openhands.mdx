@@ -53,7 +53,7 @@ By default this is **global/user-scoped**: DefenseClaw writes native OpenHands h
 The OpenHands connector is **hook-only**. `defenseclaw setup openhands` defaults to observability-only `mode=observe`, and `defenseclaw setup openhands --mode action` enables hook-native blocking. OpenHands still talks directly to its configured upstream model provider in both modes; DefenseClaw never inserts an LLM proxy.
 </Callout>
 
-#### What `setup openhands` actually does
+### What `setup openhands` actually does
 
 The wrapper accepts the same hook-alias flags as the other hook connectors. The underlying guardrail config falls back to the values DefenseClaw ships with — schema-defined in [`internal/config/config.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/config/config.go) and documented on the [Defaults page](/docs/policies/defaults).
 
@@ -73,7 +73,7 @@ for global setup and set only when `--workspace` is supplied. See the
 [full guardrail setup](/docs/guardrail) for advanced scanner and judge
 configuration.
 
-#### Version contract
+### Version contract
 
 DefenseClaw validates the installed OpenHands CLI version during setup when the trusted `openhands --version` probe succeeds. The supported POSIX contract starts at `OpenHands CLI 1.12.0`, the first version that loads user-global `~/.openhands/hooks.json`. It is source-reviewed against `OpenHands CLI 1.16.0` with no maximum version currently declared.
 
@@ -81,7 +81,7 @@ DefenseClaw validates the installed OpenHands CLI version during setup when the 
 Global OpenHands setup observes local OpenHands sessions that load `~/.openhands/hooks.json`. OpenHands 1.16.0 loads a repository-local `.openhands/hooks.json` instead of the global file, not next to it: in a project that has its own file, none of DefenseClaw's global hooks run, so tool calls there are not inspected or logged. Use `--workspace` when you want DefenseClaw to manage a repo-local file explicitly. In an enterprise deployment the guardian writes only the global file, and the foreign-hook guard does not cover OpenHands; see the [enterprise residual risks](/docs/enterprise/threat-model#residual-risks).
 </Callout>
 
-#### Native traces on macOS
+### Native traces on macOS
 
 On macOS, start OpenHands through DefenseClaw to send OpenHands' own
 OpenTelemetry traces to the gateway as well:

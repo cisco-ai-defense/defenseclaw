@@ -272,7 +272,7 @@ export function HookEventsList({ connector }: { connector: string }) {
   return (
     <div className="not-prose my-4 grid gap-4 md:grid-cols-2">
       <div className="rounded-lg border border-fd-border p-4">
-        <h4 className="mb-2 text-sm font-semibold">Block events</h4>
+        <p className="mb-2 text-sm font-semibold">Block events</p>
         <ul className="space-y-1 text-sm">
           {row.hooks.blockEvents.map((e) => (
             <li key={e} className="font-mono text-xs">
@@ -282,7 +282,7 @@ export function HookEventsList({ connector }: { connector: string }) {
         </ul>
       </div>
       <div className="rounded-lg border border-fd-border p-4">
-        <h4 className="mb-2 text-sm font-semibold">Native ask events</h4>
+        <p className="mb-2 text-sm font-semibold">Native ask events</p>
         {row.hooks.askEvents.length === 0 ? (
           <p className="text-sm text-fd-muted-foreground">
             None — confirm verdicts are downgraded with the raw action preserved.

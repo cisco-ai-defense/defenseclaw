@@ -250,7 +250,6 @@ export function TerminalAnimation({
     <figure
       ref={containerRef}
       className="my-6"
-      role="group"
       aria-label={description}
     >
       <div className="terminal-window overflow-hidden rounded-2xl shadow-lg">

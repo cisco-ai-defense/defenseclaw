@@ -747,7 +747,7 @@ wrong answer about a machine you are not on.
 
 **Unmanaged install — the operator grants these directly**
 
-| | macOS | Linux | Windows |
+| Signal | macOS | Linux | Windows |
 | --- | --- | --- | --- |
 | **A** inference heartbeat | nothing | nothing | nothing for own processes; elevation for all |
 | **B** egress attribution | root | root or `CAP_DAC_READ_SEARCH` | elevated token |
@@ -784,7 +784,7 @@ failing whole.
 The gateway is deliberately de-privileged here, so with one exception these
 grants do not go to it:
 
-| | macOS | Linux | Windows |
+| Setting | macOS | Linux | Windows |
 | --- | --- | --- | --- |
 | Gateway runs as | root (LaunchDaemon) | unprivileged `defenseclaw`, systemd sandbox | virtual service account |
 | Acquisition | direct | **brokered** via `defenseclaw-sensor-helper` | **brokered** via `defenseclaw-sensor-helper` |
