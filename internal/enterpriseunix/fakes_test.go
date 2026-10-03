@@ -218,6 +218,7 @@ type fakeRunner struct {
 	mu       sync.Mutex
 	versions map[string]string // gateway path -> version
 	calls    []string
+	ps       string // what ps -axo pid=,uid=,comm= prints (macOS)
 }
 
 func (r *fakeRunner) Run(_ context.Context, name string, args ...string) (CommandResult, error) {
@@ -238,6 +239,8 @@ func (r *fakeRunner) Run(_ context.Context, name string, args ...string) (Comman
 		return CommandResult{Stdout: []byte(fmt.Sprintf(`{"schema_version":1,"name":"defenseclaw-gateway","version":%q}`, version))}, nil
 	}
 	switch name {
+	case "ps":
+		return CommandResult{Stdout: []byte(r.ps)}, nil
 	case "dpkg", "rpm":
 		return CommandResult{ExitCode: 1}, errors.New("not owned")
 	case "restorecon":
