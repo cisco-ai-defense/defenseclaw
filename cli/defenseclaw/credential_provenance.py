@@ -40,6 +40,8 @@ _active_dotenv_digest: bytes | None = None
 # _markers it survives a later dotenv change, so child_environ() can still
 # drop a value the TUI injected before the user removed or rotated it.
 _injected_values: dict[str, bytes] = {}
+# The data dir each of those values came from.
+_injected_dirs: dict[str, str] = {}
 
 
 def _normalize_data_dir(data_dir: str) -> str:
@@ -89,6 +91,7 @@ def note_dotenv_candidate(data_dir: str, env_name: str, value: str, *, injected:
     with _lock:
         if injected:
             _injected_values[env_name] = value_digest
+            _injected_dirs[env_name] = normalized
         if normalized != _active_data_dir or _active_dotenv_digest is None:
             _markers.pop(marker_key, None)
             return
@@ -112,6 +115,23 @@ def was_injected_from_dotenv(data_dir: str, env_name: str, value: str) -> bool:
             _markers.pop(marker_key, None)
             return False
         return True
+
+
+def holds_injected_value(data_dir: str, env_name: str, value: str) -> bool:
+    """Return whether ``value`` is one this process copied from ``data_dir``'s dotenv.
+
+    Unlike :func:`was_injected_from_dotenv` this still holds after the dotenv
+    file changed, so a reload can tell its own stale copy (safe to refresh)
+    from a value the shell exported (which always wins).
+    """
+    with _lock:
+        digest = _injected_values.get(env_name)
+        source = _injected_dirs.get(env_name)
+    return (
+        digest is not None
+        and source == _normalize_data_dir(data_dir)
+        and hmac.compare_digest(digest, _digest_value(value))
+    )
 
 
 def child_environ() -> dict[str, str]:
@@ -143,5 +163,6 @@ def _reset_for_tests() -> None:
     with _lock:
         _markers.clear()
         _injected_values.clear()
+        _injected_dirs.clear()
         _active_data_dir = None
         _active_dotenv_digest = None
