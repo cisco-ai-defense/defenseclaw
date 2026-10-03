@@ -156,9 +156,10 @@ def config_validate(quiet: bool) -> None:
 )
 @click.option(
     "--section",
-    type=click.Choice(["observability"], case_sensitive=False),
+    type=str,
     default=None,
-    help="Limit output to one configuration section.",
+    metavar="SECTION",
+    help="Limit output to one configuration section (for example observability).",
 )
 @click.option(
     "--reveal",
@@ -195,11 +196,20 @@ def config_show(
             except (V8ConfigError, RuntimeError) as exc:
                 raise click.ClickException(str(exc)) from exc
         else:
-            try:
-                result = inspect_v8_config("effective", config_path=cfg_path)
-            except ConfigInspectError as exc:
-                raise click.ClickException(str(exc)) from exc
-            data = {"observability": result.effective or {}}
+            # Restore the pre-v8 view: the resolved configuration carries every
+            # section the operator can set, not observability alone. The Go
+            # observability plan stays canonical for that one section, because
+            # its graph is owned by the Go compiler rather than the Python
+            # compatibility dataclass.
+            cfg = app.cfg if app.cfg is not None else config_module.load()
+            data = _v8_effective_view(cfg, reveal=reveal)
+            wants_observability = section is None or section.lower() == "observability"
+            if wants_observability:
+                try:
+                    result = inspect_v8_config("effective", config_path=cfg_path)
+                except ConfigInspectError as exc:
+                    raise click.ClickException(str(exc)) from exc
+                data["observability"] = result.effective or {}
     else:
         if provenance:
             raise click.UsageError("--provenance requires a configuration v8 effective plan")
@@ -490,6 +500,23 @@ def _config_to_masked_dict(cfg, *, reveal: bool) -> dict:
 
     _walk(raw)
     return raw
+
+
+def _v8_effective_view(cfg, *, reveal: bool) -> dict:
+    """Render the resolved v8 configuration across every section.
+
+    Configuration v8 replaced the legacy ``otel``/``audit_sinks``/``privacy``
+    blocks with the canonical ``observability`` graph, so those top-level keys
+    no longer exist in an exact-v8 document and must not be printed as if they
+    did. Everything else the operator can set is part of the resolved view -
+    the same sections the pre-v8 ``config show`` printed.
+    """
+    data = _config_to_masked_dict(cfg, reveal=reveal)
+    # Reuse the removal set the writer applies, so the read and write views
+    # cannot disagree about which top-level keys an exact-v8 document may carry.
+    for removed in config_module._V8_UNMODELED_OR_REMOVED_TOP_LEVEL:
+        data.pop(removed, None)
+    return data
 
 
 def _is_secret_field(key: str) -> bool:

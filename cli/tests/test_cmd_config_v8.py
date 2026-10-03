@@ -151,6 +151,78 @@ def test_v8_effective_view_is_go_owned_and_reveal_is_rejected(tmp_path: Path) ->
     assert "--reveal is not supported" in reveal.output
 
 
+def test_v8_effective_view_restores_non_observability_sections(tmp_path: Path) -> None:
+    """The v8 resolved view is the whole config, not observability alone.
+
+    Configuration v8 replaced the legacy ``otel``/``audit_sinks``/``privacy``
+    blocks with the canonical observability graph, so an exact-v8 document
+    cannot carry those top-level keys. Everything else the pre-v8 ``config
+    show`` printed must still be present - this is the regression the
+    narrower view introduced.
+    """
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "config_version: 8\n"
+        "observability: {}\n"
+        "openshell:\n"
+        "  enabled: true\n"
+        "  admin:\n"
+        "    max_resources:\n"
+        "      cpu: \"1\"\n"
+        "      memory: 1Gi\n"
+        "guardrail:\n"
+        "  connector: claudecode\n"
+        "  mode: observe\n",
+        encoding="utf-8",
+    )
+    effective = {"buckets": [], "destinations": []}
+    with (
+        patch.object(cmd_config.config_module, "config_path", return_value=config_path),
+        patch.object(cmd_config, "inspect_v8_config", return_value=_wire("effective", effective=effective)),
+    ):
+        result = CliRunner().invoke(
+            cmd_config.config_cmd,
+            ["show", "--format", "json"],
+            env={"DEFENSECLAW_CONFIG": str(config_path)},
+        )
+
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert data["openshell"]["admin"]["max_resources"] == {"cpu": "1", "memory": "1Gi"}
+    assert data["guardrail"]["mode"] == "observe"
+    assert data["observability"] == effective
+    # The observability section stays Go-owned, and v8-removed keys are absent.
+    for removed in ("audit_db", "audit_sinks", "otel", "privacy", "splunk"):
+        assert removed not in data
+
+
+def test_v8_show_section_selects_any_top_level_section(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "config_version: 8\nobservability: {}\nopenshell:\n  enabled: true\n",
+        encoding="utf-8",
+    )
+    with (
+        patch.object(cmd_config.config_module, "config_path", return_value=config_path),
+        patch.object(cmd_config, "inspect_v8_config", return_value=_wire("effective", effective={"buckets": []})),
+    ):
+        openshell = CliRunner().invoke(
+            cmd_config.config_cmd,
+            ["show", "--section", "openshell", "--format", "json"],
+            env={"DEFENSECLAW_CONFIG": str(config_path)},
+        )
+        observability = CliRunner().invoke(
+            cmd_config.config_cmd,
+            ["show", "--section", "observability", "--format", "json"],
+            env={"DEFENSECLAW_CONFIG": str(config_path)},
+        )
+
+    assert openshell.exit_code == 0, openshell.output
+    assert list(json.loads(openshell.output)) == ["openshell"]
+    assert observability.exit_code == 0, observability.output
+    assert list(json.loads(observability.output)) == ["observability"]
+
+
 def test_v8_provenance_view_exposes_only_canonical_go_annotations(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text("config_version: 8\nobservability: {}\n", encoding="utf-8")
