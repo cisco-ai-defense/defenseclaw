@@ -1397,13 +1397,24 @@ def _print_native_delivery_status(summary, *, configured: set[str] | None = None
         for item in summary.connectors:
             if normalize(item.connector) not in configured and item.connector not in removed:
                 removed.append(item.connector)
+    import shutil
+    import textwrap
+
+    columns = shutil.get_terminal_size((100, 24)).columns
     for label, item in native_delivery_display_rows(connectors):
-        instance = f" ({label})" if label else ""
-        state = item.state.replace("_", "-")
+        name = item.connector + (f" ({label})" if label else "")
         color = "green" if item.state == "accepted" else "yellow"
         if item.state == "no_evidence":
             color = "bright_black"
-        ux.echo(f"      {ux.bold(item.connector + instance)}  {ux._style(state, fg=color)} — {item.detail}")
+        # The detail already starts with the state ("accepted native delivery
+        # observed ..."), so the state word is the color only, and wrapped
+        # lines hang under the detail instead of column 1 (GAP-2549, as the
+        # TUI does since GAP-2545).
+        indent = " " * (6 + len(name) + 2)
+        wrapped = textwrap.wrap(item.detail, max(columns - len(indent), 30)) or [item.detail]
+        ux.echo(f"      {ux.bold(name)}  {ux._style(wrapped[0], fg=color)}")
+        for rest in wrapped[1:]:
+            ux.echo(indent + ux._style(rest, fg=color))
     if removed:
         ux.echo("      " + ux.dim("not configured (telemetry history only, not checked): " + ", ".join(removed)))
 
