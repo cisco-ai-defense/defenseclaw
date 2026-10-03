@@ -462,3 +462,24 @@ func TestSecretSetUpToDateHeadlineMatchesTheChange(t *testing.T) {
 		}
 	}
 }
+
+// GAP-2409: a busy status printed no installed version in text mode,
+// although the docs say it reports it, and verify/status --help never said
+// they wait 5s and exit 75.
+func TestLifecycleBusyStatusShowsTheInstalledVersion(t *testing.T) {
+	busy := enterprisestatus.New(enterpriseunix.ActionStatus, "standalone", "darwin", "1.0.0")
+	busy.Installed, busy.InstalledVersion = true, "1.0.24"
+	busy.AddError("lifecycle_busy", "another DefenseClaw enterprise lifecycle run is in progress; waited 5s for it")
+	busy.Finish("darwin", 75)
+	var out bytes.Buffer
+	_ = printLifecycleResult(&out, busy, false)
+	if !strings.Contains(out.String(), "installed=true version=1.0.24") || strings.Contains(out.String(), "gateway_ready") {
+		t.Fatalf("busy status output:\n%s", out.String())
+	}
+	for _, action := range []string{"status", "verify"} {
+		long := newUnixLifecycleCommand("macos", action, "summary").Long
+		if !strings.Contains(long, "waits up to 5s") || !strings.Contains(long, "exits 75") {
+			t.Fatalf("%s --help: %q", action, long)
+		}
+	}
+}

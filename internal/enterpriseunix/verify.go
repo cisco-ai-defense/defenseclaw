@@ -54,7 +54,7 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 		// change; a run that outlasts the wait is busy, not a failed check.
 		lock, err := env.acquireLock(ctx)
 		if errors.Is(err, errLockBusy) {
-			r.AddError(codeBusy, err.Error()+"; "+verifyBusyNextStep)
+			r.AddError(codeBusy, err.Error()+"; "+readOnlyBusyNextStep(env.LockTimeout, ActionVerify))
 			return enterprisestatus.BusyExitCode(env.GOOS)
 		}
 		lock.release()
@@ -79,7 +79,7 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 			r.Installed = true
 			r.InstalledVersion = record.ProductVersion
 		}
-		r.AddError(codeBusy, errLockBusy.Error()+"; it may be stopping or restarting the services, so status checked nothing; "+statusBusyNextStep)
+		r.AddError(codeBusy, errLockBusy.Error()+"; "+readOnlyBusyNextStep(env.LockTimeout, ActionStatus))
 		return enterprisestatus.BusyExitCode(env.GOOS)
 	}
 	if record == nil {

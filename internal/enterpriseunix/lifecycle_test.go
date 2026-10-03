@@ -698,7 +698,8 @@ func TestLifecycleLockIsExclusive(t *testing.T) {
 	// unit accepts, instead of failing on the half-changed deployment.
 	verify := h.run(Options{Action: ActionVerify})
 	requireError(t, verify, codeBusy)
-	if msg := verify.Errors[len(verify.Errors)-1].Message; !strings.Contains(msg, "rerun verify") {
+	if msg := verify.Errors[len(verify.Errors)-1].Message; !strings.Contains(msg, "rerun verify") ||
+		!strings.Contains(msg, "; waited "+FormatLockWait(h.env.LockTimeout)+" for it;") {
 		t.Fatalf("busy verify must name the next step: %q", msg)
 	}
 	if verify.ExitCode != enterprisestatus.UnixExitBusy {
@@ -729,7 +730,9 @@ func TestStatusDuringAnotherRunReportsBusy(t *testing.T) {
 			status := h.run(Options{Action: ActionStatus})
 			held.release()
 			requireError(t, status, codeBusy)
-			if len(status.Errors) != 1 || !strings.Contains(status.Errors[0].Message, "rerun status") {
+			// GAP-2409: it says how long it waited, as ensure does.
+			if len(status.Errors) != 1 || !strings.Contains(status.Errors[0].Message, "rerun status") ||
+				!strings.Contains(status.Errors[0].Message, "; waited "+FormatLockWait(h.env.LockTimeout)+" for it;") {
 				t.Fatalf("busy status must be the one busy error naming its next step: %+v", status.Errors)
 			}
 			if !status.Installed || status.InstalledVersion != "1.0.0" || status.ExitCode != enterprisestatus.UnixExitBusy {
