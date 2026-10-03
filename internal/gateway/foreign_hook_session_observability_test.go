@@ -89,8 +89,18 @@ func TestForeignHookSessionDenialNamesWhatWasDenied(t *testing.T) {
 	if got, _ := foreignHookSessionDenialTarget(enterprisepolicy.SessionExchange{Event: "beforeSubmitPrompt"}); got != "prompt" {
 		t.Fatalf("beforeSubmitPrompt target=%q", got)
 	}
+	// GAP-2216: Cursor's other hook events are named for what they are,
+	// never "inspect".
+	for event, want := range map[string]string{
+		"workspaceOpen": "session", "afterAgentThought": "completion", "afterAgentResponse": "completion",
+		"stop": "completion", "preCompact": "compaction", "someNewEvent": "event",
+	} {
+		if got, tool := foreignHookSessionDenialTarget(enterprisepolicy.SessionExchange{Event: event}); got != want || tool != "" {
+			t.Errorf("%s target=%q tool=%q, want %q", event, got, tool, want)
+		}
+	}
 
-	api, capture := bindHookModelV8Runtime(t, []string{"traces"})
+	api, capture := bindHookModelV8Runtime(t, []string{"logs", "traces"})
 	sid := "S-1-5-21-1111-2222-3333-1001"
 	ctx := context.WithValue(context.Background(), verifiedUserScopedIdentityContextKey{}, sid)
 	ctx = ContextWithAgentIdentity(ctx, AgentIdentity{
@@ -125,6 +135,9 @@ func TestForeignHookSessionDenialNamesWhatWasDenied(t *testing.T) {
 			sessionSpan = true
 		}
 		if strings.HasPrefix(span.Name, "execute_tool") && span.Status.GetCode() == tracepb.Status_STATUS_CODE_ERROR {
+			if got := inspectTraceV8ProtoAttributes(span.Attributes)["defenseclaw.agent.lifecycle.event"]; got != "tool_start" {
+				t.Errorf("blocked tool span lifecycle.event=%v, want tool_start (GAP-2216)", got)
+			}
 			for _, event := range span.Events {
 				toolBlocked = toolBlocked || event.Name == "defenseclaw.guardrail.block"
 			}
@@ -132,5 +145,22 @@ func TestForeignHookSessionDenialNamesWhatWasDenied(t *testing.T) {
 	}
 	if !toolBlocked || !sessionSpan {
 		t.Fatalf("spans=%v, want a blocked execute_tool span and an apply_guardrail session span", names)
+	}
+
+	// The hook decision record of the tool denial names the real event too.
+	toolDecision := false
+	for _, record := range hookModelV8CapturedLogs(capture.logSnapshot()) {
+		var wire struct {
+			Body map[string]any `json:"body"`
+		}
+		if err := json.Unmarshal([]byte(record.Body.GetStringValue()), &wire); err != nil {
+			t.Fatal(err)
+		}
+		if wire.Body["defenseclaw.agent.lifecycle.event"] == "tool_start" {
+			toolDecision = true
+		}
+	}
+	if !toolDecision {
+		t.Fatal("no hook decision record with lifecycle.event tool_start (GAP-2216)")
 	}
 }
