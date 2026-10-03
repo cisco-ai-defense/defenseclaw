@@ -1171,11 +1171,13 @@ func finishWindowsEnterpriseStandalone(
 	exitCode := result.Finish("windows", failureCode)
 	result.LogPath = windowsEnterpriseStandaloneObserver(result, opts)
 	unknownProfile := windowsEnterpriseUnknownProfileRequested(opts) && exitCode != 0 && len(result.Errors) != 0
-	// A standard account's status or verify ran none of the deployment's
-	// checks, so it is one refusal line too, not a FAILED summary and "the
-	// standalone enterprise status failed: ..." (GAP-2162).
+	// A standard account's refusal ran none of the deployment's checks or
+	// changes, so it is one refusal line too, not a FAILED summary and "the
+	// standalone enterprise status failed: ..." (GAP-2162). That holds for
+	// every action: repair and ensure added "the standalone enterprise
+	// <action> failed: elevation_required" after (or, interleaved with
+	// stdout, before) the sentence (GAP-2262).
 	oneLine := unknownProfile || (exitCode == enterprisestatus.WindowsExitAccessDenied &&
-		(result.Action == "status" || result.Action == "verify") &&
 		len(result.Errors) != 0 && result.Errors[0].Code == "elevation_required")
 	if opts.jsonOutput {
 		if err := json.NewEncoder(cmd.OutOrStdout()).Encode(result); err != nil {

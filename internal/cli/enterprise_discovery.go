@@ -210,11 +210,16 @@ func enterpriseGatewayGet(path string, out any) (string, error) {
 // writeManagedViewRefusalJSON gives a --json caller a "code: message"
 // refusal with its exit code (elevation_required) as JSON on stdout, in the
 // errors[] form `enterprise windows status --json` uses, so a script reads
-// the code instead of an empty document (GAP-2114).
+// the code instead of an empty document (GAP-2114). A managedViewRefusal
+// carries its code beside the sentence (GAP-2262).
 func writeManagedViewRefusalJSON(w io.Writer, err error) {
 	code, message, ok := strings.Cut(err.Error(), ": ")
 	if !ok || strings.ContainsAny(code, " \t") {
 		code, message = "error", err.Error()
+	}
+	var refusal *managedViewRefusal
+	if errors.As(err, &refusal) {
+		code, message = refusal.code, refusal.message
 	}
 	_ = json.NewEncoder(w).Encode(struct {
 		OK       bool                       `json:"ok"`

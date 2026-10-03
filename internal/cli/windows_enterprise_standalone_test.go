@@ -1740,11 +1740,13 @@ func TestWindowsEnterpriseLifecycleCallerErrorsExitCodes(t *testing.T) {
 				continue
 			}
 			if !jsonOutput {
-				if want := "error " + tc.code + ": " + tc.text; !strings.Contains(stdout.String(), want) {
-					t.Fatalf("%s: output %q", tc.action, stdout.String())
+				// GAP-2262: one refusal line, as status and verify give it:
+				// no FAILED summary and no "repair failed: elevation_required".
+				if stdout.Len() != 0 || !strings.HasPrefix(err.Error(), tc.text) || strings.Contains(err.Error(), tc.code) {
+					t.Fatalf("%s: output %q, error %q", tc.action, stdout.String(), err)
 				}
-				if strings.Contains(stdout.String(), "Access is denied") {
-					t.Fatalf("%s: raw access error in %q", tc.action, stdout.String())
+				if strings.Contains(err.Error(), "Access is denied") {
+					t.Fatalf("%s: raw access error in %q", tc.action, err)
 				}
 				continue
 			}
