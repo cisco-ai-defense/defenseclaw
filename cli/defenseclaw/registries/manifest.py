@@ -201,13 +201,16 @@ class Manifest:
 # ---------------------------------------------------------------------------
 
 
-def parse_manifest(raw: str | bytes) -> Manifest:
+def parse_manifest(raw: str | bytes, *, origin: str = "") -> Manifest:
     """Parse *raw* as JSON or YAML and return a validated :class:`Manifest`.
 
     YAML parsing uses :func:`yaml.safe_load` (no arbitrary-type
     deserialization) and JSON parsing uses :func:`json.loads`. Either
     representation is accepted because publishers may serve YAML for
     humans and JSON for machines from the same endpoint.
+
+    *origin* (a path or URL) names the manifest in syntax errors so the
+    operator sees which file is broken.
 
     Raises :class:`ManifestError` on parse / schema / invariant failures.
     """
@@ -221,19 +224,40 @@ def parse_manifest(raw: str | bytes) -> Manifest:
     if not text:
         raise ManifestError("manifest is empty")
 
+    # Keep leading lines so reported line numbers match the file; drop
+    # trailing blank lines so an end-of-input error points at the last line.
+    raw = raw.rstrip()
+    what = origin or "manifest"
     data: Any
     if text[0] in "{[":
         try:
-            data = json.loads(text)
+            data = json.loads(raw)
         except json.JSONDecodeError as exc:
-            raise ManifestError(f"invalid JSON manifest: {exc}") from exc
+            raise ManifestError(
+                f"{what} is not valid JSON (line {exc.lineno}, column {exc.colno}: {exc.msg})"
+            ) from exc
     else:
         try:
-            data = yaml.safe_load(text)
+            data = yaml.safe_load(raw)
         except yaml.YAMLError as exc:
-            raise ManifestError(f"invalid YAML manifest: {exc}") from exc
+            raise ManifestError(f"{what} is not valid YAML{_yaml_error_detail(exc)}") from exc
 
     return _build_manifest(data)
+
+
+def _yaml_error_detail(exc: yaml.YAMLError) -> str:
+    """Return " (line L, column C: problem)" on one line (GAP-2537).
+
+    PyYAML's str() spans several lines with source excerpts and carets and
+    names the input "<unicode string>", which breaks the sync table.
+    """
+    mark = getattr(exc, "problem_mark", None) or getattr(exc, "context_mark", None)
+    problem = getattr(exc, "problem", None) or getattr(exc, "context", None) or ""
+    problem = " ".join(str(problem).split())
+    if mark is None:
+        return f" ({problem})" if problem else ""
+    where = f"line {mark.line + 1}, column {mark.column + 1}"
+    return f" ({where}: {problem})" if problem else f" ({where})"
 
 
 def load_manifest_file(path: str | Path) -> Manifest:

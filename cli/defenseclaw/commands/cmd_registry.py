@@ -848,7 +848,7 @@ def test_cmd(
     except (IngestError, ManifestError) as exc:
         # Mirror the wording of sync_source's report.errors so log
         # consumers don't have to special-case test-vs-sync.
-        msg = f"fetch failed: {exc}"
+        msg = str(exc) if isinstance(exc, ManifestError) else f"fetch failed: {exc}"
         if emit_json:
             _emit_json({
                 "ok": False,
