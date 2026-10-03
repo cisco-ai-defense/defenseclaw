@@ -18,7 +18,7 @@ The OpenHands connector wires DefenseClaw into [OpenHands lifecycle hooks](https
 
 | Platform | Status | Notes |
 | --- | --- | --- |
-| macOS and Linux | **Supported** | DefenseClaw installs the POSIX hook runtime and supports the OpenHands CLI `>=1.12.0` hook contract. macOS can additionally use the protected launch-command trace-only native OTLP path; Linux remains hook-only. |
+| macOS and Linux | **Supported** | DefenseClaw installs the POSIX hook runtime and supports the OpenHands CLI `>=1.12.0` hook contract. On macOS you can also export OpenHands' own traces to DefenseClaw ([native traces on macOS](#native-traces-on-macos)); Linux is hook-only. |
 | Native Windows x64 | **Unsupported** | OpenHands CLI requires WSL, and DefenseClaw does not implement a WSL connector path. |
 
 ## Setup
@@ -80,6 +80,26 @@ DefenseClaw validates the installed OpenHands CLI version during setup when the 
 <Callout type="warning">
 Global OpenHands setup observes local OpenHands sessions that load `~/.openhands/hooks.json`. OpenHands 1.16.0 loads a repository-local `.openhands/hooks.json` instead of the global file, not next to it: in a project that has its own file, none of DefenseClaw's global hooks run, so tool calls there are not inspected or logged. Use `--workspace` when you want DefenseClaw to manage a repo-local file explicitly. In an enterprise deployment the guardian writes only the global file, and the foreign-hook guard does not cover OpenHands; see the [enterprise residual risks](/docs/enterprise/threat-model#residual-risks).
 </Callout>
+
+#### Native traces on macOS
+
+On macOS, start OpenHands through DefenseClaw to send OpenHands' own
+OpenTelemetry traces to the gateway as well:
+
+```bash
+defenseclaw-gateway connector launch --connector openhands
+```
+
+Put OpenHands' own flags after `--`, for example
+`defenseclaw-gateway connector launch --connector openhands -- --headless --exit-without-confirmation -t "TEXT"`.
+
+The command checks that the OpenHands executable and hook registration are
+the ones setup recorded, then starts OpenHands with the trace exporter pointed
+at the gateway and a connector-scoped OTLP credential set only in that child
+process; the credential is never printed or put on the command line. It
+exports traces only, not logs or metrics, and DefenseClaw does not write these
+variables into shell startup files. On Linux there is no native exporter path,
+so OpenHands telemetry comes from its hooks alone.
 
 ## Hook schema
 
@@ -146,7 +166,7 @@ The resolved paths are captured in `~/.defenseclaw/hook_contract_lock.json` unde
 <HookEventsList connector="openhands" />
 
 <Callout>
-OpenHands can block supported hook events but has no native human-approval surface. Confirm verdicts become an `additionalContext` alert with `raw_action: "confirm"` preserved; the TUI and audit log are review-only. In the standalone enterprise profile, a confirm verdict on `PreToolUse` is blocked instead, and the message says the organization's rule needs a confirmation that OpenHands cannot ask for.
+OpenHands can block supported hook events but has no native human-approval surface. Confirm verdicts become an `additionalContext` alert with `raw_action: "confirm"` preserved; the TUI and audit log are review-only. In the standalone enterprise profile, a confirm verdict on `pre_tool_use` is blocked instead, and the message says the organization's rule needs a confirmation that OpenHands cannot ask for.
 </Callout>
 
 ## OpenShell sandbox
@@ -295,8 +315,22 @@ See R1, R15, R18 and R30 in the
 
 ## Disable
 
+If OpenHands is the only connector DefenseClaw guards, turn the guardrail off:
+
+```bash
+defenseclaw guardrail disable --yes
+```
+
+If other connectors are configured too, turn off OpenHands alone and keep the
+rest running:
+
 ```bash
 defenseclaw guardrail disable --connector openhands --yes
 ```
+
+Both keep OpenHands's settings, so `defenseclaw guardrail enable` (with the same
+`--connector`) turns it back on. To drop OpenHands from the configured
+connectors instead, run `defenseclaw setup remove openhands --yes`; add `--force`
+when it is the last connector.
 
 Teardown removes DefenseClaw-owned hook entries from `~/.openhands/hooks.json` or the pinned workspace hook file and leaves unrelated OpenHands hooks untouched.

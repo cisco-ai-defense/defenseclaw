@@ -28,7 +28,7 @@ stopping Claude's next turn. No proxy listener is involved.
 | Platform | Status | Connector path |
 | --- | --- | --- |
 | macOS and Linux | **Supported** | Portable command hooks plus Claude Code's native OTel exporter. |
-| Native Windows x64 | **Supported** | Shell-free native executable hooks using Claude Code's `command` plus `args` exec form. Official-client validation metadata remains empty and `live=false`; support availability is not a certification claim. |
+| Native Windows x64 | **Supported** | Shell-free native executable hooks using Claude Code's `command` plus `args` exec form. |
 
 ## Setup
 
@@ -97,8 +97,9 @@ once on the [Defaults page](/docs/policies/defaults).
 
 DefenseClaw manages marked hooks and OTLP environment entries in
 `%CLAUDE_CONFIG_DIR%\settings.json`; the default directory is
-`%USERPROFILE%\.claude`. Generated runtime and protected connector credentials
-live below `%USERPROFILE%\.defenseclaw\hooks`. See the
+`%USERPROFILE%\.claude`. The hook runtime, `defenseclaw-hook.exe`, lives in
+`%LOCALAPPDATA%\DefenseClaw\HookRuntime`; protected connector credentials
+and adapters live in `%USERPROFILE%\.defenseclaw\hooks`. See the
 [Windows path reference](/docs/get-started/windows/paths-troubleshooting#filesystem-reference).
 
   </Tab>
@@ -122,6 +123,11 @@ live below `%USERPROFILE%\.defenseclaw\hooks`. See the
 DefenseClaw stores a hash-checked backup of `settings.json` before edits.
 Teardown restores it byte-for-byte when the identity still matches; if the file
 drifted, only DefenseClaw-owned entries are removed.
+
+Setup changes only the files above. DefenseClaw also reads, without changing them, the files Claude Code uses for MCP servers, plugins, skills, agents and memory; see [AI Discovery](/docs/ai-discovery) for how inventory works.
+
+<Accordions>
+<Accordion title="What DefenseClaw inventories for Claude Code">
 
 Claude Code keeps user/local MCP registration state in `~/.claude.json`
 (`%CLAUDE_CONFIG_DIR%\.claude.json` when that override is set) and project MCP
@@ -148,6 +154,9 @@ could change the active path.
 Runtime `/add-dir` roots remain outside persistent passive inventory.
 Claude Code 2.1.219+ emits `DirectoryAdded`, so DefenseClaw records the added
 path and source without treating the observation as durable discovery authority.
+
+</Accordion>
+</Accordions>
 
 ## Enterprise (standalone profile)
 
@@ -349,6 +358,20 @@ sandbox image; your own Claude Code configuration does not change.
 
 ## Disable
 
+If Claude Code is the only connector DefenseClaw guards, turn the guardrail off:
+
+```bash
+defenseclaw guardrail disable --yes
+```
+
+If other connectors are configured too, turn off Claude Code alone and keep the
+rest running:
+
 ```bash
 defenseclaw guardrail disable --connector claudecode --yes
 ```
+
+Both keep Claude Code's settings, so `defenseclaw guardrail enable` (with the same
+`--connector`) turns it back on. To drop Claude Code from the configured
+connectors instead, run `defenseclaw setup remove claudecode --yes`; add `--force`
+when it is the last connector.
