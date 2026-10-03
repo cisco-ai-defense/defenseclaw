@@ -35,7 +35,6 @@ import sys
 from pathlib import Path
 
 import pytest
-
 from defenseclaw.tui.panels.first_run import CONNECTOR_CHOICES
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -179,6 +178,41 @@ def test_openclaw_restart_requires_the_openclaw_connector() -> None:
     text = INSTALL_SH.read_text(encoding="utf-8")
 
     assert 'openclaw_connector_active && has openclaw' in text
+
+
+@pytest.mark.parametrize(
+    ("output", "rc", "expected"),
+    [
+        ("Gateway service disabled.\nStart with: openclaw gateway install\n", 0, "WARN No OpenClaw gateway service to restart"),
+        ("Restarted systemd service: openclaw-gateway.service\n", 0, "OK OpenClaw gateway restarted"),
+        ("boom\n", 1, "WARN Restart the OpenClaw gateway to load the updated plugin: openclaw gateway restart"),
+    ],
+)
+def test_openclaw_restart_reports_what_happened(tmp_path: Path, output: str, rc: int, expected: str) -> None:
+    # GAP-2207: `openclaw gateway restart` exits 0 with "Gateway service
+    # disabled" when no service is installed; the installer said "restarted".
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    start = text.index("restart_openclaw() {")
+    func = text[start : text.index("\n}\n", start) + 3]
+    fake = tmp_path / "fakebin"
+    fake.mkdir()
+    (tmp_path / "out.txt").write_text(output, encoding="utf-8")
+    (fake / "openclaw").write_text(f'#!/bin/sh\ncat "{tmp_path / "out.txt"}"\nexit {rc}\n', encoding="utf-8")
+    (fake / "openclaw").chmod(0o755)
+    script = tmp_path / "restart.sh"
+    script.write_text(
+        "set -euo pipefail\nopenclaw_connector_active() { return 0; }\n"
+        'has() { command -v "$1" >/dev/null 2>&1; }\nwarn() { echo "WARN $*"; }\nok() { echo "OK $*"; }\n'
+        + func
+        + "restart_openclaw\n",
+        encoding="utf-8",
+    )
+
+    completed = _run([str(script)], tmp_path, PATH=f"{fake}:/usr/bin:/bin")
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert completed.stdout.strip().startswith(expected), completed.stdout
+    assert len(completed.stdout.strip().splitlines()) == 1
 
 
 def _release(tmp_path: Path, script: str) -> Path:
