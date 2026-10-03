@@ -1220,12 +1220,12 @@ def setup_llm(
 
 
 @setup.command("skill-scanner")
-@click.option("--use-llm", is_flag=True, default=None, help="Enable LLM analyzer")
-@click.option("--use-behavioral", is_flag=True, default=None, help="Enable behavioral analyzer")
-@click.option("--enable-meta", is_flag=True, default=None, help="Enable meta-analyzer")
-@click.option("--use-trigger", is_flag=True, default=None, help="Enable trigger analyzer")
-@click.option("--use-virustotal", is_flag=True, default=None, help="Enable VirusTotal scanner")
-@click.option("--use-aidefense", is_flag=True, default=None, help="Enable AI Defense analyzer")
+@click.option("--use-llm/--no-use-llm", default=None, help="Enable (or disable) the LLM analyzer")
+@click.option("--use-behavioral/--no-use-behavioral", default=None, help="Enable (or disable) the behavioral analyzer")
+@click.option("--enable-meta/--no-enable-meta", default=None, help="Enable (or disable) the meta-analyzer")
+@click.option("--use-trigger/--no-use-trigger", default=None, help="Enable (or disable) the trigger analyzer")
+@click.option("--use-virustotal/--no-use-virustotal", default=None, help="Enable (or disable) the VirusTotal scanner")
+@click.option("--use-aidefense/--no-use-aidefense", default=None, help="Enable (or disable) the AI Defense analyzer")
 @click.option(
     "--llm-provider",
     default=None,
@@ -2717,9 +2717,9 @@ def _print_summary(sc, llm, aid) -> None:
     default=None,
     help="Cisco AI Defense request timeout in milliseconds",
 )
-@click.option("--scan-prompts", is_flag=True, default=None, help="Scan MCP prompts")
-@click.option("--scan-resources", is_flag=True, default=None, help="Scan MCP resources")
-@click.option("--scan-instructions", is_flag=True, default=None, help="Scan server instructions")
+@click.option("--scan-prompts/--no-scan-prompts", default=None, help="Scan MCP prompts (or stop)")
+@click.option("--scan-resources/--no-scan-resources", default=None, help="Scan MCP resources (or stop)")
+@click.option("--scan-instructions/--no-scan-instructions", default=None, help="Scan server instructions (or stop)")
 @click.option("--verify/--no-verify", default=True, help="Run connectivity checks after setup (default: on)")
 @click.option("--non-interactive", is_flag=True, help="Use flags instead of prompts")
 @pass_ctx
