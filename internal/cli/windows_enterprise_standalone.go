@@ -1166,6 +1166,10 @@ func finishWindowsEnterpriseStandalone(
 		if err := json.NewEncoder(cmd.OutOrStdout()).Encode(result); err != nil {
 			return withExitCode(fmt.Errorf("encode the standalone lifecycle result: %w", err), enterprisestatus.WindowsExitFailure)
 		}
+	} else if windowsEnterpriseUnknownProfileRequested(opts) && exitCode != 0 && len(result.Errors) != 0 {
+		// An unknown --profile selected no profile: one error line, not a
+		// "(standalone): FAILED" summary of a profile never chosen (GAP-2040).
+		return withExitCode(errors.New(result.Errors[0].Message), exitCode)
 	} else {
 		writeWindowsEnterpriseStandaloneSummary(cmd.OutOrStdout(), result)
 	}
@@ -1245,8 +1249,11 @@ func writeWindowsEnterpriseStandalonePreflightFailure(
 		code = "powershell7_untrusted"
 	}
 	message := cause.Error()
-	if code == "elevation_required" {
+	switch code {
+	case "elevation_required":
 		message = strings.TrimPrefix(message, code+": ")
+	case "invalid_arguments":
+		message = strings.TrimPrefix(message, errWindowsEnterpriseInvalidArguments.Error()+": ")
 	}
 	result.AddError(code, message)
 	return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
