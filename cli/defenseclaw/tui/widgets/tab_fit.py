@@ -190,12 +190,17 @@ def fit_tab_labels(
     if width <= NARROW_STRIP or active not in names or len(names) < 2:
         return _fit_for_active(panels, active, unread, width)
     full = {name: _label(key, label, unread.get(name, 0)) for name, key, label in panels}
-    if strip_width(tuple(full.values())) <= width:
-        return full
     # Cached: the strip is redrawn on every render.
     if (tuple(panels), width, _PLAIN_BADGE) not in _NAMES_CACHE:
         _remember(_NAMES_CACHE, (tuple(panels), width, _PLAIN_BADGE), _every_tab_named(panels, width))
     named = _NAMES_CACHE[(tuple(panels), width, _PLAIN_BADGE)]
+    # Every full label only where the width alone names every tab in full:
+    # where the bare full names just fit, the first Logs count renamed four
+    # tabs at 191 columns (GAP-2601).
+    if (named is None or named == {name: label for name, _key, label in panels}) and strip_width(
+        tuple(full.values())
+    ) <= width:
+        return full
     if named is not None:
         return _named_fit(panels, active, unread, width, named)
     key = (tuple(panels), tuple(unread.get(name, 0) for name in names), width, _PLAIN_BADGE)
@@ -322,7 +327,8 @@ def _every_tab_named(panels: Sequence[tuple[str, str, str]], width: int) -> dict
     room for the longest full name ("V AI Discovery"), so with few counts any
     tab opens under its full name. Every tab gets its shortest name ("Log",
     "Inv"), then the tiny, short and full names grow, most important first,
-    up to the first that doesn't fit (GAP-2517), unless every full name fits (GAP-2599),
+    up to the first that doesn't fit (GAP-2517), unless every full name fits
+    beside the longest Alerts count (GAP-2599, GAP-2602),
     while ``OPEN_COUNT_RESERVE`` cells stay free for the counts, so the open
     tab keeps its full name beside Alerts, Logs and Audit backlogs (GAP-2420).
     """
@@ -348,13 +354,17 @@ def _every_tab_named(panels: Sequence[tuple[str, str, str]], width: int) -> dict
     # beside 11 free cells (GAP-2500).
     if cost() > width:
         return None
-    # Every full name that fits beside a one-digit Alerts count is used, with
-    # no room kept for other counts: those wait. Reserving it here while the
-    # full strip fits read "7 Sandboxes ... R Registries" beside Alerts alone
-    # and "7 Sandbox ... R Registry" once a Logs count came, with 15 cells
-    # free at 199 columns (GAP-2599).
+    # Every full name is used once it fits beside the longest Alerts count
+    # ("(999+)", "⁹⁹⁹⁺"), with no room kept for other counts: those wait.
+    # Reserving it here while the full strip fits read "7 Sandboxes ...
+    # R Registries" beside Alerts alone and "7 Sandbox ... R Registry" once a
+    # Logs count came, with 15 cells free at 199 columns (GAP-2599). Room for
+    # one Alerts digit only named Registries "R Reg" once Alerts reached 34 at
+    # 192 columns (GAP-2602); narrower, the names grow as below whatever is
+    # unread.
     shortest, chosen = chosen, dict(titles)
-    if cost() <= width:
+    alerts = len(_label("", "", BADGE_MAX + 1, True)) if "alerts" in keys else 0
+    if strip_width(tuple(_label(keys[name], titles[name], 0) for name in keys)) + alerts <= width:
         return chosen
     chosen = shortest
     # The names grow in one fixed order and stop at the first that doesn't
