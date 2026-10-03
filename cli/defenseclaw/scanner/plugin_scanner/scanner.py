@@ -59,6 +59,9 @@ from defenseclaw.scanner.plugin_scanner.types import (
     ScanResult,
 )
 
+# The C loader is several times faster on manifests; same safe semantics.
+_YAML_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -117,6 +120,13 @@ def scan_plugin(
     # --- Load manifest ---
     manifest = _load_manifest(target)
     manifest_missing_finding: Finding | None = None
+    if manifest is None and os.path.isfile(target):
+        # OpenCode and Amp plugins are one plain .js/.ts file: there is no
+        # manifest to look for, so its absence is not a finding (GAP-2165).
+        manifest = PluginManifest(
+            name=os.path.splitext(os.path.basename(target))[0],
+            source="none",
+        )
     if manifest is None:
         manifest_missing_finding = make_finding(
             1,
@@ -265,13 +275,16 @@ _MANIFEST_CANDIDATES: tuple[tuple[str, str], ...] = (
     # for stability; none takes precedence over another in practice
     # because each lives in a distinct plugin layout.
     ("openclaw.plugin.json", "openclaw.plugin.json"),
-    # Hermes plugins declare themselves in a YAML plugin.yaml (name,
-    # version, description, kind); it has no permissions field.
-    ("plugin.yaml", "plugin.yaml"),
-    ("plugin.yml", "plugin.yml"),
     (os.path.join(".claude-plugin", "plugin.json"), "claude.plugin.json"),
     (os.path.join(".codex-plugin", "plugin.json"), "codex.plugin.json"),
     (os.path.join(".cursor-plugin", "plugin.json"), "cursor.plugin.json"),
+    # Hermes plugins declare themselves in a YAML plugin.yaml (name,
+    # version, description, kind); it has no permissions field. It comes
+    # last: a plugin.yaml-primary plugin is treated as loaded by a Python
+    # host, so an extra plugin.yaml must not shadow the manifest a Claude
+    # Code, Codex or Cursor plugin is loaded from (GAP-2196).
+    ("plugin.yaml", "plugin.yaml"),
+    ("plugin.yml", "plugin.yml"),
 )
 
 
@@ -328,7 +341,7 @@ def _safe_read_manifest(candidate: str, scan_root: str) -> dict | None:
 
     try:
         if candidate.endswith((".yaml", ".yml")):
-            data = yaml.safe_load(raw_text)
+            data = yaml.load(raw_text, Loader=_YAML_LOADER)
         else:
             data = json.loads(raw_text)
     except (json.JSONDecodeError, ValueError, yaml.YAMLError):

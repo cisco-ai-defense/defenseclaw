@@ -479,6 +479,30 @@ def _effective_action_entry(
     return pe.get_action(target_type, name)
 
 
+_HTTP_TRANSPORT_NAMES = frozenset({"http", "streamable-http", "streamable_http", "streamablehttp"})
+
+
+def _canonical_mcp_transport(transport: Any, url: str = "", command: str = "") -> str:
+    """Fold the names of one MCP transport together (GAP-2122).
+
+    ``http`` and ``streamable-http`` are the same HTTP transport for a URL
+    server, so a registry rule pinned to either admits the other. An empty
+    transport takes the one the server's shape implies (``http`` for a URL,
+    ``stdio`` for a command), as ``mcp set --url`` without ``--transport``
+    does. ``sse`` and the other transports stay distinct. Mirrors the Go
+    ``canonicalMCPTransport``.
+    """
+    value = str(transport or "").strip().lower()
+    if value in _HTTP_TRANSPORT_NAMES:
+        return "http"
+    if not value:
+        if str(url or "").strip():
+            return "http"
+        if str(command or "").strip():
+            return "stdio"
+    return value
+
+
 def _asset_rule_matches(
     rule: Any,
     name: str,
@@ -546,7 +570,7 @@ def _asset_rule_matches(
             return False
     if getattr(rule, "transport", ""):
         constrained = True
-        if str(rule.transport).strip().lower() != transport.strip().lower():
+        if _canonical_mcp_transport(rule.transport) != _canonical_mcp_transport(transport, url, command):
             return False
     needles = getattr(rule, "source_path_contains", []) or []
     if needles:

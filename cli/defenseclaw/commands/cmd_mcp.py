@@ -14,7 +14,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""defenseclaw mcp — Manage MCP servers (scan, block, allow, list, set, unset).
+"""defenseclaw mcp — Manage MCP servers (list, scan, block, unblock, allow, set, unset).
 
 Reads MCP server configuration from the configured connector(s)'
 connector-specific config (openclaw.json, .codex/config.toml,
@@ -99,13 +99,13 @@ def _parse_args(raw: str) -> list[str]:
 
 @click.group()
 def mcp() -> None:
-    """Manage MCP servers — scan, block, allow, list, set, unset.
+    """Manage MCP servers — list, scan, block, unblock, allow, set, unset.
 
     Multi-connector: MCP config is read per-connector. ``mcp list`` shows
     every configured connector's MCP servers by default (pass ``--connector
-    X`` to narrow to one peer). The other subcommands take ``--connector
-    X`` to target a configured peer; ``mcp scan --all`` fans out across every
-    configured connector.
+    X`` to narrow to one connector). The other subcommands take
+    ``--connector X`` to target one configured connector; ``mcp scan --all``
+    fans out across every configured connector.
     """
 
 
@@ -122,7 +122,7 @@ def mcp() -> None:
     help=(
         "List MCP servers for a specific configured connector. "
         "Default: every configured connector (on a single-connector install, "
-        "just that one). Pass --connector <name> to narrow to one peer."
+        "just that one). Pass --connector <name> to narrow to one connector."
     ),
 )
 @pass_ctx
@@ -132,7 +132,7 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
     By default this lists **every configured connector's** MCP servers — each
     connector gets its own connector-tagged table — so the output reads
     the same whether one or many connectors are active. ``--connector
-    <name>`` narrows the listing to one configured peer.
+    <name>`` narrows the listing to one configured connector.
     """
     from defenseclaw.commands import resolve_list_connectors
 
@@ -1535,7 +1535,7 @@ def scan(
     Modes:
       mcp scan <name>            scan a server by name — searched across every
                                  configured connector's MCP config (use --connector
-                                 <name> to scope the lookup to one peer)
+                                 <name> to scope the lookup to one connector)
       mcp scan <url>             scan a direct URL
       mcp scan --connector <c>   scan every server configured on connector <c>
       mcp scan --all             scan every server on every configured connector
@@ -1698,7 +1698,7 @@ def scan(
 _CONNECTOR_BLOCK_HELP = (
     "Scope to one connector. Default: create an unscoped policy entry "
     "that applies across configured connectors. "
-    "Pass --connector <name> to narrow to that peer."
+    "Pass --connector <name> to narrow to that connector."
 )
 
 
@@ -1753,7 +1753,7 @@ def block(app: AppContext, target: str, reason: str, connector_flag: str) -> Non
 
     Bare ``mcp block <name>`` creates an unscoped block entry that applies
     across configured connectors; ``--connector <name>`` narrows the block to
-    one peer.
+    one connector.
     """
     from defenseclaw.commands import resolve_list_connector
     from defenseclaw.enforce import PolicyEngine
@@ -1776,20 +1776,20 @@ def block(app: AppContext, target: str, reason: str, connector_flag: str) -> Non
             if app.store and app.store.has_action(
                 "mcp", target, "install", "block", connector,
             ):
-                click.echo(f"Already blocked for {connector}: {target}")
+                click.echo(f"[mcp] Already blocked {target!r} ({connector}).")
             else:
-                click.echo(f"Already blocked globally (covers {connector}): {target}")
+                click.echo(f"[mcp] Already blocked {target!r} globally (covers {connector}).")
             return
         pe.block_for_connector(
             "mcp", target, connector, reason or "manually blocked via CLI",
         )
-        click.secho(f"Blocked: {target} (connector={connector})", fg="red")
+        click.secho(f"[mcp] Blocked {target!r} ({connector}).", fg="red")
     else:
         if pe.is_blocked("mcp", target):
-            click.echo(f"Already blocked: {target}")
+            click.echo(f"[mcp] Already blocked {target!r} (every connector).")
             return
         pe.block("mcp", target, reason or "manually blocked via CLI")
-        click.secho(f"Blocked: {target}", fg="red")
+        click.secho(f"[mcp] Blocked {target!r} (every connector).", fg="red")
 
     if app.logger:
         saved_change_audit(app.logger).log_action(
@@ -1805,7 +1805,7 @@ def block(app: AppContext, target: str, reason: str, connector_flag: str) -> Non
     help=(
         "Scope to one connector. Default: allow matching configured server "
         "copies and clear stale scoped blocks. "
-        "Pass --connector <name> to narrow to that peer."
+        "Pass --connector <name> to narrow to that connector."
     ),
 )
 @pass_ctx
@@ -1813,8 +1813,9 @@ def allow(app: AppContext, target: str, reason: str, connector_flag: str) -> Non
     """Allow an MCP server (by name or URL).
 
     Bare ``mcp allow <name>`` allows matching configured server copies;
-    ``--connector <name>`` narrows the allow to one peer. A connector-scoped
-    allow is authoritative for that peer before unscoped fallback applies.
+    ``--connector <name>`` narrows the allow to one connector. A
+    connector-scoped allow is authoritative for that connector before
+    unscoped fallback applies.
     """
     from defenseclaw.commands import resolve_list_connector
     from defenseclaw.enforce import PolicyEngine
@@ -1827,14 +1828,14 @@ def allow(app: AppContext, target: str, reason: str, connector_flag: str) -> Non
             if app.store and app.store.has_action(
                 "mcp", target, "install", "allow", connector,
             ):
-                click.echo(f"Already allowed for {connector}: {target}")
+                click.echo(f"[mcp] Already allowed {target!r} ({connector}).")
             else:
-                click.echo(f"Already allowed globally (covers {connector}): {target}")
+                click.echo(f"[mcp] Already allowed {target!r} globally (covers {connector}).")
             return
         pe.allow_for_connector(
             "mcp", target, connector, reason or "manually allowed via CLI",
         )
-        click.secho(f"Allowed: {target} (connector={connector})", fg="green")
+        click.secho(f"[mcp] Allowed {target!r} ({connector}).", fg="green")
     else:
         targets = _mcp_policy_fanout_connectors(app, pe, target)
         if targets:
@@ -1846,7 +1847,7 @@ def allow(app: AppContext, target: str, reason: str, connector_flag: str) -> Non
                     reason or "manually allowed via CLI",
                 )
                 click.secho(
-                    f"Allowed: {target} (connector={target_connector})",
+                    f"[mcp] Allowed {target!r} ({target_connector}).",
                     fg="green",
                 )
             if app.store and pe.get_action("mcp", target) is not None:
@@ -1857,15 +1858,53 @@ def allow(app: AppContext, target: str, reason: str, connector_flag: str) -> Non
                 )
             return
         if pe.is_allowed("mcp", target):
-            click.echo(f"Already allowed: {target}")
+            click.echo(f"[mcp] Already allowed {target!r} (every connector).")
             return
         pe.allow("mcp", target, reason or "manually allowed via CLI")
-        click.secho(f"Allowed: {target}", fg="green")
+        click.secho(f"[mcp] Allowed {target!r} (every connector).", fg="green")
 
     if app.logger:
         saved_change_audit(app.logger).log_action(
             "allow-mcp", target, f"reason={reason} connector={connector}",
         )
+
+
+def _mcp_only_allow_entry(app: AppContext, pe, target: str, connector: str) -> bool:
+    """True when the only state at this exact scope is an allow entry."""
+    if app.store is None:
+        return False
+    if connector:
+        restrictive = (
+            app.store.has_action("mcp", target, "install", "block", connector)
+            or app.store.has_action("mcp", target, "file", "quarantine", connector)
+            or app.store.has_action("mcp", target, "runtime", "disable", connector)
+        )
+        allowed = app.store.has_action("mcp", target, "install", "allow", connector)
+    else:
+        restrictive = (
+            pe.is_blocked("mcp", target)
+            or pe.is_quarantined("mcp", target)
+            or app.store.has_action("mcp", target, "runtime", "disable")
+        )
+        allowed = pe.is_allowed("mcp", target)
+    return allowed and not restrictive
+
+
+def _mcp_unblock_line(target: str, connector: str, only_allow: bool) -> str:
+    scope = f" ({connector})" if connector else " (every connector)"
+    if only_allow:
+        return f"[mcp] Removed the allow entry for {target!r}{scope}."
+    return f"[mcp] Unblocked {target!r}{scope}."
+
+
+def _mcp_rescan_hint(target: str, connector: str) -> None:
+    import shlex
+
+    cmd = f"defenseclaw mcp scan {shlex.quote(target)}"
+    if connector:
+        cmd += f" --connector {connector}"
+    click.echo("  Its scan verdict applies again.")
+    click.echo(f"  To scan it now, run: {cmd}")
 
 
 @mcp.command()
@@ -1875,21 +1914,22 @@ def allow(app: AppContext, target: str, reason: str, connector_flag: str) -> Non
     help=(
         "Scope to one connector. Default: clear matching connector copies and "
         "unscoped state. "
-        "Pass --connector <name> to clear only that peer's per-connector state; "
+        "Pass --connector <name> to clear only that connector's state; "
         "an unscoped block stays in force."
     ),
 )
 @pass_ctx
 def unblock(app: AppContext, target: str, connector_flag: str) -> None:
-    """Remove an MCP server from the block list and clear enforcement state.
+    """Remove an MCP server's block or allow entry.
 
-    Unlike 'allow', this does not add the server to the allow list — it
-    simply removes the block so the server goes through normal scanning
-    on the next check.
+    This clears the server's block, allow, quarantine and disable state, so
+    its scan verdict decides again. Unlike 'allow', it does not add the
+    server to the allow list. Run 'defenseclaw mcp scan <name>' afterwards
+    to scan it now.
 
     Bare ``mcp unblock <name>`` clears matching connector-scoped and unscoped
-    enforcement state; ``--connector <name>`` clears only that peer's
-    per-connector state (an unscoped block stays in force).
+    state; ``--connector <name>`` clears only that connector's state (an
+    unscoped block stays in force).
     """
     from defenseclaw.commands import resolve_list_connector
     from defenseclaw.enforce import PolicyEngine
@@ -1902,12 +1942,7 @@ def unblock(app: AppContext, target: str, connector_flag: str) -> None:
     # --connector), so a connector-scoped unblock never falsely reports a
     # global block as clearable and remove_action stays exact-match.
     if connector:
-        has_state = bool(app.store) and (
-            app.store.has_action("mcp", target, "install", "block", connector)
-            or app.store.has_action("mcp", target, "install", "allow", connector)
-            or app.store.has_action("mcp", target, "file", "quarantine", connector)
-            or app.store.has_action("mcp", target, "runtime", "disable", connector)
-        )
+        has_state = _mcp_has_connector_enforcement(app, target, connector)
     else:
         targets = _mcp_policy_fanout_connectors(app, pe, target)
         has_unscoped_state = bool(app.store) and (
@@ -1916,17 +1951,28 @@ def unblock(app: AppContext, target: str, connector_flag: str) -> None:
             or pe.is_quarantined("mcp", target)
             or app.store.has_action("mcp", target, "runtime", "disable")
         )
-        has_scoped_state = any(
-            _mcp_has_connector_enforcement(app, target, target_connector)
-            for target_connector in targets
-        )
-        if targets and (has_unscoped_state or has_scoped_state):
+        scoped = [
+            c for c in targets if _mcp_has_connector_enforcement(app, target, c)
+        ]
+        if targets and (has_unscoped_state or scoped):
+            # GAP-2085/GAP-2225: name only the scopes that held state, and
+            # say when the cleared state was just an allow entry.
+            lines = [
+                _mcp_unblock_line(target, c, _mcp_only_allow_entry(app, pe, target, c))
+                for c in scoped
+            ]
+            if has_unscoped_state:
+                lines.append(_mcp_unblock_line(
+                    target, "", _mcp_only_allow_entry(app, pe, target, ""),
+                ))
             for target_connector in targets:
                 pe.remove_action_for_connector("mcp", target, target_connector)
-                click.secho(f"[mcp] Unblocked {target!r} ({target_connector}).", fg="green")
             if has_unscoped_state:
                 pe.remove_action("mcp", target)
-            click.echo("  It will be scanned on the next check.")
+            for line in lines:
+                click.secho(line, fg="green")
+            only_one = len(scoped) == 1 and not has_unscoped_state
+            _mcp_rescan_hint(target, scoped[0] if only_one else "")
             if app.logger:
                 saved_change_audit(app.logger).log_action(
                     "mcp-unblock", target, "manual unblock via CLI connector=all",
@@ -1938,14 +1984,16 @@ def unblock(app: AppContext, target: str, connector_flag: str) -> None:
         click.echo(f"[mcp] {target!r} has no enforcement state to clear{scope}")
         return
 
+    # GAP-2049: a plain result, not the internal list of cleared states.
+    line = _mcp_unblock_line(
+        target, connector, _mcp_only_allow_entry(app, pe, target, connector),
+    )
     if connector:
         pe.remove_action_for_connector("mcp", target, connector)
     else:
         pe.remove_action("mcp", target)
-    # GAP-2049: a plain result, not the internal list of cleared states.
-    scope = f" ({connector})" if connector else ""
-    click.secho(f"[mcp] Unblocked {target!r}{scope}.", fg="green")
-    click.echo("  It will be scanned on the next check.")
+    click.secho(line, fg="green")
+    _mcp_rescan_hint(target, connector)
 
     if app.logger:
         saved_change_audit(app.logger).log_action(
@@ -2122,8 +2170,8 @@ def set_server(
 ) -> None:
     """Add or update an MCP server in the configured connector(s)' MCP config.
 
-    Writes go to each configured connector's own config file (or one peer with
-    --connector) — not a single shared config.
+    Writes go to each configured connector's own config file (or one connector
+    with --connector) — not a single shared config.
 
     Scans the server before adding unless --skip-scan is set.
     Rejects servers with HIGH/CRITICAL findings.
@@ -2256,6 +2304,13 @@ def set_server(
         if pre_c.verdict == "blocked":
             click.secho(f"  blocked [{c}]: {pre_c.reason}", fg="red")
             policy_blocked.append(c)
+            # GAP-2120: an admission refusal (block list or asset policy) is
+            # audited like plugin/skill install refusals, per connector.
+            if app.logger:
+                saved_change_audit(app.logger).log_action(
+                    "install-rejected", name,
+                    f"connector={c} source={pre_c.source or 'policy'} reason={pre_c.reason}",
+                )
             continue
         # M5 security gate (opencode only): opencode EXECUTES the command[] it
         # stores, so validate/sanitise the server name + command and block an

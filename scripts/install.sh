@@ -1161,6 +1161,18 @@ restart_old() {
     fi
 }
 
+# A 1.0.0 gateway cannot start on a WAL-mode audit.db whose 5-second startup
+# check times out (a large store): SQLite drops and recreates audit.db-wal,
+# and 1.0.0 refuses the new file (fixed in 1.0.1). In rollback-journal mode
+# it starts, and switches the database back to WAL itself (GAP-1988).
+AUDIT_JOURNAL_PY="import sqlite3,sys;c=sqlite3.connect(sys.argv[1],timeout=10);c.execute('pragma journal_mode').fetchone()[0]=='wal' and c.execute('pragma journal_mode=delete').fetchone();c.close()"
+
+reset_audit_journal_mode() {
+    local db="${DEFENSECLAW_HOME}/audit.db"
+    [[ -f "${db}" && -x "${VENV}/bin/python" ]] || return 0
+    "${VENV}/bin/python" -c "${AUDIT_JOURNAL_PY}" "${db}" >/dev/null 2>&1 || true
+}
+
 start_gateway() {
     local log="${DEFENSECLAW_HOME}/gateway.log" from=0 rc=0 deadline up=0 version delegate=""
     info "Starting the gateway"
@@ -1170,6 +1182,7 @@ start_gateway() {
     # launches the gateway; the loop below then waits for it.
     version="$("${BIN_DIR}/defenseclaw-gateway" --version 2>/dev/null | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
     if [[ -n "${version}" ]] && version_lt "${version}" 1.0.0; then delegate=1; fi
+    if [[ -n "${version}" ]] && version_lt "${version}" 1.0.1; then reset_audit_journal_mode; fi
     [[ -f "${log}" ]] && from="$(wc -c < "${log}" | tr -d ' ')"
     if [[ -n "${delegate}" ]]; then
         PATH="${BIN_DIR}:${PATH}" DEFENSECLAW_UPGRADE_FRESH_PROCESS=1 "${BIN_DIR}/defenseclaw-gateway" start || rc=$?
@@ -1455,8 +1468,19 @@ PY
 # when its own gateway restarts.
 restart_openclaw() {
     openclaw_connector_active && has openclaw || return 0
-    openclaw gateway restart >/dev/null 2>&1 && ok "OpenClaw gateway restarted" \
-        || warn "Restart the OpenClaw gateway to load the updated plugin: openclaw gateway restart"
+    local out
+    if ! out="$(openclaw gateway restart 2>&1)"; then
+        warn "Restart the OpenClaw gateway to load the updated plugin: openclaw gateway restart"
+        return 0
+    fi
+    # OpenClaw exits 0 but restarts nothing when no gateway service is
+    # installed ("Gateway service disabled"), for example a foreground
+    # `openclaw gateway`. Don't claim a restart (GAP-2207, as GAP-1408 in setup).
+    if grep -Eqi 'openclaw gateway install|service (is )?(disabled|not (loaded|enabled|installed|registered|found))' <<<"${out}"; then
+        warn "No OpenClaw gateway service to restart. Restart the OpenClaw gateway to load the updated plugin: if it runs in a terminal, restart 'openclaw gateway' there"
+        return 0
+    fi
+    ok "OpenClaw gateway restarted"
 }
 
 openclaw_connector_active() {

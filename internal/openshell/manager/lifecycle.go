@@ -580,24 +580,13 @@ func tokenDelivery(rec record) string {
 // shared with the next session unnoticed. A scan that cannot finish fails
 // closed, as it does on create.
 func (m *Manager) checkNewSecrets(ctx context.Context, rec record, eff *packs.Effective, binding sandboxauth.Binding) error {
-	found, err := m.ws.ScanSecrets(ctx, workspace.MountOptions{
-		Project: rec.Project, Name: rec.Name, DataDir: m.opts.DataDir,
-		Masks: eff.Workspace.Masks, Unmask: eff.Workspace.Unmask, Protected: eff.PolicySources(),
-	})
+	visible, err := m.unmaskedSecrets(ctx, rec, eff, binding)
 	if err != nil {
-		return workspaceError(err)
-	}
-	have := maskedRels(binding, rec.Workdir)
-	var visible []string
-	for _, mk := range found {
-		if !slices.ContainsFunc(have, func(h string) bool { return mk.Rel == h || strings.HasPrefix(mk.Rel, h+"/") }) {
-			visible = append(visible, sandboxapi.DisplayText(mk.Rel))
-		}
+		return err
 	}
 	if len(visible) == 0 {
 		return nil
 	}
-	sort.Strings(visible)
 	shown := visible
 	if len(shown) > 5 {
 		shown = append(slices.Clip(shown[:5]), fmt.Sprintf("and %d more", len(visible)-5))
@@ -609,6 +598,27 @@ func (m *Manager) checkNewSecrets(ctx context.Context, rec record, eff *packs.Ef
 		Message: truncate("✗ not started: "+msg, 512)})
 	return &sandboxapi.Error{Code: sandboxapi.CodeConflict, Message: msg,
 		Detail: "move them out of the project, or delete the sandbox and run it again, which masks them (--unmask shares one on purpose)"}
+}
+
+// unmaskedSecrets are the files of a mounted sandbox's project that the
+// secret scan would mask but its create-time masks leave visible, sorted.
+func (m *Manager) unmaskedSecrets(ctx context.Context, rec record, eff *packs.Effective, binding sandboxauth.Binding) ([]string, error) {
+	found, err := m.ws.ScanSecrets(ctx, workspace.MountOptions{
+		Project: rec.Project, Name: rec.Name, DataDir: m.opts.DataDir,
+		Masks: eff.Workspace.Masks, Unmask: eff.Workspace.Unmask, Protected: eff.PolicySources(),
+	})
+	if err != nil {
+		return nil, workspaceError(err)
+	}
+	have := maskedRels(binding, rec.Workdir)
+	var visible []string
+	for _, mk := range found {
+		if !slices.ContainsFunc(have, func(h string) bool { return mk.Rel == h || strings.HasPrefix(mk.Rel, h+"/") }) {
+			visible = append(visible, sandboxapi.DisplayText(mk.Rel))
+		}
+	}
+	sort.Strings(visible)
+	return visible, nil
 }
 
 // maskedRels turns the binding's sandbox mask paths back into
@@ -1085,6 +1095,17 @@ func (m *Manager) Review(ctx context.Context, name string, req sandboxapi.Review
 		return nil, workspaceError(err)
 	}
 	resp := &sandboxapi.ReviewResponse{Name: name, Report: report, Summary: report.SummaryLine(), RiskLine: report.RiskLine()}
+	// A secret file the session left in the project stops the next start
+	// (checkNewSecrets): the review names it, so the end of the session can
+	// say so before the keep/undo question. Best effort: a scan that cannot
+	// finish leaves it to the start.
+	if rec.Project != "" && eff != nil {
+		if binding, err := m.opts.Bindings.Get(rec.BindingID); err == nil {
+			if visible, err := m.unmaskedSecrets(ctx, rec, eff, binding); err == nil {
+				resp.UnmaskedSecrets = visible
+			}
+		}
+	}
 	if req.Diff {
 		diff, err := m.ws.ReviewDiff(ctx, m.opts.DataDir, name)
 		if err != nil {

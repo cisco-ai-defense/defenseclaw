@@ -280,7 +280,7 @@ class HintEngine:
             return hint
         return (
             "KEYS  j/k move | t switch table | a all models | Enter detail | s scan | r refresh | "
-            "/ search vendor/product/component."
+            "e export | d on/off | / search vendor/product/component."
         )
 
     def _registries_hint(self, state: HintState) -> str:

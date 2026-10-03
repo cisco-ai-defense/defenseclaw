@@ -48,6 +48,7 @@ _SIGNALS = frozenset(("logs", "traces", "metrics"))
 # gateway skips it by design. Anything else (invalid records, ambiguous
 # identity, persistence failures) is a real drop worth a warning.
 _UNMAPPED_DROP_REASONS = frozenset(("unsupported_identity",))
+_SIGNAL_NOUNS = {"logs": "log", "metrics": "metric", "traces": "trace"}
 _EVENT_NAMES = (
     "telemetry.authentication.failed",
     "telemetry.batch.normalized",
@@ -222,10 +223,10 @@ def summarize_native_delivery(report: ConnectorCustodyReport) -> NativeDeliveryS
             # map (an agent whose model calls failed, for example): skipped
             # by design, not data loss (GAP-1664).
             state = "unmapped_only"
-            signals = ", ".join(item.drop_only_signals) or "native"
             detail = (
-                f"no mapped native records yet ({drop_only}/{normalized} batches held only {signals} "
-                "records DefenseClaw does not map, skipped by design)"
+                f"no mapped native records yet ({drop_only}/{normalized} batches held only "
+                f"{_unmapped_signal_phrase(item.drop_only_signals)} records that DefenseClaw does not map, "
+                "skipped by design)"
             )
         elif drop_only == normalized:
             state = "all_drop_only"
@@ -234,10 +235,10 @@ def summarize_native_delivery(report: ConnectorCustodyReport) -> NativeDeliveryS
             # Every dropped batch held only record types DefenseClaw does
             # not map. That is normal for a healthy agent, not data loss.
             state = "accepted"
-            signals = ", ".join(item.drop_only_signals) or "native"
             detail = (
                 f"accepted native delivery observed ({normalized} batches; {drop_only} held only "
-                f"{signals} records DefenseClaw does not map, skipped by design)"
+                f"{_unmapped_signal_phrase(item.drop_only_signals)} records that DefenseClaw does not map, "
+                "skipped by design)"
             )
         elif drop_only:
             state = "partial_drop_only"
@@ -556,6 +557,16 @@ def _drop_only_keys(
         else:
             lost.append(key)
     return lost, unmapped
+
+
+def _unmapped_signal_phrase(signals: tuple[str, ...]) -> str:
+    """Name the unmapped record types as one adjective, for example "log/metric".
+
+    A comma list ("logs, metrics records") read as two separate clauses in
+    status, doctor and the TUI Overview (GAP-2093).
+    """
+
+    return "/".join(_SIGNAL_NOUNS.get(signal, signal) for signal in signals) or "native"
 
 
 def _credential_state(last_auth: datetime | None, last_native: datetime | None) -> str:

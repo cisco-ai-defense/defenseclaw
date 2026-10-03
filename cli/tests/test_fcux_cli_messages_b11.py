@@ -91,7 +91,7 @@ def test_fail_mode_closed_lists_the_observe_connector_it_closes(monkeypatch: pyt
     assert "stays fail-open while in observe mode" not in result.output
     assert "Codex (codex): open → closed (its own setting, also in observe mode)" in result.output
     assert "Cursor (cursor): " in result.output
-    assert "global default + 3 active connector overrides = closed)" in result.output
+    assert "global default + 3 connector overrides = closed)" in result.output
     assert cfg.guardrail.effective_hook_fail_mode("codex") == "closed"
 
 
@@ -105,7 +105,11 @@ def test_fail_mode_change_list_shows_a_disabled_connector_as_disabled(
     assert result.exit_code == 0, result.output
     assert "Codex (codex): disabled (no hooks); closed is saved for when it is turned on again" in result.output
     assert "Codex (codex): open → closed" not in result.output
-    assert "global default + 2 active connector overrides = closed; Codex is disabled (no hooks))" in result.output
+    # GAP-2178: codex's value is saved too, so it is counted and named as staying disabled.
+    assert (
+        "global default + 3 connector overrides = closed; Codex saved, stays disabled until "
+        "'defenseclaw guardrail enable --connector codex')" in result.output
+    )
 
 
 def test_fail_mode_with_gateway_running_skips_verifying_a_disabled_connector(

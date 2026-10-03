@@ -718,6 +718,19 @@ class TestPerConnectorWriteSurface(_BaseSetup):
         self.assertIn("--enable-judge was not applied", res.output)
         self.assertIn("--mode action --enable-judge", res.output)
 
+    def test_observe_setup_says_when_it_prunes_the_judge_gate(self):
+        # GAP-2083: setup drops an observe-mode connector from the gate; it
+        # must say so instead of pruning silently.
+        self._seed_map("codex", "hermes")
+        gc = self.app.cfg.guardrail
+        gc.judge.enabled = True
+        gc.judge.hook_connectors = ["codex", "hermes"]
+        with _stub_side_effects():
+            res = _invoke(["hermes", "--yes", "--no-restart", "--mode", "observe"], self.app)
+        self.assertEqual(res.exit_code, 0, msg=res.output)
+        self.assertEqual(gc.judge.hook_connectors, ["codex"])
+        self.assertIn("hermes was removed from the LLM judge gate", res.output)
+
     def test_no_enable_judge_opts_connector_out_of_concrete_gate(self):
         self._seed_map("codex", "hermes")
         gc = self.app.cfg.guardrail
@@ -3671,9 +3684,26 @@ class TestGatewayOfflineStaging(_BaseSetup):
         # MAC-U3-03: no OpenClaw gateway.port and no internal audit wording.
         self.assertNotIn("gateway.port:", result.output)
         self.assertNotIn("canonical", result.output)
-        # The restart step alone says when the new port applies.
-        self.assertNotIn("takes effect when the gateway starts", result.output)
+        # GAP-2153: one note for the stopped gateway, not a restart note
+        # followed by a second "Gateway is not running" block.
+        self.assertIn("the gateway isn't running, so this change takes effect when it starts", result.output)
+        self.assertNotIn("nothing listens on the new API port", result.output)
+        self.assertNotIn("Config updated", result.output)
         openclaw_check.assert_not_called()
+
+    def test_new_api_port_with_a_running_gateway_says_it_applies_on_restart(self):
+        self.app.logger = MagicMock()
+        self.app.logger.log_action.side_effect = CanonicalObservabilityUnavailableError("connection refused")
+        self._seed_map("codex")
+
+        with patch("defenseclaw.commands.cmd_setup._is_pid_alive", return_value=True), patch(
+            "defenseclaw.commands.cmd_setup._restart_defense_gateway", return_value=True
+        ):
+            result = _invoke(["gateway", "--api-port", "19095", "--non-interactive"], self.app)
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("nothing listens on the new API port until the gateway restarts", result.output)
+        self.assertNotIn("the gateway isn't running", result.output)
 
     def test_stopped_gateway_is_not_a_failed_verification(self):
         # GAP-2009: on a fresh account (gateway never started) the next step

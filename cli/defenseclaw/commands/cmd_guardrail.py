@@ -332,6 +332,7 @@ def _toggle_connector_guardrail(
             app.cfg.gateway.host,
             app.cfg.gateway.port,
             connector=key,
+            teardown=not enable,
         )
         ux.ok(f"{label} connector {action} complete", indent="  ")
         click.echo()
@@ -911,7 +912,9 @@ def disable_cmd(
             app.cfg.gateway.host,
             app.cfg.gateway.port,
             connector=connector,
-            connectors=_active_connector_set(app.cfg, connector),
+            connectors=_actives,
+            summary_exclude=frozenset(_already_off),
+            teardown=True,
         )
         # In a multi-connector install the gateway boot loop tears down
         # every active connector on restart, so report them all rather
@@ -1329,8 +1332,8 @@ def _apply_global_fail_mode_transaction(
             if fail_mode_targets:
                 # A pinned connector (Cursor) keeps its own value; say so
                 # instead of counting it in the overrides (GAP-1432). A
-                # disabled connector has no hooks: its value is saved for
-                # later and not counted (GAP-1977).
+                # connector disabled on its own has its value saved too, so
+                # it is counted and named as staying disabled (GAP-2178).
                 pinned = {name: (target_modes or {}).get(name, mode) for name in fail_mode_targets}
                 disabled = {name for name in fail_mode_targets if _disabled_on_its_own(gc, name)}
                 kept = "".join(
@@ -1338,10 +1341,15 @@ def _apply_global_fail_mode_transaction(
                     for name, value in sorted(pinned.items())
                     if value != mode and name not in disabled
                 )
-                kept += "".join(f"; {_connector_label(name)} is disabled (no hooks)" for name in sorted(disabled))
-                changed = sum(1 for name, value in pinned.items() if value == mode and name not in disabled)
+                kept += "".join(
+                    f"; {_connector_label(name)} saved, stays disabled until "
+                    f"'defenseclaw guardrail enable --connector {name}'"
+                    for name in sorted(disabled)
+                )
+                changed = sum(1 for value in pinned.values() if value == mode)
+                when = "" if gc.enabled else " — applies when the guardrail is enabled"
                 ux.ok(
-                    f"Config saved (global default + {changed} active connector overrides = {mode}{kept})",
+                    f"Config saved (global default + {changed} connector overrides = {mode}{kept}){when}",
                     indent="  ",
                 )
             else:
@@ -1439,7 +1447,8 @@ def _apply_global_fail_mode_transaction(
                 "status will report drift until reconciliation succeeds.",
                 indent="  ",
             )
-        elif not gc.enabled:
+        elif not gc.enabled and not fail_mode_targets:
+            # The fan-out summary already says when it applies (GAP-2178).
             ux.warn(
                 "guardrail is currently disabled — value will take effect "
                 "the next time you run 'defenseclaw guardrail enable'.",
@@ -1550,9 +1559,15 @@ def fail_mode_cmd(
             )
             click.echo(f"  {ux.dim('Switch to closed:')} defenseclaw guardrail fail-mode closed")
         else:
+            # Name Hermes only when it is configured (GAP-2116).
+            _hermes_note = (
+                "; Hermes remains fail-open"
+                if any(normalize_connector(n) == "hermes" for n in _actives)
+                else ""
+            )
             ux.subhead(
                 "Invalid, unauthorized, incomplete, and unreachable gateway responses BLOCK connectors "
-                "that are closed above; Hermes remains fail-open.",
+                f"that are closed above{_hermes_note}.",
                 indent="  ",
             )
             if _open_names:
@@ -1584,12 +1599,12 @@ def fail_mode_cmd(
         and all(
             (runtime_states[name].desired == desired_modes[name] and runtime_states[name].current)
             or _disabled_on_its_own(gc, name)
+            or not gc.enabled
             for name in fail_mode_targets
         )
     ):
-        click.echo(
-            f"  {ux.dim('Hook fail mode is already')} {mode!r} {ux.dim('for all active connectors — nothing to do.')}"
-        )
+        scope = "for all active connectors" if gc.enabled else "for configured connectors"
+        click.echo(f"  {ux.dim('Hook fail mode is already')} {mode!r} {ux.dim(f'{scope} — nothing to do.')}")
         return
     single_connector = _resolve_active_connector(app.cfg)
     single_pinned = None if fail_mode_targets else _cursor_pinned_fail_mode(gc, single_connector)
@@ -1615,10 +1630,29 @@ def fail_mode_cmd(
         return
 
     click.echo()
+    guardrail_off = not gc.enabled
     if fail_mode_targets:
-        click.echo(f"  {ux.bold('Changing hook fail mode for active connectors:')} {ux.accent(mode)}")
+        if guardrail_off:
+            click.echo(f"  {ux.bold('Saving hook fail mode for configured connectors:')} {ux.accent(mode)}")
+        else:
+            click.echo(f"  {ux.bold('Changing hook fail mode for active connectors:')} {ux.accent(mode)}")
         for name in fail_mode_targets:
             old = target_modes.get(name, current)
+            if guardrail_off and _disabled_on_its_own(gc, name):
+                click.echo(
+                    f"      - {_connector_label(name)} ({name}): disabled (no hooks); "
+                    f"{desired_modes[name]} is saved; it stays disabled until "
+                    f"'defenseclaw guardrail enable --connector {name}'"
+                )
+                continue
+            if guardrail_off:
+                # GAP-2156: a global disable removed every hook, so nothing
+                # changes now; read like the per-connector disabled line.
+                click.echo(
+                    f"      - {_connector_label(name)} ({name}): guardrail off (no hooks); "
+                    f"{desired_modes[name]} is saved for when it is turned on again"
+                )
+                continue
             if _disabled_on_its_own(gc, name):
                 # Like the bare view: no hooks, so no fail mode (GAP-1977).
                 click.echo(
@@ -1690,6 +1724,12 @@ def fail_mode_cmd(
             "authentication, and transport failures continue upstream.",
             indent="    ",
         )
+    elif mode == "closed" and guardrail_off:
+        ux.subhead(
+            "Once the guardrail is enabled, invalid or unavailable gateway responses will BLOCK "
+            "supported connectors." + (" Hermes remains fail-open." if hermes_targeted else ""),
+            indent="  ",
+        )
     elif mode == "closed":
         ux.warn(
             "Invalid or unavailable gateway responses will now BLOCK supported connectors.",
@@ -1697,13 +1737,16 @@ def fail_mode_cmd(
         )
         ux.subhead(
             "A 4xx, malformed/incomplete response, timeout, or connection failure blocks connectors "
-            "with a native fail-closed surface. Hermes remains fail-open.",
+            "with a native fail-closed surface."
+            + (" Hermes remains fail-open." if hermes_targeted else ""),
             indent="    ",
         )
     else:
         ux.subhead(
-            "Invalid or unavailable gateway responses will now ALLOW the agent and log the failure to "
-            "~/.defenseclaw/logs/hook-failures.jsonl.",
+            ("Once the guardrail is enabled, invalid or unavailable gateway responses will ALLOW"
+             if guardrail_off
+             else "Invalid or unavailable gateway responses will now ALLOW")
+            + " the agent and log the failure to ~/.defenseclaw/logs/hook-failures.jsonl.",
             indent="  ",
         )
     click.echo()

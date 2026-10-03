@@ -82,6 +82,11 @@ _ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 # "<sha256>  <name>" line per file. `uninstall --binaries` removes the files
 # that still match it, and keeps a uv that was updated or replaced since.
 _UV_RECORD = "defenseclaw-uv.sha256"
+# `defenseclaw-gateway stop` itself waits up to about 25s (shutdown request,
+# 10s graceful exit, then a signal and 10s more, then a kill), so a shorter
+# wait here failed the whole uninstall while the stop was still working
+# (GAP-2100).
+_GATEWAY_STOP_TIMEOUT_SECONDS = 45
 _UV_NAMES = {"win32": ("uv.exe", "uvx.exe", "uvw.exe")}
 _UV_NAMES_POSIX = ("uv", "uvx")
 _UV_RECORD_MAX_BYTES = 4096
@@ -1943,6 +1948,14 @@ def _validate_windows_binary_ownership(plan: UninstallPlan) -> None:
         raise click.ClickException("refusing Windows binary removal: CLI shim targets an unrelated runtime")
 
 
+def _is_empty_dir(path: str) -> bool:
+    try:
+        with os.scandir(path) as entries:
+            return next(entries, None) is None
+    except OSError:
+        return False
+
+
 def _validate_plan(plan: UninstallPlan) -> None:
     """Validate every destructive root and exact artifact before mutation."""
     if plan.remove_data_dir:
@@ -1959,10 +1972,16 @@ def _validate_plan(plan: UninstallPlan) -> None:
         if os.path.normcase(os.path.realpath(plan.data_dir)) in protected:
             raise click.ClickException(f"refusing protected data path: {plan.data_dir}")
         ownership_markers = ("config.yaml", "audit.db", ".env", "policies", "quarantine", ".venv")
-        if os.path.isdir(plan.data_dir) and not any(
-            os.path.exists(os.path.join(plan.data_dir, marker))
-            and not _is_reparse_path(os.path.join(plan.data_dir, marker))
-            for marker in ownership_markers
+        # An empty folder holds nothing to remove; it is what the data phase
+        # leaves when the data dir is a mount point (GAP-1980).
+        if (
+            os.path.isdir(plan.data_dir)
+            and not _is_empty_dir(plan.data_dir)
+            and not any(
+                os.path.exists(os.path.join(plan.data_dir, marker))
+                and not _is_reparse_path(os.path.join(plan.data_dir, marker))
+                for marker in ownership_markers
+            )
         ):
             raise click.ClickException(
                 f"refusing to remove {plan.data_dir}: path does not look like a DefenseClaw data directory"
@@ -2339,7 +2358,7 @@ def _stop_gateway(plan: UninstallPlan | None = None) -> None:
             capture_output=True,
             encoding="utf-8",
             errors="replace",
-            timeout=15,
+            timeout=_GATEWAY_STOP_TIMEOUT_SECONDS,
         )
         if watchdog.returncode != 0:
             detail = (watchdog.stderr or watchdog.stdout or "unknown error").strip()
@@ -2349,7 +2368,7 @@ def _stop_gateway(plan: UninstallPlan | None = None) -> None:
             capture_output=True,
             encoding="utf-8",
             errors="replace",
-            timeout=15,
+            timeout=_GATEWAY_STOP_TIMEOUT_SECONDS,
         )
         if proc.returncode != 0 and _managed_host_has_no_own_gateway(plan):
             # On a managed host `stop` refuses whenever this account's own
@@ -2774,7 +2793,7 @@ def _remove_data_dir(
         "quarantine",
         ".venv",
     )
-    if not any(os.path.exists(os.path.join(data_dir, m)) for m in markers):
+    if not _is_empty_dir(data_dir) and not any(os.path.exists(os.path.join(data_dir, m)) for m in markers):
         raise click.ClickException(
             f"refusing to remove {data_dir}: path does not look like a DefenseClaw data directory"
         )

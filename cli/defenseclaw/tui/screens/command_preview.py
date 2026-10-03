@@ -54,6 +54,19 @@ class CommandPreview:
     def masked_display(self) -> str:
         return display_argv(self.masked_argv)
 
+    @property
+    def cancel_by_default(self) -> bool:
+        """Whether Cancel, not Run, takes the initial focus.
+
+        Destructive and secret-bearing commands, and upgrade/rollback (they
+        replace the binaries and restart the gateway, GAP-2090), so a
+        reflexive Enter cancels instead of running them.
+        """
+
+        if self.risk in {"destructive", "secret"}:
+            return True
+        return bool(_upgrade_summary(self.masked_argv[1:]))
+
 
 def build_command_preview(command: ParsedCommand) -> CommandPreview:
     """Build preview copy for a parsed command."""
@@ -178,6 +191,10 @@ def _restart_effect(risk: str, args: tuple[str, ...]) -> str:
     lowered = tuple(arg.lower() for arg in args)
     if risk == "restart" or any(arg in {"restart", "rotate-token"} for arg in lowered):
         return "yes"
+    if risk == "read-only":
+        # ``setup observability list`` read "Risk read-only  Restart
+        # possible" (GAP-2186).
+        return "no"
     if lowered and lowered[0] == "setup" and "--no-restart" not in lowered:
         return "possible"
     return "no"
@@ -268,10 +285,9 @@ class CommandPreviewScreen(ModalScreen[bool]):
                 yield Button("Run", id="preview-run", variant="success")
 
     def on_mount(self) -> None:
-        # For destructive / secret-bearing commands, focus Cancel so a
-        # reflexive Enter cancels instead of running the command. Benign
-        # commands keep Run focused for fast confirmation.
-        target = "#preview-cancel" if self.preview.risk in {"destructive", "secret"} else "#preview-run"
+        # Risky commands focus Cancel so a reflexive Enter cancels instead of
+        # running them. Benign commands keep Run focused for fast confirmation.
+        target = "#preview-cancel" if self.preview.cancel_by_default else "#preview-run"
         self.query_one(target, Button).focus()
 
     def action_cancel(self) -> None:

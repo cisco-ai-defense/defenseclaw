@@ -264,25 +264,20 @@ def build_readiness_checks(
     connectors = _active_connector_names(cfg)
     if connectors:
         for connector in connectors:
-            checks.append(ReadinessCheck(f"Active Connector: {connector}", "configured", "pass"))
+            # "Connector: claudecode" fits the detail modal's label column;
+            # "Active Connector: claudecode" put the name on a second line
+            # (GAP-2059).
+            checks.append(ReadinessCheck(f"Connector: {connector}", "configured", "pass"))
     else:
         checks.append(
             ReadinessCheck(
-                "Active Connector",
-                "No connector mode is configured.",
+                "Connector",
+                # No fix command: "setup openclaw --yes" told every user to
+                # set up OpenClaw, hook-connector users too (GAP-2134). The
+                # user picks the agent in the Setup form.
+                "No agent is protected yet — Protect an agent → Add or configure a connector, "
+                "or run defenseclaw setup <connector>.",
                 "fail",
-                # Default to OpenClaw with ``--yes`` so anyone that wires this
-                # readiness fix to a quick-action keybinding never accidentally
-                # launches the interactive picker (which blocks on stdin and
-                # is impossible to drive cleanly from the embedded TUI). The
-                # Setup panel's wizard form is still the preferred entry point
-                # — this is the safe fallback if the fix runs unattended.
-                _intent(
-                    "defenseclaw",
-                    ("setup", "openclaw", "--yes"),
-                    "setup openclaw",
-                    "setup",
-                ),
             ),
         )
 

@@ -19,7 +19,7 @@ from rich.table import Table
 from textual import events, on
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical
+from textual.containers import Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, Static
 
@@ -45,7 +45,10 @@ class DetailModalModel:
         # Long labels wrap instead of being cut: "Active Connector: cla…"
         # and two "Active Connector: ope…" rows hid which connector was
         # meant (GAP-1547).
-        table.add_column(width=22, overflow="fold")
+        # The column grows to the longest label (up to 26) so labels such as
+        # "Registry / Asset Policy" stay on one line (GAP-2127).
+        longest = max((len(label) for label, _ in self.pairs), default=0)
+        table.add_column(width=max(22, min(26, longest)), overflow="fold")
         table.add_column(overflow="fold")
         for label, value in self.pairs:
             if not label and not value:
@@ -89,10 +92,13 @@ class DetailScreen(ModalScreen[None]):
         text-style: bold;
     }}
 
+    #detail-scroll {{
+        height: auto;
+        margin-bottom: 1;
+    }}
+
     #detail-body {{
         height: auto;
-        max-height: 26;
-        margin-bottom: 1;
         color: {DEFAULT_TOKENS.text_primary};
     }}
 
@@ -116,8 +122,25 @@ class DetailScreen(ModalScreen[None]):
     def compose(self) -> ComposeResult:
         with Vertical(id="detail-dialog"):
             yield Static(self.model.title, id="detail-title", markup=False)
-            yield Static(self.model.table(), id="detail-body")
+            with VerticalScroll(id="detail-scroll"):
+                yield Static(self.model.table(), id="detail-body")
             yield Button("Close", id="detail-close", variant="default")
+
+    def on_mount(self) -> None:
+        self._fit_body()
+        # Up/Down/PageUp/PageDown/End scroll the body.
+        self.query_one("#detail-scroll", VerticalScroll).focus()
+
+    def on_resize(self, _event: events.Resize) -> None:
+        self._fit_body()
+
+    def _fit_body(self) -> None:
+        # The dialog may take 85% of the screen. The title, Close button,
+        # margins, padding and border keep their 10 rows and the body
+        # scrolls: at 80x24 the readiness rows after the first few and the
+        # Close button were cut off and could not be reached (GAP-2177).
+        room = self.app.size.height * 85 // 100 - 10
+        self.query_one("#detail-scroll", VerticalScroll).styles.max_height = max(3, room)
 
     def action_close(self) -> None:
         self.dismiss(None)

@@ -528,6 +528,19 @@ class OrchestratorClient:
             raise ValueError("gateway returned a malformed policy reload response")
         return data
 
+    def acp_profiles(self) -> dict[str, Any]:
+        """GET /v1/acp/profiles: the ACP policy the running gateway has loaded."""
+        resp = self._session.get(
+            f"{self.base_url}/v1/acp/profiles",
+            timeout=self.timeout,
+            allow_redirects=False,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if not isinstance(data, dict):
+            raise ValueError("gateway returned a malformed ACP profiles response")
+        return data
+
     def emit_cli_observability(self, payload: Mapping[str, Any]) -> None:
         """Hand one raw Python-CLI fact to the canonical v8 runtime.
 

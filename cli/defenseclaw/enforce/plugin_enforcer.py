@@ -113,7 +113,13 @@ class PluginEnforcer:
         if is_link_or_reparse(src) or not os.path.exists(src):
             return False
         try:
-            source_id, _manifest = canonical_plugin_id(src)
+            # GAP-2164: a single-file OpenCode/Amp plugin is quarantined as a
+            # file named by its ID; it has no manifest directory to read.
+            source_id = (
+                validate_plugin_id(os.path.basename(src))
+                if os.path.isfile(src)
+                else canonical_plugin_id(src)[0]
+            )
             if filesystem_identity_key(source_id, os.path.dirname(src)) != filesystem_identity_key(
                 validate_plugin_id(plugin_name), os.path.dirname(src)
             ):

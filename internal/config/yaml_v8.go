@@ -73,6 +73,9 @@ type V8YAMLError struct {
 	Column  int
 	Summary string
 	Action  string
+	// FirstLine is the line of the first definition of a duplicate key, so
+	// the CLI can say "the first one is at line 3" (GAP-2188).
+	FirstLine int
 }
 
 func (e *V8YAMLError) Error() string {
@@ -235,9 +238,11 @@ func (w *v8YAMLWalker) validate(node *yaml.Node, path string, depth int) error {
 				return err
 			}
 			if first, exists := seen[key.Value]; exists {
-				return v8Error(w.source, V8YAMLErrorDuplicateKey, keyPath, key,
+				duplicate := v8Error(w.source, V8YAMLErrorDuplicateKey, keyPath, key,
 					fmt.Sprintf("duplicate mapping key; the first definition is at line %d, column %d", first.Line, first.Column),
 					"remove one definition so precedence is unambiguous")
+				duplicate.FirstLine = first.Line
+				return duplicate
 			}
 			seen[key.Value] = key
 			childDepth := depth

@@ -438,6 +438,8 @@ class TestStandardManifestDirectoryStructure(unittest.TestCase):
                 result = scan_plugin(root)
                 self.assertFalse(self._has_location(result, "STRUCT-HIDDEN", f"/{directory_name}"))
                 self.assertNotIn("MANIFEST-MISSING", [finding.rule_id for finding in result.findings])
+                # Manifest findings name the real file, not the schema label (GAP-2214).
+                self.assertTrue(self._has_location(result, "PERM-NONE", f"/{directory_name}/plugin.json"))
 
     def test_regular_file_named_like_manifest_directory_remains_hidden(self):
         root = os.path.join(self.tmp, "regular-file")
@@ -662,7 +664,8 @@ class TestNoManifestStillScans(unittest.TestCase):
         result = scan_plugin(plugin_file)
         rule_ids = [finding.rule_id for finding in result.findings]
 
-        self.assertIn("MANIFEST-MISSING", rule_ids)
+        # A single-file plugin has no manifest by design (GAP-2165).
+        self.assertNotIn("MANIFEST-MISSING", rule_ids)
         self.assertTrue(
             any("EVAL" in rule_id for rule_id in rule_ids if rule_id),
             f"Expected eval finding from direct Amp plugin scan, got: {rule_ids}",

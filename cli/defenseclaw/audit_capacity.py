@@ -56,3 +56,34 @@ def audit_disk_full_notice(db_path: str) -> str:
         "new alerts and audit events are not being recorded; free space on that disk "
         "(the gateway resumes writing once there is room)"
     )
+
+
+# Plain words for the gateway's event_history_last_sqlite_class tokens.
+AUDIT_WRITE_FAILURE_CAUSES = {
+    "full": "the disk holding the audit database is full",
+    "busy_locked": "another process keeps the audit database locked",
+    "deadline": "audit database writes time out",
+    "io": "the disk returned an I/O error",
+    "readonly_cantopen": "the audit database is read-only or cannot be opened",
+    "constraint_corrupt": "the audit database is damaged",
+}
+
+
+def audit_write_failure_reason(details: object, audit_db: str = "") -> str:
+    """Plain words for a gateway telemetry snapshot whose audit writes fail, else "".
+
+    *details* is the gateway's ``telemetry.details`` map (GAP-1308). Shared by
+    doctor, status and the TUI Overview so they say the same thing (GAP-2215).
+    """
+    if not isinstance(details, dict):
+        return ""
+    if details.get("event_history_failure") != "sqlite_write_failed":
+        return ""
+    sqlite_class = str(details.get("event_history_last_sqlite_class") or "")
+    if sqlite_class == "full" and audit_disk_freed(audit_db):
+        return (
+            "audit events could not be written while the disk holding the audit database was full; "
+            "it has room again, and this clears with the next audit event"
+        )
+    cause = AUDIT_WRITE_FAILURE_CAUSES.get(sqlite_class, "the audit database rejects writes")
+    return f"audit events cannot be written: {cause}"

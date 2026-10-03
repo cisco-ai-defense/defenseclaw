@@ -120,6 +120,15 @@ type Fix struct {
 	Apply func(ctx context.Context) error `json:"-"`
 }
 
+// Line is the fix as one line: its summary, then its command after a
+// colon (GAP-2136).
+func (f *Fix) Line() string {
+	if f.Command == "" {
+		return f.Summary
+	}
+	return f.Summary + ": " + f.Command
+}
+
 // Check is one doctor finding.
 type Check struct {
 	ID     string      `json:"id"`
@@ -368,6 +377,10 @@ type Doctor struct {
 	// DockerGroup reports whether the user belongs to the docker group
 	// and whether this session already carries that membership.
 	DockerGroup func() (member, inSession bool, err error)
+	// ServiceDockerGroupMissing reports that the systemd user manager
+	// that runs the gateway service lacks the user's docker group
+	// (default ServiceManagerMissesDockerGroup).
+	ServiceDockerGroupMissing func() bool
 	// SSHShim makes the ssh the OpenShell CLI runs with (NewSSHShim over
 	// PATH by default); the check removes it afterwards.
 	SSHShim func() (*SSHShim, error)
@@ -395,7 +408,8 @@ func (d *Doctor) defaults() {
 		d.CLI = DefaultBinary
 	}
 	if d.Gateway == nil {
-		d.Gateway = &GatewayConfigurator{Dir: d.Discover.ConfigDir, Runner: d.Runner, GOOS: d.GOOS, Discover: d.Discover, CLI: d.CLI, LookPath: d.LookPath}
+		d.Gateway = &GatewayConfigurator{Dir: d.Discover.ConfigDir, Runner: d.Runner, GOOS: d.GOOS, Discover: d.Discover, CLI: d.CLI, LookPath: d.LookPath,
+			ServiceDockerGroupMissing: d.ServiceDockerGroupMissing}
 	}
 	if d.LandlockABI == nil {
 		d.LandlockABI = landlockABI
@@ -443,6 +457,9 @@ func (d *Doctor) defaults() {
 	}
 	if d.DockerGroup == nil {
 		d.DockerGroup = dockerGroupMembership
+	}
+	if d.ServiceDockerGroupMissing == nil {
+		d.ServiceDockerGroupMissing = ServiceManagerMissesDockerGroup
 	}
 	if d.SSHShim == nil {
 		d.SSHShim = func() (*SSHShim, error) { return NewSSHShim(os.Getenv("PATH")) }
@@ -676,7 +693,9 @@ func (r *doctorRun) dockerCheck(ctx context.Context) (Check, string) {
 	jsonErr := json.Unmarshal(firstJSONLine(out), &info)
 	serverErr := strings.Join(info.ServerErrors, "; ")
 	if serverErr == "" && err != nil {
-		serverErr = strings.TrimSpace(string(out))
+		// docker info prints its (empty) JSON before the client's error;
+		// keep only the error (GAP-2136).
+		serverErr = withoutJSONLines(out)
 		if serverErr == "" {
 			serverErr = err.Error()
 		}
@@ -727,6 +746,100 @@ func (r *doctorRun) buildKitCheck(ctx context.Context) Check {
 		c.Detail += " (buildx " + v + ")"
 	}
 	return c
+}
+
+// withoutJSONLines is out without its JSON lines, trimmed.
+func withoutJSONLines(out []byte) string {
+	var kept []string
+	for _, line := range strings.Split(string(out), "\n") {
+		if line = strings.TrimSpace(line); line != "" && !strings.HasPrefix(line, "{") {
+			kept = append(kept, line)
+		}
+	}
+	return strings.Join(kept, "; ")
+}
+
+// DockerGroupMissingInProcess reports whether this process's user belongs
+// to the docker group while the process itself does not have it: it
+// started before the user joined, so it cannot reach the Docker socket
+// until it restarts (GAP-2137). Linux only; false for root.
+func DockerGroupMissingInProcess() bool {
+	if runtime.GOOS != "linux" || os.Geteuid() == 0 {
+		return false
+	}
+	member, inSession, err := dockerGroupMembership()
+	return err == nil && member && !inSession
+}
+
+// ServiceManagerMissesDockerGroup reports whether the user is listed in
+// the docker group while their systemd user manager, which starts the
+// openshell-gateway user service, does not carry it: the manager started
+// before the user joined, and with linger on logging out does not restart
+// it, so the gateway it starts cannot reach Docker (GAP-2169). Linux
+// only; false for root and whenever it cannot tell.
+func ServiceManagerMissesDockerGroup() bool {
+	if runtime.GOOS != "linux" || os.Geteuid() == 0 {
+		return false
+	}
+	member, _, err := dockerGroupMembership()
+	if err != nil || !member {
+		return false
+	}
+	g, err := user.LookupGroup("docker")
+	if err != nil {
+		return false
+	}
+	gid, err := strconv.Atoi(g.Gid)
+	if err != nil {
+		return false
+	}
+	uid := os.Getuid()
+	procs, err := os.ReadFile(fmt.Sprintf("/sys/fs/cgroup/user.slice/user-%d.slice/user@%d.service/init.scope/cgroup.procs", uid, uid))
+	if err != nil {
+		return false
+	}
+	pids := strings.Fields(string(procs))
+	if len(pids) == 0 {
+		return false
+	}
+	status, err := os.ReadFile("/proc/" + pids[0] + "/status")
+	if err != nil {
+		return false
+	}
+	groups, ok := ProcStatusGroups(status)
+	return ok && !slices.Contains(groups, gid)
+}
+
+// ProcStatusGroups parses the Groups line of a /proc/<pid>/status file;
+// ok is false when it has none.
+func ProcStatusGroups(status []byte) (groups []int, ok bool) {
+	for _, line := range strings.Split(string(status), "\n") {
+		rest, found := strings.CutPrefix(line, "Groups:")
+		if !found {
+			continue
+		}
+		for _, f := range strings.Fields(rest) {
+			if id, err := strconv.Atoi(f); err == nil {
+				groups = append(groups, id)
+			}
+		}
+		return groups, true
+	}
+	return nil, false
+}
+
+// serviceManagerRestart is the command that restarts the user's systemd
+// user manager, which then carries the groups they belong to now.
+func serviceManagerRestart() string {
+	return fmt.Sprintf("sudo systemctl restart user@%d.service", os.Getuid())
+}
+
+// serviceManagerDockerGroupHint explains a gateway service that cannot
+// reach Docker because its user manager predates the docker group.
+func serviceManagerDockerGroupHint() string {
+	return "your systemd user manager started before you joined the docker group, and logging out does not restart it while linger is on, " +
+		"so the " + GatewayService + " service it starts cannot reach Docker; restart it with `" + serviceManagerRestart() +
+		"` (this stops your user services, which then start again), then try again"
 }
 
 func firstJSONLine(out []byte) []byte {
@@ -908,6 +1021,20 @@ func (r *doctorRun) checkService(ctx context.Context) {
 		c.Fix = &Fix{Summary: "enable the gateway at login", Command: strings.Join(start.argv(), " "), Automatic: true, Apply: r.runAndWait(start, false)}
 	default:
 		c.Status, c.Detail = StatusPass, st.Unit+" "+st.Status
+	}
+	// A gateway on the docker driver cannot start under a user manager
+	// without the docker group; on another driver it is a warning, for a
+	// later switch to docker (GAP-2169).
+	if st.Installed && r.GOOS == "linux" && r.ServiceDockerGroupMissing() {
+		if r.driver() == DriverDocker {
+			c.Status = StatusFail
+		} else if c.Status == StatusPass {
+			c.Status = StatusWarn
+		}
+		c.Detail = st.Unit + " runs under a systemd user manager that started before you joined the docker group, so it cannot reach Docker " +
+			"(logging out does not restart the manager while linger is on)"
+		c.Fix = &Fix{Summary: "restart your user manager so it picks up the group (this stops your user services, which then start again)",
+			Command: serviceManagerRestart(), Sudo: true}
 	}
 }
 

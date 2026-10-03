@@ -473,6 +473,40 @@ def test_the_uv_folder_is_protected_before_uv_runs_and_before_a_rollback_starts_
     )
 
 
+def test_a_rollback_to_1_0_0_starts_its_gateway_on_a_large_wal_audit_db(tmp_path: Path) -> None:
+    # GAP-1988: the 1.0.0 gateway refuses a WAL-mode audit.db whose 5-second
+    # startup check times out ("SQLite sidecar -wal changed before secure
+    # open"), so the installers put the store in rollback-journal mode before
+    # they start a gateway older than 1.0.1.
+    import sqlite3
+    import sys
+
+    ps1 = re.search(r'^\$AuditJournalPy = "([^"]+)"$', _text(), re.M)
+    sh_text = (Path(__file__).resolve().parents[2] / "scripts" / "install.sh").read_text(encoding="utf-8")
+    sh = re.search(r'^AUDIT_JOURNAL_PY="([^"]+)"$', sh_text, re.M)
+    assert ps1 and sh and ps1.group(1) == sh.group(1)
+    db = tmp_path / "audit.db"
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+        conn.execute("CREATE TABLE audit_events (id TEXT)")
+        conn.execute("INSERT INTO audit_events VALUES ('kept')")
+    conn.close()
+    for _ in range(2):  # a store already in rollback-journal mode is left as it is
+        subprocess.run([sys.executable, "-c", ps1.group(1), str(db)], check=True)
+        conn = sqlite3.connect(db)
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
+        assert conn.execute("SELECT id FROM audit_events").fetchall() == [("kept",)]
+        conn.close()
+        assert not (tmp_path / "audit.db-wal").exists()
+    start = _ps1_function("Start-Gateway")
+    guard = 'if ((Test-Version $version) -and [version]$version -lt [version]"1.0.1") { Reset-AuditJournalMode }'
+    assert start.index(guard) < start.index('Invoke-Native $gateway @("start")')
+    sh_start = sh_text[sh_text.index("\nstart_gateway() {") :]
+    assert sh_start.index('version_lt "${version}" 1.0.1; then reset_audit_journal_mode; fi') < sh_start.index(
+        '"${BIN_DIR}/defenseclaw-gateway" start'
+    )
+
+
 def test_install_folders_set_only_the_acl_part_that_changed() -> None:
     # GAP-2004: Set-Acl writes every part of the security descriptor and was
     # refused for a standard user on a second NTFS volume, so a

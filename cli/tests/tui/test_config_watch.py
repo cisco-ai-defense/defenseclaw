@@ -504,3 +504,62 @@ async def test_native_windows_open_tui_observes_external_cli_mode_change(
         assert app.config.guardrail.effective_mode("claudecode") == "action"
         assert app.setup_model.config is app.config
         assert app._config_reload_count == 1  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_config_editor_save_records_an_audit_event(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # GAP-2121: saving asset_policy.mode in the config editor was unaudited.
+    from defenseclaw.tui.services import config_audit
+
+    path = _configure_active_path(monkeypatch, tmp_path, _config_payload(tmp_path, {"claudecode": {}}))
+    app = DefenseClawTUI(config=config_module.load(), config_path=path)
+    _detach_ui(app, monkeypatch)
+    recorded: list[tuple] = []
+    monkeypatch.setattr(config_audit, "record_config_save", lambda _cfg, entries: recorded.append(entries) or True)
+    model = app.setup_model
+    model.active_section, model.active_line = next(
+        (si, li)
+        for si, section in enumerate(model.sections)
+        for li, field in enumerate(section.fields)
+        if field.key == "asset_policy.mode"
+    )
+    assert model.set_current_field_value("action")
+
+    action = app._save_setup_config()  # noqa: SLF001 - the save entry point under test.
+
+    assert "saved" in action.hint
+    (entries,) = recorded
+    assert [(e.key, e.after) for e in entries] == [("asset_policy.mode", "action")]
+
+
+@pytest.mark.asyncio
+async def test_asset_policy_save_says_cli_admission_applies_it_now(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # GAP-2145: CLI admission reads asset_policy from config.yaml at once, so
+    # the save must not claim the change waits for a gateway restart.
+    from defenseclaw.tui.services import config_audit
+
+    path = _configure_active_path(monkeypatch, tmp_path, _config_payload(tmp_path, {"claudecode": {}}))
+    app = DefenseClawTUI(config=config_module.load(), config_path=path)
+    _detach_ui(app, monkeypatch)
+    monkeypatch.setattr(config_audit, "record_config_save", lambda _cfg, _entries: True)
+    model = app.setup_model
+    model.mode = "config"
+    model.active_section, model.active_line = next(
+        (si, li)
+        for si, section in enumerate(model.sections)
+        for li, field in enumerate(section.fields)
+        if field.key == "asset_policy.mode"
+    )
+    assert model.set_current_field_value("action")
+
+    action = app._save_setup_config()  # noqa: SLF001 - the save entry point under test.
+
+    assert "mcp set" in action.hint and "asset_policy now" in action.hint
+    banner = app._setup_config_body_text()  # noqa: SLF001 - the banner under test.
+    assert "Saved" in banner and "CLI uses asset_policy now · G: restart gateway" in banner

@@ -280,12 +280,14 @@ defenseclaw sandbox run codex --copy --name docs
 | You see | Do this |
 | --- | --- |
 | The **Landlock** check fails | Boot a kernel 6.2 or newer with `landlock` in its `lsm=` list. |
-| The **Docker** check says rootless Docker, or that Docker is older than 28 | Use a rootful Docker Engine 28 or newer and add yourself to the `docker` group (`sudo usermod -aG docker $USER`, then log in again). |
+| The **Docker** check says rootless Docker, or that Docker is older than 28 | Use a rootful Docker Engine 28 or newer and add yourself to the `docker` group (`sudo usermod -aG docker $USER`, then log in again). With linger on, logging out does not restart your systemd user manager, so the OpenShell gateway service still lacks the group: see the next row. |
+| The **Gateway service** check says it runs under a user manager that started before you joined the docker group, or setup's gateway restart fails with `the restarted gateway is not healthy` and names `sudo systemctl restart user@<uid>.service` | Your systemd user manager keeps the groups it started with, and linger keeps it running when you log out. Restart it with `sudo systemctl restart user@$(id -u).service` (this stops your user services, which then start again), then run setup again. |
 | The **Docker BuildKit** check fails | Install the `docker-buildx-plugin` package from Docker's repository. |
 | **systemd linger** warns | `sudo loginctl enable-linger $USER`, so the gateway keeps running after you log out. |
 | **Gateway service** fails with `openshell-gateway is inactive` | `defenseclaw sandbox doctor --fix` starts it. |
 | **Gateway service** says `openshell-gateway is not installed`, yet a gateway answers | OpenShell was installed another way than NVIDIA's installer. Setup uses that gateway as it runs, but DefenseClaw cannot restart it: after a gateway change, restart it yourself, the way you started it. The fix line names how to switch to the `openshell-gateway` user service. |
 | `the DefenseClaw daemon is not running` | `defenseclaw-gateway start`. With the daemon down, sandbox hooks block every tool call. |
+| `the DefenseClaw daemon started before you joined the docker group`, or a run fails with `permission denied` on `/var/run/docker.sock` | The daemon keeps the groups it started with. Restart it so it picks up the `docker` group: `defenseclaw-gateway restart`. |
 | `refusing to share /home/alice with a sandbox: it is your home directory` | Run from a project folder inside your home, not from home itself. |
 
 The [troubleshooting table](/docs/setup/sandbox#troubleshooting) in the full

@@ -388,3 +388,38 @@ func TestAuditPlatformHealthV8DetailsNameSubsystemAndReason(t *testing.T) {
 		t.Fatalf("details = %q, want %q", rows[0].Details, want)
 	}
 }
+
+// GAP-2204: a platform-health row names its subsystem as the actor, not
+// the record writer audit_logger.
+func TestAuditPlatformHealthV8RowActorIsSubsystem(t *testing.T) {
+	for _, test := range []struct {
+		action    Action
+		logEvent  bool
+		wantActor string
+	}{
+		{action: ActionWatchStart, wantActor: "watcher"},
+		{action: ActionWatchStop, wantActor: "watcher"},
+		{action: ActionGatewayJudgeBodiesReady, logEvent: true, wantActor: "judge_bodies"},
+	} {
+		t.Run(string(test.action), func(t *testing.T) {
+			logger := newTestLogger(t)
+			logger.SetRuntimeV8Emitter(newSinkHealthTestRuntime(t, logger, router.AdmissionOrdinary))
+			var err error
+			if test.logEvent {
+				err = logger.LogEvent(Event{Action: string(test.action), Actor: "defenseclaw-gateway", Details: "ready"})
+			} else {
+				err = logger.LogAction(string(test.action), "", "dirs=1")
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			rows, err := logger.store.ListEvents(10)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(rows) != 1 || rows[0].Actor != test.wantActor {
+				t.Fatalf("rows = %#v, want one row with actor %q", rows, test.wantActor)
+			}
+		})
+	}
+}

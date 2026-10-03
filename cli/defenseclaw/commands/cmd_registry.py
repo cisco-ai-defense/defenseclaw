@@ -235,27 +235,15 @@ def _source_to_dict(source: RegistrySource) -> dict[str, Any]:
 def registry() -> None:
     """Manage external skill / MCP catalog sources.
 
-    A "registry source" is a fetchable manifest (corporate HTTPS YAML,
-    smithery.ai, a git repo containing ``defenseclaw-registry.yaml``,
-    etc.) that DefenseClaw ingests on demand. Synced entries are
-    scanned with the existing skill / MCP scanners and clean ones are
-    auto-promoted into ``asset_policy.{skill,mcp}.registry`` so
-    admission decisions can attribute the rule back to its source.
+    A registry source is a fetchable manifest (corporate HTTPS YAML,
+    smithery.ai, a git repo containing defenseclaw-registry.yaml, and
+    others) that DefenseClaw ingests on demand. Synced entries are
+    scanned with the skill / MCP scanners, and clean ones are promoted
+    into asset_policy.skill.registry or asset_policy.mcp.registry, so
+    admission decisions can name the source of each rule.
 
-    \b
-    Subcommands:
-      add       Register a new source (interactive or flag-only).
-      edit      Update an existing source.
-      list      Show every configured source (with entry counts).
-      show      Pretty-print a single source.
-      remove    Delete a source and its cache.
-      test      Dry-run fetch + parse — no cache or policy writes.
-      sync      Fetch + scan + promote one or all sources.
-      entries   Show cached entries (after sync).
-      approve   Mark an entry approved (forces promotion next sync).
-      reject    Mark an entry rejected (always blocked).
-      require   Toggle ``asset_policy.{type}.registry_required``.
-      wizard    First-run interactive add+sync convenience flow.
+    Start with 'defenseclaw registry wizard', or 'registry add' then
+    'registry sync'.
     """
 
 
@@ -269,14 +257,9 @@ def registry() -> None:
 @click.option("--auth-env", default=None,
               help="ENV VAR NAME holding a bearer token (never the literal token)")
 @click.option("--enabled/--disabled", default=True, help="Mark source enabled or disabled")
-@click.option("--auto-sync/--no-auto-sync", default=False,
-              help="RESERVED: scheduled sync is not implemented yet. "
-                   "The flag is persisted so a future release can pick it "
-                   "up without a config rewrite. Run `defenseclaw registry "
-                   "sync --all` (or schedule it via cron) for now.")
-@click.option("--sync-interval-hours", type=int, default=24,
-              help="RESERVED: paired with --auto-sync above; ignored at "
-                   "runtime today.")
+# Scheduled sync is not implemented: the options are hidden and refused (GAP-2209).
+@click.option("--auto-sync/--no-auto-sync", default=None, hidden=True)
+@click.option("--sync-interval-hours", type=int, default=None, hidden=True)
 @click.option("--non-interactive", is_flag=True,
               help="Skip prompts; required flags must be present")
 @click.option("--json", "emit_json", is_flag=True, help="Emit JSON")
@@ -289,8 +272,8 @@ def add_cmd(  # noqa: PLR0913 - mirrors the prompt surface
     content: str | None,
     auth_env: str | None,
     enabled: bool,
-    auto_sync: bool,
-    sync_interval_hours: int,
+    auto_sync: bool | None,
+    sync_interval_hours: int | None,
     non_interactive: bool,
     emit_json: bool,
 ) -> None:
@@ -316,6 +299,7 @@ def add_cmd(  # noqa: PLR0913 - mirrors the prompt surface
     \b
       defenseclaw registry add clawhub --kind clawhub --content skill --non-interactive
     """
+    _refuse_scheduled_sync(auto_sync, sync_interval_hours)
     cfg = _require_cfg(app)
 
     if not non_interactive:
@@ -341,7 +325,8 @@ def add_cmd(  # noqa: PLR0913 - mirrors the prompt surface
                 "Manifest path (absolute)" if kind == "file" else "Manifest URL",
                 default="",
             )
-        if not auth_env and click.confirm(
+        # A file source is read from disk, so no token is ever sent (GAP-2123).
+        if not auth_env and kind.strip().lower() != "file" and click.confirm(
             "Use an auth token (read from an env var)?", default=False,
         ):
             auth_env = click.prompt("Env var name", default="DEFENSECLAW_REGISTRY_TOKEN")
@@ -374,8 +359,6 @@ def add_cmd(  # noqa: PLR0913 - mirrors the prompt surface
         content=content,
         auth_env=auth_env,
         enabled=enabled,
-        auto_sync=auto_sync,
-        sync_interval_hours=max(0, int(sync_interval_hours or 0)),
     )
     cfg.registries.sources.append(new_source)
     cfg.save()
@@ -396,6 +379,15 @@ def add_cmd(  # noqa: PLR0913 - mirrors the prompt surface
 _WIZARD_SYNC_PROMPT_KEY = "defenseclaw.registry.wizard_offers_sync"
 
 
+def _refuse_scheduled_sync(auto_sync: bool | None, sync_interval_hours: int | None) -> None:
+    """Refuse --auto-sync / --sync-interval-hours: nothing runs a schedule yet (GAP-2209)."""
+    if auto_sync or sync_interval_hours is not None:
+        raise click.UsageError(
+            "scheduled sync is not available yet. Run 'defenseclaw registry sync "
+            "<id>' (or 'registry sync --all' from cron) to sync a source."
+        )
+
+
 def _print_sync_hint(sid: str) -> None:
     ux.subhead(
         f"Run `defenseclaw registry sync {sid}` to fetch + scan + promote entries."
@@ -414,10 +406,8 @@ def _print_sync_hint(sid: str) -> None:
 @click.option("--clear-auth-env", is_flag=True, help="Drop auth_env back to empty")
 @click.option("--enabled/--disabled", default=None,
               help="Toggle the enabled flag")
-@click.option("--auto-sync/--no-auto-sync", default=None,
-              help="RESERVED: scheduled sync is not implemented yet.")
-@click.option("--sync-interval-hours", type=int, default=None,
-              help="RESERVED: paired with --auto-sync; ignored today.")
+@click.option("--auto-sync/--no-auto-sync", default=None, hidden=True)
+@click.option("--sync-interval-hours", type=int, default=None, hidden=True)
 @click.option("--non-interactive", is_flag=True, help="Never prompt; fail if a required value is missing.")
 @click.option("--json", "emit_json", is_flag=True, help="Print the result as JSON.")
 @pass_ctx
@@ -442,14 +432,15 @@ def edit_cmd(  # noqa: PLR0913
     the default. As soon as **any** mutating flag is passed
     (``--kind`` / ``--url`` / ``--content`` / ``--auth-env`` /
     ``--clear-auth-env`` / ``--enabled`` / ``--disabled`` /
-    ``--auto-sync`` / ``--no-auto-sync`` / ``--sync-interval-hours``
-    / ``--non-interactive``), prompts are suppressed entirely so the
+    ``--non-interactive``), prompts are suppressed entirely so the
     docstring promise — "only the flags you pass are changed" —
     holds. Use the bare form (no flags) when you want to re-confirm
     every field.
     """
+    _refuse_scheduled_sync(auto_sync, sync_interval_hours)
     cfg = _require_cfg(app)
     source = _find_source(cfg, source_id)
+    before = {field: getattr(source, field) for field in _EDIT_AUDIT_FIELDS}
 
     any_mutating = any(v is not None for v in (
         kind, content, url, auth_env, enabled, auto_sync, sync_interval_hours,
@@ -487,10 +478,8 @@ def edit_cmd(  # noqa: PLR0913
         source.auth_env = _validate_auth_env(auth_env)
     if enabled is not None:
         source.enabled = enabled
-    if auto_sync is not None:
-        source.auto_sync = auto_sync
-    if sync_interval_hours is not None:
-        source.sync_interval_hours = max(0, int(sync_interval_hours))
+    if auto_sync is False:
+        source.auto_sync = False
 
     # Validate the post-edit (kind, url) pair so flipping an
     # ``http_yaml`` source to ``kind=file`` without re-supplying the
@@ -498,12 +487,38 @@ def edit_cmd(  # noqa: PLR0913
     _validate_file_url(source.kind, source.url)
 
     cfg.save()
+    edit_details = _registry_edit_details(source, before)
     if emit_json:
-        _log_registry_action(app, "registry-edit", f"id={source.id}")
+        _log_registry_action(app, "registry-edit", edit_details)
         _emit_json({"action": "edit", "source": _source_to_dict(source)})
         return
     ux.ok(f"Updated registry source {source.id!r}.")
-    _log_registry_action(app, "registry-edit", f"id={source.id}")
+    _log_registry_action(app, "registry-edit", edit_details)
+
+
+# The fields `registry edit` can change, in the order its audit row names them.
+_EDIT_AUDIT_FIELDS = ("kind", "content", "url", "auth_env", "enabled", "auto_sync", "sync_interval_hours")
+
+
+def _registry_edit_details(source: RegistrySource, before: dict[str, Any]) -> str:
+    """Audit details of an edit: the id and each changed field as old->new.
+
+    Every edit row said only ``id=<source>``, so a disable could not be told
+    apart from any other edit (GAP-2211). auth_env is an env var name, not
+    its value.
+    """
+
+    def _fmt(value: Any) -> str:
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        return str(value) if value not in (None, "") else '""'
+
+    changes = [
+        f"{field}={_fmt(before[field])}->{_fmt(getattr(source, field))}"
+        for field in _EDIT_AUDIT_FIELDS
+        if before[field] != getattr(source, field)
+    ]
+    return " ".join([f"id={source.id}", *(changes or ["unchanged"])])
 
 
 # ---------------------------------------------------------------------------
@@ -517,8 +532,9 @@ def list_cmd(app: AppContext, emit_json: bool) -> None:
     """List configured registry sources.
 
     The ``ENTRIES`` column reports cached counts as
-    ``total (clean/warning/blocked)`` from the on-disk index — a
-    dash means the source has never been synced. Counts are
+    ``total (clean/warning/blocked/error)`` from the on-disk index — a
+    dash means the source has never been synced. A source whose last
+    sync failed is named below the table. Counts are
     deliberately read fresh from ``index.json`` rather than the
     config file so manual ``approve`` / ``reject`` calls (which
     rewrite the index) are reflected without forcing an additional
@@ -571,14 +587,21 @@ def list_cmd(app: AppContext, emit_json: bool) -> None:
         else:
             entries = (
                 f"{idx.entry_count} "
-                f"({idx.clean_count}/{idx.warning_count}/{idx.blocked_count})"
+                f"({idx.clean_count}/{idx.warning_count}/{idx.blocked_count}/{idx.error_count})"
             )
         click.echo(
             f"  {s.id:<24} {s.kind:<12} {s.content:<8} {on:<3} "
             f"{entries:<18} {last:<22} {url}"
         )
     click.echo()
-    ux.subhead("ENTRIES column: total (clean/warning/blocked)")
+    ux.subhead("ENTRIES column: total (clean/warning/blocked/error)")
+    # A failed last sync must not look like a healthy one (GAP-2210).
+    for s in sources:
+        if (s.last_status or "").startswith("error"):
+            ux.warn(
+                f"The last sync of {s.id} failed. "
+                f"Run 'defenseclaw registry show {s.id}' for the error."
+            )
 
 
 @registry.command("show")
@@ -782,7 +805,8 @@ def test_cmd(
     click.echo(f"  {ux.dim('Bytes fetched:')}  {len(raw):,}")
     click.echo(
         f"  {ux.dim('Entries:')}        {len(filtered)} "
-        f"({skill_count} skills, {mcp_count} mcps)"
+        f"({skill_count} {'skill' if skill_count == 1 else 'skills'}, "
+        f"{mcp_count} {'MCP server' if mcp_count == 1 else 'MCP servers'})"
     )
     if show_entries and filtered:
         click.echo()
@@ -893,10 +917,14 @@ def sync_cmd(  # noqa: PLR0913
     # A sync can promote entries into asset_policy.<type>.registry, which
     # admission reads: audit every run with what it changed (GAP-1518). The
     # gateway admits only registered actions, so it is a registry-edit whose
-    # details start with "sync" (GAP-1653).
+    # details start with "sync" (GAP-1653). The config is already saved, so a
+    # stopped gateway only skips the events, with one warning (GAP-2236).
     if app.logger:
+        from defenseclaw.commands._audit_notice import saved_change_audit
+
+        audit = saved_change_audit(app.logger)
         for r in reports:
-            app.logger.log_action(
+            audit.log_action(
                 "registry-edit", "config",
                 f"sync id={r.source_id} fetched={r.fetched} scanned={r.scanned} "
                 f"promoted_skills={r.promoted_skills} promoted_mcps={r.promoted_mcps} "
@@ -1583,6 +1611,12 @@ def _registry_required_payload(result: RegistryRequiredResult) -> dict[str, Any]
     help="Set the requirement for connector C only (its per-connector "
          "override). Omit to set it for every connector.",
 )
+@click.option(
+    "--enforce/--no-enforce", default=None,
+    help="--enforce also turns asset policy enforcement on (asset_policy.enabled=true, "
+         "mode=action); without it nothing is blocked while asset policy is off. "
+         "--no-enforce turns it back off (mode=observe: logged, not blocked).",
+)
 @click.option("--json", "emit_json", is_flag=True, help="Print the result as JSON.")
 @pass_ctx
 def require_cmd(
@@ -1590,6 +1624,7 @@ def require_cmd(
     asset_type: str,
     enabled: bool,
     connector: str,
+    enforce: bool | None,
     emit_json: bool,
 ) -> None:
     """Toggle ``asset_policy.<type>.registry_required``.
@@ -1605,13 +1640,19 @@ def require_cmd(
     it, so an older opposite override cannot undo the change. Overrides of
     inactive connectors are kept. Registry rule lists stay global; each rule
     still applies only to its own connector, if it names one.
+
+    The requirement is enforced only while asset policy is on
+    (``asset_policy.enabled=true`` and ``mode=action``). --enforce turns
+    both on in the same save; --no-enforce sets ``mode=observe`` again.
     """
     cfg = _require_cfg(app)
     asset = asset_type.lower()
     connector = (connector or "").strip()
+    if enforce and not enabled:
+        raise click.UsageError("--enforce needs --enabled")
 
     try:
-        result = set_registry_required(cfg, asset, enabled, connector=connector)
+        result = set_registry_required(cfg, asset, enabled, connector=connector, enforce=enforce)
     except RegistryRequiredUpdateError as exc:
         failed = [change.connector for change in exc.result.connectors]
         rollback_failed = "could not be restored" in str(exc.cause)
@@ -1649,13 +1690,15 @@ def require_cmd(
     )
     # Turning the requirement on can block every asset at admission: audit
     # each toggle like the other registry changes (GAP-1518), as a registered
-    # registry-edit whose details start with "require" (GAP-1653).
-    if app.logger:
-        affected = ",".join(f"{c.connector}:{c.status}" for c in result.connectors) or "-"
-        app.logger.log_action(
-            "registry-edit", "config",
-            f"require scope={scope_label}.registry required={'true' if enabled else 'false'} connectors={affected}",
-        )
+    # registry-edit whose details start with "require" (GAP-1653). The change
+    # is already saved, so a stopped gateway only skips the event (GAP-2236).
+    affected = ",".join(f"{c.connector}:{c.status}" for c in result.connectors) or "-"
+    _log_registry_action(
+        app, "registry-edit",
+        f"require scope={scope_label}.registry required={'true' if enabled else 'false'} "
+        f"connectors={affected}"
+        + ("" if enforce is None else f" enforce={'true' if enforce else 'false'}"),
+    )
 
     # Messaging reads the *effective* per-type policy for the scope: rule
     # lists stay global, so the empty-list check sees the global registry;
@@ -1667,6 +1710,11 @@ def require_cmd(
         effective = getattr(cfg.asset_policy, asset)
     empty_registry = len(effective.registry) == 0
     empty_action = getattr(effective, "registry_empty_action", "deny") or "deny"
+    # GAP-2119: registry_required only blocks while asset policy is on and in
+    # action mode; the per-user default is off/observe.
+    policy_on = bool(getattr(cfg.asset_policy, "enabled", False))
+    policy_mode = cfg.asset_policy.effective_mode(result.connector or "")
+    enforcing = policy_on and policy_mode == "action"
 
     if emit_json:
         payload = _registry_required_payload(result)
@@ -1674,6 +1722,9 @@ def require_cmd(
             "status": "ok",
             "registry_size": len(effective.registry),
             "registry_empty_action": empty_action,
+            "asset_policy_enabled": policy_on,
+            "asset_policy_mode": policy_mode,
+            "enforcing": enforcing,
         })
         _emit_json(payload)
         return
@@ -1692,8 +1743,27 @@ def require_cmd(
             + ", ".join(result.preserved_inactive_connectors)
             + "."
         )
+    if enforce is False:
+        ux.subhead(
+            f"Asset policy enforcement is off (mode={policy_mode}): "
+            "assets are logged, not blocked."
+        )
     if not enabled:
         return
+    if enforce:
+        ux.subhead("Asset policy enforcement is on (asset_policy.enabled=true, mode=action).")
+        ux.subhead(f"Turn it off with: defenseclaw registry require --type {asset} --disabled --no-enforce")
+    if not policy_on:
+        ux.warn(
+            "Asset policy is off (asset_policy.enabled=false): nothing is blocked "
+            f"yet, and a {asset} that is not in the registry is still added. "
+            "Re-run with --enforce to turn it on (asset_policy.enabled=true, mode=action).",
+        )
+    elif policy_mode != "action":
+        ux.warn(
+            f"Asset policy mode is {policy_mode!r}: a {asset} that is not in the "
+            "registry is logged, not blocked. Re-run with --enforce to set mode=action.",
+        )
 
     # Operators routinely flip require=on without realising the
     # downstream gateway will deny every asset whose name isn't on
@@ -1703,11 +1773,13 @@ def require_cmd(
     # surface whichever value is live.
     if empty_registry:
         if empty_action == "deny":
+            when = "will be" if enforcing else "would be"
             ux.warn(
                 f"asset_policy.{asset}.registry is EMPTY and "
-                f"registry_empty_action='deny' — every {asset} will be "
+                f"registry_empty_action='deny' — every {asset} {when} "
                 "blocked at admission until you `registry sync` (or add "
-                "manual rules).",
+                "manual rules)."
+                + ("" if enforcing else " Nothing is blocked while asset policy enforcement is off."),
             )
         elif empty_action == "warn":
             ux.warn(
@@ -1768,7 +1840,8 @@ def wizard_cmd(ctx: click.Context, app: AppContext) -> None:
     elif kind_key != "clawhub":
         url = click.prompt("Manifest URL")
     auth_env = ""
-    if click.confirm("Use an auth token (read from an env var)?", default=False):
+    # Only sources fetched over the network send a token (GAP-2123).
+    if kind.strip().lower() != "file" and click.confirm("Use an auth token (read from an env var)?", default=False):
         auth_env = click.prompt("Env var name", default="DEFENSECLAW_REGISTRY_TOKEN")
 
     ctx.meta[_WIZARD_SYNC_PROMPT_KEY] = True
@@ -1780,8 +1853,8 @@ def wizard_cmd(ctx: click.Context, app: AppContext) -> None:
         content=content,
         auth_env=auth_env or None,
         enabled=True,
-        auto_sync=False,
-        sync_interval_hours=24,
+        auto_sync=None,
+        sync_interval_hours=None,
         non_interactive=True,
         emit_json=False,
     )

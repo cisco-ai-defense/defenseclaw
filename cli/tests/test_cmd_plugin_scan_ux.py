@@ -162,7 +162,9 @@ class TestScanUXVerdictLines(_PluginScanUXBase):
         self.assertIn("[WARN]", result.output)
         self.assertNotIn("[BLOCKED]", result.output)
         self.assertIn("policy: rejected", result.output)
-        self.assertIn(f"Block it: defenseclaw plugin block {self.plugin_name}", result.output)
+        # GAP-2111: block only refuses new installs; quarantine stops the copy.
+        self.assertIn(f"Stop it: defenseclaw plugin quarantine {self.plugin_name}", result.output)
+        self.assertNotIn("plugin block", result.output)
         # Finding count must be visible.
         self.assertIn("1 finding", result.output)
         # Severity surfaced via the "max severity:" detail string.
@@ -710,6 +712,26 @@ def test_plugin_info_card_states_total_and_max_severity(capsys):
     out = capsys.readouterr().out
     assert "Findings: 2 findings (max severity: HIGH)" in out
     assert "2 HIGH findings" not in out
+
+
+def test_plugin_info_card_reads_the_same_for_every_outcome(capsys):
+    # GAP-2201: yes/no values; Verdict, Findings and scan time for clean and warned plugins.
+    from datetime import datetime, timezone
+
+    from defenseclaw.commands.cmd_plugin import _plugin_scan_payload_from_latest, _print_plugin_info_card
+
+    when = datetime(2026, 10, 3, 4, 14, 21, tzinfo=timezone.utc)
+    for count, sev, verdict in ((0, "INFO", "CLEAN"), (1, "MEDIUM", "MEDIUM")):
+        scan = _plugin_scan_payload_from_latest(
+            {"target": "/p", "finding_count": count, "max_severity": sev, "timestamp": when}
+        )
+        _print_plugin_info_card({"name": "p", "installed": True, "quarantined": False, "scan": scan}, "p")
+        out = capsys.readouterr().out
+        assert "Installed:   yes" in out and "Quarantined: no" in out
+        assert "True" not in out and "False" not in out
+        assert f"Verdict:  {verdict}" in out
+        assert "Findings: " in out
+        assert "Scanned:  2026-10-03 04:14:21 UTC" in out
 
 
 class TestScanFolderOfPlugins(_PluginScanUXBase):

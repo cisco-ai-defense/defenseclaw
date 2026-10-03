@@ -305,6 +305,24 @@ class FailModeCommandTests(unittest.TestCase):
         self.assertIn("Hermes (hermes): open (Hermes upstream", result.output)
         self.assertIn("Hermes remains fail-open", result.output)
 
+    def test_closed_view_omits_hermes_when_not_configured(self):
+        # GAP-2116: the Hermes sentence only shows when Hermes is configured.
+        runner = CliRunner()
+        app = make_ctx(enabled=True, connector="codex", hook_fail_mode="closed")
+        result = runner.invoke(cmd_guardrail.fail_mode_cmd, [], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("that are closed above.", result.output)
+        self.assertNotIn("Hermes", result.output)
+
+    def test_set_closed_omits_hermes_when_not_configured(self):
+        runner = CliRunner()
+        app = make_ctx(enabled=True, connector="codex", hook_fail_mode="open")
+        with patch("defenseclaw.commands.cmd_guardrail.reconcile_connector_registration"):
+            result = runner.invoke(cmd_guardrail.fail_mode_cmd, ["closed", "--yes"], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("native fail-closed surface.", result.output)
+        self.assertNotIn("Hermes", result.output)
+
     def test_set_open_to_closed_persists_and_restarts(self):
         runner = CliRunner()
         app = make_ctx(enabled=True, connector="codex", hook_fail_mode="open")
@@ -985,7 +1003,7 @@ class PerConnectorFailModeTests(unittest.TestCase):
         self.assertEqual(app.cfg.guardrail.connectors["codex"].hook_fail_mode, "open")
         self.assertEqual(app.cfg.guardrail.effective_hook_fail_mode("cursor"), "closed")
         self.assertIn("stays closed", result.output)
-        self.assertIn("1 active connector overrides = open; Cursor stays closed)", result.output)
+        self.assertIn("1 connector overrides = open; Cursor stays closed)", result.output)
 
         result = runner.invoke(cmd_guardrail.fail_mode_cmd, ["open", "--connector", "cursor", "--yes"], obj=app)
         self.assertEqual(result.exit_code, 1, msg=result.output)

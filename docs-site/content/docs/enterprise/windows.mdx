@@ -731,8 +731,10 @@ The agents' shared machine folders stay while they hold anything else,
 because another product can use them. Setup removes its own files from them.
 A purge also removes `C:\Program Files\ClaudeCode\managed-settings.d`, and
 then `C:\Program Files\ClaudeCode`, when nothing else is left in them.
-It also removes any `C:\ProgramData\DefenseClaw-PowerShell-<32 hex>` folder
-an interrupted elevated DefenseClaw command left; every uninstall does this,
+It also removes the folders an interrupted elevated DefenseClaw command
+left: `C:\ProgramData\DefenseClaw-PowerShell-<32 hex>`,
+`C:\ProgramData\DefenseClaw-Installer-<32 hex>` and
+`C:\Windows\Temp\DefenseClaw-Bootstrap-<32 hex>`; every uninstall does this,
 not only a purge. The `machine_state_remaining` warning names any of these
 folders it could not remove, and why.
 

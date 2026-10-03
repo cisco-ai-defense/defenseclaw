@@ -212,10 +212,61 @@ func (a *APIServer) emitForeignHookSessionDenialV8(
 		Mode: env.Mode, Reason: env.Reason,
 	}
 	a.emitHookDecisionObservabilityV8(ctx, req, resp, env, false)
-	a.emitGuardrailApplyTraceV8(ctx, connectorName, "", "tool_call", &ToolInspectVerdict{
+	// A denied tool call carries the block on its tool span, like any other
+	// blocked call, so every trace destination (Galileo included) shows it;
+	// a session or prompt event gets an apply_guardrail span named for what
+	// was denied, never "tool_call" (GAP-2142).
+	targetType, tool := foreignHookSessionDenialTarget(exchange)
+	if tool != "" {
+		if outcome, ok := hookGuardrailOutcomeFor(resp.Action, resp.Severity, resp.Reason, nil); ok {
+			meta := hookLLMEventMeta(ctx, connectorName, exchange.Key.Session, "", "", connectorName, "", "", "", nil)
+			meta.Guardrail = outcome
+			meta.LifecycleOutcome = "blocked"
+			a.emitHookToolSpanFor(ctx, meta, tool, "", "", outcome.Reason, nil)
+			return
+		}
+	}
+	a.emitGuardrailApplyTraceV8(ctx, connectorName, "", targetType, &ToolInspectVerdict{
 		Action: resp.Action, RawAction: resp.RawAction, Severity: resp.Severity,
 		Reason: resp.Reason, Mode: resp.Mode,
 	}, 0, hookEvaluationContext{})
+}
+
+// foreignHookSessionDenialTarget names what a foreign-hook denial was for:
+// the apply_guardrail target type, and the tool when the event is a tool
+// call. An exchange from a hook that sends no event name keeps the earlier
+// "tool_call" label unless it is a session start.
+func foreignHookSessionDenialTarget(exchange enterprisepolicy.SessionExchange) (targetType, tool string) {
+	event := strings.TrimSpace(exchange.Event)
+	if event == "" {
+		if exchange.SessionStart {
+			return "session", ""
+		}
+		return "tool_call", ""
+	}
+	switch canonicalHookLifecycleEvent(event) {
+	case "tool_start", "tool_end":
+		tool = clipForeignHookAuditField(strings.TrimSpace(exchange.Tool), foreignHookAuditFieldLimit)
+		if tool == "" {
+			// Cursor's shell, MCP and file events name no tool.
+			tool = "tool"
+			if strings.EqualFold(event, "beforeShellExecution") {
+				tool = "shell"
+			}
+		}
+		return "tool_call", tool
+	case "session_start", "session_end", "subagent_start", "subagent_stop":
+		return "session", ""
+	case "turn_start":
+		return "prompt", ""
+	}
+	if exchange.SessionStart {
+		return "session", ""
+	}
+	if isPromptLikeEvent(event) {
+		return "prompt", ""
+	}
+	return "inspect", ""
 }
 
 // foreignHookRemovalCache holds the guardian's foreign-hook removal ledger

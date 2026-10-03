@@ -21,6 +21,11 @@ import (
 
 const MaxContractLockBytes = 64 << 10
 
+// ErrRuntimeContractMissing means the binding's contract lock file does not
+// exist: the editor entry outlived `defenseclaw acp remove` (or was copied
+// from another machine) and the guard must not start.
+var ErrRuntimeContractMissing = errors.New("ACP runtime contract lock is missing")
+
 type RuntimeContractLock struct {
 	Version     int    `json:"version"`
 	GeneratedAt string `json:"generated_at"`
@@ -52,6 +57,9 @@ type RuntimeContractLock struct {
 // executable has moved or changed since the editor binding was published.
 func ValidateRuntimeContract(path, clientID, agentID, profile string, mode Mode, command string) error {
 	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return ErrRuntimeContractMissing
+	}
 	if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > MaxContractLockBytes {
 		return errors.New("ACP runtime contract lock is unavailable or unsafe")
 	}

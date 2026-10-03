@@ -251,6 +251,18 @@ func TestTrustedActionBlocksCommandRuleWithRuntimeExpandedRedirectTarget(t *test
 			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-COMPLETE-ARGV": blocks},
 		},
 		{
+			// GAP-2079: PowerShell joins the arguments after -Command, so an
+			// unquoted body is judged as the quoted one.
+			name:    "pwsh -Command with an unquoted body and a redirect",
+			command: "pwsh -Command echo " + redirectReductionMarker + " > C:/Users/alice/dc-x.txt",
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly, "TEST-MARKER-COMPLETE-ARGV": blocks},
+		},
+		{
+			name:    "pwsh -NoProfile -Command with an unquoted body",
+			command: "pwsh -NoProfile -Command echo " + redirectReductionMarker,
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-COMPLETE-ARGV": blocks},
+		},
+		{
 			// GAP-1868: a redirect outside the quotes or a following list
 			// member does not undo the body's match either.
 			name:    "pwsh -Command with a redirect outside the quotes",

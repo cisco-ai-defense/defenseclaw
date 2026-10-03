@@ -236,14 +236,24 @@ These are still parsed for backward compatibility, but `fail_mode` here does **n
 ## Inspect the active defaults
 
 ```bash
-defenseclaw config show                  # rendered ~/.defenseclaw/config.yaml (secrets masked)
+defenseclaw config show                  # every setting, with defaults (secrets masked)
+defenseclaw config get asset_policy.enabled   # one value of that view
 defenseclaw policy list                  # all policies on disk + which is active
 defenseclaw policy show default          # normalized summary of one named policy
 ```
 
-For configuration v8, `config show` renders the canonical effective
-observability view by default; use `--source` for the masked source document,
-or `--effective --provenance` for explicit compiler annotations. V8 rejects
+For configuration v8, `config show` prints every section: the values
+`config.yaml` sets plus the defaults that apply to the keys it leaves out, with
+the observability section resolved the way the gateway runs it. A fresh
+install's `config.yaml` sets only a few sections, so this is how you read
+`asset_policy` and the rest before you change them.
+`--section NAME` keeps one section (for example `asset_policy`), and
+`config get KEY` prints one dotted key such as
+`asset_policy.mcp.registry_required`. A default value prints with a note on
+stderr; the exit code is `1` when the key has no value and no default, and `2`
+for an unknown section. Use `--source` for the masked source document as written,
+`--effective` for the resolved observability section alone, or
+`--effective --provenance` for explicit compiler annotations. V8 rejects
 `--reveal`; neither source nor effective output resolves secret values.
 
 `policy show <name>` prints a normalized summary of the named file (`default`,

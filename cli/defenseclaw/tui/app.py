@@ -47,6 +47,7 @@ from defenseclaw.tui.command_line import (
     command_result_summary,
     infer_command_risk,
     is_command_hint,
+    is_listing_detail,
     parse_command_line,
     suggested_next_action,
 )
@@ -188,6 +189,7 @@ from defenseclaw.tui.widgets.panel_split import (
     nav_switcher,
     split_aside,
     split_layout,
+    step_nav,
 )
 from defenseclaw.tui.widgets.status_strip import render_status_strip
 from defenseclaw.tui.widgets.tab_fit import (
@@ -892,6 +894,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
        short terminal; it scrolls. */
     #detail-panel.compact.aside-below {
         max-height: 5;
+        /* One blank row between the table and the card below it (GAP-2167). */
+        margin-top: 1;
     }
 
     #detail-panel-body {
@@ -1170,6 +1174,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         self._config_watcher = ConfigChangeWatcher(config_path) if config_path is not None else None
         self._config_poll_running = False
         self._config_reload_count = 0
+        # Set on each config-editor save: saved sections the CLI already applies.
+        self._setup_cli_live_sections = ""
         self.data_dir = _resolve_data_dir(config, data_dir)
         # Operator's persisted session preferences (palette MRU,
         # per-panel "last seen" cursors, last filter, theme).
@@ -1203,6 +1209,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         self._nav_switcher_hit: tuple[str, int, NavSwitcher] | None = None
         self._panel_aside_below: RenderableType | None = None
         self._detail_max_height: int | None = None
+        self._aside_box: tuple[int, int, int] = (0, 0, 0)
+        self._aside_box_recheck = False
         self._last_aside_signature: tuple[object, ...] | None = None
         self.detail_text = ""
         self.status_text = ""
@@ -1376,8 +1384,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # Command-progress strip state machine. The strip is the single
         # source of truth for command lifecycle messaging — what ran,
         # what it's doing, and what to do next. ``idle`` means hidden;
-        # any other state keeps the strip on screen until the user
-        # explicitly dismisses it (success no longer auto-hides).
+        # a success hides itself after ``STRIP_SUCCESS_SECONDS`` (its hint
+        # says so) and leaves its result on the status line; a failure,
+        # cancellation or rejection stays until the user dismisses it.
         self._strip_state: str = "idle"
         self._strip_label: str = ""
         self._strip_started_at: float = 0.0
@@ -1623,14 +1632,14 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                         id="ai-enable",
                         compact=True,
                         variant="success",
-                        tooltip="Run `defenseclaw agent discovery enable --yes`",
+                        tooltip="Run `defenseclaw agent discovery enable --yes` (d)",
                     )
                     yield Button(
                         "Disable AI Discovery",
                         id="ai-disable",
                         compact=True,
                         variant="warning",
-                        tooltip="Run `defenseclaw agent discovery disable --yes`",
+                        tooltip="Run `defenseclaw agent discovery disable --yes` (d)",
                     )
                     yield Button(
                         "Scan now",
@@ -1660,7 +1669,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                         "Export JSON",
                         id="ai-export",
                         compact=True,
-                        tooltip="Save the AI usage snapshot to disk",
+                        tooltip="Save the AI usage snapshot to disk (e)",
                     )
                 with Horizontal(id="runtime-controls", classes="panel-controls hidden"):
                     yield Button(
@@ -2572,15 +2581,12 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             return versioned
         if width >= 120 and self._tabs_fit_next_to(versioned, width):
             return versioned
-        if width >= 96:
+        if width >= 96 and self._tabs_fit_next_to("DefenseClaw", width, tiny=True):
             # The version is on Overview; its cells go to tab names, so a
             # 200-column screen names every tab instead of a bare "R"
-            # (GAP-1283). Around 160 columns the brand alone is what leaves
-            # tabs as bare key letters, so it goes too (GAP-1544).
-            if self._tabs_fit_next_to("", width, tiny=True) and not self._tabs_fit_next_to(
-                "DefenseClaw", width, tiny=True
-            ):
-                return ""
+            # (GAP-1283). The brand stays only while every tab keeps at least
+            # its tiny name beside it: from 140 to 157 columns it kept its 12
+            # cells while five tabs were bare key letters (GAP-1544, GAP-2150).
             return "DefenseClaw"
         # At 80 columns the brand would push tabs off screen; Overview still
         # shows the wordmark.
@@ -3576,9 +3582,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
     def _close_help(self) -> None:
         self.help_open = False
         self._render_chrome()
-        # The Setup card below the table was sized while the help still
-        # filled the screen; size it again once the panel is laid out, or it
-        # wrapped for the wrong box and lost its "… i details" (GAP-2072).
+        # The first render runs on the help's layout: the Setup task detail
+        # was fitted to no box and kept its full text (lost "… i details"
+        # behind a scrollbar) until the next key (GAP-2072). Fit it again
+        # once the panel is laid out.
         self.call_after_refresh(self._render_chrome)
         # Scrolling the help moved the shared scroller; put the panel back
         # where it was once its content is laid out again.
@@ -3695,8 +3702,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             self._close_help()
             return
         # `q` doubles as the strip's keyboard dismiss: a failure stays until
-        # dismissed, and q clears a success before it hides itself after
-        # STRIP_SUCCESS_SECONDS.
+        # dismissed, a success hides itself after STRIP_SUCCESS_SECONDS.
         if self._strip_state != "idle" and self.active_panel != "activity":
             self._strip_clear()
             self._set_status("Cleared command status.")
@@ -4735,6 +4741,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             "skills": [
                 ("j/k or Up/Down", "Navigate items"),
                 ("Enter / Esc", "Open / close the detail pane"),
+                ("PgUp / PgDn", "Scroll the open detail"),
                 ("/", "Filter (Enter or Esc returns to the list)"),
                 ("s / b / a / u", "Scan / block / allow / unblock selected"),
                 ("o", "Open the action menu (every action for the row)"),
@@ -4744,6 +4751,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             "mcps": [
                 ("j/k or Up/Down", "Navigate items"),
                 ("Enter / Esc", "Open / close the detail pane"),
+                ("PgUp / PgDn", "Scroll the open detail"),
                 ("/", "Filter (Enter or Esc returns to the list)"),
                 ("s / b / a / u", "Scan / block / allow / unblock selected"),
                 ("n", "Add or update an MCP server"),
@@ -4754,6 +4762,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             "plugins": [
                 ("j/k or Up/Down", "Navigate items"),
                 ("Enter / Esc", "Open / close the detail pane"),
+                ("PgUp / PgDn", "Scroll the open detail"),
                 ("/", "Filter (Enter or Esc returns to the list)"),
                 ("s / b / a / u", "Scan / block / allow / unblock selected"),
                 ("o", "Open the action menu (every action for the row)"),
@@ -4806,6 +4815,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 ("a", "Show all / recommended models"),
                 ("s", "Scan now"),
                 ("r", "Refresh discovery"),
+                ("e", "Export the snapshot to JSON"),
+                ("d", "Turn AI Discovery on / off"),
             ],
             "runtime": [
                 ("j/k or Up/Down", "Navigate findings"),
@@ -6463,15 +6474,17 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             "": "gateway status pending",
         }.get(gateway_state, "gateway offline")
 
-        sev = self._alert_severity_counts_for_connectors(scope_connectors)
+        # Unfiltered, the Findings card counts every alert, as the Alerts
+        # panel (scope All) does: a connector-less alert (galileo export,
+        # gateway) is not "outside" any roster (GAP-2088).
         fleet_sev = self._alert_severity_counts("")
+        sev = self._alert_severity_counts(selected_connector) if selected_connector else fleet_sev
         critical = sev.get("CRITICAL", 0)
         high = sev.get("HIGH", 0)
         medium = sev.get("MEDIUM", 0)
         low = sev.get("LOW", 0)
         total_findings = critical + high + medium + low
         fleet_findings = sum(fleet_sev.values())
-        outside_roster_findings = max(fleet_findings - total_findings, 0) if scope_connectors and not selected_connector else 0
 
         cfg = self.overview_model.cfg
         # Per-connector modes: "observe, 1 action", or the filtered connector's
@@ -6540,7 +6553,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             blocks_value = total_block
             fleet_blocks_value = fleet_total_block
             outside_roster_blocks = max(fleet_blocks_value - blocks_value, 0) if scope_connectors and not selected_connector else 0
-            finding_timestamps = self._finding_event_timestamps_for_connectors(scope_connectors)
+            finding_timestamps = self._finding_event_timestamps_for_connectors((selected_connector,) if selected_connector else ())
 
             call_detail_parts: list[str] = []
             if allow_count or alert_count or block_decisions:
@@ -6633,12 +6646,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 medium,
                 low,
                 connector=selected_connector,
-                connectors=scope_connectors,
             )
             if selected_connector:
                 findings_detail = f"{findings_detail} · all connectors {fleet_findings}"
-            elif outside_roster_findings:
-                findings_detail = f"{findings_detail} · outside roster {outside_roster_findings}"
 
             metrics = (
                 MetricDatum(
@@ -6892,7 +6902,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 if bucket in counts:
                     seen.add(self._event_count_key(row.event))
                     counts[bucket] += 1
-        for event in self._recent_hook_scope_summary(scope, since=since)["finding_events"]:
+        for event in self._supplemental_hook_finding_events(scope, since):
             key = self._event_count_key(event)
             if key in seen:
                 continue
@@ -6901,6 +6911,36 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 seen.add(key)
                 counts[bucket] += 1
         return counts
+
+    def _alerts_view_is_canonical(self) -> bool:
+        """True when the Alerts model reads the audit store's alert view.
+
+        That view already lists every hook block and rule finding once (a
+        block that a finding explains is the finding row), so the Overview
+        must count its rows and not add connector-hook rows on top: each
+        block was counted twice (GAP-2088).
+        """
+
+        return self.alerts_model is not None and getattr(self.alerts_model, "store", None) is not None
+
+    def _supplemental_hook_finding_events(self, scope: tuple[str, ...], since: datetime | None) -> list[Any]:
+        """Hook rows that stand in for alerts when no alert view is loaded."""
+
+        if self._alerts_view_is_canonical():
+            return []
+        return list(self._recent_hook_scope_summary(scope, since=since)["finding_events"])
+
+    def _connector_alert_count(self, connector: str, hook_alerts: int) -> int:
+        """ALERTS for one CONNECTORS row: what its Alerts scope lists (GAP-2089)."""
+
+        if not self._alerts_view_is_canonical():
+            return hook_alerts
+        scope = (connector.strip().lower(),)
+        return sum(
+            1
+            for row in self.alerts_model.flat_rows()
+            if row.kind != "scan_finding" and self._cached_event_matches_scope(row.event, scope)
+        )
 
     @staticmethod
     def _normalize_connector_scope(connectors: Iterable[str]) -> tuple[str, ...]:
@@ -7892,10 +7932,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             if not connector:
                 continue
             health_row = self._connector_health_for_metric(connector, use_single=True)
-            allow, alerts, blocks, _newest = self._connector_hook_stats_for_connectors(
+            allow, hook_alerts, blocks, _newest = self._connector_hook_stats_for_connectors(
                 (connector,)
             )
-            calls = allow + alerts + blocks
+            calls = allow + hook_alerts + blocks
+            alerts = self._connector_alert_count(connector, hook_alerts)
             last = self._connector_last_activity(
                 connector,
                 health_row=health_row,
@@ -8134,7 +8175,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             ):
                 stamps.append(event.timestamp)
                 seen.add(self._event_count_key(event))
-        for event in self._recent_hook_scope_summary(scope, since=since)["finding_events"]:
+        for event in self._supplemental_hook_finding_events(scope, since):
             key = self._event_count_key(event)
             if key in seen:
                 continue
@@ -8223,7 +8264,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         for event in alert_events:
             seen.add(self._event_count_key(event))
             consider(event)
-        for event in self._recent_hook_scope_summary(scope, since=since)["finding_events"]:
+        for event in self._supplemental_hook_finding_events(scope, since):
             key = self._event_count_key(event)
             if key in seen:
                 continue
@@ -8288,9 +8329,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
     #   _strip_clear()          on q-dismiss
     #
     # Per user request:
-    #   * a success hides itself after STRIP_SUCCESS_SECONDS (the footer
-    #     says so) and leaves its result on the status line; a failure
-    #     stays until the user presses q
+    #   * a success hides itself after STRIP_SUCCESS_SECONDS (the hint says
+    #     so) and leaves its result on the status line; the rest stay
+    #     until the user presses q (GAP-2058)
     #   * snippet on success is a summary, not a raw last line
     #   * strip is hidden when the user is on the Activity panel (live
     #     stream is right there, the strip would be redundant)
@@ -8412,7 +8453,13 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             result = result or command_result_summary(self._strip_label, self._strip_output_lines)
             if result:
                 self._strip_summary = result
-            elif tail and len(tail) <= 120 and not _is_bare_json_punctuation(tail) and not is_command_hint(tail):
+            elif (
+                tail
+                and len(tail) <= 120
+                and not _is_bare_json_punctuation(tail)
+                and not is_command_hint(tail)
+                and not is_listing_detail(tail)
+            ):
                 self._strip_summary = tail
             else:
                 self._strip_summary = "exit 0 · finished cleanly"
@@ -8457,12 +8504,17 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
 
     def _auto_hide_success_strip(self, token: object) -> None:
         if self._strip_state == "success" and getattr(self, "_strip_auto_hide_token", None) is token:
-            # The result and its next step stay readable on the status line
-            # after the card goes (GAP-2058).
-            receipt = f"{self._strip_label or 'command'}: {self._strip_summary}" if self._strip_summary else ""
+            # The result and its "next:" step stay readable on the status
+            # line once the receipt goes (GAP-2058).
+            done = f"Done: {self._strip_label} · {self._strip_summary}" if self._strip_summary else ""
+            if done:
+                # The status line cuts at its right edge, which took the
+                # next step first at 80x24 (GAP-2133). Textual drops the last
+                # cell of a line that fills the status row exactly, so leave one.
+                done = _fit_keeping_next_step(done, max(24, self.size.width - 3))
             self._strip_clear()
-            if receipt:
-                self._set_status(receipt)
+            if done:
+                self._set_status(done)
 
     def _strip_json_result_summary(self) -> str:
         """Readable result of a registry ``--json`` run, or "" (GAP-1681)."""
@@ -8623,9 +8675,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
 
         hint = {
             "running": "press A for live output  ·  Ctrl+C or click Cancel to stop",
-            # A success hides itself; say so, or "q to clear" read as if it
-            # stayed (GAP-2058).
-            "success": f"press A for full output  ·  hides in {STRIP_SUCCESS_SECONDS:.0f}s  ·  q or Dismiss clears it now",
+            "success": f"press A for full output  ·  hides in {STRIP_SUCCESS_SECONDS:.0f}s  ·  q or Dismiss clears now",
             "failure": "press A for full output  ·  q or click Dismiss to clear",
             "cancelled": "press A for full output  ·  q or click Dismiss to clear",
             "rejected": "press : to retry  ·  q or click Dismiss to clear",
@@ -8835,6 +8885,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         enf_selected = selected_connector
         if enf_selected:
             calls_n, alert_n, block_n = self._enforcement_connector_breakdown(enf_selected)
+            # Same count as the Alerts panel in this scope, not only the
+            # hook "alert" verdicts: blocks with findings read "Alerts 0"
+            # next to "Critical 8" (GAP-2183).
+            alert_n = self._connector_alert_count(enf_selected, alert_n)
             alerts_color = TOKENS.accent_red if alert_n else TOKENS.accent_green
             enf_table.add_row(
                 Text("Alerts", style=TOKENS.text_secondary),
@@ -9809,6 +9863,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             # lazily, so show "scan pending" + trigger a one-shot load).
             self._request_enforcement_inventory(enf_selected)
             calls_n, alert_n, block_n = self._enforcement_connector_breakdown(enf_selected)
+            alert_n = self._connector_alert_count(enf_selected, alert_n)  # GAP-2183
             alert_color = TOKENS.accent_red if alert_n else TOKENS.accent_green
             block_color = TOKENS.accent_red if block_n else TOKENS.text_secondary
             selected_scan = self._connector_scan_metrics(enf_selected)
@@ -10094,6 +10149,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         self.status_text = text
         strip = render_status_strip(self._hint_status_model())
         rendered = f"{text}  [#444444]│[/]  {strip}"
+        if _status_text_fills_line(text, self.size.width):
+            # A "Done: ..." fitted to the line lost its last cell to the "…"
+            # of the cut-off health strip ("press i for readines…", GAP-2133).
+            rendered = text
         # ``text`` is operator-supplied via every ``_set_status`` caller —
         # including ``self.audit_model.active_filter_label()`` and the
         # logs search prompt — both of which echo whatever was typed
@@ -10384,7 +10443,12 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             return False
         model = self.setup_model
         if model.form_active:
-            return True
+            # Textual's auto-width columns never shrink when rows are patched,
+            # but the hint is wrapped to the room the current rows leave. When
+            # a connector change dropped the long "Verify After Setup" row the
+            # hint was cut at the edge instead of wrapping (GAP-2131), so the
+            # cells that size the columns before the hint rebuild the table.
+            return ("form", tuple(row[:-1] for row in self._table_rows))
         view = self._setup_view()
         if view == "wizards":
             return (view, setup_center.active_group(model))
@@ -10873,6 +10937,13 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         below = None if detail else self._panel_aside_below
         panel.set_class(below is not None, "aside-below")
         height, rows, width = self._aside_below_box() if below is not None else (0, 0, 0)
+        self._aside_box = (height, rows, width)
+        if below is not None and not self._aside_box_recheck:
+            # The box is measured before a panel switch's layout settles (the
+            # Setup card took the old panel's height, then grew by a row the
+            # next time help closed, GAP-2167). Measure again once it has.
+            self._aside_box_recheck = True
+            self.call_after_refresh(self._recheck_aside_below_box)
         if self._detail_max_height != (height or None):
             # Inline beats the CSS cap; None hands the cap back to the CSS.
             panel.styles.max_height = height or None
@@ -10889,7 +10960,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             title, content = split_aside(below)
             more = getattr(below, "more", "")
             if more and rows > 0 and isinstance(content, Text):
-                content = fit_rows(content, self.console, width, rows, more)
+                # Fit one column narrower than the box: text that filled the
+                # box exactly got a scrollbar after the help overlay closed,
+                # re-wrapped one column narrower, and lost its "… i details"
+                # ending behind the scrollbar (GAP-2072).
+                content = fit_rows(content, self.console, max(1, width - 1), rows, more)
             signature = (self.active_panel, "aside", title, content)
             if signature != self._last_detail_signature:
                 panel.border_title = rich_escape(title) if title else None
@@ -10924,6 +10999,13 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             # Discovery showed Codex while OpenCode's detail was open
             # (GAP-1596).
             self.call_after_refresh(self._keep_table_cursor_visible)
+
+    def _recheck_aside_below_box(self) -> None:
+        self._aside_box_recheck = False
+        if self._panel_aside_below is None or self.help_open:
+            return
+        if self._aside_below_box() != self._aside_box:
+            self._render_detail_panel()
 
     def _aside_below_box(self) -> tuple[int, int, int]:
         """``(height, rows, width)`` of ``#detail-panel`` showing an aside.
@@ -11143,6 +11225,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 return self._focus_catalog_filter(self.active_panel)
             catalog_key = _catalog_key(key)
             model = self.catalog_models[self.active_panel]
+            if model.detail_open and key in {"pagedown", "page_down", "pageup", "page_up"}:
+                # At 80x24 the detail pane stops after the Scan line; PgUp/PgDn
+                # reach the verdict, findings and Actions lines (GAP-2087).
+                return self._scroll_detail_panel(key)
             if catalog_key == "esc" and not model.detail_open and model.filter_text:
                 # The hint says "Esc clears the filter"; Esc on the list did
                 # nothing (GAP-1379, GAP-1402).
@@ -11201,6 +11287,15 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             return self._apply_inventory_action(action)
 
         if self.active_panel == "ai":
+            if not self.ai_discovery_model.filtering and key in {"e", "d"}:
+                # GAP-2103: Export JSON and Enable/Disable had no key.
+                if key == "e":
+                    self._handle_ai_control("ai-export")
+                else:
+                    snapshot = self.ai_discovery_model.snapshot
+                    enabled = bool(snapshot and snapshot.enabled)
+                    self._handle_ai_control("ai-disable" if enabled else "ai-enable")
+                return True
             action = self.ai_discovery_model.handle_key(_vim_key(key))
             return self._apply_ai_discovery_action(action)
         if self.active_panel == "activity":
@@ -11970,11 +12065,13 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             facts.append(hints.saved_hint)
         if hints.restart_pending:
             reason = hints.restart_reason
-            facts.append(
-                f"Restart the gateway (G) to apply: {reason}"
-                if reason and reason != "config saved in the TUI"
-                else "Restart the gateway (G) to apply it"
-            )
+            cli_live = self._setup_cli_live_sections
+            if reason and reason != "config saved in the TUI":
+                facts.append(f"Restart the gateway (G) to apply: {reason}")
+            elif cli_live:
+                facts.append(f"CLI uses {cli_live} now · G: restart gateway")
+            else:
+                facts.append("Restart the gateway (G) to apply it")
         # From the aside width up, the aside describes the focused field.
         lines = [head] if self._setup_width() >= ASIDE_MIN_WIDTH else [head, second]
         if facts:
@@ -12118,8 +12215,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 return SetupPanelAction(True, hint="Restart queue cleared.", clear_restart_queue=True)
             return SetupPanelAction(True, hint="No restart is queued.")
         if key == "R":
-            self.setup_model.set_config(self.config)
-            return SetupPanelAction(True, hint="Config reverted from current runtime config.")
+            # R is the global Registries key, as the tab strip and ? show.
+            # It used to revert the config from every Setup view, dropping
+            # unsaved edits; the config editor reverts on r (GAP-2151).
+            return SetupPanelAction(False)
         if self.setup_model.mode == "config":
             return self._handle_setup_config_key(key, character=character)
         return self._handle_setup_wizard_key(key)
@@ -12134,18 +12233,17 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if key in {"down", "j"}:
             self.setup_model.active_wizard = setup_catalog.step_wizard(self.setup_model.active_wizard, 1)
             return SetupPanelAction(True)
-        if key in {"left", "["}:
-            self.setup_model.active_wizard = setup_catalog.step_group(self.setup_model.active_wizard, -1)
-            return SetupPanelAction(True)
-        if key in {"right", "]"}:
-            groups = setup_catalog.GROUP_TITLES
-            if setup_catalog.wizard_group(self.setup_model.active_wizard) == groups[-1]:
-                # The nav lists "Config editor" after the last group: Right
-                # goes there instead of wrapping to the first (GAP-2060).
-                self.setup_model.mode = "config"
-                self.setup_model.active_line = self.setup_model.first_editable_line()
-                return SetupPanelAction(True, hint="Config editor opened. w goes back to the setup tasks.")
-            self.setup_model.active_wizard = setup_catalog.step_group(self.setup_model.active_wizard, 1)
+        if key in {"left", "[", "right", "]"}:
+            # Step through the nav as it is listed, so Right on the last
+            # group reaches "Config editor" instead of wrapping past it
+            # (GAP-2060).
+            delta = -1 if key in {"left", "["} else 1
+            items = setup_center.task_nav(self.setup_model, self._setup_task_statuses())
+            target = step_nav(items, delta)
+            if target == setup_center.NAV_CONFIG:
+                setup_center.select_nav(self.setup_model, target)
+                return SetupPanelAction(True, hint="Config editor opened. w goes back to the tasks.")
+            self.setup_model.active_wizard = setup_catalog.step_group(self.setup_model.active_wizard, delta)
             return SetupPanelAction(True)
         if key == "i":
             return SetupPanelAction(True, open_picker="detail")
@@ -12202,6 +12300,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # ``q`` on a text row starts typing (a value can begin with q);
         # elsewhere it closes the form like Esc.
         if key in {"esc", "escape"} or (key == "q" and not text_row):
+            if self.setup_model.back_to_goal_menu():
+                return SetupPanelAction(True, hint="Back to the goal list.")
             self.setup_model.close_wizard_form()
             return SetupPanelAction(True, hint="Setup wizard form closed.")
         if key in {"tab", "down"}:
@@ -12331,6 +12431,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             return SetupPanelAction(True, hint=f"Fix config validation: {errors[0]}")
         if not self.setup_model.has_changes():
             return SetupPanelAction(True, hint="No config changes to save.")
+        saved_entries = self.setup_model.config_diff()
         try:
             self.setup_model.apply_changes_to_config()
             save = getattr(self.config, "save", None)
@@ -12356,7 +12457,42 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             self.setup_model.mark_saved()
         except Exception as exc:  # noqa: BLE001 - user feedback belongs in status.
             return SetupPanelAction(True, hint=f"Config save failed: {exc}")
+        self._schedule_config_save_audit(saved_entries)
+        self._setup_cli_live_sections = _cli_live_config_sections(saved_entries)
+        if self._setup_cli_live_sections:
+            return SetupPanelAction(
+                True,
+                hint=(
+                    f"Config changes saved; CLI commands (mcp set, skill and plugin install) use the new "
+                    f"{self._setup_cli_live_sections} now; the gateway applies it after a restart (G)."
+                ),
+            )
         return SetupPanelAction(True, hint="Config changes saved; restart queued if gateway is running.")
+
+    def _schedule_config_save_audit(self, entries: tuple[Any, ...]) -> None:
+        """Record the saved keys as a config-update audit event (GAP-2121).
+
+        The gateway hand-off is an HTTP call, so it runs in a thread worker;
+        before the app is mounted (model-level callers) it runs inline.
+        """
+
+        from defenseclaw.tui.services.config_audit import record_config_save
+
+        cfg = self.config
+
+        def record() -> None:
+            if not record_config_save(cfg, entries) and self.is_running:
+                self.call_from_thread(
+                    self._set_status,
+                    "Config changes saved; the audit event was not recorded (is the gateway running?).",
+                )
+
+        if not entries:
+            return
+        if not self.is_running:
+            record_config_save(cfg, entries)
+            return
+        self.run_worker(record, thread=True, exclusive=False, group="config-save-audit")
 
     async def _open_config_diff(self) -> None:
         result = await self.push_screen_wait(ConfigDiffScreen(self.setup_model.config_diff()))
@@ -15452,6 +15588,19 @@ def _typed_character(event: events.Key) -> str | None:
     return None
 
 
+# Config keys the CLI reads from config.yaml on every command, so CLI
+# admission (mcp set, skill and plugin install) enforces a saved change at
+# once; only the gateway's own checks wait for the restart (GAP-2145).
+_CLI_LIVE_CONFIG_SECTIONS = ("asset_policy",)
+
+
+def _cli_live_config_sections(entries: Iterable[Any]) -> str:
+    """The saved sections the CLI already applies ("asset_policy"), or ""."""
+
+    saved = {str(getattr(entry, "key", "")).split(".", 1)[0] for entry in entries}
+    return ", ".join(section for section in _CLI_LIVE_CONFIG_SECTIONS if section in saved)
+
+
 def _typed_seed(key: str, character: str | None) -> str:
     """Text a Setup key should add to a field: the raw character, else ""."""
 
@@ -15521,7 +15670,7 @@ _SETUP_BUTTON_KEYS = {
     "setup-mode-wizards": "w",
     "setup-edit-list": "E",
     "setup-save": "S",
-    "setup-revert": "R",
+    "setup-revert": "r",
     "setup-restart": "G",
     "setup-clear-restart": "C",
     "setup-wizard-run": "ctrl+r",
@@ -15822,10 +15971,35 @@ def _is_bare_json_punctuation(text: str) -> bool:
 def _truncate_for_strip(value: str, width: int) -> str:
     # The snippet has a row of its own in the card, so it may use the card's
     # width; "width - 38" cut the registry summary at 80 columns (GAP-1754).
-    limit = max(24, width - 2)
+    return _fit_keeping_next_step(value, max(24, width - 2))
+
+
+_NEXT_STEP_SEP = " · next: "
+
+
+def _status_text_fills_line(text: str, width: int) -> bool:
+    """True when ``text`` leaves no room for the status line's health strip."""
+
+    try:
+        cells = Text.from_markup(text).cell_len
+    except Exception:  # noqa: BLE001 - not markup; count it as typed.
+        cells = len(text)
+    # The status line pads one cell on each side; the strip needs its
+    # "  │  " separator and a few cells to say anything.
+    return cells + 12 > max(0, width - 2)
+
+
+def _fit_keeping_next_step(value: str, limit: int) -> str:
+    """Cut ``value`` to ``limit`` cells, shortening the result before its
+    "· next: ..." step so the step stays readable at 80x24 (GAP-2133)."""
+
     cleaned = value.replace("\n", " ").strip()
     if len(cleaned) <= limit:
         return cleaned
+    head, sep, step = cleaned.rpartition(_NEXT_STEP_SEP)
+    room = limit - len(sep) - len(step)
+    if sep and room >= 12:
+        return f"{head[: room - 1].rstrip()}…{sep}{step}"
     return cleaned[: max(0, limit - 3)] + "..."
 
 

@@ -511,12 +511,60 @@ class TestLiveClawInventory(unittest.TestCase):
         with contextlib.redirect_stdout(out):
             format_claw_aibom_human(inv, summary_only=True)
         text = out.getvalue()
-        self.assertIn("2 unsupported inventory capabilities", text)
+        self.assertIn(
+            "2 inventory coverage notes (memory, rules); run without --summary to read them.",
+            " ".join(text.split()),
+        )
         self.assertNotIn("long internal caveat text", text)
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             format_claw_aibom_human(inv)
         self.assertIn("long internal caveat text", out.getvalue())
+
+    def test_human_summary_footer_singular_and_copilot_empty_is_zero(self):
+        # GAP-2227: one note reads singular and names its category.
+        # GAP-2226: Copilot MCP/rules are inventoried, so empty reads 0, not "not collected".
+        import contextlib
+        import io
+
+        from defenseclaw.inventory.claw_inventory import (
+            _UNVERIFIED_CONNECTOR_NOTES,
+            _not_collected_categories,
+        )
+
+        inv = {
+            "connector": "hermes",
+            "limitations": [
+                {"category": "plugins", "status": "unverified", "reason": "x"},
+                {"category": "rules", "status": "unverified", "reason": "y"},
+            ],
+        }
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            format_claw_aibom_human(inv, summary_only=True, categories={"plugins"})
+        self.assertIn(
+            "1 inventory coverage note (plugins); run without --summary to read it.",
+            " ".join(out.getvalue().split()),
+        )
+
+        copilot = {
+            "connector": "copilot",
+            "limitations": [
+                {"category": cat, "status": "unverified", "reason": note}
+                for (conn, cat), note in _UNVERIFIED_CONNECTOR_NOTES.items()
+                if conn == "copilot"
+            ],
+        }
+        self.assertTrue({"mcp", "rules"} <= {lim["category"] for lim in copilot["limitations"]})
+        self.assertFalse({"mcp", "rules"} & _not_collected_categories(copilot))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            format_claw_aibom_human(copilot)
+        text = out.getvalue()
+        self.assertNotIn("MCP servers: not collected", text)
+        self.assertNotIn("Rules: not collected", text)
+        self.assertIn("Inventory coverage notes", text)
+        self.assertIn("partly checked", text)
 
     def test_scan_hints_follow_only_categories(self):
         # GAP-2037: --only mcp points at the MCP scanner, not the skill scanner.
@@ -1214,11 +1262,11 @@ class TestCLIIntegration(unittest.TestCase):
                     self.assertEqual(data["errors"], [])
                     self.assertEqual(
                         len(data["limitations"]),
-                        3 if connector == "codex" else 4,
+                        2 if connector == "codex" else 4,
                     )
                     self.assertNotIn("failed", result.stderr.lower())
 
-    def test_combined_codex_claude_has_four_limitations_without_warning(self):
+    def test_combined_codex_claude_has_three_limitations_without_warning(self):
         from defenseclaw.commands.cmd_aibom import aibom
 
         runner = CliRunner()
@@ -1238,7 +1286,7 @@ class TestCLIIntegration(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         data = json.loads(result.stdout)
         self.assertEqual(len(data), 2)
-        self.assertEqual(sum(len(inv["limitations"]) for inv in data), 4)
+        self.assertEqual(sum(len(inv["limitations"]) for inv in data), 3)
         self.assertTrue(all(inv["errors"] == [] for inv in data))
         self.assertNotIn("failed", result.stderr.lower())
 
@@ -1257,7 +1305,7 @@ class TestCLIIntegration(unittest.TestCase):
             result = runner.invoke(aibom, ["scan", "--connector", "codex"], obj=self.app)
 
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("Unsupported inventory capabilities", result.stdout)
+        self.assertIn("Inventory coverage notes", result.stdout)
         self.assertIn("informational", result.stdout)
         self.assertNotIn("command(s) failed", result.output)
 
@@ -1283,7 +1331,7 @@ class TestCLIIntegration(unittest.TestCase):
         self.assertGreaterEqual(json_start, 0)
         data = json.loads(result.stdout[json_start:])
         self.assertEqual(len(data["errors"]), 1)
-        self.assertEqual(len(data["limitations"]), 3)
+        self.assertEqual(len(data["limitations"]), 2)
         self.assertIn("1 connector inventory command(s) failed", result.output)
 
 
@@ -3977,10 +4025,10 @@ class TestBuildAibomFromFilesystem(unittest.TestCase):
         self.assertEqual(inv["memory"], [])
         self.assertEqual(inv["errors"], [])
         self.assertEqual(inv["summary"]["errors"], 0)
-        self.assertEqual(inv["summary"]["limitations"], 3)
+        self.assertEqual(inv["summary"]["limitations"], 2)
         self.assertEqual(
             {item["category"] for item in inv["limitations"]},
-            {"tools", "models", "memory"},
+            {"tools", "memory"},
         )
         self.assertTrue(all(item["connector"] == "codex" for item in inv["limitations"]))
         self.assertTrue(all(item["status"] == "unsupported" for item in inv["limitations"]))
@@ -4015,9 +4063,9 @@ class TestBuildAibomFromFilesystem(unittest.TestCase):
         self.assertEqual(len(inv["errors"]), 1)
         self.assertEqual(inv["errors"][0]["command"], "codex:skills")
         self.assertIn("denied", inv["errors"][0]["error"])
-        self.assertEqual(len(inv["limitations"]), 3)
+        self.assertEqual(len(inv["limitations"]), 2)
         self.assertEqual(inv["summary"]["errors"], 1)
-        self.assertEqual(inv["summary"]["limitations"], 3)
+        self.assertEqual(inv["summary"]["limitations"], 2)
 
     def test_skill_eligibility_requires_marker(self):
         cfg = _make_cfg_for_connector(self.tmp, "codex")

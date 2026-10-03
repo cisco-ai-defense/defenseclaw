@@ -114,6 +114,7 @@ from defenseclaw.doctor_gateway import (
     trusted_lsof_path,
 )
 from defenseclaw.doctor_hooks import (
+    CODEX_PROBE_TIMEOUT_STATE,
     WindowsHookCheck,
     _packaged_windows_install_root,
     validate_windows_copilot_hook_registration,
@@ -2839,10 +2840,13 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
                     audit_db = str(getattr(cfg, "audit_db", "") or "")
                     reason = _telemetry_error_reason(details, audit_db) if sub == "telemetry" else ""
                     _, next_step, freed = _audit_write_failure(health, audit_db) if reason else ("", "", False)
+                    # A freed audit disk is a WARN that clears on the next
+                    # event, so do not lead with the raw "error" (GAP-2139).
+                    shown_state = "recovering" if freed else state
                     _emit(
                         "warn" if freed else "fail",
                         f"  └─ {sub}",
-                        f"{state} — {reason}" if reason else state,
+                        f"{shown_state} — {reason}" if reason else state,
                         r=r,
                         remediation=next_step,
                     )
@@ -4620,8 +4624,14 @@ def _check_windows_native_hooks(
     )
     if connector == "hermes":
         check = _hermes_idle_native_check(check, r)
+    if check.state == CODEX_PROBE_TIMEOUT_STATE:
+        _emit("warn", label, f"{check.state}: {check.detail}", r=r, remediation=_CODEX_PROBE_TIMEOUT_STEP)
+        return
     status = "pass" if check.healthy else "fail"
     _emit(status, label, f"{check.state}: {check.detail}", r=r)
+
+
+_CODEX_PROBE_TIMEOUT_STEP = "rerun defenseclaw doctor in a minute; Codex answers faster once the host is less busy"
 
 
 def _windows_native_hook_check(
@@ -5107,16 +5117,6 @@ def _check_codex_otel_alignment(cfg, r: _DoctorResult) -> None:
         )
 
 
-_EVENT_HISTORY_SQLITE_CLASSES = {
-    "full": "the disk holding the audit database is full",
-    "busy_locked": "another process keeps the audit database locked",
-    "deadline": "audit database writes time out",
-    "io": "the disk returned an I/O error",
-    "readonly_cantopen": "the audit database is read-only or cannot be opened",
-    "constraint_corrupt": "the audit database is damaged",
-}
-
-
 _EVENT_HISTORY_SQLITE_REMEDIATION = {
     "full": "free space on the disk that holds the audit database; the gateway resumes writing audit events "
     "once there is room",
@@ -5159,18 +5159,9 @@ def _audit_disk_freed(details, audit_db: str) -> bool:
 
 def _telemetry_error_reason(details, audit_db: str = "") -> str:
     """Plain words for the gateway's event-history failure tokens (GAP-1308)."""
-    if not isinstance(details, dict):
-        return ""
-    if details.get("event_history_failure") != "sqlite_write_failed":
-        return ""
-    if _audit_disk_freed(details, audit_db):
-        return (
-            "audit events could not be written while the disk holding the audit database was full; "
-            "it has room again, and this clears with the next audit event"
-        )
-    sqlite_class = str(details.get("event_history_last_sqlite_class") or "")
-    cause = _EVENT_HISTORY_SQLITE_CLASSES.get(sqlite_class, "the audit database rejects writes")
-    return f"audit events cannot be written: {cause}"
+    from defenseclaw.audit_capacity import audit_write_failure_reason
+
+    return audit_write_failure_reason(details, audit_db)
 
 
 def _check_hermes_hooks(
@@ -6898,7 +6889,14 @@ def _hermes_idle_native_check(check: WindowsHookCheck, r: _DoctorResult) -> Wind
     is nothing to reload. --passive does not list processes and keeps the
     pending-reload state.
     """
-    if check.state != "pending-reload" or r.passive or _hermes_host_running() is not False:
+    if check.state != "pending-reload" or r.passive:
+        return check
+    running = _hermes_host_running()
+    if running is None:
+        # The process listing can time out right after an upgrade on a busy
+        # host; one retry keeps a transient probe from failing doctor (GAP-2190).
+        running = _hermes_host_running()
+    if running is not False:
         return check
     detail = check.detail.split("; running Hermes", 1)[0]
     return WindowsHookCheck(
@@ -8239,11 +8237,11 @@ def _check_llm_api_key(cfg, r: _DoctorResult) -> None:
     elif provider == "openai":
         _verify_openai(api_key, r)
     elif provider in ("bedrock", "amazon-bedrock"):
-        _verify_bedrock(api_key, r)
+        _verify_bedrock(api_key, r, key_env=env_name)
     elif provider == "" and env_name.startswith("OPENAI"):
         _verify_openai(api_key, r)
     elif provider == "" and env_name.startswith("AWS_BEARER_TOKEN_BEDROCK"):
-        _verify_bedrock(api_key, r)
+        _verify_bedrock(api_key, r, key_env=env_name)
     else:
         _emit(
             "pass",
@@ -8345,6 +8343,20 @@ def _check_llm_reachable(cfg, r: _DoctorResult) -> None:
         ok, msg = _llm.ping(llm, timeout=5)
     if ok:
         _emit("pass", "LLM reachable", prefix + msg, r=r)
+    elif bool(getattr(judge, "enabled", False)) and f" {_llm._PING_FAILURE_WORDS['auth_failed']}:" in msg:
+        # The judge is on but its key is rejected, so judge verdicts
+        # silently fail open (GAP-2108).
+        key_env = (getattr(llm, "api_key_env", "") or "DEFENSECLAW_LLM_KEY").strip()
+        _emit(
+            "fail",
+            "LLM reachable",
+            prefix + msg + " (the LLM judge cannot run, so its verdicts fail open)",
+            r=r,
+            remediation=(
+                f"replace the key: defenseclaw keys set {key_env} --value-stdin "
+                "(or defenseclaw setup llm --role judge), then defenseclaw-gateway restart"
+            ),
+        )
     else:
         _emit("warn", "LLM reachable", prefix + msg, r=r)
 
@@ -8853,7 +8865,7 @@ def _bedrock_region() -> str:
     return _BEDROCK_DEFAULT_REGION
 
 
-def _verify_bedrock(api_key: str, r: _DoctorResult) -> None:
+def _verify_bedrock(api_key: str, r: _DoctorResult, *, key_env: str = "DEFENSECLAW_LLM_KEY") -> None:
     """Verify an AWS Bedrock API key (short-term ABSK bearer token).
 
     LiteLLM and the DefenseClaw scanner bridge authenticate to Bedrock
@@ -8866,8 +8878,9 @@ def _verify_bedrock(api_key: str, r: _DoctorResult) -> None:
     * ``AKIA…``  → SigV4 credentials; we can't verify without signing,
                   which would pull in botocore just for the doctor.
                   Emit a ``warn`` pointing at ``aws sts get-caller-identity``.
-    * anything else → shape we don't recognize; pass with a note, same
-                      as the generic fallback in ``_check_llm_api_key``.
+    * anything else → not a Bedrock key shape; warn with a next step
+                      (Bedrock rejects it with "Must start with pre-defined
+                      prefix", GAP-2195), and don't probe it.
 
     The foundation-models list endpoint is a cheap GET that returns
     the list of models enabled for the account. ``200`` confirms auth
@@ -8884,10 +8897,15 @@ def _verify_bedrock(api_key: str, r: _DoctorResult) -> None:
         return
     if not api_key.startswith(("ABSK", "bedrock-api-key-")):
         _emit(
-            "pass",
+            "warn",
             "LLM API key (Bedrock)",
-            f"key is set ({len(api_key)} chars) but is not a Bedrock API key format doctor knows, so it is not checked",
+            f"key is set ({len(api_key)} chars) but does not look like a Bedrock API key "
+            "(ABSK... or bedrock-api-key-...), so it is not checked",
             r=r,
+            remediation=(
+                f"replace it: defenseclaw keys set {key_env} --value-stdin "
+                "(or defenseclaw setup llm), then defenseclaw-gateway restart"
+            ),
         )
         return
     region = _bedrock_region()
@@ -8902,17 +8920,30 @@ def _verify_bedrock(api_key: str, r: _DoctorResult) -> None:
         _emit("pass", "LLM API key (Bedrock)", f"authenticated successfully ({region})", r=r)
     elif code == 401:
         _emit("fail", "LLM API key (Bedrock)", "invalid key (401 Unauthorized)", r=r)
-    elif code == 403:
-        # 403 from Bedrock usually means the token is valid but the
-        # IAM policy/resource doesn't grant bedrock:ListFoundationModels.
-        # That's a policy problem, not a key problem — downgrade to warn
-        # so the scan still runs (the scanner uses InvokeModel, which
-        # may be permitted even when List is not).
+    elif code == 403 and _bedrock_403_is_permission_denial(body):
+        # The token authenticated, but the IAM policy doesn't grant
+        # bedrock:ListFoundationModels. That's a policy problem, not a key
+        # problem — downgrade to warn so the scan still runs (the scanner
+        # uses InvokeModel, which may be permitted even when List is not).
         _emit(
             "warn",
             "LLM API key (Bedrock)",
             "403 Forbidden — key authenticates but lacks bedrock:ListFoundationModels; InvokeModel may still work.",
             r=r,
+        )
+    elif code == 403:
+        # Bedrock answers an expired or invalid bearer key with 403
+        # ("Authentication failed: Please make sure your API Key is valid."),
+        # which InvokeModel rejects the same way (GAP-2108).
+        _emit(
+            "fail",
+            "LLM API key (Bedrock)",
+            f"key rejected (403 Forbidden: {_bedrock_error_message(body)}); it is expired or invalid",
+            r=r,
+            remediation=(
+                f"replace it: defenseclaw keys set {key_env} --value-stdin "
+                "(or defenseclaw setup llm), then defenseclaw-gateway restart"
+            ),
         )
     elif code == 0:
         _emit(
@@ -8923,6 +8954,25 @@ def _verify_bedrock(api_key: str, r: _DoctorResult) -> None:
         )
     else:
         _emit("fail", "LLM API key (Bedrock)", f"HTTP {code}", r=r)
+
+
+def _bedrock_403_is_permission_denial(body: str) -> bool:
+    """True when a Bedrock 403 is an IAM denial, not a rejected key (GAP-2108)."""
+    low = (body or "").lower()
+    return any(m in low for m in ("not authorized to perform", "accessdenied", "access denied"))
+
+
+def _bedrock_error_message(body: str) -> str:
+    """The ``Message`` of a Bedrock error body, short and single-line."""
+    try:
+        data = json.loads(body or "")
+    except ValueError:
+        data = None
+    msg = ""
+    if isinstance(data, dict):
+        msg = str(data.get("Message") or data.get("message") or "")
+    msg = " ".join((msg or body or "no detail").split())
+    return msg[:160]
 
 
 def _check_cisco_ai_defense(cfg, r: _DoctorResult) -> None:
@@ -9130,6 +9180,7 @@ def _check_connector_export_custody(report, r: _DoctorResult, *, configured: set
 
     delivery_rows = iter(summarize_native_delivery(report).connectors)
     removed: list[str] = []
+    idle: dict[str, int] = {}
     for item in report.instances:
         suffix = "" if item.default else f"/{item.connector_instance_id[:8]}"
         label = f"Connector OTLP: {item.connector}{suffix}"
@@ -9137,6 +9188,17 @@ def _check_connector_export_custody(report, r: _DoctorResult, *, configured: set
         if configured is not None and normalize(item.connector) not in configured:
             if item.connector not in removed:
                 removed.append(item.connector)
+            continue
+        if (
+            not item.default
+            and (delivery is None or delivery.state == "no_evidence")
+            and item.credential_state not in {"invalid", "recovered"}
+        ):
+            # An additional instance (one per OpenShell sandbox run) with no
+            # evidence is an idle or deleted sandbox, not a custody problem:
+            # fold it into one line per connector, as status does (GAP-2097).
+            # Hook-only ones fold too: they are the same past runs (GAP-2104).
+            idle[item.connector] = idle.get(item.connector, 0) + 1
             continue
         if item.custody == "external":
             tag = "warn"
@@ -9244,6 +9306,14 @@ def _check_connector_export_custody(report, r: _DoctorResult, *, configured: set
             remediation=remediation,
         )
 
+    for connector, count in idle.items():
+        noun = "instance" if count == 1 else "instances"
+        _emit(
+            "pass",
+            f"Connector OTLP: {connector} ({count} additional {noun})",
+            "inactive (for example past sandbox runs); no recent native delivery evidence, nothing to do",
+            r=r,
+        )
     if removed:
         _emit(
             "skip",
@@ -12437,6 +12507,8 @@ def _check_hook_contract_lock(
         action = "re-seal" if windows_protected_authority_invalid else "seal"
         detail += f"; run `{setup_command(connector)} --yes` to {action} it"
         _emit("fail", "Hook contract", detail, r=r)
+    elif native_runtime is not None and native_runtime.state == CODEX_PROBE_TIMEOUT_STATE:
+        _emit("warn", "Hook contract", detail, r=r, remediation=_CODEX_PROBE_TIMEOUT_STEP)
     elif native_runtime is not None and not native_runtime.healthy:
         _emit("fail", "Hook contract", detail, r=r)
     elif status == "unknown":
