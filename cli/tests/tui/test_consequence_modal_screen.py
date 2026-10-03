@@ -71,7 +71,7 @@ def test_consequence_action_display_label_escapes_hotkey_brackets() -> None:
 def test_consequence_hint_mentions_keys_only_when_rows_have_them() -> None:
     """GAP-2115: a modal whose rows have no hotkey must not say "press a row's key"."""
 
-    assert "row's key" in _model().default_hint
+    assert "p runs now" in _model().default_hint and "u selects" in _model().default_hint
 
     keyless = ConsequenceModalModel(
         title="Desktop notifications",

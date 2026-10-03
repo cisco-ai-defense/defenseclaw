@@ -21,9 +21,12 @@ Badges show the real count up to 999 and "999+" above that.
 
 Wider than ``NARROW_STRIP`` (80 columns and up) every other tab keeps one
 label whichever panel is open, so switching panels changes only the tab you
-leave and the tab you open (GAP-2078). There other tabs give up their names
-before their unread counts (GAP-2077), and a tab stays a bare key only when
-even its shortest name doesn't fit (GAP-2150, GAP-2180); see ``_wide_labels``.
+leave and the tab you open (GAP-2078). Below about 160 columns other tabs
+give up their names before their unread counts (GAP-2077), and a tab stays a
+bare key only when even its shortest name doesn't fit (GAP-2150, GAP-2180);
+see ``_wide_labels``. Once every tab fits a name the names come from the
+width alone, so a badge never blanks or renames another tab and a count
+that doesn't fit waits (GAP-2301); see ``_every_tab_named``.
 """
 
 from __future__ import annotations
@@ -167,8 +170,9 @@ def fit_tab_labels(
     ``panels`` is the visible ``(name, key, label)`` rows in order. A width
     of 0 or less means "unknown" and returns full labels. Up to
     ``NARROW_STRIP`` cells the labels are fitted for the active tab
-    (``_fit_for_active``); wider strips use ``_wide_labels``, where other
-    tabs keep one label whichever tab is open (GAP-2078).
+    (``_fit_for_active``). Wider strips, where other tabs keep one label
+    whichever tab is open (GAP-2078), use ``_every_tab_named`` once every tab
+    fits a name (about 160 columns) and ``_wide_labels`` below that.
     """
 
     names = [name for name, _key, _title in panels]
@@ -178,15 +182,24 @@ def fit_tab_labels(
     if strip_width(tuple(full.values())) <= width:
         return full
     # Cached: the strip is redrawn on every render.
+    if (tuple(panels), width, _PLAIN_BADGE) not in _NAMES_CACHE:
+        _remember(_NAMES_CACHE, (tuple(panels), width, _PLAIN_BADGE), _every_tab_named(panels, width))
+    named = _NAMES_CACHE[(tuple(panels), width, _PLAIN_BADGE)]
+    if named is not None:
+        return _named_fit(panels, active, unread, width, named)
     key = (tuple(panels), tuple(unread.get(name, 0) for name in names), width, _PLAIN_BADGE)
     stable = _WIDE_CACHE.get(key)
     if stable is None:
         stable = _wide_labels(panels, unread, width)
-        if len(_WIDE_CACHE) >= 64:
-            _WIDE_CACHE.clear()
-        _WIDE_CACHE[key] = stable
+        _remember(_WIDE_CACHE, key, stable)
     others, actives = stable
     return {**others, active: actives[active]}
+
+
+def _remember(cache: dict[tuple[object, ...], object], key: tuple[object, ...], value: object) -> None:
+    if len(cache) >= 64:
+        cache.clear()
+    cache[key] = value
 
 
 def _rank(name: str) -> int:
@@ -288,7 +301,86 @@ def _wide_labels(
     return others, actives
 
 
+def _every_tab_named(panels: Sequence[tuple[str, str, str]], width: int) -> dict[str, str] | None:
+    """Each tab's name when every tab fits one beside a one-digit Alerts count, else None.
+
+    From about 160 columns every tab keeps a name, so the names come from
+    the width alone: a badge coming or going never blanks or renames another
+    tab ("4 MCP  5 Plugin" became "4 MCPs  5", GAP-2301). The strip keeps
+    room for the longest full name ("V AI Discovery"), so with few counts any
+    tab opens under its full name. Every tab gets its shortest name ("Log",
+    "Inv"), then the tiny, short and full names grow, most important first,
+    while ``BADGE_RESERVE`` cells stay free for the counts.
+    """
+
+    keys = {name: key for name, key, _title in panels}
+    titles = {name: title for name, _key, title in panels}
+    chosen = {name: _shortest(name, titles[name]) for name in keys}
+
+    def cost() -> int:
+        labels = {name: _label(keys[name], chosen[name], 0) for name in keys}
+        reserve = max(len(_label(keys[name], titles[name], 0)) - len(labels[name]) for name in keys)
+        alerts = (
+            len(_label(keys["alerts"], chosen["alerts"], 1, True)) - len(labels["alerts"]) if "alerts" in keys else 0
+        )
+        return strip_width(tuple(labels.values())) + reserve + alerts
+
+    if cost() > width:
+        return None
+    for tier in range(3):
+        for name in sorted(keys, key=_rank):
+            before = chosen[name]
+            chosen[name] = max(before, _names(name, titles[name])[tier], key=len)
+            if cost() + BADGE_RESERVE > width:
+                chosen[name] = before
+    return chosen
+
+
+def _named_fit(
+    panels: Sequence[tuple[str, str, str]],
+    active: str,
+    unread: Mapping[str, int],
+    width: int,
+    named: Mapping[str, str],
+) -> dict[str, str]:
+    """Labels for the open ``active`` tab over the names in ``named``.
+
+    Counts are compact ("8 Logs⁶⁴"). The Alerts count always shows; the
+    other counts take the cells the names leave free, most important tab
+    first, including the room kept for a long open name (GAP-2077). A count
+    that doesn't fit waits; it never costs a name. The counts don't depend
+    on the open tab, so switching panels never relabels a third tab. The
+    open tab reads in full, or "V AI Disco…" when the counts took that room:
+    it is the one label that may change, and its panel title names it.
+    """
+
+    keys = {name: key for name, key, _title in panels}
+    titles = {name: title for name, _key, title in panels}
+
+    def render(texts: Mapping[str, str], shown: set[str]) -> dict[str, str]:
+        return {
+            name: _label(keys[name], texts[name], unread.get(name, 0) if name in shown else 0, True) for name in keys
+        }
+
+    # One cell stays for the "…" of a shortened open name (GAP-1541).
+    spare = 1 if any(named[name] != titles[name] for name in keys) else 0
+    shown: set[str] = set()
+    for name in sorted(
+        (name for name in keys if unread.get(name, 0)), key=lambda name: (name != "alerts", _rank(name))
+    ):
+        if name == "alerts" or strip_width(tuple(render(named, shown | {name}).values())) + spare <= width:
+            shown.add(name)
+    title = titles[active]
+    wants = [title] + [f"{title[:n].rstrip()}…" for n in range(len(title) - 1, 1, -1)]
+    for want in [want for want in wants if len(want) > len(named[active])] + [named[active]]:
+        labels = render({**named, active: want}, shown)
+        if strip_width(tuple(labels.values())) <= width:
+            return labels
+    return render(named, shown - {"alerts"})
+
+
 _WIDE_CACHE: dict[tuple[object, ...], tuple[dict[str, str], dict[str, str]]] = {}
+_NAMES_CACHE: dict[tuple[object, ...], dict[str, str] | None] = {}
 
 
 def _fit_for_active(
@@ -574,6 +666,22 @@ def _fit_for_active(
 
     if active in keys:
         chosen = longest_active_name(chosen)
+    # 7. A bare Alerts key keeps its count in brackets ("2(22)") on every
+    #    panel, as on Overview: other tabs give up their names first, and
+    #    "2²²", which reads as an exponent, is left only when even bare keys
+    #    don't fit (GAP-2247, GAP-2301).
+    if "alerts" in compact and "alerts" in keys and not chosen["alerts"]:
+        compact.discard("alerts")
+        trial = dict(chosen)
+        for name in reversed(ranked):
+            if width_of(trial) <= width:
+                break
+            if name != active:
+                trial[name] = ""
+        if width_of(trial) <= width:
+            chosen = trial
+        else:
+            compact.add("alerts")
     return render(chosen)
 
 

@@ -33,7 +33,11 @@ def test_tab_labels_stay_put_and_keep_unread_counts_on_wide_strips(monkeypatch) 
         fits = {name: fit_tab_labels(PANELS, name, unread, width) for name, _key, _label in PANELS}
         for active, labels in fits.items():
             assert strip_width(tuple(labels.values())) <= width
-            assert labels[active].split(" ", 1)[-1].startswith(dict((n, t) for n, _k, t in PANELS)[active])
+            # From 160 columns every tab keeps a name, so a long open name
+            # can read "AI Discov…" beside the counts (GAP-2301).
+            shown = labels[active].split(" ", 1)[-1]
+            title = dict((n, t) for n, _k, t in PANELS)[active]
+            assert shown.startswith(title) or (width >= 146 and title.startswith(shown.rstrip("…")))
             for other, other_labels in fits.items():
                 for name, _key, _label in PANELS:
                     if name not in {active, other}:

@@ -31,11 +31,12 @@ def test_windows_160_columns_names_tabs_and_keeps_counts(monkeypatch) -> None:
         counts = {**unread, active: 0}
         labels = fit_tab_labels(PANELS, active, counts, 146)
         assert strip_width(tuple(labels.values())) <= 146
-        assert labels[active].split(" ", 1)[1].startswith(title)
-        assert len(_bare(labels)) <= 2, (active, labels)
-        assert {"overview", "alerts", "policies"}.isdisjoint(_bare(labels))
-        for name in ("logs", "audit"):
-            assert name == active or "(69)" in labels[name], (active, labels)
+        shown = labels[active].split(" ", 1)[1]
+        assert shown.startswith(title) or (shown.endswith("…") and title.startswith(shown[:-1]))
+        # Every tab keeps a name; a count that doesn't fit waits (GAP-2301).
+        assert not _bare(labels), (active, labels)
+        assert active == "alerts" or "(229)" in labels["alerts"]
+        assert active == "logs" or "(69)" in labels["logs"], (active, labels)
         # A wider strip never names fewer tabs (GAP-2150).
         previous = len(PANELS)
         for width in range(tab_fit.NARROW_STRIP + 1, 200):
