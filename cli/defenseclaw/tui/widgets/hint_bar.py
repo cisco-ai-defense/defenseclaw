@@ -370,18 +370,23 @@ def pack_hint_items(hint: str, width: int, *, max_lines: int = 2) -> str:
     """Break a ``key label · key label`` hint between items, never inside one.
 
     Word wrap split "r refresh keys" over two rows at 80 columns (GAP-1912).
-    Items that don't fit in ``max_lines`` rows are dropped whole. Plain
-    sentences, and any hint that fits, are left to the normal wrap.
+    The panel ``KEYS  a | b`` hints are packed the same way, so no row ends
+    in a bare key or starts with ``|`` (GAP-2032). Items that don't fit in
+    ``max_lines`` rows are dropped whole. Plain sentences, and any hint that
+    fits, are left to the normal wrap.
     """
 
     from rich.cells import cell_len
 
-    if width <= 0 or cell_len(hint) <= width or " · " not in hint:
+    if width <= 0 or cell_len(hint) <= width:
+        return hint
+    sep = next((sep for sep in (" · ", " | ") if sep in hint), "")
+    if not sep:
         return hint
     lines: list[str] = []
     line = ""
-    for item in hint.split(" · "):
-        joined = f"{line} · {item}" if line else item
+    for item in hint.split(sep):
+        joined = f"{line}{sep}{item}" if line else item
         if not line or cell_len(joined) <= width:
             line = joined
             continue

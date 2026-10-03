@@ -4876,7 +4876,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 # scannable at a glance.
                 key_text = key.ljust(22)
                 if desc:
-                    wrapped = ("\n" + " " * _HELP_DESC_INDENT).join(textwrap.wrap(desc, desc_width) or [desc])
+                    # Never split a path at its hyphen (last-/run.log, GAP-2033).
+                    rows = textwrap.wrap(desc, desc_width, break_on_hyphens=False)
+                    wrapped = ("\n" + " " * _HELP_DESC_INDENT).join(rows or [desc])
                     lines.append(f"  [#22D3EE]{key_text}[/] {wrapped}")
                 else:
                     lines.append(f"  {key_text}")
@@ -7759,7 +7761,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         scored independently via the persisted grouped aggregate so the
         single tile row stays intact (D1=B) while the detail sub-line
         attributes complete activity to the right connector — e.g.
-        ``codex 15 · cursor 10 · 2 idle``. ``blocks_detail`` lists
+        ``codex 15 · cursor 10 · 2 with no calls``. ``blocks_detail`` lists
         only connectors that actually blocked something. Returns ``("", "")``
         when fewer than two connectors are active, leaving the
         single-connector detail lines unchanged.
@@ -7786,7 +7788,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         call_parts = [f"[{TOKENS.accent_cyan}]{name}[/] {total}" for total, name in busy]
         idle = len(calls) - len(busy)
         if idle:
-            call_parts.append(f"[{TOKENS.text_muted}]{idle} idle[/]")
+            # Not "idle": the Agent row uses that for an agent that is not
+            # open, so one word meant two things on one screen (GAP-2005).
+            call_parts.append(f"[{TOKENS.text_muted}]{idle} with no calls[/]")
         return " · ".join(call_parts), " · ".join(block_parts)
 
     def _connector_status_map(self) -> dict[str, str]:
