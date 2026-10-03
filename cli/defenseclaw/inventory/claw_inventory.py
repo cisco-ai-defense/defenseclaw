@@ -2087,6 +2087,14 @@ _UNVERIFIED_CONNECTOR_NOTES: dict[tuple[str, str], str] = {
         "folders are listed; which agents Devin loads, and which one wins, are not checked"
     ),
     (
+        "claudecode",
+        "agents",
+    ): (
+        "user and project .claude/agents Markdown subagents (closest project "
+        "first) are listed; files without a name and description in their front "
+        "matter, and plugin, managed and session (--agents) subagents, are not checked"
+    ),
+    (
         "cursor",
         "skills",
     ): (
@@ -3219,7 +3227,9 @@ class AmbiguousClaudeAgentIdentityError(ValueError):
     """Raised when one Claude agent scope contains duplicate identities."""
 
 
-_CLAUDE_AGENT_NAME_PATTERN = re.compile(r"[a-z]+(?:-[a-z]+)*\Z")
+# Lowercase letters, digits and hyphens ("sf1r10-helper"): a digit used to
+# drop the agent from the BOM (GAP-2436).
+_CLAUDE_AGENT_NAME_PATTERN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
 _CLAUDE_AGENT_WALK_LIMIT = 32768
 _CLAUDE_AGENT_FRONTMATTER_LIMIT = 65536
 
@@ -4683,7 +4693,7 @@ def _build_aibom_from_filesystem(
         # a successful empty inventory, not an unsupported capability.
         if connector == "cursor" and cat_key == "agents":
             continue
-        if connector == "devin" and cat_key == "agents":
+        if connector in ("devin", "claudecode") and cat_key == "agents":
             continue
         result = results.get(cat_key)
         if connector_paths.normalize(connector) == "claudecode" and cat_key == "memory":

@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -231,7 +233,7 @@ func scanFindingV8Operation(
 			DefenseClawFindingCategory:            optionalScanV8Text(finding.Category),
 			DefenseClawSecuritySeverity:           string(finding.Severity),
 			DefenseClawFindingConfidence:          confidence,
-			DefenseClawFindingTargetRef:           scanV8TargetRef(result.Target),
+			DefenseClawFindingTargetRef:           scanV8ResultTargetRef(result),
 			DefenseClawGuardrailEvidenceSummary:   scanFindingV8EvidenceSummary(finding, result),
 			DefenseClawFindingTitle:               optionalScanV8Text(finding.Title),
 			DefenseClawFindingDescription:         optionalScanV8Text(finding.Description),
@@ -371,7 +373,7 @@ func scanSummaryV8Operation(
 			Envelope: envelope, Severity: severity, LogLevel: logLevel, Outcome: outcome,
 			DefenseClawEvaluationID: optionalScanV8Identifier(correlation.EvaluationID),
 			DefenseClawScanID:       scanID, DefenseClawScanScanner: result.Scanner,
-			DefenseClawScanTargetRef:     scanV8TargetRef(result.Target),
+			DefenseClawScanTargetRef:     scanV8ResultTargetRef(result),
 			DefenseClawScanTargetType:    optionalScanV8Text(scanner.NormalizeTargetTypeEnum(result.EffectiveTargetType())),
 			DefenseClawScanDurationMs:    observability.Present(result.Duration.Milliseconds()),
 			DefenseClawScanFindingCount:  observability.Present(int64(len(result.Findings))),
@@ -612,6 +614,49 @@ func scanV8TargetRef(target string) observability.Optional[string] {
 		name = name[:256]
 	}
 	return optionalScanV8Identifier(name)
+}
+
+// scanV8ResultTargetRef is scanV8TargetRef for a scan result. A plugin in a
+// category folder under a plugins root keeps the path below that root, so
+// Hermes's bundled browser/firecrawl and web/firecrawl stay distinct in audit
+// instead of both reading "firecrawl" (GAP-2440).
+func scanV8ResultTargetRef(result *scanner.ScanResult) observability.Optional[string] {
+	if scanner.NormalizeTargetTypeEnum(result.EffectiveTargetType()) == "plugin" {
+		parts := strings.FieldsFunc(strings.TrimSpace(result.Target), func(r rune) bool {
+			return r == '/' || r == '\\'
+		})
+		for i := len(parts) - 3; i >= 0; i-- {
+			if strings.EqualFold(parts[i], "plugins") {
+				rel := parts[i+1:]
+				if len(rel) == 2 && hermesBundledPlatforms(result.Target, parts, i) {
+					rel = rel[1:]
+				}
+				if ref := optionalScanV8Identifier(strings.Join(rel, "/")); ref.IsPresent() {
+					return ref
+				}
+				break
+			}
+		}
+	}
+	return scanV8TargetRef(result.Target)
+}
+
+// hermesBundledPlatforms reports whether target is a plugin in Hermes's
+// bundled platforms folder (hermes-agent/plugins/platforms/<x>, or the
+// HERMES_BUNDLED_PLUGINS root). Hermes lists those by the bare folder name
+// ("discord"), so the audit target does too, while user-root and other
+// category plugins keep category/name (GAP-2453; the watcher names them the
+// same way, GAP-2439).
+func hermesBundledPlatforms(target string, parts []string, pluginsIdx int) bool {
+	if !strings.EqualFold(parts[pluginsIdx+1], "platforms") {
+		return false
+	}
+	if pluginsIdx > 0 && parts[pluginsIdx-1] == "hermes-agent" {
+		return true
+	}
+	bundled := strings.TrimSpace(os.Getenv("HERMES_BUNDLED_PLUGINS"))
+	return bundled != "" &&
+		filepath.Clean(bundled) == filepath.Dir(filepath.Dir(filepath.Clean(strings.TrimSpace(target))))
 }
 
 // scanV8Verdict keeps an explicit admission verdict. Without one (CLI and
