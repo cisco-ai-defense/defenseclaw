@@ -46,6 +46,8 @@ async def test_detail_modal_scrolls_and_keeps_close_on_screen_at_80x24() -> None
         assert scroll.max_scroll_y > 0
         assert app.screen.query_one("#detail-close").region.bottom <= 24
         await pilot.press("end")
+        # The scroll is animated; a slow runner was still mid-way after one pause.
+        await pilot.wait_for_scheduled_animations()
         await pilot.pause()
         assert scroll.scroll_y == scroll.max_scroll_y
 
