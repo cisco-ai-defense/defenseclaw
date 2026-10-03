@@ -45,6 +45,20 @@ func (s *ContinuousDiscoveryService) homeOwnerForPath(path string) (discoveryHom
 	return best, best.Home != ""
 }
 
+// homeOwnerForSID returns the profile owner whose account is sid.
+func (s *ContinuousDiscoveryService) homeOwnerForSID(sid string) (discoveryHomeOwner, bool) {
+	sid = strings.TrimSpace(sid)
+	if s == nil || sid == "" {
+		return discoveryHomeOwner{}, false
+	}
+	for _, owner := range s.opts.homeOwners {
+		if owner.Home != "" && strings.EqualFold(strings.TrimSpace(owner.UserID), sid) {
+			return owner, true
+		}
+	}
+	return discoveryHomeOwner{}, false
+}
+
 // stampHomeOwner attributes sig to the account whose profile holds path.
 func (s *ContinuousDiscoveryService) stampHomeOwner(sig *AISignal, path string) {
 	if sig == nil || sig.UserID != "" {
@@ -59,6 +73,8 @@ func (s *ContinuousDiscoveryService) stampHomeOwner(sig *AISignal, path string) 
 // its executable. The service cannot open other accounts' processes, so the
 // token owner is unknown, but the image path is not: per-user agents run
 // from the user's profile (~\.local\bin\claude.exe, ~\.codex\...\codex.exe).
+// An agent installed machine-wide (VS Code's copilot-runtime.exe under
+// Program Files) takes the profile owner of its session account (GAP-2043).
 // A node process outside every profile takes the owner of the nearest
 // attributed ancestor, the agent that launched it.
 func (s *ContinuousDiscoveryService) attributeProcessOwners(procs []processInfo) {
@@ -68,7 +84,11 @@ func (s *ContinuousDiscoveryService) attributeProcessOwners(procs []processInfo)
 	byPID := make(map[int]int, len(procs))
 	for i := range procs {
 		byPID[procs[i].PID] = i
-		if owner, ok := s.homeOwnerForPath(procs[i].Image); ok {
+		owner, ok := s.homeOwnerForPath(procs[i].Image)
+		if !ok {
+			owner, ok = s.homeOwnerForSID(procs[i].SessionOwnerID)
+		}
+		if ok {
 			procs[i].OwnerID, procs[i].OwnerName = owner.UserID, owner.UserName
 		}
 	}

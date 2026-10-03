@@ -101,10 +101,12 @@ func TestServiceContextScanAttributesSignalsToProfileOwner(t *testing.T) {
 		{PID: 10, PPID: 1, Comm: "codex.exe", Image: strings.ToUpper(filepath.Join(alice, ".codex", "bin", "codex.exe")), Windows: true},
 		{PID: 11, PPID: 10, Comm: "node.exe", Image: filepath.Join(root, "Program Files", "nodejs", "node.exe"), Windows: true},
 		{PID: 20, PPID: 1, Comm: "claude.exe", Image: filepath.Join(bob, ".local", "bin", "claude.exe"), Windows: true},
-		{PID: 30, PPID: 1, Comm: "pwsh.exe", Image: filepath.Join(root, "Program Files", "PowerShell", "pwsh.exe"), Windows: true},
+		{PID: 30, PPID: 1, Comm: "pwsh.exe", Image: filepath.Join(root, "Program Files", "PowerShell", "pwsh.exe"), Windows: true, SessionOwnerID: "S-1-5-21-1-2-3-500"},
+		// A machine-wide install is owned by its session account (GAP-2043).
+		{PID: 40, PPID: 1, Comm: "copilot-runtime.exe", Image: filepath.Join(root, "Program Files", "Microsoft VS Code", "copilot-runtime.exe"), Windows: true, SessionOwnerID: "s-1-5-21-1-2-3-1002"},
 	}
 	s.attributeProcessOwners(procs)
-	for i, wantOwner := range []string{"alice", "alice", "bob", ""} {
+	for i, wantOwner := range []string{"alice", "alice", "bob", "", "bob"} {
 		if procs[i].OwnerName != wantOwner {
 			t.Fatalf("process %s owner = %q, want %q", procs[i].Comm, procs[i].OwnerName, wantOwner)
 		}

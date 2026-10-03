@@ -207,6 +207,22 @@ func enterpriseGatewayGet(path string, out any) (string, error) {
 	return host, nil
 }
 
+// writeManagedViewRefusalJSON gives a --json caller a "code: message"
+// refusal with its exit code (elevation_required) as JSON on stdout, in the
+// errors[] form `enterprise windows status --json` uses, so a script reads
+// the code instead of an empty document (GAP-2114).
+func writeManagedViewRefusalJSON(w io.Writer, err error) {
+	code, message, ok := strings.Cut(err.Error(), ": ")
+	if !ok || strings.ContainsAny(code, " \t") {
+		code, message = "error", err.Error()
+	}
+	_ = json.NewEncoder(w).Encode(struct {
+		OK       bool                       `json:"ok"`
+		Errors   []enterprisestatus.Message `json:"errors"`
+		ExitCode int                        `json:"exit_code"`
+	}{Errors: []enterprisestatus.Message{{Code: code, Message: message}}, ExitCode: commandExitCode(err)})
+}
+
 // enterpriseDiscoveryStatusHint is the status command for this platform.
 func enterpriseDiscoveryStatusHint() string {
 	switch runtime.GOOS {
@@ -246,6 +262,9 @@ func writeWindowsEnterpriseDiscovery(w io.Writer, user string, asJSON bool) erro
 		// the whole answer (GAP-2039).
 		var coded *exitCodeError
 		if errors.As(err, &coded) {
+			if asJSON {
+				writeManagedViewRefusalJSON(w, err)
+			}
 			return err
 		}
 		return fmt.Errorf("read the AI Discovery inventory: %w", err)
