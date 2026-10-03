@@ -953,6 +953,44 @@ class TestAdditiveSetupCommand(unittest.TestCase):
         self.assertEqual(gc.connector, "codex")
         self.assertEqual(self.app.cfg.claw.mode, "codex")
 
+    # GAP-2426: a GUARDED proxy connector is never replaced silently; the
+    # hook setup refuses with no changes and names --replace.
+    def test_hook_setup_over_guarded_openclaw_is_refused(self):
+        self._seed_single("openclaw")
+        self.app.cfg.guardrail.enabled = True
+        for args in (["codex", "--yes", "--no-restart"], ["claude-code", "--no-restart"]):
+            with _setup_patches() as restart:
+                result = CliRunner().invoke(setup_group, args, obj=self.app, input="y\ny\n")
+            self.assertNotEqual(result.exit_code, 0, msg=result.output)
+            self.assertIn("OpenClaw", result.output)
+            self.assertIn("No changes made", result.output)
+            self.assertIn(f"defenseclaw setup {args[0]} --replace", result.output)
+            restart.assert_not_called()
+            gc = self.app.cfg.guardrail
+            self.assertEqual(gc.connector, "openclaw")
+            self.assertEqual(self.app.cfg.claw.mode, "openclaw")
+            self.assertFalse(os.path.exists(self.cfg_path))
+
+    def test_hook_setup_replace_over_guarded_openclaw_confirms(self):
+        self._seed_single("openclaw")
+        self.app.cfg.guardrail.enabled = True
+        with _setup_patches():
+            result = CliRunner().invoke(
+                setup_group,
+                ["codex", "--replace", "--mode", "observe", "--no-restart"],
+                obj=self.app,
+                input="n\n",
+            )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("Replace OpenClaw with Codex?", result.output)
+        self.assertIn("Aborted", result.output)
+        self.assertEqual(self.app.cfg.guardrail.connector, "openclaw")
+        with _setup_patches():
+            result = _invoke(["codex", "--replace", "--yes", "--no-restart"], self.app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(self.app.cfg.guardrail.connector, "codex")
+        self.assertEqual(self.app.cfg.claw.mode, "codex")
+
     # First connector on a clean config: replace shape, no map.
     def test_first_connector_uses_replace_shape(self):
         self.app.cfg.guardrail.connector = ""
