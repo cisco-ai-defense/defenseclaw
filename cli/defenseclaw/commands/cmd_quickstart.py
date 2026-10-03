@@ -326,6 +326,18 @@ def _refuse_roster_narrowing(cfg_mod, connector: str, mode: str | None = None) -
         return
     slug = "claude-code" if wanted == "claudecode" else wanted
     mode_flag = f" --mode {mode}" if mode else ""
+    proxies = [c for c in configured if c in {"openclaw", "zeptoclaw"}]
+    if proxies and wanted not in {"openclaw", "zeptoclaw"}:
+        # GAP-2452: a hook connector would remove the guarded proxy
+        # connector's plugin and leave it unguarded (as 'setup <c>', GAP-2426).
+        click.echo(
+            f"  \u2717 This install already guards: {', '.join(configured)}.\n"
+            f"    {proxies[0]} is proxy-backed and cannot run next to hook connectors, so quickstart\n"
+            f"    would remove its DefenseClaw plugin and leave it unguarded. No changes made.\n"
+            f"    Switch this install to {wanted}: defenseclaw setup {slug} --replace{mode_flag}",
+            err=True,
+        )
+        sys.exit(2)
     if wanted in {"openclaw", "zeptoclaw"}:
         # Proxy-backed connectors cannot run next to hook connectors, so
         # "keep the rest" is refused (GAP-1407); --replace switches (GAP-1455).
@@ -365,4 +377,9 @@ def _configured_quickstart_connectors(cfg_mod) -> list[str]:
         active = cfg.active_connector()
     except Exception:
         return []
-    return [] if active == "openclaw" else [active]
+    if active == "openclaw" and not (
+        getattr(cfg.guardrail, "enabled", False) and (cfg.guardrail.connector or "").strip()
+    ):
+        # The implicit "openclaw" default, not a guarded OpenClaw (GAP-2452).
+        return []
+    return [active]

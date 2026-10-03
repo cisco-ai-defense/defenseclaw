@@ -6414,6 +6414,11 @@ def setup_guardrail(
     if explicit_connector:
         _ensure_connector_available(explicit_connector)
         _refuse_proxy_next_to_hook_connectors(gc, explicit_connector)
+        # GAP-2452: the same rule as 'setup <connector>' (GAP-2426): a hook
+        # connector here would replace a guarded OpenClaw/ZeptoClaw.
+        proxy_active = _guarded_proxy_connector(gc)
+        if proxy_active and explicit_connector not in _PROXY_BACKED_CONNECTORS:
+            _refuse_hook_setup_over_proxy_connector(explicit_connector, proxy_active)
 
     try:
         setup_snapshot = _capture_setup_config_snapshot(app.cfg, capture_runtime=_windows_runtime_rollback(restart))
