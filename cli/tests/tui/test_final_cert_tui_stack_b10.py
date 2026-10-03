@@ -38,10 +38,13 @@ def test_windows_160_columns_names_tabs_and_keeps_counts(monkeypatch) -> None:
         assert len(_bare(labels)) <= 2, (active, labels)
         assert active == "alerts" or "(229)" in labels["alerts"]
         assert active == "logs" or "(69)" in labels["logs"], (active, labels)
-        # A wider strip never names fewer tabs (GAP-2150).
+        # A wider strip never names fewer tabs (GAP-2150). Tabs that are bare
+        # only while a longer name is open (GAP-2491) don't count: from 160
+        # columns the Audit count takes those cells (GAP-2500).
         previous = len(PANELS)
         for width in range(tab_fit.NARROW_STRIP + 1, 200):
-            bare = len(_bare(fit_tab_labels(PANELS, active, counts, width)))
+            stable = set(_bare(fit_tab_labels(PANELS, "overview", {**unread, "overview": 0}, width)))
+            bare = len(stable & set(_bare(fit_tab_labels(PANELS, active, counts, width))))
             assert bare <= previous, (active, width)
             previous = bare
 
