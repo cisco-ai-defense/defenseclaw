@@ -5,6 +5,9 @@ package cli
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -67,5 +70,33 @@ func TestUsageMessageNamesTheInvokedPath(t *testing.T) {
 	t.Setenv(delegatedFromEnv, "defenseclaw")
 	if got := usageMessage(set, errors.New("bad flag")); !strings.Contains(got, "Try 'defenseclaw set --help'") {
 		t.Errorf("delegated usage message = %q, want the defenseclaw command", got)
+	}
+}
+
+// GAP-2232: run by a relative path (./defenseclaw-gateway from
+// /opt/defenseclaw/bin), the hint names the absolute path, which runs from
+// any directory; a bare name found on PATH stays bare.
+func TestInvokedGatewayPathResolvesARelativeInvocation(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows keeps its own hints (GAP-1183)")
+	}
+	previous := os.Args
+	t.Cleanup(func() { os.Args = previous })
+	t.Chdir(t.TempDir())
+	want, err := filepath.Abs("defenseclaw-gateway")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string]string{
+		"./defenseclaw-gateway":                    want,
+		"defenseclaw-gateway":                      "",
+		"/opt/defenseclaw/bin/defenseclaw-gateway": "/opt/defenseclaw/bin/defenseclaw-gateway",
+		"./other-binary":                           "",
+	}
+	for arg0, expect := range cases {
+		os.Args = []string{arg0}
+		if got := invokedGatewayPath("defenseclaw-gateway"); got != expect {
+			t.Errorf("os.Args[0] = %q: invoked path %q, want %q", arg0, got, expect)
+		}
 	}
 }
