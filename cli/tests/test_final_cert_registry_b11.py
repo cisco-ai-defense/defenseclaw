@@ -70,3 +70,18 @@ def test_gateway_not_running_warning_has_one_wording(registry_app) -> None:
     assert echo.call_args.args[0] == (
         "  ⚠ The gateway isn't running, so this scan result was not recorded " + HINT
     )
+
+
+@pytest.mark.parametrize(
+    ("asset", "phrase"),
+    [("mcp", "an MCP server that is not in the registry"), ("skill", "a skill that is not in the registry")],
+)
+@pytest.mark.parametrize("enabled", [False, True])
+def test_require_warning_names_the_asset_in_product_wording(registry_app, asset, phrase, enabled) -> None:
+    # GAP-2377: the observe/off warning said "a mcp that is not in the registry".
+    registry_app.cfg.asset_policy.enabled = enabled
+    registry_app.cfg.asset_policy.mode = "observe"
+    result = _run(registry_app, "require", "--type", asset, "--enabled")
+    assert result.exit_code == 0, result.output
+    assert phrase in " ".join(result.output.split())
+    assert "a mcp" not in result.output and "every mcp" not in result.output
