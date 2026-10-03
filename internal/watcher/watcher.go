@@ -1097,6 +1097,13 @@ func (w *InstallWatcher) quarantineAssetWith(ctx context.Context, evt InstallEve
 		w.emitQuarantineFailure(ctx, evt.Path, err)
 		return
 	}
+	if category, _, nested := strings.Cut(evt.Name, "/"); nested && evt.Type == InstallPlugin {
+		// A plugin in a category folder keeps its category in quarantine
+		// (plugins/<connector>/<category>/<name>), so "plugin restore
+		// <category>/<name>" finds it and web/x and memx/x don't share one
+		// slot (GAP-2464).
+		plan.QuarantinePath = filepath.Join(filepath.Dir(plan.QuarantinePath), filepath.Base(category), physicalName)
+	}
 	record, err := w.store.CreateQuarantineRecord(ctx, audit.CreateQuarantineRecordInput{
 		TargetType: evt.Type.String(), TargetName: evt.Name,
 		OriginalPath: plan.SourcePath, QuarantinePath: plan.QuarantinePath,
