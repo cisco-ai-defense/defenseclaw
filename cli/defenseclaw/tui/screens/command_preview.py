@@ -21,7 +21,12 @@ from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Static
 
-from defenseclaw.tui.command_line import ParsedCommand, display_argv, infer_command_risk
+from defenseclaw.tui.command_line import (
+    ParsedCommand,
+    display_argv,
+    env_name_value_in_clear,
+    infer_command_risk,
+)
 from defenseclaw.tui.markup_safe import escape as rich_escape
 from defenseclaw.tui.theme import DEFAULT_TOKENS
 
@@ -144,7 +149,7 @@ def mask_argv(argv: tuple[str, ...]) -> tuple[str, ...]:
     masked: list[str] = []
     mask_next = False
     mask_next_env = False
-    for arg in argv:
+    for index, arg in enumerate(argv):
         if mask_next:
             masked.append("<redacted>")
             mask_next = False
@@ -160,14 +165,16 @@ def mask_argv(argv: tuple[str, ...]) -> tuple[str, ...]:
                 masked.append(f"{flag}={_redact_env_pair(value)}")
                 continue
             if _flag_is_secret(flag):
-                masked.append(f"{flag}=<redacted>")
+                # ``--api-key-env=NAME`` shows the name (GAP-2540).
+                masked.append(arg if env_name_value_in_clear(flag, value) else f"{flag}=<redacted>")
                 continue
 
         masked.append(arg)
         if _flag_is_env(arg):
             mask_next_env = True
         elif arg.startswith("--") and _flag_is_secret(arg):
-            mask_next = True
+            following = argv[index + 1] if index + 1 < len(argv) else ""
+            mask_next = not env_name_value_in_clear(arg, following)
     return tuple(masked)
 
 
