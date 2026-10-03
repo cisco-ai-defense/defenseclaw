@@ -470,16 +470,48 @@ def _hook_details_for(store, alert_list: list) -> dict[str, list[str]]:
     return result if isinstance(result, dict) else {}
 
 
+def _connector_needle(connector: str | None) -> str:
+    """The --connector value as a stored connector name: ``claude-code`` (the
+    name 'defenseclaw setup claude-code' takes) matches ``claudecode`` (GAP-2130)."""
+    from defenseclaw.connector_contracts import normalize_connector
+
+    return normalize_connector(connector)
+
+
 def _filter_by_connector(alert_list: list, connector: str | None) -> list:
     """Keep only alerts whose connector matches ``connector`` (substring,
     case-insensitive — same match rule as the TUI ``connector:`` token).
 
     An empty/None ``connector`` is a no-op so single-connector and unfiltered
     invocations behave exactly as before."""
-    needle = (connector or "").strip().lower()
+    needle = _connector_needle(connector)
     if not needle:
         return alert_list
     return [e for e in alert_list if needle in _event_connector(e)]
+
+
+def _exit_if_unknown_connector(app: AppContext, needle: str, pool: list) -> None:
+    """Exit 1 when ``needle`` names no connector, listing the active ones, so a
+    typo does not read as a clean "no alerts" (GAP-2130)."""
+    from defenseclaw.connector_contracts import HOOK_CONTRACTS, PROXY_CONNECTORS, normalize_connector
+
+    active: list[str] = []
+    try:
+        active = sorted({normalize_connector(n) for n in app.cfg.active_connectors() if n})
+    except Exception:  # noqa: BLE001 - an old or missing config only drops the list
+        active = []
+    seen = {c for c in (_event_connector(e) for e in pool) if c}
+    known = set(HOOK_CONTRACTS) | set(PROXY_CONNECTORS) | set(active) | seen
+    if any(needle in name for name in known):
+        return
+    ux.err(f"No connector matches {needle!r}.")
+    if active:
+        ux.subhead("Active connectors: " + ", ".join(active), indent="    ")
+    elif seen:
+        ux.subhead("Connectors with alerts: " + ", ".join(sorted(seen)), indent="    ")
+    else:
+        ux.subhead("No connector is configured; run 'defenseclaw setup <connector>'.", indent="    ")
+    raise SystemExit(1)
 
 
 def _render_table(alert_list: list, store, connector: str | None = None) -> None:
@@ -570,8 +602,9 @@ def _render_table(alert_list: list, store, connector: str | None = None) -> None
     "connector",
     default=None,
     help=(
-        "Only show alerts from this connector (for example codex, claudecode, "
-        "antigravity); the same match as the TUI's connector: search."
+        "Only show alerts from this connector (for example codex, claudecode or "
+        "claude-code, antigravity); the same match as the TUI's connector: search. "
+        "A name that matches no connector exits 1 and lists the active connectors."
     ),
 )
 @click.option(
@@ -655,9 +688,12 @@ def _alerts_json(app: AppContext, limit: int, connector: str | None) -> None:
 
     if not app.store:
         raise click.ClickException("No audit store available. Run 'defenseclaw init' first.")
-    needle = (connector or "").strip()
+    needle = _connector_needle(connector)
     if needle:
-        alert_list = _filter_by_connector(app.store.list_alerts(max(limit, _CONNECTOR_SCAN_POOL)), needle)[:limit]
+        pool = app.store.list_alerts(max(limit, _CONNECTOR_SCAN_POOL))
+        alert_list = _filter_by_connector(pool, needle)[:limit]
+        if not alert_list:
+            _exit_if_unknown_connector(app, needle, pool)
     else:
         alert_list = app.store.list_alerts(limit)
     hook_details = _hook_details_for(app.store, alert_list)
@@ -717,11 +753,13 @@ def _alerts_default(
     if notice:
         ux.warn(notice[0].upper() + notice[1:])
 
-    needle = (connector or "").strip()
+    needle = _connector_needle(connector)
     if needle:
         # Scan a wider window, then keep up to --limit matching the connector.
         pool = app.store.list_alerts(max(limit, _CONNECTOR_SCAN_POOL))
         alert_list = _filter_by_connector(pool, needle)[:limit]
+        if not alert_list:
+            _exit_if_unknown_connector(app, needle, pool)
     else:
         alert_list = app.store.list_alerts(limit)
 
@@ -948,7 +986,7 @@ def _alert_selector(
         return {"ids": ids}
     selector: dict[str, object] = {}
     if connector and connector.strip():
-        selector["connector"] = connector.strip()
+        selector["connector"] = _connector_needle(connector)
     if target and target.strip():
         selector["target"] = target.strip()
     if severity != "all":
