@@ -165,6 +165,7 @@ from defenseclaw.tui.services.overview_state import (
     ConnectorOverviewRow,
     HealthSnapshot,
     SubsystemHealth,
+    format_duration,
 )
 from defenseclaw.tui.services.read_repository import (
     TUIReadRepository,
@@ -8835,9 +8836,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         uptime_suffix = ""
         # The last /health payload is kept while the gateway is down, so its
         # uptime would read "uptime=91s" frozen beside "gateway not running"
-        # (GAP-2302).
+        # (GAP-2302). It reads "up 7m" like the SERVICES Gateway row and the
+        # status bar, not "uptime=445s" (GAP-2360).
         if health is not None and health.uptime_ms and not self.overview_model.gateway_down():
-            uptime_suffix = f"  uptime={health.uptime_ms // 1000}s"
+            uptime_suffix = f"  up {format_duration(timedelta(milliseconds=health.uptime_ms))}"
         tagline = Text(
             f"  Enterprise AI Governance  v{__version__}{uptime_suffix}",
             style=f"italic {TOKENS.text_secondary}",
@@ -10122,7 +10124,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
 
         uptime = ""
         if health is not None and health.uptime_ms and not self.overview_model.gateway_down():
-            uptime = f"  uptime={health.uptime_ms // 1000}s"
+            uptime = f"  up {format_duration(timedelta(milliseconds=health.uptime_ms))}"
         keys = self.overview_model.keys_status()
         if keys.available:
             keys_line = keys.label or "all required set"
@@ -12090,17 +12092,18 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                     (len(field.label) for field in section.fields if not field.label.startswith("..")), default=34
                 )
                 header_room = max(20, min(34, fields_width))
-                labels = [
-                    _truncate_ellipsis(field.label, header_room if field.label.startswith("..") else 34)
-                    for field in section.fields
-                ]
+                # A long group header continues in its empty Value cell
+                # (".. Unified LLM" + "(shared by scanners + guardrail) ..")
+                # instead of ".. Unified LLM (sha…" (GAP-2362).
+                cells = [_config_label_cells(field, header_room, 34) for field in section.fields]
+                labels = [label for label, _value in cells]
                 checks = [_truncate_ellipsis(_validation_label(field), 30) for field in section.fields]
                 value_room = self._setup_config_value_room(labels, checks)
                 return (
                     ("Field", "Value", "Validation"),
                     tuple(
-                        (label, _truncate_ellipsis(_config_display_value(field), value_room), check)
-                        for label, check, field in zip(labels, checks, section.fields, strict=True)
+                        (label, _truncate_ellipsis(value, value_room), check)
+                        for (label, value), check in zip(cells, checks, strict=True)
                     ),
                 )
             # Long group headers (".. PLUGIN ACTIONS (severity -> …) ..") would
@@ -12115,23 +12118,25 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                     ("Field", "Value", "Validation"),
                     tuple(
                         (
-                            _truncate_ellipsis(field.label, 30),
-                            _truncate_ellipsis(_config_display_value(field), value_room),
+                            label,
+                            _truncate_ellipsis(value, value_room),
                             _truncate_ellipsis(_validation_label(field), 12),
                         )
                         for field in section.fields
+                        for label, value in (_config_label_cells(field, 30, 30),)
                     ),
                 )
             return (
                 ("Field", "Value", "Validation", "Hint"),
                 tuple(
                     (
-                        _truncate_ellipsis(field.label, 34),
-                        _config_display_value(field),
+                        label,
+                        value,
                         _validation_label(field),
                         field.hint,
                     )
                     for field in section.fields
+                    for label, value in (_config_label_cells(field, 34, 34),)
                 ),
             )
         # Task list: the selected group's tasks (the nav or the body switcher
@@ -15780,6 +15785,9 @@ def _overview_config(config: object | None) -> OverviewConfig | None:
         connector_modes=connector_modes,
         connector_packs=connector_packs,
         connector_disabled=connector_disabled,
+        # A sandbox that is not set up reads "disabled" with the gateway
+        # down too, not "offline" (GAP-2361). Identity check, as status.
+        sandbox_enabled=getattr(getattr(config, "openshell", None), "enabled", False) is True,
         # A2: visible diagnostic when the roster enumeration failed.
         roster_error=roster_error,
         # N3: active-policy scanner action overrides (data.json), so the
@@ -16648,6 +16656,26 @@ def _config_display_value(field: Any) -> str:
     # column ("/Users/dcm-fc3/.d…" at 160 columns, GAP-2253); the side
     # pane and the edit box keep the full path.
     return _home_short(value)
+
+
+def _config_label_cells(field: Any, header_room: int, label_room: int) -> tuple[str, str]:
+    """The config editor's Field and Value cells for one row.
+
+    A group header (".. Unified LLM (shared by scanners + guardrail) ..") has
+    no value, so the words that do not fit the Field column move to the Value
+    cell at a word boundary instead of ending in "…" (GAP-2362).
+    """
+
+    label = str(getattr(field, "label", "") or "")
+    is_group = getattr(field, "kind", "") == "header" and label.startswith("..")
+    if not is_group or str(getattr(field, "value", "") or ""):
+        return _truncate_ellipsis(label, label_room), _config_display_value(field)
+    if len(label) <= header_room:
+        return label, ""
+    cut = label.rfind(" ", 0, header_room + 1)
+    if cut <= 2:
+        return _truncate_ellipsis(label, header_room), ""
+    return label[:cut], label[cut + 1 :]
 
 
 def _validation_label(field: Any) -> str:
