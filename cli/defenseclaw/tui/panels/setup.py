@@ -904,7 +904,11 @@ class SetupPanelModel:
 
     def credential_action(self, action: str) -> SetupPanelAction:
         if action == "s":
-            self.open_wizard_form(SetupWizard.CREDENTIALS)
+            # Open the "set" goal: the header named the whole wizard ("See
+            # which API keys are missing and set them.") and Action still
+            # cycled through list/check/remove (GAP-2256).
+            goal = next((g for g in wizard_goals(SetupWizard.CREDENTIALS, self.config) if g.id == "set"), None)
+            self.open_wizard_form(SetupWizard.CREDENTIALS, goal=goal)
             for index, field in enumerate(self.form_fields):
                 if field.label == "Action":
                     self.form_fields[index] = field.with_value("set")
@@ -1302,6 +1306,11 @@ class SetupPanelModel:
             base = list(_narrow_goal_connectors(base, self.active_goal, self.config))
             if self.active_wizard == SetupWizard.CREDENTIALS and self.active_goal.id == "remove":
                 base = [_stored_key_picker(field, self.config) if field.label == "Env Name" else field for field in base]
+            if self.active_wizard == SetupWizard.CREDENTIALS and self.active_goal.id == "set":
+                base = [
+                    replace(field, hint=_SECRET_VALUE_SET_HINT) if field.label == "Secret Value" else field
+                    for field in base
+                ]
         self.form_fields = base
         self.form_active = True
         self.goal_active = False
@@ -1815,12 +1824,13 @@ def build_setup_sections(
                     "claw.mode",
                     "choice",
                     supported_connector_choices(os_name),
-                    "Active agent framework.",
+                    "Legacy single-agent setting; set up each connector in Setup tasks instead.",
                 ),
-                _field(cfg, "Home Dir", "claw.home_dir", hint="Override for connector home directory."),
-                _field(cfg, "Config File", "claw.config_file", hint="Connector primary config file."),
+                _field(cfg, "Home Dir", "claw.home_dir", hint="Legacy: home directory for the Mode agent."),
+                _field(cfg, "Config File", "claw.config_file", hint="Legacy: main config file for the Mode agent."),
             ),
-            "Which agent framework DefenseClaw defends.",
+            "Legacy single-agent setting (claw.mode). Connectors are set up one by one in "
+            "Setup tasks; these fields matter only to installs that still use one agent.",
         ),
         ConfigSection(
             "Agent Hooks",
@@ -1921,7 +1931,7 @@ def build_setup_sections(
     return tuple(_lock_unmodeled_fields(section) for section in sections)
 
 
-UNMODELED_CONFIG_HINT = "Edit this in config.yaml"
+UNMODELED_CONFIG_HINT = "Read-only here; edit this in config.yaml"
 READ_ONLY_VALUE = "read-only"
 
 
@@ -1943,8 +1953,13 @@ def _lock_unmodeled_fields(section: ConfigSection) -> ConfigSection:
     return ConfigSection(section.name, fields, section.summary, section.help)
 
 
+# An unset read-only field: the Value read "read-only" as if that were the
+# value (GAP-2253); the Validation/Hint columns say it is read-only.
+UNSET_VALUE = "(unset)"
+
+
 def _read_only_row(field: ConfigField, hint: str) -> ConfigField:
-    shown = field.value or READ_ONLY_VALUE
+    shown = field.value or UNSET_VALUE
     return ConfigField(label=field.label, key=field.key, kind="header", value=shown, original=shown, hint=hint)
 
 
@@ -2032,6 +2047,9 @@ def _stored_key_picker(field: WizardFormField, cfg: object | Mapping[str, Any] |
     )
 
 
+_SECRET_VALUE_SET_HINT = "Paste the key; it is sent on stdin and never shown."
+
+
 def _credentials_wizard_fields() -> tuple[WizardFormField, ...]:
     return (
         WizardFormField(
@@ -2040,10 +2058,11 @@ def _credentials_wizard_fields() -> tuple[WizardFormField, ...]:
             value="list",
             default="list",
             options=("list", "check", "fill-missing", "set", "remove"),
-            hint="list shows the keys list table; set writes to env-backed storage; remove deletes one entry.",
+            hint="list/check show which keys are set; fill-missing asks for unset ones; "
+            "set stores one key; remove deletes one.",
         ),
-        WizardFormField("Env Name", "string", hint="Credential environment variable name."),
-        WizardFormField("Secret Value", "password", hint="Only used by Action=set."),
+        WizardFormField("Env Name", "string", hint="The key's environment variable name, e.g. OPENAI_API_KEY."),
+        WizardFormField("Secret Value", "password", hint="For Action set: " + _SECRET_VALUE_SET_HINT),
     )
 
 
@@ -3331,8 +3350,8 @@ def _credentials_goals(cfg: object | Mapping[str, Any] | None) -> tuple[WizardGo
         ),
         WizardGoal(
             "set",
-            "Set a credential value",
-            summary="Write a single env-backed credential.",
+            "Set one API key",
+            summary="Store one key in ~/.defenseclaw/.env; it is sent on stdin and never shown.",
             presets={"@Action": "set"},
             fields=("Action", "Env Name", "Secret Value"),
         ),

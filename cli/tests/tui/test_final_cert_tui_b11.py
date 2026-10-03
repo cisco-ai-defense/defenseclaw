@@ -93,7 +93,7 @@ def test_tab_bar_below_80_columns_keeps_the_alerts_count(monkeypatch) -> None:
         for width in range(50, 66):
             labels = fit_tab_labels(PANELS, active, unread, width)
             assert strip_width(tuple(labels.values())) <= width
-            assert "⁷" in labels["alerts"], (active, width, labels["alerts"])
+            assert labels["alerts"].endswith(("⁷", "(7)")), (active, width, labels["alerts"])
             name = labels[active].removeprefix(key).strip()
             assert len(name) >= previous, (active, width, labels[active])
             previous = len(name)

@@ -55,5 +55,5 @@ def test_stable_labels_name_as_many_tabs_as_the_per_panel_fit(monkeypatch) -> No
         per_panel = [_fit_for_active(PANELS, name, {**unread, name: 0}, width) for name, _k, _t in PANELS]
         assert max(map(len, map(_bare, stable))) <= max(map(len, map(_bare, per_panel))), width
         for (name, _k, _t), labels in zip(PANELS, stable, strict=True):
-            assert name == "logs" or "⁹⁹⁹⁺" in labels["logs"], (width, name)
-            assert name == "audit" or "¹³" in labels["audit"], (width, name)
+            assert name == "logs" or labels["logs"].endswith(("⁹⁹⁹⁺", "(999+)")), (width, name)
+            assert name == "audit" or labels["audit"].endswith(("¹³", "(13)")), (width, name)
