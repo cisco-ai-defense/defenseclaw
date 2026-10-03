@@ -9,6 +9,12 @@ keywords:
   - defenseclaw make all
 ---
 
+<Callout title="Just want the command?">
+[Download](/docs/get-started/download) has the one-line install for your OS,
+the macOS app and the enterprise packages. This page covers the installer's
+options and exit codes, source builds and what the install creates.
+</Callout>
+
 ## Install
 
 macOS and Linux:
@@ -23,8 +29,8 @@ Windows (PowerShell):
 irm https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.ps1 | iex
 ```
 
-When it finishes, run [`defenseclaw init`](/docs/get-started/quickstart) to
-configure DefenseClaw. To pick an agent during the install, pass options: on
+When it finishes, run `defenseclaw init` to configure DefenseClaw (see the
+[quickstart](/docs/get-started/quickstart)). To pick an agent during the install, pass options: on
 macOS/Linux, end the command above with `bash -s -- --connector codex --quickstart`
 instead of `bash`; on Windows, run
 
@@ -50,6 +56,7 @@ which runs the latest release's installer for you.
 | `--rollback` / `-Rollback` | Restore the install that the last upgrade replaced |
 | `--connector NAME` / `-Connector NAME` | First install only: the agent to guard |
 | `--quickstart` / `-Quickstart` | Run `defenseclaw quickstart` afterwards when nothing is configured yet (a first install, or an install that was never set up) |
+| `--quickstart-mode MODE` / `-QuickstartMode MODE` | `observe` or `action` for that quickstart (implies `--quickstart`) |
 
 The installers exit with one of these codes (`install.ps1` when run as a file;
 `irm | iex` reports a failure as an error instead):
@@ -305,7 +312,7 @@ launchers from `~/.local/bin`. `--dry-run` previews the plan.
 
 <Cards>
   <Card title="Native Windows" href="/docs/get-started/windows" description="Native hook connectors, verification, and troubleshooting on Windows." />
-  <Card title="Quickstart" href="/docs/get-started/quickstart" description="Zero-prompt setup that gets you a guardrail in two minutes." />
+  <Card title="Quickstart" href="/docs/get-started/quickstart" description="Run init and see your first block in 5 minutes." />
   <Card title="Upgrade" href="/docs/get-started/upgrade" description="One command, automatic migrations, and rollback." />
   <Card title="Setup Guardrail" href="/docs/setup/guardrail" description="The full configuration surface for the central command." />
 </Cards>
