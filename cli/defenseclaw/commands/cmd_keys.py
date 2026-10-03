@@ -477,7 +477,9 @@ def _format_row(s: CredentialStatus, show_values: bool) -> list[str]:
         else:
             last_col = "n/a"
 
-    return [glyph, env_name, feature, requirement, source, last_col]
+    # Downgrade before the widths are measured, so redirected rows match the
+    # ASCII legend and stay aligned (GAP-2597).
+    return [ux.console_text(cell) for cell in (glyph, env_name, feature, requirement, source, last_col)]
 
 
 def _render_legend() -> None:

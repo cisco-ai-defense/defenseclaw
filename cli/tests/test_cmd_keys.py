@@ -102,6 +102,17 @@ class KeysListTests(unittest.TestCase):
             self.assertNotEqual(row[col], " ")
             self.assertEqual(row[col - 1], " ")
 
+    def test_redirected_list_rows_use_the_ascii_legend_glyphs(self):
+        # GAP-2597: rows kept U+25CB/U+00B7 while the legend was ASCII.
+        from defenseclaw import ux
+
+        with tempfile.TemporaryDirectory() as tmp, patch.object(ux, "_configured_unicode_output", False):
+            app = _make_app_context(tmp)
+            result = CliRunner().invoke(keys_cmd, ["list"], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertTrue(result.output.isascii(), msg=result.output)
+        self.assertRegex(result.output, r"(?m)^  [o*-]  [A-Z0-9_]+ ")
+
     def test_list_missing_only_filters_to_required_unset(self):
         with tempfile.TemporaryDirectory() as tmp:
             # Guardrail on + scanner_mode=remote → CISCO key becomes REQUIRED.
