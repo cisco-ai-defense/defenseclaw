@@ -11426,13 +11426,17 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             scroller = self.query_one("#body-scroll", VerticalScroll)
         except NoMatches:
             return False
+        # Step 6 rows on a tall dashboard, but never more than the viewport
+        # minus one overlap row: at 80x24 only ~4 rows show, and a fixed
+        # 6-row step skipped rows that could then never be seen (GAP-2270).
+        step = max(1, min(6, scroller.scrollable_content_region.height - 1))
         if key in scroll_line_keys:
             self._mark_overview_scroll_activity()
-            scroller.scroll_relative(y=6, animate=False, immediate=True)
+            scroller.scroll_relative(y=step, animate=False, immediate=True)
             return True
         if key in scroll_up_keys:
             self._mark_overview_scroll_activity()
-            scroller.scroll_relative(y=-6, animate=False, immediate=True)
+            scroller.scroll_relative(y=-step, animate=False, immediate=True)
             return True
         if key in page_down_keys:
             self._mark_overview_scroll_activity()

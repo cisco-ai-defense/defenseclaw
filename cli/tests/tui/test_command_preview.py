@@ -54,3 +54,19 @@ def test_command_preview_upgrade_focuses_cancel_by_default() -> None:
         assert preview.cancel_by_default, verb
     assert build_command_preview(_parsed(("uninstall", "--all", "--yes"), category="other")).cancel_by_default
     assert not build_command_preview(_parsed(("setup", "codex", "--yes"))).cancel_by_default
+
+
+def test_command_preview_agent_discovery_toggle_restarts_gateway() -> None:
+    """GAP-2269: discovery enable/disable restart the gateway by default."""
+
+    for args in (
+        ("agent", "discovery", "disable", "--yes"),
+        ("agent", "discovery", "enable", "--yes"),
+        ("agent", "discovery", "runtime", "enable", "--yes"),
+    ):
+        preview = build_command_preview(_parsed(args, category="setup"))
+        assert preview.restart == "yes", args
+        assert "Runtime traffic may briefly pause" in preview.summary, args
+    no_restart = build_command_preview(_parsed(("agent", "discovery", "disable", "--no-restart", "--yes")))
+    assert no_restart.restart == "no"
+    assert build_command_preview(_parsed(("agent", "discovery", "status"), category="other")).restart == "no"
