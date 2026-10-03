@@ -1783,13 +1783,13 @@ def block(app: AppContext, target: str, reason: str, connector_flag: str) -> Non
         pe.block_for_connector(
             "mcp", target, connector, reason or "manually blocked via CLI",
         )
-        click.secho(f"Blocked: {target} (connector={connector})", fg="red")
+        click.secho(f"[mcp] Blocked {target!r} ({connector}).", fg="red")
     else:
         if pe.is_blocked("mcp", target):
             click.echo(f"Already blocked: {target}")
             return
         pe.block("mcp", target, reason or "manually blocked via CLI")
-        click.secho(f"Blocked: {target}", fg="red")
+        click.secho(f"[mcp] Blocked {target!r} (every connector).", fg="red")
 
     if app.logger:
         saved_change_audit(app.logger).log_action(

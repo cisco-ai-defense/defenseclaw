@@ -64,7 +64,7 @@ class TestMCPBlock(MCPCommandTestBase):
     def test_block_mcp(self):
         result = self.invoke(["block", "http://evil.example.com", "--reason", "unsafe"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("Blocked", result.output)
+        self.assertIn("[mcp] Blocked 'http://evil.example.com' (every connector).", result.output)
 
         pe = PolicyEngine(self.app.store)
         self.assertTrue(pe.is_blocked("mcp", "http://evil.example.com"))
@@ -153,7 +153,7 @@ class TestMCPConnectorScope(MCPCommandTestBase):
     def test_block_connector_scopes_to_peer(self):
         result = self.invoke(["block", "http://demo.example.com", "--connector", "codex"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("connector=codex", result.output)
+        self.assertIn("[mcp] Blocked 'http://demo.example.com' (codex).", result.output)
 
         pe = PolicyEngine(self.app.store)
         self.assertTrue(pe.is_blocked_for_connector("mcp", "http://demo.example.com", "codex"))
@@ -164,7 +164,7 @@ class TestMCPConnectorScope(MCPCommandTestBase):
     def test_block_connector_alias_writes_canonical_connector(self):
         result = self.invoke(["block", "jira", "--connector", "claude-code"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("connector=claudecode", result.output)
+        self.assertIn("[mcp] Blocked 'jira' (claudecode).", result.output)
         self.assertTrue(
             self.app.store.has_action("mcp", "jira", "install", "block", "claudecode")
         )
@@ -323,7 +323,7 @@ class TestMCPConnectorScope(MCPCommandTestBase):
 
         scoped_block = self.invoke(["block", "ctx7", "--connector", "codex"])
         self.assertEqual(scoped_block.exit_code, 0, scoped_block.output)
-        self.assertIn("connector=codex", scoped_block.output)
+        self.assertIn("[mcp] Blocked 'ctx7' (codex).", scoped_block.output)
         self.assertFalse(pe.is_blocked_for_connector("mcp", "ctx7", "hermes"))
 
         bare_allow = self.invoke(["allow", "ctx7"])

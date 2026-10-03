@@ -1485,15 +1485,21 @@ def install(app: AppContext, name_or_path: str, force: bool, take_action: bool, 
         installed_connectors = {_normalize_runtime_connector(c) for c, _root in targets}
         if "hermes" in installed_connectors:
             _echo_hermes_activation_note(plugin_name)
+        if "claudecode" in installed_connectors:
+            _echo_claudecode_install_note(source_path)
 
         from defenseclaw.commands import hint
 
         # Only the OpenClaw gateway loads plugins at start; hook connectors
-        # pick a plugin up in their own next session (GAP-1878).
-        hints = ["List plugins:      defenseclaw plugin list"]
+        # pick a plugin up in their own next session (GAP-1878). plugin list
+        # does not show a Claude Code copy, so don't point there (GAP-2084).
+        hints = []
+        if installed_connectors != {"claudecode"}:
+            hints.append("List plugins:      defenseclaw plugin list")
         if "openclaw" in installed_connectors:
             hints.append("Restart gateway:   defenseclaw-gateway restart")
-        hint(*hints)
+        if hints:
+            hint(*hints)
 
     finally:
         if tmpdir:
@@ -2777,6 +2783,26 @@ def _hermes_plugin_off_id(plugin_name: str) -> str:
     return ""
 
 
+def _echo_claudecode_install_note(source_path: str) -> None:
+    """Say that Claude Code will not load a copied plugin (GAP-2084).
+
+    Claude Code loads only plugins it installed from a marketplace (listed in
+    installed_plugins.json), so the copy in its plugin cache is scanned but
+    neither loaded nor shown by plugin list.
+    """
+    click.secho(
+        "  Claude Code loads only plugins installed from a marketplace, so it will not load "
+        "this copy and plugin list will not show it.",
+        fg="yellow",
+    )
+    if not os.path.isfile(os.path.join(source_path, ".claude-plugin", "plugin.json")):
+        click.echo("  This folder is not a Claude Code plugin: it has no .claude-plugin/plugin.json.")
+    click.echo(
+        "  To use a Claude Code plugin, run /plugin marketplace add <marketplace folder or repo>, "
+        "then /plugin install <name>@<marketplace> in Claude Code."
+    )
+
+
 def _echo_hermes_activation_note(plugin_name: str) -> None:
     """Explain Hermes' own opt-in next to DefenseClaw's runtime state (GAP-1878)."""
     plugin_id = _hermes_plugin_off_id(plugin_name)
@@ -3439,16 +3465,13 @@ def block(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
         plugin_path = hermes_path or _resolve_plugin_path(app, plugin_name, connector)
         if plugin_path:
             pe.set_source_path("plugin", plugin_name, plugin_path, connector)
-        click.secho(
-            f"[plugin] {plugin_name!r} added to block list (connector={connector})",
-            fg="red",
-        )
+        click.secho(f"[plugin] Blocked {plugin_name!r} ({connector}).", fg="red")
     else:
         pe.block("plugin", plugin_name, reason)
         plugin_path = hermes_path or _resolve_plugin_path(app, plugin_name)
         if plugin_path:
             pe.set_source_path("plugin", plugin_name, plugin_path)
-        click.secho(f"[plugin] {plugin_name!r} added to block list", fg="red")
+        click.secho(f"[plugin] Blocked {plugin_name!r} (every connector).", fg="red")
 
     if app.logger:
         saved_change_audit(app.logger).log_action(
