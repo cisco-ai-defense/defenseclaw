@@ -298,5 +298,30 @@ class ConfigShowTests(unittest.TestCase):
         self.assertNotIn("_loaded_owned_nested_values", blob)
 
 
+class UndeclaredKeyWordingTests(unittest.TestCase):
+    # GAP-2235: the gateway's words for an undeclared key, at the key's line.
+    REASON = (
+        "[config_schema_invalid] configuration violates the additionalProperties constraint; "
+        "expected a declared field name; suggested field mode; "
+        "inspect the canonical v8 schema or generated reference and correct this field"
+    )
+
+    def test_typo_reads_unknown_field_with_suggestion(self):
+        raw = b"config_version: 8\nguardrail:\n  mdoe: observe\n"
+        self.assertEqual(
+            cmd_config._plain_v8_issue(raw, "$.guardrail.mdoe", self.REASON),
+            'line 3: guardrail.mdoe: unknown field (did you mean "mode"?). '
+            "All fields: defenseclaw config reference --format json-schema",
+        )
+
+    def test_unknown_section_names_its_own_line(self):
+        raw = b"config_version: 8\ngateway2:\n  a: 1\n"
+        reason = self.REASON.replace("suggested field mode; ", "")
+        self.assertEqual(
+            cmd_config._plain_v8_issue(raw, "$.gateway2", reason),
+            "line 2: gateway2: unknown field. All fields: defenseclaw config reference --format json-schema",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
