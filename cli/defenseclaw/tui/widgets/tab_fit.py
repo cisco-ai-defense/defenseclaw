@@ -322,7 +322,7 @@ def _every_tab_named(panels: Sequence[tuple[str, str, str]], width: int) -> dict
     room for the longest full name ("V AI Discovery"), so with few counts any
     tab opens under its full name. Every tab gets its shortest name ("Log",
     "Inv"), then the tiny, short and full names grow, most important first,
-    up to the first that doesn't fit (GAP-2517),
+    up to the first that doesn't fit (GAP-2517), unless every full name fits (GAP-2599),
     while ``OPEN_COUNT_RESERVE`` cells stay free for the counts, so the open
     tab keeps its full name beside Alerts, Logs and Audit backlogs (GAP-2420).
     """
@@ -348,6 +348,15 @@ def _every_tab_named(panels: Sequence[tuple[str, str, str]], width: int) -> dict
     # beside 11 free cells (GAP-2500).
     if cost() > width:
         return None
+    # Every full name that fits beside a one-digit Alerts count is used, with
+    # no room kept for other counts: those wait. Reserving it here while the
+    # full strip fits read "7 Sandboxes ... R Registries" beside Alerts alone
+    # and "7 Sandbox ... R Registry" once a Logs count came, with 15 cells
+    # free at 199 columns (GAP-2599).
+    shortest, chosen = chosen, dict(titles)
+    if cost() <= width:
+        return chosen
+    chosen = shortest
     # The names grow in one fixed order and stop at the first that doesn't
     # fit, so a wider strip never shortens a name: skipping a long name for a
     # later short one read "7 Sandboxes" at 182 columns and "7 Sandbox" at 183
