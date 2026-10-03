@@ -1361,10 +1361,14 @@ def _apply_global_fail_mode_transaction(
             used_full_restart = False
             gateway_stopped = False
             try:
+                # GAP-2071: a connector disabled on its own has no hooks to
+                # refresh or verify; its value is only saved for later.
+                disabled = frozenset(name for name in transaction_targets if _disabled_on_its_own(gc, name))
+                live_targets = [name for name in transaction_targets if name not in disabled]
                 runtime_targets = [
-                    name for name in transaction_targets if normalize_connector(name) in _RUNTIME_FAIL_MODE_CONNECTORS
+                    name for name in live_targets if normalize_connector(name) in _RUNTIME_FAIL_MODE_CONNECTORS
                 ]
-                if transaction_targets and len(runtime_targets) == len(transaction_targets):
+                if live_targets and len(runtime_targets) == len(live_targets):
                     for name in runtime_targets:
                         reconcile_connector_registration(app.cfg, name)
                 elif not _gateway_running(app):
@@ -1384,6 +1388,7 @@ def _apply_global_fail_mode_transaction(
                         app.cfg.gateway.port,
                         connector=single_connector,
                         connectors=_active_connector_set(app.cfg, single_connector),
+                        summary_exclude=disabled,
                     )
                     for name in runtime_targets:
                         state = resolve_connector_fail_mode(app.cfg, name)

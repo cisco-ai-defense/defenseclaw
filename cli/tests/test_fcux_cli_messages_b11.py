@@ -108,6 +108,33 @@ def test_fail_mode_change_list_shows_a_disabled_connector_as_disabled(
     assert "global default + 2 active connector overrides = closed; Codex is disabled (no hooks))" in result.output
 
 
+def test_fail_mode_with_gateway_running_skips_verifying_a_disabled_connector(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # GAP-2071: the post-restart check verified the torn-down codex hooks
+    # ("registration-missing, ..."), failed and rolled the change back.
+    cfg = _roster(monkeypatch, tmp_path)
+    cfg.guardrail.connectors["codex"].enabled = False
+    live = SimpleNamespace(runtime="open", desired="open", current=True, drift=())
+    torn_down = SimpleNamespace(runtime="", desired="closed", current=False, drift=("registration-missing",))
+    with (
+        patch.object(cmd_guardrail, "_gateway_running", return_value=True),
+        patch.object(
+            cmd_guardrail,
+            "resolve_connector_fail_mode",
+            side_effect=lambda _cfg, name: torn_down if name == "codex" else live,
+        ),
+        patch.object(cmd_guardrail, "reconcile_connector_registration"),
+        patch.object(cmd_setup, "_restart_services") as restart,
+    ):
+        result = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, ["closed", "--yes"], obj=_app(cfg))
+    assert result.exit_code == 0, result.output
+    assert "verification failed" not in result.output
+    restart.assert_called_once()
+    assert restart.call_args.kwargs["summary_exclude"] == frozenset({"codex"})
+    assert cfg.guardrail.hook_fail_mode == "closed"
+
+
 def test_piped_windows_table_cell_keeps_its_right_padding() -> None:
     # GAP-1972: "| OK ready| codeguard" where the column was sized for "✓ ready".
     from rich.console import Console

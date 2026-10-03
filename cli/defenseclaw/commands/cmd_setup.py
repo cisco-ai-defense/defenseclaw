@@ -12272,14 +12272,19 @@ def _refuse_proxy_next_to_hook_connectors(gc, connector: str) -> None:
 
 
 def _hook_peers_of_proxy_connector(gc, connector: str) -> list[str]:
-    """Hook connectors configured next to a proxy-backed *connector*."""
+    """Hook connectors configured next to a proxy-backed *connector*.
+
+    GAP-2067: ``init --connector hermes`` records a single hook connector in
+    ``guardrail.connector`` with an empty ``guardrail.connectors`` map, so the
+    single value counts as a configured peer too.
+    """
     if connector not in _PROXY_BACKED_CONNECTORS:
         return []
-    return [
-        name
-        for name in sorted(getattr(gc, "connectors", None) or {})
-        if normalize_connector(name) in _HOOK_ENFORCED_CONNECTORS
-    ]
+    names = {normalize_connector(name) for name in (getattr(gc, "connectors", None) or {}) if name.strip()}
+    single = (getattr(gc, "connector", "") or "").strip()
+    if single:
+        names.add(normalize_connector(single))
+    return sorted(name for name in names if name in _HOOK_ENFORCED_CONNECTORS)
 
 
 def _adopt_openclaw_gateway_token(app: AppContext) -> None:
