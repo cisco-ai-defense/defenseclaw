@@ -869,17 +869,14 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 		fmt.Fprintf(os.Stderr, "[sidecar] private-upstream allowlist: %d IPs configured\n", len(allowedIPs))
 	}
 
-	// Start LiteLLM managed sidecar. The manager launches the process,
-	// waits for health, then pushes models from config via REST API.
+	// Start LiteLLM managed sidecar. The manager writes a full config YAML
+	// from the DefenseClaw config and launches the LiteLLM process.
 	s.litellm = NewLiteLLMManager(s.currentConfig())
 	if err := s.litellm.Start(runCtx); err != nil {
 		fmt.Fprintf(os.Stderr, "[litellm] startup failed: %v (LiteLLM disabled)\n", err)
 		s.litellm = nil
 	} else {
 		litellmSidecarURL = s.litellm.BaseURL()
-		if err := s.litellm.PushModels(s.currentConfig()); err != nil {
-			fmt.Fprintf(os.Stderr, "[litellm] model push failed: %v\n", err)
-		}
 		defer s.litellm.Stop()
 	}
 
