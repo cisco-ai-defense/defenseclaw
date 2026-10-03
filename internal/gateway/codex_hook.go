@@ -768,7 +768,7 @@ func codexToolArgs(req codexHookRequest) json.RawMessage {
 	if req.ToolInput == nil {
 		return json.RawMessage(`{}`)
 	}
-	b, err := json.Marshal(req.ToolInput)
+	b, err := connector.MarshalToolArgs(req.ToolInput)
 	if err != nil {
 		return json.RawMessage(`{}`)
 	}

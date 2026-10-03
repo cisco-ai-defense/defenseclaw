@@ -1203,3 +1203,38 @@ func TestClaudeCodeRuntimeTargetsIncludeEffectiveAutoMemory(t *testing.T) {
 		}
 	}
 }
+
+// GAP-2575: Claude Code's tool input is re-encoded for the rule scan, and
+// json.Marshal turned "&&" into \u0026\u0026, so eval after && never matched
+// CMD-EVAL. eval with a runtime operand alerts (never blocks), alone or
+// after another command.
+func TestEvaluateClaudeCodeHook_DynamicEvalAlertsAfterAndAnd(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "claudecode"
+	api := &APIServer{scannerCfg: cfg}
+	for _, command := range []string{
+		`eval "$(echo true)"`,
+		`echo done && eval $(echo true)`,
+		`echo done && eval "$(echo true)"`,
+	} {
+		resp := api.evaluateClaudeCodeHook(context.Background(), claudeCodeHookRequest{
+			HookEventName: "PreToolUse",
+			ToolName:      "Bash",
+			ToolInput:     map[string]interface{}{"command": command, "description": "Run it"},
+		})
+		if resp.Action != "alert" || !strings.Contains(resp.Reason, "CMD-EVAL") {
+			t.Fatalf("%s: action=%q reason=%q, want alert on CMD-EVAL", command, resp.Action, resp.Reason)
+		}
+	}
+	if got := string(claudeCodeToolArgs(claudeCodeHookRequest{
+		ToolInput: map[string]interface{}{"command": "a && b > c"},
+	})); got != `{"command":"a && b > c"}` {
+		t.Fatalf("tool args = %s, want shell operators kept literal", got)
+	}
+	if got := string(codexToolArgs(codexHookRequest{
+		ToolInput: map[string]interface{}{"command": "a && b"},
+	})); got != `{"command":"a && b"}` {
+		t.Fatalf("codex tool args = %s, want shell operators kept literal", got)
+	}
+}
