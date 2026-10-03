@@ -295,6 +295,10 @@ def uninstall_cmd(
     _render_plan(plan, dry_run=dry_run)
 
     if dry_run:
+        refusal = _open_tui_refusal(plan)
+        if refusal:
+            # The real run stops at plan validation (GAP-2585).
+            ux.warn(f"a real run would stop before any change: {refusal}")
         ux.subhead("(dry-run — nothing modified)")
         return
 
@@ -1978,16 +1982,32 @@ def _is_empty_dir(path: str) -> bool:
         return False
 
 
+def _open_tui_refusal(plan: UninstallPlan) -> str:
+    """Why a data removal cannot run now because a TUI is open ('' when it can)."""
+    if not (plan.remove_data_dir and plan.data_dir and tui_lock_held(plan.data_dir)):
+        return ""
+    if plan.preserve_data_entries:
+        command = "defenseclaw reset"
+    elif plan.remove_binaries:
+        command = "defenseclaw uninstall --all --binaries"
+    else:
+        command = "defenseclaw uninstall --all"
+    # The TUI cannot run this itself, so name the terminal command (GAP-2585).
+    return (
+        "the DefenseClaw TUI (defenseclaw tui) is open for this account and keeps "
+        f"writing to {plan.data_dir}. Quit every open TUI (Ctrl+C), then run "
+        f"`{command}` in a terminal."
+    )
+
+
 def _validate_plan(plan: UninstallPlan) -> None:
     """Validate every destructive root and exact artifact before mutation."""
     if plan.remove_data_dir:
-        if plan.data_dir and tui_lock_held(plan.data_dir):
+        refusal = _open_tui_refusal(plan)
+        if refusal:
             # An open TUI keeps writing audit.db and its state files, so the
             # data removal failed half-done with "Directory not empty" (GAP-2576).
-            raise click.ClickException(
-                "the DefenseClaw TUI (defenseclaw tui) is open for this account and keeps "
-                f"writing to {plan.data_dir}. Quit it (Ctrl+C), then run this uninstall again."
-            )
+            raise click.ClickException(refusal)
         resolved_data = _validate_owned_root(plan.data_dir, "data path")
         if plan.platform_name == "win32":
             _validate_windows_ancestor_chain(plan.data_dir, "data path")

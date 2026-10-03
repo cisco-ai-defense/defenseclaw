@@ -50,6 +50,21 @@ def uninstall_command_for_option(option: UninstallOption) -> CommandSpec:
     return CommandSpec(binary="defenseclaw", args=args, display_name=display)
 
 
+# Rows that remove ~/.defenseclaw. Uninstall refuses that while a TUI is open
+# (the TUI keeps writing there, GAP-2576), so the TUI cannot run them: it names
+# the terminal command to run after quitting instead (GAP-2585).
+TERMINAL_ONLY_OPTIONS = frozenset({UninstallOption.WIPE_DATA.value, UninstallOption.WIPE_ALL.value})
+
+
+def terminal_command_for_option(option_id: str) -> str:
+    """The command to type in a terminal for a terminal-only row ('' otherwise)."""
+
+    if option_id not in TERMINAL_ONLY_OPTIONS:
+        return ""
+    args = uninstall_command_for_option(UninstallOption(option_id)).args
+    return " ".join(("defenseclaw", *(arg for arg in args if arg != "--yes")))
+
+
 def build_uninstall_model() -> ConsequenceModalModel:
     """Build the guarded uninstall modal model."""
 
@@ -82,7 +97,7 @@ def build_uninstall_model() -> ConsequenceModalModel:
                 action_id=UninstallOption.WIPE_DATA.value,
                 hotkey="a",
                 label="Uninstall and wipe data",
-                description="Also deletes ~/.defenseclaw audit DB, config, and secrets.",
+                description="Shows the terminal command to run after quitting; deletes ~/.defenseclaw.",
                 command=uninstall_command_for_option(UninstallOption.WIPE_DATA),
                 variant="error",
                 danger=True,
@@ -91,7 +106,7 @@ def build_uninstall_model() -> ConsequenceModalModel:
                 action_id=UninstallOption.WIPE_ALL.value,
                 hotkey="e",
                 label="Uninstall everything",
-                description="Also deletes ~/.defenseclaw and the defenseclaw binaries in ~/.local/bin.",
+                description="Shows the terminal command to run after quitting; also deletes binaries.",
                 command=uninstall_command_for_option(UninstallOption.WIPE_ALL),
                 variant="error",
                 danger=True,
