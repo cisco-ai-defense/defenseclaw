@@ -682,6 +682,15 @@ def _fit_for_active(
             chosen = trial
         else:
             compact.add("alerts")
+    # 8. Counts dropped or shrunk to make room for a name that later went
+    #    (step 7 frees cells) come back while they fit, most important tab
+    #    first: "0 Setup" showed a bare "8" with 8 cells free (GAP-2342).
+    for name in ranked:
+        for shrunk in (no_badge, compact):
+            if name in shrunk and unread.get(name, 0):
+                shrunk.discard(name)
+                if width_of(chosen) > width:
+                    shrunk.add(name)
     return render(chosen)
 
 
