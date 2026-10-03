@@ -10,7 +10,7 @@ keywords:
   - OpenShell sandbox tamper tier
 ---
 
-This page is the single source of truth for "can this connector do X?". Every row is hand-derived from the Go connector files in `internal/gateway/connector/` and re-verified on every change. Use it to pick the connector that fits your safety posture, or to find the gaps you need to compensate for.
+This page answers "can this connector do X?" for every connector. The table is checked against the connector code on every change. Use it to pick the connector that fits your safety needs, or to find the gaps you need to cover another way.
 
 <Callout title="Looking for what works on your OS?">
 This matrix describes each connector's hook or proxy contract, not where it
@@ -32,11 +32,20 @@ provide the proxy or subprocess-shim wiring some connectors use elsewhere.
   <Card title="Block" description="Whether the hooks the connector exposes can return a block decision at all." />
   <Card title="Native ask" description="Whether the connector's hooks can prompt the operator inside the agent UI for approval. Without native ask, confirm uses a connector-specific alert/allow/context fallback; the TUI can review the event but cannot resume it." />
   <Card title="Fail-closed" description="Whether the hook surface supports a fail-closed response — i.e. block on transport failure to the gateway. It does not cover a hook process the user kills or stops. Connectors marked false require operator-managed timeouts." />
-  <Card title="OpenShell sandbox" description="Where the connector's hooks live in a DefenseClaw OpenShell sandbox image: the tamper tier, then the hook config file. managed tier = a root-owned system policy file that user and project settings cannot switch off. user tier = a file in the image home the agent can edit (some launchers restore it from a root-owned copy before every start), or code the agent or a repository adds runs beside the hooks. The image pin is the harness version the image installs by default. verified = the harness ran end to end in a sandbox; unverified = its image never passes the hook check, so it cannot run yet. pending = DefenseClaw builds no sandbox image for this connector." />
-  <Card title="HITL behaviour" description="One-line summary of how human-in-the-loop approvals reach the operator for this connector." />
+  <Card title="OpenShell sandbox" description="The tamper tier of the connector's hooks in a DefenseClaw OpenShell sandbox image, and whether the harness is verified. managed tier = a root-owned policy file that user and project settings can't switch off. user tier = a file the agent can edit, or code the agent or a repository adds runs beside the hooks. verified = the harness ran end to end in a sandbox; unverified = its image never passes the hook check, so it can't run yet; pending = DefenseClaw builds no sandbox image for this connector. The image pin and hook file are in the sandbox table below." />
+  <Card title="HITL" description="The line under each connector: how human-in-the-loop approvals reach you on that connector." />
 </Cards>
 
-## Where the data comes from
+<Callout title="Antigravity asks and blocks only before a tool runs">
+Antigravity can show its approval prompt and hard-block only on `PreToolUse`.
+`PreInvocation` and `PostInvocation` can only change the context the agent
+sees, `PostToolUse` only observes, and DefenseClaw always allows `Stop`.
+DefenseClaw doesn't claim it can override Antigravity's own permission bypass,
+because no recorded test with the official client has shown that.
+</Callout>
+
+<Accordions>
+<Accordion title="Where the data comes from (for contributors)">
 
 | Field | Source |
 | --- | --- |
@@ -50,29 +59,31 @@ provide the proxy or subprocess-shim wiring some connectors use elsewhere.
 
 The component renders from `data/capability-matrix.json`, which is the single editable copy and is refreshed against the Go source on every connector change. The Go tests in `internal/gateway/connector` and `internal/openshell/harness` fail when its sandbox fields disagree with the code.
 
-<Callout type="info" title="Advertised contract vs empirical verification">
-The Antigravity contract documents native ask and hard deny only on
-`PreToolUse`. `PreInvocation` and `PostInvocation` are context-transform
-surfaces, `PostToolUse` is observation-only, and DefenseClaw returns the
-documented allow shape for `Stop`. No permission-bypass override is claimed
-without persisted official-client evidence.
-</Callout>
+</Accordion>
+</Accordions>
 
 ## Common patterns
 
 ### "I want maximum safety on a single connector"
 
-Pick a row with **proxy family**, **block: yes**, **native ask: yes**, **fail-closed: yes**. That's [OpenClaw](/docs/connectors/openclaw) today.
+Pick a row with **Block: Yes**, **Native ask: Yes** and **Fail-closed: Yes**,
+and a **managed tier** sandbox that is verified end to end:
+[Claude Code](/docs/connectors/claudecode) and
+[OmniGent](/docs/connectors/omnigent). Both ask for approval inside the
+agent, and in a sandbox their hooks sit in a root-owned policy file the agent
+can't switch off.
 
-### "I want enforcement on Claude Code without the proxy"
+### "I want my agent's own hooks to enforce"
 
 Direct-to-upstream hook enforcement is supported on [Claude Code](/docs/connectors/claudecode), [Codex](/docs/connectors/codex), [Cursor](/docs/connectors/cursor), [Hermes](/docs/connectors/hermes), [Devin](/docs/connectors/devin), [Copilot CLI](/docs/connectors/copilot), [OpenHands](/docs/connectors/openhands), [Antigravity](/docs/connectors/antigravity), [OpenCode](/docs/connectors/opencode), [Kiro](/docs/connectors/kiro), and [OmniGent](/docs/connectors/omnigent). [Amp](/docs/connectors/amp) uses a direct-to-upstream system policy plugin instead. Cursor action uses documented event-native deny from the user hook. Cursor exposes no safe API for detecting an actual higher-priority Enterprise, Team, or Project conflict, so DefenseClaw reports that limitation and does not infer a conflict. The broader constraint is that these connectors cannot block a request the agent has not yet presented to their hook or policy surface.
 
 ### "I want HITL approvals to surface inside the agent UI"
 
-Pick a row with **native ask: yes**: OpenClaw, Claude Code (PreToolUse), GitHub Copilot CLI (preToolUse),
-Antigravity (`PreToolUse` only), Amp (`tool.call` and model-bound `tool.result`
-in the active foreground thread), or OmniGent (`request`, `tool_call`, `llm_request`).
+Pick a row with **Native ask: Yes**: Claude Code (`PreToolUse`), GitHub Copilot
+CLI (`preToolUse`), Antigravity (`PreToolUse` only), Amp (`tool.call` and
+model-bound `tool.result` in the active foreground thread), OmniGent
+(`UserPromptSubmit`, `PreToolUse` and `BeforeModel`, which OmniGent calls its
+`request`, `tool_call` and `llm_request` policy phases), or OpenClaw.
 Cursor is not counted because DefenseClaw does not enable its native ask response;
 confirm verdicts remain attributed alerts and cannot resume the original call.
 Confirm verdicts on every other connector/event take an immediate
@@ -129,4 +140,4 @@ Every sandbox hook fails closed.
 
 Fail-closed here means the hook blocks when it cannot reach the gateway (a transport failure). It does not cover a hook process that the user kills, stops or starves: the agent then decides, and Claude Code, Codex, OpenHands and Devin treat a hook that dies or times out as non-blocking and run the call (see the [enterprise threat model](/docs/enterprise/threat-model#residual-risks)).
 
-Pick a row with **fail-closed: yes**: OpenClaw, ZeptoClaw, Claude Code, Codex, Cursor, Devin, OpenCode, Amp, OpenHands, Kiro, and OmniGent. GitHub Copilot CLI, Hermes, and Antigravity do not expose a generic DefenseClaw-controlled fail-closed transport response. Cursor's support is mode-matched: action writes `failClosed: true`, while observe writes `failClosed: false`. Devin can map DefenseClaw availability failures to vendor exit `2` only on its four declared block-capable events.
+Pick a row with **Fail-closed: Yes**: OpenClaw, ZeptoClaw, Claude Code, Codex, Cursor, Devin, OpenCode, Amp, OpenHands, Kiro, and OmniGent. GitHub Copilot CLI, Hermes, and Antigravity do not expose a generic DefenseClaw-controlled fail-closed transport response. Cursor's support is mode-matched: action writes `failClosed: true`, while observe writes `failClosed: false`. Devin can map DefenseClaw availability failures to vendor exit `2` only on its four declared block-capable events.

@@ -26,27 +26,7 @@ blocked, so a harmless marker is the reliable way to see a block.
 
 ### Install
 
-<Tabs items={['macOS / Linux', 'Windows']}>
-
-<Tab value="macOS / Linux">
-
-```bash
-curl -LsSf https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.sh | bash
-```
-
-</Tab>
-
-<Tab value="Windows">
-
-```powershell
-irm https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.ps1 | iex
-```
-
-Open a new terminal afterwards if the installer asks you to.
-
-</Tab>
-
-</Tabs>
+<include>../../snippets/install-commands.mdx</include>
 
 The installer only puts DefenseClaw on disk. Requirements, the macOS app and
 the enterprise packages are on [Download](/docs/get-started/download).
@@ -63,37 +43,12 @@ defenseclaw init
 
 Press Enter through the prompts. `init` finds the agents you have installed,
 selects all of them and sets them up in **observe** mode: DefenseClaw logs what
-the agents do but blocks nothing yet. Leave the "Action-mode connector(s)"
-prompt empty for now. `init` ends by starting the gateway and printing a
-report like this one:
+the agents do but blocks nothing yet. At **Select connector(s) for action
+enforcement**, leave every box unchecked for now; unchecked agents stay in
+observe. `init` ends by starting the gateway and printing a report like this
+one:
 
-```text
-  DefenseClaw First-Run
-  status=ready connector=claudecode profile=observe
-  ────────────────────────────────────────────────────────
-
-  Setup
-  ✓ Config  created defaults
-  ✓ Bootstrap  ~/.defenseclaw
-  ✓ Skill scanner  ~/.local/bin/skill-scanner
-  ✓ MCP scanner  ~/.local/bin/mcp-scanner
-  ✓ Guardrail  claudecode, mode=observe, fail mode=open
-  ✓ Sidecar  started
-
-  Readiness
-  ✓ Config file  ~/.defenseclaw/config.yaml
-  ✓ Audit database  ~/.defenseclaw/audit.db
-  ✓ Connector  Claude Code settings found
-  ✓ Sidecar  running
-  - LLM API  not configured
-  - Cisco AI Defense  scanner_mode is local
-  ✓ Gateway binary  found on PATH
-
-  Next
-  defenseclaw doctor
-  defenseclaw keys list
-  Adding another agent later: defenseclaw setup <connector>
-```
+<include>../../snippets/first-run-report.mdx</include>
 
 `✓` is done and `-` is optional or skipped. You don't need an LLM key or a
 Cisco AI Defense key for this guide. When more than one agent was set up, the
@@ -134,8 +89,11 @@ This switches only Claude Code to **action** mode, which enforces the rules.
 Any other agent stays in observe. The command restarts the running gateway so
 the change applies right away.
 
-In action mode the hook follows your fail mode. With `closed`, the agent's
-tools are blocked while the gateway is down. To allow and log instead, run
+Action mode also changes what happens while the gateway is down. The report
+showed `fail mode=open` because an agent in observe mode always fails open. In
+action mode Claude Code uses the global hook fail mode, which is `closed` on a
+new install, so its tools are blocked while the gateway is down. The command
+tells you so when it switches. To allow and log the calls instead, run
 `defenseclaw guardrail fail-mode open`.
 
 </Step>
@@ -218,19 +176,38 @@ In Claude Code, ask:
 
 The hook sends the command to the gateway, `DEMO-MARKER-BLOCK` matches at
 CRITICAL and the command doesn't run. Claude Code tells you DefenseClaw blocked
-it. In another terminal, list the latest alerts:
+it, with the reason the hook returned:
+
+> DefenseClaw policy blocked this action (rule DEMO-MARKER-BLOCK:
+> First-guardrail demo marker). Do not retry it in another form.
+
+In another terminal, list the latest alerts:
 
 ```bash
 defenseclaw alerts --limit 5
 ```
 
-The block shows up in a row like this one (shortened):
+The block is the newest row: severity `CRITICAL`, action `scan-finding`,
+target `PreToolUse` and details starting with
+`decision=blocked connector=claudecode`.
+
+`defenseclaw alerts --show 1` prints the whole record, including the rule
+and the scanner that matched:
 
 ```text
-│ 1 │ CRITICAL │ 14:02 │ connector-hook │ PreToolUse │ action connector=claudecode … action=block … reason=matched: DEMO-MARKER-BLOCK … │
+Alert #1
+  Severity:  CRITICAL
+  Action:    scan-finding
+  Target:    claudecode:PreToolUse
+  Decision:  blocked
+  Connector: claudecode
+  Rule:      DEMO-MARKER-BLOCK: First-guardrail demo marker
+  Scanner:   hook-rules
 ```
 
-`defenseclaw alerts --show 1` prints the whole record.
+The same alert is in the **Alerts** panel of `defenseclaw tui` (press `2`):
+
+![The Alerts panel of defenseclaw tui showing one CRITICAL scan-finding alert for claudecode:PreToolUse with rule DEMO-MARKER-BLOCK](/images/get-started/tui-alerts-demo-block.png)
 
 </Step>
 

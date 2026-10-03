@@ -8,7 +8,7 @@ keywords:
   - AI agent observability
 ---
 
-DefenseClaw is the **enforcement and evidence layer** for AI coding agents. It sits between your agent (Claude Code, Codex, Cursor, OpenClaw, ...) and the rest of the world, and answers three questions for you, by default:
+DefenseClaw is the **enforcement and evidence layer** for AI coding agents. It sits between your agent (Claude Code, Codex, GitHub Copilot CLI, Cursor and others) and the rest of the world, and answers three questions for you, by default:
 
 1. **What is this agent allowed to do?** Skills, MCP servers, plugins, and generated code are scanned before they run.
 2. **What is the agent doing right now?** Prompts, completions, and tool calls are inspected at runtime.
@@ -16,17 +16,21 @@ DefenseClaw is the **enforcement and evidence layer** for AI coding agents. It s
 
 ## Three modes, one command
 
-<Cards>
-  <Card title="Observe" description="Log everything, block nothing. Use this for the first week." />
-  <Card title="Action" description="Enforce the configured severity policy. The shipped default blocks CRITICAL and alerts on HIGH and MEDIUM." />
-  <Card title="HITL" description="Pause eligible actions on native-ask events. Other connector events preserve the confirm intent in audit and apply an immediate fallback." />
-</Cards>
+`defenseclaw guardrail mode observe` or `action` switches all agents, or one
+with `--connector`. HITL is an extra setting on top of action mode, turned on
+with `defenseclaw setup guardrail --human-approval`.
+
+| Mode | What it does |
+| --- | --- |
+| **Observe** | Logs everything and blocks nothing. Use it for the first week. |
+| **Action** | Blocks findings at or above the block level. The shipped default blocks CRITICAL and alerts on HIGH and MEDIUM; `defenseclaw guardrail block-at` changes the level. |
+| **HITL** | Action mode plus human approval: a risky call pauses and the agent asks you, on agents with a native approval prompt. On other agents the call takes the connector's fallback right away, and the audit log records that approval was asked for. |
 
 ## Why a separate sidecar?
 
 Inserting an inspection step inside the agent process means every agent has to grow its own copy. DefenseClaw moves the inspection out of the agent and into a single Go sidecar (`defenseclaw-gateway`), so:
 
-- The agent does not need to be modified — connectors are written *for* the agent (Claude Code's hooks, Codex's `config.toml`, Cursor's `hooks.json`, OpenClaw's plugin).
+- The agent does not need to be modified — connectors are written *for* the agent (Claude Code's hooks, the hooks in Codex's `config.toml`, Cursor's `hooks.json`, OpenCode's plugin).
 - One audit log covers every agent the operator runs.
 - One config file serves every connector — there is exactly one `~/.defenseclaw/config.yaml`. The OPA admission policy is **shared** across all connectors, while guardrail *posture* (mode, fail mode, HITL, block message, rule pack) can optionally be set **per connector** when one gateway serves several hook connectors at once. See [Multi-connector](/docs/guardrail/multi-connector).
 
@@ -34,12 +38,12 @@ Inserting an inspection step inside the agent process means every agent has to g
 
 <Flow
   direction="TB"
-  caption="You drive the Python defenseclaw CLI (and its TUI), which writes ~/.defenseclaw/config.yaml and starts the Go defenseclaw-gateway. Your agent reaches the same gateway through its connector: a hook, a plugin such as OpenClaw's TypeScript plugin, or the LLM proxy. On connectors that support human approval (HITL), the approval prompt appears in the agent itself."
+  caption="You drive the Python defenseclaw CLI (and its TUI), which writes ~/.defenseclaw/config.yaml and starts the Go defenseclaw-gateway. Your agent reaches the same gateway through its connector: the agent's hooks, or a plugin the agent loads. On connectors that support human approval (HITL), the approval prompt appears in the agent itself."
 >
   <Node id="op" kind="operator">You</Node>
   <Node id="agent" kind="agent">{`Your AI agent\nsuch as Claude Code`}</Node>
   <Node id="cli" kind="operator">{`defenseclaw CLI + TUI\nsets up and reviews`}</Node>
-  <Node id="conn" kind="connector">{`Connector\nhook, plugin or proxy`}</Node>
+  <Node id="conn" kind="connector">{`Connector\nagent hooks or plugin`}</Node>
   <Node id="gateway" kind="gateway">{`defenseclaw-gateway\ndecides and records`}</Node>
   <Node id="sinks" kind="datastore">{`Your telemetry\nOTLP, Splunk, webhooks`}</Node>
   <Node id="audit" kind="datastore">{`Audit log\nlocal SQLite database`}</Node>
@@ -59,9 +63,9 @@ network. To isolate it, run it in an NVIDIA OpenShell 0.1 sandbox with
 `defenseclaw sandbox run <command>`, for example `defenseclaw sandbox run
 claude`: OpenShell supplies the isolation boundary, and DefenseClaw keeps
 checking every tool call through its hook ingress and filters web traffic
-through its egress proxy. Claude Code, Codex, GitHub Copilot CLI, OpenCode
-and Kiro CLI run today on Linux, and as a preview on macOS; Cursor Agent, Amp
-and Devin CLI are unverified and cannot run yet. The
+through its egress proxy. Sandboxes are a preview on Linux and Apple-silicon
+Macs. The [capability matrix](/docs/connectors/capability-matrix#i-want-to-run-the-agent-in-an-openshell-sandbox)
+lists the agents verified end to end in a sandbox, and the
 [sandbox guide](/docs/sandboxes/guide) covers setup, runs, undo and review.
 
 ## What DefenseClaw is not
