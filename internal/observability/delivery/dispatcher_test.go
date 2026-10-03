@@ -1141,3 +1141,34 @@ func TestDispatcherWorkersTerminateUnderStress(t *testing.T) {
 	runtime.GC()
 	waitFor(t, func() bool { return runtime.NumGoroutine() <= baseline+8 })
 }
+
+// GAP-2538: a gateway stop flushes telemetry under a 4 s bound, but the
+// destination worker waited out its scheduled batch delay (5 s for OTLP)
+// before sending a record enqueued just before the stop, so the flush timed
+// out with a healthy destination and the record was dropped. Flush must send
+// the accepted work at once.
+func TestFlushSkipsScheduledDelayForAcceptedPayload(t *testing.T) {
+	adapter := &fakeAdapter{}
+	config := testConfig("flush-delay")
+	config.ScheduledDelay = time.Hour
+	dispatcher, err := delivery.NewDispatcher(config, adapter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dispatcher.Activate()
+	if got := dispatcher.Enqueue(payload(t, "before-stop", "value")); !got.Accepted() {
+		t.Fatalf("enqueue=%+v", got)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := dispatcher.Flush(ctx); err != nil {
+		t.Fatalf("flush waited for the scheduled delay: %v", err)
+	}
+	if got := dispatcher.Counters(); got.Delivered != 1 {
+		t.Fatalf("counters=%+v", got)
+	}
+	if got := dispatcher.Enqueue(payload(t, "after-flush", "value")); !got.Accepted() {
+		t.Fatalf("flush stopped intake: %+v", got)
+	}
+	closeDispatcher(t, dispatcher)
+}
