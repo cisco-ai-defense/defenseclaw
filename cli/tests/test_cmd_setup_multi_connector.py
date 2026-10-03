@@ -185,6 +185,27 @@ class TestAdditiveSetupCommand(unittest.TestCase):
             wait_for_connector_ready=True,
         )
 
+    def test_setup_waits_only_for_guarded_peers(self):
+        # GAP-1976: a peer turned off with `guardrail disable --connector` is
+        # never activated, so setup and rollback must not wait for it.
+        self._seed_map("claudecode", "codex", "cursor")
+        self.app.cfg.guardrail.connectors["codex"].enabled = False
+        self.app.cfg.guardrail.connectors["cursor"].enabled = False
+        with _setup_patches() as restart:
+            result = _invoke(["codex", "--yes"], self.app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("codex guardrail re-enabled", result.output)
+        self.assertTrue(self.app.cfg.guardrail.effective_enabled("codex"))
+        self.assertFalse(self.app.cfg.guardrail.effective_enabled("cursor"))
+        self.assertEqual(restart.call_args.kwargs["connectors"], ["claudecode", "codex"])
+
+    def test_rollback_restart_skips_per_connector_disabled_peers(self):
+        self._seed_map("claudecode", "codex", "cursor")
+        self.app.cfg.guardrail.connectors["codex"].enabled = False
+        with patch("defenseclaw.commands.cmd_setup._restart_services") as restart:
+            cmd_setup._restart_restored_connector_runtime(self.app)
+        self.assertEqual(restart.call_args.kwargs["connectors"], ["claudecode", "cursor"])
+
     def test_bare_batch_restart_waits_for_every_active_connector(self):
         self._seed_map("codex", "cursor")
         with (
