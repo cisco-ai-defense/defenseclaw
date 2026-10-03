@@ -9564,8 +9564,22 @@ def _apply_hook_connector_setup(
     # this before cfg.save(): action validation may have fallen back to a
     # second observe-mode setup call, and pruning only after that save leaves
     # a stale gate on disk that the restarted gateway immediately reloads.
+    _gate_before = [normalize_connector(str(c)) for c in (getattr(gc.judge, "hook_connectors", None) or [])]
     _prune_judge_gate_to_action_scope(gc, [connector])
     _judge_gate = [normalize_connector(str(c)) for c in (getattr(gc.judge, "hook_connectors", None) or [])]
+    _conn_key = normalize_connector(connector)
+    if (
+        not enable_judge
+        and ("*" in _gate_before or _conn_key in _gate_before)
+        and "*" not in _judge_gate
+        and _conn_key not in _judge_gate
+    ):
+        # GAP-2083: the prune is by design, but it must not be silent.
+        ux.warn(
+            f"{connector} was removed from the LLM judge gate: the judge reviews {connector} hook "
+            f"calls only in action mode, and {connector} is in observe mode.",
+            indent="  ",
+        )
     if enable_judge and "*" not in _judge_gate and normalize_connector(connector) not in _judge_gate:
         # GAP-1333: the gate drops observe-mode connectors; say so instead
         # of exiting 0 with the judge silently left off.
