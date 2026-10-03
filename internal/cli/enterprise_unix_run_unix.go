@@ -44,13 +44,29 @@ func platformGOOS(platform string) string {
 	return platform
 }
 
+// checkLockWait refuses a --lock-wait outside 0..MaxLockWait the way a
+// malformed value is refused: the cap as --help and lifecycle_busy print it
+// ("15m", not "15m0s"), the usage line and the --help pointer, exit 2
+// (GAP-2028).
+func checkLockWait(cmd *cobra.Command, wait time.Duration) error {
+	if wait >= 0 && wait <= enterpriseunix.MaxLockWait {
+		return nil
+	}
+	limit := enterpriseunix.FormatLockWait(enterpriseunix.MaxLockWait)
+	msg := fmt.Sprintf("--lock-wait takes at most %s, not %s", limit, enterpriseunix.FormatLockWait(wait))
+	if wait < 0 {
+		msg = fmt.Sprintf("--lock-wait takes a duration from 0 to %s, not %s", limit, wait)
+	}
+	return lifecycleFlagError(cmd, errors.New(msg))
+}
+
 func runUnixLifecycle(cmd *cobra.Command, platform, action string, opts *unixLifecycleOptions) error {
 	goos := platformGOOS(platform)
 	if enterpriseunix.CurrentGOOS() != goos {
 		return withExitCode(fmt.Errorf("`enterprise %s` manages %s hosts; this host is %s", platform, goos, enterpriseunix.CurrentGOOS()), enterprisestatus.UnixExitInvalidArgs)
 	}
-	if opts.lockWait < 0 || opts.lockWait > enterpriseunix.MaxLockWait {
-		return withExitCode(fmt.Errorf("--lock-wait must be between 0 and %s", enterpriseunix.MaxLockWait), enterprisestatus.UnixExitInvalidArgs)
+	if err := checkLockWait(cmd, opts.lockWait); err != nil {
+		return err
 	}
 	env, err := newUnixLifecycleEnv(goos)
 	if err != nil {
@@ -183,8 +199,15 @@ func printLifecycleResult(w io.Writer, result *enterprisestatus.Result, asJSON b
 	for _, change := range result.Changes {
 		fmt.Fprintf(w, "  - %s\n", change)
 	}
-	if result.Action == enterpriseunix.ActionRepair && result.OK && len(result.Changes) == 0 {
-		fmt.Fprintln(w, "  nothing to repair")
+	if result.Action == enterpriseunix.ActionRepair && result.OK {
+		if len(result.Changes) == 0 {
+			fmt.Fprintln(w, "  nothing to repair")
+		}
+		// repair re-applies the deployment, so it stops and starts every
+		// service even when nothing needed repair; say so (GAP-2030).
+		if !lifecycleResultHasWarning(result, "not_started") {
+			fmt.Fprintln(w, "  restarted the DefenseClaw services to re-apply the deployment; `ensure` leaves a healthy deployment running")
+		}
 	}
 	// A verify that found the lifecycle lock held checked nothing either:
 	// its all-false readiness line read as "not installed" (GAP-1542).
@@ -201,6 +224,16 @@ func printLifecycleResult(w io.Writer, result *enterprisestatus.Result, asJSON b
 		}
 	}
 	return nil
+}
+
+// lifecycleResultHasWarning reports whether result carries a warning with code.
+func lifecycleResultHasWarning(result *enterprisestatus.Result, code string) bool {
+	for _, warning := range result.Warnings {
+		if warning.Code == code {
+			return true
+		}
+	}
+	return false
 }
 
 // lifecycleResultHasError reports whether result carries an error with code.
@@ -235,8 +268,8 @@ func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 	if action != "status" && env.Geteuid() != 0 {
 		return withExitCode(errors.New("run this command as root"), enterprisestatus.UnixExitFailure)
 	}
-	if opts.lockWait < 0 || opts.lockWait > enterpriseunix.MaxLockWait {
-		return withExitCode(fmt.Errorf("--lock-wait must be between 0 and %s", enterpriseunix.MaxLockWait), enterprisestatus.UnixExitInvalidArgs)
+	if err := checkLockWait(cmd, opts.lockWait); err != nil {
+		return err
 	}
 	if opts.lockWait > 0 {
 		env.LockTimeout = opts.lockWait

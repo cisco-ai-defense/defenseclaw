@@ -544,7 +544,7 @@ Every mutating action is a transaction that rolls back on failure. See
 | --- | --- |
 | `install` | Install the deployment. Refuses when one is already installed |
 | `upgrade` | Upgrade an installed deployment from a new payload or package |
-| `repair` | Re-apply the installed deployment's files, modes, and services |
+| `repair` | Re-apply the installed deployment's files, modes, and services (restarts the services) |
 | `ensure` | Install, upgrade, or repair as needed. Does nothing when nothing changed |
 | `reconcile` | Run one immediate hook guardian reconcile |
 | `rotate-credentials` | Replace the key every user's per-user credentials derive from. Every user moves to the new key before it takes effect. See [Rotate per-user credentials](/docs/enterprise/operations#rotate-per-user-credentials) |

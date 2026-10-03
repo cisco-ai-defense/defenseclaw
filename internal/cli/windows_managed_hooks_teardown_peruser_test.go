@@ -108,10 +108,28 @@ func TestRemoveWindowsManagedHooksStandalonePerUserRegistrationsCoversEveryRecor
 	if err := os.MkdirAll(filepath.Join(homeB, ".defenseclaw"), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	originalPresent := windowsManagedHooksStandaloneRegistrationPresent
+	t.Cleanup(func() { windowsManagedHooksStandaloneRegistrationPresent = originalPresent })
+	for _, probe := range []struct {
+		present bool
+		err     error
+	}{{true, nil}, {false, errors.New("unreadable")}} {
+		windowsManagedHooksStandaloneRegistrationPresent = func(enterprisehooks.ManifestTarget) (bool, error) {
+			return probe.present, probe.err
+		}
+		attempted = nil
+		result = removeWindowsManagedHooksStandalonePerUserRegistrations(context.Background(), dataDir, manifest)
+		if want := "amp/" + userCleanupSIDB + ",devin/" + userCleanupSIDA + ",hermes/" + userCleanupSIDB + ",opencode/" + userCleanupSIDB; strings.Join(attempted, ",") != want {
+			t.Fatalf("probe %+v: attempted %v, want %s", probe, attempted, want)
+		}
+	}
+	// GAP-2023: an earlier uninstall already removed that user's
+	// registration (the data folder stays), so there is nothing to report.
+	windowsManagedHooksStandaloneRegistrationPresent = func(enterprisehooks.ManifestTarget) (bool, error) { return false, nil }
 	attempted = nil
 	result = removeWindowsManagedHooksStandalonePerUserRegistrations(context.Background(), dataDir, manifest)
-	if want := "amp/" + userCleanupSIDB + ",devin/" + userCleanupSIDA + ",hermes/" + userCleanupSIDB + ",opencode/" + userCleanupSIDB; strings.Join(attempted, ",") != want {
-		t.Fatalf("attempted %v, want %s", attempted, want)
+	if want := "amp/" + userCleanupSIDB + ",devin/" + userCleanupSIDA + ",opencode/" + userCleanupSIDB; strings.Join(attempted, ",") != want {
+		t.Fatalf("no registration left: attempted %v, want %s", attempted, want)
 	}
 	if err := os.RemoveAll(filepath.Join(homeB, ".defenseclaw")); err != nil {
 		t.Fatal(err)

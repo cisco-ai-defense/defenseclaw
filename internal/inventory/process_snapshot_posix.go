@@ -130,7 +130,8 @@ func platformProcessSnapshot() ([]processInfo, error) {
 // resolves to (empty when it is the same as name or comm): Cursor's installer
 // links both ~/.local/bin/agent and ~/.local/bin/cursor-agent to
 // .../cursor-agent/versions/<v>/cursor-agent, and a bare "agent" would also
-// match ssh-agent and gpg-agent (GAP-1865).
+// match ssh-agent and gpg-agent (GAP-1865). A relative argv[0] is resolved
+// against the cwd link next to cmdlinePath (GAP-2014).
 func procArgv0(cmdlinePath, comm string) (name, target string) {
 	f, err := os.Open(cmdlinePath)
 	if err != nil {
@@ -151,8 +152,16 @@ func procArgv0(cmdlinePath, comm string) (name, target string) {
 	if name == "." || name == "/" || name == comm {
 		name = ""
 	}
-	if filepath.IsAbs(raw) {
-		if resolved, err := filepath.EvalSymlinks(raw); err == nil {
+	path := raw
+	if !filepath.IsAbs(path) && strings.Contains(path, "/") {
+		// A relative argv[0] ("../.local/bin/agent") names a path from the
+		// process's working directory, /proc/<pid>/cwd (GAP-2014).
+		if cwd, err := os.Readlink(filepath.Join(filepath.Dir(cmdlinePath), "cwd")); err == nil && filepath.IsAbs(cwd) {
+			path = filepath.Join(cwd, path)
+		}
+	}
+	if filepath.IsAbs(path) {
+		if resolved, err := filepath.EvalSymlinks(path); err == nil {
 			target = strings.ToLower(filepath.Base(resolved))
 			if target == "." || target == "/" || target == comm || target == strings.ToLower(filepath.Base(raw)) {
 				target = ""
