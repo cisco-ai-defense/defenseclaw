@@ -312,6 +312,7 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 		if !watchOnce(dir, "plugin") {
 			continue
 		}
+		w.watchExistingPluginFolders(dir)
 		if watcherConnectorName(w.cfg) == "claudecode" &&
 			strings.EqualFold(filepath.Base(filepath.Clean(dir)), "cache") {
 			addClaudeCacheWatches(fsw, dir, watchedDirs)
@@ -416,7 +417,9 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 						deferredDirs = append(deferredDirs, entry)
 						continue
 					}
-					watchOnce(entry[0], entry[1])
+					if watchOnce(entry[0], entry[1]) && entry[1] == "plugin" {
+						w.watchExistingPluginFolders(entry[0])
+					}
 				}
 			}
 			w.processPending(ctx)
@@ -1093,6 +1096,13 @@ func (w *InstallWatcher) quarantineAssetWith(ctx context.Context, evt InstallEve
 	if err != nil {
 		w.emitQuarantineFailure(ctx, evt.Path, err)
 		return
+	}
+	if category, _, nested := strings.Cut(evt.Name, "/"); nested && evt.Type == InstallPlugin {
+		// A plugin in a category folder keeps its category in quarantine
+		// (plugins/<connector>/<category>/<name>), so "plugin restore
+		// <category>/<name>" finds it and web/x and memx/x don't share one
+		// slot (GAP-2464).
+		plan.QuarantinePath = filepath.Join(filepath.Dir(plan.QuarantinePath), filepath.Base(category), physicalName)
 	}
 	record, err := w.store.CreateQuarantineRecord(ctx, audit.CreateQuarantineRecordInput{
 		TargetType: evt.Type.String(), TargetName: evt.Name,

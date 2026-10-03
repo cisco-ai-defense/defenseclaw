@@ -2358,6 +2358,11 @@ def _assert_connector_plugin_identities_unambiguous(
     registry_cache: PluginRegistryCache | None = None,
 ) -> None:
     """Preflight all configured roots without collapsing physical aliases."""
+    if connector_paths.normalize(connector) == "hermes":
+        # GAP-2463: Hermes lists its own plugin sources: category folders
+        # (~/.hermes/plugins/platforms) are containers, not plugins, and a
+        # user plugin overrides a bundled one with the same id.
+        return
     claimed = PluginInstallClaims()
     for root in _plugin_roots_for_connector(app, connector):
         for entry in discover_plugin_directories(
@@ -4611,6 +4616,10 @@ def restore(app: AppContext, name: str, restore_path: str, connector_flag: str) 
     plugin_name = _validated_plugin_argument(name)
 
     pe = PolicyEngine(app.store)
+    alias_scope = _resolve_connector_scope(app, connector_flag) if connector_flag else ""
+    if "/" in name.strip("/\\"):
+        # GAP-2464: "web/x" names the category plugin itself, not a flat "x".
+        plugin_name = _quarantined_plugin_alias(pe, name, alias_scope) or plugin_name
     targets = _resolve_plugin_quarantine_restore_scopes(
         app,
         pe,
@@ -4626,28 +4635,35 @@ def restore(app: AppContext, name: str, restore_path: str, connector_flag: str) 
         raise SystemExit(1)
 
     pe_enforcer = PluginEnforcer(app.cfg.quarantine_dir)
-    existing_targets = [
-        (target_connector, entry)
-        for target_connector, entry in targets
-        if pe_enforcer.is_quarantined(plugin_name, target_connector)
-    ]
+
+    def quarantined_targets() -> list[tuple[str, Any, str]]:
+        """(action scope, entry, connector folder holding the copy)."""
+        scoped = {target_connector for target_connector, _ in targets}
+        found = []
+        for target_connector, entry in targets:
+            slot = target_connector if pe_enforcer.is_quarantined(plugin_name, target_connector) else None
+            if slot is None and not target_connector and entry is not None and entry.source_path:
+                # GAP-2464: the gateway watcher records a global action but
+                # keeps the copy under the connector it watches for.
+                owner = _connector_for_plugin_path(app, entry.source_path)
+                if owner and owner not in scoped and pe_enforcer.is_quarantined(plugin_name, owner):
+                    slot = owner
+            if slot is not None:
+                found.append((target_connector, entry, slot))
+        return found
+
+    existing_targets = quarantined_targets()
     if not existing_targets:
-        alias = _quarantined_plugin_alias(
-            pe, name, _resolve_connector_scope(app, connector_flag) if connector_flag else ""
-        )
+        alias = _quarantined_plugin_alias(pe, name, alias_scope)
         if alias and alias != plugin_name:
             plugin_name = alias
             targets = _resolve_plugin_quarantine_restore_scopes(app, pe, plugin_name, connector_flag)
-            existing_targets = [
-                (target_connector, entry)
-                for target_connector, entry in targets
-                if pe_enforcer.is_quarantined(plugin_name, target_connector)
-            ]
+            existing_targets = quarantined_targets()
     if not existing_targets:
         click.echo(f"error: {plugin_name!r} is not quarantined", err=True)
         raise SystemExit(1)
 
-    for resolved_connector, entry in existing_targets:
+    for resolved_connector, entry, slot_connector in existing_targets:
         target_restore_path = restore_path
         if not target_restore_path:
             if entry is None or not entry.source_path:
@@ -4683,8 +4699,12 @@ def restore(app: AppContext, name: str, restore_path: str, connector_flag: str) 
                 )
                 raise SystemExit(1)
         try:
+            # A category plugin (web/x) has no root-level identity to collide
+            # with; restore still refuses an existing destination.
             existing = [
-                match for root in allowed_roots if (match := resolve_plugin_identity(root, plugin_name)) is not None
+                match
+                for root in allowed_roots
+                if "/" not in plugin_name and (match := resolve_plugin_identity(root, plugin_name)) is not None
             ]
         except PluginIdentityError as exc:
             raise click.ClickException(str(exc)) from exc
@@ -4699,7 +4719,7 @@ def restore(app: AppContext, name: str, restore_path: str, connector_flag: str) 
             plugin_name,
             target_restore_path,
             allowed_roots=allowed_roots,
-            connector=resolved_connector,
+            connector=slot_connector,
         ):
             click.echo(
                 f"error: restore failed for {plugin_name!r}"
@@ -4711,7 +4731,7 @@ def restore(app: AppContext, name: str, restore_path: str, connector_flag: str) 
         suffix = f" (connector={resolved_connector})" if resolved_connector else ""
         listed = _hermes_listed_id(
             (entry.source_path if entry is not None else "") or target_restore_path,
-            resolved_connector,
+            slot_connector,
         )
         click.echo(f"[plugin] {_plugin_label(listed, plugin_name)} restored to {target_restore_path}{suffix}")
 
