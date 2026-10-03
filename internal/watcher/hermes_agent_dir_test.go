@@ -58,6 +58,10 @@ func TestWatcherDoesNotCreateHermesAgentCheckout(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(plugin, "__init__.py"), []byte("x = 1\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// Hermes loads a plugin folder only with its manifest (GAP-2471).
+	if err := os.WriteFile(filepath.Join(plugin, "plugin.yaml"), []byte("name: late-plugin\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	deadline := time.After(5 * time.Second)
 	for {
