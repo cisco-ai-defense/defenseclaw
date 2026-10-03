@@ -4515,22 +4515,30 @@ function Assert-DefenseClawPathAcl {
     # the surrounding context in a DART, and throw the FIRST fatal verdict in
     # reading order so the message a non-advisory caller sees is exactly the one
     # it saw before this function was split in two.
+    $strict = Test-DefenseClawTrustStrictAncestors
     $fatal = $null
     foreach ($verdict in $verdicts) {
         $downgradable = switch ($verdict.Kind) {
             # Access verdicts (foreign SIDs on managed paths) downgrade
             # EITHER when the caller passed -AdvisoryUntrustedAccess
             # (ancestor-advisory posture, same as before) OR when the
-            # canonical re-stamp ran as part of this call. The re-stamp
-            # replaces the DACL with the canonical shape and forces
-            # SE_DACL_PROTECTED, so a surviving Access verdict means a
-            # concurrent policy writer (GPO template, AV engine, platform
-            # installer) is actively re-admitting the SID. Install must
-            # not fail-closed on that: the trust envelope is still
-            # Administrators + SYSTEM at minimum, and the alternative is
-            # an unprotected endpoint running without the DefenseClaw
-            # gateway at all.
-            'Access' { $advisory -or $selfHealed }
+            # canonical re-stamp ran as part of this call OR, in
+            # non-strict managed_enterprise mode, unconditionally.
+            #
+            # The unconditional downgrade covers the case where
+            # Set-Acl/SetNamedSecurityInfo silently dropped
+            # SE_DACL_PROTECTED and the Assert-DefenseClawCanonicalRawPathAcl
+            # self-heal (icacls /inheritance:r) also could not force the
+            # protected flag (Group Policy, filesystem driver, or a WDAC
+            # policy actively re-admitting the ACE). The file then
+            # inherits BUILTIN\Users read from %ProgramData% defaults,
+            # which this verdict chain would otherwise refuse. The trust
+            # envelope is still SYSTEM/Administrators at minimum; the
+            # alternative is leaving the endpoint unprotected because an
+            # inherited Users read ACE is on an admin-only file.
+            # Operators who want fail-closed posture restore it with
+            # DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS=1.
+            'Access' { $advisory -or $selfHealed -or (-not $strict) }
             'Contract' { $advisory -and $selfHealed }
             default { $false }
         }
