@@ -1999,8 +1999,9 @@ def _prompt_first_run_judge_llm_config(
         )
         return provider, model, "", "", base_url, {}
 
+    same_provider = (provider or "").strip().lower() == (llm_provider or "").strip().lower()
     model = pick_model(
-        current=llm_model or "",
+        current=(llm_model or "") if same_provider else "",
         provider=provider,
         instance=None,
         flag_value=None,
