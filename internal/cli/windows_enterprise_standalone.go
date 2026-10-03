@@ -441,6 +441,10 @@ func applyWindowsEnterpriseInstallerReport(
 	if !report.Installed {
 		// Nothing inspects verdicts once the deployment is gone (GAP-2257).
 		result.Inspection.Local = "disabled"
+	} else if !report.GatewayReady {
+		// The gateway inspects verdicts; while it is not ready, report what
+		// Linux and macOS report when it does not answer (GAP-2285).
+		result.Inspection.Local = "unknown"
 	}
 	if opts != nil {
 		opts.deploymentTrustMode = windowsEnterpriseRecordedTrustMode(report.TrustMode)

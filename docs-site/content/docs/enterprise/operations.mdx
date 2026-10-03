@@ -158,8 +158,11 @@ The two summary fields are computed differently on each OS:
   always `0`.
 - **Inspection.** On Windows, `inspection.ai_defense` is `ok` when AI Defense
   is enabled in the config and the gateway is ready. It does not test the key
-  or the network. On Linux and macOS the lifecycle reads both fields from the
-  gateway's `/health`: `local` is `active`, `disabled` or `unknown`, and
+  or the network. `inspection.local` is `active` when the gateway is ready,
+  `unknown` while it is not (for example while its service is stopped), and
+  `disabled` when no deployment is installed. On Linux and macOS the
+  lifecycle reads both fields from the gateway's `/health`: `local` is
+  `active`, `disabled` or `unknown`, and
   `ai_defense` is `disabled`, `ok`, `unavailable:<code>` or `unknown` (the
   gateway did not answer). The gateway's own
   `/health` guardrail detail carries `ai_defense_available` when AI Defense
