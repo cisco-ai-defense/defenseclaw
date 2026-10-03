@@ -275,12 +275,31 @@ def _has_any_arg(args: tuple[str, ...], *needles: str) -> bool:
 def _secret_arg_indexes(args: tuple[str, ...]) -> set[int]:
     secret_indexes: set[int] = set()
     for index, arg in enumerate(args):
-        if arg.startswith("--") and _flag_is_secret(arg.split("=", 1)[0]):
-            if "=" not in arg and index + 1 < len(args):
-                secret_indexes.add(index + 1)
-            elif "=" in arg:
+        if not arg.startswith("--"):
+            continue
+        flag, has_value, value = arg.partition("=")
+        if not _flag_is_secret(flag):
+            continue
+        if has_value:
+            if not env_name_value_in_clear(flag, value):
                 secret_indexes.add(index)
+        elif index + 1 < len(args) and not env_name_value_in_clear(flag, args[index + 1]):
+            secret_indexes.add(index + 1)
     return secret_indexes
+
+
+_ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def env_name_value_in_clear(flag: str, value: str) -> bool:
+    """Whether a ``--*-env`` flag's value is an env var NAME, safe to show (GAP-2540).
+
+    ``--api-key-env AID_KEY`` names the variable that holds the key; it is
+    not the key. A value that does not look like a name (a key pasted into
+    the field by mistake) stays redacted.
+    """
+
+    return flag.lower().replace("-", "_").endswith("_env") and bool(_ENV_VAR_NAME_RE.match(value))
 
 
 def _flag_is_secret(flag: str) -> bool:
