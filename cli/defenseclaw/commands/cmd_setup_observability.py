@@ -1056,6 +1056,7 @@ def _test_v8_destination(
 ) -> None:
     from defenseclaw.config_inspect import ConfigInspectError, inspect_v8_config
     from defenseclaw.observability.destination_test import (
+        NETWORK_PATH_NOTE,
         DestinationTestError,
         canonical_local_compliance_recorder,
         run_destination_test,
@@ -1085,6 +1086,7 @@ def _test_v8_destination(
     click.echo(f"  {result.destination}: {result.mode} succeeded")
     click.echo(f"  protocol={result.protocol}; endpoints={result.endpoint_count}")
     click.echo(f"  probe_id={result.probe_id}; compliance activity recorded locally")
+    click.echo(f"  {NETWORK_PATH_NOTE}")
 
 
 def _unknown_destination_message(name: str, effective: dict) -> str:

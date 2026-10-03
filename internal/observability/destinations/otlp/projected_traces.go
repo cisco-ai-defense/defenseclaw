@@ -210,7 +210,9 @@ func (adapter *ProjectedTraceAdapter) deliverHTTP(
 		case wroteRequest.Load():
 			return failedResult(delivery.OutcomeAmbiguous, delivery.FailureCodeAcknowledgementLost)
 		default:
-			return failedResult(delivery.OutcomeTransient, transportFailureCode(err))
+			code := transportFailureCode(err)
+			logTransportFailure(adapter.destination, observability.SignalTraces, code, spanCount)
+			return failedResult(delivery.OutcomeTransient, code)
 		}
 	}
 	if response == nil {
