@@ -1346,6 +1346,7 @@ def _native_delivery_summary(cfg, *, audit_db: str = ""):
     """Return the shared bounded, path-free native OTLP evidence summary."""
 
     from defenseclaw.observability.custody_status import (
+        gateway_api_addr,
         inspect_connector_custody,
         summarize_native_delivery,
     )
@@ -1363,7 +1364,9 @@ def _native_delivery_summary(cfg, *, audit_db: str = ""):
     database = database or str(getattr(cfg, "audit_db", "") or "")
     if not database:
         database = os.path.join(data_dir, "audit.db")
-    return summarize_native_delivery(inspect_connector_custody(database, data_dir))
+    return summarize_native_delivery(
+        inspect_connector_custody(database, data_dir, api_addr=gateway_api_addr(cfg))
+    )
 
 
 def _print_native_delivery_status(summary, *, configured: set[str] | None = None) -> None:

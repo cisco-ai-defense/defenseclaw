@@ -9079,7 +9079,7 @@ def _check_observability(cfg, r: _DoctorResult, *, live_health: dict | None = No
     """Inspect v8 status and exercise each enabled Galileo runtime route."""
     from defenseclaw.config import config_path_for_data_dir
     from defenseclaw.config_inspect import ConfigInspectError, ConfigInspectTimeoutError
-    from defenseclaw.observability.custody_status import inspect_connector_custody
+    from defenseclaw.observability.custody_status import gateway_api_addr, inspect_connector_custody
     from defenseclaw.observability.v8_config import V8ConfigError
     from defenseclaw.observability.v8_status import inspect_v8_operator_status
 
@@ -9115,6 +9115,7 @@ def _check_observability(cfg, r: _DoctorResult, *, live_health: dict | None = No
         inspect_connector_custody(
             status.local_path or getattr(cfg, "audit_db", os.path.join(cfg.data_dir, "audit.db")),
             cfg.data_dir,
+            api_addr=gateway_api_addr(cfg),
         ),
         r,
         configured=_otlp_configured_connectors(cfg),
