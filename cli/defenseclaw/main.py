@@ -486,6 +486,49 @@ def _plain_help_tree(command: click.Command, seen: set[int] | None = None) -> No
 _plain_help_tree(cli)
 
 
+_NB_HYPHEN = "\u2011"
+
+
+class _HelpFormatter(click.HelpFormatter):
+    """Help output that never wraps a line at a hyphen.
+
+    Click's wrapper splits 'defenseclaw-gateway', '~/.defenseclaw/last-run.log'
+    or 'log-activity' across two lines, so they can't be read or copied whole.
+    Hyphens are non-breaking while a block wraps and plain again in the output.
+    """
+
+    def write_text(self, text: str) -> None:
+        start = len(self.buffer)
+        super().write_text(text.replace("-", _NB_HYPHEN))
+        self._restore_hyphens(start)
+
+    def write_dl(self, rows, col_max: int = 30, col_spacing: int = 2) -> None:
+        start = len(self.buffer)
+        super().write_dl([(term, desc.replace("-", _NB_HYPHEN)) for term, desc in rows], col_max, col_spacing)
+        self._restore_hyphens(start)
+
+    def _restore_hyphens(self, start: int) -> None:
+        self.buffer[start:] = [part.replace(_NB_HYPHEN, "-") for part in self.buffer[start:]]
+
+
+class _HelpContext(click.Context):
+    formatter_class = _HelpFormatter
+
+
+def _whole_words_help_tree(command: click.Command, seen: set[int] | None = None) -> None:
+    """Give every command the help formatter that keeps hyphenated words whole."""
+    seen = set() if seen is None else seen
+    if id(command) in seen:
+        return
+    seen.add(id(command))
+    command.context_class = _HelpContext
+    for sub in (getattr(command, "commands", None) or {}).values():
+        _whole_words_help_tree(sub, seen)
+
+
+_whole_words_help_tree(cli)
+
+
 def _ensure_codeguard_skill(cfg) -> None:
     """Deprecated no-op: native CodeGuard assets are explicit opt-in only."""
     _ = cfg

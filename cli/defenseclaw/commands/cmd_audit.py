@@ -23,7 +23,7 @@ from defenseclaw.context import AppContext, pass_context
 
 @click.group("audit")
 def audit() -> None:
-    """Audit trail helpers: export, findings, gateway logs, activity logging.
+    """Audit trail helpers: export, findings and gateway logs.
 
     \b
     Export the audit log, config changes included (action config-update):
@@ -33,7 +33,6 @@ def audit() -> None:
     'export' and 'findings' run 'defenseclaw-gateway audit <command>' with the
     same options. Show the newest gateway or watchdog log lines:
         defenseclaw audit logs [--source watchdog] [-n 50] [--grep TEXT]
-    'log-activity' records operator/config activity.
     """
 
 
@@ -155,16 +154,17 @@ def audit_logs(app: AppContext, source: str, line_count: int, pattern: str | Non
         click.echo(line)
 
 
-@audit.command("log-activity")
+# Internal helper (it used to back TUI config saves); hidden from --help.
+@audit.command("log-activity", hidden=True)
 @click.option(
     "--payload-file",
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
     required=True,
-    help="JSON payload written by the TUI on config save (before/after snapshots).",
+    help="JSON file with the change: action, target and before/after snapshots.",
 )
 @pass_context
 def audit_log_activity(app: AppContext, payload_file: Path) -> None:
-    """Record a config or operator mutation via Logger.log_activity."""
+    """Record a config change from a JSON payload as an audit event (internal)."""
     raw = payload_file.read_text(encoding="utf-8")
     try:
         data = json.loads(raw)
