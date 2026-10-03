@@ -5,7 +5,11 @@
 
 package cli
 
-import "golang.org/x/sys/windows"
+import (
+	"errors"
+
+	"golang.org/x/sys/windows"
+)
 
 func platformFreeDiskBytes(dir string) (uint64, error) {
 	path, err := windows.UTF16PtrFromString(dir)
@@ -17,4 +21,8 @@ func platformFreeDiskBytes(dir string) (uint64, error) {
 		return 0, err
 	}
 	return free, nil
+}
+
+func isDiskFullError(err error) bool {
+	return errors.Is(err, windows.ERROR_DISK_FULL) || errors.Is(err, windows.ERROR_HANDLE_DISK_FULL)
 }

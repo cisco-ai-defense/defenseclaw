@@ -51,6 +51,20 @@ func httpStatusFailureCode(status int) delivery.FailureCode {
 	}
 }
 
+// httpStatusFailureClass classifies a non-2xx OTLP/HTTP response the same
+// way the log and trace HTTP senders do (GAP-1994): 401/403 authentication,
+// 408/425/429/5xx transient, any other refusal permanent_payload.
+func httpStatusFailureClass(status int) delivery.FailureClass {
+	switch httpStatusFailureCode(status) {
+	case delivery.FailureCodeHTTPAuthentication:
+		return delivery.FailureClassAuthentication
+	case delivery.FailureCodeHTTPRetryable:
+		return delivery.FailureClassTransient
+	default:
+		return delivery.FailureClassPermanentPayload
+	}
+}
+
 // transportFailureCode names an OTLP/HTTP round trip that returned no
 // response and did not write the request.
 func transportFailureCode(err error) delivery.FailureCode {

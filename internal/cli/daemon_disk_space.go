@@ -5,6 +5,7 @@ package cli
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
 )
@@ -14,18 +15,53 @@ import (
 // WAL, gateway.log).
 const gatewayMinFreeDiskBytes uint64 = 32 << 20
 
+// gatewayDiskProbeBytes is written (and removed) in the data folder before a
+// start or restart. APFS reports tens of MB free that no file can use: dd
+// already fails with ENOSPC at 32-62 MB reported free, so the reported number
+// alone let a restart stop the gateway on a full disk (GAP-1813).
+const gatewayDiskProbeBytes = 4 << 20
+
 // dataDirFreeBytes reports the free space for dir; tests replace it.
 var dataDirFreeBytes = platformFreeDiskBytes
+
+// dataDirWriteProbe writes a small temporary file in dir; tests replace it.
+var dataDirWriteProbe = probeDataDirWrite
+
+func probeDataDirWrite(dir string) error {
+	file, err := os.CreateTemp(dir, ".disk-probe-*")
+	if err != nil {
+		return err
+	}
+	name := file.Name()
+	defer os.Remove(name)
+	_, err = file.Write(make([]byte, gatewayDiskProbeBytes))
+	if err == nil {
+		err = file.Sync()
+	}
+	if closeErr := file.Close(); err == nil {
+		err = closeErr
+	}
+	return err
+}
 
 // gatewayLowDiskProblem describes a disk too full for the gateway, or "" when
 // there is enough space or the free space cannot be read.
 func gatewayLowDiskProblem(dataDir string) string {
 	free, err := dataDirFreeBytes(dataDir)
-	if err != nil || free >= gatewayMinFreeDiskBytes {
+	if err != nil {
 		return ""
 	}
-	return fmt.Sprintf("the disk holding %s is full (%d MB free; the gateway needs at least %d MB)",
-		dataDir, free>>20, gatewayMinFreeDiskBytes>>20)
+	if free < gatewayMinFreeDiskBytes {
+		return fmt.Sprintf("the disk holding %s is full (%d MB free; the gateway needs at least %d MB)",
+			dataDir, free>>20, gatewayMinFreeDiskBytes>>20)
+	}
+	// Only a full disk refuses: a probe that fails for any other reason (a
+	// missing or read-only folder) leaves the start to report that itself.
+	if err := dataDirWriteProbe(dataDir); err != nil && isDiskFullError(err) {
+		return fmt.Sprintf("the disk holding %s is full (%d MB reported free, but a %d MB test file could not be written)",
+			dataDir, free>>20, gatewayDiskProbeBytes>>20)
+	}
+	return ""
 }
 
 // gatewayDiskFullError refuses start and restart before they stop or launch
