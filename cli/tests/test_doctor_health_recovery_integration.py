@@ -743,6 +743,14 @@ def test_moved_audit_store_with_one_carried_over_entry_uses_singular(tmp_path) -
     )
 
 
+def test_moved_audit_store_without_note_names_the_block_allow_entries(tmp_path) -> None:
+    # GAP-2429: a store moved by an earlier build has no note; "check them" had no antecedent.
+    summary = cmd_doctor._moved_store_block_allow_summary(tmp_path / "audit.db.corrupt-20261002T044914Z")
+    assert "cannot tell whether the old block/allow entries were carried over" in summary
+    assert "check your MCP, skill, plugin and tool block/allow entries with defenseclaw mcp list" in summary
+    assert "check them" not in summary
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX mode custody regression")
 def test_audit_check_and_repair_plan_reject_world_readable_database(tmp_path) -> None:
     data_dir = _private_data_dir(tmp_path)
