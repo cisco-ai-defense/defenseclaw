@@ -153,6 +153,9 @@ _SETUP_BATCH_READINESS_KEY = "defenseclaw._setup_batch_readiness_connectors"
 _SETUP_BATCH_REQUIRED_KEY = "defenseclaw._setup_batch_required_connectors"
 # Peers this setup run skipped because their executable did not verify.
 _SETUP_UNVERIFIED_PEERS_KEY = "defenseclaw._setup_unverified_peers"
+# Peers the restarted gateway refused in this setup run. They stay configured
+# but are not guarded until setup runs for them again (GAP-2013).
+_SETUP_RUNTIME_SKIPPED_PEERS_KEY = "defenseclaw._setup_runtime_skipped_peers"
 _SETUP_BATCH_ROLLBACK_KEY = "defenseclaw._setup_batch_rollback_snapshot"
 # Deferred per-connector audit records for a restarting bare batch. The result
 # callback emits these only after the gateway is healthy, so a fresh quickstart
@@ -5461,6 +5464,22 @@ def _remember_unverified_setup_peers(names: Any) -> None:
     ctx.meta[_SETUP_UNVERIFIED_PEERS_KEY] = frozenset(peers)
 
 
+def _remember_runtime_skipped_peers(names: Any) -> None:
+    ctx = click.get_current_context(silent=True)
+    if ctx is None or not names:
+        return
+    peers = set(ctx.meta.get(_SETUP_RUNTIME_SKIPPED_PEERS_KEY) or ())
+    peers.update(normalize_connector(name) for name in names if name)
+    ctx.meta[_SETUP_RUNTIME_SKIPPED_PEERS_KEY] = frozenset(peers)
+
+
+def _runtime_skipped_setup_peers() -> frozenset[str]:
+    ctx = click.get_current_context(silent=True)
+    if ctx is None:
+        return frozenset()
+    return frozenset(ctx.meta.get(_SETUP_RUNTIME_SKIPPED_PEERS_KEY) or ())
+
+
 def _unverified_setup_peers() -> frozenset[str]:
     try:
         ctx = click.get_current_context(silent=True)
@@ -9961,12 +9980,17 @@ def _print_observability_summary(
         except Exception:  # noqa: BLE001 — fall back to single-connector view.
             actives = []
     multi = len(actives) > 1
+    # Peers the restarted gateway refused stay configured but are not guarded
+    # now; the summary must not list them as connectors in force (GAP-2013).
+    refused = _runtime_skipped_setup_peers()
+    unguarded = [c for c in actives if c in refused and c != connector] if multi else []
+    guarded = [c for c in actives if c not in unguarded]
 
     click.echo()
     click.echo("  Summary")
     click.echo("  ───────")
     if multi:
-        mode_row = ("connectors", ", ".join(actives))
+        mode_row = ("connectors", ", ".join(guarded))
     else:
         mode_row = ("active connector", connector)
     rows = [
@@ -9985,6 +10009,8 @@ def _print_observability_summary(
         ("enforcement", enforcement_label),
         ("ai_discovery", f"enabled ({cfg.ai_discovery.mode})" if cfg else "enabled"),
     ]
+    if unguarded:
+        rows.insert(2, ("not guarded now", f"{', '.join(unguarded)} (configured; the gateway did not activate it)"))
     if connector == "omnigent":
         rows.extend(
             [
@@ -10029,7 +10055,20 @@ def _print_observability_summary(
         click.echo(f"    • Change this connector's mode: defenseclaw setup {setup_slug} --mode observe|action")
     click.echo()
     if multi:
-        click.echo(f"  This install now has {len(actives)} connectors: {', '.join(actives)}.")
+        if unguarded:
+            click.echo(
+                f"  This install now has {len(actives)} connectors configured; "
+                f"{len(guarded)} guarded now: {', '.join(guarded)}."
+            )
+            fixes = "; ".join(
+                f"defenseclaw setup {'claude-code' if c == 'claudecode' else c}" for c in unguarded
+            )
+            click.echo(
+                f"  Not guarded now: {', '.join(unguarded)}. "
+                f"To guard {'it' if len(unguarded) == 1 else 'them'} again, run: {fixes}"
+            )
+        else:
+            click.echo(f"  This install now has {len(actives)} connectors: {', '.join(actives)}.")
         click.echo("  To revert just this connector (the others keep running):")
         click.echo(f"    defenseclaw setup remove {setup_slug}")
         click.echo("  Or keep it configured but stop enforcing it:")
@@ -12195,9 +12234,18 @@ def _setup_guardrail_connector_alias(
 
     if replaced:
         click.echo(f"  --replace removes {len(replaced)} hook connector(s): {', '.join(replaced)}")
+        # The gateway tears the hooks down on its next start, so say when
+        # that is in every mode, not just in the prompt (GAP-2117).
+        if restart:
+            click.echo("  Their hooks are torn down when this setup restarts the gateway.")
+        else:
+            click.echo(
+                "  Their hooks stay installed until the gateway restarts "
+                "(--no-restart). Remove them now with: defenseclaw-gateway restart"
+            )
     if not (yes or non_interactive):
         if replaced:
-            question = f"  Replace them with {label}? Their hooks are torn down when the gateway restarts."
+            question = f"  Replace them with {label}?"
             proceed = click.confirm(question, default=False)
         else:
             proceed = click.confirm(f"  Configure {label} guardrail now?", default=True)
@@ -14760,6 +14808,7 @@ def _wait_for_connector_runtime(
                 ux.subhead(f"Continuing with the rest of the roster. To guard it again, run: {rerun}")
                 expected = expected - refused
                 skipped_peers.update(refused)
+                _remember_runtime_skipped_peers(refused)
                 tolerated = frozenset(tolerated | refused)
                 ordered = tuple(name for name in ordered if name not in refused)
                 snapshot_ready = _connector_runtime_snapshot_ready(
