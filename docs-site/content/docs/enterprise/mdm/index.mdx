@@ -391,7 +391,10 @@ MDMs ask two different questions. Answer each with the mechanism that fits.
 
 The Windows marker is written only after a successful lifecycle run. The
 Linux package database records the package even when its post-install
-`ensure` failed, so use `detect.sh` or `verify` for the real state. Standard
+`ensure` failed, so use `detect.sh` or `verify` for the real state. The
+macOS pkg receipt is the reverse: a pkg whose post-install `ensure` failed
+records no receipt, and finishing with `ensure --from-package` adds none, so
+after you fix the cause install the pkg again (or redeploy it). Standard
 users cannot write any of the markers. Only `verify` proves that the services, protected
 files, hooks and machine policy are intact.
 

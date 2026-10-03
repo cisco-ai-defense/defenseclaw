@@ -1573,3 +1573,12 @@ def test_help_names_galileo_and_add_help_lists_every_preset_id() -> None:
     flat = " ".join(add.output.split())
     listed = flat.split("Presets:", 1)[1].split("Examples:", 1)[0]
     assert {item.strip() for item in listed.split(",")} == set(preset_choices())
+
+
+def test_observability_help_uses_plain_wording() -> None:
+    # GAP-2376: the command list must not show the internal "canonical" term.
+    result = CliRunner().invoke(observability, ["--help"])
+    assert result.exit_code == 0, result.output
+    assert "canonical" not in result.output.lower()
+    assert "Turn a disabled destination back on." in result.output
+    assert "Delete a destination you added." in result.output

@@ -211,9 +211,11 @@ creates `_defenseclaw`, validates the config, lays out the files, writes the
 LaunchDaemons, starts them in order, verifies, and rolls back on any failure.
 A failed apply fails the pkg install, so `installer` and your MDM report it.
 The result is in `last-package-result.json`, and `/var/log/install.log`
-names its first error and the `ensure --from-package` command that finishes
-the install once you fix it. The pkg receipt is
-`com.cisco.defenseclaw.enterprise`.
+names its first error. Fix it, then install the pkg again (or let your MDM
+redeploy it). The pkg receipt is `com.cisco.defenseclaw.enterprise`, and a
+failed install records none. `ensure --from-package` also finishes the
+install, but it records no receipt either, so receipt-based inventory
+reports the Mac as not installed until the pkg installs successfully.
 
 If you did not stage a config, the pkg installs the default, which protects
 nothing. Apply your config afterward. Either copy it to
