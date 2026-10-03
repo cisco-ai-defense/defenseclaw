@@ -230,3 +230,28 @@ func TestUnixLifecycleLockWaitOutOfRange(t *testing.T) {
 		}
 	}
 }
+
+// GAP-2030: repair restarts the services even on a healthy deployment, and
+// its output says so; with --no-start (not_started) it does not claim it.
+func TestRepairOutputSaysItRestartedTheServices(t *testing.T) {
+	const note = "restarted the DefenseClaw services to re-apply the deployment"
+	healthy := enterprisestatus.New(enterpriseunix.ActionRepair, "standalone", "linux", "1.0.0")
+	healthy.Finish("linux", 0)
+	var out bytes.Buffer
+	if err := printLifecycleResult(&out, healthy, false); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "nothing to repair") || !strings.Contains(out.String(), note) {
+		t.Fatalf("healthy repair output:\n%s", out.String())
+	}
+	stopped := enterprisestatus.New(enterpriseunix.ActionRepair, "standalone", "linux", "1.0.0")
+	stopped.AddWarning("not_started", "installed without starting the services (--no-start)")
+	stopped.Finish("linux", 0)
+	out.Reset()
+	if err := printLifecycleResult(&out, stopped, false); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out.String(), note) {
+		t.Fatalf("--no-start repair claims a restart:\n%s", out.String())
+	}
+}

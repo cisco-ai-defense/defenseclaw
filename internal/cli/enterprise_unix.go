@@ -102,7 +102,7 @@ arguments, 75 another lifecycle run holds the lock.`,
 	summaries := map[string]string{
 		"install":            "Install the deployment (refuses when one is already installed)",
 		"upgrade":            "Upgrade an installed deployment from a new payload or package",
-		"repair":             "Re-apply the installed deployment's files, modes and services",
+		"repair":             "Re-apply the installed deployment's files, modes and services (restarts the services)",
 		"ensure":             "Install, upgrade or repair as needed; a no-op when nothing changed",
 		"reconcile":          "Run one immediate hook guardian reconcile",
 		"rotate-credentials": "Rotate the per-user credential key, moving every user before the new key takes effect",
