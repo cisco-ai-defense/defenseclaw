@@ -134,8 +134,49 @@ def test_overview_keeps_runtime_health_separate_from_native_delivery_truth() -> 
     rendered = DefenseClawTUI._overview_observability_text(view)
     assert "collector/runtime health does not prove accepted delivery" in rendered
     assert "bounded 24h, truncated; counts partial" in rendered
-    for label in ("all-drop-only", "partial-drop-only", "accepted", "no-evidence"):
-        assert label in rendered
+    assert "Claude Code (claudecode): partial drop-only evidence (1/3 batches)" in rendered
+    assert "OpenCode (opencode): accepted native delivery observed (3 batches)" in rendered
+
+
+def test_overview_native_delivery_line_does_not_repeat_state_and_hangs_wrapped_text() -> None:
+    """GAP-2545: no "accepted · accepted ..." and no flush-left wrapped lines."""
+
+    from defenseclaw.tui.app import DefenseClawTUI
+    from rich.console import Console, Group
+
+    model = _model()
+    model.set_native_delivery_summary(
+        NativeDeliverySummary(
+            state="available",
+            reason="",
+            observation_window_hours=24,
+            connectors=(
+                NativeDeliveryStatus(
+                    connector="claudecode",
+                    default=True,
+                    state="accepted",
+                    normalized_batches=154,
+                    drop_only_batches=122,
+                    detail=(
+                        "accepted native delivery observed (154 batches; 122 held only log/metric "
+                        "records that DefenseClaw does not map, skipped by design)"
+                    ),
+                ),
+            ),
+        )
+    )
+    view = type("OverviewView", (), {"overview_model": model})()
+    for width in (80, 120):
+        console = Console(width=width, record=True, color_system=None)
+        console.print(Group(*DefenseClawTUI._overview_native_delivery_renderables(view)))
+        lines = [line for line in console.export_text().splitlines() if line.strip()]
+        item = next(i for i, line in enumerate(lines) if "Claude Code (claudecode):" in line)
+        assert "accepted · accepted" not in lines[item]
+        assert lines[item].startswith("  Claude Code (claudecode): accepted native delivery observed")
+        detail_col = lines[item].index("accepted")
+        assert len(lines) > item + 1, "the detail wraps at this width"
+        for line in lines[item + 1 :]:
+            assert line[:detail_col].strip() == "", line
 
 
 def test_overview_standalone_hint_and_notices() -> None:

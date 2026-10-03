@@ -9820,6 +9820,14 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             return lines
         from defenseclaw.observability.custody_status import native_delivery_display_rows
 
+        # The detail already names the state ("accepted native delivery
+        # observed ..."), so the state word is only a color here, and a
+        # grid gives wrapped detail a hanging indent instead of lines flush
+        # with the panel edge (GAP-2545).
+        rows = Table.grid(padding=(0, 1))
+        rows.add_column(width=1)
+        rows.add_column(no_wrap=True)
+        rows.add_column(overflow="fold")
         for label, item in native_delivery_display_rows(summary.connectors):
             instance = f" · {label}" if label else ""
             style = {
@@ -9827,13 +9835,12 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 "partial_drop_only": TOKENS.accent_amber,
                 "accepted": TOKENS.accent_green,
             }.get(item.state, TOKENS.text_muted)
-            lines.append(
-                Text(
-                    f"  {friendly_connector_name(item.connector)} ({item.connector}){instance}: "
-                    f"{item.state.replace('_', '-')} · {item.detail}",
-                    style=style,
-                )
+            rows.add_row(
+                "",
+                Text(f"{friendly_connector_name(item.connector)} ({item.connector}){instance}:", style=style),
+                Text(item.detail, style=style),
             )
+        lines.append(rows)
         return lines
 
     def _overview_observability_panel(self) -> RenderableType:
@@ -10014,8 +10021,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             for label, item in native_delivery_display_rows(summary.connectors):
                 instance = f" · {label}" if label else ""
                 delivery_lines.append(
-                    f"    {friendly_connector_name(item.connector)} ({item.connector}){instance}: "
-                    f"{item.state.replace('_', '-')} · {item.detail}"
+                    f"    {friendly_connector_name(item.connector)} ({item.connector}){instance}: {item.detail}"
                 )
         delivery_text = "\n".join(delivery_lines)
         if not rows:
