@@ -809,7 +809,7 @@ def _provider_add_interactive() -> dict[str, Any]:
         ).strip()
         if _NAME_VALIDATION_RE.match(raw_name):
             break
-        click.echo("    Invalid name — use only A-Z a-z 0-9 _ -")
+        ux.echo("    Invalid name — use only A-Z a-z 0-9 _ -")
 
     base_provider_type = (
         click.prompt(
@@ -871,7 +871,7 @@ def _provider_add_interactive() -> dict[str, Any]:
         if not rpo:
             break
         if "=" not in rpo:
-            click.echo("    Expected key=value — skipping.")
+            ux.echo("    Expected key=value — skipping.")
             continue
         request_path_overrides.append(rpo)
 
@@ -961,7 +961,7 @@ def _provider_add_interactive() -> dict[str, Any]:
             if not entry:
                 break
             if "=" not in entry:
-                click.echo("    Expected alias=model-id — skipping.")
+                ux.echo("    Expected alias=model-id — skipping.")
                 continue
             k, _, v = entry.partition("=")
             k, v = k.strip(), v.strip()
@@ -1014,7 +1014,7 @@ def _provider_add_interactive() -> dict[str, Any]:
             if not entry:
                 break
             if "=" not in entry:
-                click.echo("    Expected model=deployment — skipping.")
+                ux.echo("    Expected model=deployment — skipping.")
                 continue
             k, _, v = entry.partition("=")
             k, v = k.strip(), v.strip()
@@ -1029,7 +1029,7 @@ def _provider_add_interactive() -> dict[str, Any]:
         if not e:
             break
         if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", e):
-            click.echo("    Invalid env var name — skipping.")
+            ux.echo("    Invalid env var name — skipping.")
             continue
         env_keys.append(e)
 
@@ -1752,7 +1752,7 @@ def _echo_provider_enforcement_legend(app: AppContext) -> None:
             )
         )
     else:
-        click.echo(
+        ux.echo(
             ux.dim(
                 f"  Active connector {connector!r} is a hook connector: a bound "
                 "custom provider configures DefenseClaw's judge/aux model only — "

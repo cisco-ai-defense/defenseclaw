@@ -399,7 +399,7 @@ def search(app: AppContext, query: str, as_json: bool, allow_remote_fetch: bool)
         argv = _resolve_clawhub_search_argv(query, allow_remote_fetch)
         result = _run_clawhub_process(argv, timeout=30)
     except (OSError, ValueError) as exc:
-        click.echo(
+        ux.echo(
             "error: clawhub not found — install the clawhub binary, or install "
             f"Node.js (npx) and pass --allow-remote-fetch to fetch it ({exc})",
             err=True,
@@ -412,7 +412,7 @@ def search(app: AppContext, query: str, as_json: bool, allow_remote_fetch: bool)
     if result.returncode != 0:
         stderr = result.stderr.strip()
         if _clawhub_unavailable(stderr):
-            click.echo(
+            ux.echo(
                 "error: skill registry unavailable — the 'clawhub' CLI failed to "
                 "load (it may be broken or not installed).\n"
                 "  Try: npx clawhub --version",
@@ -460,7 +460,7 @@ def search(app: AppContext, query: str, as_json: bool, allow_remote_fetch: bool)
         click.echo(json.dumps(rows, indent=2))
         return
 
-    click.echo(ux.dim("ClawHub registry results (remote — not your installed skills):"))
+    ux.echo(ux.dim("ClawHub registry results (remote — not your installed skills):"))
     click.echo(output)
 
 
@@ -1706,7 +1706,7 @@ def _print_skill_scan_policy(
         name, label, held=held, connector=connector if installed else "", installed=installed,
     ) or reason
     first, *steps = (note or "").splitlines() or [""]
-    click.echo(f"        policy: {label}" + (f" — {first}" if first else ""))
+    ux.echo(f"        policy: {label}" + (f" — {first}" if first else ""))
     for step in steps:
         click.echo(f"          {step}")
 
@@ -1911,7 +1911,7 @@ def scan(
         pack_cache: RulePackOverlayCache = {}
         for c in connectors:
             if len(connectors) > 1 and not as_json:
-                click.echo(ux._style(f"\n── connector: {c} ──", fg="cyan"))
+                ux.echo(ux._style(f"\n── connector: {c} ──", fg="cyan"))
             if remote:
                 rows = _scan_all_remote(app, as_json, connector=c)
                 if as_json and any(
@@ -1995,7 +1995,7 @@ def scan(
                 if remote:
                     for match_connector, match_dir in matches:
                         if not as_json:
-                            click.echo(ux._style(f"\n── connector: {match_connector} ──", fg="cyan"))
+                            ux.echo(ux._style(f"\n── connector: {match_connector} ──", fg="cyan"))
                         _scan_via_sidecar(
                             app,
                             target=match_dir,
@@ -2009,7 +2009,7 @@ def scan(
                     return
                 for match_connector, match_dir in matches:
                     if not as_json:
-                        click.echo(ux._style(f"\n── connector: {match_connector} ──", fg="cyan"))
+                        ux.echo(ux._style(f"\n── connector: {match_connector} ──", fg="cyan"))
                     _scan_one_local_skill(
                         app,
                         _build_skill_scanner(
@@ -2044,7 +2044,7 @@ def scan(
                 if as_json:
                     _emit_skill_json_payload(payload)
                 else:
-                    click.echo(
+                    ux.echo(
                         f"SKIPPED: {target} — vendor-bundled skills are "
                         "discovery-only and are not scanned or blocked"
                     )
@@ -2064,7 +2064,7 @@ def scan(
                 if remote:
                     for match_connector, match_dir in matches:
                         if not as_json:
-                            click.echo(ux._style(f"\n── connector: {match_connector} ──", fg="cyan"))
+                            ux.echo(ux._style(f"\n── connector: {match_connector} ──", fg="cyan"))
                         _scan_via_sidecar(
                             app,
                             target=match_dir,
@@ -2078,7 +2078,7 @@ def scan(
                     return
                 for match_connector, match_dir in matches:
                     if not as_json:
-                        click.echo(ux._style(f"\n── connector: {match_connector} ──", fg="cyan"))
+                        ux.echo(ux._style(f"\n── connector: {match_connector} ──", fg="cyan"))
                     _scan_one_local_skill(
                         app,
                         _build_skill_scanner(
@@ -2228,7 +2228,7 @@ def _scan_one_local_skill(
         if as_json:
             _emit_skill_json_payload(payload, json_sink=json_sink)
         else:
-            click.echo(
+            ux.echo(
                 f"SKIPPED: {name} — vendor-bundled skills are discovery-only "
                 "and are not scanned or blocked"
             )
@@ -2541,7 +2541,7 @@ def _apply_scan_enforcement(
     )
 
     if decision.verdict == "allowed":
-        click.echo(f"[scan] {skill_name!r} is allow-listed — skipping auto-enforcement")
+        ux.echo(f"[scan] {skill_name!r} is allow-listed — skipping auto-enforcement")
         return
 
     sev = result.max_severity()
@@ -3233,7 +3233,7 @@ def _scan_via_sidecar(
         if as_json:
             _emit_skill_json_payload(payload, json_sink=json_sink)
         else:
-            click.echo(
+            ux.echo(
                 f"SKIPPED: {name} — vendor-bundled skills are discovery-only "
                 "and are not scanned or blocked"
             )
@@ -3444,7 +3444,7 @@ def _scan_from_clawhub(app: AppContext, uri: str, as_json: bool) -> Any:
         os.makedirs(skill_dir, exist_ok=True)
 
         if not as_json:
-            click.echo(
+            ux.echo(
                 f"[scan] extracting prefix={skill_prefix!r} → {skill_dir!s}"
             )
         # ("Untrusted skill archives can decompress
@@ -4892,7 +4892,7 @@ def quarantine(app: AppContext, name: str, connector_flag: str, reason: str) -> 
         targets = _skill_match_dir_scopes(app, skill_name, connector_flag)
 
     if not targets:
-        click.echo(f"error: could not locate skill {skill_name!r} — provide an absolute path", err=True)
+        ux.echo(f"error: could not locate skill {skill_name!r} — provide an absolute path", err=True)
         raise SystemExit(1)
 
     bundled_targets = [
@@ -5433,7 +5433,7 @@ def _scan_installed_skill_for_connector(
     )
 
     if post_decision.verdict == "allowed":
-        click.echo(
+        ux.echo(
             f"[install] {skill_name!r} became allow-listed for connector={connector} "
             "— skipping post-scan enforcement"
         )
@@ -5457,7 +5457,7 @@ def _scan_installed_skill_for_connector(
     detail = f"severity={sev} findings={len(result.findings)} connector={connector}"
 
     if not take_action:
-        click.echo(
+        ux.echo(
             f"[install] {len(result.findings)} {sev} findings in {skill_name!r} "
             f"(connector={connector}; no action taken — pass --action to enforce)"
         )
@@ -5516,7 +5516,7 @@ def _scan_installed_skill_for_connector(
             saved_change_audit(app.logger).log_action(
                 "install-enforced", skill_name, f"{detail}; {actions_str}",
             )
-        click.echo(
+        ux.echo(
             f"error: skill {skill_name!r} had {sev} findings for connector={connector} "
             f"— actions applied: {actions_str}",
             err=True,
@@ -5597,7 +5597,7 @@ def install(app: AppContext, name: str, force: bool, take_action: bool, connecto
                 saved_change_audit(app.logger).log_action(
                     "install-rejected", skill_name, f"reason=blocked connector={connector}",
                 )
-            click.echo(
+            ux.echo(
                 f"error: skill {skill_name!r} is on the block list for connector={connector}"
                 f" — run 'defenseclaw skill unblock {skill_name} --connector {connector}' to clear the block",
                 err=True,
@@ -5609,7 +5609,7 @@ def install(app: AppContext, name: str, force: bool, take_action: bool, connecto
                 saved_change_audit(app.logger).log_action(
                     "install-rejected", skill_name, f"reason=quarantined connector={connector}",
                 )
-            click.echo(
+            ux.echo(
                 f"error: skill {skill_name!r} is quarantined for connector={connector}"
                 f" — release the quarantine before reinstalling",
                 err=True,
@@ -5666,7 +5666,7 @@ def install(app: AppContext, name: str, force: bool, take_action: bool, connecto
                     f"(connector={connector})"
                 )
             else:
-                click.echo(
+                ux.echo(
                     f"[install] {skill_name!r} is on the allow list for "
                     f"connector={connector} — skipping scan"
                 )
@@ -5727,18 +5727,18 @@ def _run_clawhub_uninstall(skill_name: str, cwd: str | None = None) -> None:
         args = _clawhub_args("uninstall", skill_name)
         result = _run_clawhub_process(args, timeout=120, cwd=cwd, input_text="y\n")
     except subprocess.TimeoutExpired:
-        click.echo(
+        ux.echo(
             f"[install] warning: clawhub uninstall of {skill_name!r} timed out — manual cleanup may be required",
             err=True,
         )
     except (OSError, ValueError) as exc:
-        click.echo(
+        ux.echo(
             f"[install] warning: clawhub uninstall of {skill_name!r} failed: {exc} — manual cleanup may be required",
             err=True,
         )
     else:
         if result.returncode != 0:
-            click.echo(
+            ux.echo(
                 f"[install] warning: clawhub uninstall of {skill_name!r} failed: "
                 f"{_external_failure_detail(result)} — manual cleanup may be required",
                 err=True,

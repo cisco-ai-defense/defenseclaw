@@ -33,7 +33,7 @@ from typing import TYPE_CHECKING, Any
 
 import click
 
-from defenseclaw import connector_paths
+from defenseclaw import connector_paths, ux
 from defenseclaw.commands import compute_verdict as _compute_verdict
 from defenseclaw.commands._audit_notice import note_asset_policy_observed, saved_change_audit
 from defenseclaw.commands._scan_ui import record_scan as _record_scan
@@ -328,7 +328,7 @@ def scan(
                 match.scope,
                 match.project_path,
             )
-            click.echo(
+            ux.echo(
                 ux._style(
                     f"── connector: {connector}; plugin: {instance} ──",
                     fg="cyan",
@@ -614,7 +614,7 @@ def _print_plugin_scan_policy(name: str, *, connector: str = "", installed: bool
         )
     else:
         text = "the policy would refuse this plugin at install."
-    click.echo(f"        policy: rejected — {text}")
+    ux.echo(f"        policy: rejected — {text}")
     if installed:
         # GAP-2111: 'plugin block' only refuses new installs; quarantine moves
         # the installed copy out (plugin restore brings it back).
@@ -778,7 +778,7 @@ def _render_plugin_registry_diagnostics(
                     click.echo(f"{connector} has no installed plugins.", err=force_stderr)
                 continue
             suffix = f" ({probe.detail})" if probe.detail else ""
-            click.echo(
+            ux.echo(
                 "Plugin discovery source "
                 f"[{connector}]: {probe.source_path} — {probe.state.value}; "
                 f"entries={probe.entries}{suffix}",
@@ -1135,7 +1135,7 @@ def _scan_all_plugins(
             pack_cache=pack_cache,
         )
         if len(connectors) > 1 and not as_json:
-            click.echo(ux._style(f"\n── connector: {connector} ──", fg="cyan"))
+            ux.echo(ux._style(f"\n── connector: {connector} ──", fg="cyan"))
 
         plugins = _merge_all_plugins(
             app.cfg.plugin_dir,
@@ -1522,7 +1522,7 @@ def install(app: AppContext, name_or_path: str, force: bool, take_action: bool, 
                     if pre_decision.source == "scan-disabled":
                         click.echo(f"[install] policy allows {plugin_name!r} without scan (connector={connector})")
                     else:
-                        click.echo(
+                        ux.echo(
                             f"[install] {plugin_name!r} is on the allow list for connector={connector} — skipping scan"
                         )
                     pe.set_source_path("plugin", plugin_name, plugin_path, connector)
@@ -1626,7 +1626,7 @@ def _check_plugin_pre_install_admission(
                     plugin_name,
                     f"reason=blocked connector={connector}",
                 )
-            click.echo(
+            ux.echo(
                 f"error: plugin {plugin_name!r} is on the block list for "
                 f"connector={connector} — run "
                 f"'defenseclaw plugin unblock {plugin_name} --connector {connector}' "
@@ -1642,7 +1642,7 @@ def _check_plugin_pre_install_admission(
                     plugin_name,
                     f"reason=quarantined connector={connector}",
                 )
-            click.echo(
+            ux.echo(
                 f"error: plugin {plugin_name!r} is quarantined for "
                 f"connector={connector} — release the quarantine before reinstalling",
                 err=True,
@@ -1949,7 +1949,7 @@ def _scan_installed_plugin_for_connector(
     if post_decision.verdict == "allowed":
         if app.logger and not defer_scan_log:
             saved_change_audit(app.logger).log_scan(result, connector=connector)
-        click.echo(
+        ux.echo(
             f"[install] {plugin_name!r} became allow-listed for connector={connector} — skipping post-scan enforcement"
         )
         pe.set_source_path("plugin", plugin_name, plugin_path, connector)
@@ -1984,7 +1984,7 @@ def _scan_installed_plugin_for_connector(
                 rollback()
             else:
                 _rollback_plugin_install_paths([plugin_path])
-            click.echo(
+            ux.echo(
                 f"error: refusing to install {plugin_name!r} for connector={connector} — "
                 f"{len(result.findings)} {sev_norm} findings detected and "
                 "--action was not passed. Run with --action to enforce, or "
@@ -1999,7 +1999,7 @@ def _scan_installed_plugin_for_connector(
                     f"{detail} result=refused reason=critical-without-action",
                 )
             raise SystemExit(1)
-        click.echo(
+        ux.echo(
             f"[install] {len(result.findings)} {sev} findings in {plugin_name!r} "
             f"(connector={connector}; no action taken — pass --action to enforce)"
         )
@@ -2059,7 +2059,7 @@ def _scan_installed_plugin_for_connector(
                 plugin_name,
                 f"{detail}; {actions_str}",
             )
-        click.echo(
+        ux.echo(
             f"error: plugin {plugin_name!r} had {sev} findings for "
             f"connector={connector} — actions applied: {actions_str}",
             err=True,
@@ -4667,7 +4667,7 @@ def restore(app: AppContext, name: str, restore_path: str, connector_flag: str) 
         target_restore_path = restore_path
         if not target_restore_path:
             if entry is None or not entry.source_path:
-                click.echo(
+                ux.echo(
                     f"error: no stored path for {plugin_name!r}"
                     + (f" on connector={resolved_connector}" if resolved_connector else "")
                     + " — use --path to specify restore destination",

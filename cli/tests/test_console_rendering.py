@@ -354,3 +354,46 @@ def test_explicit_tui_uses_the_same_capability_guard() -> None:
         accepted = runner.invoke(tui, catch_exceptions=False)
     assert accepted.exit_code == 0
     run_tui.assert_called_once_with()
+
+
+def test_stderr_glyph_policy_is_its_own_snapshot() -> None:
+    # GAP-2564: '2> err.txt' with stdout on a terminal kept "⚠" in the file.
+    with (
+        mock.patch.object(ux, "_configured_unicode_output", None),
+        mock.patch.object(ux, "_configured_unicode_error_output", None),
+        mock.patch.dict(os.environ, {"TERM": "xterm-256color"}, clear=False),
+        mock.patch("click.echo") as echo,
+    ):
+        ux.configure_console_output(_Stream(tty=True), err_stream=_Stream(tty=False))
+        ux.echo("  ⚠ not recorded — start it", err=True)
+        ux.echo("  ⚠ not recorded — start it")
+    assert [c.args[0] for c in echo.call_args_list] == ["  ! not recorded - start it", "  ⚠ not recorded — start it"]
+
+
+def test_cli_echo_calls_with_presentation_glyphs_go_through_ux() -> None:
+    # GAP-2527, GAP-2563: click.echo/secho skip the redirected-output ASCII fallback.
+    import ast
+
+    glyphs = {chr(k) for k in ux._ASCII_PRESENTATION_TRANSLATION}
+    root = Path(ux.__file__).parent
+    offenders = []
+    for path in sorted(root.rglob("*.py")):
+        if path.name == "ux.py":
+            continue
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            func = getattr(node, "func", None)
+            if not (
+                isinstance(node, ast.Call)
+                and isinstance(func, ast.Attribute)
+                and isinstance(func.value, ast.Name)
+                and func.value.id == "click"
+                and func.attr in ("echo", "secho")
+            ):
+                continue
+            if any(
+                isinstance(sub, ast.Constant) and isinstance(sub.value, str) and glyphs & set(sub.value)
+                for arg in node.args
+                for sub in ast.walk(arg)
+            ):
+                offenders.append(f"{path.relative_to(root)}:{node.lineno}")
+    assert offenders == [], "use ux.echo/ux.secho for glyph text: " + ", ".join(offenders)

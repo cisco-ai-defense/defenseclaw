@@ -256,7 +256,7 @@ def pick_provider(
             tail = pid.removeprefix("custom:") if pid.startswith("custom:") else pid
             if lowered in (pid.lower(), tail.lower()):
                 return tail
-        click.echo("    Invalid choice — pick a number from the list, type a provider name, or 'm' for free-form.")
+        ux.echo("    Invalid choice — pick a number from the list, type a provider name, or 'm' for free-form.")
 
 
 def pick_model(
@@ -368,7 +368,7 @@ def pick_local_runtime(
 
     live_models: list[str] | None = None
     if base_url and not non_interactive:
-        click.echo(f"    Querying {provider} for installed models…")
+        ux.echo(f"    Querying {provider} for installed models…")
         discovered, error = list_local_provider_models(provider, base_url)
         if error:
             click.echo(f"    Could not list local models ({error}). Falling back to catalog suggestions.")
@@ -691,7 +691,7 @@ def pick_instance_name(
         show_default=bool(current),
     ).strip()
     if choice and choice not in names:
-        click.echo(f"    Note: no instance named {choice!r} — will be created if you run setup provider add.")
+        ux.echo(f"    Note: no instance named {choice!r} — will be created if you run setup provider add.")
     return choice
 
 
@@ -831,10 +831,10 @@ def preflight_inherit(
 
     click.echo()
     click.echo("  " + ux.bold("How should we apply the inherited values?"))
-    click.echo("    " + ux.bold("[I]") + " Inherit fully     — copy provider/model/api_key_env/...")
-    click.echo("    " + ux.bold("[P]") + " Partial            — copy then re-prompt for model only")
-    click.echo("    " + ux.bold("[R]") + " Reconfigure        — skip inheritance, prompt for everything")
-    click.echo("    " + ux.bold("[B]") + " Back               — abort")
+    ux.echo("    " + ux.bold("[I]") + " Inherit fully     — copy provider/model/api_key_env/...")
+    ux.echo("    " + ux.bold("[P]") + " Partial            — copy then re-prompt for model only")
+    ux.echo("    " + ux.bold("[R]") + " Reconfigure        — skip inheritance, prompt for everything")
+    ux.echo("    " + ux.bold("[B]") + " Back               — abort")
 
     action_default = "I"
     action_map = {

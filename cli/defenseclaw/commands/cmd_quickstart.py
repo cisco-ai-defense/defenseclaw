@@ -31,6 +31,8 @@ import sys
 
 import click
 
+from defenseclaw import ux
+
 
 @click.command("quickstart")
 @click.option(
@@ -188,7 +190,7 @@ def quickstart_cmd(
             # ('setup <c> --yes' and 'init' are refused), so offer only the
             # commands that work: reconfigure it or switch with --replace.
             label = _connector_label(proxy)
-            click.echo(
+            ux.echo(
                 "  \u2717 Multiple connectors detected/configured: "
                 f"{_connector_labels(candidates)}.\n"
                 f"    This install guards {label}, which is proxy-backed and cannot run next to hook connectors.\n"
@@ -204,7 +206,7 @@ def quickstart_cmd(
             # GAP-1352: on an install that already guards connectors,
             # 'quickstart --connector X' refuses (it would narrow the roster),
             # so point at the commands that keep the roster.
-            click.echo(
+            ux.echo(
                 "  ✗ Multiple connectors detected/configured: "
                 f"{', '.join(candidates)}.\n"
                 f"    This install already guards: {', '.join(dict.fromkeys(configured))}.\n"
@@ -216,7 +218,7 @@ def quickstart_cmd(
             )
             sys.exit(2)
         if len(candidates) > 1:
-            click.echo(
+            ux.echo(
                 "  ✗ Multiple connectors detected/configured: "
                 f"{', '.join(candidates)}.\n"
                 "    Quickstart configures one connector.\n"
@@ -229,7 +231,7 @@ def quickstart_cmd(
         if len(candidates) == 1:
             connector = candidates[0]
             if picked and picked != connector:
-                click.echo(
+                ux.echo(
                     "  ✗ Connector choice is ambiguous.\n"
                     f"    picked_connector says {picked}, but the active/detected connector is {connector}.\n"
                     "    Re-run with --connector <name>.",
@@ -244,7 +246,7 @@ def quickstart_cmd(
                 "path": picked_path,
             }
         else:
-            click.echo(
+            ux.echo(
                 "  ✗ Could not detect an agent framework on this host.\n"
                 "    Re-run with an explicit connector, e.g. "
                 "`defenseclaw quickstart --connector hermes`.",
@@ -350,7 +352,7 @@ def _refuse_roster_narrowing(cfg_mod, connector: str, mode: str | None = None) -
         # connector's plugin and leave it unguarded (as 'setup <c>', GAP-2426).
         # GAP-2466: display names, as the setup/init refusal.
         proxy_label = _connector_label(proxies[0])
-        click.echo(
+        ux.echo(
             f"  \u2717 This install already guards: {_connector_labels(configured)}.\n"
             f"    {proxy_label} is proxy-backed and cannot run next to hook connectors, so quickstart\n"
             f"    would remove its DefenseClaw plugin and leave it unguarded. No changes made.\n"
@@ -380,7 +382,7 @@ def _refuse_roster_narrowing(cfg_mod, connector: str, mode: str | None = None) -
             lines.append("    Change the whole set instead: defenseclaw init")
         click.echo("\n".join(lines), err=True)
         sys.exit(2)
-    click.echo(
+    ux.echo(
         f"  \u2717 This install already guards: {', '.join(configured)}.\n"
         "    Quickstart configures one connector and would stop guarding the others.\n"
         f"    Add or reconfigure {wanted} and keep the rest: defenseclaw setup {slug} --yes{mode_flag}\n"

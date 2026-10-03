@@ -270,7 +270,7 @@ def _apply_asset_policy_to_gateway(ctx: click.Context, app: AppContext, before: 
         if not quiet:
             ux.ok("Restarted the gateway; agent hooks use the new asset policy now.")
         return
-    click.echo(
+    ux.echo(
         "  \u26a0 The change is saved, but the gateway restart failed, so agent hooks "
         "still use the old asset policy. Run: defenseclaw-gateway restart",
         err=True,
@@ -1330,7 +1330,7 @@ def _run_mcp_scan(  # type: ignore[no-untyped-def]
         # coverage loss is visible, not silent. Remote/URL entries below
         # spawn no local process and are unaffected.
         if not scan_stdio:
-            click.echo(
+            ux.echo(
                 f"[registry] skipping stdio MCP scan (would spawn package): "
                 f"name={entry.name!r} command={entry.command!r} — pass "
                 f"`registry sync --scan-stdio` to scan it",
@@ -1388,7 +1388,7 @@ def _run_mcp_scan(  # type: ignore[no-untyped-def]
     # missed the RFC 6598 CGNAT block. The scanner re-guards internally,
     # but failing closed here gives a precise operator-facing message.
     if not _registry_mcp_url_allowed(entry.url, allow_private=allow_private):
-        click.echo(
+        ux.echo(
             f"[registry] refusing to scan manifest MCP URL {entry.url!r} — "
             f"resolves to loopback/private/link-local/CGNAT. Use "
             f"`defenseclaw registry sync --allow-private` to opt in.",

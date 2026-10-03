@@ -333,7 +333,7 @@ def _render_kept_and_next_steps(plan: UninstallPlan) -> None:
     if kept:
         ux.subhead("Kept:")
         for line in kept:
-            click.echo(f"  • {line}")
+            ux.echo(f"  • {line}")
     if plan.remove_binaries:
         _render_next_steps_without_commands(plan)
         return
@@ -349,16 +349,16 @@ def _render_kept_and_next_steps(plan: UninstallPlan) -> None:
         return
     ux.subhead("Next steps:")
     if plan.remove_data_dir and not launcher_gone:
-        click.echo("  • set DefenseClaw up again:  defenseclaw quickstart")
+        ux.echo("  • set DefenseClaw up again:  defenseclaw quickstart")
     elif not plan.remove_data_dir:
-        click.echo("  • turn protection back on:   defenseclaw setup guardrail")
+        ux.echo("  • turn protection back on:   defenseclaw setup guardrail")
     if developer:
         if not plan.remove_data_dir:
-            click.echo("  • remove the data too:       defenseclaw uninstall --all")
-        click.echo("  • remove the developer files (PowerShell):")
+            ux.echo("  • remove the data too:       defenseclaw uninstall --all")
+        ux.echo("  • remove the developer files (PowerShell):")
         click.echo(f"      Remove-Item -LiteralPath {_powershell_quoted_paths(developer)}")
         return
-    click.echo("  • remove everything:         defenseclaw uninstall --all --binaries")
+    ux.echo("  • remove everything:         defenseclaw uninstall --all --binaries")
 
 
 _INSTALL_URL = "https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download"
@@ -368,12 +368,12 @@ def _render_next_steps_after_launcher_removal(plan: UninstallPlan, left: list[st
     """Next steps after --all removed the launcher with the data (GAP-1923)."""
     ux.subhead("Next steps (the defenseclaw command was removed):")
     if left and plan.platform_name == "win32":
-        click.echo("  • remove the rest (PowerShell):")
+        ux.echo("  • remove the rest (PowerShell):")
         click.echo(f"      Remove-Item -LiteralPath {_powershell_quoted_paths(left)}")
     elif left:
         import shlex
 
-        click.echo(f"  • remove the rest:           rm -f {' '.join(shlex.quote(path) for path in left)}")
+        ux.echo(f"  • remove the rest:           rm -f {' '.join(shlex.quote(path) for path in left)}")
     _render_reinstall_step(plan)
 
 
@@ -382,12 +382,12 @@ def _render_next_steps_without_commands(plan: UninstallPlan) -> None:
     windows = plan.platform_name == "win32"
     ux.subhead("Next steps (the defenseclaw command was removed):")
     if plan.data_dir and windows:
-        click.echo("  • remove the kept data (PowerShell):")
+        ux.echo("  • remove the kept data (PowerShell):")
         click.echo(f"      Remove-Item -Recurse -Force -LiteralPath {_powershell_quoted_paths([plan.data_dir])}")
     elif plan.data_dir:
         import shlex
 
-        click.echo(f"  • remove the kept data:      rm -rf {shlex.quote(plan.data_dir)}")
+        ux.echo(f"  • remove the kept data:      rm -rf {shlex.quote(plan.data_dir)}")
     _render_reinstall_step(plan)
 
 
@@ -401,7 +401,7 @@ def _render_reinstall_step(plan: UninstallPlan) -> None:
         # account; a per-user reinstall is not the way back.
         return
     then = "defenseclaw quickstart" if plan.remove_data_dir else "defenseclaw setup guardrail"
-    click.echo(f"  • use DefenseClaw again:     reinstall it, then run '{then}'")
+    ux.echo(f"  • use DefenseClaw again:     reinstall it, then run '{then}'")
     if windows:
         click.echo(f"      irm {_INSTALL_URL}/install.ps1 | iex")
     else:
@@ -435,18 +435,18 @@ def _dispatch_native_windows_uninstall(
         return False
 
     ux.banner("DefenseClaw Uninstall")
-    click.echo(f"  {ux.dim('→')} authenticated native Windows installation")
-    click.echo(f"  {ux.dim('→')} Setup: {request.setup_path}")
+    ux.echo(f"  {ux.dim('→')} authenticated native Windows installation")
+    ux.echo(f"  {ux.dim('→')} Setup: {request.setup_path}")
     if wipe_data:
-        click.echo(f"  {ux.dim('→')} user data will be deleted")
+        ux.echo(f"  {ux.dim('→')} user data will be deleted")
     else:
-        click.echo(f"  {ux.dim('→')} user data will be preserved")
+        ux.echo(f"  {ux.dim('→')} user data will be preserved")
     if binaries:
-        click.echo(
+        ux.echo(
             f"  {ux.dim('→')} after Setup: DefenseClaw files left in %USERPROFILE%\\.local\\bin "
             "and its user Path entry are removed too"
         )
-    click.echo(f"  {ux.dim('→')} a restart may be required to finish exact cleanup")
+    ux.echo(f"  {ux.dim('→')} a restart may be required to finish exact cleanup")
 
     if dry_run:
         ux.subhead("(dry-run — nothing modified)")
@@ -1491,22 +1491,22 @@ def _render_plan(plan: UninstallPlan, *, dry_run: bool) -> None:
     if len(plan.connectors) > 1:
         # Multi-connector installs serve N equal peers — there is no "primary",
         # so list them all without singling one out.
-        click.echo(f"  • {ux.bold('active connectors:')}   {', '.join(plan.connectors)}")
+        ux.echo(f"  • {ux.bold('active connectors:')}   {', '.join(plan.connectors)}")
     else:
-        click.echo(f"  • {ux.bold('active connector:')}    {plan.connector or 'none'}")
+        ux.echo(f"  • {ux.bold('active connector:')}    {plan.connector or 'none'}")
     display_connectors = plan.connectors
     teardown = ", ".join(display_connectors) if display_connectors else "no"
-    click.echo(f"  • {ux.bold('connector teardown:')}  {teardown}")
+    ux.echo(f"  • {ux.bold('connector teardown:')}  {teardown}")
     if plan.sandbox_teardown:
-        click.echo(f"  • {ux.bold('sandbox teardown:')}    yes (OpenShell itself is kept)")
+        ux.echo(f"  • {ux.bold('sandbox teardown:')}    yes (OpenShell itself is kept)")
         # Teardown runs with --yes: work a copy-mode sandbox holds is gone
         # with it, so say where to see it before the confirmation.
-        click.echo(
+        ux.echo(
             f"      {ux.dim('·')} work a copy-mode sandbox holds that was never pulled back is deleted with it "
             "(`defenseclaw sandbox teardown --dry-run` names it)"
         )
     elif plan.sandbox_teardown_skipped:
-        click.echo(f"  • {ux.bold('sandbox teardown:')}    skipped (--skip-sandbox-teardown)")
+        ux.echo(f"  • {ux.bold('sandbox teardown:')}    skipped (--skip-sandbox-teardown)")
         # What teardown needs to find DefenseClaw's sandboxes later lives in
         # the data dir and runs with the gateway binary.
         later = "`defenseclaw-gateway sandbox teardown` removes them later"
@@ -1517,44 +1517,44 @@ def _render_plan(plan: UninstallPlan, *, dry_run: bool) -> None:
             )
         elif plan.remove_binaries:
             later = "reinstall DefenseClaw and run `defenseclaw-gateway sandbox teardown` to remove them"
-        click.echo(
+        ux.echo(
             f"      {ux.dim('·')} DefenseClaw's OpenShell sandboxes, images, gateway change and shell wrappers "
             f"stay; {later}"
         )
-    click.echo(f"  • {ux.bold('stop sidecar:')}        {'yes' if plan.stop_gateway else 'no'}")
+    ux.echo(f"  • {ux.bold('stop sidecar:')}        {'yes' if plan.stop_gateway else 'no'}")
     if "openclaw" in display_connectors:
-        click.echo(
+        ux.echo(
             f"  • {ux.bold('revert openclaw.json:')} {'yes' if plan.revert_openclaw else 'no'} "
             f"({plan.openclaw_config_file})"
         )
-        click.echo(f"  • {ux.bold('remove plugin:')}        {'yes' if plan.remove_plugin else 'no'}")
-    click.echo(f"  • {ux.bold('wipe ' + plan.data_dir + ':')} {'yes' if plan.remove_data_dir else 'no'}")
+        ux.echo(f"  • {ux.bold('remove plugin:')}        {'yes' if plan.remove_plugin else 'no'}")
+    ux.echo(f"  • {ux.bold('wipe ' + plan.data_dir + ':')} {'yes' if plan.remove_data_dir else 'no'}")
     if plan.hook_temp_dirs:
         roots = sorted({os.path.dirname(path) for path in plan.hook_temp_dirs})
-        click.echo(
+        ux.echo(
             f"      {ux.dim('·')} {len(plan.hook_temp_dirs)} scratch folder(s) DefenseClaw hooks left "
             f"(defenseclaw-hook.*) in {', '.join(roots)}"
         )
     if plan.uv_cache_entries:
-        click.echo(
+        ux.echo(
             f"      {ux.dim('·')} DefenseClaw's entries in uv's cache {plan.uv_cache_entries} "
             "(uv cache clean defenseclaw)"
         )
     if plan.preserve_data_entries:
-        click.echo(f"  • {ux.bold('preserve runtime:')}      {', '.join(plan.preserve_data_entries)}")
-    click.echo(f"  • {ux.bold('remove binaries:')}     {'yes' if plan.remove_binaries else 'no'}")
+        ux.echo(f"  • {ux.bold('preserve runtime:')}      {', '.join(plan.preserve_data_entries)}")
+    ux.echo(f"  • {ux.bold('remove binaries:')}     {'yes' if plan.remove_binaries else 'no'}")
     if plan.remove_binaries:
         # Only the launchers that are there: the owned-name list also names
         # optional ones (scanner APIs, litellm) that most installs never had.
         for target in plan.binary_targets:
             if os.path.lexists(target):
-                click.echo(f"      {ux.dim('·')} {target}")
+                ux.echo(f"      {ux.dim('·')} {target}")
         for path in plan.setup_leftovers:
-            click.echo(f"      {ux.dim('·')} {path} (left by DefenseClaw Setup)")
+            ux.echo(f"      {ux.dim('·')} {path} (left by DefenseClaw Setup)")
         for path in plan.uv_leftovers:
-            click.echo(f"      {ux.dim('·')} {path} (what the installer's uv downloaded for DefenseClaw)")
+            ux.echo(f"      {ux.dim('·')} {path} (what the installer's uv downloaded for DefenseClaw)")
         if plan.platform_name == "win32":
-            click.echo(
+            ux.echo(
                 f"      {ux.dim('·')} the {plan.install_root} entry in your user Path, "
                 "once nothing else is left in that folder"
             )
@@ -1562,7 +1562,7 @@ def _render_plan(plan: UninstallPlan, *, dry_run: bool) -> None:
         # The launchers into the data dir stop working with it, so they go
         # too; the rest keep working and stay until --binaries.
         for target in plan.data_bound_launchers:
-            click.echo(f"      {ux.dim('·')} {target} (runs {plan.data_dir}, so it goes with it)")
+            ux.echo(f"      {ux.dim('·')} {target} (runs {plan.data_dir}, so it goes with it)")
         kept = [
             target
             for target in plan.binary_targets
@@ -1572,22 +1572,22 @@ def _render_plan(plan: UninstallPlan, *, dry_run: bool) -> None:
         ]
         developer = _windows_developer_files(plan.install_root) if plan.platform_name == "win32" else []
         if developer:
-            click.echo(f"      {ux.dim('·')} kept: {_windows_developer_removal(developer)}")
+            ux.echo(f"      {ux.dim('·')} kept: {_windows_developer_removal(developer)}")
         elif kept:
-            click.echo(
+            ux.echo(
                 f"      {ux.dim('·')} kept: {', '.join(os.path.basename(target) for target in kept)} "
                 f"in {plan.install_root} (add --binaries to remove them too)"
             )
     if plan.observability_teardown:
-        click.echo(
+        ux.echo(
             f"  • {ux.bold('local observability:')} its containers and data volumes go (docker compose down --volumes)"
         )
     if _requires_deferred_cleanup(plan):
-        click.echo(f"  • {ux.bold('deferred cleanup:')}   after this managed CLI exits")
+        ux.echo(f"  • {ux.bold('deferred cleanup:')}   after this managed CLI exits")
     if plan.mac_app:
         # Not removed here: the app owns its login item and background
         # service, which it unregisters itself.
-        click.echo(
+        ux.echo(
             f"  • {ux.bold('kept:')}                {plan.mac_app}: quit it, turn off its login item "
             "(System Settings > General > Login Items), then move it to the Trash"
         )
@@ -2461,7 +2461,7 @@ def _sandbox_teardown(plan: UninstallPlan) -> None:
         raise click.ClickException(f"sandbox teardown did not finish: {exc}") from exc
     for line in (proc.stdout or "").splitlines():
         if line.strip():
-            click.echo(f"  {ux.dim('·')} {line.strip()}")
+            ux.echo(f"  {ux.dim('·')} {line.strip()}")
     detail = (proc.stderr or proc.stdout or "").strip().splitlines()
     if proc.returncode == _SANDBOX_UNSUPPORTED_EXIT:
         reason = detail[-1].lstrip("✗ ").strip() if detail else "OpenShell sandboxes are not supported here"
@@ -2653,10 +2653,10 @@ def _run_gateway_connector_teardown(
             # double the verified line printed below.
             if _ANSI_ESCAPE.sub("", line).strip().endswith(f"{connector} teardown complete"):
                 continue
-            click.echo(f"  {ux.dim('·')} {line.strip()}")
+            ux.echo(f"  {ux.dim('·')} {line.strip()}")
     if proc.stderr and proc.returncode != 0:
         for line in proc.stderr.splitlines():
-            click.echo(f"  {ux._style('⚠', fg='yellow', bold=True)} {line}")
+            ux.echo(f"  {ux._style('⚠', fg='yellow', bold=True)} {line}")
     if proc.returncode == 0:
         verify_args = [
             gw,

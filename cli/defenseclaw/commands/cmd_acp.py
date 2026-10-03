@@ -739,7 +739,7 @@ def _wait_for_gateway_acp(app: AppContext, profile: str, mode: str, show: bool) 
             if loaded.get("enabled") is True and isinstance(entry, dict) and entry.get("mode") == mode:
                 return
             if time.monotonic() >= deadline:
-                click.echo(
+                ux.echo(
                     "  ⚠ Change saved, but the gateway has not loaded it yet; an editor session started "
                     "in the next few seconds may be refused. Wait a moment before you start it.",
                     err=True,
@@ -1256,7 +1256,7 @@ def adopt_cmd(
 
     if not json_output:
         for target_client, entry, agent, _command in planned:
-            click.echo(f"  take over  {target_client}: {entry} → guarded {agent}")
+            ux.echo(f"  take over  {target_client}: {entry} → guarded {agent}")
         for target_client, entry, agent in registry_pairs:
             click.echo(f"  add guard  {target_client}: guarded {agent} beside registry entry {entry}")
         mode = "action" if activate else "observe"
