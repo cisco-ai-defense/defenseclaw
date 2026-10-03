@@ -8976,7 +8976,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # ``OK`` etc. and crash the overview the moment any notice is
         # emitted. ``notice.message`` also routinely includes bracketed
         # tokens (``[skill] missing scan``) — same crash class.
-        notice_block: list[Text] = []
+        notice_block: list[RenderableType] = []
         short_notices = 0 < self.size.height < 32
         for notice in notices[:4]:
             if notice.level == "error":
@@ -8987,16 +8987,14 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 icon, color = "[>]", TOKENS.accent_blue
             else:
                 icon, color = "[-]", TOKENS.accent_green
-            line = Text(" ")
-            if short_notices:
-                # One row per notice that ends with "…" when it is cut: at
-                # 80x24 the wrapped rest fell under the button bar mid-sentence
-                # (GAP-1775). Taller screens wrap the full text.
-                line.no_wrap = True
-                line.overflow = "ellipsis"
-            line.append(icon, style=f"{color} bold")
-            line.append(" ")
-            line.append(notice.message)
+            # A grid so wrapped lines hang under the text, not under the icon
+            # (GAP-2533). Below 32 rows each notice is one row ending with "…"
+            # when cut: at 80x24 the wrapped rest fell under the button bar
+            # mid-sentence (GAP-1775). Taller screens wrap the full text.
+            line = Table.grid(expand=True)
+            line.add_column(no_wrap=True, width=len(icon) + 2)
+            line.add_column(ratio=1, no_wrap=short_notices, overflow="ellipsis")
+            line.add_row(Text.assemble(" ", (icon, f"{color} bold"), " "), Text(notice.message))
             notice_block.append(line)
         if not notice_block:
             quiet = Text(" ")
