@@ -432,6 +432,15 @@ func inertHooksDocument(data []byte) bool {
 	return true
 }
 
+// CopilotVSCodeUserFilesLeft reports, read-only, whether home still holds
+// DefenseClaw's Local hook file or plugin: what removing the user's Copilot
+// row takes out. Their hook command is an encoded PowerShell bridge on
+// Windows, which the generic hook-command search cannot read (GAP-2098).
+func CopilotVSCodeUserFilesLeft(home, goos, hookBinary string) (bool, error) {
+	result, err := EnsureCopilotVSCodeUser(CopilotVSCodeUserRequest{Home: home, GOOS: goos, HookBinary: hookBinary, DryRun: true})
+	return len(result.Removed) > 0, err
+}
+
 // CopilotVSCodeUserState reports, read-only, whether home holds
 // DefenseClaw's current Local hook file and plugin (verify and status).
 func CopilotVSCodeUserState(home, goos, hookBinary string) (hookFile, plugin bool) {
