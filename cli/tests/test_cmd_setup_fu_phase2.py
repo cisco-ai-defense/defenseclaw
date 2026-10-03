@@ -3706,6 +3706,43 @@ class TestGatewayOfflineStaging(_BaseSetup):
         self.assertIn("nothing listens on the new API port until the gateway restarts", result.output)
         self.assertNotIn("the gateway isn't running", result.output)
 
+    def test_new_gateway_port_skips_the_check_before_the_restart(self):
+        # GAP-2478: the running gateway still used the old port, so the
+        # check printed a "reconnecting" FAIL row and a Tip, then the
+        # restart applied the port and doctor passed.
+        self.app.logger = MagicMock()
+        self._seed_map("openclaw")
+        self.app.cfg.gateway.port = 18789
+
+        with patch("defenseclaw.commands.cmd_setup._is_pid_alive", return_value=True), patch(
+            "defenseclaw.commands.cmd_setup._restart_defense_gateway", return_value=True
+        ) as restart, patch("defenseclaw.commands.cmd_doctor._check_sidecar") as sidecar_check, patch(
+            "defenseclaw.commands.cmd_doctor._check_openclaw_gateway"
+        ) as openclaw_check:
+            result = _invoke(["gateway", "--port", "20477", "--non-interactive"], self.app)
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(self.app.cfg.gateway.port, 20477)
+        sidecar_check.assert_not_called()
+        openclaw_check.assert_not_called()
+        restart.assert_called_once()
+        self.assertNotIn("Tip: fix the issues above", result.output)
+        self.assertIn("connects to the new address after the restart", result.output)
+
+    def test_unchanged_gateway_port_still_verifies_a_running_gateway(self):
+        self.app.logger = MagicMock()
+        self._seed_map("codex")
+        port = self.app.cfg.gateway.port
+
+        with patch("defenseclaw.commands.cmd_setup._is_pid_alive", return_value=True), patch(
+            "defenseclaw.commands.cmd_setup._restart_defense_gateway", return_value=True
+        ), patch("defenseclaw.commands.cmd_doctor._check_sidecar") as sidecar_check:
+            result = _invoke(["gateway", "--port", str(port), "--non-interactive"], self.app)
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        sidecar_check.assert_called_once()
+        self.assertNotIn("connects to the new address", result.output)
+
     def test_stopped_gateway_is_not_a_failed_verification(self):
         # GAP-2009: on a fresh account (gateway never started) the next step
         # sandbox names ended in a FAIL row and "Error: ... gateway isn't running", rc 1.
