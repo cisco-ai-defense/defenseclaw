@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import errno
 import os
+import re
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -150,22 +151,29 @@ def locked_file_update(
         lock.close()
 
 
-# Held by an open ``defenseclaw tui`` for its lifetime, so ``uninstall --all``
-# can ask the user to quit it before removing the data directory (GAP-2576).
-TUI_LOCK_FILENAME = "tui.lock"
+# Each open ``defenseclaw tui`` holds its own lock file, tui-<pid>.lock, for
+# its lifetime, so ``uninstall --all`` can ask the user to quit it before
+# removing the data directory (GAP-2576). One file per process: with a single
+# shared tui.lock a second TUI ran without the lock, and the first one removed
+# the file on quit while the second was still open.
+_TUI_LOCK_NAME = re.compile(r"tui(-[0-9]+)?\.lock")
+
+
+def _tui_lock_path(data_dir: str) -> str:
+    return os.path.join(data_dir, f"tui-{os.getpid()}.lock")
 
 
 def hold_tui_lock(data_dir: str) -> IO[str] | None:
-    """Take the TUI lock in an existing ``data_dir``; the handle keeps it.
+    """Take this process's TUI lock in an existing ``data_dir``; the handle keeps it.
 
-    Returns None (and the TUI runs without it) when the folder is missing,
-    the file cannot be opened, or another TUI already holds the lock.
+    Returns None (and the TUI runs without it) when the folder is missing or
+    the file cannot be opened or locked.
     """
     if not os.path.isdir(data_dir):
         return None
     flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
     try:
-        fd = os.open(os.path.join(data_dir, TUI_LOCK_FILENAME), flags, 0o600)
+        fd = os.open(_tui_lock_path(data_dir), flags, 0o600)
     except OSError:
         return None
     lock = os.fdopen(fd, "r+")
@@ -178,21 +186,20 @@ def hold_tui_lock(data_dir: str) -> IO[str] | None:
 
 
 def release_tui_lock(lock: IO[str] | None, data_dir: str) -> None:
-    """Release the TUI lock and remove its file."""
+    """Release this process's TUI lock and remove its file (other TUIs keep theirs)."""
     if lock is None:
         return
     lock.close()
     try:
-        os.unlink(os.path.join(data_dir, TUI_LOCK_FILENAME))
+        os.unlink(_tui_lock_path(data_dir))
     except OSError:
         pass
 
 
-def tui_lock_held(data_dir: str) -> bool:
-    """Whether an open ``defenseclaw tui`` holds the lock in ``data_dir``."""
+def _lock_file_held(path: str) -> bool:
     flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
     try:
-        fd = os.open(os.path.join(data_dir, TUI_LOCK_FILENAME), flags)
+        fd = os.open(path, flags)
     except OSError:
         return False
     with os.fdopen(fd, "r+") as lock:
@@ -203,3 +210,15 @@ def tui_lock_held(data_dir: str) -> bool:
         except OSError:
             return False
     return False
+
+
+def tui_lock_held(data_dir: str) -> bool:
+    """Whether any open ``defenseclaw tui`` holds a TUI lock in ``data_dir``.
+
+    Lock files left by a TUI that was killed are not held and do not count.
+    """
+    try:
+        names = os.listdir(data_dir)
+    except OSError:
+        return False
+    return any(_TUI_LOCK_NAME.fullmatch(name) and _lock_file_held(os.path.join(data_dir, name)) for name in names)
