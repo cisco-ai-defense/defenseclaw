@@ -1329,7 +1329,10 @@ func assetPolicyResponseReason(decision config.AssetPolicyDecision) string {
 		parts = append(parts, "connector="+decision.Connector)
 	}
 	if decision.RegistryStatus != "" {
-		parts = append(parts, "registry_status="+assetPolicyRegistryStatusForReason(decision.RegistryStatus))
+		// The decision vocabulary as is ("unregistered"), as the asset-policy
+		// audit row and finding.observed record it, so one SIEM filter on
+		// registry_status finds every event of the evaluation (GAP-2516).
+		parts = append(parts, "registry_status="+decision.RegistryStatus)
 	}
 	parts = append(parts, fmt.Sprintf("registry_configured=%t", decision.RegistryConfigured))
 	if decision.RuntimeSurface != "" {
@@ -1354,15 +1357,6 @@ func assetPolicyReasonCode(source string) string {
 		return "admin-deny"
 	default:
 		return source
-	}
-}
-
-func assetPolicyRegistryStatusForReason(status string) string {
-	switch strings.TrimSpace(status) {
-	case "unregistered":
-		return "not-registered"
-	default:
-		return status
 	}
 }
 
