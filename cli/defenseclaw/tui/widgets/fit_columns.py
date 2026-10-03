@@ -46,17 +46,19 @@ class FitColumnsTable:
         *,
         header_style: str = "",
         padding: int = 2,
+        show_header: bool = True,
     ) -> None:
         self.columns = tuple(columns)
         self.rows = tuple(tuple(row) for row in rows)
         self.header_style = header_style
         self.padding = padding
+        self.show_header = show_header
 
     def kept_columns(self, max_width: int) -> tuple[tuple[int, int | None], ...]:
         """``(column index, fixed width or None)`` for the columns that fit."""
 
         natural = [
-            max([len(column.header), *(row[index].cell_len for row in self.rows)])
+            max([len(column.header) if self.show_header else 0, *(row[index].cell_len for row in self.rows)])
             for index, column in enumerate(self.columns)
         ]
         effective = [
@@ -93,7 +95,8 @@ class FitColumnsTable:
         for index, width in kept:
             column = self.columns[index]
             table.add_column(justify=column.justify, no_wrap=True, overflow="ellipsis", width=width)
-        table.add_row(*(Text(self.columns[index].header, style=self.header_style) for index, _width in kept))
+        if self.show_header:
+            table.add_row(*(Text(self.columns[index].header, style=self.header_style) for index, _width in kept))
         for row in self.rows:
             table.add_row(*(row[index] for index, _width in kept))
         yield table

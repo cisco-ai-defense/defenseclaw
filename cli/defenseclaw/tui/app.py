@@ -8884,21 +8884,26 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             quiet.append(" Runtime signals are quiet.")
             notice_block.append(quiet)
 
-        services_table = Table.grid(padding=(0, 1), expand=True)
-        services_table.add_column(no_wrap=True, width=2)
-        # 13 = the longest label ("AI Discovery") plus a space, so it never
-        # touches its state (GAP-2391).
-        services_table.add_column(no_wrap=True, width=13)
         # Below 100 columns the card is too narrow for a detail column (it
         # folded "canonical destination plan loading" four letters a line),
         # so the detail goes under the state instead.
         narrow_services = self.size.width < 100
+        services_table = Table.grid(padding=(0, 1), expand=True)
+        services_table.add_column(no_wrap=True, width=2)
+        # 13 = the longest label ("AI Discovery") plus a space, so it never
+        # touches its state (GAP-2391). At 80 columns the card is 31 wide and
+        # that extra space cut the API address to "127.0.0.1:193…", so the
+        # narrow layout keeps 12; the grid padding still leaves a space
+        # (GAP-2412).
+        services_table.add_column(no_wrap=True, width=12 if narrow_services else 13)
         # The last column takes ratio=1 so only it absorbs the spare width.
         # Without a ratio, an expanded grid spreads it over every column, so
         # with short details (gateway stopped) the label and state columns
         # widened and jumped right (GAP-2391).
         if narrow_services:
-            services_table.add_column(ratio=1)
+            # fold, not "…": a detail longer than the column (an address)
+            # wraps instead of losing its end (GAP-2412).
+            services_table.add_column(overflow="fold", ratio=1)
         else:
             services_table.add_column(no_wrap=True, width=10)
             services_table.add_column(overflow="fold", ratio=1)
@@ -9313,29 +9318,31 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             doctor_body = Group(*doctor_lines)
 
         if ai_box.rows:
-            ai_table = Table.grid(padding=(0, 2), expand=True)
-            ai_table.add_column(width=4, no_wrap=True)
-            ai_table.add_column(width=26, no_wrap=True, overflow="ellipsis")
-            ai_table.add_column(width=20, no_wrap=True, overflow="ellipsis")
-            ai_table.add_column(width=8, no_wrap=True)
-            ai_table.add_column(overflow="ellipsis")
-            for row in ai_box.rows[:6]:
-                ai_table.add_row(
+            # Fixed 26/20-wide columns overflowed 80 columns, so Rich shrank
+            # them all ("[OK…", "s…" / "3m" / "a…"). Like CONNECTORS, the rows
+            # stay one line and drop vendor, then confidence (GAP-2414).
+            ai_columns = (
+                FitColumn("STATE"),
+                FitColumn("AGENT", flex_min=12),
+                FitColumn("VENDOR", priority=1),
+                FitColumn("CONF", priority=2, justify="right"),
+                FitColumn("LAST SEEN"),
+            )
+            ai_rows = [
+                (
                     Text(row.state_badge),
                     Text(row.name, style=TOKENS.text_primary),
                     Text(row.vendor, style=TOKENS.text_secondary),
                     Text(row.confidence),
                     Text(row.seen_label, style=TOKENS.text_muted),
                 )
+                for row in ai_box.rows[:6]
+            ]
             if ai_box.overflow:
-                ai_table.add_row(
-                    Text(""),
-                    Text(f"+{ai_box.overflow} more", style=TOKENS.text_secondary),
-                    Text(""),
-                    Text(""),
-                    Text(""),
+                ai_rows.append(
+                    (Text(""), Text(f"+{ai_box.overflow} more", style=TOKENS.text_secondary), Text(""), Text(""), Text(""))
                 )
-            ai_body: RenderableType = ai_table
+            ai_body: RenderableType = FitColumnsTable(ai_columns, ai_rows, show_header=False)
         else:
             ai_body = Text(
                 ai_box.message or "ai discovery offline — run: defenseclaw agent discovery status",

@@ -34,7 +34,8 @@ def _service_rows(app: DefenseClawTUI, width: int) -> dict[str, str]:
     for line in console.export_text().splitlines():
         if line.startswith(("│ ●", "│ ○")):
             cell = line[1:].split("│")[0]
-            rows[cell[1:].lstrip("●○ ").split("  ")[0].strip()] = cell
+            name = cell[1:].lstrip("●○ ").split("  ")[0].strip()
+            rows["AI Discovery" if name.startswith("AI Discovery") else name] = cell
     return rows
 
 
@@ -50,7 +51,9 @@ def test_services_columns_stay_put_when_the_gateway_stops(tmp_path, width) -> No
         stopped = _service_rows(app, width)
     for rows in (running, stopped):
         assert rows["Gateway"].index("Gateway") == 4, rows["Gateway"]
-        state_col = rows["Gateway"].index("Gateway") + 14
-        assert rows["AI Discovery"][state_col - 2 : state_col] == "  ", rows["AI Discovery"]
+        # The narrow card keeps label width 12 so the API address fits (GAP-2412).
+        gap = 2 if width >= 100 else 1
+        state_col = rows["Gateway"].index("Gateway") + 12 + gap
+        assert rows["AI Discovery"][state_col - gap : state_col] == " " * gap, rows["AI Discovery"]
         assert rows["AI Discovery"][state_col] != " ", rows["AI Discovery"]
         assert rows["Gateway"][state_col] != " ", rows["Gateway"]
