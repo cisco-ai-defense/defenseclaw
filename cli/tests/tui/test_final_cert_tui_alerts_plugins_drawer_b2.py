@@ -85,6 +85,9 @@ async def test_activity_output_written_off_panel_keeps_full_width_lines(tmp_path
     line = "Change this connector's mode: " + "x" * 100
     async with app.run_test(size=(160, 45)) as pilot:
         log = app.query_one("#activity", RichLog)
+        # The log shows beside the history list, not with a finished
+        # command's own output (GAP-2326).
+        app.activity_model.term_mode = False
         app.action_switch_panel("activity")
         await pilot.pause()
         app.action_switch_panel("overview")

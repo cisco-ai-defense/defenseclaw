@@ -38,10 +38,14 @@ async def test_restart_mark_stays_on_the_restarting_line(tmp_path, log_shown: bo
     app = snapshot_app(tmp_path)
     async with app.run_test(size=(80, 24)) as pilot:
         app.executor.run = _restart_output  # type: ignore[method-assign]
+        # The session log shows beside the history list; a finished command's
+        # own output view hides it (GAP-2326).
+        app.activity_model.term_mode = False
         if log_shown:
             app.action_switch_panel("activity")
             await pilot.pause()
         assert await app._run_command("defenseclaw", ("agent", "discovery", "enable", "--yes")) == 0
+        app.activity_model.term_mode = False
         app.action_switch_panel("activity")
         await pilot.pause()
         log_text = [strip.text.strip() for strip in app.query_one("#activity", RichLog).lines]

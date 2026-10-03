@@ -36,6 +36,7 @@ from defenseclaw.tui.services.setup_state import (
     ConfigSection,
     ReadinessCheck,
     get_config_value,
+    guardrail_mode_overrides,
     validate_config_field,
 )
 from defenseclaw.tui.services.setup_state import (
@@ -462,7 +463,14 @@ def task_status(
     if wizard == SetupWizard.GUARDRAIL:
         if not guardrail_on:
             return TaskStatus("attention" if problems else "off", "off")
-        return TaskStatus("ok", f"on · {_text(cfg, 'guardrail.mode') or 'observe'}")
+        mode, overrides = guardrail_mode_overrides(cfg)
+        if overrides:
+            # Short for the Status column: "on · action, 1 observe" (GAP-2325).
+            counts: dict[str, int] = {}
+            for _name, own in overrides:
+                counts[own] = counts.get(own, 0) + 1
+            mode += "".join(f", {count} {own}" for own, count in counts.items())
+        return TaskStatus("ok", f"on · {mode}")
     if wizard == SetupWizard.GUARDRAIL_ACTIONS:
         if not guardrail_on:
             return TaskStatus("off", "guardrail off")
