@@ -97,7 +97,20 @@ var invokedGatewayPath = func(rootName string) string {
 		return ""
 	}
 	arg0 := os.Args[0]
-	if !filepath.IsAbs(arg0) || filepath.Base(arg0) != rootName || strings.ContainsAny(arg0, " '\"\\$`") {
+	if !strings.ContainsRune(arg0, '/') || filepath.Base(arg0) != rootName {
+		// A bare name was found on PATH, so it runs as typed.
+		return ""
+	}
+	if !filepath.IsAbs(arg0) {
+		// "./defenseclaw-gateway" from /opt/defenseclaw/bin: name the
+		// absolute path, which runs from any directory (GAP-2232).
+		abs, err := filepath.Abs(arg0)
+		if err != nil {
+			return ""
+		}
+		arg0 = abs
+	}
+	if strings.ContainsAny(arg0, " '\"\\$`") {
 		return ""
 	}
 	return arg0
