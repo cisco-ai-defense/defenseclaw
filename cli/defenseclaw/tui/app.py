@@ -165,7 +165,6 @@ from defenseclaw.tui.services.overview_state import (
     ConnectorOverviewRow,
     HealthSnapshot,
     SubsystemHealth,
-    format_scan_age,
 )
 from defenseclaw.tui.services.read_repository import (
     TUIReadRepository,
@@ -8771,7 +8770,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
 
         banner = _OverviewBanner(f"bold {TOKENS.accent_cyan}")
         uptime_suffix = ""
-        if health is not None and health.uptime_ms:
+        # The last /health payload is kept while the gateway is down, so its
+        # uptime would read "uptime=91s" frozen beside "gateway not running"
+        # (GAP-2302).
+        if health is not None and health.uptime_ms and not self.overview_model.gateway_down():
             uptime_suffix = f"  uptime={health.uptime_ms // 1000}s"
         tagline = Text(
             f"  Enterprise AI Governance  v{__version__}{uptime_suffix}",
@@ -9364,8 +9366,13 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         stable_text = re.sub(r"\b\d+(?:s|m|h|d) ago\b", "<live> ago", stable_text)
         return ("overview", self.help_open, stable_text)
 
-    def _runtime_sample_age(self) -> str:
-        """How old the last runtime sample is ("4m ago"), or ""."""
+    def _runtime_sample_time(self) -> str:
+        """When the last runtime sample was taken ("14:02:11", "Oct 02 14:02"), or "".
+
+        A clock time, not an age: Overview redraws only when its content
+        changes, so "34s ago" stayed "34s ago" while the gateway was down
+        (GAP-2302).
+        """
 
         raw = getattr(getattr(self.runtime_model, "snapshot", None), "scanned_at", "") or ""
         try:
@@ -9374,7 +9381,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             return ""
         if stamp.tzinfo is None:
             stamp = stamp.replace(tzinfo=timezone.utc)
-        return format_scan_age(stamp)
+        local = stamp.astimezone()
+        if local.date() == datetime.now(local.tzinfo).date():
+            return local.strftime("%H:%M:%S")
+        return local.strftime("%b %d %H:%M")
 
     def _overview_runtime_panel(self) -> RenderableType:
         """Always-visible Runtime coverage so Overview is not a services-only wall."""
@@ -9393,8 +9403,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             # sample ("DEGRADED · 17 processes · inference heartbeat: up")
             # read as live beside an all-offline SERVICES list (GAP-2248).
             table.add_row(Text("○ NO DATA - gateway not running", style=f"bold {TOKENS.text_muted}"))
-            age = self._runtime_sample_age()
-            last = f"Last sample {age}; it" if age else "Runtime coverage"
+            taken = self._runtime_sample_time()
+            last = f"Last sample at {taken}; it" if taken else "Runtime coverage"
             table.add_row(
                 Text(
                     f"{last} updates again once the gateway runs: press : and run \"start\".",
@@ -10025,7 +10035,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             ai_lines.append(f"  {ai_box.message or 'no AI agents detected yet'}")
 
         uptime = ""
-        if health is not None and health.uptime_ms:
+        if health is not None and health.uptime_ms and not self.overview_model.gateway_down():
             uptime = f"  uptime={health.uptime_ms // 1000}s"
         keys = self.overview_model.keys_status()
         if keys.available:

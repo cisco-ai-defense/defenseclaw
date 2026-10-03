@@ -113,7 +113,15 @@ class ConsequenceModalModel:
     def default_hint(self) -> str:
         """Footer hint for the unarmed modal; mentions keys only when a row has one."""
 
-        if any(action.hotkey for action in self.actions):
+        safe = [action.hotkey for action in self.actions if action.hotkey and not action.danger]
+        danger = [action.hotkey for action in self.actions if action.hotkey and action.danger]
+        if danger:
+            # A danger row's key only selects it, while a safe row's key runs
+            # at once, so the hint says which is which (GAP-2303).
+            runs = f"{'/'.join(safe)} {'runs' if len(safe) == 1 else 'run'} now  ·  " if safe else ""
+            selects = "selects" if len(danger) == 1 else "select"
+            return f"{runs}{'/'.join(danger)} {selects}, then enter twice runs  ·  esc cancel"
+        if safe:
             return _HINT_DEFAULT
         return _HINT_NO_KEYS
 
