@@ -713,6 +713,32 @@ func TestLifecycleLockIsExclusive(t *testing.T) {
 	}
 }
 
+// GAP-2246: status during another run (a repair restarting the services)
+// says the run is in progress instead of listing every stopped service and
+// naming repair; it still reports the recorded deployment, so MDM
+// detection sees it installed.
+func TestStatusDuringAnotherRunReportsBusy(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+			held, err := h.env.acquireLock(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			status := h.run(Options{Action: ActionStatus})
+			held.release()
+			requireError(t, status, codeBusy)
+			if len(status.Errors) != 1 || !strings.Contains(status.Errors[0].Message, "rerun status") {
+				t.Fatalf("busy status must be the one busy error naming its next step: %+v", status.Errors)
+			}
+			if !status.Installed || status.InstalledVersion != "1.0.0" || status.ExitCode != enterprisestatus.UnixExitBusy {
+				t.Fatalf("busy status: installed=%v version=%q exit=%d", status.Installed, status.InstalledVersion, status.ExitCode)
+			}
+		})
+	}
+}
+
 func TestSecretsAndCredentialDropins(t *testing.T) {
 	h := newTestHost(t, "linux")
 	payload := h.payload("1.0.0")

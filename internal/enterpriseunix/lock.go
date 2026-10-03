@@ -33,6 +33,9 @@ var errLockBusy = errors.New("another DefenseClaw enterprise lifecycle run is in
 // verify, which has no --lock-wait.
 const verifyBusyNextStep = "wait for it to finish, then rerun verify"
 
+// statusBusyNextStep is the same for status (GAP-2246).
+const statusBusyNextStep = "wait for it to finish, then rerun status"
+
 // lockBusyNextStep is what an administrator does about errLockBusy on an
 // action that takes --lock-wait. It names the wait this run already did, so
 // a run given --lock-wait 1s is not told to pass --lock-wait (GAP-1722).
