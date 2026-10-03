@@ -546,7 +546,8 @@ _FRIENDLY_CONNECTOR_NAMES = {
     "omnigent": "OmniGent",
     "kiro": "Kiro",
 }
-_CURSOR_PRIORITY_CONFLICT_DISCLOSURE = "priority-conflict-detection=unavailable (none inferred)"
+# Plain words, as on the TUI Overview (GAP-2561).
+_CURSOR_PRIORITY_CONFLICT_DISCLOSURE = "(overrides by Enterprise, Team or Project hooks can't be detected)"
 
 
 def _friendly_connector_name(name: str | None) -> str:

@@ -149,8 +149,12 @@ BADGE_RESERVE = 6
 # name: "2 Alerts¹⁷¹", "8 Logs⁹⁹⁹⁺" and "9 Audit⁵⁷⁹" took 9 cells and cut the
 # open "V AI Discovery" at 172-180 cells while the other tabs kept their full
 # names (GAP-2420). Room for three "999+" counts, less the one Alerts digit
-# already counted, so the other tabs take shorter names instead.
-OPEN_COUNT_RESERVE = 11
+# already counted, so the other tabs take shorter names instead. Alerts is an
+# inbox and gets room for three digits: a fourth digit while a long name is
+# open leaves the least important tab bare there (``_named_fit``), while
+# reserving that cell named the Registries tab "R Registry" at 200 columns
+# beside 11 free cells (GAP-2560).
+OPEN_COUNT_RESERVE = 10
 
 
 def _names(name: str, label: str) -> tuple[str, str, str]:
@@ -348,13 +352,23 @@ def _every_tab_named(panels: Sequence[tuple[str, str, str]], width: int) -> dict
     # later short one read "7 Sandboxes" at 182 columns and "7 Sandbox" at 183
     # (GAP-2517).
     for tier in range(3):
-        for name in sorted(keys, key=_rank):
+        for name in sorted(keys, key=lambda name: _grow_order(name, titles[name], tier)):
             before = chosen[name]
             chosen[name] = max(before, _names(name, titles[name])[tier], key=len)
             if cost() + OPEN_COUNT_RESERVE > width:
                 chosen[name] = before
                 return chosen
     return chosen
+
+
+def _grow_order(name: str, title: str, tier: int) -> tuple[bool, int]:
+    """Sort key for growing names: by importance, except that full names whose
+    short name is another word ("Registry" for "Registries") come first, so
+    the tab reads as its panel before "Sandbox" grows into "Sandboxes"
+    (GAP-2560). The order is fixed, so a wider strip never shortens a name."""
+
+    renamed = tier == 2 and not title.startswith(_names(name, title)[1])
+    return (not renamed, _rank(name))
 
 
 def _named_fit(
