@@ -21,9 +21,10 @@ const (
 const AIDWireVersionChatToolCalls = "chat-tool-calls-v1"
 
 // aidPromptSurfaceEvents and aidToolResultSurfaceEvents are the canonical
-// spellings each surface accepts, mirroring the runtime classification in
+// spellings each surface accepts, copied from the runtime classification in
 // isPromptLikeEvent / isResultLikeEvent. TestAIDSurfaceEventsMatchRuntimeClassification
-// fails if the two ever disagree.
+// checks every event a contract declares against that classification; a
+// spelling no contract declares is not checked, so keep the lists in step.
 var aidPromptSurfaceEvents = map[string]bool{
 	"userpromptsubmit": true, "userpromptsubmitted": true, "userprompttransformed": true,
 	"beforesubmitprompt": true, "preuserprompt": true, "subagentstart": true,
@@ -36,8 +37,7 @@ var aidToolResultSurfaceEvents = map[string]bool{
 	"postruncommand": true, "postmcptooluse": true, "aftershellexecution": true,
 	"aftermcpexecution": true, "afterfileedit": true, "aftertabfileedit": true,
 	"afteragentresponse": true, "afteragentthought": true, "afteragent": true,
-	"aftermodel": true, "postllmcall": true, "postcascaderesponse": true,
-	"postcascaderesponsewithtranscript": true, "toolexecuteafter": true,
+	"aftermodel": true, "postllmcall": true, "toolexecuteafter": true,
 	"toolresult": true, "agentend": true,
 }
 

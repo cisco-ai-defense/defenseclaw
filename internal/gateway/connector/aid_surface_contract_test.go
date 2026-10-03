@@ -77,3 +77,44 @@ func TestManifestUngatedConnectorsDeclareAIDSurfaces(t *testing.T) {
 		t.Fatal("no ungated connector was checked; the manifest shape changed")
 	}
 }
+
+// Sandbox-only contracts are built outside builtinHookContracts, so the init
+// that fills in their AID declaration never sees them. Each one that reaches
+// AID still names its events and its encoding.
+func TestSandboxOnlyContractsDeclareAIDSurfaces(t *testing.T) {
+	checked := 0
+	for name := range sandboxOnlyHookContractsByConnector {
+		for _, contract := range sandboxOnlyHookContracts(name) {
+			if len(contract.AIDSurfaces) == 0 {
+				continue
+			}
+			checked++
+			if contract.AIDWireVersion != AIDWireVersionChatToolCalls {
+				t.Errorf("%s aid_wire_version=%q want %q",
+					contract.ContractID, contract.AIDWireVersion, AIDWireVersionChatToolCalls)
+			}
+			events := make(map[string]bool, len(contract.Events))
+			for _, event := range contract.Events {
+				events[canonicalHookEvent(event)] = true
+			}
+			for _, surface := range contract.AIDSurfaces {
+				if surface == AIDSurfaceEventContent {
+					continue
+				}
+				declared := contract.AIDSurfaceEvents[surface]
+				if len(declared) == 0 {
+					t.Errorf("%s declares aid surface %q with no events", contract.ContractID, surface)
+				}
+				for _, event := range declared {
+					if !events[canonicalHookEvent(event)] {
+						t.Errorf("%s aid_surface_events[%q] names %q, which is not in events",
+							contract.ContractID, surface, event)
+					}
+				}
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no sandbox-only contract reaching AID was checked")
+	}
+}
