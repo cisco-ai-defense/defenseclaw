@@ -77,16 +77,32 @@ func TestOpenClawAllowedTurnNamesTheLocalUser(t *testing.T) {
 	if allowed.meta.UserName != wantName {
 		t.Fatalf("allowed turn user = %q, want %q", allowed.meta.UserName, wantName)
 	}
-	// A Windows HOST\user name fails the v8 identifier check (GAP-2366).
-	if hookModelV8Identifier(wantName) {
-		if name, _ := eventRouterAgentInputV8(allowed).DefenseClawUserName.Get(); name != wantName {
-			t.Fatalf("allowed turn span user = %q, want %q", name, wantName)
-		}
+	if name, _ := eventRouterAgentInputV8(allowed).DefenseClawUserName.Get(); name != wantName {
+		t.Fatalf("allowed turn span user = %q, want %q", name, wantName)
 	}
 	named := hookModelV8Observation{response: "ok"}
 	named.meta.UserName = "stream-user"
 	applyOpenClawPromptBlock(&named)
 	if named.meta.UserName != "stream-user" {
 		t.Fatalf("stream user replaced by %q", named.meta.UserName)
+	}
+}
+
+// TestBareAccountNameKeepsTheV8UserName pins GAP-2366: the Windows
+// HOST\user fallback name is reduced to the bare account name, which passes
+// the v8 identifier check, so defenseclaw.user.name is not dropped.
+func TestBareAccountNameKeepsTheV8UserName(t *testing.T) {
+	for in, want := range map[string]string{
+		`runnervm\runneradmin`: "runneradmin",
+		`DOMAIN\dcw-std1`:      "dcw-std1",
+		"dcr-std1":             "dcr-std1",
+		`trailing\`:            `trailing\`,
+	} {
+		if got := bareAccountName(in); got != want {
+			t.Fatalf("bareAccountName(%q) = %q, want %q", in, got, want)
+		}
+	}
+	if !hookModelV8Identifier(bareAccountName(`runnervm\runneradmin`)) {
+		t.Fatal("bare Windows account name fails the v8 identifier check")
 	}
 }
