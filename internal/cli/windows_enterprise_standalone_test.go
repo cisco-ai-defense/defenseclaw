@@ -1645,6 +1645,40 @@ func TestRollbackWindowsFirstInstallAccountSkipsADeletedAccount(t *testing.T) {
 	}
 }
 
+// GAP-2480: when the lifecycle capture writes the Cursor enterprise adapter
+// back over a changed or deleted one, the result and lifecycle log say so.
+func TestWindowsEnterpriseResultNamesRestoredCursorAdapter(t *testing.T) {
+	for _, restored := range []bool{true, false} {
+		document, err := json.Marshal(map[string]any{
+			"schema_version": 1, "ok": true, "action": "repair", "installed": true, "transaction_pending": false,
+			"errors": []string{}, "cursor_adapter_restored": restored,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		report, err := parseWindowsEnterpriseInstallerReport(document)
+		if err != nil {
+			t.Fatal(err)
+		}
+		result := enterprisestatus.New("repair", "standalone", "windows", "1.0.46")
+		addWindowsEnterpriseRecoveryGatewayWarnings(result, report)
+		addWindowsEnterpriseRecoveryGatewayWarnings(result, report)
+		var found []string
+		for _, warning := range result.Warnings {
+			if warning.Code == "cursor_adapter_restored" {
+				found = append(found, warning.Message)
+			}
+		}
+		want := 0
+		if restored {
+			want = 1
+		}
+		if len(found) != want || (restored && !strings.Contains(found[0], `C:\ProgramData\Cursor\defenseclaw-hook.ps1`)) {
+			t.Fatalf("restored=%t warnings = %+v", restored, result.Warnings)
+		}
+	}
+}
+
 // GAP-1680: when the lifecycle removes a stale committed managed-hook
 // lifecycle journal itself, the Setup result and lifecycle log say so.
 func TestWindowsEnterpriseResultNamesRemovedStaleLifecycleJournal(t *testing.T) {

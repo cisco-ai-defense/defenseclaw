@@ -109,6 +109,9 @@ type windowsEnterpriseInstallerReport struct {
 	// stale committed managed-hook lifecycle journal itself (GAP-1322); it
 	// holds the retire failure that made the journal stale.
 	StaleLifecycleJournalRemoved string `json:"stale_lifecycle_journal_removed"`
+	// CursorAdapterRestored is set when the lifecycle wrote this release's
+	// Cursor enterprise adapter back over a changed or deleted one (GAP-2480).
+	CursorAdapterRestored bool `json:"cursor_adapter_restored"`
 
 	// probeFailed marks a failure document that reports no deployment
 	// state at all (no installed field and no pending transaction): the
@@ -674,6 +677,15 @@ func addWindowsEnterpriseRecoveryGatewayWarnings(result *enterprisestatus.Result
 			Message: "Setup removed the stale committed managed-hook lifecycle journal " +
 				"(managed-hooks-lifecycle-journal.json in the protected install state) because its retire could not complete: " +
 				windowsEnterpriseBoundedDiagnostic(removed),
+		})
+	}
+	if report.CursorAdapterRestored {
+		// The lifecycle rewrote a protected file on its own; say so in the
+		// result and the lifecycle log (GAP-2480).
+		warnings = append(warnings, enterprisestatus.Message{
+			Code: "cursor_adapter_restored",
+			Message: `DefenseClaw restored the changed or missing Cursor enterprise adapter ` +
+				`(C:\ProgramData\Cursor\defenseclaw-hook.ps1) from this release`,
 		})
 	}
 	for _, warning := range warnings {
