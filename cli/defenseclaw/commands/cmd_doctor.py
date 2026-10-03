@@ -8239,11 +8239,11 @@ def _check_llm_api_key(cfg, r: _DoctorResult) -> None:
     elif provider == "openai":
         _verify_openai(api_key, r)
     elif provider in ("bedrock", "amazon-bedrock"):
-        _verify_bedrock(api_key, r)
+        _verify_bedrock(api_key, r, key_env=env_name)
     elif provider == "" and env_name.startswith("OPENAI"):
         _verify_openai(api_key, r)
     elif provider == "" and env_name.startswith("AWS_BEARER_TOKEN_BEDROCK"):
-        _verify_bedrock(api_key, r)
+        _verify_bedrock(api_key, r, key_env=env_name)
     else:
         _emit(
             "pass",
@@ -8345,6 +8345,20 @@ def _check_llm_reachable(cfg, r: _DoctorResult) -> None:
         ok, msg = _llm.ping(llm, timeout=5)
     if ok:
         _emit("pass", "LLM reachable", prefix + msg, r=r)
+    elif bool(getattr(judge, "enabled", False)) and f" {_llm._PING_FAILURE_WORDS['auth_failed']}:" in msg:
+        # The judge is on but its key is rejected, so judge verdicts
+        # silently fail open (GAP-2108).
+        key_env = (getattr(llm, "api_key_env", "") or "DEFENSECLAW_LLM_KEY").strip()
+        _emit(
+            "fail",
+            "LLM reachable",
+            prefix + msg + " (the LLM judge cannot run, so its verdicts fail open)",
+            r=r,
+            remediation=(
+                f"replace the key: defenseclaw keys set {key_env} --value-stdin "
+                "(or defenseclaw setup llm --role judge), then defenseclaw-gateway restart"
+            ),
+        )
     else:
         _emit("warn", "LLM reachable", prefix + msg, r=r)
 
@@ -8853,7 +8867,7 @@ def _bedrock_region() -> str:
     return _BEDROCK_DEFAULT_REGION
 
 
-def _verify_bedrock(api_key: str, r: _DoctorResult) -> None:
+def _verify_bedrock(api_key: str, r: _DoctorResult, *, key_env: str = "DEFENSECLAW_LLM_KEY") -> None:
     """Verify an AWS Bedrock API key (short-term ABSK bearer token).
 
     LiteLLM and the DefenseClaw scanner bridge authenticate to Bedrock
@@ -8902,17 +8916,30 @@ def _verify_bedrock(api_key: str, r: _DoctorResult) -> None:
         _emit("pass", "LLM API key (Bedrock)", f"authenticated successfully ({region})", r=r)
     elif code == 401:
         _emit("fail", "LLM API key (Bedrock)", "invalid key (401 Unauthorized)", r=r)
-    elif code == 403:
-        # 403 from Bedrock usually means the token is valid but the
-        # IAM policy/resource doesn't grant bedrock:ListFoundationModels.
-        # That's a policy problem, not a key problem — downgrade to warn
-        # so the scan still runs (the scanner uses InvokeModel, which
-        # may be permitted even when List is not).
+    elif code == 403 and _bedrock_403_is_permission_denial(body):
+        # The token authenticated, but the IAM policy doesn't grant
+        # bedrock:ListFoundationModels. That's a policy problem, not a key
+        # problem — downgrade to warn so the scan still runs (the scanner
+        # uses InvokeModel, which may be permitted even when List is not).
         _emit(
             "warn",
             "LLM API key (Bedrock)",
             "403 Forbidden — key authenticates but lacks bedrock:ListFoundationModels; InvokeModel may still work.",
             r=r,
+        )
+    elif code == 403:
+        # Bedrock answers an expired or invalid bearer key with 403
+        # ("Authentication failed: Please make sure your API Key is valid."),
+        # which InvokeModel rejects the same way (GAP-2108).
+        _emit(
+            "fail",
+            "LLM API key (Bedrock)",
+            f"key rejected (403 Forbidden: {_bedrock_error_message(body)}); it is expired or invalid",
+            r=r,
+            remediation=(
+                f"replace it: defenseclaw keys set {key_env} --value-stdin "
+                "(or defenseclaw setup llm), then defenseclaw-gateway restart"
+            ),
         )
     elif code == 0:
         _emit(
@@ -8923,6 +8950,25 @@ def _verify_bedrock(api_key: str, r: _DoctorResult) -> None:
         )
     else:
         _emit("fail", "LLM API key (Bedrock)", f"HTTP {code}", r=r)
+
+
+def _bedrock_403_is_permission_denial(body: str) -> bool:
+    """True when a Bedrock 403 is an IAM denial, not a rejected key (GAP-2108)."""
+    low = (body or "").lower()
+    return any(m in low for m in ("not authorized to perform", "accessdenied", "access denied"))
+
+
+def _bedrock_error_message(body: str) -> str:
+    """The ``Message`` of a Bedrock error body, short and single-line."""
+    try:
+        data = json.loads(body or "")
+    except ValueError:
+        data = None
+    msg = ""
+    if isinstance(data, dict):
+        msg = str(data.get("Message") or data.get("message") or "")
+    msg = " ".join((msg or body or "no detail").split())
+    return msg[:160]
 
 
 def _check_cisco_ai_defense(cfg, r: _DoctorResult) -> None:
@@ -9141,13 +9187,13 @@ def _check_connector_export_custody(report, r: _DoctorResult, *, configured: set
             continue
         if (
             not item.default
-            and delivery is not None
-            and delivery.state == "no_evidence"
+            and (delivery is None or delivery.state == "no_evidence")
             and item.credential_state not in {"invalid", "recovered"}
         ):
             # An additional instance (one per OpenShell sandbox run) with no
             # evidence is an idle or deleted sandbox, not a custody problem:
             # fold it into one line per connector, as status does (GAP-2097).
+            # Hook-only ones fold too: they are the same past runs (GAP-2104).
             idle[item.connector] = idle.get(item.connector, 0) + 1
             continue
         if item.custody == "external":
