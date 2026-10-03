@@ -1468,8 +1468,19 @@ PY
 # when its own gateway restarts.
 restart_openclaw() {
     openclaw_connector_active && has openclaw || return 0
-    openclaw gateway restart >/dev/null 2>&1 && ok "OpenClaw gateway restarted" \
-        || warn "Restart the OpenClaw gateway to load the updated plugin: openclaw gateway restart"
+    local out
+    if ! out="$(openclaw gateway restart 2>&1)"; then
+        warn "Restart the OpenClaw gateway to load the updated plugin: openclaw gateway restart"
+        return 0
+    fi
+    # OpenClaw exits 0 but restarts nothing when no gateway service is
+    # installed ("Gateway service disabled"), for example a foreground
+    # `openclaw gateway`. Don't claim a restart (GAP-2207, as GAP-1408 in setup).
+    if grep -Eqi 'openclaw gateway install|service (is )?(disabled|not (loaded|enabled|installed|registered|found))' <<<"${out}"; then
+        warn "No OpenClaw gateway service to restart. Restart the OpenClaw gateway to load the updated plugin: if it runs in a terminal, restart 'openclaw gateway' there"
+        return 0
+    fi
+    ok "OpenClaw gateway restarted"
 }
 
 openclaw_connector_active() {
