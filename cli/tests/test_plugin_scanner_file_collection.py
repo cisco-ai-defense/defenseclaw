@@ -662,7 +662,8 @@ class TestNoManifestStillScans(unittest.TestCase):
         result = scan_plugin(plugin_file)
         rule_ids = [finding.rule_id for finding in result.findings]
 
-        self.assertIn("MANIFEST-MISSING", rule_ids)
+        # A single-file plugin has no manifest by design (GAP-2165).
+        self.assertNotIn("MANIFEST-MISSING", rule_ids)
         self.assertTrue(
             any("EVAL" in rule_id for rule_id in rule_ids if rule_id),
             f"Expected eval finding from direct Amp plugin scan, got: {rule_ids}",

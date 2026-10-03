@@ -432,8 +432,14 @@ def scan_source_files(
     profile: str,
     source_files_out: list | None = None,
     force_include: list[str] | None = None,
+    python_host: bool = False,
 ) -> tuple[int, int]:
     """Returns (file_count, total_bytes).
+
+    ``python_host`` marks a plugin loaded by a Python agent (a Hermes
+    ``plugin.yaml`` plugin): its JavaScript files run as their own
+    processes, so the gateway-manipulation rules (``process.exit()``,
+    module-system hooks) cannot reach the agent and are skipped (GAP-2168).
 
     If ``source_files_out`` is provided, each successfully read file is
     appended as a ``SourceFile`` instance so downstream analyzers (in
@@ -582,7 +588,7 @@ def scan_source_files(
             _check_for_dynamic_imports(code_lines, rel_path, findings, in_test)
         _check_for_cognitive_file_tampering(code_lines, content, rel_path, findings, py)
         _check_for_obfuscation(code_lines, content, rel_path, findings, in_test)
-        if not is_py:
+        if not is_py and not python_host:
             _check_for_gateway_manipulation(code_lines, lines, rel_path, findings, in_test)
         _check_for_cost_runaway(code_lines, rel_path, findings)
 

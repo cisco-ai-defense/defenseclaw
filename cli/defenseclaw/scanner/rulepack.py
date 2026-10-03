@@ -41,6 +41,10 @@ this against the scanner-flip — see session notes):
   Flipping this on is a one-line change if a 1:1 traffic match is later wanted.
 * ``suppressions.yaml`` / ``sensitive-tools.yaml`` / ``judge/*.yaml`` are
   traffic- and LLM-oriented and are not applied to static artifacts here.
+* The data-loss/PII record rules (the ``enterprise-data`` category and the
+  ``pii_data_regexes`` family) are skipped too: they find personal data in
+  traffic, and on source code they match field names and example numbers in
+  help text (GAP-2168).
 
 The overlay is wired into the scan commands via :func:`maybe_wrap`, which wraps
 the underlying scanner so every ``scan()`` call site picks up the overlay with
@@ -91,8 +95,9 @@ _BINARY_EXTS = {
 # module docstring).
 _REGEX_FAMILIES = {
     "injection_regexes": ("HIGH", "RP-INJECTION", "Prompt-injection pattern", "prompt-injection"),
-    "pii_data_regexes": ("MEDIUM", "RP-PII-DATA", "PII data pattern", "pii"),
 }
+# Rule categories that describe data in traffic, not artifact code (GAP-2168).
+_TRAFFIC_DATA_CATEGORIES = frozenset({"enterprise-data"})
 _GO_UNICODE_SCALAR_ESCAPE = re.compile(
     r"(?P<slashes>\\+)x\{(?P<codepoint>[0-9A-Fa-f]{1,6})\}"
 )
@@ -433,6 +438,8 @@ def load_rule_pack(dir_path: str) -> RulePack:
 def _compile_rules_file(raw: dict, pack: RulePack) -> None:
     """Compile a ``rules/<category>.yaml`` file into the pack."""
     category = str(raw.get("category", "") or "rule")
+    if category in _TRAFFIC_DATA_CATEGORIES:
+        return
     for rule in raw.get("rules", []) or []:
         if not isinstance(rule, dict):
             continue
