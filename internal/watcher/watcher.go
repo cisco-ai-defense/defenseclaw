@@ -1212,17 +1212,25 @@ func (w *InstallWatcher) preserveRestoredBlockedAsset(evt InstallEvent) bool {
 	if connector != "" {
 		connectors = append(connectors, "")
 	}
+	// A restore clears the file action in every scope it owned. A file
+	// action set in any scope since then is a later quarantine decision (for
+	// example a re-scan block after unblock + restore), so the restored-files
+	// exception no longer applies and a re-added copy is quarantined
+	// (GAP-1971).
+	restored := false
 	for _, scope := range connectors {
 		entry, err := w.store.GetActionForConnector(evt.Type.String(), evt.Name, scope)
 		if err != nil || entry == nil {
 			continue
 		}
-		if entry.Actions.File == "" && entry.SourcePath != "" &&
-			sameWatcherPath(entry.SourcePath, evt.Path) {
-			return true
+		if entry.Actions.File != "" {
+			return false
+		}
+		if entry.SourcePath != "" && sameWatcherPath(entry.SourcePath, evt.Path) {
+			restored = true
 		}
 	}
-	return false
+	return restored
 }
 
 func (w *InstallWatcher) claudeCacheDepth(path string) (int, bool) {
