@@ -1879,6 +1879,15 @@ func (c *hookOnlyConnector) teardown(ctx context.Context, opts SetupOpts, hermes
 				errs = append(errs, fmt.Sprintf("remove hook entries from the restored config: %v", err))
 			}
 		}
+	case restored && c.name == "cursor":
+		// The same for a Cursor hooks.json captured after an earlier
+		// DefenseClaw setup whose data directory was removed (GAP-2064).
+		owned := cursorOwnedHookCommands(opts)
+		if cfg, err := readJSONObject(path); err == nil && structuredHookCommandReferences(cfg, owned) {
+			if err := removeJSONHookReferences(path, owned...); err != nil {
+				errs = append(errs, fmt.Sprintf("remove hook entries from the restored config: %v", err))
+			}
+		}
 	case restored:
 	case !restored:
 		if err := c.removeConfigEntriesWithManagedBackup(
@@ -1980,13 +1989,11 @@ func (c *hookOnlyConnector) teardownPluginArtifact(opts SetupOpts) error {
 		return nil
 	}
 	discardManagedFileBackup(opts.DataDir, c.name, "config")
-	if opts.ManagedEnterprise {
-		// A plugin captured after an earlier DefenseClaw setup (one a
-		// rolled-back install left) is DefenseClaw's own, so putting it back
-		// would leave the registration in place; it goes too.
-		return c.removeOwnedPluginWithoutBackup(path)
-	}
-	return nil
+	// A plugin captured after an earlier DefenseClaw setup (one a
+	// rolled-back install or a removed data directory left) is DefenseClaw's
+	// own, so putting it back would leave the registration in place; it goes
+	// too (GAP-2064). Any other restored file stays.
+	return c.removeOwnedPluginWithoutBackup(path)
 }
 
 // removeOwnedPluginWithoutBackup deletes the plugin at path when it is a
