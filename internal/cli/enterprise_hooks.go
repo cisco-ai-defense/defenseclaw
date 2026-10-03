@@ -160,13 +160,14 @@ var enterpriseHooksCmd = &cobra.Command{
 	Use:   "hooks",
 	Short: "Install and repair per-user hook connectors",
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-		if err := enterpriseHooksPlatformPreflight(); err != nil {
-			return err
+		err := enterpriseHooksPlatformPreflight()
+		if err == nil {
+			// Cobra runs only the nearest persistent pre-run hook. Chain the root
+			// initializer explicitly so supported hosts retain config, audit, and
+			// authorization initialization before any enterprise hook operation.
+			err = enterpriseHooksRootPersistentPreRun(cmd, args)
 		}
-		// Cobra runs only the nearest persistent pre-run hook. Chain the root
-		// initializer explicitly so supported hosts retain config, audit, and
-		// authorization initialization before any enterprise hook operation.
-		return enterpriseHooksRootPersistentPreRun(cmd, args)
+		return enterpriseHooksStatusPreRunJSON(cmd, err)
 	},
 }
 
@@ -905,6 +906,22 @@ func runEnterpriseHooksStatus(cmd *cobra.Command, _ []string) error {
 		printEnterpriseHookEnrollment(cmd.OutOrStdout(), report.Enrollment, report.State.UpdatedAt)
 	}
 	return fmt.Errorf("enterprise hooks status unhealthy")
+}
+
+// enterpriseHooksStatusPreRunJSON answers `enterprise hooks status --json`
+// run by hand that failed before the status ran (on a managed Windows
+// computer an elevated prompt has no per-user config) with its report:
+// ok=false and the reason in errors[], with no "Error:" line, instead of an
+// empty stdout (GAP-2456). The managed services and the lifecycle run it
+// under the deployment-mode pin and keep their output.
+func enterpriseHooksStatusPreRunJSON(cmd *cobra.Command, err error) error {
+	if err == nil || cmd != enterpriseHooksStatusCmd || !enterpriseHookJSON ||
+		managed.IsManagedEnterprise(os.Getenv(managed.DeploymentModeEnv)) {
+		return err
+	}
+	_ = json.NewEncoder(cmd.OutOrStdout()).Encode(enterpriseHookStatusReport{Errors: []string{err.Error()}})
+	cmd.SilenceErrors = true
+	return err
 }
 
 func enterpriseHooksStatusError(cmd *cobra.Command, report enterpriseHookStatusReport, err error) error {

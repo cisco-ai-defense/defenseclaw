@@ -1788,6 +1788,25 @@ func TestWindowsEnterpriseLifecycleCallerErrorsExitCodes(t *testing.T) {
 	if commandExitCode(err) != 1639 || !strings.Contains(fmt.Sprint(err), "This computer runs the standalone profile: use --profile standalone, or omit --profile") {
 		t.Fatalf("verify --profile secure_client on a standalone host: exit %d, %v", commandExitCode(err), err)
 	}
+	// GAP-2445: with --json the preflight JSON is the whole answer; cobra's
+	// "Error: profile_conflict: ..." line no longer follows it.
+	for _, action := range []string{"verify", "status"} {
+		var stdout, stderr bytes.Buffer
+		command := &cobra.Command{Use: action, SilenceUsage: true, RunE: func(c *cobra.Command, _ []string) error {
+			err = runWindowsEnterpriseLifecycle(context.Background(), c, action,
+				&windowsEnterpriseLifecycleOptions{profile: "secure_client", jsonOutput: true})
+			return err
+		}}
+		command.SetArgs([]string{})
+		command.SetOut(&stdout)
+		command.SetErr(&stderr)
+		_ = command.Execute()
+		var preflight windowsEnterpriseLifecyclePreflightFailure
+		if jsonErr := json.Unmarshal(stdout.Bytes(), &preflight); jsonErr != nil || preflight.OK ||
+			!strings.HasPrefix(preflight.Error, "profile_conflict: ") || commandExitCode(err) != 1639 || stderr.Len() != 0 {
+			t.Fatalf("%s --profile secure_client --json: exit %d, stdout %q, stderr %q", action, commandExitCode(err), stdout.String(), stderr.String())
+		}
+	}
 
 	// An administrator who cannot read the config still sees the real error.
 	windowsEnterpriseIsElevated = func() bool { return true }
