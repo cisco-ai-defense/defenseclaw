@@ -63,6 +63,9 @@ type EventRouter struct {
 	// Ended W3C model contexts are keyed by source-backed session/run facts.
 	// Contexts contain no live span or runtime-generation lease.
 	activeLLMContexts map[eventRouterModelContextKey]eventRouterModelContextEntry
+	// The user prompt of each session waits here for the assistant message
+	// that answers it, so that turn's spans carry it (GAP-2408).
+	pendingPrompts map[string]eventRouterPendingPrompt
 
 	toolObservationMu    sync.Mutex
 	toolObservations     map[string]eventRouterToolObservation
@@ -631,6 +634,7 @@ func (r *EventRouter) handleSessionMessage(evt EventFrame) {
 		case "user":
 			msgMeta.PromptID = promptIDForSessionMessage(envelope.SessionKey, envelope.MessageSeq, envelope.MessageID)
 			r.emitLLMPromptEventV8(msgCtx, msgMeta, contentStr, envelope.Message)
+			r.rememberEventRouterPrompt(envelope.SessionKey, openClawMessageText(contentStr), time.Now().UTC())
 		case "assistant":
 			msgMeta.PromptID = replyPromptIDForSessionMessage(envelope.SessionKey, envelope.MessageSeq)
 			msgMeta.ResponseID = stableLLMEventID("response", "openclaw", envelope.SessionKey, envelope.MessageID, intString(envelope.MessageSeq))
@@ -681,7 +685,8 @@ func (r *EventRouter) handleSessionMessage(evt EventFrame) {
 			meta.PromptID = modelEventMeta.PromptID
 			meta.ResponseID = modelEventMeta.ResponseID
 			llmCtx := r.emitEventRouterModelV8(
-				modelEventCtx, meta, msg.Provider, msg.Model, contentStr,
+				modelEventCtx, meta, msg.Provider, msg.Model,
+				r.takeEventRouterPrompt(envelope.SessionKey, time.Now().UTC()), contentStr,
 				promptTokens, completionTokens, toolCallCount, finishReasons, time.Now().UTC(),
 			)
 			r.rememberEventRouterModelContext(

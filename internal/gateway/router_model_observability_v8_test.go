@@ -222,3 +222,79 @@ func TestEventRouterModelV8MetricsDoNotDependOnTraceCollection(t *testing.T) {
 
 func bytesToTraceID(value []byte) string { return hex.EncodeToString(value) }
 func bytesToSpanID(value []byte) string  { return hex.EncodeToString(value) }
+
+func eventRouterSessionMessageFrame(t *testing.T, sessionID string, seq int, role string, content any) EventFrame {
+	t.Helper()
+	message := map[string]any{"role": role, "content": content}
+	if role == "assistant" {
+		message["provider"], message["model"], message["stopReason"] = "openai", "gpt-5", "stop"
+	}
+	payload, err := json.Marshal(map[string]any{
+		"sessionKey": sessionID, "messageId": "message-" + intString(seq), "messageSeq": seq, "message": message,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return EventFrame{Type: "event", Event: "session.message", Payload: payload}
+}
+
+// TestEventRouterBlockedPromptTurnCarriesThePrompt pins GAP-2408: the turn
+// of an OpenClaw prompt the proxy blocked names that prompt as the input of
+// its invoke_agent and chat spans, so Galileo shows which prompt was blocked
+// and not only the block text. A later message of the session that answers
+// something else does not repeat it.
+func TestEventRouterBlockedPromptTurnCarriesThePrompt(t *testing.T) {
+	openClawPromptBlocks.mu.Lock()
+	openClawPromptBlocks.entries = nil
+	openClawPromptBlocks.mu.Unlock()
+	t.Cleanup(func() {
+		openClawPromptBlocks.mu.Lock()
+		openClawPromptBlocks.entries = nil
+		openClawPromptBlocks.mu.Unlock()
+	})
+	router, capture := bindEventRouterModelV8Runtime(t, []string{"traces"})
+	const prompt = "Reply with one word: ok. Reference dccert-prompt-marker"
+	block := blockMessage("", "prompt", "matched: R9-PROMPT-MARKER:marker")
+	rememberOpenClawPromptBlock(block, AgentIdentity{UserName: "dcr-oc9a"})
+
+	router.handleSessionMessage(eventRouterSessionMessageFrame(t, "session-block", 1, "user",
+		[]map[string]any{{"type": "text", "text": prompt}}))
+	router.handleSessionMessage(eventRouterSessionMessageFrame(t, "session-block", 2, "assistant",
+		[]map[string]any{{"type": "text", "text": block}}))
+	router.handleSessionMessage(eventRouterSessionMessageFrame(t, "session-block", 3, "assistant",
+		[]map[string]any{{"type": "text", "text": "later reply"}}))
+
+	spans := waitForEventRouterModelSpans(t, capture, 4)
+	if len(spans) != 4 {
+		t.Fatalf("spans=%d want=4 (two agent+chat turns)", len(spans))
+	}
+	laterTrace := ""
+	for _, span := range spans {
+		if strings.Contains(hookModelV8ProtoAttributes(span)["gen_ai.output.messages"], "later reply") {
+			laterTrace = bytesToTraceID(span.TraceId)
+		}
+	}
+	withPrompt := map[string]int{}
+	for _, span := range spans {
+		attributes := hookModelV8ProtoAttributes(span)
+		family := attributes["defenseclaw.span.family"]
+		input := attributes["gen_ai.input.messages"]
+		if bytesToTraceID(span.TraceId) == laterTrace {
+			if input != "" {
+				t.Errorf("%s of the later turn repeats an input: %s", family, input)
+			}
+			continue
+		}
+		if !strings.Contains(input, prompt) {
+			t.Errorf("%s of the blocked turn has input %q, want the prompt", family, input)
+			continue
+		}
+		if attributes["defenseclaw.outcome"] != string(observability.OutcomeBlocked) {
+			t.Errorf("%s outcome=%q want blocked", family, attributes["defenseclaw.outcome"])
+		}
+		withPrompt[family]++
+	}
+	if withPrompt[observability.TelemetryFamilyAgentInvoke] != 1 || withPrompt[observability.TelemetryFamilyModelChat] != 1 {
+		t.Fatalf("spans with the blocked prompt=%v, want one agent and one chat", withPrompt)
+	}
+}
