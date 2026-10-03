@@ -177,3 +177,50 @@ func TestBrokeredProcessAccountOwnsAMachineWideAgent(t *testing.T) {
 		t.Fatal("lookup still installed")
 	}
 }
+
+// GAP-2263: a service-context scan's skill rows name each profile's skills,
+// not the agent's own state files, the Hermes category folders or the
+// Hermes .bundled_manifest.
+func TestServiceContextSkillRowsNameSkillsOnly(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The service account's own Hermes home is elsewhere.
+	t.Setenv("HERMES_HOME", filepath.Join(root, "service"))
+	bob := filepath.Join(root, "Users", "bob")
+	hermes := filepath.Join(bob, "AppData", "Local", "hermes", "skills")
+	cursor := filepath.Join(bob, ".cursor", "skills-cursor")
+	for _, dir := range []string{filepath.Join(hermes, "creative", "ascii-art"), filepath.Join(hermes, "media"), filepath.Join(cursor, "canvas")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for path, body := range map[string]string{
+		filepath.Join(hermes, "creative", "ascii-art", "SKILL.md"): "---\nname: ascii-art\n---\n",
+		filepath.Join(hermes, ".bundled_manifest"):                 "",
+		filepath.Join(hermes, ".curator_state"):                    "{}",
+		filepath.Join(cursor, ".sync-manifest.json"):               "{}",
+	} {
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s := &ContinuousDiscoveryService{opts: AIDiscoveryOptions{HomeDir: bob, HomeDirs: []string{bob},
+		homeOwners: []discoveryHomeOwner{{Home: bob, UserID: "S-1-5-21-1-2-3-1002", UserName: "bob"}}}}
+	entries := func(signal AISignal) string {
+		var names []string
+		for _, evidence := range signal.Evidence {
+			if evidence.Type == "skill_entry" {
+				names = append(names, evidence.Basename)
+			}
+		}
+		return strings.Join(names, ",")
+	}
+	if got := entries(s.signalFromDirectoryChildren(AISignature{ID: "hermes", Name: "Hermes"}, SignalSkill, "skill", hermes)); got != "ascii-art" {
+		t.Fatalf("Hermes skill entries = %q, want ascii-art", got)
+	}
+	if got := entries(s.signalFromDirectoryChildren(AISignature{ID: "cursor", Name: "Cursor"}, SignalSkill, "skill", cursor)); got != "canvas" {
+		t.Fatalf("Cursor skill entries = %q, want canvas", got)
+	}
+}

@@ -102,14 +102,29 @@ func windowsEnterpriseStandardUserMutationAnswer(action string) string {
 // policy, audit export) the way status and verify answer it: what the view
 // needs, the elevated command to ask the administrator for, and that
 // nothing changed. It ran exit 1 with a stuttered internal prefix and no
-// command (GAP-2039).
+// command (GAP-2039). The code stays out of the sentence: it is the
+// managedViewRefusal's, for --json errors[].code (GAP-2262).
 func windowsManagedStandardUserViewAnswer(what, adminArgs string) string {
-	return "elevation_required: " + what + " of a managed computer can be read only from an elevated Administrator prompt or by the MDM agent. " +
+	return what + " of a managed computer can be read only from an elevated Administrator prompt or by the MDM agent. " +
 		"Ask your administrator, who runs it from an elevated PowerShell prompt with `& '" + managedWindowsAdminCLI() + "' " + adminArgs + "`. Nothing was changed."
 }
 
+// managedViewRefusal is a standard account's refusal of a managed view. It
+// prints as the sentence alone, like status and verify; its code
+// (elevation_required) is only for the --json errors[].code. The text read
+// "Error: elevation_required: ..." (GAP-2262).
+type managedViewRefusal struct {
+	code    string
+	message string
+}
+
+func (r *managedViewRefusal) Error() string { return r.message }
+
 // managedHostCurrentAccountName is the signed-in account without its
-// computer or domain prefix: the AI Discovery view names accounts that way.
+// computer or domain prefix: the AI Discovery view names accounts that way,
+// and every refusal names it that way in the commands it suggests
+// (`enterprise policy show --user` resolves the plain name too), not as
+// COMPUTER\account in some and account in others (GAP-2262).
 func managedHostCurrentAccountName() string {
 	account := managedHostCurrentAccount()
 	return account[strings.LastIndex(account, `\`)+1:]
@@ -124,5 +139,5 @@ func windowsEnterpriseStandardUserInspectionAnswer(action string) string {
 	return "the managed deployment's " + action + " needs an elevated prompt: a standard account cannot run the installer's own checks, " +
 		"so this says nothing about the deployment's health. Ask your administrator, who checks it from an elevated PowerShell prompt with `& '" +
 		managedWindowsAdminCLI() + "' enterprise windows " + action + " --profile standalone`, and your account's agents with `& '" +
-		managedWindowsAdminCLI() + "' enterprise policy show --user " + managedHostCurrentAccount() + "`. Nothing was changed."
+		managedWindowsAdminCLI() + "' enterprise policy show --user " + managedHostCurrentAccountName() + "`. Nothing was changed."
 }

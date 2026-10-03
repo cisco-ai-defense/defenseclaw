@@ -138,7 +138,7 @@ func managedWindowsAdminCommandAnswer(where, command string) error {
 	return fmt.Errorf("this computer's DefenseClaw is managed by your organization (%s), so `%s` has no per-user "+
 		"deployment to check and nothing for you to do; your administrator can check the managed deployment %s, "+
 		"and your account's agents with `& '%s' enterprise policy show --user %s`. Nothing was changed.",
-		where, command, managedWindowsAdminStatusHint(), managedWindowsAdminCLI(), managedHostCurrentAccount())
+		where, command, managedWindowsAdminStatusHint(), managedWindowsAdminCLI(), managedHostCurrentAccountName())
 }
 
 // managedWindowsUpgradeAnswer tells a user on a managed Windows computer that

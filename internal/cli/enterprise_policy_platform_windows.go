@@ -35,7 +35,7 @@ import (
 func pinStandaloneManagedEnv() error {
 	return pinManagedAdministratorEnvironment("enterprise policy", func() string {
 		return windowsManagedStandardUserViewAnswer("the machine policy",
-			"enterprise policy show --user "+managedHostCurrentAccount())
+			"enterprise policy show --user "+managedHostCurrentAccountName())
 	})
 }
 
