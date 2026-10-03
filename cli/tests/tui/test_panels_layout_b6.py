@@ -47,7 +47,7 @@ def test_shortened_active_tab_always_ends_with_an_ellipsis(monkeypatch) -> None:
             shown = labels[active].split(" ", 1)[1]
             assert shown.startswith(name) or "…" in shown, (active, labels[active])
     # The Alerts count is never dropped for an ellipsis.
-    assert "2⁵" in tab_fit.fit_tab_labels(PANELS, "sandboxes", busy, 66)["alerts"]
+    assert tab_fit.fit_tab_labels(PANELS, "sandboxes", busy, 66)["alerts"] in {"2⁵", "2(5)"}
 
 
 def test_runtime_starts_compact_on_short_screens_and_keeps_its_own_toggle() -> None:
