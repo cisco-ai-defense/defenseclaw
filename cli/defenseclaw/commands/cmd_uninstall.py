@@ -68,6 +68,7 @@ from defenseclaw import legacy_connector, ux
 # the virtual environment this CLI runs from (GAP-1397).
 from defenseclaw.bootstrap import remove_own_api_port_claims
 from defenseclaw.commands import windows_native_uninstall
+from defenseclaw.file_lock import tui_lock_held
 
 # Connectors whose teardown the Python CLI knows how to perform locally
 # without going through ``defenseclaw-gateway connector teardown``. This
@@ -1980,6 +1981,13 @@ def _is_empty_dir(path: str) -> bool:
 def _validate_plan(plan: UninstallPlan) -> None:
     """Validate every destructive root and exact artifact before mutation."""
     if plan.remove_data_dir:
+        if plan.data_dir and tui_lock_held(plan.data_dir):
+            # An open TUI keeps writing audit.db and its state files, so the
+            # data removal failed half-done with "Directory not empty" (GAP-2576).
+            raise click.ClickException(
+                "the DefenseClaw TUI (defenseclaw tui) is open for this account and keeps "
+                f"writing to {plan.data_dir}. Quit it (Ctrl+C), then run this uninstall again."
+            )
         resolved_data = _validate_owned_root(plan.data_dir, "data path")
         if plan.platform_name == "win32":
             _validate_windows_ancestor_chain(plan.data_dir, "data path")

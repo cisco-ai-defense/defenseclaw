@@ -51,6 +51,7 @@ def _lock_retry_delay(deadline: float) -> float:
         raise FileLockTimeoutError("file update lock is busy")
     return min(0.05, remaining)
 
+
 if os.name == "nt":
     import msvcrt
 
@@ -147,3 +148,58 @@ def locked_file_update(
             _unlock_file(lock)
     finally:
         lock.close()
+
+
+# Held by an open ``defenseclaw tui`` for its lifetime, so ``uninstall --all``
+# can ask the user to quit it before removing the data directory (GAP-2576).
+TUI_LOCK_FILENAME = "tui.lock"
+
+
+def hold_tui_lock(data_dir: str) -> IO[str] | None:
+    """Take the TUI lock in an existing ``data_dir``; the handle keeps it.
+
+    Returns None (and the TUI runs without it) when the folder is missing,
+    the file cannot be opened, or another TUI already holds the lock.
+    """
+    if not os.path.isdir(data_dir):
+        return None
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(os.path.join(data_dir, TUI_LOCK_FILENAME), flags, 0o600)
+    except OSError:
+        return None
+    lock = os.fdopen(fd, "r+")
+    try:
+        _lock_file_exclusive(lock, timeout_seconds=0)
+    except OSError:
+        lock.close()
+        return None
+    return lock
+
+
+def release_tui_lock(lock: IO[str] | None, data_dir: str) -> None:
+    """Release the TUI lock and remove its file."""
+    if lock is None:
+        return
+    lock.close()
+    try:
+        os.unlink(os.path.join(data_dir, TUI_LOCK_FILENAME))
+    except OSError:
+        pass
+
+
+def tui_lock_held(data_dir: str) -> bool:
+    """Whether an open ``defenseclaw tui`` holds the lock in ``data_dir``."""
+    flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(os.path.join(data_dir, TUI_LOCK_FILENAME), flags)
+    except OSError:
+        return False
+    with os.fdopen(fd, "r+") as lock:
+        try:
+            probe_file_lock_available(lock, timeout_seconds=0)
+        except FileLockTimeoutError:
+            return True
+        except OSError:
+            return False
+    return False
