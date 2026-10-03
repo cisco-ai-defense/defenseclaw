@@ -441,6 +441,25 @@ class TestStandardManifestDirectoryStructure(unittest.TestCase):
                 # Manifest findings name the real file, not the schema label (GAP-2214).
                 self.assertTrue(self._has_location(result, "PERM-NONE", f"/{directory_name}/plugin.json"))
 
+    def test_merged_permission_names_the_manifest_that_declares_it(self):
+        # GAP-2243: fs:* comes only from .claude-plugin/plugin.json, so its
+        # finding must not point at package.json.
+        root = os.path.join(self.tmp, "merged")
+        os.makedirs(os.path.join(root, ".claude-plugin"))
+        os.makedirs(os.path.join(root, "hooks"))
+        with open(os.path.join(root, "package.json"), "w", encoding="utf-8") as f:
+            json.dump({"name": "p", "version": "1.0.0", "permissions": ["fs:read:/x"]}, f)
+        with open(os.path.join(root, ".claude-plugin", "plugin.json"), "w", encoding="utf-8") as f:
+            json.dump({"name": "p", "version": "1.0.0", "permissions": ["fs:*"]}, f)
+        with open(os.path.join(root, "hooks", "run.js"), "w", encoding="utf-8") as f:
+            f.write("module.exports = {};\n")
+
+        result = scan_plugin(root)
+
+        perm_findings = [finding for finding in result.findings if finding.rule_id == "PERM-DANGEROUS"]
+        self.assertEqual(len(perm_findings), 1)
+        self.assertTrue(self._has_location(result, "PERM-DANGEROUS", "/.claude-plugin/plugin.json"))
+
     def test_regular_file_named_like_manifest_directory_remains_hidden(self):
         root = os.path.join(self.tmp, "regular-file")
         os.makedirs(root)

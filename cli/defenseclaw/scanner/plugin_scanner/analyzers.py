@@ -81,8 +81,10 @@ _MANIFEST_SOURCE_PATHS = {
 }
 
 
-def _manifest_location(target: str, manifest: PluginManifest) -> str:
-    source = manifest.source or "package.json"
+def _manifest_location(target: str, manifest: PluginManifest, perm: str | None = None) -> str:
+    # A permission merged from another manifest is reported at the file
+    # that declares it, not at the primary manifest (GAP-2243).
+    source = (manifest.permission_sources or {}).get(perm or "") or manifest.source or "package.json"
     return f"{target}/{_MANIFEST_SOURCE_PATHS.get(source, source)}"
 
 
@@ -133,7 +135,7 @@ def check_permissions(
                         f'Plugin requests "{perm}" which grants broad {perm.split(":")[0]} access. '
                         "This permission should be scoped more narrowly."
                     ),
-                    location=f"{_manifest_location(target, manifest)}",
+                    location=_manifest_location(target, manifest, perm),
                     remediation=f'Replace "{perm}" with specific, scoped permissions (e.g., "fs:read:/specific/path").',
                 )
             )
@@ -150,7 +152,7 @@ def check_permissions(
                         f'Plugin uses wildcard permission "{perm}". '
                         "Wildcard permissions bypass fine-grained policy enforcement."
                     ),
-                    location=f"{_manifest_location(target, manifest)}",
+                    location=_manifest_location(target, manifest, perm),
                     remediation="Use specific, scoped permissions instead of wildcards.",
                 )
             )
