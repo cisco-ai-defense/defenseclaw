@@ -23452,6 +23452,155 @@ function Invoke-DefenseClawInstallLikeLifecycle {
     return $result
 }
 
+function Invoke-DefenseClawNuclearUninstall {
+    # Managed-mode bulldoze: uninstall --purge is a hammer. We don't care
+    # what the previous state was; the point is a clean slate for the
+    # next install. Skip metadata parsing, ACL validation, identity
+    # authentication, and every "refuse-on-drift" gate.
+    #
+    # Safety invariants (STILL ENFORCED):
+    #   1. All deletes are confined to %ProgramFiles%\Cisco\Cisco Secure
+    #      Client\DefenseClaw* and %ProgramData%\Cisco\Cisco Secure
+    #      Client\DefenseClaw*. No path outside those bases can be
+    #      affected, regardless of what the caller passes in.
+    #   2. Services deleted are only those named with the current scope's
+    #      Gateway/Guardian service names (incl. derived Broker +
+    #      Enumerator variants).
+    #
+    # Operators who need the legacy refuse-on-drift uninstall posture
+    # restore it with DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS=1.
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$GuardianServiceName
+    )
+    $warnings = [Collections.Generic.List[string]]::new()
+    $takeownExe = [IO.Path]::Combine($script:System32, 'takeown.exe')
+    $enumeratorName = Get-DefenseClawEnumeratorServiceName `
+        -GuardianServiceName $GuardianServiceName
+    $brokerName = Get-DefenseClawCMIDBrokerServiceName `
+        -GatewayServiceName $GatewayServiceName
+
+    # 1. Stop + delete every managed service we might have created in this
+    #    scope. Swallow errors - a service that is already gone or whose
+    #    stop fails is fine; sc.exe delete marks the row for deletion
+    #    regardless and the SCM pending-delete flag completes at reboot.
+    foreach ($name in @(
+        $GatewayServiceName,
+        $GuardianServiceName,
+        $enumeratorName,
+        $brokerName
+    )) {
+        if ([string]::IsNullOrWhiteSpace($name)) { continue }
+        try { $null = & $script:ScExe 'stop' $name 2>&1 } catch {}
+        try { $null = & $script:ScExe 'delete' $name 2>&1 } catch {}
+    }
+
+    # 2. Nuke InstallRoot + StateRoot. Each path must pass the safe-root
+    #    scope guard before any takeown/icacls/delete runs. The two bases
+    #    are HARDCODED here so a caller cannot subvert the hammer by
+    #    passing an attacker-chosen Layout.
+    $safeRootPattern =
+        '^[A-Z]:\\(Program Files|ProgramData)\\Cisco\\' +
+        'Cisco Secure Client\\DefenseClaw(-Cert)?(\\|$)'
+    foreach ($pathEntry in @(
+        @{ Role = 'InstallRoot'; Path = [string]$Layout.InstallRoot },
+        @{ Role = 'StateRoot';   Path = [string]$Layout.StateRoot }
+    )) {
+        $path = $pathEntry.Path
+        $role = $pathEntry.Role
+        if ([string]::IsNullOrWhiteSpace($path)) { continue }
+        if ($path -notmatch $safeRootPattern) {
+            $warnings.Add(
+                "nuclear uninstall refused $role outside safe-root scope: $path"
+            )
+            continue
+        }
+        if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path)) {
+            continue
+        }
+        try { $null = & $takeownExe '/F' $path '/A' '/R' '/D' 'Y' 2>&1 } catch {}
+        try { $null = & $script:IcaclsExe $path '/reset' '/T' '/C' '/L' 2>&1 } catch {}
+        for ($attempt = 1; $attempt -le 3; $attempt++) {
+            try {
+                Microsoft.PowerShell.Management\Remove-Item `
+                    -LiteralPath $path `
+                    -Recurse `
+                    -Force `
+                    -ErrorAction Stop
+                break
+            }
+            catch {
+                if ($attempt -eq 3) {
+                    $warnings.Add(
+                        "nuclear uninstall could not remove $role $path after 3 attempts: $($_.Exception.Message)"
+                    )
+                }
+                else {
+                    Microsoft.PowerShell.Utility\Start-Sleep `
+                        -Milliseconds (300 * $attempt)
+                }
+            }
+        }
+    }
+
+    # 3. Nuke the handful of fixed-path artifacts that live outside
+    #    --install-root / --state-root scope (per-user Claude managed
+    #    policy / managed-hooks state, the one legacy production IPC
+    #    directory). Each path hardcoded; safe-root scope implicit.
+    foreach ($fixedPath in @(
+        'C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw\ipc',
+        'C:\Program Files\ClaudeCode\managed-settings.d\.defenseclaw-managed-hooks.state',
+        'C:\Program Files\ClaudeCode\managed-settings.d\managed-settings.json'
+    )) {
+        if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $fixedPath)) {
+            continue
+        }
+        try { $null = & $takeownExe '/F' $fixedPath '/A' 2>&1 } catch {}
+        try { $null = & $script:IcaclsExe $fixedPath '/reset' '/C' '/L' 2>&1 } catch {}
+        try {
+            Microsoft.PowerShell.Management\Remove-Item `
+                -LiteralPath $fixedPath `
+                -Recurse `
+                -Force `
+                -ErrorAction Stop
+        }
+        catch {
+            $warnings.Add("nuclear uninstall could not remove fixed-path $fixedPath : $($_.Exception.Message)")
+        }
+    }
+
+    foreach ($warning in $warnings) {
+        Microsoft.PowerShell.Utility\Write-Warning -Message (
+            '{0}: {1}' -f $script:AclSelfHealMarker, $warning
+        )
+    }
+
+    return [pscustomobject]@{
+        schema_version                           = 1
+        ok                                       = $true
+        action                                   = 'uninstall'
+        installed                                = $false
+        purged                                   = $true
+        nuclear                                  = $true
+        install_root                             = [string]$Layout.InstallRoot
+        state_root                               = [string]$Layout.StateRoot
+        gateway_service                          = $GatewayServiceName
+        broker_service                           = $brokerName
+        guardian_service                         = $GuardianServiceName
+        enumerator_service                       = $enumeratorName
+        gateway_service_state                    = 'absent'
+        broker_service_state                     = 'absent'
+        guardian_service_state                   = 'absent'
+        enumerator_service_state                 = 'absent'
+        gateway_ready                            = $false
+        guardian_ready                           = $false
+        cached_enterprise_clients_require_reload = $true
+        errors                                   = @()
+        warnings                                 = @($warnings.ToArray())
+    }
+}
+
 function Invoke-DefenseClawUninstallLifecycle {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -23461,6 +23610,17 @@ function Invoke-DefenseClawUninstallLifecycle {
         [hashtable]$NativeCleanupSource,
         [int]$SelfUninstallCallerPID
     )
+    # Managed-mode bulldoze shortcut: --purge means "clean slate", not
+    # "forensic-grade authenticated teardown". Skip the entire validator
+    # pipeline when the strict-mode knob is off (default). This is the
+    # single-switch escape from the "we keep hitting new identity gates"
+    # loop.
+    if ($Purge -and -not (Test-DefenseClawTrustStrictAncestors)) {
+        return Invoke-DefenseClawNuclearUninstall `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -GuardianServiceName $GuardianServiceName
+    }
     $metadata = Get-DefenseClawDeploymentMetadata -Layout $Layout -Required
     Assert-DefenseClawMetadataIdentity `
         -Metadata $metadata `
