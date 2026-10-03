@@ -2165,7 +2165,7 @@ func (s *ContinuousDiscoveryService) signalFromDirectoryChildren(sig AISignature
 				// A skill is a folder. A hidden file beside the skills is
 				// the agent's own state (Cursor .sync-manifest.json, the
 				// Codex .codex-system-skills.marker), not a skill (GAP-2263).
-				if detector == "skill" && strings.HasPrefix(entry.Name(), ".") && entry.Type().IsRegular() {
+				if detector == "skill" && isHiddenSkillStateFile(entry) {
 					continue
 				}
 				// Codex uses `.system` as a one-level skill container. Expand
@@ -2295,6 +2295,12 @@ func (s *ContinuousDiscoveryService) isHermesSkillsRoot(path string) bool {
 	return false
 }
 
+// isHiddenSkillStateFile reports a hidden regular file in a skills folder:
+// the agent's own state, not a skill (a skill is a folder).
+func isHiddenSkillStateFile(entry os.DirEntry) bool {
+	return strings.HasPrefix(entry.Name(), ".") && entry.Type().IsRegular()
+}
+
 // appendSystemSkillChildren enumerates one level below a Codex `.system`
 // container. Exact vendor-cache children are stamped bundled; children below
 // any other root are stamped user-owned. Nested subtrees are not recursed into.
@@ -2321,6 +2327,11 @@ func (s *ContinuousDiscoveryService) appendSystemSkillChildren(evidence *[]AIEvi
 		}
 		name := sanitizeBasenameValue(entry.Name())
 		if name == "" {
+			continue
+		}
+		// Codex keeps .codex-system-skills.marker inside .system; like
+		// any hidden file beside the skills it is not a skill (GAP-2263).
+		if isHiddenSkillStateFile(entry) {
 			continue
 		}
 		child := filepath.Join(systemDir, entry.Name())
