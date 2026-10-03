@@ -393,6 +393,8 @@ _SETUP_MODE_RE = re.compile(r"^[\u2713\u2714]\s+\S+ mode=(observe|action)$")
 _KEYS_ROW_RE = re.compile(r"^[\u25cf\u25cb\u00b7*o-]\s+([A-Z][A-Z0-9_]*)\s+(.*)$")
 _KEYS_SET_RE = re.compile(r"(?:\u2713|\u2714|\bOK) set\b")
 _SCAN_DONE_RE = re.compile(r"^(?:[\u2713\u2714]|OK)?\s*(Scan complete: .+)$")
+_SCAN_SUMMARY_RE = re.compile(r"^Summary: (\d+) (skills?) scanned\b")
+_NO_SKILLS_PREFIXES = ("No skills found", "No scannable skills")
 
 
 def _plugin_info_summary(lines: Sequence[str]) -> str:
@@ -476,7 +478,16 @@ def command_result_summary(command: str, lines: Sequence[str]) -> str:
         # ``skill scan --all`` (and the other --all scans) print one section
         # per connector; the last line was a skills directory (GAP-2184).
         noun = "connector" if len(connectors) == 1 else "connectors"
-        return f"{len(connectors)} {noun} scanned"
+        text = f"{len(connectors)} {noun} scanned"
+        # "4 connectors scanned" read the same when no connector had a
+        # skill to scan (GAP-2388): say how many skills were scanned.
+        skills = [int(m.group(1)) for line in lines if (m := _SCAN_SUMMARY_RE.match(line.strip()))]
+        if skills:
+            count = sum(skills)
+            text += f" · {count} {'skill' if count == 1 else 'skills'} scanned"
+        elif any(line.strip().startswith(_NO_SKILLS_PREFIXES) for line in lines):
+            text += " · no scannable skills"
+        return text
     for index, line in enumerate(lines):
         if "installed copy is disabled, so it does not load" in line:
             # GAP-2313: ``plugin block`` of a disabled plugin.

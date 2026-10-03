@@ -122,7 +122,8 @@ def test_setup_rerun_offers_configured_connectors_and_details_keep_names() -> No
         model.open_wizard_form(SetupWizard.CONNECTOR_SETUP, goal=goal)
         connector = next(field for field in model.form_fields if field.label == "Connector")
         assert connector.options == ("amp", "claudecode", "codex")
-        assert connector.value == "amp"
+        # GAP-2387: the destructive Remove goal starts with nothing picked.
+        assert connector.value == ("amp" if goal_id == "rerun" else "")
     # Readiness rows show the whole connector name ("Connector: ope…").
     console = Console(width=92, record=True)
     console.print(DetailModalModel.from_pairs("t", [("Connector: openhands", "PASS · configured")]).table())

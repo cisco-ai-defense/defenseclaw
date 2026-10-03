@@ -177,6 +177,7 @@ from defenseclaw.tui.services.tui_state import TUIState, TUIStateStore
 from defenseclaw.tui.theme import DEFAULT_TOKENS, TEXTUAL_CSS, severity_color, state_color
 from defenseclaw.tui.widgets.action_menu import ActionMenuScreen, MenuAction
 from defenseclaw.tui.widgets.data_table import MeasuredDataTable
+from defenseclaw.tui.widgets.fit_columns import FitColumn, FitColumnsTable
 from defenseclaw.tui.widgets.hint_bar import HintBar
 from defenseclaw.tui.widgets.native_metrics import MetricDatum, MetricTile, OverviewMetrics
 from defenseclaw.tui.widgets.panel_split import (
@@ -9563,26 +9564,20 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
 
         if not rows:
             return None
-        table = Table.grid(padding=(0, 2), expand=True)
-        table.add_column(no_wrap=True)  # CONNECTOR
-        table.add_column(no_wrap=True)  # MODE
-        table.add_column(no_wrap=True)  # RULE PACK
-        table.add_column(no_wrap=True)  # LAST ACTIVITY
-        table.add_column(justify="right", no_wrap=True)  # CALLS
-        table.add_column(justify="right", no_wrap=True)  # BLOCKS
-        table.add_column(justify="right", no_wrap=True)  # ALERTS
-        table.add_column(no_wrap=True)  # STATUS
-        header_style = f"bold {TOKENS.text_secondary}"
-        table.add_row(
-            Text("CONNECTOR", style=header_style),
-            Text("MODE", style=header_style),
-            Text("RULE PACK", style=header_style),
-            Text("LAST ACTIVITY", style=header_style),
-            Text("CALLS", style=header_style),
-            Text("BLOCKS", style=header_style),
-            Text("ALERTS", style=header_style),
-            Text("STATUS", style=header_style),
+        # Rich cut every column at 80 ("MO…", "C…" and "3…" for 303 calls):
+        # the least useful columns are dropped first and the numbers stay
+        # whole (GAP-2385).
+        columns = (
+            FitColumn("CONNECTOR"),
+            FitColumn("MODE", priority=3),
+            FitColumn("RULE PACK", priority=1),
+            FitColumn("LAST ACTIVITY", priority=2),
+            FitColumn("CALLS", justify="right"),
+            FitColumn("BLOCKS", justify="right"),
+            FitColumn("ALERTS", justify="right"),
+            FitColumn("STATUS", priority=4),
         )
+        table_rows: list[tuple[Text, ...]] = []
         selected = self._connector_filter()
         disclosure_lines: list[Text] = []
         for row in rows:
@@ -9604,16 +9599,19 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             disclosure = self.overview_model.connector_priority_conflict_disclosure(row.connector)
             if disclosure:
                 disclosure_lines.append(Text(f"{name} ({row.connector}): {disclosure}", style=TOKENS.text_muted))
-            table.add_row(
-                Text(f"{name} ({row.connector})", style=name_style),
-                Text(row.mode or "?", style=TOKENS.text_secondary),
-                Text(row.rule_pack or "default", style=TOKENS.text_secondary),
-                Text(row.last_activity, style=TOKENS.text_muted),
-                Text(str(row.calls), style=TOKENS.text_primary),
-                Text(str(row.blocks), style=color_blocks),
-                Text(str(row.alerts), style=color_alerts),
-                status_cell,
+            table_rows.append(
+                (
+                    Text(f"{name} ({row.connector})", style=name_style),
+                    Text(row.mode or "?", style=TOKENS.text_secondary),
+                    Text(row.rule_pack or "default", style=TOKENS.text_secondary),
+                    Text(row.last_activity, style=TOKENS.text_muted),
+                    Text(str(row.calls), style=TOKENS.text_primary),
+                    Text(str(row.blocks), style=color_blocks),
+                    Text(str(row.alerts), style=color_alerts),
+                    status_cell,
+                )
             )
+        table = FitColumnsTable(columns, table_rows, header_style=f"bold {TOKENS.text_secondary}")
         hint = Text(
             "Press m to filter every view by connector · with one selected, Enter opens its Alerts.",
             style=f"italic {TOKENS.text_muted}",
@@ -9676,77 +9674,68 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         storage = self.overview_model.observability_storage_status()
         status_error = self.overview_model.observability_status_error
         if rows:
-            table = Table.grid(padding=(0, 2), expand=True)
+            # Fixed minimum widths wider than the screen made Rich drop NAME
+            # and KIND at 80 columns, so the rows read "healthy (acti…" with
+            # no name (GAP-2385). Low-value columns now go first.
             if storage is not None:
-                for width in (18, 12, 9, 14, 18, 9, 21, 20, 28, 24):
-                    table.add_column(no_wrap=True, min_width=width)
-                table.add_column(overflow="ellipsis")
-                table.add_row(
-                    *(
-                        Text(label, style=TOKENS.text_secondary)
-                        for label in (
-                            "NAME",
-                            "KIND",
-                            "POLICY",
-                            "HEALTH",
-                            "SIGNALS",
-                            "BUCKETS",
-                            "REDACTION",
-                            "QUEUE",
-                            "CONFIGURED LIMITS",
-                            "LAST RESULT",
-                            "TARGET",
-                        )
-                    )
+                columns = (
+                    FitColumn("NAME"),
+                    FitColumn("KIND", priority=9),
+                    FitColumn("POLICY", priority=5),
+                    FitColumn("HEALTH"),
+                    FitColumn("SIGNALS", priority=8),
+                    FitColumn("BUCKETS", priority=2),
+                    FitColumn("REDACTION", priority=6),
+                    FitColumn("QUEUE", priority=7),
+                    FitColumn("CONFIGURED LIMITS", priority=1),
+                    FitColumn("LAST RESULT", priority=4),
+                    FitColumn("TARGET", priority=3, flex_min=16),
                 )
+                table_rows: list[tuple[Text, ...]] = []
                 for row in rows:
                     health = row.state
                     if row.health_reason:
                         health += f" ({row.health_reason})"
-                    table.add_row(
-                        Text(row.name, style=TOKENS.text_primary),
-                        Text(row.kind, style=TOKENS.text_secondary),
-                        Text(row.policy_state, style=state_color(row.policy_state)),
-                        Text(health, style=state_color(row.state)),
-                        Text(row.signals, style=TOKENS.text_secondary),
-                        Text(row.buckets, style=TOKENS.text_secondary),
-                        Text(row.redaction, style=TOKENS.accent_cyan),
-                        Text(row.queue, style=TOKENS.text_secondary),
-                        Text(row.limits, style=TOKENS.text_secondary),
-                        Text(row.activity, style=TOKENS.text_secondary),
-                        Text(row.endpoint, style=TOKENS.text_muted, overflow="ellipsis"),
+                    table_rows.append(
+                        (
+                            Text(row.name, style=TOKENS.text_primary),
+                            Text(row.kind, style=TOKENS.text_secondary),
+                            Text(row.policy_state, style=state_color(row.policy_state)),
+                            Text(health, style=state_color(row.state)),
+                            Text(row.signals, style=TOKENS.text_secondary),
+                            Text(row.buckets, style=TOKENS.text_secondary),
+                            Text(row.redaction, style=TOKENS.accent_cyan),
+                            Text(row.queue, style=TOKENS.text_secondary),
+                            Text(row.limits, style=TOKENS.text_secondary),
+                            Text(row.activity, style=TOKENS.text_secondary),
+                            Text(row.endpoint, style=TOKENS.text_muted),
+                        )
                     )
             else:
-                table.add_column(no_wrap=True, min_width=18)  # NAME
-                table.add_column(no_wrap=True, min_width=11)  # TARGET
-                table.add_column(no_wrap=True, min_width=16)  # SCOPE
-                table.add_column(no_wrap=True, min_width=12)  # KIND
-                table.add_column(no_wrap=True, min_width=10)  # STATE
-                table.add_column(no_wrap=True, min_width=18)  # SIGNALS
-                table.add_column(no_wrap=True, min_width=13)  # ROUTING
-                table.add_column(overflow="ellipsis")  # ENDPOINT
-                table.add_row(
-                    Text("NAME", style=TOKENS.text_secondary),
-                    Text("TARGET", style=TOKENS.text_secondary),
-                    Text("SCOPE", style=TOKENS.text_secondary),
-                    Text("KIND/PRESET", style=TOKENS.text_secondary),
-                    Text("STATE", style=TOKENS.text_secondary),
-                    Text("SIGNALS", style=TOKENS.text_secondary),
-                    Text("ROUTING", style=TOKENS.text_secondary),
-                    Text("ENDPOINT", style=TOKENS.text_secondary),
+                columns = (
+                    FitColumn("NAME"),
+                    FitColumn("TARGET", priority=6),
+                    FitColumn("SCOPE", priority=4),
+                    FitColumn("KIND/PRESET", priority=7),
+                    FitColumn("STATE"),
+                    FitColumn("SIGNALS", priority=5),
+                    FitColumn("ROUTING", priority=3),
+                    FitColumn("ENDPOINT", priority=2, flex_min=16),
                 )
-                for row in rows:
-                    color = state_color(row.state)
-                    table.add_row(
+                table_rows = [
+                    (
                         Text(row.name, style=TOKENS.text_primary),
                         Text(row.target, style=TOKENS.text_secondary),
                         Text(row.scope, style=TOKENS.text_secondary),
                         Text(row.kind, style=TOKENS.text_secondary),
-                        Text(row.state, style=color),
+                        Text(row.state, style=state_color(row.state)),
                         Text(row.signals, style=TOKENS.text_secondary),
                         Text(row.routing or "—", style=TOKENS.accent_cyan),
-                        Text(row.endpoint, style=TOKENS.text_muted, overflow="ellipsis"),
+                        Text(row.endpoint, style=TOKENS.text_muted),
                     )
+                    for row in rows
+                ]
+            table = FitColumnsTable(columns, table_rows, header_style=TOKENS.text_secondary)
             prefix: list[RenderableType] = []
             if storage is not None:
                 retention_health = storage.retention_health or "unavailable"
@@ -11528,6 +11517,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             except CommandLineError:
                 parsed = None
             if parsed is not None and not parsed.needs_preview:
+                # Named after the key's task ("Done: Scan all · ..."), not the
+                # raw argv (GAP-2388).
+                parsed = replace(parsed, display_name=intent.label)
                 self.run_worker(self._run_and_report(parsed), exclusive=False, thread=False)
                 return True
             self.run_worker(self._confirm_and_run_intent(intent), exclusive=False, thread=False)
@@ -12021,7 +12013,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             # screen width cut the goal descriptions at the border (GAP-1775).
             room = main_width - others - 2 - 4
         if room < 24:
-            return rows
+            # Too narrow to wrap: end the hint with "…" instead of cutting it
+            # mid-word at the edge ("The connector wh", GAP-2386). The
+            # focused field's full hint is in the body line above.
+            return tuple((*row[:-1], _truncate_ellipsis(row[-1], max(room, 1))) for row in rows)
         return tuple(
             (*row[:-1], "\n".join(textwrap.wrap(row[-1], room)) if len(row[-1]) > room else row[-1])
             for row in rows
@@ -16638,7 +16633,9 @@ def _cycle_value(current: str, options: tuple[str, ...], delta: int) -> str:
     try:
         index = options.index(current)
     except ValueError:
-        index = 0
+        # Nothing picked yet (Remove a connector, GAP-2387): → picks the
+        # first option, ← the last.
+        return options[0] if delta > 0 else options[-1]
     return options[(index + delta) % len(options)]
 
 

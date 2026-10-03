@@ -254,6 +254,17 @@ NOTIFICATION_ROUTING_SLOTS: tuple[tuple[str, str, str], ...] = (
     ("sources.asset_policy", "Source: Asset Policy", "yes"),
 )
 
+# The hints only repeated the label ("Toggle hitl approval.", GAP-2386).
+_NOTIFICATION_SLOT_HINTS: dict[str, str] = {
+    "block_enforced": "Show a desktop notification when a call is blocked.",
+    "block_would_block": "Show a desktop notification when observe mode would have blocked a call.",
+    "hitl_approval": "Show a desktop notification when an action waits for your approval.",
+    "sources.hook": "Notify about verdicts from agent hooks (Claude Code, Codex, ...).",
+    "sources.guardrail": "Notify about verdicts from the LLM guardrail.",
+    "sources.asset_policy": "Notify when a skill or MCP server is blocked by the allow list.",
+}
+_RESTART_GATEWAY_HINT = "Restart the gateway so the change takes effect now."
+
 _MISSING_FIELDS_PREFIX = "Missing required field(s): "
 
 WIZARD_DESCRIPTIONS: tuple[str, ...] = (
@@ -1311,7 +1322,7 @@ class SetupPanelModel:
             base = list(self._sandbox_form_fields(presets))
         if self.active_goal is not None:
             base = list(_filter_fields_for_goal(base, self.active_goal))
-            base = list(_narrow_goal_connectors(base, self.active_goal, self.config))
+            base = list(_narrow_goal_connectors(base, self.active_goal, self.config, opening=True))
             base = list(_narrow_manage_goal_fields(base, self.active_wizard, self.active_goal))
             if self.active_wizard == SetupWizard.CREDENTIALS and self.active_goal.id == "remove":
                 base = [_stored_key_picker(field, self.config) if field.label == "Env Name" else field for field in base]
@@ -1635,6 +1646,10 @@ class SetupPanelModel:
             # Setup has no "Observability" task (GAP-2351).
             preset = wizard_field_value(self.form_fields, "Preset")
             name = "Export telemetry" + (f" / {observability_preset_label(preset)}" if preset else "")
+        if self.active_wizard == SetupWizard.NOTIFICATIONS_ROUTING:
+            # "setup Notifications Routing" for the task "What notifies you"
+            # (GAP-2386).
+            name = "What notifies you"
         if self.active_wizard == SetupWizard.CONNECTOR_SETUP and len(args) > 1 and not args[1].startswith("-"):
             # "setup claude-code", not "setup Connector Setup" (GAP-1709).
             name = args[1]
@@ -3806,7 +3821,7 @@ def _notifications_routing_goals(cfg: object | Mapping[str, Any] | None) -> tupl
         WizardGoal(
             "verdicts",
             "Choose which verdicts notify me",
-            summary="Toggle block/observe/HITL verdict notifications.",
+            summary="Pick which verdicts show a desktop notification.",
             fields=(
                 "Block (enforced)",
                 "Block (would-block / observe)",
@@ -3817,7 +3832,7 @@ def _notifications_routing_goals(cfg: object | Mapping[str, Any] | None) -> tupl
         WizardGoal(
             "sources",
             "Choose which sources notify me",
-            summary="Toggle hook/guardrail/asset-policy sources.",
+            summary="Pick which parts of DefenseClaw can notify you.",
             fields=(
                 "Source: Hooks",
                 "Source: Guardrail",
@@ -4531,13 +4546,16 @@ def notifications_routing_wizard_fields(
         else:
             current = bool(get_config_value(cfg, f"notifications.{slot}", fallback == "yes"))
         value = "yes" if current else "no"
-        fields.append(WizardFormField(label, "bool", value=value, default=value))
+        fields.append(
+            WizardFormField(label, "bool", value=value, default=value, hint=_NOTIFICATION_SLOT_HINTS.get(slot, ""))
+        )
     fields.append(
         WizardFormField(
             "Restart Gateway After",
             "bool",
             value="yes",
             default="yes",
+            hint=_RESTART_GATEWAY_HINT,
         )
     )
     return tuple(fields)
@@ -6111,6 +6129,15 @@ def _prune_empty_sections(fields: Sequence[WizardFormField]) -> tuple[WizardForm
 # Goals that act on a connector that is already set up.
 _CONFIGURED_CONNECTOR_GOALS = frozenset({"rerun", "remove"})
 
+# "Choose which agents DefenseClaw protects" is the batch goal, so the
+# "Batch setup only:" hint prefixes said nothing (GAP-2386).
+_BULK_GOAL_HINTS: dict[str, str] = {
+    "Connectors (CSV)": "Agents to protect, comma-separated (e.g. codex,hermes); the others are turned off.",
+    "Detected Connectors": "Also protect every agent found on this machine.",
+    "All Supported Connectors": "Protect every agent DefenseClaw supports.",
+}
+_REMOVE_CONNECTOR_HINT = "The agent to stop protecting; its hooks are removed (←/→ to pick)."
+
 
 def _pin_goal_action(
     fields: Sequence[WizardFormField], goal: WizardGoal | None
@@ -6146,6 +6173,8 @@ def _narrow_goal_connectors(
     fields: Sequence[WizardFormField],
     goal: WizardGoal | None,
     cfg: object | Mapping[str, Any] | None,
+    *,
+    opening: bool = False,
 ) -> tuple[WizardFormField, ...]:
     """Offer only configured connectors to "Re-run setup" and "Remove".
 
@@ -6156,17 +6185,39 @@ def _narrow_goal_connectors(
     """
 
     fields = _pin_goal_action(fields, goal)
+    if goal is not None and goal.id == "bulk" and goal.presets.get("@Action") == "batch":
+        # The Connectors row started empty instead of on the agents
+        # protected now (GAP-2386).
+        current = ",".join(sorted(dict.fromkeys(_active_connector_names_for_setup(cfg))))
+        return tuple(
+            replace(
+                field,
+                hint=_BULK_GOAL_HINTS[field.label],
+                **({"value": current, "default": current} if field.label == "Connectors (CSV)" and not field.value else {}),
+            )
+            if field.label in _BULK_GOAL_HINTS
+            else field
+            for field in fields
+        )
     if goal is None or goal.id not in _CONFIGURED_CONNECTOR_GOALS:
         return tuple(fields)
     configured = tuple(sorted(dict.fromkeys(_active_connector_names_for_setup(cfg))))
     if not configured:
         return tuple(fields)
+    removing = goal.id == "remove"
     narrowed: list[WizardFormField] = []
     for field in fields:
         if field.label == "Connector" and field.kind == "choice":
             value = field.value if field.value in configured else configured[0]
             default = field.default if field.default in configured else configured[0]
+            if removing and opening:
+                # A destructive goal opened on the first roster entry, so
+                # Ctrl+R removed claudecode before anything was picked
+                # (GAP-2387): it starts with no connector chosen.
+                value = default = ""
             field = replace(field, options=configured, value=value, default=default)
+            if removing:
+                field = replace(field, hint=_REMOVE_CONNECTOR_HINT)
         narrowed.append(field)
     return tuple(narrowed)
 
@@ -6601,10 +6652,7 @@ def _guardrail_wizard_fields_for(
             value=scope,
             default=_guardrail_default_scope(cfg),
             options=_GUARDRAIL_SCOPES,
-            hint=(
-                "selected-connector exposes only connector policy; "
-                "global-all-active exposes process-global settings affecting every active connector."
-            ),
+            hint="Change one connector's policy, or the settings shared by every protected agent.",
         ),
         WizardFormField("Connector policy (this connector only)", "section", visible_when=connector_scope),
         WizardFormField("Global settings (all active connectors)", "section", visible_when=global_scope),
@@ -7302,7 +7350,9 @@ def _build_connector_setup_args(fields: Sequence[WizardFormField]) -> tuple[str,
             out.append("--no-restart")
         return tuple(out)
     if action == "remove":
-        out = ["setup", "remove", connector, "--yes"]
+        # No default here: the Remove goal starts unpicked (GAP-2387).
+        picked = wizard_field_value(fields, "Connector")
+        out = ["setup", "remove", *((picked,) if picked else ()), "--yes"]
         if wizard_bool_value(fields, "Restart Gateway", "yes") == "no":
             out.append("--no-restart")
         if wizard_bool_value(fields, "Force Last Connector Removal", "no") == "yes":
@@ -8869,6 +8919,8 @@ def _mapping_or_attr(obj: object, name: str, default: Any = "") -> Any:
 def _default_wizard_field_hint(label: str, kind: str, flag: str = "") -> str:
     lowered = label.lower()
     if kind == "bool":
+        if lowered.startswith("restart gateway"):
+            return _RESTART_GATEWAY_HINT
         return f"Toggle {lowered}."
     if kind in {"choice", "preset", "whtype", "regid"}:
         return f"Select {lowered}."
