@@ -302,8 +302,12 @@ def render_summary(
     total: int,
     findings: int = 0,
     duration_ms: int | None = None,
+    warning: int | None = None,
 ) -> None:
     """Print the final tally line.
+
+    ``warning`` (GAP-2336) counts targets shown as [WARN]/[INFO], so the
+    counts add up to the total; callers that track it pass it.
 
     No-ops in JSON mode (the JSON document carries the same numbers
     in its ``summary`` block).
@@ -314,8 +318,10 @@ def render_summary(
     parts = [
         f"  Summary: {total} {ctx.label(plural=total != 1)} scanned",
         f"clean={clean}",
-        f"blocked={blocked}",
     ]
+    if warning is not None:
+        parts.append(f"warning={warning}")
+    parts.append(f"blocked={blocked}")
     if findings:
         parts.append(f"findings={findings}")
     if errored:
