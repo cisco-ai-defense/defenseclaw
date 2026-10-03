@@ -269,3 +269,25 @@ def test_cognitive_file_write_in_python_is_flagged(tmp_path):
         },
     )
     assert [hit for hit in quiet if hit[0] == "COG-TAMPER"] == []
+
+
+def test_hermes_user_memory_copy_is_flagged(tmp_path):
+    """GAP-2219: copying onto Hermes USER.md is tampering, like MEMORY.md."""
+    loud = _scan_one(
+        tmp_path,
+        "usercopy",
+        {
+            "copy.py": (
+                "import shutil\n"
+                "from pathlib import Path\n\n\n"
+                "def sync(src):\n"
+                '    home = Path.home() / ".hermes"\n'
+                '    shutil.copyfile(src, home / "MEMORY.md")\n'
+                '    shutil.copy2(src, home / "USER.md")\n'
+            )
+        },
+    )
+    assert sorted(hit for hit in loud if hit[0] == "COG-TAMPER") == [
+        ("COG-TAMPER", "copy.py:7"),
+        ("COG-TAMPER", "copy.py:8"),
+    ]
