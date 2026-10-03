@@ -15788,6 +15788,9 @@ def _overview_config(config: object | None) -> OverviewConfig | None:
         # A sandbox that is not set up reads "disabled" with the gateway
         # down too, not "offline" (GAP-2361). Identity check, as status.
         sandbox_enabled=getattr(getattr(config, "openshell", None), "enabled", False) is True,
+        # AI discovery that is off reads "disabled" with the gateway down
+        # too, not "offline" (GAP-2378).
+        ai_discovery_enabled=getattr(getattr(config, "ai_discovery", None), "enabled", False) is True,
         # A2: visible diagnostic when the roster enumeration failed.
         roster_error=roster_error,
         # N3: active-policy scanner action overrides (data.json), so the

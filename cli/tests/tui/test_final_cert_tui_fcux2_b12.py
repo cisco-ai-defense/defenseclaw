@@ -8,7 +8,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Final-cert TUI UX batch 12: Overview uptime and Sandbox rows, config group headers."""
+"""Final-cert TUI UX batches 12-13: Overview uptime, Sandbox and AI Discovery rows, config group headers."""
 
 from __future__ import annotations
 
@@ -51,6 +51,14 @@ def test_sandbox_not_set_up_reads_disabled_with_the_gateway_down() -> None:
         assert model.gateway_down()
         assert model.subsystem_state("sandbox") == want
         assert model.subsystem_state("api") == "offline"
+
+
+def test_ai_discovery_row_reads_disabled_with_gateway_down_when_off() -> None:
+    # GAP-2378: same pattern as GAP-2361, for AI Discovery.
+    for enabled, want in ((False, "disabled"), (True, "offline")):
+        model = OverviewPanelModel(OverviewConfig(ai_discovery_enabled=enabled))
+        model.set_gateway_probe("stopped")
+        assert model.subsystem_state("ai_discovery") == want
 
 
 def test_group_header_continues_in_the_value_cell() -> None:
