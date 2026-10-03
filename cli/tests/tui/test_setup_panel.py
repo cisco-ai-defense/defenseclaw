@@ -985,6 +985,16 @@ def test_guardrail_wizard_promotes_strategy_when_judge_model_configured() -> Non
 
 
 
+def test_guardrail_wizard_prefills_judge_bedrock_region() -> None:
+    # GAP-2298: Region stayed blank although guardrail.judge.llm.bedrock.region was set.
+    cfg = {
+        "guardrail": {
+            "judge": {"llm": {"provider": "bedrock", "model": "m", "bedrock": {"region": "us-east-1"}}},
+        },
+    }
+    assert wizard_field_value(_guardrail_wizard_fields_for({}, cfg), "Region") == "us-east-1"
+
+
 def test_guardrail_wizard_prefills_v5_judge_llm_block() -> None:
     # GAP-2176: setup guardrail now writes only guardrail.judge.llm, so the
     # wizard must read the judge model from there (v4 judge.model stays a fallback).

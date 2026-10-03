@@ -1057,10 +1057,16 @@ class TestSetupGuardrailJudgeFlagsObserveMode(unittest.TestCase):
         self.assertIn("defenseclaw setup claude-code --mode action --enable-judge --yes", result.output)
         execute.assert_not_called()
 
-    def test_judge_model_on_observe_connector_warns_judge_left_off(self):
+    def test_all_gate_on_observe_connector_warns_once_without_judge_add_hint(self):
+        # GAP-2297: an 'all' gate pruned to nothing gave two warnings, one with
+        # a 'guardrail judge add' hint that refuses observe-mode connectors.
+        self.app.cfg.guardrail.judge.hook_connectors = ["*"]
         result, _ = self._invoke("observe")
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("The LLM judge was not enabled", result.output)
+        self.assertEqual(result.output.count("The LLM judge"), 1, result.output)
+        self.assertIn("The LLM judge is off", result.output)
+        self.assertIn("defenseclaw setup claude-code --mode action --enable-judge --yes", result.output)
+        self.assertNotIn("judge add", result.output)
         self.assertFalse(self.app.cfg.guardrail.judge.enabled)
 
     def test_action_connector_keeps_judge_and_writes_only_v5_fields(self):

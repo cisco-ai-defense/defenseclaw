@@ -3377,7 +3377,11 @@ class Config:
         # Load already moved a retired connector ID in memory; apply the same
         # rename to the on-disk document so any save persists it.
         legacy_connector.migrate_raw_config(existing, path)
-        merged = _merge_v8_modeled_changes(existing, dataclass_data, self._loaded_v8_modeled_snapshot)
+        merged = _merge_v8_modeled_changes(
+            existing,
+            dataclass_data,
+            _baseline_keeping_migrated_llm_slots(dataclass_data, self._loaded_v8_modeled_snapshot),
+        )
         merged["config_version"] = 8
         merged.setdefault("observability", {})
         # The Go runtime requires an explicit profile selector whenever ACP is
@@ -3917,6 +3921,50 @@ _V8_UNMODELED_OR_REMOVED_TOP_LEVEL = frozenset(
     {"audit_db", "audit_sinks", "otel", "privacy", "splunk", "observability"}
 )
 _V8_MISSING = object()
+
+# v4 LLM field -> the v5 slot that _migrate_llm_fields() copies it into.
+_LEGACY_LLM_SLOT_PAIRS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
+    (("guardrail", "judge", "model"), ("guardrail", "judge", "llm", "model")),
+    (("guardrail", "judge", "api_key_env"), ("guardrail", "judge", "llm", "api_key_env")),
+    (("guardrail", "judge", "api_base"), ("guardrail", "judge", "llm", "base_url")),
+    (("guardrail", "model"), ("guardrail", "llm", "model")),
+    (("guardrail", "api_key_env"), ("guardrail", "llm", "api_key_env")),
+    (("guardrail", "api_base"), ("guardrail", "llm", "base_url")),
+    (("default_llm_model",), ("llm", "model")),
+    (("default_llm_api_key_env",), ("llm", "api_key_env")),
+    (("inspect_llm", "model"), ("llm", "model")),
+    (("inspect_llm", "api_key_env"), ("llm", "api_key_env")),
+    (("inspect_llm", "api_key"), ("llm", "api_key")),
+    (("inspect_llm", "provider"), ("llm", "provider")),
+    (("inspect_llm", "base_url"), ("llm", "base_url")),
+)
+
+
+def _dig(data: Any, path: tuple[str, ...]) -> Any:
+    for key in path:
+        if not isinstance(data, dict):
+            return None
+        data = data.get(key)
+    return data
+
+
+def _baseline_keeping_migrated_llm_slots(current: dict[str, Any], baseline: dict[str, Any]) -> dict[str, Any]:
+    """Make a cleared v4 LLM field persist the v5 copy load made of it (GAP-2176).
+
+    Load copies v4 LLM values into the v5 slots before it takes the save
+    baseline, so the v5 copy looks unchanged and the modeled delta would write
+    only the cleared v4 field: the value would be lost on disk. Drop those v5
+    slots from the baseline so the delta writes them as well.
+    """
+    adjusted: dict[str, Any] | None = None
+    for legacy, unified in _LEGACY_LLM_SLOT_PAIRS:
+        if _dig(baseline, legacy) and not _dig(current, legacy) and _dig(current, unified):
+            if adjusted is None:
+                adjusted = copy.deepcopy(baseline)
+            parent = _dig(adjusted, unified[:-1])
+            if isinstance(parent, dict):
+                parent.pop(unified[-1], None)
+    return baseline if adjusted is None else adjusted
 
 
 def _merge_v8_modeled_changes(
