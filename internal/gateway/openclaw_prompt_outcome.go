@@ -25,7 +25,9 @@ import (
 type openClawPromptBlock struct {
 	message                      string
 	userID, userIDKind, userName string
-	at                           time.Time
+	// guardrail is the block's rule and severity for the turn's spans.
+	guardrail hookGuardrailOutcome
+	at        time.Time
 }
 
 var openClawPromptBlocks struct {
@@ -34,14 +36,17 @@ var openClawPromptBlocks struct {
 }
 
 // rememberOpenClawPromptBlock records a prompt block by the block text the
-// proxy returned for it.
-func rememberOpenClawPromptBlock(message string, identity AgentIdentity) {
+// proxy returned for it, with the verdict's rule and severity.
+func rememberOpenClawPromptBlock(message string, identity AgentIdentity, verdict *ScanVerdict) {
 	message = strings.TrimSpace(message)
 	if message == "" {
 		return
 	}
 	entry := openClawPromptBlock{
 		message: message, userID: identity.UserID, userIDKind: identity.UserIDKind, userName: identity.UserName,
+	}
+	if verdict != nil {
+		entry.guardrail, _ = hookGuardrailOutcomeFor("block", verdict.Severity, verdict.Reason, verdict.RuleIDs)
 	}
 	if entry.userID == "" && entry.userName == "" {
 		entry.userID, entry.userName = localProcessUser()
@@ -109,7 +114,8 @@ func openClawMessageText(content string) string {
 }
 
 // applyOpenClawPromptBlock marks the turn of a blocked prompt: its agent and
-// chat spans get a blocked outcome, and the user when the stream named none.
+// chat spans get a blocked outcome with the block's rule and severity
+// (GAP-2332), and the user when the stream named none.
 // Every other turn names the gateway's own OS user on an unmanaged install
 // (the OpenClaw stream sends no identity), so allowed turns are attributed as
 // the blocked ones and the other connectors' turns are (GAP-2287).
@@ -120,6 +126,7 @@ func applyOpenClawPromptBlock(observation *hookModelV8Observation) {
 	if observation.outcome == "" {
 		if entry, ok := takeOpenClawPromptBlock(observation.response); ok {
 			observation.outcome = observability.OutcomeBlocked
+			observation.meta.Guardrail = entry.guardrail
 			if observation.meta.UserID == "" && observation.meta.UserName == "" {
 				observation.meta.UserID, observation.meta.UserIDKind, observation.meta.UserName =
 					entry.userID, entry.userIDKind, entry.userName

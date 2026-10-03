@@ -889,6 +889,42 @@ func TestProjectAgentSpanMetadataNamesABlockedOutcome(t *testing.T) {
 	}
 }
 
+// GAP-2332: the invoke_agent and chat spans of a blocked prompt carry the
+// flat guardrail fields, and Galileo's metadata names the rule and severity.
+func TestProjectBlockedTurnMetadataNamesTheRule(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		bucket          observability.Bucket
+		family, name    string
+		kind, operation string
+	}{
+		{observability.BucketAgentLifecycle, "span.agent.invoke", "invoke_agent openclaw", "INTERNAL", "invoke_agent"},
+		{observability.BucketModelIO, "span.model.chat", "chat gpt-5", "CLIENT", "chat"},
+	} {
+		body := map[string]any{"kind": tc.kind, "attributes": map[string]any{
+			"gen_ai.operation.name": tc.operation, "gen_ai.agent.name": "openclaw", "gen_ai.provider.name": "openai",
+			"defenseclaw.outcome":            "blocked",
+			"defenseclaw.guardrail.action":   "block",
+			"defenseclaw.guardrail.rule_id":  "R6-PROMPT-MARKER",
+			"defenseclaw.guardrail.severity": "HIGH",
+			"gen_ai.input.messages":          messages("user", "x"), "gen_ai.output.messages": messages("assistant", "y"),
+		}}
+		result := Project(projectRecord(t, tc.bucket, observability.EventName(tc.family), tc.name, body, redaction.ProfileNone), Limits{})
+		if !result.Eligible() {
+			t.Fatalf("%s: reason = %q, missing %v", tc.family, result.Reason(), result.MissingFields())
+		}
+		raw, _ := resultAttributes(t, result)["metadata"].(string)
+		var metadata map[string]string
+		if err := json.Unmarshal([]byte(raw), &metadata); err != nil {
+			t.Fatalf("%s: metadata %q: %v", tc.family, raw, err)
+		}
+		if metadata["defenseclaw.guardrail.rule_id"] != "R6-PROMPT-MARKER" ||
+			metadata["defenseclaw.guardrail.severity"] != "HIGH" || metadata["defenseclaw.guardrail.action"] != "block" {
+			t.Fatalf("%s: metadata = %v, want the block, its rule and its severity", tc.family, metadata)
+		}
+	}
+}
+
 func TestProjectRejectsForgedResourceAttributes(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

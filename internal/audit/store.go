@@ -4301,6 +4301,26 @@ func (s *Store) CountBlockedEgress() (int, error) {
 	return count, nil
 }
 
+// ListTargetSnapshotPaths returns the paths of every stored baseline
+// snapshot of targetType.
+func (s *Store) ListTargetSnapshotPaths(targetType string) ([]string, error) {
+	rows, err := s.queryDB(context.Background(), "list_target_snapshot_paths",
+		`SELECT target_path FROM target_snapshots WHERE target_type = ?`, targetType)
+	if err != nil {
+		return nil, fmt.Errorf("audit: list target snapshot paths: %w", err)
+	}
+	defer rows.Close()
+	var paths []string
+	for rows.Next() {
+		var path string
+		if err := rows.Scan(&path); err != nil {
+			return nil, fmt.Errorf("audit: list target snapshot paths: %w", err)
+		}
+		paths = append(paths, path)
+	}
+	return paths, rows.Err()
+}
+
 // GetTargetSnapshot loads the stored baseline snapshot for a target.
 func (s *Store) GetTargetSnapshot(targetType, targetPath string) (*SnapshotRow, error) {
 	var r SnapshotRow

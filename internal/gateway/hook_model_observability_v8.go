@@ -334,6 +334,8 @@ func hookModelV8AgentInput(
 		input.DefenseClawContentOutputOriginalBytes = observability.Present(outputBytes)
 		input.DefenseClawContentOutputMimeType = observability.Present("text/plain")
 	}
+	input.DefenseClawGuardrailAction, input.DefenseClawGuardrailRuleID, input.DefenseClawGuardrailSeverity =
+		guardrailOutcomeAttributes(meta.Guardrail)
 	applyHookModelV8AgentFacts(&input, observation, rootAgentID, rootSessionID)
 	return input, true
 }
@@ -406,6 +408,8 @@ func hookModelV8ModelInput(observation hookModelV8Observation) observability.Spa
 	input.GenAIResponseID = hookModelV8OptionalID(meta.reportedResponseID())
 	input.DefenseClawModelRequestID = hookModelV8OptionalID(meta.PromptID)
 	input.DefenseClawModelResponseID = hookModelV8OptionalID(meta.ResponseID)
+	input.DefenseClawGuardrailAction, input.DefenseClawGuardrailRuleID, input.DefenseClawGuardrailSeverity =
+		guardrailOutcomeAttributes(meta.Guardrail)
 	applyHookModelV8ModelFacts(&input, observation)
 	return input
 }

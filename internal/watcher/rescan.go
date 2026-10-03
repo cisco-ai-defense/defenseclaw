@@ -116,8 +116,13 @@ const (
 // the periodic loop cheap and stops scan_results from growing on every cycle.
 func (w *InstallWatcher) runRescanCycle(ctx context.Context) {
 	defer func() { w.startupRescanDone = true }()
+	if !w.startupRescanDone {
+		w.startupAdmitRoots = w.baselinedWatchRoots()
+		defer func() { w.startupAdmitRoots = nil }()
+	}
 	targets := w.enumerateTargets()
 	if len(targets) == 0 {
+		w.markWatchRoots()
 		return
 	}
 
@@ -141,11 +146,88 @@ func (w *InstallWatcher) runRescanCycle(ctx context.Context) {
 			w.recordWatcherEvent(ctx, "rescan_skip", string(evt.Type), "")
 		}
 	}
+	w.markWatchRoots()
 
 	fmt.Fprintf(os.Stderr, "[rescan] cycle complete: targets=%d scanned=%d skipped=%d\n",
 		len(targets), scanned, skipped)
 	_ = w.logger.LogAction(string(audit.ActionRescan), "",
 		fmt.Sprintf("targets=%d scanned=%d skipped=%d", len(targets), scanned, skipped))
+}
+
+// watchRootMarkerType is the target_snapshots type of the marker row saying
+// a skill or plugin root was covered by a completed rescan cycle.
+func watchRootMarkerType(typ InstallType) string { return string(typ) + "_root" }
+
+// baselinedWatchRoots lists, per type, the skill and plugin roots that a
+// completed rescan cycle covered in an earlier run: a root with a marker row,
+// or one holding baselines from a build without markers. A target without a
+// baseline under one of them arrived while the gateway was stopped (GAP-2475),
+// even when the root was empty before. On a first start nothing is listed, so
+// the startup rescan only records baselines, as before.
+func (w *InstallWatcher) baselinedWatchRoots() map[InstallType][]string {
+	roots := make(map[InstallType][]string)
+	for typ, dirs := range map[InstallType][]string{InstallSkill: w.skillDirs, InstallPlugin: w.pluginDirs} {
+		if len(dirs) == 0 {
+			continue
+		}
+		paths, err := w.store.ListTargetSnapshotPaths(string(typ))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[rescan] list %s baselines: %v\n", typ, err)
+			continue
+		}
+		markers, err := w.store.ListTargetSnapshotPaths(watchRootMarkerType(typ))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[rescan] list %s root markers: %v\n", typ, err)
+		}
+		paths = append(paths, markers...)
+		for _, dir := range dirs {
+			for _, path := range paths {
+				if watcherPathAtOrBelow(path, dir) {
+					roots[typ] = append(roots[typ], dir)
+					break
+				}
+			}
+		}
+	}
+	return roots
+}
+
+// markWatchRoots records, after a completed rescan cycle, that every existing
+// skill and plugin root was covered, so a target added to it while the gateway
+// is stopped is admitted at the next start even if the root was empty.
+func (w *InstallWatcher) markWatchRoots() {
+	if w.markedWatchRoots == nil {
+		w.markedWatchRoots = make(map[string]bool)
+	}
+	for typ, dirs := range map[InstallType][]string{InstallSkill: w.skillDirs, InstallPlugin: w.pluginDirs} {
+		markerType := watchRootMarkerType(typ)
+		for _, dir := range dirs {
+			key := markerType + "\x00" + dir
+			if w.markedWatchRoots[key] {
+				continue
+			}
+			if _, err := os.Lstat(dir); err != nil {
+				continue
+			}
+			if err := w.store.SetTargetSnapshot(markerType, dir, "", "{}", "{}", "[]", "", ""); err != nil {
+				fmt.Fprintf(os.Stderr, "[rescan] mark %s root %s: %v\n", typ, dir, err)
+				continue
+			}
+			w.markedWatchRoots[key] = true
+		}
+	}
+}
+
+// admitsAtStartup reports whether the startup rescan must run install
+// admission for evt, a skill or plugin without a baseline under a root that
+// was baselined before.
+func (w *InstallWatcher) admitsAtStartup(evt InstallEvent) bool {
+	for _, root := range w.startupAdmitRoots[evt.Type] {
+		if watcherPathAtOrBelow(evt.Path, root) {
+			return true
+		}
+	}
+	return false
 }
 
 // enumerateTargets lists all direct child directories under watched roots plus
@@ -546,6 +628,20 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 	baseline, err := w.store.GetTargetSnapshot(string(evt.Type), evt.Path)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
+			if w.admitsAtStartup(evt) {
+				// Added while the gateway was stopped: admit it as the live
+				// watcher would (scan, verdict, block/quarantine; GAP-2475).
+				fmt.Fprintf(os.Stderr, "[rescan] %s %s is new since the last run; running install admission\n", evt.Type, evt.Name)
+				res := w.runAdmission(ctx, evt)
+				if w.onAdmit != nil {
+					w.onAdmit(res)
+				}
+				if _, statErr := os.Lstat(evt.Path); statErr == nil {
+					// No scan id: the next cycle records the scan baseline.
+					w.persistSnapshot(evt, currentSnap, "", fingerprint)
+				}
+				return rescanScanned
+			}
 			// First time we've seen this target: scan once to establish a
 			// baseline that future cycles can diff against.
 			result, scanID := w.scanAndEmit(ctx, evt)

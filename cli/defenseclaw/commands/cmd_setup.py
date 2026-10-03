@@ -4433,6 +4433,7 @@ def setup_gateway(
     """
     gw = app.cfg.gateway
     previous_api_port = gw.api_port
+    previous_target = (gw.host, gw.port)
 
     data_dir = app.cfg.data_dir
     uses_openclaw = remote or "openclaw" in app.cfg.active_connectors()
@@ -4486,9 +4487,17 @@ def setup_gateway(
     # it starts (GAP-2009). That holds for a new API port too, so a stopped
     # gateway gets the same single note (GAP-2153).
     gateway_stopped = not _is_pid_alive(os.path.join(data_dir, "gateway.pid"))
+    # The running gateway keeps its old OpenClaw host and port until the
+    # restart that follows this command, so checking it now reports a
+    # "reconnecting" FAIL row that the restart fixes (GAP-2478).
+    target_changed = (gw.host, gw.port) != previous_target
     _print_gateway_summary(gw, openclaw=uses_openclaw)
 
-    if verify and not api_port_changed and not gateway_stopped:
+    if verify and target_changed and not api_port_changed and not gateway_stopped:
+        click.echo()
+        click.echo("  The gateway connects to the new address after the restart below.")
+        click.echo("  Check it then with: defenseclaw doctor")
+    elif verify and not api_port_changed and not gateway_stopped:
         from defenseclaw.commands.cmd_doctor import _check_openclaw_gateway, _check_sidecar, _DoctorResult
 
         ux.section("Verifying gateway connectivity")
@@ -8984,6 +8993,7 @@ def _rollback_failed_connector_application(
             )
     restore_complete = True
     gateway_still_down = False
+    openclaw_gateway_down = False
     try:
         # Keep the hook lock the gateway published for the failed generation.
         # It is the gateway's teardown authority for that generation: with
@@ -9079,6 +9089,11 @@ def _rollback_failed_connector_application(
                 # GAP-1139: the restored config is in place; the gateway
                 # cannot start for the same reason the setup failed.
                 gateway_still_down = True
+            elif not _secret_safe and not exact_runtime and isinstance(exc, _OpenClawGatewayNotRunning):
+                # GAP-2477: defenseclaw-gateway is back on the restored config;
+                # only OpenClaw's own gateway is down, which is a note, not an
+                # incomplete rollback.
+                openclaw_gateway_down = True
             elif not _secret_safe:
                 detail = (
                     f"restore prior gateway lifecycle [{_setup_runtime_ref(type(exc).__name__)}]"
@@ -9122,7 +9137,7 @@ def _rollback_failed_connector_application(
 
     cause_text = f"[ref {_setup_runtime_ref(type(cause).__name__)}]" if exact_runtime else f"({cause})"
     if rollback_errors:
-        outcome = "rollback was incomplete: " + "; ".join(rollback_errors)
+        outcome = "rollback was incomplete: " + "; ".join(error.rstrip(".") for error in rollback_errors)
     elif gateway_still_down:
         outcome = (
             "restored the prior connector configuration, but the gateway still cannot start for the "
@@ -9173,6 +9188,11 @@ def _rollback_failed_connector_application(
         failure = click.ClickException(
             f"connector setup did not converge {cause_text}; {outcome}. "
             "Check each connector's current mode with `defenseclaw status`, then run the same setup command again."
+        )
+    if openclaw_gateway_down:
+        failure = click.ClickException(
+            f"{failure.format_message()} Note: the OpenClaw gateway is not running; start it with "
+            "`openclaw gateway run` (or `openclaw gateway restart`) and it loads the DefenseClaw plugin."
         )
     if exact_runtime:
         raise failure from None
@@ -12597,6 +12617,35 @@ def _refuse_hook_switch_over_configured_proxy(connector: str | None) -> None:
     if proxy:
         _refuse_hook_setup_over_proxy_connector(wanted, proxy)
 
+
+
+def _refuse_hook_set_over_configured_proxy(connectors) -> None:
+    """Refuse a set of hook connectors over a guarded proxy with one message (GAP-2476).
+
+    ``init --observe-all``/``--action-connectors``/discovery can pick several
+    hook connectors; the refusal names all of them instead of the first one.
+    """
+    wanted: list[str] = []
+    for connector in connectors:
+        name = normalize_connector((connector or "").strip())
+        if name and name != "none" and name not in _PROXY_BACKED_CONNECTORS and name not in wanted:
+            wanted.append(name)
+    if len(wanted) <= 1:
+        _refuse_hook_switch_over_configured_proxy(wanted[0] if wanted else None)
+        return
+    proxy = _configured_sole_guarded_proxy_connector()
+    if not proxy:
+        return
+    proxy_label = _CONNECTOR_META.get(proxy, {}).get("label", proxy)
+    labels = sorted(_CONNECTOR_META.get(name, {}).get("label", name) for name in wanted)
+    names = ", ".join(labels[:-1]) + f" and {labels[-1]}"
+    raise click.ClickException(
+        f"this install guards {proxy_label}, which is proxy-backed and cannot run next to hook "
+        f"connectors: setting up {names} would remove the DefenseClaw plugin from {proxy_label} "
+        f"and leave it unguarded. No changes made. To switch this install to hook connectors, run "
+        f"'defenseclaw setup <connector> --replace' for one of them, then run this init command "
+        f"again to add the rest."
+    )
 
 def _hook_peers_of_proxy_connector(gc, connector: str) -> list[str]:
     """Hook connectors configured next to a proxy-backed *connector*.

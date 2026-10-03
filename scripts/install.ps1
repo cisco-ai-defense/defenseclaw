@@ -87,14 +87,19 @@ $ManagedShims = @("defenseclaw", "skill-scanner", "mcp-scanner")
 # runs this extensionless script. cmd.exe and PowerShell ignore it: it has no
 # PATHEXT extension.
 $PosixShim = "defenseclaw"
+# PowerShell and cmd.exe run `defenseclaw` through this copy of the venv's
+# native console-script launcher: PATHEXT puts .exe before .cmd. Through the
+# .cmd shim, cmd.exe asked "Terminate batch job (Y/N)?" after every Ctrl+C
+# (GAP-2237); defenseclaw.cmd stays for callers that name it.
+$CliLauncher = "defenseclaw.exe"
 # defenseclaw-hook.exe reads its data dir from the state file beside it, never
 # from the environment an agent runs it with (a custom DEFENSECLAW_HOME too).
 $HookState = "defenseclaw-hook-state.json"
-$ManagedFiles = $ManagedBinaries + @($ManagedShims | ForEach-Object { "$_.cmd" }) + @($PosixShim, $HookState)
+$ManagedFiles = $ManagedBinaries + @($ManagedShims | ForEach-Object { "$_.cmd" }) + @($PosixShim, $CliLauncher, $HookState)
 # What a `make all` developer install publishes to BinDir besides the managed
-# binaries (cmd_uninstall._WINDOWS_DEVELOPER_FILES). PATHEXT runs
-# defenseclaw.exe before the defenseclaw.cmd shim, so these must go.
-$DeveloperFiles = @("defenseclaw.exe", "litellm.exe", "skill-scanner.exe", "skill-scanner-api.exe",
+# binaries (cmd_uninstall._WINDOWS_DEVELOPER_FILES), except its defenseclaw.exe,
+# which Install-New replaces with $CliLauncher. These must go.
+$DeveloperFiles = @("litellm.exe", "skill-scanner.exe", "skill-scanner-api.exe",
     "skill-scanner-pre-commit.exe", "mcp-scanner.exe", "mcp-scanner-api.exe", ".defenseclaw-source-root")
 # Data-dir entries that are install machinery, not user data.
 $NotData = @(".venv", ".venv.busy", ".uv", "previous", "previous.new", ".repair", ".staging", ".failed-*",
@@ -941,7 +946,7 @@ function Install-File([string]$Source, [string]$Destination) {
 function Write-PosixShim([string]$Target) {
     # `defenseclaw uninstall` recognizes this launcher by its exec line.
     $path = Join-Path $BinDir $PosixShim
-    $text = "#!/bin/sh`n# Git Bash runs this; cmd.exe and PowerShell run defenseclaw.cmd.`nexec `"$($Target -replace '\\', '/')`" `"`$@`"`n"
+    $text = "#!/bin/sh`n# Git Bash runs this; cmd.exe and PowerShell run defenseclaw.exe.`nexec `"$($Target -replace '\\', '/')`" `"`$@`"`n"
     if ((Test-Path -LiteralPath $path) -and [IO.File]::ReadAllText($path) -ceq $text) { return }
     [IO.File]::WriteAllText("$path.new", $text, (New-Object Text.UTF8Encoding $false))
     if (Test-Path -LiteralPath $path) { Remove-Aside $path }
@@ -1118,8 +1123,12 @@ function Install-New {
         elseif (Test-Path -LiteralPath (Join-Path $BinDir "$name.cmd")) { Remove-Aside (Join-Path $BinDir "$name.cmd") }
     }
     $target = Join-Path $Venv "Scripts\defenseclaw.exe"
-    if (Test-Path -LiteralPath $target) { Write-PosixShim $target }
-    elseif (Test-Path -LiteralPath (Join-Path $BinDir $PosixShim)) { Remove-Aside (Join-Path $BinDir $PosixShim) }
+    if (Test-Path -LiteralPath $target) { Write-PosixShim $target; Install-File $target (Join-Path $BinDir $CliLauncher) }
+    else {
+        foreach ($name in @($PosixShim, $CliLauncher)) {
+            if (Test-Path -LiteralPath (Join-Path $BinDir $name)) { Remove-Aside (Join-Path $BinDir $name) }
+        }
+    }
     Write-HookState
     if ((Test-Path -LiteralPath (Join-Path $DataDir "config.yaml")) -or $env:DEFENSECLAW_CONFIG) {
         Write-Info "Migrating config and data"

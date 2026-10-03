@@ -797,6 +797,14 @@ def _launcher_link_target(path: str) -> str:
     return os.path.normpath(os.path.join(os.path.dirname(path), target))
 
 
+# The installer's defenseclaw.exe is a copy of uv's console-script launcher
+# (about 50 KB); anything far larger is not that file.
+_WINDOWS_CLI_LAUNCHER_MAX_BYTES = 4 * 1024 * 1024
+# The Windows CLI launchers: defenseclaw.exe (what PowerShell and cmd.exe run)
+# and the defenseclaw.cmd shim. Either may be the one running this CLI.
+_WINDOWS_CLI_LAUNCHERS = ("defenseclaw.exe", "defenseclaw.cmd")
+
+
 def _is_data_bound_launcher(path: str, data_dir: str, platform_name: str) -> bool:
     """Report whether the launcher at path runs the CLI's venv in data_dir.
 
@@ -818,6 +826,16 @@ def _is_data_bound_launcher(path: str, data_dir: str, platform_name: str) -> boo
     elif name.lower() == "defenseclaw":
         # The Git Bash launcher: exec "C:/.../.venv/Scripts/defenseclaw.exe" "$@"
         expected = f'exec "{os.path.join(venv, "Scripts", "defenseclaw.exe")}" "$@"'.replace("\\", "/").lower()
+    elif name.lower() == "defenseclaw.exe":
+        # The installer's copy of the venv's uv launcher names the venv's
+        # python.exe, which it starts (GAP-2237).
+        expected_bytes = os.path.join(venv, "Scripts", "python.exe").lower().encode("utf-8")
+        try:
+            with open(path, "rb") as stream:
+                data = stream.read(_WINDOWS_CLI_LAUNCHER_MAX_BYTES + 1)
+        except OSError:
+            return False
+        return len(data) <= _WINDOWS_CLI_LAUNCHER_MAX_BYTES and expected_bytes in data.lower()
     else:
         return False
     try:
@@ -1289,6 +1307,9 @@ def _owned_binary_targets(platform_name: str) -> tuple[str, tuple[str, ...]]:
         install_root = os.path.abspath(os.path.join(home, ".local", "bin"))
         names = (
             "defenseclaw.cmd",
+            # The installer's copy of the venv's native launcher, which
+            # PowerShell and cmd.exe run before defenseclaw.cmd (GAP-2237).
+            "defenseclaw.exe",
             # The installer's extensionless launcher for Git Bash.
             "defenseclaw",
             "defenseclaw-gateway.exe",
@@ -2023,6 +2044,7 @@ def _validate_plan(plan: UninstallPlan) -> None:
         allowed_names = (
             {
                 "defenseclaw.cmd",
+                "defenseclaw.exe",
                 "defenseclaw",
                 "defenseclaw-gateway.exe",
                 "defenseclaw-acp.exe",
@@ -2854,20 +2876,27 @@ def _remove_binaries(plan: UninstallPlan | None = None) -> None:
     _validate_plan(plan)
     failures: list[str] = []
     targets = list(plan.binary_targets)
-    if plan.platform_name == "win32":
+    deferred_launchers: list[str] = []
+    launchers = [p for p in targets if ntpath.basename(p).lower() in _WINDOWS_CLI_LAUNCHERS and os.path.lexists(p)]
+    if (
+        plan.platform_name == "win32"
+        and any(ntpath.basename(path).lower() == "defenseclaw.cmd" for path in launchers)
+        and _running_from_managed_venv(plan)
+    ):
+        # The launcher running this CLI cannot go now: Windows keeps a running
+        # defenseclaw.exe, and cmd.exe reads defenseclaw.cmd again after this
+        # CLI exits (deleting it ends the command with "The batch file cannot
+        # be found." and exit 1). The helper removes both once they are done.
+        try:
+            _schedule_deferred_cleanup(replace(plan, binary_targets=tuple(launchers), remove_data_dir=False))
+        except click.ClickException:
+            # Without the helper the shim still goes last.
+            targets.sort(key=lambda path: ntpath.basename(path).lower() == "defenseclaw.cmd")
+        else:
+            deferred_launchers = launchers
+            targets = [path for path in targets if path not in launchers]
+    elif plan.platform_name == "win32":
         targets.sort(key=lambda path: ntpath.basename(path).lower() == "defenseclaw.cmd")
-    deferred_shim = ""
-    if targets and ntpath.basename(targets[-1]).lower() == "defenseclaw.cmd" and os.path.lexists(targets[-1]):
-        if _running_from_managed_venv(plan):
-            # cmd.exe reads defenseclaw.cmd again after this CLI exits, so
-            # deleting it now ends the command with "The batch file cannot be
-            # found." and exit 1. The helper removes it once cmd.exe is done.
-            try:
-                _schedule_deferred_cleanup(replace(plan, binary_targets=(targets[-1],), remove_data_dir=False))
-            except click.ClickException:
-                pass
-            else:
-                deferred_shim = targets.pop()
     for path in targets:
         if not os.path.lexists(path):
             # The plan lists only the launchers that exist; the owned-name
@@ -2895,8 +2924,8 @@ def _remove_binaries(plan: UninstallPlan | None = None) -> None:
 
     if failures:
         raise OSError("; ".join(failures))
-    if deferred_shim:
-        ux.ok(f"{deferred_shim} is removed right after this command exits")
+    for path in deferred_launchers:
+        ux.ok(f"{path} is removed right after this command exits")
 
     _remove_install_bookkeeping(plan.install_root, plan.data_dir)
     if plan.platform_name == "win32" and _install_root_empties(plan):
@@ -2917,7 +2946,7 @@ def _remove_binaries(plan: UninstallPlan | None = None) -> None:
     # because we can't be sure which environment was used. Mention it only
     # when another defenseclaw is still on PATH.
     remaining = shutil.which("defenseclaw")
-    if remaining and not (deferred_shim and _normalized(remaining) == _normalized(deferred_shim)):
+    if remaining and _normalized(remaining) not in {_normalized(path) for path in deferred_launchers}:
         ux.subhead(
             f"another defenseclaw remains at {remaining}; if you installed it with pip, run 'pip uninstall defenseclaw'"
         )
