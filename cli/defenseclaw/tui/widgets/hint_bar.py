@@ -256,7 +256,7 @@ class HintEngine:
         if state.logs_paused:
             return f"Paused. Space resumes. New lines since pause: +{state.new_lines_since_pause}."
         return (
-            "KEYS  h/l source | 1-8 filter | Space pause | / search | e errors | w warnings | "
+            "KEYS  h/l source | f filter | Space pause | / search | e errors | w warnings | "
             "Enter detail | g/G top/end."
         )
 

@@ -715,6 +715,10 @@ class Store:
         "defenseclaw.judge.kind",
         "defenseclaw.acp.method",
         "defenseclaw.hook.event",
+        # An operator change names its target and diff; the Audit table and
+        # search read them from the summary row (GAP-2275).
+        "defenseclaw.admin.target_ref",
+        "defenseclaw.admin.diff",
     )
 
     def _summary_structured_sql(self) -> str:
