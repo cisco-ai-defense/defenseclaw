@@ -2591,9 +2591,9 @@ def _print_plugin_list_table(
     table, hidden = _fit_plugin_list_table(console, title, rows)
     console.print(table)
     if hidden:
-        console.print(
-            f"[dim]Hidden to fit: {', '.join(hidden)}. See defenseclaw plugin info <id>[/dim]"
-        )
+        # GAP-2348: the command sits on its own line, so a wrap never splits it.
+        console.print(f"[dim]Hidden to fit: {', '.join(hidden)}.[/dim]")
+        console.print("[dim]See: defenseclaw plugin info <id>[/dim]")
 
 
 # GAP-2292: the column order, and which columns may be hidden (first to last)
