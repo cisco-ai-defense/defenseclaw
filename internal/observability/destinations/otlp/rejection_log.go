@@ -44,9 +44,31 @@ const (
 	rejectionLogInterval    = time.Minute
 )
 
-// rejectionLogWriter is where rejected-export lines go. The gateway's stderr
-// is gateway.log. Tests replace it.
-var rejectionLogWriter io.Writer = os.Stderr
+// rejectionLogWriter is where rejected-export lines go when set (tests set
+// it). Otherwise they go to os.Stderr, read at write time: the daemon swaps
+// os.Stderr for the pipe that stamps each gateway.log line with a time after
+// this package is initialised (GAP-2343).
+var rejectionLogWriter io.Writer
+
+func rejectionLogOutput() io.Writer {
+	if rejectionLogWriter != nil {
+		return rejectionLogWriter
+	}
+	return os.Stderr
+}
+
+// itemUnit names the exported items: "span"/"spans" for traces,
+// "record"/"records" otherwise.
+func itemUnit(signal observability.Signal, count int) string {
+	unit := "record"
+	if signal == observability.SignalTraces {
+		unit = "span"
+	}
+	if count != 1 {
+		unit += "s"
+	}
+	return unit
+}
 
 var rejectionLogLimiter = struct {
 	sync.Mutex
@@ -126,12 +148,8 @@ func logHTTPRejection(destination string, signal observability.Signal, response 
 	if response.Body != nil {
 		body, _ = io.ReadAll(io.LimitReader(response.Body, rejectionBodyReadBytes))
 	}
-	unit := "records"
-	if signal == observability.SignalTraces {
-		unit = "spans"
-	}
 	line := fmt.Sprintf("[observability] %s %s export rejected: HTTP %d (%d %s",
-		safeLogToken(destination), signal, response.StatusCode, itemCount, unit)
+		safeLogToken(destination), signal, response.StatusCode, itemCount, itemUnit(signal, itemCount))
 	if len(names) > 0 {
 		line += ": " + strings.Join(names, ", ")
 	}
@@ -142,7 +160,7 @@ func logHTTPRejection(destination string, signal observability.Signal, response 
 	if suppressed > 0 {
 		line += fmt.Sprintf(" [%d similar in the last minute not logged]", suppressed)
 	}
-	_, _ = fmt.Fprintln(rejectionLogWriter, line)
+	_, _ = fmt.Fprintln(rejectionLogOutput(), line)
 }
 
 // rejectionLogAdmit applies the once-a-minute limit for key. It reports
@@ -172,17 +190,14 @@ func logTransportFailure(destination string, signal observability.Signal, code d
 	if !ok {
 		return
 	}
-	unit := "records"
-	if signal == observability.SignalTraces {
-		unit = "spans"
-	}
 	line := fmt.Sprintf("[observability] %s %s export failed: %s (%d %s); the gateway connects through "+
 		"the proxy it was started with (HTTPS_PROXY/NO_PROXY), so check that path and restart the gateway "+
-		"from a shell with the right proxy settings", safeLogToken(destination), signal, code, itemCount, unit)
+		"from a shell with the right proxy settings", safeLogToken(destination), signal, code, itemCount,
+		itemUnit(signal, itemCount))
 	if suppressed > 0 {
 		line += fmt.Sprintf(" [%d similar in the last minute not logged]", suppressed)
 	}
-	_, _ = fmt.Fprintln(rejectionLogWriter, line)
+	_, _ = fmt.Fprintln(rejectionLogOutput(), line)
 }
 
 // rejectionReason extracts a short, scrubbed reason from an OTLP error body:

@@ -1062,6 +1062,7 @@ def _test_v8_destination(
 ) -> None:
     from defenseclaw.config_inspect import ConfigInspectError, inspect_v8_config
     from defenseclaw.observability.destination_test import (
+        NETWORK_FAILURE_CLASSES,
         NETWORK_PATH_NOTE,
         DestinationTestError,
         canonical_local_compliance_recorder,
@@ -1096,6 +1097,9 @@ def _test_v8_destination(
                 ". For a Galileo cluster other than api.galileo.ai, run 'defenseclaw setup observability "
                 "add galileo' again with --endpoint <https://<cluster>/otel/traces>"
             )
+        elif exc.failure_class in NETWORK_FAILURE_CLASSES:
+            # GAP-2344: same note as 'observability destination test'.
+            message += f"\n{NETWORK_PATH_NOTE}"
         raise click.ClickException(message) from exc
     click.echo(f"  {result.destination}: {result.mode} succeeded")
     if result.mode == "handshake" and result.authentication_verified:
