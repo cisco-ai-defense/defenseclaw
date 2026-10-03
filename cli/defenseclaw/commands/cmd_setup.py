@@ -2643,6 +2643,19 @@ def _emit_untrusted_prefix_setup_hints(resolved_binary: str, parent: str) -> Non
     ux.subhead("  `trusted-paths add` writes ~/.defenseclaw/config.yaml (ai_discovery.trusted_binary_prefixes).")
 
 
+def _echo_summary_rows(rows: list[tuple[str, str, str]]) -> None:
+    """Print "section.key: value" rows with every value in one column (GAP-2568).
+
+    Padding only the key left values of a longer section (scanners.mcp_scanner)
+    to the right of a shorter one (cisco_ai_defense, llm).
+    """
+    labels = [f"{section}.{key}:" for section, key, _ in rows]
+    width = max((len(label) for label in labels), default=0)
+    for label, (_, _, val) in zip(labels, rows):
+        click.echo(f"    {label:<{width}s} {val}")
+    click.echo()
+
+
 def _print_summary(sc, llm, aid) -> None:
     click.echo()
     click.echo("  Saved to ~/.defenseclaw/config.yaml")
@@ -2679,9 +2692,7 @@ def _print_summary(sc, llm, aid) -> None:
     if sc.lenient:
         rows.append(("scanners.skill_scanner", "lenient", "true"))
 
-    for section, key, val in rows:
-        click.echo(f"    {section}.{key + ':':<22s} {val}")
-    click.echo()
+    _echo_summary_rows(rows)
 
 
 # ---------------------------------------------------------------------------
@@ -2753,7 +2764,7 @@ def setup_mcp_scanner(
         if api_endpoint is not None:
             aid.endpoint = api_endpoint
         if api_key_env is not None:
-            aid.api_key_env = api_key_env
+            aid.api_key_env = _validated_api_key_env_name(api_key_env)
         if api_timeout_ms is not None:
             aid.timeout_ms = api_timeout_ms
         if scan_prompts is not None:
@@ -2792,6 +2803,22 @@ def setup_mcp_scanner(
             parts.append(f"llm_model={llm.model}")
         parts.append("mcp_managed_via=openclaw_config")
         _log_setup_action(app, ACTION_SETUP_MCP_SCANNER, " ".join(parts), allow_offline=True)
+
+
+def _validated_api_key_env_name(value: str) -> str:
+    """Refuse a pasted key in --api-key-env, which takes a variable NAME (GAP-2569).
+
+    Without this check the key itself was saved to config.yaml as
+    cisco_ai_defense.api_key_env. An empty value still clears the field.
+    """
+    name = value.strip()
+    if name and (not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) or _looks_like_secret(name)):
+        raise click.BadParameter(
+            "takes the NAME of the variable that holds the key, e.g. CISCO_AI_DEFENSE_API_KEY; "
+            "store the key itself with 'defenseclaw keys set CISCO_AI_DEFENSE_API_KEY'.",
+            param_hint="'--api-key-env'",
+        )
+    return name
 
 
 def _interactive_mcp_setup(mc, cfg) -> None:
@@ -2859,9 +2886,7 @@ def _print_mcp_summary(mc, llm, aid) -> None:
     if mc.scan_instructions:
         rows.append(("scanners.mcp_scanner", "scan_instructions", "true"))
 
-    for section, key, val in rows:
-        click.echo(f"    {section}.{key + ':':<22s} {val}")
-    click.echo()
+    _echo_summary_rows(rows)
 
 
 # ---------------------------------------------------------------------------
