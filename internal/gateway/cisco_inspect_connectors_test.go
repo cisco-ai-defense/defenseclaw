@@ -120,15 +120,20 @@ func TestCiscoInspectClient_ConnectorToolCallPayloads(t *testing.T) {
 		tool      string
 		args      map[string]interface{}
 		headers   map[string]string
-		// wantID is the id the agent reported. Empty means the golden carries
-		// none, so the id is DefenseClaw's and only has to be non-empty: the
-		// chat schema rejects a tool call without one.
+		// extra is merged into the golden payload.
+		extra map[string]interface{}
+		// wantID is the id the agent reported. Empty means the payload carries
+		// none, so the id is DefenseClaw's "dc-" one: the chat schema rejects a
+		// tool call without an id, and a minted correlation id is not the
+		// agent's.
 		wantID string
 	}{
 		{
 			connector: "claudecode",
 			tool:      "Bash",
 			args:      map[string]interface{}{"command": command},
+			extra:     map[string]interface{}{"tool_use_id": "toolu_01U3wpX"},
+			wantID:    "toolu_01U3wpX",
 		},
 		{
 			connector: "codex",
@@ -138,6 +143,8 @@ func TestCiscoInspectClient_ConnectorToolCallPayloads(t *testing.T) {
 				"X-DefenseClaw-Hook-Event":    "PreToolUse",
 				"X-DefenseClaw-Hook-Contract": defaultTestCodexHookContract,
 			},
+			extra:  map[string]interface{}{"tool_use_id": "call_codex_42"},
+			wantID: "call_codex_42",
 		},
 		{
 			connector: "cursor",
@@ -189,6 +196,9 @@ func TestCiscoInspectClient_ConnectorToolCallPayloads(t *testing.T) {
 	} {
 		t.Run(test.connector, func(t *testing.T) {
 			payload := loadGoldenHookPayload(t, test.connector, "pre_tool_block")
+			for key, value := range test.extra {
+				payload[key] = value
+			}
 			got := decodeAIDWire(t, captureAIDPayloadForConnector(t, test.connector, payload, test.headers))
 
 			if len(got.Messages) != 2 {
@@ -226,10 +236,13 @@ func TestCiscoInspectClient_ConnectorToolCallPayloads(t *testing.T) {
 			if want := "Tool call: " + test.tool + "\n" + call.Function.Arguments; text.Content != want {
 				t.Errorf("text content = %q, want the same invocation as text %q", text.Content, want)
 			}
-			if call.ID == nil || *call.ID == "" {
+			switch {
+			case call.ID == nil || *call.ID == "":
 				t.Errorf("id = %v, want a non-empty id on every tool call", call.ID)
-			} else if test.wantID != "" && *call.ID != test.wantID {
+			case test.wantID != "" && *call.ID != test.wantID:
 				t.Errorf("id = %q, want the agent's id %q", *call.ID, test.wantID)
+			case test.wantID == "" && !strings.HasPrefix(*call.ID, "dc-"):
+				t.Errorf("id = %q, want a \"dc-\" id when the agent reported none", *call.ID)
 			}
 		})
 	}

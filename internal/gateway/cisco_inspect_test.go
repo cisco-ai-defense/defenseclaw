@@ -620,7 +620,8 @@ func TestCiscoInspectClient_NonManagedHookSendsToolCall(t *testing.T) {
 
 // The agent's own tool id reaches the wire. Each hook sets toolUseID on the
 // request: claudecode and codex from tool_use_id, every other connector from the
-// reported ToolInvocationID on the shared agent hook.
+// reported ToolInvocationID on the shared agent hook. This pins the request to
+// wire step; the connector table drives each hook's own route.
 func TestCiscoInspectClient_ToolUseIDReachesWire(t *testing.T) {
 	var gotBody []byte
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
