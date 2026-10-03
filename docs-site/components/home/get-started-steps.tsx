@@ -25,7 +25,7 @@ export function GetStartedSteps() {
         <h3>Initialize</h3>
         <p>Picks up the agents you have and starts them in observe mode, so nothing is blocked yet.</p>
         <InstallCommand command={INIT_COMMAND} prompt="$" copyLabel="Copy defenseclaw init" />
-        <Link href={QUICKSTART} className={styles.stepLink}>
+        <Link href="/docs/get-started/first-run" className={styles.stepLink}>
           What init sets up <ArrowRight aria-hidden />
         </Link>
       </li>
@@ -38,7 +38,7 @@ export function GetStartedSteps() {
           prompt="$"
           copyLabel="Copy the action-mode command"
         />
-        <Link href={QUICKSTART} className={styles.stepLink}>
+        <Link href={`${QUICKSTART}#turn-on-blocking-for-claude-code`} className={styles.stepLink}>
           5-minute quickstart <ArrowRight aria-hidden />
         </Link>
       </li>
