@@ -1327,13 +1327,18 @@ def _log_redaction_change(app: AppContext, action: str, audit_details: str, chan
 
     Profile ``strict`` keeps only metadata, so the setup row's details read
     as an internal event name; the Activity target (for example
-    ``config:redaction-apply:all-configurable:strict``) survives (GAP-2192).
+    ``config:redaction-apply:all-configurable:strict:changed-legs-56:newly-unredacted-0``)
+    survives (GAP-2192). The counts are in the target because strict reduces
+    the after state to a field count; they hold no content.
     """
 
     app.logger.log_action(ACTION_SETUP_REDACTION_POLICY, "redaction-policy", audit_details)
     verb, _, rest = action.partition(" ")
     fields = dict(token.partition("=")[::2] for token in rest.split())
-    scope = ":".join(value for value in fields.values() if value)
+    scope = ":".join(
+        [value for value in fields.values() if value]
+        + [f"changed-legs-{int(changed)}", f"newly-unredacted-{int(newly)}"]
+    )
     details = [f"scope={scope}"] if scope else []
     details += [f"{key}={value}" for key, value in fields.items() if key != "scope"]
     details += [f"changed_legs={changed}", f"newly_unredacted={newly}"]
