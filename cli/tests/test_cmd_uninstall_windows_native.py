@@ -79,6 +79,32 @@ class DeferredInterpreterRemovalCommandTests(unittest.TestCase):
                 windows_uninstall_helper._remove_after_exit([uv], [], status_path=r"C:\T&x\r.json")  # noqa: SLF001
             )
 
+    def test_after_exit_result_says_superseded_when_a_new_install_owns_the_data_folder(self) -> None:
+        # GAP-2149: a release installer wrote into the data folder while the
+        # cleanup ran, and the result told the user to remove it by hand.
+        from unittest.mock import patch
+
+        from defenseclaw.commands import windows_uninstall_helper
+
+        uv = r"C:\Users\u\.defenseclaw\.uv"
+        data_dir = r"C:\Users\u\.defenseclaw"
+        status = r"C:\Users\u\AppData\Local\Temp\defenseclaw-uninstall-result-ab.json"
+        with (
+            patch.object(windows_uninstall_helper.subprocess, "Popen") as popen,
+            patch.object(windows_uninstall_helper.os, "path", ntpath),
+        ):
+            windows_uninstall_helper._remove_after_exit(  # noqa: SLF001
+                [uv], [data_dir], status_path=status, gone=[data_dir], data_dir=data_dir
+            )
+
+        command = popen.call_args.args[0]
+        result = command[command.index(f'(if exist "{data_dir}\\.install.lock"') :]
+        for name in (".install.lock", "installer", ".venv"):
+            self.assertIn(f'(if exist "{data_dir}\\{name}" (echo {{"status": "superseded"', result)
+        self.assertLess(result.index('"superseded"'), result.index('"failed"'))
+        self.assertIn("nothing needs to be removed by hand", result)
+        self.assertLess(command.index(f'(for /l %i in (1,1,30) do if exist "{data_dir}"'), command.index(result))
+
     @unittest.skipUnless(sys.platform == "win32", "runs cmd.exe")
     def test_after_exit_command_removes_the_folder_on_windows(self) -> None:
         from unittest.mock import patch
@@ -204,6 +230,29 @@ class DeferredHelperResultFileTests(unittest.TestCase):
         self.assertIn(".env (holds API keys)", detail)
         self.assertIn("config.yaml", detail)
         self.assertTrue(shim_kept)
+
+    def test_install_started_during_the_wait_stops_the_cleanup(self) -> None:
+        # GAP-2149: a release install.ps1 took its lock in the data folder
+        # while the cleanup waited; the cleanup must leave that install alone.
+        def on_wait(status_path: Path) -> None:
+            (status_path.parent.parent / "data" / ".install.lock").mkdir(exist_ok=True)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = self._run(root, on_wait=on_wait)
+            kept = [(root / "bin" / "defenseclaw.cmd").exists(), (root / "data" / "config.yaml").exists()]
+        self.assertEqual(result["status"], "superseded")
+        self.assertIn("nothing needs to be removed by hand", result["detail"])
+        self.assertEqual(kept, [True, True])
+
+    def test_leftover_install_lock_does_not_stop_the_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lock = root / "data" / ".install.lock"
+            lock.mkdir(parents=True)
+            os.utime(lock, (time.time() - 3600, time.time() - 3600))
+            result = self._run(root)
+        self.assertEqual(result, {"status": "succeeded"})
 
 
 @unittest.skipUnless(sys.platform == "win32", "Windows file locking regression")

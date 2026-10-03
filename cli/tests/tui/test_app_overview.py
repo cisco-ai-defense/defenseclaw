@@ -1231,6 +1231,15 @@ def test_overview_findings_and_connector_alerts_match_the_alerts_view() -> None:
                 timestamp=now,
                 connector="codex",
             ),
+            # A connector-less alert still counts under scope All, as in the
+            # Alerts panel (GAP-2088 r4x reopen).
+            AlertEvent(
+                id="export-1",
+                severity="HIGH",
+                action="otel-export-failed",
+                target="galileo/traces",
+                timestamp=now,
+            ),
         ]
     )
     app = DefenseClawTUI(overview_model=overview, audit_model=AuditPanelModel(store), alerts_model=alerts)
@@ -1239,7 +1248,7 @@ def test_overview_findings_and_connector_alerts_match_the_alerts_view() -> None:
         metrics = {metric.key: metric.value for metric in app._overview_metric_data()}
         rows = {row.connector: row for row in app._overview_connector_rows()}
 
-    assert metrics["findings"] == 3
+    assert metrics["findings"] == 4
     assert rows["claudecode"].blocks == 2
     assert rows["claudecode"].alerts == 2
     assert rows["codex"].alerts == 1

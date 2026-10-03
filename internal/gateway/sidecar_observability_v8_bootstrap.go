@@ -789,6 +789,16 @@ func (s *Sidecar) closeOwnedObservabilityV8Runtime() error {
 	return nil
 }
 
+// observabilityV8ShutdownFlushWarning is the gateway.log line written when the
+// telemetry runtime cannot finish its flush within the shutdown bound. The stop
+// itself succeeded, so it is a warning, not an "Error:" line (GAP-2166).
+func observabilityV8ShutdownFlushWarning() string {
+	return fmt.Sprintf("[sidecar] WARNING: telemetry flush on shutdown did not finish within %s; "+
+		"unsent telemetry was dropped. A telemetry destination is probably unreachable: "+
+		"check it with 'defenseclaw setup observability test <name>'. The gateway stopped normally.\n",
+		sidecarObservabilityV8ShutdownTimeout)
+}
+
 // observabilityV8ActivePlanDigest returns the plan identity actually owned by
 // the live graph. ConfigManager must seed from this value rather than rereading
 // config.yaml: the file can legitimately change after bootstrap but before the

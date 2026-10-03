@@ -996,7 +996,7 @@ class SetupPanelModel:
         restart_hint = ""
         actions = ["[`] Wizards", "[Arrows] Navigate", "[Enter/Click] Edit/Toggle"]
         if changes:
-            actions.extend(("[S] Review & Save", "[R] Revert"))
+            actions.extend(("[S] Review & Save", "\\[r] Revert"))
         if self.restart_queue.pending:
             restart_hint = "Restart pending: " + self.restart_queue.reason + "  [G] restart now  [C] clear"
             actions.extend(("[G] Restart Now", "[C] Clear Restart"))
@@ -5718,6 +5718,11 @@ def uninstall_intent(option: UninstallOption) -> SetupCommandIntent:
     )
 
 
+# The connector install.sh offers first; the Setup form starts on it when no
+# connector is configured (GAP-2159).
+_DEFAULT_SETUP_CONNECTOR = "codex"
+
+
 def connector_setup_wizard_fields(
     cfg: object | Mapping[str, Any] | None = None,
     os_name: str | None = None,
@@ -5731,8 +5736,10 @@ def connector_setup_wizard_fields(
     else:
         connector = str(get_config_value(cfg, "guardrail.connector", "") or "").strip()
         if not connector:
-            connector = str(get_config_value(cfg, "claw.mode", "openclaw") or "openclaw").strip()
-    connector = connector or "openclaw"
+            connector = str(get_config_value(cfg, "claw.mode", "") or "").strip()
+    # No connector configured: start where install.sh does (codex), not on
+    # openclaw, so Ctrl+R can't set up an agent nobody picked (GAP-2159).
+    connector = connector or _DEFAULT_SETUP_CONNECTOR
     # A stored compatibility mirror can name a proxy connector that this OS
     # can't run (e.g. a config copied from macOS opened on Windows); fall back
     # to the first supported connector rather than offering an unusable default.
@@ -7140,7 +7147,7 @@ def wizard_bool_value(fields: Sequence[WizardFormField], label: str, fallback: s
 
 
 def _build_connector_setup_args(fields: Sequence[WizardFormField]) -> tuple[str, ...]:
-    connector = wizard_field_value(fields, "Connector") or "openclaw"
+    connector = wizard_field_value(fields, "Connector") or _DEFAULT_SETUP_CONNECTOR
     action = wizard_field_value(fields, "Action") or "setup"
     if action == "batch":
         out = ["setup", "--yes"]

@@ -132,3 +132,29 @@ async def test_status_result_and_filter_prompt_do_not_stick(tmp_path) -> None:
         sections = dict(app._help_sections())  # noqa: SLF001
         overview = [desc for key, desc in sum(sections.values(), []) if key == "m"]
         assert overview and not any("(Overview, Alerts, Audit, Logs)" in desc for desc in overview)
+
+
+def test_tab_bar_names_tabs_before_minor_badges_and_brand(tmp_path, monkeypatch) -> None:
+    # GAP-2150: at 124-136 strip cells five or six tabs were bare keys while
+    # the Logs 999+ / Audit badges and the brand stayed, and a wider strip
+    # named fewer tabs than a narrower one.
+    from textual.geometry import Size
+
+    monkeypatch.setattr(tab_fit, "_PLAIN_BADGE", False)
+    unread = {"alerts": 22, "audit": 13, "logs": 1000}
+    for active in ("registries", "setup", "overview"):
+        previous = len(PANELS)
+        for width in range(66, 180):
+            labels = fit_tab_labels(PANELS, active, unread, width)
+            assert strip_width(tuple(labels.values())) <= width
+            bare = sum(" " not in label for label in labels.values())
+            assert bare <= previous, (active, width, labels)
+            previous = bare
+    labels = fit_tab_labels(PANELS, "registries", unread, 136)
+    assert sum(" " not in label for label in labels.values()) <= 2
+    assert labels["registries"] == "R Registries" and "²²" in labels["alerts"]
+
+    app = snapshot_app(tmp_path)
+    for width, brand in ((150, False), (157, False), (175, True)):
+        monkeypatch.setattr(type(app), "size", property(lambda _self, width=width: Size(width, 45)))
+        assert bool(app._header_title()) is brand, width  # noqa: SLF001 - brand rule under test.

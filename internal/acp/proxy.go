@@ -18,6 +18,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 )
 
 type Mode string
@@ -469,6 +470,23 @@ const maxBlockReasonBytes = 512
 const evaluationUnavailableReason = "DefenseClaw could not check this step because the gateway did not answer, " +
 	"so it was not delivered. Try again; run defenseclaw status if it keeps happening."
 
+// gatewayNotReadyReason is the same refusal when the gateway did answer, but
+// with HTTP 503: it is not ready to check ACP traffic yet (GAP-2135).
+const gatewayNotReadyReason = "DefenseClaw could not check this step because the gateway is not ready to check " +
+	"ACP traffic yet (it may still be loading a setup change), so it was not delivered. Try again in a few " +
+	"seconds; run defenseclaw acp status if it keeps happening."
+
+// gatewayNotReadyRetryDelay is the pause before the one retry of a 503: the
+// gateway applies a config change about half a second after it is saved.
+var gatewayNotReadyRetryDelay = time.Second
+
+func unavailableReason(err error) string {
+	if errors.Is(err, ErrGatewayNotReady) {
+		return gatewayNotReadyReason
+	}
+	return evaluationUnavailableReason
+}
+
 func boundedBlockReason(reason string) string {
 	reason = strings.TrimSpace(reason)
 	if len(reason) > maxBlockReasonBytes {
@@ -599,6 +617,15 @@ func evaluate(ctx context.Context, opts ProxyOptions, in Evaluation) (Verdict, e
 	if err == nil || opts.Mode != ModeAction || errors.Is(err, ErrModeMismatch) || ctx.Err() != nil {
 		return verdict, err
 	}
+	if errors.Is(err, ErrGatewayNotReady) {
+		timer := time.NewTimer(gatewayNotReadyRetryDelay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return verdict, err
+		case <-timer.C:
+		}
+	}
 	return opts.Evaluator.Evaluate(ctx, in)
 }
 
@@ -637,7 +664,7 @@ func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direc
 			if opts.Mode == ModeAction {
 				// Fail closed for this frame only, exactly as for a block.
 				logf(opts.Stderr, "[defenseclaw-acp] evaluation unavailable, refused %s %s: %v\n", direction, msg.Method, evalErr)
-				verdict = Verdict{Action: "block", Reason: evaluationUnavailableReason}
+				verdict = Verdict{Action: "block", Reason: unavailableReason(evalErr)}
 			} else {
 				logf(opts.Stderr, "[defenseclaw-acp] observe evaluation error: %v\n", evalErr)
 				verdict = Verdict{Action: "allow"}
@@ -668,7 +695,7 @@ func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direc
 						return fmt.Errorf("ACP completed-turn evaluation unavailable: %w", turnErr)
 					}
 					logf(opts.Stderr, "[defenseclaw-acp] completed-turn evaluation unavailable, refused the turn: %v\n", turnErr)
-					turnVerdict = Verdict{Action: "block", Reason: evaluationUnavailableReason}
+					turnVerdict = Verdict{Action: "block", Reason: unavailableReason(turnErr)}
 				}
 				if turnVerdict.Action == "block" || turnVerdict.Action == "confirm" {
 					if _, err := dst.Write(blockedTurnFrames(msg.ID, session, turnVerdict.Reason)); err != nil {

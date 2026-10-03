@@ -513,6 +513,13 @@ def task_status(
     return TaskStatus("na")
 
 
+# Tasks whose base command alone ("defenseclaw setup") is not what they run
+# (GAP-2160).
+_COMMAND_DISPLAY: dict[SetupWizard, str] = {
+    SetupWizard.CONNECTOR_SETUP: "defenseclaw setup <connector> --yes",
+}
+
+
 def setup_detail_pairs(model: object) -> tuple[tuple[str, str], ...]:
     """What ``i`` shows on the wizard list: the selected task, then readiness.
 
@@ -525,7 +532,7 @@ def setup_detail_pairs(model: object) -> tuple[tuple[str, str], ...]:
         ("Task", f"{wizard_label(info.wizard)} ({wizard_group(info.wizard)})"),
         ("What it does", info.description),
         ("How it works", info.how_to),
-        ("Command", " ".join(info.argv)),
+        ("Command", _COMMAND_DISPLAY.get(info.wizard, " ".join(info.argv))),
     ]
     if info.status == "unsupported":
         pairs.append(("Unavailable", model.wizard_unavailable_reason(info.wizard)))  # type: ignore[attr-defined]

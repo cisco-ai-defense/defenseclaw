@@ -825,9 +825,14 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 	// failures before the normal shutdown block is reached. The explicit normal
 	// close below preserves close-before-store ordering; this deferred call is
 	// idempotent and covers startup lifecycle/token/watcher failures.
+	shutdownFlushWarned := false
 	defer func() {
-		if err := s.closeOwnedObservabilityV8Runtime(); err != nil && runErr == nil {
-			runErr = err
+		// A telemetry flush that cannot finish on shutdown (for example an
+		// unreachable collector) is not a reason to fail the stop: warn once
+		// instead of returning an "Error:" that reads as a startup failure
+		// (GAP-2166).
+		if err := s.closeOwnedObservabilityV8Runtime(); err != nil && runErr == nil && !shutdownFlushWarned {
+			fmt.Fprint(os.Stderr, observabilityV8ShutdownFlushWarning())
 		}
 	}()
 	runCtx, runCancel := context.WithCancel(ctx)
@@ -1221,10 +1226,14 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 	// a legacy fallback. Retire it immediately afterward, while audit.db is still
 	// open; the deferred close above remains the abnormal-return safety net.
 	if err := s.closeOwnedObservabilityV8Runtime(); err != nil {
-		return err
+		// Runtime.Close contract: the stores stay open until the deferred close
+		// above retries with a fresh context.
+		fmt.Fprint(os.Stderr, observabilityV8ShutdownFlushWarning())
+		shutdownFlushWarned = true
+	} else {
+		s.logger.Close()
+		_ = s.client.Close()
 	}
-	s.logger.Close()
-	_ = s.client.Close()
 	// Return the first non-nil error if any subsystem failed before shutdown
 	select {
 	case err := <-errCh:

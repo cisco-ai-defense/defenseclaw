@@ -130,7 +130,8 @@ SETUP_KEYMAPS: dict[SetupView, tuple[KeySpec, ...]] = {
         KeySpec("/", "find field", "Find a field by name or key in any section", None, ("/",)),
         KeySpec("E", "list editor", "Edit this section's list entries", "setup-edit-list", ("E",), when="list_editor"),
         KeySpec("S", "review & save", "Review the changes, then save config.yaml", "setup-save", ("S",)),
-        KeySpec("R", "revert", "Drop unsaved changes", "setup-revert", ("R",)),
+        # Lowercase: R is the global Registries key (GAP-2151).
+        KeySpec("r", "revert", "Drop unsaved changes", "setup-revert", ("r",)),
         KeySpec("w", "wizards", "Back to the setup tasks", "setup-mode-wizards", ("w",)),
         *_RESTART,
     ),

@@ -543,7 +543,7 @@ def test_connector_wizard_builds_go_argv_for_supported_connectors() -> None:
         "setup claude-code",
     )
 
-    fields = connector_setup_wizard_fields({})
+    fields = connector_setup_wizard_fields({"guardrail": {"connector": "openclaw"}})
     fields = _with_field(fields, "Connector", "openclaw")
     fields = _with_field(fields, "Guardrail Mode", "action")
     fields = _with_field(fields, "Scanner Mode", "both")
