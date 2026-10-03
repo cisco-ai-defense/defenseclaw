@@ -11443,12 +11443,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         panel.set_class(below is not None, "aside-below")
         height, rows, width = self._aside_below_box() if below is not None else (0, 0, 0)
         self._aside_box = (height, rows, width)
-        if detail and not panel.has_class("compact"):
-            # A tall terminal left ~17 rows empty above a 16-row detail whose
-            # last lines (Registries Blocked/Errors/Rejected) were hidden with
-            # only a one-cell scrollbar thumb as a cue (GAP-2600): grow into
-            # the rows the table does not need, never below the CSS cap.
-            height = max(16, self._aside_below_box()[0])
+        if detail:
+            height = self._detail_box_height()
         if below is not None and not self._aside_box_recheck:
             # The box is measured before a panel switch's layout settles (the
             # Setup card took the old panel's height, then grew by a row the
@@ -11511,10 +11507,32 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             # (GAP-1596).
             self.call_after_refresh(self._keep_table_cursor_visible)
 
+    def _detail_box_height(self) -> int:
+        """Inline max height for an open panel detail; 0 keeps the CSS cap."""
+
+        try:
+            main = self.query_one("#panel-main")
+            panel = self.query_one("#detail-panel", VerticalScroll)
+        except NoMatches:
+            return 0
+        if not panel.has_class("compact"):
+            # A tall terminal left ~17 rows empty above a 16-row detail whose
+            # last lines (Registries Blocked/Errors/Rejected) were hidden with
+            # only a one-cell scrollbar thumb as a cue (GAP-2600): grow into
+            # the rows the table does not need, never below the CSS cap.
+            return max(16, self._aside_below_box()[0])
+        # At 80x24 the Alerts connector strip and a wrapped heading left
+        # #panel-main 10 rows: the table's 4-row minimum plus the 7-row
+        # compact cap pushed the box's bottom border off the panel (GAP-2606).
+        # Shrink the box to what is left so it closes and scrolls.
+        main_height = int(main.content_size.height or 0)
+        room = main_height - 4 - panel.styles.margin.top
+        return max(3, room) if 0 < main_height and room < 7 else 0
+
     def _recheck_detail_box(self) -> None:
-        if not self.is_running or self.help_open or not self.detail_text or self._detail_max_height is None:
+        if not self.is_running or self.help_open or not self.detail_text:
             return
-        if max(16, self._aside_below_box()[0]) != self._detail_max_height:
+        if (self._detail_box_height() or None) != self._detail_max_height:
             self._render_detail_panel()
 
     def _recheck_aside_below_box(self) -> None:
