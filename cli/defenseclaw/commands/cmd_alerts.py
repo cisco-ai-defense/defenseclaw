@@ -1106,7 +1106,7 @@ def _set_alert_disposition(
                 if isinstance(item, dict):
                     click.echo(f"  {item.get('id', '')}")
             if len(targets) > 20:
-                click.echo(f"  … and {len(targets) - 20} more")
+                ux.echo(f"  … and {len(targets) - 20} more")
         if dry_run:
             ux.ok("Dry run complete; no alerts were changed.")
             return None

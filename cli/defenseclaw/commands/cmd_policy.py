@@ -213,7 +213,7 @@ def create(
     dest = os.path.join(policies_dir, f"{name}.yaml")
 
     if os.path.islink(dest):
-        click.echo(f"error: policy '{name}' is a symbolic link — refusing to write", err=True)
+        ux.echo(f"error: policy '{name}' is a symbolic link — refusing to write", err=True)
         raise SystemExit(1)
 
     real_dest = os.path.realpath(dest)
@@ -627,7 +627,7 @@ def _reload_and_report(
         ux.ok("Gateway reloaded the policy; it is enforcing it now.")
         return
     if outcome == "unreachable":
-        click.echo(
+        ux.echo(
             "  ⚠ The gateway isn't running; it loads this policy when it starts "
             "(defenseclaw-gateway start)" + ("; the audit event was not recorded." if audit_skipped else ".")
         )
@@ -850,7 +850,7 @@ def delete(app: AppContext, name: str, force: bool, assume_yes: bool) -> None:
         raise SystemExit(1)
 
     if os.path.islink(path):
-        click.echo(f"error: policy '{name}' is a symbolic link — refusing to delete", err=True)
+        ux.echo(f"error: policy '{name}' is a symbolic link — refusing to delete", err=True)
         raise SystemExit(1)
 
     real_path = os.path.realpath(path)
@@ -875,7 +875,7 @@ def delete(app: AppContext, name: str, force: bool, assume_yes: bool) -> None:
         return
 
     if is_active and not force:
-        click.echo(
+        ux.echo(
             f"error: policy '{name}' is active — refusing to delete. "
             "Activate another policy first, or pass --force to delete it "
             "and re-activate 'default'.",
@@ -1459,7 +1459,7 @@ def _user_policy_dest(app: AppContext, name: str) -> str:
     dest = os.path.join(policies_dir, f"{name}.yaml")
 
     if os.path.islink(dest):
-        click.echo(f"error: policy '{name}' is a symbolic link — refusing to write", err=True)
+        ux.echo(f"error: policy '{name}' is a symbolic link — refusing to write", err=True)
         raise SystemExit(1)
 
     real_dest = os.path.realpath(dest)
@@ -1760,7 +1760,7 @@ def _try_rego_compile(rego_dir: str) -> bool:
         # verdict, so the default fails closed. Operators can opt out with
         # DEFENSECLAW_POLICY_VALIDATE_ALLOW_NO_OPA=1.
         if os.environ.get("DEFENSECLAW_POLICY_VALIDATE_ALLOW_NO_OPA", "").strip() == "1":
-            click.echo("  No Rego checker found — skipping Rego compilation (opt-in).")
+            ux.echo("  No Rego checker found — skipping Rego compilation (opt-in).")
             return True
         ux.err("FAIL: no Rego checker found (neither 'opa' nor 'defenseclaw-gateway').")
         click.echo("  Reinstall DefenseClaw, or install OPA for full validation.")

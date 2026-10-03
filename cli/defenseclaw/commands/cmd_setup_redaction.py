@@ -1415,7 +1415,7 @@ def _execute_mutations(
         except CanonicalObservabilityUnavailableError:
             audit_after_restart = restart
             if not restart:
-                click.echo(
+                ux.echo(
                     "  ⚠ Change saved, but the gateway runtime is unavailable; the canonical setup audit "
                     "event was not recorded. Start defenseclaw-gateway before the next change.",
                     err=True,
@@ -1437,7 +1437,7 @@ def _execute_mutations(
             _restart_gateway(quiet=emit_json)
         except click.ClickException:
             if audit_after_restart:
-                click.echo(
+                ux.echo(
                     "  ⚠ Change saved, but the canonical setup audit event was not recorded because the "
                     "gateway restart failed. Start defenseclaw-gateway before the next change.",
                     err=True,

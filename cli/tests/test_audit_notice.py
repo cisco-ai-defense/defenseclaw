@@ -84,7 +84,7 @@ def test_not_recorded_warnings_follow_console_glyph_policy(unicode_ok) -> None:
             patch.object(_scan_ui, "_SCAN_NOT_RECORDED_NOTED", False),
         ):
             result = make_separate_stderr_runner().invoke(skill, ["block", "demo"], obj=app)
-            with patch.object(_audit_notice.click, "secho") as secho, patch.object(_scan_ui.click, "echo") as echo:
+            with patch("click.secho") as secho, patch.object(_scan_ui.click, "echo") as echo:
                 _audit_notice.note_asset_policy_observed(None, decision, target_type="mcp", name="m")
                 _scan_ui.record_scan(scan_logger, object())
         assert result.exit_code == 0, result.output

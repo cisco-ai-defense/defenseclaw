@@ -130,7 +130,7 @@ def scan(
     pending_telemetry: list[tuple[object, str, str]] = []
     for c in connectors:
         if len(connectors) > 1 and not as_json:
-            click.echo(ux._style(f"\n── connector: {c} ──", fg="cyan"))
+            ux.echo(ux._style(f"\n── connector: {c} ──", fg="cyan"))
         inv, pending = _scan_one_connector(app, c, cats, as_json, summary_only)
         invs.append(inv)
         if pending is not None:
@@ -198,7 +198,7 @@ def _scan_one_connector(
     if not as_json:
         # Neutral wording: some connectors (Hermes) are read from disk, and the
         # report header names the real source (GAP-2312).
-        click.echo(ux.dim(f"Scanning {label} inventory …"), err=True)
+        ux.echo(ux.dim(f"Scanning {label} inventory …"), err=True)
     inv = build_claw_aibom(app.cfg, live=True, categories=cats, connector=connector)
 
     enrich_with_policy(

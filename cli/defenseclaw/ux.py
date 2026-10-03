@@ -54,6 +54,9 @@ TUI_UNAVAILABLE_MESSAGE = (
 # Without the snapshot, a legacy cp1252/OEM stream would look capable after the
 # reconfigure even though its terminal host still cannot render these glyphs.
 _configured_unicode_output: bool | None = None
+# stderr gets its own snapshot: '2> file' with stdout on a terminal must still
+# write stable ASCII into the file (GAP-2564).
+_configured_unicode_error_output: bool | None = None
 
 _UNICODE_PROBE = "✓✗⚠─═└—↪"
 _ASCII_PRESENTATION_TRANSLATION = str.maketrans(
@@ -185,40 +188,49 @@ def _stream_supports_unicode(stream: object) -> bool:
     return True
 
 
-def configure_console_output(stream: object | None = None) -> bool:
+def configure_console_output(stream: object | None = None, err_stream: object | None = None) -> bool:
     """Snapshot whether human CLI output may use rich Unicode presentation.
 
-    ``TERM=dumb`` is the explicit native-launch fallback. Otherwise stdout must
-    be an interactive stream whose original encoding supports the complete
-    presentation-glyph set. Call this before any UTF-8 stream reconfiguration.
+    ``TERM=dumb`` is the explicit native-launch fallback. Otherwise the stream
+    must be an interactive stream whose original encoding supports the complete
+    presentation-glyph set. stdout and stderr are snapshotted separately; an
+    explicit *stream* without *err_stream* leaves stderr alone. Call this before any
+    UTF-8 stream reconfiguration. Returns the stdout policy.
     """
 
-    global _configured_unicode_output
+    global _configured_unicode_output, _configured_unicode_error_output
+    dumb = os.environ.get("TERM", "").strip().lower() == "dumb"
     target = sys.stdout if stream is None else stream
-    _configured_unicode_output = os.environ.get("TERM", "").strip().lower() != "dumb" and _stream_supports_unicode(
-        target
-    )
+    _configured_unicode_output = not dumb and _stream_supports_unicode(target)
+    if err_stream is not None or stream is None:
+        err_target = sys.stderr if err_stream is None else err_stream
+        _configured_unicode_error_output = not dumb and _stream_supports_unicode(err_target)
     return _configured_unicode_output
 
 
-def unicode_output_enabled() -> bool:
+def unicode_output_enabled(*, err: bool = False) -> bool:
     """Return the policy snapshot, preserving rich output before configuration.
 
     The default keeps direct library/Click-test use backward-compatible. The
     shipped entrypoint always calls :func:`configure_console_output` first.
+    ``err=True`` asks about stderr, which follows stdout until it has its
+    own snapshot.
     """
 
     if os.environ.get("TERM", "").strip().lower() == "dumb":
         return False
-    if _configured_unicode_output is None:
+    snapshot = _configured_unicode_output
+    if err and _configured_unicode_error_output is not None:
+        snapshot = _configured_unicode_error_output
+    if snapshot is None:
         return True
-    return _configured_unicode_output
+    return snapshot
 
 
-def console_text(text: str) -> str:
+def console_text(text: str, *, err: bool = False) -> str:
     """Downgrade presentation glyphs while preserving ordinary Unicode text."""
 
-    if unicode_output_enabled():
+    if unicode_output_enabled(err=err):
         return text
     return ascii_presentation_text(text)
 
@@ -311,8 +323,16 @@ def echo(message: object | None = None, **kwargs: object) -> None:
     """Call :func:`click.echo` with presentation-safe human output."""
 
     if isinstance(message, str):
-        message = console_text(message)
+        message = console_text(message, err=bool(kwargs.get("err")))
     click.echo(message, **kwargs)
+
+
+def secho(message: object | None = None, **kwargs: object) -> None:
+    """Call :func:`click.secho` with presentation-safe human output."""
+
+    if isinstance(message, str):
+        message = console_text(message, err=bool(kwargs.get("err")))
+    click.secho(message, **kwargs)
 
 
 def terminal_supports_tui(*, stdin: object | None = None, stdout: object | None = None) -> bool:

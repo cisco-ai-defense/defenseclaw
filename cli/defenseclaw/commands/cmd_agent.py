@@ -1753,7 +1753,7 @@ def discovery_setup(
             indent="  ",
         )
     if not diff and not enabled_changed and not runtime_diff:
-        click.echo(f"  {ux.dim('No changes — current config already matches your answers.')}")
+        ux.echo(f"  {ux.dim('No changes — current config already matches your answers.')}")
         return
     for label, before, after in diff:
         ux.subhead(f"{label}: {before!r} → {after!r}", indent="  ")

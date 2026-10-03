@@ -118,7 +118,7 @@ def _confirm_proceed() -> bool:
     --yes; scripts that answer on a piped stdin keep the prompt.
     """
     if _isatty(sys.stdin) and not _isatty(sys.stdout) and not _isatty(sys.stderr):
-        click.echo(
+        ux.echo(
             "  ✗ This change needs your confirmation, but the output is piped, so the prompt "
             "would be hidden. Re-run it with --yes to apply it, or without the pipe.",
             err=True,
@@ -605,7 +605,7 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
         ux.section("Guardrail status", indent="  ")
         enabled_txt = "yes" if gc.enabled else "no"
         enabled_val = ux._style(enabled_txt, fg="green") if gc.enabled else ux._style(enabled_txt, fg="yellow")
-        click.echo(f"  • {ux._style('enabled:', fg='bright_black', bold=True)}    {enabled_val}")
+        ux.echo(f"  • {ux._style('enabled:', fg='bright_black', bold=True)}    {enabled_val}")
 
     # Resolve the full active set and render exactly one coherent view: a
     # per-connector block for EACH active connector. active_connectors()
@@ -637,7 +637,7 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
         if as_json:
             _echo_status_json(gc, [], [])
             return
-        click.echo(
+        ux.echo(
             f"  • {ux._style('connectors:', fg='bright_black', bold=True)} "
             f"{ux.dim('(none configured)')}"
         )
@@ -787,12 +787,12 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
         ux.warn("runtime fail-mode drift: " + drift_row, indent="  ")
     for limit_row in runtime_limit_rows:
         ux.warn("connector limitation: " + limit_row, indent="  ")
-    click.echo(f"  • {ux.dim('fail = invalid, unauthorized, incomplete, or unreachable gateway responses')}")
+    ux.echo(f"  • {ux.dim('fail = invalid, unauthorized, incomplete, or unreachable gateway responses')}")
     if any_disabled:
-        click.echo(f"  • {ux.dim('fail - = disabled connector (no hooks, so no fail mode)')}")
+        ux.echo(f"  • {ux.dim('fail - = disabled connector (no hooks, so no fail mode)')}")
 
     if proxy_in_use:
-        click.echo(f"  • {ux._style('port:', fg='bright_black', bold=True)}       {gc.port}")
+        ux.echo(f"  • {ux._style('port:', fg='bright_black', bold=True)}       {gc.port}")
     click.echo()
     if gc.enabled:
         click.echo(f"  {ux.dim('Disable with:')}  defenseclaw guardrail disable")
@@ -1221,7 +1221,7 @@ def _set_connector_fail_mode(app: AppContext, requested: str, mode: str | None, 
         _refuse_cursor_fail_mode(gc, key, mode, pinned)
 
     if mode == configured_mode and runtime_state.desired == mode and runtime_state.current:
-        click.echo(f"  {ux.dim(f'{label} hook fail mode is already')} {mode!r} {ux.dim('— nothing to do.')}")
+        ux.echo(f"  {ux.dim(f'{label} hook fail mode is already')} {mode!r} {ux.dim('— nothing to do.')}")
         return
 
     click.echo()
@@ -1229,7 +1229,7 @@ def _set_connector_fail_mode(app: AppContext, requested: str, mode: str | None, 
         click.echo(f"  {ux.bold(f'Reconciling {label} hook runtime:')} {ux.accent(mode)}")
         ux.warn("Persisted policy matches, but installed runtime state is stale or inconsistent.", indent="  ")
     else:
-        click.echo(
+        ux.echo(
             f"  {ux.bold(f'Changing {label} hook fail mode:')} {configured_mode} {ux.dim('→')} {ux.accent(mode)}"
         )
     if normalize_connector(key) == "hermes" and mode == "closed":
@@ -1606,7 +1606,7 @@ def fail_mode_cmd(
         )
     ):
         scope = "for all active connectors" if gc.enabled else "for configured connectors"
-        click.echo(f"  {ux.dim('Hook fail mode is already')} {mode!r} {ux.dim(f'{scope} — nothing to do.')}")
+        ux.echo(f"  {ux.dim('Hook fail mode is already')} {mode!r} {ux.dim(f'{scope} — nothing to do.')}")
         return
     single_connector = _resolve_active_connector(app.cfg)
     single_pinned = None if fail_mode_targets else _cursor_pinned_fail_mode(gc, single_connector)
@@ -1623,12 +1623,12 @@ def fail_mode_cmd(
         and (single_state is None or (single_state.desired == mode and single_state.current))
     ):
         if normalize_connector(single_connector) == "hermes":
-            click.echo(
+            ux.echo(
                 f"  {ux.dim('Configured Hermes fail-mode provenance is already')} {mode!r}"
                 f" {ux.dim('— runtime remains upstream fail-open.')}"
             )
         else:
-            click.echo(f"  {ux.dim('Hook fail mode is already')} {mode!r} {ux.dim('— nothing to do.')}")
+            ux.echo(f"  {ux.dim('Hook fail mode is already')} {mode!r} {ux.dim('— nothing to do.')}")
         return
 
     click.echo()
@@ -1687,7 +1687,7 @@ def fail_mode_cmd(
                 # The fan-out saves the value as the connector's own setting,
                 # which applies in observe mode too (GAP-1977).
                 note = ux.dim(" (its own setting, also in observe mode)") if _observe_keeps_fail_open(gc, name) else ""
-                click.echo(
+                ux.echo(
                     f"      - {_connector_label(name)} ({name}): {shown} {ux.dim('→')} {ux.accent(mode)}{note}"
                 )
             elif old != mode:
@@ -1702,7 +1702,7 @@ def fail_mode_cmd(
             f"{ux.dim('(reconcile the installed hooks)')}"
         )
     else:
-        click.echo(f"  {ux.bold('Changing hook fail mode:')} {current} {ux.dim('→')} {ux.accent(mode)}")
+        ux.echo(f"  {ux.bold('Changing hook fail mode:')} {current} {ux.dim('→')} {ux.accent(mode)}")
     active_names = fail_mode_targets or [single_connector]
     if mode == "closed" and not fail_mode_targets:
         # The multi-connector fan-out gives every connector its own value,
@@ -1936,7 +1936,7 @@ def _set_connector_hilt(
     new_min = cur_min if min_severity is None else min_severity.upper()
 
     if has_override and new_enabled == cur_enabled and new_min == cur_min:
-        click.echo(
+        ux.echo(
             f"  {ux.dim(f'{label} HILT is already')} "
             f"enabled={str(new_enabled).lower()} min_severity={new_min} "
             f"{ux.dim('— nothing to do.')}"
@@ -2144,13 +2144,13 @@ def hilt_cmd(
         old_enabled == desired_enabled and old_min == desired_min
         for old_enabled, old_min, desired_enabled, desired_min in target_hilts.values()
     ):
-        click.echo(
+        ux.echo(
             f"  {ux.dim('HILT is already')} "
             f"{ux.dim('in the requested state for all active connectors — nothing to do.')}"
         )
         return
     if not hilt_targets and new_enabled == cur_enabled and new_min == cur_min:
-        click.echo(
+        ux.echo(
             f"  {ux.dim('HILT is already')} "
             f"enabled={str(new_enabled).lower()} min_severity={new_min} "
             f"{ux.dim('— nothing to do.')}"
@@ -2164,14 +2164,14 @@ def hilt_cmd(
             old_enabled, old_min, desired_enabled, desired_min = target_hilts[name]
             if old_enabled == desired_enabled and old_min == desired_min:
                 continue
-            click.echo(
+            ux.echo(
                 f"      - {_connector_label(name)} ({name}): "
                 f"enabled={str(old_enabled).lower()} {ux.dim('→')} "
                 f"{ux.accent(str(desired_enabled).lower())}, "
                 f"min_severity={old_min} {ux.dim('→')} {ux.accent(desired_min)}"
             )
     else:
-        click.echo(
+        ux.echo(
             f"  {ux.bold('Updating HILT:')} "
             f"enabled={str(cur_enabled).lower()} {ux.dim('→')} "
             f"{ux.accent(str(new_enabled).lower())}, "
@@ -2312,7 +2312,7 @@ def _set_connector_block_message(
 
     new_msg = "" if clear else message
     if new_msg == cur:
-        click.echo(
+        ux.echo(
             f"  {ux.dim(f'{label} block message unchanged — nothing to do.')}"
         )
         return
@@ -2491,12 +2491,12 @@ def block_message_cmd(
         and new_msg == current
         and all(value == new_msg for value in target_messages.values())
     ):
-        click.echo(
+        ux.echo(
             f"  {ux.dim('Block message unchanged for all active connectors — nothing to do.')}"
         )
         return
     if not block_message_targets and new_msg == current:
-        click.echo(f"  {ux.dim('Block message unchanged — nothing to do.')}")
+        ux.echo(f"  {ux.dim('Block message unchanged — nothing to do.')}")
         return
 
     click.echo()
@@ -2517,7 +2517,7 @@ def block_message_cmd(
                 continue
             old_label = old if old else "(built-in default)"
             new_label = new_msg if new_msg else "(built-in default)"
-            click.echo(
+            ux.echo(
                 f"      - {_connector_label(name)} ({name}): "
                 f"{old_label} {ux.dim('→')} {ux.accent(new_label)}"
             )
@@ -2825,7 +2825,7 @@ def list_packs_cmd(app: AppContext, json_out: bool) -> None:
     gc = app.cfg.guardrail
     ux.section("Guardrail rule packs", indent="  ")
 
-    click.echo(f"  • {ux._style('built-in presets:', fg='bright_black', bold=True)}")
+    ux.echo(f"  • {ux._style('built-in presets:', fg='bright_black', bold=True)}")
     for pname, desc in _RULE_PACK_PRESETS:
         click.echo(f"      - {ux.accent(pname)}: {ux.dim(desc)}")
     click.echo()
@@ -2835,14 +2835,14 @@ def list_packs_cmd(app: AppContext, json_out: bool) -> None:
     except Exception:  # noqa: BLE001 — discovery is best-effort in a listing.
         custom = []
     if custom:
-        click.echo(f"  • {ux._style('custom packs:', fg='bright_black', bold=True)}")
+        ux.echo(f"  • {ux._style('custom packs:', fg='bright_black', bold=True)}")
         for pack in custom:
             used = f" (used by {', '.join(pack.used_by)})" if pack.used_by else ""
             click.echo(f"      - {ux.accent(pack.name)}: {pack.path}{ux.dim(used)}")
         click.echo()
 
     global_dir = (getattr(gc, "rule_pack_dir", "") or "").strip()
-    click.echo(
+    ux.echo(
         f"  • {ux._style('global rule-pack dir:', fg='bright_black', bold=True)} "
         + (ux.accent(global_dir) if global_dir else ux.dim("(built-in default)"))
     )
@@ -2867,7 +2867,7 @@ def list_packs_cmd(app: AppContext, json_out: bool) -> None:
     click.echo()
     # G5 parity: don't fabricate a phantom openclaw row when nothing is set up.
     if not actives and not configured:
-        click.echo(
+        ux.echo(
             f"  • {ux._style('per connector:', fg='bright_black', bold=True)} "
             f"{ux.dim('(none configured)')}"
         )
@@ -2876,7 +2876,7 @@ def list_packs_cmd(app: AppContext, json_out: bool) -> None:
     if not actives:
         actives = [connector]
 
-    click.echo(f"  • {ux._style('per connector:', fg='bright_black', bold=True)}")
+    ux.echo(f"  • {ux._style('per connector:', fg='bright_black', bold=True)}")
     for name in actives:
         rp_dir = (
             (
@@ -3021,14 +3021,14 @@ def _pop_stopped_gateway_note() -> str | None:
 
 def _echo_stopped_gateway_note(what: str | None, *, audit_skipped: bool) -> None:
     if not what:
-        click.echo(
+        ux.echo(
             "  ⚠ The gateway isn't running, so the audit event was not recorded; "
             "the change applies when it starts (defenseclaw-gateway start).",
             err=True,
         )
         return
     tail = "; the audit event was not recorded" if audit_skipped else ""
-    click.echo(
+    ux.echo(
         f"  ⚠ The gateway isn't running, so it was left stopped: the {what} applies when it starts "
         f"(defenseclaw-gateway start){tail}.",
         err=True,
@@ -3087,7 +3087,7 @@ def _log_guardrail_change(app: AppContext, operation: str, details: str) -> None
         _echo_stopped_gateway_note(pending, audit_skipped=True)
         return
     except CanonicalObservabilityError as exc:
-        click.echo(f"  ⚠ Change saved, but the gateway did not confirm the audit event ({exc}).", err=True)
+        ux.echo(f"  ⚠ Change saved, but the gateway did not confirm the audit event ({exc}).", err=True)
     if pending:
         _echo_stopped_gateway_note(pending, audit_skipped=False)
 
@@ -3112,7 +3112,7 @@ def _log_guardrail_action(app: AppContext, action: str, details: str) -> None:
         _echo_stopped_gateway_note(pending, audit_skipped=True)
         return
     except CanonicalObservabilityError as exc:
-        click.echo(f"  ⚠ Change saved, but the gateway did not confirm the audit event ({exc}).", err=True)
+        ux.echo(f"  ⚠ Change saved, but the gateway did not confirm the audit event ({exc}).", err=True)
     if pending:
         _echo_stopped_gateway_note(pending, audit_skipped=False)
 
@@ -3493,13 +3493,13 @@ def protection_list_cmd(app: AppContext, json_out: bool) -> None:
     width = max((len(p.name) for p in packs), default=0)
     for pack in packs:
         state = f"{pack.rule_count} rules" if pack.selectable else "staged, not available yet"
-        click.echo(f"  • {ux.accent(pack.name.ljust(width))}  {pack.covers}  {ux.dim('(' + state + ')')}")
+        ux.echo(f"  • {ux.accent(pack.name.ljust(width))}  {pack.covers}  {ux.dim('(' + state + ')')}")
     click.echo()
-    click.echo(f"  • {ux._style('on per scope:', fg='bright_black', bold=True)}")
+    ux.echo(f"  • {ux._style('on per scope:', fg='bright_black', bold=True)}")
     for scope in scopes:
         who = "global" if scope["scope"] == "global" else f"{_connector_label(scope['scope'])} ({scope['scope']})"
         enabled = ", ".join(scope["enabled"]) or ux.dim("none")
-        click.echo(f"      - {who}: {enabled} {ux.dim('· pack ' + str(scope['pack']))}")
+        ux.echo(f"      - {who}: {enabled} {ux.dim('· pack ' + str(scope['pack']))}")
     click.echo()
     ux.subhead("Turn one on with: defenseclaw guardrail protection enable NAME [--connector NAME]", indent="  ")
     click.echo()

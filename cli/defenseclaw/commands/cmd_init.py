@@ -505,7 +505,7 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     # bold success text so the eye lands here when the operator
     # scrolls back up after a long init.
     click.echo()
-    click.echo("  " + ux.dim("─" * 54))
+    ux.echo("  " + ux.dim("─" * 54))
     click.echo()
     ux.ok("DefenseClaw initialized.", indent="  ")
     click.echo()
@@ -1409,7 +1409,7 @@ def _prompt_action_connectors(
     action: list[str] = []
     for name in requested:
         if name not in allowed:
-            click.echo(
+            ux.echo(
                 f"  ⚠ {name}: not in the configured connector list; ignoring.",
                 err=True,
             )
@@ -1563,7 +1563,7 @@ def _supported_action_connectors(
         if downgrades is not None:
             downgrades.append(warning)
         if not quiet:
-            click.echo(
+            ux.echo(
                 f"  ⚠ {key}: requested action but configuring in observe mode "
                 f"({warning['reason']}). Set "
                 "DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing.",
@@ -1774,7 +1774,7 @@ def _build_noninteractive_connector_settings(
     # operator knows --observe-all / --action-connectors were not applied.
     if connector:
         if observe_all or action_list:
-            click.echo(
+            ux.echo(
                 f"  ⚠ --connector {connector} takes precedence; ignoring "
                 "--observe-all/--action-connectors. Drop --connector to configure "
                 "multiple connectors.",
@@ -1791,14 +1791,14 @@ def _build_noninteractive_connector_settings(
     for name in action_list:
         if name not in _HOOK_ENFORCED_CONNECTORS:
             if not quiet:
-                click.echo(
+                ux.echo(
                     f"  ⚠ {name}: not a hook-enforced connector; skipping --action-connectors entry.",
                     err=True,
                 )
             continue
         if name not in detected:
             if not quiet:
-                click.echo(
+                ux.echo(
                     f"  ⚠ {name}: not detected as installed; configuring anyway "
                     "(use --rescan-agents to refresh discovery).",
                     err=True,
@@ -2131,7 +2131,7 @@ def _activate_additional_connectors(
     try:
         cfg = cfg_mod.load()
     except Exception as exc:  # noqa: BLE001 — surface and fall back to primary-only.
-        click.echo(f"  ✗ could not reload config to add connectors: {exc}", err=True)
+        ux.echo(f"  ✗ could not reload config to add connectors: {exc}", err=True)
         return [primary_name], None
 
     gc = cfg.guardrail
@@ -2278,7 +2278,7 @@ def _activate_additional_connectors(
             )
             s["mode_warning"] = warning
             if not quiet:
-                click.echo(
+                ux.echo(
                     f"  ⚠ {key}: requested action but configuring in observe mode "
                     f"({warning['reason']}). Set "
                     "DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing.",
@@ -2319,7 +2319,7 @@ def _activate_additional_connectors(
     try:
         cfg.save()
     except OSError as exc:
-        click.echo(f"  ✗ failed to save multi-connector config: {exc}", err=True)
+        ux.echo(f"  ✗ failed to save multi-connector config: {exc}", err=True)
         return [primary_key], None
 
     active = sorted(gc.connectors)
@@ -2327,7 +2327,7 @@ def _activate_additional_connectors(
     # would otherwise prefix the JSON document and break parsers. The gateway
     # is still started when requested; only the narration is suppressed.
     if not quiet:
-        click.echo("  ✓ Configured connectors: " + ", ".join(active))
+        ux.echo("  ✓ Configured connectors: " + ", ".join(active))
     # Start (or restart) the gateway ONCE here so its set-difference reconcile
     # wires hooks for every connector in the map. The structured result is
     # returned (not echoed) so the caller can replace the stale "Sidecar not
@@ -3579,14 +3579,14 @@ def _start_gateway(cfg, logger) -> None:
             timeout=_GATEWAY_START_TIMEOUT,
         )
         if result.returncode == 0:
-            click.echo(" " + ux._style("✓", fg="green", bold=True))
+            ux.echo(" " + ux._style("✓", fg="green", bold=True))
             pid = _read_pid(pid_file)
             if pid:
                 click.echo(f"  PID:           {ux.bold(str(pid))}")
             logger.log_action("init-sidecar", "start", f"pid={pid or 'unknown'}")
             started = True
         else:
-            click.echo(" " + ux._style("✗", fg="red", bold=True))
+            ux.echo(" " + ux._style("✗", fg="red", bold=True))
             from defenseclaw.bootstrap import gateway_failure_detail
 
             # GAP-2341: show the cause, not the audit migration banners.
@@ -3595,7 +3595,7 @@ def _start_gateway(cfg, logger) -> None:
                 click.echo(f"                 {ux.dim(err)}")
             click.echo("                 " + ux.dim("check: defenseclaw-gateway status"))
     except FileNotFoundError:
-        click.echo(" " + ux._style("✗", fg="red", bold=True) + ux.dim(" (binary not found)"))
+        ux.echo(" " + ux._style("✗", fg="red", bold=True) + ux.dim(" (binary not found)"))
     except subprocess.TimeoutExpired:
         click.echo(" " + ux._style("!", fg="yellow", bold=True) + ux.dim(" (still starting after 90 s)"))
         click.echo("                 " + ux.dim("check: defenseclaw-gateway status"))
@@ -3731,7 +3731,7 @@ def _check_sidecar_health(api_port: int, retries: int = 3, bind: str = "127.0.0.
 def _print_health_summary(health: dict | None) -> None:
     """Render a compact health summary from /health JSON."""
     if not health:
-        click.echo("  Health:        ok ✓")
+        ux.echo("  Health:        ok ✓")
         return
 
     subsystems = ["gateway", "watcher", "guardrail", "api", "telemetry", "splunk", "sandbox"]
@@ -3751,4 +3751,4 @@ def _print_health_summary(health: dict | None) -> None:
     if parts:
         click.echo(f"  Health:        {', '.join(parts)}")
     else:
-        click.echo("  Health:        ok ✓")
+        ux.echo("  Health:        ok ✓")

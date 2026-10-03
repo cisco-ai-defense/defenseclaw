@@ -681,7 +681,7 @@ def exec_gateway(argv: Sequence[str]) -> NoReturn:
     from defenseclaw.platform_support import host_os
 
     if host_os() == "windows":
-        click.echo(f"{ux._style('✗', fg='red', bold=True)} {UNSUPPORTED_PLATFORM_MESSAGE}", err=True)
+        ux.echo(f"{ux._style('✗', fg='red', bold=True)} {UNSUPPORTED_PLATFORM_MESSAGE}", err=True)
         raise SystemExit(UNSUPPORTED_EXIT_CODE)
     binary = resolve_gateway_binary()
     if not binary:
