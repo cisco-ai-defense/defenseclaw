@@ -2223,13 +2223,18 @@ def _format_mcp_detail(row: MCPRow) -> str:
     return "\n".join(lines)
 
 
+# A plugin description longer than this ends with "…" in the detail pane,
+# which is only a few rows high (GAP-2048); "i Info" shows it in full.
+PLUGIN_DESCRIPTION_MAX = 160
+
+
 def _format_plugin_detail(row: PluginRow) -> str:
     status = row.status or ("enabled" if row.enabled else "disabled")
-    enabled_label = "yes" if row.enabled else "no"
-    lines = [
-        f"[bold #22D3EE]Plugin[/] {_esc(row.display_name)}",
-        f"  Status     {_format_status(status)}    Enabled  {enabled_label}",
-    ]
+    status_line = f"  Status     {_format_status(status)}"
+    # "Status enabled  Enabled yes" said the same thing twice (GAP-2048).
+    if status.lower() not in {"enabled", "disabled"}:
+        status_line += f"    Enabled  {'yes' if row.enabled else 'no'}"
+    lines = [f"[bold #22D3EE]Plugin[/] {_esc(row.display_name)}", status_line]
     if row.version:
         lines.append(f"  Version    {_esc(row.version)}")
     if row.origin:
@@ -2248,11 +2253,24 @@ def _format_plugin_detail(row: PluginRow) -> str:
                 row.scan.severity_counts,
             )
         )
-    if row.verdict and row.verdict not in {status, row.scan.max_severity if row.scan else ""}:
+    if row.verdict == "rejected":
+        # Same meaning as the CLI scan's "policy: rejected" line (GAP-2048).
+        lines.append(
+            "  Verdict    rejected: the policy refuses it at install; this copy still loads until you act (b blocks it)"
+        )
+    elif row.verdict and row.verdict not in {status, row.scan.max_severity if row.scan else ""}:
         lines.append(f"  Verdict    {_esc(row.verdict)}")
+    if row.scan is not None and row.scan.total_findings > 0:
+        # The list payload has only the counts; say where the findings are.
+        flag = f" --connector {row.connector}" if row.connector else ""
+        lines.append(f"  Findings   press s, or run: defenseclaw plugin scan {_esc(row.id)}{_esc(flag)}")
     if row.description:
+        description = " ".join(row.description.split())
+        if len(description) > PLUGIN_DESCRIPTION_MAX:
+            cut = description[: PLUGIN_DESCRIPTION_MAX - 1].rsplit(" ", 1)[0].rstrip(" ,.;:")
+            description = f"{cut}\u2026"
         lines.append("")
-        lines.append(f"  {_esc(row.description)}")
+        lines.append(f"  {_esc(description)}")
     lines.append("")
     lines.append(_plugin_action_legend(row.verdict, status, row.enabled))
     return "\n".join(lines)

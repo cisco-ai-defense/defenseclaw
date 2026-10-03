@@ -299,14 +299,18 @@ class RegistriesPanelModel:
             # selected entry's asset type (parity with `registry require`).
             # Not on ``R``: that is the Registries tab key, and pressing it
             # again must never start a policy change (GAP-1152).
+            # Approval is required per content type, so on Sources the
+            # selected source's content type is enough (GAP-2051).
             row = self.selected_entry()
-            if row is None:
-                return RegistryPanelAction(True, hint="(no entry selected)")
-            if row.type not in {"skill", "mcp"}:
+            source = self.selected_source()
+            asset_type = row.type if row is not None else (source.content if source is not None else "")
+            if not asset_type:
+                return RegistryPanelAction(True, hint="(no entry or source selected)")
+            if asset_type not in {"skill", "mcp"}:
                 return RegistryPanelAction(True, hint="(registry require supports skill/mcp only)")
             return RegistryPanelAction(
                 True,
-                require_entry_intent(row, currently_required=self._registry_required(row.type)),
+                require_type_intent(asset_type, currently_required=self._registry_required(asset_type)),
             )
         if key == "d":
             if self.current_tab != RegistriesTab.SOURCES:
@@ -463,6 +467,11 @@ def approve_entry_intent(row: RegistryEntryRow) -> RegistryCommandIntent:
         label=f"registry approve {row.source_id} {row.name}",
         args=("registry", "approve", row.source_id, row.name, "--type", row.type, "--json"),
         hint=f"Approving {row.name}",
+        # The modal names the effect, as Sync and Require do (GAP-2051).
+        consequence=(
+            f"Approved entries are promoted even without a clean scan and stay approved across syncs; "
+            f"{row.name} is promoted into policy now."
+        ),
     )
 
 
@@ -471,6 +480,9 @@ def reject_entry_intent(row: RegistryEntryRow) -> RegistryCommandIntent:
         label=f"registry reject {row.source_id} {row.name}",
         args=("registry", "reject", row.source_id, row.name, "--type", row.type, "--json"),
         hint=f"Rejecting {row.name}",
+        consequence=(
+            f"Rejected entries are never promoted; any policy rule this source gave {row.name} is cleared now."
+        ),
     )
 
 
@@ -483,6 +495,10 @@ def remove_source_intent(source_id: str) -> RegistryCommandIntent:
 
 
 def require_entry_intent(row: RegistryEntryRow, *, currently_required: bool) -> RegistryCommandIntent:
+    return require_type_intent(row.type, currently_required=currently_required)
+
+
+def require_type_intent(asset_type: str, *, currently_required: bool) -> RegistryCommandIntent:
     """Toggle ``asset_policy.<type>.registry_required`` for the row's asset type (E4h).
 
     Parity with the ``registry require`` CLI (``cmd_registry.py``): the TUI
@@ -496,12 +512,12 @@ def require_entry_intent(row: RegistryEntryRow, *, currently_required: bool) -> 
     """
     flag = "--disabled" if currently_required else "--enabled"
     if currently_required:
-        hint = f"Making registry approval optional for {row.type} assets"
+        hint = f"Making registry approval optional for {asset_type} assets"
     else:
-        hint = f"Requiring registry approval: any {row.type} not approved in a registry will be refused"
+        hint = f"Requiring registry approval: any {asset_type} not approved in a registry will be refused"
     return RegistryCommandIntent(
-        label=f"registry require --type {row.type} {flag}",
-        args=("registry", "require", "--type", row.type, flag, "--json"),
+        label=f"registry require --type {asset_type} {flag}",
+        args=("registry", "require", "--type", asset_type, flag, "--json"),
         hint=hint,
         # The status bar is hidden behind the modal, so the modal itself
         # names the consequence (GAP-1281).
