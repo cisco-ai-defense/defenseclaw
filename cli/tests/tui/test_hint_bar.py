@@ -20,7 +20,7 @@ from defenseclaw.tui.widgets.hint_bar import HintBar, HintEngine
 @pytest.mark.parametrize(
     ("panel", "expected"),
     (
-        ("skills", "R registries"),
+        ("skills", "R registry entry"),
         ("mcps", "n add server"),
         ("plugins", "plugin install"),
         ("inventory", "h/l sub-tab"),
