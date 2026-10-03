@@ -48,6 +48,9 @@ async def test_sources_columns_fit_80x24_and_shrink_after_an_ok_sync(tmp_path) -
         app.action_switch_panel("registries")
         await settle_panel(app, pilot)
         table = app.query_one("#panel-table", DataTable)
+        # The rows below are set by hand; a periodic or config-poll refresh
+        # on a slow runner reloaded the real (empty) sources between steps.
+        app.registries_model.refresh = lambda *_args, **_kwargs: None
 
         async def show(status: str) -> int:
             app.registries_model.sources = [RegistrySourceRow(id="sf1-local", last_status=status)]
