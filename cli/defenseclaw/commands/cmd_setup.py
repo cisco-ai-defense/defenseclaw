@@ -187,6 +187,16 @@ _GATEWAY_API_READY_TIMEOUT_SECONDS = 45.0
 # `defenseclaw-gateway start|restart` prints this when its readiness deadline
 # passed but the new gateway is still alive and was kept (GAP-2022).
 _GATEWAY_LEFT_STARTING_MARKER = "is still starting and was left running"
+# Set when the last _restart_defense_gateway failed only because the gateway
+# was still starting and was kept (GAP-2080); read once by the caller.
+_gateway_left_starting = False
+
+
+def _take_gateway_left_starting() -> bool:
+    """Whether the last restart left a still-starting gateway running; clears it."""
+    global _gateway_left_starting
+    left, _gateway_left_starting = _gateway_left_starting, False
+    return left
 _GATEWAY_PID_GENERATION_MAX_BYTES = 16 * 1024
 _DEFENSE_GATEWAY_LIFECYCLE_TIMEOUT_SECONDS = 60
 # `defenseclaw-gateway start|restart` stops the old gateway (up to 10 s), waits
@@ -13958,6 +13968,13 @@ def _fail_if_restart_failed(failed: list[str]) -> None:
             "The OpenClaw gateway is not running. Start it with `openclaw gateway run` "
             "(or `openclaw gateway restart`), then run the same setup command again."
         )
+    if failed == ["defenseclaw-gateway"] and _take_gateway_left_starting():
+        # GAP-2080: restarting a slow gateway again would only stop it again.
+        raise _GatewayRestartFailed(
+            "the gateway is still starting and was kept running, so the change is not confirmed as "
+            "applied yet. Check it with: defenseclaw-gateway status. If it does not become healthy, run: "
+            "defenseclaw-gateway restart, then defenseclaw doctor."
+        )
     raise _GatewayRestartFailed(
         "gateway restart/readiness failed for: "
         + ", ".join(failed)
@@ -15163,6 +15180,8 @@ def _restart_defense_gateway(
         ctx = None
     if ctx is not None:
         ctx.meta[_SETUP_RESTART_HANDLED_KEY] = True
+    global _gateway_left_starting
+    _gateway_left_starting = False
 
     if os.name == "nt":
         from defenseclaw.gateway import packaged_windows_install_root
@@ -15249,7 +15268,12 @@ def _restart_defense_gateway(
         ):
             click.echo(" ✓ (ready after a slow start)")
             return True
-        click.echo(" ✗")
+        if _GATEWAY_LEFT_STARTING_MARKER in err:
+            # Not a failed restart: the gateway is alive and was kept (GAP-2080).
+            _gateway_left_starting = True
+            click.echo(" ⚠ (still starting; kept running)")
+        else:
+            click.echo(" ✗")
         if err:
             for line in err.splitlines()[:3]:
                 click.echo(f"    {line}")
