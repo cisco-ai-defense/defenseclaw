@@ -3592,13 +3592,16 @@ function Set-DefenseClawPathAcl {
         if ([string]$after.Identity -cne [string]$before.Identity) {
             throw "managed secret identity changed during ACL replacement: $Path"
         }
+        # Opt the verifier into the icacls /inheritance:r self-heal (same
+        # rationale as the AdminFile branch below).
         Assert-DefenseClawCanonicalRawPathAcl `
             -Path $Path `
             -Actual ([Security.AccessControl.RawSecurityDescriptor]::new(
                 [byte[]]$after.SecurityDescriptor,
                 0
             )) `
-            -Expected $security
+            -Expected $security `
+            -AllowSelfHeal
         return
     }
     # For file kinds (not directories) that must have SE_DACL_PROTECTED
@@ -3628,13 +3631,25 @@ function Set-DefenseClawPathAcl {
         if ([string]$after.Identity -cne [string]$before.Identity) {
             throw "managed AdminFile identity changed during ACL replacement: $Path"
         }
+        # Opt the verifier into the icacls /inheritance:r self-heal: the
+        # native SetUninstallAdminFileSecurityDescriptorNoFollow uses SDDL
+        # with an explicit D:P marker, but on some Windows 10/11 .NET
+        # revisions SE_DACL_PROTECTED gets silently dropped between the
+        # SDDL-side write and the Get-FileSecurityDescriptor read. Without
+        # self-heal, uninstall traps on deployment.json with:
+        #   managed DACL is not protected after exact ACL replacement:
+        #   <state root>\install\deployment.json
+        # The verifier's icacls /inheritance:r + native re-read repairs
+        # the flag and continues. Same posture as the Set-Acl stamp path
+        # below.
         Assert-DefenseClawCanonicalRawPathAcl `
             -Path $Path `
             -Actual ([Security.AccessControl.RawSecurityDescriptor]::new(
                 [byte[]]$after.SecurityDescriptor,
                 0
             )) `
-            -Expected $security
+            -Expected $security `
+            -AllowSelfHeal
         return
     }
     Microsoft.PowerShell.Security\Set-Acl `
@@ -6958,13 +6973,16 @@ function Restore-DefenseClawRedactionKeySecuritySnapshot {
             [uint32]32,
             [string]$current.Identity
         )
+        # Post-write verify: opt into icacls self-heal for SE_DACL_PROTECTED
+        # (silent SDDL drop on some Windows 10/11 .NET revisions).
         Assert-DefenseClawCanonicalRawPathAcl `
             -Path $path `
             -Actual ([Security.AccessControl.RawSecurityDescriptor]::new(
                 [byte[]]$compatibilityResult.SecurityDescriptor,
                 0
             )) `
-            -Expected $compatibilityACL
+            -Expected $compatibilityACL `
+            -AllowSelfHeal
         return
     }
 
@@ -7111,13 +7129,15 @@ function Restore-DefenseClawRedactionKeySecuritySnapshot {
             [uint32]32,
             [string]$current.Identity
         )
+        # Post-write verify: opt into icacls self-heal for SE_DACL_PROTECTED.
         Assert-DefenseClawCanonicalRawPathAcl `
             -Path $path `
             -Actual ([Security.AccessControl.RawSecurityDescriptor]::new(
                 [byte[]]$retained.SecurityDescriptor,
                 0
             )) `
-            -Expected $retainedExpected
+            -Expected $retainedExpected `
+            -AllowSelfHeal
         return
     }
 
@@ -7179,13 +7199,15 @@ function Restore-DefenseClawRedactionKeySecuritySnapshot {
         [uint32]32,
         [string]$recorded.file_identity
     )
+    # Post-write verify: opt into icacls self-heal for SE_DACL_PROTECTED.
     Assert-DefenseClawCanonicalRawPathAcl `
         -Path $path `
         -Actual ([Security.AccessControl.RawSecurityDescriptor]::new(
             [byte[]]$restored.SecurityDescriptor,
             0
         )) `
-        -Expected $expected
+        -Expected $expected `
+        -AllowSelfHeal
 }
 
 function Set-DefenseClawManagedCoreAcls {
@@ -8081,12 +8103,20 @@ function Repair-DefenseClawUninstallAdminFileAcl {
         if ([string]$after.Identity -cne [string]$before.Identity) {
             throw 'uninstall ACL recovery changed managed file identity'
         }
+        # Post-write verify: opt into the icacls /inheritance:r self-heal.
+        # SetUninstallAdminFileSecurityDescriptorNoFollow uses SDDL with
+        # the D:P marker but on some Windows 10/11 .NET revisions
+        # SE_DACL_PROTECTED gets silently dropped between the SDDL write
+        # and the Get-FileSecurityDescriptor read. Without self-heal,
+        # uninstall traps on deployment.json with "managed DACL is not
+        # protected after exact ACL replacement".
         Assert-DefenseClawCanonicalRawPathAcl `
             -Path $path `
             -Actual ([Security.AccessControl.RawSecurityDescriptor]::new(
                 [byte[]]$after.SecurityDescriptor, 0
             )) `
-            -Expected $expected
+            -Expected $expected `
+            -AllowSelfHeal
     }
     if (-not [string]::IsNullOrWhiteSpace($ExpectedSHA256) -and
         -not [string]::IsNullOrEmpty($aclDrift)) {
