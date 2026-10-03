@@ -213,6 +213,30 @@ class TestRegistryListShow(RegistryCommandTestBase):
         self.assertEqual(len(payload), 1)
         self.assertEqual(payload[0]["id"], "corp-skills")
 
+    def test_list_aligns_long_ids_and_uses_free_width_for_url(self):
+        # GAP-2405: a long ID must not shift its row, and the URL uses the
+        # terminal width instead of a fixed 32 characters.
+        url = "https://registry.example.com/teams/platform/skills/manifest.yaml"
+        self.invoke([
+            "add", "a-much-longer-registry-source-id",
+            "--kind", "http_yaml",
+            "--content", "skill",
+            "--url", url,
+            "--non-interactive",
+        ])
+        with patch.dict(os.environ, {"COLUMNS": "200"}):
+            result = self.invoke(["list"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        lines = result.output.splitlines()
+        header = next(line for line in lines if line.lstrip().startswith("ID "))
+        row = next(line for line in lines if "a-much-longer-registry-source-id" in line)
+        short = next(line for line in lines if line.lstrip().startswith("corp-skills"))
+        self.assertEqual(row.index("http_yaml"), header.index("KIND"))
+        self.assertEqual(short.index("clawhub"), header.index("KIND"))
+        self.assertEqual(row.index("skill"), header.index("CONTENT"))
+        self.assertIn(url, row)
+        self.assertEqual(row.index(url), header.index("URL"))
+
     def test_show_json_includes_index_block(self):
         result = self.invoke(["show", "corp-skills", "--json"])
         self.assertEqual(result.exit_code, 0, result.output)

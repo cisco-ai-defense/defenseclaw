@@ -12369,19 +12369,21 @@ def _setup_guardrail_connector_alias(
     _ensure_connector_available(connector)
 
     label = _CONNECTOR_META.get(connector, {}).get("label", connector)
-    click.echo()
-    click.echo(f"  DefenseClaw — {label} guardrail setup")
-    click.echo("  ─────────────────────────────────────────────────────────")
-    click.echo()
-    click.echo(f"  This pins claw.mode={connector} and guardrail.connector={connector},")
-    click.echo("  then runs the same non-interactive backend as `setup guardrail`.")
-    click.echo()
 
     # GAP-1455: --replace switches a hook-connector install to the proxy
     # connector in one command; the gateway tears the removed ones down.
     replaced = _hook_peers_of_proxy_connector(app.cfg.guardrail, connector) if replace else []
     if not replace:
+        # Refuse before the intro so a refused run never announces a
+        # change it does not make (GAP-2407).
         _refuse_proxy_next_to_hook_connectors(app.cfg.guardrail, connector)
+
+    click.echo()
+    click.echo(f"  DefenseClaw — {label} guardrail setup")
+    click.echo("  ─────────────────────────────────────────────────────────")
+    click.echo()
+    click.echo(f"  Sets up DefenseClaw guardrails for {label}.")
+    click.echo()
 
     if replaced:
         click.echo(f"  --replace removes {len(replaced)} hook connector(s): {', '.join(replaced)}")

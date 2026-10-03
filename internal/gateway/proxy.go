@@ -242,6 +242,19 @@ func (p *GuardrailProxy) agentIDForRequest() string {
 	return SharedAgentRegistry().AgentID()
 }
 
+// recordProxyConnectorRequest counts one guarded model request for a proxy
+// connector (OpenClaw, ZeptoClaw), whose traffic never reaches the hook
+// handlers that count requests for hook connectors. Hook connectors are left
+// out so their requests are not counted twice (GAP-2406).
+func (p *GuardrailProxy) recordProxyConnectorRequest() {
+	if p == nil || p.health == nil || p.connector == nil {
+		return
+	}
+	if name := p.connector.Name(); connector.IsProxyConnector(name) {
+		p.health.RecordConnectorRequestFor(name)
+	}
+}
+
 // connectorName returns the active connector's name for telemetry labels.
 func (p *GuardrailProxy) connectorName() string {
 	if p.connector != nil {
@@ -1055,6 +1068,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	} else {
 		p.emitEgress(r.Context(), mkEgress("allow", "known-provider"))
 	}
+	p.recordProxyConnectorRequest()
 
 	// Extract text for inspection. Parse multiple API formats:
 	//  - Chat Completions: {"messages": [...]}
@@ -2623,6 +2637,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		writeOpenAIError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
 		return
 	}
+	p.recordProxyConnectorRequest()
 	req.RawBody = body
 	req.ExtraParams = extractExtraParams(body)
 

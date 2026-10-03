@@ -34,6 +34,7 @@ from __future__ import annotations
 import json as _json
 import os
 import re
+import shutil
 import sys
 from dataclasses import asdict
 from typing import Any
@@ -611,20 +612,26 @@ def list_cmd(app: AppContext, emit_json: bool) -> None:
         return
     click.echo()
     ux.section("Registry sources")
+    # Size the ID column to the longest ID and give the URL the rest of the
+    # terminal, so a long ID never shifts the row (GAP-2405).
+    id_w = max([24] + [len(s.id) for s in sources])
+    fixed_w = 2 + id_w + 1 + 13 + 9 + 4 + 19 + 23
+    url_w = max(32, shutil.get_terminal_size((120, 24)).columns - fixed_w - 1)
+    longest_url = max([3] + [len(s.url or "") for s in sources])
     click.echo(
-        f"  {'ID':<24} {'KIND':<12} {'CONTENT':<8} {'ON':<3} "
+        f"  {'ID':<{id_w}} {'KIND':<12} {'CONTENT':<8} {'ON':<3} "
         f"{'ENTRIES':<18} {'LAST SYNC':<22} URL"
     )
     click.echo(
-        f"  {'-' * 24} {'-' * 12} {'-' * 8} {'-' * 3} "
-        f"{'-' * 18} {'-' * 22} {'-' * 32}"
+        f"  {'-' * id_w} {'-' * 12} {'-' * 8} {'-' * 3} "
+        f"{'-' * 18} {'-' * 22} {'-' * min(url_w, longest_url)}"
     )
     for s in sources:
         on = "yes" if s.enabled else "no"
         last = s.last_sync or "-"
         url = s.url or ""
-        if len(url) > 32:
-            url = url[:29] + "..."
+        if len(url) > url_w:
+            url = url[: url_w - 3] + "..."
         idx = indices.get(s.id)
         if idx is None or idx.entry_count == 0 and not s.last_sync:
             entries = "-"
@@ -635,7 +642,7 @@ def list_cmd(app: AppContext, emit_json: bool) -> None:
                 f"/{idx.rejected_count})"
             )
         click.echo(
-            f"  {s.id:<24} {s.kind:<12} {s.content:<8} {on:<3} "
+            f"  {s.id:<{id_w}} {s.kind:<12} {s.content:<8} {on:<3} "
             f"{entries:<18} {last:<22} {url}"
         )
     click.echo()
