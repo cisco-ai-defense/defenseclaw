@@ -24,6 +24,21 @@ import shutil
 # Below this SQLite cannot grow the audit database (doctor's capacity check).
 AUDIT_DISK_FULL_BYTES = 16 * 1024 * 1024
 
+# Free space at which a disk the gateway reported full counts as freed. Well
+# above the full mark: a full APFS volume still reports about 32 MiB free.
+AUDIT_DISK_FREED_BYTES = 256 * 1024 * 1024
+
+
+def audit_disk_freed(db_path: str) -> bool:
+    """True when the disk holding *db_path* has clear room again (GAP-2016)."""
+    if not db_path:
+        return False
+    try:
+        free_bytes = shutil.disk_usage(os.path.dirname(os.path.abspath(db_path)) or os.curdir).free
+    except OSError:
+        return False
+    return free_bytes >= AUDIT_DISK_FREED_BYTES
+
 
 def audit_disk_full_notice(db_path: str) -> str:
     """Return a notice when audit events cannot be recorded for lack of space, else ""."""

@@ -80,6 +80,9 @@ class ConnectorCustodyStatus:
     last_authentication_failure: str = ""
     drop_only_signals: tuple[str, ...] = ()
     drop_only_reasons: tuple[str, ...] = ()
+    # Drop-only batches that held only records DefenseClaw does not map.
+    unmapped_drop_only_batches: int = 0
+    last_lost_drop: str = ""
 
     def as_json(self) -> dict[str, Any]:
         data = asdict(self)
@@ -206,10 +209,17 @@ def summarize_native_delivery(report: ConnectorCustodyReport) -> NativeDeliveryS
             state = "partial_drop_only"
             signals = ", ".join(item.drop_only_signals)
             reasons = ", ".join(reason.replace("_", " ") for reason in item.drop_only_reasons)
+            unmapped = min(max(item.unmapped_drop_only_batches, 0), drop_only)
             detail = (
-                f"partial drop-only evidence ({drop_only}/{normalized} batches dropped whole"
+                f"partial drop-only evidence ({drop_only - unmapped}/{normalized} batches dropped whole"
                 + (f"; dropped signals: {signals}" if signals else "")
                 + (f"; reason: {reasons}" if reasons else "")
+                + (f"; last at {item.last_lost_drop}" if item.last_lost_drop else "")
+                + (
+                    f"; {unmapped} more held only records DefenseClaw does not map, skipped by design"
+                    if unmapped
+                    else ""
+                )
                 + "); accepted native delivery observed in remaining batches"
             )
         else:
@@ -245,6 +255,7 @@ class _Evidence:
     last_unattributed_auth: datetime | None = None
     truncated: bool = False
     drop_reasons: dict[tuple[str, str, str], set[str]] = field(default_factory=dict)
+    last_drop: dict[tuple[str, str, str], datetime] = field(default_factory=dict)
 
 
 def inspect_connector_custody(
@@ -307,8 +318,13 @@ def inspect_connector_custody(
             # they share a connector name.
             evidence_connector = connector if is_default else ""
             normalized, drop_only = _batch_counts(evidence, evidence_connector)
-            drop_signals = _drop_only_signals(evidence, evidence_connector)
-            drop_reasons = _drop_only_reasons(evidence, evidence_connector)
+            lost_keys, unmapped_keys = _drop_only_keys(evidence, evidence_connector)
+            reported_keys = lost_keys or unmapped_keys
+            drop_signals = tuple(sorted({key[2] for key in reported_keys}))
+            drop_reasons = tuple(
+                sorted(set().union(*(evidence.drop_reasons.get(key, {"unknown"}) for key in reported_keys)))
+            )
+            last_lost = max((evidence.last_drop[key] for key in lost_keys if key in evidence.last_drop), default=None)
             last_native = evidence.last_native.get(evidence_connector)
             last_auth = evidence.last_auth.get(evidence_connector)
             instances.append(
@@ -324,6 +340,8 @@ def inspect_connector_custody(
                     drop_only_batches=drop_only,
                     drop_only_signals=drop_signals,
                     drop_only_reasons=drop_reasons,
+                    unmapped_drop_only_batches=len(unmapped_keys) if lost_keys else 0,
+                    last_lost_drop=_format_time(last_lost),
                     authentication_failures=evidence.auth_count.get(evidence_connector, 0),
                     credential_state=_credential_state(last_auth, last_native),
                     last_native_activity=_format_time(last_native),
@@ -436,6 +454,7 @@ def _load_recent_evidence(db: sqlite3.Connection, now: datetime) -> _Evidence:
             evidence.dropped[key] = evidence.dropped.get(key, 0) + count
             reason = facts.get("reason", "")
             evidence.drop_reasons.setdefault(key, set()).add(reason or "unknown")
+            evidence.last_drop[key] = max(when, evidence.last_drop.get(key, when))
     return evidence
 
 
@@ -484,23 +503,25 @@ def _batch_counts(evidence: _Evidence, connector: str) -> tuple[int, int]:
     return batches, drop_only
 
 
-def _drop_only_signals(evidence: _Evidence, connector: str) -> tuple[str, ...]:
-    """Name the signals (logs, metrics, traces) of the drop-only batches."""
-    signals = {
-        key[2]
-        for key, count in evidence.normalized.items()
-        if key[0] == connector and count > 0 and evidence.dropped.get(key, 0) >= count
-    }
-    return tuple(sorted(signals))
+def _drop_only_keys(
+    evidence: _Evidence, connector: str
+) -> tuple[list[tuple[str, str, str]], list[tuple[str, str, str]]]:
+    """Split drop-only batches into lost ones and ones skipped by design.
 
-
-def _drop_only_reasons(evidence: _Evidence, connector: str) -> tuple[str, ...]:
-    """Name the gateway's drop reasons for the drop-only batches."""
-    reasons: set[str] = set()
+    Signals and reasons describe the lost batches when there are any, so a
+    few old real drops do not turn many by-design skips into "dropped
+    whole" (GAP-2035).
+    """
+    lost: list[tuple[str, str, str]] = []
+    unmapped: list[tuple[str, str, str]] = []
     for key, count in evidence.normalized.items():
-        if key[0] == connector and count > 0 and evidence.dropped.get(key, 0) >= count:
-            reasons |= evidence.drop_reasons.get(key, {"unknown"})
-    return tuple(sorted(reasons))
+        if key[0] != connector or count <= 0 or evidence.dropped.get(key, 0) < count:
+            continue
+        if evidence.drop_reasons.get(key, {"unknown"}) <= _UNMAPPED_DROP_REASONS:
+            unmapped.append(key)
+        else:
+            lost.append(key)
+    return lost, unmapped
 
 
 def _credential_state(last_auth: datetime | None, last_native: datetime | None) -> str:
