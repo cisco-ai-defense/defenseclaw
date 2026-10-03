@@ -200,7 +200,11 @@ def _find_source(cfg: Config, sid: str) -> RegistrySource:
     # GAP-1928: the shared not-found shape, with the valid ids, and exit 1
     # (exit 2 stays for usage errors).
     message = ux.not_found_message(
-        "registry source", sid, (s.id for s in cfg.registries.sources), "defenseclaw registry list"
+        "registry source",
+        sid,
+        (s.id for s in cfg.registries.sources),
+        "defenseclaw registry list",
+        empty_hint="Add one with: defenseclaw registry add <id> ... (or defenseclaw registry wizard).",
     )
     click.echo(f"Error: {message}", err=True)
     raise SystemExit(1)

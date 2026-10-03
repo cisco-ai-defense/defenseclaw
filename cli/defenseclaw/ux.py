@@ -578,12 +578,15 @@ def not_found_message(
     list_command: str,
     *,
     empty: str = "",
+    empty_hint: str = "",
     limit: int = 12,
 ) -> str:
     """One wording for an unknown name on show/enable/... commands (GAP-1818, GAP-1928).
 
     ``kind 'name' not found. Available: a, b. Run `<list_command>` for details.``
     Callers add the ``Error:`` prefix (``click.ClickException`` does) and exit 1.
+    ``empty_hint`` replaces the list-command hint when nothing is configured,
+    since pointing at a list that is known to be empty is no help (GAP-2392).
     """
     names = sorted({str(item) for item in available if item is not None and str(item)})
     text = f"{kind} '{name}' not found."
@@ -594,6 +597,8 @@ def not_found_message(
         text += f" Available: {shown}."
     else:
         text += " " + (empty or f"No {kind}s are configured.")
+        if empty_hint:
+            return f"{text} {empty_hint}"
     return f"{text} Run `{list_command}` for details."
 
 
