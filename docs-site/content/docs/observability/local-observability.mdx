@@ -22,22 +22,17 @@ Docker Desktop does not run on Windows Server; there, send telemetry to an
 existing collector with `defenseclaw setup observability add otlp`.
 </Callout>
 
-<Video
-  src="local-observability"
-  caption="defenseclaw setup local-observability up — five containers come up, the gateway picks up the new OTLP endpoint, and Grafana dashboards populate live."
-/>
-
 ## What it brings up
 
 The stack runs from `bundles/local_observability_stack/docker-compose.yml`:
 
-| Service | Image / role | Default port |
-| --- | --- | --- |
-| `otel-collector` | OpenTelemetry Collector — fans out to Prom/Loki/Tempo | `4317` (gRPC), `4318` (HTTP) |
-| `prometheus` | Metrics store | `9090` |
-| `loki` | Log store (gateway audit + sink failures) | `3100` |
-| `tempo` | Trace store (per-decision spans) | `3200` |
-| `grafana` | UI with seeded DefenseClaw dashboards | `3000` |
+| Service | Image | Role | Port on `127.0.0.1` |
+| --- | --- | --- | --- |
+| `otel-collector` | `otel/opentelemetry-collector-contrib:0.153.0` | Receives OTLP and fans out to Prometheus, Loki, and Tempo | `4317` (gRPC), `4318` (HTTP) |
+| `prometheus` | `prom/prometheus:v2.54.1` | Metrics store | `9090` |
+| `loki` | `grafana/loki:3.2.0` | Log store | `3100` |
+| `tempo` | `grafana/tempo:2.6.0` | Trace store | `3200` |
+| `grafana` | `grafana/grafana:11.3.0` | Dashboards | `3000` |
 
 All five run under one Compose project (`defenseclaw-observability`). They share a Docker network and the bundled Grafana datasources point at each container by service name.
 
@@ -92,7 +87,7 @@ All five run under one Compose project (`defenseclaw-observability`). They share
   </Step>
 </Steps>
 
-`up` also refreshes the host-mounted stack copy in `~/.defenseclaw/observability-stack/` from the bundled version before Compose starts. That includes Grafana dashboards, Prometheus rules, Loki, Tempo, and OTel Collector config. Deleting Docker containers is not enough to update those files because they live on the host; pass `--no-refresh-config` only when you intentionally want to keep local edits.
+`up` also refreshes the host copy of the stack in `~/.defenseclaw/observability-stack/` from the bundled version before Compose starts. That covers the Compose file and controller, plus the Grafana dashboards, Prometheus rules, and Loki, Tempo, and OTel Collector config. Deleting Docker containers is not enough to update those files because they live on the host. Pass `--no-refresh-config` to keep local edits to dashboards, rules, and service config, or `--no-refresh-bundle` to skip the refresh entirely.
 
 ## Useful flags
 
@@ -110,10 +105,11 @@ defenseclaw setup local-observability up \
 | --- | --- |
 | `--endpoint` | OTLP endpoint the gateway writes into `config.yaml`. Defaults to whatever the bridge published (`127.0.0.1:4317`). |
 | `--signals` | Comma-separated subset of `traces,metrics,logs`. Omitting it selects all three, which is required for complete bundled-dashboard coverage. |
-| `--service-name` | Resource attribute set on every emitted span. Defaults to `defenseclaw`. |
+| `--service-name` | Value written to `observability.resource.attributes.service.name`. Defaults to `defenseclaw`. |
 | `--no-config` | Bring containers up but do **not** modify `config.yaml`. Useful when you manage gateway config out-of-band. |
 | `--password` / `--no-password` | Require the managed Grafana admin credential, or explicitly allow anonymous Admin access on the managed loopback bind. New stacks default to password; previously used anonymous stacks are grandfathered until you pass `--password`. |
-| `--refresh-config` / `--no-refresh-config` | Refresh bundled Grafana dashboards, Prometheus rules, Loki, Tempo, and OTel Collector config by default; opt out to preserve local edits. |
+| `--refresh-bundle` / `--no-refresh-bundle` | Refresh `~/.defenseclaw/observability-stack/` from the bundle before starting (default on). A running stack is stopped, refreshed, and restarted. |
+| `--refresh-config` / `--no-refresh-config` | During that refresh, also overwrite Grafana dashboards, Prometheus rules, and Loki, Tempo, and OTel Collector config (default on); opt out to keep local edits. |
 | `--no-wait` | Don't block on healthchecks — fire-and-forget. |
 | `--timeout` | Seconds to wait for healthchecks. Default 180. |
 
@@ -144,29 +140,39 @@ The example below is the result of the sample `up` command using
 ```yaml title="~/.defenseclaw/config.yaml (after the sample command)"
 config_version: 8
 observability:
-  resource:
-    attributes:
-      service.name: defenseclaw-gateway
   destinations:
     - name: local-observability
       kind: otlp
+      enabled: true
       endpoint: 127.0.0.1:4317
       protocol: grpc
+      tls:
+        insecure: true
       network_safety:
         allow_private_networks: true
+      send:
+        signals:
+          - traces
+          - metrics
+          - logs
+        buckets:
+          - '*'
+  resource:
+    attributes:
+      service.name: defenseclaw-gateway
 ```
 
-Because `send` and `routes` are omitted, this OTLP destination receives all
-reviewed buckets and all three signals, unredacted. That is both the v8
-capability default and the complete `local-observability-v1` dashboard profile.
-If a destination with the same name already exists, the bridge updates it in
-place rather than adding a duplicate. Other telemetry destinations and notifier
-webhooks are left untouched.
+`send` selects the signals from `--signals` and every bucket (`'*'`), with no
+redaction profile, so the destination receives everything unredacted. That
+matches the complete `local-observability-v1` dashboard profile. If a
+destination with the same name already exists, `up` updates it in place rather
+than adding a duplicate. Other telemetry destinations and notifier webhooks are
+left untouched.
 
 To send to a collector of your own on this computer or a private network, add
 `--allow-private-networks` to `defenseclaw setup observability add otlp`. It
 writes the same `network_safety` setting. If that collector has no TLS, also
-add `--plaintext`, which writes `tls.insecure: true` like the bundle does.
+add `--plaintext`, which writes `tls.insecure: true` as shown above.
 
 Every signal carries `host.name` from the operating system, and you can't
 change it. When two computers share a name (a cloned virtual machine, for
@@ -193,7 +199,9 @@ The bundle ships a full board set in `bundles/local_observability_stack/grafana/
     <File name="defenseclaw-runtime.json" />
     <File name="defenseclaw-agent-identity.json" />
     <File name="defenseclaw-agent-360.json" />
+    <File name="defenseclaw-blocked-events.json" />
     <File name="defenseclaw-ai-discovery.json" />
+    <File name="defenseclaw-ai-runtime.json" />
   </Folder>
 </Files>
 
@@ -212,17 +220,19 @@ The bundle ships a full board set in `bundles/local_observability_stack/grafana/
 | **Runtime & Reliability** (`defenseclaw-runtime`) | Process, SQLite, v8 destination/exporter, queue, and canonical gateway-error health. |
 | **Agent identity** (`defenseclaw-agent-identity`) | Three-tier agent identity correlation, churn, discovery latency, per-connector header presence. |
 | **Agent360** (`defenseclaw-agent-360`) | Automatic Agent Directory plus one-click per-agent/tree lifecycle, initial and grouped follow-up prompts, descendants, per-agent model/tool-family summaries, updates, approvals, outcomes, inputs/outputs, reported tokens/cost, security decisions, and Tempo waterfall. |
+| **Blocked Events & Analysis** (`defenseclaw-blocked-events`) | Enforced and observe-mode would-block decisions, rule IDs, recurring signatures, and pivots into Agent360. |
 | **AI Agent Usage & Detection** (`defenseclaw-ai-discovery`) | Continuous AI inventory loop: active signals, per-vendor/product tables, confidence. |
+| **AI Discovery Runtime Planes** (`defenseclaw-ai-runtime`) | What AI runtimes actually ran next to the discovery inventory: runtime-plane coverage and health, processes and connections, runtime findings, and host-level agent activity. |
 
 See the [complete Grafana dashboard catalog](/docs/observability/grafana-dashboards)
 for the owner and purpose of every board, the drill-down map, backend usage,
 and the exact difference between **0**, **No data**, and **Not reported**.
 
-For a multi-connector gateway, start on **Connectors (Overview)** to compare connectors side by side, then click a connector cell to drill into **Connector Detail**.
+For a multi-connector gateway, start on **Hook Connectors** to compare connectors side by side, then click a connector cell to drill into **Connector Detail**.
 
 ### Agent Directory and Agent360
 
-![Agent360 overview showing automatic agent discovery and per-agent lifecycle analytics](/images/grafana/agent360-overview.jpg)
+![Agent360 for a Claude Code agent: the Agent Directory, the KPI strip with turns, model and tool calls, tokens and cost marked Not reported, and the execution phase timeline](/images/grafana/agent360-overview.jpg)
 
 Open **Agent identity → Runtime Agent Directory**. Every hook lifecycle
 transition updates the stable `defenseclaw.agent.last_seen` inventory metric,
@@ -241,39 +251,13 @@ Agent360 correlates the same stable fields across all three backends:
 | `trace_id` | Direct pivot from a log/operation that actually reports W3C trace identity into the Tempo waterfall. Aggregate metrics do not fabricate trace IDs. |
 
 Use **Scope = This agent** for a single agent, or **Agent tree** to include
-all descendants. Prometheus supplies directory, state, throughput, latency,
-token, reported-cost totals, and directed phase aggregates. Loki supplies the
-prompt-to-outcome lifecycle DAG plus compact lifecycle/model/tool/network/security
-summaries with the full event available in log details. Session and durable
-lineage anchors may be recovered from the prior 24 hours so selected-range
-boundaries remain renderable; a recovered relationship edge is kept only when its
-child has graph-eligible activity in the selected range. Active typed `parent_of`
-and inverse `delegated_by` relationship records establish agent parentage; raw
-parent fields and trace topology do not. Repeated model work is
-grouped per owning agent, provider, and model. Repeated tools are grouped per
-owning agent as Bash, MCP, Skills, Collaboration, File edits, Web/browser, Visual,
-or Task control; an unrecognized tool keeps its reported name. Exact
-`collaboration.send_message` requests are excluded from generic Collaboration
-summaries so they appear only as message groups; other collaboration tools remain.
-Summary nodes show total requests and link to every exact raw canonical OTEL record,
-including their terminal counterparts. Stable agent nodes use agent/root/parent
-identity, name, type, depth, and connector; optional session fields stay in
-lifecycle/session/ordered/raw detail rather than splitting one agent's total. One
-per-root **Prompt inputs** node counts distinct depth-zero
-`model.request` facts, with replay-safe turn/model-request/request/operation/occurrence identity;
-**Session start** remains a separate lifecycle anchor. The ordered/raw views retain
-the individual initial and follow-up request records.
-For each sender, real collaboration updates to `/root` or `/root/*` collapse
-into one **Messages to root** node that resolves the exported root agent ID. Exact
-root task paths and calls remain in ordered/raw drill-downs; non-root targets
-remain exact groups without an invented target-agent mapping. Tempo
-supplies request-bounded waterfalls; it does not pretend an asynchronous lifetime
-is one trace. Select a row in **Operation
-and enforcement traces** to populate the waterfall. Token and cost panels only
-display values explicitly reported by the connector. Input tokens include the
-prompt/context usage reported by the provider and may be much larger than
-output for long-context agents. Missing values remain **Not reported** and are
-never estimated.
+all descendants. Prometheus supplies the directory, counts, latency, and
+reported token and cost totals; Loki supplies the lifecycle DAG and the
+event-level detail; Tempo supplies request-bounded trace waterfalls. Token and
+cost panels show only values the connector reports, so missing values read
+**Not reported** and are never estimated. The
+[Agent360 guide](/docs/observability/agent360#inspect-the-lifecycle-dag) explains
+how the DAG groups agents, models, tools, and messages.
 
 The local stack performs no additional redaction, masking, or field hiding.
 DefenseClaw applies the selected v8 profile centrally before canonical OTEL export.
@@ -328,7 +312,7 @@ restore authoritative inspection before considering the incident resolved.
 defenseclaw setup local-observability down
 ```
 
-Stops all five containers and removes the Compose project. Dashboards and Grafana state live in named Docker volumes so they survive `down`/`up` cycles.
+Stops and removes the five containers and their network. Metrics, logs, traces, and Grafana state live in named Docker volumes, so they survive `down`/`up` cycles.
 The `local-observability` destination stays in `config.yaml`, so the gateway keeps trying to send to the stopped stack; add `--disable-config` to turn it off too.
 
 To wipe everything including the volumes:
@@ -408,7 +392,7 @@ See [Splunk integration](/docs/observability/splunk) for the dashboards we ship 
     deployment an administrator sets it in `/etc/defenseclaw/config.yaml`.
   </Accordion>
   <Accordion title="Port already in use">
-    Grafana 3000, Loki 3100, Tempo 3200, OTLP 4317/4318, Prometheus 9090. The bundled compose file pins these ports; the `up` preflight refuses to launch if a non-stack process is bound to one of them. Free the conflicting port (or stop the foreign container shown in the preflight warning) and re-run `up`. There is no `--port-shift` flag — edit `bundles/local_observability_stack/docker-compose.yml` if you need to relocate a port permanently.
+    Grafana 3000, Loki 3100, Tempo 3200, OTLP 4317/4318, Prometheus 9090. The bundled compose file pins these ports; the `up` preflight refuses to launch if a non-stack process is bound to one of them. Free the conflicting port (or stop the foreign container shown in the preflight warning) and re-run `up`. There is no port flag. Edits to `~/.defenseclaw/observability-stack/docker-compose.yml` are overwritten the next time `up` refreshes the stack, so a relocated port only lasts if you also run every `up` with `--no-refresh-bundle` and pass the new collector address with `--endpoint`. Freeing the default port is the supported fix.
   </Accordion>
   <Accordion title="Reverting config.yaml">
     `down` does not remove the `local-observability` destination. Disable or remove that named destination through the observability setup controls when you want to detach the gateway while keeping the local data volumes.

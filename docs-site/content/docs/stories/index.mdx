@@ -1,6 +1,6 @@
 ---
 title: Stories
-description: Concrete walkthroughs for the things people actually want — block rm -rf on Claude Code, catch a prompt injection on Codex, stop secret exfiltration from Cursor, approve risky tool calls, pin local observability, and switch connectors without losing audit history.
+description: Step-by-step walkthroughs for common goals — block a destructive command on Claude Code, catch a prompt injection on Codex, stop a secret upload from Cursor, approve risky tool calls, run the local observability stack, and add a connector without losing audit history.
 keywords:
   - DefenseClaw user stories
   - DefenseClaw walkthroughs
@@ -10,13 +10,13 @@ keywords:
   - DefenseClaw HITL
 ---
 
-Six walkthroughs. Each one starts from a real operator goal, ends with a verifiable outcome, and explains the trade-offs you accepted along the way.
+Six walkthroughs. Each one starts from a real operator goal, ends with an outcome you can check, and explains the trade-offs along the way.
 
 <Cards>
-  <Card title="Stop Claude Code from rm -rf" href="/docs/stories/observe-claude-code" description="Wire Claude Code, switch to action mode, watch a destructive shell command get blocked." />
-  <Card title="Catch a prompt injection on Codex" href="/docs/stories/prompt-injection-codex" description="Local regex packs catch the obvious; the optional LLM judge catches the clever ones." />
-  <Card title="Block secret exfiltration from Cursor" href="/docs/stories/cursor-secret-exfil" description="Cursor's beforeShellExecution hook is the perfect stop point for `cat .env | curl ...`." />
-  <Card title="Approve risky tool calls before they fire" href="/docs/stories/hitl-approvals" description="HITL sits between observe and full enforcement — pause, review, then continue." />
-  <Card title="Run local observability" href="/docs/stories/local-observability" description="Start the pinned five-container stack, reload the gateway, and inspect the provisioned dashboards." />
-  <Card title="Switch from OpenClaw to Codex without losing audit history" href="/docs/stories/switch-connectors" description="The audit DB is connector-agnostic. Switching only moves the data path." />
+  <Card title="Stop Claude Code from deleting a critical path" href="/docs/stories/observe-claude-code" description="Wire Claude Code, switch to action mode, and watch rm -rf on a protected root path get blocked." />
+  <Card title="Catch a prompt injection on Codex" href="/docs/stories/prompt-injection-codex" description="Local rules catch the obvious phrasing; the optional LLM judge catches the subtler cases." />
+  <Card title="Stop a secret upload from Cursor" href="/docs/stories/cursor-secret-exfil" description="Cursor's beforeShellExecution hook stops a command that pipes a key file into curl before the shell runs it." />
+  <Card title="Approve risky tool calls before they run" href="/docs/stories/hitl-approvals" description="HITL sits between observe and full enforcement: pause, review, then continue or stop." />
+  <Card title="Run the local observability stack" href="/docs/stories/local-observability" description="Start the bundled five-container stack, let the gateway pick it up without a restart, and open the dashboards." />
+  <Card title="Add a connector without losing audit history" href="/docs/stories/switch-connectors" description="The audit database is shared by every connector, so adding or replacing one keeps your history." />
 </Cards>

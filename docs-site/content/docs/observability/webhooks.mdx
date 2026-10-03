@@ -155,7 +155,7 @@ A connector-hook block names the rule that fired. The event's `details` carry `r
     },
     'remove <name>': {
       type: 'subcommand',
-      description: 'Delete the entry. Confirms first; --yes for scripts.',
+      description: 'Delete the entry. Confirms first; --yes for scripts, --connector for a per-connector webhook.',
     },
     'test <name>': {
       type: 'subcommand',
@@ -218,7 +218,7 @@ The output includes:
 - The formatted payload bytes count and a 160-byte preview.
 - Every header DefenseClaw sent; the HMAC signature for `generic` is shown as `<redacted>`.
 - The HTTP status returned by the receiver.
-- An audit-log entry for the test with `name=pd-prod type=pagerduty ok=True`.
+- A `setup-webhook` audit event with `name=pd-prod type=pagerduty ok=True`, recorded when the gateway is running.
 
 For the dry-run rehearsal:
 
@@ -295,4 +295,4 @@ The TUI (`defenseclaw tui` → Setup → Webhooks) runs these same `setup webhoo
 - [Webhook CLI source](https://github.com/cisco-ai-defense/defenseclaw/blob/main/cli/defenseclaw/commands/cmd_setup_webhook.py) (`cmd_setup_webhook.py`): every subcommand, validator and helper.
 - `internal/gateway/webhook.go` — the dispatcher, dedup logic, and HMAC implementation.
 - [Reference → CLI](/docs/reference/cli) — the CLI command catalog.
-- [Observability → Splunk](/docs/observability/splunk) — for the **audit-sink** path (every event, no severity floor).
+- [Observability → Splunk](/docs/observability/splunk) — to export every event, with no severity floor, as a telemetry destination.

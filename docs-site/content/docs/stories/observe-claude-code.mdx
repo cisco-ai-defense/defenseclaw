@@ -8,7 +8,7 @@ keywords:
   - claude code observability
 ---
 
-> "I want to observe Claude Code and block recursive force deletion against critical system paths."
+> I want to observe Claude Code and block recursive force deletion against critical system paths.
 
 That sentence is the original DefenseClaw user story. Here is the entire flow, end to end.
 
@@ -51,12 +51,11 @@ Open the live dashboard:
 defenseclaw tui
 ```
 
-Or inspect a scriptable snapshot from mandatory SQLite event history:
+Or print the last 50 audit rows for Claude Code as JSON Lines:
 
 ```bash
-defenseclaw-gateway audit export --connector claudecode --output - \
-  | tail -n 200 \
-  | jq 'select(.connector == "claudecode")'
+defenseclaw-gateway audit export --connector claudecode --limit 50 --newest \
+  | jq -c '{timestamp, action, severity}'
 ```
 
 Open Claude Code and use it normally. DefenseClaw records the version-selected
@@ -73,7 +72,7 @@ representative traffic to understand your agent before the first block decision.
 
 ```bash
 ls ~/.defenseclaw/policies/guardrail/default/
-sed -n '80,125p' ~/.defenseclaw/policies/guardrail/default/rules/commands.yaml
+grep -n -A10 'id: CMD-RM-RF' ~/.defenseclaw/policies/guardrail/default/rules/commands.yaml
 ```
 
 The `CMD-RM-RF` rule is CRITICAL and matches `/` plus protected top-level
@@ -135,15 +134,15 @@ there is nothing to block; use the harmless test rule in
 
 ```bash
 defenseclaw alerts --limit 10
-# or inspect the mandatory SQLite history filtered by severity:
-defenseclaw-gateway audit export --connector claudecode --output - \
-  | tail -n 200 \
-  | jq 'select(.connector == "claudecode" and (.severity == "HIGH" or .severity == "CRITICAL"))'
+# or read the hook decisions from the last 30 minutes of audit history:
+defenseclaw-gateway audit export --connector claudecode --since 30m \
+  | jq 'select(.action == "connector-hook" and .structured.action == "block")
+        | {timestamp, severity, rule_ids: .structured.rule_ids}'
 ```
 
-Inspect the matching event's stable `connector`, `severity`, `action`, and
-`structured.rule_ids` fields; exact IDs and timestamps are generated at
-runtime.
+Each hook call writes one `connector-hook` row. Its `structured.action` is
+the answer returned to Claude Code (`block` here), and `structured.rule_ids`
+lists `CMD-RM-RF`. IDs and timestamps differ on every run.
 
 </Step>
 
@@ -177,10 +176,17 @@ runtime.
 <Accordion title="What if I want to allow it on a specific path?">
 
 Use a less destructive command when possible. If your organization truly needs
-a different boundary, copy the pack, edit `rules/commands.yaml`, validate the
-custom pack, and select it with `defenseclaw setup guardrail --rule-pack-dir /absolute/path/to/pack --restart`. The current rule schema does not provide a
-per-path allow-list field, and CRITICAL findings cannot be approved through
-HITL.
+a different boundary, copy the pack, edit its `rules/commands.yaml`, then check
+and select it:
+
+```bash
+cp -R ~/.defenseclaw/policies/guardrail/default ~/my-guardrail-pack
+defenseclaw guardrail validate-pack ~/my-guardrail-pack
+defenseclaw guardrail use-pack ~/my-guardrail-pack --connector claudecode --restart
+```
+
+The rule schema has no per-path allow-list field, and CRITICAL findings cannot
+be approved through HITL.
 
 </Accordion>
 
