@@ -200,9 +200,13 @@ func (a *APIServer) emitForeignHookSessionDenialV8(
 		return
 	}
 	defer func() { _ = recover() }()
+	// The hook event the agent sent names the decision's lifecycle event
+	// (tool_start for a tool call), as for any other hook block; without it
+	// every denial said lifecycle.event "event" (GAP-2216).
+	event := clipForeignHookAuditField(strings.TrimSpace(exchange.Event), foreignHookAuditFieldLimit)
 	req := agentHookRequest{
 		ConnectorName: connectorName,
-		HookEventName: env.Event,
+		HookEventName: firstNonEmpty(event, env.Event),
 		SessionID:     exchange.Key.Session,
 	}
 	// An enforced block, as a hook response reports it: would_block marks an
@@ -220,6 +224,7 @@ func (a *APIServer) emitForeignHookSessionDenialV8(
 	if tool != "" {
 		if outcome, ok := hookGuardrailOutcomeFor(resp.Action, resp.Severity, resp.Reason, nil); ok {
 			meta := hookLLMEventMeta(ctx, connectorName, exchange.Key.Session, "", "", connectorName, "", "", "", nil)
+			meta = applyHookEventMeta(meta, event, nil)
 			meta.Guardrail = outcome
 			meta.LifecycleOutcome = "blocked"
 			a.emitHookToolSpanFor(ctx, meta, tool, "", "", outcome.Reason, nil)
@@ -259,6 +264,18 @@ func foreignHookSessionDenialTarget(exchange enterprisepolicy.SessionExchange) (
 		return "session", ""
 	case "turn_start":
 		return "prompt", ""
+	case "turn_end":
+		return "completion", ""
+	case "compact_start", "compact_end":
+		return "compaction", ""
+	}
+	// Cursor's workspaceOpen opens the session and afterAgentThought is
+	// agent output; neither is a lifecycle event of its own (GAP-2216).
+	switch canonicalEvent(event) {
+	case "workspaceopen":
+		return "session", ""
+	case "afteragentthought":
+		return "completion", ""
 	}
 	if exchange.SessionStart {
 		return "session", ""
@@ -266,7 +283,7 @@ func foreignHookSessionDenialTarget(exchange enterprisepolicy.SessionExchange) (
 	if isPromptLikeEvent(event) {
 		return "prompt", ""
 	}
-	return "inspect", ""
+	return "event", ""
 }
 
 // foreignHookRemovalCache holds the guardian's foreign-hook removal ledger
