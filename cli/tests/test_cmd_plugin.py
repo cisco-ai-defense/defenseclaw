@@ -1094,6 +1094,15 @@ class TestPluginBlock(PluginCommandTestBase):
         events = [e for e in self.app.store.list_events(10) if e.action == "plugin-block"]
         self.assertEqual(len(events), 1)
 
+    def test_block_of_an_installed_plugin_says_it_still_loads(self):
+        # GAP-2111: block refuses new installs only; name quarantine.
+        self._install_plugin("loaded-one")
+        result = self.invoke(["block", "loaded-one"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("The installed copy still loads", result.output)
+        self.assertIn("defenseclaw plugin quarantine loaded-one", result.output)
+        self.assertNotIn("still loads", self.invoke(["block", "never-installed"]).output)
+
     def test_block_custom_reason_in_audit_log(self):
         self.invoke(["block", "r1", "--reason", "CVE-1234"])
         ev = [e for e in self.app.store.list_events(10) if e.action == "plugin-block"][0]

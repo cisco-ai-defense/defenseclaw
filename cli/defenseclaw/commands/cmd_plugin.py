@@ -573,7 +573,12 @@ def _print_plugin_scan_policy(name: str, *, connector: str = "", installed: bool
     else:
         text = "the policy would refuse this plugin at install."
     click.echo(f"        policy: rejected — {text}")
-    click.echo(f"          Block it: defenseclaw plugin block {name}{flag}")
+    if installed:
+        # GAP-2111: 'plugin block' only refuses new installs; quarantine moves
+        # the installed copy out (plugin restore brings it back).
+        click.echo(f"          Stop it: defenseclaw plugin quarantine {name}{flag}")
+    else:
+        click.echo(f"          Block it: defenseclaw plugin block {name}{flag}")
 
 
 def _host_plugin_dirs(app: AppContext, connector: str) -> list[str]:
@@ -3472,6 +3477,14 @@ def block(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
         if plugin_path:
             pe.set_source_path("plugin", plugin_name, plugin_path)
         click.secho(f"[plugin] Blocked {plugin_name!r} (every connector).", fg="red")
+
+    if plugin_path or _plugin_match_dir_scopes(app, plugin_name, connector):
+        flag = f" --connector {connector}" if connector else ""
+        click.secho(
+            "  The installed copy still loads: block only refuses new installs.\n"
+            f"  To stop it: defenseclaw plugin quarantine {plugin_name}{flag}",
+            fg="yellow",
+        )
 
     if app.logger:
         saved_change_audit(app.logger).log_action(

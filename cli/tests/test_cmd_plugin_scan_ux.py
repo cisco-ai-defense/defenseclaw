@@ -162,7 +162,9 @@ class TestScanUXVerdictLines(_PluginScanUXBase):
         self.assertIn("[WARN]", result.output)
         self.assertNotIn("[BLOCKED]", result.output)
         self.assertIn("policy: rejected", result.output)
-        self.assertIn(f"Block it: defenseclaw plugin block {self.plugin_name}", result.output)
+        # GAP-2111: block only refuses new installs; quarantine stops the copy.
+        self.assertIn(f"Stop it: defenseclaw plugin quarantine {self.plugin_name}", result.output)
+        self.assertNotIn("plugin block", result.output)
         # Finding count must be visible.
         self.assertIn("1 finding", result.output)
         # Severity surfaced via the "max severity:" detail string.
