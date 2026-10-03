@@ -1656,6 +1656,11 @@ class SetupPanelModel:
         category = "info" if doctor else "setup"
         # "keys remove", not "setup Credentials" (GAP-2061).
         label = "sandbox doctor" if doctor else (" ".join(args[:2]) if keys_run else "setup " + name)
+        consequence = ""
+        if keys_run and tuple(args[:2]) == ("keys", "remove") and len(args) > 2:
+            from defenseclaw.commands.cmd_keys import required_removal_warning
+
+            consequence = required_removal_warning(self.config, args[2])
         # A cancelled run (or a finished check) puts this status back.
         self._status_before_check[self.active_wizard] = self.wizard_status.get(self.active_wizard, "")
         self.wizard_status[self.active_wizard] = "running..."
@@ -1674,6 +1679,7 @@ class SetupPanelModel:
                 env_overrides=secret_env,
                 risk=risk,
                 terminal=terminal,
+                consequence=consequence,
             ),
         )
 

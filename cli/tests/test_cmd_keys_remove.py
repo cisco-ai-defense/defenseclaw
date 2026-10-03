@@ -13,6 +13,7 @@ from click.testing import CliRunner
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from defenseclaw.commands.cmd_keys import keys_cmd
+from defenseclaw.config import GuardrailConfig
 
 from tests.test_cmd_keys import _make_app_context
 
@@ -99,3 +100,22 @@ class KeysRemoveTests(unittest.TestCase):
                 self.assertIn("gateway auth token", refused.output)
                 with open(dotenv, encoding="utf-8") as fh:
                     self.assertIn("DEFENSECLAW_GATEWAY_TOKEN=t1", fh.read())
+
+    def test_remove_of_required_key_names_the_feature_it_breaks(self):
+        # GAP-2254: removing a key the config REQUIRES gave only a generic confirm.
+        with tempfile.TemporaryDirectory() as tmp:
+            app = _make_app_context(tmp, guardrail=GuardrailConfig(enabled=True, scanner_mode="remote"))
+            with open(os.path.join(tmp, ".env"), "w", encoding="utf-8") as fh:
+                fh.write("CISCO_AI_DEFENSE_API_KEY=c1\nNOT_A_KNOWN_KEY=x1\n")
+            env = {k: v for k, v in os.environ.items() if k not in ("CISCO_AI_DEFENSE_API_KEY", "NOT_A_KNOWN_KEY")}
+            runner = CliRunner()
+            with patch.dict(os.environ, env, clear=True):
+                declined = runner.invoke(keys_cmd, ["remove", "CISCO_AI_DEFENSE_API_KEY"], obj=app, input="n\n")
+                self.assertNotEqual(declined.exit_code, 0)
+                self.assertIn("CISCO_AI_DEFENSE_API_KEY is REQUIRED by guardrail.remote", declined.output)
+                removed = runner.invoke(keys_cmd, ["remove", "CISCO_AI_DEFENSE_API_KEY", "--yes"], obj=app)
+                self.assertEqual(removed.exit_code, 0, removed.output)
+                self.assertIn("guardrail.remote stops working", removed.output)
+                other = runner.invoke(keys_cmd, ["remove", "NOT_A_KNOWN_KEY", "--yes"], obj=app)
+                self.assertEqual(other.exit_code, 0, other.output)
+                self.assertNotIn("REQUIRED", other.output)
