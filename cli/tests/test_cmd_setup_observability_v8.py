@@ -1536,3 +1536,20 @@ def test_setup_v8_add_refuses_endpoint_credentials_in_plain_words(
     for jargon in ("oneOf", "v8", "$.observability", "config.yaml:", "pw@"):
         assert jargon not in result.output
     assert (tmp_path / "config.yaml").read_text() == before
+
+
+def test_help_names_galileo_and_add_help_lists_every_preset_id() -> None:
+    """GAP-2304: the group help names Galileo and 'add --help' lists the preset ids."""
+    from defenseclaw.observability.presets import preset_choices
+
+    group = CliRunner().invoke(observability, ["--help"])
+    assert group.exit_code == 0, group.output
+    flat = " ".join(group.output.split())
+    assert "Galileo" in flat
+    assert "Splunk Enterprise HEC" in flat
+
+    add = CliRunner().invoke(observability, ["add", "--help"])
+    assert add.exit_code == 0, add.output
+    flat = " ".join(add.output.split())
+    listed = flat.split("Presets:", 1)[1].split("Examples:", 1)[0]
+    assert {item.strip() for item in listed.split(",")} == set(preset_choices())

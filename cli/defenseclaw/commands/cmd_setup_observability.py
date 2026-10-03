@@ -107,9 +107,11 @@ _LEGACY_GENERATED_GALILEO_SEND = {
 def observability() -> None:
     """Configure canonical telemetry destinations.
 
-    Supports Splunk Observability Cloud, Splunk HEC, Datadog, Honeycomb,
-    New Relic, Grafana Cloud, plus generic OTLP and generic HTTP JSONL
-    adapters. For chat/incident notifier webhooks (Slack, PagerDuty,
+    Supports Splunk Observability Cloud, Splunk HEC, Splunk Enterprise
+    HEC, Datadog, Honeycomb, New Relic, Grafana Cloud, Galileo, the local
+    observability stack, plus generic OTLP and generic HTTP JSONL
+    adapters ('defenseclaw setup observability add --help' lists the
+    preset ids). For chat/incident notifier webhooks (Slack, PagerDuty,
     Webex, HMAC-signed), see ``defenseclaw setup webhook`` — that's a
     separate ``webhooks[]`` list and not a telemetry destination.
     """
@@ -194,7 +196,12 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
     plaintext,
     environment,
 ) -> None:
-    """Configure a telemetry destination.
+    """Configure a telemetry destination from a <preset>.
+
+    \b
+    Presets: splunk-o11y, splunk-hec, splunk-enterprise, datadog,
+             honeycomb, newrelic, grafana-cloud, galileo, local-otlp,
+             otlp, webhook
 
     Examples:
 
@@ -1049,6 +1056,7 @@ def _test_v8_destination(
 ) -> None:
     from defenseclaw.config_inspect import ConfigInspectError, inspect_v8_config
     from defenseclaw.observability.destination_test import (
+        NETWORK_PATH_NOTE,
         DestinationTestError,
         canonical_local_compliance_recorder,
         run_destination_test,
@@ -1078,6 +1086,7 @@ def _test_v8_destination(
     click.echo(f"  {result.destination}: {result.mode} succeeded")
     click.echo(f"  protocol={result.protocol}; endpoints={result.endpoint_count}")
     click.echo(f"  probe_id={result.probe_id}; compliance activity recorded locally")
+    click.echo(f"  {NETWORK_PATH_NOTE}")
 
 
 def _unknown_destination_message(name: str, effective: dict) -> str:

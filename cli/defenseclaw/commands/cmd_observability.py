@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,7 @@ from defenseclaw.observability.custody_status import (
     inspect_connector_custody,
 )
 from defenseclaw.observability.destination_test import (
+    NETWORK_PATH_NOTE,
     DestinationTestError,
     canonical_local_compliance_recorder,
     run_destination_test,
@@ -55,6 +57,7 @@ _BUCKETS = (
 )
 _SIGNALS = ("logs", "traces", "metrics")
 _SEVERITY_RANK = {"INFO": 1, "LOW": 2, "MEDIUM": 3, "HIGH": 4, "CRITICAL": 5}
+_NETWORK_FAILURES = frozenset({"connection_failed", "dns_failed", "timeout", "tls_failed", "protocol_failed"})
 
 
 @dataclass(frozen=True)
@@ -98,11 +101,13 @@ def observability_destination() -> None:
 def observability_destination_test(name: str, write_probe: bool, timeout: float) -> None:
     """Test exactly NAME without ordinary collection, routing, or fan-out."""
 
+    started = time.monotonic()
     try:
         inspected = inspect_v8_config(
             "effective",
             config_path=str(config_module.config_path()),
         )
+        started = time.monotonic()
         result = run_destination_test(
             inspected.effective or {},
             name=name,
@@ -117,8 +122,14 @@ def observability_destination_test(name: str, write_probe: bool, timeout: float)
     except ConfigInspectError as exc:
         raise click.ClickException(str(exc)) from exc
     except DestinationTestError as exc:
-        raise click.ClickException(f"destination test failed ({exc.failure_class}): {exc.message}") from exc
+        message = f"destination test failed ({exc.failure_class}): {exc.message}"
+        if exc.failure_class in _NETWORK_FAILURES:
+            message += f"\n{NETWORK_PATH_NOTE}"
+        raise click.ClickException(message) from exc
 
+    elapsed_ms = max(0, round((time.monotonic() - started) * 1000))
+    mode_label = "write probe" if result.mode == "write_probe" else "handshake"
+    click.echo(f"result: PASS - {mode_label} succeeded in {elapsed_ms} ms")
     click.echo(f"destination: {result.destination}")
     click.echo(f"kind: {result.kind}")
     click.echo(f"mode: {result.mode}")
@@ -134,6 +145,7 @@ def observability_destination_test(name: str, write_probe: bool, timeout: float)
     else:
         click.echo("authentication: resolved locally; not transmitted by the non-mutating handshake")
     click.echo("compliance activity: attempt and outcome recorded locally")
+    click.echo(NETWORK_PATH_NOTE)
 
 
 @observability_cmd.command("plan")

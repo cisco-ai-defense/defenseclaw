@@ -127,6 +127,18 @@ _METADATA_HOSTS: Final = frozenset(
 )
 
 
+# The test dials the destination itself, without a proxy; the gateway
+# delivers through the proxy it was started with. Say so next to every
+# verdict, so a passing test is not read as "the gateway can deliver"
+# (GAP-2299).
+NETWORK_PATH_NOTE: Final = (
+    "network path: this test connects directly from this shell, without a proxy; the gateway "
+    "delivers through the proxy it was started with (HTTPS_PROXY/NO_PROXY or the enterprise "
+    "proxy). If doctor shows delivery_failed while this test passes, restart the gateway from a "
+    "shell with the right proxy settings ('defenseclaw-gateway restart') and check gateway.log"
+)
+
+
 class DestinationTestError(RuntimeError):
     """A bounded, display-safe destination-test failure."""
 

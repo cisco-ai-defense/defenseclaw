@@ -28,7 +28,33 @@ import (
 	"google.golang.org/protobuf/encoding/protowire"
 
 	"github.com/defenseclaw/defenseclaw/internal/observability"
+	"github.com/defenseclaw/defenseclaw/internal/observability/delivery"
 )
+
+// GAP-2299: an export that gets no HTTP response names the failure code and
+// the gateway's proxy path in gateway.log, at most once a minute per code.
+func TestLogTransportFailureNamesCodeAndProxyPath(t *testing.T) {
+	var out bytes.Buffer
+	previous := rejectionLogWriter
+	rejectionLogWriter = &out
+	t.Cleanup(func() { rejectionLogWriter = previous })
+
+	logTransportFailure("galileo-gap2299", observability.SignalTraces, delivery.FailureCodeConnectionFailed, 5)
+	logTransportFailure("galileo-gap2299", observability.SignalTraces, delivery.FailureCodeConnectionFailed, 5)
+
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("want one throttled line, got %q", out.String())
+	}
+	for _, want := range []string{
+		"galileo-gap2299 traces export failed: connection_failed (5 spans)",
+		"HTTPS_PROXY/NO_PROXY",
+	} {
+		if !strings.Contains(lines[0], want) {
+			t.Fatalf("line %q lacks %q", lines[0], want)
+		}
+	}
+}
 
 // GAP-1768: a refused export names the HTTP status, a scrubbed reason and
 // the refused span names in gateway.log, at most once a minute per status.

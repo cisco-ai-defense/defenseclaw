@@ -34,6 +34,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/netguard"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
+	"github.com/defenseclaw/defenseclaw/internal/observability/delivery"
 )
 
 const (
@@ -116,18 +117,10 @@ func logHTTPRejection(destination string, signal observability.Signal, response 
 	if response == nil {
 		return
 	}
-	key := fmt.Sprintf("%s/%s/%d", destination, signal, response.StatusCode)
-	now := time.Now()
-	rejectionLogLimiter.Lock()
-	if last, ok := rejectionLogLimiter.last[key]; ok && now.Sub(last) < rejectionLogInterval {
-		rejectionLogLimiter.suppressed[key]++
-		rejectionLogLimiter.Unlock()
+	suppressed, ok := rejectionLogAdmit(fmt.Sprintf("%s/%s/%d", destination, signal, response.StatusCode))
+	if !ok {
 		return
 	}
-	suppressed := rejectionLogLimiter.suppressed[key]
-	rejectionLogLimiter.last[key] = now
-	rejectionLogLimiter.suppressed[key] = 0
-	rejectionLogLimiter.Unlock()
 
 	var body []byte
 	if response.Body != nil {
@@ -146,6 +139,46 @@ func logHTTPRejection(destination string, signal observability.Signal, response 
 	if reason := rejectionReason(response.Header.Get("Content-Type"), body); reason != "" {
 		line += ": " + reason
 	}
+	if suppressed > 0 {
+		line += fmt.Sprintf(" [%d similar in the last minute not logged]", suppressed)
+	}
+	_, _ = fmt.Fprintln(rejectionLogWriter, line)
+}
+
+// rejectionLogAdmit applies the once-a-minute limit for key. It reports
+// whether a line may be written and how many were skipped since the last one.
+func rejectionLogAdmit(key string) (int, bool) {
+	now := time.Now()
+	rejectionLogLimiter.Lock()
+	defer rejectionLogLimiter.Unlock()
+	if last, ok := rejectionLogLimiter.last[key]; ok && now.Sub(last) < rejectionLogInterval {
+		rejectionLogLimiter.suppressed[key]++
+		return 0, false
+	}
+	suppressed := rejectionLogLimiter.suppressed[key]
+	rejectionLogLimiter.last[key] = now
+	rejectionLogLimiter.suppressed[key] = 0
+	return suppressed, true
+}
+
+// logTransportFailure writes one gateway.log line when an export gets no
+// HTTP response at all (DNS, connect, proxy or timeout), so a destination
+// that doctor shows as delivery_failed also leaves a trace in gateway.log
+// (GAP-2299). The gateway dials through the proxy it was started with, which
+// is often not the proxy of the shell where 'destination test' runs. At most
+// one line per destination, signal and failure code per minute.
+func logTransportFailure(destination string, signal observability.Signal, code delivery.FailureCode, itemCount int) {
+	suppressed, ok := rejectionLogAdmit(fmt.Sprintf("%s/%s/%s", destination, signal, code))
+	if !ok {
+		return
+	}
+	unit := "records"
+	if signal == observability.SignalTraces {
+		unit = "spans"
+	}
+	line := fmt.Sprintf("[observability] %s %s export failed: %s (%d %s); the gateway connects through "+
+		"the proxy it was started with (HTTPS_PROXY/NO_PROXY), so check that path and restart the gateway "+
+		"from a shell with the right proxy settings", safeLogToken(destination), signal, code, itemCount, unit)
 	if suppressed > 0 {
 		line += fmt.Sprintf(" [%d similar in the last minute not logged]", suppressed)
 	}
