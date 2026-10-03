@@ -625,6 +625,9 @@ func validHighEntropy(value string, fieldClass observability.FieldClass) bool {
 	if looksUUID(value) || (len(value) == 32 && allHex(value)) || (len(value) == 64 && allHex(value) && fieldClass == observability.FieldClassIdentifier) {
 		return false
 	}
+	if identifierShaped(value) {
+		return false
+	}
 	classes := 0
 	for _, predicate := range []func(byte) bool{isASCIIUpper, isASCIILower, isASCIIDigit, func(value byte) bool { return strings.ContainsRune("+/_-=", rune(value)) }} {
 		if byteAny(value, predicate) {
@@ -647,6 +650,39 @@ func validHighEntropy(value string, fieldClass observability.FieldClass) bool {
 		entropy -= probability * math.Log2(probability)
 	}
 	return entropy >= 3.5
+}
+
+// identifierShaped reports whether value reads as an upper-case,
+// separator-delimited identifier such as a rule id (CERT-S3-MARKER-BLOCK) or
+// an environment variable name (SERVICE_OTLP_V2_TOKEN). These appear in
+// clear in structured fields, so redacting them in free text only hides which
+// rule fired. The shape needs at least three segments, at least one of them an
+// upper-case word of three or more letters, and every mixed or numeric segment
+// at most four characters; random keys with long mixed groups still match.
+func identifierShaped(value string) bool {
+	segments := strings.FieldsFunc(value, func(character rune) bool { return character == '-' || character == '_' })
+	if len(segments) < 3 || strings.Count(value, "-")+strings.Count(value, "_") != len(segments)-1 {
+		return false
+	}
+	word := false
+	for _, segment := range segments {
+		letters := true
+		for i := range len(segment) {
+			if !isASCIIUpper(segment[i]) && !isASCIIDigit(segment[i]) {
+				return false
+			}
+			if !isASCIIUpper(segment[i]) {
+				letters = false
+			}
+		}
+		switch {
+		case letters && len(segment) >= 3:
+			word = true
+		case !letters && len(segment) > 4:
+			return false
+		}
+	}
+	return word
 }
 
 func validBase64Alphabet(value string) bool {
