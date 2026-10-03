@@ -264,11 +264,14 @@ def build_readiness_checks(
     connectors = _active_connector_names(cfg)
     if connectors:
         for connector in connectors:
-            checks.append(ReadinessCheck(f"Active Connector: {connector}", "configured", "pass"))
+            # "Connector: claudecode" fits the detail modal's label column;
+            # "Active Connector: claudecode" put the name on a second line
+            # (GAP-2059).
+            checks.append(ReadinessCheck(f"Connector: {connector}", "configured", "pass"))
     else:
         checks.append(
             ReadinessCheck(
-                "Active Connector",
+                "Connector",
                 "No connector mode is configured.",
                 "fail",
                 # Default to OpenClaw with ``--yes`` so anyone that wires this

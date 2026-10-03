@@ -527,14 +527,14 @@ def test_readiness_renders_every_active_connector_without_setup_filtering() -> N
     checks = build_readiness_checks(cfg, None, None, (), RestartQueue())
     titles = [check.title for check in checks]
 
-    assert "Active Connector: codex" in titles
-    assert "Active Connector: hermes" in titles
-    assert "Active Connector" not in titles
+    assert "Connector: codex" in titles
+    assert "Connector: hermes" in titles
+    assert "Connector" not in titles
 
     model = SetupPanelModel(cfg)
     model_titles = [check.title for check in model.readiness_checks]
-    assert "Active Connector: codex" in model_titles
-    assert "Active Connector: hermes" in model_titles
+    assert "Connector: codex" in model_titles
+    assert "Connector: hermes" in model_titles
 
 
 def test_connector_wizard_builds_go_argv_for_supported_connectors() -> None:

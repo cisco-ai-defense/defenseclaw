@@ -77,13 +77,19 @@ SETUP_KEYMAPS: dict[SetupView, tuple[KeySpec, ...]] = {
     # switcher) and a double-click on a task do what its buttons did.
     "wizards": (
         KeySpec("↑/↓", "choose", "Move between setup tasks (on into the next group)", None, ("up", "down", "j", "k")),
-        KeySpec("←/→", "group", "Previous / next task group (also [ and ])", None, ("left", "right", "[", "]")),
         KeySpec("Enter", "open", "Open the selected task", None, ("enter",)),
+        KeySpec(
+            "←/→",
+            "group",
+            "Previous / next task group, then the config editor (also [ and ])",
+            None,
+            ("left", "right", "[", "]"),
+        ),
         KeySpec("i", "details", "Readiness checks and what the selected task runs", None, ("i",)),
         KeySpec("c", "config", "Edit config.yaml fields directly (config editor)", None, ("c",)),
         KeySpec("f", "fill missing", "Prompt for every missing required key", None, ("f",), when="credentials"),
         KeySpec("s", "set key", "Set one API key", None, ("s",), when="credentials"),
-        KeySpec("r", "refresh", "Reload the list of API keys", None, ("r",)),
+        KeySpec("r", "reload keys", "Reload the list of API keys", None, ("r",), when="credentials"),
         *_RESTART,
     ),
     "goals": (
@@ -199,7 +205,8 @@ def keymap(view: SetupView, conditions: Iterable[str] = ()) -> tuple[KeySpec, ..
 # each side); it has no button bar to fall back on.
 HINT_WIDTH = 78
 ONE_ROW_VIEWS: frozenset[str] = frozenset({"wizards"})
-MORE_KEYS = "? all keys"
+# "? all keys" read as "show all API keys" on the API keys task (GAP-2061).
+MORE_KEYS = "? help"
 
 
 def keys_hint(view: SetupView, conditions: Iterable[str] = ()) -> str:
@@ -207,7 +214,7 @@ def keys_hint(view: SetupView, conditions: Iterable[str] = ()) -> str:
 
     On the task list the keys of the selected task (``f``, ``s``, ``G``) win
     over the general ones: those go from the end until the line fits one
-    80-column row, and ``? all keys`` points at the help sheet that still
+    80-column row, and ``? help`` points at the help sheet that still
     lists them (GAP-1825).
     """
 
@@ -225,7 +232,15 @@ def keys_hint(view: SetupView, conditions: Iterable[str] = ()) -> str:
         specs.remove(spec)
         text = join(specs, MORE_KEYS)
         if len(text) <= HINT_WIDTH:
+            return text
+    # A queued restart on the API keys task: its own keys go from the end
+    # (r first) before the restart key does.
+    for spec in reversed(specs[1:]):
+        if len(text) <= HINT_WIDTH:
             break
+        if spec.when == "credentials":
+            specs.remove(spec)
+            text = join(specs, MORE_KEYS)
     return text
 
 
