@@ -10,7 +10,7 @@
 
 """Audit events of changes a command has already applied.
 
-``skill block``, ``plugin block``, ``mcp set`` and ``guardrail judge add``
+``skill block``, ``plugin block``/``install``, ``mcp set`` and ``guardrail judge add``
 save the change first and record its audit event afterwards. With the
 gateway stopped (or never started), the event used to end the command with
 "Error: ... then run the command again", rc 1, after the change was already
@@ -53,6 +53,9 @@ class _SavedChangeAudit:
 
     def log_config_change(self, *args: Any, **kwargs: Any) -> None:
         self._record("log_config_change", *args, **kwargs)
+
+    def log_scan(self, *args: Any, **kwargs: Any) -> None:
+        self._record("log_scan", *args, **kwargs)
 
 
 def saved_change_audit(logger: Any) -> _SavedChangeAudit:

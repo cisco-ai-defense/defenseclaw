@@ -104,6 +104,12 @@ def scan(
         connectors = list(app.cfg.active_connectors())
     else:
         connectors = [None]
+    if not connectors:
+        # Nothing to inventory: say so instead of printing nothing (GAP-2073).
+        from defenseclaw.commands import echo_no_connector
+
+        echo_no_connector()
+        return
 
     invs: list[dict] = []
     pending_telemetry: list[tuple[object, str, str]] = []

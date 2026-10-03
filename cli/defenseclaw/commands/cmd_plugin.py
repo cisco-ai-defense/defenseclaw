@@ -1476,7 +1476,7 @@ def install(app: AppContext, name_or_path: str, force: bool, take_action: bool, 
 
         if app.logger:
             for result in scan_results.values():
-                app.logger.log_scan(result)
+                saved_change_audit(app.logger).log_scan(result)
         transaction.finalize()
         if deferred_enforcement_failure:
             raise SystemExit(1)
@@ -1850,7 +1850,7 @@ def _scan_installed_plugin_for_connector(
 
     if post_decision.verdict == "allowed":
         if app.logger and not defer_scan_log:
-            app.logger.log_scan(result)
+            saved_change_audit(app.logger).log_scan(result)
         click.echo(
             f"[install] {plugin_name!r} became allow-listed for connector={connector} — skipping post-scan enforcement"
         )
@@ -1865,7 +1865,7 @@ def _scan_installed_plugin_for_connector(
 
     if post_decision.verdict == "clean":
         if app.logger and not defer_scan_log:
-            app.logger.log_scan(result)
+            saved_change_audit(app.logger).log_scan(result)
         click.echo(f"[install] {plugin_name!r} installed and clean (connector={connector})")
         pe.set_source_path("plugin", plugin_name, plugin_path, connector)
         if app.logger:
@@ -1906,7 +1906,7 @@ def _scan_installed_plugin_for_connector(
             f"(connector={connector}; no action taken — pass --action to enforce)"
         )
         if app.logger and not defer_scan_log:
-            app.logger.log_scan(result)
+            saved_change_audit(app.logger).log_scan(result)
         pe.set_source_path("plugin", plugin_name, plugin_path, connector)
         if app.logger:
             saved_change_audit(app.logger).log_action("install-warning", plugin_name, detail)
@@ -1914,7 +1914,7 @@ def _scan_installed_plugin_for_connector(
 
     action_cfg = post_decision.action
     if app.logger and not defer_scan_log:
-        app.logger.log_scan(result)
+        saved_change_audit(app.logger).log_scan(result)
     enforcement_reason = f"post-install scan: {len(result.findings)} findings, max={sev}"
     applied_actions: list[str] = []
 
