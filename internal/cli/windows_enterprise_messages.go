@@ -97,6 +97,24 @@ func windowsEnterpriseStandardUserMutationAnswer(action string) string {
 		managedWindowsAdminCLI() + "' enterprise windows " + action + " --profile standalone`. Nothing was changed."
 }
 
+// windowsManagedStandardUserViewAnswer answers a standard account's
+// read-only view of a managed Windows deployment (AI Discovery, machine
+// policy, audit export) the way status and verify answer it: what the view
+// needs, the elevated command to ask the administrator for, and that
+// nothing changed. It ran exit 1 with a stuttered internal prefix and no
+// command (GAP-2039).
+func windowsManagedStandardUserViewAnswer(what, adminArgs string) string {
+	return "elevation_required: " + what + " of a managed computer can be read only from an elevated Administrator prompt or by the MDM agent. " +
+		"Ask your administrator, who runs it from an elevated PowerShell prompt with `& '" + managedWindowsAdminCLI() + "' " + adminArgs + "`. Nothing was changed."
+}
+
+// managedHostCurrentAccountName is the signed-in account without its
+// computer or domain prefix: the AI Discovery view names accounts that way.
+func managedHostCurrentAccountName() string {
+	account := managedHostCurrentAccount()
+	return account[strings.LastIndex(account, `\`)+1:]
+}
+
 // windowsEnterpriseStandardUserInspectionAnswer answers a standard account's
 // `enterprise windows status` or `verify`: only an elevated prompt can run
 // the installer's integrity checks. The installer's own refusal (an invalid
