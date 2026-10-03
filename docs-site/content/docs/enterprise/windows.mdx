@@ -72,30 +72,46 @@ The four services:
 
 The Service Control Manager restarts each service after a failure.
 
+How a hook reaches the gateway:
+
 <Flow
   direction="TB"
-  caption="Standalone Windows. Before it sends any bytes, the hook confirms that the process behind its loopback connection is the process the Service Control Manager reports for DefenseClawGateway."
+  caption="Windows. The hook calls the gateway on 127.0.0.1:18970. Before it sends any bytes, it checks that the process behind the connection is the one the Service Control Manager reports for DefenseClawGateway. The hook's credential is bound to the user's SID, so the gateway knows who is calling."
 >
-  <Zone id="w0" label="Z0 · Admin and MDM (SYSTEM)" tone="trusted">
-    <Node id="setup" kind="operator">{`Setup /ensure\nor enterprise windows`}</Node>
+  <Zone id="w0" label="Z0 · Admin and OS (SYSTEM)" tone="trusted">
+    <Node id="scm" kind="generic">{`Service Control Manager\nknows the gateway's PID`}</Node>
   </Zone>
-  <Zone id="w1" label="Z1 · Services (LocalSystem)" tone="privileged">
-    <Node id="grd" kind="generic">{`HookGuardian ·\nHookEnumerator`}</Node>
-    <Node id="sns" kind="generic">SensorHelper</Node>
+  <Zone id="w4" label="Z4 · User session (the user)" tone="untrusted">
+    <Node id="agent" kind="agent">{`AI agent\nruns as the user`}</Node>
+    <Node id="hook" kind="connector">{`defenseclaw-hook.exe\nchecks the listener`}</Node>
   </Zone>
   <Zone id="w2" label="Z2 · Gateway (virtual account)" tone="restricted">
-    <Node id="gw" kind="gateway">DefenseClawGateway</Node>
+    <Node id="gw" kind="gateway">{`Gateway\nallows or blocks`}</Node>
   </Zone>
-  <Zone id="w4" label="Z4 · User session (user)" tone="untrusted">
-    <Node id="agent" kind="agent">AI agent</Node>
-    <Node id="hook" kind="connector">defenseclaw-hook.exe</Node>
+  <Edge from="scm" to="gw" label="starts" />
+  <Edge from="agent" to="hook" label="runs per tool call" />
+  <Edge from="hook" to="gw" label="asks over loopback TCP" />
+</Flow>
+
+How the hooks stay in place:
+
+<Flow
+  direction="TB"
+  caption="Windows. The enumerator lists the users to protect in hook-guardian\targets.yaml. The guardian puts back DefenseClaw's hooks in each listed user's agent config, writing under that user's own token and only while the user has an active session. It also writes the Claude Code, Cursor, Copilot and OpenCode machine policy; the lifecycle writes Codex's."
+>
+  <Zone id="w1" label="Z1 · Services (LocalSystem)" tone="privileged">
+    <Node id="enum" kind="generic">{`Enumerator\nlists the users`}</Node>
+    <Node id="grd" kind="generic">{`Guardian\nchecks every minute`}</Node>
   </Zone>
-  <Edge from="setup" to="grd" label="SCM + DACLs" />
-  <Edge from="setup" to="gw" label="SCM + DACLs" />
-  <Edge from="grd" to="agent" label="user config, as user" />
-  <Edge from="agent" to="hook" />
-  <Edge from="hook" to="gw" label="loopback · SCM PID" />
-  <Edge from="gw" to="sns" label="fixed requests" />
+  <Zone id="w3" label="Z3 · Admin-owned files" tone="protected">
+    <Node id="tgt" kind="policy">{`Target manifest\ntargets.yaml`}</Node>
+  </Zone>
+  <Zone id="w4b" label="Z4 · User session (the user)" tone="untrusted">
+    <Node id="ucfg" kind="agent">{`Agent config\nin the user's profile`}</Node>
+  </Zone>
+  <Edge from="enum" to="tgt" label="writes" />
+  <Edge from="grd" to="tgt" label="reads" />
+  <Edge from="grd" to="ucfg" label="repairs, as the user" />
 </Flow>
 
 See [Threat model](/docs/enterprise/threat-model#trust-zones) for what each
