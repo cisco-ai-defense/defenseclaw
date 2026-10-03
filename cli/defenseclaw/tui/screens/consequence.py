@@ -87,6 +87,9 @@ class ConsequenceModalModel:
     default_action_id: str
     consequence: str = ""
     border_color: str = DEFAULT_TOKENS.border_active
+    # Footer text that replaces the generated one, for a modal whose rows do
+    # different things (the uninstall a/e rows only show a command, GAP-2595).
+    hint: str = ""
 
     def __post_init__(self) -> None:
         if not self.actions:
@@ -113,6 +116,8 @@ class ConsequenceModalModel:
     def default_hint(self) -> str:
         """Footer hint for the unarmed modal; mentions keys only when a row has one."""
 
+        if self.hint:
+            return self.hint
         safe = [action.hotkey for action in self.actions if action.hotkey and not action.danger]
         danger = [action.hotkey for action in self.actions if action.hotkey and action.danger]
         if danger:

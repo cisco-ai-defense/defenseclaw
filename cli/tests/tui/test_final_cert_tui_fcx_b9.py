@@ -88,5 +88,7 @@ def test_overview_with_the_gateway_down_drops_uptime_and_dates_the_last_sample(t
 def test_uninstall_chooser_hint_says_which_keys_run_and_which_select() -> None:
     # GAP-2303: "press a row's key" while [u] only selects and [p] runs.
     hint = build_uninstall_model().default_hint
-    assert hint.startswith("p runs now") and "u/a/e select, then enter twice runs" in hint
+    # GAP-2595: a/e only show a command, so the footer says that.
+    assert hint.startswith("p previews") and "a/e show the command to run after quitting" in hint
+    assert "u, then enter twice, uninstalls" in hint
     assert "row's key" not in hint and hint.endswith("esc cancel")
