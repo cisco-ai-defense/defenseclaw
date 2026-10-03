@@ -387,6 +387,7 @@ def _claude_mcp_entry(entry: dict[str, Any]) -> dict[str, Any]:
 
 def _flag_claude_unloadable(
     entries: list[MCPServerEntry], servers: Any, path: str, *, user_scope: bool = False,
+    where: str = "",
 ) -> list[MCPServerEntry]:
     """Mark the entries Claude Code skips as not loaded (GAP-2514).
 
@@ -395,7 +396,8 @@ def _flag_claude_unloadable(
     stays listed (so ``mcp unset`` and the repair still find it) but carries
     ``load_problem`` instead of passing as a live server. ``mcp set`` only
     writes the user-scope ``mcpServers`` of :func:`claude_mcp_state_path`,
-    so only those entries say it repairs them (GAP-2528).
+    so only those entries say it repairs them (GAP-2528). ``where`` names
+    the key inside *path* (a per-project entry, GAP-2530).
     """
     set_repairs = user_scope and os.path.normcase(os.path.abspath(path)) == os.path.normcase(
         os.path.abspath(claude_mcp_state_path())
@@ -412,7 +414,7 @@ def _flag_claude_unloadable(
         ):
             entry = replace(
                 entry,
-                load_problem=f'has a "url" but no "type" in {path}',
+                load_problem=f'has a "url" but no "type" in {path}{where}',
                 load_problem_set_repairs=set_repairs,
             )
         out.append(entry)
@@ -3700,6 +3702,7 @@ def _read_claude_mcp_state(
             local_servers = project_state.get("mcpServers")
             local_entries = _flag_claude_unloadable(
                 _parse_mcp_servers_value(local_servers), local_servers, path,
+                where=f' (projects["{project_key}"].mcpServers)',
             )
             break
 

@@ -531,6 +531,18 @@ def _panel_label(panel: str) -> str:
     """The tab label for ``panel`` ("MCPs", not ``"mcps".title()`` = "Mcps")."""
 
     return next((label for name, _key, label in PANELS if name == panel), panel.title())
+
+
+def _catalog_loaded_text(panel: str, model: Any) -> str:
+    """How a catalog load ended; rows the agent skips are not counted as loaded (GAP-2531)."""
+
+    label = _panel_label(panel)
+    skipped = model.not_loaded_count() if hasattr(model, "not_loaded_count") else 0
+    if skipped:
+        return f"{label}: {len(model.items)} listed, {skipped} not loaded by the agent (see the row's detail)."
+    return f"{label}: {len(model.items)} loaded."
+
+
 PANEL_NAMES = {name for name, _key, _label in PANELS}
 
 
@@ -14020,7 +14032,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 model.apply_loaded([], exc)
             if hint := _no_connector_hint(stderr):
                 model.message = hint
-        self._end_load(panel, loading, announce, model.message, f"{_panel_label(panel)}: {len(model.items)} loaded.")
+        self._end_load(panel, loading, announce, model.message, _catalog_loaded_text(panel, model))
         self._render_chrome()
 
     def _end_load(self, panel: str, loading: str, announce: bool, error: str, done: str) -> None:
@@ -14073,7 +14085,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if not any(text for _name, text in results):
             model.message = f"Could not load {panel} for any connector."
         model.set_connector_filter(self._connector_filter())
-        self._end_load(panel, loading, announce, model.message, f"{_panel_label(panel)}: {len(model.items)} loaded.")
+        self._end_load(panel, loading, announce, model.message, _catalog_loaded_text(panel, model))
         self._render_chrome()
 
     async def _confirm_and_run_intent(self, intent: Any) -> int | None:

@@ -312,7 +312,7 @@ def _mcp_not_loaded_next_step(s: MCPServerEntry, connector: str) -> str:
     if not s.load_problem_set_repairs:
         return (
             f"Claude Code skips it: it {s.load_problem}. Repair it by adding "
-            f'"type": "http" to the {s.name} entry in that file'
+            f'"type": "http" to the {s.name} entry there'
         )
     return (
         f"Claude Code skips it: it {s.load_problem}. Repair it with: "
@@ -484,6 +484,7 @@ def _mcp_list_json_items(
             verdict_label = "bundled"
         if s.load_problem:
             entry["not_loaded"] = s.load_problem
+            entry["not_loaded_repair"] = _mcp_not_loaded_next_step(s, connector)
             verdict_label = "not loaded"
         entry["verdict"] = verdict_label
         out.append(entry)
