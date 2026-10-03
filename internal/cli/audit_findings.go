@@ -67,11 +67,11 @@ func runAuditFindings(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("audit findings: audit store not loaded")
 	}
 	if auditFindingsLimit < 1 || auditFindingsLimit > 10_000 {
-		return fmt.Errorf("audit findings: --limit must be between 1 and 10000")
+		return auditUsageError(cmd, fmt.Errorf("audit findings: --limit must be between 1 and 10000"))
 	}
 	since, err := parseAuditFindingsSince(auditFindingsSince)
 	if err != nil {
-		return err
+		return auditUsageError(cmd, err)
 	}
 	if auditFindingsNewOnly && since == nil {
 		return fmt.Errorf("audit findings: --new-only requires --since")
