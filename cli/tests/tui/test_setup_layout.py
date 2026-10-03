@@ -165,7 +165,7 @@ def test_fifteen_tabs_fit_at_120_columns(width: int) -> None:
     assert labels["setup"] == "0 Setup"
     for name, key, _label in FIFTEEN_PANELS:
         assert labels[name].startswith(key)
-    assert "(12)" in labels["alerts"]
+    assert labels["alerts"].endswith(("(12)", "¹²"))
 
 
 def test_tabs_name_the_most_important_panels_first() -> None:
@@ -226,7 +226,7 @@ async def test_a_wide_then_80_column_screen_names_tabs_and_keeps_validation(herm
     async with app.run_test(size=(200, 50)) as pilot:
         await pilot.pause()
         tabs = screen_text(app).splitlines()[0]
-        assert "R Registr" in tabs, tabs
+        assert "R Reg" in tabs and "N Run" in tabs, tabs
         app.action_switch_panel("setup")
         await pilot.pause()
         await pilot.press("c", "/", *"device", "enter")

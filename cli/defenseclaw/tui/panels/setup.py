@@ -894,6 +894,34 @@ class SetupPanelModel:
         )
         self.credential_cursor = _clamp(self.credential_cursor, 0, max(0, len(rows) - 1))
 
+    def _stored_credential_choice(self, fields: Sequence[WizardFormField]) -> tuple[WizardFormField, ...]:
+        """Env Name as a pick list of the entries stored in the .env file.
+
+        Remove only deletes entries of ~/.defenseclaw/.env, so offer those
+        instead of a blank text box (GAP-2061). Free text stays when the list
+        is not loaded or holds none.
+        """
+
+        rows = self.credential_snapshot.rows
+        stored = tuple(dict.fromkeys(row.env_name for row in rows if row.source == "dotenv" and row.env_name))
+        if not stored:
+            return tuple(fields)
+        selected = self.selected_credential()
+        first = selected.env_name if selected is not None and selected.env_name in stored else stored[0]
+        return tuple(
+            WizardFormField(
+                "Env Name",
+                "choice",
+                value=first,
+                default=first,
+                options=stored,
+                hint="Stored in ~/.defenseclaw/.env; ←/→ picks the entry to remove.",
+            )
+            if field.label == "Env Name"
+            else field
+            for field in fields
+        )
+
     def selected_credential(self) -> CredentialRow | None:
         rows = self.credential_snapshot.rows
         if 0 <= self.credential_cursor < len(rows):
@@ -1281,6 +1309,8 @@ class SetupPanelModel:
         if self.active_goal is not None:
             base = list(_filter_fields_for_goal(base, self.active_goal))
             base = list(_narrow_goal_connectors(base, self.active_goal, self.config))
+        if self.active_wizard == SetupWizard.CREDENTIALS and presets.get("@Action") == "remove":
+            base = list(self._stored_credential_choice(base))
         self.form_fields = base
         self.form_active = True
         self.goal_active = False
@@ -1632,6 +1662,9 @@ class SetupPanelModel:
         doctor = tuple(args[:2]) == ("sandbox", "doctor")
         category = "info" if doctor else "setup"
         label = "sandbox doctor" if doctor else "setup " + name
+        if self.active_wizard == SetupWizard.CREDENTIALS and tuple(args[:1]) == ("keys",):
+            # Name the command that ran ("keys remove"), not "setup Credentials".
+            label = " ".join(args[:2])
         # A cancelled run (or a finished check) puts this status back.
         self._status_before_check[self.active_wizard] = self.wizard_status.get(self.active_wizard, "")
         self.wizard_status[self.active_wizard] = "running..."
@@ -3203,7 +3236,7 @@ def _connector_setup_goals(cfg: object | Mapping[str, Any] | None) -> tuple[Wiza
         WizardGoal(
             "add",
             "Add or configure a connector",
-            summary="Add a connector peer, or replace the configured set when requested.",
+            summary="Protect one more agent next to the ones already set up (or instead of them).",
             presets={"@Action": "setup"},
             # The task text promises the guardrail mode; without the field a
             # connector added here always got the CLI default (GAP-1957).
@@ -3342,13 +3375,13 @@ def _token_rotation_goals(cfg: object | Mapping[str, Any] | None) -> tuple[Wizar
         WizardGoal(
             "auto",
             "Rotate shared token for active connectors",
-            summary="Rotate gateway and distinct connector-scoped hook credentials with exact rollback.",
+            summary="New gateway and hook tokens for every protected agent; the old ones come back if it fails.",
             fields=("Refresh Hooks",),
         ),
         WizardGoal(
             "specific",
             "Rotate shared token with connector hint",
-            summary="Token storage is shared; connector only narrows the hook refresh path.",
+            summary="Same shared token, but only this agent's hooks are rewritten with it.",
             fields=("Connector", "Refresh Hooks"),
         ),
     )
@@ -5681,7 +5714,14 @@ def connector_setup_wizard_fields(
     overrides.pop("@Guardrail Mode", None)
     scanner_mode = str(get_config_value(cfg, "guardrail.scanner_mode", "local") or "local")
     fields = (
-        WizardFormField("Connector", "choice", value=connector, default=connector, options=choices),
+        WizardFormField(
+            "Connector",
+            "choice",
+            value=connector,
+            default=connector,
+            options=choices,
+            hint="The agent to protect (←/→ steps through the supported agents).",
+        ),
         WizardFormField(
             "Connectors (CSV)",
             "string",
@@ -5695,9 +5735,22 @@ def connector_setup_wizard_fields(
             options=("setup", "batch", "remove"),
             hint="Set up/add one connector, choose the active connector set, or remove one.",
         ),
-        WizardFormField("Guardrail Mode", "choice", value=mode, default=mode, options=("observe", "action")),
         WizardFormField(
-            "Scanner Mode", "choice", value=scanner_mode, default=scanner_mode, options=("local", "remote", "both")
+            "Guardrail Mode",
+            "choice",
+            value=mode,
+            default=mode,
+            options=("observe", "action"),
+            hint="observe only logs and alerts on what it finds; action also blocks it.",
+        ),
+        WizardFormField(
+            "Scanner Mode",
+            "choice",
+            value=scanner_mode,
+            default=scanner_mode,
+            options=("local", "remote", "both"),
+            hint="Proxy connectors only (hook connectors ignore it): local scans on this machine, "
+            "remote uses Cisco AI Defense, both uses both.",
         ),
         WizardFormField(
             "Replace Existing",
@@ -5711,7 +5764,13 @@ def connector_setup_wizard_fields(
             "string",
             hint="Optional workspace-scoped connector config directory.",
         ),
-        WizardFormField("Restart Gateway", "bool", value="yes", default="yes"),
+        WizardFormField(
+            "Restart Gateway",
+            "bool",
+            value="yes",
+            default="yes",
+            hint="Restart the gateway so the change takes effect now (no: it applies at the next restart).",
+        ),
         WizardFormField(
             "Detected Connectors",
             "bool",
@@ -5726,8 +5785,20 @@ def connector_setup_wizard_fields(
             default="no",
             hint="Batch setup only: include every supported hook connector.",
         ),
-        WizardFormField("Local Stack", "bool", value="no", default="no"),
-        WizardFormField("Verify After Setup", "bool", value="yes", default="yes"),
+        WizardFormField(
+            "Local Stack",
+            "bool",
+            value="no",
+            default="no",
+            hint="Also start the local guardrail and scanner services on this machine.",
+        ),
+        WizardFormField(
+            "Verify After Setup",
+            "bool",
+            value="yes",
+            default="yes",
+            hint="Proxy connectors only: check that guarded traffic flows once setup ends.",
+        ),
         WizardFormField(
             "Force Last Connector Removal",
             "bool",
@@ -7088,8 +7159,7 @@ def _build_credentials_args(fields: Sequence[WizardFormField]) -> tuple[str, ...
         return ("keys", "fill-missing", "--yes")
     if action == "set":
         args = ["keys", "set"]
-        if env_name := wizard_field_value(fields, "Env Name"):
-            args.append(env_name)
+        args.append(wizard_field_value(fields, "Env Name") or "<ENV_NAME>")
         args.append("--value-stdin")
         # The secret value is intentionally NOT placed in argv (it would be
         # visible in process listings). ``--value-stdin`` makes ``keys set``
@@ -7100,7 +7170,9 @@ def _build_credentials_args(fields: Sequence[WizardFormField]) -> tuple[str, ...
     if action == "remove":
         # The command preview is the confirmation; the CLI prompt can't be
         # answered from the TUI subprocess.
-        return ("keys", "remove", wizard_field_value(fields, "Env Name"), "--yes")
+        # The preview names the missing argument instead of "keys remove ''"
+        # (GAP-2061); Run asks for the field first.
+        return ("keys", "remove", wizard_field_value(fields, "Env Name") or "<ENV_NAME>", "--yes")
     # The readable table, not --json: this output is read by a person in
     # Activity (GAP-1162). The Setup panel loads its own JSON copy.
     return ("keys", "list")
