@@ -632,6 +632,32 @@ func TestHookManagedAIDOnly_ToolCallKeepsTextForm(t *testing.T) {
 	}
 }
 
+// The managed lane makes its own carryable check, so arguments that cannot
+// stand as tool-call fields go out as the text form alone there too.
+func TestHookManagedAIDOnly_UncarryableArgsStayText(t *testing.T) {
+	stub := &stubAIDInspector{verdict: &ScanVerdict{Action: "allow", Severity: "NONE", Scanner: "ai-defense"}}
+	a := managedHookServer(stub)
+	for _, req := range []*ToolInspectRequest{
+		{Tool: "shell", Args: json.RawMessage(`null`), Direction: "tool_call"},
+		{Tool: "shell", Args: json.RawMessage(` null `), Direction: "tool_call"},
+		{Tool: "shell", Args: json.RawMessage(`"rm -rf /"`), Direction: "tool_call"},
+		{Tool: "shell", Args: json.RawMessage(`["rm -rf /"]`), Direction: "tool_call"},
+		{
+			Tool:                    "shell",
+			Args:                    json.RawMessage(`{"hook_event_name":"PreToolUse","command":"rm -rf /"}`),
+			Direction:               "tool_call",
+			toolArgsAreHookEnvelope: true,
+		},
+	} {
+		stub.messages = nil
+		a.inspectToolPolicy(req)
+		want := []ChatMessage{{Role: "user", Content: "Tool call: shell\n" + string(req.Args)}}
+		if !reflect.DeepEqual(stub.messages, want) {
+			t.Errorf("args %s: AID messages = %#v, want the text form alone", req.Args, stub.messages)
+		}
+	}
+}
+
 func TestHookManagedAIDOnly_CodeGuardIgnored(t *testing.T) {
 	a := managedHookServer(&stubAIDInspector{verdict: nil})
 	// A write tool carrying a secret — CodeGuard would normally flag this.

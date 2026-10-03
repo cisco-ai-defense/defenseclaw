@@ -68,6 +68,8 @@ func TestManifestUngatedConnectorsDeclareAIDSurfaces(t *testing.T) {
 				t.Errorf("%s declares aid surface %q with no events", name, surface)
 			}
 		}
+		checkAIDSurfaceClassification(t, name, entry.NativeHooks.Events,
+			entry.NativeHooks.AIDSurfaces, entry.NativeHooks.AIDSurfaceEvents)
 		if entry.NativeHooks.AIDWireVersion != AIDWireVersionChatToolCalls {
 			t.Errorf("%s aid_wire_version=%q want %q",
 				name, entry.NativeHooks.AIDWireVersion, AIDWireVersionChatToolCalls)
@@ -112,9 +114,50 @@ func TestSandboxOnlyContractsDeclareAIDSurfaces(t *testing.T) {
 					}
 				}
 			}
+			checkAIDSurfaceClassification(t, contract.ContractID, contract.Events,
+				contract.AIDSurfaces, contract.AIDSurfaceEvents)
+			if routed := intersectEvents(contract.Routing().StructuredActionEvents, contract.Events); len(routed) > 0 &&
+				!sameStrings(contract.AIDSurfaceEvents[AIDSurfaceToolCall], routed) {
+				t.Errorf("%s aid_surface_events[tool_call]=%v, want the routed %v",
+					contract.ContractID, contract.AIDSurfaceEvents[AIDSurfaceToolCall], routed)
+			}
 		}
 	}
 	if checked == 0 {
 		t.Fatal("no sandbox-only contract reaching AID was checked")
+	}
+}
+
+// checkAIDSurfaceClassification holds a hand-written declaration to the
+// runtime classification the derived ones come from: prompt and tool_result
+// list exactly the events the canonical spellings select, and a tool_call
+// event is neither a prompt nor a result.
+func checkAIDSurfaceClassification(
+	t *testing.T,
+	label string,
+	events, surfaces []string,
+	declared map[string][]string,
+) {
+	t.Helper()
+	carried := make(map[string]bool, len(surfaces))
+	for _, surface := range surfaces {
+		carried[surface] = true
+	}
+	for surface, canonical := range map[string]map[string]bool{
+		AIDSurfacePrompt:     aidPromptSurfaceEvents,
+		AIDSurfaceToolResult: aidToolResultSurfaceEvents,
+	} {
+		if !carried[surface] {
+			continue
+		}
+		if want := filterEvents(events, canonical); !sameStrings(declared[surface], want) {
+			t.Errorf("%s aid_surface_events[%q]=%v, want %v", label, surface, declared[surface], want)
+		}
+	}
+	for _, event := range declared[AIDSurfaceToolCall] {
+		key := canonicalHookEvent(event)
+		if aidPromptSurfaceEvents[key] || aidToolResultSurfaceEvents[key] {
+			t.Errorf("%s aid_surface_events[tool_call] names %q, a prompt or result event", label, event)
+		}
 	}
 }
