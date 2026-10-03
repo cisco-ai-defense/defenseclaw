@@ -2967,7 +2967,8 @@ _SKILL_SCANNER_HINTS: dict[str, str] = {
 _MCP_SCANNER_HINTS: dict[str, str] = {
     **_SCANNER_LLM_HINTS,
     "--analyzers": (
-        "auto (the default) picks them for you, or a comma-separated list: yara (local rules), "
+        "auto (the default, also what an empty field means) picks them for you, or a comma-separated "
+        "list: yara (local rules), "
         "api (Cisco AI Defense), llm (LLM review), behavioral (code vs. description), "
         "readiness (timeouts, retries)."
     ),
@@ -3037,8 +3038,8 @@ def wizard_form_defs(
         policy, lenient = _skill_scanner_policy_values(cfg)
         policies = ("strict", "balanced", "permissive", "none")
         skill_fields = (
-            WizardFormField("Behavioral Analyzer", "bool", "--use-behavioral", value="no", default="no"),
-            WizardFormField("LLM Analyzer", "bool", "--use-llm", value="no", default="no"),
+            _cfg_bool_field("Behavioral Analyzer", "--use-behavioral", cfg, "scanners.skill_scanner.use_behavioral"),
+            _cfg_bool_field("LLM Analyzer", "--use-llm", cfg, "scanners.skill_scanner.use_llm"),
             WizardFormField(
                 "LLM Provider",
                 "choice",
@@ -3049,10 +3050,10 @@ def wizard_form_defs(
             ),
             WizardFormField("LLM Model", "string", "--llm-model"),
             WizardFormField("LLM Consensus Runs", "int", "--llm-consensus-runs", value="0", default="0"),
-            WizardFormField("Meta Analyzer", "bool", "--enable-meta", value="no", default="no"),
-            WizardFormField("Trigger Analyzer", "bool", "--use-trigger", value="no", default="no"),
-            WizardFormField("VirusTotal Scanner", "bool", "--use-virustotal", value="no", default="no"),
-            WizardFormField("AI Defense Analyzer", "bool", "--use-aidefense", value="no", default="no"),
+            _cfg_bool_field("Meta Analyzer", "--enable-meta", cfg, "scanners.skill_scanner.enable_meta"),
+            _cfg_bool_field("Trigger Analyzer", "--use-trigger", cfg, "scanners.skill_scanner.use_trigger"),
+            _cfg_bool_field("VirusTotal Scanner", "--use-virustotal", cfg, "scanners.skill_scanner.use_virustotal"),
+            _cfg_bool_field("AI Defense Analyzer", "--use-aidefense", cfg, "scanners.skill_scanner.use_aidefense"),
             WizardFormField(
                 "Scan Policy",
                 "choice",
@@ -3099,9 +3100,9 @@ def wizard_form_defs(
                 value="",
                 default="",
             ),
-            WizardFormField("Scan Prompts", "bool", "--scan-prompts", value="no", default="no"),
-            WizardFormField("Scan Resources", "bool", "--scan-resources", value="no", default="no"),
-            WizardFormField("Scan Instructions", "bool", "--scan-instructions", value="no", default="no"),
+            _cfg_bool_field("Scan Prompts", "--scan-prompts", cfg, "scanners.mcp_scanner.scan_prompts"),
+            _cfg_bool_field("Scan Resources", "--scan-resources", cfg, "scanners.mcp_scanner.scan_resources"),
+            _cfg_bool_field("Scan Instructions", "--scan-instructions", cfg, "scanners.mcp_scanner.scan_instructions"),
             WizardFormField("Verify After Setup", "bool", "--verify", "--no-verify", value="yes", default="yes"),
         )
         return _hinted(mcp_fields, _MCP_SCANNER_HINTS)
@@ -3230,6 +3231,22 @@ _GUARDRAIL_JUDGE_SECTIONS: tuple[str, ...] = (
 
 def _cfg_str(cfg: object | Mapping[str, Any] | None, path: str, default: str = "") -> str:
     return str(get_config_value(cfg, path, default) or default).strip()
+
+
+def _cfg_bool_field(label: str, flag: str, cfg: object | Mapping[str, Any] | None, path: str) -> WizardFormField:
+    """A yes/no field that opens on the configured value and can turn it off.
+
+    The scanner analyzer toggles showed a hard-coded "no" on an install
+    where the analyzer was on, and "no" emitted nothing, so the form could
+    enable an analyzer but never disable it (GAP-2571). An unchanged field
+    emits no flag; a change emits ``flag`` or ``--no-<flag>``.
+    """
+
+    value = get_config_value(cfg, path, False)
+    if not isinstance(value, bool):
+        value = str(value).strip().lower() in {"1", "true", "yes", "on"}
+    current = "yes" if value else "no"
+    return WizardFormField(label, "bool", flag, "--no-" + flag[2:], value=current, default=current)
 
 
 def _skill_scanner_policy_values(cfg: object | Mapping[str, Any] | None) -> tuple[str, str]:
@@ -5671,6 +5688,12 @@ def build_wizard_args(
                 base.append(field.no_flag)
             continue
         if field.kind in {"string", "int", "choice", "password"}:
+            if wizard == SetupWizard.MCP_SCANNER and field.flag == "--analyzers" and not field.value.strip():
+                # Clearing the list showed an empty field while Run kept the
+                # old list; empty now means auto, as the hint says (GAP-2572).
+                if field.default not in {"", "auto"}:
+                    base.extend((field.flag, "auto"))
+                continue
             if not field.value or not field.flag:
                 continue
             if not always_pass_defaults and field.value == field.default and not field.required:
