@@ -124,7 +124,7 @@ def test_footer_summary_is_a_result_not_the_last_listing_line() -> None:
         "Retention: 7 days",
         "Plan digest: " + "ab" * 32,
     ]
-    assert command_result_summary("setup Observability / destination", listing) == "2 destinations listed"
+    assert command_result_summary("setup Export telemetry", listing) == "2 destinations listed"
     assert is_listing_detail(r"C:\Users\u\.agents\skills") and is_listing_detail("/home/u/.claude/skills")
     assert is_listing_detail("Plan digest: " + "ab" * 32)
     assert not is_listing_detail("Saved 3 rules to policy.yaml")
@@ -146,7 +146,7 @@ def test_read_only_setup_list_says_restart_no_and_plain_goal_words() -> None:
     command = ParsedCommand(
         binary="defenseclaw",
         args=("setup", "observability", "list"),
-        display_name="setup Observability / destination",
+        display_name="setup Export telemetry",
         category="setup",
         needs_preview=True,
     )
