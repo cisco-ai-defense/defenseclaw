@@ -4797,7 +4797,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 ("h/l", "Switch source (Gateway / Verdicts / OTEL / Watchdog)"),
                 ("j/k or Up/Down", "Select a line"),
                 ("Enter", "Open the selected line"),
-                ("1-8 / f", "Filter preset / cycle presets"),
+                ("f", "Cycle filter presets (or click a filter chip)"),
                 ("e / w", "Errors only / warnings and worse"),
                 ("Space", "Pause / resume auto-scroll"),
                 ("/", "Search"),
@@ -10109,8 +10109,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
 
         The source tabs and filter presets are the two button bars right
         below, so they are not repeated here. They were, with numbers
-        ("2 Verdicts") that read as shortcuts although 1-8 pick filter
-        presets, and at 80x24 those rows hid every log line.
+        ("2 Verdicts") that read as shortcuts although digits switch
+        panels, and at 80x24 those rows hid every log line.
         """
 
         header = self.logs_model.header_state()
