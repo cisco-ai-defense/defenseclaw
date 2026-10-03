@@ -4433,6 +4433,7 @@ def setup_gateway(
     """
     gw = app.cfg.gateway
     previous_api_port = gw.api_port
+    previous_target = (gw.host, gw.port)
 
     data_dir = app.cfg.data_dir
     uses_openclaw = remote or "openclaw" in app.cfg.active_connectors()
@@ -4486,9 +4487,17 @@ def setup_gateway(
     # it starts (GAP-2009). That holds for a new API port too, so a stopped
     # gateway gets the same single note (GAP-2153).
     gateway_stopped = not _is_pid_alive(os.path.join(data_dir, "gateway.pid"))
+    # The running gateway keeps its old OpenClaw host and port until the
+    # restart that follows this command, so checking it now reports a
+    # "reconnecting" FAIL row that the restart fixes (GAP-2478).
+    target_changed = (gw.host, gw.port) != previous_target
     _print_gateway_summary(gw, openclaw=uses_openclaw)
 
-    if verify and not api_port_changed and not gateway_stopped:
+    if verify and target_changed and not api_port_changed and not gateway_stopped:
+        click.echo()
+        click.echo("  The gateway connects to the new address after the restart below.")
+        click.echo("  Check it then with: defenseclaw doctor")
+    elif verify and not api_port_changed and not gateway_stopped:
         from defenseclaw.commands.cmd_doctor import _check_openclaw_gateway, _check_sidecar, _DoctorResult
 
         ux.section("Verifying gateway connectivity")
