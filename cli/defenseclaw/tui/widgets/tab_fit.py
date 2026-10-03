@@ -334,9 +334,10 @@ def _every_tab_named(panels: Sequence[tuple[str, str, str]], width: int) -> dict
     def cost() -> int:
         labels = {name: _label(keys[name], chosen[name], 0) for name in keys}
         reserve = max(len(_label(keys[name], titles[name], 0)) - len(labels[name]) for name in keys)
-        alerts = (
-            len(_label(keys["alerts"], chosen["alerts"], 1, True)) - len(labels["alerts"]) if "alerts" in keys else 0
-        )
+        # One cell for a one-digit Alerts count, as a superscript ("¹"), on
+        # every platform: the "(1)" Windows draws cost two more cells and
+        # named Registries "R Registry" there beside free cells (GAP-2588).
+        alerts = 1 if "alerts" in keys else 0
         return strip_width(tuple(labels.values())) + reserve + alerts
 
     # Windows' bracket counts ("2 Alerts(24)", "8 Log(205)") need no extra
@@ -437,9 +438,19 @@ def _named_fit(
         if name in KEEP_BADGE or name in {"overview", active} or not named[name]:
             continue
         before, deficit = named[name], short_of()
-        named[name] = ""
-        if short_of() > deficit - 2:
-            named[name] = before
+        # A shorter name first, so a tab goes bare only when none of its
+        # names fits: "R" stayed bare beside the open "V AI Discovery" with 6
+        # cells free where "R Reg" fits (GAP-2588).
+        shorter = {*_names(name, titles[name]), _shortest(name, titles[name])}
+        shorter = {text for text in shorter if len(text) < len(before)}
+        for text in sorted(shorter, key=lambda text: (len(text), text), reverse=True):
+            named[name] = text
+            if short_of() <= 0:
+                break
+        else:
+            named[name] = ""
+            if short_of() > deficit - 2:
+                named[name] = before
     title = titles[active]
     wants = [title] + [f"{title[:n].rstrip()}…" for n in range(len(title) - 1, 1, -1)]
     for want in [want for want in wants if len(want) > len(named[active])] + [named[active]]:
