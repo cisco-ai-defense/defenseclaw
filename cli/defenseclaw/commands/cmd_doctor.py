@@ -9417,6 +9417,21 @@ def _destination_remediation(destination, live) -> str:
     )
 
 
+def _galileo_canary_remediation(failure_class: str, destination_name: str) -> str:
+    """Next step for a failed Galileo canary row."""
+    if failure_class == "gateway_unavailable":
+        return "start the gateway with 'defenseclaw-gateway start', then run 'defenseclaw doctor' again"
+    test = f"'defenseclaw observability destination test {shlex.quote(destination_name)}'"
+    if failure_class == "delivery_failed":
+        return (
+            f"{test} connects directly, so it can pass while the gateway still cannot deliver. "
+            "Check the Galileo credentials and endpoint ('defenseclaw setup galileo') and the "
+            "gateway's proxy settings (HTTPS_PROXY/NO_PROXY), then run 'defenseclaw-gateway restart' "
+            "from a shell with the right proxy settings, check gateway.log, and run 'defenseclaw doctor' again"
+        )
+    return f"run {test} to check the route"
+
+
 def _check_galileo_trace_canaries(
     status,
     r: _DoctorResult,
@@ -9460,11 +9475,7 @@ def _check_galileo_trace_canaries(
                 label,
                 f"{exc.failure_class}: {exc.message}",
                 r=r,
-                remediation=(
-                    "start the gateway with 'defenseclaw-gateway start', then run 'defenseclaw doctor' again"
-                    if exc.failure_class == "gateway_unavailable"
-                    else f"run 'defenseclaw observability destination test {destination.name}' to check the route"
-                ),
+                remediation=_galileo_canary_remediation(exc.failure_class, destination.name),
             )
             continue
         _emit(
