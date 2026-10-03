@@ -1615,14 +1615,14 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                         id="ai-enable",
                         compact=True,
                         variant="success",
-                        tooltip="Run `defenseclaw agent discovery enable --yes`",
+                        tooltip="Run `defenseclaw agent discovery enable --yes` (d)",
                     )
                     yield Button(
                         "Disable AI Discovery",
                         id="ai-disable",
                         compact=True,
                         variant="warning",
-                        tooltip="Run `defenseclaw agent discovery disable --yes`",
+                        tooltip="Run `defenseclaw agent discovery disable --yes` (d)",
                     )
                     yield Button(
                         "Scan now",
@@ -1652,7 +1652,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                         "Export JSON",
                         id="ai-export",
                         compact=True,
-                        tooltip="Save the AI usage snapshot to disk",
+                        tooltip="Save the AI usage snapshot to disk (e)",
                     )
                 with Horizontal(id="runtime-controls", classes="panel-controls hidden"):
                     yield Button(
@@ -4798,6 +4798,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 ("a", "Show all / recommended models"),
                 ("s", "Scan now"),
                 ("r", "Refresh discovery"),
+                ("e", "Export the snapshot to JSON"),
+                ("d", "Turn AI Discovery on / off"),
             ],
             "runtime": [
                 ("j/k or Up/Down", "Navigate findings"),
@@ -11187,6 +11189,15 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             return self._apply_inventory_action(action)
 
         if self.active_panel == "ai":
+            if not self.ai_discovery_model.filtering and key in {"e", "d"}:
+                # GAP-2103: Export JSON and Enable/Disable had no key.
+                if key == "e":
+                    self._handle_ai_control("ai-export")
+                else:
+                    snapshot = self.ai_discovery_model.snapshot
+                    enabled = bool(snapshot and snapshot.enabled)
+                    self._handle_ai_control("ai-disable" if enabled else "ai-enable")
+                return True
             action = self.ai_discovery_model.handle_key(_vim_key(key))
             return self._apply_ai_discovery_action(action)
         if self.active_panel == "activity":
