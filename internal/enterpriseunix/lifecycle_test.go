@@ -680,7 +680,7 @@ func TestLifecycleLockIsExclusive(t *testing.T) {
 	r := h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")})
 	requireError(t, r, codeBusy)
 	if msg := r.Errors[len(r.Errors)-1].Message; !strings.Contains(msg, "--lock-wait <duration>") ||
-		!strings.Contains(msg, "waited "+formatLockWait(h.env.LockTimeout)+" for it") {
+		!strings.Contains(msg, "waited "+FormatLockWait(h.env.LockTimeout)+" for it") {
 		t.Fatalf("busy must name the wait done and the next step (GAP-1427, GAP-1722): %q", msg)
 	}
 	// GAP-1722: a run that already waited the longest allowed time is not
