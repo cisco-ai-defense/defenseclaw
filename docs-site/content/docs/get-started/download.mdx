@@ -9,6 +9,9 @@ keywords:
   - DefenseClaw enterprise package
 ---
 
+import { OsPanel, OsTabs } from '@/components/install/os-download-tiles';
+import { InstallCommand } from '@/components/install/install-command';
+
 DefenseClaw installs for your own account with one command, and you don't need
 administrator rights. The installer downloads the latest release, checks every
 file against the release's `checksums.txt` and installs `uv` if you don't have
@@ -16,73 +19,63 @@ it. `uv` provides the Python runtime, so you don't need anything else.
 
 ## Install for your OS
 
-<Tabs items={['macOS', 'Linux', 'Windows']}>
+Pick your system. The site detects it and remembers your choice.
 
-<Tab value="macOS">
+<OsTabs>
+<OsPanel os="macos">
 
 **Requires** a Mac with Apple silicon (`arm64`). Intel Macs are unsupported,
 and the installer stops before it changes anything.
 
-```bash
-curl -LsSf https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.sh | bash
-```
+<InstallCommand command="curl -LsSf https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.sh | bash" prompt="$" copyLabel="Copy the install command" />
 
 To install, guard one agent and run first-time setup in a single step:
 
-```bash
-curl -LsSf https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.sh | bash -s -- --connector claudecode --quickstart
-```
+<InstallCommand command="curl -LsSf https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.sh | bash -s -- --connector claudecode --quickstart" prompt="$" copyLabel="Copy the install-and-setup command" />
 
-**Menu-bar app (optional).** Download `DefenseClawMac-<version>-macos-arm64.dmg`
-from the [latest release](https://github.com/cisco-ai-defense/defenseclaw/releases/latest).
+**Menu-bar app (preview, optional).** Download `DefenseClawMac-<version>-macos-arm64.dmg`
+from the [latest release](https://github.com/cisco-ai-defense/defenseclaw/releases/latest);
+it needs macOS 14 or newer.
 After that, the installer and `defenseclaw upgrade` keep an installed app up to
 date, but they don't install it for you. See [macOS app](/docs/macos-app).
 
-</Tab>
+</OsPanel>
 
-<Tab value="Linux">
+<OsPanel os="linux">
 
 **Requires** Linux on `x86_64` or `arm64`.
 
-```bash
-curl -LsSf https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.sh | bash
-```
+<InstallCommand command="curl -LsSf https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.sh | bash" prompt="$" copyLabel="Copy the install command" />
 
 To install, guard one agent and run first-time setup in a single step:
 
-```bash
-curl -LsSf https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.sh | bash -s -- --connector claudecode --quickstart
-```
+<InstallCommand command="curl -LsSf https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.sh | bash -s -- --connector claudecode --quickstart" prompt="$" copyLabel="Copy the install-and-setup command" />
 
 If the installer says `~/.local/bin` isn't on your `PATH`, run the line it
 prints, then open a new shell.
 
-</Tab>
+</OsPanel>
 
-<Tab value="Windows">
+<OsPanel os="windows">
 
 **Requires** Windows on `x64`, with Windows PowerShell 5.1 or PowerShell 7.
 Windows on ARM64 isn't certified, even with x64 emulation, so the installer
 stops there. Run it as the user who uses DefenseClaw, not as an administrator.
 
-```powershell
-irm https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.ps1 | iex
-```
+<InstallCommand command="irm https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.ps1 | iex" prompt="PS>" copyLabel="Copy the install command" />
 
 To install, guard one agent and run first-time setup in a single step:
 
-```powershell
-& ([scriptblock]::Create((irm https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.ps1))) -Connector claudecode -Quickstart
-```
+<InstallCommand command="& ([scriptblock]::Create((irm https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.ps1))) -Connector claudecode -Quickstart" prompt="PS>" copyLabel="Copy the install-and-setup command" />
 
 The installer adds `%USERPROFILE%\.local\bin` to your user `PATH`. If it tells
 you to open a new terminal, do that before you run `defenseclaw`. The
 [native Windows guide](/docs/get-started/windows) covers the Windows lanes and
 troubleshooting.
 
-</Tab>
+</OsPanel>
 
-</Tabs>
+</OsTabs>
 
 Then run `defenseclaw init`. The [5-minute quickstart](/docs/get-started/quickstart)
 takes you from there to your first blocked tool call.
@@ -92,7 +85,13 @@ The [support matrix](/docs/support-matrix) shows each agent on macOS, Linux and
 Windows, and what was verified for this release.
 </Callout>
 
-## Managing many machines?
+<Callout title="On a computer your organization manages">
+Where an administrator has deployed DefenseClaw enterprise, the per-user
+installer and `defenseclaw upgrade` refuse to run: the organization installs
+and updates DefenseClaw through its MDM.
+</Callout>
+
+## Managing many machines? [#enterprise]
 
 The standalone enterprise packages install DefenseClaw as operating-system
 services that belong to the administrator, so users can't turn the protection
