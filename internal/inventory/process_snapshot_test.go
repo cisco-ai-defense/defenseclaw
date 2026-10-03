@@ -363,3 +363,25 @@ func TestClassifyWindowsProcessesFoldsAmpPluginRuntimes(t *testing.T) {
 		t.Fatalf("connectors = %q %q %q %q", procs[0].Connector, procs[1].Connector, procs[2].Connector, procs[3].Connector)
 	}
 }
+
+// GAP-2043: VS Code Copilot Chat runs its agent host as copilot-runtime.exe
+// (under Code.exe), which runs DefenseClaw's Copilot hooks: it is a Copilot
+// process. The Copilot CLI's own copilot-runtime.exe engine child is folded
+// into its run, so one CLI session stays one process.
+func TestClassifyWindowsProcessesFindsTheVSCodeCopilotAgentHost(t *testing.T) {
+	catalog, err := LoadAISignatures()
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeImage := `c:\Program Files\Microsoft VS Code\07f806f999\resources\app\node_modules.asar.unpacked\@github\copilot-sdk-win32-x64\prebuilds\win32-x64\copilot-runtime.exe`
+	procs := []processInfo{
+		{PID: 13728, PPID: 15252, Comm: "copilot-runtime.exe", Image: runtimeImage, Windows: true},
+		{PID: 15252, PPID: 900, Comm: "Code.exe", Image: `c:\Program Files\Microsoft VS Code\Code.exe`, Windows: true},
+		{PID: 5000, PPID: 901, Comm: "copilot.exe", Image: `C:\Users\u\AppData\Roaming\npm\copilot.exe`, Windows: true},
+		{PID: 5001, PPID: 5000, Comm: "copilot-runtime.exe", Image: `C:\Users\u\AppData\Local\copilot\pkg\copilot-runtime.exe`, Windows: true},
+	}
+	classifyWindowsProcesses(procs, catalog)
+	if procs[0].Connector != "copilot" || procs[1].Connector != "" || procs[2].Connector != "copilot" || procs[3].Connector != "" {
+		t.Fatalf("connectors = %q %q %q %q", procs[0].Connector, procs[1].Connector, procs[2].Connector, procs[3].Connector)
+	}
+}

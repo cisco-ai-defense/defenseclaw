@@ -22,10 +22,10 @@ func init() {
 // LocalSystem's) discovery view at the standalone managed deployment; a
 // standard account cannot read its config or gateway token.
 func pinEnterpriseDiscoveryEnv() error {
-	return pinManagedAdministratorEnvironment(
-		"enterprise windows discovery",
-		"the AI Discovery inventory of a managed computer can be read only from an elevated Administrator prompt or by the MDM agent",
-	)
+	return pinManagedAdministratorEnvironment("enterprise windows discovery", func() string {
+		return windowsManagedStandardUserViewAnswer("the AI Discovery inventory",
+			"enterprise windows discovery --user "+managedHostCurrentAccountName())
+	})
 }
 
 // newWindowsDiscoveryCommand is `enterprise windows discovery`, the Windows

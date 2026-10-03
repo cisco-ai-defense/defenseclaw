@@ -402,6 +402,7 @@
       ],
       "process_names": [
         "copilot",
+        "copilot-runtime",
         "GitHub Copilot"
       ],
       "config_paths": [
