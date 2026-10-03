@@ -77,9 +77,9 @@ depend on Intune:
   -SetupPath .\DefenseClawSetup-Enterprise-Standalone-x64.exe `
   -Sha256 <SHA-256 from the cosign-verified checksums.txt> `
   -ConfigPath .\config.yaml `
-  -OutputDirectory .\ws1-defenseclaw-1.4.0 `
-  -ProductVersion 1.4.0
-Compress-Archive -Path .\ws1-defenseclaw-1.4.0\content\* -DestinationPath .\DefenseClaw-1.4.0.zip
+  -OutputDirectory .\ws1-defenseclaw-1.0.0 `
+  -ProductVersion 1.0.0
+Compress-Archive -Path .\ws1-defenseclaw-1.0.0\content\* -DestinationPath .\DefenseClaw-1.0.0.zip
 ```
 
 The `content` folder holds the Setup, `config.yaml`, the
@@ -125,7 +125,7 @@ set:
 | | **Installer Success Exit Code** | `0` |
 | Deployment Options > When To Call Install Complete | **Identify Application By** | **Using Custom Script** |
 | | **Script Type** | PowerShell |
-| | **Command to Run the Script** | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\detect.ps1 -MinimumVersion 1.4.0` |
+| | **Command to Run the Script** | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\detect.ps1 -MinimumVersion <version>` |
 | | **Custom Script File** | `packaging/mdm/windows/detect.ps1` |
 | | **Success Exit** | `0` |
 
@@ -350,7 +350,7 @@ Add a sensor in **Resources** > **Scripting** > **Sensors** > **Add** >
 | **Code** | `detect.sh`, with the settings below |
 
 ```bash
-DC_MIN_VERSION="1.4.0"
+DC_MIN_VERSION="1.0.0"
 DC_REQUIRE_HEALTHY=1
 DC_FORMAT="value"
 ```

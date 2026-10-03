@@ -11,6 +11,30 @@ keywords:
   - tamper resistance
 ---
 
+## Is this for you?
+
+- **One person, one computer: use the open-source install.** You install
+  DefenseClaw for yourself, and you own it: you can change its policy or turn
+  it off. Start with the [Quickstart](/docs/get-started/quickstart).
+- **A fleet your IT team manages: use enterprise deployment.** An
+  administrator or an MDM installs DefenseClaw as operating-system services,
+  and the people who run AI agents, and the agents themselves, cannot turn
+  it off.
+- **What you need:** an MDM, configuration-management tool or administrator
+  shell that runs commands as SYSTEM on Windows and as root on Linux and
+  macOS, and agents that run as standard users.
+
+Which features each edition offers is in the
+[feature table](/docs/support-matrix#features), and which agents are protected
+on which OS in the [enterprise route table](/docs/support-matrix#enterprise).
+
+<Callout title="Ready to deploy?">
+[Deploy to a fleet](/docs/enterprise/get-started) walks through the six steps,
+from choosing a profile to a ringed rollout, and links to each detail page.
+</Callout>
+
+## How enterprise deployment differs
+
 A normal DefenseClaw install belongs to the person who runs the AI agent. That
 person can stop it, edit its policy, or remove its hooks. Enterprise
 deployment moves DefenseClaw out of their reach. An administrator or an MDM
@@ -186,13 +210,11 @@ Details are under **Requirements** on each install page:
 [Linux](/docs/enterprise/linux#requirements),
 [macOS](/docs/enterprise/macos#requirements).
 
-DefenseClaw protects each agent in one of three ways:
-
-| How | Agents | Notes |
-| --- | --- | --- |
-| [Machine policy](/docs/enterprise/concepts#machine-policy-connector) | Codex, Claude Code, Cursor, GitHub Copilot, and OpenCode through DefenseClaw's managed OpenCode plugin | DefenseClaw's hooks sit in the vendor's administrator-owned policy files, which apply to every user of the computer |
-| [Per-user](/docs/enterprise/concepts#per-user-connector) | Devin, Antigravity, Hermes, Amp, Kiro. On Linux and macOS also OpenHands and OmniGent | The guardian writes DefenseClaw's hook, or plugin, into each enrolled user's own agent config and repairs it |
-| [Through the ACP guard](/docs/enterprise/concepts#acp-mediated-connector) | Kiro in an editor that starts it over ACP | Run it through `defenseclaw-gateway enterprise acp`. See [ACP guard](/docs/acp-guard) |
+DefenseClaw protects each agent through vendor machine policy, a per-user
+hook the guardian maintains, or the ACP guard. The routes for each agent are
+in step 2 of [Deploy to a fleet](/docs/enterprise/get-started#2-pick-the-agents),
+and the agent and OS combinations verified in this release are in the
+[enterprise route table](/docs/support-matrix#enterprise).
 
 OpenClaw and ZeptoClaw are not supported in enterprise deployments.
 OpenHands and OmniGent are refused on Windows. The per-OS details, including
@@ -316,6 +338,7 @@ install, as [Cisco AI Defense key](/docs/enterprise/ai-defense-key) shows.
 ## Next steps
 
 <Cards>
+  <Card title="Deploy to a fleet" href="/docs/enterprise/get-started" description="The six steps from profile and agents to your MDM recipe, ensure and a ringed rollout." />
   <Card title="Plan a rollout" href="/docs/enterprise/rollout" description="Choose agents and users, pilot in observe mode, handle existing per-user installs, and expand in rings." />
   <Card title="Threat model" href="/docs/enterprise/threat-model" description="Trust zones, how each boundary is protected, and the risks that remain." />
   <Card title="Windows" href="/docs/enterprise/windows" description="Install the four standalone services with the Setup program or PowerShell 7." />
