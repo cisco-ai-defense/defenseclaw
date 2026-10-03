@@ -1236,6 +1236,15 @@ function Restore-Slot([string]$Slot) {
     return $failed
 }
 
+function Clear-SetupDataDir([string]$Failed) {
+    # DefenseClaw Setup's gateway re-applies the permissions of its whole data
+    # folder before it starts and gives its child 5 seconds, so the failed
+    # copy and uv's cache (about 28,000 files) kept it from starting after a
+    # restore (GAP-1839). Setup cannot use either of them.
+    Invoke-Quietly { Remove-Tree $Failed }
+    Invoke-Quietly { Remove-Tree (Join-Path $DataDir ".uv") }
+}
+
 function Restore-Snapshot {
     Clear-StagedRelease
     try { $failed = Restore-Slot $Snap } catch {
@@ -1243,12 +1252,17 @@ function Restore-Snapshot {
         Write-Err $_.Exception.Message
         Die "Could not restore $previousLabel; run the installer again to finish restoring it. Log: $($Run.Log)"
     }
-    Restart-Old
-    if (-not $PrevVersion) {
+    if ($Setup) {
+        Clear-SetupDataDir $failed
+    } elseif (-not $PrevVersion) {
         # A first install has nothing to look back at, and the copy it kept
         # (about 2 GB) held a full disk full for every account (GAP-1883).
         Invoke-Quietly { Remove-Tree $failed }
-        Write-KeptUvCache
+    }
+    Restart-Old
+    if (-not $PrevVersion) { Write-KeptUvCache; return }
+    if ($Setup) {
+        Write-Info "The failed $Ver install and its download cache were removed, so DefenseClaw Setup's gateway can start"
         return
     }
     $bytes = (Get-ChildItem -LiteralPath $failed -Recurse -Force -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
@@ -1332,12 +1346,14 @@ function Resume-InterruptedRun {
             $failed = Restore-Slot $slot
             # A DefenseClaw Setup install that was replaced runs its own gateway (GAP-1839).
             $setupInstall = Find-SetupInstall
-            if ($wasRunning -and $setupInstall -and -not (Test-Path -LiteralPath (Join-Path $BinDir "defenseclaw-gateway.exe"))) {
+            $setupBack = $setupInstall -and -not (Test-Path -LiteralPath (Join-Path $BinDir "defenseclaw-gateway.exe"))
+            if ($setupBack) { Clear-SetupDataDir $failed }
+            if ($wasRunning -and $setupBack) {
                 Start-SetupGateway $setupInstall.Root
             } elseif ($wasRunning) {
                 [void](Start-Gateway)
             }
-            Write-Warn "The interrupted install was kept in $failed"
+            if (-not $setupBack) { Write-Warn "The interrupted install was kept in $failed" }
         } else {
             # The snapshot never finished, so live data was only copied, not changed.
             Undo-Snapshot $slot
