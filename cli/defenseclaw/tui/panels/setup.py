@@ -2026,13 +2026,15 @@ def _openclaw_path_field(cfg: object | Mapping[str, Any] | None, label: str, key
 def action_matrix_fields(prefix: str, cfg: object | Mapping[str, Any] | None) -> tuple[ConfigField, ...]:
     if prefix not in {"skill_actions", "mcp_actions", "plugin_actions"}:
         return (ConfigField("(unknown actions prefix)", prefix + ".error", "header"),)
+    # A short group header with no value, so it reads whole: the long one
+    # and its legend value were both cut with "…" at every width (GAP-2508).
+    # The legend is the header's hint; each row's own hint names its choices.
     out = [
         ConfigField(
-            label=".. " + prefix.replace("_", " ").upper() + " (severity -> file / runtime / install) ..",
+            label=".. " + prefix.replace("_", " ").upper() + " (per severity) ..",
             key=prefix + ".hint",
             kind="header",
-            value="file: quarantine/none; runtime: enable/disable; install: none/block/allow",
-            original="file: quarantine/none; runtime: enable/disable; install: none/block/allow",
+            hint="file: quarantine/none; runtime: enable/disable; install: none/block/allow",
         ),
     ]
     for severity in ("critical", "high", "medium", "low", "info"):

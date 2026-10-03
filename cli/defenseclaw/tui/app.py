@@ -2716,6 +2716,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             panel = self.active_panel
             if panel == "setup" or self._panel_nav(panel) or self._panel_aside(panel) is not None:
                 self.call_after_refresh(self._render_chrome)
+            elif panel == "overview":
+                # Overview's cards are built for the current width (GAP-2509).
+                self.call_after_refresh(self._update_body_only)
 
     def _mark_overflowing_controls(self) -> None:
         """Say so on a button bar whose last buttons are cut off.
@@ -9566,7 +9569,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
 
         stable_text = re.sub(r"\buptime=\d+s\b", "uptime=<live>", self.body_text)
         stable_text = re.sub(r"\b\d+(?:s|m|h|d) ago\b", "<live> ago", stable_text)
-        return ("overview", self.help_open, stable_text)
+        # The CONFIGURATION card is laid out for the width at render time, so
+        # a new width is new content: after a resize it kept the old width's
+        # wrapping until the next data change (GAP-2509).
+        width = int(getattr(self.size, "width", 0) or 0)
+        return ("overview", self.help_open, width, stable_text)
 
     def _runtime_sample_time(self) -> str:
         """When the last runtime sample was taken ("14:02:11", "Oct 02 14:02"), or "".
@@ -12238,7 +12245,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                         for (label, value), check in zip(cells, checks, strict=True)
                     ),
                 )
-            # Long group headers (".. PLUGIN ACTIONS (severity -> …) ..") would
+            # Long group headers (".. Unified LLM (for scanners ...) ..") would
             # size the Field column and push values off an 80-column screen;
             # the focused field's full label is in the body line above.
             width = int(getattr(getattr(self, "size", None), "width", 0) or 0)
@@ -15270,6 +15277,25 @@ def _project_omnigent_effective_readiness(
     )
 
 
+_GATEWAY_STARTUP_GRACE_SECONDS = 90
+
+
+def _gateway_listener_pending(trust: object, *, now: float | None = None) -> bool:
+    """True when the managed gateway started recently and has no API listener yet."""
+
+    if getattr(trust, "code", "") != "missing_listener":
+        return False
+    record = getattr(trust, "record", None)
+    try:
+        started = int(getattr(record, "start_time", "") or 0)
+    except (TypeError, ValueError):
+        return False
+    if started <= 0:
+        return False
+    age = (time.time() if now is None else now) - started
+    return 0 <= age <= _GATEWAY_STARTUP_GRACE_SECONDS
+
+
 def _fetch_gateway_health(config: object | None) -> GatewayHealthResult:
     """Probe the configured authenticated sidecar status without using proxy state.
 
@@ -15316,6 +15342,11 @@ def _fetch_gateway_health(config: object | None) -> GatewayHealthResult:
             # Report it as offline so the Overview gives the start command
             # instead of an identity error (GAP-1110).
             return GatewayHealthResult("offline", "the gateway is not running")
+        if _gateway_listener_pending(trust):
+            # Our gateway process is up but has not bound its API port yet:
+            # right after a restart that is startup, not an identity
+            # problem (GAP-2513).
+            return GatewayHealthResult("starting", "starting")
         return GatewayHealthResult("error", f"gateway listener identity is unverified: {trust.detail}")
 
     try:

@@ -15323,16 +15323,16 @@ def _restart_openclaw_gateway() -> bool:
             )
             return True
         if result.returncode == 0:
-            click.echo(" ✓")
+            ux.echo(" ✓")
             return True
-        click.echo(" ✗")
+        ux.echo(" ✗")
         err = (result.stderr or result.stdout or "").strip()
         if err:
             for line in err.splitlines()[:3]:
                 click.echo(f"    {line}")
         return False
     except FileNotFoundError:
-        click.echo(" ✗ (openclaw CLI not found)")
+        ux.echo(" ✗ (openclaw CLI not found)")
         click.echo("    Install OpenClaw or restart its gateway manually.")
         return False
     except subprocess.TimeoutExpired:
@@ -15340,7 +15340,7 @@ def _restart_openclaw_gateway() -> bool:
         # state that we can safely reconcile here.  A timeout is therefore a
         # fail-closed restart failure; the native DefenseClaw gateway helper
         # below performs its own identity-aware timeout reconciliation.
-        click.echo(" ✗ (timed out)")
+        ux.echo(" ✗ (timed out)")
         return False
 
 
@@ -15632,7 +15632,7 @@ def _restart_defense_gateway(
         return False
     was_running = pid_alive
     if not was_running and not start_if_stopped:
-        click.echo("  defenseclaw-gateway: not running — skipping restart.")
+        ux.echo("  defenseclaw-gateway: not running — skipping restart.")
         click.echo("    Start it with: defenseclaw-gateway start")
         return True
 
@@ -15640,7 +15640,7 @@ def _restart_defense_gateway(
     click.echo(f"  defenseclaw-gateway: {action}...", nl=False)
 
     if lifecycle_executable and lifecycle_executable_requires_running and not was_running:
-        click.echo(" ✗ (verified running executable is no longer active)")
+        ux.echo(" ✗ (verified running executable is no longer active)")
         return False
     search_path = child_env.get("PATH", os.defpath) if child_env is not None else None
     executable = (
@@ -15651,14 +15651,14 @@ def _restart_defense_gateway(
     if not executable:
         refused = "" if lifecycle_executable else _refused_gateway_lifecycle_candidate(search_path)
         if refused:
-            click.echo(" ✗ (untrusted gateway binary)")
+            ux.echo(" ✗ (untrusted gateway binary)")
             click.echo(f"    {refused}")
             return False
-        click.echo(" ✗ (binary not found)")
+        ux.echo(" ✗ (binary not found)")
         click.echo("    Build with: make gateway")
         return False
     if not os.path.isabs(executable) or not os.path.isfile(executable) or not os.access(executable, os.X_OK):
-        click.echo(" ✗ (binary is not a verified executable file)")
+        ux.echo(" ✗ (binary is not a verified executable file)")
         return False
     executable = str(Path(executable).resolve())
     cmd = [executable, "restart"] if was_running else [executable, "start"]
@@ -15680,9 +15680,9 @@ def _restart_defense_gateway(
                 data_dir,
                 previous_generation=generation_before,
             ):
-                click.echo(" ✓")
+                ux.echo(" ✓")
                 return True
-            click.echo(" ✗ (API health timed out)")
+            ux.echo(" ✗ (API health timed out)")
             click.echo("    The gateway process started but its sidecar API never became ready.")
             return False
         err = (result.stderr or result.stdout or "").strip()
@@ -15692,23 +15692,23 @@ def _restart_defense_gateway(
             data_dir,
             previous_generation=generation_before,
         ):
-            click.echo(" ✓ (ready after a slow start)")
+            ux.echo(" ✓ (ready after a slow start)")
             return True
         if _GATEWAY_LEFT_STARTING_MARKER in err:
             # Not a failed restart: the gateway is alive and was kept (GAP-2080).
             _gateway_left_starting = True
-            click.echo(" ⚠ (still starting; kept running)")
+            ux.echo(" ⚠ (still starting; kept running)")
         else:
-            click.echo(" ✗")
+            ux.echo(" ✗")
         if err:
             for line in err.splitlines()[:3]:
                 click.echo(f"    {line}")
         return False
     except UnsafePathError:
-        click.echo(" ✗ (binary is not a verified executable file)")
+        ux.echo(" ✗ (binary is not a verified executable file)")
         return False
     except FileNotFoundError:
-        click.echo(" ✗ (binary not found)")
+        ux.echo(" ✗ (binary not found)")
         click.echo("    Build with: make gateway")
         return False
     except subprocess.TimeoutExpired:
@@ -15727,11 +15727,11 @@ def _restart_defense_gateway(
             data_dir,
             previous_generation=generation_before,
         ):
-            click.echo(" ✓ (ready after launcher timeout)")
+            ux.echo(" ✓ (ready after launcher timeout)")
             return True
         if not was_running:
             _cleanup_timed_out_gateway_start(executable, child_env=child_env)
-        click.echo(" ✗ (timed out; final status is not healthy)")
+        ux.echo(" ✗ (timed out; final status is not healthy)")
         return False
 
 
@@ -15892,7 +15892,7 @@ def _restart_defense_gateway_native(
                 allow_breakaway=True,
             )
     except UnsafePathError as exc:
-        click.echo(" ✗ (installed gateway could not be held for the launch)")
+        ux.echo(" ✗ (installed gateway could not be held for the launch)")
         click.echo(f"    {exc}")
         return False
     except CommandTimeoutError as exc:
@@ -15900,24 +15900,24 @@ def _restart_defense_gateway_native(
             data_dir,
             previous_generation=generation_before,
         ):
-            click.echo(" ✓ (API ready after launcher timeout)")
+            ux.echo(" ✓ (API ready after launcher timeout)")
             return True
         _echo_native_command_diagnostics(exc.result)
         if not was_running:
             _native_gateway_lifecycle_stop(runner, executable)
-        click.echo(" ✗ (timed out; final API state is not healthy)")
+        ux.echo(" ✗ (timed out; final API state is not healthy)")
         return False
     except LocalStackError as exc:
-        click.echo(" ✗")
+        ux.echo(" ✗")
         click.echo(f"    {exc}")
         return False
     if result.returncode == 0 and _wait_for_defense_gateway_api(
         data_dir,
         previous_generation=generation_before,
     ):
-        click.echo(" ✓")
+        ux.echo(" ✓")
         return True
-    click.echo(" ✗")
+    ux.echo(" ✗")
     _echo_native_command_diagnostics(result)
     if result.returncode == 0:
         click.echo("    The lifecycle command returned, but the sidecar API did not reach running state.")

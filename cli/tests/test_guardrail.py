@@ -2059,6 +2059,40 @@ class TestRestartDefenseGateway(unittest.TestCase):
             self.assertEqual(mock_ready.call_args.args, (tmpdir,))
             self.assertIsNotNone(mock_ready.call_args.kwargs["previous_generation"])
 
+    # GAP-2490: with stdout not a TTY the restart mark is ASCII like every other line.
+    @patch(
+        "defenseclaw.commands.cmd_setup._gateway_pid_file_identifies_gateway",
+        return_value=True,
+    )
+    @patch(
+        "defenseclaw.commands.cmd_setup._wait_for_defense_gateway_api",
+        return_value=True,
+    )
+    @patch("defenseclaw.commands.cmd_setup.run_pinned_executable")
+    def test_restart_mark_uses_ascii_fallback_when_redirected(self, mock_run, _mock_ready, _mock_identity):
+        import io
+        from contextlib import redirect_stdout
+
+        from defenseclaw import ux
+        from defenseclaw.commands.cmd_setup import _restart_defense_gateway
+
+        mock_run.return_value = MagicMock(returncode=0)
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with open(os.path.join(tmpdir, "gateway.pid"), "w") as f:
+                f.write(str(os.getpid()))
+            with (
+                patch.object(ux, "_configured_unicode_output", False),
+                patch(
+                    "defenseclaw.commands.cmd_setup._gateway_lifecycle_executable",
+                    return_value=sys.executable,
+                ),
+                redirect_stdout(out),
+            ):
+                self.assertTrue(_restart_defense_gateway(tmpdir))
+        self.assertIn("defenseclaw-gateway: restarting... OK", out.getvalue())
+        self.assertNotIn("✓", out.getvalue())
+
     @patch(
         "defenseclaw.commands.cmd_setup._wait_for_defense_gateway_api",
         return_value=False,
