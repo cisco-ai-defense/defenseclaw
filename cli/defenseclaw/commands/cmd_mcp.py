@@ -1980,8 +1980,9 @@ def unblock(app: AppContext, target: str, connector_flag: str) -> None:
             return
         has_state = has_unscoped_state
     if not has_state:
-        scope = f" for {connector}" if connector else ""
-        click.echo(f"[mcp] {target!r} has no enforcement state to clear{scope}")
+        # GAP-2258: same "[mcp] ... (scope)." shape as the other lines.
+        scope = f" ({connector})" if connector else " (every connector)"
+        click.echo(f"[mcp] Nothing to clear for {target!r}{scope}.")
         return
 
     # GAP-2049: a plain result, not the internal list of cleared states.

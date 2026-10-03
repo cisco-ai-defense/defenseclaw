@@ -144,7 +144,14 @@ class TestMCPUnblock(MCPCommandTestBase):
     def test_unblock_no_state(self):
         result = self.invoke(["unblock", "http://clean.com"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("no enforcement state", result.output)
+        # GAP-2258: plain wording, scope in parentheses, closing period.
+        self.assertIn("[mcp] Nothing to clear for 'http://clean.com' (every connector).", result.output)
+        self.assertNotIn("enforcement state", result.output)
+
+    def test_unblock_no_state_scoped(self):
+        result = self.invoke(["unblock", "http://clean.com", "--connector", "openclaw"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("[mcp] Nothing to clear for 'http://clean.com' (openclaw).", result.output)
 
     def test_unblock_does_not_add_to_allow_list(self):
         pe = PolicyEngine(self.app.store)
