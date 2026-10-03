@@ -1,0 +1,17 @@
+model_list:
+  - model_name: "defenseclaw-default"
+    litellm_params:
+      model: "bedrock/us.anthropic.claude-sonnet-4-20250514-v1:0"
+      aws_region_name: "us-west-2"
+
+  - model_name: "defenseclaw-quality"
+    litellm_params:
+      model: "bedrock/us.anthropic.claude-sonnet-4-20250514-v1:0"
+      aws_region_name: "us-west-2"
+
+general_settings:
+  master_key: "os.environ/DEFENSECLAW_MASTER_KEY"
+
+litellm_settings:
+  drop_params: true
+  callbacks: ["defenseclaw.callbacks.guardrails.proxy_handler_instance"]

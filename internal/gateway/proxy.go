@@ -37,7 +37,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/maximhq/bifrost/core/schemas"
 	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/crypto/pbkdf2"
 	"golang.org/x/time/rate"
@@ -2570,7 +2569,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	}
 
 	// Forward inbound HTTP headers to the upstream provider via
-	// Bifrost's per-request schemas.BifrostContextKeyExtraHeaders
+	// Bifrost's per-request contextKeyExtraHeaders
 	// context value (honored by every Bifrost provider through
 	// providers/utils/utils.go:SetExtraHeaders). Same blocklist /
 	// validation / caps as the passthrough path. Toggled by
@@ -2597,7 +2596,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		}
 		if len(fwd) > 0 {
 			r = r.WithContext(context.WithValue(r.Context(),
-				schemas.BifrostContextKeyExtraHeaders,
+				contextKeyExtraHeaders,
 				map[string][]string(fwd)))
 			forwardedHeaderCount = n
 		}
@@ -2839,7 +2838,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 				// preserving provider-owned headers and the selected standard key.
 				r = r.WithContext(context.WithValue(
 					r.Context(),
-					schemas.BifrostContextKeyExtraHeaders,
+					contextKeyExtraHeaders,
 					map[string][]string{},
 				))
 				forwardedHeaderCount = 0
@@ -6068,7 +6067,7 @@ func splitURLPathSegments(path string) []string {
 }
 
 func applyRawForwardRequestHeaders(upReq *http.Request, r *http.Request, providerName, targetAPIKey string) {
-	fwd, forwardedHeaderContextBound := r.Context().Value(schemas.BifrostContextKeyExtraHeaders).(map[string][]string)
+	fwd, forwardedHeaderContextBound := r.Context().Value(contextKeyExtraHeaders).(map[string][]string)
 	if forwardedHeaderContextBound {
 		for name, values := range fwd {
 			upReq.Header.Del(name)
