@@ -8883,16 +8883,22 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
 
         services_table = Table.grid(padding=(0, 1), expand=True)
         services_table.add_column(no_wrap=True, width=2)
-        services_table.add_column(no_wrap=True, width=12)
+        # 13 = the longest label ("AI Discovery") plus a space, so it never
+        # touches its state (GAP-2391).
+        services_table.add_column(no_wrap=True, width=13)
         # Below 100 columns the card is too narrow for a detail column (it
         # folded "canonical destination plan loading" four letters a line),
         # so the detail goes under the state instead.
         narrow_services = self.size.width < 100
+        # The last column takes ratio=1 so only it absorbs the spare width.
+        # Without a ratio, an expanded grid spreads it over every column, so
+        # with short details (gateway stopped) the label and state columns
+        # widened and jumped right (GAP-2391).
         if narrow_services:
-            services_table.add_column()
+            services_table.add_column(ratio=1)
         else:
             services_table.add_column(no_wrap=True, width=10)
-            services_table.add_column(overflow="fold")
+            services_table.add_column(overflow="fold", ratio=1)
         services_layout = (
             ("Gateway", "gateway"),
             ("Agent", "agent"),
