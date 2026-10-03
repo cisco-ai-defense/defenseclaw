@@ -4131,7 +4131,7 @@ def wizard_state_summary(wizard: SetupWizard | int, cfg: object | Mapping[str, A
         provider = _cfg_str(cfg, "llm.provider")
         model = _cfg_str(cfg, "llm.model")
         main = f"{provider}/{model}" if (provider and model) else (model or provider or "not set")
-        judge = _cfg_str(cfg, "guardrail.judge.model") or "not set"
+        judge = _cfg_str(cfg, "guardrail.judge.llm.model") or _cfg_str(cfg, "guardrail.judge.model") or "not set"
         connectors = _active_connector_names_for_setup(cfg)
         connector_summary = ", ".join(connectors) if connectors else "none"
         role = "judge+agent available" if _any_active_connector_is_proxy(cfg) else "judge only"
@@ -6405,11 +6405,16 @@ def _guardrail_wizard_fields_for(
     judge_model = ""
     judge_provider_default = "bedrock"
     judge_model_default = ""
-    if judge := str(get_config_value(cfg, "guardrail.judge.model", "") or ""):
+    if judge := str(
+        get_config_value(cfg, "guardrail.judge.llm.model", "")
+        or get_config_value(cfg, "guardrail.judge.model", "")
+        or ""
+    ):
         if "/" in judge:
             judge_provider, judge_model = judge.split("/", 1)
         else:
             judge_model = judge
+            judge_provider = str(get_config_value(cfg, "guardrail.judge.llm.provider", "") or "") or judge_provider
     elif model := str(get_config_value(cfg, "llm.model", "") or ""):
         judge_model = model
         judge_model_default = model
@@ -6429,12 +6434,20 @@ def _guardrail_wizard_fields_for(
     # A live provider change (driver) wins so the conditional Bedrock /
     # Vertex / Azure judge groups re-derive against the new selection.
     judge_provider = (overrides.get("@Provider") or judge_provider).strip().lower() or judge_provider
-    judge_key_env = str(get_config_value(cfg, "guardrail.judge.api_key_env", "") or "")
+    judge_key_env = str(
+        get_config_value(cfg, "guardrail.judge.llm.api_key_env", "")
+        or get_config_value(cfg, "guardrail.judge.api_key_env", "")
+        or ""
+    )
     judge_key_default = ""
     if not judge_key_env:
         judge_key_env = str(get_config_value(cfg, "llm.api_key_env", "") or "")
         judge_key_default = judge_key_env
-    judge_base = str(get_config_value(cfg, "guardrail.judge.api_base", "") or "")
+    judge_base = str(
+        get_config_value(cfg, "guardrail.judge.llm.base_url", "")
+        or get_config_value(cfg, "guardrail.judge.api_base", "")
+        or ""
+    )
     judge_base_default = ""
     if not judge_base:
         judge_base = str(get_config_value(cfg, "llm.base_url", "") or "")
