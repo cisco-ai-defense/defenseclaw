@@ -1196,7 +1196,7 @@ func finishWindowsEnterpriseStandalone(
 	oneLine := unknownProfile || (exitCode == enterprisestatus.WindowsExitAccessDenied &&
 		len(result.Errors) != 0 && result.Errors[0].Code == "elevation_required")
 	if opts.jsonOutput {
-		if err := json.NewEncoder(cmd.OutOrStdout()).Encode(result); err != nil {
+		if err := newEnterpriseJSONEncoder(cmd.OutOrStdout()).Encode(result); err != nil {
 			return withExitCode(fmt.Errorf("encode the standalone lifecycle result: %w", err), enterprisestatus.WindowsExitFailure)
 		}
 		// The JSON result carries every error in errors[] (GAP-2445).

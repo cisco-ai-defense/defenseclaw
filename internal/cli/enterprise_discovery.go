@@ -222,7 +222,7 @@ func writeManagedViewRefusalJSON(w io.Writer, err error) {
 	if errors.As(err, &refusal) {
 		code, message = refusal.code, refusal.message
 	}
-	_ = json.NewEncoder(w).Encode(struct {
+	_ = newEnterpriseJSONEncoder(w).Encode(struct {
 		OK       bool                       `json:"ok"`
 		Errors   []enterprisestatus.Message `json:"errors"`
 		ExitCode int                        `json:"exit_code"`
@@ -367,7 +367,7 @@ func writeEnterpriseDiscoveryReport(w io.Writer, report enterpriseDiscoveryRepor
 		report.Runtime = view
 	}
 	if asJSON {
-		encoder := json.NewEncoder(w)
+		encoder := newEnterpriseJSONEncoder(w)
 		encoder.SetIndent("", "  ")
 		return encoder.Encode(report)
 	}
