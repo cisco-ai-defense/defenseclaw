@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
+import click
 import pytest
 from click.testing import CliRunner
 from defenseclaw.commands import cmd_config
@@ -21,8 +22,24 @@ from defenseclaw.config_inspect import ConfigV8WireResult
 from defenseclaw.main import cli
 
 
+def _reset_help_options(command: click.Command) -> None:
+    # Click caches each command's help option the first time it is built. A
+    # test elsewhere that builds click.Context(cli) by hand (without the
+    # group's context_settings) caches a --help-only option, so start clean.
+    command._help_option = None
+    for sub in (getattr(command, "commands", None) or {}).values():
+        _reset_help_options(sub)
+
+
+@pytest.fixture
+def fresh_help_options():
+    _reset_help_options(cli)
+    yield
+    _reset_help_options(cli)
+
+
 @pytest.mark.parametrize("argv", [["-h"], ["status", "-h"], ["config", "show", "-h"]])
-def test_dash_h_is_short_help(argv: list[str], monkeypatch: pytest.MonkeyPatch) -> None:
+def test_dash_h_is_short_help(argv: list[str], monkeypatch: pytest.MonkeyPatch, fresh_help_options) -> None:
     monkeypatch.setattr(sys, "argv", ["defenseclaw", *argv])
     result = CliRunner().invoke(cli, argv, prog_name="defenseclaw")
     assert result.exit_code == 0, result.output
@@ -30,7 +47,7 @@ def test_dash_h_is_short_help(argv: list[str], monkeypatch: pytest.MonkeyPatch) 
     assert "-h, --help" in result.output
 
 
-def test_registry_help_lists_each_command_once(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_registry_help_lists_each_command_once(monkeypatch: pytest.MonkeyPatch, fresh_help_options) -> None:
     monkeypatch.setattr(sys, "argv", ["defenseclaw", "registry", "--help"])
     result = CliRunner().invoke(cli, ["registry", "--help"], prog_name="defenseclaw", terminal_width=80)
     assert result.exit_code == 0, result.output
