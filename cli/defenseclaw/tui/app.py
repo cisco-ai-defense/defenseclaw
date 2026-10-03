@@ -3076,12 +3076,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         self._render_command_strip()
         acknowledgement_status = self.status_text or self._status_text()
         self.status_text = acknowledgement_status
-        try:
-            self.query_one("#status", Static).update(
-                self._safe_body_renderable(acknowledgement_status)
-            )
-        except NoMatches:
-            pass
+        # Through _set_status so the health strip stays: painting the bare
+        # text left _last_status_signature on the full line, so later
+        # refreshes skipped the repaint and the bar read only "Ready." until
+        # a segment changed, 10-45 s later (GAP-2612).
+        self._set_status(acknowledgement_status)
 
     def _queue_deferred_panel_render(self, panel: str, generation: int) -> None:
         """Track work before its post-paint callback enters the render lane."""

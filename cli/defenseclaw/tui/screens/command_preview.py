@@ -73,6 +73,10 @@ class CommandPreview:
         if self.risk in {"destructive", "secret", "restart"}:
             return True
         args = tuple(arg.lower() for arg in self.masked_argv[1:])
+        if self.masked_argv and _is_gateway_stop(self.masked_argv[0], self.masked_argv[1:]):
+            # It takes hooks offline until the next start; one Enter on the
+            # palette ": stop" confirm stopped the gateway (GAP-2611).
+            return True
         if args[:2] == ("registry", "require"):
             # It turns registry approval on or off for every connector; a
             # stray Enter ran it from Run (GAP-2438).
@@ -229,12 +233,20 @@ def _upgrade_summary(args: tuple[str, ...]) -> str:
     return ""
 
 
+def _gateway_verbs(binary: str, args: tuple[str, ...]) -> tuple[str, ...]:
+    if not binary.lower().removesuffix(".exe").endswith("defenseclaw-gateway"):
+        return ()
+    return tuple(arg.lower() for arg in args if not arg.startswith("-"))
+
+
+def _is_gateway_stop(binary: str, args: tuple[str, ...]) -> bool:
+    return _gateway_verbs(binary, args) == ("stop",)
+
+
 def _gateway_lifecycle_summary(binary: str, args: tuple[str, ...]) -> str:
     """What gateway ``stop``/``start`` change; both said only "can change DefenseClaw state" (GAP-2607)."""
 
-    if not binary.lower().removesuffix(".exe").endswith("defenseclaw-gateway"):
-        return ""
-    verbs = tuple(arg.lower() for arg in args if not arg.startswith("-"))
+    verbs = _gateway_verbs(binary, args)
     if verbs == ("stop",):
         return (
             "Stops the gateway and its watchdog. Hooks are not checked until you start it again: "
