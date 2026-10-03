@@ -244,6 +244,7 @@ func runWindowsEnterpriseStandaloneAction(
 			result := newWindowsEnterpriseStandaloneResult(action, opts)
 			result.Noop = true
 			result.NoopReason = "not_installed"
+			result.Inspection.Local = "disabled"
 			return finishWindowsEnterpriseStandalone(cmd, opts, result, 0)
 		}
 	}
@@ -437,6 +438,10 @@ func applyWindowsEnterpriseInstallerReport(
 	result.Installed = report.Installed
 	result.TransactionPending = report.TransactionPending
 	result.InstalledVersion = report.InstalledVersion
+	if !report.Installed {
+		// Nothing inspects verdicts once the deployment is gone (GAP-2257).
+		result.Inspection.Local = "disabled"
+	}
 	if opts != nil {
 		opts.deploymentTrustMode = windowsEnterpriseRecordedTrustMode(report.TrustMode)
 	}

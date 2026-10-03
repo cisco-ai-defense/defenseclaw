@@ -52,3 +52,46 @@ func TestStatusWarnsAboutARunningPerUserGateway(t *testing.T) {
 		t.Fatalf("the warning stays after the per-user gateway stopped: %+v", got.Warnings)
 	}
 }
+
+// GAP-2245: macOS ps prints argv[0], so the managed binary run by its bare
+// name (a repair in progress) must be matched by its executable path, not
+// reported as a per-user gateway.
+func TestStatusMatchesMacOSGatewaysByExecutablePath(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	writeFreshLedger(t, h)
+	managedGateway := filepath.Join(h.env.Layout.BinDir, "defenseclaw-gateway")
+	h.runner.ps = strings.Join([]string{
+		"4200 0 defenseclaw-gateway",                           // the managed binary, run by bare name
+		"4201 499 " + managedGateway,                           // the managed gateway
+		"4202 501 /Users/alice/.local/bin/defenseclaw-gateway", // a per-user gateway
+		"4203 502 defenseclaw-gateway",                         // a per-user gateway run by bare name
+		"4204 503 defenseclaw-gateway",                         // exited before its path was read
+		"4205 0 /bin/zsh",
+	}, "\n")
+	execs := map[int]string{
+		4200: managedGateway,
+		4201: managedGateway,
+		4202: "/Users/alice/.local/bin/defenseclaw-gateway",
+		4203: "/Users/bob/.local/bin/defenseclaw-gateway",
+	}
+	h.env.ProcessExecPath = func(pid int) (string, error) {
+		if exe, ok := execs[pid]; ok {
+			return exe, nil
+		}
+		return "", os.ErrNotExist
+	}
+	got := h.run(Options{Action: ActionStatus})
+	requireOK(t, got)
+	message := messagesOf(got.Warnings, codePerUserGatewayRunning)
+	for _, want := range []string{"(pid 4202)", "(pid 4203)"} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("status must name the per-user gateway %s: %+v", want, got.Warnings)
+		}
+	}
+	for _, pid := range []string{"4200", "4201", "4204", "4205"} {
+		if strings.Contains(message, pid) {
+			t.Fatalf("status names pid %s, which is not a per-user gateway: %+v", pid, got.Warnings)
+		}
+	}
+}

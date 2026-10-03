@@ -1839,3 +1839,13 @@ func TestWindowsEnterpriseStandardUserStatusReportsRecordedDeployment(t *testing
 		}
 	}
 }
+
+// GAP-2257: an uninstall (or any result of a host without a deployment)
+// reports that nothing inspects verdicts, not the installed default.
+func TestWindowsEnterpriseUninstalledResultReportsLocalInspectionDisabled(t *testing.T) {
+	result := newWindowsEnterpriseStandaloneResult("uninstall", &windowsEnterpriseLifecycleOptions{})
+	applyWindowsEnterpriseInstallerReport(result, nil, &windowsEnterpriseInstallerReport{Installed: false}, windowsEnterpriseStandaloneRun{})
+	if result.Installed || result.Inspection.Local != "disabled" || result.Inspection.AIDefense != "disabled" {
+		t.Fatalf("uninstalled result: installed=%v inspection=%+v", result.Installed, result.Inspection)
+	}
+}
