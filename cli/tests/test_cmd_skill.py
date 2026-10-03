@@ -3474,7 +3474,9 @@ class TestSkillConnectorPolicyValidation(SkillCommandTestBase):
         result = self.invoke(["unblock", "sample"])
 
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("[skill] Unblocked 'sample'", result.output)
+        # GAP-2085: the bare unblock names the scope a bare block names.
+        self.assertIn("[skill] Unblocked 'sample' (every connector).", result.output)
+        self.assertIn("It will be scanned on the next check.", result.output)
         self.assertFalse(self.app.store.has_action("skill", "sample", "install", "allow"))
         self.assertIsNone(self.app.store.get_action("skill", "sample"))
 
@@ -3511,10 +3513,17 @@ class TestSkillConnectorPolicyValidation(SkillCommandTestBase):
         self.assertIn("It will be scanned on the next check.", unblocked.output)
 
     def test_scoped_block_uses_unblock_line_style(self):
-        result = self.invoke(["block", "sample", "--connector", "codex"])
+        with patch("defenseclaw.commands.hint") as hint:
+            result = self.invoke(["block", "sample", "--connector", "codex"])
 
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("[skill] Blocked 'sample' (codex).", result.output)
+        # GAP-2085: the unblock hint and the scoped unblock keep the scope.
+        hint.assert_called_once_with("Unblock later:  defenseclaw skill unblock sample --connector codex")
+        unblocked = self.invoke(["unblock", "sample", "--connector", "codex"])
+        self.assertEqual(unblocked.exit_code, 0, unblocked.output)
+        self.assertIn("[skill] Unblocked 'sample' (codex).", unblocked.output)
+        self.assertIn("It will be scanned on the next check.", unblocked.output)
 
     def test_bare_allow_fans_out_to_matching_connector_copies(self):
         hermes_root = os.path.join(self.tmp_dir, "hermes", "skills")

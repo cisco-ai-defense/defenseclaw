@@ -116,7 +116,8 @@ class TestMCPUnblock(MCPCommandTestBase):
 
         result = self.invoke(["unblock", "http://evil.com"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("[mcp] Unblocked 'http://evil.com'.", result.output)
+        # GAP-2085: same scope as the bare block line.
+        self.assertIn("[mcp] Unblocked 'http://evil.com' (every connector).", result.output)
         self.assertFalse(pe.is_blocked("mcp", "http://evil.com"))
 
     def test_unblock_no_state(self):

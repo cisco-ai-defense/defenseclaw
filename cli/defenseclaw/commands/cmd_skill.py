@@ -4238,7 +4238,8 @@ def block(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
         )
 
     from defenseclaw.commands import hint
-    hint(f"Unblock later:  defenseclaw skill unblock {skill_name}")
+    scope_flag = f" --connector {connector}" if connector else ""
+    hint(f"Unblock later:  defenseclaw skill unblock {skill_name}{scope_flag}")
 
 
 # ---------------------------------------------------------------------------
@@ -4350,6 +4351,7 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
             return
         pe.remove_action_for_connector("skill", skill_name, connector)
         click.secho(f"[skill] Unblocked {skill_name!r} ({connector}).", fg="green")
+        click.echo("  It will be scanned on the next check.")
         if physical_records:
             click.echo(
                 "  The skill is unblocked, but its files remain quarantined; "
@@ -4430,7 +4432,9 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
 
     if runtime_cleared:
         pe.remove_action("skill", skill_name)
-        click.secho(f"[skill] Unblocked {skill_name!r}.", fg="green")
+        # GAP-2085: name the scope the bare block named.
+        click.secho(f"[skill] Unblocked {skill_name!r} (every connector).", fg="green")
+        click.echo("  It will be scanned on the next check.")
     else:
         pe.unblock("skill", skill_name)
         pe.clear_quarantine("skill", skill_name)

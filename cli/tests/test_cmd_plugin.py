@@ -330,7 +330,36 @@ class TestPluginInstall(PluginCommandTestBase):
         self.assertIn("Claude Code loads only plugins installed from a marketplace", result.output)
         self.assertIn("has no .claude-plugin/plugin.json", result.output)
         self.assertIn("/plugin install <name>@<marketplace>", result.output)
+        self.assertIn("Remove this copy: defenseclaw plugin remove cc-plugin --connector claudecode", result.output)
         hint.assert_not_called()
+
+    @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
+    def test_remove_deletes_the_copy_install_put_in_the_claude_cache(self, mock_scan):
+        # GAP-2152: remove found nothing at <cache>/<name>, yet a reinstall
+        # refused because the copy was there.
+        mock_scan.return_value = self._clean_result()
+        plugins_root = os.path.join(self.tmp_dir, "claude-plugins")
+        cache = os.path.join(plugins_root, "cache")
+        self.app.cfg.active_connectors = lambda: ["claudecode"]  # type: ignore[method-assign]
+        self.app.cfg.active_connector = lambda: "claudecode"  # type: ignore[method-assign]
+        self.app.cfg.plugin_dirs = lambda connector=None: [cache]  # type: ignore[method-assign]
+        src = self._create_plugin_dir("cc-plugin")
+        # A marketplace folder of the same name is never removed.
+        os.makedirs(os.path.join(cache, "mkt", "other", "1.0.0"))
+        with open(os.path.join(plugins_root, "known_marketplaces.json"), "w") as fh:
+            json.dump({"mkt": {}}, fh)
+
+        self.assertEqual(self._invoke_install(["install", src, "--connector", "claudecode"]).exit_code, 0)
+        removed = self.invoke(["remove", "cc-plugin", "--connector", "claudecode"])
+        self.assertEqual(removed.exit_code, 0, removed.output)
+        self.assertIn("'cc-plugin' removed from", removed.output)
+        self.assertFalse(os.path.exists(os.path.join(cache, "cc-plugin")))
+        self.assertEqual(self.invoke(["remove", "cc-plugin"]).exit_code, 1)
+        self.assertEqual(self._invoke_install(["install", src]).exit_code, 0)
+        self.assertEqual(self.invoke(["remove", "cc-plugin"]).exit_code, 0)
+
+        self.assertEqual(self.invoke(["remove", "mkt"]).exit_code, 1)
+        self.assertTrue(os.path.isdir(os.path.join(cache, "mkt")))
 
     @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
     def test_install_duplicate_without_force(self, mock_scan):
@@ -1133,6 +1162,16 @@ class TestPluginBlock(PluginCommandTestBase):
         self.assertIn("The installed copy still loads", result.output)
         self.assertIn("defenseclaw plugin quarantine loaded-one", result.output)
         self.assertNotIn("still loads", self.invoke(["block", "never-installed"]).output)
+
+    def test_bare_unblock_of_a_bare_block_names_every_connector(self):
+        # GAP-2085: a copy on one connector does not narrow a global block.
+        self._install_plugin("loaded-two")
+        self.invoke(["block", "loaded-two"])
+        result = self.invoke(["unblock", "loaded-two"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("[plugin] Unblocked 'loaded-two' (every connector).", result.output)
+        self.assertNotIn("(openclaw).", result.output)
+        self.assertFalse(PolicyEngine(self.app.store).is_blocked("plugin", "loaded-two"))
 
     def test_block_custom_reason_in_audit_log(self):
         self.invoke(["block", "r1", "--reason", "CVE-1234"])
