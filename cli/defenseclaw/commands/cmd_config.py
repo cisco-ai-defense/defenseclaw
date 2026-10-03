@@ -22,7 +22,8 @@ Five subcommands:
   return a non-zero exit code on any error. Used both by the operator
   and by the auto-validate hook in ``main.py``.
 * ``config show`` — render the config as JSON or YAML with secrets
-  masked (observability resolved, every other section as written).
+  masked (observability resolved; every other section as written, with
+  defaults for the keys config.yaml leaves out).
 * ``config get`` — print one dotted key of that view.
 * ``config reference`` — render schema-generated v8 reference material.
 * ``config path`` — print the filesystem layout DefenseClaw uses.
@@ -186,13 +187,16 @@ def config_show(
 ) -> None:
     """Show the configuration with secrets masked.
 
-    Every section of config.yaml is shown, with the observability section
-    resolved the way the gateway runs it. Read one value with
-    'defenseclaw config get KEY', for example asset_policy.enabled.
+    Every section is shown: the values config.yaml sets plus the defaults
+    that apply to the keys it leaves out, with the observability section
+    resolved the way the gateway runs it. --source shows only what
+    config.yaml sets. Read one value with 'defenseclaw config get KEY', for
+    example asset_policy.enabled.
     """
     data = _show_data(app, source=source, effective=effective, provenance=provenance, reveal=reveal)
     if section:
-        data = _select_section(data, section)
+        view = "effective" if (effective or provenance) else ("source" if source else "full")
+        data = _select_section(data, section, view=view)
     if provenance:
         effective_observability = data.get("observability")
         if isinstance(effective_observability, dict):
@@ -223,25 +227,32 @@ def config_get(app: AppContext, key: str, fmt: str) -> None:
     """Print one configuration value (secrets masked).
 
     KEY is a dotted path such as asset_policy.enabled or
-    asset_policy.mcp.registry_required. Exits 1 when the key is not set.
+    asset_policy.mcp.registry_required. A key config.yaml leaves out prints
+    its default, with a note on stderr. Exits 1 when the key has no value
+    and no default, and 2 for an unknown section.
     """
     parts = [part for part in key.strip().split(".") if part]
     if not parts:
         raise click.UsageError("KEY must be a dotted path such as asset_policy.enabled")
-    value: object = _show_data(app, source=False, effective=False, provenance=False, reveal=False)
-    for depth, part in enumerate(parts):
-        if isinstance(value, dict) and part in value:
-            value = value[part]
-        elif isinstance(value, list) and part.isdigit() and int(part) < len(value):
-            value = value[int(part)]
-        else:
-            where = "defenseclaw config show"
-            if depth:
-                where += f" --section {parts[0]}"
+    view = _show_data(app, source=False, effective=False, provenance=False, reveal=False)
+    found, value = _lookup(view, parts)
+    if not found:
+        sections = _v8_sections() or set(view)
+        if parts[0] not in view and parts[0] not in sections:
+            available = ", ".join(sorted(sections)) or "none"
+            raise click.UsageError(f"no configuration section '{parts[0]}'. Sections: {available}")
+        if parts[0] not in view:
             raise click.ClickException(
-                f"{key} is not set in the configuration (if the key is valid, its default applies). "
-                f"Run '{where}' to see what is set."
+                f"{key} is not set: config.yaml has no '{parts[0]}' section and it has no defaults."
             )
+        raise click.ClickException(
+            f"{key} is not set and has no default. "
+            f"Run 'defenseclaw config show --section {parts[0]}' to see the keys it has."
+        )
+    if parts[0] != "observability" and _looks_like_v8_config(str(config_module.config_path())):
+        written = _show_data(app, source=True, effective=False, provenance=False, reveal=False)
+        if not _lookup(written, parts)[0]:
+            click.echo(f"(default: config.yaml does not set {key})", err=True)
     if isinstance(value, (dict, list)) or fmt.lower() == "json":
         _emit(value, fmt)
     elif isinstance(value, bool):
@@ -250,6 +261,72 @@ def config_get(app: AppContext, key: str, fmt: str) -> None:
         click.echo("null")
     else:
         click.echo(str(value))
+
+
+def _lookup(data: object, parts: list[str]) -> tuple[bool, object]:
+    """Follow a dotted path through dicts and list indexes."""
+    value = data
+    for part in parts:
+        if isinstance(value, dict) and part in value:
+            value = value[part]
+        elif isinstance(value, list) and part.isdigit() and int(part) < len(value):
+            value = value[int(part)]
+        else:
+            return False, None
+    return True, value
+
+
+def _v8_schema() -> dict:
+    try:
+        from defenseclaw.observability.v8_config import _schema_validator
+
+        return _schema_validator().schema
+    except Exception:  # noqa: BLE001 - without the schema, show only what is written.
+        return {}
+
+
+def _v8_sections() -> set[str]:
+    return set((_v8_schema().get("properties") or {}).keys())
+
+
+def _v8_defaults(app: AppContext) -> dict:
+    """The masked values the CLI runs with, pruned to v8 schema keys.
+
+    They fill the keys config.yaml leaves out, so a fresh install shows
+    asset_policy.enabled and the rest (GAP-2171).
+    """
+    schema = _v8_schema()
+    if not schema:
+        return {}
+    try:
+        cfg = app.cfg if app.cfg is not None else config_module.load()
+    except Exception:  # noqa: BLE001 - fall back to the built-in defaults.
+        cfg = config_module.default_config()
+    defs = schema.get("$defs") or {}
+
+    def _resolve(node: object) -> object:
+        while isinstance(node, dict) and "$ref" in node:
+            node = defs.get(str(node["$ref"]).rsplit("/", 1)[-1])
+        return node
+
+    def _prune(value: object, node: object) -> object:
+        node = _resolve(node)
+        if not isinstance(value, dict) or not isinstance(node, dict) or "properties" not in node:
+            return value
+        props = node["properties"]
+        return {k: _prune(v, props[k]) for k, v in value.items() if k in props}
+
+    return _prune(_config_to_masked_dict(cfg, reveal=False), schema)  # type: ignore[return-value]
+
+
+def _merge_defaults(written: dict, defaults: dict) -> dict:
+    merged = dict(defaults)
+    for key, value in written.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _merge_defaults(value, merged[key])
+        else:
+            merged[key] = value
+    return merged
 
 
 def _show_data(app: AppContext, *, source: bool, effective: bool, provenance: bool, reveal: bool) -> dict:
@@ -265,7 +342,10 @@ def _show_data(app: AppContext, *, source: bool, effective: bool, provenance: bo
             raise click.UsageError("--provenance requires a configuration v8 effective plan")
         # Preserve the pre-v8 view for installations that have not upgraded.
         cfg = app.cfg if app.cfg is not None else config_module.load()
-        return _config_to_masked_dict(cfg, reveal=reveal)
+        legacy = _config_to_masked_dict(cfg, reveal=reveal)
+        if effective:
+            return {"observability": legacy.get("observability")}
+        return legacy
 
     if reveal:
         raise click.UsageError(
@@ -283,20 +363,29 @@ def _show_data(app: AppContext, *, source: bool, effective: bool, provenance: bo
             raise click.ClickException(str(exc)) from exc
         if source:
             return masked
+        masked = _merge_defaults(masked, _v8_defaults(app))
     try:
         result = inspect_v8_config("effective", config_path=cfg_path)
     except ConfigInspectError as exc:
         raise click.ClickException(str(exc)) from exc
     # Only observability has a canonical resolved plan; every other section is
-    # shown as written (GAP-2171).
+    # shown as written plus its defaults (GAP-2171).
     masked["observability"] = result.effective or {}
     return masked
 
 
-def _select_section(data: dict, section: str) -> dict:
+def _select_section(data: dict, section: str, *, view: str = "full") -> dict:
     name = section.strip().lower()
     if name in data:
         return {name: data[name]}
+    if view == "effective":
+        raise click.UsageError("--effective shows only the observability section; drop --effective for other sections")
+    if name in _v8_sections():
+        if view == "source":
+            raise click.ClickException(
+                f"config.yaml does not set '{name}'. Drop --source to see the defaults that apply"
+            )
+        raise click.ClickException(f"section '{name}' is not set in config.yaml and has no defaults")
     available = ", ".join(sorted(key for key in data if not key.startswith("_"))) or "none"
     raise click.UsageError(f"no section '{name}' in this view. Sections: {available}")
 

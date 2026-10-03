@@ -95,10 +95,42 @@ def test_config_show_has_every_section_and_get_reads_one_key(tmp_path: Path) -> 
     section = _invoke(tmp_path, ["show", "--section", "asset_policy", "--format", "json"])
     assert json.loads(section.output) == {"asset_policy": data["asset_policy"]}
     unknown = _invoke(tmp_path, ["show", "--section", "nope"])
-    assert unknown.exit_code == 2 and "Sections: asset_policy, config_version, llm, observability" in unknown.output
+    assert unknown.exit_code == 2 and "Sections: " in unknown.output and "asset_policy, " in unknown.output
 
     got = _invoke(tmp_path, ["get", "asset_policy.mcp.registry_required"])
     assert got.exit_code == 0 and got.output == "true\n"
-    missing = _invoke(tmp_path, ["get", "asset_policy.skill.registry_required"])
+    missing = _invoke(tmp_path, ["get", "asset_policy.connectors.hermes"])
     assert missing.exit_code == 1
     assert "config show --section asset_policy" in missing.output
+
+
+def test_fresh_v8_config_shows_and_gets_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # 'init' writes only claw/config_version/gateway/observability; the
+    # sections it leaves out still show the defaults that apply (GAP-2171).
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("config_version: 8\ngateway: {}\nobservability: {}\n", encoding="utf-8")
+
+    def run(args: list[str]):
+        with (
+            patch.object(cmd_config.config_module, "config_path", return_value=config_path),
+            patch.object(cmd_config, "inspect_v8_config", return_value=_effective({"destinations": []})),
+        ):
+            return CliRunner().invoke(cmd_config.config_cmd, args)
+
+    shown = run(["show", "--section", "asset_policy", "--format", "json"])
+    assert shown.exit_code == 0, shown.output
+    policy = json.loads(shown.output)["asset_policy"]
+    assert policy["enabled"] is False and policy["mode"] == "observe"
+    assert policy["mcp"]["registry_required"] is False
+    assert "audit_db" not in json.loads(run(["show", "--format", "json"]).output)
+
+    got = run(["get", "asset_policy.mcp.registry_required"])
+    assert got.exit_code == 0, got.output
+    assert got.stdout == "false\n"
+    assert "default: config.yaml does not set" in got.stderr
+
+    assert run(["get", "nope.enabled"]).exit_code == 2
+    assert run(["show", "--section", "managed"]).exit_code == 1
+    source = run(["show", "--source", "--section", "asset_policy"])
+    assert source.exit_code == 1 and "Drop --source" in source.output
