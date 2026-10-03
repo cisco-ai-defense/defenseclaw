@@ -195,7 +195,12 @@ class DeferredHelperResultFileTests(unittest.TestCase):
         self.assertEqual(result["status"], "failed")
         detail = result["detail"]
         self.assertIn(f"{os.path.normcase(held)} is in use by another program. Close that program, then run ", detail)
-        self.assertIn(f'"{root / "bin" / "defenseclaw.cmd"}" uninstall --all --binaries --yes again', detail)
+        # GAP-2082: pasted into PowerShell the bare quoted path was a ParserError.
+        self.assertIn(
+            f'run & "{root / "bin" / "defenseclaw.cmd"}" uninstall --all --binaries --yes again in PowerShell '
+            "(in Command Prompt, leave out the &)",
+            detail,
+        )
         self.assertIn(".env (holds API keys)", detail)
         self.assertIn("config.yaml", detail)
         self.assertTrue(shim_kept)

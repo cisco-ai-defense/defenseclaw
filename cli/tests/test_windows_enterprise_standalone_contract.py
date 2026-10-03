@@ -289,7 +289,7 @@ def test_standalone_purge_keeps_the_launching_cli_powershell_temp() -> None:
         module, "Invoke-DefenseClawEnterpriseLifecycle"
     )
     assert "$script:DefenseClawLauncherTemp" in _function_body(
-        module, "Remove-DefenseClawStalePowerShellTempDirectories"
+        module, "Remove-DefenseClawStaleRunDirectories"
     )
 
 
