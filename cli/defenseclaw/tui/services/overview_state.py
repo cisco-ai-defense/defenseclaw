@@ -1443,13 +1443,17 @@ class OverviewPanelModel:
         if runtime_detail:
             parts.append(runtime_detail)
         if connector.tool_inspection_mode:
-            parts.append(connector.tool_inspection_mode)
+            # Same wording as `defenseclaw setup` ("Tool inspection: ...").
+            mode = connector.tool_inspection_mode
+            parts.append("pre-execution + response-scan" if mode == "both" else mode)
         if connector.requests:
             parts.append(f"{connector.requests} req")
         if connector.tool_blocks:
-            parts.append(f"{connector.tool_blocks} tool blocks")
+            n = connector.tool_blocks
+            parts.append(f"{n} tool block{'' if n == 1 else 's'}")
         if connector.subprocess_blocks:
-            parts.append(f"{connector.subprocess_blocks} subprocess blocks")
+            n = connector.subprocess_blocks
+            parts.append(f"{n} subprocess block{'' if n == 1 else 's'}")
         return " - ".join(parts)
 
     def _not_running_suffix(self) -> str:

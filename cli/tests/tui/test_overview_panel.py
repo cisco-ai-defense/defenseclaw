@@ -323,6 +323,29 @@ def test_overview_v8_rows_merge_policy_and_exact_live_health_without_inference()
     assert storage.retention_failure == "run_failed"
 
 
+def test_agent_detail_names_tool_inspection_mode_and_singular_blocks() -> None:
+    # GAP-2515: the raw "both" enum and "1 tool blocks" leaked into the row.
+    model = OverviewPanelModel(
+        OverviewConfig(claw_mode="openclaw", guardrail_connector="openclaw"),
+        version="test",
+    )
+    model.set_health(
+        HealthSnapshot(
+            connector=ConnectorHealth(
+                name="openclaw",
+                state="running",
+                tool_inspection_mode="both",
+                requests=8,
+                tool_blocks=1,
+                subprocess_blocks=1,
+            )
+        )
+    )
+    assert model.agent_detail() == (
+        "OpenClaw - pre-execution + response-scan - 8 req - 1 tool block - 1 subprocess block"
+    )
+
+
 def test_agent_detail_rolls_up_connectors_in_multi_connector() -> None:
     # 8.13: in a multi-connector install the SERVICES "Agent" row collapses to
     # an "N connectors active" roll-up (per-connector detail lives in the
