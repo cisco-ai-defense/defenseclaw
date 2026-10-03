@@ -216,10 +216,14 @@ func TestGatewayStatusUnknownKeyStillFindsGateway(t *testing.T) {
 		"guardrail key": {"guardrail:\n  bogus_key_v2173: 1\n", "guardrail.bogus_key_v2173: unknown field"},
 		"top-level key": {"bogus_top_v2173: 1\n", "bogus_top_v2173: unknown field"},
 		"typo of mode":  {"guardrail:\n  mdoe: action\n", `guardrail.mdoe: unknown field (did you mean "mode"?)`},
-		"key plus type": {"guardrail:\n  bogus_key_v2173: 1\n  enabled: maybe\n", "guardrail.enabled: expected a value of type boolean"},
+		"key plus type": {"guardrail:\n  bogus_key_v2173: 1\n  enabled: maybe\n", "line 7: guardrail.bogus_key_v2173: unknown field"},
+		"type only":     {"guardrail:\n  enabled: maybe\n", "guardrail.enabled: expected a value of type boolean"},
 		// Two undeclared keys name the first one, not its section (GAP-2173).
 		"two top-level keys": {"bogus_x: 1\nbogus_y: 2\n", "line 6: bogus_x: unknown field"},
 		"two typos":          {"guardrail:\n  mdoe: observe\n  scaner_mode: local\n", `line 7: guardrail.mdoe: unknown field (did you mean "mode"?)`},
+		// Keys in two sections name the first one in the file (GAP-2234).
+		"two sections":    {"watch:\n  debouce_ms: 500\nguardrail:\n  mdoe: observe\n", "line 7: watch.debouce_ms: unknown field"},
+		"unknown section": {"gateway2:\n  a: 1\nguardrail:\n  bogus_k: 1\n", "line 6: gateway2: unknown field"},
 		// A second section of the same name keeps the first (GAP-2188).
 		"duplicate section": {"gateway:\n  api_port: 19999\n", "line 6: gateway appears twice; the first one is at line 3. Merge them into one"},
 	} {

@@ -121,7 +121,10 @@ func validateV8Schema(source string, document *V8YAMLDocument) error {
 				Action:  "correct the configuration and retry",
 			}
 		}
-		leaf := deepestV8SchemaError(validation)
+		leaf := firstUnknownV8SchemaError(validation, document.Document)
+		if leaf == nil {
+			leaf = deepestV8SchemaError(validation)
+		}
 		path := v8SchemaDisplayPath(leaf.InstanceLocation)
 		keyword := leaf.KeywordLocation
 		if index := strings.LastIndex(keyword, "/"); index >= 0 {
@@ -146,8 +149,14 @@ func validateV8Schema(source string, document *V8YAMLDocument) error {
 			Summary:       "configuration violates the " + keyword + " constraint",
 			Action:        "inspect the canonical v8 schema or generated reference and correct this field",
 		}
-		if node != nil {
+		if key := v8SchemaUnknownKeyNode(document.Document, leaf.InstanceLocation, unknown); key != nil {
+			// The line of the key itself: an unknown section's value
+			// starts on the line of its first child (GAP-2235).
+			result.Line, result.Column = key.Line, key.Column
+		} else if node != nil {
 			result.Line, result.Column = node.Line, node.Column
+		}
+		if node != nil {
 			if keyword == "enum" && node.Kind == yaml.ScalarNode {
 				result.Value = node.Value
 				if len(result.Value) > 60 {
@@ -197,6 +206,54 @@ func deepestV8SchemaError(root *jsonschema.ValidationError) *jsonschema.Validati
 	}
 	visit(root, 0)
 	return best
+}
+
+// firstUnknownV8SchemaError is the undeclared-key error whose key comes
+// first in the file, or nil when there is none. The validator's causes come
+// in map order, so with undeclared keys in several sections the deepest
+// error named a different key on each run, and an unknown top-level section
+// lost to a deeper key (GAP-2234). Errors inside a oneOf or anyOf branch are
+// skipped: a key may be undeclared only in the branch that does not apply.
+func firstUnknownV8SchemaError(root *jsonschema.ValidationError, document *yaml.Node) *jsonschema.ValidationError {
+	var best *jsonschema.ValidationError
+	bestLine, bestColumn := 0, 0
+	var visit func(*jsonschema.ValidationError)
+	visit = func(current *jsonschema.ValidationError) {
+		location := current.KeywordLocation + "/"
+		if strings.Contains(location, "/oneOf/") || strings.Contains(location, "/anyOf/") {
+			return
+		}
+		if len(current.Causes) == 0 {
+			unknown := v8SchemaUnknownProperty(current, document)
+			if key := v8SchemaUnknownKeyNode(document, current.InstanceLocation, unknown); key != nil &&
+				(best == nil || key.Line < bestLine || key.Line == bestLine && key.Column < bestColumn) {
+				best, bestLine, bestColumn = current, key.Line, key.Column
+			}
+		}
+		for _, cause := range current.Causes {
+			visit(cause)
+		}
+	}
+	visit(root)
+	return best
+}
+
+// v8SchemaUnknownKeyNode is the key node of the undeclared key unknown in
+// the mapping at pointer, or nil.
+func v8SchemaUnknownKeyNode(document *yaml.Node, pointer, unknown string) *yaml.Node {
+	if unknown == "" {
+		return nil
+	}
+	mapping := v8SchemaYAMLNode(document, pointer, "")
+	if mapping == nil || mapping.Kind != yaml.MappingNode {
+		return nil
+	}
+	for index := 0; index+1 < len(mapping.Content); index += 2 {
+		if key := mapping.Content[index]; key.Kind == yaml.ScalarNode && key.Value == unknown {
+			return key
+		}
+	}
+	return nil
 }
 
 func v8SchemaDisplayPath(pointer string) string {

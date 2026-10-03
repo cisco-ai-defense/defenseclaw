@@ -633,6 +633,7 @@ def _yaml_syntax_detail(raw: bytes) -> str | None:
 
 
 _V8_PATH_TOKEN = re.compile(r'\.([^.\[\s]+)|\[(\d+)\]|\["((?:[^"\\]|\\.)*)"\]')
+_UNDECLARED_KEY_SUMMARY = "configuration violates the additionalProperties constraint"
 _V8_REASON = re.compile(r"^\[(?P<code>[A-Za-z0-9_-]+)\]\s*(?P<text>.*)$", re.S)
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _ENV_REFERENCE = re.compile(r"\$\{(?:env:)?([A-Za-z_][A-Za-z0-9_]*)\}")
@@ -669,28 +670,46 @@ def _yaml_node_at(raw: bytes | None, field_path: str):
     return None if rest else node
 
 
-def _duplicate_key_line(raw: bytes | None, field_path: str) -> int:
-    """The 1-based line of the second definition of the key at ``field_path``, or 0."""
+def _key_lines(raw: bytes | None, field_path: str) -> list[int]:
+    """The 1-based lines of every definition of the last key in ``field_path``."""
 
     tokens = list(_V8_PATH_TOKEN.finditer(field_path, 1))
     if not field_path.startswith("$") or not tokens or tokens[-1].end() != len(field_path):
-        return 0
+        return []
     key, _index, quoted = tokens[-1].groups()
     if key is None and quoted is None:
-        return 0
+        return []
     name = key if key is not None else quoted.replace('\\"', '"')
     parent = _yaml_node_at(raw, field_path[: tokens[-1].start()])
     if not isinstance(parent, yaml.MappingNode):
-        return 0
-    lines = [k.start_mark.line + 1 for k, _ in parent.value if isinstance(k, yaml.ScalarNode) and k.value == name]
+        return []
+    return [k.start_mark.line + 1 for k, _ in parent.value if isinstance(k, yaml.ScalarNode) and k.value == name]
+
+
+def _duplicate_key_line(raw: bytes | None, field_path: str) -> int:
+    """The 1-based line of the second definition of the key at ``field_path``, or 0."""
+
+    lines = _key_lines(raw, field_path)
     return lines[1] if len(lines) > 1 else 0
+
+
+def _key_line(raw: bytes | None, field_path: str) -> int:
+    """The 1-based line of the key at ``field_path``, or 0.
+
+    An unknown section's value starts on its first child's line; the key is
+    the line to fix (GAP-2235).
+    """
+
+    lines = _key_lines(raw, field_path)
+    return lines[0] if lines else 0
 
 
 def _plain_v8_issue(raw: bytes | None, field_path: str, reason: str) -> str:
     path = field_path.split(" (line", 1)[0].strip()
     field = path[2:] if path.startswith("$.") else ("config.yaml" if path == "$" else path)
     node = _yaml_node_at(raw, path)
-    where = f"line {node.start_mark.line + 1}: " if node is not None else ""
+    line = _key_line(raw, path) or (node.start_mark.line + 1 if node is not None else 0)
+    where = f"line {line}: " if line else ""
     match = _V8_REASON.match(reason.strip())
     code, text = (match.group("code"), match.group("text")) if match else ("", reason.strip())
 
@@ -727,6 +746,13 @@ def _plain_v8_issue(raw: bytes | None, field_path: str, reason: str) -> str:
             return (
                 f"line {line}: {field} appears twice; the first one is at line {first.group(1)}. Merge them into one."
             )
+
+    if code == "config_schema_invalid" and text.startswith(_UNDECLARED_KEY_SUMMARY):
+        # The gateway's words for an undeclared key, not the schema keyword
+        # (GAP-2235): 'guardrail.mdoe: unknown field (did you mean "mode"?).'
+        suggestion = re.search(r"suggested field ([^;]+)", text)
+        hint = f' (did you mean "{suggestion.group(1).strip()}"?)' if suggestion else ""
+        return f"{where}{field}: unknown field{hint}. All fields: {_ALL_FIELDS_COMMAND}"
 
     parts = [
         part.strip()
