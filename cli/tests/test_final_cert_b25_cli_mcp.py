@@ -28,6 +28,9 @@ def test_unset_of_a_changed_claude_entry_names_the_change(tmp_path, monkeypatch)
     # GAP-2553: only the entry's url changed (no Claude Code run); the message
     # must not blame a Claude Code rewrite.
     monkeypatch.setenv("HOME", str(tmp_path))
+    # On Windows the conftest points CLAUDE_CONFIG_DIR under HOME; keep the
+    # file at ~/.claude.json on every OS.
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path / "d"))
     settings = tmp_path / ".claude.json"
     set_mcp_server("claudecode", "r4chg", {"type": "http", "url": "https://mcp.example.invalid/mcp"})
