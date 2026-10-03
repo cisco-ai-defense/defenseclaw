@@ -160,6 +160,7 @@ def test_tab_bar_names_tabs_before_minor_badges_and_brand(tmp_path, monkeypatch)
     assert labels["registries"] == "R Registries" and "²²" in labels["alerts"]
 
     app = snapshot_app(tmp_path)
-    for width, brand in ((150, False), (157, False), (175, True)):
+    # GAP-2517: the brand waits until every tab keeps its full name beside it.
+    for width, brand in ((150, False), (157, False), (175, False), (260, True)):
         monkeypatch.setattr(type(app), "size", property(lambda _self, width=width: Size(width, 45)))
         assert bool(app._header_title()) is brand, width  # noqa: SLF001 - brand rule under test.

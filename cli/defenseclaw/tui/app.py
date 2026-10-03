@@ -197,8 +197,6 @@ from defenseclaw.tui.widgets.panel_split import (
 from defenseclaw.tui.widgets.status_strip import render_status_strip
 from defenseclaw.tui.widgets.tab_fit import (
     BADGE_RESERVE,
-    SHORT_LABELS,
-    TINY_LABELS,
     fit_tab_labels,
     strip_width,
 )
@@ -2648,26 +2646,25 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             return versioned
         if width >= 120 and self._tabs_fit_next_to(versioned, width):
             return versioned
-        if width >= 96 and self._tabs_fit_next_to("DefenseClaw", width, tiny=True):
+        if width >= 96 and self._tabs_fit_next_to("DefenseClaw", width):
             # The version is on Overview; its cells go to tab names, so a
             # 200-column screen names every tab instead of a bare "R"
-            # (GAP-1283). The brand stays only while every tab keeps at least
-            # its tiny name beside it: from 140 to 157 columns it kept its 12
-            # cells while five tabs were bare key letters (GAP-1544, GAP-2150).
+            # (GAP-1283). The brand shows only once every tab keeps its full
+            # name beside it: from 140 to 157 columns it kept its 12 cells
+            # while five tabs were bare key letters (GAP-1544, GAP-2150), and
+            # at 175 columns it turned "3 Skills" (170) back into "3 Skill"
+            # (GAP-2517).
             return "DefenseClaw"
         # At 80 columns the brand would push tabs off screen; Overview still
         # shows the wordmark.
         return ""
 
-    def _tabs_fit_next_to(self, title: str, width: int, *, tiny: bool = False) -> bool:
-        """True when every visible tab keeps its full (or tiny) name beside ``title``."""
+    def _tabs_fit_next_to(self, title: str, width: int) -> bool:
+        """True when every visible tab keeps its full name beside ``title``."""
 
         strip = max(0, width - 2 - (len(title) + 1 if title else 0) - 12)
         visible = [(name, key, label) for name, key, label in PANELS if not self._panel_hidden(name)]
-        labels = [
-            f"{key} {TINY_LABELS.get(name, SHORT_LABELS.get(name, label)) if tiny else label}"
-            for name, key, label in visible
-        ]
+        labels = [f"{key} {label}" for _name, key, label in visible]
         if not visible or strip_width(labels) + BADGE_RESERVE > strip:
             return False
         # The brand goes before any tab loses its name, counts and the room
@@ -2676,7 +2673,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         unread = {name: self._panel_unread_count(name) for name, _key, _label in visible}
         widest = max(visible, key=lambda row: len(row[2]))[0]
         fitted = fit_tab_labels(visible, widest, unread, strip)
-        return all(fitted[name].startswith(f"{key} ") for name, key, _label in visible)
+        return all(fitted[name].startswith(f"{key} {label}") for name, key, label in visible)
 
     def _sync_header_title(self) -> None:
         title = self._header_title()
@@ -12876,12 +12873,18 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             # the selected field's editor with the digit appended (30 -> 301);
             # Enter edits a field (GAP-1282).
             return SetupPanelAction(False)
+        if key == "q" or (character or key) in CASE_SENSITIVE_PANEL_KEYS:
+            # q closes the drawer or overlay, as the ? sheet says, and T, A, V,
+            # N and P switch panels like the digits. q typed "30q" into the
+            # selected Timeout field (GAP-2520).
+            return SetupPanelAction(False)
         seed = _typed_seed(key, character)
         if seed:
             # Letters the editor uses as commands (j k s r w ...) were
-            # handled above; any other printable key opens the text box.
+            # handled above. Other printable keys never type into a field:
+            # "c" then "q" gave "30cq"; the hint bar says Enter edits (GAP-2520).
             if text_row and field is not None:
-                return SetupPanelAction(True, open_field_editor="config", field_editor_value=field.value + seed)
+                return SetupPanelAction(True, hint="Press Enter to edit this value.")
             if field is not None and field.interactive:
                 return SetupPanelAction(True, hint="Press Enter or Space to change this value.")
             reason = field.hint if field is not None else ""

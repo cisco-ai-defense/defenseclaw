@@ -2698,6 +2698,14 @@ def _print_summary(sc, llm, aid) -> None:
     help="LLM provider (anthropic or openai)",
 )
 @click.option("--llm-model", default=None, help="LLM model for semantic analysis")
+@click.option("--api-endpoint", default=None, help="Cisco AI Defense API URL for the api analyzer")
+@click.option("--api-key-env", default=None, help="Env var holding the Cisco AI Defense API key")
+@click.option(
+    "--api-timeout-ms",
+    type=click.IntRange(min=1),
+    default=None,
+    help="Cisco AI Defense request timeout in milliseconds",
+)
 @click.option("--scan-prompts", is_flag=True, default=None, help="Scan MCP prompts")
 @click.option("--scan-resources", is_flag=True, default=None, help="Scan MCP resources")
 @click.option("--scan-instructions", is_flag=True, default=None, help="Scan server instructions")
@@ -2709,6 +2717,9 @@ def setup_mcp_scanner(
     analyzers,
     llm_provider,
     llm_model,
+    api_endpoint,
+    api_key_env,
+    api_timeout_ms,
     scan_prompts,
     scan_resources,
     scan_instructions,
@@ -2737,6 +2748,14 @@ def setup_mcp_scanner(
             llm.provider = llm_provider
         if llm_model is not None:
             llm.model = llm_model
+        # The TUI's "Use a remote scan API" goal sends these; without them
+        # the command failed with "No such option: --api-endpoint" (GAP-2529).
+        if api_endpoint is not None:
+            aid.endpoint = api_endpoint
+        if api_key_env is not None:
+            aid.api_key_env = api_key_env
+        if api_timeout_ms is not None:
+            aid.timeout_ms = api_timeout_ms
         if scan_prompts is not None:
             mc.scan_prompts = scan_prompts
         if scan_resources is not None:
