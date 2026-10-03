@@ -301,6 +301,12 @@ class HintEngine:
     def _registries_hint(self, state: HintState) -> str:
         if hint := self._filter_hint(state):
             return hint
+        if state.panel_view == "detail":
+            # The open detail scrolls with PgUp/PgDn (GAP-2591, GAP-2600).
+            return (
+                "KEYS  PgUp/PgDn scroll detail | Esc close | j/k move | s sync | S sync all | "
+                "a approve | x reject | e require approval | d remove source."
+            )
         return (
             "KEYS  h/l sources/entries/approved | j/k move | Enter detail | s sync | S sync all | "
             "a approve | x reject | e require approval | d remove source."

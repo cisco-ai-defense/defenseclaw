@@ -5019,6 +5019,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 ("h/l", "Sources / entries / approved sub-tab"),
                 ("j/k or Up/Down", "Navigate rows"),
                 ("Enter / Esc", "Open / close detail"),
+                ("PgUp / PgDn", "Scroll the open detail"),
                 ("s / S", "Sync the selected source / sync all"),
                 ("a / x", "Approve / reject the selected entry"),
                 ("e", "Require (or stop requiring) registry approval for the entry's type"),
@@ -10803,6 +10804,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             return self.policy_model.view
         if self.active_panel == "setup":
             return self._setup_view()
+        if active_panel == "registries" and self.registries_model.detail_open:
+            return "detail"
         return ""
 
     def _active_filter_label(self) -> str:
@@ -11427,6 +11430,12 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         panel.set_class(below is not None, "aside-below")
         height, rows, width = self._aside_below_box() if below is not None else (0, 0, 0)
         self._aside_box = (height, rows, width)
+        if detail and not panel.has_class("compact"):
+            # A tall terminal left ~17 rows empty above a 16-row detail whose
+            # last lines (Registries Blocked/Errors/Rejected) were hidden with
+            # only a one-cell scrollbar thumb as a cue (GAP-2600): grow into
+            # the rows the table does not need, never below the CSS cap.
+            height = max(16, self._aside_below_box()[0])
         if below is not None and not self._aside_box_recheck:
             # The box is measured before a panel switch's layout settles (the
             # Setup card took the old panel's height, then grew by a row the
@@ -11701,6 +11710,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             action = self.alerts_model.handle_key(key)
             return self._apply_alert_action(action)
         if self.active_panel == "registries":
+            if self.registries_model.detail_open and key in {"pagedown", "page_down", "pageup", "page_up"}:
+                # The source/entry detail cut its last lines (Blocked/Errors/
+                # Rejected, Approved/URL) and no key moved it (GAP-2591).
+                return self._scroll_detail_panel(key)
             action = self.registries_model.handle_key(key)
             return self._apply_registry_action(action)
         if self.active_panel in self.catalog_models:

@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from fixtures import screen_text  # noqa: E402
 
 
-async def test_uninstall_wipe_shows_its_second_confirmation_at_80x24() -> None:
+async def test_uninstall_keep_data_shows_its_second_confirmation_at_80x24() -> None:
     results: list[object] = []
 
     class Harness(App[None]):
@@ -34,20 +34,19 @@ async def test_uninstall_wipe_shows_its_second_confirmation_at_80x24() -> None:
     app = Harness()
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
-        await pilot.press("a", "enter")
+        await pilot.press("u", "enter")
         await pilot.pause()
         text = screen_text(app)
-        # The armed hint and the row being confirmed (with what it deletes)
-        # are both visible, and the dialog's right border is on screen.
+        # The armed hint and the row being confirmed are both visible, and
+        # the dialog's right border is on screen.
         assert "press enter / click again to confirm" in text
-        # GAP-2585 wording wraps the row before the path.
-        assert "Uninstall and wipe data" in text and "deletes" in text and "~/.defenseclaw." in text
+        assert "Uninstall, keep data" in text
         assert all(len(line.rstrip()) <= 80 for line in text.splitlines())
         assert any(line.rstrip().endswith("╮") for line in text.splitlines()[:3])
     assert results == []
 
 
-async def test_uninstall_everything_row_fits_and_confirms_at_80x24() -> None:
+async def test_uninstall_everything_row_fits_and_picks_at_80x24() -> None:
     results: list[object] = []
 
     class Harness(App[None]):
@@ -57,14 +56,16 @@ async def test_uninstall_everything_row_fits_and_confirms_at_80x24() -> None:
     app = Harness()
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
-        await pilot.press("e", "enter")
+        await pilot.press("down", "down", "down")
         await pilot.pause()
         text = screen_text(app)
-        assert "press enter / click again to confirm" in text
         assert "Uninstall everything" in text and "binaries" in text
         assert all(len(line.rstrip()) <= 80 for line in text.splitlines())
         assert any(line.rstrip().endswith("╮") for line in text.splitlines()[:3])
-    assert results == []
+        # The row only shows a terminal command, so one Enter picks it (GAP-2595).
+        await pilot.press("enter")
+        await pilot.pause()
+    assert [getattr(action, "action_id", None) for action in results] == ["wipe-all"]
 
 
 async def test_all_three_toasts_are_visible() -> None:
