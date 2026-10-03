@@ -101,10 +101,19 @@ class StrictAlertDecisionTests(unittest.TestCase):
         self.app.store.db.commit()
 
     def test_strict_profile_block_still_reads_blocked(self):
+        # The gateway stores the hook-decision row as "hook_decision" (the
+        # audit export shows it as "action"); both names must be read.
+        for stored_action in ("hook_decision", "action"):
+            with self.subTest(stored_action=stored_action):
+                self.app.store.db.execute("DELETE FROM audit_events")
+                self.app.store.db.commit()
+                self._assert_strict_block_reads_blocked(stored_action)
+
+    def _assert_strict_block_reads_blocked(self, stored_action: str) -> None:
         # Under strict the connector-hook row keeps only its projected
-        # details; the hook-decision action row still holds the verdict.
+        # details; the hook-decision row still holds the verdict.
         now = datetime.now(timezone.utc)
-        self._log(action="action", severity="CRITICAL", connector="claudecode",
+        self._log(action=stored_action, severity="CRITICAL", connector="claudecode",
                   details="legacy_action=hook_decision | hook_decision", timestamp=now - timedelta(seconds=1),
                   structured={"defenseclaw.guardrail.effective_action": "block",
                               "defenseclaw.guardrail.raw_action": "block",
