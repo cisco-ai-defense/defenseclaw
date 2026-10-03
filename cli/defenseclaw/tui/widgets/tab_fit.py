@@ -21,8 +21,10 @@ Badges show the real count up to 999 and "999+" above that.
 
 From 80 columns up (wider than ``NARROW_STRIP``) every other tab shows the
 shortest label it gets with any panel active, so switching panels changes
-only the tab you leave and the tab you open (GAP-2078), and other tabs give
-up their names before their unread counts (GAP-2077).
+only the tab you leave and the tab you open (GAP-2078). Other tabs keep
+their unread counts ahead of their names (GAP-2077), but no tab is left a
+bare key while the minor Logs/Audit counts could make room for its name
+(GAP-2150).
 """
 
 from __future__ import annotations
@@ -433,15 +435,6 @@ def _fit_for_active(
                 if not done and name != active and fewer and len(fewer) < len(trial[name]):
                     trial[name] = fewer
                     done = room(trial, alerts=True)
-            if not done and wide:
-                # Then the least important other tabs drop their names, so
-                # their unread counts stay (GAP-2077).
-                for name in reversed(ranked):
-                    if name != active and trial[name]:
-                        trial[name] = ""
-                        if room(trial, alerts=True):
-                            done = True
-                            break
             if done:
                 chosen = trial
             else:

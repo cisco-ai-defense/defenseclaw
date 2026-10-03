@@ -38,7 +38,10 @@ def test_tab_labels_stay_put_and_keep_unread_counts_on_wide_strips(monkeypatch) 
                 for name, _key, _label in PANELS:
                     if name not in {active, other}:
                         assert labels[name] == other_labels[name], (width, active, other, name)
-        assert "⁶⁴" in fits["registries"]["logs"] and "¹⁰" in fits["registries"]["audit"], width
+    # At 160 columns every tab has a name and the Logs and Audit counts show.
+    # Narrower strips may drop them so no tab is a bare key (GAP-2150).
+    assert "⁶⁴" in fits["registries"]["logs"] and "¹⁰" in fits["registries"]["audit"]
+    assert all(" " in label for label in fits["registries"].values())
 
 
 def test_alerts_and_audit_hints_match_what_esc_does() -> None:
