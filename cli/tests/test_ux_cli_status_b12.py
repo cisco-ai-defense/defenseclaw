@@ -104,7 +104,7 @@ def registry_app(monkeypatch):
 
 def test_registry_wizard_asks_for_a_file_path_and_hints_sync_only_when_declined(registry_app) -> None:
     # GAP-2075
-    answers = "local-mcp\nfile\nmcp\n~/registry.yaml\nn\nn\n"
+    answers = "local-mcp\nfile\nmcp\n~/registry.yaml\nn\n"
     result = CliRunner().invoke(cmd_registry.registry, ["wizard"], input=answers, obj=registry_app)
     assert result.exit_code == 0, result.output
     assert "Manifest file path" in result.output and "Manifest URL" not in result.output

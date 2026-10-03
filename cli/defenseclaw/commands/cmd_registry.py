@@ -341,7 +341,8 @@ def add_cmd(  # noqa: PLR0913 - mirrors the prompt surface
                 "Manifest path (absolute)" if kind == "file" else "Manifest URL",
                 default="",
             )
-        if not auth_env and click.confirm(
+        # A file source is read from disk, so no token is ever sent (GAP-2123).
+        if not auth_env and kind.strip().lower() != "file" and click.confirm(
             "Use an auth token (read from an env var)?", default=False,
         ):
             auth_env = click.prompt("Env var name", default="DEFENSECLAW_REGISTRY_TOKEN")
@@ -1583,6 +1584,11 @@ def _registry_required_payload(result: RegistryRequiredResult) -> dict[str, Any]
     help="Set the requirement for connector C only (its per-connector "
          "override). Omit to set it for every connector.",
 )
+@click.option(
+    "--enforce", is_flag=True,
+    help="Also turn asset policy enforcement on (asset_policy.enabled=true, "
+         "mode=action). Without it nothing is blocked while asset policy is off.",
+)
 @click.option("--json", "emit_json", is_flag=True, help="Print the result as JSON.")
 @pass_ctx
 def require_cmd(
@@ -1590,6 +1596,7 @@ def require_cmd(
     asset_type: str,
     enabled: bool,
     connector: str,
+    enforce: bool,
     emit_json: bool,
 ) -> None:
     """Toggle ``asset_policy.<type>.registry_required``.
@@ -1605,13 +1612,19 @@ def require_cmd(
     it, so an older opposite override cannot undo the change. Overrides of
     inactive connectors are kept. Registry rule lists stay global; each rule
     still applies only to its own connector, if it names one.
+
+    The requirement is enforced only while asset policy is on
+    (``asset_policy.enabled=true`` and ``mode=action``). --enforce turns
+    both on in the same save.
     """
     cfg = _require_cfg(app)
     asset = asset_type.lower()
     connector = (connector or "").strip()
+    if enforce and not enabled:
+        raise click.UsageError("--enforce needs --enabled")
 
     try:
-        result = set_registry_required(cfg, asset, enabled, connector=connector)
+        result = set_registry_required(cfg, asset, enabled, connector=connector, enforce=enforce)
     except RegistryRequiredUpdateError as exc:
         failed = [change.connector for change in exc.result.connectors]
         rollback_failed = "could not be restored" in str(exc.cause)
@@ -1654,7 +1667,8 @@ def require_cmd(
         affected = ",".join(f"{c.connector}:{c.status}" for c in result.connectors) or "-"
         app.logger.log_action(
             "registry-edit", "config",
-            f"require scope={scope_label}.registry required={'true' if enabled else 'false'} connectors={affected}",
+            f"require scope={scope_label}.registry required={'true' if enabled else 'false'} "
+            f"connectors={affected}" + (" enforce=true" if enforce else ""),
         )
 
     # Messaging reads the *effective* per-type policy for the scope: rule
@@ -1667,6 +1681,11 @@ def require_cmd(
         effective = getattr(cfg.asset_policy, asset)
     empty_registry = len(effective.registry) == 0
     empty_action = getattr(effective, "registry_empty_action", "deny") or "deny"
+    # GAP-2119: registry_required only blocks while asset policy is on and in
+    # action mode; the per-user default is off/observe.
+    policy_on = bool(getattr(cfg.asset_policy, "enabled", False))
+    policy_mode = cfg.asset_policy.effective_mode(result.connector or "")
+    enforcing = policy_on and policy_mode == "action"
 
     if emit_json:
         payload = _registry_required_payload(result)
@@ -1674,6 +1693,9 @@ def require_cmd(
             "status": "ok",
             "registry_size": len(effective.registry),
             "registry_empty_action": empty_action,
+            "asset_policy_enabled": policy_on,
+            "asset_policy_mode": policy_mode,
+            "enforcing": enforcing,
         })
         _emit_json(payload)
         return
@@ -1694,6 +1716,19 @@ def require_cmd(
         )
     if not enabled:
         return
+    if enforce:
+        ux.subhead("Asset policy enforcement is on (asset_policy.enabled=true, mode=action).")
+    if not policy_on:
+        ux.warn(
+            "Asset policy is off (asset_policy.enabled=false): nothing is blocked "
+            f"yet, and a {asset} that is not in the registry is still added. "
+            "Re-run with --enforce to turn it on (asset_policy.enabled=true, mode=action).",
+        )
+    elif policy_mode != "action":
+        ux.warn(
+            f"Asset policy mode is {policy_mode!r}: a {asset} that is not in the "
+            "registry is logged, not blocked. Re-run with --enforce to set mode=action.",
+        )
 
     # Operators routinely flip require=on without realising the
     # downstream gateway will deny every asset whose name isn't on
@@ -1703,11 +1738,13 @@ def require_cmd(
     # surface whichever value is live.
     if empty_registry:
         if empty_action == "deny":
+            when = "will be" if enforcing else "would be"
             ux.warn(
                 f"asset_policy.{asset}.registry is EMPTY and "
-                f"registry_empty_action='deny' — every {asset} will be "
+                f"registry_empty_action='deny' — every {asset} {when} "
                 "blocked at admission until you `registry sync` (or add "
-                "manual rules).",
+                "manual rules)."
+                + ("" if enforcing else " Nothing is blocked while asset policy enforcement is off."),
             )
         elif empty_action == "warn":
             ux.warn(
@@ -1768,7 +1805,8 @@ def wizard_cmd(ctx: click.Context, app: AppContext) -> None:
     elif kind_key != "clawhub":
         url = click.prompt("Manifest URL")
     auth_env = ""
-    if click.confirm("Use an auth token (read from an env var)?", default=False):
+    # Only sources fetched over the network send a token (GAP-2123).
+    if kind_key != "file" and click.confirm("Use an auth token (read from an env var)?", default=False):
         auth_env = click.prompt("Env var name", default="DEFENSECLAW_REGISTRY_TOKEN")
 
     ctx.meta[_WIZARD_SYNC_PROMPT_KEY] = True
