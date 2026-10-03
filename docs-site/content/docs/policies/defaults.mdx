@@ -218,7 +218,7 @@ guardrail:
       hook_fail_mode: open         # explicit softer override for Codex
 ```
 
-`claw.mode` flips to `multi` automatically once more than one connector is active. Manage these blocks with `defenseclaw setup <connector>` (choosing **Add**) and the `defenseclaw guardrail ... --connector X` command group — see [Setup → Multi-connector](/docs/setup/guardrail/multi-connector) and [Reference → Configuration](/docs/reference/configuration). The OPA admission policy is still global — there's no per-connector policy override surface yet.
+`claw.mode` flips to `multi` automatically once more than one connector is active. Manage these blocks with `defenseclaw setup <connector>` (choosing **Add**) and the `defenseclaw guardrail ... --connector X` command group — see [Setup → Multi-connector](/docs/guardrail/multi-connector) and [Reference → Configuration](/docs/reference/configuration). The OPA admission policy is still global — there's no per-connector policy override surface yet.
 
 <Callout type="warn" title="Legacy top-level connector blocks are deprecated">
 Older installs used top-level `claude_code:` / `codex:` blocks (the `AgentHookConfig` fields) for per-connector overrides:
@@ -283,7 +283,7 @@ defenseclaw quickstart
 ## See also
 
 - [Policies](/docs/policies) — the layered architecture (regex → judge → suppressions → OPA admission)
-- [Setup Guardrail](/docs/setup/guardrail) — the CLI that consumes these defaults
+- [Setup Guardrail](/docs/guardrail) — the CLI that consumes these defaults
 - [HITL](/docs/hitl) — what `guardrail.hilt.enabled` and `min_severity` actually change for the operator
 - [Reference → Fail modes](/docs/reference/fail-modes) — the three "fail open vs closed" knobs disambiguated
 - [Reference → Configuration](/docs/reference/configuration) — every key surfaced here, with type and default

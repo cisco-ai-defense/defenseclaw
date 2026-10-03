@@ -45,7 +45,7 @@ const columns: FooterColumn[] = [
       { text: 'Connectors by OS', href: '/docs/support-matrix' },
       { text: 'Connectors', href: '/docs/connectors' },
       { text: 'Version compatibility', href: '/docs/connectors/compatibility' },
-      { text: 'Capability matrix', href: '/docs/capability-matrix' },
+      { text: 'Capability matrix', href: '/docs/connectors/capability-matrix' },
     ],
   },
   {

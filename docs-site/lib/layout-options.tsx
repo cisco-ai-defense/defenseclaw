@@ -189,14 +189,14 @@ export const baseOptions: BaseLayoutProps = {
 // under content/docs/, so authoring a new page is just dropping an
 // MDX file and listing it in the local meta.
 //
-// We strip the `custom` repo-stats item from the docs sidebar: that
-// surface renders custom link items in the main viewport (above the
-// page tree) which would push the navigation down and read as
-// chrome rather than content. The home navbar remains the single
-// place the stats pills appear, exactly to the left of the GitHub
+// The docs sidebar keeps only the icon links (Cisco AI Defense, Discord,
+// GitHub), which render in its footer. Every main link and the Tools
+// menu already has a home in the page tree below, so listing them above
+// the tree showed each destination twice. The `custom` repo-stats pill
+// also stays on the home navbar only, where it sits left of the GitHub
 // icon.
 export const docsOptions: DocsLayoutProps = {
   ...baseOptions,
-  links: baseOptions.links?.filter((link) => link.type !== 'custom'),
+  links: baseOptions.links?.filter((link) => link.type === 'icon'),
   tree: source.pageTree,
 };

@@ -2,7 +2,7 @@
 
 The quickstart for NVIDIA OpenShell 0.1 sandboxes is the
 [published sandbox guide](https://cisco-ai-defense.github.io/defenseclaw/docs/setup/sandbox/)
-(`docs-site/content/docs/setup/sandbox.mdx`). In short, on Linux or an
+(`docs-site/content/docs/sandboxes/guide.mdx`). In short, on Linux or an
 Apple-silicon Mac (where sandboxes are OpenShell MicroVMs; see
 [compute drivers](SANDBOX.md#compute-drivers)):
 

@@ -149,7 +149,7 @@ For routed traffic, the classifier chooses only a configured alias. The gateway
 then resolves that alias's credential from the process environment or dotenv
 and sends it only to the configured provider. The semantic-router container
 does not read `~/.defenseclaw/.env`. See
-[Semantic model routing](/docs/setup/semantic-routing).
+[Semantic model routing](/docs/guardrail/semantic-routing).
 
 ## Provider-specific SaaS variables are not baseline entries
 
@@ -197,5 +197,5 @@ inspection, or OTLP scope.
 
 - [`cli/defenseclaw/credentials.py`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/cli/defenseclaw/credentials.py) — the `CREDENTIALS` registry, `Requirement` enum, `Resolution` dataclass, and the `classify` / `resolve` functions.
 - [`cli/defenseclaw/commands/cmd_keys.py`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/cli/defenseclaw/commands/cmd_keys.py) — the `list` / `set` / `fill-missing` / `check` subcommands.
-- [Setup → Unified LLM key](/docs/setup/unified-llm-key) — the guided action page.
+- [Setup → Unified LLM key](/docs/guardrail/unified-llm-key) — the guided action page.
 - [Reference → Env vars](/docs/reference/env-vars) — every other env var DefenseClaw reads (behavior switches, paths, telemetry).

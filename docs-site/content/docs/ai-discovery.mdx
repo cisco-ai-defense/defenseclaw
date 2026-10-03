@@ -368,7 +368,7 @@ defenseclaw agent signatures enable codex
 
 `disable` and `enable` take an individual signature ID, not a pack name; use
 `signatures list` to find the ID. The bundled pack covers every connector listed
-in [Capability matrix](/docs/capability-matrix). Custom packs are useful when
+in [Capability matrix](/docs/connectors/capability-matrix). Custom packs are useful when
 you ship internal AI tooling and want it surfaced as a first-party signal
 rather than `unknown`.
 
@@ -625,7 +625,7 @@ a sequence of host actions add up to a chain?
 | Question | Answered by |
 | --- | --- |
 | What AI is **present**? | Discovery / AIBOM |
-| What AI is **allowed**? | [Registry](/docs/setup/registries) |
+| What AI is **allowed**? | [Registry](/docs/scanning/registries) |
 | What AI **actually ran, and where did it send data**? | Runtime planes |
 
 Neither half produces the interesting pair alone. *Present but never running*
@@ -659,7 +659,7 @@ framework running inside a bare `python3` is invisible to it.
 
 <Callout type="warning" title="The runtime planes read more than the inventory does">
 argv is collected, and it is classified as **content** on the wire — each
-destination's [redaction profile](/docs/reference/redaction) governs whether it
+destination's [redaction profile](/docs/observability/redaction) governs whether it
 leaves the host. Provider hostnames are content for the same reason.
 Environment variable *values* are never read on any runtime path, matching the
 inventory scanner's names-only rule. Enabling runtime or continuous discovery
@@ -866,7 +866,7 @@ defenseclaw agent discovery runtime selftest
 If the helper is absent, stopped, or its protected socket cannot be opened,
 runtime coverage reports degraded rather than silently falling back to a
 privileged gateway. Stage the approved helper binary and run enterprise
-`repair`; see [Secure Client managed deployment](/docs/setup/enterprise-deployment#troubleshooting)
+`repair`; see [Secure Client managed deployment](/docs/enterprise/secure-client#troubleshooting)
 or [Troubleshooting](/docs/enterprise/troubleshooting) for the standalone profile.
 
 <Callout type="warn">
@@ -1056,7 +1056,7 @@ inventory verdict including `unobserved`.
 
 ## Use it alongside Registry
 
-Discovery tells you *what's there*. The [Registry](/docs/setup/registries)
+Discovery tells you *what's there*. The [Registry](/docs/scanning/registries)
 tells you *what's allowed*. The runtime planes tell you *what actually ran*.
 
 A common production pattern:
@@ -1103,7 +1103,7 @@ A common production pattern:
 
 - [Observability](/docs/observability) — where the discovery events actually surface
 - [Splunk](/docs/observability/splunk) — the AI Discovery Inventory dashboard
-- [Capability Matrix](/docs/capability-matrix) — what hooks each discovered connector exposes
-- [Setup → Skill Scanner](/docs/setup/skill-scanner) and [MCP Scanner](/docs/setup/mcp-scanner) — what to do *with* discovered skills and MCP servers
+- [Capability Matrix](/docs/connectors/capability-matrix) — what hooks each discovered connector exposes
+- [Setup → Skill Scanner](/docs/scanning/skill-scanner) and [MCP Scanner](/docs/scanning/mcp-scanner) — what to do *with* discovered skills and MCP servers
 - [Reference → CLI](/docs/reference/cli) — full flag surface for `agent`, `aibom`, `registry`
-- [Reference → Redaction](/docs/reference/redaction) — which field classes govern argv and provider hostnames
+- [Reference → Redaction](/docs/observability/redaction) — which field classes govern argv and provider hostnames

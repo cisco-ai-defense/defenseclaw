@@ -43,7 +43,7 @@ carries the removed legacy standalone sandbox: while the config still says
 `openshell.mode: standalone`, an empty `gateway.api_bind` inherits
 `guardrail.host` when that value is non-empty and is not the literal
 `localhost` (for example `10.200.0.1`), so `upgrade` health checks keep
-reaching the gateway. Running [`defenseclaw sandbox legacy-cleanup`](/docs/setup/sandbox)
+reaching the gateway. Running [`defenseclaw sandbox legacy-cleanup`](/docs/sandboxes/guide)
 resets that config and returns the API to loopback. An explicit
 `gateway.api_bind` always takes precedence. A non-loopback value expands access
 to the authenticated management surface; protect that listener with host
@@ -674,7 +674,7 @@ it for `sandbox run`.
 | `harness` | Required. The connector to run, such as `claudecode` or `codex`. |
 | `project` | Required. The absolute host path of the launch folder. In mount mode the daemon checks and mounts it. In copy mode it only labels the sandbox: the CLI stages and uploads the copy after the create, then reports it with `POST …/{name}/workspace`. |
 | `name` | Optional. At most 19 lowercase letters, digits, and `-` (OpenShell 0.1.1 refuses longer names). Empty picks `<folder>-<random>`, the folder name cut to fit. |
-| `pack`, `profile`, `copy`, `safe`, `yolo`, `context`, `unmask`, `host_ports`, `no_mcp`, `learn`, `cpu`, `memory` | The run options that take part in [policy resolution](/docs/setup/sandbox-policy#how-the-effective-policy-is-computed). |
+| `pack`, `profile`, `copy`, `safe`, `yolo`, `context`, `unmask`, `host_ports`, `no_mcp`, `learn`, `cpu`, `memory` | The run options that take part in [policy resolution](/docs/sandboxes/policy-packs#how-the-effective-policy-is-computed). |
 | `no_snapshot` | Skip the pre-session snapshot of a mounted project, and so undo. |
 | `no_build` | Refuse, with 409 `image_unavailable`, instead of building and hook-checking a missing harness image inside the request. A build can take minutes. |
 | `llm` | The model credential: `profile` (a provider profile the harness supports, such as `defenseclaw-anthropic`), `credentials` (its environment variable names and secret values), and `bedrock_region`. |
@@ -756,7 +756,7 @@ rejection to `openshell.egress.block`.
 `sandbox` scopes the unblock to one sandbox. Without it, `always` is
 required, and the host is saved to `openshell.egress.unblocked` for every
 sandbox. Only refusals the policy marks unblockable can be lifted; see
-[How a destination is decided](/docs/setup/sandbox-policy#how-a-destination-is-decided).
+[How a destination is decided](/docs/sandboxes/policy-packs#how-a-destination-is-decided).
 
 ### Policy explain
 
@@ -1018,7 +1018,7 @@ ask the same decider, so they never disagree with the proxy. In short:
 
 The full order, with what an allow entry, an unblock, and
 `openshell.admin.allow_unblock: false` change, is under
-[How a destination is decided](/docs/setup/sandbox-policy#how-a-destination-is-decided).
+[How a destination is decided](/docs/sandboxes/policy-packs#how-a-destination-is-decided).
 `POST /api/v1/sandbox/egress/unblock` refuses what can't be unblocked: the
 administrator's lists and `allow_unblock: false` answer `admin_violation`
 ("blocked by your organization's DefenseClaw policy"). The block list,

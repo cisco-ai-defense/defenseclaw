@@ -39,11 +39,11 @@ Docker Desktop's Linux VM kernel has no Landlock, so on a Mac DefenseClaw runs
 sandboxes in OpenShell MicroVMs (OpenShell's `vm` driver: Apple silicon only,
 experimental upstream). A MicroVM mounts no host folders, so every run works
 on a copy of your project, and `defenseclaw sandbox pull <name>` brings the
-changes back (see [macOS](/docs/setup/sandbox#macos)). The status line names
+changes back (see [macOS](/docs/sandboxes/guide#macos)). The status line names
 the gateway's driver: `(MicroVM)`, or `(docker)`.
 </Callout>
 
-When sandboxes are on (see the [sandbox guide](/docs/setup/sandbox)), the app
+When sandboxes are on (see the [sandbox guide](/docs/sandboxes/guide)), the app
 shows the sandboxes the DefenseClaw daemon runs in four places: the menu bar,
 desktop notifications, an Overview card and the Sandboxes panel. It reads the
 daemon's `/api/v1/sandbox` API on every refresh of the app (every 5 seconds by
@@ -157,7 +157,7 @@ machine), **Claude Code** and **Codex** (at least one; defaults follow
 `openshell.harnesses`), **Shell wrappers** and **Build images now**. There is
 no telemetry question: the Homebrew gateway does not read `gateway.env`, so
 setup cannot turn OpenShell's anonymous usage telemetry off on a Mac (see
-[sandbox setup](/docs/setup/sandbox)). Nor is there a mounts question: setup
+[sandbox setup](/docs/sandboxes/guide)). Nor is there a mounts question: setup
 sets `compute_driver = "vm"` in the gateway's `gateway.toml`, restarts the
 gateway once, and every run works on a copy. The first run of each image
 prepares its MicroVM disk, which takes about a minute and 5 GB.

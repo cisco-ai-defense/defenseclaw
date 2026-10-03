@@ -86,8 +86,8 @@ upstream installation methods do not satisfy this protected admission path;
 do not substitute WSL, Docker, a VM, Git Bash, Cygwin, or MSYS.
 
 `setup opencode` is the dedicated OpenCode alias. See the
-[quick-alias reference](/docs/setup/guardrail/aliases) for its common setup
-options and [full guardrail setup](/docs/setup/guardrail) for advanced scanner
+[quick-alias reference](/docs/guardrail/aliases) for its common setup
+options and [full guardrail setup](/docs/guardrail) for advanced scanner
 and judge configuration.
 
 #### Version contract
@@ -237,9 +237,9 @@ asset declarations.
 
 `defenseclaw sandbox run opencode` runs OpenCode in an NVIDIA OpenShell
 sandbox on Linux, or on a Mac with Apple silicon in a MicroVM of its own that
-works on a copy of your folder ([macOS](/docs/setup/sandbox#macos)): the
+works on a copy of your folder ([macOS](/docs/sandboxes/guide#macos)): the
 agent sees only your project folder, and the DefenseClaw plugin gates every
-tool call. The [sandbox guide](/docs/setup/sandbox)
+tool call. The [sandbox guide](/docs/sandboxes/guide)
 covers setup, the session and every flag. The first run builds the OpenCode
 image; `defenseclaw sandbox image build opencode` builds it ahead of time.
 `defenseclaw sandbox setup` builds the images of the harnesses in

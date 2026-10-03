@@ -36,7 +36,7 @@ native telemetry, and approval support therefore vary by connector.
 </Cards>
 
 <Callout type="info">
-**One gateway, many hook connectors.** A single DefenseClaw gateway can serve several hook connectors at once, each with its own guardrail posture under `guardrail.connectors.<name>` — pick **Add** (not Replace) when you run a second `setup <connector>`. Proxy connectors (OpenClaw, ZeptoClaw) bind a listener and own the traffic plane, so they can't be multi peers. See [Multi-connector](/docs/setup/guardrail/multi-connector).
+**One gateway, many hook connectors.** A single DefenseClaw gateway can serve several hook connectors at once, each with its own guardrail posture under `guardrail.connectors.<name>` — pick **Add** (not Replace) when you run a second `setup <connector>`. Proxy connectors (OpenClaw, ZeptoClaw) bind a listener and own the traffic plane, so they can't be multi peers. See [Multi-connector](/docs/guardrail/multi-connector).
 </Callout>
 
 ## Pick yours
@@ -84,7 +84,7 @@ ranges and script generations.
 `defenseclaw sandbox run <harness>` runs a coding agent in an NVIDIA OpenShell
 sandbox that sees only your project folder, on Linux, or on a Mac with Apple
 silicon in a MicroVM of its own that works on a copy of the folder
-([macOS](/docs/setup/sandbox#macos)); the [sandbox guide](/docs/setup/sandbox)
+([macOS](/docs/sandboxes/guide#macos)); the [sandbox guide](/docs/sandboxes/guide)
 covers setup and every command.
 DefenseClaw builds sandbox images for these harnesses:
 
@@ -107,7 +107,7 @@ Claude Code, Codex, Copilot CLI, Cursor Agent and OmniGent register their
 hooks in a root-owned managed policy or configuration, so user and project
 settings cannot switch them off. The others are in the user tier: the agent
 can edit their hook file, or code the agent or a repository adds runs beside
-the hooks. Every other connector is pending. The [capability matrix](/docs/capability-matrix#i-want-to-run-the-agent-in-an-openshell-sandbox)
+the hooks. Every other connector is pending. The [capability matrix](/docs/connectors/capability-matrix#i-want-to-run-the-agent-in-an-openshell-sandbox)
 shows each harness's image pin, tier and verification.
 
 ## How a connector is structured

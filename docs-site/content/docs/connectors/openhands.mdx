@@ -55,7 +55,7 @@ The OpenHands connector is **hook-only**. `defenseclaw setup openhands` defaults
 
 #### What `setup openhands` actually does
 
-The wrapper accepts the same hook-alias flags as the other hook connectors. The underlying guardrail config falls back to the values DefenseClaw ships with — schema-defined in [`internal/config/config.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/config/config.go) and documented on the [Defaults page](/docs/defaults).
+The wrapper accepts the same hook-alias flags as the other hook connectors. The underlying guardrail config falls back to the values DefenseClaw ships with — schema-defined in [`internal/config/config.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/config/config.go) and documented on the [Defaults page](/docs/policies/defaults).
 
 | Flag | Default | What it does |
 | --- | --- | --- |
@@ -69,8 +69,8 @@ The wrapper accepts the same hook-alias flags as the other hook connectors. The 
 guardrail setup backend, defaults to observe mode, and can join an existing
 hook-connector roster when you choose **Add**. `claw.workspace_dir` is cleared
 for global setup and set only when `--workspace` is supplied. See the
-[quick-alias reference](/docs/setup/guardrail/aliases) for common options and
-[full guardrail setup](/docs/setup/guardrail) for advanced scanner and judge
+[quick-alias reference](/docs/guardrail/aliases) for common options and
+[full guardrail setup](/docs/guardrail) for advanced scanner and judge
 configuration.
 
 #### Version contract

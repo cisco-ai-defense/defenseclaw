@@ -3,7 +3,7 @@
 Start with `defenseclaw sandbox doctor`: every failed check names its fix, and
 `--fix` applies the ones that need only your user. The
 [troubleshooting](https://cisco-ai-defense.github.io/defenseclaw/docs/setup/sandbox/#troubleshooting) section of the published sandbox
-guide (`docs-site/content/docs/setup/sandbox.mdx`) lists the common messages.
+guide (`docs-site/content/docs/sandboxes/guide.mdx`) lists the common messages.
 The architecture, including the OpenShell behaviours the code is built
 around, is in [SANDBOX.md](SANDBOX.md), and the telemetry sandboxes emit is
 in [OPENSHELL_SANDBOX_EVENTS.md](OPENSHELL_SANDBOX_EVENTS.md).

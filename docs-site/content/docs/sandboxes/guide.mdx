@@ -1,5 +1,5 @@
 ---
-title: Run coding agents in OpenShell sandboxes
+title: Complete sandbox guide
 description: Set up NVIDIA OpenShell 0.1 sandboxes and run Claude Code, Codex and other harnesses in skip-permissions mode on your project folder, with DefenseClaw judging every tool call and every site.
 keywords:
   - DefenseClaw sandbox
@@ -356,7 +356,7 @@ off:
   the harness also runs code a user or project adds beside the hooks. The
   run banner says so, and DefenseClaw watches for hooks that go silent.
 
-The [capability matrix](/docs/capability-matrix) lists each harness's hook
+The [capability matrix](/docs/connectors/capability-matrix) lists each harness's hook
 file, pinned version and status.
 
 ## Run an agent
@@ -410,7 +410,7 @@ it copies anything, and the first start of an image says it takes longer:
 | `Model` | The model credential the sandbox uses, and the only hosts it works at. The sandbox holds a placeholder that OpenShell swaps for the real value on requests to those hosts. With no credential found, this line says so and you log in inside the sandbox. |
 | `Secret` | Each `--credential` or `--github-write` binding and the host it works at. |
 | `Host` | Ports on your machine you listed with `--host-port` that the policy accepts, for example `localhost:5432 (opens when you approve the sandbox's first connection)`. Refused ports appear as warnings instead. |
-| `Uploads` | Shown when [the large-upload block](/docs/setup/sandbox-policy#large-upload-alert-threshold) is on (`openshell.egress.block_large_uploads`, a pack's, or your organization's `openshell.admin.block_large_uploads`): `an upload of more than 25 MiB to a host the sandbox has not contacted before is cut, except to hosts you allowed or unblocked, where your organization lets you (the large-upload block)`. Uploads to hosts you unblocked, or that you allowed (`openshell.egress.allow` or a custom pack's `egress.allow`), are only reported, unless `openshell.admin.allow_unblock: false` drops your allow entries and refuses unblocks; the curated hosts a built-in pack allows (the balanced pack's GitHub and package registries) are not exempt. With your organization's `openshell.admin.egress_allow_only` list every host the sandbox may reach is on it and exempt, so the line reads `an upload of more than 25 MiB is reported, not cut: …`. |
+| `Uploads` | Shown when [the large-upload block](/docs/sandboxes/policy-packs#large-upload-alert-threshold) is on (`openshell.egress.block_large_uploads`, a pack's, or your organization's `openshell.admin.block_large_uploads`): `an upload of more than 25 MiB to a host the sandbox has not contacted before is cut, except to hosts you allowed or unblocked, where your organization lets you (the large-upload block)`. Uploads to hosts you unblocked, or that you allowed (`openshell.egress.allow` or a custom pack's `egress.allow`), are only reported, unless `openshell.admin.allow_unblock: false` drops your allow entries and refuses unblocks; the curated hosts a built-in pack allows (the balanced pack's GitHub and package registries) are not exempt. With your organization's `openshell.admin.egress_allow_only` list every host the sandbox may reach is on it and exempt, so the line reads `an upload of more than 25 MiB is reported, not cut: …`. |
 | `Asks` | Where the rare asks go while the harness has your terminal: they are shown as they come, and you answer them in another terminal with `defenseclaw sandbox approvals --sandbox <name>` (see [answer the rare asks](#answer-the-rare-asks)). |
 | `Keys` | Shown for a harness whose Ctrl-C quits it, and so ends the session, rather than stopping a turn: in OpenCode, Esc interrupts a turn. |
 | `MCP` | Your MCP servers that came along. |
@@ -535,7 +535,7 @@ you can run. Claude Code, Codex, Copilot CLI, Cursor and Devin read this
 note; the other harnesses have no place for it, and there only your
 terminal's notice reports the block. Each block is told once, and only in
 the sandbox that hit it. An upload that
-[the large-upload block](/docs/setup/sandbox-policy#large-upload-alert-threshold)
+[the large-upload block](/docs/sandboxes/policy-packs#large-upload-alert-threshold)
 cuts ends the same way for the tool (`curl: (56) Failure when receiving data
 from the peer`), so the agent is told of it too: that the upload to the host
 was cut after how much, because the sandbox had not contacted it before, and
@@ -1123,7 +1123,7 @@ defenseclaw sandbox run claude --pack strict
 `--pack` picks a whole policy pack.
 The `strict` pack also works on a copy, keeps the harness prompts, and
 leaves MCP servers behind. See
-[sandbox policy packs](/docs/setup/sandbox-policy) for the packs, custom
+[sandbox policy packs](/docs/sandboxes/policy-packs) for the packs, custom
 packs, and the limits an organization can set.
 
 After a few sessions, `defenseclaw sandbox policy suggest` turns the sites
@@ -1211,7 +1211,7 @@ of your Codex servers whose name the repository also uses, and says so.
 The other harnesses don't bring your MCP servers along yet, and the
 repository-server block covers only Claude Code and Codex. The `strict`
 pack leaves every MCP server behind. See
-[MCP servers in a sandbox](/docs/setup/sandbox-policy#mcp-servers-in-a-sandbox)
+[MCP servers in a sandbox](/docs/sandboxes/policy-packs#mcp-servers-in-a-sandbox)
 for the managed configuration each harness gets.
 
 ## Make `claude` run sandboxed
@@ -1539,7 +1539,7 @@ per-connector sandbox policy it generated was never enforced.
 The old `sandbox init` command and the legacy options of `sandbox setup`
 (sandbox and host IPs, auto-pairing, host networking) were removed with it.
 OpenClaw and ZeptoClaw use the `shims` subprocess policy on every platform;
-see the [capability matrix](/docs/capability-matrix).
+see the [capability matrix](/docs/connectors/capability-matrix).
 
 ### Detect a legacy install
 
@@ -1668,12 +1668,12 @@ ignored; see
 
 ## Related
 
-- [Sandbox policy packs and admin controls](/docs/setup/sandbox-policy):
+- [Sandbox policy packs and admin controls](/docs/sandboxes/policy-packs):
   the `open`, `balanced` and `strict` packs, custom packs, and
   `openshell.admin` limits.
 - [OpenShell sandbox settings](/docs/reference/configuration#openshell-sandbox-settings):
   every `openshell:` key in `config.yaml`.
-- [Capability matrix](/docs/capability-matrix): the sandbox column per
+- [Capability matrix](/docs/connectors/capability-matrix): the sandbox column per
   connector.
 - [TUI](/docs/tui): the Sandboxes panel and the Setup wizards.
 - [Environment variables](/docs/reference/env-vars): `DEFENSECLAW_NO_SANDBOX`

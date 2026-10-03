@@ -19,7 +19,7 @@ maps its severity to `block`.
 
 This page inventories the detectors currently shipped in the repository and
 explains which layer owns each decision. Benchmark scores for these layers are
-published in [Deterministic Detection Benchmarks](/docs/benchmarks).
+published in [Deterministic Detection Benchmarks](/docs/guardrail/benchmarks).
 
 <Callout type="info" title="Repository snapshot">
 The balanced/default enabled rule catalog contains 239 local rules across seven
@@ -264,7 +264,7 @@ Strict intentionally accepts more interruption risk. Balanced/default is the
 recommended general posture, while permissive is useful for observation-heavy
 deployments. Connector capability still controls whether `block` can become a
 native deny; unsupported surfaces retain the finding and audit action without
-claiming prevention. See [Defaults](/docs/defaults) for the complete operator
+claiming prevention. See [Defaults](/docs/policies/defaults) for the complete operator
 configuration.
 
 To change these levels without switching packs, set `guardrail.block_at` and

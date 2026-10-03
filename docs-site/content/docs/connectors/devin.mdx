@@ -293,7 +293,7 @@ image. Remove it with `docker image rm <tag>`; the next prune forgets its
 record.
 </Callout>
 
-The [sandbox guide](/docs/setup/sandbox) covers the `sandbox` commands. What
+The [sandbox guide](/docs/sandboxes/guide) covers the `sandbox` commands. What
 the Devin CLI image already holds:
 
 - **User tier.** Devin has no system hook tier, so the hooks are in
@@ -311,7 +311,7 @@ the Devin CLI image already holds:
   so a tool that ran although DefenseClaw denied it, or whose `PreToolUse`
   hook never reached DefenseClaw, raises a `hook_tamper` finding and the
   pack's `hooks.on_tamper` applies (see
-  [Sandbox policy](/docs/setup/sandbox-policy)). Measured on a logged-in
+  [Sandbox policy](/docs/sandboxes/policy-packs)). Measured on a logged-in
   Devin CLI 3000.11.3: `PostToolUse` fires only for a tool that ran, not for
   a call a hook denied or you refused at Devin's permission prompt.
 - **Workspace trust is skipped.** A headless Devin run fails in an untrusted

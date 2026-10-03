@@ -18,7 +18,7 @@ export default function sitemap(): MetadataRoute.Sitemap {
     ...(p.data.updatedAt ? { lastModified: new Date(p.data.updatedAt) } : {}),
     changeFrequency: 'weekly',
     // Surface the canonical guardrail flow at the top.
-    priority: p.url === '/docs/setup/guardrail' ? 1.0 : 0.7,
+    priority: p.url === '/docs/guardrail' ? 1.0 : 0.7,
   }));
 
   return [

@@ -79,16 +79,16 @@ be printed or copied.
 Redaction is configured through the v8 bucket/profile policy: edit
 `observability.destinations[].routes[].selector.buckets` and
 `observability.redaction_profiles`, then follow
-[Redaction → Verify policy](/docs/reference/redaction#verify-policy).
+[Redaction → Verify policy](/docs/observability/redaction#verify-policy).
 
 The alias defaults to observe mode and accepts the common hook-connector
 options, including `--mode`, `--workspace`, `--rule-pack`,
 `--human-approval`, `--hilt-min-severity`, `--fail-mode`, `--block-message`,
 `--replace`, `--with-local-stack`, and restart controls. Use the
-[quick-alias reference](/docs/setup/guardrail/aliases) for that surface. Use
-the [full guardrail setup](/docs/setup/guardrail) when you also need scanner,
+[quick-alias reference](/docs/guardrail/aliases) for that surface. Use
+the [full guardrail setup](/docs/guardrail) when you also need scanner,
 detection-strategy, or judge-provider configuration. Defaults are documented
-once on the [Defaults page](/docs/defaults).
+once on the [Defaults page](/docs/policies/defaults).
 
 ## Files DefenseClaw will modify
 
@@ -290,9 +290,9 @@ the gateway was down. See [Residual risks](/docs/enterprise/threat-model#residua
 
 `defenseclaw sandbox run claude` runs Claude Code in an NVIDIA OpenShell
 sandbox on Linux, or on a Mac with Apple silicon in a MicroVM of its own that
-works on a copy of your folder ([macOS](/docs/setup/sandbox#macos)): the
+works on a copy of your folder ([macOS](/docs/sandboxes/guide#macos)): the
 agent sees only your project folder, and DefenseClaw hooks gate every tool
-call. The [sandbox guide](/docs/setup/sandbox)
+call. The [sandbox guide](/docs/sandboxes/guide)
 covers setup, the session and every flag. The files below exist only in the
 sandbox image; your own Claude Code configuration does not change.
 
@@ -339,7 +339,7 @@ sandbox image; your own Claude Code configuration does not change.
   DefenseClaw brought along from your Claude Code setup; a read-only
   `/etc/claude-code/managed-mcp.json` lists them, so a repository's
   `.mcp.json` servers never start unless the sandbox pack sets
-  [`mcp.project_servers: allow`](/docs/setup/sandbox-policy#mcp-servers-in-a-sandbox).
+  [`mcp.project_servers: allow`](/docs/sandboxes/policy-packs#mcp-servers-in-a-sandbox).
   `--no-mcp` leaves your servers behind.
 - **Image and verification.** The image installs Claude Code 2.1.156 by
   default and refuses a version without a reviewed Linux hook contract.

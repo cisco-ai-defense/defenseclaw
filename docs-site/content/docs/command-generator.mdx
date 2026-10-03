@@ -10,7 +10,7 @@ keywords:
   - DefenseClaw connector setup generator
 ---
 
-`defenseclaw setup guardrail` is fully scriptable — every prompt in the interactive wizard has a flag, with [three documented exceptions](/docs/setup/guardrail#prompt-flag-mapping). The generator below lets you build the exact `--non-interactive` invocation for any connector without leaving the docs. Pick the knobs; the command rewrites itself live; the **Notes & validation** panel flags combinations that won't behave the way you expect (e.g. HITL in observe mode, remote scanner with no Cisco endpoint, connectors that can't fail closed).
+`defenseclaw setup guardrail` is fully scriptable — every prompt in the interactive wizard has a flag, with [three documented exceptions](/docs/guardrail#prompt-flag-mapping). The generator below lets you build the exact `--non-interactive` invocation for any connector without leaving the docs. Pick the knobs; the command rewrites itself live; the **Notes & validation** panel flags combinations that won't behave the way you expect (e.g. HITL in observe mode, remote scanner with no Cisco endpoint, connectors that can't fail closed).
 
 <Callout>
 Generated commands are display-only. Nothing on this page runs against your machine. Select **Bash / zsh** for macOS or Linux, or **PowerShell** for native Windows, then copy the result into that host's terminal.
@@ -53,8 +53,8 @@ They own `observability.destinations[].routes[].selector.buckets` and
 ## Related
 
 <Cards>
-  <Card title="defenseclaw setup guardrail" href="/docs/setup/guardrail" description="The narrative reference for every flag, including the three interactive-only prompts." />
+  <Card title="defenseclaw setup guardrail" href="/docs/guardrail" description="The narrative reference for every flag, including the three interactive-only prompts." />
   <Card title="HITL" href="/docs/hitl" description="Per-connector native-ask events, explicit fallbacks, and the decision flow." />
-  <Card title="Capability matrix" href="/docs/capability-matrix" description="Connector × capability comparison the generator reads from at build time." />
+  <Card title="Capability matrix" href="/docs/connectors/capability-matrix" description="Connector × capability comparison the generator reads from at build time." />
   <Card title="CLI commands" href="/docs/reference/cli" description="Full CLI surface — first run, setup, audit, scanning, gateway control, status." />
 </Cards>

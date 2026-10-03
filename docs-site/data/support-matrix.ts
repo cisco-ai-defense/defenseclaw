@@ -375,7 +375,7 @@ interface FeatureSource {
 // packages ship no per-user `defenseclaw` CLI, and a managed computer refuses
 // per-user commands (internal/cli/managed_host_guard.go).
 const featureSources: FeatureSource[] = [
-  { id: 'guardrails', label: 'Guardrails: observe, action, block', href: '/docs/setup/guardrail', group: 'Protect' },
+  { id: 'guardrails', label: 'Guardrails: observe, action, block', href: '/docs/guardrail', group: 'Protect' },
   { id: 'policy', label: 'Policy and rule packs', href: '/docs/policies', group: 'Protect' },
   {
     id: 'codeguard',
@@ -384,15 +384,15 @@ const featureSources: FeatureSource[] = [
     group: 'Protect',
     note: 'Enterprise: part of the local policy engine in the standalone profile.',
   },
-  { id: 'skill-scanner', label: 'Skill scanner', href: '/docs/setup/skill-scanner', group: 'Protect' },
-  { id: 'mcp-scanner', label: 'MCP scanner', href: '/docs/setup/mcp-scanner', group: 'Protect' },
+  { id: 'skill-scanner', label: 'Skill scanner', href: '/docs/scanning/skill-scanner', group: 'Protect' },
+  { id: 'mcp-scanner', label: 'MCP scanner', href: '/docs/scanning/mcp-scanner', group: 'Protect' },
   {
     id: 'judge',
     label: 'LLM judge',
     href: '/docs/reference/cli#guardrail',
     group: 'Protect',
   },
-  { id: 'redaction', label: 'Redaction profiles', href: '/docs/reference/redaction', group: 'Protect' },
+  { id: 'redaction', label: 'Redaction profiles', href: '/docs/observability/redaction', group: 'Protect' },
   {
     id: 'sandboxes',
     label: 'OpenShell sandboxes',
@@ -410,7 +410,7 @@ const featureSources: FeatureSource[] = [
   },
   { id: 'tools', label: 'Tool inventory', href: '/docs/reference/cli#asset-policy-commands', group: 'Discover' },
   { id: 'plugins', label: 'Plugin inventory and scan', href: '/docs/reference/cli#scanning', group: 'Discover' },
-  { id: 'registries', label: 'Registries', href: '/docs/setup/registries', group: 'Discover' },
+  { id: 'registries', label: 'Registries', href: '/docs/scanning/registries', group: 'Discover' },
   { id: 'aibom', label: 'AIBOM', href: '/docs/ai-discovery#aibom-ai-bill-of-materials', group: 'Discover' },
   {
     id: 'otlp',
@@ -437,7 +437,7 @@ const featureSources: FeatureSource[] = [
   {
     id: 'webhooks',
     label: 'Webhooks',
-    href: '/docs/setup/webhooks',
+    href: '/docs/observability/webhooks',
     group: 'Observe',
   },
   { id: 'audit', label: 'Audit log and export', href: '/docs/reference/cli#audit--alerts', group: 'Observe' },
