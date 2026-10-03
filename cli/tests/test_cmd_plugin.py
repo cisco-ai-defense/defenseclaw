@@ -232,6 +232,36 @@ class TestAmpManagedBridgeProtection(PluginCommandTestBase):
             self.assertIn("defenseclaw setup remove amp", result.output, args)
         self.assertTrue(os.path.isfile(self.managed))
 
+    @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
+    def test_scan_of_the_plugin_root_scans_each_plugin_and_skips_the_bridge(self, mock_scan):
+        # GAP-2099: the root was scanned as one plugin named "plugins",
+        # bridge included, with a "plugin block plugins" suggestion.
+        from datetime import datetime, timedelta, timezone
+
+        from defenseclaw.models import ScanResult
+
+        mock_scan.side_effect = lambda target, **_kw: ScanResult(
+            scanner="plugin-scanner", target=target, timestamp=datetime.now(timezone.utc),
+            findings=[], duration=timedelta(seconds=0),
+        )
+        result = self.invoke(["scan", self.amp_plugins])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(
+            [call.args[0] for call in mock_scan.call_args_list],
+            [os.path.join(self.amp_plugins, "architect.ts")],
+        )
+        self.assertIn("architect", result.output)
+        self.assertNotIn("plugin block plugins", result.output)
+
+        os.remove(os.path.join(self.amp_plugins, "architect.ts"))
+        mock_scan.reset_mock()
+        only_bridge = self.invoke(["scan", self.amp_plugins, "--connector", "amp"])
+        self.assertEqual(only_bridge.exit_code, 0, only_bridge.output)
+        mock_scan.assert_not_called()
+        self.assertIn("No plugins found to scan in", only_bridge.output)
+        self.assertIn("defenseclaw.ts is DefenseClaw's own Amp bridge", only_bridge.output)
+        self.assertIn("defenseclaw setup remove amp", only_bridge.output)
+
     def test_remove_deletes_an_ordinary_amp_file_plugin(self):
         """GAP-2063: direct Amp plugins are files, not directories."""
         result = self.invoke(["remove", "architect", "--connector", "amp"])
@@ -947,9 +977,10 @@ class TestPluginRemove(PluginCommandTestBase):
         self.assertFalse(os.path.exists(os.path.join(self.app.cfg.plugin_dir, "removable")))
 
     def test_remove_nonexistent(self):
+        # GAP-2099: removing nothing is an error, as for skill remove.
         result = self.invoke(["remove", "ghost-plugin"])
-        self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("not found", result.output)
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("error: plugin not found: ghost-plugin", result.output)
 
     def test_remove_logs_action(self):
         self._install_plugin("to-remove")
@@ -1031,7 +1062,7 @@ class TestPluginRemovePathTraversal(PluginCommandTestBase):
     def test_remove_rejects_parent_traversal(self):
         """../../etc -> basename 'etc' -> resolves safely inside plugin_dir -> not found."""
         result = self.invoke(["remove", "../../etc"])
-        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(result.exit_code, 1)
         self.assertIn("not found", result.output)
 
     def test_remove_rejects_dotdot(self):
