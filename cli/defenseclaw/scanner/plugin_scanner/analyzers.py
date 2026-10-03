@@ -32,13 +32,14 @@ from defenseclaw.scanner.plugin_scanner.helpers import (
     _SKIP_DIRS,
     STANDARD_MANIFEST_DIRS,
     PathLinkStatus,
+    PySource,
     collect_files,
     downgrade,
     inspect_path_link,
     is_comment_line,
     is_test_path,
     make_finding,
-    python_code_lines,
+    python_source,
     sanitise_evidence,
     strip_comment,
     strip_hash_comment,
@@ -55,9 +56,10 @@ from defenseclaw.scanner.plugin_scanner.rules import (
     DANGEROUS_PERMISSIONS,
     DYNAMIC_IMPORT_PATTERNS,
     GATEWAY_PATTERNS,
-    INTERNAL_HOSTNAME_PATTERNS,
+    INTERNAL_HOST_PATTERN,
     JSON_SECRET_PATTERNS,
     JSON_URL_PATTERNS,
+    NETWORK_CALL_PATTERN,
     PRIVATE_IP_PATTERN,
     RISKY_DEPENDENCIES,
     SAFE_DOTFILES,
@@ -544,11 +546,14 @@ def scan_source_files(
         if is_py:
             # Python rules skip comments and docstrings; call rules also skip
             # every string literal (warning text, regex data) (GAP-1877).
-            code_lines = python_code_lines(content, keep_strings=True) or [
-                strip_hash_comment(line) for line in lines
-            ]
-            call_lines = python_code_lines(content) or code_lines
+            py = python_source(content)
+            if py is None:
+                code_lines = [strip_hash_comment(line) for line in lines]
+                call_lines = code_lines
+            else:
+                code_lines, call_lines = py.code, py.calls
         else:
+            py = None
             code_lines = [strip_comment(line) for line in lines]
             call_lines = code_lines
 
@@ -570,12 +575,12 @@ def scan_source_files(
         _check_for_hardcoded_secrets(lines, rel_path, findings, in_test)
         _check_for_credential_access(code_lines, rel_path, findings, capabilities, in_test)
         _check_for_exfiltration(lines, content, rel_path, findings, capabilities, in_test)
-        _check_for_ssrf(code_lines, rel_path, findings, in_test)
+        _check_for_ssrf(code_lines, rel_path, findings, in_test, call_lines, py)
         if not is_py:
             # import()/require()/spawn() and the gateway rules are JavaScript
             # shapes; on Python they match ``from x import (`` and prose.
             _check_for_dynamic_imports(code_lines, rel_path, findings, in_test)
-        _check_for_cognitive_file_tampering(code_lines, content, rel_path, findings)
+        _check_for_cognitive_file_tampering(code_lines, content, rel_path, findings, py)
         _check_for_obfuscation(code_lines, content, rel_path, findings, in_test)
         if not is_py:
             _check_for_gateway_manipulation(code_lines, lines, rel_path, findings, in_test)
@@ -769,15 +774,19 @@ def _check_for_cognitive_file_tampering(
     content: str,
     rel_path: str,
     findings: list[Finding],
+    py: PySource | None = None,
 ) -> None:
     for cog_file in COGNITIVE_FILES:
         if cog_file not in content:
             continue
-        if not WRITE_FUNCTIONS.search(content):
+        # JavaScript: a write function anywhere in the file. Python: the
+        # line's value must reach a write/append/delete, so a file name in a
+        # data list is not tampering (GAP-2124, GAP-2069).
+        if py is None and not WRITE_FUNCTIONS.search(content):
             continue
 
         for line_idx, line in enumerate(code_lines):
-            if cog_file in line:
+            if cog_file in line and (py is None or py.path_written(line_idx)):
                 findings.append(
                     make_finding(
                         len(findings) + 1,
@@ -1230,7 +1239,22 @@ def _check_for_ssrf(
     rel_path: str,
     findings: list[Finding],
     in_test_path: bool,
+    call_lines: list[str] | None = None,
+    py: PySource | None = None,
 ) -> None:
+    calls = call_lines if call_lines is not None else code_lines
+
+    def in_network_call(i: int) -> bool:
+        # The call must be code, not text in a string (an example URL in a
+        # help message): on this line or, in Python, on the line opening any
+        # bracket the line sits in (a multi-line call); elsewhere the line
+        # before (GAP-2068, GAP-2125).
+        if py is not None:
+            context = [calls[o] for o in py.openers(i)] + [calls[i]]
+        else:
+            context = calls[max(i - 1, 0) : i + 1]
+        return NETWORK_CALL_PATTERN.search("\n".join(context)) is not None
+
     # Cloud metadata endpoints
     for cmp in CLOUD_METADATA_PATTERNS:
         for i, line in enumerate(code_lines):
@@ -1257,10 +1281,10 @@ def _check_for_ssrf(
                 )
                 break
 
-    # Private IP addresses in network contexts
-    net_keyword_re = re.compile(r"\b(?:fetch|http|request|get|post|url|endpoint|host)\b", re.IGNORECASE)
+    # Private IP addresses used by a network call. A loopback allow-list
+    # check or a default bind host is not a request (GAP-2125).
     for i, line in enumerate(code_lines):
-        if PRIVATE_IP_PATTERN.search(line) and net_keyword_re.search(line):
+        if PRIVATE_IP_PATTERN.search(line) and in_network_call(i):
             findings.append(
                 make_finding(
                     len(findings) + 1,
@@ -1280,9 +1304,9 @@ def _check_for_ssrf(
             )
             break
 
-    # Internal hostnames in network calls
+    # Internal hostnames in network calls (GAP-1982, GAP-2068).
     for i, line in enumerate(code_lines):
-        if INTERNAL_HOSTNAME_PATTERNS.search(line):
+        if INTERNAL_HOST_PATTERN.search(line) and in_network_call(i):
             findings.append(
                 make_finding(
                     len(findings) + 1,

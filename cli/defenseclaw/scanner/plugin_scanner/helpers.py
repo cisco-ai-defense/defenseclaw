@@ -23,6 +23,7 @@ deduplication, and assessment computation.
 from __future__ import annotations
 
 import io
+import keyword
 import os
 import re
 import stat
@@ -130,6 +131,243 @@ def python_code_lines(content: str, *, keep_strings: bool = False) -> list[str] 
     line numbers still match ``content.split("\n")``. Returns ``None``
     when the file doesn't tokenize, so the caller can fall back.
     """
+    views = python_code_views(content)
+    if views is None:
+        return None
+    return views[0] if keep_strings else views[1]
+
+
+def python_code_views(content: str) -> tuple[list[str], list[str]] | None:
+    """Return both :func:`python_code_lines` views from one tokenize pass.
+
+    The first view keeps non-docstring string literals, the second blanks
+    every string literal. Tokenizing is the costly part of a plugin scan
+    (GAP-2070), so callers that need both views should use this.
+    """
+    src = python_source(content)
+    return None if src is None else (src.code, src.calls)
+
+
+# Write/append/delete calls on a path in Python source (GAP-2124). A
+# cognitive file name counts as written only when the statement holding it,
+# or a name it is assigned to, reaches one of these. ``fh.write(...)`` is
+# left out: it takes content, not a path, and the ``open(p, "a")`` that made
+# the handle already counts.
+_PY_WRITE_METHODS = frozenset({"write_text", "write_bytes", "unlink", "rmdir", "rename", "touch"})
+_PY_MODULE_WRITES = {
+    "os": frozenset({"remove", "unlink", "rename", "replace", "truncate", "rmdir", "removedirs"}),
+    "shutil": frozenset({"move", "rmtree"}),
+}
+_PY_OPEN_FLAGS = frozenset({"O_WRONLY", "O_RDWR", "O_APPEND", "O_TRUNC", "O_CREAT"})
+_PY_WRITE_MODE = re.compile(r"[rbtU]*[wax+][rbtU+]*")
+_PY_MUTATORS = frozenset({"append", "extend", "add", "insert", "update", "setdefault"})
+_PY_ASSIGN_OPS = frozenset({"=", "+=", "-=", "*=", "/=", "//=", "%=", "|=", "&=", "^=", ">>=", "<<=", "@=", "**="})
+
+
+class _PyStmt:
+    __slots__ = ("scope", "writes", "names", "targets")
+
+    def __init__(self, scope: int) -> None:
+        self.scope = scope
+        self.writes = False
+        self.names: set[str] = set()
+        # (scope, name) pairs; scope -1 is module-wide (globals, attributes).
+        self.targets: set[tuple[int, str]] = set()
+
+
+class PySource:
+    """One tokenize pass over a Python file: the two blanked views plus,
+    on demand, the bracket and statement structure the call and write
+    checks need (GAP-2068, GAP-2124)."""
+
+    def __init__(self, toks: list, code: list[str], calls: list[str]) -> None:
+        self.code = code
+        self.calls = calls
+        self._toks = toks
+        self._openers: list[tuple[int, ...]] | None = None
+        self._line_stmt: list[int] = []
+        self._stmts: list[_PyStmt] = []
+
+    def openers(self, line_idx: int) -> tuple[int, ...]:
+        """Indexes of the lines whose brackets are still open at *line_idx*."""
+        if self._openers is None:
+            self._analyze()
+        return self._openers[line_idx] if line_idx < len(self._openers) else ()
+
+    def path_written(self, line_idx: int) -> bool:
+        """True when the value on *line_idx* reaches a write/append/delete.
+
+        Either its own statement writes (``Path(...).write_text``,
+        ``open(p, "a")``, ``os.remove``), or it is assigned to a name (or
+        returned from a function) that a writing statement later uses. A
+        file name in a data list that is only compared against is not a
+        write (GAP-2069).
+        """
+        if self._openers is None:
+            self._analyze()
+        if line_idx >= len(self._line_stmt) or self._line_stmt[line_idx] < 0:
+            return False
+        first = self._stmts[self._line_stmt[line_idx]]
+        if first.writes:
+            return True
+        tainted: dict[str, set[int]] = {}
+        for scope, name in first.targets:
+            tainted.setdefault(name, set()).add(scope)
+        seen = {id(first)}
+        changed = bool(tainted)
+        while changed:
+            changed = False
+            for st in self._stmts:
+                if id(st) in seen:
+                    continue
+                if not any((scopes := tainted.get(n)) and (-1 in scopes or st.scope in scopes) for n in st.names):
+                    continue
+                if st.writes:
+                    return True
+                seen.add(id(st))
+                for scope, name in st.targets:
+                    tainted.setdefault(name, set()).add(scope)
+                changed = True
+        return False
+
+    def _analyze(self) -> None:
+        nrows = len(self.code)
+        openers: list[tuple[int, ...]] = [()] * nrows
+        line_stmt = [-1] * nrows
+        stmts: list[_PyStmt] = []
+        stack: list[int] = []
+        funcs: list[tuple[int, int, str]] = []  # (indent, scope id, name)
+        indent = 0
+        row = 0
+        cur: list = []
+        for tok in self._toks:
+            start_row = tok.start[0] - 1
+            while row <= start_row and row < nrows:
+                openers[row] = tuple(stack)
+                row += 1
+            if tok.type == tokenize.OP:
+                if tok.string in "([{":
+                    stack.append(start_row)
+                elif tok.string in ")]}" and stack:
+                    stack.pop()
+            if tok.type == tokenize.INDENT:
+                indent += 1
+            elif tok.type == tokenize.DEDENT:
+                indent -= 1
+                while funcs and funcs[-1][0] >= indent:
+                    funcs.pop()
+            elif tok.type in (tokenize.NEWLINE, tokenize.ENDMARKER):
+                if cur:
+                    # A statement level with a def header ends that function
+                    # (also after a one-line ``def f(): ...``).
+                    while funcs and funcs[-1][0] >= indent:
+                        funcs.pop()
+                    st = _py_statement(cur, funcs)
+                    for r in range(cur[0].start[0] - 1, min(cur[-1].end[0], nrows)):
+                        line_stmt[r] = len(stmts)
+                    stmts.append(st)
+                    lead = [t.string for t in cur[:2]]
+                    if lead[0] == "def" or lead == ["async", "def"]:
+                        names = [t.string for t in cur if t.type == tokenize.NAME]
+                        fname = names[names.index("def") + 1] if names.index("def") + 1 < len(names) else ""
+                        funcs.append((indent, len(stmts) - 1, fname))
+                cur = []
+            elif tok.type not in (tokenize.NL, tokenize.COMMENT):
+                cur.append(tok)
+        self._openers, self._line_stmt, self._stmts = openers, line_stmt, stmts
+
+
+def _string_value(tok_string: str) -> str:
+    body = tok_string.lstrip("rRbBuUfF")
+    if body[:3] in ('"""', "'''"):
+        return body[3:-3]
+    return body[1:-1]
+
+
+def _py_statement(cur: list, funcs: list[tuple[int, int, str]]) -> _PyStmt:
+    """Names, assignment targets and write calls of one logical line."""
+    st = _PyStmt(funcs[-1][1] if funcs else -1)
+    n = len(cur)
+
+    def is_op(k: int, s: str) -> bool:
+        return 0 <= k < n and cur[k].type == tokenize.OP and cur[k].string == s
+
+    def add_target(k: int) -> None:
+        name = cur[k].string
+        if keyword.iskeyword(name):
+            return
+        st.targets.add((-1 if is_op(k - 1, ".") else st.scope, name))
+
+    depth = 0
+    assign_at: list[int] = []
+    for k, tok in enumerate(cur):
+        if tok.type == tokenize.OP:
+            if tok.string in "([{":
+                depth += 1
+            elif tok.string in ")]}":
+                depth -= 1
+            elif depth == 0 and tok.string in _PY_ASSIGN_OPS:
+                assign_at.append(k)
+            continue
+        if tok.type != tokenize.NAME or keyword.iskeyword(tok.string):
+            continue
+        name = tok.string
+        st.names.add(name)
+        if name in _PY_OPEN_FLAGS:
+            st.writes = True
+        elif is_op(k + 1, "(") and (
+            (name in _PY_WRITE_METHODS and is_op(k - 1, "."))
+            or (is_op(k - 1, ".") and k >= 2 and name in _PY_MODULE_WRITES.get(cur[k - 2].string, ()))
+        ):
+            st.writes = True
+        elif name == "open" and is_op(k + 1, "("):
+            level = 0
+            for t in cur[k + 1 :]:
+                if t.type == tokenize.OP and t.string in "([{":
+                    level += 1
+                elif t.type == tokenize.OP and t.string in ")]}":
+                    level -= 1
+                    if level == 0:
+                        break
+                elif t.type == tokenize.STRING and _PY_WRITE_MODE.fullmatch(_string_value(t.string)):
+                    st.writes = True
+                    break
+        elif name in _PY_MUTATORS and is_op(k - 1, ".") and is_op(k + 1, "(") and k >= 2:
+            if cur[k - 2].type == tokenize.NAME:
+                add_target(k - 2)
+
+    lead = cur[0].string
+    if lead == "for" or (lead == "async" and n > 1 and cur[1].string == "for"):
+        for k in range(1, n):
+            if cur[k].type == tokenize.NAME and cur[k].string == "in":
+                break
+            if cur[k].type == tokenize.NAME:
+                add_target(k)
+    elif lead in ("with", "async"):
+        for k in range(n - 1):
+            if cur[k].type == tokenize.NAME and cur[k].string == "as" and cur[k + 1].type == tokenize.NAME:
+                add_target(k + 1)
+    elif lead in ("return", "yield"):
+        if funcs and funcs[-1][2]:
+            st.targets.add((-1, funcs[-1][2]))
+    elif assign_at:
+        depth = 0
+        for k in range(assign_at[-1]):
+            tok = cur[k]
+            if tok.type == tokenize.OP:
+                if tok.string in "([{":
+                    depth += 1
+                elif tok.string in ")]}":
+                    depth -= 1
+                elif depth == 0 and tok.string == ":":
+                    break
+            elif tok.type == tokenize.NAME and depth == 0 and not is_op(k + 1, "."):
+                add_target(k)
+    return st
+
+
+def python_source(content: str) -> PySource | None:
+    """Tokenize *content* once and return its :class:`PySource`, or None."""
     try:
         toks = list(tokenize.generate_tokens(io.StringIO(content).readline))
     except (tokenize.TokenError, SyntaxError):
@@ -137,32 +375,42 @@ def python_code_lines(content: str, *, keep_strings: bool = False) -> list[str] 
     string_types = {tokenize.STRING}
     if hasattr(tokenize, "FSTRING_MIDDLE"):
         string_types.add(tokenize.FSTRING_MIDDLE)
-    spans = []
+    doc_spans = []
+    string_spans = []
     stmt_start = True
     for i, tok in enumerate(toks):
-        if tok.type == tokenize.COMMENT or (tok.type in string_types and not keep_strings):
-            spans.append(tok)
-        elif tok.type == tokenize.STRING and stmt_start:
-            # A bare string statement (docstring): strings up to NEWLINE.
-            j = i + 1
-            while j < len(toks) and toks[j].type in (tokenize.STRING, tokenize.NL, tokenize.COMMENT):
-                j += 1
-            if j == len(toks) or toks[j].type in (tokenize.NEWLINE, tokenize.ENDMARKER):
-                spans.extend(t for t in toks[i:j] if t.type == tokenize.STRING)
+        if tok.type == tokenize.COMMENT:
+            doc_spans.append(tok)
+        elif tok.type in string_types:
+            string_spans.append(tok)
+            if tok.type == tokenize.STRING and stmt_start:
+                # A bare string statement (docstring): strings up to NEWLINE.
+                j = i + 1
+                while j < len(toks) and toks[j].type in (tokenize.STRING, tokenize.NL, tokenize.COMMENT):
+                    j += 1
+                if j == len(toks) or toks[j].type in (tokenize.NEWLINE, tokenize.ENDMARKER):
+                    doc_spans.extend(t for t in toks[i:j] if t.type == tokenize.STRING)
         if tok.type in (tokenize.NEWLINE, tokenize.INDENT, tokenize.DEDENT):
             stmt_start = True
         elif tok.type not in (tokenize.NL, tokenize.COMMENT):
             stmt_start = False
-    rows = [list(r) for r in content.split("\n")]
+    rows = content.split("\n")
+    _blank_spans(rows, doc_spans)
+    code = [r.rstrip() for r in rows]
+    _blank_spans(rows, string_spans)
+    return PySource(toks, code, [r.rstrip() for r in rows])
+
+
+def _blank_spans(rows: list[str], spans) -> None:
+    """Replace each token span in *rows* with spaces, keeping columns."""
     for tok in spans:
         (sr, sc), (er, ec) = tok.start, tok.end
         for r in range(sr - 1, min(er, len(rows))):
             row = rows[r]
             lo = sc if r == sr - 1 else 0
-            hi = ec if r == er - 1 else len(row)
-            for c in range(lo, min(hi, len(row))):
-                row[c] = " "
-    return ["".join(r).rstrip() for r in rows]
+            hi = min(ec if r == er - 1 else len(row), len(row))
+            if hi > lo:
+                rows[r] = row[:lo] + " " * (hi - lo) + row[hi:]
 
 
 def is_comment_line(line: str) -> bool:

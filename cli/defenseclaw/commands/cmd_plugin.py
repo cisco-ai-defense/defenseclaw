@@ -27,6 +27,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -1171,7 +1172,9 @@ def _scan_all_plugins(
         _scan_ui.render_preamble(ctx, target_count=len(targets))
 
         clean = blocked = errored = findings_total = 0
-        total_ms = 0
+        # Summary time is the wall time of the sweep, not the sum of the
+        # base scanner's durations (GAP-2070).
+        sweep_started = time.monotonic()
         group_results: list[dict[str, Any]] = []
         for pid, scan_dir, scope, project_path in targets:
             try:
@@ -1182,7 +1185,6 @@ def _scan_all_plugins(
                     click.echo(f"  error: scan failed for {pid!r}: {exc}", err=True)
                 continue
             _record_scan(app.logger, result)
-            total_ms += int(result.duration.total_seconds() * 1000)
             if as_json:
                 payload = json.loads(result.to_json())
                 payload["connector"] = connector
@@ -1229,7 +1231,7 @@ def _scan_all_plugins(
                 errored=errored,
                 total=len(targets),
                 findings=findings_total,
-                duration_ms=total_ms,
+                duration_ms=int((time.monotonic() - sweep_started) * 1000),
             )
 
     if as_json:

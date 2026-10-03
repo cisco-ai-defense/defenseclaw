@@ -53,13 +53,21 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass, field
+from datetime import timedelta
 from typing import TypeAlias
 
 import yaml
 
 from defenseclaw.models import Finding
+from defenseclaw.scanner.plugin_scanner.helpers import PySource, python_source
 from defenseclaw.scanner.plugin_scanner.self_identity import is_first_party_self_target
+
+try:  # Python 3.11+
+    from re import _parser as _sre_parse
+except ImportError:  # pragma: no cover - Python 3.10
+    import sre_parse as _sre_parse
 
 _log = logging.getLogger(__name__)
 
@@ -89,6 +97,27 @@ _GO_UNICODE_SCALAR_ESCAPE = re.compile(
     r"(?P<slashes>\\+)x\{(?P<codepoint>[0-9A-Fa-f]{1,6})\}"
 )
 
+# A literal prefilter (GAP-2070): every match of a rule must contain certain
+# ASCII literals, e.g. ``ignore`` and one of ``previous|prior``. A node is a
+# lower-case literal or an ("and"|"or", [nodes]) tuple. Checking it with
+# ``in`` on the folded text is far cheaper than a full ``re.search``, and a
+# rule whose literals are absent cannot match, so results are unchanged.
+_Required: TypeAlias = "str | tuple[str, list]"
+_REPEATS = {"MAX_REPEAT", "MIN_REPEAT", "POSSESSIVE_REPEAT"}
+# The only non-ASCII characters that ``re.IGNORECASE`` matches to an ASCII
+# letter. Folding them first keeps the prefilter exact for (?i) rules.
+_ASCII_CASE_FOLD = {0x130: "i", 0x131: "i", 0x17F: "s", 0x212A: "k"}
+
+# Windowed search (GAP-2070): in a file over _WINDOW_MIN_TEXT characters a
+# rule is searched only in the lines around its anchor literals (every match
+# contains one), _WINDOW_SLACK characters and one line on each side, and only in windows
+# that hold all of the rule's required literals. Python's re otherwise walks
+# every position of a 400 KB adapter for each prose rule. Small files and
+# rules without a usable anchor get a plain search.
+_WINDOW_MIN_TEXT = 4096
+_WINDOW_SLACK = 512
+_ANCHOR_MIN_LEN = 3
+
 
 @dataclass
 class _CompiledRule:
@@ -99,6 +128,15 @@ class _CompiledRule:
     confidence: float
     tags: list[str]
     category: str
+    # Literals every match contains (None: no prefilter).
+    required: _Required | None = None
+    # Literals one of which every match contains (None: plain search).
+    anchors: list[str] | None = None
+    # Rules whose expression is a write/append/delete of a path. On Python
+    # source a hit counts only when the matched value reaches a write call:
+    # a file name in a data list or a message is not an access (GAP-2069,
+    # GAP-2124).
+    path_write: bool = False
 
 
 @dataclass
@@ -111,16 +149,45 @@ class RulePack:
     def is_empty(self) -> bool:
         return not self.rules
 
-    def scan_text(self, text: str, *, location: str = "") -> list[Finding]:
-        """Return one finding per matching rule (first hit), with line number."""
+    def scan_text(self, text: str, *, location: str = "", python: bool = False) -> list[Finding]:
+        """Return one finding per matching rule (first hit), with line number.
+
+        With *python* set, a hit is confirmed on the source with comments
+        and docstrings blanked, the same view the plugin scanner's source
+        rules use (GAP-1877); ``path_write`` rules also need the matched
+        value to reach a write call (GAP-2069, GAP-2124). The view is built
+        only when a rule hits.
+        """
         if not text:
             return []
+        folded = _fold(text)
+        py: PySource | None | bool = False  # False: not built yet
+        code = text
         findings: list[Finding] = []
         for rule in self.rules:
-            m = rule.pattern.search(text)
+            if rule.required is not None and not _holds(rule.required, folded):
+                continue
+            source = text
+            m = _search(rule, text, folded)
+            if m is not None and python:
+                if py is False:
+                    py = python_source(text)
+                    code = text if py is None else "\n".join(py.code)
+                source = code
+                if rule.path_write and py is not None:
+                    m = next(
+                        (
+                            hit
+                            for hit in rule.pattern.finditer(source)
+                            if py.path_written(source.count("\n", 0, hit.start()))
+                        ),
+                        None,
+                    )
+                else:
+                    m = _search(rule, source, folded)
             if m is None:
                 continue
-            line_no = text.count("\n", 0, m.start()) + 1
+            line_no = source.count("\n", 0, m.start()) + 1
             loc = f"{location}:{line_no}" if location else ""
             findings.append(
                 Finding(
@@ -147,7 +214,9 @@ class RulePack:
         if os.path.isfile(path):
             text = _read_text(path)
             if text is not None:
-                findings.extend(self.scan_text(text, location=os.path.basename(path)))
+                findings.extend(
+                    self.scan_text(text, location=os.path.basename(path), python=_is_python(path))
+                )
             return findings
 
         if not os.path.isdir(path):
@@ -166,11 +235,149 @@ class RulePack:
                     continue
                 seen += 1
                 rel = os.path.relpath(full, path)
-                findings.extend(self.scan_text(text, location=rel))
+                findings.extend(self.scan_text(text, location=rel, python=_is_python(fname)))
         return findings
 
 
 RulePackOverlayCache: TypeAlias = dict[str, RulePack]
+
+
+def _is_python(path: str) -> bool:
+    return path.casefold().endswith(".py")
+
+
+def _fold(text: str) -> str:
+    """Lower-case *text* so ASCII literals match it as ``re.IGNORECASE`` does."""
+    if text.isascii() or not any(chr(c) in text for c in _ASCII_CASE_FOLD):
+        return text.lower()
+    return text.translate(_ASCII_CASE_FOLD).lower()
+
+
+def _holds(node: _Required, folded: str) -> bool:
+    if isinstance(node, str):
+        return node in folded
+    op, kids = node
+    # Plain loops: this runs per rule and file, and generator overhead
+    # showed up in the GAP-2070 profile.
+    want = op != "and"
+    for k in kids:
+        if (k in folded if isinstance(k, str) else _holds(k, folded)) is want:
+            return want
+    return not want
+
+
+def _search(rule: _CompiledRule, text: str, folded: str) -> re.Match[str] | None:
+    """``rule.pattern.search(text)``, limited to anchor windows in big files."""
+    if rule.anchors is None or len(text) < _WINDOW_MIN_TEXT or len(folded) != len(text):
+        return rule.pattern.search(text)
+    spans: list[tuple[int, int]] = []
+    for lit in rule.anchors:
+        i = folded.find(lit)
+        while i >= 0:
+            spans.append((i, i + len(lit)))
+            i = folded.find(lit, i + 1)
+    if not spans:
+        return None
+    spans.sort()
+    windows: list[list[int]] = []
+    for lo, hi in spans:
+        # Whole lines, plus one more line on each side, so a match that
+        # spans a long line and the next one (a CSV header and a row) fits.
+        lo = text.rfind("\n", 0, max(lo - _WINDOW_SLACK, 0))
+        lo = text.rfind("\n", 0, lo) + 1 if lo > 0 else 0
+        hi = text.find("\n", min(hi + _WINDOW_SLACK, len(text)))
+        hi = text.find("\n", hi + 1) if hi >= 0 else -1
+        hi = len(text) if hi < 0 else hi
+        if windows and lo <= windows[-1][1]:
+            windows[-1][1] = max(windows[-1][1], hi)
+        else:
+            windows.append([lo, hi])
+    for lo, hi in windows:
+        if rule.required is not None and not _holds(rule.required, folded[lo:hi]):
+            continue
+        m = rule.pattern.search(text, lo, hi)
+        if m is not None:
+            return m
+    return None
+
+
+def _anchors(node: _Required | None, pattern: re.Pattern[str]) -> list[str] | None:
+    """A literal set one of which every match contains, for :func:`_search`.
+
+    None when there is no such set of usable literals, or when the pattern
+    has an end anchor (``$`` / ``\\Z`` without MULTILINE) that a window's
+    end would satisfy falsely.
+    """
+    if node is None:
+        return None
+    if "\\Z" in pattern.pattern or "\\z" in pattern.pattern:
+        return None
+    if "$" in pattern.pattern and not pattern.flags & re.MULTILINE:
+        return None
+    if isinstance(node, str):
+        return [node] if len(node) >= _ANCHOR_MIN_LEN or not node.isascii() else None
+    op, kids = node
+    sets = [_anchors(k, pattern) for k in kids]
+    if op == "or":
+        if any(a is None for a in sets):
+            return None
+        return [lit for a in sets for lit in a]
+    usable = [a for a in sets if a is not None]
+    if not usable:
+        return None
+    # Prefer the child with the longest shortest literal: rarer in text.
+    return max(usable, key=lambda a: (min(len(x) for x in a), -len(a)))
+
+
+def _required_literals(pattern: str) -> _Required | None:
+    """Literals every match of *pattern* contains, or None when unknown."""
+    try:
+        return _required_seq(_sre_parse.parse(pattern))
+    except Exception:  # noqa: BLE001 - no prefilter is always safe
+        return None
+
+
+def _uncased(cp: int) -> bool:
+    c = chr(cp)
+    return cp >= 0x80 and c.lower() == c == c.upper()
+
+
+def _required_seq(items) -> _Required | None:
+    parts: list = []
+    run: list[str] = []
+
+    def flush() -> None:
+        if run:
+            parts.append("".join(run).lower())
+            run.clear()
+
+    for op, av in items:
+        name = getattr(op, "name", str(op))
+        if name == "LITERAL" and (av < 0x80 or _uncased(av)):
+            run.append(chr(av))
+            continue
+        flush()
+        sub = None
+        if name == "IN" and av and all(getattr(o, "name", "") == "LITERAL" and _uncased(v) for o, v in av):
+            # A set of uncased non-ASCII characters, such as zero-width
+            # spaces: rare in text, so a good prefilter.
+            sub = ("or", [chr(v) for _, v in av])
+        elif name == "SUBPATTERN":
+            sub = _required_seq(av[-1])
+        elif name == "ATOMIC_GROUP":
+            sub = _required_seq(av)
+        elif name in _REPEATS and av[0] >= 1:
+            sub = _required_seq(av[2])
+        elif name == "BRANCH":
+            alts = [_required_seq(b) for b in av[1]]
+            if all(a is not None for a in alts):
+                sub = ("or", alts)
+        if sub is not None:
+            parts.append(sub)
+    flush()
+    if not parts:
+        return None
+    return parts[0] if len(parts) == 1 else ("and", parts)
 
 
 def _read_text(path: str) -> str | None:
@@ -243,6 +450,8 @@ def _compile_rules_file(raw: dict, pack: RulePack) -> None:
         compiled = _compile(pattern, rule_id)
         if compiled is None:
             continue
+        expression = str(rule.get("expression", "") or "")
+        required = _required_literals(compiled.pattern)
         pack.rules.append(
             _CompiledRule(
                 rule_id=rule_id,
@@ -252,6 +461,11 @@ def _compile_rules_file(raw: dict, pack: RulePack) -> None:
                 confidence=float(rule.get("confidence", 0.0) or 0.0),
                 tags=[str(t) for t in (rule.get("tags") or [])],
                 category=category,
+                required=required,
+                anchors=_anchors(required, compiled),
+                path_write="f.paths" in expression
+                and "f.commands" not in expression
+                and any(f"PATH_ACCESS_{a}" in expression for a in ("WRITE", "APPEND", "DELETE")),
             )
         )
 
@@ -269,6 +483,7 @@ def _compile_local_patterns(raw: dict, pack: RulePack) -> None:
             compiled = _compile(str(pattern), rule_id)
             if compiled is None:
                 continue
+            required = _required_literals(compiled.pattern)
             pack.rules.append(
                 _CompiledRule(
                     rule_id=rule_id,
@@ -278,6 +493,8 @@ def _compile_local_patterns(raw: dict, pack: RulePack) -> None:
                     confidence=0.0,
                     tags=[tag],
                     category="local-pattern",
+                    required=required,
+                    anchors=_anchors(required, compiled),
                 )
             )
 
@@ -406,10 +623,14 @@ class RulePackOverlayScanner:
 
     def scan(self, target, *args, **kwargs):
         result = self.inner.scan(target, *args, **kwargs)
+        started = time.monotonic()
         try:
             self._apply_overlay(result, target, kwargs)
         except Exception as exc:  # pragma: no cover - defensive
             _log.debug("rule-pack overlay failed for %r: %s", target, exc)
+        # The reported scan duration covers the overlay too (GAP-2070).
+        if isinstance(getattr(result, "duration", None), timedelta):
+            result.duration += timedelta(seconds=time.monotonic() - started)
         return result
 
     def _apply_overlay(self, result, target, kwargs) -> None:
