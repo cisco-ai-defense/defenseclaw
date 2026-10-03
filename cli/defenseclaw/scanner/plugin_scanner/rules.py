@@ -516,8 +516,10 @@ GATEWAY_PATTERNS: list[GatewayPattern] = [
 # Write-function detection (cognitive tampering)
 # ---------------------------------------------------------------------------
 
+# Copy and rename calls overwrite their destination too (GAP-2187).
 WRITE_FUNCTIONS: re.Pattern[str] = re.compile(
-    r"(?:writeFile|appendFile|writeFileSync|appendFileSync|createWriteStream)\s*\("
+    r"(?:writeFile|appendFile|writeFileSync|appendFileSync|createWriteStream"
+    r"|copyFile|copyFileSync|\bcpSync|\bfs\.(?:promises\.)?cp|\brename|renameSync)\s*\("
 )
 
 # ---------------------------------------------------------------------------

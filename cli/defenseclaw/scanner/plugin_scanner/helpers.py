@@ -121,6 +121,126 @@ def strip_hash_comment(line: str) -> str:
     return line
 
 
+# A ``/`` after one of these (or these words) starts a regex literal, not a
+# division.
+_JS_REGEX_AFTER = frozenset("(,=:[!&|?{};+-*%<>~^")
+_JS_REGEX_WORDS = frozenset(
+    {"return", "typeof", "case", "in", "of", "new", "delete", "void", "throw", "yield", "await"}
+)
+
+
+def js_call_view(content: str) -> tuple[list[str], list[tuple[int, ...]]]:
+    """JavaScript/TypeScript lines with comments and the text of string,
+    template and regex literals blanked (``${...}`` stays code), plus, per
+    line, the lines opening the brackets still open where it starts.
+
+    The JavaScript side of :meth:`PySource.openers` and ``PySource.calls``:
+    a network word inside an error message is not a call, and a URL four
+    lines into ``axios({`` belongs to that call (GAP-2068). Columns and
+    line numbers match ``content.split("\n")``.
+    """
+    out = list(content)
+    n = len(content)
+    tmpl: list[int] = []  # per open template: brace depth in ``${}``, -1 in its text
+    last = ""
+    word = ""
+    i = 0
+
+    def blank(a: int, b: int) -> None:
+        for k in range(a, min(b, n)):
+            if out[k] != "\n":
+                out[k] = " "
+
+    while i < n:
+        ch = content[i]
+        nxt = content[i + 1] if i + 1 < n else ""
+        if tmpl and tmpl[-1] < 0:
+            if ch == "`":
+                tmpl.pop()
+                last, word = "`", ""
+                i += 1
+            elif ch == "$" and nxt == "{":
+                out[i] = " "
+                tmpl[-1] = 0
+                last, word = "{", ""
+                i += 2
+            else:
+                step = 2 if ch == "\\" else 1
+                blank(i, i + step)
+                i += step
+            continue
+        if ch in "\"'":
+            j = i + 1
+            while j < n and content[j] not in (ch, "\n"):
+                j += 2 if content[j] == "\\" else 1
+            blank(i + 1, j)
+            i = j + 1 if j < n and content[j] == ch else j
+            last, word = ch, ""
+            continue
+        if ch == "`":
+            tmpl.append(-1)
+            i += 1
+            continue
+        if ch == "/" and nxt == "/":
+            j = content.find("\n", i)
+            j = n if j < 0 else j
+            blank(i, j)
+            i = j
+            continue
+        if ch == "/" and nxt == "*":
+            j = content.find("*/", i + 2)
+            j = n if j < 0 else j + 2
+            blank(i, j)
+            i = j
+            continue
+        if ch == "/" and (not last or last in _JS_REGEX_AFTER or word in _JS_REGEX_WORDS):
+            j, in_class = i + 1, False
+            while j < n and content[j] != "\n":
+                c = content[j]
+                if c == "\\":
+                    j += 2
+                    continue
+                if c == "/" and not in_class:
+                    break
+                in_class = (in_class or c == "[") and c != "]"
+                j += 1
+            if j < n and content[j] == "/":
+                blank(i + 1, j)
+                i = j + 1
+                last, word = "a", ""
+                continue
+        if tmpl and ch == "{":
+            tmpl[-1] += 1
+        elif tmpl and ch == "}":
+            if tmpl[-1] == 0:
+                tmpl[-1] = -1
+                i += 1
+                continue
+            tmpl[-1] -= 1
+        if ch.isalnum() or ch in "_$":
+            j = i
+            while j < n and (content[j].isalnum() or content[j] in "_$"):
+                j += 1
+            word, last = content[i:j], "a"
+            i = j
+            continue
+        if not ch.isspace():
+            last, word = ch, ""
+        i += 1
+
+    lines = "".join(out).split("\n")
+    openers: list[tuple[int, ...]] = []
+    stack: list[int] = []
+    for row, line in enumerate(lines):
+        openers.append(tuple(stack))
+        for c in line:
+            if c in "([{":
+                stack.append(row)
+            elif c in ")]}" and stack:
+                stack.pop()
+    return lines, openers
+
+
 def python_code_lines(content: str, *, keep_strings: bool = False) -> list[str] | None:
     """Return *content*'s lines with Python comments and docstrings blanked.
 
@@ -156,7 +276,8 @@ def python_code_views(content: str) -> tuple[list[str], list[str]] | None:
 _PY_WRITE_METHODS = frozenset({"write_text", "write_bytes", "unlink", "rmdir", "rename", "touch"})
 _PY_MODULE_WRITES = {
     "os": frozenset({"remove", "unlink", "rename", "replace", "truncate", "rmdir", "removedirs"}),
-    "shutil": frozenset({"move", "rmtree"}),
+    # A copy onto a path overwrites it like a move does (GAP-2187).
+    "shutil": frozenset({"move", "rmtree", "copy", "copy2", "copyfile", "copytree"}),
 }
 _PY_OPEN_FLAGS = frozenset({"O_WRONLY", "O_RDWR", "O_APPEND", "O_TRUNC", "O_CREAT"})
 _PY_WRITE_MODE = re.compile(r"[rbtU]*[wax+][rbtU+]*")
