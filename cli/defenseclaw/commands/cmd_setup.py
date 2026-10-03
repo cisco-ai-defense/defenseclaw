@@ -9605,7 +9605,7 @@ def _apply_hook_connector_setup(
     _conn_key = normalize_connector(connector)
     if (
         not enable_judge
-        and ("*" in _gate_before or _conn_key in _gate_before)
+        and _conn_key in _gate_before
         and "*" not in _judge_gate
         and _conn_key not in _judge_gate
     ):
@@ -10712,11 +10712,10 @@ def _prune_judge_gate_to_action_scope(gc, connectors: list[str]) -> list[str]:
     if not targets:
         return list(getattr(gc.judge, "hook_connectors", []) or [])
 
-    action_targets = {
-        c
-        for c in targets
-        if (gc.effective_mode(c) if hasattr(gc, "effective_mode") else getattr(gc, "mode", "observe")) == "action"
-    }
+    def _is_action(c: str) -> bool:
+        return (gc.effective_mode(c) if hasattr(gc, "effective_mode") else getattr(gc, "mode", "observe")) == "action"
+
+    action_targets = {c for c in targets if _is_action(c)}
     current_gate = [
         normalize_connector(str(c)) for c in (getattr(gc.judge, "hook_connectors", []) or []) if str(c).strip()
     ]
@@ -10734,7 +10733,18 @@ def _prune_judge_gate_to_action_scope(gc, connectors: list[str]) -> list[str]:
             for c in _configured_connector_set(gc)
             if normalize_connector(c) in _HOOK_ENFORCED_CONNECTORS
         }
-        new_gate = sorted((configured_hook_connectors - targets) | action_targets)
+        # GAP-2083: the same action-mode rule for every connector 'all'
+        # covered, and say that 'all' is gone instead of narrowing silently.
+        new_gate = sorted({c for c in configured_hook_connectors - targets if _is_action(c)} | action_targets)
+        dropped = sorted((configured_hook_connectors | targets) - set(new_gate))
+        ux.warn(
+            "LLM judge gate 'all' was replaced with "
+            + (", ".join(new_gate) if new_gate else "nothing (judge off)")
+            + f": {', '.join(dropped)} {'is' if len(dropped) == 1 else 'are'} in observe mode, and the judge "
+            "reviews hook calls only for action-mode connectors. Connectors set up later are not added "
+            "automatically: defenseclaw guardrail judge add <connector>",
+            indent="  ",
+        )
     else:
         new_gate = sorted(c for c in current_gate if c not in targets or c in action_targets)
 
