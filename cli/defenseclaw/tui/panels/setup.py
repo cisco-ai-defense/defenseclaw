@@ -1304,6 +1304,7 @@ class SetupPanelModel:
         if self.active_goal is not None:
             base = list(_filter_fields_for_goal(base, self.active_goal))
             base = list(_narrow_goal_connectors(base, self.active_goal, self.config))
+            base = list(_narrow_manage_goal_fields(base, self.active_wizard, self.active_goal))
             if self.active_wizard == SetupWizard.CREDENTIALS and self.active_goal.id == "remove":
                 base = [_stored_key_picker(field, self.config) if field.label == "Env Name" else field for field in base]
             if self.active_wizard == SetupWizard.CREDENTIALS and self.active_goal.id == "set":
@@ -1413,6 +1414,7 @@ class SetupPanelModel:
         if self.active_goal is not None:
             fields = list(_filter_fields_for_goal(fields, self.active_goal))
             fields = list(_narrow_goal_connectors(fields, self.active_goal, self.config))
+            fields = list(_narrow_manage_goal_fields(fields, self.active_wizard, self.active_goal))
         self.form_fields = fields
         if self.form_fields:
             self.form_cursor = _clamp(self.form_cursor, 0, len(self.form_fields) - 1)
@@ -6122,6 +6124,39 @@ def _narrow_goal_connectors(
             value = field.value if field.value in configured else configured[0]
             default = field.default if field.default in configured else configured[0]
             field = replace(field, options=configured, value=value, default=default)
+        narrowed.append(field)
+    return tuple(narrowed)
+
+
+_MANAGE_GOAL_NOUNS: dict[SetupWizard, str] = {
+    SetupWizard.OBSERVABILITY: "destination",
+    SetupWizard.WEBHOOKS: "webhook",
+}
+
+
+def _narrow_manage_goal_fields(
+    fields: Sequence[WizardFormField],
+    wizard: SetupWizard | None,
+    goal: WizardGoal | None,
+) -> tuple[WizardFormField, ...]:
+    """List/enable/disable/remove goals show only the rows their command takes.
+
+    The preset's required rows (Splunk "Realm us1 - Sets --realm.") survived
+    the goal filter, but ``setup observability list|enable|remove`` never
+    passes them, and Name kept the generic add/enable/remove hint (GAP-2276).
+    """
+
+    noun = _MANAGE_GOAL_NOUNS.get(wizard) if wizard is not None else None
+    action = (goal.presets.get("@Action") or "") if goal is not None else ""
+    if noun is None or goal is None or action not in {"list", "enable", "disable", "remove"}:
+        return tuple(fields)
+    wanted = set(goal.fields)
+    narrowed: list[WizardFormField] = []
+    for field in fields:
+        if field.label not in wanted:
+            continue
+        if field.label == "Name":
+            field = replace(field, hint=f"Name of the {noun} to {action}.")
         narrowed.append(field)
     return tuple(narrowed)
 

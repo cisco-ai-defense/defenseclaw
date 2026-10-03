@@ -281,6 +281,13 @@ class HintEngine:
         # Follow the panel state: no s while discovery is off, and a names
         # what it switches to (GAP-2230).
         scope = "a recommended" if "all_models" in state.panel_conditions else "a all models"
+        if "restart_pending" in state.panel_conditions:
+            # The panel says "Press d to restart it"; "d turn on" did not
+            # match (GAP-2278).
+            return (
+                f"KEYS  j/k move | t switch table | {scope} | Enter detail | r refresh | "
+                "e export | d restart gateway | / search vendor/product/component."
+            )
         if "disabled" in state.panel_conditions:
             return (
                 f"KEYS  j/k move | t switch table | {scope} | Enter detail | r refresh | "

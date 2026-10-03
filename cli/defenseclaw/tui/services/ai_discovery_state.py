@@ -948,11 +948,14 @@ class AIDiscoveryPanelModel:
         return AIDiscoveryPanelAction(False)
 
     def hint_conditions(self) -> tuple[str, ...]:
-        """Hint bar conditions: ``disabled`` (discovery off), ``all_models``."""
+        """Hint bar conditions: ``disabled`` (discovery off), ``restart_pending``
+        (on in config, gateway not restarted yet), ``all_models``."""
 
         conditions: list[str] = []
         if self.snapshot is not None and not self.snapshot.enabled:
             conditions.append("disabled")
+        if getattr(self.snapshot, "restart_pending", False):
+            conditions.append("restart_pending")
         if self.show_all_models:
             conditions.append("all_models")
         return tuple(conditions)

@@ -215,6 +215,15 @@ def _restart_effect(risk: str, args: tuple[str, ...]) -> str:
         # ``setup observability list`` read "Risk read-only  Restart
         # possible" (GAP-2186).
         return "no"
+    if (
+        lowered[:2] == ("agent", "discovery")
+        and any(arg in {"enable", "disable", "setup"} for arg in lowered[2:4])
+        and "--no-restart" not in lowered
+    ):
+        # ``agent discovery [runtime] enable|disable|setup`` restart the
+        # gateway by default (--restart), but the modal said "Restart no"
+        # (GAP-2278).
+        return "yes"
     if lowered and lowered[0] == "setup" and "--no-restart" not in lowered:
         return "possible"
     return "no"
