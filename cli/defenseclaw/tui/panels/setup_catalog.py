@@ -371,7 +371,20 @@ def _observability_status(observability: Any, error: str) -> TaskStatus:
         return TaskStatus("off", "local only")
     if not destinations:
         return TaskStatus("off", "local only")
+    # The list and Overview count the built-in local store too, so say so
+    # here: "2 exports + local", not "2 destinations" next to "3" (GAP-2239).
+    if _has_local_store(observability):
+        return TaskStatus("ok", f"{_plural(len(destinations), 'export')} + local")
     return TaskStatus("ok", _plural(len(destinations), "destination"))
+
+
+def _has_local_store(observability: Any) -> bool:
+    return any(
+        getattr(destination, "enabled", False)
+        and getattr(destination, "generated", False)
+        and getattr(destination, "kind", "") == "sqlite"
+        for destination in getattr(observability, "destinations", ()) or ()
+    )
 
 
 def _redaction_profiles(cfg: Any, observability: Any) -> set[str]:

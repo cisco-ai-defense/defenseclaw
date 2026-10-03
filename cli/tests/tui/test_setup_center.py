@@ -141,7 +141,7 @@ def test_telemetry_statuses_come_from_the_canonical_plan() -> None:
     )
 
     exported = _status(SetupWizard.OBSERVABILITY, None, observability=plan)
-    assert exported.state == "ok" and exported.text.startswith("2 ")
+    assert exported.state == "ok" and exported.text == "2 exports + local"
     assert _status(SetupWizard.SPLUNK, None, observability=plan).state == "ok"
     assert _status(SetupWizard.SPLUNK_DASHBOARDS, None, observability=plan).state == "na"
     assert _status(SetupWizard.OBSERVABILITY, None).state == "off"

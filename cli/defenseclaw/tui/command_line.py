@@ -369,7 +369,10 @@ _PATH_LINE_RE = re.compile(r"^(?:[A-Za-z]:[\\/]|~[\\/]|/)\S*$")
 _DIGEST_LINE_RE = re.compile(r"\bdigest:\s*[0-9a-f]{16,}$", re.IGNORECASE)
 _SETUP_DONE_RE = re.compile(r"^[\u2713\u2714]\s+(.+ connector setup complete|\d+ connector\(s\) set up)")
 _SETUP_MODE_RE = re.compile(r"^[\u2713\u2714]\s+\S+ mode=(observe|action)$")
-_KEYS_ROW_RE = re.compile(r"^[\u25cf\u25cb\u00b7]\s+([A-Z][A-Z0-9_]*)\s+(.*)$")
+# A Windows console without UTF-8 gets the ASCII forms "*", "o", "-" and
+# "OK set" (ux.ascii_presentation_text), so match both (GAP-2238).
+_KEYS_ROW_RE = re.compile(r"^[\u25cf\u25cb\u00b7*o-]\s+([A-Z][A-Z0-9_]*)\s+(.*)$")
+_KEYS_SET_RE = re.compile(r"(?:\u2713|\u2714|\bOK) set\b")
 
 
 def command_result_summary(command: str, lines: Sequence[str]) -> str:
@@ -406,7 +409,7 @@ def command_result_summary(command: str, lines: Sequence[str]) -> str:
     if not rows:
         return ""
     required = [row for row in rows if "REQUIRED" in row.group(2).split()]
-    missing = [row.group(1) for row in required if "\u2713 set" not in row.group(2)]
+    missing = [row.group(1) for row in required if not _KEYS_SET_RE.search(row.group(2))]
     noun = "credential" if len(rows) == 1 else "credentials"
     text = f"{len(rows)} {noun}, {len(required)} required"
     return f"{text}, missing: {', '.join(missing)}" if missing else f"{text}, all set"
