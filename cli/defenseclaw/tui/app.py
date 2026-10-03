@@ -10420,7 +10420,12 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             return False
         model = self.setup_model
         if model.form_active:
-            return True
+            # Textual's auto-width columns never shrink when rows are patched,
+            # but the hint is wrapped to the room the current rows leave. When
+            # a connector change dropped the long "Verify After Setup" row the
+            # hint was cut at the edge instead of wrapping (GAP-2131), so the
+            # cells that size the columns before the hint rebuild the table.
+            return ("form", tuple(row[:-1] for row in self._table_rows))
         view = self._setup_view()
         if view == "wizards":
             return (view, setup_center.active_group(model))

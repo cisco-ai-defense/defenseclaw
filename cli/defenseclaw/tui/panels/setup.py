@@ -5795,7 +5795,7 @@ def connector_setup_wizard_fields(
             "bool",
             value="no",
             default="no",
-            hint="Replace the configured connector set instead of adding this connector as a peer.",
+            hint="yes turns off the agents set up now and protects only this one; no adds it next to them.",
         ),
         WizardFormField(
             "Workspace Dir",
