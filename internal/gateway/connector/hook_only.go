@@ -991,7 +991,7 @@ func (c *hookOnlyConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 			Supported:     true,
 			Scope:         "workspace,user",
 			DiscoveryOnly: true,
-			Notes:         []string{"Read-only discovery uses the official `copilot plugins list --kind plugin --json` command under the validated pinned workspace and exact COPILOT_HOME. DefenseClaw does not install, enable, disable, or remove Copilot plugins; semantic activation and managed/organization policy remain unverified without live-session evidence."},
+			Notes:         []string{"Read-only discovery uses the official `copilot plugin list --json` command (falling back to `copilot plugins list --kind plugin --json` on older CLIs) under the validated pinned workspace and exact COPILOT_HOME. DefenseClaw does not install, enable, disable, or remove Copilot plugins; semantic activation and managed/organization policy remain unverified without live-session evidence."},
 		}
 		caps.Agents = SurfaceCapability{
 			Supported:      true,
