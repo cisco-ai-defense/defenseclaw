@@ -122,6 +122,7 @@ func (w *InstallWatcher) runRescanCycle(ctx context.Context) {
 	}
 	targets := w.enumerateTargets()
 	if len(targets) == 0 {
+		w.markWatchRoots()
 		return
 	}
 
@@ -145,6 +146,7 @@ func (w *InstallWatcher) runRescanCycle(ctx context.Context) {
 			w.recordWatcherEvent(ctx, "rescan_skip", string(evt.Type), "")
 		}
 	}
+	w.markWatchRoots()
 
 	fmt.Fprintf(os.Stderr, "[rescan] cycle complete: targets=%d scanned=%d skipped=%d\n",
 		len(targets), scanned, skipped)
@@ -152,10 +154,16 @@ func (w *InstallWatcher) runRescanCycle(ctx context.Context) {
 		fmt.Sprintf("targets=%d scanned=%d skipped=%d", len(targets), scanned, skipped))
 }
 
-// baselinedWatchRoots lists, per type, the skill and plugin roots that hold a
-// baseline from an earlier run. A target without a baseline under one of them
-// arrived while the gateway was stopped (GAP-2475). On a first start there are
-// no baselines yet, so the startup rescan only records them, as before.
+// watchRootMarkerType is the target_snapshots type of the marker row saying
+// a skill or plugin root was covered by a completed rescan cycle.
+func watchRootMarkerType(typ InstallType) string { return string(typ) + "_root" }
+
+// baselinedWatchRoots lists, per type, the skill and plugin roots that a
+// completed rescan cycle covered in an earlier run: a root with a marker row,
+// or one holding baselines from a build without markers. A target without a
+// baseline under one of them arrived while the gateway was stopped (GAP-2475),
+// even when the root was empty before. On a first start nothing is listed, so
+// the startup rescan only records baselines, as before.
 func (w *InstallWatcher) baselinedWatchRoots() map[InstallType][]string {
 	roots := make(map[InstallType][]string)
 	for typ, dirs := range map[InstallType][]string{InstallSkill: w.skillDirs, InstallPlugin: w.pluginDirs} {
@@ -167,6 +175,11 @@ func (w *InstallWatcher) baselinedWatchRoots() map[InstallType][]string {
 			fmt.Fprintf(os.Stderr, "[rescan] list %s baselines: %v\n", typ, err)
 			continue
 		}
+		markers, err := w.store.ListTargetSnapshotPaths(watchRootMarkerType(typ))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[rescan] list %s root markers: %v\n", typ, err)
+		}
+		paths = append(paths, markers...)
 		for _, dir := range dirs {
 			for _, path := range paths {
 				if watcherPathAtOrBelow(path, dir) {
@@ -177,6 +190,32 @@ func (w *InstallWatcher) baselinedWatchRoots() map[InstallType][]string {
 		}
 	}
 	return roots
+}
+
+// markWatchRoots records, after a completed rescan cycle, that every existing
+// skill and plugin root was covered, so a target added to it while the gateway
+// is stopped is admitted at the next start even if the root was empty.
+func (w *InstallWatcher) markWatchRoots() {
+	if w.markedWatchRoots == nil {
+		w.markedWatchRoots = make(map[string]bool)
+	}
+	for typ, dirs := range map[InstallType][]string{InstallSkill: w.skillDirs, InstallPlugin: w.pluginDirs} {
+		markerType := watchRootMarkerType(typ)
+		for _, dir := range dirs {
+			key := markerType + "\x00" + dir
+			if w.markedWatchRoots[key] {
+				continue
+			}
+			if _, err := os.Lstat(dir); err != nil {
+				continue
+			}
+			if err := w.store.SetTargetSnapshot(markerType, dir, "", "{}", "{}", "[]", "", ""); err != nil {
+				fmt.Fprintf(os.Stderr, "[rescan] mark %s root %s: %v\n", typ, dir, err)
+				continue
+			}
+			w.markedWatchRoots[key] = true
+		}
+	}
 }
 
 // admitsAtStartup reports whether the startup rescan must run install

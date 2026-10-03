@@ -84,3 +84,51 @@ func TestStartupRescanAdmitsPluginAddedWhileStopped(t *testing.T) {
 		t.Fatalf("restart moved the baselined plugin: %v", err)
 	}
 }
+
+// GAP-2475 (verify b14): a user's first plugin, added while the gateway is
+// stopped to a root that was empty at the previous start, is admitted too.
+func TestStartupRescanAdmitsFirstPluginInEmptyRoot(t *testing.T) {
+	t.Setenv("PATH", "")
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	cfg.Gateway.Watcher.Plugin.TakeAction = true
+	ocPath := filepath.Join(cfg.DataDir, "openclaw.json")
+	if err := os.WriteFile(ocPath, []byte(`{"mcp":{"servers":{}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Claw.ConfigFile = ocPath
+
+	pluginDir := filepath.Join(filepath.Dir(skillDir), "plugins")
+	if err := os.MkdirAll(pluginDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	high := &countingScanner{name: "plugin-scanner", findings: []scanner.Finding{{
+		ID: "f1", RuleID: "PLUGIN-001", Severity: scanner.SeverityHigh, Title: "dynamic code",
+	}}}
+	start := func() []AdmissionResult {
+		var admitted []AdmissionResult
+		w := New(cfg, nil, []string{pluginDir}, store, logger, nil, func(r AdmissionResult) {
+			admitted = append(admitted, r)
+		})
+		w.scannerFactory = func(InstallEvent) scanner.Scanner { return high }
+		w.runRescanCycle(context.Background())
+		return admitted
+	}
+
+	if admitted := start(); len(admitted) != 0 {
+		t.Fatalf("first start admitted %v", admitted)
+	}
+	offline := filepath.Join(pluginDir, "offl1")
+	if err := os.MkdirAll(offline, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(offline, "index.js"), []byte("// offl1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	admitted := start()
+	if len(admitted) != 1 || admitted[0].Event.Path != offline || admitted[0].Verdict != VerdictRejected {
+		t.Fatalf("restart admitted %#v, want offl1 rejected", admitted)
+	}
+	if _, err := os.Lstat(offline); !os.IsNotExist(err) {
+		t.Fatalf("first plugin added while stopped stayed in place: %v", err)
+	}
+}
