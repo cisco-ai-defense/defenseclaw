@@ -27,6 +27,12 @@ const claudeCodeTranscriptTailBytes = 256 << 10
 // on each assistant message, so it fills the gap. Only a bounded tail of a
 // regular .jsonl file is read, and only a value that is a valid model
 // identifier is returned. A managed (Secure Client) deployment reads nothing.
+//
+// The first turn of a new session has no assistant message yet when its Stop
+// hook runs: Claude Code writes it to the transcript after the hook. That turn
+// lost its chat span when the gateway restarted between SessionStart and the
+// turn (GAP-2578). Claude Code records a "model" attachment with the model ID
+// when the prompt is submitted, so the newest of the two is used.
 func claudeCodeTranscriptModel(path string) string {
 	path = strings.TrimSpace(path)
 	if path == "" || managedEnterpriseActive.Load() || !filepath.IsAbs(path) ||
@@ -48,7 +54,7 @@ func claudeCodeTranscriptModel(path string) string {
 	lines := bytes.Split(tail[:read], []byte{'\n'})
 	for index := len(lines) - 1; index >= 0; index-- {
 		line := lines[index]
-		if !bytes.Contains(line, []byte(`"assistant"`)) {
+		if !bytes.Contains(line, []byte(`"assistant"`)) && !bytes.Contains(line, []byte(`"modelId"`)) {
 			continue
 		}
 		var entry struct {
@@ -57,14 +63,26 @@ func claudeCodeTranscriptModel(path string) string {
 				Role  string `json:"role"`
 				Model string `json:"model"`
 			} `json:"message"`
+			Attachment struct {
+				Type     string `json:"type"`
+				Identity struct {
+					ModelID string `json:"modelId"`
+				} `json:"identity"`
+			} `json:"attachment"`
 		}
-		if json.Unmarshal(line, &entry) != nil ||
-			(entry.Type != "assistant" && entry.Message.Role != "assistant") {
+		if json.Unmarshal(line, &entry) != nil {
 			continue
+		}
+		model := ""
+		switch {
+		case entry.Type == "assistant" || entry.Message.Role == "assistant":
+			model = entry.Message.Model
+		case entry.Type == "attachment" && entry.Attachment.Type == "model":
+			model = entry.Attachment.Identity.ModelID
 		}
 		// Claude Code writes "<synthetic>" for messages it made itself;
 		// the identifier check skips them.
-		if model := strings.TrimSpace(entry.Message.Model); hookModelV8Identifier(model) {
+		if model = strings.TrimSpace(model); hookModelV8Identifier(model) {
 			return model
 		}
 	}

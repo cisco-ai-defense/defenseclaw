@@ -194,6 +194,39 @@ func TestHookClaudeCodeTurnAfterGatewayRestartHasAChatSpanOnGalileo(t *testing.T
 	t.Fatal("galileo got no chat span for the turn after the restart")
 }
 
+// GAP-2578: the gateway restarted between the SessionStart of a new session
+// and its first turn. The transcript has no assistant message yet when that
+// turn's Stop hook runs, only the "model" attachment of the prompt, which
+// names the model ID.
+func TestHookClaudeCodeFirstTurnOfANewSessionAfterGatewayRestartHasAChatSpanOnGalileo(t *testing.T) {
+	api, spans := hookGalileoSpanCapture(t)
+	transcript := filepath.Join(t.TempDir(), "claude-new-session.jsonl")
+	if err := os.WriteFile(transcript, []byte(
+		`{"type":"attachment","attachment":{"type":"hook_success","hookEvent":"SessionStart"}}`+"\n"+
+			`{"type":"user","message":{"role":"user","content":"Reply with exactly: first turn"}}`+"\n"+
+			`{"type":"attachment","attachment":{"type":"model","identity":{"modelId":"us.anthropic.claude-haiku-4-5-20251001-v1:0","marketingName":"Haiku 4.5"}}}`+"\n",
+	), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const session = "claude-new-session-after-restart"
+	prompt := "Reply with exactly: first turn"
+	api.emitClaudeCodeHookLLMEvent(context.Background(), claudeCodeHookRequest{
+		HookEventName: "UserPromptSubmit", SessionID: session, Prompt: prompt, TranscriptPath: transcript, Payload: map[string]any{},
+	}, nil, []byte(`{"prompt":"`+prompt+`"}`))
+	api.emitClaudeCodeHookLLMEvent(context.Background(), claudeCodeHookRequest{
+		HookEventName: "Stop", SessionID: session, LastAssistantMessage: "first turn", TranscriptPath: transcript, Payload: map[string]any{},
+	}, nil, []byte(`{"last_assistant_message":"first turn"}`))
+	for _, span := range waitHookGalileoSpans(spans, "chat", 1) {
+		if strings.HasPrefix(span.Name, "chat") {
+			if span.Name != "chat anthropic.claude-haiku-4-5-20251001-v1:0" {
+				t.Fatalf("chat span name=%q, want the model of the model attachment", span.Name)
+			}
+			return
+		}
+	}
+	t.Fatal("galileo got no chat span for the first turn of a new session after the restart")
+}
+
 // GAP-2556: on Bedrock the startup SessionStart names the inference profile
 // ("us.anthropic..."), while the transcript the gateway reads after a restart
 // (GAP-2511) names the model ID Bedrock answered with ("anthropic..."). One
