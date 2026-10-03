@@ -834,6 +834,39 @@ func TestPluginRootSkipsBytecodeAndDependencyDirs(t *testing.T) {
 	}
 }
 
+// GAP-2411: Hermes nests its bundled plugins in category folders
+// (plugins/browser/browser_use). The rescan scans the nested plugins, not
+// the category folder, which the plugin scanner refuses.
+func TestPluginRootExpandsCategoryFolders(t *testing.T) {
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	pluginDir := filepath.Join(filepath.Dir(skillDir), "plugins")
+	flat := filepath.Join(pluginDir, "disk-cleanup")
+	nested := filepath.Join(pluginDir, "browser", "browser_use")
+	for _, d := range []string{flat, nested, filepath.Join(pluginDir, "browser", "_shared")} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, f := range []string{filepath.Join(flat, "plugin.yaml"), filepath.Join(nested, "plugin.yaml"),
+		filepath.Join(pluginDir, "browser", "_shared", "plugin.yaml")} {
+		if err := os.WriteFile(f, []byte("name: x\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w := New(cfg, nil, []string{pluginDir}, store, logger, nil, nil)
+
+	got := map[string]string{}
+	for _, target := range w.enumerateTargets() {
+		if target.Type == InstallPlugin {
+			got[target.Name] = target.Path
+		}
+	}
+	want := map[string]string{"disk-cleanup": flat, "browser/browser_use": nested}
+	if len(got) != len(want) || got["disk-cleanup"] != flat || got["browser/browser_use"] != nested {
+		t.Fatalf("rescan plugin targets = %v, want %v", got, want)
+	}
+}
+
 // GAP-1525: on an upgrade the old copy of DefenseClaw's own OpenClaw plugin
 // is still on disk when the startup rescan runs; connector setup replaces it
 // moments later. The startup cycle must not scan that dir, while a later

@@ -246,13 +246,33 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 			if !e.IsDir() || skipPluginChildDir(e.Name()) {
 				continue
 			}
-			if w.isOwnPlugin(filepath.Join(dir, e.Name())) {
+			path := filepath.Join(dir, e.Name())
+			if w.isOwnPlugin(path) {
+				continue
+			}
+			// A folder of plugins (Hermes hermes-agent/plugins/browser,
+			// memory, platforms, ...) is not a plugin: the plugin scanner
+			// refuses it (GAP-1580). Rescan the plugins inside it instead,
+			// keyed by the category/name id 'plugin list' shows (GAP-2411).
+			if children := pluginFolderChildren(path); len(children) > 0 {
+				for _, child := range children {
+					childPath := filepath.Join(path, child)
+					if w.isOwnPlugin(childPath) {
+						continue
+					}
+					targets = append(targets, InstallEvent{
+						Type:      InstallPlugin,
+						Name:      e.Name() + "/" + child,
+						Path:      childPath,
+						Timestamp: time.Now().UTC(),
+					})
+				}
 				continue
 			}
 			targets = append(targets, InstallEvent{
 				Type:      InstallPlugin,
 				Name:      e.Name(),
-				Path:      filepath.Join(dir, e.Name()),
+				Path:      path,
 				Timestamp: time.Now().UTC(),
 			})
 		}
@@ -295,6 +315,53 @@ func skipPluginChildDir(name string) bool {
 		return true
 	}
 	return false
+}
+
+// pluginManifestNames mirrors the plugin scanner's manifest candidates
+// (cli/defenseclaw/scanner/plugin_scanner/scanner.py _MANIFEST_CANDIDATES).
+var pluginManifestNames = []string{
+	"package.json",
+	"manifest.json",
+	"plugin.json",
+	"openclaw.plugin.json",
+	filepath.Join(".claude-plugin", "plugin.json"),
+	filepath.Join(".codex-plugin", "plugin.json"),
+	filepath.Join(".cursor-plugin", "plugin.json"),
+	"plugin.yaml",
+	"plugin.yml",
+}
+
+func hasPluginManifest(path string) bool {
+	for _, name := range pluginManifestNames {
+		if info, err := os.Stat(filepath.Join(path, name)); err == nil && info.Mode().IsRegular() {
+			return true
+		}
+	}
+	return false
+}
+
+// pluginFolderChildren returns the sub-folders of path that hold a plugin
+// manifest when path itself has none: the same test the CLI plugin scanner
+// uses to refuse a folder of plugins (cmd_plugin._plugin_folder_children).
+func pluginFolderChildren(path string) []string {
+	if hasPluginManifest(path) {
+		return nil
+	}
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, e := range entries {
+		name := e.Name()
+		if !e.IsDir() || strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") {
+			continue
+		}
+		if hasPluginManifest(filepath.Join(path, name)) {
+			out = append(out, name)
+		}
+	}
+	return out
 }
 
 func isClaudeSkillsPlugin(path string) bool {
