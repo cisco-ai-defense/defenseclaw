@@ -273,6 +273,26 @@ class TestPluginInstall(PluginCommandTestBase):
         self.assertTrue(os.path.isfile(os.path.join(installed, "plugin.py")))
 
     @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
+    def test_install_claudecode_says_claude_code_will_not_load_it(self, mock_scan):
+        # GAP-2084: Claude Code loads only marketplace installs, so the copy
+        # is neither loaded nor listed; say so and give the next step.
+        mock_scan.return_value = self._clean_result()
+        cache = os.path.join(self.tmp_dir, "claude-plugins", "cache")
+        self.app.cfg.active_connectors = lambda: ["claudecode"]  # type: ignore[method-assign]
+        self.app.cfg.plugin_dirs = lambda connector=None: [cache]  # type: ignore[method-assign]
+        src = self._create_plugin_dir("cc-plugin")
+
+        with patch("defenseclaw.commands.hint") as hint:
+            result = self._invoke_install(["install", src, "--connector", "claudecode"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Installed plugin: cc-plugin", result.output)
+        self.assertIn("Claude Code loads only plugins installed from a marketplace", result.output)
+        self.assertIn("has no .claude-plugin/plugin.json", result.output)
+        self.assertIn("/plugin install <name>@<marketplace>", result.output)
+        hint.assert_not_called()
+
+    @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
     def test_install_duplicate_without_force(self, mock_scan):
         mock_scan.return_value = self._clean_result()
         src = self._create_plugin_dir("dup-plugin")
