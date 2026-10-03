@@ -1876,7 +1876,7 @@ def build_setup_sections(
         ConfigSection(
             "Observability",
             _v8_observability_fields(observability_status, error=observability_status_error),
-            "Canonical v8 collection, retention, routing, and per-route redaction policy.",
+            "Telemetry collection, retention, routing, and per-route redaction policy.",
             "Read-only effective plan; press E to manage destinations through setup observability.",
         ),
         ConfigSection("Webhooks", tuple(_webhook_summary_fields(cfg)), "Read-only notifier webhook summary."),
@@ -8434,7 +8434,7 @@ def _v8_observability_fields(
     )
     if status is None:
         return (
-            _header("Status", "observability.status", error.strip() or "loading canonical effective plan..."),
+            _header("Status", "observability.status", error.strip() or "loading telemetry destinations\u2026"),
             how_to,
         )
 

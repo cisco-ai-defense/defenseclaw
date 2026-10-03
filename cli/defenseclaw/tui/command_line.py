@@ -391,6 +391,13 @@ def command_result_summary(command: str, lines: Sequence[str]) -> str:
         # per connector; the last line was a skills directory (GAP-2184).
         noun = "connector" if len(connectors) == 1 else "connectors"
         return f"{len(connectors)} {noun} scanned"
+    for index, line in enumerate(lines):
+        if "block only refuses new installs" in line:
+            # ``plugin block`` ends with "To stop it: ..."; the card dropped
+            # the sentence that says the copy still loads (GAP-2228).
+            stop = next((rest.strip() for rest in lines[index + 1 :] if rest.strip().startswith("To stop it:")), "")
+            text = "New installs blocked; the installed copy still loads."
+            return f"{text} {stop}" if stop else text
     if any(line.strip() == "Observability v8 destinations" for line in lines):
         rows = _destination_rows(lines)
         noun = "destination" if rows == 1 else "destinations"

@@ -233,6 +233,7 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
             token_value = _prompt_secret(preset, app.cfg.data_dir)
 
     inputs: dict[str, str] = {k: str(v) for k, v in raw_inputs.items() if v is not None}
+    _refuse_endpoint_credentials(preset, inputs)
 
     signal_tuple = None
     if signals:
@@ -328,6 +329,31 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
                 "  Saved. The gateway isn't running; it loads this destination when it starts "
                 "(defenseclaw-gateway start)."
             ),
+        )
+
+
+def _refuse_endpoint_credentials(preset: Preset, inputs: dict[str, str]) -> None:
+    """Refuse user:password in --endpoint/--url in plain words (GAP-2205).
+
+    The v8 schema rejects such an endpoint as a failed source shape at
+    destinations[N], which reads as a broken config.yaml.
+    """
+
+    for key in ("endpoint", "url"):
+        value = inputs.get(key, "").strip()
+        scheme, separator, rest = value.partition("://")
+        authority = re.split(r"[/?#]", rest if separator and scheme else value, maxsplit=1)[0]
+        if "@" not in authority:
+            continue
+        where = (
+            f"pass it with --token (stored as {preset.token_env} in ~/.defenseclaw/.env)"
+            if preset.token_env
+            else "add a header to the destination in config.yaml, for example "
+            "headers: {Authorization: {env: OTEL_AUTHORIZATION}}, and put the value in that environment variable"
+        )
+        raise click.ClickException(
+            f"--{key} must not contain a user name or password (user:password@). "
+            f"Nothing was saved. Remove them from the URL and {where}."
         )
 
 

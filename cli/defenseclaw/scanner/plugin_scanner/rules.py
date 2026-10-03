@@ -102,6 +102,9 @@ COGNITIVE_FILES: set[str] = {
     "TOOLS.md",
     "AGENTS.md",
     "MEMORY.md",
+    # Hermes keeps its curated user memory in USER.md next to MEMORY.md
+    # (GAP-2219).
+    "USER.md",
     "openclaw.json",
     "gateway.json",
     "config.yaml",

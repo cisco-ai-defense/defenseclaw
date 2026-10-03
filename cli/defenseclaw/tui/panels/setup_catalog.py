@@ -213,7 +213,7 @@ _READINESS_OWNERS: dict[str, tuple[SetupWizard, ...]] = {
     "Regional Provider": (SetupWizard.LLM,),
     "Custom-provider Overlay": (SetupWizard.CUSTOM_PROVIDERS,),
     "Scanner Availability": (SetupWizard.SKILL_SCANNER, SetupWizard.MCP_SCANNER),
-    "Observability v8": (SetupWizard.OBSERVABILITY,),
+    "Telemetry": (SetupWizard.OBSERVABILITY,),
     "Registry / Asset Policy": (SetupWizard.REGISTRIES,),
     "Restart Pending": (SetupWizard.GATEWAY,),
 }
