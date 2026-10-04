@@ -990,7 +990,9 @@ def _alert_selector(
     if connector and connector.strip():
         selector["connector"] = _connector_needle(connector)
     if target and target.strip():
-        selector["target"] = target.strip()
+        # The Target alerts print (GAP-2619); the gateway matches both
+        # Copilot harness spellings of it.
+        selector["target"] = copilot_hook_target(target.strip(), connector or "")
     if severity != "all":
         selector["severity"] = severity
     if since and since.strip():
