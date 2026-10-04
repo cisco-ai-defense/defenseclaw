@@ -869,6 +869,15 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 		fmt.Fprintf(os.Stderr, "[sidecar] private-upstream allowlist: %d IPs configured\n", len(allowedIPs))
 	}
 
+	// IT Governed mode: auto-provision Hermes with hardened Docker sandbox,
+	// DefenseClaw hooks, and sandbox-escape guardrail rules.
+	if s.currentConfig().IsITGoverned() {
+		provisioner := NewITGovernedProvisioner(s.currentConfig())
+		if err := provisioner.Provision(); err != nil {
+			fmt.Fprintf(os.Stderr, "[it-governed] provisioning failed: %v\n", err)
+		}
+	}
+
 	// Start LiteLLM managed sidecar. The manager writes a full config YAML
 	// from the DefenseClaw config and launches the LiteLLM process.
 	s.litellm = NewLiteLLMManager(s.currentConfig())

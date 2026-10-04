@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -201,7 +202,39 @@ func (m *LiteLLMManager) WriteFullConfig(cfg *config.Config) (string, error) {
 
 	buf.WriteString(fmt.Sprintf("\ngeneral_settings:\n  master_key: %q\n", m.masterKey))
 	buf.WriteString("\nlitellm_settings:\n  drop_params: true\n  modify_params: true\n")
-	buf.WriteString("  callbacks: [\"filter_empty.proxy_handler_instance\"]\n")
+	buf.WriteString("  callbacks: [\"filter_empty.proxy_handler_instance\", \"sr_router.proxy_handler_instance\"]\n")
+
+	// MCP servers from defenseclaw config — LiteLLM expects a dict keyed by server name
+	if mcpServers := cfg.MCPServers; len(mcpServers) > 0 {
+		buf.WriteString("\nmcp_servers:\n")
+		for _, srv := range mcpServers {
+			buf.WriteString(fmt.Sprintf("  %s:\n", srv.Name))
+			buf.WriteString(fmt.Sprintf("    transport: %q\n", srv.Transport))
+			buf.WriteString("    allow_all_keys: true\n")
+			if srv.Command != "" {
+				buf.WriteString(fmt.Sprintf("    command: %q\n", srv.Command))
+			}
+			buf.WriteString("    args:\n")
+			for _, arg := range srv.Args {
+				buf.WriteString(fmt.Sprintf("      - %q\n", arg))
+			}
+			if len(srv.Env) > 0 {
+				buf.WriteString("    env:\n")
+				for k, v := range srv.Env {
+					upperK := strings.ToUpper(k)
+					if strings.HasSuffix(upperK, "_ENV") {
+						envVal := os.Getenv(v)
+						if envVal != "" {
+							realKey := strings.ToUpper(strings.TrimSuffix(upperK, "_ENV"))
+							buf.WriteString(fmt.Sprintf("      %s: %q\n", realKey, envVal))
+						}
+					} else {
+						buf.WriteString(fmt.Sprintf("      %s: %q\n", strings.ToUpper(k), v))
+					}
+				}
+			}
+		}
+	}
 
 	path := filepath.Join(dir, "config.yaml")
 	if err := safefile.Write(path, buf.Bytes()); err != nil {

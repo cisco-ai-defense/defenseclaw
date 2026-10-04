@@ -317,8 +317,9 @@ type Config struct {
 	// Managed configures the local UDS gRPC server consumed by AVC
 	// (Cisco Secure Client). Only active when ManagedIPCEnabled()
 	// returns true — see managed.go.
-	Managed ManagedIPCConfig `mapstructure:"managed" yaml:"managed,omitempty"`
-	Routing RoutingConfig    `mapstructure:"routing"          yaml:"routing,omitempty"`
+	Managed    ManagedIPCConfig `mapstructure:"managed"     yaml:"managed,omitempty"`
+	Routing    RoutingConfig    `mapstructure:"routing"     yaml:"routing,omitempty"`
+	MCPServers []MCPServerEntry `mapstructure:"mcp_servers" yaml:"mcp_servers,omitempty"`
 }
 
 // RoutingConfig mirrors routing.RoutingConfig for config.yaml parsing.
@@ -3809,7 +3810,7 @@ func validateDeploymentMode(mode string) error {
 	if _, ok := validDeploymentModes[mode]; ok {
 		return nil
 	}
-	return fmt.Errorf("config: deployment_mode=%q is invalid (allowed: managed_enterprise, unmanaged_byod, ci_cd, sandboxed, server, saas)", mode)
+	return fmt.Errorf("config: deployment_mode=%q is invalid (allowed: managed_enterprise, unmanaged_byod, ci_cd, sandboxed, server, saas, it_governed)", mode)
 }
 
 func validateGatewayConfigReloadMode(mode string) error {
@@ -3838,9 +3839,15 @@ func normalizeDeploymentMode(mode string) string {
 		return string(DeploymentModeCICD)
 	case "edge":
 		return string(DeploymentModeServer)
+	case "governed", "it-governed":
+		return string(DeploymentModeITGoverned)
 	default:
 		return strings.TrimSpace(mode)
 	}
+}
+
+func (c *Config) IsITGoverned() bool {
+	return c != nil && c.DeploymentMode == string(DeploymentModeITGoverned)
 }
 
 func (c *Config) Save() error {

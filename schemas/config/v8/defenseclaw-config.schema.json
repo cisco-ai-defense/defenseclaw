@@ -69,7 +69,8 @@
         "ci_cd",
         "sandboxed",
         "server",
-        "saas"
+        "saas",
+        "it_governed"
       ]
     },
     "discovery_source": {
@@ -168,6 +169,45 @@
     },
     "routing": {
       "$ref": "#/$defs/routing"
+    },
+    "mcp_servers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "transport": {
+            "type": "string",
+            "enum": [
+              "stdio",
+              "sse"
+            ]
+          },
+          "command": {
+            "type": "string"
+          },
+          "args": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "url": {
+            "type": "string"
+          },
+          "env": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "name"
+        ]
+      }
     }
   },
   "$defs": {
@@ -1622,7 +1662,7 @@
       "oneOf": [
         {
           "type": "string",
-          "pattern": "^[0-9]+(?:\\.[0-9]+)?(?:ns|us|µs|ms|s|m|h)(?:[0-9]+(?:\\.[0-9]+)?(?:ns|us|µs|ms|s|m|h))*$"
+          "pattern": "^[0-9]+(?:\\.[0-9]+)?(?:ns|us|\u00b5s|ms|s|m|h)(?:[0-9]+(?:\\.[0-9]+)?(?:ns|us|\u00b5s|ms|s|m|h))*$"
         },
         {
           "type": "integer",
@@ -3670,7 +3710,7 @@
     },
     "acpPairName": {
       "type": "string",
-      "description": "Per-pair binding key, \"<client>/<agent>\" — the identifier `defenseclaw acp status` prints.",
+      "description": "Per-pair binding key, \"<client>/<agent>\" \u2014 the identifier `defenseclaw acp status` prints.",
       "pattern": "^[a-z0-9][a-z0-9_-]{0,63}/[a-z0-9][a-z0-9_-]{0,63}$"
     },
     "acpPairBindings": {

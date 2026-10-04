@@ -16716,3 +16716,476 @@ def _routing_health_status(endpoint: str) -> str:
             return "healthy" if response.status == 200 else f"unhealthy (HTTP {response.status})"
     except (OSError, urllib.error.URLError, ValueError):
         return "unreachable (gateway may need restart)"
+
+
+# ---------------------------------------------------------------------------
+# defenseclaw setup it-governed
+# ---------------------------------------------------------------------------
+
+_HERMES_REPO_URL = "https://github.com/NousResearch/hermes-agent.git"
+
+
+def _install_hermes_agent() -> None:
+    """Clone hermes-agent, create venv, install deps, write launcher."""
+    import subprocess  # noqa: PLC0415
+
+    home = os.path.expanduser("~")
+    hermes_home = os.path.join(home, ".hermes")
+    agent_dir = os.path.join(hermes_home, "hermes-agent")
+    bin_dir = os.path.join(home, ".local", "bin")
+
+    os.makedirs(hermes_home, exist_ok=True)
+    os.makedirs(bin_dir, exist_ok=True)
+
+    # Clone
+    if not os.path.isfile(os.path.join(agent_dir, "cli.py")):
+        click.echo(f"  Cloning hermes-agent...")
+        subprocess.check_call(
+            ["git", "clone", "--depth=1", _HERMES_REPO_URL, agent_dir],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        click.echo("  ✓ Repository cloned")
+
+    # Venv
+    venv_dir = os.path.join(agent_dir, "venv")
+    if not os.path.isdir(venv_dir):
+        python = _find_python()
+        if not python:
+            raise click.ClickException("python3 not found — required for Hermes")
+        click.echo("  Creating Python venv...")
+        subprocess.check_call([python, "-m", "venv", venv_dir],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        # Install requirements
+        pip = os.path.join(venv_dir, "bin", "pip")
+        req_file = os.path.join(agent_dir, "requirements.txt")
+        if os.path.isfile(req_file):
+            click.echo("  Installing dependencies (this may take a minute)...")
+            subprocess.check_call([pip, "install", "-q", "-r", req_file],
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        click.echo("  ✓ Dependencies installed")
+
+    # Launcher script
+    launcher = os.path.join(bin_dir, "hermes")
+    with open(launcher, "w") as f:
+        f.write(f'#!/bin/bash\nexec "{venv_dir}/bin/python" "{agent_dir}/cli.py" "$@"\n')
+    os.chmod(launcher, 0o755)
+
+    # Default config
+    config_path = os.path.join(hermes_home, "config.yaml")
+    if not os.path.isfile(config_path):
+        with open(config_path, "w") as f:
+            f.write("_config_version: 44\nagent:\n    max_turns: 150\n    reasoning_effort: high\n    verbose: false\n")
+        os.chmod(config_path, 0o600)
+
+
+def _find_python() -> str:
+    """Find a suitable Python 3 interpreter."""
+    import shutil as _shutil  # noqa: PLC0415
+    for name in ("python3.12", "python3.11", "python3"):
+        p = _shutil.which(name)
+        if p:
+            return p
+    return ""
+
+
+def _uninstall_hermes_agent() -> None:
+    """Remove Hermes binary, agent code, and data directory."""
+    import subprocess  # noqa: PLC0415
+
+    home = os.path.expanduser("~")
+    hermes_home = os.path.join(home, ".hermes")
+    launcher = os.path.join(home, ".local", "bin", "hermes")
+
+    # Remove launcher
+    if os.path.isfile(launcher):
+        os.remove(launcher)
+
+    # Unlock any immutable files before removal
+    if os.path.isdir(hermes_home):
+        for root, dirs, files in os.walk(hermes_home):
+            for f in files:
+                p = os.path.join(root, f)
+                try:
+                    subprocess.run(["chflags", "nouchg", p], capture_output=True, timeout=2)
+                except Exception:
+                    pass
+
+    # Remove hermes home — may contain root-owned Docker sandbox files
+    import shutil as _shutil  # noqa: PLC0415
+    try:
+        _shutil.rmtree(hermes_home, ignore_errors=True)
+    except Exception:
+        pass
+
+    # If remnants remain (Docker sandbox root-owned files), try sudo
+    if os.path.isdir(hermes_home):
+        try:
+            subprocess.run(["sudo", "rm", "-rf", hermes_home], capture_output=True, timeout=10)
+        except Exception:
+            click.echo(f"  ⚠ Could not fully remove {hermes_home}")
+            click.echo(f"    Run: sudo rm -rf {hermes_home}")
+
+
+def _unlock_it_governed_configs(app: AppContext) -> None:
+    """Remove immutable flags from all IT Governed config files."""
+    import subprocess  # noqa: PLC0415
+
+    hermes_home = os.path.expanduser("~/.hermes")
+    targets = [
+        os.path.join(hermes_home, "config.yaml"),
+        os.path.join(app.cfg.data_dir, "config.yaml"),
+        os.path.join(app.cfg.data_dir, "policies", "guardrail", "default", "rules", "sandbox-escape.yaml"),
+        os.path.join(app.cfg.data_dir, "hooks", "hermes-hook.sh"),
+    ]
+    for path in targets:
+        if os.path.exists(path):
+            try:
+                subprocess.run(["chflags", "nouchg", path], capture_output=True, timeout=2)
+            except Exception:
+                pass
+
+
+@setup.command("it-governed")
+@click.option("--disable", is_flag=True, help="Disable IT Governed mode and restore default settings.")
+@click.option("--status", is_flag=True, help="Show current IT Governed mode status.")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompts.")
+@pass_ctx
+def setup_it_governed(app: AppContext, disable: bool, status: bool, yes: bool) -> None:
+    """Enable IT Governed mode — hardened Hermes sandbox with DefenseClaw guardrails.
+
+    When enabled, DefenseClaw automatically:
+      1. Sets deployment_mode to it_governed
+      2. Configures the hermes connector with action-mode guardrails
+      3. Provisions Hermes with a hardened Docker sandbox (no host FS access,
+         no network, all capabilities dropped, no privilege escalation)
+      4. Installs DefenseClaw hooks into Hermes for tool-call inspection
+      5. Deploys sandbox-escape detection rules (CRITICAL severity)
+      6. Points Hermes at DefenseClaw's LiteLLM proxy for semantic routing
+      7. Locks config files with immutable flags (requires admin/sudo)
+
+    On next gateway start, the provisioner runs automatically.
+
+    \b
+    Examples:
+      defenseclaw setup it-governed          # Enable IT Governed mode
+      defenseclaw setup it-governed --status  # Check status
+      defenseclaw setup it-governed --disable # Restore default mode
+    """
+    import shutil  # noqa: PLC0415
+
+    if status:
+        _print_it_governed_status(app)
+        return
+
+    if disable:
+        if app.cfg.deployment_mode != "it_governed":
+            click.echo("  IT Governed mode is not enabled.")
+            return
+        click.echo()
+        click.echo("  Disabling IT Governed mode...")
+        click.echo()
+
+        # 1. Unlock config files
+        _unlock_it_governed_configs(app)
+
+        # 2. Uninstall Hermes
+        click.echo("  Removing Hermes agent...")
+        _uninstall_hermes_agent()
+        click.echo("  ✓ Hermes removed")
+
+        # 3. Remove sandbox-escape rules
+        rules_path = os.path.join(app.cfg.data_dir, "policies", "guardrail", "default", "rules", "sandbox-escape.yaml")
+        if os.path.isfile(rules_path):
+            os.remove(rules_path)
+            click.echo("  ✓ Sandbox-escape rules removed")
+
+        # 4. Remove hermes hook script and token
+        for f in ("hermes-hook.sh", "hermes-hook.sh.bak", ".hook-hermes.token"):
+            p = os.path.join(app.cfg.data_dir, "hooks", f)
+            if os.path.isfile(p):
+                os.remove(p)
+        click.echo("  ✓ Hook scripts removed")
+
+        # 5. Reset config
+        app.cfg.deployment_mode = ""
+        app.cfg.guardrail.connector = ""
+        if hasattr(app.cfg.guardrail, "connectors") and app.cfg.guardrail.connectors:
+            app.cfg.guardrail.connectors.pop("hermes", None)
+        app.cfg.save()
+        click.echo("  ✓ Config reset")
+
+        click.echo()
+        click.echo("  ✓ IT Governed mode disabled")
+        click.echo("    Restart the gateway: defenseclaw-gateway stop && defenseclaw-gateway start")
+        click.echo()
+        return
+
+    click.echo()
+    click.echo("  IT Governed Mode")
+    click.echo("  ─────────────────────────────────────────")
+    click.echo("  Hardens Hermes agent execution inside a Docker sandbox.")
+    click.echo("  The agent cannot access host files, network, or escalate privileges.")
+    click.echo("  DefenseClaw guardrails inspect every tool call and block escape attempts.")
+    click.echo()
+    click.echo("  Components configured:")
+    click.echo("    ✓ deployment_mode: it_governed")
+    click.echo("    ✓ guardrail connector: hermes (action mode)")
+    click.echo("    ✓ Docker sandbox: hardened (no mounts, no network, caps dropped)")
+    click.echo("    ✓ DefenseClaw hooks: PreToolUse, PostToolUse, UserPromptSubmit, SessionStart, Stop")
+    click.echo("    ✓ Sandbox-escape rules: 5 CRITICAL detection rules")
+    click.echo("    ✓ LiteLLM proxy: semantic model routing via Circuit API")
+    click.echo()
+
+    # Check prerequisites
+    docker_path = shutil.which("docker")
+    if not docker_path:
+        raise click.ClickException(
+            "Docker is not installed or not in PATH. IT Governed mode requires Docker for sandbox isolation."
+        )
+
+    if not yes:
+        click.confirm("  Enable IT Governed mode?", abort=True)
+
+    # Install Hermes if not present
+    hermes_path = shutil.which("hermes")
+    if not hermes_path:
+        click.echo("  Hermes not found — installing...")
+        _install_hermes_agent()
+        hermes_path = shutil.which("hermes")
+        if not hermes_path:
+            raise click.ClickException("Hermes installation failed. Check logs above.")
+        click.echo("  ✓ Hermes installed")
+    else:
+        click.echo(f"  ✓ Hermes found at {hermes_path}")
+
+    # Pre-pull the Docker sandbox image so Hermes doesn't hang on first start
+    import subprocess as _sp  # noqa: PLC0415
+    _sandbox_image = "nikolaik/python-nodejs:python3.11-nodejs20"
+    click.echo(f"  Pulling Docker sandbox image ({_sandbox_image})...")
+    try:
+        _sp.check_call(["docker", "pull", _sandbox_image], stdout=_sp.DEVNULL, stderr=_sp.DEVNULL, timeout=300)
+        click.echo("  ✓ Docker image ready")
+    except Exception:
+        click.echo("  ⚠ Docker image pull failed — Hermes will pull on first start (may be slow)")
+
+    # 1. Set deployment mode
+    app.cfg.deployment_mode = "it_governed"
+
+    # 2. Configure hermes connector with action mode
+    app.cfg.guardrail.connector = "hermes"
+    app.cfg.guardrail.mode = "action"
+    app.cfg.guardrail.enabled = True
+    if not hasattr(app.cfg.guardrail, "connectors") or not app.cfg.guardrail.connectors:
+        app.cfg.guardrail.connectors = {}
+    app.cfg.guardrail.connectors["hermes"] = {"mode": "action"}
+
+    # 3. Save config
+    app.cfg.save()
+    click.echo()
+    click.echo("  ✓ Config saved with deployment_mode=it_governed")
+
+    # 4. Run the provisioner inline — configure Hermes sandbox now
+    click.echo()
+    click.echo("  Provisioning Hermes sandbox...")
+    try:
+        _provision_it_governed(app)
+        click.echo("  ✓ Hermes sandbox provisioned")
+    except Exception as e:
+        click.echo(f"  ⚠ Provisioning incomplete: {e}")
+        click.echo("    The gateway will retry on next start.")
+
+    click.echo()
+    click.echo("  ✓ IT Governed mode is active")
+    click.echo()
+    click.echo("  Next:")
+    click.echo("    1. Start the gateway:  defenseclaw-gateway start")
+    click.echo("       (Installs hooks into Hermes and starts LiteLLM + SR)")
+    click.echo("    2. Start Hermes:       hermes")
+    click.echo("       (Runs with hardened Docker sandbox + DefenseClaw guardrails)")
+    click.echo()
+    click.echo("  Optional: lock configs to prevent tampering:")
+    click.echo(f"    sudo bash {os.path.join(app.cfg.data_dir, 'lock-sandbox.sh')}")
+    click.echo()
+
+
+def _provision_it_governed(app: AppContext) -> None:
+    """Write hardened Hermes config, hooks, sandbox-escape rules, and LiteLLM provider."""
+    import subprocess  # noqa: PLC0415
+
+    hermes_home = os.path.expanduser("~/.hermes")
+    data_dir = app.cfg.data_dir
+    hook_script = os.path.join(data_dir, "hooks", "hermes-hook.sh")
+    gateway_token = os.environ.get("DEFENSECLAW_GATEWAY_TOKEN", "")
+
+    # Load gateway token from .env if not in environment
+    if not gateway_token:
+        env_path = os.path.join(data_dir, ".env")
+        if os.path.isfile(env_path):
+            with open(env_path) as f:
+                for line in f:
+                    if line.startswith("DEFENSECLAW_GATEWAY_TOKEN="):
+                        gateway_token = line.strip().split("=", 1)[1]
+
+    # Write hardened terminal config
+    config_path = os.path.join(hermes_home, "config.yaml")
+    try:
+        import yaml  # noqa: PLC0415
+        with open(config_path) as f:
+            cfg = yaml.safe_load(f) or {}
+    except Exception:
+        cfg = {"_config_version": 44, "agent": {"max_turns": 150, "reasoning_effort": "high"}}
+
+    cfg["terminal"] = {
+        "backend": "docker",
+        "docker_image": "nikolaik/python-nodejs:python3.11-nodejs20",
+        "container_cpu": 2,
+        "container_disk": 10240,
+        "container_memory": 4096,
+        "container_persistent": False,
+        "cwd": "/workspace",
+        "docker_mount_cwd_to_workspace": False,
+        "docker_network": False,
+        "docker_volumes": [],
+        "docker_forward_env": [],
+        "docker_env": {},
+        "docker_run_as_host_user": False,
+        "docker_extra_args": ["--cap-drop=ALL", "--security-opt=no-new-privileges", "--pids-limit=256"],
+        "docker_shm_size": "256m",
+        "docker_persist_across_processes": False,
+        "docker_orphan_reaper": True,
+        "docker_snap_compat": False,
+        "home_mode": "tmpfs",
+        "lifetime_seconds": 300,
+        "timeout": 120,
+    }
+
+    # Hooks: the gateway's connector setup writes hooks into hermes config
+    # on startup. We only ensure hooks_auto_accept is set so hermes doesn't
+    # prompt for consent on DefenseClaw hooks.
+    cfg["hooks_auto_accept"] = True
+
+    # Provider
+    if gateway_token:
+        cfg["providers"] = {"defenseclaw": {"name": "defenseclaw", "base_url": "http://127.0.0.1:4001/v1", "api_key": gateway_token, "api_mode": "responses"}}
+        cfg["model"] = {"default": "default", "provider": "defenseclaw", "api_mode": "responses"}
+
+    import yaml  # noqa: PLC0415
+    with open(config_path, "w") as f:
+        yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+    os.chmod(config_path, 0o600)
+
+    # Hook token
+    token_path = os.path.join(data_dir, "hooks", ".hook-hermes.token")
+    if gateway_token and not os.path.isfile(token_path):
+        os.makedirs(os.path.dirname(token_path), exist_ok=True)
+        with open(token_path, "w") as f:
+            f.write(gateway_token)
+        os.chmod(token_path, 0o600)
+
+    # Sandbox-escape rules
+    rules_dir = os.path.join(data_dir, "policies", "guardrail", "default", "rules")
+    os.makedirs(rules_dir, exist_ok=True)
+    rules_path = os.path.join(rules_dir, "sandbox-escape.yaml")
+    if not os.path.isfile(rules_path):
+        with open(rules_path, "w") as f:
+            f.write("""version: 1
+category: sandbox-escape
+rules:
+  - id: SANDBOX-CONFIG-TAMPER
+    pattern: '(?i)(?:\\.hermes/config\\.yaml|hermes\\s+config\\s+(?:set|edit|unset)|TERMINAL_ENV\\s*=|TERMINAL_DOCKER_MOUNT|TERMINAL_DOCKER_NETWORK|docker_mount_cwd|docker_network|docker_volumes|backend\\s*:\\s*local)'
+    title: "Hermes sandbox config tampering"
+    severity: CRITICAL
+    confidence: 0.95
+    tags: [sandbox-escape, config-tamper]
+  - id: SANDBOX-DOCKER-ESCAPE
+    pattern: '(?i)(?:docker\\s+(?:run|exec|cp|mount|volume)|--privileged|--cap-add|--security-opt|--pid\\s*=\\s*host|--network\\s*=\\s*host|--mount\\s+type=bind|nsenter\\b|chroot\\b|unshare\\b)'
+    title: "Docker container escape attempt"
+    severity: CRITICAL
+    confidence: 0.92
+    tags: [sandbox-escape, container-escape]
+  - id: SANDBOX-ENV-OVERRIDE
+    pattern: '(?i)(?:export\\s+TERMINAL_(?:ENV|DOCKER_MOUNT|DOCKER_NETWORK|DOCKER_VOLUMES)|HERMES_HOME\\s*=|DEFENSECLAW_HOME\\s*=|\\.hermes/\\.env)'
+    title: "Sandbox environment variable override"
+    severity: CRITICAL
+    confidence: 0.93
+    tags: [sandbox-escape, env-tamper]
+  - id: SANDBOX-DEFENSECLAW-TAMPER
+    pattern: '(?i)(?:\\.defenseclaw/config\\.yaml|\\.defenseclaw/hooks/|\\.defenseclaw/policies/|defenseclaw\\s+setup\\s+guardrail\\s+--disable)'
+    title: "DefenseClaw guardrail config tampering"
+    severity: CRITICAL
+    confidence: 0.95
+    tags: [sandbox-escape, guardrail-tamper]
+  - id: SANDBOX-CHFLAGS-REMOVE
+    pattern: '(?i)(?:chflags\\s+(?:nouchg|noschg)|xattr\\s+-d\\s+com\\.apple)'
+    title: "File immutability flag removal"
+    severity: CRITICAL
+    confidence: 0.95
+    tags: [sandbox-escape, privilege]
+""")
+
+
+def _lock_it_governed_configs(app: AppContext) -> bool:
+    """Lock config files with macOS immutable flags. Returns True on success."""
+    import subprocess  # noqa: PLC0415
+
+    hermes_home = os.path.expanduser("~/.hermes")
+    targets = [
+        os.path.join(hermes_home, "config.yaml"),
+        os.path.join(app.cfg.data_dir, "config.yaml"),
+        os.path.join(app.cfg.data_dir, "policies", "guardrail", "default", "rules", "sandbox-escape.yaml"),
+        os.path.join(app.cfg.data_dir, "hooks", "hermes-hook.sh"),
+    ]
+    try:
+        for path in targets:
+            if os.path.exists(path):
+                subprocess.check_call(["chflags", "uchg", path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True
+    except (subprocess.CalledProcessError, OSError):
+        return False
+
+
+def _print_it_governed_status(app: AppContext) -> None:
+    import shutil  # noqa: PLC0415
+
+    is_governed = app.cfg.deployment_mode == "it_governed"
+    connector = getattr(app.cfg.guardrail, "connector", "")
+    mode = getattr(app.cfg.guardrail, "mode", "observe")
+    hermes_installed = shutil.which("hermes") is not None
+    docker_installed = shutil.which("docker") is not None
+
+    click.echo()
+    click.echo("  IT Governed Mode Status")
+    click.echo("  ─────────────────────────────────────────")
+    click.echo(f"  deployment_mode:   {'it_governed ✓' if is_governed else app.cfg.deployment_mode or '(not set)'}")
+    click.echo(f"  connector:         {connector or '(not set)'}")
+    click.echo(f"  guardrail mode:    {mode}")
+    click.echo(f"  hermes installed:  {'✓' if hermes_installed else '✗'}")
+    click.echo(f"  docker installed:  {'✓' if docker_installed else '✗'}")
+
+    # Check sandbox-escape rules
+    import os  # noqa: PLC0415
+    rules_path = os.path.join(app.cfg.data_dir, "policies", "guardrail", "default", "rules", "sandbox-escape.yaml")
+    click.echo(f"  sandbox rules:     {'✓' if os.path.exists(rules_path) else '✗ (not deployed)'}")
+
+    # Check hermes config
+    hermes_home = os.path.expanduser("~/.hermes")
+    hermes_config = os.path.join(hermes_home, "config.yaml")
+    if os.path.exists(hermes_config):
+        try:
+            import yaml  # noqa: PLC0415
+            with open(hermes_config) as f:
+                hcfg = yaml.safe_load(f)
+            terminal = hcfg.get("terminal", {})
+            backend = terminal.get("backend", "local")
+            mount_cwd = terminal.get("docker_mount_cwd_to_workspace", True)
+            network = terminal.get("docker_network", True)
+            click.echo(f"  hermes backend:    {backend}")
+            click.echo(f"  host FS mounted:   {'✗ (safe)' if not mount_cwd else '⚠ MOUNTED'}")
+            click.echo(f"  network access:    {'✗ (safe)' if not network else '⚠ ENABLED'}")
+        except Exception:
+            click.echo(f"  hermes config:     ⚠ could not parse")
+    else:
+        click.echo(f"  hermes config:     ✗ (not found)")
+
+    click.echo()

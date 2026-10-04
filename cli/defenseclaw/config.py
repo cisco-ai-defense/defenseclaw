@@ -120,6 +120,7 @@ VALID_DEPLOYMENT_MODES = {
     "sandboxed",
     "server",
     "saas",
+    "it_governed",
 }
 
 
@@ -179,6 +180,8 @@ LEGACY_DEPLOYMENT_MODE_ALIASES = {
     "standalone": "unmanaged_byod",
     "ci": "ci_cd",
     "edge": "server",
+    "governed": "it_governed",
+    "it-governed": "it_governed",
 }
 
 
@@ -308,7 +311,7 @@ def _validate_deployment_mode(mode: str) -> str:
         raise ValueError(
             f"config: deployment_mode={mode!r} is invalid "
             "(allowed: managed_enterprise, unmanaged_byod, "
-            "ci_cd, sandboxed, server, saas)"
+            "ci_cd, sandboxed, server, saas, it_governed)"
         )
     return mode
 

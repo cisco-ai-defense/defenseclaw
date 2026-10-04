@@ -64,7 +64,7 @@
     "environment":      { "type": ["string", "null"], "description": "Deployment environment. Populated from config environment when set." },
     "deployment_mode":  {
       "anyOf": [
-        { "type": "string", "enum": ["managed_enterprise", "unmanaged_byod", "ci_cd", "sandboxed", "server", "saas"] },
+        { "type": "string", "enum": ["managed_enterprise", "unmanaged_byod", "ci_cd", "sandboxed", "server", "saas", "it_governed"] },
         { "type": "null" }
       ],
       "description": "Sidecar deployment mode. Populated from config deployment_mode when set."
