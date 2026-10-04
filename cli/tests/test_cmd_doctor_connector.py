@@ -3763,3 +3763,20 @@ def test_safe_display_path_keeps_windows_backslashes_and_escapes_controls():
     # WIN2-U2-23: the doctor Rule pack line doubled every backslash.
     assert safe_display_path("C:\\Users\\u\\rules") == '"C:\\Users\\u\\rules"'
     assert safe_display_path('a"b\x1b') == '"a\\"b\\u001b"'
+
+
+class TestConnectorSkippedAtStart(unittest.TestCase):
+    """GAP-2621: a connector the gateway skipped at start gets a WARN with the fix."""
+
+    def test_skipped_connector_warns_with_setup_command(self):
+        from defenseclaw.commands.cmd_doctor import _check_connector_skipped_at_start
+
+        health = {"guardrail": {"state": "running", "details": {"connectors_not_started": ["openhands"]}}}
+        r = _DoctorResult()
+        _check_connector_skipped_at_start("openhands", health, r)
+        _check_connector_skipped_at_start("codex", health, r)
+        self.assertEqual(len(r.checks), 1)
+        row = r.checks[0]
+        self.assertEqual((row["status"], row["label"]), ("warn", "Connector setup"))
+        self.assertIn("OpenHands was skipped", row["detail"])
+        self.assertEqual(row["remediation"], "defenseclaw setup openhands")

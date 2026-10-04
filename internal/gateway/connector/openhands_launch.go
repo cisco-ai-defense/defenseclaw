@@ -231,6 +231,10 @@ func validateOpenHandsLoopbackAPIAddr(apiAddr string) error {
 
 func validateOpenHandsDarwinExecutable(opts SetupOpts, sealedOnly bool) (string, error) {
 	selected := strings.TrimSpace(opts.AgentExecutable)
+	if opts.AgentExecutable == "" {
+		// An install from before setup recorded the executable (0.8.10).
+		return "", errors.New("no verified OpenHands executable is recorded for this install")
+	}
 	if selected == "" || selected != opts.AgentExecutable || strings.ContainsAny(selected, "\x00\r\n") ||
 		!filepath.IsAbs(selected) || filepath.Clean(selected) != selected || filepath.Base(selected) != "openhands" {
 		return "", errors.New("selected OpenHands executable is not an absolute normalized openhands path")

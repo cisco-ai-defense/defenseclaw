@@ -7470,6 +7470,27 @@ def _amp_non_defenseclaw_direct_plugins(cfg) -> list[str]:
     return discovered
 
 
+def _check_connector_skipped_at_start(connector: str, live_health: dict | None, r: _DoctorResult) -> None:
+    """Warn when the running gateway skipped *connector* at start.
+
+    The gateway skips a connector whose setup it refused, for example an
+    OpenHands that 0.8.10 enrolled without a recorded executable (GAP-2621).
+    Its old hook file can still pass the hook row, so name the fix here.
+    """
+    from defenseclaw.commands.cmd_status import _connectors_not_started
+
+    if connector not in _connectors_not_started(live_health):
+        return
+    _emit(
+        "warn",
+        "Connector setup",
+        f"{_CONNECTOR_LABELS.get(connector, connector)} was skipped when the gateway started, so it is not "
+        "enforced; gateway.log has the reason",
+        r=r,
+        remediation=f"defenseclaw setup {connector}",
+    )
+
+
 def _check_connector_hooks(cfg, connector: str, r: _DoctorResult) -> None:
     """Run the Services hook/health check matching *connector*.
 
@@ -10374,6 +10395,7 @@ def doctor(
                 )
             continue
         with _doctor_label_suffix(f"[{_conn}]" if _multi_hooks else ""):
+            _check_connector_skipped_at_start(_conn, sidecar_health, r)
             _check_connector_hooks(cfg, _conn, r)
             if _conn == "codex":
                 _check_codex_otel_alignment(cfg, r)
