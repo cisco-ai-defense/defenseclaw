@@ -23452,6 +23452,40 @@ function Invoke-DefenseClawInstallLikeLifecycle {
     return $result
 }
 
+function Invoke-DefenseClawNuclearSilentExec {
+    # Helper for the nuclear path only. Runs a native console-subsystem
+    # binary (sc.exe, taskkill.exe, takeown.exe, icacls.exe) without
+    # spawning a visible console window. The outer DefenseClawSetup EXE
+    # launches install-enterprise.ps1 under a PowerShell host that does
+    # not inherit an interactive console - so every `& $takeownExe ...`
+    # style call flashes a brief console window per invocation. Using
+    # ProcessStartInfo with CreateNoWindow=true keeps the nuclear teardown
+    # silent regardless of how the Setup EXE invoked its PowerShell host.
+    #
+    # All errors are intentionally swallowed - this is the nuclear path,
+    # not a validator. Non-zero exit codes are expected (service already
+    # gone, file already removed, etc).
+    param(
+        [Parameter(Mandatory)][string]$File,
+        [string[]]$Arguments = @()
+    )
+    try {
+        $psi = [Diagnostics.ProcessStartInfo]::new()
+        $psi.FileName               = $File
+        $psi.UseShellExecute        = $false
+        $psi.CreateNoWindow         = $true
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError  = $true
+        foreach ($arg in $Arguments) { [void]$psi.ArgumentList.Add($arg) }
+        $process = [Diagnostics.Process]::Start($psi)
+        if ($null -eq $process) { return }
+        $null = $process.StandardOutput.ReadToEnd()
+        $null = $process.StandardError.ReadToEnd()
+        $process.WaitForExit()
+    }
+    catch {}
+}
+
 function Invoke-DefenseClawNuclearUninstall {
     # Managed-mode bulldoze: uninstall --purge is a hammer. We don't care
     # what the previous state was; the point is a clean slate for the
@@ -23482,8 +23516,11 @@ function Invoke-DefenseClawNuclearUninstall {
         -GatewayServiceName $GatewayServiceName
 
     # 1. Stop + delete every managed service we might have created in this
-    #    scope. Swallow errors - a service that is already gone or whose
-    #    stop fails is fine; sc.exe delete marks the row for deletion
+    #    scope. All native-exe invocations in the nuclear path route through
+    #    Invoke-DefenseClawNuclearSilentExec so no console window flashes
+    #    when the Setup EXE's PowerShell host runs without an inherited
+    #    console. Errors are swallowed - a service that is already gone or
+    #    whose stop fails is fine; sc.exe delete marks the row for deletion
     #    regardless and the SCM pending-delete flag completes at reboot.
     foreach ($name in @(
         $GatewayServiceName,
@@ -23492,8 +23529,8 @@ function Invoke-DefenseClawNuclearUninstall {
         $brokerName
     )) {
         if ([string]::IsNullOrWhiteSpace($name)) { continue }
-        try { $null = & $script:ScExe 'stop' $name 2>&1 } catch {}
-        try { $null = & $script:ScExe 'delete' $name 2>&1 } catch {}
+        Invoke-DefenseClawNuclearSilentExec -File $script:ScExe -Arguments @('stop', $name)
+        Invoke-DefenseClawNuclearSilentExec -File $script:ScExe -Arguments @('delete', $name)
     }
 
     # 1b. Force-kill the two SERVICE-WORKER binaries that hold persistent
@@ -23515,7 +23552,9 @@ function Invoke-DefenseClawNuclearUninstall {
         'defenseclaw-cmid-broker.exe',
         'defenseclaw-gateway.exe'
     )) {
-        try { $null = & $taskkillExe '/F' '/IM' $image '/T' 2>&1 } catch {}
+        Invoke-DefenseClawNuclearSilentExec `
+            -File $taskkillExe `
+            -Arguments @('/F', '/IM', $image, '/T')
     }
 
     # 1c. Short settle delay so NT closes the released handles before the
@@ -23546,8 +23585,12 @@ function Invoke-DefenseClawNuclearUninstall {
         if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path)) {
             continue
         }
-        try { $null = & $takeownExe '/F' $path '/A' '/R' '/D' 'Y' 2>&1 } catch {}
-        try { $null = & $script:IcaclsExe $path '/reset' '/T' '/C' '/L' 2>&1 } catch {}
+        Invoke-DefenseClawNuclearSilentExec `
+            -File $takeownExe `
+            -Arguments @('/F', $path, '/A', '/R', '/D', 'Y')
+        Invoke-DefenseClawNuclearSilentExec `
+            -File $script:IcaclsExe `
+            -Arguments @($path, '/reset', '/T', '/C', '/L')
         for ($attempt = 1; $attempt -le 3; $attempt++) {
             try {
                 Microsoft.PowerShell.Management\Remove-Item `
@@ -23594,8 +23637,12 @@ function Invoke-DefenseClawNuclearUninstall {
         if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $fixedPath)) {
             continue
         }
-        try { $null = & $takeownExe '/F' $fixedPath '/A' 2>&1 } catch {}
-        try { $null = & $script:IcaclsExe $fixedPath '/reset' '/C' '/L' 2>&1 } catch {}
+        Invoke-DefenseClawNuclearSilentExec `
+            -File $takeownExe `
+            -Arguments @('/F', $fixedPath, '/A')
+        Invoke-DefenseClawNuclearSilentExec `
+            -File $script:IcaclsExe `
+            -Arguments @($fixedPath, '/reset', '/C', '/L')
         try {
             Microsoft.PowerShell.Management\Remove-Item `
                 -LiteralPath $fixedPath `
@@ -23610,18 +23657,17 @@ function Invoke-DefenseClawNuclearUninstall {
 
     # 3b. Agent-config files that are SHARED with the host agent (Codex
     #     requirements.toml, Cursor hooks.json). In managed_enterprise
-    #     mode these are DefenseClaw-owned (allow_managed_hooks_only
-    #     = true), but we still gate deletion on a content check: delete
-    #     only if the file references defenseclaw-hook.exe. If a user
-    #     hand-crafted a non-DefenseClaw file at the same path, leave it
-    #     alone.
-    #
-    #     The content check matches ANY scoped bin dir, not just the
-    #     current scope - that is deliberate. Over an iterated test
-    #     cycle a VM accumulates stale entries from previous scoped
-    #     installs (observed on this VM: four distinct DefenseClaw-Cert
-    #     runIDs stamped into one Codex requirements.toml). "Clean
-    #     slate" means ALL of them go.
+    #     mode these are DefenseClaw-owned - allow_managed_hooks_only
+    #     is set and the install stamped all current content. Prior v18
+    #     tried to be clever with a content check gating deletion on a
+    #     plaintext regex match, but Cursor's hook commands are PowerShell
+    #     EncodedCommand base64 blobs: the literal strings
+    #     "defenseclaw-hook.ps1" / "DefenseClaw-Cert" never appear in the
+    #     file, so the regex missed. Over iterated test cycles the
+    #     uncleaned hooks.json then tripped install's ownership-metadata
+    #     check with "Cursor hook references remain without ownership
+    #     metadata". Nuclear ("clean slate") - just delete, same scope
+    #     invariant as step 3a.
     foreach ($agentConfigPath in @(
         'C:\ProgramData\OpenAI\Codex\requirements.toml',
         'C:\ProgramData\Cursor\hooks.json'
@@ -23629,29 +23675,12 @@ function Invoke-DefenseClawNuclearUninstall {
         if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $agentConfigPath)) {
             continue
         }
-        $content = $null
-        try {
-            $content = Microsoft.PowerShell.Management\Get-Content `
-                -LiteralPath $agentConfigPath -Raw -ErrorAction Stop
-        }
-        catch {
-            try { $null = & $takeownExe '/F' $agentConfigPath '/A' 2>&1 } catch {}
-            try { $null = & $script:IcaclsExe $agentConfigPath '/reset' '/C' '/L' 2>&1 } catch {}
-            try {
-                $content = Microsoft.PowerShell.Management\Get-Content `
-                    -LiteralPath $agentConfigPath -Raw -ErrorAction Stop
-            }
-            catch {
-                $warnings.Add("nuclear uninstall could not read agent config $agentConfigPath to decide ownership: $($_.Exception.Message)")
-                continue
-            }
-        }
-        if ($content -notmatch 'defenseclaw-hook\.exe|defenseclaw-hook\.ps1|defenseclaw-cmid|DefenseClaw-Cert|Cisco Secure Client\\DefenseClaw') {
-            # Not our file - do not touch.
-            continue
-        }
-        try { $null = & $takeownExe '/F' $agentConfigPath '/A' 2>&1 } catch {}
-        try { $null = & $script:IcaclsExe $agentConfigPath '/reset' '/C' '/L' 2>&1 } catch {}
+        Invoke-DefenseClawNuclearSilentExec `
+            -File $takeownExe `
+            -Arguments @('/F', $agentConfigPath, '/A')
+        Invoke-DefenseClawNuclearSilentExec `
+            -File $script:IcaclsExe `
+            -Arguments @($agentConfigPath, '/reset', '/C', '/L')
         try {
             Microsoft.PowerShell.Management\Remove-Item `
                 -LiteralPath $agentConfigPath -Force -ErrorAction Stop

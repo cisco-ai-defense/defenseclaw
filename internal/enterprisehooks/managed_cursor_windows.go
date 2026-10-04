@@ -37,6 +37,21 @@ const (
 
 var windowsCursorManagedRootResolver = defaultWindowsCursorManagedRoot
 
+// windowsCursorManagedTrustStrictAncestors mirrors the semantics of
+// managed.TrustStrictAncestorsEnv but kept inline here so this file does
+// not take a new import on the managed package (and so a future refactor
+// of the trust package cannot regress a Cursor-only reclaim path).
+// Returns true when the strict-mode env knob is explicitly set.
+func windowsCursorManagedTrustStrictAncestors() bool {
+	switch strings.ToLower(strings.TrimSpace(
+		os.Getenv("DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS"),
+	)) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
 // WindowsCursorManagedRuntimeTarget binds a machine-authorized SID to only
 // that user's canonical DefenseClaw runtime. No token is stored in ProgramData.
 type WindowsCursorManagedRuntimeTarget struct {
@@ -563,7 +578,35 @@ func validateWindowsCursorManagedPublicArtifacts(
 			)
 			if removeErr == nil &&
 				!connector.WindowsCursorEnterpriseHooksSemanticallyEqual(cleaned, artifacts.hooks.data) {
-				return artifacts, errors.New("enterprise hooks: Cursor hook references remain without ownership metadata")
+				if windowsCursorManagedTrustStrictAncestors() {
+					return artifacts, errors.New("enterprise hooks: Cursor hook references remain without ownership metadata")
+				}
+				// Bulldoze reclaim: a prior scoped install stamped
+				// hook entries into hooks.json but its ownership
+				// metadata (state/receipt) is gone - either from a
+				// crash between the hooks write and the state write,
+				// or from a manual clean-up that wiped only the
+				// sidecars. The entries are DefenseClaw's by
+				// adapter-path match, so overwrite hooks.json with
+				// the cleaned bytes and continue. The caller is
+				// already inside withWindowsCursorManagedTransaction,
+				// so this write is lock-serialized against other
+				// managed Cursor operations.
+				fmt.Fprintf(os.Stderr,
+					"[enterprise-hooks] reclaiming orphan Cursor hook "+
+						"refs at %s (state ownership metadata absent)\n",
+					artifacts.hooks.path)
+				if writeErr := os.WriteFile(
+					artifacts.hooks.path,
+					cleaned,
+					0o644,
+				); writeErr != nil {
+					return artifacts, fmt.Errorf(
+						"enterprise hooks: reclaim orphan Cursor hook refs: %w",
+						writeErr,
+					)
+				}
+				artifacts.hooks.data = append([]byte(nil), cleaned...)
 			}
 		}
 		artifacts.active = false
