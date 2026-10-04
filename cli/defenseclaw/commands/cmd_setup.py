@@ -16947,6 +16947,141 @@ def setup_it_governed(app: AppContext, disable: bool, status: bool, yes: bool) -
     if not yes:
         click.confirm("  Enable IT Governed mode?", abort=True)
 
+    # ── Collect credentials ──────────────────────────────────
+    click.echo()
+    click.echo("  Credential Setup")
+    click.echo("  ─────────────────────────────────────────")
+
+    data_dir = app.cfg.data_dir
+    env_path = os.path.join(data_dir, ".env")
+    env_lines = {}
+    if os.path.isfile(env_path):
+        with open(env_path) as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    env_lines[k.strip()] = v.strip()
+
+    # Circuit API
+    if not env_lines.get("CISCO_AI_GATEWAY_AUTH"):
+        click.echo()
+        click.echo("  Circuit API (LLM provider)")
+        click.echo("  Get credentials from your Cisco AI Gateway admin.")
+        gateway_auth = click.prompt("    Base64 client_id:secret (CISCO_AI_GATEWAY_AUTH)", default="", show_default=False)
+        if gateway_auth.strip():
+            env_lines["CISCO_AI_GATEWAY_AUTH"] = gateway_auth.strip()
+            # Auto-fetch initial JWT
+            click.echo("    Fetching JWT token...")
+            try:
+                import subprocess as _sp2  # noqa: PLC0415
+                import json as _json  # noqa: PLC0415
+                result = _sp2.run(
+                    ["curl", "-s", "-X", "POST", "https://id.cisco.com/oauth2/default/v1/token",
+                     "-H", f"Authorization: Basic {gateway_auth.strip()}=",
+                     "-H", "Content-Type: application/x-www-form-urlencoded",
+                     "-d", "grant_type=client_credentials&scope=customscope"],
+                    capture_output=True, text=True, timeout=15
+                )
+                token_data = _json.loads(result.stdout)
+                jwt = token_data.get("access_token", "")
+                if jwt:
+                    env_lines["CISCO_AI_JWT"] = jwt
+                    click.echo("    ✓ JWT token fetched (valid 1 hour)")
+                else:
+                    click.echo(f"    ⚠ JWT fetch failed: {token_data.get('error', 'unknown')}")
+            except Exception as e:
+                click.echo(f"    ⚠ JWT fetch failed: {e}")
+    else:
+        click.echo("  ✓ Circuit API credentials found")
+
+    # Atlassian (Jira/Confluence)
+    if not env_lines.get("CONFLUENCE_API_TOKEN"):
+        click.echo()
+        click.echo("  Atlassian (Jira + Confluence MCP)")
+        click.echo("  Get API token from: https://id.atlassian.com/manage-profile/security/api-tokens")
+        atlassian_url = click.prompt("    Atlassian URL (e.g. https://your-company.atlassian.net)", default="", show_default=False)
+        atlassian_user = click.prompt("    Atlassian email", default="", show_default=False)
+        atlassian_token = click.prompt("    Atlassian API token", default="", show_default=False, hide_input=True)
+        if atlassian_token.strip():
+            env_lines["CONFLUENCE_URL"] = f"{atlassian_url.strip()}/wiki" if atlassian_url else ""
+            env_lines["CONFLUENCE_USERNAME"] = atlassian_user.strip()
+            env_lines["CONFLUENCE_API_TOKEN"] = atlassian_token.strip()
+            env_lines["JIRA_URL"] = atlassian_url.strip()
+            env_lines["JIRA_USERNAME"] = atlassian_user.strip()
+            env_lines["JIRA_API_TOKEN"] = atlassian_token.strip()
+            click.echo("    ✓ Atlassian credentials saved")
+        else:
+            click.echo("    ⏭ Skipped Atlassian (can add later)")
+    else:
+        click.echo("  ✓ Atlassian credentials found")
+
+    # Microsoft Graph (Outlook)
+    if not env_lines.get("MS_GRAPH_ACCESS_TOKEN"):
+        click.echo()
+        click.echo("  Microsoft Graph (Outlook + Calendar MCP)")
+        click.echo("  Get token from: https://developer.microsoft.com/graph/graph-explorer")
+        graph_token = click.prompt("    Graph API access token (paste JWT)", default="", show_default=False)
+        if graph_token.strip():
+            env_lines["MS_GRAPH_ACCESS_TOKEN"] = graph_token.strip()
+            click.echo("    ✓ Graph API token saved")
+        else:
+            click.echo("    ⏭ Skipped Outlook (can add later)")
+    else:
+        click.echo("  ✓ Microsoft Graph token found")
+
+    # Webex
+    if not env_lines.get("WEBEX_ACCESS_TOKEN"):
+        click.echo()
+        click.echo("  Webex Messaging (optional)")
+        click.echo("  Get token from: https://developer.webex.com/docs/getting-started")
+        webex_token = click.prompt("    Webex access token", default="", show_default=False)
+        if webex_token.strip():
+            env_lines["WEBEX_ACCESS_TOKEN"] = webex_token.strip()
+            click.echo("    ✓ Webex token saved")
+        else:
+            click.echo("    ⏭ Skipped Webex (can add later)")
+    else:
+        click.echo("  ✓ Webex token found")
+
+    # Write .env
+    os.makedirs(data_dir, exist_ok=True)
+    with open(env_path, "w") as f:
+        f.write("# DefenseClaw IT Governed — auto-generated credentials\n")
+        for k, v in env_lines.items():
+            f.write(f"{k}={v}\n")
+    os.chmod(env_path, 0o600)
+    click.echo()
+    click.echo(f"  ✓ Credentials saved to {env_path}")
+
+    # ── Write MCP servers config ─────────────────────────────
+    mcp_servers_yaml = ""
+    if env_lines.get("CONFLUENCE_API_TOKEN"):
+        mcp_servers_yaml += f"""
+  - name: confluence
+    transport: stdio
+    command: uvx
+    args: [mcp-atlassian]
+    env:
+      CONFLUENCE_URL: "{env_lines.get('CONFLUENCE_URL', '')}"
+      CONFLUENCE_USERNAME: "{env_lines.get('CONFLUENCE_USERNAME', '')}"
+      CONFLUENCE_API_TOKEN_ENV: CONFLUENCE_API_TOKEN
+      JIRA_URL: "{env_lines.get('JIRA_URL', '')}"
+      JIRA_USERNAME: "{env_lines.get('JIRA_USERNAME', '')}"
+      JIRA_API_TOKEN_ENV: JIRA_API_TOKEN"""
+
+    if env_lines.get("MS_GRAPH_ACCESS_TOKEN"):
+        mcp_servers_yaml += """
+  - name: outlook
+    transport: stdio
+    command: python3
+    args: ["{data_dir}/litellm/outlook_mcp.py"]
+    env:
+      MS_GRAPH_ACCESS_TOKEN_ENV: MS_GRAPH_ACCESS_TOKEN""".format(data_dir=data_dir)
+
+    # ── Continue with installation ───────────────────────────
+    click.echo()
+
     # Install Hermes if not present
     hermes_path = shutil.which("hermes")
     if not hermes_path:
@@ -16980,7 +17115,19 @@ def setup_it_governed(app: AppContext, disable: bool, status: bool, yes: bool) -
         app.cfg.guardrail.connectors = {}
     app.cfg.guardrail.connectors["hermes"] = {"mode": "action"}
 
-    # 3. Save config
+    # 3. Write MCP servers to config.yaml if credentials were provided
+    if mcp_servers_yaml:
+        config_path = os.path.join(data_dir, "config.yaml")
+        if os.path.isfile(config_path):
+            with open(config_path) as f:
+                cfg_content = f.read()
+            if "mcp_servers:" not in cfg_content:
+                cfg_content += f"\nmcp_servers:\n{mcp_servers_yaml}\n"
+                with open(config_path, "w") as f:
+                    f.write(cfg_content)
+        click.echo("  ✓ MCP servers configured")
+
+    # 4. Save config
     app.cfg.save()
     click.echo()
     click.echo("  ✓ Config saved with deployment_mode=it_governed")
