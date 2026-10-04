@@ -51,19 +51,24 @@ const (
 	codexDotEnvJoinedFlag = "[added-newline]"
 )
 
-// codexDotEnvLoopbackHosts are the gateway's loopback spellings. Codex dials
-// the endpoint written into [otel] (127.0.0.1); localhost and ::1 cover a
-// hand-edited endpoint.
-var codexDotEnvLoopbackHosts = []string{"127.0.0.1", "localhost", "::1"}
+// codexDotEnvBypassHosts are the hosts the block keeps off the proxy. The
+// first three are the gateway's loopback spellings: Codex dials the endpoint
+// written into [otel] (127.0.0.1); localhost and ::1 cover a hand-edited
+// endpoint. The rest are the cloud instance-metadata and container-credential
+// endpoints (EC2 IMDS over IPv4 and IPv6, ECS task credentials), which AWS
+// asks to bypass any proxy: without them the AWS credential lookups Codex
+// makes for Bedrock go through HTTP(S)_PROXY in clear HTTP (GAP-2620, the
+// same list as the CLI's GAP-1655 exemption in cli/defenseclaw/entry.py).
+var codexDotEnvBypassHosts = []string{"127.0.0.1", "localhost", "::1", "169.254.169.254", "169.254.170.2", "fd00:ec2::254"}
 
 // codexDotEnvBodyLines are the managed assignments. NO_PROXY is what reqwest
 // reads first, so it carries the union of both spellings plus the loopback;
 // no_proxy then mirrors it for the tools Codex runs (curl reads no_proxy).
 // Empty expansions leave empty list entries, which proxy matchers skip.
 func codexDotEnvBodyLines() []string {
-	loopback := strings.Join(codexDotEnvLoopbackHosts, ",")
+	bypass := strings.Join(codexDotEnvBypassHosts, ",")
 	return []string{
-		`NO_PROXY="${NO_PROXY},${no_proxy},` + loopback + `"`,
+		`NO_PROXY="${NO_PROXY},${no_proxy},` + bypass + `"`,
 		`no_proxy="${NO_PROXY}"`,
 	}
 }

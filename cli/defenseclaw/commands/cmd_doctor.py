@@ -4968,6 +4968,9 @@ def _defenseclaw_hook_script_kind(path: str) -> str:
 _CODEX_DOTENV_PROXY_MARKER = (
     "# >>> DefenseClaw (managed; removed on uninstall): keep Codex telemetry to the local gateway off HTTP(S)_PROXY"
 )
+# GAP-2620: the block also lists the instance-metadata endpoints; an older
+# block without them is refreshed by the next Codex Setup.
+_CODEX_DOTENV_METADATA_ENTRY = b"169.254.169.254"
 _TELEMETRY_PROXY_VARS = ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy")
 _LOOPBACK_NO_PROXY_FIX_POSIX = (
     'export NO_PROXY="${NO_PROXY:+$NO_PROXY,}127.0.0.1,localhost,::1" '
@@ -4993,6 +4996,13 @@ def codex_telemetry_proxy_status(environ=None, *, os_name: str | None = None) ->
             dotenv = fh.read(1024 * 1024)
     except OSError:
         dotenv = b""
+    if _CODEX_DOTENV_PROXY_MARKER.encode() in dotenv and _CODEX_DOTENV_METADATA_ENTRY not in dotenv:
+        return (
+            "warn",
+            f"{proxy_var} is set; the DefenseClaw NO_PROXY entry in {dotenv_path} keeps Codex telemetry off the "
+            "proxy but predates the instance-metadata addresses, so AWS credential lookups still use the proxy",
+            "run: defenseclaw-gateway restart (it refreshes the entry), then restart Codex",
+        )
     if _CODEX_DOTENV_PROXY_MARKER.encode() in dotenv:
         return (
             "pass",
