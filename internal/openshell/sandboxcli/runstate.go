@@ -317,12 +317,27 @@ func (a *App) handoverText(h *handover) string {
 // (--model=x) or the word is another option or holds a space (a prompt
 // after a switch). A harness whose command line holds no prompt word
 // (keepsEveryArg) keeps every argument, in order.
+//
+// An option whose value holds a space is kept without it, and
+// launchOptionsSplit names those options: `sandbox run` warns the
+// operator, because a later session passes the harness the option and no
+// value.
 func launchOptions(spec *harness.Spec, args []string) []string {
+	kept, _ := launchOptionsSplit(spec, args)
+	return kept
+}
+
+// launchOptionsSplit is launchOptions and, separately, the options whose
+// value the record leaves out. The word that was left out may have been a
+// prompt rather than the option's value - nothing available here tells the
+// two apart, and a prompt is not recorded on purpose - so the caller's
+// warning is worded for both readings.
+func launchOptionsSplit(spec *harness.Spec, args []string) (kept, unkeptValue []string) {
 	if len(args) == 0 || printMode(spec, args) {
-		return nil
+		return nil, nil
 	}
 	if keepsEveryArg(spec) {
-		return slices.Clone(args)
+		return slices.Clone(args), nil
 	}
 	var out []string
 	operand := false
@@ -339,12 +354,18 @@ func launchOptions(spec *harness.Spec, args []string) []string {
 		if strings.Contains(arg, "=") || i+1 >= len(args) {
 			continue
 		}
-		if next := args[i+1]; !strings.HasPrefix(next, "-") && !strings.ContainsAny(next, " \t\r\n") {
-			out = append(out, next)
-			i++
+		next := args[i+1]
+		if strings.HasPrefix(next, "-") {
+			continue
 		}
+		if strings.ContainsAny(next, " \t\r\n") {
+			unkeptValue = append(unkeptValue, arg)
+			break
+		}
+		out = append(out, next)
+		i++
 	}
-	return out
+	return out, unkeptValue
 }
 
 // keepsEveryArg reports whether every word of spec's interactive command
