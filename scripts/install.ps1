@@ -1019,11 +1019,13 @@ function Copy-BinDir([string]$To) {
 function Restore-BinDir([string]$From) {
     $marker = Join-Path $From "NO_BINDIR"
     if (Test-Path -LiteralPath $marker) {
-        # There was no bin folder: take out this run's files, then the
-        # folders it made (bin first, then ~\.local) when they are empty.
+        # There was no bin folder: take out this run's files, and the .new
+        # copies a run killed mid-copy leaves (GAP-2618), then the folders it
+        # made (bin first, then ~\.local) when they are empty.
         foreach ($name in $ManagedFiles) {
-            $live = Join-Path $BinDir $name
-            if (Test-Path -LiteralPath $live) { Remove-Aside $live }
+            foreach ($live in @((Join-Path $BinDir $name), (Join-Path $BinDir "$name.new"))) {
+                if (Test-Path -LiteralPath $live) { Remove-Aside $live }
+            }
         }
         $made = @(Get-Content -LiteralPath $marker | Where-Object { $_ })
         if (-not $made.Count) { $made = @($BinDir) }
@@ -1367,7 +1369,13 @@ function Resume-InterruptedRun {
     foreach ($slot in @((Join-Path $DataDir "previous.new"), (Join-Path $DataDir ".repair"))) {
         if (-not (Test-Path -LiteralPath $slot)) { continue }
         if (Test-Path -LiteralPath (Join-Path $slot "COMPLETE")) {
-            Write-Warn "An earlier install was interrupted; restoring the install it replaced"
+            # An interrupted first install replaced nothing (GAP-2618).
+            $firstInstall = -not (Read-Text (Join-Path $slot "VERSION"))
+            if ($firstInstall) {
+                Write-Warn "An earlier first install was interrupted; removing what it had copied"
+            } else {
+                Write-Warn "An earlier install was interrupted; restoring the install it replaced"
+            }
             [void](Stop-Gateway)
             $wasRunning = (Read-Text (Join-Path $slot "GATEWAY_WAS_RUNNING")) -eq "true"
             $state = Join-Path $Staging "hook-runtime-state.json"
@@ -1377,12 +1385,18 @@ function Resume-InterruptedRun {
             $setupInstall = Find-SetupInstall
             $setupBack = $setupInstall -and -not (Test-Path -LiteralPath (Join-Path $BinDir "defenseclaw-gateway.exe"))
             if ($setupBack) { Clear-SetupDataDir $failed }
+            # Nothing was installed before, so the copy holds nothing to go back to.
+            if ($firstInstall -and -not $setupBack) { Invoke-Quietly { Remove-Tree $failed } }
             if ($wasRunning -and $setupBack) {
                 Start-SetupGateway $setupInstall.Root
             } elseif ($wasRunning) {
                 [void](Start-Gateway)
             }
-            if (-not $setupBack) { Write-Warn "The interrupted install was kept in $failed" }
+            if ($firstInstall -and -not $setupBack) {
+                Write-Info "Nothing was left installed"
+            } elseif (-not $setupBack) {
+                Write-Warn "The interrupted install was kept in $failed"
+            }
         } else {
             # The snapshot never finished, so live data was only copied, not changed.
             Undo-Snapshot $slot
