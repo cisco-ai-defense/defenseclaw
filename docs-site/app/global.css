@@ -2710,16 +2710,6 @@ article#nd-page :not(pre) > code[data-inline='long'] {
   color: inherit;
 }
 
-/* Guided demo code uses GitHub's comment grey, which misses 4.5:1 on the
- * demo's code surfaces in both themes. */
-.scenario-code-theme-light span[style*='color:#6A737D' i] {
-  color: #57606a !important;
-}
-
-.scenario-code-theme-dark span[style*='color:#6A737D' i] {
-  color: #8b949e !important;
-}
-
 /* Print: the diagram entrance animations must not leave messages or nodes
  * at their starting opacity on paper. */
 @media print {
