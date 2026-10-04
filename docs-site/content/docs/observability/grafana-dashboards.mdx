@@ -147,6 +147,15 @@ DefenseClaw does not invent telemetry.
 | **No data** | The panel is conditional (for example HITL, failures, or proxy-only traffic) and no matching series or event exists for the current filters. |
 | **Not reported** | The connector/provider did not report that field, most commonly token usage or cost. It is not equivalent to zero. |
 
+If the Connector list is empty and every connector- or scanner-filtered panel
+shows no data while Loki and Tempo have events, check the destination name.
+The dashboards read the short `local-observability-v1` metric labels
+(`connector`, `scanner`, `target_type`), which the gateway exports only to the
+OTLP destination named `local-observability`. Any other name gets the canonical
+v8 labels (`defenseclaw_connector_source`, ...). See
+[Local observability](/docs/observability/local-observability) for pointing a
+gateway on another computer at the stack.
+
 If a global panel is unexpectedly empty while raw events are visible, widen
 the time range first. Historical token totals and model/provider breakdowns
 use range functions, so they continue to render after the gateway process
