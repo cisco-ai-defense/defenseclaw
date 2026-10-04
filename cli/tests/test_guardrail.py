@@ -2414,6 +2414,25 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
 
     @patch("defenseclaw.commands.cmd_setup.ux.subhead")
     @patch("defenseclaw.commands.cmd_setup._restart_defense_gateway", return_value=True)
+    def test_multi_connector_restart_without_readiness_gate_names_only_omnigent(
+        self,
+        _mock_restart,
+        mock_subhead,
+    ):
+        # GAP-2630: `agent discovery enable` restarts without a readiness
+        # wait; the roster must not read "registration is not verified".
+        from defenseclaw.commands.cmd_setup import _restart_services
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _restart_services(tmpdir, connector="codex", connectors=["codex", "claudecode", "omnigent"])
+
+        messages = [call.args[0] for call in mock_subhead.call_args_list]
+        self.assertTrue(all("not verified" not in message for message in messages))
+        self.assertTrue(any("enforcement via" in message for message in messages))
+        self.assertTrue(any(m.startswith("OmniGent:") and "defenseclaw doctor" in m for m in messages))
+
+    @patch("defenseclaw.commands.cmd_setup.ux.subhead")
+    @patch("defenseclaw.commands.cmd_setup._restart_defense_gateway", return_value=True)
     def test_omnigent_hint_without_readiness_gate_does_not_claim_gateway_ready(
         self,
         _mock_restart,

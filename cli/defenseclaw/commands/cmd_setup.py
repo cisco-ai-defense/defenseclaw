@@ -14305,7 +14305,8 @@ def _restart_services(
     # Peers the restarted gateway refused: setup skipped them, so they are
     # not guarded now and the closing roster line leaves them out (GAP-2013).
     runtime_skipped: frozenset[str] = frozenset()
-    if wait_for_connector_ready and wait_targets and gateway_restarted:
+    registration_checked = bool(wait_for_connector_ready and wait_targets and gateway_restarted)
+    if registration_checked:
         readiness_label = "DefenseClaw gateway registration" if "omnigent" in wait_targets else "connector runtime"
         click.echo(f"  {readiness_label}: waiting for verified setup...", nl=False)
         readiness_kwargs: dict[str, Any] = {}
@@ -14384,6 +14385,16 @@ def _restart_services(
                 if shown
                 else "No hook connectors were left to tear down."
             )
+        elif "omnigent" in hook_multi and not registration_checked:
+            # No readiness wait ran (for example `agent discovery enable`):
+            # don't label the whole roster "not verified" after a good
+            # restart; name the one unchecked connector and how to check it
+            # (GAP-2630).
+            ux.subhead(
+                f"{roster}: enforcement via native lifecycle surfaces on the sidecar API port. "
+                "No proxy listener — each talks directly to its native upstream."
+            )
+            ux.subhead("OmniGent: this restart does not check its registration; run 'defenseclaw doctor' to confirm.")
         elif "omnigent" in hook_multi:
             registration_state = (
                 "DefenseClaw gateway registration is ready"
