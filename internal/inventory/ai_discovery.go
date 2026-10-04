@@ -263,7 +263,15 @@ type ProcessRuntime struct {
 	UptimeSec int64      `json:"uptime_sec,omitempty"`
 	User      string     `json:"user,omitempty"`
 	Comm      string     `json:"comm,omitempty"`
+	// OtherInstances lists the other live processes of the same product
+	// (two Claude Code sessions, say), newest first. The signal itself
+	// stays one row per product so its fingerprint and lifecycle don't
+	// change; the newest process fills the fields above (GAP-2633).
+	OtherInstances []ProcessRuntime `json:"other_instances,omitempty"`
 }
+
+// maxProcessOtherInstances bounds Runtime.OtherInstances per signal.
+const maxProcessOtherInstances = 64
 
 // LocalModelInfo describes one model observed through a vetted local-server
 // metadata endpoint or as an on-disk model artifact. Model IDs deliberately
@@ -2510,9 +2518,10 @@ func (s *ContinuousDiscoveryService) detectProcesses() ([]AISignal, error) {
 	// Claude Desktop's "Claude"). Each process keeps only its closest
 	// matches; see processMatchScore.
 	type posixClaim struct {
-		signal AISignal
-		pid    int
-		score  int
+		sig   AISignature
+		want  string
+		procs []processInfo // closest name matches, newest first
+		score int
 	}
 	var claims []posixClaim
 	bestScore := map[int]int{}
@@ -2531,14 +2540,13 @@ func (s *ContinuousDiscoveryService) detectProcesses() ([]AISignal, error) {
 			if want == "" {
 				continue
 			}
-			// Pick the *most recently started* matching process so
-			// the rendered Runtime block is the freshest invocation,
-			// not whichever ps row sorted first. This makes "Last
-			// active" intuitive when a long-lived helper process and
-			// a fresh agent run share the same comm.
-			// A closer name match wins over recency, so Claude Desktop's
-			// "Claude" picks the app rather than a newer "claude" CLI.
-			var best *processInfo
+			// Keep every process with the closest name match, so Claude
+			// Desktop's "Claude" picks the app rather than a "claude"
+			// CLI, and sort them newest first: the most recently started
+			// one fills the Runtime block (the freshest invocation, not
+			// whichever ps row sorted first) and the rest become
+			// Runtime.OtherInstances.
+			var matched []processInfo
 			bestMatch := 0
 			for i := range procs {
 				name := processMatchName(procs[i], want)
@@ -2546,40 +2554,62 @@ func (s *ContinuousDiscoveryService) detectProcesses() ([]AISignal, error) {
 					continue
 				}
 				match := processMatchScore(name, rawWant)
-				if best == nil || match > bestMatch || (match == bestMatch && procs[i].StartedAt.After(best.StartedAt)) {
-					p := procs[i]
-					p.Comm = name
-					best = &p
+				if match < bestMatch {
+					continue
+				}
+				if match > bestMatch {
+					matched = nil
 					bestMatch = match
 				}
+				p := procs[i]
+				p.Comm = name
+				matched = append(matched, p)
 			}
-			if best == nil {
+			if len(matched) == 0 {
 				continue
 			}
-			// Quality reflects how confident this row is *as evidence
-			// of the named SDK*. Exact comm match (the kernel-reported
-			// process name equals a catalog `process_names` entry) is
-			// the strongest signal a `ps` snapshot can give us;
-			// substring matches (e.g. "claude-code" containing "claude")
-			// are still useful but less specific, so the engine
-			// down-weights them via Quality.
-			quality := 1.0
-			matchKind := MatchKindExact
-			if !processCommExactlyEquals(best.Comm, want) {
-				quality = 0.5
-				matchKind = MatchKindSubstring
+			sort.SliceStable(matched, func(i, j int) bool {
+				return matched[i].StartedAt.After(matched[j].StartedAt)
+			})
+			for _, p := range matched {
+				if bestMatch > bestScore[p.PID] {
+					bestScore[p.PID] = bestMatch
+				}
 			}
-			score := bestMatch
-			if score > bestScore[best.PID] {
-				bestScore[best.PID] = score
-			}
-			claims = append(claims, posixClaim{signal: s.signalFromProcess(sig, *best, now, matchKind, quality), pid: best.PID, score: score})
+			claims = append(claims, posixClaim{sig: sig, want: want, procs: matched, score: bestMatch})
 		}
 	}
 	for _, claim := range claims {
-		if claim.score == bestScore[claim.pid] {
-			out = append(out, claim.signal)
+		var kept []processInfo
+		for _, p := range claim.procs {
+			if claim.score == bestScore[p.PID] {
+				kept = append(kept, p)
+			}
 		}
+		if len(kept) == 0 {
+			continue
+		}
+		// Quality reflects how confident this row is *as evidence
+		// of the named SDK*. Exact comm match (the kernel-reported
+		// process name equals a catalog `process_names` entry) is
+		// the strongest signal a `ps` snapshot can give us;
+		// substring matches (e.g. "claude-code" containing "claude")
+		// are still useful but less specific, so the engine
+		// down-weights them via Quality.
+		quality := 1.0
+		matchKind := MatchKindExact
+		if !processCommExactlyEquals(kept[0].Comm, claim.want) {
+			quality = 0.5
+			matchKind = MatchKindSubstring
+		}
+		signal := s.signalFromProcess(claim.sig, kept[0], now, matchKind, quality)
+		for _, other := range kept[1:] {
+			if len(signal.Runtime.OtherInstances) >= maxProcessOtherInstances {
+				break
+			}
+			signal.Runtime.OtherInstances = append(signal.Runtime.OtherInstances, *newProcessRuntime(other, now))
+		}
+		out = append(out, signal)
 	}
 	return out, nil
 }
@@ -2627,6 +2657,19 @@ func (s *ContinuousDiscoveryService) signalFromProcess(sig AISignature, proc pro
 	}
 	ev := AIEvidence{Type: "process", ValueHash: hashValue(evidenceValue), Quality: quality, MatchKind: matchKind}
 	signal := s.signalFromEvidence(sig, SignalActiveProcess, "process", []AIEvidence{ev})
+	runtimeInfo := newProcessRuntime(proc, now)
+	if runtimeInfo.StartedAt != nil {
+		started := *runtimeInfo.StartedAt
+		signal.LastActiveAt = &started
+	}
+	if proc.OwnerID != "" {
+		signal.UserID, signal.UserName = proc.OwnerID, proc.OwnerName
+	}
+	signal.Runtime = runtimeInfo
+	return signal
+}
+
+func newProcessRuntime(proc processInfo, now time.Time) *ProcessRuntime {
 	runtimeInfo := &ProcessRuntime{PID: proc.PID, PPID: proc.PPID, User: proc.User, Comm: proc.Comm}
 	if !proc.StartedAt.IsZero() {
 		started := proc.StartedAt
@@ -2634,16 +2677,11 @@ func (s *ContinuousDiscoveryService) signalFromProcess(sig AISignature, proc pro
 		if uptime := now.Sub(proc.StartedAt); uptime >= 0 {
 			runtimeInfo.UptimeSec = int64(uptime.Seconds())
 		}
-		signal.LastActiveAt = &started
 	}
-	if proc.OwnerID != "" {
-		signal.UserID, signal.UserName = proc.OwnerID, proc.OwnerName
-		if runtimeInfo.User == "" {
-			runtimeInfo.User = proc.OwnerName
-		}
+	if proc.OwnerID != "" && runtimeInfo.User == "" {
+		runtimeInfo.User = proc.OwnerName
 	}
-	signal.Runtime = runtimeInfo
-	return signal
+	return runtimeInfo
 }
 
 func (s *ContinuousDiscoveryService) detectApplications() []AISignal {

@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -316,6 +317,48 @@ func TestDetectProcessesClaimsEachPOSIXProcessOnce(t *testing.T) {
 	}
 }
 
+// GAP-2633: two live Claude Code sessions of one user stay one signal, with
+// the newest as the Runtime block and the older one in OtherInstances.
+func TestDetectProcessesKeepsEveryPOSIXInstanceOfAProduct(t *testing.T) {
+	old := processSnapshotSource
+	t.Cleanup(func() { processSnapshotSource = old })
+	now := time.Now().UTC().Truncate(time.Second)
+	procs := []processInfo{
+		{PID: 60371, PPID: 60300, Comm: "claude", User: "dcr-std1", StartedAt: now.Add(-8 * 24 * time.Hour)},
+		{PID: 2425551, PPID: 2425500, Comm: "claude", User: "dcr-std1", StartedAt: now.Add(-time.Minute)},
+		{PID: 500, PPID: 1, Comm: "Claude", User: "dcr-std1", StartedAt: now.Add(-time.Hour)},
+	}
+	processSnapshotSource = func() ([]processInfo, error) { return procs, nil }
+	catalog := []AISignature{
+		{ID: "claudecode", Name: "Claude Code", ProcessNames: []string{"claude"}},
+		{ID: "claude-desktop", Name: "Claude Desktop", ProcessNames: []string{"Claude"}},
+	}
+	svc := &ContinuousDiscoveryService{catalog: catalog}
+	signals, err := svc.detectProcesses()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bySig := map[string]AISignal{}
+	for _, signal := range signals {
+		bySig[signal.SignatureID] = signal
+	}
+	if len(signals) != 2 {
+		t.Fatalf("signals = %d, want 2 (one per product)", len(signals))
+	}
+	code := bySig["claudecode"].Runtime
+	if code == nil || code.PID != 2425551 {
+		t.Fatalf("claudecode runtime = %+v, want newest PID 2425551", code)
+	}
+	if len(code.OtherInstances) != 1 || code.OtherInstances[0].PID != 60371 ||
+		code.OtherInstances[0].UptimeSec < 8*24*3600 || len(code.OtherInstances[0].OtherInstances) != 0 {
+		t.Fatalf("claudecode other instances = %+v, want PID 60371 only", code.OtherInstances)
+	}
+	desktop := bySig["claude-desktop"].Runtime
+	if desktop == nil || desktop.PID != 500 || len(desktop.OtherInstances) != 0 {
+		t.Fatalf("claude-desktop runtime = %+v, want PID 500 alone", desktop)
+	}
+}
+
 // GAP-1738: cursor-agent runs as its own node.exe on Windows; that image is
 // Cursor, any other node.exe is not.
 func TestClassifyWindowsProcessesFindsCursorAgentNode(t *testing.T) {
@@ -405,5 +448,31 @@ func TestClassifyWindowsProcessesFindsTheVSCodeCopilotAgentHost(t *testing.T) {
 	classifyWindowsProcesses(procs, catalog)
 	if procs[0].Connector != "copilot" || procs[1].Connector != "" || procs[2].Connector != "copilot" || procs[3].Connector != "" {
 		t.Fatalf("connectors = %q %q %q %q", procs[0].Connector, procs[1].Connector, procs[2].Connector, procs[3].Connector)
+	}
+}
+
+// GAP-2633: a spooled per-user scan binds every listed process to the
+// account and refuses a negative PID in OtherInstances.
+func TestUserScanBindsEveryProcessInstanceToTheAccount(t *testing.T) {
+	catalog := []AISignature{{ID: "claudecode", Name: "Claude Code", ProcessNames: []string{"claude"}}}
+	sig := AISignal{
+		SignatureID: "claudecode", Name: "Claude Code", Product: "Claude Code", Category: "active_process",
+		Detector: "process", State: "new", Fingerprint: hashValue("fp"),
+		Runtime: &ProcessRuntime{PID: 2, User: "spoofed", Comm: "claude",
+			OtherInstances: []ProcessRuntime{{PID: 1, User: "spoofed", Comm: "claude"}}},
+	}
+	svc := &ContinuousDiscoveryService{catalog: catalog}
+	got := svc.attributeUserScanSignal(sig, "1001", "dcr-std1")
+	if got.Runtime.User != "dcr-std1" || len(got.Runtime.OtherInstances) != 1 || got.Runtime.OtherInstances[0].User != "dcr-std1" {
+		t.Fatalf("runtime = %+v, want every instance bound to dcr-std1", got.Runtime)
+	}
+	if sig.Runtime.OtherInstances[0].User != "spoofed" {
+		t.Fatal("attributeUserScanSignal changed the caller's signal")
+	}
+	bad := sig
+	bad.Runtime = &ProcessRuntime{PID: 2, Comm: "claude", OtherInstances: []ProcessRuntime{{PID: -1, Comm: "claude"}}}
+	err := ValidateUserScanReport(AIDiscoveryReport{Summary: AIDiscoverySummary{ScanID: "scan-1"}, Signals: []AISignal{bad}}, catalog)
+	if err == nil || !strings.Contains(err.Error(), "non-negative") {
+		t.Fatalf("validate negative other PID = %v, want non-negative error", err)
 	}
 }
