@@ -3671,8 +3671,9 @@ func (s *Store) SelectAlertAcknowledgementTargets(
 		args = append(args, selector.Connector)
 	}
 	if selector.Target != "" {
-		query += ` AND event.target = ?`
-		args = append(args, selector.Target)
+		predicate, values := alertTargetPredicateSQL(selector.Target)
+		query += ` AND ` + predicate
+		args = append(args, values...)
 	}
 	if !selector.Since.IsZero() {
 		query += ` AND julianday(event.timestamp) >= julianday(?)`

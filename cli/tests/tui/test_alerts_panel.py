@@ -907,3 +907,40 @@ def test_copilot_local_and_cli_findings_share_one_target() -> None:
     )
 
     assert {alert.target for alert in alerts_from_v8_history(rows)} == {"copilot:preToolUse"}
+
+
+def test_copilot_detail_target_and_history_cover_both_harnesses() -> None:
+    """GAP-2619: the detail pane of a VS Code Local alert (stored
+    copilot:PreToolUse) shows copilot:preToolUse, and its History lists the
+    Copilot CLI events of that hook point too."""
+
+    db = sqlite3.connect(":memory:")
+    db.execute(
+        "CREATE TABLE audit_events (id TEXT, timestamp TEXT, action TEXT, target TEXT,"
+        " actor TEXT, details TEXT, severity TEXT, run_id TEXT)"
+    )
+    db.executemany(
+        "INSERT INTO audit_events VALUES (?, ?, 'connector-hook', ?, 'hook', '', 'HIGH', '')",
+        [
+            ("local", "2026-10-04T16:09:00Z", "copilot:PreToolUse"),
+            ("cli", "2026-10-04T16:08:00Z", "copilot:preToolUse"),
+            ("claude", "2026-10-04T16:07:00Z", "claudecode:PreToolUse"),
+        ],
+    )
+    selected = AlertEvent(
+        id="local",
+        severity="HIGH",
+        action="scan-finding",
+        target="copilot:PreToolUse",
+        timestamp=datetime(2026, 10, 4, 16, 9, tzinfo=timezone.utc),
+    )
+    model = AlertsPanelModel(store=SimpleNamespace(db=db))
+    model.set_events([selected])
+    model.toggle_expand_or_detail()
+
+    info = model.get_detail_info()
+    assert info is not None
+    assert info.event.target == "copilot:preToolUse"
+    assert [item.id for item in info.history] == ["local", "cli"]
+    assert {item.target for item in info.history} == {"copilot:preToolUse"}
+    assert dict(model.detail_pairs())["Target"] == "copilot:preToolUse"
