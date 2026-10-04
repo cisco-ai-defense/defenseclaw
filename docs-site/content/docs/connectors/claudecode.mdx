@@ -258,14 +258,15 @@ block, ask, or decision authority.
 </Flow>
 
 **Behind an HTTP proxy.** DefenseClaw's hooks reach the gateway on 127.0.0.1
-directly and ignore `HTTP_PROXY` and `HTTPS_PROXY`. Claude Code's own OTel
-exporter follows those variables, so its telemetry to the gateway, with its
-OTLP credential, goes to the proxy unless the loopback is excluded, and it is
-lost when the proxy cannot reach your machine's loopback. The exporter has no
-proxy option of its own, so set `NO_PROXY=127.0.0.1,localhost` (and
-`no_proxy`) in the shell that starts Claude Code, for example in `~/.bashrc`
-or `~/.zshrc`. On Windows run
-`setx NO_PROXY 127.0.0.1,localhost` once and open a new terminal.
+directly and ignore `HTTP_PROXY` and `HTTPS_PROXY`. Claude Code 2.1's OTel
+exporter also connects to the gateway directly when those variables are set,
+so its telemetry and OTLP credential never reach the proxy. DefenseClaw does
+not add `NO_PROXY` to the `env` block in `~/.claude/settings.json`, because a
+value there would replace your shell's `NO_PROXY` for all Claude Code traffic.
+If your proxy log does show `POST http://127.0.0.1:<port>/v1/...` requests
+from Claude Code, set `NO_PROXY=127.0.0.1,localhost` (and `no_proxy`) in the
+shell that starts Claude Code, for example in `~/.bashrc` or `~/.zshrc`. On
+Windows run `setx NO_PROXY 127.0.0.1,localhost` once and open a new terminal.
 
 **Another account on the gateway port.** Per-user installs on Linux, macOS and
 Windows point Claude Code's OTel exporter at this account's gateway API port (for

@@ -328,14 +328,17 @@ your own Codex configuration does not change.
   so without a loopback entry in `NO_PROXY` its telemetry to the gateway, with
   its OTLP credential, would go to the proxy. On Linux and macOS, setup adds a
   marked block to `~/.codex/.env` (`$CODEX_HOME/.env`), which Codex loads
-  when it starts. The block appends `127.0.0.1,localhost,::1` to the
-  `NO_PROXY` and `no_proxy` values you already have, so Codex sends its
-  telemetry straight to the gateway and everything else still goes through
+  when it starts. The block appends `127.0.0.1,localhost,::1` and the cloud
+  instance-metadata addresses (`169.254.169.254,169.254.170.2,fd00:ec2::254`)
+  to the `NO_PROXY` and `no_proxy` values you already have, so Codex sends its
+  telemetry straight to the gateway, its AWS credential lookups go straight
+  to the instance metadata service, and everything else still goes through
   your proxy. Codex sessions started before setup keep the old environment
   until you restart them. Uninstall and
   `defenseclaw guardrail disable --connector codex` remove only that block,
   and the file too if setup created it. If a proxy variable is set and the
-  loopback is not covered, `defenseclaw doctor` shows a warning on the
+  loopback is not covered, or the block is an older one without the
+  instance-metadata addresses, `defenseclaw doctor` shows a warning on the
   **Codex telemetry proxy** row, with a one-line fix.
   On Windows, set it once for your account with
   `setx NO_PROXY 127.0.0.1,localhost,::1` and open a new terminal, or run

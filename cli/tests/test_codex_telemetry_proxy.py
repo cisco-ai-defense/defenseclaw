@@ -33,6 +33,15 @@ def test_proxy_without_loopback_warns_with_one_line_fix(tmp_path):
 
 def test_managed_dotenv_or_shell_loopback_passes(tmp_path):
     env = {"HTTPS_PROXY": "http://proxy.test:3128"}
-    assert _status(tmp_path, env, dotenv=f"A=1\n{_CODEX_DOTENV_PROXY_MARKER} >>>\n")[0] == "pass"
+    block = f"A=1\n{_CODEX_DOTENV_PROXY_MARKER} >>>\nNO_PROXY=\"${{NO_PROXY}},127.0.0.1,169.254.169.254\"\n"
+    assert _status(tmp_path, env, dotenv=block)[0] == "pass"
     os.remove(tmp_path / ".env")
     assert _status(tmp_path, {**env, "NO_PROXY": "corp.example, 127.0.0.1"})[0] == "pass"
+
+
+def test_managed_dotenv_without_metadata_entry_warns(tmp_path):
+    # GAP-2620: an older block without the instance-metadata addresses.
+    old = f"{_CODEX_DOTENV_PROXY_MARKER} >>>\nNO_PROXY=\"${{NO_PROXY}},127.0.0.1,localhost,::1\"\n"
+    tag, detail, fix = _status(tmp_path, {"HTTPS_PROXY": "http://proxy.test:3128"}, dotenv=old)
+    assert tag == "warn" and "instance-metadata" in detail
+    assert "defenseclaw-gateway restart" in fix
