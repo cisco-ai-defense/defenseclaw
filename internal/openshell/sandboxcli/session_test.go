@@ -1492,6 +1492,43 @@ func TestLaunchOptionsKeepOptionsNotPrompts(t *testing.T) {
 	}
 }
 
+// An option whose value is not recorded with it: a later session passes the
+// harness the option and no value, which is what `sandbox run` warns about.
+// The word that was left out may have been a prompt instead (the case named
+// for it), and nothing available here tells the two apart.
+func TestLaunchOptionsSplitReportsAnUnkeptValue(t *testing.T) {
+	claude, codex := harnessSpec(t, "claudecode"), harnessSpec(t, "codex")
+	for _, c := range []struct {
+		name       string
+		spec       *harness.Spec
+		args       []string
+		wantKept   []string
+		wantUnkept []string
+	}{
+		{"a spaced value", claude, []string{"--append-system-prompt", "be brief"},
+			[]string{"--append-system-prompt"}, []string{"--append-system-prompt"}},
+		{"the value attached", claude, []string{"--append-system-prompt=be brief"},
+			[]string{"--append-system-prompt=be brief"}, nil},
+		{"a one-word value", claude, []string{"--model", "sonnet"},
+			[]string{"--model", "sonnet"}, nil},
+		{"a spaced value before more options", claude, []string{"--append-system-prompt", "be brief", "--model", "sonnet"},
+			[]string{"--append-system-prompt"}, []string{"--append-system-prompt"}},
+		{"a prompt after a switch, which keeps the option too", claude, []string{"--verbose", "fix the failing tests"},
+			[]string{"--verbose"}, []string{"--verbose"}},
+		{"print mode records nothing", claude, []string{"-p", "fix it", "--model", "sonnet"}, nil, nil},
+		{"a spaced codex value", codex, []string{"-m", "glm 5.3"},
+			[]string{"-m"}, []string{"-m"}},
+	} {
+		kept, unkept := launchOptionsSplit(c.spec, c.args)
+		if !slices.Equal(kept, c.wantKept) {
+			t.Errorf("%s: launchOptionsSplit(%q) kept %q, want %q", c.name, c.args, kept, c.wantKept)
+		}
+		if !slices.Equal(unkept, c.wantUnkept) {
+			t.Errorf("%s: launchOptionsSplit(%q) unkept %q, want %q", c.name, c.args, unkept, c.wantUnkept)
+		}
+	}
+}
+
 // Certification OG-M1: a first word that is not an option is a prompt or a
 // one-off subcommand for most harnesses, but launch configuration for
 // some, and the options after it were lost with it (OmniGent's documented
