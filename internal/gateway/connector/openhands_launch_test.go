@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -357,4 +358,27 @@ func seedOpenHandsDarwinSelection(t *testing.T, dataDir, binDir string) (string,
 		t.Fatalf("seed OpenHands setup selection: %v", err)
 	}
 	return executable, version
+}
+
+// GAP-2621: an OpenHands that 0.8.10 enrolled has no recorded executable. The
+// macOS setup refusal must be an executable admission, which a gateway start
+// skips for OpenHands alone instead of rolling every connector back, and it
+// names the fix.
+func TestOpenHandsDarwinSetupAdmissionWithoutRecordedExecutableIsSkippable(t *testing.T) {
+	err := openHandsDarwinSetupAdmission(SetupOpts{
+		DataDir:      testenv.PrivateTempDir(t),
+		AgentVersion: "OpenHands CLI 1.16.0",
+	})
+	if !errors.Is(err, ErrExecutableAdmission) {
+		t.Fatalf("admission error = %v, want ErrExecutableAdmission", err)
+	}
+	for _, want := range []string{
+		"no verified OpenHands executable is recorded",
+		"defenseclaw setup openhands",
+		"defenseclaw setup trusted-paths add",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("admission error %q does not mention %q", err, want)
+		}
+	}
 }
