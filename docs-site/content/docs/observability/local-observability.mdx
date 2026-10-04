@@ -82,8 +82,9 @@ All five run under one Compose project (`defenseclaw-observability`). They share
     with `authentication_failed`. Even the explicit
     `--write-probe` bypasses normal collection, routing, SQLite event history,
     and dashboard counts. The command does persist a separate bounded,
-    local-only compliance record of the attempt and outcome. Use
-    `defenseclaw setup observability list` first if you renamed the destination.
+    local-only compliance record of the attempt and outcome. Keep the
+    destination name `local-observability`: the bundled dashboards depend
+    on it (see "What ends up in `config.yaml`" below).
     Notifier webhooks use
     `defenseclaw setup webhook test <name>` instead.
   </Step>
@@ -165,6 +166,26 @@ capability default and the complete `local-observability-v1` dashboard profile.
 If a destination with the same name already exists, the bridge updates it in
 place rather than adding a duplicate. Other telemetry destinations and notifier
 webhooks are left untouched.
+
+The name `local-observability` selects the `local-observability-v1` metric
+projection. With it, metrics carry the short Prometheus labels that the bundled
+dashboards filter on (`connector`, `scanner`, `target_type`, `rule_id`,
+`severity` and so on). An OTLP destination with any other name exports the
+canonical v8 labels instead (`defenseclaw_connector_source`,
+`defenseclaw_scan_scanner`, `defenseclaw_metric_target_type`, ...), so the
+Connector list and every connector- or scanner-filtered panel stay empty. Don't
+rename this destination.
+
+To send a gateway on another computer to a shared stack, add the destination
+with the `local-otlp` preset, not as plain `otlp`:
+
+```bash
+defenseclaw setup observability add local-otlp --endpoint <stack-host>:4317 --non-interactive
+```
+
+It writes the same `local-observability` destination with that endpoint and
+`tls.insecure: true` (the bundled collector listens in plaintext). In a managed
+administrator config, use the name `local-observability` for the same reason.
 
 To send to a collector of your own on this computer or a private network, add
 `--allow-private-networks` to `defenseclaw setup observability add otlp`. It
