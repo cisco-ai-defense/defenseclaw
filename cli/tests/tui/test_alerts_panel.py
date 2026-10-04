@@ -888,3 +888,22 @@ def test_post_tool_finding_reads_like_the_cli(monkeypatch) -> None:
     label = alerts_panel._alert_details_label(alert)
     assert "redacted" not in label
     assert label.startswith("SEC-AWS-KEY: AWS access key")
+
+
+def test_copilot_local_and_cli_findings_share_one_target() -> None:
+    """GAP-2619: a VS Code Local-harness finding (copilot:PreToolUse) and a
+    Copilot CLI one (copilot:preToolUse) show the same Target."""
+
+    rows = tuple(
+        _v8_alert_row(
+            f"f-{i}",
+            bucket="security.finding",
+            event_name="finding.observed",
+            severity="CRITICAL",
+            action="scan-finding",
+            payload={"defenseclaw.finding.target_ref": ref, "defenseclaw.scan.scanner": "hook-rules"},
+        )
+        for i, ref in enumerate(("copilot:PreToolUse", "copilot:preToolUse"))
+    )
+
+    assert {alert.target for alert in alerts_from_v8_history(rows)} == {"copilot:preToolUse"}

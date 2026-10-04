@@ -39,6 +39,7 @@ import click
 import requests
 
 from defenseclaw import ux
+from defenseclaw.alert_semantics import copilot_hook_target
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.gateway import OrchestratorClient, alert_disposition_timeout_seconds
 from defenseclaw.logger import _gateway_api_host
@@ -380,6 +381,7 @@ def _finding_facts(
             "rule": f"{rule_id}: {title}" if title else rule_id,
             "sandbox": sandbox if sandbox != (target or sandbox) else "",
         }
+    target = copilot_hook_target(target)
     facts = {
         "target": target,
         "decision": _hook_decision(hook_details.get(e.id, []), target),
@@ -563,7 +565,7 @@ def _render_table(alert_list: list, store, connector: str | None = None) -> None
         sev_cell = f"[{sev_style}]{e.severity}[/{sev_style}]" if sev_style else e.severity
         ts     = e.timestamp.strftime("%H:%M") if e.timestamp else ""
         action = _trunc(e.action or "", _W_ACTION)
-        target = _trunc_path(e.target or "", w_target)
+        target = _trunc_path(copilot_hook_target(e.target or "", _event_connector(e)), w_target)
         kv_map = _kv(e.details or "")
         scanner_name = kv_map.get("scanner", "")
         facts = _finding_facts(e, hook_details, targets)
