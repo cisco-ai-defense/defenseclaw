@@ -25,6 +25,7 @@ from defenseclaw.alert_semantics import (
     ALERT_LEGACY_FINDING_ACTIONS,
     ALERT_NON_ALLOW_OUTCOMES,
     copilot_hook_target,
+    copilot_hook_target_spellings,
 )
 from defenseclaw.hook_metrics import (
     POST_TOOL_DECISION,
@@ -1303,7 +1304,11 @@ class AlertsPanelModel:
                 details=hydrated.details if "=" in hydrated.details else event.details,
                 facts=event.facts,
             )
+        connector = (hydrated.connector if hydrated is not None else "") or event.connector
         event = hydrated or event
+        # The list shows one Copilot hook target for both harnesses; so do
+        # the detail pane and its History (GAP-2619).
+        event = replace(event, target=copilot_hook_target(event.target, connector))
         if event.action == "scan-finding":
             # A hook-rule finding carries the rule, not the outcome; the
             # connector-hook row of the same request says whether the call was
@@ -1316,7 +1321,7 @@ class AlertsPanelModel:
         return AlertDetailInfo(
             event=event,
             findings=_list_findings_by_run_id(self.store, event.run_id),
-            history=_list_events_by_target(self.store, event.target, 10),
+            history=_list_events_by_target(self.store, event.target, 10, connector),
         )
 
     def detail_pairs(self) -> tuple[tuple[str, str], ...]:
@@ -1708,23 +1713,36 @@ def _list_findings_by_run_id(store: object | None, run_id: str) -> tuple[AlertFi
         return ()
 
 
-def _list_events_by_target(store: object | None, target: str, limit: int) -> tuple[AlertEvent, ...]:
+def _list_events_by_target(
+    store: object | None, target: str, limit: int, connector: str = ""
+) -> tuple[AlertEvent, ...]:
     if store is None or not target:
         return ()
+    # Both harness spellings of a Copilot hook target (GAP-2619).
+    spellings = copilot_hook_target_spellings(target, connector)
     try:
         if hasattr(store, "list_events_by_target"):
-            return tuple(
-                _coerce_alert_event(item) for item in store.list_events_by_target(target, limit)  # type: ignore[attr-defined]
-            )
-        db = getattr(store, "db", None)
-        if db is None:
-            return ()
-        rows = db.execute(
-            """SELECT id, timestamp, action, target, actor, details, severity, run_id
-               FROM audit_events WHERE target = ? ORDER BY timestamp DESC LIMIT ?""",
-            (target, max(limit, 1)),
-        ).fetchall()
-        return tuple(_alert_event_from_row(row) for row in rows)
+            events = [
+                _coerce_alert_event(item)
+                for spelling in spellings
+                for item in store.list_events_by_target(spelling, limit)  # type: ignore[attr-defined]
+            ]
+            if len(spellings) > 1:
+                events = sorted(events, key=lambda item: item.timestamp, reverse=True)[:limit]
+        else:
+            db = getattr(store, "db", None)
+            if db is None:
+                return ()
+            marks = ",".join("?" * len(spellings))
+            rows = db.execute(
+                "SELECT id, timestamp, action, target, actor, details, severity, run_id"
+                f" FROM audit_events WHERE target IN ({marks}) ORDER BY timestamp DESC LIMIT ?",
+                (*spellings, max(limit, 1)),
+            ).fetchall()
+            events = [_alert_event_from_row(row) for row in rows]
+        return tuple(
+            replace(item, target=copilot_hook_target(item.target, item.connector or connector)) for item in events
+        )
     except Exception:  # noqa: BLE001 - detail enrichment must not hide the selected row.
         return ()
 

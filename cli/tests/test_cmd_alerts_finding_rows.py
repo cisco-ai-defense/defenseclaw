@@ -13,7 +13,7 @@ from click.testing import CliRunner
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from defenseclaw.alert_semantics import copilot_hook_target
-from defenseclaw.commands.cmd_alerts import alerts
+from defenseclaw.commands.cmd_alerts import _alert_selector, alerts
 from defenseclaw.models import Event
 
 from tests.helpers import cleanup_app, make_app_context
@@ -113,6 +113,18 @@ class AlertFindingRowsTests(unittest.TestCase):
         self.assertEqual(copilot_hook_target("PreToolUse", "copilot"), "preToolUse")
         self.assertEqual(copilot_hook_target("copilot:UserPromptSubmit"), "copilot:userPromptSubmitted")
         self.assertEqual(copilot_hook_target("claudecode:PreToolUse"), "claudecode:PreToolUse")
+
+    def test_target_selector_sends_the_shown_copilot_target(self):
+        # GAP-2619: acknowledge/dismiss --target takes the Target alerts print.
+        def selector(target, connector=None):
+            return _alert_selector(
+                alert_ids=(), connector=connector, target=target, severity="all", since=None, before=None
+            )["target"]
+
+        self.assertEqual(selector("copilot:PreToolUse"), "copilot:preToolUse")
+        self.assertEqual(selector(" PreToolUse ", "copilot"), "preToolUse")
+        self.assertEqual(selector("PreToolUse"), "PreToolUse")
+        self.assertEqual(selector("skill://one"), "skill://one")
 
     def test_finding_rows_show_target_rule_connector_and_decision(self):
         now = datetime.now(timezone.utc)
