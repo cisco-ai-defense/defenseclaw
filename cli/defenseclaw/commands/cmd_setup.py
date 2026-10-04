@@ -16995,14 +16995,27 @@ def setup_it_governed(app: AppContext, disable: bool, status: bool, yes: bool) -
         click.echo(f"  ⚠ Provisioning incomplete: {e}")
         click.echo("    The gateway will retry on next start.")
 
+    # 5. Copy PulseClaw skills to Hermes
+    click.echo("  Installing PulseClaw skills...")
+    _install_pulseclaw_skills()
+    click.echo("  ✓ Skills installed")
+
+    # 6. Set fixed Hermes session token for MyAgent connectivity
+    click.echo("  Configuring Hermes session token...")
+    _set_hermes_session_token()
+    click.echo("  ✓ Hermes session token set")
+
+    # 7. Install MyAgent.app
+    click.echo("  Installing MyAgent.app...")
+    _install_myagent_app()
+
     click.echo()
     click.echo("  ✓ IT Governed mode is active")
     click.echo()
-    click.echo("  Next:")
-    click.echo("    1. Start the gateway:  defenseclaw-gateway start")
-    click.echo("       (Installs hooks into Hermes and starts LiteLLM + SR)")
-    click.echo("    2. Start Hermes:       hermes")
-    click.echo("       (Runs with hardened Docker sandbox + DefenseClaw guardrails)")
+    click.echo("  To start:")
+    click.echo("    1. defenseclaw-gateway start")
+    click.echo("    2. hermes serve --port 9119 --host 127.0.0.1")
+    click.echo("    3. Open MyAgent from Applications (or Option+Space)")
     click.echo()
     click.echo("  Optional: lock configs to prevent tampering:")
     click.echo(f"    sudo bash {os.path.join(app.cfg.data_dir, 'lock-sandbox.sh')}")
@@ -17143,6 +17156,89 @@ def _lock_it_governed_configs(app: AppContext) -> bool:
         return True
     except (subprocess.CalledProcessError, OSError):
         return False
+
+
+_MYAGENT_DMG_URL = "https://github.com/cisco-aispg/defenseclaw/releases/latest/download/MyAgent.dmg"
+_HERMES_SESSION_TOKEN = "myagent-defenseclaw-session-2026"
+_HERMES_SERVE_PORT = 9119
+
+
+def _install_pulseclaw_skills() -> None:
+    """Copy PulseClaw skills from the enterprise repo to Hermes skills directory."""
+    import shutil as _sh  # noqa: PLC0415
+
+    hermes_skills = os.path.expanduser("~/.hermes/skills")
+    os.makedirs(hermes_skills, exist_ok=True)
+
+    # Try the enterprise repo path (local dev)
+    enterprise_skills = os.path.expanduser(
+        "~/workspace/defenseclaw-workspace/defenseclaw-enterprise/"
+        "services/dataplane-pulse/pulseclaw/skills"
+    )
+    if os.path.isdir(enterprise_skills):
+        count = 0
+        for entry in os.scandir(enterprise_skills):
+            if entry.is_dir():
+                dst = os.path.join(hermes_skills, entry.name)
+                if not os.path.exists(dst):
+                    _sh.copytree(entry.path, dst)
+                    count += 1
+        click.echo(f"    Copied {count} PulseClaw skills from enterprise repo")
+    else:
+        click.echo("    ⚠ PulseClaw skills not found (enterprise repo not present)")
+
+
+def _set_hermes_session_token() -> None:
+    """Write a fixed session token to ~/.hermes/.env for MyAgent connectivity."""
+    hermes_env = os.path.expanduser("~/.hermes/.env")
+    token_line = f"HERMES_DASHBOARD_SESSION_TOKEN={_HERMES_SESSION_TOKEN}"
+
+    existing = ""
+    if os.path.isfile(hermes_env):
+        with open(hermes_env) as f:
+            existing = f.read()
+
+    if "HERMES_DASHBOARD_SESSION_TOKEN" not in existing:
+        with open(hermes_env, "a") as f:
+            f.write(f"\n{token_line}\n")
+
+
+def _install_myagent_app() -> None:
+    """Download and install MyAgent.app from GitHub releases."""
+    import subprocess  # noqa: PLC0415
+
+    app_path = "/Applications/MyAgent.app"
+    if os.path.isdir(app_path):
+        click.echo("  ✓ MyAgent.app already installed")
+        return
+
+    dmg_path = "/tmp/MyAgent.dmg"
+    try:
+        click.echo(f"    Downloading MyAgent.app...")
+        subprocess.check_call(
+            ["curl", "-sL", _MYAGENT_DMG_URL, "-o", dmg_path],
+            timeout=120,
+        )
+
+        # Mount DMG, copy app, unmount
+        subprocess.check_call(
+            ["hdiutil", "attach", dmg_path, "-nobrowse", "-quiet"],
+            timeout=30,
+        )
+        # Find the mounted volume
+        for vol in os.listdir("/Volumes"):
+            candidate = f"/Volumes/{vol}/MyAgent.app"
+            if os.path.isdir(candidate):
+                import shutil  # noqa: PLC0415
+                shutil.copytree(candidate, app_path)
+                click.echo("  ✓ MyAgent.app installed to /Applications")
+                break
+        subprocess.run(["hdiutil", "detach", f"/Volumes/{vol}", "-quiet"], capture_output=True)
+        os.remove(dmg_path)
+    except Exception as e:
+        click.echo(f"  ⚠ MyAgent.app install failed: {e}")
+        click.echo(f"    Download manually from: {_MYAGENT_DMG_URL}")
+        click.echo(f"    Or build from source: cd motive && xcodebuild ...")
 
 
 def _print_it_governed_status(app: AppContext) -> None:

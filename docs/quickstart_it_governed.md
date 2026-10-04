@@ -406,3 +406,51 @@ Three-layer defense:
 | **Config immutability** | User/agent tampering with Docker hardening, hook scripts, guardrail rules |
 
 All three layers are independent — compromising one does not defeat the others.
+
+---
+
+## MyAgent Desktop App
+
+IT Governed mode includes **MyAgent.app** — a native macOS menu-bar agent app
+that connects to Hermes via WebSocket. Installed automatically by `defenseclaw setup it-governed`.
+
+### What it does
+- **Option+Space**: Opens floating command bar (press again to expand to full window)
+- Sends queries to Hermes agent via WebSocket (`ws://127.0.0.1:9119/api/ws`)
+- Receives streaming responses with tool calls, thinking, and results
+- Shows **macOS Notification Center** banners when responses complete in background
+- Click notification → opens full response in resizable window
+
+### What it CANNOT do (App Sandbox)
+- No file system access
+- No process spawning
+- No automation or accessibility
+- No network server
+- Only connects to localhost (Hermes serve)
+
+### Architecture
+```
+MyAgent.app (sandboxed) → WebSocket → Hermes serve (port 9119)
+                                        → LLM via LiteLLM:4001
+                                        → MCP tools (Jira, Outlook, Webex)
+                                        → 78 PulseClaw skills
+                                        → Docker sandbox (terminal)
+                                        → DefenseClaw guardrails
+```
+
+### Fixed port and token
+- Hermes serve runs on **port 9119** (fixed)
+- Session token: set in `~/.hermes/.env` as `HERMES_DASHBOARD_SESSION_TOKEN`
+- MyAgent hardcodes this token — no manual config needed
+
+### Starting the stack
+```bash
+# 1. Gateway (manages LiteLLM, SR, guardrails, MCP)
+defenseclaw-gateway start
+
+# 2. Hermes agent (port 9119)
+hermes serve --port 9119 --host 127.0.0.1
+
+# 3. MyAgent.app auto-connects
+# (opens from /Applications or Option+Space hotkey)
+```
