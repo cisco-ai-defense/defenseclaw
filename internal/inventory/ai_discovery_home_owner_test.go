@@ -125,6 +125,34 @@ func TestServiceContextScanAttributesSignalsToProfileOwner(t *testing.T) {
 	}
 }
 
+// GAP-2034: Amp's self-update recreates @ampcode\cli without the service's
+// list-only grant. On a service-context scan that denied install folder is
+// still installed; a denied settings file, or a per-user scan, is not.
+func TestServiceContextScanKeepsDeniedListOnlyInstallFolder(t *testing.T) {
+	alice := filepath.Join(t.TempDir(), "Users", "alice")
+	ampInstall := filepath.Join(alice, "AppData", "Roaming", "npm", "node_modules", "@ampcode", "cli")
+	restore := discoveryConfigStat
+	t.Cleanup(func() { discoveryConfigStat = restore })
+	discoveryConfigStat = func(path string) (os.FileInfo, error) {
+		if strings.HasPrefix(path, alice) {
+			return nil, &fs.PathError{Op: "GetFileAttributesEx", Path: path, Err: fs.ErrPermission}
+		}
+		return nil, fs.ErrNotExist
+	}
+	catalog := []AISignature{{ID: "amp", Name: "Amp", SupportedConnector: "amp",
+		ConfigPaths: []string{"~/.config/amp/settings.json", "$APPDATA/npm/node_modules/@ampcode/cli"}}}
+	service := &ContinuousDiscoveryService{catalog: catalog, opts: AIDiscoveryOptions{HomeDir: alice, HomeDirs: []string{alice},
+		homeOwners: []discoveryHomeOwner{{Home: alice, UserID: "S-1-5-21-1-2-3-1001", UserName: "alice"}}}}
+	signals := service.detectConfigPaths()
+	if len(signals) != 1 || signals[0].UserName != "alice" || len(signals[0].Evidence) != 1 || signals[0].Evidence[0].PathHash != hashPath(ampInstall) {
+		t.Fatalf("service scan signals = %+v, want only alice's Amp install folder", signals)
+	}
+	perUser := &ContinuousDiscoveryService{catalog: catalog, opts: AIDiscoveryOptions{HomeDir: alice, HomeDirs: []string{alice}}}
+	if got := perUser.detectConfigPaths(); len(got) != 0 {
+		t.Fatalf("per-user scan reported a denied path: %+v", got)
+	}
+}
+
 // Without platform profile owners (every per-user and Unix install) nothing
 // is attributed and per-user variables expand as before.
 func TestPerUserScanLeavesSignalsUnattributed(t *testing.T) {
