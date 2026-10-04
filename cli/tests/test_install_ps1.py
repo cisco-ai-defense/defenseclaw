@@ -584,7 +584,7 @@ def test_a_restored_setup_install_keeps_no_failed_copy_or_uv_cache_in_its_data_d
     assert restore.index("Restore-Slot $Snap") < restore.index("Clear-SetupDataDir $failed") < restore.index("Restart-Old")
     resume = _ps1_function("Resume-InterruptedRun")
     assert resume.index("Clear-SetupDataDir $failed") < resume.index("Start-SetupGateway $setupInstall.Root")
-    assert 'if (-not $setupBack) { Write-Warn "The interrupted install was kept in $failed" }' in resume
+    assert '} elseif (-not $setupBack) {\n                Write-Warn "The interrupted install was kept in $failed"' in resume
 
 
 def test_the_uv_folder_is_protected_before_uv_runs_and_before_a_rollback_starts_the_gateway() -> None:
@@ -705,3 +705,21 @@ def test_a_failed_first_install_names_the_kept_uv_cache_and_a_full_disk() -> Non
     assert staging.index("Write-KeptUvCache") < staging.index("Die ")
     assert "Write-Err $_.Exception.Message; [void](Test-DiskFull); $installed = $false" in install
     assert "Write-Err $_.Exception.Message; [void](Test-DiskFull); $saved = $false" in install
+
+
+def test_an_interrupted_first_install_leaves_no_new_files_or_failed_copy() -> None:
+    # GAP-2618: a first install killed mid-copy left ~\.local\bin\*.new (so
+    # ~\.local\bin and ~\.local stayed), a .failed-<time> copy of a venv that
+    # never was an install, and "restoring the install it replaced".
+    restore = _bin_dir_functions()
+    restore = restore[restore.index("function Restore-BinDir(") :]
+    no_bin = restore[: restore.index("New-Item -ItemType Directory -Path $BinDir")]
+    assert '(Join-Path $BinDir "$name.new")' in no_bin
+    resume = _ps1_function("Resume-InterruptedRun")
+    first = resume.index('$firstInstall = -not (Read-Text (Join-Path $slot "VERSION"))')
+    assert first < resume.index("$failed = Restore-Slot $slot")
+    assert "An earlier first install was interrupted; removing what it had copied" in resume
+    assert resume.index("$failed = Restore-Slot $slot") < resume.index(
+        "if ($firstInstall -and -not $setupBack) { Invoke-Quietly { Remove-Tree $failed } }"
+    )
+    assert 'Write-Info "Nothing was left installed"' in resume
