@@ -1289,6 +1289,11 @@ func writeWindowsEnterpriseStandalonePreflightFailure(
 	switch code {
 	case "elevation_required":
 		message = strings.TrimPrefix(message, code+": ")
+		// A standard account's repair, ensure, install or upgrade --json
+		// reported installed=false with no services on a healthy host:
+		// report what any account can read, as status and verify do
+		// (GAP-2012, GAP-2162).
+		applyWindowsEnterpriseRecordedDeployment(result)
 	case "invalid_arguments":
 		message = strings.TrimPrefix(message, errWindowsEnterpriseInvalidArguments.Error()+": ")
 		if windowsEnterpriseUnknownProfileRequested(opts) {

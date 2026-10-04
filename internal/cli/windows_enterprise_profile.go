@@ -344,6 +344,19 @@ func applyWindowsEnterpriseConfiguredTrust(action string, opts *windowsEnterpris
 // from; tests replace it.
 var windowsEnterpriseTrustConfigReader = readWindowsEnterpriseBoundedFile
 
+// windowsEnterpriseRequestedAttestations are the attestation flags of this
+// run, which the command handed to an administrator must repeat (GAP-2011).
+func windowsEnterpriseRequestedAttestations(opts *windowsEnterpriseLifecycleOptions) []string {
+	var flags []string
+	if opts.attestAgentApplicationControl {
+		flags = append(flags, "--attest-agent-application-control")
+	}
+	if opts.attestClaudeEffectivePolicy {
+		flags = append(flags, "--attest-claude-effective-policy")
+	}
+	return flags
+}
+
 func readWindowsEnterpriseConfiguredTrust(action string, opts *windowsEnterpriseLifecycleOptions) (windowsEnterpriseConfiguredTrust, error) {
 	path := strings.TrimSpace(opts.configPath)
 	supplied := path != ""
@@ -367,7 +380,8 @@ func readWindowsEnterpriseConfiguredTrust(action string, opts *windowsEnterprise
 		if !supplied && errors.Is(err, os.ErrPermission) && !windowsEnterpriseIsElevated() {
 			// A standard account cannot read the protected installed config,
 			// and could not change the deployment anyway (GAP-1961).
-			return windowsEnterpriseConfiguredTrust{}, errors.New("elevation_required: " + windowsEnterpriseStandardUserMutationAnswer(action))
+			return windowsEnterpriseConfiguredTrust{}, errors.New("elevation_required: " +
+				windowsEnterpriseStandardUserMutationAnswer(action, windowsEnterpriseRequestedAttestations(opts)...))
 		}
 		return windowsEnterpriseConfiguredTrust{}, fmt.Errorf("read enterprise.trust from %s: %w", path, err)
 	}

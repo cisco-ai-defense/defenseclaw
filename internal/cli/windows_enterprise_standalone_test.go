@@ -1802,17 +1802,18 @@ func TestWindowsEnterpriseLifecycleCallerErrorsExitCodes(t *testing.T) {
 			if result.OK || len(result.Errors) != 1 || result.Errors[0].Code != tc.code || result.ExitCode != tc.exit {
 				t.Fatalf("%s: result %+v", tc.action, result)
 			}
-			// GAP-2113: the refusal reports the installed deployment, and
-			// stderr is the one line text mode prints.
-			if tc.profile == "nope" && (!result.Installed || len(result.Services) != 3 || result.Services[0].State != "running" || err.Error() != tc.text) {
-				t.Fatalf("verify --profile nope --json: result %+v, error %q", result, err)
+			// GAP-2113, GAP-2012: the refusal reports the installed
+			// deployment, and stderr is the one line text mode prints.
+			if !result.Installed || len(result.Services) != 3 || result.Services[0].State != "running" ||
+				(tc.profile == "nope" && err.Error() != tc.text) {
+				t.Fatalf("%s --profile %s --json: result %+v, error %q", tc.action, tc.profile, result, err)
 			}
 			// GAP-2161: readiness follows the service states where a state
 			// decides it, and a warning names the checks that never ran.
-			if tc.profile == "nope" && (!result.Readiness.Enumerator || result.Readiness.SensorHelper ||
+			if !result.Readiness.Enumerator || result.Readiness.SensorHelper ||
 				len(result.Warnings) != 1 || result.Warnings[0].Code != "health_not_checked" ||
-				!strings.Contains(result.Warnings[0].Message, "enterprise windows verify --profile standalone --json")) {
-				t.Fatalf("verify --profile nope --json: readiness %+v, warnings %+v", result.Readiness, result.Warnings)
+				!strings.Contains(result.Warnings[0].Message, "enterprise windows verify --profile standalone --json") {
+				t.Fatalf("%s --profile %s --json: readiness %+v, warnings %+v", tc.action, tc.profile, result.Readiness, result.Warnings)
 			}
 		}
 	}
@@ -1840,6 +1841,13 @@ func TestWindowsEnterpriseLifecycleCallerErrorsExitCodes(t *testing.T) {
 			!strings.HasPrefix(preflight.Error, "profile_conflict: ") || commandExitCode(err) != 1639 || stderr.Len() != 0 {
 			t.Fatalf("%s --profile secure_client --json: exit %d, stdout %q, stderr %q", action, commandExitCode(err), stdout.String(), stderr.String())
 		}
+	}
+
+	// GAP-2011: the refusal hands the administrator the attestation too.
+	refusal := resolveWindowsEnterpriseLifecycleProfile("repair",
+		&windowsEnterpriseLifecycleOptions{profile: "standalone", attestClaudeEffectivePolicy: true})
+	if refusal == nil || !strings.Contains(refusal.Error(), "enterprise windows repair --profile standalone --attest-claude-effective-policy`. Nothing was changed.") {
+		t.Fatalf("attested repair refusal: %v", refusal)
 	}
 
 	// An administrator who cannot read the config still sees the real error.
