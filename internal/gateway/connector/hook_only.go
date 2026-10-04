@@ -1233,12 +1233,28 @@ var openHandsSetupOperation = func(c *hookOnlyConnector, ctx context.Context, op
 func (c *hookOnlyConnector) setupOpenHandsWithTokenRollback(ctx context.Context, opts SetupOpts) error {
 	return withOpenHandsLifecycleTransaction(opts, func() error {
 		if runtime.GOOS == "darwin" {
-			if _, err := validateOpenHandsDarwinExecutable(opts, false); err != nil {
-				return fmt.Errorf("openhands setup executable admission: %w", err)
+			if err := openHandsDarwinSetupAdmission(opts); err != nil {
+				return err
 			}
 		}
 		return c.setupOpenHandsWithTokenRollbackLocked(ctx, opts)
 	})
+}
+
+// openHandsDarwinSetupAdmission refuses, before Setup changes anything, an
+// OpenHands executable without current protected setup evidence. The refusal
+// is an ErrExecutableAdmission, so a gateway start skips only OpenHands and
+// keeps the other connectors. An OpenHands that 0.8.10 enrolled (the uv-tool
+// install) has no recorded executable; reporting that as a plain setup failure
+// sent the start into a rollback that could not restore the old lock, and the
+// whole 0.8.10 upgrade rolled back (GAP-2621). The executable is not run.
+func openHandsDarwinSetupAdmission(opts SetupOpts) error {
+	if _, err := validateOpenHandsDarwinExecutable(opts, false); err != nil {
+		return executableAdmissionRefused(fmt.Errorf(
+			"openhands setup executable admission: %w; run `defenseclaw setup openhands` to verify and record it "+
+				"(if setup reports that its folder is not trusted, run `defenseclaw setup trusted-paths add <dir>` first)", err))
+	}
+	return nil
 }
 
 func (c *hookOnlyConnector) setupOpenHandsWithTokenRollbackLocked(ctx context.Context, opts SetupOpts) error {
