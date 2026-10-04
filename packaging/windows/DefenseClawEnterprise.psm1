@@ -23462,6 +23462,19 @@ function Invoke-DefenseClawNuclearSilentExec {
     # ProcessStartInfo with CreateNoWindow=true keeps the nuclear teardown
     # silent regardless of how the Setup EXE invoked its PowerShell host.
     #
+    # MUST use ProcessStartInfo.Arguments (not .ArgumentList): the
+    # ArgumentList collection is .NET Core 2.1+ only, and Windows
+    # PowerShell 5.1 (the default host shipped with Windows and the one
+    # the Setup EXE spawns) runs on .NET Framework 4.x which does not
+    # have it. A missing-property access there would land in the catch
+    # block below and silently no-op the entire call - sc.exe would
+    # never run, taskkill would never run, and the uninstall would still
+    # report ok:true because the return struct hard-codes service state
+    # as "absent" without observing the real SCM. ConvertTo-
+    # DefenseClawWindowsCommandLine applies the standard CommandLineTo-
+    # ArgvW quoting rules so each argument is parsed as a distinct token
+    # by the callee.
+    #
     # All errors are intentionally swallowed - this is the nuclear path,
     # not a validator. Non-zero exit codes are expected (service already
     # gone, file already removed, etc).
@@ -23472,11 +23485,12 @@ function Invoke-DefenseClawNuclearSilentExec {
     try {
         $psi = [Diagnostics.ProcessStartInfo]::new()
         $psi.FileName               = $File
+        $psi.Arguments              = ConvertTo-DefenseClawWindowsCommandLine `
+            -Arguments $Arguments
         $psi.UseShellExecute        = $false
         $psi.CreateNoWindow         = $true
         $psi.RedirectStandardOutput = $true
         $psi.RedirectStandardError  = $true
-        foreach ($arg in $Arguments) { [void]$psi.ArgumentList.Add($arg) }
         $process = [Diagnostics.Process]::Start($psi)
         if ($null -eq $process) { return }
         $null = $process.StandardOutput.ReadToEnd()
@@ -23690,6 +23704,51 @@ function Invoke-DefenseClawNuclearUninstall {
         }
     }
 
+    # Probe actual SCM + process state so the return reflects reality
+    # instead of the previously hard-coded "absent"/false. If sc.exe
+    # delete silently failed (prior bug: ArgumentList-only helper on
+    # Windows PowerShell 5.1 no-op'd the entire native-exec stack), the
+    # service row survives and we need to surface that so the caller
+    # does not conclude success. Same for lingering worker processes
+    # holding file handles.
+    $serviceStateProbe = {
+        param($name)
+        if ([string]::IsNullOrWhiteSpace($name)) { return 'absent' }
+        try {
+            $svc = Microsoft.PowerShell.Management\Get-Service `
+                -Name $name -ErrorAction Stop
+            return $svc.Status.ToString().ToLowerInvariant()
+        }
+        catch { return 'absent' }
+    }
+    $gatewayState    = & $serviceStateProbe $GatewayServiceName
+    $brokerState     = & $serviceStateProbe $brokerName
+    $guardianState   = & $serviceStateProbe $GuardianServiceName
+    $enumeratorState = & $serviceStateProbe $enumeratorName
+    foreach ($row in @(
+        @{ Name = $GatewayServiceName;  State = $gatewayState },
+        @{ Name = $brokerName;          State = $brokerState },
+        @{ Name = $GuardianServiceName; State = $guardianState },
+        @{ Name = $enumeratorName;      State = $enumeratorState }
+    )) {
+        if ($row.State -ne 'absent') {
+            $warnings.Add("nuclear uninstall could not remove service $($row.Name) (state: $($row.State))")
+        }
+    }
+    foreach ($processImage in @(
+        'defenseclaw-cmid-broker.exe',
+        'defenseclaw-gateway.exe'
+    )) {
+        $survivors = Microsoft.PowerShell.Management\Get-Process `
+            -Name ([IO.Path]::GetFileNameWithoutExtension($processImage)) `
+            -ErrorAction SilentlyContinue
+        if ($survivors) {
+            foreach ($survivor in $survivors) {
+                $warnings.Add("nuclear uninstall left worker process alive: $processImage pid=$($survivor.Id)")
+            }
+        }
+    }
+
     foreach ($warning in $warnings) {
         Microsoft.PowerShell.Utility\Write-Warning -Message (
             '{0}: {1}' -f $script:AclSelfHealMarker, $warning
@@ -23709,10 +23768,10 @@ function Invoke-DefenseClawNuclearUninstall {
         broker_service                           = $brokerName
         guardian_service                         = $GuardianServiceName
         enumerator_service                       = $enumeratorName
-        gateway_service_state                    = 'absent'
-        broker_service_state                     = 'absent'
-        guardian_service_state                   = 'absent'
-        enumerator_service_state                 = 'absent'
+        gateway_service_state                    = $gatewayState
+        broker_service_state                     = $brokerState
+        guardian_service_state                   = $guardianState
+        enumerator_service_state                 = $enumeratorState
         gateway_ready                            = $false
         guardian_ready                           = $false
         cached_enterprise_clients_require_reload = $true
