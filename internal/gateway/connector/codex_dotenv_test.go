@@ -95,7 +95,8 @@ func TestCodexDotEnvLoopbackNoProxy(t *testing.T) {
 			env := map[string]string{"HTTPS_PROXY": "http://proxy.test:3128"}
 			expandCodexDotEnv(t, first, env)
 			selector := (&httpproxy.Config{HTTPProxy: "http://proxy.test:3128", HTTPSProxy: "http://proxy.test:3128", NoProxy: env["NO_PROXY"]}).ProxyFunc()
-			direct := []string{"http://127.0.0.1:18970/v1/logs"}
+			// GAP-2620: the instance-metadata endpoints bypass the proxy too.
+			direct := []string{"http://127.0.0.1:18970/v1/logs", "http://169.254.169.254/latest/api/token", "http://169.254.170.2/v2/credentials", "http://[fd00:ec2::254]/latest/api/token"}
 			if tc.original != nil {
 				direct = append(direct, "https://corp.example/")
 			}
