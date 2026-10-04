@@ -5,6 +5,9 @@ package cli
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -45,6 +48,66 @@ func TestBadFlagValueNamesWhatTheFlagTakes(t *testing.T) {
 		got = usageFlagError(enterpriseStatus, parseErr)
 		if got.Error() != want || commandExitCode(got) != 1 || !errors.Is(got, parseErr) {
 			t.Errorf("%s in an exempt tree: %q (exit %d), want %q with its own exit status", arg, got, commandExitCode(got), want)
+		}
+	}
+}
+
+// GAP-2189: run by its absolute path (the enterprise rpm puts nothing on
+// PATH), a usage error names that path, so the hint runs as typed.
+func TestUsageMessageNamesTheInvokedPath(t *testing.T) {
+	previous := invokedGatewayPath
+	t.Cleanup(func() { invokedGatewayPath = previous })
+	invokedGatewayPath = func(string) string { return "/opt/defenseclaw/bin/defenseclaw-gateway" }
+	root := &cobra.Command{Use: "defenseclaw-gateway"}
+	set := &cobra.Command{Use: "set", RunE: func(*cobra.Command, []string) error { return nil }}
+	root.AddCommand(set)
+	got := usageMessage(set, errors.New("bad flag"))
+	want := "bad flag\nUsage: /opt/defenseclaw/bin/defenseclaw-gateway set\n" +
+		"Try '/opt/defenseclaw/bin/defenseclaw-gateway set --help' for help."
+	if got != want {
+		t.Errorf("usage message = %q, want %q", got, want)
+	}
+	// GAP-2240: the unknown-action hint of a lifecycle group too.
+	for _, group := range []string{"linux", "macos"} {
+		groupCmd, _, err := rootCmd.Find([]string{"enterprise", group})
+		if err != nil || groupCmd.RunE == nil {
+			t.Fatalf("enterprise %s: %v", group, err)
+		}
+		want := "Try '/opt/defenseclaw/bin/defenseclaw-gateway enterprise " + group + " --help' for help."
+		if got := groupCmd.RunE(groupCmd, []string{"frobnicate"}); got == nil || !strings.Contains(got.Error(), want) {
+			t.Errorf("enterprise %s frobnicate: %v, want %q", group, got, want)
+		}
+	}
+	t.Setenv(delegatedFromEnv, "defenseclaw")
+	if got := usageMessage(set, errors.New("bad flag")); !strings.Contains(got, "Try 'defenseclaw set --help'") {
+		t.Errorf("delegated usage message = %q, want the defenseclaw command", got)
+	}
+}
+
+// GAP-2232: run by a relative path (./defenseclaw-gateway from
+// /opt/defenseclaw/bin), the hint names the absolute path, which runs from
+// any directory; a bare name found on PATH stays bare.
+func TestInvokedGatewayPathResolvesARelativeInvocation(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows keeps its own hints (GAP-1183)")
+	}
+	previous := os.Args
+	t.Cleanup(func() { os.Args = previous })
+	t.Chdir(t.TempDir())
+	want, err := filepath.Abs("defenseclaw-gateway")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string]string{
+		"./defenseclaw-gateway":                    want,
+		"defenseclaw-gateway":                      "",
+		"/opt/defenseclaw/bin/defenseclaw-gateway": "/opt/defenseclaw/bin/defenseclaw-gateway",
+		"./other-binary":                           "",
+	}
+	for arg0, expect := range cases {
+		os.Args = []string{arg0}
+		if got := invokedGatewayPath("defenseclaw-gateway"); got != expect {
+			t.Errorf("os.Args[0] = %q: invoked path %q, want %q", arg0, got, expect)
 		}
 	}
 }

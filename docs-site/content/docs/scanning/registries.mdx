@@ -133,7 +133,7 @@ The first sync downloads the manifest, runs the skill scanner on every entry, an
     },
     'list': {
       type: 'subcommand',
-      description: 'Tabular listing with cached entry counts (clean/warning/blocked/error) per source. --json for machine-readable output.',
+      description: 'Tabular listing with cached entry counts (clean/warning/blocked/error/rejected) per source; a rejected entry is only kept out of policy, it is not blocked; a source whose last sync failed is named below the table. --json for machine-readable output.',
     },
     'show <id>': {
       type: 'subcommand',
@@ -153,7 +153,7 @@ The first sync downloads the manifest, runs the skill scanner on every entry, an
     },
     'entries <id>': {
       type: 'subcommand',
-      description: 'Show cached entries with their scanner verdict. Filter by --type skill|mcp|all, --status pending|clean|warning|blocked|error|all, --approved, --rejected.',
+      description: 'Show cached entries with their scanner verdict. Filter by --type skill|mcp|all, --status pending|clean|warning|blocked|error|rejected|all, --approved, --rejected.',
     },
     'approve <id> <name>': {
       type: 'subcommand',
@@ -161,7 +161,7 @@ The first sync downloads the manifest, runs the skill scanner on every entry, an
     },
     'reject <id> <name>': {
       type: 'subcommand',
-      description: 'Mark an entry rejected: it is never promoted and is listed as blocked, even if the scanner is clean. --type is needed only when the name is ambiguous.',
+      description: 'Mark an entry rejected: it is never promoted into asset policy, even if the scanner is clean. Its status reads rejected, not blocked. --type is needed only when the name is ambiguous.',
     },
     'require --type skill|mcp --enabled|--disabled [--connector <name>]': {
       type: 'subcommand',
@@ -202,8 +202,22 @@ Once entries are flowing in, `asset_policy.<type>.registry_required` flips the c
 
 ```bash
 defenseclaw registry require --type skill --enabled
-defenseclaw registry require --type mcp   --enabled
+defenseclaw registry require --type mcp   --enabled --enforce
 ```
+
+The requirement is enforced only while asset policy is on:
+`asset_policy.enabled: true` and `asset_policy.mode: action`. A per-user
+install starts with `enabled: false` and `mode: observe`, so `require` alone
+blocks nothing and the CLI says so. Add `--enforce` to turn both on in the same
+save, or set them in the TUI config editor (Setup → `c` → Asset Policy). In
+`observe` mode an unregistered asset is logged, not blocked. To turn
+enforcement back off, run
+`defenseclaw registry require --type mcp --disabled --no-enforce`
+(`--no-enforce` sets `mode: observe`).
+
+A registry rule that pins `transport` treats `http` and `streamable-http` as
+the same HTTP transport, and a URL server added without `--transport` counts as
+`http`.
 
 An unscoped operation is broad operator intent: it updates the global default
 and clears only the targeted `registry_required` override on every active
@@ -276,7 +290,7 @@ defenseclaw registry reject  corp-skills evil-skill --type skill
 
 ## Sync schedules
 
-Today, syncing is **on demand**. The `--auto-sync` and `--sync-interval-hours` flags on `add` / `edit` are saved, but the runtime does not poll. Run `registry sync --all` on a schedule until scheduled sync ships in a future release.
+Today, syncing is **on demand**: scheduled sync is not available yet, and `add` / `edit` refuse `--auto-sync` and `--sync-interval-hours`. Run `registry sync --all` on a schedule (cron, a systemd timer or a CI schedule) until scheduled sync ships in a future release.
 
 DefenseClaw configuration is per user, so schedule the sync as the user who
 runs DefenseClaw, for example in that user's crontab (`crontab -e`):

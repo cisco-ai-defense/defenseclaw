@@ -141,7 +141,7 @@ def test_telemetry_statuses_come_from_the_canonical_plan() -> None:
     )
 
     exported = _status(SetupWizard.OBSERVABILITY, None, observability=plan)
-    assert exported.state == "ok" and exported.text.startswith("2 ")
+    assert exported.state == "ok" and exported.text == "2 exports + local"
     assert _status(SetupWizard.SPLUNK, None, observability=plan).state == "ok"
     assert _status(SetupWizard.SPLUNK_DASHBOARDS, None, observability=plan).state == "na"
     assert _status(SetupWizard.OBSERVABILITY, None).state == "off"
@@ -159,7 +159,7 @@ def test_a_task_this_os_cannot_run_is_not_applicable(config) -> None:
 @pytest.mark.parametrize(
     ("check", "owners"),
     [
-        ("Active Connector", {SetupWizard.CONNECTOR_SETUP}),
+        ("Connector", {SetupWizard.CONNECTOR_SETUP}),
         ("Gateway / API Health", {SetupWizard.GATEWAY}),
         ("Guardrail", {SetupWizard.GUARDRAIL}),
         ("Required Credentials", {SetupWizard.CREDENTIALS}),
@@ -184,7 +184,7 @@ def test_a_failing_check_belongs_to_the_task_that_fixes_it(check, owners) -> Non
 
 
 def test_passing_checks_are_not_problems() -> None:
-    readiness = (_check("LLM Config", status="pass"), _check("Active Connector: codex", status="pass"))
+    readiness = (_check("LLM Config", status="pass"), _check("Connector: codex", status="pass"))
 
     assert all(not setup_catalog.task_problems(wizard, readiness) for wizard in SetupWizard)
 

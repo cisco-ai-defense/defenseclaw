@@ -211,7 +211,7 @@ class TestPrintAgentsLiveCounters(unittest.TestCase):
     own live counters — there is no privileged "primary" tally."""
 
     def test_cursor_disclosure_has_enabled_disabled_and_config_live_parity(self):
-        disclosure = "priority-conflict-detection=unavailable (none inferred)"
+        disclosure = "(overrides by Enterprise, Team or Project hooks can't be detected)"
         live_health = {
             "connectors": [
                 {"name": "codex", "state": "running"},
@@ -229,7 +229,7 @@ class TestPrintAgentsLiveCounters(unittest.TestCase):
                     codex_row = next(line for line in out.splitlines() if "Codex (codex)" in line)
 
                     self.assertIn(disclosure, cursor_row)
-                    self.assertNotIn("priority-conflict-detection", codex_row)
+                    self.assertNotIn("Project hooks", codex_row)
                     if enabled:
                         self.assertNotIn("DISABLED", cursor_row)
                         if health is not None:

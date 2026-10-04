@@ -807,11 +807,7 @@ def _delete_existing(text: str, parent: Node, part: PathPart | None, node: Node)
         if parent.flow_style:
             return _delete_flow_element(text, parent, key.start_mark.index, value.end_mark.index, pair)
         if len(parent.value) == 1:
-            end = _block_content_end(text, parent)
-            replacement = "{}" + (
-                _detect_newline(text) if text[parent.start_mark.index : end].endswith(("\n", "\r")) else ""
-            )
-            return text[: parent.start_mark.index] + replacement + text[end:]
+            return _empty_block_collection(text, parent, "{}")
         start = _line_start(text, key.start_mark.index)
         end = _block_content_end(text, value)
         return text[:start] + text[end:]
@@ -819,15 +815,33 @@ def _delete_existing(text: str, parent: Node, part: PathPart | None, node: Node)
         if parent.flow_style:
             return _delete_flow_element(text, parent, node.start_mark.index, node.end_mark.index, node)
         if len(parent.value) == 1:
-            end = _block_content_end(text, parent)
-            replacement = "[]" + (
-                _detect_newline(text) if text[parent.start_mark.index : end].endswith(("\n", "\r")) else ""
-            )
-            return text[: parent.start_mark.index] + replacement + text[end:]
+            return _empty_block_collection(text, parent, "[]")
         start = _line_start(text, node.start_mark.index)
         end = _block_content_end(text, node)
         return text[:start] + text[end:]
     return text
+
+
+def _empty_block_collection(text: str, parent: Node, empty: str) -> str:
+    """Replace a block collection that loses its last entry with ``{}``/``[]``.
+
+    The empty flow value goes on its key's line (``destinations: []``).  A
+    PyYAML-dumped list sits at its key's indent (``  destinations:\n  - a``),
+    so writing ``[]`` where the ``-`` was would make it a sibling of the key
+    and invalid YAML (GAP-2194).
+    """
+
+    start = parent.start_mark.index
+    end = _block_content_end(text, parent)
+    suffix = _detect_newline(text) if text[start:end].endswith(("\n", "\r")) else ""
+    line_start = _line_start(text, start)
+    if not text[line_start:start].strip():
+        cursor = line_start
+        while cursor > 0 and text[cursor - 1] in " \t\r\n":
+            cursor -= 1
+        if cursor > 0 and text[cursor - 1] == ":" and "#" not in text[_line_start(text, cursor - 1) : cursor]:
+            return text[:cursor] + " " + empty + suffix + text[end:]
+    return text[:start] + empty + suffix + text[end:]
 
 
 def _delete_flow_element(

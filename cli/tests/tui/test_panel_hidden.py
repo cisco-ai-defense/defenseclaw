@@ -52,5 +52,5 @@ def test_plugins_and_tools_tabs_show_for_every_connector(monkeypatch) -> None:
 def test_tools_shortcut_is_capital_t_only() -> None:
     from defenseclaw.tui.app import CASE_SENSITIVE_PANEL_SHORTCUTS, PANEL_SHORTCUTS
 
-    assert CASE_SENSITIVE_PANEL_SHORTCUTS == {"T": "tools"}
+    assert CASE_SENSITIVE_PANEL_SHORTCUTS["T"] == "tools"
     assert "t" not in PANEL_SHORTCUTS

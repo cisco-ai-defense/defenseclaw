@@ -40,6 +40,7 @@ func (r *EventRouter) emitEventRouterModelV8(
 	meta llmEventMeta,
 	provider string,
 	model string,
+	prompt string,
 	response string,
 	promptTokens int64,
 	completionTokens int64,
@@ -54,7 +55,7 @@ func (r *EventRouter) emitEventRouterModelV8(
 	if !authoritative || lifecycle == nil {
 		return ctx
 	}
-	model = strings.TrimSpace(model)
+	model = telemetryModelID(strings.TrimSpace(model))
 	if !hookModelV8Identifier(model) {
 		return ctx
 	}
@@ -63,7 +64,7 @@ func (r *EventRouter) emitEventRouterModelV8(
 	meta.Provider = provider
 	meta.Model = model
 	observation := hookModelV8Observation{
-		meta: meta, response: response,
+		meta: meta, prompt: prompt, response: openClawReplyText(response),
 		usage: hookLLMSpanUsage{
 			promptTokens: promptTokens, completionTokens: completionTokens, model: model,
 		},
@@ -75,6 +76,7 @@ func (r *EventRouter) emitEventRouterModelV8(
 		toolCallCount: toolCallCount,
 		finishReasons: hookModelV8FinishReasons(finishReasons),
 	}
+	applyOpenClawPromptBlock(&observation)
 	input := hookModelV8ModelInput(observation)
 	input.Envelope.Provenance.Producer = eventRouterModelV8Producer
 	metricRuntime, _ := emitter.(hookLifecycleMetricV8Runtime)
@@ -143,22 +145,31 @@ func emitEventRouterModelUnderAgentV8(
 
 // eventRouterAgentInputV8 is the agent root of one OpenClaw assistant message.
 // The stream reports no lifecycle or execution identity, so the root carries
-// only what the message reports, like the proxy's agent root.
+// only what the message reports, like the proxy's agent root. The message is
+// the turn's reply, so the root's output is that reply, as on the hook
+// connectors' agent spans; without it Galileo showed a blank agent node for
+// every OpenClaw turn (GAP-2495).
 func eventRouterAgentInputV8(observation hookModelV8Observation) observability.SpanAgentInvokeInput {
 	meta := observation.meta
 	envelope := hookModelV8Envelope(observation, "invoke_agent")
 	envelope.Provenance.Producer = eventRouterModelV8Producer
 	outcome, technicalFailure, errorType := hookModelV8ObservationResult(observation)
+	inputMessages, inputBytes, inputReported, inputState, inputStructured := hookModelV8InputMessages(
+		observation.prompt, observation.promptOriginalBytes, observation.promptTruncated,
+	)
+	outputMessages, outputBytes, outputReported, outputState, outputStructured := hookModelV8OutputMessages(
+		observation.response, observation.finishReasons,
+	)
 	input := observability.SpanAgentInvokeInput{
 		Envelope: envelope, Outcome: outcome, Kind: "INTERNAL",
 		StartTimeUnixNano:                  uint64(observation.startedAt.UnixNano()),
 		EndTimeUnixNano:                    uint64(observation.finishedAt.UnixNano()),
 		Status:                             observability.NewTraceStatusOK(),
 		DefenseClawAgentType:               observation.agentType,
-		DefenseClawTelemetryInputReported:  false,
-		DefenseClawContentInputState:       "not_reported",
-		DefenseClawTelemetryOutputReported: false,
-		DefenseClawContentOutputState:      "not_reported",
+		DefenseClawTelemetryInputReported:  inputReported,
+		DefenseClawContentInputState:       inputState,
+		DefenseClawTelemetryOutputReported: outputReported,
+		DefenseClawContentOutputState:      outputState,
 		GenAIOperationName:                 observability.Present("invoke_agent"),
 		ConditionConnectorKnown:            hookModelV8StableToken(meta.Source) != "",
 		ConditionOperationTerminal:         true,
@@ -170,10 +181,29 @@ func eventRouterAgentInputV8(observation hookModelV8Observation) observability.S
 	if technicalFailure {
 		input.Status = observability.NewTraceStatusError(input.ErrorType)
 	}
+	if inputStructured {
+		input.GenAIInputMessages = observability.Present(inputMessages)
+	}
+	if inputReported {
+		input.DefenseClawContentInputOriginalBytes = observability.Present(inputBytes)
+		input.DefenseClawContentInputMimeType = observability.Present("text/plain")
+	}
+	if outputStructured {
+		input.GenAIOutputMessages = observability.Present(outputMessages)
+	}
+	if outputReported {
+		input.DefenseClawContentOutputOriginalBytes = observability.Present(outputBytes)
+		input.DefenseClawContentOutputMimeType = observability.Present("text/plain")
+	}
 	input.DefenseClawConnectorSource = hookModelV8OptionalID(meta.Source)
+	input.UserID = hookModelV8OptionalID(meta.UserID)
+	input.DefenseClawUserIDKind = v8UserIDKind(meta.UserIDKind)
+	input.DefenseClawUserName = hookModelV8OptionalID(meta.UserName)
 	input.DefenseClawRunID = hookModelV8OptionalID(meta.RunID)
 	input.DefenseClawTurnID = hookModelV8OptionalID(meta.TurnID)
 	input.DefenseClawPolicyID = hookModelV8OptionalID(meta.PolicyID)
+	input.DefenseClawGuardrailAction, input.DefenseClawGuardrailRuleID, input.DefenseClawGuardrailSeverity =
+		guardrailOutcomeAttributes(meta.Guardrail)
 	input.GenAIConversationID = hookModelV8OptionalID(observation.sessionID)
 	input.GenAIAgentID = hookModelV8OptionalID(observation.agentID)
 	input.GenAIAgentName = hookModelV8OptionalID(observation.agentName)
@@ -331,4 +361,56 @@ func (r *EventRouter) evictOldestEventRouterModelContextLocked() {
 	if found {
 		delete(r.activeLLMContexts, oldestKey)
 	}
+}
+
+type eventRouterPendingPrompt struct {
+	text       string
+	observedAt time.Time
+}
+
+// rememberEventRouterPrompt keeps a session's newest user prompt for the
+// assistant message that answers it. The stream reports the prompt and the
+// reply as separate frames, and a blocked prompt's turn has no tool child
+// either, so without this its spans showed only the block text (GAP-2408).
+func (r *EventRouter) rememberEventRouterPrompt(sessionID, prompt string, observedAt time.Time) {
+	sessionID, prompt = strings.TrimSpace(sessionID), strings.TrimSpace(prompt)
+	if r == nil || sessionID == "" || prompt == "" {
+		return
+	}
+	r.spanMu.Lock()
+	defer r.spanMu.Unlock()
+	if r.pendingPrompts == nil {
+		r.pendingPrompts = make(map[string]eventRouterPendingPrompt)
+	}
+	cutoff := observedAt.Add(-eventRouterModelContextTTL)
+	for key, entry := range r.pendingPrompts {
+		if !entry.observedAt.After(cutoff) {
+			delete(r.pendingPrompts, key)
+		}
+	}
+	if _, ok := r.pendingPrompts[sessionID]; !ok && len(r.pendingPrompts) >= eventRouterModelContextCapacity {
+		return
+	}
+	r.pendingPrompts[sessionID] = eventRouterPendingPrompt{text: prompt, observedAt: observedAt}
+}
+
+// takeEventRouterPrompt hands the pending prompt to the first assistant
+// message after it. Later messages of the same turn answer tool results, not
+// the prompt, so they do not repeat it.
+func (r *EventRouter) takeEventRouterPrompt(sessionID string, now time.Time) string {
+	sessionID = strings.TrimSpace(sessionID)
+	if r == nil || sessionID == "" {
+		return ""
+	}
+	r.spanMu.Lock()
+	defer r.spanMu.Unlock()
+	entry, ok := r.pendingPrompts[sessionID]
+	if !ok {
+		return ""
+	}
+	delete(r.pendingPrompts, sessionID)
+	if !entry.observedAt.After(now.Add(-eventRouterModelContextTTL)) {
+		return ""
+	}
+	return entry.text
 }

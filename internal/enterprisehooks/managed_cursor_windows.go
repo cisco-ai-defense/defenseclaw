@@ -638,9 +638,10 @@ func validateWindowsCursorManagedStateIdentity(
 // exact body the protected ownership state recorded for its hook executable.
 // It does not require the current build's template: the adapter template
 // changes between releases, and an upgrade must still snapshot, replace and
-// restore the adapter an earlier release installed (GAP-1068). Install
-// rewrites the adapter from the current template, and the machine-policy
-// verify reports an adapter that differs from it.
+// restore the adapter an earlier release installed (GAP-1068). Install and
+// the guardian's RefreshWindowsCursorManagedAdapter rewrite the adapter from
+// the current template, and the machine-policy verify reports an adapter that
+// differs from it.
 func windowsCursorManagedAdapterMatchesState(state windowsCursorManagedPolicyState, adapter []byte) bool {
 	if len(adapter) == 0 || !validWindowsCursorManagedDigest(state.AdapterSHA256) ||
 		state.AdapterSHA256 != windowsManagedPolicyDigest(adapter) {
@@ -648,6 +649,158 @@ func windowsCursorManagedAdapterMatchesState(state windowsCursorManagedPolicySta
 	}
 	hookExecutable := "'" + strings.ReplaceAll(state.HookExecutable, "'", "''") + "'"
 	return bytes.Contains(adapter, []byte(hookExecutable))
+}
+
+// windowsCursorManagedAdapterRefresh returns the adapter and ownership state
+// that bring an active deployment's adapter to this build's template, or
+// ok=false when the adapter is already current or belongs to another hook
+// executable. Only the adapter body and its recorded digest change; the
+// targets and the receipt binding stay as they are (GAP-2467).
+func windowsCursorManagedAdapterRefresh(
+	artifacts windowsCursorManagedArtifacts,
+	hookExecutable string,
+) (adapter, state []byte, ok bool, err error) {
+	if !artifacts.active ||
+		!sameWindowsEnterprisePath(artifacts.parsed.HookExecutable, hookExecutable) {
+		return nil, nil, false, nil
+	}
+	adapter, err = connector.RenderWindowsCursorEnterpriseAdapter(artifacts.parsed.HookExecutable, "closed")
+	if err != nil {
+		return nil, nil, false, err
+	}
+	if bytes.Equal(artifacts.adapter.data, adapter) {
+		return nil, nil, false, nil
+	}
+	parsed := artifacts.parsed
+	parsed.AdapterSHA256 = windowsManagedPolicyDigest(adapter)
+	state, err = windowsCursorManagedStateBody(parsed)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	return adapter, state, true, nil
+}
+
+// windowsCursorManagedAdapterDriftCandidate returns current with the adapter
+// replaced by this build's render and the state digest rebound to it. It is
+// for an active deployment whose adapter file was changed in place (GAP-2474)
+// or deleted (GAP-2479), so it no longer matches its protected state. The
+// state must be the exact canonical body DefenseClaw wrote and must name
+// hookExecutable. The caller validates the candidate like any deployment, so
+// the adapter body is the only thing that may differ from a valid policy.
+func windowsCursorManagedAdapterDriftCandidate(
+	current windowsCursorManagedArtifacts,
+	hookExecutable string,
+) (windowsCursorManagedArtifacts, error) {
+	if !current.state.existed {
+		return current, errors.New("enterprise hooks: Cursor managed ownership metadata is incomplete")
+	}
+	var state windowsCursorManagedPolicyState
+	if err := json.Unmarshal(current.state.data, &state); err != nil {
+		return current, fmt.Errorf("enterprise hooks: parse Cursor managed ownership metadata: %w", err)
+	}
+	canonical, err := windowsCursorManagedStateBody(state)
+	if err != nil {
+		return current, err
+	}
+	if !bytes.Equal(canonical, current.state.data) {
+		return current, errors.New("enterprise hooks: Cursor managed ownership metadata is not canonical")
+	}
+	if !filepath.IsAbs(state.HookExecutable) || !sameWindowsEnterprisePath(state.HookExecutable, hookExecutable) {
+		return current, errors.New("enterprise hooks: Cursor managed policy belongs to another hook executable")
+	}
+	adapter, err := connector.RenderWindowsCursorEnterpriseAdapter(state.HookExecutable, "closed")
+	if err != nil {
+		return current, err
+	}
+	state.AdapterSHA256 = windowsManagedPolicyDigest(adapter)
+	body, err := windowsCursorManagedStateBody(state)
+	if err != nil {
+		return current, err
+	}
+	candidate := current
+	candidate.adapter.existed = true
+	candidate.adapter.data = adapter
+	candidate.state.data = body
+	return candidate, nil
+}
+
+// RefreshWindowsCursorManagedAdapter rewrites the active Cursor enterprise
+// adapter when it is not this build's render: an upgrade changed its
+// template (GAP-2467), or the file was changed in place (GAP-2474) or
+// deleted (GAP-2479). Per-user
+// rows verify against the protected state, so without this an upgrade keeps
+// the adapter an earlier release wrote, and a changed adapter fails every
+// verify and repair until it is restored. It reports whether it rewrote the
+// adapter.
+func RefreshWindowsCursorManagedAdapter(hookExecutable string) (bool, error) {
+	return refreshWindowsCursorManagedAdapter(hookExecutable, true)
+}
+
+// RestoreWindowsCursorManagedAdapter rewrites the active Cursor enterprise
+// adapter only when it no longer matches its protected state or is missing
+// (GAP-2474, GAP-2479). It
+// leaves an earlier release's recorded adapter alone, so a lifecycle snapshot
+// still captures it (GAP-1068). It reports whether it rewrote the adapter.
+func RestoreWindowsCursorManagedAdapter(hookExecutable string) (bool, error) {
+	return refreshWindowsCursorManagedAdapter(hookExecutable, false)
+}
+
+func refreshWindowsCursorManagedAdapter(hookExecutable string, upgradeTemplate bool) (bool, error) {
+	if err := windowsEnterpriseMutationIdentityCheck(); err != nil {
+		return false, err
+	}
+	hookExecutable = filepath.Clean(hookExecutable)
+	refreshed := false
+	err := withWindowsCursorManagedTransaction(func() error {
+		current, err := snapshotWindowsCursorManagedArtifacts()
+		if err != nil {
+			return err
+		}
+		artifacts, err := validateWindowsCursorManagedArtifacts(current)
+		if err != nil {
+			candidate, candidateErr := windowsCursorManagedAdapterDriftCandidate(current, hookExecutable)
+			if candidateErr != nil {
+				return err
+			}
+			if !current.adapter.existed {
+				// A deleted adapter (GAP-2479): the trust checks read the
+				// file, so write this build's render first, and remove it
+				// again unless the deployment then validates.
+				if writeErr := windowsManagedPolicyWriter(current.adapter.path, candidate.adapter.data, true); writeErr != nil {
+					return fmt.Errorf("%v (Cursor adapter restore failed: %v)", err, writeErr)
+				}
+			}
+			if artifacts, candidateErr = validateWindowsCursorManagedArtifacts(candidate); candidateErr != nil ||
+				!artifacts.active {
+				if !current.adapter.existed {
+					if removeErr := restoreWindowsCursorManagedFile(current.adapter, current.adapterMetadata); removeErr != nil {
+						return fmt.Errorf("%v (Cursor adapter rollback failed: %v)", err, removeErr)
+					}
+				}
+				return err
+			}
+			// Write over, and roll back to, the adapter that is on disk.
+			artifacts.adapter = current.adapter
+		} else if !upgradeTemplate {
+			return nil
+		}
+		adapter, state, ok, err := windowsCursorManagedAdapterRefresh(artifacts, hookExecutable)
+		if err != nil || !ok {
+			return err
+		}
+		if err := windowsManagedPolicyWriter(artifacts.adapter.path, adapter, true); err != nil {
+			return err
+		}
+		if err := windowsManagedPolicyWriter(artifacts.state.path, state, true); err != nil {
+			if restoreErr := restoreWindowsCursorManagedFile(artifacts.adapter, artifacts.adapterMetadata); restoreErr != nil {
+				return fmt.Errorf("%v (Cursor adapter rollback failed: %v)", err, restoreErr)
+			}
+			return err
+		}
+		refreshed = true
+		return nil
+	})
+	return refreshed, err
 }
 
 func validWindowsCursorManagedDigest(value string) bool {

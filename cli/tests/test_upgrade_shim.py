@@ -50,6 +50,8 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.delenv(update_notice.NO_CHECK_ENV, raising=False)
     monkeypatch.delenv("CI", raising=False)
     monkeypatch.delenv("DEFENSECLAW_CONFIG", raising=False)
+    for name in ("SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"):
+        monkeypatch.delenv(name, raising=False)
     # A developer's own cosign must not take part; the signature tests add a fake one.
     monkeypatch.setattr(upgrade_shim, "_cosign", lambda: None)
     return data
@@ -314,6 +316,28 @@ def test_windows_starts_the_installer_detached(
     assert started[0][6:] == ["-Yes", "-Local", str(release)]
 
 
+def test_windows_rollback_over_ssh_gives_the_command_for_this_terminal(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # GAP-1993: the new window never appears in an SSH session; rc 0 hid the result.
+    (home / "installer").mkdir()
+    (home / "installer" / "install.ps1").write_text("", encoding="utf-8")
+    monkeypatch.setattr(upgrade_shim.os, "name", "nt")
+    monkeypatch.setenv("SSH_CONNECTION", "10.0.0.1 50000 10.0.0.2 22")
+    started: list[object] = []
+    monkeypatch.setattr(upgrade_shim.subprocess, "Popen", lambda *args, **kwargs: started.append(args))
+
+    assert upgrade_shim.run(["rollback", "--yes"]) == 1
+
+    assert started == []
+    err = capsys.readouterr().err
+    assert "no desktop (SSH session)" in err and "Nothing was changed." in err
+    command = next(line.strip() for line in err.splitlines() if line.strip().startswith("powershell "))
+    assert command.endswith("install.ps1\" -Rollback -Yes"), command
+    staged = command.split('"')[1]
+    assert os.path.isfile(staged) and staged != str(home / "installer" / "install.ps1")
+
+
 def test_rollback_uses_the_saved_installer(home: Path, execs: list[list[str]]) -> None:
     saved = home / "installer" / "install.sh"
     saved.parent.mkdir()
@@ -345,9 +369,25 @@ def test_windows_rollback_to_the_setup_package_refuses_in_this_terminal(
     assert "releases/tag/0.8.10" in err
 
 
-def test_rollback_without_a_saved_installer_explains(home: Path, execs: list[list[str]]) -> None:
+def test_rollback_from_a_source_install_uses_the_installer_it_replaced(home: Path, execs: list[list[str]]) -> None:
+    # GAP-2459: a 'make all' install has no installer/; the release it rolled
+    # back from keeps one in previous/, and that rolls forward again.
+    saved = home / "previous" / "installer" / "install.sh"
+    saved.parent.mkdir(parents=True)
+    saved.write_text("#!/bin/bash\n", encoding="utf-8")
+
+    assert upgrade_shim.run(["rollback", "--yes"]) == 0
+
+    assert execs[0][2:] == ["--rollback", "--yes"]
+    assert execs[0][1] != str(saved)
+
+
+def test_rollback_without_a_saved_installer_explains(
+    home: Path, execs: list[list[str]], capsys: pytest.CaptureFixture[str]
+) -> None:
     assert upgrade_shim.run(["rollback"]) == 1
     assert execs == []
+    assert "previous" in capsys.readouterr().err
 
 
 def test_entry_dispatches_upgrade_before_importing_the_cli(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -577,7 +617,7 @@ class _FakeKey:
     def __init__(self, values: dict[str, str]) -> None:
         self.values = values
 
-    def __enter__(self) -> "_FakeKey":
+    def __enter__(self) -> _FakeKey:
         return self
 
     def __exit__(self, *_: object) -> None:

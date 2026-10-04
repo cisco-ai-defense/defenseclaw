@@ -6878,7 +6878,7 @@ function Assert-DoctorWindowsHookRegistration {
         'hermes' { 'on-disk Windows-native executable registration is valid' }
         default { 'healthy Windows-native executable registration' }
     }
-    $expectedDoctorStatus = if ($Connector -eq 'hermes') { 'fail' } else { 'pass' }
+    $expectedDoctorStatus = 'pass'
     if ($check.status -ne $expectedDoctorStatus -or
         $check.detail -notmatch [regex]::Escape($expectedHealthyDetail)) {
         throw "Doctor did not validate the registered $Connector Windows hook: $($check.status) $($check.detail)"

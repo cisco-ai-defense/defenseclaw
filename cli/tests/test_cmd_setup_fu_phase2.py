@@ -718,6 +718,19 @@ class TestPerConnectorWriteSurface(_BaseSetup):
         self.assertIn("--enable-judge was not applied", res.output)
         self.assertIn("--mode action --enable-judge", res.output)
 
+    def test_observe_setup_says_when_it_prunes_the_judge_gate(self):
+        # GAP-2083: setup drops an observe-mode connector from the gate; it
+        # must say so instead of pruning silently.
+        self._seed_map("codex", "hermes")
+        gc = self.app.cfg.guardrail
+        gc.judge.enabled = True
+        gc.judge.hook_connectors = ["codex", "hermes"]
+        with _stub_side_effects():
+            res = _invoke(["hermes", "--yes", "--no-restart", "--mode", "observe"], self.app)
+        self.assertEqual(res.exit_code, 0, msg=res.output)
+        self.assertEqual(gc.judge.hook_connectors, ["codex"])
+        self.assertIn("hermes was removed from the LLM judge gate", res.output)
+
     def test_no_enable_judge_opts_connector_out_of_concrete_gate(self):
         self._seed_map("codex", "hermes")
         gc = self.app.cfg.guardrail
@@ -2600,7 +2613,8 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                     self.app.cfg = copy.deepcopy(original_cfg)
                     gc = self.app.cfg.guardrail
                     gc.enabled = True
-                    gc.connector = "opencode" if target_case == "configured" else "openclaw"
+                    # A guarded OpenClaw refuses --connector opencode first (GAP-2452).
+                    gc.connector = {"configured": "opencode", "explicit": "codex"}.get(target_case, "openclaw")
                     gc.mode = "observe"
                     gc.scanner_mode = "both"
                     gc.hilt.enabled = False
@@ -3671,9 +3685,120 @@ class TestGatewayOfflineStaging(_BaseSetup):
         # MAC-U3-03: no OpenClaw gateway.port and no internal audit wording.
         self.assertNotIn("gateway.port:", result.output)
         self.assertNotIn("canonical", result.output)
-        # The restart step alone says when the new port applies.
-        self.assertNotIn("takes effect when the gateway starts", result.output)
+        # GAP-2153: one note for the stopped gateway, not a restart note
+        # followed by a second "Gateway is not running" block.
+        self.assertIn("the gateway isn't running, so this change takes effect when it starts", result.output)
+        self.assertNotIn("nothing listens on the new API port", result.output)
+        self.assertNotIn("Config updated", result.output)
         openclaw_check.assert_not_called()
+
+    def test_new_api_port_with_a_running_gateway_says_it_applies_on_restart(self):
+        self.app.logger = MagicMock()
+        self.app.logger.log_action.side_effect = CanonicalObservabilityUnavailableError("connection refused")
+        self._seed_map("codex")
+
+        with patch("defenseclaw.commands.cmd_setup._is_pid_alive", return_value=True), patch(
+            "defenseclaw.commands.cmd_setup._restart_defense_gateway", return_value=True
+        ):
+            result = _invoke(["gateway", "--api-port", "19095", "--non-interactive"], self.app)
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("nothing listens on the new API port until the gateway restarts", result.output)
+        self.assertNotIn("the gateway isn't running", result.output)
+
+    def test_new_gateway_port_skips_the_check_before_the_restart(self):
+        # GAP-2478: the running gateway still used the old port, so the
+        # check printed a "reconnecting" FAIL row and a Tip, then the
+        # restart applied the port and doctor passed.
+        self.app.logger = MagicMock()
+        self._seed_map("openclaw")
+        self.app.cfg.gateway.port = 18789
+
+        with patch("defenseclaw.commands.cmd_setup._is_pid_alive", return_value=True), patch(
+            "defenseclaw.commands.cmd_setup._restart_defense_gateway", return_value=True
+        ) as restart, patch("defenseclaw.commands.cmd_doctor._check_sidecar") as sidecar_check, patch(
+            "defenseclaw.commands.cmd_doctor._check_openclaw_gateway"
+        ) as openclaw_check:
+            result = _invoke(["gateway", "--port", "20477", "--non-interactive"], self.app)
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(self.app.cfg.gateway.port, 20477)
+        sidecar_check.assert_not_called()
+        # GAP-2486: the OpenClaw listener at the new address is still checked.
+        openclaw_check.assert_called_once()
+        restart.assert_called_once()
+        self.assertNotIn("Tip: fix the issues above", result.output)
+        self.assertIn("connects to the new address after the restart", result.output)
+
+    def test_new_gateway_port_with_no_openclaw_listener_fails_the_row(self):
+        # GAP-2486: nothing listened on the new port, yet the run said the
+        # gateway connects there and only a later doctor showed the FAIL.
+        self.app.logger = MagicMock()
+        self._seed_map("openclaw")
+        self.app.cfg.gateway.port = 18789
+
+        with patch("defenseclaw.commands.cmd_setup._is_pid_alive", return_value=True), patch(
+            "defenseclaw.commands.cmd_setup._restart_defense_gateway", return_value=True
+        ), patch("defenseclaw.commands.cmd_doctor._check_sidecar") as sidecar_check, patch(
+            "defenseclaw.commands.cmd_doctor._http_probe", return_value=(0, "")
+        ):
+            result = _invoke(["gateway", "--port", "20491", "--non-interactive"], self.app)
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        sidecar_check.assert_not_called()
+        self.assertIn("not reachable at 127.0.0.1:20491", result.output)
+        self.assertIn("Tip: fix the issues above", result.output)
+        self.assertNotIn("connects to the new address", result.output)
+
+    def test_stopped_gateway_still_checks_the_openclaw_listener(self):
+        # GAP-2505: with the DefenseClaw gateway stopped, a new port where
+        # nothing listens was saved with only the gateway-not-running note.
+        self.app.logger = MagicMock()
+        self.app.logger.log_action.side_effect = CanonicalObservabilityUnavailableError("gateway is not running")
+        self._seed_map("openclaw")
+        self.app.cfg.gateway.port = 18789
+
+        with patch("defenseclaw.commands.cmd_doctor._check_sidecar") as sidecar_check, patch(
+            "defenseclaw.commands.cmd_doctor._http_probe", return_value=(0, "")
+        ):
+            result = _invoke(["gateway", "--port", "20513", "--non-interactive"], self.app)
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(self.app.cfg.gateway.port, 20513)
+        sidecar_check.assert_not_called()
+        self.assertIn("not reachable at 127.0.0.1:20513", result.output)
+        self.assertIn("the gateway isn't running, so this change takes effect when it starts", result.output)
+        self.assertNotIn("connects to the new address", result.output)
+
+    def test_unchanged_gateway_port_still_verifies_a_running_gateway(self):
+        self.app.logger = MagicMock()
+        self._seed_map("codex")
+        port = self.app.cfg.gateway.port
+
+        with patch("defenseclaw.commands.cmd_setup._is_pid_alive", return_value=True), patch(
+            "defenseclaw.commands.cmd_setup._restart_defense_gateway", return_value=True
+        ), patch("defenseclaw.commands.cmd_doctor._check_sidecar") as sidecar_check:
+            result = _invoke(["gateway", "--port", str(port), "--non-interactive"], self.app)
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        sidecar_check.assert_called_once()
+        self.assertNotIn("connects to the new address", result.output)
+
+    def test_stopped_gateway_is_not_a_failed_verification(self):
+        # GAP-2009: on a fresh account (gateway never started) the next step
+        # sandbox names ended in a FAIL row and "Error: ... gateway isn't running", rc 1.
+        self.app.logger = MagicMock()
+        self.app.logger.log_action.side_effect = CanonicalObservabilityUnavailableError("gateway is not running")
+        self._seed_map("codex")
+
+        with patch("defenseclaw.commands.cmd_doctor._check_sidecar") as sidecar_check:
+            result = _invoke(["gateway", "--non-interactive"], self.app)
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertNotIn("Error", result.output)
+        self.assertIn("the gateway isn't running, so this change takes effect when it starts", result.output)
+        self.assertEqual(result.output.count("defenseclaw-gateway start"), 1, result.output)
+        sidecar_check.assert_not_called()
 
     def test_api_port_flag_is_used_on_a_terminal(self):
         # MAC-U2-03: the port hint run on a terminal prompted with the old
@@ -4224,6 +4349,26 @@ class TestJ3PerDirectionStrategy(_BaseSetup):
         self.assertEqual(self.app.cfg.guardrail.detection_strategy_completion, "regex_only")
         self.assertEqual(self.app.cfg.guardrail.judge.hook_connectors, ["*"])
 
+    def test_summary_shows_the_judge_llm_in_use(self):
+        # GAP-2056: the summary printed the empty legacy guardrail.judge.model
+        # and api_key_env right after the judge step named the judge LLM.
+        self.app.cfg.guardrail.judge.llm.model = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+        self.app.cfg.guardrail.judge.llm.api_key_env = "DEFENSECLAW_LLM_KEY"
+        with _stub_side_effects(), \
+                patch("defenseclaw.commands.cmd_setup.execute_guardrail_setup", return_value=(True, [])):
+            res = _invoke(
+                [
+                    "guardrail", "--non-interactive", "--connector", "codex", "--no-restart", "--no-verify",
+                    "--mode", "action", "--detection-strategy", "regex_judge",
+                ],
+                self.app,
+            )
+        self.assertEqual(res.exit_code, 0, msg=res.output)
+        self.assertRegex(res.output, r"guardrail\.judge\.llm\.model:\s+us\.anthropic\.claude-haiku-4-5")
+        self.assertRegex(res.output, r"judge credentials:\s+DEFENSECLAW_LLM_KEY")
+        for legacy in ("guardrail.judge.model", "guardrail.judge.api_key_env", "guardrail.model_name"):
+            self.assertNotIn(legacy, res.output)
+
     def test_off_by_default_tool_call_unset(self):
         with _stub_side_effects(), \
                 patch("defenseclaw.commands.cmd_setup.execute_guardrail_setup", return_value=(True, [])):
@@ -4254,3 +4399,29 @@ def test_gateway_lifecycle_progress_reports_a_slow_restart(capsys):
     with cmd_setup._GatewayLifecycleProgress("restarting", interval=60):
         pass
     assert capsys.readouterr().out == ""
+
+
+def test_gateway_lifecycle_progress_names_a_pending_audit_upgrade(tmp_path, capsys):
+    # GAP-2027: over a 0.x audit history setup printed only "waiting for the
+    # gateway" while the launcher ran the one-time audit upgrade.
+    import sqlite3
+    import time as _time
+
+    assert cmd_setup._audit_upgrade_note(str(tmp_path)) == ""
+    conn = sqlite3.connect(tmp_path / "audit.db")
+    conn.execute("CREATE TABLE schema_version (version INTEGER)")
+    conn.execute("INSERT INTO schema_version VALUES (32)")
+    conn.commit()
+    note = cmd_setup._audit_upgrade_note(str(tmp_path))
+    assert note.startswith("Upgrading the audit database (one time")
+    conn.execute("INSERT INTO schema_version VALUES (33)")
+    conn.commit()
+    conn.close()
+    assert cmd_setup._audit_upgrade_note(str(tmp_path)) == ""
+
+    with cmd_setup._GatewayLifecycleProgress("starting", interval=0.01, note=note):
+        _time.sleep(0.05)
+    out = capsys.readouterr().out
+    assert out.startswith("\n    Upgrading the audit database (one time; a large history can take a few minutes)...\n")
+    assert "    still starting after 0s: upgrading the audit database" in out
+    assert out.endswith("  defenseclaw-gateway:")

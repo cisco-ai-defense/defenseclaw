@@ -349,3 +349,29 @@ func TestTelemetryEgressFollowsTheEnvironmentProxy(t *testing.T) {
 		t.Fatal("no proxy variable must leave the exporters on direct connections")
 	}
 }
+
+// GAP-2375: the telemetry dialer tells the OTLP exporters whether an
+// endpoint goes through a proxy, so a connection-failure line in gateway.log
+// gives proxy advice only when a proxy is in use.
+func TestTelemetryEgressDialerReportsWhetherItProxies(t *testing.T) {
+	t.Cleanup(func() { enterpriseEgress.Store(nil); telemetryEgress.Store(nil) })
+	var reporter interface {
+		Proxies(*url.URL) (bool, error)
+	} = telemetryEgressDialer{}
+	endpoint := &url.URL{Scheme: "https", Host: "api.example.test:443"}
+	for _, tc := range []struct {
+		env  map[string]string
+		want bool
+	}{
+		{env: map[string]string{}, want: false},
+		{env: map[string]string{"HTTPS_PROXY": "http://proxy.example.test:3128"}, want: true},
+		{env: map[string]string{"HTTPS_PROXY": "http://proxy.example.test:3128", "NO_PROXY": "api.example.test"}, want: false},
+	} {
+		if err := setGatewayEgress(&config.Config{}, func(key string) string { return tc.env[key] }); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := reporter.Proxies(endpoint); err != nil || got != tc.want {
+			t.Fatalf("env %v: Proxies = %v, %v; want %v", tc.env, got, err, tc.want)
+		}
+	}
+}

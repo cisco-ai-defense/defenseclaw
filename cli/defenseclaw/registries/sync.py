@@ -96,6 +96,8 @@ class SyncReport:
     blocked: int = 0
     warnings: int = 0
     errors: list[str] = field(default_factory=list)
+    # Entries scanned without every analyzer (for example LLM skipped).
+    partial: list[str] = field(default_factory=list)
     started_at: str = ""
     finished_at: str = ""
 
@@ -112,6 +114,7 @@ class SyncReport:
             "blocked": self.blocked,
             "warnings": self.warnings,
             "errors": list(self.errors),
+            "partial": list(self.partial),
             "started_at": self.started_at,
             "finished_at": self.finished_at,
             "ok": self.ok(),
@@ -170,7 +173,7 @@ def sync_source(
     try:
         manifest, raw = fetch_manifest(source, allow_private=allow_private)
     except (IngestError, ManifestError) as exc:
-        report.errors.append(f"fetch failed: {exc}")
+        report.errors.append(str(exc) if isinstance(exc, ManifestError) else f"fetch failed: {exc}")
         source.last_status = f"error: {exc}"[:240]
         source.last_sync = report.started_at
         report.finished_at = _now_iso()
@@ -283,7 +286,7 @@ def _run_scans(
         if verdict is None:
             continue
         if verdict.rejected:
-            verdict.status = "blocked"
+            verdict.status = "rejected"
             continue
         try:
             scan_result = scan_callback(source, entry)
@@ -302,6 +305,8 @@ def _run_scans(
         verdict.last_scanned_at = _now_iso()
         verdict.severity = scan_result.max_severity()
         verdict.error = ""
+        for note in getattr(scan_result, "notes", None) or []:
+            report.partial.append(f"{entry.type}:{entry.name}: {note}")
         if scan_result.is_clean():
             verdict.status = "clean"
         elif verdict.severity in _BLOCKING_SEVERITIES:
@@ -411,22 +416,22 @@ def manual_set_verdict(
             # Approving a previously-blocked entry should land in
             # ``status`` so list filters and the TUI badge reflect
             # the decision before the next scan run.
-            if verdict.status == "blocked":
+            if verdict.status in ("blocked", "rejected"):
                 verdict.status = _status_after_decision(verdict)
     if rejected is not None:
         verdict.rejected = rejected
         if rejected:
             verdict.approved = False
             # Reject is the strongest negative verdict the operator
-            # can express. Surface it through ``status`` so
-            # ``registry entries --status blocked`` and the TUI's
-            # rendering both show the row as blocked, not pending.
-            verdict.status = "blocked"
+            # can express. Surface it through ``status`` as "rejected"
+            # (not "blocked", GAP-2371): reject only stops promotion, it
+            # does not block the server or skill itself.
+            verdict.status = "rejected"
         else:
-            # Operator un-rejected — drop the synthetic 'blocked'
+            # Operator un-rejected — drop the synthetic 'rejected'
             # so a subsequent scan can write a real verdict without
             # an explicit re-approve.
-            if verdict.status == "blocked":
+            if verdict.status in ("blocked", "rejected"):
                 verdict.status = _status_after_decision(verdict)
     save_index(data_dir, source_id, idx)
     return verdict
@@ -435,7 +440,7 @@ def manual_set_verdict(
 def _status_after_decision(verdict: EntryVerdict) -> str:
     """The status an approve or un-reject leaves behind.
 
-    A reject overwrote the scanner's status with ``blocked``; the scan facts
+    A reject overwrote the scanner's status with ``rejected``; the scan facts
     are still cached, so a scanned entry gets its last verdict back instead of
     ``pending`` (GAP-1764). An entry the scanner itself blocked, or one never
     scanned, becomes ``pending`` until the next scan.

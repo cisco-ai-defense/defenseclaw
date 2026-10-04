@@ -17,7 +17,7 @@ import os
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Generic, Literal, TypeVar
 
 from defenseclaw.connector_paths import (
@@ -133,6 +133,8 @@ class PluginScanSummary:
     total_findings: int = 0
     # E4i: per-severity breakdown (see CatalogScanSummary.severity_counts).
     severity_counts: Mapping[str, int] = field(default_factory=dict)
+    # "YYYY-MM-DD HH:MM:SS UTC" from ``plugin list --json`` (GAP-2201).
+    scanned_at: str = ""
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any] | None) -> PluginScanSummary | None:
@@ -143,6 +145,7 @@ class PluginScanSummary:
             max_severity=str(raw.get("max_severity") or ""),
             total_findings=int(raw.get("total_findings") or 0),
             severity_counts=_parse_severity_counts(raw.get("severity_counts")),
+            scanned_at=str(raw.get("scanned_at") or ""),
         )
 
 
@@ -165,6 +168,8 @@ class CatalogCommandIntent:
     # upgrades a ``"destructive"`` catalog intent to the C1 consequence modal
     # lives in ``app.py`` (the ``tui/app`` lane).
     risk: str = "read-only"
+    # Plain-words effect the confirm modal shows (GAP-2228).
+    consequence: str = ""
 
     @property
     def argv(self) -> tuple[str, ...]:
@@ -258,6 +263,8 @@ class MCPRow:
     severity: str = ""
     verdict: str = ""
     registry_source: str = ""
+    # Why the agent skips this entry and how to repair it (GAP-2531).
+    not_loaded: str = ""
     # Same denormalization as SkillRow so the detail pane can show
     # the file/runtime/install state without re-parsing the JSON.
     total_findings: int = 0
@@ -743,7 +750,10 @@ class SkillsPanelModel(CatalogListModel[SkillRow]):
         if key == "r":
             return CatalogPanelAction(True, self.load_intent(), reload_requested=True)
         if key == "R":
-            return CatalogPanelAction(True, registry_focus=self.registry_focus())
+            # With no row R is the global Registries key; it did nothing and
+            # said nothing on an empty list (GAP-2404).
+            focus = self.registry_focus()
+            return CatalogPanelAction(True, registry_focus=focus) if focus else CatalogPanelAction(False)
         return CatalogPanelAction(False)
 
     def empty_state(self) -> str:
@@ -807,6 +817,9 @@ class MCPsPanelModel(CatalogListModel[MCPRow]):
     def blocked_count(self) -> int:
         return sum(1 for row in self.items if row.status == "blocked")
 
+    def not_loaded_count(self) -> int:
+        return sum(1 for row in self.items if row.not_loaded)
+
     def menu_actions(self) -> tuple[CatalogMenuAction, ...]:
         row = self.selected()
         return mcp_actions(row.status if row else "", self.connector)
@@ -847,7 +860,10 @@ class MCPsPanelModel(CatalogListModel[MCPRow]):
         if key == "r":
             return CatalogPanelAction(True, self.load_intent(), reload_requested=True)
         if key == "R":
-            return CatalogPanelAction(True, registry_focus=self.registry_focus())
+            # With no row R is the global Registries key; it did nothing and
+            # said nothing on an empty list (GAP-2404).
+            focus = self.registry_focus()
+            return CatalogPanelAction(True, registry_focus=focus) if focus else CatalogPanelAction(False)
         return CatalogPanelAction(False)
 
     def empty_state(self) -> str:
@@ -1276,6 +1292,10 @@ def mcp_list_to_row(raw: Mapping[str, Any]) -> MCPRow:
         status = "disabled"
     elif actions.install == "allow":
         status = "allowed"
+    not_loaded = str(raw.get("not_loaded_repair") or raw.get("not_loaded") or "")
+    if not_loaded and status == "active":
+        # The agent skips it, so it is not live (GAP-2531).
+        status = "not loaded"
     return MCPRow(
         name=str(raw.get("name") or ""),
         connector=str(raw.get("connector") or ""),
@@ -1286,6 +1306,7 @@ def mcp_list_to_row(raw: Mapping[str, Any]) -> MCPRow:
         server_url=str(raw.get("url") or ""),
         severity=str(raw.get("severity") or scan.max_severity if scan else ""),
         verdict=str(raw.get("verdict") or ""),
+        not_loaded=not_loaded,
         total_findings=scan.total_findings if scan is not None else 0,
         scan_clean=scan.clean if scan is not None else True,
         scan_target=scan.target if scan is not None else "",
@@ -1556,7 +1577,7 @@ def plugin_actions(verdict: str, status: str, enabled: bool) -> tuple[CatalogMen
         CatalogMenuAction("i", "Info", "Show full details"),
     ]
     if verdict == "blocked":
-        actions.append(CatalogMenuAction("u", "Unblock", "Remove from block list (runs plugin allow)"))
+        actions.append(CatalogMenuAction("u", "Unblock", "Remove from block list (runs plugin unblock)"))
     elif verdict == "allowed":
         actions.append(CatalogMenuAction("b", "Block", "Add to install block list"))
     else:
@@ -1708,7 +1729,29 @@ def plugin_action_intent(key: str, row: PluginRow, *, origin: str, connector: st
         # N1: plugin remove (``x``) deletes files from disk — flag it so the
         # dispatcher routes it through the destructive/consequence confirm.
         risk="destructive" if key == "x" else "read-only",
+        consequence=_plugin_consequence(key, row),
     )
+
+
+def _plugin_consequence(key: str, row: PluginRow) -> str:
+    if key == "b" and not row.enabled and row.status != "quarantined":
+        # GAP-2313: a disabled copy does not load, so don't say it keeps loading.
+        return f"Block refuses new installs of {row.display_name}; the installed copy is disabled, so it does not load."
+    return _PLUGIN_CONSEQUENCES.get(key, "").format(name=row.display_name)
+
+
+# The confirm said only "This enforce command can change DefenseClaw state."
+# (GAP-2228); block does not stop an installed copy.
+_PLUGIN_CONSEQUENCES: Mapping[str, str] = {
+    "b": (
+        "Block refuses new installs of {name}; the installed copy keeps loading "
+        "until you quarantine or disable it."
+    ),
+    "u": (
+        "Unblock clears DefenseClaw's block, allow, quarantine and disable entries for {name}; "
+        "it keeps the on/off setting from the agent's own config."
+    ),
+}
 
 
 def tool_action_intent(key: str, row: ToolRow, *, origin: str, connector: str = "") -> CatalogCommandIntent | None:
@@ -2002,6 +2045,17 @@ def _verdict_before_source(cells: tuple[str, ...]) -> tuple[str, ...]:
     return (*head, verdict, source, details)
 
 
+def _plugin_status(row: PluginRow) -> str:
+    """The plugin Status shown in the table and the detail (GAP-2369)."""
+
+    status = row.status or ("enabled" if row.enabled else "disabled")
+    if status == "blocked":
+        # A block only refuses new installs; Status shows whether the
+        # installed copy loads, Verdict says it is blocked (GAP-2228).
+        status = "enabled" if row.enabled else "disabled"
+    return status
+
+
 def catalog_row_cells(row: object) -> tuple[str, str, str, str, str]:
     if isinstance(row, SkillRow):
         source = " ".join(part for part in (row.source, row.registry_badge) if part)
@@ -2012,9 +2066,8 @@ def catalog_row_cells(row: object) -> tuple[str, str, str, str, str]:
         detail = row.server_url or row.command or row.verdict or row.severity
         return (row.name, row.status, source, row.actions, _truncate(detail, 72))
     if isinstance(row, PluginRow):
-        status = row.status or ("enabled" if row.enabled else "disabled")
         detail = row.description or row.origin or row.verdict
-        return (row.display_name, status, row.origin, row.verdict or "-", _truncate(detail, 72))
+        return (row.display_name, _plugin_status(row), row.origin, row.verdict or "-", _truncate(detail, 72))
     if isinstance(row, ToolRow):
         return (row.name, row.status, row.display_scope, "-", _truncate(row.reason, 72))
     return ("", "", "", "", "")
@@ -2063,6 +2116,7 @@ _STATUS_COLOR: Mapping[str, str] = {
     "rejected": "#F87171",
     "quarantined": "#F87171",
     "warning": "#FBBF24",
+    "not loaded": "#FBBF24",
     "disabled": "#94A3B8",
     "removed": "#94A3B8",
     "inactive": "#94A3B8",
@@ -2218,22 +2272,67 @@ def _format_mcp_detail(row: MCPRow) -> str:
         lines.append(f"  Verdict    {_esc(row.verdict)}")
     if row.reason:
         lines.append(f"  Reason     {_esc(row.reason)}")
+    if row.not_loaded:
+        lines.append(f"  Not loaded {_esc(row.not_loaded)}")
     lines.append("")
     lines.append(_mcp_action_legend(row.status))
     return "\n".join(lines)
 
 
-def _format_plugin_detail(row: PluginRow) -> str:
-    status = row.status or ("enabled" if row.enabled else "disabled")
-    enabled_label = "yes" if row.enabled else "no"
-    lines = [
-        f"[bold #22D3EE]Plugin[/] {_esc(row.display_name)}",
-        f"  Status     {_format_status(status)}    Enabled  {enabled_label}",
-    ]
+# A plugin description longer than this ends with "…" in the detail pane,
+# which is only a few rows high (GAP-2048); a line under it points to
+# o, then Info, which prints it in full; A opens that output (GAP-2314, GAP-2370).
+PLUGIN_DESCRIPTION_MAX = 160
+PLUGIN_DESCRIPTION_MORE = "  Full description: press o, then Info, then A for its output"
+
+
+# A plugin scan younger than this is "just scanned": the detail neither
+# offers a rescan nor sends the user to s to see its findings (GAP-2437).
+PLUGIN_RECENT_SCAN_MINUTES = 60
+
+
+def _scan_age_minutes(scanned_at: str, now: datetime | None = None) -> int | None:
+    """Minutes since a plugin scan time, or None when it doesn't parse."""
+
+    try:
+        when = datetime.strptime(scanned_at, "%Y-%m-%d %H:%M:%S UTC").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    return max(0, int(((now or datetime.now(timezone.utc)) - when).total_seconds() // 60))
+
+
+def _scanned_line(scanned_at: str, now: datetime | None = None) -> str:
+    """``2026-10-02 16:53Z (15 h ago)`` for a plugin scan time, or "".
+
+    A verdict from a scan many builds old read as current (GAP-2401).
+    """
+
+    minutes = _scan_age_minutes(scanned_at, now)
+    if minutes is None:
+        return _esc(scanned_at)
+    when = datetime.strptime(scanned_at, "%Y-%m-%d %H:%M:%S UTC").replace(tzinfo=timezone.utc)
+    if minutes < 60:
+        age = f"{minutes} min"
+    elif minutes < 48 * 60:
+        age = f"{minutes // 60} h"
+    else:
+        age = f"{minutes // (24 * 60)} d"
+    return f"{when:%Y-%m-%d %H:%M}Z ({age} ago)"
+
+
+def _format_plugin_detail(row: PluginRow, now: datetime | None = None) -> str:
+    status = _plugin_status(row)
+    status_line = f"  Status     {_format_status(status)}"
+    # "Status enabled  Enabled yes" said the same thing twice (GAP-2048).
+    if status.lower() not in {"enabled", "disabled"}:
+        status_line += f"    Enabled  {'yes' if row.enabled else 'no'}"
+    lines = [f"[bold #22D3EE]Plugin[/] {_esc(row.display_name)}", status_line]
     if row.version:
         lines.append(f"  Version    {_esc(row.version)}")
     if row.origin:
         lines.append(f"  Origin     {_esc(row.origin)}")
+    age = _scan_age_minutes(row.scan.scanned_at, now) if row.scan is not None and row.scan.scanned_at else None
+    recent_scan = age is not None and age < PLUGIN_RECENT_SCAN_MINUTES
     if row.scan is not None:
         # E4i: plugin scans carry the same per-severity breakdown; reuse
         # ``_scan_line`` (no target for plugins) so the rendering matches
@@ -2248,11 +2347,38 @@ def _format_plugin_detail(row: PluginRow) -> str:
                 row.scan.severity_counts,
             )
         )
-    if row.verdict and row.verdict not in {status, row.scan.max_severity if row.scan else ""}:
+        if row.scan.scanned_at:
+            scanned = f"  Scanned    {_scanned_line(row.scan.scanned_at, now)}"
+            if not recent_scan:
+                scanned += " · press s to rescan with this build"
+            lines.append(scanned)
+    if row.verdict == "rejected":
+        # Same meaning as the CLI scan's "policy: rejected" line (GAP-2048). q is not a
+        # row key (GAP-2111): Quarantine lives in the o actions menu.
+        lines.append(
+            "  Verdict    rejected: the policy refuses it at install; this copy still loads until you act (o, then Quarantine)"
+        )
+    elif row.verdict and row.verdict not in {status, row.scan.max_severity if row.scan else ""}:
         lines.append(f"  Verdict    {_esc(row.verdict)}")
+    if row.scan is not None and row.scan.total_findings > 0:
+        # The list payload has only the counts; say where the findings are.
+        flag = f" --connector {row.connector}" if row.connector else ""
+        command = f"defenseclaw plugin scan {_esc(row.id)}{_esc(flag)}"
+        if recent_scan:
+            # A scan run from here prints them in Activity (GAP-2437).
+            lines.append(f"  Findings   listed in the scan output (A), or run: {command}")
+        else:
+            lines.append(f"  Findings   press s to rescan and list them, or run: {command}")
     if row.description:
+        description = " ".join(row.description.split())
+        cut_off = len(description) > PLUGIN_DESCRIPTION_MAX
+        if cut_off:
+            cut = description[: PLUGIN_DESCRIPTION_MAX - 1].rsplit(" ", 1)[0].rstrip(" ,.;:")
+            description = f"{cut}\u2026"
         lines.append("")
-        lines.append(f"  {_esc(row.description)}")
+        lines.append(f"  {_esc(description)}")
+        if cut_off:
+            lines.append(f"[dim]{PLUGIN_DESCRIPTION_MORE}[/]")
     lines.append("")
     lines.append(_plugin_action_legend(row.verdict, status, row.enabled))
     return "\n".join(lines)

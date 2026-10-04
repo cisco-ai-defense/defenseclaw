@@ -91,6 +91,10 @@ class PlaneRow:
             # Running with a stated limit (a non-elevated gateway sees only
             # its own sockets) is partial coverage, as selftest says (GAP-1377).
             return "partial" if self.reason else "up"
+        if not _selected_plane_gap(self):
+            # An opt-in plane nobody selected is off, not a broken sensor
+            # (GAP-2102): "blind" read as a failure.
+            return "off"
         if self.available:
             return "idle"
         return "blind"
@@ -445,8 +449,20 @@ class RuntimePanelModel:
             context=self.findings_context(),
             top_findings=tuple(top),
             next_action=self.next_action(),
-            degraded_reason=self.degraded_reason(),
+            degraded_reason=self.degraded_summary(),
         )
+
+    def degraded_summary(self) -> str:
+        """The cause heads only ("shadow egress partially covered"), for Overview.
+
+        The full reasons ran 2-3 lines on Overview and told a standard user to
+        run the gateway elevated; the Runtime panel keeps the detail (GAP-2533).
+        """
+
+        if self.health_state() != "degraded" or not self.snapshot.degraded_reasons:
+            return self.degraded_reason()
+        heads = [reason.split(":", 1)[0].strip() for reason in self.snapshot.degraded_reasons]
+        return ", ".join(dict.fromkeys(head for head in heads if head))
 
     def degraded_reason(self) -> str:
         """Short cause for a DEGRADED badge; empty when not degraded."""
@@ -523,16 +539,26 @@ class RuntimePanelModel:
                 parts.append(f"{idle} selected but not running")
             if blind:
                 parts.append(f"{blind} cannot see the host")
+            off = [plane for plane in self.snapshot.planes if plane.badge == "off"]
+            if off:
+                parts.append(f"{len(off)} not selected")
             coverage = ", ".join(parts) or "one or more planes cannot watch the host"
             extra = ""
             if self.snapshot.degraded_reasons:
                 extra = " " + "; ".join(self.snapshot.degraded_reasons) + "."
             if short:
                 return f"DEGRADED means coverage is partial ({coverage}).{extra}"
+            # The how-to-enable hint ends in a command, so it goes last: text
+            # run on after it read as part of the command (GAP-2102).
+            enable_hint = "".join(
+                f" {plane.name.capitalize()} is off (not selected). {self.plane_fix(plane)}"
+                for plane in off
+            )
             return (
                 f"DEGRADED means coverage is partial ({coverage}).{extra} "
                 "Findings below are still valid for the planes that are up. "
                 "HEALTHY means every selected plane is watching."
+                + enable_hint
             )
         unobserved = self.inventory_unobserved_count()
         extra = ""

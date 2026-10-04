@@ -23,6 +23,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"net/url"
 	"os"
 	"regexp"
 	"strings"
@@ -34,6 +35,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/netguard"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
+	"github.com/defenseclaw/defenseclaw/internal/observability/delivery"
 )
 
 const (
@@ -43,9 +45,31 @@ const (
 	rejectionLogInterval    = time.Minute
 )
 
-// rejectionLogWriter is where rejected-export lines go. The gateway's stderr
-// is gateway.log. Tests replace it.
-var rejectionLogWriter io.Writer = os.Stderr
+// rejectionLogWriter is where rejected-export lines go when set (tests set
+// it). Otherwise they go to os.Stderr, read at write time: the daemon swaps
+// os.Stderr for the pipe that stamps each gateway.log line with a time after
+// this package is initialised (GAP-2343).
+var rejectionLogWriter io.Writer
+
+func rejectionLogOutput() io.Writer {
+	if rejectionLogWriter != nil {
+		return rejectionLogWriter
+	}
+	return os.Stderr
+}
+
+// itemUnit names the exported items: "span"/"spans" for traces,
+// "record"/"records" otherwise.
+func itemUnit(signal observability.Signal, count int) string {
+	unit := "record"
+	if signal == observability.SignalTraces {
+		unit = "span"
+	}
+	if count != 1 {
+		unit += "s"
+	}
+	return unit
+}
 
 var rejectionLogLimiter = struct {
 	sync.Mutex
@@ -116,29 +140,17 @@ func logHTTPRejection(destination string, signal observability.Signal, response 
 	if response == nil {
 		return
 	}
-	key := fmt.Sprintf("%s/%s/%d", destination, signal, response.StatusCode)
-	now := time.Now()
-	rejectionLogLimiter.Lock()
-	if last, ok := rejectionLogLimiter.last[key]; ok && now.Sub(last) < rejectionLogInterval {
-		rejectionLogLimiter.suppressed[key]++
-		rejectionLogLimiter.Unlock()
+	suppressed, ok := rejectionLogAdmit(fmt.Sprintf("%s/%s/%d", destination, signal, response.StatusCode))
+	if !ok {
 		return
 	}
-	suppressed := rejectionLogLimiter.suppressed[key]
-	rejectionLogLimiter.last[key] = now
-	rejectionLogLimiter.suppressed[key] = 0
-	rejectionLogLimiter.Unlock()
 
 	var body []byte
 	if response.Body != nil {
 		body, _ = io.ReadAll(io.LimitReader(response.Body, rejectionBodyReadBytes))
 	}
-	unit := "records"
-	if signal == observability.SignalTraces {
-		unit = "spans"
-	}
 	line := fmt.Sprintf("[observability] %s %s export rejected: HTTP %d (%d %s",
-		safeLogToken(destination), signal, response.StatusCode, itemCount, unit)
+		safeLogToken(destination), signal, response.StatusCode, itemCount, itemUnit(signal, itemCount))
 	if len(names) > 0 {
 		line += ": " + strings.Join(names, ", ")
 	}
@@ -149,7 +161,100 @@ func logHTTPRejection(destination string, signal observability.Signal, response 
 	if suppressed > 0 {
 		line += fmt.Sprintf(" [%d similar in the last minute not logged]", suppressed)
 	}
-	_, _ = fmt.Fprintln(rejectionLogWriter, line)
+	_, _ = fmt.Fprintln(rejectionLogOutput(), line)
+}
+
+// logPartialRejection writes one gateway.log line when the collector accepted
+// the export but rejected some or all of its items (an OTLP partial success).
+// Galileo answers that way when it cannot read a span, and the reason used to
+// show only as "permanent payload (unspecified)" in doctor, with nothing in
+// gateway.log (GAP-2532). At most one line per destination and signal per
+// minute; the reason is scrubbed and shortened like an HTTP rejection's.
+func logPartialRejection(destination string, signal observability.Signal, rejected, total int, message string) {
+	suppressed, ok := rejectionLogAdmit(fmt.Sprintf("%s/%s/partial", destination, signal))
+	if !ok {
+		return
+	}
+	line := fmt.Sprintf("[observability] %s %s export partly rejected by the collector: %d of %d %s refused",
+		safeLogToken(destination), signal, rejected, total, itemUnit(signal, total))
+	if reason := scrubRejectionText(message); reason != "" {
+		line += ": " + reason
+	}
+	if suppressed > 0 {
+		line += fmt.Sprintf(" [%d similar in the last minute not logged]", suppressed)
+	}
+	_, _ = fmt.Fprintln(rejectionLogOutput(), line)
+}
+
+// rejectionLogAdmit applies the once-a-minute limit for key. It reports
+// whether a line may be written and how many were skipped since the last one.
+func rejectionLogAdmit(key string) (int, bool) {
+	now := time.Now()
+	rejectionLogLimiter.Lock()
+	defer rejectionLogLimiter.Unlock()
+	if last, ok := rejectionLogLimiter.last[key]; ok && now.Sub(last) < rejectionLogInterval {
+		rejectionLogLimiter.suppressed[key]++
+		return 0, false
+	}
+	suppressed := rejectionLogLimiter.suppressed[key]
+	rejectionLogLimiter.last[key] = now
+	rejectionLogLimiter.suppressed[key] = 0
+	return suppressed, true
+}
+
+// logTransportFailure writes one gateway.log line when an export gets no
+// HTTP response at all (DNS, connect, proxy or timeout), so a destination
+// that doctor shows as delivery_failed also leaves a trace in gateway.log
+// (GAP-2299). The line names the endpoint and the path the gateway took to
+// it: through the proxy it was started with, which is often not the proxy of
+// the shell where 'destination test' runs, or directly when no proxy covers
+// the endpoint, where proxy advice would mislead (GAP-2375). At most one
+// line per destination, signal and failure code per minute.
+func logTransportFailure(destination string, signal observability.Signal, code delivery.FailureCode, itemCount int, endpoint string, proxied bool) {
+	suppressed, ok := rejectionLogAdmit(fmt.Sprintf("%s/%s/%s", destination, signal, code))
+	if !ok {
+		return
+	}
+	target := "the endpoint"
+	if endpoint != "" {
+		target = endpoint
+	}
+	line := fmt.Sprintf("[observability] %s %s export failed: %s (%d %s); ", safeLogToken(destination), signal,
+		code, itemCount, itemUnit(signal, itemCount))
+	if proxied {
+		line += "the gateway connects to " + target + " through the proxy it was started with " +
+			"(HTTPS_PROXY/NO_PROXY), so check that path and restart the gateway from a shell with the " +
+			"right proxy settings"
+	} else {
+		line += "the gateway connects directly to " + target + " (no proxy), so check that the " +
+			"collector is running there and reachable from this host"
+	}
+	if suppressed > 0 {
+		line += fmt.Sprintf(" [%d similar in the last minute not logged]", suppressed)
+	}
+	_, _ = fmt.Fprintln(rejectionLogOutput(), line)
+}
+
+// proxyReporter is a dialer that can say whether it reaches a destination
+// through a proxy (the gateway's telemetry egress dialer).
+type proxyReporter interface {
+	Proxies(target *url.URL) (bool, error)
+}
+
+// transportRoute returns the endpoint host:port of config and whether its
+// dialer sends that endpoint through a proxy. The HTTP transport never uses
+// a proxy itself, so a dialer that cannot tell connects directly.
+func transportRoute(config signalConfig) (string, bool) {
+	if config.url == nil {
+		return "", false
+	}
+	endpoint := config.url.Host
+	reporter, ok := config.dialer.(proxyReporter)
+	if !ok {
+		return endpoint, false
+	}
+	proxied, err := reporter.Proxies(&url.URL{Scheme: "https", Host: endpoint})
+	return endpoint, err == nil && proxied
 }
 
 // rejectionReason extracts a short, scrubbed reason from an OTLP error body:

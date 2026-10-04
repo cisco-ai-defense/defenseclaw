@@ -97,6 +97,7 @@ class RegistrySourceRow:
     warning_count: int = 0
     blocked_count: int = 0
     error_count: int = 0
+    rejected_count: int = 0
     index_error: str = ""
 
     @property
@@ -108,6 +109,19 @@ class RegistrySourceRow:
         if self.index_error:
             return f"cache error: {self.index_error}"
         return self.last_status or "-"
+
+    @property
+    def table_status_label(self) -> str:
+        """The Sources table shows only "error" or "cache error" for a failure.
+
+        A full sync error in the Status column pushed Entries, C/W/B/E and
+        Last Sync off an 80-column screen (GAP-2347). Enter (the detail view)
+        and the A output keep the whole message.
+        """
+
+        label = self.status_label
+        head, sep, _rest = label.partition(":")
+        return head.strip() if sep and head.strip() else label
 
 
 class RegistriesPanelModel:
@@ -299,14 +313,22 @@ class RegistriesPanelModel:
             # selected entry's asset type (parity with `registry require`).
             # Not on ``R``: that is the Registries tab key, and pressing it
             # again must never start a policy change (GAP-1152).
+            # Approval is required per content type, so on Sources the
+            # selected source's content type is enough (GAP-2051).
             row = self.selected_entry()
-            if row is None:
-                return RegistryPanelAction(True, hint="(no entry selected)")
-            if row.type not in {"skill", "mcp"}:
+            source = self.selected_source()
+            asset_type = row.type if row is not None else (source.content if source is not None else "")
+            if not asset_type:
+                return RegistryPanelAction(True, hint="(no entry or source selected)")
+            if asset_type not in {"skill", "mcp"}:
                 return RegistryPanelAction(True, hint="(registry require supports skill/mcp only)")
             return RegistryPanelAction(
                 True,
-                require_entry_intent(row, currently_required=self._registry_required(row.type)),
+                require_type_intent(
+                    asset_type,
+                    currently_required=self._registry_required(asset_type),
+                    **self._asset_policy_state(),
+                ),
             )
         if key == "d":
             if self.current_tab != RegistriesTab.SOURCES:
@@ -320,37 +342,51 @@ class RegistriesPanelModel:
     def data_table_columns(self) -> tuple[str, ...]:
         if self.current_tab == RegistriesTab.SOURCES:
             # Verdict counts share one clean/warn/block/error ("C/W/B/E") column so the
-            # table fits 80 columns instead of clipping "Error" (GAP-1166).
-            return ("ID", "Kind", "Content", "On", "Last Sync", "Status", "Entries", "C/W/B/E")
+            # table fits 80 columns instead of clipping "Error" (GAP-1166). The
+            # counts come before Last Sync: at 80 columns a sync time cut
+            # them to "1/0" (GAP-2315); the detail has the full time.
+            return ("ID", "Kind", "Content", "On", "Status", "Entries", "C/W/B/E", "Last Sync")
         return ("Source", "Name", "Type", "Status", "Severity", "A/R", "Location")
 
-    def data_table_rows(self) -> tuple[tuple[str, ...], ...]:
+    def data_table_rows(self, width: int = 0) -> tuple[tuple[str, ...], ...]:
+        """Table rows; ``width`` (cells, 0 = unknown) fits the Sources table."""
+
         if self.current_tab == RegistriesTab.SOURCES:
-            return tuple(
+            rows = tuple(
                 (
                     row.id,
                     row.kind,
                     row.content,
                     row.enabled_label,
-                    row.last_sync or "(never)",
-                    row.status_label,
+                    row.table_status_label,
                     str(row.entry_count),
                     f"{row.clean_count}/{row.warning_count}/{row.blocked_count}/{row.error_count}",
+                    _short_sync_time(row.last_sync) or "(never)",
                 )
                 for row in self.sources
             )
+            return _fit_source_rows(self.data_table_columns(), rows, width)
         return tuple(
             (
                 row.source_id,
                 row.name,
                 row.type,
                 row.status or "-",
-                row.severity or "-",
+                entry_severity_label(row),
                 row.approval_marker,
                 row.location,
             )
             for row in self.visible_entries()
         )
+
+    def status_note(self) -> str:
+        """Where to read a failed source's full status (GAP-2347)."""
+
+        if self.current_tab == RegistriesTab.SOURCES and any(
+            row.table_status_label != row.status_label for row in self.sources
+        ):
+            return "Enter on a source shows its full error."
+        return ""
 
     def empty_state(self) -> str:
         if self.row_count() > 0:
@@ -379,6 +415,22 @@ class RegistriesPanelModel:
             entry_type, name = self._filter_entry_key
             rows = [row for row in rows if row.type == entry_type and row.name == name]
         return tuple(rows)
+
+    def _asset_policy_state(self) -> dict[str, Any]:
+        """The live asset policy on/off, mode and active connector count."""
+        asset_policy = _get_attr(self.config, "asset_policy", "AssetPolicy", default=None)
+        enabled = bool(_get_attr(asset_policy, "enabled", "Enabled", default=False))
+        effective_mode = getattr(asset_policy, "effective_mode", None)
+        try:
+            mode = str(effective_mode("") if callable(effective_mode) else "observe")
+        except (AttributeError, TypeError, ValueError):
+            mode = "observe"
+        active_connectors = getattr(self.config, "active_connectors", None)
+        try:
+            count = len(tuple(active_connectors())) if callable(active_connectors) else 0
+        except (AttributeError, TypeError, ValueError):
+            count = 0
+        return {"policy_enabled": enabled, "policy_mode": mode, "connector_count": count}
 
     def _registry_required(self, asset_type: str) -> bool:
         """Return whether every active connector effectively requires it.
@@ -438,6 +490,50 @@ SYNC_CONSEQUENCE = (
     "Fetches the source, scans each entry and promotes clean or approved entries into policy. "
     "A remote MCP scan connects to the server and runs the MCP scanner, so it can take up to a minute."
 )
+# Sync all names every source and the per-entry cost (GAP-2542).
+SYNC_ALL_CONSEQUENCE = (
+    "Fetches every enabled source, scans each entry and promotes clean or approved entries into policy. "
+    "A remote MCP scan connects to the server and runs the MCP scanner, so it can take up to a minute "
+    "per remote MCP entry."
+)
+
+
+def _short_sync_time(value: str) -> str:
+    """``2026-10-03T06:17:21Z`` as ``2026-10-03 06:17Z`` for the Sources table."""
+
+    text = (value or "").strip()
+    if len(text) >= 16 and text[10:11] == "T" and text.endswith("Z"):
+        return f"{text[:10]} {text[11:16]}Z"
+    return text
+
+
+# Shortest ID the Sources table cuts to; the detail (Enter) has the full ID.
+_MIN_ID_CELLS = 8
+
+
+def _fit_source_rows(
+    columns: tuple[str, ...], rows: tuple[tuple[str, ...], ...], width: int
+) -> tuple[tuple[str, ...], ...]:
+    """Sources rows that fit ``width`` cells: a longer ID cut Last Sync to
+    "2026-10-03 07:" at 80 columns (GAP-2365). The time drops its year
+    first ("10-03 07:45Z"), then the ID is cut ("rs3r8-lon…"). The detail
+    view keeps both in full.
+    """
+
+    def need(table: tuple[tuple[str, ...], ...]) -> int:
+        # DataTable pads every cell by one column on each side; the last
+        # column's right pad may be cut.
+        return sum(max(map(len, column)) + 2 for column in zip(columns, *table, strict=True)) - 1
+
+    if width <= 0 or not rows or need(rows) <= width:
+        return rows
+    last = len(columns) - 1
+    rows = tuple((*row[:last], row[last][5:] if row[last][4:5] == "-" else row[last]) for row in rows)
+    over = need(rows) - width
+    if over <= 0:
+        return rows
+    cells = max(_MIN_ID_CELLS, max(len(row[0]) for row in rows) - over)
+    return tuple((row[0] if len(row[0]) <= cells else f"{row[0][: cells - 1]}…", *row[1:]) for row in rows)
 
 
 def sync_source_intent(source_id: str) -> RegistryCommandIntent:
@@ -454,7 +550,7 @@ def sync_all_intent() -> RegistryCommandIntent:
         label="registry sync --all",
         args=("registry", "sync", "--all", "--json"),
         hint="Syncing all enabled sources ...",
-        consequence=SYNC_CONSEQUENCE,
+        consequence=SYNC_ALL_CONSEQUENCE,
     )
 
 
@@ -463,6 +559,11 @@ def approve_entry_intent(row: RegistryEntryRow) -> RegistryCommandIntent:
         label=f"registry approve {row.source_id} {row.name}",
         args=("registry", "approve", row.source_id, row.name, "--type", row.type, "--json"),
         hint=f"Approving {row.name}",
+        # The modal names the effect, as Sync and Require do (GAP-2051).
+        consequence=(
+            f"Approved entries are promoted even without a clean scan and stay approved across syncs; "
+            f"{row.name} is promoted into policy now."
+        ),
     )
 
 
@@ -471,6 +572,9 @@ def reject_entry_intent(row: RegistryEntryRow) -> RegistryCommandIntent:
         label=f"registry reject {row.source_id} {row.name}",
         args=("registry", "reject", row.source_id, row.name, "--type", row.type, "--json"),
         hint=f"Rejecting {row.name}",
+        consequence=(
+            f"Rejected entries are never promoted; any policy rule this source gave {row.name} is cleared now."
+        ),
     )
 
 
@@ -479,10 +583,26 @@ def remove_source_intent(source_id: str) -> RegistryCommandIntent:
         label=f"registry remove {source_id}",
         args=("registry", "remove", source_id, "--non-interactive", "--json"),
         hint=f"Removing {source_id}",
+        # Say what goes with the source, as Sync and Approve do (GAP-2229).
+        consequence=(
+            f"Removes source {source_id} from config, drops the policy rules it promoted "
+            "and deletes its cached entries. Add and sync it again to bring them back."
+        ),
     )
 
 
 def require_entry_intent(row: RegistryEntryRow, *, currently_required: bool) -> RegistryCommandIntent:
+    return require_type_intent(row.type, currently_required=currently_required)
+
+
+def require_type_intent(
+    asset_type: str,
+    *,
+    currently_required: bool,
+    policy_enabled: bool = True,
+    policy_mode: str = "action",
+    connector_count: int = 0,
+) -> RegistryCommandIntent:
     """Toggle ``asset_policy.<type>.registry_required`` for the row's asset type (E4h).
 
     Parity with the ``registry require`` CLI (``cmd_registry.py``): the TUI
@@ -493,19 +613,40 @@ def require_entry_intent(row: RegistryEntryRow, *, currently_required: bool) -> 
     otherwise. ``registry require`` only supports skill/mcp (the sync/promote
     pipeline never populates the plugin registry), so the caller gates on the
     asset type before building this intent.
+
+    ``policy_enabled``/``policy_mode`` are the live asset policy: the
+    requirement only refuses anything while the policy is on in action mode,
+    so the confirm says so as the CLI does (GAP-2119, GAP-2512).
     """
     flag = "--disabled" if currently_required else "--enabled"
+    enforcing = policy_enabled and policy_mode.strip().lower() == "action"
+    scope = (
+        f" Applies to every active connector ({connector_count})." if connector_count > 1 else ""
+    )
     if currently_required:
-        hint = f"Making registry approval optional for {row.type} assets"
+        hint = f"Making registry approval optional for {asset_type} assets"
+        consequence = f"{hint}.{scope}"
+    elif enforcing:
+        hint = f"Requiring registry approval: any {asset_type} not approved in a registry will be refused"
+        consequence = f"{hint}.{scope}"
     else:
-        hint = f"Requiring registry approval: any {row.type} not approved in a registry will be refused"
+        hint = f"Requiring registry approval for {asset_type} assets"
+        noun = "an MCP server" if asset_type == "mcp" else f"a {asset_type}"
+        if not policy_enabled:
+            state = "Asset policy is off: nothing is blocked yet, and"
+        else:
+            state = f"Asset policy mode is {policy_mode or 'observe'}: nothing is blocked yet, and"
+        consequence = (
+            f"{hint}.{scope} {state} {noun} not in a registry is still added. "
+            f"Turn enforcement on with: defenseclaw registry require --type {asset_type} --enabled --enforce"
+        )
     return RegistryCommandIntent(
-        label=f"registry require --type {row.type} {flag}",
-        args=("registry", "require", "--type", row.type, flag, "--json"),
+        label=f"registry require --type {asset_type} {flag}",
+        args=("registry", "require", "--type", asset_type, flag, "--json"),
         hint=hint,
         # The status bar is hidden behind the modal, so the modal itself
         # names the consequence (GAP-1281).
-        consequence=f"{hint}.",
+        consequence=consequence,
     )
 
 
@@ -519,8 +660,8 @@ def registry_badge(source_id: str, *, max_id_chars: int = 18) -> str:
 
 
 def source_detail_info(source: RegistrySourceRow, data_dir: str | Path | None = None) -> RegistryDetailInfo:
+    # The title already names the source (GAP-2402).
     fields: list[tuple[str, str]] = [
-        ("Source ID", source.id),
         ("Kind", source.kind),
         ("Content", source.content),
         ("Enabled", source.enabled_label),
@@ -538,6 +679,7 @@ def source_detail_info(source: RegistrySourceRow, data_dir: str | Path | None = 
             ("Warnings", str(source.warning_count)),
             ("Blocked", str(source.blocked_count)),
             ("Errors", str(source.error_count)),
+            ("Rejected", str(source.rejected_count)),
         )
     )
     if source.index_error:
@@ -548,6 +690,15 @@ def source_detail_info(source: RegistrySourceRow, data_dir: str | Path | None = 
         except Exception as exc:  # noqa: BLE001 - detail view should surface unsafe configured IDs.
             fields.append(("Cache Safety", str(exc)))
     return RegistryDetailInfo(f"SOURCE: {source.id}", tuple(fields))
+
+
+def entry_severity_label(entry: RegistryEntryRow) -> str:
+    """The severity word ``mcp list`` uses: CLEAN, not INFO, with no findings (GAP-2402)."""
+
+    severity = (entry.severity or "").strip()
+    if entry.findings == 0 and severity.upper() in {"", "INFO", "NONE", "CLEAN"}:
+        return "CLEAN" if entry.status == "clean" else "-"
+    return severity or "-"
 
 
 def entry_status_label(status: str) -> str:
@@ -563,11 +714,44 @@ def registry_result_summary(output: str) -> str:
     The TUI runs registry commands with ``--json``, so the last output line
     is a bare ``]`` or ``}`` (GAP-1681). Returns "" when ``output`` is not a
     registry result.
+
+    The output also holds stderr, so a change to asset_policy adds the
+    gateway restart line next to the JSON; the summary keeps the result and
+    adds the restart outcome (GAP-2499).
     """
-    try:
-        data = json.loads(output)
-    except ValueError:
+    found = _json_document(output)
+    if found is None:
         return ""
+    data, other = found
+    text = _registry_data_summary(data)
+    if not text:
+        return ""
+    if "gateway restart failed" in other:
+        return f"{text} · gateway restart failed; run: defenseclaw-gateway restart"
+    if "defenseclaw-gateway: restarting" in other:
+        return f"{text} · gateway restarted"
+    return text
+
+
+def _json_document(output: str) -> tuple[Any, str] | None:
+    """The first JSON document in ``output`` and the text around it."""
+    decoder = json.JSONDecoder()
+    offset = 0
+    for line in output.splitlines(keepends=True):
+        stripped = line.lstrip()
+        if stripped[:1] in ("{", "["):
+            start = offset + len(line) - len(stripped)
+            try:
+                data, end = decoder.raw_decode(output, start)
+            except ValueError:
+                pass
+            else:
+                return data, output[:start] + output[end:]
+        offset += len(line)
+    return None
+
+
+def _registry_data_summary(data: Any) -> str:
     if isinstance(data, list):
         if not data:
             return "nothing to sync"
@@ -592,7 +776,14 @@ def registry_result_summary(output: str) -> str:
         return f"removed source {data['source_id']}"
     if "registry_required" in data and data.get("asset_type"):
         state = "required" if data["registry_required"] else "optional"
-        return f"registry approval now {state} for {data['asset_type']} assets"
+        text = f"registry approval now {state} for {data['asset_type']} assets"
+        if data["registry_required"] and data.get("enforcing") is False:
+            # GAP-2512: nothing is refused while asset policy is off/observe.
+            if data.get("asset_policy_enabled") is False:
+                text += " · not enforced: asset policy is off"
+            else:
+                text += f" · not enforced: asset policy mode is {data.get('asset_policy_mode') or 'observe'}"
+        return text
     return ""
 
 
@@ -626,11 +817,11 @@ def _int(value: object) -> int:
 
 def entry_detail_info(entry: RegistryEntryRow) -> RegistryDetailInfo:
     fields: list[tuple[str, str]] = [
+        # The title already names the entry (GAP-2229).
         ("Source ID", entry.source_id),
-        ("Name", entry.name),
         ("Type", entry.type),
         ("Status", entry_status_label(entry.status)),
-        ("Severity", entry.severity or "-"),
+        ("Severity", entry_severity_label(entry)),
         ("Findings", str(entry.findings)),
         ("Approved", "yes" if entry.approved else "no"),
         ("Rejected", "yes" if entry.rejected else "no"),
@@ -644,8 +835,9 @@ def entry_detail_info(entry: RegistryEntryRow) -> RegistryDetailInfo:
         fields.append(("URL", entry.url))
     if entry.source_url:
         fields.append(("Source URL", entry.source_url))
-    if entry.location:
+    if entry.location and entry.location != entry.url:
         fields.append(("Location", entry.location))
+    fields.append(("Keys", "a approve | x reject | e require approval | Esc close"))
     return RegistryDetailInfo(f"{entry.type.upper()}: {entry.name}", tuple(fields))
 
 
@@ -676,6 +868,7 @@ def _attach_index(row: RegistrySourceRow, index: SourceIndex | None, index_error
         warning_count=index.warning_count,
         blocked_count=index.blocked_count,
         error_count=index.error_count,
+        rejected_count=index.rejected_count,
         index_error=index_error,
     )
 

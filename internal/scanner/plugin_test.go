@@ -253,15 +253,14 @@ func TestPluginScanner_Integration(t *testing.T) {
 		t.Skipf("skipping: target %s not found", target)
 	}
 
+	// The Go caller records every scan it runs, so the CLI child must not
+	// emit the same scan a second time (GAP-2482).
 	awaitEmission := func(scanName string) {
 		t.Helper()
 		select {
-		case payload := <-emitted:
-			if len(payload) == 0 {
-				t.Fatalf("%s canonical CLI scan admission payload was empty", scanName)
-			}
-		case <-time.After(3 * time.Second):
-			t.Fatalf("%s canonical CLI scan admission was not attempted", scanName)
+		case <-emitted:
+			t.Fatalf("%s scan was recorded by the CLI child as well as the caller", scanName)
+		case <-time.After(500 * time.Millisecond):
 		}
 	}
 

@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -127,7 +128,7 @@ var policyTestCmd = &cobra.Command{
 
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
-		results, err := tester.Run(ctx, regoDir)
+		results, err := tester.Run(ctx, opaLoaderPath(regoDir))
 		if err != nil {
 			return fmt.Errorf("policy test: %w", err)
 		}
@@ -162,6 +163,17 @@ var policyTestCmd = &cobra.Command{
 func noRegoTestsMessage(regoDir string) string {
 	return fmt.Sprintf("No Rego unit tests (*_test.rego) in %s; nothing to run. "+
 		"Add <module>_test.rego files next to your policies to test them.", regoDir)
+}
+
+// opaLoaderPath keeps OPA from reading a Windows drive letter as its
+// "<data-prefix>:<path>" syntax: "C:\x" would load "\x" under data.C and
+// fail to find it. A file:// URL has no such prefix and OPA cleans it back
+// to "C:/x".
+func opaLoaderPath(dir string) string {
+	if !strings.Contains(filepath.VolumeName(dir), ":") {
+		return dir
+	}
+	return (&url.URL{Scheme: "file", Path: "/" + filepath.ToSlash(dir)}).String()
 }
 
 // policyCommandRegoDir returns --rego-dir when given, else the configured

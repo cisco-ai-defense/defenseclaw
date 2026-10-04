@@ -201,6 +201,11 @@ type GatewayConfigurator struct {
 	// every ready sandbox, and an error refuses the restart (default:
 	// discover the Discover registration, dial it and FlushSandboxes).
 	FlushSandboxes func(context.Context) error
+	// ServiceDockerGroupMissing reports that the systemd user manager that
+	// runs the gateway service lacks the user's docker group, which a
+	// restarted gateway that does not come up names (Linux; default
+	// ServiceManagerMissesDockerGroup).
+	ServiceDockerGroupMissing func() bool
 }
 
 // gatewayExecutable is the openshell-gateway that preflights gateway.toml:
@@ -1464,6 +1469,13 @@ func (g *GatewayConfigurator) restart(ctx context.Context) error {
 		return fmt.Errorf("%w: %v: %s", errRestartCommand, err, strings.TrimSpace(string(out)))
 	}
 	if err := g.VerifyGateway(ctx); err != nil {
+		missing := g.ServiceDockerGroupMissing
+		if missing == nil {
+			missing = ServiceManagerMissesDockerGroup
+		}
+		if g.GOOS == "linux" && missing() {
+			return fmt.Errorf("openshell: the restarted gateway is not healthy: %w; %s", err, serviceManagerDockerGroupHint())
+		}
 		return fmt.Errorf("openshell: the restarted gateway is not healthy: %w", err)
 	}
 	g.clearRestartPending()

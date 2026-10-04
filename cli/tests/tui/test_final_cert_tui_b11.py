@@ -93,7 +93,7 @@ def test_tab_bar_below_80_columns_keeps_the_alerts_count(monkeypatch) -> None:
         for width in range(50, 66):
             labels = fit_tab_labels(PANELS, active, unread, width)
             assert strip_width(tuple(labels.values())) <= width
-            assert "⁷" in labels["alerts"], (active, width, labels["alerts"])
+            assert labels["alerts"].endswith(("⁷", "(7)")), (active, width, labels["alerts"])
             name = labels[active].removeprefix(key).strip()
             assert len(name) >= previous, (active, width, labels[active])
             previous = len(name)
@@ -132,3 +132,35 @@ async def test_status_result_and_filter_prompt_do_not_stick(tmp_path) -> None:
         sections = dict(app._help_sections())  # noqa: SLF001
         overview = [desc for key, desc in sum(sections.values(), []) if key == "m"]
         assert overview and not any("(Overview, Alerts, Audit, Logs)" in desc for desc in overview)
+
+
+def test_tab_bar_names_tabs_before_minor_badges_and_brand(tmp_path, monkeypatch) -> None:
+    # GAP-2150: at 124-136 strip cells five or six tabs were bare keys while
+    # the Logs 999+ / Audit badges and the brand stayed, and a wider strip
+    # named fewer tabs than a narrower one.
+    from textual.geometry import Size
+
+    monkeypatch.setattr(tab_fit, "_PLAIN_BADGE", False)
+    unread = {"alerts": 22, "audit": 13, "logs": 1000}
+    for active in ("registries", "setup", "overview"):
+        previous = len(PANELS)
+        # From 67 cells (wider than NARROW_STRIP) other tabs keep one label
+        # whichever tab is open (GAP-2078); at that step one tab can give up
+        # its name, so the check starts there.
+        for width in range(tab_fit.NARROW_STRIP + 1, 180):
+            labels = fit_tab_labels(PANELS, active, unread, width)
+            assert strip_width(tuple(labels.values())) <= width
+            bare = sum(" " not in label for label in labels.values())
+            assert bare <= previous, (active, width, labels)
+            previous = bare
+    labels = fit_tab_labels(PANELS, "registries", unread, 136)
+    # Other tabs keep one label whichever tab is open (GAP-2078), which
+    # costs one name here: three bare keys, not five to seven.
+    assert sum(" " not in label for label in labels.values()) <= 3
+    assert labels["registries"] == "R Registries" and "²²" in labels["alerts"]
+
+    app = snapshot_app(tmp_path)
+    # GAP-2517: the brand waits until every tab keeps its full name beside it.
+    for width, brand in ((150, False), (157, False), (175, False), (260, True)):
+        monkeypatch.setattr(type(app), "size", property(lambda _self, width=width: Size(width, 45)))
+        assert bool(app._header_title()) is brand, width  # noqa: SLF001 - brand rule under test.

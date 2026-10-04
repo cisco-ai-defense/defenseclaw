@@ -71,7 +71,10 @@ All five run under one Compose project (`defenseclaw-observability`). They share
     defenseclaw observability destination test local-observability
     ```
 
-    The default test is a non-mutating protocol handshake. Even the explicit
+    The default test is a non-mutating protocol handshake. For an OTLP/HTTP
+    destination with a configured key or token it also sends one empty export
+    (no spans, logs or metrics), so a key the endpoint rejects fails the test
+    with `authentication_failed`. Even the explicit
     `--write-probe` bypasses normal collection, routing, SQLite event history,
     and dashboard counts. The command does persist a separate bounded,
     local-only compliance record of the attempt and outcome. Use

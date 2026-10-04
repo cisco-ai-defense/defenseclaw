@@ -38,7 +38,10 @@ type gatewayProcess struct {
 
 // gatewayProcesses lists the running defenseclaw-gateway processes other
 // than the managed binary: on Linux from /proc/<pid>/exe, on macOS from ps
-// (as root both see every process).
+// and the executable path the kernel recorded for each candidate (as root
+// both see every process). ps reports argv[0], so the managed binary run by
+// its bare name (an admin's repair or status) looks like any other
+// defenseclaw-gateway there (GAP-2245).
 func (e *Env) gatewayProcesses(ctx context.Context) []gatewayProcess {
 	var all []gatewayProcess
 	switch e.GOOS {
@@ -79,13 +82,31 @@ func (e *Env) gatewayProcesses(ctx context.Context) []gatewayProcess {
 			if pidErr != nil || uidErr != nil {
 				continue
 			}
-			all = append(all, gatewayProcess{PID: pid, UID: uid, Path: strings.Join(fields[2:], " ")})
+			path := strings.Join(fields[2:], " ")
+			if filepath.Base(path) != "defenseclaw-gateway" {
+				continue
+			}
+			if exe, err := e.ProcessExecPath(pid); err == nil && filepath.IsAbs(exe) {
+				path = exe
+			} else if !filepath.IsAbs(path) {
+				// Neither names the binary: it may be the managed one.
+				continue
+			}
+			if resolved, err := filepath.EvalSymlinks(path); err == nil {
+				path = resolved
+			}
+			all = append(all, gatewayProcess{PID: pid, UID: uid, Path: path})
 		}
 	}
 	managedGateway := filepath.Join(e.Layout.BinDir, "defenseclaw-gateway")
+	resolvedManaged, err := filepath.EvalSymlinks(managedGateway)
+	if err != nil {
+		resolvedManaged = managedGateway
+	}
 	var out []gatewayProcess
 	for _, process := range all {
-		if filepath.Base(process.Path) != "defenseclaw-gateway" || filepath.Clean(process.Path) == managedGateway || process.PID == os.Getpid() {
+		path := filepath.Clean(process.Path)
+		if filepath.Base(path) != "defenseclaw-gateway" || path == managedGateway || path == resolvedManaged || process.PID == os.Getpid() {
 			continue
 		}
 		out = append(out, process)

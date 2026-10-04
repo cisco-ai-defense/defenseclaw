@@ -424,8 +424,11 @@ def test_windows_pid_integrity_checks_every_replaceable_ancestor(
     monkeypatch.setattr(
         file_permissions,
         "windows_acl_custody_write_error",
-        lambda path, *, allow_current_user, require_current_user_owner=False: inspected.append(
-            f"{os.path.normpath(os.fspath(path))}:{allow_current_user}:{require_current_user_owner}"
+        lambda path, *, allow_current_user, require_current_user_owner=False, ancestor_replace_only=False: (
+            inspected.append(
+                f"{os.path.normpath(os.fspath(path))}:{allow_current_user}:"
+                f"{require_current_user_owner}:{ancestor_replace_only}"
+            )
         ),
     )
 
@@ -435,12 +438,50 @@ def test_windows_pid_integrity_checks_every_replaceable_ancestor(
     )
 
     assert (status, problem) == ("ok", "")
-    expected = [f"{os.path.normpath(os.fspath(pid_file))}:True:True"]
+    expected = [f"{os.path.normpath(os.fspath(pid_file))}:True:True:False"]
     ancestor = pid_file.parent
     while ancestor.parent != ancestor:
-        expected.append(f"{os.path.normpath(os.fspath(ancestor))}:True:False")
+        expected.append(f"{os.path.normpath(os.fspath(ancestor))}:True:False:True")
         ancestor = ancestor.parent
     assert inspected == expected
+
+
+@pytest.mark.parametrize(
+    ("permissions", "expected_status"),
+    [
+        (0x00000004 | 0x00000002, "ok"),  # inherited Users (CI)(AD)/(WD): create-child only.
+        (0x00000040, "denied"),  # FILE_DELETE_CHILD can replace the record's folder.
+    ],
+)
+def test_windows_pid_integrity_ignores_create_child_on_second_volume_ancestor(
+    monkeypatch,
+    tmp_path,
+    permissions,
+    expected_status,
+):
+    """GAP-2615: DEFENSECLAW_HOME below Q:\\dch-root, which keeps the volume root's Users grants."""
+    pid_file = tmp_path / "dch-root" / "dch" / "gateway.pid"
+    pid_file.parent.mkdir(parents=True)
+    pid_file.write_text("4242", encoding="ascii")
+    info = pid_file.stat()
+    current_sid = "S-1-5-21-current"
+    shared_parent = os.path.normpath(os.fspath(pid_file.parent.parent))
+
+    def snapshot(path):
+        entries = [(0x001F01FF, 1, 0, current_sid)]
+        if os.path.normpath(os.fspath(path)) == shared_parent:
+            entries.append((permissions, 1, 0x02, "S-1-5-32-545"))
+        return current_sid, False, entries
+
+    monkeypatch.setattr(cmd_doctor.os, "name", "nt")
+    monkeypatch.setattr(file_permissions, "_windows_acl_snapshot", snapshot)
+    monkeypatch.setattr(file_permissions, "_windows_current_user_sid", lambda: current_sid)
+
+    status, problem = doctor_gateway._pid_record_integrity_error(os.fspath(pid_file), info)
+
+    assert status == expected_status
+    if expected_status == "denied":
+        assert "S-1-5-32-545" in problem
 
 
 def test_windows_gateway_data_dir_requires_current_user_owned_custody(

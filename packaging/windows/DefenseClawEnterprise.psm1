@@ -170,6 +170,10 @@ $script:DefenseClawRecoveryGatewayRefusal = $null
 # managed-hook lifecycle journal it could not retire (GAP-1322). Reset per
 # lifecycle run.
 $script:DefenseClawStaleLifecycleJournalRemoved = ''
+# Standalone: set when this run's managed-hook lifecycle capture wrote the
+# release's Cursor enterprise adapter back over a changed or deleted one
+# (GAP-2480). Reset per lifecycle run.
+$script:DefenseClawCursorAdapterRestored = $false
 # Standalone: what the rollback of a failed first install could not remove
 # (the managed-hook lifecycle retire report's leftovers). Reset per lifecycle
 # run.
@@ -9380,33 +9384,46 @@ function Remove-DefenseClawEmptyClaudeManagedSettingsFolders {
     }
 }
 
-# An elevated enterprise CLI run gives PowerShell a protected temp folder,
-# ProgramData\DefenseClaw-PowerShell-<32 hex>, and removes it when PowerShell
-# exits; a run stopped before that leaves it (GAP-1734). A purge removes every
-# such folder except the ones this run uses (its TEMP and the launching CLI's
-# folder, GAP-1853), and writes "path: reason" for each one it kept.
-function Remove-DefenseClawStalePowerShellTempDirectories {
-    param([Parameter(Mandatory)][string]$ProgramData)
+# An elevated enterprise CLI run stages the installer scripts in
+# ProgramData\DefenseClaw-Installer-<32 hex>, gives PowerShell a protected
+# temp folder, ProgramData\DefenseClaw-PowerShell-<32 hex>, and
+# install-enterprise.ps1 moves TEMP into Windows\Temp\DefenseClaw-Bootstrap-<32
+# hex>. Each run removes its own folders when it exits; a run stopped before
+# that leaves them (GAP-1734, GAP-2057). A purge removes every such folder
+# except the ones this run uses (its TEMP, the launching CLI's folder,
+# GAP-1853, and the folder this module was loaded from), and writes
+# "path: reason" for each one it kept.
+function Remove-DefenseClawStaleRunDirectories {
+    param(
+        [Parameter(Mandatory)][string]$ProgramData,
+        [Parameter(Mandatory)][string]$WindowsTemp
+    )
     $inUse = @(
-        @([string]$env:TEMP, [string]$script:DefenseClawLauncherTemp) |
+        @([string]$env:TEMP, [string]$script:DefenseClawLauncherTemp, [string]$PSScriptRoot) |
             Microsoft.PowerShell.Core\Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
             Microsoft.PowerShell.Core\ForEach-Object { $_.TrimEnd('\') + '\' }
     )
-    foreach ($item in @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $ProgramData -Force -Directory -Filter 'DefenseClaw-PowerShell-*' -ErrorAction SilentlyContinue)) {
-        $path = [string]$item.FullName
-        $prefix = $path.TrimEnd('\') + '\'
-        if ([string]$item.Name -cnotmatch '^DefenseClaw-PowerShell-[a-f0-9]{32}$' -or
-            @($inUse | Microsoft.PowerShell.Core\Where-Object {
-                $_.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)
-            }).Count -gt 0) {
-            continue
-        }
-        try {
-            Assert-DefenseClawPathAcl -Path $path -AllowedWriterSIDs @($script:SystemSID, $script:AdministratorsSID)
-            Remove-DefenseClawManagedTree -Path $path -RequiredBase $ProgramData -Label 'stale enterprise PowerShell temp'
-        }
-        catch {
-            "${path}: " + (ConvertTo-DefenseClawBoundedDiagnostic -Value $_.Exception.Message -MaxLength 512)
+    foreach ($scope in @(
+            @($ProgramData, 'DefenseClaw-PowerShell-', 'stale enterprise PowerShell temp'),
+            @($ProgramData, 'DefenseClaw-Installer-', 'stale enterprise installer staging'),
+            @($WindowsTemp, 'DefenseClaw-Bootstrap-', 'stale enterprise bootstrap environment'))) {
+        $parent, $prefix, $label = $scope
+        foreach ($item in @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $parent -Force -Directory -Filter ($prefix + '*') -ErrorAction SilentlyContinue)) {
+            $path = [string]$item.FullName
+            $pathPrefix = $path.TrimEnd('\') + '\'
+            if ([string]$item.Name -cnotmatch ('^' + [regex]::Escape($prefix) + '[a-f0-9]{32}$') -or
+                @($inUse | Microsoft.PowerShell.Core\Where-Object {
+                    $_.StartsWith($pathPrefix, [StringComparison]::OrdinalIgnoreCase)
+                }).Count -gt 0) {
+                continue
+            }
+            try {
+                Assert-DefenseClawPathAcl -Path $path -AllowedWriterSIDs @($script:SystemSID, $script:AdministratorsSID)
+                Remove-DefenseClawManagedTree -Path $path -RequiredBase $parent -Label $label
+            }
+            catch {
+                "${path}: " + (ConvertTo-DefenseClawBoundedDiagnostic -Value $_.Exception.Message -MaxLength 512)
+            }
         }
     }
 }
@@ -14814,6 +14831,10 @@ function Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand {
     if ([string]$report.phase -notin @($expectedPhase)) {
         throw "managed-hook lifecycle snapshot $Action returned invalid phase: $($report.phase)"
     }
+    $restored = $report.PSObject.Properties['cursor_adapter_restored']
+    if ($null -ne $restored -and $restored.Value -is [bool] -and [bool]$restored.Value) {
+        $script:DefenseClawCursorAdapterRestored = $true
+    }
     return $report
 }
 
@@ -14850,6 +14871,7 @@ function Set-DefenseClawRecoveryGatewayCandidate {
     $script:DefenseClawRecoveryGatewayRuns = @()
     $script:DefenseClawRecoveryGatewayRefusal = $null
     $script:DefenseClawStaleLifecycleJournalRemoved = ''
+    $script:DefenseClawCursorAdapterRestored = $false
     $script:DefenseClawRollbackLeftovers = @()
     $script:DefenseClawRecoveryActivationDeferrable = $false
     $script:DefenseClawRecoveryActivationDeferred = $false
@@ -18345,6 +18367,9 @@ function Get-DefenseClawLifecycleStatus {
             $status['stale_lifecycle_journal_removed'] =
                 $script:DefenseClawStaleLifecycleJournalRemoved
         }
+        if ($script:DefenseClawCursorAdapterRestored) {
+            $status['cursor_adapter_restored'] = $true
+        }
         # What a recovered failed first install's rollback left.
         if (@($script:DefenseClawRollbackLeftovers).Count -gt 0) {
             $status['rollback_leftovers'] = [string[]]@(
@@ -21545,7 +21570,7 @@ function Invoke-DefenseClawCommittedUninstallCleanup {
             # uninstall result's warnings.
             $machineStateRemaining = [string[]]@(
                 @($machineStateRemaining) +
-                @(Remove-DefenseClawStalePowerShellTempDirectories -ProgramData $script:ProgramData)
+                @(Remove-DefenseClawStaleRunDirectories -ProgramData $script:ProgramData -WindowsTemp ([IO.Path]::Combine($script:WindowsDirectory, 'Temp')))
             )
             $result |
                 Microsoft.PowerShell.Utility\Add-Member `

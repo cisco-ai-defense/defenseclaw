@@ -185,6 +185,27 @@ class TestAdditiveSetupCommand(unittest.TestCase):
             wait_for_connector_ready=True,
         )
 
+    def test_setup_waits_only_for_guarded_peers(self):
+        # GAP-1976: a peer turned off with `guardrail disable --connector` is
+        # never activated, so setup and rollback must not wait for it.
+        self._seed_map("claudecode", "codex", "cursor")
+        self.app.cfg.guardrail.connectors["codex"].enabled = False
+        self.app.cfg.guardrail.connectors["cursor"].enabled = False
+        with _setup_patches() as restart:
+            result = _invoke(["codex", "--yes"], self.app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("codex guardrail re-enabled", result.output)
+        self.assertTrue(self.app.cfg.guardrail.effective_enabled("codex"))
+        self.assertFalse(self.app.cfg.guardrail.effective_enabled("cursor"))
+        self.assertEqual(restart.call_args.kwargs["connectors"], ["claudecode", "codex"])
+
+    def test_rollback_restart_skips_per_connector_disabled_peers(self):
+        self._seed_map("claudecode", "codex", "cursor")
+        self.app.cfg.guardrail.connectors["codex"].enabled = False
+        with patch("defenseclaw.commands.cmd_setup._restart_services") as restart:
+            cmd_setup._restart_restored_connector_runtime(self.app)
+        self.assertEqual(restart.call_args.kwargs["connectors"], ["claudecode", "cursor"])
+
     def test_bare_batch_restart_waits_for_every_active_connector(self):
         self._seed_map("codex", "cursor")
         with (
@@ -794,10 +815,28 @@ class TestAdditiveSetupCommand(unittest.TestCase):
         self.assertNotEqual(result.exit_code, 0, msg=result.output)
         self.assertIn("cannot run next to hook connectors", result.output)
         self.assertIn("setup remove", result.output)
+        # GAP-2407: a refused run prints no intro that announces a change.
+        self.assertNotIn("Sets up DefenseClaw guardrails", result.output)
+        self.assertNotIn("claw.mode", result.output)
         gc = self.app.cfg.guardrail
         self.assertEqual(set(gc.connectors), {"codex", "cursor"})
         self.assertEqual(gc.connector, "codex")
         self.assertEqual(self.app.cfg.claw.mode, "codex")
+
+    # GAP-2067: "init --connector hermes" leaves a single hook connector in
+    # guardrail.connector (empty map); setup openclaw must refuse it too.
+    def test_openclaw_next_to_single_hook_connector_is_refused(self):
+        self._seed_single("hermes")
+        with _setup_patches():
+            result = _invoke(["openclaw", "--yes", "--no-restart", "--no-verify"], self.app)
+        self.assertNotEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("1 configured (hermes)", result.output)
+        self.assertEqual(self.app.cfg.guardrail.connector, "hermes")
+        with _setup_patches(), patch("defenseclaw.commands.cmd_setup.setup_guardrail"):
+            result = _invoke(["openclaw", "--replace", "--yes", "--no-restart", "--no-verify"], self.app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("--replace removes 1 hook connector(s): hermes", result.output)
+        self.assertEqual(self.app.cfg.guardrail.connector, "openclaw")
 
     # GAP-1455: --replace switches a hook-connector install to OpenClaw in one
     # command, after listing (and confirming) what it removes.
@@ -808,6 +847,8 @@ class TestAdditiveSetupCommand(unittest.TestCase):
                 setup_group, ["openclaw", "--replace", "--no-restart", "--no-verify"], obj=self.app, input="n\n"
             )
         self.assertIn("--replace removes 2 hook connector(s): codex, cursor", declined.output)
+        # GAP-2117: say when the removed hooks go away, not only in the prompt.
+        self.assertIn("Their hooks stay installed until the gateway restarts (--no-restart).", declined.output)
         self.assertIn("Aborted", declined.output)
         self.assertEqual(set(self.app.cfg.guardrail.connectors), {"codex", "cursor"})
 
@@ -815,6 +856,9 @@ class TestAdditiveSetupCommand(unittest.TestCase):
             result = _invoke(["openclaw", "--replace", "--yes", "--no-restart", "--no-verify"], self.app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
         backend.assert_called_once()
+        self.assertIn("Remove them now with: defenseclaw-gateway restart", result.output)
+        self.assertIn("Sets up DefenseClaw guardrails for OpenClaw.", result.output)
+        self.assertNotIn("claw.mode", result.output)
         gc = self.app.cfg.guardrail
         self.assertEqual(gc.connectors, {})
         self.assertEqual(gc.connector, "openclaw")
@@ -836,6 +880,51 @@ class TestAdditiveSetupCommand(unittest.TestCase):
                 dotenv = handle.read()
         self.assertIn("DEFENSECLAW_GATEWAY_TOKEN=openclaw-side-token", dotenv)
         self.assertIn("OPENCLAW_GATEWAY_TOKEN=openclaw-side-token", dotenv)
+
+    # GAP-2259: the running gateway is stopped with the token it loaded, so its
+    # shutdown API never sees the new one; it then starts on the new token.
+    def test_openclaw_token_swap_stops_gateway_with_old_token(self):
+        oc = os.path.join(self.tmp_dir, "openclaw.json")
+        with open(oc, "w", encoding="utf-8") as handle:
+            json.dump({"gateway": {"auth": {"token": "openclaw-side-token"}}}, handle)
+        self.app.cfg.claw.config_file = oc
+        self.app.cfg.gateway.token = ""
+        self.app.cfg.gateway.token_env = ""
+        dotenv_path = os.path.join(self.app.cfg.data_dir, ".env")
+        alive = {"value": True}
+        seen: list[tuple[str, bool]] = []
+
+        def dotenv_has_new_token() -> bool:
+            if not os.path.exists(dotenv_path):
+                return False
+            with open(dotenv_path, encoding="utf-8") as handle:
+                return "openclaw-side-token" in handle.read()
+
+        def stop(cmd, **_kwargs):
+            seen.append((cmd[-1], dotenv_has_new_token()))
+            alive["value"] = False
+
+        def start(_data_dir, **_kwargs):
+            seen.append(("start", dotenv_has_new_token()))
+            return True
+
+        for restart, expected in ((False, []), (True, [("stop", False), ("start", True)])):
+            seen.clear()
+            alive["value"] = True
+            if os.path.exists(dotenv_path):
+                os.unlink(dotenv_path)
+            with (
+                patch.dict(os.environ, {"DEFENSECLAW_GATEWAY_TOKEN": "defenseclaw-own-token"}),
+                patch.object(cmd_setup, "_is_pid_alive", side_effect=lambda _p: alive["value"]),
+                patch.object(cmd_setup, "_gateway_pid_file_identifies_gateway", return_value=True),
+                patch.object(cmd_setup, "_gateway_lifecycle_executable", return_value="/opt/dc/defenseclaw-gateway"),
+                patch.object(cmd_setup, "run_pinned_executable", side_effect=stop),
+                patch.object(cmd_setup, "_restart_defense_gateway", side_effect=start),
+            ):
+                os.environ.pop("OPENCLAW_GATEWAY_TOKEN", None)
+                cmd_setup._adopt_openclaw_gateway_token(self.app, restart=restart)
+            self.assertEqual(seen, expected)
+            self.assertTrue(dotenv_has_new_token())
 
     # GAP-1524: DefenseClaw dials the OpenClaw gateway on openclaw.json's port.
     def test_openclaw_gateway_port_is_adopted_from_openclaw_json(self):
@@ -862,6 +951,62 @@ class TestAdditiveSetupCommand(unittest.TestCase):
         gc = self.app.cfg.guardrail
         self.assertEqual(gc.connectors, {})
         self.assertEqual(gc.connector, "codex")
+        self.assertEqual(self.app.cfg.claw.mode, "codex")
+
+    # GAP-2426: a GUARDED proxy connector is never replaced silently; the
+    # hook setup refuses with no changes and names --replace.
+    def test_hook_setup_over_guarded_openclaw_is_refused(self):
+        self._seed_single("openclaw")
+        self.app.cfg.guardrail.enabled = True
+        for args in (["codex", "--yes", "--no-restart"], ["claude-code", "--no-restart"]):
+            with _setup_patches() as restart:
+                result = CliRunner().invoke(setup_group, args, obj=self.app, input="y\ny\n")
+            self.assertNotEqual(result.exit_code, 0, msg=result.output)
+            self.assertIn("OpenClaw", result.output)
+            self.assertIn("No changes made", result.output)
+            self.assertIn(f"defenseclaw setup {args[0]} --replace", result.output)
+            restart.assert_not_called()
+            gc = self.app.cfg.guardrail
+            self.assertEqual(gc.connector, "openclaw")
+            self.assertEqual(self.app.cfg.claw.mode, "openclaw")
+            self.assertFalse(os.path.exists(self.cfg_path))
+
+    # GAP-2452: 'setup guardrail --connector <hook>' takes the same rule.
+    def test_setup_guardrail_hook_connector_over_guarded_openclaw_is_refused(self):
+        self._seed_single("openclaw")
+        self.app.cfg.guardrail.enabled = True
+        with _setup_patches() as restart:
+            result = CliRunner().invoke(
+                setup_group, ["guardrail", "--connector", "codex", "--non-interactive"], obj=self.app
+            )
+        self.assertNotEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("No changes made", result.output)
+        self.assertIn("defenseclaw setup codex --replace", result.output)
+        restart.assert_not_called()
+        self.assertEqual(self.app.cfg.guardrail.connector, "openclaw")
+        self.assertEqual(self.app.cfg.claw.mode, "openclaw")
+        self.assertFalse(os.path.exists(self.cfg_path))
+
+    def test_hook_setup_replace_over_guarded_openclaw_confirms(self):
+        self._seed_single("openclaw")
+        self.app.cfg.guardrail.enabled = True
+        with _setup_patches():
+            result = CliRunner().invoke(
+                setup_group,
+                ["codex", "--replace", "--mode", "observe", "--no-restart"],
+                obj=self.app,
+                input="n\n",
+            )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("Replace OpenClaw with Codex?", result.output)
+        self.assertIn("Aborted", result.output)
+        self.assertEqual(self.app.cfg.guardrail.connector, "openclaw")
+        with _setup_patches():
+            result = _invoke(["codex", "--replace", "--yes", "--no-restart"], self.app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        # GAP-2418: --yes skips the question, so the output must still name OpenClaw.
+        self.assertIn("--replace removes OpenClaw: DefenseClaw stops guarding it.", result.output)
+        self.assertEqual(self.app.cfg.guardrail.connector, "codex")
         self.assertEqual(self.app.cfg.claw.mode, "codex")
 
     # First connector on a clean config: replace shape, no map.
@@ -1076,6 +1221,22 @@ class TestObservabilitySummaryDisplay(unittest.TestCase):
         self.assertIn("unsupported", out)
         self.assertIn("native OTel:", out)
         self.assertIn("hook-derived audit only", out)
+
+
+    # GAP-2013: a peer the restarted gateway refused is configured but not
+    # guarded, so the Summary must not list it with the guarded connectors.
+    def test_summary_marks_a_refused_peer_not_guarded(self):
+        self._seed_map("claudecode", "codex", "hermes", "opencode")
+        buf = io.StringIO()
+        with click.Context(click.Command("setup")), contextlib.redirect_stdout(buf):
+            cmd_setup._remember_runtime_skipped_peers({"hermes"})
+            _print_observability_summary("opencode", self.app.cfg, mode="action", os_name="posix")
+        out = buf.getvalue()
+
+        self.assertRegex(out, r"connectors:\s+claudecode, codex, opencode\n")
+        self.assertRegex(out, r"not guarded now:\s+hermes ")
+        self.assertIn("This install now has 4 connectors configured; 3 guarded now: claudecode, codex, opencode.", out)
+        self.assertIn("Not guarded now: hermes. To guard it again, run: defenseclaw setup hermes", out)
 
 
 class TestConfiguredConnectorSet(unittest.TestCase):
@@ -1394,6 +1555,26 @@ class TestRemoveConnector(unittest.TestCase):
         self.assertIn("previous connectors, which stay protected", message)
         self.assertNotIn("may not be protected", message)
         self.assertNotIn("defenseclaw-gateway start", message)
+
+    def test_rollback_after_a_still_starting_gateway_names_readiness_timing(self):
+        # GAP-2105: a gateway that was still starting (kept running) ended in
+        # "could not apply the new connector configuration ... Fix that error".
+        self._seed_map("codex")
+        snapshot = cmd_setup._capture_setup_config_snapshot(self.app.cfg)
+        cause = cmd_setup._GatewayRestartFailed(
+            cmd_setup._GATEWAY_KEPT_STARTING_TEXT + ", so the change is not confirmed as applied yet."
+        )
+        with (
+            patch("defenseclaw.commands.cmd_setup._restart_restored_connector_runtime"),
+            self.assertRaises(click.ClickException) as raised,
+        ):
+            cmd_setup._rollback_failed_connector_application(self.app, snapshot, cause)
+
+        message = raised.exception.format_message()
+        self.assertIn("did not become ready in time (it was still starting)", message)
+        self.assertIn("`defenseclaw-gateway status` shows it healthy, run the same setup command again", message)
+        self.assertNotIn("could not apply", message)
+        self.assertNotIn("Fix that error", message)
 
     # D3=A: --no-restart does NOT bounce and warns teardown is deferred.
     def test_remove_no_restart_defers_teardown(self):

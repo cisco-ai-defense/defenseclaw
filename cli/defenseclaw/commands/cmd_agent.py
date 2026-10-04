@@ -1159,7 +1159,26 @@ def discovery_enable(
 
     diff = _preview_discovery_changes(ad, pending)
     runtime_diff = _preview_runtime_planes(ad, enable_host_plane=enable_host_plane)
+    restart_pending = False
     if ad.enabled and not diff and not runtime_diff:
+        # GAP-2260: on in config but the running gateway started before
+        # that change, so discovery is not running. Restart instead of
+        # answering "already enabled" and scanning a sidecar that 503s.
+        restart_pending = _live_discovery_enabled(
+            app,
+            gateway_host=gateway_host,
+            gateway_port=gateway_port,
+            gateway_token_env=gateway_token_env,
+        ) is False
+        if restart_pending and not restart:
+            ux.warn(
+                "AI discovery is on in config, but the running gateway started "
+                "before that change, so it is not running yet.",
+                indent="  ",
+            )
+            ux.subhead("Restart the gateway to start it: defenseclaw-gateway restart", indent="  ")
+            return
+    if ad.enabled and not diff and not runtime_diff and not restart_pending:
         # If the operator passed tuning flags alongside --yes, treat
         # this as an idempotent "apply these new settings" rather
         # than a no-op. Runtime planes are part of the same enable
@@ -1178,7 +1197,14 @@ def discovery_enable(
             )
         return
 
-    if ad.enabled:
+    if restart_pending:
+        ux.section("Starting AI discovery")
+        ux.subhead(
+            "AI discovery is on in config, but the running gateway started before "
+            "that change, so it is not running yet.",
+            indent="  ",
+        )
+    elif ad.enabled:
         ux.section("Updating AI discovery settings")
     else:
         ux.section("Enabling AI discovery")
@@ -1304,7 +1330,17 @@ def discovery_disable(app: AppContext, restart: bool, yes: bool) -> None:
         return
 
     ux.section("Disabling AI discovery")
-    if restart:
+    # GAP-2389: never start a gateway the user stopped. The saved change
+    # applies the next time the gateway starts.
+    gateway_stopped = not _gateway_running(app)
+    if gateway_stopped:
+        restart = False
+        ux.subhead(
+            "The gateway is not running, so it will not be started. AI discovery "
+            "stays off when the gateway next starts.",
+            indent="  ",
+        )
+    elif restart:
         ux.subhead(
             "Will restart the gateway so the discovery service stops immediately.",
             indent="  ",
@@ -1717,7 +1753,7 @@ def discovery_setup(
             indent="  ",
         )
     if not diff and not enabled_changed and not runtime_diff:
-        click.echo(f"  {ux.dim('No changes — current config already matches your answers.')}")
+        ux.echo(f"  {ux.dim('No changes — current config already matches your answers.')}")
         return
     for label, before, after in diff:
         ux.subhead(f"{label}: {before!r} → {after!r}", indent="  ")
@@ -2979,7 +3015,7 @@ def _apply_runtime_settings(
         ux.subhead(
             "--no-restart specified: the setting is saved but the running gateway keeps "
             "its current planes until you restart it "
-            "('defenseclaw setup restart').",
+            "('defenseclaw-gateway restart').",
             indent="  ",
         )
         return
@@ -3002,11 +3038,20 @@ def _apply_runtime_settings(
             connector=connector,
             connectors=connectors,
         )
+    except cmd_setup._OpenClawGatewayNotRunning:
+        # GAP-2548: defenseclaw-gateway, which runs the runtime planes,
+        # restarted fine; only OpenClaw's own gateway is down. That does not
+        # stop the planes, so this is not a failed restart.
+        ux.warn(
+            "The OpenClaw gateway is not running, so OpenClaw traffic is not guarded "
+            "until you start it: 'openclaw gateway run'.",
+            indent="  ",
+        )
     except Exception as exc:  # noqa: BLE001 - the config is already saved
         ux.err(f"Gateway restart failed: {exc}", indent="  ")
         ux.subhead(
             "The configuration is saved. Restart the gateway to apply it: "
-            "'defenseclaw setup restart'.",
+            "'defenseclaw-gateway restart'.",
             indent="    ",
         )
         raise SystemExit(1) from exc
@@ -3288,6 +3333,39 @@ def _resolve_connectors_for_restart(cfg: Any) -> list[str]:
 
     connector = normalize_connector(_resolve_connector_for_restart(cfg))
     return [connector] if connector else []
+
+
+def _gateway_running(app: AppContext) -> bool:
+    """Whether this user's gateway is running (same probe as cmd_setup._is_pid_alive)."""
+    from defenseclaw.process_liveness import pid_file_alive
+
+    try:
+        return pid_file_alive(os.path.join(app.cfg.data_dir, "gateway.pid"))
+    except Exception:  # noqa: BLE001 - an unreadable PID file means "not running".
+        return False
+
+
+def _live_discovery_enabled(
+    app: AppContext,
+    *,
+    gateway_host: str | None,
+    gateway_port: int | None,
+    gateway_token_env: str | None,
+) -> bool | None:
+    """Return the running gateway's ai_discovery state; None when it can't be read."""
+
+    try:
+        client = _usage_client(
+            app,
+            gateway_host=gateway_host,
+            gateway_port=gateway_port,
+            gateway_token_env=gateway_token_env,
+        )
+        payload = client.ai_usage()
+    except Exception:  # noqa: BLE001 - best-effort probe; callers keep the old path.
+        return None
+    enabled = payload.get("enabled") if isinstance(payload, dict) else None
+    return enabled if isinstance(enabled, bool) else None
 
 
 def _trigger_post_enable_scan(

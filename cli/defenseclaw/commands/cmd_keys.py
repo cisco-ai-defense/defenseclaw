@@ -58,7 +58,7 @@ def _emit_bound_endpoint_hint(spec: CredentialSpec | None, cfg, *, indent: str) 
     endpoint = spec.resolve_bound_endpoint(cfg)
     if not endpoint:
         return
-    click.echo(f"{indent}{ux.dim('↪ bound to ' + endpoint)}")
+    ux.echo(f"{indent}{ux.dim('↪ bound to ' + endpoint)}")
     click.echo(f"{indent}{ux.dim('  change region/host: defenseclaw setup')}")
 
 
@@ -102,6 +102,26 @@ def _gateway_token_names(cfg) -> set[str]:
     if token_env:
         names.add(token_env)
     return names
+
+
+def required_removal_warning(cfg, env_name: str) -> str:
+    """The line that says removing ``env_name`` breaks a feature in use (GAP-2254).
+
+    Empty when the current config does not REQUIRE the key. ``keys list``
+    marks such a key "● REQUIRED <feature>"; ``keys remove`` and the TUI
+    confirm repeat that before the key is deleted.
+    """
+    try:
+        statuses = classify(cfg)
+    except Exception:  # noqa: BLE001 - a partial config must not block a remove.
+        return ""
+    for status in statuses:
+        if status.resolution.env_name == env_name and status.requirement is Requirement.REQUIRED:
+            return (
+                f"{env_name} is REQUIRED by {status.spec.feature} in the current config; "
+                f"{status.spec.feature} stops working until the key is set again."
+            )
+    return ""
 
 
 def _render_unregistered(app: AppContext, statuses: list[CredentialStatus]) -> None:
@@ -218,7 +238,7 @@ def keys_set(app: AppContext, env_name: str, value: str | None, value_stdin: boo
         except CanonicalObservabilityUnavailableError:
             # Same offline rule as policy activate: the key is saved, only the
             # audit event can't be admitted while the gateway is down.
-            click.echo(
+            ux.echo(
                 "  ⚠ Key saved, but the gateway runtime is unavailable; the audit event was not recorded.",
                 err=True,
             )
@@ -253,6 +273,8 @@ def keys_remove(app: AppContext, env_name: str, yes: bool) -> None:
             "the CLI and the TUI off from the gateway. It is not removed. "
             "To reset it, run 'defenseclaw setup' or 'defenseclaw init'."
         )
+    if warning := required_removal_warning(app.cfg, env_name):
+        ux.warn(warning)
     if not yes and not click.confirm(f"  Remove {env_name} from {dotenv_path}?", default=False):
         raise click.Abort()
 
@@ -284,7 +306,7 @@ def keys_remove(app: AppContext, env_name: str, yes: bool) -> None:
                 diff=[{"path": f"/.env/{env_name}", "op": "remove", "before": "set", "after": "unset"}],
             )
         except CanonicalObservabilityUnavailableError:
-            click.echo(
+            ux.echo(
                 "  ⚠ Key removed, but the gateway runtime is unavailable; the audit event was not recorded.",
                 err=True,
             )
@@ -348,7 +370,7 @@ def keys_fill_missing(app: AppContext, yes: bool) -> None:
 
     ux.warn(f"{len(statuses)} required credential(s) are unset:")
     for s in statuses:
-        click.echo(
+        ux.echo(
             f"    {ux.dim('•')} {ux.bold(s.resolution.env_name)}  "
             f"{ux.dim('—')}  {s.spec.description}"
         )
@@ -429,7 +451,7 @@ def _render_table(statuses: list[CredentialStatus], show_values: bool) -> None:
     # Pad before styling: ANSI codes count toward str.ljust widths.
     hdr = "  " + "  ".join(ux.bold(h.ljust(widths[i])) for i, h in enumerate(headers))
     click.echo(hdr)
-    click.echo("  " + "  ".join(ux.dim("─" * widths[i]) for i in range(len(headers))))
+    ux.echo("  " + "  ".join(ux.dim("─" * widths[i]) for i in range(len(headers))))
     for r in rows:
         click.echo("  " + "  ".join(r[i].ljust(widths[i]) for i in range(len(headers))))
     click.echo()
@@ -455,11 +477,13 @@ def _format_row(s: CredentialStatus, show_values: bool) -> list[str]:
         else:
             last_col = "n/a"
 
-    return [glyph, env_name, feature, requirement, source, last_col]
+    # Downgrade before the widths are measured, so redirected rows match the
+    # ASCII legend and stay aligned (GAP-2597).
+    return [ux.console_text(cell) for cell in (glyph, env_name, feature, requirement, source, last_col)]
 
 
 def _render_legend() -> None:
-    click.echo(
+    ux.echo(
         f"  {ux.bold('Legend:')}  ● required   ○ optional   · not used by current config"
     )
     click.echo(

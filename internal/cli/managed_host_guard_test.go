@@ -397,7 +397,7 @@ func TestManagedWindowsConfigOnlyAnswerNamesTheCommand(t *testing.T) {
 	t.Setenv("DEFENSECLAW_HOME", filepath.Join(t.TempDir(), "absent"))
 	err := loadGatewayCommandConfigFor(statusCmd)
 	if err == nil || !strings.Contains(err.Error(), "`status` has no per-user deployment") ||
-		!strings.Contains(err.Error(), "enterprise policy show --user HOST\\std1") {
+		!strings.Contains(err.Error(), "enterprise policy show --user std1`") {
 		t.Fatalf("status on a managed Windows computer: %v", err)
 	}
 	// GAP-1183: the hints run as typed (the installed CLI, not a bare

@@ -42,18 +42,8 @@ func init() {
 // standalone removal falls back to the deployment's own hook launcher, the
 // one the files were rendered for.
 func windowsCopilotVSCodeUser(home string, verify, remove bool) error {
-	opts, _, standalone, err := enterpriseHookWindowsGuardianOptions()
-	if !standalone {
-		if !remove || verify || !enterprisehooks.WindowsStandaloneProcess() {
-			return nil
-		}
-		layout, _, _, layoutErr := standaloneEnterprisePolicyLayout()
-		if layoutErr != nil {
-			return layoutErr
-		}
-		opts, err = enterprisepolicy.Options{HookBinary: enterprisepolicy.HookBinaryPath(layout)}, nil
-	}
-	if err != nil {
+	opts, ok, err := windowsCopilotVSCodeUserOptions(remove && !verify)
+	if err != nil || !ok {
 		return err
 	}
 	hookFile, plugin := enterprisepolicy.CopilotVSCodeUserWant(opts)
@@ -75,6 +65,35 @@ func windowsCopilotVSCodeUser(home string, verify, remove bool) error {
 		return fmt.Errorf("DefenseClaw's VS Code Local hooks under %s are not current: %s", home, strings.Join(append(result.Changed, result.Removed...), ", "))
 	}
 	return nil
+}
+
+// windowsCopilotVSCodeUserOptions resolves the hook binary the user files
+// are rendered for: the loaded config's, or, for a standalone removal
+// without one, the deployment's own launcher. ok is false when there is
+// nothing to do.
+func windowsCopilotVSCodeUserOptions(removal bool) (enterprisepolicy.Options, bool, error) {
+	opts, _, standalone, err := enterpriseHookWindowsGuardianOptions()
+	if standalone {
+		return opts, err == nil, err
+	}
+	if !removal || !enterprisehooks.WindowsStandaloneProcess() {
+		return opts, false, nil
+	}
+	layout, _, _, err := standaloneEnterprisePolicyLayout()
+	if err != nil {
+		return opts, false, err
+	}
+	return enterprisepolicy.Options{HookBinary: enterprisepolicy.HookBinaryPath(layout)}, true, nil
+}
+
+// windowsCopilotVSCodeUserFilesLeft reports, read-only, whether home still
+// holds DefenseClaw's VS Code Local hook file or Copilot plugin (GAP-2098).
+func windowsCopilotVSCodeUserFilesLeft(home string) (bool, error) {
+	opts, ok, err := windowsCopilotVSCodeUserOptions(true)
+	if err != nil || !ok {
+		return false, err
+	}
+	return enterprisepolicy.CopilotVSCodeUserFilesLeft(home, "windows", opts.HookBinary)
 }
 
 // windowsClaudeManagedHooksOnlyEnforced reports whether the loaded config's
@@ -150,7 +169,15 @@ func enterpriseHookStandalonePlatformPrepare(stderr io.Writer) {
 	if _, err := enterpriseHookWindowsWSL(opts); err != nil {
 		fmt.Fprintf(stderr, "defenseclaw: enterprise machine policy (Windows): WSL agent sessions: %v\n", err)
 	}
+	if refreshed, err := enterpriseHookWindowsCursorAdapterRefresh(opts.HookBinary); err != nil {
+		fmt.Fprintf(stderr, "defenseclaw: enterprise machine policy (Windows): Cursor enterprise adapter: %v\n", err)
+	} else if refreshed {
+		fmt.Fprintf(stderr, "[hook-guardian] rewrote the Cursor enterprise adapter for this release\n")
+	}
 }
+
+// enterpriseHookWindowsCursorAdapterRefresh is replaceable in tests.
+var enterpriseHookWindowsCursorAdapterRefresh = enterprisehooks.RefreshWindowsCursorManagedAdapter
 
 // windowsStandaloneGoOwnedPolicyMu serializes the guardian's writers of the
 // Go-owned machine policy: the reconcile's publish and the OpenCode plugin

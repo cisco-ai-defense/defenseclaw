@@ -161,6 +161,11 @@ To undo the last upgrade:
 defenseclaw rollback
 ```
 
+In an SSH session there is no desktop to show that window, so
+`defenseclaw upgrade` and `defenseclaw rollback` change nothing, exit 1 and
+print the `powershell -File ... install.ps1` command that runs the installer
+in the same terminal, where it shows the result and sets the exit code.
+
 See [Upgrade DefenseClaw](/docs/get-started/upgrade) for every option.
 
 When an administrator sets the `DisableSelfUpdate` policy (a nonzero DWORD

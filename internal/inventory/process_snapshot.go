@@ -39,6 +39,10 @@ type processInfo struct {
 	// Image.
 	OwnerID   string
 	OwnerName string
+	// SessionOwnerID (Windows) is the SID of the account the process runs
+	// as, from Remote Desktop Services: its token SID where visible, else
+	// the account signed in to its session. Empty in session 0.
+	SessionOwnerID string
 	// Argv0 is the basename of argv[0] on Linux, kept only when it differs
 	// from Comm. A runtime that renames its main thread hides the command
 	// from comm: cursor-agent runs `exec -a "$0" node ...` and Node names
@@ -53,6 +57,8 @@ type windowsProcessEntry struct {
 	PID  int
 	PPID int
 	Comm string
+	// SessionOwnerID: see processInfo.SessionOwnerID.
+	SessionOwnerID string
 }
 
 type windowsProcessDetails struct {
@@ -86,6 +92,7 @@ func collectWindowsSnapshot(reader windowsSnapshotReader) ([]processInfo, error)
 		infos = append(infos, processInfo{
 			PID: entry.PID, PPID: entry.PPID, Comm: comm,
 			User: details.User, StartedAt: details.StartedAt, Image: details.Image, Windows: true,
+			SessionOwnerID: entry.SessionOwnerID,
 		})
 	}
 	return infos, nil
@@ -128,13 +135,43 @@ func classifyWindowsProcesses(procs []processInfo, catalog []AISignature) {
 	// cursor-agent's worker-server is a second cursor-agent node.exe
 	// (GAP-1849) and Amp's plugin runtimes are amp.exe children of amp.exe
 	// (GAP-1965). Fold each into its parent so one run is one process.
+	// The Copilot CLI runs its engine as a copilot-runtime.exe child; that
+	// engine alone is VS Code Copilot Chat's agent host (GAP-2043).
 	var helpers []int
 	for i := range procs {
 		if procs[i].Connector == "" {
 			continue
 		}
+		name := normalizedWindowsProcessName(procs[i].Comm)
 		if parent := byPID[procs[i].PPID]; parent != nil && parent.PID != procs[i].PID && parent.Connector == procs[i].Connector &&
-			normalizedWindowsProcessName(parent.Comm) == normalizedWindowsProcessName(procs[i].Comm) {
+			(normalizedWindowsProcessName(parent.Comm) == name || name == "copilot-runtime") {
+			helpers = append(helpers, i)
+		}
+	}
+	// Siblings from the same executable (same image and account) whose
+	// parent has exited are one run as well: Codex's app-server daemon and
+	// its pid-update-loop helper are two codex.exe processes whose launcher
+	// is gone (GAP-2021). The earliest started one stays. Without a known
+	// image nothing proves they are the same executable.
+	type orphanRun struct {
+		ppid                         int
+		connector, name, image, user string
+	}
+	firstOrphan := map[orphanRun]int{}
+	for i := range procs {
+		if procs[i].Connector == "" || procs[i].PPID <= 0 || byPID[procs[i].PPID] != nil || strings.TrimSpace(procs[i].Image) == "" {
+			continue
+		}
+		run := orphanRun{procs[i].PPID, procs[i].Connector, normalizedWindowsProcessName(procs[i].Comm),
+			strings.ToLower(procs[i].Image), strings.ToLower(procs[i].User)}
+		first, seen := firstOrphan[run]
+		switch {
+		case !seen:
+			firstOrphan[run] = i
+		case windowsProcessStartedBefore(procs[i], procs[first]):
+			firstOrphan[run] = i
+			helpers = append(helpers, first)
+		default:
 			helpers = append(helpers, i)
 		}
 	}
@@ -156,6 +193,15 @@ func classifyWindowsProcesses(procs []processInfo, catalog []AISignature) {
 			}
 		}
 	}
+}
+
+// windowsProcessStartedBefore orders two processes by start time, then by
+// PID when a start time is unknown or equal, so every scan keeps the same one.
+func windowsProcessStartedBefore(a, b processInfo) bool {
+	if !a.StartedAt.IsZero() && !b.StartedAt.IsZero() && !a.StartedAt.Equal(b.StartedAt) {
+		return a.StartedAt.Before(b.StartedAt)
+	}
+	return a.PID < b.PID
 }
 
 // windowsProcessAliases builds one exact basename index for every catalog

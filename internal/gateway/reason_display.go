@@ -23,6 +23,7 @@ import (
 	"sync/atomic"
 
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
+	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
 
 const builtInMatchReasonPrefix = "matched: "
@@ -57,6 +58,12 @@ func trustedBuiltInFindingLabel(label string) bool {
 			}
 		}
 	}
+	// A built-in CodeGuard rule on a file write (GAP-2029).
+	for _, rule := range scanner.BuiltinRulesMeta() {
+		if label == rule.ID+":"+strings.TrimSpace(rule.Title) {
+			return true
+		}
+	}
 	return false
 }
 
@@ -85,6 +92,9 @@ func notificationDisplayReason(reason string, policy redaction.SinkPolicy) strin
 		return reason
 	}
 	if policy == redaction.SinkPolicyDefault && !managedEnterpriseActive.Load() {
+		if subject := agentAssetPolicySubject(reason); subject != "" {
+			return subject
+		}
 		if subject := agentJudgeSubject(reason); subject != "" {
 			return subject
 		}
@@ -149,6 +159,9 @@ func agentVerdictReason(action, sourceReason, displayReason string, policy redac
 		return displayReason
 	}
 	subject := agentBlockListSubject(sourceReason)
+	if subject == "" {
+		subject = agentAssetPolicySubject(sourceReason)
+	}
 	if subject == "" {
 		subject = agentJudgeSubject(sourceReason)
 	}
@@ -298,6 +311,55 @@ func agentBlockListSubject(reason string) string {
 		return "tool " + m[2] + " is on the block list"
 	}
 	return "MCP server " + m[2] + " is on the block list"
+}
+
+// agentAssetPolicyKinds words the asset types of an asset-policy reason.
+var agentAssetPolicyKinds = map[string]string{"mcp": "MCP server", "skill": "skill", "plugin": "plugin"}
+
+// agentAssetPolicyKeys are the fields assetPolicyResponseReason emits.
+var agentAssetPolicyKeys = []string{
+	"reason_code", "source", "asset_type", "asset_name", "connector",
+	"registry_status", "registry_configured", "surface",
+}
+
+// agentAssetPolicyValuePattern is the shape of a value an asset-policy reason
+// may show the agent: the asset name the agent itself asked for, or an enum.
+var agentAssetPolicyValuePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$`)
+
+// agentAssetPolicySubject words an asset-policy block reason
+// (assetPolicyResponseReason: "ASSET-POLICY reason_code=... asset_name=...")
+// for the agent ("MCP server github is not in the approved registry"), or
+// returns "" for any other reason. The redacted key=value reason read like a
+// broken hook and hid the server name (GAP-2423). Every field must be a known
+// key with a plain value; anything else stays redacted.
+func agentAssetPolicySubject(reason string) string {
+	fields := strings.Split(reason, " ")
+	if len(fields) < 2 || fields[0] != "ASSET-POLICY" {
+		return ""
+	}
+	values := make(map[string]string, len(fields)-1)
+	for _, field := range fields[1:] {
+		key, value, ok := strings.Cut(field, "=")
+		if !ok || !slices.Contains(agentAssetPolicyKeys, key) || !agentAssetPolicyValuePattern.MatchString(value) {
+			return ""
+		}
+		values[key] = value
+	}
+	kind, name := agentAssetPolicyKinds[values["asset_type"]], values["asset_name"]
+	if kind == "" || name == "" {
+		return ""
+	}
+	switch values["reason_code"] {
+	case "not-in-approved-registry":
+		return kind + " " + name + " is not in the approved registry"
+	case "registry-required-but-empty":
+		return kind + " " + name + " needs an approved registry, and none is configured"
+	case "default-deny":
+		return kind + " " + name + " is denied by the default asset policy"
+	case "admin-deny":
+		return kind + " " + name + " is denied by asset policy"
+	}
+	return ""
 }
 
 // agentOrderedRulePrefix starts the note an ordered tool-call chain match

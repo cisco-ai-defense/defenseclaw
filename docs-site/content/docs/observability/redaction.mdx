@@ -407,8 +407,12 @@ The CLI is the preferred redaction editor. Each mutation runs the strict Python
 source validator and the canonical Go compiler before writing. For a changed,
 non-dry-run write, it compares the live file with the preview digest, installs a
 private backup, atomically replaces `config.yaml`, verifies the installed
-effective-plan digest, and records a `setup-redaction-policy` audit action. The
-backup path is unique for each write:
+effective-plan digest, and records a `setup-redaction-policy` audit action plus a
+`config-update` Activity row whose target names the change (for example
+`config:redaction-apply:all-configurable:strict:changed-legs-56:newly-unredacted-0`,
+with the changed and newly unredacted leg counts; profile `strict` keeps that
+target but drops the setup row details, which then read
+`details removed by redaction profile strict`). The backup path is unique for each write:
 
 ```text
 <data-dir>/backups/config.yaml.before-redaction-<nanosecond-timestamp>

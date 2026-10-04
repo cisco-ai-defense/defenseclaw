@@ -383,6 +383,19 @@ such as one you set yourself, stops the builds from 2.1.163 that are below
 it. DefenseClaw's value is in its own drop-in, `00-defenseclaw-version-floor.json`, next to
 `90-defenseclaw.json`; the hook drop-in does not change.
 
+On standalone Windows the floor follows the machine-wide hook drop-in. When
+every enrolled account runs Claude Code 2.1.219 or later, `90-defenseclaw.json`
+uses the `claudecode-hooks-v2` contract, which adds the `DirectoryAdded`
+event, and the floor rises to 2.1.219; `enterprise policy show` and `verify`
+name the reason. Claude Code 2.1.163 to 2.1.218 then refuses to start until it
+is updated. Claude Code 2.1.154 to 2.1.162 predates `requiredMinimumVersion`,
+so it still starts and shows its own Settings Warning that `DirectoryAdded` in
+`90-defenseclaw.json` is an unknown hook event and was skipped. The rest of
+the file stays in effect, so DefenseClaw's hooks still block and audit; choose
+**Continue**, and update that copy of Claude Code. A standard account cannot
+change the file, so **Fix with Claude** does not help. To keep these builds
+off the host, use application control ([Vendor limits](#vendor-limits)).
+
 ```yaml title="config.yaml (excerpt)"
 enterprise:
   machine_policy:
@@ -596,8 +609,11 @@ These come from the agents themselves:
 - **Claude Code before 2.1.163.** These builds do not read
   `requiredMinimumVersion`, so no floor stops them, DefenseClaw's or yours.
   Those that read `managed-settings.d`, such as 2.1.153, still run
-  DefenseClaw's hooks; older ones are the next item. Use application control
-  to allow only the Claude Code versions you support.
+  DefenseClaw's hooks; older ones are the next item. Where the Windows hook
+  drop-in uses the v2 contract they also show a Settings Warning about the
+  unknown `DirectoryAdded` event (see
+  [Claude Code version floor](#claude-code-version-floor)). Use application
+  control to allow only the Claude Code versions you support.
 - **Older Claude Code releases (Linux and macOS).** Releases that do not
   read `managed-settings.d` ignore both of DefenseClaw's drop-ins, the
   hooks in `90-defenseclaw.json` and the

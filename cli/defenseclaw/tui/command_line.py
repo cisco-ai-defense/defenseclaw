@@ -55,6 +55,15 @@ def _root_click_commands() -> set[str]:
     return set(cli.commands)
 
 
+def _masked_display(raw: str, tokens: tuple[str, ...]) -> str:
+    """The typed command for the status bar, drawer and MRU, secrets redacted (GAP-2010)."""
+
+    from defenseclaw.tui.screens.command_preview import mask_argv  # local: that module imports this one
+
+    masked = mask_argv(tokens)
+    return raw if masked == tokens else " ".join(masked)
+
+
 def _is_env_prefix(token: str) -> bool:
     if "=" not in token:
         return False
@@ -99,7 +108,7 @@ def parse_command_line(text: str) -> ParsedCommand:
     return ParsedCommand(
         binary=entry.cli_binary,
         args=args,
-        display_name=raw,
+        display_name=_masked_display(raw, tokens),
         category=entry.category,
         risk=risk,
         needs_preview=_needs_preview(entry.category, args),
@@ -122,7 +131,7 @@ def _parse_raw_binary(tokens: tuple[str, ...]) -> ParsedCommand:
         return ParsedCommand(
             binary="defenseclaw",
             args=args,
-            display_name=" ".join(tokens),
+            display_name=_masked_display(" ".join(tokens), tokens),
             category=category,
             risk=risk,
             needs_preview=_needs_preview(category, args),
@@ -136,7 +145,7 @@ def _parse_raw_binary(tokens: tuple[str, ...]) -> ParsedCommand:
     return ParsedCommand(
         binary="defenseclaw-gateway",
         args=args,
-        display_name=" ".join(tokens),
+        display_name=_masked_display(" ".join(tokens), tokens),
         category=entry.category,
         risk=risk,
         needs_preview=_needs_preview(entry.category, args),
@@ -266,12 +275,39 @@ def _has_any_arg(args: tuple[str, ...], *needles: str) -> bool:
 def _secret_arg_indexes(args: tuple[str, ...]) -> set[int]:
     secret_indexes: set[int] = set()
     for index, arg in enumerate(args):
-        if arg.startswith("--") and _flag_is_secret(arg.split("=", 1)[0]):
-            if "=" not in arg and index + 1 < len(args):
-                secret_indexes.add(index + 1)
-            elif "=" in arg:
+        if not arg.startswith("--"):
+            continue
+        flag, has_value, value = arg.partition("=")
+        if not _flag_is_secret(flag):
+            continue
+        if has_value:
+            if not env_name_value_in_clear(flag, value):
                 secret_indexes.add(index)
+        elif index + 1 < len(args) and not env_name_value_in_clear(flag, args[index + 1]):
+            secret_indexes.add(index + 1)
     return secret_indexes
+
+
+_ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def env_name_value_in_clear(flag: str, value: str) -> bool:
+    """Whether a ``--*-env`` flag's value is an env var NAME, safe to show (GAP-2540).
+
+    ``--api-key-env AID_KEY`` names the variable that holds the key; it is
+    not the key. A value that does not look like a name (a key pasted into
+    the field by mistake) stays redacted.
+    """
+
+    from defenseclaw.tui.services.setup_state import looks_like_secret_value  # noqa: PLC0415
+
+    # A long mixed-case token is a valid name by syntax but is a pasted
+    # key, so it stays redacted too (GAP-2569).
+    return (
+        flag.lower().replace("-", "_").endswith("_env")
+        and bool(_ENV_VAR_NAME_RE.match(value))
+        and not looks_like_secret_value(value)
+    )
 
 
 def _flag_is_secret(flag: str) -> bool:
@@ -286,7 +322,39 @@ def _flag_is_secret(flag: str) -> bool:
 READINESS_HINT = "press 0 (Setup), then i for readiness"
 
 
-def suggested_next_action(command: str, exit_code: int, *, panel: str = "") -> str:
+# A doctor row that needs attention: "[WARN] Connector OTLP: codex  -  ..."
+# (plain) or "⚠ Connector OTLP: codex  —  ..." (color), label only.
+_DOCTOR_ATTENTION_RE = re.compile(r"^(\[(?:WARN|FAIL)\]|[\u26a0\u2717])\s+(.+?)(?:\s{2,}[\u2014-]\s{2,}.*)?$")
+DOCTOR_DETAILS_HINT = "press A (Activity) for the check details"
+
+
+def doctor_attention_checks(lines: Sequence[str]) -> list[tuple[bool, str]]:
+    """``(failed, label)`` of each doctor check that failed or warned.
+
+    Failures come first, then warnings, each in output order: a failure
+    after two warnings was hidden behind "and 1 more" (GAP-2419).
+    """
+
+    checks: dict[str, bool] = {}
+    for line in lines:
+        if not (match := _DOCTOR_ATTENTION_RE.match(line.strip())):
+            continue
+        label = match.group(2).strip()
+        # "⚠ Fix the failures above, then re-run" is doctor's footer, not a check.
+        if not label.startswith("Fix the failures above"):
+            checks[label] = checks.get(label, False) or match.group(1) in ("[FAIL]", "\u2717")
+    return sorted(((failed, label) for label, failed in checks.items()), key=lambda check: not check[0])
+
+
+def doctor_attention_rows(lines: Sequence[str]) -> list[str]:
+    """Labels of the doctor checks that failed or warned, failures first."""
+
+    return [label for _failed, label in doctor_attention_checks(lines)]
+
+
+def suggested_next_action(
+    command: str, exit_code: int, *, panel: str = "", lines: Sequence[str] = ()
+) -> str:
     """Return a one-line nudge for what to do after a command finishes.
 
     Each hint names the key that gets there. Returns an empty string when
@@ -301,15 +369,53 @@ def suggested_next_action(command: str, exit_code: int, *, panel: str = "") -> s
 
     readiness = "press i for readiness" if panel == "setup" else READINESS_HINT
     cmd = command.strip().lower()
+    if "doctor" in cmd and doctor_attention_rows(lines):
+        # Readiness passed every row while doctor warned about a connector's
+        # OTLP drops: the doctor output in Activity names the check (GAP-2252).
+        return DOCTOR_DETAILS_HINT if exit_code == 0 else f"{DOCTOR_DETAILS_HINT}, or rerun doctor"
     if exit_code != 0:
         if "keys" in cmd:
             return "open Credentials or run keys check"
         if "doctor" in cmd:
             return f"{readiness}, or rerun doctor"
         return "review output and rerun when fixed"
-    if "keys" in cmd or "doctor" in cmd or "setup" in cmd:
+    if "doctor" in cmd:
+        # Every check passed: readiness would only repeat those PASS rows,
+        # so a clean doctor run gets no next step (GAP-2587).
+        return ""
+    if "keys" in cmd or "setup" in cmd:
         return readiness
     return ""
+
+
+def _destination_rows(lines: Sequence[str]) -> int:
+    """Rows of the ``setup observability list`` table (NAME header .. Retention)."""
+
+    count = 0
+    in_table = False
+    for line in lines:
+        text = line.strip()
+        if text.startswith("NAME ") and " KIND " in text:
+            in_table = True
+            continue
+        if not in_table:
+            continue
+        if not text or text.startswith(("Retention:", "Plan digest:")):
+            break
+        count += 1
+    return count
+
+
+def is_listing_detail(line: str) -> bool:
+    """True for an output line that is part of a listing, not a result.
+
+    A directory (``C:\\Users\\u\\.agents\\skills``, ``/home/u/.claude/skills``)
+    or a ``Plan digest: <hex>`` line ended the output, and the footer showed
+    it as ``Done: ... · <path>`` (GAP-2184).
+    """
+
+    text = line.strip()
+    return bool(_PATH_LINE_RE.match(text) or _DIGEST_LINE_RE.search(text))
 
 
 def is_command_hint(line: str) -> bool:
@@ -325,9 +431,66 @@ def is_command_hint(line: str) -> bool:
 
 
 _GATEWAY_PID_RE = re.compile(r"\bOK \(PID (\d+)\)")
+_CONNECTOR_HEADER_RE = re.compile(r"^(?:\u2500\u2500|--) connector: (\S+) (?:\u2500\u2500|--)$")
+_PATH_LINE_RE = re.compile(r"^(?:[A-Za-z]:[\\/]|~[\\/]|/)\S*$")
+_DIGEST_LINE_RE = re.compile(r"\bdigest:\s*[0-9a-f]{16,}$", re.IGNORECASE)
 _SETUP_DONE_RE = re.compile(r"^[\u2713\u2714]\s+(.+ connector setup complete|\d+ connector\(s\) set up)")
 _SETUP_MODE_RE = re.compile(r"^[\u2713\u2714]\s+\S+ mode=(observe|action)$")
-_KEYS_ROW_RE = re.compile(r"^[\u25cf\u25cb\u00b7]\s+([A-Z][A-Z0-9_]*)\s+(.*)$")
+# A Windows console without UTF-8 gets the ASCII forms "*", "o", "-" and
+# "OK set" (ux.ascii_presentation_text), so match both (GAP-2238).
+_KEYS_ROW_RE = re.compile(r"^[\u25cf\u25cb\u00b7*o-]\s+([A-Z][A-Z0-9_]*)\s+(.*)$")
+_KEYS_SET_RE = re.compile(r"(?:\u2713|\u2714|\bOK) set\b")
+_SCAN_DONE_RE = re.compile(r"^(?:[\u2713\u2714]|OK)?\s*(Scan complete: .+)$")
+_SCAN_SUMMARY_RE = re.compile(r"^Summary: (\d+) (skills?) scanned\b")
+_NO_SKILLS_PREFIXES = ("No skills found", "No scannable skills")
+
+
+def _plugin_info_summary(lines: Sequence[str]) -> str:
+    """``a2a: clean, 0 findings, not quarantined`` for ``plugin info``.
+
+    The card showed the last line, ``Actions: -`` (GAP-2370).
+    """
+
+    fields: dict[str, str] = {}
+    in_scan = False
+    for line in lines:
+        text = line.strip()
+        key, sep, value = text.partition(":")
+        if not sep:
+            continue
+        key, value = key.strip(), value.strip()
+        if key == "Last Scan":
+            in_scan = True
+        elif key in {"Plugin", "Quarantined"} and not in_scan:
+            fields.setdefault(key, value)
+        elif key in {"Verdict", "Findings"} and in_scan:
+            fields.setdefault(key, value)
+        elif key == "Actions":
+            fields["Actions"] = value
+    name = fields.get("Plugin", "")
+    if not name:
+        return ""
+    parts = [fields.get("Verdict", "not scanned")]
+    if fields.get("Findings"):
+        parts.append(fields["Findings"])
+    if "Quarantined" in fields:
+        parts.append("quarantined" if fields["Quarantined"] == "yes" else "not quarantined")
+    actions = fields.get("Actions", "-").split(" (", 1)[0].strip()
+    if actions and actions != "-":
+        parts.append(f"actions: {actions}")
+    return f"{name}: {', '.join(parts)}"
+
+
+def failure_result_summary(command: str, lines: Sequence[str]) -> str:
+    """The result of a failed command, or "" to fall back to its last line.
+
+    A failed doctor ended with "Fix the failures above, then re-run", but
+    the drawer shows nothing above it: name the failing checks (GAP-2395).
+    """
+
+    if "doctor" in command.strip().lower():
+        return command_result_summary(command, lines)
+    return ""
 
 
 def command_result_summary(command: str, lines: Sequence[str]) -> str:
@@ -338,11 +501,70 @@ def command_result_summary(command: str, lines: Sequence[str]) -> str:
     (GAP-1910). ``lines`` are the ANSI-free output lines.
     """
 
-    if "restart" in command.lower():
+    lowered = command.strip().lower()
+    if lowered.startswith("upgrade"):
+        # "Done: Upgrade · To install a specific 1.x release: ..." hid the
+        # result line above it (GAP-2250).
+        for line in lines:
+            text = line.strip().lstrip("\u2713\u2714").strip()
+            if " is up to date" in text or text.startswith(("\u2192 Installing", "Installing DefenseClaw")):
+                return text.lstrip("\u2192 ").strip()
+        return ""
+    if "doctor" in lowered:
+        attention = doctor_attention_checks(lines)
+        health = next((line.strip() for line in reversed(lines) if line.strip().startswith("Health:")), "")
+        if health and attention:
+            # "Health: 129 passed, 1 warning" did not say which check warned
+            # (GAP-2252). Failures lead, and say so when warnings follow, so
+            # the failing check is never cut or hidden (GAP-2419).
+            mixed = len({failed for failed, _label in attention}) > 1
+            named = [f"{'failed' if failed else 'warning'} {label}" if mixed else label for failed, label in attention]
+            more = f" and {len(named) - 2} more" if len(named) > 2 else ""
+            return f"{health} · check: {', '.join(named[:2])}{more}"
+        return ""
+    if "restart" in lowered:
         for line in lines:
             if match := _GATEWAY_PID_RE.search(line):
                 return f"Gateway restarted (PID {match.group(1)})"
         return ""
+    if lowered.startswith(("info plugin", "plugin info")):
+        return _plugin_info_summary(lines)
+    if "discovery scan" in lowered:
+        # ``agent discovery scan`` ends with a hint about other commands;
+        # the receipt showed that hint instead of the counts (GAP-2319).
+        for line in lines:
+            if match := _SCAN_DONE_RE.match(line.strip()):
+                return match.group(1)
+        return ""
+    connectors = [m.group(1) for line in lines if (m := _CONNECTOR_HEADER_RE.match(line.strip()))]
+    if connectors and "scan" in command.lower():
+        # ``skill scan --all`` (and the other --all scans) print one section
+        # per connector; the last line was a skills directory (GAP-2184).
+        noun = "connector" if len(connectors) == 1 else "connectors"
+        text = f"{len(connectors)} {noun} scanned"
+        # "4 connectors scanned" read the same when no connector had a
+        # skill to scan (GAP-2388): say how many skills were scanned.
+        skills = [int(m.group(1)) for line in lines if (m := _SCAN_SUMMARY_RE.match(line.strip()))]
+        if skills:
+            count = sum(skills)
+            text += f" · {count} {'skill' if count == 1 else 'skills'} scanned"
+        elif any(line.strip().startswith(_NO_SKILLS_PREFIXES) for line in lines):
+            text += " · no scannable skills"
+        return text
+    for index, line in enumerate(lines):
+        if "installed copy is disabled, so it does not load" in line:
+            # GAP-2313: ``plugin block`` of a disabled plugin.
+            return "New installs blocked; the installed copy is disabled."
+        if "block only refuses new installs" in line:
+            # ``plugin block`` ends with "To stop it: ..."; the card dropped
+            # the sentence that says the copy still loads (GAP-2228).
+            stop = next((rest.strip() for rest in lines[index + 1 :] if rest.strip().startswith("To stop it:")), "")
+            text = "New installs blocked; the installed copy still loads."
+            return f"{text} {stop}" if stop else text
+    if any(line.strip() == "Observability v8 destinations" for line in lines):
+        rows = _destination_rows(lines)
+        noun = "destination" if rows == 1 else "destinations"
+        return f"{rows} {noun} listed"
     if command.strip().lower().startswith("setup"):
         done = next((m.group(1) for line in lines if (m := _SETUP_DONE_RE.match(line.strip()))), "")
         mode = next((m.group(1) for line in lines if (m := _SETUP_MODE_RE.match(line.strip()))), "")
@@ -354,7 +576,7 @@ def command_result_summary(command: str, lines: Sequence[str]) -> str:
     if not rows:
         return ""
     required = [row for row in rows if "REQUIRED" in row.group(2).split()]
-    missing = [row.group(1) for row in required if "\u2713 set" not in row.group(2)]
+    missing = [row.group(1) for row in required if not _KEYS_SET_RE.search(row.group(2))]
     noun = "credential" if len(rows) == 1 else "credentials"
     text = f"{len(rows)} {noun}, {len(required)} required"
     return f"{text}, missing: {', '.join(missing)}" if missing else f"{text}, all set"

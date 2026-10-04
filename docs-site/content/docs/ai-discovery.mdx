@@ -145,7 +145,7 @@ This is not an unrestricted content crawl. The scanner:
 - preserves recognized model stores as specialized evidence and accepts high-signal GGUF/GGML, safetensors, Core ML, and Q4NX artifacts on format evidence;
 - outside those stores, admits ambiguous ONNX/ORT, TFLite, PyTorch/checkpoint, and generic binary formats only when they have explicit model context (for example, a model/weights/checkpoint/format directory, a semantic model name in a non-cache application support/container/resource scope, or a nearby bounded metadata sidecar) **and** a meaningful, non-opaque identity from the artifact or model directory;
 - rejects generic identities such as `model`, `weights`, and `runtime`, opaque hex/UUID-like cache keys, and version-only identities. Known Chrome Optimization Guide/OptGuide payload paths are rejected for these ambiguous formats; this targeted suppression does not exclude high-signal formats or recognized model stores;
-- skips common source, dependency, build, browser-noise, and runtime-noise trees while allowing application-scoped caches to participate;
+- skips common source, dependency, build, browser-noise, and runtime-noise trees, plus DefenseClaw's own data directory (`~/.defenseclaw` and the configured `data_dir`, which hold its bundled dependencies and models), while allowing application-scoped caches to participate;
 - applies global and per-root traversal limits, rotates roots, and resumes incomplete roots on later scans; and
 - reads only bounded metadata such as a GGUF header prefix or a small adjacent manifest/configuration file, never tensor payloads.
 
@@ -292,9 +292,13 @@ enabled:
   group). The gateway adds it to its inventory on every full scan.
 - Each signal carries `user` and `user_id` from the account the guardian
   started the scan for, never from the scan's own output. The
-  `ai_component.discovered`, `changed` and `removed` records, managed
-  `ai_component.observed` records and the per-entry skill, plugin and MCP
-  records carry the same user (`user.id`, `defenseclaw.user.name`).
+  `ai_component.discovered`, `changed` and `removed` records carry the same
+  user (`user.id`, `defenseclaw.user.name`) to your observability
+  destinations, without the entry's name. The per-entry skill, plugin and
+  MCP records (`ai_component.observed`, which name each entry) carry the
+  user too, but stay in the local inventory (a Secure Client deployment
+  also sends them to Cisco AI Defense). Read entry names with the
+  `discovery` view below.
 - The gateway's own process detector does not run; the scan summary reports
   `detector_notes.process: provided by per-user scans`.
 - A user's results turn `gone` when the user leaves the manifest, or three
@@ -473,6 +477,16 @@ For OpenClaw, `aibom scan` calls the live `openclaw` binary in parallel for each
 <Callout type="info">
 On a multi-connector install, a default `aibom scan` **fans out**: it produces one BOM section per active connector and merges them into a single document, mirroring the rest of the read/inventory commands. Pass `--connector <name>` to scope the BOM to a single connector.
 </Callout>
+
+In the human output, a count of `0` means the category was read and is empty.
+`-` / `not collected` means DefenseClaw cannot read that category for this
+connector (or `--only` left it out). The **Inventory coverage notes** at the end
+say what each connector's inventory covers: `not supported` notes mark a
+category that is not read, `partly checked` notes mark one that is read but
+where some runtime details (for example folder trust or organization policy)
+are not checked. `--summary` folds them into one line such as
+`1 inventory coverage note (plugins); run without --summary to read it.`
+JSON keeps them in `limitations` with `status` `unsupported` or `unverified`.
 
 The output is a custom JSON document. The document and each item carry the
 same `provenance` block: schema version, content hash, configuration

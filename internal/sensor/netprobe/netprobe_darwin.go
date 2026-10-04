@@ -26,7 +26,10 @@ package netprobe
 import (
 	"bufio"
 	"context"
+	"errors"
+	"fmt"
 	"net"
+	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -61,15 +64,38 @@ func snapshot() ([]Connection, int, error) {
 	// local model server this plane exists to notice was invisible on macOS.
 	cmd := processutil.CommandContext(ctx, "/usr/sbin/lsof", "-nP", "-iTCP", "-Ts", "-FpfnT")
 	output, err := cmd.Output()
-	if err != nil {
-		// lsof exits non-zero when some processes could not be examined, which
-		// is the ordinary unprivileged case, and still prints what it could
-		// read. Only treat it as fatal when nothing came back.
-		if len(output) == 0 {
-			return nil, 0, err
-		}
+	if err := lsofError(output, err); err != nil {
+		return nil, 0, err
 	}
 	return parseLsof(string(output))
+}
+
+// lsofError decides whether an lsof run failed.
+//
+// lsof exits non-zero when some processes could not be examined, which is the
+// ordinary unprivileged case, and still prints what it could read. It also
+// exits 1, silently, when it found no TCP socket at all: for an unprivileged
+// gateway that is the normal state right after start, before the user's
+// agents have opened a connection. Neither case means the connection table is
+// unreadable. Only a run that printed nothing to stdout and complained on
+// stderr (or did not run, or timed out) is a real failure.
+func lsofError(output []byte, err error) error {
+	if err == nil || len(output) > 0 {
+		return nil
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		return err
+	}
+	stderr := strings.TrimSpace(string(exitErr.Stderr))
+	if exitErr.ExitCode() == 1 && stderr == "" {
+		return nil
+	}
+	if stderr != "" {
+		first, _, _ := strings.Cut(stderr, "\n")
+		return fmt.Errorf("%w: %s", err, first)
+	}
+	return err
 }
 
 // parseLsof decodes lsof -F output: one field per line, tagged by its first

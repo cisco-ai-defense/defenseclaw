@@ -37,6 +37,15 @@ const codeUnitFailed = "unit_failed"
 // readOnly handles status and verify.
 func (l *lifecycle) readOnly(ctx context.Context) int {
 	env, r := l.env, l.result
+	// status waits for a run that holds the lock the same way, because the
+	// run stops and starts the services (GAP-2246). It still reports the
+	// recorded deployment below, so detection sees it installed.
+	statusBusy := false
+	if l.opts.Action == ActionStatus && env.Geteuid() == 0 {
+		lock, err := env.acquireLock(ctx)
+		statusBusy = errors.Is(err, errLockBusy)
+		lock.release()
+	}
 	if l.opts.Action == ActionVerify {
 		// The daily verify can start while another run changes the
 		// deployment: ensure restarts the timer, and a Persistent timer past
@@ -45,7 +54,7 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 		// change; a run that outlasts the wait is busy, not a failed check.
 		lock, err := env.acquireLock(ctx)
 		if errors.Is(err, errLockBusy) {
-			r.AddError(codeBusy, err.Error()+"; "+verifyBusyNextStep)
+			r.AddError(codeBusy, err.Error()+"; "+readOnlyBusyNextStep(env.LockTimeout, ActionVerify))
 			return enterprisestatus.BusyExitCode(env.GOOS)
 		}
 		lock.release()
@@ -65,6 +74,14 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 	if pending, _ := env.loadPending(); pending != nil {
 		r.TransactionPending = true
 	}
+	if statusBusy {
+		if record != nil {
+			r.Installed = true
+			r.InstalledVersion = record.ProductVersion
+		}
+		r.AddError(codeBusy, errLockBusy.Error()+"; "+readOnlyBusyNextStep(env.LockTimeout, ActionStatus))
+		return enterprisestatus.BusyExitCode(env.GOOS)
+	}
 	if record == nil {
 		r.Installed = false
 		failure := env.lastPackageInstallFailure()
@@ -75,12 +92,9 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 			}
 			r.AddError(codeNotInstalled, message)
 		}
-		if failure != "" {
-			r.AddWarning(codePackageInstallFailed, "the package was installed, but its own install run did not complete, so no deployment is active: "+
-				failure+"; fix that, then finish the install with `"+env.lifecycleCommand(ActionEnsure)+" --from-package`")
-		}
+		env.warnPackageInstallFailed(r, failure)
 		if leftovers := env.unmanagedLeftovers(env.Services, ChannelPayload); len(leftovers) > 0 {
-			r.AddWarning(codeLeftovers, "DefenseClaw machine state exists without a committed deployment: "+strings.Join(leftovers, ", ")+"; "+env.leftoversNextStep(ctx))
+			r.AddWarning(codeLeftovers, "DefenseClaw machine state exists without a committed deployment: "+strings.Join(leftovers, ", ")+"; "+env.leftoversNextStep(ctx, failure != ""))
 		}
 		return 0
 	}
@@ -391,12 +405,42 @@ func (e *Env) lastPackageInstallFailure() string {
 	return strings.TrimSpace(first.Code + ": " + first.Message)
 }
 
+// warnPackageInstallFailed adds the package_install_failed warning that
+// names why the package's own install run failed and how to finish the
+// install. status, verify and an uninstall that found nothing to remove all
+// give it, so their unmanaged_leftovers hint can defer to it (GAP-2410).
+func (e *Env) warnPackageInstallFailed(r *enterprisestatus.Result, failure string) {
+	if failure == "" {
+		return
+	}
+	next := "fix that, then finish the install with `" + e.lifecycleCommand(ActionEnsure) + " --from-package`"
+	if e.GOOS == "darwin" {
+		// A failed pkg install records no receipt, and ensure does not
+		// write one, so receipt-based MDM inventory keeps reporting the
+		// Mac as not installed (GAP-2359).
+		next = "fix that, then install the package again, which also records the pkg receipt that MDM inventory reads (`" +
+			e.lifecycleCommand(ActionEnsure) + " --from-package` finishes the install but records no receipt)"
+	}
+	opening := "the package was installed, but its own install run did not complete, so no deployment is active: "
+	if e.GOOS == "darwin" {
+		// pkgutil keeps no receipt for a pkg whose postinstall failed.
+		opening = "the package's files were copied, but its postinstall did not complete, so macOS recorded no pkg receipt and no deployment is active: "
+	}
+	r.AddWarning(codePackageInstallFailed, opening+failure+"; "+next)
+}
+
 // leftoversNextStep tells the administrator what to do about machine state
 // no committed deployment owns, typically after a lifecycle uninstall that
 // kept the package installed: remove the package, or activate it again.
-func (e *Env) leftoversNextStep(ctx context.Context) string {
+// After the package's own install run failed, the package_install_failed
+// warning already names the finish step (on macOS: install the pkg again,
+// for its receipt), so the activate hint defers to it (GAP-2380).
+func (e *Env) leftoversNextStep(ctx context.Context, packageInstallFailed bool) string {
 	gateway := filepath.Join(e.Layout.BinDir, binGateway)
 	reactivate := "`" + e.lifecycleCommand("ensure") + " --from-package --config <file>`"
+	if packageInstallFailed {
+		reactivate = "finish the install as the " + codePackageInstallFailed + " warning says"
+	}
 	if e.GOOS == "linux" {
 		remove := ""
 		if _, err := e.Runner.Run(ctx, "dpkg", "-S", gateway); err == nil {
@@ -410,8 +454,14 @@ func (e *Env) leftoversNextStep(ctx context.Context) string {
 			remove = "dnf remove defenseclaw-enterprise"
 		}
 		if remove != "" {
+			if packageInstallFailed {
+				return "the defenseclaw-enterprise package is still installed: remove it with `" + remove + "` (or the MDM uninstall.sh), or " + reactivate
+			}
 			return "the defenseclaw-enterprise package is still installed: remove it with `" + remove + "` (or the MDM uninstall.sh), or activate the deployment again with " + reactivate
 		}
+	}
+	if packageInstallFailed {
+		return "remove it with `" + e.lifecycleCommand("uninstall") + " --purge` (this also deletes the kept config and state), or " + reactivate
 	}
 	return "remove it with `" + e.lifecycleCommand("uninstall") + " --purge` (this also deletes the kept config and state), or activate the deployment again with " + reactivate + " (package) or `--payload <dir>` (payload archive)"
 }

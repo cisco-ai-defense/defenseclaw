@@ -284,8 +284,24 @@ observability:
     observability = yaml.safe_load(prepared.candidate)["observability"]
     assert observability["buckets"] == {}
     assert observability["destinations"] == []
-    assert "buckets:\n    {}" in prepared.candidate.decode()
-    assert "destinations:\n    []" in prepared.candidate.decode()
+    assert "  buckets: {}\n" in prepared.candidate.decode()
+    assert "  destinations: []\n" in prepared.candidate.decode()
+
+
+def test_deleting_last_item_of_indentless_block_list_stays_valid_yaml() -> None:
+    # PyYAML's safe_dump (the TUI config editor save) writes lists at their
+    # key's indent; deleting the last destination crashed with invalid_yaml
+    # (GAP-2194).
+    source = """config_version: 8
+observability:
+  destinations:
+  - name: only
+    kind: console
+  buckets: {}
+"""
+    prepared = prepare_v8_yaml_write(source, [V8YAMLMutation.delete(("observability", "destinations", 0))])
+
+    assert prepared.candidate.decode() == "config_version: 8\nobservability:\n  destinations: []\n  buckets: {}\n"
 
 
 def test_destination_append_and_delete_preserve_other_item_comments() -> None:

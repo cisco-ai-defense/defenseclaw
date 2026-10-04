@@ -185,10 +185,107 @@ class TestOpenCodeManagedBridgeProtection(PluginCommandTestBase):
             )
 
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("added to block list", result.output)
+        self.assertIn("[plugin] Blocked 'defenseclaw' (opencode).", result.output)
         self.assertEqual(quarantined.exit_code, 0, quarantined.output)
         self.assertIn("quarantined", quarantined.output)
         self.assertFalse(os.path.exists(sibling))
+        self.assertTrue(os.path.isfile(self.managed))
+
+
+class TestAmpManagedBridgeProtection(PluginCommandTestBase):
+    """GAP-2047: the Amp policy bridge is connector configuration, like OpenCode's."""
+
+    def setUp(self):
+        super().setUp()
+        self.home = os.path.join(self.tmp_dir, "home")
+        self.amp_plugins = os.path.join(self.home, ".config", "amp", "plugins")
+        os.makedirs(self.amp_plugins)
+        self.managed = os.path.join(self.amp_plugins, "defenseclaw.ts")
+        with open(self.managed, "w", encoding="utf-8") as handle:
+            handle.write("// managed bridge\n")
+        with open(os.path.join(self.amp_plugins, "architect.ts"), "w", encoding="utf-8") as handle:
+            handle.write("export default function architect() {}\n")
+        self.app.cfg.active_connector = lambda: "amp"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["amp"]  # type: ignore[method-assign]
+        self.app.cfg.plugin_dirs = lambda c=None: [self.amp_plugins] if c in (None, "amp") else []  # type: ignore[method-assign]
+        home_env = patch.dict(os.environ, {"HOME": self.home, "USERPROFILE": self.home}, clear=False)
+        home_env.start()
+        self.addCleanup(home_env.stop)
+
+    def test_bridge_is_not_an_ordinary_amp_plugin(self):
+        entries = discover_plugin_directories(self.amp_plugins, connector="amp")
+        self.assertEqual([entry.id for entry in entries], ["architect"])
+
+    def test_lifecycle_actions_refuse_bridge_with_setup_remove_pointer(self):
+        commands = (
+            ["remove", "defenseclaw", "--connector", "amp"],
+            ["block", "defenseclaw", "--connector", "amp"],
+            ["disable", "defenseclaw", "--connector", "amp"],
+            ["quarantine", "defenseclaw", "--connector", "amp"],
+            ["quarantine", self.managed, "--connector", "amp"],
+            ["scan", self.managed, "--connector", "amp"],
+        )
+        for args in commands:
+            result = self.invoke(args)
+            self.assertNotEqual(result.exit_code, 0, (args, result.output))
+            self.assertIn("managed Amp defenseclaw.ts bridge", result.output, args)
+            self.assertIn("defenseclaw setup remove amp", result.output, args)
+        self.assertTrue(os.path.isfile(self.managed))
+
+    @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
+    def test_scan_of_the_plugin_root_scans_each_plugin_and_skips_the_bridge(self, mock_scan):
+        # GAP-2099: the root was scanned as one plugin named "plugins",
+        # bridge included, with a "plugin block plugins" suggestion.
+        from datetime import datetime, timedelta, timezone
+
+        from defenseclaw.models import ScanResult
+
+        mock_scan.side_effect = lambda target, **_kw: ScanResult(
+            scanner="plugin-scanner", target=target, timestamp=datetime.now(timezone.utc),
+            findings=[], duration=timedelta(seconds=0),
+        )
+        result = self.invoke(["scan", self.amp_plugins])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(
+            [call.args[0] for call in mock_scan.call_args_list],
+            [os.path.join(self.amp_plugins, "architect.ts")],
+        )
+        self.assertIn("architect", result.output)
+        self.assertNotIn("plugin block plugins", result.output)
+
+        os.remove(os.path.join(self.amp_plugins, "architect.ts"))
+        mock_scan.reset_mock()
+        only_bridge = self.invoke(["scan", self.amp_plugins, "--connector", "amp"])
+        self.assertEqual(only_bridge.exit_code, 0, only_bridge.output)
+        mock_scan.assert_not_called()
+        self.assertIn("No plugins found to scan in", only_bridge.output)
+        self.assertIn("defenseclaw.ts is DefenseClaw's own Amp bridge", only_bridge.output)
+        self.assertIn("defenseclaw setup remove amp", only_bridge.output)
+
+    @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
+    def test_scan_audit_names_the_connector(self, mock_scan):
+        # GAP-2272: the scan row says whose plugin it was, so
+        # 'audit export --connector amp' includes it.
+        from datetime import datetime, timedelta, timezone
+
+        from defenseclaw.models import ScanResult
+
+        mock_scan.side_effect = lambda target, **_kw: ScanResult(
+            scanner="plugin-scanner", target=target, timestamp=datetime.now(timezone.utc),
+            findings=[], duration=timedelta(seconds=0),
+        )
+        with patch.object(self.app.logger, "log_scan") as log_scan:
+            result = self.invoke(["scan", self.amp_plugins, "--connector", "amp"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertTrue(log_scan.call_args_list, result.output)
+        self.assertTrue(all(c.kwargs.get("connector") == "amp" for c in log_scan.call_args_list))
+
+    def test_remove_deletes_an_ordinary_amp_file_plugin(self):
+        """GAP-2063: direct Amp plugins are files, not directories."""
+        result = self.invoke(["remove", "architect", "--connector", "amp"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("removed from", result.output)
+        self.assertFalse(os.path.exists(os.path.join(self.amp_plugins, "architect.ts")))
         self.assertTrue(os.path.isfile(self.managed))
 
 
@@ -222,6 +319,92 @@ class TestPluginInstall(PluginCommandTestBase):
         installed = self._connector_plugin_path("my-plugin")
         self.assertTrue(os.path.isdir(installed))
         self.assertTrue(os.path.isfile(os.path.join(installed, "plugin.py")))
+
+    @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
+    def test_install_of_a_blocked_plugin_points_at_unblock(self, mock_scan):
+        # GAP-2112: allow also skips the scan gate; unblock only clears the block.
+        mock_scan.return_value = self._clean_result()
+        PolicyEngine(self.app.store).block("plugin", "held-plugin", "test")
+        result = self._invoke_install(["install", self._create_plugin_dir("held-plugin")])
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("'defenseclaw plugin unblock held-plugin --connector", result.output)
+        self.assertNotIn("plugin allow", result.output)
+
+    @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
+    def test_install_claudecode_says_claude_code_will_not_load_it(self, mock_scan):
+        # GAP-2084: Claude Code loads only marketplace installs, so the copy
+        # is neither loaded nor listed; say so and give the next step.
+        mock_scan.return_value = self._clean_result()
+        cache = os.path.join(self.tmp_dir, "claude-plugins", "cache")
+        self.app.cfg.active_connectors = lambda: ["claudecode"]  # type: ignore[method-assign]
+        self.app.cfg.plugin_dirs = lambda connector=None: [cache]  # type: ignore[method-assign]
+        src = self._create_plugin_dir("cc-plugin")
+
+        with patch("defenseclaw.commands.hint") as hint:
+            result = self._invoke_install(["install", src, "--connector", "claudecode"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Installed plugin: cc-plugin", result.output)
+        self.assertIn("Claude Code loads only plugins installed from a marketplace", result.output)
+        self.assertIn("has no .claude-plugin/plugin.json", result.output)
+        self.assertIn("/plugin install <name>@<marketplace>", result.output)
+        self.assertIn("Remove this copy: defenseclaw plugin remove cc-plugin --connector claudecode", result.output)
+        hint.assert_not_called()
+
+    @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
+    def test_remove_deletes_the_copy_install_put_in_the_claude_cache(self, mock_scan):
+        # GAP-2152: remove found nothing at <cache>/<name>, yet a reinstall
+        # refused because the copy was there.
+        mock_scan.return_value = self._clean_result()
+        plugins_root = os.path.join(self.tmp_dir, "claude-plugins")
+        cache = os.path.join(plugins_root, "cache")
+        self.app.cfg.active_connectors = lambda: ["claudecode"]  # type: ignore[method-assign]
+        self.app.cfg.active_connector = lambda: "claudecode"  # type: ignore[method-assign]
+        self.app.cfg.plugin_dirs = lambda connector=None: [cache]  # type: ignore[method-assign]
+        src = self._create_plugin_dir("cc-plugin")
+        # A marketplace folder of the same name is never removed.
+        os.makedirs(os.path.join(cache, "mkt", "other", "1.0.0"))
+        with open(os.path.join(plugins_root, "known_marketplaces.json"), "w") as fh:
+            json.dump({"mkt": {}}, fh)
+
+        self.assertEqual(self._invoke_install(["install", src, "--connector", "claudecode"]).exit_code, 0)
+        removed = self.invoke(["remove", "cc-plugin", "--connector", "claudecode"])
+        self.assertEqual(removed.exit_code, 0, removed.output)
+        self.assertIn("'cc-plugin' removed from", removed.output)
+        self.assertFalse(os.path.exists(os.path.join(cache, "cc-plugin")))
+        self.assertEqual(self.invoke(["remove", "cc-plugin"]).exit_code, 1)
+        self.assertEqual(self._invoke_install(["install", src]).exit_code, 0)
+        self.assertEqual(self.invoke(["remove", "cc-plugin"]).exit_code, 0)
+
+        self.assertEqual(self.invoke(["remove", "mkt"]).exit_code, 1)
+        self.assertTrue(os.path.isdir(os.path.join(cache, "mkt")))
+
+    @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
+    def test_remove_deletes_the_codex_cache_copy_of_a_fanned_out_install(self, mock_scan):
+        # GAP-2152: a bare install also copies to Codex's cache; bare and
+        # --connector codex remove must find that copy too.
+        mock_scan.return_value = self._clean_result()
+        roots = {
+            "claudecode": os.path.join(self.tmp_dir, "claude-plugins", "cache"),
+            "codex": os.path.join(self.tmp_dir, "codex-plugins", "cache"),
+        }
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+        self.app.cfg.active_connector = lambda: "claudecode"  # type: ignore[method-assign]
+        self.app.cfg.plugin_dirs = lambda connector=None: [roots[connector or "claudecode"]]  # type: ignore[method-assign]
+        src = self._create_plugin_dir("fan-plugin")
+
+        installed = self._invoke_install(["install", src])
+        self.assertEqual(installed.exit_code, 0, installed.output)
+        self.assertIn("Remove this copy: defenseclaw plugin remove fan-plugin\n", installed.output)
+        self.assertEqual(self.invoke(["remove", "fan-plugin"]).exit_code, 0)
+        for root in roots.values():
+            self.assertFalse(os.path.exists(os.path.join(root, "fan-plugin")))
+
+        self.assertEqual(self._invoke_install(["install", src]).exit_code, 0)
+        removed = self.invoke(["remove", "fan-plugin", "--connector", "codex"])
+        self.assertEqual(removed.exit_code, 0, removed.output)
+        self.assertFalse(os.path.exists(os.path.join(roots["codex"], "fan-plugin")))
+        self.assertTrue(os.path.isdir(os.path.join(roots["claudecode"], "fan-plugin")))
 
     @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
     def test_install_duplicate_without_force(self, mock_scan):
@@ -339,7 +522,7 @@ class TestPluginList(PluginCommandTestBase):
     def test_list_empty(self, _mock_oc):
         result = self.invoke(["list"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("No plugins found", result.output)
+        self.assertIn("has no installed plugins", result.output)
 
     @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
     def test_list_with_plugins(self, _mock_oc):
@@ -552,20 +735,40 @@ class TestPluginList(PluginCommandTestBase):
 
                 text_result = self.invoke(["list", "--connector", "claudecode"])
                 self.assertEqual(text_result.exit_code, 0, text_result.output)
-                self.assertIn(registry, text_result.output)
-                self.assertIn(f"— {expected_state}; entries=0", text_result.output)
-                self.assertIn("No plugins found", text_result.output)
+                if expected_state == "missing":
+                    self.assertIn(registry, text_result.output)
+                    # GAP-2274: plain wording, no internal "registry source" text.
+                    self.assertIn("claudecode has no installed plugins", text_result.output)
+                    self.assertNotIn("registry source", text_result.output)
+                    # GAP-2290: no second "check your installation" line.
+                    self.assertNotIn("No plugins found", text_result.output)
+                else:
+                    # GAP-2317: a valid but empty registry reads the same way.
+                    self.assertIn("claudecode has no installed plugins.", text_result.output)
+                    self.assertNotIn("entries=0", text_result.output)
+                    self.assertNotIn("No plugins found", text_result.output)
 
                 json_result = self.invoke(
                     ["list", "--connector", "claudecode", "--json"]
                 )
                 self.assertEqual(json_result.exit_code, 0, json_result.output)
                 self.assertEqual(json.loads(json_result.stdout), [])
-                self.assertIn(registry, json_result.stderr)
-                self.assertIn(
-                    f"— {expected_state}; entries=0",
-                    json_result.stderr,
-                )
+                self.assertIn("claudecode has no installed plugins", json_result.stderr)
+
+
+class TestPluginScanAllMissingClaudeRegistry(PluginCommandTestBase):
+    @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
+    def test_scan_all_without_claude_plugins_prints_the_plain_line(self, _mock_oc):
+        # GAP-2274: same one-liner as the other connectors.
+        plugin_root = os.path.join(self.tmp_dir, "noclaude", "plugins")
+        os.makedirs(plugin_root)
+        self.app.cfg.active_connectors = lambda: ["claudecode"]  # type: ignore[method-assign]
+        self.app.cfg.plugin_dirs = lambda connector=None: [plugin_root]  # type: ignore[method-assign]
+        result = self.invoke(["scan", "--all", "--connector", "claudecode"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("No plugins found to scan for connector=claudecode.", result.output)
+        self.assertNotIn("discovery source", result.output)
+        self.assertNotIn("registry source", result.output)
 
 
 class TestPluginListMultiConnectorDefault(PluginCommandTestBase):
@@ -755,13 +958,111 @@ class TestPluginListMultiConnectorDefault(PluginCommandTestBase):
         self.assertIn("image_gen/xai, web/xai", ambiguous.output)
 
     @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
+    def test_block_keeps_runtime_status_and_one_line_rows(self, _mock_oc):
+        """GAP-2199/GAP-2202: block shows in Actions only; long descriptions stay on one line."""
+        rows = self._hermes_nested_rows()
+        rows[0]["description"] = "Brave Search (free tier) - web search via the public API " * 2
+        # GAP-2202 (b11): YAML folded/multi-paragraph descriptions hold newlines.
+        rows[1]["description"] = "A2A adapter.\n\nSecond paragraph\nof text.\n"
+        rows[2]["description"] = "Image generation via xAI.\n"
+        with (
+            patch("defenseclaw.inventory.claw_inventory._enumerate_hermes_plugins", return_value=rows),
+            patch.dict(os.environ, {"COLUMNS": "200"}),
+        ):
+            self.assertEqual(self.invoke(["block", "ddgs", "--connector", "hermes"]).exit_code, 0)
+            listed = self.invoke(["list", "--connector", "hermes"])
+        self.assertEqual(listed.exit_code, 0, listed.output)
+        row = next(line for line in listed.output.splitlines() if "web/ddgs" in line)
+        self.assertIn("\u2713 enabled", row)
+        self.assertIn("install-blocked", row)
+        self.assertNotIn("\u2717 blocked", row)
+        self.assertIn("\u2026", row)
+        # Windows draws the header row with the same light bar as the body.
+        body = [line for line in listed.output.splitlines() if line.startswith("\u2502") and " Status " not in line]
+        self.assertEqual(len(body), len(rows), listed.output)
+        self.assertIn("(4/4 enabled)", listed.output)
+
+    @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
+    def test_narrow_terminals_keep_status_id_and_verdict_on_one_line(self, _mock_oc):
+        """GAP-2292: Description narrows or hides first at 80 and 120 columns."""
+        rows = self._hermes_nested_rows()
+        for row in rows:
+            row["description"] = "Browser Use (https://browser-use.com) cloud browser backend for Hermes"
+        for columns, hidden in (("80", True), ("120", False), ("200", False)):
+            with self.subTest(columns=columns):
+                with (
+                    patch("defenseclaw.inventory.claw_inventory._enumerate_hermes_plugins", return_value=rows),
+                    patch.dict(os.environ, {"COLUMNS": columns}),
+                ):
+                    listed = self.invoke(["list", "--connector", "hermes"])
+                self.assertEqual(listed.exit_code, 0, listed.output)
+                lines = listed.output.splitlines()
+                self.assertTrue(all(len(line) <= int(columns) for line in lines), listed.output)
+                body = [line for line in lines if line.startswith("\u2502") and " Status " not in line]
+                self.assertEqual(len(body), len(rows), listed.output)
+                for row in rows:
+                    line = next(b for b in body if f"\u2502 {row['id']} " in b)
+                    cells = [cell.strip() for cell in line.strip("\u2502").split("\u2502")]
+                    # Status, full ID, then Severity/Verdict "-" (no scan yet).
+                    self.assertEqual(cells[:2], ["\u2713 enabled", row["id"]])
+                    self.assertIn("-", cells)
+                self.assertEqual("Hidden to fit" in listed.output, hidden, listed.output)
+                if hidden:
+                    self.assertIn("See: defenseclaw plugin info <id>", lines, listed.output)
+                else:
+                    self.assertIn("Description", listed.output)
+
+    @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
+    def test_hidden_to_fit_hint_never_splits_the_command(self, _mock_oc):
+        """GAP-2348: the plugin info command stays whole at 80, 60 and 45 columns."""
+        rows = self._hermes_nested_rows()
+        for row in rows:
+            row["description"] = "Browser Use (https://browser-use.com) cloud browser backend for Hermes"
+        for columns in ("80", "60", "45"):
+            with self.subTest(columns=columns):
+                with (
+                    patch("defenseclaw.inventory.claw_inventory._enumerate_hermes_plugins", return_value=rows),
+                    patch.dict(os.environ, {"COLUMNS": columns}),
+                ):
+                    listed = self.invoke(["list", "--connector", "hermes"])
+                self.assertEqual(listed.exit_code, 0, listed.output)
+                self.assertIn("See: defenseclaw plugin info <id>", listed.output.splitlines(), listed.output)
+
+    def test_list_below_70_columns_hides_actions_instead_of_squeezing(self):
+        """GAP-2333/GAP-2334: Actions hides (and is named) before Status/Verdict are cut."""
+        from defenseclaw.commands.cmd_plugin import _fit_plugin_list_table
+        from rich.console import Console
+
+        rows = [
+            {"Status": status, "ID": pid, "Plugin": pid, "Description": "A plugin", "Origin": "bundled",
+             "Severity": sev, "Verdict": verdict, "Actions": actions}
+            for status, pid, sev, verdict, actions in (
+                ("\u2717 disabled", "cron_providers/chronos", "-", "-", "disabled"),
+                ("\u2713 enabled", "dashboard_auth/self_hosted", "-", "-", "-"),
+                ("\u2717 quarantined", "photon", "MEDIUM", "warning", "quarantined"),
+            )
+        ]
+        for width in (60, 80):
+            with self.subTest(width=width):
+                console = Console(width=width, record=True)
+                table, hidden = _fit_plugin_list_table(console, "Plugins", rows)
+                console.print(table)
+                text = console.export_text()
+                self.assertEqual(hidden, ["Description", "Origin", "Plugin", "Actions"])
+                self.assertNotIn("\u2026", text, text)
+                self.assertNotIn("\u2503\u2503", text, text)
+                for cell in ("\u2717 disabled", "\u2717 quarantined", "Severity", "Verdict", "warning"):
+                    self.assertIn(cell, text)
+                self.assertTrue(all(len(line) <= width for line in text.splitlines()), text)
+
+    @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
     def test_hermes_nested_block_is_keyed_by_listed_id(self, _mock_oc):
         """GAP-1480: blocking a nested Hermes plugin turns its list row blocked."""
         rows = self._hermes_nested_rows()
         with patch("defenseclaw.inventory.claw_inventory._enumerate_hermes_plugins", return_value=rows):
             blocked = self.invoke(["block", "ddgs", "--connector", "hermes"])
             self.assertEqual(blocked.exit_code, 0, blocked.output)
-            self.assertIn("'web/ddgs' added to block list", blocked.output)
+            self.assertIn("[plugin] Blocked 'web/ddgs' (hermes).", blocked.output)
             listed = self.invoke(["list", "--connector", "hermes", "--json"])
             items = {item["id"]: item for item in json.loads(listed.output)}
             self.assertEqual(items["web/ddgs"]["status"], "blocked")
@@ -857,6 +1158,73 @@ class TestPluginListMultiConnectorDefault(PluginCommandTestBase):
         self.assertNotIn("Check your antigravity", result.output)
         self.assertNotIn("Check your opencode", result.output)
 
+    @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
+    def test_copilot_lister_failure_is_reported_not_an_empty_state(self, _mock_oc):
+        """GAP-2415: say Copilot plugins could not be listed, and why."""
+        from defenseclaw.commands import cmd_plugin
+
+        self.app.cfg.active_connectors = lambda: ["copilot"]  # type: ignore[method-assign]
+        self.app.cfg.active_connector = lambda: "copilot"  # type: ignore[method-assign]
+
+        def _failing_lister(connector, cfg, **_kw):
+            if connector == "copilot":
+                cmd_plugin._HOST_PLUGIN_LIST_ERRORS["copilot"] = "`copilot plugin list --json` exited 2"
+            return []
+
+        with patch.object(cmd_plugin, "_list_host_plugins", side_effect=_failing_lister):
+            text = self.invoke(["list", "--connector", "copilot"])
+            as_json = self.invoke(["list", "--connector", "copilot", "--json"])
+
+        self.assertEqual(text.exit_code, 1, text.output)
+        self.assertIn(
+            "warning: could not list copilot plugins: `copilot plugin list --json` exited 2",
+            text.stderr,
+        )
+        self.assertNotIn("has no installed plugins", text.output)
+        self.assertEqual(as_json.exit_code, 1, as_json.output)
+        self.assertEqual(json.loads(as_json.stdout), [])
+        self.assertIn("could not list copilot plugins", as_json.stderr)
+
+    @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
+    def test_single_connector_without_plugins_is_a_plain_empty_state(self, _mock_oc):
+        """GAP-2368: no plugins is normal; don't hint at a broken install."""
+        codex_dir = os.path.join(self.tmp_dir, "codex-empty-plugins")
+        os.makedirs(codex_dir)
+        self.app.cfg.active_connectors = lambda: ["codex"]  # type: ignore[method-assign]
+        self.app.cfg.active_connector = lambda: "codex"  # type: ignore[method-assign]
+        self.app.cfg.plugin_dirs = lambda connector=None: [codex_dir]  # type: ignore[method-assign]
+
+        result = self.invoke(["list", "--connector", "codex"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn(f"codex has no installed plugins (checked: {codex_dir}", result.output)
+        self.assertNotIn("Check your", result.output)
+        self.assertNotIn("installation", result.output)
+
+    @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
+    def test_default_puts_missing_claude_registry_on_its_own_line(self, _mock_oc):
+        """GAP-2290: the not-found note replaces claudecode's summary line."""
+        plugin_root = os.path.join(self.tmp_dir, "noclaude", "plugins")
+        os.makedirs(plugin_root)
+        self.app.cfg.active_connectors = lambda: ["claudecode", "hermes"]  # type: ignore[method-assign]
+        self.app.cfg.plugin_dirs = lambda connector=None: [plugin_root] if connector == "claudecode" else []  # type: ignore[method-assign]
+
+        result = self.invoke(["list"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        registry = os.path.join(plugin_root, "installed_plugins.json")
+        lines = result.output.splitlines()
+        self.assertEqual(
+            lines[:2],
+            [
+                f"Plugins (connector=claudecode): no installed plugins ({registry} not found)",
+                "Plugins (connector=hermes): no plugins found",
+            ],
+            result.output,
+        )
+        self.assertNotIn("claudecode has no installed plugins", result.output)
+        self.assertNotIn("Check your", result.output)
+
 
 class TestPluginRemove(PluginCommandTestBase):
     def test_remove_installed_plugin(self):
@@ -868,9 +1236,10 @@ class TestPluginRemove(PluginCommandTestBase):
         self.assertFalse(os.path.exists(os.path.join(self.app.cfg.plugin_dir, "removable")))
 
     def test_remove_nonexistent(self):
+        # GAP-2099: removing nothing is an error, as for skill remove.
         result = self.invoke(["remove", "ghost-plugin"])
-        self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("not found", result.output)
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("error: plugin not found: ghost-plugin", result.output)
 
     def test_remove_logs_action(self):
         self._install_plugin("to-remove")
@@ -915,6 +1284,28 @@ class TestPluginRemove(PluginCommandTestBase):
         self.assertTrue(os.path.exists(os.path.join(codex_dir, "scoped")))
         self.assertFalse(os.path.exists(os.path.join(hermes_dir, "scoped")))
 
+    def test_remove_names_the_gateway_restart_only_for_openclaw(self):
+        # GAP-1969: a Hermes plugin is not loaded by the gateway.
+        self.app.cfg.active_connectors = lambda: ["codex", "hermes"]  # type: ignore[method-assign]
+        self.app.cfg.active_connector = lambda: "codex"  # type: ignore[method-assign]
+        hermes_dir = os.path.join(self.tmp_dir, "hermes-plugins")
+        self.app.cfg.plugin_dirs = lambda connector=None: [hermes_dir] if connector == "hermes" else []  # type: ignore[method-assign]
+        os.makedirs(os.path.join(hermes_dir, "scoped"))
+
+        with patch("defenseclaw.commands.hint") as hint:
+            result = self.invoke(["remove", "scoped", "--connector", "hermes"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(hint.call_args.args, ("List plugins:      defenseclaw plugin list",))
+
+    def test_remove_from_the_openclaw_plugin_dir_names_the_gateway_restart(self):
+        self._install_plugin("legacy")
+        with patch("defenseclaw.commands.hint") as hint:
+            result = self.invoke(["remove", "legacy"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Restart gateway:   defenseclaw-gateway restart", hint.call_args.args)
+
     def test_remove_connector_flag_rejects_unknown_connector(self):
         self.app.cfg.active_connectors = lambda: ["codex", "hermes"]  # type: ignore[method-assign]
 
@@ -930,7 +1321,7 @@ class TestPluginRemovePathTraversal(PluginCommandTestBase):
     def test_remove_rejects_parent_traversal(self):
         """../../etc -> basename 'etc' -> resolves safely inside plugin_dir -> not found."""
         result = self.invoke(["remove", "../../etc"])
-        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(result.exit_code, 1)
         self.assertIn("not found", result.output)
 
     def test_remove_rejects_dotdot(self):
@@ -980,18 +1371,37 @@ class TestPluginLifecycle(PluginCommandTestBase):
         self.invoke(["remove", "lifecycle"])
 
         result = self.invoke(["list"])
-        self.assertIn("No plugins found", result.output)
+        self.assertIn("has no installed plugins", result.output)
 
 
 class TestPluginBlock(PluginCommandTestBase):
     def test_block_happy_path(self):
         result = self.invoke(["block", "blocked-one"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("added to block list", result.output)
+        self.assertIn("[plugin] Blocked 'blocked-one' (every connector).", result.output)
         self.assertIn("blocked-one", result.output)
         self.assertTrue(PolicyEngine(self.app.store).is_blocked("plugin", "blocked-one"))
         events = [e for e in self.app.store.list_events(10) if e.action == "plugin-block"]
         self.assertEqual(len(events), 1)
+
+    def test_block_of_an_installed_plugin_says_it_still_loads(self):
+        # GAP-2111: block refuses new installs only; name quarantine.
+        self._install_plugin("loaded-one")
+        result = self.invoke(["block", "loaded-one"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("The installed copy still loads", result.output)
+        self.assertIn("defenseclaw plugin quarantine loaded-one", result.output)
+        self.assertNotIn("still loads", self.invoke(["block", "never-installed"]).output)
+
+    def test_bare_unblock_of_a_bare_block_names_every_connector(self):
+        # GAP-2085: a copy on one connector does not narrow a global block.
+        self._install_plugin("loaded-two")
+        self.invoke(["block", "loaded-two"])
+        result = self.invoke(["unblock", "loaded-two"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("[plugin] Unblocked 'loaded-two' (every connector).", result.output)
+        self.assertNotIn("(openclaw).", result.output)
+        self.assertFalse(PolicyEngine(self.app.store).is_blocked("plugin", "loaded-two"))
 
     def test_block_custom_reason_in_audit_log(self):
         self.invoke(["block", "r1", "--reason", "CVE-1234"])
@@ -1003,8 +1413,7 @@ class TestPluginAllow(PluginCommandTestBase):
     def test_allow_happy_path(self):
         result = self.invoke(["allow", "allowed-one"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("added to allow list", result.output)
-        self.assertIn("allowed-one", result.output)
+        self.assertIn("[plugin] Allowed 'allowed-one' (every connector).", result.output)
         self.assertTrue(PolicyEngine(self.app.store).is_allowed("plugin", "allowed-one"))
         events = [e for e in self.app.store.list_events(10) if e.action == "plugin-allow"]
         self.assertEqual(len(events), 1)
@@ -1446,8 +1855,8 @@ class TestPluginInfo(PluginCommandTestBase):
         result = self.invoke(["info", "infoplug"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("infoplug", result.output)
-        self.assertIn("Installed:   True", result.output)
-        self.assertIn("Quarantined: False", result.output)
+        self.assertIn("Installed:   yes", result.output)
+        self.assertIn("Quarantined: no", result.output)
 
     def test_info_not_installed(self):
         # P-D: a plugin that exists nowhere (not installed, no scan/enforcement
@@ -1455,7 +1864,12 @@ class TestPluginInfo(PluginCommandTestBase):
         # rendering a phantom "Installed: False" card. Mirrors skill SK-2.
         result = self.invoke(["info", "ghost-plugin"])
         self.assertEqual(result.exit_code, 1, result.output)
-        self.assertIn("not found", result.output)
+        # GAP-2003: same shape as policy show / mcp scan misses, with a next step.
+        self.assertIn(
+            "Error: plugin 'ghost-plugin' not found. "
+            "Run `defenseclaw plugin list` to see installed plugins.",
+            result.output,
+        )
 
     def test_info_json_installed(self):
         self._install_plugin("jsonplug")
@@ -1497,7 +1911,7 @@ class TestPluginInfoNestedHermes(PluginCommandTestBase):
                 self.assertEqual(data["name"], pid)
             bare = self.invoke(["info", "web/ddgs"])
             self.assertEqual(bare.exit_code, 0, bare.output)
-            self.assertIn("Installed:   True", bare.output)
+            self.assertIn("Installed:   yes", bare.output)
             miss = self.invoke(["info", "web/none", "--connector", "hermes"])
             self.assertIn("'web/none' not found", miss.output)
 
@@ -1600,7 +2014,8 @@ class TestPluginMultiConnectorSemantics(PluginCommandTestBase):
         self.assertIn(codex_path, result.output)
         self.assertIn(hermes_path, result.output)
         self.assertIn("Actions:     -", result.output)
-        self.assertIn("Actions:     blocked", result.output)
+        # GAP-2264: the same wording as plugin list, with what still runs.
+        self.assertIn("Actions:     install-blocked (new installs are refused; the installed copy still loads)", result.output)
 
     def test_scoped_info_labels_connector_for_installed_plugin(self):
         codex_path = self._seed_connector_plugin("codex", "shared")
@@ -1625,7 +2040,7 @@ class TestPluginMultiConnectorSemantics(PluginCommandTestBase):
 
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Connector:   codex", result.output)
-        self.assertIn("Installed:   False", result.output)
+        self.assertIn("Installed:   no", result.output)
         self.assertIn("Actions:     disabled", result.output)
 
     def test_info_global_action_does_not_create_phantom_card(self):
@@ -1661,17 +2076,21 @@ class TestPluginMultiConnectorSemantics(PluginCommandTestBase):
             ["block", "dc-plugin-final-state", "--connector", "codex"]
         )
         self.assertEqual(scoped_block.exit_code, 0, scoped_block.output)
-        self.assertIn("connector=codex", scoped_block.output)
+        self.assertIn("[plugin] Blocked 'dc-plugin-final-state' (codex).", scoped_block.output)
 
         bare_allow = self.invoke(["allow", "dc-plugin-final-state"])
         self.assertEqual(bare_allow.exit_code, 0, bare_allow.output)
-        self.assertIn("added to allow list (connector=codex)", bare_allow.output)
-        self.assertIn("added to allow list (connector=hermes)", bare_allow.output)
+        self.assertIn("[plugin] Allowed 'dc-plugin-final-state' (codex).", bare_allow.output)
+        self.assertIn("[plugin] Allowed 'dc-plugin-final-state' (hermes).", bare_allow.output)
 
         bare_unblock = self.invoke(["unblock", "dc-plugin-final-state"])
         self.assertEqual(bare_unblock.exit_code, 0, bare_unblock.output)
-        self.assertIn("all enforcement state cleared (connector=codex)", bare_unblock.output)
-        self.assertIn("all enforcement state cleared (connector=hermes)", bare_unblock.output)
+        # GAP-2273: the bare allow replaced the codex block, so only allow
+        # entries were left to clear.
+        self.assertIn("Removed the allow entry for 'dc-plugin-final-state' (codex).", bare_unblock.output)
+        self.assertIn("Removed the allow entry for 'dc-plugin-final-state' (hermes).", bare_unblock.output)
+        self.assertNotIn("Unblocked", bare_unblock.output)
+        self.assertIn("defenseclaw plugin scan dc-plugin-final-state", bare_unblock.output)
 
         codex_info = self.invoke(
             ["info", "dc-plugin-final-state", "--connector", "codex"]
@@ -1687,6 +2106,17 @@ class TestPluginMultiConnectorSemantics(PluginCommandTestBase):
         self.assertIn("Connector:   hermes", hermes_info.output)
         self.assertIn("Actions:     -", hermes_info.output)
 
+    def test_unblock_of_allow_only_plugin_says_allow_entry_removed(self):
+        # GAP-2273: an allow entry is not a block; say what was cleared.
+        self._seed_connector_plugin("hermes", "spotify")
+        self.invoke(["allow", "spotify", "--connector", "hermes"])
+        result = self.invoke(["unblock", "spotify", "--connector", "hermes"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("[plugin] Removed the allow entry for 'spotify' (hermes).", result.output)
+        self.assertIn("defenseclaw plugin scan spotify --connector hermes", result.output)
+        self.assertNotIn("Unblocked", result.output)
+        self.assertIsNone(self.app.store.get_action("plugin", "spotify", "hermes"))
+
     def test_bare_unblock_clears_all_scoped_enforcement_fields(self):
         self._seed_connector_plugin("codex", "shared")
         self._seed_connector_plugin("hermes", "shared")
@@ -1699,8 +2129,12 @@ class TestPluginMultiConnectorSemantics(PluginCommandTestBase):
         result = self.invoke(["unblock", "shared"])
 
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("all enforcement state cleared (connector=codex)", result.output)
-        self.assertIn("all enforcement state cleared (connector=hermes)", result.output)
+        # GAP-2049: one plain line per connector plus what "unblocked" means
+        # for the agent's own on/off setting; no internal state list.
+        self.assertIn("[plugin] Unblocked 'shared' (codex).", result.output)
+        self.assertIn("[plugin] Unblocked 'shared' (hermes).", result.output)
+        self.assertEqual(result.output.count("keeps the on/off setting from the agent's own config"), 1)
+        self.assertNotIn("allow/block/quarantine/disable", result.output)
         self.assertIsNone(self.app.store.get_action("plugin", "shared", "codex"))
         self.assertIsNone(self.app.store.get_action("plugin", "shared", "hermes"))
 
@@ -1805,6 +2239,26 @@ class TestPluginMultiConnectorSemantics(PluginCommandTestBase):
             result = self.invoke(["install", src, "--connector", "hermes"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("hermes plugins enable optin", result.output)
+
+    @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
+    def test_install_with_gateway_never_started_warns_once_and_exits_zero(self, mock_scan):
+        # GAP-2066: the plugin is installed and clean; a gateway that was
+        # never started skips only the audit events (scan included), rc 0.
+        from defenseclaw.logger import CanonicalObservabilityUnavailableError
+
+        mock_scan.side_effect = lambda path, **_kwargs: self._clean_scan_result(path)
+        src = self._create_plugin_dir("nogw")
+        down = CanonicalObservabilityUnavailableError("gateway authentication is unavailable")
+        with (
+            patch("defenseclaw.commands._audit_notice._NOTED", False),
+            patch.object(self.app.logger, "log_scan", side_effect=down),
+            patch.object(self.app.logger, "log_action", side_effect=down),
+        ):
+            result = self.invoke(["install", src, "--connector", "hermes"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertTrue(os.path.isdir(os.path.join(self.hermes_root, "nogw")))
+        self.assertEqual(result.output.count("audit event was not recorded"), 1, result.output)
+        self.assertNotIn("run the command again", result.output)
 
     @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
     def test_install_antigravity_uses_documented_plugin_dir(self, mock_scan):
@@ -1998,6 +2452,101 @@ class TestPluginRestoreEdgeCases(PluginCommandTestBase):
         # The path equals plugin_dir which the code allows (real_restore == real_plugin_dir)
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("restored", result.output)
+
+
+class TestPluginQuarantineRestoreOriginalPath(PluginCommandTestBase):
+    """GAP-2163/GAP-2164: quarantine finds listed plugins; restore uses the original path."""
+
+    def test_opencode_single_file_round_trip(self):
+        config = os.path.join(self.tmp_dir, "opencode-config")
+        plugins = os.path.join(config, "plugins")
+        os.makedirs(plugins)
+        source = os.path.join(plugins, "probe.js")
+        with open(source, "w", encoding="utf-8") as handle:
+            handle.write("export const Probe = async () => ({});\n")
+        self.app.cfg.active_connectors = lambda: ["opencode"]  # type: ignore[method-assign]
+        with patch.dict(os.environ, {"OPENCODE_CONFIG_DIR": config}, clear=False):
+            result = self.invoke(["quarantine", "probe", "--connector", "opencode"])
+            self.assertEqual(result.exit_code, 0, result.output)
+            self.assertFalse(os.path.exists(source))
+            result = self.invoke(["restore", "probe", "--connector", "opencode"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertTrue(os.path.isfile(source))
+
+    def test_hermes_nested_plugin_by_listed_name(self):
+        root = os.path.join(self.tmp_dir, "hermes-agent", "plugins")
+        path = os.path.join(root, "platforms", "photon")
+        os.makedirs(path)
+        with open(os.path.join(path, "plugin.yaml"), "w", encoding="utf-8") as handle:
+            handle.write("name: photon-platform\n")
+        self.app.cfg.active_connectors = lambda: ["hermes"]  # type: ignore[method-assign]
+        self.app.cfg.plugin_dirs = lambda connector=None: [root]  # type: ignore[method-assign]
+        rows = [{"id": "photon", "name": "photon-platform", "host_path": path}]
+        with patch("defenseclaw.commands.cmd_plugin._list_hermes_plugins", return_value=rows):
+            result = self.invoke(["quarantine", "photon", "--connector", "hermes"])
+            self.assertEqual(result.exit_code, 0, result.output)
+            self.assertFalse(os.path.exists(path))
+            # GAP-2200: the listed name finds the quarantine keyed by manifest id.
+            info = self.invoke(["info", "photon", "--connector", "hermes"])
+            self.assertEqual(info.exit_code, 0, info.output)
+            self.assertIn("Quarantined: yes", info.output)
+            self.assertIn("Actions:     quarantined", info.output)
+            self.assertIn(os.path.join("hermes", "photon-platform"), info.output)
+            result = self.invoke(["restore", "photon", "--connector", "hermes"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertTrue(os.path.isfile(os.path.join(path, "plugin.yaml")))
+        self.assertFalse(os.path.exists(os.path.join(root, "platforms", "photon-platform")))
+
+    @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
+    def test_hermes_quarantined_nested_plugin_keeps_its_list_row(self, _mock_oc):
+        """GAP-2265: the quarantined row keeps id, description, origin and severity."""
+        from datetime import datetime, timedelta, timezone
+
+        from defenseclaw.models import Finding, ScanResult
+
+        root = os.path.join(self.tmp_dir, "hermes-agent", "plugins")
+        path = os.path.join(root, "platforms", "photon")
+        os.makedirs(path)
+        with open(os.path.join(path, "plugin.yaml"), "w", encoding="utf-8") as handle:
+            handle.write("name: photon-platform\ndescription: >\n  Photon Spectrum gateway adapter.\n")
+        _seed_scan(self.app.store, ScanResult(
+            scanner="plugin-scanner", target=path, timestamp=datetime.now(timezone.utc),
+            findings=[Finding(id="f1", severity="MEDIUM", title="t", scanner="plugin-scanner")],
+            duration=timedelta(seconds=0.1),
+        ))
+        self.app.cfg.active_connectors = lambda: ["hermes"]  # type: ignore[method-assign]
+        self.app.cfg.plugin_dirs = lambda connector=None: [root]  # type: ignore[method-assign]
+        before = [{
+            "id": "photon", "name": "photon-platform", "description": "Photon Spectrum gateway adapter.",
+            "version": "", "origin": "bundled", "enabled": True, "source": "host:hermes", "host_path": path,
+        }]
+        other = [{
+            "id": "spotify", "name": "spotify", "description": "", "version": "",
+            "origin": "bundled", "enabled": True, "source": "host:hermes", "host_path": "",
+        }]
+        with (
+            patch.dict(os.environ, {"HERMES_HOME": self.tmp_dir, "COLUMNS": "200"}),
+            patch("defenseclaw.commands.cmd_plugin._list_hermes_plugins", return_value=before),
+        ):
+            result = self.invoke(["quarantine", "photon", "--connector", "hermes"])
+            self.assertEqual(result.exit_code, 0, result.output)
+        with (
+            patch.dict(os.environ, {"HERMES_HOME": self.tmp_dir, "COLUMNS": "200"}),
+            patch("defenseclaw.commands.cmd_plugin._list_hermes_plugins", return_value=other),
+        ):
+            listed = self.invoke(["list", "--connector", "hermes"])
+            as_json = self.invoke(["list", "--connector", "hermes", "--json"])
+        self.assertEqual(listed.exit_code, 0, listed.output)
+        row = next(line for line in listed.output.splitlines() if "quarantined" in line)
+        cells = [cell.strip() for cell in row.strip("\u2502").split("\u2502")]
+        self.assertEqual(cells[1:5], ["photon", "photon-platform", "Photon Spectrum gateway adapter.", "bundled"])
+        self.assertEqual(cells[5], "MEDIUM")
+        # GAP-2293: Verdict keeps the scan verdict; Status and Actions show the quarantine.
+        self.assertEqual(cells[0], "\u2717 quarantined")
+        self.assertEqual(cells[6:], ["warning", "quarantined"])
+        item = next(entry for entry in json.loads(as_json.output) if entry["id"] == "photon")
+        self.assertEqual(item["status"], "quarantined")
+        self.assertEqual(item["actions"], {"file": "quarantine"})
 
 
 class TestPluginInfoHelpers(PluginCommandTestBase):
@@ -2825,30 +3374,91 @@ class HostPluginEnumerationTests(unittest.TestCase):
         args, kwargs = run.call_args
         self.assertEqual(
             args[0],
-            [r"C:\Tools\copilot.exe", "plugins", "list", "--kind", "plugin", "--json"],
+            [r"C:\Tools\copilot.exe", "plugin", "list", "--json"],
         )
         self.assertEqual(kwargs["cwd"], self.tmp_dir)
         self.assertEqual(kwargs["env"]["COPILOT_HOME"], os.path.join(os.path.expanduser("~"), ".copilot"))
         self.assertEqual(kwargs["timeout"], 15)
 
     @patch("defenseclaw.commands.cmd_plugin.subprocess.run")
-    @patch("defenseclaw.commands.cmd_plugin._trusted_copilot_binary", return_value="")
-    def test_list_copilot_plugins_does_not_execute_untrusted_path(self, _trusted, run):
+    @patch(
+        "defenseclaw.commands.cmd_plugin._trusted_copilot_binary",
+        return_value="/usr/local/bin/copilot",
+    )
+    def test_list_copilot_plugins_reads_copilot_1_0_90_rows(self, _trusted, run):
+        """GAP-2415: 1.0.90 prints name + marketplace rows."""
         from defenseclaw.commands.cmd_plugin import _list_copilot_plugins
 
-        self.assertEqual(_list_copilot_plugins(workspace_dir=self.tmp_dir), [])
+        run.return_value = SimpleNamespace(
+            returncode=0,
+            stdout='[{"name":"v10crm-plug","marketplace":"v10crm-mkt",'
+            '"version":"0.0.1","enabled":true,"source":"live"}]',
+            stderr="",
+        )
+
+        rows = _list_copilot_plugins(workspace_dir=self.tmp_dir)
+
+        self.assertEqual([(r["id"], r["name"]) for r in rows], [("v10crm-plug@v10crm-mkt", "v10crm-plug")])
+        run.assert_called_once()
+
+    @patch("defenseclaw.commands.cmd_plugin.subprocess.run")
+    @patch(
+        "defenseclaw.commands.cmd_plugin._trusted_copilot_binary",
+        return_value="/usr/local/bin/copilot",
+    )
+    def test_list_copilot_plugins_records_why_listing_failed(self, _trusted, run):
+        """GAP-2415: a failing Copilot lister is not an empty plugin list."""
+        from defenseclaw.commands import cmd_plugin
+
+        run.return_value = SimpleNamespace(
+            returncode=2,
+            stdout="",
+            stderr="error: unexpected argument '--json' found\nUsage: copilot plugin list\n",
+        )
+
+        self.assertEqual(cmd_plugin._list_copilot_plugins(workspace_dir=self.tmp_dir), [])
+        self.assertEqual(
+            [c.args[0][1:] for c in run.call_args_list],
+            [["plugin", "list", "--json"], ["plugins", "list", "--kind", "plugin", "--json"]],
+        )
+        self.assertEqual(
+            cmd_plugin._HOST_PLUGIN_LIST_ERRORS.pop("copilot"),
+            "`copilot plugin list --json` exited 2: error: unexpected argument '--json' found",
+        )
+
+    @patch("defenseclaw.commands.cmd_plugin.subprocess.run")
+    @patch("defenseclaw.commands.cmd_plugin._trusted_copilot_binary", return_value="")
+    def test_list_copilot_plugins_does_not_execute_untrusted_path(self, _trusted, run):
+        from defenseclaw.commands import cmd_plugin
+
+        with patch.object(cmd_plugin, "_untrusted_copilot_binary", return_value="/opt/agents/bin/copilot"):
+            self.assertEqual(cmd_plugin._list_copilot_plugins(workspace_dir=self.tmp_dir), [])
         run.assert_not_called()
+        # GAP-2415: a refused binary is reported, not shown as "no plugins".
+        reason = cmd_plugin._HOST_PLUGIN_LIST_ERRORS.pop("copilot")
+        self.assertIn("/opt/agents/bin/copilot is not in a trusted location", reason)
+        self.assertIn("ai_discovery.trusted_binary_prefixes", reason)
 
     @patch("defenseclaw.commands.cmd_plugin.subprocess.run")
     @patch(
         "defenseclaw.commands.cmd_plugin._trusted_copilot_binary",
         return_value=r"C:\Tools\copilot.exe",
     )
-    def test_list_copilot_plugins_requires_pinned_workspace(self, _trusted, run):
-        from defenseclaw.commands.cmd_plugin import _list_copilot_plugins
+    def test_list_copilot_plugins_without_pinned_workspace_runs_in_home(self, _trusted, run):
+        """GAP-2415: the default config (no claw.workspace_dir) still lists."""
+        from defenseclaw.commands import cmd_plugin
 
-        self.assertEqual(_list_copilot_plugins(), [])
-        run.assert_not_called()
+        run.return_value = SimpleNamespace(
+            returncode=0,
+            stdout='[{"name":"p","marketplace":"m","enabled":true}]',
+            stderr="",
+        )
+        with patch.dict(os.environ, {"HOME": self.tmp_dir, "USERPROFILE": self.tmp_dir}):
+            rows = cmd_plugin._list_copilot_plugins()
+
+        self.assertEqual([r["id"] for r in rows], ["p@m"])
+        self.assertEqual(run.call_args.kwargs["cwd"], os.path.realpath(self.tmp_dir))
+        self.assertNotIn("copilot", cmd_plugin._HOST_PLUGIN_LIST_ERRORS)
 
 
 class MergeAllPluginsHostBranchTests(unittest.TestCase):

@@ -131,3 +131,50 @@ func TestCopilotCLIHookFileRunByVSCodeLocalHarness(t *testing.T) {
 		t.Fatalf("allowed call rendered a decision: %v", out)
 	}
 }
+
+// GAP-1903: the VS Code Local harness also runs the per-user Copilot CLI
+// hook file (bound to the CLI event preToolUse, no dialect header) and sends
+// it the Local payload, as VS Code 1.140 did on dc-win2. A marker command in
+// run_in_terminal is denied with the Local decision shape, a benign one runs,
+// and a body naming another event keeps the CLI handling.
+func TestCopilotCLIHookFileLocalPayloadFromVSCode(t *testing.T) {
+	installSandboxMarkerRules(t)
+	store, logger := testStoreAndLogger(t)
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "copilot"
+	api := &APIServer{scannerCfg: cfg, store: store, logger: logger}
+	handler := http.HandlerFunc(api.handleAgentHook("copilot"))
+
+	post := func(bodyEvent, command string) map[string]interface{} {
+		body := `{"timestamp":"2026-10-03T23:56:24.200Z","hook_event_name":"` + bodyEvent + `",` +
+			`"session_id":"s1","transcript_path":"/home/alice/t.jsonl","cwd":"/home/alice/w",` +
+			`"tool_name":"run_in_terminal","tool_use_id":"call_1__vscode-1",` +
+			`"tool_input":{"command":"` + command + `","explanation":"Run the command.",` +
+			`"goal":"Execute requested command","mode":"sync","timeout":120000}}`
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/copilot/hook", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-DefenseClaw-Copilot-Event", "preToolUse")
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		var out map[string]interface{}
+		if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil || w.Code != http.StatusOK {
+			t.Fatalf("status=%d err=%v body=%s", w.Code, err, w.Body.String())
+		}
+		hookOutput, _ := out["hook_output"].(map[string]interface{})
+		return hookOutput
+	}
+
+	out := post("PreToolUse", "echo DCE2E-BLOCK-MARKER > /home/alice/w/x.txt")
+	specific, _ := out["hookSpecificOutput"].(map[string]interface{})
+	if specific["permissionDecision"] != "deny" || specific["hookEventName"] != "PreToolUse" ||
+		specific["permissionDecisionReason"] == "" {
+		t.Fatalf("marker command not denied: %v", out)
+	}
+	if out := post("PreToolUse", "echo hello"); len(out) != 0 {
+		t.Fatalf("benign call rendered a decision: %v", out)
+	}
+	if out := post("PostToolUse", "echo DCE2E-BLOCK-MARKER"); out["hookSpecificOutput"] != nil {
+		t.Fatalf("a body naming another event switched dialect: %v", out)
+	}
+}

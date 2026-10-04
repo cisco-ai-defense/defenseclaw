@@ -90,7 +90,8 @@ each level); the effective order remains unverified pending official-client
 evidence.
 
 Read-only plugin inventory uses the official
-`copilot plugins list --kind plugin --json` command. DefenseClaw does not use
+`copilot plugin list --json` command (older Copilot CLIs: `copilot plugins
+list --kind plugin --json`). DefenseClaw does not use
 that inventory path to install, enable, disable, or remove Copilot plugins.
 
 </Accordion>
@@ -284,11 +285,14 @@ denies with exit code 0; `Stop` never fails closed. Without the flag, a
 Copilot hook keeps the Copilot CLI contract.
 
 **Per-user hook file in the Local harness.** The Local harness also runs the
-per-user Copilot CLI hook file (`~/.copilot/hooks/defenseclaw.json`) and then
-sends a Copilot CLI-shaped body with its own tool names. The gateway maps the
-same reviewed Local tool names there, so a per-user `run_in_terminal` call is
-judged as a shell command, and a `PreToolUse` deny or ask carries both the CLI
-`permissionDecision` and the Local `hookSpecificOutput`.
+per-user Copilot CLI hook file (`~/.copilot/hooks/defenseclaw.json`). It maps
+each CLI event to its own (`preToolUse` to `PreToolUse`, `userPromptSubmitted`
+to `UserPromptSubmit`, `agentStop` to `Stop`) and sends that command its Local
+payload (`hook_event_name`, `tool_name`, `tool_input`), not the CLI body. When
+the body's `hook_event_name` is the Local event of the bound CLI event, the
+gateway judges the call in the Local dialect: a per-user `run_in_terminal`
+call is judged as a shell command, and a `PreToolUse` deny comes back as the
+Local `hookSpecificOutput` that VS Code enforces.
 
 **Device policies (enterprise, standalone profile).** With
 `ownership: merge`, the Copilot machine policy also enables the VS Code

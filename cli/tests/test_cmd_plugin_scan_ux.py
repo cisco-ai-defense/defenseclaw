@@ -162,7 +162,9 @@ class TestScanUXVerdictLines(_PluginScanUXBase):
         self.assertIn("[WARN]", result.output)
         self.assertNotIn("[BLOCKED]", result.output)
         self.assertIn("policy: rejected", result.output)
-        self.assertIn(f"Block it: defenseclaw plugin block {self.plugin_name}", result.output)
+        # GAP-2111: block only refuses new installs; quarantine stops the copy.
+        self.assertIn(f"Stop it: defenseclaw plugin quarantine {self.plugin_name}", result.output)
+        self.assertNotIn("plugin block", result.output)
         # Finding count must be visible.
         self.assertIn("1 finding", result.output)
         # Severity surfaced via the "max severity:" detail string.
@@ -181,8 +183,7 @@ class TestScanUXSummary(_PluginScanUXBase):
         result = self.invoke(["scan", self.plugin_name])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Summary: 1 plugin scanned", result.output)
-        self.assertIn("clean=1", result.output)
-        self.assertIn("blocked=0", result.output)
+        self.assertIn("clean=1, warning=0, blocked=0", result.output)
 
     @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
     def test_summary_rejected_is_not_blocked(self, mock_scan) -> None:
@@ -220,8 +221,8 @@ class TestScanUXSummary(_PluginScanUXBase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertNotIn("[BLOCKED]", result.output)
         self.assertIn("[WARN]", result.output)
-        self.assertIn("blocked=0", result.output)
-        self.assertIn("findings=1", result.output)
+        # GAP-2336: the [WARN] plugin is counted, so the counts add up.
+        self.assertIn("Summary: 1 plugin scanned, clean=0, warning=1, blocked=0, findings=1", result.output)
 
     @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
     def test_summary_includes_duration_ms(self, mock_scan) -> None:
@@ -480,8 +481,9 @@ class TestScanAllSweep(_PluginScanUXBase):
                     ["scan", "--all", "--connector", "claudecode"]
                 )
                 self.assertEqual(text_result.exit_code, 0, text_result.output)
-                self.assertIn(registry, text_result.output)
-                self.assertIn(f"— {expected_state}; entries=0", text_result.output)
+                # GAP-2274/GAP-2317: a missing or empty registry only means no plugins yet.
+                self.assertNotIn(registry, text_result.output)
+                self.assertNotIn("entries=0", text_result.output)
                 self.assertIn("No plugins found to scan", text_result.output)
 
                 json_result = self.invoke(
@@ -710,6 +712,28 @@ def test_plugin_info_card_states_total_and_max_severity(capsys):
     out = capsys.readouterr().out
     assert "Findings: 2 findings (max severity: HIGH)" in out
     assert "2 HIGH findings" not in out
+
+
+def test_plugin_info_card_reads_the_same_for_every_outcome(capsys):
+    # GAP-2201: yes/no values; Verdict, Findings and scan time for clean and warned plugins.
+    from datetime import datetime, timezone
+
+    from defenseclaw.commands.cmd_plugin import _plugin_scan_payload_from_latest, _print_plugin_info_card
+
+    when = datetime(2026, 10, 3, 4, 14, 21, tzinfo=timezone.utc)
+    # GAP-2201 (b11): Verdict is the plugin list word, not the severity.
+    for count, sev, verdict in ((0, "INFO", "clean"), (1, "MEDIUM", "warning")):
+        scan = _plugin_scan_payload_from_latest(
+            {"target": "/p", "finding_count": count, "max_severity": sev, "timestamp": when}
+        )
+        _print_plugin_info_card({"name": "p", "installed": True, "quarantined": False, "scan": scan}, "p")
+        out = capsys.readouterr().out
+        assert "Installed:   yes" in out and "Quarantined: no" in out
+        assert "True" not in out and "False" not in out
+        assert f"Verdict:  {verdict}" in out
+        assert "Verdict:  MEDIUM" not in out and "Verdict:  CLEAN" not in out
+        assert "Findings: " in out
+        assert "Scanned:  2026-10-03 04:14:21 UTC" in out
 
 
 class TestScanFolderOfPlugins(_PluginScanUXBase):

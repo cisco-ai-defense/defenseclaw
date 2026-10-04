@@ -185,7 +185,7 @@ class DoctorHermesPathTests(unittest.TestCase):
 
 class DoctorGuardrailTests(unittest.TestCase):
     @patch("defenseclaw.commands.cmd_doctor._http_probe", return_value=(200, "ok"))
-    def test_empty_guardrail_model_is_warning_not_failure(self, _mock_probe):
+    def test_empty_guardrail_model_is_not_a_warning(self, _mock_probe):
         cfg = Config(
             data_dir="/tmp/defenseclaw",
             audit_db="/tmp/defenseclaw/audit.db",
@@ -200,11 +200,12 @@ class DoctorGuardrailTests(unittest.TestCase):
 
         _check_guardrail_proxy(cfg, result)
 
+        # Fetch-interceptor routing is how OpenClaw works (GAP-2233):
+        # an empty guardrail.model is not something to warn about.
         self.assertEqual(result.failed, 0)
-        self.assertEqual(result.warned, 1)
+        self.assertEqual(result.warned, 0)
         self.assertEqual(result.passed, 1)
-        warn_checks = [c for c in result.checks if c["status"] == "warn"]
-        self.assertTrue(any("fetch-interceptor" in c["detail"] for c in warn_checks))
+        self.assertNotIn("guardrail.model", " ".join(c["detail"] for c in result.checks))
 
     def test_proxy_interception_fails_when_self_test_misses(self):
         cfg = Config(
@@ -221,6 +222,52 @@ class DoctorGuardrailTests(unittest.TestCase):
         _check_proxy_interception(cfg, result, live_health={"interception": {"verified": False}})
         self.assertEqual(result.failed, 1, result.checks)
         self.assertIn("not being intercepted", result.checks[0]["detail"])
+
+    def test_proxy_interception_waits_for_first_report_after_restart(self):
+        # GAP-2487: right after a sidecar restart the plugin has not reported
+        # yet; it does within a minute, so this is not a FAIL.
+        cfg = Config(
+            data_dir="/tmp/defenseclaw",
+            audit_db="/tmp/defenseclaw/audit.db",
+            quarantine_dir="/tmp/defenseclaw/quarantine",
+            plugin_dir="/tmp/defenseclaw/plugins",
+            policy_dir="/tmp/defenseclaw/policies",
+            guardrail=GuardrailConfig(enabled=True, model="openai/gpt-4", port=4000, connector="openclaw"),
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
+        )
+        result = _DoctorResult()
+        _check_proxy_interception(cfg, result, live_health={"uptime_ms": 2000})
+        self.assertEqual(result.failed, 0, result.checks)
+        self.assertEqual(result.warned, 1, result.checks)
+        self.assertIn("waiting for the OpenClaw plugin", result.checks[0]["detail"])
+
+        result = _DoctorResult()
+        _check_proxy_interception(cfg, result, live_health={"uptime_ms": 600000})
+        self.assertEqual(result.failed, 1, result.checks)
+        self.assertIn("has not reported", result.checks[0]["detail"])
+
+    def test_proxy_interception_points_at_an_unreachable_openclaw_gateway(self):
+        # GAP-2506: the plugin cannot report while the OpenClaw gateway is
+        # down, so "rerun doctor in a minute" never helped.
+        cfg = Config(
+            data_dir="/tmp/defenseclaw",
+            audit_db="/tmp/defenseclaw/audit.db",
+            quarantine_dir="/tmp/defenseclaw/quarantine",
+            plugin_dir="/tmp/defenseclaw/plugins",
+            policy_dir="/tmp/defenseclaw/policies",
+            guardrail=GuardrailConfig(enabled=True, model="openai/gpt-4", port=4000, connector="openclaw"),
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
+        )
+        result = _DoctorResult()
+        result.record("fail", "OpenClaw gateway", "not reachable at 127.0.0.1:20497")
+        _check_proxy_interception(cfg, result, live_health={"uptime_ms": 2000})
+        self.assertEqual(result.warned, 0, result.checks)
+        self.assertEqual(result.failed, 2, result.checks)
+        row = result.checks[-1]
+        self.assertIn("OpenClaw gateway is not reachable", row["detail"])
+        self.assertIn("start or fix the OpenClaw gateway first", row["remediation"])
 
     def test_proxy_interception_passes_when_self_test_verified(self):
         cfg = Config(
@@ -1734,14 +1781,14 @@ class VerifyBedrockTests(unittest.TestCase):
         _verify_bedrock("ASIAEXAMPLETEMPKEY", r)
         self.assertEqual(r.warned, 1, r.checks)
 
-    def test_unrecognized_shape_passes_with_note(self):
-        # If the operator is running a custom gateway that accepts
-        # some other token format, we shouldn't block — just note
-        # the shape isn't one we can probe.
+    def test_unrecognized_shape_warns_with_next_step(self):
+        # GAP-2195: Bedrock rejects keys without a known prefix, so an
+        # unknown shape is a WARN with a next step, never a green check.
         r = _DoctorResult()
-        _verify_bedrock("custom-gateway-token-xyz", r)
-        self.assertEqual(r.passed, 1, r.checks)
-        self.assertIn("not a Bedrock API key format doctor knows", r.checks[0]["detail"])
+        _verify_bedrock("dccert-fake-invalid-key", r)
+        self.assertEqual((r.passed, r.warned, r.failed), (0, 1, 0), r.checks)
+        self.assertIn("does not look like a Bedrock API key", r.checks[0]["detail"])
+        self.assertIn("keys set DEFENSECLAW_LLM_KEY", r.checks[0].get("remediation", ""))
 
     @patch("defenseclaw.commands.cmd_doctor._http_probe", return_value=(200, "{}"))
     def test_short_term_bedrock_api_key_is_probed(self, mock_probe):
@@ -2891,6 +2938,23 @@ class GuardrailProxyMultiConnectorTests(unittest.TestCase):
         cfg.active_connectors.return_value = connectors
         cfg.guardrail = SimpleNamespace(mode=mode)
         return cfg
+
+    @patch("defenseclaw.commands.cmd_doctor._http_probe")
+    def test_no_active_connector_skips_proxy_probe(self, mock_probe):
+        # GAP-2291: after the last connector is removed nothing needs the
+        # proxy, so doctor must not FAIL (and exit 1) on a closed port.
+        from defenseclaw.commands.cmd_doctor import _check_guardrail_proxy
+
+        cfg = self._cfg([])
+        cfg.guardrail = SimpleNamespace(enabled=True, mode="observe", port=4000)
+        result = _DoctorResult()
+
+        _check_guardrail_proxy(cfg, result)
+
+        mock_probe.assert_not_called()
+        self.assertEqual(result.failed, 0)
+        self.assertEqual(result.checks[0]["status"], "skip")
+        self.assertIn("no active connector", result.checks[0]["detail"])
 
     def test_all_hook_enforced_reports_closed(self):
         from defenseclaw.commands.cmd_doctor import (

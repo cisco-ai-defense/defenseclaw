@@ -64,3 +64,32 @@ def test_refused_audit_event_still_fails(_restart) -> None:
     app.logger.log_config_change = MagicMock(side_effect=CanonicalObservabilityError("refused"))
     result = make_separate_stderr_runner().invoke(cmd_judge.judge, ["add", "hermes"], obj=app)
     assert isinstance(result.exception, CanonicalObservabilityError)
+
+
+@pytest.mark.parametrize("unicode_ok", [True, False])
+def test_not_recorded_warnings_follow_console_glyph_policy(unicode_ok) -> None:
+    # GAP-2527: with output redirected the warning kept "⚠" while the rest of the command used "!".
+    from defenseclaw import ux
+    from defenseclaw.commands import _audit_notice, _scan_ui
+
+    mark = "⚠" if unicode_ok else "!"
+    app, tmp_dir, db_path = make_app_context()
+    try:
+        app.logger.log_action = MagicMock(side_effect=CanonicalObservabilityUnavailableError("down"))
+        scan_logger = MagicMock()
+        scan_logger.log_scan.side_effect = CanonicalObservabilityUnavailableError("down")
+        decision = MagicMock(observed_reason="not in the registry", observed_source="registry")
+        with (
+            patch.object(ux, "_configured_unicode_output", unicode_ok),
+            patch.object(_scan_ui, "_SCAN_NOT_RECORDED_NOTED", False),
+        ):
+            result = make_separate_stderr_runner().invoke(skill, ["block", "demo"], obj=app)
+            with patch("click.secho") as secho, patch.object(_scan_ui.click, "echo") as echo:
+                _audit_notice.note_asset_policy_observed(None, decision, target_type="mcp", name="m")
+                _scan_ui.record_scan(scan_logger, object())
+        assert result.exit_code == 0, result.output
+        assert f"  {mark} The gateway isn't running, so the audit event was not recorded" in result.stderr
+        assert secho.call_args.args[0].startswith(f"  {mark} asset policy (observe)")
+        assert echo.call_args.args[0].startswith(f"  {mark} The gateway isn't running, so this scan result")
+    finally:
+        cleanup_app(app, db_path, tmp_dir)

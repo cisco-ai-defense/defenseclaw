@@ -1645,6 +1645,40 @@ func TestRollbackWindowsFirstInstallAccountSkipsADeletedAccount(t *testing.T) {
 	}
 }
 
+// GAP-2480: when the lifecycle capture writes the Cursor enterprise adapter
+// back over a changed or deleted one, the result and lifecycle log say so.
+func TestWindowsEnterpriseResultNamesRestoredCursorAdapter(t *testing.T) {
+	for _, restored := range []bool{true, false} {
+		document, err := json.Marshal(map[string]any{
+			"schema_version": 1, "ok": true, "action": "repair", "installed": true, "transaction_pending": false,
+			"errors": []string{}, "cursor_adapter_restored": restored,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		report, err := parseWindowsEnterpriseInstallerReport(document)
+		if err != nil {
+			t.Fatal(err)
+		}
+		result := enterprisestatus.New("repair", "standalone", "windows", "1.0.46")
+		addWindowsEnterpriseRecoveryGatewayWarnings(result, report)
+		addWindowsEnterpriseRecoveryGatewayWarnings(result, report)
+		var found []string
+		for _, warning := range result.Warnings {
+			if warning.Code == "cursor_adapter_restored" {
+				found = append(found, warning.Message)
+			}
+		}
+		want := 0
+		if restored {
+			want = 1
+		}
+		if len(found) != want || (restored && !strings.Contains(found[0], `C:\ProgramData\Cursor\defenseclaw-hook.ps1`)) {
+			t.Fatalf("restored=%t warnings = %+v", restored, result.Warnings)
+		}
+	}
+}
+
 // GAP-1680: when the lifecycle removes a stale committed managed-hook
 // lifecycle journal itself, the Setup result and lifecycle log say so.
 func TestWindowsEnterpriseResultNamesRemovedStaleLifecycleJournal(t *testing.T) {
@@ -1679,7 +1713,10 @@ func TestWindowsEnterpriseResultNamesRemovedStaleLifecycleJournal(t *testing.T) 
 // config; it gets the elevation_required refusal (exit 5) that status and
 // verify give, not a raw "Access is denied" with exit 1603. GAP-1962: an
 // unknown --profile exits 1639 (invalid arguments) like every other
-// argument error.
+// argument error; GAP-2040: as one line that claims no profile. GAP-2041:
+// naming the Secure Client profile on a standalone computer is a caller
+// error (1639) that names the profile to use, not a fatal install (1603).
+// GAP-2113: its --json result reports the installed deployment.
 func TestWindowsEnterpriseLifecycleCallerErrorsExitCodes(t *testing.T) {
 	stubWindowsEnterpriseDeployments(t, map[string]winpath.EnterpriseDeploymentState{"standalone": winpath.EnterpriseDeploymentInstalled})
 	originalObserver := windowsEnterpriseStandaloneObserver
@@ -1690,6 +1727,14 @@ func TestWindowsEnterpriseLifecycleCallerErrorsExitCodes(t *testing.T) {
 	})
 	windowsEnterpriseStandaloneObserver = func(*enterprisestatus.Result, *windowsEnterpriseLifecycleOptions) string { return "" }
 	windowsEnterpriseIsElevated = func() bool { return false }
+	originalServiceState := windowsEnterpriseServiceState
+	t.Cleanup(func() { windowsEnterpriseServiceState = originalServiceState })
+	windowsEnterpriseServiceState = func(name string) string {
+		if name == "DefenseClawSensorHelper" {
+			return "absent"
+		}
+		return "running"
+	}
 
 	// The installed config is readable only by administrators.
 	installed := `C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml`
@@ -1711,23 +1756,42 @@ func TestWindowsEnterpriseLifecycleCallerErrorsExitCodes(t *testing.T) {
 		exit                        int
 	}{
 		{"repair", "standalone", "elevation_required", "a standard account cannot repair the managed deployment", 5},
-		{"verify", "nope", "invalid_arguments", "--profile must be secure_client or standalone", 1639},
+		{"verify", "nope", "invalid_arguments", `invalid --profile "nope": use standalone or secure_client`, 1639},
 	} {
 		for _, jsonOutput := range []bool{false, true} {
-			var stdout bytes.Buffer
-			command := &cobra.Command{}
+			var stdout, stderr bytes.Buffer
+			var err error
+			command := &cobra.Command{Use: tc.action, SilenceUsage: true, RunE: func(c *cobra.Command, _ []string) error {
+				err = runWindowsEnterpriseLifecycle(context.Background(), c, tc.action,
+					&windowsEnterpriseLifecycleOptions{profile: tc.profile, jsonOutput: jsonOutput})
+				return err
+			}}
+			command.SetArgs([]string{})
 			command.SetOut(&stdout)
-			err := runWindowsEnterpriseLifecycle(context.Background(), command, tc.action,
-				&windowsEnterpriseLifecycleOptions{profile: tc.profile, jsonOutput: jsonOutput})
+			command.SetErr(&stderr)
+			_ = command.Execute()
 			if got := commandExitCode(err); got != tc.exit {
 				t.Fatalf("%s --profile %s (json %t): exit %d, want %d (%v)", tc.action, tc.profile, jsonOutput, got, tc.exit, err)
 			}
-			if !jsonOutput {
-				if want := "error " + tc.code + ": "; !strings.Contains(stdout.String(), want+tc.text) && !strings.Contains(stdout.String(), want+"invalid arguments: "+tc.text) {
-					t.Fatalf("%s: output %q", tc.action, stdout.String())
+			// GAP-2445: --json prints only the JSON result, whose errors[]
+			// carry the refusal; text mode prints the one Error line.
+			if want := "Error: " + err.Error() + "\n"; (jsonOutput && stderr.Len() != 0) || (!jsonOutput && stderr.String() != want) {
+				t.Fatalf("%s --profile %s (json %t): stderr %q", tc.action, tc.profile, jsonOutput, stderr.String())
+			}
+			if !jsonOutput && tc.profile == "nope" {
+				if stdout.Len() != 0 || err.Error() != tc.text {
+					t.Fatalf("%s --profile nope: output %q, error %q", tc.action, stdout.String(), err)
 				}
-				if strings.Contains(stdout.String(), "Access is denied") {
-					t.Fatalf("%s: raw access error in %q", tc.action, stdout.String())
+				continue
+			}
+			if !jsonOutput {
+				// GAP-2262: one refusal line, as status and verify give it:
+				// no FAILED summary and no "repair failed: elevation_required".
+				if stdout.Len() != 0 || !strings.HasPrefix(err.Error(), tc.text) || strings.Contains(err.Error(), tc.code) {
+					t.Fatalf("%s: output %q, error %q", tc.action, stdout.String(), err)
+				}
+				if strings.Contains(err.Error(), "Access is denied") {
+					t.Fatalf("%s: raw access error in %q", tc.action, err)
 				}
 				continue
 			}
@@ -1738,13 +1802,144 @@ func TestWindowsEnterpriseLifecycleCallerErrorsExitCodes(t *testing.T) {
 			if result.OK || len(result.Errors) != 1 || result.Errors[0].Code != tc.code || result.ExitCode != tc.exit {
 				t.Fatalf("%s: result %+v", tc.action, result)
 			}
+			// GAP-2113, GAP-2012: the refusal reports the installed
+			// deployment, and stderr is the one line text mode prints.
+			if !result.Installed || len(result.Services) != 3 || result.Services[0].State != "running" ||
+				(tc.profile == "nope" && err.Error() != tc.text) {
+				t.Fatalf("%s --profile %s --json: result %+v, error %q", tc.action, tc.profile, result, err)
+			}
+			// GAP-2161: readiness follows the service states where a state
+			// decides it, and a warning names the checks that never ran.
+			if !result.Readiness.Enumerator || result.Readiness.SensorHelper ||
+				len(result.Warnings) != 1 || result.Warnings[0].Code != "health_not_checked" ||
+				!strings.Contains(result.Warnings[0].Message, "enterprise windows verify --profile standalone --json") {
+				t.Fatalf("%s --profile %s --json: readiness %+v, warnings %+v", tc.action, tc.profile, result.Readiness, result.Warnings)
+			}
 		}
+	}
+
+	err := runWindowsEnterpriseLifecycle(context.Background(), &cobra.Command{}, "verify",
+		&windowsEnterpriseLifecycleOptions{profile: "secure_client"})
+	if commandExitCode(err) != 1639 || !strings.Contains(fmt.Sprint(err), "This computer runs the standalone profile: use --profile standalone, or omit --profile") {
+		t.Fatalf("verify --profile secure_client on a standalone host: exit %d, %v", commandExitCode(err), err)
+	}
+	// GAP-2445: with --json the preflight JSON is the whole answer; cobra's
+	// "Error: profile_conflict: ..." line no longer follows it.
+	for _, action := range []string{"verify", "status"} {
+		var stdout, stderr bytes.Buffer
+		command := &cobra.Command{Use: action, SilenceUsage: true, RunE: func(c *cobra.Command, _ []string) error {
+			err = runWindowsEnterpriseLifecycle(context.Background(), c, action,
+				&windowsEnterpriseLifecycleOptions{profile: "secure_client", jsonOutput: true})
+			return err
+		}}
+		command.SetArgs([]string{})
+		command.SetOut(&stdout)
+		command.SetErr(&stderr)
+		_ = command.Execute()
+		var preflight windowsEnterpriseLifecyclePreflightFailure
+		if jsonErr := json.Unmarshal(stdout.Bytes(), &preflight); jsonErr != nil || preflight.OK ||
+			!strings.HasPrefix(preflight.Error, "profile_conflict: ") || commandExitCode(err) != 1639 || stderr.Len() != 0 {
+			t.Fatalf("%s --profile secure_client --json: exit %d, stdout %q, stderr %q", action, commandExitCode(err), stdout.String(), stderr.String())
+		}
+	}
+
+	// GAP-2011: the refusal hands the administrator the attestation too.
+	refusal := resolveWindowsEnterpriseLifecycleProfile("repair",
+		&windowsEnterpriseLifecycleOptions{profile: "standalone", attestClaudeEffectivePolicy: true})
+	if refusal == nil || !strings.Contains(refusal.Error(), "enterprise windows repair --profile standalone --attest-claude-effective-policy`. Nothing was changed.") {
+		t.Fatalf("attested repair refusal: %v", refusal)
 	}
 
 	// An administrator who cannot read the config still sees the real error.
 	windowsEnterpriseIsElevated = func() bool { return true }
-	err := resolveWindowsEnterpriseLifecycleProfile("repair", &windowsEnterpriseLifecycleOptions{profile: "standalone"})
+	err = resolveWindowsEnterpriseLifecycleProfile("repair", &windowsEnterpriseLifecycleOptions{profile: "standalone"})
 	if err == nil || !strings.Contains(err.Error(), "read enterprise.trust from") {
 		t.Fatalf("elevated repair: %v", err)
+	}
+}
+
+// GAP-2162: a standard account's status or verify reports what any account
+// can read (the recorded deployment, present but unreadable to it, and the
+// service states) instead of installed=false with no services, and text
+// mode is the one refusal line. Exit 5 stays.
+func TestWindowsEnterpriseStandardUserStatusReportsRecordedDeployment(t *testing.T) {
+	stubWindowsEnterpriseDeployments(t, map[string]winpath.EnterpriseDeploymentState{"standalone": winpath.EnterpriseDeploymentUnknown})
+	originalRunner := windowsEnterpriseStandaloneRunner
+	originalObserver := windowsEnterpriseStandaloneObserver
+	originalElevated := windowsEnterpriseIsElevated
+	originalServiceState := windowsEnterpriseServiceState
+	t.Cleanup(func() {
+		windowsEnterpriseStandaloneRunner = originalRunner
+		windowsEnterpriseStandaloneObserver = originalObserver
+		windowsEnterpriseIsElevated = originalElevated
+		windowsEnterpriseServiceState = originalServiceState
+	})
+	windowsEnterpriseStandaloneRunner = func(context.Context, *cobra.Command, string, []string) (windowsEnterpriseStandaloneRun, error) {
+		return windowsEnterpriseStandaloneRun{
+			Output:   []byte(`{"schema_version":1,"ok":false,"error":"the installer rejected its module before import"}`),
+			ExitCode: 1603,
+		}, nil
+	}
+	windowsEnterpriseStandaloneObserver = func(*enterprisestatus.Result, *windowsEnterpriseLifecycleOptions) string { return "" }
+	windowsEnterpriseIsElevated = func() bool { return false }
+	windowsEnterpriseServiceState = func(string) string { return "running" }
+
+	for _, action := range []string{"status", "verify"} {
+		for _, jsonOutput := range []bool{false, true} {
+			var stdout bytes.Buffer
+			command := &cobra.Command{}
+			command.SetOut(&stdout)
+			opts := &windowsEnterpriseLifecycleOptions{resolvedProfile: "standalone", jsonOutput: jsonOutput}
+			err := runWindowsEnterpriseStandaloneAction(context.Background(), command, action, opts, `C:\x\install-enterprise.ps1`, nil)
+			if commandExitCode(err) != 5 || strings.Contains(err.Error(), "the standalone enterprise") ||
+				!strings.HasPrefix(err.Error(), "the managed deployment's "+action+" needs an elevated prompt") {
+				t.Fatalf("%s (json %t): exit %d, error %v", action, jsonOutput, commandExitCode(err), err)
+			}
+			if !jsonOutput {
+				if stdout.Len() != 0 {
+					t.Fatalf("%s: text output %q, want only the refusal line", action, stdout.String())
+				}
+				continue
+			}
+			var result enterprisestatus.Result
+			if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+				t.Fatal(err)
+			}
+			if !result.Installed || result.InstalledVersion != "" || len(result.Services) != 4 ||
+				result.Errors[0].Code != "elevation_required" || result.ExitCode != 5 ||
+				len(result.Warnings) != 1 || result.Warnings[0].Code != "health_not_checked" {
+				t.Fatalf("%s --json: result %+v", action, result)
+			}
+		}
+	}
+}
+
+// GAP-2257: an uninstall (or any result of a host without a deployment)
+// reports that nothing inspects verdicts, not the installed default.
+func TestWindowsEnterpriseUninstalledResultReportsLocalInspectionDisabled(t *testing.T) {
+	result := newWindowsEnterpriseStandaloneResult("uninstall", &windowsEnterpriseLifecycleOptions{})
+	applyWindowsEnterpriseInstallerReport(result, nil, &windowsEnterpriseInstallerReport{Installed: false}, windowsEnterpriseStandaloneRun{})
+	if result.Installed || result.Inspection.Local != "disabled" || result.Inspection.AIDefense != "disabled" {
+		t.Fatalf("uninstalled result: installed=%v inspection=%+v", result.Installed, result.Inspection)
+	}
+}
+
+// GAP-2285: with the deployment installed but the gateway stopped, nothing
+// inspects verdicts, so local inspection is not reported as active.
+func TestWindowsEnterpriseGatewayDownReportsLocalInspectionUnknown(t *testing.T) {
+	stubWindowsUnprotectedAgents(t, nil, os.ErrNotExist)
+	previousAmp := windowsEnterpriseAmpMachineFolderProblems
+	t.Cleanup(func() { windowsEnterpriseAmpMachineFolderProblems = previousAmp })
+	windowsEnterpriseAmpMachineFolderProblems = func() []string { return nil }
+	for _, ready := range []bool{false, true} {
+		result := newWindowsEnterpriseStandaloneResult("status", &windowsEnterpriseLifecycleOptions{})
+		applyWindowsEnterpriseInstallerReport(result, nil, &windowsEnterpriseInstallerReport{Installed: true, GatewayReady: ready}, windowsEnterpriseStandaloneRun{})
+		want := "unknown"
+		if ready {
+			want = "active"
+		}
+		if result.Inspection.Local != want || result.Readiness.Gateway != ready {
+			t.Fatalf("gateway ready %v: inspection=%+v readiness=%+v, want local=%s", ready, result.Inspection, result.Readiness, want)
+		}
 	}
 }

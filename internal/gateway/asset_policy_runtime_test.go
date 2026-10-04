@@ -561,13 +561,18 @@ func TestAssetPolicyResponseReasonEmitsAllStructuredFields(t *testing.T) {
 		"asset_type=mcp",
 		"asset_name=rogue",
 		"connector=claudecode",
-		"registry_status=not-registered",
+		// The decision vocabulary, as the asset-policy audit row has it
+		// (GAP-2516).
+		"registry_status=unregistered",
 		"registry_configured=true",
 		"surface=hook",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("response reason %q missing %q", got, want)
 		}
+	}
+	if strings.Contains(got, "not-registered") {
+		t.Errorf("response reason %q renames registry_status; the asset-policy row says unregistered", got)
 	}
 	if strings.Contains(got, "detail=") {
 		t.Errorf("response reason should NOT include detail= field; redactor would scrub it anyway: %q", got)
@@ -641,5 +646,25 @@ func TestMergeAssetDecisionDefaultsTargetTypeToASSET(t *testing.T) {
 	)
 	if len(findings) == 0 || findings[len(findings)-1] != "ASSET-POLICY-ASSET" {
 		t.Fatalf("findings = %v, want trailing ASSET-POLICY-ASSET fallback", findings)
+	}
+}
+
+// TestHookResponseRuleIDsCarriesAssetPolicyRule pins GAP-2489: an asset
+// policy block names its rule on the hook response (and so on the tool
+// span's defenseclaw.guardrail.rule_id); a hook-rule block keeps its own
+// rule first.
+func TestHookResponseRuleIDsCarriesAssetPolicyRule(t *testing.T) {
+	assets := []runtimeAssetDecision{
+		{targetType: "mcp", decision: config.AssetPolicyDecision{RawAction: "block", Source: "registry-required"}},
+		{targetType: "skill", decision: config.AssetPolicyDecision{RawAction: "allow", Source: "admin-allow"}},
+	}
+	if got := hookResponseRuleIDs(nil, "allow", assets); len(got) != 1 || got[0] != "asset_policy.mcp.registry-required" {
+		t.Fatalf("asset block rule IDs = %v", got)
+	}
+	if got := hookResponseRuleIDs([]string{"CMD-1"}, "block", assets); len(got) != 2 || got[0] != "CMD-1" {
+		t.Fatalf("hook block rule IDs = %v, want CMD-1 first", got)
+	}
+	if got := hookResponseRuleIDs([]string{"CMD-1"}, "allow", nil); len(got) != 1 || got[0] != "CMD-1" {
+		t.Fatalf("no-asset rule IDs = %v", got)
 	}
 }

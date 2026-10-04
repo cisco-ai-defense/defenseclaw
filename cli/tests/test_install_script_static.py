@@ -35,7 +35,6 @@ import sys
 from pathlib import Path
 
 import pytest
-
 from defenseclaw.tui.panels.first_run import CONNECTOR_CHOICES
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -179,6 +178,41 @@ def test_openclaw_restart_requires_the_openclaw_connector() -> None:
     text = INSTALL_SH.read_text(encoding="utf-8")
 
     assert 'openclaw_connector_active && has openclaw' in text
+
+
+@pytest.mark.parametrize(
+    ("output", "rc", "expected"),
+    [
+        ("Gateway service disabled.\nStart with: openclaw gateway install\n", 0, "WARN No OpenClaw gateway service to restart"),
+        ("Restarted systemd service: openclaw-gateway.service\n", 0, "OK OpenClaw gateway restarted"),
+        ("boom\n", 1, "WARN Restart the OpenClaw gateway to load the updated plugin: openclaw gateway restart"),
+    ],
+)
+def test_openclaw_restart_reports_what_happened(tmp_path: Path, output: str, rc: int, expected: str) -> None:
+    # GAP-2207: `openclaw gateway restart` exits 0 with "Gateway service
+    # disabled" when no service is installed; the installer said "restarted".
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    start = text.index("restart_openclaw() {")
+    func = text[start : text.index("\n}\n", start) + 3]
+    fake = tmp_path / "fakebin"
+    fake.mkdir()
+    (tmp_path / "out.txt").write_text(output, encoding="utf-8")
+    (fake / "openclaw").write_text(f'#!/bin/sh\ncat "{tmp_path / "out.txt"}"\nexit {rc}\n', encoding="utf-8")
+    (fake / "openclaw").chmod(0o755)
+    script = tmp_path / "restart.sh"
+    script.write_text(
+        "set -euo pipefail\nopenclaw_connector_active() { return 0; }\n"
+        'has() { command -v "$1" >/dev/null 2>&1; }\nwarn() { echo "WARN $*"; }\nok() { echo "OK $*"; }\n'
+        + func
+        + "restart_openclaw\n",
+        encoding="utf-8",
+    )
+
+    completed = _run([str(script)], tmp_path, PATH=f"{fake}:/usr/bin:/bin")
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert completed.stdout.strip().startswith(expected), completed.stdout
+    assert len(completed.stdout.strip().splitlines()) == 1
 
 
 def _release(tmp_path: Path, script: str) -> Path:
@@ -335,6 +369,15 @@ def test_a_failed_first_run_quickstart_keeps_the_install_and_exits_4(tmp_path: P
     summary = text[text.index('if [[ -n "${QUICKSTART_RERUN}" ]]; then') :]
     assert summary.index("exit 4") < summary.index("exit ${START_RC}")
 
+
+
+def test_quickstart_failure_without_hermes_says_how_to_install_it() -> None:
+    # GAP-2383: "Fix what quickstart reported above" did not say Hermes was missing.
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    summary = text[text.index('if [[ -n "${QUICKSTART_RERUN}" ]]; then') :]
+    branch = summary[: summary.index("exit 4")]
+    assert '[[ "${CONNECTOR}" == hermes ]] && ! PATH="${BIN_DIR}:${PATH}" has hermes' in branch
+    assert "Install Hermes (https://github.com/NousResearch/hermes-agent), then run:" in branch
 
 
 def _openclaw_install_run(tmp_path: Path, npm_rc: int, answer: int = 0) -> subprocess.CompletedProcess[str]:
@@ -660,6 +703,38 @@ def test_both_installers_say_when_an_upgrade_leaves_the_gateway_stopped() -> Non
     for path in (INSTALL_SH, ROOT / "scripts" / "install.ps1"):
         text = path.read_text(encoding="utf-8")
         assert "The gateway is not running, so agent hooks are not guarded until it is" in text, path
+        # GAP-2481: after 'uninstall --binaries' the guardrail is off, and a
+        # gateway start alone does not guard the hooks again.
+        assert "Turn it back on with:" in text and "defenseclaw setup guardrail" in text, path
+
+_GUARDRAIL_CONFIGS = {
+    # What 'uninstall --binaries' and 'setup guardrail --disable' save.
+    "off": ("guardrail:\n  enabled: false\n  mode: action\n  judge:\n    enabled: true\ngateway:\n  port: 18970\n", True),
+    "on": ("guardrail:\n  enabled: true\n  judge:\n    enabled: false\n", False),
+    "other-section": ("guardrail:\n  mode: action\nwebhook:\n  enabled: false\n", False),
+    "no-guardrail": ("gateway:\n  enabled: false\n", False),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_GUARDRAIL_CONFIGS))
+def test_install_sh_reads_guardrail_off_from_the_kept_config(tmp_path: Path, name: str) -> None:
+    # GAP-2481: the reinstall after 'uninstall --binaries' said only "Start it
+    # with: defenseclaw-gateway start" over a config with the guardrail off.
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    start = text.index("guardrail_off() {")
+    func = text[start : text.index("\n}\n", start) + 3]
+    body, expected = _GUARDRAIL_CONFIGS[name]
+    (tmp_path / "config.yaml").write_text(body, encoding="utf-8")
+    script = tmp_path / "g.sh"
+    script.write_text(
+        f'set -euo pipefail\n{func}DEFENSECLAW_HOME="{tmp_path}"\nif guardrail_off; then echo off; else echo on; fi\n',
+        encoding="utf-8",
+    )
+    env = {k: v for k, v in os.environ.items() if k != "DEFENSECLAW_CONFIG"}
+    out = subprocess.run(["bash", str(script)], capture_output=True, text=True, env=env, check=True).stdout
+    assert out.strip() == ("off" if expected else "on")
+    branch = text[text.index("if guardrail_off; then") :]
+    assert branch.index("defenseclaw setup guardrail") < branch.index("defenseclaw-gateway start")
 
 
 def test_a_rollback_copy_that_does_not_fit_says_how_much_to_free(tmp_path: Path) -> None:
@@ -1054,3 +1129,37 @@ def test_ctrl_c_before_the_swap_says_so_and_drops_what_was_staged(tmp_path: Path
     assert "x Cancelled; nothing was changed" in completed.stdout
     assert "Cancelled; nothing was changed" in (tmp_path / "install.log").read_text(encoding="utf-8")
     assert sorted(p.name for p in home.iterdir()) == []
+
+
+def test_installed_version_is_the_gateway_on_path_not_a_stale_release_venv(tmp_path: Path) -> None:
+    # GAP-2454: `make all` over a 0.8.10 release install leaves the 0.8.10
+    # release venv behind; the installer called that "Installed: 0.8.10", warned
+    # that the 1.0 audit history would be deleted and labelled the rollback 0.8.10.
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    start = text.index("installed_version() {")
+    func = text[start : text.index("\n}\n", start) + 3]
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    venv = tmp_path / ".venv"
+    (venv / "lib" / "python3.12" / "site-packages" / "defenseclaw-0.8.10.dist-info").mkdir(parents=True)
+    gateway = bin_dir / "defenseclaw-gateway"
+    gateway.write_text("#!/bin/sh\necho 'defenseclaw-gateway version 1.0.0 (commit=abc1234)'\n", encoding="utf-8")
+    gateway.chmod(0o755)
+    script = tmp_path / "version.sh"
+    script.write_text(
+        f'set -euo pipefail\nVENV="{venv}" BIN_DIR="{bin_dir}"\n' + func + 'echo "v=$(installed_version)"\n',
+        encoding="utf-8",
+    )
+
+    assert "v=1.0.0" in _run([str(script)], tmp_path).stdout
+
+    # A gateway that prints no version (or is missing) falls back to the venv.
+    gateway.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    assert "v=0.8.10" in _run([str(script)], tmp_path).stdout
+    gateway.unlink()
+    assert "v=0.8.10" in _run([str(script)], tmp_path).stdout
+
+    # install.ps1 asks the gateway first as well.
+    ps1 = (ROOT / "scripts" / "install.ps1").read_text(encoding="utf-8")
+    body = ps1[ps1.index("function Get-InstalledVersion {") :]
+    assert body.index('"defenseclaw-gateway.exe"') < body.index("dist-info")

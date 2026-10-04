@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from defenseclaw import connector_paths
@@ -31,6 +31,10 @@ class AdmissionDecision:
     reason: str
     action: SeverityAction = field(default_factory=SeverityAction)
     source: str = ""
+    # GAP-2390: in asset-policy observe mode, what action mode would have
+    # refused (reason and ``<source>-observe``). Empty when nothing was observed.
+    observed_reason: str = ""
+    observed_source: str = ""
 
 
 @dataclass(frozen=True)
@@ -155,6 +159,17 @@ def evaluate_admission(
     if asset_decision.verdict == "blocked":
         return asset_decision
 
+    def _done(decision: AdmissionDecision) -> AdmissionDecision:
+        # GAP-2390: keep an observe-mode would-block on whatever decision the
+        # rest of admission reaches, so install paths can warn and audit it.
+        if not asset_decision.source.endswith("-observe"):
+            return decision
+        return replace(
+            decision,
+            observed_reason=asset_decision.reason,
+            observed_source=asset_decision.source,
+        )
+
     allowed_reason = _action_reason(action_entry, default=f"{target_type} '{name}' is on the allow list — scan skipped")
     if (
         pe.is_allowed_for_connector(target_type, name, connector)
@@ -182,7 +197,7 @@ def evaluate_admission(
         existing_path = getattr(existing, "source_path", None) if existing else None
         if existing_path and existing_path != source_path:
             presented = source_path or "(no source path presented)"
-            return AdmissionDecision(
+            return _done(AdmissionDecision(
                 "rejected",
                 (
                     f"allow entry for {target_type} '{name}' is pinned to "
@@ -190,8 +205,8 @@ def evaluate_admission(
                     f"{presented!r} — failing closed"
                 ),
                 source="manual-allow-path-mismatch",
-            )
-        return AdmissionDecision("allowed", allowed_reason, source="manual-allow")
+            ))
+        return _done(AdmissionDecision("allowed", allowed_reason, source="manual-allow"))
 
     quarantined = (
         pe.is_quarantined_for_connector(target_type, name, connector)
@@ -200,7 +215,7 @@ def evaluate_admission(
     )
     if include_quarantine and quarantined:
         reason = _action_reason(action_entry, default="quarantined")
-        return AdmissionDecision("rejected", f"quarantined: {reason}", source="quarantine")
+        return _done(AdmissionDecision("rejected", f"quarantined: {reason}", source="quarantine"))
 
     policy = load_admission_policy(policy_dir)
 
@@ -212,16 +227,16 @@ def evaluate_admission(
     if allow_first_party and fp_entry is not None and policy.allow_list_bypass_scan:
         fp_reason, fp_constraints = fp_entry
         if _matches_provenance(fp_constraints, source_path):
-            return AdmissionDecision("allowed", fp_reason, source="policy-allow")
+            return _done(AdmissionDecision("allowed", fp_reason, source="policy-allow"))
 
     if scan_result is None:
         if not policy.scan_on_install:
-            return AdmissionDecision(
+            return _done(AdmissionDecision(
                 "allowed",
                 "scan_on_install disabled — allowed without scan",
                 source="scan-disabled",
-            )
-        return AdmissionDecision("scan", "scan required", source="scan-required")
+            ))
+        return _done(AdmissionDecision("scan", "scan required", source="scan-required"))
 
     finding_count, severity = _scan_summary(scan_result)
     action = effective_action_for(
@@ -232,13 +247,13 @@ def evaluate_admission(
     )
 
     if finding_count <= 0:
-        return AdmissionDecision("clean", "scan clean", action=action, source="scan-clean")
+        return _done(AdmissionDecision("clean", "scan clean", action=action, source="scan-clean"))
 
     detail = f"{finding_count} {'finding' if finding_count == 1 else 'findings'}, max {severity}"
     if action.install == "block" or action.runtime == "disable":
-        return AdmissionDecision("rejected", detail, action=action, source="scan-rejected")
+        return _done(AdmissionDecision("rejected", detail, action=action, source="scan-rejected"))
 
-    return AdmissionDecision("warning", detail, action=action, source="scan-warning")
+    return _done(AdmissionDecision("warning", detail, action=action, source="scan-warning"))
 
 
 def evaluate_asset_policy(
@@ -479,6 +494,30 @@ def _effective_action_entry(
     return pe.get_action(target_type, name)
 
 
+_HTTP_TRANSPORT_NAMES = frozenset({"http", "streamable-http", "streamable_http", "streamablehttp"})
+
+
+def _canonical_mcp_transport(transport: Any, url: str = "", command: str = "") -> str:
+    """Fold the names of one MCP transport together (GAP-2122).
+
+    ``http`` and ``streamable-http`` are the same HTTP transport for a URL
+    server, so a registry rule pinned to either admits the other. An empty
+    transport takes the one the server's shape implies (``http`` for a URL,
+    ``stdio`` for a command), as ``mcp set --url`` without ``--transport``
+    does. ``sse`` and the other transports stay distinct. Mirrors the Go
+    ``canonicalMCPTransport``.
+    """
+    value = str(transport or "").strip().lower()
+    if value in _HTTP_TRANSPORT_NAMES:
+        return "http"
+    if not value:
+        if str(url or "").strip():
+            return "http"
+        if str(command or "").strip():
+            return "stdio"
+    return value
+
+
 def _asset_rule_matches(
     rule: Any,
     name: str,
@@ -546,7 +585,7 @@ def _asset_rule_matches(
             return False
     if getattr(rule, "transport", ""):
         constrained = True
-        if str(rule.transport).strip().lower() != transport.strip().lower():
+        if _canonical_mcp_transport(rule.transport) != _canonical_mcp_transport(transport, url, command):
             return False
     needles = getattr(rule, "source_path_contains", []) or []
     if needles:

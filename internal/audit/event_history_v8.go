@@ -560,7 +560,20 @@ func (writer *EventHistoryWriter) appendContextTxResolvedProfile(
 		record.Outcome() == observability.OutcomeTerminated
 
 	legacyTarget := any(nullStr(target))
+	// A control-plane record names who made the change in
+	// defenseclaw.admin.actor_ref (tui:operator for a TUI save); the actor
+	// column says the same, as CLI rows say cli, instead of the producer
+	// that wrote the record (audit_logger) (GAP-2143). A platform-health
+	// record the audit logger wrote names its subsystem instead (watcher,
+	// gateway, judge_bodies), as watch-start and watch-stop rows otherwise
+	// said audit_logger (GAP-2204).
 	legacyActor := any(provenance.Producer)
+	if actorRef := strings.TrimSpace(projectedCompatibilityString(projection, "defenseclaw.admin.actor_ref")); actorRef != "" {
+		legacyActor = actorRef
+	} else if subsystem := strings.TrimSpace(projectedCompatibilityString(projection, "defenseclaw.health.subsystem")); subsystem != "" &&
+		provenance.Producer == "audit_logger" {
+		legacyActor = subsystem
+	}
 	legacyDetails := any(details)
 	legacyStructured := any(string(payloadJSON))
 	legacySeverity := severityValue
@@ -599,6 +612,10 @@ func (writer *EventHistoryWriter) appendContextTxResolvedProfile(
 		legacyActor = legacy.Actor
 		if value, kept := keptCompatibilityValue(projected, "details", legacy.Details); kept {
 			legacyDetails = value
+		} else if details == string(record.EventName()) {
+			// The profile removed the details: say so rather than show the
+			// internal legacy.audit.* event name as the row text (GAP-2192).
+			legacyDetails = "details removed by redaction profile " + string(expectedProfile)
 		}
 		if encoded, err := json.Marshal(legacy.Structured); len(legacy.Structured) == 0 ||
 			(err == nil && projected["structured_json"] == string(encoded)) {
@@ -1166,8 +1183,17 @@ func projectedCompatibilityTarget(projection observabilityredaction.Projection) 
 	if err != nil {
 		return ""
 	}
-	target, _ := payload["target"].(string)
-	return target
+	if target, _ := payload["target"].(string); target != "" {
+		return target
+	}
+	// Scan and finding records name the asset only in their typed target
+	// reference; without this a plugin scan row had no target (GAP-2272).
+	for _, field := range []string{"defenseclaw.scan.target_ref", "defenseclaw.finding.target_ref"} {
+		if target, _ := payload[field].(string); strings.TrimSpace(target) != "" {
+			return target
+		}
+	}
+	return ""
 }
 
 func projectedCompatibilityDetails(projection observabilityredaction.Projection, fallback string) string {
@@ -1195,6 +1221,22 @@ func projectedCompatibilityDetails(projection observabilityredaction.Projection,
 		// request_timeout); name it so the alert says why it fired.
 		if code, ok := payload["defenseclaw.schema.error_code"].(string); ok && strings.TrimSpace(code) != "" {
 			return label + ": " + strings.TrimSpace(code)
+		}
+		return label
+	}
+	// Scan summaries carry no message: say what the scanner found, as the
+	// pre-v8 scan rows did, instead of only "scan.completed" (GAP-2272).
+	if scannerName, ok := payload["defenseclaw.scan.scanner"].(string); ok && scannerName != "" {
+		label := "scanner=" + scannerName
+		for _, field := range []struct{ key, name string }{
+			{"defenseclaw.scan.target_type", "target_type"},
+			{"defenseclaw.scan.finding_count", "findings"},
+			{"defenseclaw.scan.severity_max", "max_severity"},
+			{"defenseclaw.scan.verdict", "verdict"},
+		} {
+			if value, present := payload[field.key]; present && value != nil && fmt.Sprint(value) != "" {
+				label += " " + field.name + "=" + fmt.Sprint(value)
+			}
 		}
 		return label
 	}

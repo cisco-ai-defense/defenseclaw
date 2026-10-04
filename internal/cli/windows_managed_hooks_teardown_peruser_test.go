@@ -92,6 +92,10 @@ func TestRemoveWindowsManagedHooksStandalonePerUserRegistrationsCoversEveryRecor
 		return enterpriseHookUserCleanupDone, nil
 	}
 	enterpriseHookWindowsUserCleanupIdentity = func() error { return nil }
+	originalPresent := windowsManagedHooksStandaloneRegistrationPresent
+	t.Cleanup(func() { windowsManagedHooksStandaloneRegistrationPresent = originalPresent })
+	registrationsPresent := func(enterprisehooks.ManifestTarget) (bool, error) { return true, nil }
+	windowsManagedHooksStandaloneRegistrationPresent = registrationsPresent
 
 	result := removeWindowsManagedHooksStandalonePerUserRegistrations(context.Background(), dataDir, manifest)
 	want := "amp/" + userCleanupSIDB + ",devin/" + userCleanupSIDA + ",opencode/" + userCleanupSIDB
@@ -108,11 +112,33 @@ func TestRemoveWindowsManagedHooksStandalonePerUserRegistrationsCoversEveryRecor
 	if err := os.MkdirAll(filepath.Join(homeB, ".defenseclaw"), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	for _, probe := range []struct {
+		present bool
+		err     error
+	}{{true, nil}, {false, errors.New("unreadable")}} {
+		windowsManagedHooksStandaloneRegistrationPresent = func(enterprisehooks.ManifestTarget) (bool, error) {
+			return probe.present, probe.err
+		}
+		attempted = nil
+		result = removeWindowsManagedHooksStandalonePerUserRegistrations(context.Background(), dataDir, manifest)
+		if want := "amp/" + userCleanupSIDB + ",devin/" + userCleanupSIDA + ",hermes/" + userCleanupSIDB + ",opencode/" + userCleanupSIDB; strings.Join(attempted, ",") != want {
+			t.Fatalf("probe %+v: attempted %v, want %s", probe, attempted, want)
+		}
+	}
+	// GAP-2023: an earlier uninstall already removed that user's
+	// registration (the data folder stays), so there is nothing to report.
+	// GAP-2098: the enrolled OpenCode row of the signed-out user holds no
+	// plugin either, so it is attempted but not reported as pending.
+	windowsManagedHooksStandaloneRegistrationPresent = func(enterprisehooks.ManifestTarget) (bool, error) { return false, nil }
 	attempted = nil
 	result = removeWindowsManagedHooksStandalonePerUserRegistrations(context.Background(), dataDir, manifest)
-	if want := "amp/" + userCleanupSIDB + ",devin/" + userCleanupSIDA + ",hermes/" + userCleanupSIDB + ",opencode/" + userCleanupSIDB; strings.Join(attempted, ",") != want {
-		t.Fatalf("attempted %v, want %s", attempted, want)
+	if want := "amp/" + userCleanupSIDB + ",devin/" + userCleanupSIDA + ",opencode/" + userCleanupSIDB; strings.Join(attempted, ",") != want {
+		t.Fatalf("no registration left: attempted %v, want %s", attempted, want)
 	}
+	if len(result.Pending) != 0 {
+		t.Fatalf("no registration left: pending %v", result.Pending)
+	}
+	windowsManagedHooksStandaloneRegistrationPresent = registrationsPresent
 	if err := os.RemoveAll(filepath.Join(homeB, ".defenseclaw")); err != nil {
 		t.Fatal(err)
 	}

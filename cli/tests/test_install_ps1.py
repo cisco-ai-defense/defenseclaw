@@ -110,11 +110,12 @@ def test_connector_choices_are_the_windows_supported_connectors() -> None:
 def test_uninstall_owns_every_file_the_installer_writes_to_local_bin() -> None:
     hook_state = re.search(r'\$HookState = "([^"]+)"', _text())
     posix_shim = re.search(r'\$PosixShim = "([^"]+)"', _text())
-    assert hook_state is not None and posix_shim is not None
+    cli_launcher = re.search(r'\$CliLauncher = "([^"]+)"', _text())
+    assert hook_state is not None and posix_shim is not None and cli_launcher is not None
     written = (
         set(_list("ManagedBinaries"))
         | {f"{shim}.cmd" for shim in _list("ManagedShims")}
-        | {hook_state.group(1), posix_shim.group(1)}
+        | {hook_state.group(1), posix_shim.group(1), cli_launcher.group(1)}
     )
     _root, targets = cmd_uninstall._owned_binary_targets("win32")
     assert written == {re.split(r"[\\/]", target)[-1] for target in targets}
@@ -130,11 +131,23 @@ def test_a_release_install_removes_the_developer_install_files() -> None:
     # GAP-1493: defenseclaw.exe from `make all` shadows the release
     # defenseclaw.cmd (PATHEXT), so the release install removes what make all
     # published beyond the managed binaries, once the swap is done.
-    developer = set(cmd_uninstall._WINDOWS_DEVELOPER_FILES) - set(_list("ManagedBinaries"))
+    # Its defenseclaw.exe is replaced by the installer's launcher (GAP-2237).
+    developer = set(cmd_uninstall._WINDOWS_DEVELOPER_FILES) - set(_list("ManagedBinaries")) - {"defenseclaw.exe"}
     assert set(_list("DeveloperFiles")) == developer
     text = _text()
     assert '(Join-Path $BinDir ".defenseclaw-source-root") -PathType Leaf' in text
     assert "    Complete-Swap\n    Remove-DeveloperFiles\n" in text
+
+
+def test_powershell_runs_a_native_cli_launcher() -> None:
+    # GAP-2237: through defenseclaw.cmd, cmd.exe asked "Terminate batch job
+    # (Y/N)?" after Ctrl+C. PATHEXT runs .exe before .cmd, so the installer
+    # puts the venv's own launcher beside the shim, and rollback keeps it.
+    text = _text()
+    assert '$CliLauncher = "defenseclaw.exe"' in text
+    assert "@($PosixShim, $CliLauncher, $HookState)" in text
+    assert "Write-PosixShim $target; Install-File $target (Join-Path $BinDir $CliLauncher)" in text
+    assert "defenseclaw.exe" not in _list("DeveloperFiles")
 
 
 def test_cli_shim_is_the_one_uninstall_recognizes() -> None:
@@ -296,6 +309,44 @@ def _ps1_function(name: str) -> str:
     return text[start : text.index("\n}\n", start) + 3]
 
 
+_GUARDRAIL_CONFIGS = {
+    # What 'uninstall --binaries' and 'setup guardrail --disable' save.
+    "off": ("guardrail:\n  enabled: false\n  mode: action\n  judge:\n    enabled: true\ngateway:\n  port: 18970\n", True),
+    "on": ("guardrail:\n  enabled: true\n  judge:\n    enabled: false\n", False),
+    "other-section": ("guardrail:\n  mode: action\nwebhook:\n  enabled: false\n", False),
+    "no-guardrail": ("gateway:\n  enabled: false\n", False),
+}
+
+
+def test_reinstall_over_a_disabled_guardrail_names_setup_guardrail() -> None:
+    # GAP-2481: after 'uninstall --binaries' (guardrail off, hooks torn down)
+    # the reinstall said only "Start it with: defenseclaw-gateway start".
+    install = _ps1_function("Invoke-Install")
+    branch = install[install.index("if (Test-GuardrailOff) {") :]
+    assert branch.index("Turn it back on with: defenseclaw setup guardrail") < branch.index(
+        "Start it with: defenseclaw-gateway start"
+    )
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize("name", sorted(_GUARDRAIL_CONFIGS))
+def test_test_guardrail_off_reads_the_kept_config(tmp_path: Path, name: str) -> None:
+    body, expected = _GUARDRAIL_CONFIGS[name]
+    (tmp_path / "config.yaml").write_text(body, encoding="utf-8")
+    script = f"$DataDir = '{tmp_path}'\n{_ps1_function('Test-GuardrailOff')}\nif (Test-GuardrailOff) {{ 'off' }} else {{ 'on' }}\n"
+    env = {k: v for k, v in os.environ.items() if k != "DEFENSECLAW_CONFIG"}
+    completed = subprocess.run(
+        [POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", script],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env=env,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert completed.stdout.strip() == ("off" if expected else "on")
+
+
 def test_a_slow_first_start_is_waited_for_before_restoring() -> None:
     # GAP-1348: a 1.x gateway over a large audit database outlasted start's
     # 60-second readiness wait, and the upgrade rolled back while it was
@@ -414,6 +465,74 @@ def test_disk_room_is_checked_before_staging_and_before_the_gateway_stops() -> N
     assert install.index("is staged and checked") < second < install.index('Write-Info "Stopping the gateway')
 
 
+def test_a_room_refusal_runs_before_the_uv_folder_or_uv_is_created() -> None:
+    # GAP-2614: "nothing was changed", but the refusal came after
+    # Protect-UvDirectory -Create had made an empty .uv in the data folder.
+    install = _ps1_function("Invoke-Install")
+    room = install.index('Assert-InstallRoom $InstallRoom "the new version"')
+    assert room < install.index("Protect-UvDirectory -Create") < install.index("$Uv = Install-Uv")
+
+
+def _bin_dir_functions() -> str:
+    text = _text()
+    out = []
+    for name in ("Copy-BinDir", "Restore-BinDir"):
+        start = text.index(f"function {name}(")
+        out.append(text[start : text.index("\n}\n", start) + 3])
+    return "\n".join(out)
+
+
+def test_a_restore_removes_the_bin_folder_only_when_the_run_created_it() -> None:
+    # GAP-2614: "Nothing was left installed." / "Your previous install is
+    # back." left an empty ~\.local\bin after a failed first install or a
+    # restored DefenseClaw Setup upgrade.
+    body = _bin_dir_functions()
+    copy = body[: body.index("function Restore-BinDir(")]
+    assert copy.index('(Join-Path $To "NO_BINDIR")') < copy.index("foreach ($name in $ManagedFiles)")
+    # A first install also made ~\.local; the restore takes that out too.
+    assert "$made += $parent" in copy
+    restore = body[body.index("function Restore-BinDir(") :]
+    marker = restore.index('$marker = Join-Path $From "NO_BINDIR"')
+    # With no bin folder before, the restore never recreates it.
+    assert marker < restore.index("New-Item -ItemType Directory -Path $BinDir")
+    assert "Remove-Item -LiteralPath $dir -Force" in restore
+    assert "-Recurse" not in restore
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize("existed", ["none", "parent", "bin"])
+def test_restore_bin_dir_puts_the_bin_folder_back_as_it_was(tmp_path: Path, existed: str) -> None:
+    bin_dir, slot = tmp_path / "local" / "bin", tmp_path / "slot"
+    if existed != "none":
+        bin_dir.parent.mkdir()
+    if existed == "bin":
+        bin_dir.mkdir()
+    script = f"""
+$ErrorActionPreference = 'Stop'
+$BinDir = '{bin_dir}'
+$ManagedFiles = @('defenseclaw-gateway.exe')
+function Install-File([string]$From, [string]$To) {{ Copy-Item -LiteralPath $From -Destination $To -Force }}
+function Remove-Aside([string]$Path) {{ Remove-Item -LiteralPath $Path -Force }}
+{_bin_dir_functions()}
+Copy-BinDir '{slot}'
+New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
+Set-Content -LiteralPath (Join-Path $BinDir 'defenseclaw-gateway.exe') -Value 'new'
+Restore-BinDir '{slot}'
+"""
+    completed = subprocess.run(
+        [POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", script],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert bin_dir.parent.is_dir() is (existed != "none")
+    assert bin_dir.is_dir() is (existed == "bin")
+    if existed == "bin":
+        assert list(bin_dir.iterdir()) == []
+
+
 def test_a_stopped_or_undone_install_frees_the_staged_release_first() -> None:
     # GAP-1839/GAP-1841: the 873 MB .staging left no room for the restore or
     # for the old gateway's restart.
@@ -454,6 +573,20 @@ def test_an_interrupted_setup_upgrade_restarts_the_setup_gateway() -> None:
     assert "Start-SetupGateway $Setup.Root" in _ps1_function("Restore-SetupInstall")
 
 
+def test_a_restored_setup_install_keeps_no_failed_copy_or_uv_cache_in_its_data_dir() -> None:
+    # GAP-1839: the failed 1.0 copy and the uv cache stayed in Setup's data
+    # dir, and Setup's gateway, which walks it all before it starts, then
+    # timed out on every start.
+    clear = _text()[_text().index("function Clear-SetupDataDir(") :][:600]
+    assert "Remove-Tree $Failed" in clear
+    assert 'Remove-Tree (Join-Path $DataDir ".uv")' in clear
+    restore = _ps1_function("Restore-Snapshot")
+    assert restore.index("Restore-Slot $Snap") < restore.index("Clear-SetupDataDir $failed") < restore.index("Restart-Old")
+    resume = _ps1_function("Resume-InterruptedRun")
+    assert resume.index("Clear-SetupDataDir $failed") < resume.index("Start-SetupGateway $setupInstall.Root")
+    assert '} elseif (-not $setupBack) {\n                Write-Warn "The interrupted install was kept in $failed"' in resume
+
+
 def test_the_uv_folder_is_protected_before_uv_runs_and_before_a_rollback_starts_the_gateway() -> None:
     # GAP-1988: the uv cache and Python in the data dir inherited its
     # permissions, so the 1.0.0 gateway, which re-applies them on every private
@@ -471,3 +604,122 @@ def test_the_uv_folder_is_protected_before_uv_runs_and_before_a_rollback_starts_
         < rollback.index("Protect-UvDirectory")
         < rollback.index("if ($startAfter -and (Start-Gateway)")
     )
+
+
+def test_a_rollback_to_1_0_0_starts_its_gateway_on_a_large_wal_audit_db(tmp_path: Path) -> None:
+    # GAP-1988: the 1.0.0 gateway refuses a WAL-mode audit.db whose 5-second
+    # startup check times out ("SQLite sidecar -wal changed before secure
+    # open"), so the installers put the store in rollback-journal mode before
+    # they start a gateway older than 1.0.1.
+    import sqlite3
+    import sys
+
+    ps1 = re.search(r'^\$AuditJournalPy = "([^"]+)"$', _text(), re.M)
+    sh_text = (Path(__file__).resolve().parents[2] / "scripts" / "install.sh").read_text(encoding="utf-8")
+    sh = re.search(r'^AUDIT_JOURNAL_PY="([^"]+)"$', sh_text, re.M)
+    assert ps1 and sh and ps1.group(1) == sh.group(1)
+    db = tmp_path / "audit.db"
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+        conn.execute("CREATE TABLE audit_events (id TEXT)")
+        conn.execute("INSERT INTO audit_events VALUES ('kept')")
+    conn.close()
+    for _ in range(2):  # a store already in rollback-journal mode is left as it is
+        subprocess.run([sys.executable, "-c", ps1.group(1), str(db)], check=True)
+        conn = sqlite3.connect(db)
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
+        assert conn.execute("SELECT id FROM audit_events").fetchall() == [("kept",)]
+        conn.close()
+        assert not (tmp_path / "audit.db-wal").exists()
+    start = _ps1_function("Start-Gateway")
+    guard = 'if ((Test-Version $version) -and [version]$version -lt [version]"1.0.1") { Reset-AuditJournalMode }'
+    assert start.index(guard) < start.index('Invoke-Native $gateway @("start")')
+    sh_start = sh_text[sh_text.index("\nstart_gateway() {") :]
+    assert sh_start.index('version_lt "${version}" 1.0.1; then reset_audit_journal_mode; fi') < sh_start.index(
+        '"${BIN_DIR}/defenseclaw-gateway" start'
+    )
+
+
+def test_install_folders_set_only_the_acl_part_that_changed() -> None:
+    # GAP-2004: Set-Acl writes every part of the security descriptor and was
+    # refused for a standard user on a second NTFS volume, so a
+    # DEFENSECLAW_HOME there died with a raw PowerShell error.
+    helper = _text()[_text().index("function Set-DirectoryAcl(") :][:600]
+    assert "$dir.SetAccessControl($Acl)" in helper
+    assert "[IO.FileSystemAclExtensions]::SetAccessControl($dir, $Acl)" in helper
+    new_dir = _text()[_text().index("function New-InstallDirectory(") :][:900]
+    assert "Set-Acl" not in new_dir
+    assert 'catch { Die "Could not set the permissions of ${Path}:' in new_dir
+    assert "Set-Acl" not in _ps1_function("Protect-UvDirectory")
+    assert "Set-DirectoryAcl $DataDir $acl" in _ps1_function("Invoke-Install")
+
+
+def test_the_last_uv_hint_names_both_lock_errors() -> None:
+    # GAP-2025: a held uv cache file fails with os error 5 as well as 32.
+    assert "file in use or access denied (os error 32 or 5)" in _text()[_text().index("function Invoke-UvPipInstall(") :][:1300]
+
+
+def test_tree_sizes_do_not_read_sum_from_measure_object() -> None:
+    # GAP-2616: under StrictMode, Measure-Object over no files has no .Sum, so
+    # the space refusal on a fresh first install (no or an empty .uv) crashed.
+    assert "Measure-Object -Property Length -Sum" not in _text()
+    assert "$bytes = Get-TreeSize $uvDir" in _ps1_function("Write-KeptUvCache")
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize("cache", ["missing", "empty", "one-file"])
+def test_write_kept_uv_cache_runs_under_strict_mode(tmp_path: Path, cache: str) -> None:
+    if cache != "missing":
+        (tmp_path / ".uv").mkdir()
+    if cache == "one-file":
+        (tmp_path / ".uv" / "wheel").write_bytes(b"x" * 2048)
+    tree = _text()[_text().index("function Get-TreeSize(") :]
+    tree = tree[: tree.index("\n}\n") + 3]
+    script = (
+        "Set-StrictMode -Version Latest\n$ErrorActionPreference = 'Stop'\n"
+        f"$DataDir = '{tmp_path}'\nfunction Write-Info([string]$m) {{ 'info: ' + $m }}\n"
+        f"{tree}\n{_ps1_function('Write-KeptUvCache')}\nWrite-KeptUvCache\n'done'\n"
+    )
+    completed = subprocess.run(
+        [POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", script],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    lines = completed.stdout.strip().splitlines()
+    assert lines[-1] == "done"
+    assert any("download cache" in line for line in lines) == (cache == "one-file")
+
+
+def test_a_failed_first_install_names_the_kept_uv_cache_and_a_full_disk() -> None:
+    # GAP-1883: the space refusal and a staging failure kept the uv cache
+    # silently, and a disk that filled at the binary copy showed only the
+    # raw .NET text.
+    assert "Write-KeptUvCache" in _ps1_function("Restore-Snapshot")
+    room = _text()[_text().index("function Assert-InstallRoom(") :][:1400]
+    assert room.index("if (-not $PrevVersion) { Write-KeptUvCache }") < room.index("Die (")
+    install = _ps1_function("Invoke-Install")
+    staging = install[install.index('(New-Venv (Join-Path $Staging "venv")') :][:300]
+    assert staging.index("Write-KeptUvCache") < staging.index("Die ")
+    assert "Write-Err $_.Exception.Message; [void](Test-DiskFull); $installed = $false" in install
+    assert "Write-Err $_.Exception.Message; [void](Test-DiskFull); $saved = $false" in install
+
+
+def test_an_interrupted_first_install_leaves_no_new_files_or_failed_copy() -> None:
+    # GAP-2618: a first install killed mid-copy left ~\.local\bin\*.new (so
+    # ~\.local\bin and ~\.local stayed), a .failed-<time> copy of a venv that
+    # never was an install, and "restoring the install it replaced".
+    restore = _bin_dir_functions()
+    restore = restore[restore.index("function Restore-BinDir(") :]
+    no_bin = restore[: restore.index("New-Item -ItemType Directory -Path $BinDir")]
+    assert '(Join-Path $BinDir "$name.new")' in no_bin
+    resume = _ps1_function("Resume-InterruptedRun")
+    first = resume.index('$firstInstall = -not (Read-Text (Join-Path $slot "VERSION"))')
+    assert first < resume.index("$failed = Restore-Slot $slot")
+    assert "An earlier first install was interrupted; removing what it had copied" in resume
+    assert resume.index("$failed = Restore-Slot $slot") < resume.index(
+        "if ($firstInstall -and -not $setupBack) { Invoke-Quietly { Remove-Tree $failed } }"
+    )
+    assert 'Write-Info "Nothing was left installed"' in resume

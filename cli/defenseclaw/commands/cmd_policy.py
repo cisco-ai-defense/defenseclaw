@@ -213,7 +213,7 @@ def create(
     dest = os.path.join(policies_dir, f"{name}.yaml")
 
     if os.path.islink(dest):
-        click.echo(f"error: policy '{name}' is a symbolic link — refusing to write", err=True)
+        ux.echo(f"error: policy '{name}' is a symbolic link — refusing to write", err=True)
         raise SystemExit(1)
 
     real_dest = os.path.realpath(dest)
@@ -525,13 +525,13 @@ def _log_policy_action(
     except CanonicalObservabilityUnavailableError:
         if defer_stopped:
             return True
-        click.echo(
+        ux.echo(
             f"  ⚠ {done}. The gateway isn't running, so the audit event was not recorded "
             "(start it with: defenseclaw-gateway start).",
             err=True,
         )
     except CanonicalObservabilityError as exc:
-        click.echo(f"  ⚠ {done}, but the gateway did not confirm the audit event ({exc}).", err=True)
+        ux.echo(f"  ⚠ {done}, but the gateway did not confirm the audit event ({exc}).", err=True)
     return False
 
 
@@ -610,7 +610,7 @@ def _reload_and_report(
     )
     if needs_restart and _gateway_pid_alive(app):
         if audit_skipped:
-            click.echo(skipped_note, err=True)
+            ux.echo(skipped_note, err=True)
         from defenseclaw.commands import cmd_setup
 
         if cmd_setup._restart_defense_gateway(app.cfg.data_dir, start_if_stopped=False):
@@ -627,13 +627,13 @@ def _reload_and_report(
         ux.ok("Gateway reloaded the policy; it is enforcing it now.")
         return
     if outcome == "unreachable":
-        click.echo(
+        ux.echo(
             "  ⚠ The gateway isn't running; it loads this policy when it starts "
             "(defenseclaw-gateway start)" + ("; the audit event was not recorded." if audit_skipped else ".")
         )
         return
     if audit_skipped:
-        click.echo(skipped_note, err=True)
+        ux.echo(skipped_note, err=True)
     click.echo(
         f"error: policy '{name}' was saved, but the running gateway rejected the reload"
         + (f" ({detail})" if detail else "")
@@ -850,7 +850,7 @@ def delete(app: AppContext, name: str, force: bool, assume_yes: bool) -> None:
         raise SystemExit(1)
 
     if os.path.islink(path):
-        click.echo(f"error: policy '{name}' is a symbolic link — refusing to delete", err=True)
+        ux.echo(f"error: policy '{name}' is a symbolic link — refusing to delete", err=True)
         raise SystemExit(1)
 
     real_path = os.path.realpath(path)
@@ -875,7 +875,7 @@ def delete(app: AppContext, name: str, force: bool, assume_yes: bool) -> None:
         return
 
     if is_active and not force:
-        click.echo(
+        ux.echo(
             f"error: policy '{name}' is active — refusing to delete. "
             "Activate another policy first, or pass --force to delete it "
             "and re-activate 'default'.",
@@ -1459,7 +1459,7 @@ def _user_policy_dest(app: AppContext, name: str) -> str:
     dest = os.path.join(policies_dir, f"{name}.yaml")
 
     if os.path.islink(dest):
-        click.echo(f"error: policy '{name}' is a symbolic link — refusing to write", err=True)
+        ux.echo(f"error: policy '{name}' is a symbolic link — refusing to write", err=True)
         raise SystemExit(1)
 
     real_dest = os.path.realpath(dest)
@@ -1760,7 +1760,7 @@ def _try_rego_compile(rego_dir: str) -> bool:
         # verdict, so the default fails closed. Operators can opt out with
         # DEFENSECLAW_POLICY_VALIDATE_ALLOW_NO_OPA=1.
         if os.environ.get("DEFENSECLAW_POLICY_VALIDATE_ALLOW_NO_OPA", "").strip() == "1":
-            click.echo("  No Rego checker found — skipping Rego compilation (opt-in).")
+            ux.echo("  No Rego checker found — skipping Rego compilation (opt-in).")
             return True
         ux.err("FAIL: no Rego checker found (neither 'opa' nor 'defenseclaw-gateway').")
         click.echo("  Reinstall DefenseClaw, or install OPA for full validation.")

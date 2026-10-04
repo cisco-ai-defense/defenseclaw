@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
+from defenseclaw.audit_capacity import audit_write_failure_reason
 from defenseclaw.connector_paths import (
     connector_config_files,
     connector_home,
@@ -42,7 +43,14 @@ NoticeLevel = Literal["info", "warn", "error"]
 STALENESS_WINDOW = timedelta(minutes=15)
 DOCTOR_CLOCK_SKEW_TOLERANCE = timedelta(minutes=5)
 MAX_AI_DISCOVERY_OVERVIEW_ROWS = 8
-_CURSOR_PRIORITY_CONFLICT_DISCLOSURE = "priority-conflict-detection=unavailable (none inferred)"
+# Cursor merges hooks Enterprise > Team > Project > User and has no API to
+# detect a higher-priority file, so DefenseClaw infers none. Plain words, not
+# the old "priority-conflict-detection=unavailable" token (GAP-2561).
+_CURSOR_PRIORITY_CONFLICT_DISCLOSURE = "overrides by Enterprise, Team or Project hooks can't be detected"
+_CURSOR_PRIORITY_CONFLICT_NOTICE = (
+    "DefenseClaw can't tell whether an Enterprise, Team or Project Cursor hooks file "
+    "overrides its user hooks (Cursor has no API for this)."
+)
 
 
 @dataclass(frozen=True)
@@ -209,6 +217,12 @@ class OverviewConfig:
     # roster silently collapsing (chip vanishes, ``m`` stops cycling, tiles
     # disappear). Empty (the common case) renders nothing.
     roster_error: str = ""
+    # ``openshell.enabled``: a sandbox is set up. Without one the Sandbox
+    # row reads "disabled" whether or not the gateway runs (GAP-2361).
+    sandbox_enabled: bool = False
+    # ``ai_discovery.enabled``: discovery is turned on. Off, the AI Discovery
+    # row reads "disabled" whether or not the gateway runs (GAP-2378).
+    ai_discovery_enabled: bool = False
 
     def connector_is_disabled(self, name: str) -> bool:
         """True when ``name`` is in the roster but enforcement is disabled."""
@@ -427,6 +441,9 @@ class EnforcementCounts:
 class OverviewNotice:
     level: NoticeLevel
     message: str
+    # The end of ``message`` that a one-row render must keep, such as the
+    # key hint ("; N for details"); the cut goes before it (GAP-2551).
+    keep_tail: str = ""
 
 
 @dataclass(frozen=True)
@@ -459,6 +476,28 @@ class ObservabilityDestinationRow:
     activity: str = ""
     health_reason: str = ""
 
+    @property
+    def health_label(self) -> str:
+        """HEALTH in plain words: "healthy", or "degraded (queue full)".
+
+        A healthy exporter reports "activated" at start and
+        "delivery_recovered" after every successful export, failure or not,
+        so "healthy (delivery_recovered)" showed after a plain restart
+        (GAP-2523). Those codes are not shown; other codes lose the "_".
+        """
+
+        reason = self.health_reason.strip()
+        if not reason or (self.state == "healthy" and reason in _ROUTINE_HEALTH_REASONS):
+            return self.state
+        if reason.isidentifier() and reason.islower():
+            reason = reason.replace("_", " ")
+        return f"{self.state} ({reason})"
+
+
+# Lifecycle codes a healthy destination reports on start and after each
+# successful export; they are not news (GAP-2523).
+_ROUTINE_HEALTH_REASONS = frozenset({"activated", "delivery_recovered", "scrape_recovered"})
+
 
 @dataclass(frozen=True)
 class ObservabilityStorageStatus:
@@ -489,6 +528,7 @@ class DoctorBoxState:
     recovered: bool = False
     checks: tuple[RenderedDoctorCheck, ...] = ()
     all_green: bool = False
+    note: str = ""
 
 
 @dataclass(frozen=True)
@@ -534,7 +574,9 @@ QUICK_ACTIONS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("s", "Scan all", ("skill", "scan", "--all")),
     ("d", "Doctor", ("doctor",)),
     ("i", "Inventory", ("aibom", "scan", "--json")),
-    ("g", "Guardrail", ("setup", "guardrail")),
+    # The app opens Setup's Guardrail goals for g (GAP-2323); this is the
+    # non-interactive fallback for any other caller.
+    ("g", "Guardrail", ("setup", "guardrail", "--non-interactive")),
     ("m", "Mode", ("setup", "connector")),
     # ``p`` switches to the Policies panel (app.py), so it has no command here.
     ("l", "Logs", ("logs",)),
@@ -768,9 +810,20 @@ class OverviewPanelModel:
                     f"{self.silent_bypass} silent LLM bypass event(s) in the last 5m - see Alerts -> egress",
                 )
             )
+        failing_exports = () if self.gateway_down() else self.failing_export_destinations()
+        if failing_exports:
+            names = ", ".join(failing_exports[:2]) + keys_overflow_suffix(len(failing_exports), 2)
+            notices.append(
+                OverviewNotice(
+                    "warn",
+                    f"Telemetry export failing: {names} - check it with: "
+                    f"defenseclaw setup observability test {failing_exports[0]}",
+                )
+            )
 
         if self.doctor is not None and not self.doctor.is_empty():
-            _, contradicted = partition_doctor_checks(self.doctor.checks, self.health)
+            contradicted = tuple(check for check in self.doctor.checks if self.doctor_check_stale_reason(check))
+            removed = tuple(check for check in contradicted if self._doctor_destination_removed(check))
             stale_failures = sum(1 for check in contradicted if check.status == "fail")
             effective_failed = max(self.doctor.failed - stale_failures, 0)
             if effective_failed > 0:
@@ -778,6 +831,16 @@ class OverviewPanelModel:
                     OverviewNotice(
                         "error",
                         f"Doctor found {effective_failed} failure(s) - see the DOCTOR panel or run: defenseclaw doctor",
+                    )
+                )
+            elif contradicted and len(removed) == len(contradicted):
+                # A failing check for a destination that was removed since
+                # the run is not a current failure (GAP-2431).
+                notices.append(
+                    OverviewNotice(
+                        "info",
+                        f"The last doctor run ({format_age(self.doctor.age(now=now))}) checked "
+                        f"{len(removed)} telemetry destination(s) that no longer exist - press [d] to refresh",
                     )
                 )
             elif contradicted:
@@ -806,7 +869,14 @@ class OverviewPanelModel:
                         "see the DOCTOR panel or rerun the selected repair",
                     )
                 )
-            elif self.doctor.outcome_state(now=now) == "failed" and effective_failed == 0:
+            elif (
+                self.doctor.outcome_state(now=now) == "failed"
+                and effective_failed == 0
+                and not removed
+                and not self._doctor_failed_only_stale(stale_failures, effective_failed, now=now)
+            ):
+                # Not for a run whose only failures are stale: that showed a
+                # red banner beside "1 stale failure(s)" (GAP-2518).
                 notices.append(
                     OverviewNotice(
                         "error",
@@ -889,13 +959,17 @@ class OverviewPanelModel:
                 )
             )
         elif runtime.scanned and runtime.findings == 0 and runtime.processes and not self.gateway_down():
-            why = f" ({runtime.degraded_reason}; press N for details)" if runtime.degraded_reason else ""
+            # One short line like the other notices; the Runtime panel (N)
+            # carries the full reason and what to do about it (GAP-2533).
+            why, tail = "", "no findings above the reporting floor"
+            if runtime.degraded_reason:
+                why, tail = f" ({runtime.degraded_reason})", "no findings; N for details"
             notices.append(
                 OverviewNotice(
                     "info",
-                    f"Runtime is {runtime.health_title or 'watching'}{why}: "
-                    f"{runtime.processes} processes and {runtime.connections} connections, "
-                    "no findings above the reporting floor.",
+                    f"Runtime is {runtime.health_title or 'watching'}{why}: {runtime.processes} processes, "
+                    f"{runtime.connections} connections, {tail}",
+                    keep_tail=f", {tail}" if why else "",
                 )
             )
 
@@ -928,19 +1002,38 @@ class OverviewPanelModel:
             )
         return tuple(cards)
 
+    def _doctor_destination_removed(self, check: DoctorCheck) -> bool:
+        """A failing "Destination: <name>" check for a destination since removed (GAP-2431)."""
+
+        status = self.observability_status
+        label = check.label.strip()
+        if status is None or check.status not in {"fail", "warn"} or not label.lower().startswith("destination:"):
+            return False
+        name = label.split(":", 1)[1].strip()
+        return bool(name) and name not in {destination.name for destination in status.destinations}
+
+    def doctor_check_stale_reason(self, check: DoctorCheck) -> str:
+        """Why a cached doctor check no longer describes the live state, or ""."""
+
+        # The last /health payload is kept while the gateway is down, so it
+        # cannot clear a check that the gateway being down explains.
+        if not self.gateway_down() and live_health_contradicts(check, self.health):
+            return "live state OK"
+        if self._doctor_destination_removed(check):
+            return "destination removed"
+        return ""
+
     def doctor_box(self, *, now: datetime | None = None) -> DoctorBoxState:
         now = now or datetime.now(timezone.utc)
         if self.doctor is None or self.doctor.is_empty():
             return DoctorBoxState(empty=True)
 
-        stale_checks = tuple(
-            check for check in self.doctor.top_failures(3) if live_health_contradicts(check, self.health)
-        )
+        stale_checks = tuple(check for check in self.doctor.top_failures(3) if self.doctor_check_stale_reason(check))
         stale_failures = sum(
-            1 for check in self.doctor.checks if check.status == "fail" and live_health_contradicts(check, self.health)
+            1 for check in self.doctor.checks if check.status == "fail" and self.doctor_check_stale_reason(check)
         )
         stale_warnings = sum(
-            1 for check in self.doctor.checks if check.status == "warn" and live_health_contradicts(check, self.health)
+            1 for check in self.doctor.checks if check.status == "warn" and self.doctor_check_stale_reason(check)
         )
         effective_failed = max(self.doctor.failed - stale_failures, 0)
         effective_warned = max(self.doctor.warned - stale_warnings, 0)
@@ -962,20 +1055,51 @@ class OverviewPanelModel:
         for check in self.doctor.top_failures(3):
             stale = check in stale_checks
             badge = "STALE" if stale else check.status.upper()
-            detail = f"{check.detail} (live state OK)" if stale and check.detail else check.detail
+            reason = self.doctor_check_stale_reason(check)
+            detail = check.detail
+            if reason == "destination removed":
+                detail = f"{check.detail} ({reason})".strip() if check.detail else f"({reason})"
+            elif stale and check.detail:
+                detail = f"{check.detail} (live state OK)"
             rendered.append(RenderedDoctorCheck(badge=badge, label=check.label, detail=detail, stale=stale))
 
         outcome = self.doctor.outcome_state(now=now)
+        stale = self.doctor.is_stale(now=now)
+        note = ""
+        if self._doctor_failed_only_stale(stale_failures, effective_failed, now=now):
+            # The only failures are ones /health now contradicts, so the run
+            # is out of date, not failed (GAP-2518).
+            outcome = "stale"
+        all_green = not rendered and outcome in {"", "healthy"}
+        if all_green and self.gateway_down():
+            # A passing run from before the gateway stopped read "HEALTHY /
+            # All checks passing" beside an all-offline SERVICES (GAP-2518).
+            outcome, stale, all_green = "stale", True, False
+            note = "The gateway stopped after this run."
         return DoctorBoxState(
             empty=False,
             summary_parts=tuple(parts),
             repair_summary_parts=self.doctor.repair_summary_parts(),
             run_outcome=outcome,
             age_label=format_age(self.doctor.age(now=now)),
-            stale=self.doctor.is_stale(now=now),
+            stale=stale,
             recovered=stale_count > 0,
             checks=tuple(rendered),
-            all_green=not rendered and outcome in {"", "healthy"},
+            all_green=all_green,
+            note=note,
+        )
+
+    def _doctor_failed_only_stale(self, stale_failures: int, effective_failed: int, *, now: datetime) -> bool:
+        """The run failed only on checks the live state now contradicts."""
+
+        doctor = self.doctor
+        return (
+            doctor is not None
+            and stale_failures > 0
+            and effective_failed == 0
+            and not doctor.repair_count("failed")
+            and not doctor.repair_count("blocked")
+            and doctor.outcome_state(now=now) == "failed"
         )
 
     def keys_status(self) -> KeysStatus:
@@ -1052,7 +1176,19 @@ class OverviewPanelModel:
         if key == "gateway" and (self.health is None or self.gateway_down()):
             # Match the "Gateway is not running" banner instead of "unknown".
             return self.gateway_availability().state if self.gateway_probe is not None else "unknown"
+        if key == "sinks" and (self.health is None or self.health.sinks.state.strip().lower() in {"", "unknown"}):
+            # The gateway does not report sink health, so SERVICES hides the
+            # row; the stopped-gateway fallback showed "Sinks offline" only
+            # then (GAP-1158, GAP-2396).
+            return "unknown"
         if self.gateway_down() and key in _GATEWAY_HOSTED_SERVICES:
+            # A sandbox that is not set up, or AI discovery that is turned
+            # off, is not a service that went down with the gateway: it
+            # reads "disabled" in both states (GAP-2361, GAP-2378).
+            if key == "sandbox" and self.cfg is not None and not self.cfg.sandbox_enabled:
+                return "disabled"
+            if key == "ai_discovery" and self.cfg is not None and not self.cfg.ai_discovery_enabled:
+                return "disabled"
             return "offline"
         if self.health is None:
             return "unknown"
@@ -1085,7 +1221,12 @@ class OverviewPanelModel:
             case "sinks":
                 return self.health.sinks.state
             case "telemetry":
-                return self.health.telemetry.state
+                state = self.health.telemetry.state
+                if state.strip().lower() in {"running", "healthy"} and self.failing_export_destinations():
+                    # Setup said "needs attention" while this row stayed
+                    # green for a failing export (GAP-2432).
+                    return "degraded"
+                return state
             case "ai_discovery":
                 return self.health.ai_discovery.state
             case "api":
@@ -1225,6 +1366,13 @@ class OverviewPanelModel:
     def connector_priority_conflict_disclosure(connector: str) -> str:
         if connector.strip().lower() == "cursor":
             return _CURSOR_PRIORITY_CONFLICT_DISCLOSURE
+        return ""
+
+    @staticmethod
+    def connector_priority_conflict_notice(connector: str) -> str:
+        """The sentence the CONNECTORS panel shows under its table, or ``""``."""
+        if connector.strip().lower() == "cursor":
+            return _CURSOR_PRIORITY_CONFLICT_NOTICE
         return ""
 
     def multi_connector_rows(self) -> list[tuple[str, str]]:
@@ -1374,13 +1522,17 @@ class OverviewPanelModel:
         if runtime_detail:
             parts.append(runtime_detail)
         if connector.tool_inspection_mode:
-            parts.append(connector.tool_inspection_mode)
+            # Same wording as `defenseclaw setup` ("Tool inspection: ...").
+            mode = connector.tool_inspection_mode
+            parts.append("pre-execution + response-scan" if mode == "both" else mode)
         if connector.requests:
             parts.append(f"{connector.requests} req")
         if connector.tool_blocks:
-            parts.append(f"{connector.tool_blocks} tool blocks")
+            n = connector.tool_blocks
+            parts.append(f"{n} tool block{'' if n == 1 else 's'}")
         if connector.subprocess_blocks:
-            parts.append(f"{connector.subprocess_blocks} subprocess blocks")
+            n = connector.subprocess_blocks
+            parts.append(f"{n} subprocess block{'' if n == 1 else 's'}")
         return " - ".join(parts)
 
     def _not_running_suffix(self) -> str:
@@ -1416,10 +1568,11 @@ class OverviewPanelModel:
             return ""
         details = self.health.watcher.details
         parts: list[str] = []
-        if "skill_dirs" in details:
-            parts.append(f"{details['skill_dirs']} skill dirs")
-        if "plugin_dirs" in details:
-            parts.append(f"{details['plugin_dirs']} plugin dirs")
+        for key, noun in (("skill_dirs", "skill dir"), ("plugin_dirs", "plugin dir")):
+            if key in details:
+                count = details[key]
+                # "1 plugin dir", not "1 plugin dirs" (GAP-2526).
+                parts.append(f"{count} {noun}" if str(count).strip() == "1" else f"{count} {noun}s")
         return ", ".join(parts)
 
     def guardrail_mode_label(self, connector: str = "") -> str:
@@ -1487,12 +1640,35 @@ class OverviewPanelModel:
         """Summarize compiler-owned canonical v8 destinations."""
 
         if self.observability_status is None:
-            return "canonical destination plan loading"
+            return "loading telemetry destinations\u2026"
         rows = self._v8_observability_destination_rows()
         labels = [f"{row.name} ({row.state})" for row in rows if row.policy_state == "enabled"]
         count = len(labels)
         suffix = f": {', '.join(labels)}" if labels else ""
-        return f"{count} destination{'s' if count != 1 else ''}{suffix}"
+        summary = f"{count} destination{'s' if count != 1 else ''}{suffix}"
+        # Lead with the cause, as doctor and gateway status do (GAP-2215).
+        if failure := self.audit_write_failure():
+            return f"{failure}; {summary}"
+        return summary
+
+    def failing_export_destinations(self) -> tuple[str, ...]:
+        """Names of enabled export destinations the gateway reports as failing."""
+
+        return tuple(
+            row.name
+            for row in self._v8_observability_destination_rows()
+            if row.policy_state == "enabled" and row.kind != "sqlite" and row.state in {"failing", "degraded"}
+        )
+
+    def audit_write_failure(self) -> str:
+        """Plain words when the live gateway reports failing audit writes, else ""."""
+
+        if self.health is None or self.health.telemetry.state.strip().lower() in {"running", "healthy", "disabled"}:
+            return ""
+        audit_db = self.observability_status.local_path if self.observability_status is not None else ""
+        if not audit_db and self.cfg is not None and self.cfg.data_dir:
+            audit_db = os.path.join(self.cfg.data_dir, "audit.db")
+        return audit_write_failure_reason(self.health.telemetry.details, audit_db)
 
     def observability_destination_rows(self) -> tuple[ObservabilityDestinationRow, ...]:
         """Return the canonical v8 destination inventory."""
@@ -1512,18 +1688,29 @@ class OverviewPanelModel:
         status = self.observability_status
         if status is None:
             return ()
+        # The last /health payload outlives a stopped gateway, so its
+        # "healthy" rows and queue figures read as live (GAP-2586).
+        gateway_down = self.gateway_down()
         health = destination_health_from_gateway(
-            {"details": self.health.telemetry.details} if self.health is not None else None
+            {"details": self.health.telemetry.details} if self.health is not None and not gateway_down else None
         )
+        write_failure = "" if gateway_down else self.audit_write_failure()
         rows: list[ObservabilityDestinationRow] = []
         for destination in status.destinations:
             live = health.get(destination.name)
             state = live.state if live is not None and live.state else ""
+            reason = ""
             if not state:
                 state = "disabled" if not destination.enabled else "unavailable"
-            reason = ""
+                if destination.enabled and gateway_down:
+                    state, reason = "offline", "gateway not running"
             if live is not None:
                 reason = live.reason or live.last_error_class
+            if write_failure and destination.enabled and destination.kind == "sqlite":
+                # The sink's own counters lag the gateway's audit-write
+                # failure and still say healthy (GAP-2002, GAP-2215).
+                freed = not write_failure.startswith("audit events cannot be written")
+                state, reason = ("degraded" if freed else "failing"), write_failure
             endpoint = destination.endpoint or "—"
             display_endpoint = (
                 endpoint if destination.kind in {"sqlite", "jsonl"} else redact_endpoint_for_display(endpoint)
@@ -1554,9 +1741,13 @@ class OverviewPanelModel:
         status = self.observability_status
         if status is None:
             return None
-        health_state, health_failure = retention_health_from_gateway(
-            {"details": self.health.telemetry.details} if self.health is not None else None
-        )
+        if self.gateway_down():
+            # Not the last snapshot's "controller=healthy" (GAP-2586).
+            health_state, health_failure = "offline", "gateway not running"
+        else:
+            health_state, health_failure = retention_health_from_gateway(
+                {"details": self.health.telemetry.details} if self.health is not None else None
+            )
         retention = "unbounded" if status.unbounded_retention else f"{status.retention_days} days"
         return ObservabilityStorageStatus(
             retention=retention,
@@ -1846,7 +2037,7 @@ def connector_source_label(connector: str, category: str) -> str:
         ),
         ("cursor", "plugins"): ("unsupported",),
         ("devin", "plugins"): ("unsupported (closed beta; no general plugin claim)",),
-        ("copilot", "plugins"): ("copilot plugins list --kind plugin --json",),
+        ("copilot", "plugins"): ("copilot plugin list --json",),
         ("openhands", "plugins"): ("unsupported",),
         ("antigravity", "plugins"): (
             "~/.gemini/config/plugins/<plugin>/ (read/write)",

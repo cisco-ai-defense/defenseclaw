@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -474,10 +475,13 @@ class AuditPanelModel:
 
     def filter_same_target(self) -> bool:
         event = self.selected()
-        if event is None or not event.target:
+        # The TARGET the table shows, also for hook-decision, guardrail and
+        # ACP rows that have no target column of their own (GAP-2076).
+        target = _event_target(event) if event is not None else ""
+        if not target:
             return False
         self.common_filter = ""
-        self.correlation_target = event.target
+        self.correlation_target = target
         self.correlation_run_id = ""
         self.apply_filter()
         return True
@@ -631,11 +635,13 @@ class AuditPanelModel:
             ("Event ID", event.id),
             ("Action", event.action),
         ]
-        if event.target:
-            pairs.append(("Target", event.target))
+        if target := event.target or _structured_text(event.structured, "defenseclaw.admin.target_ref"):
+            pairs.append(("Target", target))
         pairs.extend((("Severity", event.severity), ("Actor", event.actor)))
         if connector := event_connector(event):
             pairs.append(("Connector", connector))
+        if change := _admin_change_summary(event.structured):
+            pairs.append(("Change", change))
         # Guardrail verdicts and judge rows keep their outcome in the
         # structured record; the flat row only says "guardrail.evaluation.
         # completed" (GAP-1215).
@@ -848,7 +854,7 @@ class AuditPanelModel:
             return False
         if self.common_filter and not _matches_common_filter(event, self.common_filter):
             return False
-        if self.correlation_target and event.target != self.correlation_target:
+        if self.correlation_target and _event_target(event) != self.correlation_target:
             return False
         if self.correlation_run_id and event.run_id != self.correlation_run_id:
             return False
@@ -1151,6 +1157,11 @@ def _is_low_signal_event(event: Event) -> bool:
         return False
     if severity not in AUDIT_LOW_SIGNAL_SEVERITIES:
         return False
+    if event.actor.strip().lower().startswith("cli:"):
+        # An operator's own change (cli:operator config-update) is not
+        # routine: the default view read "0 shown" right after a judge
+        # model change (GAP-2322).
+        return False
     haystack = _event_haystack(event)
     return not any(token in haystack for token in AUDIT_ACTIONABLE_TOKENS)
 
@@ -1205,7 +1216,7 @@ def _event_field(event: Event, field: str) -> str:
     if field == "severity":
         return _display_severity(event).lower()
     if field == "target":
-        return event.target.lower()
+        return _event_target(event).lower()
     if field == "type":
         return _target_type_from_action(event.action).lower()
     return ""
@@ -1239,12 +1250,13 @@ def _event_haystack(event: Event) -> str:
         (
             event.id,
             event.action,
-            event.target,
+            _event_target(event),
             event.actor,
             event.severity,
             _display_severity(event),
             event_connector(event),
             event.details,
+            _admin_change_summary(event.structured),
             event.run_id,
             _target_type_from_action(event.action),
         )
@@ -1496,7 +1508,17 @@ def _row_target_label(event: Event) -> str:
     return _truncate(event.target, 32)
 
 
+def _event_target(event: Event) -> str:
+    """The row's target: its own, else the call it names (GAP-1510, GAP-2076)."""
+
+    return event.target or _structured_target_label(event.structured)
+
+
 def _structured_target_label(structured: object) -> str:
+    # An operator change names what it changed (config:llm:guardrail.judge);
+    # the row's own target column is empty (GAP-2275).
+    if ref := _structured_text(structured, "defenseclaw.admin.target_ref"):
+        return ref
     if method := _structured_text(structured, "defenseclaw.acp.method"):
         return f"ACP {method}"
     if hook := _structured_text(structured, "defenseclaw.hook.event"):
@@ -1517,6 +1539,9 @@ def _row_details_label(event: Event) -> str:
     """
 
     if event.action != "connector-hook":
+        if "=" not in event.details and (change := _admin_change_summary(event.structured)):
+            # "config.change.applied" is the event name; say what changed (GAP-2275).
+            return _truncate(change, 20)
         if "=" not in event.details and (outcome := _structured_outcome_label(event)):
             # The details of a v8 row are only its event name
             # ("guardrail.evaluation.completed"); the decision and rule say
@@ -1537,6 +1562,32 @@ def _row_details_label(event: Event) -> str:
     if not parts:
         return _truncate(event.details, 20)
     return _truncate(" · ".join(parts), 20)
+
+
+def _admin_change_summary(structured: object) -> str:
+    """``model: haiku -> sonnet`` from an operator change's admin diff (GAP-2275)."""
+
+    if not isinstance(structured, dict):
+        return ""
+    raw = structured.get("defenseclaw.admin.diff")
+    if isinstance(raw, str) and raw.strip():
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            return ""
+    if not isinstance(raw, list):
+        return ""
+    parts: list[str] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path") or "").strip()
+        before = str(item.get("before") or "").strip()
+        after = str(item.get("after") or "").strip()
+        change = f"{before} -> {after}" if before else after
+        if change:
+            parts.append(f"{path}: {change}" if path else change)
+    return "; ".join(parts)
 
 
 def _structured_outcome_label(event: Event) -> str:

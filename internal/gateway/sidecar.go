@@ -825,9 +825,14 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 	// failures before the normal shutdown block is reached. The explicit normal
 	// close below preserves close-before-store ordering; this deferred call is
 	// idempotent and covers startup lifecycle/token/watcher failures.
+	shutdownFlushWarned := false
 	defer func() {
-		if err := s.closeOwnedObservabilityV8Runtime(); err != nil && runErr == nil {
-			runErr = err
+		// A telemetry flush that cannot finish on shutdown (for example an
+		// unreachable collector) is not a reason to fail the stop: warn once
+		// instead of returning an "Error:" that reads as a startup failure
+		// (GAP-2166).
+		if err := s.closeOwnedObservabilityV8Runtime(); err != nil && runErr == nil && !shutdownFlushWarned {
+			fmt.Fprint(os.Stderr, observabilityV8ShutdownFlushWarning())
 		}
 	}()
 	runCtx, runCancel := context.WithCancel(ctx)
@@ -856,12 +861,6 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 		s.currentConfig().Gateway.AutoApprove, s.currentConfig().Gateway.Watcher.Enabled, s.currentConfig().Gateway.APIPort, s.currentConfig().Guardrail.Enabled, runID)
 	if err := s.recordSidecarLifecycle(runCtx, audit.ActionSidecarStart); err != nil {
 		return err
-	}
-
-	if s.currentConfig().Guardrail.Enabled && s.currentConfig().Guardrail.Model == "" &&
-		proxyShouldBindForConfiguredConnector(s.currentConfig()) {
-		fmt.Fprintf(os.Stderr, "[sidecar] WARNING: guardrail.enabled is true but guardrail.model is empty — relying on fetch-interceptor routing.\n")
-		fmt.Fprintf(os.Stderr, "[sidecar]          Set guardrail.model in ~/.defenseclaw/config.yaml only if you need a fixed advertised model name.\n")
 	}
 
 	if strings.EqualFold(s.currentConfig().Guardrail.Host, "localhost") {
@@ -1221,10 +1220,14 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 	// a legacy fallback. Retire it immediately afterward, while audit.db is still
 	// open; the deferred close above remains the abnormal-return safety net.
 	if err := s.closeOwnedObservabilityV8Runtime(); err != nil {
-		return err
+		// Runtime.Close contract: the stores stay open until the deferred close
+		// above retries with a fresh context.
+		fmt.Fprint(os.Stderr, observabilityV8ShutdownFlushWarning())
+		shutdownFlushWarned = true
+	} else {
+		s.logger.Close()
+		_ = s.client.Close()
 	}
-	s.logger.Close()
-	_ = s.client.Close()
 	// Return the first non-nil error if any subsystem failed before shutdown
 	select {
 	case err := <-errCh:
@@ -3786,6 +3789,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		proxy.SetConnectorSwitchState(registry, setupOpts)
 		proxy.SetHILTApprovalManager(s.hilt)
 		proxy.SetNotifier(s.osNotifier)
+		proxy.SetRefreshedGatewayTokenSource(s.client.RefreshedToken)
 		// In managed_enterprise mode, replace the proxy's opensource
 		// AID client (constructed by NewGuardrailProxy from the same
 		// CiscoAIDefenseConfig) with the token-authenticated managed

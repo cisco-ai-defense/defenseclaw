@@ -1113,6 +1113,50 @@ def test_doctor_galileo_canary_fails_safely_and_skips_disabled_routes() -> None:
     )
 
 
+def test_doctor_galileo_canary_names_gateway_delivery_failure() -> None:
+    # GAP-2393: a 502 from the gateway means its own export failed; the row must
+    # say so and must not point only at the direct destination test.
+    from defenseclaw.commands.cmd_doctor import (
+        _check_galileo_trace_canaries,
+        _DoctorResult,
+    )
+    from defenseclaw.observability.trace_canary import TraceCanaryError
+
+    enabled = V8DestinationStatus(
+        name="galileo",
+        kind="otlp",
+        enabled=True,
+        generated=False,
+        capabilities=("traces",),
+        selected_signals=("traces",),
+        policy_form="capability_default",
+        endpoint="https://api.galileo.ai/otel/traces",
+        route_count=1,
+        buckets=("agent.lifecycle",),
+        redaction_profiles=("none",),
+        preset="galileo",
+    )
+    result = _DoctorResult()
+    with patch(
+        "defenseclaw.observability.trace_canary.run_trace_canary",
+        side_effect=TraceCanaryError("delivery_failed"),
+    ):
+        _check_galileo_trace_canaries(
+            SimpleNamespace(destinations=(enabled,)),
+            result,
+            config_path="/data/config.yaml",
+            data_dir="/data",
+        )
+
+    check = result.checks[0]
+    assert check["status"] == "fail"
+    assert check["detail"].startswith("delivery_failed: the running gateway accepted the canary")
+    assert "gateway_rejected" not in check["detail"]
+    assert "HTTPS_PROXY/NO_PROXY" in check["remediation"]
+    assert "'defenseclaw-gateway restart'" in check["remediation"]
+    assert "connects directly" in check["remediation"]
+
+
 def test_doctor_caps_automatic_galileo_canaries_and_warns_for_remaining_routes() -> None:
     from defenseclaw.commands.cmd_doctor import (
         _check_galileo_trace_canaries,
@@ -1281,3 +1325,13 @@ def test_doctor_v8_local_rows_fail_when_gateway_reports_audit_write_failure() ->
     healthy = _DoctorResult()
     _check_observability_v8_status(status, healthy, live_health={"telemetry": {"state": "running"}})
     assert {c["label"]: c["status"] for c in healthy.checks}["Local SQLite"] == "pass"
+
+
+def test_destination_display_reason_hides_routine_healthy_codes() -> None:
+    """GAP-2557: doctor shows no lifecycle code for a healthy destination."""
+    from defenseclaw.observability.v8_status import V8DestinationHealth
+
+    assert V8DestinationHealth(name="g", state="healthy", reason="delivery_recovered").display_reason == ""
+    assert V8DestinationHealth(name="g", state="healthy", reason="activated").display_reason == ""
+    assert V8DestinationHealth(name="g", state="degraded", reason="queue_full").display_reason == "queue_full"
+    assert V8DestinationHealth(name="g", state="healthy", reason="origin_loop").display_reason == "origin_loop"

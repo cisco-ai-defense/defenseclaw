@@ -476,6 +476,106 @@ class TestLiveClawInventory(unittest.TestCase):
         self.assertIn("Config:    /h/.config/opencode/opencode.json", out.getvalue())
         self.assertNotIn("defenseclaw.js", out.getvalue())
 
+    def test_human_kiro_config_is_kiro_settings_not_defenseclaw_hook(self):
+        # GAP-2038: DefenseClaw-written hook/agent files are not Kiro's config.
+        import contextlib
+        import io
+
+        inv = {
+            "connector": "kiro",
+            "connector_config_files": [
+                "/h/.kiro/hooks/defenseclaw.json",
+                "/h/.kiro/agents/defenseclaw.json",
+                "/h/.kiro/settings/cli.json",
+            ],
+        }
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            format_claw_aibom_human(inv, summary_only=True)
+        self.assertIn("Config:    /h/.kiro/settings/cli.json", out.getvalue())
+        self.assertNotIn("defenseclaw.json", out.getvalue())
+
+    def test_human_summary_folds_limitations_into_one_line(self):
+        # GAP-2037: --summary is the tables only; caveats become one pointer line.
+        import contextlib
+        import io
+
+        inv = {
+            "connector": "codex",
+            "limitations": [
+                {"category": "rules", "reason": "long internal caveat text"},
+                {"category": "memory", "reason": "another caveat"},
+            ],
+        }
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            format_claw_aibom_human(inv, summary_only=True)
+        text = out.getvalue()
+        self.assertIn(
+            "2 inventory coverage notes (memory, rules); run without --summary to read them.",
+            " ".join(text.split()),
+        )
+        self.assertNotIn("long internal caveat text", text)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            format_claw_aibom_human(inv)
+        self.assertIn("long internal caveat text", out.getvalue())
+
+    def test_human_summary_footer_singular_and_copilot_empty_is_zero(self):
+        # GAP-2227: one note reads singular and names its category.
+        # GAP-2226: Copilot MCP/rules are inventoried, so empty reads 0, not "not collected".
+        import contextlib
+        import io
+
+        from defenseclaw.inventory.claw_inventory import (
+            _UNVERIFIED_CONNECTOR_NOTES,
+            InventoryCapabilityStatus,
+            _not_collected_categories,
+        )
+
+        inv = {
+            "connector": "hermes",
+            "limitations": [
+                {"category": "plugins", "status": "unverified", "reason": "x"},
+                {"category": "rules", "status": "unverified", "reason": "y"},
+            ],
+        }
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            format_claw_aibom_human(inv, summary_only=True, categories={"plugins"})
+        self.assertIn(
+            "1 inventory coverage note (plugins); run without --summary to read it.",
+            " ".join(out.getvalue().split()),
+        )
+
+        copilot = {
+            "connector": "copilot",
+            "limitations": [
+                # Real enum members, as the collector emits them (GAP-2227).
+                {"category": cat, "status": InventoryCapabilityStatus.UNVERIFIED, "reason": note}
+                for (conn, cat), note in _UNVERIFIED_CONNECTOR_NOTES.items()
+                if conn == "copilot"
+            ],
+        }
+        self.assertTrue({"mcp", "rules"} <= {lim["category"] for lim in copilot["limitations"]})
+        self.assertFalse({"mcp", "rules"} & _not_collected_categories(copilot))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            format_claw_aibom_human(copilot)
+        text = out.getvalue()
+        self.assertNotIn("MCP servers: not collected", text)
+        self.assertNotIn("Rules: not collected", text)
+        self.assertIn("Inventory coverage notes", text)
+        self.assertIn("partly checked", text)
+
+    def test_scan_hints_follow_only_categories(self):
+        # GAP-2037: --only mcp points at the MCP scanner, not the skill scanner.
+        from defenseclaw.commands.cmd_aibom import _scan_hints
+
+        self.assertEqual(_scan_hints({"mcp"}), ["Scan MCP servers:  defenseclaw mcp scan --all"])
+        self.assertEqual(_scan_hints(None), ["Scan skills:  defenseclaw skill scan all"])
+        self.assertEqual(_scan_hints({"models"}), [])
+
     @patch("defenseclaw.inventory.claw_inventory.subprocess.run", side_effect=FileNotFoundError)
     def test_fallback_when_openclaw_missing(self, _):
         inv = build_claw_aibom(self.cfg, live=True)
@@ -1119,6 +1219,10 @@ class TestCLIIntegration(unittest.TestCase):
         runner = CliRunner()
         result = runner.invoke(aibom, ["scan", "--summary"], obj=self.app)
         self.assertEqual(result.exit_code, 0, result.output)
+        # GAP-2312: the progress line must not claim "live" (Hermes is read
+        # from disk); the report header names the source.
+        self.assertIn("inventory", result.stderr)
+        self.assertNotIn("Scanning live", result.stderr)
 
     @patch("defenseclaw.inventory.claw_inventory.subprocess.run", side_effect=_mock_run)
     def test_scan_only_filter(self, _):
@@ -1131,6 +1235,41 @@ class TestCLIIntegration(unittest.TestCase):
         self.assertEqual(len(data["mcp"]), 1)
         self.assertEqual(data["plugins"], [])
         self.assertEqual(data["memory"], [])
+
+    def test_scan_only_rejects_unknown_category(self):
+        # GAP-2399: an unknown --only category is a usage error (rc 2).
+        from defenseclaw.commands.cmd_aibom import aibom
+        runner = CliRunner()
+        for arg in ("bogus", "mcp,bogus"):
+            with self.subTest(arg=arg):
+                result = runner.invoke(aibom, ["scan", "--only", arg], obj=self.app)
+                self.assertEqual(result.exit_code, 2, result.output)
+                self.assertIn("unknown category 'bogus'", result.output)
+                self.assertIn("valid: skills, plugins, mcp", result.output)
+
+    @patch("defenseclaw.inventory.claw_inventory.subprocess.run", side_effect=_mock_run)
+    def test_scan_only_accepts_singular(self, _):
+        from defenseclaw.commands.cmd_aibom import aibom
+        runner = CliRunner()
+        result = runner.invoke(aibom, ["scan", "--json", "--only", "skill"], obj=self.app)
+        self.assertEqual(result.exit_code, 0, result.output)
+        data = json.loads(result.stdout)
+        self.assertEqual(len(data["skills"]), 2)
+        self.assertEqual(data["mcp"], [])
+
+    def test_coverage_notes_avoid_internal_jargon(self):
+        # GAP-2400: notes say what was listed and what was not, in plain words.
+        from defenseclaw.inventory.claw_inventory import _UNVERIFIED_CONNECTOR_NOTES
+
+        jargon = (
+            "same-name winner", "official-client evidence", "project-through-worktree",
+            "activation provenance", "singular/plural", "custom-tool registry",
+            "no-follow", "inventoried",
+        )
+        for key, note in _UNVERIFIED_CONNECTOR_NOTES.items():
+            for word in jargon:
+                with self.subTest(key=key, word=word):
+                    self.assertNotIn(word, note)
 
     @patch("defenseclaw.inventory.claw_inventory.subprocess.run", side_effect=FileNotFoundError)
     def test_scan_with_errors_shows_warning(self, _):
@@ -1164,11 +1303,11 @@ class TestCLIIntegration(unittest.TestCase):
                     self.assertEqual(data["errors"], [])
                     self.assertEqual(
                         len(data["limitations"]),
-                        3 if connector == "codex" else 4,
+                        2 if connector == "codex" else 4,
                     )
                     self.assertNotIn("failed", result.stderr.lower())
 
-    def test_combined_codex_claude_has_four_limitations_without_warning(self):
+    def test_combined_codex_claude_has_three_limitations_without_warning(self):
         from defenseclaw.commands.cmd_aibom import aibom
 
         runner = CliRunner()
@@ -1188,7 +1327,7 @@ class TestCLIIntegration(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         data = json.loads(result.stdout)
         self.assertEqual(len(data), 2)
-        self.assertEqual(sum(len(inv["limitations"]) for inv in data), 4)
+        self.assertEqual(sum(len(inv["limitations"]) for inv in data), 3)
         self.assertTrue(all(inv["errors"] == [] for inv in data))
         self.assertNotIn("failed", result.stderr.lower())
 
@@ -1207,7 +1346,7 @@ class TestCLIIntegration(unittest.TestCase):
             result = runner.invoke(aibom, ["scan", "--connector", "codex"], obj=self.app)
 
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("Unsupported inventory capabilities", result.stdout)
+        self.assertIn("Inventory coverage notes", result.stdout)
         self.assertIn("informational", result.stdout)
         self.assertNotIn("command(s) failed", result.output)
 
@@ -1233,7 +1372,7 @@ class TestCLIIntegration(unittest.TestCase):
         self.assertGreaterEqual(json_start, 0)
         data = json.loads(result.stdout[json_start:])
         self.assertEqual(len(data["errors"]), 1)
-        self.assertEqual(len(data["limitations"]), 3)
+        self.assertEqual(len(data["limitations"]), 2)
         self.assertIn("1 connector inventory command(s) failed", result.output)
 
 
@@ -2847,8 +2986,8 @@ class TestBuildAibomFromFilesystem(unittest.TestCase):
             {category: limitations[category]["status"] for category in ("mcp", "rules", "skills")},
             {"mcp": "unverified", "rules": "unverified", "skills": "unverified"},
         )
-        self.assertIn("legacy config*.json", limitations["mcp"]["reason"])
-        self.assertIn("runtime precedence", limitations["rules"]["reason"])
+        self.assertIn("older config*.json", limitations["mcp"]["reason"])
+        self.assertIn("which rule wins at runtime", limitations["rules"]["reason"])
 
     def test_codex_agents_and_rules_reject_reparse_ancestry(self):
         cfg = _make_cfg_for_connector(self.tmp, "codex")
@@ -3927,13 +4066,19 @@ class TestBuildAibomFromFilesystem(unittest.TestCase):
         self.assertEqual(inv["memory"], [])
         self.assertEqual(inv["errors"], [])
         self.assertEqual(inv["summary"]["errors"], 0)
-        self.assertEqual(inv["summary"]["limitations"], 3)
+        self.assertEqual(inv["summary"]["limitations"], 2)
         self.assertEqual(
             {item["category"] for item in inv["limitations"]},
-            {"tools", "models", "memory"},
+            {"tools", "memory"},
         )
         self.assertTrue(all(item["connector"] == "codex" for item in inv["limitations"]))
         self.assertTrue(all(item["status"] == "unsupported" for item in inv["limitations"]))
+        # GAP-2312: the default notes must not describe another product's
+        # model ("plugin's manifest", "the framework").
+        for item in inv["limitations"]:
+            self.assertNotIn("framework", item["reason"])
+            self.assertNotIn("manifest", item["reason"])
+            self.assertIn("this connector", item["reason"])
 
     def test_claudecode_expected_limitations_are_not_errors(self):
         cfg = _make_cfg_for_connector(self.tmp, "claudecode")
@@ -3965,9 +4110,9 @@ class TestBuildAibomFromFilesystem(unittest.TestCase):
         self.assertEqual(len(inv["errors"]), 1)
         self.assertEqual(inv["errors"][0]["command"], "codex:skills")
         self.assertIn("denied", inv["errors"][0]["error"])
-        self.assertEqual(len(inv["limitations"]), 3)
+        self.assertEqual(len(inv["limitations"]), 2)
         self.assertEqual(inv["summary"]["errors"], 1)
-        self.assertEqual(inv["summary"]["limitations"], 3)
+        self.assertEqual(inv["summary"]["limitations"], 2)
 
     def test_skill_eligibility_requires_marker(self):
         cfg = _make_cfg_for_connector(self.tmp, "codex")

@@ -22,6 +22,7 @@ mirroring the Cobra root command in internal/cli/root.go.
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import re
@@ -212,7 +213,9 @@ def _emit_version_json(ctx: click.Context, _param: click.Parameter | None, value
     ctx.exit()
 
 
-@click.group()
+# -h is the short form of --help on every command, as on defenseclaw-gateway
+# (GAP-2170). Child contexts inherit help_option_names from this group.
+@click.group(context_settings={"help_option_names": ["-h", "--help"]})
 @click.version_option(version=__version__, prog_name="defenseclaw")
 @click.option(
     "--version-json",
@@ -232,11 +235,12 @@ def cli(ctx: click.Context) -> None:
     \b
     Multi-connector:
       One gateway enforces N agent-native connectors (codex, claudecode,
-      hermes, antigravity, omnigent, and others) tracked under guardrail.connectors. Add one
-      with 'defenseclaw setup <connector>' (choose Add when prompted),
-      remove with 'defenseclaw setup remove <name>'. Scope policy per peer
-      with 'defenseclaw guardrail ... --connector X', and inspect the
-      roster with 'defenseclaw status' / 'defenseclaw guardrail status'.
+      hermes, antigravity, omnigent, and others) tracked under
+      guardrail.connectors. Add one with 'defenseclaw setup <connector>'
+      (choose Add when prompted), remove with
+      'defenseclaw setup remove <name>'. Scope policy per peer with
+      'defenseclaw guardrail ... --connector X', and inspect the roster
+      with 'defenseclaw status' / 'defenseclaw guardrail status'.
       Note: OpenClaw/ZeptoClaw use the proxy path and cannot be multi peers.
     """
     ctx.ensure_object(AppContext)
@@ -438,13 +442,34 @@ cli.add_command(version_cmd, "version")
 
 
 _RST_LITERAL = re.compile(r"``([^`]+?)``")
+_MD_BOLD = re.compile(r"\*\*([^*]+?)\*\*")
 
 
 def _plain_help(text: str | None) -> str | None:
-    """Show RST inline literals (``x``) as 'x': Click prints help verbatim."""
-    if not text or "``" not in text:
+    """Show RST literals (``x``) as 'x' and drop **bold** markers (GAP-2310).
+
+    Click prints help verbatim, so markup would show as typed.
+    """
+    if not text or ("``" not in text and "**" not in text):
         return text
-    return _RST_LITERAL.sub(r"'\1'", text)
+    return _MD_BOLD.sub(r"\1", _RST_LITERAL.sub(r"'\1'", text))
+
+
+def _first_sentence(text: str | None) -> str | None:
+    """The first sentence of *text*, for a group's Commands list.
+
+    Without an explicit short_help Click cuts the summary off at the terminal
+    width with '...' (GAP-2036); the whole sentence wraps instead.
+    """
+    if not text:
+        return None
+    words = inspect.cleandoc(text).split("\n\n", 1)[0].split()
+    if words and words[0] == "\b":
+        words = words[1:]
+    for i, word in enumerate(words):
+        if word.endswith("."):
+            return " ".join(words[: i + 1])
+    return " ".join(words) or None
 
 
 def _plain_help_tree(command: click.Command, seen: set[int] | None = None) -> None:
@@ -454,7 +479,7 @@ def _plain_help_tree(command: click.Command, seen: set[int] | None = None) -> No
         return
     seen.add(id(command))
     command.help = _plain_help(command.help)
-    command.short_help = _plain_help(command.short_help)
+    command.short_help = _plain_help(command.short_help) or _first_sentence(command.help)
     for param in command.params:
         if isinstance(param, click.Option):
             param.help = _plain_help(param.help)
@@ -463,6 +488,55 @@ def _plain_help_tree(command: click.Command, seen: set[int] | None = None) -> No
 
 
 _plain_help_tree(cli)
+
+
+_NB_HYPHEN = "\u2011"
+
+
+class _HelpFormatter(click.HelpFormatter):
+    """Help output that never wraps a line at a hyphen.
+
+    Click's wrapper splits 'defenseclaw-gateway', '~/.defenseclaw/last-run.log'
+    or 'log-activity' across two lines, so they can't be read or copied whole.
+    Hyphens are non-breaking while a block wraps and plain again in the output.
+    Redirected help gets the same ASCII stand-ins as the rest of the CLI
+    (em dash, ellipsis; GAP-2598), swapped before wrapping so widths hold.
+    """
+
+    def write_text(self, text: str) -> None:
+        start = len(self.buffer)
+        super().write_text(ux.console_text(text).replace("-", _NB_HYPHEN))
+        self._restore_hyphens(start)
+
+    def write_dl(self, rows, col_max: int = 30, col_spacing: int = 2) -> None:
+        start = len(self.buffer)
+        rows = [(ux.console_text(term), ux.console_text(desc).replace("-", _NB_HYPHEN)) for term, desc in rows]
+        super().write_dl(rows, col_max, col_spacing)
+        self._restore_hyphens(start)
+
+    def getvalue(self) -> str:
+        return ux.console_text(super().getvalue())
+
+    def _restore_hyphens(self, start: int) -> None:
+        self.buffer[start:] = [part.replace(_NB_HYPHEN, "-") for part in self.buffer[start:]]
+
+
+class _HelpContext(click.Context):
+    formatter_class = _HelpFormatter
+
+
+def _whole_words_help_tree(command: click.Command, seen: set[int] | None = None) -> None:
+    """Give every command the help formatter that keeps hyphenated words whole."""
+    seen = set() if seen is None else seen
+    if id(command) in seen:
+        return
+    seen.add(id(command))
+    command.context_class = _HelpContext
+    for sub in (getattr(command, "commands", None) or {}).values():
+        _whole_words_help_tree(sub, seen)
+
+
+_whole_words_help_tree(cli)
 
 
 def _ensure_codeguard_skill(cfg) -> None:
@@ -593,7 +667,9 @@ def main() -> None:
 
     try:
         if not _try_launch_tui():
-            cli()
+            # GAP-2580: the TUI runs "python -m defenseclaw.main"; usage errors
+            # must still name the command the user types.
+            cli(prog_name="defenseclaw")
     except CanonicalObservabilityUnavailableError as exc:
         # The command's audit event needs the gateway (for example after
         # init --no-start-gateway): one line with the fix, no traceback
@@ -606,7 +682,7 @@ def main() -> None:
         )
         sys.exit(1)
     except CanonicalObservabilityError as exc:
-        click.echo(f"Error: the gateway did not confirm the audit event: {exc}", err=True)
+        click.echo(f"Error: the audit event was not recorded: {exc}.", err=True)
         sys.exit(1)
     except OSError as exc:
         if _output_pipe_closed(exc):

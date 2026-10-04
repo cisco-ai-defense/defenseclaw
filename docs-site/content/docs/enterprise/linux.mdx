@@ -83,7 +83,7 @@ The units:
 | `defenseclaw-hook-guardian-reconcile.service` | root | One immediate reconcile, on demand |
 | `defenseclaw-hook-enumerator.service` | root, homes read-only | Rewrites the target manifest every five minutes (in the default `auto` enrollment mode) |
 | `defenseclaw-sensor-helper.service` | root, acquisition capabilities | Answers the gateway's fixed AI Discovery requests |
-| `defenseclaw-enterprise-apply.path` | PID 1 | Runs `ensure --reason path` when `/etc/defenseclaw/config.yaml`, `/etc/defenseclaw/secrets` or `/etc/defenseclaw/policies` changes |
+| `defenseclaw-enterprise-apply.path` | PID 1 | Runs `ensure --reason path` when `/etc/defenseclaw/config.yaml`, `/etc/defenseclaw/secrets` or `/etc/defenseclaw/policies` changes. `enterprise secret set` and `remove` pause it while they write the credential, because they apply the change themselves |
 | `defenseclaw-enterprise-verify.timer` | PID 1 | Runs `verify` daily, with up to one hour of random delay |
 
 The package installs the units in `/usr/lib/systemd/system`. A tarball install

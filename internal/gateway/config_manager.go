@@ -1000,6 +1000,10 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 		"tenant_id":        {},
 		"workspace_id":     {},
 		"discovery_source": {},
+		// The gateway never reads registry sources (the CLI fetches and
+		// promotes them into asset_policy), so a registry add/edit must not
+		// make every later reload fail as restart-required (GAP-2422).
+		"registries": {},
 		// Sandbox settings are read per launch, and the sandbox listeners
 		// rebind in-process (apiNeedsRestart). Only the legacy standalone
 		// mode behind the bind shim needs a fresh process (below).

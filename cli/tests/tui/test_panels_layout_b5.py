@@ -47,13 +47,16 @@ def test_every_tab_has_a_name_at_160_columns_and_short_active_names_end_with_an_
     for active in ("overview", "activity", "registries"):
         labels = tab_fit.fit_tab_labels(PANELS, active, unread, 146)
         assert tab_fit.strip_width(tuple(labels.values())) <= 146
-        bare = [name for name, key, _label in PANELS if labels[name] in {key, f"{key}⁵"}]
-        assert bare == [], (active, labels)
-        assert labels["inventory"] == "6 Inv" and labels["runtime"] == "N Run"
+        bare = [name for name, key, _label in PANELS if labels[name] in {key, f"{key}⁵", f"{key}(5)"}]
+        # Labels stay put across panels and the counts stay (GAP-2077,
+        # GAP-2078): with two counts up only the two least important tabs
+        # wait as key letters, so AI Discovery can read in full.
+        assert set(bare) <= {"runtime", "registries"}, (active, labels)
+        assert labels["inventory"] == "6 Inv" and labels["audit"].endswith(("⁵", "(5)"))
     # GAP-1751: at 80 columns the active tab reads in full when other tabs'
     # names and minor badges make room (an abbreviated one still ends with "…").
     labels = tab_fit.fit_tab_labels(PANELS, "sandboxes", unread, 66)
-    assert labels["sandboxes"] == "7 Sandboxes" and "⁵" in labels["alerts"]
+    assert labels["sandboxes"] == "7 Sandboxes" and labels["alerts"].endswith(("⁵", "(5)"))
 
 
 def test_palette_enter_uses_the_text_typed_so_far() -> None:
@@ -119,10 +122,11 @@ def test_setup_rerun_offers_configured_connectors_and_details_keep_names() -> No
         model.open_wizard_form(SetupWizard.CONNECTOR_SETUP, goal=goal)
         connector = next(field for field in model.form_fields if field.label == "Connector")
         assert connector.options == ("amp", "claudecode", "codex")
-        assert connector.value == "amp"
-    # Readiness rows show the whole connector name ("Active Connector: ope…").
+        # GAP-2387: the destructive Remove goal starts with nothing picked.
+        assert connector.value == ("amp" if goal_id == "rerun" else "")
+    # Readiness rows show the whole connector name ("Connector: ope…").
     console = Console(width=92, record=True)
-    console.print(DetailModalModel.from_pairs("t", [("Active Connector: openhands", "PASS · configured")]).table())
+    console.print(DetailModalModel.from_pairs("t", [("Connector: openhands", "PASS · configured")]).table())
     assert "openhands" in console.export_text()
 
 

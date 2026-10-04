@@ -12,7 +12,8 @@ from click.testing import CliRunner
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from defenseclaw.commands.cmd_alerts import alerts
+from defenseclaw.alert_semantics import copilot_hook_target
+from defenseclaw.commands.cmd_alerts import _alert_selector, alerts
 from defenseclaw.models import Event
 
 from tests.helpers import cleanup_app, make_app_context
@@ -94,6 +95,36 @@ class AlertFindingRowsTests(unittest.TestCase):
         shown = self.runner.invoke(alerts, ["--show", "3"], obj=self.app, catch_exceptions=False)
         self.assertIn("llm-judge", shown.output)
         self.assertNotIn("hook-rules", shown.output)
+
+    def test_copilot_local_and_cli_findings_share_one_target(self):
+        # GAP-2619: the VS Code Local harness names the hook PreToolUse and the
+        # Copilot CLI preToolUse; the table showed one hook point two ways.
+        now = datetime.now(timezone.utc)
+        for i, ref in enumerate(("copilot:PreToolUse", "copilot:preToolUse")):
+            self.app.store.log_event(Event(
+                action="scan-finding", target="", severity="CRITICAL", connector="copilot",
+                details="finding.observed", timestamp=now - timedelta(seconds=i),
+                structured={**FINDING, "defenseclaw.finding.target_ref": ref},
+            ))
+        table = self.runner.invoke(alerts, ["--connector", "copilot"], obj=self.app, catch_exceptions=False)
+        self.assertEqual(table.exit_code, 0, table.output)
+        self.assertEqual(table.output.count("preToolUse"), 2, table.output)
+        self.assertNotIn("PreToolUse", table.output)
+        self.assertEqual(copilot_hook_target("PreToolUse", "copilot"), "preToolUse")
+        self.assertEqual(copilot_hook_target("copilot:UserPromptSubmit"), "copilot:userPromptSubmitted")
+        self.assertEqual(copilot_hook_target("claudecode:PreToolUse"), "claudecode:PreToolUse")
+
+    def test_target_selector_sends_the_shown_copilot_target(self):
+        # GAP-2619: acknowledge/dismiss --target takes the Target alerts print.
+        def selector(target, connector=None):
+            return _alert_selector(
+                alert_ids=(), connector=connector, target=target, severity="all", since=None, before=None
+            )["target"]
+
+        self.assertEqual(selector("copilot:PreToolUse"), "copilot:preToolUse")
+        self.assertEqual(selector(" PreToolUse ", "copilot"), "preToolUse")
+        self.assertEqual(selector("PreToolUse"), "PreToolUse")
+        self.assertEqual(selector("skill://one"), "skill://one")
 
     def test_finding_rows_show_target_rule_connector_and_decision(self):
         now = datetime.now(timezone.utc)

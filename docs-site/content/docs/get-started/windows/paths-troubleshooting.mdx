@@ -24,7 +24,8 @@ again to repair them.
 
 | File | What it is |
 | --- | --- |
-| `defenseclaw.cmd` | The CLI and TUI launcher. |
+| `defenseclaw.exe` | The CLI and TUI launcher. PowerShell and cmd.exe run it for `defenseclaw`. |
+| `defenseclaw.cmd` | The same launcher as a batch file, for scripts that call `defenseclaw.cmd` by name. |
 | `defenseclaw` | The same launcher for Git Bash, which does not run `.cmd` files by bare name. cmd.exe and PowerShell ignore it. |
 | `defenseclaw-gateway.exe` | The gateway and its lifecycle commands. |
 | `defenseclaw-hook.exe` | The hook runner that agents call. It opens no console window. |
@@ -232,6 +233,15 @@ not remove, leftovers of connectors you no longer use.
     `defenseclaw-hook --version-json | ConvertFrom-Json`, or
     `cmd /c "%USERPROFILE%\.local\bin\defenseclaw-hook.exe --version"`.
     `defenseclaw doctor` also compares the hook's release with the CLI's.
+  </Accordion>
+  <Accordion title="Ctrl+C on a running command asks Terminate batch job (Y/N)?">
+    cmd.exe asks this question whenever Ctrl+C reaches a batch file.
+    `defenseclaw` runs `defenseclaw.exe`, so Ctrl+C prints `Aborted!` and
+    returns you to the prompt. You still see the question when you run
+    `defenseclaw.cmd` by name, or on an older install that has no
+    `defenseclaw.exe` in `%USERPROFILE%\.local\bin` (re-run the installer or
+    `defenseclaw upgrade` to add it). The command has already stopped: answer
+    `Y` or `N`, both return you to the prompt.
   </Accordion>
   <Accordion title="An install, upgrade, or rollback fails">
     Read the newest `%USERPROFILE%\.defenseclaw\logs\install-*.log`. A failed

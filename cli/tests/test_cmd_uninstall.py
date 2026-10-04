@@ -24,6 +24,7 @@ import hashlib
 import io
 import json
 import os
+import shlex
 import sys
 import tempfile
 import unittest
@@ -326,6 +327,7 @@ class WindowsOwnedCleanupTests(unittest.TestCase):
             tuple(Path(path).name for path in plan.binary_targets),
             (
                 "defenseclaw.cmd",
+                "defenseclaw.exe",
                 "defenseclaw",
                 "defenseclaw-gateway.exe",
                 "defenseclaw-acp.exe",
@@ -336,7 +338,6 @@ class WindowsOwnedCleanupTests(unittest.TestCase):
             ),
         )
         self.assertEqual(plan.managed_venv, os.path.join(plan.data_dir, ".venv"))
-        self.assertNotIn("defenseclaw.exe", tuple(Path(path).name for path in plan.binary_targets))
 
     def test_binary_only_removes_exact_targets_and_preserves_unrelated_files(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -612,6 +613,48 @@ class WindowsOwnedCleanupTests(unittest.TestCase):
         unlink.assert_called_once_with(gateway)
         self.assertEqual([p.binary_targets for p in scheduled], [(shim,)])
         self.assertFalse(scheduled[0].remove_data_dir)
+
+    def test_binaries_only_leaves_the_running_cli_launchers_to_the_helper(self):
+        # GAP-2237: PowerShell runs the installer's defenseclaw.exe, which
+        # Windows keeps while it runs; it goes with the shim after the CLI exits.
+        root = "C:\\Users\\test\\.local\\bin"
+        shim, launcher, gateway = (root + "\\" + name for name in ("defenseclaw.cmd", "defenseclaw.exe", "defenseclaw-gateway.exe"))
+        plan = cmd_uninstall.UninstallPlan(
+            platform_name="win32",
+            install_root=root,
+            gateway_path=gateway,
+            binary_targets=(shim, launcher, gateway),
+            data_dir="C:\\Users\\test\\.defenseclaw",
+            managed_venv="C:\\Users\\test\\.defenseclaw\\.venv",
+            remove_binaries=True,
+        )
+        scheduled = []
+        with (
+            patch.object(cmd_uninstall, "_validate_plan"),
+            patch.object(cmd_uninstall, "_running_from_managed_venv", return_value=True),
+            patch.object(cmd_uninstall, "_schedule_deferred_cleanup", side_effect=scheduled.append),
+            patch.object(cmd_uninstall.os.path, "lexists", return_value=True),
+            patch.object(cmd_uninstall.os, "unlink") as unlink,
+            patch.object(cmd_uninstall, "_remove_install_bookkeeping"),
+            patch.object(cmd_uninstall.shutil, "which", return_value=launcher),
+            capture_click_output() as output,
+        ):
+            cmd_uninstall._remove_binaries(plan)
+
+        unlink.assert_called_once_with(gateway)
+        self.assertEqual([p.binary_targets for p in scheduled], [(shim, launcher)])
+        self.assertIn(f"{launcher} is removed right after this command exits", output.getvalue())
+        self.assertNotIn("another defenseclaw remains", output.getvalue())
+
+    def test_installer_cli_launcher_is_bound_to_the_data_dir_venv(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = os.path.join(tmp, ".defenseclaw")
+            launcher = Path(tmp) / "defenseclaw.exe"
+            python = os.path.join(cmd_uninstall._normalized(os.path.join(data_dir, ".venv")), "Scripts", "python.exe")
+            launcher.write_bytes(b"MZ\0trampoline" + python.upper().encode("utf-8") + b"PK\0script")
+            self.assertTrue(cmd_uninstall._is_data_bound_launcher(str(launcher), data_dir, "win32"))
+            launcher.write_bytes(b"MZ\0trampoline C:\\Other\\.venv\\Scripts\\python.exe")
+            self.assertFalse(cmd_uninstall._is_data_bound_launcher(str(launcher), data_dir, "win32"))
 
     def test_deferred_scheduling_failure_is_nonzero_and_stops_cleanup(self):
         plan = cmd_uninstall.UninstallPlan(
@@ -1400,6 +1443,8 @@ class GatewayTeardownOutputTests(unittest.TestCase):
         kwargs = run_mock.call_args.kwargs
         self.assertEqual(kwargs["encoding"], "utf-8")
         self.assertEqual(kwargs["errors"], "replace")
+        # GAP-2100: the gateway's own stop can take about 25s before it kills.
+        self.assertTrue(all(call.kwargs["timeout"] >= 30 for call in run_mock.call_args_list))
 
 
 class RemoveDataDirTests(unittest.TestCase):
@@ -1464,6 +1509,33 @@ class RemoveDataDirTests(unittest.TestCase):
             self.assertTrue(data_dir.is_dir())
             self.assertEqual(list(data_dir.iterdir()), [])
             self.assertIn("mount point", out.getvalue())
+
+    def test_binary_phase_accepts_the_emptied_mount_point(self):
+        # GAP-1980: the binary phase re-validates the plan; the kept, empty
+        # mount point must not fail the ownership-marker check.
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / ".defenseclaw"
+            data_dir.mkdir()
+            bin_dir = Path(tmp) / "bin"
+            bin_dir.mkdir()
+            gateway = bin_dir / "defenseclaw-gateway"
+            gateway.write_text("bin", encoding="utf-8")
+            plan = cmd_uninstall.UninstallPlan(
+                platform_name="linux",
+                data_dir=str(data_dir),
+                install_root=str(bin_dir),
+                gateway_path=str(gateway),
+                binary_targets=(str(gateway),),
+                remove_data_dir=True,
+                remove_binaries=True,
+            )
+            # data_dir is what the data phase leaves on a mount point: empty.
+            with contextlib.redirect_stdout(io.StringIO()):
+                cmd_uninstall._remove_binaries(plan)
+            self.assertFalse(gateway.exists())
+            (data_dir / "unrelated.txt").write_text("x", encoding="utf-8")
+            with self.assertRaises(click.ClickException):
+                cmd_uninstall._validate_plan(plan)
 
     def test_reset_rejects_symlinked_preserved_venv(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1578,6 +1650,24 @@ class ExecutePlanConnectorTests(unittest.TestCase):
         finally:
             for c in ctx_mgrs:
                 c.__exit__(None, None, None)
+
+
+class RemovePluginMessageTests(unittest.TestCase):
+    """GAP-2497: after the openclaw teardown removed the plugin, the plugin
+    step must not claim it "was not installed"."""
+
+    def test_plugin_already_removed_by_teardown(self):
+        plan = cmd_uninstall.UninstallPlan(
+            connector="openclaw", connectors=("openclaw",), data_dir="/tmp/dc", remove_plugin=True
+        )
+        with (
+            patch("defenseclaw.guardrail.uninstall_openclaw_plugin", return_value=""),
+            capture_click_output() as out,
+        ):
+            cmd_uninstall._remove_plugin(plan)
+        text = out.getvalue()
+        self.assertIn("plugin already removed", text)
+        self.assertNotIn("not installed", text)
 
 
 def _completed(returncode: int, stderr: str = ""):
@@ -1768,7 +1858,7 @@ class LauncherRemovedNextStepsTests(unittest.TestCase):
                 cmd_uninstall._render_kept_and_next_steps(plan)
         text = buf.getvalue()
         self.assertIn(f"{bin_dir}: defenseclaw-gateway (the defenseclaw command went with the data)", text)
-        self.assertIn(f"rm -f {gateway}", text)
+        self.assertIn(f"rm -f {shlex.quote(str(gateway))}", text)
         self.assertIn("install.sh | bash", text)
         self.assertNotIn("the DefenseClaw commands", text)
         self.assertNotIn("  • set DefenseClaw up again:  defenseclaw", text)

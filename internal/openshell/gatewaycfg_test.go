@@ -64,6 +64,8 @@ type gatewayFixture struct {
 	// flush answers FlushSandboxes; flushes counts the calls.
 	flush   error
 	flushes int
+	// staleManager answers ServiceDockerGroupMissing.
+	staleManager bool
 }
 
 // systemdUnit renders `systemctl --user show openshell-gateway` output
@@ -110,14 +112,15 @@ func newGatewayFixture(t *testing.T) *gatewayFixture {
 	f.runner.OnFunc("systemctl --user show-environment", func(context.Context, openshell.Command) ([]byte, error) { return []byte(f.manager), nil })
 	f.probe = func() error { return nil }
 	f.cfg = &openshell.GatewayConfigurator{
-		Dir:             f.dir,
-		GOOS:            "linux",
-		BrewPrefix:      filepath.Join(filepath.Dir(f.dir), "homebrew"),
-		Runner:          f.runner,
-		VerifyGateway:   func(context.Context) error { f.verified++; return f.verify },
-		ProbeClientAuth: func(context.Context, *openshell.Registration) error { f.probes++; return f.probe() },
-		FlushSandboxes:  func(context.Context) error { f.flushes++; return f.flush },
-		Now:             func() time.Time { return time.Date(2026, 9, 26, 19, 0, 0, 0, time.UTC) },
+		Dir:                       f.dir,
+		GOOS:                      "linux",
+		BrewPrefix:                filepath.Join(filepath.Dir(f.dir), "homebrew"),
+		Runner:                    f.runner,
+		VerifyGateway:             func(context.Context) error { f.verified++; return f.verify },
+		ProbeClientAuth:           func(context.Context, *openshell.Registration) error { f.probes++; return f.probe() },
+		FlushSandboxes:            func(context.Context) error { f.flushes++; return f.flush },
+		Now:                       func() time.Time { return time.Date(2026, 9, 26, 19, 0, 0, 0, time.UTC) },
+		ServiceDockerGroupMissing: func() bool { return f.staleManager },
 		// The tests' preflight answers to the bare name, whatever this
 		// machine's PATH holds.
 		LookPath: func(string) (string, error) { return "", exec.ErrNotFound },
@@ -743,6 +746,23 @@ func TestGatewayConfigTrustsTheProbeWithoutAServiceEnvironment(t *testing.T) {
 	f.cfg.BrewFormulaInstalled = func() bool { return true }
 	if _, err := f.cfg.Plan(context.Background(), bindMounts); !errors.Is(err, openshell.ErrGatewayMismatch) || f.probes != 0 {
 		t.Fatalf("Plan on Homebrew's gateway with a registration on another port = %v (probes %d)", err, f.probes)
+	}
+}
+
+// TestGatewayRestartNamesStaleUserManager covers a gateway that does not
+// come back because its systemd user manager predates the user's docker
+// group (GAP-2169): the error names the manager restart.
+func TestGatewayRestartNamesStaleUserManager(t *testing.T) {
+	f := newGatewayFixture(t)
+	f.verify = errors.New("connection refused")
+	if err := f.cfg.Restart(context.Background()); err == nil || strings.Contains(err.Error(), "user manager") {
+		t.Fatalf("Restart = %v", err)
+	}
+	f.staleManager = true
+	err := f.cfg.Restart(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "connection refused") || !strings.Contains(err.Error(), "started before you joined the docker group") ||
+		!strings.Contains(err.Error(), "`sudo systemctl restart user@") {
+		t.Fatalf("Restart = %v", err)
 	}
 }
 

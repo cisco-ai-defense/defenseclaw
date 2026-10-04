@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import errno
 import hashlib
 import hmac
 import http.client
@@ -113,6 +114,7 @@ from defenseclaw.doctor_gateway import (
     trusted_lsof_path,
 )
 from defenseclaw.doctor_hooks import (
+    CODEX_PROBE_TIMEOUT_STATE,
     WindowsHookCheck,
     _packaged_windows_install_root,
     validate_windows_copilot_hook_registration,
@@ -412,8 +414,13 @@ def _write_doctor_cache(cfg, result: _DoctorResult) -> None:
         body = json.dumps(payload, indent=2).encode("utf-8")
         atomic_write_private_bytes(path, body)
     except OSError as exc:
+        if exc.errno == errno.ENOSPC:
+            # The cache is optional; the Audit storage capacity row already
+            # names the full disk and the next step (GAP-2015).
+            ux.echo(f"note: doctor results were not cached: the disk holding {data_dir} is full", err=True)
+            return
         ux.echo(
-            f"warning: could not write doctor cache at {path}: {exc}",
+            f"warning: could not write doctor cache at {path}: {exc.strerror or exc}",
             err=True,
         )
 
@@ -1801,7 +1808,8 @@ def _check_audit_db(cfg, r: _DoctorResult) -> None:
 
 _CARRY_OVER_NOTE_SUFFIX = ".carryover.json"
 _REVIEW_BLOCK_ALLOW_LISTS = (
-    "check them with defenseclaw mcp list, skill list, plugin list and tool list, and block or allow them again."
+    "check your MCP, skill, plugin and tool block/allow entries with defenseclaw mcp list, skill list,"
+    " plugin list and tool list, and block or allow them again."
 )
 
 
@@ -1813,16 +1821,20 @@ def _moved_store_block_allow_summary(moved: Path) -> str:
         kept = int(note.get("carried_over", 0))
         error = str(note.get("error") or "")
     except (OSError, ValueError, TypeError, AttributeError):
-        return f"started a new store; {_REVIEW_BLOCK_ALLOW_LISTS}"
+        return (
+            "started a new store; DefenseClaw cannot tell whether the old block/allow entries were carried over"
+            f" (the store was moved by an earlier version that kept no record), so {_REVIEW_BLOCK_ALLOW_LISTS}"
+        )
+    entries = "1 block/allow entry" if kept == 1 else f"{kept} block/allow entries"
     if not error:
-        return f"started a new store and carried over {kept} block/allow entries."
+        return f"started a new store and carried over {entries}."
     if kept == 0:
         return (
             "started a new store, but the old block/allow lists could not be read, so 0 entries were "
             f"carried over and earlier blocks no longer apply; {_REVIEW_BLOCK_ALLOW_LISTS}"
         )
     return (
-        f"started a new store and carried over {kept} block/allow entries, but some could not be read; "
+        f"started a new store and carried over {entries}, but some could not be read; "
         f"{_REVIEW_BLOCK_ALLOW_LISTS}"
     )
 
@@ -2829,12 +2841,16 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
                     reason = last_error.strip() if isinstance(last_error, str) else ""
                     _emit("warn", f"  └─ {sub}", f"degraded — {reason}" if reason else "degraded", r=r)
                 else:
-                    reason = _telemetry_error_reason(details) if sub == "telemetry" else ""
-                    next_step = _audit_write_failure(health)[1] if reason else ""
+                    audit_db = str(getattr(cfg, "audit_db", "") or "")
+                    reason = _telemetry_error_reason(details, audit_db) if sub == "telemetry" else ""
+                    _, next_step, freed = _audit_write_failure(health, audit_db) if reason else ("", "", False)
+                    # A freed audit disk is a WARN that clears on the next
+                    # event, so do not lead with the raw "error" (GAP-2139).
+                    shown_state = "recovering" if freed else state
                     _emit(
-                        "fail",
+                        "warn" if freed else "fail",
                         f"  └─ {sub}",
-                        f"{state} — {reason}" if reason else state,
+                        f"{shown_state} — {reason}" if reason else state,
                         r=r,
                         remediation=next_step,
                     )
@@ -4612,8 +4628,14 @@ def _check_windows_native_hooks(
     )
     if connector == "hermes":
         check = _hermes_idle_native_check(check, r)
+    if check.state == CODEX_PROBE_TIMEOUT_STATE:
+        _emit("warn", label, f"{check.state}: {check.detail}", r=r, remediation=_CODEX_PROBE_TIMEOUT_STEP)
+        return
     status = "pass" if check.healthy else "fail"
     _emit(status, label, f"{check.state}: {check.detail}", r=r)
+
+
+_CODEX_PROBE_TIMEOUT_STEP = "rerun defenseclaw doctor in a minute; Codex answers faster once the host is less busy"
 
 
 def _windows_native_hook_check(
@@ -4939,6 +4961,77 @@ def _defenseclaw_hook_script_kind(path: str) -> str:
         return "broken" if ".defenseclaw" in path.replace("\\", "/").split("/") else ""
 
 
+# GAP-1550: Codex's native OTLP exporter follows HTTP(S)_PROXY for the
+# loopback gateway too. On Linux and macOS Codex Setup appends this marked
+# NO_PROXY block to CODEX_HOME/.env (internal/gateway/connector/codex_dotenv.go);
+# Codex loads that file at start.
+_CODEX_DOTENV_PROXY_MARKER = (
+    "# >>> DefenseClaw (managed; removed on uninstall): keep Codex telemetry to the local gateway off HTTP(S)_PROXY"
+)
+# GAP-2620: the block also lists the instance-metadata endpoints; an older
+# block without them is refreshed by the next Codex Setup.
+_CODEX_DOTENV_METADATA_ENTRY = b"169.254.169.254"
+_TELEMETRY_PROXY_VARS = ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy")
+_LOOPBACK_NO_PROXY_FIX_POSIX = (
+    'export NO_PROXY="${NO_PROXY:+$NO_PROXY,}127.0.0.1,localhost,::1" '
+    'no_proxy="${no_proxy:+$no_proxy,}127.0.0.1,localhost,::1"'
+)
+_LOOPBACK_NO_PROXY_FIX_NT = "setx NO_PROXY 127.0.0.1,localhost,::1 (then open a new terminal)"
+
+
+def codex_telemetry_proxy_status(environ=None, *, os_name: str | None = None) -> tuple[str, str, str] | None:
+    """Say whether Codex's telemetry to the local gateway would use a proxy.
+
+    Returns ``(status, detail, remediation)``, or ``None`` when no proxy
+    variable is set. Codex (reqwest) reads NO_PROXY first, then no_proxy.
+    """
+    env = os.environ if environ is None else environ
+    os_name = os.name if os_name is None else os_name
+    proxy_var = next((key for key in _TELEMETRY_PROXY_VARS if str(env.get(key) or "").strip()), "")
+    if not proxy_var:
+        return None
+    dotenv_path = os.path.join(codex_home(), ".env")
+    try:
+        with open(dotenv_path, "rb") as fh:
+            dotenv = fh.read(1024 * 1024)
+    except OSError:
+        dotenv = b""
+    if _CODEX_DOTENV_PROXY_MARKER.encode() in dotenv and _CODEX_DOTENV_METADATA_ENTRY not in dotenv:
+        return (
+            "warn",
+            f"{proxy_var} is set; the DefenseClaw NO_PROXY entry in {dotenv_path} keeps Codex telemetry off the "
+            "proxy but predates the instance-metadata addresses, so AWS credential lookups still use the proxy",
+            "run: defenseclaw-gateway restart (it refreshes the entry), then restart Codex",
+        )
+    if _CODEX_DOTENV_PROXY_MARKER.encode() in dotenv:
+        return (
+            "pass",
+            f"{proxy_var} is set; Codex loads DefenseClaw's loopback NO_PROXY entry from {dotenv_path}, "
+            "so its telemetry to the gateway stays off the proxy",
+            "",
+        )
+    no_proxy = str(env.get("NO_PROXY") or "").strip() or str(env.get("no_proxy") or "").strip()
+    entries = {entry.strip().lower() for entry in no_proxy.split(",")}
+    if entries & {"*", "127.0.0.1", "localhost"}:
+        return ("pass", f"{proxy_var} is set and NO_PROXY in this shell lists the loopback", "")
+    fix = _LOOPBACK_NO_PROXY_FIX_NT if os_name == "nt" else _LOOPBACK_NO_PROXY_FIX_POSIX
+    detail = (
+        f"{proxy_var} is set and NO_PROXY does not list 127.0.0.1: Codex sends its telemetry for the "
+        "local gateway, with its OTLP credential, through the proxy"
+    )
+    if os_name != "nt":
+        detail += f" ({dotenv_path} has no DefenseClaw NO_PROXY entry; defenseclaw-gateway restart adds it)"
+    return ("warn", detail, f"in the shell that starts Codex run: {fix}")
+
+
+def _check_codex_telemetry_proxy(r: _DoctorResult) -> None:
+    status = codex_telemetry_proxy_status()
+    if status is None:
+        return
+    tag, detail, remediation = status
+    _emit(tag, "Codex telemetry proxy", detail, r=r, remediation=remediation)
+
+
 def _check_codex_otel_alignment(cfg, r: _DoctorResult) -> None:
     """Bind Codex's configured OTel tag to trusted live runtime status.
 
@@ -5057,7 +5150,20 @@ def _check_codex_otel_alignment(cfg, r: _DoctorResult) -> None:
             r=r,
         )
     elif telemetry_state not in {"running", "healthy"}:
-        reason = _telemetry_error_reason(telemetry.get("details") if isinstance(telemetry, dict) else None)
+        details = telemetry.get("details") if isinstance(telemetry, dict) else None
+        audit_db = str(getattr(cfg, "audit_db", "") or "")
+        reason = _telemetry_error_reason(details, audit_db)
+        if reason and _audit_disk_freed(details, audit_db):
+            # Only the gateway's stale disk-full state is left; the telemetry
+            # row already says it clears with the next event (GAP-2016).
+            _emit(
+                "pass",
+                "Codex OTel runtime",
+                f"Codex telemetry settings are correct (environment {runtime_environment!r}); "
+                "live telemetry recovers with the next audit event now that the audit disk has room",
+                r=r,
+            )
+            return
         if reason:
             # The audit store, not Codex, is failing; the audit storage and
             # telemetry rows already FAIL with the fix (GAP-1927).
@@ -5086,51 +5192,51 @@ def _check_codex_otel_alignment(cfg, r: _DoctorResult) -> None:
         )
 
 
-_EVENT_HISTORY_SQLITE_CLASSES = {
-    "full": "the disk holding the audit database is full",
-    "busy_locked": "another process keeps the audit database locked",
-    "deadline": "audit database writes time out",
-    "io": "the disk returned an I/O error",
-    "readonly_cantopen": "the audit database is read-only or cannot be opened",
-    "constraint_corrupt": "the audit database is damaged",
-}
-
-
 _EVENT_HISTORY_SQLITE_REMEDIATION = {
     "full": "free space on the disk that holds the audit database; the gateway resumes writing audit events "
     "once there is room",
 }
 
 
-def _audit_write_failure(live_health) -> tuple[str, str]:
-    """(reason, next step) when the live gateway reports failing audit writes (GAP-1984)."""
+def _audit_write_failure(live_health, audit_db: str = "") -> tuple[str, str, bool]:
+    """(reason, next step, disk freed) when the live gateway reports failing audit writes (GAP-1984)."""
     telemetry = live_health.get("telemetry") if isinstance(live_health, dict) else None
     if not isinstance(telemetry, dict):
-        return "", ""
+        return "", "", False
     state = str(telemetry.get("state", telemetry.get("status", "")) or "").strip().lower()
     if state in {"running", "healthy", "disabled"}:
-        return "", ""
+        return "", "", False
     details = telemetry.get("details")
-    reason = _telemetry_error_reason(details)
+    reason = _telemetry_error_reason(details, audit_db)
     if not reason:
-        return "", ""
+        return "", "", False
+    if _audit_disk_freed(details, audit_db):
+        return reason, "", True
     sqlite_class = str(details.get("event_history_last_sqlite_class") or "")
     remediation = _EVENT_HISTORY_SQLITE_REMEDIATION.get(
         sqlite_class,
         "fix the audit database storage, then run 'defenseclaw-gateway restart'",
     )
-    return reason, remediation
+    return reason, remediation, False
 
 
-def _telemetry_error_reason(details) -> str:
+def _audit_disk_freed(details, audit_db: str) -> bool:
+    """The gateway last failed on a full disk that has room again (GAP-2016).
+
+    The gateway clears the failure on its next audit write, not on its own.
+    """
+    from defenseclaw.audit_capacity import audit_disk_freed
+
+    if not isinstance(details, dict) or details.get("event_history_last_sqlite_class") != "full":
+        return False
+    return audit_disk_freed(audit_db)
+
+
+def _telemetry_error_reason(details, audit_db: str = "") -> str:
     """Plain words for the gateway's event-history failure tokens (GAP-1308)."""
-    if not isinstance(details, dict):
-        return ""
-    if details.get("event_history_failure") != "sqlite_write_failed":
-        return ""
-    sqlite_class = str(details.get("event_history_last_sqlite_class") or "")
-    cause = _EVENT_HISTORY_SQLITE_CLASSES.get(sqlite_class, "the audit database rejects writes")
-    return f"audit events cannot be written: {cause}"
+    from defenseclaw.audit_capacity import audit_write_failure_reason
+
+    return audit_write_failure_reason(details, audit_db)
 
 
 def _check_hermes_hooks(
@@ -6858,7 +6964,14 @@ def _hermes_idle_native_check(check: WindowsHookCheck, r: _DoctorResult) -> Wind
     is nothing to reload. --passive does not list processes and keeps the
     pending-reload state.
     """
-    if check.state != "pending-reload" or r.passive or _hermes_host_running() is not False:
+    if check.state != "pending-reload" or r.passive:
+        return check
+    running = _hermes_host_running()
+    if running is None:
+        # The process listing can time out right after an upgrade on a busy
+        # host; one retry keeps a transient probe from failing doctor (GAP-2190).
+        running = _hermes_host_running()
+    if running is not False:
         return check
     detail = check.detail.split("; running Hermes", 1)[0]
     return WindowsHookCheck(
@@ -7751,18 +7864,25 @@ def _check_guardrail_proxy(cfg, r: _DoctorResult) -> None:
         _emit("skip", "Guardrail proxy", "disabled", r=r)
         return
 
+    # With no active connector nothing routes through the proxy, so a closed
+    # port is expected (GAP-2291); the Connectors row already says what to run.
+    if not _doctor_active_connectors(cfg):
+        _emit(
+            "skip",
+            "Guardrail proxy",
+            "no active connector; proxy not needed - run 'defenseclaw setup <connector>'",
+            r=r,
+        )
+        return
+
     closed_detail = _guardrail_proxy_intentionally_closed(cfg)
     if closed_detail:
         _emit("pass", "Guardrail proxy", closed_detail, r=r)
         return
 
-    if not cfg.guardrail.model:
-        _emit(
-            "warn",
-            "Guardrail proxy",
-            "guardrail.model is empty — relying on fetch-interceptor routing",
-            r=r,
-        )
+    # An empty guardrail.model is the normal state: connectors route LLM
+    # traffic through the OpenClaw fetch interceptor, an api_base rewrite or
+    # a /c/<connector> base URL, never through an advertised model name.
 
     host = getattr(cfg.guardrail, "host", None) or "127.0.0.1"
     url = f"http://{host}:{cfg.guardrail.port}/health/liveliness"
@@ -7778,6 +7898,9 @@ def _check_guardrail_proxy(cfg, r: _DoctorResult) -> None:
 _PROXY_DOCTOR_CONNECTORS = frozenset({"openclaw"})
 # Three 60s plugin cadences. A stopped interceptor must not keep doctor green.
 _INTERCEPTION_SELF_TEST_FRESHNESS = timedelta(minutes=3)
+# The plugin reports every 60 s and a restarted sidecar starts with no
+# report, so a fresh sidecar gets two cadences before a missing one fails.
+_INTERCEPTION_FIRST_REPORT_WINDOW = timedelta(minutes=2)
 
 
 def _check_proxy_interception(cfg, r: _DoctorResult, *, live_health: dict | None = None) -> None:
@@ -7802,6 +7925,38 @@ def _check_proxy_interception(cfg, r: _DoctorResult, *, live_health: dict | None
 
     label = "OpenClaw interception" if connectors == ["openclaw"] else "Proxy interception"
     info = live_health.get("interception") if isinstance(live_health, dict) else None
+    uptime_ms = live_health.get("uptime_ms") if isinstance(live_health, dict) else None
+    if (
+        not isinstance(info, dict)
+        and "openclaw" in connectors
+        and any(c["status"] == "fail" and c["label"].startswith("OpenClaw gateway") for c in r.checks)
+    ):
+        # GAP-2506: the plugin runs inside the OpenClaw gateway, so it cannot
+        # report while that gateway is unreachable; rerunning doctor won't help.
+        _emit(
+            "fail",
+            label,
+            "no interception self-test: the OpenClaw gateway is not reachable (see the OpenClaw gateway row)",
+            remediation="start or fix the OpenClaw gateway first, then rerun doctor",
+            r=r,
+        )
+        return
+    if (
+        not isinstance(info, dict)
+        and isinstance(uptime_ms, int)
+        and 0 <= uptime_ms < _INTERCEPTION_FIRST_REPORT_WINDOW.total_seconds() * 1000
+    ):
+        # GAP-2487: the sidecar just (re)started and the plugin has not
+        # reported yet; it does so within a minute without an OpenClaw restart.
+        _emit(
+            "warn",
+            label,
+            f"the DefenseClaw gateway started {uptime_ms // 1000} s ago; waiting for the OpenClaw plugin "
+            "to report its interception self-test (it reports every 60 s)",
+            remediation="rerun doctor in a minute",
+            r=r,
+        )
+        return
     if not isinstance(info, dict):
         _emit(
             "fail",
@@ -8199,11 +8354,11 @@ def _check_llm_api_key(cfg, r: _DoctorResult) -> None:
     elif provider == "openai":
         _verify_openai(api_key, r)
     elif provider in ("bedrock", "amazon-bedrock"):
-        _verify_bedrock(api_key, r)
+        _verify_bedrock(api_key, r, key_env=env_name)
     elif provider == "" and env_name.startswith("OPENAI"):
         _verify_openai(api_key, r)
     elif provider == "" and env_name.startswith("AWS_BEARER_TOKEN_BEDROCK"):
-        _verify_bedrock(api_key, r)
+        _verify_bedrock(api_key, r, key_env=env_name)
     else:
         _emit(
             "pass",
@@ -8305,6 +8460,34 @@ def _check_llm_reachable(cfg, r: _DoctorResult) -> None:
         ok, msg = _llm.ping(llm, timeout=5)
     if ok:
         _emit("pass", "LLM reachable", prefix + msg, r=r)
+    elif bool(getattr(judge, "enabled", False)) and f" {_llm._PING_FAILURE_WORDS['auth_failed']}:" in msg:
+        # The judge is on but its key is rejected, so judge verdicts
+        # silently fail open (GAP-2108).
+        key_env = (getattr(llm, "api_key_env", "") or "DEFENSECLAW_LLM_KEY").strip()
+        _emit(
+            "fail",
+            "LLM reachable",
+            prefix + msg + " (the LLM judge cannot run, so its verdicts fail open)",
+            r=r,
+            remediation=(
+                f"replace the key: defenseclaw keys set {key_env} --value-stdin "
+                "(or defenseclaw setup llm --role judge), then defenseclaw-gateway restart"
+            ),
+        )
+    elif " through the proxy " in msg and (proxy := _llm.env_proxy(llm)) is not None:
+        # Doctor's probe uses this shell's proxy; say how to fix or skip it (GAP-2421).
+        source = proxy[1] if proxy[1].upper().endswith("_PROXY") else "the system proxy"
+        _emit(
+            "warn",
+            "LLM reachable",
+            prefix + msg,
+            r=r,
+            remediation=(
+                f"check that the proxy at {proxy[0]} is running, or unset {source} (or add the provider "
+                "host to NO_PROXY) in this shell and rerun 'defenseclaw doctor'; the gateway uses the "
+                "proxy settings it was started with"
+            ),
+        )
     else:
         _emit("warn", "LLM reachable", prefix + msg, r=r)
 
@@ -8813,7 +8996,7 @@ def _bedrock_region() -> str:
     return _BEDROCK_DEFAULT_REGION
 
 
-def _verify_bedrock(api_key: str, r: _DoctorResult) -> None:
+def _verify_bedrock(api_key: str, r: _DoctorResult, *, key_env: str = "DEFENSECLAW_LLM_KEY") -> None:
     """Verify an AWS Bedrock API key (short-term ABSK bearer token).
 
     LiteLLM and the DefenseClaw scanner bridge authenticate to Bedrock
@@ -8826,8 +9009,9 @@ def _verify_bedrock(api_key: str, r: _DoctorResult) -> None:
     * ``AKIA…``  → SigV4 credentials; we can't verify without signing,
                   which would pull in botocore just for the doctor.
                   Emit a ``warn`` pointing at ``aws sts get-caller-identity``.
-    * anything else → shape we don't recognize; pass with a note, same
-                      as the generic fallback in ``_check_llm_api_key``.
+    * anything else → not a Bedrock key shape; warn with a next step
+                      (Bedrock rejects it with "Must start with pre-defined
+                      prefix", GAP-2195), and don't probe it.
 
     The foundation-models list endpoint is a cheap GET that returns
     the list of models enabled for the account. ``200`` confirms auth
@@ -8844,10 +9028,15 @@ def _verify_bedrock(api_key: str, r: _DoctorResult) -> None:
         return
     if not api_key.startswith(("ABSK", "bedrock-api-key-")):
         _emit(
-            "pass",
+            "warn",
             "LLM API key (Bedrock)",
-            f"key is set ({len(api_key)} chars) but is not a Bedrock API key format doctor knows, so it is not checked",
+            f"key is set ({len(api_key)} chars) but does not look like a Bedrock API key "
+            "(ABSK... or bedrock-api-key-...), so it is not checked",
             r=r,
+            remediation=(
+                f"replace it: defenseclaw keys set {key_env} --value-stdin "
+                "(or defenseclaw setup llm), then defenseclaw-gateway restart"
+            ),
         )
         return
     region = _bedrock_region()
@@ -8862,17 +9051,30 @@ def _verify_bedrock(api_key: str, r: _DoctorResult) -> None:
         _emit("pass", "LLM API key (Bedrock)", f"authenticated successfully ({region})", r=r)
     elif code == 401:
         _emit("fail", "LLM API key (Bedrock)", "invalid key (401 Unauthorized)", r=r)
-    elif code == 403:
-        # 403 from Bedrock usually means the token is valid but the
-        # IAM policy/resource doesn't grant bedrock:ListFoundationModels.
-        # That's a policy problem, not a key problem — downgrade to warn
-        # so the scan still runs (the scanner uses InvokeModel, which
-        # may be permitted even when List is not).
+    elif code == 403 and _bedrock_403_is_permission_denial(body):
+        # The token authenticated, but the IAM policy doesn't grant
+        # bedrock:ListFoundationModels. That's a policy problem, not a key
+        # problem — downgrade to warn so the scan still runs (the scanner
+        # uses InvokeModel, which may be permitted even when List is not).
         _emit(
             "warn",
             "LLM API key (Bedrock)",
             "403 Forbidden — key authenticates but lacks bedrock:ListFoundationModels; InvokeModel may still work.",
             r=r,
+        )
+    elif code == 403:
+        # Bedrock answers an expired or invalid bearer key with 403
+        # ("Authentication failed: Please make sure your API Key is valid."),
+        # which InvokeModel rejects the same way (GAP-2108).
+        _emit(
+            "fail",
+            "LLM API key (Bedrock)",
+            f"key rejected (403 Forbidden: {_bedrock_error_message(body)}); it is expired or invalid",
+            r=r,
+            remediation=(
+                f"replace it: defenseclaw keys set {key_env} --value-stdin "
+                "(or defenseclaw setup llm), then defenseclaw-gateway restart"
+            ),
         )
     elif code == 0:
         _emit(
@@ -8883,6 +9085,25 @@ def _verify_bedrock(api_key: str, r: _DoctorResult) -> None:
         )
     else:
         _emit("fail", "LLM API key (Bedrock)", f"HTTP {code}", r=r)
+
+
+def _bedrock_403_is_permission_denial(body: str) -> bool:
+    """True when a Bedrock 403 is an IAM denial, not a rejected key (GAP-2108)."""
+    low = (body or "").lower()
+    return any(m in low for m in ("not authorized to perform", "accessdenied", "access denied"))
+
+
+def _bedrock_error_message(body: str) -> str:
+    """The ``Message`` of a Bedrock error body, short and single-line."""
+    try:
+        data = json.loads(body or "")
+    except ValueError:
+        data = None
+    msg = ""
+    if isinstance(data, dict):
+        msg = str(data.get("Message") or data.get("message") or "")
+    msg = " ".join((msg or body or "no detail").split())
+    return msg[:160]
 
 
 def _check_cisco_ai_defense(cfg, r: _DoctorResult) -> None:
@@ -8982,7 +9203,7 @@ def _check_observability(cfg, r: _DoctorResult, *, live_health: dict | None = No
     """Inspect v8 status and exercise each enabled Galileo runtime route."""
     from defenseclaw.config import config_path_for_data_dir
     from defenseclaw.config_inspect import ConfigInspectError, ConfigInspectTimeoutError
-    from defenseclaw.observability.custody_status import inspect_connector_custody
+    from defenseclaw.observability.custody_status import gateway_api_addr, inspect_connector_custody
     from defenseclaw.observability.v8_config import V8ConfigError
     from defenseclaw.observability.v8_status import inspect_v8_operator_status
 
@@ -9011,11 +9232,14 @@ def _check_observability(cfg, r: _DoctorResult, *, live_health: dict | None = No
         # finding, not a crash of the whole report.
         _emit("fail", "Observability v8 effective plan", f"cannot inspect the configuration: {exc}", r=r)
         return
-    _check_observability_v8_status(status, r, live_health=live_health)
+    _check_observability_v8_status(
+        status, r, live_health=live_health, audit_db=str(getattr(cfg, "audit_db", "") or "")
+    )
     _check_connector_export_custody(
         inspect_connector_custody(
             status.local_path or getattr(cfg, "audit_db", os.path.join(cfg.data_dir, "audit.db")),
             cfg.data_dir,
+            api_addr=gateway_api_addr(cfg),
         ),
         r,
         configured=_otlp_configured_connectors(cfg),
@@ -9084,10 +9308,11 @@ def _check_connector_export_custody(report, r: _DoctorResult, *, configured: set
             "no connector instance has emitted correlation evidence yet",
             r=r,
         )
-    from defenseclaw.observability.custody_status import summarize_native_delivery
+    from defenseclaw.observability.custody_status import native_evidence_row_limit, summarize_native_delivery
 
     delivery_rows = iter(summarize_native_delivery(report).connectors)
     removed: list[str] = []
+    idle: dict[str, int] = {}
     for item in report.instances:
         suffix = "" if item.default else f"/{item.connector_instance_id[:8]}"
         label = f"Connector OTLP: {item.connector}{suffix}"
@@ -9095,6 +9320,17 @@ def _check_connector_export_custody(report, r: _DoctorResult, *, configured: set
         if configured is not None and normalize(item.connector) not in configured:
             if item.connector not in removed:
                 removed.append(item.connector)
+            continue
+        if (
+            not item.default
+            and (delivery is None or delivery.state == "no_evidence")
+            and item.credential_state not in {"invalid", "recovered"}
+        ):
+            # An additional instance (one per OpenShell sandbox run) with no
+            # evidence is an idle or deleted sandbox, not a custody problem:
+            # fold it into one line per connector, as status does (GAP-2097).
+            # Hook-only ones fold too: they are the same past runs (GAP-2104).
+            idle[item.connector] = idle.get(item.connector, 0) + 1
             continue
         if item.custody == "external":
             tag = "warn"
@@ -9202,6 +9438,14 @@ def _check_connector_export_custody(report, r: _DoctorResult, *, configured: set
             remediation=remediation,
         )
 
+    for connector, count in idle.items():
+        noun = "instance" if count == 1 else "instances"
+        _emit(
+            "pass",
+            f"Connector OTLP: {connector} ({count} additional {noun})",
+            "inactive (for example past sandbox runs); no recent native delivery evidence, nothing to do",
+            r=r,
+        )
     if removed:
         _emit(
             "skip",
@@ -9210,27 +9454,70 @@ def _check_connector_export_custody(report, r: _DoctorResult, *, configured: set
             r=r,
         )
     if report.unattributed_authentication_failures:
-        _emit(
-            "warn",
-            "Native OTLP credentials",
-            f"invalid credential attempts could not be attributed to a trusted connector; "
-            f"count={report.unattributed_authentication_failures}; "
-            f"last={report.last_unattributed_authentication_failure or 'unknown'}",
-            r=r,
-            remediation=(
-                "the gateway rejected OTLP sent to it without a valid DefenseClaw token (nothing was stored); "
-                "a stale OTEL_EXPORTER_OTLP_* setting in a shell profile or agent config usually causes it. "
-                "Re-run 'defenseclaw setup <connector>' for each agent that exports telemetry; if it keeps "
-                "growing, look for other OTLP senders pointed at the gateway port"
-            ),
-        )
+        _emit_unattributed_otlp_credentials(report, r)
     if report.event_rows_truncated:
+        # A busy install passes the read cap every day; the newest events
+        # are a fair sample and there is nothing to do (GAP-2555).
         _emit(
-            "warn",
+            "pass",
             "Connector OTLP evidence",
-            "recent evidence reached the bounded read limit; drop-only and credential counts are partial",
+            f"busy install: counts cover the newest {native_evidence_row_limit()} events "
+            f"of the last {report.observation_window_hours} h; nothing to do",
             r=r,
         )
+
+
+
+def _short_age(seconds: float) -> str:
+    """Compact age for a doctor row: 'under a minute', '12 min', '23 h' or '3 d'."""
+    if seconds < 60:
+        return "under a minute"
+    minutes = int(seconds // 60)
+    if minutes < 60:
+        return f"{minutes} min"
+    hours = minutes // 60
+    return f"{hours} h" if hours < 48 else f"{hours // 24} d"
+
+
+def _emit_unattributed_otlp_credentials(report, r: _DoctorResult, *, now=None) -> None:
+    """Rejected OTLP attempts no trusted connector owns (GAP-2294).
+
+    The count covers a rolling window, so the row names the window and the
+    age of the last attempt. Re-running setup cannot clear old attempts; it
+    is only suggested while attempts are still arriving.
+    """
+    from defenseclaw.observability.custody_status import _format_time, _parse_time
+
+    count = report.unattributed_authentication_failures
+    window = int(getattr(report, "observation_window_hours", 0) or 24)
+    noun = "attempt" if count == 1 else "attempts"
+    last = _parse_time(report.last_unattributed_authentication_failure)
+    current = now or datetime.now(timezone.utc)
+    age = (current - last).total_seconds() if last else None
+    if age is None:
+        when = "last attempt time unknown"
+    else:
+        when = f"last {_short_age(age)} ago ({_format_time(last)})"
+    detail = (
+        f"{count} rejected OTLP {noun} in the last {window} h, {when}; "
+        "the sender had no valid DefenseClaw token, so nothing was stored or attributed to a connector"
+    )
+    if age is not None and age > 3600:
+        clears = _format_time(last + timedelta(hours=window))
+        remediation = (
+            "no new attempts in the last hour; this row clears on its own at "
+            f"{clears} if none arrive. Re-running setup does not clear it. "
+            "If 'defenseclaw doctor' later shows a newer 'last', look for a stale "
+            "OTEL_EXPORTER_OTLP_* setting in a shell profile or agent config"
+        )
+    else:
+        remediation = (
+            "attempts are recent: a stale OTEL_EXPORTER_OTLP_* setting in a shell profile or agent "
+            "config usually causes this. Re-run 'defenseclaw setup <connector>' for each agent that "
+            "exports telemetry; if the count keeps growing, look for other OTLP senders pointed at "
+            "the gateway port"
+        )
+    _emit("warn", "Native OTLP credentials", detail, r=r, remediation=remediation)
 
 
 def _destination_remediation(destination, live) -> str:
@@ -9250,9 +9537,26 @@ def _destination_remediation(destination, live) -> str:
     target = f" at {destination.endpoint}" if destination.endpoint else ""
     return (
         f"check that the collector{target} is running and reachable from this machine ({test}), "
-        "then run 'defenseclaw-gateway restart'; to stop using this route, run "
-        f"'defenseclaw setup observability disable {name}'"
+        "then run 'defenseclaw-gateway restart'. The test connects directly; the gateway uses the "
+        "proxy it was started with (HTTPS_PROXY/NO_PROXY), so if the test passes, restart the "
+        "gateway from a shell with the right proxy settings and check gateway.log. To stop using "
+        f"this route, run 'defenseclaw setup observability disable {name}'"
     )
+
+
+def _galileo_canary_remediation(failure_class: str, destination_name: str) -> str:
+    """Next step for a failed Galileo canary row."""
+    if failure_class == "gateway_unavailable":
+        return "start the gateway with 'defenseclaw-gateway start', then run 'defenseclaw doctor' again"
+    test = f"'defenseclaw observability destination test {shlex.quote(destination_name)}'"
+    if failure_class == "delivery_failed":
+        return (
+            f"{test} connects directly, so it can pass while the gateway still cannot deliver. "
+            "Check the Galileo credentials and endpoint ('defenseclaw setup galileo') and the "
+            "gateway's proxy settings (HTTPS_PROXY/NO_PROXY), then run 'defenseclaw-gateway restart' "
+            "from a shell with the right proxy settings, check gateway.log, and run 'defenseclaw doctor' again"
+        )
+    return f"run {test} to check the route"
 
 
 def _check_galileo_trace_canaries(
@@ -9298,11 +9602,7 @@ def _check_galileo_trace_canaries(
                 label,
                 f"{exc.failure_class}: {exc.message}",
                 r=r,
-                remediation=(
-                    "start the gateway with 'defenseclaw-gateway start', then run 'defenseclaw doctor' again"
-                    if exc.failure_class == "gateway_unavailable"
-                    else f"run 'defenseclaw observability destination test {destination.name}' to check the route"
-                ),
+                remediation=_galileo_canary_remediation(exc.failure_class, destination.name),
             )
             continue
         _emit(
@@ -9327,6 +9627,7 @@ def _check_observability_v8_status(
     r: _DoctorResult,
     *,
     live_health: dict | None = None,
+    audit_db: str = "",
 ) -> None:
     """Render one canonical v8 operator snapshot into doctor checks."""
 
@@ -9338,12 +9639,14 @@ def _check_observability_v8_status(
 
     retention = "unbounded" if status.unbounded_retention else f"{status.retention_days} days"
     local_path = status.local_path or "built-in data directory"
-    write_failure, write_next_step = _audit_write_failure(live_health)
+    write_failure, write_next_step, disk_freed = _audit_write_failure(live_health, audit_db)
     local_detail = f"retention={retention}; path={local_path}"
+    local_tag = "warn" if status.unbounded_retention else "pass"
     if write_failure:
         local_detail += f"; {write_failure}"
+        local_tag = "warn" if disk_freed else "fail"
     _emit(
-        "fail" if write_failure else ("warn" if status.unbounded_retention else "pass"),
+        local_tag,
         "Local SQLite",
         local_detail,
         r=r,
@@ -9380,13 +9683,13 @@ def _check_observability_v8_status(
             # The sink's own counters lag the gateway's audit-write failure
             # (healthy, 0 consecutive failures), so leave them out and say
             # what the telemetry row says (GAP-1984, GAP-2002).
-            tag = "fail"
+            tag = "warn" if disk_freed else "fail"
             detail += f"; {write_failure}"
         elif destination.enabled and live is not None:
             live_state = live.state or "unavailable"
             detail += f"; health={live_state}"
-            if live.reason:
-                detail += f"/{live.reason}"
+            if live.display_reason:
+                detail += f"/{live.display_reason}"
             detail += f"; queue={live.queue_label}; last={live.activity_label}; circuit={live.circuit_label}"
             if live_state == "unavailable" and destination.kind != "sqlite":
                 tag = "warn"
@@ -10074,6 +10377,7 @@ def doctor(
             _check_connector_hooks(cfg, _conn, r)
             if _conn == "codex":
                 _check_codex_otel_alignment(cfg, r)
+                _check_codex_telemetry_proxy(r)
             # Human-approval (HILT) support is per-connector: each connector
             # has a different native ask surface AND may carry its own hilt
             # override, so run it for EVERY active connector (tagged like the
@@ -12053,7 +12357,20 @@ def _check_connector_inventory(
     if count:
         names = ", ".join(s.name for s in servers[:5])
         more = f" (+{count - 5} more)" if count > 5 else ""
-        _emit("pass", "MCP servers", f"{count} configured: {names}{more}", r=r)
+        not_loaded = [
+            s.name for s in servers
+            if isinstance(getattr(s, "load_problem", None), str) and s.load_problem
+        ]
+        if not_loaded:
+            # GAP-2514: an entry the agent skips is not a configured server.
+            _emit(
+                "warn", "MCP servers",
+                f"{count} configured: {names}{more}; not loaded by the agent: "
+                f"{', '.join(not_loaded)} (repair: defenseclaw mcp list --connector {connector})",
+                r=r,
+            )
+        else:
+            _emit("pass", "MCP servers", f"{count} configured: {names}{more}", r=r)
     else:
         _emit("skip", "MCP servers", "no MCP servers registered", r=r)
 
@@ -12392,6 +12709,8 @@ def _check_hook_contract_lock(
         action = "re-seal" if windows_protected_authority_invalid else "seal"
         detail += f"; run `{setup_command(connector)} --yes` to {action} it"
         _emit("fail", "Hook contract", detail, r=r)
+    elif native_runtime is not None and native_runtime.state == CODEX_PROBE_TIMEOUT_STATE:
+        _emit("warn", "Hook contract", detail, r=r, remediation=_CODEX_PROBE_TIMEOUT_STEP)
     elif native_runtime is not None and not native_runtime.healthy:
         _emit("fail", "Hook contract", detail, r=r)
     elif status == "unknown":

@@ -199,7 +199,24 @@ fi
 status=$?
 rm -f "$state/allow-downgrade"
 if [ "$status" -ne 0 ]; then
-    echo "DefenseClaw: the managed deployment did not apply (exit $status); see $state/last-package-result.json" >&2
+    echo "DefenseClaw: the managed deployment did not apply (exit $status)." >&2
+    # The Installer shows only a generic error, so name the cause (the
+    # first error of the JSON result, one line) in install.log, as the
+    # Linux postinstall does (GAP-1744, GAP-2331). ensure --json writes
+    # indented JSON, so join the lines first.
+    cause=$(tr '\n' ' ' 2>/dev/null <"$state/last-package-result.json" |
+        sed -nE 's/.*"errors":[[:space:]]*\[[[:space:]]*\{[[:space:]]*"code":[[:space:]]*"([^"]*)",[[:space:]]*"message":[[:space:]]*"(([^"\\]|\\.)*)".*/\1: \2/p' |
+        head -n 1 |
+        sed 's/\\"/"/g; s/\\u003c/</g; s/\\u003e/>/g; s/\\u0026/\&/g')
+    if [ -n "$cause" ]; then
+        echo "DefenseClaw: $cause" >&2
+    fi
+    # A failed install records no pkg receipt, and ensure does not write
+    # one, so receipt-based MDM inventory reports the Mac as not
+    # installed until the pkg installs again (GAP-2359).
+    echo "DefenseClaw: fix that, then install the package again. That finishes the install and records the pkg receipt that MDM inventory reads." >&2
+    echo "DefenseClaw: sudo $gateway enterprise macos ensure --from-package also finishes the install, but records no pkg receipt." >&2
+    echo "DefenseClaw: the full result is in $state/last-package-result.json." >&2
 fi
 exit "$status"
 EOF

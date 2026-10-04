@@ -54,6 +54,7 @@ from defenseclaw.config import (
     LLMTLSConfig,
     VertexKeyConfig,
 )
+from defenseclaw.llm_keys import looks_like_key_shape
 
 _CATALOG_RESOURCE = "_data/llm/model_catalog.json"
 
@@ -256,7 +257,7 @@ def pick_provider(
             tail = pid.removeprefix("custom:") if pid.startswith("custom:") else pid
             if lowered in (pid.lower(), tail.lower()):
                 return tail
-        click.echo("    Invalid choice — pick a number from the list, type a provider name, or 'm' for free-form.")
+        ux.echo("    Invalid choice — pick a number from the list, type a provider name, or 'm' for free-form.")
 
 
 def pick_model(
@@ -303,7 +304,13 @@ def pick_model(
             click.echo(f"    [{idx}] {m}")
         click.echo("    [c] type a custom model id")
         click.echo()
-        default = current if current in models else models[0]
+        # Keep the saved model as the default even when it is not in the
+        # suggested list (an older or custom id), so pressing Enter keeps
+        # it. A live runtime list is authoritative: only installed models.
+        if current and (current in models or live_models is None):
+            default = current
+        else:
+            default = models[0]
         while True:
             raw = click.prompt("  Pick model", default=default, show_default=True).strip()
             if raw.isdigit():
@@ -362,7 +369,7 @@ def pick_local_runtime(
 
     live_models: list[str] | None = None
     if base_url and not non_interactive:
-        click.echo(f"    Querying {provider} for installed models…")
+        ux.echo(f"    Querying {provider} for installed models…")
         discovered, error = list_local_provider_models(provider, base_url)
         if error:
             click.echo(f"    Could not list local models ({error}). Falling back to catalog suggestions.")
@@ -643,11 +650,22 @@ def pick_key_env(
         suggested = suggestions[0] if suggestions else DEFENSECLAW_LLM_KEY_ENV
         if len(suggestions) > 1:
             click.echo(f"    Common env vars: {', '.join(suggestions)}")
-        name = click.prompt(
-            "  API key env var name",
-            default=suggested,
-            show_default=True,
-        ).strip()
+        while True:
+            name = click.prompt(
+                "  API key env var name",
+                default=suggested,
+                show_default=True,
+            ).strip()
+            if not looks_like_key_shape(name):
+                break
+            click.echo(f"    Enter the NAME of the variable that holds the key, e.g. {suggested}.")
+            click.echo(f"    Store the key itself with 'defenseclaw keys set {suggested}'.")
+    if flag_value and looks_like_key_shape(name):
+        raise click.BadParameter(
+            f"takes the NAME of the variable that holds the key, e.g. {DEFENSECLAW_LLM_KEY_ENV}; "
+            f"store the key itself with 'defenseclaw keys set {DEFENSECLAW_LLM_KEY_ENV}'.",
+            param_hint=f"'{flag_name}'",
+        )
     if not _ENV_KEY_RE.match(name):
         raise click.BadParameter(
             f"invalid env var name: {name!r} (must be ASCII [A-Za-z_][A-Za-z0-9_]*)"
@@ -685,7 +703,7 @@ def pick_instance_name(
         show_default=bool(current),
     ).strip()
     if choice and choice not in names:
-        click.echo(f"    Note: no instance named {choice!r} — will be created if you run setup provider add.")
+        ux.echo(f"    Note: no instance named {choice!r} — will be created if you run setup provider add.")
     return choice
 
 
@@ -825,10 +843,10 @@ def preflight_inherit(
 
     click.echo()
     click.echo("  " + ux.bold("How should we apply the inherited values?"))
-    click.echo("    " + ux.bold("[I]") + " Inherit fully     — copy provider/model/api_key_env/...")
-    click.echo("    " + ux.bold("[P]") + " Partial            — copy then re-prompt for model only")
-    click.echo("    " + ux.bold("[R]") + " Reconfigure        — skip inheritance, prompt for everything")
-    click.echo("    " + ux.bold("[B]") + " Back               — abort")
+    ux.echo("    " + ux.bold("[I]") + " Inherit fully     — copy provider/model/api_key_env/...")
+    ux.echo("    " + ux.bold("[P]") + " Partial            — copy then re-prompt for model only")
+    ux.echo("    " + ux.bold("[R]") + " Reconfigure        — skip inheritance, prompt for everything")
+    ux.echo("    " + ux.bold("[B]") + " Back               — abort")
 
     action_default = "I"
     action_map = {

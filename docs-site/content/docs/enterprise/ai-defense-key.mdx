@@ -82,7 +82,8 @@ sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise secret set --name ai-de
 
 The command stores the key, then runs `ensure` with reason `secret`, which
 restarts the gateway so it reads the key. The apply path unit would also
-pick up the change.
+pick up the change. The output starts with `✓ secret set: done` and
+`- stored credential ai-defense-api-key`, followed by the apply steps.
 
   </Tab>
   <Tab value="macOS">
@@ -94,7 +95,8 @@ unset AID_KEY
 ```
 
 The command stores the key, then runs `ensure` with reason `secret`, which
-restarts the gateway so it reads the key.
+restarts the gateway so it reads the key. The output starts with
+`✓ secret set: done` and `- stored credential ai-defense-api-key`.
 
   </Tab>
   <Tab value="Windows">
@@ -205,6 +207,10 @@ sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise secret remove --name ai
 ```powershell
 & 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise secret remove --name ai-defense-api-key
 ```
+
+On Linux and macOS the output names the credential:
+`- removed credential ai-defense-api-key`, or
+`- credential ai-defense-api-key was not stored; nothing to remove`.
 
 Set `enabled: false` in the config as well. Otherwise the gateway keeps
 logging that the credential is missing, while the local engine decides

@@ -230,9 +230,15 @@ def _rollback(*, yes: bool) -> int:
     name = _installer_name()
     installer = os.path.join(home, "installer", name)
     if not os.path.isfile(installer):
+        # A source ('make all') install saves no installer. After a rollback to
+        # one, the install it replaced (now in previous/) still has its own, and
+        # that one rolls forward again (GAP-2459).
+        installer = os.path.join(home, "previous", "installer", name)
+    if not os.path.isfile(installer):
+        saved = os.path.join(home, "installer")
         raise ShimError(
-            f"no saved installer at {installer}; download {name} from the release you want and run it "
-            "with --rollback"
+            f"no saved installer in {saved} or {os.path.join(home, 'previous', 'installer')}; "
+            f"download {name} from the release you want and run it with --rollback"
         )
     previous = os.path.join(home, "previous")
     if os.name == "nt" and os.path.isdir(os.path.join(previous, "legacy-setup")):
@@ -278,6 +284,19 @@ def _run_installer(path: str, args: list[str], workdir: str) -> int:
         # Windows PowerShell 5.1 then cannot load its built-in modules (Get-Acl
         # fails), so let it build its default module path.
         env = {key: value for key, value in os.environ.items() if key.upper() != "PSMODULEPATH"}
+        if _windows_terminal_without_desktop():
+            # An SSH session has no desktop: the new window never appears and
+            # the result would only be in the install log (GAP-1993). Keep the
+            # staged installer and give the command that runs it right here.
+            command = " ".join(
+                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", f'"{path}"', *ps_args]
+            )
+            raise ShimError(
+                "this terminal has no desktop (SSH session), so the installer's window would not be "
+                "visible here.\n"
+                "    Run the installer in this terminal instead; it shows the result and sets the exit code:\n"
+                f"      {command}"
+            )
         try:
             subprocess.Popen(  # noqa: S603 - fixed interpreter and verified script
                 [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path, *ps_args],
@@ -303,6 +322,11 @@ def _run_installer(path: str, args: list[str], workdir: str) -> int:
         shutil.rmtree(workdir, ignore_errors=True)
         raise ShimError(f"could not run {bash}: {exc}") from None
     return 0  # pragma: no cover - execv does not return
+
+
+def _windows_terminal_without_desktop() -> bool:
+    """An OpenSSH session on Windows: a new console window is never shown there."""
+    return any(os.environ.get(name) for name in ("SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"))
 
 
 def _powershell_flag(arg: str) -> str:

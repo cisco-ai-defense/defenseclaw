@@ -8,9 +8,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -162,6 +164,9 @@ func (a *APIServer) handleCLIObservabilityV8(w http.ResponseWriter, r *http.Requ
 	if err := a.emitCLIObservabilityV8(ctx, request, envelope); err != nil {
 		// The response is intentionally content-free: runtime, database, route,
 		// exporter, and source-payload errors must not cross this API boundary.
+		// The CLI tells the operator gateway.log has the cause, so log it here
+		// (GAP-2381).
+		fmt.Fprintf(os.Stderr, "[api] CLI %s event was not recorded: %v\n", request.Kind, err)
 		http.Error(w, `{"error":"canonical observability emission failed"}`, http.StatusServiceUnavailable)
 		return
 	}

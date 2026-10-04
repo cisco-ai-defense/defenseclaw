@@ -113,6 +113,10 @@ class V8DestinationStatus:
         return "; ".join(parts) or "not-applicable"
 
 
+# Lifecycle codes a healthy destination reports on routine success.
+_ROUTINE_HEALTHY_REASONS = frozenset({"activated", "delivery_recovered", "scrape_recovered"})
+
+
 @dataclass(frozen=True)
 class V8DestinationHealth:
     """One content-free live destination-health snapshot.
@@ -140,6 +144,19 @@ class V8DestinationHealth:
     consecutive_failures: int | None = None
     circuit_open_until: str = ""
     last_failure_class: str = ""
+
+    @property
+    def display_reason(self) -> str:
+        """The reason worth showing next to the state, or "".
+
+        A healthy destination reports "activated" or a "*_recovered" code on
+        routine success; those are not news, as in the TUI (GAP-2523,
+        GAP-2557).
+        """
+
+        if self.state == "healthy" and self.reason in _ROUTINE_HEALTHY_REASONS:
+            return ""
+        return self.reason
 
     @property
     def queue_label(self) -> str:

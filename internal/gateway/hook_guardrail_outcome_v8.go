@@ -76,6 +76,9 @@ type hookToolCallCapture struct {
 	// invocationID names the pending call this request remembered.
 	invocationID string
 	ok           bool
+	// promptMeta is the prompt this request remembered for its turn.
+	promptMeta llmEventMeta
+	promptOK   bool
 }
 
 type hookToolCallCaptureKey struct{}
@@ -90,6 +93,17 @@ func captureHookToolCall(ctx context.Context, meta llmEventMeta, tool, arguments
 	}
 	if capture, _ := ctx.Value(hookToolCallCaptureKey{}).(*hookToolCallCapture); capture != nil {
 		*capture = hookToolCallCapture{meta: meta, tool: tool, arguments: arguments, invocationID: invocationID, ok: true}
+	}
+}
+
+// captureHookPrompt records the prompt a hook request remembered for its
+// turn, so a block of that prompt can end the turn.
+func captureHookPrompt(ctx context.Context, meta llmEventMeta) {
+	if ctx == nil {
+		return
+	}
+	if capture, _ := ctx.Value(hookToolCallCaptureKey{}).(*hookToolCallCapture); capture != nil {
+		capture.promptMeta, capture.promptOK = meta, true
 	}
 }
 
@@ -112,7 +126,8 @@ func (a *APIServer) emitHookGuardrailOutcomeV8(
 	if !ok {
 		return
 	}
-	if capture, _ := ctx.Value(hookToolCallCaptureKey{}).(*hookToolCallCapture); capture != nil && capture.ok {
+	capture, _ := ctx.Value(hookToolCallCaptureKey{}).(*hookToolCallCapture)
+	if capture != nil && capture.ok {
 		meta := capture.meta
 		meta.Guardrail = outcome
 		if outcome.Action == "block" {
@@ -130,6 +145,33 @@ func (a *APIServer) emitHookGuardrailOutcomeV8(
 	evaluation := hookEvaluationContext{EvaluationID: resp.EvaluationID, RuleIDs: resp.RuleIDs}
 	a.emitGuardrailApplyTraceV8(ctx, req.ConnectorName, req.ToolName,
 		hookTargetTypeForEvent(req.HookEventName), verdict, elapsed, evaluation)
+	if capture != nil && capture.promptOK && outcome.Action == "block" {
+		// A blocked prompt never reaches the model, so no Stop ends its turn
+		// and Galileo, which has no span type for apply_guardrail, showed
+		// nothing (GAP-2485). The turn ends now with the block on its agent
+		// and chat spans and the block message as the reply the user saw.
+		meta := capture.promptMeta
+		meta.Guardrail = outcome
+		meta.LifecycleOutcome = "blocked"
+		reply := strings.TrimSpace(hookPromptBlockReply(resp.Reason))
+		if reply == "" {
+			reply = "DefenseClaw blocked this prompt"
+		}
+		a.emitHookLLMSpan(ctx, meta, reply)
+	}
+}
+
+// hookPromptBlockReply is the reply a blocked prompt's turn carries: the
+// block message the agent showed its user. That message is already worded
+// and scrubbed for the agent (agentDisplayReason, agentVerdictReason), so the
+// sink scrub on top turned it into a "<redacted len=N sha=...>" token even
+// for an unredacted destination (GAP-2510). A managed (Secure Client)
+// deployment keeps the scrub.
+func hookPromptBlockReply(reason string) string {
+	if managedEnterpriseActive.Load() {
+		return redaction.ForSinkReason(reason)
+	}
+	return reason
 }
 
 // annotateHookToolInvocation attaches an ask or alert decision to the tool
@@ -149,6 +191,28 @@ func (a *APIServer) annotateHookToolInvocation(meta llmEventMeta, tool, invocati
 	if invocationID == "" && len(queue) > 0 {
 		queue[len(queue)-1].meta.Guardrail = outcome
 	}
+}
+
+// guardrailOutcomeAttributes are the flat defenseclaw.guardrail.action,
+// rule_id and severity attributes of an outcome, all absent without one.
+// The agent and chat spans of a blocked prompt or turn carry them as a tool
+// span does, so Galileo shows the rule of a prompt block on the turn
+// (GAP-2332).
+func guardrailOutcomeAttributes(
+	outcome hookGuardrailOutcome,
+) (action, ruleID, severity observability.Optional[string]) {
+	if outcome.Action == "" {
+		return observability.Absent[string](), observability.Absent[string](), observability.Absent[string]()
+	}
+	return observability.Present(outcome.Action), hookV8OptionalIdentifier(outcome.RuleID),
+		hookV8OptionalText(outcome.Severity, 16)
+}
+
+// guardrailOutcomeBlocked reports whether a span already carries a block,
+// which a later alert on the same span must not replace.
+func guardrailOutcomeBlocked(action observability.Optional[string]) bool {
+	value, ok := action.Get()
+	return ok && value == "block"
 }
 
 // guardrailOutcomeEvent is the one field set every

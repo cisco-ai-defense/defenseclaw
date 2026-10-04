@@ -14,4 +14,11 @@ type SessionExchange struct {
 	Key          SessionKey    `json:"key"`
 	SessionStart bool          `json:"session_start"`
 	Decision     GuardDecision `json:"decision"`
+	// Event and Tool name the hook event and the tool it was checked for,
+	// as the agent's payload reported them ("" when it named none). They
+	// only label the gateway's export of a denial (a tool span for a tool
+	// call, an apply_guardrail span for a session or prompt event); the
+	// decision never depends on them.
+	Event string `json:"event,omitempty"`
+	Tool  string `json:"tool,omitempty"`
 }

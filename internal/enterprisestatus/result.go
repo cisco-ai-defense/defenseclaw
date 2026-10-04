@@ -14,6 +14,7 @@
 package enterprisestatus
 
 import (
+	"bytes"
 	"encoding/json"
 	"sort"
 )
@@ -225,5 +226,14 @@ func (r Result) MarshalJSON() ([]byte, error) {
 	if sorted.Errors == nil {
 		sorted.Errors = []Message{}
 	}
-	return json.Marshal(sorted)
+	// Encode without HTML escaping: messages carry PowerShell next steps
+	// ("& 'C:\\...\\defenseclaw.exe' ...") and a Marshaler's bytes are kept
+	// as-is by an outer encoder with SetEscapeHTML(false) (GAP-2504).
+	var buf bytes.Buffer
+	encoder := json.NewEncoder(&buf)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(sorted); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
 }

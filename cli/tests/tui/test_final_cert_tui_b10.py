@@ -29,7 +29,7 @@ def test_active_tab_reads_in_full_at_80_columns(monkeypatch) -> None:
         for width in range(62, 76):
             labels = fit_tab_labels(PANELS, active, unread, width)
             assert labels[active] == title, (width, labels[active])
-            assert "¹" in labels["alerts"]
+            assert labels["alerts"].endswith(("¹", "(1)"))  # bare keys: "2(1)" (GAP-2247)
             assert strip_width(tuple(labels.values())) <= width
 
 
@@ -39,8 +39,8 @@ def test_setup_task_list_hint_fits_one_row_with_task_keys() -> None:
         hint = setup_keys.keys_hint("wizards", conditions)
         assert len(hint) <= setup_keys.HINT_WIDTH, hint
     hint = setup_keys.keys_hint("wizards", ("credentials",))
-    assert "f fill missing" in hint and "s set key" in hint and hint.endswith("? all keys")
-    assert setup_keys.keys_hint("wizards").endswith("r refresh")
+    assert "f fill missing" in hint and "s set key" in hint and hint.endswith("? help")
+    assert setup_keys.keys_hint("wizards").endswith("c config")
 
 
 def test_audit_digits_switch_panels_and_h_l_step_the_chips() -> None:

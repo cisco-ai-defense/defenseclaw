@@ -284,7 +284,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	// the audit envelope (HookAuditEnvelope.EvaluationID / RuleIDs)
 	// both see them without a second pass.
 	resp.EvaluationID = evalCtx.EvaluationID
-	resp.RuleIDs = evalCtx.RuleIDs
+	resp.RuleIDs = hookResponseRuleIDs(evalCtx.RuleIDs, rawActionBeforeAssets, assetDecisions)
 	resp.RedactionEnabled = verdict.RedactionEnabled
 	resp.laneVerdict = verdict.laneVerdict
 	return resp
@@ -680,7 +680,7 @@ func claudeCodeToolArgs(req claudeCodeHookRequest) json.RawMessage {
 	if req.ToolInput == nil {
 		return json.RawMessage(`{}`)
 	}
-	b, err := json.Marshal(req.ToolInput)
+	b, err := gatewayconnector.MarshalToolArgs(req.ToolInput)
 	if err != nil {
 		return json.RawMessage(`{}`)
 	}

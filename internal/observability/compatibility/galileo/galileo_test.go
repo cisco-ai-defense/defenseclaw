@@ -452,6 +452,42 @@ func TestProjectToolRemovedContentIsAnExplicitSchemaMiss(t *testing.T) {
 	}
 }
 
+// GAP-2565: the "strict" profile removes a tool call's arguments and result.
+// The execute_tool span must still reach Galileo with empty slots, as under
+// "content", or the turn shows no tool step.
+func TestProjectToolUnderStrictRedactionKeepsTheSpan(t *testing.T) {
+	t.Parallel()
+	const canary = "gap2565-strict-canary"
+	projection := projectRecord(t, observability.BucketToolActivity, "span.tool.execute", "execute_tool exec", map[string]any{
+		"kind": "INTERNAL",
+		"attributes": map[string]any{
+			"gen_ai.operation.name": "execute_tool", "gen_ai.tool.name": "exec",
+			"gen_ai.tool.call.arguments":            `{"command":"echo ` + canary + `"}`,
+			"gen_ai.tool.call.result":               canary,
+			"defenseclaw.telemetry.input.reported":  true,
+			"defenseclaw.telemetry.output.reported": true,
+		},
+	}, redaction.ProfileStrict)
+	result := Project(projection, Limits{})
+	if !result.Eligible() {
+		t.Fatalf("result = %q, missing %v", result.Reason(), result.MissingFields())
+	}
+	if encoded, _ := result.Bytes(); bytes.Contains(encoded, []byte(canary)) {
+		t.Fatal("strict tool span recovered raw content")
+	}
+	attributes := resultAttributes(t, result)
+	for _, key := range []string{"gen_ai.tool.call.arguments", "gen_ai.tool.call.result", "input.value", "output.value"} {
+		if got := attributes[key]; got != "" {
+			t.Errorf("%s = %#v, want empty", key, got)
+		}
+	}
+	for _, slot := range []string{"arguments", "result"} {
+		if got := attributes["defenseclaw.telemetry."+slot+".state"]; got != "not_reported" {
+			t.Errorf("%s state = %#v", slot, got)
+		}
+	}
+}
+
 // GAP-1164: an allowed Hermes or Antigravity call ends with a tool_end whose
 // result the hook never reported. That span must reach Galileo with an empty
 // result placeholder, not be dropped and leave a bare invoke_agent root.
@@ -889,6 +925,97 @@ func TestProjectAgentSpanMetadataNamesABlockedOutcome(t *testing.T) {
 	}
 }
 
+// GAP-2332: the invoke_agent and chat spans of a blocked prompt carry the
+// flat guardrail fields, and Galileo's metadata names the rule and severity.
+func TestProjectBlockedTurnMetadataNamesTheRule(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		bucket          observability.Bucket
+		family, name    string
+		kind, operation string
+	}{
+		{observability.BucketAgentLifecycle, "span.agent.invoke", "invoke_agent openclaw", "INTERNAL", "invoke_agent"},
+		{observability.BucketModelIO, "span.model.chat", "chat gpt-5", "CLIENT", "chat"},
+	} {
+		body := map[string]any{"kind": tc.kind, "attributes": map[string]any{
+			"gen_ai.operation.name": tc.operation, "gen_ai.agent.name": "openclaw", "gen_ai.provider.name": "openai",
+			"defenseclaw.outcome":            "blocked",
+			"defenseclaw.guardrail.action":   "block",
+			"defenseclaw.guardrail.rule_id":  "R6-PROMPT-MARKER",
+			"defenseclaw.guardrail.severity": "HIGH",
+			"gen_ai.input.messages":          messages("user", "x"), "gen_ai.output.messages": messages("assistant", "y"),
+		}}
+		result := Project(projectRecord(t, tc.bucket, observability.EventName(tc.family), tc.name, body, redaction.ProfileNone), Limits{})
+		if !result.Eligible() {
+			t.Fatalf("%s: reason = %q, missing %v", tc.family, result.Reason(), result.MissingFields())
+		}
+		raw, _ := resultAttributes(t, result)["metadata"].(string)
+		var metadata map[string]string
+		if err := json.Unmarshal([]byte(raw), &metadata); err != nil {
+			t.Fatalf("%s: metadata %q: %v", tc.family, raw, err)
+		}
+		if metadata["defenseclaw.guardrail.rule_id"] != "R6-PROMPT-MARKER" ||
+			metadata["defenseclaw.guardrail.severity"] != "HIGH" || metadata["defenseclaw.guardrail.action"] != "block" ||
+			metadata["defenseclaw.outcome"] != "blocked" {
+			// GAP-2484: the blocked outcome stays next to the guardrail fields.
+			t.Fatalf("%s: metadata = %v, want the block, its rule, its severity and the blocked outcome", tc.family, metadata)
+		}
+	}
+}
+
+// GAP-2524: a structured message is content as a whole, so the "content"
+// profile replaced its role and part types with redaction tokens and
+// "strict" removed them; Galileo rejected every such span because the role
+// is an enum. The projection keeps a role Galileo accepts and text parts,
+// with the content still replaced.
+func TestProjectRedactedMessagesKeepARoleGalileoAccepts(t *testing.T) {
+	t.Parallel()
+	structured := func(role, text string) []any {
+		return []any{map[string]any{"role": role, "parts": []any{map[string]any{"type": "text", "content": text}}}}
+	}
+	for _, profile := range []redaction.ProfileName{redaction.ProfileContent, redaction.ProfileStrict} {
+		body := map[string]any{"kind": "INTERNAL", "attributes": map[string]any{
+			"gen_ai.operation.name": "invoke_agent", "gen_ai.agent.name": "openclaw", "gen_ai.provider.name": "amazon-bedrock",
+			"gen_ai.input.messages":  structured("user", "Reply with exactly one word: quokka"),
+			"gen_ai.output.messages": structured("assistant", "quokka"),
+		}}
+		record := newTraceRecordWith(t, observability.BucketAgentLifecycle, "span.agent.invoke", "invoke_agent openclaw", body,
+			func(input *observability.RecordInput) {
+				// As the generated builders classify a structured field: every
+				// leaf of a message has the field's content class.
+				for pointer := range input.FieldClasses {
+					if strings.HasPrefix(pointer, "/attributes/gen_ai.") && strings.Contains(pointer, ".messages/") {
+						input.FieldClasses[pointer] = observability.FieldClassContent
+					}
+				}
+			})
+		result := Project(redactRecord(t, record, profile), Limits{})
+		if !result.Eligible() {
+			t.Fatalf("%s: reason = %q, missing %v", profile, result.Reason(), result.MissingFields())
+		}
+		attributes := resultAttributes(t, result)
+		for direction, want := range map[string]string{"input": "user", "output": "assistant"} {
+			raw, _ := attributes["gen_ai."+direction+".messages"].(string)
+			var got []map[string]any
+			if err := json.Unmarshal([]byte(raw), &got); err != nil || len(got) != 1 {
+				t.Fatalf("%s: %s messages %q: %v", profile, direction, raw, err)
+			}
+			if got[0]["role"] != want {
+				t.Errorf("%s: %s role = %v, want %q (%s)", profile, direction, got[0]["role"], want, raw)
+			}
+			if strings.Contains(raw, "quokka") {
+				t.Errorf("%s: %s messages kept the content: %s", profile, direction, raw)
+			}
+			parts, _ := got[0]["parts"].([]any)
+			for _, candidate := range parts {
+				if part, _ := candidate.(map[string]any); part == nil || part["type"] != "text" {
+					t.Errorf("%s: %s part = %v, want a text part", profile, direction, candidate)
+				}
+			}
+		}
+	}
+}
+
 func TestProjectRejectsForgedResourceAttributes(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -1021,7 +1148,7 @@ func TestProjectCanarySurfaceIsExact(t *testing.T) {
 			canaryMarkerKey: true, canaryOperationKey: canaryOperationValue, canaryDestinationKey: "galileo",
 		}
 	}
-	valid := projectRecord(t, observability.BucketModelIO, observability.EventName(observability.TelemetryFamilyModelChat), "chat gpt-4o-mini", map[string]any{
+	valid := projectRecord(t, observability.BucketModelIO, observability.EventName(observability.TelemetryFamilyModelChat), "chat defenseclaw-diagnostic", map[string]any{
 		"kind": "CLIENT", "attributes": base(),
 	}, redaction.ProfileNone)
 	result := Project(valid, Limits{})
@@ -1032,6 +1159,13 @@ func TestProjectCanarySurfaceIsExact(t *testing.T) {
 	if wire["bucket"] != string(observability.BucketModelIO) ||
 		wire["event_name"] != observability.TelemetryFamilyModelChat {
 		t.Fatalf("canonical canary identity was rewritten: %#v", wire)
+	}
+	// GAP-2534: Galileo shows only user_metadata, so the canary must say so there.
+	attributes := wire["body"].(map[string]any)["attributes"].(map[string]any)
+	var metadata map[string]string
+	if err := json.Unmarshal([]byte(attributes["metadata"].(string)), &metadata); err != nil ||
+		metadata[canaryMarkerKey] != "true" || metadata[canaryOperationKey] != canaryOperationValue {
+		t.Fatalf("canary user_metadata = %#v (%v)", attributes["metadata"], err)
 	}
 	for name, mutation := range map[string]func(map[string]any){
 		"missing marker":      func(attributes map[string]any) { delete(attributes, canaryMarkerKey) },
@@ -1045,7 +1179,7 @@ func TestProjectCanarySurfaceIsExact(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			attributes := base()
 			mutation(attributes)
-			projection := projectRecord(t, observability.BucketModelIO, observability.EventName(observability.TelemetryFamilyModelChat), "chat gpt-4o-mini", map[string]any{
+			projection := projectRecord(t, observability.BucketModelIO, observability.EventName(observability.TelemetryFamilyModelChat), "chat defenseclaw-diagnostic", map[string]any{
 				"kind": "CLIENT", "attributes": attributes,
 			}, redaction.ProfileNone)
 			if result := Project(projection, Limits{}); result.Reason() != ReasonUnsupportedShape {

@@ -53,3 +53,13 @@ def test_activity_panel_terminal_and_history_key_flow() -> None:
     assert panel.term_mode is False
     panel.handle_key("enter")
     assert panel.term_mode is True
+
+
+def test_continued_output_joins_the_last_line() -> None:
+    # GAP-2284: the mark after "restarting..." stays on that line.
+    model = ActivityPanelModel()
+    model.add_entry("defenseclaw agent discovery enable --yes")
+    model.append_output("restarting...")
+    model.append_output(" \u2713", continues=True)
+    model.append_output("next")
+    assert model.entries[-1].output == ["restarting... \u2713", "next"]

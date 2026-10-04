@@ -1322,6 +1322,29 @@ def _execute_route_mutations(
     )
 
 
+def _log_redaction_change(app: AppContext, action: str, audit_details: str, changed: int, newly: int) -> None:
+    """Record the setup row plus an operator Activity mutation naming the change.
+
+    Profile ``strict`` keeps only metadata, so the setup row's details read
+    as an internal event name; the Activity target (for example
+    ``config:redaction-apply:all-configurable:strict:changed-legs-56:newly-unredacted-0``)
+    survives (GAP-2192). The counts are in the target because strict reduces
+    the after state to a field count; they hold no content.
+    """
+
+    app.logger.log_action(ACTION_SETUP_REDACTION_POLICY, "redaction-policy", audit_details)
+    verb, _, rest = action.partition(" ")
+    fields = dict(token.partition("=")[::2] for token in rest.split())
+    scope = ":".join(
+        [value for value in fields.values() if value]
+        + [f"changed-legs-{int(changed)}", f"newly-unredacted-{int(newly)}"]
+    )
+    details = [f"scope={scope}"] if scope else []
+    details += [f"{key}={value}" for key, value in fields.items() if key != "scope"]
+    details += [f"changed_legs={changed}", f"newly_unredacted={newly}"]
+    app.logger.log_config_change(f"redaction-{verb}", " ".join(details))
+
+
 def _execute_mutations(
     app: AppContext,
     mutations: Iterable[V8YAMLMutation],
@@ -1386,15 +1409,13 @@ def _execute_mutations(
     audit_after_restart = False
     if app.logger:
         try:
-            app.logger.log_action(
-                ACTION_SETUP_REDACTION_POLICY,
-                "redaction-policy",
-                audit_details,
+            _log_redaction_change(
+                app, action, audit_details, len(preview.changes), preview.newly_unredacted
             )
         except CanonicalObservabilityUnavailableError:
             audit_after_restart = restart
             if not restart:
-                click.echo(
+                ux.echo(
                     "  ⚠ Change saved, but the gateway runtime is unavailable; the canonical setup audit "
                     "event was not recorded. Start defenseclaw-gateway before the next change.",
                     err=True,
@@ -1416,7 +1437,7 @@ def _execute_mutations(
             _restart_gateway(quiet=emit_json)
         except click.ClickException:
             if audit_after_restart:
-                click.echo(
+                ux.echo(
                     "  ⚠ Change saved, but the canonical setup audit event was not recorded because the "
                     "gateway restart failed. Start defenseclaw-gateway before the next change.",
                     err=True,
@@ -1424,10 +1445,8 @@ def _execute_mutations(
             raise
         if audit_after_restart and app.logger:
             try:
-                app.logger.log_action(
-                    ACTION_SETUP_REDACTION_POLICY,
-                    "redaction-policy",
-                    audit_details,
+                _log_redaction_change(
+                    app, action, audit_details, len(preview.changes), preview.newly_unredacted
                 )
             except CanonicalObservabilityUnavailableError as exc:
                 rollback_path = result.backup_path or str(backup)

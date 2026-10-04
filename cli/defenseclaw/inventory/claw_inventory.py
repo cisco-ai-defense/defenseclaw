@@ -84,7 +84,17 @@ ALL_CATEGORIES: frozenset[str] = frozenset(
     ["skills", "plugins", "mcp", "agents", "rules", "tools", "models", "memory"]
 )
 
-_CATEGORY_ALIASES: dict[str, str] = {"model_providers": "models"}
+_CATEGORY_ALIASES: dict[str, str] = {
+    "model_providers": "models",
+    # Singular spellings (GAP-2399).
+    "skill": "skills",
+    "plugin": "plugins",
+    "mcps": "mcp",
+    "agent": "agents",
+    "rule": "rules",
+    "tool": "tools",
+    "model": "models",
+}
 
 _COMMANDS: dict[str, tuple[str, ...]] = {
     "skills_list": ("skills", "list"),
@@ -133,6 +143,17 @@ class InventoryLimitation(TypedDict):
 class _FilesystemCollectionResult(NamedTuple):
     items: list[dict[str, Any]]
     error: dict[str, str] | None
+
+
+class _PartialCollectionError(ValueError):
+    """A collector read some sources but could not read others.
+
+    ``items`` keeps what was read; the message names the failed sources.
+    """
+
+    def __init__(self, message: str, items: list[dict[str, Any]]) -> None:
+        super().__init__(message)
+        self.items = items
 
 
 # ---------------------------------------------------------------------------
@@ -739,6 +760,28 @@ def _build_scan_map_for_type(store: Any, scanner_name: str) -> dict[str, dict[st
     return scan_map
 
 
+def _is_defenseclaw_written(path: str) -> bool:
+    """True for files DefenseClaw setup writes (``.../defenseclaw.json`` and kin)."""
+    return os.path.basename(path).lower().startswith("defenseclaw")
+
+
+def aibom_display_config(inv: dict[str, Any]) -> str:
+    """Return the agent's own config file for the AIBOM ``Config:`` line.
+
+    DefenseClaw's hook/bridge files (``~/.kiro/hooks/defenseclaw.json``,
+    ``plugins/defenseclaw.js``) are never presented as the agent's
+    configuration (GAP-1358, GAP-2038). Returns "" when none is known.
+    """
+    connector = str(inv.get("connector") or inv.get("claw_mode") or "openclaw").lower()
+    config_files = inv.get("connector_config_files") or [inv.get("openclaw_config", "")]
+    if connector == "opencode" and inv.get("connector_mcp_files"):
+        # The inventory reads OpenCode's opencode.json (GAP-1358).
+        mcp_files = [c for c in inv["connector_mcp_files"] if c]
+        config_files = [c for c in mcp_files if os.path.isfile(c)] or mcp_files
+    agent_files = [c for c in config_files if c and not _is_defenseclaw_written(c)]
+    return agent_files[0] if agent_files else ""
+
+
 def format_claw_aibom_human(
     inv: dict[str, Any],
     *,
@@ -758,13 +801,7 @@ def format_claw_aibom_human(
     connector = str(inv.get("connector") or inv.get("claw_mode") or "openclaw")
     title = "OpenClaw AIBOM" if connector.lower() == "openclaw" else f"{connector} AIBOM"
     home = inv.get("connector_home") or inv.get("claw_home", "")
-    config_files = inv.get("connector_config_files") or [inv.get("openclaw_config", "")]
-    if connector.lower() == "opencode" and inv.get("connector_mcp_files"):
-        # DefenseClaw's own bridge plugin is the first lifecycle file; the
-        # inventory reads OpenCode's opencode.json (GAP-1358).
-        mcp_files = [c for c in inv["connector_mcp_files"] if c]
-        config_files = [c for c in mcp_files if os.path.isfile(c)] or mcp_files
-    primary_config = next((c for c in config_files if c), "")
+    primary_config = aibom_display_config(inv)
     cats = _resolve_categories(categories)
     console.print()
     console.print(f"[bold]{title}[/bold]  (source: {mode})")
@@ -790,11 +827,27 @@ def format_claw_aibom_human(
             ("models", _render_models, "model_providers"),
             ("memory", _render_memory, "memory"),
         )
+        not_collected = _not_collected_categories(inv)
         for cat, render, key in sections:
-            if cat in cats:
-                render(console, inv.get(key, []))
+            if cat not in cats:
+                continue
+            if cat in not_collected and not inv.get(key):
+                console.print(f"[dim]{_CATEGORY_LABELS[cat]}: not collected[/dim]\n")
+                continue
+            render(console, inv.get(key, []))
 
-    _render_limitations(console, inv.get("limitations", []))
+    # With --only, count and show only the notes of the selected categories (GAP-2227).
+    limitations = [
+        lim for lim in inv.get("limitations", [])
+        if not isinstance(lim, dict) or "category" not in lim or lim["category"] in cats
+    ]
+    if summary_only:
+        # --summary is the tables only; the caveats are one pointer line (GAP-2037).
+        if limitations:
+            console.print(f"[dim]{_limitations_footer(limitations)}[/dim]")
+            console.print()
+    else:
+        _render_limitations(console, limitations)
     _render_errors(console, inv.get("errors", []))
 
 
@@ -967,6 +1020,39 @@ def _collect_mcp_config_files(connector: str, cfg: Config) -> list[str]:
 
 _SUMMARY_KEY_CATEGORY = {"model_providers": "models"}
 
+_CATEGORY_LABELS = {
+    "skills": "Skills",
+    "plugins": "Plugins",
+    "mcp": "MCP servers",
+    "agents": "Agents",
+    "rules": "Rules",
+    "tools": "Tools",
+    "models": "Model providers",
+    "memory": "Memory stores",
+}
+
+
+def _not_collected_categories(inv: dict[str, Any]) -> set[str]:
+    """Categories this connector cannot inventory (an UNSUPPORTED limitation),
+    or whose collector failed (an entry in ``errors``).
+
+    When such a category is empty it means "not collected", not "none"
+    (GAP-2101, the same rule as GAP-1483 for ``--only``).
+    """
+    unsupported = {
+        str(lim.get("category"))
+        for lim in inv.get("limitations") or []
+        if isinstance(lim, dict) and lim.get("status") == InventoryCapabilityStatus.UNSUPPORTED
+    }
+    # A collector that failed ("<connector>:<category>" in errors) did not
+    # collect either; its empty list is not "none" (GAP-2148).
+    failed = {
+        str(err.get("command", "")).rpartition(":")[2]
+        for err in inv.get("errors") or []
+        if isinstance(err, dict)
+    }
+    return unsupported | (failed & set(_CATEGORY_LABELS))
+
 
 def _mark_collected_categories(inv: dict[str, Any], cats: frozenset[str]) -> None:
     """Flag the categories an ``--only`` run did not collect (GAP-1483).
@@ -1101,7 +1187,10 @@ def _render_summary(
         ("models", "Model providers", str(data.get("model_providers", {}).get("count", 0)), ""),
         ("memory", "Memory stores", str(data.get("memory", {}).get("count", 0)), ""),
     ])
+    not_collected = _not_collected_categories(inv)
     for cat, name, count, detail in rows:
+        if cat in not_collected and count == "0":
+            count, detail = "-", "[dim]not collected[/dim]"
         if cat in cats:
             table.add_row(name, count, detail)
     console.print(table)
@@ -1388,6 +1477,8 @@ def _render_models(console: Any, providers: list[dict[str, Any]]) -> None:
     auth_rows = [p for p in providers if p.get("source") == "auth"]
     plugin_rows = [p for p in providers if str(p.get("source", "")).startswith("plugin:")]
     model_rows = [p for p in providers if p.get("source") == "models list"]
+    openclaw_rows = {id(p) for p in (*config_rows, *auth_rows, *plugin_rows, *model_rows)}
+    other_rows = [p for p in providers if id(p) not in openclaw_rows]
 
     if config_rows:
         c = config_rows[0]
@@ -1435,6 +1526,19 @@ def _render_models(console: Any, providers: list[dict[str, Any]]) -> None:
         console.print(f"  [dim]Provider plugins ({len(enabled)} loaded): {names}[/dim]")
         if disabled:
             console.print(f"  [dim]+ {len(disabled)} disabled provider plugins[/dim]")
+        console.print()
+
+    if other_rows:
+        table = Table(title=f"Model Providers ({len(other_rows)})")
+        table.add_column("Provider", style="bold")
+        table.add_column("Model")
+        table.add_column("Base URL")
+        for prov in other_rows:
+            label = str(prov.get("id", ""))
+            if prov.get("active"):
+                label += " (active)"
+            table.add_row(label, str(prov.get("model") or "-"), str(prov.get("base_url") or "-"))
+        console.print(table)
         console.print()
 
 
@@ -1485,12 +1589,35 @@ def _render_limitations(console: Any, limitations: list[dict[str, Any]]) -> None
 
     if not limitations:
         return
-    console.print("[bold cyan]Unsupported inventory capabilities[/bold cyan] [dim](informational)[/dim]:")
+    from rich.padding import Padding
+
+    console.print("[bold cyan]Inventory coverage notes[/bold cyan] [dim](informational)[/dim]:")
     for limitation in limitations:
         category = limitation.get("category", "?")
         reason = limitation.get("reason", "unsupported by this connector")
-        console.print(f"  [cyan]{category}[/cyan] — {reason}")
+        # status is usually an InventoryCapabilityStatus member; str() of a
+        # (str, Enum) member is "InventoryCapabilityStatus.X", so use .value.
+        status = limitation.get("status", "")
+        label = _LIMITATION_STATUS_LABELS.get(str(getattr(status, "value", status)), "")
+        suffix = f" [dim]({label})[/dim]" if label else ""
+        # Wrapped lines stay indented under the category (GAP-2227).
+        console.print(Padding(f"[cyan]{category}[/cyan]{suffix} — {reason}", (0, 0, 0, 2)))
     console.print()
+
+
+_LIMITATION_STATUS_LABELS = {
+    InventoryCapabilityStatus.UNSUPPORTED.value: "not supported",
+    InventoryCapabilityStatus.UNVERIFIED.value: "partly checked",
+}
+
+
+def _limitations_footer(limitations: list[dict[str, Any]]) -> str:
+    """One --summary pointer line: count, plural and the categories (GAP-2227)."""
+    n = len(limitations)
+    cats = sorted({str(lim.get("category", "?")) for lim in limitations if isinstance(lim, dict)})
+    noun, pronoun = ("note", "it") if n == 1 else ("notes", "them")
+    where = f" ({', '.join(cats)})" if cats else ""
+    return f"{n} inventory coverage {noun}{where}; run without --summary to read {pronoun}."
 
 
 def _trunc(s: str, n: int) -> str:
@@ -1829,9 +1956,12 @@ def _parse_memory(raw: Any) -> list[dict[str, Any]]:
 
 _FILESYSTEM_ONLY_CONNECTOR_NOTES: dict[str, str] = {
     "agents": "agents are not a first-class concept on this connector",
-    "tools": "tool registry is owned by each plugin's manifest",
-    "models": "model providers are configured inside the framework",
-    "memory": "memory backend is private to the framework",
+    # Connector-neutral wording: these defaults apply to every non-OpenClaw
+    # connector (Copilot, Cursor, ...), which have no plugin manifests or
+    # "framework" of their own (GAP-2312).
+    "tools": "this connector has no local tool registry to read; its MCP servers are listed under MCP",
+    "models": "model and provider settings are not read for this connector",
+    "memory": "this connector has no documented local memory store to read",
 }
 
 _PARTIAL_CONNECTOR_NOTES: dict[tuple[str, str], str] = {
@@ -1844,164 +1974,165 @@ _PARTIAL_CONNECTOR_NOTES: dict[tuple[str, str], str] = {
     ),
     (
         "copilot",
-        "skills",
-    ): (
-        "documented local project, inherited, personal, and COPILOT_SKILLS_DIRS "
-        "sources are inventoried; plugin, built-in, and organization/remote "
-        "skills are not expanded from private or remote stores"
-    ),
-    (
-        "copilot",
-        "agents",
-    ): (
-        "documented local project/ancestor and personal agents plus the "
-        "reviewed Copilot CLI 1.0.77 built-in agent set are inventoried; "
-        "built-ins cannot be shadowed by local files, while plugin-contributed "
-        "agents and remote organization/enterprise agents require "
-        "official-client live-session inspection"
-    ),
-    (
-        "copilot",
-        "mcp",
-    ): (
-        "documented workspace/ancestor and personal MCP configuration is "
-        "inventoried in priority order irrespective of folder trust; effective "
-        "workspace activation requires a trusted folder (or "
-        "GITHUB_COPILOT_PROMPT_MODE_WORKSPACE_MCP=true in untrusted prompt "
-        "mode), while session flag, plugin-contributed, built-in, and remote "
-        "runtime servers require official-client live inspection"
-    ),
-    (
-        "copilot",
-        "rules",
-    ): (
-        "documented personal, repository-root, current-workspace, intermediate, "
-        "nested active-file candidates, modular, imported, and "
-        "COPILOT_CUSTOM_INSTRUCTIONS_DIRS sources are inventoried with no-follow "
-        "file/directory/size bounds and collision metadata; exact active-file "
-        "selection, path-specific applyTo, session enable/disable state, folder "
-        "trust, managed/organization policy, and remote instructions remain "
-        "unverified"
-    ),
-    (
-        "copilot",
         "plugins",
     ): (
-        "declared plugins are queried only through the trusted Copilot executable "
-        "with `plugins list --kind plugin --json`, the pinned workspace, and exact "
-        "COPILOT_HOME; semantic activation and managed/organization policy remain "
-        "unverified without live-session evidence"
+        "AIBOM does not list Copilot plugins (only the Copilot CLI can); run "
+        "`defenseclaw plugin list --connector copilot` to see them. Plugin "
+        "activation and organization policy are not checked"
     ),
 }
 
 _UNVERIFIED_CONNECTOR_NOTES: dict[tuple[str, str], str] = {
     (
+        "copilot",
+        "skills",
+    ): (
+        "project, parent-folder, personal and COPILOT_SKILLS_DIRS skills are "
+        "listed; built-in, plugin and organization/remote skills are not"
+    ),
+    (
+        "copilot",
+        "agents",
+    ): (
+        "project, parent-folder and personal agents plus the Copilot CLI 1.0.77 "
+        "built-in agent set are listed (built-ins cannot be shadowed by local "
+        "files); plugin-contributed "
+        "agents and organization/enterprise agents are not listed"
+    ),
+    (
+        "copilot",
+        "mcp",
+    ): (
+        "workspace, parent-folder and personal MCP config files are listed "
+        "regardless of folder trust (Copilot starts workspace servers only in a "
+        "trusted folder); servers added per session, by plugins, built in or "
+        "remote are not listed"
+    ),
+    (
+        "copilot",
+        "rules",
+    ): (
+        "personal, repository and workspace instruction files (including nested, "
+        "modular, imported and COPILOT_CUSTOM_INSTRUCTIONS_DIRS files) are "
+        "listed; which file applies to the active file (applyTo), session "
+        "toggles, folder trust, organization policy and remote instructions are "
+        "not checked"
+    ),
+    (
         "opencode",
         "skills",
     ): (
-        "local project-through-worktree, global, compatibility, and active "
-        "OPENCODE_CONFIG_DIR skills are inventoried; built-in, remote, and "
-        "runtime permission-filtered availability are not scanned"
+        "project skills (up to the git worktree root), global skills, compatible "
+        "skill folders and OPENCODE_CONFIG_DIR skills are listed; built-in and "
+        "remote skills, and skills hidden by permissions at runtime, are not checked"
     ),
     (
         "opencode",
         "plugins",
     ): (
-        "operator-authored direct JS/TS plugins and local config plugin specs "
-        "are inventoried; the exact DefenseClaw-managed bridge is connector "
-        "configuration and is excluded from ordinary plugin scanning"
+        "JS/TS plugin files and plugins named in the OpenCode config are listed; "
+        "the DefenseClaw plugin that connects OpenCode to DefenseClaw is part of "
+        "the connector setup, so it is not listed or scanned as a plugin"
     ),
     (
         "opencode",
         "agents",
     ): (
-        "local singular/plural Markdown agents and config agent maps are "
-        "inventoried; built-in and remote/managed agents remain unverified"
+        "Markdown agents (agent/ and agents/ folders) and agents defined in the "
+        "OpenCode config are listed; built-in, remote and managed agents are not checked"
     ),
     (
         "opencode",
         "rules",
     ): (
-        "local AGENTS.md/CLAUDE.md fallback and config instruction files are "
-        "inventoried without fetching remote instruction URLs"
+        "AGENTS.md (or CLAUDE.md when there is no AGENTS.md) and instruction "
+        "files named in the config are listed; remote instruction URLs are not fetched"
     ),
     (
         "opencode",
         "tools",
     ): (
-        "local singular/plural JS/TS tools and Markdown/config commands are "
-        "inventoried; the legacy config tools permission map is not a custom-tool registry"
+        "JS/TS custom tools (tool/ and tools/ folders) and Markdown or config "
+        "commands are listed; the old 'tools' config setting only sets "
+        "permissions, so its entries are not listed as tools"
     ),
     (
         "devin",
         "skills",
     ): (
-        "documented user config-root and ~/.agents skills plus pinned project "
-        ".devin/.agents skills are inventoried locally; remote or managed "
-        "activation requires official-client evidence"
+        "user config-folder and ~/.agents skills plus the project's .devin and "
+        ".agents skills are listed; remote and managed skills, and whether Devin "
+        "loads them, are not checked"
     ),
     (
         "devin",
         "rules",
     ): (
-        "documented config-root AGENT(S).md, project/nested AGENT(S).md and "
-        "AGENTS.local.md, and project .devin rules are inventoried with bounded "
-        "no-follow discovery; effective runtime precedence is unverified"
+        "AGENT.md/AGENTS.md in the config folder and the project (nested ones "
+        "too), AGENTS.local.md and project .devin rules are listed (links are not "
+        "followed); which rule wins at runtime is not checked"
     ),
     (
         "devin",
         "mcp",
     ): (
-        "canonical user/project mcp_config.json registries and read-only "
-        "mcp_config.local.json plus legacy config*.json sources are inventoried; "
-        "live server activation is unverified"
+        "user and project mcp_config.json, mcp_config.local.json and older "
+        "config*.json files are listed; whether Devin starts each server is not checked"
     ),
     (
         "devin",
         "agents",
     ): (
-        "pinned-project .devin/agents and .agents/agents Markdown agents are "
-        "inventoried locally; runtime activation and precedence are unverified"
+        "Markdown agents in the project's .devin/agents and .agents/agents "
+        "folders are listed; which agents Devin loads, and which one wins, are not checked"
+    ),
+    (
+        "claudecode",
+        "agents",
+    ): (
+        "user and project .claude/agents Markdown subagents (closest project "
+        "first) are listed; files without a name and description in their front "
+        "matter, and plugin, managed and session (--agents) subagents, are not checked"
     ),
     (
         "cursor",
         "skills",
     ): (
-        "local project/user Cursor, Agents, Claude, and Codex skill roots plus "
-        "nested project Cursor/Agents roots are scanned recursively and without "
-        "following aliases; multi-root, cloud, team/private, marketplace, and "
-        "dynamic plugin skill activation require official-client evidence"
+        "project and user skill folders for Cursor, .agents, Claude and Codex "
+        "(nested project folders too; links are not followed) are listed; skills "
+        "from multi-root workspaces, cloud, team or private sources, the "
+        "marketplace and plugins are not checked"
     ),
     (
         "cursor",
         "plugins",
     ): (
-        "only the documented local plugin directory is inspectable; marketplace, "
-        "team/private, cloud, and dynamically registered plugins are unverified"
+        "only the local plugin folder is listed; marketplace, team or private, "
+        "cloud and dynamically added plugins are not checked"
     ),
     (
         "cursor",
         "mcp",
     ): (
-        "project and user mcp.json candidates are retained without inventing a "
-        "same-name winner; extension-registered dynamic servers, cloud/team "
-        "sources, multi-root activation, and the effective runtime selection are unverified"
+        "project and user mcp.json files are listed (a name in both is listed "
+        "twice); servers added by extensions, cloud or team settings, multi-root "
+        "workspaces, and which copy Cursor actually uses are not checked"
     ),
     (
         "cursor",
         "agents",
     ): (
-        "project/user .cursor, .claude, and .codex subagent files are inventoried "
-        "with documented scope precedence; multi-root, cloud, team/private, "
-        "marketplace/dynamic, and runtime-only subagents are unverified"
+        "project and user subagent files in .cursor, .claude and .codex are "
+        "listed (project first); subagents from multi-root workspaces, cloud, "
+        "team or private sources, the marketplace, or only at runtime are not checked"
     ),
     (
         "cursor",
         "rules",
     ): (
-        "local .cursor/rules/**/*.mdc and root/nested AGENTS.md are inventoried; "
-        "user UI rules, team/private rules, cloud state, multi-root activation, "
-        "and effective runtime ordering are unverified"
+        "local .cursor/rules .mdc files and root or nested AGENTS.md files are "
+        "listed; rules set in the Cursor UI, team or private rules, cloud "
+        "settings, multi-root workspaces and the order Cursor applies them are not checked"
     ),
 }
 
@@ -2022,7 +2153,7 @@ def _collect_filesystem_category(
         return _FilesystemCollectionResult(collector(), None)
     except Exception as exc:  # noqa: BLE001 - partial inventory records the failure.
         return _FilesystemCollectionResult(
-            [],
+            exc.items if isinstance(exc, _PartialCollectionError) else [],
             {"command": f"{connector}:{category}", "error": str(exc)},
         )
 
@@ -2700,7 +2831,9 @@ def _model_providers_for_connector(
     """Per-connector model-provider enumeration.
 
     * claudecode — ``ANTHROPIC_BASE_URL`` env + the resolved key store
-    * codex      — ``OPENAI_BASE_URL`` env + key store
+    * codex      — ``~/.codex/config.toml`` ``model`` / ``model_provider`` /
+                   ``[model_providers.*]`` (GAP-2101), falling back to the
+                   ``OPENAI_BASE_URL`` / ``OPENAI_API_KEY`` env
     * zeptoclaw  — re-parse ``~/.zeptoclaw/config.json`` providers map
                    (the Setup-time snapshot is held in-process by
                    the Go connector; offline AIBOM doesn't have it,
@@ -2716,12 +2849,23 @@ def _model_providers_for_connector(
             default_base_url="https://api.anthropic.com",
         )
     if name == "codex":
-        return _providers_from_env(
+        rows = _providers_from_codex_config(
+            os.path.join(connector_paths.connector_home(name), "config.toml"),
+        )
+        env_rows = _providers_from_env(
             "OPENAI_BASE_URL",
             "OPENAI_API_KEY",
             default_provider="openai",
             default_base_url="https://api.openai.com/v1",
         )
+        if not rows:
+            return env_rows
+        for row in rows:
+            # The built-in openai provider has no table; the env supplies it.
+            if row["id"] == "openai" and env_rows and not row.get("base_url"):
+                row["base_url"] = env_rows[0]["base_url"]
+                row["api_key_present"] = env_rows[0]["api_key_present"]
+        return rows
     if name == "zeptoclaw":
         return _providers_from_zeptoclaw_config(
             os.path.join(home, ".zeptoclaw", "config.json"),
@@ -3083,7 +3227,9 @@ class AmbiguousClaudeAgentIdentityError(ValueError):
     """Raised when one Claude agent scope contains duplicate identities."""
 
 
-_CLAUDE_AGENT_NAME_PATTERN = re.compile(r"[a-z]+(?:-[a-z]+)*\Z")
+# Lowercase letters, digits and hyphens ("sf1r10-helper"): a digit used to
+# drop the agent from the BOM (GAP-2436).
+_CLAUDE_AGENT_NAME_PATTERN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
 _CLAUDE_AGENT_WALK_LIMIT = 32768
 _CLAUDE_AGENT_FRONTMATTER_LIMIT = 65536
 
@@ -3784,14 +3930,18 @@ def _tools_from_claude_settings(path: str) -> list[dict[str, Any]]:
     return rows
 
 
-def _tools_from_codex_config(path: str) -> list[dict[str, Any]]:
-    """Codex's ``[tools]`` table — TOML."""
+def _load_toml_dict(path: str, *, strict: bool = False) -> dict[str, Any] | None:
+    """Read a TOML file; return None when it is missing or unreadable.
+
+    With strict, a file that exists but cannot be read or parsed raises, so
+    the collector lands in ``errors`` instead of reading as empty (GAP-2148).
+    """
     if not os.path.isfile(path):
-        return []
+        return None
     try:
         # tomllib ships in the stdlib on Python 3.11+. On 3.10 (still an
         # advertised target) it is absent, so fall back to the tomli
-        # backport rather than silently dropping Codex tool definitions.
+        # backport rather than silently dropping Codex definitions.
         try:
             import tomllib
         except ModuleNotFoundError:
@@ -3799,9 +3949,84 @@ def _tools_from_codex_config(path: str) -> list[dict[str, Any]]:
 
         with open(path, "rb") as fh:
             raw = tomllib.load(fh)
-    except (OSError, ValueError, ModuleNotFoundError):
+    except (OSError, ValueError, ModuleNotFoundError) as exc:
+        if strict:
+            raise ValueError(f"could not read {path}: {exc}") from exc
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
+def _providers_from_codex_config(path: str) -> list[dict[str, Any]]:
+    """Codex's ``model`` / ``model_provider`` / ``[model_providers.*]`` (GAP-2101).
+
+    Only names, endpoints and the *name* of the key env var are reported;
+    header and token values are never copied into the BOM.
+    """
+    raw = _load_toml_dict(path, strict=True)
+    if raw is None:
         return []
-    tools = raw.get("tools") if isinstance(raw, dict) else None
+    model = str(raw.get("model") or "").strip()
+    active = str(raw.get("model_provider") or "").strip()
+    if model and not active:
+        active = "openai"  # Codex's built-in default provider
+    tables = raw.get("model_providers")
+    if not isinstance(tables, dict):
+        tables = {}
+    rows: list[dict[str, Any]] = []
+    for pid, body in tables.items():
+        if not isinstance(body, dict):
+            continue
+        env_key = str(body.get("env_key") or "").strip()
+        row: dict[str, Any] = {
+            "id": str(pid),
+            "name": str(body.get("name") or pid),
+            "base_url": _strip_url_userinfo(str(body.get("base_url") or "")),
+            "active": str(pid) == active,
+            "api_key_present": bool(
+                (env_key and os.environ.get(env_key, "").strip())
+                or body.get("experimental_bearer_token")
+            ),
+            "source": path,
+        }
+        if env_key:
+            row["env_key"] = env_key
+        if body.get("wire_api"):
+            row["wire_api"] = str(body["wire_api"])
+        if row["active"] and model:
+            row["model"] = model
+        rows.append(row)
+    if active and active not in tables:
+        builtin: dict[str, Any] = {
+            "id": active,
+            "name": active,
+            "base_url": "",
+            "active": True,
+            "builtin": True,
+            "source": path,
+        }
+        if model:
+            builtin["model"] = model
+        rows.insert(0, builtin)
+    return rows
+
+
+def _strip_url_userinfo(url: str) -> str:
+    """Drop ``user:pass@`` from an endpoint URL before it lands in the BOM."""
+    from urllib.parse import urlsplit, urlunsplit
+
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return ""
+    if "@" not in parts.netloc:
+        return url
+    return urlunsplit(parts._replace(netloc=parts.netloc.rsplit("@", 1)[1]))
+
+
+def _tools_from_codex_config(path: str) -> list[dict[str, Any]]:
+    """Codex's ``[tools]`` table — TOML."""
+    raw = _load_toml_dict(path)
+    tools = raw.get("tools") if raw is not None else None
     if not isinstance(tools, dict):
         return []
     rows: list[dict[str, Any]] = []
@@ -4431,21 +4656,22 @@ def _build_aibom_from_filesystem(
     if connector_paths.normalize(connector) == "hermes":
         hermes_notes = {
             "skills": (
-                "default-profile HERMES_HOME/skills and existing skills.external_dirs are inventoried; "
-                "named/multiplex profiles and session/project-conditional skill sources are unsupported or unverified"
+                "the default profile's HERMES_HOME/skills and skills.external_dirs folders are listed; "
+                "named profiles and skills that depend on the session or project are not checked"
             ),
             "plugins": (
-                "default-profile user, vendor bundled/Nix override, and official Hermes-venv entry-point metadata are "
-                "inventoried with config-derived activation provenance; runtime activation and project plugins "
-                "conditional on the Hermes process CWD plus HERMES_ENABLE_PROJECT_PLUGINS remain unverified"
+                "the default profile's user plugins, bundled (or Nix override) plugins and plugins installed in "
+                "the Hermes Python environment are listed, with whether the config enables them; whether they load "
+                "at runtime, and project plugins (which depend on the folder Hermes runs in and "
+                "HERMES_ENABLE_PROJECT_PLUGINS), are not checked"
             ),
             "rules": (
-                "default-profile SOUL.md is inventoried as identity; project AGENTS.md, CLAUDE.md, .hermes.md, and "
-                ".cursorrules depend on the Hermes session CWD and remain unverified"
+                "the default profile's SOUL.md is listed as identity; project AGENTS.md, CLAUDE.md, .hermes.md and "
+                ".cursorrules depend on the folder Hermes runs in and are not checked"
             ),
             "memory": (
-                "default-profile MEMORY.md/USER.md and configured memory.provider are inventoried; provider-owned "
-                "external state requires loading the provider and remains unverified"
+                "the default profile's MEMORY.md and USER.md and the configured memory.provider are listed; data "
+                "the provider stores elsewhere is not checked"
             ),
         }
         for category, reason in hermes_notes.items():
@@ -4459,7 +4685,7 @@ def _build_aibom_from_filesystem(
                     }
                 )
     for cat_key, note in _FILESYSTEM_ONLY_CONNECTOR_NOTES.items():
-        if connector == "codex" and cat_key == "agents":
+        if connector == "codex" and cat_key in ("agents", "models"):
             continue
         if cat_key not in cats:
             continue
@@ -4467,7 +4693,7 @@ def _build_aibom_from_filesystem(
         # a successful empty inventory, not an unsupported capability.
         if connector == "cursor" and cat_key == "agents":
             continue
-        if connector == "devin" and cat_key == "agents":
+        if connector in ("devin", "claudecode") and cat_key == "agents":
             continue
         result = results.get(cat_key)
         if connector_paths.normalize(connector) == "claudecode" and cat_key == "memory":
@@ -4882,6 +5108,35 @@ def _hermes_pip_entry_points() -> list[tuple[Any, str]]:
     return rows
 
 
+def hermes_listed_identity(path: str) -> tuple[str, str] | None:
+    """The (id, origin) _enumerate_hermes_plugins gives the plugin folder *path*.
+
+    Works when the folder is gone (quarantined): it only compares paths with
+    the same roots, so ``.../plugins/platforms/photon`` is ``photon`` and
+    ``.../plugins/web/ddgs`` is ``web/ddgs`` (GAP-2265).
+    """
+    user_root = os.path.join(connector_paths.hermes_home(), "plugins")
+    bundled = "bundled-nix" if (os.environ.get("HERMES_BUNDLED_PLUGINS") or "").strip() else "bundled"
+    skip = {"memory", "context_engine", "platforms", "model-providers"}
+    bases: list[tuple[str, str, set[str]]] = []
+    for root in connector_paths.plugin_dirs("hermes"):
+        if os.path.normcase(root) != os.path.normcase(user_root):
+            bases.append((os.path.join(root, "platforms"), bundled, set()))
+            bases.append((root, bundled, skip))
+    bases.append((user_root, "user", set()))
+    target = os.path.abspath(path.rstrip("/\\") or path)
+    for base, source, skipped in bases:
+        try:
+            rel = os.path.relpath(target, os.path.abspath(base))
+        except ValueError:
+            continue
+        parts = rel.split(os.sep)
+        if rel == os.curdir or parts[0] == os.pardir or len(parts) > 2 or parts[0] in skipped:
+            continue
+        return "/".join(parts), source
+    return None
+
+
 def _enumerate_hermes_plugins() -> list[dict[str, Any]]:
     """Mirror v0.19's bounded default-profile plugin source and activation order."""
 
@@ -5138,7 +5393,8 @@ def _enumerate_mcp_filesystem(
     """
     rows: list[dict[str, Any]] = []
     resolved = connector or cfg.active_connector()
-    entries = cfg.mcp_servers(connector)
+    diagnostics: list[connector_paths.MCPSourceDiagnostic] = []
+    entries = cfg.mcp_servers(connector, diagnostic_sink=diagnostics)
     cursor_names: dict[str, int] = {}
     if connector_paths.normalize(resolved) == "cursor":
         for entry in entries:
@@ -5170,6 +5426,11 @@ def _enumerate_mcp_filesystem(
                 row["selection_conflict"] = True
                 row["activation_state"] = "unverified-same-name-scope-conflict"
         rows.append(row)
+    if diagnostics:
+        # An MCP config that exists but cannot be read or parsed is an error,
+        # not "none configured" (GAP-2182, the MCP side of GAP-2148).
+        failed = "; ".join(f"could not read {d.source} ({d.problem})" for d in diagnostics)
+        raise _PartialCollectionError(failed, rows)
     return rows
 
 

@@ -18,6 +18,37 @@ import (
 // before it answered health.
 var errGatewayExitedBeforeReadiness = errors.New("gateway process exited before readiness")
 
+// errGatewayReadinessDeadline marks a readiness wait that ran out of time
+// while the gateway was not answering yet or was still STARTING.
+var errGatewayReadinessDeadline = errors.New("gateway did not become ready before timeout")
+
+// errGatewayStillStarting marks an interactive start or restart that reached
+// the readiness deadline and left the live gateway running (GAP-2022).
+var errGatewayStillStarting = errors.New("gateway is still starting")
+
+// readinessError keeps a readiness error's text and adds a sentinel kind.
+type readinessError struct {
+	error
+	kind error
+}
+
+func (e readinessError) Is(target error) bool { return target == e.kind }
+func (e readinessError) Unwrap() error        { return e.error }
+
+// reportGatewayStillStarting tells the user that the gateway did not answer
+// within the readiness deadline, that it was left running, and what to run.
+// The watchdog that restart stopped is started again so it reports whether
+// the gateway comes up. The exit code stays non-zero: protection is not
+// confirmed yet.
+func reportGatewayStillStarting(err error, pid int, logPath string, cfg *config.Config, cfgErr error) error {
+	fmt.Println(Style("STILL STARTING", "fg=yellow", "bold"))
+	_ = startConfiguredWatchdog(cfg, cfgErr, false)
+	return fmt.Errorf("the gateway (PID %d) is still starting and was left running: %v. "+
+		"Protection is not confirmed until it answers. Check it with: defenseclaw-gateway status. "+
+		"If it does not become healthy, run: defenseclaw-gateway restart (check %s for errors)",
+		pid, err, logPath)
+}
+
 // gatewayLogExitReasonMaxBytes bounds how much of gateway.log a failed start
 // reads back.
 const gatewayLogExitReasonMaxBytes = 64 << 10
@@ -87,9 +118,17 @@ func gatewayExitedBeforeReadinessError(err error, logPath string, offset int64) 
 // configSchemaProblem renders an invalid enum value or a value of the wrong
 // type the way 'defenseclaw config validate' does, 'line 13: guardrail.mode
 // is "x"; allowed values: observe, action' or 'line 11: guardrail.mode:
-// expected a value of type string (got a number)', instead of the raw schema
+// expected a value of type string (got a number)', or an undeclared key as
+// 'line 9: guardrail.mdoe: unknown field (did you mean "mode"?)', instead of the raw schema
 // diagnostic (GAP-1914, GAP-1990).
 func configSchemaProblem(err error) (string, bool) {
+	var yamlErr *config.V8YAMLError
+	if errors.As(err, &yamlErr) && yamlErr.Code == config.V8YAMLErrorDuplicateKey &&
+		yamlErr.Line > 0 && yamlErr.FirstLine > 0 && strings.HasPrefix(yamlErr.Path, "$.") {
+		// A second section header with the same name (GAP-2188).
+		return fmt.Sprintf("%s line %d: %s appears twice; the first one is at line %d. Merge them into one",
+			config.ConfigPath(), yamlErr.Line, strings.TrimPrefix(yamlErr.Path, "$."), yamlErr.FirstLine), true
+	}
 	var schemaErr *config.V8SchemaError
 	if !errors.As(err, &schemaErr) {
 		return "", false
@@ -99,6 +138,14 @@ func configSchemaProblem(err error) (string, bool) {
 		where += fmt.Sprintf(" line %d", schemaErr.Line)
 	}
 	field := strings.TrimPrefix(schemaErr.Path, "$.")
+	if schemaErr.Keyword == "additionalProperties" && field != "" && field != "$" {
+		// A typo'd or undeclared key (GAP-2173).
+		hint := ""
+		if schemaErr.Suggestion != "" {
+			hint = fmt.Sprintf(" (did you mean %q?)", schemaErr.Suggestion)
+		}
+		return fmt.Sprintf("%s: %s: unknown field%s", where, field, hint), true
+	}
 	if schemaErr.Keyword == "type" && schemaErr.Expected != "" {
 		got := ""
 		if noun := configValueClassNoun(schemaErr.ReceivedClass); noun != "" {

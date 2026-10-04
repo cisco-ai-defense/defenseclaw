@@ -253,6 +253,12 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
 
     Use --enable-guardrail to configure the LLM guardrail inline.
     """
+    from defenseclaw.commands.cmd_setup import _validated_api_key_env_name
+
+    # Refuse a pasted key before anything is written (GAP-2589).
+    cisco_api_key_env = _validated_api_key_env_name(cisco_api_key_env, "'--cisco-api-key-env'")
+    # GAP-2593: the LLM key's env var name too.
+    llm_api_key_env = _validated_api_key_env_name(llm_api_key_env, "'--llm-api-key-env'", "DEFENSECLAW_LLM_KEY")
     requested_connectors = []
     if connector:
         requested_connectors.append(_normalize_connector_arg(connector))
@@ -301,6 +307,11 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
                 f"connector {requested!r} is {support.status} on "
                 f"{platform_support.host_os()}: {support.reason}"
             )
+    if connector:
+        from defenseclaw.commands.cmd_setup import _refuse_hook_switch_over_configured_proxy
+
+        # GAP-2455: never silently replace a guarded OpenClaw/ZeptoClaw.
+        _refuse_hook_switch_over_configured_proxy(_normalize_connector_arg(connector))
 
     if _use_guided_first_run(
         non_interactive=non_interactive,
@@ -500,7 +511,7 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     # bold success text so the eye lands here when the operator
     # scrolls back up after a long init.
     click.echo()
-    click.echo("  " + ux.dim("─" * 54))
+    ux.echo("  " + ux.dim("─" * 54))
     click.echo()
     ux.ok("DefenseClaw initialized.", indent="  ")
     click.echo()
@@ -638,6 +649,9 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
         and _stdin_is_tty()
     ):
         interactive_wizard = True
+        if not connector:
+            # GAP-2455: the wizard sets up hook connectors only.
+            _confirm_replacing_guarded_proxy()
         (
             connector_settings,
             scanner_mode,
@@ -698,6 +712,12 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
             quiet=json_summary,
             data_dir=data_dir,
         )
+        # GAP-2455: discovery, --observe-all and --action-connectors pick hook
+        # connectors too; never let them silently replace a guarded OpenClaw.
+        # GAP-2476: one refusal that names the whole set, not its first entry.
+        from defenseclaw.commands.cmd_setup import _refuse_hook_set_over_configured_proxy
+
+        _refuse_hook_set_over_configured_proxy(setting["connector"] for setting in connector_settings)
     if start_gateway is None:
         # GAP-1539: a running gateway loads its connector set only at start,
         # so a scripted re-init reconciles (restarts) it instead of leaving
@@ -1292,6 +1312,32 @@ def _confirm_dropped_connectors(
     return [name for name in installed if name in kept]
 
 
+def _confirm_replacing_guarded_proxy() -> None:
+    """Ask before the wizard replaces a guarded OpenClaw/ZeptoClaw (GAP-2455).
+
+    The picker offers hook connectors only, and setting them up removes the
+    DefenseClaw plugin from the proxy connector. The default keeps it.
+    """
+    from defenseclaw.commands.cmd_setup import _CONNECTOR_META, _configured_sole_guarded_proxy_connector
+
+    proxy = _configured_sole_guarded_proxy_connector()
+    if not proxy:
+        return
+    label = _CONNECTOR_META.get(proxy, {}).get("label", proxy)
+    ux.warn(
+        f"This install guards {label}, which is proxy-backed and cannot run next to hook "
+        f"connectors. This wizard sets up hook connectors: it removes the DefenseClaw plugin "
+        f"from {label}, which then runs unguarded.",
+        indent="  ",
+    )
+    if click.confirm(f"  Stop guarding {label} and set up hook connectors instead?", default=False):
+        return
+    raise click.ClickException(
+        f"No changes made; {label} stays guarded. To change its settings, run "
+        f"'defenseclaw setup {proxy}'."
+    )
+
+
 def _note_proxy_connectors(disc) -> None:
     """Surface detected proxy connectors (openclaw, zeptoclaw) during selection.
 
@@ -1369,7 +1415,7 @@ def _prompt_action_connectors(
     action: list[str] = []
     for name in requested:
         if name not in allowed:
-            click.echo(
+            ux.echo(
                 f"  ⚠ {name}: not in the configured connector list; ignoring.",
                 err=True,
             )
@@ -1523,7 +1569,7 @@ def _supported_action_connectors(
         if downgrades is not None:
             downgrades.append(warning)
         if not quiet:
-            click.echo(
+            ux.echo(
                 f"  ⚠ {key}: requested action but configuring in observe mode "
                 f"({warning['reason']}). Set "
                 "DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing.",
@@ -1543,7 +1589,14 @@ def _action_downgrade_record(connector: str, discovery=None) -> dict:
         "reason": "connector version could not be verified against a known hook contract",
         "next_command": f"defenseclaw setup {key} --mode action",
     }
+    from defenseclaw.bootstrap import HERMES_INSTALL_HINT, _hermes_installed
+
     signal = getattr(discovery, "agents", {}).get(key) if discovery is not None else None
+    if key == "hermes" and not getattr(signal, "binary_path", "") and not _hermes_installed():
+        # Setup alone cannot verify an agent that is not installed (GAP-2383).
+        record["reason"] = "Hermes is not installed, so its version cannot be checked yet"
+        record["next_command"] = f"{HERMES_INSTALL_HINT}, then run: defenseclaw setup hermes --mode action"
+        return record
     if (
         signal is not None
         and getattr(signal, "error", "") == agent_discovery.UNTRUSTED_PREFIX_ERROR
@@ -1727,7 +1780,7 @@ def _build_noninteractive_connector_settings(
     # operator knows --observe-all / --action-connectors were not applied.
     if connector:
         if observe_all or action_list:
-            click.echo(
+            ux.echo(
                 f"  ⚠ --connector {connector} takes precedence; ignoring "
                 "--observe-all/--action-connectors. Drop --connector to configure "
                 "multiple connectors.",
@@ -1744,14 +1797,14 @@ def _build_noninteractive_connector_settings(
     for name in action_list:
         if name not in _HOOK_ENFORCED_CONNECTORS:
             if not quiet:
-                click.echo(
+                ux.echo(
                     f"  ⚠ {name}: not a hook-enforced connector; skipping --action-connectors entry.",
                     err=True,
                 )
             continue
         if name not in detected:
             if not quiet:
-                click.echo(
+                ux.echo(
                     f"  ⚠ {name}: not detected as installed; configuring anyway "
                     "(use --rescan-agents to refresh discovery).",
                     err=True,
@@ -1999,8 +2052,9 @@ def _prompt_first_run_judge_llm_config(
         )
         return provider, model, "", "", base_url, {}
 
+    same_provider = (provider or "").strip().lower() == (llm_provider or "").strip().lower()
     model = pick_model(
-        current=llm_model or "",
+        current=(llm_model or "") if same_provider else "",
         provider=provider,
         instance=None,
         flag_value=None,
@@ -2083,7 +2137,7 @@ def _activate_additional_connectors(
     try:
         cfg = cfg_mod.load()
     except Exception as exc:  # noqa: BLE001 — surface and fall back to primary-only.
-        click.echo(f"  ✗ could not reload config to add connectors: {exc}", err=True)
+        ux.echo(f"  ✗ could not reload config to add connectors: {exc}", err=True)
         return [primary_name], None
 
     gc = cfg.guardrail
@@ -2230,7 +2284,7 @@ def _activate_additional_connectors(
             )
             s["mode_warning"] = warning
             if not quiet:
-                click.echo(
+                ux.echo(
                     f"  ⚠ {key}: requested action but configuring in observe mode "
                     f"({warning['reason']}). Set "
                     "DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing.",
@@ -2271,7 +2325,7 @@ def _activate_additional_connectors(
     try:
         cfg.save()
     except OSError as exc:
-        click.echo(f"  ✗ failed to save multi-connector config: {exc}", err=True)
+        ux.echo(f"  ✗ failed to save multi-connector config: {exc}", err=True)
         return [primary_key], None
 
     active = sorted(gc.connectors)
@@ -2279,7 +2333,7 @@ def _activate_additional_connectors(
     # would otherwise prefix the JSON document and break parsers. The gateway
     # is still started when requested; only the narration is suppressed.
     if not quiet:
-        click.echo("  ✓ Configured connectors: " + ", ".join(active))
+        ux.echo("  ✓ Configured connectors: " + ", ".join(active))
     # Start (or restart) the gateway ONCE here so its set-difference reconcile
     # wires hooks for every connector in the map. The structured result is
     # returned (not echoed) so the caller can replace the stale "Sidecar not
@@ -2514,15 +2568,32 @@ def _render_first_run_report(report, renderer, *, connectors: list[str] | None =
     renderer.section("Next")
     for cmd in report.next_commands[:5]:
         renderer.echo(f"  {cmd}")
-    renderer.echo("  Adding another agent later: defenseclaw setup <connector>")
-    if _closed_fail_mode_connectors(report, connectors):
+    proxy = _proxy_connector_label(report, connectors)
+    if proxy:
+        # GAP-2427: a proxy connector has no hooks. Its model calls go through
+        # the gateway, nothing restarts the gateway for it, and it cannot run
+        # next to hook connectors (setup <hook> needs --replace, GAP-2426), so
+        # the hook advice below is wrong for it.
+        renderer.echo(
+            f"  {proxy} runs alone: defenseclaw setup <connector> --replace for a hook agent"
+            f" replaces {proxy}'s guardrail"
+        )
+        renderer.echo(f"  {proxy} model calls fail while the DefenseClaw gateway is down (fail-closed)")
+        if platform_support.host_os() in {"linux", "darwin"}:
+            renderer.echo(
+                f"  Nothing starts the gateway for {proxy}: after a reboot or defenseclaw-gateway stop,"
+                " run: defenseclaw-gateway start"
+            )
+    else:
+        renderer.echo("  Adding another agent later: defenseclaw setup <connector>")
+    if not proxy and _closed_fail_mode_connectors(report, connectors):
         # --non-interactive keeps the closed default the wizard asks about
         # (GAP-1424): say what it means and how to change it.
         renderer.echo(
             "  Fail mode is closed: hooks block the agent while the gateway is unreachable;"
             " to allow and log instead: defenseclaw guardrail fail-mode open"
         )
-    if platform_support.host_os() in {"linux", "darwin"}:
+    if not proxy and platform_support.host_os() in {"linux", "darwin"}:
         # No service unit restarts a per-user gateway on Linux or macOS; the
         # agent shell hooks start it on their next call (RHEL-U3-06).
         renderer.echo(
@@ -2533,6 +2604,19 @@ def _render_first_run_report(report, renderer, *, connectors: list[str] | None =
         renderer.echo("  Running coding agents in OpenShell sandboxes: defenseclaw sandbox setup")
     if summary := _unguarded_acp_summary():
         renderer.echo(f"  Unguarded ACP agents found ({summary}): defenseclaw setup acp")
+
+
+_PROXY_LABELS = {"openclaw": "OpenClaw", "zeptoclaw": "ZeptoClaw"}
+
+
+def _proxy_connector_label(report, connectors: list[str] | None) -> str:
+    """The display name of the proxy connector this install runs, or ''."""
+
+    names = connectors or ([report.connector] if report.connector else [])
+    for name in names:
+        if platform_support.is_proxy_connector(name):
+            return _PROXY_LABELS.get(name, name)
+    return ""
 
 
 def _closed_fail_mode_connectors(report, connectors: list[str] | None) -> list[str]:
@@ -3501,21 +3585,23 @@ def _start_gateway(cfg, logger) -> None:
             timeout=_GATEWAY_START_TIMEOUT,
         )
         if result.returncode == 0:
-            click.echo(" " + ux._style("✓", fg="green", bold=True))
+            ux.echo(" " + ux._style("✓", fg="green", bold=True))
             pid = _read_pid(pid_file)
             if pid:
                 click.echo(f"  PID:           {ux.bold(str(pid))}")
             logger.log_action("init-sidecar", "start", f"pid={pid or 'unknown'}")
             started = True
         else:
-            click.echo(" " + ux._style("✗", fg="red", bold=True))
-            err = (result.stderr or result.stdout or "").strip()
+            ux.echo(" " + ux._style("✗", fg="red", bold=True))
+            from defenseclaw.bootstrap import gateway_failure_detail
+
+            # GAP-2341: show the cause, not the audit migration banners.
+            err = gateway_failure_detail(result, "")
             if err:
-                for line in err.splitlines()[:3]:
-                    click.echo(f"                 {ux.dim(line)}")
+                click.echo(f"                 {ux.dim(err)}")
             click.echo("                 " + ux.dim("check: defenseclaw-gateway status"))
     except FileNotFoundError:
-        click.echo(" " + ux._style("✗", fg="red", bold=True) + ux.dim(" (binary not found)"))
+        ux.echo(" " + ux._style("✗", fg="red", bold=True) + ux.dim(" (binary not found)"))
     except subprocess.TimeoutExpired:
         click.echo(" " + ux._style("!", fg="yellow", bold=True) + ux.dim(" (still starting after 90 s)"))
         click.echo("                 " + ux.dim("check: defenseclaw-gateway status"))
@@ -3651,7 +3737,7 @@ def _check_sidecar_health(api_port: int, retries: int = 3, bind: str = "127.0.0.
 def _print_health_summary(health: dict | None) -> None:
     """Render a compact health summary from /health JSON."""
     if not health:
-        click.echo("  Health:        ok ✓")
+        ux.echo("  Health:        ok ✓")
         return
 
     subsystems = ["gateway", "watcher", "guardrail", "api", "telemetry", "splunk", "sandbox"]
@@ -3671,4 +3757,4 @@ def _print_health_summary(health: dict | None) -> None:
     if parts:
         click.echo(f"  Health:        {', '.join(parts)}")
     else:
-        click.echo("  Health:        ok ✓")
+        ux.echo("  Health:        ok ✓")

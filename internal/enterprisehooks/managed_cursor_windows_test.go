@@ -556,6 +556,192 @@ func TestWindowsCursorManagedStateAcceptsAnEarlierReleaseAdapter(t *testing.T) {
 	}
 }
 
+// GAP-2467: an upgrade rewrites an earlier release's adapter to this build's
+// template and rebinds the state digest, so the pair stays valid; a current
+// adapter, an inactive policy and another deployment's hook are left alone.
+func TestWindowsCursorManagedAdapterRefreshRewritesAnEarlierReleaseAdapter(t *testing.T) {
+	originalRoot := windowsCursorManagedRootResolver
+	originalTrust := windowsManagedPolicyFileTrustCheck
+	windowsCursorManagedRootResolver = func() (string, error) {
+		return `C:\ProgramData\Cursor`, nil
+	}
+	windowsManagedPolicyFileTrustCheck = func(string) error { return nil }
+	t.Cleanup(func() {
+		windowsCursorManagedRootResolver = originalRoot
+		windowsManagedPolicyFileTrustCheck = originalTrust
+	})
+
+	hookExecutable := `C:\Program Files\Cisco\DefenseClaw\defenseclaw-hook.exe`
+	current, err := connector.RenderWindowsCursorEnterpriseAdapter(hookExecutable, "closed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	earlier := append([]byte("# adapter template of an earlier release\r\n"), current...)
+	paths, err := windowsCursorManagedPaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifactsFor := func(adapter []byte) windowsCursorManagedArtifacts {
+		t.Helper()
+		state, err := windowsCursorManagedStateBody(windowsCursorManagedPolicyState{
+			SchemaVersion:      1,
+			HookExecutable:     hookExecutable,
+			GatewayAddr:        "127.0.0.1:18970",
+			GatewayServiceName: "DefenseClawGateway",
+			AdapterSHA256:      windowsManagedPolicyDigest(adapter),
+			ReceiptSHA256:      windowsManagedPolicyDigest([]byte("private receipt")),
+			Targets: []WindowsCursorManagedRuntimeTarget{{
+				SID: "S-1-5-21-1000-1000-1000-1001", DataDir: `C:\Users\developer\.defenseclaw`,
+			}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		artifacts, err := validateWindowsCursorManagedStateIdentity(windowsCursorManagedArtifacts{
+			adapter: windowsManagedFileSnapshot{path: paths.Adapter, existed: true, data: adapter},
+			state:   windowsManagedFileSnapshot{path: paths.State, existed: true, data: state},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		artifacts.active = true
+		return artifacts
+	}
+
+	stale := artifactsFor(earlier)
+	adapter, state, ok, err := windowsCursorManagedAdapterRefresh(stale, hookExecutable)
+	if err != nil || !ok {
+		t.Fatalf("an earlier release's adapter was not refreshed: ok=%t err=%v", ok, err)
+	}
+	if !bytes.Equal(adapter, current) {
+		t.Fatal("the refreshed adapter is not this build's render")
+	}
+	refreshed, err := validateWindowsCursorManagedStateIdentity(windowsCursorManagedArtifacts{
+		adapter: windowsManagedFileSnapshot{path: paths.Adapter, existed: true, data: adapter},
+		state:   windowsManagedFileSnapshot{path: paths.State, existed: true, data: state},
+	})
+	if err != nil {
+		t.Fatalf("the refreshed adapter and state do not validate: %v", err)
+	}
+	if refreshed.parsed.ReceiptSHA256 != stale.parsed.ReceiptSHA256 ||
+		len(refreshed.parsed.Targets) != 1 || refreshed.parsed.Targets[0] != stale.parsed.Targets[0] {
+		t.Fatalf("the refresh changed more than the adapter digest: %+v", refreshed.parsed)
+	}
+
+	if _, _, ok, err := windowsCursorManagedAdapterRefresh(artifactsFor(current), hookExecutable); ok || err != nil {
+		t.Fatalf("a current adapter was rewritten: ok=%t err=%v", ok, err)
+	}
+	inactive := stale
+	inactive.active = false
+	if _, _, ok, err := windowsCursorManagedAdapterRefresh(inactive, hookExecutable); ok || err != nil {
+		t.Fatalf("an inactive policy was rewritten: ok=%t err=%v", ok, err)
+	}
+	if _, _, ok, err := windowsCursorManagedAdapterRefresh(stale, `C:\Other\defenseclaw-hook.exe`); ok || err != nil {
+		t.Fatalf("another deployment's adapter was rewritten: ok=%t err=%v", ok, err)
+	}
+}
+
+// GAP-2474: an adapter changed in place gets this build's render back, with
+// the state digest rebound and nothing else changed; a state DefenseClaw did
+// not write, or one for another hook executable, is refused.
+func TestWindowsCursorManagedAdapterDriftCandidateRestoresAChangedAdapter(t *testing.T) {
+	originalRoot := windowsCursorManagedRootResolver
+	originalTrust := windowsManagedPolicyFileTrustCheck
+	windowsCursorManagedRootResolver = func() (string, error) {
+		return `C:\ProgramData\Cursor`, nil
+	}
+	windowsManagedPolicyFileTrustCheck = func(string) error { return nil }
+	t.Cleanup(func() {
+		windowsCursorManagedRootResolver = originalRoot
+		windowsManagedPolicyFileTrustCheck = originalTrust
+	})
+
+	hookExecutable := `C:\Program Files\Cisco\DefenseClaw\defenseclaw-hook.exe`
+	current, err := connector.RenderWindowsCursorEnterpriseAdapter(hookExecutable, "closed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths, err := windowsCursorManagedPaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := windowsCursorManagedPolicyState{
+		SchemaVersion:      1,
+		HookExecutable:     hookExecutable,
+		GatewayAddr:        "127.0.0.1:18970",
+		GatewayServiceName: "DefenseClawGateway",
+		ReceiptSHA256:      windowsManagedPolicyDigest([]byte("private receipt")),
+		Targets: []WindowsCursorManagedRuntimeTarget{{
+			SID: "S-1-5-21-1000-1000-1000-1001", DataDir: `C:\Users\developer\.defenseclaw`,
+		}},
+	}
+	changed := []byte("# an administrator's edit\r\n")
+	artifactsFor := func(recorded []byte) windowsCursorManagedArtifacts {
+		t.Helper()
+		state := policy
+		state.AdapterSHA256 = windowsManagedPolicyDigest(recorded)
+		body, err := windowsCursorManagedStateBody(state)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return windowsCursorManagedArtifacts{
+			adapter: windowsManagedFileSnapshot{path: paths.Adapter, existed: true, data: changed},
+			state:   windowsManagedFileSnapshot{path: paths.State, existed: true, data: body},
+		}
+	}
+
+	earlier := append([]byte("# adapter template of an earlier release\r\n"), current...)
+	for name, recorded := range map[string][]byte{"this release": current, "an earlier release": earlier} {
+		drifted := artifactsFor(recorded)
+		if _, err := validateWindowsCursorManagedStateIdentity(drifted); err == nil {
+			t.Fatalf("%s: a changed adapter passed the strict identity check", name)
+		}
+		candidate, err := windowsCursorManagedAdapterDriftCandidate(drifted, hookExecutable)
+		if err != nil {
+			t.Fatalf("%s: a changed adapter was not restored: %v", name, err)
+		}
+		if !bytes.Equal(candidate.adapter.data, current) {
+			t.Fatalf("%s: the restored adapter is not this build's render", name)
+		}
+		restored, err := validateWindowsCursorManagedStateIdentity(candidate)
+		if err != nil {
+			t.Fatalf("%s: the restored adapter and state do not validate: %v", name, err)
+		}
+		if restored.parsed.ReceiptSHA256 != policy.ReceiptSHA256 ||
+			len(restored.parsed.Targets) != 1 || restored.parsed.Targets[0] != policy.Targets[0] {
+			t.Fatalf("%s: the restore changed more than the adapter digest: %+v", name, restored.parsed)
+		}
+	}
+
+	if _, err := windowsCursorManagedAdapterDriftCandidate(artifactsFor(current), `C:\Other\defenseclaw-hook.exe`); err == nil {
+		t.Fatal("another deployment's adapter was restored")
+	}
+	reformatted := artifactsFor(current)
+	reformatted.state.data = bytes.ReplaceAll(reformatted.state.data, []byte("\n  "), []byte("\n "))
+	if _, err := windowsCursorManagedAdapterDriftCandidate(reformatted, hookExecutable); err == nil {
+		t.Fatal("a state DefenseClaw did not write was accepted")
+	}
+	// GAP-2479: a deleted adapter gets this build's render back too.
+	missing := artifactsFor(current)
+	missing.adapter.existed = false
+	missing.adapter.data = nil
+	candidate, err := windowsCursorManagedAdapterDriftCandidate(missing, hookExecutable)
+	if err != nil {
+		t.Fatalf("a deleted adapter was not restored: %v", err)
+	}
+	if !candidate.adapter.existed || !bytes.Equal(candidate.adapter.data, current) {
+		t.Fatal("the restored deleted adapter is not this build's render")
+	}
+	if _, err := validateWindowsCursorManagedStateIdentity(candidate); err != nil {
+		t.Fatalf("the restored deleted adapter and state do not validate: %v", err)
+	}
+	noState := artifactsFor(current)
+	noState.state.existed = false
+	if _, err := windowsCursorManagedAdapterDriftCandidate(noState, hookExecutable); err == nil {
+		t.Fatal("an adapter without ownership state was accepted")
+	}
+}
+
 // GAP-1567: the purge removes the allow-only tombstone the default uninstall
 // keeps in ProgramData\Cursor, and only that exact file.
 func TestPurgeWindowsCursorManagedTombstoneRemovesOnlyTheTombstone(t *testing.T) {

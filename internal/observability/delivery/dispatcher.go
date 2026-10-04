@@ -87,7 +87,12 @@ type Dispatcher struct {
 
 	counters  atomicCounters
 	completed atomic.Uint64
-	now       func() time.Time
+	// flushTarget is the highest accepted count a pending Flush waits for.
+	// While completed is below it the worker skips the scheduled batch delay,
+	// so a flush (and the gateway's bounded shutdown flush) does not sit out
+	// a 5 s batch window behind a just-enqueued record (GAP-2538).
+	flushTarget atomic.Uint64
+	now         func() time.Time
 }
 
 // NewDispatcher validates limits and snapshots configuration without touching
@@ -268,6 +273,15 @@ func (dispatcher *Dispatcher) Flush(ctx context.Context) error {
 		return newError(ErrorInvalidContext)
 	}
 	target := dispatcher.counters.accepted.Load()
+	if dispatcher.completed.Load() < target {
+		for {
+			current := dispatcher.flushTarget.Load()
+			if current >= target || dispatcher.flushTarget.CompareAndSwap(current, target) {
+				break
+			}
+		}
+		dispatcher.signalWorker()
+	}
 	for dispatcher.completed.Load() < target {
 		select {
 		case <-dispatcher.flushNotify:
@@ -618,7 +632,7 @@ func (dispatcher *Dispatcher) waitForPending() bool {
 
 func (dispatcher *Dispatcher) waitScheduledDelay() bool {
 	delay := dispatcher.config.ScheduledDelay
-	if delay <= 0 || dispatcher.intakeIsStopped() {
+	if delay <= 0 || dispatcher.intakeIsStopped() || dispatcher.flushPending() {
 		return dispatcher.rootContext.Err() == nil
 	}
 	timer := time.NewTimer(delay)
@@ -630,11 +644,17 @@ func (dispatcher *Dispatcher) waitScheduledDelay() bool {
 		case <-timer.C:
 			return true
 		case <-dispatcher.wake:
-			if dispatcher.intakeIsStopped() {
+			if dispatcher.intakeIsStopped() || dispatcher.flushPending() {
 				return true
 			}
 		}
 	}
+}
+
+// flushPending reports whether a Flush is still waiting for work accepted
+// before it was called.
+func (dispatcher *Dispatcher) flushPending() bool {
+	return dispatcher.completed.Load() < dispatcher.flushTarget.Load()
 }
 
 // takeCircuitRejectedBatch removes already-accepted work without consulting

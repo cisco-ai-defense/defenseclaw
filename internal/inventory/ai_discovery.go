@@ -428,12 +428,14 @@ const (
 )
 
 // maxEvidencePerSignal caps the number of evidence rows the engine
-// will accept on a single signal. The bound is generous (manifests
-// + lockfiles + version pins for one component rarely produce more
-// than a dozen rows in practice) but it is finite so a malicious
-// pack cannot DOS the gateway or the SQLite store via a single
-// pathological signal.
-const maxEvidencePerSignal = 32
+// will accept on a single signal. A skills folder is one signal with
+// one row per skill, and a stock Hermes install alone bundles 58, so
+// at 32 every Hermes account stayed partial (cap_exceeded) and half
+// its skills were never named (GAP-2379). The bound matches the
+// per-user report's list limit (maxUserScanField) and stays finite
+// so a malicious pack cannot DOS the gateway or the SQLite store via
+// a single pathological signal.
+const maxEvidencePerSignal = 256
 
 type AIDiscoverySummary struct {
 	ScanID            string            `json:"scan_id"`
@@ -1533,7 +1535,12 @@ func (s *ContinuousDiscoveryService) classifyAndPersist(scanID, source string, s
 		// `mtime`-style hint via signal.LastActiveAt, keep that
 		// value; otherwise default LastActiveAt to `now` so consumers
 		// always have *some* "freshness" timestamp to render.
-		if sig.LastActiveAt == nil && !(sig.Model != nil && sig.Model.Status == "installed") {
+		// Shell-history matches are the exception: a substring hit in a
+		// flat command log carries no time of use, so stamping the scan
+		// time would report a tool that never ran as "last active: just
+		// now". Leave it nil; freshness falls back to LastSeen.
+		if sig.LastActiveAt == nil && sig.Detector != "shell_history" &&
+			!(sig.Model != nil && sig.Model.Status == "installed") {
 			t := now
 			sig.LastActiveAt = &t
 		}
@@ -1844,12 +1851,41 @@ func (s *ContinuousDiscoveryService) recordScanIfPossible(report AIDiscoveryRepo
 	}
 }
 
+// serviceListOnlyInstallFolders are the per-user install folders that the
+// managed Windows enumerator grants the gateway service list-only rights on
+// (inventoryDACLListOnlyDirs in internal/enterprisehooks). An agent that
+// updates itself replaces its folder (Amp recreates @ampcode\cli at start),
+// and the new folder lacks the grant until the next enumerator pass. A
+// folder the service is denied still exists, so it is not reported removed
+// and then discovered again with a new first_seen (GAP-2034).
+var serviceListOnlyInstallFolders = map[string]bool{
+	"$LOCALAPPDATA/Kiro-Cli":                 true,
+	"$LOCALAPPDATA/copilot/pkg":              true,
+	"$LOCALAPPDATA/devin/cli":                true,
+	"$APPDATA/npm/node_modules/@ampcode/cli": true,
+	"$LOCALAPPDATA/cursor-agent":             true,
+}
+
+// discoveryConfigStat is os.Stat; tests replace it.
+var discoveryConfigStat = os.Stat
+
+// configPathPresent reports whether a config candidate is on disk. On a
+// service-context scan a list-only install folder the service is denied
+// counts as present (serviceListOnlyInstallFolders).
+func (s *ContinuousDiscoveryService) configPathPresent(candidate, path string) bool {
+	_, err := discoveryConfigStat(path)
+	if err == nil {
+		return true
+	}
+	return len(s.opts.homeOwners) > 0 && serviceListOnlyInstallFolders[candidate] && errors.Is(err, os.ErrPermission)
+}
+
 func (s *ContinuousDiscoveryService) detectConfigPaths() []AISignal {
 	var out []AISignal
 	for _, sig := range s.catalog {
 		for _, candidate := range sig.ConfigPaths {
 			for _, path := range s.expandCandidatePath(candidate) {
-				if pathExists(path) {
+				if s.configPathPresent(candidate, path) {
 					category := SignalWorkspaceArtifact
 					if sig.SupportedConnector != "" {
 						category = SignalSupportedConnector
@@ -1950,6 +1986,12 @@ func (s *ContinuousDiscoveryService) signalFromMCPConfigPath(sig AISignature, pa
 // "unparseable" from "no servers declared". The plain readMCPServerNames
 // remains for callers that don't need the reason.
 func readMCPServerNamesWithErr(path string) ([]string, error) {
+	// An empty MCP config declares no server; it is not malformed.
+	// Antigravity leaves a 0-byte mcp_config.json, which read as a
+	// parse error and so as an MCP server row (GAP-2337).
+	if isBlankFile(path) {
+		return nil, nil
+	}
 	entries, err := parseMCPConfigForNames(path)
 	if err != nil {
 		return nil, err
@@ -1962,6 +2004,19 @@ func readMCPServerNamesWithErr(path string) ([]string, error) {
 		}
 	}
 	return names, nil
+}
+
+// isBlankFile reports a small regular file holding only whitespace.
+func isBlankFile(path string) bool {
+	st, err := os.Stat(path)
+	if err != nil || !st.Mode().IsRegular() || st.Size() > 4096 {
+		return false
+	}
+	if st.Size() == 0 {
+		return true
+	}
+	raw, err := os.ReadFile(path) // #nosec G304 -- catalog MCP config path
+	return err == nil && strings.TrimSpace(string(raw)) == ""
 }
 
 // readMCPServerNames parses `path` with the appropriate format-specific
@@ -2137,7 +2192,7 @@ func (s *ContinuousDiscoveryService) signalFromDirectoryChildren(sig AISignature
 			coverageReason = CoverageReasonReadError
 		default:
 			if detector == "skill" && strings.EqualFold(strings.TrimSpace(sig.ID), "hermes") &&
-				hermesskills.IsRoot(path) {
+				s.isHermesSkillsRoot(path) {
 				if childPartial, childReason := s.appendHermesSkillChildren(&evidence, path); childPartial {
 					partial = true
 					coverageReason = childReason
@@ -2155,6 +2210,12 @@ func (s *ContinuousDiscoveryService) signalFromDirectoryChildren(sig AISignature
 				}
 				name := sanitizeBasenameValue(entry.Name())
 				if name == "" {
+					continue
+				}
+				// A skill is a folder. A hidden file beside the skills is
+				// the agent's own state (Cursor .sync-manifest.json, the
+				// Codex .codex-system-skills.marker), not a skill (GAP-2263).
+				if detector == "skill" && isHiddenSkillStateFile(entry) {
 					continue
 				}
 				// Codex uses `.system` as a one-level skill container. Expand
@@ -2214,7 +2275,11 @@ func (s *ContinuousDiscoveryService) appendHermesSkillChildren(evidence *[]AIEvi
 	if remaining <= 0 {
 		return true, CoverageReasonCapExceeded
 	}
-	entries, err := hermesskills.Discover(root, hermesskills.DefaultDirectoryLimit)
+	discover := hermesskills.Discover
+	if !hermesskills.IsRoot(root) {
+		discover = hermesskills.DiscoverProfileRoot
+	}
+	entries, err := discover(root, hermesskills.DefaultDirectoryLimit)
 	if err != nil {
 		if errors.Is(err, os.ErrPermission) {
 			return true, CoverageReasonPermissionDenied
@@ -2251,6 +2316,41 @@ func (s *ContinuousDiscoveryService) appendHermesSkillChildren(evidence *[]AIEvi
 	return false, ""
 }
 
+// hermesProfileSkillsRoots are where a Hermes skills root sits in a
+// profile: %LOCALAPPDATA%\hermes\skills on Windows, ~/.hermes/skills
+// elsewhere (the catalog's two Hermes skill paths).
+var hermesProfileSkillsRoots = []string{
+	filepath.Join("AppData", "Local", "hermes", "skills"),
+	filepath.Join(".hermes", "skills"),
+}
+
+// isHermesSkillsRoot reports whether path is a Hermes skills root: this
+// process's own, or on a service-context scan (managed Windows) the one in
+// a scanned profile. hermesskills.IsRoot resolves only the service
+// account's own Hermes home, so every user's Hermes category folders and
+// .bundled_manifest were listed as skills (GAP-2263).
+func (s *ContinuousDiscoveryService) isHermesSkillsRoot(path string) bool {
+	if hermesskills.IsRoot(path) {
+		return true
+	}
+	owner, ok := s.homeOwnerForPath(path)
+	if !ok {
+		return false
+	}
+	for _, tail := range hermesProfileSkillsRoots {
+		if strings.EqualFold(filepath.Clean(path), filepath.Join(filepath.Clean(owner.Home), tail)) {
+			return true
+		}
+	}
+	return false
+}
+
+// isHiddenSkillStateFile reports a hidden regular file in a skills folder:
+// the agent's own state, not a skill (a skill is a folder).
+func isHiddenSkillStateFile(entry os.DirEntry) bool {
+	return strings.HasPrefix(entry.Name(), ".") && entry.Type().IsRegular()
+}
+
 // appendSystemSkillChildren enumerates one level below a Codex `.system`
 // container. Exact vendor-cache children are stamped bundled; children below
 // any other root are stamped user-owned. Nested subtrees are not recursed into.
@@ -2277,6 +2377,11 @@ func (s *ContinuousDiscoveryService) appendSystemSkillChildren(evidence *[]AIEvi
 		}
 		name := sanitizeBasenameValue(entry.Name())
 		if name == "" {
+			continue
+		}
+		// Codex keeps .codex-system-skills.marker inside .system; like
+		// any hidden file beside the skills it is not a skill (GAP-2263).
+		if isHiddenSkillStateFile(entry) {
 			continue
 		}
 		child := filepath.Join(systemDir, entry.Name())
@@ -2846,6 +2951,7 @@ func (s *ContinuousDiscoveryService) detectPackageManifests(ctx context.Context)
 	var out []AISignal
 	files := 0
 	walkErrs := 0
+	ownDataDirs := s.ownDataDirs()
 	// Walk each scan root; collect entries grouped by dir so we can
 	// compute lockfile-based version indexes once per dir.
 	for _, root := range s.scanRoots() {
@@ -2890,7 +2996,7 @@ func (s *ContinuousDiscoveryService) detectPackageManifests(ctx context.Context)
 				return filepath.SkipAll
 			}
 			if d.IsDir() {
-				if shouldSkipDiscoveryDir(d.Name()) && path != root {
+				if path != root && (shouldSkipDiscoveryDir(d.Name()) || modelPathInSet(path, ownDataDirs)) {
 					return filepath.SkipDir
 				}
 				return nil

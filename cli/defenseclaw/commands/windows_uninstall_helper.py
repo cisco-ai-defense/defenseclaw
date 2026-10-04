@@ -22,6 +22,8 @@ from pathlib import Path
 
 _ALLOWED_BINARIES = {
     "defenseclaw.cmd",
+    # The installer's copy of the venv's launcher (GAP-2237).
+    "defenseclaw.exe",
     "defenseclaw",
     "defenseclaw-gateway.exe",
     "defenseclaw-acp.exe",
@@ -40,6 +42,10 @@ _ALLOWED_BINARIES = {
 _RETIRED_COPY_RE = re.compile(r"\.(?P<name>.+)\.source-install-old-[0-9a-f]+", re.IGNORECASE)
 _OWNERSHIP_MARKERS = {"config.yaml", "audit.db", ".env", "policies", "quarantine", ".venv"}
 _LAUNCHER_UNWIND_GRACE_SECONDS = 1.0
+# scripts/install.ps1 holds this folder in the data dir while it installs; it
+# and "installer" and ".venv" are what a new install writes there (GAP-2149).
+_INSTALL_LOCK = ".install.lock"
+_NEW_INSTALL_ENTRIES = (_INSTALL_LOCK, "installer", ".venv")
 _LAUNCHER_WAIT_SECONDS = 15.0
 # An interactive cmd.exe that ran the shim stays open; do not wait long on it.
 _SHIM_SHELL_WAIT_SECONDS = 5.0
@@ -217,10 +223,14 @@ def _open_launchers(plan: dict[str, object]) -> list[tuple[int, float]]:
     Ancestors whose image lives in the managed runtime's Scripts folder are
     opened, then the cmd.exe running the shim (a shorter wait, since an
     interactive prompt stays open); the walk stops at any other process.
+    PowerShell and cmd.exe start the installer's defenseclaw.exe instead of
+    the shim (GAP-2237): it is opened too, and the walk ends there, since no
+    batch file is read after it.
     Each entry is (handle, seconds to wait at most).
     """
     kernel32 = _kernel32()
     scripts = _norm(os.path.join(str(plan["managed_venv"]), "Scripts")) + os.sep
+    cli_launcher = _norm(os.path.join(str(plan["install_root"]), "defenseclaw.exe"))
     parents = _parent_pids(kernel32)
     handles: list[tuple[int, float]] = []
     process_id = parents.get(int(plan["parent_pid"]), 0)
@@ -239,6 +249,9 @@ def _open_launchers(plan: dict[str, object]) -> list[tuple[int, float]]:
             handles.append((handle, _LAUNCHER_WAIT_SECONDS))
             process_id = parents.get(process_id, 0)
             continue
+        if _norm(image.value) == cli_launcher:
+            handles.append((handle, _LAUNCHER_WAIT_SECONDS))
+            break
         if handles and os.path.basename(_norm(image.value)) == "cmd.exe":
             handles.append((handle, _SHIM_SHELL_WAIT_SECONDS))
         else:
@@ -270,23 +283,66 @@ def _interpreter_dirs(plan: dict[str, object], data_dir: str) -> list[str]:
 
 
 _EMPTY_DIR_RD_TRIES = 30
+_LOCK_CLOCK_SLACK_SECONDS = 0.5
 
 
-def _result_step(status_path: str, gone: list[str]) -> str:
+class _SupersededError(Exception):
+    """A new install started in the data dir; the cleanup must not touch it."""
+
+
+def _superseded_detail(data_dir: str) -> str:
+    return (
+        f"a new DefenseClaw install started in {data_dir} before this cleanup finished, so the cleanup "
+        "stopped and left that folder and its launchers to the new install; nothing needs to be removed by hand"
+    )
+
+
+def _check_not_superseded(data_dir: str, since: float) -> None:
+    """Stop before deleting anything once an installer holds its lock in data_dir (GAP-2149).
+
+    A lock older than this helper is a leftover, not a new install. NTFS
+    stamps file times from the coarse system clock (one ~16 ms tick behind
+    time.time()), so a lock taken just after the helper started can look a
+    little older; _LOCK_CLOCK_SLACK_SECONDS absorbs that.
+    """
+    try:
+        changed = os.lstat(os.path.join(data_dir, _INSTALL_LOCK)).st_mtime
+    except OSError:
+        return
+    if changed >= since - _LOCK_CLOCK_SLACK_SECONDS:
+        raise _SupersededError(_superseded_detail(data_dir))
+
+
+def _result_step(status_path: str, gone: list[str], data_dir: str = "") -> str:
     """cmd.exe step that writes the uninstall result once the after-exit removal ran.
 
     It says failed with the first folder in gone that is still there, else
-    succeeded (GAP-1960).
+    succeeded (GAP-1960). By then the helper had emptied data_dir, so an
+    installer's entry in it means a new install now owns it: superseded, not
+    "remove it by hand" (GAP-2149).
     """
     step = f'(echo {{"status": "succeeded"}}>"{status_path}")'
     for path in reversed(gone):
         detail = json.dumps(f"could not remove {path}; remove it by hand")
         step = f'(if exist "{path}" (echo {{"status": "failed", "detail": {detail}}}>"{status_path}") else {step})'
+    if data_dir:
+        detail = json.dumps(_superseded_detail(data_dir))
+        for name in reversed(_NEW_INSTALL_ENTRIES):
+            marker = os.path.join(data_dir, name)
+            step = (
+                f'(if exist "{marker}" (echo {{"status": "superseded", "detail": {detail}}}>"{status_path}") '
+                f"else {step})"
+            )
     return step
 
 
 def _remove_after_exit(
-    dirs: list[str], empty_dirs: list[str], *, status_path: str = "", gone: list[str] | None = None
+    dirs: list[str],
+    empty_dirs: list[str],
+    *,
+    status_path: str = "",
+    gone: list[str] | None = None,
+    data_dir: str = "",
 ) -> bool:
     """Start cmd.exe to remove dirs (and then empty_dirs, if empty) after this process exits.
 
@@ -327,9 +383,9 @@ def _remove_after_exit(
         if not _CMD_METACHARACTERS & set(path)
     )
     must_go.extend(gone or [])
-    writes_result = bool(status_path) and not _CMD_METACHARACTERS & set(status_path + "".join(must_go))
+    writes_result = bool(status_path) and not _CMD_METACHARACTERS & set(status_path + "".join(must_go) + data_dir)
     if writes_result:
-        steps.append(_result_step(status_path, must_go))
+        steps.append(_result_step(status_path, must_go, data_dir))
     command = " & ".join(steps)
     flags = (
         getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
@@ -399,7 +455,31 @@ def _retry(action, description: str) -> None:
         except (OSError, ValueError) as exc:
             last_error = exc
             time.sleep(0.125)
-    raise OSError(f"{description} failed after waiting for file release: {last_error}")
+    raise OSError(f"{description} failed after waiting for file release: {last_error}") from last_error
+
+
+def _data_left_detail(plan: dict[str, object], data_dir: str, error: OSError) -> str:
+    """Say what is left of a data folder that could not go and what to do (GAP-2055)."""
+    held = getattr(error.__cause__, "filename", "") or ""
+    shim = os.path.join(str(plan["install_root"]), "defenseclaw.cmd")
+    flags = " --binaries" if plan.get("remove_empty_install_root") else ""
+    # PowerShell (the Windows Terminal default) needs the & call operator
+    # before a quoted command path; Command Prompt rejects it (GAP-2082).
+    rerun = (
+        f'run & "{shim}" uninstall --all{flags} --yes again in PowerShell (in Command Prompt, leave out the &)'
+        if os.path.isfile(shim)
+        else "remove it by hand"
+    )
+    if held:
+        detail = f"could not remove {data_dir}: {held} is in use by another program. Close that program, then {rerun}."
+    else:
+        detail = f"could not remove {data_dir}: {error.__cause__ or error}. To finish, {rerun}."
+    try:
+        left = sorted(os.listdir(data_dir))
+    except OSError:
+        left = []
+    names = ", ".join(f"{name} (holds API keys)" if name == ".env" else name for name in left)
+    return f"{detail} Still there: {names}." if names else detail
 
 
 def _remove_earlier_results(status_path: str) -> None:
@@ -448,6 +528,7 @@ def main() -> int:
     after_exit_empty: list[str] = []
     gone: list[str] = []
     deferred = False
+    started_at = time.time()
     try:
         with open(manifest_path, encoding="utf-8") as stream:
             plan = json.load(stream)
@@ -460,6 +541,17 @@ def main() -> int:
             launchers = _open_launchers(plan)
         except OSError:
             launchers = []
+        # The CLI prints this path once it sees ready, so it exists from then
+        # on and is the only result file in TEMP (GAP-2054).
+        _write_json(
+            status_path,
+            {
+                "status": "scheduled",
+                "detail": "cleanup starts when the uninstall command exits; "
+                "this file says succeeded or failed when it finishes",
+            },
+        )
+        _remove_earlier_results(status_path)
         _write_json(ready_path, {"status": "ready"})
 
         kernel32 = _kernel32()
@@ -478,10 +570,27 @@ def main() -> int:
         time.sleep(_LAUNCHER_UNWIND_GRACE_SECONDS)
 
         install_root, data_dir, targets = _validate_plan(plan)
+        if bool(plan.get("remove_data_dir")) and os.path.lexists(data_dir):
+
+            def remove_data() -> None:
+                _validate_plan(plan)
+                _check_not_superseded(data_dir, started_at)
+                _remove_tree(data_dir, marker_names=_OWNERSHIP_MARKERS, skip=set(interpreter_dirs))
+
+            # Data first: if it cannot go, the launchers stay, so the
+            # uninstall can run again (GAP-2055).
+            try:
+                _retry(remove_data, f"remove {data_dir}")
+            except OSError as exc:
+                raise OSError(_data_left_detail(plan, data_dir, exc)) from exc
+        # The data dir is gone (or only the helper's .uv is left in it), so
+        # the ownership-marker check no longer applies.
+        targets_plan = {**plan, "remove_data_dir": False}
         for target in targets:
 
             def remove_target(target=target):
-                _validate_plan(plan)
+                _validate_plan(targets_plan)
+                _check_not_superseded(data_dir, started_at)
                 os.unlink(target)
 
             _retry(remove_target, f"remove {target}")
@@ -491,13 +600,6 @@ def main() -> int:
                 os.rmdir(install_root)
             except OSError:
                 pass
-        if bool(plan.get("remove_data_dir")) and os.path.lexists(data_dir):
-
-            def remove_data() -> None:
-                _validate_plan(plan)
-                _remove_tree(data_dir, marker_names=_OWNERSHIP_MARKERS, skip=set(interpreter_dirs))
-
-            _retry(remove_data, f"remove {data_dir}")
         after_exit = interpreter_dirs
         after_exit_empty = [data_dir] if bool(plan.get("remove_data_dir")) else []
         after_exit_empty.extend(
@@ -518,7 +620,12 @@ def main() -> int:
             deferred = True
         else:
             _write_json(status_path, {"status": "succeeded"})
-        _remove_earlier_results(status_path)
+        return 0
+    except _SupersededError as exc:
+        try:
+            _write_json(status_path, {"status": "superseded", "detail": str(exc)})
+        except OSError:
+            pass
         return 0
     except Exception as exc:  # noqa: BLE001 - helper result boundary.
         payload = {"status": "failed", "detail": str(exc)}
@@ -551,7 +658,13 @@ def main() -> int:
             pass
         result: dict[str, object] = {"status": "succeeded"}
         try:
-            if _remove_after_exit(after_exit, after_exit_empty, status_path=status_path if deferred else "", gone=gone):
+            if _remove_after_exit(
+                after_exit,
+                after_exit_empty,
+                status_path=status_path if deferred else "",
+                gone=gone,
+                data_dir=data_dir if gone else "",
+            ):
                 result = {}
         except OSError as exc:
             result = {"status": "failed", "detail": f"could not start the final removal: {exc}"}

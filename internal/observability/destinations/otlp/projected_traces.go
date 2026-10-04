@@ -210,7 +210,10 @@ func (adapter *ProjectedTraceAdapter) deliverHTTP(
 		case wroteRequest.Load():
 			return failedResult(delivery.OutcomeAmbiguous, delivery.FailureCodeAcknowledgementLost)
 		default:
-			return failedResult(delivery.OutcomeTransient, transportFailureCode(err))
+			code := transportFailureCode(err)
+			endpoint, proxied := transportRoute(adapter.config)
+			logTransportFailure(adapter.destination, observability.SignalTraces, code, spanCount, endpoint, proxied)
+			return failedResult(delivery.OutcomeTransient, code)
 		}
 	}
 	if response == nil {
@@ -331,12 +334,16 @@ func (adapter *ProjectedTraceAdapter) classifyTraceResponse(
 	}
 	if result.PartialSuccess != nil && result.PartialSuccess.RejectedSpans > 0 {
 		accepted, rejected := adapter.recordTraceSuccess(spanCount, result.PartialSuccess.RejectedSpans)
+		logPartialRejection(adapter.destination, observability.SignalTraces, rejected, spanCount,
+			result.PartialSuccess.ErrorMessage)
 		if accepted > 0 && rejected > 0 {
 			return delivery.DeliveryResult{
 				Outcome: delivery.OutcomePartial, DeliveredItems: accepted, RejectedItems: rejected,
 			}
 		}
-		return deliveryResult(delivery.OutcomePermanentPayload)
+		// The collector answered 2xx but refused every span (Galileo does this
+		// for spans it cannot read). Name it as a refusal, not "unspecified".
+		return failedResult(delivery.OutcomePermanentPayload, delivery.FailureCodeHTTPRejected)
 	}
 	adapter.recordTraceSuccess(spanCount, 0)
 	for _, traceID := range canaryTraceIDs {

@@ -109,6 +109,9 @@ type windowsEnterpriseInstallerReport struct {
 	// stale committed managed-hook lifecycle journal itself (GAP-1322); it
 	// holds the retire failure that made the journal stale.
 	StaleLifecycleJournalRemoved string `json:"stale_lifecycle_journal_removed"`
+	// CursorAdapterRestored is set when the lifecycle wrote this release's
+	// Cursor enterprise adapter back over a changed or deleted one (GAP-2480).
+	CursorAdapterRestored bool `json:"cursor_adapter_restored"`
 
 	// probeFailed marks a failure document that reports no deployment
 	// state at all (no installed field and no pending transaction): the
@@ -244,6 +247,7 @@ func runWindowsEnterpriseStandaloneAction(
 			result := newWindowsEnterpriseStandaloneResult(action, opts)
 			result.Noop = true
 			result.NoopReason = "not_installed"
+			result.Inspection.Local = "disabled"
 			return finishWindowsEnterpriseStandalone(cmd, opts, result, 0)
 		}
 	}
@@ -267,7 +271,10 @@ func runWindowsEnterpriseStandaloneAction(
 	if (action == "status" || action == "verify") && !windowsEnterpriseIsElevated() && windowsEnterpriseInstallerRefusedModule(report) {
 		// A standard account cannot run the installer's own integrity checks,
 		// which only an administrator can; its refusal read as a broken
-		// install with administrator-only advice (GAP-1720).
+		// install with administrator-only advice (GAP-1720). Its --json
+		// result still reports what any account can read: the recorded
+		// deployment and the service states (GAP-2162).
+		applyWindowsEnterpriseRecordedDeployment(result)
 		result.AddError("elevation_required", windowsEnterpriseStandardUserInspectionAnswer(action))
 		return finishWindowsEnterpriseStandalone(cmd, opts, result, enterprisestatus.WindowsExitAccessDenied)
 	}
@@ -434,6 +441,14 @@ func applyWindowsEnterpriseInstallerReport(
 	result.Installed = report.Installed
 	result.TransactionPending = report.TransactionPending
 	result.InstalledVersion = report.InstalledVersion
+	if !report.Installed {
+		// Nothing inspects verdicts once the deployment is gone (GAP-2257).
+		result.Inspection.Local = "disabled"
+	} else if !report.GatewayReady {
+		// The gateway inspects verdicts; while it is not ready, report what
+		// Linux and macOS report when it does not answer (GAP-2285).
+		result.Inspection.Local = "unknown"
+	}
 	if opts != nil {
 		opts.deploymentTrustMode = windowsEnterpriseRecordedTrustMode(report.TrustMode)
 	}
@@ -662,6 +677,15 @@ func addWindowsEnterpriseRecoveryGatewayWarnings(result *enterprisestatus.Result
 			Message: "Setup removed the stale committed managed-hook lifecycle journal " +
 				"(managed-hooks-lifecycle-journal.json in the protected install state) because its retire could not complete: " +
 				windowsEnterpriseBoundedDiagnostic(removed),
+		})
+	}
+	if report.CursorAdapterRestored {
+		// The lifecycle rewrote a protected file on its own; say so in the
+		// result and the lifecycle log (GAP-2480).
+		warnings = append(warnings, enterprisestatus.Message{
+			Code: "cursor_adapter_restored",
+			Message: `DefenseClaw restored the changed or missing Cursor enterprise adapter ` +
+				`(C:\ProgramData\Cursor\defenseclaw-hook.ps1) from this release`,
 		})
 	}
 	for _, warning := range warnings {
@@ -1162,12 +1186,29 @@ func finishWindowsEnterpriseStandalone(
 ) error {
 	exitCode := result.Finish("windows", failureCode)
 	result.LogPath = windowsEnterpriseStandaloneObserver(result, opts)
+	unknownProfile := windowsEnterpriseUnknownProfileRequested(opts) && exitCode != 0 && len(result.Errors) != 0
+	// A standard account's refusal ran none of the deployment's checks or
+	// changes, so it is one refusal line too, not a FAILED summary and "the
+	// standalone enterprise status failed: ..." (GAP-2162). That holds for
+	// every action: repair and ensure added "the standalone enterprise
+	// <action> failed: elevation_required" after (or, interleaved with
+	// stdout, before) the sentence (GAP-2262).
+	oneLine := unknownProfile || (exitCode == enterprisestatus.WindowsExitAccessDenied &&
+		len(result.Errors) != 0 && result.Errors[0].Code == "elevation_required")
 	if opts.jsonOutput {
-		if err := json.NewEncoder(cmd.OutOrStdout()).Encode(result); err != nil {
+		if err := newEnterpriseJSONEncoder(cmd.OutOrStdout()).Encode(result); err != nil {
 			return withExitCode(fmt.Errorf("encode the standalone lifecycle result: %w", err), enterprisestatus.WindowsExitFailure)
 		}
-	} else {
+		// The JSON result carries every error in errors[] (GAP-2445).
+		cmd.SilenceErrors = true
+	} else if !oneLine {
 		writeWindowsEnterpriseStandaloneSummary(cmd.OutOrStdout(), result)
+	}
+	if oneLine {
+		// An unknown --profile selected no profile: one error line, not a
+		// "(standalone): FAILED" summary or "the standalone enterprise ...
+		// failed" of a profile never chosen (GAP-2040, GAP-2113).
+		return withExitCode(errors.New(result.Errors[0].Message), exitCode)
 	}
 	if exitCode == 0 {
 		return nil
@@ -1245,11 +1286,119 @@ func writeWindowsEnterpriseStandalonePreflightFailure(
 		code = "powershell7_untrusted"
 	}
 	message := cause.Error()
-	if code == "elevation_required" {
+	switch code {
+	case "elevation_required":
 		message = strings.TrimPrefix(message, code+": ")
+		// A standard account's repair, ensure, install or upgrade --json
+		// reported installed=false with no services on a healthy host:
+		// report what any account can read, as status and verify do
+		// (GAP-2012, GAP-2162).
+		applyWindowsEnterpriseRecordedDeployment(result)
+	case "invalid_arguments":
+		message = strings.TrimPrefix(message, errWindowsEnterpriseInvalidArguments.Error()+": ")
+		if windowsEnterpriseUnknownProfileRequested(opts) {
+			// Name the value once (GAP-2040); the resolution error keeps
+			// the text the Secure Client profile pins.
+			message = fmt.Sprintf("invalid --profile %q: use %s or %s",
+				strings.TrimSpace(opts.profile), managed.ProfileStandalone, managed.ProfileSecureClient)
+			applyWindowsEnterpriseRecordedDeployment(result)
+		}
 	}
 	result.AddError(code, message)
 	return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+}
+
+// windowsEnterpriseServiceState is a service's state as the installer
+// names it (running, stopped, absent, ...); tests replace it.
+var windowsEnterpriseServiceState = windowsEnterpriseSCMServiceState
+
+// applyWindowsEnterpriseRecordedDeployment gives a refused request's result
+// the deployment this computer records and its services' states. An unknown
+// --profile selects no profile and inspects nothing, so its --json result
+// reported an installed computer as installed=false with no services
+// (GAP-2113). A standard account cannot read the administrator-only record,
+// so for it a record that is present counts as installed with no version;
+// the service manager's states are readable by any account (GAP-2162).
+// Only the enumerator's and sensor helper's readiness follow from a service
+// state (as in a full status); the gateway's and guardian's readiness,
+// coverage_complete and security_complete need checks this refusal never
+// ran, so a health_not_checked warning says so instead of leaving their
+// false values to read as failed checks (GAP-2161).
+func applyWindowsEnterpriseRecordedDeployment(result *enterprisestatus.Result) {
+	for _, profile := range []string{managed.ProfileStandalone, managed.ProfileSecureClient} {
+		deployment, err := windowsEnterpriseDeploymentInspector(profile)
+		if err != nil {
+			continue
+		}
+		unreadable := deployment.State == winpath.EnterpriseDeploymentUnknown && !windowsEnterpriseIsElevated()
+		if deployment.State != winpath.EnterpriseDeploymentInstalled && !unreadable {
+			continue
+		}
+		result.Profile, result.Installed, result.InstalledVersion = profile, true, deployment.ProductVersion
+		for _, service := range []struct{ name, kind string }{
+			{"DefenseClawGateway", "gateway"},
+			{"DefenseClawHookGuardian", "guardian"},
+			{"DefenseClawHookEnumerator", "enumerator"},
+			{"DefenseClawSensorHelper", "sensor_helper"},
+		} {
+			state := windowsEnterpriseServiceState(service.name)
+			if state == "absent" {
+				continue
+			}
+			result.Services = append(result.Services, enterprisestatus.Service{
+				Name: service.name, Kind: service.kind, State: state, Required: true,
+			})
+			switch service.kind {
+			case "enumerator":
+				result.Readiness.Enumerator = state == "running"
+			case "sensor_helper":
+				result.Readiness.SensorHelper = state == "running"
+			}
+		}
+		result.AddWarning("health_not_checked", "this request was refused before any health check ran, so readiness.gateway, readiness.guardian, "+
+			"coverage_complete and security_complete were not checked (they read false); only the recorded deployment and the service states are reported. "+
+			"For the deployment's health, run `& '"+managedWindowsAdminCLI()+"' enterprise windows verify --profile "+profile+" --json` from an elevated PowerShell prompt")
+		return
+	}
+}
+
+// windowsEnterpriseSCMServiceState reads a service's state from the service
+// manager, which any account may query.
+func windowsEnterpriseSCMServiceState(name string) string {
+	manager, err := windows.OpenSCManager(nil, nil, windows.SC_MANAGER_CONNECT)
+	if err != nil {
+		return "unknown"
+	}
+	defer windows.CloseServiceHandle(manager)
+	namePointer, err := windows.UTF16PtrFromString(name)
+	if err != nil {
+		return "unknown"
+	}
+	service, err := windows.OpenService(manager, namePointer, windows.SERVICE_QUERY_STATUS)
+	if errors.Is(err, windows.ERROR_SERVICE_DOES_NOT_EXIST) {
+		return "absent"
+	}
+	if err != nil {
+		return "unknown"
+	}
+	defer windows.CloseServiceHandle(service)
+	var status windows.SERVICE_STATUS
+	if err := windows.QueryServiceStatus(service, &status); err != nil {
+		return "unknown"
+	}
+	switch status.CurrentState {
+	case windows.SERVICE_RUNNING:
+		return "running"
+	case windows.SERVICE_STOPPED:
+		return "stopped"
+	case windows.SERVICE_START_PENDING:
+		return "startpending"
+	case windows.SERVICE_STOP_PENDING:
+		return "stoppending"
+	case windows.SERVICE_PAUSED:
+		return "paused"
+	}
+	return "unknown"
 }
 
 // windowsEnterpriseStandaloneFootprintPresent reports any standalone

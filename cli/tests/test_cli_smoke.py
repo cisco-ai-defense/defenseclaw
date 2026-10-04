@@ -49,6 +49,30 @@ class CliSmokeTests(unittest.TestCase):
         self.assertIn("init", result.output)
         self.assertIn("skill", result.output)
 
+    def test_top_level_help_fits_80_columns(self):
+        # GAP-2138: the Multi-connector paragraph is a \b block, so click
+        # keeps its hand wrapping; every line must fit an 80-column terminal.
+        from defenseclaw.main import cli
+
+        result = CliRunner().invoke(cli, ["--help"], terminal_width=80)
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("tracked under\n", result.output)
+        wide = [line for line in result.output.splitlines() if len(line) > 80]
+        self.assertEqual(wide, [])
+    def test_group_help_rows_show_whole_summaries(self):
+        # GAP-2036: Click cut command summaries off with '...' at 80 columns.
+        import click
+        from defenseclaw.main import cli
+
+        for group in ("mcp", "skill", "setup", "guardrail", "audit"):
+            command = cli.commands[group]
+            text = command.get_help(click.Context(command, info_name=group, terminal_width=80))
+            commands = text.split("Commands:", 1)[1]
+            self.assertNotIn("...", commands, f"{group}: {commands}")
+            if group == "mcp":
+                self.assertIn("in the configured connector(s)' MCP config.", " ".join(commands.split()))
+
     def test_init_help_works(self):
         from defenseclaw.main import cli
 

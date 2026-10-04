@@ -203,6 +203,12 @@ class MCPServerEntry:
     source_scope: str = ""
     trust_required: bool = False
     bundled: bool = False
+    # Why the agent itself skips this entry ("" = it loads). Set for Claude
+    # Code entries it rejects, so list/scan/doctor do not call them live.
+    load_problem: str = ""
+    # True when ``mcp set`` rewrites the skipped entry itself (the user-scope
+    # ``mcpServers`` it writes). Other scopes are repaired in their own file.
+    load_problem_set_repairs: bool = False
 
 
 @dataclass(frozen=True)
@@ -377,6 +383,42 @@ def _claude_mcp_entry(entry: dict[str, Any]) -> dict[str, Any]:
     else:
         return out
     return {"type": kind, **out}
+
+
+def _flag_claude_unloadable(
+    entries: list[MCPServerEntry], servers: Any, path: str, *, user_scope: bool = False,
+    where: str = "",
+) -> list[MCPServerEntry]:
+    """Mark the entries Claude Code skips as not loaded (GAP-2514).
+
+    Claude Code skips a ``url`` entry without ``type`` ("has a \"url\" but
+    no \"type\""), the shape ``mcp set`` wrote before GAP-1837. The entry
+    stays listed (so ``mcp unset`` and the repair still find it) but carries
+    ``load_problem`` instead of passing as a live server. ``mcp set`` only
+    writes the user-scope ``mcpServers`` of :func:`claude_mcp_state_path`,
+    so only those entries say it repairs them (GAP-2528). ``where`` names
+    the key inside *path* (a per-project entry, GAP-2530).
+    """
+    set_repairs = user_scope and os.path.normcase(os.path.abspath(path)) == os.path.normcase(
+        os.path.abspath(claude_mcp_state_path())
+    )
+    if not isinstance(servers, dict):
+        return entries
+    out: list[MCPServerEntry] = []
+    for entry in entries:
+        cfg = servers.get(entry.name)
+        if (
+            isinstance(cfg, dict)
+            and str(cfg.get("url", "") or "").strip()
+            and not str(cfg.get("type", "") or "").strip()
+        ):
+            entry = replace(
+                entry,
+                load_problem=f'has a "url" but no "type" in {path}{where}',
+                load_problem_set_repairs=set_repairs,
+            )
+        out.append(entry)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -708,8 +750,9 @@ def claude_auto_memory_resolution(
     if not workspace:
         return ClaudeAutoMemoryResolution(
             limitation=(
-                "Claude auto-memory project identity is unresolved because no "
-                "connector workspace/session CWD is available"
+                "Claude auto-memory is not listed: no project folder is set "
+                "(claw.workspace_dir), so DefenseClaw cannot tell which "
+                "project's memory Claude Code uses"
             ),
         )
     project_root, project_limitation = _claude_project_root(workspace)
@@ -3589,7 +3632,9 @@ def _claudecode_mcp_servers(
     )
     if project_mcp:
         entries.extend(
-            _read_dotmcp_json(project_mcp, diagnostic_sink=diagnostic_sink)
+            _read_dotmcp_json(
+                project_mcp, diagnostic_sink=diagnostic_sink, claude_schema=True,
+            )
         )
     entries.extend(user_entries)
 
@@ -3654,10 +3699,17 @@ def _read_claude_mcp_state(
             )
             if normalized_key != normalized_workspace:
                 continue
-            local_entries = _parse_mcp_servers_value(project_state.get("mcpServers"))
+            local_servers = project_state.get("mcpServers")
+            local_entries = _flag_claude_unloadable(
+                _parse_mcp_servers_value(local_servers), local_servers, path,
+                where=f' (projects["{project_key}"].mcpServers)',
+            )
             break
 
-    user_entries = _parse_mcp_servers_value(data.get("mcpServers"))
+    user_servers = data.get("mcpServers")
+    user_entries = _flag_claude_unloadable(
+        _parse_mcp_servers_value(user_servers), user_servers, path, user_scope=True,
+    )
     return local_entries, user_entries
 
 
@@ -4602,6 +4654,7 @@ def _read_dotmcp_json(
     *,
     source_scope: str = "",
     diagnostic_sink: list[MCPSourceDiagnostic] | None = None,
+    claude_schema: bool = False,
 ) -> list[MCPServerEntry]:
     """Parse a project-local ``.mcp.json``.
 
@@ -4623,10 +4676,10 @@ def _read_dotmcp_json(
     if not isinstance(data, dict):
         return []
     inner = data.get("mcpServers")
-    if isinstance(inner, dict):
-        entries = _parse_mcp_servers_dict(inner)
-    else:
-        entries = _parse_mcp_servers_dict(data)
+    servers = inner if isinstance(inner, dict) else data
+    entries = _parse_mcp_servers_dict(servers)
+    if claude_schema:
+        entries = _flag_claude_unloadable(entries, servers, path)
     if source_scope:
         return [
             replace(entry, source=path, source_scope=source_scope)
@@ -7661,14 +7714,13 @@ def _set_claudecode_mcp_server(
             identity_matches = _claude_postimage_identity_matches(path, state)
             if raw != postimage or not identity_matches:
                 state["exact_restore"] = False
-            if not identity_matches:
-                released.update(state["managed"])
-                state["managed"].clear()
-            else:
-                previously_managed = set(state["managed"])
-                if _reconcile_claude_managed_servers(state, data):
-                    released.update(previously_managed - set(state["managed"]))
-                    state["exact_restore"] = False
+            # Claude Code rewrites ~/.claude.json as it runs (new inode, its own
+            # state added), so ownership follows each entry's value, not the
+            # file identity (GAP-2541).
+            previously_managed = set(state["managed"])
+            if _reconcile_claude_managed_servers(state, data):
+                released.update(previously_managed - set(state["managed"]))
+                state["exact_restore"] = False
             if not state["managed"]:
                 _finish_claude_mcp_episode(path, None, released)
                 state = None
@@ -7770,12 +7822,24 @@ def _unset_claude_without_state(
     return True
 
 
-def _raise_claude_mcp_not_removed(path: str, name: str, data: dict[str, Any]) -> None:
+_CLAUDE_ENTRY_CHANGED = "the entry changed after DefenseClaw wrote it"
+_CLAUDE_ENTRY_CHANGED_OR_PRIOR = (
+    "the entry changed after DefenseClaw wrote it, or it was there before DefenseClaw wrote it"
+)
+
+
+def _raise_claude_mcp_not_removed(
+    path: str,
+    name: str,
+    data: dict[str, Any],
+    reason: str = _CLAUDE_ENTRY_CHANGED_OR_PRIOR,
+) -> None:
+    # A Claude Code rewrite alone no longer releases an entry (GAP-2541), so
+    # the reason names the entry's own change, not the rewrite (GAP-2553).
     servers = data.get("mcpServers")
     if isinstance(servers, dict) and name in servers:
         raise MCPServerNotRemovedError(
-            f"DefenseClaw no longer owns {name!r} in {path} (Claude Code rewrote the file as it ran, "
-            "or the entry was there before DefenseClaw wrote it), so it left the entry in place; "
+            f"DefenseClaw no longer owns {name!r} in {path} ({reason}), so it left the entry in place; "
             f"remove it with: claude mcp remove {name} -s user"
         )
 
@@ -7806,14 +7870,12 @@ def _unset_claudecode_mcp_server(path: str, name: str) -> bool | str:
         if not bytes_match:
             state["exact_restore"] = False
         target_was_owned = name in state["managed"]
-        if not identity_matches:
-            released.update(state["managed"])
-            state["managed"].clear()
-        else:
-            previously_managed = set(state["managed"])
-            if _reconcile_claude_managed_servers(state, data):
-                released.update(previously_managed - set(state["managed"]))
-                state["exact_restore"] = False
+        # An entry still exactly as DefenseClaw wrote it stays DefenseClaw's,
+        # even after Claude Code rewrote the file around it (GAP-2541).
+        previously_managed = set(state["managed"])
+        if _reconcile_claude_managed_servers(state, data):
+            released.update(previously_managed - set(state["managed"]))
+            state["exact_restore"] = False
 
         if not state["managed"]:
             _finish_claude_mcp_episode(path, None, released)
@@ -7821,7 +7883,12 @@ def _unset_claudecode_mcp_server(path: str, name: str) -> bool | str:
                 # The file changed since DefenseClaw wrote the entry, so it
                 # is no longer DefenseClaw's to remove (GAP-1400): say so
                 # rather than let the caller report it removed.
-                _raise_claude_mcp_not_removed(path, name, data)
+                _raise_claude_mcp_not_removed(
+                    path,
+                    name,
+                    data,
+                    _CLAUDE_ENTRY_CHANGED if target_was_owned else _CLAUDE_ENTRY_CHANGED_OR_PRIOR,
+                )
                 return False
             return _unset_claude_without_state(path, name, raw, data, released)
 
@@ -7875,6 +7942,11 @@ def _unset_claudecode_mcp_server(path: str, name: str) -> bool | str:
 
         if not changed:
             _commit_claude_state_without_config(path, next_state, raw, released)
+            if target_was_owned:
+                # Other entries are still DefenseClaw's, but this one changed
+                # after DefenseClaw wrote it: say so, as the last-entry case
+                # does, rather than let the caller report it removed (GAP-2570).
+                _raise_claude_mcp_not_removed(path, name, data, _CLAUDE_ENTRY_CHANGED)
             return False
 
         if not next_state["managed"]:

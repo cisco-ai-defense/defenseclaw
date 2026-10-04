@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 type blockingEvaluator struct{}
@@ -555,5 +556,51 @@ func TestCopyFramesActionAbortedTurnDropsLateAgentAnswer(t *testing.T) {
 	}
 	if len(state.abortedPrompts) != 0 || len(state.mutedSessions) != 0 {
 		t.Fatalf("aborted turn state left behind: %v %v", state.abortedPrompts, state.mutedSessions)
+	}
+}
+
+// notReadyEvaluator answers HTTP 503 (ErrGatewayNotReady) `failures` times.
+type notReadyEvaluator struct{ failures, calls int }
+
+func (e *notReadyEvaluator) Evaluate(context.Context, Evaluation) (Verdict, error) {
+	e.calls++
+	if e.calls <= e.failures {
+		return Verdict{}, fmt.Errorf("%w: ACP evaluator returned HTTP 503", ErrGatewayNotReady)
+	}
+	return Verdict{Action: "allow"}, nil
+}
+
+// Right after acp setup turned the guard on, the gateway answered 503 until
+// it reloaded the config, and the editor was told it "did not answer"
+// (GAP-2135). The guard now waits before its one retry, and a refusal names
+// the real cause.
+func TestCopyFramesActionGatewayNotReadyRetriesAfterAPauseAndNamesTheCause(t *testing.T) {
+	saved := gatewayNotReadyRetryDelay
+	gatewayNotReadyRetryDelay = 20 * time.Millisecond
+	t.Cleanup(func() { gatewayNotReadyRetryDelay = saved })
+	prompt := `{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"s","prompt":[]}}` + "\n"
+
+	loading := &notReadyEvaluator{failures: 1}
+	var forwarded, rejected bytes.Buffer
+	state := &proxyState{pendingClient: map[string]string{}, pendingAgent: map[string]string{}}
+	started := time.Now()
+	if err := copyFrames(context.Background(), ProxyOptions{Mode: ModeAction, Evaluator: loading}, state, ClientToAgent, bytes.NewBufferString(prompt), &forwarded, &rejected); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(forwarded.String(), `"id":3`) || rejected.Len() != 0 || loading.calls != 2 {
+		t.Fatalf("a 503 was not retried: calls=%d forwarded=%q rejected=%q", loading.calls, forwarded.String(), rejected.String())
+	}
+	if elapsed := time.Since(started); elapsed < gatewayNotReadyRetryDelay {
+		t.Fatalf("retried after %v, want a pause of at least %v", elapsed, gatewayNotReadyRetryDelay)
+	}
+
+	notReady := &notReadyEvaluator{failures: 2}
+	forwarded.Reset()
+	state = &proxyState{pendingClient: map[string]string{}, pendingAgent: map[string]string{}}
+	if err := copyFrames(context.Background(), ProxyOptions{Mode: ModeAction, Evaluator: notReady, Stderr: io.Discard}, state, ClientToAgent, bytes.NewBufferString(prompt), &forwarded, &rejected); err != nil {
+		t.Fatal(err)
+	}
+	if text, _ := blockedTurn(t, rejected.Bytes(), "3"); text != gatewayNotReadyReason || strings.Contains(text, "did not answer") {
+		t.Fatalf("refused turn = %q", text)
 	}
 }

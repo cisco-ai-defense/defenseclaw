@@ -410,16 +410,23 @@ gateway_pid() {
 }
 
 installed_version() {
-    local info
+    # The gateway on PATH is the install that runs. A `make all` source install
+    # replaces it (and the CLI link) but leaves an older release venv behind, so
+    # that venv's version is only the fallback (GAP-2454).
+    local info version=""
+    if [[ -x "${BIN_DIR}/defenseclaw-gateway" ]]; then
+        version="$("${BIN_DIR}/defenseclaw-gateway" --version 2>/dev/null | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+    fi
+    if [[ -n "${version}" ]]; then
+        printf '%s' "${version}"
+        return
+    fi
     for info in "${VENV}"/lib/python*/site-packages/defenseclaw-*.dist-info; do
         [[ -d "${info}" ]] || continue
         info="${info##*/defenseclaw-}"
         printf '%s' "${info%.dist-info}"
         return
     done
-    if [[ -x "${BIN_DIR}/defenseclaw-gateway" ]]; then
-        "${BIN_DIR}/defenseclaw-gateway" --version 2>/dev/null | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true
-    fi
 }
 
 stop_gateway() {
@@ -743,6 +750,23 @@ if [[ "${WAS_RUNNING}" == true ]]; then
     restart_openclaw
 fi
 
+# True when the config sets guardrail.enabled to false, as 'uninstall' and
+# 'setup guardrail --disable' write it (a direct child of the top-level block).
+guardrail_off() {
+    local config="${DEFENSECLAW_CONFIG:-${DEFENSECLAW_HOME}/config.yaml}"
+    [[ -f "${config}" ]] || return 1
+    awk '
+        /^guardrail:[ \t]*$/ { block = 1; indent = 0; next }
+        block && /^[^ \t#]/ { block = 0 }
+        block && /^[ \t]+[^ \t#]/ {
+            match($0, /^[ \t]+/)
+            if (!indent) indent = RLENGTH
+            if (RLENGTH == indent && $0 ~ /^[ \t]+enabled:[ \t]*false[ \t]*(#.*)?\r?$/) off = 1
+        }
+        END { exit !off }
+    ' "${config}"
+}
+
 if [[ -z "${PREV_VERSION}" ]]; then
     first_install_extras
 elif [[ "${RUN_QUICKSTART}" == true && ! -f "${DEFENSECLAW_HOME}/config.yaml" && -z "${DEFENSECLAW_CONFIG:-}" ]]; then
@@ -769,8 +793,15 @@ fi
 if [[ -n "${PREV_VERSION}" && -z "$(gateway_pid || true)" ]] \
     && [[ -f "${DEFENSECLAW_HOME}/config.yaml" || -n "${DEFENSECLAW_CONFIG:-}" ]]; then
     # GAP-1496: it was not running before the upgrade, so it was not started.
-    warn "The gateway is not running, so agent hooks are not guarded until it is"
-    printf "  Start it with: ${CYAN}defenseclaw-gateway start${NC}\n"
+    if guardrail_off; then
+        # GAP-2481: 'uninstall --binaries' turned the guardrail off and tore the
+        # connector hooks down; a gateway start alone does not set them up again.
+        warn "Protection is off in the kept config (guardrail.enabled = false), so agent hooks are not guarded"
+        printf "  Turn it back on with: ${CYAN}defenseclaw setup guardrail${NC}\n"
+    else
+        warn "The gateway is not running, so agent hooks are not guarded until it is"
+        printf "  Start it with: ${CYAN}defenseclaw-gateway start${NC}\n"
+    fi
 fi
 if [[ -n "${PREV_VERSION}" && "${RUN_QUICKSTART}" != true && ! -f "${DEFENSECLAW_HOME}/config.yaml" && -z "${DEFENSECLAW_CONFIG:-}" ]]; then
     # An earlier install that was never initialized: say how to start, as a
@@ -790,8 +821,14 @@ if [[ -n "${APP_RELAUNCH:-}" ]]; then
 fi
 printf "\n"
 if [[ -n "${QUICKSTART_RERUN}" ]]; then
-    err "Quickstart failed (exit ${QUICKSTART_RC}): DefenseClaw ${VERSION} is installed, but ${CONNECTOR} is not set up yet"
-    printf "  Fix what quickstart reported above ('defenseclaw doctor' helps), then run:\n    ${CYAN}%s${NC}\n\n" "${QUICKSTART_RERUN}"
+    if [[ "${CONNECTOR}" == hermes ]] && ! PATH="${BIN_DIR}:${PATH}" has hermes; then
+        # GAP-2383: the agent itself is missing, so say how to get it.
+        err "Quickstart failed (exit ${QUICKSTART_RC}): DefenseClaw ${VERSION} is installed, but Hermes is not installed yet"
+        printf "  Install Hermes (https://github.com/NousResearch/hermes-agent), then run:\n    ${CYAN}%s${NC}\n\n" "${QUICKSTART_RERUN}"
+    else
+        err "Quickstart failed (exit ${QUICKSTART_RC}): DefenseClaw ${VERSION} is installed, but ${CONNECTOR} is not set up yet"
+        printf "  Fix what quickstart reported above ('defenseclaw doctor' helps), then run:\n    ${CYAN}%s${NC}\n\n" "${QUICKSTART_RERUN}"
+    fi
     exit 4
 fi
 if [[ "${OPENCLAW_MISSING}" == true ]]; then
@@ -1161,6 +1198,18 @@ restart_old() {
     fi
 }
 
+# A 1.0.0 gateway cannot start on a WAL-mode audit.db whose 5-second startup
+# check times out (a large store): SQLite drops and recreates audit.db-wal,
+# and 1.0.0 refuses the new file (fixed in 1.0.1). In rollback-journal mode
+# it starts, and switches the database back to WAL itself (GAP-1988).
+AUDIT_JOURNAL_PY="import sqlite3,sys;c=sqlite3.connect(sys.argv[1],timeout=10);c.execute('pragma journal_mode').fetchone()[0]=='wal' and c.execute('pragma journal_mode=delete').fetchone();c.close()"
+
+reset_audit_journal_mode() {
+    local db="${DEFENSECLAW_HOME}/audit.db"
+    [[ -f "${db}" && -x "${VENV}/bin/python" ]] || return 0
+    "${VENV}/bin/python" -c "${AUDIT_JOURNAL_PY}" "${db}" >/dev/null 2>&1 || true
+}
+
 start_gateway() {
     local log="${DEFENSECLAW_HOME}/gateway.log" from=0 rc=0 deadline up=0 version delegate=""
     info "Starting the gateway"
@@ -1170,6 +1219,7 @@ start_gateway() {
     # launches the gateway; the loop below then waits for it.
     version="$("${BIN_DIR}/defenseclaw-gateway" --version 2>/dev/null | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
     if [[ -n "${version}" ]] && version_lt "${version}" 1.0.0; then delegate=1; fi
+    if [[ -n "${version}" ]] && version_lt "${version}" 1.0.1; then reset_audit_journal_mode; fi
     [[ -f "${log}" ]] && from="$(wc -c < "${log}" | tr -d ' ')"
     if [[ -n "${delegate}" ]]; then
         PATH="${BIN_DIR}:${PATH}" DEFENSECLAW_UPGRADE_FRESH_PROCESS=1 "${BIN_DIR}/defenseclaw-gateway" start || rc=$?
@@ -1455,8 +1505,19 @@ PY
 # when its own gateway restarts.
 restart_openclaw() {
     openclaw_connector_active && has openclaw || return 0
-    openclaw gateway restart >/dev/null 2>&1 && ok "OpenClaw gateway restarted" \
-        || warn "Restart the OpenClaw gateway to load the updated plugin: openclaw gateway restart"
+    local out
+    if ! out="$(openclaw gateway restart 2>&1)"; then
+        warn "Restart the OpenClaw gateway to load the updated plugin: openclaw gateway restart"
+        return 0
+    fi
+    # OpenClaw exits 0 but restarts nothing when no gateway service is
+    # installed ("Gateway service disabled"), for example a foreground
+    # `openclaw gateway`. Don't claim a restart (GAP-2207, as GAP-1408 in setup).
+    if grep -Eqi 'openclaw gateway install|service (is )?(disabled|not (loaded|enabled|installed|registered|found))' <<<"${out}"; then
+        warn "No OpenClaw gateway service to restart. Restart the OpenClaw gateway to load the updated plugin: if it runs in a terminal, restart 'openclaw gateway' there"
+        return 0
+    fi
+    ok "OpenClaw gateway restarted"
 }
 
 openclaw_connector_active() {

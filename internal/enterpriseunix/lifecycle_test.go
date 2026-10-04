@@ -680,7 +680,7 @@ func TestLifecycleLockIsExclusive(t *testing.T) {
 	r := h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")})
 	requireError(t, r, codeBusy)
 	if msg := r.Errors[len(r.Errors)-1].Message; !strings.Contains(msg, "--lock-wait <duration>") ||
-		!strings.Contains(msg, "waited "+formatLockWait(h.env.LockTimeout)+" for it") {
+		!strings.Contains(msg, "waited "+FormatLockWait(h.env.LockTimeout)+" for it") {
 		t.Fatalf("busy must name the wait done and the next step (GAP-1427, GAP-1722): %q", msg)
 	}
 	// GAP-1722: a run that already waited the longest allowed time is not
@@ -698,7 +698,8 @@ func TestLifecycleLockIsExclusive(t *testing.T) {
 	// unit accepts, instead of failing on the half-changed deployment.
 	verify := h.run(Options{Action: ActionVerify})
 	requireError(t, verify, codeBusy)
-	if msg := verify.Errors[len(verify.Errors)-1].Message; !strings.Contains(msg, "rerun verify") {
+	if msg := verify.Errors[len(verify.Errors)-1].Message; !strings.Contains(msg, "rerun verify") ||
+		!strings.Contains(msg, "; waited "+FormatLockWait(h.env.LockTimeout)+" for it;") {
 		t.Fatalf("busy verify must name the next step: %q", msg)
 	}
 	if verify.ExitCode != enterprisestatus.UnixExitBusy {
@@ -710,6 +711,34 @@ func TestLifecycleLockIsExclusive(t *testing.T) {
 	}
 	if !strings.Contains(string(unit), "\nSuccessExitStatus=75\n") {
 		t.Fatalf("a busy verify leaves its unit failed:\n%s", unit)
+	}
+}
+
+// GAP-2246: status during another run (a repair restarting the services)
+// says the run is in progress instead of listing every stopped service and
+// naming repair; it still reports the recorded deployment, so MDM
+// detection sees it installed.
+func TestStatusDuringAnotherRunReportsBusy(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+			held, err := h.env.acquireLock(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			status := h.run(Options{Action: ActionStatus})
+			held.release()
+			requireError(t, status, codeBusy)
+			// GAP-2409: it says how long it waited, as ensure does.
+			if len(status.Errors) != 1 || !strings.Contains(status.Errors[0].Message, "rerun status") ||
+				!strings.Contains(status.Errors[0].Message, "; waited "+FormatLockWait(h.env.LockTimeout)+" for it;") {
+				t.Fatalf("busy status must be the one busy error naming its next step: %+v", status.Errors)
+			}
+			if !status.Installed || status.InstalledVersion != "1.0.0" || status.ExitCode != enterprisestatus.UnixExitBusy {
+				t.Fatalf("busy status: installed=%v version=%q exit=%d", status.Installed, status.InstalledVersion, status.ExitCode)
+			}
+		})
 	}
 }
 

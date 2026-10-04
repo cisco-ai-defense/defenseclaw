@@ -520,6 +520,9 @@ func TestScanV8NamesPathTargetsAndKeepsFindingsOutOfClean(t *testing.T) {
 		`C:\Users\u\.claude\skills\ws1-notes`: "ws1-notes",
 		"skill://demo":                        "skill://demo",
 		"http://127.0.0.1:8000/mcp":           "http://127.0.0.1:8000/mcp",
+		// GAP-2338: names the identifier grammar rejects still name the target.
+		"/home/u/.hermes/hermes-agent/plugins/__pycache__": "plugins/__pycache__",
+		`C:\Users\u\plugins\My Plugin`:                     "plugins/My_Plugin",
 	} {
 		if got, ok := scanV8TargetRef(target).Get(); !ok || got != want {
 			t.Errorf("scanV8TargetRef(%q) = %q, %v; want %q", target, got, ok, want)
@@ -534,5 +537,26 @@ func TestScanV8NamesPathTargetsAndKeepsFindingsOutOfClean(t *testing.T) {
 	}
 	if got := scanV8Verdict(withFinding, "block"); got != "block" {
 		t.Errorf("explicit verdict = %q, want block", got)
+	}
+}
+
+// GAP-2440: plugins nested in a category folder under a plugins root keep
+// that category, so same-named plugins stay distinct in audit.
+func TestScanV8PluginTargetRefKeepsCategoryFolder(t *testing.T) {
+	for _, tc := range []struct{ target, targetType, want string }{
+		{"/opt/hermes/plugins/browser/firecrawl", "plugin", "browser/firecrawl"},
+		{"/opt/hermes/plugins/web/firecrawl", "plugin", "web/firecrawl"},
+		{`C:\Users\u\hermes\plugins\image_gen\openrouter`, "plugin", "image_gen/openrouter"},
+		{"/home/u/.hermes/plugins/notes", "plugin", "notes"},
+		// GAP-2453: Hermes lists its bundled platforms/* plugins by the bare
+		// name; a user-root platforms folder keeps category/name.
+		{"/home/u/.hermes/hermes-agent/plugins/platforms/discord", "plugin", "discord"},
+		{"/home/u/.hermes/plugins/platforms/mine", "plugin", "platforms/mine"},
+		{"/home/u/.claude/skills/review/notes", "skill", "notes"},
+	} {
+		result := &scanner.ScanResult{Target: tc.target, TargetType: tc.targetType}
+		if got, ok := scanV8ResultTargetRef(result).Get(); !ok || got != tc.want {
+			t.Errorf("scanV8ResultTargetRef(%q, %s) = %q, %v; want %q", tc.target, tc.targetType, got, ok, tc.want)
+		}
 	}
 }

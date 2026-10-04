@@ -179,6 +179,14 @@ func snapshotCodexSetupRuntime(opts SetupOpts, connector *CodexConnector) (codex
 	} {
 		paths[path] = 0o600
 	}
+	if codexDotEnvSupported() {
+		// A symlinked .env (dotfile managers) is edited through the link by
+		// the atomic transform and is not snapshotted here.
+		dotEnvPath := codexDotEnvPath()
+		if info, err := os.Lstat(dotEnvPath); os.IsNotExist(err) || (err == nil && info.Mode().IsRegular()) {
+			paths[dotEnvPath] = codexDotEnvPerm(dotEnvPath)
+		}
+	}
 
 	for path, perm := range paths {
 		fileSnapshot := codexSetupRuntimeFileSnapshot{path: path, perm: perm}
@@ -405,6 +413,17 @@ func (c *CodexConnector) setupLocked(ctx context.Context, opts SetupOpts) error 
 			codexUsesManagedHookLayer(opts),
 		)
 	}
+	// GAP-1550: keep Codex's native OTLP exports to the loopback gateway
+	// (and their bearer) off HTTP(S)_PROXY; see codex_dotenv.go.
+	if err := ensureCodexDotEnvProxyBypass(opts); err != nil {
+		return c.rollbackSetupAfterSnapshot(
+			opts,
+			runtimeSnapshot,
+			fmt.Errorf("codex .env loopback NO_PROXY: %w", err),
+			true,
+			codexUsesManagedHookLayer(opts),
+		)
+	}
 
 	if opts.InstallCodeGuard {
 		if err := ensureCodexCodeGuardSkill(ctx, opts); err != nil {
@@ -433,6 +452,9 @@ func (c *CodexConnector) teardownLocked(ctx context.Context, opts SetupOpts) err
 		// reference it. Revoking first would strand a partially restored Codex
 		// config on a permanently unauthorized endpoint.
 		return fmt.Errorf("codex teardown: config restore: %w", err)
+	}
+	if err := removeCodexDotEnvProxyBypass(opts); err != nil {
+		return fmt.Errorf("codex teardown: .env loopback NO_PROXY: %w", err)
 	}
 	if runtime.GOOS == "windows" {
 		if err := c.restoreCodexManagedHooks(opts); err != nil {
@@ -499,6 +521,7 @@ func (c *CodexConnector) VerifyClean(opts SetupOpts) error {
 	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("read codex config while verifying cleanup: %w", err)
 	}
+	residual = append(residual, codexDotEnvResidue()...)
 	if runtime.GOOS == "windows" {
 		managedPath := codexManagedConfigPath()
 		if data, err := os.ReadFile(managedPath); err == nil {
@@ -1704,7 +1727,16 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 		exactBackupSafe := true
 		if err := atomicTransformFileWithStateDir(configPath, opts.DataDir, 0o600, func(raw []byte, exists bool) (atomicTransformResult, error) {
 			if !managedFileBackupMatchesSnapshot(managedBackup, raw, exists) {
-				exactBackupSafe = false
+				// Codex writes its own entries (folder trust, model choice) to
+				// config.toml, so the record drifts in normal use. Re-record the
+				// current bytes instead of dropping the record: teardown filters
+				// DefenseClaw's fields out of an exact restore, so the outside
+				// edit survives either way, and doctor keeps drift detection
+				// after a plain gateway restart (GAP-2300).
+				managedBackup = recaptureManagedFileBackup(
+					opts.DataDir, c.Name(), "config.toml", configPath, raw, exists,
+				)
+				exactBackupSafe = managedBackup != nil
 			}
 			if err := render(raw); err != nil {
 				return atomicTransformResult{}, err

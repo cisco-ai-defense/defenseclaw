@@ -140,6 +140,59 @@ def _validate_connector(name: str) -> None:
     )
 
 
+def _refuse_if_observe(app: AppContext, gc, name: str) -> None:
+    """Refuse a gate entry for a configured observe-mode connector (GAP-2083).
+
+    The LLM judge reviews hook calls only for action-mode connectors, and
+    setup prunes observe-mode connectors from the gate (GAP-1333). Accepting
+    one here made ``guardrail status`` show Judge=on until the next setup
+    silently dropped it. Unconfigured connectors keep the existing
+    "entry is kept" behaviour (their mode is decided at setup).
+    """
+    if name not in _configured_observe_connectors(app, gc):
+        return
+    raise click.ClickException(
+        f"'{name}' is in observe mode: the LLM judge reviews hook calls only for "
+        f"action-mode connectors, and setup removes observe-mode connectors from the "
+        f"judge gate. Switch it to action mode with the judge on: "
+        f"{_action_judge_command(name)}"
+    )
+
+
+def _action_judge_command(name: str) -> str:
+    setup_name = "claude-code" if name == "claudecode" else name
+    return f"defenseclaw setup {setup_name} --mode action --enable-judge --yes"
+
+
+def _configured_observe_connectors(app: AppContext, gc) -> list[str]:
+    """Configured hook connectors whose effective mode is not action (GAP-2083)."""
+    effective_mode = getattr(gc, "effective_mode", None)
+    if not callable(effective_mode):
+        return []
+    try:
+        active = {(c or "").strip().lower() for c in app.cfg.active_connectors()}
+    except Exception:  # noqa: BLE001 — older configs; skip the check.
+        return []
+    hook_enforced, _proxy = _connector_sets()
+    return sorted(
+        c for c in active if c in hook_enforced and (effective_mode(c) or "").strip().lower() != "action"
+    )
+
+
+def _warn_all_covers_observe(app: AppContext, gc) -> None:
+    """'all' is accepted, but say which configured connectors are observe (GAP-2083)."""
+    observe = _configured_observe_connectors(app, gc)
+    if not observe:
+        return
+    ux.warn(
+        f"{', '.join(observe)} {'is' if len(observe) == 1 else 'are'} in observe mode: the LLM judge is "
+        f"meant for action-mode connectors, and 'defenseclaw setup <connector>' removes an observe-mode "
+        f"connector from the gate. To judge one, switch it to action mode: "
+        f"defenseclaw setup <connector> --mode action --enable-judge --yes",
+        indent="  ",
+    )
+
+
 def _warn_if_inert(app: AppContext, gc) -> None:
     """Surface the two states in which a gate edit silently does nothing."""
     if not gc.enabled:
@@ -248,6 +301,18 @@ def _ensure_enabled_hook_judge_strategies(gc) -> bool:
     return changed
 
 
+def _gateway_running(app: AppContext) -> bool:
+    """Same PID-file probe as ``cmd_guardrail._gateway_running``."""
+    import os
+
+    from defenseclaw.process_liveness import pid_file_alive
+
+    try:
+        return pid_file_alive(os.path.join(app.cfg.data_dir, "gateway.pid"))
+    except Exception:  # noqa: BLE001 - an unreadable PID file means "not running".
+        return False
+
+
 def _save_and_restart(app: AppContext, gc, *, restart: bool, action: str, previous: str = "") -> None:
     try:
         app.cfg.save()
@@ -264,8 +329,10 @@ def _save_and_restart(app: AppContext, gc, *, restart: bool, action: str, previo
 
     _warn_if_inert(app, gc)
 
-    if not restart and gc.enabled:
-        # The judge gate is read at gateway start (GAP-1476).
+    if not restart and gc.enabled and _gateway_running(app):
+        # The judge gate is read at gateway start (GAP-1476). A stopped
+        # gateway reads the new gate when it starts; the audit note says how
+        # to start it (GAP-1978).
         ux.subhead("The running gateway keeps the old gate until: defenseclaw-gateway restart", indent="  ")
 
     if restart and gc.enabled:
@@ -344,6 +411,9 @@ def judge_add(
 ) -> None:
     """Opt CONNECTOR into the hook-lane LLM judge ('all' = every hook connector).
 
+    The judge reviews hook calls only for action-mode connectors; adding a
+    configured observe-mode connector is refused.
+
     \b
     Examples:
       defenseclaw guardrail judge add hermes
@@ -352,10 +422,11 @@ def judge_add(
       defenseclaw guardrail judge add opencode --timeout 8
     """
     name = _normalize_target(connector)
+    gc = app.cfg.guardrail
     if name != ALL_CONNECTORS:
         _validate_connector(name)
+        _refuse_if_observe(app, gc, name)
 
-    gc = app.cfg.guardrail
     gate = list(gc.judge.hook_connectors or [])
     previous_gate = ",".join(gate)
 
@@ -424,7 +495,7 @@ def judge_add(
         strategy_changed = _ensure_enabled_hook_judge_strategies(gc)
 
     if not gate_changed and not timeout_changed and not enable_changed and not strategy_changed:
-        click.echo("  " + ux.dim(f"{noop_reason} — nothing to do."))
+        ux.echo("  " + ux.dim(f"{noop_reason} — nothing to do."))
         _warn_if_inert(app, gc)
         click.echo()
         return
@@ -436,9 +507,11 @@ def judge_add(
             saved.append("detection_strategy")
         if timeout_changed:
             saved.append("hook_timeout")
-        click.echo("  " + ux.dim(f"{noop_reason} — saving {' + '.join(saved)} only."))
+        ux.echo("  " + ux.dim(f"{noop_reason} — saving {' + '.join(saved)} only."))
 
     _warn_if_unconfigured(app, name)
+    if name == ALL_CONNECTORS:
+        _warn_all_covers_observe(app, gc)
     _save_and_restart(app, gc, restart=restart, action=f"add {name}", previous=previous_gate)
     click.echo()
 
@@ -474,7 +547,7 @@ def judge_remove(app: AppContext, connector: str, restart: bool) -> None:
     click.echo()
     if name == ALL_CONNECTORS:
         if not gate:
-            click.echo("  " + ux.dim("hook_connectors is already empty — nothing to do."))
+            ux.echo("  " + ux.dim("hook_connectors is already empty — nothing to do."))
             click.echo()
             return
         gc.judge.hook_connectors = []
@@ -490,7 +563,7 @@ def judge_remove(app: AppContext, connector: str, restart: bool) -> None:
         hook_enforced, _ = _connector_sets()
         gate = sorted(hook_enforced - {name})
         gc.judge.hook_connectors = gate
-        click.echo(
+        ux.echo(
             "  "
             + ux.dim(
                 f"hook_connectors was all — expanded to every hook "
@@ -501,9 +574,9 @@ def judge_remove(app: AppContext, connector: str, restart: bool) -> None:
         gate = _gate_without(gate, name)
         gc.judge.hook_connectors = gate
         if not gate:
-            click.echo("  " + ux.dim("hook_connectors is now empty — hook-lane judge off."))
+            ux.echo("  " + ux.dim("hook_connectors is now empty — hook-lane judge off."))
     else:
-        click.echo("  " + ux.dim(f"'{name}' is not in hook_connectors — nothing to do."))
+        ux.echo("  " + ux.dim(f"'{name}' is not in hook_connectors — nothing to do."))
         click.echo()
         return
 
@@ -537,6 +610,7 @@ def judge_list(app: AppContext) -> None:
         return
 
     judged_prereqs = bool(gc.enabled) and bool(gc.judge.enabled)
+    observe = set(_configured_observe_connectors(app, gc))
     click.echo("  " + ux.bold("effective state per connector:"))
     for nm in actives:
         if nm in proxy_backed:
@@ -585,8 +659,14 @@ def judge_list(app: AppContext) -> None:
                     if not gc.enabled
                     else " — judge disabled"
                 )
+            elif nm in observe:
+                # judge add refuses an observe-mode connector (GAP-2083).
+                state = "regex + AID only"
+                note = f" — observe mode; to opt in: {_action_judge_command(nm)}"
             else:
                 state = "regex + AID only"
                 note = f" — opt in: defenseclaw guardrail judge add {nm}"
+            if gated and nm in observe and nm in hook_enforced:
+                note += " (observe mode: verdicts only alert; setup removes it from the gate)"
         click.echo(f"      - {nm}: {ux.accent(state)}{ux.dim(note)}")
     click.echo()

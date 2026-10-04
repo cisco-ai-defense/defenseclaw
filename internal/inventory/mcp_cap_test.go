@@ -28,7 +28,7 @@ import (
 // TestSignalFromMCPConfigPathCapExceededStampsPartial covers Vineet's
 // [P1] inline finding on the MCP-inventory silent truncation. Before
 // the fix, the parent "mcp" evidence row consumed one slot of the
-// maxEvidencePerSignal (32) cap, so a caller with 32 real MCP servers
+// maxEvidencePerSignal cap, so a caller with 32 real MCP servers
 // silently dropped the 32nd row and marked the signal complete. The
 // new code caps mcp_server rows at maxEvidencePerSignal-1 and — more
 // importantly — stamps Partial + CoverageReason=cap_exceeded so
@@ -189,5 +189,27 @@ func TestSignalFromMCPConfigPathReadsHermesTopLevelMCPServers(t *testing.T) {
 	}
 	if len(names) != 1 || names[0] != "vmb4-native" {
 		t.Fatalf("mcp_server evidence basenames = %v, want [vmb4-native]", names)
+	}
+}
+
+// GAP-2337: Antigravity leaves a 0-byte mcp_config.json. An empty or
+// whitespace-only config declares no server: it is complete, not a
+// parse error, so the admin view does not list it as an MCP server.
+func TestSignalFromMCPConfigPathBlankConfigIsNotParseError(t *testing.T) {
+	t.Parallel()
+	for name, body := range map[string]string{"empty": "", "blank": " \r\n\t"} {
+		cfgPath := filepath.Join(t.TempDir(), "mcp_config.json")
+		if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+			t.Fatalf("write fixture: %v", err)
+		}
+		signal := (&ContinuousDiscoveryService{}).signalFromMCPConfigPath(AISignature{ID: "antigravity"}, cfgPath)
+		if signal.Partial || signal.CoverageReason != "" {
+			t.Fatalf("%s config: Partial=%v CoverageReason=%q, want complete", name, signal.Partial, signal.CoverageReason)
+		}
+		for _, ev := range signal.Evidence {
+			if ev.Type == "mcp_server" {
+				t.Fatalf("%s config emitted mcp_server %q", name, ev.Basename)
+			}
+		}
 	}
 }

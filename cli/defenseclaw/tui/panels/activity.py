@@ -220,6 +220,16 @@ class ActivityPanelModel:
     def is_running(self) -> bool:
         return bool(self.entries and not self.entries[-1].done)
 
+    @property
+    def shows_finished_output(self) -> bool:
+        """The body shows a finished command's whole output (the drawer log
+        would only repeat it, GAP-2326)."""
+
+        if self.tab != "commands" or not self.term_mode or not self.entries:
+            return False
+        index = self.cursor if 0 <= self.cursor < len(self.entries) else len(self.entries) - 1
+        return self.entries[index].done
+
     def set_tab(self, tab: ActivityTab) -> None:
         self.tab = tab
 
@@ -247,10 +257,16 @@ class ActivityPanelModel:
         self.term_mode = True
         self.term_scroll = 0
 
-    def append_output(self, line: str) -> None:
+    def append_output(self, line: str, *, continues: bool = False) -> None:
         if not self.entries:
             return
-        self.entries[-1].output.append(line)
+        output = self.entries[-1].output
+        if continues and output:
+            # The rest of a line already shown, such as the mark after
+            # "restarting..." (GAP-2284).
+            output[-1] += line
+        else:
+            output.append(line)
 
     def finish_entry(
         self,
@@ -419,7 +435,7 @@ class ActivityPanelModel:
 
     def _render_mutations(self, *, height: int) -> str:
         if not self.mutations:
-            return "  No activity events in canonical SQLite event history yet."
+            return "  No activity events in the local audit log yet."
         lines: list[str] = []
         max_rows = max(height - 6, 5)
         start = max(0, self.mutation_cursor - max_rows + 1)

@@ -90,7 +90,22 @@ def scan(
 
     cats: set[str] | None = None
     if categories:
-        cats = {c.strip().lower() for c in categories.split(",") if c.strip()}
+        from defenseclaw.inventory.claw_inventory import _CATEGORY_ALIASES, ALL_CATEGORIES
+
+        cats = set()
+        for raw in categories.split(","):
+            c = raw.strip().lower()
+            if not c:
+                continue
+            c = _CATEGORY_ALIASES.get(c, c)
+            if c not in ALL_CATEGORIES:
+                # GAP-2399: an unknown category is a usage error, not "all".
+                valid = "skills, plugins, mcp, agents, rules, tools, models, memory"
+                raise click.BadParameter(
+                    f"unknown category {raw.strip()!r} (valid: {valid})",
+                    param_hint="'--only'",
+                )
+            cats.add(c)
 
     # Resolve which connector(s) to inventory.
     #   --connector X  → just X
@@ -104,12 +119,18 @@ def scan(
         connectors = list(app.cfg.active_connectors())
     else:
         connectors = [None]
+    if not connectors:
+        # Nothing to inventory: say so instead of printing nothing (GAP-2073).
+        from defenseclaw.commands import echo_no_connector
+
+        echo_no_connector()
+        return
 
     invs: list[dict] = []
     pending_telemetry: list[tuple[object, str, str]] = []
     for c in connectors:
         if len(connectors) > 1 and not as_json:
-            click.echo(ux._style(f"\n── connector: {c} ──", fg="cyan"))
+            ux.echo(ux._style(f"\n── connector: {c} ──", fg="cyan"))
         inv, pending = _scan_one_connector(app, c, cats, as_json, summary_only)
         invs.append(inv)
         if pending is not None:
@@ -133,12 +154,22 @@ def scan(
     if as_json:
         return
 
-    if not as_json:
-        from defenseclaw.commands import hint
-        hint(
-            "View alerts:  defenseclaw alerts",
-            "Scan skills:  defenseclaw skill scan all",
-        )
+    from defenseclaw.commands import hint
+    hint("View alerts:  defenseclaw alerts", *_scan_hints(cats))
+
+
+# Next-step scan hint per scanned category; --only limits them (GAP-2037).
+_SCAN_HINTS = (
+    ("skills", "Scan skills:  defenseclaw skill scan all"),
+    ("mcp", "Scan MCP servers:  defenseclaw mcp scan --all"),
+    ("plugins", "Scan plugins:  defenseclaw plugin scan --all"),
+)
+
+
+def _scan_hints(cats: set[str] | None) -> list[str]:
+    if cats is None:
+        return [_SCAN_HINTS[0][1]]
+    return [text for cat, text in _SCAN_HINTS if cat in cats]
 
 
 def _scan_one_connector(
@@ -165,7 +196,9 @@ def _scan_one_connector(
         app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "openclaw"
     )
     if not as_json:
-        click.echo(ux.dim(f"Scanning live {label} environment …"), err=True)
+        # Neutral wording: some connectors (Hermes) are read from disk, and the
+        # report header names the real source (GAP-2312).
+        ux.echo(ux.dim(f"Scanning {label} inventory …"), err=True)
     inv = build_claw_aibom(app.cfg, live=True, categories=cats, connector=connector)
 
     enrich_with_policy(

@@ -40,7 +40,10 @@ class _Config:
 
 def test_help_descriptions_wrap_under_their_column() -> None:
     # GAP-1912: "taken)" and "first)" wrapped back to column 3.
-    plain = Text.from_markup(DefenseClawTUI(config=_Config())._render_help_body()).plain
+    app = DefenseClawTUI(config=_Config())
+    # Outside run_test the width comes from the runner's console; pin 80 columns.
+    app._body_width = lambda: 80 - 6  # type: ignore[method-assign]
+    plain = Text.from_markup(app._render_help_body()).plain
     assert "\n" + " " * 25 + "taken)" in plain
     assert "\n" + " " * 25 + "first)" in plain
     assert max(len(line) for line in plain.splitlines()) <= 72

@@ -13,6 +13,11 @@ this keeps one in ~/.defenseclaw/backups and says so (GAP-1469).
 Exit 0 when there is nothing to keep or the copy was made; exit 1 when the
 database cannot be read or a copy is needed but could not be made, so
 `make all` stops before anything changed.
+
+With --pending it changes nothing and prints nothing: exit 0 when the next
+gateway start still has that one-time purge to do, else 1. `make all` starts
+the gateway quietly, so it says first that this start can take minutes
+(GAP-2027).
 """
 
 from __future__ import annotations
@@ -69,9 +74,14 @@ def rows_to_purge(db: Path) -> int:
         conn.close()
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     home = data_dir().resolve()
     db = home / "audit.db"
+    if argv == ["--pending"]:
+        try:
+            return 0 if db.is_file() and rows_to_purge(db) else 1
+        except sqlite3.Error:
+            return 1
     if not db.is_file():
         return 0
     try:
@@ -126,4 +136,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv[1:]))

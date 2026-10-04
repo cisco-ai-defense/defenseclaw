@@ -33,10 +33,10 @@ import (
 // account is told to use an elevated prompt: the managed config is
 // administrator-only.
 func pinStandaloneManagedEnv() error {
-	return pinManagedAdministratorEnvironment(
-		"enterprise policy",
-		"this host has a managed DefenseClaw deployment; its machine policy can be inspected only from an elevated Administrator prompt or by the MDM agent",
-	)
+	return pinManagedAdministratorEnvironment("enterprise policy", func() string {
+		return windowsManagedStandardUserViewAnswer("the machine policy",
+			"enterprise policy show --user "+managedHostCurrentAccountName())
+	})
 }
 
 // standaloneEnrolledHomes is empty on Windows: the Copilot VS Code lock is
@@ -91,9 +91,21 @@ func enterprisePolicyTarget(name string) (enterprisehooks.TargetCredentials, err
 
 // runAsEnterprisePolicyTarget impersonates the target user (or runs
 // directly when this process already is that user).
+//
+// Only the LocalSystem guardian can act as an account. An elevated
+// administrator, whom the standard-account refusal sends here, reads the
+// account's agent settings with its own rights instead: show and verify only
+// read them (GAP-2465). The identity check runs before fn, so fn runs once.
 func runAsEnterprisePolicyTarget(target enterprisehooks.TargetCredentials, fn func() error) error {
-	return enterprisehooks.RunAsTarget(target, fn)
+	err := enterprisePolicyRunAsTarget(target, fn)
+	if errors.Is(err, enterprisehooks.ErrWindowsEnterpriseNotLocalSystem) {
+		return fn()
+	}
+	return err
 }
+
+// enterprisePolicyRunAsTarget is replaceable in tests.
+var enterprisePolicyRunAsTarget = enterprisehooks.RunAsTarget
 
 // enterprisePolicyLiveAvailable refuses `enterprise policy verify --live` on
 // a managed Windows host up front. The live check starts the real client as

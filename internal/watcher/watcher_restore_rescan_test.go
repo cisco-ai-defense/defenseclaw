@@ -120,3 +120,53 @@ func TestRestoreWhileBlockedRescanKeepsFilesNotQuarantined(t *testing.T) {
 		t.Fatalf("actions = %#v, want install=block and no file action", entry.Actions)
 	}
 }
+
+// GAP-1971 (verify run 1): after unblock + restore and the re-scan that
+// quarantined the skill again, a delete and re-copy of the same skill is
+// caught by the block list and must be quarantined, not kept as "restored".
+func TestRestoreAfterUnblockRecopyIsQuarantined(t *testing.T) {
+	w, store, evt := restoredRescanFixture(t, false)
+	rejectRestored(w, evt)
+	if _, err := os.Lstat(evt.Path); !os.IsNotExist(err) {
+		t.Fatalf("re-blocked skill files stayed in the skill folder: %v", err)
+	}
+
+	if err := os.MkdirAll(evt.Path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(evt.Path, "SKILL.md"), []byte("review\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w.enforceBlock(context.Background(), evt)
+
+	if _, err := os.Lstat(evt.Path); !os.IsNotExist(err) {
+		t.Fatalf("re-copied blocked skill stayed in the skill folder: %v", err)
+	}
+	records, err := store.ListQuarantineRecordsForConnector(context.Background(), "skill", "review-two", "claudecode")
+	if err != nil || len(records) == 0 {
+		t.Fatalf("quarantine records = %#v err=%v", records, err)
+	}
+}
+
+// GAP-1971 (verify run 2): the re-scan blocked the restored skill but its
+// quarantine move failed (the folder was deleted meanwhile). A re-copy must
+// still be quarantined.
+func TestRestoreAfterUnblockFailedRequarantineRecopyIsQuarantined(t *testing.T) {
+	w, _, evt := restoredRescanFixture(t, false)
+	if err := os.RemoveAll(evt.Path); err != nil {
+		t.Fatal(err)
+	}
+	rejectRestored(w, evt)
+
+	if err := os.MkdirAll(evt.Path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(evt.Path, "SKILL.md"), []byte("review\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w.enforceBlock(context.Background(), evt)
+
+	if _, err := os.Lstat(evt.Path); !os.IsNotExist(err) {
+		t.Fatalf("re-copied blocked skill stayed in the skill folder: %v", err)
+	}
+}

@@ -1,0 +1,35 @@
+"""Final-cert TUI fixes, batch 31 (GAP-2508, GAP-2509)."""
+
+from __future__ import annotations
+
+from types import SimpleNamespace
+
+import pytest
+from defenseclaw.tui.app import DefenseClawTUI, _config_label_cells
+from defenseclaw.tui.panels.setup import action_matrix_fields
+
+
+@pytest.mark.parametrize("prefix", ["skill_actions", "mcp_actions", "plugin_actions"])
+@pytest.mark.parametrize("room", [20, 30, 34])
+def test_action_matrix_header_reads_whole(prefix: str, room: int) -> None:
+    header = action_matrix_fields(prefix, {})[0]
+
+    label, value = _config_label_cells(header, room, room)
+
+    assert "…" not in label + value
+    assert label.startswith(".. ") and label.endswith(" ..")
+    assert prefix.split("_")[0].upper() in label
+    assert len(label) <= room and len(value) <= 12
+    assert "install: none/block/allow" in header.hint
+
+
+def test_overview_signature_changes_with_width(monkeypatch: pytest.MonkeyPatch) -> None:
+    app = DefenseClawTUI()
+    app.body_text = "Agents 9 configured"
+    size = SimpleNamespace(width=80, height=60)
+    monkeypatch.setattr(DefenseClawTUI, "size", property(lambda _self: size))
+
+    narrow = app._overview_body_signature()
+    size.width = 140
+
+    assert app._overview_body_signature() != narrow

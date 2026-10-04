@@ -17,11 +17,24 @@
 package cli
 
 import (
+	"encoding/json"
+	"io"
 	"strings"
 )
 
 // Windows enterprise result wording that does not depend on Windows APIs,
 // kept here so the unit tests run on every platform.
+
+// newEnterpriseJSONEncoder is the encoder for enterprise --json output. Its
+// messages carry PowerShell next steps (`& 'C:\...\defenseclaw.exe' ...`),
+// and the default encoder HTML-escapes & to \u0026, so the raw JSON a person
+// reads did not show the copy-pasteable command the human line shows
+// (GAP-2504).
+func newEnterpriseJSONEncoder(w io.Writer) *json.Encoder {
+	encoder := json.NewEncoder(w)
+	encoder.SetEscapeHTML(false)
+	return encoder
+}
 
 // windowsEnterpriseNoActiveSession is why LocalSystem could not act as an
 // account: Windows gives it a user's token only for an active (connected)
@@ -91,10 +104,50 @@ func windowsEnterprisePurgedUserStateChange(entry string) string {
 
 // windowsEnterpriseStandardUserMutationAnswer answers a standard account's
 // `enterprise windows install`, `upgrade`, `repair` or `ensure`: only an
-// administrator can change the managed deployment (GAP-1961).
-func windowsEnterpriseStandardUserMutationAnswer(action string) string {
+// administrator can change the managed deployment (GAP-1961). The command it
+// hands on keeps the attestation flags the user asked for: without
+// --attest-claude-effective-policy the administrator's repair leaves
+// security_complete false (GAP-2011).
+func windowsEnterpriseStandardUserMutationAnswer(action string, flags ...string) string {
+	command := "enterprise windows " + action + " --profile standalone"
+	for _, flag := range flags {
+		command += " " + flag
+	}
 	return "a standard account cannot " + action + " the managed deployment. Ask your administrator, who runs it from an elevated PowerShell prompt with `& '" +
-		managedWindowsAdminCLI() + "' enterprise windows " + action + " --profile standalone`. Nothing was changed."
+		managedWindowsAdminCLI() + "' " + command + "`. Nothing was changed."
+}
+
+// windowsManagedStandardUserViewAnswer answers a standard account's
+// read-only view of a managed Windows deployment (AI Discovery, machine
+// policy, audit export) the way status and verify answer it: what the view
+// needs, the elevated command to ask the administrator for, and that
+// nothing changed. It ran exit 1 with a stuttered internal prefix and no
+// command (GAP-2039). The code stays out of the sentence: it is the
+// managedViewRefusal's, for --json errors[].code (GAP-2262).
+func windowsManagedStandardUserViewAnswer(what, adminArgs string) string {
+	return what + " of a managed computer can be read only from an elevated Administrator prompt or by the MDM agent. " +
+		"Ask your administrator, who runs it from an elevated PowerShell prompt with `& '" + managedWindowsAdminCLI() + "' " + adminArgs + "`. Nothing was changed."
+}
+
+// managedViewRefusal is a standard account's refusal of a managed view. It
+// prints as the sentence alone, like status and verify; its code
+// (elevation_required) is only for the --json errors[].code. The text read
+// "Error: elevation_required: ..." (GAP-2262).
+type managedViewRefusal struct {
+	code    string
+	message string
+}
+
+func (r *managedViewRefusal) Error() string { return r.message }
+
+// managedHostCurrentAccountName is the signed-in account without its
+// computer or domain prefix: the AI Discovery view names accounts that way,
+// and every refusal names it that way in the commands it suggests
+// (`enterprise policy show --user` resolves the plain name too), not as
+// COMPUTER\account in some and account in others (GAP-2262).
+func managedHostCurrentAccountName() string {
+	account := managedHostCurrentAccount()
+	return account[strings.LastIndex(account, `\`)+1:]
 }
 
 // windowsEnterpriseStandardUserInspectionAnswer answers a standard account's
@@ -106,5 +159,5 @@ func windowsEnterpriseStandardUserInspectionAnswer(action string) string {
 	return "the managed deployment's " + action + " needs an elevated prompt: a standard account cannot run the installer's own checks, " +
 		"so this says nothing about the deployment's health. Ask your administrator, who checks it from an elevated PowerShell prompt with `& '" +
 		managedWindowsAdminCLI() + "' enterprise windows " + action + " --profile standalone`, and your account's agents with `& '" +
-		managedWindowsAdminCLI() + "' enterprise policy show --user " + managedHostCurrentAccount() + "`. Nothing was changed."
+		managedWindowsAdminCLI() + "' enterprise policy show --user " + managedHostCurrentAccountName() + "`. Nothing was changed."
 }

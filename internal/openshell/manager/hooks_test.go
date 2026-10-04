@@ -592,7 +592,7 @@ func TestHookCoverage(t *testing.T) {
 	}
 	findings := e.events("hookbox", sandboxapi.ActivityFinding, sandboxapi.ReasonHookFinding)
 	if len(findings) != 1 || findings[0].Severity != "HIGH" || findings[0].Tool != "Bash" ||
-		!strings.Contains(findings[0].Message, "Bash: Allowed but flagged by DefenseClaw rule E2E-SANDBOX-ALERT") {
+		findings[0].Message != "⚠ Bash allowed but flagged by DefenseClaw: E2E-SANDBOX-ALERT (E2E sandbox alert marker)" {
 		t.Fatalf("finding events = %+v", findings)
 	}
 	// A blocked prompt is on the feed and counted, but is no tool call

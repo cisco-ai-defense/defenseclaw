@@ -112,7 +112,7 @@ def _inventory_payload() -> dict[str, object]:
                 "connector": "codex",
                 "category": "tools",
                 "status": "unsupported",
-                "reason": "tool registry is owned by each plugin's manifest",
+                "reason": "this connector has no local tool registry to read; its MCP servers are listed under MCP",
             }
         ],
         "summary": {

@@ -116,6 +116,11 @@ A connector turned off with `guardrail disable --connector X` has no hooks, so
 it has no fail mode: `guardrail status` shows `-` in its Fail column and
 `guardrail fail-mode` lists it as `disabled (no hooks)`.
 
+OpenClaw and ZeptoClaw are proxy-backed and have no hooks, so the hook fail
+mode does not apply to them: while the gateway is down, their requests are
+blocked (fail-closed) whatever `guardrail.hook_fail_mode` says.
+`guardrail fail-mode` lists them as `closed (proxy-backed, no hooks ...)`.
+
 ## Connector response shapes
 
 Fail mode can block only where the agent protocol has a block shape. A

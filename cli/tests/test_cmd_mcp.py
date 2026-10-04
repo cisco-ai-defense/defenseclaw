@@ -64,7 +64,7 @@ class TestMCPBlock(MCPCommandTestBase):
     def test_block_mcp(self):
         result = self.invoke(["block", "http://evil.example.com", "--reason", "unsafe"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("Blocked", result.output)
+        self.assertIn("[mcp] Blocked 'http://evil.example.com' (every connector).", result.output)
 
         pe = PolicyEngine(self.app.store)
         self.assertTrue(pe.is_blocked("mcp", "http://evil.example.com"))
@@ -116,13 +116,44 @@ class TestMCPUnblock(MCPCommandTestBase):
 
         result = self.invoke(["unblock", "http://evil.com"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("cleared", result.output)
+        # GAP-2085: same scope as the bare block line.
+        self.assertIn("[mcp] Unblocked 'http://evil.com' (every connector).", result.output)
         self.assertFalse(pe.is_blocked("mcp", "http://evil.com"))
+
+    def test_unblock_allow_only_entry_says_allow_entry_removed(self):
+        # GAP-2225: clearing an allow entry must not claim it was unblocked.
+        allowed = self.invoke(["allow", "http://trusted.example.com"])
+        self.assertIn("[mcp] Allowed 'http://trusted.example.com' (every connector).", allowed.output)
+        result = self.invoke(["unblock", "http://trusted.example.com"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn(
+            "[mcp] Removed the allow entry for 'http://trusted.example.com' (every connector).",
+            result.output,
+        )
+        self.assertNotIn("Unblocked", result.output)
+        # GAP-2397: the URL is not configured, so there is no scan hint.
+        self.assertIn("is not configured", result.output)
+        self.assertNotIn("To scan it now", result.output)
+        self.assertFalse(PolicyEngine(self.app.store).is_allowed("mcp", "http://trusted.example.com"))
+
+    def test_group_help_lists_unblock_and_says_connector(self):
+        # GAP-2224
+        result = self.invoke(["--help"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("list, scan, block, unblock, allow, set, unset", result.output)
+        self.assertNotIn("peer", result.output)
 
     def test_unblock_no_state(self):
         result = self.invoke(["unblock", "http://clean.com"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("no enforcement state", result.output)
+        # GAP-2258: plain wording, scope in parentheses, closing period.
+        self.assertIn("[mcp] Nothing to clear for 'http://clean.com' (every connector).", result.output)
+        self.assertNotIn("enforcement state", result.output)
+
+    def test_unblock_no_state_scoped(self):
+        result = self.invoke(["unblock", "http://clean.com", "--connector", "openclaw"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("[mcp] Nothing to clear for 'http://clean.com' (openclaw).", result.output)
 
     def test_unblock_does_not_add_to_allow_list(self):
         pe = PolicyEngine(self.app.store)
@@ -153,7 +184,7 @@ class TestMCPConnectorScope(MCPCommandTestBase):
     def test_block_connector_scopes_to_peer(self):
         result = self.invoke(["block", "http://demo.example.com", "--connector", "codex"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("connector=codex", result.output)
+        self.assertIn("[mcp] Blocked 'http://demo.example.com' (codex).", result.output)
 
         pe = PolicyEngine(self.app.store)
         self.assertTrue(pe.is_blocked_for_connector("mcp", "http://demo.example.com", "codex"))
@@ -164,7 +195,7 @@ class TestMCPConnectorScope(MCPCommandTestBase):
     def test_block_connector_alias_writes_canonical_connector(self):
         result = self.invoke(["block", "jira", "--connector", "claude-code"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("connector=claudecode", result.output)
+        self.assertIn("[mcp] Blocked 'jira' (claudecode).", result.output)
         self.assertTrue(
             self.app.store.has_action("mcp", "jira", "install", "block", "claudecode")
         )
@@ -235,7 +266,7 @@ class TestMCPConnectorScope(MCPCommandTestBase):
     def test_allow_connector_scopes_to_peer(self):
         result = self.invoke(["allow", "http://demo.example.com", "--connector", "codex"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("connector=codex", result.output)
+        self.assertIn("[mcp] Allowed 'http://demo.example.com' (codex).", result.output)
         pe = PolicyEngine(self.app.store)
         self.assertTrue(pe.is_allowed_for_connector("mcp", "http://demo.example.com", "codex"))
         self.assertFalse(pe.is_allowed_for_connector("mcp", "http://demo.example.com", "claudecode"))
@@ -258,13 +289,41 @@ class TestMCPConnectorScope(MCPCommandTestBase):
 
         result = self.invoke(["allow", "ctx7"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("Allowed: ctx7 (connector=claudecode)", result.output)
-        self.assertIn("Allowed: ctx7 (connector=codex)", result.output)
+        self.assertIn("[mcp] Allowed 'ctx7' (claudecode).", result.output)
+        self.assertIn("[mcp] Allowed 'ctx7' (codex).", result.output)
 
         self.assertTrue(pe.is_allowed_for_connector("mcp", "ctx7", "claudecode"))
         self.assertTrue(pe.is_allowed_for_connector("mcp", "ctx7", "codex"))
         self.assertFalse(self.app.store.has_action("mcp", "ctx7", "install", "block", "codex"))
         self.assertFalse(pe.is_allowed("mcp", "ctx7"))
+
+    def test_unblock_after_failed_scan_says_no_verdict(self):
+        # GAP-2367: a server whose last scan failed has no verdict to apply.
+        db = self.app.store.db
+        cols = {row[1] for row in db.execute("PRAGMA table_info(scan_results)").fetchall()}
+        for col, kind in (("exit_code", "INTEGER"), ("error", "TEXT")):
+            if col not in cols:
+                db.execute(f"ALTER TABLE scan_results ADD COLUMN {col} {kind}")
+        ts = datetime(2026, 10, 3, 8, 0, tzinfo=timezone.utc).isoformat()
+        db.execute(
+            "INSERT INTO scan_results (id, scanner, target, timestamp, finding_count, max_severity,"
+            " exit_code, error) VALUES ('f1', 'mcp-scanner', 'mcp://codex/fresh', ?, 0, 'INFO', 1, 'unreachable')",
+            (ts,),
+        )
+        db.commit()
+        pe = PolicyEngine(self.app.store)
+        self._serve({"codex": ["fresh", "never"]})  # configured, so the hint applies
+        pe.block_for_connector("mcp", "fresh", "codex", "x")
+        pe.block_for_connector("mcp", "never", "codex", "x")
+
+        result = self.invoke(["unblock", "fresh", "--connector", "codex"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("It has no scan verdict yet (its last scan failed).", result.output)
+        self.assertNotIn("Its scan verdict applies again", result.output)
+        self.assertIn("To scan it now, run: defenseclaw mcp scan fresh --connector codex", result.output)
+
+        never = self.invoke(["unblock", "never", "--connector", "codex"])
+        self.assertIn("It has no scan verdict yet (it has not been scanned).", never.output)
 
     def test_unblock_connector_scopes_to_peer(self):
         pe = PolicyEngine(self.app.store)
@@ -273,19 +332,105 @@ class TestMCPConnectorScope(MCPCommandTestBase):
 
         result = self.invoke(["unblock", "http://demo.example.com", "--connector", "codex"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("cleared", result.output)
+        self.assertIn("Unblocked 'http://demo.example.com' (codex).", result.output)
         self.assertFalse(pe.is_blocked_for_connector("mcp", "http://demo.example.com", "codex"))
         # claudecode's scoped block survives the codex-scoped unblock.
         self.assertTrue(
             self.app.store.has_action("mcp", "http://demo.example.com", "install", "block", "claudecode")
         )
 
+    def _serve(self, by_connector: dict[str, list[str]]) -> None:
+        def _servers(connector=None, **_):
+            return [
+                MCPServerEntry(name=n, url=f"https://{connector}.example/{n}", transport="sse")
+                for n in by_connector.get(connector, [])
+            ]
+
+        self.app.cfg.mcp_servers = _servers  # type: ignore[method-assign]
+
+    def test_block_unknown_name_says_not_configured(self):
+        # GAP-2397: a typo still records the block but says the name is unknown.
+        self._serve({"claudecode": ["deepwiki"]})
+        result = self.invoke(["block", "deepwkii", "--connector", "codex"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("[mcp] Blocked 'deepwkii' (codex).", result.output)
+        self.assertIn(
+            "Note: 'deepwkii' is not configured on codex. Configured MCP servers: none.",
+            result.output,
+        )
+        self.assertIn("Check the name with: defenseclaw mcp list --connector codex", result.output)
+
+        bare = self.invoke(["block", "deepwkii"])
+        self.assertIn(
+            "'deepwkii' is not configured on any configured connector (claudecode, codex). "
+            "Configured MCP servers: deepwiki.",
+            bare.output,
+        )
+
+        unblock = self.invoke(["unblock", "deepwkii", "--connector", "codex"])
+        self.assertEqual(unblock.exit_code, 0, unblock.output)
+        self.assertIn("[mcp] Unblocked 'deepwkii' (codex).", unblock.output)
+        self.assertIn("There is nothing to scan.", unblock.output)
+        self.assertNotIn("To scan it now", unblock.output)
+
+    def test_block_configured_name_has_no_note(self):
+        self._serve({"claudecode": ["deepwiki"]})
+        result = self.invoke(["block", "deepwiki", "--connector", "claudecode"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertNotIn("not configured", result.output)
+        unblock = self.invoke(["unblock", "deepwiki", "--connector", "claudecode"])
+        self.assertIn(
+            "To scan it now, run: defenseclaw mcp scan deepwiki --connector claudecode",
+            unblock.output,
+        )
+
+    @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")
+    @patch("defenseclaw.scanner.mcp.MCPScannerWrapper.scan")
+    def test_set_unreachable_says_not_added(self, mock_scan, mock_set):
+        # GAP-2398: one clear result and the right next step.
+        mock_scan.side_effect = RuntimeError(
+            "Connection to MCP server at http://example.com/mcp was cancelled."
+        )
+        result = self.invoke(
+            ["set", "plain", "--url", "http://example.com/mcp", "--connector", "codex"]
+        )
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("'plain' was not added.", result.output)
+        self.assertIn("--skip-scan", result.output)
+        self.assertNotIn("then scan again", result.output)
+        self.assertNotIn("Scan failed", result.output)
+        mock_set.assert_not_called()
+
+    @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")
+    @patch("defenseclaw.scanner.mcp.MCPScannerWrapper.scan")
+    def test_set_allow_private_reaches_pre_add_scan(self, mock_scan, mock_set):
+        # GAP-2435: the --allow-private hint must name an option mcp set accepts.
+        mock_scan.side_effect = RuntimeError("connection refused")
+        args = ["set", "loop", "--url", "http://127.0.0.1:9/mcp", "--connector", "codex"]
+        result = self.invoke(args + ["--allow-private"])
+        self.assertNotIn("No such option", result.output)
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertTrue(mock_scan.call_args.kwargs.get("allow_private"))
+        self.invoke(args)
+        self.assertFalse(mock_scan.call_args.kwargs.get("allow_private"))
+        mock_set.assert_not_called()
+
     def test_bare_unblock_clears_connector_scoped_block(self):
+        self.app.cfg.mcp_servers = lambda connector=None, **_: (  # type: ignore[method-assign]
+            [MCPServerEntry(name="demo", url="http://demo.example.com", transport="sse")]
+            if connector == "codex" else []
+        )
         pe = PolicyEngine(self.app.store)
         pe.block_for_connector("mcp", "http://demo.example.com", "codex", "x")
         result = self.invoke(["unblock", "http://demo.example.com"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("all enforcement state cleared (connector=codex)", result.output)
+        # GAP-2049: a plain result, not the internal list of cleared states.
+        self.assertIn("[mcp] Unblocked 'http://demo.example.com' (codex).", result.output)
+        self.assertIn(
+            "To scan it now, run: defenseclaw mcp scan http://demo.example.com --connector codex",
+            result.output,
+        )
+        self.assertNotIn("allow/block/quarantine/disable", result.output)
         self.assertFalse(
             self.app.store.has_action("mcp", "http://demo.example.com", "install", "block", "codex")
         )
@@ -320,18 +465,18 @@ class TestMCPConnectorScope(MCPCommandTestBase):
 
         scoped_block = self.invoke(["block", "ctx7", "--connector", "codex"])
         self.assertEqual(scoped_block.exit_code, 0, scoped_block.output)
-        self.assertIn("connector=codex", scoped_block.output)
+        self.assertIn("[mcp] Blocked 'ctx7' (codex).", scoped_block.output)
         self.assertFalse(pe.is_blocked_for_connector("mcp", "ctx7", "hermes"))
 
         bare_allow = self.invoke(["allow", "ctx7"])
         self.assertEqual(bare_allow.exit_code, 0, bare_allow.output)
-        self.assertIn("Allowed: ctx7 (connector=codex)", bare_allow.output)
-        self.assertIn("Allowed: ctx7 (connector=hermes)", bare_allow.output)
+        self.assertIn("[mcp] Allowed 'ctx7' (codex).", bare_allow.output)
+        self.assertIn("[mcp] Allowed 'ctx7' (hermes).", bare_allow.output)
 
         bare_unblock = self.invoke(["unblock", "ctx7"])
         self.assertEqual(bare_unblock.exit_code, 0, bare_unblock.output)
-        self.assertIn("all enforcement state cleared (connector=codex)", bare_unblock.output)
-        self.assertIn("all enforcement state cleared (connector=hermes)", bare_unblock.output)
+        self.assertIn("Removed the allow entry for 'ctx7' (codex).", bare_unblock.output)
+        self.assertIn("Removed the allow entry for 'ctx7' (hermes).", bare_unblock.output)
 
         self.assertIsNone(self.app.store.get_action("mcp", "ctx7", "codex"))
         self.assertIsNone(self.app.store.get_action("mcp", "ctx7", "hermes"))
@@ -1219,6 +1364,56 @@ class TestMCPScan(MCPCommandTestBase):
         self.assertIn("claudecode", result.output)
 
     @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")
+    @patch("defenseclaw.enforce.admission.evaluate_admission")
+    def test_set_admission_refusal_is_audited_per_connector(self, mock_admit, mock_set):
+        # GAP-2120: an asset-policy admission refusal wrote no audit row.
+        from defenseclaw.enforce.admission import AdmissionDecision
+
+        self.app.cfg.active_connectors = lambda: ["hermes"]  # type: ignore[method-assign]
+        mock_admit.return_value = AdmissionDecision(
+            "blocked", "mcp 'offreg' is not in the approved registry",
+            source="asset-policy-registry-required",
+        )
+
+        result = self.invoke(["set", "offreg", "--url", "https://x/mcp", "--skip-scan"])
+
+        self.assertNotEqual(result.exit_code, 0)
+        mock_set.assert_not_called()
+        rows = [e for e in self.app.store.list_events(50) if e.action == "install-rejected"]
+        self.assertEqual(len(rows), 1, [(e.action, e.target) for e in self.app.store.list_events(50)])
+        self.assertEqual(rows[0].target, "offreg")
+        self.assertIn("connector=hermes", rows[0].details)
+        self.assertIn("source=asset-policy-registry-required", rows[0].details)
+        self.assertIn("not in the approved registry", rows[0].details)
+
+    @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")
+    def test_set_observe_mode_off_registry_server_is_warned_and_audited(self, mock_set):
+        # GAP-2390: observe mode added an off-registry server with no warning
+        # and only a plain mcp-set audit row.
+        from defenseclaw.config import AssetPolicyConfig, AssetPolicyRule, AssetTypePolicy
+
+        self.app.cfg.active_connectors = lambda: ["hermes"]  # type: ignore[method-assign]
+        self.app.cfg.asset_policy = AssetPolicyConfig(
+            enabled=True, mode="observe",
+            mcp=AssetTypePolicy(
+                registry_required=True,
+                registry=[AssetPolicyRule(name="approved", url="https://ok.example/mcp")],
+            ),
+        )
+
+        result = self.invoke(["set", "offreg", "--url", "https://x/mcp", "--skip-scan"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        mock_set.assert_called_once()
+        self.assertIn("asset policy (observe) [hermes]", result.output)
+        self.assertIn("not in the approved registry", result.output)
+        rows = [e for e in self.app.store.list_events(50) if e.action == "install-warning"]
+        self.assertEqual(len(rows), 1, [(e.action, e.target) for e in self.app.store.list_events(50)])
+        self.assertEqual(rows[0].target, "offreg")
+        self.assertIn("connector=hermes", rows[0].details)
+        self.assertIn("source=asset-policy-registry-required-observe", rows[0].details)
+
+    @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")
     @patch("defenseclaw.commands.cmd_mcp._run_scan")
     @patch("defenseclaw.enforce.admission.evaluate_admission")
     def test_set_post_scan_allow_records_connector_scoped_allow(
@@ -1322,7 +1517,7 @@ class TestMCPScan(MCPCommandTestBase):
         result = self.invoke(["unset", "ctx7"])
 
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("Removed MCP server: ctx7", result.output)
+        self.assertIn("[mcp] Removed 'ctx7'", result.output)
         self.assertIn("codex", result.output)
         self.assertIn("skipped", result.output)
 
@@ -1344,8 +1539,25 @@ class TestMCPScan(MCPCommandTestBase):
         result = self.invoke(["set", "ctx7", "--url", "https://x/mcp", "--skip-scan"])
 
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("Added MCP server: ctx7 to 2 connectors", result.output)
+        self.assertIn("[mcp] Added 'ctx7' to 2 connectors", result.output)
         self.assertIn("not applied: zeptoclaw", result.output)
+
+    @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")
+    def test_set_existing_name_says_updated(self, _mock_set):
+        # GAP-2417: re-setting a server the connector already has is an update.
+        self.app.cfg.active_connectors = lambda: ["codex"]  # type: ignore[method-assign]
+        self.app.cfg.mcp_servers = MagicMock(
+            return_value=[MCPServerEntry(name="ctx7", url="https://old/mcp", transport="sse")]
+        )
+
+        updated = self.invoke(["set", "ctx7", "--url", "https://new/mcp", "--skip-scan", "--connector", "codex"])
+        added = self.invoke(["set", "ctx8", "--url", "https://new/mcp", "--skip-scan", "--connector", "codex"])
+
+        self.assertEqual(updated.exit_code, 0, updated.output)
+        self.assertIn("[mcp] Updated 'ctx7' (codex).", updated.output)
+        self.assertNotIn("Added", updated.output)
+        self.assertEqual(added.exit_code, 0, added.output)
+        self.assertIn("[mcp] Added 'ctx8' (codex).", added.output)
 
     @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")
     def test_set_isolates_unexpected_write_failure_and_exits_nonzero(self, mock_set):
@@ -1367,7 +1579,7 @@ class TestMCPScan(MCPCommandTestBase):
         self.assertNotEqual(result.exit_code, 0)
         attempted = {c.kwargs.get("connector") for c in mock_set.call_args_list}
         self.assertEqual(attempted, {"claudecode", "codex"})  # loop not aborted
-        self.assertIn("Added MCP server: ctx7", result.output)  # codex landed
+        self.assertIn("[mcp] Added 'ctx7'", result.output)  # codex landed
         self.assertIn("failed [claudecode]", result.output)
 
     @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")
@@ -1406,7 +1618,7 @@ class TestMCPScan(MCPCommandTestBase):
         self.assertNotEqual(result.exit_code, 0)
         attempted = {c.kwargs.get("connector") for c in mock_unset.call_args_list}
         self.assertEqual(attempted, {"claudecode", "codex"})  # loop not aborted
-        self.assertIn("Removed MCP server: ctx7", result.output)  # codex removed
+        self.assertIn("[mcp] Removed 'ctx7'", result.output)  # codex removed
         self.assertIn("failed [claudecode]", result.output)
 
     @patch("defenseclaw.commands.cmd_mcp._unset_mcp_via_connector")
@@ -1429,12 +1641,12 @@ class TestMCPScan(MCPCommandTestBase):
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("not removed [claudecode]", result.output)
         self.assertIn("claude mcp remove ctx7 -s user", result.output)
-        self.assertIn("Removed MCP server: ctx7", result.output)  # codex removed
+        self.assertIn("[mcp] Removed 'ctx7'", result.output)  # codex removed
         self.assertNotIn("claudecode, codex", result.output)
 
         result = self.invoke(["unset", "ctx7", "--connector", "claudecode"])
         self.assertNotEqual(result.exit_code, 0)
-        self.assertNotIn("Removed MCP server", result.output)
+        self.assertNotIn("[mcp] Removed", result.output)
         self.assertIn("was not removed from: claudecode", result.output)
 
     @patch("defenseclaw.scanner.mcp.MCPScannerWrapper.scan")

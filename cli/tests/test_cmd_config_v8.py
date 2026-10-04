@@ -288,3 +288,15 @@ def test_future_config_mutation_refuses_v7_source(tmp_path: Path) -> None:
     assert result.exit_code == 1
     assert "run 'defenseclaw migrate' first" in result.output
     root_preflight.assert_not_called()
+
+
+def test_duplicate_section_names_the_second_definition_line() -> None:
+    # GAP-2188: the second "gateway:" (line 4) is named, not the first one's value.
+    raw = b"config_version: 8\ngateway:\n  api_port: 19010\ngateway:\n  api_port: 19011\n"
+    reason = (
+        "[yaml_duplicate_key] duplicate mapping key; the first definition is at line 2, column 1; "
+        "remove one definition so precedence is unambiguous"
+    )
+    assert cmd_config._plain_v8_issue(raw, "$.gateway", reason) == (
+        "line 4: gateway appears twice; the first one is at line 2. Merge them into one."
+    )

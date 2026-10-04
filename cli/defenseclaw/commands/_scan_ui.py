@@ -56,12 +56,15 @@ output path).
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
 import click
+
+from defenseclaw import ux
 
 # ---------------------------------------------------------------------------
 # Component / category definitions
@@ -302,8 +305,12 @@ def render_summary(
     total: int,
     findings: int = 0,
     duration_ms: int | None = None,
+    warning: int | None = None,
 ) -> None:
     """Print the final tally line.
+
+    ``warning`` (GAP-2336) counts targets shown as [WARN]/[INFO], so the
+    counts add up to the total; callers that track it pass it.
 
     No-ops in JSON mode (the JSON document carries the same numbers
     in its ``summary`` block).
@@ -314,8 +321,10 @@ def render_summary(
     parts = [
         f"  Summary: {total} {ctx.label(plural=total != 1)} scanned",
         f"clean={clean}",
-        f"blocked={blocked}",
     ]
+    if warning is not None:
+        parts.append(f"warning={warning}")
+    parts.append(f"blocked={blocked}")
     if findings:
         parts.append(f"findings={findings}")
     if errored:
@@ -413,13 +422,14 @@ def record_scan(logger: Any, result: Any, **kwargs: Any) -> None:
 
     if not logger:
         return
+    # The gateway spawned this scan and records the result itself (GAP-2482).
+    if os.environ.get("DEFENSECLAW_SCAN_RECORDED_BY_CALLER") == "1":
+        return
     try:
         logger.log_scan(result, **kwargs)
     except CanonicalObservabilityUnavailableError:
         if not _SCAN_NOT_RECORDED_NOTED:
             _SCAN_NOT_RECORDED_NOTED = True
-            click.echo(
-                "  \u26a0 The gateway isn't running, so this scan result was not recorded "
-                "(start it: defenseclaw-gateway start).",
-                err=True,
-            )
+            from defenseclaw.commands._audit_notice import not_recorded_warning
+
+            ux.echo(not_recorded_warning("this scan result"), err=True)

@@ -21,6 +21,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -999,7 +1000,9 @@ func (l *Logger) logActionWithEnvelopeContextAndAssetActor(
 			return nil
 		}
 	}
-	disposition, emitErr = l.emitCompatibilityAuditV8(ctx, event, compatibilityAuditV8Options{})
+	disposition, emitErr = l.emitCompatibilityAuditV8(ctx, event, compatibilityAuditV8Options{
+		classification: cliActionV8Classification(event),
+	})
 	if emitErr != nil {
 		return emitErr
 	}
@@ -1007,6 +1010,31 @@ func (l *Logger) logActionWithEnvelopeContextAndAssetActor(
 		return nil
 	}
 	return fmt.Errorf("audit: no generated v8 family handled action %q", event.Action)
+}
+
+// cliActionV8Classification supplies the context that a CLI-reported action
+// needs when its registered classification has no default identity (init,
+// bootstrap). Without it the gateway rejected re-running "defenseclaw init"
+// on a v8 install with a content-free 503 (GAP-2381). Such a CLI action is a
+// setup mutation recorded as a compliance activity.
+func cliActionV8Classification(event Event) observability.ClassificationContext {
+	if event.Actor != "cli" {
+		return observability.ClassificationContext{}
+	}
+	registered, found := observability.AuditActionClassification(observability.ProducerKey(event.Action))
+	if !found || registered.Bucket != "" ||
+		!slices.Contains(registered.AllowedContextBuckets, observability.BucketComplianceActivity) {
+		return observability.ClassificationContext{}
+	}
+	classification := observability.ClassificationContext{
+		Bucket:         observability.BucketComplianceActivity,
+		EventName:      observability.EventName("legacy.audit.action"),
+		MandatoryFacts: observability.MandatoryFacts{ControlPlaneMutation: true},
+	}
+	if _, err := registered.Resolve(classification); err != nil {
+		return observability.ClassificationContext{}
+	}
+	return classification
 }
 
 // LogActionWithEnforcement persists an action event with enforcement metadata.

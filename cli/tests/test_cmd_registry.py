@@ -213,6 +213,30 @@ class TestRegistryListShow(RegistryCommandTestBase):
         self.assertEqual(len(payload), 1)
         self.assertEqual(payload[0]["id"], "corp-skills")
 
+    def test_list_aligns_long_ids_and_uses_free_width_for_url(self):
+        # GAP-2405: a long ID must not shift its row, and the URL uses the
+        # terminal width instead of a fixed 32 characters.
+        url = "https://registry.example.com/teams/platform/skills/manifest.yaml"
+        self.invoke([
+            "add", "a-much-longer-registry-source-id",
+            "--kind", "http_yaml",
+            "--content", "skill",
+            "--url", url,
+            "--non-interactive",
+        ])
+        with patch.dict(os.environ, {"COLUMNS": "200"}):
+            result = self.invoke(["list"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        lines = result.output.splitlines()
+        header = next(line for line in lines if line.lstrip().startswith("ID "))
+        row = next(line for line in lines if "a-much-longer-registry-source-id" in line)
+        short = next(line for line in lines if line.lstrip().startswith("corp-skills"))
+        self.assertEqual(row.index("http_yaml"), header.index("KIND"))
+        self.assertEqual(short.index("clawhub"), header.index("KIND"))
+        self.assertEqual(row.index("skill"), header.index("CONTENT"))
+        self.assertIn(url, row)
+        self.assertEqual(row.index(url), header.index("URL"))
+
     def test_show_json_includes_index_block(self):
         result = self.invoke(["show", "corp-skills", "--json"])
         self.assertEqual(result.exit_code, 0, result.output)
@@ -232,6 +256,21 @@ class TestRegistryListShow(RegistryCommandTestBase):
             "Run `defenseclaw registry list` for details.",
             result.output,
         )
+
+    def test_remove_unknown_source_with_none_configured_points_at_add(self):
+        # GAP-2392: with no sources left, hint at add/wizard, not the empty list.
+        self.invoke(["remove", "corp-skills", "-y"])
+        result = self.runner.invoke(
+            registry, ["remove", "corp-skills", "-y"],
+            obj=self.app, catch_exceptions=True,
+        )
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn(
+            "Error: registry source 'corp-skills' not found. No registry sources are configured. "
+            "Add one with: defenseclaw registry add <id> ... (or defenseclaw registry wizard).",
+            result.output,
+        )
+        self.assertNotIn("registry list", result.output)
 
 
 class TestRegistryEdit(RegistryCommandTestBase):
@@ -277,6 +316,35 @@ class TestRegistryEdit(RegistryCommandTestBase):
         ])
         src = next(s for s in self.app.cfg.registries.sources if s.id == "corp-skills")
         self.assertEqual(src.auth_env, "")
+
+    def test_edit_audit_row_names_changed_fields(self):
+        # GAP-2211: each edit row says what changed, before and after.
+        with patch.object(self.app, "logger", MagicMock()) as logger:
+            self.invoke(["edit", "corp-skills", "--disabled", "--non-interactive"])
+            self.invoke([
+                "edit", "corp-skills", "--enabled", "--url", "https://catalog.example.com/v2.yaml",
+                "--auth-env", "DEFENSECLAW_TOKEN", "--non-interactive",
+            ])
+            self.invoke(["edit", "corp-skills", "--enabled", "--non-interactive"])
+        details = [c.args[2] for c in logger.log_action.call_args_list if c.args[0] == "registry-edit"]
+        self.assertEqual(details, [
+            "id=corp-skills enabled=true->false",
+            "id=corp-skills url=https://catalog.example.com/skills.yaml->https://catalog.example.com/v2.yaml "
+            'auth_env=""->DEFENSECLAW_TOKEN enabled=false->true',
+            "id=corp-skills unchanged",
+        ])
+
+    def test_edit_that_changes_nothing_says_so(self):
+        # GAP-2339: a no-op edit must not claim "Updated".
+        result = self.invoke(["edit", "corp-skills", "--enabled", "--non-interactive"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn(
+            "No changes: registry source 'corp-skills' already has these settings.",
+            result.output,
+        )
+        self.assertNotIn("Updated", result.output)
+        result = self.invoke(["edit", "corp-skills", "--disabled", "--non-interactive"])
+        self.assertIn("Updated registry source 'corp-skills'.", result.output)
 
 
 class TestRegistryRemove(RegistryCommandTestBase):
@@ -391,7 +459,7 @@ class TestRegistrySync(RegistryCommandTestBase):
                     result = self.invoke(["sync", "corp-skills"])
         self.assertEqual(result.exit_code, 0, result.output)
         logger.log_action.assert_any_call(
-            "registry-edit", "config",
+            "registry-sync", "corp-skills",
             "sync id=corp-skills fetched=1 scanned=1 promoted_skills=1 promoted_mcps=0 "
             "blocked=0 errors=0 promote=on",
         )
@@ -489,6 +557,23 @@ class TestRegistryApproveReject(RegistryCommandTestBase):
         payload = json.loads(result.output)
         self.assertTrue(payload["verdict"]["rejected"])
 
+    def test_registry_audit_rows_name_their_operation_and_target(self):
+        # GAP-2280: approve and reject are their own actions on the entry,
+        # and source changes name the source instead of "config".
+        with patch.object(self.app, "logger", MagicMock()) as logger:
+            for verb in ("approve", "reject"):
+                result = self.invoke([verb, "corp-skills", "demo-skill", "--type", "skill", "--no-repromote"])
+                self.assertEqual(result.exit_code, 0, result.output)
+            self.invoke(["edit", "corp-skills", "--disabled", "--non-interactive"])
+            self.invoke(["remove", "corp-skills", "--non-interactive"])
+        rows = [c.args[:2] for c in logger.log_action.call_args_list]
+        self.assertEqual(rows, [
+            ("registry-approve", "skill:demo-skill"),
+            ("registry-reject", "skill:demo-skill"),
+            ("registry-edit", "corp-skills"),
+            ("registry-remove", "corp-skills"),
+        ])
+
     def test_approve_infers_type_from_source_content(self):
         # GAP-1384: a source with content=skill implies --type skill.
         result = self.invoke([
@@ -505,6 +590,71 @@ class TestRegistryApproveReject(RegistryCommandTestBase):
             "--type", "skill", "--no-repromote",
         ], obj=self.app, catch_exceptions=True)
         self.assertNotEqual(result.exit_code, 0)
+
+
+    def test_approve_missing_entry_in_synced_source_names_entries(self):
+        # GAP-2281: the source was synced; don't tell the operator to sync.
+        result = self.runner.invoke(registry, [
+            "approve", "corp-skills", "no-such-entry", "--no-repromote",
+        ], obj=self.app)
+        self.assertEqual(result.exit_code, 2, result.output)
+        self.assertIn("corp-skills has no skill entry 'no-such-entry'", result.output)
+        self.assertIn("entries: demo-skill", result.output)
+        self.assertNotIn("sync` first", result.output)
+
+    def test_approve_with_wrong_type_points_at_other_type(self):
+        # GAP-2307: the entry exists as a skill; --type mcp must say so.
+        result = self.runner.invoke(registry, [
+            "approve", "corp-skills", "demo-skill", "--type", "mcp", "--no-repromote",
+        ], obj=self.app)
+        self.assertEqual(result.exit_code, 2, result.output)
+        self.assertIn(
+            "corp-skills has no mcp entry 'demo-skill'; it is a skill entry "
+            "(use skill:demo-skill or demo-skill --type skill)",
+            result.output,
+        )
+        self.assertNotIn("entries: none", result.output)
+
+    def test_approve_reject_accept_the_printed_type_prefix(self):
+        # GAP-2450: sync and approve print "skill:demo-skill"; that form works too.
+        for verb, key in (("reject", "rejected"), ("approve", "approved")):
+            result = self.invoke([verb, "corp-skills", "skill:demo-skill", "--no-repromote", "--json"])
+            self.assertEqual(result.exit_code, 0, result.output)
+            payload = json.loads(result.output)
+            self.assertEqual(payload["verdict"]["name"], "demo-skill")
+            self.assertTrue(payload["verdict"][key])
+        result = self.runner.invoke(registry, [
+            "approve", "corp-skills", "skill:demo-skill", "--no-repromote",
+        ], obj=self.app)
+        self.assertIn("Approved skill:demo-skill from corp-skills.", result.output)
+
+    def test_wrong_type_prefix_hint_names_a_form_that_works(self):
+        # GAP-2457/GAP-2458: the hint must not send the user back into an rc-2 loop.
+        result = self.runner.invoke(registry, [
+            "reject", "corp-skills", "mcp:demo-skill", "--no-repromote",
+        ], obj=self.app)
+        self.assertEqual(result.exit_code, 2, result.output)
+        self.assertIn("(use skill:demo-skill or demo-skill --type skill)", result.output)
+        result = self.runner.invoke(registry, [
+            "reject", "corp-skills", "mcp:demo-skill", "--type", "skill", "--no-repromote",
+        ], obj=self.app)
+        self.assertEqual(result.exit_code, 2, result.output)
+        self.assertIn("the mcp: prefix in 'mcp:demo-skill' does not match --type skill", result.output)
+        self.assertIn("(use skill:demo-skill or demo-skill --type skill)", result.output)
+        for name in ("skill:demo-skill", "demo-skill"):
+            result = self.invoke(["reject", "corp-skills", name, "--type", "skill", "--no-repromote", "--json"])
+            self.assertEqual(result.exit_code, 0, result.output)
+
+    def test_approve_in_never_synced_source_says_sync_first(self):
+        self.invoke([
+            "add", "fresh", "--kind", "http_yaml", "--content", "skill",
+            "--url", "https://catalog.example.com/fresh.yaml", "--non-interactive",
+        ])
+        result = self.runner.invoke(registry, [
+            "reject", "fresh", "demo-skill", "--no-repromote",
+        ], obj=self.app)
+        self.assertEqual(result.exit_code, 2, result.output)
+        self.assertIn("run `defenseclaw registry sync fresh` first", result.output)
 
 
 class TestRegistryRequire(RegistryCommandTestBase):
@@ -532,10 +682,26 @@ class TestRegistryRequire(RegistryCommandTestBase):
             self.assertEqual(result.exit_code, 0, result.output)
             actions = [
                 c.args for c in logger.log_action.call_args_list
-                if c.args[0] == "registry-edit" and c.args[2].startswith("require ")
+                if c.args[0] == "registry-require" and c.args[2].startswith("require ")
             ]
             self.assertEqual(len(actions), 1, actions)
+            self.assertEqual(actions[0][1], "asset_policy.connectors.openhands.mcp.registry")
             self.assertIn(f"require scope=asset_policy.connectors.openhands.mcp.registry required={state}", actions[0][2])
+
+    def test_require_with_gateway_down_saves_warns_and_exits_zero(self):
+        # GAP-2236: the change is saved; a stopped gateway skips only the event.
+        from defenseclaw.logger import CanonicalObservabilityUnavailableError
+
+        logger = MagicMock()
+        logger.log_action.side_effect = CanonicalObservabilityUnavailableError("down")
+        with patch.object(self.app, "logger", logger):
+            result = CliRunner().invoke(
+                registry, ["require", "--type", "mcp", "--enabled", "--connector", "hermes"], obj=self.app,
+            )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertTrue(self.app.cfg.asset_policy.effective_asset_type_policy("hermes", "mcp").registry_required)
+        self.assertEqual(result.output.count("audit event was not recorded"), 1)
+        self.assertNotIn("run the command again", result.output)
 
     def test_require_messages_name_asset_policy_key_and_count(self):
         # GAP-1880: singular "1 entry" and the same key name as the success line.
@@ -976,6 +1142,32 @@ class TestFileAdapterPathValidation(RegistryCommandTestBase):
         ])
         self.assertEqual(result.exit_code, 0, result.output)
 
+    def test_add_file_kind_warns_when_manifest_missing(self):
+        # GAP-2282: register it, but say the path does not exist yet.
+        missing = os.path.join(self.tmp_dir, "nope.yaml")
+        result = self.invoke([
+            "add", "local", "--kind", "file", "--content", "mcp",
+            "--url", missing, "--non-interactive",
+        ])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn(f"{missing} does not exist yet", result.output)
+        present = os.path.join(self.tmp_dir, "present.yaml")
+        with open(present, "w") as fh:
+            fh.write("schema_version: 1\nentries: []\n")
+        result = self.invoke(["edit", "local", "--url", present, "--json"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertNotIn("warning", json.loads(result.output))
+
+    def test_add_file_kind_warns_when_url_is_a_directory(self):
+        # GAP-2306: an existing directory is not "missing".
+        result = self.invoke([
+            "add", "local-dir", "--kind", "file", "--content", "mcp",
+            "--url", self.tmp_dir, "--non-interactive",
+        ])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn(f"{self.tmp_dir} is a directory, not a manifest file", result.output)
+        self.assertNotIn("does not exist yet", result.output)
+
     def test_add_file_kind_accepts_tilde_expansion(self):
         # ``~/manifest.yaml`` expands to an absolute path so it should
         # pass; the file adapter does the same expansion on read.
@@ -1070,23 +1262,50 @@ class TestRegistryEntriesFilters(RegistryCommandTestBase):
         rows = json.loads(result.output)
         names = {row["name"] for row in rows}
         self.assertEqual(names, {"rejected-one"})
-        # The reject path also flips ``status`` to ``blocked`` so the
-        # operator's call survives both filter shapes.
-        self.assertEqual(rows[0]["status"], "blocked")
+        # The reject path also flips ``status`` to ``rejected`` (GAP-2371)
+        # so the operator's call survives both filter shapes.
+        self.assertEqual(rows[0]["status"], "rejected")
 
-    def test_entries_status_blocked_includes_rejected(self):
-        # Cross-check: the reject above should land on the
-        # ``--status blocked`` filter as well, not just on
-        # ``--rejected``. This is the regression the
-        # ``manual_set_verdict`` fix targets.
+    def test_rejected_with_a_scan_status_explains_the_empty_result(self):
+        # GAP-2416: a rejected entry's status is "rejected", so the help no
+        # longer offers "--rejected --status warning" and the empty result
+        # says why.
+        result = self.invoke([
+            "entries", "corp-skills", "--rejected", "--status", "clean",
+        ])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("No matching entries", result.output)
+        self.assertIn("drop --status to list them", result.output)
+        help_text = " ".join(self.invoke(["entries", "--help"]).output.split())
+        self.assertNotIn("--rejected --status warning", help_text)
+        self.assertRegex(help_text, r"already means \W*--status rejected")
+
+    def test_entries_status_rejected_not_blocked(self):
+        # GAP-2371: a rejected entry is on ``--status rejected``, not on
+        # ``--status blocked`` (reject does not block the server itself).
         result = self.invoke([
             "entries", "corp-skills",
-            "--status", "blocked",
+            "--status", "rejected",
             "--json",
         ])
         self.assertEqual(result.exit_code, 0, result.output)
         names = {row["name"] for row in json.loads(result.output)}
         self.assertEqual(names, {"rejected-one"})
+        blocked = self.invoke(["entries", "corp-skills", "--status", "blocked", "--json"])
+        self.assertEqual(json.loads(blocked.output), [])
+
+    def test_list_counts_rejected_apart_from_blocked(self):
+        # GAP-2371: list shows "2 (1/0/0/0/1)", not the reject under B.
+        result = self.invoke(["list"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("2 (1/0/0/0/1)", result.output)
+        self.assertIn("ENTRIES column: total (clean/warning/blocked/error/rejected)", result.output)
+        payload = json.loads(self.invoke(["list", "--json"]).output)
+        self.assertEqual((payload[0]["entries"]["blocked"], payload[0]["entries"]["rejected"]), (0, 1))
+        entries = self.invoke(["entries", "corp-skills"])
+        row = next(line for line in entries.output.splitlines() if "rejected-one" in line)
+        self.assertIn(" rejected ", row)
+        self.assertNotIn("blocked", row)
 
     def test_entries_approved_and_rejected_returns_empty(self):
         # Mutual exclusivity by definition.

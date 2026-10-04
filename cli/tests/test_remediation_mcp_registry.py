@@ -145,7 +145,7 @@ def test_f0321_remote_scan_blocks_private_and_loopback_targets():
 
     # Private (RFC1918) target rejected by default — fail closed before
     # the SDK ever dials the host.
-    with pytest.raises(ValueError, match="refusing to scan remote MCP target"):
+    with pytest.raises(ValueError, match="refusing to scan MCP URL"):
         wrapper.scan("http://10.20.30.40:9/mcp")
 
     # --allow-private also opts in to loopback scans. Patch the SDK leg so the

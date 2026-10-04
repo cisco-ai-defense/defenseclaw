@@ -444,6 +444,9 @@ class InventorySnapshot:
             raw = json.loads(text)
         except json.JSONDecodeError as exc:
             raise ValueError(f"parse inventory json: {exc}") from exc
+        if raw == []:
+            # aibom scan --json with no connector configured (GAP-2073).
+            raw = {}
         if not isinstance(raw, Mapping):
             raise ValueError("parse inventory json: expected object")
         return cls.from_mapping(raw)
@@ -923,9 +926,14 @@ class InventoryPanelModel:
             "models": _map_val(inv.summary.models, "count"),
             "memory": _map_val(inv.summary.memory, "count"),
         }
-        config_path = inv.openclaw_config
-        if inv.connector_config_files and inv.connector_config_files[0]:
-            config_path = inv.connector_config_files[0]
+        from defenseclaw.inventory.claw_inventory import aibom_display_config
+
+        config_path = aibom_display_config({
+            "connector": connector,
+            "openclaw_config": inv.openclaw_config,
+            "connector_config_files": list(inv.connector_config_files),
+            "connector_mcp_files": list(inv.connector_mcp_files),
+        }) or inv.openclaw_config
         return InventorySummaryState(
             connector_name=connector,
             source_label=source_label,

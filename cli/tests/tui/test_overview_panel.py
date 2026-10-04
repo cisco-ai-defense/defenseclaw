@@ -133,9 +133,50 @@ def test_overview_keeps_runtime_health_separate_from_native_delivery_truth() -> 
     view = type("OverviewView", (), {"overview_model": model})()
     rendered = DefenseClawTUI._overview_observability_text(view)
     assert "collector/runtime health does not prove accepted delivery" in rendered
-    assert "bounded 24h, truncated; counts partial" in rendered
-    for label in ("all-drop-only", "partial-drop-only", "accepted", "no-evidence"):
-        assert label in rendered
+    assert "bounded 24h, newest 4096 events" in rendered
+    assert "Claude Code (claudecode): partial drop-only evidence (1/3 batches)" in rendered
+    assert "OpenCode (opencode): accepted native delivery observed (3 batches)" in rendered
+
+
+def test_overview_native_delivery_line_does_not_repeat_state_and_hangs_wrapped_text() -> None:
+    """GAP-2545: no "accepted · accepted ..." and no flush-left wrapped lines."""
+
+    from defenseclaw.tui.app import DefenseClawTUI
+    from rich.console import Console, Group
+
+    model = _model()
+    model.set_native_delivery_summary(
+        NativeDeliverySummary(
+            state="available",
+            reason="",
+            observation_window_hours=24,
+            connectors=(
+                NativeDeliveryStatus(
+                    connector="claudecode",
+                    default=True,
+                    state="accepted",
+                    normalized_batches=154,
+                    drop_only_batches=122,
+                    detail=(
+                        "accepted native delivery observed (154 batches; 122 held only log/metric "
+                        "records that DefenseClaw does not map, skipped by design)"
+                    ),
+                ),
+            ),
+        )
+    )
+    view = type("OverviewView", (), {"overview_model": model})()
+    for width in (80, 120):
+        console = Console(width=width, record=True, color_system=None)
+        console.print(Group(*DefenseClawTUI._overview_native_delivery_renderables(view)))
+        lines = [line for line in console.export_text().splitlines() if line.strip()]
+        item = next(i for i, line in enumerate(lines) if "Claude Code (claudecode):" in line)
+        assert "accepted · accepted" not in lines[item]
+        assert lines[item].startswith("  Claude Code (claudecode): accepted native delivery observed")
+        detail_col = lines[item].index("accepted")
+        assert len(lines) > item + 1, "the detail wraps at this width"
+        for line in lines[item + 1 :]:
+            assert line[:detail_col].strip() == "", line
 
 
 def test_overview_standalone_hint_and_notices() -> None:
@@ -323,6 +364,29 @@ def test_overview_v8_rows_merge_policy_and_exact_live_health_without_inference()
     assert storage.retention_failure == "run_failed"
 
 
+def test_agent_detail_names_tool_inspection_mode_and_singular_blocks() -> None:
+    # GAP-2515: the raw "both" enum and "1 tool blocks" leaked into the row.
+    model = OverviewPanelModel(
+        OverviewConfig(claw_mode="openclaw", guardrail_connector="openclaw"),
+        version="test",
+    )
+    model.set_health(
+        HealthSnapshot(
+            connector=ConnectorHealth(
+                name="openclaw",
+                state="running",
+                tool_inspection_mode="both",
+                requests=8,
+                tool_blocks=1,
+                subprocess_blocks=1,
+            )
+        )
+    )
+    assert model.agent_detail() == (
+        "OpenClaw - pre-execution + response-scan - 8 req - 1 tool block - 1 subprocess block"
+    )
+
+
 def test_agent_detail_rolls_up_connectors_in_multi_connector() -> None:
     # 8.13: in a multi-connector install the SERVICES "Agent" row collapses to
     # an "N connectors active" roll-up (per-connector detail lives in the
@@ -378,7 +442,7 @@ def test_agent_detail_rolls_up_connectors_in_multi_connector() -> None:
 
 
 def test_cursor_agent_detail_has_enabled_disabled_parity_and_preserves_codex() -> None:
-    disclosure = "priority-conflict-detection=unavailable (none inferred)"
+    disclosure = "overrides by Enterprise, Team or Project hooks can't be detected"
 
     enabled = OverviewPanelModel(OverviewConfig(claw_mode="cursor"), version="test")
     enabled.set_health(HealthSnapshot(connector=ConnectorHealth(name="cursor", state="running")))
@@ -1008,7 +1072,7 @@ def test_multi_connector_rows_lists_each_connector_with_mode() -> None:
     rows = model.multi_connector_rows()
     assert [value for _, value in rows] == [
         "Codex (codex) — mode=observe",
-        "Cursor (cursor) — mode=action, priority-conflict-detection=unavailable (none inferred)",
+        "Cursor (cursor) — mode=action, overrides by Enterprise, Team or Project hooks can't be detected",
     ]
     # Indented sub-lines: blank label so the key:<16 formatting nests
     # them under the single "Agent" line.
@@ -1052,7 +1116,7 @@ def test_multi_connector_rows_append_effective_rule_pack() -> None:
         ("", "Codex (codex) — mode=action, strict"),
         (
             "",
-            "Cursor (cursor) — mode=observe, priority-conflict-detection=unavailable (none inferred)",
+            "Cursor (cursor) — mode=observe, overrides by Enterprise, Team or Project hooks can't be detected",
         ),
     ]
 
@@ -1278,3 +1342,59 @@ def test_guardrail_detail_names_a_failing_judge() -> None:
         )
     )
     assert "judge failing: 10/10 calls failed" in model.guardrail_detail()
+
+
+def test_telemetry_detail_names_full_disk_and_marks_local_sqlite_failing(monkeypatch) -> None:
+    """GAP-2215: the sink still says healthy, so the Overview must lead with the gateway's cause."""
+    import shutil
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(shutil, "disk_usage", lambda _path: SimpleNamespace(total=100, used=100, free=0))
+    model = _model()
+    model.set_observability_status(
+        V8OperatorStatus(
+            source="/tmp/config.yaml",
+            data_dir="/tmp/dc",
+            plan_digest="a" * 64,
+            bucket_catalog_version=1,
+            retention_days=7,
+            local_path="/tmp/dc/audit.db",
+            judge_bodies_path="",
+            destinations=(
+                V8DestinationStatus(
+                    name="local-sqlite",
+                    kind="sqlite",
+                    enabled=True,
+                    generated=True,
+                    capabilities=("logs",),
+                    selected_signals=("logs",),
+                    policy_form="implicit_local",
+                    endpoint="/tmp/dc/audit.db",
+                    route_count=1,
+                    buckets=("compliance.activity",),
+                    redaction_profiles=("none",),
+                ),
+            ),
+            buckets=(V8BucketStatus("compliance.activity", ("logs",), "none"),),
+            warnings=(),
+        )
+    )
+    details = {
+        "event_history_failure": "sqlite_write_failed",
+        "event_history_last_sqlite_class": "full",
+        "destinations": [{"name": "local-sqlite", "health_state": "healthy", "reason": "activated"}],
+    }
+    model.set_health(HealthSnapshot(telemetry=SubsystemHealth(state="error", details=details)))
+
+    assert model.telemetry_detail() == (
+        "audit events cannot be written: the disk holding the audit database is full; "
+        "1 destination: local-sqlite (failing)"
+    )
+    (row,) = model.observability_destination_rows()
+    assert (row.state, row.health_reason) == (
+        "failing",
+        "audit events cannot be written: the disk holding the audit database is full",
+    )
+
+    model.set_health(HealthSnapshot(telemetry=SubsystemHealth(state="running", details=details)))
+    assert model.telemetry_detail() == "1 destination: local-sqlite (healthy)"

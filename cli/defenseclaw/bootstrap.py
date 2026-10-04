@@ -269,6 +269,9 @@ def _api_port_free(host: str, port: int) -> bool:
 # the claiming account's SID (gateway_port_claim_windows.go, GAP-1569).
 _API_PORT_CLAIM_DIR = "/var/tmp"
 _API_PORT_CLAIM_PREFIX = "defenseclaw-api-port-"
+# init claims a guardrail proxy port the same way, so two accounts that run
+# init at the same time don't both pick it (GAP-2198). Only init writes these.
+_GUARDRAIL_PORT_CLAIM_PREFIX = "defenseclaw-guardrail-port-"
 _WINDOWS_CLAIM_SID = re.compile(r"S-1-[0-9]+(?:-[0-9]+)+")
 
 
@@ -304,8 +307,8 @@ def _windows_own_sid() -> str:
         return ""
 
 
-def _api_port_claimed_by_other_account(port: int) -> bool:
-    path = os.path.join(_api_port_claim_dir(), f"{_API_PORT_CLAIM_PREFIX}{port}")
+def _api_port_claimed_by_other_account(port: int, prefix: str = _API_PORT_CLAIM_PREFIX) -> bool:
+    path = os.path.join(_api_port_claim_dir(), f"{prefix}{port}")
     if _windows_port_claims():
         sid = _windows_claim_sid(path)
         own = _windows_own_sid()
@@ -335,7 +338,7 @@ def remove_own_api_port_claims() -> None:
         return
     own = _windows_own_sid() if windows else ""
     for name in names:
-        if not name.startswith(_API_PORT_CLAIM_PREFIX):
+        if not name.startswith((_API_PORT_CLAIM_PREFIX, _GUARDRAIL_PORT_CLAIM_PREFIX)):
             continue
         path = os.path.join(claim_dir, name)
         if windows:
@@ -356,7 +359,7 @@ def _api_port_available(host: str, port: int) -> bool:
     return _api_port_free(host, port) and not _api_port_claimed_by_other_account(port)
 
 
-def _reserve_api_port(port: int) -> bool:
+def _reserve_api_port(port: int, prefix: str = _API_PORT_CLAIM_PREFIX) -> bool:
     """Claim ``port`` for this account now, as its gateway start would.
 
     Two accounts running init at the same time could otherwise both pick a
@@ -369,13 +372,13 @@ def _reserve_api_port(port: int) -> bool:
     try:
         os.close(
             os.open(
-                os.path.join(_API_PORT_CLAIM_DIR, f"{_API_PORT_CLAIM_PREFIX}{port}"),
+                os.path.join(_API_PORT_CLAIM_DIR, f"{prefix}{port}"),
                 os.O_CREAT | os.O_EXCL | os.O_WRONLY,
                 0o644,
             )
         )
     except FileExistsError:
-        return not _api_port_claimed_by_other_account(port)
+        return not _api_port_claimed_by_other_account(port, prefix)
     except OSError:
         return True  # a claim is only a hint
     return True
@@ -438,12 +441,23 @@ def choose_first_run_api_port(cfg: Config) -> str:
 _DEFAULT_GUARDRAIL_PORT = 4000
 
 
+def _guardrail_port_available(host: str, port: int) -> bool:
+    """``port`` is free, not claimed by another account, and now claimed by this one."""
+    return (
+        _api_port_free(host, port)
+        and not _api_port_claimed_by_other_account(port, _GUARDRAIL_PORT_CLAIM_PREFIX)
+        and _reserve_api_port(port, _GUARDRAIL_PORT_CLAIM_PREFIX)
+    )
+
+
 def choose_first_run_guardrail_port(cfg: Config) -> str:
     """Move a new config's guardrail proxy port off 4000 when something holds it.
 
     Like the API port: a second account's proxy (OpenClaw) on the same host
     could not listen on the first account's 4000, so its gateway never
-    started (GAP-1701). Returns a line for the first-run output, or "".
+    started (GAP-1701). The chosen port is claimed like the API port, so two
+    accounts that run init at the same time get different ports (GAP-2198).
+    Returns a line for the first-run output, or "".
     """
     gc = cfg.guardrail
     if int(getattr(gc, "port", 0) or 0) != _DEFAULT_GUARDRAIL_PORT:
@@ -451,18 +465,21 @@ def choose_first_run_guardrail_port(cfg: Config) -> str:
     host = str(getattr(gc, "host", "") or "").strip().strip("[]")
     if host.lower() in {"", "localhost", "::1"}:
         host = "127.0.0.1"
-    if _api_port_free(host, _DEFAULT_GUARDRAIL_PORT):
+    if _guardrail_port_available(host, _DEFAULT_GUARDRAIL_PORT):
         return ""
     for step in range(1, _FIRST_RUN_API_PORT_TRIES + 1):
         port = _DEFAULT_GUARDRAIL_PORT + step * _FIRST_RUN_API_PORT_STEP
-        if _api_port_free(host, port):
+        if _guardrail_port_available(host, port):
             gc.port = port
             return (
-                f"{host}:{_DEFAULT_GUARDRAIL_PORT} is in use (often another account's DefenseClaw guardrail "
-                f"proxy), so this account's guardrail proxy uses port {port}"
+                # A claim by another account's init has no listener yet, so
+                # "in use" alone sent users looking for one (GAP-2283).
+                f"{host}:{_DEFAULT_GUARDRAIL_PORT} is in use or claimed by another account's DefenseClaw install, "
+                f"so this account's guardrail proxy uses port {port}"
             )
     return (
-        f"{host}:{_DEFAULT_GUARDRAIL_PORT} is in use; choose a free guardrail proxy port with "
+        f"{host}:{_DEFAULT_GUARDRAIL_PORT} and the next {_FIRST_RUN_API_PORT_TRIES} candidate ports are in use or "
+        "claimed by other accounts; choose a free guardrail proxy port with "
         "`defenseclaw setup guardrail --port <free port> --non-interactive`"
     )
 
@@ -837,14 +854,19 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
 
         if connector != "none":
             _apply_first_run_choices(cfg, options, connector, profile, scanner_mode)
-        elif new_config:
-            # A fresh config defaults to OpenClaw. Persist the explicit
-            # "no connector" markers (the state `setup remove --force` leaves)
-            # so status and uninstall do not treat an uninstalled OpenClaw as
-            # the active connector (GAP-1056).
-            cfg.claw.mode = ""
-            cfg.guardrail.connector = ""
-            cfg.guardrail.connectors = {}
+        else:
+            if new_config:
+                # A fresh config defaults to OpenClaw. Persist the explicit
+                # "no connector" markers (the state `setup remove --force`
+                # leaves) so status and uninstall do not treat an uninstalled
+                # OpenClaw as the active connector (GAP-1056).
+                cfg.claw.mode = ""
+                cfg.guardrail.connector = ""
+                cfg.guardrail.connectors = {}
+            # GAP-2592: no connector still saves the scanner mode and the
+            # LLM / Cisco AI Defense flags (llm.* also drives the scanners).
+            cfg.guardrail.scanner_mode = scanner_mode
+            _apply_first_run_llm_choices(cfg, options)
     except BaseException as exc:
         rollback_error = _restore_first_run_selection_transaction(transaction_app, setup_snapshot)
         if rollback_error:
@@ -1033,7 +1055,22 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
         report._protected_selection = None
         if rollback_error:
             report.setup.append(StepResult("First-run rollback", "fail", rollback_error, "defenseclaw init"))
+        else:
+            # The OK rows above describe the run, not what was kept (GAP-2590).
+            report.setup.append(
+                StepResult(
+                    "First-run rollback",
+                    "fail",
+                    "a step failed, so init restored the previous config; nothing was saved",
+                    "fix the failed step, then run defenseclaw init again",
+                )
+            )
     return report
+
+
+def _until_key_ok(detail: str) -> str:
+    """Readiness suffix for a failed key check: a missing key vs a rejected one (GAP-2596)."""
+    return "until the key is set" if "not set" in detail else "until a valid key is set"
 
 
 def targeted_readiness(cfg: Config, options: FirstRunOptions) -> list[StepResult]:
@@ -1114,7 +1151,7 @@ def targeted_readiness(cfg: Config, options: FirstRunOptions) -> list[StepResult
             key_step = StepResult(
                 "LLM API key",
                 "warn",
-                f"{key_step.detail}; the LLM judge stays inactive until the key is set",
+                f"{key_step.detail}; the LLM judge stays inactive {_until_key_ok(key_step.detail)}",
                 f"defenseclaw keys set {env_name}",
             )
         steps.append(key_step)
@@ -1122,7 +1159,18 @@ def targeted_readiness(cfg: Config, options: FirstRunOptions) -> list[StepResult
         steps.append(StepResult("LLM API", "skip", "not configured"))
 
     if cfg.guardrail.enabled and cfg.guardrail.scanner_mode in ("remote", "both"):
-        steps.append(_doctor_check("_check_cisco_ai_defense", cfg, "Cisco AI Defense"))
+        aid_step = _doctor_check("_check_cisco_ai_defense", cfg, "Cisco AI Defense")
+        if aid_step.status == "fail":
+            # Like the LLM key (GAP-1057): a missing or rejected Cisco key is
+            # set afterwards and must not roll back this run's config (GAP-2590).
+            env_name = cfg.cisco_ai_defense.api_key_env or "CISCO_AI_DEFENSE_API_KEY"
+            aid_step = StepResult(
+                "Cisco AI Defense",
+                "warn",
+                f"{aid_step.detail}; remote scanning stays inactive {_until_key_ok(aid_step.detail)}",
+                f"defenseclaw keys set {env_name}",
+            )
+        steps.append(aid_step)
     else:
         steps.append(StepResult("Cisco AI Defense", "skip", "scanner_mode is local"))
 
@@ -1280,6 +1328,12 @@ def _action_downgrade_record(connector: str, discovery=None) -> dict:
         "next_command": f"defenseclaw setup {key} --mode action",
     }
     signal = getattr(discovery, "agents", {}).get(key) if discovery is not None else None
+    if key == "hermes" and not getattr(signal, "binary_path", "") and not _hermes_installed():
+        # Its version cannot be checked before it is installed, and setup
+        # alone cannot fix that, so name the install first (GAP-2383).
+        record["reason"] = "Hermes is not installed, so its version cannot be checked yet"
+        record["next_command"] = f"{HERMES_INSTALL_HINT}, then run: defenseclaw setup hermes --mode action"
+        return record
     if (
         signal is not None
         and getattr(signal, "error", "") == agent_discovery.UNTRUSTED_PREFIX_ERROR
@@ -1435,7 +1489,11 @@ def _apply_first_run_choices(
     elif severity and selected_pc is not None and selected_pc.hilt is not None:
         selected_pc.hilt.min_severity = cfg.guardrail.hilt.min_severity
     pin_cursor_posture(cfg.guardrail, connector)
+    _apply_first_run_llm_choices(cfg, options)
 
+
+def _apply_first_run_llm_choices(cfg: Config, options: FirstRunOptions) -> None:
+    """Save the unified LLM and Cisco AI Defense flags, with or without a connector."""
     if options.llm_provider:
         cfg.llm.provider = options.llm_provider.strip()
     if options.llm_model:
@@ -1723,6 +1781,26 @@ def _running_connectors_from_state_file(data_dir: str) -> list[str] | None:
 _GATEWAY_AUDIT_UPGRADE_ALLOWANCE = 600
 _GATEWAY_START_TIMEOUT = (660 if os.name == "nt" else 210) + _GATEWAY_AUDIT_UPGRADE_ALLOWANCE
 
+# Progress banners the gateway prints before it fails, e.g.
+# "[audit] applying migration 1: initial schema: ...".
+_GATEWAY_PROGRESS_LINE = re.compile(r"^\[[\w.-]+\] applying migration \d+")
+
+
+def gateway_failure_detail(result: subprocess.CompletedProcess, default: str) -> str:
+    """The output line that explains a failed gateway start or restart.
+
+    On a fresh home the gateway prints audit migration banners first, so
+    the first line hid the real cause (GAP-2341). Use the last ``Error:``
+    line, else the first line that is not a migration banner.
+    """
+    text = "\n".join(part for part in (result.stderr, result.stdout) if part)
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    errors = [line for line in lines if line.startswith("Error:")]
+    if errors:
+        return errors[-1]
+    useful = [line for line in lines if not _GATEWAY_PROGRESS_LINE.match(line)]
+    return useful[0] if useful else default
+
 
 def _start_gateway_structured(cfg: Config, *, hook_fail_mode_changed: bool = False) -> StepResult:
     """Start (or restart) the defenseclaw-gateway sidecar to match
@@ -1811,12 +1889,11 @@ def _start_gateway_structured(cfg: Config, *, hook_fail_mode_changed: bool = Fal
                 if dropped and len(active) > 1:
                     detail += f"; no longer guarding {', '.join(dropped)}"
                 return StepResult("Sidecar", "pass", detail)
-            detail = (result.stderr or result.stdout or "restart failed").strip().splitlines()
             return StepResult(
                 "Sidecar",
                 "warn",
                 f"connector drift detected ({running} → {desired}) but restart failed: "
-                f"{detail[0] if detail else 'restart failed'}",
+                f"{gateway_failure_detail(result, 'restart failed')}",
                 "defenseclaw-gateway restart",
             )
         if hook_fail_mode_changed:
@@ -1843,8 +1920,7 @@ def _start_gateway_structured(cfg: Config, *, hook_fail_mode_changed: bool = Fal
         return StepResult("Sidecar", "warn", str(exc), "defenseclaw-gateway status")
     if result.returncode == 0:
         return StepResult("Sidecar", "pass", "started")
-    detail = (result.stderr or result.stdout or "start failed").strip().splitlines()
-    first = detail[0] if detail else "start failed"
+    first = gateway_failure_detail(result, "start failed")
     # A port held by another account names its own fix; lead with it.
     port_fix = re.search(r"with: (defenseclaw setup gateway --api-port \d+)", first)
     return StepResult("Sidecar", "warn", first, port_fix.group(1) if port_fix else "defenseclaw-gateway status")
@@ -1877,8 +1953,7 @@ def _restart_for_hook_fail_mode(gw: str) -> StepResult:
         return StepResult("Sidecar", "warn", f"restart failed ({exc}); {stale}", "defenseclaw-gateway restart")
     if result.returncode == 0:
         return StepResult("Sidecar", "pass", "restarted to apply the new hook fail mode")
-    detail = (result.stderr or result.stdout or "restart failed").strip().splitlines()
-    first = detail[0] if detail else "restart failed"
+    first = gateway_failure_detail(result, "restart failed")
     return StepResult("Sidecar", "warn", f"restart failed: {first}; {stale}", "defenseclaw-gateway restart")
 
 
@@ -1937,6 +2012,18 @@ def _file_mentions_defenseclaw(path: str) -> bool:
         return False
 
 
+# Where to get Hermes when it is missing (GAP-2383).
+HERMES_INSTALL_HINT = "install Hermes (https://github.com/NousResearch/hermes-agent)"
+
+
+def _hermes_installed() -> bool:
+    spec = agent_discovery._SPECS["hermes"]
+    if agent_discovery._binary_path_for_agent("hermes", spec):
+        return True
+    # The upstream installer links ~/.local/bin/hermes, which may not be on PATH yet.
+    return os.path.isfile(os.path.expanduser("~/.local/bin/hermes"))
+
+
 def _connector_readiness(cfg: Config, connector: str) -> StepResult:
     if connector == "none":
         return StepResult("Connector", "skip", "no connector requested")
@@ -1974,6 +2061,15 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
             return StepResult("Connector", "pass", "ZeptoClaw config found")
         return StepResult("Connector", "warn", "ZeptoClaw config not found yet", "defenseclaw setup zeptoclaw")
     if connector == "hermes":
+        if not _hermes_installed():
+            # Setup writes Hermes' config.yaml hooks even before Hermes is
+            # installed, so the file alone is not readiness (GAP-2354).
+            return StepResult(
+                "Connector",
+                "warn",
+                "Hermes is not installed (hermes is not on PATH)",
+                f"{HERMES_INSTALL_HINT}, then run: defenseclaw setup hermes",
+            )
         path = hermes_config_path()
         if os.path.isfile(path):
             return StepResult("Connector", "pass", "Hermes config found")

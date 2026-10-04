@@ -68,13 +68,69 @@ def _harden_textual_stdin_decoder() -> None:
     linux_driver.getincrementaldecoder = _tolerant_factory  # type: ignore[attr-defined]
 
 
+def _hold_windows_ctrl_c_until_exit(win32: object | None = None, register: object | None = None) -> None:
+    """Keep a Ctrl+C pressed while the TUI exits from reaching cmd.exe (GAP-2181).
+
+    On Windows ``defenseclaw`` is a ``.cmd`` shim. Textual reads Ctrl+C as a
+    key, but it restores the console's processed input when it closes, so a
+    second Ctrl+C pressed while this process is still exiting becomes a
+    console Ctrl+C event that cmd.exe answers with "Terminate batch job
+    (Y/N)?". When Textual restores the console, this keeps processed input off
+    until the interpreter exits, then drops the pending keys and restores the
+    console mode as Textual found it.
+    """
+
+    if win32 is None:
+        if os.name != "nt":
+            return
+        try:
+            from textual.drivers import win32 as textual_win32
+        except Exception:  # noqa: BLE001 - leave Textual's behaviour unchanged.
+            return
+        win32 = textual_win32
+    if register is None:
+        import atexit
+
+        register = atexit.register
+    original = win32.enable_application_mode  # type: ignore[attr-defined]
+
+    def enable_application_mode():  # type: ignore[no-untyped-def]
+        restore = original()
+
+        def restore_holding_ctrl_c() -> None:
+            restore()
+            stdin = sys.__stdin__
+            try:
+                mode = win32.get_console_mode(stdin)  # type: ignore[attr-defined]
+                if not mode & win32.ENABLE_PROCESSED_INPUT:  # type: ignore[attr-defined]
+                    return
+                win32.set_console_mode(stdin, mode & ~win32.ENABLE_PROCESSED_INPUT)  # type: ignore[attr-defined]
+            except Exception:  # noqa: BLE001 - best effort; the console is already restored.
+                return
+
+            def release() -> None:
+                try:
+                    handle = win32.GetStdHandle(win32.STD_INPUT_HANDLE)  # type: ignore[attr-defined]
+                    win32.KERNEL32.FlushConsoleInputBuffer(handle)  # type: ignore[attr-defined]
+                finally:
+                    win32.set_console_mode(stdin, mode)  # type: ignore[attr-defined]
+
+            register(release)  # type: ignore[operator]
+
+        return restore_holding_ctrl_c
+
+    win32.enable_application_mode = enable_application_mode  # type: ignore[attr-defined]
+
+
 def run_textual_tui() -> None:
     """Run the Python Textual TUI backend."""
 
     from defenseclaw import config
+    from defenseclaw.file_lock import hold_tui_lock, release_tui_lock
     from defenseclaw.tui.app import DefenseClawTUI
 
     _harden_textual_stdin_decoder()
+    _hold_windows_ctrl_c_until_exit()
 
     try:
         config.require_v8_config(allow_missing=True)
@@ -90,11 +146,16 @@ def run_textual_tui() -> None:
             first_run = False
         except Exception:
             cfg, first_run = _load_after_optional_first_run_prompt(config)
-    DefenseClawTUI(
-        config=cfg,
-        first_run=first_run,
-        config_path=config.config_path(),
-    ).run()
+    data_dir = str(config.default_data_path())
+    tui_lock = hold_tui_lock(data_dir)
+    try:
+        DefenseClawTUI(
+            config=cfg,
+            first_run=first_run,
+            config_path=config.config_path(),
+        ).run()
+    finally:
+        release_tui_lock(tui_lock, data_dir)
 
 
 def _load_after_optional_first_run_prompt(config_module: object) -> tuple[object | None, bool]:

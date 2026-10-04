@@ -56,7 +56,8 @@ func TestWindowsEnterpriseSessionAndStandardUserWording(t *testing.T) {
 	t.Cleanup(func() { managedHostCurrentAccount = restore })
 	managedHostCurrentAccount = func() string { return `HOST\dcw-std1` }
 	answer := windowsEnterpriseStandardUserInspectionAnswer("status")
-	for _, want := range []string{"needs an elevated prompt", "enterprise windows status --profile standalone", `--user HOST\dcw-std1`, "Nothing was changed."} {
+	// GAP-2262: the account is named as the discovery view names it.
+	for _, want := range []string{"needs an elevated prompt", "enterprise windows status --profile standalone", "--user dcw-std1`", "Nothing was changed."} {
 		if !strings.Contains(answer, want) {
 			t.Fatalf("answer lacks %q: %q", want, answer)
 		}
@@ -66,5 +67,17 @@ func TestWindowsEnterpriseSessionAndStandardUserWording(t *testing.T) {
 	}
 	if strings.Contains(answer, "AllowUnsigned") || strings.Contains(answer, "Authenticode") {
 		t.Fatalf("answer leaks installer internals: %q", answer)
+	}
+}
+
+// GAP-2011: the administrator's command keeps the attestation the standard
+// user asked for, so running it makes security_complete true.
+func TestWindowsEnterpriseStandardUserMutationAnswerKeepsAttestation(t *testing.T) {
+	answer := windowsEnterpriseStandardUserMutationAnswer("repair", "--attest-claude-effective-policy")
+	if !strings.Contains(answer, "enterprise windows repair --profile standalone --attest-claude-effective-policy`. Nothing was changed.") {
+		t.Fatalf("answer = %q", answer)
+	}
+	if plain := windowsEnterpriseStandardUserMutationAnswer("repair"); !strings.Contains(plain, "repair --profile standalone`. Nothing") {
+		t.Fatalf("plain answer = %q", plain)
 	}
 }

@@ -36,6 +36,7 @@ from defenseclaw.tui.services.setup_state import (
     ConfigSection,
     ReadinessCheck,
     get_config_value,
+    guardrail_mode_overrides,
     validate_config_field,
 )
 from defenseclaw.tui.services.setup_state import (
@@ -199,13 +200,13 @@ class TaskProblem:
 
 
 def _check_name(check: ReadinessCheck) -> str:
-    # "Active Connector: codex" is one row per connector.
+    # "Connector: codex" is one row per connector.
     return check.title.split(":", 1)[0].strip()
 
 
 # Which task owns each readiness check (its fix belongs to that task).
 _READINESS_OWNERS: dict[str, tuple[SetupWizard, ...]] = {
-    "Active Connector": (SetupWizard.CONNECTOR_SETUP,),
+    "Connector": (SetupWizard.CONNECTOR_SETUP,),
     "Gateway / API Health": (SetupWizard.GATEWAY,),
     "Guardrail": (SetupWizard.GUARDRAIL,),
     "Required Credentials": (SetupWizard.CREDENTIALS,),
@@ -213,7 +214,7 @@ _READINESS_OWNERS: dict[str, tuple[SetupWizard, ...]] = {
     "Regional Provider": (SetupWizard.LLM,),
     "Custom-provider Overlay": (SetupWizard.CUSTOM_PROVIDERS,),
     "Scanner Availability": (SetupWizard.SKILL_SCANNER, SetupWizard.MCP_SCANNER),
-    "Observability v8": (SetupWizard.OBSERVABILITY,),
+    "Telemetry": (SetupWizard.OBSERVABILITY,),
     "Registry / Asset Policy": (SetupWizard.REGISTRIES,),
     "Restart Pending": (SetupWizard.GATEWAY,),
 }
@@ -363,15 +364,32 @@ def _gateway_status(cfg: Any, problems: Sequence[TaskProblem]) -> TaskStatus:
     return TaskStatus("ok", _short(f"{host}:{port}" if port else host))
 
 
-def _observability_status(observability: Any, error: str) -> TaskStatus:
+def _observability_status(observability: Any, error: str, failing: Sequence[str] = ()) -> TaskStatus:
     destinations = _destinations(observability)
+    if destinations and failing:
+        # Overview and doctor called an export failing while this said
+        # "✓ 3 exports + local" (GAP-2394).
+        return TaskStatus("attention", f"{len(failing)} of {len(destinations)} failing")
     if destinations is None:
         if error:
             return TaskStatus("attention", "config unreadable")
         return TaskStatus("off", "local only")
     if not destinations:
         return TaskStatus("off", "local only")
+    # The list and Overview count the built-in local store too, so say so
+    # here: "2 exports + local", not "2 destinations" next to "3" (GAP-2239).
+    if _has_local_store(observability):
+        return TaskStatus("ok", f"{_plural(len(destinations), 'export')} + local")
     return TaskStatus("ok", _plural(len(destinations), "destination"))
+
+
+def _has_local_store(observability: Any) -> bool:
+    return any(
+        getattr(destination, "enabled", False)
+        and getattr(destination, "generated", False)
+        and getattr(destination, "kind", "") == "sqlite"
+        for destination in getattr(observability, "destinations", ()) or ()
+    )
 
 
 def _redaction_profiles(cfg: Any, observability: Any) -> set[str]:
@@ -425,6 +443,7 @@ def task_status(
     observability: Any = None,
     observability_error: str = "",
     available: bool = True,
+    failing_exports: Sequence[str] = (),
 ) -> TaskStatus:
     """Rate one Setup task for the Status column.
 
@@ -449,7 +468,14 @@ def task_status(
     if wizard == SetupWizard.GUARDRAIL:
         if not guardrail_on:
             return TaskStatus("attention" if problems else "off", "off")
-        return TaskStatus("ok", f"on · {_text(cfg, 'guardrail.mode') or 'observe'}")
+        mode, overrides = guardrail_mode_overrides(cfg)
+        if overrides:
+            # Short for the Status column: "on · action, 1 observe" (GAP-2325).
+            counts: dict[str, int] = {}
+            for _name, own in overrides:
+                counts[own] = counts.get(own, 0) + 1
+            mode += "".join(f", {count} {own}" for own, count in counts.items())
+        return TaskStatus("ok", f"on · {mode}")
     if wizard == SetupWizard.GUARDRAIL_ACTIONS:
         if not guardrail_on:
             return TaskStatus("off", "guardrail off")
@@ -461,7 +487,11 @@ def task_status(
         if not _text(cfg, f"scanners.{scanner}.binary"):
             return TaskStatus("off")
         if wizard == SetupWizard.SKILL_SCANNER:
-            policy = _text(cfg, "scanners.skill_scanner.policy") or "permissive"
+            # An empty policy is what "--policy none" saves; only an unset one
+            # is the permissive default, as the strictness form reads it
+            # (GAP-2562).
+            raw = _value(cfg, "scanners.skill_scanner.policy", "permissive")
+            policy = "permissive" if raw is None else (str(raw).strip() or "none")
             return TaskStatus("ok", f"{policy} · LLM" if _flag(cfg, "scanners.skill_scanner.use_llm") else policy)
         return TaskStatus("ok", _short(f"{_text(cfg, 'scanners.mcp_scanner.analyzers') or 'auto'} analyzers"))
     if wizard == SetupWizard.REDACTION:
@@ -490,7 +520,7 @@ def task_status(
         hooks = [hook for hook in _items(cfg, "webhooks") if _enabled(hook, default=False)]
         return TaskStatus("ok", _plural(len(hooks), "webhook")) if hooks else TaskStatus("off", "none")
     if wizard == SetupWizard.OBSERVABILITY:
-        return _observability_status(observability, observability_error)
+        return _observability_status(observability, observability_error, failing_exports)
     if wizard == SetupWizard.SPLUNK:
         return _splunk_status(cfg, observability)
     if wizard == SetupWizard.SPLUNK_DASHBOARDS:
@@ -513,6 +543,13 @@ def task_status(
     return TaskStatus("na")
 
 
+# Tasks whose base command alone ("defenseclaw setup") is not what they run
+# (GAP-2160).
+_COMMAND_DISPLAY: dict[SetupWizard, str] = {
+    SetupWizard.CONNECTOR_SETUP: "defenseclaw setup <connector> --yes",
+}
+
+
 def setup_detail_pairs(model: object) -> tuple[tuple[str, str], ...]:
     """What ``i`` shows on the wizard list: the selected task, then readiness.
 
@@ -525,7 +562,7 @@ def setup_detail_pairs(model: object) -> tuple[tuple[str, str], ...]:
         ("Task", f"{wizard_label(info.wizard)} ({wizard_group(info.wizard)})"),
         ("What it does", info.description),
         ("How it works", info.how_to),
-        ("Command", " ".join(info.argv)),
+        ("Command", _COMMAND_DISPLAY.get(info.wizard, " ".join(info.argv))),
     ]
     if info.status == "unsupported":
         pairs.append(("Unavailable", model.wizard_unavailable_reason(info.wizard)))  # type: ignore[attr-defined]
@@ -548,7 +585,7 @@ def setup_detail_pairs(model: object) -> tuple[tuple[str, str], ...]:
 # --- config sections -------------------------------------------------------
 
 SECTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("Core", ("General", "Agent", "Claw", "Gateway", "Gateway Watcher", "Gateway Watchdog")),
+    ("Core", ("General", "Agent", "Gateway", "Gateway Watcher", "Gateway Watchdog")),
     (
         "Protection",
         (
@@ -567,7 +604,10 @@ SECTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ),
     ("Hooks (read-only)", ("Agent Hooks", "Connector Hooks")),
     ("Observability", ("Observability", "Webhooks", "Notifications", "AI Discovery")),
-    ("Legacy", ("Inspect LLM (legacy - read-only)",)),
+    # claw.mode is the single-agent setting from before connectors; on a
+    # multi-connector install it read as "Which agent framework DefenseClaw
+    # defends" (GAP-2253).
+    ("Legacy", ("Claw", "Inspect LLM (legacy - read-only)")),
 )
 _DEFAULT_SECTION_GROUP = "Core"
 _LEGACY_GROUP = "Legacy"

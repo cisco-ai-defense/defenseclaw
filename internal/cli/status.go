@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -32,6 +33,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/spf13/cobra"
+	"gopkg.in/yaml.v3"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -63,8 +65,9 @@ The sidecar must be running for this command to work.`,
 		gatewayStatusConfigProblem = nil
 		err := loadGatewayCommandConfigFor(cmd)
 		if relaxed := gatewayStatusRelaxedConfig(err); relaxed != nil {
-			// GAP-1788: a missing destination secret does not hide the
-			// running gateway; show its status, then the config problem.
+			// GAP-1788, GAP-2062: a missing destination secret or an
+			// invalid value does not hide the running gateway; show its
+			// status, then the config problem.
 			cfg = relaxed
 			gatewayStatusConfigProblem = gatewayStatusConfigLoadError(err)
 			return nil
@@ -87,10 +90,15 @@ var gatewayStatusConfigProblem error
 
 // gatewayStatusRelaxedConfig loads config.yaml without compiling the
 // observability destinations when err is only a missing destination secret,
-// so status can still find and query the gateway. It returns nil otherwise.
+// so status can still find and query the gateway. An invalid enum or type
+// value is dropped for the same purpose, so status shows the running
+// gateway before the problem in both cases (GAP-2062); so is an undeclared
+// key (GAP-2173). It returns nil
+// otherwise.
 func gatewayStatusRelaxedConfig(err error) *config.Config {
 	var secretErr *config.V8SecretReferenceError
-	if err == nil || !errors.As(err, &secretErr) || secretErr.Credential {
+	secretOnly := err != nil && errors.As(err, &secretErr) && !secretErr.Credential
+	if err == nil || (!secretOnly && !gatewayStatusDroppableValue(err)) {
 		return nil
 	}
 	path := config.ConfigPath()
@@ -98,11 +106,114 @@ func gatewayStatusRelaxedConfig(err error) *config.Config {
 	if readErr != nil {
 		return nil
 	}
-	relaxed, loadErr := config.LoadRuntimeV8FromBytes(path, raw)
-	if loadErr != nil {
-		return nil
+	for range 8 {
+		// Check the schema before the typed decode: a wrong-type value
+		// (a list for a string, text for a boolean or integer) fails the
+		// decode with no schema path to drop (GAP-2118).
+		schemaCheck := config.ValidateV8SchemaBytes(path, raw)
+		if schemaCheck == nil {
+			relaxed, loadErr := config.LoadRuntimeV8FromBytes(path, raw)
+			if loadErr != nil {
+				return nil
+			}
+			return relaxed
+		}
+		if !gatewayStatusDroppableValue(schemaCheck) {
+			return nil
+		}
+		var next []byte
+		ok := false
+		var schemaErr *config.V8SchemaError
+		var yamlErr *config.V8YAMLError
+		switch {
+		case errors.As(schemaCheck, &schemaErr):
+			next, ok = yamlWithoutPath(raw, schemaErr.Path, 0)
+		case errors.As(schemaCheck, &yamlErr):
+			// Keep the first definition of a duplicate section (GAP-2188).
+			next, ok = yamlWithoutPath(raw, yamlErr.Path, yamlErr.Line)
+		}
+		if !ok {
+			return nil
+		}
+		raw = next
 	}
-	return relaxed
+	return nil
+}
+
+// gatewayStatusDroppableValue reports a schema error about one value (an
+// unknown enum choice, a wrong type or an undeclared key), whose removal leaves the rest of
+// config.yaml, including the gateway address, as written.
+func gatewayStatusDroppableValue(err error) bool {
+	var yamlErr *config.V8YAMLError
+	if errors.As(err, &yamlErr) {
+		// A second definition of a key (GAP-2188) is dropped too.
+		return yamlErr.Code == config.V8YAMLErrorDuplicateKey && yamlErr.Line > 0 &&
+			yamlErr.Path != "" && yamlErr.Path != "$"
+	}
+	var schemaErr *config.V8SchemaError
+	if !errors.As(err, &schemaErr) || schemaErr.Path == "" || schemaErr.Path == "$" {
+		return false
+	}
+	// An unknown (typo'd) key is dropped too (GAP-2173).
+	return schemaErr.Keyword == "enum" || schemaErr.Keyword == "type" || schemaErr.Keyword == "additionalProperties"
+}
+
+var yamlPathSegment = regexp.MustCompile(`^(?:\.([A-Za-z0-9_-]+)|\[([0-9]+)\])`)
+
+// yamlWithoutPath removes the value at a schema display path such as
+// $.guardrail.mode or $.connectors[0].name from a YAML document. With a
+// line above zero it removes only the key written on that line, the second
+// definition of a duplicate key.
+func yamlWithoutPath(raw []byte, path string, line int) ([]byte, bool) {
+	rest := strings.TrimPrefix(path, "$")
+	var segments []string
+	for rest != "" {
+		match := yamlPathSegment.FindStringSubmatch(rest)
+		if match == nil {
+			return nil, false
+		}
+		segments = append(segments, match[1]+match[2])
+		rest = rest[len(match[0]):]
+	}
+	var doc yaml.Node
+	if len(segments) == 0 || yaml.Unmarshal(raw, &doc) != nil || len(doc.Content) == 0 {
+		return nil, false
+	}
+	node := doc.Content[0]
+	for i, segment := range segments {
+		last := i == len(segments)-1
+		found := false
+		switch node.Kind {
+		case yaml.MappingNode:
+			for j := 0; j+1 < len(node.Content); j += 2 {
+				if node.Content[j].Value != segment || last && line > 0 && node.Content[j].Line != line {
+					continue
+				}
+				if last {
+					node.Content = append(node.Content[:j], node.Content[j+2:]...)
+				} else {
+					node = node.Content[j+1]
+				}
+				found = true
+				break
+			}
+		case yaml.SequenceNode:
+			index, err := strconv.Atoi(segment)
+			if err == nil && index >= 0 && index < len(node.Content) {
+				if last {
+					node.Content = append(node.Content[:index], node.Content[index+1:]...)
+				} else {
+					node = node.Content[index]
+				}
+				found = true
+			}
+		}
+		if !found {
+			return nil, false
+		}
+	}
+	out, err := yaml.Marshal(&doc)
+	return out, err == nil
 }
 
 // gatewayStatusJSON selects the machine-readable status (GAP-1609).

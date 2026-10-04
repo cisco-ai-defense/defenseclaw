@@ -170,6 +170,31 @@ var copilotVSCodeLocalProjections = map[string]copilotVSCodeLocalProjection{
 	},
 }
 
+// copilotCLIHookFileLocalEvents is how the VS Code Local harness maps the
+// events of a Copilot CLI-format hook file such as the per-user
+// ~/.copilot/hooks/defenseclaw.json (HOOKS_BY_TARGET[Target.GitHubCopilot] in
+// microsoft/vscode src/vs/workbench/contrib/chat/common/promptSyntax/hookTypes.ts).
+// The harness then sends its own Local payload to that command
+// (chatHookService.ts: hook_event_name, tool_name, tool_input), never the CLI's
+// camelCase body: "Runtime payloads still use the Local schema."
+var copilotCLIHookFileLocalEvents = map[string]string{
+	"sessionStart":        "SessionStart",
+	"userPromptSubmitted": "UserPromptSubmit",
+	"preToolUse":          "PreToolUse",
+	"postToolUse":         "PostToolUse",
+	"agentStop":           "Stop",
+	"subagentStop":        "SubagentStop",
+}
+
+// CopilotVSCodeLocalEventForCLIHook returns the Local event a Copilot CLI
+// hook-file entry bound to cliEvent runs as in the VS Code Local harness. ok
+// is false for CLI events the harness maps to no Local dialect event
+// (sessionEnd, errorOccurred) or never runs.
+func CopilotVSCodeLocalEventForCLIHook(cliEvent string) (string, bool) {
+	local, ok := copilotCLIHookFileLocalEvents[strings.TrimSpace(cliEvent)]
+	return local, ok
+}
+
 // CopilotVSCodeLocalTool reports a VS Code Local agent tool DefenseClaw
 // projects. The Local harness also runs the per-user Copilot CLI hook file
 // (~/.copilot/hooks) and then sends a CLI-shaped body (toolName, toolArgs)
@@ -199,7 +224,7 @@ func CopilotVSCodeLocalActionTool(toolName string) string {
 // value keeps the native object, so ActionFacts sees the shape it cannot
 // prove instead of a projection that drops part of the call.
 func copilotVSCodeLocalToolArgs(toolName string, input interface{}) json.RawMessage {
-	native, err := json.Marshal(input)
+	native, err := MarshalToolArgs(input)
 	if err != nil {
 		return nil
 	}
@@ -218,7 +243,7 @@ func copilotVSCodeLocalToolArgs(toolName string, input interface{}) json.RawMess
 		if !ok || strings.TrimSpace(url) == "" {
 			return native
 		}
-		out, _ := json.Marshal(map[string]string{"url": url})
+		out, _ := MarshalToolArgs(map[string]string{"url": url})
 		return out
 	}
 	p, ok := copilotVSCodeLocalProjections[toolName]
@@ -237,7 +262,7 @@ func copilotVSCodeLocalToolArgs(toolName string, input interface{}) json.RawMess
 		}
 		out[to] = text
 	}
-	encoded, err := json.Marshal(out)
+	encoded, err := MarshalToolArgs(out)
 	if err != nil {
 		return native
 	}

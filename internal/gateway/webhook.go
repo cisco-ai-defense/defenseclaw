@@ -23,6 +23,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -76,6 +77,7 @@ type WebhookDispatcher struct {
 
 type webhookEndpoint struct {
 	url         string
+	logURL      string // redactWebhookURL(url): the only form that may be logged
 	channelType string // slack, pagerduty, webex, generic
 	secret      string
 	roomID      string
@@ -184,7 +186,7 @@ func buildWebhookEndpoints(cfgs []config.WebhookConfig, logger *log.Logger) []we
 			continue
 		}
 		if err := validateWebhookURL(c.URL); err != nil {
-			logger.Printf("rejected endpoint %s: %v", c.URL, err)
+			logger.Printf("rejected endpoint %s: %s", redactWebhookURL(c.URL), scrubWebhookErr(err, c.URL))
 			continue
 		}
 		evts := make(map[string]bool)
@@ -206,6 +208,7 @@ func buildWebhookEndpoints(cfgs []config.WebhookConfig, logger *log.Logger) []we
 		}
 		endpoints = append(endpoints, webhookEndpoint{
 			url:         c.URL,
+			logURL:      redactWebhookURL(c.URL),
 			channelType: strings.ToLower(c.Type),
 			secret:      c.ResolvedSecret(),
 			roomID:      c.RoomID,
@@ -287,14 +290,59 @@ func newWebhookHTTPClient(allowLoopback bool, logger *log.Logger) *http.Client {
 			}
 			if err := validateWebhookURL(req.URL.String()); err != nil {
 				if logger != nil {
-					logger.Printf("rejected redirect to %s: %v",
-						req.URL.Redacted(), err)
+					logger.Printf("rejected redirect to %s: %s",
+						redactWebhookURL(req.URL.String()), scrubWebhookErr(err, req.URL.String()))
 				}
 				return fmt.Errorf("webhook redirect rejected: %w", err)
 			}
 			return nil
 		},
 	}
+}
+
+// redactWebhookURL keeps only scheme://host[:port] of a webhook URL and
+// replaces any userinfo, path, query and fragment with "***". For Slack,
+// Discord and webhook.site style endpoints the path is the credential, so
+// gateway log lines must never carry it. Mirrors redact_webhook_url in
+// cli/defenseclaw/webhooks/writer.py ("setup webhook list/show/test").
+func redactWebhookURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "***"
+	}
+	host := u.Host
+	if u.User != nil {
+		host = "***@" + host
+	}
+	out := u.Scheme + "://" + host
+	if (u.Path != "" && u.Path != "/") || u.Opaque != "" {
+		out += "/***"
+	}
+	if u.RawQuery != "" || u.ForceQuery {
+		out += "?***"
+	}
+	if u.Fragment != "" {
+		out += "#***"
+	}
+	return out
+}
+
+// scrubWebhookErr renders err with every copy of the webhook URL replaced by
+// its redacted form. net/http wraps transport errors in *url.Error, whose
+// text repeats the full request URL (`Post "https://host/secret": ...`).
+func scrubWebhookErr(err error, raw string) string {
+	if err == nil {
+		return ""
+	}
+	msg := err.Error()
+	var ue *url.Error
+	if errors.As(err, &ue) && ue.URL != "" {
+		msg = strings.ReplaceAll(msg, ue.URL, redactWebhookURL(ue.URL))
+	}
+	if raw != "" {
+		msg = strings.ReplaceAll(msg, raw, redactWebhookURL(raw))
+	}
+	return msg
 }
 
 func hashWebhookTargetURL(raw string) string {
@@ -355,7 +403,7 @@ func (d *WebhookDispatcher) Dispatch(event audit.Event) {
 		cooldownKey := event.Target + "\x00" + action
 		if !ep.claimSlot(cooldownKey) {
 			d.logger.Printf("suppressed duplicate %s/%s for %s (cooldown %s)",
-				event.Target, action, ep.url, ep.cooldown)
+				event.Target, action, ep.logURL, ep.cooldown)
 			ctx := webhookMetricContext(event)
 			tHash := hashWebhookTargetURL(ep.url)
 			d.recordDeliveryV8(ctx, ep.channelType, tHash, "cooldown_suppressed", 0, 0, true)
@@ -534,7 +582,7 @@ func (d *WebhookDispatcher) send(ep *webhookEndpoint, event audit.Event) bool {
 		payload, err = formatGenericPayload(event)
 	}
 	if err != nil {
-		d.logger.Printf("format error for %s: %v", ep.url, err)
+		d.logger.Printf("format error for %s: %v", ep.logURL, err)
 		record(0, 0, "failed")
 		ep.noteWebhookFailure(tctx, d, targetHash)
 		return false
@@ -553,7 +601,7 @@ func (d *WebhookDispatcher) send(ep *webhookEndpoint, event audit.Event) bool {
 		req, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, ep.url, bytes.NewReader(payload))
 		if reqErr != nil {
 			cancel()
-			d.logger.Printf("request error for %s: %v", ep.url, reqErr)
+			d.logger.Printf("request error for %s: %s", ep.logURL, scrubWebhookErr(reqErr, ep.url))
 			lastStatus = 0
 			continue
 		}
@@ -563,8 +611,8 @@ func (d *WebhookDispatcher) send(ep *webhookEndpoint, event audit.Event) bool {
 		resp, doErr := d.client.Do(req)
 		cancel()
 		if doErr != nil {
-			d.logger.Printf("send to %s attempt %d/%d failed: %v",
-				ep.url, attempt+1, webhookMaxRetries+1, doErr)
+			d.logger.Printf("send to %s attempt %d/%d failed: %s",
+				ep.logURL, attempt+1, webhookMaxRetries+1, scrubWebhookErr(doErr, ep.url))
 			lastStatus = 0
 			continue
 		}
@@ -576,7 +624,7 @@ func (d *WebhookDispatcher) send(ep *webhookEndpoint, event audit.Event) bool {
 			ms := time.Since(start).Milliseconds()
 			if d.debug {
 				d.logger.Printf("sent to %s (status=%d action=%s severity=%s)",
-					ep.url, resp.StatusCode, event.Action, event.Severity)
+					ep.logURL, resp.StatusCode, event.Action, event.Severity)
 			}
 			record(resp.StatusCode, float64(ms), "delivered")
 			ep.noteWebhookSuccess(tctx, d, targetHash)
@@ -585,7 +633,7 @@ func (d *WebhookDispatcher) send(ep *webhookEndpoint, event audit.Event) bool {
 
 		if !isRetryable(resp.StatusCode) {
 			d.logger.Printf("%s returned %d (permanent failure), not retrying",
-				ep.url, resp.StatusCode)
+				ep.logURL, resp.StatusCode)
 			ms := time.Since(start).Milliseconds()
 			record(lastStatus, float64(ms), "failed")
 			ep.noteWebhookFailure(tctx, d, targetHash)
@@ -602,9 +650,9 @@ func (d *WebhookDispatcher) send(ep *webhookEndpoint, event audit.Event) bool {
 		}
 
 		d.logger.Printf("%s returned %d, attempt %d/%d",
-			ep.url, resp.StatusCode, attempt+1, webhookMaxRetries+1)
+			ep.logURL, resp.StatusCode, attempt+1, webhookMaxRetries+1)
 	}
-	d.logger.Printf("exhausted retries for %s", ep.url)
+	d.logger.Printf("exhausted retries for %s", ep.logURL)
 	ms := time.Since(start).Milliseconds()
 	record(lastStatus, float64(ms), "failed")
 	ep.noteWebhookFailure(tctx, d, targetHash)

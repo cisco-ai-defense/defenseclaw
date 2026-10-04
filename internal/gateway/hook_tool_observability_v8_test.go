@@ -479,6 +479,33 @@ func TestHookToolV8BlockedCallCarriesGuardrailBlockOnEveryDestination(t *testing
 			!strings.Contains(attributes["metadata"], `"status":"ERROR"`)) {
 			t.Errorf("galileo: tool span metadata=%q, want the guardrail decision", attributes["metadata"])
 		}
+		// GAP-2525: the turn's agent root names the rule as well, so the
+		// blocked turn shows it in Galileo's trace metadata and in Tempo.
+		// The agent span ends after its tool span, so it can come in a later
+		// export batch: wait for it as for the tool span.
+		var agent *tracepb.Span
+		for deadline := time.Now().Add(3 * time.Second); agent == nil && time.Now().Before(deadline); {
+			for _, span := range hookModelV8CapturedSpansFromCapture(capture) {
+				if strings.HasPrefix(span.Name, "invoke_agent") && bytes.Equal(span.SpanId, tool.ParentSpanId) {
+					agent = span
+				}
+			}
+			if agent == nil {
+				time.Sleep(10 * time.Millisecond)
+			}
+		}
+		if agent == nil {
+			t.Fatalf("%s: no invoke_agent parent of the blocked tool span", name)
+		}
+		agentAttributes := hookModelV8ProtoAttributes(agent)
+		for key, want := range map[string]string{
+			"defenseclaw.guardrail.action": "block", "defenseclaw.guardrail.rule_id": "C2-METADATA-AWS",
+			"defenseclaw.guardrail.severity": "CRITICAL",
+		} {
+			if agentAttributes[key] != want && !strings.Contains(agentAttributes["metadata"], fmt.Sprintf("%q:%q", key, want)) {
+				t.Errorf("%s: agent root %s=%q want %q (metadata=%q)", name, key, agentAttributes[key], want, agentAttributes["metadata"])
+			}
+		}
 		var event *tracepb.Span_Event
 		for _, candidate := range tool.Events {
 			if candidate.Name == "defenseclaw.guardrail.block" {

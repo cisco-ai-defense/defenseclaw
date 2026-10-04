@@ -5264,7 +5264,16 @@ def test_uninstall_returns_shared_vendor_directories_to_their_prior_state() -> N
         "    if ($Purge -and (Test-DefenseClawStandaloneProfile)) {\n"
         "        $machineStateRemaining = [string[]]@(Remove-DefenseClawEmptyClaudeManagedSettingsFolders"
     ) in module
-    assert "@(Remove-DefenseClawStalePowerShellTempDirectories -ProgramData $script:ProgramData)" in module
+    # GAP-2057: stale installer staging and bootstrap folders go too.
+    assert (
+        "@(Remove-DefenseClawStaleRunDirectories -ProgramData $script:ProgramData "
+        "-WindowsTemp ([IO.Path]::Combine($script:WindowsDirectory, 'Temp')))"
+    ) in module
+    sweep = module[module.index("function Remove-DefenseClawStaleRunDirectories") :]
+    sweep = sweep[: sweep.index("\nfunction ", 1)]
+    for prefix in ("DefenseClaw-PowerShell-", "DefenseClaw-Installer-", "DefenseClaw-Bootstrap-"):
+        assert f"'{prefix}'" in sweep
+    assert "[string]$PSScriptRoot" in sweep
     assert "-Name machine_state_remaining" in module
 
     # The traverse grant names a virtual account that only exists while the

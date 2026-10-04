@@ -812,7 +812,9 @@ def test_top_level_command_registers_named_write_probe_without_legacy_config_loa
         )
 
     assert result.exit_code == 0, result.output
+    assert result.output.startswith("result: PASS - write probe succeeded in ")
     assert "probe ID: cli-probe-1" in result.output
+    assert "network path: this test connects directly from this shell, without a proxy" in result.output
     assert "super-secret" not in result.output
     assert run.call_args.kwargs["name"] == "soc"
     assert run.call_args.kwargs["write_probe"] is True
@@ -954,3 +956,150 @@ def test_gateway_local_compliance_recorder_names_foreign_api_port_holder(tmp_pat
     assert "the gateway token was not sent" in message
     assert "defenseclaw setup gateway --api-port 18962" in message
     assert "v8" not in message
+
+
+def test_top_level_command_network_failure_names_the_gateway_proxy_path(tmp_path: Path) -> None:
+    """GAP-2299: a failed connection says the gateway uses its own proxy settings."""
+    from defenseclaw.main import cli
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("config_version: 8\nobservability: {}\n", encoding="utf-8")
+    wire = ConfigV8WireResult(
+        wire_version=1,
+        kind="effective",
+        config_version=8,
+        source=str(config_path),
+        data_dir=str(tmp_path),
+        plan_digest="destination-test-plan",
+        network_validation="offline_syntax_and_literal_policy_only",
+        effective=_effective(_destination("soc")),
+    )
+    failure = destination_test.DestinationTestError("connection_failed", "the destination refused the connection")
+    with (
+        patch.object(cmd_observability.config_module, "config_path", return_value=config_path),
+        patch.object(cmd_observability, "inspect_v8_config", return_value=wire),
+        patch.object(cmd_observability, "canonical_local_compliance_recorder", return_value=_Compliance()),
+        patch.object(cmd_observability, "run_destination_test", side_effect=failure),
+    ):
+        result = CliRunner().invoke(cli, ["observability", "destination", "test", "soc"])
+
+    assert result.exit_code == 1, result.output
+    assert "destination test failed (connection_failed)" in result.output
+    assert "HTTPS_PROXY/NO_PROXY" in result.output
+
+
+def test_doctor_destination_hint_names_the_gateway_proxy_path() -> None:
+    """GAP-2299: doctor's failing-destination hint says the test and the gateway may differ."""
+    from types import SimpleNamespace
+
+    from defenseclaw.commands.cmd_doctor import _destination_remediation
+
+    hint = _destination_remediation(
+        SimpleNamespace(name="galileo", endpoint="https://collector.example.test"),
+        SimpleNamespace(circuit_state="closed", state="failing"),
+    )
+    assert "'defenseclaw observability destination test galileo'" in hint
+    assert "HTTPS_PROXY/NO_PROXY" in hint
+
+
+class _CredentialTransport(_Transport):
+    def __init__(self, error: destination_test.DestinationTestError | None = None) -> None:
+        super().__init__()
+        self.checks: list[tuple[object, object]] = []
+        self.check_error = error
+
+    def check_credentials(self, destination: object, target: object, *, probe_id: str, timeout: float) -> None:
+        self.checks.append((destination, target))
+        if self.check_error is not None:
+            raise self.check_error
+
+
+def _galileo_like() -> dict:
+    return _destination(
+        "galileo",
+        kind="otlp",
+        protocol="http/protobuf",
+        endpoint="https://api.galileo.example.test/otel/traces",
+        headers={"Galileo-API-Key": {"env": "SOC_TOKEN"}},
+        selected_signals=["traces"],
+    )
+
+
+def test_otlp_http_handshake_checks_the_key_with_an_empty_export() -> None:
+    # GAP-2289: the handshake alone passed for a key the endpoint rejects.
+    transport = _CredentialTransport()
+    result = destination_test.run_destination_test(
+        _effective(_galileo_like()),
+        name="galileo",
+        data_dir="/data",
+        timeout=2.5,
+        write_probe=False,
+        compliance=_Compliance(),
+        transport=transport,
+        credential_resolver=_resolve,
+        probe_id_factory=lambda: "cred-1",
+    )
+    assert result.mode == "handshake"
+    assert result.authentication_verified is True
+    assert len(transport.checks) == 1
+    assert transport.checks[0][1].request_target == "/otel/traces"
+
+    compliance = _Compliance()
+    rejected = _CredentialTransport(
+        destination_test.DestinationTestError("authentication_failed", "the destination rejected the configured credentials")
+    )
+    with pytest.raises(destination_test.DestinationTestError) as captured:
+        destination_test.run_destination_test(
+            _effective(_galileo_like()),
+            name="galileo",
+            data_dir="/data",
+            timeout=2.5,
+            write_probe=False,
+            compliance=compliance,
+            transport=rejected,
+            credential_resolver=_resolve,
+            probe_id_factory=lambda: "cred-2",
+        )
+    assert captured.value.failure_class == "authentication_failed"
+    assert compliance.activities[-1].failure_class == "authentication_failed"
+
+
+def test_empty_export_classifies_401_as_authentication_failed() -> None:
+    import http.server
+    import threading
+
+    seen: dict[str, object] = {}
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802
+            seen["length"] = self.headers.get("Content-Length")
+            seen["key"] = self.headers.get("Galileo-API-Key")
+            self.send_response(401)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *_args: object) -> None:
+            return
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), _Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        target = destination_test._Target(
+            scheme="http", host="127.0.0.1", port=server.server_address[1], request_target="/otel/traces",
+            protocol="http", safety=destination_test._NetworkSafety(allow_private_networks=True),
+            tls=destination_test._TLSSettings(insecure=True),
+        )
+        destination = destination_test._Destination(
+            name="galileo", kind="otlp", protocol="http/protobuf", targets=(target,), method="POST",
+            headers={"Galileo-API-Key": "k-test"}, token="", index="",
+        )
+        with pytest.raises(destination_test.DestinationTestError) as captured:
+            destination_test.SocketProbeTransport().check_credentials(
+                destination, target, probe_id="cred-3", timeout=5
+            )
+    finally:
+        server.shutdown()
+    assert captured.value.failure_class == "authentication_failed"
+    assert "HTTP 401" in captured.value.message
+    assert seen == {"length": "0", "key": "k-test"}

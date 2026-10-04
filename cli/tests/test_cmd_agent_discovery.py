@@ -188,13 +188,40 @@ class DiscoveryEnableTests(unittest.TestCase):
     def test_already_enabled_short_circuits(self):
         runner = CliRunner()
         app = _make_ctx(enabled=True)
-        with patch("defenseclaw.commands.cmd_setup._restart_services") as restart_mock:
+        with patch("defenseclaw.commands.cmd_setup._restart_services") as restart_mock, \
+                patch.object(cmd_agent, "_live_discovery_enabled", return_value=True):
             result = runner.invoke(cmd_agent.discovery_enable, ["--yes", "--no-scan"], obj=app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertIn("already enabled", result.output)
         # Idempotent path must not bounce the gateway or rewrite YAML —
         # otherwise re-running the wizard would cause needless sidecar
         # downtime.
+        restart_mock.assert_not_called()
+        app.cfg.save.assert_not_called()
+
+    def test_restart_pending_restarts_instead_of_already_enabled(self):
+        # GAP-2260: on in config, but the gateway started before the change.
+        runner = CliRunner()
+        app = _make_ctx(enabled=True)
+        with patch.object(cmd_agent, "_live_discovery_enabled", return_value=False), \
+                patch("defenseclaw.commands.cmd_setup._restart_services") as restart_mock, \
+                patch.object(cmd_agent, "_trigger_post_enable_scan") as scan_mock:
+            result = runner.invoke(cmd_agent.discovery_enable, ["--yes"], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertNotIn("already enabled", result.output)
+        self.assertIn("Starting AI discovery", result.output)
+        restart_mock.assert_called_once()
+        scan_mock.assert_called_once()
+
+    def test_restart_pending_with_no_restart_names_the_restart(self):
+        runner = CliRunner()
+        app = _make_ctx(enabled=True)
+        with patch.object(cmd_agent, "_live_discovery_enabled", return_value=False), \
+                patch("defenseclaw.commands.cmd_setup._restart_services") as restart_mock:
+            result = runner.invoke(cmd_agent.discovery_enable, ["--yes", "--no-restart"], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("defenseclaw-gateway restart", result.output)
+        self.assertNotIn("already enabled", result.output)
         restart_mock.assert_not_called()
         app.cfg.save.assert_not_called()
 
@@ -386,6 +413,27 @@ class DiscoveryEnableTests(unittest.TestCase):
 
 
 class DiscoveryDisableTests(unittest.TestCase):
+    def setUp(self):
+        running = patch.object(cmd_agent, "_gateway_running", return_value=True)
+        running.start()
+        self.addCleanup(running.stop)
+
+    def test_stopped_gateway_is_not_started(self):
+        # GAP-2389: the user stopped the gateway; disable saves the change
+        # without starting it and without claiming a restart.
+        runner = CliRunner()
+        app = _make_ctx(enabled=True)
+        with patch.object(cmd_agent, "_gateway_running", return_value=False), \
+                patch("defenseclaw.commands.cmd_setup._restart_services") as restart_mock:
+            result = runner.invoke(cmd_agent.discovery_disable, input="y\n", obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertFalse(app.cfg.ai_discovery.enabled)
+        app.cfg.save.assert_called_once()
+        restart_mock.assert_not_called()
+        self.assertIn("gateway is not running", result.output)
+        self.assertNotIn("Will restart", result.output)
+        self.assertNotIn("restarted", result.output)
+
     def test_already_disabled_short_circuits(self):
         runner = CliRunner()
         app = _make_ctx(enabled=False)
@@ -484,7 +532,8 @@ class DiscoveryConnectorConfigRoundTripTests(unittest.TestCase):
                 app.logger = MagicMock()
                 with patch(
                     "defenseclaw.commands.cmd_setup._restart_services"
-                ) as restart_mock, patch.object(cmd_agent, "_trigger_post_enable_scan"):
+                ) as restart_mock, patch.object(cmd_agent, "_trigger_post_enable_scan"), \
+                        patch.object(cmd_agent, "_gateway_running", return_value=True):
                     result = CliRunner().invoke(command, args, obj=app)
 
                 with open(config_path, encoding="utf-8") as handle:

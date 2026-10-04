@@ -246,6 +246,48 @@ def _status_row(key: str, value: str) -> None:
     ux.echo(f"  {ux._style(label_padded, fg='bright_black', bold=True)}{rendered_value}")
 
 
+def _status_columns() -> int:
+    """Terminal width to wrap status lines to, or 0 when stdout is not a terminal."""
+
+    import shutil
+    import sys
+
+    try:
+        if not sys.stdout.isatty():
+            return 0
+    except (AttributeError, ValueError):
+        return 0
+    return shutil.get_terminal_size((100, 24)).columns
+
+
+def _echo_wrapped(text: str, hang: int) -> None:
+    """Echo one status line, wrapped at spaces to the terminal width.
+
+    The terminal hard-wrapped long lines mid-word to column 1 ("does not
+    prove a" / "ccepted delivery"). Break at a space instead and hang the
+    rest ``hang`` columns in (GAP-2566). Width counts visible text only,
+    so styled spans survive; a single word wider than the line stays whole.
+    Piped output is not wrapped, so each item stays on one line for grep.
+    """
+
+    import re
+
+    width = _status_columns()
+    if not width or len(click.unstyle(text)) <= width:
+        ux.echo(text)
+        return
+    parts = re.split(r"( +)", text)
+    line, used = parts[0], len(click.unstyle(parts[0]))
+    for sep, word in zip(parts[1::2], parts[2::2]):
+        size = len(click.unstyle(word))
+        if click.unstyle(line).strip() and used + len(sep) + size > width:
+            ux.echo(line)
+            line, used = " " * hang + word, hang + size
+        else:
+            line, used = line + sep + word, used + len(sep) + size
+    ux.echo(line)
+
+
 @click.command()
 @click.option(
     "--json",
@@ -348,7 +390,7 @@ def status(app: AppContext, as_json: bool) -> None:
     # policy that declares none, so the common case renders nothing.
     overrides_summary = _scanner_overrides_summary(cfg)
     if overrides_summary:
-        ux.echo(f"    {ux.bold('overrides'.ljust(16))}{ux.dim(overrides_summary)}")
+        _echo_wrapped(f"    {ux.bold('overrides'.ljust(16))}{ux.dim(overrides_summary)}", 20)
 
     # Counts from DB. The numeric labels stay tight-aligned to match
     # the legacy 16-char column; we color the labels and leave the
@@ -445,10 +487,22 @@ def status(app: AppContext, as_json: bool) -> None:
             holder = _foreign_gateway_port_holder(cfg)
         except Exception:  # noqa: BLE001 - status stays best effort
             holder = ""
+        # GAP-2081: a live gateway.pid with no /health answer is a gateway
+        # that is still starting or hung, as defenseclaw-gateway status says;
+        # "start it" was a dead end (start says it is already running).
+        hung_pid = 0 if holder else _live_gateway_pid(cfg)
         if holder:
             _status_row(
                 "Sidecar",
                 ux._style(f"not running; port {cfg.gateway.api_port} is held by {holder}", fg="yellow"),
+            )
+        elif hung_pid:
+            _status_row(
+                "Sidecar",
+                ux._style(
+                    f"running (PID {hung_pid}) but not answering /health; it is still starting or hung",
+                    fg="yellow",
+                ),
             )
         else:
             _status_row(
@@ -458,19 +512,35 @@ def status(app: AppContext, as_json: bool) -> None:
         _print_audit_log_health(cfg, None)
         # Even when the sidecar is down, show the *configured* agents
         # so operators know what `start` will spin up.
-        _print_agents(cfg, sidecar_down=True)
+        _print_agents(cfg, sidecar_down=True, sidecar_hung=bool(hung_pid))
         _print_application_protection(cfg)
         _print_semantic_routing(cfg)
         _print_hook_guardian(cfg)
-        hint(
-            "Free the port:  stop that process, or run: defenseclaw setup gateway --api-port "
-            f"{_free_api_port_hint(cfg)} --non-interactive"
-            if holder
-            else "Start sidecar:  defenseclaw-gateway start",
-            "Subsystems:    defenseclaw-gateway status",
-        )
+        if holder:
+            first_hint = (
+                "Free the port:  stop that process, or run: defenseclaw setup gateway --api-port "
+                f"{_free_api_port_hint(cfg)} --non-interactive"
+            )
+        elif hung_pid:
+            first_hint = "Check sidecar:  defenseclaw-gateway status (restart it if it stays this way)"
+        else:
+            first_hint = "Start sidecar:  defenseclaw-gateway start"
+        hint(first_hint, "Subsystems:    defenseclaw-gateway status")
     if config_problems:
         raise SystemExit(1)
+
+
+def _live_gateway_pid(cfg) -> int:
+    """PID of a live gateway recorded in ``gateway.pid``, else 0 (best effort)."""
+    data_dir = str(getattr(cfg, "data_dir", "") or "")
+    if not data_dir:
+        return 0
+    try:
+        from defenseclaw.commands.cmd_doctor import _read_pid_from_file
+
+        return _read_pid_from_file(os.path.join(data_dir, "gateway.pid"))
+    except Exception:  # noqa: BLE001 - status stays best effort
+        return 0
 
 
 def _format_uptime(ms: object) -> str:
@@ -518,7 +588,8 @@ _FRIENDLY_CONNECTOR_NAMES = {
     "omnigent": "OmniGent",
     "kiro": "Kiro",
 }
-_CURSOR_PRIORITY_CONFLICT_DISCLOSURE = "priority-conflict-detection=unavailable (none inferred)"
+# Plain words, as on the TUI Overview (GAP-2561).
+_CURSOR_PRIORITY_CONFLICT_DISCLOSURE = "(overrides by Enterprise, Team or Project hooks can't be detected)"
 
 
 def _friendly_connector_name(name: str | None) -> str:
@@ -566,6 +637,7 @@ def _print_agents(
     *,
     health: dict | None = None,
     sidecar_down: bool = False,
+    sidecar_hung: bool = False,
 ) -> None:
     """Render the "Agents" roster as one section, for ANY connector count.
 
@@ -648,7 +720,11 @@ def _print_agents(
     if sidecar_down and enabled_count:
         # Hooks are configured but nothing answers them: each connector falls
         # back to its fail-mode (open = calls run unchecked, closed = blocked).
-        header = f"{enabled_count} configured, not enforced while the sidecar is stopped"
+        header = (
+            f"{enabled_count} configured, no hook verdicts while the sidecar is not answering"
+            if sidecar_hung
+            else f"{enabled_count} configured, not enforced while the sidecar is stopped"
+        )
         if disabled_count:
             header += f" ({disabled_count} disabled)"
         header = ux._style(header, fg="yellow")
@@ -656,12 +732,14 @@ def _print_agents(
     if guardrail_off:
         ux.echo(" " * 16 + ux.dim("Turn protection back on: defenseclaw setup guardrail"))
     if sidecar_down and enabled_count:
-        ux.echo(
+        _echo_wrapped(
             " " * 16
             + ux.dim(
                 "Hooks fall back to each connector's fail-mode: open lets calls run "
-                "unchecked, closed blocks them. Start it: defenseclaw-gateway start"
-            )
+                "unchecked, closed blocks them. "
+                + ("Check it: defenseclaw-gateway status" if sidecar_hung else "Start it: defenseclaw-gateway start")
+            ),
+            16,
         )
     for conn in actives:
         source = roster.get(conn, {}).get("source", "manual")
@@ -678,7 +756,7 @@ def _print_agents(
             # connector the sidecar simply hasn't surfaced yet.
             disabled_label = ux._style("DISABLED", fg="yellow")
             disabled_text = ux.dim(f"{friendly} ({conn}) — mode={mode or '?'}{fail_mode_suffix}{disclosure_suffix}")
-            ux.echo(f"                {disabled_text} — {disabled_label}")
+            _echo_wrapped(f"                {disabled_text} — {disabled_label}", 18)
             continue
         hc = health_map.get(conn.strip().lower())
         source_suffix = f" source={source}"
@@ -701,9 +779,10 @@ def _print_agents(
             if runtime_detail:
                 suffix += ux.dim(f" ({runtime_detail})")
             suffix += _hook_runtime_degraded_suffix(cfg, conn)
-            ux.echo(
+            _echo_wrapped(
                 f"                {friendly} ({conn}) — mode={mode or '?'}"
-                f"{fail_mode_suffix}{source_suffix}{disclosure_suffix}{suffix}"
+                f"{fail_mode_suffix}{source_suffix}{disclosure_suffix}{suffix}",
+                18,
             )
             _print_agent_counters(hc, indent="                  ")
         else:
@@ -720,21 +799,21 @@ def _print_agents(
                 )
                 suffix = _connector_state_verb(runtime_state)
                 suffix += ux.dim(f" ({runtime_detail})")
-                ux.echo(f"                {dim_text}{suffix}")
+                _echo_wrapped(f"                {dim_text}{suffix}", 18)
             elif conn == "openclaw" and openclaw_implied_but_not_installed(cfg):
                 suffix = _connector_state_verb("off") + ux.dim(" (OpenClaw is not installed)")
-                ux.echo(f"                {dim_text}{suffix}")
+                _echo_wrapped(f"                {dim_text}{suffix}", 18)
             elif conn.strip().lower() in not_started:
                 # Setup failed when the gateway started (GAP-1714).
                 suffix = _connector_state_verb("not running") + ux.dim(
                     " (setup failed when the gateway started, so it is not enforced; "
                     f"see gateway.log, then run: defenseclaw setup {conn.strip().lower()})"
                 )
-                ux.echo(f"                {dim_text}{suffix}")
+                _echo_wrapped(f"                {dim_text}{suffix}", 18)
             else:
                 # A drifted or removed hook registration shows with the
                 # gateway stopped too (GAP-1230).
-                ux.echo(f"                {dim_text}{_hook_runtime_degraded_suffix(cfg, conn)}")
+                _echo_wrapped(f"                {dim_text}{_hook_runtime_degraded_suffix(cfg, conn)}", 18)
 
 
 def _canonical_data_dir(value) -> str | None:
@@ -937,10 +1016,11 @@ def _print_agent_counters(conn: dict, indent: str = "                ") -> None:
         if sub_blocks
         else ux.dim(f"subprocess blocks: {sub_blocks}")
     )
-    ux.echo(
+    _echo_wrapped(
         f"{indent}{ux.dim(f'requests: {requests}')}  {err_text}  "
         f"{ux.dim(f'tool inspections: {inspections}')}  {block_text_tool}  "
-        f"{block_text_sub}"
+        f"{block_text_sub}",
+        len(indent),
     )
 
 
@@ -955,13 +1035,14 @@ def _print_application_protection(cfg, health: dict | None = None) -> None:
     if not enabled:
         # GAP-1498: no "(disabled)" echo, no scan that will never run; say
         # what the feature does and how to turn it on.
-        ux.echo(
+        _echo_wrapped(
             "                "
             + ux.dim(
                 "guards AI apps that discovery finds; to turn it on, set "
                 "application_protection.enabled: true in the config file "
                 "('defenseclaw config path') and restart the gateway"
-            )
+            ),
+            16,
         )
         return
     guardrail_mode = str(state.get("guardrail_mode") or "observe")
@@ -1279,7 +1360,7 @@ def _print_observability_status(cfg, *, config_has_problems: bool = False) -> No
         # the loader's raw diagnostic repeated both (GAP-1995).
         reason = "the config has a problem, listed above" if config_has_problems else str(exc)
         ux.echo("    " + ux._style(f"destination plan unavailable: {reason}", fg="yellow"))
-        _print_native_delivery_status(_native_delivery_summary(cfg))
+        _print_native_delivery_status(_native_delivery_summary(cfg), configured=_configured_connectors(cfg))
         return
 
     retention = "unbounded" if status.unbounded_retention else f"{status.retention_days} days"
@@ -1287,20 +1368,33 @@ def _print_observability_status(cfg, *, config_has_problems: bool = False) -> No
     for destination in status.destinations:
         state = ux._style("enabled", fg="green") if destination.enabled else ux._style("disabled", fg="bright_black")
         signals = ",".join(destination.selected_signals) or "none"
-        ux.echo(
+        _echo_wrapped(
             f"    {ux.bold(f'{destination.name:<26s}')}"
             f"{ux.dim(f'[{destination.kind}]')} {state}  "
-            f"{signals}  {destination.redaction_label}"
+            f"{signals}  {destination.redaction_label}",
+            30,
         )
         if destination.endpoint:
             ux.echo(f"      {ux.dim('target:')} {destination.endpoint}")
-    _print_native_delivery_status(_native_delivery_summary(cfg, audit_db=status.local_path))
+    _print_native_delivery_status(
+        _native_delivery_summary(cfg, audit_db=status.local_path),
+        configured=_configured_connectors(cfg),
+    )
+
+
+def _configured_connectors(cfg) -> set[str] | None:
+    """Connectors set up now, as doctor scopes its OTLP rows (GAP-2242)."""
+
+    from defenseclaw.commands.cmd_doctor import _otlp_configured_connectors
+
+    return _otlp_configured_connectors(cfg)
 
 
 def _native_delivery_summary(cfg, *, audit_db: str = ""):
     """Return the shared bounded, path-free native OTLP evidence summary."""
 
     from defenseclaw.observability.custody_status import (
+        gateway_api_addr,
         inspect_connector_custody,
         summarize_native_delivery,
     )
@@ -1318,29 +1412,58 @@ def _native_delivery_summary(cfg, *, audit_db: str = ""):
     database = database or str(getattr(cfg, "audit_db", "") or "")
     if not database:
         database = os.path.join(data_dir, "audit.db")
-    return summarize_native_delivery(inspect_connector_custody(database, data_dir))
+    return summarize_native_delivery(
+        inspect_connector_custody(database, data_dir, api_addr=gateway_api_addr(cfg))
+    )
 
 
-def _print_native_delivery_status(summary) -> None:
-    """Render delivery truth separately from collector/runtime health."""
+def _print_native_delivery_status(summary, *, configured: set[str] | None = None) -> None:
+    """Render delivery truth separately from collector/runtime health.
 
-    hours = summary.observation_window_hours
-    scope = f"bounded {hours}h"
-    if summary.event_rows_truncated:
-        scope += ", truncated; counts partial"
+    ``configured`` (when known) keeps per-connector rows for connectors set up
+    now. Evidence outlives ``setup remove``, so removed connectors fold into
+    one "not configured" line, as doctor does (GAP-2242).
+    """
+
+    from defenseclaw.observability.custody_status import native_evidence_scope
+
+    scope = native_evidence_scope(summary.observation_window_hours, summary.event_rows_truncated)
     delivery_context = f"native OTLP delivery ({scope}; collector/runtime health does not prove accepted delivery):"
-    ux.echo("    " + ux.dim(delivery_context))
+    _echo_wrapped("    " + ux.dim(delivery_context), 6)
     if not summary.connectors:
         reason = f"; {summary.reason.replace('_', ' ')}" if summary.reason else ""
         ux.echo(f"      {ux.dim(f'no evidence ({scope}{reason})')}")
         return
-    for item in summary.connectors:
-        instance = "" if item.default else " (additional instance)"
-        state = item.state.replace("_", "-")
+    from defenseclaw.connector_paths import normalize
+    from defenseclaw.observability.custody_status import native_delivery_display_rows
+
+    connectors = summary.connectors
+    removed: list[str] = []
+    if configured is not None:
+        connectors = tuple(item for item in connectors if normalize(item.connector) in configured)
+        for item in summary.connectors:
+            if normalize(item.connector) not in configured and item.connector not in removed:
+                removed.append(item.connector)
+    import shutil
+    import textwrap
+
+    columns = shutil.get_terminal_size((100, 24)).columns
+    for label, item in native_delivery_display_rows(connectors):
+        name = item.connector + (f" ({label})" if label else "")
         color = "green" if item.state == "accepted" else "yellow"
         if item.state == "no_evidence":
             color = "bright_black"
-        ux.echo(f"      {ux.bold(item.connector + instance)}  {ux._style(state, fg=color)} — {item.detail}")
+        # The detail already starts with the state ("accepted native delivery
+        # observed ..."), so the state word is the color only, and wrapped
+        # lines hang under the detail instead of column 1 (GAP-2549, as the
+        # TUI does since GAP-2545).
+        indent = " " * (6 + len(name) + 2)
+        wrapped = textwrap.wrap(item.detail, max(columns - len(indent), 30)) or [item.detail]
+        ux.echo(f"      {ux.bold(name)}  {ux._style(wrapped[0], fg=color)}")
+        for rest in wrapped[1:]:
+            ux.echo(indent + ux._style(rest, fg=color))
+    if removed:
+        ux.echo("      " + ux.dim("not configured (telemetry history only, not checked): " + ", ".join(removed)))
 
 
 def _scanner_overrides_summary(cfg) -> str:

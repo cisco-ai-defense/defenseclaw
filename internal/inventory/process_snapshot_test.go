@@ -61,7 +61,7 @@ func TestCollectWindowsSnapshotAndClassifyAgents(t *testing.T) {
 	started := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
 	reader := fakeWindowsSnapshotReader{
 		entries: []windowsProcessEntry{
-			{PID: 10, PPID: 1, Comm: `C:\tools\CoDeX.ExE`},
+			{PID: 10, PPID: 1, Comm: `C:\tools\CoDeX.ExE`, SessionOwnerID: "S-1-5-21-7-1001"},
 			{PID: 16, PPID: 10, Comm: "cmd.exe"},
 			{PID: 11, PPID: 16, Comm: "node.exe"},
 			{PID: 12, PPID: 1, Comm: "CLAUDE.CMD"},
@@ -94,7 +94,7 @@ func TestCollectWindowsSnapshotAndClassifyAgents(t *testing.T) {
 			t.Errorf("false positive PID %d classified as %q", pid, got[pid])
 		}
 	}
-	if procs[0].User != `WORKSTATION\kevin` || !procs[0].StartedAt.Equal(started) || !procs[0].Windows {
+	if procs[0].User != `WORKSTATION\kevin` || !procs[0].StartedAt.Equal(started) || !procs[0].Windows || procs[0].SessionOwnerID != "S-1-5-21-7-1001" {
 		t.Fatalf("metadata not preserved: %+v", procs[0])
 	}
 }
@@ -347,6 +347,28 @@ func TestClassifyWindowsProcessesFoldsCursorWorkerServer(t *testing.T) {
 	}
 }
 
+// GAP-2021: Codex's app-server daemon and its pid-update-loop helper share a
+// launcher that has exited; they are one Codex process. A Codex run under a
+// live shell, or one with a different exited parent, stays its own.
+func TestClassifyWindowsProcessesFoldsOrphanedCodexDaemonHelpers(t *testing.T) {
+	image := `C:\Users\kevin\AppData\Roaming\npm\node_modules\@openai\codex\vendor\codex.exe`
+	started := time.Date(2026, 10, 2, 5, 33, 0, 0, time.UTC)
+	procs := []processInfo{
+		{PID: 452, PPID: 9220, Comm: "codex.exe", Image: image, StartedAt: started.Add(time.Second), Windows: true},
+		{PID: 11104, PPID: 9220, Comm: "codex.exe", Image: image, StartedAt: started, Windows: true},
+		{PID: 700, PPID: 0, Comm: "pwsh.exe", Windows: true},
+		{PID: 701, PPID: 700, Comm: "codex.exe", Image: image, Windows: true},
+		{PID: 702, PPID: 700, Comm: "codex.exe", Image: image, Windows: true},
+		{PID: 800, PPID: 9300, Comm: "codex.exe", Image: image, Windows: true},
+	}
+	classifyWindowsProcesses(procs, windowsAgentCatalog())
+	for i, want := range []string{"", "codex", "", "codex", "codex", "codex"} {
+		if procs[i].Connector != want {
+			t.Fatalf("pid %d: connector %q, want %q", procs[i].PID, procs[i].Connector, want)
+		}
+	}
+}
+
 // GAP-1965: Amp's plugin runtimes are amp.exe children of the amp.exe run;
 // they are folded into it, so one Amp session is one Amp process.
 func TestClassifyWindowsProcessesFoldsAmpPluginRuntimes(t *testing.T) {
@@ -360,6 +382,28 @@ func TestClassifyWindowsProcessesFoldsAmpPluginRuntimes(t *testing.T) {
 	}
 	classifyWindowsProcesses(procs, catalog)
 	if procs[0].Connector != "amp" || procs[1].Connector != "" || procs[2].Connector != "" || procs[3].Connector != "amp" {
+		t.Fatalf("connectors = %q %q %q %q", procs[0].Connector, procs[1].Connector, procs[2].Connector, procs[3].Connector)
+	}
+}
+
+// GAP-2043: VS Code Copilot Chat runs its agent host as copilot-runtime.exe
+// (under Code.exe), which runs DefenseClaw's Copilot hooks: it is a Copilot
+// process. The Copilot CLI's own copilot-runtime.exe engine child is folded
+// into its run, so one CLI session stays one process.
+func TestClassifyWindowsProcessesFindsTheVSCodeCopilotAgentHost(t *testing.T) {
+	catalog, err := LoadAISignatures()
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeImage := `c:\Program Files\Microsoft VS Code\07f806f999\resources\app\node_modules.asar.unpacked\@github\copilot-sdk-win32-x64\prebuilds\win32-x64\copilot-runtime.exe`
+	procs := []processInfo{
+		{PID: 13728, PPID: 15252, Comm: "copilot-runtime.exe", Image: runtimeImage, Windows: true},
+		{PID: 15252, PPID: 900, Comm: "Code.exe", Image: `c:\Program Files\Microsoft VS Code\Code.exe`, Windows: true},
+		{PID: 5000, PPID: 901, Comm: "copilot.exe", Image: `C:\Users\u\AppData\Roaming\npm\copilot.exe`, Windows: true},
+		{PID: 5001, PPID: 5000, Comm: "copilot-runtime.exe", Image: `C:\Users\u\AppData\Local\copilot\pkg\copilot-runtime.exe`, Windows: true},
+	}
+	classifyWindowsProcesses(procs, catalog)
+	if procs[0].Connector != "copilot" || procs[1].Connector != "" || procs[2].Connector != "copilot" || procs[3].Connector != "" {
 		t.Fatalf("connectors = %q %q %q %q", procs[0].Connector, procs[1].Connector, procs[2].Connector, procs[3].Connector)
 	}
 }

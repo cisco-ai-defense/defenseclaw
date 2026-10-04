@@ -7577,15 +7577,21 @@ function Get-PackagedRotationConnectorPosture([object]$Status) {
 
 function Assert-PackagedRotationActionClosedPosture([object[]]$Posture) {
     foreach ($row in $Posture) {
+        # status is passive (GAP-1466): it does not start the Codex app-server
+        # to check the effective hook policy, so Codex reports exactly
+        # policy-unverified (and so not current) and nothing else.
+        $drift = @($row.fail_drift | ForEach-Object { [string]$_ })
+        $passiveCodex = [string]$row.name -ceq 'codex' -and
+            $drift.Count -eq 1 -and $drift[0] -ceq 'policy-unverified'
         if ([string]$row.mode -cne 'action' -or -not [bool]$row.enabled -or
             [string]$row.source -cne 'manual' -or
             [string]$row.fail_effective -cne 'closed' -or
             [string]$row.fail_configured -cne 'closed' -or
             [string]$row.fail_desired -cne 'closed' -or
             [string]$row.fail_runtime -cne 'closed' -or
-            -not [bool]$row.fail_current -or
-            @($row.fail_drift).Count -ne 0) {
-            throw "packaged token rotation connector '$([string]$row.name)' is not exact action/closed without drift"
+            (-not $passiveCodex -and (-not [bool]$row.fail_current -or $drift.Count -ne 0))) {
+            $postureDetail = ([pscustomobject]$row) | ConvertTo-Json -Compress -Depth 4
+            throw "packaged token rotation connector '$([string]$row.name)' is not exact action/closed without drift: $postureDetail"
         }
     }
 }

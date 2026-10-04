@@ -469,11 +469,10 @@ class LogsPanelModel:
         return tuple(groups)
 
     def filter_chip_group(self) -> LogChipGroupState:
-        """Return the preset filter row, including number-key shortcuts.
+        """Return the preset filter row.
 
-        Only the first eight presets advertise a number shortcut; key 9
-        is reserved for the global Audit panel hotkey, so the Hooks
-        preset is keyless (reached via click or the f cycle).
+        No preset has a number shortcut: digits are the global panel keys
+        (GAP-2296). Presets are reached with f, e/w or a click.
         """
 
         chips = tuple(
@@ -482,10 +481,10 @@ class LogsPanelModel:
                 value=preset,
                 label=FILTER_LABELS[preset],
                 active=preset == self.filter_mode,
-                shortcut=str(index) if index <= 8 else "",
+                shortcut="",
                 style_key="active-chip" if preset == self.filter_mode else "inactive-chip",
             )
-            for index, preset in enumerate(FILTER_PRESETS, start=1)
+            for preset in FILTER_PRESETS
         )
         return LogChipGroupState(group="preset", label="filter", shortcut="f", chips=chips)
 
@@ -1026,14 +1025,8 @@ class LogsPanelModel:
             old = self.verdict_severity
             self.cycle_verdict_severity()
             return LogPanelAction(True, filter_change=_filter_change(FILTER_TYPE_SEVERITY, old, self.verdict_severity))
-        # Filters are bound to number keys 1-8 only. The 9 key is the
-        # global hotkey for the Audit panel, so the Hooks preset (the 9th
-        # entry) is reached via its chip, the f cycle, or the Hook Calls
-        # tile deep-link instead of a conflicting number shortcut.
-        if key in {str(i) for i in range(1, 9)} and not self.searching and int(key) <= len(FILTER_PRESETS):
-            old = self.filter_mode
-            self.set_filter(FILTER_PRESETS[int(key) - 1])
-            return LogPanelAction(True, filter_change=_filter_change(FILTER_TYPE_PRESET, old, self.filter_mode))
+        # Digits stay the global panel keys, so 1 opens Overview from Logs
+        # too; presets are the f cycle, e/w and the chips (GAP-2296).
         if key == "e" and not self.searching:
             old = self.filter_mode
             self.set_filter(FILTER_NONE if self.filter_mode == FILTER_ERRORS else FILTER_ERRORS)
@@ -1110,7 +1103,7 @@ class LogsPanelModel:
         error = f"\n[#F87171]{self.error_messages[self.source]}[/]" if self.error_messages[self.source] else ""
         return (
             f"{self._header_text()}  {visible} / {total} lines\n"
-            "Keys: h/l source, 1-8 filter, Space pause, / search, e errors, w warnings, Enter detail."
+            "Keys: h/l source, f filter, Space pause, / search, e errors, w warnings, Enter detail."
             f"{error}"
         )
 

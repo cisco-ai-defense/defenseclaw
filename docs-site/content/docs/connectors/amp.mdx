@@ -79,6 +79,12 @@ with private file permissions or the Windows user-only ACL. Setup preserves an
 existing file, teardown restores it, and a user-modified managed file is never
 silently removed.
 
+Plugin lists, scans and the AIBOM treat this file as connector configuration,
+not as an operator plugin, so it is not listed there. `defenseclaw plugin
+remove|disable|block|quarantine defenseclaw --connector amp` refuse it, because
+Amp runs unguarded without it. To stop guarding Amp, run `defenseclaw setup
+remove amp`.
+
 The shipped policy allow-list matches only
 `.config/amp/plugins/defenseclaw.ts`. It does not trust sibling files or the
 whole Amp plugins directory.

@@ -26,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
 
@@ -249,6 +250,7 @@ func (a *APIServer) handleSandboxStatus(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	st.DaemonUID = daemonUID()
+	st.DockerGroupMissing = openshell.DockerGroupMissingInProcess()
 	a.writeJSON(w, http.StatusOK, st)
 }
 

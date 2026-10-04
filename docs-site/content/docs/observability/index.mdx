@@ -468,7 +468,14 @@ do not paste prompt content, credentials, or raw audit databases into tickets.
    remote destination, also verify DNS, TLS, credentials, and network reachability.
 3. Run `defenseclaw observability destination test <name>`. Add
    `--write-probe` only when a bounded delivery write is appropriate; the
-   probe is isolated and does not create normal dashboard traffic.
+   probe is isolated and does not create normal dashboard traffic. The test
+   connects directly from your shell, without a proxy, while the gateway
+   delivers through the proxy it was started with (`HTTPS_PROXY`/`NO_PROXY`
+   or the enterprise proxy). If the test passes but doctor still shows
+   `delivery_failed`, look for `[observability] <name> ... export failed`
+   lines in the gateway log. Each line names the endpoint and says whether
+   the gateway connected directly or through a proxy. When it went through a
+   proxy, restart the gateway from a shell with the right proxy settings.
 4. Inspect that destination's queue, retry, drop, and circuit telemetry. An open
    circuit suppresses only that route's adapter work while mandatory local
    SQLite and sibling destinations continue. Repair and reload the destination,

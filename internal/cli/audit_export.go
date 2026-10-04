@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -205,6 +206,12 @@ func runAuditExport(cmd *cobra.Command, _ []string) (err error) {
 	if cfg == nil {
 		return fmt.Errorf("audit export: config not loaded")
 	}
+	// A bad --since/--until is a usage error (exit 2, GAP-2110), checked
+	// before the database is opened or an -o file is created.
+	window, err := parseAuditExportWindow(time.Now())
+	if err != nil {
+		return auditUsageError(cmd, err)
+	}
 	version.SetBinaryVersion(appVersion)
 	prov := version.Current()
 
@@ -264,16 +271,18 @@ func runAuditExport(cmd *cobra.Command, _ []string) (err error) {
 	}
 
 	connFilter := strings.ToLower(strings.TrimSpace(auditExportConnector))
-	window, err := parseAuditExportWindow(time.Now())
-	if err != nil {
-		return err
-	}
 
 	where, args := window.sqlPredicate()
+	// event_name marks a v8 record (GAP-2203); a database from before v8
+	// has no such column, and its rows are all legacy rows.
+	eventNameCol := "NULL"
+	if ok, _ := columnExists(db, "audit_events", "event_name"); ok {
+		eventNameCol = "event_name"
+	}
 	q := `SELECT id, timestamp, action, target, actor, details, structured_json, severity, run_id,
 session_id, trace_id, agent_id, agent_name, agent_instance_id, sidecar_instance_id,
 schema_version, content_hash, generation, binary_version,
-destination_app, tool_name, tool_id, policy_id, connector
+destination_app, tool_name, tool_id, policy_id, connector, ` + eventNameCol + `
 FROM audit_events` + where + ` ORDER BY ` + window.orderBy()
 	// When a connector or time filter is active the cap must apply to
 	// *matching* rows, so we filter in Go and bound the count there.
@@ -311,14 +320,14 @@ FROM audit_events` + where + ` ORDER BY ` + window.orderBy()
 			contentHash, binVer                             sql.NullString
 			gen                                             sql.NullInt64
 			destApp, toolName, toolID, policyID             sql.NullString
-			connectorCol                                    sql.NullString
+			connectorCol, eventName                         sql.NullString
 		)
 		if err := rows.Scan(
 			&id, &ts, &action, &target, &actor, &details, &structuredRaw, &severity, &runID,
 			&sessionID, &traceID,
 			&agentID, &agentName, &agentInst, &sidecarInst,
 			&schemaVer, &contentHash, &gen, &binVer,
-			&destApp, &toolName, &toolID, &policyID, &connectorCol,
+			&destApp, &toolName, &toolID, &policyID, &connectorCol, &eventName,
 		); err != nil {
 			return fmt.Errorf("audit export: scan: %w", err)
 		}
@@ -345,7 +354,7 @@ FROM audit_events` + where + ` ORDER BY ` + window.orderBy()
 			ns(agentID), ns(agentName), ns(agentInst), ns(sidecarInst),
 			schemaVer, ns(contentHash), gen, ns(binVer),
 			ns(destApp), ns(toolName), ns(toolID), ns(policyID),
-			connector,
+			connector, ns(eventName),
 			prov,
 		)
 		if err != nil {
@@ -428,6 +437,15 @@ type auditExportWindow struct {
 	since, until *time.Time
 	limit        int
 	newest       bool
+}
+
+// auditUsageError gives a bad flag value the usage-error shape and exit
+// status 2, like unknown flags and unparsable numbers (GAP-2110).
+func auditUsageError(cmd *cobra.Command, err error) error {
+	if cmd == nil {
+		return withExitCode(err, 2)
+	}
+	return usageError(cmd, err)
 }
 
 // parseAuditExportWindow reads --since, --until, --limit and --newest.
@@ -709,7 +727,7 @@ func exportAuditEventsFallbackWindow(db *sql.DB, out io.Writer, prov version.Pro
 			"", "", "", "",
 			sql.NullInt64{}, "", sql.NullInt64{}, "",
 			"", "", "", "",
-			conn,
+			conn, "",
 			prov,
 		)
 		if err != nil {
@@ -744,10 +762,14 @@ func buildAuditEventLine(
 	agentID, agentName, agentInst, sidecarInst string,
 	schemaVer sql.NullInt64, contentHash string, gen sql.NullInt64, binVer string,
 	destApp, toolName, toolID, policyID string,
-	connector string,
+	connector, eventName string,
 	prov version.Provenance,
 ) ([]byte, error) {
-	actionOut, detailsOut := normalizeAuditAction(action, details)
+	v8Action := isV8RecordAction(eventName, action)
+	actionOut, detailsOut := strings.TrimSpace(action), details
+	if !v8Action {
+		actionOut, detailsOut = normalizeAuditAction(action, details)
+	}
 	sev := normalizeSeverity(severity)
 	act := strings.TrimSpace(actor)
 	if act == "" {
@@ -801,7 +823,7 @@ func buildAuditEventLine(
 		"policy_id":           strPtr(policyID),
 		"connector":           strPtr(connector),
 	}
-	if err := validateAuditEventMap(ev); err != nil {
+	if err := validateAuditEventMap(ev, v8Action); err != nil {
 		return nil, fmt.Errorf("audit export: %w", err)
 	}
 	return json.Marshal(ev)
@@ -867,6 +889,25 @@ func normalizeSeverity(s string) string {
 	}
 }
 
+// v8RecordActionPattern is the action shape the audit-event schema accepts
+// for v8 runtime records.
+var v8RecordActionPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
+
+// isV8RecordAction reports whether a row is a v8 runtime record whose action
+// the export keeps as is. A v8 record (event_name set and not a
+// legacy.audit.* compatibility identity) carries the action of its telemetry
+// family, which the runtime catalog validated: telemetry-destination,
+// circuit_breaker_open, config.change.applied and others. Those are not
+// audit-logger actions, so rewriting them to "action" with the real value in
+// legacy_action=... hid them from SIEM queries on the action (GAP-2203).
+func isV8RecordAction(eventName, action string) bool {
+	name := strings.TrimSpace(eventName)
+	if name == "" || strings.HasPrefix(name, "legacy.audit.") {
+		return false
+	}
+	return v8RecordActionPattern.MatchString(strings.TrimSpace(action))
+}
+
 func normalizeAuditAction(action, details string) (string, string) {
 	a := strings.TrimSpace(action)
 	if isKnownAuditAction(a) {
@@ -883,7 +924,7 @@ var auditSeverityEnum = map[string]struct{}{
 	"CRITICAL": {}, "HIGH": {}, "MEDIUM": {}, "LOW": {}, "INFO": {}, "WARN": {},
 }
 
-func validateAuditEventMap(ev map[string]any) error {
+func validateAuditEventMap(ev map[string]any, v8Action bool) error {
 	if _, ok := ev["id"]; !ok {
 		return fmt.Errorf("invalid audit event: missing id")
 	}
@@ -891,7 +932,11 @@ func validateAuditEventMap(ev map[string]any) error {
 		return fmt.Errorf("invalid audit event: missing timestamp")
 	}
 	act, _ := ev["action"].(string)
-	if !isKnownAuditAction(act) {
+	if v8Action {
+		if !v8RecordActionPattern.MatchString(act) {
+			return fmt.Errorf("invalid audit event: v8 record action %q", act)
+		}
+	} else if !isKnownAuditAction(act) {
 		return fmt.Errorf("invalid audit event: unknown action %q", act)
 	}
 	sev, _ := ev["severity"].(string)
@@ -947,6 +992,17 @@ FROM activity_events`+where+` ORDER BY timestamp ASC`, args...)
 		}
 	}
 	return rows.Err()
+}
+
+func columnExists(db *sql.DB, table, column string) (bool, error) {
+	var n int
+	err := db.QueryRow(
+		`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name=?`, table, column,
+	).Scan(&n)
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 func tableExists(db *sql.DB, name string) (bool, error) {

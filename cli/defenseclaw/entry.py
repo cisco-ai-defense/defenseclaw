@@ -55,8 +55,22 @@ def exempt_instance_metadata_from_proxy(environ=None) -> None:
             env[key] = updated
 
 
+def use_bundled_litellm_cost_map(environ=None) -> None:
+    """Make LiteLLM use its bundled model price list.
+
+    Importing litellm fetches the price list from GitHub. Behind a dead or
+    silent proxy that cost up to 5 s and printed a raw ANSI-coloured
+    "LiteLLM:WARNING ... Failed to fetch remote model cost map" line in
+    doctor output (GAP-2451). The CLI never needs the remote copy. An
+    explicit LITELLM_LOCAL_MODEL_COST_MAP setting is kept.
+    """
+    env = os.environ if environ is None else environ
+    env.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
+
+
 def main() -> None:
     exempt_instance_metadata_from_proxy()
+    use_bundled_litellm_cost_map()
     argv = sys.argv[1:]
     if argv and argv[0] in ("upgrade", "rollback"):
         from defenseclaw.upgrade_shim import run

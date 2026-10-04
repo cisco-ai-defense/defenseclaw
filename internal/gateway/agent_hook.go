@@ -278,6 +278,19 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				return
 			}
 			vscodeLocal := copilotHookDialectFromHeaders(r.Header) == connector.CopilotHookSurfaceVSCodeLocal
+			if local, ok := connector.CopilotVSCodeLocalEventForCLIHook(event); !vscodeLocal && ok &&
+				payloadString(payload, "hook_event_name") == local &&
+				payload["toolName"] == nil && payload["toolArgs"] == nil {
+				// GAP-1903: the VS Code Local harness also runs the per-user
+				// Copilot CLI hook file, under the Local event the bound CLI
+				// event maps to, and sends it the Local payload (snake_case
+				// tool_name/tool_input). Decoded as a CLI body, the call had
+				// no authoritative arguments and its command rules stayed
+				// detection-only. The Copilot CLI's own camelCase bodies carry
+				// no hook_event_name, and the body may only name the event
+				// the hook command is bound to.
+				event, vscodeLocal = local, true
+			}
 			if vscodeLocal {
 				// The VS Code Local harness names the event in its body.
 				// It must be the event the hook command is bound to, so a
@@ -2166,7 +2179,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	// / RuleIDs), and the scan_finding events all join on the same
 	// evaluation_id.
 	resp.EvaluationID = evalCtx.EvaluationID
-	resp.RuleIDs = evalCtx.RuleIDs
+	resp.RuleIDs = hookResponseRuleIDs(evalCtx.RuleIDs, rawActionBeforeAssets, assetDecisions)
 	resp.RedactionEnabled = verdict.RedactionEnabled
 	resp.laneVerdict = verdict.laneVerdict
 	return resp
@@ -2332,6 +2345,7 @@ func (a *APIServer) agentHookMCPAssetDecision(ctx context.Context, req agentHook
 		return a.evaluateRuntimeMCPAssetPolicy(ctx, req.ConnectorName, req.HookEventName, probe)
 	}
 	probe := mcpProbeFromFields(payloadString(req.Payload, "mcp_server_name"), req.ToolName, toolInput)
+	probe.WorkspaceDir = req.CWD
 	return a.evaluateRuntimeMCPAssetPolicy(ctx, req.ConnectorName, req.HookEventName, probe)
 }
 

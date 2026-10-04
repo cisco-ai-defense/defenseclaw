@@ -26,6 +26,9 @@ from defenseclaw.tui.theme import DEFAULT_TOKENS
 # Footer hint text. The armed variant is shown once a ``danger`` action has
 # been chosen a first time and is waiting for the explicit second confirm.
 _HINT_DEFAULT = "press a row's key, or up/down and enter  ·  esc cancel"
+# Used when no action row has a hotkey, so the hint never points at keys
+# that are not on screen (GAP-2115).
+_HINT_NO_KEYS = "up/down and enter confirm  ·  esc cancel"
 _HINT_ARMED = "⚠ danger — press enter / click again to confirm  ·  esc cancel"
 
 
@@ -84,6 +87,9 @@ class ConsequenceModalModel:
     default_action_id: str
     consequence: str = ""
     border_color: str = DEFAULT_TOKENS.border_active
+    # Footer text that replaces the generated one, for a modal whose rows do
+    # different things (the uninstall a/e rows only show a command, GAP-2595).
+    hint: str = ""
 
     def __post_init__(self) -> None:
         if not self.actions:
@@ -105,6 +111,24 @@ class ConsequenceModalModel:
             if action.action_id == self.default_action_id:
                 return index
         return 0
+
+    @property
+    def default_hint(self) -> str:
+        """Footer hint for the unarmed modal; mentions keys only when a row has one."""
+
+        if self.hint:
+            return self.hint
+        safe = [action.hotkey for action in self.actions if action.hotkey and not action.danger]
+        danger = [action.hotkey for action in self.actions if action.hotkey and action.danger]
+        if danger:
+            # A danger row's key only selects it, while a safe row's key runs
+            # at once, so the hint says which is which (GAP-2303).
+            runs = f"{'/'.join(safe)} {'runs' if len(safe) == 1 else 'run'} now  ·  " if safe else ""
+            selects = "selects" if len(danger) == 1 else "select"
+            return f"{runs}{'/'.join(danger)} {selects}, then enter twice runs  ·  esc cancel"
+        if safe:
+            return _HINT_DEFAULT
+        return _HINT_NO_KEYS
 
     def action_for_hotkey(self, hotkey: str) -> ConsequenceAction | None:
         """Return the action selected by a hotkey, if any."""
@@ -241,7 +265,7 @@ class ConsequenceModalScreen(ModalScreen[ConsequenceAction | None]):
                 yield Static(self.model.consequence, id="consequence-warning")
             # The hint is docked to the dialog's bottom edge (see CSS), so
             # the danger step's "press Enter again" is always on screen.
-            yield Static(_HINT_DEFAULT, id="consequence-hint")
+            yield Static(self.model.default_hint, id="consequence-hint")
             for index, action in enumerate(self.model.actions):
                 label = action.display_label
                 if action.description:
@@ -273,7 +297,7 @@ class ConsequenceModalScreen(ModalScreen[ConsequenceAction | None]):
         dialog.styles.border = ("round", self.model.border_color)
 
     def _update_hint(self) -> None:
-        hint = _HINT_ARMED if self._armed_index is not None else _HINT_DEFAULT
+        hint = _HINT_ARMED if self._armed_index is not None else self.model.default_hint
         self.query_one("#consequence-hint", Static).update(hint)
 
     def _disarm(self) -> None:

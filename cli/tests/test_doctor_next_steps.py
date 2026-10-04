@@ -426,6 +426,35 @@ def test_windows_hermes_idle_is_healthy_not_pending_reload() -> None:
         assert cmd_doctor._hermes_idle_native_check(pending, _DoctorResult(passive=True)) is pending
     with mock.patch.object(cmd_doctor, "_hermes_host_running", return_value=True):
         assert cmd_doctor._hermes_idle_native_check(pending, _DoctorResult()) is pending
+    # GAP-2190: an unknown listing (slow host right after an upgrade) is retried once.
+    with mock.patch.object(cmd_doctor, "_hermes_host_running", side_effect=[None, False]):
+        assert cmd_doctor._hermes_idle_native_check(pending, _DoctorResult()).healthy
+
+
+def test_slow_codex_policy_probe_is_retried_then_a_warning(tmp_path) -> None:
+    # GAP-2190: a Codex app-server that does not answer in time is slow, not policy-blocked.
+    from defenseclaw import doctor_hooks
+    from defenseclaw.doctor_hooks import CODEX_PROBE_TIMEOUT_STATE, WindowsHookCheck, _InspectionError
+
+    config = str(tmp_path / "config.toml")
+    slow = _InspectionError(CODEX_PROBE_TIMEOUT_STATE, "timed out waiting for Codex policy response 1")
+    with mock.patch.object(doctor_hooks, "_codex_effective_policy_inspector", side_effect=[slow, (False, "src")]) as m:
+        doctor_hooks._validate_codex_effective_hook_policy(str(tmp_path), config)
+    assert m.call_count == 2
+    with mock.patch.object(doctor_hooks, "_codex_effective_policy_inspector", side_effect=[slow, slow]):
+        try:
+            doctor_hooks._validate_codex_effective_hook_policy(str(tmp_path), config)
+        except _InspectionError as exc:
+            assert exc.state == CODEX_PROBE_TIMEOUT_STATE
+        else:
+            raise AssertionError("a second timeout must still be reported")
+
+    r = _DoctorResult()
+    check = WindowsHookCheck(CODEX_PROBE_TIMEOUT_STATE, "Codex app-server did not answer the policy probe")
+    with mock.patch.object(cmd_doctor, "_windows_native_hook_check", return_value=check):
+        _render(lambda: cmd_doctor._check_windows_native_hooks(mock.MagicMock(), "codex", "Codex hooks", r))
+    assert (r.passed, r.warned, r.failed) == (0, 1, 0), r.checks
+    assert "rerun defenseclaw doctor" in r.checks[0]["remediation"]
 
 
 def test_hook_only_doctor_rows_skip_fleet_and_windows_wording_and_flag_bad_mode() -> None:
@@ -807,3 +836,39 @@ def test_pre_first_start_token_and_codex_hook_rows_are_pending(tmp_path) -> None
     cmd_doctor._check_codex_hooks(cfg, running, platform_name="linux")
     assert running.checks[-1]["status"] == "fail"
     assert running.checks[-1]["remediation"] == "re-register the hooks: defenseclaw setup codex --yes"
+
+
+def test_unattributed_otlp_credentials_name_window_and_age() -> None:
+    # GAP-2294: the count covers a rolling window; old attempts clear on
+    # their own, so setup is only suggested while attempts are recent.
+    from datetime import datetime, timezone
+
+    now = datetime(2026, 10, 3, 6, 22, tzinfo=timezone.utc)
+
+    def row(last: str) -> dict:
+        report = ConnectorCustodyReport(
+            state="available",
+            reason="",
+            observation_window_hours=24,
+            unattributed_authentication_failures=9,
+            last_unattributed_authentication_failure=last,
+        )
+        r = _DoctorResult()
+        cmd_doctor._emit_unattributed_otlp_credentials(report, r, now=now)
+        (check,) = r.checks
+        assert check["label"] == "Native OTLP credentials" and check["status"] == "warn"
+        return check
+
+    old = row("2026-10-02T06:44:41Z")
+    assert "9 rejected OTLP attempts in the last 24 h, last 23 h ago" in old["detail"]
+    assert "clears on its own at 2026-10-03T06:44:41Z" in old["remediation"]
+    assert "defenseclaw setup" not in old["remediation"]
+
+    recent = row("2026-10-03T06:10:00Z")
+    assert "last 12 min ago" in recent["detail"]
+    assert "defenseclaw setup <connector>" in recent["remediation"]
+
+    # GAP-2335: a few seconds old reads naturally, not "last 0 min ago".
+    fresh = row("2026-10-03T06:21:55Z")
+    assert "last under a minute ago" in fresh["detail"]
+    assert "0 min" not in fresh["detail"]

@@ -158,11 +158,36 @@ class BootstrapEnvTests(unittest.TestCase):
         with open(os.path.join(hermes_home, "config.yaml"), "w", encoding="utf-8") as fh:
             fh.write("hooks: {}\n")
 
+        from defenseclaw import bootstrap
+
         with patch.dict(os.environ, {"HERMES_HOME": hermes_home}):
-            result = _connector_readiness(cfg, "hermes")
+            with patch.object(bootstrap, "_hermes_installed", return_value=True):
+                result = _connector_readiness(cfg, "hermes")
+            # GAP-2354: the config.yaml setup writes is not an installed Hermes.
+            with patch.object(bootstrap, "_hermes_installed", return_value=False):
+                missing = _connector_readiness(cfg, "hermes")
 
         self.assertEqual(result.status, "pass")
         self.assertIn("Hermes config found", result.detail)
+        self.assertEqual((missing.status, missing.detail), ("warn", "Hermes is not installed (hermes is not on PATH)"))
+
+    def test_missing_hermes_action_next_step_names_the_install_first(self):
+        # GAP-2383: the first Next line was "setup hermes --mode action",
+        # which cannot work before Hermes is installed.
+        from defenseclaw import bootstrap
+
+        cfg = _cfg_for(os.path.join(self._tmp.name, "dchome"))
+        with patch.object(bootstrap, "_hermes_installed", return_value=False):
+            setup = bootstrap._connector_mode_warning_steps([bootstrap._action_downgrade_record("hermes")])
+            readiness = [_connector_readiness(cfg, "hermes")]
+        commands = bootstrap._next_commands(setup, readiness, cfg, "observe")
+
+        self.assertEqual(
+            commands[0],
+            "install Hermes (https://github.com/NousResearch/hermes-agent), then run: defenseclaw setup hermes --mode action",
+        )
+        self.assertIn("Hermes is not installed", setup[0].detail)
+        self.assertFalse([c for c in commands if c.startswith("defenseclaw setup hermes")])
 
     def test_openclaw_setup_and_readiness_agree_before_openclaw_json_exists(self):
         # GAP-1523: Guardrail skipped ("OpenClaw config not found ... skipped
@@ -1353,6 +1378,35 @@ class FirstRunApiPortTests(unittest.TestCase):
             self.assertEqual(bootstrap.choose_first_run_guardrail_port(default_config()), "")
 
     @unittest.skipIf(os.name == "nt", "port claims are a Linux and macOS hint")
+    def test_two_accounts_in_init_at_once_get_different_guardrail_ports(self):
+        # GAP-2198: neither proxy listens yet, so the free-port check alone
+        # gave both accounts 4010; the claim makes the second one move on.
+        import tempfile
+
+        from defenseclaw import bootstrap
+        from defenseclaw.config import default_config
+
+        first, second = default_config(), default_config()
+        with tempfile.TemporaryDirectory() as claims:
+            with (
+                patch.object(bootstrap, "_API_PORT_CLAIM_DIR", claims),
+                patch.object(bootstrap, "_api_port_free", side_effect=lambda _host, port: port != 4000),
+            ):
+                bootstrap.choose_first_run_guardrail_port(first)
+                self.assertTrue(os.path.exists(os.path.join(claims, "defenseclaw-guardrail-port-4010")))
+                with patch.object(bootstrap.os, "getuid", return_value=os.getuid() + 1):
+                    note = bootstrap.choose_first_run_guardrail_port(second)
+            # GAP-2283: 4010 is only claimed (nothing listens), so the note
+            # must not send the user looking for a process on it.
+            self.assertIn("in use or claimed by another account's DefenseClaw install", note)
+            self.assertNotIn("often", note)
+            with patch.object(bootstrap, "_API_PORT_CLAIM_DIR", claims):
+                bootstrap.remove_own_api_port_claims()
+                self.assertEqual(os.listdir(claims), [])
+
+        self.assertEqual((first.guardrail.port, second.guardrail.port), (4010, 4020))
+
+    @unittest.skipIf(os.name == "nt", "port claims are a Linux and macOS hint")
     def test_uninstall_all_removes_only_this_accounts_claims(self):
         import tempfile
 
@@ -1484,6 +1538,34 @@ def test_a_gateway_start_that_outlasts_init_says_it_is_still_starting(tmp_path, 
     assert step.status == "warn"
     assert step.detail.startswith("still starting")
     assert step.next_command == "defenseclaw-gateway status"
+
+
+def test_a_failed_first_start_names_the_error_not_the_migration_banner(tmp_path, monkeypatch):
+    # GAP-2341: on a fresh home the first stderr line is an audit migration
+    # banner, and init showed it as the Sidecar failure.
+    import subprocess
+
+    from defenseclaw import bootstrap
+
+    cfg = MagicMock()
+    cfg.data_dir = str(tmp_path)
+    monkeypatch.setattr(bootstrap.shutil, "which", lambda _name: "/bin/defenseclaw-gateway")
+    monkeypatch.setattr(bootstrap, "_pid_file_running", lambda _path: False)
+    stderr = (
+        "[audit] applying migration 1: initial schema: audit_events, scan_results\n"
+        "[judge_body] applying migration 1: initial schema\n"
+        "Error: start daemon readiness: hermes hook config: handler has a tampered DefenseClaw command\n"
+    )
+    monkeypatch.setattr(
+        bootstrap.subprocess, "run", lambda argv, **_kw: subprocess.CompletedProcess(argv, 1, "", stderr)
+    )
+    step = bootstrap._start_gateway_structured(cfg)
+
+    assert step.status == "warn"
+    assert step.detail == "Error: start daemon readiness: hermes hook config: handler has a tampered DefenseClaw command"
+    banner_only = subprocess.CompletedProcess([], 1, "", "[audit] applying migration 1: x\ngateway exited\n")
+    assert bootstrap.gateway_failure_detail(banner_only, "start failed") == "gateway exited"
+    assert bootstrap.gateway_failure_detail(subprocess.CompletedProcess([], 1, "", ""), "start failed") == "start failed"
 
 
 def test_init_waits_past_the_windows_gateway_readiness_wait():

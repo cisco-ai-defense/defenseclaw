@@ -58,6 +58,9 @@ from any shell.
 On Linux and macOS, `verify` first waits up to 5 seconds for another
 lifecycle run to finish, and holds no lock while it checks. If that run is
 still going, `verify` skips its checks and exits `75` with `lifecycle_busy`.
+`status` run as root waits the same way; if the run is still going, it
+reports the installed version but skips its checks, because that run may be
+restarting the services, and exits `75` with `lifecycle_busy`.
 The Linux verify unit accepts that exit, so a daily run that met an
 administrator's change is not left failed. On Windows, `verify` does not
 wait: while another run's transaction is pending, it fails (`1603`); run it
@@ -108,6 +111,9 @@ inspect-tool calls and refused hook-socket requests carry the verified
 account (`user.id`, `defenseclaw.user.name`); a refused request also names
 its route and reason. Each tool call the foreign-hook guard denies adds a
 `connector-hook` row with `event: foreign_hook_session` that names the file.
+Its trace spans (and their Galileo metadata) carry
+`defenseclaw.guardrail.rule_id` `ENTERPRISE-FOREIGN-HOOK-BLOCKED`, so a
+dashboard can count foreign-hook blocks apart from rule-pack blocks.
 Scan-finding and scan-verdict rows do not carry the account yet
 ([#921](https://github.com/cisco-ai-defense/defenseclaw/issues/921)); join
 them to the hook decision on `evaluation_id`.
@@ -203,8 +209,11 @@ The two summary fields are computed differently on each OS:
   always `0`.
 - **Inspection.** On Windows, `inspection.ai_defense` is `ok` when AI Defense
   is enabled in the config and the gateway is ready. It does not test the key
-  or the network. On Linux and macOS the lifecycle reads both fields from the
-  gateway's `/health`: `local` is `active`, `disabled` or `unknown`, and
+  or the network. `inspection.local` is `active` when the gateway is ready,
+  `unknown` while it is not (for example while its service is stopped), and
+  `disabled` when no deployment is installed. On Linux and macOS the
+  lifecycle reads both fields from the gateway's `/health`: `local` is
+  `active`, `disabled` or `unknown`, and
   `ai_defense` is `disabled`, `ok`, `unavailable:<code>` or `unknown` (the
   gateway did not answer). The gateway's own
   `/health` guardrail detail carries `ai_defense_available` when AI Defense

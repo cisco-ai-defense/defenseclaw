@@ -446,6 +446,10 @@ class AIUsageSnapshot:
     enabled: bool = False
     # Runtime opt-in reported by the currently running gateway generation.
     lookup_model_provenance_online: bool = False
+    # ai_discovery.enabled in config.yaml (None = unknown). When it is true
+    # but the gateway reports enabled=false, the gateway started before the
+    # change and needs a restart (GAP-2260).
+    configured_enabled: bool | None = None
     summary: AIUsageSummary = field(default_factory=AIUsageSummary)
     signals: tuple[AIUsageSignal, ...] = ()
     fetched_at: datetime | None = None
@@ -464,10 +468,17 @@ class AIUsageSnapshot:
             lookup_model_provenance_online=_coerce_bool(
                 raw.get("lookup_model_provenance_online")
             ),
+            configured_enabled=_coerce_optional_bool(raw.get("configured_enabled")),
             summary=AIUsageSummary.from_mapping(summary_raw if isinstance(summary_raw, Mapping) else None),
             signals=signals,
             fetched_at=_parse_datetime(raw.get("fetched_at")) or _parse_datetime(raw.get("fetchedAt")),
         )
+
+    @property
+    def restart_pending(self) -> bool:
+        """Config turns discovery on, but the running gateway has not started it."""
+
+        return not self.enabled and self.configured_enabled is True
 
     @classmethod
     def from_json(cls, text: str) -> AIUsageSnapshot:
@@ -917,6 +928,14 @@ class AIDiscoveryPanelModel:
         if key == "r":
             return AIDiscoveryPanelAction(True, self.load_intent())
         if key == "s":
+            if getattr(self.snapshot, "restart_pending", False):
+                return AIDiscoveryPanelAction(
+                    True,
+                    hint="AI discovery is on in config but not running yet. Press d to restart the gateway, then s.",
+                )
+            if self.snapshot is not None and not self.snapshot.enabled:
+                # A scan only fails with HTTP 503 while discovery is off (GAP-2230).
+                return AIDiscoveryPanelAction(True, hint="AI discovery is off. Press d to turn it on, then s to scan.")
             return AIDiscoveryPanelAction(True, self.scan_intent())
         if key == "/":
             self.filter_text = ""
@@ -927,6 +946,19 @@ class AIDiscoveryPanelModel:
                 hint="Type to filter products and models. Enter applies; Esc clears.",
             )
         return AIDiscoveryPanelAction(False)
+
+    def hint_conditions(self) -> tuple[str, ...]:
+        """Hint bar conditions: ``disabled`` (discovery off), ``restart_pending``
+        (on in config, gateway not restarted yet), ``all_models``."""
+
+        conditions: list[str] = []
+        if self.snapshot is not None and not self.snapshot.enabled:
+            conditions.append("disabled")
+        if getattr(self.snapshot, "restart_pending", False):
+            conditions.append("restart_pending")
+        if self.show_all_models:
+            conditions.append("all_models")
+        return tuple(conditions)
 
     def toggle_model_scope_action(self) -> AIDiscoveryPanelAction:
         """Toggle model scope independently of keyboard filter input."""
@@ -965,6 +997,11 @@ class AIDiscoveryPanelModel:
             return (
                 "AI discovery snapshot not yet available. "
                 "Ensure the gateway is running and DEFENSECLAW_GATEWAY_TOKEN matches the configured token."
+            )
+        if getattr(self.snapshot, "restart_pending", False):
+            return (
+                "AI discovery is on in config, but the running gateway started before that change. "
+                "Press d to restart it, or run: defenseclaw-gateway restart"
             )
         if not self.snapshot.enabled:
             return "AI discovery disabled. Run: defenseclaw agent discovery enable"

@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 )
 
@@ -213,8 +214,18 @@ func TestWindowsEnterpriseDiscoveryGroupsTheGatewayReportByAccount(t *testing.T)
 	enterpriseDiscoveryGatewayReport = func() (enterpriseGatewayAIUsage, string, error) {
 		return enterpriseGatewayAIUsage{Enabled: true, Summary: inventory.AIDiscoverySummary{ScannedAt: scanned, Result: "ok"}, Signals: []inventory.AISignal{
 			{Name: "Amp", Category: "supported_connector", SupportedConnector: "amp", Detector: "config", UserName: "dcw-std2", UserID: "S-1-5-21-2", LastSeen: scanned},
-			{Name: "dccert-mcp", Category: "mcp_server", SupportedConnector: "codex", UserName: "dcw-std1", UserID: "S-1-5-21-1", LastSeen: scanned},
-			{Name: "dccert-skill", Category: "skill", UserName: "dcw-std1", UserID: "S-1-5-21-1", LastSeen: scanned},
+			{Name: "Cursor", Category: "mcp_server", SupportedConnector: "cursor", UserName: "dcw-std1", UserID: "S-1-5-21-1", LastSeen: scanned,
+				Basenames: []string{"dccert-mcp", "mcp.json"}, Evidence: []inventory.AIEvidence{
+					{Type: "mcp", Basename: "mcp.json"}, {Type: "mcp_server", Basename: "dccert-mcp"}}},
+			// GAP-2337: a config file that declares no server is no MCP server.
+			{Name: "Antigravity", Category: "mcp_server", SupportedConnector: "antigravity", UserName: "dcw-std1", UserID: "S-1-5-21-1", LastSeen: scanned,
+				Basenames: []string{"mcp_config.json"}, Evidence: []inventory.AIEvidence{{Type: "mcp", Basename: "mcp_config.json"}}},
+			{Name: "Hermes Agent", Category: "skill", SupportedConnector: "hermes", UserName: "dcw-std1", UserID: "S-1-5-21-1", LastSeen: scanned,
+				Basenames: []string{"skills"}, Evidence: []inventory.AIEvidence{{Type: "skill", Basename: "skills"}},
+				Partial: true, CoverageReason: "read_error"},
+			{Name: "dccert-skill", Category: "skill", UserName: "dcw-std1", UserID: "S-1-5-21-1", LastSeen: scanned,
+				Basenames: []string{"skills", "ewr6-hello2"}, Evidence: []inventory.AIEvidence{
+					{Type: "skill", Basename: "skills"}, {Type: "skill_entry", Basename: "ewr6-hello2"}}},
 			{Name: "Ollama", Category: "local_ai_app", LastSeen: scanned},
 		}}, "127.0.0.1:18970", nil
 	}
@@ -226,7 +237,7 @@ func TestWindowsEnterpriseDiscoveryGroupsTheGatewayReportByAccount(t *testing.T)
 	got := summary.String()
 	for _, want := range []string{
 		"AI Discovery inventory from the gateway's scan of each user profile (gateway 127.0.0.1:18970)",
-		"dcw-std1: scanned 2026-10-02T22:00:00Z, result ok, 2 signal(s)", "mcp_server 1, skill 1",
+		"dcw-std1: scanned 2026-10-02T22:00:00Z, result ok, 3 signal(s)", "mcp_server 1, skill 2",
 		"dcw-std2: scanned", "supported_connector 1", "machine-wide (no account): scanned",
 	} {
 		if !strings.Contains(got, want) {
@@ -244,6 +255,32 @@ func TestWindowsEnterpriseDiscoveryGroupsTheGatewayReportByAccount(t *testing.T)
 	if got := one.String(); !strings.Contains(got, "dccert-mcp") || strings.Contains(got, "Amp") {
 		t.Fatalf("--user dcw-std1 output:\n%s", got)
 	}
+	// GAP-2263: a skill row names the skills, not the skills folder itself.
+	if got := one.String(); !strings.Contains(got, "  ewr6-hello2\n") || strings.Contains(got, "skills,") {
+		t.Fatalf("--user dcw-std1 skill row:\n%s", got)
+	}
+	// GAP-2337: an MCP row names its servers, not the config file; a
+	// partial scan says so.
+	if got := one.String(); !strings.Contains(got, "  dccert-mcp\n") || strings.Contains(got, "mcp.json") ||
+		strings.Contains(got, "Antigravity") || !strings.Contains(got, "  skills (partial: read_error)\n") {
+		t.Fatalf("--user dcw-std1 MCP and partial rows:\n%s", got)
+	}
+	var oneJSON bytes.Buffer
+	if err := writeWindowsEnterpriseDiscovery(&oneJSON, "dcw-std1", true); err != nil {
+		t.Fatal(err)
+	}
+	var shaped enterpriseDiscoveryReport
+	if err := json.Unmarshal(oneJSON.Bytes(), &shaped); err != nil || len(shaped.Accounts) != 1 || len(shaped.Accounts[0].Signals) != 3 {
+		t.Fatalf("--json --user dcw-std1 = %s (%v)", oneJSON.String(), err)
+	}
+	for _, signal := range shaped.Accounts[0].Signals {
+		if signal.Category != "skill" || signal.Partial {
+			continue
+		}
+		if strings.Join(signal.Basenames, ",") != "ewr6-hello2" {
+			t.Fatalf("--json skill basenames = %v", signal.Basenames)
+		}
+	}
 
 	var asJSON bytes.Buffer
 	if err := writeWindowsEnterpriseDiscovery(&asJSON, "S-1-5-21-2", true); err != nil {
@@ -257,5 +294,21 @@ func TestWindowsEnterpriseDiscoveryGroupsTheGatewayReportByAccount(t *testing.T)
 
 	if err := writeWindowsEnterpriseDiscovery(&bytes.Buffer{}, "nobody", false); err == nil || !strings.Contains(err.Error(), `no AI Discovery signal for account "nobody"`) {
 		t.Fatalf("an unknown account = %v", err)
+	}
+
+	// GAP-2114: a standard account's --json refusal is JSON on stdout too.
+	enterpriseDiscoveryGatewayReport = func() (enterpriseGatewayAIUsage, string, error) {
+		return enterpriseGatewayAIUsage{}, "", withExitCode(errors.New("elevation_required: ask your administrator"), 5)
+	}
+	var refused bytes.Buffer
+	err := writeWindowsEnterpriseDiscovery(&refused, "", true)
+	var refusal struct {
+		OK       bool                       `json:"ok"`
+		Errors   []enterprisestatus.Message `json:"errors"`
+		ExitCode int                        `json:"exit_code"`
+	}
+	if commandExitCode(err) != 5 || json.Unmarshal(refused.Bytes(), &refusal) != nil || refusal.OK || refusal.ExitCode != 5 ||
+		len(refusal.Errors) != 1 || refusal.Errors[0].Code != "elevation_required" || refusal.Errors[0].Message != "ask your administrator" {
+		t.Fatalf("--json refusal = %q (%v)", refused.String(), err)
 	}
 }

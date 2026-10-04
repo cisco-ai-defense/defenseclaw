@@ -527,14 +527,14 @@ def test_readiness_renders_every_active_connector_without_setup_filtering() -> N
     checks = build_readiness_checks(cfg, None, None, (), RestartQueue())
     titles = [check.title for check in checks]
 
-    assert "Active Connector: codex" in titles
-    assert "Active Connector: hermes" in titles
-    assert "Active Connector" not in titles
+    assert "Connector: codex" in titles
+    assert "Connector: hermes" in titles
+    assert "Connector" not in titles
 
     model = SetupPanelModel(cfg)
     model_titles = [check.title for check in model.readiness_checks]
-    assert "Active Connector: codex" in model_titles
-    assert "Active Connector: hermes" in model_titles
+    assert "Connector: codex" in model_titles
+    assert "Connector: hermes" in model_titles
 
 
 def test_connector_wizard_builds_go_argv_for_supported_connectors() -> None:
@@ -543,7 +543,8 @@ def test_connector_wizard_builds_go_argv_for_supported_connectors() -> None:
         "setup claude-code",
     )
 
-    fields = connector_setup_wizard_fields({})
+    # Linux: Windows has no openclaw, so the form would open on a hook connector.
+    fields = connector_setup_wizard_fields({"guardrail": {"connector": "openclaw"}}, "linux")
     fields = _with_field(fields, "Connector", "openclaw")
     fields = _with_field(fields, "Guardrail Mode", "action")
     fields = _with_field(fields, "Scanner Mode", "both")
@@ -981,6 +982,31 @@ def test_guardrail_wizard_promotes_strategy_when_judge_model_configured() -> Non
     # exists (it is inherited but never emitted as --judge-model).
     cfg_inherit = {"llm": {"provider": "openai", "model": "gpt-5"}, "guardrail": {"judge": {}}}
     assert wizard_field_value(_guardrail_wizard_fields_for({}, cfg_inherit), "Strategy") == "regex_only"
+
+
+
+def test_guardrail_wizard_prefills_judge_bedrock_region() -> None:
+    # GAP-2298: Region stayed blank although guardrail.judge.llm.bedrock.region was set.
+    cfg = {
+        "guardrail": {
+            "judge": {"llm": {"provider": "bedrock", "model": "m", "bedrock": {"region": "us-east-1"}}},
+        },
+    }
+    assert wizard_field_value(_guardrail_wizard_fields_for({}, cfg), "Region") == "us-east-1"
+
+
+def test_guardrail_wizard_prefills_v5_judge_llm_block() -> None:
+    # GAP-2176: setup guardrail now writes only guardrail.judge.llm, so the
+    # wizard must read the judge model from there (v4 judge.model stays a fallback).
+    cfg = {
+        "guardrail": {
+            "detection_strategy": "regex_only",
+            "judge": {"llm": {"provider": "bedrock", "model": "us.anthropic.claude-haiku-4-5-20251001-v1:0"}},
+        },
+    }
+    fields = _guardrail_wizard_fields_for({}, cfg)
+    assert wizard_field_value(fields, "Model") == "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+    assert wizard_field_value(fields, "Strategy") == "regex_judge"
 
 
 def test_credentials_matrix_actions_are_data_only_and_validate_required_fields() -> None:

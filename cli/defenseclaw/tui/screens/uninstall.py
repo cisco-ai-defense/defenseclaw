@@ -50,17 +50,31 @@ def uninstall_command_for_option(option: UninstallOption) -> CommandSpec:
     return CommandSpec(binary="defenseclaw", args=args, display_name=display)
 
 
+# Rows that remove ~/.defenseclaw. Uninstall refuses that while a TUI is open
+# (the TUI keeps writing there, GAP-2576), so the TUI cannot run them: it names
+# the terminal command to run after quitting instead (GAP-2585).
+TERMINAL_ONLY_OPTIONS = frozenset({UninstallOption.WIPE_DATA.value, UninstallOption.WIPE_ALL.value})
+
+
+def terminal_command_for_option(option_id: str) -> str:
+    """The command to type in a terminal for a terminal-only row ('' otherwise)."""
+
+    if option_id not in TERMINAL_ONLY_OPTIONS:
+        return ""
+    args = uninstall_command_for_option(UninstallOption(option_id)).args
+    return " ".join(("defenseclaw", *(arg for arg in args if arg != "--yes")))
+
+
 def build_uninstall_model() -> ConsequenceModalModel:
     """Build the guarded uninstall modal model."""
 
     return ConsequenceModalModel(
         title="Uninstall DefenseClaw",
-        summary="Choose what the TUI should run. The default is preview-only.",
-        details=(
-            "Destructive rows pass --yes because this modal is the confirmation step.",
-            "Use the dry-run row first if you want to inspect the plan.",
-        ),
-        consequence="Uninstall can remove hooks, plugin integration, config, audit DB, secrets, and binaries.",
+        # The header said "Choose what the TUI should run" and explained
+        # "--yes", though rows a and e only show a command (GAP-2608).
+        summary="Preview the plan, or uninstall and keep your data. The default is preview-only.",
+        details=("Deleting data or binaries is done from a terminal after you quit (rows a and e show the command).",),
+        consequence="Uninstall here removes the DefenseClaw hooks and plugin integration and keeps ~/.defenseclaw.",
         actions=(
             ConsequenceAction(
                 action_id=UninstallOption.DRY_RUN.value,
@@ -82,23 +96,31 @@ def build_uninstall_model() -> ConsequenceModalModel:
                 action_id=UninstallOption.WIPE_DATA.value,
                 hotkey="a",
                 label="Uninstall and wipe data",
-                description="Also deletes ~/.defenseclaw audit DB, config, and secrets.",
+                # The TUI cannot remove the data it keeps open, so this row
+                # only shows a command and needs no danger confirm (GAP-2595).
+                description=(
+                    "The TUI cannot do this. Quit, then "
+                    f"`{terminal_command_for_option(UninstallOption.WIPE_DATA.value)}` deletes ~/.defenseclaw."
+                ),
                 command=uninstall_command_for_option(UninstallOption.WIPE_DATA),
                 variant="error",
-                danger=True,
             ),
             ConsequenceAction(
                 action_id=UninstallOption.WIPE_ALL.value,
                 hotkey="e",
                 label="Uninstall everything",
-                description="Also deletes ~/.defenseclaw and the defenseclaw binaries in ~/.local/bin.",
+                description=(
+                    "The TUI cannot do this. Quit, then "
+                    f"`{terminal_command_for_option(UninstallOption.WIPE_ALL.value)}` "
+                    "deletes ~/.defenseclaw and the binaries."
+                ),
                 command=uninstall_command_for_option(UninstallOption.WIPE_ALL),
                 variant="error",
-                danger=True,
             ),
         ),
         default_action_id=UninstallOption.DRY_RUN.value,
         border_color=DEFAULT_TOKENS.accent_red,
+        hint="p previews  ·  a/e show the command to run after quitting  ·  u, then enter twice, uninstalls  ·  esc cancel",
     )
 
 

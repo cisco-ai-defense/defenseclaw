@@ -129,3 +129,129 @@ observability:
 		t.Error("a non-secret error was relaxed")
 	}
 }
+
+// GAP-2062: an invalid enum value does not hide the running gateway either:
+// status drops the value to find the gateway, then reports the problem.
+func TestGatewayStatusInvalidEnumStillFindsGateway(t *testing.T) {
+	home := t.TempDir()
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	t.Setenv("DEFENSECLAW_HOME", home)
+	t.Setenv("DEFENSECLAW_CONFIG", configPath)
+	raw := fmt.Sprintf(`config_version: 8
+data_dir: %s
+gateway:
+  api_bind: 127.0.0.1
+  api_port: 19132
+guardrail:
+  mode: enforce-everything
+`, filepath.ToSlash(home))
+	if err := os.WriteFile(configPath, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previous := cfg
+	t.Cleanup(func() { cfg = previous; gatewayStatusConfigProblem = nil })
+
+	loadErr := loadGatewayCommandConfigFor(statusCmd)
+	if loadErr == nil {
+		t.Fatal("config with an invalid guardrail.mode loaded")
+	}
+	relaxed := gatewayStatusRelaxedConfig(loadErr)
+	if relaxed == nil || relaxed.Gateway.APIPort != 19132 {
+		t.Fatalf("relaxed config = %+v (load error %v)", relaxed, loadErr)
+	}
+	msg := gatewayStatusConfigLoadError(loadErr).Error()
+	if !strings.Contains(msg, `guardrail.mode is "enforce-everything"`) {
+		t.Errorf("status error %q does not name the invalid value", msg)
+	}
+}
+
+// GAP-2118: a value of the wrong type (alone or next to an invalid enum)
+// does not hide the running gateway either.
+func TestGatewayStatusWrongTypeValueStillFindsGateway(t *testing.T) {
+	for name, extra := range map[string]string{
+		"list for string":   "  block_message: [1, 2]\n",
+		"text for boolean":  "  enabled: maybe\n",
+		"text for integer":  "  port: notaport\n",
+		"enum plus boolean": "  mode: enforce-everything\n  enabled: maybe\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			home := t.TempDir()
+			configPath := filepath.Join(t.TempDir(), "config.yaml")
+			t.Setenv("DEFENSECLAW_HOME", home)
+			t.Setenv("DEFENSECLAW_CONFIG", configPath)
+			raw := fmt.Sprintf("config_version: 8\ndata_dir: %s\ngateway:\n  api_bind: 127.0.0.1\n  api_port: 19133\nguardrail:\n%s",
+				filepath.ToSlash(home), extra)
+			if err := os.WriteFile(configPath, []byte(raw), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			previous := cfg
+			t.Cleanup(func() { cfg = previous; gatewayStatusConfigProblem = nil })
+
+			loadErr := loadGatewayCommandConfigFor(statusCmd)
+			if loadErr == nil {
+				t.Fatal("config with a wrong-type value loaded")
+			}
+			relaxed := gatewayStatusRelaxedConfig(loadErr)
+			if relaxed == nil || relaxed.Gateway.APIPort != 19133 {
+				t.Fatalf("relaxed config = %+v (load error %v)", relaxed, loadErr)
+			}
+		})
+	}
+}
+
+func TestYAMLWithoutPath(t *testing.T) {
+	out, ok := yamlWithoutPath([]byte("a:\n  b: 1\n  c: [x, y]\n"), "$.a.c[0]", 0)
+	if !ok || strings.Contains(string(out), "x") || !strings.Contains(string(out), "b: 1") {
+		t.Fatalf("yamlWithoutPath = %q, %v", out, ok)
+	}
+	if _, ok := yamlWithoutPath([]byte("a: 1\n"), "$.missing", 0); ok {
+		t.Error("a missing path was removed")
+	}
+}
+
+// GAP-2173: an undeclared (typo'd) key does not hide the running gateway
+// either, and the problem reads like the enum and type ones.
+func TestGatewayStatusUnknownKeyStillFindsGateway(t *testing.T) {
+	for name, tc := range map[string]struct{ extra, want string }{
+		"guardrail key": {"guardrail:\n  bogus_key_v2173: 1\n", "guardrail.bogus_key_v2173: unknown field"},
+		"top-level key": {"bogus_top_v2173: 1\n", "bogus_top_v2173: unknown field"},
+		"typo of mode":  {"guardrail:\n  mdoe: action\n", `guardrail.mdoe: unknown field (did you mean "mode"?)`},
+		"key plus type": {"guardrail:\n  bogus_key_v2173: 1\n  enabled: maybe\n", "line 7: guardrail.bogus_key_v2173: unknown field"},
+		"type only":     {"guardrail:\n  enabled: maybe\n", "guardrail.enabled: expected a value of type boolean"},
+		// Two undeclared keys name the first one, not its section (GAP-2173).
+		"two top-level keys": {"bogus_x: 1\nbogus_y: 2\n", "line 6: bogus_x: unknown field"},
+		"two typos":          {"guardrail:\n  mdoe: observe\n  scaner_mode: local\n", `line 7: guardrail.mdoe: unknown field (did you mean "mode"?)`},
+		// Keys in two sections name the first one in the file (GAP-2234).
+		"two sections":    {"watch:\n  debouce_ms: 500\nguardrail:\n  mdoe: observe\n", "line 7: watch.debouce_ms: unknown field"},
+		"unknown section": {"gateway2:\n  a: 1\nguardrail:\n  bogus_k: 1\n", "line 6: gateway2: unknown field"},
+		// A second section of the same name keeps the first (GAP-2188).
+		"duplicate section": {"gateway:\n  api_port: 19999\n", "line 6: gateway appears twice; the first one is at line 3. Merge them into one"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			home := t.TempDir()
+			configPath := filepath.Join(t.TempDir(), "config.yaml")
+			t.Setenv("DEFENSECLAW_HOME", home)
+			t.Setenv("DEFENSECLAW_CONFIG", configPath)
+			raw := fmt.Sprintf("config_version: 8\ndata_dir: %s\ngateway:\n  api_bind: 127.0.0.1\n  api_port: 19134\n%s",
+				filepath.ToSlash(home), tc.extra)
+			if err := os.WriteFile(configPath, []byte(raw), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			previous := cfg
+			t.Cleanup(func() { cfg = previous; gatewayStatusConfigProblem = nil })
+
+			loadErr := loadGatewayCommandConfigFor(statusCmd)
+			if loadErr == nil {
+				t.Fatal("config with an unknown key loaded")
+			}
+			relaxed := gatewayStatusRelaxedConfig(loadErr)
+			if relaxed == nil || relaxed.Gateway.APIPort != 19134 {
+				t.Fatalf("relaxed config = %+v (load error %v)", relaxed, loadErr)
+			}
+			msg := gatewayStatusConfigLoadError(loadErr).Error()
+			if !strings.Contains(msg, tc.want) || strings.Contains(msg, "additionalProperties") || strings.Contains(msg, "yaml_duplicate_key") {
+				t.Errorf("status error %q does not contain %q in plain words", msg, tc.want)
+			}
+		})
+	}
+}

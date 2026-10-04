@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -207,6 +208,27 @@ func enterpriseGatewayGet(path string, out any) (string, error) {
 	return host, nil
 }
 
+// writeManagedViewRefusalJSON gives a --json caller a "code: message"
+// refusal with its exit code (elevation_required) as JSON on stdout, in the
+// errors[] form `enterprise windows status --json` uses, so a script reads
+// the code instead of an empty document (GAP-2114). A managedViewRefusal
+// carries its code beside the sentence (GAP-2262).
+func writeManagedViewRefusalJSON(w io.Writer, err error) {
+	code, message, ok := strings.Cut(err.Error(), ": ")
+	if !ok || strings.ContainsAny(code, " \t") {
+		code, message = "error", err.Error()
+	}
+	var refusal *managedViewRefusal
+	if errors.As(err, &refusal) {
+		code, message = refusal.code, refusal.message
+	}
+	_ = newEnterpriseJSONEncoder(w).Encode(struct {
+		OK       bool                       `json:"ok"`
+		Errors   []enterprisestatus.Message `json:"errors"`
+		ExitCode int                        `json:"exit_code"`
+	}{Errors: []enterprisestatus.Message{{Code: code, Message: message}}, ExitCode: commandExitCode(err)})
+}
+
 // enterpriseDiscoveryStatusHint is the status command for this platform.
 func enterpriseDiscoveryStatusHint() string {
 	switch runtime.GOOS {
@@ -242,7 +264,16 @@ var enterpriseDiscoveryGatewayReport = func() (enterpriseGatewayAIUsage, string,
 func writeWindowsEnterpriseDiscovery(w io.Writer, user string, asJSON bool) error {
 	usage, host, err := enterpriseDiscoveryGatewayReport()
 	if err != nil {
-		return fmt.Errorf("read the AI Discovery inventory: %w", err)
+		// A refusal with its own exit code (elevation_required) is already
+		// the whole answer (GAP-2039).
+		var coded *exitCodeError
+		if !errors.As(err, &coded) {
+			err = withExitCode(fmt.Errorf("read the AI Discovery inventory: %w", err), 1)
+		}
+		if asJSON {
+			writeManagedViewRefusalJSON(w, err)
+		}
+		return err
 	}
 	report := enterpriseDiscoveryReport{Gateway: host, Accounts: []enterpriseDiscoveryAccount{}}
 	byUser := map[string]int{}
@@ -265,7 +296,13 @@ func writeWindowsEnterpriseDiscovery(w io.Writer, user string, asJSON bool) erro
 		return strings.ToLower(report.Accounts[i].User) < strings.ToLower(report.Accounts[j].User)
 	})
 	if user != "" && len(report.Accounts) == 0 {
-		return fmt.Errorf("no AI Discovery signal for account %q in the gateway's scan; the account has no AI agent, skill or MCP server found yet, or ai_discovery is off", user)
+		// A --json caller reads this as JSON too, not an empty stdout (GAP-2456).
+		err := withExitCode(&managedViewRefusal{code: "account_not_found", message: fmt.Sprintf(
+			"no AI Discovery signal for account %q in the gateway's scan; the account has no AI agent, skill or MCP server found yet, or ai_discovery is off", user)}, 1)
+		if asJSON {
+			writeManagedViewRefusalJSON(w, err)
+		}
+		return err
 	}
 	heading := fmt.Sprintf("AI Discovery inventory from the gateway's scan of each user profile (gateway %s)", host)
 	return writeEnterpriseDiscoveryReport(w, report, user, asJSON, heading)
@@ -312,6 +349,9 @@ func writeEnterpriseDiscovery(w io.Writer, dir, user string, asJSON bool) error 
 // writeEnterpriseDiscoveryReport adds the runtime discovery section to the
 // accounts' inventory and prints both.
 func writeEnterpriseDiscoveryReport(w io.Writer, report enterpriseDiscoveryReport, user string, asJSON bool, heading string) error {
+	for i := range report.Accounts {
+		report.Accounts[i].Signals = enterpriseDiscoveryAdminSignals(report.Accounts[i].Signals)
+	}
 	if view, err := enterpriseDiscoveryRuntime(); err != nil {
 		report.RuntimeError = err.Error()
 	} else if view != nil {
@@ -327,7 +367,7 @@ func writeEnterpriseDiscoveryReport(w io.Writer, report enterpriseDiscoveryRepor
 		report.Runtime = view
 	}
 	if asJSON {
-		encoder := json.NewEncoder(w)
+		encoder := newEnterpriseJSONEncoder(w)
 		encoder.SetIndent("", "  ")
 		return encoder.Encode(report)
 	}
@@ -367,10 +407,7 @@ func writeEnterpriseDiscoveryReport(w io.Writer, report enterpriseDiscoveryRepor
 			if connector == "" {
 				connector = "-"
 			}
-			files := strings.Join(signal.Basenames, ",")
-			if files == "" {
-				files = "-"
-			}
+			files := enterpriseDiscoverySignalFiles(signal)
 			fmt.Fprintf(table, "  %s\t%s\t%s\t%s\t%s\t%s\n", signal.Category, signal.Name, connector, signal.State,
 				signal.LastSeen.UTC().Format(time.RFC3339), files)
 		}
@@ -384,6 +421,56 @@ func writeEnterpriseDiscoveryReport(w io.Writer, report enterpriseDiscoveryRepor
 		fmt.Fprintln(w, "Run with --user <account> to list one account's signals, or --json for every field.")
 	}
 	return nil
+}
+
+// enterpriseDiscoveryAdminSignals makes each signal's basenames name what
+// it found. Evidence keeps the scanned folder or config file as its first
+// row, so the view named "skills" in every skill row (GAP-2263) and each
+// MCP config file as a server (GAP-2337). A skill, plugin or rule signal
+// lists its *_entry names and an MCP signal its mcp_server names. An MCP
+// config file read in full that declares no server is not an MCP server:
+// it is left out. Signals without evidence are kept as they are.
+func enterpriseDiscoveryAdminSignals(signals []inventory.AISignal) []inventory.AISignal {
+	out := make([]inventory.AISignal, 0, len(signals))
+	for _, signal := range signals {
+		if len(signal.Evidence) == 0 {
+			out = append(out, signal)
+			continue
+		}
+		var names []string
+		for _, evidence := range signal.Evidence {
+			named := strings.HasSuffix(evidence.Type, "_entry") || evidence.Type == "mcp_server"
+			if named && evidence.Basename != "" && !slices.Contains(names, evidence.Basename) {
+				names = append(names, evidence.Basename)
+			}
+		}
+		switch {
+		case len(names) > 0:
+			sort.Strings(names)
+			signal.Basenames = names
+		case signal.Category == inventory.SignalMCPServer && !signal.Partial:
+			continue
+		}
+		out = append(out, signal)
+	}
+	return out
+}
+
+// enterpriseDiscoverySignalFiles is a signal's FILES cell; a partial scan
+// says so, so an unread folder is not taken for an empty one.
+func enterpriseDiscoverySignalFiles(signal inventory.AISignal) string {
+	files := strings.Join(signal.Basenames, ",")
+	if files == "" {
+		files = "-"
+	}
+	if signal.Partial {
+		reason := signal.CoverageReason
+		if reason == "" {
+			reason = "incomplete"
+		}
+		files += " (partial: " + reason + ")"
+	}
+	return files
 }
 
 // writeEnterpriseRuntime prints the runtime discovery section.

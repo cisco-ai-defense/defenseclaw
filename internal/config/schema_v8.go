@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -34,7 +35,10 @@ var (
 	observabilityV8SchemaErr  error
 )
 
-var observabilityV8AdditionalPropertyPattern = regexp.MustCompile(`additionalProperties '((?:\\'|[^'])+)' not allowed`)
+var (
+	observabilityV8AdditionalPropertyPattern = regexp.MustCompile(`additionalProperties ((?:'(?:\\'|[^'])+'(?:, )?)+) not allowed`)
+	observabilityV8QuotedPropertyPattern     = regexp.MustCompile(`'((?:\\'|[^'])+)'`)
+)
 
 type V8SchemaError struct {
 	Source        string
@@ -87,6 +91,18 @@ func (e *V8SchemaError) Error() string {
 	return message
 }
 
+// ValidateV8SchemaBytes checks raw against the embedded v8 schema only,
+// without decoding it into a Config. A wrong-type value fails the typed
+// decode with a plain unmarshal error, so callers that need the schema
+// violation (its path and keyword) check the schema first (GAP-2118).
+func ValidateV8SchemaBytes(source string, raw []byte) error {
+	document, err := ParseV8YAML(source, raw)
+	if err != nil {
+		return err
+	}
+	return validateV8Schema(source, document)
+}
+
 func validateV8Schema(source string, document *V8YAMLDocument) error {
 	schema, err := compiledObservabilityV8Schema()
 	if err != nil {
@@ -105,7 +121,10 @@ func validateV8Schema(source string, document *V8YAMLDocument) error {
 				Action:  "correct the configuration and retry",
 			}
 		}
-		leaf := deepestV8SchemaError(validation)
+		leaf := firstUnknownV8SchemaError(validation, document.Document)
+		if leaf == nil {
+			leaf = deepestV8SchemaError(validation)
+		}
 		path := v8SchemaDisplayPath(leaf.InstanceLocation)
 		keyword := leaf.KeywordLocation
 		if index := strings.LastIndex(keyword, "/"); index >= 0 {
@@ -114,7 +133,7 @@ func validateV8Schema(source string, document *V8YAMLDocument) error {
 		if keyword == "" {
 			keyword = "schema"
 		}
-		unknown := v8SchemaUnknownProperty(leaf)
+		unknown := v8SchemaUnknownProperty(leaf, document.Document)
 		if unknown != "" {
 			path = v8YAMLChildPath(path, unknown)
 		}
@@ -130,8 +149,14 @@ func validateV8Schema(source string, document *V8YAMLDocument) error {
 			Summary:       "configuration violates the " + keyword + " constraint",
 			Action:        "inspect the canonical v8 schema or generated reference and correct this field",
 		}
-		if node != nil {
+		if key := v8SchemaUnknownKeyNode(document.Document, leaf.InstanceLocation, unknown); key != nil {
+			// The line of the key itself: an unknown section's value
+			// starts on the line of its first child (GAP-2235).
+			result.Line, result.Column = key.Line, key.Column
+		} else if node != nil {
 			result.Line, result.Column = node.Line, node.Column
+		}
+		if node != nil {
 			if keyword == "enum" && node.Kind == yaml.ScalarNode {
 				result.Value = node.Value
 				if len(result.Value) > 60 {
@@ -181,6 +206,54 @@ func deepestV8SchemaError(root *jsonschema.ValidationError) *jsonschema.Validati
 	}
 	visit(root, 0)
 	return best
+}
+
+// firstUnknownV8SchemaError is the undeclared-key error whose key comes
+// first in the file, or nil when there is none. The validator's causes come
+// in map order, so with undeclared keys in several sections the deepest
+// error named a different key on each run, and an unknown top-level section
+// lost to a deeper key (GAP-2234). Errors inside a oneOf or anyOf branch are
+// skipped: a key may be undeclared only in the branch that does not apply.
+func firstUnknownV8SchemaError(root *jsonschema.ValidationError, document *yaml.Node) *jsonschema.ValidationError {
+	var best *jsonschema.ValidationError
+	bestLine, bestColumn := 0, 0
+	var visit func(*jsonschema.ValidationError)
+	visit = func(current *jsonschema.ValidationError) {
+		location := current.KeywordLocation + "/"
+		if strings.Contains(location, "/oneOf/") || strings.Contains(location, "/anyOf/") {
+			return
+		}
+		if len(current.Causes) == 0 {
+			unknown := v8SchemaUnknownProperty(current, document)
+			if key := v8SchemaUnknownKeyNode(document, current.InstanceLocation, unknown); key != nil &&
+				(best == nil || key.Line < bestLine || key.Line == bestLine && key.Column < bestColumn) {
+				best, bestLine, bestColumn = current, key.Line, key.Column
+			}
+		}
+		for _, cause := range current.Causes {
+			visit(cause)
+		}
+	}
+	visit(root)
+	return best
+}
+
+// v8SchemaUnknownKeyNode is the key node of the undeclared key unknown in
+// the mapping at pointer, or nil.
+func v8SchemaUnknownKeyNode(document *yaml.Node, pointer, unknown string) *yaml.Node {
+	if unknown == "" {
+		return nil
+	}
+	mapping := v8SchemaYAMLNode(document, pointer, "")
+	if mapping == nil || mapping.Kind != yaml.MappingNode {
+		return nil
+	}
+	for index := 0; index+1 < len(mapping.Content); index += 2 {
+		if key := mapping.Content[index]; key.Kind == yaml.ScalarNode && key.Value == unknown {
+			return key
+		}
+	}
+	return nil
 }
 
 func v8SchemaDisplayPath(pointer string) string {
@@ -235,7 +308,10 @@ func v8SchemaPointerSegments(pointer string) []string {
 	return parts
 }
 
-func v8SchemaUnknownProperty(validation *jsonschema.ValidationError) string {
+// v8SchemaUnknownProperty names the undeclared key of an additionalProperties
+// violation. With several (two typos in one section) it is the first one in
+// the file, so the error names a key, not its section (GAP-2173).
+func v8SchemaUnknownProperty(validation *jsonschema.ValidationError, document *yaml.Node) string {
 	if validation == nil || !strings.HasSuffix(validation.KeywordLocation, "/additionalProperties") {
 		return ""
 	}
@@ -243,7 +319,21 @@ func v8SchemaUnknownProperty(validation *jsonschema.ValidationError) string {
 	if len(match) != 2 {
 		return ""
 	}
-	return strings.ReplaceAll(match[1], `\'`, `'`)
+	var names []string
+	for _, quoted := range observabilityV8QuotedPropertyPattern.FindAllStringSubmatch(match[1], -1) {
+		names = append(names, strings.ReplaceAll(quoted[1], `\'`, `'`))
+	}
+	if len(names) == 0 {
+		return ""
+	}
+	if mapping := v8SchemaYAMLNode(document, validation.InstanceLocation, ""); mapping != nil && mapping.Kind == yaml.MappingNode {
+		for index := 0; index+1 < len(mapping.Content); index += 2 {
+			if key := mapping.Content[index].Value; slices.Contains(names, key) {
+				return key
+			}
+		}
+	}
+	return names[0]
 }
 
 func v8SchemaExpectation(validation *jsonschema.ValidationError, unknown string) (string, string) {

@@ -20,6 +20,11 @@ import (
 
 var ErrModeMismatch = errors.New("ACP runtime mode does not match central policy")
 
+// ErrGatewayNotReady is an authenticated HTTP 503: the gateway answered but
+// cannot evaluate yet, for example while it loads the config change of an
+// acp setup that just turned the guard on (GAP-2135).
+var ErrGatewayNotReady = errors.New("ACP gateway is not ready to evaluate")
+
 type Evaluation struct {
 	Profile   string          `json:"profile"`
 	Mode      Mode            `json:"mode"`
@@ -146,6 +151,9 @@ func (e *HTTPEvaluator) Evaluate(ctx context.Context, in Evaluation) (Verdict, e
 	}
 	if resp.StatusCode == http.StatusConflict {
 		return Verdict{}, ErrModeMismatch
+	}
+	if resp.StatusCode == http.StatusServiceUnavailable {
+		return Verdict{}, fmt.Errorf("%w: ACP evaluator returned HTTP %d", ErrGatewayNotReady, resp.StatusCode)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return Verdict{}, fmt.Errorf("ACP evaluator returned HTTP %d", resp.StatusCode)

@@ -103,7 +103,7 @@ class TestSkillBlock(SkillCommandTestBase):
 
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("evil-skill", result.output)
-        self.assertIn("block list", result.output)
+        self.assertIn("[skill] Blocked 'evil-skill' (every connector).", result.output)
 
         pe = PolicyEngine(self.app.store)
         self.assertTrue(pe.is_blocked("skill", "evil-skill"))
@@ -2115,6 +2115,26 @@ class TestSkillList(SkillCommandTestBase):
         self.assertIn("ghost-skill", result.output)
 
     @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full")
+    def test_list_unblocked_skill_with_quarantined_files_is_quarantined(self, mock_list):
+        # GAP-2008: after a bare unblock the files stay in quarantine until an
+        # explicit restore, so the row says quarantined, not removed.
+        mock_list.return_value = {"skills": []}
+        self.app.store.insert_scan_result(
+            str(uuid.uuid4()), "skill-scanner", "/h/.claude/skills/held-skill",
+            datetime.now(timezone.utc), 500, 1, "CRITICAL", "{}",
+        )
+        self.app.store.create_quarantine_record(
+            "skill", "held-skill", "/h/.claude/skills/held-skill",
+            "/h/.defenseclaw/quarantine/skills/amp/held-skill", "sha256:x",
+            "watcher enforcement", "amp", state="active",
+        )
+
+        result = self.invoke(["list"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("quarantined", result.output)
+        self.assertNotIn("removed", result.output)
+
+    @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full")
     def test_list_no_duplicate_entries(self, mock_list):
         """If a skill is in both OpenClaw list and actions DB, it shouldn't appear twice."""
         mock_list.return_value = {
@@ -2169,7 +2189,12 @@ class TestSkillInfo(SkillCommandTestBase):
         # that implies the skill exists.
         result = self.invoke(["info", "definitely-not-a-skill"])
         self.assertEqual(result.exit_code, 1, result.output)
-        self.assertIn("not found", result.output)
+        # GAP-2003: same shape as policy show / mcp scan misses, with a next step.
+        self.assertIn(
+            "Error: skill 'definitely-not-a-skill' not found. "
+            "Run `defenseclaw skill list` to see installed skills.",
+            result.output,
+        )
 
     @patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info", return_value=None)
     def test_info_renders_scan_history_phantom(self, _mock):
@@ -3449,7 +3474,9 @@ class TestSkillConnectorPolicyValidation(SkillCommandTestBase):
         result = self.invoke(["unblock", "sample"])
 
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("allow/block/quarantine/disable", result.output)
+        # GAP-2085: the bare unblock names the scope a bare block names.
+        self.assertIn("[skill] Unblocked 'sample' (every connector).", result.output)
+        self.assertIn("It will be scanned on the next check.", result.output)
         self.assertFalse(self.app.store.has_action("skill", "sample", "install", "allow"))
         self.assertIsNone(self.app.store.get_action("skill", "sample"))
 
@@ -3467,7 +3494,8 @@ class TestSkillConnectorPolicyValidation(SkillCommandTestBase):
 
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn(
-            "[skill] 'sample' added to block list for connector=hermes, connector=codex",
+            "[skill] Blocked 'sample' (every connector).\n"
+            "  Copies found for connector=hermes, connector=codex.",
             result.output,
         )
         self.assertTrue(self.app.store.has_action("skill", "sample", "install", "block"))
@@ -3477,6 +3505,25 @@ class TestSkillConnectorPolicyValidation(SkillCommandTestBase):
         self.assertFalse(
             self.app.store.has_action("skill", "sample", "install", "block", "codex")
         )
+
+        # GAP-2085: bare unblock names the same scope the bare block did.
+        unblocked = self.invoke(["unblock", "sample"])
+        self.assertEqual(unblocked.exit_code, 0, unblocked.output)
+        self.assertIn("[skill] Unblocked 'sample' (every connector).", unblocked.output)
+        self.assertIn("It will be scanned on the next check.", unblocked.output)
+
+    def test_scoped_block_uses_unblock_line_style(self):
+        with patch("defenseclaw.commands.hint") as hint:
+            result = self.invoke(["block", "sample", "--connector", "codex"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("[skill] Blocked 'sample' (codex).", result.output)
+        # GAP-2085: the unblock hint and the scoped unblock keep the scope.
+        hint.assert_called_once_with("Unblock later:  defenseclaw skill unblock sample --connector codex")
+        unblocked = self.invoke(["unblock", "sample", "--connector", "codex"])
+        self.assertEqual(unblocked.exit_code, 0, unblocked.output)
+        self.assertIn("[skill] Unblocked 'sample' (codex).", unblocked.output)
+        self.assertIn("It will be scanned on the next check.", unblocked.output)
 
     def test_bare_allow_fans_out_to_matching_connector_copies(self):
         hermes_root = os.path.join(self.tmp_dir, "hermes", "skills")
@@ -3517,8 +3564,8 @@ class TestSkillConnectorPolicyValidation(SkillCommandTestBase):
         result = self.invoke(["unblock", "sample"])
 
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("connector=hermes", result.output)
-        self.assertIn("connector=codex", result.output)
+        self.assertIn("[skill] Unblocked 'sample' (hermes).", result.output)
+        self.assertIn("[skill] Unblocked 'sample' (codex).", result.output)
         self.assertIsNone(self.app.store.get_action("skill", "sample", "hermes"))
         self.assertIsNone(self.app.store.get_action("skill", "sample", "codex"))
 

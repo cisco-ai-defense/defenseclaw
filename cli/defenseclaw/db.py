@@ -715,6 +715,10 @@ class Store:
         "defenseclaw.judge.kind",
         "defenseclaw.acp.method",
         "defenseclaw.hook.event",
+        # An operator change names its target and diff; the Audit table and
+        # search read them from the summary row (GAP-2275).
+        "defenseclaw.admin.target_ref",
+        "defenseclaw.admin.diff",
     )
 
     def _summary_structured_sql(self) -> str:
@@ -880,6 +884,36 @@ class Store:
             key = str(connector or "").strip().lower()
             if not key:
                 continue
+            entry = stats.setdefault(key, {"calls": 0, "blocks": 0, "alerts": 0, "newest": ""})
+            entry["calls"] = int(entry["calls"]) + int(calls or 0)
+            entry["blocks"] = int(entry["blocks"]) + int(blocks or 0)
+            entry["alerts"] = int(entry["alerts"]) + int(alerts or 0)
+            if newest and str(newest) > str(entry["newest"]):
+                entry["newest"] = newest
+        # Proxy connectors (OpenClaw, ZeptoClaw) write no connector-hook rows:
+        # their guardrail records tool inspections (inspect-tool-*) and LLM
+        # evaluations (guardrail-verdict), and a blocked LLM turn adds a
+        # ``block`` row. Without them an OpenClaw-only Overview read "Blocks 0"
+        # after a tool block and a prompt block (GAP-2496).
+        cur = self.db.execute(
+            """SELECT LOWER(TRIM(connector)) AS connector_name,
+                      SUM(CASE WHEN action IN ('inspect-tool-allow', 'inspect-tool-alert',
+                                               'inspect-tool-confirm', 'inspect-tool-block',
+                                               'guardrail-verdict')
+                               THEN 1 ELSE 0 END) AS calls,
+                      SUM(CASE WHEN action IN ('inspect-tool-block', 'block', 'guardrail-block')
+                               THEN 1 ELSE 0 END) AS blocks,
+                      SUM(CASE WHEN action IN ('inspect-tool-alert', 'inspect-tool-confirm')
+                               THEN 1 ELSE 0 END) AS alerts,
+                      MAX(timestamp) AS newest
+                 FROM audit_events
+                WHERE action IN ('inspect-tool-allow', 'inspect-tool-alert', 'inspect-tool-confirm',
+                                 'inspect-tool-block', 'guardrail-verdict', 'block', 'guardrail-block')
+                  AND LOWER(TRIM(COALESCE(connector, ''))) IN ('openclaw', 'zeptoclaw')
+                GROUP BY connector_name"""
+        )
+        for connector, calls, blocks, alerts, newest in cur.fetchall():
+            key = str(connector or "").strip().lower()
             entry = stats.setdefault(key, {"calls": 0, "blocks": 0, "alerts": 0, "newest": ""})
             entry["calls"] = int(entry["calls"]) + int(calls or 0)
             entry["blocks"] = int(entry["blocks"]) + int(blocks or 0)
@@ -1408,7 +1442,11 @@ class Store:
         """Map alert IDs to the details of connector-hook rows of the same request.
 
         A hook-rule finding row carries the rule but not the decision; the
-        connector-hook row written for the same request does.
+        connector-hook row written for the same request does. A redaction
+        profile can drop that row's details (strict keeps metadata only), so
+        the structured guardrail decision of the hook-decision ``action`` row
+        of the same request is read as well (GAP-2096). The gateway stores
+        that row as ``hook_decision`` (audit export shows it as ``action``).
         """
         ids = [alert_id for alert_id in alert_ids if alert_id]
         columns, _tables = self._audit_projection_schema()
@@ -1426,6 +1464,7 @@ class Store:
             self._safe_json_extract(payload, f'$."defenseclaw.{key}"')
             for key in (
                 "guardrail.effective_action", "guardrail.would_block", "guardrail.mode", "acp.method", "acp.client",
+                "guardrail.raw_action",
             )
         )
         cur = self.db.execute(
@@ -1433,19 +1472,22 @@ class Store:
                FROM audit_events AS f
                JOIN audit_events AS h
                  ON h.request_id = f.request_id
-                AND (h.action IN ('connector-hook', 'guardrail-verdict') OR h.action LIKE 'inspect-tool-%')
+                AND (h.action IN ('connector-hook', 'guardrail-verdict', 'hook_decision', 'action')
+                      OR h.action LIKE 'inspect-tool-%')
                WHERE f.id IN ({placeholders}) AND COALESCE(f.request_id, '') <> ''
                ORDER BY h.timestamp ASC, h.rowid ASC""",
             ids,
         )
         out: dict[str, list[str]] = {}
-        for alert_id, action, details, effective, would_block, mode, acp_method, acp_client in cur.fetchall():
+        for alert_id, action, details, effective, would_block, mode, acp_method, acp_client, raw in cur.fetchall():
             if action == "connector-hook":
                 out.setdefault(alert_id, []).append(details or "")
             elif action.startswith("inspect-tool-"):
                 out.setdefault(alert_id, []).append(f"action={action.removeprefix('inspect-tool-')} {details or ''}")
             elif effective:
                 parts = [f"action={str(effective).strip().lower()}"]
+                if raw:
+                    parts.append(f"raw_action={str(raw).strip().lower()}")
                 if str(would_block).strip().lower() in ("1", "true"):
                     parts.append("would_block=true")
                 if mode:

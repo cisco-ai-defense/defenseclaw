@@ -428,7 +428,34 @@ class Logger:
         except CanonicalObservabilityError:
             raise
         except Exception as exc:
-            raise CanonicalObservabilityError("canonical Observability v8 admission was not confirmed") from exc
+            raise CanonicalObservabilityError(_unconfirmed_audit_reason(exc)) from exc
+
+
+def _unconfirmed_audit_reason(exc: BaseException) -> str:
+    """Why the gateway did not confirm an audit event, in the user's words (GAP-2019).
+
+    The cause's own text (URLs, payload fragments) stays out of the message.
+    """
+    import requests
+
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    if status in (401, 403):
+        return (
+            "the gateway on this port refused this account's credentials; "
+            "check with 'defenseclaw doctor' that it is this account's gateway"
+        )
+    if isinstance(exc, requests.Timeout):
+        return (
+            "the gateway could not record it in time, likely because its audit database is busy "
+            "or slow; gateway.log has the cause. Try again in a minute"
+        )
+    if isinstance(status, int) and status >= 500:
+        # GAP-2381: a 5xx is not always a busy database; the gateway logs the cause.
+        return (
+            f"the gateway could not record it (HTTP {status}); gateway.log has the cause. "
+            "If it names a busy or locked audit database, try again in a minute"
+        )
+    return "the gateway did not acknowledge it; gateway.log has the cause. Try again in a minute"
 
 
 # Fields the gateway's canonical scan ingress accepts for one finding

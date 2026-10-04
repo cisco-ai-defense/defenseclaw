@@ -581,6 +581,34 @@ func (g *GuardrailInspector) SetScannerMode(mode string) {
 // then returns a merged verdict. The detection strategy controls whether
 // regex runs alone, triages for LLM adjudication, or the LLM runs first.
 func (g *GuardrailInspector) Inspect(ctx context.Context, direction, content string, messages []ChatMessage, model, mode string) *ScanVerdict {
+	return g.inspect(ctx, direction, content, "", messages, model, mode)
+}
+
+// InspectWithRawRecheck inspects content and, when it differs, the raw text
+// it was derived from (F-1265), and keeps the stricter verdict. Both checks
+// are one evaluation with one apply_guardrail span, so an OpenClaw prompt is
+// not traced and counted twice (GAP-2288).
+func (g *GuardrailInspector) InspectWithRawRecheck(ctx context.Context, direction, content, raw string, messages []ChatMessage, model, mode string) *ScanVerdict {
+	if raw == content {
+		raw = ""
+	}
+	return g.inspect(ctx, direction, content, raw, messages, model, mode)
+}
+
+// inspectPromptWithRawRecheck is the F-1265 prompt check for any inspector:
+// one evaluation when the inspector supports it, two otherwise.
+func inspectPromptWithRawRecheck(ctx context.Context, inspector ContentInspector, content, raw string, messages []ChatMessage, model, mode string) *ScanVerdict {
+	if guardrail, ok := inspector.(*GuardrailInspector); ok {
+		return guardrail.InspectWithRawRecheck(ctx, "prompt", content, raw, messages, model, mode)
+	}
+	verdict := inspector.Inspect(ctx, "prompt", content, messages, model, mode)
+	if content != raw {
+		verdict = mergePromptVerdicts(verdict, inspector.Inspect(ctx, "prompt", raw, messages, model, mode))
+	}
+	return verdict
+}
+
+func (g *GuardrailInspector) inspect(ctx context.Context, direction, content, raw string, messages []ChatMessage, model, mode string) *ScanVerdict {
 	// Scope correction:
 	// Completion/response scanning must only inspect assistant-visible output.
 	// It must not re-scan request-side system prompts, tool definitions,
@@ -613,24 +641,17 @@ func (g *GuardrailInspector) Inspect(ctx context.Context, direction, content str
 			}
 		}()
 	}
-	var verdict *ScanVerdict
-	switch {
-	case g.managedMode:
-		// managed_enterprise: Cisco AI Defense (CMID-authenticated) is
-		// the sole decision-maker. Local regex, judge, and OPA are all
-		// skipped; a request AID cannot decide fails open. See
-		// inspectManagedAIDOnly.
-		verdict = g.inspectManagedAIDOnly(
-			ctx,
-			direction,
-			managedAIDMessagesForInspection(direction, content, messages),
-		)
-	case strategy == "regex_judge":
-		verdict = g.inspectRegexJudge(ctx, direction, content, messages, model, mode)
-	case strategy == "judge_first":
-		verdict = g.inspectJudgeFirst(ctx, direction, content, messages, model, mode)
-	default:
-		verdict = g.inspectRegexOnly(ctx, direction, content, messages, model, mode)
+	verdict := g.inspectStrategy(ctx, strategy, direction, content, messages, model, mode)
+	if raw != "" {
+		// Clamp each verdict as a separate Inspect call did before merging.
+		if !g.managedMode {
+			clampPromptDirectionVerdict(verdict, direction)
+		}
+		rawVerdict := g.inspectStrategy(ctx, strategy, direction, raw, messages, model, mode)
+		if !g.managedMode {
+			clampPromptDirectionVerdict(rawVerdict, direction)
+		}
+		verdict = mergePromptVerdicts(verdict, rawVerdict)
 	}
 
 	elapsed := time.Since(start)
@@ -674,6 +695,28 @@ func (g *GuardrailInspector) Inspect(ctx context.Context, direction, content str
 		)
 	}
 	return verdict
+}
+
+// inspectStrategy runs the configured detection strategy on one text.
+func (g *GuardrailInspector) inspectStrategy(ctx context.Context, strategy, direction, content string, messages []ChatMessage, model, mode string) *ScanVerdict {
+	switch {
+	case g.managedMode:
+		// managed_enterprise: Cisco AI Defense (CMID-authenticated) is
+		// the sole decision-maker. Local regex, judge, and OPA are all
+		// skipped; a request AID cannot decide fails open. See
+		// inspectManagedAIDOnly.
+		return g.inspectManagedAIDOnly(
+			ctx,
+			direction,
+			managedAIDMessagesForInspection(direction, content, messages),
+		)
+	case strategy == "regex_judge":
+		return g.inspectRegexJudge(ctx, direction, content, messages, model, mode)
+	case strategy == "judge_first":
+		return g.inspectJudgeFirst(ctx, direction, content, messages, model, mode)
+	default:
+		return g.inspectRegexOnly(ctx, direction, content, messages, model, mode)
+	}
 }
 
 // inspectManagedAIDOnly is the managed_enterprise inspection path in which

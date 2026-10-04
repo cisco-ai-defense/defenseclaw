@@ -380,8 +380,8 @@ func TestWindowsWatchdogStatusSurfacesDegradedAsDownstreamWithoutMutation(t *tes
 		t.Fatal(statusErr)
 	}
 	if !strings.Contains(output, "last known state: degraded") ||
-		!strings.Contains(output, "downstream connector") ||
-		!strings.Contains(output, "restarting the watchdog is not a repair") {
+		!strings.Contains(output, "a required connector or protection subsystem is not running") ||
+		!strings.Contains(output, "restarting the watchdog does not fix it") {
 		t.Fatalf("degraded status output = %q", output)
 	}
 	pidAfter, err := os.ReadFile(pidPath)
@@ -420,7 +420,7 @@ func TestWindowsWatchdogStatusDoesNotTreatMissingStateAsHealthy(t *testing.T) {
 	if statusErr != nil {
 		t.Fatal(statusErr)
 	}
-	if !strings.Contains(output, "last known state: unavailable") || strings.Contains(output, "Last known state: healthy") {
+	if !strings.Contains(output, "none recorded yet") || strings.Contains(output, "Last known state: healthy") {
 		t.Fatalf("missing-state status output = %q", output)
 	}
 }
