@@ -324,14 +324,23 @@ your own Codex configuration does not change.
   to be open; see the CLI reference for the other commands that reach out.
 - **Behind an HTTP proxy.** DefenseClaw's hooks reach the gateway on
   127.0.0.1 directly and ignore `HTTP_PROXY` and `HTTPS_PROXY`. Codex's own
-  OTel exporter follows those variables, so its telemetry to the gateway, with
-  its OTLP credential, goes to the proxy unless the loopback is excluded. Set
-  `NO_PROXY=127.0.0.1,localhost` (and `no_proxy`) in the shell that starts
-  Codex. On Windows, set it once for your account with
-  `setx NO_PROXY 127.0.0.1,localhost` and open a new terminal, or run
-  `$env:NO_PROXY = "127.0.0.1,localhost"` in the PowerShell session before
-  you start Codex. Codex has no setting of its own that keeps its exporter off
-  the proxy, so DefenseClaw cannot do this for you.
+  OTel exporter follows those variables and has no proxy option of its own,
+  so without a loopback entry in `NO_PROXY` its telemetry to the gateway, with
+  its OTLP credential, would go to the proxy. On Linux and macOS, setup adds a
+  marked block to `~/.codex/.env` (`$CODEX_HOME/.env`), which Codex loads
+  when it starts. The block appends `127.0.0.1,localhost,::1` to the
+  `NO_PROXY` and `no_proxy` values you already have, so Codex sends its
+  telemetry straight to the gateway and everything else still goes through
+  your proxy. Codex sessions started before setup keep the old environment
+  until you restart them. Uninstall and
+  `defenseclaw guardrail disable --connector codex` remove only that block,
+  and the file too if setup created it. If a proxy variable is set and the
+  loopback is not covered, `defenseclaw doctor` shows a warning on the
+  **Codex telemetry proxy** row, with a one-line fix.
+  On Windows, set it once for your account with
+  `setx NO_PROXY 127.0.0.1,localhost,::1` and open a new terminal, or run
+  `$env:NO_PROXY = "127.0.0.1,localhost,::1"` in the PowerShell session
+  before you start Codex.
 
 ## Disable
 
