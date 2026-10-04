@@ -69,3 +69,15 @@ func TestWindowsEnterpriseSessionAndStandardUserWording(t *testing.T) {
 		t.Fatalf("answer leaks installer internals: %q", answer)
 	}
 }
+
+// GAP-2011: the administrator's command keeps the attestation the standard
+// user asked for, so running it makes security_complete true.
+func TestWindowsEnterpriseStandardUserMutationAnswerKeepsAttestation(t *testing.T) {
+	answer := windowsEnterpriseStandardUserMutationAnswer("repair", "--attest-claude-effective-policy")
+	if !strings.Contains(answer, "enterprise windows repair --profile standalone --attest-claude-effective-policy`. Nothing was changed.") {
+		t.Fatalf("answer = %q", answer)
+	}
+	if plain := windowsEnterpriseStandardUserMutationAnswer("repair"); !strings.Contains(plain, "repair --profile standalone`. Nothing") {
+		t.Fatalf("plain answer = %q", plain)
+	}
+}

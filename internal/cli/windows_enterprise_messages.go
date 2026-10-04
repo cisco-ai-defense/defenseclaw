@@ -104,10 +104,17 @@ func windowsEnterprisePurgedUserStateChange(entry string) string {
 
 // windowsEnterpriseStandardUserMutationAnswer answers a standard account's
 // `enterprise windows install`, `upgrade`, `repair` or `ensure`: only an
-// administrator can change the managed deployment (GAP-1961).
-func windowsEnterpriseStandardUserMutationAnswer(action string) string {
+// administrator can change the managed deployment (GAP-1961). The command it
+// hands on keeps the attestation flags the user asked for: without
+// --attest-claude-effective-policy the administrator's repair leaves
+// security_complete false (GAP-2011).
+func windowsEnterpriseStandardUserMutationAnswer(action string, flags ...string) string {
+	command := "enterprise windows " + action + " --profile standalone"
+	for _, flag := range flags {
+		command += " " + flag
+	}
 	return "a standard account cannot " + action + " the managed deployment. Ask your administrator, who runs it from an elevated PowerShell prompt with `& '" +
-		managedWindowsAdminCLI() + "' enterprise windows " + action + " --profile standalone`. Nothing was changed."
+		managedWindowsAdminCLI() + "' " + command + "`. Nothing was changed."
 }
 
 // windowsManagedStandardUserViewAnswer answers a standard account's
