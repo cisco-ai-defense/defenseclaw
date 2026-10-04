@@ -24,6 +24,7 @@ from defenseclaw.alert_semantics import (
     ALERT_ALL_SEVERITIES,
     ALERT_LEGACY_FINDING_ACTIONS,
     ALERT_NON_ALLOW_OUTCOMES,
+    copilot_hook_target,
 )
 from defenseclaw.hook_metrics import (
     POST_TOOL_DECISION,
@@ -397,7 +398,7 @@ def _v8_alert_event(row: V8EventHistoryRow, decisions: Mapping[str, str] | None 
         id=row.id,
         severity=severity,
         action=action,
-        target=target,
+        target=copilot_hook_target(target, row.connector),
         details=" ".join(detail_parts),
         timestamp=row.timestamp or datetime.now(timezone.utc),
         actor=row.actor or row.source,

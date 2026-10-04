@@ -43,3 +43,31 @@ ALERT_LEGACY_FINDING_ACTIONS = (
     "scan-finding",
     "tool-result-pii-alert",
 )
+
+# The VS Code Local harness runs Copilot hooks under Claude-style event names
+# (PreToolUse); the Copilot CLI sends the camelCase names Setup registers
+# (preToolUse). Alerts show the CLI name for both, so one hook point is not
+# split in two (GAP-2619). Mirrors copilotCLIHookFileLocalEvents in
+# internal/gateway/connector/hook_only_copilot_vscode.go.
+_COPILOT_LOCAL_TO_CLI_EVENT = {
+    "SessionStart": "sessionStart",
+    "UserPromptSubmit": "userPromptSubmitted",
+    "PreToolUse": "preToolUse",
+    "PostToolUse": "postToolUse",
+    "Stop": "agentStop",
+    "SubagentStop": "subagentStop",
+}
+
+
+def copilot_hook_target(target: str, connector: str = "") -> str:
+    """``copilot:PreToolUse`` -> ``copilot:preToolUse``; a bare ``PreToolUse``
+    becomes ``preToolUse`` when ``connector`` is copilot. Other targets are
+    returned unchanged."""
+    text = target or ""
+    head, sep, event = text.partition(":")
+    if sep and head.strip().lower() == "copilot":
+        cli = _COPILOT_LOCAL_TO_CLI_EVENT.get(event.strip())
+        return f"{head}:{cli}" if cli else text
+    if (connector or "").strip().lower() == "copilot":
+        return _COPILOT_LOCAL_TO_CLI_EVENT.get(text.strip(), text)
+    return text
