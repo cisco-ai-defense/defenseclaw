@@ -4961,6 +4961,67 @@ def _defenseclaw_hook_script_kind(path: str) -> str:
         return "broken" if ".defenseclaw" in path.replace("\\", "/").split("/") else ""
 
 
+# GAP-1550: Codex's native OTLP exporter follows HTTP(S)_PROXY for the
+# loopback gateway too. On Linux and macOS Codex Setup appends this marked
+# NO_PROXY block to CODEX_HOME/.env (internal/gateway/connector/codex_dotenv.go);
+# Codex loads that file at start.
+_CODEX_DOTENV_PROXY_MARKER = (
+    "# >>> DefenseClaw (managed; removed on uninstall): keep Codex telemetry to the local gateway off HTTP(S)_PROXY"
+)
+_TELEMETRY_PROXY_VARS = ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy")
+_LOOPBACK_NO_PROXY_FIX_POSIX = (
+    'export NO_PROXY="${NO_PROXY:+$NO_PROXY,}127.0.0.1,localhost,::1" '
+    'no_proxy="${no_proxy:+$no_proxy,}127.0.0.1,localhost,::1"'
+)
+_LOOPBACK_NO_PROXY_FIX_NT = "setx NO_PROXY 127.0.0.1,localhost,::1 (then open a new terminal)"
+
+
+def codex_telemetry_proxy_status(environ=None, *, os_name: str | None = None) -> tuple[str, str, str] | None:
+    """Say whether Codex's telemetry to the local gateway would use a proxy.
+
+    Returns ``(status, detail, remediation)``, or ``None`` when no proxy
+    variable is set. Codex (reqwest) reads NO_PROXY first, then no_proxy.
+    """
+    env = os.environ if environ is None else environ
+    os_name = os.name if os_name is None else os_name
+    proxy_var = next((key for key in _TELEMETRY_PROXY_VARS if str(env.get(key) or "").strip()), "")
+    if not proxy_var:
+        return None
+    dotenv_path = os.path.join(codex_home(), ".env")
+    try:
+        with open(dotenv_path, "rb") as fh:
+            dotenv = fh.read(1024 * 1024)
+    except OSError:
+        dotenv = b""
+    if _CODEX_DOTENV_PROXY_MARKER.encode() in dotenv:
+        return (
+            "pass",
+            f"{proxy_var} is set; Codex loads DefenseClaw's loopback NO_PROXY entry from {dotenv_path}, "
+            "so its telemetry to the gateway stays off the proxy",
+            "",
+        )
+    no_proxy = str(env.get("NO_PROXY") or "").strip() or str(env.get("no_proxy") or "").strip()
+    entries = {entry.strip().lower() for entry in no_proxy.split(",")}
+    if entries & {"*", "127.0.0.1", "localhost"}:
+        return ("pass", f"{proxy_var} is set and NO_PROXY in this shell lists the loopback", "")
+    fix = _LOOPBACK_NO_PROXY_FIX_NT if os_name == "nt" else _LOOPBACK_NO_PROXY_FIX_POSIX
+    detail = (
+        f"{proxy_var} is set and NO_PROXY does not list 127.0.0.1: Codex sends its telemetry for the "
+        "local gateway, with its OTLP credential, through the proxy"
+    )
+    if os_name != "nt":
+        detail += f" ({dotenv_path} has no DefenseClaw NO_PROXY entry; defenseclaw-gateway restart adds it)"
+    return ("warn", detail, f"in the shell that starts Codex run: {fix}")
+
+
+def _check_codex_telemetry_proxy(r: _DoctorResult) -> None:
+    status = codex_telemetry_proxy_status()
+    if status is None:
+        return
+    tag, detail, remediation = status
+    _emit(tag, "Codex telemetry proxy", detail, r=r, remediation=remediation)
+
+
 def _check_codex_otel_alignment(cfg, r: _DoctorResult) -> None:
     """Bind Codex's configured OTel tag to trusted live runtime status.
 
@@ -10306,6 +10367,7 @@ def doctor(
             _check_connector_hooks(cfg, _conn, r)
             if _conn == "codex":
                 _check_codex_otel_alignment(cfg, r)
+                _check_codex_telemetry_proxy(r)
             # Human-approval (HILT) support is per-connector: each connector
             # has a different native ask surface AND may carry its own hilt
             # override, so run it for EVERY active connector (tagged like the
