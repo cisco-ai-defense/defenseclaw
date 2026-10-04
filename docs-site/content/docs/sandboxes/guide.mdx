@@ -397,6 +397,11 @@ Arguments after `--` go to the harness:
 defenseclaw sandbox run claude -- --model sonnet
 ```
 
+An option whose value holds a space is not recorded with the run, so a later
+`sandbox connect` starts the harness with the option and no value; the run warns when
+this happens. Write the value attached (`-- --append-system-prompt="be brief"`) to have
+it recorded.
+
 `--prompt TEXT` (`-p`) runs the harness headless with one prompt and
 streams its output, so it works without a terminal too:
 
