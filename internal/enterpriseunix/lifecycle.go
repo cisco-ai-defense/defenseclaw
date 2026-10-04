@@ -137,6 +137,9 @@ type lifecycle struct {
 	// uninstall; keptKnown is false when the accounts record was unreadable.
 	keptPerUser []perUserKept
 	keptKnown   bool
+	// packageManaged is set when the deb/rpm owns the binaries, so the
+	// uninstall leaves them to the package manager.
+	packageManaged bool
 }
 
 // noteChange records one change a repair or ensure made to an installed
@@ -1679,9 +1682,22 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	// Per-user registrations go first, while the binaries they name still
 	// exist: each user's worker removes only DefenseClaw's own entries (and,
 	// on purge, that user's DefenseClaw state).
+	//
+	// Without a deployment record (after a default or --keep-state
+	// uninstall) a purge still finds the enrolled accounts when the
+	// enrollment record and the config it needs are there; otherwise it
+	// names the accounts whose per-user files stay (GAP-2632).
 	perUserLeft := false
-	if record != nil && exists(filepath.Join(env.P(env.Layout.BinDir), binGateway)) {
+	gatewayPresent := exists(filepath.Join(env.P(env.Layout.BinDir), binGateway))
+	enrollmentKept := exists(env.P(env.Layout.ManifestPath)) && exists(env.P(env.Layout.ConfigPath))
+	// Without a record, the package database says whether the deb/rpm owns
+	// the binaries: a purge deleted those of an installed rpm (GAP-2632).
+	l.packageManaged = env.GOOS == "linux" && (record != nil && record.Channel == ChannelPackage ||
+		record == nil && gatewayPresent && env.packageOwned(ctx, filepath.Join(env.Layout.BinDir, binGateway)))
+	if gatewayPresent && (record != nil || enrollmentKept) {
 		perUserLeft = l.removePerUserRegistrations(ctx)
+	} else if record == nil {
+		l.warnUnpurgedPerUser(ctx)
 	}
 	// DefenseClaw's vendor machine policy entries go next, while the hook
 	// binary they name still exists; administrator entries stay byte for
@@ -1716,7 +1732,7 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	}
 	// On Linux the deb/rpm removes its own files. A macOS pkg has no
 	// uninstaller, so the lifecycle removes the binaries and the receipt.
-	packageManaged := record != nil && record.Channel == ChannelPackage && env.GOOS == "linux"
+	packageManaged := l.packageManaged
 	paths := []string{}
 	if record != nil {
 		for path := range record.Files {
@@ -1880,7 +1896,7 @@ func (l *lifecycle) uninstallSummary(record *Deployment) []string {
 	env, r := l.env, l.result
 	layout := env.Layout
 	removed := "stopped and removed the DefenseClaw services, binaries and deployment record"
-	if record != nil && record.Channel == ChannelPackage && env.GOOS == "linux" {
+	if l.packageManaged {
 		removed = "stopped and removed the DefenseClaw services and deployment record (the package manager removes the package's files)"
 	}
 	lines := []string{removed}
