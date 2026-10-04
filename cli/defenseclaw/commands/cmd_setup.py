@@ -10185,6 +10185,12 @@ def _print_connector_next_steps(connector: str, *, os_name: str | None = None) -
             "    • Reload/restart every running OmniGent server; OmniGent does not expose "
             "loaded policy generation/module/config identity for live verification"
         )
+    if connector == "codex":
+        from defenseclaw.commands.cmd_doctor import codex_telemetry_proxy_status
+
+        proxy_status = codex_telemetry_proxy_status(os_name=os_name)
+        if proxy_status is not None and proxy_status[0] == "warn":
+            ux.echo(f"    • Keep Codex telemetry off your HTTP proxy: {proxy_status[2]}")
     if os_name == "nt":
         ux.echo("    • Watch decisions live: defenseclaw tui")
         ux.echo(f"    • Recent alerts for this connector: defenseclaw alerts --limit 25 --connector {connector}")
