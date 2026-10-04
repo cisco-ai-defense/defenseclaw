@@ -4,11 +4,13 @@
 package gateway
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
@@ -374,6 +376,84 @@ func hermesHomePath() string {
 func isHermesInstalled() bool {
 	_, err := exec.LookPath("hermes")
 	return err == nil
+}
+
+func resolveHermesBinary() string {
+	if p, err := exec.LookPath("hermes"); err == nil {
+		return p
+	}
+	home, _ := os.UserHomeDir()
+	for _, path := range []string{
+		filepath.Join(home, ".local", "bin", "hermes"),
+		"/usr/local/bin/hermes",
+		"/opt/homebrew/bin/hermes",
+	} {
+		if _, err := os.Stat(path); err == nil {
+			return path
+		}
+	}
+	return ""
+}
+
+const hermesServePort = 9119
+const hermesSessionToken = "myagent-defenseclaw-session-2026"
+
+// HermesServeManager manages a hermes serve child process.
+type HermesServeManager struct {
+	cmd     *exec.Cmd
+	cancel  context.CancelFunc
+	stopped bool
+}
+
+func startManagedHermesServe(ctx context.Context, binaryPath string, dataDir string) *HermesServeManager {
+	childCtx, cancel := context.WithCancel(ctx)
+
+	cmd := exec.CommandContext(childCtx, binaryPath, "serve",
+		"--port", fmt.Sprintf("%d", hermesServePort),
+		"--host", "127.0.0.1",
+	)
+	cmd.Env = append(os.Environ(),
+		fmt.Sprintf("HERMES_DASHBOARD_SESSION_TOKEN=%s", hermesSessionToken),
+	)
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Start(); err != nil {
+		fmt.Fprintf(os.Stderr, "[it-governed] hermes serve failed to start: %v\n", err)
+		cancel()
+		return nil
+	}
+
+	fmt.Fprintf(os.Stderr, "[it-governed] hermes serve started on port %d (pid %d)\n", hermesServePort, cmd.Process.Pid)
+
+	mgr := &HermesServeManager{cmd: cmd, cancel: cancel}
+
+	go func() {
+		err := cmd.Wait()
+		if !mgr.stopped {
+			fmt.Fprintf(os.Stderr, "[it-governed] hermes serve exited unexpectedly: %v\n", err)
+		}
+	}()
+
+	return mgr
+}
+
+func (m *HermesServeManager) Stop() {
+	m.stopped = true
+	if m.cancel != nil {
+		m.cancel()
+	}
+	if m.cmd != nil && m.cmd.Process != nil {
+		m.cmd.Process.Signal(os.Interrupt)
+		done := make(chan struct{})
+		go func() { m.cmd.Wait(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			m.cmd.Process.Kill()
+		}
+	}
+	fmt.Fprintf(os.Stderr, "[it-governed] hermes serve stopped\n")
 }
 
 const hermesRepoURL = "https://github.com/NousResearch/hermes-agent.git"

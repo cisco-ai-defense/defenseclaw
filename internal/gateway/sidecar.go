@@ -974,6 +974,21 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 		}
 	}
 
+	// IT Governed mode: start Hermes serve as a managed child process.
+	// Hermes handles agent execution (tool calling, planning, MCP tools).
+	// MyAgent.app connects to it via WebSocket on the fixed port.
+	if s.currentConfig().IsITGoverned() {
+		hermesCmd := resolveHermesBinary()
+		if hermesCmd != "" {
+			hermesMgr := startManagedHermesServe(runCtx, hermesCmd, s.currentConfig().DataDir)
+			if hermesMgr != nil {
+				defer hermesMgr.Stop()
+			}
+		} else {
+			fmt.Fprintf(os.Stderr, "[it-governed] hermes binary not found — MyAgent will not be available\n")
+		}
+	}
+
 	// Initialize OPA engine before goroutines so both the watcher and the
 	// API reload handler share the same instance.
 	if s.currentConfig().PolicyDir != "" {
