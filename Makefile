@@ -1015,6 +1015,7 @@ macos-app-test:
 	macos/DefenseClawMac/script/test_canonical_event_history.sh
 	macos/DefenseClawMac/script/test_connector_inventory_compatibility.sh
 	macos/DefenseClawMac/script/test_inspector_layout_policy.sh
+	macos/DefenseClawMac/script/test_main_window_lifecycle_contract.sh
 	$(MAKE) macos-app-build
 
 macos-app-release: macos-app-license-check
