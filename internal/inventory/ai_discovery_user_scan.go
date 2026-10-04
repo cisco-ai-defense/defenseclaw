@@ -380,10 +380,15 @@ func ValidateUserScanReport(report AIDiscoveryReport, catalog []AISignature) err
 		}
 		fields := []string{sig.Name, sig.Vendor, sig.Product, sig.Detector, sig.Version, sig.SupportedConnector, sig.State, sig.CoverageReason}
 		if sig.Runtime != nil {
-			if sig.Runtime.PID < 0 || sig.Runtime.PPID < 0 {
-				return errors.New("process ids must be non-negative")
+			if len(sig.Runtime.OtherInstances) > maxProcessOtherInstances {
+				return errors.New("signal lists are too long")
 			}
-			fields = append(fields, sig.Runtime.Comm, sig.Runtime.User)
+			for _, rt := range append([]ProcessRuntime{*sig.Runtime}, sig.Runtime.OtherInstances...) {
+				if rt.PID < 0 || rt.PPID < 0 {
+					return errors.New("process ids must be non-negative")
+				}
+				fields = append(fields, rt.Comm, rt.User)
+			}
 		}
 		if sig.Component != nil {
 			fields = append(fields, sig.Component.Ecosystem, sig.Component.Name, sig.Component.Version, sig.Component.Framework)
@@ -577,6 +582,12 @@ func (s *ContinuousDiscoveryService) attributeUserScanSignal(sig AISignal, uid, 
 	if sig.Runtime != nil {
 		runtimeInfo := *sig.Runtime
 		runtimeInfo.User = user
+		runtimeInfo.OtherInstances = nil
+		for _, other := range sig.Runtime.OtherInstances {
+			other.User = user
+			other.OtherInstances = nil
+			runtimeInfo.OtherInstances = append(runtimeInfo.OtherInstances, other)
+		}
 		sig.Runtime = &runtimeInfo
 	}
 	if sig.Model != nil {
