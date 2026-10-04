@@ -473,7 +473,13 @@ stops each enrolled user's per-user gateway and removes all of that user's
 `~/.defenseclaw`, the empty agent folders DefenseClaw created in that home,
 the per-user binaries and launcher links in `~/.local/bin`, and the
 DefenseClaw wheels earlier per-user installs left in `~/.cache/uv`, and the
-result names every user it purged or left alone. If uninstall reports an
+result names every user it purged or left alone. To delete the users' data,
+run `--purge` instead of the plain uninstall: the plain uninstall removes the
+enrollment record that a later `--purge` needs to find the enrolled accounts. A purge after it warns
+(`per_user_state_remaining`) and names each account whose files stay. To
+delete them, activate the deployment again with
+`ensure --from-package --config <file>` and run `uninstall --purge`, or
+delete those files by hand. If uninstall reports an
 error, it keeps the deployment record, the config and the state, so you can
 fix the cause and rerun it.
 See [Uninstall](/docs/enterprise/lifecycle#uninstall).
