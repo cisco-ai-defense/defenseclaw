@@ -379,6 +379,10 @@ These routes return `503` when no upstream client object is present and `502`
 when an attempted upstream RPC fails, including a disconnected client. They do
 not perform the CLI's filesystem quarantine/restore workflow.
 
+The gateway registers these routes and the three inventory routes below only
+when `openclaw` is an active connector, and never on a standalone enterprise
+deployment; elsewhere they return `404`.
+
 ### Inventory
 
 | Method | Path | Purpose |

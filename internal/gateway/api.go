@@ -32,6 +32,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -912,6 +913,19 @@ func (a *APIServer) runtimeConfigSnapshot() *config.Config {
 	return cloneConfig(a.scannerCfg)
 }
 
+// servesOpenClawRoutes reports whether Run registers the routes that proxy
+// the OpenClaw gateway RPCs (/skill/*, /plugin/*, /skills, /mcps,
+// /tools/catalog): only when openclaw is an active connector, and never on a
+// standalone enterprise deployment, which does not run OpenClaw. A connector
+// change restarts the gateway, so the route set is fixed for the process.
+func (a *APIServer) servesOpenClawRoutes() bool {
+	cfg := a.runtimeConfigSnapshot()
+	if cfg == nil || cfg.StandaloneEnterprise() {
+		return false
+	}
+	return slices.Contains(cfg.ActiveConnectors(), "openclaw")
+}
+
 // Run starts the HTTP server and blocks until ctx is cancelled.
 // listenWithRetry binds a TCP listener on addr, retrying briefly while the
 // address is still in use. It exists for the `setup --restart` window: the old
@@ -983,10 +997,16 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/health", a.handleHealth)
 	mux.HandleFunc("/status", a.handleStatus)
 	mux.HandleFunc("/api/v1/admin/shutdown", a.handleShutdown)
-	mux.HandleFunc("/skill/disable", a.handleSkillDisable)
-	mux.HandleFunc("/skill/enable", a.handleSkillEnable)
-	mux.HandleFunc("/plugin/disable", a.handlePluginDisable)
-	mux.HandleFunc("/plugin/enable", a.handlePluginEnable)
+	if a.servesOpenClawRoutes() {
+		// These routes proxy the OpenClaw gateway RPCs.
+		mux.HandleFunc("/skill/disable", a.handleSkillDisable)
+		mux.HandleFunc("/skill/enable", a.handleSkillEnable)
+		mux.HandleFunc("/plugin/disable", a.handlePluginDisable)
+		mux.HandleFunc("/plugin/enable", a.handlePluginEnable)
+		mux.HandleFunc("/skills", a.handleSkills)
+		mux.HandleFunc("/mcps", a.handleMCPs)
+		mux.HandleFunc("/tools/catalog", a.handleToolsCatalog)
+	}
 	mux.HandleFunc("/scan/result", a.handleScanResult)
 	mux.HandleFunc("/enforce/block", a.handleEnforceBlock)
 	mux.HandleFunc("/enforce/allow", a.handleEnforceAllow)
@@ -999,9 +1019,6 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/policy/evaluate/audit", a.handlePolicyEvaluateAudit)
 	mux.HandleFunc("/policy/evaluate/skill-actions", a.handlePolicyEvaluateSkillActions)
 	mux.HandleFunc("/policy/reload", a.handlePolicyReload)
-	mux.HandleFunc("/skills", a.handleSkills)
-	mux.HandleFunc("/mcps", a.handleMCPs)
-	mux.HandleFunc("/tools/catalog", a.handleToolsCatalog)
 	mux.HandleFunc("/v1/skill/scan", a.handleSkillScan)
 	mux.HandleFunc("/v1/plugin/scan", a.handlePluginScan)
 	mux.HandleFunc("/v1/mcp/scan", a.handleMCPScan)
@@ -2320,30 +2337,9 @@ func (a *APIServer) handlePolicyEvaluate(w http.ResponseWriter, r *http.Request)
 	a.writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "data": out})
 }
 
-// refuseOpenClawInventoryOnStandalone answers an OpenClaw-backed inventory
-// route on a managed standalone deployment, which runs no OpenClaw gateway:
-// /skills failed with 502 "gateway: not connected" and /mcps answered an
-// empty list (GAP-1142). There AI Discovery inventories each enrolled
-// account's skills and MCP servers instead.
-func (a *APIServer) refuseOpenClawInventoryOnStandalone(w http.ResponseWriter, route string) bool {
-	cfg := a.runtimeConfigSnapshot()
-	if cfg == nil || !cfg.StandaloneEnterprise() {
-		return false
-	}
-	a.writeJSON(w, http.StatusNotImplemented, map[string]string{
-		"error": route + " reads the OpenClaw gateway, which a managed enterprise deployment does not run; " +
-			"AI Discovery inventories each enrolled account's skills and MCP servers " +
-			"(defenseclaw-gateway enterprise linux|macos discovery)",
-	})
-	return true
-}
-
 func (a *APIServer) handleSkills(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	if a.refuseOpenClawInventoryOnStandalone(w, "/skills") {
 		return
 	}
 
@@ -2371,9 +2367,6 @@ func (a *APIServer) handleMCPs(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if a.refuseOpenClawInventoryOnStandalone(w, "/mcps") {
-		return
-	}
 
 	if a.scannerCfg == nil {
 		a.writeJSON(w, http.StatusOK, []config.MCPServerEntry{})
@@ -2392,9 +2385,6 @@ func (a *APIServer) handleMCPs(w http.ResponseWriter, r *http.Request) {
 func (a *APIServer) handleToolsCatalog(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	if a.refuseOpenClawInventoryOnStandalone(w, "/tools/catalog") {
 		return
 	}
 
