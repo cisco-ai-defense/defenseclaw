@@ -46,7 +46,7 @@ _HEX_DIGITS = frozenset("0123456789abcdef")
 # Private stage files a source install writes beside its targets. A stage
 # outlives its install only when the process was killed outright, or it was
 # written by an older installer, so the next install prunes ones a day old.
-_SOURCE_INSTALL_STAGE = re.compile(r"\.defenseclaw[A-Za-z0-9._-]*\.source-install-[0-9a-f]{32}")
+_SOURCE_INSTALL_STAGE = re.compile(r"\.\.?defenseclaw[A-Za-z0-9._-]*\.source-install-[0-9a-f]{32}")
 STALE_STAGE_SECONDS = 24 * 60 * 60
 CUSTODY_MARKER = b"DefenseClaw deterministic retirement custody v1\n"
 
@@ -1040,11 +1040,22 @@ def _entry_claim_matches(parent_fd: int, leaf: str, expected: ObjectIdentity) ->
     another hardlink to the object for the whole operation.  That retained
     claim makes inode recycling impossible.  All serialized/public identities
     use the four-field birth identity.
+
+    A device number is a per-boot handle: macOS renumbers APFS volumes on
+    every boot, so a claim recorded before a reboot names its volume by a
+    number that no longer exists. Inode and nanosecond birth time still name
+    the object, so they are accepted with the directory's current device,
+    never for an entry on another mount.
     """
 
     if len(expected) == 2:
         return _entry_identity(parent_fd, leaf) == expected
-    return _entry_strong_identity(parent_fd, leaf) == expected
+    current = _entry_strong_identity(parent_fd, leaf)
+    if current is None:
+        return False
+    if current == tuple(expected):
+        return True
+    return current[1:] == tuple(expected[1:]) and current[0] == os.fstat(parent_fd).st_dev
 
 
 def path_identity(path: Path) -> StrongIdentity:
@@ -1381,10 +1392,12 @@ def _ensure_retirement_intent(
         return False
     if not allow_create:
         return False
+    # A completed claim owns one durable intent and one retired name. Reserve
+    # both slots before creating either so the advertised bound is never
+    # exceeded by the normal second (rename) phase, freeing completed
+    # retirements first so a long-lived checkout never fills its custody.
+    _reclaim_completed_entry_slots(custody_fd, needed=2)
     with os.scandir(custody_fd) as entries:
-        # A completed claim owns one durable intent and one retired name.
-        # Reserve both slots before creating either so the advertised bound is
-        # never exceeded by the normal second (rename) phase.
         if sum(1 for _entry in entries) + 2 > MAX_CUSTODY_ENTRIES:
             raise PublishError("retirement custody reached its bounded entry limit")
     try:
@@ -1557,12 +1570,12 @@ def prune_retired_custody(custody_root: Path) -> None:
 
 
 def _reclaim_completed_entry_slots(custody_fd: int, *, needed: int) -> None:
-    """Free completed regular-file retirements so a later exact unlink can proceed.
+    """Free the oldest completed entry retirements until ``needed`` slots fit.
 
     Incomplete journal entries, foreign names, and the custody marker stay
     untouched. Source-install rebuilds share one bounded bin custody across
-    gateway and ACP publication; without reclaim, a long-lived checkout cannot
-    replace either binary once the bound is reached.
+    every published name; without reclaim, a long-lived checkout cannot
+    retire anything once the bound is reached.
     """
 
     if needed <= 0:
@@ -1931,7 +1944,9 @@ def _tree_has_safe_mounts_at(
         budget = {"nodes": 1, "bytes": 0}
         _validate_tree_mounts_fd(
             descriptor,
-            root_device=expected[0],
+            # The claim matched, so the tree root's current device is the
+            # recorded one, possibly renumbered since a reboot.
+            root_device=os.fstat(descriptor).st_dev,
             root_mount=root_mount,
             depth=1,
             budget=budget,
@@ -2397,15 +2412,12 @@ def unlink_exact(
     expected: ObjectIdentity,
     *,
     custody_root: Path | None = None,
-    reclaim_completed: bool = False,
 ) -> bool:
     """Durably retire only the exact claimed object and preserve replacements."""
 
     parent_fd = _open_directory(destination.parent, create=False)
     custody_fd = _open_custody_root(custody_root or _default_custody_root(destination), create=True)
     try:
-        if reclaim_completed:
-            _reclaim_completed_entry_slots(custody_fd, needed=2)
         return _unlink_exact_at(
             parent_fd,
             destination.name,
@@ -2423,18 +2435,22 @@ def _prune_stale_stages(
     directory: Path,
     custody_root: Path,
     *,
+    destination_name: str | None = None,
     uid: int | None = None,
     now: float | None = None,
 ) -> list[str]:
     """Remove this account's day-old source-install stage files in directory.
 
     Only regular files owned by this account are removed, through exact
-    custody retirement. Any other leftover is reported with the command that
-    removes it. Never raises; returns the reported paths.
+    custody retirement. Any other leftover is reported on one line with the
+    command that removes it; with ``destination_name`` only that name's stages
+    are reported, so each publication of one install reports a file once.
+    Never raises; returns the reported paths.
     """
 
     owner = os.geteuid() if uid is None else uid
     cutoff = (time.time() if now is None else now) - STALE_STAGE_SECONDS
+    own_prefix = None if destination_name is None else f".{destination_name}.source-install-"
     reported: list[str] = []
     try:
         with os.scandir(parent_fd) as entries:
@@ -2443,26 +2459,33 @@ def _prune_stale_stages(
         return reported
     for name in names:
         path = directory / name
+        foreign = False
+        remove = "rm -f"
         try:
             metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
             if metadata.st_mtime > cutoff:
                 continue
-            if metadata.st_uid == owner and stat.S_ISREG(metadata.st_mode):
+            if metadata.st_uid != owner:
+                foreign, reason = True, "another account owns it"
+            elif not stat.S_ISREG(metadata.st_mode):
+                reason = "it is not a regular file"
+                if stat.S_ISDIR(metadata.st_mode):
+                    remove = "rm -rf"
+            else:
                 identity = _entry_strong_identity(parent_fd, name)
-                if identity is not None and unlink_exact(
-                    path, identity, custody_root=custody_root, reclaim_completed=True
-                ):
+                if identity is None or unlink_exact(path, identity, custody_root=custody_root):
                     continue
-                if identity is None:
-                    continue
+                reason = "it changed while it was removed"
         except FileNotFoundError:
             continue
-        except (OSError, PublishError):
-            metadata = None
-        prefix = "" if metadata is not None and metadata.st_uid == owner else "sudo "
+        except (OSError, PublishError) as exc:
+            reason = str(exc)
+        if own_prefix is not None and not name.startswith(own_prefix):
+            continue
+        prefix = "sudo " if foreign else ""
         print(
-            f"source-install: left a temporary file from an earlier install: {path}; "
-            f"remove it with: {prefix}rm -f {shlex.quote(str(path))}",
+            f"source-install: kept a temporary file from an earlier install because {reason}; "
+            f"remove it with: {prefix}{remove} {shlex.quote(str(path))}",
             file=sys.stderr,
         )
         reported.append(str(path))
@@ -2496,7 +2519,7 @@ def publish_regular(
         source_stat = os.fstat(source_fd)
         parent_fd = _open_directory(destination.parent, create=False)
         try:
-            _prune_stale_stages(parent_fd, destination.parent, retirement_root)
+            _prune_stale_stages(parent_fd, destination.parent, retirement_root, destination_name=destination.name)
             stage = f".{destination.name}.source-install-{uuid.uuid4().hex}"
             stage_fd = os.open(
                 stage,
@@ -2596,12 +2619,7 @@ def publish_regular(
                     os.close(stage_fd)
                 if not succeeded and linked_fresh:
                     try:
-                        unlink_exact(
-                            destination,
-                            stage_claim,
-                            custody_root=retirement_root,
-                            reclaim_completed=True,
-                        )
+                        unlink_exact(destination, stage_claim, custody_root=retirement_root)
                     except (OSError, PublishError):
                         pass
                 if not retain_stage:
@@ -2609,12 +2627,7 @@ def publish_regular(
                     if current_stage is not None:
                         if current_stage not in safe_stage_identities:
                             raise PublishError(f"source-install staging changed and was preserved: {destination}")
-                        if not unlink_exact(
-                            destination.parent / stage,
-                            current_stage,
-                            custody_root=retirement_root,
-                            reclaim_completed=True,
-                        ):
+                        if not unlink_exact(destination.parent / stage, current_stage, custody_root=retirement_root):
                             raise PublishError(f"source-install staging changed and was preserved: {destination}")
                     if succeeded:
                         prune_retired_custody(retirement_root)
