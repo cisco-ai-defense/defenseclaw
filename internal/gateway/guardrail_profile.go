@@ -500,15 +500,25 @@ func localProfileSubject(account *osuser.User) profileSubject {
 	if strings.Contains(account.Username, `\`) {
 		subject.Principal = account.Username
 	}
-	if gids, err := account.GroupIds(); err == nil {
-		for _, gid := range gids {
-			subject.Groups = append(subject.Groups, gid)
-			if group, lookupErr := osuser.LookupGroupId(gid); lookupErr == nil && group.Name != "" {
-				subject.Groups = append(subject.Groups, group.Name)
-			}
+	subject.Groups = localAccountGroups(account)
+	return subject
+}
+
+// localAccountGroups lists an OS account's groups as each group's id
+// followed by its name, from the OS account database.
+func localAccountGroups(account *osuser.User) []string {
+	gids, err := account.GroupIds()
+	if err != nil {
+		return nil
+	}
+	var groups []string
+	for _, gid := range gids {
+		groups = append(groups, gid)
+		if group, lookupErr := osuser.LookupGroupId(gid); lookupErr == nil && group.Name != "" {
+			groups = append(groups, group.Name)
 		}
 	}
-	return subject
+	return groups
 }
 
 // match runs the ordered assignments: the first match wins; within one
