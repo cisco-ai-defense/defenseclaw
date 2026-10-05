@@ -204,13 +204,12 @@ def _any_llm_component_uses_default_key(cfg: Config) -> bool:
     if sc is not None:
         ss = getattr(sc, "skill_scanner", None)
         # Skill and plugin scan commands use their resolved model as the
-        # default-on signal. Surface the missing key in Setup/Keys before the
+        # default-on signal (use_llm is on by default, and a judge without a
+        # model never runs). Surface the missing key in Setup/Keys before the
         # operator encounters a scan-time skip warning.
         if ss is not None:
             skill_llm = cfg.resolve_llm("scanners.skill")
-            if (
-                getattr(ss, "use_llm", False) or skill_llm.model
-            ) and needs_key("scanners.skill"):
+            if skill_llm.model and needs_key("scanners.skill"):
                 return True
         plugin_llm = cfg.resolve_llm("scanners.plugin")
         if plugin_llm.model and needs_key("scanners.plugin"):
@@ -315,7 +314,9 @@ def _virustotal_key(cfg: Config) -> Requirement:
     if sc is None:
         return Requirement.NOT_USED
     ss = getattr(sc, "skill_scanner", None)
-    if ss is None or not getattr(ss, "use_virustotal", False):
+    from defenseclaw.scanner.settings import virustotal_enabled
+
+    if ss is None or not virustotal_enabled(ss):
         return Requirement.NOT_USED
     return Requirement.REQUIRED
 

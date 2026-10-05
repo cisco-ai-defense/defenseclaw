@@ -481,17 +481,12 @@ def task_status(
             return TaskStatus("off", "guardrail off")
         return TaskStatus("ok", f"fail {_text(cfg, 'guardrail.hook_fail_mode') or 'closed'}")
     if wizard in {SetupWizard.SKILL_SCANNER, SetupWizard.MCP_SCANNER}:
-        scanner = "skill_scanner" if wizard == SetupWizard.SKILL_SCANNER else "mcp_scanner"
         if problems:
             return TaskStatus("attention", "not configured")
-        if not _text(cfg, f"scanners.{scanner}.binary"):
-            return TaskStatus("off")
         if wizard == SetupWizard.SKILL_SCANNER:
-            # An empty policy is what "--policy none" saves; only an unset one
-            # is the permissive default, as the strictness form reads it
-            # (GAP-2562).
-            raw = _value(cfg, "scanners.skill_scanner.policy", "permissive")
-            policy = "permissive" if raw is None else (str(raw).strip() or "none")
+            # An unset or empty policy is the recommended quiet preset.
+            raw = _value(cfg, "scanners.skill_scanner.policy", "quiet")
+            policy = str(raw or "").strip() or "quiet"
             return TaskStatus("ok", f"{policy} · LLM" if _flag(cfg, "scanners.skill_scanner.use_llm") else policy)
         return TaskStatus("ok", _short(f"{_text(cfg, 'scanners.mcp_scanner.analyzers') or 'auto'} analyzers"))
     if wizard == SetupWizard.REDACTION:

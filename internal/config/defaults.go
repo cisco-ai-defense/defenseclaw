@@ -144,7 +144,8 @@ func DefaultConfig() *Config {
 		Scanners: ScannersConfig{
 			SkillScanner: SkillScannerConfig{
 				Binary:  "skill-scanner",
-				Policy:  "permissive",
+				UseLLM:  true,
+				Policy:  DefaultSkillScannerPolicy,
 				Lenient: true,
 			},
 			MCPScanner: MCPScannerConfig{

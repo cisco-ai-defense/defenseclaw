@@ -121,6 +121,13 @@ def test_runtime_and_security_contracts_are_direct_and_synchronized_with_uv_over
     )
     assert str(direct["cisco-ai-mcp-scanner"].marker) == 'python_version >= "3.11"'
     _assert_skill_scanner_wheels(document["project"]["dependencies"])
+    # The scanner version doctor reports is the pinned one.
+    from defenseclaw.scanner import settings
+
+    assert (settings.SKILL_SCANNER_VERSION, settings.MCP_SCANNER_VERSION) == (
+        SKILL_SCANNER_VERSION,
+        MCP_SCANNER_VERSION,
+    )
 
 
 def test_dependency_repair_cannot_lower_security_floors() -> None:

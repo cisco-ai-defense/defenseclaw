@@ -99,7 +99,7 @@ class ScannerCommandIntegrationTests(unittest.TestCase):
     def test_doctor_executes_resolved_managed_skill_launcher(self, _resolve_binary, _lexists, mock_run):
         mock_run.return_value = SimpleNamespace(
             returncode=0,
-            stdout="skill-scanner 2.0.4\n",
+            stdout="skill-scanner 2.2.1\n",
             stderr="",
         )
         cfg = SimpleNamespace(
@@ -117,14 +117,16 @@ class ScannerCommandIntegrationTests(unittest.TestCase):
             r"C:\managed\.venv\Scripts\skill-scanner.exe",
             result.checks[0]["detail"],
         )
-        self.assertIn("skill-scanner 2.0.4", result.checks[0]["detail"])
+        self.assertIn("cisco-ai-skill-scanner 2.2.1", result.checks[0]["detail"])
         mock_run.assert_called_once()
         self.assertEqual(
             mock_run.call_args.args[0],
             [r"C:\managed\.venv\Scripts\skill-scanner.exe", "--version"],
         )
-        self.assertEqual(result.checks[1]["status"], "fail")
-        self.assertIn("managed environment or on PATH", result.checks[1]["detail"])
+        # MCP scans run the SDK in this environment (defenseclaw mcp scan),
+        # so doctor checks its installed version, not a mcp-scanner launcher.
+        self.assertEqual(result.checks[1]["status"], "pass")
+        self.assertIn("cisco-ai-mcp-scanner 4.3.0", result.checks[1]["detail"])
 
     @patch("defenseclaw.commands.cmd_doctor.subprocess.run")
     @patch("defenseclaw.commands.cmd_doctor.os.path.expanduser", return_value="/Users/test/.local/bin/skill-scanner")

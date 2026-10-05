@@ -947,6 +947,18 @@ class TestSetupCommand(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Configure skill-scanner", result.output)
 
+    def test_setup_skill_scanner_without_a_judge_recommends_one(self):
+        """No llm: block -> static rules with the quiet policy, and the wizard
+        recommends a judge (never a rules-only setup)."""
+        from defenseclaw.commands.cmd_setup import setup
+
+        result = self.runner.invoke(
+            setup, ["skill-scanner", "--non-interactive", "--no-verify"], obj=self.app, catch_exceptions=False
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(self.app.cfg.scanners.skill_scanner.policy, "quiet")
+        self.assertIn("defenseclaw setup llm", result.output)
+
     def test_setup_non_interactive_flags(self):
         from defenseclaw.commands.cmd_setup import setup
 
@@ -1209,7 +1221,7 @@ class TestSetupSkillScannerCommonConfig(unittest.TestCase):
             catch_exceptions=False,
         )
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertTrue(self.app.cfg.scanners.skill_scanner.use_aidefense)
+        self.assertTrue(self.app.cfg.scanners.skill_scanner.analyzers.aidefense.enabled)
 
 
 class TestSetupMCPScannerCommonConfig(unittest.TestCase):
@@ -1256,6 +1268,19 @@ class TestSetupMCPScannerCommonConfig(unittest.TestCase):
         self.assertIn("llm.provider", result.output)
         self.assertIn("llm.model", result.output)
         self.assertNotIn("inspect_llm.provider", result.output)
+
+    def test_auto_inside_analyzers_keeps_yara(self):
+        """M29: "auto,llm" (what the old wizard saved) runs YARA and the LLM."""
+        from defenseclaw.commands.cmd_setup import setup
+
+        result = self.runner.invoke(
+            setup,
+            ["mcp-scanner", "--non-interactive", "--no-verify", "--analyzers", "auto,llm"],
+            obj=self.app,
+            catch_exceptions=False,
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(self.app.cfg.scanners.mcp_scanner.analyzers, "yara,llm")
 
     def test_mcp_scanner_no_old_llm_flags(self):
         """The old --endpoint-url, --llm-base-url, --llm-timeout, --llm-max-retries flags are gone."""
