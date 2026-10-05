@@ -35,14 +35,6 @@ const (
 	entraUserSIDPrefix    = "S-1-12-1-"
 )
 
-// Windows join types reported in DirectoryFacts.JoinType.
-const (
-	JoinTypeAD        = "ad"
-	JoinTypeEntra     = "entra"
-	JoinTypeHybrid    = "hybrid"
-	JoinTypeWorkgroup = "workgroup"
-)
-
 // windowsDirectoryReader is the OS state the Windows resolver reads.
 type windowsDirectoryReader interface {
 	// StringValue reads one REG_SZ value under HKLM.
@@ -61,9 +53,9 @@ type windowsDirectoryReader interface {
 	DNSDomain() string
 }
 
-// windowsJoinState is the machine's join state.
+// windowsJoinState is the machine's join state: the Entra tenant and the AD
+// domain it is joined to, either or both.
 type windowsJoinState struct {
-	JoinType  string
 	TenantID  string
 	ADDomain  string
 	DNSDomain string
@@ -91,16 +83,6 @@ func readWindowsJoinState(r windowsDirectoryReader) windowsJoinState {
 		state.ADDomain = strings.TrimSpace(domain)
 		state.DNSDomain = strings.TrimSpace(r.DNSDomain())
 	}
-	switch {
-	case adJoined && state.TenantID != "":
-		state.JoinType = JoinTypeHybrid
-	case adJoined:
-		state.JoinType = JoinTypeAD
-	case state.TenantID != "":
-		state.JoinType = JoinTypeEntra
-	default:
-		state.JoinType = JoinTypeWorkgroup
-	}
 	return state
 }
 
@@ -127,7 +109,6 @@ func resolveWindowsDirectoryFacts(
 		return DirectoryFacts{}
 	}
 	join := readWindowsJoinState(r)
-	facts.JoinType = join.JoinType
 	account, domain, ok := r.LookupAccount(sid)
 	upn, provider := identityStoreUPN(r, sid)
 	switch {

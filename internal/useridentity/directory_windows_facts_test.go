@@ -52,7 +52,7 @@ func TestResolveWindowsDirectoryFacts(t *testing.T) {
 
 	entra := resolveWindowsDirectoryFacts(reader, entraSID, nil, now)
 	if entra.Directory != DirectoryEntraID || entra.UPN != "alice@contoso.com" || entra.TenantID != tenant ||
-		entra.JoinType != JoinTypeHybrid || entra.Source != SourceWindowsIdentityStore || entra.Assurance != AssuranceVerified {
+		entra.Source != SourceWindowsIdentityStore || entra.Assurance != AssuranceVerified {
 		t.Fatalf("entra facts = %+v", entra)
 	}
 	hybrid := resolveWindowsDirectoryFacts(reader, adSID, func(string) string { return "ignored@corp.example.com" }, now)

@@ -106,9 +106,6 @@ type DirectoryFacts struct {
 	// TenantID is the cloud tenant (for example the Entra tenant GUID)
 	// from the OS join state (defenseclaw.user.tenant_id).
 	TenantID string `json:"tenant_id,omitempty"`
-	// JoinType is the machine join state the facts came from: "ad",
-	// "entra", "hybrid", "workgroup" or empty when not applicable.
-	JoinType string `json:"join_type,omitempty"`
 	// Groups are the account's group identifiers (SIDs on Windows, group
 	// names or gids elsewhere). Telemetry carries only their count.
 	Groups []string `json:"groups,omitempty"`

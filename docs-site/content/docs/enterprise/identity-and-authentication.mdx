@@ -52,7 +52,7 @@ Each cell names what DefenseClaw reads and the assurance it records.
 | Local account | uid, name and groups from NSS `files` (verified) | SID and name from `LookupAccountSid` (verified) | Reported as `local` from Open Directory, read by the root enumerator (verified) |
 | LDAP or SSSD | The NSS backend that owns the uid (`sss` or `ldap`), the domain from the fully qualified name and the groups from `initgroups` (verified). The guardian adds the UPN from SSSD InfoPipe and the directory type from `realm list` (verified) | Not applicable | An LDAP-bound account's directory from `dscl /Search` (verified) |
 | Active Directory over Kerberos | SSSD or winbind: principal, domain and groups (verified). Without InfoPipe the principal is `account@REALM`. The Kerberos principal in the session's credential cache (claimed) | Account and domain from `LookupAccountSid`, the AD UPN from `TranslateNameW` in the background (verified). Groups from the SYSTEM enumerator's token-group cache (verified). The logon session's UPN and Kerberos principal (claimed) | AD-bound Mac: the Kerberos principal from the `dscl` AuthenticationAuthority and the domain from `dsconfigad -show` (verified) |
-| Entra ID | With the himmelblau or `aad` NSS module, reported as `entra_id` (verified) | Entra-joined or hybrid-joined: the UPN and provider from the identity store cache, the tenant and join type from the join state (verified). Entra group SIDs (`S-1-12-1-...`) | Platform SSO with Company Portal: the device's SSO provider from `app-sso platform -s` (verified). The user's Platform SSO login stays claimed and is not read |
+| Entra ID | With the himmelblau or `aad` NSS module, reported as `entra_id` (verified) | Entra-joined or hybrid-joined: the UPN and provider from the identity store cache, the tenant from the join state (verified). Entra group SIDs (`S-1-12-1-...`) | Platform SSO with Company Portal: the device's SSO provider from `app-sso platform -s` (verified). The user's Platform SSO login stays claimed and is not read |
 | Okta | No Okta NSS module is recognized; the account appears as the AD or LDAP account Okta syncs to | As the AD account Okta syncs to | Platform SSO or Okta Device Access with Okta Verify: the device's SSO provider (verified). As AD or LDAP when synced |
 
 Who resolves the verified facts depends on the install:
@@ -60,8 +60,7 @@ Who resolves the verified facts depends on the install:
 - **Linux:** the gateway resolves the NSS facts itself, on any install. The
   root guardian adds InfoPipe and `realm list` facts on the standalone
   enterprise profile only.
-- **Windows:** the gateway resolves the account, UPN, tenant and join type
-  itself. Groups come from the SYSTEM enumerator, on the standalone
+- **Windows:** the gateway resolves the account, UPN and tenant itself. Groups come from the SYSTEM enumerator, on the standalone
   enterprise profile only.
 - **macOS:** every verified fact comes from the root enumerator, so a
   per-user install has none. Its records carry only claimed facts.
