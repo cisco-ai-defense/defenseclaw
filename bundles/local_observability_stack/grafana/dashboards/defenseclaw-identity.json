@@ -1,0 +1,1098 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "description": "Who runs agents and under which guardrail profile: users by directory and domain, verified vs claimed principals, SSH vs local sessions, agent identities (agt-) and their sessions (ais-), profile selection with match reasons and policy digests, and identity.observed group counts. Identity here is attribution read from the operating system, not authentication.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "links": [
+    {
+      "title": "Overview",
+      "type": "link",
+      "url": "/d/defenseclaw-overview?${__url_time_range}&${user:queryparam}",
+      "icon": "external link",
+      "targetBlank": false
+    },
+    {
+      "title": "Agent identity",
+      "type": "link",
+      "url": "/d/defenseclaw-agent-identity?${__url_time_range}&${user:queryparam}",
+      "icon": "external link",
+      "targetBlank": false
+    },
+    {
+      "title": "Policy decisions",
+      "type": "link",
+      "url": "/d/defenseclaw-policy-decisions?${__url_time_range}&${user:queryparam}",
+      "icon": "external link",
+      "targetBlank": false
+    },
+    {
+      "title": "Blocked Events & Analysis",
+      "type": "link",
+      "url": "/d/defenseclaw-blocked-events?${__url_time_range}&${user:queryparam}",
+      "icon": "external link",
+      "targetBlank": false
+    },
+    {
+      "title": "AI discovery",
+      "type": "link",
+      "url": "/d/defenseclaw-ai-discovery?${__url_time_range}&${user:queryparam}",
+      "icon": "external link",
+      "targetBlank": false
+    }
+  ],
+  "liveNow": false,
+  "panels": [
+    {
+      "type": "row",
+      "title": "Who runs agents",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "title": "Users observed",
+      "description": "Distinct users (user.id) with an `identity.observed` record in the selected range. The gateway writes one per user per cache TTL.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 1,
+        "w": 6,
+        "h": 4
+      },
+      "targets": [
+        {
+          "expr": "count(sum by (user_id) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | body_user_id=~\"$user\" | event_name=\"identity.observed\" | label_format user_id=\"{{.body_user_id}}\" | user_id!=\"\" [$__range]))) or vector(0)",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "refId": "A",
+          "queryType": "instant",
+          "instant": true
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "0",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Agent identities (agt-)",
+      "description": "Distinct stable agent identities (`defenseclaw.agent.identity.id`, `agt-` + 16 hex) on hook decisions and tool invocations in the range: one per harness install, user and machine.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 6,
+        "y": 1,
+        "w": 6,
+        "h": 4
+      },
+      "targets": [
+        {
+          "expr": "count(sum by (agent_identity) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | body_user_id=~\"$user\" | event_name=~\"hook_decision|tool[.]invocation[.].*\" | connector=~\"$connector\" | body_defenseclaw_agent_identity_id=~\"agt-.+\" | label_format agent_identity=\"{{.body_defenseclaw_agent_identity_id}}\" [$__range]))) or vector(0)",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "refId": "A",
+          "queryType": "instant",
+          "instant": true
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "0",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Agent sessions (ais-)",
+      "description": "Distinct agent sessions (`defenseclaw.agent.instance_id`) that belong to an agent identity in the range.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 1,
+        "w": 6,
+        "h": 4
+      },
+      "targets": [
+        {
+          "expr": "count(sum by (agent_session) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | body_user_id=~\"$user\" | event_name=~\"hook_decision|tool[.]invocation[.].*\" | connector=~\"$connector\" | body_defenseclaw_agent_identity_id=~\"agt-.+\" | body_defenseclaw_agent_instance_id!=\"\" | label_format agent_session=\"{{.body_defenseclaw_agent_instance_id}}\" [$__range]))) or vector(0)",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "refId": "A",
+          "queryType": "instant",
+          "instant": true
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "0",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Verified principal share",
+      "description": "Share of `identity.observed` records whose principal the gateway resolved itself for a kernel- or credential-verified uid or SID (`verified`), against principals only the hook reported (`claimed`). Only verified principals can select a guardrail profile.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 18,
+        "y": 1,
+        "w": 6,
+        "h": 4
+      },
+      "targets": [
+        {
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | body_user_id=~\"$user\" | event_name=\"identity.observed\" | body_defenseclaw_user_principal_assurance=\"verified\" [$__range])) / sum(count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | body_user_id=~\"$user\" | event_name=\"identity.observed\" | body_defenseclaw_user_principal_assurance=~\"verified|claimed\" [$__range]))",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "refId": "A",
+          "queryType": "instant",
+          "instant": true
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "noValue": "No principals in range",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "row",
+      "title": "Directory and sessions",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 5,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "type": "table",
+      "title": "Users by directory and domain",
+      "description": "Distinct users per directory (local, ldap, active_directory, entra_id, okta, other) and domain, from `identity.observed`.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 6,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "count by (directory, domain) (sum by (directory, domain, user_id) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | body_user_id=~\"$user\" | event_name=\"identity.observed\" | body_user_id!=\"\" | label_format directory=\"{{if .body_defenseclaw_user_directory}}{{.body_defenseclaw_user_directory}}{{else}}unreported{{end}}\", domain=\"{{if .body_defenseclaw_user_domain}}{{.body_defenseclaw_user_domain}}{{else}}unreported{{end}}\", user_id=\"{{.body_user_id}}\" [$__range])))",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "refId": "A",
+          "queryType": "instant",
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "labelsToFields",
+          "options": {
+            "mode": "columns"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "indexByName": {
+              "directory": 0,
+              "domain": 1,
+              "Value": 2
+            },
+            "renameByName": {
+              "directory": "Directory",
+              "domain": "Domain",
+              "Value": "Users",
+              "Value #A": "Users"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No records in range",
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "sortBy": [
+          {
+            "displayName": "Users",
+            "desc": true
+          }
+        ]
+      }
+    },
+    {
+      "type": "piechart",
+      "title": "Verified vs claimed principals",
+      "description": "Distinct users by principal assurance. `claimed` means the hook reported the principal and the gateway could not confirm it.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 6,
+        "w": 6,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "count by (assurance) (sum by (assurance, user_id) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | body_user_id=~\"$user\" | event_name=\"identity.observed\" | body_user_id!=\"\" | label_format assurance=\"{{if .body_defenseclaw_user_principal_assurance}}{{.body_defenseclaw_user_principal_assurance}}{{else}}unreported{{end}}\", user_id=\"{{.body_user_id}}\" [$__range])))",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "refId": "A",
+          "queryType": "instant",
+          "instant": true,
+          "legendFormat": "{{assurance}}"
+        }
+      ],
+      "options": {
+        "pieType": "donut",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "values": false
+        },
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "values": [
+            "value",
+            "percent"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No principals in range",
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "piechart",
+      "title": "SSH vs local sessions",
+      "description": "Distinct agent sessions by the login session they ran in (`defenseclaw.session.kind`: local, ssh, rdp or console).",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 18,
+        "y": 6,
+        "w": 6,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "count by (session_kind) (sum by (session_kind, agent_session) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | body_user_id=~\"$user\" | event_name=~\"hook_decision|tool[.]invocation[.].*\" | connector=~\"$connector\" | body_defenseclaw_agent_instance_id!=\"\" | label_format session_kind=\"{{if .body_defenseclaw_session_kind}}{{.body_defenseclaw_session_kind}}{{else}}unreported{{end}}\", agent_session=\"{{.body_defenseclaw_agent_instance_id}}\" [$__range])))",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "refId": "A",
+          "queryType": "instant",
+          "instant": true,
+          "legendFormat": "{{session_kind}}"
+        }
+      ],
+      "options": {
+        "pieType": "donut",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "values": false
+        },
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "values": [
+            "value",
+            "percent"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No sessions in range",
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "row",
+      "title": "Agents",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 14,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "type": "table",
+      "title": "Agents per user (agt- ids)",
+      "description": "Distinct agent identities each user ran in the range. Principal is the directory name (for example alice@CORP.EXAMPLE.COM) when the gateway resolved one; redaction profiles may replace it.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 15,
+        "w": 12,
+        "h": 9
+      },
+      "targets": [
+        {
+          "expr": "count by (user_id, user_name, principal) (sum by (user_id, user_name, principal, agent_identity) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | body_user_id=~\"$user\" | event_name=~\"hook_decision|tool[.]invocation[.].*\" | connector=~\"$connector\" | body_defenseclaw_agent_identity_id=~\"agt-.+\" | label_format user_id=\"{{.body_user_id}}\", user_name=\"{{.body_defenseclaw_user_name}}\", principal=\"{{.body_defenseclaw_user_principal}}\", agent_identity=\"{{.body_defenseclaw_agent_identity_id}}\" [$__range])))",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "refId": "A",
+          "queryType": "instant",
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "labelsToFields",
+          "options": {
+            "mode": "columns"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "indexByName": {
+              "user_name": 0,
+              "principal": 1,
+              "user_id": 2,
+              "Value": 3
+            },
+            "renameByName": {
+              "user_name": "User",
+              "principal": "Principal",
+              "user_id": "User ID",
+              "Value": "Agents",
+              "Value #A": "Agents"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No records in range",
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "sortBy": [
+          {
+            "displayName": "Agents",
+            "desc": true
+          }
+        ]
+      }
+    },
+    {
+      "type": "table",
+      "title": "Sessions per agent",
+      "description": "Distinct sessions (`ais-`) per agent identity (`agt-`) in the range. The agent ID is stable across gateway restarts; a new session ID marks a new chat.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 15,
+        "w": 12,
+        "h": 9
+      },
+      "targets": [
+        {
+          "expr": "count by (agent_identity, connector, user_name) (sum by (agent_identity, connector, user_name, agent_session) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | body_user_id=~\"$user\" | event_name=~\"hook_decision|tool[.]invocation[.].*\" | connector=~\"$connector\" | body_defenseclaw_agent_identity_id=~\"agt-.+\" | body_defenseclaw_agent_instance_id!=\"\" | label_format agent_identity=\"{{.body_defenseclaw_agent_identity_id}}\", user_name=\"{{.body_defenseclaw_user_name}}\", agent_session=\"{{.body_defenseclaw_agent_instance_id}}\" [$__range])))",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "refId": "A",
+          "queryType": "instant",
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "labelsToFields",
+          "options": {
+            "mode": "columns"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "indexByName": {
+              "agent_identity": 0,
+              "connector": 1,
+              "user_name": 2,
+              "Value": 3
+            },
+            "renameByName": {
+              "agent_identity": "Agent identity",
+              "connector": "Connector",
+              "user_name": "User",
+              "Value": "Sessions",
+              "Value #A": "Sessions"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No records in range",
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "sortBy": [
+          {
+            "displayName": "Sessions",
+            "desc": true
+          }
+        ]
+      }
+    },
+    {
+      "type": "row",
+      "title": "Guardrail profiles",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 24,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Decisions by guardrail profile and match reason",
+      "description": "Hook decisions per selected guardrail profile and the reason it was selected (agent, user, group, connector, default, default_unverified, default_lookup_failed). `none` means no profiles are configured.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 25,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum by (profile, profile_match) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | body_user_id=~\"$user\" | event_name=\"hook_decision\" | connector=~\"$connector\" | label_format profile=\"{{if .body_defenseclaw_guardrail_profile_name}}{{.body_defenseclaw_guardrail_profile_name}}{{else}}none{{end}}\", profile_match=\"{{if .body_defenseclaw_guardrail_profile_match}}{{.body_defenseclaw_guardrail_profile_match}}{{else}}unreported{{end}}\" [$__auto]))",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "refId": "A",
+          "queryType": "range",
+          "legendFormat": "{{profile}} · {{profile_match}}"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "sum"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No records in range",
+          "custom": {
+            "drawStyle": "bars",
+            "lineWidth": 1,
+            "fillOpacity": 80,
+            "showPoints": "auto",
+            "stacking": {
+              "mode": "normal"
+            }
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "table",
+      "title": "Profile selection audit",
+      "description": "Hook decisions in the range per profile, match reason, matched group and action. Use it to confirm which group put a user in a profile.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 25,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum by (profile, profile_match, matched_group, action) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | body_user_id=~\"$user\" | event_name=\"hook_decision\" | connector=~\"$connector\" | label_format profile=\"{{if .body_defenseclaw_guardrail_profile_name}}{{.body_defenseclaw_guardrail_profile_name}}{{else}}none{{end}}\", profile_match=\"{{if .body_defenseclaw_guardrail_profile_match}}{{.body_defenseclaw_guardrail_profile_match}}{{else}}unreported{{end}}\", matched_group=\"{{.body_defenseclaw_guardrail_profile_matched_group}}\", action=\"{{.body_defenseclaw_guardrail_effective_action}}\" [$__range]))",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "refId": "A",
+          "queryType": "instant",
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "labelsToFields",
+          "options": {
+            "mode": "columns"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "indexByName": {
+              "profile": 0,
+              "profile_match": 1,
+              "matched_group": 2,
+              "action": 3,
+              "Value": 4
+            },
+            "renameByName": {
+              "profile": "Profile",
+              "profile_match": "Match",
+              "matched_group": "Matched group",
+              "action": "Action",
+              "Value": "Decisions",
+              "Value #A": "Decisions"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No records in range",
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "sortBy": [
+          {
+            "displayName": "Decisions",
+            "desc": true
+          }
+        ]
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Profile digest timeline",
+      "description": "Hook decisions per profile and policy digest over time. A new digest series marks the reload where that profile's effective policy changed; `defenseclaw guardrail profile show <name>` prints the current digest.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 33,
+        "w": 24,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum by (profile, digest) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | body_user_id=~\"$user\" | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_guardrail_profile_digest!=\"\" | label_format profile=\"{{.body_defenseclaw_guardrail_profile_name}}\", digest=\"{{.body_defenseclaw_guardrail_profile_digest}}\" [$__auto]))",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "refId": "A",
+          "queryType": "range",
+          "legendFormat": "{{profile}} {{digest}}"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "sum"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No records in range",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "auto",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "row",
+      "title": "identity.observed",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 41,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "type": "table",
+      "title": "Directory group counts",
+      "description": "The largest group count per user from `identity.observed` in the range. The record carries counts only, never group names.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 42,
+        "w": 24,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "max by (user_id, user_name, directory, domain, source, assurance) (max_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | body_user_id=~\"$user\" | event_name=\"identity.observed\" | label_format user_id=\"{{.body_user_id}}\", user_name=\"{{.body_defenseclaw_user_name}}\", directory=\"{{if .body_defenseclaw_user_directory}}{{.body_defenseclaw_user_directory}}{{else}}unreported{{end}}\", domain=\"{{if .body_defenseclaw_user_domain}}{{.body_defenseclaw_user_domain}}{{else}}unreported{{end}}\", source=\"{{if .body_defenseclaw_user_identity_source}}{{.body_defenseclaw_user_identity_source}}{{else}}unreported{{end}}\", assurance=\"{{if .body_defenseclaw_user_principal_assurance}}{{.body_defenseclaw_user_principal_assurance}}{{else}}unreported{{end}}\" | unwrap body_defenseclaw_user_group_count | __error__=\"\" [$__range]))",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "refId": "A",
+          "queryType": "instant",
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "labelsToFields",
+          "options": {
+            "mode": "columns"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "indexByName": {
+              "user_name": 0,
+              "user_id": 1,
+              "directory": 2,
+              "domain": 3,
+              "source": 4,
+              "assurance": 5,
+              "Value": 6
+            },
+            "renameByName": {
+              "user_name": "User",
+              "user_id": "User ID",
+              "directory": "Directory",
+              "domain": "Domain",
+              "source": "Source",
+              "assurance": "Assurance",
+              "Value": "Groups",
+              "Value #A": "Groups"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No records in range",
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "sortBy": [
+          {
+            "displayName": "Groups",
+            "desc": true
+          }
+        ]
+      }
+    },
+    {
+      "type": "logs",
+      "title": "Recent identity.observed records",
+      "description": "Raw `identity.observed` records, newest first.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 50,
+        "w": 24,
+        "h": 10
+      },
+      "targets": [
+        {
+          "expr": "{service_name=\"defenseclaw\"} | json | __error__=\"\" | body_user_id=~\"$user\" | event_name=\"identity.observed\"",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "refId": "A",
+          "queryType": "range"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "sortOrder": "Descending",
+        "enableLogDetails": true
+      }
+    }
+  ],
+  "preload": false,
+  "refresh": "1m",
+  "schemaVersion": 39,
+  "tags": [
+    "defenseclaw",
+    "identity",
+    "users",
+    "guardrail-profiles"
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "connector",
+        "label": "Connector",
+        "type": "custom",
+        "query": "openclaw,codex,claudecode,zeptoclaw,hermes,cursor,devin,copilot,openhands,antigravity,opencode,amp,omnigent",
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".+",
+        "current": {
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ],
+          "selected": true
+        },
+        "options": [
+          {
+            "text": "All",
+            "value": "$__all",
+            "selected": true
+          },
+          {
+            "text": "openclaw",
+            "value": "openclaw"
+          },
+          {
+            "text": "codex",
+            "value": "codex"
+          },
+          {
+            "text": "claudecode",
+            "value": "claudecode"
+          },
+          {
+            "text": "zeptoclaw",
+            "value": "zeptoclaw"
+          },
+          {
+            "text": "hermes",
+            "value": "hermes"
+          },
+          {
+            "text": "cursor",
+            "value": "cursor"
+          },
+          {
+            "text": "devin",
+            "value": "devin"
+          },
+          {
+            "text": "copilot",
+            "value": "copilot"
+          },
+          {
+            "text": "openhands",
+            "value": "openhands"
+          },
+          {
+            "text": "antigravity",
+            "value": "antigravity"
+          },
+          {
+            "text": "opencode",
+            "value": "opencode"
+          },
+          {
+            "text": "amp",
+            "value": "amp"
+          },
+          {
+            "text": "omnigent",
+            "value": "omnigent"
+          }
+        ],
+        "skipUrlSync": false,
+        "hide": 0
+      },
+      {
+        "name": "user",
+        "label": "User ID regex",
+        "description": "Regex over user.id (uid or SID).",
+        "type": "textbox",
+        "query": ".*",
+        "current": {
+          "text": ".*",
+          "value": ".*",
+          "selected": true
+        },
+        "options": [
+          {
+            "text": ".*",
+            "value": ".*",
+            "selected": true
+          }
+        ],
+        "hide": 0
+      }
+    ]
+  },
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "",
+  "title": "DefenseClaw — Identity & Users",
+  "uid": "defenseclaw-identity",
+  "version": 1,
+  "weekStart": ""
+}
