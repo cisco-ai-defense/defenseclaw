@@ -17573,11 +17573,35 @@ function Get-DefenseClawLifecycleSources {
         if ([string]::IsNullOrWhiteSpace([string]$entry[1])) {
             continue
         }
-        $sources[[string]$entry[0]] = Get-DefenseClawSourceDescriptor `
-            -Path ([string]$entry[1]) `
-            -Label ([string]$entry[2]) `
-            -Authenticode:([bool]$entry[3]) `
-            -AllowUnsigned:$AllowUnsigned
+        $name = [string]$entry[0]
+        try {
+            $sources[$name] = Get-DefenseClawSourceDescriptor `
+                -Path ([string]$entry[1]) `
+                -Label ([string]$entry[2]) `
+                -Authenticode:([bool]$entry[3]) `
+                -AllowUnsigned:$AllowUnsigned
+        }
+        catch {
+            # provider_library is deliberately optional at install time.
+            # A full XDR deployment installs Cloud Management last, and
+            # a CM upgrade can race with DefenseClaw install: discovery
+            # at Setup-EXE preflight walks the newest CM\<ver>\CMID\
+            # <ver>\<arch>\cmidapi.dll but the file may have moved by
+            # the time this validation runs. The broker already
+            # discovers the library at runtime via the deferred
+            # provider pattern (see cmd/defenseclaw-cmid-broker/
+            # main_windows.go), so dropping the stale discovery here is
+            # safe - it defers the lookup to the broker's runtime walk
+            # and the CMID lane activates when the file lands.
+            if ($name -eq 'provider_library') {
+                Microsoft.PowerShell.Utility\Write-Warning (
+                    'managed credential provider library at {0} failed preflight ({1}); deferring to broker-time discovery' `
+                        -f ([string]$entry[1]), $_.Exception.Message
+                )
+                continue
+            }
+            throw
+        }
     }
     return $sources
 }
