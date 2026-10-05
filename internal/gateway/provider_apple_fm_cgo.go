@@ -21,7 +21,6 @@ package gateway
 import (
 	"context"
 	"fmt"
-	"sync"
 
 	fm "github.com/blacktop/go-foundationmodels"
 )
@@ -30,11 +29,6 @@ func init() {
 	appleFMAvailable = true
 	appleFMComplete = completeWithFoundationModels
 }
-
-// Sessions are created per call and serialized. The bridge keeps process
-// global tool state, and the judge runs injection, PII, and exfil checks
-// at the same time.
-var appleFMSessionMu sync.Mutex
 
 func completeWithFoundationModels(ctx context.Context, call appleFMCall) (string, error) {
 	if err := ctx.Err(); err != nil {
@@ -47,10 +41,11 @@ func completeWithFoundationModels(ctx context.Context, call appleFMCall) (string
 		return "", fmt.Errorf("apple-fm: messages is required")
 	}
 
-	appleFMSessionMu.Lock()
-	defer appleFMSessionMu.Unlock()
-
+	if err := acquireAppleFMSession(ctx); err != nil {
+		return "", err
+	}
 	if err := ctx.Err(); err != nil {
+		releaseAppleFMSession()
 		return "", err
 	}
 	var session *fm.Session
@@ -60,20 +55,37 @@ func completeWithFoundationModels(ctx context.Context, call appleFMCall) (string
 		session = fm.NewSession()
 	}
 	if session == nil {
+		releaseAppleFMSession()
 		return "", fmt.Errorf("apple-fm: Foundation Models session was not created")
 	}
-	defer session.Release()
 
-	// Respond ignores GenerationOptions and calls RespondSync. Requests
-	// that set max_tokens or temperature are rejected before this point.
-	text := session.Respond(call.prompt, nil)
-	if text == "" {
-		return "", fmt.Errorf("apple-fm: Foundation Models returned an empty response")
+	// RespondSync does not take a context and cannot be cancelled.
+	// The caller stops waiting when ctx ends. This goroutine keeps the
+	// session slot until the native call returns, then releases it, so
+	// a cancelled waiter is not stuck behind the lock.
+	type fmResult struct{ text string }
+	done := make(chan fmResult, 1)
+	go func() {
+		var text string
+		func() {
+			defer session.Release()
+			text = session.Respond(call.prompt, nil)
+		}()
+		releaseAppleFMSession()
+		done <- fmResult{text: text}
+	}()
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case res := <-done:
+		if res.text == "" {
+			return "", fmt.Errorf("apple-fm: Foundation Models returned an empty response")
+		}
+		if err := appleFMResponseError(res.text); err != nil {
+			return "", err
+		}
+		return res.text, nil
 	}
-	if err := appleFMResponseError(text); err != nil {
-		return "", err
-	}
-	return text, nil
 }
 
 func appleFMAvailabilityError() error {

@@ -57,6 +57,28 @@ var appleFMComplete = func(context.Context, appleFMCall) (string, error) {
 	return "", errAppleFMNotLinked
 }
 
+// appleFMSessionSlot serializes on-device sessions. The bridge keeps
+// process-global state, so only one Respond runs at a time. The slot is
+// a channel so a cancelled request can leave the queue; the native call
+// itself has no context and keeps the slot until it returns.
+var appleFMSessionSlot = make(chan struct{}, 1)
+
+func acquireAppleFMSession(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case appleFMSessionSlot <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func releaseAppleFMSession() {
+	<-appleFMSessionSlot
+}
+
 func isAppleFMProvider(providerType, model string) bool {
 	switch strings.ToLower(strings.TrimSpace(providerType)) {
 	case "apple-fm", "apple_fm":
