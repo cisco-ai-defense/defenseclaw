@@ -190,8 +190,8 @@ func (s *MCPScanner) SupportedTargets() []string { return []string{"mcp"} }
 func (s *MCPScanner) buildArgs(target string) []string {
 	args := []string{"mcp", "scan", "--json"}
 
-	if s.Config.Analyzers != "" {
-		args = append(args, "--analyzers", s.Config.Analyzers)
+	if analyzers := s.Config.AnalyzersArg(); analyzers != "" {
+		args = append(args, "--analyzers", analyzers)
 	}
 	if s.Config.ScanPrompts {
 		args = append(args, "--scan-prompts")

@@ -164,6 +164,9 @@ func ParseV8YAML(source string, data []byte) (*V8YAMLDocument, error) {
 	if err := rejectV8YAMLLegacyKeys(source, root); err != nil {
 		return nil, err
 	}
+	if err := rejectV9RemovedKeys(source, root); err != nil {
+		return nil, err
+	}
 	plainValue, err := projectV8YAML(source, root, "$")
 	if err != nil {
 		return nil, err
@@ -356,6 +359,91 @@ func rejectV8YAMLLegacyKeys(source string, root *yaml.Node) error {
 		}
 	}
 	return nil
+}
+
+// rejectV9RemovedKeys refuses, in a config_version 9 source, the v8 keys
+// that config_version 9 replaced. A v8 source keeps them: they are the
+// input of the v8 to v9 migration (MigrateV9).
+func rejectV9RemovedKeys(source string, root *yaml.Node) error {
+	version := v8YAMLMapValue(root, "config_version")
+	var number int64
+	if version == nil || version.Decode(&number) != nil || number < ConfigVersionV9 {
+		return nil
+	}
+	for _, removed := range []struct{ key, target string }{
+		{"skill_actions", "admission.skill.actions"},
+		{"mcp_actions", "admission.mcp.actions"},
+		{"plugin_actions", "admission.plugin.actions"},
+		{"update_check", "update.check"},
+	} {
+		if node := v8YAMLMapValue(root, removed.key); node != nil {
+			return v9RemovedKeyError(source, v8YAMLChildPath("$", removed.key), node, removed.target)
+		}
+	}
+	if node := v8YAMLMapValue(v8YAMLMapValue(root, "watch"), "allow_list_bypass_scan"); node != nil {
+		return v9RemovedKeyError(source, "$.watch.allow_list_bypass_scan", node,
+			"admission.<type>.allow_list_bypass_scan")
+	}
+	guardrail := v8YAMLMapValue(root, "guardrail")
+	if err := rejectV9RulePackDir(source, guardrail, "$.guardrail"); err != nil {
+		return err
+	}
+	if err := rejectV9ConnectorRulePackDirs(source, guardrail, "$.guardrail"); err != nil {
+		return err
+	}
+	if profiles := v8YAMLMapValue(guardrail, "profiles"); profiles != nil && profiles.Kind == yaml.MappingNode {
+		for index := 0; index+1 < len(profiles.Content); index += 2 {
+			path := v8YAMLChildPath("$.guardrail.profiles", profiles.Content[index].Value)
+			profile := profiles.Content[index+1]
+			if err := rejectV9RulePackDir(source, profile, path); err != nil {
+				return err
+			}
+			if err := rejectV9ConnectorRulePackDirs(source, profile, path); err != nil {
+				return err
+			}
+		}
+	}
+	scanners := v8YAMLMapValue(root, "scanners")
+	for _, removed := range []struct{ scanner, key, target string }{
+		{"skill_scanner", "binary", "the managed scanner install"},
+		{"skill_scanner", "use_virustotal", "scanners.skill_scanner.analyzers.virustotal.enabled"},
+		{"skill_scanner", "use_aidefense", "scanners.skill_scanner.analyzers.aidefense.enabled"},
+		{"skill_scanner", "virustotal_api_key", "a key stored with defenseclaw keys set"},
+		{"skill_scanner", "virustotal_api_key_env", "scanners.skill_scanner.analyzers.virustotal.api_key_env"},
+		{"mcp_scanner", "binary", "the managed scanner install"},
+	} {
+		if node := v8YAMLMapValue(v8YAMLMapValue(scanners, removed.scanner), removed.key); node != nil {
+			return v9RemovedKeyError(source, "$.scanners."+removed.scanner+"."+removed.key, node, removed.target)
+		}
+	}
+	return nil
+}
+
+func rejectV9RulePackDir(source string, scope *yaml.Node, path string) error {
+	if node := v8YAMLMapValue(scope, "rule_pack_dir"); node != nil {
+		return v9RemovedKeyError(source, path+".rule_pack_dir", node, "rule_pack or custom_packs")
+	}
+	return nil
+}
+
+func rejectV9ConnectorRulePackDirs(source string, scope *yaml.Node, path string) error {
+	connectors := v8YAMLMapValue(scope, "connectors")
+	if connectors == nil || connectors.Kind != yaml.MappingNode {
+		return nil
+	}
+	for index := 0; index+1 < len(connectors.Content); index += 2 {
+		connectorPath := v8YAMLChildPath(path+".connectors", connectors.Content[index].Value)
+		if err := rejectV9RulePackDir(source, connectors.Content[index+1], connectorPath); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func v9RemovedKeyError(source, path string, node *yaml.Node, target string) error {
+	return v8Error(source, V8YAMLErrorLegacyKeyForbidden, path, node,
+		"a v8 configuration key is not accepted in config_version 9",
+		"use "+target)
 }
 
 func v8YAMLLegacyError(source, path string, node *yaml.Node, target string) error {

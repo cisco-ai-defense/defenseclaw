@@ -31,6 +31,11 @@ type ListEntry struct {
 	TargetType string `json:"target_type"`
 	TargetName string `json:"target_name"`
 	Reason     string `json:"reason"`
+	// SourcePath pins the entry to one install path (admission.rego
+	// matches it as path components); empty matches any path.
+	SourcePath string `json:"source_path,omitempty"`
+	// Connector scopes the entry to one connector; empty matches all.
+	Connector string `json:"connector,omitempty"`
 }
 
 // ScanResultInput is the scan result subset needed by OPA.

@@ -49,8 +49,12 @@ type GuardrailProfile struct {
 	// HILT overrides the human-in-the-loop block; nil inherits.
 	HILT *HILTConfig `mapstructure:"hilt" yaml:"hilt,omitempty"`
 	// RulePackDir selects a rule pack for subjects of this profile; empty
-	// inherits.
+	// inherits. It is a v8 key, rejected in config_version 9 (use RulePack).
 	RulePackDir string `mapstructure:"rule_pack_dir" yaml:"rule_pack_dir,omitempty"`
+	// RulePack and Rules override the pack and its customisation for
+	// subjects of this profile; empty / nil inherit.
+	RulePack string                `mapstructure:"rule_pack" yaml:"rule_pack,omitempty"`
+	Rules    *GuardrailRulesConfig `mapstructure:"-"         yaml:"rules,omitempty"`
 	// BlockMessage overrides the message shown when a decision blocks.
 	BlockMessage string `mapstructure:"block_message" yaml:"block_message,omitempty"`
 	// Connectors holds per-connector overrides inside the profile, keyed by

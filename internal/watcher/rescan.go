@@ -884,7 +884,7 @@ func (w *InstallWatcher) scannerFingerprint(evt InstallEvent) string {
 		parts = append(parts,
 			"binary="+c.Binary,
 			"binver="+w.scannerBinaryVersion(c.Binary),
-			"analyzers="+c.Analyzers,
+			"analyzers="+c.AnalyzersArg(),
 			fmt.Sprintf("scan_prompts=%t", c.ScanPrompts),
 			fmt.Sprintf("scan_resources=%t", c.ScanResources),
 			fmt.Sprintf("scan_instructions=%t", c.ScanInstructions),
