@@ -80,7 +80,7 @@ func WriteWindowsIdentitySpool(dir string, cache *WindowsEnrollmentGroupCache, s
 		if facts.ResolvedAt.IsZero() {
 			facts.ResolvedAt = now
 		}
-		record := IdentitySpoolRecord{Key: key, UpdatedAt: now, Facts: facts}
+		record := IdentitySpoolRecord{Key: key, User: windowsIdentitySpoolUser(key), UpdatedAt: now, Facts: facts}
 		switch {
 		case facts.UPN != "" && facts.Source == useridentity.SourceWindowsIdentityStore:
 			record.UPNSource = UPNSourceIdentityStore
@@ -99,4 +99,15 @@ func WriteWindowsIdentitySpool(dir string, cache *WindowsEnrollmentGroupCache, s
 		}
 	}
 	return nil
+}
+
+// windowsIdentitySpoolUser names a record's account DOMAIN\account, as the
+// Linux and macOS records name theirs, so a record maps to an account
+// without a SID lookup; "" when the SID no longer resolves.
+func windowsIdentitySpoolUser(sid string) string {
+	names := useridentity.WindowsGroupNames([]string{sid}, 1, windowsIdentityGroupNameBudget)
+	if len(names) == 1 && names[0] != sid {
+		return names[0]
+	}
+	return ""
 }
