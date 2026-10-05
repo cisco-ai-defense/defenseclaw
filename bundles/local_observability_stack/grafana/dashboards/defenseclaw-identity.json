@@ -60,7 +60,7 @@
     {
       "type": "stat",
       "title": "Users observed",
-      "description": "Distinct users (user.id) with an `identity.observed` record in the selected range. The gateway writes one per user per cache TTL.",
+      "description": "Distinct users (user.id) with an `identity.observed` record in the range: verified users whose directory facts resolved. The gateway writes one per user every 15 minutes at most. A per-user macOS install resolves none.",
       "datasource": {
         "type": "loki",
         "uid": "defenseclaw-loki"
@@ -213,7 +213,7 @@
     {
       "type": "stat",
       "title": "Verified principal share",
-      "description": "Share of `identity.observed` records whose principal the gateway resolved itself for a kernel- or credential-verified uid or SID (`verified`), against principals only the hook reported (`claimed`). Only verified principals can select a guardrail profile.",
+      "description": "Share of hook decisions and tool calls whose identity facts the gateway resolved itself for a kernel- or credential-verified uid or SID (`verified`), against records that carry only what the hook reported (`claimed`). Only verified facts can select a guardrail profile.",
       "datasource": {
         "type": "loki",
         "uid": "defenseclaw-loki"
@@ -226,7 +226,7 @@
       },
       "targets": [
         {
-          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | body_user_id=~\"$user\" | event_name=\"identity.observed\" | body_defenseclaw_user_principal_assurance=\"verified\" [$__range])) / sum(count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | body_user_id=~\"$user\" | event_name=\"identity.observed\" | body_defenseclaw_user_principal_assurance=~\"verified|claimed\" [$__range]))",
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | body_user_id=~\"$user\" | event_name=~\"hook_decision|tool[.]invocation[.].*\" | connector=~\"$connector\" | body_defenseclaw_user_principal_assurance=\"verified\" [$__range])) / sum(count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | body_user_id=~\"$user\" | event_name=~\"hook_decision|tool[.]invocation[.].*\" | connector=~\"$connector\" | body_defenseclaw_user_principal_assurance=~\"verified|claimed\" [$__range]))",
           "datasource": {
             "type": "loki",
             "uid": "defenseclaw-loki"
@@ -276,7 +276,7 @@
     {
       "type": "table",
       "title": "Users by directory and domain",
-      "description": "Distinct users per directory (local, ldap, active_directory, entra_id, okta, other) and domain, from `identity.observed`.",
+      "description": "Distinct verified users per directory (local, ldap, active_directory, entra_id, okta, other) and domain, from `identity.observed`. `unreported` directory on Linux SSSD means the guardian's realm facts are not available (per-user install).",
       "datasource": {
         "type": "loki",
         "uid": "defenseclaw-loki"
@@ -352,8 +352,8 @@
     },
     {
       "type": "piechart",
-      "title": "Verified vs claimed principals",
-      "description": "Distinct users by principal assurance. `claimed` means the hook reported the principal and the gateway could not confirm it.",
+      "title": "Verified vs claimed identity",
+      "description": "Distinct users by the assurance of the identity facts on their hook decisions and tool calls. `claimed` means the gateway resolved no directory facts and the record carries what the hook reported.",
       "datasource": {
         "type": "loki",
         "uid": "defenseclaw-loki"
@@ -366,7 +366,7 @@
       },
       "targets": [
         {
-          "expr": "count by (assurance) (sum by (assurance, user_id) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | body_user_id=~\"$user\" | event_name=\"identity.observed\" | body_user_id!=\"\" | label_format assurance=\"{{if .body_defenseclaw_user_principal_assurance}}{{.body_defenseclaw_user_principal_assurance}}{{else}}unreported{{end}}\", user_id=\"{{.body_user_id}}\" [$__range])))",
+          "expr": "count by (assurance) (sum by (assurance, user_id) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | body_user_id=~\"$user\" | event_name=~\"hook_decision|tool[.]invocation[.].*\" | connector=~\"$connector\" | body_user_id!=\"\" | body_defenseclaw_user_principal_assurance=~\"verified|claimed\" | label_format assurance=\"{{.body_defenseclaw_user_principal_assurance}}\", user_id=\"{{.body_user_id}}\" [$__range])))",
           "datasource": {
             "type": "loki",
             "uid": "defenseclaw-loki"
@@ -412,7 +412,7 @@
     {
       "type": "piechart",
       "title": "SSH vs local sessions",
-      "description": "Distinct agent sessions by the login session they ran in (`defenseclaw.session.kind`: local, ssh, rdp or console).",
+      "description": "Distinct agent sessions by the login session they ran in (`defenseclaw.session.kind`: local, ssh, rdp or console). The kind is reported only at the assurance of the record's directory facts, so Windows and macOS sessions with verified directory facts show as `unreported`; Linux sessions are verified through logind or utmp.",
       "datasource": {
         "type": "loki",
         "uid": "defenseclaw-loki"
@@ -483,7 +483,7 @@
     {
       "type": "table",
       "title": "Agents per user (agt- ids)",
-      "description": "Distinct agent identities each user ran in the range. Principal is the directory name (for example alice@CORP.EXAMPLE.COM) when the gateway resolved one; redaction profiles may replace it.",
+      "description": "Distinct agent identities each user ran in the range. Principal (for example alice@CORP.EXAMPLE.COM) is filled only when `ai_discovery.include_user_principal` is on.",
       "datasource": {
         "type": "loki",
         "uid": "defenseclaw-loki"

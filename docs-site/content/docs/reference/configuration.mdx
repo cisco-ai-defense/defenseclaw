@@ -448,7 +448,7 @@ The `openshell:` block for the NVIDIA OpenShell sandbox is described in
 | `guardrail.profile_assignments` | `[]` | Ordered list of `{profile, match}`. `match` takes `groups`, `users`, `connectors` and `agents`; at least one is required. Keys combine with AND, values of one key with OR, and the first matching assignment wins. `agents` entries are `agt-` followed by 16 hex digits. |
 | `guardrail.default_profile` | `""` | The profile for subjects no assignment matches. Empty keeps the `guardrail.*` settings. |
 | `ai_discovery.ide_inventory` | `all` | IDE extension and plugin inventory scope: `all`, `ai_only` or `off`. |
-| `ai_discovery.include_user_principal` | `false` | Add the user's directory principal to AI discovery inventory records. |
+| `ai_discovery.include_user_principal` | `false` | Send the user's directory principal and Kerberos principal on every record that carries identity. Off, records keep the domain, directory and assurance but no principal. |
 
 Within a profile, the precedence for one connector is the profile's
 `connectors.<connector>` entry, then the profile field, then
