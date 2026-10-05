@@ -1436,3 +1436,27 @@ func TestRemoveAllReportKeepsTheWorkerErrorCause(t *testing.T) {
 		t.Fatalf("bounded worker error = %q", got)
 	}
 }
+
+// A deployment that selects only machine-policy connectors has no manifest
+// rows; the guardian still writes identity records and per-user scans for
+// every eligible account the enumerator published (GAP-0021).
+func TestStandaloneGuardianCoversEligibleAccountsWithoutRows(t *testing.T) {
+	previous := enterpriseHookLoadEligibleAccounts
+	t.Cleanup(func() { enterpriseHookLoadEligibleAccounts = previous })
+	enterpriseHookLoadEligibleAccounts = func(path string) ([]enterprisehooks.UnixEligibleAccount, error) {
+		if path != enterprisehooks.UnixEligibleAccountsPath("/etc/defenseclaw/hooks/manifest.json") {
+			t.Errorf("eligible accounts read from %q", path)
+		}
+		return []enterprisehooks.UnixEligibleAccount{
+			{User: "alice", UID: 1001, Home: "/home/alice"},
+			{User: "bob@corp.example", UID: 94401104, Home: "/home/bob@corp.example"},
+		}, nil
+	}
+	rows := enterpriseHookEnrolledAccountRows(io.Discard, enterpriseHookReconcileRun{
+		Manifest: "/etc/defenseclaw/hooks/manifest.json",
+		Rows:     []enterpriseHookReconcileRow{{User: "alice", UserHome: "/home/alice", Connector: "opencode", OK: true, UID: 1001}},
+	})
+	if len(rows) != 2 || rows[0].Connector != "opencode" || rows[1].UID != 94401104 || rows[1].User != "bob@corp.example" || rows[1].UserHome != "/home/bob@corp.example" {
+		t.Fatalf("rows = %+v, want the manifest row and one row for the eligible account without one", rows)
+	}
+}
