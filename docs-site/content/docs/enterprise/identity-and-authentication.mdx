@@ -1,0 +1,262 @@
+---
+title: Identity and authentication
+description: Which directory identities DefenseClaw attributes agent activity to on Linux, Windows and macOS, how agents get their own stable identity, and how to select guardrail profiles by user, group, connector or agent at scale.
+keywords:
+  - DefenseClaw identity
+  - Active Directory Kerberos
+  - Entra ID
+  - Okta
+  - SSSD InfoPipe
+  - agent identity
+  - guardrail profiles
+---
+
+DefenseClaw ties each agent action to the person who ran it and to the agent
+that did it. On a shared Linux host, for example an AD/Kerberos deployment
+where developers sign in over SSH, it records the directory principal and
+domain of the account, whether the login came over SSH, and a stable
+identity for each agent. Guardrail profiles can then give a group, a user, a
+connector or a single agent its own policy, and every decision records which
+profile applied and why.
+
+## Attribution, not authentication
+
+DefenseClaw reads identity only from the operating system the agent runs on.
+
+- It never calls an identity provider (no Entra, Okta or LDAP API calls).
+- It holds no identity credentials: no passwords, tokens, tickets or keys.
+- It adds no new secrets and no sign-in step.
+- Okta and Entra ID appear only through what the OS already knows: a joined
+  device, Platform SSO, or a directory synced into AD or LDAP.
+
+Each fact has an assurance level, sent as
+`defenseclaw.user.principal.assurance`:
+
+| Assurance | Meaning |
+| --- | --- |
+| `verified` | The gateway or the root hook guardian resolved the fact itself, for a uid or SID the kernel or a per-user credential already proved. |
+| `claimed` | The hook reported the fact from the user's own session. A user can change it. |
+
+<Callout type="warn" title="Do not grant access from these fields">
+Identity in DefenseClaw records answers "who ran this agent". It is not an
+authenticated assertion for another system. Only `verified` facts can select
+a guardrail profile; headers, hook payloads and `claimed` facts never do.
+</Callout>
+
+## Supported identity types
+
+Each cell names what DefenseClaw reads and the assurance it records.
+
+| Identity | Linux | Windows | macOS |
+| --- | --- | --- | --- |
+| Local account | uid and name from the account database (verified) | SID and name from `LookupAccountSid` (verified) | uid and name from the account database (verified) |
+| LDAP or SSSD | Directory backend from NSS (`sss`, `ldap`), domain from the fully qualified name, groups from `initgroups` (verified). UPN and mail through SSSD InfoPipe, read by the root guardian (verified) | Not applicable | Directory-bound accounts through `dscl /Search` (verified) |
+| Active Directory over Kerberos | SSSD or winbind: principal, domain and groups (verified). The Kerberos principal in the session's credential cache (claimed) | Domain SID, name and groups (verified). AD UPN through `TranslateNameW` (verified). The logon session's UPN and authentication package (claimed) | AD-bound Mac: the Kerberos principal from `dscl` AuthenticationAuthority and the binding from `dsconfigad -show` (verified) |
+| Entra ID | Only with an Entra NSS module installed (for example himmelblau); reported as that module's directory | Entra-joined or hybrid-joined: UPN from the identity store cache, tenant and join type (verified). Entra group SIDs (`S-1-12-1-...`) | Platform SSO with Company Portal: the device's SSO provider from `app-sso platform -s` (verified). The user's Platform SSO login (claimed) |
+| Okta | Only with Okta's NSS module (the Okta ASA agent); otherwise as the AD or LDAP account Okta syncs to | As the AD account Okta syncs to | Platform SSO or Okta Device Access: the device's SSO provider (verified). The user's login (claimed). As AD or LDAP when synced |
+
+DefenseClaw records the directory as `defenseclaw.user.directory`: `local`,
+`ldap`, `active_directory`, `entra_id`, `okta` or `other`. It also records
+which OS facility resolved the facts in `defenseclaw.user.identity.source`.
+
+Principals and UPNs compare without regard to case. SSSD returns the realm in
+upper case (`alice@CORP.EXAMPLE.COM`) while the directory may store
+`alice@corp.example.com`; both name the same user.
+
+### Login sessions
+
+| Fact | Linux | Windows | macOS |
+| --- | --- | --- | --- |
+| SSH or local session | logind `GetSession` for the verified uid, or `/run/utmp` (verified). `SSH_CONNECTION` and `SSH_TTY` (claimed) | `SSH_CONNECTION` (claimed) | `SSH_CONNECTION` (claimed) |
+| Remote desktop | Not applicable | Logon type from `LsaGetLogonSessionData` (claimed) | Not applicable |
+| Kerberos principal | The default principal of a `FILE:` or `KCM:` credential cache, read directly, never through `klist` (claimed) | The logon session's Kerberos package (claimed) | The default credential cache (claimed) |
+
+The session kind is sent as `defenseclaw.session.kind` (`local`, `ssh`,
+`rdp` or `console`), the client address as `client.address` and the Kerberos
+principal as `defenseclaw.session.kerberos_principal`.
+
+## Agent identity
+
+Each agent gets an identity of its own instead of only inheriting the
+person's. The identities are digests of facts the gateway already holds, so
+they need no credential and stay the same across sessions, gateway restarts
+and upgrades.
+
+<Flow
+  direction="TB"
+  caption="One person can run many agents, each agent many sessions, and each session sub-agents. Every level keeps a pointer to the level above it."
+>
+  <Node id="h" kind="operator">{`Person\nuser.id, principal`}</Node>
+  <Node id="a" kind="agent" emphasis>{`Agent (agt-)\nper install and user`}</Node>
+  <Node id="s" kind="agent">{`Session (ais-)\none chat`}</Node>
+  <Node id="c" kind="agent">{`Sub-agents (ais-)\nparent, root, depth`}</Node>
+  <Edge from="h" to="a" label="runs" />
+  <Edge from="a" to="s" label="starts" />
+  <Edge from="s" to="c" label="spawns" />
+</Flow>
+
+| Level | Attribute | How the ID is made |
+| --- | --- | --- |
+| Person | `user.id`, `defenseclaw.user.principal` | From the OS, as above |
+| Agent | `defenseclaw.agent.identity.id` | `agt-` and 16 hex digits of a SHA-256 over the machine ID, the verified user, the connector and the connector's config root in that user's home |
+| Session | `defenseclaw.agent.instance_id` | `ais-` and 16 hex digits of a SHA-256 over the agent ID and the session ID |
+| Sub-agent | `defenseclaw.agent.instance_id`, parent and root | `ais-` over the parent instance and the sub-agent ID |
+
+The machine ID comes from `/etc/machine-id`, the Windows `MachineGuid` or the
+macOS `IOPlatformUUID`. A config root the agent claims, such as a
+`CLAUDE_CONFIG_DIR` override, is recorded as a hint and never changes the ID.
+Two users who reuse the same session ID get different session IDs.
+
+List the identities the gateway has seen:
+
+```bash
+defenseclaw agent identities
+defenseclaw agent identities --user alice --connector codex --json
+```
+
+## Guardrail profiles at scale
+
+A profile is a named set of guardrail overrides. Ordered assignments select
+it by directory group, user, connector or agent. Thousands of agents then
+share a few profiles instead of one override each.
+
+```yaml
+guardrail:
+  mode: observe
+  profiles:
+    strict:
+      description: Default for verified users who match nothing else
+      mode: action
+      block_at: MEDIUM
+    contractors:
+      mode: action
+      block_at: MEDIUM
+      alert_at: LOW
+      hilt: {enabled: true, min_severity: HIGH}
+      rule_pack_dir: /etc/defenseclaw/rulepacks/strict
+      connectors:
+        codex: {mode: observe}
+    ml-team:
+      mode: action
+      block_at: HIGH
+  profile_assignments:          # ordered: the first match wins
+    - profile: contractors
+      match: {groups: ["CORP\\Contractors", "S-1-12-1-1111111111-2222222222-3333333333-4444444444"]}
+    - profile: ml-team
+      match: {users: ["alice@CORP.EXAMPLE.COM"], connectors: [codex]}
+    - profile: ml-team
+      match: {agents: ["agt-3f9c0a1b2c3d4e5f"]}
+  default_profile: strict       # "" keeps today's guardrail.* behaviour
+```
+
+Then check the file and see which profile a subject gets:
+
+```bash
+defenseclaw config validate
+defenseclaw guardrail profile list
+defenseclaw guardrail profile show contractors
+defenseclaw guardrail profile explain --user alice --connector codex
+```
+
+### How a profile is chosen
+
+- Assignments are tried in order and the first match wins.
+- Inside one `match`, the keys (`groups`, `users`, `connectors`, `agents`)
+  must all match, and any one value of a key is enough.
+- `users` match a principal (UPN or `DOMAIN\user`), an account name, a uid
+  or a SID. `groups` match a group name, `DOMAIN\Group` or a SID, including
+  Entra `S-1-12-1-...` SIDs. Both compare without regard to case.
+- `agents` match an agent identity (`agt-` and 16 hex digits).
+- A request with no match gets `default_profile`. An empty default keeps the
+  global `guardrail.*` settings.
+
+**Only verified subjects select a profile.** The subject is the user the
+kernel or a per-user credential proved, with the directory facts the gateway
+resolved for that user. Identity headers, hook payloads and claimed facts never
+reach the matcher. Without a verified user, only assignments that match on
+`connectors` alone can apply; anything else gets the default. A failed
+directory lookup also gets the default. Set a strict `default_profile` so an
+unverified request is never treated more leniently than a known one.
+
+### Precedence
+
+For one connector, the most specific value wins:
+
+1. the profile's `connectors.<connector>` entry;
+2. the profile's own field;
+3. `guardrail.connectors.<connector>`;
+4. the application protection overlay;
+5. the global `guardrail.*` value.
+
+A profile accepts `description`, `mode`, `block_at`, `alert_at`, `hilt`,
+`rule_pack_dir`, `block_message` and `connectors`. `enabled` and
+`hook_fail_mode` are rejected, in a profile and in its connector entries,
+because both are built into the hooks installed on the machine.
+`hilt.min_severity` is stored in upper case (`HIGH`). Profile names are lower
+case, at most 64 characters. The Secure Client profile rejects guardrail
+profiles.
+
+### Audit which profile decided
+
+Every decision records the profile and the reason it was selected:
+
+| Attribute | Meaning |
+| --- | --- |
+| `defenseclaw.guardrail.profile.name` | The profile that applied; absent when no profile did |
+| `defenseclaw.guardrail.profile.digest` | `sha256:` digest of the profile's effective guardrail policy |
+| `defenseclaw.guardrail.profile.match` | `agent`, `user`, `group`, `connector`, `default`, `default_unverified` or `default_lookup_failed` |
+| `defenseclaw.guardrail.profile.matched_group` | The group that matched, for `group` |
+
+The same records carry the user, the principal and
+`defenseclaw.agent.identity.id`. A reload that changes a profile's effective
+policy writes one `config.change.applied` audit event per changed profile,
+with the path `guardrail.profiles.<name>.digest`. Compare the digest in a
+decision with the one `defenseclaw guardrail profile explain` reports to prove
+which policy version decided it. The Grafana
+[Identity & Users](/docs/observability/grafana-dashboards) board charts
+decisions by profile and match reason and the digest timeline.
+
+## Privacy controls
+
+| Setting | Default | Effect |
+| --- | --- | --- |
+| `ai_discovery.include_user_principal` | `false` | Adds the directory principal to AI discovery inventory records. Off by default, like `include_user_email`, because a principal names a person across systems. |
+| `ai_discovery.ide_inventory` | `all` | `all`, `ai_only` or `off`. Plugin lists can reveal personal tooling; `ai_only` keeps only AI plugins. |
+
+The principal, the Kerberos principal, the client address and the tenant ID
+are marked sensitive. Like `user.id`, they are identifiers, which v8 redaction
+profiles preserve so records still join; see
+[Redaction](/docs/observability/redaction). Choose destinations accordingly.
+The `identity.observed` record carries a group count, never group names.
+
+## Set up SSSD InfoPipe on Linux
+
+On an SSSD host, DefenseClaw reads the UPN and mail through SSSD's InfoPipe
+D-Bus service, from the root hook guardian. Without it, the principal falls
+back to `account@REALM`. Enable the attributes in `/etc/sssd/sssd.conf`:
+
+```ini
+[sssd]
+services = nss, pam, ifp
+
+[ifp]
+user_attributes = +userPrincipalName, +mail
+```
+
+Then restart SSSD and check that it answers:
+
+```bash
+sudo systemctl restart sssd
+dbus-send --system --print-reply --dest=org.freedesktop.sssd.infopipe /org/freedesktop/sssd/infopipe org.freedesktop.sssd.infopipe.GetUserAttr string:alice array:string:userPrincipalName,mail
+```
+
+## Troubleshooting
+
+| Symptom | Check |
+| --- | --- |
+| No principal, only `user.id` | The account is local, or the directory lookup failed. On Linux run `getent passwd alice` and `id alice`; on SSSD, check InfoPipe as above. |
+| `principal.assurance` is `claimed` | Only the hook reported the fact, so profiles ignore it. Check that the gateway can resolve the account itself (`getent passwd alice` on Linux). |
+| Every decision shows `default_unverified` | No verified user reached the gateway. Check that the hook runs as the signed-in user and that the gateway accepts its credential (`defenseclaw doctor`). |
+| `default_lookup_failed` | The directory lookup for a verified user failed, so the default profile applied. Check that the directory service answers on the host. |
+| A group assignment never matches | Run `defenseclaw guardrail profile explain --user alice` and compare the group spelling. Use the SID to avoid name ambiguity. |
+| A new session ID after a restart | Expected only for a new chat. The agent ID (`agt-`) stays the same; if it changed, the connector's config root moved. |
