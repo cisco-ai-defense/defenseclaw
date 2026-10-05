@@ -6,7 +6,9 @@
 package gateway
 
 import (
+	"context"
 	"encoding/binary"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -101,6 +103,29 @@ func TestSecureClientIgnoresIdentityFacts(t *testing.T) {
 	(&llmEventIdentity{Directory: useridentity.DirectoryFacts{Principal: "a@B", Assurance: useridentity.AssuranceVerified}}).applyTo(&input)
 	if !reflect.DeepEqual(input, observability.LogCompatHookDecisionInput{}) {
 		t.Fatal("Secure Client record gained identity attributes")
+	}
+}
+
+// A verified subject with resolved directory facts emits one
+// identity.observed record carrying the group count (GAP-0060).
+func TestVerifiedSubjectEmitsIdentityObserved(t *testing.T) {
+	setIdentityFactsEnabled(true)
+	t.Cleanup(func() { setIdentityFactsEnabled(false) })
+	capture := &endpointInventoryCapture{}
+	(&APIServer{observabilityV8: capture}).observeIdentity(context.Background(), VerifiedSubject{
+		UserID: "1291", IDKind: useridentity.KindPOSIXUID, UserName: "dcad-alice",
+		Directory: useridentity.DirectoryFacts{
+			Domain: "dclab.test", Directory: useridentity.DirectoryActiveDirectory,
+			Groups: []string{"dc-ml-team@dclab.test", "dc-devs@dclab.test"}, Source: useridentity.SourceSSSDInfoPipe,
+			Assurance: useridentity.AssuranceVerified, ResolvedAt: time.Now(),
+		},
+	}, useridentity.SessionFacts{})
+	records := capture.snapshot()
+	if len(records) != 1 || string(records[0].EventName()) != observability.TelemetryEventIdentityObserved {
+		t.Fatalf("records = %d, want one identity.observed", len(records))
+	}
+	if got := fmt.Sprint(canonicalBody(t, records[0])[observability.TelemetryAttributeDefenseClawUserGroupCount]); got != "2" {
+		t.Fatalf("group_count = %s, want 2", got)
 	}
 }
 
