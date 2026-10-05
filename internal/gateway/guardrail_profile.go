@@ -563,7 +563,7 @@ func assignmentMatches(m config.ProfileMatch, subject *profileSubject, verified 
 	if len(m.Groups) > 0 {
 		matched := ""
 		for _, want := range m.Groups {
-			if anyEqualFold(subject.Groups, want) {
+			if profileGroupMatches(subject.Groups, want) {
 				matched = strings.TrimSpace(want)
 				break
 			}
@@ -590,6 +590,26 @@ func assignmentMatches(m config.ProfileMatch, subject *profileSubject, verified 
 		reason, group = profileMatchAgent, ""
 	}
 	return reason, group, true
+}
+
+// profileGroupMatches reports whether one of a subject's groups is want,
+// compared without regard to case. Windows subjects carry each group as its
+// SID and DOMAIN\name, so a bare group name in an assignment also matches
+// the name part of a DOMAIN\name group.
+func profileGroupMatches(groups []string, want string) bool {
+	if anyEqualFold(groups, want) {
+		return true
+	}
+	want = strings.TrimSpace(want)
+	if want == "" || strings.Contains(want, `\`) {
+		return false
+	}
+	for _, group := range groups {
+		if i := strings.LastIndexByte(group, '\\'); i >= 0 && strings.EqualFold(strings.TrimSpace(group[i+1:]), want) {
+			return true
+		}
+	}
+	return false
 }
 
 func anyMatches(values []string, pred func(string) bool) bool {
