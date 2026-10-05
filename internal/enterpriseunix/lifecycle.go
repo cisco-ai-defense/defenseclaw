@@ -74,8 +74,9 @@ type Options struct {
 	// KeepServiceAccount makes uninstall keep the gateway service account,
 	// which it removes otherwise.
 	KeepServiceAccount bool
-	// RemoveServiceAccount is the older flag for what uninstall now does by
-	// default; it is still accepted.
+	// RemoveServiceAccount is the deprecated flag for what uninstall now
+	// does by default. It is accepted with a warning until the next minor
+	// release removes it.
 	RemoveServiceAccount bool
 	// ProductVersion, when set, must equal the payload's version.
 	ProductVersion string
@@ -117,6 +118,7 @@ const (
 	codeState               = "state_unreadable"
 	codeLeftovers           = "unmanaged_leftovers"
 	codeWSL                 = "wsl_distribution"
+	codeDeprecatedOption    = "deprecated_option"
 )
 
 type lifecycle struct {
@@ -426,6 +428,9 @@ func (l *lifecycle) validateOptions() int {
 	}
 	if o.ConfigFile != "" && !filepath.IsAbs(o.ConfigFile) {
 		return bad("--config must be an absolute path")
+	}
+	if o.RemoveServiceAccount {
+		r.AddWarning(codeDeprecatedOption, "--remove-service-account is deprecated and will be removed in the next minor release: uninstall deletes the gateway service account by default (keep it with --keep-service-account)")
 	}
 	return 0
 }
