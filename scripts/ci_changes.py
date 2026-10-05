@@ -93,7 +93,7 @@ RULES: tuple[tuple[tuple[str, ...], frozenset[str]], ...] = (
     (("scripts/live-connector-e2e/",), frozenset({"connector"})),
     (("scripts/",), frozenset({"go", "python", "packaging", "checks"})),
     (("LICENSE", "NOTICE", "THIRD_PARTY_LICENSES.txt"), frozenset({"packaging"})),
-    ((".claude/", ".agents/", ".devin/", ".windsurf/"), frozenset()),
+    ((".claude/", ".agents/", ".devin/"), frozenset()),
 )
 
 PY_TEST_ROOT = "cli/tests"
