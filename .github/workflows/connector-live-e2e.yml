@@ -317,10 +317,12 @@ jobs:
       # entirely because CONNECTOR is not openclaw — hook connectors do not
       # need it. We do NOT run `make plugin` here for the same reason.
       - name: Install DefenseClaw
+        id: install
         if: steps.select.outputs.run == 'true'
         run: make install
 
       - name: Put DefenseClaw on PATH
+        id: path
         if: steps.select.outputs.run == 'true'
         run: |
           echo "${HOME}/.local/bin" >> "$GITHUB_PATH"
@@ -361,7 +363,10 @@ jobs:
       # Amp uses the canonical gateway hook dispatcher because the installed
       # agent entrypoint is TypeScript. Native Windows uses windows-native.yml.
       - name: Contract entrypoint smoke
-        if: steps.select.outputs.run == 'true'
+        # A Go contract failure for one connector must not skip the entrypoint
+        # smoke for the others: the macOS cell runs every connector, so run it
+        # whenever the install succeeded, even after an earlier step failed.
+        if: ${{ !cancelled() && steps.select.outputs.run == 'true' && steps.install.outcome == 'success' && steps.path.outcome == 'success' }}
         # Layer A runs agent-less, so the cached agent version is empty and the
         # gateway resolves an "unversioned" hook contract. In action mode the
         # gateway refuses to wire the connector (and thus never writes
