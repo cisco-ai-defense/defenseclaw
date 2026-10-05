@@ -366,6 +366,7 @@ def guardrail() -> None:
       use-pack       switch the rule pack, globally or for one connector
       protection     turn opt-in protection packs on/off per scope
       validate-pack  validate one pack with the authoritative Go loader
+      profile        identity-based guardrail profiles: list, show, explain
 
     \b
     Multi-connector: one gateway enforces N hook connectors. Each policy
@@ -4274,6 +4275,201 @@ alert_at_cmd = guardrail.command(
     HIGH+).
     """,
 )(_level_command("alert_at"))
+
+
+# ---------------------------------------------------------------------------
+# guardrail profile — identity-based guardrail profiles (read-only)
+# ---------------------------------------------------------------------------
+
+
+@guardrail.group("profile")
+def profile_group() -> None:
+    """Show identity-based guardrail profiles and which one a subject gets.
+
+    \b
+      list     the profiles, their assignments and the default
+      show     one profile's settings
+      explain  which profile a user, connector or agent resolves to
+
+    Profiles live under ``guardrail.profiles`` in config.yaml; assignments
+    are tried in order and the first match wins. Only verified identities
+    select a profile, so ``explain`` asks the running gateway.
+    """
+
+
+def _profile_settings(profile) -> dict:
+    out: dict = {}
+    for key in ("description", "mode", "block_at", "alert_at", "rule_pack_dir", "block_message"):
+        value = getattr(profile, key, "")
+        if value:
+            out[key] = value
+    if profile.hilt is not None:
+        out["hilt"] = {"enabled": profile.hilt.enabled, "min_severity": profile.hilt.min_severity}
+    if profile.connectors:
+        out["connectors"] = {
+            name: {
+                key: value
+                for key, value in (
+                    ("mode", pc.mode),
+                    ("block_at", pc.block_at),
+                    ("alert_at", pc.alert_at),
+                    ("rule_pack_dir", pc.rule_pack_dir),
+                    ("block_message", pc.block_message),
+                )
+                if value
+            }
+            | ({"hilt": {"enabled": pc.hilt.enabled, "min_severity": pc.hilt.min_severity}} if pc.hilt else {})
+            for name, pc in sorted(profile.connectors.items())
+        }
+    return out
+
+
+def _assignment_json(assignment) -> dict:
+    match = {
+        key: list(values)
+        for key, values in (
+            ("groups", assignment.match.groups),
+            ("users", assignment.match.users),
+            ("connectors", assignment.match.connectors),
+            ("agents", assignment.match.agents),
+        )
+        if values
+    }
+    return {"profile": assignment.profile, "match": match}
+
+
+@profile_group.command("list")
+@click.option("--json", "json_out", is_flag=True, help="Print the profiles as JSON.")
+@pass_ctx
+def profile_list_cmd(app: AppContext, json_out: bool) -> None:
+    """List the guardrail profiles, their ordered assignments and the default."""
+    gc = app.cfg.guardrail
+    payload = {
+        "version": 1,
+        "profiles": {name: _profile_settings(gc.profiles[name]) for name in sorted(gc.profiles)},
+        "assignments": [_assignment_json(a) for a in gc.profile_assignments],
+        "default_profile": gc.default_profile,
+    }
+    if json_out:
+        click.echo(json.dumps(payload, indent=2))
+        return
+    ux.section("Guardrail profiles", indent="  ")
+    if not gc.profiles:
+        click.echo(f"  {ux.dim('No guardrail profiles are configured; guardrail.* applies to everyone.')}")
+        click.echo()
+        return
+    for name in sorted(gc.profiles):
+        profile = gc.profiles[name]
+        summary = ", ".join(
+            f"{key}={value}" for key, value in _profile_settings(profile).items() if key not in {"description", "connectors", "hilt"}
+        )
+        ux.echo(f"  • {ux.accent(name)}  {profile.description or ''} {ux.dim('(' + (summary or 'inherits everything') + ')')}")
+    click.echo()
+    ux.echo(f"  • {ux._style('assignments (first match wins):', fg='bright_black', bold=True)}")
+    if not gc.profile_assignments:
+        click.echo(f"      {ux.dim('none')}")
+    for index, assignment in enumerate(gc.profile_assignments, start=1):
+        match = "; ".join(f"{key}={','.join(values)}" for key, values in _assignment_json(assignment)["match"].items())
+        click.echo(f"      {index}. {assignment.profile} ← {match}")
+    default = gc.default_profile or ux.dim("none (guardrail.* applies)")
+    ux.echo(f"  • {ux._style('default:', fg='bright_black', bold=True)} {default}")
+    click.echo()
+
+
+@profile_group.command("show")
+@click.argument("name")
+@click.option("--json", "json_out", is_flag=True, help="Print the profile as JSON.")
+@pass_ctx
+def profile_show_cmd(app: AppContext, name: str, json_out: bool) -> None:
+    """Show one guardrail profile's settings and where it is assigned."""
+    gc = app.cfg.guardrail
+    profile = gc.profiles.get(name)
+    if profile is None:
+        known = ", ".join(sorted(gc.profiles)) or "none"
+        ux.err(f"No guardrail profile named {name!r} (configured: {known}).")
+        raise SystemExit(1)
+    payload = {
+        "version": 1,
+        "name": name,
+        "settings": _profile_settings(profile),
+        "assignments": [_assignment_json(a) for a in gc.profile_assignments if a.profile == name],
+        "default": gc.default_profile == name,
+    }
+    if json_out:
+        click.echo(json.dumps(payload, indent=2))
+        return
+    ux.section(f"Guardrail profile {name}", indent="  ")
+    settings = payload["settings"]
+    if not settings:
+        click.echo(f"  {ux.dim('Sets nothing; inherits guardrail.* for its subjects.')}")
+    for key, value in settings.items():
+        if isinstance(value, dict):
+            value = json.dumps(value, sort_keys=True)
+        click.echo(f"  {key}: {value}")
+    assigned = payload["assignments"]
+    click.echo(f"  assigned by: {len(assigned)} assignment(s){' and default_profile' if payload['default'] else ''}")
+    click.echo()
+
+
+@profile_group.command("explain")
+@click.option("--user", "user", default="", help="Account name, uid or SID to resolve.")
+@click.option("--connector", "connector", default="", help="Connector the request would come from.")
+@click.option("--agent", "agent", default="", help="Agent identity (agt-...) the request would carry.")
+@click.option("--json", "json_out", is_flag=True, help="Print the resolution as JSON.")
+@pass_ctx
+def profile_explain_cmd(app: AppContext, user: str, connector: str, agent: str, json_out: bool) -> None:
+    """Explain which guardrail profile a subject resolves to, and why.
+
+    Asks the running gateway (loopback, gateway token), which resolves the
+    user through the operating system the way it does for live requests.
+    """
+    from defenseclaw.gateway import OrchestratorClient, gateway_api_client_host
+
+    if not (user or connector or agent):
+        ux.err("Name at least one of --user, --connector or --agent.")
+        raise SystemExit(2)
+    try:
+        client = OrchestratorClient(
+            host=gateway_api_client_host(app.cfg),
+            port=app.cfg.gateway.api_port,
+            token=app.cfg.gateway.resolved_token(),
+            timeout=5,
+        )
+        try:
+            result = client.guardrail_profile_resolve(user=user, connector=connector, agent=agent)
+        finally:
+            client.close()
+    except Exception as exc:  # noqa: BLE001 - report any transport or HTTP failure
+        ux.err(f"Could not ask the gateway: {exc}")
+        ux.subhead("Start it with: defenseclaw-gateway start", indent="  ")
+        raise SystemExit(1) from None
+    if json_out:
+        click.echo(json.dumps(result, indent=2, sort_keys=True))
+        return
+    ux.section("Guardrail profile resolution", indent="  ")
+    if not result.get("profiles_configured"):
+        click.echo(f"  {ux.dim('No guardrail profiles are configured; guardrail.* applies.')}")
+    profile = result.get("profile") or ux.dim("none (guardrail.* applies)")
+    click.echo(f"  profile: {profile}")
+    if result.get("match"):
+        reason = result["match"]
+        if result.get("matched_group"):
+            reason += f" ({result['matched_group']})"
+        click.echo(f"  match:   {reason}")
+    if result.get("digest"):
+        click.echo(f"  digest:  {result['digest']}")
+    if result.get("lookup_error"):
+        ux.warn(f"user lookup failed: {result['lookup_error']}")
+    effective = result.get("effective") or {}
+    if effective:
+        scope = result.get("connector") or "global"
+        hilt = effective.get("hilt") or {}
+        click.echo(
+            f"  applies ({scope}): mode={effective.get('mode', '')} block_at={effective.get('block_at') or 'pack'} "
+            f"alert_at={effective.get('alert_at') or 'pack'} hilt={'on' if hilt.get('enabled') else 'off'} "
+            f"rule_pack={effective.get('rule_pack_dir') or 'default'}"
+        )
+    click.echo()
 
 
 # Register `defenseclaw guardrail judge` (hook-lane judge gate). The

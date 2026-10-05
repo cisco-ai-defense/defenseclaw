@@ -1478,7 +1478,8 @@ class CommandRegistrationTests(unittest.TestCase):
         # protection packs on and off per scope. block-at / alert-at set the
         # tool-call block and alert levels, globally or per connector.
         # allow-private-upstream records private upstream hosts the
-        # gateway may reach (guardrail.allow_private_upstreams).
+        # gateway may reach (guardrail.allow_private_upstreams). profile
+        # lists and explains the identity-based guardrail profiles.
         # Keep this assertion exact so accidental command removal
         # (e.g. a careless `del`) is caught immediately.
         self.assertEqual(
@@ -1496,6 +1497,7 @@ class CommandRegistrationTests(unittest.TestCase):
                 "judge",
                 "list-packs",
                 "mode",
+                "profile",
                 "protection",
                 "use-pack",
                 "validate-pack",

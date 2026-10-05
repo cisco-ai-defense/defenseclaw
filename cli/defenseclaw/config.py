@@ -27,6 +27,7 @@ import logging
 import ntpath
 import os
 import platform
+import re
 import stat
 import subprocess
 import sys
@@ -2523,6 +2524,89 @@ class GuardrailConfig:
                 _validate_guardrail_level("alert_at", pc.alert_at)
             except ValueError as exc:
                 raise ValueError(f"guardrail.connectors[{name!r}]: {exc}") from exc
+
+
+_GUARDRAIL_PROFILE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+_AGENT_IDENTITY_RE = re.compile(r"^agt-[0-9a-f]{16}$")
+_PROFILE_FORBIDDEN_KEY = (
+    "is not allowed in a guardrail profile (it is baked into the installed hooks); "
+    "set it on guardrail or guardrail.connectors instead"
+)
+
+
+def validate_guardrail_profiles(gc: GuardrailConfig) -> None:
+    """Validate ``guardrail.profiles`` / ``profile_assignments`` / ``default_profile``.
+
+    Mirrors ``GuardrailConfig.validateProfiles`` in
+    ``internal/config/guardrail_profiles.go`` message for message. The
+    Secure Client rejection stays with the gateway, which knows the
+    deployment profile. Raises :class:`ValueError` on the first violation.
+    """
+    if not (gc.profiles or gc.profile_assignments or (gc.default_profile or "").strip()):
+        return
+    for name in sorted(gc.profiles):
+        if not _GUARDRAIL_PROFILE_NAME_RE.match(name):
+            raise ValueError(
+                f"guardrail.profiles: invalid profile name {name!r} "
+                "(want lowercase letters, digits, '-' or '_', at most 64)"
+            )
+        try:
+            _validate_guardrail_profile(gc.profiles[name])
+        except ValueError as exc:
+            raise ValueError(f"guardrail.profiles[{name!r}]: {exc}") from exc
+    for i, assignment in enumerate(gc.profile_assignments):
+        if assignment.profile not in gc.profiles:
+            raise ValueError(f"guardrail.profile_assignments[{i}]: unknown profile {assignment.profile!r}")
+        match = assignment.match
+        if not (match.groups or match.users or match.connectors or match.agents):
+            raise ValueError(
+                f"guardrail.profile_assignments[{i}]: match needs at least one of groups, users, "
+                "connectors or agents; use guardrail.default_profile for everyone else"
+            )
+        for agent in match.agents:
+            if not _AGENT_IDENTITY_RE.match(agent):
+                raise ValueError(
+                    f"guardrail.profile_assignments[{i}].match.agents: {agent!r} is not an agent "
+                    "identity (want agt- followed by 16 hex digits)"
+                )
+    default = (gc.default_profile or "").strip()
+    if default and default not in gc.profiles:
+        raise ValueError(f"guardrail.default_profile: unknown profile {default!r}")
+
+
+def _validate_guardrail_profile(profile: GuardrailProfile) -> None:
+    if profile.enabled is not None:
+        raise ValueError("enabled " + _PROFILE_FORBIDDEN_KEY)
+    if profile.hook_fail_mode:
+        raise ValueError("hook_fail_mode " + _PROFILE_FORBIDDEN_KEY)
+    _validate_guardrail_mode(profile.mode)
+    _validate_guardrail_level("block_at", profile.block_at)
+    _validate_guardrail_level("alert_at", profile.alert_at)
+    if profile.hilt is not None:
+        _validate_guardrail_min_severity(profile.hilt.min_severity)
+    seen: dict[str, str] = {}
+    for name in sorted(profile.connectors):
+        if not name.strip():
+            raise ValueError("connectors: empty connector name is not allowed")
+        norm = connector_paths.normalize(name)
+        if norm in seen:
+            raise ValueError(
+                f"connectors: {seen[norm]!r} and {name!r} refer to the same connector {norm!r}; keep only one"
+            )
+        seen[norm] = name
+        pc = profile.connectors[name]
+        if pc.enabled is not None:
+            raise ValueError(f"connectors[{name!r}]: enabled {_PROFILE_FORBIDDEN_KEY}")
+        if pc.hook_fail_mode:
+            raise ValueError(f"connectors[{name!r}]: hook_fail_mode {_PROFILE_FORBIDDEN_KEY}")
+        try:
+            _validate_guardrail_mode(pc.mode)
+            _validate_guardrail_level("block_at", pc.block_at)
+            _validate_guardrail_level("alert_at", pc.alert_at)
+            if pc.hilt is not None:
+                _validate_guardrail_min_severity(pc.hilt.min_severity)
+        except ValueError as exc:
+            raise ValueError(f"connectors[{name!r}]: {exc}") from exc
 
 
 #: Values of ``guardrail.block_at`` / ``alert_at`` (global or per connector),
@@ -5999,6 +6083,7 @@ def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
     # gateway's Load() which rejects the same shapes. Value-only check —
     # no registry access (see GuardrailConfig.validate).
     cfg.guardrail.validate()
+    validate_guardrail_profiles(cfg.guardrail)
     # Same value-only guard for the per-connector asset_policy overrides
     # (OTHER-7) — empty/duplicate connector names + bad scalar enums. The
     # global asset_policy fields are intentionally not re-validated here.
