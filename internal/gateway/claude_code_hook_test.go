@@ -188,6 +188,7 @@ func TestEvaluateClaudeCodeHook_BlocksUnregisteredMCPPreToolUse(t *testing.T) {
 	cfg.AssetPolicy.Mode = "action"
 	cfg.AssetPolicy.MCP.RegistryRequired = true
 	cfg.AssetPolicy.MCP.Registry = []config.AssetPolicyRule{{Name: "github"}}
+	cfg.Guardrail.BlockMessage = "dccert-block-marker blocked by policy"
 
 	api := &APIServer{scannerCfg: cfg}
 
@@ -210,6 +211,10 @@ func TestEvaluateClaudeCodeHook_BlocksUnregisteredMCPPreToolUse(t *testing.T) {
 	// GAP-2489: the tool span takes its rule_id from the response.
 	if len(resp.RuleIDs) == 0 || resp.RuleIDs[0] != "asset_policy.mcp.registry-required" {
 		t.Fatalf("rule_ids=%v, want asset_policy.mcp.registry-required first", resp.RuleIDs)
+	}
+	// The configured block message is what Claude Code shows.
+	if resp.Reason != cfg.Guardrail.BlockMessage {
+		t.Fatalf("reason=%q, want the configured block message", resp.Reason)
 	}
 }
 

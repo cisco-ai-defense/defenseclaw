@@ -275,10 +275,14 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 		a.dispatchClaudeCodeHookNotification(req, action, rawAction, verdict.Severity, verdict.Reason, wouldBlock, evalCtx,
 			sinkPolicyFor(ctx, verdict.RedactionEnabled))
 	}
-	resp := claudeCodeResponseFor(
-		req, action, rawAction, verdict.Severity, verdict.Reason, verdict.Findings, mode, wouldBlock,
-		sinkPolicyFor(ctx, verdict.RedactionEnabled),
+	// A configured block message (the request's guardrail profile, then the
+	// global guardrail) replaces the agent-facing reason on blocks, as on
+	// the generic hook path.
+	reason, policy := resolveHookBlockReasonForConfig(
+		a.decisionConfig(ctx), "claudecode", action, verdict.Reason, sinkPolicyFor(ctx, verdict.RedactionEnabled),
 	)
+	resp := claudeCodeResponseFor(req, action, rawAction, verdict.Severity, reason, verdict.Findings, mode, wouldBlock, policy)
+	resp.SourceReason = verdict.Reason
 	// Stamp the unified-pipeline correlation keys so the agent-hook
 	// dispatch wrapper (claudeCodeResponseToAgentHookResponse) and
 	// the audit envelope (HookAuditEnvelope.EvaluationID / RuleIDs)
