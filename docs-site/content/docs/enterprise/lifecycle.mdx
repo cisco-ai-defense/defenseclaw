@@ -64,7 +64,7 @@ installed version, `ensure` upgrades in place. It keeps the installed config
 unless you also pass `CONFIG=`.
 
 ```powershell
-& 'C:\Staging\DefenseClawSetup-Enterprise-Standalone-x64.exe' /ensure JSON=1
+& 'C:\ProgramData\DefenseClaw-Staging\DefenseClawSetup-Enterprise-Standalone-x64.exe' /ensure JSON=1
 $LASTEXITCODE
 ```
 
@@ -189,7 +189,7 @@ On Windows, pass the new file to the same release's Setup. `ensure` sees that
 the config differs from the installed one and applies it:
 
 ```powershell
-& 'C:\Staging\DefenseClawSetup-Enterprise-Standalone-x64.exe' /ensure CONFIG=C:\Staging\config.yaml JSON=1
+& 'C:\ProgramData\DefenseClaw-Staging\DefenseClawSetup-Enterprise-Standalone-x64.exe' /ensure CONFIG=C:\ProgramData\DefenseClaw-Staging\config.yaml JSON=1
 ```
 
 If the new config is invalid, `ensure` fails and does not apply it: on Linux
@@ -256,7 +256,7 @@ sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos repair --js
 ```
 
 ```powershell title="Windows"
-& 'C:\Staging\DefenseClawSetup-Enterprise-Standalone-x64.exe' /repair JSON=1
+& 'C:\ProgramData\DefenseClaw-Staging\DefenseClawSetup-Enterprise-Standalone-x64.exe' /repair JSON=1
 ```
 
 - **What changed (Linux and macOS).** The result lists what `repair`
@@ -419,7 +419,7 @@ sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux uninstall --purge
 ```
 
 ```powershell title="Windows: remove everything"
-& 'C:\Staging\DefenseClawSetup-Enterprise-Standalone-x64.exe' /uninstall JSON=1 PURGE=1
+& 'C:\ProgramData\DefenseClaw-Staging\DefenseClawSetup-Enterprise-Standalone-x64.exe' /uninstall JSON=1 PURGE=1
 ```
 
 After an uninstall, ask users to restart running agents. An agent that loaded

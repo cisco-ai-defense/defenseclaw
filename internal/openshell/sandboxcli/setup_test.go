@@ -360,7 +360,7 @@ func TestSetupSaysWhatToDoWhenHomebrewFails(t *testing.T) {
 	}
 	has(t, ta.output(), "✗ install OpenShell: Homebrew could not install the nvidia/openshell formula\n",
 		"Homebrew says why above; most often Xcode or the Command Line Tools are older than it wants",
-		"then run `defenseclaw sandbox setup` again", "docs/setup/sandbox/#troubleshooting")
+		"then run `defenseclaw sandbox setup` again", "docs/sandboxes/guide/#troubleshooting")
 
 	// "Your Xcode (26.2) at /Applications/Xcode.app is too outdated. Please
 	// update to Xcode 27.0 (or delete it).", with the Command Line Tools

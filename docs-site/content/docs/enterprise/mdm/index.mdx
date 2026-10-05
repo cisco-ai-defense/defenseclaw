@@ -112,7 +112,8 @@ PIN=$(awk -v f="$FILE" '$2 == f {print $1}' checksums.txt)
 echo "$PIN"
 ```
 
-Replace `FILE` with the artifact you deploy. Signature-based trust is optional
+Replace `FILE` with the artifact you deploy. On a Mac, use `shasum -a 256 -c`
+in place of `sha256sum --check`. Signature-based trust is optional
 and is covered in the kit's `signing/README.md`.
 
 ## Deliver the config

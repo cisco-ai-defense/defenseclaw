@@ -30,8 +30,9 @@ also the [complete sandbox guide](/docs/sandboxes/guide).
 
 <Callout title="Sandboxes and managed installs">
 Sandboxes run on Linux, and on Macs with Apple silicon in OpenShell
-MicroVMs (see [macOS](/docs/sandboxes/guide#macos)), as your own user. A
-`managed_enterprise` install doesn't start the sandbox runtime yet. Sandboxes
+MicroVMs (see [macOS](/docs/sandboxes/guide#macos)), as your own user. They
+don't run on Windows, and in a `managed_enterprise` install `sandbox setup`,
+`sandbox run`, and `sandbox teardown` refuse to start. Sandboxes
 therefore run only on installs where the user owns `config.yaml`, and there
 the admin block is enforced but advisory. See
 [Authoritative and advisory admin blocks](#authoritative-and-advisory-admin-blocks).
@@ -413,8 +414,8 @@ symbolic link. When you name the pack by its name or by its directory, that
 directory may not be a symbolic link either. A path straight to `pack.yaml`
 checks only the file.
 
-On macOS and Linux, DefenseClaw also checks ownership so that no other local
-user can change your policy:
+DefenseClaw also checks ownership so that no other local user can change your
+policy:
 
 - the file and its directory must belong to you or to root;
 - neither may be writable by its group or by every user. On Linux a POSIX ACL
@@ -425,7 +426,6 @@ user can change your policy:
   such a directory is refused.
 
 Fix a refused file with `chmod go-w` or by moving it to a directory you own.
-These ownership checks don't run on Windows.
 
 Because you own your custom packs, keep them out of the folders you run
 sandboxes on. A folder that holds a pack the policy is read from
@@ -462,7 +462,7 @@ override the one before it, and the last one can only make things stricter:
 
 1. **The pack** supplies every default.
 2. **Your `openshell` keys** in `config.yaml` override the pack. See
-   [Configuration](/docs/reference/configuration#openshell-sandbox-settings)
+   [Configuration](/docs/reference/configuration#sandbox-keys)
    for each key.
 3. **Per-run options** of [`defenseclaw sandbox run`](/docs/reference/sandbox-cli#sandbox-run)
    override your keys: `--pack`, `--profile`, `--copy`, `--safe` (keep the
@@ -867,10 +867,8 @@ Project folders that must run in copy mode. The globs are host paths:
   segments;
 - a pattern without wildcards covers that folder and everything below it;
 - `~/` expands to the home directory of the account that computes the policy.
-
-In a managed install that account may be the gateway's service account rather
-than the developer, so `~/code/customers` would not match developer projects.
-Use absolute paths in managed configs, with `*` for the user name.
+  In a config you hand out to many machines, use absolute paths with `*` for
+  the user name, such as `/home/*/code/customers`.
 
 Mounting a parent of a covered folder counts too, because the parent would
 expose it. Matching ignores case and follows symbolic links, so another
@@ -946,8 +944,6 @@ macOS app:
 | Run a harness | `allowed_harnesses`, or the pack's `harness.allowed` |
 
 A request to connect to this machine itself is treated as a host-port request.
-In a `managed_enterprise` install, "always" decisions can't be saved, because
-the administrator owns `config.yaml`.
 
 ### Limits DefenseClaw always applies
 
@@ -1008,46 +1004,11 @@ What happens next depends on the refusal:
 
 ## Authoritative and advisory admin blocks
 
-How far the admin block binds depends on who owns `config.yaml`:
-
-| Deployment | Who owns `config.yaml` | Admin block |
-| --- | --- | --- |
-| `deployment_mode: managed_enterprise` | The administrator. Users can't write it. | **Authoritative.** Users can only affect a run through per-run options and runtime actions, and the admin block limits both. |
-| Any other mode | The user. | **Advisory.** It applies to every run, but the user can edit or remove it. Use it for team defaults and to prevent mistakes, not to stop a determined user. |
-
+Sandboxes run only on installs where the user owns `config.yaml`. There the
+admin block applies to every run, but the user can edit or remove it. Use it
+for team defaults and to prevent mistakes, not to stop a determined user.
 `defenseclaw sandbox doctor`, `sandbox status`, and `sandbox policy explain`
-say which one applies on a machine.
-
-<Callout type="warn" title="Managed installs don't run sandboxes yet">
-A `managed_enterprise` install runs the DefenseClaw gateway as a service
-account, while OpenShell's gateway is a per-user service, and sandboxes must
-run as the developer's own account. So the gateway doesn't start the sandbox
-runtime in a managed install (`/health` reports the `sandbox` subsystem as
-`disabled`), and `sandbox setup`, `sandbox run`, and `sandbox teardown` refuse
-to start there. Today the admin block binds
-sandboxes only as an advisory block, on installs where the developer owns
-`config.yaml`. You can already stage it in a managed config, which validates
-it.
-</Callout>
-
-In a managed install the administrator writes the whole file, so the
-`openshell` keys outside `admin` are organization defaults too.
-
-A managed install also trusts a custom required pack only when it is as
-protected as the config:
-
-- On macOS and Linux, the file and every directory above it must be owned by
-  root, not writable by group or others, and free of symbolic links. On macOS,
-  an ACL entry that grants write access to any of them is refused too.
-- On Windows, the file must be on a local NTFS drive. It and every folder
-  above it must be owned by Administrators, LocalSystem, or TrustedInstaller,
-  and no other account may be able to change the file or replace it through
-  one of those folders.
-
-The default `pack_dir` inside the data directory usually doesn't qualify, so give
-`required_pack` an absolute path in an administrator-owned directory, such as
-`/opt/acme/sandbox-packs/acme-dev/pack.yaml`. Keep the file readable by the
-accounts that run sandboxes. Built-in packs are always trusted.
+say which kind of block applies on a machine.
 
 See [Sandbox policy pushdown](/docs/enterprise/configuration#sandbox-policy-pushdown)
 for rolling the admin block out to managed machines.
@@ -1055,8 +1016,7 @@ for rolling the admin block out to managed machines.
 ## Example: a balanced organization
 
 This example and the next are `openshell` blocks to distribute to developer
-machines. While managed installs don't run sandboxes, such a block is
-advisory on the machines that do (see above).
+machines. On those machines the block is advisory (see above).
 
 The goal is fast, low-friction development on the web allowlist. Customer
 code never gets a live mount, and one file-sharing service is off limits.
@@ -1142,7 +1102,7 @@ What developers get:
 
 ## Related
 
-- [Configuration: OpenShell sandbox settings](/docs/reference/configuration#openshell-sandbox-settings)
+- [Configuration: Sandbox keys](/docs/reference/configuration#sandbox-keys)
   lists every `openshell` key.
 - [Enterprise configuration](/docs/enterprise/configuration) covers
   administrator-owned configuration.

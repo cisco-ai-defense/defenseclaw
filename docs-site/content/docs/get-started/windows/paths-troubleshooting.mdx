@@ -345,8 +345,10 @@ commands.
 - Restart each agent you set up (fully exit and relaunch Amp). In an empty
   folder, send a harmless prompt such as “Reply with the word ready.” For
   `amp -x`, add `--plugin-ready-timeout 30`.
-- Open `defenseclaw tui` or run `defenseclaw alerts`, and check that the new
-  activity shows up under the agent you used.
+- Open `defenseclaw tui`, or run `defenseclaw-gateway audit export --output -`,
+  and check that the new activity shows up in the audit log under the agent
+  you used. A harmless prompt creates an audit event, not an alert, so
+  `defenseclaw alerts` can stay empty.
 - With several agents, repeat the prompt in each one. One agent working does
   not prove that another's hooks work.
 

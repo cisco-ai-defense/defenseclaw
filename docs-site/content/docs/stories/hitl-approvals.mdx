@@ -103,7 +103,7 @@ defenseclaw setup claude-code --yes --mode action --no-human-approval --restart
 
 [Cursor](/docs/connectors/cursor), [ZeptoClaw](/docs/connectors/zeptoclaw), [Codex](/docs/connectors/codex), [Hermes](/docs/connectors/hermes), [Devin](/docs/connectors/devin), and [OpenHands](/docs/connectors/openhands) cannot pause for a DefenseClaw approval on their documented hook surfaces. These integrations apply explicit connector-specific alert, allow, or injected-context behavior and keep `raw_action: "confirm"` available for audit. Cursor exposes ask-capable event schemas, but DefenseClaw deliberately does not enable their native ask response; its confirm verdicts remain attributed alerts and cannot resume the original call.
 
-[OpenCode](/docs/connectors/opencode) also cannot pause, but for a narrower reason: OpenCode v1.18.10-v1.18.33 publishes `permission.ask` and chat/context hooks, while DefenseClaw intentionally does not implement or claim those surfaces. The connector makes no native-ask, context-injection, or TUI-resume claim.
+[OpenCode](/docs/connectors/opencode) also cannot pause, but for a narrower reason: OpenCode publishes `permission.ask` and chat/context hooks, but DefenseClaw does not implement those surfaces. See the [OpenCode connector](/docs/connectors/opencode) for the supported versions. The connector makes no native-ask, context-injection, or TUI-resume claim.
 
 ```bash
 defenseclaw tui

@@ -504,7 +504,8 @@ Each read route takes exactly one identity anchor as a query parameter:
 `model_response_id`, `tool_invocation_id` or `trace_id`. `evaluation_id` is
 not an anchor. `span_id` narrows a `trace_id` anchor, and
 `connector_instance_id` narrows any anchor to one connector instance. Results
-page with `limit` (at most 500), `after_time` and `after_id`.
+page with `limit` (at most 500), `after_time` and `after_id`. Unknown query
+keys are rejected, and each key may appear only once.
 
 | Method | Path | Purpose |
 | --- | --- | --- |

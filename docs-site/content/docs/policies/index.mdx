@@ -332,7 +332,7 @@ single_category_max_severity: HIGH
 min_categories_for_critical: 2
 ```
 
-The judge call goes through the same Bifrost pipeline as everything else and uses the [unified LLM key](/docs/guardrail/unified-llm-key). Each judge call, with its token usage, is emitted as a `judge` gateway event so you can monitor cost from your dashboards.
+The judge call goes through the same Bifrost pipeline as everything else and uses the [unified LLM key](/docs/guardrail/unified-llm-key). Each judge call is emitted as a `judge` gateway event, and its token usage is reported on the judge trace and the GenAI token-usage metric, so you can monitor cost from your dashboards.
 
 You can target a different model than the rest of the stack by setting `guardrail.judge.llm` in `config.yaml`:
 

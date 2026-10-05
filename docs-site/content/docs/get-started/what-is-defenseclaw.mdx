@@ -38,12 +38,12 @@ Inserting an inspection step inside the agent process means every agent has to g
 
 <Flow
   direction="TB"
-  caption="You drive the Python defenseclaw CLI (and its TUI), which writes ~/.defenseclaw/config.yaml and starts the Go defenseclaw-gateway. Your agent reaches the same gateway through its connector: the agent's hooks, or a plugin the agent loads. On connectors that support human approval (HITL), the approval prompt appears in the agent itself."
+  caption="You drive the Python defenseclaw CLI (and its TUI), which writes ~/.defenseclaw/config.yaml and starts the Go defenseclaw-gateway. Your agent reaches the same gateway through its connector: the agent's hooks, a plugin the agent loads, or the guardrail proxy. On connectors that support human approval (HITL), the approval prompt appears in the agent itself."
 >
   <Node id="op" kind="operator">You</Node>
   <Node id="agent" kind="agent">{`Your AI agent\nsuch as Claude Code`}</Node>
   <Node id="cli" kind="operator">{`defenseclaw CLI + TUI\nsets up and reviews`}</Node>
-  <Node id="conn" kind="connector">{`Connector\nagent hooks or plugin`}</Node>
+  <Node id="conn" kind="connector">{`Connector\nhooks, plugin or proxy`}</Node>
   <Node id="gateway" kind="gateway">{`defenseclaw-gateway\ndecides and records`}</Node>
   <Node id="sinks" kind="datastore">{`Your telemetry\nOTLP, Splunk, webhooks`}</Node>
   <Node id="audit" kind="datastore">{`Audit log\nlocal SQLite database`}</Node>
@@ -77,6 +77,6 @@ DefenseClaw does not prove an agent's behaviour is safe. It improves safety by c
 ## Next
 
 <Cards>
-  <Card title="Install" href="/docs/get-started/install" description="One curl command, or build from source." />
+  <Card title="Install" href="/docs/get-started/install" description="One command on macOS, Linux or Windows." />
   <Card title="Quickstart" href="/docs/get-started/quickstart" description="Zero-prompt first-run setup." />
 </Cards>

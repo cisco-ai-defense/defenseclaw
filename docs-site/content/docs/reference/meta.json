@@ -4,10 +4,10 @@
     "cli",
     "setup-commands",
     "sandbox-cli",
-    "gateway-api",
     "configuration",
+    "env-vars",
     "keys",
     "fail-modes",
-    "env-vars"
+    "gateway-api"
   ]
 }

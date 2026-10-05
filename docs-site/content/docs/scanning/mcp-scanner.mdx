@@ -52,6 +52,7 @@ The default sources include:
 - `~/.cursor/mcp.json` → `mcpServers`
 - `~/.config/devin/mcp_config.json` and `<workspace>/.devin/mcp_config.json` → `mcpServers`
 - `~/.gemini/config/mcp_config.json` and `<workspace>/.agents/mcp_config.json` → `mcpServers` (Antigravity)
+- `~/.kiro/settings/mcp.json` and `<workspace>/.kiro/settings/mcp.json` → `mcpServers` (Kiro)
 - The MCP config of every other connector you set up with `defenseclaw setup <connector>`.
 
 Each server is scanned independently and findings are tagged with the connector that discovered them. Use `--connector <name>` on list, scan, set, unset, block, allow, and unblock commands when you want one connector's MCP source instead of the full configured roster. Without `--connector`, `mcp set` writes the server into every configured connector's MCP source, and `mcp unset` removes it from every configured connector that has it.
@@ -151,21 +152,17 @@ observability destination.
 
 ## Configure the action mapping
 
-The scanner produces a *severity*. What that severity *does* lives in the active OPA policy file under `mcp_actions` — the schema is per-severity buckets, identical in shape to `skill_actions`:
+The scanner produces a *severity*. What that severity *does* lives under `mcp_actions` in `~/.defenseclaw/config.yaml` — per-severity buckets, identical in shape to `skill_actions`. The defaults block the install of critical and high servers and leave everything else alone:
 
-```yaml title="policies/default.yaml (excerpt)"
-admission:
-  scan_on_install: true
-  allow_list_bypass_scan: true
-
+```yaml title="~/.defenseclaw/config.yaml (defaults)"
 mcp_actions:
   critical:
-    file:    quarantine
-    runtime: disable
+    file:    none
+    runtime: enable
     install: block
   high:
-    file:    quarantine
-    runtime: disable
+    file:    none
+    runtime: enable
     install: block
   medium:
     file:    none
@@ -179,23 +176,24 @@ mcp_actions:
     file:    none
     runtime: enable
     install: none
+```
 
-# Optional per-asset overrides (in scanner_overrides), e.g. tighten medium for the mcp class:
+The policy file can tighten this for MCP findings under `scanner_overrides.mcp`. Keys are uppercase severities and `runtime` is `block` or `allow`. The shipped default policy sets:
+
+```yaml title="policies/default.yaml (excerpt)"
 scanner_overrides:
   mcp:
-    medium:
+    MEDIUM:
+      runtime: block
       file: quarantine
-      runtime: disable
       install: block
+    LOW:
+      runtime: block
+      file: none
+      install: none
 ```
 
-To switch profiles for the entire `mcp_actions` table:
-
-```bash
-defenseclaw policy activate strict       # see Defaults page for the diff vs default
-defenseclaw policy activate default
-defenseclaw policy activate permissive
-```
+`defenseclaw policy activate <name>` rewrites only `skill_actions`; it does not change `mcp_actions`. See [Defaults](/docs/policies/defaults) for each shipped policy.
 
 ## Block / allow individual servers
 
@@ -247,6 +245,8 @@ error: scan failed: refusing to scan remote MCP target 'http://10.20.30.40:8080/
   ! 1 MCP server(s) could not be scanned (last scan failed): internal-docs (claudecode)
   internal-docs (claudecode): refused, the URL is a private or loopback address; to scan it anyway: defenseclaw mcp scan internal-docs --connector claudecode --allow-private
 ```
+
+`mcp set` also takes `--url` and `--transport` for SSE or HTTP servers and `--env KEY=VAL` (repeatable) for server environment variables. For OpenCode only, `--force-untrusted-command` writes a command outside the trusted install prefixes.
 
 Amp MCP discovery is intentionally read-only. Use `amp mcp add` (or edit Amp's
 settings through Amp tooling) for schema-preserving writes and workspace

@@ -62,6 +62,7 @@ $installer = irm "$release/install.ps1"
 | `-Local DIR` | Take every release file from a directory instead of GitHub |
 | `-Rollback` | Restore the install that the last upgrade replaced |
 | `-Connector NAME` | First install only: the agent to guard |
+| `-NoOpenclaw` | First install only: same as `-Connector none`, kept for older scripts |
 | `-Quickstart` | Run `defenseclaw quickstart` afterwards when nothing is configured yet |
 | `-QuickstartMode MODE` | `observe` or `action` for that quickstart (implies `-Quickstart`) |
 | `-NoPersistPath` | Do not add `%USERPROFILE%\.local\bin` to your user `PATH` |
@@ -94,6 +95,12 @@ For guided configuration, which asks which agents to guard:
 
 ```powershell
 defenseclaw init
+```
+
+For a zero-prompt setup of one agent:
+
+```powershell
+defenseclaw quickstart --connector codex
 ```
 
 To add one agent directly, run its setup command, for example:
@@ -197,8 +204,9 @@ your desktop session. Your data from before the upgrade is in
 You do not need the old Setup to move. To check an old
 `DefenseClawSetup-x64.exe` file, compare its SHA-256
 (`Get-FileHash -Algorithm SHA256`) with its entry in that release's
-`checksums.txt`. The 0.8.x Setup files are not Authenticode-signed, so their
-own `/verify` check always fails; that does not mean the file was changed.
+`checksums.txt`, after verifying the Sigstore signature of `checksums.txt`.
+The 0.8.x Setup files are not Authenticode-signed, so their own `/verify`
+check always fails; that does not mean the file was changed.
 
 ## Repair
 

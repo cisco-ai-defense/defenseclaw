@@ -116,6 +116,7 @@ the retained user task.
 | Amp | `agent.start` |
 | OmniGent | `UserPromptSubmit` only when the deployment supplies a stable session ID |
 | OpenCode | No prompt-bearing plugin hook; tool-call context only |
+| Kiro | `UserPromptSubmit` (CLI 2.x agent: `userPromptSubmit`), when the hook payload carries a stable session ID |
 
 Cross-call intent is retained only when the connector supplies a stable,
 authenticated session key; DefenseClaw does not use a process-global fallback

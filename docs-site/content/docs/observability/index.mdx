@@ -277,10 +277,12 @@ boundary, apply the profile only to that destination's `send` or matching route.
 
 ## Centralized redaction
 
-Use `defenseclaw setup redaction` for the guided policy editor. The first screen
-covers broad policy choices; **Show advanced settings?** opens bucket collection,
-custom profiles, destination policy, and ordered routes. For automation, start
-with `defenseclaw setup redaction status --json` and preview changes with
+DefenseClaw redacts each record once, before export, using the profile selected
+for that destination. Use `defenseclaw setup redaction` for the guided policy
+editor. The first screen covers broad policy choices; **Show advanced
+settings?** opens bucket collection, custom profiles, destination policy, and
+ordered routes. For automation, start with
+`defenseclaw setup redaction status --json` and preview changes with
 `--dry-run`.
 
 To turn redaction off everywhere, run:
@@ -373,7 +375,7 @@ SQLite reaper.
   <Card
     title="Agent360"
     href="/docs/observability/agent360"
-    description="Prompt-to-outcome lifecycle DAG with distinct session/prompt facts, recursive lineage provenance, per-agent grouped request work with raw terminal drill-down, real collaboration updates, approvals, outcomes, and Tempo traces."
+    description="Prompt-to-outcome lifecycle view of each agent turn, with subagents, approvals, outcomes, and Tempo traces."
   />
   <Card
     title="Galileo"
@@ -406,25 +408,10 @@ projection, including content when the producer supplies it.
 
 ## Upgrade from v7
 
-Run the normal command:
-
-```bash
-defenseclaw upgrade --yes
-```
-
-The upgrader backs up the source, converts and validates the complete v8 candidate,
-preserves narrower v7 collection/routing/redaction behavior, refreshes owned local
-dashboard assets without resetting data volumes, restarts, and checks health. No
-separate migration approval or apply command is required. The v8 gateway does not
-rewrite v7 configuration at startup or run both formats in parallel.
-
-Live v8 observability policy lives in YAML. Ambient `DEFENSECLAW_OTEL_*`, standard
-`OTEL_EXPORTER_OTLP_*`, and `DEFENSECLAW_DISABLE_REDACTION` values are upgrade-only
-inputs, not runtime routing/redaction controls. YAML names credential environment
-references with `token_env`, `bearer_env`, or `{env: NAME}`; secret values stay out
-of the source and rendered plan.
-
-See [Upgrade DefenseClaw](/docs/get-started/upgrade) for rollback and verification.
+Run `defenseclaw upgrade --yes`. It converts and validates the v7 settings into
+a v8 config; ambient `DEFENSECLAW_OTEL_*` and standard `OTEL_EXPORTER_OTLP_*`
+values are read only during that upgrade. See
+[Upgrade DefenseClaw](/docs/get-started/upgrade) for rollback and verification.
 
 ## Alert runbooks
 
@@ -443,7 +430,7 @@ do not paste prompt content, credentials, or raw audit databases into tickets.
 3. Inspect correlated gateway or Collector logs without copying event content
    into the incident. A sustained nonzero count normally indicates that a
    producer and the generated telemetry registry disagree.
-4. For a source checkout, run `make telemetry-check`, `make check-schemas`, and
+4. Source checkout only: run `make telemetry-check`, `make check-schemas`, and
    the owning producer tests. Roll back an incompatible producer or regenerate
    and validate its registry change before redeploying.
 
@@ -484,9 +471,9 @@ do not paste prompt content, credentials, or raw audit databases into tickets.
 
 ### Runbook: audit sink
 
-For compatibility, this alert can still use the historical `audit.sink`
-metric name. In live config v8 the affected target is a named
-`observability.destinations` entry; there is no live `audit_sinks` section.
+This runbook covers destination delivery. The alert keeps the historical
+`audit.sink` metric name; the affected target is a named
+`observability.destinations` entry.
 
 1. Identify the `sink_kind` and destination name, then inspect its delivered,
    dropped, retry, and circuit-state telemetry.

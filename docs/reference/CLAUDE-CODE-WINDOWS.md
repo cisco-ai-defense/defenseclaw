@@ -49,7 +49,7 @@ executable, so Git Bash is not in the enforcement path.
 | [v2.1.220](https://github.com/anthropics/claude-code/releases/tag/v2.1.220) | 2026-07-25 | latest official non-prerelease observed during this audit |
 
 The audit host had the native binary at
-`C:\Users\kevin\.local\bin\claude.exe` and a read-only `claude --version`
+`%USERPROFILE%\.local\bin\claude.exe` and a read-only `claude --version`
 probe returned `2.1.211 (Claude Code)`. That local observation is not a
 substitute for the official contract or the later real-client E2E phase.
 

@@ -283,16 +283,16 @@ Inside the Go gateway, every provider call goes through the embedded **Bifrost S
 | Groq | `groq` | Lower-latency open models |
 | Mistral | `mistral` | Mistral Cloud |
 | Ollama | `ollama` | Local model server (no key needed) |
-| Vertex AI | `vertex_ai` (also `vertex`) | Google Vertex |
+| Vertex AI | `vertex_ai` (also `vertex`, `vertexai`) | Google Vertex |
 | Cohere | `cohere` | Cohere Cloud |
 | Perplexity | `perplexity` | Perplexity API |
 | Cerebras | `cerebras` | Cerebras Cloud |
-| Fireworks | `fireworks` | Fireworks AI |
+| Fireworks | `fireworks` (also `fireworks_ai`, `fireworksai`) | Fireworks AI |
 | xAI | `xai` | Grok models |
 | HuggingFace | `huggingface` | HF Inference Endpoints |
 | Replicate | `replicate` | Replicate hosted models |
 | vLLM | `vllm` | Self-hosted vLLM (no key needed) |
-| DeepSeek, Together AI, LM Studio | `deepseek`, `together_ai`, `lm_studio` | Reached through their own `base_url` with Bifrost's OpenAI-compatible adapter |
+| DeepSeek, Together AI, LM Studio | `deepseek`, `together_ai` (also `togetherai`, `together`), `lm_studio` (also `lmstudio`) | Reached through their own `base_url` with Bifrost's OpenAI-compatible adapter |
 
 You don't pick the Bifrost key directly. You pick a model — the gateway maps `gpt-4o-mini` → `openai`, `claude-3-5-sonnet-20241022` → `anthropic`, and so on. The unified key is then handed to whichever provider the model resolves to.
 

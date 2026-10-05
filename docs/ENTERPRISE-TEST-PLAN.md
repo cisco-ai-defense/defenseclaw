@@ -2641,8 +2641,8 @@ the build and OS, and does not file a bug unless the behavior differs from the r
 
 | Issue | Topic |
 | --- | --- |
-| #922 | Rule engine: runtime-expanded redirect target turns a command rule detection-only (fixed on this branch; open for `main`) |
-| #917, #918 | Managed Windows Cursor (Secure Client): per-user DefenseClaw entries left in `~/.cursor/hooks.json` / `~/.claude/settings.json` deny every tool call (fixed on the Secure Client follow-up branch) |
+| #922 | Rule engine: runtime-expanded redirect target turns a command rule detection-only |
+| #917, #918 | Managed Windows Cursor (Secure Client): per-user DefenseClaw entries left in `~/.cursor/hooks.json` / `~/.claude/settings.json` deny every tool call |
 | #894 to #909 | Secure Client (`main`) follow-ups: Windows Codex machine-policy hook binding (#909), transaction recovery and sensor helper (#907, #908), uninstall refusals (#906), guardian freshness and state paths (#895, #896, #905), device identity (#904), enrollment of signed-out users (#894), Claude HKLM policy (#899), Codex requirements merge (#898), self-upgrade guard (#897), stale Windows docs (#900) |
 | #932 to #942 | Secure Client hardening (gateway authentication for Unix hooks, per-user gateway coexistence, GUI socket peer, payload publishers, Codex requirements on macOS, Cursor hooks, Claude managed-hooks-only, inspection health and `unavailable_action`) |
 | #901 | `managed_enterprise` on `main`: Windows sensor helper logs/home dirs, Claude floor below the contract |
@@ -2679,7 +2679,7 @@ the build and OS, and does not file a bug unless the behavior differs from the r
   desktop session.
 - **Versions and auto-update.** Agents self-update mid-test (Claude Code, OpenCode, Codex,
   kiro-cli). A version outside its hook contract becomes `hook_contract_unverified` and
-  `security_complete: false`. Pin or turn off auto-update. Verified ranges on this branch
+  `security_complete: false`. Pin or turn off auto-update. Verified ranges
   (`cli/defenseclaw/inventory/hook_contracts.json`): Claude Code 2.1.154 and later; Codex 0.124
   and later (0.145 and later is the default contract); Copilot CLI 1.0.18 and later; Cursor
   2.4.0 to before 4.0.0 (plus one exact CLI build); OpenCode 1.18.10 to before 1.19.0; Hermes

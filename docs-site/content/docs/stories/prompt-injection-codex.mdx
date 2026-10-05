@@ -47,7 +47,7 @@ defenseclaw setup guardrail \
   --connector codex \
   --mode action \
   --detection-strategy regex_judge \
-  --judge-model anthropic/claude-sonnet-4-20250514 \
+  --judge-model "<provider/model>" \
   --judge-api-key-env DEFENSECLAW_LLM_KEY \
   --judge-hook-connectors codex \
   --restart \
@@ -142,6 +142,6 @@ that finding as containment context for the next step.
 ## Next
 
 <Cards>
-  <Card title="Block secret exfiltration from Cursor" href="/docs/stories/cursor-secret-exfil" description="The companion story — a safe synthetic file and a pre-execution tool-call gate." />
+  <Card title="Detect secret-exfiltration intent from Cursor" href="/docs/stories/cursor-secret-exfil" description="The companion story — a safe synthetic file and a pre-execution tool-call gate." />
   <Card title="Connector compatibility" href="/docs/connectors/compatibility" description="Exact hook contracts, version ranges, and script generations." />
 </Cards>

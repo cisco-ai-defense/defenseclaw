@@ -12,12 +12,12 @@ keywords:
   - SSRF guard
 ---
 
-`defenseclaw setup webhook` manages the **notifier** webhooks the gateway dispatches when a guardrail or asset-policy event clears your minimum-severity threshold. Four destinations are supported out of the box; every one of them is configurable interactively or via a fully-flagged non-interactive form.
+`defenseclaw setup webhook` manages the **notifier** webhooks the gateway calls when an event meets your minimum severity. Four types are supported. Each one can be set up with prompts or with flags only.
 
-<Callout title="Notifiers vs telemetry destinations — important">
-There are two webhook surfaces, and they are intentionally separated:
+<Callout title="Notifiers and telemetry destinations">
+There are two separate webhook surfaces:
 
-- **Notifiers** (`defenseclaw setup webhook`) — chat/incident pings shaped to the destination's API (Slack blocks, PagerDuty Events v2, Webex `messages`, or generic JSON). Severity-gated, deduped, exactly the events you'd page someone for. **This page.**
+- **Notifiers** (`defenseclaw setup webhook`) — chat/incident pings shaped to the destination's API (Slack blocks, PagerDuty Events v2, Webex `messages`, or generic JSON). Filtered by severity and deduplicated. **This page.**
 - **HTTP JSONL telemetry destinations** (`defenseclaw setup observability add webhook`) — canonical v8 log projections posted as JSON Lines. Omitted policy selects every collected log bucket; `send`/`routes` and destination redaction can narrow it. It has an independent bounded queue and is intended for SIEMs and data lakes.
 
 Pick the surface that matches the consumer. Most installs run one notifier (Slack) and zero or more independent telemetry destinations.
@@ -56,6 +56,7 @@ Slack incoming webhooks carry the secret in the URL itself, so you do not need a
 
 ```bash
 defenseclaw setup webhook add slack \
+  --name slack-alerts \
   --url https://hooks.slack.com/services/T000/B000/XXXXXX \
   --min-severity HIGH \
   --non-interactive
@@ -64,8 +65,8 @@ defenseclaw setup webhook add slack \
 The name is derived from the type and host. Test it without posting to the channel by using `--dry-run`, then send a real test when you're happy:
 
 ```bash
-defenseclaw setup webhook test slack-hooks-slack-com --dry-run
-defenseclaw setup webhook test slack-hooks-slack-com
+defenseclaw setup webhook test slack-alerts --dry-run
+defenseclaw setup webhook test slack-alerts
 ```
 
 </Tab>
@@ -92,7 +93,7 @@ The gateway reads the key from its environment, which includes `~/.defenseclaw/.
 
 <Tab value="Generic HMAC">
 
-For SIEMs / SOAR platforms that prefer a generic POST with a verifiable signature:
+For SIEM or SOAR platforms that accept a generic POST with a signature. Store the shared secret in `DEFENSECLAW_SIEM_SECRET` first:
 
 ```bash
 defenseclaw keys set DEFENSECLAW_SIEM_SECRET
@@ -139,19 +140,19 @@ A connector-hook block names the rule that fired. The event's `details` carry `r
     },
     'list': {
       type: 'subcommand',
-      description: 'Tabular listing of every configured webhook. URLs are truncated; secret-envs referenced by name (never printed). --json for machine-readable output.',
+      description: 'Table of every configured webhook. URLs are truncated and secret-envs are shown by name only. --json for JSON output; --connector for one connector.',
     },
     'show <name>': {
       type: 'subcommand',
-      description: 'Pretty-print a single entry with full URL, secret-env name, severity, events allow-list, timeout, cooldown.',
+      description: 'Show one entry with its full URL, secret-env name, severity, events, timeout and cooldown. --json for JSON output.',
     },
     'enable <name>': {
       type: 'subcommand',
-      description: 'Flip enabled=true. Safe to re-run on an already-enabled entry.',
+      description: 'Set enabled=true. Safe to re-run. --connector for a connector-scoped entry.',
     },
     'disable <name>': {
       type: 'subcommand',
-      description: 'Flip enabled=false. Preserves the entry so you can re-enable later without re-typing the URL.',
+      description: 'Set enabled=false and keep the entry. --connector for a connector-scoped entry.',
     },
     'remove <name>': {
       type: 'subcommand',
@@ -159,7 +160,7 @@ A connector-hook block names the rule that fired. The event's `details` carry `r
     },
     'test <name>': {
       type: 'subcommand',
-      description: 'Dispatch a synthetic event with a unique ID through the configured webhook. --dry-run formats the payload without delivering. Each invocation defeats receiver dedup, safe to re-run.',
+      description: 'Send a synthetic event with a unique ID. --dry-run formats the payload without sending; --timeout sets the delivery timeout in seconds. Safe to re-run.',
     },
   }}
 />
@@ -192,7 +193,7 @@ Env var names the interactive prompt suggests for `--secret-env`:
 
 ## SSRF guard
 
-Every URL is validated against the same SSRF guard the Go gateway runs at delivery time:
+Every URL is checked against the same SSRF guard the gateway runs at delivery time:
 
 - The scheme is `http://` or `https://`, and the host parses.
 - The host resolves to a public address. Private (RFC 1918 and IPv6 ULA), link-local, loopback, cloud-metadata and carrier-grade NAT (100.64.0.0/10) addresses are rejected.
@@ -203,11 +204,11 @@ Every URL is validated against the same SSRF guard the Go gateway runs at delive
 error: IP 10.0.0.5 is a private or reserved address; webhooks must reach a public address so events can't be sent to internal services (SSRF guard). Use a public endpoint or relay.
 ```
 
-The validator runs both at `add` time (early failure) and at delivery time (catches hand-edits to `config.yaml` that would otherwise reject events at runtime).
+The check runs at `add` time and again at delivery time, which catches hand edits to `config.yaml`.
 
 ## Verifying a webhook with `test`
 
-`test` ships a synthetic event with a unique event-ID per invocation, which means receivers cannot dedup it:
+`test` sends a synthetic event with a new event ID each time, so receivers do not deduplicate it:
 
 ```bash
 defenseclaw setup webhook test pd-prod
@@ -220,13 +221,11 @@ The output includes:
 - The HTTP status returned by the receiver.
 - A `setup-webhook` audit event with `name=pd-prod type=pagerduty ok=True`, recorded when the gateway is running.
 
-For the dry-run rehearsal:
+To format the payload without sending it:
 
 ```bash
 defenseclaw setup webhook test pd-prod --dry-run
 ```
-
-— the payload is formatted (so you can copy/paste it into your receiver's playground) without making the HTTP call.
 
 ## Common gotchas
 
@@ -255,7 +254,7 @@ webhooks:
     enabled: true
 ```
 
-Then run `defenseclaw setup webhook test pd-prod` to validate. The runtime accepts any non-empty env-var name; the rejection is a CLI-only foot-gun guard.
+Then run `defenseclaw setup webhook test pd-prod` to validate. The gateway accepts any non-empty variable name; only the CLI applies this check.
 
 </Accordion>
 
@@ -290,7 +289,7 @@ The TUI (`defenseclaw tui` → Setup → Webhooks) runs these same `setup webhoo
 
 </Accordions>
 
-## Reference
+## See also
 
 - [Webhook CLI source](https://github.com/cisco-ai-defense/defenseclaw/blob/main/cli/defenseclaw/commands/cmd_setup_webhook.py) (`cmd_setup_webhook.py`): every subcommand, validator and helper.
 - `internal/gateway/webhook.go` — the dispatcher, dedup logic, and HMAC implementation.

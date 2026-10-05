@@ -11,7 +11,7 @@ keywords:
   - asset_policy registry_required
 ---
 
-A **registry source** is a fetchable manifest of skills and/or MCP servers that DefenseClaw ingests on demand. Public catalogs (clawhub, smithery), internal HTTPS YAMLs / JSONs, git repos, and on-disk YAMLs are all supported. Synced entries flow through the existing skill / MCP scanners; clean ones land in `asset_policy.{skill,mcp}.registry` so a later admission decision can say "approved by registry:`<id>`" instead of "approved by an unattributed rule someone wrote in 2024."
+A **registry source** is a fetchable manifest of skills and/or MCP servers that DefenseClaw ingests on demand. Public catalogs (clawhub, smithery, skills.sh), internal HTTPS YAMLs / JSONs, git repos, and on-disk YAMLs are all supported. Synced entries flow through the existing skill / MCP scanners; clean ones land in `asset_policy.{skill,mcp}.registry` so a later admission decision can say "approved by registry:`<id>`" instead of "approved by an unattributed rule someone wrote in 2024."
 
 <Callout title="Why registries matter">
 Without a registry, every new skill / MCP that lands on disk is admission-evaluated against ad-hoc operator-authored rules. With one or more registries, the catalog drives admission: clean entries get auto-promoted, everything else is held for review, and toggling `registry_required` flips the asset class to deny-by-default for anything the catalog hasn't blessed.
@@ -129,7 +129,7 @@ The first sync downloads the manifest, runs the skill scanner on every entry, an
     },
     'edit <id>': {
       type: 'subcommand',
-      description: 'Update an existing source. Bare form (no flags) walks every field interactively; passing any mutating flag suppresses prompts.',
+      description: 'Update an existing source. Bare form (no flags) walks every field interactively; passing any mutating flag suppresses prompts. --clear-auth-env removes the auth variable; --json for JSON output.',
     },
     'list': {
       type: 'subcommand',
@@ -145,11 +145,11 @@ The first sync downloads the manifest, runs the skill scanner on every entry, an
     },
     'test <id>': {
       type: 'subcommand',
-      description: 'Dry-run fetch + parse: no cache writes, no asset_policy mutation. The same SSRF guard, size cap, and content filter as a real sync.',
+      description: 'Dry-run fetch + parse: no cache writes, no asset_policy mutation. The same SSRF guard, size cap, and content filter as a real sync. -e/--show-entries lists entries (--limit, default 20); --allow-private; --json.',
     },
     'sync [<id>...]': {
       type: 'subcommand',
-      description: 'Fetch + scan + promote one or more sources. --all syncs every enabled source; --no-promote previews without asset_policy writes; --no-scan does a metadata-only refresh; --scan-stdio also scans stdio MCP entries.',
+      description: 'Fetch + scan + promote one or more sources. --all syncs every enabled source (add --include-disabled for disabled ones); --no-promote previews without asset_policy writes; --no-scan does a metadata-only refresh; --scan-stdio also scans stdio MCP entries; --allow-private; --json.',
     },
     'entries <id>': {
       type: 'subcommand',

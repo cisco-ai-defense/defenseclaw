@@ -66,7 +66,8 @@ it does not use a POSIX hook shell or WSL.
 `setup codex` is the dedicated Codex setup alias. It uses the same setup
 backend as `setup guardrail`, adds or reconfigures Codex, wires hooks + OTel +
 the notify bridge, and can join an existing hook-connector roster when you
-choose **Add**. No proxy listener binds in either mode.
+choose **Add**. No proxy listener binds in either mode. Fully quit and reopen
+Codex after setup so it loads the new hooks and OTel settings.
 
 Native logs, metrics, and traces use the standard loopback
 `/v1/{logs,metrics,traces}` endpoints with

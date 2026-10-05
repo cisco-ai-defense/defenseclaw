@@ -62,6 +62,13 @@ shows up as **DefenseClaw Local Mode**. The generated HEC token and bootstrap
 secret stay hidden unless you pass `--show-credentials`; keep them out of
 diagnostics and support output.
 
+| Flag | Purpose |
+| --- | --- |
+| `--index`, `--source`, `--sourcetype` | HEC index, source, and sourcetype. Local defaults are `defenseclaw_local`, `defenseclaw`, and `defenseclaw:json`. |
+| `--refresh-bundle` / `--no-refresh-bundle` | Refresh `~/.defenseclaw/splunk-bridge/` from the installed bundle before starting, keeping your secrets. On by default; a running stack is restarted. |
+| `--s3-export` | Also start the optional S3 exporter sidecar. Set the bucket with `--s3-bucket` (or `S3_BUCKET`), and optionally `--s3-prefix` and `--aws-region` (default `us-west-2`). |
+| `--show-credentials` | Print the generated HEC token and bootstrap secret. Use it only in a private terminal. |
+
 ### Bundled dashboards
 
 The app opens on a home page and groups its views into four menus:

@@ -198,15 +198,29 @@ retry loop or an agent that is still active.
 
 ![Agent360 lifecycle DAG for a Codex agent tree: the prompt start, the root agent at depth 0, three depth-1 subagents, grouped tool-family and model nodes, and a terminal outcome](/images/grafana/agent360-topology.jpg)
 
-The **Lifecycle DAG — prompt → agents → work → outcomes** is built from canonical
-Loki events and durable relationship evidence, never trace parentage or raw
-subagent parent fields. An active typed `parent_of` relationship is read in its
-reported direction; an active typed `delegated_by` relationship is read in the
-inverse direction. Work and outcomes use the selected time range. Session and
-durable lineage anchors may be recovered from the prior 24 hours so a boundary
-window does not leave an edge endpoint missing; a recovered lineage edge remains
-only when that child has graph-eligible activity in the selected range. Its arrows
-are causal or ownership relationships that DefenseClaw can prove:
+The **Lifecycle DAG — prompt → agents → work → outcomes** is built from
+canonical Loki events and durable relationship evidence, never from trace
+parentage or raw parent fields. Work and outcomes use the selected time range;
+session and lineage anchors may come from the prior 24 hours so an edge at the
+window boundary still has both ends. Each arrow is a relationship DefenseClaw can
+prove:
+
+- **Session start** points to the root agent. It is a lifecycle anchor, not
+  prompt text.
+- **Prompt inputs** is one grouped node per root that counts depth-zero prompt
+  submissions.
+- A parent agent points to each child recorded by a `parent_of` or
+  `delegated_by` relationship.
+- Each agent points to one summary node per provider/model pair, and one per
+  tool family: Bash, MCP, Skills, Collaboration, File edits, Web/browser,
+  Visual, or Task control. An unrecognized tool keeps its reported name.
+- Each agent points to its messages to other agents, approvals, turn outcomes,
+  and terminal outcome.
+
+Repeated calls by one agent increase a node's total instead of adding nodes. The
+root agent's own model and tool work appears under the root, like any subagent's.
+Click a node for the exact records behind it, including any content the
+connector exported; the dashboard does not remove or mask fields.
 
 - the separate **Session start** anchor points to the root agent observed at
   `session_start` without claiming that the session event contains prompt text;

@@ -1,6 +1,6 @@
 ---
 title: Plan a rollout
-description: Plan a DefenseClaw enterprise rollout across thousands of mixed Windows, Linux, and macOS endpoints, from prerequisites and a pilot in observe mode to per-user installs and rings.
+description: Plan a DefenseClaw enterprise rollout. Choose agents and users, pilot in observe mode, remove per-user installs, and expand in rings.
 keywords:
   - DefenseClaw enterprise rollout
   - MDM rollout plan
@@ -85,17 +85,11 @@ The [enumerator](/docs/enterprise/concepts#enumerator) decides which users are
 [enrolled](/docs/enterprise/concepts#enrollment). It enrolls a user for an agent
 only after it finds a supported install of that agent for that user, and it
 checks again every five minutes. The settings live under
-`enterprise.enrollment` and behave differently per OS:
-
-| Setting | Linux and macOS | Windows |
-| --- | --- | --- |
-| Candidates | Every account the user database lists (NSS on Linux, Directory Services on macOS), signed-in users, the owners of folders under the home roots, and `include_users` | Every user profile on the computer: local, domain, and Microsoft Entra ID accounts |
-| Built-in filter | A user ID in the interactive range, a login shell, and a home under `/home` or `/var/home` (Linux) or `/Users` (macOS) or a `home_roots` entry. Never root or `nobody`. The range starts at `UID_MIN` from `/etc/login.defs` (1000 when unset) on Linux and at 501 on macOS. On Linux, `UID_MAX` (60000 when unset) caps only local accounts in `/etc/passwd`; directory accounts have no upper bound unless you set `uid_max` | Interactive user profiles only |
-| `include_users` | Adds these users even outside the user-ID range or with a no-login shell. Everyone else who passes the filter is still enrolled | Accepted, but it adds and removes no one: every profile on the computer is already a candidate |
-| `exclude_users` | Never enrolled | Never enrolled |
-| `include_groups`, `exclude_groups` | Filter by group | Filter by local, Active Directory and Microsoft Entra ID group. A user whose membership is not known yet, or who is left undecided by an `include_groups` entry that does not resolve, is pending: no new rows, nothing revoked |
-| `exempt_users` | Not enrolled, but their calls are still inspected and logged | Keeps the rows of the machine-policy agents, so the user is inspected and logged there. Per-user agents get no new rows; rows already enrolled are kept |
-| A user who is not enrolled and runs a machine-policy agent | Inspected by default (`unenrolled_users: inspect`). Refused with `unenrolled_users: deny` | Refused |
+`enterprise.enrollment`. By default it picks interactive local and directory
+users on Linux and macOS, and every interactive profile on Windows. Narrow the
+set with `include_users`, `exclude_users`, the group filters and
+`exempt_users`. Each setting behaves a little differently per OS; see
+[What each OS honors](/docs/enterprise/enrollment#what-each-os-honors).
 
 Three cases to plan for:
 
@@ -154,7 +148,7 @@ Some users may already run the ordinary per-user DefenseClaw. On a managed
 computer, the per-user installer (`install.sh`, `install.ps1`),
 `defenseclaw upgrade`, and the per-user gateway refuse to run.
 
-There is no automatic migration in this release.
+DefenseClaw does not migrate per-user installs.
 `enterprise.coexistence.per_user_install` is reserved: it is accepted and
 validated but has no effect. Remove per-user installs yourself, before the
 managed install reaches a computer:
@@ -240,3 +234,7 @@ upgrades and refuses to install an older version over a newer one.
 [changing the config](/docs/enterprise/lifecycle#change-the-config),
 [repair](/docs/enterprise/lifecycle#repair), and
 [uninstall](/docs/enterprise/lifecycle#uninstall).
+
+## Next
+
+[Install with any MDM](/docs/enterprise/mdm) to deploy the pilot ring.

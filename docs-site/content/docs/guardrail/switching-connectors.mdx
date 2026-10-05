@@ -47,7 +47,9 @@ When you no longer want a connector wired, remove it explicitly:
 defenseclaw setup remove codex
 ```
 
-DefenseClaw refuses to remove the last connector by default because the gateway would enforce nothing. If that is intentional, pass `--force`:
+The gateway restarts and tears down that connector's hooks. Pass `--no-restart` to restart it later.
+
+DefenseClaw refuses to remove the last connector by default because the gateway would enforce nothing. If that is intentional, pass `--force`. DefenseClaw stays installed; use `defenseclaw uninstall` to remove it:
 
 ```bash
 defenseclaw setup remove codex --force
@@ -57,7 +59,7 @@ defenseclaw setup remove codex --force
 
 Choose **Replace** in the connector setup prompt when you want setup to tear down the previous connector's agent-side files before wiring the new one. This is useful when a single-user workstation is moving from one agent to another and you do not want both configured at the same time.
 
-Non-interactively, pass `--replace`:
+Non-interactively, pass `--replace`. Setup asks before it removes the other connectors; `--yes` skips the question:
 
 ```bash
 defenseclaw setup claude-code --replace --mode action

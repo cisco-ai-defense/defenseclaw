@@ -116,6 +116,10 @@ permissive, or strict profiles.
   closed set of `delete --all` workload forms for production-scoped contexts.
 - `infrastructure-destruction-protection` blocks unscoped Terraform, OpenTofu,
   and Pulumi destruction while allowing plans, previews, and targeted changes.
+- `ssh-authorized-keys-protection` is a contract only and cannot be activated.
+  It defines how an approved-fingerprint allowlist would guard writes to
+  `~/.ssh/authorized_keys`. Do not point `policy_dir` at it; see its
+  [README](../policies/guardrail-use-cases/ssh-authorized-keys-protection/README.md).
 
 Cloud, SQL, Kubernetes, and infrastructure rules use semantic-only `a^` regex fallbacks. A complete
 ActionFacts parse, an exact code-owned prerequisite, a successful CEL result,

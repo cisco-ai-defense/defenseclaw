@@ -66,7 +66,8 @@ outside this native connector path.
 `setup claude-code` is the dedicated Claude Code setup alias. It uses the same
 setup backend as `setup guardrail`, adds or reconfigures `claudecode`, wires
 hooks + native OTel, and can join an existing hook-connector roster when you
-choose **Add**. No proxy listener binds in either mode.
+choose **Add**. No proxy listener binds in either mode. Fully quit and reopen
+Claude Code after setup so it loads the new hooks and OTel settings.
 
 Native OTLP uses managed loopback exporter settings with a Claude-scoped
 Authorization bearer. Logs and metrics are enabled; traces are explicitly

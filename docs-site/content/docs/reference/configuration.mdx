@@ -350,8 +350,8 @@ routing:
 guardrail:
   enabled: true
   connector: claudecode        # actively enforced connector
-  mode: action                 # observe | action
-  scanner_mode: local          # local | remote | both
+  mode: action                 # observe | action (default observe)
+  scanner_mode: local          # local | remote | both (default both)
   rule_pack_dir: ~/.defenseclaw/policies/guardrail/default  # path; --rule-pack picks the bundled profile dir
   block_at: ""                 # CRITICAL | HIGH | MEDIUM | LOW; empty -> the rule pack's level
   alert_at: ""                 # same values; never above block_at
@@ -1059,6 +1059,7 @@ set, the CLI and the gateway add the instance-metadata endpoints
 | OpenHands | `~/.openhands/hooks.json` by default; `<workspace>/.openhands/hooks.json` with `--workspace` |
 | Antigravity | `~/.gemini/config/hooks.json`; Google documents no configuration-home environment override, and DefenseClaw owns only this global registration. Antigravity also discovers `<workspace>/.agents/hooks.json`, which DefenseClaw does not patch to avoid duplicate ownership. |
 | Hermes | `~/.hermes/config.yaml` |
+| Kiro | `~/.kiro/hooks/defenseclaw.json` (Kiro IDE and `kiro-cli --v3`), `~/.kiro/agents/defenseclaw.json` (Kiro CLI 2.x) and `~/.kiro/settings/cli.json`; a workspace copy under `<workspace>/.kiro/hooks/` with `--workspace` |
 | OpenCode | `~/.config/opencode/plugins/defenseclaw.js` (managed bridge plugin — written whole, not patched; removed on teardown) |
 | Amp | `~/.config/amp/plugins/defenseclaw.ts` on macOS/Linux or `%USERPROFILE%\.config\amp\plugins\defenseclaw.ts` on native Windows (managed system policy plugin) |
 | OmniGent | `$OMNIGENT_CONFIG` when set, then `$OMNIGENT_CONFIG_HOME/config.yaml` or `~/.omnigent/config.yaml`; `~/.defenseclaw/hooks/defenseclaw_omnigent_policy.py`; and `defenseclaw_omnigent.pth` in OmniGent's Python environment. The CLI server must receive the selected YAML through `--config`. |

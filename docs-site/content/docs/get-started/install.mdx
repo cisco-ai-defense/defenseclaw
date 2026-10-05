@@ -29,7 +29,8 @@ Windows (PowerShell):
 irm https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.ps1 | iex
 ```
 
-When it finishes, run `defenseclaw init` to configure DefenseClaw (see the
+On a first install the installer asks which agent to guard (the default is
+`codex`). When it finishes, run `defenseclaw init` to configure DefenseClaw (see the
 [quickstart](/docs/get-started/quickstart)). To pick an agent during the install, pass options: on
 macOS/Linux, end the command above with `bash -s -- --connector codex --quickstart`
 instead of `bash`; on Windows, run
@@ -55,8 +56,12 @@ which runs the latest release's installer for you.
 | `--local DIR` / `-Local DIR` | Take every release file from a directory instead of GitHub |
 | `--rollback` / `-Rollback` | Restore the install that the last upgrade replaced |
 | `--connector NAME` / `-Connector NAME` | First install only: the agent to guard |
+| `--no-openclaw` / `-NoOpenclaw` | First install only: same as connector `none` (configure no agent) |
 | `--quickstart` / `-Quickstart` | Run `defenseclaw quickstart` afterwards when nothing is configured yet (a first install, or an install that was never set up) |
 | `--quickstart-mode MODE` / `-QuickstartMode MODE` | `observe` or `action` for that quickstart (implies `--quickstart`) |
+| `-NoPersistPath` | Windows only: do not change the user `PATH` in the registry |
+| `-CosignPath FILE` | Windows only: the `cosign` to check the release signature with |
+| `--sandbox` | macOS/Linux only: deprecated, has no effect |
 
 The installers exit with one of these codes (`install.ps1` when run as a file;
 `irm | iex` reports a failure as an error instead):
@@ -215,6 +220,10 @@ launcher (with a `defenseclaw.cmd` copy for scripts that name it),
 plus an extensionless `defenseclaw` launcher so the command also works in Git
 Bash.
 The installer adds `%USERPROFILE%\.local\bin` to your user `PATH`.
+
+On macOS and Linux the installer does not change `PATH`. If `~/.local/bin` is
+not on it, the installer prints the line to add to your shell profile. Add it,
+then open a new shell before you run `defenseclaw`.
 
 ## Startup behavior
 
