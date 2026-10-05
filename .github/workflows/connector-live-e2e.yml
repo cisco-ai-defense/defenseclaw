@@ -344,7 +344,7 @@ jobs:
           fi
 
       # Deterministic Go contract tests for each connector in the cell. The
-      # shared connector lifecycle / observability / verify matrices are
+      # shared connector lifecycle, verify-clean and golden-layout matrices are
       # connector-parameterized; filtering with -run per connector makes a
       # failure point at exactly which connector regressed. A connector with
       # no dedicated subtest matches nothing and `go test` exits 0, so the
@@ -357,9 +357,12 @@ jobs:
           failed=""
           for c in ${CELL_CONNECTORS}; do
             echo "::group::go contract tests: ${c}"
-            go test -count=1 ./test/e2e/ \
-              -run "TestConnectorLifecycle_Matrix/${c}|TestV7Observability_DestinationAppPerConnector/${c}|TestConnectorVerifyCleanOnFreshDataDir/${c}|TestGoldenPerConnectorLayout" \
-              || failed="${failed} ${c}"
+            # go test -run splits its pattern at each "/" into per-level
+            # filters, so each top-level test needs its own run.
+            for test in TestConnectorLifecycle_Matrix TestConnectorVerifyCleanOnFreshDataDir TestGoldenPerConnectorLayout; do
+              go test -count=1 ./test/e2e/ -run "^${test}\$/^${c}\$" \
+                || failed="${failed} ${c}:${test}"
+            done
             echo "::endgroup::"
           done
           if [ -n "${failed}" ]; then
