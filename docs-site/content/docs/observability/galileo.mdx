@@ -369,7 +369,7 @@ carries it:
 | Metadata key | Value | Spans |
 | --- | --- | --- |
 | `user.id`, `defenseclaw.user.name` | The account's uid or SID and name | Agent, model and tool |
-| `defenseclaw.user.principal`, `defenseclaw.user.domain` | The directory principal and domain, for example `alice@CORP.EXAMPLE.COM` and `CORP.EXAMPLE.COM` | Agent, model and tool |
+| `defenseclaw.user.principal`, `defenseclaw.user.domain` | The directory principal and domain, for example `alice@CORP.EXAMPLE.COM` and `corp.example.com`. The principal is sent only with `ai_discovery.include_user_principal` | Agent, model and tool |
 | `defenseclaw.agent.identity.id` | The stable agent identity (`agt-`) | Agent, model and tool |
 | `defenseclaw.guardrail.profile.name` | The guardrail profile that decided | Model and tool |
 

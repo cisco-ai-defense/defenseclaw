@@ -18,12 +18,12 @@ gateway's service account is not the person running the AI agent.
 | `defenseclaw.user.id_kind` | `posix_uid` or `windows_sid`, set only when the identifier came from the corresponding trusted OS source. |
 | `defenseclaw.user.name` | OS account name from the same lookup as `user.id`; never mixed with a fallback identity. |
 | `defenseclaw.user.email` | Optional connector-account email. Collection is off by default. |
-| `defenseclaw.user.principal` | Directory principal of the account: a UPN, a Kerberos principal or `DOMAIN\user`, for example `alice@CORP.EXAMPLE.COM`. |
+| `defenseclaw.user.principal` | Directory principal of the account: a UPN, a Kerberos principal or `DOMAIN\user`, for example `alice@CORP.EXAMPLE.COM`. Sent only with `ai_discovery.include_user_principal`. |
 | `defenseclaw.user.domain` | Directory domain or Kerberos realm of the principal. |
 | `defenseclaw.user.directory` | `local`, `ldap`, `active_directory`, `entra_id`, `okta` or `other`. |
 | `defenseclaw.user.tenant_id` | Cloud directory tenant, for an Entra-joined Windows account. |
 | `defenseclaw.user.identity.source` | The OS facility that resolved the directory facts. |
-| `defenseclaw.user.principal.assurance` | `verified` when the gateway or the root guardian resolved the facts, `claimed` when only the hook reported them. |
+| `defenseclaw.user.principal.assurance` | `verified` when the gateway or the root guardian resolved the facts, `claimed` when only the hook reported them (`defenseclaw.user.identity.source` is then `hook_reported`). |
 | `defenseclaw.session.kind` | Login session of the agent: `local`, `ssh`, `rdp` or `console`. |
 | `defenseclaw.agent.identity.id` | The agent's own stable identity (`agt-`), one per connector install, user and machine. |
 
@@ -122,11 +122,14 @@ For Codex and Claude Code, join a hook event to the latest `ai.discovery` row
 with the same trusted `user.id` to obtain the connector email. The address is
 reported once per discovery cycle rather than copied onto every hook event.
 
-## Optional principal in inventory
+## Optional principal
 
-Hook activity carries the directory principal when the gateway resolved one.
-AI discovery inventory records leave it out unless you opt in, because a
-principal names a person across systems:
+No record carries `defenseclaw.user.principal` or
+`defenseclaw.session.kerberos_principal` unless you opt in, because a
+principal names a person across systems. The domain, directory, source and
+assurance are sent either way. With the option on, hook decisions, tool
+activity, agent, model and tool spans, and `identity.observed` carry the
+principal:
 
 ```yaml
 config_version: 8

@@ -49,31 +49,54 @@ Each cell names what DefenseClaw reads and the assurance it records.
 
 | Identity | Linux | Windows | macOS |
 | --- | --- | --- | --- |
-| Local account | uid and name from the account database (verified) | SID and name from `LookupAccountSid` (verified) | uid and name from the account database (verified) |
-| LDAP or SSSD | Directory backend from NSS (`sss`, `ldap`), domain from the fully qualified name, groups from `initgroups` (verified). UPN and mail through SSSD InfoPipe, read by the root guardian (verified) | Not applicable | Directory-bound accounts through `dscl /Search` (verified) |
-| Active Directory over Kerberos | SSSD or winbind: principal, domain and groups (verified). The Kerberos principal in the session's credential cache (claimed) | Domain SID, name and groups (verified). AD UPN through `TranslateNameW` (verified). The logon session's UPN and authentication package (claimed) | AD-bound Mac: the Kerberos principal from `dscl` AuthenticationAuthority and the binding from `dsconfigad -show` (verified) |
-| Entra ID | Only with an Entra NSS module installed (for example himmelblau); reported as that module's directory | Entra-joined or hybrid-joined: UPN from the identity store cache, tenant and join type (verified). Entra group SIDs (`S-1-12-1-...`) | Platform SSO with Company Portal: the device's SSO provider from `app-sso platform -s` (verified). The user's Platform SSO login (claimed) |
-| Okta | Only with Okta's NSS module (the Okta ASA agent); otherwise as the AD or LDAP account Okta syncs to | As the AD account Okta syncs to | Platform SSO or Okta Device Access: the device's SSO provider (verified). The user's login (claimed). As AD or LDAP when synced |
+| Local account | uid, name and groups from NSS `files` (verified) | SID and name from `LookupAccountSid` (verified) | Reported as `local` from Open Directory, read by the root enumerator (verified) |
+| LDAP or SSSD | The NSS backend that owns the uid (`sss` or `ldap`), the domain from the fully qualified name and the groups from `initgroups` (verified). The guardian adds the UPN from SSSD InfoPipe and the directory type from `realm list` (verified) | Not applicable | An LDAP-bound account's directory from `dscl /Search` (verified) |
+| Active Directory over Kerberos | SSSD or winbind: principal, domain and groups (verified). Without InfoPipe the principal is `account@REALM`. The Kerberos principal in the session's credential cache (claimed) | Account and domain from `LookupAccountSid`, the AD UPN from `TranslateNameW` in the background (verified). Groups from the SYSTEM enumerator's token-group cache (verified). The logon session's UPN and Kerberos principal (claimed) | AD-bound Mac: the Kerberos principal from the `dscl` AuthenticationAuthority and the domain from `dsconfigad -show` (verified) |
+| Entra ID | With the himmelblau or `aad` NSS module, reported as `entra_id` (verified) | Entra-joined or hybrid-joined: the UPN and provider from the identity store cache, the tenant and join type from the join state (verified). Entra group SIDs (`S-1-12-1-...`) | Platform SSO with Company Portal: the device's SSO provider from `app-sso platform -s` (verified). The user's Platform SSO login stays claimed and is not read |
+| Okta | No Okta NSS module is recognized; the account appears as the AD or LDAP account Okta syncs to | As the AD account Okta syncs to | Platform SSO or Okta Device Access with Okta Verify: the device's SSO provider (verified). As AD or LDAP when synced |
+
+Who resolves the verified facts depends on the install:
+
+- **Linux:** the gateway resolves the NSS facts itself, on any install. The
+  root guardian adds InfoPipe and `realm list` facts on the standalone
+  enterprise profile only.
+- **Windows:** the gateway resolves the account, UPN, tenant and join type
+  itself. Groups come from the SYSTEM enumerator, on the standalone
+  enterprise profile only.
+- **macOS:** every verified fact comes from the root enumerator, so a
+  per-user install has none. Its records carry only claimed facts.
+
+A record carries `verified` facts whenever the gateway resolved some.
+Otherwise it falls back to what the hook claimed: the logon session's UPN or
+Kerberos principal, with the domain taken from its realm and
+`defenseclaw.user.identity.source` set to `hook_reported`.
 
 DefenseClaw records the directory as `defenseclaw.user.directory`: `local`,
-`ldap`, `active_directory`, `entra_id`, `okta` or `other`. It also records
-which OS facility resolved the facts in `defenseclaw.user.identity.source`.
+`ldap`, `active_directory`, `entra_id`, `okta` or `other`. The OS facility
+that resolved the facts is `defenseclaw.user.identity.source`, for example
+`sssd`, `sssd_infopipe`, `winbind`, `nss_ldap`, `nss_files`, `windows_lsa`,
+`windows_identity_store`, `macos_opendirectory`, `macos_platform_sso` or
+`hook_reported`.
 
 Principals and UPNs compare without regard to case. SSSD returns the realm in
 upper case (`alice@CORP.EXAMPLE.COM`) while the directory may store
-`alice@corp.example.com`; both name the same user.
+`alice@corp.example.com`; both name the same user. The domain is reported in
+lower case.
 
 ### Login sessions
 
 | Fact | Linux | Windows | macOS |
 | --- | --- | --- | --- |
-| SSH or local session | logind `GetSession` for the verified uid, or `/run/utmp` (verified). `SSH_CONNECTION` and `SSH_TTY` (claimed) | `SSH_CONNECTION` (claimed) | `SSH_CONNECTION` (claimed) |
+| SSH or local session | The hook's claim confirmed through logind `GetSession` for the verified uid, or `/run/utmp` (verified). Otherwise `SSH_CONNECTION` and `XDG_SESSION_ID` (claimed) | `SSH_CONNECTION` (claimed) | `SSH_CONNECTION` (claimed) |
 | Remote desktop | Not applicable | Logon type from `LsaGetLogonSessionData` (claimed) | Not applicable |
-| Kerberos principal | The default principal of a `FILE:` or `KCM:` credential cache, read directly, never through `klist` (claimed) | The logon session's Kerberos package (claimed) | The default credential cache (claimed) |
+| Kerberos principal | The default principal of a `FILE:`, `DIR:` or `KCM:` credential cache, read directly, never through `klist` (claimed) | `user@domain` of a Kerberos logon session (claimed) | A `FILE:` cache named by `KRB5CCNAME` or `krb5.conf` (claimed). The default `API:` cache cannot be read |
 
 The session kind is sent as `defenseclaw.session.kind` (`local`, `ssh`,
-`rdp` or `console`), the client address as `client.address` and the Kerberos
-principal as `defenseclaw.session.kerberos_principal`.
+`rdp` or `console`) and the client address as `client.address`, but only at
+the same assurance as the record's directory facts. A record with verified
+directory facts and only a claimed session, such as any record from Windows
+or macOS, carries no session kind. The Kerberos principal is always claimed
+and is sent as `defenseclaw.session.kerberos_principal`.
 
 ## Agent identity
 
@@ -207,8 +230,8 @@ Every decision records the profile and the reason it was selected:
 | `defenseclaw.guardrail.profile.match` | `agent`, `user`, `group`, `connector`, `default`, `default_unverified` or `default_lookup_failed` |
 | `defenseclaw.guardrail.profile.matched_group` | The group that matched, for `group` |
 
-The same records carry the user, the principal and
-`defenseclaw.agent.identity.id`. A reload that changes a profile's effective
+The same records carry the user, `defenseclaw.agent.identity.id` and, with
+`ai_discovery.include_user_principal`, the principal. A reload that changes a profile's effective
 policy writes one `config.change.applied` audit event per changed profile,
 with the path `guardrail.profiles.<name>.digest`. Compare the digest in a
 decision with the one `defenseclaw guardrail profile explain` reports to prove
@@ -220,7 +243,7 @@ decisions by profile and match reason and the digest timeline.
 
 | Setting | Default | Effect |
 | --- | --- | --- |
-| `ai_discovery.include_user_principal` | `false` | Adds the directory principal to AI discovery inventory records. Off by default, like `include_user_email`, because a principal names a person across systems. |
+| `ai_discovery.include_user_principal` | `false` | Adds `defenseclaw.user.principal` and `defenseclaw.session.kerberos_principal` to every record that carries identity: hook decisions, tool activity, agent, model and tool spans, and `identity.observed`. Off by default, like `include_user_email`, because a principal names a person across systems. The domain, directory and assurance are sent either way. |
 | `ai_discovery.ide_inventory` | `all` | `all`, `ai_only` or `off`. Plugin lists can reveal personal tooling; `ai_only` keeps only AI plugins. |
 
 The principal, the Kerberos principal, the client address and the tenant ID
@@ -254,8 +277,8 @@ dbus-send --system --print-reply --dest=org.freedesktop.sssd.infopipe /org/freed
 
 | Symptom | Check |
 | --- | --- |
-| No principal, only `user.id` | The account is local, or the directory lookup failed. On Linux run `getent passwd alice` and `id alice`; on SSSD, check InfoPipe as above. |
-| `principal.assurance` is `claimed` | Only the hook reported the fact, so profiles ignore it. Check that the gateway can resolve the account itself (`getent passwd alice` on Linux). |
+| No principal, only `user.id` | `ai_discovery.include_user_principal` is off, which is the default; the domain and directory still appear. With it on, the account is local or the directory lookup failed. On Linux run `getent passwd alice` and `id alice`; on SSSD, check InfoPipe as above. |
+| `principal.assurance` is `claimed` | The gateway resolved no directory facts, so the record carries what the hook reported and profiles ignore it. Expected on a per-user macOS install. On Linux check `getent passwd alice`. |
 | Every decision shows `default_unverified` | No verified user reached the gateway. Check that the hook runs as the signed-in user and that the gateway accepts its credential (`defenseclaw doctor`). |
 | `default_lookup_failed` | The directory lookup for a verified user failed, so the default profile applied. Check that the directory service answers on the host. |
 | A group assignment never matches | Run `defenseclaw guardrail profile explain --user alice` and compare the group spelling. Use the SID to avoid name ambiguity. |
