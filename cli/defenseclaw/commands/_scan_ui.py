@@ -433,3 +433,52 @@ def record_scan(logger: Any, result: Any, **kwargs: Any) -> None:
             from defenseclaw.commands._audit_notice import not_recorded_warning
 
             ux.echo(not_recorded_warning("this scan result"), err=True)
+
+
+# GAP-2643: with the LLM analyzer on, 'skill scan --all' and 'plugin scan
+# --all' spent about 15 s per item waiting on the model, one item at a time
+# (31 min for 68 skills). Up to this many items now scan at once; results are
+# still reported in the original order.
+LLM_SCAN_WORKERS = 4
+
+
+def scan_batch_workers(scanner: Any, **scan_options: Any) -> int:
+    """How many items a ``scan --all`` sweep may scan at once with *scanner*.
+
+    Scanners opt in through ``batch_workers(**scan_options)``; anything else
+    (including test doubles) scans one item at a time, as before.
+    """
+    fn = getattr(scanner, "batch_workers", None)
+    if not callable(fn):
+        return 1
+    try:
+        workers = fn(**scan_options)
+    except Exception:  # noqa: BLE001 - never let the probe break a sweep
+        return 1
+    if isinstance(workers, bool) or not isinstance(workers, int):
+        return 1
+    return max(1, workers)
+
+
+def ordered_scans(scan_one: Any, items: list[Any], *, workers: int = 1):
+    """Yield ``(item, get_result)`` in *items* order.
+
+    ``get_result()`` returns ``scan_one(item)`` or raises what it raised. With
+    ``workers > 1`` up to that many scans run in a thread pool ahead of the
+    caller; otherwise each scan runs when ``get_result()`` is called.
+    """
+    if workers <= 1 or len(items) < 2:
+        for item in items:
+            yield item, (lambda item=item: scan_one(item))
+        return
+    from concurrent.futures import ThreadPoolExecutor
+
+    pool = ThreadPoolExecutor(
+        max_workers=min(workers, len(items)), thread_name_prefix="defenseclaw-scan",
+    )
+    try:
+        futures = [pool.submit(scan_one, item) for item in items]
+        for item, future in zip(items, futures):
+            yield item, future.result
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
