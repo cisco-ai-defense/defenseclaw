@@ -606,7 +606,7 @@ func (a *App) preflight(ctx context.Context, api API) (*sandboxapi.Status, error
 		return nil, apiError(err)
 	}
 	if !st.Enabled {
-		return nil, fmt.Errorf("OpenShell sandboxes are off; run `%s setup` to turn them on", CommandName)
+		return nil, errors.New(sandboxapi.DisabledMessage)
 	}
 	if !st.Available {
 		reason := firstNonEmpty(st.Reason, "the daemon is not connected to an OpenShell gateway")

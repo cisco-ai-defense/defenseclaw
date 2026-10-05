@@ -227,7 +227,7 @@ func (a *APIServer) sandboxDisabledError() *sandboxapi.Error {
 	if cfg := a.runtimeConfigSnapshot(); cfg != nil && cfg.OpenShell.Enabled {
 		return sandboxapi.Errorf(sandboxapi.CodeUnavailable, "the sandbox subsystem is not running; see `defenseclaw sandbox doctor`")
 	}
-	return sandboxapi.Errorf(sandboxapi.CodeDisabled, "OpenShell sandboxes are disabled; set openshell.enabled or run `defenseclaw sandbox setup`")
+	return sandboxapi.Errorf(sandboxapi.CodeDisabled, sandboxapi.DisabledMessage)
 }
 
 func (a *APIServer) handleSandboxStatus(w http.ResponseWriter, r *http.Request) {

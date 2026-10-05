@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/wrapper"
 )
 
@@ -87,7 +88,7 @@ func (a *App) wrapperPreflight(spec *harness.Spec) error {
 		return fmt.Errorf("not wrapping `%s`, which would then fail to start in every new shell: %w", spec.Command, err)
 	}
 	if a.Cfg != nil && !a.Cfg.OpenShell.Enabled {
-		return why(fmt.Errorf("OpenShell sandboxes are off; run `%s setup` to turn them on", CommandName))
+		return why(errors.New(sandboxapi.DisabledMessage))
 	}
 	api, err := a.api()
 	if err != nil {
