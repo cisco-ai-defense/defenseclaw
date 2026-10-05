@@ -9,6 +9,16 @@ param()
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# This smoke exercises the refuse-on-drift validator contract (e.g. the
+# "managed DACL is not protected after exact ACL replacement" throw and
+# strict identity verdicts). The non-strict managed_enterprise bulldoze
+# path intentionally relaxes some of those checks via Write-DefenseClaw-
+# AclSelfHealAdvisory. Pin strict mode for the duration of this smoke so
+# the validator continues to fail the specific drift scenarios the test
+# cases inject. Production deployments default to non-strict; strict is
+# an operator opt-in and the posture these tests certify.
+$env:DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS = '1'
+
 $modulePath = [IO.Path]::GetFullPath(
     (Microsoft.PowerShell.Management\Join-Path $PSScriptRoot '..\DefenseClawEnterprise.psm1')
 )

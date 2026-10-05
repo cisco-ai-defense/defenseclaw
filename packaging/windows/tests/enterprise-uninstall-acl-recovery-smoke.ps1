@@ -9,6 +9,16 @@ param()
 Microsoft.PowerShell.Core\Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# This smoke certifies the refuse-on-drift uninstall ACL recovery
+# contract. Non-strict managed_enterprise mode intentionally relaxes
+# some validator verdicts (changed attestation evidence, inherited
+# Users read ACE, etc.) via Write-DefenseClawAclSelfHealAdvisory. Pin
+# strict mode for the duration of this smoke so the recovery continues
+# to reject the specific drift scenarios the test cases inject.
+# Production deployments default to non-strict; strict is an operator
+# opt-in and the posture these tests certify.
+$env:DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS = '1'
+
 $modulePath = [IO.Path]::GetFullPath((
     Microsoft.PowerShell.Management\Join-Path `
         $PSScriptRoot `
