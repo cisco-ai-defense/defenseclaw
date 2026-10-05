@@ -97,8 +97,9 @@ RULES: tuple[tuple[tuple[str, ...], frozenset[str]], ...] = (
 )
 
 PY_TEST_ROOT = "cli/tests"
-# This file names many paths in RULES; it never pins them.
+# This file and its test name many paths as data; they never pin them.
 SELF = "scripts/ci_changes.py"
+SELF_TEST = "cli/tests/test_ci_changes.py"
 GO_TEST_FUNCTION_RE = re.compile(r"^func\s+(Test[A-Za-z0-9_]*)\s*\(", re.MULTILINE)
 TUI_TEST_MARKER = "defenseclaw.tui"
 
@@ -194,12 +195,12 @@ def classify(
     basenames = {path.rsplit("/", 1)[-1] for path in files}
     py_tests = []
     if "python" not in flags:
-        py_tests = references(basenames, [f"{PY_TEST_ROOT}/*.py"])
+        py_tests = references(basenames, [f"{PY_TEST_ROOT}/*.py", f":!{SELF_TEST}"])
         if "tui" in flags:
             py_tests = sorted(
                 set(py_tests)
                 | set(references(["def test"], [f"{PY_TEST_ROOT}/tui/"]))
-                | set(references([TUI_TEST_MARKER], [f"{PY_TEST_ROOT}/*.py"]))
+                | set(references([TUI_TEST_MARKER], [f"{PY_TEST_ROOT}/*.py", f":!{SELF_TEST}"]))
             )
         py_tests = [path for path in py_tests if _is_test_module(path)]
 
