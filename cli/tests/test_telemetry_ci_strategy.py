@@ -74,6 +74,7 @@ def test_ordinary_ci_always_checks_real_registry_without_exhaustive_mutation_sui
 
     aggregate = jobs["python-lint-test"]
     assert set(aggregate["needs"]) == {
+        "changes",
         "python-test",
         "python-lint",
     }
