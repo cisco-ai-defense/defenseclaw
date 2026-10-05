@@ -286,7 +286,12 @@ func (adapter *aiDiscoveryV8Adapter) emitSignalLog(
 			UserID:                aiDiscoveryV8OptionalText(signal.UserID),
 			DefenseClawUserIDKind: v8UserIDKind(discoveryUserIDKind(signal.UserID)),
 			DefenseClawUserName:   aiDiscoveryV8OptionalText(signal.UserName),
+			// The agent identity of the connector install the signal belongs
+			// to, so discovery joins that agent's decisions.
+			DefenseClawAgentIdentityID: agentIdentityV8(inventoryAgentIdentityID(signal.SupportedConnector, signal.UserID)),
 		}
+		identity := inventoryIdentity(signal.UserID)
+		identity.applyTo(&base)
 		if signal.Category == inventory.SignalLocalModel && signal.Model != nil && signal.Model.Provenance != nil {
 			provenance := signal.Model.Provenance
 			base.DefenseClawAIModelProvenancePublisher = aiDiscoveryV8OptionalText(provenance.Publisher)
@@ -312,7 +317,7 @@ func (adapter *aiDiscoveryV8Adapter) emitSignalLog(
 		case "ai_component.changed":
 			return builder.BuildLogAIComponentChanged(base)
 		case "ai_component.observed":
-			return builder.BuildLogAIComponentObserved(observability.LogAIComponentObservedInput{
+			observed := observability.LogAIComponentObservedInput{
 				Envelope:                                 base.Envelope,
 				Severity:                                 base.Severity,
 				LogLevel:                                 base.LogLevel,
@@ -339,7 +344,10 @@ func (adapter *aiDiscoveryV8Adapter) emitSignalLog(
 				DefenseClawAIModelProvenanceDerivation:   base.DefenseClawAIModelProvenanceDerivation,
 				DefenseClawAIModelProvenanceSource:       base.DefenseClawAIModelProvenanceSource,
 				DefenseClawAIModelProvenanceConfidence:   base.DefenseClawAIModelProvenanceConfidence,
-			})
+				DefenseClawAgentIdentityID:               base.DefenseClawAgentIdentityID,
+			}
+			identity.applyTo(&observed)
+			return builder.BuildLogAIComponentObserved(observed)
 		case "ai_component.removed":
 			return builder.BuildLogAIComponentRemoved(observability.LogAIComponentRemovedInput(base))
 		default:
@@ -460,6 +468,7 @@ func (adapter *aiDiscoveryV8Adapter) emitIDEPluginLog(
 			DefenseClawUserIDKind:        v8UserIDKind(discoveryUserIDKind(plugin.UserID)),
 			DefenseClawUserName:          ideV8Optional(plugin.UserName, ideV8UserPattern, 256),
 		}
+		inventoryIdentity(plugin.UserID).applyTo(&base)
 		switch plugin.State {
 		case inventory.AIStateNew:
 			return builder.BuildLogIdePluginDiscovered(observability.LogIdePluginDiscoveredInput(base))
