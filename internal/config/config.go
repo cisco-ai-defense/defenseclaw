@@ -1107,36 +1107,6 @@ func (c *Config) ResolvedDefaultLLMAPIKey() string {
 	return c.ResolveLLM("").ResolvedAPIKey()
 }
 
-// EffectiveInspectLLM returns InspectLLM-shaped settings by delegating to
-// ResolveLLM. DEPRECATED: prefer c.ResolveLLM("scanners.skill") /
-// c.ResolveLLM("scanners.mcp") directly.
-func (c *Config) EffectiveInspectLLM() InspectLLMConfig {
-	base := c.ResolveLLM("")
-	out := c.InspectLLM
-	if out.Model == "" {
-		out.Model = base.Model
-	}
-	if out.Provider == "" {
-		out.Provider = base.Provider
-	}
-	if out.APIKey == "" {
-		out.APIKey = base.APIKey
-	}
-	if out.APIKeyEnv == "" {
-		out.APIKeyEnv = base.APIKeyEnv
-	}
-	if out.BaseURL == "" {
-		out.BaseURL = base.BaseURL
-	}
-	if out.Timeout == 0 {
-		out.Timeout = base.EffectiveTimeout()
-	}
-	if out.MaxRetries == 0 {
-		out.MaxRetries = base.EffectiveMaxRetries()
-	}
-	return out
-}
-
 type OTelConfig struct {
 	Enabled      bool                    `mapstructure:"enabled"      yaml:"enabled"`
 	Traces       OTelTracePolicyConfig   `mapstructure:"traces"       yaml:"traces"`
@@ -1441,20 +1411,6 @@ type AgentHookConfig struct {
 	ScanOnStop                   bool     `mapstructure:"scan_on_stop"                    yaml:"scan_on_stop,omitempty"`
 	ScanPaths                    []string `mapstructure:"scan_paths"                      yaml:"scan_paths,omitempty"`
 	ComponentScanIntervalMinutes int      `mapstructure:"component_scan_interval_minutes" yaml:"component_scan_interval_minutes,omitempty"`
-}
-
-// EffectiveFailMode returns the per-connector POLICY-LAYER fail
-// mode for AgentHookConfig, defaulting to "closed" for backward
-// compatibility. NOTE: this is NOT what governs the generated
-// hook scripts; see GuardrailConfig.EffectiveHookFailMode for
-// that. Both fields are named "fail_mode" in YAML — the namespace
-// (top-level connector vs guardrail.hook_fail_mode) is what tells
-// them apart.
-func (c AgentHookConfig) EffectiveFailMode() string {
-	if c.FailMode == "open" {
-		return "open"
-	}
-	return "closed"
 }
 
 // ConnectorHookConfig returns the AgentHookConfig for a named connector.

@@ -107,14 +107,6 @@ func DetectEnvironment() Environment {
 	return EnvLinux
 }
 
-// DefaultSkillWatchPaths returns skill directories for the default claw mode.
-// Prefer Config.SkillDirsForConnector when a config is available;
-// this fallback always uses the OpenClaw layout because we don't
-// know the active framework here.
-func DefaultSkillWatchPaths() []string {
-	return SkillDirsForOpenClaw("")
-}
-
 func DefaultConfig() *Config {
 	dataDir := DefaultDataPath()
 	clawMode := ClawOpenClaw

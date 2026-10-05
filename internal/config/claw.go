@@ -187,12 +187,6 @@ func (c *Config) HasConnectorConfigured() bool {
 	return false
 }
 
-// ActiveConnector returns the resolved connector name for external packages
-// that need to stamp connector-scoped telemetry/resource attributes.
-func (c *Config) ActiveConnector() string {
-	return c.activeConnector()
-}
-
 // ActiveConnectors returns the full resolved set of connector names
 // (sorted) for external packages — notably the gateway boot loop and the
 // TUI — that need to enumerate every active connector rather than just
