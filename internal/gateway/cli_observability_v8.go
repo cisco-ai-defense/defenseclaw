@@ -514,10 +514,19 @@ func (a *APIServer) emitCLILLMBridgeV8(
 	}
 	finishedAt := time.Now().UTC()
 	startedAt := finishedAt.Add(-time.Duration(request.DurationMS * float64(time.Millisecond)))
+	// Attribute the CLI's LLM calls (plugin/skill scans, judge setup checks)
+	// to the calling user the way hook and judge spans are, and carry the
+	// CLI run id so the spans join that run's scan.completed rows
+	// (GAP-2644). A per-user gateway runs as its user, so the local process
+	// user is the fallback; a service-account gateway reports none.
+	caller := auditCallerIdentity(ctx)
+	user := newLLMEventUser(caller.ID, caller.Name, caller.IDKind != "")
 	observation := hookModelV8Observation{
 		meta: llmEventMeta{
 			Source: "python-cli", Provider: request.Provider, Model: request.Model,
 			ResponseID: request.ResponseID, FinishReasons: append([]string(nil), request.FinishReasons...),
+			RunID:  audit.EnvelopeFromContext(ctx).RunID,
+			UserID: user.ID, UserIDKind: user.IDKind, UserName: user.Name,
 		},
 		provider: request.Provider, reportedModel: request.Model, model: request.Model,
 		responseModel: request.ResponseModel, startedAt: startedAt, finishedAt: finishedAt,

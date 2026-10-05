@@ -1563,3 +1563,43 @@ def test_processes_last_active_uses_newest_product_activity():
     assert "2m ago" in out
     assert "32m ago" not in out
     assert "newest activity seen for that product" in out
+
+
+def test_processes_lists_every_live_instance_of_a_product():
+    # GAP-2633: two live Claude Code sessions are two rows, not one.
+    signal = {
+        "product": "Claude Code",
+        "vendor": "Anthropic",
+        "state": "seen",
+        "last_active_at": "2026-10-04T19:24:00Z",
+        "runtime": {
+            "pid": 2425551, "user": "dcr-std1", "comm": "claude", "uptime_sec": 60,
+            "other_instances": [
+                {"pid": 60371, "user": "dcr-std1", "comm": "claude",
+                 "uptime_sec": 700000, "started_at": "2026-09-26T19:00:00Z"},
+            ],
+        },
+    }
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        def ai_usage(self):
+            return {"signals": [signal]}
+
+    app = _make_ctx(enabled=True)
+    runner = CliRunner()
+    with patch("defenseclaw.commands.cmd_agent._resolve_gateway_target",
+               side_effect=_resolve_target_stub), \
+            patch("defenseclaw.commands.cmd_agent.OrchestratorClient", FakeClient):
+        as_json = runner.invoke(cmd_agent.processes, ["--json"], obj=app)
+        human = runner.invoke(cmd_agent.processes, [], obj=app)
+
+    assert as_json.exit_code == 0, as_json.output
+    rows = __import__("json").loads(as_json.output)["processes"]
+    assert [row["runtime"]["pid"] for row in rows] == [2425551, 60371]
+    assert all("other_instances" not in row["runtime"] for row in rows)
+    assert human.exit_code == 0, human.output
+    assert "AI processes (2 live)" in human.output
+    assert "2425551" in human.output and "60371" in human.output

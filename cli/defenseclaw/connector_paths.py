@@ -4052,7 +4052,10 @@ def _devin_mcp_servers(
     workspace = _discovery_workspace_dir(workspace_dir, infer_from_cwd=infer_from_cwd)
     entries: list[MCPServerEntry] = []
     for path in _devin_mcp_read_paths(workspace or None):
-        entries.extend(_read_dotmcp_json(path, diagnostic_sink=diagnostic_sink))
+        legacy = os.path.basename(path).casefold().startswith("config")
+        entries.extend(
+            _read_dotmcp_json(path, diagnostic_sink=diagnostic_sink, wrapped_only=legacy)
+        )
     return _dedup_mcp_entries(entries)
 
 
@@ -4576,6 +4579,36 @@ def _read_openclaw_json(config_file: str) -> dict[str, Any] | None:
         return None
 
 
+def _load_mcp_json_document(
+    path: str,
+    diagnostic_sink: list[MCPSourceDiagnostic] | None,
+) -> Any:
+    """Load a JSON MCP config, or ``None`` when it declares nothing usable.
+
+    A missing or blank file declares no servers and records no diagnostic:
+    Antigravity creates a 0-byte ``mcp_config.json`` on first run
+    (GAP-2627). Unreadable or invalid files record a diagnostic.
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        _record_mcp_source_diagnostic(diagnostic_sink, path, "unreadable")
+        return None
+    except UnicodeError:
+        _record_mcp_source_diagnostic(diagnostic_sink, path, "malformed")
+        return None
+    if not text.strip():
+        return None
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        _record_mcp_source_diagnostic(diagnostic_sink, path, "malformed")
+        return None
+
+
 def _read_mcp_settings_block(
     path: str,
     *,
@@ -4587,20 +4620,10 @@ def _read_mcp_settings_block(
     *keys* is a tuple of the dotted lookup path inside the JSON
     document — e.g. ``("mcpServers",)`` for Claude Code's
     settings.json or ``("mcp", "servers")`` for ZeptoClaw's
-    config.json. Returns an empty list when the file is missing,
+    config.json. Returns an empty list when the file is missing, blank,
     invalid JSON, or the block isn't a mapping.
     """
-    try:
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
-    except FileNotFoundError:
-        return []
-    except OSError:
-        _record_mcp_source_diagnostic(diagnostic_sink, path, "unreadable")
-        return []
-    except (UnicodeError, json.JSONDecodeError):
-        _record_mcp_source_diagnostic(diagnostic_sink, path, "malformed")
-        return []
+    data = _load_mcp_json_document(path, diagnostic_sink)
     if not isinstance(data, dict):
         return []
     cursor: Any = data
@@ -4655,28 +4678,26 @@ def _read_dotmcp_json(
     source_scope: str = "",
     diagnostic_sink: list[MCPSourceDiagnostic] | None = None,
     claude_schema: bool = False,
+    wrapped_only: bool = False,
 ) -> list[MCPServerEntry]:
     """Parse a project-local ``.mcp.json``.
 
     The file may either wrap the servers under ``mcpServers`` (Claude
     Code / Codex SDK convention) or be a top-level mapping of name →
-    server. Both are accepted.
+    server. Both are accepted unless *wrapped_only* is set: a general
+    settings file (Devin's ``config.json``) holds other top-level objects
+    such as ``hooks`` and ``shell``, which are not servers (GAP-2625).
     """
-    try:
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
-    except FileNotFoundError:
-        return []
-    except OSError:
-        _record_mcp_source_diagnostic(diagnostic_sink, path, "unreadable")
-        return []
-    except (UnicodeError, json.JSONDecodeError):
-        _record_mcp_source_diagnostic(diagnostic_sink, path, "malformed")
-        return []
+    data = _load_mcp_json_document(path, diagnostic_sink)
     if not isinstance(data, dict):
         return []
     inner = data.get("mcpServers")
-    servers = inner if isinstance(inner, dict) else data
+    if isinstance(inner, dict):
+        servers = inner
+    elif wrapped_only:
+        return []
+    else:
+        servers = data
     entries = _parse_mcp_servers_dict(servers)
     if claude_schema:
         entries = _flag_claude_unloadable(entries, servers, path)

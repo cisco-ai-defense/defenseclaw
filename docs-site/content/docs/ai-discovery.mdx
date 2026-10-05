@@ -543,6 +543,8 @@ custom JSON downstream if your SBOM tooling requires CycloneDX.
 
 Both continuous and on-demand discovery feed the same audit pipeline. Once you've got [Observability](/docs/observability) wired up, the bundled dashboards light up automatically.
 
+Galileo is not one of these places. Its `galileo-rich-v2` trace profile carries agent, workflow, model, tool, retrieval and judge spans only, so discovery results never reach Galileo; use Grafana, Splunk or another OTLP destination for them (see [Galileo](/docs/observability/galileo)).
+
 ### Managed enterprise export
 
 When `deployment_mode: managed_enterprise` has a valid top-level

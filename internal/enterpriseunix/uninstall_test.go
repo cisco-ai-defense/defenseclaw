@@ -20,6 +20,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 )
 
@@ -269,5 +270,83 @@ func TestUninstallPurgeNamesOnlyWhatEachAccountHad(t *testing.T) {
 	}
 	if got := purgedUserChange("erin", &purgedUserDetail{UVCache: true}); got != "removed DefenseClaw's entries in the uv cache (~/.cache/uv) of user erin" {
 		t.Fatalf("an account with only uv cache entries: %q", got)
+	}
+}
+
+// packageOwnedRunner answers the host commands a purge without a deployment
+// record runs: rpm owns the gateway, and getent lists passwd.
+type packageOwnedRunner struct {
+	Runner
+	passwd string
+}
+
+func (r packageOwnedRunner) Run(ctx context.Context, name string, args ...string) (CommandResult, error) {
+	switch {
+	case name == "rpm":
+		return CommandResult{}, nil
+	case name == "getent" && len(args) == 1 && args[0] == "passwd":
+		return CommandResult{Stdout: []byte(r.passwd)}, nil
+	}
+	return r.Runner.Run(ctx, name, args...)
+}
+
+// GAP-2632: after a default uninstall of the rpm, the purge that uninstall
+// named reported done, removed no account's ~/.defenseclaw, named nobody and
+// deleted the rpm's binaries. The default uninstall removes the enrollment
+// record a purge needs, so it now names a step that works, and a purge
+// without the record keeps the package's files and names each account whose
+// files stay.
+func TestPurgeAfterDefaultUninstallNamesTheAccountsItCannotClean(t *testing.T) {
+	h := packageHost(t, "1.0.0")
+	h.env.Runner = packageOwnedRunner{Runner: h.runner, passwd: "root:x:0:0:root:/root:/bin/bash\n" +
+		"alice:x:1001:1001::/home/alice:/bin/bash\nbob:x:1002:1002::/home/bob:/bin/bash\n"}
+	requireOK(t, h.run(Options{Action: ActionInstall, FromPackage: true}))
+	writeHostFile(t, h, enterprisehooks.UnixEligibleAccountsPath(h.env.Layout.ManifestPath),
+		`{"accounts":[{"user":"alice","home":"/home/alice"},{"user":"bob","home":"/home/bob"}]}`)
+	writeHostFile(t, h, "/home/alice/.defenseclaw/hook_contract_lock.json", "{}")
+
+	plain := h.run(Options{Action: ActionUninstall})
+	requireOK(t, plain)
+	kept := strings.Join(plain.Changes, "\n")
+	if !strings.Contains(kept, "kept: the DefenseClaw per-user data (~/.defenseclaw) of alice.") ||
+		!strings.Contains(kept, "activate the deployment again with `"+h.env.lifecycleCommand(ActionEnsure)+" --from-package --config <file>` and run `") ||
+		strings.Contains(kept, "while the defenseclaw-enterprise package is installed") {
+		t.Fatalf("the default uninstall names a purge that cannot find the accounts:\n%s", kept)
+	}
+
+	purge := h.run(Options{Action: ActionUninstall, Purge: true})
+	requireOK(t, purge)
+	got := messagesOf(purge.Warnings, codePerUserState)
+	if !strings.Contains(got, "not removed: the DefenseClaw per-user data (~/.defenseclaw) of alice.") ||
+		strings.Contains(got, "bob") || !strings.Contains(got, "--from-package --config <file>`") {
+		t.Fatalf("the purge does not name the account whose data stays: %q", got)
+	}
+	if !exists(h.env.P(filepath.Join(h.env.Layout.BinDir, binGateway))) {
+		t.Fatal("the purge removed the binaries the rpm still owns")
+	}
+	if !exists(h.env.P("/home/alice/.defenseclaw")) {
+		t.Fatal("the purge deleted a home folder without an enrollment record")
+	}
+}
+
+// A purge after --keep-state still has the enrollment record and the config,
+// so it purges the enrolled accounts, which its kept line said it would.
+func TestPurgeAfterKeepStateUninstallPurgesTheAccounts(t *testing.T) {
+	h := packageHost(t, "1.0.0")
+	requireOK(t, h.run(Options{Action: ActionInstall, FromPackage: true}))
+	writeHostFile(t, h, h.env.Layout.ManifestPath, "version: 1\ntargets: []\n")
+	requireOK(t, h.run(Options{Action: ActionUninstall, KeepState: true}))
+	var calls []string
+	h.env.Runner = removeAllRunner{Runner: h.runner, answer: func(args string) (CommandResult, error) {
+		calls = append(calls, args)
+		return CommandResult{Stdout: []byte(`{"ok":true,"purged":["alice"],"purged_detail":{"alice":{"data":true}}}`)}, nil
+	}}
+	purge := h.run(Options{Action: ActionUninstall, Purge: true})
+	requireOK(t, purge)
+	if len(calls) != 1 || !strings.HasSuffix(calls[0], " --purge") {
+		t.Fatalf("the purge did not purge the enrolled accounts: %v", calls)
+	}
+	if !strings.Contains(strings.Join(purge.Changes, "\n"), "per-user data of user alice") {
+		t.Fatalf("the purge does not name the account it purged: %v", purge.Changes)
 	}
 }

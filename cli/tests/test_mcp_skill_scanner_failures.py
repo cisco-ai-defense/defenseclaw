@@ -260,3 +260,19 @@ def test_failed_scan_next_step_follows_error(error, expected):
     assert expected in hint
     if "allow-private" not in expected:
         assert "--allow-private" not in hint
+
+
+def test_path_command_refusal_says_paths_are_refused():
+    """GAP-2640: an absolute npx path is refused with the real reason and the fix."""
+    from defenseclaw.commands.cmd_mcp import _failed_scan_next_step
+    from defenseclaw.scanner import mcp
+
+    error = mcp._stdio_scan_command_error("/opt/homebrew/bin/npx", ["-y", "pkg"])
+
+    assert error is not None
+    assert "is a path" in error
+    assert "set the command to the bare name 'npx'" in error
+    assert mcp._stdio_scan_command_error("npx", ["-y", "pkg"]) is None
+    hint = _failed_scan_next_step("fs", "cursor", error)
+    assert "never a command path" in hint
+    assert "not an npx or uvx launcher" not in hint

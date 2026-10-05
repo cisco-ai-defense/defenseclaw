@@ -402,10 +402,10 @@ def processes(
         raise click.ClickException(f"sidecar request failed: {exc}") from exc
 
     raw_signals = payload.get("signals", []) or []
-    process_signals = [
+    process_signals = _expand_process_instances([
         s for s in raw_signals
         if s.get("runtime") and str(s.get("state", "")).lower() != "gone"
-    ]
+    ])
     # Most-recently-seen first so an operator hunting a runaway agent
     # sees fresh activity at the top.
     process_signals.sort(
@@ -4775,6 +4775,31 @@ def _product_last_active(signals: list[dict[str, Any]]) -> dict[str, str]:
         if product and ts is not None and (product not in best or ts > best[product][0]):
             best[product] = (ts, raw)
     return {product: raw for product, (_ts, raw) in best.items()}
+
+
+def _expand_process_instances(signals: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return one row per live process.
+
+    The sidecar keeps one signal per product and lists that product's other
+    live processes in ``runtime.other_instances`` (GAP-2633), so two Claude
+    Code sessions are two rows here.
+    """
+    rows: list[dict[str, Any]] = []
+    for sig in signals:
+        runtime = _mapping_block(sig.get("runtime"))
+        others = runtime.get("other_instances")
+        primary = dict(sig)
+        primary["runtime"] = {k: v for k, v in runtime.items() if k != "other_instances"}
+        rows.append(primary)
+        for other in others if isinstance(others, list) else []:
+            if not isinstance(other, dict):
+                continue
+            row = dict(sig)
+            row["runtime"] = {k: v for k, v in other.items() if k != "other_instances"}
+            if other.get("started_at"):
+                row["last_active_at"] = other["started_at"]
+            rows.append(row)
+    return rows
 
 
 def _process_last_active(sig: dict[str, Any], product_last_active: dict[str, str] | None) -> str:
