@@ -834,21 +834,8 @@ func (a *APIServer) registerConnectorHookRoutes(mux *http.ServeMux, wrap ...func
 	}
 
 	if a.connectorRegistry == nil {
-		// No registry plumbed (legacy boot path, tests). Fall back
-		// to the previous hardcoded routes so existing flows keep
-		// working — we never unconditionally register a route the
-		// connector didn't ask for.
-		if f, ok := connectorHookHandlerByName["claudecode"]; ok {
-			register("/api/v1/claude-code/hook", http.HandlerFunc(f(a)))
-		}
-		if f, ok := connectorHookHandlerByName["codex"]; ok {
-			register("/api/v1/codex/hook", http.HandlerFunc(f(a)))
-		}
-		for _, name := range []string{"hermes", "cursor", "devin", "copilot", "openhands", "antigravity", "opencode", "amp", "omnigent", "kiro"} {
-			if f, ok := connectorHookHandlerByName[name]; ok {
-				register("/api/v1/"+name+"/hook", http.HandlerFunc(f(a)))
-			}
-		}
+		// The sidecar always plumbs the registry (SetConnectorRegistry);
+		// without one there is no connector to serve a hook route for.
 		return
 	}
 
