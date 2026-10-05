@@ -78,7 +78,7 @@ BOOTSTRAP_PYTHON := $(shell if [ -x "$(VENV_BIN)/python$(EXE)" ]; then printf '%
         test-verbose test-file lint py-lint go-lint go-mod-no-toolchain check-quiet-startup repro-flags-parity assemble-parity ts-test rego-test clean \
         check check-audit-actions check-error-codes check-schemas telemetry-generate telemetry-check generate-guardrail-catalog check-guardrail-catalog check-grafana-dashboards check-observability-v8-hard-cut check-v7 check-provider-coverage check-llm-catalog check-llm-catalog-live check-version-sync \
         set-version \
-        _bundle-data _stage-extension-fingerprint _checkout-write-preflight _source-install-preflight _source-install-dev-preflight _source-dev-install source-migrate source-restart-gateway \
+        _bundle-data _stage-extension-fingerprint _checkout-write-preflight _source-install-preflight _source-install-dev-preflight _source-dev-install source-migrate source-acp-refresh source-restart-gateway \
         proto proto-check proto-tools \
         dist dist-cli dist-gateway dist-installers dist-requirements dist-test dist-checksums dist-clean
 
@@ -155,6 +155,7 @@ all: _source-install-dev-preflight
 	@$(HOST_PYTHON) ./scripts/keep-pre-1.0-audit-history.py
 	@$(MAKE) --no-print-directory _source-dev-install
 	@$(MAKE) --no-print-directory source-migrate
+	@$(MAKE) --no-print-directory source-acp-refresh
 	@$(MAKE) --no-print-directory source-restart-gateway
 	@# Pre-1.0 installers left their retired binaries behind; install.sh
 	@# removes them, so a source install must too (GAP-0053).
@@ -194,6 +195,18 @@ source-migrate: _source-install-preflight
 		if ! "$(INSTALL_DIR)/defenseclaw$(EXE)" migrate; then \
 			echo "  Could not migrate the existing config — fix the error above, then re-run: defenseclaw migrate"; \
 			exit 1; \
+		fi; \
+	fi
+
+# make all replaced defenseclaw-acp, so every ACP editor entry DefenseClaw
+# wrote still pins the old guard digest and fails closed. Re-pin the entries
+# that start this install's guard, as the release upgrade does. Best effort.
+source-acp-refresh: _source-install-preflight
+	@data_dir="$${DEFENSECLAW_HOME:-$$HOME/.defenseclaw}"; \
+	guard="$(INSTALL_DIR)/$(ACP_GUARD)$(EXE)"; \
+	if [ -f "$$data_dir/config.yaml" ] && [ -f "$$guard" ]; then \
+		if ! "$(INSTALL_DIR)/defenseclaw$(EXE)" acp refresh --guard-path "$$guard"; then \
+			echo "  Could not re-pin the ACP guard in your editor entries. Run: defenseclaw acp refresh"; \
 		fi; \
 	fi
 

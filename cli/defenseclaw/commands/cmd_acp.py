@@ -958,26 +958,25 @@ def verify_cmd(app: AppContext, client: str | None, agent: str | None, runtime_d
         raise click.ClickException("ACP binding verification failed: " + " | ".join(failures))
 
 
-@acp_cmd.command("refresh")
-@click.option(
-    "--from-sha256",
-    "from_sha256",
-    default="",
-    help="Re-pin only locks that pinned this guard digest (the installer passes the guard it replaced).",
-)
-@pass_ctx
-def refresh_cmd(app: AppContext, from_sha256: str) -> None:
-    """Re-pin the DefenseClaw ACP guard in every editor entry after an upgrade.
+def refresh_guard_pins(
+    data_dir: str,
+    *,
+    from_sha256: str = "",
+    guard_path: str = "",
+    apply: bool = True,
+) -> list[str]:
+    """Re-pin DefenseClaw's own ACP guard in its contract locks.
 
-    An upgrade replaces defenseclaw-acp, so each contract lock still names the
-    old guard digest and the editor entry fails closed. This re-pins only
-    DefenseClaw's own guard and the protocol schema; a changed agent binary or
-    editor entry still needs 'defenseclaw acp setup'. The installer runs it.
+    Touches only the editor entries DefenseClaw wrote (``_managed_pairs``),
+    never a managed-custody lock, and only the guard digest and protocol
+    schema: a changed agent binary still needs ``acp setup``. ``from_sha256``
+    limits it to locks that pinned that guard digest; ``guard_path`` to
+    locks whose guard is that file. With ``apply=False`` nothing is written.
+    Returns the ``client/agent`` pairs re-pinned (or that would be).
     """
-    if not app.cfg:
-        raise click.ClickException("configuration is unavailable")
-    data_dir = str(Path(app.cfg.data_dir).expanduser().resolve())
     protocol = {"schema_version": _SCHEMA_VERSION, "schema_sha256": _SCHEMA_SHA256}
+    only_path = os.path.normcase(str(Path(guard_path).expanduser().resolve())) if guard_path else ""
+    repinned: list[str] = []
     for client, agent in sorted(_managed_pairs()):
         lock_path = _contract_lock_path(data_dir, client, agent)
         try:
@@ -987,23 +986,57 @@ def refresh_cmd(app: AppContext, from_sha256: str) -> None:
         except (OSError, json.JSONDecodeError):
             continue
         guard = document.get("guard") if isinstance(document, dict) else None
-        guard_path = guard.get("path") if isinstance(guard, dict) else None
+        pinned_path = guard.get("path") if isinstance(guard, dict) else None
         if (
-            not isinstance(guard_path, str)
+            not isinstance(pinned_path, str)
             or guard.get("managed_custody") is True
-            or Path(guard_path).name.lower() not in _GUARD_BASENAMES
-            or not Path(guard_path).is_file()
+            or Path(pinned_path).name.lower() not in _GUARD_BASENAMES
+            or not Path(pinned_path).is_file()
         ):
+            continue
+        if only_path and os.path.normcase(str(Path(pinned_path).resolve())) != only_path:
             continue
         if from_sha256 and str(guard.get("sha256", "")).lower() != from_sha256.strip().lower():
             continue
-        digest = _sha256_file(guard_path)
+        digest = _sha256_file(pinned_path)
         if guard.get("sha256") == digest and document.get("protocol") == protocol:
             continue
-        guard["sha256"] = digest
-        document["protocol"] = protocol
-        atomic_write_private_bytes(lock_path, (json.dumps(document, indent=2, sort_keys=True) + "\n").encode())
-        click.echo(f"Re-pinned the DefenseClaw ACP guard for {client}/{agent}")
+        if apply:
+            guard["sha256"] = digest
+            document["protocol"] = protocol
+            atomic_write_private_bytes(lock_path, (json.dumps(document, indent=2, sort_keys=True) + "\n").encode())
+        repinned.append(f"{client}/{agent}")
+    return repinned
+
+
+@acp_cmd.command("refresh")
+@click.option(
+    "--from-sha256",
+    "from_sha256",
+    default="",
+    help="Re-pin only locks that pinned this guard digest (the installer passes the guard it replaced).",
+)
+@click.option(
+    "--guard-path",
+    "guard_path",
+    default="",
+    help="Re-pin only locks whose guard is this file (a source install passes the guard it just published).",
+)
+@pass_ctx
+def refresh_cmd(app: AppContext, from_sha256: str, guard_path: str) -> None:
+    """Re-pin the DefenseClaw ACP guard in every editor entry after an upgrade.
+
+    An upgrade replaces defenseclaw-acp, so each contract lock still names the
+    old guard digest and the editor entry fails closed. This re-pins only
+    DefenseClaw's own guard and the protocol schema; a changed agent binary or
+    editor entry still needs 'defenseclaw acp setup'. The installers and
+    'make all' run it, and 'defenseclaw doctor --fix' does too.
+    """
+    if not app.cfg:
+        raise click.ClickException("configuration is unavailable")
+    data_dir = str(Path(app.cfg.data_dir).expanduser().resolve())
+    for pair in refresh_guard_pins(data_dir, from_sha256=from_sha256, guard_path=guard_path):
+        click.echo(f"Re-pinned the DefenseClaw ACP guard for {pair}")
 
 
 # --- ACP discovery and takeover -------------------------------------------

@@ -604,6 +604,9 @@ class TestCheckConnectorHooks(unittest.TestCase):
                 mode="observe",
                 fail_closed=False,
             )
+            # Cursor has no approval prompt: an inherited human_approval is
+            # the Human approval row's warning, not an inconsistent posture.
+            cfg.guardrail.effective_hilt.return_value = MagicMock(enabled=True)
             r = _DoctorResult()
             _check_cursor_configured_runtime(
                 cfg,

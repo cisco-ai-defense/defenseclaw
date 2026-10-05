@@ -1096,6 +1096,70 @@ def sandbox_doctor_report(binary: str) -> tuple[dict | None, str]:
     return report, ""
 
 
+_SANDBOX_GATEWAY_DEPENDENCY = "depends on: OpenShell gateway"
+# Services that are simply not running; an install or policy problem stays a
+# failure even before the first sandbox run.
+_SANDBOX_RUNTIME_CHECKS = frozenset({"docker", "gateway-version", "gateway-service", "defenseclaw-daemon"})
+
+
+def _sandbox_checks_by_root_cause(checks: list) -> list[dict]:
+    """Report one root cause once, and keep unused sandboxes from failing doctor.
+
+    When the OpenShell gateway does not answer, the gateway service and the
+    daemon's "sandboxes are unavailable" rows restate that one problem: they
+    become skips that name the dependency. Until a harness image is built no
+    sandbox has ever run, so a service that is not running only blocks the
+    first run: it is a warning with the same next step.
+    """
+    rows = [dict(check) for check in checks if isinstance(check, dict)]
+    by_id = {str(row.get("id") or ""): row for row in rows}
+
+    def status(check_id: str) -> str:
+        return str((by_id.get(check_id) or {}).get("status") or "").strip().lower()
+
+    def detail(check_id: str) -> str:
+        return str((by_id.get(check_id) or {}).get("detail") or "").strip()
+
+    gateway_down = (
+        status("gateway-version") == "fail"
+        and status("gateway-driver") == "skip"
+        and detail("gateway-driver") == "the gateway is not answering"
+    )
+    images = detail("overlay-images")
+    unused = (
+        status("overlay-images") == "warn"
+        and images.startswith("not built yet:")
+        and "hook-verified:" not in images
+        and "MicroVM" not in images
+        and status("sandbox-hooks") in {"", "pass"}
+        and detail("sandbox-hooks") in {"", "no sandbox is running"}
+    )
+    for row in rows:
+        row_id = str(row.get("id") or "")
+        row_status = str(row.get("status") or "").strip().lower()
+        row_detail = str(row.get("detail") or "").strip()
+        if (
+            gateway_down
+            and row_status == "fail"
+            and (
+                row_id == "gateway-service"
+                or (row_id == "defenseclaw-daemon" and row_detail.startswith("running, but sandboxes are unavailable"))
+            )
+        ):
+            # The daemon's own reason repeats the gateway's error; the
+            # service row says something of its own (how it is installed).
+            reason = "the daemon is running" if row_id == "defenseclaw-daemon" else row_detail
+            row["status"] = "skip"
+            row["detail"] = f"{_SANDBOX_GATEWAY_DEPENDENCY} ({reason})" if reason else _SANDBOX_GATEWAY_DEPENDENCY
+            row.pop("fix", None)
+        elif unused and row_status == "fail" and row_id in _SANDBOX_RUNTIME_CHECKS:
+            row["status"] = "warn"
+            row["detail"] = (
+                f"{row_detail}; no sandbox has run yet (no harness image is built), so this blocks only the first run"
+            )
+    return rows
+
+
 def _check_sandbox(cfg, r: _DoctorResult) -> None:
     """The Sandbox section: the Go ``sandbox doctor`` checks, one row each.
 
@@ -1152,9 +1216,7 @@ def _check_sandbox(cfg, r: _DoctorResult) -> None:
             remediation="run 'defenseclaw sandbox doctor' for the full output",
         )
         return
-    for check in report["checks"]:
-        if not isinstance(check, dict):
-            continue
+    for check in _sandbox_checks_by_root_cause(report["checks"]):
         status = str(check.get("status") or "").strip().lower()
         tag = status if status in _SANDBOX_DOCTOR_STATUSES else "warn"
         check_id = str(check.get("id") or "").strip()
@@ -1654,7 +1716,42 @@ def _gateway_rotated_provider_converged(cfg) -> bool:
     return not configured or _env_names_equal(configured, _CANONICAL_GATEWAY_TOKEN_ENV)
 
 
-def _check_hilt_support(cfg, connector: str, r: _DoctorResult) -> None:
+def _emit_hilt_observe_summary(observe_only: list[tuple[str, str]], r: _DoctorResult, *, tagged: bool) -> None:
+    """One Human approval row for every connector whose approvals observe mode mutes."""
+    if not observe_only:
+        return
+    if len(observe_only) == 1:
+        connector, min_sev = observe_only[0]
+        with _doctor_label_suffix(f"[{connector}]" if tagged else ""):
+            _emit("warn", "Human approval", f"enabled at {min_sev}, but {connector} mode is observe", r=r)
+        return
+    levels = sorted({min_sev for _, min_sev in observe_only})
+    if len(levels) == 1:
+        names = ", ".join(connector for connector, _ in observe_only)
+        enabled = f"enabled at {levels[0]}"
+    else:
+        names = ", ".join(f"{connector} ({min_sev})" for connector, min_sev in observe_only)
+        enabled = "enabled"
+    _emit(
+        "warn",
+        "Human approval",
+        f"{enabled}, but these connectors are in observe mode, so they never ask: {names}",
+        r=r,
+        remediation=(
+            "switch a connector to action mode to get approval prompts "
+            "(defenseclaw guardrail mode action --connector <name>), "
+            "or turn approvals off: defenseclaw guardrail hilt off"
+        ),
+    )
+
+
+def _check_hilt_support(
+    cfg,
+    connector: str,
+    r: _DoctorResult,
+    *,
+    observe_only: list[tuple[str, str]] | None = None,
+) -> None:
     guardrail = getattr(cfg, "guardrail", None)
     # Resolve the connector's EFFECTIVE hilt + mode (per-connector override >
     # global default) so a multi-connector install reports each connector's
@@ -1679,6 +1776,10 @@ def _check_hilt_support(cfg, connector: str, r: _DoctorResult) -> None:
     min_sev = (getattr(hilt, "min_severity", "") or "HIGH").upper()
     mode = mode_src.lower()
     if mode != "action":
+        if observe_only is not None:
+            # The caller prints one row for every connector in this state.
+            observe_only.append((connector, min_sev))
+            return
         _emit("warn", "Human approval", f"enabled at {min_sev}, but {connector} mode is observe", r=r)
         return
 
@@ -2891,7 +2992,17 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
                     # standalone sandbox shim), so warn rather than fail.
                     last_error = info.get("last_error")
                     reason = last_error.strip() if isinstance(last_error, str) else ""
-                    _emit("warn", f"  └─ {sub}", f"degraded — {reason}" if reason else "degraded", r=r)
+                    if sub == "sandbox" and reason.startswith("openshell:"):
+                        # The Sandbox section reports the OpenShell gateway
+                        # once, with its next step.
+                        _emit(
+                            "skip",
+                            f"  └─ {sub}",
+                            f"{_SANDBOX_GATEWAY_DEPENDENCY} (see the Sandbox section)",
+                            r=r,
+                        )
+                    else:
+                        _emit("warn", f"  └─ {sub}", f"degraded — {reason}" if reason else "degraded", r=r)
                 else:
                     audit_db = str(getattr(cfg, "audit_db", "") or "")
                     reason = _telemetry_error_reason(details, audit_db) if sub == "telemetry" else ""
@@ -6135,7 +6246,13 @@ def _check_cursor_configured_runtime(
         except Exception:  # noqa: BLE001 - report the persisted registration independently.
             hilt = None
     hilt_enabled = getattr(hilt, "enabled", False) is True
-    if fail_mode != expected_fail_mode or hilt_enabled:
+    # Cursor has no native approval prompt, so an inherited human_approval
+    # changes nothing: confirm verdicts stay attributed alerts, and the
+    # Human approval row already says so, as it does for the other
+    # connectors without a prompt. Only a managed deployment, whose posture
+    # an administrator pins, still treats it as inconsistent.
+    managed = str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise"
+    if fail_mode != expected_fail_mode or (hilt_enabled and managed):
         _emit(
             "fail",
             label,
@@ -8499,9 +8616,19 @@ def _check_llm_reachable(cfg, r: _DoctorResult) -> None:
     if not gc.enabled:
         _emit("skip", "LLM reachable", "guardrail disabled", r=r)
         return
+    judge = getattr(gc, "judge", None)
+    if _guardrail_proxy_intentionally_closed(cfg) and not bool(getattr(judge, "enabled", False)):
+        # As for the LLM API key: hook/policy connectors send no model traffic
+        # through DefenseClaw, and with the judge off nothing calls this LLM.
+        _emit(
+            "skip",
+            "LLM reachable",
+            "not used: the LLM judge is disabled and no connector routes through the proxy",
+            r=r,
+        )
+        return
     llm = cfg.resolve_llm("guardrail")
     prefix = ""
-    judge = getattr(gc, "judge", None)
     if not (llm.model or "").strip() and bool(getattr(judge, "enabled", False)):
         # A judge-only setup (`setup llm --role judge`) leaves the unified
         # model empty; probe the judge LLM instead (GAP-1365).
@@ -9593,6 +9720,27 @@ def _emit_unattributed_otlp_credentials(report, r: _DoctorResult, *, now=None) -
     _emit("warn", "Native OTLP credentials", detail, r=r, remediation=remediation)
 
 
+def _local_observability_stack_stopped(destination, live, tag: str) -> bool:
+    """Whether a failing route is only the bundled local stack being stopped.
+
+    The stack runs in Docker and is often down on purpose (Docker quit, a
+    reboot). A failure counts only while the stack is up (its Grafana
+    answers on 127.0.0.1:3000) or the failure is not a connection one.
+    """
+    from defenseclaw.platform_support import is_local_observability_stack_destination
+
+    if not is_local_observability_stack_destination(name=destination.name, preset_id=destination.preset):
+        return False
+    failing = tag == "fail" or live.circuit_state == "open"
+    if not failing or live.last_failure_class in {"authentication", "permanent_payload", "unsafe_endpoint"}:
+        return False
+    try:
+        with socket.create_connection(("127.0.0.1", 3000), timeout=0.25):
+            return False
+    except OSError:
+        return True
+
+
 def _destination_remediation(destination, live) -> str:
     """Next step for a Destination row that warns or fails."""
     name = shlex.quote(destination.name)
@@ -9751,6 +9899,7 @@ def _check_observability_v8_status(
             detail += f"; target={destination.endpoint}"
         live = destination_health.get(destination.name)
         tag = "pass" if destination.enabled else "skip"
+        local_stack_stopped = False
         sqlite_write_failure = bool(destination.enabled and destination.kind == "sqlite" and write_failure)
         if sqlite_write_failure:
             # The sink's own counters lag the gateway's audit-write failure
@@ -9773,6 +9922,12 @@ def _check_observability_v8_status(
             if live.circuit_state == "half_open":
                 tag = "warn"
                 detail += "; one bounded recovery probe is in progress"
+            local_stack_stopped = _local_observability_stack_stopped(destination, live, tag)
+            if local_stack_stopped:
+                # Nothing to repair: the bundled stack is not running, and
+                # local SQLite keeps every record meanwhile.
+                tag = "warn"
+                detail += "; the local observability stack is not running"
             elif live.circuit_state == "open":
                 if live.last_failure_class in {
                     "authentication",
@@ -9796,7 +9951,13 @@ def _check_observability_v8_status(
             tag = "warn"
             detail += "; health=unavailable; queue=unavailable; last=unavailable"
         next_step = ""
-        if tag in {"warn", "fail"}:
+        if local_stack_stopped:
+            next_step = (
+                "start it: defenseclaw setup local-observability up (Docker must be running), "
+                "or stop sending to it: defenseclaw setup observability disable "
+                f"{shlex.quote(destination.name)}"
+            )
+        elif tag in {"warn", "fail"}:
             next_step = write_next_step if sqlite_write_failure else _destination_remediation(destination, live)
         _emit(
             tag,
@@ -10434,6 +10595,8 @@ def doctor(
     # labeling. (N1)
     _enabled_hook_connectors = [c for c in hook_connectors if _connector_enabled(cfg, c)]
     _multi_hooks = len(_enabled_hook_connectors) > 1
+    # Observe mode mutes approvals the same way for every connector: one row.
+    _hilt_observe_only: list[tuple[str, str]] = []
     for _conn in hook_connectors:
         if not _connector_enabled(cfg, _conn):
             # Disabled connector: hooks were torn down, so probing hook health
@@ -10457,7 +10620,8 @@ def doctor(
             # has a different native ask surface AND may carry its own hilt
             # override, so run it for EVERY active connector (tagged like the
             # hook rows) instead of only the primary.
-            _check_hilt_support(cfg, _conn, r)
+            _check_hilt_support(cfg, _conn, r, observe_only=_hilt_observe_only)
+    _emit_hilt_observe_summary(_hilt_observe_only, r, tagged=_multi_hooks)
     _check_guardrail_proxy(cfg, r)
     _check_proxy_interception(cfg, r, live_health=sidecar_health)
     _check_openclaw_transport_advisory(cfg, r)
@@ -11424,6 +11588,16 @@ def _doctor_repair_specs() -> tuple[RepairSpec, ...]:
             ("change explicit plugin admission policy in config.yaml",),
             False,
             True,
+        ),
+        (
+            "doctor.acp.guard.repin",
+            "ACP guard pins",
+            "safe",
+            _fix_acp_guard_pins,
+            (),
+            ("re-pin the upgraded DefenseClaw ACP guard in the editor entries DefenseClaw wrote",),
+            False,
+            False,
         ),
     )
     specs: list[RepairSpec] = [
@@ -13002,9 +13176,11 @@ def _check_acp_bindings(cfg, r: _DoctorResult) -> None:
         if not problems:
             _emit("pass", label, f"healthy; profile {profile} ({mode})", r=r)
             continue
-        if any("acp refresh" in problem for problem in problems):
-            fix = "defenseclaw acp refresh"
+        if all("acp refresh" in problem for problem in problems):
+            fix = "re-pin the upgraded guard: defenseclaw doctor --fix (or defenseclaw acp refresh)"
         else:
+            # Setup re-pins the agent and the guard; refresh never re-pins
+            # a changed agent binary.
             fix = f"defenseclaw acp setup --client {client} --agent {agent}"
         if managed:
             # A managed enrollment keeps its locks in a per-user runtime dir
@@ -14765,6 +14941,71 @@ def _fix_plugin_registry_required(
         return ("fail", f"could not save config: {type(exc).__name__}: {exc}")
 
     return ("pass", f"cleared plugin.registry_required [{', '.join(offenders)}]")
+
+
+def _fix_acp_guard_pins(
+    cfg,
+    *,
+    assume_yes: bool,
+    plan_only: bool = False,
+) -> tuple[str, str]:
+    """Re-pin the upgraded DefenseClaw ACP guard, as ``defenseclaw acp refresh`` does.
+
+    Companion to :func:`_check_acp_bindings`. Only the editor entries
+    DefenseClaw wrote are touched, and only their guard digest: an agent
+    executable that changed since setup is named with its setup command,
+    never re-pinned. Managed enrollments keep their locks in a per-user
+    runtime directory that doctor does not know, so they are left alone.
+    """
+    if getattr(cfg, "acp", None) is None:
+        return ("skip", "no ACP binding is configured")
+    if str(getattr(cfg, "deployment_mode", "") or "") == "managed_enterprise":
+        return ("skip", "managed ACP enrollments are checked with acp verify, not repaired by doctor")
+    from defenseclaw.commands import cmd_acp
+
+    data_dir = str(Path(str(getattr(cfg, "data_dir", "") or "")).expanduser().resolve())
+    try:
+        pairs = sorted(cmd_acp._managed_pairs())
+        if not pairs:
+            return ("skip", "no ACP binding is configured")
+        pending = cmd_acp.refresh_guard_pins(data_dir, apply=False)
+        agent_drift = [
+            f"{client}/{agent}"
+            for client, agent in pairs
+            if "agent executable digest has drifted" in cmd_acp._verify_binding(data_dir, client, agent)
+        ]
+    except Exception as exc:  # noqa: BLE001 - unreadable editor settings must not abort the repair run.
+        return ("skip", f"could not read the editor ACP settings: {exc}")
+    agent_note = ""
+    if agent_drift:
+        commands = ", ".join(
+            "'defenseclaw acp setup --client {} --agent {}'".format(*pair.split("/")) for pair in agent_drift
+        )
+        agent_note = (
+            f"{', '.join(agent_drift)}: the agent executable changed since setup (for example, it updated); "
+            f"doctor does not re-pin it, so review it and run {commands}"
+        )
+    if not pending:
+        current = "the ACP guard pins are current"
+        return ("skip", f"{current}; {agent_note}" if agent_note else current)
+    suffix = f"; {agent_note}" if agent_note else ""
+    if plan_only:
+        return (
+            "plan",
+            f"re-pin the DefenseClaw ACP guard for {', '.join(pending)} (as 'defenseclaw acp refresh'){suffix}",
+        )
+    if not assume_yes and not click.confirm(
+        f"    Re-pin the DefenseClaw ACP guard for {', '.join(pending)}?",
+        default=True,
+    ):
+        return ("skip", "declined by user")
+    try:
+        done = cmd_acp.refresh_guard_pins(data_dir)
+    except (OSError, click.ClickException) as exc:
+        return ("fail", f"could not re-pin the ACP guard: {exc}")
+    if not done:
+        return ("skip", "the ACP guard pins are current")
+    return ("pass", f"re-pinned the DefenseClaw ACP guard for {', '.join(done)}{suffix}")
 
 
 def _fix_connector_residue(cfg, *, assume_yes: bool) -> tuple[str, str]:
