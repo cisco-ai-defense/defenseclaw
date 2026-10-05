@@ -1492,10 +1492,11 @@ func TestLaunchOptionsKeepOptionsNotPrompts(t *testing.T) {
 	}
 }
 
-// An option whose value is not recorded with it: a later session passes the
-// harness the option and no value, which is what `sandbox run` warns about.
-// The word that was left out may have been a prompt instead (the case named
-// for it), and nothing available here tells the two apart.
+// An option followed by a word with a space ends the record: a later session
+// passes the harness the option without the word and none of the options
+// after it, which is what `sandbox run` warns about. The word may have been
+// a prompt instead (the case named for it), and nothing available here tells
+// the two apart.
 func TestLaunchOptionsSplitReportsAnUnkeptValue(t *testing.T) {
 	claude, codex := harnessSpec(t, "claudecode"), harnessSpec(t, "codex")
 	for _, c := range []struct {
@@ -1503,28 +1504,27 @@ func TestLaunchOptionsSplitReportsAnUnkeptValue(t *testing.T) {
 		spec       *harness.Spec
 		args       []string
 		wantKept   []string
-		wantUnkept []string
+		wantUnkept string
+		wantLater  []string
 	}{
 		{"a spaced value", claude, []string{"--append-system-prompt", "be brief"},
-			[]string{"--append-system-prompt"}, []string{"--append-system-prompt"}},
+			[]string{"--append-system-prompt"}, "--append-system-prompt", nil},
 		{"the value attached", claude, []string{"--append-system-prompt=be brief"},
-			[]string{"--append-system-prompt=be brief"}, nil},
+			[]string{"--append-system-prompt=be brief"}, "", nil},
 		{"a one-word value", claude, []string{"--model", "sonnet"},
-			[]string{"--model", "sonnet"}, nil},
-		{"a spaced value before more options", claude, []string{"--append-system-prompt", "be brief", "--model", "sonnet"},
-			[]string{"--append-system-prompt"}, []string{"--append-system-prompt"}},
+			[]string{"--model", "sonnet"}, "", nil},
+		{"a spaced value before more options", claude, []string{"--append-system-prompt", "be brief", "--model", "sonnet", "--effort=high"},
+			[]string{"--append-system-prompt"}, "--append-system-prompt", []string{"--model", "--effort"}},
 		{"a prompt after a switch, which keeps the option too", claude, []string{"--verbose", "fix the failing tests"},
-			[]string{"--verbose"}, []string{"--verbose"}},
-		{"print mode records nothing", claude, []string{"-p", "fix it", "--model", "sonnet"}, nil, nil},
+			[]string{"--verbose"}, "--verbose", nil},
+		{"print mode records nothing", claude, []string{"-p", "fix it", "--model", "sonnet"}, nil, "", nil},
 		{"a spaced codex value", codex, []string{"-m", "glm 5.3"},
-			[]string{"-m"}, []string{"-m"}},
+			[]string{"-m"}, "-m", nil},
 	} {
-		kept, unkept := launchOptionsSplit(c.spec, c.args)
-		if !slices.Equal(kept, c.wantKept) {
-			t.Errorf("%s: launchOptionsSplit(%q) kept %q, want %q", c.name, c.args, kept, c.wantKept)
-		}
-		if !slices.Equal(unkept, c.wantUnkept) {
-			t.Errorf("%s: launchOptionsSplit(%q) unkept %q, want %q", c.name, c.args, unkept, c.wantUnkept)
+		kept, unkept, later := launchOptionsSplit(c.spec, c.args)
+		if !slices.Equal(kept, c.wantKept) || unkept != c.wantUnkept || !slices.Equal(later, c.wantLater) {
+			t.Errorf("%s: launchOptionsSplit(%q) = %q, %q, %q, want %q, %q, %q",
+				c.name, c.args, kept, unkept, later, c.wantKept, c.wantUnkept, c.wantLater)
 		}
 	}
 }
