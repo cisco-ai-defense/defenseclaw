@@ -1587,7 +1587,7 @@ func TestDetectLLMNotes(t *testing.T) {
 		{"claude", nil, claude, "", nil, []string{"CLAUDE_CODE_OAUTH_TOKEN from `claude setup-token`", "stores a real token the agent can read"}, ""},
 		{"claude none", nil, claude, "none", nil, []string{"stores a real token the agent can read"}, ""},
 		{"claude not installed", func(ta *testApp) { ta.LookPath = func(string) (string, error) { return "", errors.New("not found") } }, claude, "", nil,
-			[]string{"set ANTHROPIC_API_KEY, or use /login in the sandbox"}, "setup-token"},
+			[]string{"(set ANTHROPIC_API_KEY, or set AWS_BEARER_TOKEN_BEDROCK for Amazon Bedrock); a login inside"}, "setup-token"},
 		{"claude wrapped", func(ta *testApp) { ta.Cfg.OpenShell.Wrappers = []string{"claudecode"} }, claude, "", nil,
 			[]string{"CLAUDE_CODE_OAUTH_TOKEN from `DEFENSECLAW_NO_SANDBOX=1 claude setup-token`"}, ""},
 		{"hermes provider key", nil, harnessSpec(t, "hermes"), "", map[string]bool{"HERMES_DEFENSECLAW_API_KEY": true},
