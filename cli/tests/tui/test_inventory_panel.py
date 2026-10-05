@@ -573,7 +573,7 @@ def test_inventory_ide_plugins_users_and_agent_identities() -> None:
         return {"agent_id": agent_id, "user_id": "1001", "user_name": user, "connector": connector,
                 "first_seen": "2026-10-01T00:00:00Z", "last_seen": "2026-10-05T00:00:00Z", "sessions_seen": 3}
 
-    panel.apply_agent_identities(json.dumps({"agents": [
+    panel.apply_agent_identities(json.dumps({"enabled": True, "identities": [
         identity("agt-0123456789abcdef", "bob"),
         identity("agt-fedcba9876543210", "alice"),
         identity("agt-1111111111111111", "carol", connector="amp"),

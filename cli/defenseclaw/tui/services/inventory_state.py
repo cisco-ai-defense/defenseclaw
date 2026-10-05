@@ -816,11 +816,12 @@ class InventoryPanelModel:
                 raw = json.loads(text)
             except (json.JSONDecodeError, ValueError):
                 raw = None
-            agents = raw.get("agents") if isinstance(raw, Mapping) else None
-            if isinstance(agents, list):
+            #  prints {enabled, identities}.
+            identities = raw.get("identities") if isinstance(raw, Mapping) else None
+            if isinstance(identities, list):
                 rows = tuple(
                     InventoryAgent.from_identity(item)
-                    for item in agents
+                    for item in identities
                     if isinstance(item, Mapping) and item.get("agent_id")
                 )
         self.agent_identities = rows
