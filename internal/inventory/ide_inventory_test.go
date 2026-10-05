@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/inventory/ideplugins"
+	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
 )
 
 func writeVSCodeExtensions(t *testing.T, home string, ids ...string) {
@@ -111,6 +113,21 @@ func TestIDEInventoryAttributesPluginsToProfileOwners(t *testing.T) {
 	}
 	if got := svc.IDEInventory(); len(got.Plugins) != 1 || got.Plugins[0].PluginID != "github.copilot" {
 		t.Fatalf("ai_only = %+v", got.Plugins)
+	}
+}
+
+// The Devin vendor's plugins keep pre-rename ids that the catalog does not
+// spell; the AI index still flags them as Devin plugins.
+func TestIDEAIIndexFlagsPreRenameDevinPlugins(t *testing.T) {
+	idx := newIDEAIIndex([]AISignature{{ID: legacyconnector.Replacement}})
+	for family, id := range map[string]string{
+		ideplugins.FamilyVSCode:    legacyconnector.VSCodeExtensionIDs[0],
+		ideplugins.FamilyJetBrains: legacyconnector.JetBrainsPluginIDs[0],
+		ideplugins.FamilyVim:       legacyconnector.VimPlugins[0],
+	} {
+		if sig, ok := idx.match(family, id); !ok || sig.ID != legacyconnector.Replacement {
+			t.Fatalf("%s %s matched %+v, %t", family, id, sig, ok)
+		}
 	}
 }
 

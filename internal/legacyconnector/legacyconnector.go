@@ -77,6 +77,19 @@ const (
 // vendor still reads them, so inventory and access-control code keeps them.
 var InventoryDotDirs = []string{".windsurf", ".codeium"}
 
+// DesktopDataName is the pre-rename app's user-data folder name (under the
+// platform's application-support directory). Devin Desktop installs from
+// before the rename keep their extension state there.
+const DesktopDataName = "Windsurf"
+
+// The vendor's IDE plugins still carry the pre-rename ids. The IDE inventory
+// flags them as Devin plugins.
+var (
+	VSCodeExtensionIDs = []string{"codeium.codeium"}
+	JetBrainsPluginIDs = []string{"com.codeium.intellij"}
+	VimPlugins         = []string{"codeium.vim", "codeium.nvim", "windsurf.vim", "windsurf.nvim"}
+)
+
 // Canonical maps the retired Desktop ID to its replacement. The comparison
 // ignores case and surrounding or embedded whitespace. Any other name is
 // returned unchanged with migrated=false.

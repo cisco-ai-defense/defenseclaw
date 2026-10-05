@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
 )
 
 // vscodeProduct is one VS Code-family editor: its home-relative dot
@@ -27,8 +29,9 @@ var vscodeProducts = []vscodeProduct{
 	{token: "vscode-insiders", channel: "insiders", dotDirs: []string{".vscode-insiders"}, dataName: "Code - Insiders", servers: []string{".vscode-server-insiders", ".vscode-insiders-server"}},
 	{token: "vscodium", channel: "stable", dotDirs: []string{".vscode-oss", ".vscodium"}, dataName: "VSCodium", servers: []string{".vscodium-server", ".vscode-oss-server"}},
 	{token: "cursor", channel: "stable", dotDirs: []string{".cursor"}, dataName: "Cursor", servers: []string{".cursor-server"}},
-	{token: "windsurf", channel: "stable", dotDirs: []string{".windsurf"}, dataName: "Windsurf", servers: []string{".windsurf-server"}},
 	{token: "devin-desktop", channel: "stable", dotDirs: []string{".devin"}, dataName: "Devin", servers: []string{".devin-server"}},
+	// Devin Desktop installs from before the rename keep the old folders.
+	{token: "devin-desktop", channel: "stable", dotDirs: legacyconnector.InventoryDotDirs[:1], dataName: legacyconnector.DesktopDataName, servers: []string{legacyconnector.InventoryDotDirs[0] + "-server"}},
 	{token: "kiro", channel: "stable", dotDirs: []string{".kiro"}, dataName: "Kiro", servers: []string{".kiro-server"}},
 	{token: "trae", channel: "stable", dotDirs: []string{".trae"}, dataName: "Trae", servers: []string{".trae-server"}},
 	{token: "void", channel: "stable", dotDirs: []string{".void-editor"}, dataName: "Void", servers: []string{".void-server"}},

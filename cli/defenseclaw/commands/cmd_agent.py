@@ -394,7 +394,7 @@ def ide_plugins(
 ) -> None:
     """List the extensions and plugins installed in each user's IDEs.
 
-    Covers VS Code and its forks (Cursor, Windsurf, Kiro and others,
+    Covers VS Code and its forks (Cursor, Devin Desktop, Kiro and others,
     including remote SSH servers), JetBrains IDEs, Visual Studio, Zed,
     Eclipse and Vim/Neovim, with each plugin's enabled state and an AI flag.
     The running gateway collects the list during AI discovery.
