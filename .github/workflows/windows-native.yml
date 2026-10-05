@@ -30,8 +30,33 @@ defaults:
     shell: pwsh
 
 jobs:
+  changes:
+    # Pick the Windows suites a pull request needs (scripts/ci_changes.py).
+    # Every other event runs everything. A gated job is skipped, and Windows
+    # Native Required accepts a skip only when this job selected it away.
+    name: Select Windows suites
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      windows_go: ${{ steps.classify.outputs.windows_go }}
+      windows_python: ${{ steps.classify.outputs.windows_python }}
+      windows_pkg: ${{ steps.classify.outputs.windows_pkg }}
+      pwsh: ${{ steps.classify.outputs.pwsh }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+          # The pull_request merge commit and its base parent.
+          fetch-depth: 2
+      - id: classify
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: python3 scripts/ci_changes.py --event $env:EVENT_NAME --github-output $env:GITHUB_OUTPUT
+
   windows-go:
     name: Windows x64 Go suite / shard ${{ matrix.shard }}
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.windows_go != 'false' }}
     runs-on: windows-latest
     timeout-minutes: 60
     strategy:
@@ -280,6 +305,8 @@ jobs:
 
   windows-python:
     name: Windows Python suite / shard ${{ matrix.shard }}
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.windows_python != 'false' }}
     runs-on: windows-latest
     timeout-minutes: 75
     env:
@@ -397,6 +424,8 @@ jobs:
 
   powershell-static:
     name: Windows PowerShell harness validation
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.pwsh != 'false' }}
     runs-on: windows-latest
     timeout-minutes: 15
     steps:
@@ -457,6 +486,8 @@ jobs:
 
   package-artifact:
     name: Windows packaged artifact build
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.windows_pkg != 'false' }}
     runs-on: windows-latest
     timeout-minutes: 35
     env:
@@ -765,6 +796,7 @@ jobs:
     name: Windows Native Required
     if: ${{ always() }}
     needs:
+      - changes
       - windows-go
       - windows-python
       - powershell-static
@@ -780,7 +812,12 @@ jobs:
       - name: Fail unless every deterministic Windows validation job succeeded
         run: |
           $results = $env:REQUIRED_RESULTS | ConvertFrom-Json
-          $failed = @($results.PSObject.Properties | Where-Object { $_.Value.result -ne 'success' })
+          # A pull request skips the suites its files do not feed. A skip
+          # counts only when the classifier ran; any other result fails.
+          $selected = $results.changes.result -eq 'success'
+          $failed = @($results.PSObject.Properties | Where-Object {
+            $_.Value.result -ne 'success' -and -not ($selected -and $_.Value.result -eq 'skipped')
+          })
           if ($failed.Count) {
             $summary = $failed | ForEach-Object { "$($_.Name)=$($_.Value.result)" }
             throw "Required Windows validation did not succeed: $($summary -join ', ')"

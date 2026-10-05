@@ -39,7 +39,7 @@ def test_ci_shards_python_once_and_does_not_repeat_unified_corpus() -> None:
     assert "--dist=worksteal" in exhaustive
     assert "name: Python Lint" in workflow
     assert "name: Python Lint & Test" in workflow
-    assert "needs: [python-test, python-lint]" in workflow
+    assert "needs: [changes, python-test, python-lint]" in workflow
     assert workflow.count("run: make py-lint") == 1
     assert "pattern: python-coverage-part-*" in workflow
     assert 'test "${#coverage_parts[@]}" -eq 4' in workflow
@@ -124,7 +124,7 @@ def test_ci_shards_slow_gateway_package_and_combines_go_coverage() -> None:
     assert "GO_PACKAGE_SHARDS: 8" in workflow
     assert "internal/(audit|gateway)" in workflow
     assert 'test "${#coverage_parts[@]}" -eq 24' in workflow
-    assert "needs: [go-test-gateway, go-test-audit, go-test-other]" in workflow
+    assert "needs: [changes, go-test-gateway, go-test-audit, go-test-other, go-pinned]" in workflow
     assert 'test "$AUDIT_RESULT" = success' in workflow
     assert "python3 scripts/merge_go_coverage.py" in workflow
     assert "go tool cover -func=coverage.out" in workflow

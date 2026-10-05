@@ -24,6 +24,61 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    # Pick the suites a pull request needs from the files it changes
+    # (scripts/ci_changes.py, contract: cli/tests/test_ci_changes.py). Every
+    # other event runs everything. Required checks still report: a gated job
+    # is skipped, which passes; Go Build gates its steps so each matrix name
+    # reports; and the Go Test, Python Lint & Test and Enterprise Required
+    # aggregates accept a skipped partition only when this job selected it
+    # away. Gated jobs use `!= 'false'`, so a failed classifier runs everything.
+    name: Select CI suites
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      go: ${{ steps.classify.outputs.go }}
+      go_pinned: ${{ steps.classify.outputs.go_pinned }}
+      go_tests: ${{ steps.classify.outputs.go_tests }}
+      python: ${{ steps.classify.outputs.python }}
+      python_tests: ${{ steps.classify.outputs.python_tests }}
+      py_select: ${{ steps.classify.outputs.py_select }}
+      python_lint: ${{ steps.classify.outputs.python_lint }}
+      wheel: ${{ steps.classify.outputs.wheel }}
+      ts: ${{ steps.classify.outputs.ts }}
+      rego: ${{ steps.classify.outputs.rego }}
+      checks: ${{ steps.classify.outputs.checks }}
+      core: ${{ steps.classify.outputs.core }}
+      install: ${{ steps.classify.outputs.install }}
+      enterprise: ${{ steps.classify.outputs.enterprise }}
+      workflows: ${{ steps.classify.outputs.workflows }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+          # The pull_request merge commit and its base parent.
+          fetch-depth: 2
+      - id: classify
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: python3 scripts/ci_changes.py --event "$EVENT_NAME" --github-output "$GITHUB_OUTPUT"
+
+  workflow-lint:
+    name: Workflow Lint
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.workflows != 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+      # Syntax, expressions, job graph and runner labels (.github/actionlint.yaml).
+      # Embedded scripts are not linted here.
+      - run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -shellcheck= -pyflakes=
+
   version-sync:
     name: Version Sync Check
     runs-on: ubuntu-latest
@@ -42,6 +97,8 @@ jobs:
 
   go-lint:
     name: Go Lint
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.go != 'false' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
@@ -64,6 +121,8 @@ jobs:
 
   go-test-gateway:
     name: Go Gateway Test (shard ${{ matrix.shard }})
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.go != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 50
     strategy:
@@ -105,6 +164,8 @@ jobs:
 
   go-test-audit:
     name: Go Audit Test (shard ${{ matrix.shard }})
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.go != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 50
     strategy:
@@ -146,6 +207,8 @@ jobs:
 
   go-test-other:
     name: Go Test (remaining packages / shard ${{ matrix.shard }})
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.go != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 50
     strategy:
@@ -193,63 +256,14 @@ jobs:
           path: coverage-go-other-${{ matrix.shard }}.out
           retention-days: 1
 
-  go-test:
-    # Preserve the existing required-check name while combining the complete
-    # race/coverage suite from the gateway and audit shards plus all remaining
-    # packages.
-    name: Go Test
-    needs: [go-test-gateway, go-test-audit, go-test-other]
-    if: ${{ always() }}
+  go-pinned:
+    # A pull request with no Go change still runs the Go tests that name a
+    # file it changes, such as a docs page a test reads.
+    name: Go Pinned Tests
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.go_pinned == 'true' }}
     runs-on: ubuntu-latest
-    steps:
-      - name: Require every Go test partition
-        env:
-          GATEWAY_RESULT: ${{ needs.go-test-gateway.result }}
-          AUDIT_RESULT: ${{ needs.go-test-audit.result }}
-          OTHER_RESULT: ${{ needs.go-test-other.result }}
-        run: |
-          test "$GATEWAY_RESULT" = success
-          test "$AUDIT_RESULT" = success
-          test "$OTHER_RESULT" = success
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
-        with:
-          persist-credentials: false
-      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
-        with:
-          go-version-file: go.mod
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          pattern: go-coverage-*
-          path: coverage-parts
-          merge-multiple: true
-      - name: Combine Go coverage
-        run: |
-          set -euo pipefail
-          mapfile -t coverage_parts < <(
-            find coverage-parts -type f -name 'coverage-go-*.out' -print | sort
-          )
-          test "${#coverage_parts[@]}" -eq 24
-          python3 scripts/merge_go_coverage.py \
-            --output coverage.out \
-            "${coverage_parts[@]}"
-          go tool cover -func=coverage.out >/dev/null
-      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
-        with:
-          name: go-coverage
-          path: coverage.out
-
-  go-build:
-    name: Go Build (${{ matrix.goos }}/${{ matrix.goarch }})
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        include:
-          - goos: linux
-            goarch: amd64
-          - goos: linux
-            goarch: arm64
-          - goos: darwin
-            goarch: arm64
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -263,14 +277,126 @@ jobs:
           cache: npm
           cache-dependency-path: extensions/defenseclaw/package-lock.json
       - run: make plugin
-      - run: make gateway-cross GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }}
+      - name: Run the Go tests that name a changed file
+        env:
+          GO_TESTS: ${{ needs.changes.outputs.go_tests }}
+        run: |
+          set -euo pipefail
+          status=0
+          while IFS=$'\t' read -r package pattern; do
+            echo "::group::go test -run '$pattern' $package"
+            go test -count=1 -timeout 25m -run "$pattern" "$package" || status=1
+            echo "::endgroup::"
+          done < <(python3 -c 'import json, os; [print(t["package"] + "\t" + t["run"]) for t in json.loads(os.environ["GO_TESTS"])]')
+          exit "$status"
+
+  go-test:
+    # Preserve the existing required-check name while combining the complete
+    # race/coverage suite from the gateway and audit shards plus all remaining
+    # packages. A pull request without Go changes skips the shards and runs
+    # only Go Pinned Tests, if any.
+    name: Go Test
+    needs: [changes, go-test-gateway, go-test-audit, go-test-other, go-pinned]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every Go test partition
+        env:
+          GO_SUITE: ${{ needs.changes.outputs.go }}
+          GATEWAY_RESULT: ${{ needs.go-test-gateway.result }}
+          AUDIT_RESULT: ${{ needs.go-test-audit.result }}
+          OTHER_RESULT: ${{ needs.go-test-other.result }}
+          PINNED_RESULT: ${{ needs.go-pinned.result }}
+        run: |
+          set -euo pipefail
+          if [ "$GO_SUITE" = false ]; then
+            echo "No Go change in this pull request: the Go suite was skipped."
+            case "$PINNED_RESULT" in success|skipped) ;; *) echo "Go Pinned Tests: $PINNED_RESULT"; exit 1 ;; esac
+            exit 0
+          fi
+          test "$GATEWAY_RESULT" = success
+          test "$AUDIT_RESULT" = success
+          test "$OTHER_RESULT" = success
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        if: ${{ needs.changes.outputs.go != 'false' }}
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        if: ${{ needs.changes.outputs.go != 'false' }}
+        with:
+          go-version-file: go.mod
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: ${{ needs.changes.outputs.go != 'false' }}
+        with:
+          pattern: go-coverage-*
+          path: coverage-parts
+          merge-multiple: true
+      - name: Combine Go coverage
+        if: ${{ needs.changes.outputs.go != 'false' }}
+        run: |
+          set -euo pipefail
+          mapfile -t coverage_parts < <(
+            find coverage-parts -type f -name 'coverage-go-*.out' -print | sort
+          )
+          test "${#coverage_parts[@]}" -eq 24
+          python3 scripts/merge_go_coverage.py \
+            --output coverage.out \
+            "${coverage_parts[@]}"
+          go tool cover -func=coverage.out >/dev/null
       - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        if: ${{ needs.changes.outputs.go != 'false' }}
+        with:
+          name: go-coverage
+          path: coverage.out
+
+  go-build:
+    # The three matrix names are required checks, so the job always starts
+    # and gates its steps instead: a skipped matrix job would never report
+    # the expanded names.
+    name: Go Build (${{ matrix.goos }}/${{ matrix.goarch }})
+    needs: changes
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: arm64
+    steps:
+      - if: ${{ needs.changes.outputs.go == 'false' }}
+        run: echo "No Go change in this pull request; the cross build is skipped."
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        if: ${{ needs.changes.outputs.go != 'false' }}
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        if: ${{ needs.changes.outputs.go != 'false' }}
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        if: ${{ needs.changes.outputs.go != 'false' }}
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: extensions/defenseclaw/package-lock.json
+      - if: ${{ needs.changes.outputs.go != 'false' }}
+        run: make plugin
+      - if: ${{ needs.changes.outputs.go != 'false' }}
+        run: make gateway-cross GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }}
+      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        if: ${{ needs.changes.outputs.go != 'false' }}
         with:
           name: defenseclaw-${{ matrix.goos }}-${{ matrix.goarch }}
           path: defenseclaw-${{ matrix.goos }}-${{ matrix.goarch }}
 
   python-test:
     name: Python Test (shard ${{ matrix.shard }})
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.python_tests != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -288,6 +414,9 @@ jobs:
         env:
           PYTHON_TEST_SHARD: ${{ matrix.shard }}
           PYTHON_TEST_SHARDS: 4
+          # Empty for the full suite. Otherwise the only modules to run: the
+          # TUI tests and the tests that name a changed file.
+          PY_SELECT: ${{ needs.changes.outputs.py_select }}
         run: |
           set -euo pipefail
           mapfile -t test_files < <(
@@ -298,6 +427,13 @@ jobs:
               --exclude cli/tests/test_telemetry_registry_candidate_renderer.py
           )
           test "${#test_files[@]}" -gt 0
+          if [ -n "$PY_SELECT" ]; then
+            mapfile -t test_files < <(
+              printf '%s\n' "${test_files[@]}" | grep -Fx -f <(tr ' ' '\n' <<<"$PY_SELECT") || true
+            )
+            echo "Selected ${#test_files[@]} test modules in this shard."
+            [ "${#test_files[@]}" -gt 0 ] || exit 0
+          fi
           COVERAGE_FILE="coverage-py-shard-$PYTHON_TEST_SHARD" \
             .venv/bin/python -m pytest "${test_files[@]}" \
               -q --tb=short \
@@ -312,6 +448,8 @@ jobs:
 
   python-lint:
     name: Python Lint
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.python_lint != 'false' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
@@ -325,30 +463,47 @@ jobs:
     # Preserve the existing required-check name while making it the single
     # authority over lint, every isolated test partition, and combined
     # coverage.
+    # A pull request without Python changes runs only the selected modules
+    # (or nothing), and skips lint, the judge corpus and the coverage merge.
     name: Python Lint & Test
-    needs: [python-test, python-lint]
+    needs: [changes, python-test, python-lint]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
       - name: Require lint and every Python test partition
         env:
+          PYTHON_SUITE: ${{ needs.changes.outputs.python }}
           PYTHON_REGULAR_RESULT: ${{ needs.python-test.result }}
           PYTHON_LINT_RESULT: ${{ needs.python-lint.result }}
         run: |
+          set -euo pipefail
+          if [ "$PYTHON_SUITE" = false ]; then
+            echo "No Python change in this pull request: only selected modules ran."
+            for result in "$PYTHON_REGULAR_RESULT" "$PYTHON_LINT_RESULT"; do
+              case "$result" in success|skipped) ;; *) echo "partition result: $result"; exit 1 ;; esac
+            done
+            exit 0
+          fi
           test "$PYTHON_REGULAR_RESULT" = success
           test "$PYTHON_LINT_RESULT" = success
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        if: ${{ needs.changes.outputs.python != 'false' }}
         with:
           persist-credentials: false
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
-      - run: uv sync
-      - run: make contextual-judge-test
+        if: ${{ needs.changes.outputs.python != 'false' }}
+      - if: ${{ needs.changes.outputs.python != 'false' }}
+        run: uv sync
+      - if: ${{ needs.changes.outputs.python != 'false' }}
+        run: make contextual-judge-test
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: ${{ needs.changes.outputs.python != 'false' }}
         with:
           pattern: python-coverage-part-*
           path: coverage-parts
           merge-multiple: true
       - name: Combine Python coverage
+        if: ${{ needs.changes.outputs.python != 'false' }}
         run: |
           set -euo pipefail
           mapfile -t coverage_parts < <(
@@ -358,6 +513,7 @@ jobs:
           .venv/bin/coverage combine "${coverage_parts[@]}"
           .venv/bin/coverage xml -o coverage-py.xml
       - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        if: ${{ needs.changes.outputs.python != 'false' }}
         with:
           name: python-coverage
           path: coverage-py.xml
@@ -381,6 +537,8 @@ jobs:
 
   python-wheel-install:
     name: Python Wheel Security Contract (${{ matrix.python-version }})
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.wheel != 'false' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -568,6 +726,8 @@ jobs:
     # installer through a fresh install, a 0.8.10 upgrade with rollback, the
     # 0.8.x handoff, and the failure drills, each in a throwaway HOME.
     name: Install and Upgrade Smoke
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.install != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
@@ -612,6 +772,8 @@ jobs:
 
   connector-matrix:
     name: Connector Matrix
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.core != 'false' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
@@ -639,6 +801,8 @@ jobs:
   # of four separate jobs.
   macos-enterprise-packaging:
     name: macOS Enterprise Hook Hardening + Packaging
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.enterprise != 'false' }}
     runs-on: macos-latest
     timeout-minutes: 25
     steps:
@@ -684,6 +848,8 @@ jobs:
     # here on its own OS, and the systemd units get a static systemd-analyze
     # check on Linux.
     name: Unix Standalone Lifecycle (${{ matrix.os }})
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.enterprise != 'false' }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
@@ -768,6 +934,8 @@ jobs:
     # Setup from the release's builder without a signing certificate, which
     # is the hash-pinned standalone-unsigned flavor.
     name: Enterprise Install Lane Assets
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.enterprise != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     outputs:
@@ -882,6 +1050,8 @@ jobs:
 
   enterprise-macos-install:
     name: Enterprise Install Lane (pkg)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.enterprise != 'false' }}
     runs-on: macos-latest
     timeout-minutes: 30
     steps:
@@ -963,6 +1133,7 @@ jobs:
     # job blocks the merge.
     name: Enterprise Required
     needs:
+      - changes
       - enterprise-install-assets
       - enterprise-linux-install
       - enterprise-macos-install
@@ -979,12 +1150,17 @@ jobs:
           MACOS_INSTALL: ${{ needs.enterprise-macos-install.result }}
           WINDOWS_INSTALL: ${{ needs.enterprise-windows-install.result }}
           UNIX_LIFECYCLE: ${{ needs.unix-standalone-lifecycle.result }}
+          # false when the pull request changes nothing these gates consume.
+          ENTERPRISE: ${{ needs.changes.outputs.enterprise }}
         shell: bash
         run: |
           status=0
           for gate in INSTALL_ASSETS LINUX_INSTALL MACOS_INSTALL WINDOWS_INSTALL UNIX_LIFECYCLE; do
             result=${!gate}
             echo "$gate: $result"
+            if [ "$ENTERPRISE" = false ] && [ "$result" = skipped ]; then
+              continue
+            fi
             [ "$result" = success ] || status=1
           done
           exit "$status"
@@ -995,6 +1171,8 @@ jobs:
     # with the newest stable Go, the way a release host that upgraded its Go
     # would, and reports such a warning without gating merges.
     name: Quiet Start-up (latest Go, advisory)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.go != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     continue-on-error: true
@@ -1013,6 +1191,8 @@ jobs:
 
   python-audit:
     name: Python Dependency Audit
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.python != 'false' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
@@ -1091,6 +1271,8 @@ jobs:
 
   ts-build-test:
     name: TypeScript Build & Test
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.ts != 'false' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
@@ -1106,6 +1288,8 @@ jobs:
 
   ts-audit:
     name: npm Dependency Audit
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.ts != 'false' }}
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -1127,6 +1311,8 @@ jobs:
 
   rego-test:
     name: Rego Policy Tests
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.rego != 'false' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
@@ -1143,6 +1329,8 @@ jobs:
 
   schema-parity:
     name: Schema & Parity Checks
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.checks != 'false' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
@@ -1172,6 +1360,8 @@ jobs:
 
   local-observability-golden:
     name: Local Observability Golden
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.core != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:

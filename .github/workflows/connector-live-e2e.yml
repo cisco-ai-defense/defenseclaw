@@ -199,6 +199,10 @@ jobs:
           # connector signal and is the cell to mark "required" in branch
           # protection. Its check name is "Contract codex / macos-latest".
           minimal='{"os":["macos-latest"],"connector":["codex"]}'
+          # A pull request that changes no code (docs or other workflows only,
+          # per scripts/ci_changes.py) keeps the required check name but
+          # reports it from a no-op cell on Linux instead of a macOS runner.
+          noop='{"os":["macos-latest"],"connector":["codex"],"include":[{"os":"macos-latest","connector":"codex","runner":"ubuntu-latest","noop":true}]}'
 
           if [ "${EVENT}" != "pull_request" ]; then
             echo "matrix=${full}" >> "$GITHUB_OUTPUT"
@@ -241,6 +245,9 @@ jobs:
             -e '^\.github/workflows/connector-live-e2e\.yml$'; then
             echo "matrix=${full}" >> "$GITHUB_OUTPUT"
             echo "connector/release-sensitive change -> full Linux + macOS matrix"
+          elif [ "$(printf '%s\n' "${changed}" | python3 scripts/ci_changes.py --event pull_request --files-from - --get code)" = false ]; then
+            echo "matrix=${noop}" >> "$GITHUB_OUTPUT"
+            echo "no code change -> no-op required cell"
           else
             echo "matrix=${minimal}" >> "$GITHUB_OUTPUT"
             echo "no connector/release-sensitive change -> macOS codex smoke only"
@@ -256,7 +263,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.changes.outputs.matrix) }}
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runner || matrix.os }}
     timeout-minutes: 25
     defaults:
       run:
@@ -276,6 +283,7 @@ jobs:
           INPUT_OS: ${{ inputs.os }}
           MATRIX_CONNECTOR: ${{ matrix.connector }}
           MATRIX_CONNECTORS: ${{ matrix.connectors }}
+          MATRIX_NOOP: ${{ matrix.noop && 'true' || 'false' }}
         run: |
           case "${RUNNER_OS}" in
             Linux)   dcos=linux ;;
@@ -297,6 +305,7 @@ jobs:
             [ "${in_os}" = "all" ] || [ "${in_os}" = "${dcos}" ] || connectors=""
           fi
           run=false
+          if [ "${MATRIX_NOOP}" = true ]; then connectors=""; fi
           [ -z "${connectors}" ] || run=true
           echo "run=${run}" >> "$GITHUB_OUTPUT"
           echo "connectors=${connectors}" >> "$GITHUB_OUTPUT"
