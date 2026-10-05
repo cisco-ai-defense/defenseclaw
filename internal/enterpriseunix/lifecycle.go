@@ -1117,6 +1117,9 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		}
 	}
 
+	if !l.opts.NoStart && l.testFaultAfterServicesRequested() {
+		return failAndRollback(codeLifecycleTestFault, errors.New("the lifecycle test fault asked this run to fail after its services started"))
+	}
 	if !l.opts.NoStart {
 		// Inputs written during this transaction are applied by a follow-up
 		// (settleInputChanges); they do not fail this one.
