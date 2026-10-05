@@ -169,6 +169,7 @@ func (s *ContinuousDiscoveryService) detectModelFilesWithOutcome(ctx context.Con
 		roots[i].macOSOwnershipRoots = macOSOwnershipRoots
 	}
 	delegatedRoots := nestedModelScanRoots(roots)
+	ownDataDirs := s.ownDataDirs()
 	if len(roots) > 1 {
 		sequence := s.modelFileRootCursor.Add(1) - 1
 		start := modelRootRotationStart(sequence, len(roots), priorityRootCount)
@@ -241,7 +242,7 @@ func (s *ContinuousDiscoveryService) detectModelFilesWithOutcome(ctx context.Con
 				}
 				return nil
 			}
-			if walkErr != nil && macOSPrivacyDenied(runtime.GOOS, walkErr) {
+			if walkErr != nil && s.discoveryAccessSkipped(walkErr) {
 				// Skipped like ~/Library itself: not an error of the scan.
 				if d != nil && d.IsDir() {
 					return filepath.SkipDir
@@ -291,7 +292,8 @@ func (s *ContinuousDiscoveryService) detectModelFilesWithOutcome(ctx context.Con
 				}
 				macOSHomeLibrary := runtime.GOOS == "darwin" && !root.specialized &&
 					isMacOSHomeLibrary(path, homes)
-				if path != root.path && (shouldSkipModelDirectoryForRoot(d.Name(), root) || macOSHomeLibrary) {
+				if path != root.path && (shouldSkipModelDirectoryForRoot(d.Name(), root) || macOSHomeLibrary ||
+					modelPathInSet(path, ownDataDirs)) {
 					lastCompleted = path
 					return filepath.SkipDir
 				}
@@ -872,7 +874,7 @@ func (s *ContinuousDiscoveryService) modelFileScanRootsWithErrors() ([]modelScan
 		path = filepath.Clean(path)
 		resolved, err := filepath.EvalSymlinks(path)
 		if err != nil {
-			if !os.IsNotExist(err) && !macOSPrivacyDenied(runtime.GOOS, err) {
+			if !os.IsNotExist(err) && !s.discoveryAccessSkipped(err) {
 				rootErrors[hashPath(path)] = modelRootAccessErrorDetail(root, err)
 			}
 			return
@@ -883,7 +885,7 @@ func (s *ContinuousDiscoveryService) modelFileScanRootsWithErrors() ([]modelScan
 		}
 		info, err := os.Stat(path)
 		if err != nil {
-			if !os.IsNotExist(err) && !macOSPrivacyDenied(runtime.GOOS, err) {
+			if !os.IsNotExist(err) && !s.discoveryAccessSkipped(err) {
 				rootErrors[hashPath(path)] = modelRootAccessErrorDetail(root, err)
 			}
 			return
@@ -1211,6 +1213,35 @@ func (s *ContinuousDiscoveryService) lemonadeConfiguredModelDirs() []string {
 		}
 	}
 	return out
+}
+
+// ownDataDirs lists DefenseClaw's own data directories: the configured
+// DataDir and ~/.defenseclaw under every scanned home. Their .venv, uv
+// cache and bundled models (magika) are DefenseClaw's own dependencies,
+// not AI tools of the user, so the discovery walks never descend there.
+func (s *ContinuousDiscoveryService) ownDataDirs() []string {
+	if s == nil {
+		return nil
+	}
+	var dirs []string
+	add := func(path string) {
+		path = strings.TrimSpace(path)
+		if path == "" || !filepath.IsAbs(path) {
+			return
+		}
+		path = filepath.Clean(path)
+		dirs = append(dirs, path)
+		if resolved, err := filepath.EvalSymlinks(path); err == nil && filepath.Clean(resolved) != path {
+			dirs = append(dirs, filepath.Clean(resolved))
+		}
+	}
+	add(s.opts.DataDir)
+	for _, home := range s.homesToScan() {
+		if strings.TrimSpace(home) != "" {
+			add(filepath.Join(home, ".defenseclaw"))
+		}
+	}
+	return dirs
 }
 
 func shouldSkipModelDirectory(name string, specialized bool) bool {

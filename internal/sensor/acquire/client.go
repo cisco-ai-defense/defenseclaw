@@ -24,6 +24,7 @@ package acquire
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"sync"
@@ -63,6 +64,11 @@ func NewHelper(socketPath string) *Helper {
 	return helper
 }
 
+// ErrHelperUnreachable wraps a failed connect to the helper's socket: the
+// helper is not running or not listening yet (it restarts during a package
+// upgrade), so a later try can succeed.
+var ErrHelperUnreachable = errors.New("acquire: dial helper")
+
 // dialTimeout bounds connecting. Short: the helper is a local service, so a
 // slow connect means it is gone, not busy.
 const dialTimeout = 5 * time.Second
@@ -73,7 +79,7 @@ func (h *Helper) dial(ctx context.Context) (net.Conn, error) {
 	var dialer net.Dialer
 	conn, err := dialer.DialContext(dialCtx, "unix", h.socketPath)
 	if err != nil {
-		return nil, fmt.Errorf("acquire: dial helper at %s: %w", h.socketPath, err)
+		return nil, fmt.Errorf("%w at %s: %w", ErrHelperUnreachable, h.socketPath, err)
 	}
 	return conn, nil
 }

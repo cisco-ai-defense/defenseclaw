@@ -22,6 +22,7 @@ import {
 import { readFile, readdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
+import GithubSlugger from 'github-slugger';
 
 const CONTENT_ROOT = resolve(process.cwd(), 'content/docs');
 
@@ -59,21 +60,37 @@ function slugsToUrl(slugs: string[]): string {
   return slugs.length === 0 ? '/docs/' : `/docs/${slugs.join('/')}/`;
 }
 
-// Pull h2/h3 headings from a Markdown body so the validator can
-// match `#anchor` references. Mirrors GitHub's slug rules
-// (lowercase, dashes, strip non-word chars) — close enough to
-// Fumadocs's TOC-builder for practical link checking.
+// Pull headings from a Markdown body so the validator can match `#anchor`
+// references. This mirrors Fumadocs's remark-heading plugin, which sets the
+// ids on the built pages: a trailing `[#custom-id]` wins, otherwise the
+// heading's plain text goes through github-slugger, with one slugger per page
+// so repeated headings get `-1`, `-2` suffixes. Lines inside fenced code
+// blocks are not headings.
+function headingText(raw: string): string {
+  return raw
+    .replace(/`([^`]*)`/g, '$1')
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/<[^>]+>/g, '')
+    .replace(/(\*\*|__|\*|_)(\S(?:.*?\S)?)\1/g, '$2')
+    .replace(/\\([\\`*_{}[\]()#+\-.!<>|])/g, '$1');
+}
+
 function extractHeadings(body: string): string[] {
+  const slugger = new GithubSlugger();
   const slugs: string[] = [];
+  let fence: string | null = null;
   for (const line of body.split(/\r?\n/)) {
+    const fenceMatch = /^\s*(`{3,}|~{3,})/.exec(line);
+    if (fenceMatch) {
+      if (fence === null) fence = fenceMatch[1];
+      else if (line.trim().startsWith(fence)) fence = null;
+      continue;
+    }
+    if (fence !== null) continue;
     const m = /^(#{1,6})\s+(.+?)\s*$/.exec(line);
     if (!m) continue;
-    if (m[1].length < 2) continue; // skip h1 (page title)
-    const slug = m[2]
-      .toLowerCase()
-      .replace(/[^\w\s-]/g, '')
-      .trim()
-      .replace(/\s+/g, '-');
+    const custom = /\s*\[#([^\]]+?)\]\s*$/.exec(m[2]);
+    const slug = custom ? custom[1] : slugger.slug(headingText(m[2]));
     if (slug) slugs.push(slug);
   }
   return slugs;

@@ -96,6 +96,7 @@ enum MainWindowLifecycleContractTests {
             "DefenseClawMac/Features/ActivityView.swift",
             "DefenseClawMac/Features/AlertsView.swift",
             "DefenseClawMac/Features/AuditView.swift",
+            "DefenseClawMac/Features/DiscoverViews.swift",
             "DefenseClawMac/Features/LogsView.swift",
         ] {
             let featureSource = try source(at: root.appendingPathComponent(relativePath))
@@ -104,6 +105,12 @@ enum MainWindowLifecycleContractTests {
             expect(!featureSource.contains(".inspector(isPresented:"),
                    "\(relativePath) must not restore a nested native inspector")
         }
+
+        // GAP-2626: a native inspector inside the NavigationSplitView detail
+        // registers a second NSTrackingSeparatorToolbarItem for the same
+        // divider on macOS 15, and AppKit aborts the whole app.
+        expect(!applicationSources.contains(".inspector(isPresented:"),
+               "no panel may use the native SwiftUI inspector inside the main split view")
 
         print("MainWindowLifecycleContractTests passed")
     }

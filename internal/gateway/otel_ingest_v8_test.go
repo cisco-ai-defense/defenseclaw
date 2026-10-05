@@ -321,7 +321,9 @@ func TestOTLPIngestV8AcceptedBatchUsesCanonicalRouterWithoutRawBody(t *testing.T
 		event.connector != "codex" || event.severity != "INFO" || event.mandatory != 0 {
 		t.Fatalf("canonical event=%#v", event)
 	}
-	if dropped.eventName == "" || dropped.severity != "MEDIUM" ||
+	// GAP-1165: native records no binding imports are dropped and counted by
+	// design, so their drop event is INFO rather than a per-batch WARN.
+	if dropped.eventName == "" || dropped.severity != "INFO" ||
 		!strings.Contains(dropped.payload, `"defenseclaw.telemetry.rejection_reason_class":"unsupported_identity"`) {
 		t.Fatalf("canonical drop event=%#v", dropped)
 	}

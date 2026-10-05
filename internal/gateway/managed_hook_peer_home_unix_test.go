@@ -137,7 +137,7 @@ func TestManagedHookPeerNameResolvesDirectoryUsers(t *testing.T) {
 		UnenrolledUsers: config.EnterpriseUnenrolledDeny,
 		ExemptUsers:     []string{"svc-release"},
 	}, nil, func() (managedHookLedger, error) { return managedHookLedger{}, nil })
-	if decision := authorizer.decide(peer, "claudecode"); !decision.Allow || !decision.Exempt {
+	if decision := authorizer.decide(peer, "claudecode", ""); !decision.Allow || !decision.Exempt {
 		t.Fatalf("exempt directory user by name: %+v, want an exempt allow", decision)
 	}
 }

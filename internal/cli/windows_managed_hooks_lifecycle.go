@@ -69,7 +69,11 @@ type windowsManagedHooksLifecycleReport struct {
 	// Leftovers names what the rollback of a first standalone install
 	// could not remove (rollbackWindowsStandaloneFirstInstallFootprint).
 	Leftovers []string `json:"leftovers,omitempty"`
-	Error     string   `json:"error,omitempty"`
+	// CursorAdapterRestored is set when a capture wrote this release's
+	// Cursor enterprise adapter back over a changed or deleted one
+	// (GAP-2474, GAP-2479), so the lifecycle result can say so (GAP-2480).
+	CursorAdapterRestored bool   `json:"cursor_adapter_restored,omitempty"`
+	Error                 string `json:"error,omitempty"`
 }
 
 type windowsManagedHooksLifecycleContext struct {
@@ -301,7 +305,8 @@ func runWindowsManagedHooksLifecycle(
 		if err != nil {
 			return fail(err)
 		}
-		currentCursor, cursorActive, err := enterprisehooks.ReadWindowsCursorManagedPolicyTargets()
+		currentCursor, cursorActive, restored, err := readWindowsManagedHooksLifecycleCursorTargets(ctx.opts.HookBinary)
+		report.CursorAdapterRestored = restored
 		if err != nil {
 			return fail(err)
 		}
@@ -1930,10 +1935,15 @@ func garbageCollectWindowsManagedHooksLifecycleGenerations(
 				HookExecutable: target.hookExecutable,
 			},
 		); err != nil {
+			account := ""
+			if label := enterpriseHookWindowsAccountLabel(enterpriseHookReconcileRow{SID: target.sid}); label != target.sid {
+				account = " (" + strings.TrimSuffix(label, " ("+target.sid+")") + ")"
+			}
 			return fmt.Errorf(
-				"retire %s managed runtime generations for SID %s: %w",
+				"retire %s managed runtime generations for SID %s%s: %w",
 				target.connector,
 				target.sid,
+				account,
 				err,
 			)
 		}
@@ -2028,6 +2038,34 @@ func restoreWindowsManagedHooksLifecycleComposite(
 		return err
 	}
 	return nil
+}
+
+// These are replaceable in tests.
+var (
+	windowsManagedHooksLifecycleCursorTargets     = enterprisehooks.ReadWindowsCursorManagedPolicyTargets
+	windowsManagedHooksLifecycleCursorRestore     = enterprisehooks.RestoreWindowsCursorManagedAdapter
+	windowsManagedHooksLifecycleStandaloneProcess = enterprisehooks.WindowsStandaloneProcess
+)
+
+// readWindowsManagedHooksLifecycleCursorTargets reads the protected Cursor
+// target registry for a lifecycle capture. When a standalone deployment's
+// adapter was changed in place or deleted, it first writes this build's
+// adapter back, so a repair or Setup /ensure can capture its snapshot instead
+// of failing with the services stopped (GAP-2474, GAP-2479), and reports
+// that it did (GAP-2480). Any other failure is returned as is.
+func readWindowsManagedHooksLifecycleCursorTargets(
+	hookBinary string,
+) ([]enterprisehooks.WindowsCursorManagedRuntimeTarget, bool, bool, error) {
+	targets, active, err := windowsManagedHooksLifecycleCursorTargets()
+	if err == nil || !windowsManagedHooksLifecycleStandaloneProcess() {
+		return targets, active, false, err
+	}
+	restored, restoreErr := windowsManagedHooksLifecycleCursorRestore(hookBinary)
+	if restoreErr != nil || !restored {
+		return targets, active, false, err
+	}
+	targets, active, err = windowsManagedHooksLifecycleCursorTargets()
+	return targets, active, true, err
 }
 
 func windowsManagedHooksCursorOptions(

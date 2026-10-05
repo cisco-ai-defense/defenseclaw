@@ -373,7 +373,7 @@ def _render_table(components: list[Component]) -> None:
         f"{ux.bold('STATUS'.ljust(status_w))}  "
         f"{ux.bold('ORIGIN')}"
     )
-    click.echo(
+    ux.echo(
         f"  {ux.dim('─' * name_w)}  {ux.dim('─' * version_w)}  "
         f"{ux.dim('─' * status_w)}  {ux.dim('─' * 40)}"
     )
@@ -386,7 +386,7 @@ def _render_table(components: list[Component]) -> None:
             f"{c.origin}"
         )
         if c.detail:
-            click.echo(
+            ux.echo(
                 f"  {' ' * name_w}  {' ' * version_w}  {' ' * status_w}  "
                 f"{ux.dim('↳')} {c.detail}"
             )

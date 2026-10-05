@@ -12,20 +12,28 @@
 
 from __future__ import annotations
 
+import re
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
-
-from rich.markup import escape as rich_escape
 
 from defenseclaw.alert_semantics import (
     ALERT_ACTIONABLE_SEVERITIES,
     ALERT_ALL_SEVERITIES,
     ALERT_LEGACY_FINDING_ACTIONS,
     ALERT_NON_ALLOW_OUTCOMES,
+    copilot_hook_target,
+    copilot_hook_target_spellings,
 )
-from defenseclaw.hook_metrics import connector_hook_decision
+from defenseclaw.hook_metrics import (
+    POST_TOOL_DECISION,
+    connector_hook_decision,
+    detection_only_hook_label,
+    parse_detail_tokens,
+)
+from defenseclaw.tui.markup_safe import escape as rich_escape
 from defenseclaw.tui.panels.audit import (
     parse_kv_details,
     split_connector_token,
@@ -37,8 +45,10 @@ from defenseclaw.tui.services.event_models import (
     parse_timestamp,
 )
 from defenseclaw.tui.services.v8_event_history import (
+    LEGACY_HOOK_EVENT_NAME,
     V8EventHistoryRow,
     load_v8_alert_history,
+    load_v8_event_history,
     payload_text,
 )
 
@@ -65,6 +75,9 @@ class AlertEvent:
     request_id: str = ""
     session_id: str = ""
     connector: str = ""
+    # Labelled facts from the canonical record (connector, rule, scanner,
+    # decision) that the flat audit row behind it does not carry.
+    facts: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -86,6 +99,10 @@ class AlertCommandIntent:
     hint: str = ""
     binary: str = "defenseclaw"
     category: str = "alerts"
+    # "destructive" routes the intent through the danger modal, which needs
+    # an explicit second keypress; ``consequence`` is the line it shows.
+    risk: str = "read-only"
+    consequence: str = ""
 
     @property
     def argv(self) -> tuple[str, ...]:
@@ -227,13 +244,16 @@ def _is_v8_alert_row(row: V8EventHistoryRow) -> bool:
         return _v8_row_outcome(row) in ALERT_NON_ALLOW_OUTCOMES
     if row.bucket in {"platform.health", "diagnostic"}:
         return severity in ALERT_ACTIONABLE_SEVERITIES
-    if not row.bucket:
+    legacy_hook = _is_legacy_hook_row(row)
+    if not row.bucket or legacy_hook:
         action = (row.action or "").strip().lower()
         if action == "connector-hook":
             projected_decision = (row.hook_decision or "").strip().lower()
             if projected_decision in {"allow", "alert", "block"}:
                 return projected_decision == "block"
             return connector_hook_decision(row.details) == "block"
+        if legacy_hook:
+            return False
         return (
             (action in ALERT_LEGACY_FINDING_ACTIONS and severity in _V8_FINDING_SEVERITIES)
             or action in ALERT_NON_ALLOW_OUTCOMES
@@ -243,7 +263,46 @@ def _is_v8_alert_row(row: V8EventHistoryRow) -> bool:
     return False
 
 
-def _v8_alert_event(row: V8EventHistoryRow) -> AlertEvent:
+def _is_legacy_hook_row(row: V8EventHistoryRow) -> bool:
+    """The connector-hook row a current gateway files under guardrail.evaluation.
+
+    A block with no rule finding (a tool on the static block list) exists only
+    as this row; the history reader already drops the ones a finding explains
+    (GAP-1747).
+    """
+
+    return row.event_name == LEGACY_HOOK_EVENT_NAME and (row.action or "").strip().lower() == "connector-hook"
+
+
+_DECISION_KEYS = (
+    "defenseclaw.enforcement.effective_action",
+    "defenseclaw.guardrail.effective_action",
+    "defenseclaw.guardrail.decision",
+    "defenseclaw.network.decision",
+)
+
+
+def _evaluation_decisions(rows: Iterable[V8EventHistoryRow]) -> dict[str, str]:
+    """Map a guardrail evaluation id to the action taken for that call.
+
+    A hook-rules finding and the hook decision that blocked the call are two
+    records of one evaluation; only the decision carries the action, so the
+    finding's detail looks it up here (GAP-0999).
+    """
+
+    decisions: dict[str, str] = {}
+    for row in rows:
+        evaluation = payload_text(row.payload, "defenseclaw.evaluation.id")
+        decision = payload_text(row.payload, *_DECISION_KEYS)
+        if evaluation and decision:
+            decisions.setdefault(evaluation, decision)
+    return decisions
+
+
+_POST_TOOL_DECISION = POST_TOOL_DECISION
+
+
+def _v8_alert_event(row: V8EventHistoryRow, decisions: Mapping[str, str] | None = None) -> AlertEvent:
     payload = row.payload
     action = (
         payload_text(
@@ -264,7 +323,10 @@ def _v8_alert_event(row: V8EventHistoryRow) -> AlertEvent:
             "defenseclaw.enforcement.target_ref",
             "defenseclaw.network.target_ref",
             "defenseclaw.scan.target_ref",
+            # GAP-1303: a sandbox finding without a destination names its sandbox.
+            "defenseclaw.sandbox.name",
             "defenseclaw.agent.id",
+            "defenseclaw.health.subsystem",
         )
         or row.event_name
     )
@@ -290,18 +352,54 @@ def _v8_alert_event(row: V8EventHistoryRow) -> AlertEvent:
         detail_parts.append(f"redaction_profile={row.redaction_profile}")
     if summary:
         detail_parts.append(f"summary={summary}")
+    facts: list[tuple[str, str]] = []
+    if row.connector:
+        facts.append(("Connector", row.connector))
+    rule_id = payload_text(payload, "defenseclaw.finding.rule_id")
+    rule = ": ".join(
+        value
+        for value in (rule_id, _finding_display_title(rule_id, payload_text(payload, "defenseclaw.finding.title")))
+        if value
+    )
+    if rule:
+        facts.append(("Rule", rule))
+    if scanner := payload_text(payload, "defenseclaw.scan.scanner"):
+        facts.append(("Scanner", scanner))
+    decision = payload_text(payload, *_DECISION_KEYS)
+    if not decision and decisions:
+        decision = decisions.get(payload_text(payload, "defenseclaw.evaluation.id"), "")
+    if decision and row.bucket == "security.finding" and decision.strip().lower() == "allow":
+        if label := detection_only_hook_label(target):
+            # Same wording as "defenseclaw alerts": a post-tool or
+            # MessageDisplay finding cannot block, so "allow" is not a choice
+            # (GAP-1423, GAP-1531).
+            decision = label
+    if not decision and row.bucket == "security.finding" and payload_text(payload, "defenseclaw.sandbox.name"):
+        # A sandbox finding carries OpenShell's disposition in its evidence
+        # ("FINDING:BLOCKED ..."); the CLI shows it as decision=blocked (GAP-1532).
+        disposition = re.match(
+            r"FINDING:([A-Z_]+)\b", payload_text(payload, "defenseclaw.guardrail.evidence_summary").strip()
+        )
+        if disposition:
+            decision = disposition.group(1).lower().replace("_", " ")
+    if decision:
+        facts.append(("Decision", decision))
     severity = (row.severity or "INFO").upper()
     if row.bucket == "network.egress" and severity == "INFO":
         severity = "WARNING"
     elif row.bucket == "enforcement.action" and severity == "INFO":
         severity = "HIGH"
+    elif _is_legacy_hook_row(row) and severity == "INFO":
+        # The row's own severity is INFO; the hook decision carries the real one.
+        detail_severity = _severity_bucket(parse_kv_details(row.details).get("severity", ""))
+        severity = detail_severity if detail_severity in {"CRITICAL", "HIGH", "MEDIUM", "LOW"} else "HIGH"
     elif not row.bucket and severity == "INFO":
         severity = "HIGH"
     return AlertEvent(
         id=row.id,
         severity=severity,
         action=action,
-        target=target,
+        target=copilot_hook_target(target, row.connector),
         details=" ".join(detail_parts),
         timestamp=row.timestamp or datetime.now(timezone.utc),
         actor=row.actor or row.source,
@@ -310,15 +408,22 @@ def _v8_alert_event(row: V8EventHistoryRow) -> AlertEvent:
         request_id=row.request_id,
         session_id=row.session_id,
         connector=row.connector,
+        facts=tuple(facts),
     )
 
 
 def alerts_from_v8_history(
     rows: tuple[V8EventHistoryRow, ...],
+    context: tuple[V8EventHistoryRow, ...] = (),
 ) -> tuple[AlertEvent, ...]:
-    """Project canonical history rows without performing another DB read."""
+    """Project canonical history rows without performing another DB read.
 
-    return tuple(_v8_alert_event(row) for row in rows if _is_v8_alert_row(row))
+    ``context`` is other recent history (hook decisions) that may hold the
+    action taken for a finding's evaluation.
+    """
+
+    decisions = _evaluation_decisions((*rows, *context))
+    return tuple(_v8_alert_event(row, decisions) for row in rows if _is_v8_alert_row(row))
 
 
 def humanize_alert_details(raw: str) -> str:
@@ -457,13 +562,20 @@ class AlertsPanelModel:
 
         if self.store is not None:
             rows = load_v8_alert_history(self.store, limit=500)
-            self.apply_v8_history(rows)
+            # The hook decision of a finding's evaluation is in the general
+            # history, not the alert view; without it a finding opened before
+            # the shared snapshot refresh showed no Decision line (GAP-0999).
+            self.apply_v8_history(rows, load_v8_event_history(self.store, limit=500))
         self.refresh_gateway_scans()
 
-    def apply_v8_history(self, rows: tuple[V8EventHistoryRow, ...]) -> None:
+    def apply_v8_history(
+        self,
+        rows: tuple[V8EventHistoryRow, ...],
+        context: tuple[V8EventHistoryRow, ...] = (),
+    ) -> None:
         """Apply an already-loaded shared canonical-history snapshot."""
 
-        audit_events = list(alerts_from_v8_history(rows))
+        audit_events = _with_hook_decisions(self.store, list(alerts_from_v8_history(rows, context)))
         if self.audit_events == audit_events:
             return
         self.audit_events = audit_events
@@ -571,9 +683,23 @@ class AlertsPanelModel:
                 else _event_severity_bucket(event, parsed_details=details)
             )
             haystack = f"{severity} {event.severity} {event.action} {event.target} {event.details}".lower()
-            if remaining not in haystack:
+            if remaining not in haystack and not self._matches_shown_text(event, remaining):
                 return False
         return True
+
+    @staticmethod
+    def _matches_shown_text(event: AlertEvent, needle: str) -> bool:
+        """Search what the table shows too: the Details cell and the facts.
+
+        A finding's Details cell (``PATH-AWS-CREDS: AWS credentials file``)
+        comes from its rule fact, not from the raw details, so search missed
+        it (GAP-2128). A hook row's Details cell is its raw details or a
+        fact, so hook details are not parsed again here.
+        """
+
+        if needle in " ".join(value for _, value in event.facts).lower():
+            return True
+        return not _is_hook_event(event) and needle in _alert_details_label(event).lower()
 
     def set_connector_filter(self, connector: str) -> None:
         """Set the shared connector filter ("" = All) and re-apply filters."""
@@ -629,6 +755,18 @@ class AlertsPanelModel:
             parts.append(f"search '{self.filter_text}'")
         return ", ".join(parts)
 
+    def step_severity_scope(self, step: int) -> None:
+        """Move to the previous or next severity chip (Actionable .. Low)."""
+
+        order = ("actionable", "all", "critical", "high", "medium", "low")
+        current = self.active_scope_key()
+        index = order.index(current) if current in order else 0
+        target = order[max(0, min(index + step, len(order) - 1))]
+        if target == "actionable":
+            self.set_actionable_scope()
+        else:
+            self.set_severity_filter_exact("" if target == "all" else target.upper())  # type: ignore[arg-type]
+
     def active_scope_key(self) -> str:
         if self.severity_filter:
             return self.severity_filter.lower()
@@ -677,6 +815,18 @@ class AlertsPanelModel:
 
     def deselect_all(self) -> None:
         self.selected_ids.clear()
+
+    def marked_events(self) -> list[AlertEvent]:
+        """Loaded events whose ids are marked with Space, newest first."""
+
+        seen: set[str] = set()
+        events: list[AlertEvent] = []
+        for row in self.flat_rows():
+            event = row.event
+            if event.id in self.selected_ids and event.id not in seen:
+                seen.add(event.id)
+                events.append(event)
+        return events
 
     def filtered_ids(self) -> list[str]:
         return [row.event.id for row in self.filtered if not row.event.id.startswith("gw:")]
@@ -750,6 +900,26 @@ class AlertsPanelModel:
 
         return sum(1 for row in self.filtered if row.kind != "scan_finding")
 
+    def total_count(self) -> int:
+        """Return every top-level Alerts row, ignoring the active filter."""
+
+        return sum(1 for row in self.flat_rows() if row.kind != "scan_finding")
+
+    def connector_scope_count(self) -> int:
+        """Top-level rows in the shared connector scope, ignoring search and severity.
+
+        The tab badge and status bar use it, so under a connector scope they
+        read the same 15 as the Alerts panel, not the unscoped 24 (GAP-2441).
+        """
+
+        if not self.connector_filter:
+            return self.total_count()
+        return sum(
+            1
+            for row in self.flat_rows()
+            if row.kind != "scan_finding" and self._row_matches_context_filters(row, ("", ""))
+        )
+
     def critical_count(self) -> int:
         counts = self.severity_counts()
         return counts["CRITICAL"] + counts["HIGH"]
@@ -773,6 +943,15 @@ class AlertsPanelModel:
             if self.filter_text or self.filtering:
                 self.clear_filter()
                 return AlertPanelAction(True, hint="Filter cleared.")
+            if self.show_all_severities or self.severity_filter:
+                # The hint for a severity filter says Esc clears it.
+                old = self.severity_filter
+                self.set_actionable_scope()
+                return AlertPanelAction(
+                    True,
+                    hint="Severity filter cleared.",
+                    filter_change=_alert_filter_change(old, self.severity_filter),
+                )
             return AlertPanelAction(False)
         if key == "space":
             self.toggle_select()
@@ -781,7 +960,9 @@ class AlertsPanelModel:
         if key == "a":
             self.select_all()
             return AlertPanelAction(True, hint=f"Selected {len(self.selected_ids)} alert(s).")
-        if key in {"A", "X"}:
+        # A is the Activity panel key everywhere (the result strip says
+        # "press A for full output"), so only X deselects here (GAP-1630).
+        if key == "X":
             self.deselect_all()
             return AlertPanelAction(True, hint="Selection cleared.")
         if key == "r":
@@ -795,52 +976,72 @@ class AlertsPanelModel:
                 self.refresh()
             self.apply_filter()
             return AlertPanelAction(True, hint="Type to search alerts. Enter applies; Esc clears.")
-        if key == "1":
+        # h/l step through the severity chips; the digits stay panel keys,
+        # so 1 opens Overview from Alerts too (GAP-1708).
+        if key in {"h", "left", "l", "right"}:
             old = self.severity_filter
-            self.set_severity_filter("")
-            return AlertPanelAction(True, filter_change=_alert_filter_change(old, self.severity_filter))
-        if key == "2":
-            old = self.severity_filter
-            self.set_severity_filter("CRITICAL")
-            return AlertPanelAction(True, filter_change=_alert_filter_change(old, self.severity_filter))
-        if key == "3":
-            old = self.severity_filter
-            self.set_severity_filter("HIGH")
-            return AlertPanelAction(True, filter_change=_alert_filter_change(old, self.severity_filter))
-        if key == "4":
-            old = self.severity_filter
-            self.set_severity_filter("MEDIUM")
-            return AlertPanelAction(True, filter_change=_alert_filter_change(old, self.severity_filter))
-        if key == "5":
-            old = self.severity_filter
-            self.set_severity_filter("LOW")
-            return AlertPanelAction(True, filter_change=_alert_filter_change(old, self.severity_filter))
+            self.step_severity_scope(-1 if key in {"h", "left"} else 1)
+            return AlertPanelAction(
+                True,
+                hint="Showing alerts of all severities."
+                if self.active_scope_key() == "all"
+                else f"Showing {self.active_scope_label().lower()} alerts.",
+                filter_change=_alert_filter_change(old, self.severity_filter),
+            )
         if key == "y":
             copied = self.copy_detail_text()
             if not copied:
                 return AlertPanelAction(True, hint="No alert detail to copy.")
             return AlertPanelAction(True, hint="Copied alert detail.", copy_text=copied)
         if key == "d":
+            # With rows marked by Space, d dismisses exactly those rows (like
+            # x acknowledges them); only without marks does it act on the
+            # highlighted row. The confirm text names the alert(s), so the
+            # operator sees it is the one they reviewed (GAP-1777).
+            if self.selected_ids:
+                marked = self.marked_events()
+                count = len(self.selected_ids)
+                return AlertPanelAction(
+                    True,
+                    AlertCommandIntent(
+                        label=f"alerts dismiss {count} marked",
+                        args=_alert_id_command_args("dismiss", self.selected_ids),
+                        hint=f"Dismissing {count} marked alert(s).",
+                        consequence=_marked_dismiss_consequence(marked, count),
+                    ),
+                )
             row = self.selected()
             if row is None or row.event.id.startswith("gw:"):
-                return AlertPanelAction(True, hint="No audit alert selected to dismiss.")
+                return AlertPanelAction(True, hint="No audit alert highlighted to dismiss.")
+            summary = _alert_summary_line(row.event)
             return AlertPanelAction(
                 True,
                 AlertCommandIntent(
-                    label="alerts dismiss selected",
+                    label="alerts dismiss highlighted",
                     args=_alert_id_command_args("dismiss", [row.event.id]),
-                    hint=f"Dismissing selected alert {row.event.id}.",
+                    hint=f"Dismissing highlighted alert: {summary}.",
+                    consequence=(
+                        f"Removes this alert from the active list: {summary}. The audit trail keeps the event."
+                    ),
                 ),
             )
         if key == "x":
             if not self.selected_ids:
                 return AlertPanelAction(True, hint="Select alerts before acknowledging them.")
+            count = len(self.selected_ids)
+            # Name the marked alert(s) like the d confirm does (GAP-1874).
             return AlertPanelAction(
                 True,
                 AlertCommandIntent(
-                    label=f"alerts acknowledge {len(self.selected_ids)} selected",
+                    label=f"alerts acknowledge {count} selected",
                     args=_alert_id_command_args("acknowledge", self.selected_ids),
-                    hint=f"Acknowledging {len(self.selected_ids)} selected alert(s).",
+                    hint=f"Acknowledging {count} selected alert(s).",
+                    consequence=_marked_consequence(
+                        f"Marks {count} alert(s) as handled and removes them from the active list. "
+                        "The audit trail keeps the events.",
+                        self.marked_events(),
+                        count,
+                    ),
                 ),
             )
         if key == "c":
@@ -853,6 +1054,10 @@ class AlertsPanelModel:
                     label="alerts dismiss filtered",
                     args=_alert_id_command_args("dismiss", filtered_ids),
                     hint=f"Clearing {len(filtered_ids)} filtered alert(s).",
+                    # One stray keypress (typing "clear" into the TUI) must
+                    # not empty the alert list behind a Run-focused preview.
+                    risk="destructive",
+                    consequence=_bulk_dismiss_consequence(len(filtered_ids)),
                 ),
             )
         if key == "C":
@@ -865,6 +1070,10 @@ class AlertsPanelModel:
                     label="alerts dismiss all",
                     args=_alert_id_command_args("dismiss", all_ids),
                     hint=f"Clearing all {len(all_ids)} loaded active alert(s).",
+                    # One stray keypress (typing "clear" into the TUI) must
+                    # not empty the alert list behind a Run-focused preview.
+                    risk="destructive",
+                    consequence=_bulk_dismiss_consequence(len(all_ids)),
                 ),
             )
         return AlertPanelAction(False)
@@ -978,7 +1187,7 @@ class AlertsPanelModel:
         if self.filter_text or self.severity_filter:
             return "No alerts match the current filters."
         if not self.show_all_severities:
-            return "No actionable alerts. Press 1 to show all severities."
+            return "No actionable alerts. Press l to show all severities."
         return "No active alerts."
 
     def _store_alert_reader(self) -> object:
@@ -1017,10 +1226,13 @@ class AlertsPanelModel:
             lines = [
                 f"[bold #22D3EE]{rich_escape(display_severity)} {rich_escape(event.action)}[/]",
                 f"Target: {rich_escape(event.target)}",
+                *(f"{label}: {rich_escape(value)}" for label, value in event.facts),
                 f"Time: {event.timestamp.strftime('%Y-%m-%d %H:%M:%S')}",
             ]
-            if event.details:
-                human = humanize_alert_details(event.details)
+            if (canonical := _canonical_detail_pairs(event)) is not None:
+                lines.extend(f"{label}: {rich_escape(value)}" for label, value in canonical)
+            elif event.details:
+                human = "" if event.facts else humanize_alert_details(event.details)
                 if human and human != event.details:
                     lines.append(f"Summary: {rich_escape(human)}")
                 lines.append(f"Details: {rich_escape(event.details)}")
@@ -1053,7 +1265,7 @@ class AlertsPanelModel:
                 f"History: {item.timestamp.strftime('%b %d %H:%M')} "
                 f"{rich_escape(item.action)} {rich_escape(item.severity)}"
             )
-        lines.append("[Enter] close detail  [Esc] close")
+        lines.append("[Enter] close detail  [Esc] close  PgUp/PgDn scroll")
         return "\n".join(lines)
 
     def get_detail_info(self) -> AlertDetailInfo | None:
@@ -1083,11 +1295,33 @@ class AlertsPanelModel:
             # compatibility INFO severity. Keep the alert projection's visible
             # promotion when hydrating its full detail row.
             hydrated = replace(hydrated, severity=event.severity)
+        if hydrated is not None and event.facts:
+            # A canonical finding's audit row has no target and only its
+            # event name as details (RHEL-U3-05); keep what the row showed.
+            hydrated = replace(
+                hydrated,
+                target=hydrated.target or event.target,
+                details=hydrated.details if "=" in hydrated.details else event.details,
+                facts=event.facts,
+            )
+        connector = (hydrated.connector if hydrated is not None else "") or event.connector
         event = hydrated or event
+        # The list shows one Copilot hook target for both harnesses; so do
+        # the detail pane and its History (GAP-2619).
+        event = replace(event, target=copilot_hook_target(event.target, connector))
+        if event.action == "scan-finding":
+            # A hook-rule finding carries the rule, not the outcome; the
+            # connector-hook row of the same request says whether the call was
+            # blocked or only observed (GAP-1213). Its label is more precise
+            # than the evaluation's raw "allow", which an observe-mode match
+            # also records, so it replaces that one.
+            if decision := _hook_decision_label(self.store, event.id, event.target):
+                facts = tuple(fact for fact in event.facts if fact[0] != "Decision")
+                event = replace(event, facts=(*facts, ("Decision", decision)))
         return AlertDetailInfo(
             event=event,
             findings=_list_findings_by_run_id(self.store, event.run_id),
-            history=_list_events_by_target(self.store, event.target, 10),
+            history=_list_events_by_target(self.store, event.target, 10, connector),
         )
 
     def detail_pairs(self) -> tuple[tuple[str, str], ...]:
@@ -1110,6 +1344,7 @@ class AlertsPanelModel:
             ("Severity", display_severity),
             ("Action", event.action),
             ("Target", event.target),
+            *event.facts,
             ("Timestamp", event.timestamp.isoformat()),
         ]
         if _is_hook_event(event):
@@ -1118,8 +1353,10 @@ class AlertsPanelModel:
                 pairs.extend(structured)
             elif event.details:
                 pairs.append(("Details", event.details))
+        elif (canonical := _canonical_detail_pairs(event)) is not None:
+            pairs.extend(canonical)
         else:
-            human = humanize_alert_details(event.details)
+            human = "" if event.facts else humanize_alert_details(event.details)
             if human and human != event.details:
                 pairs.append(("Summary", human))
             if event.details:
@@ -1174,6 +1411,8 @@ class AlertsPanelModel:
                     lines.append(f"{label}: {value}")
             elif event.details:
                 lines.append(f"Details: {event.details}")
+        elif (canonical := _canonical_detail_pairs(event)) is not None:
+            lines.extend(f"{label}: {value}" for label, value in canonical)
         else:
             human = humanize_alert_details(event.details)
             if human and human != event.details:
@@ -1331,6 +1570,45 @@ def _alert_filter_change(old: str, new: str) -> AlertFilterChange | None:
     return AlertFilterChange(panel="alerts", filter_type="severity", old=old, new=new)
 
 
+def _bulk_dismiss_consequence(count: int) -> str:
+    return f"Removes {count} alert(s) from the active list. The TUI has no undo for this."
+
+
+def _alert_summary_line(event: AlertEvent) -> str:
+    """One-line identity of an alert for confirm text: time, connector, target, rule."""
+
+    parts = [event.timestamp.strftime("%b %d %H:%M"), _event_display_severity(event)]
+    connector = _alert_connector(event)
+    target = _alert_target_label(event)
+    if connector and not target.startswith(connector):
+        parts.append(connector)
+    if target:
+        parts.append(target)
+    details = _alert_details_label(event)
+    if details:
+        parts.append(details)
+    return " · ".join(part for part in parts if part)
+
+
+def _marked_dismiss_consequence(events: list[AlertEvent], count: int) -> str:
+    return _marked_consequence(
+        f"Removes {count} marked alert(s) from the active list. The audit trail keeps the events.",
+        events,
+        count,
+    )
+
+
+def _marked_consequence(head: str, events: list[AlertEvent], count: int) -> str:
+    """Confirm text: what the action does, then one line per marked alert."""
+
+    lines = [head]
+    shown = events[:5]
+    lines.extend(f"  {_alert_summary_line(event)}" for event in shown)
+    if count > len(shown):
+        lines.append(f"  … and {count - len(shown)} more")
+    return "\n".join(lines)
+
+
 def _alert_id_command_args(command: str, alert_ids: list[str] | set[str]) -> tuple[str, ...]:
     ids = sorted(set(alert_ids))
     args = ["alerts", command]
@@ -1435,25 +1713,124 @@ def _list_findings_by_run_id(store: object | None, run_id: str) -> tuple[AlertFi
         return ()
 
 
-def _list_events_by_target(store: object | None, target: str, limit: int) -> tuple[AlertEvent, ...]:
+def _list_events_by_target(
+    store: object | None, target: str, limit: int, connector: str = ""
+) -> tuple[AlertEvent, ...]:
     if store is None or not target:
         return ()
+    # Both harness spellings of a Copilot hook target (GAP-2619).
+    spellings = copilot_hook_target_spellings(target, connector)
     try:
         if hasattr(store, "list_events_by_target"):
-            return tuple(
-                _coerce_alert_event(item) for item in store.list_events_by_target(target, limit)  # type: ignore[attr-defined]
-            )
-        db = getattr(store, "db", None)
-        if db is None:
-            return ()
-        rows = db.execute(
-            """SELECT id, timestamp, action, target, actor, details, severity, run_id
-               FROM audit_events WHERE target = ? ORDER BY timestamp DESC LIMIT ?""",
-            (target, max(limit, 1)),
-        ).fetchall()
-        return tuple(_alert_event_from_row(row) for row in rows)
+            events = [
+                _coerce_alert_event(item)
+                for spelling in spellings
+                for item in store.list_events_by_target(spelling, limit)  # type: ignore[attr-defined]
+            ]
+            if len(spellings) > 1:
+                events = sorted(events, key=lambda item: item.timestamp, reverse=True)[:limit]
+        else:
+            db = getattr(store, "db", None)
+            if db is None:
+                return ()
+            marks = ",".join("?" * len(spellings))
+            rows = db.execute(
+                "SELECT id, timestamp, action, target, actor, details, severity, run_id"
+                f" FROM audit_events WHERE target IN ({marks}) ORDER BY timestamp DESC LIMIT ?",
+                (*spellings, max(limit, 1)),
+            ).fetchall()
+            events = [_alert_event_from_row(row) for row in rows]
+        return tuple(
+            replace(item, target=copilot_hook_target(item.target, item.connector or connector)) for item in events
+        )
     except Exception:  # noqa: BLE001 - detail enrichment must not hide the selected row.
         return ()
+
+
+def _hook_decision_label(store: object | None, event_id: str, hook_target: str = "") -> str:
+    """Outcome of the hook call behind a finding: blocked, would block, or allowed.
+
+    A post-tool finding cannot block the call that already ran (GAP-1303)."""
+
+    lookup = getattr(store, "hook_details_for_alerts", None)
+    if lookup is None or not event_id or event_id.startswith("gw:"):
+        return ""
+    try:
+        rows = lookup([event_id]).get(event_id, [])
+    except Exception:  # noqa: BLE001 - an older or locked audit DB only loses the decision.
+        return ""
+    return _hook_decision_from_rows(rows, hook_target)
+
+
+def _finding_display_title(rule_id: str, title: str) -> str:
+    """The rule pack's title for a redacted secret finding, as the CLI shows it (GAP-1456)."""
+    if not rule_id or not title:
+        return title
+    try:
+        from defenseclaw.commands.cmd_alerts import _finding_title  # noqa: PLC0415
+
+        return _finding_title(rule_id, title)
+    except Exception:  # noqa: BLE001 - the title is a display nicety.
+        return title
+
+
+def with_hook_decisions(store: object | None, events: list[AlertEvent]) -> list[AlertEvent]:
+    """Public name for the shared read snapshot (GAP-1456, GAP-1560)."""
+    return _with_hook_decisions(store, events)
+
+
+def _with_hook_decisions(store: object | None, events: list[AlertEvent]) -> list[AlertEvent]:
+    """Give each hook-rule finding the decision of its hook call (GAP-1456).
+
+    The list and the detail then say "detected after the tool ran (cannot
+    block)" like ``defenseclaw alerts``, not the evaluation's raw "allow".
+    """
+    lookup = getattr(store, "hook_details_for_alerts", None)
+    ids = [e.id for e in events if e.action == "scan-finding" and e.id and not e.id.startswith("gw:")]
+    if lookup is None or not ids:
+        return events
+    try:
+        details = lookup(ids)
+    except Exception:  # noqa: BLE001 - an older or locked audit DB only loses the decision.
+        return events
+    out: list[AlertEvent] = []
+    for event in events:
+        rows = details.get(event.id, [])
+        decision = _hook_decision_from_rows(rows, event.target) if event.id in details else ""
+        if decision:
+            facts = tuple(fact for fact in event.facts if fact[0] not in ("Decision", "Route"))
+            # An ACP prompt names its route like the audit row (GAP-1629).
+            route = _acp_route_from_rows(rows)
+            event = replace(event, facts=(*facts, ("Decision", decision), *((("Route", route),) if route else ())))
+        out.append(event)
+    return out
+
+
+def _acp_route_from_rows(rows: Iterable[str]) -> str:
+    for raw in rows:
+        tokens = parse_detail_tokens(raw or "")
+        if method := tokens.get("acp_method", "").strip():
+            client = tokens.get("acp_client", "").strip()
+            return f"ACP {method} (client {client})" if client else f"ACP {method}"
+    return ""
+
+
+def _hook_decision_from_rows(rows: Iterable[str], hook_target: str = "") -> str:
+    decision = ""
+    for raw in rows:
+        tokens = parse_detail_tokens((raw or "").split(" details_json=", 1)[0])
+        action = tokens.get("action", "").strip().lower()
+        mode = tokens.get("mode", "").strip().lower()
+        if action == "block":
+            return f"blocked ({mode} mode)" if mode else "blocked"
+        raw_action = tokens.get("raw_action", "").strip().lower()
+        observed_block = action == "allow" and raw_action == "block"
+        if tokens.get("would_block", "").strip().lower() == "true" or observed_block:
+            # The same label as "defenseclaw alerts" (GAP-1560).
+            decision = detection_only_hook_label(hook_target) or "would block (observe mode)"
+        elif not decision and action:
+            decision = "allowed" if action == "allow" else action
+    return decision
 
 
 def _get_alert_event_by_id(store: object | None, event_id: str) -> AlertEvent | None:
@@ -1570,7 +1947,43 @@ def _alert_details_label(event: AlertEvent) -> str:
             parts.append(elapsed)
         if parts:
             return _truncate(" · ".join(parts), 58)
+    # Canonical-history rows end with ``summary=<free text>``; that text (for
+    # example the degraded subsystem and its reason) beats the bucket prefix.
+    if event.details.startswith("bucket="):
+        summary = event.details.partition(" summary=")[2].strip()
+        event_name = event.details.partition("event_name=")[2].split(" ", 1)[0]
+        rule = next((value for label, value in event.facts if label == "Rule"), "")
+        if rule and (not summary or summary.startswith("<redacted")):
+            # GAP-1456: a redacted evidence summary says nothing; show what the
+            # CLI shows instead (decision and rule).
+            decision = next((value for label, value in event.facts if label == "Decision"), "")
+            return _truncate(" · ".join(part for part in (rule, decision) if part), 58)
+        if summary and summary != event_name:
+            return _truncate(summary, 58)
+        # A finding with no summary of its own (prompt-lane rows) showed only
+        # "finding.observed"; its rule says what matched (GAP-1324).
+        if rule := next((value for label, value in event.facts if label == "Rule"), ""):
+            return _truncate(rule, 58)
+        if summary:
+            return _truncate(summary, 58)
     return _truncate(humanize_alert_details(event.details) or event.details, 58)
+
+
+def _canonical_detail_pairs(event: AlertEvent) -> list[tuple[str, str]] | None:
+    """Readable detail rows of a canonical-history alert, or None for a legacy row.
+
+    The ``bucket=... event_name=... source=... redaction_profile=...`` blob is
+    internal telemetry; the pane already names the target, connector, rule and
+    decision, so only a readable summary is kept (GAP-1743). A row with no
+    facts and no summary keeps the raw line so the pane is never empty.
+    """
+    if not event.details.startswith("bucket="):
+        return None
+    summary = event.details.partition(" summary=")[2].strip()
+    event_name = event.details.partition("event_name=")[2].split(" ", 1)[0]
+    if summary and not summary.startswith("<redacted") and summary != event_name:
+        return [("Summary", summary)]
+    return [] if event.facts else [("Details", event.details)]
 
 
 def _hook_detail_lines(event: AlertEvent) -> list[str]:

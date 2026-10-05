@@ -47,7 +47,8 @@ import (
 // the guardian's other goroutines, and NFS root_squash homes work.
 
 const (
-	enterpriseHookWorkerProtocolVersion = 1
+	// 2: the discover operation also answers app and extension surfaces.
+	enterpriseHookWorkerProtocolVersion = 2
 	enterpriseHookWorkerRequestLimit    = 1 << 20
 	enterpriseHookWorkerResponseLimit   = 8 << 20
 	enterpriseHookWorkerStderrLimit     = 64 << 10
@@ -148,6 +149,35 @@ type enterpriseHookWorkerRequest struct {
 	// AIDiscovery carries the settings and signature catalog of the
 	// ai_discovery operation; the worker cannot read the managed config.
 	AIDiscovery *enterpriseHookWorkerAIDiscovery `json:"ai_discovery,omitempty"`
+	// CopilotVSCode asks the worker to place or remove DefenseClaw's VS
+	// Code Local hook file and Copilot plugin in the user's own home (the
+	// foreign_cleanup worker does either; remove-all's apply worker only
+	// removes).
+	CopilotVSCode *enterpriseHookWorkerCopilotVSCode `json:"copilot_vscode,omitempty"`
+}
+
+// enterpriseHookWorkerCopilotVSCode is what the user's home should hold
+// for the VS Code Local harness; the parent resolves it from the
+// administrator's config.
+type enterpriseHookWorkerCopilotVSCode struct {
+	HookBinary string `json:"hook_binary"`
+	HookFile   bool   `json:"hook_file"`
+	Plugin     bool   `json:"plugin"`
+	// RemoveDirs are the folders the guardian created in the home for
+	// these files (from its record); each still empty afterwards goes.
+	RemoveDirs []string `json:"remove_dirs,omitempty"`
+}
+
+// enterpriseHookWorkerCopilotVSCodeReport is the worker's account of it
+// (user-influenced; only logged).
+type enterpriseHookWorkerCopilotVSCodeReport struct {
+	Changed []string `json:"changed,omitempty"`
+	Removed []string `json:"removed,omitempty"`
+	Kept    []string `json:"kept,omitempty"`
+	// Created are the folders the write created in the home; the parent
+	// records them (only below the home) for the removal.
+	Created []string `json:"created,omitempty"`
+	Error   string   `json:"error,omitempty"`
 }
 
 type enterpriseHookWorkerAIDiscovery struct {
@@ -182,13 +212,29 @@ type enterpriseHookWorkerTargetResult struct {
 	Pending  bool                           `json:"pending,omitempty"`
 	Error    string                         `json:"error,omitempty"`
 	Result   *enterprisehooks.InstallResult `json:"result,omitempty"`
+	// Purged is what a purge target found and removed (booleans only, so
+	// nothing the account controls reaches the administrator's output).
+	Purged *enterpriseHookPurgeDetail `json:"purged,omitempty"`
+}
+
+// enterpriseHookPurgeDetail is what uninstall --purge removed for one
+// account: its ~/.defenseclaw, its per-user binaries and launcher links in
+// ~/.local/bin, and whether it stopped a running per-user gateway first.
+type enterpriseHookPurgeDetail struct {
+	Data     bool `json:"data,omitempty"`
+	Binaries bool `json:"binaries,omitempty"`
+	Gateway  bool `json:"gateway,omitempty"`
+	UVCache  bool `json:"uv_cache,omitempty"`
 }
 
 type enterpriseHookWorkerResponse struct {
-	Version  int                                          `json:"version"`
-	Targets  []enterpriseHookWorkerTargetResult           `json:"targets,omitempty"`
-	Versions map[string]string                            `json:"versions,omitempty"`
-	Reasons  map[string]string                            `json:"reasons,omitempty"`
+	Version  int                                `json:"version"`
+	Targets  []enterpriseHookWorkerTargetResult `json:"targets,omitempty"`
+	Versions map[string]string                  `json:"versions,omitempty"`
+	Reasons  map[string]string                  `json:"reasons,omitempty"`
+	// Surfaces are the discovered app and extension installs per connector
+	// (user-influenced; the parent validates them).
+	Surfaces map[string][]connector.AgentSurface          `json:"surfaces,omitempty"`
 	Cleanup  map[string]enterpriseHookWorkerCleanupReport `json:"cleanup,omitempty"`
 	// Blocks are the foreign-hook blocks the user's hooks recorded since
 	// the last cleanup (user-influenced; only logged).
@@ -198,7 +244,9 @@ type enterpriseHookWorkerResponse struct {
 	// AIDiscovery is the user's scan report (user-influenced; the guardian
 	// validates it before the gateway reads it).
 	AIDiscovery *inventory.AIDiscoveryReport `json:"ai_discovery,omitempty"`
-	Error       string                       `json:"error,omitempty"`
+	// CopilotVSCode reports the VS Code Local hook file and plugin.
+	CopilotVSCode *enterpriseHookWorkerCopilotVSCodeReport `json:"copilot_vscode,omitempty"`
+	Error         string                                   `json:"error,omitempty"`
 }
 
 // enterpriseHookWorkerAccount is the resolved target the parent spawns
@@ -266,10 +314,20 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 	enterprisehooks.SetStandaloneUnix(request.Standalone)
 	switch request.Operation {
 	case enterpriseHookWorkerOpApply:
-		return respond(runEnterpriseHookWorkerApply(ctx, request), 0)
+		// remove-all: the VS Code Local file and plugin go with the
+		// registrations, first, so a purge target finds the folders
+		// DefenseClaw created for them empty and removes them too.
+		var vscode *enterpriseHookWorkerCopilotVSCodeReport
+		if request.CopilotVSCode != nil {
+			vscode = runEnterpriseHookWorkerCopilotVSCode(request)
+		}
+		response := runEnterpriseHookWorkerApply(ctx, request)
+		response.CopilotVSCode = vscode
+		return respond(response, 0)
 	case enterpriseHookWorkerOpDiscover:
 		versions := map[string]string{}
 		reasons := map[string]string{}
+		surfaces := map[string][]connector.AgentSurface{}
 		for _, name := range request.Connectors {
 			name = strings.ToLower(strings.TrimSpace(name))
 			if name == "" {
@@ -286,8 +344,19 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 			} else if reason != "" {
 				reasons[name] = reason
 			}
+			// Host apps are never run; an engine CLI bundled in one is run
+			// only outside a static (untrusted-home) discovery.
+			if found := enterpriseHookWorkerDiscoverSurfaces(ctx, request.Home, name, !request.StaticDiscovery); len(found) != 0 {
+				surfaces[name] = found
+			}
+			if name == "kiro" {
+				// The Kiro IDE is read, never run, so static discovery reads it too.
+				if ide, _ := enterpriseHookWorkerDiscoverKiroIDE(request.Home); ide != "" {
+					versions[enterprisehooks.KiroIDEDiscoveryKey] = ide
+				}
+			}
 		}
-		return respond(enterpriseHookWorkerResponse{Versions: versions, Reasons: reasons}, 0)
+		return respond(enterpriseHookWorkerResponse{Versions: versions, Reasons: reasons, Surfaces: surfaces}, 0)
 	case enterpriseHookWorkerOpForeignCleanup:
 		for _, target := range request.Targets {
 			if target.Mode != enterpriseHookWorkerModeRemoveLeftover {
@@ -296,6 +365,9 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 		}
 		now := time.Now()
 		response := enterpriseHookWorkerResponse{Cleanup: runEnterpriseHookWorkerForeignCleanup(request, now)}
+		if request.CopilotVSCode != nil {
+			response.CopilotVSCode = runEnterpriseHookWorkerCopilotVSCode(request)
+		}
 		if len(request.Targets) > 0 {
 			response.Targets = runEnterpriseHookWorkerApply(ctx, request).Targets
 		}
@@ -320,11 +392,15 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 	}
 }
 
-// enterpriseHookWorkerDiscoverVersion and
-// enterpriseHookWorkerDiscoverStaticVersion are replaceable in tests.
+// enterpriseHookWorkerDiscoverVersion,
+// enterpriseHookWorkerDiscoverStaticVersion,
+// enterpriseHookWorkerDiscoverSurfaces and
+// enterpriseHookWorkerDiscoverKiroIDE are replaceable in tests.
 var (
 	enterpriseHookWorkerDiscoverVersion       = enterprisehooks.DiscoverUnixAgentVersion
 	enterpriseHookWorkerDiscoverStaticVersion = enterprisehooks.DiscoverUnixAgentVersionStatically
+	enterpriseHookWorkerDiscoverSurfaces      = enterprisehooks.DiscoverUnixAgentSurfaces
+	enterpriseHookWorkerDiscoverKiroIDE       = enterprisehooks.DiscoverUnixKiroIDEVersion
 )
 
 func validateEnterpriseHookWorkerIdentity(request enterpriseHookWorkerRequest) error {
@@ -379,7 +455,10 @@ var (
 	enterpriseHookWorkerInstaller = enterprisehooks.Install
 	enterpriseHookWorkerVerifier  = enterprisehooks.Verify
 	enterpriseHookWorkerRemover   = enterprisehooks.RemoveUserHooks
-	enterpriseHookWorkerPurger    = enterprisehooks.PurgeUserState
+	enterpriseHookWorkerPurger    = enterprisehooks.PurgeUserStateSummary
+	// enterpriseHookWorkerStopPerUser stops the account's per-user gateway
+	// and watchdog before the purge removes the state they run from.
+	enterpriseHookWorkerStopPerUser = stopPerUserGatewayForPurge
 )
 
 func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWorkerRequest) enterpriseHookWorkerResponse {
@@ -424,10 +503,17 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 			}
 		case enterpriseHookWorkerModePurge:
 			if removalFailed {
-				err = errors.New("not removed, because a DefenseClaw hook registration of this account was not removed")
+				err = errors.New("a DefenseClaw hook registration of this account was not removed")
 				break
 			}
-			err = enterpriseHookWorkerPurger(ctx, opts)
+			var stopped bool
+			if stopped, err = enterpriseHookWorkerStopPerUser(opts); err != nil {
+				break
+			}
+			var summary enterprisehooks.PurgeSummary
+			if summary, err = enterpriseHookWorkerPurger(ctx, opts); err == nil {
+				outcome.Purged = &enterpriseHookPurgeDetail{Data: summary.Data, Binaries: summary.Binaries, Gateway: stopped, UVCache: summary.UVCache}
+			}
 		default:
 			err = fmt.Errorf("unknown worker mode %q", target.Mode)
 		}

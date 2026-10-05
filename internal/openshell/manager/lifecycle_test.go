@@ -756,6 +756,27 @@ func TestStartRescansForSecrets(t *testing.T) {
 	e.startBox("maskbox", sandboxapi.StartRequest{})
 }
 
+// The end-of-session review names the secret files the next start refuses
+// on (GAP-2094), and none while the masks cover what the scan finds.
+func TestReviewNamesUnmaskedSecrets(t *testing.T) {
+	e := newEnv(t, nil)
+	e.ws.masked = []workspace.MaskedPath{{Rel: ".env", Reason: "name"}}
+	e.create(sandboxapi.CreateRequest{Name: "revbox"})
+	review, err := e.m.Review(t.Context(), "revbox", sandboxapi.ReviewRequest{})
+	if err != nil || len(review.UnmaskedSecrets) != 0 {
+		t.Fatalf("review = %+v, %v; want no unmasked secrets", review, err)
+	}
+	e.ws.scanned = []workspace.MaskedPath{{Rel: ".env"}, {Rel: "blk2.txt", Reason: "content"}}
+	review, err = e.m.Review(t.Context(), "revbox", sandboxapi.ReviewRequest{})
+	if err != nil || !slices.Equal(review.UnmaskedSecrets, []string{"blk2.txt"}) {
+		t.Fatalf("review = %+v, %v; want blk2.txt named", review, err)
+	}
+	e.ws.scanErr = workspace.ErrScanIncomplete
+	if review, err = e.m.Review(t.Context(), "revbox", sandboxapi.ReviewRequest{}); err != nil || len(review.UnmaskedSecrets) != 0 {
+		t.Fatalf("review with a failed scan = %+v, %v; want it reviewed without names", review, err)
+	}
+}
+
 // A sandbox whose template limits exceed the organization's lowered or newly
 // set max_resources is reported and refused a start; one within the cap starts.
 func TestStartRefusesLimitsAboveALowerMaximum(t *testing.T) {

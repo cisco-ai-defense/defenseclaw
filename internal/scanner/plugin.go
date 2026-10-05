@@ -22,12 +22,20 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/processutil"
 )
+
+// ScanRecordedByCallerEnv tells a `defenseclaw plugin scan` child that the
+// gateway records the scan itself. Every Go caller logs the returned result
+// (watcher admission, rescan, API and hook scans), so a child that also
+// recorded it wrote a second scan row and a second scan-finding alert per
+// finding (GAP-2482).
+const ScanRecordedByCallerEnv = "DEFENSECLAW_SCAN_RECORDED_BY_CALLER"
 
 type PluginScanner struct {
 	BinaryPath  string
@@ -80,6 +88,7 @@ func (s *PluginScanner) Scan(ctx context.Context, target string) (*ScanResult, e
 
 	binaryPath, args := s.pluginScanCommand(target)
 	cmd := processutil.CommandContext(ctx, binaryPath, args...)
+	cmd.Env = append(os.Environ(), ScanRecordedByCallerEnv+"=1")
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

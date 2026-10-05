@@ -23,11 +23,16 @@ package sensor
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/sensor/acquire"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/agentchain"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/plane"
+	"github.com/defenseclaw/defenseclaw/internal/sensor/platform"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/scoring"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/tactics"
 )
@@ -219,6 +224,42 @@ func TestStartFailureIsReportedNotSwallowed(t *testing.T) {
 	}
 	if _, _, running, _ := host.stats(); running {
 		t.Error("a failed source reported running")
+	}
+}
+
+// GAP-1255: after a macOS package upgrade the gateway started before the
+// sensor helper listened again, and Plane C kept that dial error until the
+// gateway restarted. Run retries a start that could not reach the helper;
+// other start failures stay reported and are not retried.
+func TestHostPlaneRetriesOnlyAnUnreachableHelper(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	health := func(service *Service) (bool, string) {
+		running, _, reason := service.hostPlaneHealth(platform.Capability{})
+		return running, reason
+	}
+
+	source := newFake(fullCoverage())
+	source.startErr = fmt.Errorf("%w at /var/run/x.sock: connect: no such file or directory", acquire.ErrHelperUnreachable)
+	service := &Service{hostPlane: newHost(source)}
+	service.startHostPlane(ctx)
+	if running, reason := health(service); running || !strings.Contains(reason, "dial helper") {
+		t.Fatalf("before the helper listens: running=%v reason=%q", running, reason)
+	}
+	source.startErr = nil
+	service.startHostPlane(ctx)
+	if running, reason := health(service); !running || reason != "" {
+		t.Fatalf("after the helper listens: running=%v reason=%q, want the plane running", running, reason)
+	}
+
+	refused := newFake(fullCoverage())
+	refused.startErr = errors.New("plane: Endpoint Security needs root; re-run the gateway elevated")
+	service = &Service{hostPlane: newHost(refused)}
+	service.startHostPlane(ctx)
+	refused.startErr = nil
+	service.startHostPlane(ctx)
+	if running, reason := health(service); running || !strings.Contains(reason, "needs root") {
+		t.Fatalf("a refused local source: running=%v reason=%q, want the first reason kept", running, reason)
 	}
 }
 

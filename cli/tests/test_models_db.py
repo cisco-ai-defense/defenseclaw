@@ -259,6 +259,21 @@ class ModelsDbTests(unittest.TestCase):
         counts = self.store.get_counts()
         self.assertEqual(counts.blocked_egress_calls, 1)
 
+    def test_status_alert_count_gives_up_after_its_time_budget(self):
+        # GAP-1149: counting alerts over 850k audit rows kept status silent
+        # for minutes; with a budget the count is None and the store stays usable.
+        now = datetime.now(timezone.utc).isoformat()
+        self.store.db.executemany(
+            "INSERT INTO audit_events (id, timestamp, action, target, actor, details, severity)"
+            " VALUES (?, ?, 'block', 't', 'a', 'd', 'HIGH')",
+            ((f"e{i}", now) for i in range(5000)),
+        )
+        self.store.db.commit()
+
+        self.assertIsNone(self.store.get_counts(alert_count_seconds=0).alerts)
+        self.assertEqual(self.store.get_counts(alert_count_seconds=60).alerts, 5000)
+        self.assertEqual(self.store.get_counts().alerts, 5000)
+
     def test_store_init_migrates_run_id_columns(self):
         self.store.close()
         os.unlink(self.tmp.name)
@@ -504,6 +519,15 @@ class ModelsDbTests(unittest.TestCase):
         self.assertNotIn("v8-unattributed-block", alert_ids)
         block = next(event for event in self.store.list_alerts(10) if event.id == "v8-connector-block")
         self.assertEqual(block.connector, "cursor")
+        self.assertEqual(block.severity, "HIGH")
+        # A block that matched a CRITICAL rule is listed as CRITICAL.
+        self.store.db.execute(
+            "UPDATE audit_events SET structured_json = ? WHERE id = 'v8-connector-block'",
+            (json.dumps({"severity": "CRITICAL", "action": "block"}),),
+        )
+        self.store.db.commit()
+        block = next(event for event in self.store.list_alerts(10) if event.id == "v8-connector-block")
+        self.assertEqual(block.severity, "CRITICAL")
 
     def test_alert_readers_and_counts_exclude_clean_and_detection_only_rows(self):
         now = datetime.now(timezone.utc).isoformat()

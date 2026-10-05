@@ -248,3 +248,24 @@ func destinationHealthByName(
 	t.Fatalf("destination %q not found in %+v", name, snapshot.Destinations)
 	return nil
 }
+
+func TestSettleInitializingRouteAfterADelivery(t *testing.T) {
+	// GAP-1332: logs delivered, traces not sent yet -> the route is healthy.
+	now := time.Now()
+	row := DestinationHealth{State: delivery.HealthInitializing, LastSuccess: now}
+	settleInitializingRoute(&row)
+	if row.State != delivery.HealthHealthy {
+		t.Fatalf("delivered route state=%s", row.State)
+	}
+	for _, still := range []DestinationHealth{
+		{State: delivery.HealthInitializing},
+		{State: delivery.HealthInitializing, LastSuccess: now, LastFailure: now.Add(time.Second)},
+		{State: delivery.HealthFailing, LastSuccess: now},
+	} {
+		want := still.State
+		settleInitializingRoute(&still)
+		if still.State != want {
+			t.Fatalf("state changed to %s for %+v", still.State, still)
+		}
+	}
+}

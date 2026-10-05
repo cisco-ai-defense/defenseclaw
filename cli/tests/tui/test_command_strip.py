@@ -41,3 +41,19 @@ async def test_success_strip_hides_itself_and_failure_stays(tmp_path, monkeypatc
         await asyncio.wait_for(hide_timer_passed.wait(), timeout=10)
         await pilot.pause()
         assert app.query_one("#command-progress").has_class("hidden") is hidden
+
+
+async def test_registry_json_run_shows_a_readable_result(tmp_path) -> None:
+    """A registry --json run ends on "}"; the card names the result (GAP-1681)."""
+    app = fixtures.snapshot_app(tmp_path)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app._strip_running("registry reject corp wiki")  # noqa: SLF001
+        for line in ('{', '"action": "reject",', '"verdict": {', '"name": "wiki",', '"type": "mcp"', '}', '}'):
+            app._strip_output(line)  # noqa: SLF001
+        app._strip_finished(exit_code=0, duration=0.1)  # noqa: SLF001
+        assert app._strip_summary.startswith("mcp:wiki rejected")  # noqa: SLF001
+        app._strip_running("policy show")  # noqa: SLF001
+        app._strip_output("}")  # noqa: SLF001
+        app._strip_finished(exit_code=0, duration=0.1)  # noqa: SLF001
+        assert app._strip_summary.startswith("exit 0 · finished cleanly")  # noqa: SLF001

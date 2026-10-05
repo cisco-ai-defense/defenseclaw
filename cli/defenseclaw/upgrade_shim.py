@@ -50,6 +50,11 @@ LOCAL_DIR_ENV = "DEFENSECLAW_UPGRADE_LOCAL_DIR"
 _VERSION = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 _TIMEOUT = 30
 
+RECOVER_CORRUPT_AUDIT_NOTE = (
+    "  --recover-corrupt-audit is no longer needed: the gateway moves a corrupt audit store "
+    "aside and starts a new one by itself (see defenseclaw doctor)."
+)
+
 USAGE = """Usage: defenseclaw upgrade [--version X.Y.Z] [--yes]
        defenseclaw rollback [--yes]
 
@@ -71,6 +76,14 @@ WINDOWS_MANAGED_MARKER_KEY = r"SOFTWARE\Cisco\DefenseClaw\Enterprise"
 
 class ShimError(RuntimeError):
     """A user-facing failure; nothing on the machine was changed."""
+
+    exit_code = 1
+
+
+class ShimUsageError(ShimError):
+    """A bad option or argument: exit 2, like every other Click command."""
+
+    exit_code = 2
 
 
 def managed_deployment() -> str | None:
@@ -134,7 +147,7 @@ def run(argv: list[str]) -> int:
     except ShimError as exc:
         print(f"  ✗ {exc}", file=sys.stderr)
         print("    Nothing was changed.", file=sys.stderr)
-        return 1
+        return exc.exit_code
     except KeyboardInterrupt:
         return 130
 
@@ -163,14 +176,17 @@ def _parse(command: str, args: list[str]) -> dict[str, object] | None:
             options["version"] = args[index]
         elif command == "upgrade" and arg.startswith("--version="):
             options["version"] = arg.split("=", 1)[1]
+        elif command == "upgrade" and arg == "--recover-corrupt-audit":
+            # Hidden, kept for 0.8.x muscle memory and scripts: recovery is now automatic.
+            print(RECOVER_CORRUPT_AUDIT_NOTE, file=sys.stderr)
         else:
-            raise ShimError(f"unknown option {arg!r} for 'defenseclaw {command}' (see --help)")
+            raise ShimUsageError(f"unknown option {arg!r} for 'defenseclaw {command}' (see --help)")
         index += 1
     version = options["version"]
     if version is not None:
         version = str(version).removeprefix("v")
         if not _VERSION.match(version):
-            raise ShimError(f"--version must look like 1.2.3, got {options['version']!r}")
+            raise ShimUsageError(f"--version must look like 1.2.3, got {options['version']!r}")
         options["version"] = version
     return options
 
@@ -183,11 +199,15 @@ def _upgrade(version: str | None, *, yes: bool) -> int:
     explicit = version is not None
     if version is None:
         version = _local_version(local_dir) if local_dir else _latest_version(repo)
+    if not explicit and _key(version) <= _key(installed):
+        # GAP-1801: a newest release older than this install (0.8.x before
+        # 1.0 is published) is "nothing newer", not a refused downgrade.
+        older = " is older" if _key(version) < _key(installed) else ""
+        print(f"  ✓ DefenseClaw {installed} is up to date (latest release: {version}{older}). Nothing was changed.")
+        print("    To install a specific 1.x release: defenseclaw upgrade --version X.Y.Z")
+        return 0
     if _key(version) < (1, 0, 0):
         raise ShimError(f"DefenseClaw {installed} cannot install {version}; 1.x installs only 1.0.0 or later")
-    if not explicit and _key(version) <= _key(installed):
-        print(f"  ✓ DefenseClaw {installed} is up to date (latest release: {version}).")
-        return 0
 
     print(f"  → Installing DefenseClaw {version} (installed: {installed})")
     workdir = tempfile.mkdtemp(prefix="defenseclaw-upgrade-")
@@ -200,15 +220,36 @@ def _upgrade(version: str | None, *, yes: bool) -> int:
     return _run_installer(installer, (["--yes"] if yes else []) + extra, workdir)
 
 
+def _data_home() -> str:
+    """The data folder, normalized so Windows paths print with backslashes only (GAP-1842)."""
+    return os.path.normpath(os.path.expanduser(os.environ.get("DEFENSECLAW_HOME") or "~/.defenseclaw"))
+
+
 def _rollback(*, yes: bool) -> int:
-    home = os.path.expanduser(os.environ.get("DEFENSECLAW_HOME") or "~/.defenseclaw")
+    home = _data_home()
     name = _installer_name()
     installer = os.path.join(home, "installer", name)
     if not os.path.isfile(installer):
+        # A source ('make all') install saves no installer. After a rollback to
+        # one, the install it replaced (now in previous/) still has its own, and
+        # that one rolls forward again (GAP-2459).
+        installer = os.path.join(home, "previous", "installer", name)
+    if not os.path.isfile(installer):
+        saved = os.path.join(home, "installer")
         raise ShimError(
-            f"no saved installer at {installer}; download {name} from the release you want and run it "
-            "with --rollback"
+            f"no saved installer in {saved} or {os.path.join(home, 'previous', 'installer')}; "
+            f"download {name} from the release you want and run it with --rollback"
         )
+    previous = os.path.join(home, "previous")
+    if os.name == "nt" and os.path.isdir(os.path.join(previous, "legacy-setup")):
+        # install.ps1 refuses this rollback in its own window, which a terminal
+        # without a desktop never sees; refuse here with the same way back.
+        try:
+            with open(os.path.join(previous, "VERSION"), encoding="utf-8-sig") as handle:
+                back_to = handle.read().strip()
+        except OSError:
+            back_to = "0.8.x"
+        raise ShimError(legacy_setup_rollback_refusal(back_to, previous, os.environ.get(REPO_ENV) or DEFAULT_REPO))
     workdir = tempfile.mkdtemp(prefix="defenseclaw-rollback-")
     copy = os.path.join(workdir, name)
     try:
@@ -221,6 +262,16 @@ def _rollback(*, yes: bool) -> int:
     return _run_installer(copy, ["--rollback"] + (["--yes"] if yes else []), workdir)
 
 
+def legacy_setup_rollback_refusal(back_to: str, previous: str, repo: str) -> str:
+    """Why a rollback to DefenseClaw Setup (0.8.7-0.8.10) is manual, and how (install.ps1 says the same)."""
+    return (
+        f"The previous install is DefenseClaw Setup {back_to}, which cannot be restored automatically. "
+        f"To go back to it, run 'defenseclaw uninstall', then download DefenseClawSetup-x64.exe from "
+        f"https://github.com/{repo}/releases/tag/{back_to} and run it in your desktop session. "
+        f"Its files and your data from before the upgrade are in {previous}"
+    )
+
+
 def _run_installer(path: str, args: list[str], workdir: str) -> int:
     if os.name == "nt":
         # The running CLI holds files in .venv open; start the installer in its
@@ -229,16 +280,37 @@ def _run_installer(path: str, args: list[str], workdir: str) -> int:
             os.environ.get("SystemRoot", r"C:\Windows"), "System32", "WindowsPowerShell", "v1.0", "powershell.exe"
         )
         ps_args = [_powershell_flag(arg) for arg in args]
+        # A PowerShell 7 session puts its own module folders in PSModulePath.
+        # Windows PowerShell 5.1 then cannot load its built-in modules (Get-Acl
+        # fails), so let it build its default module path.
+        env = {key: value for key, value in os.environ.items() if key.upper() != "PSMODULEPATH"}
+        if _windows_terminal_without_desktop():
+            # An SSH session has no desktop: the new window never appears and
+            # the result would only be in the install log (GAP-1993). Keep the
+            # staged installer and give the command that runs it right here.
+            command = " ".join(
+                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", f'"{path}"', *ps_args]
+            )
+            raise ShimError(
+                "this terminal has no desktop (SSH session), so the installer's window would not be "
+                "visible here.\n"
+                "    Run the installer in this terminal instead; it shows the result and sets the exit code:\n"
+                f"      {command}"
+            )
         try:
             subprocess.Popen(  # noqa: S603 - fixed interpreter and verified script
                 [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path, *ps_args],
                 creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
                 cwd=workdir,
+                env=env,
             )
         except OSError as exc:
             shutil.rmtree(workdir, ignore_errors=True)
             raise ShimError(f"could not start {powershell}: {exc}") from None
-        print("  → The installer continues in a new window.")
+        home = _data_home()
+        print("  → The installer continues in a new window, which shows the result when it ends.")
+        print(f"    Its log is saved in {os.path.join(home, 'logs')} (install-<time>.log).")
+        print("    Confirm the result afterwards with: defenseclaw --version")
         return 0
     bash = "/bin/bash" if os.path.exists("/bin/bash") else (shutil.which("bash") or "bash")
     sys.stdout.flush()
@@ -250,6 +322,11 @@ def _run_installer(path: str, args: list[str], workdir: str) -> int:
         shutil.rmtree(workdir, ignore_errors=True)
         raise ShimError(f"could not run {bash}: {exc}") from None
     return 0  # pragma: no cover - execv does not return
+
+
+def _windows_terminal_without_desktop() -> bool:
+    """An OpenSSH session on Windows: a new console window is never shown there."""
+    return any(os.environ.get(name) for name in ("SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"))
 
 
 def _powershell_flag(arg: str) -> str:

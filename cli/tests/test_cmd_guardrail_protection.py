@@ -141,8 +141,7 @@ def test_enable_globally_composes_validates_then_switches(env) -> None:
     assert gc.rule_pack_dir == str(final)
     assert (gc.enabled, gc.mode, gc.port, gc.connectors) == (True, "action", 4321, {})
     app.cfg.save.assert_called_once()
-    assert app.logger.log_action.call_args.args[0] == "config-update"  # the registered audit action
-    assert app.logger.log_action.call_args.args[2].startswith("guardrail-protection ")
+    assert app.logger.log_config_change.call_args.args[0] == "guardrail-protection"  # a config-update mutation
 
 
 def test_second_pack_recomposes_from_the_recorded_base(env) -> None:
@@ -342,7 +341,7 @@ def test_audit_rejection_after_save_is_a_warning(env) -> None:
     from defenseclaw.logger import CanonicalObservabilityError
 
     app, _root, _validator = env
-    app.logger.log_action.side_effect = CanonicalObservabilityError("admission was not confirmed")
+    app.logger.log_config_change.side_effect = CanonicalObservabilityError("admission was not confirmed")
     result = _run(app, "enable", DB)
     assert result.exit_code == 0, result.output
     app.cfg.save.assert_called_once()
@@ -360,3 +359,21 @@ def test_a_strict_base_stays_strict_after_layering(env) -> None:
     assert pc.pack_profile(payload["pack_path"]) == "strict"
     assert app.cfg.guardrail.connectors["codex"].rule_pack_dir == str(composed)
     assert pc.pack_name_for_path(app.cfg, str(composed)) == ("protected-codex", "custom")
+
+
+def test_gateway_kept_starting_is_not_reported_as_a_failed_restart(env, monkeypatch) -> None:
+    # GAP-2080: the gateway was left running; "restart failed, run restart" was wrong.
+    app, _root, _validator = env
+
+    def _restart(*_a, **_k):
+        cmd_setup._gateway_left_starting = True
+        return False
+
+    monkeypatch.setattr(cmd_setup, "_gateway_left_starting", False)
+    monkeypatch.setattr(cmd_guardrail, "_gateway_running", lambda _app: True)
+    monkeypatch.setattr(cmd_setup, "_restart_defense_gateway", _restart)
+    text = _run(app, "enable", DB)
+    assert text.exit_code == 1
+    assert "still starting and was kept running" in text.output and "defenseclaw-gateway status" in text.output
+    assert "restart failed" not in text.output and "✗" not in text.output
+    assert _json(_run(app, "disable", DB, "--json"))["gateway"] == "still_starting"

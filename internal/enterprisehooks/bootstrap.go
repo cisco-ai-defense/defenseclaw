@@ -88,6 +88,20 @@ func defaultHookConfigStubForConnector(conn connector.Connector, opts connector.
 			ContentPath: filepath.Join(home, ".gemini", "config", "hooks.json"),
 			Contents:    []byte("{}\n"),
 		}
+	case "omnigent":
+		// OmniGent creates ~/.omnigent/config.yaml only on its first
+		// `omnigent setup`, so a user who installed it but never ran it
+		// failed verify for the whole host (seen live on macOS). An empty
+		// mapping is a valid OmniGent config. Standalone profile only, as
+		// for OpenHands.
+		if !standaloneProfileProcess() {
+			return connector.HookConfigStub{}
+		}
+		return connector.HookConfigStub{
+			ContentPath: filepath.Join(home, ".omnigent", "config.yaml"),
+			Contents:    []byte("{}\n"),
+			Mode:        0o600,
+		}
 	case "cursor":
 		return connector.HookConfigStub{
 			ContentPath: filepath.Join(home, ".cursor", "hooks.json"),

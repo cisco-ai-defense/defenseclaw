@@ -7,6 +7,8 @@ import { mdxComponents } from '@/components/mdx-components';
 import { BreadcrumbSchema, TechArticleSchema } from '@/components/structured-data';
 import { ConnectorBrand } from '@/components/connector-brand';
 import matrix from '@/data/capability-matrix.json';
+import { legacyRedirectFor, legacyRedirects } from '@/lib/redirects';
+import { LegacyRedirect } from '@/components/legacy-redirect';
 
 const connectorIds = new Set(matrix.connectors.map((connector) => connector.id));
 
@@ -16,6 +18,8 @@ interface PageParams {
 
 export default async function Page({ params }: PageParams) {
   const slug = (await params).slug;
+  const moved = legacyRedirectFor(slug);
+  if (moved) return <LegacyRedirect to={moved} />;
   const page = source.getPage(slug);
   if (!page) notFound();
 
@@ -47,6 +51,9 @@ export default async function Page({ params }: PageParams) {
       tableOfContent={{
         enabled: page.data.toc.length > 0,
         style: 'clerk',
+        // A labelled landmark, so the rail's links are not loose content
+        // outside every landmark (axe region).
+        container: { role: 'complementary', 'aria-label': 'On this page' },
       }}
       role="main"
     >
@@ -76,11 +83,22 @@ export default async function Page({ params }: PageParams) {
 }
 
 export async function generateStaticParams() {
-  return source.generateParams();
+  return [
+    ...source.generateParams(),
+    ...Object.keys(legacyRedirects).map((key) => ({ slug: key.split('/') })),
+  ];
 }
 
 export async function generateMetadata({ params }: PageParams): Promise<Metadata> {
   const slug = (await params).slug;
+  const moved = legacyRedirectFor(slug);
+  if (moved) {
+    return {
+      title: 'This page moved',
+      robots: { index: false, follow: true },
+      alternates: { canonical: canonicalUrl(moved) },
+    };
+  }
   const page = source.getPage(slug);
   if (!page) return {};
 

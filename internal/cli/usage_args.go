@@ -1,0 +1,303 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// SPDX-License-Identifier: Apache-2.0
+
+package cli
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"reflect"
+	"runtime"
+	"strings"
+
+	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
+)
+
+// usageArgsExempt lists the command trees whose positional-argument handling
+// stays cobra's own: agent hooks and the notify hook have exit-status
+// contracts of their own (rc 2 blocks an agent's tool call).
+var usageArgsExempt = []string{"hook", "notify"}
+
+// usageArgsExemptGroups lists command groups (paths below the root) whose
+// leaves keep their own positional-argument handling: Setup and the Windows
+// module drive the Windows enterprise lifecycle, whose invalid-arguments
+// exit code is 1639. The rest of the enterprise tree rejects a stray
+// argument like every other command (GAP-2330: "enterprise hooks status
+// extra-arg" ran and exited 0).
+var usageArgsExemptGroups = []string{"enterprise windows"}
+
+// usageTakesArgs lists the commands that read positional arguments without
+// declaring an Args validator.
+var usageTakesArgs = map[string]bool{
+	"connector launch":    true,
+	"sandbox image build": true,
+}
+
+// pendingUnknownSubcommand carries an unknown-subcommand error out of the
+// help function, which cobra calls for a command group and whose result it
+// cannot return. ExecuteContext reports it.
+var pendingUnknownSubcommand error
+
+var usageArgChecksInstalled bool
+
+// inCommandTree reports whether c sits under one of the named top-level
+// commands.
+func inCommandTree(c *cobra.Command, names []string) bool {
+	fields := strings.Fields(c.CommandPath())
+	for _, f := range fields[min(1, len(fields)):] {
+		for _, name := range names {
+			if f == name {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// usageError adds the usage line and a --help pointer to err and gives it
+// exit status 2, the shape and status the Python defenseclaw CLI uses.
+func usageError(c *cobra.Command, err error) error {
+	return withExitCode(&delegatedUsageError{msg: usageMessage(c, err), err: err}, 2)
+}
+
+// usageMessage is err with the command's usage line and the --help pointer.
+func usageMessage(c *cobra.Command, err error) string {
+	named := func(text string) string { return invokedCommandText(c, text) }
+	use := named(c.UseLine())
+	if c.HasAvailableSubCommands() {
+		// Show the subcommand form too, as --help does (GAP-1622).
+		group := named(c.CommandPath()) + " [command]"
+		if c.Runnable() {
+			use += "\n       " + group
+		} else {
+			use = group
+		}
+	}
+	msg := fmt.Sprintf("%s\nUsage: %s\nTry '%s --help' for help.", plainFlagValueError(err), use, named(c.CommandPath()))
+	return delegatedCommandText(c, msg)
+}
+
+// invokedCommandText names the gateway binary in a command hint as it was
+// run, so the hint runs as typed (GAP-2189, GAP-2240). text starts with the
+// root command name, as c.CommandPath() and c.UseLine() do.
+func invokedCommandText(c *cobra.Command, text string) string {
+	root := c.Root().Name()
+	invoked := invokedGatewayPath(root)
+	if invoked == "" || os.Getenv(delegatedFromEnv) == "defenseclaw" || !strings.HasPrefix(text, root) {
+		return text
+	}
+	return invoked + strings.TrimPrefix(text, root)
+}
+
+// invokedGatewayPath is the absolute path the gateway binary was run by,
+// when it was run by one, so a usage hint runs as typed: the enterprise rpm
+// installs only /opt/defenseclaw/bin, which is not on root's PATH, and a
+// bare "defenseclaw-gateway ... --help" was "command not found" (GAP-2189).
+// A seam for tests.
+var invokedGatewayPath = func(rootName string) string {
+	if runtime.GOOS == "windows" || len(os.Args) == 0 {
+		return ""
+	}
+	arg0 := os.Args[0]
+	if !strings.ContainsRune(arg0, '/') || filepath.Base(arg0) != rootName {
+		// A bare name was found on PATH, so it runs as typed.
+		return ""
+	}
+	if !filepath.IsAbs(arg0) {
+		// "./defenseclaw-gateway" from /opt/defenseclaw/bin: name the
+		// absolute path, which runs from any directory (GAP-2232).
+		abs, err := filepath.Abs(arg0)
+		if err != nil {
+			return ""
+		}
+		arg0 = abs
+	}
+	if strings.ContainsAny(arg0, " '\"\\$`") {
+		return ""
+	}
+	return arg0
+}
+
+// plainFlagValueError names what a typed flag takes instead of pflag's
+// parser text ('invalid argument "maybe" for "--json" flag:
+// strconv.ParseBool: parsing "maybe": invalid syntax'): '--json takes true
+// or false, not "maybe"' (GAP-1989).
+func plainFlagValueError(err error) string {
+	var invalid *pflag.InvalidValueError
+	if !errors.As(err, &invalid) || invalid.GetFlag() == nil {
+		return err.Error()
+	}
+	takes := ""
+	if t, ok := invalid.GetFlag().Value.(interface{ flagTakes() string }); ok {
+		// A flag with a narrower range says so (GAP-2329: "1h" was the
+		// example and the 15m cap of --lock-wait then refused it).
+		return fmt.Sprintf("--%s takes %s, not %q", invalid.GetFlag().Name, t.flagTakes(), invalid.GetValue())
+	}
+	switch invalid.GetFlag().Value.Type() {
+	case "bool":
+		takes = "true or false"
+	case "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32", "uint64", "count":
+		takes = "a whole number"
+	case "float32", "float64":
+		takes = "a number"
+	case "duration":
+		takes = "a duration such as 30s, 5m or 1h"
+	default:
+		return err.Error()
+	}
+	return fmt.Sprintf("--%s takes %s, not %q", invalid.GetFlag().Name, takes, invalid.GetValue())
+}
+
+// delegatedFromEnv is set by the Python CLI when it runs a gateway command on
+// the user's behalf: 'defenseclaw audit export' runs 'defenseclaw-gateway
+// audit export'. Usage errors then name the command the user typed
+// (GAP-1644). Only the value "defenseclaw" is honored.
+const delegatedFromEnv = "DEFENSECLAW_DELEGATED_FROM"
+
+// delegatedCommandText replaces the gateway binary name in text with
+// "defenseclaw" when the Python CLI delegated the command.
+func delegatedCommandText(c *cobra.Command, text string) string {
+	if os.Getenv(delegatedFromEnv) != "defenseclaw" {
+		return text
+	}
+	return strings.ReplaceAll(text, c.Root().Name()+" ", "defenseclaw ")
+}
+
+// delegatedUsageError keeps the wrapped error for errors.Is/As while its
+// text may name the delegating command.
+type delegatedUsageError struct {
+	msg string
+	err error
+}
+
+func (e *delegatedUsageError) Error() string { return e.msg }
+func (e *delegatedUsageError) Unwrap() error { return e.err }
+
+// unexpectedArgs rejects positional arguments on a command that takes none
+// (GAP-1549): "status extra-arg" ran status and "watchdog bogus" started the
+// foreground watchdog.
+func unexpectedArgs(c *cobra.Command, args []string) error {
+	if err := strayArgumentError(c, args); err != nil {
+		return usageError(c, err)
+	}
+	return nil
+}
+
+// strayArgumentError is the bare error for positional arguments on a command
+// that takes none: "unexpected argument" on a leaf, "unknown command" on a
+// group. cobra.NoArgs said "unknown command" on a leaf too (GAP-2330).
+func strayArgumentError(c *cobra.Command, args []string) error {
+	if len(args) == 0 {
+		return nil
+	}
+	kind := "unexpected argument"
+	if c.HasSubCommands() {
+		kind = "unknown command"
+	}
+	return fmt.Errorf("%s %q for %q%s", kind, args[0], c.CommandPath(), didYouMean(c, args[0]))
+}
+
+// didYouMean is the "Did you mean X?" line for a mistyped subcommand of c,
+// or "". cobra.SuggestionsFor treats an unset minimum distance as 0, so only
+// prefixes matched and "acp verfy" got no suggestion; cobra itself defaults
+// it to 2 (GAP-2374).
+func didYouMean(c *cobra.Command, typed string) string {
+	if c.DisableSuggestions {
+		return ""
+	}
+	if c.SuggestionsMinimumDistance <= 0 {
+		c.SuggestionsMinimumDistance = 2
+	}
+	suggestions := c.SuggestionsFor(typed)
+	if len(suggestions) == 0 {
+		return ""
+	}
+	return "\nDid you mean " + strings.Join(suggestions, " or ") + "?"
+}
+
+// isCobraNoArgs reports whether a command's validator is cobra.NoArgs,
+// which reports a stray argument on a leaf as an unknown command.
+func isCobraNoArgs(args cobra.PositionalArgs) bool {
+	return args != nil && reflect.ValueOf(args).Pointer() == reflect.ValueOf(cobra.NoArgs).Pointer()
+}
+
+// inExemptGroup reports whether the command path (below the root) is one of
+// the usageArgsExemptGroups or sits under one.
+func inExemptGroup(path string) bool {
+	for _, group := range usageArgsExemptGroups {
+		if path == group || strings.HasPrefix(path, group+" ") {
+			return true
+		}
+	}
+	return false
+}
+
+// unknownSubcommand reports a command group invoked with a name that is none
+// of its subcommands. Cobra printed the group help and exited 0 for
+// "rulepack bogus" (GAP-1549).
+func unknownSubcommand(c *cobra.Command) error {
+	if c.Runnable() || !c.HasSubCommands() || inCommandTree(c, []string{"hook", "notify"}) {
+		return nil
+	}
+	if f := c.Flags().Lookup("help"); f != nil && f.Changed {
+		return nil
+	}
+	return unexpectedArgs(c, c.Flags().Args())
+}
+
+// installUsageArgChecks makes stray positional arguments a usage error on
+// every gateway command that takes none, and an unknown subcommand of a
+// command group a usage error instead of the group help with rc 0.
+func installUsageArgChecks(root *cobra.Command) {
+	if usageArgChecksInstalled {
+		return
+	}
+	usageArgChecksInstalled = true
+	var walk func(*cobra.Command)
+	walk = func(c *cobra.Command) {
+		for _, sub := range c.Commands() {
+			switch sub.Name() {
+			case "help", "completion":
+				continue
+			}
+			path := strings.TrimSpace(strings.TrimPrefix(sub.CommandPath(), root.CommandPath()))
+			if sub.Runnable() && (sub.Args == nil || isCobraNoArgs(sub.Args)) && !sub.DisableFlagParsing &&
+				!usageTakesArgs[path] && !inCommandTree(sub, usageArgsExempt) && !inExemptGroup(path) {
+				sub.Args = unexpectedArgs
+			}
+			walk(sub)
+		}
+	}
+	walk(root)
+	// A mistyped top-level command gets the same error, suggestion, usage
+	// and --help lines as a mistyped subcommand, not the raw cobra "Did you
+	// mean this?" block (GAP-2374). cobra already rejects every positional
+	// argument on the root, so only the message changes.
+	if root.Args == nil {
+		root.Args = unexpectedArgs
+	}
+	help := root.HelpFunc()
+	root.SetHelpFunc(func(cmd *cobra.Command, args []string) {
+		if err := unknownSubcommand(cmd); err != nil {
+			pendingUnknownSubcommand = err
+			return
+		}
+		help(cmd, args)
+	})
+}
+
+// isUnknownRootCommand reports cobra's own unknown top-level command error,
+// which carries no exit code (it exited 1; the Python CLI exits 2).
+func isUnknownRootCommand(root *cobra.Command, err error) bool {
+	msg := err.Error()
+	return strings.HasPrefix(msg, "unknown command ") &&
+		strings.Contains(msg, fmt.Sprintf(" for %q", root.CommandPath()))
+}

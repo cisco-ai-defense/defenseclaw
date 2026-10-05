@@ -436,7 +436,11 @@ def test_windows_registration_freshness_uses_authenticated_packaged_root(
 
     assert _WINDOWS_REGISTRATION_FRESHNESS(cfg, "codex") is None
     assert observed["install_root"] == str(install_root)
-    assert observed["config_path"] == str(codex_home / "managed_config.toml")
+    # Current Codex ignores CODEX_HOME/managed_config.toml on Windows, so a
+    # per-user install is checked at config.toml and a managed-layer
+    # registration is reported stale.
+    assert observed["config_path"] == str(codex_home / "config.toml")
+    assert observed["codex_per_user"] is True
 
 
 def test_windows_registration_freshness_surfaces_codex_effective_policy_block(
@@ -737,6 +741,19 @@ def test_runtime_digest_hashes_raw_windows_binary_bytes(tmp_path: Path) -> None:
     assert fail_mode_runtime._sha256_regular_file(artifact) == "sha256:" + hashlib.sha256(body).hexdigest()
 
 
+def test_runtime_digest_hashes_a_launcher_larger_than_128_mib(tmp_path: Path) -> None:
+    # GAP-1922: a source-built defenseclaw-hook.exe is about 148 MiB.
+    artifact = tmp_path / "defenseclaw-hook.exe"
+    size = 150 * 1024 * 1024
+    with artifact.open("wb") as stream:
+        stream.truncate(size)
+    digest = hashlib.sha256()
+    chunk = bytes(1024 * 1024)
+    for _ in range(size // len(chunk)):
+        digest.update(chunk)
+    assert fail_mode_runtime._sha256_regular_file(artifact) == "sha256:" + digest.hexdigest()
+
+
 def test_v2_shared_digest_is_authoritative_over_legacy_entry_duplicate(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -846,3 +863,56 @@ def test_unix_registration_freshness_requires_current_script_path(
             encoding="utf-8",
         )
         assert fail_mode_runtime._unix_registration_freshness(cfg, "claudecode") is None
+
+
+def test_global_fail_mode_leaves_a_stopped_gateway_stopped_and_lists_effective_modes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # GAP-1370: observe connectors already run fail-open, and a mixed roster
+    # (hermes has no runtime registration) must not start a stopped gateway.
+    cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "", "hermes": ""})
+    cfg.guardrail.hook_fail_mode = "closed"
+    app = AppContext()
+    app.cfg = cfg
+    app.logger = MagicMock()
+    with (
+        patch("defenseclaw.commands.cmd_guardrail._gateway_running", return_value=False),
+        patch("defenseclaw.commands.cmd_guardrail.reconcile_connector_registration") as reconcile,
+        patch("defenseclaw.commands.cmd_setup._restart_services") as restart,
+    ):
+        result = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, ["open", "--yes"], obj=app)
+    assert result.exit_code == 0, result.output
+    restart.assert_not_called()
+    reconcile.assert_called_once_with(cfg, "claudecode")
+    assert "closed → open" not in result.output
+    assert "(hermes): already open; saved as its own setting" in result.output
+    assert "left stopped" in result.output and "defenseclaw-gateway start" in result.output
+    assert cfg.guardrail.connectors["hermes"].hook_fail_mode == "open"
+
+
+def test_fail_mode_change_list_matches_status_runtime_and_cursor_contract(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # GAP-1370: the change list shows the installed runtime value that
+    # guardrail status shows, and Cursor in action mode stays fail-closed.
+    cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"codex": "", "cursor": ""})
+    cfg.guardrail.hook_fail_mode = "closed"
+    cfg.guardrail.mode = "observe"
+    cfg.guardrail.connectors["cursor"].mode = "action"
+    app = AppContext()
+    app.cfg = cfg
+    app.logger = MagicMock()
+    stale = SimpleNamespace(runtime="closed", desired="open", current=False, drift=("installed hook",))
+    with (
+        patch("defenseclaw.commands.cmd_guardrail._gateway_running", return_value=False),
+        patch("defenseclaw.commands.cmd_guardrail.resolve_connector_fail_mode", return_value=stale),
+        patch("defenseclaw.commands.cmd_guardrail.reconcile_connector_registration"),
+        patch("defenseclaw.commands.cmd_setup._restart_services") as restart,
+    ):
+        result = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, ["open", "--yes"], obj=app)
+    assert result.exit_code == 0, result.output
+    restart.assert_not_called()
+    assert "(codex): closed → open" in result.output
+    assert "(codex): already open" not in result.output
+    assert "(cursor): stays closed" in result.output
+    assert "Cursor action mode keeps hook failures closed" in result.output

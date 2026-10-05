@@ -285,8 +285,16 @@ struct AIDiscoveryModelTests {
         expect(Set(row.detectors) == Set(["model_api", "model_runtime"]), "detectors aggregate")
         expect(row.provenance == provenance, "stronger provenance wins during aggregation")
 
+        // The app renders local models inline in the product table (there is
+        // no separate model table since the v1.1.25 import), so identified
+        // local-model signals must stay product rows with their model ID.
         let productRows = AIDiscoveryGrouping.rows(from: signals)
-        expect(productRows.count == 4, "only identified local-model signals leave the product table")
+        expect(productRows.count == 6, "every signal remains a product row")
+        expect(
+            productRows.contains { $0.product == "Ollama" && !$0.model.isEmpty },
+            "identified local-model signals stay in the product table with their model ID"
+        )
+        expect(AIDiscoveryGrouping.hasModels(in: productRows), "product table shows the model columns")
         expect(productRows.contains { $0.product == "Codex" }, "ordinary product remains")
         expect(
             productRows.contains { $0.product == "Acme Model Studio" },

@@ -40,7 +40,7 @@ func TestAuditPlatformHealthV8ActionsUseExactGeneratedFamiliesOnly(t *testing.T)
 		{name: "sidecar starting", action: ActionSidecarStart, eventName: "subsystem.lifecycle", outcome: observability.OutcomeAttempted, severity: observability.SeverityInfo, subsystem: "sidecar", health: "starting", mandatory: true},
 		{name: "sidecar stopped", action: ActionSidecarStop, eventName: "subsystem.lifecycle", outcome: observability.OutcomeCompleted, severity: observability.SeverityInfo, subsystem: "sidecar", health: "stopped", mandatory: true},
 		{name: "sidecar connected", action: ActionSidecarConnected, eventName: "subsystem.ready", outcome: observability.OutcomeCompleted, severity: observability.SeverityInfo, subsystem: "gateway", health: "ready", mandatory: true},
-		{name: "sidecar disconnected", action: ActionSidecarDisconnected, eventName: "subsystem.degraded", outcome: observability.OutcomeFailed, severity: observability.SeverityHigh, subsystem: "gateway", health: "degraded", errorCode: "connection_lost", mandatory: true},
+		{name: "sidecar disconnected", action: ActionSidecarDisconnected, eventName: "subsystem.degraded", outcome: observability.OutcomeFailed, severity: observability.SeverityMedium, subsystem: "gateway", health: "degraded", errorCode: "connection_lost", mandatory: true},
 		{name: "guardrail starting", action: ActionGuardrailStart, eventName: "subsystem.lifecycle", outcome: observability.OutcomeAttempted, severity: observability.SeverityInfo, subsystem: "guardrail", health: "starting", mandatory: true},
 		{name: "guardrail healthy", action: ActionGuardrailHealthy, eventName: "subsystem.ready", outcome: observability.OutcomeCompleted, severity: observability.SeverityInfo, subsystem: "guardrail", health: "ready", mandatory: true},
 		{name: "guardrail degraded", action: ActionGuardrailDegraded, connector: "codex", eventName: "subsystem.degraded", outcome: observability.OutcomeFailed, severity: observability.SeverityHigh, subsystem: "guardrail", health: "degraded", errorCode: "guardrail_degraded", mandatory: true},
@@ -369,4 +369,57 @@ func TestAuditPlatformHealthV8ConcurrentDetachDoesNotRaceOrFallback(t *testing.T
 		_ = logger.LogAction(string(ActionGuardrailHealthy), "", "private")
 	}
 	<-done
+}
+
+func TestAuditPlatformHealthV8DetailsNameSubsystemAndReason(t *testing.T) {
+	logger := newTestLogger(t)
+	runtime := newTestRuntimeV8Emitter(t, logger.store, router.AdmissionOrdinary)
+	logger.SetRuntimeV8Emitter(runtime)
+	if err := logger.LogActionSeverityConnector(
+		string(ActionGuardrailDegraded), "codex", "hook self-heal Setup failed", "", "codex",
+	); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := logger.store.ListEvents(10)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("rows=%d err=%v", len(rows), err)
+	}
+	if want := "guardrail degraded: hook self-heal Setup failed"; rows[0].Details != want {
+		t.Fatalf("details = %q, want %q", rows[0].Details, want)
+	}
+}
+
+// GAP-2204: a platform-health row names its subsystem as the actor, not
+// the record writer audit_logger.
+func TestAuditPlatformHealthV8RowActorIsSubsystem(t *testing.T) {
+	for _, test := range []struct {
+		action    Action
+		logEvent  bool
+		wantActor string
+	}{
+		{action: ActionWatchStart, wantActor: "watcher"},
+		{action: ActionWatchStop, wantActor: "watcher"},
+		{action: ActionGatewayJudgeBodiesReady, logEvent: true, wantActor: "judge_bodies"},
+	} {
+		t.Run(string(test.action), func(t *testing.T) {
+			logger := newTestLogger(t)
+			logger.SetRuntimeV8Emitter(newSinkHealthTestRuntime(t, logger, router.AdmissionOrdinary))
+			var err error
+			if test.logEvent {
+				err = logger.LogEvent(Event{Action: string(test.action), Actor: "defenseclaw-gateway", Details: "ready"})
+			} else {
+				err = logger.LogAction(string(test.action), "", "dirs=1")
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			rows, err := logger.store.ListEvents(10)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(rows) != 1 || rows[0].Actor != test.wantActor {
+				t.Fatalf("rows = %#v, want one row with actor %q", rows, test.wantActor)
+			}
+		})
+	}
 }

@@ -1,0 +1,297 @@
+---
+title: Webhook alerts
+description: Configure Slack, PagerDuty, Webex, and generic HMAC webhooks so the gateway can ping a chat or incident channel when high-severity events fire.
+keywords:
+  - defenseclaw setup webhook
+  - Slack webhook
+  - PagerDuty webhook
+  - Webex webhook
+  - generic HMAC webhook
+  - DefenseClaw notifier
+  - DefenseClaw telemetry destination
+  - SSRF guard
+---
+
+`defenseclaw setup webhook` manages the **notifier** webhooks the gateway calls when an event meets your minimum severity. Four types are supported. Each one can be set up with prompts or with flags only.
+
+<Callout title="Notifiers and telemetry destinations">
+There are two separate webhook surfaces:
+
+- **Notifiers** (`defenseclaw setup webhook`) — chat/incident pings shaped to the destination's API (Slack blocks, PagerDuty Events v2, Webex `messages`, or generic JSON). Filtered by severity and deduplicated. **This page.**
+- **HTTP JSONL telemetry destinations** (`defenseclaw setup observability add webhook`) — canonical v8 log projections posted as JSON Lines. Omitted policy selects every collected log bucket; `send`/`routes` and destination redaction can narrow it. It has an independent bounded queue and is intended for SIEMs and data lakes.
+
+Pick the surface that matches the consumer. Most installs run one notifier (Slack) and zero or more independent telemetry destinations.
+</Callout>
+
+## The four webhook types
+
+<TypeTable
+  type={{
+    'slack': {
+      type: 'webhook',
+      description: 'Posts an attachment-style message to a Slack incoming webhook URL. Secret lives in the URL itself; no secret-env required.',
+    },
+    'pagerduty': {
+      type: 'webhook',
+      description: 'Triggers a PagerDuty Events v2 incident. The routing key is read from the env var named in --secret-env, which is required (the interactive prompt suggests DEFENSECLAW_PD_ROUTING_KEY).',
+    },
+    'webex': {
+      type: 'webhook',
+      description: 'Posts a markdown message to a Webex room. The bot token comes from the env var named in --secret-env, which is required (the prompt suggests DEFENSECLAW_WEBEX_TOKEN); --room-id targets the room.',
+    },
+    'generic': {
+      type: 'webhook',
+      description: 'POSTs the event JSON to any endpoint. When --secret-env is set, the body is signed with HMAC-SHA256 in the X-Hub-Signature-256 header.',
+    },
+  }}
+/>
+
+## Three worked examples
+
+<Tabs items={['Slack', 'PagerDuty', 'Generic HMAC']}>
+
+<Tab value="Slack">
+
+Slack incoming webhooks carry the secret in the URL itself, so you do not need a `--secret-env`:
+
+```bash
+defenseclaw setup webhook add slack \
+  --name slack-alerts \
+  --url https://hooks.slack.com/services/T000/B000/XXXXXX \
+  --min-severity HIGH \
+  --non-interactive
+```
+
+The name is derived from the type and host. Test it without posting to the channel by using `--dry-run`, then send a real test when you're happy:
+
+```bash
+defenseclaw setup webhook test slack-alerts --dry-run
+defenseclaw setup webhook test slack-alerts
+```
+
+</Tab>
+
+<Tab value="PagerDuty">
+
+PagerDuty Events v2 needs a routing key. Store it with `keys set` (hidden
+prompt, saved to `~/.defenseclaw/.env`) and point the webhook at the env var's
+**name**:
+
+```bash
+defenseclaw keys set DEFENSECLAW_PD_ROUTING_KEY
+defenseclaw setup webhook add pagerduty \
+  --name pd-prod \
+  --url https://events.pagerduty.com/v2/enqueue \
+  --secret-env DEFENSECLAW_PD_ROUTING_KEY \
+  --min-severity HIGH \
+  --non-interactive
+```
+
+The gateway reads the key from its environment, which includes `~/.defenseclaw/.env`, when it starts. After you rotate the key, run `defenseclaw-gateway restart`.
+
+</Tab>
+
+<Tab value="Generic HMAC">
+
+For SIEM or SOAR platforms that accept a generic POST with a signature. Store the shared secret in `DEFENSECLAW_SIEM_SECRET` first:
+
+```bash
+defenseclaw keys set DEFENSECLAW_SIEM_SECRET
+defenseclaw setup webhook add generic \
+  --name siem \
+  --url https://siem.example.com/defenseclaw \
+  --secret-env DEFENSECLAW_SIEM_SECRET \
+  --events block,guardrail \
+  --min-severity MEDIUM \
+  --non-interactive
+```
+
+The receiver validates the signature by recomputing the hex
+`HMAC-SHA256(secret, body)` and comparing it to the `X-Hub-Signature-256`
+header, which has the form `sha256=<hex>`.
+
+A dry run shows the payload and the headers without sending anything:
+
+```text title="defenseclaw setup webhook test siem --dry-run"
+  Testing webhook siem [generic] -> https://siem.example.com/***
+  (dry-run) formatting only, no delivery
+    Payload:        311 bytes
+    Preview:        {"webhook_type":"defenseclaw_enforcement","defenseclaw_version":"1.0","event":{"id":"synthetic-8fd159624404","timestamp":"2026-10-03T04:09:51Z","action":"webhoo
+    Headers:
+      Content-Type: application/json
+      User-Agent: defenseclaw-cli/webhook-test
+      X-Hub-Signature-256: <redacted>
+    OK Result:         dry-run OK
+```
+
+A connector-hook block names the rule that fired. The event's `details` carry `rule=<id>` next to the redacted reason, and `defenseclaw_rule` gives the same label the agent sees, for example `rule VB2-MARKER-BLOCK: Marker command`. Titles appear only for compiled-in and loaded rule-pack rules; the matched content stays redacted.
+
+</Tab>
+
+</Tabs>
+
+## All seven subcommands
+
+<TypeTable
+  type={{
+    'add <type>': {
+      type: 'subcommand',
+      description: 'Create or replace a webhook entry. Type is one of slack | pagerduty | webex | generic. Prompts interactively for missing required fields; --non-interactive enforces flag-only.',
+    },
+    'list': {
+      type: 'subcommand',
+      description: 'Table of every configured webhook. URLs are truncated and secret-envs are shown by name only. --json for JSON output; --connector for one connector.',
+    },
+    'show <name>': {
+      type: 'subcommand',
+      description: 'Show one entry with its full URL, secret-env name, severity, events, timeout and cooldown. --json for JSON output.',
+    },
+    'enable <name>': {
+      type: 'subcommand',
+      description: 'Set enabled=true. Safe to re-run. --connector for a connector-scoped entry.',
+    },
+    'disable <name>': {
+      type: 'subcommand',
+      description: 'Set enabled=false and keep the entry. --connector for a connector-scoped entry.',
+    },
+    'remove <name>': {
+      type: 'subcommand',
+      description: 'Delete the entry. Confirms first; --yes for scripts, --connector for a per-connector webhook.',
+    },
+    'test <name>': {
+      type: 'subcommand',
+      description: 'Send a synthetic event with a unique ID. --dry-run formats the payload without sending; --timeout sets the delivery timeout in seconds. Safe to re-run.',
+    },
+  }}
+/>
+
+## Flag reference for `add`
+
+| Flag | Default | Notes |
+| --- | --- | --- |
+| `--name <id>` | derived from `type` + URL host | Friendly identifier shown in `list` and audit. |
+| `--url <url>` | (required) | Validated against the SSRF guard at write time and again at delivery. |
+| `--secret-env <ENV>` | required for `pagerduty` and `webex` | The **name** of an env var, never the literal secret. It must look like an env var name (`A-Z`, `0-9`, `_`). |
+| `--room-id <id>` | (required for `webex`) | Webex room/space identifier. |
+| `--min-severity INFO\|LOW\|MEDIUM\|HIGH\|CRITICAL` | `HIGH` | Events below the floor are dropped. Case-insensitive. |
+| `--events a,b,c` | (all categories) | Allow-list of event categories: `block`, `scan`, `guardrail`, `drift`, `health`. |
+| `--timeout-seconds <n>` | `10` | Per-delivery timeout. |
+| `--cooldown-seconds <n>` | `300` (runtime default) | Dedup window. `0` disables dedup; omit to use the runtime default. |
+| `--enabled` / `--disabled` | `--enabled` | Initial state. |
+| `--connector <name>` | (global) | Scope the webhook to one connector. That connector's events go to its own webhooks when it has any, and to the global webhooks otherwise. `list` and `remove` take the same option. |
+| `--dry-run` | off | Print the YAML diff without writing. |
+| `--non-interactive` | off | Required for CI; a missing required field exits non-zero with a message such as `error: pagerduty: --secret-env is required`. |
+
+Env var names the interactive prompt suggests for `--secret-env`:
+
+| Type | Suggested `--secret-env` |
+| --- | --- |
+| `slack` | (none — secret is in the URL) |
+| `pagerduty` | `DEFENSECLAW_PD_ROUTING_KEY` |
+| `webex` | `DEFENSECLAW_WEBEX_TOKEN` |
+| `generic` | asks whether to sign with HMAC first, then suggests `DEFENSECLAW_WEBHOOK_SECRET` |
+
+## SSRF guard
+
+Every URL is checked against the same SSRF guard the gateway runs at delivery time:
+
+- The scheme is `http://` or `https://`, and the host parses.
+- The host resolves to a public address. Private (RFC 1918 and IPv6 ULA), link-local, loopback, cloud-metadata and carrier-grade NAT (100.64.0.0/10) addresses are rejected.
+- `DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST=1` allows `localhost` and loopback addresses only. `DEFENSECLAW_ALLOW_CGNAT=1` allows the 100.64.0.0/10 range only. Every other private range stays blocked.
+- No credentials in the URL (`https://user:pass@…`); they belong in `--secret-env`.
+
+```text title="A private address is refused at add time"
+error: IP 10.0.0.5 is a private or reserved address; webhooks must reach a public address so events can't be sent to internal services (SSRF guard). Use a public endpoint or relay.
+```
+
+The check runs at `add` time and again at delivery time, which catches hand edits to `config.yaml`.
+
+## Verifying a webhook with `test`
+
+`test` sends a synthetic event with a new event ID each time, so receivers do not deduplicate it:
+
+```bash
+defenseclaw setup webhook test pd-prod
+```
+
+The output includes:
+
+- The formatted payload bytes count and a 160-byte preview.
+- Every header DefenseClaw sent; the HMAC signature for `generic` is shown as `<redacted>`.
+- The HTTP status returned by the receiver.
+- A `setup-webhook` audit event with `name=pd-prod type=pagerduty ok=True`, recorded when the gateway is running.
+
+To format the payload without sending it:
+
+```bash
+defenseclaw setup webhook test pd-prod --dry-run
+```
+
+## Common gotchas
+
+<Accordions>
+
+<Accordion title="secret_env does not look like an environment variable name">
+
+`--secret-env` takes an env var **name**: uppercase letters, digits and
+underscores, not starting with a digit. Anything else, such as a pasted token,
+is rejected:
+
+```text
+error: secret_env 'sk-abc' does not look like an environment variable name (expected e.g. SLACK_WEBHOOK_SECRET); inline secrets are not accepted — store the value in ~/.defenseclaw/.env instead
+```
+
+Store the value with `defenseclaw keys set <NAME>` and pass the name. If an
+existing env var has a different shape, you can name it in `config.yaml`
+directly:
+
+```yaml title="~/.defenseclaw/config.yaml"
+webhooks:
+  - name: pd-prod
+    type: pagerduty
+    url: https://events.pagerduty.com/v2/enqueue
+    secret_env: MY_WEIRDLY_NAMED_VAR
+    enabled: true
+```
+
+Then run `defenseclaw setup webhook test pd-prod` to validate. The gateway accepts any non-empty variable name; only the CLI applies this check.
+
+</Accordion>
+
+<Accordion title="The URL is refused as a private or reserved address">
+
+The URL resolves to an address the SSRF guard blocks. For a receiver on your
+own machine during development, allow loopback:
+
+```bash
+export DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST=1
+defenseclaw setup webhook test my-local-receiver
+```
+
+This allows only `localhost` and loopback addresses; RFC 1918, link-local and
+metadata addresses stay blocked. The gateway reads the variable from its own
+environment, so set it where the gateway starts too. Don't ship it to
+production. For a private network, use a public relay instead.
+
+</Accordion>
+
+<Accordion title="Slack receives nothing from a test">
+
+Slack incoming webhooks rate-limit aggressively and silently drop messages with malformed Block Kit. Watch the test output for `Result:         ok (HTTP 200)`. If you got the 200 and Slack isn't showing anything, check the channel allowlist on the Slack app, then re-run `test` — the unique event-ID defeats Slack's own message dedup.
+
+</Accordion>
+
+<Accordion title="The TUI runs these same commands">
+
+The TUI (`defenseclaw tui` → Setup → Webhooks) runs these same `setup webhook` subcommands. Anything you can do in the TUI you can also do from a script with these flags.
+
+</Accordion>
+
+</Accordions>
+
+## See also
+
+- [Webhook CLI source](https://github.com/cisco-ai-defense/defenseclaw/blob/main/cli/defenseclaw/commands/cmd_setup_webhook.py) (`cmd_setup_webhook.py`): every subcommand, validator and helper.
+- `internal/gateway/webhook.go` — the dispatcher, dedup logic, and HMAC implementation.
+- [Reference → CLI](/docs/reference/cli) — the CLI command catalog.
+- [Observability → Splunk](/docs/observability/splunk) — to export every event, with no severity floor, as a telemetry destination.

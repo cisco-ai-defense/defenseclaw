@@ -1,15 +1,13 @@
 {
   "title": "OpenShell sandboxes",
   "pages": [
-    "index",
     "linux",
     "macos",
     "first-session",
+    "guide",
     "network",
+    "policy-packs",
     "apps",
-    "---Reference---",
-    "[Full sandbox guide](/docs/setup/sandbox)",
-    "[Policy packs and admin controls](/docs/setup/sandbox-policy)",
-    "[Sandbox CLI reference](/docs/reference/sandbox-cli)"
+    "legacy-cleanup"
   ]
 }

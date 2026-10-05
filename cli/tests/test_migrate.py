@@ -272,10 +272,25 @@ def test_cli_exit_codes(data_dir: Path, recorded: list[str]) -> None:
     done = runner.invoke(migrate_cmd, ["--data-dir", str(data_dir), "--from-version", "0.8.4", "--yes", "--json"])
     assert done.exit_code == 0, done.output
     payload = json.loads(done.stdout)
-    assert "0.x import 0.8.5" in done.stderr
+    assert "→ step 0.8.5" in done.stderr
+    assert payload["applied"] == ["0.x import 0.8.5: step 0.8.5"]
     assert payload["from_config_version"] == 7
     assert payload["changed"] is True
     assert recorded == ["0.8.5"]
+
+
+def test_upgrade_names_hooks_that_now_fail_open(data_dir: Path, recorded: list[str]) -> None:
+    # 0.8.x sealed the global fail mode into observe-mode hooks.
+    _write_config(data_dir, "config_version: 8\nguardrail:\n  mode: observe\n  hook_fail_mode: closed\n")
+    lock = {"connectors": {"claudecode": {"hook_fail_mode": "closed"}, "codex": {"hook_fail_mode": "open"}}}
+    (data_dir / "hook_contract_lock.json").write_text(json.dumps(lock), encoding="utf-8")
+
+    result = CliRunner().invoke(migrate_cmd, ["--data-dir", str(data_dir)])
+
+    assert result.exit_code == 0, result.output
+    assert "claudecode hooks now fail open" in result.output
+    assert "defenseclaw setup claudecode --mode action" in result.output
+    assert "codex" not in result.output
 
 
 def test_a_pre_v8_config_always_gets_the_v8_conversion(data_dir: Path, recorded: list[str]) -> None:
@@ -319,6 +334,21 @@ def test_only_a_0x_import_selects_the_windows_agents(data_dir: Path, recorded: l
 
     migrate(str(data_dir), from_version="0.8.4")
     migrate(str(data_dir))
+    migrate(str(data_dir), from_version="1.0.0")
+
+    assert calls == [str(data_dir)]
+
+
+def test_a_0x_import_with_a_v8_config_selects_the_windows_agents(
+    data_dir: Path, recorded: list[str], monkeypatch
+) -> None:
+    # GAP-1390: 0.8.10 already writes config_version 8 but never recorded the
+    # Codex executable, so the 1.x gateway refused Codex after the upgrade.
+    calls: list[str] = []
+    monkeypatch.setattr(migrations, "_select_windows_agents", calls.append)
+    _write_config(data_dir, "config_version: 8\n")
+
+    migrate(str(data_dir), from_version="0.8.10")
 
     assert calls == [str(data_dir)]
 
@@ -417,3 +447,35 @@ def test_windows_agent_selection_writes_no_receipt_without_a_native_agent(data_d
     monkeypatch.setattr(os, "name", "nt")
 
     migrations._select_windows_agents(str(data_dir))
+
+
+def test_cli_check_lists_pending_steps_as_pending(data_dir: Path, recorded: list[str]) -> None:
+    # GAP-1117: --check names each step, uses no success tick, and its JSON
+    # lists them under "pending" (nothing was applied).
+    config = _write_config(data_dir, "config_version: 7\n")
+    runner = CliRunner()
+
+    text = runner.invoke(migrate_cmd, ["--data-dir", str(data_dir), "--from-version", "0.8.4", "--check"])
+    assert text.exit_code == 0, text.output
+    assert "1 migration step(s) pending (config_version 7 -> 8)" in text.stdout
+    # GAP-1500: human output shows the step in user terms, no "0.x import" id.
+    assert "→ step 0.8.5" in text.stdout
+    assert "0.x import" not in text.stdout
+    assert "✓" not in text.stdout
+
+    js = runner.invoke(migrate_cmd, ["--data-dir", str(data_dir), "--from-version", "0.8.4", "--check", "--json"])
+    assert js.exit_code == 0, js.output
+    payload = json.loads(js.stdout)
+    assert payload["pending"] == ["0.x import 0.8.5: step 0.8.5"]
+    assert payload["applied"] == []
+    assert config.read_text(encoding="utf-8") == "config_version: 7\n"
+
+
+def test_cli_rejects_a_from_version_that_is_not_a_release(data_dir: Path) -> None:
+    # GAP-1449: --from-version banana is a usage error, not "current", rc 0.
+    _write_config(data_dir, "config_version: 8\n")
+    result = CliRunner().invoke(migrate_cmd, ["--data-dir", str(data_dir), "--check", "--from-version", "banana"])
+    assert result.exit_code == 2
+    assert "not a release version" in result.output
+    ok = CliRunner().invoke(migrate_cmd, ["--data-dir", str(data_dir), "--check", "--from-version", "1.0.1.dev3"])
+    assert ok.exit_code == 0, ok.output

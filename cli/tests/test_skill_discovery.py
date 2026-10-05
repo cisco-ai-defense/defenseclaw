@@ -317,3 +317,26 @@ def test_claudecode_follows_and_deduplicates_skill_directory_symlinks(
 
     assert len(discovered) == 1
     assert discovered[0].path == str(target)
+
+
+@pytest.mark.parametrize("connector", ["claudecode", "amp"])
+def test_claude_account_synced_skills_are_expanded(tmp_path, connector) -> None:
+    """GAP-1243: ~/.claude/skills/synced/<account>/<skill> holds real skills."""
+    root = tmp_path / ".claude" / "skills"
+    own = root / "own"
+    own.mkdir(parents=True)
+    (own / "SKILL.md").write_text("# own", encoding="utf-8")
+    account = root / "synced" / "7e6ed31d-account"
+    for name in ("pdf", "docx"):
+        (account / name).mkdir(parents=True)
+        (account / name / "SKILL.md").write_text(f"# {name}", encoding="utf-8")
+    (account / "unmarked").mkdir()
+    (root / "synced" / "manifest.json").write_text("{}", encoding="utf-8")
+
+    discovered = discover_skill_directories(os.fspath(root), connector=connector)
+
+    assert [(entry.name, entry.path) for entry in discovered] == [
+        ("own", os.fspath(own)),
+        ("docx", os.fspath(account / "docx")),
+        ("pdf", os.fspath(account / "pdf")),
+    ]

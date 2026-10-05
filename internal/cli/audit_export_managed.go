@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -36,18 +37,18 @@ var (
 // An explicit DEFENSECLAW_CONFIG or DEFENSECLAW_HOME is the operator's
 // choice and is left alone, as is every host without a managed deployment.
 func prepareManagedAuditExportEnvironment() error {
-	return pinManagedAdministratorEnvironment(
-		"audit export",
-		"this host has a managed DefenseClaw deployment; its audit log can be exported only from an elevated Administrator prompt or by the MDM agent",
-	)
+	return pinManagedAdministratorEnvironment("audit export", func() string {
+		return windowsManagedStandardUserViewAnswer("the audit log", "audit export -o <file>")
+	})
 }
 
 // pinManagedAdministratorEnvironment gives a read-only administrator command
 // (command names it in errors) the managed deployment's environment on a
-// standalone managed Windows host, as described above; refusal is the
-// message a standard account gets. Every other host, and an explicit
-// DEFENSECLAW_CONFIG or DEFENSECLAW_HOME, is left alone.
-func pinManagedAdministratorEnvironment(command, refusal string) error {
+// standalone managed Windows host, as described above; refusal builds the
+// elevation_required answer a standard account gets, with the exit code
+// (5) status and verify give it (GAP-2039). Every other host, and an
+// explicit DEFENSECLAW_CONFIG or DEFENSECLAW_HOME, is left alone.
+func pinManagedAdministratorEnvironment(command string, refusal func() string) error {
 	if strings.TrimSpace(os.Getenv(managed.ConfigPathEnv)) != "" ||
 		strings.TrimSpace(os.Getenv("DEFENSECLAW_HOME")) != "" {
 		return nil
@@ -56,7 +57,7 @@ func pinManagedAdministratorEnvironment(command, refusal string) error {
 		return nil
 	}
 	if !auditExportCallerIsAdministrator() {
-		return fmt.Errorf("%s: %s", command, refusal)
+		return withExitCode(&managedViewRefusal{code: "elevation_required", message: refusal()}, enterprisestatus.WindowsExitAccessDenied)
 	}
 	layout, err := auditExportManagedLayout()
 	if err != nil {

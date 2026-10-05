@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -207,6 +208,10 @@ func TestHermesSetupAdmissionRejectsChangedPathBytesVersionAndCustodyBeforeMutat
 			err := NewHermesConnector().Setup(context.Background(), opts)
 			if err == nil || !strings.Contains(err.Error(), test.wantError) {
 				t.Fatalf("Setup error = %v, want %q", err, test.wantError)
+			}
+			// GAP-1856: the gateway skips only this connector on this error.
+			if !errors.Is(err, ErrExecutableAdmission) {
+				t.Fatalf("Setup error = %v, want ErrExecutableAdmission", err)
 			}
 			assertHermesAdmissionTargetsUnchanged(t, before)
 		})

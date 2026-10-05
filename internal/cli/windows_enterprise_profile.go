@@ -25,6 +25,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
@@ -161,6 +162,15 @@ func resolveWindowsEnterpriseLifecycleProfile(action string, opts *windowsEnterp
 		switch {
 		case len(live) > 1:
 			return errors.New("profile_conflict: both Secure Client and standalone enterprise deployments are recorded on this host")
+		case len(live) == 1 && profile != "" && profile != live[0] && live[0] == managed.ProfileStandalone:
+			// Naming the other profile on a standalone computer is the
+			// caller's mistake, not a failed install: answer it with the
+			// invalid-arguments code and the profile to use (GAP-2041).
+			return withExitCode(fmt.Errorf(
+				"profile_conflict: this host carries a %s enterprise deployment; %s of the %s profile is refused because the profiles share service names. "+
+					"This computer runs the %s profile: use --profile %s, or omit --profile",
+				live[0], action, profile, live[0], live[0],
+			), enterprisestatus.WindowsExitInvalidArgs)
 		case len(live) == 1 && profile != "" && profile != live[0]:
 			return fmt.Errorf(
 				"profile_conflict: this host carries a %s enterprise deployment; %s of the %s profile is refused because the profiles share service names",
@@ -330,6 +340,23 @@ func applyWindowsEnterpriseConfiguredTrust(action string, opts *windowsEnterpris
 	return nil
 }
 
+// windowsEnterpriseTrustConfigReader reads the config enterprise.trust comes
+// from; tests replace it.
+var windowsEnterpriseTrustConfigReader = readWindowsEnterpriseBoundedFile
+
+// windowsEnterpriseRequestedAttestations are the attestation flags of this
+// run, which the command handed to an administrator must repeat (GAP-2011).
+func windowsEnterpriseRequestedAttestations(opts *windowsEnterpriseLifecycleOptions) []string {
+	var flags []string
+	if opts.attestAgentApplicationControl {
+		flags = append(flags, "--attest-agent-application-control")
+	}
+	if opts.attestClaudeEffectivePolicy {
+		flags = append(flags, "--attest-claude-effective-policy")
+	}
+	return flags
+}
+
 func readWindowsEnterpriseConfiguredTrust(action string, opts *windowsEnterpriseLifecycleOptions) (windowsEnterpriseConfiguredTrust, error) {
 	path := strings.TrimSpace(opts.configPath)
 	supplied := path != ""
@@ -345,10 +372,16 @@ func readWindowsEnterpriseConfiguredTrust(action string, opts *windowsEnterprise
 		}
 		path = installed
 	}
-	body, err := readWindowsEnterpriseBoundedFile(path, windowsEnterpriseConfigProfileLimit)
+	body, err := windowsEnterpriseTrustConfigReader(path, windowsEnterpriseConfigProfileLimit)
 	if err != nil {
 		if !supplied && errors.Is(err, os.ErrNotExist) {
 			return windowsEnterpriseConfiguredTrust{}, nil
+		}
+		if !supplied && errors.Is(err, os.ErrPermission) && !windowsEnterpriseIsElevated() {
+			// A standard account cannot read the protected installed config,
+			// and could not change the deployment anyway (GAP-1961).
+			return windowsEnterpriseConfiguredTrust{}, errors.New("elevation_required: " +
+				windowsEnterpriseStandardUserMutationAnswer(action, windowsEnterpriseRequestedAttestations(opts)...))
 		}
 		return windowsEnterpriseConfiguredTrust{}, fmt.Errorf("read enterprise.trust from %s: %w", path, err)
 	}

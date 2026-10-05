@@ -16,6 +16,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -86,7 +88,43 @@ func (m *policyManager) options(cfg *config.Config) (enterprisepolicy.Options, e
 	// config names; enterprisepolicy inspects it under Root.
 	opts.SkipTrustChecks = m.skipTrust
 	opts.Now = env.Now
+	if cfg != nil {
+		opts.CopilotUserHomes = m.enrolledHomes()
+	}
 	return opts, opts.Validate()
+}
+
+// enrolledHomes are the eligible accounts' homes from the enumerator's
+// root-only record (under Root in tests); the Copilot VS Code lock gate
+// checks each for DefenseClaw's plugin. An unreadable record is no homes,
+// which keeps the lock off.
+func (m *policyManager) enrolledHomes() []string {
+	return m.env.accountHomes(enterprisehooks.UnixEligibleAccountsPath(m.env.Layout.ManifestPath))
+}
+
+// accountHomes are the homes (under Root) in a root-only record in the
+// eligible-accounts format: the enumerator's eligible accounts or the
+// guardian's VS Code Local accounts. An unreadable record is no homes.
+func (env *Env) accountHomes(recordPath string) []string {
+	data, err := readBounded(env.P(recordPath), maxInputBytes)
+	if err != nil {
+		return nil
+	}
+	var record struct {
+		Accounts []struct {
+			Home string `json:"home"`
+		} `json:"accounts"`
+	}
+	if json.Unmarshal(data, &record) != nil {
+		return nil
+	}
+	homes := []string{}
+	for _, account := range record.Accounts {
+		if home := strings.TrimSpace(account.Home); home != "" {
+			homes = append(homes, env.P(home))
+		}
+	}
+	return homes
 }
 
 func (m *policyManager) Intended(cfg *config.Config) ([]string, error) {
@@ -282,27 +320,29 @@ func missingClaudeVersionFloor(result enterprisepolicy.Result) string {
 }
 
 // describeMachinePolicy reports the vendor machine policy of the installed
-// config without writing.
-func (l *lifecycle) describeMachinePolicy(record *Deployment) {
+// config without writing. It returns the problems that fail both status
+// and verify: enrolled users' guardian-owned hook files that are missing
+// or modified.
+func (l *lifecycle) describeMachinePolicy(record *Deployment) []string {
 	env, r := l.env, l.result
 	raw, err := readBounded(env.P(env.Layout.ConfigPath), maxInputBytes)
 	if err != nil {
-		return
+		return nil
 	}
 	validated, err := env.validateConfig(raw)
 	if err != nil {
-		return
+		return nil
 	}
 	l.warnNoConnectorsEnabled(validated)
 	intended, err := env.MachinePolicy.Intended(validated.Loaded)
 	if err != nil {
 		r.AddWarning(codeMachinePolicy, err.Error())
-		return
+		return nil
 	}
 	result, verifyErr := env.MachinePolicy.Verify(validated.Loaded)
 	if isCoded(verifyErr, codeMachinePolicy) {
 		r.AddWarning(codeMachinePolicy, verifyErr.Error())
-		return
+		return nil
 	}
 	// A connector the last transaction placed that is gone from its vendor
 	// file now is reported once, with the file and the command that puts it
@@ -341,6 +381,71 @@ func (l *lifecycle) describeMachinePolicy(record *Deployment) {
 			"DefenseClaw's Claude Code version floor %s is missing; `%s` (or reconcile or repair) writes it back",
 			path, env.lifecycleCommand("ensure")))
 	}
+	// A per-user file the guardian owns (Copilot's VS Code Local hook file)
+	// that a user deleted or edited leaves that agent surface unguarded
+	// until the guardian rewrites it, so status and verify both fail on it
+	// (WIN-R1-25, #1055), as on managed Windows. Two cases are not drift:
+	// a home that no longer exists (a deleted account, which
+	// guardian_target_account_removed reports; GAP-1209), and an account
+	// the guardian has not written the file for yet (a fresh install or a
+	// newly enrolled user; GAP-1267), which is a warning until its pass.
+	homeOf := map[string]string{}
+	for _, home := range env.accountHomes(enterprisehooks.UnixEligibleAccountsPath(env.Layout.ManifestPath)) {
+		homeOf[enterprisepolicy.CopilotVSCodeLocalHookFilePath(home)] = home
+	}
+	// The guardian keeps its record in its data directory (GAP-1761); an
+	// earlier build left it next to the manifest.
+	written := map[string]bool{}
+	for _, record := range []string{
+		filepath.Join(env.Layout.GuardianAuthDir, enterprisehooks.UnixCopilotVSCodeAccountsFileName),
+		enterprisehooks.UnixCopilotVSCodeAccountsPath(env.Layout.ManifestPath),
+	} {
+		for _, home := range env.accountHomes(record) {
+			written[home] = true
+		}
+	}
+	var drift []string
+	for _, state := range result.States {
+		var changed, pending []string
+		for _, path := range state.UserFileDrift {
+			home, known := homeOf[path]
+			if known {
+				if _, err := os.Lstat(home); errors.Is(err, os.ErrNotExist) {
+					continue
+				}
+			}
+			if known && !written[home] {
+				pending = append(pending, path)
+				continue
+			}
+			changed = append(changed, path)
+		}
+		if len(pending) > 0 {
+			r.AddWarning(codeGuardianUserFilePending, fmt.Sprintf(
+				"DefenseClaw's %s hook file is not written yet for %d newly enrolled user(s): %s; the hook guardian writes it on its first pass for them",
+				state.Connector, len(pending), firstPaths(pending)))
+		}
+		if len(changed) == 0 {
+			continue
+		}
+		drift = append(drift, fmt.Sprintf(
+			"DefenseClaw's %s hook file is missing or modified for %d enrolled user(s): %s; the hook guardian rewrites it on its next pass",
+			state.Connector, len(changed), firstPaths(changed)))
+		r.SecurityComplete = false
+	}
+	return drift
+}
+
+// codeGuardianUserFilePending names enrolled users whose guardian-owned
+// per-user hook file the guardian has not written yet.
+const codeGuardianUserFilePending = "guardian_user_file_pending"
+
+// firstPaths lists up to five paths and counts the rest.
+func firstPaths(paths []string) string {
+	if len(paths) > 5 {
+		paths = append(append([]string{}, paths[:5]...), fmt.Sprintf("and %d more", len(paths)-5))
+	}
+	return strings.Join(paths, ", ")
 }
 
 // codeNoConnectorsEnabled names a deployment whose config enables no

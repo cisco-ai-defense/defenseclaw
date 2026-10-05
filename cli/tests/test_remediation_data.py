@@ -256,6 +256,9 @@ def test_f0561_local_grafana_is_loopback_bound_and_authenticated() -> None:
             expected_ports=((3000, 3000),),
         )
     assert "network_mode" not in overlay["services"]["grafana"]
+    # The collector's debug exporter logs every payload; unrotated logs filled a disk.
+    for service in base["services"].values():
+        assert service["logging"]["options"]["max-size"] == "10m"
 
 
 # --------------------------------------------------------------------------- #

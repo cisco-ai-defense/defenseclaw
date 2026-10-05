@@ -530,7 +530,7 @@ func getBifrostClient(
 	route := currentEnterpriseEgress()
 	proxyConfig, err := bifrostEgressProxy(route, endpoint)
 	if err != nil {
-		return nil, fmt.Errorf("gateway: bifrost init: %w", err)
+		return nil, fmt.Errorf("gateway: %s client setup failed: %w", providerDisplayName(providerKey), err)
 	}
 	egressID := ""
 	if proxyConfig != nil {
@@ -575,7 +575,7 @@ func getBifrostClient(
 	defer cancel()
 	client, err := bifrost.Init(ctx, schemas.BifrostConfig{Account: acct})
 	if err != nil {
-		return nil, fmt.Errorf("gateway: bifrost init: %w", err)
+		return nil, fmt.Errorf("gateway: %s client setup failed: %w", providerDisplayName(providerKey), err)
 	}
 	bifrostTenants[tk] = &bifrostTenantEntry{client: client, lastUsed: now}
 	return client, nil
@@ -644,7 +644,7 @@ func (bp *bifrostProvider) ChatCompletion(ctx context.Context, req *ChatRequest)
 	bCtx := newBifrostRequestContext(ctx, req)
 	resp, bErr := client.ChatCompletionRequest(bCtx, bReq)
 	if bErr != nil {
-		return nil, bifrostErrorToGo(bErr)
+		return nil, bifrostErrorToGo(bp.providerKey, bErr)
 	}
 
 	return fromBifrostChatResponse(resp), nil
@@ -660,13 +660,13 @@ func (bp *bifrostProvider) ChatCompletionStream(ctx context.Context, req *ChatRe
 	bCtx := newBifrostRequestContext(ctx, req)
 	stream, bErr := client.ChatCompletionStreamRequest(bCtx, bReq)
 	if bErr != nil {
-		return nil, bifrostErrorToGo(bErr)
+		return nil, bifrostErrorToGo(bp.providerKey, bErr)
 	}
 
 	var usage *ChatUsage
 	for chunk := range stream {
 		if chunk.BifrostError != nil {
-			return usage, bifrostErrorToGo(chunk.BifrostError)
+			return usage, bifrostErrorToGo(bp.providerKey, chunk.BifrostError)
 		}
 		if chunk.BifrostChatResponse == nil {
 			continue
@@ -929,12 +929,16 @@ func fromBifrostUsage(u *schemas.BifrostLLMUsage) *ChatUsage {
 	}
 }
 
-func bifrostErrorToGo(bErr *schemas.BifrostError) error {
+// bifrostErrorToGo turns a provider failure into an error that names the
+// provider and the problem in user terms. The text reaches status, doctor and
+// the gateway health line (judge_last_error); the old "gateway: bifrost: 400
+// ..." prefix named an internal library instead (GAP-1673).
+func bifrostErrorToGo(provider schemas.ModelProvider, bErr *schemas.BifrostError) error {
 	if bErr == nil {
 		return nil
 	}
-	msg := "unknown bifrost error"
-	if bErr.Error != nil {
+	msg := "unknown error"
+	if bErr.Error != nil && strings.TrimSpace(bErr.Error.Message) != "" {
 		msg = bErr.Error.Message
 	}
 	code := 0
@@ -942,9 +946,36 @@ func bifrostErrorToGo(bErr *schemas.BifrostError) error {
 		code = *bErr.StatusCode
 	}
 	if code > 0 {
-		return fmt.Errorf("gateway: bifrost: %d %s", code, msg)
+		return fmt.Errorf("%s returned %d: %s", providerDisplayName(provider), code, msg)
 	}
-	return fmt.Errorf("gateway: bifrost: %s", msg)
+	return fmt.Errorf("%s request failed: %s", providerDisplayName(provider), msg)
+}
+
+// providerDisplayName is the provider's name as users know it.
+func providerDisplayName(provider schemas.ModelProvider) string {
+	switch provider {
+	case schemas.Bedrock:
+		return "Bedrock"
+	case schemas.OpenAI:
+		return "OpenAI"
+	case schemas.Azure:
+		return "Azure OpenAI"
+	case schemas.Vertex:
+		return "Vertex AI"
+	case schemas.OpenRouter:
+		return "OpenRouter"
+	case schemas.XAI:
+		return "xAI"
+	case schemas.HuggingFace:
+		return "Hugging Face"
+	case schemas.VLLM:
+		return "vLLM"
+	}
+	name := strings.TrimSpace(string(provider))
+	if name == "" {
+		return "The LLM provider"
+	}
+	return strings.ToUpper(name[:1]) + name[1:]
 }
 
 func ptrStr(s *string) string {

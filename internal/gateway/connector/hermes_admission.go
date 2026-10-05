@@ -31,12 +31,51 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/processutil"
 )
 
-const (
-	hermesVersionProbeTimeout     = 10 * time.Second
-	hermesVersionProbeOutputLimit = int64(4 << 10)
-)
+const hermesVersionProbeOutputLimit = int64(4 << 10)
+
+// ErrAgentVersionProbeTimeout marks an agent version probe that ran out of
+// time. A slow probe says nothing about the agent, so a gateway start keeps
+// the connector's existing hooks instead of rolling them back (GAP-1587).
+var ErrAgentVersionProbeTimeout = errors.New("slow agent probe")
+
+// ErrExecutableAdmission marks a setup that a connector refused before it
+// changed anything, because the agent executable no longer matches the
+// protected setup evidence (for example an agent update replaced it). A gateway
+// start skips only that connector instead of rolling it back, which re-checks
+// the same evidence and failed every connector's start (GAP-1856).
+var ErrExecutableAdmission = errors.New("agent executable admission refused")
+
+type executableAdmissionError struct{ err error }
+
+func (e executableAdmissionError) Error() string   { return e.err.Error() }
+func (e executableAdmissionError) Unwrap() []error { return []error{e.err, ErrExecutableAdmission} }
+
+// executableAdmissionRefused marks err as ErrExecutableAdmission and keeps its
+// message and chain.
+func executableAdmissionRefused(err error) error {
+	if err == nil {
+		return nil
+	}
+	return executableAdmissionError{err: err}
+}
+
+// ErrSetupRefusedUnchanged marks a Setup refusal raised before Setup wrote
+// anything, such as an unsupported Hermes profile topology. Rolling back
+// after it would tear down the hooks an earlier setup installed, so a gateway
+// start keeps them (GAP-1851).
+var ErrSetupRefusedUnchanged = errors.New("connector setup refused before any change")
+
+type setupRefusedUnchanged struct{ err error }
+
+func (e setupRefusedUnchanged) Error() string { return e.err.Error() }
+
+func (e setupRefusedUnchanged) Unwrap() []error { return []error{ErrSetupRefusedUnchanged, e.err} }
 
 var (
+	// hermesVersionProbeTimeout bounds 'hermes --version'. It takes about 4 s
+	// on an idle Windows host and passed 10 s on a busy one (GAP-1587).
+	hermesVersionProbeTimeout = 30 * time.Second
+
 	hermesManagedExecutablePathResolver = hermesManagedExecutablePath
 	hermesAgentVersionProbe             = probeHermesAgentVersion
 	hermesInstalledVersionReader        = hermespath.InstalledVersionForManagedExecutable
@@ -268,7 +307,7 @@ func probeHermesAgentVersion(ctx context.Context, executable string) (string, er
 	cmd.Stderr = stderr
 	if err := cmd.Run(); err != nil {
 		if errors.Is(probeCtx.Err(), context.DeadlineExceeded) {
-			return "", fmt.Errorf("probe timed out after %s: %w", hermesVersionProbeTimeout, context.DeadlineExceeded)
+			return "", fmt.Errorf("probe timed out after %s: %w (%w)", hermesVersionProbeTimeout, context.DeadlineExceeded, ErrAgentVersionProbeTimeout)
 		}
 		return "", fmt.Errorf("probe exited unsuccessfully: %w", err)
 	}

@@ -75,3 +75,28 @@ def test_config_schema_rule_names_real_code() -> None:
     assert "CURRENT_CONFIG_VERSION" in runbook and "CURRENT_CONFIG_VERSION = " in _text("cli/defenseclaw/config.py")
     go_config = "".join(path.read_text(encoding="utf-8") for path in (ROOT / "internal/config").glob("*.go"))
     assert "MaxSupportedConfigVersion" in runbook and "MaxSupportedConfigVersion" in go_config
+
+
+def test_dry_run_cannot_sign_publish_or_read_release_secrets() -> None:
+    import yaml
+
+    workflow = yaml.safe_load(_text(".github/workflows/release.yaml"))
+    dry_run = workflow[True]["workflow_dispatch"]["inputs"]["dry_run"]
+    assert dry_run["type"] == "boolean" and dry_run["default"] is False
+    jobs = workflow["jobs"]
+    # Each job that signs, releases or pushes is skipped by its own condition.
+    for name in ("sign", "publish", "legacy-channel"):
+        assert "!inputs.dry_run" in jobs[name]["if"], name
+    for name, job in jobs.items():
+        # `inputs.dry_run && '' || 'release'` would always pick 'release'.
+        if name != "legacy-channel" and "environment" in job:
+            assert job["environment"] == "${{ !inputs.dry_run && 'release' || '' }}", name
+        for step in job.get("steps", []):
+            run = step.get("run", "")
+            publishing = ("gh release create", "gh release edit", "publish-release-channel", "cosign sign-blob")
+            if any(cmd in run for cmd in publishing):
+                assert '[[ "$DRY_RUN" != true ]] ||' in run, (name, step.get("name"))
+            for key, value in step.get("env", {}).items():
+                if "secrets." in str(value):
+                    guarded = str(value).startswith("${{ !inputs.dry_run && secrets.")
+                    assert name == "legacy-channel" or guarded, (name, key)

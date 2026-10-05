@@ -14,7 +14,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from rich.markup import escape as rich_escape
 from textual import events, on
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -22,7 +21,13 @@ from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Static
 
-from defenseclaw.tui.command_line import ParsedCommand, display_argv, infer_command_risk
+from defenseclaw.tui.command_line import (
+    ParsedCommand,
+    display_argv,
+    env_name_value_in_clear,
+    infer_command_risk,
+)
+from defenseclaw.tui.markup_safe import escape as rich_escape
 from defenseclaw.tui.theme import DEFAULT_TOKENS
 
 SECRET_FLAG_FRAGMENTS = ("key", "token", "secret", "password", "credential")
@@ -46,26 +51,76 @@ class CommandPreview:
     # What the command receives besides argv, with every value hidden:
     # "Secret: sent on stdin (hidden)" and "Environment: NAME=<hidden>".
     hidden_inputs: tuple[str, ...] = ()
+    # What running it changes, in plain words, when the intent says
+    # (e.g. "any mcp not approved in a registry will be refused").
+    consequence: str = ""
 
     @property
     def masked_display(self) -> str:
         return display_argv(self.masked_argv)
+
+    @property
+    def cancel_by_default(self) -> bool:
+        """Whether Cancel, not Run, takes the initial focus.
+
+        Destructive, secret-bearing and restart commands, and
+        upgrade/rollback (they replace the binaries and restart the gateway,
+        GAP-2090), so a reflexive Enter cancels instead of running them. One
+        rule for every origin: palette "restart" focused Run while Overview
+        "u" focused Cancel (GAP-2251).
+        """
+
+        if self.risk in {"destructive", "secret", "restart"}:
+            return True
+        args = tuple(arg.lower() for arg in self.masked_argv[1:])
+        if self.masked_argv and _is_gateway_stop(self.masked_argv[0], self.masked_argv[1:]):
+            # It takes hooks offline until the next start; one Enter on the
+            # palette ": stop" confirm stopped the gateway (GAP-2611).
+            return True
+        if args[:2] == ("registry", "require"):
+            # It turns registry approval on or off for every connector; a
+            # stray Enter ran it from Run (GAP-2438).
+            return True
+        return bool(_upgrade_summary(self.masked_argv[1:]))
 
 
 def build_command_preview(command: ParsedCommand) -> CommandPreview:
     """Build preview copy for a parsed command."""
 
     argv = (command.binary, *command.args)
-    risk = command.risk if command.risk != "read-only" else classify_risk(command.category, command.args)
+    inferred = classify_risk(command.category, command.args)
+    risk = command.risk if command.risk != "read-only" else inferred
+    if risk == "mutation" and inferred == "destructive":
+        # Registries "d remove source" said "Risk mutation" and focused Run,
+        # so one Enter removed the source (GAP-2309).
+        risk = inferred
+    restart = _restart_effect(risk, command.args)
+    summary = (
+        _upgrade_summary(command.args)
+        or _gateway_lifecycle_summary(command.binary, command.args)
+        or _risk_summary(risk, command.category)
+    )
+    changes_state = risk in {"setup", "mutation"}
+    if changes_state and restart != "no" and command.args[:1] == ("registry",):
+        # Sync and remove restart only when they change policy; a sync that
+        # promotes nothing new keeps the gateway up (GAP-2542).
+        when = "" if restart == "yes" else " only if it changes policy,"
+        summary = (
+            f"This registries command restarts a running gateway{when} so agent hooks use the new policy. "
+            "Runtime traffic may briefly pause."
+        )
+    elif changes_state and restart == "yes":
+        summary = f"This {command.category} command restarts the gateway. Runtime traffic may briefly pause."
     return CommandPreview(
         title=command.display_name,
         masked_argv=mask_argv(argv),
         category=command.category,
         risk=risk,
         origin=command.category,
-        restart=_restart_effect(risk, command.args),
-        summary=_risk_summary(risk, command.category),
+        restart=restart,
+        summary=summary,
         hidden_inputs=hidden_input_lines(command),
+        consequence=command.consequence,
     )
 
 
@@ -102,7 +157,7 @@ def mask_argv(argv: tuple[str, ...]) -> tuple[str, ...]:
     masked: list[str] = []
     mask_next = False
     mask_next_env = False
-    for arg in argv:
+    for index, arg in enumerate(argv):
         if mask_next:
             masked.append("<redacted>")
             mask_next = False
@@ -118,14 +173,16 @@ def mask_argv(argv: tuple[str, ...]) -> tuple[str, ...]:
                 masked.append(f"{flag}={_redact_env_pair(value)}")
                 continue
             if _flag_is_secret(flag):
-                masked.append(f"{flag}=<redacted>")
+                # ``--api-key-env=NAME`` shows the name (GAP-2540).
+                masked.append(arg if env_name_value_in_clear(flag, value) else f"{flag}=<redacted>")
                 continue
 
         masked.append(arg)
         if _flag_is_env(arg):
             mask_next_env = True
         elif arg.startswith("--") and _flag_is_secret(arg):
-            mask_next = True
+            following = argv[index + 1] if index + 1 < len(argv) else ""
+            mask_next = not env_name_value_in_clear(arg, following)
     return tuple(masked)
 
 
@@ -147,6 +204,59 @@ def _redact_env_pair(pair: str) -> str:
     return "<redacted>"
 
 
+def _upgrade_summary(args: tuple[str, ...]) -> str:
+    """What ``upgrade``/``rollback`` change, which the generic summaries miss (GAP-1422)."""
+
+    verb = args[0].lower() if args else ""
+    if verb == "upgrade":
+        # It read as if a new release were certain, with no versions, even
+        # when the install was already up to date (GAP-2250).
+        try:
+            from defenseclaw import __version__ as installed
+        except ImportError:  # pragma: no cover - the package always has it.
+            installed = ""
+        current = f"DefenseClaw {installed}" if installed else "the installed DefenseClaw"
+        lowered = [arg.lower() for arg in args]
+        if "--version" in lowered and lowered.index("--version") + 1 < len(args):
+            target = args[lowered.index("--version") + 1]
+            return (
+                f"Upgrade command. Installs release {target} over {current}: "
+                "replaces the DefenseClaw binaries and restarts the gateway."
+            )
+        return (
+            f"Upgrade command. Checks the latest release first. If it is newer than {current}, "
+            "installs it, replaces the DefenseClaw binaries and restarts the gateway; "
+            "if you are up to date, nothing changes."
+        )
+    if verb == "rollback":
+        return "Rollback command. Restores the previous release's binaries and restarts the gateway."
+    return ""
+
+
+def _gateway_verbs(binary: str, args: tuple[str, ...]) -> tuple[str, ...]:
+    if not binary.lower().removesuffix(".exe").endswith("defenseclaw-gateway"):
+        return ()
+    return tuple(arg.lower() for arg in args if not arg.startswith("-"))
+
+
+def _is_gateway_stop(binary: str, args: tuple[str, ...]) -> bool:
+    return _gateway_verbs(binary, args) == ("stop",)
+
+
+def _gateway_lifecycle_summary(binary: str, args: tuple[str, ...]) -> str:
+    """What gateway ``stop``/``start`` change; both said only "can change DefenseClaw state" (GAP-2607)."""
+
+    verbs = _gateway_verbs(binary, args)
+    if verbs == ("stop",):
+        return (
+            "Stops the gateway and its watchdog. Hooks are not checked until you start it again: "
+            "fail-open connectors run unchecked and fail-closed connectors refuse tool calls."
+        )
+    if verbs == ("start",):
+        return "Starts the gateway (and its watchdog, if enabled). Agent hooks are checked again."
+    return ""
+
+
 def _risk_summary(risk: str, category: str) -> str:
     if risk == "destructive":
         return "Destructive command. Review carefully before running."
@@ -163,6 +273,26 @@ def _restart_effect(risk: str, args: tuple[str, ...]) -> str:
     lowered = tuple(arg.lower() for arg in args)
     if risk == "restart" or any(arg in {"restart", "rotate-token"} for arg in lowered):
         return "yes"
+    if risk == "read-only":
+        # ``setup observability list`` read "Risk read-only  Restart
+        # possible" (GAP-2186).
+        return "no"
+    if lowered[:2] == ("agent", "discovery") and "--no-restart" not in lowered:
+        # ``agent discovery enable|disable|setup`` and ``agent discovery
+        # runtime enable|disable`` restart the gateway by default
+        # (GAP-2269).
+        verbs = {arg for arg in lowered[2:4] if not arg.startswith("-")}
+        if verbs & {"enable", "disable", "setup"}:
+            return "yes"
+    if lowered[:1] == ("registry",):
+        # A registry command that changes asset_policy restarts a running
+        # gateway (GAP-2422); approve/reject/require always change it, sync
+        # and remove only when they promote or drop rules (GAP-2499).
+        verb = lowered[1] if len(lowered) > 1 else ""
+        if verb in {"approve", "reject", "require"} and "--no-repromote" not in lowered:
+            return "yes"
+        if verb in {"sync", "remove"} and "--no-promote" not in lowered:
+            return "possible"
     if lowered and lowered[0] == "setup" and "--no-restart" not in lowered:
         return "possible"
     return "no"
@@ -217,6 +347,10 @@ class CommandPreviewScreen(ModalScreen[bool]):
         Binding("escape", "cancel", "Cancel", show=False),
         Binding("q", "cancel", "Cancel", show=False),
         Binding("enter", "run", "Run", show=False),
+        # Left/Right move between Cancel and Run like the forms' arrows;
+        # only Tab did (GAP-2251).
+        Binding("left", "move_focus(-1)", "Previous button", show=False),
+        Binding("right", "move_focus(1)", "Next button", show=False),
     ]
 
     def __init__(self, command: ParsedCommand) -> None:
@@ -238,7 +372,8 @@ class CommandPreviewScreen(ModalScreen[bool]):
         hidden = "".join(f"\n{rich_escape(line)}" for line in self.preview.hidden_inputs)
         with Vertical(id="preview-dialog"):
             yield Static("Confirm Command", id="preview-title")
-            yield Static(f"[{color}]{summary}[/]", id="preview-risk")
+            consequence = f"\n{rich_escape(self.preview.consequence)}" if self.preview.consequence else ""
+            yield Static(f"[{color}]{summary}[/]{consequence}", id="preview-risk")
             yield Static(
                 "[bold]Command[/]\n"
                 f"{masked}{hidden}\n\n"
@@ -252,11 +387,18 @@ class CommandPreviewScreen(ModalScreen[bool]):
                 yield Button("Run", id="preview-run", variant="success")
 
     def on_mount(self) -> None:
-        # For destructive / secret-bearing commands, focus Cancel so a
-        # reflexive Enter cancels instead of running the command. Benign
-        # commands keep Run focused for fast confirmation.
-        target = "#preview-cancel" if self.preview.risk in {"destructive", "secret"} else "#preview-run"
+        # Risky commands focus Cancel so a reflexive Enter cancels instead of
+        # running them. Benign commands keep Run focused for fast confirmation.
+        target = "#preview-cancel" if self.preview.cancel_by_default else "#preview-run"
         self.query_one(target, Button).focus()
+
+    def action_move_focus(self, step: int) -> None:
+        buttons = list(self.query("#preview-buttons Button").results(Button))
+        if not buttons:
+            return
+        current = self.focused
+        index = buttons.index(current) if current in buttons else 0
+        buttons[max(0, min(len(buttons) - 1, index + step))].focus()
 
     def action_cancel(self) -> None:
         self.dismiss(False)

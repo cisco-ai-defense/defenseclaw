@@ -52,5 +52,5 @@ def fetch_file(source: RegistrySource) -> tuple[Manifest, bytes]:
             f"manifest file is {size} bytes (max {MAX_MANIFEST_BYTES})"
         )
     raw = p.read_bytes()
-    manifest = parse_manifest(raw)
+    manifest = parse_manifest(raw, origin=str(p))
     return manifest, raw

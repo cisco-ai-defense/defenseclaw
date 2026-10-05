@@ -15,7 +15,8 @@ keywords:
 `defenseclaw-gateway` exposes a sidecar management API used by hook scripts,
 connector plugins, the CLI, and the TUI. This page lists every static route
 pattern registered by `APIServer.Run`, the two provider routes installed by
-`registerProviderRoutes`, and every built-in connector hook route.
+`registerProviderRoutes`, every built-in connector hook route, and the sandbox
+routes.
 
 This is **not** an OpenAPI specification. The canonical request and response
 shapes are the handlers in
@@ -43,7 +44,7 @@ carries the removed legacy standalone sandbox: while the config still says
 `openshell.mode: standalone`, an empty `gateway.api_bind` inherits
 `guardrail.host` when that value is non-empty and is not the literal
 `localhost` (for example `10.200.0.1`), so `upgrade` health checks keep
-reaching the gateway. Running [`defenseclaw sandbox legacy-cleanup`](/docs/setup/sandbox)
+reaching the gateway. Running [`defenseclaw sandbox legacy-cleanup`](/docs/sandboxes/guide)
 resets that config and returns the API to loopback. An explicit
 `gateway.api_bind` always takes precedence. A non-loopback value expands access
 to the authenticated management surface; protect that listener with host
@@ -54,9 +55,32 @@ listener.
 
 ## Auth
 
-Every request except `GET /health` must authenticate. The shared authentication
-middleware accepts these header forms; all three are constant-time compared
-with the resolved gateway token:
+Every request except `GET /health` must authenticate. Two routes use their own
+scheme instead of the gateway token:
+
+- `POST /api/v1/acp/challenge` and `POST /api/v1/acp/evaluate` accept only a
+  loopback request signed with the ACP key (`X-DefenseClaw-ACP-Key-ID`, a
+  nonce and a request MAC; see [ACP guard](/docs/acp-guard)). The gateway
+  token alone gets 401 there.
+- In a managed install on the standalone profile,
+  `GET /api/v1/hook-listener-proof` answers before authentication. A loopback
+  request sends three headers: `X-DefenseClaw-Connector` (the connector the
+  credential belongs to, for example `amp` or `opencode`),
+  `X-DefenseClaw-Listener-Key-Id` (the lowercase hex SHA-256 of the user's
+  per-user hook credential for that connector) and
+  `X-DefenseClaw-Listener-Nonce` (64 lowercase hex characters, 32 random
+  bytes). When the key ID names a current hook credential for that
+  connector, the answer is 204 with `X-DefenseClaw-Listener-Proof`: the hex
+  HMAC-SHA256, keyed with that credential, over
+  `defenseclaw.listener-proof.v1`, a NUL byte, the connector, a NUL byte and
+  the nonce. Any other request, including one without
+  `X-DefenseClaw-Connector`, gets 401. The answer is a digest, never a
+  credential. The Amp and OpenCode plugins use it to check
+  that the listener is the gateway before they send the user's credential.
+
+For every other route the shared authentication middleware accepts these
+header forms; all three are constant-time compared with the resolved gateway
+token:
 
 ```
 Authorization:         Bearer <token>
@@ -136,9 +160,28 @@ X-DefenseClaw-Client: cli
 
 | Method | Path | Auth | Purpose |
 | --- | --- | --- | --- |
-| `GET` | `/health` | exempt | Liveness + uptime + version. Used by k8s probes and `defenseclaw doctor`. |
+| `GET` | `/health` | exempt | The full health document: uptime, every subsystem's state and details, provenance and ACP posture. Used by readiness probes, `defenseclaw doctor`, `defenseclaw status`, the TUI, the watchdog and in-agent plugins. |
 | `GET` | `/status` | required | Health, process identity, provenance, an optional connected-gateway hello, legacy singular `connector_mode`, and `connector_modes` (one entry per active connector). Used by `defenseclaw status` and the TUI. |
 | `GET` | `/v1/connectors` | required | Lists every connector registered in the gateway (name, description, source, hook capabilities, tool inspection mode). |
+
+`/health` is unauthenticated by design. Any local process that can reach
+the API port can read it, including another account on a multi-user host.
+The document carries the gateway's config path (which names the owner's
+home directory), the active connectors with per-agent request and block
+counts, and the guardrail, routing and telemetry state, including
+telemetry destinations. In a managed install on the standalone profile it
+also carries `inspection` (whether local and AI Defense inspection are
+active) and `user_scoped_credentials.key_ids`, the non-secret SHA-256
+fingerprints of the per-machine keys from which the per-user credentials
+that authenticate right now are derived (the current key, plus a staged or
+retiring one during a key rotation). They let the lifecycle check a key
+rotation; they are not the key IDs the listener proof takes, which are the
+SHA-256 of one user's hook credential. It carries no tokens, key material or request
+content. On Linux and macOS managed installs the hook socket also answers
+`GET /health` with the same document without peer authorization; every
+other path there keeps peer authorization. This is accepted so that every
+health consumer works without a credential; see residual R33 in the
+enterprise threat model.
 
 When `openshell.enabled` is `true`, `/health` includes a `sandbox` subsystem
 for the OpenShell sandbox runtime:
@@ -248,6 +291,14 @@ register a connector hook route.
 | `POST` | `/api/v1/opencode/hook` | OpenCode | same |
 | `POST` | `/api/v1/amp/hook` | Amp | [`internal/gateway/connector/amp.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/gateway/connector/amp.go) |
 | `POST` | `/api/v1/omnigent/hook` | OmniGent | [`internal/gateway/connector/omnigent.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/gateway/connector/omnigent.go) |
+| `POST` | `/api/v1/kiro/hook` | Kiro | [`internal/gateway/connector/kiro.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/gateway/connector/kiro.go) |
+
+A connector that is unsupported on the host OS registers no route. In a
+managed install on the standalone profile, the gateway also serves
+`POST /api/v1/foreign-hook-session/{connector}`: the administrator-owned hook
+reports its session scan there, authenticated by the hook socket's peer
+credentials or the user's per-user hook token for that connector. On any other
+profile the route answers `404`.
 
 All hook endpoints share a per-IP rate limiter (20 RPS, burst 40 — see `hookLimiter` in api.go). Loopback callers (the on-host hook scripts) are exempt; the limit only applies to remote callers.
 
@@ -429,13 +480,32 @@ The continuous AI Discovery surface — see [AI Discovery](/docs/ai-discovery) f
 | `GET` | `/api/v1/ai-usage/components/{ecosystem}/{name}/history` | Detection history for one component. |
 | `GET` | `/api/v1/ai-usage/confidence/policy` | Show the active confidence-scoring policy. |
 | `POST` | `/api/v1/ai-usage/confidence/policy/validate` | Dry-run validation of a candidate policy file. |
+| `GET` | `/api/v1/ai-usage/runtime` | Latest runtime-discovery snapshot: each runtime plane (what it can see and why) and scored findings. Returns `enabled: false` with empty lists when `ai_discovery.runtime` is off. Backs `defenseclaw agent discovery runtime status` and `findings`. |
+| `POST` | `/api/v1/ai-usage/runtime/scan` | Poll the runtime planes now and return the new snapshot. Answers `503` when `ai_discovery.runtime` is off. Backs `defenseclaw agent discovery runtime scan`. |
+
+### ACP guard
+
+`defenseclaw-acp` calls the two signed routes while it mediates an editor's
+agent; the two read routes report the built-in catalog and the configured ACP
+posture. See [ACP guard](/docs/acp-guard).
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/v1/acp/catalog` | The pinned built-in catalog of ACP clients and agents. |
+| `GET` | `/v1/acp/profiles` | The ACP posture from the running config: `enabled`, `mode`, `default_profile`, and `profiles`. |
+| `POST` | `/api/v1/acp/challenge` | Issue a server nonce for the signed ACP request scheme. Loopback only, signed with the ACP key; see [Auth](#auth). |
+| `POST` | `/api/v1/acp/evaluate` | Evaluate one ACP frame, or one completed turn, for a bound agent and return the verdict. Same signed scheme; the gateway token alone gets `401`. |
 
 ### Correlation ledger
 
-Each read route accepts exactly one supported identity anchor (for example
-`record_id`, `evaluation_id` is not a supported query key here,
-`semantic_event_id`, `session_id`, `trace_id`, or `tool_invocation_id`) and
-supports bounded cursor pagination.
+Each read route takes exactly one identity anchor as a query parameter:
+`record_id`, `semantic_event_id`, `logical_event_id`, `session_id`, `turn_id`,
+`agent_id`, `lifecycle_id`, `execution_id`, `model_request_id`,
+`model_response_id`, `tool_invocation_id` or `trace_id`. `evaluation_id` is
+not an anchor. `span_id` narrows a `trace_id` anchor, and
+`connector_instance_id` narrows any anchor to one connector instance. Results
+page with `limit` (at most 500), `after_time` and `after_id`. Unknown query
+keys are rejected, and each key may appear only once.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
@@ -610,7 +680,7 @@ runtime isn't running (see the `/health` `sandbox` subsystem above).
 | `POST` | `/api/v1/sandbox/sandboxes/{name}/stop` | Optional `{}` | `Sandbox` |
 | `POST` | `/api/v1/sandbox/sandboxes/{name}/start` | Optional `{"no_snapshot": bool, "new_snapshot": bool}`; `409 conflict` when the sandbox is already running | `Sandbox` |
 | `POST` | `/api/v1/sandbox/sandboxes/{name}/undo` | Optional `{"preview", "keep_refs", "stop", "restart"}` (all bool) | `UndoResponse`: the workspace `result`, whether it `stopped` and `restarted` the sandbox, a `summary`, and a `review` |
-| `POST` | `/api/v1/sandbox/sandboxes/{name}/review` | Optional `{"diff": bool}` | `ReviewResponse`: the `report`, a `summary`, a `risk_line`, and the `diff` when asked |
+| `POST` | `/api/v1/sandbox/sandboxes/{name}/review` | Optional `{"diff": bool}` | `ReviewResponse`: the `report`, a `summary`, a `risk_line`, the `unmasked_secrets` (project files that look like secrets and that the sandbox does not mask, so its next start refuses), and the `diff` when asked |
 | `POST` | `/api/v1/sandbox/sandboxes/{name}/accept` | Optional `{"snapshot_created_at": time, "session": int}`; `409 conflict` when the sandbox is running, its undo point was undone, it is another one than `snapshot_created_at` names, or the sandbox was started again since the `session` named; `400 invalid_request` for a copy-mode sandbox; `404 not_found` without an undo point | `Sandbox`, whose `snapshot` carries `accepted_at` |
 | `GET` | `/api/v1/sandbox/sandboxes/{name}/logs` | Query `lines` (optional, 0 or absent for all of it); `404 not_found` when no log was kept | `RunLog`: `name`, `state` (`exited` or `interrupted`), `exit`, `started_at`, `kept_at`, `log` |
 | `POST` | `/api/v1/sandbox/sandboxes/{name}/workspace` | `WorkspaceReport` | `{"status": "recorded"}` |
@@ -632,7 +702,7 @@ it for `sandbox run`.
 | `harness` | Required. The connector to run, such as `claudecode` or `codex`. |
 | `project` | Required. The absolute host path of the launch folder. In mount mode the daemon checks and mounts it. In copy mode it only labels the sandbox: the CLI stages and uploads the copy after the create, then reports it with `POST …/{name}/workspace`. |
 | `name` | Optional. At most 19 lowercase letters, digits, and `-` (OpenShell 0.1.1 refuses longer names). Empty picks `<folder>-<random>`, the folder name cut to fit. |
-| `pack`, `profile`, `copy`, `safe`, `yolo`, `context`, `unmask`, `host_ports`, `no_mcp`, `learn`, `cpu`, `memory` | The run options that take part in [policy resolution](/docs/setup/sandbox-policy#how-the-effective-policy-is-computed). |
+| `pack`, `profile`, `copy`, `safe`, `yolo`, `context`, `unmask`, `host_ports`, `no_mcp`, `learn`, `cpu`, `memory` | The run options that take part in [policy resolution](/docs/sandboxes/policy-packs#how-the-effective-policy-is-computed). |
 | `no_snapshot` | Skip the pre-session snapshot of a mounted project, and so undo. |
 | `no_build` | Refuse, with 409 `image_unavailable`, instead of building and hook-checking a missing harness image inside the request. A build can take minutes. |
 | `llm` | The model credential: `profile` (a provider profile the harness supports, such as `defenseclaw-anthropic`), `credentials` (its environment variable names and secret values), and `bedrock_region`. |
@@ -714,7 +784,7 @@ rejection to `openshell.egress.block`.
 `sandbox` scopes the unblock to one sandbox. Without it, `always` is
 required, and the host is saved to `openshell.egress.unblocked` for every
 sandbox. Only refusals the policy marks unblockable can be lifted; see
-[How a destination is decided](/docs/setup/sandbox-policy#how-a-destination-is-decided).
+[How a destination is decided](/docs/sandboxes/policy-packs#how-a-destination-is-decided).
 
 ### Policy explain
 
@@ -778,6 +848,7 @@ Each `ActivityEvent` has a `seq` (one higher per event), `time`, `kind`, and
 | `egress.unblocked` | An unblock was applied. |
 | `approval.requested`, `approval.resolved` | An ask was raised or answered. |
 | `tool.blocked` | DefenseClaw blocked a tool call. `reason` is plain and never quotes matched content. |
+| `hook.blocked` | DefenseClaw blocked a hook event other than a tool call, such as a submitted prompt (`event` names it). The sandbox's `hooks.prompt_blocked` counts blocked prompts. |
 | `sandbox.lifecycle` | A sandbox changed phase. |
 | `finding` | A finding. Its `reason` is, for example, `hook_tamper` (a tool ran without a DefenseClaw verdict), `hook_silence`, `hooks_unreachable` (hooks do not reach DefenseClaw, so every tool call is blocked), `hooks_restored`, or `nested_repo`. |
 | `workspace` | An undo, or a copy-mode upload or pull. |
@@ -906,8 +977,10 @@ are capped at 4 MiB, far below the main receiver's 64 MiB.
   with the same key and the same request within two minutes gets the original
   response, marked `X-DefenseClaw-Idempotent-Replay: true`, instead of a
   second evaluation. The same key on a different request gets 422.
-- A blocked tool call's verdict carries a plain reason for the agent: the rule
-  and what to do instead, never the matched content.
+- A blocked tool call's verdict carries a plain reason for the agent, in the
+  words a host hook uses for the same rule
+  (`DefenseClaw policy blocked this action (rule <ID>: <title>). Do not retry it in another form.`),
+  never the matched content.
 - The [CSRF rules](#csrf-protection) are the same as on the main API.
 
 ### Egress proxy
@@ -973,7 +1046,7 @@ ask the same decider, so they never disagree with the proxy. In short:
 
 The full order, with what an allow entry, an unblock, and
 `openshell.admin.allow_unblock: false` change, is under
-[How a destination is decided](/docs/setup/sandbox-policy#how-a-destination-is-decided).
+[How a destination is decided](/docs/sandboxes/policy-packs#how-a-destination-is-decided).
 `POST /api/v1/sandbox/egress/unblock` refuses what can't be unblocked: the
 administrator's lists and `allow_unblock: false` answer `admin_violation`
 ("blocked by your organization's DefenseClaw policy"). The block list,

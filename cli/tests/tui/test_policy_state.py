@@ -52,7 +52,7 @@ def policy(
         firewall_default=firewall,
         hilt=hilt,
         scanner_overrides=0,
-        replaces_webhooks=False,
+        adds_webhooks=False,
         sets_cisco=False,
     )
 
@@ -78,7 +78,7 @@ def loaded_model() -> PoliciesPanelModel:
 
 def test_policy_rows_fit_80_columns_and_widen_at_120() -> None:
     model = loaded_model()
-    assert model.handle_key("5").kind == "render"
+    assert model.select_view("policies").kind == "render"
     compact = model.data_table_rows(80)
     columns = model.data_table_columns(80)
     assert len(columns) == len(compact[0]) == 6
@@ -93,7 +93,7 @@ def test_policy_rows_fit_80_columns_and_widen_at_120() -> None:
 
 def test_rule_pack_rows_put_global_first_and_name_the_source() -> None:
     model = loaded_model()
-    assert model.handle_key("6").kind == "render"
+    assert model.select_view("packs").kind == "render"
     rows = model.data_table_rows(80)
     assert [row[0] for row in rows] == ["global", "codex", "claudecode"]
     assert rows[1][1:] == ("strict", "own pack")
@@ -103,11 +103,11 @@ def test_rule_pack_rows_put_global_first_and_name_the_source() -> None:
 
 def test_enter_asks_for_the_right_picker_per_view() -> None:
     model = loaded_model()
-    model.handle_key("5")
+    model.select_view("policies")
     model.handle_key("down")
     action = model.handle_key("enter")
     assert (action.kind, action.policy) == ("pick_policy", "permissive")
-    model.handle_key("6")
+    model.select_view("packs")
     assert model.handle_key("enter") == model.handle_key("enter")
     assert model.handle_key("enter").connector == ""
     model.handle_key("j")
@@ -116,7 +116,7 @@ def test_enter_asks_for_the_right_picker_per_view() -> None:
 
 def test_sandbox_view_loads_lazily_and_is_hidden_when_unsupported() -> None:
     model = loaded_model()
-    assert model.handle_key("7").kind == "load_sandbox_packs"
+    assert model.select_view("sandbox_packs").kind == "load_sandbox_packs"
     model.apply_sandbox_json(
         json.dumps(
             {
@@ -131,18 +131,18 @@ def test_sandbox_view_loads_lazily_and_is_hidden_when_unsupported() -> None:
         ("●", "open", "built-in", "open", "a" * 12),
         ("", "mine", "custom", "-", "invalid"),
     )
-    assert model.handle_key("7").kind == "render"
+    assert model.select_view("sandbox_packs").kind == "render"
 
     unsupported = PoliciesPanelModel(sandbox_supported=False)
     assert "sandbox_packs" not in unsupported.views()
-    assert unsupported.handle_key("7").kind == "hint"
+    assert unsupported.select_view("sandbox_packs").kind == "hint"
     assert unsupported.view == "posture"
-    assert "1-6 view" in unsupported.keys_hint()
+    assert "←/→ view" in unsupported.keys_hint()
 
 
 def test_detail_toggles_and_escape_closes_it() -> None:
     model = loaded_model()
-    model.handle_key("5")
+    model.select_view("policies")
     assert model.detail_text() == ""
     model.handle_key("i")
     assert "block CRITICAL · alert MEDIUM+" in model.detail_text()

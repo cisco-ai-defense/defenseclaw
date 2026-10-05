@@ -11,12 +11,10 @@ import (
 	"testing"
 )
 
-// uninstall --purge left every enrolled account's ~/.defenseclaw, including
-// its per-user hook credentials. The purge removes that state; only the
-// account's own hooks the foreign-hook policy moved aside stay, and each
-// DefenseClaw hook script becomes the disabled stub, because an agent that
-// is still running may call it.
-func TestPurgeUserStateKeepsOnlyStubsAndMovedAsideHooks(t *testing.T) {
+// uninstall --purge left every enrolled account's ~/.defenseclaw, then kept
+// its hook scripts as stubs and its foreign-hooks-backup. The purge removes
+// all of it: nothing of ~/.defenseclaw stays.
+func TestPurgeUserStateRemovesEverything(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("the purge runs for the Linux and macOS standalone profile")
 	}
@@ -29,6 +27,7 @@ func TestPurgeUserStateKeepsOnlyStubsAndMovedAsideHooks(t *testing.T) {
 		"connector_backups/devin/config.json":             "{}",
 		"logs/hooks.log":                                  "log",
 		"foreign-hooks-backup/cursor/20260929/hooks.json": "{\"own\":true}",
+		".venv/bin/defenseclaw":                           "#!/bin/sh\n",
 	}
 	for name, body := range files {
 		path := filepath.Join(dataDir, filepath.FromSlash(name))
@@ -42,19 +41,60 @@ func TestPurgeUserStateKeepsOnlyStubsAndMovedAsideHooks(t *testing.T) {
 	if err := PurgeUserState(dataDir); err != nil {
 		t.Fatal(err)
 	}
-	var left []string
-	_ = filepath.Walk(dataDir, func(path string, info os.FileInfo, err error) error {
-		if err == nil && !info.IsDir() {
-			rel, _ := filepath.Rel(dataDir, path)
-			left = append(left, filepath.ToSlash(rel))
-		}
-		return nil
-	})
-	if strings.Join(left, ",") != "foreign-hooks-backup/cursor/20260929/hooks.json,hooks/devin-hook.sh" {
-		t.Fatalf("the purge left %v", left)
+	if _, err := os.Lstat(dataDir); !os.IsNotExist(err) {
+		var left []string
+		_ = filepath.Walk(dataDir, func(path string, info os.FileInfo, err error) error {
+			if err == nil && !info.IsDir() {
+				rel, _ := filepath.Rel(dataDir, path)
+				left = append(left, filepath.ToSlash(rel))
+			}
+			return nil
+		})
+		t.Fatalf("the purge left %s: %v (%s)", dataDir, err, strings.Join(left, ","))
 	}
-	stub, _ := os.ReadFile(filepath.Join(dataDir, "hooks", "devin-hook.sh"))
-	if !strings.Contains(string(stub), "disabled tombstone") || !strings.HasSuffix(string(stub), "exit 0\n") {
-		t.Fatalf("the hook script is not the disabled stub: %s", stub)
+	// A rerun on the removed folder is a no-op.
+	if err := PurgeUserState(dataDir); err != nil {
+		t.Fatalf("rerun: %v", err)
+	}
+}
+
+// The purge deleted ~/.defenseclaw, and with it the list of the agent
+// folders DefenseClaw had created, so those folders stayed in the purged
+// home, empty. They go first; a listed folder with content stays.
+func TestPurgeUserStateRemovesTheEmptyFoldersDefenseClawCreated(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the purge runs for the Linux and macOS standalone profile")
+	}
+	home := t.TempDir()
+	dataDir := filepath.Join(home, ".defenseclaw")
+	created := []string{
+		filepath.Join(home, ".copilot"), filepath.Join(home, ".copilot", "hooks"),
+		filepath.Join(home, ".claude", "commands"), filepath.Join(home, ".config", "opencode", "plugins"),
+	}
+	for _, dir := range append(created, dataDir) {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	userFile := filepath.Join(home, ".claude", "commands", "mine.md")
+	if err := os.WriteFile(userFile, []byte("mine"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := RecordWatcherCreatedDirs(dataDir, created); err != nil {
+		t.Fatal(err)
+	}
+	if err := WithUserHomeDir(home, func() error { return PurgeUserState(dataDir) }); err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{dataDir, filepath.Join(home, ".copilot"), filepath.Join(home, ".config", "opencode", "plugins")} {
+		if _, err := os.Lstat(dir); !os.IsNotExist(err) {
+			t.Fatalf("%s stayed after the purge: %v", dir, err)
+		}
+	}
+	if _, err := os.Stat(userFile); err != nil {
+		t.Fatalf("a listed folder with the user's file in it must stay: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".config", "opencode")); err != nil {
+		t.Fatalf("an unlisted parent must stay: %v", err)
 	}
 }

@@ -63,14 +63,14 @@ def test_config_version_preflight_reads_only_one_exact_discriminator(
 def test_config_version_preflight_rejects_malformed_yaml(tmp_path: Path) -> None:
     path = tmp_path / "config.yaml"
     path.write_text("config_version: [8\n", encoding="utf-8")
-    with pytest.raises(config_module.ConfigVersionError, match="schema version"):
+    with pytest.raises(config_module.ConfigVersionError, match=r"invalid YAML at line \d+.*config validate"):
         config_module.source_config_version(path=str(path))
 
 
 def test_config_version_preflight_normalizes_invalid_utf8(tmp_path: Path) -> None:
     path = tmp_path / "config.yaml"
     path.write_bytes(b"config_version: 8\ninvalid: \xff\n")
-    with pytest.raises(config_module.ConfigVersionError, match="schema version"):
+    with pytest.raises(config_module.ConfigVersionError, match=r"not valid UTF-8 text.*config validate"):
         config_module.source_config_version(path=str(path))
 
 
@@ -213,11 +213,46 @@ def test_transport_failure_is_bounded_and_fails_closed() -> None:
 
     with pytest.raises(
         CanonicalObservabilityError,
-        match="canonical Observability v8 admission was not confirmed",
+        match="the gateway did not acknowledge it",
     ) as caught:
         Logger(BrokenRecorder()).log_action("policy-reload", "default", "secret")
     assert "private endpoint" not in str(caught.value)
     assert "secret" not in str(caught.value)
+
+
+def test_slow_audit_write_is_reported_in_plain_words() -> None:
+    # GAP-2019: a busy audit database read "canonical Observability v8 admission was not confirmed".
+    class SlowRecorder:
+        def emit_cli_observability(self, _payload) -> None:
+            raise requests.ReadTimeout("read timed out")
+
+        def close(self) -> None:
+            return
+
+    with pytest.raises(CanonicalObservabilityError) as caught:
+        Logger(SlowRecorder()).log_action("policy-reload", "default", "detail")
+    assert "audit database is busy or slow" in str(caught.value)
+    assert "Try again in a minute" in str(caught.value)
+    assert "canonical" not in str(caught.value).lower()
+
+
+def test_gateway_5xx_does_not_blame_a_busy_database() -> None:
+    # GAP-2381: a 503 for a rejected event read "audit database is busy or slow".
+    response = requests.Response()
+    response.status_code = 503
+
+    class RejectingRecorder:
+        def emit_cli_observability(self, _payload) -> None:
+            raise requests.HTTPError("503", response=response)
+
+        def close(self) -> None:
+            return
+
+    with pytest.raises(CanonicalObservabilityError) as caught:
+        Logger(RejectingRecorder()).log_action("init", "/data", "environment=linux")
+    message = str(caught.value)
+    assert "HTTP 503" in message and "gateway.log has the cause" in message
+    assert "is busy or slow" not in message
 
 
 def test_from_config_is_lazy_and_builds_authenticated_gateway_client_on_emit() -> None:
@@ -706,3 +741,59 @@ def test_close_closes_only_the_canonical_transport() -> None:
     logger = Logger(recorder)
     logger.close()
     assert recorder.closed
+
+
+def test_scan_ingress_keeps_only_gateway_finding_fields() -> None:
+    """GAP-1083: confidence/evidence made the gateway reject every scan with findings."""
+    import re
+
+    from defenseclaw.logger import _SCAN_FINDING_WIRE_FIELDS
+
+    go_source = (Path(__file__).resolve().parents[2] / "internal" / "gateway" / "cli_observability_v8.go").read_text(
+        encoding="utf-8"
+    )
+    struct = re.search(r"type cliObservabilityV8Finding struct \{(.*?)\n\}", go_source, re.S)
+    assert struct
+    assert set(_SCAN_FINDING_WIRE_FIELDS) == set(re.findall(r'json:"([a-z_]+)', struct.group(1)))
+
+    recorder = _Recorder()
+    Logger(recorder).log_scan(
+        ScanResult(
+            scanner="plugin-scanner",
+            target="/tmp/plugin",
+            timestamp=datetime(2026, 10, 2, tzinfo=timezone.utc),
+            findings=[
+                Finding(
+                    id="f-1",
+                    severity="HIGH",
+                    title="Install script",
+                    scanner="plugin-scanner",
+                    rule_id="plugin.install-script",
+                    line_number=3,
+                    confidence=0.9,
+                    evidence="matched text",
+                )
+            ],
+            duration=timedelta(milliseconds=5),
+        )
+    )
+    wire = recorder.payloads[0]["scan"]["findings"][0]
+    assert "confidence" not in wire and "evidence" not in wire
+    assert wire["rule_id"] == "plugin.install-script" and wire["line_number"] == 3
+
+
+def test_scan_payload_names_the_connector_when_given() -> None:
+    """GAP-1381: CLI scan telemetry says which connector's asset was scanned."""
+    recorder = _Recorder()
+    result = ScanResult(
+        scanner="skill-scanner",
+        target="/tmp/skills/ws1-notes",
+        timestamp=datetime(2026, 7, 6, tzinfo=timezone.utc),
+        findings=[],
+        duration=timedelta(milliseconds=5),
+    )
+    Logger(recorder).log_scan(result, connector="claudecode")
+    Logger(recorder).log_scan(result)
+
+    assert recorder.payloads[0]["scan"]["connector"] == "claudecode"
+    assert "connector" not in recorder.payloads[1]["scan"]

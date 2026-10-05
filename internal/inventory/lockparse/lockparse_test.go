@@ -183,6 +183,27 @@ crewai = { version = "0.30.0", optional = true }
 	}
 }
 
+func TestParsePyprojectToml_dropsEnvironmentMarkersAndExtras(t *testing.T) {
+	dir := t.TempDir()
+	path := writeLockFile(t, dir, "pyproject.toml", `[project]
+name = "demo"
+dependencies = [
+  "openai==2.24.0; python_version >= '3.14'",
+  "httpx[socks]>=0.27",
+]
+`)
+	out, err := Parse(path, MaxFileBytes)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got := find(t, out, "openai").Version; got != "2.24.0" {
+		t.Fatalf("openai = %q, want 2.24.0 without the marker", got)
+	}
+	if got := find(t, out, "httpx").Version; got != "0.27" {
+		t.Fatalf("httpx = %q", got)
+	}
+}
+
 func TestParsePoetryStyleLock_extractsNameVersionPairs(t *testing.T) {
 	dir := t.TempDir()
 	path := writeLockFile(t, dir, "poetry.lock", `# Comment

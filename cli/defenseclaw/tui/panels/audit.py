@@ -12,11 +12,15 @@
 
 from __future__ import annotations
 
+import json
+import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
+from defenseclaw.hook_metrics import connector_hook_decision
 from defenseclaw.models import ActionEntry, Event
 from defenseclaw.tui.services.event_models import parse_timestamp, timestamp_label
 
@@ -59,6 +63,14 @@ AUDIT_COMMON_FILTER_LABELS: dict[AuditCommonFilter, str] = {
     "blocks": "Blocks",
     "scans": "Scans",
     "credentials": "Credentials",
+}
+
+_CHIP_HINTS: dict[str, str] = {
+    "": "Showing all audit events.",
+    "risk": "Showing high-risk audit events.",
+    "blocks": "Showing block/deny/quarantine events.",
+    "scans": "Showing scan and finding events.",
+    "credentials": "Showing credential/key related events.",
 }
 
 
@@ -226,6 +238,8 @@ class AuditPanelModel:
         self.correlation_run_id = ""
         self.detail_open = False
         self.error_message = ""
+        # True until the app's first audit-history read finishes (GAP-1240).
+        self.loading = False
         # 8.13 multi-connector: the shared connector filter ("" = All) and
         # whether the table should surface a CONNECTOR column. Both are set
         # by the app from the active connector count; single-connector
@@ -258,11 +272,20 @@ class AuditPanelModel:
             filtered_label = filter_label
             filter_label = f"Showing {len(self.filtered)} of {len(self.items)}: {filter_label}"
         summary = f"{len(self.filtered)} shown of {len(self.items)} events"
+        if len(self.items) >= AUDIT_LOAD_LIMIT:
+            # Say how far back the view reaches; blocks come from the whole
+            # trail, everything else from the newest rows (GAP-1355).
+            try:
+                oldest = min(event.timestamp for event in self.items[:AUDIT_LOAD_LIMIT])
+                since = f" since {timestamp_label(oldest)}"
+            except (TypeError, ValueError):
+                since = ""
+            summary += f" · newest {AUDIT_LOAD_LIMIT}{since} + all blocks; older: defenseclaw audit export"
         hidden = self.hidden_routine_count()
         if hidden:
             # The default view hides routine events (gateway starts, reloads,
             # migrations); say so, or a table of zero rows looks broken.
-            summary += f" · {hidden} routine hidden, 1 shows all"
+            summary += f" · {hidden} routine hidden, l shows all"
         return AuditToolbarState(
             summary_label=summary,
             filter_label=filter_label,
@@ -366,7 +389,8 @@ class AuditPanelModel:
                 self.items = list(self.store.list_actionable_event_summaries(500))  # type: ignore[attr-defined]
                 self._count_routine()
             elif hasattr(self.store, "list_event_summaries"):
-                self.items = list(self.store.list_event_summaries(500))  # type: ignore[attr-defined]
+                newest = self.store.list_event_summaries(500)  # type: ignore[attr-defined]
+                self.items = with_older_blocks(self.store, newest)
             else:
                 self.items = list(self.store.list_events(500))  # type: ignore[attr-defined]
         except Exception as exc:  # noqa: BLE001 - store failures are panel error state.
@@ -399,6 +423,8 @@ class AuditPanelModel:
 
     def apply_filter(self) -> None:
         self.filtered = [event for event in self.items if self._matches_active_filters(event)]
+        if self.common_filter == "blocks":
+            self.filtered = _without_duplicate_hook_decisions(self.filtered)
         if self.filtered:
             self.cursor = max(0, min(self.cursor, len(self.filtered) - 1))
         else:
@@ -420,6 +446,22 @@ class AuditPanelModel:
         self.correlation_run_id = ""
         self.apply_filter()
 
+    def step_common_filter(self, step: int) -> str:
+        """Move to the previous or next chip (All .. Credentials); the status text."""
+
+        order: tuple[AuditCommonFilter, ...] = ("", "risk", "blocks", "scans", "credentials")
+        if self.common_filter in order and (self.common_filter or self.show_all_events):
+            index = order.index(self.common_filter) + step
+        else:
+            index = 0  # the default view (routine rows hidden) steps to All
+        target = order[max(0, min(index, len(order) - 1))]
+        if not target:
+            self.show_all_events = True
+        self.set_common_filter(target)
+        if not target and self.store is not None:
+            self.refresh()
+        return _CHIP_HINTS[target]
+
     def set_common_filter(self, preset: AuditCommonFilter) -> None:
         self.common_filter = preset
         if preset:
@@ -433,10 +475,13 @@ class AuditPanelModel:
 
     def filter_same_target(self) -> bool:
         event = self.selected()
-        if event is None or not event.target:
+        # The TARGET the table shows, also for hook-decision, guardrail and
+        # ACP rows that have no target column of their own (GAP-2076).
+        target = _event_target(event) if event is not None else ""
+        if not target:
             return False
         self.common_filter = ""
-        self.correlation_target = event.target
+        self.correlation_target = target
         self.correlation_run_id = ""
         self.apply_filter()
         return True
@@ -589,16 +634,38 @@ class AuditPanelModel:
             ("Time", event.timestamp.isoformat()),
             ("Event ID", event.id),
             ("Action", event.action),
-            ("Target", event.target),
-            ("Severity", event.severity),
-            ("Actor", event.actor),
         ]
-        if event.details:
-            structured = _structured_detail_rows(event.details)
-            if structured:
-                pairs.extend(structured)
-            else:
-                pairs.append(("Details", event.details))
+        if target := event.target or _structured_text(event.structured, "defenseclaw.admin.target_ref"):
+            pairs.append(("Target", target))
+        pairs.extend((("Severity", event.severity), ("Actor", event.actor)))
+        if connector := event_connector(event):
+            pairs.append(("Connector", connector))
+        if change := _admin_change_summary(event.structured):
+            pairs.append(("Change", change))
+        # Guardrail verdicts and judge rows keep their outcome in the
+        # structured record; the flat row only says "guardrail.evaluation.
+        # completed" (GAP-1215).
+        kv_rows = _structured_detail_rows(event.details) if event.details else ()
+        # The row's own key=value details are the hook's record of the call;
+        # a structured fact with the same label (``Decision: none`` from a
+        # guardrail record) would contradict it, and a repeated Connector
+        # pushes Mode/Rules/Reason off the pane (GAP-1215).
+        kv_labels = {label for label, _value in kv_rows}
+        if "Enforcement mode" in kv_labels:
+            kv_labels.add("Mode")
+        if "Hook event" in kv_labels:
+            kv_labels.add("Hook")
+        for label, value in _structured_fact_pairs(event.structured):
+            if label not in kv_labels:
+                pairs.append((label, value))
+        shown = set(pairs)
+        has_connector = any(label == "Connector" for label, _value in pairs)
+        if kv_rows:
+            pairs.extend(
+                row for row in kv_rows if row not in shown and not (row[0] == "Connector" and has_connector)
+            )
+        elif event.details:
+            pairs.append(("Details", event.details))
         if event.run_id:
             pairs.append(("Run ID", event.run_id))
         if info.action is not None:
@@ -662,24 +729,10 @@ class AuditPanelModel:
                 True,
                 hint="Type search. Use field:value like severity:HIGH, action:block, target:skill.",
             )
-        if key == "1":
-            self.show_all_events = True
-            self.set_common_filter("")
-            if self.store is not None:
-                self.refresh()
-            return AuditPanelAction(True, hint="Showing all audit events.")
-        if key == "2":
-            self.set_common_filter("risk")
-            return AuditPanelAction(True, hint="Showing high-risk audit events.")
-        if key == "3":
-            self.set_common_filter("blocks")
-            return AuditPanelAction(True, hint="Showing block/deny/quarantine events.")
-        if key == "4":
-            self.set_common_filter("scans")
-            return AuditPanelAction(True, hint="Showing scan and finding events.")
-        if key == "5":
-            self.set_common_filter("credentials")
-            return AuditPanelAction(True, hint="Showing credential/key related events.")
+        if key in {"h", "l"}:
+            # h/l step through the chips; the digits stay panel keys, as the
+            # tab bar shows (5 used to filter to Credentials, GAP-1934).
+            return AuditPanelAction(True, hint=self.step_common_filter(-1 if key == "h" else 1))
         if key == "t":
             if self.filter_same_target():
                 return AuditPanelAction(True, hint="Correlated audit view by selected target.")
@@ -706,7 +759,9 @@ class AuditPanelModel:
         if not self.filtered and not self.filter_text:
             hidden = self.hidden_routine_count()
             if hidden:
-                body = f"{hidden} routine events are hidden (gateway starts, reloads). Press 1 to show all events."
+                body = f"{hidden} routine events are hidden (gateway starts, reloads). Press l (or click All) to show all events."
+            elif self.loading:
+                body = "Loading audit events... a large audit database can take a minute to read."
             else:
                 body = "No audit events yet. Events are recorded when you scan, block, allow, or configure DefenseClaw."
             return f"{header}\n{body}".strip()
@@ -768,8 +823,8 @@ class AuditPanelModel:
             action_style_key=action_style,
             target_type=_target_type_from_action(event.action),
             target_label=target_label,
-            severity_label=event.severity,
-            severity_style_key=audit_severity_style_key(event.severity),
+            severity_label=_display_severity(event),
+            severity_style_key=audit_severity_style_key(_display_severity(event)),
             run_label=_truncate(event.run_id, 14),
             details_label=details_label,
             connector_label=_truncate(event_connector(event), 14),
@@ -799,7 +854,7 @@ class AuditPanelModel:
             return False
         if self.common_filter and not _matches_common_filter(event, self.common_filter):
             return False
-        if self.correlation_target and event.target != self.correlation_target:
+        if self.correlation_target and _event_target(event) != self.correlation_target:
             return False
         if self.correlation_run_id and event.run_id != self.correlation_run_id:
             return False
@@ -923,11 +978,30 @@ def _list_events_by_run_id(store: object | None, run_id: str, limit: int) -> tup
         return ()
 
 
+_RELATED_WINDOW_SECONDS = 120
+
+
+def _seconds_apart(first: datetime, second: datetime) -> float:
+    try:
+        return abs((first - second).total_seconds())
+    except TypeError:  # naive vs aware timestamps from mixed sources
+        return abs((first.replace(tzinfo=None) - second.replace(tzinfo=None)).total_seconds())
+
+
 def _list_related_events(store: object | None, event: Event, limit: int) -> tuple[Event, ...]:
     related: list[Event] = []
     seen: set[str] = set()
+    # A run id is the whole gateway session, so its newest rows (sidecar-stop
+    # minutes later) are not related to this event. Keep same-run rows close
+    # in time, nearest first (GAP-1215).
+    same_run = [
+        candidate
+        for candidate in _list_events_by_run_id(store, event.run_id, 200)
+        if _seconds_apart(candidate.timestamp, event.timestamp) <= _RELATED_WINDOW_SECONDS
+    ]
+    same_run.sort(key=lambda candidate: _seconds_apart(candidate.timestamp, event.timestamp))
     candidates = (
-        *_list_events_by_run_id(store, event.run_id, limit),
+        *same_run[:limit],
         *_list_events_by_target(store, event.target, limit),
     )
     for candidate in candidates:
@@ -974,16 +1048,75 @@ def _target_type_from_action(action: str) -> str:
     return ""
 
 
+AUDIT_LOAD_LIMIT = 500
+
+
+def with_older_blocks(store: object, events: Iterable[Event]) -> list[Event]:
+    """The newest audit rows plus older block/deny rows past that window."""
+
+    rows = list(events)
+    lookup = getattr(store, "list_block_event_summaries", None)
+    if lookup is None or len(rows) < AUDIT_LOAD_LIMIT:
+        return rows
+    try:
+        blocks = lookup(AUDIT_LOAD_LIMIT)
+    except Exception:  # noqa: BLE001 - an older or locked DB keeps the newest rows.
+        return rows
+    seen = {event.id for event in rows}
+    return rows + [event for event in blocks if event.id not in seen]
+
+
+def _display_severity(event: Event) -> str:
+    """Row severity; a hook row stored as INFO shows its decision's severity.
+
+    A blocked ``connector-hook`` row is persisted with INFO while its details
+    say ``severity=CRITICAL``; the SEVERITY column read INFO next to
+    "block · CRITICAL" (GAP-1323).
+    """
+
+    severity = (event.severity or "").strip().upper()
+    if severity in {"", "INFO"} and event.action.lower() == "connector-hook":
+        decided = _parse_kv_details(event.details).get("severity", "").strip().upper()
+        if decided and decided != "NONE":
+            return decided
+    return event.severity
+
+
 def _matches_common_filter(event: Event, preset: AuditCommonFilter) -> bool:
     action = event.action.lower()
-    severity = event.severity.upper()
+    severity = _display_severity(event).upper()
     haystack = _event_haystack(event)
     if preset == "risk":
-        return severity in {"CRITICAL", "HIGH", "ERROR"} or any(
-            token in action or token in haystack
-            for token in ("block", "deny", "quarantine", "fail", "error", "panic", "timeout")
+        # Only rows at or above the alert level, blocks and would-blocks, and
+        # failures. Matching "block" anywhere in the text also kept every
+        # INFO allow row, whose details carry would_block=false (GAP-1323).
+        if severity in {"CRITICAL", "HIGH", "ERROR"} or _matches_common_filter(event, "blocks"):
+            return True
+        if _parse_kv_details(event.details).get("would_block", "").strip().lower() == "true":
+            return True
+        return any(token in action for token in ("block", "deny", "quarantine")) or any(
+            token in action or token in haystack for token in ("fail", "error", "panic", "timeout")
         )
     if preset == "blocks":
+        # A hook or guardrail block is a ``connector-hook``/``guardrail-verdict``
+        # row whose decision is block; the action name alone never says so,
+        # and the filter showed 0 rows (GAP-1215). Observe-mode would-blocks
+        # are not blocks.
+        if action == "llm-judge-response":
+            # The judge's verdict is an input to the hook decision; the call's
+            # own hook or guardrail row records whether it was blocked, and an
+            # observe-mode verdict blocked nothing (GAP-1510).
+            return False
+        if event.enforced is True:
+            return True
+        if action == "connector-hook":
+            return connector_hook_decision(event.details, event.structured, event.enforced) == "block"
+        if _structured_text(event.structured, "defenseclaw.guardrail.effective_action") == "block":
+            return True
+        if "config" in action and not any(token in action for token in ("block", "deny", "quarantine")):
+            # "config.reload.rejected" is a refused config change, not a
+            # block/deny/quarantine event (GAP-1583).
+            return False
         return any(token in action for token in ("block", "deny", "quarantine", "reject"))
     if preset == "scans":
         return any(token in action for token in ("scan", "finding", "analyze"))
@@ -992,11 +1125,42 @@ def _matches_common_filter(event: Event, preset: AuditCommonFilter) -> bool:
     return True
 
 
+def _without_duplicate_hook_decisions(events: list[Event]) -> list[Event]:
+    """Drop a ``hook_decision`` row whose call already has a ``connector-hook`` block row.
+
+    Every hook block is recorded twice (the connector-hook row and its
+    canonical hook_decision); Blocks listed each one twice (GAP-1510).
+    """
+
+    hook_blocks = [
+        (event_connector(event).lower(), event.timestamp)
+        for event in events
+        if event.action.lower() == "connector-hook"
+    ]
+    if not hook_blocks:
+        return events
+    kept: list[Event] = []
+    for event in events:
+        if event.action.lower() == "hook_decision":
+            connector = event_connector(event).lower()
+            if any(
+                name == connector and _seconds_apart(event.timestamp, at) <= 2.0 for name, at in hook_blocks
+            ):
+                continue
+        kept.append(event)
+    return kept
+
+
 def _is_low_signal_event(event: Event) -> bool:
     severity = event.severity.strip().upper()
     if severity in AUDIT_ACTIONABLE_SEVERITIES:
         return False
     if severity not in AUDIT_LOW_SIGNAL_SEVERITIES:
+        return False
+    if event.actor.strip().lower().startswith("cli:"):
+        # An operator's own change (cli:operator config-update) is not
+        # routine: the default view read "0 shown" right after a judge
+        # model change (GAP-2322).
         return False
     haystack = _event_haystack(event)
     return not any(token in haystack for token in AUDIT_ACTIONABLE_TOKENS)
@@ -1008,11 +1172,23 @@ def _matches_search_query(event: Event, query: str) -> bool:
         return True
     for term in terms:
         field, separator, value = term.partition(":")
-        if separator and field in {"action", "actor", "connector", "details", "id", "run", "run_id", "severity", "target", "type"}:
+        if separator and field in {
+            "action",
+            "actor",
+            "connector",
+            "decision",
+            "details",
+            "id",
+            "run",
+            "run_id",
+            "severity",
+            "target",
+            "type",
+        }:
             if value not in _event_field(event, field):
                 return False
             continue
-        if term not in _event_haystack(event):
+        if term not in _search_haystack(event):
             return False
     return True
 
@@ -1023,20 +1199,50 @@ def _event_field(event: Event, field: str) -> str:
     if field == "run" or field == "run_id":
         return event.run_id.lower()
     if field == "action":
-        return event.action.lower()
+        # The hint's own example is action:block; the raw action of a hook or
+        # guardrail block is connector-hook/guardrail-verdict, so the decision
+        # the DETAILS column shows counts too (GAP-1780).
+        return f"{event.action} {_event_decision(event)}".lower()
+    if field == "decision":
+        return _event_decision(event)
     if field == "actor":
         return event.actor.lower()
+    # connector and severity match what the CONNECTOR and SEVERITY columns
+    # show, not only the raw details/severity (GAP-1631).
     if field == "connector":
-        return _parse_kv_details(event.details).get("connector", "").lower()
+        return event_connector(event).lower()
     if field == "details":
         return event.details.lower()
     if field == "severity":
-        return event.severity.lower()
+        return _display_severity(event).lower()
     if field == "target":
-        return event.target.lower()
+        return _event_target(event).lower()
     if field == "type":
         return _target_type_from_action(event.action).lower()
     return ""
+
+
+def _event_decision(event: Event) -> str:
+    """The decision a row records (block, allow, ...), or "" when it has none."""
+
+    if _matches_common_filter(event, "blocks"):
+        return "block"
+    if event.action.lower() == "connector-hook":
+        return (connector_hook_decision(event.details, event.structured, event.enforced) or "").lower()
+    return (_structured_text(event.structured, "defenseclaw.guardrail.effective_action") or "").lower()
+
+
+# Hidden flags that say a row did NOT block; free text "block" matched every
+# allow row through them (GAP-1780).
+# Hook rows carry it twice: ``would_block=false`` and an escaped JSON copy
+# ``\"would_block\":false`` that kept matching "block" (GAP-1780).
+_HAYSTACK_NOISE = re.compile(r'\bwould_block\\*"?\s*[:=]\s*(?:false|0)\b', re.IGNORECASE)
+
+
+def _search_haystack(event: Event) -> str:
+    """Free-text search scope: what the row shows plus its decision."""
+
+    return f"{_HAYSTACK_NOISE.sub('', _event_haystack(event))} {_event_decision(event)}"
 
 
 def _event_haystack(event: Event) -> str:
@@ -1044,10 +1250,13 @@ def _event_haystack(event: Event) -> str:
         (
             event.id,
             event.action,
-            event.target,
+            _event_target(event),
             event.actor,
             event.severity,
+            _display_severity(event),
+            event_connector(event),
             event.details,
+            _admin_change_summary(event.structured),
             event.run_id,
             _target_type_from_action(event.action),
         )
@@ -1292,7 +1501,31 @@ def _row_target_label(event: Event) -> str:
             return _truncate(f"{connector} · {hook_phase}", 32)
         if connector:
             return _truncate(connector, 32)
+    if not event.target:
+        # Guardrail-verdict, judge and hook_decision rows have no target of
+        # their own; name the call instead of a blank cell (GAP-1510).
+        return _truncate(_structured_target_label(event.structured), 32)
     return _truncate(event.target, 32)
+
+
+def _event_target(event: Event) -> str:
+    """The row's target: its own, else the call it names (GAP-1510, GAP-2076)."""
+
+    return event.target or _structured_target_label(event.structured)
+
+
+def _structured_target_label(structured: object) -> str:
+    # An operator change names what it changed (config:llm:guardrail.judge);
+    # the row's own target column is empty (GAP-2275).
+    if ref := _structured_text(structured, "defenseclaw.admin.target_ref"):
+        return ref
+    if method := _structured_text(structured, "defenseclaw.acp.method"):
+        return f"ACP {method}"
+    if hook := _structured_text(structured, "defenseclaw.hook.event"):
+        return hook
+    if kind := _structured_text(structured, "defenseclaw.judge.kind"):
+        return f"{kind} judge"
+    return ""
 
 
 def _row_details_label(event: Event) -> str:
@@ -1306,6 +1539,14 @@ def _row_details_label(event: Event) -> str:
     """
 
     if event.action != "connector-hook":
+        if "=" not in event.details and (change := _admin_change_summary(event.structured)):
+            # "config.change.applied" is the event name; say what changed (GAP-2275).
+            return _truncate(change, 20)
+        if "=" not in event.details and (outcome := _structured_outcome_label(event)):
+            # The details of a v8 row are only its event name
+            # ("guardrail.evaluation.completed"); the decision and rule say
+            # more ("block · SEC-AWS-KEY") (GAP-1510).
+            return _truncate(outcome, 20)
         return _truncate(event.details, 20)
     parsed = _parse_kv_details(event.details)
     decision = parsed.get("action", "") or parsed.get("decision", "")
@@ -1321,6 +1562,40 @@ def _row_details_label(event: Event) -> str:
     if not parts:
         return _truncate(event.details, 20)
     return _truncate(" · ".join(parts), 20)
+
+
+def _admin_change_summary(structured: object) -> str:
+    """``model: haiku -> sonnet`` from an operator change's admin diff (GAP-2275)."""
+
+    if not isinstance(structured, dict):
+        return ""
+    raw = structured.get("defenseclaw.admin.diff")
+    if isinstance(raw, str) and raw.strip():
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            return ""
+    if not isinstance(raw, list):
+        return ""
+    parts: list[str] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path") or "").strip()
+        before = str(item.get("before") or "").strip()
+        after = str(item.get("after") or "").strip()
+        change = f"{before} -> {after}" if before else after
+        if change:
+            parts.append(f"{path}: {change}" if path else change)
+    return "; ".join(parts)
+
+
+def _structured_outcome_label(event: Event) -> str:
+    facts = dict(_structured_fact_pairs(event.structured))
+    decision = facts.get("Decision", "")
+    if event.action.lower() == "llm-judge-response":
+        return f"judge: {decision}" if decision else ""
+    return " · ".join(part for part in (decision, facts.get("Rules", "")) if part)
 
 
 # Public aliases — re-exported so the Alerts panel (which surfaces
@@ -1357,7 +1632,55 @@ def event_connector(event: Event) -> str:
     which the CONNECTOR column renders as ``—``.
     """
 
-    return _parse_kv_details(event.details).get("connector", "").strip()
+    return (event.connector or _parse_kv_details(event.details).get("connector", "")).strip()
+
+
+_STRUCTURED_FACTS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "Decision",
+        ("defenseclaw.guardrail.effective_action", "defenseclaw.guardrail.decision", "defenseclaw.judge.action"),
+    ),
+    ("Mode", ("defenseclaw.guardrail.mode",)),
+    ("Would block", ("defenseclaw.guardrail.would_block",)),
+    ("Rules", ("defenseclaw.guardrail.rule_ids", "defenseclaw.finding.rule_id")),
+    ("Reason", ("defenseclaw.guardrail.reason", "defenseclaw.judge.error_summary")),
+    ("Judge", ("defenseclaw.judge.kind",)),
+    ("ACP method", ("defenseclaw.acp.method",)),
+    ("ACP client", ("defenseclaw.acp.client",)),
+    ("Hook", ("defenseclaw.hook.event",)),
+)
+
+
+def _structured_text(structured: object, key: str) -> str:
+    if not isinstance(structured, dict):
+        return ""
+    value = structured.get(key)
+    if isinstance(value, list):
+        return ", ".join(str(item) for item in value if str(item).strip())
+    if isinstance(value, bool):
+        return "yes" if value else ""
+    return str(value).strip().lower() if key.endswith(("decision", "effective_action")) else str(value or "").strip()
+
+
+def _structured_fact_pairs(structured: object) -> tuple[tuple[str, str], ...]:
+    """Labelled outcome fields from a v8 structured record, when present."""
+
+    pairs: list[tuple[str, str]] = []
+    for label, keys in _STRUCTURED_FACTS:
+        # "none" is a placeholder (no verdict from that stage), not a decision.
+        value = next(
+            (text for key in keys if (text := _structured_text(structured, key)) and text.lower() != "none"),
+            "",
+        )
+        if label == "Mode":
+            # The CLI and status bar call the enforcing mode "action".
+            value = _MODE_LABELS.get(value.lower(), value)
+        if value:
+            pairs.append((label, value))
+    return tuple(pairs)
+
+
+_MODE_LABELS = {"enforce": "action"}
 
 
 parse_kv_details = _parse_kv_details

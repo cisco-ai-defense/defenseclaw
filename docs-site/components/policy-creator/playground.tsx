@@ -169,22 +169,13 @@ const SECTION_DEFS: SectionDef[] = [
   {
     id: 'correlator',
     title: 'Session correlator (Layer 5)',
-    subtitle: (p) => {
-      const enabled = p.correlator.filter((c) => c.enabled).length;
-      if (p.correlator.length === 0) return 'not loaded — pick a preset to seed defaults';
-      return enabled === p.correlator.length
-        ? `${enabled} pattern${enabled === 1 ? '' : 's'} enabled`
-        : `${enabled} of ${p.correlator.length} patterns enabled`;
-    },
-    // Highlight as "warning" when the operator has disabled bundled
-    // patterns — that's an intentional choice but the wizard should
-    // make it visible so a teammate reviewing the share link spots it.
-    status: (p) => {
-      if (p.correlator.length === 0) return 'untouched';
-      const disabled = p.correlator.filter((c) => !c.enabled).length;
-      if (disabled > 0) return 'warning';
-      return 'customized';
-    },
+    subtitle: (p) =>
+      p.correlator.length === 0
+        ? 'not loaded — pick a preset to show the bundled patterns'
+        : `${p.correlator.length} compiled-in pattern${p.correlator.length === 1 ? '' : 's'}, read-only`,
+    // Read-only: the gateway runs only its compiled-in patterns, so
+    // this section never counts as customized.
+    status: () => 'untouched',
     render: (p, set) => <CorrelatorSection policy={p} onPolicyChange={set} />,
   },
   {
@@ -441,7 +432,7 @@ function RiskyConfigBanner({
       <div className="flex items-baseline gap-2">
         <span aria-hidden="true">⚠</span>
         <span className="font-semibold">Risky configuration</span>
-        <span className="text-amber-700/80 dark:text-amber-300/80">
+        <span className="text-amber-800 dark:text-amber-300">
           ({findings.length} {findings.length === 1 ? 'item' : 'items'})
         </span>
       </div>
@@ -449,13 +440,13 @@ function RiskyConfigBanner({
         {findings.map((f, i) => (
           <li key={`${f.code}:${i}`}>
             <div className="flex items-baseline gap-2">
-              <code className="font-mono text-[10px] text-amber-700/80 dark:text-amber-300/80">
+              <code className="font-mono text-[10px] text-amber-800 dark:text-amber-300">
                 {f.location}
               </code>
             </div>
             <div>{f.message}</div>
             {f.fix && (
-              <div className="text-[10px] text-amber-700/80 dark:text-amber-300/80">
+              <div className="text-[10px] text-amber-800 dark:text-amber-300">
                 Fix: {f.fix}
               </div>
             )}
@@ -530,10 +521,10 @@ function DiffVsPresetBanner({
                 <span
                   className={
                     d.kind === 'added'
-                      ? 'text-emerald-600 dark:text-emerald-400'
+                      ? 'text-emerald-700 dark:text-emerald-400'
                       : d.kind === 'removed'
-                        ? 'text-red-500'
-                        : 'text-amber-600 dark:text-amber-400'
+                        ? 'text-red-700 dark:text-red-400'
+                        : 'text-amber-700 dark:text-amber-400'
                   }
                 >
                   {d.kind === 'added' ? '+' : d.kind === 'removed' ? '−' : '~'}
@@ -574,13 +565,13 @@ function FindingsBar({
         <span aria-hidden="true">⚠</span>
         <span>
           {counts.errors > 0 && (
-            <span className="text-red-500">
+            <span className="text-red-700 dark:text-red-400">
               {counts.errors} error{counts.errors === 1 ? '' : 's'}
             </span>
           )}
           {counts.errors > 0 && (counts.warnings > 0 || counts.info > 0) && ' · '}
           {counts.warnings > 0 && (
-            <span className="text-amber-600">
+            <span className="text-amber-700 dark:text-amber-400">
               {counts.warnings} warning{counts.warnings === 1 ? '' : 's'}
             </span>
           )}
@@ -596,9 +587,9 @@ function FindingsBar({
               <span
                 className={
                   f.level === 'error'
-                    ? 'text-red-500'
+                    ? 'text-red-700 dark:text-red-400'
                     : f.level === 'warning'
-                      ? 'text-amber-600 dark:text-amber-400'
+                      ? 'text-amber-700 dark:text-amber-400'
                       : 'text-fd-muted-foreground'
                 }
               >

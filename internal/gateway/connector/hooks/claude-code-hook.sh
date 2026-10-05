@@ -124,7 +124,7 @@ fi
 unset CURSOR_ORIGIN_VERSION CURSOR_HOOK_MARKER _CURSOR_HOOK_LINE
 
 {{if .Sandbox}}defenseclaw_sandbox_require_token claudecode claude-code-hook "claude-code tool"{{else}}if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
-  defenseclaw_handle_missing_token claudecode claude-code-hook "claude-code tool"
+  defenseclaw_handle_missing_token claudecode claude-code-hook "claude-code tool" "${HOOK_DIR}/{{.TokenFile}}"
 fi{{end}}
 
 API_ADDR="{{.APIAddr}}"
@@ -162,7 +162,14 @@ fail_unreachable() {
   if defenseclaw_should_fail_closed_on_unreachable; then
     exit 2
   fi
-  exit 0
+{{if not .Sandbox}}  # Claude Code does not show stderr of a hook that exits 0: say on screen
+  # that this account's gateway is down and how to start it again.
+  if [ "$1" = "gateway unreachable" ]; then
+    case "$(printf '%s' "$PAYLOAD" | _dc_jq -r '.hook_event_name // empty' 2>/dev/null)" in
+      SessionStart|UserPromptSubmit|PreToolUse) defenseclaw_unreachable_notice_json ;;
+    esac
+  fi
+{{end}}  exit 0
 }
 
 fail_response() {
@@ -209,16 +216,26 @@ RESPONSE="$(defenseclaw_sandbox_post "/api/v1/claude-code/hook" "$PAYLOAD" \
   "${TRACE_HEADER_ARGS[@]+"${TRACE_HEADER_ARGS[@]}"}" \
   "${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}")" || {
   fail_unreachable "sandbox ingress unreachable"
-}{{else}}RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/claude-code/hook" \
-  -H "Content-Type: application/json" \
-  -H "X-DefenseClaw-Client: claude-code-hook/1.0" \
-  "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
-  "${TRACE_HEADER_ARGS[@]+"${TRACE_HEADER_ARGS[@]}"}" \
-  "${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}" \
-  --connect-timeout 2{{if .HookSocketTransportSH}} --unix-socket "${DEFENSECLAW_HOOK_SOCKET}"{{end}} \
-  --max-time 10 \
-  -d "$PAYLOAD" 2>/dev/null) || {
-  fail_unreachable "gateway unreachable"
+}{{else}}if defenseclaw_api_listener_foreign "$API_ADDR"; then
+  fail_unreachable "${API_ADDR} is held by another account while this account's gateway is not running; no token was sent. Run \`defenseclaw-gateway start\` for the fix"
+fi
+# A refused connection means this account's gateway is not running (after
+# a reboot, for example): start it once and retry. See
+# defenseclaw_gateway_cold_start in _hardening.sh.
+defenseclaw_hook_post() {
+  curl -s --noproxy '*' -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/claude-code/hook" \
+    -H "Content-Type: application/json" \
+    -H "X-DefenseClaw-Client: claude-code-hook/1.0" \
+    "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
+    "${TRACE_HEADER_ARGS[@]+"${TRACE_HEADER_ARGS[@]}"}" \
+    "${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}" \
+    --connect-timeout 2{{if .HookSocketTransportSH}} --unix-socket "${DEFENSECLAW_HOOK_SOCKET}"{{end}} \
+    --max-time 10 \
+    -d "$PAYLOAD" 2>/dev/null
+}
+RESPONSE=$(defenseclaw_hook_post) || {
+  defenseclaw_gateway_cold_start "$?" || fail_unreachable "gateway unreachable"
+  RESPONSE=$(defenseclaw_hook_post) || fail_unreachable "gateway unreachable"
 }{{end}}
 
 HTTP_CODE=$(echo "$RESPONSE" | tail -1)

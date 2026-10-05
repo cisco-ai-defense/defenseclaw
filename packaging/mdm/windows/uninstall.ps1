@@ -10,7 +10,8 @@
     standalone --json` (which stops and deletes the services, removes
     DefenseClaw's hooks and machine-policy entries while preserving
     administrator entries, and removes the Add/Remove Programs entry and
-    marker). -Purge also removes managed state.
+    marker, and the managed machine state). -Purge also removes each enrolled
+    account's DefenseClaw data and per-user binaries.
 
     Works in Windows PowerShell 5.1 (32- or 64-bit) and PowerShell 7: it only
     locates the installed native CLI through the protected 64-bit HKLM marker
@@ -191,7 +192,9 @@ function Invoke-DefenseClawNative {
     $info.RedirectStandardOutput = $true
     $info.RedirectStandardError = $true
     $info.RedirectStandardInput = $true
-    $info.WorkingDirectory = [System.IO.Path]::GetDirectoryName($FilePath)
+    # Start the CLI in System32, never in the install's bin folder: a working
+    # directory inside InstallRoot keeps an uninstall from retiring it (GAP-1684).
+    $info.WorkingDirectory = [System.Environment]::SystemDirectory
     foreach ($name in @($info.EnvironmentVariables.Keys)) {
         if ($name -match '^(DOTNET_|COMPLUS_|CORECLR_|COR_ENABLE_PROFILING$|COR_PROFILER|PSMODULEPATH$|PSEXECUTIONPOLICYPREFERENCE$|__PSLOCKDOWNPOLICY$)') {
             $info.EnvironmentVariables.Remove($name)

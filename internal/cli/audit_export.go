@@ -5,12 +5,14 @@
 package cli
 
 import (
+	"bytes"
 	"container/heap"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -32,6 +34,7 @@ var (
 	auditExportSince           string
 	auditExportUntil           string
 	auditExportNewest          bool
+	auditExportForce           bool
 )
 
 var auditCmd = &cobra.Command{
@@ -97,8 +100,11 @@ var auditExportCmd = &cobra.Command{
 	Use:   "export",
 	Short: "Export audit_events as JSONL (v7 schema)",
 	Long: `Write one JSON object per line. Each audit row is validated against
-schemas/audit-event.json before it is written. With --include-activity,
-append rows from activity_events validated against activity-event.json.
+schemas/audit-event.json before it is written. Configuration changes and
+operator actions are audit rows too (action config-update and others).
+--include-activity appends the rows of the activity_events table, which
+holds only history from releases before 1.0, validated against
+activity-event.json.
 
 Rows are written oldest first. --limit N keeps the first (oldest) N
 matching rows; add --newest to keep the N most recent rows instead (they
@@ -139,7 +145,7 @@ func auditExportPersistentPreRunE(cmd *cobra.Command, _ []string) error {
 		warn = cmd.ErrOrStderr()
 	}
 	applyManagedStandaloneAdminEnv(warn)
-	if err := loadGatewayCommandConfigOnly(); err != nil {
+	if err := loadGatewayCommandConfigFor(cmd); err != nil {
 		return err
 	}
 	return checkManagedAuditExportDatabase()
@@ -160,11 +166,12 @@ func checkManagedAuditExportDatabase() error {
 
 func init() {
 	auditExportCmd.Flags().StringVarP(&auditExportOut, "output", "o", "-", "Output file path, or '-' for stdout")
-	auditExportCmd.Flags().BoolVar(&auditExportIncludeActivity, "include-activity", false, "Append activity_events payloads (activity-event.json) after audit lines")
+	auditExportCmd.Flags().BoolVar(&auditExportIncludeActivity, "include-activity", false, "Append pre-1.0 activity_events rows (activity-event.json) after audit lines; configuration changes are audit rows already")
 	auditExportCmd.Flags().IntVar(&auditExportLimit, "limit", 0, "Max audit rows (0 = unlimited); the oldest matching rows unless --newest")
 	auditExportCmd.Flags().StringVar(&auditExportSince, "since", "", "Only rows at or after this time: RFC3339 (2026-09-27T18:30:00Z) or a duration ago (30m, 2h)")
 	auditExportCmd.Flags().StringVar(&auditExportUntil, "until", "", "Only rows before this time: RFC3339 or a duration ago")
 	auditExportCmd.Flags().BoolVar(&auditExportNewest, "newest", false, "With --limit, keep the newest matching rows instead of the oldest (still written oldest first)")
+	auditExportCmd.Flags().BoolVar(&auditExportForce, "force", false, "Overwrite the --output file if it already exists")
 	auditExportCmd.Flags().StringVar(&auditExportConnector, "connector", "", "Only export rows attributed to this connector (matches the authoritative connector column, then structured.connector, then the details connector= field). Activity rows are omitted when set.")
 
 	auditCmd.AddCommand(auditExportCmd)
@@ -195,9 +202,15 @@ func isKnownAuditAction(s string) bool {
 	return false
 }
 
-func runAuditExport(_ *cobra.Command, _ []string) error {
+func runAuditExport(cmd *cobra.Command, _ []string) (err error) {
 	if cfg == nil {
 		return fmt.Errorf("audit export: config not loaded")
+	}
+	// A bad --since/--until is a usage error (exit 2, GAP-2110), checked
+	// before the database is opened or an -o file is created.
+	window, err := parseAuditExportWindow(time.Now())
+	if err != nil {
+		return auditUsageError(cmd, err)
 	}
 	version.SetBinaryVersion(appVersion)
 	prov := version.Current()
@@ -207,6 +220,9 @@ func runAuditExport(_ *cobra.Command, _ []string) error {
 		return fmt.Errorf("audit export: open db: %w", err)
 	}
 	defer db.Close()
+	// A reader that stops early (| head -1, | Select-Object -First 1) is
+	// not an export failure (GAP-1694).
+	defer func() { err = quietClosedOutputPipe(err) }()
 
 	out := io.Writer(os.Stdout)
 	if auditExportOut != "" && auditExportOut != "-" {
@@ -220,29 +236,53 @@ func runAuditExport(_ *cobra.Command, _ []string) error {
 		// afterwards. Open with O_CREATE|O_EXCL|0o600 so the file is
 		// 0600 from creation and we refuse to clobber an existing
 		// file (which could be an attacker-pre-created decoy).
+		// --force removes the old file first, so the new one is still
+		// created with O_EXCL and 0600 (GAP-1398).
+		if auditExportForce {
+			if rmErr := os.Remove(auditExportOut); rmErr != nil && !os.IsNotExist(rmErr) {
+				return fmt.Errorf("audit export: remove existing output %s: %w", auditExportOut, rmErr)
+			}
+		}
 		f, err := os.OpenFile(
 			auditExportOut,
 			os.O_WRONLY|os.O_CREATE|os.O_EXCL|os.O_TRUNC,
 			0o600,
 		)
 		if err != nil {
+			if os.IsExist(err) {
+				return fmt.Errorf("audit export: %s already exists; pass --force to overwrite it or choose another -o path", auditExportOut)
+			}
 			return fmt.Errorf("audit export: create output: %w", err)
 		}
 		defer f.Close()
-		out = f
+		lc := &lineCountWriter{w: f}
+		out = lc
+		// GAP-1494: say what was written instead of finishing silently.
+		defer func() {
+			if err != nil {
+				return
+			}
+			msgOut := io.Writer(os.Stderr)
+			if cmd != nil {
+				msgOut = cmd.ErrOrStderr()
+			}
+			fmt.Fprintf(msgOut, "Wrote %d line(s) to %s\n", lc.lines, auditExportOut)
+		}()
 	}
 
 	connFilter := strings.ToLower(strings.TrimSpace(auditExportConnector))
-	window, err := parseAuditExportWindow(time.Now())
-	if err != nil {
-		return err
-	}
 
 	where, args := window.sqlPredicate()
+	// event_name marks a v8 record (GAP-2203); a database from before v8
+	// has no such column, and its rows are all legacy rows.
+	eventNameCol := "NULL"
+	if ok, _ := columnExists(db, "audit_events", "event_name"); ok {
+		eventNameCol = "event_name"
+	}
 	q := `SELECT id, timestamp, action, target, actor, details, structured_json, severity, run_id,
 session_id, trace_id, agent_id, agent_name, agent_instance_id, sidecar_instance_id,
 schema_version, content_hash, generation, binary_version,
-destination_app, tool_name, tool_id, policy_id, connector
+destination_app, tool_name, tool_id, policy_id, connector, ` + eventNameCol + `
 FROM audit_events` + where + ` ORDER BY ` + window.orderBy()
 	// When a connector or time filter is active the cap must apply to
 	// *matching* rows, so we filter in Go and bound the count there.
@@ -261,13 +301,15 @@ FROM audit_events` + where + ` ORDER BY ` + window.orderBy()
 		// Activity rows are operator config mutations, not connector-scoped,
 		// so they are omitted whenever a connector filter is requested.
 		if auditExportIncludeActivity && connFilter == "" {
-			return exportActivityLines(db, out, prov, window)
+			return appendActivityLines(auditExportStderr(cmd), db, out, prov, window)
 		}
 		return nil
 	}
 	defer rows.Close()
 
 	sink := window.sink(out)
+	seenConnectors := map[string]struct{}{}
+	matchedConnectorRows := 0
 	for rows.Next() {
 		var (
 			id, ts, action, actor                           string
@@ -278,14 +320,14 @@ FROM audit_events` + where + ` ORDER BY ` + window.orderBy()
 			contentHash, binVer                             sql.NullString
 			gen                                             sql.NullInt64
 			destApp, toolName, toolID, policyID             sql.NullString
-			connectorCol                                    sql.NullString
+			connectorCol, eventName                         sql.NullString
 		)
 		if err := rows.Scan(
 			&id, &ts, &action, &target, &actor, &details, &structuredRaw, &severity, &runID,
 			&sessionID, &traceID,
 			&agentID, &agentName, &agentInst, &sidecarInst,
 			&schemaVer, &contentHash, &gen, &binVer,
-			&destApp, &toolName, &toolID, &policyID, &connectorCol,
+			&destApp, &toolName, &toolID, &policyID, &connectorCol, &eventName,
 		); err != nil {
 			return fmt.Errorf("audit export: scan: %w", err)
 		}
@@ -295,9 +337,13 @@ FROM audit_events` + where + ` ORDER BY ` + window.orderBy()
 		}
 		connector := resolveAuditEventConnector(ns(connectorCol), ns(details), ns(structuredRaw))
 		if connFilter != "" {
+			if connector != "" {
+				seenConnectors[connector] = struct{}{}
+			}
 			if connector != connFilter {
 				continue
 			}
+			matchedConnectorRows++
 		}
 
 		line, err := buildAuditEventLine(id, ts, action,
@@ -308,7 +354,7 @@ FROM audit_events` + where + ` ORDER BY ` + window.orderBy()
 			ns(agentID), ns(agentName), ns(agentInst), ns(sidecarInst),
 			schemaVer, ns(contentHash), gen, ns(binVer),
 			ns(destApp), ns(toolName), ns(toolID), ns(policyID),
-			connector,
+			connector, ns(eventName),
 			prov,
 		)
 		if err != nil {
@@ -328,15 +374,61 @@ FROM audit_events` + where + ` ORDER BY ` + window.orderBy()
 	if err := sink.flush(); err != nil {
 		return err
 	}
+	if connFilter != "" && matchedConnectorRows == 0 {
+		noteUnmatchedAuditConnector(cmd.ErrOrStderr(), connFilter, seenConnectors)
+	}
 
 	// Activity rows are operator config mutations, not connector-scoped, so
 	// they are omitted whenever a connector filter is requested.
 	if auditExportIncludeActivity && connFilter == "" {
-		if err := exportActivityLines(db, out, prov, window); err != nil {
+		if err := appendActivityLines(auditExportStderr(cmd), db, out, prov, window); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// activityHistoryNote says why --include-activity added nothing (GAP-1170):
+// since 1.0 operator changes are audit rows in the export itself, and
+// activity_events holds only history from older databases.
+const activityHistoryNote = "note: --include-activity added no rows. Configuration changes and operator " +
+	"actions are already audit rows in this export (action config-update and others); " +
+	"activity_events holds only history from releases before 1.0."
+
+// appendActivityLines appends the activity_events rows and notes on stderr
+// when there were none, so the flag never looks broken. stdout stays JSONL.
+func appendActivityLines(stderr io.Writer, db *sql.DB, out io.Writer, prov version.Provenance, window auditExportWindow) error {
+	counted := &lineCountWriter{w: out}
+	if err := exportActivityLines(db, counted, prov, window); err != nil {
+		return err
+	}
+	if counted.lines == 0 {
+		fmt.Fprintln(stderr, activityHistoryNote)
+	}
+	return nil
+}
+
+func auditExportStderr(cmd *cobra.Command) io.Writer {
+	if cmd == nil {
+		return os.Stderr
+	}
+	return cmd.ErrOrStderr()
+}
+
+// noteUnmatchedAuditConnector says on stderr that --connector matched no row,
+// naming the connectors that do have rows in the window, so a typo is not
+// mistaken for "no activity" (GAP-1237). stdout stays valid, empty JSONL.
+func noteUnmatchedAuditConnector(w io.Writer, filter string, seen map[string]struct{}) {
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	if len(names) == 0 {
+		fmt.Fprintf(w, "audit export: no rows from connector %q in this window (no row in it names a connector)\n", filter)
+		return
+	}
+	fmt.Fprintf(w, "audit export: no rows from connector %q in this window; connectors with rows: %s\n", filter, strings.Join(names, ", "))
 }
 
 // auditExportWindow is the row selection of one export: an optional time
@@ -345,6 +437,15 @@ type auditExportWindow struct {
 	since, until *time.Time
 	limit        int
 	newest       bool
+}
+
+// auditUsageError gives a bad flag value the usage-error shape and exit
+// status 2, like unknown flags and unparsable numbers (GAP-2110).
+func auditUsageError(cmd *cobra.Command, err error) error {
+	if cmd == nil {
+		return withExitCode(err, 2)
+	}
+	return usageError(cmd, err)
 }
 
 // parseAuditExportWindow reads --since, --until, --limit and --newest.
@@ -626,7 +727,7 @@ func exportAuditEventsFallbackWindow(db *sql.DB, out io.Writer, prov version.Pro
 			"", "", "", "",
 			sql.NullInt64{}, "", sql.NullInt64{}, "",
 			"", "", "", "",
-			conn,
+			conn, "",
 			prov,
 		)
 		if err != nil {
@@ -661,10 +762,14 @@ func buildAuditEventLine(
 	agentID, agentName, agentInst, sidecarInst string,
 	schemaVer sql.NullInt64, contentHash string, gen sql.NullInt64, binVer string,
 	destApp, toolName, toolID, policyID string,
-	connector string,
+	connector, eventName string,
 	prov version.Provenance,
 ) ([]byte, error) {
-	actionOut, detailsOut := normalizeAuditAction(action, details)
+	v8Action := isV8RecordAction(eventName, action)
+	actionOut, detailsOut := strings.TrimSpace(action), details
+	if !v8Action {
+		actionOut, detailsOut = normalizeAuditAction(action, details)
+	}
 	sev := normalizeSeverity(severity)
 	act := strings.TrimSpace(actor)
 	if act == "" {
@@ -718,7 +823,7 @@ func buildAuditEventLine(
 		"policy_id":           strPtr(policyID),
 		"connector":           strPtr(connector),
 	}
-	if err := validateAuditEventMap(ev); err != nil {
+	if err := validateAuditEventMap(ev, v8Action); err != nil {
 		return nil, fmt.Errorf("audit export: %w", err)
 	}
 	return json.Marshal(ev)
@@ -784,6 +889,25 @@ func normalizeSeverity(s string) string {
 	}
 }
 
+// v8RecordActionPattern is the action shape the audit-event schema accepts
+// for v8 runtime records.
+var v8RecordActionPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
+
+// isV8RecordAction reports whether a row is a v8 runtime record whose action
+// the export keeps as is. A v8 record (event_name set and not a
+// legacy.audit.* compatibility identity) carries the action of its telemetry
+// family, which the runtime catalog validated: telemetry-destination,
+// circuit_breaker_open, config.change.applied and others. Those are not
+// audit-logger actions, so rewriting them to "action" with the real value in
+// legacy_action=... hid them from SIEM queries on the action (GAP-2203).
+func isV8RecordAction(eventName, action string) bool {
+	name := strings.TrimSpace(eventName)
+	if name == "" || strings.HasPrefix(name, "legacy.audit.") {
+		return false
+	}
+	return v8RecordActionPattern.MatchString(strings.TrimSpace(action))
+}
+
 func normalizeAuditAction(action, details string) (string, string) {
 	a := strings.TrimSpace(action)
 	if isKnownAuditAction(a) {
@@ -800,7 +924,7 @@ var auditSeverityEnum = map[string]struct{}{
 	"CRITICAL": {}, "HIGH": {}, "MEDIUM": {}, "LOW": {}, "INFO": {}, "WARN": {},
 }
 
-func validateAuditEventMap(ev map[string]any) error {
+func validateAuditEventMap(ev map[string]any, v8Action bool) error {
 	if _, ok := ev["id"]; !ok {
 		return fmt.Errorf("invalid audit event: missing id")
 	}
@@ -808,7 +932,11 @@ func validateAuditEventMap(ev map[string]any) error {
 		return fmt.Errorf("invalid audit event: missing timestamp")
 	}
 	act, _ := ev["action"].(string)
-	if !isKnownAuditAction(act) {
+	if v8Action {
+		if !v8RecordActionPattern.MatchString(act) {
+			return fmt.Errorf("invalid audit event: v8 record action %q", act)
+		}
+	} else if !isKnownAuditAction(act) {
 		return fmt.Errorf("invalid audit event: unknown action %q", act)
 	}
 	sev, _ := ev["severity"].(string)
@@ -864,6 +992,17 @@ FROM activity_events`+where+` ORDER BY timestamp ASC`, args...)
 		}
 	}
 	return rows.Err()
+}
+
+func columnExists(db *sql.DB, table, column string) (bool, error) {
+	var n int
+	err := db.QueryRow(
+		`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name=?`, table, column,
+	).Scan(&n)
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 func tableExists(db *sql.DB, name string) (bool, error) {
@@ -944,4 +1083,17 @@ func validateActivityPayloadMap(m map[string]any) error {
 		return fmt.Errorf("invalid activity action %q", act)
 	}
 	return nil
+}
+
+// lineCountWriter counts the JSONL lines written through it so a file export
+// can report its size.
+type lineCountWriter struct {
+	w     io.Writer
+	lines int
+}
+
+func (c *lineCountWriter) Write(p []byte) (int, error) {
+	n, err := c.w.Write(p)
+	c.lines += bytes.Count(p[:n], []byte{'\n'})
+	return n, err
 }

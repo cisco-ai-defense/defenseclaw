@@ -64,10 +64,10 @@ def test_active_panel_section_switches_with_panel() -> None:
     alerts_keys = {key for key, _ in app._help_sections()[1][1]}
     app.active_panel = "logs"
     logs_keys = {key for key, _ in app._help_sections()[1][1]}
-    # Alerts has severity filters (1-5), Logs doesn't; Logs has e/w,
+    # Alerts steps severity chips with h/l, Logs doesn't; Logs has e/w,
     # Alerts doesn't — so the two blocks must be different.
     assert alerts_keys != logs_keys
-    assert "1-5" in alerts_keys
+    assert "h/l" in alerts_keys
     assert "e / w" in logs_keys
 
 

@@ -38,3 +38,17 @@ func TestWindowsStandaloneSummaryPrintsWarnings(t *testing.T) {
 		t.Fatalf("summary printed the internal lifecycle diagnostic:\n%s", text)
 	}
 }
+
+// rotate-credentials refuses on Windows, but --help shows its help and
+// exits 0 instead of the 1639 refusal.
+func TestWindowsRotateCredentialsHelpIsNotRefused(t *testing.T) {
+	cmd := newWindowsRotateCredentialsCommand()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	if err := cmd.RunE(cmd, []string{"--help"}); err != nil || !strings.Contains(out.String(), "rotate-credentials") {
+		t.Fatalf("--help: err=%v output=%q", err, out.String())
+	}
+	if err := cmd.RunE(cmd, nil); commandExitCode(err) != enterprisestatus.WindowsExitInvalidArgs {
+		t.Fatalf("rotate-credentials exit = %d (%v), want %d", commandExitCode(err), err, enterprisestatus.WindowsExitInvalidArgs)
+	}
+}

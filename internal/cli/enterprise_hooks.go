@@ -30,6 +30,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -96,8 +97,8 @@ var (
 	// and avoids the consistent SQLITE_BUSY crash the guardian would hit. The
 	// seam remains overridable so lifecycle tests keep their custom pre-runs.
 	enterpriseHooksFullRootPersistentPreRun   = rootPersistentPreRunNoAuditE
-	enterpriseHooksConfigOnlyPersistentPreRun = func(*cobra.Command, []string) error {
-		return loadGatewayCommandConfigOnly()
+	enterpriseHooksConfigOnlyPersistentPreRun = func(cmd *cobra.Command, _ []string) error {
+		return loadGatewayCommandConfigFor(cmd)
 	}
 	enterpriseHooksPluginRegistryFactory       = newConnectorRegistryWithPlugins
 	enterpriseHooksCertifiedRegistryFactory    = newWindowsEnterpriseCertifiedConnectorRegistry
@@ -159,13 +160,14 @@ var enterpriseHooksCmd = &cobra.Command{
 	Use:   "hooks",
 	Short: "Install and repair per-user hook connectors",
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-		if err := enterpriseHooksPlatformPreflight(); err != nil {
-			return err
+		err := enterpriseHooksPlatformPreflight()
+		if err == nil {
+			// Cobra runs only the nearest persistent pre-run hook. Chain the root
+			// initializer explicitly so supported hosts retain config, audit, and
+			// authorization initialization before any enterprise hook operation.
+			err = enterpriseHooksRootPersistentPreRun(cmd, args)
 		}
-		// Cobra runs only the nearest persistent pre-run hook. Chain the root
-		// initializer explicitly so supported hosts retain config, audit, and
-		// authorization initialization before any enterprise hook operation.
-		return enterpriseHooksRootPersistentPreRun(cmd, args)
+		return enterpriseHooksStatusPreRunJSON(cmd, err)
 	},
 }
 
@@ -603,7 +605,7 @@ func runEnterpriseHooksReconcile(cmd *cobra.Command, _ []string) error {
 			label += "@" + row.UserHome
 		}
 		if row.OK {
-			fmt.Fprintf(cmd.OutOrStdout(), "  %s %s reconciled\n", Style("✓", "fg=green", "bold"), label)
+			fmt.Fprintf(cmd.OutOrStdout(), "  %s %s reconciled%s\n", Style("✓", "fg=green", "bold"), label, enterpriseHookAgentVersionNote(row))
 		} else if row.Pending {
 			fmt.Fprintf(cmd.OutOrStdout(), "  %s %s pending an exact active Windows session\n", Style("•", "fg=yellow", "bold"), label)
 		} else {
@@ -618,6 +620,15 @@ func runEnterpriseHooksReconcile(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("enterprise hooks reconcile failed for %d target(s)", run.Failures)
 	}
 	return nil
+}
+
+// enterpriseHookAgentVersionNote names an untested newer agent version on a
+// reconcile or verify line.
+func enterpriseHookAgentVersionNote(row enterpriseHookReconcileRow) string {
+	if row.Result == nil || row.Result.AgentVersionStatus == "" {
+		return ""
+	}
+	return fmt.Sprintf(" (%s %s)", row.Result.AgentVersionStatus, strings.TrimSpace(row.Result.AgentVersion))
 }
 
 type enterpriseHookStatusReport struct {
@@ -650,6 +661,10 @@ type enterpriseHookEnrollment struct {
 	SID        string                          `json:"sid,omitempty"`
 	UID        int                             `json:"uid,omitempty"`
 	Connectors []enterpriseHookEnrollmentState `json:"connectors"`
+	// AccountDeleted marks an account whose home no longer exists: it was
+	// deleted, and its rows last until the hook enumerator's next pass
+	// (GAP-1867).
+	AccountDeleted bool `json:"account_deleted,omitempty"`
 }
 
 // enterpriseHookEnrollmentState is one connector's state for an account:
@@ -701,6 +716,24 @@ func enterpriseHookEnrollmentFromRows(rows []enterpriseHookReconcileRow) []enter
 	return out
 }
 
+// markEnterpriseHookDeletedAccounts sets AccountDeleted on each account whose
+// home is gone and that has no connector the last reconcile verified there.
+// Status listed such an account with its agents pending for the minutes
+// until the enumerator dropped it, as if it would still enroll.
+func markEnterpriseHookDeletedAccounts(enrollment []enterpriseHookEnrollment) {
+	for i := range enrollment {
+		home := strings.TrimSpace(enrollment[i].UserHome)
+		if home == "" || slices.ContainsFunc(enrollment[i].Connectors, func(state enterpriseHookEnrollmentState) bool {
+			return state.State == "enrolled"
+		}) {
+			continue
+		}
+		if _, err := os.Lstat(home); errors.Is(err, os.ErrNotExist) {
+			enrollment[i].AccountDeleted = true
+		}
+	}
+}
+
 // printEnterpriseHookEnrollment renders the per-account enrollment list.
 func printEnterpriseHookEnrollment(w io.Writer, enrollment []enterpriseHookEnrollment, updatedAt string) {
 	if len(enrollment) == 0 {
@@ -736,7 +769,15 @@ func printEnterpriseHookEnrollment(w io.Writer, enrollment []enterpriseHookEnrol
 		}
 		connectors := make([]string, 0, len(account.Connectors))
 		for _, connector := range account.Connectors {
+			if account.AccountDeleted {
+				connectors = append(connectors, connector.Connector)
+				continue
+			}
 			connectors = append(connectors, connector.Connector+" "+connector.State)
+		}
+		if account.AccountDeleted {
+			fmt.Fprintf(w, "    %s: account deleted, home removed (%s dropped at the hook enumerator's next pass)\n", label, strings.Join(connectors, ", "))
+			continue
 		}
 		fmt.Fprintf(w, "    %s: %s\n", label, strings.Join(connectors, ", "))
 	}
@@ -789,6 +830,7 @@ func runEnterpriseHooksStatus(cmd *cobra.Command, _ []string) error {
 			report.Errors = append(report.Errors, enterpriseHookGuardianFailureIssues(state)...)
 		}
 		report.Enrollment = enterpriseHookEnrollmentFromRows(state.Results)
+		markEnterpriseHookDeletedAccounts(report.Enrollment)
 	}
 	authorization, authorizationExists, authorizationErr := records.Authorization, records.AuthorizationExists, records.AuthorizationErr
 	if authorizationErr != nil {
@@ -864,6 +906,22 @@ func runEnterpriseHooksStatus(cmd *cobra.Command, _ []string) error {
 		printEnterpriseHookEnrollment(cmd.OutOrStdout(), report.Enrollment, report.State.UpdatedAt)
 	}
 	return fmt.Errorf("enterprise hooks status unhealthy")
+}
+
+// enterpriseHooksStatusPreRunJSON answers `enterprise hooks status --json`
+// run by hand that failed before the status ran (on a managed Windows
+// computer an elevated prompt has no per-user config) with its report:
+// ok=false and the reason in errors[], with no "Error:" line, instead of an
+// empty stdout (GAP-2456). The managed services and the lifecycle run it
+// under the deployment-mode pin and keep their output.
+func enterpriseHooksStatusPreRunJSON(cmd *cobra.Command, err error) error {
+	if err == nil || cmd != enterpriseHooksStatusCmd || !enterpriseHookJSON ||
+		managed.IsManagedEnterprise(os.Getenv(managed.DeploymentModeEnv)) {
+		return err
+	}
+	_ = json.NewEncoder(cmd.OutOrStdout()).Encode(enterpriseHookStatusReport{Errors: []string{err.Error()}})
+	cmd.SilenceErrors = true
+	return err
 }
 
 func enterpriseHooksStatusError(cmd *cobra.Command, report enterpriseHookStatusReport, err error) error {
@@ -944,6 +1002,16 @@ func enterpriseHookGuardianFailureIssues(state enterpriseHookGuardianState) []st
 	issues := make([]string, 0, state.FailureCount)
 	for _, row := range state.Results {
 		if row.OK || row.Pending {
+			continue
+		}
+		if account := enterpriseHookSignedOutAccount(row); account != "" {
+			// The same next step the refused repair gives: nothing an
+			// administrator runs helps until the account signs in.
+			issues = append(issues, fmt.Sprintf(
+				"the guardian cannot repair %s for %s while that account is signed out: have the account sign in, "+
+					"or remove it with its profile, then run repair again. The guardian repairs DefenseClaw hooks "+
+					"only in the account's own Windows session",
+				strings.TrimSpace(row.Connector), account))
 			continue
 		}
 		detail := strings.TrimSpace(row.Error)
@@ -1355,7 +1423,7 @@ func runEnterpriseHooksVerify(cmd *cobra.Command, _ []string) error {
 	}
 	for _, row := range run.Rows {
 		if row.OK {
-			fmt.Fprintf(cmd.OutOrStdout(), "  %s %s verified\n", Style("✓", "fg=green", "bold"), enterpriseHookTargetLabel(row))
+			fmt.Fprintf(cmd.OutOrStdout(), "  %s %s verified%s\n", Style("✓", "fg=green", "bold"), enterpriseHookTargetLabel(row), enterpriseHookAgentVersionNote(row))
 		} else if row.Pending {
 			fmt.Fprintf(cmd.OutOrStdout(), "  %s %s pending an exact active Windows session\n", Style("•", "fg=yellow", "bold"), enterpriseHookTargetLabel(row))
 		} else if enterpriseHookVerifyRowExcused(run, row) {
@@ -2118,6 +2186,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("enterprise hooks watch: create fsnotify watcher: %w", err)
 	}
 	defer fsw.Close()
+	events := newEnterpriseHookWatchPump(fsw.Events, fsw.Errors, enterpriseHookWatchEventBuffer)
 
 	watched := map[string]struct{}{}
 	// Owned-file allowlists, split by expected writer. fsnotify on
@@ -2263,7 +2332,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		if !isMissingManifestErr(err) || cfg == nil || !managed.IsManagedEnterprise(cfg.DeploymentMode) {
 			return err
 		}
-		if waitErr := waitForEnterpriseHookManifestManaged(cmd.Context(), cmd.ErrOrStderr(), fsw); waitErr != nil {
+		if waitErr := waitForEnterpriseHookManifestManaged(cmd.Context(), cmd.ErrOrStderr(), fsw, events); waitErr != nil {
 			return waitErr
 		}
 		// Manifest is present now — re-run the startup reconcile so
@@ -2341,7 +2410,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		select {
 		case <-cmd.Context().Done():
 			return cmd.Context().Err()
-		case event, ok := <-fsw.Events:
+		case event, ok := <-events.Events:
 			if !ok {
 				if err := cmd.Context().Err(); err != nil {
 					return err
@@ -2408,7 +2477,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			resetEnterpriseHookWatchTimer(debounce, enterpriseHookWatchDebounce)
 			debouncePending = true
 			debounceReason = "fsnotify"
-		case err, ok := <-fsw.Errors:
+		case err, ok := <-events.Errors:
 			if !ok {
 				if contextErr := cmd.Context().Err(); contextErr != nil {
 					return contextErr
@@ -2416,6 +2485,14 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 				return errors.New("enterprise hooks watch: fsnotify error channel closed unexpectedly")
 			}
 			fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] fsnotify error: %s\n", err)
+		case <-events.Overflow:
+			// Events were dropped while a reconcile ran; reconcile once more
+			// so a dropped change is not left to the interval pass.
+			resetEnterpriseHookWatchTimer(debounce, enterpriseHookWatchDebounce)
+			debouncePending = true
+			if debounceReason == "" {
+				debounceReason = "fsnotify"
+			}
 		case <-debounce.C:
 			if debouncePending {
 				debouncePending = false
@@ -2531,7 +2608,7 @@ func writeGuardianStateOrLog(w io.Writer, state string) {
 // symlink) is treated as fatal: we did our one bounded wait, an
 // operator now dropped a bad file, further recovery belongs to a
 // human triage rather than an unbounded wait loop.
-func waitForEnterpriseHookManifestManaged(ctx context.Context, w io.Writer, fsw *fsnotify.Watcher) error {
+func waitForEnterpriseHookManifestManaged(ctx context.Context, w io.Writer, fsw *fsnotify.Watcher, events *enterpriseHookWatchPump) error {
 	manifestPath := filepath.Clean(enterpriseHookManifest)
 	parentDir := filepath.Dir(manifestPath)
 
@@ -2596,7 +2673,7 @@ func waitForEnterpriseHookManifestManaged(ctx context.Context, w io.Writer, fsw 
 				return fmt.Errorf("enterprise hooks watch: targets.yaml wait timeout after %s at %s — exiting for SCM restart", enterpriseHookTargetsWaitTimeout, manifestPath)
 			}
 			return deadline.Err()
-		case event := <-fsw.Events:
+		case event := <-events.Events:
 			// Only react to writes/creates for the target file; ignore
 			// noise for siblings (a stray temp file, chmod on the
 			// dir itself).
@@ -2609,7 +2686,11 @@ func waitForEnterpriseHookManifestManaged(ctx context.Context, w io.Writer, fsw 
 			if done, err := probeShouldReturn(probeManifestPresent(manifestPath), fmt.Sprintf("appeared (%s)", event.Op)); done {
 				return err
 			}
-		case fswErr := <-fsw.Errors:
+		case <-events.Overflow:
+			if done, err := probeShouldReturn(probeManifestPresent(manifestPath), "present after dropped events"); done {
+				return err
+			}
+		case fswErr := <-events.Errors:
 			// fsnotify.Errors is documented to deliver only
 			// recoverable errors (queue overflow, watcher-internal
 			// signals). Log and keep waiting; the ticker will retry.

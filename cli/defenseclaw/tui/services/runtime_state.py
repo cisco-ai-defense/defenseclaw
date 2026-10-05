@@ -22,6 +22,7 @@ decision is testable from a fixture.
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -87,7 +88,13 @@ class PlaneRow:
     @property
     def badge(self) -> str:
         if self.running:
-            return "up"
+            # Running with a stated limit (a non-elevated gateway sees only
+            # its own sockets) is partial coverage, as selftest says (GAP-1377).
+            return "partial" if self.reason else "up"
+        if not _selected_plane_gap(self):
+            # An opt-in plane nobody selected is off, not a broken sensor
+            # (GAP-2102): "blind" read as a failure.
+            return "off"
         if self.available:
             return "idle"
         return "blind"
@@ -102,7 +109,10 @@ class PlaneRow:
         that is genuinely clean.
         """
         if self.running:
-            return f"{self.name}: up via {self.mechanism or 'unknown mechanism'}"
+            via = self.mechanism or "unknown mechanism"
+            if self.reason:
+                return f"{self.name}: partial via {via} -- {self.reason}"
+            return f"{self.name}: up via {via}"
         detail = self.reason or "no reason reported"
         if self.available:
             return f"{self.name}: available but not running -- {detail}"
@@ -197,6 +207,9 @@ class RuntimeOverview:
     context: str = ""
     top_findings: tuple[str, ...] = ()
     next_action: str = ""
+    # Why the badge says DEGRADED, in a few words (e.g. "partial coverage:
+    # shadow-egress idle"), so Overview can say it without the Runtime tab.
+    degraded_reason: str = ""
 
 
 def decode_runtime_snapshot(payload: Any) -> RuntimeSnapshot:
@@ -272,7 +285,10 @@ def decode_runtime_snapshot(payload: Any) -> RuntimeSnapshot:
 class RuntimePanelModel:
     """Pure row model for the Runtime panel."""
 
-    def __init__(self) -> None:
+    def __init__(self, platform: str | None = None) -> None:
+        # The host plane's grant differs per OS; Linux was told to grant
+        # macOS Endpoint Security (GAP-1403).
+        self.platform = platform or sys.platform
         self.snapshot = RuntimeSnapshot()
         self._inventory_unobserved = 0
         self.filtered: tuple[RuntimeRow, ...] = ()
@@ -284,6 +300,11 @@ class RuntimePanelModel:
         # the host is DEGRADED, which is the question this panel exists
         # to answer.
         self.planes_expanded = True
+        # Short terminals (under 32 rows) keep their own choice and start on
+        # the one-line strip, so a "p" pressed on a tall screen does not
+        # expand the planes over the findings table at 80x24 (GAP-1596).
+        self.short_screen = False
+        self.planes_expanded_short = False
         self.message = ""
 
     def set_snapshot(self, payload: Any) -> None:
@@ -344,8 +365,15 @@ class RuntimePanelModel:
             "No findings at or above the reporting floor. "
             f"{self.snapshot.processes_observed} processes and "
             f"{self.snapshot.connections_observed} connections were watched. "
-            "A quiet table is a clean host, not a blind sensor."
+            + self._quiet_table_note()
         )
+
+    def _quiet_table_note(self) -> str:
+        """Only call a quiet table clean when coverage is not DEGRADED."""
+
+        if self.snapshot.degraded:
+            return "Coverage is partial, so a quiet table is not proof of a clean host."
+        return "A quiet table is a clean host, not a blind sensor."
 
     def inventory_unobserved_count(self) -> int:
         return self._inventory_unobserved
@@ -362,7 +390,7 @@ class RuntimePanelModel:
         if not self.snapshot.rows:
             return (
                 f"No findings at or above the reporting floor. {watched}. "
-                "A quiet table is a clean host, not a blind sensor."
+                + self._quiet_table_note()
             )
         unobserved = self.inventory_unobserved_count()
         parts = [f"{len(self.snapshot.rows)} scored finding(s). {watched}."]
@@ -421,7 +449,34 @@ class RuntimePanelModel:
             context=self.findings_context(),
             top_findings=tuple(top),
             next_action=self.next_action(),
+            degraded_reason=self.degraded_summary(),
         )
+
+    def degraded_summary(self) -> str:
+        """The cause heads only ("shadow egress partially covered"), for Overview.
+
+        The full reasons ran 2-3 lines on Overview and told a standard user to
+        run the gateway elevated; the Runtime panel keeps the detail (GAP-2533).
+        """
+
+        if self.health_state() != "degraded" or not self.snapshot.degraded_reasons:
+            return self.degraded_reason()
+        heads = [reason.split(":", 1)[0].strip() for reason in self.snapshot.degraded_reasons]
+        return ", ".join(dict.fromkeys(head for head in heads if head))
+
+    def degraded_reason(self) -> str:
+        """Short cause for a DEGRADED badge; empty when not degraded."""
+
+        if self.health_state() != "degraded":
+            return ""
+        if self.snapshot.degraded_reasons:
+            return "; ".join(self.snapshot.degraded_reasons)
+        gaps = [
+            f"{plane.name} {plane.badge}"
+            for plane in self.snapshot.planes
+            if plane.badge != "up" and _selected_plane_gap(plane)
+        ]
+        return f"partial coverage: {', '.join(gaps)}" if gaps else "partial coverage"
 
     def health_state(self) -> str:
         """Operator-facing health: off, waiting, degraded, or healthy."""
@@ -442,8 +497,12 @@ class RuntimePanelModel:
             "healthy": "HEALTHY",
         }[self.health_state()]
 
-    def health_explanation(self) -> str:
-        """What the badge means, and what a quiet findings table does not mean."""
+    def health_explanation(self, short: bool = False) -> str:
+        """What the badge means, and what a quiet findings table does not mean.
+
+        ``short`` (80x24) keeps only the DEGRADED reasons, so the buttons and
+        the findings table stay on screen (GAP-1596).
+        """
 
         state = self.health_state()
         if state == "off":
@@ -460,6 +519,7 @@ class RuntimePanelModel:
             )
         if state == "degraded":
             up = sum(1 for plane in self.snapshot.planes if plane.badge == "up")
+            partial = sum(1 for plane in self.snapshot.planes if plane.badge == "partial")
             idle = sum(
                 1
                 for plane in self.snapshot.planes
@@ -473,18 +533,32 @@ class RuntimePanelModel:
             parts: list[str] = []
             if up:
                 parts.append(f"{up} watching")
+            if partial:
+                parts.append(f"{partial} partially watching")
             if idle:
                 parts.append(f"{idle} selected but not running")
             if blind:
                 parts.append(f"{blind} cannot see the host")
+            off = [plane for plane in self.snapshot.planes if plane.badge == "off"]
+            if off:
+                parts.append(f"{len(off)} not selected")
             coverage = ", ".join(parts) or "one or more planes cannot watch the host"
             extra = ""
             if self.snapshot.degraded_reasons:
                 extra = " " + "; ".join(self.snapshot.degraded_reasons) + "."
+            if short:
+                return f"DEGRADED means coverage is partial ({coverage}).{extra}"
+            # The how-to-enable hint ends in a command, so it goes last: text
+            # run on after it read as part of the command (GAP-2102).
+            enable_hint = "".join(
+                f" {plane.name.capitalize()} is off (not selected). {self.plane_fix(plane)}"
+                for plane in off
+            )
             return (
                 f"DEGRADED means coverage is partial ({coverage}).{extra} "
                 "Findings below are still valid for the planes that are up. "
                 "HEALTHY means every selected plane is watching."
+                + enable_hint
             )
         unobserved = self.inventory_unobserved_count()
         extra = ""
@@ -495,7 +569,7 @@ class RuntimePanelModel:
             )
         return (
             "HEALTHY means the user-level inference and egress planes are watching. "
-            "Endpoint Security is optional and needs an elevated gateway. "
+            f"{self._host_plane_note()} "
             "A quiet findings table is a clean host, not a blind sensor."
             + extra
         )
@@ -515,19 +589,39 @@ class RuntimePanelModel:
             for plane in self.snapshot.planes
         )
 
+    def _host_plane_note(self) -> str:
+        if self.platform.startswith("linux"):
+            return "Agent actions (plane C) is optional."
+        if self.platform == "darwin":
+            return "Endpoint Security is optional and needs an elevated gateway."
+        return "Agent actions (plane C) is optional."
+
+    def _host_plane_fix(self) -> str:
+        """Next step for the agent-actions plane, in this OS's terms."""
+
+        enable = "defenseclaw agent discovery runtime enable --enable-host-plane"
+        if self.platform.startswith("linux"):
+            return (
+                "Agent actions is optional. Process events need no grant; file events "
+                f"need CAP_SYS_ADMIN (fanotify). Turn it on: {enable}"
+            )
+        if self.platform == "darwin":
+            return (
+                "Agent actions is optional and needs an elevated gateway. "
+                "Use Permissions, then run runtime enable with "
+                "--enable-host-plane if you can grant Endpoint Security."
+            )
+        return f"Agent actions is optional. Use Permissions to see what it needs, then run: {enable}"
+
     def plane_fix(self, plane: PlaneRow) -> str:
         """Next action for an idle or blind plane. Empty when the plane is up."""
 
         if plane.running:
-            return ""
+            return "Click Permissions for what full coverage needs." if plane.reason else ""
         reason = plane.reason.lower()
         if plane.plane == "c" or "not selected" in reason or "enable_host_plane" in reason:
             if plane.plane == "c":
-                return (
-                    "Agent actions is optional and needs an elevated gateway. "
-                    "Use Permissions, then run runtime enable with "
-                    "--enable-host-plane if you can grant Endpoint Security."
-                )
+                return self._host_plane_fix()
             return "Click Enable Runtime to turn on inference and egress."
         if any(
             token in reason
@@ -565,11 +659,16 @@ class RuntimePanelModel:
         )
         return tuple(parts)
 
+    def planes_shown_expanded(self) -> bool:
+        """Whether the planes show one line each (with reasons) right now."""
+
+        return self.planes_expanded_short if self.short_screen else self.planes_expanded
+
     def plane_strip(self) -> tuple[str, ...]:
         """The always-visible plane strip."""
         if not self.snapshot.planes:
             return ("plane health unavailable: the gateway reported no planes",)
-        if self.planes_expanded:
+        if self.planes_shown_expanded():
             return tuple(plane.summary for plane in self.snapshot.planes)
         return tuple(f"{plane.name}: {plane.badge}" for plane in self.snapshot.planes)
 
@@ -621,7 +720,10 @@ class RuntimePanelModel:
         if key == "e":
             return RuntimePanelAction.ENABLE
         if key == "p":
-            self.planes_expanded = not self.planes_expanded
+            if self.short_screen:
+                self.planes_expanded_short = not self.planes_expanded_short
+            else:
+                self.planes_expanded = not self.planes_expanded
             return RuntimePanelAction.TOGGLE_PLANES
         if key == "/":
             self.filtering = True

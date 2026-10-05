@@ -63,8 +63,19 @@ type Options struct {
 	// AllowDowngrade permits installing a payload older than the recorded
 	// deployment (a deliberate rollback). Without it downgrades are refused.
 	AllowDowngrade bool
-	Purge          bool
-	// RemoveServiceAccount deletes the gateway account on purge.
+	// Purge makes uninstall also remove each enrolled account's per-user
+	// DefenseClaw data and binaries.
+	Purge bool
+	// KeepState makes a (non-purge) uninstall keep the machine state: the
+	// config, secrets, gateway and guardian state, logs and lifecycle
+	// state, and the service account, so a reinstall resumes with them.
+	// Without it uninstall removes all of it.
+	KeepState bool
+	// KeepServiceAccount makes uninstall keep the gateway service account,
+	// which it removes otherwise.
+	KeepServiceAccount bool
+	// RemoveServiceAccount is the older flag for what uninstall now does by
+	// default; it is still accepted.
 	RemoveServiceAccount bool
 	// ProductVersion, when set, must equal the payload's version.
 	ProductVersion string
@@ -105,6 +116,7 @@ const (
 	codeVerify              = "verify_failed"
 	codeState               = "state_unreadable"
 	codeLeftovers           = "unmanaged_leftovers"
+	codeWSL                 = "wsl_distribution"
 )
 
 type lifecycle struct {
@@ -118,6 +130,16 @@ type lifecycle struct {
 	// reportChanges is set while a repair or ensure re-applies an installed
 	// deployment: the result then lists what the transaction changed.
 	reportChanges bool
+	// perUserRemoved counts the per-user hook registrations an uninstall
+	// removed, for its summary.
+	perUserRemoved int
+	// keptPerUser is what each enrolled account keeps after a default
+	// uninstall; keptKnown is false when the accounts record was unreadable.
+	keptPerUser []perUserKept
+	keptKnown   bool
+	// packageManaged is set when the deb/rpm owns the binaries, so the
+	// uninstall leaves them to the package manager.
+	packageManaged bool
 }
 
 // noteChange records one change a repair or ensure made to an installed
@@ -193,6 +215,9 @@ func (l *lifecycle) run(ctx context.Context) int {
 		r.AddError(codeServiceManager, err.Error())
 		return 0
 	}
+	if l.opts.Action != ActionInstall && l.opts.Action != ActionEnsure && env.insideWSL() {
+		r.AddWarning(codeWSL, wslDeploymentWarning)
+	}
 	if readOnly {
 		return l.readOnly(ctx)
 	}
@@ -204,13 +229,26 @@ func (l *lifecycle) run(ctx context.Context) int {
 	lock, err := env.acquireLock(ctx)
 	if err != nil {
 		if errors.Is(err, errLockBusy) {
-			r.AddError(codeBusy, err.Error())
+			r.AddError(codeBusy, err.Error()+"; "+lockBusyNextStep(env.LockTimeout))
 			return enterprisestatus.BusyExitCode(env.GOOS)
 		}
 		r.AddError(codeState, err.Error())
 		return 0
 	}
 	defer lock.release()
+	if l.opts.Action == ActionUninstall {
+		// An uninstall leaves no lifecycle directory holding only its lock
+		// (a rerun, or the package preremove after an uninstall, found
+		// nothing installed and would otherwise recreate it). A kept
+		// deployment record or retained state keeps the directory.
+		defer func() {
+			dir := env.P(env.Layout.LifecycleDir)
+			if entries, err := os.ReadDir(dir); err == nil && len(entries) == 1 && entries[0].Name() == lockFileName {
+				_ = os.Remove(filepath.Join(dir, lockFileName))
+				_ = os.Remove(dir)
+			}
+		}()
+	}
 
 	if !l.recoverInterrupted(ctx) && l.opts.Action != ActionUninstall {
 		// The previous deployment's files are only in the kept snapshot;
@@ -248,8 +286,19 @@ func (l *lifecycle) run(ctx context.Context) int {
 			r.AddError(codeInvalidArguments, "a protected-state change can only be applied by ensure")
 			return enterprisestatus.InvalidArgsExitCode(env.GOOS)
 		}
-		if err := l.opts.Mutate(ctx); err != nil {
+		resume := l.pauseApplyTrigger(ctx)
+		err := l.opts.Mutate(ctx)
+		resume()
+		if err != nil {
 			r.AddError(codeChange, err.Error())
+			return 0
+		}
+		if record == nil && l.opts.PayloadDir == "" && !l.opts.FromPackage {
+			// Staged before the first install (a credential the config
+			// references): the install applies it.
+			r.Noop = true
+			r.NoopReason = "not_installed"
+			r.AddWarning(codeNotInstalled, "DefenseClaw enterprise is not installed yet; the change is stored and the first install applies it")
 			return 0
 		}
 	}
@@ -281,6 +330,9 @@ func (l *lifecycle) run(ctx context.Context) int {
 		if record == nil {
 			return l.settleInputChanges(ctx, l.freshInstall(ctx))
 		}
+		if env.insideWSL() {
+			r.AddWarning(codeWSL, wslDeploymentWarning)
+		}
 		if noop, reason := l.ensureNoop(ctx, record); noop {
 			r.Noop = true
 			r.NoopReason = reason
@@ -308,6 +360,23 @@ func (l *lifecycle) run(ctx context.Context) int {
 		return l.uninstall(ctx, record)
 	}
 	return 0
+}
+
+// pauseApplyTrigger stops the Linux apply path unit while a protected-state
+// change (enterprise secret set or remove) writes under this run's lock, and
+// returns the function that starts it again. This run applies the change
+// itself. Left watching, the path unit started the apply service on that
+// write, and its redundant ensure held the lock for several seconds after
+// this run returned, so a lifecycle command typed right after it failed
+// lifecycle_busy (GAP-2261). The transaction stops the path unit anyway
+// while it applies (quiesce) and starts it again when it activates.
+func (l *lifecycle) pauseApplyTrigger(ctx context.Context) func() {
+	env := l.env
+	unit := Unit{Name: unitApplyPath, Kind: "path"}
+	if env.GOOS != "linux" || !env.Services.Active(ctx, unit) || env.Services.Stop(ctx, unit) != nil {
+		return func() {}
+	}
+	return func() { _ = env.Services.Start(context.WithoutCancel(ctx), unit) }
 }
 
 // codeSuperseded names an apply run that stood down for a newer binary.
@@ -346,8 +415,14 @@ func (l *lifecycle) validateOptions() int {
 	if o.Purge && o.Action != ActionUninstall {
 		return bad("--purge applies only to uninstall")
 	}
-	if o.RemoveServiceAccount && !o.Purge {
-		return bad("--remove-service-account requires uninstall --purge")
+	if (o.KeepState || o.KeepServiceAccount || o.RemoveServiceAccount) && o.Action != ActionUninstall {
+		return bad("--keep-state, --keep-service-account and --remove-service-account apply only to uninstall")
+	}
+	if o.KeepState && o.Purge {
+		return bad("--keep-state and --purge are mutually exclusive")
+	}
+	if o.RemoveServiceAccount && (o.KeepServiceAccount || o.KeepState) {
+		return bad("--remove-service-account contradicts --keep-service-account and --keep-state")
 	}
 	if o.ConfigFile != "" && !filepath.IsAbs(o.ConfigFile) {
 		return bad("--config must be an absolute path")
@@ -355,8 +430,31 @@ func (l *lifecycle) validateOptions() int {
 	return 0
 }
 
+// wslDeploymentWarning reports a deployment that already runs inside WSL.
+const wslDeploymentWarning = "this Linux system is a WSL distribution: the Windows user can open it as root (wsl -u root) and Windows machine policy does not reach it, so DefenseClaw cannot enforce here; govern WSL from the Windows side (enterprise.machine_policy.windows_wsl) and uninstall this deployment"
+
+// insideWSL reports whether this Linux system is a WSL distribution: the
+// interop binfmt handler or /run/WSL is present, or the kernel release
+// names Microsoft.
+func (e *Env) insideWSL() bool {
+	if e.GOOS != "linux" {
+		return false
+	}
+	for _, marker := range []string{"/proc/sys/fs/binfmt_misc/WSLInterop", "/proc/sys/fs/binfmt_misc/WSLInterop-late", "/run/WSL"} {
+		if _, err := os.Stat(e.P(marker)); err == nil {
+			return true
+		}
+	}
+	release, err := os.ReadFile(e.P("/proc/sys/kernel/osrelease"))
+	return err == nil && strings.Contains(strings.ToLower(string(release)), "microsoft")
+}
+
 func (l *lifecycle) freshInstall(ctx context.Context) int {
 	env, r := l.env, l.result
+	if env.insideWSL() {
+		r.AddError(codeWSL, "refusing to install inside a WSL distribution: the Windows user can open it as root (wsl -u root) and Windows machine policy does not reach it, so it is not a boundary DefenseClaw can enforce; govern WSL from the Windows side with enterprise.machine_policy.windows_wsl")
+		return 0
+	}
 	if present, where := env.secureClientPresent(); present {
 		r.AddError(codeProfileConflict, fmt.Sprintf("a Cisco Secure Client DefenseClaw deployment is present (%s); the profiles are mutually exclusive — uninstall it first", where))
 		return 0
@@ -366,7 +464,8 @@ func (l *lifecycle) freshInstall(ctx context.Context) int {
 		channel = ChannelPackage
 	}
 	if l.opts.PayloadDir == "" && !l.opts.FromPackage {
-		r.AddError(codeInvalidArguments, "install needs --payload or --from-package")
+		r.AddError(codeInvalidArguments, "install needs --payload <dir> or --from-package; to apply the installed package, run `"+
+			env.lifecycleCommand(ActionEnsure)+" --from-package`")
 		return enterprisestatus.InvalidArgsExitCode(env.GOOS)
 	}
 	var adopting *adoption
@@ -609,6 +708,9 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 	if err != nil {
 		return nil, &codedError{code: codeConfig, err: err}
 	}
+	if err := env.checkRulePacksReadable(validated, account); err != nil {
+		return nil, &codedError{code: codeConfig, err: err}
+	}
 	p.config = validated
 
 	p.secrets, p.secretsSHA, err = env.listSecrets()
@@ -707,6 +809,9 @@ func recordBinaries(env *Env, record *Deployment) map[string]string {
 func (l *lifecycle) configBytes() (data []byte, fromInstalled bool, err error) {
 	env := l.env
 	if l.opts.ConfigFile != "" {
+		if err := trustedInputFile(l.opts.ConfigFile, "--config"); err != nil {
+			return nil, false, err
+		}
 		data, err = readBounded(l.opts.ConfigFile, maxInputBytes)
 		return data, false, err
 	}
@@ -902,10 +1007,24 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	if err != nil {
 		return failAndRollback(codeApply, err)
 	}
+	if err := env.settleSecretModes(ctx, account); err != nil {
+		return failAndRollback(codeApply, err)
+	}
 	changed, err := l.applyFiles(p)
 	if err != nil {
 		return failAndRollback(codeApply, err)
 	}
+	if record != nil {
+		// An edit made in place (the config-apply trigger) is never rewritten,
+		// so applyFiles does not name it; the result still says it was applied.
+		if p.configFromInstalled && p.config.SHA != record.ConfigSHA256 {
+			l.noteChange("applied the edited %s", env.Layout.ConfigPath)
+		}
+		if p.secretsSHA != record.SecretsSHA256 {
+			l.noteChange("applied the changed secrets")
+		}
+	}
+	changesApplied := len(r.Changes) > changesBefore
 	// Vendor machine policy goes in before the services start so the
 	// gateway loads a descriptor that names exactly the connectors whose
 	// hooks are in place.
@@ -948,8 +1067,14 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 			return failAndRollback(codeActivate, err)
 		}
 		for _, unit := range units {
-			if unit.Activate && !contains(previouslyActive, unit.Name) && env.Services.Active(ctx, unit) {
+			if !unit.Activate || !env.Services.Active(ctx, unit) {
+				continue
+			}
+			switch {
+			case !contains(previouslyActive, unit.Name):
 				l.noteChange("started %s, which was not running", unit.Name)
+			case changesApplied && unit.Kind == "gateway":
+				l.noteChange("restarted %s to load the change", unit.Name)
 			}
 		}
 	} else {
@@ -1224,8 +1349,12 @@ func (l *lifecycle) activate(ctx context.Context, units []Unit, restartSockets m
 		if !unit.Activate {
 			continue
 		}
+		wasDisabled := unitDisabled(ctx, env.Services, unit)
 		if err := env.Services.Enable(ctx, unit); err != nil {
 			return fmt.Errorf("enable %s: %w", unit.Name, err)
+		}
+		if wasDisabled {
+			l.noteChange("re-enabled %s, which was disabled and would not start after a reboot", unit.Name)
 		}
 		if unit.Name == env.SelfUnit {
 			// Already running: this transaction executes inside it.
@@ -1492,25 +1621,49 @@ func (l *lifecycle) reconcile(ctx context.Context, record *Deployment) int {
 	return 0
 }
 
-// uninstall stops and removes the deployment. Config, secrets and state
-// stay unless purge is set.
+// uninstall stops and removes the deployment, with its machine state (the
+// config, secrets, gateway and guardian state, logs and lifecycle state) and
+// the service account. Each account keeps its own ~/.defenseclaw and
+// per-user binaries unless purge is set. KeepState keeps the machine state
+// for a reinstall to resume with.
 func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	env, r := l.env, l.result
 	units := env.Services.Units()
 	if record == nil && !l.opts.Purge {
 		r.Noop = true
 		r.NoopReason = "not_installed"
+		// After a failed first package install, give the same finish step
+		// as status and verify (GAP-2410).
+		failure := env.lastPackageInstallFailure()
+		env.warnPackageInstallFailed(r, failure)
 		if leftovers := env.unmanagedLeftovers(env.Services, ChannelPayload); len(leftovers) > 0 {
-			r.AddWarning(codeLeftovers, "no committed deployment, but DefenseClaw machine state exists ("+strings.Join(leftovers, ", ")+"); "+env.leftoversNextStep(ctx))
+			r.AddWarning(codeLeftovers, "no committed deployment, but DefenseClaw machine state exists ("+strings.Join(leftovers, ", ")+"); "+env.leftoversNextStep(ctx, failure != ""))
 		}
 		return 0
+	}
+	if !l.opts.Purge {
+		// Read before the machine state, and the accounts record with it, go.
+		l.keptPerUser, l.keptKnown = env.perUserLeftovers()
 	}
 	ordered := append([]Unit{}, units...)
 	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Stage > ordered[j].Stage })
 	stopUnit := func(unit Unit) {
 		_ = env.Services.Stop(ctx, unit)
-		if unit.Activate {
+		// On macOS launchctl disable writes an override into launchd's
+		// database that no command can delete (GAP-1443). The definitions
+		// are removed below; one that stays is disabled there.
+		if unit.Activate && env.GOOS != "darwin" {
 			_ = env.Services.Disable(ctx, unit)
+		}
+	}
+	disableKeptDefinitions := func() {
+		if env.GOOS != "darwin" {
+			return
+		}
+		for _, unit := range units {
+			if unit.Activate && exists(env.P(env.Services.DefinitionPath(unit, ChannelPayload))) {
+				_ = env.Services.Disable(ctx, unit)
+			}
 		}
 	}
 	// The guardian repairs any DefenseClaw registration that goes missing
@@ -1529,9 +1682,22 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	// Per-user registrations go first, while the binaries they name still
 	// exist: each user's worker removes only DefenseClaw's own entries (and,
 	// on purge, that user's DefenseClaw state).
+	//
+	// Without a deployment record (after a default or --keep-state
+	// uninstall) a purge still finds the enrolled accounts when the
+	// enrollment record and the config it needs are there; otherwise it
+	// names the accounts whose per-user files stay (GAP-2632).
 	perUserLeft := false
-	if record != nil && exists(filepath.Join(env.P(env.Layout.BinDir), binGateway)) {
+	gatewayPresent := exists(filepath.Join(env.P(env.Layout.BinDir), binGateway))
+	enrollmentKept := exists(env.P(env.Layout.ManifestPath)) && exists(env.P(env.Layout.ConfigPath))
+	// Without a record, the package database says whether the deb/rpm owns
+	// the binaries: a purge deleted those of an installed rpm (GAP-2632).
+	l.packageManaged = env.GOOS == "linux" && (record != nil && record.Channel == ChannelPackage ||
+		record == nil && gatewayPresent && env.packageOwned(ctx, filepath.Join(env.Layout.BinDir, binGateway)))
+	if gatewayPresent && (record != nil || enrollmentKept) {
 		perUserLeft = l.removePerUserRegistrations(ctx)
+	} else if record == nil {
+		l.warnUnpurgedPerUser(ctx)
 	}
 	// DefenseClaw's vendor machine policy entries go next, while the hook
 	// binary they name still exists; administrator entries stay byte for
@@ -1552,6 +1718,7 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 		}
 	}
 	if perUserLeft {
+		disableKeptDefinitions()
 		// Some users' agents still name the hook binary. Removing it now
 		// would leave those registrations calling a program that no longer
 		// exists, with nothing left to remove them: the binaries, the
@@ -1565,7 +1732,7 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	}
 	// On Linux the deb/rpm removes its own files. A macOS pkg has no
 	// uninstaller, so the lifecycle removes the binaries and the receipt.
-	packageManaged := record != nil && record.Channel == ChannelPackage && env.GOOS == "linux"
+	packageManaged := l.packageManaged
 	paths := []string{}
 	if record != nil {
 		for path := range record.Files {
@@ -1582,8 +1749,8 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	}
 	sort.Strings(paths)
 	for _, path := range paths {
-		if path == env.Layout.ConfigPath && !l.opts.Purge {
-			continue
+		if path == env.Layout.ConfigPath {
+			continue // machine state: removed with its directory below
 		}
 		if err := removeFile(env.P(path)); err != nil {
 			errs = append(errs, err)
@@ -1603,6 +1770,26 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 			names = append(names, unit.Name)
 		}
 		_, _ = env.Runner.Run(ctx, "systemctl", append([]string{"reset-failed"}, names...)...)
+		// A Persistent= timer leaves its last-trigger stamp behind.
+		for _, name := range append(names, legacyLinuxUnits...) {
+			if strings.HasSuffix(name, ".timer") {
+				_ = removeFile(env.P(systemdTimerStampPath(name)))
+			}
+		}
+	}
+	if env.GOOS == "darwin" {
+		// launchctl disable writes an override to launchd's database that
+		// outlives the job, and launchctl cannot delete one. A label that an
+		// older version or --no-start disabled goes back to launchd's
+		// default, enabled, once its definition is gone (Enable writes
+		// nothing for a label that is not disabled). A definition that is
+		// still there is disabled, so a reboot does not start it.
+		for _, unit := range units {
+			if unit.Activate && !exists(env.P(env.Services.DefinitionPath(unit, ChannelPayload))) {
+				_ = env.Services.Enable(ctx, unit)
+			}
+		}
+		disableKeptDefinitions()
 	}
 	_ = os.RemoveAll(env.P(env.Layout.HookSocketDir))
 	// Runtime leftovers of the stopped services: the sensor helper's socket
@@ -1633,13 +1820,29 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 		}
 	}
 	_ = env.clearPending()
+	// An interrupted credential rotation ends here too: the services are
+	// stopped, so its staged key would otherwise outlive the deployment and
+	// be accepted again by a reinstall until a lifecycle run settled it.
+	// The committed key stays with the retained state.
+	if err := env.removeRotationKeys(); err != nil {
+		errs = append(errs, err)
+	} else if err := env.clearRotationIntent(); err != nil {
+		errs = append(errs, err)
+	}
 	// No config is running once the deployment is gone; a reinstall that
 	// keeps the retained config.yaml starts without an old rejection.
 	_ = removeFile(env.rejectedConfigPath())
 	_ = os.RemoveAll(filepath.Join(env.P(env.Layout.LifecycleDir), snapshotsDirName))
 	env.removeSideStores("")
 
-	if l.opts.Purge {
+	// The machine state goes too (owner decision: the default uninstall
+	// removes the services and the machine state; only each account's own
+	// data stays). A purge removes it whatever failed above; the default
+	// uninstall only once everything above succeeded, so a failed one keeps
+	// the deployment record, the config and the state for a rerun, or for
+	// an ensure that restores the deployment.
+	removeState := l.opts.Purge || (!l.opts.KeepState && len(errs) == 0)
+	if removeState {
 		for _, dir := range []string{env.Layout.ConfigDir, env.Layout.DataDir, env.Layout.GuardianAuthDir, env.Layout.LogDir, env.Layout.LifecycleDir} {
 			if err := os.RemoveAll(env.P(dir)); err != nil {
 				errs = append(errs, err)
@@ -1654,14 +1857,14 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 			_ = removeDirIfEmpty(env.P("/opt/cisco"))
 			_ = removeDirIfEmpty(env.P("/Library/Logs/Cisco"))
 		}
-		if l.opts.RemoveServiceAccount {
+		if !l.opts.KeepServiceAccount {
 			if err := env.Accounts.Remove(ctx, env.Layout.ServiceUser); err != nil {
 				errs = append(errs, err)
 			}
 		}
 	}
 	if err := errors.Join(errs...); err != nil {
-		if !l.opts.Purge && record != nil {
+		if !removeState && record != nil {
 			// The deployment record stays until the removal is complete:
 			// without it a rerun of uninstall is a no-op and a reinstall
 			// (the package postinstall, an MDM ensure) refuses the kept state
@@ -1673,7 +1876,7 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 		return 0
 	}
 	_ = removeFile(env.deploymentPath())
-	if !l.opts.Purge && record != nil {
+	if l.opts.KeepState && record != nil {
 		// Record what stays so a reinstall resumes with it instead of
 		// refusing it as an unmanaged layout.
 		if err := env.recordRetainedState(); err != nil {
@@ -1681,7 +1884,44 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 		}
 	}
 	r.Installed = false
+	r.Changes = append(r.Changes, l.uninstallSummary(record)...)
 	return 0
+}
+
+// uninstallSummary says what a completed uninstall removed and kept, like
+// the change list of ensure and repair. A bare "uninstall: done" did not
+// tell the administrator what happened to the machine state or to the
+// users' own data (GAP-1227).
+func (l *lifecycle) uninstallSummary(record *Deployment) []string {
+	env, r := l.env, l.result
+	layout := env.Layout
+	removed := "stopped and removed the DefenseClaw services, binaries and deployment record"
+	if l.packageManaged {
+		removed = "stopped and removed the DefenseClaw services and deployment record (the package manager removes the package's files)"
+	}
+	lines := []string{removed}
+	if l.perUserRemoved > 0 {
+		lines = append(lines, fmt.Sprintf("removed %d DefenseClaw per-user hook registrations from the enrolled accounts", l.perUserRemoved))
+	}
+	if len(r.MachinePolicy) > 0 {
+		lines = append(lines, "removed DefenseClaw's machine policy entries for "+strings.Join(sortedKeys(r.MachinePolicy), ", "))
+	}
+	state := fmt.Sprintf("the managed config and secrets (%s), the gateway and guardian state (%s, %s), the logs (%s)",
+		layout.ConfigDir, layout.DataDir, layout.GuardianAuthDir, layout.LogDir)
+	switch {
+	case l.opts.KeepState:
+		lines = append(lines, "kept for a reinstall: "+state+" and the service account "+layout.ServiceUser)
+	case l.opts.KeepServiceAccount:
+		lines = append(lines, "removed the machine state: "+state+" and the lifecycle state ("+layout.LifecycleDir+"); kept the service account "+layout.ServiceUser)
+	default:
+		lines = append(lines, "removed the machine state: "+state+", the lifecycle state ("+layout.LifecycleDir+") and the service account "+layout.ServiceUser)
+	}
+	if !l.opts.Purge {
+		if kept := l.keptPerUserLine(record); kept != "" {
+			lines = append(lines, kept)
+		}
+	}
+	return lines
 }
 
 // removePerUserRegistrations runs `enterprise hooks remove-all` (with
@@ -1706,10 +1946,15 @@ func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 		Pending     []string `json:"pending"`
 		Failed      []string `json:"failed"`
 		StateFailed []string `json:"state_failed"`
+		Purged      []string `json:"purged"`
+		Removed     int      `json:"removed"`
+		// PurgedDetail is absent from an installed binary that predates it.
+		PurgedDetail map[string]purgedUserDetail `json:"purged_detail"`
 	}
 	if jsonErr := json.Unmarshal(out.Stdout, &report); jsonErr != nil && err == nil {
 		return false
 	}
+	l.perUserRemoved = report.Removed
 	rerun := "`" + l.uninstallCommand() + "`"
 	left := false
 	for _, entry := range report.Failed {
@@ -1734,9 +1979,59 @@ func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 	}
 	for _, entry := range report.StateFailed {
 		user, reason, _ := strings.Cut(entry, ": ")
-		r.AddWarning(codePerUserState, fmt.Sprintf("the DefenseClaw per-user state of user %s was not removed: %s", user, reason))
+		r.AddWarning(codePerUserState, fmt.Sprintf("the DefenseClaw per-user data and binaries of user %s were not removed: %s; fix the cause and rerun %s", user, reason, rerun))
+	}
+	// A purge deletes data an account created before the install; name each
+	// account, instead of a bare "done".
+	for _, user := range report.Purged {
+		var detail *purgedUserDetail
+		if found, ok := report.PurgedDetail[user]; ok {
+			detail = &found
+		}
+		r.Changes = append(r.Changes, purgedUserChange(user, detail))
 	}
 	return left
+}
+
+// purgedUserDetail is what the purge found and removed for one account.
+type purgedUserDetail struct {
+	Data     bool `json:"data"`
+	Binaries bool `json:"binaries"`
+	Gateway  bool `json:"gateway"`
+	UVCache  bool `json:"uv_cache"`
+}
+
+// purgedUserChange names what the purge removed for user: only what it
+// found, so an account that never had a per-user install is not said to
+// have lost per-user binaries and a gateway (GAP-1444). Without detail (an
+// installed binary from before it) it names everything the purge covers.
+func purgedUserChange(user string, detail *purgedUserDetail) string {
+	const data = "all DefenseClaw per-user data of user %s (~/.defenseclaw, including its hook scripts and the foreign-hooks-backup folder)"
+	if detail == nil {
+		return fmt.Sprintf("removed "+data+" and its per-user binaries and launcher links in ~/.local/bin, after stopping its per-user gateway", user)
+	}
+	var text string
+	switch {
+	case detail.Data && detail.Binaries:
+		text = fmt.Sprintf("removed "+data+" and its per-user binaries and launcher links in ~/.local/bin", user)
+	case detail.Data:
+		text = fmt.Sprintf("removed "+data, user)
+	case detail.Binaries:
+		text = fmt.Sprintf("removed the DefenseClaw per-user binaries and launcher links of user %s in ~/.local/bin", user)
+	case detail.UVCache:
+		text = fmt.Sprintf("removed DefenseClaw's entries in the uv cache (~/.cache/uv) of user %s", user)
+	default:
+		text = fmt.Sprintf("found no DefenseClaw per-user data or binaries of user %s to remove", user)
+	}
+	// Earlier per-user installers left a DefenseClaw wheel in the account's
+	// uv cache per install; the purge removes those too (GAP-1947).
+	if detail.UVCache && (detail.Data || detail.Binaries) {
+		text += ", and DefenseClaw's entries in its uv cache (~/.cache/uv)"
+	}
+	if detail.Gateway {
+		text += ", after stopping its per-user gateway"
+	}
+	return text
 }
 
 // uninstallCommand is this run's uninstall command line, for a rerun.
@@ -1745,8 +2040,11 @@ func (l *lifecycle) uninstallCommand() string {
 	if l.opts.Purge {
 		command += " --purge"
 	}
-	if l.opts.RemoveServiceAccount {
-		command += " --remove-service-account"
+	if l.opts.KeepState {
+		command += " --keep-state"
+	}
+	if l.opts.KeepServiceAccount {
+		command += " --keep-service-account"
 	}
 	return command
 }

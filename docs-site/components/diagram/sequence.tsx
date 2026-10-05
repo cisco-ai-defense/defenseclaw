@@ -3,8 +3,8 @@ import {
   type DiagramKind,
   type MessageKind,
   KIND_TO_STYLE,
-  CHAR_WIDTH,
   DiagramDefs,
+  estimateTextWidth,
   DiagramKindIcon,
   ForeignDiv,
   nextDiagramId,
@@ -64,9 +64,14 @@ interface ResolvedMessage extends MessageProps {
   toIdx: number;
 }
 
-const PILL_PAD_X = 20;
-const PILL_HEIGHT = 58;
-const PILL_MAX_WIDTH = 146;
+const PILL_PAD_X = 12;
+// Room for the role glyph in front of the label (14px + 8px gap).
+const PILL_ICON_SPACE = 22;
+// Two lines of 12.5px text: a long participant label wraps instead of
+// being cut off with an ellipsis.
+const PILL_HEIGHT = 50;
+const PILL_MIN_WIDTH = 104;
+const PILL_MAX_WIDTH = 168;
 const COL_MIN_GAP = 150;
 // Cap how wide any single column gap can grow. Without this, one
 // 60-char message label can push every other column outward and
@@ -82,13 +87,18 @@ const BOTTOM_MARGIN = 30;
 const SIDE_MARGIN = 24;
 const CHIP_MIN_WIDTH = 40;
 const CHIP_MAX_WIDTH = 300;
-const CHIP_CHAR_WIDTH = 6.5;
+// Message labels are 12px semibold; participant labels 12.5px.
+const CHIP_FONT = 12;
+const PILL_FONT = 12.5;
+// 6px padding a side plus 8px of safety for the estimate.
 const CHIP_PAD_X = 20;
 // Same chip-width estimator used inside the renderer (see
 // SequenceLabelChip below). Hoisted so the layout stage can reserve
 // the right amount of space per column without rendering yet.
 function estimateChipWidth(label: string): number {
-  return Math.min(CHIP_MAX_WIDTH, Math.max(CHIP_MIN_WIDTH, label.length * CHIP_CHAR_WIDTH + CHIP_PAD_X));
+  return Math.ceil(
+    Math.min(CHIP_MAX_WIDTH, Math.max(CHIP_MIN_WIDTH, estimateTextWidth(label, CHIP_FONT) + CHIP_PAD_X)),
+  );
 }
 
 // Filter Message children out of the JSX tree, ignoring whitespace
@@ -131,7 +141,10 @@ export function Sequence({
 
   // Resolve pill widths from the label characters.
   const pillWidths = participants.map((p) =>
-    Math.min(PILL_MAX_WIDTH, Math.max(128, p.label.length * CHAR_WIDTH + PILL_PAD_X * 2 + 22)),
+    Math.min(
+      PILL_MAX_WIDTH,
+      Math.max(PILL_MIN_WIDTH, Math.ceil(estimateTextWidth(p.label, PILL_FONT) + PILL_PAD_X * 2 + PILL_ICON_SPACE + 6)),
+    ),
   );
 
   const idIndex = new Map(participants.map((p, i) => [p.id, i]));
@@ -247,40 +260,13 @@ export function Sequence({
       role="img"
       aria-label={ariaLabel}
       preserveAspectRatio="xMidYMid meet"
-      // Hidden on phones — the timeline list below renders the same
-      // information stacked vertically. Both renders ship in the
-      // same SSR HTML; no JS for the swap.
-      className="fd-seq-svg hidden sm:block"
+      // Hidden inline on phones (global.css, figure[data-mobile=stack])
+      // — the timeline list renders the same information stacked
+      // vertically. Both renders ship in the same SSR HTML; no JS for
+      // the swap, and the expanded view still shows this drawing.
+      className="fd-seq-svg"
     >
       <DiagramDefs id={id} />
-
-      {/* Alternating swimlane bands make participant ownership readable at
-          a glance without the graph-paper texture used by the old system. */}
-      {resolved.map((participant, index) => {
-        const previousX = resolved[index - 1]?.x;
-        const nextX = resolved[index + 1]?.x;
-        const left = index === 0
-          ? 8
-          : (previousX! + participant.x) / 2;
-        const right = index === resolved.length - 1
-          ? totalWidth - 8
-          : (participant.x + nextX!) / 2;
-        return (
-          <rect
-            key={`lane-${participant.id}`}
-            className="fd-seq-lane"
-            x={left}
-            y={lifelineTop - 8}
-            width={right - left}
-            height={totalHeight - lifelineTop - BOTTOM_MARGIN + 16}
-            style={{
-              fill: index % 2 === 0
-                ? 'var(--diagram-lane-bg)'
-                : 'transparent',
-            }}
-          />
-        );
-      })}
 
       {/*
         Animation cadence (gated on the parent figure's
@@ -323,32 +309,27 @@ export function Sequence({
         />
       ))}
 
-      {/* Numbered message rows create an audit-trace reading rhythm. */}
+      {/* Step numbers in the left margin match the numbered phone
+          timeline, so a reader can say "step 4" in either view. */}
       {messages.map((_, index) => {
         const y = lifelineTop + 28 + index * MESSAGE_GAP;
         return (
-          <g key={`row-${index}`} className="fd-seq-row-guide">
-            <line
-              x1={12}
-              x2={totalWidth - 12}
-              y1={y + 23}
-              y2={y + 23}
-              style={{ stroke: 'var(--diagram-row-rule)', strokeWidth: 1 }}
-            />
-            <text
-              x={14}
-              y={y + 4}
-              style={{
-                fill: 'var(--diagram-row-number)',
-                fontFamily: 'var(--font-mono), ui-monospace, monospace',
-                fontSize: '9px',
-                fontWeight: 700,
-                letterSpacing: '0.08em',
-              }}
-            >
-              {String(index + 1).padStart(2, '0')}
-            </text>
-          </g>
+          <text
+            key={`row-${index}`}
+            className="fd-seq-row-guide"
+            x={6}
+            y={y + 4}
+            aria-hidden="true"
+            style={{
+              fill: 'var(--diagram-row-number)',
+              fontFamily: 'var(--font-sans), system-ui, sans-serif',
+              fontSize: '11px',
+              fontWeight: 600,
+              fontVariantNumeric: 'tabular-nums',
+            }}
+          >
+            {index + 1}
+          </text>
         );
       })}
 
@@ -383,6 +364,7 @@ export function Sequence({
             label={m.label}
             kind={m.kind ?? 'sync'}
             markerId={id}
+            diagramWidth={totalWidth}
             animationDelay={messageDelay}
             labelAnimationDelay={labelDelay}
           />
@@ -398,13 +380,16 @@ export function Sequence({
       naturalHeight={totalHeight}
       ariaLabel={ariaLabel}
       oversize={oversize}
+      mobile={messages.length > 0 ? 'stack' : 'scale'}
+      mobileFallback={
+        <SequenceTimelineList
+          participants={resolved}
+          messages={messages}
+          ariaLabel={ariaLabel}
+        />
+      }
     >
       {svg}
-      <SequenceTimelineList
-        participants={resolved}
-        messages={messages}
-        ariaLabel={ariaLabel}
-      />
     </DiagramLightbox>
   );
 }
@@ -430,23 +415,24 @@ function SequenceTimelineList({
     <ol
       role="list"
       aria-label={`${ariaLabel} (timeline view)`}
-      className="diagram-timeline not-prose sm:hidden"
+      className="diagram-timeline not-prose"
     >
       {messages.map((m, i) => {
         const from = participants[m.fromIdx];
         const to = participants[m.toIdx];
         const isNote = Boolean(m.note);
-        const isReturn = m.kind === 'return';
-        const isAsync = m.kind === 'async';
-        const arrow = isReturn ? '←' : isAsync ? '⇢' : '→';
+        // Always read "from → to"; a reply is marked in words, not by
+        // flipping the arrow (which made "Policy ← Gateway" read as
+        // the gateway sending to the policy).
+        const kindNote = m.kind === 'return' ? 'reply' : m.kind === 'async' ? 'async' : undefined;
         return (
           <li
             key={`tl-${i}`}
             className={`diagram-timeline-row${isNote ? ' is-note' : ''}`}
           >
             <div className="diagram-timeline-meta">
-              <span className="font-mono tabular-nums">
-                {String(i + 1).padStart(2, '0')}
+              <span className="diagram-timeline-step tabular-nums">
+                {i + 1}
               </span>
               {isNote ? (
                 <span className="font-medium text-fd-foreground">
@@ -457,9 +443,11 @@ function SequenceTimelineList({
                 <span className="font-medium text-fd-foreground">
                   {from.label}{' '}
                   <span aria-hidden className="text-fd-muted-foreground">
-                    {arrow}
-                  </span>{' '}
+                    →
+                  </span>
+                  <span className="sr-only"> to </span>{' '}
                   {to.label}
+                  {kindNote && <span className="diagram-timeline-kind">{kindNote}</span>}
                 </span>
               )}
             </div>
@@ -522,27 +510,16 @@ function ParticipantPill({
         y={y}
         width={p.pillW}
         height={p.pillH}
-        rx={6}
-        ry={6}
+        rx={7}
+        ry={7}
         style={{
           fill: p.emphasis
             ? 'var(--diagram-node-emphasis-bg)'
             : 'var(--diagram-node-bg)',
           stroke,
-          strokeWidth: p.emphasis ? 1.6 : 1,
+          strokeWidth: p.emphasis ? 1.5 : 1,
         }}
       />
-      {accent && (
-        <rect
-          x={x}
-          y={y}
-          width={4}
-          height={p.pillH}
-          rx={3}
-          ry={3}
-          style={{ fill: p.emphasis ? 'var(--diagram-accent-blue)' : accent }}
-        />
-      )}
       <foreignObject x={x} y={y} width={p.pillW} height={p.pillH}>
         <ForeignDiv
           style={{
@@ -552,57 +529,39 @@ function ParticipantPill({
             flexDirection: 'row',
             alignItems: 'center',
             justifyContent: 'center',
-            gap: '10px',
-            padding: '8px 12px 8px 14px',
+            gap: '8px',
+            padding: `6px ${PILL_PAD_X}px`,
             boxSizing: 'border-box',
             fontFamily: 'var(--font-sans), system-ui, sans-serif',
             fontSize: '12.5px',
-            fontWeight: p.emphasis ? 680 : 620,
+            fontWeight: p.emphasis ? 650 : 600,
+            lineHeight: 1.2,
             color: 'var(--diagram-text)',
             letterSpacing: '-0.01em',
             textAlign: 'left',
-            whiteSpace: 'nowrap',
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
           }}
         >
           <span
+            aria-hidden
             style={{
               display: 'inline-flex',
               flex: '0 0 auto',
-              alignItems: 'center',
-              justifyContent: 'center',
-              width: '28px',
-              height: '28px',
-              border: `1px solid color-mix(in oklab, ${accent} 28%, var(--diagram-border))`,
-              borderRadius: '5px',
-              background: `color-mix(in oklab, ${accent} 8%, var(--diagram-node-bg))`,
-              color: accent,
+              color: p.emphasis ? 'var(--diagram-accent-blue)' : accent,
             }}
-            aria-hidden
           >
-            <DiagramKindIcon kind={kind} />
+            <DiagramKindIcon kind={kind} size={14} />
           </span>
           <span
             style={{
-              display: 'flex',
               minWidth: 0,
-              flex: '1 1 auto',
-              flexDirection: 'column',
+              overflow: 'hidden',
+              overflowWrap: 'anywhere',
+              display: '-webkit-box',
+              WebkitLineClamp: 2,
+              WebkitBoxOrient: 'vertical',
             }}
           >
-            <span style={{
-              color: accent,
-              fontFamily: 'var(--font-mono), ui-monospace, monospace',
-              fontSize: '8px',
-              fontWeight: 750,
-              letterSpacing: '0.09em',
-              lineHeight: 1,
-              textTransform: 'uppercase',
-            }}>{style.label}</span>
-            <span style={{ marginTop: '4px', overflow: 'hidden', textOverflow: 'ellipsis', width: '100%' }}>
-              {p.label}
-            </span>
+            {p.label}
           </span>
         </ForeignDiv>
       </foreignObject>
@@ -617,6 +576,7 @@ function SequenceArrow({
   label,
   kind,
   markerId,
+  diagramWidth,
   animationDelay,
   labelAnimationDelay,
 }: {
@@ -626,6 +586,9 @@ function SequenceArrow({
   label?: string;
   kind: MessageKind;
   markerId: string;
+  // Labels are kept inside [20, diagramWidth - 6] (clear of the step numbers) so a label wider than
+  // its arrow never runs off the drawing.
+  diagramWidth: number;
   // Row-staggered entrance delay; gated on the parent figure's
   // `data-animate="entered"`. The arrow slides in from the left
   // (transform-origin set in global.css), the label fades in 200ms
@@ -635,15 +598,19 @@ function SequenceArrow({
 }) {
   const isReturn = kind === 'return';
   const isAsync = kind === 'async';
+  // Replies are dashed and one step lighter; they keep full opacity so
+  // the line still clears 3:1 against the canvas.
   const stroke = from.emphasis || to.emphasis
     ? 'var(--diagram-accent-blue)'
-    : 'var(--diagram-edge-strong)';
+    : isReturn
+      ? 'var(--diagram-edge)'
+      : 'var(--diagram-edge-strong)';
   const arrow =
     from.emphasis || to.emphasis
       ? `${markerId}-arrow-emphasis`
       : `${markerId}-arrow`;
   const dasharray = isReturn ? '5 4' : isAsync ? '2 4' : undefined;
-  const opacity = isReturn ? 0.75 : 1;
+  const opacity = 1;
 
   // Self-message: render a small loop on the right side of the lifeline.
   if (from.id === to.id) {
@@ -673,6 +640,7 @@ function SequenceArrow({
             y={y + r}
             label={label}
             anchor="start"
+            diagramWidth={diagramWidth}
             animationDelay={labelAnimationDelay}
           />
         )}
@@ -707,9 +675,10 @@ function SequenceArrow({
       {label && (
         <SequenceLabelChip
           x={(x1 + x2) / 2}
-          y={y - 18}
+          y={y - 16}
           label={label}
           anchor="middle"
+          diagramWidth={diagramWidth}
           animationDelay={labelAnimationDelay}
         />
       )}
@@ -722,21 +691,24 @@ function SequenceLabelChip({
   y,
   label,
   anchor,
+  diagramWidth,
   animationDelay,
 }: {
   x: number;
   y: number;
   label: string;
   anchor: 'start' | 'middle' | 'end';
+  diagramWidth: number;
   animationDelay?: string;
 }) {
   const w = estimateChipWidth(label);
   const h = 22;
   const offsetX = anchor === 'middle' ? -w / 2 : anchor === 'end' ? -w : 0;
+  const left = Math.max(20, Math.min(x + offsetX, diagramWidth - 6 - w));
   return (
     <foreignObject
       className="fd-seq-message-label"
-      x={x + offsetX}
+      x={left}
       y={y - h / 2}
       width={w}
       height={h}
@@ -751,12 +723,13 @@ function SequenceLabelChip({
           justifyContent: 'center',
           padding: '0 6px',
           boxSizing: 'border-box',
-          fontFamily: 'var(--font-mono), ui-monospace, SFMono-Regular, Menlo, monospace',
-          fontSize: '11px',
-          fontWeight: 620,
+          fontFamily: 'var(--font-sans), system-ui, sans-serif',
+          fontSize: '12px',
+          fontWeight: 560,
           lineHeight: 1.15,
           color: 'var(--diagram-edge-label)',
           background: 'var(--diagram-canvas)',
+          borderRadius: '4px',
           whiteSpace: 'nowrap',
           overflow: 'hidden',
           textOverflow: 'ellipsis',

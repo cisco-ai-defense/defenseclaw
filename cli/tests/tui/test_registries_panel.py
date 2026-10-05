@@ -87,6 +87,23 @@ def test_registry_index_loader_reads_configurable_data_dir(tmp_path: Path) -> No
     assert index.verdicts[0].name == "demo-skill"
 
 
+def test_registry_index_loader_reads_older_reject_as_rejected(tmp_path: Path) -> None:
+    # GAP-2371: an older reject stored status "blocked" and counted it under B.
+    write_index(
+        tmp_path,
+        "sf1-local",
+        {
+            "blocked_count": 1,
+            "verdicts": [{"name": "deepwiki", "type": "mcp", "status": "blocked", "rejected": True}],
+        },
+    )
+
+    index = load_registry_index(tmp_path, "sf1-local")
+
+    assert index.verdicts[0].status == "rejected"
+    assert (index.blocked_count, index.rejected_count) == (0, 1)
+
+
 def test_registry_index_loader_missing_file_is_an_error(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
         load_registry_index(tmp_path, "no-such")
@@ -246,9 +263,9 @@ def test_registries_panel_focus_entry_miss_shows_full_entries_table(tmp_path: Pa
 def test_registries_panel_handle_key_tabs(tmp_path: Path) -> None:
     panel = new_panel(tmp_path)
 
-    assert panel.handle_key("2").handled is True
+    assert panel.handle_key("l").handled is True
     assert panel.current_tab == RegistriesTab.ENTRIES
-    assert panel.handle_key("3").handled is True
+    assert panel.handle_key("l").handled is True
     assert panel.current_tab == RegistriesTab.APPROVED
 
 
@@ -319,6 +336,8 @@ def test_registries_panel_mixed_effective_state_toggles_broad_enforcement_on(tmp
             "claudecode": PerConnectorGuardrailConfig(),
         },
     )
+    cfg.asset_policy.enabled = True
+    cfg.asset_policy.mode = "action"
     cfg.asset_policy.skill.registry_required = True
     cfg.asset_policy.connectors["codex"] = PerConnectorAssetPolicy(
         skill=PerConnectorAssetTypePolicy(registry_required=False),
@@ -326,12 +345,72 @@ def test_registries_panel_mixed_effective_state_toggles_broad_enforcement_on(tmp
     panel = RegistriesPanelModel(cfg)
     panel.set_tab(RegistriesTab.ENTRIES)
 
-    action = panel.handle_key("R")
+    action = panel.handle_key("e")
 
     assert action.intent is not None
     assert action.intent.args == (
         "registry", "require", "--type", "skill", "--enabled", "--json",
     )
+    assert action.intent.risk == "mutation"
+    assert "refused" in action.intent.hint
+
+
+def test_registries_require_confirm_and_toast_say_nothing_is_refused_while_policy_is_off(
+    tmp_path: Path,
+) -> None:
+    """GAP-2512: asset policy off/observe refuses nothing; the TUI said it would."""
+    from defenseclaw.tui.panels.registries import registry_result_summary
+
+    write_index(
+        tmp_path,
+        "smithery-public",
+        {"verdicts": [{"name": "deepwiki", "type": "mcp", "status": "clean"}]},
+    )
+    panel = new_panel(tmp_path)
+    panel.config.asset_policy.enabled = False
+    panel.config.asset_policy.mode = "observe"
+    panel.set_tab(RegistriesTab.ENTRIES)
+
+    intent = panel.handle_key("e").intent
+
+    assert intent is not None
+    assert intent.args == ("registry", "require", "--type", "mcp", "--enabled", "--json")
+    assert "refused" not in intent.hint
+    assert "refused" not in intent.consequence
+    assert "Asset policy is off: nothing is blocked yet" in intent.consequence
+    assert "registry require --type mcp --enabled --enforce" in intent.consequence
+
+    panel.config.asset_policy.enabled = True
+    observe = panel.handle_key("e").intent
+    assert observe is not None
+    assert "Asset policy mode is observe" in observe.consequence
+
+    panel.config.asset_policy.mode = "action"
+    armed = panel.handle_key("e").intent
+    assert armed is not None
+    assert "will be refused" in armed.consequence
+
+    off = {"status": "ok", "asset_type": "mcp", "registry_required": True, "enforcing": False,
+           "asset_policy_enabled": False, "asset_policy_mode": "observe"}
+    assert registry_result_summary(json.dumps(off)) == (
+        "registry approval now required for mcp assets · not enforced: asset policy is off"
+    )
+    on = dict(off, enforcing=True, asset_policy_enabled=True, asset_policy_mode="action")
+    assert registry_result_summary(json.dumps(on)) == "registry approval now required for mcp assets"
+
+
+def test_registries_tab_key_and_sync_are_not_read_only(tmp_path: Path) -> None:
+    """GAP-1152: R (the tab key) never starts a policy change; sync is a mutation."""
+    write_index(
+        tmp_path,
+        "corp-skills",
+        {"verdicts": [{"name": "demo-skill", "type": "skill", "status": "clean"}]},
+    )
+    panel = new_panel(tmp_path)
+    panel.set_tab(RegistriesTab.ENTRIES)
+    assert panel.handle_key("R").intent is None
+    panel.set_tab(RegistriesTab.SOURCES)
+    assert panel.handle_key("S").intent.risk == "mutation"
 
 
 def test_registries_panel_approve_requires_selection(tmp_path: Path) -> None:
@@ -372,7 +451,7 @@ def test_registries_panel_source_detail_preserves_full_id_and_cache_safety(tmp_p
     assert detail is not None
     fields = dict(detail.fields)
     assert detail.title == f"SOURCE: {long_id}"
-    assert fields["Source ID"] == long_id
+    assert "Source ID" not in fields
     assert fields["URL"] == "https://example.com/index.json"
     assert Path(fields["Cache Path"]).parts[-3:] == ("registries", long_id, "index.json")
 
@@ -424,3 +503,36 @@ def test_registry_badge_truncates_long_ids() -> None:
     assert registry_badge("") == ""
     assert registry_badge("corp-skills") == "registry:corp-skills"
     assert registry_badge("very-long-corporate-registry") == "registry:very-long-corpo..."
+
+
+def test_registry_result_summary_reads_the_json_result() -> None:
+    """The finished card named the result, not the closing "]" (GAP-1681)."""
+    from defenseclaw.tui.panels.registries import entry_status_label, registry_result_summary
+
+    sync = [{"source_id": "corp", "fetched": 1, "scanned": 1, "promoted_skills": 0,
+             "promoted_mcps": 1, "blocked": 0, "errors": []}]
+    assert registry_result_summary(json.dumps(sync, indent=2)) == (
+        "corp: fetched 1, scanned 1, promoted 1 MCP, blocked 0"
+    )
+    approve = {"action": "approve", "promoted_mcps": 1, "promoted_skills": 0,
+               "verdict": {"name": "wiki", "type": "mcp", "status": "pending"}}
+    assert registry_result_summary(json.dumps(approve, indent=2)) == (
+        "mcp:wiki approved · policy now has 1 MCP from this source"
+        " · status pending until the next sync scans it"
+    )
+    reject = {"action": "reject", "verdict": {"name": "wiki", "type": "mcp", "status": "blocked"}}
+    assert registry_result_summary(json.dumps(reject)) == "mcp:wiki rejected"
+    assert registry_result_summary("not json") == ""
+    # GAP-2499: stderr's gateway restart line came after the JSON, so the
+    # toast showed only "defenseclaw-gateway: restarting... \u2713".
+    restarted = json.dumps(reject, indent=2) + "\n  defenseclaw-gateway: restarting... \u2713"
+    assert registry_result_summary(restarted) == "mcp:wiki rejected · gateway restarted"
+    failed = (
+        "  defenseclaw-gateway: restarting... \u2717\n" + json.dumps(approve) + "\n"
+        "  \u26a0 The change is saved, but the gateway restart failed, so agent hooks still use the old"
+    )
+    assert registry_result_summary(failed).endswith(
+        "status pending until the next sync scans it · gateway restart failed; run: defenseclaw-gateway restart"
+    )
+    assert entry_status_label("pending").startswith("pending (no scan verdict yet")
+    assert entry_status_label("clean") == "clean"

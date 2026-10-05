@@ -224,6 +224,104 @@ def test_standalone_uninstall_removes_the_ipc_directory_before_retiring_the_tree
     assert helper < removal < retire
 
 
+def test_standalone_default_uninstall_removes_the_machine_state() -> None:
+    # GAP-1277 (owner decision 2026-10-01): a standalone uninstall removes the
+    # machine state; -Purge adds the per-user data. The user-state flag reads
+    # the caller's -Purge first, and the Secure Client profile is unchanged.
+    entry = _function_body(_text(MODULE), "Invoke-DefenseClawEnterpriseLifecycle")
+    user_state = entry.index("$script:DefenseClawUninstallPurgeUserState = (")
+    machine = entry.index(
+        "if ($Action -eq 'Uninstall' -and (Test-DefenseClawStandaloneProfile)) {\n        $Purge = [switch]$true\n    }"
+    )
+    first_use = min(entry.index(":$Purge"), entry.index("if ($Purge -and $Action -ne 'Uninstall')"))
+    assert user_state < machine < first_use
+    assert entry.count("$Purge = ") == 1
+
+
+def test_standalone_setup_uninstall_docs_say_it_removes_the_machine_state() -> None:
+    # GAP-2647: the standalone Setup pages describe the GAP-1277 behavior
+    # above (machine state always removed; PURGE=1 adds the per-user data).
+    # The Secure Client page keeps its own wording (state kept unless
+    # PURGE=1) and says how the standalone profile differs.
+    standalone = {
+        "windows": ROOT / "docs-site" / "content" / "docs" / "enterprise" / "windows.mdx",
+        "cli": ROOT / "docs-site" / "content" / "docs" / "reference" / "cli.mdx",
+        "setup-design": ROOT / "docs" / "WINDOWS-ENTERPRISE-SETUP.md",
+        "intune": ROOT / "packaging" / "mdm" / "intune" / "windows.md",
+    }
+    for name, page in standalone.items():
+        text = " ".join(_text(page).split())
+        assert "PURGE=1` to also remove the config" not in text, name
+        assert "`/uninstall`, also remove managed state." not in text, name
+        assert "remove state on uninstall" not in text, name
+    # The Secure Client page moved from setup/enterprise-deployment.mdx to
+    # enterprise/secure-client.mdx in the 1.0 docs-site layout.
+    docs = ROOT / "docs-site" / "content" / "docs"
+    secure_client_page = next(
+        page
+        for page in (docs / "enterprise" / "secure-client.mdx", docs / "setup" / "enterprise-deployment.mdx")
+        if page.exists()
+    )
+    secure_client = " ".join(_text(secure_client_page).split())
+    assert "It keeps runtime state, logs and guardian evidence." in secure_client
+    assert "the standalone Setup's `/uninstall` always removes its machine state" in secure_client
+
+
+def test_standalone_uninstall_retry_binds_the_receipt_to_the_retrying_cli() -> None:
+    # GAP-1684/GAP-1679: when the first self-uninstall could not rename
+    # InstallRoot aside, its retry by the installed CLI runs from InstallRoot.
+    # The recovery binds the prepared receipt to that caller (same CLI file)
+    # before the rename, so the detached finalizer waits for it, and the
+    # retry finishes the committed cleanup and machine-state purge. Secure
+    # Client recovery is unchanged.
+    module = _text(MODULE)
+    recovery = _function_body(module, "Invoke-DefenseClawSelfUninstallRecovery")
+    rebind = recovery.index("$receipt = Set-DefenseClawSelfUninstallReceiptCaller")
+    guard = recovery.rindex("if ($SelfUninstallCallerPID -gt 0 -and", 0, rebind)
+    assert "(Test-DefenseClawStandaloneProfile)" in recovery[guard:rebind]
+    move = recovery.index("[IO.Directory]::Move($Layout.InstallRoot, $retiredRoot)")
+    cleanup = recovery.index("$result = Invoke-DefenseClawCommittedUninstallCleanup")
+    assert rebind < move < cleanup
+    assert recovery.rindex("if ($reboundCaller) {", 0, cleanup) > move
+    caller = _function_body(module, "Set-DefenseClawSelfUninstallReceiptCaller")
+    assert "Get-DefenseClawSelfUninstallCallerIdentity" in caller
+    assert "caller_file_identity" in caller and "caller_sha256" in caller
+    assert "'prepared_install_retirement'" in caller
+    prelayout = _function_body(module, "Invoke-DefenseClawPreLayoutRecovery")
+    assert "-SelfUninstallCallerPID $SelfUninstallCallerPID" in prelayout
+    entry = _function_body(module, "Invoke-DefenseClawEnterpriseLifecycle")
+    call = entry[entry.index("$preLayoutRecovery = Invoke-DefenseClawPreLayoutRecovery") :]
+    call = call[: call.index("if ([bool]$preLayoutRecovery.handled)")]
+    assert "-SelfUninstallCallerPID $SelfUninstallCallerPID" in call
+
+
+def test_lifecycles_retire_a_stale_committed_journal_through_the_fallback() -> None:
+    # GAP-1322: a journal the installed gateway cannot retire no longer
+    # blocks every later upgrade, ensure and uninstall (behaviour in
+    # enterprise-standalone-stale-lifecycle-journal-smoke.ps1).
+    module = _text(MODULE)
+    for name in ("Invoke-DefenseClawInstallLikeLifecycle", "Invoke-DefenseClawUninstallLifecycle"):
+        assert "Invoke-DefenseClawCommittedManagedHooksLifecycleRetire" in _function_body(module, name)
+
+
+def test_standalone_purge_keeps_the_launching_cli_powershell_temp() -> None:
+    """GAP-1853: install-enterprise.ps1 moves TEMP into its bootstrap folder,
+    so the stale-temp sweep learns the launching CLI's protected folder from
+    -LauncherTemp, which only the standalone profile passes."""
+
+    installer = _text(INSTALLER)
+    standalone = installer[installer.index("if ($EnterpriseProfile -ceq 'Standalone') {") :]
+    standalone = standalone[: standalone.index("Invoke-DefenseClawEnterpriseLifecycle @arguments")]
+    assert "$arguments['LauncherTemp'] = [string]$bootstrapEnvironment.OriginalEnvironment['TEMP']" in standalone
+    module = _text(MODULE)
+    assert "$script:DefenseClawLauncherTemp = [string]$LauncherTemp" in _function_body(
+        module, "Invoke-DefenseClawEnterpriseLifecycle"
+    )
+    assert "$script:DefenseClawLauncherTemp" in _function_body(
+        module, "Remove-DefenseClawStaleRunDirectories"
+    )
+
+
 # The standalone PowerShell smokes run inside disposable scratch directories
 # and never touch a service or a real machine root, so Windows CI runs every
 # one of them on each installed engine (Windows PowerShell 5.1 and 7).
@@ -231,7 +329,9 @@ STANDALONE_SMOKES = (
     "enterprise-profile-lifecycle-lock-smoke.ps1",
     "enterprise-profile-deployment-record-smoke.ps1",
     "enterprise-standalone-claude-policy-binding-smoke.ps1",
+    "enterprise-standalone-enumerator-environment-smoke.ps1",
     "enterprise-standalone-install-tree-smoke.ps1",
+    "enterprise-standalone-machine-leftovers-purge-smoke.ps1",
     "enterprise-standalone-manifest-adoption-smoke.ps1",
     "enterprise-standalone-recorded-trust-smoke.ps1",
     "enterprise-standalone-recovery-activation-deferral-smoke.ps1",
@@ -239,6 +339,8 @@ STANDALONE_SMOKES = (
     "enterprise-standalone-rollback-sensor-helper-smoke.ps1",
     "enterprise-standalone-root-squat-smoke.ps1",
     "enterprise-standalone-secrets-acl-smoke.ps1",
+    "enterprise-standalone-service-logged-error-smoke.ps1",
+    "enterprise-standalone-stale-lifecycle-journal-smoke.ps1",
     "enterprise-standalone-user-cleanup-report-smoke.ps1",
 )
 

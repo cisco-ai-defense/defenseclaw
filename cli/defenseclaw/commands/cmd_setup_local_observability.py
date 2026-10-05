@@ -38,6 +38,7 @@ from defenseclaw.observability.local_stack import (
     GRAFANA_PASSWORD_FILE_NAME,
     LocalStackController,
     LocalStackError,
+    resolve_native_docker_executable,
     resolve_stack_dir,
 )
 
@@ -59,8 +60,8 @@ _DEFAULT_SIGNALS: tuple[str, ...] = ("traces", "metrics", "logs")
 def local_observability(ctx: click.Context) -> None:
     """Drive the bundled local observability stack.
 
-    Provides a one-command path to the same compose stack that
-    historically lived under ``deploy/observability/``. Subcommands:
+    Runs a local Prometheus, Loki, Tempo and Grafana stack with Docker
+    Compose on loopback and points this gateway at it. Subcommands:
 
     \b
       up       Start the stack, wait for readiness, wire config.yaml
@@ -69,10 +70,10 @@ def local_observability(ctx: click.Context) -> None:
       status   Show compose ps + per-service readiness probes
       logs     Tail logs for one or all services
       url      Print the Grafana / Prometheus / Tempo / Loki URLs
+      env      Print OTEL_* variables that point a process at the stack
 
-    Bare invocation is an alias for ``up`` so ``defenseclaw setup
-    local-observability`` matches the ergonomics of ``setup splunk
-    --logs``.
+    Running it without a subcommand is the same as 'up'. The stack needs
+    Docker with Compose v2.
     """
     if ctx.invoked_subcommand is None:
         ctx.invoke(up_cmd)
@@ -181,7 +182,7 @@ def up_cmd(
             controller=controller,
         )
 
-    click.echo(f"  {ux.dim('→')} Starting local observability stack (this takes ~30s)...")
+    ux.echo(f"  {ux.dim('→')} Starting local observability stack (this takes ~30s)...")
     # Bundle refresh may replace the controller's Compose file. Resolve a fresh
     # controller so every platform launches the verified active copy.
     controller = _resolve_controller(app.cfg.data_dir)
@@ -207,7 +208,7 @@ def up_cmd(
 
     logs_enabled = False
     if not no_config and not started.readiness_verified:
-        click.echo(
+        ux.echo(
             f"  {ux.dim('→')} Stack readiness was not verified; "
             "config.yaml was not changed. Run without --no-wait after the "
             "stack is ready to enable export."
@@ -270,6 +271,7 @@ def down_cmd(app: AppContext, disable_config: bool) -> None:
     """Stop the stack (volumes preserved)."""
     controller = _resolve_controller(app.cfg.data_dir)
     _run_native_controller(controller.down, "Docker Compose down")
+    click.echo(f"  {ux.bold('Stopped:')} local observability stack (data volumes kept)")
 
     if disable_config:
         from defenseclaw.commands.cmd_setup_observability import (
@@ -280,6 +282,12 @@ def down_cmd(app: AppContext, disable_config: bool) -> None:
         _require_v8_operator_status(app.cfg.data_dir)
         _set_v8_destination_enabled(app.cfg.data_dir, "local-observability", False, "")
         click.echo(f"  {ux.bold('Config updated:')} observability.destinations[local-observability].enabled=false")
+    elif _local_destination_enabled(app.cfg.data_dir):
+        click.echo(
+            "  The local-observability destination stays configured, so the gateway keeps trying to "
+            "send to the stopped stack. Start it again with 'defenseclaw setup local-observability up', "
+            "or turn the destination off with 'defenseclaw setup local-observability down --disable-config'."
+        )
 
     if app.logger:
         app.logger.log_action(
@@ -331,6 +339,23 @@ def status_cmd(app: AppContext) -> None:
     controller = _resolve_controller(app.cfg.data_dir)
     output = _run_native_controller(controller.status, "Docker Compose status")
     click.echo(output, nl=False)
+    # GAP-1335: a stack that is down or failing is not a success.
+    if getattr(controller, "status_foreign", False) is True:
+        # GAP-1461: `up` refuses too, so do not point at it alone.
+        click.echo(
+            "  These containers belong to another copy of the stack (see the note above), so this one "
+            "cannot start. Use that copy's Grafana as it is, or stop that stack and then run: "
+            "defenseclaw setup local-observability up",
+            err=True,
+        )
+        raise SystemExit(1)
+    if not getattr(controller, "status_ready", True):
+        click.echo(
+            "  The local observability stack is not ready. Start it with: "
+            "defenseclaw setup local-observability up",
+            err=True,
+        )
+        raise SystemExit(1)
 
 
 @local_observability.command("logs")
@@ -353,6 +378,7 @@ def logs_cmd(app: AppContext, service: str | None, follow: bool) -> None:
 @pass_ctx
 def url_cmd(_app: AppContext, emit_json: bool) -> None:
     """Print the Grafana / Prometheus / Tempo / Loki URLs."""
+    _warn_if_docker_missing()
     if emit_json:
         click.echo(_json.dumps(CONTRACT, separators=(",", ":")))
         return
@@ -364,6 +390,7 @@ def url_cmd(_app: AppContext, emit_json: bool) -> None:
 @pass_ctx
 def env_cmd(_app: AppContext, emit_json: bool) -> None:
     """Print environment values that point a gateway at the local collector."""
+    _warn_if_docker_missing()
     values = LocalStackController.environment_contract()
     if emit_json:
         click.echo(_json.dumps(values, separators=(",", ":")))
@@ -378,6 +405,36 @@ def env_cmd(_app: AppContext, emit_json: bool) -> None:
 
 
 T = TypeVar("T")
+
+
+def _warn_if_docker_missing() -> None:
+    """Say on stderr that the printed addresses have nothing behind them yet.
+
+    url and env print a fixed contract and stay exit 0 so scripts can use
+    them, but without Docker the stack cannot run on this machine.
+    """
+    try:
+        docker = resolve_native_docker_executable()
+    except LocalStackError:
+        docker = ""
+    if docker:
+        return
+    click.echo(
+        "  warning: Docker CLI was not found on PATH, so the local stack cannot run here. "
+        "These are the addresses it uses once 'defenseclaw setup local-observability up' succeeds.",
+        err=True,
+    )
+
+
+def _local_destination_enabled(data_dir: str) -> bool:
+    """Whether config.yaml still sends to the local stack (best effort)."""
+    from defenseclaw.commands.cmd_setup_observability import _v8_authored_destinations
+
+    try:
+        destinations = _v8_authored_destinations(data_dir)
+    except Exception:  # noqa: BLE001 - only decides whether to print a note
+        return False
+    return any(d.get("name") == "local-observability" and d.get("enabled", True) is not False for d in destinations)
 
 
 def _run_native_controller(operation: Callable[[], T], description: str) -> T:
@@ -425,7 +482,7 @@ def _refresh_and_maybe_restart_local_observability(
     was_running = _run_native_controller(controller.is_running, "Docker project check")
     stopped = False
     if was_running:
-        click.echo(f"  {ux.dim('→')} Stopping running observability stack to refresh bundle...")
+        ux.echo(f"  {ux.dim('→')} Stopping running observability stack to refresh bundle...")
         _run_native_controller(
             controller.down,
             "Docker Compose down before refresh",
@@ -440,13 +497,13 @@ def _refresh_and_maybe_restart_local_observability(
     result.stopped = stopped
 
     if result.skipped_reason:
-        click.echo(f"  {ux.dim('→')} Bundle refresh skipped: {result.skipped_reason}")
+        ux.echo(f"  {ux.dim('→')} Bundle refresh skipped: {result.skipped_reason}")
         return result
     if result.errors:
         for err in result.errors[:3]:
             click.echo(f"  warning: refresh: {err}")
         if stopped:
-            click.echo(f"  {ux.dim('→')} Restarting previously running observability stack after refresh failure...")
+            ux.echo(f"  {ux.dim('→')} Restarting previously running observability stack after refresh failure...")
             _run_native_controller(
                 lambda: controller.up(timeout=180, wait=False),
                 "Docker Compose restart after refresh failure",
@@ -460,12 +517,12 @@ def _refresh_and_maybe_restart_local_observability(
             f"{preserved_count} preserved)"
         )
     else:
-        click.echo(f"  {ux.dim('→')} Bundle refresh: no changes (seeded copy already matches bundle)")
+        ux.echo(f"  {ux.dim('→')} Bundle refresh: no changes (seeded copy already matches bundle)")
     if result.preserved_paths and not refresh_config:
         preserved = ", ".join(sorted(result.preserved_paths)[:5])
         if len(result.preserved_paths) > 5:
             preserved = f"{preserved}, ..."
-        click.echo(
+        ux.echo(
             "  "
             + ux.dim("→")
             + " Preserved local observability config: "
@@ -610,7 +667,7 @@ def _print_stack_summary(
     print_redaction_status_hint(cfg)
     click.echo()
     ux.section("Next steps")
-    click.echo("    # The gateway hot-reloads the observability destination; no restart is needed.")
+    click.echo("    # DefenseClaw applies the destination itself (it restarts the gateway when needed).")
     click.echo("    defenseclaw setup local-observability status")
     click.echo("    defenseclaw setup local-observability down   # stop (keeps data)")
     click.echo("    defenseclaw setup local-observability reset  # stop + wipe data")

@@ -31,6 +31,7 @@ func (dispatcher *Dispatcher) transitionHealth(state HealthState, reason HealthR
 		dispatcher.healthMu.Unlock()
 		return
 	}
+	reason = SettledHealthReason(previous, previousReason, state, reason)
 	if previous == state && previousReason == reason {
 		dispatcher.healthMu.Unlock()
 		return
@@ -58,6 +59,24 @@ func (dispatcher *Dispatcher) transitionHealth(state HealthState, reason HealthR
 	case dispatcher.healthNotify <- struct{}{}:
 	default:
 	}
+}
+
+// SettledHealthReason is the reason to record when a signal moves to state.
+// Every successful export reports delivery_recovered, but only a signal that
+// was degraded or failing has recovered: a healthy one keeps its reason and a
+// new one is activated. Otherwise the first export after every gateway start
+// recorded a "restored" health row although nothing had failed (GAP-2557).
+func SettledHealthReason(
+	previous HealthState, previousReason HealthReason, state HealthState, reason HealthReason,
+) HealthReason {
+	if state != HealthHealthy || reason != HealthReasonRecovered ||
+		previous == HealthDegraded || previous == HealthFailing {
+		return reason
+	}
+	if previous == HealthHealthy && previousReason != "" {
+		return previousReason
+	}
+	return HealthReasonActivated
 }
 
 func (dispatcher *Dispatcher) observeHealth() {

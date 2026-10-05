@@ -601,8 +601,8 @@ func completeCanonicalProjectedCanary(spans []canonicalProjectedSpan) bool {
 			child = &spans[index]
 		}
 	}
-	if root == nil || child == nil || root.spanName != "invoke_agent diagnostic" ||
-		child.spanName != "chat gpt-4o-mini" || root.span.Kind != tracepb.Span_SPAN_KIND_INTERNAL ||
+	if root == nil || child == nil || root.spanName != observability.RuntimeCanaryAgentSpanName ||
+		child.spanName != observability.RuntimeCanaryModelSpanName || root.span.Kind != tracepb.Span_SPAN_KIND_INTERNAL ||
 		child.span.Kind != tracepb.Span_SPAN_KIND_CLIENT || len(root.span.ParentSpanId) != 0 ||
 		!bytes.Equal(child.span.ParentSpanId, root.span.SpanId) || !bytes.Equal(root.span.TraceId, child.span.TraceId) ||
 		root.span.Flags&1 == 0 || child.span.Flags&1 == 0 || root.span.TraceState != child.span.TraceState ||

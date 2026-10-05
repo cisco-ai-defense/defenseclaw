@@ -20,6 +20,12 @@ import (
 
 const gatewayEgressV8Producer = "gateway.egress"
 
+// gatewayEgressV8LogBranches is the defenseclaw.network.branch enum of the
+// v8 egress log families.
+var gatewayEgressV8LogBranches = map[string]bool{
+	"known": true, "shape": true, "passthrough": true, "chat": true, "private-upstream": true,
+}
+
 type gatewayEgressV8Runtime interface {
 	sidecarRuntimeEmitter
 	RecordGeneratedMetric(
@@ -45,6 +51,21 @@ func emitGatewayEgressV8(
 	if runtime == nil || ctx == nil {
 		return true
 	}
+	// GAP-1896: the plugin also reports "intercept" (a request rerouted
+	// through this proxy) and the "undici" and "selftest" branches, which the
+	// v8 log schema does not list (decision allow|block; branch known, shape,
+	// passthrough, chat, private-upstream), so every such log failed to build.
+	// An intercepted request was let through, so its log says allow and keeps
+	// the reason; an unlisted branch is left out. The interception self-test
+	// is a local probe, not egress, so it gets the metric only.
+	logDecision, logBranch := p.Decision, p.Branch
+	if logDecision == "intercept" {
+		logDecision = "allow"
+	}
+	if !gatewayEgressV8LogBranches[logBranch] {
+		logBranch = ""
+	}
+	skipLog := p.Branch == "selftest"
 	eventName := observability.TelemetryEventEgressAllowed
 	outcome := observability.OutcomeAllowed
 	if p.Decision == "block" {
@@ -69,7 +90,7 @@ func emitGatewayEgressV8(
 		classification, observability.SourceGateway, correlationEvent.Connector,
 		observability.ProducerKey("egress"),
 	)
-	if err == nil {
+	if err == nil && !skipLog {
 		_, err = runtime.Emit(ctx, metadata, func(snapshot observabilityruntime.EmitContext, admission router.Admission) (observability.Record, error) {
 			if admission != router.AdmissionOrdinary || snapshot.Generation() > math.MaxInt64 {
 				return observability.Record{}, &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
@@ -96,9 +117,9 @@ func emitGatewayEgressV8(
 					DefenseClawNetworkTargetRef:    p.TargetHost,
 					DefenseClawNetworkTargetPath:   optionalGatewayEgressText(p.TargetPath),
 					DefenseClawNetworkResolvedIp:   optionalGatewayEgressText(p.ResolvedIP),
-					DefenseClawNetworkDecision:     observability.Present(p.Decision),
+					DefenseClawNetworkDecision:     observability.Present(logDecision),
 					DefenseClawNetworkReason:       optionalGatewayEgressText(p.Reason),
-					DefenseClawNetworkBranch:       optionalGatewayEgressToken(p.Branch),
+					DefenseClawNetworkBranch:       optionalGatewayEgressToken(logBranch),
 					DefenseClawNetworkSource:       optionalGatewayEgressToken(p.Source),
 					DefenseClawNetworkBodyShape:    optionalGatewayEgressToken(p.BodyShape),
 					DefenseClawNetworkLooksLikeLLM: observability.Present(p.LooksLikeLLM),
@@ -121,9 +142,9 @@ func emitGatewayEgressV8(
 				DefenseClawNetworkTargetRef:    p.TargetHost,
 				DefenseClawNetworkTargetPath:   optionalGatewayEgressText(p.TargetPath),
 				DefenseClawNetworkResolvedIp:   optionalGatewayEgressText(p.ResolvedIP),
-				DefenseClawNetworkDecision:     observability.Present(p.Decision),
+				DefenseClawNetworkDecision:     observability.Present(logDecision),
 				DefenseClawNetworkReason:       optionalGatewayEgressText(p.Reason),
-				DefenseClawNetworkBranch:       optionalGatewayEgressToken(p.Branch),
+				DefenseClawNetworkBranch:       optionalGatewayEgressToken(logBranch),
 				DefenseClawNetworkSource:       optionalGatewayEgressToken(p.Source),
 				DefenseClawNetworkBodyShape:    optionalGatewayEgressToken(p.BodyShape),
 				DefenseClawNetworkLooksLikeLLM: observability.Present(p.LooksLikeLLM),
@@ -133,7 +154,7 @@ func emitGatewayEgressV8(
 		})
 	}
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "[guardrail] generated egress log failed")
+		fmt.Fprintf(os.Stderr, "[guardrail] generated egress log failed: %v\n", err)
 	}
 	_, metricErr := runtime.RecordGeneratedMetric(
 		ctx, observability.EventName(observability.TelemetryInstrumentDefenseClawEgressEvents),

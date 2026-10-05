@@ -1,0 +1,352 @@
+---
+title: Registries
+description: Subscribe DefenseClaw to public or internal skill / MCP catalogs. Sources are fetched, scanned, and clean entries are auto-promoted into asset_policy so admission decisions can attribute the rule back to its origin.
+keywords:
+  - defenseclaw registry
+  - DefenseClaw skill catalog
+  - DefenseClaw MCP catalog
+  - clawhub registry
+  - smithery registry
+  - http_yaml registry
+  - asset_policy registry_required
+---
+
+A **registry source** is a fetchable manifest of skills and/or MCP servers that DefenseClaw ingests on demand. Public catalogs (clawhub, smithery, skills.sh), internal HTTPS YAMLs / JSONs, git repos, and on-disk YAMLs are all supported. Synced entries flow through the existing skill / MCP scanners; clean ones land in `asset_policy.{skill,mcp}.registry` so a later admission decision can say "approved by registry:`<id>`" instead of "approved by an unattributed rule someone wrote in 2024."
+
+<Callout title="Why registries matter">
+Without a registry, every new skill / MCP that lands on disk is admission-evaluated against ad-hoc operator-authored rules. With one or more registries, the catalog drives admission: clean entries get auto-promoted, everything else is held for review, and toggling `registry_required` flips the asset class to deny-by-default for anything the catalog hasn't blessed.
+</Callout>
+
+<DefenseClawDemo scenario="registry-promote-require" variant="clean" />
+
+## What you just saw
+
+An **on-demand** registry sync verified source integrity, routed an entry through its existing scanner, and selected a deterministic outcome: promote a clean entry, hold a warning for review, or deny an unknown asset when `registry_required=true`. Stored sync settings do not create a runtime poller.
+
+## The seven registry kinds
+
+<TypeTable
+  type={{
+    'clawhub': {
+      type: 'kind',
+      description: 'OpenClaw plugin catalog. Reads the openclaw npm package metadata from registry.npmjs.org and lists its bundled plugins; no URL needed.',
+    },
+    'smithery': {
+      type: 'kind',
+      description: 'smithery.ai public MCP catalog. URL optional; --content typically mcp.',
+    },
+    'http_yaml': {
+      type: 'kind',
+      description: 'YAML manifest fetched over HTTPS. Use for internal mirrors. Requires --url. SHA-256 mandatory on every entry source_url.',
+    },
+    'http_json': {
+      type: 'kind',
+      description: 'Same as http_yaml but JSON-encoded. Requires --url.',
+    },
+    'git': {
+      type: 'kind',
+      description: 'Clone a git repo containing a defenseclaw-registry.yaml. Requires --url. Useful for catalogs you already version-control internally.',
+    },
+    'file': {
+      type: 'kind',
+      description: 'Read a local YAML/JSON manifest from disk. Requires --url with an absolute path. Air-gapped installs and integration tests.',
+    },
+    'skills_sh': {
+      type: 'kind',
+      description: 'Curated skills.sh view. URL optional; --content typically skill.',
+    },
+  }}
+/>
+
+## Three worked examples
+
+<Tabs items={['Internal mirror', 'Smithery MCPs', 'ClawHub']}>
+
+<Tab value="Internal mirror">
+
+Most enterprises run a curated mirror inside their own DNS:
+
+```bash
+defenseclaw registry add corp-skills \
+  --kind http_yaml \
+  --url https://catalog.corp.example.com/skills.yaml \
+  --content skill \
+  --auth-env CORP_CATALOG_TOKEN \
+  --non-interactive
+
+export CORP_CATALOG_TOKEN="$(vault kv get -field=token kv/defenseclaw/catalog)"
+defenseclaw registry test corp-skills              # dry-run: fetch + parse, no writes
+defenseclaw registry sync corp-skills              # fetch + scan + promote
+```
+
+The `--auth-env` option takes the **name** of an env var; the literal token never lands in `config.yaml`. SHA-256 is required on every entry's `source_url` for `http_yaml`, `http_json`, `git`, and `file` kinds — the manifest publisher computes it once.
+
+</Tab>
+
+<Tab value="Smithery MCPs">
+
+For the smithery.ai public MCP catalog:
+
+```bash
+defenseclaw registry add smithery-public \
+  --kind smithery \
+  --content mcp \
+  --non-interactive
+
+defenseclaw registry sync smithery-public
+```
+
+Each entry is run through the MCP scanner; clean ones land in `asset_policy.mcp.registry` so an MCP listed in the catalog passes admission with the registry named as the reason. Remote (URL) entries are scanned directly. Scanning a stdio entry starts the publisher's package on your machine, so it happens only with `registry sync --scan-stdio`; without that flag the entry stays `pending` and is not promoted. Use `--scan-stdio` only for a catalog whose packages you are willing to run.
+
+</Tab>
+
+<Tab value="ClawHub">
+
+ClawHub lists OpenClaw plugins, so it matters mainly for OpenClaw installs. No URL and no auth are needed:
+
+```bash
+defenseclaw registry add clawhub \
+  --kind clawhub \
+  --content skill \
+  --non-interactive
+
+defenseclaw registry sync clawhub
+```
+
+The first sync downloads the manifest, runs the skill scanner on every entry, and promotes the clean ones into `asset_policy.skill.registry`.
+
+</Tab>
+
+</Tabs>
+
+## All twelve subcommands
+
+<TypeTable
+  type={{
+    'add <id>': {
+      type: 'subcommand',
+      description: 'Register a new source. Interactive by default (prompts for missing fields); --non-interactive enforces flag-only.',
+    },
+    'edit <id>': {
+      type: 'subcommand',
+      description: 'Update an existing source. Bare form (no flags) walks every field interactively; passing any mutating flag suppresses prompts. --clear-auth-env removes the auth variable; --json for JSON output.',
+    },
+    'list': {
+      type: 'subcommand',
+      description: 'Tabular listing with cached entry counts (clean/warning/blocked/error/rejected) per source; a rejected entry is only kept out of policy, it is not blocked; a source whose last sync failed is named below the table. --json for machine-readable output.',
+    },
+    'show <id>': {
+      type: 'subcommand',
+      description: 'Pretty-print a single source plus its verdict summary.',
+    },
+    'remove <id>': {
+      type: 'subcommand',
+      description: 'Delete the source AND any asset_policy rules it promoted (Reason="registry:<id>"). --keep-cache leaves the on-disk manifest behind; --yes (or --non-interactive) skips the confirmation prompt.',
+    },
+    'test <id>': {
+      type: 'subcommand',
+      description: 'Dry-run fetch + parse: no cache writes, no asset_policy mutation. The same SSRF guard, size cap, and content filter as a real sync. -e/--show-entries lists entries (--limit, default 20); --allow-private; --json.',
+    },
+    'sync [<id>...]': {
+      type: 'subcommand',
+      description: 'Fetch + scan + promote one or more sources. --all syncs every enabled source (add --include-disabled for disabled ones); --no-promote previews without asset_policy writes; --no-scan does a metadata-only refresh; --scan-stdio also scans stdio MCP entries; --allow-private; --json.',
+    },
+    'entries <id>': {
+      type: 'subcommand',
+      description: 'Show cached entries with their scanner verdict. Filter by --type skill|mcp|all, --status pending|clean|warning|blocked|error|rejected|all, --approved, --rejected.',
+    },
+    'approve <id> <name>': {
+      type: 'subcommand',
+      description: 'Mark an entry approved: it is promoted whatever the scanner verdict, right away from the cache unless --no-repromote. --type is needed only when the name is ambiguous.',
+    },
+    'reject <id> <name>': {
+      type: 'subcommand',
+      description: 'Mark an entry rejected: it is never promoted into asset policy, even if the scanner is clean. Its status reads rejected, not blocked. --type is needed only when the name is ambiguous.',
+    },
+    'require --type skill|mcp --enabled|--disabled [--connector <name>]': {
+      type: 'subcommand',
+      description: 'Scope registry_required to one connector, or update the global default and reconcile every active connector. Inactive connector overrides are preserved.',
+    },
+    'wizard': {
+      type: 'subcommand',
+      description: 'First-run convenience flow: add + sync in a single interactive command. The friendly entry point if `add` feels intimidating.',
+    },
+  }}
+/>
+
+## The lifecycle of an entry
+
+<Flow
+  direction="TB"
+  caption="How a registry entry reaches asset policy. Sync fetches the manifest and scans every entry; only a clean entry is promoted on its own. Syncing with --no-promote scans without touching policy. Approve and reject override the scanner either way, and a rejected entry is never promoted."
+>
+  <Node id="add" kind="operator">{`Add a source\nregistry add\nsaved in config.yaml`}</Node>
+  <Node id="sync" kind="generic">{`Sync the source\nregistry sync\nfetch the manifest`}</Node>
+  <Node id="scan" kind="policy">{`Scan each entry\nskill scanner or MCP scanner`}</Node>
+  <Node id="verdict" kind="decision">Scan result?</Node>
+  <Node id="hold" kind="operator">{`Held for review\nwarning or blocked\nerror or pending`}</Node>
+  <Node id="promote" kind="policy">{`Added to asset policy\nrule tagged registry:<id>`}</Node>
+  <Node id="never" kind="generic">{`Never promoted\nlisted as blocked`}</Node>
+  <Edge from="add" to="sync" />
+  <Edge from="sync" to="scan" />
+  <Edge from="scan" to="verdict" />
+  <Edge from="verdict" to="promote" label="clean" />
+  <Edge from="verdict" to="hold" label="anything else" />
+  <Edge from="hold" to="promote" label="you approve" />
+  <Edge from="hold" to="never" label="you reject" />
+</Flow>
+
+## Promote and require — the deny-by-default story
+
+Once entries are flowing in, `asset_policy.<type>.registry_required` flips the corresponding asset class to **deny-by-default**:
+
+```bash
+defenseclaw registry require --type skill --enabled
+defenseclaw registry require --type mcp   --enabled --enforce
+```
+
+The requirement is enforced only while asset policy is on:
+`asset_policy.enabled: true` and `asset_policy.mode: action`. A per-user
+install starts with `enabled: false` and `mode: observe`, so `require` alone
+blocks nothing and the CLI says so. Add `--enforce` to turn both on in the same
+save, or set them in the TUI config editor (Setup → `c` → Asset Policy). In
+`observe` mode an unregistered asset is logged, not blocked. To turn
+enforcement back off, run
+`defenseclaw registry require --type mcp --disabled --no-enforce`
+(`--no-enforce` sets `mode: observe`).
+
+A registry rule that pins `transport` treats `http` and `streamable-http` as
+the same HTTP transport, and a URL server added without `--transport` counts as
+`http`.
+
+An unscoped operation is broad operator intent: it updates the global default
+and clears only the targeted `registry_required` override on every active
+connector, so stale opposite overrides cannot keep enforcement disabled. All
+other per-connector fields and the global registry rule/filter lists remain
+unchanged. `--connector <name>` changes only that connector's explicit
+override. Known but inactive connector overrides are preserved so future
+activation does not silently inherit a weaker or stronger posture than the one
+previously saved.
+
+When `registry_required=true`:
+
+- An asset whose name matches a rule in `asset_policy.<type>.registry` follows that rule.
+- An asset whose name does **not** match any rule falls through to the configured `registry_empty_action` (default `deny`).
+- An empty registry list with `require=on` blocks **every** asset of that class by default until the next `sync` populates it. Setting `registry_empty_action: warn` or `allow` relaxes only this empty-registry gate and falls through to the type default; `warn` is non-blocking. The CLI warns you in colour when you flip `require=on` against an empty list — read the warning carefully.
+
+The Go gateway tags every admission decision with `Reason="registry:<id>"` (or
+`"registry:operator-approved"` for manually approved entries). Inspect the TUI
+or run `defenseclaw-gateway audit export --output -` to see which catalog won;
+an optional JSONL destination contains only the records its v8 route selects.
+
+## What `--auth-env`, `--allow-private`, and SHA-256 actually do
+
+| Knob | Default | Purpose |
+| --- | --- | --- |
+| `--auth-env <ENV>` | `""` | Name of an env var holding a bearer token sent on every fetch. The CLI rejects values that look like literal secrets. |
+| `--allow-private` | off | A `registry test` and `registry sync` flag (not `add`). Permits RFC 1918 / ULA destinations: off in production, on for an internal mirror on a private subnet. |
+| `--scan-stdio` | off | A `registry sync` flag. Also scans stdio MCP entries, which starts each publisher-controlled package on this machine. |
+| `--non-interactive` | off | Required for CI; missing required flags exit non-zero with a clear `error: --foo is required`. |
+| SHA-256 on `source_url` | required for `http_yaml` / `http_json` / `git` / `file` | Per-entry integrity; the scanner refuses to download an entry whose computed digest does not match. |
+
+Registry fetches use the same hardened URL path in `test` and `sync`: loopback, link-local, cloud-metadata, and private-network destinations are refused by default, including DNS resolutions that rebind into a reserved range. Use `--allow-private` only for a registry mirror you intentionally run on an internal network. Local `file` registries must use absolute paths, and remote entry downloads must pass the per-entry SHA-256 check before scanner promotion can happen.
+
+## Inspect what landed
+
+This is a real `file` source with two stdio MCP entries, synced without
+`--scan-stdio`, so both entries are still `pending`:
+
+```text title="defenseclaw registry list"
+  Registry sources
+  ----------------
+  ID                       KIND         CONTENT  ON  ENTRIES            LAST SYNC              URL
+  ------------------------ ------------ -------- --- ------------------ ---------------------- --------------------------------
+  corp-mcp                 file         mcp      yes 2 (0/0/0)          2026-10-03T04:25:28Z   /tmp/corp-mcp.yaml
+
+  ENTRIES column: total (clean/warning/blocked)
+```
+
+```text title="defenseclaw registry entries corp-mcp --status pending"
+  Entries for corp-mcp
+  --------------------
+  NAME                             TYPE   STATUS     SEV      A/R
+  -------------------------------- ------ ---------- -------- ---
+  context7                         mcp    pending    -        --
+  filesystem                       mcp    pending    -        --
+```
+
+`ENTRIES` reads total, then clean, warning and blocked counts; a dash means the
+source was never synced. `A/R` shows whether you approved or rejected an entry.
+
+```bash
+defenseclaw registry list                              # one row per source, with cached counts
+defenseclaw registry show corp-skills                  # full detail + verdict summary
+defenseclaw registry entries corp-skills --status warning
+defenseclaw registry approve corp-skills my-skill --type skill
+defenseclaw registry reject  corp-skills evil-skill --type skill
+```
+
+`approve` and `reject` re-promote against the cached manifest immediately by default, so the new rule lands without a network round-trip. Pass `--no-repromote` if you want to defer the change to the next `registry sync`. `--type` is optional when the source holds one content type (`--content skill` or `--content mcp`) or the entry name exists under one type only.
+
+## Sync schedules
+
+Today, syncing is **on demand**: scheduled sync is not available yet, and `add` / `edit` refuse `--auto-sync` and `--sync-interval-hours`. Run `registry sync --all` on a schedule (cron, a systemd timer or a CI schedule) until scheduled sync ships in a future release.
+
+DefenseClaw configuration is per user, so schedule the sync as the user who
+runs DefenseClaw, for example in that user's crontab (`crontab -e`):
+
+```bash
+0 * * * * defenseclaw registry sync --all
+```
+
+Keep the gateway running: `registry sync` records an audit event and exits with
+an error when the gateway is unavailable. Use the full path to `defenseclaw` if
+cron's `PATH` does not include it.
+
+## Common gotchas
+
+<Accordions>
+
+<Accordion title="`--url for kind=file must be an absolute path`">
+
+The `file` adapter rejects relative paths because `~/.defenseclaw/` and the operator's CWD are not guaranteed to line up at admission. Use `$PWD/manifest.yaml` or a fully qualified path.
+
+</Accordion>
+
+<Accordion title="Sync errors out with `sha256 is required for registry-managed http(s) skill source_url`">
+
+The catalog publisher needs to compute and include the SHA-256 in their manifest. This is a hard requirement for `http_yaml`, `http_json`, `git`, and `file` kinds — without it, an attacker who compromises the registry HTTPS endpoint could swap the skill payload underneath you.
+
+</Accordion>
+
+<Accordion title="Removing a source removes its rules too">
+
+`remove` strips every `asset_policy.{skill,mcp}.registry` rule whose `Reason="registry:<id>"`. The intent is "the registry is the source of truth for these rules; deleting the registry deletes the rules". Use `--keep-cache` if you want to preserve the on-disk manifest for a future re-add.
+
+</Accordion>
+
+<Accordion title="My MCP scanner / skill scanner is not installed">
+
+The skill scanner is an unconditional runtime dependency. If it is missing,
+affected skill scans fail and those entries are marked `error`. The MCP scanner
+is declared only on Python 3.11 and newer; any Python 3.10 runtime, including a
+managed POSIX install that selected 3.10, legitimately omits it. When the MCP
+SDK is unavailable, MCP entries are fetched but remain `pending` because no
+verdict is computed.
+
+Do not repair a packaged runtime with `pip`. Use the
+[supported install or repair path](/docs/get-started/install), then rerun
+`defenseclaw registry sync --all`. Source contributors should run `uv sync`
+from the checkout. Use Python 3.11 or newer when MCP scanning is required.
+
+</Accordion>
+
+</Accordions>
+
+## Reference
+
+- [`cli/defenseclaw/commands/cmd_registry.py`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/cli/defenseclaw/commands/cmd_registry.py) — every subcommand, validator, and the lifecycle helpers.
+- [`cli/defenseclaw/registries/`](https://github.com/cisco-ai-defense/defenseclaw/tree/main/cli/defenseclaw/registries) — adapters, manifest schema, sync engine, promotion rules.
+- [Reference → CLI](/docs/reference/cli) — full CLI catalog.
+- [Skill scanner](/docs/scanning/skill-scanner) and [MCP scanner](/docs/scanning/mcp-scanner) — what the scanners look at when verdicts get computed.
+- [Policies](/docs/policies) — how `asset_policy` decisions blend with repo policies and the LLM judge.

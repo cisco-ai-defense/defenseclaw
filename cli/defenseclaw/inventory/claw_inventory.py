@@ -68,7 +68,7 @@ INVENTORY_VERSION = 4
 
 # Keep AIBOM scan-finding evidence within the canonical Observability v8
 # ingress contract. The complete inventory remains in the command result;
-# only its audit-telemetry projection is summarized when a category is large.
+# only its audit-telemetry projection is summarized (item count, size, digest).
 _AIBOM_TELEMETRY_DESCRIPTION_MAX_BYTES = 65_536
 _AIBOM_TELEMETRY_SUMMARY_SCHEMA = "defenseclaw.aibom.telemetry-summary.v1"
 
@@ -84,7 +84,17 @@ ALL_CATEGORIES: frozenset[str] = frozenset(
     ["skills", "plugins", "mcp", "agents", "rules", "tools", "models", "memory"]
 )
 
-_CATEGORY_ALIASES: dict[str, str] = {"model_providers": "models"}
+_CATEGORY_ALIASES: dict[str, str] = {
+    "model_providers": "models",
+    # Singular spellings (GAP-2399).
+    "skill": "skills",
+    "plugin": "plugins",
+    "mcps": "mcp",
+    "agent": "agents",
+    "rule": "rules",
+    "tool": "tools",
+    "model": "models",
+}
 
 _COMMANDS: dict[str, tuple[str, ...]] = {
     "skills_list": ("skills", "list"),
@@ -133,6 +143,17 @@ class InventoryLimitation(TypedDict):
 class _FilesystemCollectionResult(NamedTuple):
     items: list[dict[str, Any]]
     error: dict[str, str] | None
+
+
+class _PartialCollectionError(ValueError):
+    """A collector read some sources but could not read others.
+
+    ``items`` keeps what was read; the message names the failed sources.
+    """
+
+    def __init__(self, message: str, items: list[dict[str, Any]]) -> None:
+        super().__init__(message)
+        self.items = items
 
 
 # ---------------------------------------------------------------------------
@@ -211,21 +232,22 @@ def build_claw_aibom(
     _attach_connector_paths(out, cfg, connector)
     _sync_legacy_connector_paths(out)
     out["summary"] = _build_summary(out)
+    _mark_collected_categories(out, cats)
     return out
 
 
 def _aibom_telemetry_description(payload: Any) -> str:
-    """Return a lossless small payload or a bounded, verifiable summary.
+    """Return a bounded, verifiable summary of one inventory category.
 
-    Canonical Observability v8 admits at most 65,536 UTF-8 bytes per finding
-    description. AIBOM remains the source of truth and is rendered in full to
-    the caller; this helper only bounds the scan finding sent to telemetry.
+    An inventory category is a snapshot, not a security finding, so the scan
+    finding sent to telemetry carries its item count, size and digest rather
+    than the listing itself (GAP-1822). AIBOM remains the source of truth and
+    is rendered in full to the caller. Canonical Observability v8 admits at
+    most 65,536 UTF-8 bytes per finding description.
     """
 
     rendered = json.dumps(payload, indent=2)
     rendered_bytes = rendered.encode("utf-8")
-    if len(rendered_bytes) <= _AIBOM_TELEMETRY_DESCRIPTION_MAX_BYTES:
-        return rendered
 
     canonical = json.dumps(
         payload,
@@ -264,6 +286,8 @@ def claw_aibom_to_scan_result(inv: dict[str, Any], cfg: Config) -> ScanResult:
     ]
     findings: list[Finding] = []
     for key, label in category_labels:
+        if not _category_collected(inv, key):
+            continue
         payload = inv.get(key, [])
         count = len(payload) if isinstance(payload, list) else 0
         findings.append(
@@ -275,6 +299,9 @@ def claw_aibom_to_scan_result(inv: dict[str, Any], cfg: Config) -> ScanResult:
                 location=target,
                 scanner="aibom-claw",
                 tags=["claw-aibom", key],
+                # One stable rule per category: the gateway would otherwise
+                # derive it from the title, which carries the item count.
+                rule_id=f"aibom-claw.inventory.{key}",
             ),
         )
     return ScanResult(
@@ -315,14 +342,16 @@ def enrich_with_policy(
     pe = PolicyEngine(store)
     if skill_actions is None:
         skill_actions = SkillActionsConfig()
+    inv_connector = connector_paths.normalize(str(inv.get("connector") or inv.get("claw_mode") or ""))
 
     for inv_key, target_type, scanner_name in _POLICY_CATEGORIES:
         items = inv.get(inv_key, [])
         if not items:
             continue
 
-        actions_map = _build_actions_map_for_type(store, target_type)
+        actions_map = _build_actions_map_for_type(store, target_type, inv_connector)
         scan_map = _build_scan_map_for_type(store, scanner_name)
+        scan_by_path = _scan_map_by_path(scan_map)
 
         counts: dict[str, int] = {
             "blocked": 0,
@@ -331,6 +360,7 @@ def enrich_with_policy(
             "warning": 0,
             "clean": 0,
             "unscanned": 0,
+            "discovery-only": 0,
         }
 
         for item in items:
@@ -339,7 +369,12 @@ def enrich_with_policy(
                 continue
 
             candidates = _inventory_key_candidates(item, target_type, name)
-            scan_entry = _lookup_by_candidates(scan_map, candidates)
+            # GAP-1593: the scan of this exact copy wins. The basename key
+            # holds only the latest scan of any same-named copy (codeguard is
+            # in every connector), which the path check below then dropped.
+            scan_entry = _scan_entry_for_item_path(scan_by_path, item)
+            if scan_entry is None:
+                scan_entry = _lookup_by_candidates(scan_map, candidates)
             fallback_actions = _fallback_actions_for(target_type, skill_actions, cfg)
             action_entry = _lookup_by_candidates(actions_map, candidates)
             policy_name = _inventory_policy_name(item, target_type, name, action_entry)
@@ -360,6 +395,13 @@ def enrich_with_policy(
             # as unscanned rather than inheriting a stranger's result.
             if scan_entry is not None and not _scan_entry_matches_path(scan_entry, source_path):
                 scan_entry = None
+            # `mcp scan` records a configured server as mcp://<connector>/<name>
+            # (what `mcp list` reads). That target names this exact copy, so it
+            # counts as this server's scan even though it is not its URL.
+            if target_type == "mcp" and inv_connector:
+                scoped_entry = scan_map.get(f"mcp://{inv_connector}/{name}")
+                if scoped_entry is not None:
+                    scan_entry = scoped_entry
             # F-0742: a ``source: user`` (or other operator/third-party)
             # AIBOM row must not be silently blessed by the first-party
             # allow list just because its resolved path lands under a
@@ -376,9 +418,23 @@ def enrich_with_policy(
                 policy_dir=policy_dir,
                 source_path=source_path,
                 allow_first_party=allow_first_party,
+                connector=inv_connector,
             )
+            if verdict == "unscanned" and target_type == "skill" and item.get("bundled"):
+                # GAP-1593: vendor-bundled skills are discovery-only, as
+                # 'skill list' says; they are never scanned or blocked.
+                verdict, detail = "discovery-only", "vendor-bundled; not scanned or blocked"
             item["policy_verdict"] = verdict
             item["policy_detail"] = detail
+            if target_type == "skill":
+                # GAP-1997: "eligible" says the agent loads the skill; this
+                # says DefenseClaw scans it, matching summary.skills.eligible.
+                item["scan_eligible"] = bool(item.get("eligible")) and verdict != "discovery-only"
+            # GAP-1383: a skill DefenseClaw disabled or quarantined is not
+            # enabled, whatever the connector's own config says; the Skills
+            # panel and 'skill info' already say so.
+            if target_type == "skill" and _action_holds_off(action_entry):
+                item["enabled"] = False
             if scan_entry:
                 item["scan_findings"] = scan_entry["finding_count"]
                 item["scan_severity"] = scan_entry["max_severity"]
@@ -387,19 +443,33 @@ def enrich_with_policy(
 
         scanned = sum(1 for it in items if "scan_findings" in it)
         total_findings = sum(it.get("scan_findings", 0) for it in items)
+        discovery_only = counts.get("discovery-only", 0)
 
         summary = inv.get("summary")
         if summary:
             summary[f"policy_{inv_key}"] = counts
+            if target_type == "skill" and isinstance(summary.get(inv_key), dict) and discovery_only:
+                # GAP-1920: discovery-only skills are listed, never scanned, so
+                # they are not "eligible" next to the discovery-only count.
+                summary[inv_key]["eligible"] = sum(
+                    1 for it in items if it.get("eligible") and it.get("policy_verdict") != "discovery-only"
+                )
             summary[f"scan_{inv_key}"] = {
                 "scanned": scanned,
-                "unscanned": len(items) - scanned,
+                "unscanned": len(items) - scanned - discovery_only,
                 "total_findings": total_findings,
             }
 
 
 # keep the old name as an alias for backward compatibility
 enrich_skills_with_policy = enrich_with_policy
+
+
+def _action_holds_off(action_entry: Any) -> bool:
+    actions = getattr(action_entry, "actions", None)
+    if actions is None:
+        return False
+    return getattr(actions, "runtime", "") == "disable" or getattr(actions, "file", "") == "quarantine"
 
 
 def _fallback_actions_for(
@@ -478,8 +548,14 @@ def _admission_verdict(
     policy_dir: str = "",
     source_path: str = "",
     allow_first_party: bool = True,
+    connector: str = "",
 ) -> tuple[str, str]:
-    """Replicate admission ordering for offline inventory evaluation."""
+    """Replicate admission ordering for offline inventory evaluation.
+
+    GAP-1558: pass the inventory's connector so a connector-scoped block
+    (``skill block X --connector claudecode``) reads "blocked" here, as it
+    does in ``skill list`` and ``skill info``.
+    """
     from defenseclaw.enforce.admission import evaluate_admission
 
     decision = evaluate_admission(
@@ -488,6 +564,7 @@ def _admission_verdict(
         target_type=target_type,
         name=name,
         source_path=source_path,
+        connector=connector,
         scan_result=scan_entry,
         action_entry=action_entry,
         fallback_actions=skill_actions,
@@ -605,6 +682,33 @@ def _inventory_policy_name(
     return name
 
 
+def _path_key(path: str) -> str:
+    try:
+        return os.path.normcase(os.path.realpath(path))
+    except (OSError, ValueError):
+        return os.path.normcase(path)
+
+
+def _scan_map_by_path(scan_map: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Scan entries keyed by their normalized full target path."""
+    by_path: dict[str, dict[str, Any]] = {}
+    for entry in scan_map.values():
+        target = str(entry.get("target") or "")
+        if target and (os.path.isabs(target) or os.sep in target or "/" in target):
+            by_path.setdefault(_path_key(target), entry)
+    return by_path
+
+
+def _scan_entry_for_item_path(
+    by_path: dict[str, dict[str, Any]], item: dict[str, Any],
+) -> dict[str, Any] | None:
+    for key in ("path", "baseDir", "filePath"):
+        raw = item.get(key)
+        if raw:
+            return by_path.get(_path_key(str(raw)))
+    return None
+
+
 def _lookup_by_candidates(mapping: dict[str, Any], candidates: list[str]) -> Any | None:
     for candidate in candidates:
         if candidate in mapping:
@@ -612,14 +716,26 @@ def _lookup_by_candidates(mapping: dict[str, Any], candidates: list[str]) -> Any
     return None
 
 
-def _build_actions_map_for_type(store: Any, target_type: str) -> dict[str, ActionEntry]:
+def _build_actions_map_for_type(
+    store: Any, target_type: str, connector: str = "",
+) -> dict[str, ActionEntry]:
+    """Name -> action entry; with *connector*, its own entry wins over a
+    global one and other connectors' entries are ignored."""
     actions_map: dict[str, ActionEntry] = {}
     try:
         entries = store.list_actions_by_type(target_type)
     except Exception:
         return actions_map
+    if not connector:
+        for e in entries:
+            actions_map[e.target_name] = e
+        return actions_map
     for e in entries:
-        actions_map[e.target_name] = e
+        scope = connector_paths.normalize(getattr(e, "connector", "") or "")
+        if scope == connector:
+            actions_map[e.target_name] = e
+        elif not scope:
+            actions_map.setdefault(e.target_name, e)
     return actions_map
 
 
@@ -644,12 +760,39 @@ def _build_scan_map_for_type(store: Any, scanner_name: str) -> dict[str, dict[st
     return scan_map
 
 
+def _is_defenseclaw_written(path: str) -> bool:
+    """True for files DefenseClaw setup writes (``.../defenseclaw.json`` and kin)."""
+    return os.path.basename(path).lower().startswith("defenseclaw")
+
+
+def aibom_display_config(inv: dict[str, Any]) -> str:
+    """Return the agent's own config file for the AIBOM ``Config:`` line.
+
+    DefenseClaw's hook/bridge files (``~/.kiro/hooks/defenseclaw.json``,
+    ``plugins/defenseclaw.js``) are never presented as the agent's
+    configuration (GAP-1358, GAP-2038). Returns "" when none is known.
+    """
+    connector = str(inv.get("connector") or inv.get("claw_mode") or "openclaw").lower()
+    config_files = inv.get("connector_config_files") or [inv.get("openclaw_config", "")]
+    if connector == "opencode" and inv.get("connector_mcp_files"):
+        # The inventory reads OpenCode's opencode.json (GAP-1358).
+        mcp_files = [c for c in inv["connector_mcp_files"] if c]
+        config_files = [c for c in mcp_files if os.path.isfile(c)] or mcp_files
+    agent_files = [c for c in config_files if c and not _is_defenseclaw_written(c)]
+    return agent_files[0] if agent_files else ""
+
+
 def format_claw_aibom_human(
     inv: dict[str, Any],
     *,
     summary_only: bool = False,
+    categories: set[str] | None = None,
 ) -> None:
-    """Render the inventory to the terminal using Rich tables."""
+    """Render the inventory to the terminal using Rich tables.
+
+    *categories* is the ``--only`` selection: sections that were not
+    collected are left out instead of reading "none" (GAP-1358).
+    """
     from rich.console import Console
 
     console = Console(stderr=False)
@@ -658,8 +801,8 @@ def format_claw_aibom_human(
     connector = str(inv.get("connector") or inv.get("claw_mode") or "openclaw")
     title = "OpenClaw AIBOM" if connector.lower() == "openclaw" else f"{connector} AIBOM"
     home = inv.get("connector_home") or inv.get("claw_home", "")
-    config_files = inv.get("connector_config_files") or [inv.get("openclaw_config", "")]
-    primary_config = next((c for c in config_files if c), "")
+    primary_config = aibom_display_config(inv)
+    cats = _resolve_categories(categories)
     console.print()
     console.print(f"[bold]{title}[/bold]  (source: {mode})")
     if primary_config:
@@ -670,20 +813,41 @@ def format_claw_aibom_human(
         console.print(f"  Mode:      {inv.get('claw_mode', '')}")
     console.print()
 
-    _render_summary(console, inv)
+    _render_summary(console, inv, cats)
     console.print()
 
     if not summary_only:
-        _render_skills(console, inv.get("skills", []))
-        _render_plugins(console, inv.get("plugins", []))
-        _render_mcp(console, inv.get("mcp", []))
-        _render_agents(console, inv.get("agents", []))
-        _render_rules(console, inv.get("rules", []))
-        _render_tools(console, inv.get("tools", []))
-        _render_models(console, inv.get("model_providers", []))
-        _render_memory(console, inv.get("memory", []))
+        sections = (
+            ("skills", _render_skills, "skills"),
+            ("plugins", _render_plugins, "plugins"),
+            ("mcp", _render_mcp, "mcp"),
+            ("agents", _render_agents, "agents"),
+            ("rules", _render_rules, "rules"),
+            ("tools", _render_tools, "tools"),
+            ("models", _render_models, "model_providers"),
+            ("memory", _render_memory, "memory"),
+        )
+        not_collected = _not_collected_categories(inv)
+        for cat, render, key in sections:
+            if cat not in cats:
+                continue
+            if cat in not_collected and not inv.get(key):
+                console.print(f"[dim]{_CATEGORY_LABELS[cat]}: not collected[/dim]\n")
+                continue
+            render(console, inv.get(key, []))
 
-    _render_limitations(console, inv.get("limitations", []))
+    # With --only, count and show only the notes of the selected categories (GAP-2227).
+    limitations = [
+        lim for lim in inv.get("limitations", [])
+        if not isinstance(lim, dict) or "category" not in lim or lim["category"] in cats
+    ]
+    if summary_only:
+        # --summary is the tables only; the caveats are one pointer line (GAP-2037).
+        if limitations:
+            console.print(f"[dim]{_limitations_footer(limitations)}[/dim]")
+            console.print()
+    else:
+        _render_limitations(console, limitations)
     _render_errors(console, inv.get("errors", []))
 
 
@@ -854,6 +1018,66 @@ def _collect_mcp_config_files(connector: str, cfg: Config) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
+_SUMMARY_KEY_CATEGORY = {"model_providers": "models"}
+
+_CATEGORY_LABELS = {
+    "skills": "Skills",
+    "plugins": "Plugins",
+    "mcp": "MCP servers",
+    "agents": "Agents",
+    "rules": "Rules",
+    "tools": "Tools",
+    "models": "Model providers",
+    "memory": "Memory stores",
+}
+
+
+def _not_collected_categories(inv: dict[str, Any]) -> set[str]:
+    """Categories this connector cannot inventory (an UNSUPPORTED limitation),
+    or whose collector failed (an entry in ``errors``).
+
+    When such a category is empty it means "not collected", not "none"
+    (GAP-2101, the same rule as GAP-1483 for ``--only``).
+    """
+    unsupported = {
+        str(lim.get("category"))
+        for lim in inv.get("limitations") or []
+        if isinstance(lim, dict) and lim.get("status") == InventoryCapabilityStatus.UNSUPPORTED
+    }
+    # A collector that failed ("<connector>:<category>" in errors) did not
+    # collect either; its empty list is not "none" (GAP-2148).
+    failed = {
+        str(err.get("command", "")).rpartition(":")[2]
+        for err in inv.get("errors") or []
+        if isinstance(err, dict)
+    }
+    return unsupported | (failed & set(_CATEGORY_LABELS))
+
+
+def _mark_collected_categories(inv: dict[str, Any], cats: frozenset[str]) -> None:
+    """Flag the categories an ``--only`` run did not collect (GAP-1483).
+
+    Their empty lists mean "not collected", not "none": the JSON summary
+    carries ``"collected": false`` for them and the audit record skips them,
+    so a partial BOM does not read (or store) as an empty inventory.
+    """
+    if cats == ALL_CATEGORIES:
+        return
+    inv["categories_collected"] = sorted(cats)
+    summary = inv.get("summary")
+    if not isinstance(summary, dict):
+        return
+    for key, value in summary.items():
+        if isinstance(value, dict) and "count" in value:
+            if _SUMMARY_KEY_CATEGORY.get(key, key) not in cats:
+                value["collected"] = False
+
+
+def _category_collected(inv: dict[str, Any], key: str) -> bool:
+    entry = (inv.get("summary") or {}).get(key)
+    return not (isinstance(entry, dict) and entry.get("collected") is False)
+
+
 def _build_summary(inv: dict[str, Any]) -> dict[str, Any]:
     skills = inv.get("skills", [])
     plugins = inv.get("plugins", [])
@@ -861,10 +1085,19 @@ def _build_summary(inv: dict[str, Any]) -> dict[str, Any]:
     n_eligible = sum(1 for s in skills if s.get("eligible"))
     n_loaded = sum(1 for p in plugins if p.get("status") == "loaded")
     n_disabled = sum(1 for p in plugins if not p.get("enabled"))
+    # Connectors without a runtime "loaded" status (Hermes) report the
+    # configured state instead, so the summary does not read "0 loaded".
+    reports_loaded = any("status" in p for p in plugins)
 
     cats = {
         "skills": {"count": len(skills), "eligible": n_eligible},
-        "plugins": {"count": len(plugins), "loaded": n_loaded, "disabled": n_disabled},
+        "plugins": {
+            "count": len(plugins),
+            "loaded": n_loaded,
+            "enabled": len(plugins) - n_disabled,
+            "disabled": n_disabled,
+            "reports_loaded": reports_loaded,
+        },
         "mcp": {"count": len(inv.get("mcp", []))},
         "agents": {"count": len(inv.get("agents", []))},
         "rules": {"count": len(inv.get("rules", []))},
@@ -910,7 +1143,9 @@ def _needed_commands(cats: frozenset[str]) -> set[str]:
 # ---------------------------------------------------------------------------
 
 
-def _render_summary(console: Any, inv: dict[str, Any]) -> None:
+def _render_summary(
+    console: Any, inv: dict[str, Any], cats: frozenset[str] = ALL_CATEGORIES,
+) -> None:
     from rich.table import Table
 
     summary = inv.get("summary")
@@ -928,25 +1163,36 @@ def _render_summary(console: Any, inv: dict[str, Any]) -> None:
     sk_detail = f"{sk.get('eligible', 0)} eligible"
     sk_detail += _scan_detail_suffix(data.get("scan_skills"))
     sk_detail += _policy_detail_suffix(data.get("policy_skills"))
-    table.add_row("Skills", str(sk.get("count", 0)), sk_detail)
+    rows: list[tuple[str, str, str, str]] = [("skills", "Skills", str(sk.get("count", 0)), sk_detail)]
 
     pl = data.get("plugins", {})
-    pl_detail = f"{pl.get('loaded', 0)} loaded, {pl.get('disabled', 0)} disabled"
+    if pl.get("reports_loaded", True):
+        pl_detail = f"{pl.get('loaded', 0)} loaded, {pl.get('disabled', 0)} disabled"
+    else:
+        pl_detail = f"{pl.get('enabled', 0)} enabled, {pl.get('disabled', 0)} disabled"
     pl_detail += _scan_detail_suffix(data.get("scan_plugins"))
     pl_detail += _policy_detail_suffix(data.get("policy_plugins"))
-    table.add_row("Plugins", str(pl.get("count", 0)), pl_detail)
+    rows.append(("plugins", "Plugins", str(pl.get("count", 0)), pl_detail))
 
     mcp_detail = ""
     mcp_detail += _scan_detail_suffix(data.get("scan_mcp")).lstrip(" · ")
     mcp_detail += _policy_detail_suffix(data.get("policy_mcp"))
     if mcp_detail.startswith(" · "):
         mcp_detail = mcp_detail.lstrip(" · ")
-    table.add_row("MCP servers", str(data.get("mcp", {}).get("count", 0)), mcp_detail)
-    table.add_row("Agents", str(data.get("agents", {}).get("count", 0)))
-    table.add_row("Rules", str(data.get("rules", {}).get("count", 0)))
-    table.add_row("Tools", str(data.get("tools", {}).get("count", 0)))
-    table.add_row("Model providers", str(data.get("model_providers", {}).get("count", 0)))
-    table.add_row("Memory stores", str(data.get("memory", {}).get("count", 0)))
+    rows.extend([
+        ("mcp", "MCP servers", str(data.get("mcp", {}).get("count", 0)), mcp_detail),
+        ("agents", "Agents", str(data.get("agents", {}).get("count", 0)), ""),
+        ("rules", "Rules", str(data.get("rules", {}).get("count", 0)), ""),
+        ("tools", "Tools", str(data.get("tools", {}).get("count", 0)), ""),
+        ("models", "Model providers", str(data.get("model_providers", {}).get("count", 0)), ""),
+        ("memory", "Memory stores", str(data.get("memory", {}).get("count", 0)), ""),
+    ])
+    not_collected = _not_collected_categories(inv)
+    for cat, name, count, detail in rows:
+        if cat in not_collected and count == "0":
+            count, detail = "-", "[dim]not collected[/dim]"
+        if cat in cats:
+            table.add_row(name, count, detail)
     console.print(table)
 
 
@@ -958,12 +1204,18 @@ def _policy_detail_suffix(policy: dict[str, int] | None) -> str:
         parts.append(f"[red]{policy['blocked']} blocked[/red]")
     if policy.get("rejected"):
         parts.append(f"[red]{policy['rejected']} rejected[/red]")
+    # GAP-1748: an allow-listed item is still a scanned item; count it as the
+    # TUI Inventory panel does, or the row says only "1 scanned".
+    if policy.get("allowed"):
+        parts.append(f"[cyan]{policy['allowed']} allowed[/cyan]")
     if policy.get("warning"):
         parts.append(f"[yellow]{policy['warning']} warning[/yellow]")
     if policy.get("clean"):
         parts.append(f"[green]{policy['clean']} clean[/green]")
     if policy.get("unscanned"):
         parts.append(f"[dim]{policy['unscanned']} unscanned[/dim]")
+    if policy.get("discovery-only"):
+        parts.append(f"[dim]{policy['discovery-only']} discovery-only[/dim]")
     return " · " + ", ".join(parts) if parts else ""
 
 
@@ -976,7 +1228,7 @@ def _scan_detail_suffix(scan: dict[str, int] | None) -> str:
         return ""
     parts = [f"{scanned} scanned"]
     if findings:
-        parts.append(f"[yellow]{findings} findings[/yellow]")
+        parts.append(f"[yellow]{findings} {'finding' if findings == 1 else 'findings'}[/yellow]")
     return " · " + ", ".join(parts)
 
 
@@ -987,6 +1239,7 @@ _VERDICT_STYLES: dict[str, tuple[str, str]] = {
     "clean": ("green", "✓ clean"),
     "allowed": ("cyan", "↪ allowed"),
     "unscanned": ("dim", "… unscanned"),
+    "discovery-only": ("dim", "discovery-only"),
 }
 
 
@@ -1001,9 +1254,18 @@ def _render_skills(console: Any, skills: list[dict[str, Any]]) -> None:
     ineligible = [s for s in skills if not s.get("eligible")]
     has_policy = any(s.get("policy_verdict") for s in skills)
     has_scan = any("scan_findings" in s for s in skills)
+    discovery_only = sum(1 for s in eligible if s.get("policy_verdict") == "discovery-only")
 
     if eligible:
-        table = Table(title=f"Skills — eligible ({len(eligible)})")
+        # GAP-1997: discovery-only skills are listed but not scanned, so the
+        # title counts them apart, as the summary line does.
+        title = f"Skills — eligible ({len(eligible)})"
+        if discovery_only:
+            title = (
+                f"Skills ({len(eligible)}): {len(eligible) - discovery_only} eligible, "
+                f"{discovery_only} discovery-only"
+            )
+        table = Table(title=title)
         table.add_column("Name", style="green bold")
         table.add_column("Source")
         table.add_column("Description", max_width=50)
@@ -1215,6 +1477,8 @@ def _render_models(console: Any, providers: list[dict[str, Any]]) -> None:
     auth_rows = [p for p in providers if p.get("source") == "auth"]
     plugin_rows = [p for p in providers if str(p.get("source", "")).startswith("plugin:")]
     model_rows = [p for p in providers if p.get("source") == "models list"]
+    openclaw_rows = {id(p) for p in (*config_rows, *auth_rows, *plugin_rows, *model_rows)}
+    other_rows = [p for p in providers if id(p) not in openclaw_rows]
 
     if config_rows:
         c = config_rows[0]
@@ -1262,6 +1526,19 @@ def _render_models(console: Any, providers: list[dict[str, Any]]) -> None:
         console.print(f"  [dim]Provider plugins ({len(enabled)} loaded): {names}[/dim]")
         if disabled:
             console.print(f"  [dim]+ {len(disabled)} disabled provider plugins[/dim]")
+        console.print()
+
+    if other_rows:
+        table = Table(title=f"Model Providers ({len(other_rows)})")
+        table.add_column("Provider", style="bold")
+        table.add_column("Model")
+        table.add_column("Base URL")
+        for prov in other_rows:
+            label = str(prov.get("id", ""))
+            if prov.get("active"):
+                label += " (active)"
+            table.add_row(label, str(prov.get("model") or "-"), str(prov.get("base_url") or "-"))
+        console.print(table)
         console.print()
 
 
@@ -1312,12 +1589,35 @@ def _render_limitations(console: Any, limitations: list[dict[str, Any]]) -> None
 
     if not limitations:
         return
-    console.print("[bold cyan]Unsupported inventory capabilities[/bold cyan] [dim](informational)[/dim]:")
+    from rich.padding import Padding
+
+    console.print("[bold cyan]Inventory coverage notes[/bold cyan] [dim](informational)[/dim]:")
     for limitation in limitations:
         category = limitation.get("category", "?")
         reason = limitation.get("reason", "unsupported by this connector")
-        console.print(f"  [cyan]{category}[/cyan] — {reason}")
+        # status is usually an InventoryCapabilityStatus member; str() of a
+        # (str, Enum) member is "InventoryCapabilityStatus.X", so use .value.
+        status = limitation.get("status", "")
+        label = _LIMITATION_STATUS_LABELS.get(str(getattr(status, "value", status)), "")
+        suffix = f" [dim]({label})[/dim]" if label else ""
+        # Wrapped lines stay indented under the category (GAP-2227).
+        console.print(Padding(f"[cyan]{category}[/cyan]{suffix} — {reason}", (0, 0, 0, 2)))
     console.print()
+
+
+_LIMITATION_STATUS_LABELS = {
+    InventoryCapabilityStatus.UNSUPPORTED.value: "not supported",
+    InventoryCapabilityStatus.UNVERIFIED.value: "partly checked",
+}
+
+
+def _limitations_footer(limitations: list[dict[str, Any]]) -> str:
+    """One --summary pointer line: count, plural and the categories (GAP-2227)."""
+    n = len(limitations)
+    cats = sorted({str(lim.get("category", "?")) for lim in limitations if isinstance(lim, dict)})
+    noun, pronoun = ("note", "it") if n == 1 else ("notes", "them")
+    where = f" ({', '.join(cats)})" if cats else ""
+    return f"{n} inventory coverage {noun}{where}; run without --summary to read {pronoun}."
 
 
 def _trunc(s: str, n: int) -> str:
@@ -1656,9 +1956,12 @@ def _parse_memory(raw: Any) -> list[dict[str, Any]]:
 
 _FILESYSTEM_ONLY_CONNECTOR_NOTES: dict[str, str] = {
     "agents": "agents are not a first-class concept on this connector",
-    "tools": "tool registry is owned by each plugin's manifest",
-    "models": "model providers are configured inside the framework",
-    "memory": "memory backend is private to the framework",
+    # Connector-neutral wording: these defaults apply to every non-OpenClaw
+    # connector (Copilot, Cursor, ...), which have no plugin manifests or
+    # "framework" of their own (GAP-2312).
+    "tools": "this connector has no local tool registry to read; its MCP servers are listed under MCP",
+    "models": "model and provider settings are not read for this connector",
+    "memory": "this connector has no documented local memory store to read",
 }
 
 _PARTIAL_CONNECTOR_NOTES: dict[tuple[str, str], str] = {
@@ -1671,164 +1974,165 @@ _PARTIAL_CONNECTOR_NOTES: dict[tuple[str, str], str] = {
     ),
     (
         "copilot",
-        "skills",
-    ): (
-        "documented local project, inherited, personal, and COPILOT_SKILLS_DIRS "
-        "sources are inventoried; plugin, built-in, and organization/remote "
-        "skills are not expanded from private or remote stores"
-    ),
-    (
-        "copilot",
-        "agents",
-    ): (
-        "documented local project/ancestor and personal agents plus the "
-        "reviewed Copilot CLI 1.0.77 built-in agent set are inventoried; "
-        "built-ins cannot be shadowed by local files, while plugin-contributed "
-        "agents and remote organization/enterprise agents require "
-        "official-client live-session inspection"
-    ),
-    (
-        "copilot",
-        "mcp",
-    ): (
-        "documented workspace/ancestor and personal MCP configuration is "
-        "inventoried in priority order irrespective of folder trust; effective "
-        "workspace activation requires a trusted folder (or "
-        "GITHUB_COPILOT_PROMPT_MODE_WORKSPACE_MCP=true in untrusted prompt "
-        "mode), while session flag, plugin-contributed, built-in, and remote "
-        "runtime servers require official-client live inspection"
-    ),
-    (
-        "copilot",
-        "rules",
-    ): (
-        "documented personal, repository-root, current-workspace, intermediate, "
-        "nested active-file candidates, modular, imported, and "
-        "COPILOT_CUSTOM_INSTRUCTIONS_DIRS sources are inventoried with no-follow "
-        "file/directory/size bounds and collision metadata; exact active-file "
-        "selection, path-specific applyTo, session enable/disable state, folder "
-        "trust, managed/organization policy, and remote instructions remain "
-        "unverified"
-    ),
-    (
-        "copilot",
         "plugins",
     ): (
-        "declared plugins are queried only through the trusted Copilot executable "
-        "with `plugins list --kind plugin --json`, the pinned workspace, and exact "
-        "COPILOT_HOME; semantic activation and managed/organization policy remain "
-        "unverified without live-session evidence"
+        "AIBOM does not list Copilot plugins (only the Copilot CLI can); run "
+        "`defenseclaw plugin list --connector copilot` to see them. Plugin "
+        "activation and organization policy are not checked"
     ),
 }
 
 _UNVERIFIED_CONNECTOR_NOTES: dict[tuple[str, str], str] = {
     (
+        "copilot",
+        "skills",
+    ): (
+        "project, parent-folder, personal and COPILOT_SKILLS_DIRS skills are "
+        "listed; built-in, plugin and organization/remote skills are not"
+    ),
+    (
+        "copilot",
+        "agents",
+    ): (
+        "project, parent-folder and personal agents plus the Copilot CLI 1.0.77 "
+        "built-in agent set are listed (built-ins cannot be shadowed by local "
+        "files); plugin-contributed "
+        "agents and organization/enterprise agents are not listed"
+    ),
+    (
+        "copilot",
+        "mcp",
+    ): (
+        "workspace, parent-folder and personal MCP config files are listed "
+        "regardless of folder trust (Copilot starts workspace servers only in a "
+        "trusted folder); servers added per session, by plugins, built in or "
+        "remote are not listed"
+    ),
+    (
+        "copilot",
+        "rules",
+    ): (
+        "personal, repository and workspace instruction files (including nested, "
+        "modular, imported and COPILOT_CUSTOM_INSTRUCTIONS_DIRS files) are "
+        "listed; which file applies to the active file (applyTo), session "
+        "toggles, folder trust, organization policy and remote instructions are "
+        "not checked"
+    ),
+    (
         "opencode",
         "skills",
     ): (
-        "local project-through-worktree, global, compatibility, and active "
-        "OPENCODE_CONFIG_DIR skills are inventoried; built-in, remote, and "
-        "runtime permission-filtered availability are not scanned"
+        "project skills (up to the git worktree root), global skills, compatible "
+        "skill folders and OPENCODE_CONFIG_DIR skills are listed; built-in and "
+        "remote skills, and skills hidden by permissions at runtime, are not checked"
     ),
     (
         "opencode",
         "plugins",
     ): (
-        "operator-authored direct JS/TS plugins and local config plugin specs "
-        "are inventoried; the exact DefenseClaw-managed bridge is connector "
-        "configuration and is excluded from ordinary plugin scanning"
+        "JS/TS plugin files and plugins named in the OpenCode config are listed; "
+        "the DefenseClaw plugin that connects OpenCode to DefenseClaw is part of "
+        "the connector setup, so it is not listed or scanned as a plugin"
     ),
     (
         "opencode",
         "agents",
     ): (
-        "local singular/plural Markdown agents and config agent maps are "
-        "inventoried; built-in and remote/managed agents remain unverified"
+        "Markdown agents (agent/ and agents/ folders) and agents defined in the "
+        "OpenCode config are listed; built-in, remote and managed agents are not checked"
     ),
     (
         "opencode",
         "rules",
     ): (
-        "local AGENTS.md/CLAUDE.md fallback and config instruction files are "
-        "inventoried without fetching remote instruction URLs"
+        "AGENTS.md (or CLAUDE.md when there is no AGENTS.md) and instruction "
+        "files named in the config are listed; remote instruction URLs are not fetched"
     ),
     (
         "opencode",
         "tools",
     ): (
-        "local singular/plural JS/TS tools and Markdown/config commands are "
-        "inventoried; the legacy config tools permission map is not a custom-tool registry"
+        "JS/TS custom tools (tool/ and tools/ folders) and Markdown or config "
+        "commands are listed; the old 'tools' config setting only sets "
+        "permissions, so its entries are not listed as tools"
     ),
     (
         "devin",
         "skills",
     ): (
-        "documented user config-root and ~/.agents skills plus pinned project "
-        ".devin/.agents skills are inventoried locally; remote or managed "
-        "activation requires official-client evidence"
+        "user config-folder and ~/.agents skills plus the project's .devin and "
+        ".agents skills are listed; remote and managed skills, and whether Devin "
+        "loads them, are not checked"
     ),
     (
         "devin",
         "rules",
     ): (
-        "documented config-root AGENT(S).md, project/nested AGENT(S).md and "
-        "AGENTS.local.md, and project .devin rules are inventoried with bounded "
-        "no-follow discovery; effective runtime precedence is unverified"
+        "AGENT.md/AGENTS.md in the config folder and the project (nested ones "
+        "too), AGENTS.local.md and project .devin rules are listed (links are not "
+        "followed); which rule wins at runtime is not checked"
     ),
     (
         "devin",
         "mcp",
     ): (
-        "canonical user/project mcp_config.json registries and read-only "
-        "mcp_config.local.json plus legacy config*.json sources are inventoried; "
-        "live server activation is unverified"
+        "user and project mcp_config.json, mcp_config.local.json and older "
+        "config*.json files are listed; whether Devin starts each server is not checked"
     ),
     (
         "devin",
         "agents",
     ): (
-        "pinned-project .devin/agents and .agents/agents Markdown agents are "
-        "inventoried locally; runtime activation and precedence are unverified"
+        "Markdown agents in the project's .devin/agents and .agents/agents "
+        "folders are listed; which agents Devin loads, and which one wins, are not checked"
+    ),
+    (
+        "claudecode",
+        "agents",
+    ): (
+        "user and project .claude/agents Markdown subagents (closest project "
+        "first) are listed; files without a name and description in their front "
+        "matter, and plugin, managed and session (--agents) subagents, are not checked"
     ),
     (
         "cursor",
         "skills",
     ): (
-        "local project/user Cursor, Agents, Claude, and Codex skill roots plus "
-        "nested project Cursor/Agents roots are scanned recursively and without "
-        "following aliases; multi-root, cloud, team/private, marketplace, and "
-        "dynamic plugin skill activation require official-client evidence"
+        "project and user skill folders for Cursor, .agents, Claude and Codex "
+        "(nested project folders too; links are not followed) are listed; skills "
+        "from multi-root workspaces, cloud, team or private sources, the "
+        "marketplace and plugins are not checked"
     ),
     (
         "cursor",
         "plugins",
     ): (
-        "only the documented local plugin directory is inspectable; marketplace, "
-        "team/private, cloud, and dynamically registered plugins are unverified"
+        "only the local plugin folder is listed; marketplace, team or private, "
+        "cloud and dynamically added plugins are not checked"
     ),
     (
         "cursor",
         "mcp",
     ): (
-        "project and user mcp.json candidates are retained without inventing a "
-        "same-name winner; extension-registered dynamic servers, cloud/team "
-        "sources, multi-root activation, and the effective runtime selection are unverified"
+        "project and user mcp.json files are listed (a name in both is listed "
+        "twice); servers added by extensions, cloud or team settings, multi-root "
+        "workspaces, and which copy Cursor actually uses are not checked"
     ),
     (
         "cursor",
         "agents",
     ): (
-        "project/user .cursor, .claude, and .codex subagent files are inventoried "
-        "with documented scope precedence; multi-root, cloud, team/private, "
-        "marketplace/dynamic, and runtime-only subagents are unverified"
+        "project and user subagent files in .cursor, .claude and .codex are "
+        "listed (project first); subagents from multi-root workspaces, cloud, "
+        "team or private sources, the marketplace, or only at runtime are not checked"
     ),
     (
         "cursor",
         "rules",
     ): (
-        "local .cursor/rules/**/*.mdc and root/nested AGENTS.md are inventoried; "
-        "user UI rules, team/private rules, cloud state, multi-root activation, "
-        "and effective runtime ordering are unverified"
+        "local .cursor/rules .mdc files and root or nested AGENTS.md files are "
+        "listed; rules set in the Cursor UI, team or private rules, cloud "
+        "settings, multi-root workspaces and the order Cursor applies them are not checked"
     ),
 }
 
@@ -1849,7 +2153,7 @@ def _collect_filesystem_category(
         return _FilesystemCollectionResult(collector(), None)
     except Exception as exc:  # noqa: BLE001 - partial inventory records the failure.
         return _FilesystemCollectionResult(
-            [],
+            exc.items if isinstance(exc, _PartialCollectionError) else [],
             {"command": f"{connector}:{category}", "error": str(exc)},
         )
 
@@ -2527,7 +2831,9 @@ def _model_providers_for_connector(
     """Per-connector model-provider enumeration.
 
     * claudecode — ``ANTHROPIC_BASE_URL`` env + the resolved key store
-    * codex      — ``OPENAI_BASE_URL`` env + key store
+    * codex      — ``~/.codex/config.toml`` ``model`` / ``model_provider`` /
+                   ``[model_providers.*]`` (GAP-2101), falling back to the
+                   ``OPENAI_BASE_URL`` / ``OPENAI_API_KEY`` env
     * zeptoclaw  — re-parse ``~/.zeptoclaw/config.json`` providers map
                    (the Setup-time snapshot is held in-process by
                    the Go connector; offline AIBOM doesn't have it,
@@ -2543,12 +2849,23 @@ def _model_providers_for_connector(
             default_base_url="https://api.anthropic.com",
         )
     if name == "codex":
-        return _providers_from_env(
+        rows = _providers_from_codex_config(
+            os.path.join(connector_paths.connector_home(name), "config.toml"),
+        )
+        env_rows = _providers_from_env(
             "OPENAI_BASE_URL",
             "OPENAI_API_KEY",
             default_provider="openai",
             default_base_url="https://api.openai.com/v1",
         )
+        if not rows:
+            return env_rows
+        for row in rows:
+            # The built-in openai provider has no table; the env supplies it.
+            if row["id"] == "openai" and env_rows and not row.get("base_url"):
+                row["base_url"] = env_rows[0]["base_url"]
+                row["api_key_present"] = env_rows[0]["api_key_present"]
+        return rows
     if name == "zeptoclaw":
         return _providers_from_zeptoclaw_config(
             os.path.join(home, ".zeptoclaw", "config.json"),
@@ -2910,7 +3227,9 @@ class AmbiguousClaudeAgentIdentityError(ValueError):
     """Raised when one Claude agent scope contains duplicate identities."""
 
 
-_CLAUDE_AGENT_NAME_PATTERN = re.compile(r"[a-z]+(?:-[a-z]+)*\Z")
+# Lowercase letters, digits and hyphens ("sf1r10-helper"): a digit used to
+# drop the agent from the BOM (GAP-2436).
+_CLAUDE_AGENT_NAME_PATTERN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
 _CLAUDE_AGENT_WALK_LIMIT = 32768
 _CLAUDE_AGENT_FRONTMATTER_LIMIT = 65536
 
@@ -3611,14 +3930,18 @@ def _tools_from_claude_settings(path: str) -> list[dict[str, Any]]:
     return rows
 
 
-def _tools_from_codex_config(path: str) -> list[dict[str, Any]]:
-    """Codex's ``[tools]`` table — TOML."""
+def _load_toml_dict(path: str, *, strict: bool = False) -> dict[str, Any] | None:
+    """Read a TOML file; return None when it is missing or unreadable.
+
+    With strict, a file that exists but cannot be read or parsed raises, so
+    the collector lands in ``errors`` instead of reading as empty (GAP-2148).
+    """
     if not os.path.isfile(path):
-        return []
+        return None
     try:
         # tomllib ships in the stdlib on Python 3.11+. On 3.10 (still an
         # advertised target) it is absent, so fall back to the tomli
-        # backport rather than silently dropping Codex tool definitions.
+        # backport rather than silently dropping Codex definitions.
         try:
             import tomllib
         except ModuleNotFoundError:
@@ -3626,9 +3949,84 @@ def _tools_from_codex_config(path: str) -> list[dict[str, Any]]:
 
         with open(path, "rb") as fh:
             raw = tomllib.load(fh)
-    except (OSError, ValueError, ModuleNotFoundError):
+    except (OSError, ValueError, ModuleNotFoundError) as exc:
+        if strict:
+            raise ValueError(f"could not read {path}: {exc}") from exc
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
+def _providers_from_codex_config(path: str) -> list[dict[str, Any]]:
+    """Codex's ``model`` / ``model_provider`` / ``[model_providers.*]`` (GAP-2101).
+
+    Only names, endpoints and the *name* of the key env var are reported;
+    header and token values are never copied into the BOM.
+    """
+    raw = _load_toml_dict(path, strict=True)
+    if raw is None:
         return []
-    tools = raw.get("tools") if isinstance(raw, dict) else None
+    model = str(raw.get("model") or "").strip()
+    active = str(raw.get("model_provider") or "").strip()
+    if model and not active:
+        active = "openai"  # Codex's built-in default provider
+    tables = raw.get("model_providers")
+    if not isinstance(tables, dict):
+        tables = {}
+    rows: list[dict[str, Any]] = []
+    for pid, body in tables.items():
+        if not isinstance(body, dict):
+            continue
+        env_key = str(body.get("env_key") or "").strip()
+        row: dict[str, Any] = {
+            "id": str(pid),
+            "name": str(body.get("name") or pid),
+            "base_url": _strip_url_userinfo(str(body.get("base_url") or "")),
+            "active": str(pid) == active,
+            "api_key_present": bool(
+                (env_key and os.environ.get(env_key, "").strip())
+                or body.get("experimental_bearer_token")
+            ),
+            "source": path,
+        }
+        if env_key:
+            row["env_key"] = env_key
+        if body.get("wire_api"):
+            row["wire_api"] = str(body["wire_api"])
+        if row["active"] and model:
+            row["model"] = model
+        rows.append(row)
+    if active and active not in tables:
+        builtin: dict[str, Any] = {
+            "id": active,
+            "name": active,
+            "base_url": "",
+            "active": True,
+            "builtin": True,
+            "source": path,
+        }
+        if model:
+            builtin["model"] = model
+        rows.insert(0, builtin)
+    return rows
+
+
+def _strip_url_userinfo(url: str) -> str:
+    """Drop ``user:pass@`` from an endpoint URL before it lands in the BOM."""
+    from urllib.parse import urlsplit, urlunsplit
+
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return ""
+    if "@" not in parts.netloc:
+        return url
+    return urlunsplit(parts._replace(netloc=parts.netloc.rsplit("@", 1)[1]))
+
+
+def _tools_from_codex_config(path: str) -> list[dict[str, Any]]:
+    """Codex's ``[tools]`` table — TOML."""
+    raw = _load_toml_dict(path)
+    tools = raw.get("tools") if raw is not None else None
     if not isinstance(tools, dict):
         return []
     rows: list[dict[str, Any]] = []
@@ -4258,21 +4656,22 @@ def _build_aibom_from_filesystem(
     if connector_paths.normalize(connector) == "hermes":
         hermes_notes = {
             "skills": (
-                "default-profile HERMES_HOME/skills and existing skills.external_dirs are inventoried; "
-                "named/multiplex profiles and session/project-conditional skill sources are unsupported or unverified"
+                "the default profile's HERMES_HOME/skills and skills.external_dirs folders are listed; "
+                "named profiles and skills that depend on the session or project are not checked"
             ),
             "plugins": (
-                "default-profile user, vendor bundled/Nix override, and official Hermes-venv entry-point metadata are "
-                "inventoried with config-derived activation provenance; runtime activation and project plugins "
-                "conditional on the Hermes process CWD plus HERMES_ENABLE_PROJECT_PLUGINS remain unverified"
+                "the default profile's user plugins, bundled (or Nix override) plugins and plugins installed in "
+                "the Hermes Python environment are listed, with whether the config enables them; whether they load "
+                "at runtime, and project plugins (which depend on the folder Hermes runs in and "
+                "HERMES_ENABLE_PROJECT_PLUGINS), are not checked"
             ),
             "rules": (
-                "default-profile SOUL.md is inventoried as identity; project AGENTS.md, CLAUDE.md, .hermes.md, and "
-                ".cursorrules depend on the Hermes session CWD and remain unverified"
+                "the default profile's SOUL.md is listed as identity; project AGENTS.md, CLAUDE.md, .hermes.md and "
+                ".cursorrules depend on the folder Hermes runs in and are not checked"
             ),
             "memory": (
-                "default-profile MEMORY.md/USER.md and configured memory.provider are inventoried; provider-owned "
-                "external state requires loading the provider and remains unverified"
+                "the default profile's MEMORY.md and USER.md and the configured memory.provider are listed; data "
+                "the provider stores elsewhere is not checked"
             ),
         }
         for category, reason in hermes_notes.items():
@@ -4286,7 +4685,7 @@ def _build_aibom_from_filesystem(
                     }
                 )
     for cat_key, note in _FILESYSTEM_ONLY_CONNECTOR_NOTES.items():
-        if connector == "codex" and cat_key == "agents":
+        if connector == "codex" and cat_key in ("agents", "models"):
             continue
         if cat_key not in cats:
             continue
@@ -4294,7 +4693,7 @@ def _build_aibom_from_filesystem(
         # a successful empty inventory, not an unsupported capability.
         if connector == "cursor" and cat_key == "agents":
             continue
-        if connector == "devin" and cat_key == "agents":
+        if connector in ("devin", "claudecode") and cat_key == "agents":
             continue
         result = results.get(cat_key)
         if connector_paths.normalize(connector) == "claudecode" and cat_key == "memory":
@@ -4347,6 +4746,7 @@ def _build_aibom_from_filesystem(
     _attach_connector_paths(out, cfg, connector)
     _sync_legacy_connector_paths(out)
     out["summary"] = _build_summary(out)
+    _mark_collected_categories(out, cats)
     return out
 
 
@@ -4708,6 +5108,35 @@ def _hermes_pip_entry_points() -> list[tuple[Any, str]]:
     return rows
 
 
+def hermes_listed_identity(path: str) -> tuple[str, str] | None:
+    """The (id, origin) _enumerate_hermes_plugins gives the plugin folder *path*.
+
+    Works when the folder is gone (quarantined): it only compares paths with
+    the same roots, so ``.../plugins/platforms/photon`` is ``photon`` and
+    ``.../plugins/web/ddgs`` is ``web/ddgs`` (GAP-2265).
+    """
+    user_root = os.path.join(connector_paths.hermes_home(), "plugins")
+    bundled = "bundled-nix" if (os.environ.get("HERMES_BUNDLED_PLUGINS") or "").strip() else "bundled"
+    skip = {"memory", "context_engine", "platforms", "model-providers"}
+    bases: list[tuple[str, str, set[str]]] = []
+    for root in connector_paths.plugin_dirs("hermes"):
+        if os.path.normcase(root) != os.path.normcase(user_root):
+            bases.append((os.path.join(root, "platforms"), bundled, set()))
+            bases.append((root, bundled, skip))
+    bases.append((user_root, "user", set()))
+    target = os.path.abspath(path.rstrip("/\\") or path)
+    for base, source, skipped in bases:
+        try:
+            rel = os.path.relpath(target, os.path.abspath(base))
+        except ValueError:
+            continue
+        parts = rel.split(os.sep)
+        if rel == os.curdir or parts[0] == os.pardir or len(parts) > 2 or parts[0] in skipped:
+            continue
+        return "/".join(parts), source
+    return None
+
+
 def _enumerate_hermes_plugins() -> list[dict[str, Any]]:
     """Mirror v0.19's bounded default-profile plugin source and activation order."""
 
@@ -4964,7 +5393,8 @@ def _enumerate_mcp_filesystem(
     """
     rows: list[dict[str, Any]] = []
     resolved = connector or cfg.active_connector()
-    entries = cfg.mcp_servers(connector)
+    diagnostics: list[connector_paths.MCPSourceDiagnostic] = []
+    entries = cfg.mcp_servers(connector, diagnostic_sink=diagnostics)
     cursor_names: dict[str, int] = {}
     if connector_paths.normalize(resolved) == "cursor":
         for entry in entries:
@@ -4996,6 +5426,11 @@ def _enumerate_mcp_filesystem(
                 row["selection_conflict"] = True
                 row["activation_state"] = "unverified-same-name-scope-conflict"
         rows.append(row)
+    if diagnostics:
+        # An MCP config that exists but cannot be read or parsed is an error,
+        # not "none configured" (GAP-2182, the MCP side of GAP-2148).
+        failed = "; ".join(f"could not read {d.source} ({d.problem})" for d in diagnostics)
+        raise _PartialCollectionError(failed, rows)
     return rows
 
 

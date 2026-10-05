@@ -17,6 +17,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -24,7 +25,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 # Checked-in source fixtures and published documentation share one release
 # identity so native repair/upgrade comparisons remain monotonic.
-CURRENT_RELEASE = "0.8.10"
+CURRENT_RELEASE = "1.0.0"
 CURRENT_PUBLISHED_RELEASE = "0.8.10"
 LATEST_POSIX_INSTALL_URL = (
     "https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.sh"
@@ -38,8 +39,10 @@ DOC_INSTALL_COMMANDS = {
         LATEST_POSIX_INSTALL_COMMAND,
         LATEST_WINDOWS_INSTALL_COMMAND,
     ),
-    "docs-site/content/docs/get-started/first-guardrail.mdx": (
-        f"{LATEST_POSIX_INSTALL_COMMAND} -s -- --connector claudecode",
+    # Quickstart and Upgrade include this shared snippet.
+    "docs-site/content/snippets/install-commands.mdx": (
+        LATEST_POSIX_INSTALL_COMMAND,
+        LATEST_WINDOWS_INSTALL_COMMAND,
     ),
     "docs-site/components/terminal-demo.tsx": (
         f"text: '{LATEST_POSIX_INSTALL_COMMAND}',",
@@ -54,13 +57,13 @@ INSTALLER_FILES = (
 OBSERVABILITY_V8_CURRENT_AUTHORITY_FILES = (
     "docs-site/components/command-generator.tsx",
     "docs-site/content/docs/command-generator.mdx",
-    "docs-site/content/docs/setup/guardrail/index.mdx",
+    "docs-site/content/docs/guardrail/index.mdx",
     "docs-site/content/docs/connectors/openclaw.mdx",
     "docs-site/content/docs/connectors/zeptoclaw.mdx",
     "docs-site/content/docs/connectors/claudecode.mdx",
     "docs-site/content/docs/connectors/codex.mdx",
-    "docs-site/content/docs/setup/index.mdx",
-    "docs-site/content/docs/reference/redaction.mdx",
+    "docs-site/content/docs/reference/setup-commands.mdx",
+    "docs-site/content/docs/observability/redaction.mdx",
     "docs-site/content/docs/reference/cli.mdx",
     "docs-site/content/docs/observability/index.mdx",
     "bundles/local_observability_stack/prometheus/rules/alerts.yml",
@@ -71,8 +74,7 @@ OBSERVABILITY_V8_CURRENT_AUTHORITY_FILES = (
 OBSERVABILITY_V8_WORKFLOW_GUIDES = (
     "docs-site/components/command-generator.tsx",
     "docs-site/content/docs/command-generator.mdx",
-    "docs-site/content/docs/setup/guardrail/index.mdx",
-    "docs-site/content/docs/setup/index.mdx",
+    "docs-site/content/docs/observability/redaction.mdx",
     "bundles/local_observability_stack/prometheus/rules/alerts.yml",
 )
 
@@ -84,7 +86,7 @@ OBSERVABILITY_V8_CONNECTOR_GUIDES = (
 )
 
 OBSERVABILITY_V8_JSONL_GUIDES = {
-    "docs-site/content/docs/setup/index.mdx": "kind: jsonl",
+    "docs-site/content/docs/reference/setup-commands.mdx": "kind: jsonl",
     "docs-site/content/docs/reference/configuration.mdx": "kind: jsonl",
 }
 
@@ -544,6 +546,40 @@ def test_failed_gateway_install_does_not_claim_source_ownership(tmp_path: Path) 
     assert not (install_dir / ".defenseclaw-source-root").exists()
 
 
+def test_preflight_skips_a_python3_that_does_not_run(tmp_path: Path) -> None:
+    # WIN-R1-27: on Windows python3 is often the Store alias, which only prints
+    # a hint. The preflight must use the next working Python, or say plainly
+    # that none runs instead of blaming the checkout.
+    bash = shutil.which("bash")
+    python = shutil.which("python3")
+    assert bash and python
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    _write_executable(fake / "python3", "#!/bin/sh\necho 'Python was not found' >&2\nexit 9\n")
+    script = ROOT / "scripts" / "source-install-preflight.sh"
+    args = [bash, str(script), "no-such-mode", str(ROOT), str(tmp_path), str(tmp_path), "defenseclaw", "gw"]
+
+    # Windows Python cannot start without SYSTEMROOT, so keep it.
+    env = {"PATH": str(fake), **{k: v for k, v in os.environ.items() if k.upper() == "SYSTEMROOT"}}
+    none = subprocess.run(args, capture_output=True, text=True, check=False, env=env)
+    assert none.returncode == 1
+    assert "no working Python 3 interpreter" in none.stderr
+    assert "identity" not in none.stderr
+
+    # A wrapper, not a symlink: a Windows venv python.exe reached through a
+    # symlink in another folder cannot find its pyvenv.cfg.
+    _write_executable(fake / "python", f'#!/bin/sh\nexec "{Path(sys.executable).as_posix()}" "$@"\n')
+    found = subprocess.run(args, capture_output=True, text=True, check=False, env=env)
+    assert "no working Python 3 interpreter" not in found.stderr
+    assert found.returncode == 64, found.stderr  # detection passed; then the bad mode is refused
+
+
+def test_install_docs_cover_the_windows_source_build() -> None:
+    text = " ".join((ROOT / "docs-site/content/docs/get-started/install.mdx").read_text(encoding="utf-8").split())
+    assert "Build from source on Windows" in text
+    assert "Git Bash" in text and "py -3" in text and "core.autocrlf=false" in text
+
+
 def test_source_install_docs_are_developer_only_and_point_existing_hosts_to_resolver() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     install = (ROOT / "docs/INSTALL.md").read_text(encoding="utf-8")
@@ -601,7 +637,7 @@ def test_repository_operator_pointers_delegate_to_the_canonical_website() -> Non
         "docs/ENV-VARS.md": "https://cisco-ai-defense.github.io/defenseclaw/docs/reference/env-vars/",
         "docs/INSTALL.md": "https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/install/",
         "docs/QUICKSTART.md": "https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/quickstart/",
-        "docs/REGISTRIES.md": "https://cisco-ai-defense.github.io/defenseclaw/docs/setup/registries/",
+        "docs/REGISTRIES.md": "https://cisco-ai-defense.github.io/defenseclaw/docs/scanning/registries/",
         "docs/SPLUNK_APP.md": "https://cisco-ai-defense.github.io/defenseclaw/docs/observability/splunk/",
     }
     for rel, canonical_url in expected.items():
@@ -614,11 +650,11 @@ def test_repository_operator_pointers_delegate_to_the_canonical_website() -> Non
 
 def test_scanner_recovery_docs_match_dependency_and_registry_contracts() -> None:
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    mcp_docs = (ROOT / "docs-site/content/docs/setup/mcp-scanner.mdx").read_text(
+    mcp_docs = (ROOT / "docs-site/content/docs/scanning/mcp-scanner.mdx").read_text(
         encoding="utf-8"
     )
     registry_docs = (
-        ROOT / "docs-site/content/docs/setup/registries.mdx"
+        ROOT / "docs-site/content/docs/scanning/registries.mdx"
     ).read_text(encoding="utf-8")
     llm_source = (ROOT / "cli/defenseclaw/llm.py").read_text(encoding="utf-8")
     mcp_source = (ROOT / "cli/defenseclaw/scanner/mcp.py").read_text(
@@ -712,9 +748,6 @@ def test_current_observability_docs_do_not_advertise_retired_redaction_controls(
         for retired in retired_guidance:
             assert retired not in text, f"{rel} still advertises retired control: {retired}"
 
-    guardrail_reference = (ROOT / "docs-site/content/docs/setup/guardrail/index.mdx").read_text(encoding="utf-8")
-    assert "Legacy v7 JSONL export" in guardrail_reference
-
 
 def test_current_observability_guidance_explains_v8_redaction_workflow() -> None:
     required_workflow = (
@@ -758,7 +791,7 @@ def test_dev_installer_only_offers_jsonl_tail_when_the_destination_exists() -> N
 
 
 def test_setup_index_separates_commands_from_policy_reference_cards() -> None:
-    text = (ROOT / "docs-site/content/docs/setup/index.mdx").read_text(encoding="utf-8")
+    text = (ROOT / "docs-site/content/docs/reference/setup-commands.mdx").read_text(encoding="utf-8")
     command_start = text.index("## Auxiliary configuration commands")
     reference_start = text.index("## Deployment and policy references")
     matrix_start = text.index("## Interactive vs non-interactive")
@@ -770,8 +803,8 @@ def test_setup_index_separates_commands_from_policy_reference_cards() -> None:
 
 
 def test_redaction_cli_docs_cover_simple_advanced_and_scripted_workflows() -> None:
-    redaction = (ROOT / "docs-site/content/docs/reference/redaction.mdx").read_text(encoding="utf-8")
-    setup = (ROOT / "docs-site/content/docs/setup/index.mdx").read_text(encoding="utf-8")
+    redaction = (ROOT / "docs-site/content/docs/observability/redaction.mdx").read_text(encoding="utf-8")
+    setup = (ROOT / "docs-site/content/docs/reference/setup-commands.mdx").read_text(encoding="utf-8")
     cli = (ROOT / "docs-site/content/docs/reference/cli.mdx").read_text(encoding="utf-8")
 
     for text in (redaction, setup, cli):
@@ -792,8 +825,8 @@ def test_redaction_cli_docs_cover_simple_advanced_and_scripted_workflows() -> No
 
 
 def test_redaction_workflow_documents_linux_windows_macos_and_tui_surfaces() -> None:
-    redaction = (ROOT / "docs-site/content/docs/reference/redaction.mdx").read_text(encoding="utf-8")
-    setup = (ROOT / "docs-site/content/docs/setup/index.mdx").read_text(encoding="utf-8")
+    redaction = (ROOT / "docs-site/content/docs/observability/redaction.mdx").read_text(encoding="utf-8")
+    setup = (ROOT / "docs-site/content/docs/reference/setup-commands.mdx").read_text(encoding="utf-8")
     cli = (ROOT / "docs-site/content/docs/reference/cli.mdx").read_text(encoding="utf-8")
     windows_paths = (
         ROOT / "docs-site/content/docs/get-started/windows/paths-troubleshooting.mdx"
@@ -801,13 +834,13 @@ def test_redaction_workflow_documents_linux_windows_macos_and_tui_surfaces() -> 
 
     for expected in (
         "macOS, Linux, and native Windows",
-        "Setup → Redaction Policy",
+        "0 Setup → Guardrail & scanning → Redaction",
         "%USERPROFILE%\\.defenseclaw\\backups\\config.yaml.before-redaction",
         "protected current-user/SYSTEM DACL",
         "0700`/`0600",
     ):
         assert expected in redaction
-    assert "TUI → Setup → Redaction Policy" in setup
+    assert "TUI → 0 Setup → Guardrail & scanning → Redaction" in setup
     assert "Logs → Redaction policy…" in setup
     assert "config.yaml.before-redaction-*" in windows_paths
     assert (
@@ -886,7 +919,7 @@ def test_zeptoclaw_calls_out_local_history_retention_and_trust_boundary() -> Non
 
 
 def test_enterprise_example_uses_secure_managed_redaction_default() -> None:
-    text = (ROOT / "docs-site/content/docs/setup/enterprise-deployment.mdx").read_text()
+    text = (ROOT / "docs-site/content/docs/enterprise/secure-client.mdx").read_text()
     assert "  defaults:\n    redaction_profile: sensitive" in text
 
 
@@ -911,3 +944,34 @@ def test_policy_overview_matches_atomic_invalid_regex_rejection() -> None:
     assert "/docs/policies/rulepack-validation" in overview
     assert "invalid Go regular expression" in validation
     assert "does not silently discard the bad file" in " ".join(validation.split())
+
+
+def test_enterprise_docs_say_how_to_turn_on_ai_discovery() -> None:
+    # GAP-1191: ai_discovery.enabled defaults to false, so the managed
+    # install pages and every sample config must turn it on explicitly.
+    for page in ("linux.mdx", "macos.mdx"):
+        text = (ROOT / "docs-site/content/docs/enterprise" / page).read_text()
+        assert "ai_discovery:\n  enabled: true" in text, page
+    configuration = (ROOT / "docs-site/content/docs/enterprise/configuration.mdx").read_text()
+    samples = configuration[configuration.index("## Sample configs"):]
+    assert samples.count("ai_discovery:\n  enabled: true") == 3
+
+
+def test_threat_model_r7_matches_linux_socket_dependency() -> None:
+    # GAP-1198: on Linux the gateway service requires both socket units, so
+    # a held port keeps the whole gateway (hook socket included) down.
+    model = (ROOT / "docs/ENTERPRISE-THREAT-MODEL.md").read_text()
+    unit = (ROOT / "packaging/systemd/defenseclaw-gateway.service").read_text()
+    assert "Requires=defenseclaw-gateway-api.socket defenseclaw-gateway-hook.socket" in unit
+    assert "which the gateway serves independently of the TCP port" not in model
+    assert "does not start at all, and every hook on the host fails closed" in model
+    assert "| R34 |" in model and "logger -t defenseclaw-gateway" in model
+
+
+def test_quickstart_initializes_before_setup() -> None:
+    # GAP-1613: the installer does not initialize DefenseClaw, so the
+    # walkthrough (the quickstart; First guardrail continues from it) must
+    # run init before any other defenseclaw command.
+    text = (ROOT / "docs-site/content/docs/get-started/quickstart.mdx").read_text()
+    commands = re.findall(r"^defenseclaw(?:-gateway)? [a-z-]+", text, re.MULTILINE)
+    assert commands[0] == "defenseclaw init", commands

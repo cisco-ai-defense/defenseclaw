@@ -154,7 +154,7 @@
       "id": "omnigent",
       "label": "OmniGent",
       "windowsSupport": "degraded",
-      "windowsNote": "Native Windows is limited to OmniGent 0.7.x server and SDK harnesses; terminal wrappers and filesystem, network, and L7 sandbox parity are unavailable.",
+      "windowsNote": "Native Windows supports OmniGent 0.7.x through 0.13.x server and SDK harnesses in a degraded mode; terminal wrappers and filesystem, network, and L7 sandbox parity are unavailable.",
       "summary": "Custom policy bridge with allow, ask, and deny enforcement.",
       "family": "hooks",
       "toolInspection": "pre-execution + response-scan",
@@ -263,7 +263,7 @@
       },
       "sandbox": { "status": "artifacts", "tamperTier": "user", "hookConfig": "/sandbox/.config/devin/config.json", "harnessPin": "3000.4.25", "verified": "unverified", "unverifiedReason": "The Devin CLI needs a Devin account login (devin auth login, a browser or pasted-token flow) before any agent turn", "untestedAuth": ["login"] },
       "hilt": "Can block documented events but has no native resumable human-approval surface; confirm verdicts fall back explicitly.",
-      "notes": "The native devin-hooks-v1 contract registers eight lifecycle events in user config.json or project .devin/hooks.v1.json. Exit 2 blocks; every other hook error fails open. Session and turn correlation use session_id and prompt_id, but Devin publishes no stable per-tool invocation ID, so paired tool state is detection-only. Restricted Mode disables hooks and agents. Devin Desktop's default Devin Local agent shares the Devin CLI hook config; its legacy Cascade agent is not covered. The separate native devin acp entry point is cataloged for the shared DefenseClaw ACP guard but is not certified; cloud Devin, proxy transport, native OTLP, closed-beta plugins, and managed higher-layer enforcement are excluded."
+      "notes": "The native devin-hooks-v1 contract registers eight lifecycle events in user config.json or project .devin/hooks.v1.json. Exit 2 blocks; every other hook error fails open. Session and turn correlation use session_id and prompt_id, but Devin publishes no stable per-tool invocation ID, so paired tool state is detection-only. Restricted Mode disables hooks and agents. Devin Desktop's default Devin Local agent shares the Devin CLI hook config; Devin Desktop 3.9.19 removed the legacy Cascade agent, which earlier builds run uncovered. The separate native devin acp entry point is cataloged for the shared DefenseClaw ACP guard but is not certified; cloud Devin, proxy transport, native OTLP, and managed higher-layer enforcement are excluded, and plugin hooks are checked only by the standalone foreign-hook guard."
     },
     {
       "id": "kiro",

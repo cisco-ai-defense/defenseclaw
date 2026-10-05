@@ -48,7 +48,8 @@ def test_builtin_summaries_match_yaml(policy_dir: Path) -> None:
     assert default.firewall_default == "deny"
     assert default.hilt is False
     assert default.scanner_overrides == 4
-    assert default.replaces_webhooks is True
+    assert default.adds_webhooks is False  # webhooks: [] adds nothing (GAP-1273)
+    assert default.edited is False
     assert default.sets_cisco is False
     assert default.builtin is True
 
@@ -91,7 +92,8 @@ def test_user_policy_shadows_builtin_and_bad_yaml_skipped(policy_dir: Path) -> N
     assert "broken" not in policies and "list" not in policies
     mine = policies["default"]
     assert mine.description == "mine"
-    assert mine.builtin is False
+    assert mine.builtin is True
+    assert mine.edited is True  # GAP-1458: an edited built-in stays a built-in
     assert mine.path == str(policy_dir / "default.yaml")
     assert mine.block_at == "HIGH+"
     assert mine.alert_at == "none"
@@ -99,7 +101,7 @@ def test_user_policy_shadows_builtin_and_bad_yaml_skipped(policy_dir: Path) -> N
     assert custom.install_block_at == "LOW+"
     assert custom.hilt is True
     assert custom.sets_cisco is True
-    assert custom.replaces_webhooks is False
+    assert custom.adds_webhooks is False
     assert set(custom.to_json()) == {
         "name",
         "description",
@@ -112,8 +114,9 @@ def test_user_policy_shadows_builtin_and_bad_yaml_skipped(policy_dir: Path) -> N
         "firewall_default",
         "hilt",
         "scanner_overrides",
-        "replaces_webhooks",
+        "adds_webhooks",
         "sets_cisco",
+        "edited",
     }
 
 

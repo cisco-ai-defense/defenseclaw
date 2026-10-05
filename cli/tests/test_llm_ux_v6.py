@@ -252,6 +252,31 @@ class TestLLMPickerNonInteractive(unittest.TestCase):
                 non_interactive=True,
             )
 
+    def test_model_default_keeps_saved_non_catalog_model(self) -> None:
+        saved = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+        with mock.patch.object(_llm_picker.click, "prompt", side_effect=lambda *a, **kw: kw["default"]) as prompt:
+            out = _llm_picker.pick_model(
+                current=saved,
+                provider="bedrock",
+                instance={"available_models": ["us.anthropic.claude-opus-4-8"]},
+                flag_value=None,
+                non_interactive=False,
+            )
+        self.assertEqual(out, saved)
+        self.assertEqual(prompt.call_args.kwargs["default"], saved)
+
+    def test_model_default_live_list_skips_missing_saved_model(self) -> None:
+        with mock.patch.object(_llm_picker.click, "prompt", side_effect=lambda *a, **kw: kw["default"]):
+            out = _llm_picker.pick_model(
+                current="gone:latest",
+                provider="ollama",
+                instance=None,
+                flag_value=None,
+                non_interactive=False,
+                live_models=["qwen3.5:9b"],
+            )
+        self.assertEqual(out, "qwen3.5:9b")
+
     def test_region_required_in_non_interactive(self) -> None:
         with self.assertRaises(click.UsageError):
             _llm_picker.pick_region(
@@ -282,6 +307,31 @@ class TestLLMPickerNonInteractive(unittest.TestCase):
             # Top-level llm is always first when populated.
             self.assertEqual(paths[0], "llm")
             self.assertIn("guardrail.judge", paths)
+
+
+class TestSetupLLMInteractiveMissingKey(unittest.TestCase):
+    def setUp(self) -> None:
+        from tests.helpers import cleanup_app, make_app_context
+
+        self.app, self.tmp_dir, self.db_path = make_app_context()
+        self.addCleanup(cleanup_app, self.app, self.db_path, self.tmp_dir)
+
+    def test_defaults_without_a_key_are_not_saved_unless_confirmed(self) -> None:
+        def fake_configure(cfg, _data_dir, *, target_path=""):
+            cfg.llm.provider, cfg.llm.model, cfg.llm.api_key_env = "anthropic", "claude-test", "DEFENSECLAW_LLM_KEY"
+
+        env = {k: v for k, v in os.environ.items() if k != "DEFENSECLAW_LLM_KEY"}
+        with (
+            mock.patch.dict(os.environ, env, clear=True),
+            mock.patch.object(cmd_setup, "_maybe_inherit_existing_llm", return_value=None),
+            mock.patch.object(cmd_setup, "_configure_llm", side_effect=fake_configure),
+            mock.patch.object(self.app.cfg, "save") as save,
+        ):
+            res = CliRunner().invoke(setup, ["llm"], obj=self.app, input="\n", catch_exceptions=False)
+
+        self.assertEqual(res.exit_code, 0, res.output)
+        self.assertIn("LLM configuration not saved", res.output)
+        save.assert_not_called()
 
 
 class TestSetupLLMNonInteractiveFlags(unittest.TestCase):
@@ -322,6 +372,26 @@ class TestSetupLLMNonInteractiveFlags(unittest.TestCase):
         self.assertEqual(cfg.llm.bedrock.region, "us-east-1")
         self.assertEqual(cfg.llm.bedrock.auth_mode, "iam_credentials")
         self.assertEqual(cfg.llm.bedrock.inference_profile, "us.")
+
+    def test_provider_and_model_flags_skip_the_prompts(self) -> None:
+        # GAP-1290: without --non-interactive the flags still answer the prompts.
+        res = self.runner.invoke(
+            setup,
+            [
+                "llm",
+                "--provider", "bedrock",
+                "--model", "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+                "--bedrock-region", "us-east-1",
+                "--bedrock-auth-mode", "instance_role",
+            ],
+            obj=self.app,
+            input="",
+            catch_exceptions=False,
+        )
+        self.assertEqual(res.exit_code, 0, res.output)
+        self.assertNotIn("Pick provider", res.output)
+        self.assertEqual(self.app.cfg.llm.provider, "bedrock")
+        self.assertEqual(self.app.cfg.llm.model, "us.anthropic.claude-haiku-4-5-20251001-v1:0")
 
     def test_instance_name_flag_persists(self) -> None:
         res = self.runner.invoke(
@@ -702,6 +772,15 @@ class TestLLMPing(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("boom", msg.lower())
 
+    def test_ping_and_bridge_let_litellm_drop_refused_params(self) -> None:
+        """RHEL-U2-09: a model that takes temperature 1 only must not fail on 0.0."""
+        from defenseclaw import llm as llm_mod
+
+        with mock.patch("litellm.completion", side_effect=RuntimeError("boom")) as completion:
+            llm_mod.ping(LLMConfig(provider="anthropic", model="claude-opus-4-8"))
+            llm_mod.call_llm({"model": "anthropic/claude-opus-4-8", "messages": [{"role": "user", "content": "x"}]})
+        self.assertEqual([c.kwargs.get("drop_params") for c in completion.call_args_list], [True, True])
+
 
 class _LocalModelHandler(BaseHTTPRequestHandler):
     routes: dict[str, tuple[int, bytes]] = {}
@@ -888,6 +967,28 @@ class TestLocalModelListing(unittest.TestCase):
             local_runtime.call_args.kwargs["default_base_url"],
             "http://127.0.0.1:11434",
         )
+
+
+    def test_bedrock_instance_role_is_asked_before_and_skips_the_key(self) -> None:
+        with tempfile.TemporaryDirectory() as data_dir:
+            cfg = _make_cfg(data_dir)
+            with (
+                mock.patch.object(_llm_picker, "pick_provider", return_value="bedrock"),
+                mock.patch.object(_llm_picker, "list_custom_instances", return_value=[]),
+                mock.patch.object(_llm_picker, "pick_model", return_value="bedrock/anthropic.claude-sonnet-4"),
+                mock.patch.object(_llm_picker, "pick_region", return_value="us-east-1"),
+                mock.patch.object(_llm_picker, "pick_auth_mode", return_value="instance_role"),
+                mock.patch.object(_llm_picker, "pick_key_env") as key_env,
+                mock.patch.object(_llm_picker, "summary_panel"),
+                mock.patch.object(cmd_setup, "_prompt_and_save_secret") as save_secret,
+                mock.patch.object(cmd_setup.click, "prompt", side_effect=["", 30, 2]),
+            ):
+                cmd_setup._configure_llm(cfg, data_dir)
+
+        key_env.assert_not_called()
+        save_secret.assert_not_called()
+        self.assertEqual(cfg.llm.bedrock.auth_mode, "instance_role")
+        self.assertEqual(cfg.llm.api_key_env, "")
 
 
 if __name__ == "__main__":  # pragma: no cover

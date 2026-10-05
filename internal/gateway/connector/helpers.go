@@ -167,6 +167,14 @@ func hookInvocationCommand(connector, unixCommand string) string {
 // hookInvocationCommand, split out so the Windows command string can be
 // exercised by tests on any host.
 func hookInvocationCommandFor(goos, connector, unixCommand string) string {
+	return hookInvocationCommandWith(goos, connector, unixCommand, defenseclawHookBinary)
+}
+
+// hookInvocationCommandWith renders hookInvocationCommandFor's command for the
+// launcher hookBinary returns. A hook process does not run from the installed
+// gateway's layout, so it cannot resolve the launcher itself and renders
+// DefenseClaw's own registrations for the administrator's published one.
+func hookInvocationCommandWith(goos, connector, unixCommand string, hookBinary func() string) string {
 	if goos != "windows" {
 		return unixCommand
 	}
@@ -176,7 +184,7 @@ func hookInvocationCommandFor(goos, connector, unixCommand string) string {
 	// use the GUI subsystem, so a call operator would not reliably wait for
 	// stdout or exit 2. Never fall back to a session's stale PATH.
 	if connector == "codex" {
-		return windowsNativePowerShellHookCommand(connector)
+		return windowsNativePowerShellHookCommandForBinary(connector, hookBinary())
 	}
 	// Antigravity (agy v1) tokenizes the command itself and passes quote
 	// characters through to direct exec. Put only tokenizer-safe arguments in
@@ -185,7 +193,7 @@ func hookInvocationCommandFor(goos, connector, unixCommand string) string {
 	// corruption for user profiles with spaces and current-directory/PATH
 	// lookup for defenseclaw-hook.exe.
 	if connector == "antigravity" {
-		return windowsAntigravityHookCommand()
+		return windowsNativePowerShellHookCommandForBinary("antigravity", hookBinary())
 	}
 	// Copilot selects the powershell field itself on Windows. Its hook JSON is
 	// delivered through redirected standard input, while the packaged launcher
@@ -210,7 +218,7 @@ func hookInvocationCommandFor(goos, connector, unixCommand string) string {
 	// may use installer-managed PortableGit for its terminal tool, but this
 	// integration neither locates nor invokes that upstream dependency.
 	if connector == "hermes" {
-		return windowsHermesDirectHookCommand(defenseclawHookBinary())
+		return windowsHermesDirectHookCommand(hookBinary())
 	}
 	// Devin evaluates command hooks through bash even on Windows. Invoke the
 	// stable launcher directly: the real 3000.4.25 client preserves redirected
@@ -218,22 +226,22 @@ func hookInvocationCommandFor(goos, connector, unixCommand string) string {
 	// Avoid PowerShell -EncodedCommand here because Devin unwraps that argument
 	// before its bash boundary, leaving bash to parse PowerShell source.
 	if connector == "devin" {
-		return windowsDevinBashHookCommand(defenseclawHookBinary())
+		return windowsDevinBashHookCommand(hookBinary())
 	}
 	// Kiro honors only exit 2 as a block. Release launchers use the GUI
 	// subsystem, which PowerShell's call operator does not await (the hook's
 	// status is lost and Kiro proceeds), and cmd.exe rejects the call operator
-	// outright. Use Kiro's encoded system PowerShell command, which awaits the
-	// launcher and returns its exit status to cmd.exe and to any launcher that
-	// runs the command line directly (windowsKiroHookCommandForBinary).
+	// outright. Use Kiro's cmd.exe and encoded system PowerShell command, which
+	// awaits the launcher and returns its exit status through a PowerShell
+	// host, cmd.exe or a direct start (windowsKiroHookCommandForBinary).
 	if connector == "kiro" {
-		return windowsKiroHookCommandForBinary(defenseclawHookBinary(), "")
+		return windowsKiroHookCommandForBinary(hookBinary(), "", false)
 	}
 	// Claude Code evaluates hook command strings with PowerShell on Windows.
 	// A quoted executable path alone is only a string expression there; the
 	// call operator is required to invoke it. Use a single-quoted literal so an
 	// install path cannot introduce PowerShell interpolation.
-	return "& " + powershellQuoteLiteral(defenseclawHookBinary()) + " " + nativeHookFlag + connector
+	return "& " + powershellQuoteLiteral(hookBinary()) + " " + nativeHookFlag + connector
 }
 
 func windowsHermesDirectHookCommand(binary string) string {
@@ -907,6 +915,12 @@ func windowsSystemPowerShellExe() string {
 	return strings.TrimRight(trustedWindowsSystemDirectory(), `\/`) + `\WindowsPowerShell\v1.0\powershell.exe`
 }
 
+// windowsSystemCmdExe is cmd.exe in the trusted system directory, built as a
+// Windows path like windowsSystemPowerShellExe.
+func windowsSystemCmdExe() string {
+	return strings.TrimRight(trustedWindowsSystemDirectory(), `\/`) + `\cmd.exe`
+}
+
 func powershellEncodedCommand(script string) string {
 	wide := utf16.Encode([]rune(script))
 	buf := make([]byte, len(wide)*2)
@@ -1093,6 +1107,7 @@ func nativeHookBinaryOwnershipCandidates() []string {
 		hookBinaries,
 		canonicalNativeWindowsHookBinary(),
 		canonicalNativeWindowsInstalledHookBinary(),
+		canonicalStandaloneWindowsHookBinary(),
 		filepath.Join(userHomeDir(), ".local", "bin", windowsHookBinaryName),
 	))
 }
@@ -1141,6 +1156,34 @@ func isDefenseClawManagedHookExecutable(exe string) bool {
 		canonicalNativeWindowsInstalledHookBinary(),
 	}) {
 		if sameManagedHookExecutablePath(exe, owned) {
+			return true
+		}
+	}
+	return false
+}
+
+// isRenamedDefenseClawHookExecutable recognizes a DefenseClaw launcher path
+// that was edited in place (GAP-1364): an absolute defenseclaw-* executable in
+// the same directory as one of DefenseClaw's own launchers. Callers must still
+// require DefenseClaw's exact hook argv. A defenseclaw-* executable in any
+// other directory is never claimed.
+func isRenamedDefenseClawHookExecutable(exe string) bool {
+	exe = strings.TrimSpace(exe)
+	if exe == "" || (!filepath.IsAbs(exe) && !isWindowsDriveAbsolutePath(exe)) {
+		return false
+	}
+	if !strings.HasPrefix(strings.ToLower(filepath.Base(exe)), "defenseclaw-") {
+		return false
+	}
+	for _, owned := range uniqueNonEmptyStrings([]string{
+		defenseclawHookBinary(),
+		canonicalNativeWindowsHookBinary(),
+		canonicalNativeWindowsInstalledHookBinary(),
+	}) {
+		if !filepath.IsAbs(owned) && !isWindowsDriveAbsolutePath(owned) {
+			continue
+		}
+		if pathidentity.Same(filepath.Dir(exe), filepath.Dir(owned)) {
 			return true
 		}
 	}

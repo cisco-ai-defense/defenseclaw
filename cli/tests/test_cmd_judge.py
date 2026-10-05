@@ -93,6 +93,33 @@ def invoke(app, args):
     return CliRunner().invoke(cmd_judge.judge, args, obj=app)
 
 
+class JudgeAddObserveModeTests(unittest.TestCase):
+    """GAP-2083: the judge reviews hook calls only for action-mode connectors."""
+
+    def _ctx(self, modes):
+        app = make_ctx(connectors=list(modes))
+        app.cfg.guardrail.effective_mode = lambda c: modes.get(c, "observe")
+        return app
+
+    @patch.object(cmd_setup, "_restart_services")
+    def test_add_refuses_configured_observe_connector(self, restart):
+        app = self._ctx({"claudecode": "action", "codex": "observe"})
+        result = invoke(app, ["add", "codex", "--no-restart"])
+        self.assertNotEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("'codex' is in observe mode", result.output)
+        self.assertIn("defenseclaw setup codex --mode action --enable-judge --yes", result.output)
+        self.assertEqual(app.cfg.guardrail.judge.hook_connectors, [])
+        app.cfg.save.assert_not_called()
+        restart.assert_not_called()
+
+    @patch.object(cmd_setup, "_restart_services")
+    def test_add_accepts_action_connector(self, restart):
+        app = self._ctx({"claudecode": "action", "codex": "observe"})
+        result = invoke(app, ["add", "claudecode", "--no-restart"])
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(app.cfg.guardrail.judge.hook_connectors, ["claudecode"])
+
+
 class JudgeAddTests(unittest.TestCase):
     @patch.object(cmd_setup, "_restart_services")
     def test_add_appends_and_restarts(self, restart):
@@ -102,7 +129,7 @@ class JudgeAddTests(unittest.TestCase):
         self.assertEqual(app.cfg.guardrail.judge.hook_connectors, ["hermes"])
         app.cfg.save.assert_called_once()
         restart.assert_called_once()
-        app.logger.log_action.assert_called_once()
+        app.logger.log_config_change.assert_called_once()
 
     @patch.object(cmd_setup, "_restart_services")
     def test_add_normalizes_case(self, restart):
@@ -221,13 +248,26 @@ class JudgeAddTests(unittest.TestCase):
         app.cfg.save.assert_called_once()
         self.assertNotIn("nothing to do", result.output)
 
+    @patch.object(cmd_judge, "_gateway_running", return_value=True)
     @patch.object(cmd_setup, "_restart_services")
-    def test_add_no_restart_flag(self, restart):
+    def test_add_no_restart_flag(self, restart, _running):
         app = make_ctx()
         result = invoke(app, ["add", "hermes", "--no-restart"])
         self.assertEqual(result.exit_code, 0, msg=result.output)
         app.cfg.save.assert_called_once()
         restart.assert_not_called()
+        # GAP-1476: say the running gateway needs a restart to apply it.
+        self.assertIn("defenseclaw-gateway restart", result.output)
+
+    @patch.object(cmd_judge, "_gateway_running", return_value=False)
+    @patch.object(cmd_setup, "_restart_services")
+    def test_add_no_restart_with_the_gateway_stopped_names_no_running_gateway(self, restart, _running):
+        # GAP-1978: "The running gateway keeps the old gate" with no gateway running.
+        app = make_ctx()
+        result = invoke(app, ["add", "hermes", "--no-restart"])
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        restart.assert_not_called()
+        self.assertNotIn("running gateway", result.output)
 
     @patch.object(cmd_setup, "_restart_services")
     def test_add_skips_restart_when_guardrail_disabled(self, restart):
@@ -525,7 +565,7 @@ class JudgeListTests(unittest.TestCase):
     def test_list_default_timeout_labeled(self):
         app = make_ctx()
         result = invoke(app, ["list"])
-        self.assertIn("5s (gateway default)", result.output)
+        self.assertIn("8s (gateway default)", result.output)
 
     def test_list_custom_timeout_shown(self):
         app = make_ctx(hook_timeout=8.0)

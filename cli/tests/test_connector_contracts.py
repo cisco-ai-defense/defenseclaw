@@ -305,6 +305,19 @@ class TestConnectorContractManifest(unittest.TestCase):
         self.assertIn("scoped bearer + source header on /v1/<signal>", rendered)
         self.assertNotIn("/otlp/codex/<token>", rendered)
 
+    def test_setup_banner_prints_the_gateway_hook_route(self) -> None:
+        # GAP-1611: the gateway serves Claude Code on /api/v1/claude-code/hook.
+        for connector, route in (
+            ("claudecode", "/api/v1/claude-code/hook"),
+            ("codex", "/api/v1/codex/hook"),
+            ("cursor", "/api/v1/cursor/hook"),
+        ):
+            with self.subTest(connector=connector):
+                with patch("defenseclaw.commands.cmd_setup.click.echo") as echo:
+                    _print_connector_observability_banner(connector)
+                rendered = "\n".join(str(call.args[0]) for call in echo.call_args_list if call.args)
+                self.assertIn(f"→ {route}", rendered)
+
     def test_claude_aliases_resolve_to_claudecode(self) -> None:
         compat = resolve_connector_contract("claude-code", "Claude Code 2.1.154")
         self.assertEqual(compat.status, STATUS_KNOWN)
@@ -481,18 +494,19 @@ class TestConnectorContractManifest(unittest.TestCase):
         )
 
     def test_devin_contract_pins_are_per_platform(self) -> None:
-        # Same per-OS pins as Go's TestDevinContractPinsArePerOS.
-        for platform_name, want in (
-            ("linux", STATUS_KNOWN),
-            ("darwin", STATUS_UNKNOWN),
-            ("windows", STATUS_UNKNOWN),
-        ):
+        # Same per-OS pins as Go's TestDevinContractPinsArePerOS: 3000.11.3 is
+        # verified on Linux and an untested newer version elsewhere.
+        for platform_name, untested in (("linux", False), ("darwin", True), ("windows", True)):
             with self.subTest(platform_name=platform_name):
                 verified = resolve_connector_contract("devin", "3000.11.3", platform_name=platform_name)
-                self.assertEqual(verified.status, want)
+                self.assertEqual((verified.status, verified.untested), (STATUS_KNOWN, untested))
                 reviewed = resolve_connector_contract("devin", "3000.4.25", platform_name=platform_name)
                 self.assertEqual(reviewed.status, STATUS_KNOWN)
                 self.assertEqual(reviewed.contract.contract_id, "devin-hooks-v1")
+                between = resolve_connector_contract("devin", "3000.10.48", platform_name=platform_name)
+                self.assertEqual((between.status, between.untested), (STATUS_KNOWN, True))
+                below = resolve_connector_contract("devin", "3000.4.24", platform_name=platform_name)
+                self.assertEqual(below.status, STATUS_UNKNOWN)
 
     def test_unversioned_connectors_use_default_contract(self) -> None:
         compat = resolve_connector_contract("cursor", "")
@@ -538,12 +552,17 @@ class TestConnectorContractManifest(unittest.TestCase):
                 self.assertEqual(compat.contract.contract_id, "cursor-hooks-v1")
                 self.assertTrue(compat.supported)
 
+        # Newer than every tested bound: compatible, marked untested.
+        for raw_version in ("2026.08.31-4057e58", "agent v2026.08.31-4057e58", "cursor 4.0.0"):
+            with self.subTest(raw_version=raw_version):
+                compat = resolve_connector_contract("cursor", raw_version)
+                self.assertEqual(compat.status, STATUS_KNOWN)
+                self.assertTrue(compat.untested)
+                self.assertEqual(compat.contract.contract_id, "cursor-hooks-v1")
+
         for raw_version in (
             "cursor-agent 2026.07.23-deadbee",
-            "2026.08.31-4057e58",
-            "agent v2026.08.31-4057e58",
             "cursor 2.3.99",
-            "cursor 4.0.0",
             "Cursor Agent 2026.07.23-e383d2b",
         ):
             with self.subTest(raw_version=raw_version):
@@ -593,9 +612,10 @@ class TestConnectorContractManifest(unittest.TestCase):
         self.assertTrue(current.supported)
         self.assertEqual(current.status, STATUS_KNOWN)
 
-        after_reviewed_range = resolve_connector_contract("omnigent", "omnigent 0.14.0")
-        self.assertFalse(after_reviewed_range.supported)
-        self.assertEqual(after_reviewed_range.status, STATUS_UNKNOWN)
+        # Newer than the reviewed range: compatible, marked untested (#1034).
+        after_reviewed_range = resolve_connector_contract("omnigent", "omnigent 0.15.0")
+        self.assertTrue(after_reviewed_range.supported)
+        self.assertEqual((after_reviewed_range.status, after_reviewed_range.untested), (STATUS_KNOWN, True))
 
     def test_hermes_contract_advertises_native_windows_path_precedence(self) -> None:
         compat = resolve_connector_contract("hermes", "")
@@ -642,8 +662,8 @@ class TestConnectorContractManifest(unittest.TestCase):
         self.assertEqual(current.contract.contract_id, "hermes-hooks-v2")
 
         unreviewed = resolve_connector_contract("hermes", "Hermes Agent v0.22.0")
-        self.assertEqual(unreviewed.status, STATUS_UNKNOWN)
-        self.assertFalse(unreviewed.supported)
+        self.assertEqual((unreviewed.status, unreviewed.untested), (STATUS_KNOWN, True))
+        self.assertEqual(unreviewed.contract.contract_id, "hermes-hooks-v2")
 
     def test_manifest_loader_preserves_unversioned_default_marker(self) -> None:
         _, contracts = _load_contracts_from_manifest(
@@ -937,11 +957,11 @@ class TestSetupConnectorVersionGate(unittest.TestCase):
         self.assertNotIn("Upgrade OpenCode", current)
         self.assertIn("newer than DefenseClaw's validated range", current)
 
-    def test_opencode_11900_is_refused_before_save_and_roster_mutation(self) -> None:
+    def test_opencode_below_floor_is_refused_before_save_and_roster_mutation(self) -> None:
         with (
             patch(
                 "defenseclaw.commands.cmd_setup.agent_discovery.discover_agents",
-                return_value=_discovery("opencode", installed=True, version="opencode 1.19.0"),
+                return_value=_discovery("opencode", installed=True, version="opencode 1.18.9"),
             ),
             patch(
                 "defenseclaw.commands.cmd_setup.platform_support.host_os",

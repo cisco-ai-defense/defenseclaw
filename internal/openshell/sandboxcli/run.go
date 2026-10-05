@@ -258,6 +258,11 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 	if err != nil {
 		return err
 	}
+	if llm.Credential != nil {
+		if err := harness.LaunchEnvProblem(llm.Credential.Profile, env); err != nil {
+			return err
+		}
+	}
 	// A launch the harness cannot take (OmniGent with a profile that names
 	// no default model and no --model) fails before a sandbox exists.
 	pre := harness.LaunchOptions{Mode: harness.Interactive, Yolo: !o.Safe, Args: o.Args}
@@ -1447,28 +1452,6 @@ func launchModel(sb *sandboxapi.Sandbox, args []string) string {
 	return model
 }
 
-// launchCaveats are the limits an interactive session of sb should know
-// about: the harness's own (harness.Spec.InteractiveCaveat), then its
-// provider's (harness.CredentialProfile.Caveat). A one-prompt run has none.
-func launchCaveats(sb *sandboxapi.Sandbox, o RunOptions) []string {
-	spec, ok := harness.Get(sb.Harness)
-	if !ok || o.Prompt != "" || printMode(spec, o.Args) {
-		return nil
-	}
-	var out []string
-	if caveat := spec.InteractiveCaveat(); caveat != "" {
-		out = append(out, caveat)
-	}
-	if sb.Launch.CredentialProfile == "" {
-		return out
-	}
-	cp, err := spec.CredentialProfile(sb.Launch.CredentialProfile, sb.Launch.BedrockRegion)
-	if err == nil && cp.Caveat != "" {
-		out = append(out, cp.Caveat)
-	}
-	return out
-}
-
 func joinNonEmpty(sep string, parts ...string) string {
 	var kept []string
 	for _, p := range parts {
@@ -1510,9 +1493,6 @@ func (a *App) banner(sb *sandboxapi.Sandbox, b bannerInfo) {
 		row("Model", joinNonEmpty(" · ", model, b.llm.Note))
 	case model != "":
 		row("Model", model)
-	}
-	for _, caveat := range launchCaveats(sb, b.o) {
-		row("", "⚠ "+caveat)
 	}
 	for _, c := range bannerCredentials(sb, b.o) {
 		row("Secret", c)

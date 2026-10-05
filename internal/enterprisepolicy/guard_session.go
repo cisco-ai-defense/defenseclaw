@@ -481,7 +481,7 @@ func stickySessionDecision(decision GuardDecision, connector string, record Sess
 		Scope:     record.Scope,
 		Path:      record.Path,
 		Digest:    record.Digest,
-		Reason:    "blocked since earlier in this session: " + record.Reason,
+		Reason:    strings.TrimSuffix("blocked since earlier in this session: "+record.Reason, ": "),
 	}}, decision.Findings...)
 	return decision
 }

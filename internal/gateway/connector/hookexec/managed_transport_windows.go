@@ -85,6 +85,11 @@ func managedEnterpriseHTTPClient(
 				}
 
 				servicePID, err := managedEnterpriseQueryServicePID(serviceName)
+				if errors.Is(err, errManagedGatewayNotRunning) {
+					// Still a peer-verification failure (fail closed), but the
+					// hook can say the service is stopped.
+					return nil, fmt.Errorf("%w: %w", errManagedGatewayPeerUnverified, err)
+				}
 				if err != nil {
 					return nil, managedGatewayPeerError("query protected gateway service: %v", err)
 				}
@@ -192,7 +197,8 @@ func queryManagedGatewayServicePID(serviceName string) (uint32, error) {
 	}
 	if status.CurrentState != windows.SERVICE_RUNNING || status.ProcessId == 0 {
 		return 0, fmt.Errorf(
-			"service is not Running with a process (state=%d pid=%d)",
+			"%w (state=%d pid=%d)",
+			errManagedGatewayNotRunning,
 			status.CurrentState,
 			status.ProcessId,
 		)

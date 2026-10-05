@@ -482,7 +482,7 @@ func TestCanonicalConsumerExportsAllSixGeneratedFamiliesWithPR403Graph(t *testin
 	}, "none", 12)
 	consumer, err := NewCanonicalTraceConsumer(CanonicalTraceConsumerOptions{
 		Destination: fixture.destination, Generation: 12, Pipeline: fixture.pipeline,
-		Adapter: adapter, Dispatcher: canonicalDispatcherConfigWithDelay("galileo", 8, 12, 100*time.Millisecond),
+		Adapter: adapter, Dispatcher: canonicalDispatcherConfigWithDelay("galileo", 8, 12, time.Second),
 		Limits: compatibility.DefaultLimits(), Observer: fixture.failures,
 	})
 	if err != nil {
@@ -495,7 +495,14 @@ func TestCanonicalConsumerExportsAllSixGeneratedFamiliesWithPR403Graph(t *testin
 			t.Fatalf("enqueue %s = %s failures=%+v", record.EventName(), result, fixture.failures.snapshot())
 		}
 	}
-	flushCanonical(t, consumer)
+	// All seven spans must leave in one request: Galileo re-roots a span whose
+	// parent went in an earlier request (GAP-2045), so a 100 ms batch window
+	// split the graph on a slow runner. Wait out the 1 s window here.
+	flushCtx, cancelFlush := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelFlush()
+	if err := consumer.ForceFlush(flushCtx); err != nil {
+		t.Fatalf("ForceFlush: %v", err)
+	}
 	var spans []*tracepb.Span
 	for {
 		select {

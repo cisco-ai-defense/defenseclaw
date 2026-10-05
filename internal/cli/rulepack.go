@@ -52,9 +52,8 @@ var rulePackCmd = &cobra.Command{
 	Use:   "rulepack",
 	Short: "Inspect a guardrail rule pack without starting the gateway",
 	Long: `Inspect a guardrail rule pack without starting the gateway or reading its
-config. Enterprise packages ship no defenseclaw CLI; administrators validate
-a custom pack with this command before pointing guardrail.rule_pack_dir at
-it.`,
+config. Administrators validate a custom pack with this command before
+pointing guardrail.rule_pack_dir at it.`,
 	PersistentPreRunE: func(_ *cobra.Command, _ []string) error {
 		return nil
 	},
@@ -67,7 +66,10 @@ var rulePackValidateCmd = &cobra.Command{
 	Long: `Validate a rule-pack directory the same way the gateway does when it loads
 one, including every regular and semantic expression, and print a summary or
 the first problem. Without --dir the embedded default pack is validated.
-Exit status 0 means the pack is valid.
+Exit status 0 means the pack is valid. On a host with a defenseclaw service
+account the text output also exits 1 when that account cannot read the pack
+(the gateway would refuse it); with --json the exit status reports validity
+only and that problem is printed on stderr.
 
 Example:
   defenseclaw-gateway rulepack validate --dir /etc/defenseclaw/policies/guardrail/custom`,
@@ -78,6 +80,9 @@ Example:
 var (
 	rulePackValidateDir  string
 	rulePackValidateJSON bool
+
+	// rulePackServiceReadProblemFn is replaced by tests.
+	rulePackServiceReadProblemFn = rulePackServiceReadProblem
 )
 
 func init() {
@@ -107,8 +112,21 @@ func runRulePackValidate(cmd *cobra.Command, _ []string) error {
 			Valid:       false,
 			Error:       &diagnostic,
 		}
+		// A directory-level problem is reported at the pack root ("."); the
+		// text output names the directory the operator passed instead
+		// (GAP-1405). The JSON wire format keeps its path-free contract.
+		dirLevel := rulePackValidateDir != "" && diagnostic.Path == "." &&
+			(strings.HasPrefix(diagnostic.Code, "directory_") || diagnostic.Code == "not_directory")
+		if dirLevel && !rulePackValidateJSON {
+			textDiag := diagnostic
+			textDiag.Path = rulePackValidateDir
+			response.Error = &textDiag
+		}
 		if writeErr := writeRulePackValidation(cmd.OutOrStdout(), response, rulePackValidateJSON); writeErr != nil {
 			return errors.New("rule-pack validation failed and its safe diagnostic could not be written")
+		}
+		if dirLevel {
+			return fmt.Errorf("rule-pack validation failed [%s]: check --dir %s (omit --dir to validate the embedded default pack)", diagnostic.Code, rulePackValidateDir)
 		}
 		return fmt.Errorf("rule-pack validation failed [%s]", diagnostic.Code)
 	}
@@ -120,7 +138,24 @@ func runRulePackValidate(cmd *cobra.Command, _ []string) error {
 		Valid:       true,
 		Summary:     &summary,
 	}
-	return writeRulePackValidation(cmd.OutOrStdout(), response, rulePackValidateJSON)
+	problem := ""
+	if rulePackValidateDir != "" {
+		problem = rulePackServiceReadProblemFn(cmd.Context(), rulePackValidateDir)
+	}
+	if problem != "" && !rulePackValidateJSON {
+		// A script that checks only the exit status must not pass a pack the
+		// gateway will refuse (GAP-1274).
+		fmt.Fprintf(cmd.OutOrStdout(), "rule pack syntax is valid: %d files, %d rules, digest %s\n",
+			summary.RuleFileCount, summary.RuleCount, summary.Digest)
+		return fmt.Errorf("the gateway cannot load this pack: %s", problem)
+	}
+	if err := writeRulePackValidation(cmd.OutOrStdout(), response, rulePackValidateJSON); err != nil {
+		return err
+	}
+	if problem != "" {
+		fmt.Fprintf(cmd.ErrOrStderr(), "warning: the gateway cannot load this pack: %s\n", problem)
+	}
+	return nil
 }
 
 func writeRulePackValidation(w io.Writer, response rulePackWireResponse, asJSON bool) error {

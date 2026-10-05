@@ -112,7 +112,7 @@ def _inventory_payload() -> dict[str, object]:
                 "connector": "codex",
                 "category": "tools",
                 "status": "unsupported",
-                "reason": "tool registry is owned by each plugin's manifest",
+                "reason": "this connector has no local tool registry to read; its MCP servers are listed under MCP",
             }
         ],
         "summary": {
@@ -494,3 +494,40 @@ def test_inventory_load_intent_for_targets_connector_and_restores() -> None:
     # Prior single-connector state is untouched.
     assert panel.connector == "codex"
     assert panel.connector_focus_enabled is False
+
+
+def test_inventory_all_summary_names_every_connector_and_digits_fall_through() -> None:
+    """GAP-1156: the All summary is not one connector's Source/Home/Config,
+    and digits only filter on the Skills and Plugins sub-tabs."""
+
+    panel = InventoryPanelModel()
+    panel.show_connector_column = True
+    amp = json.dumps({"connector": "amp", "connector_home": "/home/amp", "skills": [{"id": "a"}]})
+    codex = json.dumps({"connector": "codex", "connector_home": "/home/cx", "skills": [{"id": "c"}]})
+    panel.apply_merged([("amp", amp), ("codex", codex)])
+
+    panel.set_connector_filter("")
+    rows = dict(panel.summary_table_rows())
+    assert rows["Source"].startswith("All 2 connectors")
+    assert "Home" not in rows
+    panel.set_connector_filter("codex")
+    assert dict(panel.summary_table_rows())["Home"] == "/home/cx"
+
+    panel.set_active_subtab("summary")
+    assert panel.handle_key("3").handled is False
+    panel.set_active_subtab("plugins")
+    action = panel.handle_key("3")
+    assert action.handled is True and "Ctrl+P" in action.hint
+
+
+def test_inventory_hermes_plugin_rows_show_origin_and_status() -> None:
+    # GAP-1593: Hermes AIBOM rows carry source_kind/enabled, not origin/status.
+    from defenseclaw.tui.services.inventory_state import InventoryPlugin, _verdict_summary
+
+    on = InventoryPlugin.from_mapping({"id": "platforms/photon", "source_kind": "bundled", "enabled": True})
+    off = InventoryPlugin.from_mapping({"id": "web/ddgs", "source_kind": "user", "enabled": False})
+    fs = InventoryPlugin.from_mapping({"id": "x", "origin": "/p", "enabled": True, "status": "loaded"})
+    assert (on.origin, on.status) == ("bundled", "enabled")
+    assert (off.origin, off.status) == ("user", "disabled")
+    assert (fs.origin, fs.status) == ("/p", "loaded")
+    assert _verdict_summary({"clean": "1", "discovery-only": "5"}) == "1 clean  5 discovery-only"

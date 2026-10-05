@@ -12,3 +12,9 @@ package enterprisehooks
 func GrantGatewayInventoryReadForManifest(_ Manifest, _ string, _ EnumerationLogger) error {
 	return nil
 }
+
+// RevokeGatewayInventoryReadForManifest is a Windows-only no-op on other
+// platforms.
+func RevokeGatewayInventoryReadForManifest(_ Manifest) error {
+	return nil
+}

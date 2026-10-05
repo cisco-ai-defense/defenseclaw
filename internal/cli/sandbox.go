@@ -18,13 +18,16 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"golang.org/x/term"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -137,6 +140,13 @@ func sandboxRunE(fn func(ctx context.Context, app *sandboxcli.App, cmd *cobra.Co
 		case errors.Is(err, context.Canceled):
 			return withExitCode(err, 130)
 		}
+		var disabled *sandboxcli.DisabledError
+		if errors.As(err, &disabled) && sandboxJSONOutput(cmd) {
+			// GAP-1817: keep --json machine-readable while sandboxes are off.
+			enc := json.NewEncoder(cmd.OutOrStdout())
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(map[string]any{"enabled": disabled.Enabled, "available": false, "reason": disabled.Message})
+		}
 		fmt.Fprintln(cmd.ErrOrStderr(), Style("✗", "fg=red", "bold")+" "+err.Error())
 		if errors.Is(err, sandboxcli.ErrUnsupported) {
 			return withExitCode(err, 3)
@@ -145,9 +155,47 @@ func sandboxRunE(fn func(ctx context.Context, app *sandboxcli.App, cmd *cobra.Co
 	}
 }
 
-func outputFlag(cmd *cobra.Command) *string {
-	return cmd.Flags().StringP("output", "o", "text", "output format: text or json")
+// sandboxJSONOutput reports whether the command was run with --output json
+// (or --json).
+func sandboxJSONOutput(cmd *cobra.Command) bool {
+	f := cmd.Flags().Lookup("output")
+	return f != nil && strings.EqualFold(f.Value.String(), "json")
 }
+
+func outputFlag(cmd *cobra.Command) *string {
+	out := cmd.Flags().StringP("output", "o", "text", "output format: text or json")
+	// --json, as on the other status commands (GAP-1247).
+	cmd.Flags().AddFlag(&pflag.Flag{
+		Name:        "json",
+		Usage:       "same as --output json",
+		Value:       &jsonOutputValue{out: out},
+		DefValue:    "false",
+		NoOptDefVal: "true",
+	})
+	return out
+}
+
+// jsonOutputValue is the --json switch: setting it selects --output json.
+type jsonOutputValue struct {
+	out *string
+	set bool
+}
+
+func (v *jsonOutputValue) String() string { return strconv.FormatBool(v.set) }
+
+func (v *jsonOutputValue) Set(s string) error {
+	b, err := strconv.ParseBool(s)
+	if err != nil {
+		return err
+	}
+	v.set = b
+	if b {
+		*v.out = "json"
+	}
+	return nil
+}
+
+func (v *jsonOutputValue) Type() string { return "bool" }
 
 func parseOutput(s string) (sandboxcli.OutputFormat, error) { return sandboxcli.ParseOutput(s) }
 
@@ -182,7 +230,6 @@ Then it records the harnesses, offers shell wrappers and builds the harness imag
 
 func newSandboxDoctorCmd() *cobra.Command {
 	var o sandboxcli.DoctorOptions
-	var jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "doctor",
 		Short: "Check that this machine can run sandboxes",
@@ -198,15 +245,11 @@ check fails (with --output json the result is printed and the exit status is 0; 
 			if err != nil {
 				return err
 			}
-			if jsonOut {
-				out = sandboxcli.OutputJSON
-			}
 			o.Output = out
 			return app.RunDoctor(ctx, o)
 		}),
 	}
-	outputFlag(cmd)
-	cmd.Flags().BoolVar(&jsonOut, "json", false, "same as --output json")
+	outputFlag(cmd) // also registers --json
 	cmd.Flags().BoolVar(&o.Fix, "fix", false, "apply the fixes doctor can make as your user (asks first)")
 	cmd.Flags().BoolVarP(&o.Yes, "yes", "y", false, "apply fixes without asking")
 	return cmd

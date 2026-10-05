@@ -1,4 +1,4 @@
 {
   "title": "CEL policies",
-  "pages": ["index", "authoring", "engine", "tool-call-state"]
+  "pages": ["authoring", "engine", "tool-call-state"]
 }

@@ -19,7 +19,7 @@ maps its severity to `block`.
 
 This page inventories the detectors currently shipped in the repository and
 explains which layer owns each decision. Benchmark scores for these layers are
-published in [Deterministic Detection Benchmarks](/docs/benchmarks).
+published in [Deterministic Detection Benchmarks](/docs/guardrail/benchmarks).
 
 <Callout type="info" title="Repository snapshot">
 The balanced/default enabled rule catalog contains 239 local rules across seven
@@ -33,24 +33,22 @@ The YAML and Go files linked below remain authoritative if these counts change.
 
 <Flow
   direction="TB"
-  caption="Lexical and semantic signals can detect broadly. Only complete code-owned proof on an eligible synchronous surface can authorize a block."
+  caption="How a tool call earns the right to be blocked. CEL and regex only pick candidates. A block needs a code-owned proof for the same rule ID (and, for chain rules, the earlier steps of a fixed chain in the same session), complete parsing, and a connector that can block before the tool runs. Without that, the finding is still recorded, but it stays detection-only (never changes the action) or alert-only (at most an alert). For proven findings, the active profile or guardrail.block_at maps severity to the action."
 >
-  <Node id="event" kind="generic">Authenticated tool call or scanned content</Node>
-  <Node id="facts" kind="policy">Normalize trusted fields into ActionFacts</Node>
-  <Node id="select" kind="policy">CEL and bounded RE2 candidate selectors</Node>
-  <Node id="semantic" kind="policy">Code-owned semantic validator</Node>
-  <Node id="chain" kind="policy">Optional bounded same-session chain proof</Node>
-  <Node id="gate" kind="decision">Same-rule enforcement proof gate</Node>
-  <Node id="profile" kind="policy">Permissive / balanced / strict posture</Node>
-  <Node id="action" kind="generic">allow / alert / confirm / block</Node>
-  <Edge from="event" to="facts" />
-  <Edge from="facts" to="select" />
-  <Edge from="select" to="semantic" />
-  <Edge from="semantic" to="chain" label="when sequence context is required" />
-  <Edge from="semantic" to="gate" label="atomic proof" />
-  <Edge from="chain" to="gate" label="complete lineage" />
-  <Edge from="gate" to="profile" />
-  <Edge from="profile" to="action" />
+  <Node id="facts" kind="policy">{`Parse the tool call\ninto ActionFacts`}</Node>
+  <Node id="select" kind="policy">{`Rules flag candidates\nCEL and RE2 regex`}</Node>
+  <Node id="semantic" kind="policy">{`Code checks the effect\nvalidator for the same rule`}</Node>
+  <Node id="chain" kind="policy">{`Check earlier steps\nfixed chains, same session`}</Node>
+  <Node id="gate" kind="decision">{`Proven, and can block?\nconnector blocks before run`}</Node>
+  <Node id="record" kind="generic">{`Recorded, not blocked\ndetection-only or alert-only`}</Node>
+  <Node id="profile" kind="policy">{`Profile picks the action\nallow · alert · confirm · block`}</Node>
+  <Edge from="facts" to="select" label="facts" />
+  <Edge from="select" to="semantic" label="candidate" />
+  <Edge from="semantic" to="gate" label="single call" />
+  <Edge from="semantic" to="chain" label="chain rule" />
+  <Edge from="chain" to="gate" label="chain complete" />
+  <Edge from="gate" to="record" label="no" />
+  <Edge from="gate" to="profile" label="yes" />
 </Flow>
 
 YARA description scanning and the legacy session correlator are parallel
@@ -106,6 +104,7 @@ and cannot gain blocking authority.
 | `f.paths` | command ID, read/write/delete/execute access, path flavor, normalized/resolved path | Bind an operation to an exact local resource |
 | `f.network` | command ID, connect/listen/download/upload action, scheme, host, port, scope, target kind | Separate loopback/private use from public or unresolved egress |
 | `f.data_flows` | source and destination command IDs, typed source/sink classes | Prove bounded source-to-sink relationships inside one action |
+| `f.artifacts`, `f.archive_lineages` | archive files a command produces or consumes, path digest identity, produce-then-consume joins | Tie an archive written by one command to the command that later reads it |
 | `f.parse` | status, dialect, bounded issue codes | Fail closed to detection-only when projection is not authoritative |
 | `f.tool`, `f.cwd`, `f.active_home` | trusted connector identity and execution context | Resolve tool-specific schemas and local paths without trusting payload claims |
 
@@ -186,8 +185,8 @@ Pattern-writing guidance and counterexamples are in the
 
 ## Exact atomic semantic rules
 
-This benchmarked change added or materially completed 34 exact semantic rule
-IDs. Twenty-eight combine CEL and regex candidate selection, four use CEL with
+Thirty-four rule IDs use exact semantic proofs. Twenty-eight combine CEL and
+regex candidate selection, four use CEL with
 lexical fallback disabled, and two use a code-owned exact proof selected by a
 narrow regex. Neither selector alone can authorize a block.
 
@@ -264,16 +263,26 @@ Strict intentionally accepts more interruption risk. Balanced/default is the
 recommended general posture, while permissive is useful for observation-heavy
 deployments. Connector capability still controls whether `block` can become a
 native deny; unsupported surfaces retain the finding and audit action without
-claiming prevention. See [Defaults](/docs/defaults) for the complete operator
+claiming prevention. See [Defaults](/docs/policies/defaults) for the complete operator
 configuration.
 
-To change these levels without switching packs, set `guardrail.block_at` and
-`guardrail.alert_at` to `CRITICAL`, `HIGH`, `MEDIUM` or `LOW`: the lowest
-severity that blocks, and the lowest that alerts. Set them globally, or for one
-connector under `guardrail.connectors.<name>`. A connector's own value wins
-over the global one, and the global one wins over the pack's level. The alert
-level never ends up above the block level, so anything that blocks also
-alerts, and `CRITICAL` always blocks.
+To change these levels without switching packs, set the lowest severity that
+blocks and the lowest that alerts, globally or for one connector:
+
+```bash
+defenseclaw guardrail block-at HIGH                       # every connector
+defenseclaw guardrail block-at CRITICAL --connector codex # except codex
+defenseclaw guardrail alert-at MEDIUM --connector codex
+defenseclaw guardrail block-at inherit --connector codex  # back to the global level
+```
+
+Levels are `CRITICAL`, `HIGH`, `MEDIUM` or `LOW`. The commands write
+`guardrail.block_at` and `guardrail.alert_at`, or the same keys under
+`guardrail.connectors.<name>`, and restart a running gateway so hook decisions
+pick up the change (`--no-restart` to skip). A connector's own value wins over
+the global one, and the global one wins over the pack's level. The alert level
+never ends up above the block level, so anything that blocks also alerts, and
+`CRITICAL` always blocks. The same settings in `config.yaml`:
 
 ```yaml
 guardrail:
@@ -284,15 +293,16 @@ guardrail:
       alert_at: MEDIUM
 ```
 
-The levels apply to tool-call decisions only: hook tool calls (including
+The levels apply to tool-call decisions in action mode only: hook tool calls (including
 bounded chains, CodeGuard on file writes and sandbox shell commands) and the
 guardrail proxy's checks of tool calls in LLM responses. Prompts, completions,
 tool responses and message content keep the pack's levels. Human approval only
 ever applies below the block level: anything at or above it blocks without
 asking. The pack decides everything else, such as which rules run, and the
 named policy's thresholds for LLM traffic through the guardrail proxy don't
-change. A running gateway restarts to apply a level change: hook decisions
-read the configuration the gateway started with.
+change. Hook decisions read the configuration the gateway started with, so
+after editing these keys in `config.yaml` by hand, run
+`defenseclaw-gateway restart`.
 
 ### Low-noise rollout
 
@@ -350,7 +360,7 @@ fact and use closed CEL/ActionFacts proofs instead of resource-name guesses.
 
 The SSH contract intentionally abstains today because the public CEL activation
 does not expose file content or a trusted fingerprint allowlist parameter. It
-must not be selected as `policy_dir` until that binding exists. Dynamic paths,
+must not be selected as a rule pack (`rule_pack_dir`) until that binding exists. Dynamic paths,
 malformed keys, missing policy, failed writes, and unresolved homes already
 fail closed to abstention in its ActionFacts helper.
 
@@ -358,7 +368,7 @@ fail closed to abstention in its ActionFacts helper.
 connector with `defenseclaw guardrail protection enable NAME [--connector X]`,
 layered into a custom pack in Policy Creator, or copied into an
 operator-owned policy directory. `guardrail protection enable` composes
-`~/.defenseclaw/policies/guardrail/protected-<scope>/` from the scope's
+`~/.defenseclaw/policies/guardrail/protected-<scope>/<profile>/` from the scope's
 current pack plus every pack that is on (the same merge Policy Creator uses),
 validates it with the gateway's validator, and switches the scope to it;
 `guardrail protection disable NAME` takes it out again and `guardrail
@@ -386,10 +396,11 @@ chains.
 
 ### Optional LLM judge
 
-Injection, PII, and tool-injection judges handle ambiguous content. They are
-optional, non-deterministic secondary detectors and are deliberately outside
-the benchmarked deterministic block path. Data-exfiltration is a category of
-the tool-injection judge rather than a separate judge file.
+The injection, PII, exfil and tool-injection judges handle ambiguous content.
+They are optional, non-deterministic secondary detectors and are deliberately
+outside the benchmarked deterministic block path. The exfil judge reads prompts
+only and its configuration is compiled in; the tool-injection judge also has a
+data-exfiltration category. See [Layer 3 — LLM judge](/docs/policies#layer-3--llm-judge) on the Policies page.
 
 ### OPA/Rego
 

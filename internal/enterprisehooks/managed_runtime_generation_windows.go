@@ -1044,8 +1044,10 @@ func loadUnselectedWindowsManagedRuntimeBundle(
 		!sameWindowsEnterprisePath(bundle.DataDir, opts.DataDir) ||
 		bundle.HookExecutable != opts.HookExecutable ||
 		!sameWindowsEnterprisePath(bundle.HookExecutable, opts.HookExecutable) {
-		return entry, nil, errors.New(
-			"enterprise hooks: refusing to collect a managed runtime bundle with a foreign identity",
+		return entry, nil, fmt.Errorf(
+			"enterprise hooks: refusing to collect a managed runtime bundle with a foreign identity: %s: "+
+				"it names another connector, account, data folder or hook binary than its file name and this deployment do",
+			path,
 		)
 	}
 	desired := WindowsManagedRuntimeGenerationDesired{
@@ -1060,9 +1062,16 @@ func loadUnselectedWindowsManagedRuntimeBundle(
 		HookContractLockUpdatedAt:  bundle.HookContractLockUpdatedAt,
 		HookContractEntryUpdatedAt: bundle.HookContractEntryUpdatedAt,
 	}
-	if _, _, err := validateWindowsManagedRuntimeGenerationDesired(desired); err != nil {
-		return entry, nil, errors.New(
-			"enterprise hooks: refusing to collect an invalid managed runtime bundle",
+	// An unselected bundle is only deleted here, so its identity authorizes
+	// the collection; its token and hook-contract fields are content. A
+	// bundle an older release wrote can carry a contract this build no longer
+	// accepts (1.0.1 wrote Kiro bundles with no contract ID), and refusing it
+	// failed every later upgrade, repair and uninstall (GAP-1322).
+	if _, err := validateWindowsManagedRuntimeGenerationIdentity(desired); err != nil {
+		return entry, nil, fmt.Errorf(
+			"enterprise hooks: refusing to collect an invalid managed runtime bundle: %s: %s",
+			path,
+			strings.TrimPrefix(err.Error(), "enterprise hooks: "),
 		)
 	}
 	entry = windowsManagedRuntimeSelectorTargetFromDesired(
@@ -1070,8 +1079,8 @@ func loadUnselectedWindowsManagedRuntimeBundle(
 		generationID,
 		windowsManagedRuntimeSHA256(data),
 	)
-	if err := validateWindowsManagedRuntimeBundleAgainstSelector(bundle, entry); err != nil {
-		return entry, nil, err
+	if !windowsManagedRuntimeBundleMatchesSelectorIdentity(bundle, entry) {
+		return entry, nil, errors.New("enterprise hooks: managed runtime bundle does not match its protected selector")
 	}
 	return entry, data, nil
 }
@@ -1079,32 +1088,8 @@ func loadUnselectedWindowsManagedRuntimeBundle(
 func validateWindowsManagedRuntimeGenerationDesired(
 	desired WindowsManagedRuntimeGenerationDesired,
 ) (WindowsManagedRuntimeGenerationDesired, *windows.SID, error) {
-	connectorName, err := canonicalWindowsManagedRuntimeConnector(desired.Connector)
-	if err != nil || connectorName != desired.Connector {
-		return desired, nil, errors.New(
-			"enterprise hooks: managed runtime generation connector is not canonical",
-		)
-	}
-	target, err := validateWindowsEnterpriseTargetSID(desired.TargetSID)
-	if err != nil || target.String() != desired.TargetSID {
-		return desired, nil, errors.New(
-			"enterprise hooks: managed runtime generation target SID is not canonical",
-		)
-	}
-	if err := validateWindowsManagedRuntimeGenerationPath(desired.DataDir, ".defenseclaw"); err != nil {
-		return desired, nil, fmt.Errorf("enterprise hooks: invalid managed runtime data directory: %w", err)
-	}
-	if err := validateWindowsManagedRuntimeGenerationPath(desired.HookExecutable, ""); err != nil {
-		return desired, nil, fmt.Errorf("enterprise hooks: invalid managed hook executable: %w", err)
-	}
-	if !strings.EqualFold(filepath.Ext(desired.HookExecutable), ".exe") {
-		return desired, nil, errors.New("enterprise hooks: managed hook executable is not an .exe file")
-	}
-	gatewayAddr, err := connector.NormalizeWindowsManagedGatewayAddr(desired.GatewayAddr)
-	if err != nil || gatewayAddr != desired.GatewayAddr {
-		return desired, nil, errors.New("enterprise hooks: managed runtime gateway address is not canonical")
-	}
-	if err := connector.ValidateWindowsManagedGatewayServiceName(desired.GatewayServiceName); err != nil {
+	target, err := validateWindowsManagedRuntimeGenerationIdentity(desired)
+	if err != nil {
 		return desired, nil, err
 	}
 	if desired.ScopedToken == "" || desired.ScopedToken != strings.TrimSpace(desired.ScopedToken) ||
@@ -1112,8 +1097,7 @@ func validateWindowsManagedRuntimeGenerationDesired(
 		strings.ContainsAny(desired.ScopedToken, "\x00\r\n") {
 		return desired, nil, errors.New("enterprise hooks: managed runtime scoped token is invalid")
 	}
-	if !validWindowsManagedRuntimeText(desired.HookContractID, 256) ||
-		!windowsManagedRuntimeKnownContract(desired.Connector, desired.HookContractID) {
+	if !windowsManagedRuntimeValidContract(desired.Connector, desired.HookContractID) {
 		return desired, nil, errors.New("enterprise hooks: managed runtime hook contract is invalid")
 	}
 	lockTime, err := time.Parse(time.RFC3339Nano, desired.HookContractLockUpdatedAt)
@@ -1125,6 +1109,43 @@ func validateWindowsManagedRuntimeGenerationDesired(
 		return desired, nil, errors.New("enterprise hooks: managed runtime hook contract entry timestamp is invalid")
 	}
 	return desired, target, nil
+}
+
+// validateWindowsManagedRuntimeGenerationIdentity checks the fields that
+// name a generation's owner and runtime: connector, target SID, data
+// directory, hook executable, gateway address and service.
+func validateWindowsManagedRuntimeGenerationIdentity(
+	desired WindowsManagedRuntimeGenerationDesired,
+) (*windows.SID, error) {
+	connectorName, err := canonicalWindowsManagedRuntimeConnector(desired.Connector)
+	if err != nil || connectorName != desired.Connector {
+		return nil, errors.New(
+			"enterprise hooks: managed runtime generation connector is not canonical",
+		)
+	}
+	target, err := validateWindowsEnterpriseTargetSID(desired.TargetSID)
+	if err != nil || target.String() != desired.TargetSID {
+		return nil, errors.New(
+			"enterprise hooks: managed runtime generation target SID is not canonical",
+		)
+	}
+	if err := validateWindowsManagedRuntimeGenerationPath(desired.DataDir, ".defenseclaw"); err != nil {
+		return nil, fmt.Errorf("enterprise hooks: invalid managed runtime data directory: %w", err)
+	}
+	if err := validateWindowsManagedRuntimeGenerationPath(desired.HookExecutable, ""); err != nil {
+		return nil, fmt.Errorf("enterprise hooks: invalid managed hook executable: %w", err)
+	}
+	if !strings.EqualFold(filepath.Ext(desired.HookExecutable), ".exe") {
+		return nil, errors.New("enterprise hooks: managed hook executable is not an .exe file")
+	}
+	gatewayAddr, err := connector.NormalizeWindowsManagedGatewayAddr(desired.GatewayAddr)
+	if err != nil || gatewayAddr != desired.GatewayAddr {
+		return nil, errors.New("enterprise hooks: managed runtime gateway address is not canonical")
+	}
+	if err := connector.ValidateWindowsManagedGatewayServiceName(desired.GatewayServiceName); err != nil {
+		return nil, err
+	}
+	return target, nil
 }
 
 func validateWindowsManagedRuntimeGenerationResolveOptions(
@@ -1421,13 +1442,12 @@ func validWindowsManagedRuntimeText(value string, maximum int) bool {
 		!strings.ContainsAny(value, "\x00\r\n")
 }
 
-func windowsManagedRuntimeKnownContract(connectorName, contractID string) bool {
-	for _, contract := range connector.KnownHookContracts(connectorName) {
-		if contract.ContractID == contractID {
-			return true
-		}
-	}
-	return false
+// windowsManagedRuntimeValidContract accepts a hook contract ID registered
+// for the connector on this host, the managed Windows Kiro contracts
+// included. Every managed footprint pins one.
+func windowsManagedRuntimeValidContract(connectorName, contractID string) bool {
+	return validWindowsManagedRuntimeText(contractID, 256) &&
+		connector.HookContractRegistered(connectorName, contractID)
 }
 
 func requireWindowsManagedRuntimeEffectiveTarget(target *windows.SID) error {
@@ -1526,7 +1546,7 @@ func parseWindowsManagedRuntimeBundleLeaf(leaf string) (string, string, bool) {
 		return "", "", false
 	}
 	identity := strings.TrimSuffix(strings.TrimPrefix(leaf, ".managed-runtime-"), ".json")
-	for _, connectorName := range []string{"claudecode", "codex", "cursor", "copilot", "antigravity", "devin", "hermes", "opencode"} {
+	for _, connectorName := range []string{"claudecode", "codex", "cursor", "copilot", "antigravity", "devin", "hermes", "kiro", "opencode"} {
 		prefix := connectorName + "-"
 		if !strings.HasPrefix(identity, prefix) {
 			continue
@@ -1615,14 +1635,7 @@ func validateWindowsManagedRuntimeBundleAgainstSelector(
 	bundle windowsManagedRuntimeBundle,
 	entry windowsManagedRuntimeSelectorTarget,
 ) error {
-	if bundle.SchemaVersion != windowsManagedRuntimeGenerationSchema ||
-		bundle.GenerationID != entry.GenerationID ||
-		bundle.Connector != entry.Connector || bundle.TargetSID != entry.SID ||
-		!sameWindowsEnterprisePath(bundle.DataDir, entry.DataDir) || bundle.DataDir != entry.DataDir ||
-		!sameWindowsEnterprisePath(bundle.HookExecutable, entry.HookExecutable) || bundle.HookExecutable != entry.HookExecutable ||
-		bundle.GatewayAddr != entry.GatewayAddr ||
-		bundle.GatewayServiceName != entry.GatewayServiceName ||
-		bundle.FailMode != "closed" {
+	if !windowsManagedRuntimeBundleMatchesSelectorIdentity(bundle, entry) {
 		return errors.New("enterprise hooks: managed runtime bundle does not match its protected selector")
 	}
 	desired := WindowsManagedRuntimeGenerationDesired{
@@ -1641,6 +1654,20 @@ func validateWindowsManagedRuntimeBundleAgainstSelector(
 		return errors.New("enterprise hooks: managed runtime bundle contains invalid authenticated fields")
 	}
 	return nil
+}
+
+func windowsManagedRuntimeBundleMatchesSelectorIdentity(
+	bundle windowsManagedRuntimeBundle,
+	entry windowsManagedRuntimeSelectorTarget,
+) bool {
+	return bundle.SchemaVersion == windowsManagedRuntimeGenerationSchema &&
+		bundle.GenerationID == entry.GenerationID &&
+		bundle.Connector == entry.Connector && bundle.TargetSID == entry.SID &&
+		sameWindowsEnterprisePath(bundle.DataDir, entry.DataDir) && bundle.DataDir == entry.DataDir &&
+		sameWindowsEnterprisePath(bundle.HookExecutable, entry.HookExecutable) && bundle.HookExecutable == entry.HookExecutable &&
+		bundle.GatewayAddr == entry.GatewayAddr &&
+		bundle.GatewayServiceName == entry.GatewayServiceName &&
+		bundle.FailMode == "closed"
 }
 
 func windowsManagedRuntimeBundleMatchesDesired(
@@ -1740,7 +1767,7 @@ func defaultWindowsManagedRuntimeSelectorPath(connectorName string) (string, err
 			return "", err
 		}
 		directory = filepath.Dir(requirementsPath)
-	case "copilot", "antigravity", "devin", "hermes", "opencode", "amp":
+	case "copilot", "antigravity", "devin", "hermes", "kiro", "opencode", "amp":
 		directory, err = windowsPerUserManagedRuntimeDir(name)
 		if err != nil {
 			return "", err

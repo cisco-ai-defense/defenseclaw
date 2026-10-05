@@ -10,6 +10,7 @@ import {
   STRIPE_WIDTH,
   ZONE_TONE_STYLE,
   DiagramDefs,
+  estimateTextWidth,
   NodeLabel,
   ForeignDiv,
   flattenToLines,
@@ -28,15 +29,19 @@ const NODE_MARKER = Symbol.for('defenseclaw.diagram.Node');
 const EDGE_MARKER = Symbol.for('defenseclaw.diagram.Edge');
 const ZONE_MARKER = Symbol.for('defenseclaw.diagram.Zone');
 const EDGE_LABEL_MIN_WIDTH = 40;
-const EDGE_LABEL_MAX_WIDTH = 220;
-const EDGE_LABEL_CHAR_WIDTH = 6.4;
-const EDGE_LABEL_PADDING = 14;
+const EDGE_LABEL_MAX_WIDTH = 240;
+// Edge labels are 11.5px semibold; the chip pads 6px a side, plus 6px
+// of safety for the estimate.
+const EDGE_LABEL_FONT = 11.5;
+const EDGE_LABEL_PADDING = 18;
 
 function measureEdgeLabel(label?: string): number {
   if (!label) return 0;
-  return Math.min(
-    EDGE_LABEL_MAX_WIDTH,
-    Math.max(EDGE_LABEL_MIN_WIDTH, label.length * EDGE_LABEL_CHAR_WIDTH + EDGE_LABEL_PADDING),
+  return Math.ceil(
+    Math.min(
+      EDGE_LABEL_MAX_WIDTH,
+      Math.max(EDGE_LABEL_MIN_WIDTH, estimateTextWidth(label, EDGE_LABEL_FONT) + EDGE_LABEL_PADDING),
+    ),
   );
 }
 
@@ -65,25 +70,31 @@ const ZONE_TB_NODESEP = 30;
 const ZONE_TB_EDGESEP = 16;
 const ZONE_TB_RANKSEP = 64;
 const ZONE_RADIUS = 8;
-const ZONE_BADGE_HEIGHT = 18;
+// The zone header is a tab on the top border: the trust level in the
+// tone color, then the zone label. Half of it sits above the border,
+// so ZONE_PAD_TOP (24) still clears it by 13px.
+const ZONE_BADGE_HEIGHT = 22;
 const ZONE_BADGE_INSET = 12;
-const ZONE_BADGE_PAD_X = 7;
-const ZONE_BADGE_GAP = 6;
-// 8.5px mono caps with 0.08em tracking, and 10.5px semibold sans.
-// Deliberately generous, like the node estimates: a badge that is a
-// little long is fine, a clipped zone name is not.
-const ZONE_TONE_CHAR_WIDTH = 6;
-const ZONE_LABEL_CHAR_WIDTH = 5.6;
+const ZONE_BADGE_PAD_X = 8;
+const ZONE_BADGE_GAP = 7;
+// Flows wider than this become a stacked list on phones (see
+// FlowProps.mobile). At 390px the canvas is about 340px wide, so a
+// 460px drawing would already shrink to ~74% and its 14px titles to
+// ~10px.
+const MOBILE_STACK_MIN_WIDTH = 460;
 // Layouts per Flow, at most: the first, plus re-layouts after widening
 // member slots for badges. One re-layout is normally enough.
 const ZONE_LAYOUT_PASSES = 3;
 
 function measureZoneBadge(label: string, tone: ZoneTone): number {
+  // Trust level 10.5px bold (~5% wider than semibold), label 11.5px
+  // semibold, plus 4px of safety.
   return Math.ceil(
     ZONE_BADGE_PAD_X * 2 +
-      ZONE_TONE_STYLE[tone].label.length * ZONE_TONE_CHAR_WIDTH +
+      estimateTextWidth(ZONE_TONE_STYLE[tone].label, 10.5) * 1.05 +
       ZONE_BADGE_GAP +
-      label.length * ZONE_LABEL_CHAR_WIDTH,
+      estimateTextWidth(label, 11.5) +
+      4,
   );
 }
 
@@ -94,6 +105,10 @@ export interface NodeProps {
   // Id of the <Zone> this node sits in. Only needed when the node is
   // not nested inside its <Zone>; nesting wins if both are given.
   zone?: string;
+  // Short tag printed above the title, e.g. the identity a component
+  // runs as ("root", "user"). Only use it when it carries meaning;
+  // the role glyph already tells readers what kind of thing it is.
+  tag?: string;
   children?: React.ReactNode;
 }
 
@@ -161,6 +176,8 @@ interface ResolvedNode {
   kind: DiagramKind;
   emphasis: boolean;
   lines: string[];
+  tag?: string;
+  zone?: string;
   width: number;
   height: number;
   // Set by dagre after layout — center coordinates of the node.
@@ -193,6 +210,18 @@ interface ResolvedEdge {
 //    expand button when the inline scale gets too small.
 export type DiagramFit = 'native' | 'scale' | 'auto';
 
+// How a Flow behaves below 640px:
+//
+//  - 'stack': the drawing is replaced by a vertical list, grouped by
+//    zone, where each card lists its outgoing arrows ("reads → Config").
+//    The expand button still opens the drawing.
+//  - 'scale': the drawing shrinks to the column width.
+//  - 'scroll': the drawing keeps up to 620px and pans sideways, with a
+//    "scroll sideways" hint.
+//  - 'auto' (default): 'stack' when the drawing is wider than 460px,
+//    otherwise 'scale'.
+export type FlowMobile = 'auto' | 'stack' | 'scale' | 'scroll';
+
 interface FlowProps {
   direction?: 'LR' | 'TB';
   caption?: string;
@@ -211,6 +240,12 @@ interface FlowProps {
   // (scripts/check-diagram-widths.ts) fails the build at
   // ARTICLE_WIDTH_HARD_LIMIT.
   oversize?: boolean;
+  // Print each node's role ("Policy", "Control plane") as a tag above
+  // its title. Off by default: the role glyph carries the role, and a
+  // tag on every card is noise. A node's own `tag` always wins.
+  kindLabels?: boolean;
+  // Phone behaviour; see FlowMobile.
+  mobile?: FlowMobile;
   children?: React.ReactNode;
 }
 
@@ -320,6 +355,8 @@ export function Flow({
   fit = 'auto',
   compact,
   oversize = false,
+  kindLabels = false,
+  mobile = 'auto',
   children,
 }: FlowProps) {
   const { nodes: nodeProps, edges: edgeProps, zones: zoneSpecs } = partitionChildren(children);
@@ -347,6 +384,7 @@ export function Flow({
     const measured = measureLabel(flattenToLines(node.children), {
       kind,
       compact: true,
+      tag: node.tag ?? (kindLabels ? KIND_TO_STYLE[kind].label : undefined),
     });
     return sum + measured.width;
   }, 0);
@@ -380,16 +418,21 @@ export function Flow({
     const kind: DiagramKind = p.kind ?? 'generic';
     const emphasis = Boolean(p.emphasis) || kind === 'gateway';
     const lines = flattenToLines(p.children);
+    const tag = p.tag ?? (kindLabels ? KIND_TO_STYLE[kind].label : undefined);
     const measured = measureLabel(lines, {
       kind,
       compact: compactMode,
       dense: denseMode,
+      tag,
+      emphasis,
     });
     return {
       id: p.id,
       kind,
       emphasis,
       lines: measured.lines,
+      tag,
+      zone: p.zone,
       // A vertical process should read like an intentional operating
       // procedure, not a skinny stack of unrelated cards. Give each step a
       // consistent rail width while leaving branched architecture diagrams
@@ -622,6 +665,7 @@ export function Flow({
           edge={edge}
           markerId={id}
           fromRank={rankById.get(edge.from) ?? 0}
+          labelBackground={labelBackground(edge, placedZones)}
         />
       ))}
 
@@ -647,6 +691,9 @@ export function Flow({
     </svg>
   );
 
+  const mobileMode: Exclude<FlowMobile, 'auto'> =
+    mobile === 'auto' ? (width > MOBILE_STACK_MIN_WIDTH ? 'stack' : 'scale') : mobile;
+
   return (
     <DiagramLightbox
       caption={caption}
@@ -654,9 +701,158 @@ export function Flow({
       naturalHeight={height}
       ariaLabel={ariaLabel}
       oversize={oversize}
+      mobile={mobileMode}
+      mobileFallback={
+        mobileMode === 'stack' ? (
+          <FlowStack
+            nodes={resolved}
+            edges={resolvedEdges}
+            zones={zones}
+            direction={layoutDirection}
+            numbered={processRail}
+            ariaLabel={ariaLabel}
+          />
+        ) : undefined
+      }
     >
       {svg}
     </DiagramLightbox>
+  );
+}
+
+// The fill behind an edge label: the zone it sits in, else the canvas,
+// so the label reads as cut out of the line rather than a white box
+// floating on a tinted zone.
+function labelBackground(edge: ResolvedEdge, zones: PlacedZone[]): string {
+  if (!edge.label || zones.length === 0) return 'var(--diagram-canvas)';
+  const first = edge.points[0];
+  const last = edge.points[edge.points.length - 1];
+  const point = edge.labelPoint ?? (first && last ? { x: (first.x + last.x) / 2, y: (first.y + last.y) / 2 } : undefined);
+  if (!point) return 'var(--diagram-canvas)';
+  const zone = zones.find(
+    (z) => point.x >= z.x && point.x <= z.x + z.width && point.y >= z.y && point.y <= z.y + z.height,
+  );
+  return zone ? ZONE_TONE_STYLE[zone.tone].fill : 'var(--diagram-canvas)';
+}
+
+// Short name of a zone for the phone list: "Z1" from "Z1 · Services",
+// else the whole label.
+function zoneShortName(label: string): string {
+  const head = label.split(' · ')[0]?.trim();
+  return head && /^Z\d+$/i.test(head) ? head : label;
+}
+
+// Phone render of a Flow: the same nodes and edges as a vertical list,
+// grouped by zone in declaration order. Each card names its outgoing
+// arrows, so the relationships survive without the drawing.
+function FlowStack({
+  nodes,
+  edges,
+  zones,
+  direction,
+  numbered,
+  ariaLabel,
+}: {
+  nodes: ResolvedNode[];
+  edges: ResolvedEdge[];
+  zones: ResolvedZone[];
+  direction: 'LR' | 'TB';
+  numbered: boolean;
+  ariaLabel: string;
+}) {
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  const zoneById = new Map(zones.map((z) => [z.id, z]));
+  const readingOrder = (a: ResolvedNode, b: ResolvedNode) =>
+    direction === 'LR' ? a.x - b.x || a.y - b.y : a.y - b.y || a.x - b.x;
+  const groups: { zone?: ResolvedZone; nodes: ResolvedNode[] }[] = zones.map((zone) => ({
+    zone,
+    nodes: zone.members
+      .map((m) => byId.get(m))
+      .filter((n): n is ResolvedNode => Boolean(n))
+      .sort(readingOrder),
+  }));
+  const loose = nodes.filter((n) => !n.zone || !zoneById.has(n.zone)).sort(readingOrder);
+  if (loose.length > 0) groups.push({ nodes: loose });
+
+  const title = (n: ResolvedNode | undefined) => n?.lines[0] || n?.id || '';
+  const stepById = new Map(groups.flatMap((g) => g.nodes).map((n, i) => [n.id, i + 1]));
+  return (
+    <div className="diagram-stack" aria-label={`${ariaLabel} (list view)`}>
+      <p className="diagram-stack-hint">
+        List view for small screens. Use the expand button to open the drawing.
+      </p>
+      {groups.map((group, gi) => {
+        const tone = group.zone ? ZONE_TONE_STYLE[group.zone.tone] : undefined;
+        return (
+          <section
+            key={group.zone?.id ?? `loose-${gi}`}
+            className="diagram-stack-group"
+            data-zone-tone={group.zone?.tone}
+            style={
+              tone
+                ? ({ ['--zone-accent' as string]: tone.accent, ['--zone-fill' as string]: tone.fill } as React.CSSProperties)
+                : undefined
+            }
+          >
+            {group.zone && tone && (
+              <p className="diagram-stack-zone">
+                <span className="diagram-stack-tone">{tone.label}</span>
+                <span>{group.zone.label}</span>
+              </p>
+            )}
+            <ol className="diagram-stack-nodes">
+              {group.nodes.map((node) => {
+                const out = edges.filter((e) => e.from === node.id);
+                const inBidi = edges.filter((e) => e.to === node.id && e.variant === 'bidirectional');
+                const [, ...details] = node.lines;
+                return (
+                  <li
+                    key={node.id}
+                    className="diagram-stack-node"
+                    data-emphasis={node.emphasis ? 'true' : undefined}
+                    style={{ ['--node-accent' as string]: KIND_TO_STYLE[node.kind].accent } as React.CSSProperties}
+                  >
+                    {node.tag && <span className="diagram-stack-tag">{node.tag}</span>}
+                    <span className="diagram-stack-title">
+                      {numbered && <span className="diagram-stack-step">{stepById.get(node.id)}.</span>}
+                      {title(node)}
+                    </span>
+                    {details.map((line, i) => (
+                      <span key={i} className="diagram-stack-detail">{line}</span>
+                    ))}
+                    {(out.length > 0 || inBidi.length > 0) && (
+                      <ul className="diagram-stack-edges">
+                        {[...out.map((e) => ({ e, other: e.to })), ...inBidi.map((e) => ({ e, other: e.from }))].map(
+                          ({ e, other }, i) => {
+                            const target = byId.get(other);
+                            const targetZone = target?.zone ? zoneById.get(target.zone) : undefined;
+                            const crosses = Boolean(targetZone) && target?.zone !== node.zone;
+                            return (
+                              <li key={i}>
+                                {e.label && <span className="diagram-stack-verb">{e.label}</span>}
+                                <span aria-hidden className="diagram-stack-arrow">
+                                  {e.variant === 'bidirectional' ? '↔' : '→'}
+                                </span>
+                                <span className="diagram-stack-target">{title(target)}</span>
+                                {crosses && targetZone && (
+                                  <span className="diagram-stack-crossing">
+                                    {zoneShortName(targetZone.label)}
+                                  </span>
+                                )}
+                              </li>
+                            );
+                          },
+                        )}
+                      </ul>
+                    )}
+                  </li>
+                );
+              })}
+            </ol>
+          </section>
+        );
+      })}
+    </div>
   );
 }
 
@@ -845,7 +1041,7 @@ function FlowNode({
   const strokeColor = node.emphasis
     ? 'var(--diagram-accent-blue)'
     : 'var(--diagram-node-border)';
-  const strokeWidth = node.emphasis ? 1.6 : 1;
+  const strokeWidth = node.emphasis ? 1.5 : 1;
   const nodeAnimDelay = `${rank * 60}ms`;
 
   return (
@@ -855,8 +1051,8 @@ function FlowNode({
         y={y}
         width={node.width}
         height={node.height}
-        rx={6}
-        ry={6}
+        rx={7}
+        ry={7}
         style={{
           fill: node.emphasis
             ? 'var(--diagram-node-emphasis-bg)'
@@ -866,17 +1062,17 @@ function FlowNode({
         }}
       />
 
-      {/* Role rail pairs a stable icon and text label with color. This keeps
-          the diagram accessible without turning every component into a
-          different pictogram shape. */}
+      {/* A thin role rail inside the card's left edge. It pairs with
+          the role glyph in front of the title, so color is never the
+          only cue. */}
       {style.accent && (
         <rect
-          x={x}
-          y={y}
+          x={x + 0.5}
+          y={y + 6}
           width={STRIPE_WIDTH}
-          height={node.height}
-          rx={3}
-          ry={3}
+          height={Math.max(0, node.height - 12)}
+          rx={1.5}
+          ry={1.5}
           style={{ fill: node.emphasis ? 'var(--diagram-accent-blue)' : style.accent }}
         />
       )}
@@ -888,32 +1084,35 @@ function FlowNode({
           lines={node.lines}
           kind={node.kind}
           emphasis={node.emphasis}
+          tag={node.tag}
         />
       </g>
 
       {processStep !== undefined && (
         <text
           x={x + node.width - 14}
-          y={y + 19}
+          y={y + 20}
           textAnchor="end"
           aria-hidden="true"
           style={{
             fill: 'var(--diagram-row-number)',
-            fontFamily: 'var(--font-mono), ui-monospace, monospace',
-            fontSize: 9,
-            fontWeight: 720,
-            letterSpacing: '0.08em',
+            fontFamily: 'var(--font-sans), system-ui, sans-serif',
+            fontSize: 11,
+            fontWeight: 650,
+            fontVariantNumeric: 'tabular-nums',
           }}
         >
-          {String(processStep).padStart(2, '0')}
+          {processStep}
         </text>
       )}
     </g>
   );
 }
 
+// Strong enough to read as a boundary (about 3:1 against the canvas in
+// both themes), still quieter than the cards inside it.
 function zoneStroke(tone: ZoneTone): string {
-  return `color-mix(in oklab, ${ZONE_TONE_STYLE[tone].accent} 46%, var(--diagram-border))`;
+  return `color-mix(in oklab, ${ZONE_TONE_STYLE[tone].accent} 62%, var(--diagram-border))`;
 }
 
 function FlowZone({ zone }: { zone: PlacedZone }) {
@@ -932,15 +1131,16 @@ function FlowZone({ zone }: { zone: PlacedZone }) {
       style={{
         fill: tone.fill,
         stroke: zoneStroke(zone.tone),
-        strokeWidth: 1,
+        strokeWidth: 1.25,
         strokeDasharray: tone.dash,
       }}
     />
   );
 }
 
-// The zone's name tag, straddling its top border: tone name first (the
-// same uppercase classification line nodes use), then the label.
+// The zone's header tab, straddling its top border: the trust level in
+// the tone color (it carries the zone's meaning, so it is spelled out
+// rather than left to the tint), then the zone label.
 function FlowZoneBadge({ zone }: { zone: PlacedZone }) {
   const tone = ZONE_TONE_STYLE[zone.tone];
   return (
@@ -961,23 +1161,21 @@ function FlowZoneBadge({ zone }: { zone: PlacedZone }) {
           gap: `${ZONE_BADGE_GAP}px`,
           padding: `0 ${ZONE_BADGE_PAD_X - 1}px`,
           boxSizing: 'border-box',
-          border: `1px solid ${zoneStroke(zone.tone)}`,
-          borderRadius: '4px',
+          border: `1.25px solid ${zoneStroke(zone.tone)}`,
+          borderRadius: '5px',
           background: 'var(--diagram-canvas)',
           whiteSpace: 'nowrap',
           overflow: 'hidden',
+          fontFamily: 'var(--font-sans), system-ui, sans-serif',
+          lineHeight: 1,
         }}
       >
         <span
           style={{
             flex: '0 0 auto',
             color: tone.accent,
-            fontFamily: 'var(--font-mono), ui-monospace, monospace',
-            fontSize: '8.5px',
-            fontWeight: 750,
-            letterSpacing: '0.08em',
-            lineHeight: 1,
-            textTransform: 'uppercase',
+            fontSize: '10.5px',
+            fontWeight: 700,
           }}
         >
           {tone.label}
@@ -988,10 +1186,8 @@ function FlowZoneBadge({ zone }: { zone: PlacedZone }) {
             overflow: 'hidden',
             textOverflow: 'ellipsis',
             color: 'var(--diagram-text)',
-            fontFamily: 'var(--font-sans), system-ui, sans-serif',
-            fontSize: '10.5px',
-            fontWeight: 650,
-            lineHeight: 1,
+            fontSize: '11.5px',
+            fontWeight: 600,
             letterSpacing: '-0.005em',
           }}
         >
@@ -1006,9 +1202,12 @@ function FlowEdge({
   edge,
   markerId,
   fromRank,
+  labelBackground,
 }: {
   edge: ResolvedEdge;
   markerId: string;
+  // Fill behind the label: the zone it sits in, or the canvas.
+  labelBackground: string;
   // Source-node rank. The edge animation starts a half-step after the
   // source node's entrance lands so the line "draws out" of an
   // already-visible node.
@@ -1017,7 +1216,7 @@ function FlowEdge({
   if (edge.points.length < 2) return null;
   const isEmphasis = edge.emphasis;
   const stroke = isEmphasis ? 'var(--diagram-accent-blue)' : 'var(--diagram-edge)';
-  const strokeWidth = isEmphasis ? 1.75 : 1.25;
+  const strokeWidth = isEmphasis ? 1.6 : 1.25;
   const dasharray = edge.variant === 'dashed' ? '6 5' : undefined;
   const arrow = isEmphasis ? `${markerId}-arrow-emphasis` : `${markerId}-arrow`;
 
@@ -1068,6 +1267,7 @@ function FlowEdge({
           x={mid.x}
           y={mid.y}
           label={edge.label}
+          background={labelBackground}
           animationDelay={labelAnimDelay}
         />
       )}
@@ -1075,20 +1275,22 @@ function FlowEdge({
   );
 }
 
+// Edge labels read as cut out of their line: sans text on the fill
+// behind it (zone or canvas), so the line stops short of the words
+// instead of running under floating mono text.
 function EdgeLabelChip({
   x,
   y,
   label,
+  background,
   animationDelay,
 }: {
   x: number;
   y: number;
   label: string;
+  background: string;
   animationDelay?: string;
 }) {
-  // Estimate chip width from char count. The chip uses an HTML
-  // foreignObject so we get full font fallback and crisp anti-aliased
-  // text instead of SVG <text> spacing quirks.
   const chipW = measureEdgeLabel(label);
   const chipH = 20;
   return (
@@ -1109,15 +1311,16 @@ function EdgeLabelChip({
           justifyContent: 'center',
           padding: '0 6px',
           boxSizing: 'border-box',
-          fontFamily: 'var(--font-mono), ui-monospace, monospace',
-          fontSize: '10px',
-          fontWeight: 650,
+          fontFamily: 'var(--font-sans), system-ui, sans-serif',
+          fontSize: '11.5px',
+          fontWeight: 560,
+          lineHeight: 1,
           color: 'var(--diagram-edge-label)',
-          background: 'var(--diagram-canvas)',
+          background,
+          borderRadius: '4px',
           whiteSpace: 'nowrap',
           overflow: 'hidden',
           textOverflow: 'ellipsis',
-          letterSpacing: '-0.005em',
         }}
       >
         {label}

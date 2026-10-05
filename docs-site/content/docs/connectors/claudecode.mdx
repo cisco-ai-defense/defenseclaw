@@ -8,6 +8,8 @@ keywords:
   - Claude Code observability
 ---
 
+import { ConnectorSupport } from '@/components/support-matrix';
+
 The Claude Code connector wires DefenseClaw into [Anthropic's documented hook surfaces](https://code.claude.com/docs/en/hooks) without inserting a proxy in the data path. Claude Code talks directly to its native upstream; DefenseClaw inspects via hooks + native OTel.
 
 <Callout type="info">
@@ -21,10 +23,12 @@ stopping Claude's next turn. No proxy listener is involved.
 
 ## Platform support
 
+<ConnectorSupport id="claudecode" />
+
 | Platform | Status | Connector path |
 | --- | --- | --- |
 | macOS and Linux | **Supported** | Portable command hooks plus Claude Code's native OTel exporter. |
-| Native Windows x64 | **Supported** | Shell-free native executable hooks using Claude Code's `command` plus `args` exec form. Official-client validation metadata remains empty and `live=false`; support availability is not a certification claim. |
+| Native Windows x64 | **Supported** | Shell-free native executable hooks using Claude Code's `command` plus `args` exec form. |
 
 ## Setup
 
@@ -62,7 +66,8 @@ outside this native connector path.
 `setup claude-code` is the dedicated Claude Code setup alias. It uses the same
 setup backend as `setup guardrail`, adds or reconfigures `claudecode`, wires
 hooks + native OTel, and can join an existing hook-connector roster when you
-choose **Add**. No proxy listener binds in either mode.
+choose **Add**. No proxy listener binds in either mode. Fully quit and reopen
+Claude Code after setup so it loads the new hooks and OTel settings.
 
 Native OTLP uses managed loopback exporter settings with a Claude-scoped
 Authorization bearer. Logs and metrics are enabled; traces are explicitly
@@ -75,16 +80,16 @@ be printed or copied.
 Redaction is configured through the v8 bucket/profile policy: edit
 `observability.destinations[].routes[].selector.buckets` and
 `observability.redaction_profiles`, then follow
-[Redaction → Verify policy](/docs/reference/redaction#verify-policy).
+[Redaction → Verify policy](/docs/observability/redaction#verify-policy).
 
 The alias defaults to observe mode and accepts the common hook-connector
 options, including `--mode`, `--workspace`, `--rule-pack`,
 `--human-approval`, `--hilt-min-severity`, `--fail-mode`, `--block-message`,
 `--replace`, `--with-local-stack`, and restart controls. Use the
-[quick-alias reference](/docs/setup/guardrail/aliases) for that surface. Use
-the [full guardrail setup](/docs/setup/guardrail) when you also need scanner,
+[quick-alias reference](/docs/guardrail/aliases) for that surface. Use
+the [full guardrail setup](/docs/guardrail) when you also need scanner,
 detection-strategy, or judge-provider configuration. Defaults are documented
-once on the [Defaults page](/docs/defaults).
+once on the [Defaults page](/docs/policies/defaults).
 
 ## Files DefenseClaw will modify
 
@@ -93,8 +98,9 @@ once on the [Defaults page](/docs/defaults).
 
 DefenseClaw manages marked hooks and OTLP environment entries in
 `%CLAUDE_CONFIG_DIR%\settings.json`; the default directory is
-`%USERPROFILE%\.claude`. Generated runtime and protected connector credentials
-live below `%USERPROFILE%\.defenseclaw\hooks`. See the
+`%USERPROFILE%\.claude`. The hook runtime, `defenseclaw-hook.exe`, lives in
+`%LOCALAPPDATA%\DefenseClaw\HookRuntime`; protected connector credentials
+and adapters live in `%USERPROFILE%\.defenseclaw\hooks`. See the
 [Windows path reference](/docs/get-started/windows/paths-troubleshooting#filesystem-reference).
 
   </Tab>
@@ -118,6 +124,11 @@ live below `%USERPROFILE%\.defenseclaw\hooks`. See the
 DefenseClaw stores a hash-checked backup of `settings.json` before edits.
 Teardown restores it byte-for-byte when the identity still matches; if the file
 drifted, only DefenseClaw-owned entries are removed.
+
+Setup changes only the files above. DefenseClaw also reads, without changing them, the files Claude Code uses for MCP servers, plugins, skills, agents and memory; see [AI Discovery](/docs/ai-discovery) for how inventory works.
+
+<Accordions>
+<Accordion title="What DefenseClaw inventories for Claude Code">
 
 Claude Code keeps user/local MCP registration state in `~/.claude.json`
 (`%CLAUDE_CONFIG_DIR%\.claude.json` when that override is set) and project MCP
@@ -144,6 +155,9 @@ could change the active path.
 Runtime `/add-dir` roots remain outside persistent passive inventory.
 Claude Code 2.1.219+ emits `DirectoryAdded`, so DefenseClaw records the added
 path and source without treating the observation as durable discovery authority.
+
+</Accordion>
+</Accordions>
 
 ## Enterprise (standalone profile)
 
@@ -240,30 +254,55 @@ The added `DirectoryAdded` hook is synchronous, matcherless, bounded to 30
 seconds, and observation-only: it runs after the directory is added and has no
 block, ask, or decision authority.
 
-## Telemetry channels at boot
+## How Claude Code reaches the gateway
 
 <Flow
-  direction="LR"
-  compact
-  caption="Two telemetry channels: hooks for per-tool-call decisions and native OTel for model/token metrics plus privacy-gated events."
+  direction="TB"
+  caption="Claude Code reaches the gateway's API port two ways. The hook sends each event and gets a verdict back, which can block or ask on the events that allow a decision; Claude Code's own OpenTelemetry exporter only records logs and metrics, with traces, prompts and tool content switched off. Setup writes both into Claude Code's settings."
 >
   <Node id="cc" kind="agent">Claude Code</Node>
-  <Node id="hooks" kind="connector">{`Version-selected 28/29-event\nhook contract`}</Node>
-  <Node id="otel" kind="connector">{`Native OTel exporter\n(env-driven)`}</Node>
-  <Node id="gateway" kind="gateway">defenseclaw-gateway</Node>
-  <Edge from="cc" to="hooks" />
-  <Edge from="hooks" to="gateway" />
-  <Edge from="cc" to="otel" />
-  <Edge from="otel" to="gateway" />
+  <Node id="hooks" kind="connector">{`DefenseClaw hook\nruns on each hook event`}</Node>
+  <Node id="otel" kind="connector">{`Built-in telemetry\nOpenTelemetry exporter`}</Node>
+  <Node id="gateway" kind="gateway">{`DefenseClaw gateway\nAPI port, 18970 by default`}</Node>
+  <Edge from="cc" to="hooks" label="runs" />
+  <Edge from="hooks" to="gateway" label="asks for a verdict" />
+  <Edge from="cc" to="otel" label="exports" />
+  <Edge from="otel" to="gateway" label="logs + metrics" />
 </Flow>
+
+**Behind an HTTP proxy.** DefenseClaw's hooks reach the gateway on 127.0.0.1
+directly and ignore `HTTP_PROXY` and `HTTPS_PROXY`. Claude Code 2.1's OTel
+exporter also connects to the gateway directly when those variables are set,
+so its telemetry and OTLP credential never reach the proxy. DefenseClaw does
+not add `NO_PROXY` to the `env` block in `~/.claude/settings.json`, because a
+value there would replace your shell's `NO_PROXY` for all Claude Code traffic.
+If your proxy log does show `POST http://127.0.0.1:<port>/v1/...` requests
+from Claude Code, set `NO_PROXY=127.0.0.1,localhost` (and `no_proxy`) in the
+shell that starts Claude Code, for example in `~/.bashrc` or `~/.zshrc`. On
+Windows run `setx NO_PROXY 127.0.0.1,localhost` once and open a new terminal.
+
+**Another account on the gateway port.** Per-user installs on Linux, macOS and
+Windows point Claude Code's OTel exporter at this account's gateway API port (for
+example `http://127.0.0.1:18970`) with the Claude-scoped OTLP bearer in
+`~/.claude/settings.json`. DefenseClaw's hooks and CLI check who owns that port
+and send nothing to another account's listener, but Claude Code's exporter
+cannot: if another account holds the port while this account's gateway is
+stopped, that listener receives Claude Code's OTLP logs and metrics and the
+Claude-scoped OTLP bearer. The bearer only lets it post Claude Code OTLP logs
+and metrics into this account's gateway; it never authenticates hooks,
+inspection, management or another connector. This is a known residual for
+1.0. To reduce it, give each account its own gateway port
+(`defenseclaw setup gateway --api-port <port>`), keep the gateway running while
+Claude Code runs, and treat Claude Code telemetry attribution as advisory after
+the gateway was down. See [Residual risks](/docs/enterprise/threat-model#residual-risks).
 
 ## In an OpenShell sandbox
 
 `defenseclaw sandbox run claude` runs Claude Code in an NVIDIA OpenShell
 sandbox on Linux, or on a Mac with Apple silicon in a MicroVM of its own that
-works on a copy of your folder ([macOS](/docs/setup/sandbox#macos)): the
+works on a copy of your folder ([macOS](/docs/sandboxes/guide#macos)): the
 agent sees only your project folder, and DefenseClaw hooks gate every tool
-call. The [sandbox guide](/docs/setup/sandbox)
+call. The [sandbox guide](/docs/sandboxes/guide)
 covers setup, the session and every flag. The files below exist only in the
 sandbox image; your own Claude Code configuration does not change.
 
@@ -310,7 +349,7 @@ sandbox image; your own Claude Code configuration does not change.
   DefenseClaw brought along from your Claude Code setup; a read-only
   `/etc/claude-code/managed-mcp.json` lists them, so a repository's
   `.mcp.json` servers never start unless the sandbox pack sets
-  [`mcp.project_servers: allow`](/docs/setup/sandbox-policy#mcp-servers-in-a-sandbox).
+  [`mcp.project_servers: allow`](/docs/sandboxes/policy-packs#mcp-servers-in-a-sandbox).
   `--no-mcp` leaves your servers behind.
 - **Image and verification.** The image installs Claude Code 2.1.156 by
   default and refuses a version without a reviewed Linux hook contract.
@@ -321,6 +360,20 @@ sandbox image; your own Claude Code configuration does not change.
 
 ## Disable
 
+If Claude Code is the only connector DefenseClaw guards, turn the guardrail off:
+
+```bash
+defenseclaw guardrail disable --yes
+```
+
+If other connectors are configured too, turn off Claude Code alone and keep the
+rest running:
+
 ```bash
 defenseclaw guardrail disable --connector claudecode --yes
 ```
+
+Both keep Claude Code's settings, so `defenseclaw guardrail enable` (with the same
+`--connector`) turns it back on. To drop Claude Code from the configured
+connectors instead, run `defenseclaw setup remove claudecode --yes`; add `--force`
+when it is the last connector.

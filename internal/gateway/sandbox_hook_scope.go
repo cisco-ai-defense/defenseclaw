@@ -340,9 +340,11 @@ func sandboxHookAuditExtra(ctx context.Context) map[string]string {
 }
 
 // hookRequestAuditExtra combines the contract compatibility fields with the
-// sandbox identity for one request's hook audit envelope.
+// sandbox identity and the agent host tag for one request's hook audit
+// envelope.
 func hookRequestAuditExtra(ctx context.Context, profile connector.HookProfile) map[string]string {
-	return mergeHookEnvelopeExtra(hookCompatibilityExtra(profile), sandboxHookAuditExtra(ctx))
+	extra := mergeHookEnvelopeExtra(hookCompatibilityExtra(profile), sandboxHookAuditExtra(ctx))
+	return mergeHookEnvelopeExtra(extra, agentHostExtra(ctx))
 }
 
 // sandboxBindingEnvelope overlays the binding's identity onto env.

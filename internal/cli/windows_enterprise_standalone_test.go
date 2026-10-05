@@ -15,6 +15,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -24,6 +25,8 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/sys/windows"
 
+	"github.com/defenseclaw/defenseclaw/internal/daemon"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
@@ -595,7 +598,7 @@ func TestWindowsEnterpriseLifecycleLogRotatesFiveGenerations(t *testing.T) {
 	for run := 0; run < 40; run++ {
 		result := enterprisestatus.New("status", "standalone", "windows", "1.4.0")
 		result.Finish("windows", 0)
-		path, err := writeWindowsEnterpriseLifecycleLog(directory, result, nil)
+		path, err := writeWindowsEnterpriseLifecycleLog(directory, result, nil, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1243,13 +1246,34 @@ func TestWindowsEnterpriseUninstallReportsTheUserRegistrationsItLeft(t *testing.
 
 	got := warnings(base + `,"user_registrations_removed":1,"user_registrations_pending":["devin/` + sid + `","hermes/` + sid +
 		`"],"user_registrations_failed":["per-user registrations were not removed: requires the LocalSystem guardian service"]}`)
-	if len(got) != 2 || got[0].Code != "user_registrations_pending" || got[1].Code != "user_registrations_failed" {
+	// GAP-1568: no removal was attempted, so there is one warning, not a
+	// second "removing ... failed" that repeats it.
+	if len(got) != 1 || got[0].Code != "user_registrations_pending" {
 		t.Fatalf("warnings = %+v", got)
 	}
-	if !strings.Contains(got[0].Message, "2 user connector registration(s)") ||
-		!strings.Contains(got[0].Message, "devin/"+sid+"; hermes/"+sid) ||
-		!strings.Contains(got[1].Message, "requires the LocalSystem guardian service") {
+	// GAP-1074: the warning groups the registrations by account, says the
+	// run was not LocalSystem, and names the next step.
+	if !strings.Contains(got[0].Message, "2 user connector registration(s) because this uninstall did not run as LocalSystem") ||
+		!strings.Contains(got[0].Message, sid+": devin, hermes") ||
+		!strings.Contains(got[0].Message, "Setup /ensure and then /uninstall, both as LocalSystem") {
 		t.Fatalf("warnings = %+v", got)
+	}
+	// A removal that was attempted and failed is still reported.
+	attempted := warnings(base + `,"user_registrations_pending":["amp/` + sid + `"],"user_registrations_failed":["kiro/` + sid +
+		`: C:\\Users\\alice\\.kiro\\hooks\\defenseclaw.json still holds DefenseClaw's hook"]}`)
+	if len(attempted) != 2 || attempted[1].Code != "user_registrations_failed" ||
+		!strings.Contains(attempted[1].Message, `defenseclaw.json still holds`) ||
+		// GAP-1932: a failed removal names a next step.
+		!strings.Contains(attempted[1].Message, "remove the named DefenseClaw entries from those files as that user, or run DefenseClaw Setup /ensure and then /uninstall") {
+		t.Fatalf("attempted-failure warnings = %+v", attempted)
+	}
+	signedOut := warnings(base + `,"user_registrations_pending":["amp/` + sid + `"],"user_registrations_failed":[]}`)
+	if len(signedOut) != 1 || !strings.Contains(signedOut[0].Message, "because those accounts had no active (connected) session (signed out, or signed in with a disconnected session)") {
+		t.Fatalf("signed-out warnings = %+v", signedOut)
+	}
+	if labels := windowsEnterpriseRegistrationsByAccount([]string{"amp/S-1-5-18", "kiro/S-1-5-18", "orphan"}); len(labels) != 2 ||
+		!strings.HasSuffix(labels[0], "SYSTEM (S-1-5-18): amp, kiro") || labels[1] != "orphan" {
+		t.Fatalf("labels by account = %q", labels)
 	}
 
 	if got := warnings(base + `,"user_registrations_removed":2,"user_registrations_pending":[],"user_registrations_failed":[]}`); len(got) != 0 {
@@ -1265,6 +1289,51 @@ func TestWindowsEnterpriseUninstallReportsTheUserRegistrationsItLeft(t *testing.
 	if len(purge.Warnings) != 1 || purge.Warnings[0].Code != "per_user_state_remaining" ||
 		!strings.Contains(purge.Warnings[0].Message, `alice (`+sid+`): C:\Users\alice\.defenseclaw`) {
 		t.Fatalf("purge warnings = %+v", purge.Warnings)
+	}
+	// GAP-1111: a purge that did not run as LocalSystem left every enrolled
+	// account's data, so it fails and names the LocalSystem rerun.
+	notSystem, err := parseWindowsEnterpriseInstallerReport([]byte(base + `,"user_state_remaining":["alice (` + sid + `): C:\\Users\\alice\\.defenseclaw: the uninstall did not run as LocalSystem"]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed := enterprisestatus.New("uninstall", "standalone", "windows", "test")
+	applyWindowsEnterpriseInstallerReport(failed, &windowsEnterpriseLifecycleOptions{purge: true}, notSystem, windowsEnterpriseStandaloneRun{})
+	if len(failed.Errors) != 1 || failed.Errors[0].Code != "per_user_state_remaining" || len(failed.Warnings) != 0 ||
+		!strings.Contains(failed.Errors[0].Message, "--purge did not run as LocalSystem") ||
+		!strings.Contains(failed.Errors[0].Message, "/uninstall PURGE=1, both as LocalSystem") ||
+		!strings.HasSuffix(failed.Errors[0].Message, `Accounts: alice (`+sid+`): C:\Users\alice\.defenseclaw`) {
+		t.Fatalf("not-LocalSystem purge: errors %+v warnings %+v", failed.Errors, failed.Warnings)
+	}
+	if code := failed.Finish("windows", windowsEnterpriseFailureCodeFor(failed)); failed.OK || code == 0 {
+		t.Fatalf("not-LocalSystem purge finished ok=%t exit %d", failed.OK, code)
+	}
+	// A purge names each account whose data and binaries went.
+	gone, err := parseWindowsEnterpriseInstallerReport([]byte(base + `,"user_state_purged":["bob (` + sid + `): C:\\Users\\bob\\.defenseclaw"]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := enterprisestatus.New("uninstall", "standalone", "windows", "test")
+	applyWindowsEnterpriseInstallerReport(done, &windowsEnterpriseLifecycleOptions{purge: true}, gone, windowsEnterpriseStandaloneRun{})
+	if len(done.Warnings) != 0 || len(done.Changes) != 1 ||
+		!strings.Contains(done.Changes[0], `removed all DefenseClaw per-user data of bob (`+sid+`): C:\Users\bob\.defenseclaw`) ||
+		!strings.Contains(done.Changes[0], `.local\bin`) {
+		t.Fatalf("purged accounts: changes %+v warnings %+v", done.Changes, done.Warnings)
+	}
+	// GAP-1734: an uninstall names the machine folders it could not remove,
+	// with or without --purge (the MDM default uninstall has none).
+	machine, err := parseWindowsEnterpriseInstallerReport([]byte(base + `,"machine_state_remaining":["C:\\ProgramData\\DefenseClaw-PowerShell-` +
+		strings.Repeat("a", 32) + `: access denied"]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, purge := range []bool{true, false} {
+		left := enterprisestatus.New("uninstall", "standalone", "windows", "test")
+		applyWindowsEnterpriseInstallerReport(left, &windowsEnterpriseLifecycleOptions{purge: purge}, machine, windowsEnterpriseStandaloneRun{})
+		if len(left.Errors) != 0 || len(left.Warnings) != 1 || left.Warnings[0].Code != "machine_state_remaining" ||
+			!strings.Contains(left.Warnings[0].Message, `the uninstall could not remove 1 DefenseClaw machine folder(s)`) ||
+			!strings.Contains(left.Warnings[0].Message, `C:\ProgramData\DefenseClaw-PowerShell-`+strings.Repeat("a", 32)+`: access denied`) {
+			t.Fatalf("machine leftovers (purge %v): errors %+v warnings %+v", purge, left.Errors, left.Warnings)
+		}
 	}
 	if got := warnings(base + `}`); len(got) != 0 {
 		t.Fatalf("a report without the cleanup fields warned: %+v", got)
@@ -1289,6 +1358,10 @@ func TestWindowsEnterpriseUninstallReportsTheUserRegistrationsItLeft(t *testing.
 // stays in a lifecycle_diagnostic warning), and records which gateway the
 // recovery ran and why.
 func TestWindowsEnterpriseFailedLifecycleNamesTheRecoveryStep(t *testing.T) {
+	// The host's own API listener is not part of this report.
+	previousListeners := windowsEnterpriseAPIListeners
+	t.Cleanup(func() { windowsEnterpriseAPIListeners = previousListeners })
+	windowsEnterpriseAPIListeners = func(string, int) ([]daemon.Listener, error) { return nil, nil }
 	internalDetail := `managed Windows DACL on C:\Users\alice\.defenseclaw\hooks has 2 ACEs, expected 7`
 	failure := `managed-hook lifecycle snapshot retire failed: retire amp managed runtime generations for SID S-1-5-21-1-2-3-1017: ` + internalDetail
 	document, err := json.Marshal(map[string]any{
@@ -1344,6 +1417,10 @@ func TestWindowsEnterpriseFailedLifecycleNamesTheRecoveryStep(t *testing.T) {
 			"sha256": strings.Repeat("c", 64), "trust": "hash_pinned", "identity": `NT AUTHORITY\SYSTEM`,
 			"staged_error": failure, "outcome": "succeeded",
 		}},
+		"rollback_leftovers": []string{
+			"bob (S-1-5-21-1-2-3-1019) [codex, cursor]: DefenseClaw's agent registrations, because the account is not signed in",
+			`bob (S-1-5-21-1-2-3-1019) [codex, cursor]: C:\Users\bob\.codex\hooks.json, which changed after DefenseClaw wrote it`,
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1368,6 +1445,17 @@ func TestWindowsEnterpriseFailedLifecycleNamesTheRecoveryStep(t *testing.T) {
 	if fallbacks != 1 || len(result.Errors) != 0 {
 		t.Fatalf("result = %+v", result)
 	}
+	var leftovers []string
+	for _, warning := range result.Warnings {
+		if warning.Code == "rollback_leftover" {
+			leftovers = append(leftovers, warning.Message)
+		}
+	}
+	if len(leftovers) != 2 ||
+		!strings.Contains(leftovers[0], "bob (S-1-5-21-1-2-3-1019) [codex, cursor]: DefenseClaw's agent registrations, because the account is not signed in; to remove it, run DefenseClaw Setup /ensure and then /uninstall") ||
+		!strings.HasSuffix(leftovers[1], `hooks.json, which changed after DefenseClaw wrote it; remove DefenseClaw's entries from that file by hand`) {
+		t.Fatalf("rollback leftovers = %q", leftovers)
+	}
 
 	// Status and verify keep their full detail and get no recovery step.
 	result = enterprisestatus.New("verify", "standalone", "windows", "1.0.42")
@@ -1375,5 +1463,483 @@ func TestWindowsEnterpriseFailedLifecycleNamesTheRecoveryStep(t *testing.T) {
 	applyWindowsEnterpriseInstallerReport(result, opts, report, windowsEnterpriseStandaloneRun{ExitCode: 1})
 	if result.Errors[0].Message != failure {
 		t.Fatalf("verify error rewritten: %q", result.Errors[0].Message)
+	}
+}
+
+// WIN-R2-03: Setup run from an elevated prompt cannot act as the accounts the
+// guardian registered, so the rollback names that cause and a remedy the
+// administrator can run from that prompt.
+func TestWindowsFirstInstallRollbackLeftoverNamesTheElevatedPrompt(t *testing.T) {
+	account := "bob (S-1-5-21-1-2-3-1019) [copilot]"
+	err := fmt.Errorf("restore: %w", enterprisehooks.ErrWindowsEnterpriseNotLocalSystem)
+	leftover := windowsFirstInstallRollbackAccountLeftover(account, err)
+	if leftover != account+": DefenseClaw's agent registrations, because Setup did not run as LocalSystem" {
+		t.Fatalf("leftover = %q", leftover)
+	}
+	if got := windowsFirstInstallRollbackAccountLeftover(account, nil); got != "" {
+		t.Fatalf("removed registrations reported as %q", got)
+	}
+	raw, _ := json.Marshal([]string{leftover})
+	warnings := windowsEnterpriseRollbackLeftoverWarnings(raw)
+	if len(warnings) != 1 || !strings.Contains(warnings[0].Message, "one-time scheduled task that runs as SYSTEM") {
+		t.Fatalf("warnings = %+v", warnings)
+	}
+}
+
+// GAP-1049: an uninstall reports security_incomplete only while a
+// deployment is still installed or a transaction is pending. Once nothing
+// is installed and nothing is pending (a completed uninstall, or a failed
+// first install that rolled back) there is nothing left to secure.
+func TestWindowsEnterpriseUninstallSecurityIncompleteOnlyWhileInstalled(t *testing.T) {
+	stubWindowsUnprotectedAgents(t, nil, os.ErrNotExist)
+	previousAmp := windowsEnterpriseAmpMachineFolderProblems
+	t.Cleanup(func() { windowsEnterpriseAmpMachineFolderProblems = previousAmp })
+	windowsEnterpriseAmpMachineFolderProblems = func() []string { return nil }
+	incomplete := func(action, line string) (string, []enterprisestatus.Message) {
+		t.Helper()
+		report, err := parseWindowsEnterpriseInstallerReport([]byte(line))
+		if err != nil {
+			t.Fatalf("parse %s: %v", line, err)
+		}
+		result := enterprisestatus.New(action, "standalone", "windows", "test")
+		applyWindowsEnterpriseInstallerReport(result, nil, report, windowsEnterpriseStandaloneRun{})
+		for _, warning := range result.Warnings {
+			if warning.Code == "security_incomplete" {
+				return warning.Message, result.Errors
+			}
+		}
+		return "", result.Errors
+	}
+	if got, _ := incomplete("uninstall", `{"schema_version":1,"ok":true,"action":"Uninstall","installed":false,"transaction_pending":false}`); got != "" {
+		t.Fatalf("a completed uninstall reported security_incomplete: %q", got)
+	}
+	got, errs := incomplete("install", `{"schema_version":1,"ok":false,"action":"Install","installed":false,"transaction_pending":false,"error":"install failed and rolled back"}`)
+	if got != "" || len(errs) == 0 {
+		t.Fatalf("a rolled-back install: security_incomplete %q, errors %+v", got, errs)
+	}
+	if got, _ := incomplete("uninstall", `{"schema_version":1,"ok":true,"action":"Uninstall","installed":false,"transaction_pending":true}`); !strings.Contains(got, "a lifecycle transaction is pending") {
+		t.Fatalf("a pending uninstall: security_incomplete %q", got)
+	}
+	if got, _ := incomplete("uninstall", `{"schema_version":1,"ok":true,"action":"Uninstall","installed":true,"transaction_pending":false}`); got == "" {
+		t.Fatal("an uninstall that left the deployment installed did not report security_incomplete")
+	}
+}
+
+// GAP-1073: status and verify help list only the flags they read; the
+// install-only flags stay accepted.
+func TestWindowsEnterpriseInspectionHelpHidesInstallFlags(t *testing.T) {
+	for _, action := range []string{"status", "verify", "install"} {
+		cmd := newWindowsEnterpriseLifecycleCommand(action)
+		usage := cmd.UsageString()
+		hidden := action != "install"
+		for _, name := range []string{"gateway-binary", "purge", "certification-codex-home", "mode", "install-root"} {
+			if cmd.Flags().Lookup(name) == nil {
+				t.Fatalf("%s: --%s is no longer accepted", action, name)
+			}
+			if strings.Contains(usage, "--"+name+" ") == hidden {
+				t.Fatalf("%s help: --%s shown=%v\n%s", action, name, !hidden, usage)
+			}
+		}
+		for _, name := range []string{"--json", "--profile", "--config"} {
+			if !strings.Contains(usage, name+" ") {
+				t.Fatalf("%s help lacks %s\n%s", action, name, usage)
+			}
+		}
+	}
+}
+
+// An ensure whose install reported success while the host has no deployment
+// fails: ok with exit 0 would tell an MDM the device is protected while
+// nothing is installed (GAP-1079). This is the report the lifecycle returned
+// when an Install finished an earlier installed-CLI purge instead of
+// installing.
+func TestWindowsEnterpriseEnsureFailsWhenInstallLeavesNothingInstalled(t *testing.T) {
+	absent := map[string]any{"schema_version": 1, "ok": true, "action": "status", "installed": false, "transaction_pending": false, "errors": []string{}}
+	stub := &ensureStub{t: t, replies: []map[string]any{
+		absent,
+		{"schema_version": 1, "ok": true, "action": "Uninstall", "installed": false, "transaction_pending": false, "purged": true, "errors": []string{}},
+	}}
+	stub.install(t)
+	command := &cobra.Command{}
+	var stdout bytes.Buffer
+	command.SetOut(&stdout)
+	command.SetErr(&bytes.Buffer{})
+	err := runWindowsEnterpriseStandaloneEnsure(context.Background(), command, ensureTestOptions(), `C:\stage\install-enterprise.ps1`)
+	if got := commandExitCode(err); got != 1603 || len(stub.calls) != 2 || stub.calls[1][1] != "Install" {
+		t.Fatalf("exit %d after runs %q (%v)", got, stub.calls, err)
+	}
+	var result enterprisestatus.Result
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.OK || result.Installed || len(result.Errors) != 1 || result.Errors[0].Code != "not_installed" ||
+		!strings.Contains(result.Errors[0].Message, "nothing protects it") {
+		t.Fatalf("result %+v", result)
+	}
+}
+
+// The guardian writes DefenseClaw's Copilot VS Code Local hook file without
+// a connector backup, so a failed first install's rollback left it in every
+// profile, pointing at a removed hook (GAP-1287). It is removed for an
+// account with a Copilot row, and a failure is a named leftover.
+func TestRollbackWindowsFirstInstallAccountRemovesCopilotVSCodeHooks(t *testing.T) {
+	originalRestorer := windowsFirstInstallRollbackUserConfigRestorer
+	originalCopilot := windowsFirstInstallRollbackCopilotVSCodeRemover
+	originalHomeGone := windowsFirstInstallRollbackHomeGone
+	t.Cleanup(func() {
+		windowsFirstInstallRollbackUserConfigRestorer = originalRestorer
+		windowsFirstInstallRollbackCopilotVSCodeRemover = originalCopilot
+		windowsFirstInstallRollbackHomeGone = originalHomeGone
+	})
+	windowsFirstInstallRollbackHomeGone = func(string) bool { return false }
+	windowsFirstInstallRollbackUserConfigRestorer = func(string, string, string) ([]string, []string, error) {
+		return nil, nil, nil
+	}
+	var removed []string
+	removeErr := error(nil)
+	windowsFirstInstallRollbackCopilotVSCodeRemover = func(home, sid string) error {
+		removed = append(removed, home+"|"+sid)
+		return removeErr
+	}
+	home, sid := `C:\Users\dcw-std1`, "S-1-5-21-1-2-3-1017"
+	if got := rollbackWindowsFirstInstallAccount("dcw-std1", home, sid, home+`\.defenseclaw`, []string{"codex", "kiro"}); len(got) != 0 || len(removed) != 0 {
+		t.Fatalf("no Copilot row: leftovers=%v removed=%v", got, removed)
+	}
+	if got := rollbackWindowsFirstInstallAccount("dcw-std1", home, sid, home+`\.defenseclaw`, []string{"copilot"}); len(got) != 0 ||
+		len(removed) != 1 || removed[0] != home+"|"+sid {
+		t.Fatalf("Copilot row: leftovers=%v removed=%v", got, removed)
+	}
+	removeErr = errors.New("access denied")
+	got := rollbackWindowsFirstInstallAccount("dcw-std1", home, sid, home+`\.defenseclaw`, []string{"copilot"})
+	if len(got) != 1 || !strings.Contains(got[0], "Copilot VS Code hooks") || !strings.Contains(got[0], "access denied") {
+		t.Fatalf("failed Copilot removal leftovers = %v", got)
+	}
+}
+
+// GAP-1618: an account deleted with its profile while a first install ran
+// is not a rollback leftover; there is nothing left to remove and no remedy
+// applies.
+func TestRollbackWindowsFirstInstallAccountSkipsADeletedAccount(t *testing.T) {
+	originalRestorer := windowsFirstInstallRollbackUserConfigRestorer
+	originalCopilot := windowsFirstInstallRollbackCopilotVSCodeRemover
+	t.Cleanup(func() {
+		windowsFirstInstallRollbackUserConfigRestorer = originalRestorer
+		windowsFirstInstallRollbackCopilotVSCodeRemover = originalCopilot
+	})
+	calls := 0
+	windowsFirstInstallRollbackUserConfigRestorer = func(string, string, string) ([]string, []string, error) {
+		calls++
+		return nil, nil, errors.New("enterprise hooks: inspect user home: The system cannot find the file specified.")
+	}
+	windowsFirstInstallRollbackCopilotVSCodeRemover = func(string, string) error {
+		calls++
+		return errors.New("access denied")
+	}
+	present := t.TempDir()
+	deleted := filepath.Join(present, "dcw-vwm")
+	if got := rollbackWindowsFirstInstallAccount("dcw-vwm", deleted, "S-1-5-21-1-2-3-1035", deleted+`\.defenseclaw`, []string{"codex", "copilot"}); len(got) != 0 || calls != 0 {
+		t.Fatalf("deleted account: leftovers=%v calls=%d", got, calls)
+	}
+	if got := rollbackWindowsFirstInstallAccount("dcw-std1", present, "S-1-5-21-1-2-3-1017", present+`\.defenseclaw`, []string{"codex"}); len(got) != 1 || calls != 1 {
+		t.Fatalf("existing account: leftovers=%v calls=%d", got, calls)
+	}
+}
+
+// GAP-2480: when the lifecycle capture writes the Cursor enterprise adapter
+// back over a changed or deleted one, the result and lifecycle log say so.
+func TestWindowsEnterpriseResultNamesRestoredCursorAdapter(t *testing.T) {
+	for _, restored := range []bool{true, false} {
+		document, err := json.Marshal(map[string]any{
+			"schema_version": 1, "ok": true, "action": "repair", "installed": true, "transaction_pending": false,
+			"errors": []string{}, "cursor_adapter_restored": restored,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		report, err := parseWindowsEnterpriseInstallerReport(document)
+		if err != nil {
+			t.Fatal(err)
+		}
+		result := enterprisestatus.New("repair", "standalone", "windows", "1.0.46")
+		addWindowsEnterpriseRecoveryGatewayWarnings(result, report)
+		addWindowsEnterpriseRecoveryGatewayWarnings(result, report)
+		var found []string
+		for _, warning := range result.Warnings {
+			if warning.Code == "cursor_adapter_restored" {
+				found = append(found, warning.Message)
+			}
+		}
+		want := 0
+		if restored {
+			want = 1
+		}
+		if len(found) != want || (restored && !strings.Contains(found[0], `C:\ProgramData\Cursor\defenseclaw-hook.ps1`)) {
+			t.Fatalf("restored=%t warnings = %+v", restored, result.Warnings)
+		}
+	}
+}
+
+// GAP-1680: when the lifecycle removes a stale committed managed-hook
+// lifecycle journal itself, the Setup result and lifecycle log say so.
+func TestWindowsEnterpriseResultNamesRemovedStaleLifecycleJournal(t *testing.T) {
+	document, err := json.Marshal(map[string]any{
+		"schema_version": 1, "ok": true, "action": "upgrade", "installed": true, "transaction_pending": false,
+		"errors":                          []string{},
+		"stale_lifecycle_journal_removed": "managed-hook lifecycle snapshot retire failed: retire 2 managed runtime generations for SID S-1-5-21-1-2-3-1019: refusing to collect an invalid managed runtime bundle",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := parseWindowsEnterpriseInstallerReport(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := enterprisestatus.New("ensure", "standalone", "windows", "1.0.42")
+	addWindowsEnterpriseRecoveryGatewayWarnings(result, report)
+	addWindowsEnterpriseRecoveryGatewayWarnings(result, report)
+	var found []string
+	for _, warning := range result.Warnings {
+		if warning.Code == "stale_lifecycle_journal_removed" {
+			found = append(found, warning.Message)
+		}
+	}
+	if len(found) != 1 || !strings.Contains(found[0], "managed-hooks-lifecycle-journal.json") ||
+		!strings.Contains(found[0], "refusing to collect an invalid managed runtime bundle") {
+		t.Fatalf("warnings = %+v", result.Warnings)
+	}
+}
+
+// GAP-1961: a standard account's repair cannot read the protected installed
+// config; it gets the elevation_required refusal (exit 5) that status and
+// verify give, not a raw "Access is denied" with exit 1603. GAP-1962: an
+// unknown --profile exits 1639 (invalid arguments) like every other
+// argument error; GAP-2040: as one line that claims no profile. GAP-2041:
+// naming the Secure Client profile on a standalone computer is a caller
+// error (1639) that names the profile to use, not a fatal install (1603).
+// GAP-2113: its --json result reports the installed deployment.
+func TestWindowsEnterpriseLifecycleCallerErrorsExitCodes(t *testing.T) {
+	stubWindowsEnterpriseDeployments(t, map[string]winpath.EnterpriseDeploymentState{"standalone": winpath.EnterpriseDeploymentInstalled})
+	originalObserver := windowsEnterpriseStandaloneObserver
+	originalElevated := windowsEnterpriseIsElevated
+	t.Cleanup(func() {
+		windowsEnterpriseStandaloneObserver = originalObserver
+		windowsEnterpriseIsElevated = originalElevated
+	})
+	windowsEnterpriseStandaloneObserver = func(*enterprisestatus.Result, *windowsEnterpriseLifecycleOptions) string { return "" }
+	windowsEnterpriseIsElevated = func() bool { return false }
+	originalServiceState := windowsEnterpriseServiceState
+	t.Cleanup(func() { windowsEnterpriseServiceState = originalServiceState })
+	windowsEnterpriseServiceState = func(name string) string {
+		if name == "DefenseClawSensorHelper" {
+			return "absent"
+		}
+		return "running"
+	}
+
+	// The installed config is readable only by administrators.
+	installed := `C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml`
+	originalReader := windowsEnterpriseTrustConfigReader
+	originalScriptFinder := windowsEnterpriseScriptFinder
+	t.Cleanup(func() {
+		windowsEnterpriseTrustConfigReader = originalReader
+		windowsEnterpriseScriptFinder = originalScriptFinder
+	})
+	windowsEnterpriseTrustConfigReader = func(path string, _ int64) ([]byte, error) {
+		return nil, &os.PathError{Op: "open", Path: path, Err: windows.ERROR_ACCESS_DENIED}
+	}
+	// Never reach a real lifecycle if the refusal regresses.
+	windowsEnterpriseScriptFinder = func(string) (string, error) { return "", errors.New("test: no installer") }
+	windowsEnterpriseInstalledConfigPath = func() (string, error) { return installed, nil }
+
+	for _, tc := range []struct {
+		action, profile, code, text string
+		exit                        int
+	}{
+		{"repair", "standalone", "elevation_required", "a standard account cannot repair the managed deployment", 5},
+		{"verify", "nope", "invalid_arguments", `invalid --profile "nope": use standalone or secure_client`, 1639},
+	} {
+		for _, jsonOutput := range []bool{false, true} {
+			var stdout, stderr bytes.Buffer
+			var err error
+			command := &cobra.Command{Use: tc.action, SilenceUsage: true, RunE: func(c *cobra.Command, _ []string) error {
+				err = runWindowsEnterpriseLifecycle(context.Background(), c, tc.action,
+					&windowsEnterpriseLifecycleOptions{profile: tc.profile, jsonOutput: jsonOutput})
+				return err
+			}}
+			command.SetArgs([]string{})
+			command.SetOut(&stdout)
+			command.SetErr(&stderr)
+			_ = command.Execute()
+			if got := commandExitCode(err); got != tc.exit {
+				t.Fatalf("%s --profile %s (json %t): exit %d, want %d (%v)", tc.action, tc.profile, jsonOutput, got, tc.exit, err)
+			}
+			// GAP-2445: --json prints only the JSON result, whose errors[]
+			// carry the refusal; text mode prints the one Error line.
+			if want := "Error: " + err.Error() + "\n"; (jsonOutput && stderr.Len() != 0) || (!jsonOutput && stderr.String() != want) {
+				t.Fatalf("%s --profile %s (json %t): stderr %q", tc.action, tc.profile, jsonOutput, stderr.String())
+			}
+			if !jsonOutput && tc.profile == "nope" {
+				if stdout.Len() != 0 || err.Error() != tc.text {
+					t.Fatalf("%s --profile nope: output %q, error %q", tc.action, stdout.String(), err)
+				}
+				continue
+			}
+			if !jsonOutput {
+				// GAP-2262: one refusal line, as status and verify give it:
+				// no FAILED summary and no "repair failed: elevation_required".
+				if stdout.Len() != 0 || !strings.HasPrefix(err.Error(), tc.text) || strings.Contains(err.Error(), tc.code) {
+					t.Fatalf("%s: output %q, error %q", tc.action, stdout.String(), err)
+				}
+				if strings.Contains(err.Error(), "Access is denied") {
+					t.Fatalf("%s: raw access error in %q", tc.action, err)
+				}
+				continue
+			}
+			var result enterprisestatus.Result
+			if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+				t.Fatal(err)
+			}
+			if result.OK || len(result.Errors) != 1 || result.Errors[0].Code != tc.code || result.ExitCode != tc.exit {
+				t.Fatalf("%s: result %+v", tc.action, result)
+			}
+			// GAP-2113, GAP-2012: the refusal reports the installed
+			// deployment, and stderr is the one line text mode prints.
+			if !result.Installed || len(result.Services) != 3 || result.Services[0].State != "running" ||
+				(tc.profile == "nope" && err.Error() != tc.text) {
+				t.Fatalf("%s --profile %s --json: result %+v, error %q", tc.action, tc.profile, result, err)
+			}
+			// GAP-2161: readiness follows the service states where a state
+			// decides it, and a warning names the checks that never ran.
+			if !result.Readiness.Enumerator || result.Readiness.SensorHelper ||
+				len(result.Warnings) != 1 || result.Warnings[0].Code != "health_not_checked" ||
+				!strings.Contains(result.Warnings[0].Message, "enterprise windows verify --profile standalone --json") {
+				t.Fatalf("%s --profile %s --json: readiness %+v, warnings %+v", tc.action, tc.profile, result.Readiness, result.Warnings)
+			}
+		}
+	}
+
+	err := runWindowsEnterpriseLifecycle(context.Background(), &cobra.Command{}, "verify",
+		&windowsEnterpriseLifecycleOptions{profile: "secure_client"})
+	if commandExitCode(err) != 1639 || !strings.Contains(fmt.Sprint(err), "This computer runs the standalone profile: use --profile standalone, or omit --profile") {
+		t.Fatalf("verify --profile secure_client on a standalone host: exit %d, %v", commandExitCode(err), err)
+	}
+	// GAP-2445: with --json the preflight JSON is the whole answer; cobra's
+	// "Error: profile_conflict: ..." line no longer follows it.
+	for _, action := range []string{"verify", "status"} {
+		var stdout, stderr bytes.Buffer
+		command := &cobra.Command{Use: action, SilenceUsage: true, RunE: func(c *cobra.Command, _ []string) error {
+			err = runWindowsEnterpriseLifecycle(context.Background(), c, action,
+				&windowsEnterpriseLifecycleOptions{profile: "secure_client", jsonOutput: true})
+			return err
+		}}
+		command.SetArgs([]string{})
+		command.SetOut(&stdout)
+		command.SetErr(&stderr)
+		_ = command.Execute()
+		var preflight windowsEnterpriseLifecyclePreflightFailure
+		if jsonErr := json.Unmarshal(stdout.Bytes(), &preflight); jsonErr != nil || preflight.OK ||
+			!strings.HasPrefix(preflight.Error, "profile_conflict: ") || commandExitCode(err) != 1639 || stderr.Len() != 0 {
+			t.Fatalf("%s --profile secure_client --json: exit %d, stdout %q, stderr %q", action, commandExitCode(err), stdout.String(), stderr.String())
+		}
+	}
+
+	// GAP-2011: the refusal hands the administrator the attestation too.
+	refusal := resolveWindowsEnterpriseLifecycleProfile("repair",
+		&windowsEnterpriseLifecycleOptions{profile: "standalone", attestClaudeEffectivePolicy: true})
+	if refusal == nil || !strings.Contains(refusal.Error(), "enterprise windows repair --profile standalone --attest-claude-effective-policy`. Nothing was changed.") {
+		t.Fatalf("attested repair refusal: %v", refusal)
+	}
+
+	// An administrator who cannot read the config still sees the real error.
+	windowsEnterpriseIsElevated = func() bool { return true }
+	err = resolveWindowsEnterpriseLifecycleProfile("repair", &windowsEnterpriseLifecycleOptions{profile: "standalone"})
+	if err == nil || !strings.Contains(err.Error(), "read enterprise.trust from") {
+		t.Fatalf("elevated repair: %v", err)
+	}
+}
+
+// GAP-2162: a standard account's status or verify reports what any account
+// can read (the recorded deployment, present but unreadable to it, and the
+// service states) instead of installed=false with no services, and text
+// mode is the one refusal line. Exit 5 stays.
+func TestWindowsEnterpriseStandardUserStatusReportsRecordedDeployment(t *testing.T) {
+	stubWindowsEnterpriseDeployments(t, map[string]winpath.EnterpriseDeploymentState{"standalone": winpath.EnterpriseDeploymentUnknown})
+	originalRunner := windowsEnterpriseStandaloneRunner
+	originalObserver := windowsEnterpriseStandaloneObserver
+	originalElevated := windowsEnterpriseIsElevated
+	originalServiceState := windowsEnterpriseServiceState
+	t.Cleanup(func() {
+		windowsEnterpriseStandaloneRunner = originalRunner
+		windowsEnterpriseStandaloneObserver = originalObserver
+		windowsEnterpriseIsElevated = originalElevated
+		windowsEnterpriseServiceState = originalServiceState
+	})
+	windowsEnterpriseStandaloneRunner = func(context.Context, *cobra.Command, string, []string) (windowsEnterpriseStandaloneRun, error) {
+		return windowsEnterpriseStandaloneRun{
+			Output:   []byte(`{"schema_version":1,"ok":false,"error":"the installer rejected its module before import"}`),
+			ExitCode: 1603,
+		}, nil
+	}
+	windowsEnterpriseStandaloneObserver = func(*enterprisestatus.Result, *windowsEnterpriseLifecycleOptions) string { return "" }
+	windowsEnterpriseIsElevated = func() bool { return false }
+	windowsEnterpriseServiceState = func(string) string { return "running" }
+
+	for _, action := range []string{"status", "verify"} {
+		for _, jsonOutput := range []bool{false, true} {
+			var stdout bytes.Buffer
+			command := &cobra.Command{}
+			command.SetOut(&stdout)
+			opts := &windowsEnterpriseLifecycleOptions{resolvedProfile: "standalone", jsonOutput: jsonOutput}
+			err := runWindowsEnterpriseStandaloneAction(context.Background(), command, action, opts, `C:\x\install-enterprise.ps1`, nil)
+			if commandExitCode(err) != 5 || strings.Contains(err.Error(), "the standalone enterprise") ||
+				!strings.HasPrefix(err.Error(), "the managed deployment's "+action+" needs an elevated prompt") {
+				t.Fatalf("%s (json %t): exit %d, error %v", action, jsonOutput, commandExitCode(err), err)
+			}
+			if !jsonOutput {
+				if stdout.Len() != 0 {
+					t.Fatalf("%s: text output %q, want only the refusal line", action, stdout.String())
+				}
+				continue
+			}
+			var result enterprisestatus.Result
+			if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+				t.Fatal(err)
+			}
+			if !result.Installed || result.InstalledVersion != "" || len(result.Services) != 4 ||
+				result.Errors[0].Code != "elevation_required" || result.ExitCode != 5 ||
+				len(result.Warnings) != 1 || result.Warnings[0].Code != "health_not_checked" {
+				t.Fatalf("%s --json: result %+v", action, result)
+			}
+		}
+	}
+}
+
+// GAP-2257: an uninstall (or any result of a host without a deployment)
+// reports that nothing inspects verdicts, not the installed default.
+func TestWindowsEnterpriseUninstalledResultReportsLocalInspectionDisabled(t *testing.T) {
+	result := newWindowsEnterpriseStandaloneResult("uninstall", &windowsEnterpriseLifecycleOptions{})
+	applyWindowsEnterpriseInstallerReport(result, nil, &windowsEnterpriseInstallerReport{Installed: false}, windowsEnterpriseStandaloneRun{})
+	if result.Installed || result.Inspection.Local != "disabled" || result.Inspection.AIDefense != "disabled" {
+		t.Fatalf("uninstalled result: installed=%v inspection=%+v", result.Installed, result.Inspection)
+	}
+}
+
+// GAP-2285: with the deployment installed but the gateway stopped, nothing
+// inspects verdicts, so local inspection is not reported as active.
+func TestWindowsEnterpriseGatewayDownReportsLocalInspectionUnknown(t *testing.T) {
+	stubWindowsUnprotectedAgents(t, nil, os.ErrNotExist)
+	previousAmp := windowsEnterpriseAmpMachineFolderProblems
+	t.Cleanup(func() { windowsEnterpriseAmpMachineFolderProblems = previousAmp })
+	windowsEnterpriseAmpMachineFolderProblems = func() []string { return nil }
+	for _, ready := range []bool{false, true} {
+		result := newWindowsEnterpriseStandaloneResult("status", &windowsEnterpriseLifecycleOptions{})
+		applyWindowsEnterpriseInstallerReport(result, nil, &windowsEnterpriseInstallerReport{Installed: true, GatewayReady: ready}, windowsEnterpriseStandaloneRun{})
+		want := "unknown"
+		if ready {
+			want = "active"
+		}
+		if result.Inspection.Local != want || result.Readiness.Gateway != ready {
+			t.Fatalf("gateway ready %v: inspection=%+v readiness=%+v, want local=%s", ready, result.Inspection, result.Readiness, want)
+		}
 	}
 }

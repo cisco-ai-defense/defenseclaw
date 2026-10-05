@@ -208,7 +208,7 @@ func capturePluginArtifactRegistrationSnapshot(
 		return nil, errors.New("connector does not own a managed plugin artifact")
 	}
 	pluginPath := conn.configPath(opts)
-	if err := prepareOpenCodePluginArtifactDestination(pluginPath); err != nil {
+	if err := prepareOpenCodePluginArtifactDestination(pluginPath, opts.DataDir); err != nil {
 		return nil, fmt.Errorf("prepare %s plugin destination: %w", conn.name, err)
 	}
 	backupPath := managedFileBackupPath(opts.DataDir, conn.name, "config")
@@ -565,6 +565,13 @@ func copilotProfileDecode(payload map[string]interface{}) HookProfileRequest {
 		raw := bytes.TrimSpace([]byte(value))
 		if len(raw) >= 2 && raw[0] == '{' && raw[len(raw)-1] == '}' && json.Valid(raw) {
 			req.ToolArgs = append(json.RawMessage(nil), raw...)
+		}
+	}
+	if CopilotVSCodeLocalTool(req.ToolName) && len(req.ToolArgs) != 0 {
+		// The VS Code Local harness running the CLI hook file (GAP-1903).
+		var input interface{}
+		if json.Unmarshal(req.ToolArgs, &input) == nil {
+			req.ToolArgs = copilotVSCodeLocalToolArgs(req.ToolName, input)
 		}
 	}
 	return req
@@ -984,7 +991,7 @@ func (c *hookOnlyConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 			Supported:     true,
 			Scope:         "workspace,user",
 			DiscoveryOnly: true,
-			Notes:         []string{"Read-only discovery uses the official `copilot plugins list --kind plugin --json` command under the validated pinned workspace and exact COPILOT_HOME. DefenseClaw does not install, enable, disable, or remove Copilot plugins; semantic activation and managed/organization policy remain unverified without live-session evidence."},
+			Notes:         []string{"Read-only discovery uses the official `copilot plugin list --json` command (falling back to `copilot plugins list --kind plugin --json` on older CLIs) under the validated pinned workspace and exact COPILOT_HOME. DefenseClaw does not install, enable, disable, or remove Copilot plugins; semantic activation and managed/organization policy remain unverified without live-session evidence."},
 		}
 		caps.Agents = SurfaceCapability{
 			Supported:      true,
@@ -1172,7 +1179,7 @@ func (c *hookOnlyConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 func (c *hookOnlyConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	if c.name == "opencode" {
 		if err := validateOpenCodeWindowsSetupAdmission(opts); err != nil {
-			return err
+			return executableAdmissionRefused(err)
 		}
 	}
 	if c.name == "hermes" {
@@ -1181,10 +1188,10 @@ func (c *hookOnlyConnector) Setup(ctx context.Context, opts SetupOpts) error {
 			return err
 		}
 		if err := validateHermesSingleProfile(configPath); err != nil {
-			return err
+			return setupRefusedUnchanged{err: err}
 		}
 		if err := validateHermesWindowsSetupAdmission(ctx, opts); err != nil {
-			return err
+			return executableAdmissionRefused(err)
 		}
 		if err := prepareHermesLifecycleDataDir(opts); err != nil {
 			return fmt.Errorf("prepare Hermes lifecycle state: %w", err)
@@ -1226,12 +1233,28 @@ var openHandsSetupOperation = func(c *hookOnlyConnector, ctx context.Context, op
 func (c *hookOnlyConnector) setupOpenHandsWithTokenRollback(ctx context.Context, opts SetupOpts) error {
 	return withOpenHandsLifecycleTransaction(opts, func() error {
 		if runtime.GOOS == "darwin" {
-			if _, err := validateOpenHandsDarwinExecutable(opts, false); err != nil {
-				return fmt.Errorf("openhands setup executable admission: %w", err)
+			if err := openHandsDarwinSetupAdmission(opts); err != nil {
+				return err
 			}
 		}
 		return c.setupOpenHandsWithTokenRollbackLocked(ctx, opts)
 	})
+}
+
+// openHandsDarwinSetupAdmission refuses, before Setup changes anything, an
+// OpenHands executable without current protected setup evidence. The refusal
+// is an ErrExecutableAdmission, so a gateway start skips only OpenHands and
+// keeps the other connectors. An OpenHands that 0.8.10 enrolled (the uv-tool
+// install) has no recorded executable; reporting that as a plain setup failure
+// sent the start into a rollback that could not restore the old lock, and the
+// whole 0.8.10 upgrade rolled back (GAP-2621). The executable is not run.
+func openHandsDarwinSetupAdmission(opts SetupOpts) error {
+	if _, err := validateOpenHandsDarwinExecutable(opts, false); err != nil {
+		return executableAdmissionRefused(fmt.Errorf(
+			"openhands setup executable admission: %w; run `defenseclaw setup openhands` to verify and record it "+
+				"(if setup reports that its folder is not trusted, run `defenseclaw setup trusted-paths add <dir>` first)", err))
+	}
+	return nil
 }
 
 func (c *hookOnlyConnector) setupOpenHandsWithTokenRollbackLocked(ctx context.Context, opts SetupOpts) error {
@@ -1275,6 +1298,13 @@ func (c *hookOnlyConnector) setup(ctx context.Context, opts SetupOpts, hermesCon
 	}
 	if c.name == "devin" {
 		if err := c.migrateDevinConfigTarget(opts, c.configPath(opts)); err != nil {
+			return err
+		}
+	}
+	if c.name == "copilot" {
+		// Pinning a workspace (for example `setup devin --workspace`) moves
+		// Copilot's hooks between ~/.copilot/hooks and <workspace>/.github/hooks.
+		if err := c.migrateConfigTarget(opts, c.configPath(opts), "Copilot"); err != nil {
 			return err
 		}
 	}
@@ -1373,7 +1403,17 @@ func (c *hookOnlyConnector) migrateConfigTarget(opts SetupOpts, target, label st
 // is present in the installed regular file.
 func (c *hookOnlyConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) {
 	if !c.pluginArtifact {
-		return ownedHooksPresentInConfig(c, opts)
+		present, err := ownedHooksPresentInConfig(c, opts)
+		if err != nil || !present || c.name != "hermes" || !opts.ManagedEnterprise {
+			return present, err
+		}
+		// Hermes runs a shell hook only once it is approved, so a managed
+		// registration includes DefenseClaw's approvals: a user who empties
+		// the allowlist and declines the prompt otherwise runs every tool
+		// call unchecked while verify passes and the guardian repairs
+		// nothing.
+		command := hermesConfiguredHookCommand(c.hookCommand(opts), opts.HookExecutable)
+		return hermesOwnedApprovalsPresent(filepath.Join(filepath.Dir(hermesConfigPath(opts)), hermesAllowlistFileName), command)
 	}
 	path := c.configPath(opts)
 	const maxManagedPluginBytes = 4 << 20
@@ -1590,7 +1630,7 @@ func (c *hookOnlyConnector) setupPluginArtifact(opts SetupOpts) error {
 		return err
 	}
 	path := c.configPath(opts)
-	if err := prepareOpenCodePluginArtifactDestination(path); err != nil {
+	if err := prepareOpenCodePluginArtifactDestination(path, opts.DataDir); err != nil {
 		return fmt.Errorf("%s prepare plugin destination: %w", c.name, err)
 	}
 	backupPath := managedFileBackupPath(opts.DataDir, c.name, "config")
@@ -1775,6 +1815,9 @@ func (c *hookOnlyConnector) Teardown(ctx context.Context, opts SetupOpts) error 
 	if c.name == "openhands" && runtime.GOOS == "darwin" {
 		return c.teardownOpenHandsWithToken(ctx, opts)
 	}
+	if c.name == "copilot" {
+		removeOrphanedCopilotVSCodeLocalRendersForPerUser(opts)
+	}
 	return c.teardown(ctx, opts, "")
 }
 
@@ -1828,7 +1871,7 @@ func (c *hookOnlyConnector) teardown(ctx context.Context, opts SetupOpts, hermes
 	}
 	switch {
 	case err != nil:
-		errs = append(errs, fmt.Sprintf("restore config backup: %v", err))
+		errs = append(errs, restoreBackupFailure(err))
 	case restored && c.name == "devin":
 		// A Devin backup captured after an earlier DefenseClaw setup (the
 		// per-user devin-hook.sh route) holds DefenseClaw's own hooks, which
@@ -1838,6 +1881,26 @@ func (c *hookOnlyConnector) teardown(ctx context.Context, opts SetupOpts, hermes
 			errs = append(errs, fmt.Sprintf("inspect restored config: %v", err))
 		} else if present {
 			if err := removeDevinHookReferences(path, owned...); err != nil {
+				errs = append(errs, fmt.Sprintf("remove hook entries from the restored config: %v", err))
+			}
+		}
+	case restored && (c.name == "copilot" || c.name == "openhands"):
+		// The same for a backup captured after a rollback: the earlier
+		// release's gateway registered its own hooks again before this
+		// release's setup took the backup (GAP-1926). A file that does not
+		// parse is the operator's and stays as restored.
+		hookScript := c.hookCommand(opts)
+		if cfg, err := readJSONObject(path); err == nil && containsHookScript(cfg, hookScript) {
+			if err := c.removeConfigEntries(path, hookScript, opts); err != nil {
+				errs = append(errs, fmt.Sprintf("remove hook entries from the restored config: %v", err))
+			}
+		}
+	case restored && c.name == "cursor":
+		// The same for a Cursor hooks.json captured after an earlier
+		// DefenseClaw setup whose data directory was removed (GAP-2064).
+		owned := cursorOwnedHookCommands(opts)
+		if cfg, err := readJSONObject(path); err == nil && structuredHookCommandReferences(cfg, owned) {
+			if err := removeJSONHookReferences(path, owned...); err != nil {
 				errs = append(errs, fmt.Sprintf("remove hook entries from the restored config: %v", err))
 			}
 		}
@@ -1942,13 +2005,11 @@ func (c *hookOnlyConnector) teardownPluginArtifact(opts SetupOpts) error {
 		return nil
 	}
 	discardManagedFileBackup(opts.DataDir, c.name, "config")
-	if opts.ManagedEnterprise {
-		// A plugin captured after an earlier DefenseClaw setup (one a
-		// rolled-back install left) is DefenseClaw's own, so putting it back
-		// would leave the registration in place; it goes too.
-		return c.removeOwnedPluginWithoutBackup(path)
-	}
-	return nil
+	// A plugin captured after an earlier DefenseClaw setup (one a
+	// rolled-back install or a removed data directory left) is DefenseClaw's
+	// own, so putting it back would leave the registration in place; it goes
+	// too (GAP-2064). Any other restored file stays.
+	return c.removeOwnedPluginWithoutBackup(path)
 }
 
 // removeOwnedPluginWithoutBackup deletes the plugin at path when it is a
@@ -2443,6 +2504,7 @@ func (c *hookOnlyConnector) patchConfig(opts SetupOpts, hookScript string) error
 		if err := validateCopilotHookPolicy(opts, path); err != nil {
 			return err
 		}
+		removeOrphanedCopilotVSCodeLocalRendersForPerUser(opts)
 	}
 	logicalName := c.managedBackupLogicalName()
 	if err := captureManagedFileBackup(opts.DataDir, c.name, logicalName, path); err != nil {
@@ -3704,10 +3766,50 @@ func readHermesAllowlist(path string) (map[string]interface{}, error) {
 	if document == nil {
 		return nil, fmt.Errorf("Hermes shell hook allowlist is not a JSON object")
 	}
-	if _, ok := document["approvals"].([]interface{}); !ok {
+	// Hermes reads a document without approvals ({}) as no approvals, so
+	// repair adds DefenseClaw's to it instead of failing.
+	raw, present := document["approvals"]
+	if !present || raw == nil {
+		document["approvals"] = []interface{}{}
+		return document, nil
+	}
+	if _, ok := raw.([]interface{}); !ok {
 		return nil, fmt.Errorf("Hermes shell hook allowlist approvals is not an array")
 	}
 	return document, nil
+}
+
+// hermesOwnedApprovalsPresent reports whether the allowlist holds
+// DefenseClaw's approval of command for every required Hermes event.
+func hermesOwnedApprovalsPresent(path, command string) (bool, error) {
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	document, err := readHermesAllowlist(path)
+	if err != nil {
+		return false, err
+	}
+	approved := map[string]bool{}
+	for _, raw := range document["approvals"].([]interface{}) {
+		entry, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		event, _ := entry["event"].(string)
+		entryCommand, _ := entry["command"].(string)
+		if owned, _ := entry[hermesAllowlistOwnerField].(bool); owned && entryCommand == command {
+			approved[event] = true
+		}
+	}
+	for _, spec := range hermesRequiredHooks {
+		if !approved[spec.event] {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func hermesHookEventSet() map[string]struct{} {
@@ -3943,7 +4045,7 @@ func writeHermesDirectNativeState(opts SetupOpts, command, status string) error 
 func validateHermesSingleProfile(configPath string) error {
 	home := filepath.Clean(filepath.Dir(configPath))
 	if strings.EqualFold(filepath.Base(filepath.Dir(home)), "profiles") {
-		return fmt.Errorf("Hermes named profiles are unsupported by the single-HERMES_HOME connector; no changes made")
+		return fmt.Errorf("Hermes named profiles are unsupported by the single-HERMES_HOME connector; point HERMES_HOME at the default profile (run 'hermes profile use default') and retry; no changes made")
 	}
 	activeProfile := filepath.Join(home, "active_profile")
 	if info, err := os.Lstat(activeProfile); err == nil {
@@ -3958,7 +4060,7 @@ func validateHermesSingleProfile(configPath string) error {
 			return fmt.Errorf("inspect Hermes active_profile: %w", readErr)
 		}
 		if profile := strings.TrimSpace(string(data)); profile != "" && !strings.EqualFold(profile, "default") {
-			return fmt.Errorf("Hermes active named profile %q is unsupported by the single-HERMES_HOME connector; no changes made", profile)
+			return fmt.Errorf("Hermes active named profile %q is unsupported by the single-HERMES_HOME connector; switch back with 'hermes profile use default' and retry; no changes made", profile)
 		}
 	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("inspect Hermes active_profile: %w", err)
@@ -3974,7 +4076,8 @@ func validateHermesSingleProfile(configPath string) error {
 		}
 		entries, readErr := directory.ReadDir(257)
 		closeErr := directory.Close()
-		if readErr != nil {
+		// ReadDir(n > 0) reports an empty directory as io.EOF.
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
 			return fmt.Errorf("inspect Hermes profiles directory: %w", readErr)
 		}
 		if closeErr != nil {
@@ -3985,31 +4088,16 @@ func validateHermesSingleProfile(configPath string) error {
 		}
 		for _, entry := range entries {
 			if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
-				return fmt.Errorf("Hermes named profile %q is unsupported by the single-HERMES_HOME connector; no changes made", entry.Name())
+				return fmt.Errorf("Hermes named profile %q is unsupported by the single-HERMES_HOME connector; remove it with 'hermes profile delete %s' (or move it out of %s) and retry; no changes made", entry.Name(), entry.Name(), profilesDir)
 			}
 		}
 	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("inspect Hermes profiles directory: %w", err)
 	}
-	cfg, err := readHermesBoundedConfig(configPath)
-	if err != nil {
-		return err
-	}
-	configMultiplex := hermesBool(cfg["multiplex_profiles"])
-	if gateway, ok := cfg["gateway"].(map[string]interface{}); ok && cfg["multiplex_profiles"] == nil {
-		configMultiplex = hermesBool(gateway["multiplex_profiles"])
-	}
-	if raw, present := os.LookupEnv("GATEWAY_MULTIPLEX_PROFILES"); present {
-		switch strings.ToLower(strings.TrimSpace(raw)) {
-		case "1", "true", "yes", "on":
-			configMultiplex = true
-		case "0", "false", "no", "off":
-			configMultiplex = false
-		}
-	}
-	if configMultiplex {
-		return fmt.Errorf("Hermes multiplex profiles are unsupported by the single-HERMES_HOME connector; no changes made")
-	}
+	// gateway.multiplex_profiles is not checked: Hermes writes its default
+	// (true) into config.yaml on its own, and a multiplexing gateway serves
+	// the default profile plus the named profiles under profiles/, which are
+	// refused above. With none, it serves only this HERMES_HOME (GAP-1844).
 	return nil
 }
 
@@ -4028,19 +4116,6 @@ func readHermesBoundedConfig(path string) (map[string]interface{}, error) {
 		return nil, fmt.Errorf("Hermes config exceeds the %d-byte inspection limit", hermesInventoryConfigMaxBytes)
 	}
 	return readYAMLObject(path)
-}
-
-func hermesBool(value interface{}) bool {
-	if boolean, ok := value.(bool); ok {
-		return boolean
-	}
-	if text, ok := value.(string); ok {
-		switch strings.ToLower(strings.TrimSpace(text)) {
-		case "1", "true", "yes", "on":
-			return true
-		}
-	}
-	return false
 }
 
 func hermesSkillPaths(configPath string) []string {

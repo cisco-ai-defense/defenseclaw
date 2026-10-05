@@ -1,7 +1,7 @@
 # Guardrail implementation map
 
 Operator setup and behavior are documented on the published
-[guardrail guide](https://cisco-ai-defense.github.io/defenseclaw/docs/setup/guardrail/).
+[guardrail guide](https://cisco-ai-defense.github.io/defenseclaw/docs/guardrail/).
 Policy authoring and tuning live under the published
 [policies section](https://cisco-ai-defense.github.io/defenseclaw/docs/policies/).
 
@@ -67,13 +67,6 @@ validated separately against the real Click command tree by
 
 ## Known issues / OpenClaw version compatibility
 
-OpenClaw 2026.6.8+ can emit provider traffic through undici and embedded
-runtimes that skip a fetch-only interceptor. The DefenseClaw plugin now
-patches `globalThis.fetch`, `http`/`https.request`, and the undici global
-dispatcher, then publishes an interception self-test on
-`POST /v1/events/egress` (`branch=selftest`). `defenseclaw doctor` reads
-`/health.interception.verified` for proxy connectors and warns when the
-installed OpenClaw version is in that range. A live `:4000` port or a
-stale `INCOMING REQUEST` count is not proof of agent-path enforcement;
-confirm the OpenClaw interception row and, when logs can grow, a real
-`INCOMING REQUEST` delta.
+A live `:4000` port is not proof that DefenseClaw intercepts OpenClaw traffic. The published
+[OpenClaw connector page](https://cisco-ai-defense.github.io/defenseclaw/docs/connectors/openclaw/)
+explains the interception self-test and how to confirm coverage.

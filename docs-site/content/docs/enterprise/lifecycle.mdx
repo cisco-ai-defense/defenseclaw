@@ -64,7 +64,7 @@ installed version, `ensure` upgrades in place. It keeps the installed config
 unless you also pass `CONFIG=`.
 
 ```powershell
-& 'C:\Staging\DefenseClawSetup-Enterprise-Standalone-x64.exe' /ensure JSON=1
+& 'C:\ProgramData\DefenseClaw-Staging\DefenseClawSetup-Enterprise-Standalone-x64.exe' /ensure JSON=1
 $LASTEXITCODE
 ```
 
@@ -79,12 +79,12 @@ Upgrade with the channel you installed from. A host where the package owns
 the binaries refuses a payload upgrade (`package_owned_binaries`).
 
 ```bash title="Debian and Ubuntu package"
-VERSION=1.4.0   # the release you deploy
+VERSION=1.0.0   # the release you deploy
 sudo apt install "./defenseclaw-enterprise-${VERSION}-linux-amd64.deb"
 ```
 
 ```bash title="RHEL package"
-VERSION=1.4.0
+VERSION=1.0.0   # the release you deploy
 sudo dnf upgrade "./defenseclaw-enterprise-${VERSION}-linux-amd64.rpm"
 ```
 
@@ -94,15 +94,20 @@ script never fails the package transaction, so read that file or run `verify`
 afterwards.
 
 ```bash title="Payload archive"
-VERSION=1.4.0
-sudo mkdir -p "/var/tmp/defenseclaw-${VERSION}"
-sudo tar -xzf "defenseclaw-enterprise-${VERSION}-linux-amd64.tar.gz" -C "/var/tmp/defenseclaw-${VERSION}" --no-same-owner
-cd "/var/tmp/defenseclaw-${VERSION}"
-sudo ./defenseclaw-gateway enterprise linux upgrade --payload "$PWD" --json
+VERSION=1.0.0   # the release you deploy
+ARCH=amd64      # or arm64
+PAYLOAD="/root/defenseclaw-enterprise-${VERSION}"
+sudo install -d -o root -g root -m 0700 "$PAYLOAD"
+sudo tar -xzf "defenseclaw-enterprise-${VERSION}-linux-${ARCH}.tar.gz" \
+  -C "$PAYLOAD" --no-same-owner --no-same-permissions
+sudo chmod -R go-w "$PAYLOAD"
+sudo "$PAYLOAD/defenseclaw-gateway" enterprise linux upgrade --payload "$PAYLOAD" --json
 ```
 
-Run the new release's `defenseclaw-gateway` from the extracted directory. The
-payload must be owned by root and must not be writable by group or others.
+Run the new release's `defenseclaw-gateway` from the extracted folder. The
+payload must be owned by root and must not be writable by group or others,
+so extract it into a root-only folder, as above, never into a shared one
+such as `/var/tmp`.
 
 ### macOS
 
@@ -111,7 +116,7 @@ the lifecycle fails, the script fails the installation, so your MDM reports
 it.
 
 ```bash
-VERSION=1.4.0
+VERSION=1.0.0   # the release you deploy
 sudo installer -pkg "./defenseclaw-enterprise-${VERSION}-darwin-arm64.pkg" -target /
 sudo cat /opt/cisco/defenseclaw/lifecycle/last-package-result.json
 ```
@@ -145,7 +150,7 @@ Every lifecycle refuses an older release unless you ask for the rollback
 | Windows | `/ensure` refuses to install an older version (`downgrade_refused`, exit `1603`). Run the older release's Setup with `/upgrade JSON=1`: an explicit `upgrade` does not compare versions. Uninstalling and installing the older release also works |
 | Debian and Ubuntu | `sudo apt install --allow-downgrades ./defenseclaw-enterprise-<older>-linux-amd64.deb`, then `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux ensure --from-package --allow-downgrade --json` |
 | RHEL | `rpm -U` refuses an older package. Use `sudo dnf downgrade ./defenseclaw-enterprise-<older>-linux-amd64.rpm`, then run the same `ensure --from-package --allow-downgrade` |
-| Linux payload | From the older release's extracted payload, run `sudo ./defenseclaw-gateway enterprise linux upgrade --payload "$PWD" --allow-downgrade --json` |
+| Linux payload | Extract the older release as in [Upgrade](#linux), then run `sudo "$PAYLOAD/defenseclaw-gateway" enterprise linux upgrade --payload "$PAYLOAD" --allow-downgrade --json` |
 | macOS | Create the root-owned rollback marker, then install the older package: `sudo touch /opt/cisco/defenseclaw/lifecycle/allow-downgrade`, then `sudo installer -pkg ./defenseclaw-enterprise-<older>-darwin-arm64.pkg -target /` |
 
 - **Linux packages.** The package's install script runs
@@ -184,7 +189,7 @@ On Windows, pass the new file to the same release's Setup. `ensure` sees that
 the config differs from the installed one and applies it:
 
 ```powershell
-& 'C:\Staging\DefenseClawSetup-Enterprise-Standalone-x64.exe' /ensure CONFIG=C:\Staging\config.yaml JSON=1
+& 'C:\ProgramData\DefenseClaw-Staging\DefenseClawSetup-Enterprise-Standalone-x64.exe' /ensure CONFIG=C:\ProgramData\DefenseClaw-Staging\config.yaml JSON=1
 ```
 
 If the new config is invalid, `ensure` fails and does not apply it: on Linux
@@ -251,14 +256,17 @@ sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos repair --js
 ```
 
 ```powershell title="Windows"
-& 'C:\Staging\DefenseClawSetup-Enterprise-Standalone-x64.exe' /repair JSON=1
+& 'C:\ProgramData\DefenseClaw-Staging\DefenseClawSetup-Enterprise-Standalone-x64.exe' /repair JSON=1
 ```
 
 - **What changed (Linux and macOS).** The result lists what `repair`
   changed: the files it rewrote or whose mode or owner it restored, the
   services it started because they were not running, DefenseClaw's machine
   policy entries it rewrote, and the users and agents whose hooks the
-  guardian rewrote. On a healthy deployment it says `nothing to repair`. The
+  guardian rewrote. On a healthy deployment it says `nothing to repair`.
+  `repair` always re-applies the deployment, so it stops and restarts every
+  DefenseClaw service (the gateway and the hook guardian are down for a few
+  seconds) and says so; `ensure` leaves a healthy deployment running. The
   `--json` result carries the list as `changes`, and an `ensure` that
   re-applies the deployment lists its changes the same way.
 - **Linux and macOS, payload installs.** `repair` keeps the installed binaries.
@@ -328,23 +336,36 @@ Uninstall does the following on every OS:
   entries stay. On Linux and macOS it restores the preimages it recorded.
 - It stops and removes the services.
 
-Config, credentials, state, and logs stay unless you purge.
+It also removes the machine state: the config, credentials, state and logs.
+Each user's DefenseClaw folder (`~/.defenseclaw`) and per-user binaries stay.
+A purge removes everything, each enrolled user's folder and per-user binaries
+included. The Secure Client profile keeps its machine state unless you purge.
 
-| Install channel | Remove, keep config and state | Remove everything |
+On Linux and macOS, the default uninstall removes the deployment and its
+machine state: the config, credentials, gateway and guardian state, logs,
+lifecycle state and the service account. Each user keeps `~/.defenseclaw`
+and the per-user binaries; `--purge` removes those too. Add `--keep-state`
+to keep the machine state for a reinstall instead.
+
+| Install channel | Remove the deployment and machine state, keep each user's data | Remove everything |
 | --- | --- | --- |
-| Linux payload | `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux uninstall --json` | Add `--purge`. Add `--remove-service-account` to also delete the `defenseclaw` account |
-| Debian and Ubuntu package | `sudo apt remove defenseclaw-enterprise` | `sudo apt purge defenseclaw-enterprise` |
-| RHEL package | `sudo dnf remove defenseclaw-enterprise` | Run the lifecycle `uninstall --purge --json` first, then `sudo dnf remove defenseclaw-enterprise`. rpm has no purge |
-| macOS | `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos uninstall --json` | Add `--purge`, and `--remove-service-account` to delete `_defenseclaw` |
+| Linux payload | `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux uninstall --json` | Add `--purge` |
+| Debian and Ubuntu package | `sudo apt remove defenseclaw-enterprise` | Run the lifecycle `uninstall --purge --json` first, then `sudo apt purge defenseclaw-enterprise` |
+| RHEL package | `sudo dnf remove defenseclaw-enterprise` | Run the lifecycle `uninstall --purge --json` first, then `sudo dnf remove defenseclaw-enterprise` |
+| macOS | `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos uninstall --json` | Add `--purge` |
 | Windows | Setup `/uninstall JSON=1`, or `defenseclaw.exe enterprise windows uninstall --profile standalone --json` | Setup `/uninstall JSON=1 PURGE=1`, or add `--purge` |
 
 - **Linux packages.** Removing the package runs the lifecycle `uninstall`
-  first. `apt purge` then deletes `/etc/defenseclaw`, `/var/lib/defenseclaw`,
-  `/var/lib/defenseclaw-hook-guardian`, `/var/lib/defenseclaw-enterprise`, and
-  `/var/log/defenseclaw`. It keeps the `defenseclaw` account. To delete the
-  account, run
-  `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux uninstall --purge --remove-service-account --json`
-  before you remove the package.
+  first, without purge, which removes the machine state and the
+  `defenseclaw` account. `apt purge` also deletes what a failed uninstall
+  left of `/etc/defenseclaw`, `/var/lib/defenseclaw`,
+  `/var/lib/defenseclaw-hook-guardian`, `/var/lib/defenseclaw-enterprise`,
+  and `/var/log/defenseclaw`. Each user keeps `~/.defenseclaw` and the
+  per-user binaries: by then the gateway that removes them as each user is
+  gone. To remove those too, run
+  `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux uninstall --purge --json`
+  before you remove the package. The MDM `uninstall.sh --purge` does this
+  for you.
 - **macOS.** A pkg has no uninstaller. The lifecycle removes the binaries
   itself and forgets the package receipt (`com.cisco.defenseclaw.enterprise`).
 - **Registrations left (Linux and macOS).** Each user's registrations are
@@ -354,38 +375,51 @@ Config, credentials, state, and logs stay unless you purge.
   the deployment record and state stay. Fix the cause, or remove
   DefenseClaw's entries from that user's agent config, and run the same
   uninstall again. `ensure` restores the deployment instead.
-- **Per-user state (Linux and macOS).** `--purge` also removes each enrolled
-  user's DefenseClaw folder (`~/.defenseclaw`, with its hook credentials), as
-  that user. It first restores the files of any agent that DefenseClaw
-  changed and still has backups for there, for example one set up by an
-  earlier release. Two things stay: `~/.defenseclaw/foreign-hooks-backup`
-  (the user's own hooks that the foreign-hook policy moved aside) and the
-  hook scripts in `~/.defenseclaw/hooks`, each replaced by a stub that exits
-  0, because an agent that is still running may call it. Delete the folder
-  once the user's agents have restarted.
+- **Per-user state (Linux and macOS).** `--purge` also removes everything
+  DefenseClaw put in each enrolled user's home, as that user. It first stops
+  the user's per-user gateway and watchdog, if one runs, and restores the
+  files of any agent that DefenseClaw changed and still has backups for
+  there, for example one set up by an earlier release. It then removes all of
+  `~/.defenseclaw` (the hook scripts, hook credentials and
+  `~/.defenseclaw/foreign-hooks-backup` included) and, from `~/.local/bin`,
+  `defenseclaw-gateway`, `defenseclaw-acp`, the launcher links into
+  `~/.defenseclaw`, the `uv` the per-user installer added (when unchanged)
+  and its bookkeeping. No dangling link stays; the user's own tools in
+  `~/.local/bin` stay. The per-user install edits no shell profile, so no
+  PATH entry is left. The result names each user whose data it removed. It
+  also names each enrolled user it left alone, with the reason: a home that
+  is not trusted or not available, a hook removal that failed, or a gateway
+  that could not be stopped. Fix the cause and run the same uninstall again.
+  Back up `~/.defenseclaw/foreign-hooks-backup` first if a user wants their
+  own moved-aside hooks back.
 - **MDM.** Use `uninstall.sh [--purge]` on Linux and macOS, or `uninstall.ps1`
   on Windows. See [Install with an MDM](/docs/enterprise/mdm).
 - **Windows per-user registrations.** Acting as a user needs that user's
   session token, which only LocalSystem can obtain. An MDM uninstall runs as
   LocalSystem and removes DefenseClaw's hooks and plugins (Amp, Antigravity,
-  Devin, Hermes, OpenCode, and a DefenseClaw Copilot user hook file) from
+  Devin, Hermes, Kiro, OpenCode, and a DefenseClaw Copilot user hook file) from
   every signed-in user's agent config. An uninstall from an elevated
   administrator prompt or from Add/Remove Programs removes none, and users
   who are signed out keep theirs. The result lists them in the
   `user_registrations_pending` and `user_registrations_failed` warnings. What
   stays is inert; see [Windows: Remove](/docs/enterprise/windows#remove).
 - **Per-user state (Windows).** `PURGE=1` or `--purge`, run as LocalSystem,
-  also removes each enrolled account's `%USERPROFILE%\.defenseclaw`, whether
-  or not the account is signed in. The same two things stay as on Linux and
-  macOS. The `per_user_state_remaining` warning names each folder it could
-  not remove, with the reason.
+  also removes all of each enrolled account's `%USERPROFILE%\.defenseclaw`
+  (hook scripts and `foreign-hooks-backup` included), whether or not the
+  account is signed in. It also removes the DefenseClaw files of a per-user
+  install from `%USERPROFILE%\.local\bin` and, once that folder is empty,
+  the folder and its entry in the account's user `Path`. The result names
+  each account it purged. A signed-out account's `Path` cannot be changed,
+  so it keeps that entry, and the result says so. The
+  `per_user_state_remaining` warning names each folder it could not remove,
+  with the reason.
 
 ```bash title="Linux: remove everything"
-sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux uninstall --purge --remove-service-account --json
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux uninstall --purge --json
 ```
 
 ```powershell title="Windows: remove everything"
-& 'C:\Staging\DefenseClawSetup-Enterprise-Standalone-x64.exe' /uninstall JSON=1 PURGE=1
+& 'C:\ProgramData\DefenseClaw-Staging\DefenseClawSetup-Enterprise-Standalone-x64.exe' /uninstall JSON=1 PURGE=1
 ```
 
 After an uninstall, ask users to restart running agents. An agent that loaded

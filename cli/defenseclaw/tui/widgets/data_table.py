@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
+from textual import events
 from textual.widgets import DataTable
 from textual.widgets.data_table import RowKey
 
@@ -35,6 +36,13 @@ class MeasuredDataTable(DataTable):
         # cells an earlier paint drew at the widths from before the measure.
         self._update_count += 1
         self.refresh()
+
+    def _on_resize(self, event: events.Resize) -> None:
+        super()._on_resize(event)
+        # A shorter table kept its scroll offset, so the selected row (the one
+        # Enter acts on) could sit below the bottom edge (GAP-2535).
+        if self.row_count and self.show_cursor and self.cursor_type != "none":
+            self.call_after_refresh(self._scroll_cursor_into_view)
 
 
 __all__ = ["MeasuredDataTable"]

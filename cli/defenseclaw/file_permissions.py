@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import shlex
 import stat
 import subprocess
 import sys
@@ -59,6 +60,13 @@ class UnsafePathError(OSError):
     def __init__(self, message: str, *, code: str = UNSAFE_PATH_UNKNOWN) -> None:
         super().__init__(message)
         self.code = code
+
+
+def unsafe_gateway_remedy(exc: UnsafePathError) -> str:
+    """The refusal plus a fix, without repeating one it already names."""
+    if "chmod go-w" in str(exc):
+        return str(exc)
+    return f"{exc}; fix its owner and mode (chmod go-w) or reinstall DefenseClaw"
 
 
 MAX_DOTENV_BYTES = 1024 * 1024
@@ -653,7 +661,8 @@ def trusted_posix_executable_path(path: str | os.PathLike[str]) -> str:
     current_uid = geteuid() if callable(geteuid) else info.st_uid
     if info.st_uid not in {0, current_uid} or stat.S_IMODE(info.st_mode) & 0o022:
         raise UnsafePathError(
-            "gateway executable is writable by an untrusted principal",
+            f"gateway executable {resolved} can be changed by another account; "
+            f"make this account or root its owner and run: chmod go-w {shlex.quote(str(resolved))}",
             code=UNSAFE_PATH_UNTRUSTED_CUSTODY,
         )
     if sys.platform == "darwin" and darwin_acl_write_error(resolved):
@@ -679,8 +688,12 @@ def trusted_posix_executable_path(path: str | os.PathLike[str]) -> str:
         if parent_info.st_uid not in {0, current_uid} or (
             stat.S_IMODE(parent_info.st_mode) & 0o022 and not root_sticky
         ):
+            # Name the folder: a chmod on the (possibly symlinked) command
+            # path changes the file, not the folder other accounts can write.
             raise UnsafePathError(
-                "gateway executable ancestor is writable by an untrusted principal",
+                f"folder {current} holding the gateway executable {resolved} can be changed by "
+                f"another account; make this account or root its owner and run: "
+                f"chmod go-w {shlex.quote(str(current))}",
                 code=UNSAFE_PATH_UNTRUSTED_CUSTODY,
             )
         if sys.platform == "darwin" and darwin_acl_write_error(current):
@@ -1435,8 +1448,22 @@ def atomic_write_private_bytes(
     )
 
 
-def windows_acl_write_error(path: str | os.PathLike[str]) -> str | None:
-    """Return why an untrusted SID can write *path*, or ``None`` when safe."""
+_WINDOWS_BUILTIN_ADMINISTRATORS_SID = "S-1-5-32-544"
+
+
+def windows_acl_write_error(
+    path: str | os.PathLike[str],
+    *,
+    trust_administrators: bool = False,
+) -> str | None:
+    """Return why an untrusted SID can write *path*, or ``None`` when safe.
+
+    Only the current user (who must own *path*), OWNER RIGHTS and LocalSystem
+    may hold write rights. ``trust_administrators`` also admits the built-in
+    Administrators group, matched by its well-known SID only: a profile folder
+    such as ``~\\.local\\bin`` inherits its full-control entry, and a local
+    administrator can already take over the account's files.
+    """
     if os.name != "nt":
         return None
     try:
@@ -1456,6 +1483,8 @@ def windows_acl_write_error(path: str | os.PathLike[str]) -> str | None:
         return f"owner SID {owner_sid or '<unknown>'} is not the current user"
 
     trusted = {"S-1-3-4", "S-1-5-18", current_sid}  # OWNER RIGHTS, LocalSystem, current user
+    if trust_administrators:
+        trusted.add(_WINDOWS_BUILTIN_ADMINISTRATORS_SID)
     write_mask = 0x10000000 | 0x40000000 | 0x000D0156
     for permissions, access_mode, inheritance, sid in entries:
         if access_mode not in (1, 2) or not permissions & write_mask:
@@ -1656,7 +1685,17 @@ def _protect_private_directory(path: str) -> None:
         raise OSError(f"refusing to protect foreign-owned directory: {path}")
     problem = windows_acl_write_error(path)
     if problem is not None or not _windows_acl_has_required_access(path):
-        _set_windows_owner_only_acl(path)
+        try:
+            _set_windows_owner_only_acl(path)
+        except PermissionError as exc:
+            # A managed install's DACL (read-only OWNER RIGHTS) denies the
+            # owner WRITE_DAC; name the folder and the way out.
+            raise PermissionError(
+                exc.errno,
+                f"cannot protect private directory {path}: its access control list does not let this "
+                "account change it (a managed DefenseClaw install can leave it that way); remove the "
+                "folder, or have an administrator reset its access, then run the command again",
+            ) from exc
         problem = windows_acl_write_error(path)
         if problem is not None:
             raise OSError(f"cannot protect private directory {path}: {problem}")
@@ -2125,7 +2164,19 @@ def _set_windows_owner_only_acl(path: str, *, set_owner: bool = False) -> None:
 
 
 def _set_windows_current_user_owner(path: str) -> None:
-    """Assign a DefenseClaw-managed path to the current token user."""
+    """Assign a DefenseClaw-managed path to the current token user.
+
+    A path the user already owns is left alone: setting the owner needs
+    WRITE_OWNER even when it does not change, and a folder that grants the
+    user Modify, such as a per-session TEMP folder on a Windows server, does
+    not grant it.
+    """
+    try:
+        already_owned = _windows_acl_snapshot(path)[0] == _windows_current_user_sid()
+    except OSError:
+        already_owned = False
+    if already_owned:
+        return
     import ctypes
     from ctypes import wintypes
 

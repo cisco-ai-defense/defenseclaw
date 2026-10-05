@@ -2119,7 +2119,7 @@ targets:
             }
         }
         function script:Start-DefenseClawService {
-            param([Parameter(Mandatory)][string]$Name)
+            param([Parameter(Mandatory)][string]$Name, [string]$FailureLogPath)
             if ($script:HarnessState.service_start_modes[$Name] -eq 4) {
                 throw "queued or explicit start was blocked while $Name was disabled"
             }
@@ -7046,6 +7046,25 @@ targets:
             -Purge:$true `
             -RemoveState:$true `
             -ExpectHandled:$true `
+            -ExpectCanonical:$false `
+            -ExpectRetired:$false `
+            -ExpectEvidence:$false `
+            -ExpectedEventOrder @(
+                'assert-committed-state',
+                'remove-retired-tree',
+                'remove-evidence'
+            )
+        # GAP-1079: a fresh Install after an installed-CLI purge finishes
+        # the purge cleanup and then installs; it must not return the purge
+        # result as its own (ok, nothing installed).
+        Invoke-HarnessSelfUninstallRecoveryCase `
+            -Name 'committed-purge-state-absent-install-continues' `
+            -Phase 'committed_install_retirement' `
+            -RootState 'retired-only' `
+            -Purge:$true `
+            -RemoveState:$true `
+            -Action 'Install' `
+            -ExpectHandled:$false `
             -ExpectCanonical:$false `
             -ExpectRetired:$false `
             -ExpectEvidence:$false `

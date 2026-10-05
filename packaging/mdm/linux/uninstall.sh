@@ -9,7 +9,11 @@
 # stops the services and removes DefenseClaw's hooks and machine-policy
 # entries while preserving administrator-owned entries, then removes the
 # package (dpkg / rpm; the macOS lifecycle forgets its pkg receipt itself).
-# --purge also removes the administrator config, credentials, state and logs.
+# The uninstall also removes the administrator config, credentials, state,
+# logs and the service account. --purge also removes each enrolled
+# account's ~/.defenseclaw and per-user binaries (the lifecycle purge runs
+# before the package goes, so it can act as each user). Without it each
+# account keeps ~/.defenseclaw.
 #
 # Idempotent: on a host without the deployment it prints a no-op result and
 # exits 0. Exit codes: 0 removed or nothing to do, 1 failure, 2 invalid
@@ -22,7 +26,7 @@ set -eu
 DC_SCRIPT_OS=linux # linux | darwin - the only line that differs between the copies
 
 # ---- MDM settings (flags override) -------------------------------------------
-DC_PURGE=0          # 1: also remove config, credentials, state and logs
+DC_PURGE=0          # 1: also remove each account's ~/.defenseclaw and per-user binaries
 DC_KEEP_PACKAGE=0   # 1: leave the deb/rpm installed (Linux)
 DC_LOG=""
 # ---- end of settings ---------------------------------------------------------

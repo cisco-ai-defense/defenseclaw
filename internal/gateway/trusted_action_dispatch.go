@@ -29,7 +29,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
@@ -39,10 +38,13 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 )
 
-const (
-	trustedActionDispatchTimeout = 50 * time.Millisecond
-	trustedActionDispatchMaxCost = uint64(24_000_000)
-)
+// trustedActionDispatchMaxCost bounds the semantic rules' total CEL cost per
+// action (each program also has its own cost limit). The bound is on cost,
+// not wall-clock time: a 50 ms deadline here skipped every semantic rule
+// left when a loaded host stalled the gateway, so a CRITICAL command rule
+// only alerted and the call ran (GAP-2140). The caller's context still
+// cancels the evaluation.
+const trustedActionDispatchMaxCost = uint64(24_000_000)
 
 // trustedActionRequest is private so a remote payload cannot assert that an
 // arbitrary body is a trusted or enforcement-capable action. Only adapters
@@ -115,8 +117,7 @@ func dispatchTrustedAction(
 
 	facts = actionfacts.Analyze(request.Input)
 	analyzed = true
-	ctx, cancel := context.WithTimeout(parent, trustedActionDispatchTimeout)
-	defer cancel()
+	ctx := parent
 
 	generation := snapshotRulePackGeneration(request.Connector)
 	options := ruleScanOptions{
@@ -163,11 +164,37 @@ func dispatchTrustedAction(
 	// staticTargetTwin is the complete analysis a redirect-target view was
 	// cut from, with the placeholder targets' redirect and path facts.
 	var staticTargetTwin *actionfacts.Facts
+	// subsetView is set when semanticFacts keeps only the action's static,
+	// certain commands; as on a redirect-target view, only a match counts.
+	subsetView := false
+	// powerShellView keeps the independently parsed commands of exact
+	// pwsh -Command / -EncodedCommand bodies next to the action's static
+	// top-level commands. The original action remains partial. The view
+	// never replaces a view chosen below, whose rule classes and non-matches
+	// keep their meaning: it is an extra pass where only a monotone argv
+	// rule's match counts.
+	var powerShellView *actionfacts.Facts
 	if !facts.Authoritative() {
+		if view, ok := actionfacts.PowerShellCommandSubsetReduction(request.Input, facts); ok {
+			powerShellView = &view
+		}
 		if view, twin, ok := actionfacts.DynamicRedirectTargetReduction(request.Input, facts); ok {
 			semanticFacts, staticTargetTwin, viewCandidate = view, &twin, redirectReductionCandidate
 		} else if view, ok := actionfacts.ShortCircuitListReduction(request.Input, facts); ok {
 			semanticFacts, viewCandidate = view, listReductionCandidate
+		} else if view, ok := actionfacts.PowerShellProfileWrapperReduction(request.Input, facts); ok {
+			// pwsh -Command "<body>" without -NoProfile, alone or first in a
+			// list: a profile only runs more commands before the body, so a
+			// match on the body counts.
+			semanticFacts, viewCandidate, subsetView = view, subsetReductionCandidate, true
+		} else if view, partialArgv, ok := actionfacts.StaticCommandSubsetReduction(request.Input, facts); ok {
+			semanticFacts, viewCandidate, subsetView = view, subsetReductionCandidate, true
+			if partialArgv {
+				viewCandidate = argvSubsetReductionCandidate
+			}
+		} else if powerShellView != nil {
+			semanticFacts, viewCandidate, subsetView = *powerShellView, argvSubsetReductionCandidate, true
+			powerShellView = nil
 		} else {
 			var fallbackTelemetry trustedActionTelemetry
 			findings, fallbackTelemetry = dispatchTrustedFallback(
@@ -181,7 +208,7 @@ func dispatchTrustedAction(
 		}
 	}
 	// matchOnly is set when only a match on the view counts.
-	matchOnly := staticTargetTwin != nil
+	matchOnly := staticTargetTwin != nil || subsetView
 	fullProjection, projectionCode := semantic.Project(semanticFacts)
 	if projectionCode != semantic.ProjectionOK {
 		var fallbackTelemetry trustedActionTelemetry
@@ -198,116 +225,148 @@ func dispatchTrustedAction(
 	excluded := make(map[string]struct{})
 	semanticFindings := make([]RuleFinding, 0, len(generation.semanticRules))
 	matchedSemanticOwnerIDs := make(map[string]struct{})
-	var enforcementFacts actionfacts.Facts
-	var enforcementProjection *semanticpb.Facts
-	enforcementProjected := false
 	var consumedCost uint64
-	fallbackAllOwners := false
 
-	for _, candidate := range generation.semanticRules {
-		if ctx.Err() != nil ||
-			consumedCost >= trustedActionDispatchMaxCost {
-			break
-		}
-		if _, alreadyMatched := matchedSemanticOwnerIDs[candidate.rule.ID]; alreadyMatched {
-			continue
-		}
-		if viewCandidate != nil && !viewCandidate(candidate) {
-			continue
-		}
-		if !candidate.owner.eligible(semanticFacts) {
-			if !matchOnly && candidate.owner.suppressFallback != nil &&
-				candidate.owner.suppressFallback(semanticFacts) {
-				excludeSemanticOwner(excluded, candidate.owner, false)
-			}
-			continue
-		}
-		if staticTargetTwin != nil && !candidate.owner.eligible(*staticTargetTwin) {
-			continue
-		}
-		result, evalCode := candidate.program.EvalBool(ctx, fullProjection)
-		consumedCost += result.Cost
-		if consumedCost > trustedActionDispatchMaxCost {
-			break
-		}
-		if evalCode != semantic.EvalOK {
-			if ctx.Err() != nil {
+	// evaluateSemanticRules runs the semantic rules that candidateOK admits
+	// on view (projection is its projection) and reports whether the view's
+	// enforcement projection failed, in which case no finding was added
+	// after the failure and the caller decides what that means.
+	evaluateSemanticRules := func(
+		view actionfacts.Facts,
+		projection *semanticpb.Facts,
+		candidateOK func(compiledSemanticRule) bool,
+		matchOnly bool,
+		staticTargetTwin *actionfacts.Facts,
+	) (projectionFailed bool) {
+		var enforcementFacts actionfacts.Facts
+		var enforcementProjection *semanticpb.Facts
+		enforcementProjected := false
+		projectionCode := semantic.ProjectionOK
+		for _, candidate := range generation.semanticRules {
+			if ctx.Err() != nil ||
+				consumedCost >= trustedActionDispatchMaxCost {
 				break
 			}
-			continue
-		}
-		if !result.Matched {
-			if !matchOnly {
-				excludeSemanticOwner(excluded, candidate.owner, false)
+			if _, alreadyMatched := matchedSemanticOwnerIDs[candidate.rule.ID]; alreadyMatched {
+				continue
 			}
-			continue
-		}
-
-		if !enforcementProjected {
-			enforcementFacts = semanticFacts.EnforcementProjection()
-			enforcementProjection, projectionCode = semantic.Project(enforcementFacts)
-			enforcementProjected = true
-		}
-		if projectionCode != semantic.ProjectionOK {
-			fallbackAllOwners = true
-			break
-		}
-		enforcementResult, enforcementCode := candidate.program.EvalBool(
-			ctx,
-			enforcementProjection,
-		)
-		consumedCost += enforcementResult.Cost
-		if consumedCost > trustedActionDispatchMaxCost {
-			break
-		}
-		if enforcementCode != semantic.EvalOK {
-			if ctx.Err() != nil {
+			if candidateOK != nil && !candidateOK(candidate) {
+				continue
+			}
+			if !candidate.owner.eligible(view) {
+				if !matchOnly && candidate.owner.suppressFallback != nil &&
+					candidate.owner.suppressFallback(view) {
+					excludeSemanticOwner(excluded, candidate.owner, false)
+				}
+				continue
+			}
+			if staticTargetTwin != nil && !candidate.owner.eligible(*staticTargetTwin) {
+				continue
+			}
+			result, evalCode := candidate.program.EvalBool(ctx, projection)
+			consumedCost += result.Cost
+			if consumedCost > trustedActionDispatchMaxCost {
 				break
 			}
-			continue
-		}
+			if evalCode != semantic.EvalOK {
+				if ctx.Err() != nil {
+					break
+				}
+				continue
+			}
+			if !result.Matched {
+				if !matchOnly {
+					excludeSemanticOwner(excluded, candidate.owner, false)
+				}
+				continue
+			}
 
-		excludeSemanticOwner(excluded, candidate.owner, true)
-		for _, claimedID := range candidate.owner.claimedIDs(true) {
-			matchedSemanticOwnerIDs[claimedID] = struct{}{}
+			if !enforcementProjected {
+				enforcementFacts = view.EnforcementProjection()
+				enforcementProjection, projectionCode = semantic.Project(enforcementFacts)
+				enforcementProjected = true
+			}
+			if projectionCode != semantic.ProjectionOK {
+				return true
+			}
+			enforcementResult, enforcementCode := candidate.program.EvalBool(
+				ctx,
+				enforcementProjection,
+			)
+			consumedCost += enforcementResult.Cost
+			if consumedCost > trustedActionDispatchMaxCost {
+				break
+			}
+			if enforcementCode != semantic.EvalOK {
+				if ctx.Err() != nil {
+					break
+				}
+				continue
+			}
+
+			excludeSemanticOwner(excluded, candidate.owner, true)
+			for _, claimedID := range candidate.owner.claimedIDs(true) {
+				matchedSemanticOwnerIDs[claimedID] = struct{}{}
+			}
+			finding := RuleFinding{
+				RuleID:      candidate.rule.ID,
+				Title:       candidate.rule.Title,
+				Severity:    candidate.rule.Severity,
+				Confidence:  candidate.rule.Confidence,
+				Tags:        append([]string(nil), candidate.rule.Tags...),
+				enforcement: findingEnforcementAllowed,
+			}
+			if !request.EnforcementCapable ||
+				candidate.owner.detectionOnly || candidate.owner.alertOnly ||
+				!enforcementFacts.EnforcementEligible() ||
+				!enforcementResult.Matched {
+				finding.enforcement = findingEnforcementDetectionOnly
+			}
+			if request.EnforcementCapable && candidate.owner.alertOnly {
+				finding.enforcement = findingEnforcementAlertOnly
+			}
+			finding = finding.withTrustedActionProof(
+				newActionFactsSemanticFindingProof(
+					candidate.rule.ID,
+					actionFactsSemanticProofInput{
+						FactsAuthoritative:  view.Authoritative(),
+						EnforcementEligible: enforcementFacts.EnforcementEligible(),
+						ProjectionComplete:  projectionCode == semantic.ProjectionOK,
+						EvaluationComplete:  enforcementCode == semantic.EvalOK,
+						Matched:             enforcementResult.Matched,
+					},
+				),
+			)
+			semanticFindings = append(
+				semanticFindings,
+				adjustConfidence(request.Input.Tool, finding),
+			)
 		}
-		finding := RuleFinding{
-			RuleID:      candidate.rule.ID,
-			Title:       candidate.rule.Title,
-			Severity:    candidate.rule.Severity,
-			Confidence:  candidate.rule.Confidence,
-			Tags:        append([]string(nil), candidate.rule.Tags...),
-			enforcement: findingEnforcementAllowed,
-		}
-		if !request.EnforcementCapable ||
-			candidate.owner.detectionOnly || candidate.owner.alertOnly ||
-			!enforcementFacts.EnforcementEligible() ||
-			!enforcementResult.Matched {
-			finding.enforcement = findingEnforcementDetectionOnly
-		}
-		if request.EnforcementCapable && candidate.owner.alertOnly {
-			finding.enforcement = findingEnforcementAlertOnly
-		}
-		finding = finding.withTrustedActionProof(
-			newActionFactsSemanticFindingProof(
-				candidate.rule.ID,
-				actionFactsSemanticProofInput{
-					FactsAuthoritative:  semanticFacts.Authoritative(),
-					EnforcementEligible: enforcementFacts.EnforcementEligible(),
-					ProjectionComplete:  projectionCode == semantic.ProjectionOK,
-					EvaluationComplete:  enforcementCode == semantic.EvalOK,
-					Matched:             enforcementResult.Matched,
-				},
-			),
-		)
-		semanticFindings = append(
-			semanticFindings,
-			adjustConfidence(request.Input.Tool, finding),
-		)
+		return false
 	}
-	if fallbackAllOwners {
+
+	if evaluateSemanticRules(
+		semanticFacts,
+		fullProjection,
+		viewCandidate,
+		matchOnly,
+		staticTargetTwin,
+	) {
 		clear(excluded)
 		semanticFindings = semanticFindings[:0]
+	}
+	// The PowerShell body view adds positive argv matches only. A failed
+	// projection there adds nothing and leaves the result above unchanged.
+	if powerShellView != nil {
+		if projection, code := semantic.Project(*powerShellView); code == semantic.ProjectionOK {
+			evaluateSemanticRules(
+				*powerShellView,
+				projection,
+				argvSubsetReductionCandidate,
+				true,
+				nil,
+			)
+		}
 	}
 	restoreTrustedUnresolvedReadFallbacks(
 		excluded,
@@ -405,7 +464,47 @@ func dispatchTrustedAction(
 		legacyFindings = withSequenceProvenFindings(legacyFindings, sequenceFindings)
 	}
 	findings = append(semanticFindings, legacyFindings...)
-	return finalizeTrustedActionFindings(generation, request, contextFacts, findings)
+	finalized := finalizeTrustedActionFindings(generation, request, contextFacts, findings)
+	finalized = appendTrustedHomeResolvedSSHKeyWriteFinding(finalized, generation, request, facts)
+	if staticTargetTwin == nil {
+		return finalized
+	}
+	// The recovery lanes and the context checks also judge the static-target
+	// twin of a redirect-target view, and, as for semantic rules, only a block
+	// proven there counts. The twin's stand-in target is no sensitive path,
+	// so such a block rests on the rest of the action, which the runtime
+	// target does not change; any other result keeps the whole-action one.
+	twinLegacy, _ := fallbackLanes(append([]RuleFinding(nil), scanned...), *staticTargetTwin)
+	twinFindings := finalizeTrustedActionFindings(
+		generation,
+		request,
+		*staticTargetTwin,
+		append(append([]RuleFinding(nil), semanticFindings...), twinLegacy...),
+	)
+	return withTwinProvenBlocks(finalized, twinFindings)
+}
+
+// withTwinProvenBlocks returns findings, the finalized findings of a
+// redirect-target action, with each finding of twin, the same lanes judged on
+// its static-target twin, that may block there in place of the finding of the
+// same rule or owner that may not.
+func withTwinProvenBlocks(findings, twin []RuleFinding) []RuleFinding {
+	for _, proven := range twin {
+		if !proven.contributesToEnforcement() {
+			continue
+		}
+		key := trustedActionFindingKey(proven.RuleID)
+		index := slices.IndexFunc(findings, func(finding RuleFinding) bool {
+			return trustedActionFindingKey(finding.RuleID) == key
+		})
+		switch {
+		case index < 0:
+			findings = append(findings, proven)
+		case !findings[index].contributesToEnforcement():
+			findings[index] = proven
+		}
+	}
+	return findings
 }
 
 // withSequenceProvenFindings returns findings, the fallback findings checked
@@ -437,6 +536,24 @@ func withSequenceProvenFindings(findings, sequence []RuleFinding) []RuleFinding 
 // fallback, as for any other partial action.
 func redirectReductionCandidate(candidate compiledSemanticRule) bool {
 	return candidate.program.RedirectReductionSafe()
+}
+
+// subsetReductionCandidate reports whether a match of candidate on the view
+// from actionfacts.StaticCommandSubsetReduction may stand for the whole
+// action: the expression must be one that more commands and facts cannot turn
+// off (semantic.Program.StaticCommandSubsetSafe), and the rule must have no
+// code-owned prerequisite, a Go check written for complete facts. Other rules
+// keep their legacy fallback.
+func subsetReductionCandidate(candidate compiledSemanticRule) bool {
+	return candidate.owner.prerequisite == nil &&
+		candidate.program.StaticCommandSubsetSafe()
+}
+
+// argvSubsetReductionCandidate is subsetReductionCandidate for a view that
+// also keeps commands with partial argv (semantic.Program.StaticArgvSubsetSafe).
+func argvSubsetReductionCandidate(candidate compiledSemanticRule) bool {
+	return candidate.owner.prerequisite == nil &&
+		candidate.program.StaticArgvSubsetSafe()
 }
 
 // listReductionCandidate reports whether a result of candidate on the view
@@ -1929,12 +2046,8 @@ func dispatchTrustedFallback(
 		facts,
 		request.EnforcementCapable,
 	)
-	return finalizeTrustedActionFindings(
-		generation,
-		request,
-		facts,
-		findings,
-	), fallbackTelemetry
+	findings = finalizeTrustedActionFindings(generation, request, facts, findings)
+	return appendTrustedHomeResolvedSSHKeyWriteFinding(findings, generation, request, facts), fallbackTelemetry
 }
 
 // neutralizeTrustedSecretStoreValue keeps credential detectors focused on
@@ -2132,11 +2245,8 @@ func deduplicateTrustedActionFindings(findings []RuleFinding) []RuleFinding {
 	deduplicated := make([]RuleFinding, 0, len(findings))
 	positions := make(map[string]int, len(findings))
 	for _, finding := range findings {
-		key := canonicalTrustedRuleID(finding.RuleID)
-		owner, claimed := trustedSemanticOwnerClaimingRule(finding.RuleID)
-		if claimed {
-			key = canonicalTrustedRuleID(owner.id)
-		}
+		key := trustedActionFindingKey(finding.RuleID)
+		_, claimed := trustedSemanticOwnerClaimingRule(finding.RuleID)
 		if position, duplicate := positions[key]; duplicate {
 			current := deduplicated[position]
 			candidateRank := severityRank[strings.ToUpper(strings.TrimSpace(finding.Severity))]
@@ -2155,6 +2265,15 @@ func deduplicateTrustedActionFindings(findings []RuleFinding) []RuleFinding {
 		deduplicated = append(deduplicated, finding)
 	}
 	return deduplicated
+}
+
+// trustedActionFindingKey is the identity deduplication gives a finding: the
+// owner of a rule a semantic owner claims, otherwise the rule itself.
+func trustedActionFindingKey(ruleID string) string {
+	if owner, claimed := trustedSemanticOwnerClaimingRule(ruleID); claimed {
+		return canonicalTrustedRuleID(owner.id)
+	}
+	return canonicalTrustedRuleID(ruleID)
 }
 
 // trustedFixtureSourceInspectionAction identifies the one tool-call shape in
@@ -2542,6 +2661,15 @@ func trustedLegacyProvenCommandFinding(
 	) && (contract.prerequisite == nil || contract.prerequisite(facts)) {
 		finding.enforcement = findingEnforcementDetectionOnly
 	}
+	if finding.RuleID == "CMD-EVAL" &&
+		finding.enforcement != findingEnforcementDetectionOnly {
+		// eval's operand is only known when it runs, so no parse can prove
+		// the call and the proof boundary left the finding detection-only,
+		// which "defenseclaw alerts" never shows (GAP-2575). An executed
+		// eval with a runtime operand alerts at the connector's threshold
+		// and never confirms or blocks.
+		finding.enforcement = findingEnforcementAlertOnly
+	}
 	if proof, proven := trustedSemanticOwnerFindingProofFromActions(
 		finding.RuleID,
 		facts,
@@ -2854,7 +2982,7 @@ func trustedLegacyCommandRuleMatches(
 			if !ok {
 				continue
 			}
-			scanCommand.Argv = staticArgv
+			scanCommand.Argv = withTrustedDynamicEvalOperand(command, staticArgv)
 			scanCommand.ArgvComplete = true
 		} else if command.Effect != actionfacts.EffectExecute {
 			continue
@@ -2944,6 +3072,22 @@ func trustedLegacyCommandRuleMatches(
 		}
 	}
 	return matchesByID
+}
+
+// withTrustedDynamicEvalOperand keeps the shape CMD-EVAL names: eval whose
+// first operand expands at runtime (eval "$(...)", eval "$VAR"). The static
+// argv stops at that operand, which left a bare "eval" that no command rule
+// can match, so the rule never fired on a real tool call (GAP-2575). A "$"
+// stands in for the runtime value; nothing else about the argv changes.
+func withTrustedDynamicEvalOperand(
+	command actionfacts.CommandFact,
+	argv []string,
+) []string {
+	if command.Program != "eval" || len(argv) != 1 ||
+		len(command.Arguments) < 2 || !command.Arguments[1].Expands {
+		return argv
+	}
+	return append(argv, "$")
 }
 
 func trustedStaticCommandArgv(

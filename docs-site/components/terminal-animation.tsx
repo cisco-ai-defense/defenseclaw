@@ -250,26 +250,27 @@ export function TerminalAnimation({
     <figure
       ref={containerRef}
       className="my-6"
-      role="group"
       aria-label={description}
     >
-      <div className="terminal-window overflow-hidden rounded-2xl border border-fd-border/60 bg-[#0b0d12] backdrop-blur shadow-lg">
-        <div className="flex items-center gap-2 border-b border-fd-border/60 bg-[#11141b] px-4 py-2 text-xs text-fd-muted-foreground">
-          <span aria-hidden className="size-3 rounded-full bg-red-500/80" />
-          <span aria-hidden className="size-3 rounded-full bg-yellow-500/80" />
-          <span aria-hidden className="size-3 rounded-full bg-green-500/80" />
-          <span className="ml-3 font-mono text-zinc-400">{cwd}</span>
-          <div className="ml-auto flex items-center gap-2">
+      <div className="terminal-window overflow-hidden rounded-2xl shadow-lg">
+        <div className="flex items-center gap-2 border-b border-[var(--term-border)] bg-[var(--term-chrome)] px-4 py-2 text-xs text-[var(--term-muted)]">
+          <span aria-hidden className="size-3 shrink-0 rounded-full bg-red-500/80" />
+          <span aria-hidden className="size-3 shrink-0 rounded-full bg-yellow-500/80" />
+          <span aria-hidden className="size-3 shrink-0 rounded-full bg-green-500/80" />
+          <span className="ml-3 min-w-0 truncate font-mono text-[var(--term-muted)]" title={cwd}>
+            {cwd}
+          </span>
+          <div className="ml-auto flex shrink-0 items-center gap-2">
             <span
               aria-live="polite"
-              className="hidden font-mono text-[10px] uppercase tracking-wider text-zinc-400 sm:inline"
+              className="hidden font-mono text-[10px] uppercase tracking-wider text-[var(--term-muted)] sm:inline"
             >
               {paused ? 'paused' : done ? 'looping' : 'playing'}
             </span>
             <button
               type="button"
               onClick={onTogglePause}
-              className="rounded border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-[11px] text-zinc-300 hover:bg-zinc-800"
+              className="rounded border border-[var(--term-control-border)] bg-[var(--term-bg)] px-2 py-0.5 text-[11px] text-[var(--term-fg)] hover:bg-[var(--term-border)]"
               aria-label={paused ? 'Resume animation' : 'Pause animation'}
             >
               {paused ? 'Resume' : 'Pause'}
@@ -277,7 +278,7 @@ export function TerminalAnimation({
             <button
               type="button"
               onClick={onRestart}
-              className="rounded border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-[11px] text-zinc-300 hover:bg-zinc-800"
+              className="rounded border border-[var(--term-control-border)] bg-[var(--term-bg)] px-2 py-0.5 text-[11px] text-[var(--term-fg)] hover:bg-[var(--term-border)]"
               aria-label="Restart animation"
             >
               Restart
@@ -289,7 +290,7 @@ export function TerminalAnimation({
           tabIndex={0}
           aria-label="Animated terminal output"
           style={{ maxHeight: height, minHeight: Math.min(220, height) }}
-          className="m-0 overflow-x-auto overflow-y-auto p-5 font-mono text-[13px] leading-6 text-zinc-100"
+          className="dc-scroll-cue m-0 overflow-x-auto overflow-y-auto p-5 font-mono text-[13px] leading-6 text-[var(--term-text)]"
         >
           {rendered.map((line, i) => (
             <Line key={i} line={line} shell={shell} />
@@ -299,7 +300,7 @@ export function TerminalAnimation({
               aria-hidden
               className="terminal-cursor inline-block w-2 align-text-bottom"
               style={{
-                background: 'var(--brand-cisco, #049fd9)',
+                background: 'var(--term-prompt)',
                 height: '1em',
               }}
             >
@@ -310,10 +311,26 @@ export function TerminalAnimation({
       </div>
       {caption ? (
         <figcaption className="mt-2 text-center text-xs text-fd-muted-foreground">
-          {caption}
+          <CaptionText text={caption} />
         </figcaption>
       ) : null}
     </figure>
+  );
+}
+
+// Captions are plain strings in MDX props, so `backticks` would show
+// literally. Render the backticked parts as inline code.
+function CaptionText({ text }: { text: string }) {
+  return (
+    <>
+      {text.split(/(`[^`]+`)/).map((part, i) =>
+        part.startsWith('`') && part.endsWith('`') && part.length > 2 ? (
+          <code key={i}>{part.slice(1, -1)}</code>
+        ) : (
+          part
+        ),
+      )}
+    </>
   );
 }
 
@@ -321,18 +338,17 @@ function Line({ line, shell }: { line: RenderedLine; shell: string }) {
   if (line.type === 'cmd') {
     return (
       <div>
-        <span style={{ color: 'var(--brand-cisco, #049fd9)' }}>{shell} </span>
-        <span className="text-zinc-100">{line.text}</span>
+        <span className="text-[var(--term-prompt)]">{shell} </span>
+        <span className="text-[var(--term-fg)]">{line.text}</span>
       </div>
     );
   }
   if (line.type === 'prompt') {
     return (
       <div>
-        <span className="text-zinc-300">{line.text}</span>
+        <span className="text-[var(--term-text)]">{line.text}</span>
         <span
-          className="font-semibold"
-          style={{ color: 'var(--brand-orange, #ff7a18)' }}
+          className="font-semibold text-[var(--term-reply)]"
         >
           {line.reply}
         </span>
@@ -340,16 +356,16 @@ function Line({ line, shell }: { line: RenderedLine; shell: string }) {
     );
   }
   if (line.type === 'ok') {
-    return <div className="text-emerald-400">{line.text}</div>;
+    return <div className="text-[var(--term-ok)]">{line.text}</div>;
   }
   if (line.type === 'warn') {
-    return <div className="text-amber-300">{line.text}</div>;
+    return <div className="text-[var(--term-warn)]">{line.text}</div>;
   }
   if (line.type === 'dim') {
-    return <div className="text-zinc-400">{line.text}</div>;
+    return <div className="text-[var(--term-muted)]">{line.text}</div>;
   }
   if (line.type === 'spacer') {
     return <div>&nbsp;</div>;
   }
-  return <div className="text-zinc-200">{line.text}</div>;
+  return <div className="text-[var(--term-fg)]">{line.text}</div>;
 }

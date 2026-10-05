@@ -164,8 +164,3 @@ func TestHookSocketAuditRowsNameTheVerifiedCaller(t *testing.T) {
 		t.Fatalf("oversized request wrote a %d-byte audit row", len(data))
 	}
 }
-
-func auditStringValue(value any) string {
-	text, _ := value.(string)
-	return text
-}

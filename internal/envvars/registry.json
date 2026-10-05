@@ -103,7 +103,7 @@
     {
       "name": "DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT",
       "category": "security_opt_out",
-      "purpose": "Bypass the action-mode fail-closed checks for unverified hook contracts and hook-contract lock drift during connector setup, allowing enforcing hooks to be installed against agent versions outside the verified contract matrix.",
+      "purpose": "Bypass the action-mode fail-closed checks for agent versions with no hook contract (below the tested floor, on the known-broken list, or an unmatched exact build) and for incompatible hook-contract lock drift during connector setup. Untested newer versions no longer need it.",
       "default": "unset (fail-closed in action mode)",
       "accepted_values": [
         "1",
@@ -967,6 +967,10 @@
         {
           "location": "internal/gateway/client.go",
           "description": "Client struct gates verbose logging on this var"
+        },
+        {
+          "location": "extensions/defenseclaw/src/log.ts",
+          "description": "OpenClaw plugin also prints its routine diagnostics when stdout is an interactive terminal"
         }
       ],
       "since": "0.1.0"
@@ -3642,8 +3646,8 @@
     {
       "name": "DEFENSECLAW_POLICY_VALIDATE_ALLOW_NO_OPA",
       "category": "security_opt_out",
-      "purpose": "Accept a policy file as 'validated' even when OPA / Rego is not installed. Default rejects; this turns validation into a no-op when OPA is absent.",
-      "default": "unset (validation requires OPA)",
+      "purpose": "Skip the Rego compile check when neither opa nor defenseclaw-gateway is available. A standard install validates Rego with the OPA engine built into defenseclaw-gateway and does not need this; the default fails validation when no checker is found.",
+      "default": "unset (validation needs opa or defenseclaw-gateway)",
       "accepted_values": [
         "1",
         "unset"
@@ -4183,9 +4187,143 @@
         {
           "location": "cli/defenseclaw/commands/cmd_setup_observability.py",
           "description": "Click reads the setup token from the child process environment instead of argv"
+        },
+        {
+          "location": "cli/defenseclaw/tui/panels/setup.py",
+          "description": "The TUI Setup wizard passes the token in the child process environment instead of argv (GAP-1888)"
         }
       ],
       "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_SETUP_LLM_API_KEY",
+      "category": "credential",
+      "purpose": "Secret transport for 'defenseclaw setup llm' (--api-key). Set in the child process environment so the value is not exposed in command-line arguments, which other local users can read; same as the flag.",
+      "default": "unset",
+      "accepted_values": [
+        "secret-value",
+        "unset"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "cli/defenseclaw/commands/cmd_setup.py",
+          "description": "Click reads the flag value from the environment instead of argv"
+        },
+        {
+          "location": "cli/defenseclaw/tui/panels/setup.py",
+          "description": "The TUI Setup wizard passes the secret in the child process environment instead of argv (GAP-1888)"
+        }
+      ],
+      "since": "1.0.0"
+    },
+    {
+      "name": "DEFENSECLAW_SETUP_GATEWAY_TOKEN",
+      "category": "credential",
+      "purpose": "Secret transport for 'defenseclaw setup gateway' (--token). Set in the child process environment so the value is not exposed in command-line arguments, which other local users can read; same as the flag.",
+      "default": "unset",
+      "accepted_values": [
+        "secret-value",
+        "unset"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "cli/defenseclaw/commands/cmd_setup.py",
+          "description": "Click reads the flag value from the environment instead of argv"
+        },
+        {
+          "location": "cli/defenseclaw/tui/panels/setup.py",
+          "description": "The TUI Setup wizard passes the secret in the child process environment instead of argv (GAP-1888)"
+        }
+      ],
+      "since": "1.0.0"
+    },
+    {
+      "name": "DEFENSECLAW_SETUP_SPLUNK_ACCESS_TOKEN",
+      "category": "credential",
+      "purpose": "Secret transport for 'defenseclaw setup splunk' (--access-token). Set in the child process environment so the value is not exposed in command-line arguments, which other local users can read; same as the flag.",
+      "default": "unset",
+      "accepted_values": [
+        "secret-value",
+        "unset"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "cli/defenseclaw/commands/cmd_setup.py",
+          "description": "Click reads the flag value from the environment instead of argv"
+        },
+        {
+          "location": "cli/defenseclaw/tui/panels/setup.py",
+          "description": "The TUI Setup wizard passes the secret in the child process environment instead of argv (GAP-1888)"
+        }
+      ],
+      "since": "1.0.0"
+    },
+    {
+      "name": "DEFENSECLAW_SETUP_SPLUNK_HEC_TOKEN",
+      "category": "credential",
+      "purpose": "Secret transport for 'defenseclaw setup splunk' (--hec-token). Set in the child process environment so the value is not exposed in command-line arguments, which other local users can read; same as the flag.",
+      "default": "unset",
+      "accepted_values": [
+        "secret-value",
+        "unset"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "cli/defenseclaw/commands/cmd_setup.py",
+          "description": "Click reads the flag value from the environment instead of argv"
+        },
+        {
+          "location": "cli/defenseclaw/tui/panels/setup.py",
+          "description": "The TUI Setup wizard passes the secret in the child process environment instead of argv (GAP-1888)"
+        }
+      ],
+      "since": "1.0.0"
+    },
+    {
+      "name": "DEFENSECLAW_INIT_LLM_API_KEY",
+      "category": "credential",
+      "purpose": "Secret transport for 'defenseclaw init' (--llm-api-key). Set in the child process environment so the value is not exposed in command-line arguments, which other local users can read; same as the flag.",
+      "default": "unset",
+      "accepted_values": [
+        "secret-value",
+        "unset"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "cli/defenseclaw/commands/cmd_init.py",
+          "description": "Click reads the flag value from the environment instead of argv"
+        }
+      ],
+      "since": "1.0.0"
+    },
+    {
+      "name": "DEFENSECLAW_INIT_CISCO_API_KEY",
+      "category": "credential",
+      "purpose": "Secret transport for 'defenseclaw init' (--cisco-api-key). Set in the child process environment so the value is not exposed in command-line arguments, which other local users can read; same as the flag.",
+      "default": "unset",
+      "accepted_values": [
+        "secret-value",
+        "unset"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "cli/defenseclaw/commands/cmd_init.py",
+          "description": "Click reads the flag value from the environment instead of argv"
+        }
+      ],
+      "since": "1.0.0"
     },
     {
       "name": "DEFENSECLAW_SETUP_SERVICE_CONTROL_TEST_HELPER",
@@ -5815,7 +5953,7 @@
     {
       "name": "DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST",
       "category": "security_opt_out",
-      "purpose": "Relax the webhook SSRF guard to permit RFC1918 / loopback / link-local destinations. Required for local-development setups (e.g. webhook against http://127.0.0.1:5000); a production setup should not use this.",
+      "purpose": "Relax the webhook SSRF guard to permit localhost and loopback destinations only; private (RFC 1918), link-local and cloud-metadata addresses stay blocked. Required for local-development setups (e.g. webhook against http://127.0.0.1:5000); a production setup should not use this.",
       "default": "unset (SSRF guard blocks private IPs)",
       "accepted_values": [
         "1",
@@ -6008,6 +6146,26 @@
       "since": "0.8.0"
     },
     {
+      "name": "DEFENSECLAW_WINDOWS_ROLLBACK_SIGNED_OUT_ACCOUNTS",
+      "category": "security_opt_out",
+      "purpose": "Skip the S4U logon that the rollback of a failed first Windows standalone install uses to put back a signed-out account's agent configuration. Those accounts are then listed as rollback leftovers.",
+      "default": "unset (signed-out accounts are restored through an S4U logon)",
+      "accepted_values": [
+        "0",
+        "unset"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": true,
+      "consumers": [
+        {
+          "location": "internal/enterprisehooks/rollback_first_install_windows.go",
+          "description": "windowsStandaloneSignedOutRollbackEnabled() skips the S4U restore of signed-out accounts when set to 0"
+        }
+      ],
+      "since": "1.0.0",
+      "security_note": "Cleanup opt-out: with 0, a signed-out account can keep agent hook configuration that points at the rolled-back install until an administrator removes the listed leftovers."
+    },
+    {
       "name": "DEFENSECLAW_WINDOWS_SERVICE_ACCOUNT",
       "category": "runtime_path",
       "purpose": "Identify the exact virtual Windows service account permitted to write the managed runtime tree.",
@@ -6124,6 +6282,133 @@
         }
       ],
       "since": "0.9.0"
+    },
+    {
+      "name": "DEFENSECLAW_AGENT_HOME",
+      "category": "hook_internal",
+      "purpose": "The account's real HOME, saved unexported by the Unix hook hardening before it swaps in the per-hook HOME, so a hook can cold-start the account's stopped per-user gateway with the right HOME. The hook sets it itself, so an inherited value is overwritten.",
+      "default": "(set by hooks)",
+      "accepted_values": [
+        "absolute-path"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/hooks/_hardening.sh",
+          "description": "Hook hardening and the per-user gateway cold start"
+        }
+      ],
+      "since": "1.0.1"
+    },
+    {
+      "name": "DEFENSECLAW_GATEWAY_AUTOSTART",
+      "category": "security_opt_out",
+      "purpose": "Set to 0, false, no or off in the agent's environment to stop the Unix hooks from starting a stopped per-user gateway when their request is refused. Fail-closed hooks then block and fail-open hooks let the call through until the gateway is started.",
+      "default": "unset (hooks start a stopped per-user gateway)",
+      "accepted_values": [
+        "0",
+        "false",
+        "no",
+        "off"
+      ],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/hooks/_hardening.sh",
+          "description": "Per-user gateway cold start from the hooks"
+        },
+        {
+          "location": "internal/gateway/connector/hook_test_env_helpers_test.go",
+          "description": "Turns the cold start off in the sanitized hook test environment"
+        }
+      ],
+      "since": "1.0.1"
+    },
+    {
+      "name": "DEFENSECLAW_LOG_TIMESTAMPS",
+      "category": "debug",
+      "purpose": "Set to 0 to turn off the RFC 3339 UTC time stamps the gateway and the background watchdog put on each line of their log files.",
+      "default": "unset (lines are stamped)",
+      "accepted_values": [
+        "0",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/daemon/logstamp.go",
+          "description": "StampChildLog and StampDetachedLog skip stamping when set to 0"
+        }
+      ],
+      "since": "1.0.1"
+    },
+    {
+      "name": "DEFENSECLAW_STAMP_LOG",
+      "category": "hook_internal",
+      "purpose": "Internal marker set by DefenseClaw on a detached helper (the background watchdog) so it stamps its log lines like the gateway; cleared by the helper so its children do not inherit it.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/daemon/logstamp.go",
+          "description": "StampDetachedLog reads and clears the marker"
+        }
+      ],
+      "since": "1.0.1"
+    },
+    {
+      "name": "DEFENSECLAW_DELEGATED_FROM",
+      "category": "hook_internal",
+      "purpose": "Set to 'defenseclaw' by the Python CLI when it runs a gateway command for the user ('defenseclaw audit export' and 'audit findings' run 'defenseclaw-gateway audit ...'), so the gateway's usage errors name the command the user typed.",
+      "default": "unset",
+      "accepted_values": [
+        "defenseclaw",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "cli/defenseclaw/commands/cmd_audit.py",
+          "description": "Sets it before running defenseclaw-gateway audit export/findings"
+        },
+        {
+          "location": "internal/cli/usage_args.go",
+          "description": "Names 'defenseclaw' instead of the gateway binary in usage errors"
+        }
+      ],
+      "since": "1.0.0"
+    },
+    {
+      "name": "DEFENSECLAW_SCAN_RECORDED_BY_CALLER",
+      "category": "hook_internal",
+      "purpose": "Set to 1 by the gateway when it runs a defenseclaw plugin scan child whose result it records itself, so the CLI child does not write a second scan row and scan-finding alert (GAP-2482).",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/scanner/plugin.go",
+          "description": "Sets it on the plugin scan child process"
+        },
+        {
+          "location": "cli/defenseclaw/commands/_scan_ui.py",
+          "description": "Skips recording the scan when it is 1"
+        }
+      ],
+      "since": "1.0.0"
     }
   ]
 }

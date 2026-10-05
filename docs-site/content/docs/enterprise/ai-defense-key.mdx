@@ -25,14 +25,14 @@ See [Concepts](/docs/enterprise/concepts) for the terms.
 
 ## Before you start
 
-Install the deployment first, then store the key. `enterprise secret set`
-refuses to run until a deployment is installed (on Windows, `secret remove`
-does too):
+On Linux and macOS the key can be stored before or after the install. Stored
+before the install, it stays readable by root only (`enterprise secret set`
+reports `not_installed` as a warning and exits 0), and the install gives the
+gateway its access, so a config that references the key installs at once.
 
-| OS | Refusal |
-| --- | --- |
-| Linux, macOS | `DefenseClaw enterprise is not installed (no service account)`, exit 1 |
-| Windows | `no standalone managed deployment is installed`, exit 1603 |
+On Windows, install the deployment first: `enterprise secret set` and
+`secret remove` refuse with `no standalone managed deployment is installed`,
+exit 1603.
 
 The MDM wrappers follow the same order for you; see
 [Deliver the key with an MDM](#deliver-the-key-with-an-mdm).
@@ -82,7 +82,8 @@ sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise secret set --name ai-de
 
 The command stores the key, then runs `ensure` with reason `secret`, which
 restarts the gateway so it reads the key. The apply path unit would also
-pick up the change.
+pick up the change. The output starts with `✓ secret set: done` and
+`- stored credential ai-defense-api-key`, followed by the apply steps.
 
   </Tab>
   <Tab value="macOS">
@@ -94,21 +95,31 @@ unset AID_KEY
 ```
 
 The command stores the key, then runs `ensure` with reason `secret`, which
-restarts the gateway so it reads the key.
+restarts the gateway so it reads the key. The output starts with
+`✓ secret set: done` and `- stored credential ai-defense-api-key`.
 
   </Tab>
   <Tab value="Windows">
 
 Run from an elevated PowerShell 7 session. `--from-file` accepts only a
 file that non-administrators cannot write. On Windows client editions a new
-folder under `C:\` inherits write access for authenticated users, so restrict
-the folder before you put the key in it:
+folder under `C:\` inherits write access for authenticated users, so create
+an administrator-only folder first, write the key into it from a prompt that
+does not echo it, store it, and delete the file:
 
 ```powershell
-icacls C:\Admin /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F"
-& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise secret set --name ai-defense-api-key --from-file C:\Admin\ai-defense-api-key.txt
-Remove-Item C:\Admin\ai-defense-api-key.txt
+$Stage = 'C:\ProgramData\DefenseClaw-Staging'
+New-Item -ItemType Directory -Path $Stage -Force | Out-Null
+icacls $Stage /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
+$Key = Read-Host -AsSecureString 'Cisco AI Defense API key'
+[System.Net.NetworkCredential]::new('', $Key).Password | Set-Content -NoNewline -Path "$Stage\ai-defense-api-key.txt"
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise secret set --name ai-defense-api-key --from-file "$Stage\ai-defense-api-key.txt"
+Remove-Item "$Stage\ai-defense-api-key.txt"
+Remove-Variable Key
 ```
+
+This is the same staging folder the
+[Windows install](/docs/enterprise/windows#2-write-the-config) uses.
 
 The command stores the key and restarts the `DefenseClawGateway` service
 if it is running. A stopped gateway reads the key when it next starts.
@@ -167,18 +178,18 @@ The lifecycle status (`enterprise linux status`, `enterprise macos status`
 or `enterprise windows status`, with `--json`) has an
 `inspection.ai_defense` field:
 
-| Value | Meaning |
-| --- | --- |
-| `disabled` | `enabled` is `false` |
-| `ok` | Windows: `enabled` is `true` and the gateway is ready |
-| `unavailable:gateway_not_ready` | Windows: `enabled` is `true` but the gateway is not ready |
-| `unknown` | The gateway did not report its inspection state |
+| Value | Linux and macOS | Windows |
+| --- | --- | --- |
+| `disabled` | `enabled` is `false` | `enabled` is `false` |
+| `ok` | Cisco AI Defense answered a request with the stored key | `enabled` is `true` and the gateway is ready |
+| `unavailable:<code>` | AI Defense is enabled but not working. `<code>` is `credential_unavailable` (the key is missing or fails its trust check), `auth_failed` (the key was rejected), `proxy_auth_required`, `proxy_config`, `unreachable`, `not_initialized` or `error`. `status` and `verify` also warn `ai_defense_unavailable` | `unavailable:gateway_not_ready`: `enabled` is `true` but the gateway is not ready |
+| `unknown` | The gateway has not reported yet, for example right after a restart, before the key has been tried | The gateway did not report its inspection state |
 
-On Windows, `ok` reflects the config and gateway readiness; it does not
-prove the key was accepted. On Linux and macOS this release reports
-`unknown`. To confirm that the gateway loaded the key, check the gateway
-log for an error from the `cisco-inspect` subsystem after the restart: a
-missing or untrusted key is logged there. See
+On Linux and macOS the value comes from the gateway's own `/health`, so `ok`
+means the key works. On Windows, `ok` reflects the config and gateway
+readiness and does not prove the key was accepted: check the gateway log for
+an error from the `cisco-inspect` subsystem after the restart, where a
+missing or untrusted key is logged. See
 [Logs and events](/docs/enterprise/operations#logs-and-events).
 
 ## Rotate the key
@@ -196,6 +207,10 @@ sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise secret remove --name ai
 ```powershell
 & 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise secret remove --name ai-defense-api-key
 ```
+
+On Linux and macOS the output names the credential:
+`- removed credential ai-defense-api-key`, or
+`- credential ai-defense-api-key was not stored; nothing to remove`.
 
 Set `enabled: false` in the config as well. Otherwise the gateway keeps
 logging that the credential is missing, while the local engine decides
@@ -226,7 +241,7 @@ for recipes.
 | Stored, listed or removed | `0` | `0` |
 | Invalid input: both or neither of `--from-stdin` and `--from-file`, or an empty, multi-line or oversized value | `2` | `1639` |
 | Invalid credential name | `1` | `1639` |
-| Not elevated or not root, not installed, or the write failed | `1` | `1603` |
+| Not elevated or not root, not installed (Windows only), or the write failed | `1` | `1603` |
 | The follow-up `ensure` failed and rolled back | `1` | Not applicable |
 | Another lifecycle run holds the lock | `75` | Not applicable |
 | The gateway restart failed after the key was stored | Not applicable | `1603` |

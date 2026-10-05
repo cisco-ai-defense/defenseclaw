@@ -17,6 +17,7 @@ import (
 	"image"
 	_ "image/png"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -477,10 +478,25 @@ func ApplyForTarget(executable string, target Target, component Component, versi
 		return fmt.Errorf("verify resource output before publish: %w", err)
 	}
 	if err := os.Rename(temporaryPath, path); err != nil {
-		return fmt.Errorf("publish resource-complete executable: %w", err)
+		return fmt.Errorf("publish resource-complete executable: %w%s", err, publishHint(err, path))
 	}
 	committed = true
 	return VerifyForTarget(path, target, component, versionValue, iconPath)
+}
+
+// publishHint explains the usual cause of a denied publish on Windows: the
+// target executable is still running (often a gateway started from this
+// checkout), and Windows does not let a running image be replaced.
+func publishHint(err error, path string) string {
+	if !errors.Is(err, fs.ErrPermission) {
+		return ""
+	}
+	name := filepath.Base(path)
+	stop := "stop it"
+	if strings.HasPrefix(strings.ToLower(name), "defenseclaw-gateway") {
+		stop = "stop it with 'defenseclaw-gateway stop'"
+	}
+	return fmt.Sprintf(" (%s may still be running from this location; %s, then build again)", name, stop)
 }
 
 type resourceKey struct {

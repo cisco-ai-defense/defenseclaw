@@ -2779,6 +2779,7 @@ groups:
   - content.output
   - error.core
   - genai.agent
+  - security.guardrail.outcome
   attributes:
   - ref: defenseclaw.agent.type
     requirement_level: required
@@ -2903,6 +2904,7 @@ groups:
   - content.output
   - error.core
   - genai.model
+  - security.guardrail.outcome
   attributes:
   - ref: gen_ai.request.model
     requirement_level: required

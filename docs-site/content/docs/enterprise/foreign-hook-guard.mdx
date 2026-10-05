@@ -291,14 +291,13 @@ for a user and repository. Each line shows the connector, `blocked`,
 `reported` or `allowlisted`, the scope, the file and `sha256:<digest>`.
 
 ```bash
-sudo DEFENSECLAW_CONFIG=/etc/defenseclaw/config.yaml /opt/defenseclaw/bin/defenseclaw-gateway enterprise policy show --user alice --project /home/alice/repo
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise policy show --user alice --project /home/alice/repo
 ```
 
-On macOS use `DEFENSECLAW_CONFIG=/opt/cisco/defenseclaw/etc/config.yaml`
-and `/opt/cisco/defenseclaw/bin/defenseclaw-gateway`. On Windows:
+On macOS use `/opt/cisco/defenseclaw/bin/defenseclaw-gateway`. On Windows,
+from an elevated prompt:
 
 ```powershell
-$env:DEFENSECLAW_CONFIG = 'C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml'
 & 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise policy show --user alice --project C:\src\repo
 ```
 
@@ -314,6 +313,10 @@ Before it changes a user's file, the guardian copies the original to:
 | --- | --- |
 | Linux and macOS | `~/.defenseclaw/foreign-hooks-backup/<connector>/<timestamp>/` |
 | Windows | `%USERPROFILE%\.defenseclaw\foreign-hooks-backup\<connector>\<timestamp>\` |
+
+An uninstall without purge keeps these backups. A purge deletes the whole
+DefenseClaw folder, these backups included, so copy any you want to keep
+first.
 
 `<timestamp>` is UTC, for example `20260926T141500Z`. Each backed-up file
 is named `<12 hex characters>-<original file name>`. Removed plugin files
@@ -366,7 +369,10 @@ with `enterprise_machine_policy_summary_untrusted`.
   they name a foreign plugin.
 - Antigravity, OpenHands and OmniGent have neither a vendor lock nor the
   guard, and neither does Hermes on Windows. Hooks a user or project adds
-  for them run next to DefenseClaw's. See
+  for them run next to DefenseClaw's. `enterprise policy verify` and
+  `policy show` print `foreign_hooks=n/a foreign=-` for them, with a
+  `no foreign-hook guard` note, because nothing counts or removes those
+  hooks. See
   [Residual risks](/docs/enterprise/threat-model#residual-risks).
 - Hermes has no vendor lock and no way to order hooks, so the guard is the
   only control, and it runs inside DefenseClaw's own Hermes hook. A Hermes

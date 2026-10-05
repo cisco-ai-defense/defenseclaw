@@ -22,7 +22,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from rich.markup import escape as rich_escape
 from textual import events, on
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -31,6 +30,7 @@ from textual.css.query import NoMatches
 from textual.screen import ModalScreen
 from textual.widgets import Input, Static
 
+from defenseclaw.tui.markup_safe import escape as rich_escape
 from defenseclaw.tui.theme import DEFAULT_TOKENS
 
 TOKENS = DEFAULT_TOKENS

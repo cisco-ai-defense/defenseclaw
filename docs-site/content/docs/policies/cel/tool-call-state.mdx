@@ -98,27 +98,28 @@ shell call are different events; only the actual tool call enters this path.
 
 ## Pending to successful state
 
-A pre-tool hook describes intent, not execution. If DefenseClaw allows a
-proposal on a connector with authoritative pairing, it stores a bounded,
+A pre-tool hook describes intent, not execution. If DefenseClaw does not block
+a proposal on a connector with authoritative pairing, it stores a bounded,
 content-free pending marker or predecessor projection keyed by the connector
 instance, authenticated session, and strongest invocation identity.
 
 <Sequence
-  caption="Intent becomes durable history only after the same connector contract proves identity and success. Failure, cancellation, ambiguity, expiry, and turn cutoffs discard the pending proposal."
+  caption="A pending step becomes history only after the post-tool event for the same call ID reports success. A failed, cancelled, unknown or expired call is discarded. The store is the gateway's SQLite database, and it keeps hashes and step flags, not command text."
   participants={[
-    { id: 'agent', label: 'Agent runtime', kind: 'agent' },
-    { id: 'hook', label: 'Connector hooks', kind: 'connector' },
-    { id: 'gateway', label: 'DefenseClaw gateway', kind: 'gateway' },
-    { id: 'ledger', label: 'State ledger', kind: 'datastore' },
+    { id: 'agent', label: 'Agent', kind: 'agent' },
+    { id: 'hook', label: 'Connector hook', kind: 'connector' },
+    { id: 'gateway', label: 'Gateway', kind: 'gateway' },
+    { id: 'ledger', label: 'State store', kind: 'datastore' },
   ]}
 >
-  <Message from="agent" to="hook" label="tool proposal" />
-  <Message from="hook" to="gateway" label="authenticated pre-tool event + call ID" />
-  <Message from="gateway" to="ledger" label="store content-free pending marker" />
-  <Message from="gateway" to="hook" kind="return" label="allow / alert / confirm / block" />
-  <Message from="agent" to="hook" label="tool outcome" />
-  <Message from="hook" to="gateway" label="matching authoritative result" />
-  <Message from="gateway" to="ledger" label="commit successful predecessor" />
+  <Message from="agent" to="hook" label="about to run a tool" />
+  <Message from="hook" to="gateway" label="pre-tool event + call ID" />
+  <Message from="gateway" to="ledger" label="check earlier successful steps" />
+  <Message from="gateway" to="ledger" label="if not blocked: save a pending step" />
+  <Message from="gateway" to="hook" kind="return" label="allow · alert · confirm · block" />
+  <Message from="agent" to="hook" label="tool finished" />
+  <Message from="hook" to="gateway" label="post-tool result, same call ID" />
+  <Message from="gateway" to="ledger" label="success: keep the step; else discard" />
 </Sequence>
 
 Only authenticated native `/api/v1/{connector}/hook` events can advance this
@@ -160,6 +161,13 @@ recorded as successful.
 
 State levels have strict meanings:
 
+- `paired-outcomes` — a pre proposal can become pending and only an exact,
+  authoritative matching result can commit it;
+- `detection-only` — pre and post events can be inspected, but post events do
+  not authorize a durable cross-event transition; and
+- `direct-only` — only the current pre-tool proposal is enforceable; there is
+  no trustworthy post outcome for state.
+
 The stateful route is enabled only for a known compatible agent version or an
 explicitly reviewed unversioned default contract. A detected version mismatch,
 unknown pin, or missing lifecycle contract disables state mutation and artifact
@@ -167,13 +175,6 @@ enforcement even if older hook fields still happen to parse. Compatibility loss
 also clears pending state in the exact authenticated session, and the persisted
 fingerprint binds the resolved contract so an older proposal cannot cross a
 contract or agent-version boundary.
-
-- `paired-outcomes` — a pre proposal can become pending and only an exact,
-  authoritative matching result can commit it;
-- `detection-only` — pre and post events can be inspected, but post events do
-  not authorize a durable cross-event transition; and
-- `direct-only` — only the current pre-tool proposal is enforceable; there is
-  no trustworthy post outcome for state.
 
 | Connector / primary contract | Structured proposal events | Result / outcome evidence | Invocation identity | State level |
 | --- | --- | --- | --- | --- |
@@ -188,6 +189,12 @@ contract or agent-version boundary.
 | [OpenCode](https://github.com/anomalyco/opencode/blob/2b72179c663cadcb54f54d9f19221b3fb3d11fb6/packages/plugin/src/index.ts) | `tool.execute.before` | v7 awaits `tool.execute.after` with the executed args and validated result; `bash` additionally requires numeric `metadata.exit=0` | paired `(sessionID, callID)` | `paired-outcomes` |
 | [Amp](https://ampcode.com/manual/plugin-api) | `tool.call` | terminal `tool.result`; `status=done` succeeds, `error` fails, and `cancelled` discards | paired `toolUseID` on both events | `paired-outcomes` |
 | [OmniGent](https://omnigent.ai/docs/policies/custom) | `tool_call` mapped to `PreToolUse` | `tool_result` repeats request data but has no authoritative success/failure field | no stable call or session ID in `PolicyEvent` | `direct-only` |
+| [Kiro](https://kiro.dev/docs/hooks/actions) | `preToolUse` (CLI 2.x) or `PreToolUse` (CLI `--v3` and Kiro IDE), matching every tool | `postToolUse` / `PostToolUse` is audited as result content | none used for state | no lifecycle contract: pre-tool decisions only, like `direct-only` |
+
+Kiro has no reviewed tool-call lifecycle contract, so it never creates pending
+or committed state; each pre-tool call is judged on its own, and the
+fixed chains can't complete on Kiro events. Agents reached through the
+[ACP guard](/docs/acp-guard), such as Zed, are outside this contract too.
 
 Turn-completion events such as Codex, Claude Code, or Cursor `Stop`, OpenCode
 `session.idle`, and Amp `agent.end` discard only unfinished proposals. They
@@ -245,6 +252,7 @@ claims.
 | OpenCode | yes | yes | yes | yes | yes | yes | generic or MCP only |
 | Amp | yes | yes | yes | yes | yes | no dedicated lifecycle | generic or MCP only |
 | OmniGent | yes | yes | yes | yes | yes | yes | generic or MCP only |
+| Kiro | yes (all tools) | yes | yes | yes | yes | no dedicated lifecycle | generic or MCP only |
 
 ## Files written now and executed later
 

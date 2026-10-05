@@ -99,7 +99,7 @@ func TestOnlyTheStandaloneHermesHookRendersTheForeignHookGuard(t *testing.T) {
 	hardening := strings.Index(hook, "defenseclaw_harden_env\n")
 	socket := strings.Index(hook, "if ! defenseclaw_hook_socket_trusted; then")
 	guard := strings.Index(hook, "DEFENSECLAW_FOREIGN_GUARD=")
-	request := strings.Index(hook, "RESPONSE=$(curl")
+	request := strings.Index(hook, "RESPONSE=$(defenseclaw_hook_post)")
 	if capture < 0 || hardening < capture || socket < 0 || guard < socket || request < guard {
 		t.Fatalf("guard order: agent HOME %d, hardening %d, socket check %d, guard %d, request %d", capture, hardening, socket, guard, request)
 	}

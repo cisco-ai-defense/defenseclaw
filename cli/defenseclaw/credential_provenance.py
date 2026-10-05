@@ -36,6 +36,12 @@ _lock = threading.RLock()
 _markers: dict[tuple[str, str], _Marker] = {}
 _active_data_dir: str | None = None
 _active_dotenv_digest: bytes | None = None
+# Every value this process copied from dotenv into os.environ, by name. Unlike
+# _markers it survives a later dotenv change, so child_environ() can still
+# drop a value the TUI injected before the user removed or rotated it.
+_injected_values: dict[str, bytes] = {}
+# The data dir each of those values came from.
+_injected_dirs: dict[str, str] = {}
 
 
 def _normalize_data_dir(data_dir: str) -> str:
@@ -83,6 +89,9 @@ def note_dotenv_candidate(data_dir: str, env_name: str, value: str, *, injected:
     marker_key = (normalized, env_name)
     value_digest = _digest_value(value)
     with _lock:
+        if injected:
+            _injected_values[env_name] = value_digest
+            _injected_dirs[env_name] = normalized
         if normalized != _active_data_dir or _active_dotenv_digest is None:
             _markers.pop(marker_key, None)
             return
@@ -108,11 +117,52 @@ def was_injected_from_dotenv(data_dir: str, env_name: str, value: str) -> bool:
         return True
 
 
+def holds_injected_value(data_dir: str, env_name: str, value: str) -> bool:
+    """Return whether ``value`` is one this process copied from ``data_dir``'s dotenv.
+
+    Unlike :func:`was_injected_from_dotenv` this still holds after the dotenv
+    file changed, so a reload can tell its own stale copy (safe to refresh)
+    from a value the shell exported (which always wins).
+    """
+    with _lock:
+        digest = _injected_values.get(env_name)
+        source = _injected_dirs.get(env_name)
+    return (
+        digest is not None
+        and source == _normalize_data_dir(data_dir)
+        and hmac.compare_digest(digest, _digest_value(value))
+    )
+
+
+def child_environ() -> dict[str, str]:
+    """A copy of ``os.environ`` without the values this process took from dotenv.
+
+    A long-lived parent (the TUI) loads ``~/.defenseclaw/.env`` once. Its
+    DefenseClaw children read that file themselves, so passing the copies on
+    would keep a removed or rotated key alive for them and make every dotenv
+    key look exported by the shell (GAP-1176). A value the shell exported, or
+    one changed since the injection, is kept.
+    """
+    env = dict(os.environ)
+    fold = os.name == "nt"
+    with _lock:
+        injected = {(name.upper() if fold else name): digest for name, digest in _injected_values.items()}
+    if not injected:
+        return env
+    for key in list(env):
+        digest = injected.get(key.upper() if fold else key)
+        if digest is not None and hmac.compare_digest(digest, _digest_value(env[key])):
+            del env[key]
+    return env
+
+
 def _reset_for_tests() -> None:
     """Clear process-local markers between isolated unit-test scenarios."""
     global _active_data_dir, _active_dotenv_digest
 
     with _lock:
         _markers.clear()
+        _injected_values.clear()
+        _injected_dirs.clear()
         _active_data_dir = None
         _active_dotenv_digest = None

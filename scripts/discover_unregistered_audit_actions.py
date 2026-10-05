@@ -55,7 +55,7 @@ PY_LOG_ACTIVITY_RE = re.compile(
     rf'\.log_activity\([^)]*?action\s*=\s*"{ACTION_RE}"',
     re.DOTALL,
 )
-PY_EVENT_ACTION_RE = re.compile(rf'Event\([^)]*?action\s*=\s*"{ACTION_RE}"', re.DOTALL)
+PY_EVENT_ACTION_RE = re.compile(rf'\bEvent\([^)]*?action\s*=\s*"{ACTION_RE}"', re.DOTALL)
 
 
 def load_registered_actions() -> set[str]:

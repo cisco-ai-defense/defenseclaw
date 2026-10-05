@@ -17,16 +17,16 @@ import os
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Generic, Literal, TypeVar
 
-from rich.markup import escape as rich_escape
-
 from defenseclaw.connector_paths import (
+    claude_mcp_state_path,
     connector_config_files,
     connector_home,
     hermes_config_path,
 )
+from defenseclaw.tui.markup_safe import escape as rich_escape
 from defenseclaw.tui.panels.registries import registry_badge
 from defenseclaw.tui.services import connector_filter as connector_filter_svc
 
@@ -133,6 +133,8 @@ class PluginScanSummary:
     total_findings: int = 0
     # E4i: per-severity breakdown (see CatalogScanSummary.severity_counts).
     severity_counts: Mapping[str, int] = field(default_factory=dict)
+    # "YYYY-MM-DD HH:MM:SS UTC" from ``plugin list --json`` (GAP-2201).
+    scanned_at: str = ""
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any] | None) -> PluginScanSummary | None:
@@ -143,6 +145,7 @@ class PluginScanSummary:
             max_severity=str(raw.get("max_severity") or ""),
             total_findings=int(raw.get("total_findings") or 0),
             severity_counts=_parse_severity_counts(raw.get("severity_counts")),
+            scanned_at=str(raw.get("scanned_at") or ""),
         )
 
 
@@ -165,6 +168,8 @@ class CatalogCommandIntent:
     # upgrades a ``"destructive"`` catalog intent to the C1 consequence modal
     # lives in ``app.py`` (the ``tui/app`` lane).
     risk: str = "read-only"
+    # Plain-words effect the confirm modal shows (GAP-2228).
+    consequence: str = ""
 
     @property
     def argv(self) -> tuple[str, ...]:
@@ -236,6 +241,9 @@ class SkillRow:
     connector: str = ""
     # Vendor-managed rows remain visible for discovery, but expose Info only.
     bundled: bool = False
+    # An unscoped (every-connector) block, quarantine or disable, e.g. from
+    # the watcher. ``u`` clears it with the bare unblock (GAP-1820).
+    global_decision: bool = False
 
     @property
     def registry_badge(self) -> str:
@@ -255,6 +263,8 @@ class MCPRow:
     severity: str = ""
     verdict: str = ""
     registry_source: str = ""
+    # Why the agent skips this entry and how to repair it (GAP-2531).
+    not_loaded: str = ""
     # Same denormalization as SkillRow so the detail pane can show
     # the file/runtime/install state without re-parsing the JSON.
     total_findings: int = 0
@@ -351,6 +361,7 @@ class CatalogListModel(Generic[RowT]):
         # reload needed when the operator cycles the shared chip.
         self.show_connector_column = False
         self.connector_filter = ""
+        self.merged_connectors: tuple[str, ...] = ()
 
     def set_connector_filter(self, connector: str) -> None:
         """Narrow the merged rows to one connector ("" = All); re-filters."""
@@ -379,6 +390,7 @@ class CatalogListModel(Generic[RowT]):
         """
 
         rows: list[RowT] = []
+        self.merged_connectors = tuple(connector for connector, _text in results if connector)
         for connector, text in results:
             if not text:
                 continue
@@ -500,6 +512,31 @@ class CatalogListModel(Generic[RowT]):
     def _row_matches_connector_filter(self, row: RowT) -> bool:
         return connector_filter_svc.filter_allows(self.connector_filter, self.row_connector(row))
 
+    def connector_filter_empty_state(self, noun: str) -> str:
+        """Say the shared connector filter hides every row (GAP-1752).
+
+        Without this the panel read "0 of 60 - No plugins detected" while
+        the 60 rows belonged to other connectors.
+        """
+
+        if not (self.connector_filter and self.items and not self.filtered):
+            return ""
+        return (
+            f"No {noun} for {friendly_connector_name(self.connector_filter)}; "
+            f"{len(self.items)} in other connectors. Press m and pick All connectors to see them."
+        )
+
+    def merged_empty_state(self, noun: str) -> str:
+        """Empty state for the merged All view of several connectors (GAP-1806)."""
+
+        if self.connector_filter or not self.show_connector_column or len(self.merged_connectors) < 2:
+            return ""
+        names = ", ".join(friendly_connector_name(name) for name in self.merged_connectors)
+        return (
+            f"No {noun} found for the {len(self.merged_connectors)} active connectors ({names}). "
+            "Press m and pick one connector to see where it looks."
+        )
+
     def selected(self) -> RowT | None:
         if 0 <= self.cursor < len(self.filtered):
             return self.filtered[self.cursor]
@@ -590,8 +627,12 @@ class CatalogListModel(Generic[RowT]):
     def empty_state(self) -> str:
         return ""
 
+    # Plugins show the scan verdict in this column, so they label it Verdict
+    # like ``plugin list`` does (GAP-1749).
+    actions_header = "Actions"
+
     def data_table_columns(self) -> tuple[str, ...]:
-        base = ("Name", "Status", "Source", "Actions", "Details")
+        base = ("Name", "Status", "Source", self.actions_header, "Details")
         if self.show_connector_column:
             return ("Connector", *base)
         return base
@@ -671,7 +712,9 @@ class SkillsPanelModel(CatalogListModel[SkillRow]):
 
     def menu_actions(self) -> tuple[CatalogMenuAction, ...]:
         row = self.selected()
-        return skill_actions(row.status if row else "", bundled=bool(row and row.bundled))
+        if row is None:
+            return skill_actions("")
+        return skill_actions(row.status, bundled=row.bundled, install=row.install_action)
 
     def action_intent(self, key: str, *, origin: str = "action-menu") -> CatalogCommandIntent | None:
         row = self.selected()
@@ -707,14 +750,24 @@ class SkillsPanelModel(CatalogListModel[SkillRow]):
         if key == "r":
             return CatalogPanelAction(True, self.load_intent(), reload_requested=True)
         if key == "R":
-            return CatalogPanelAction(True, registry_focus=self.registry_focus())
+            # With no row R is the global Registries key; it did nothing and
+            # said nothing on an empty list (GAP-2404).
+            focus = self.registry_focus()
+            return CatalogPanelAction(True, registry_focus=focus) if focus else CatalogPanelAction(False)
         return CatalogPanelAction(False)
 
     def empty_state(self) -> str:
         if self.filter_text:
             return "No skills match the filter."
         if not self.loaded:
+            if self.loading:
+                # A first visit loads by itself; "Press r" read as if it
+                # had to be asked for (GAP-1402).
+                return 'Loading skills... (runs "defenseclaw skill list --json")'
             return 'Press "r" to load skills. Runs "defenseclaw skill list --json".'
+        merged = self.connector_filter_empty_state("skills") or self.merged_empty_state("skills")
+        if merged:
+            return merged
         return (
             f"No skills found in {connector_source_label(self.connector, 'skills')} "
             f"(active connector: {friendly_connector_name(self.connector)})."
@@ -764,6 +817,9 @@ class MCPsPanelModel(CatalogListModel[MCPRow]):
     def blocked_count(self) -> int:
         return sum(1 for row in self.items if row.status == "blocked")
 
+    def not_loaded_count(self) -> int:
+        return sum(1 for row in self.items if row.not_loaded)
+
     def menu_actions(self) -> tuple[CatalogMenuAction, ...]:
         row = self.selected()
         return mcp_actions(row.status if row else "", self.connector)
@@ -804,25 +860,47 @@ class MCPsPanelModel(CatalogListModel[MCPRow]):
         if key == "r":
             return CatalogPanelAction(True, self.load_intent(), reload_requested=True)
         if key == "R":
-            return CatalogPanelAction(True, registry_focus=self.registry_focus())
+            # With no row R is the global Registries key; it did nothing and
+            # said nothing on an empty list (GAP-2404).
+            focus = self.registry_focus()
+            return CatalogPanelAction(True, registry_focus=focus) if focus else CatalogPanelAction(False)
         return CatalogPanelAction(False)
 
     def empty_state(self) -> str:
         if self.filter_text:
             return "No MCP servers match the filter."
         if not self.loaded:
+            if self.loading:
+                # A first visit loads by itself; "Press r" read as if it
+                # had to be asked for (GAP-1402).
+                return 'Loading MCP servers... (runs "defenseclaw mcp list --json")'
             return 'Press "r" to load MCP servers. Runs "defenseclaw mcp list --json".'
-        return (
-            f"No MCP servers configured in {connector_source_label(self.connector, 'mcps')} "
-            f"(active connector: {friendly_connector_name(self.connector)})."
-        )
+        merged = self.connector_filter_empty_state("MCP servers") or self.merged_empty_state("MCP servers")
+        if merged:
+            return merged
+        name = friendly_connector_name(self.connector)
+        source = connector_source_label(self.connector, "mcps")
+        if not source:
+            return f"No MCP servers found for {name}."
+        return f"No MCP servers configured in {source} (active connector: {name})."
 
 
 class PluginsPanelModel(CatalogListModel[PluginRow]):
     """Pure Plugins panel state and action-intent mapping."""
 
+    actions_header = "Verdict"
+
+    def data_table_columns(self) -> tuple[str, ...]:
+        # The verdict comes before the long Source path, so it stays on
+        # screen at 80 columns (GAP-1905).
+        return _verdict_before_source(super().data_table_columns())
+
+    def data_table_rows(self) -> tuple[tuple[str, ...], ...]:
+        return tuple(_verdict_before_source(row) for row in super().data_table_rows())
+
     def __init__(self, *, connector: str = "") -> None:
-        super().__init__()
+        # Without filter fields the filter matched every row (GAP-1520).
+        super().__init__(filter_fields=("id", "name", "description", "origin", "status", "verdict"))
         self.connector = connector
 
     def load_intent(self) -> CatalogCommandIntent:
@@ -903,8 +981,17 @@ class PluginsPanelModel(CatalogListModel[PluginRow]):
         return CatalogPanelAction(False)
 
     def empty_state(self) -> str:
+        if self.filter_text and self.items:
+            return "No plugins match the filter."
         if not self.loaded:
+            if self.loading:
+                # A first visit loads by itself; "Press r" read as if it
+                # had to be asked for (GAP-1402).
+                return 'Loading plugins... (runs "defenseclaw plugin list --json")'
             return 'Press "r" to load plugins. Runs "defenseclaw plugin list --json".'
+        merged = self.connector_filter_empty_state("plugins") or self.merged_empty_state("plugins")
+        if merged:
+            return merged
         return (
             f"No plugins detected. Plugins extend {friendly_connector_name(self.connector)} with tools and hooks. "
             'Use : then "plugin install <name>" to add one.'
@@ -915,7 +1002,7 @@ class ToolsPanelModel(CatalogListModel[ToolRow]):
     """Pure Tools panel state backed by audit-store tool action rows."""
 
     def __init__(self, store: object | None = None, *, connector: str = "") -> None:
-        super().__init__()
+        super().__init__(filter_fields=("name", "scope", "status", "reason", "target_name"))
         self.store = store
         self.connector = connector
 
@@ -1017,9 +1104,10 @@ class ToolsPanelModel(CatalogListModel[ToolRow]):
         if key == "o":
             return CatalogPanelAction(True, open_action_menu=self.selected() is not None)
         if key in {"b", "a", "u"}:
-            intent = (
-                self.action_intent(key, origin="tools") if self.selected() and self.action_key_available(key) else None
-            )
+            if self.selected() is None:
+                # b/a on an empty table did nothing and said nothing (GAP-1486).
+                return CatalogPanelAction(True, hint=TOOLS_ADD_HINT)
+            intent = self.action_intent(key, origin="tools") if self.action_key_available(key) else None
             return CatalogPanelAction(True, intent)
         if key == "r":
             return CatalogPanelAction(
@@ -1035,13 +1123,22 @@ class ToolsPanelModel(CatalogListModel[ToolRow]):
         return (
             f"[bold #22D3EE]{title}[/]\n"
             f"{len(self.filtered)} of {len(self.items)} policy rows{filter_text}{detail}\n"
-            "[dim]Rows:[/] block/allow policy only; unblocked tools disappear from this table.\n"
-            "[dim]Navigate:[/] j/k move  ·  Enter detail  ·  / filter  ·  Esc close  ·  r refresh\n"
-            "[dim]Actions:[/]  o open menu  ·  b block  ·  a allow  ·  u unblock"
+            # The keys are on the hint bar; repeating them here left no
+            # room for rows at 80x24 (GAP-1541).
+            "[dim]Rows:[/] block/allow policy only; unblocked tools disappear from this table."
         )
 
     def empty_state(self) -> str:
-        return "No tool policy rows. This table only shows block/allow entries; unblocked tools disappear here."
+        if self.filter_text and self.items:
+            return "No tool rules match the filter."
+        hidden = self.connector_filter_empty_state("tool rules")
+        if hidden:
+            return hidden
+        # The summary above already says what the table holds (GAP-1541).
+        return "No tool policy rows yet. " + TOOLS_ADD_HINT
+
+
+TOOLS_ADD_HINT = "To add a rule, press : and type: tool block <tool-name> --connector <connector> (or tool allow)."
 
 
 def parse_skill_list_json(text: str) -> tuple[SkillRow, ...]:
@@ -1086,7 +1183,12 @@ def skill_list_to_row(raw: Mapping[str, Any]) -> SkillRow:
     actions = CatalogActionState.from_mapping(_mapping_or_none(raw.get("actions")))
     severity = scan.max_severity if scan is not None else ""
     scan_mismatch = ""
-    if scan is not None and not scan.clean:
+    if "verdict" in raw:
+        # `skill list` reports the admission policy's verdict; use it so the
+        # Skills panel agrees with the CLI and the Inventory.
+        if str(raw.get("verdict") or "") in {"rejected", "warning"}:
+            scan_mismatch = str(raw["verdict"])
+    elif scan is not None and not scan.clean:
         severity_upper = severity.upper()
         if severity_upper in {"CRITICAL", "HIGH"}:
             scan_mismatch = "rejected"
@@ -1109,12 +1211,14 @@ def skill_list_to_row(raw: Mapping[str, Any]) -> SkillRow:
         status = "blocked"
     elif status_field == "disabled":
         status = "disabled"
+    elif source in {"enforcement", "scan-history"} and not bool(raw.get("eligible")):
+        # Gone from disk: the CLI says "removed"; the verdict stays in its
+        # own column (GAP-1598).
+        status = "removed"
     elif scan_mismatch:
         status = scan_mismatch
     elif bool(raw.get("eligible")):
         status = "active"
-    elif source in {"enforcement", "scan-history"}:
-        status = "removed"
     else:
         status = "inactive"
 
@@ -1135,6 +1239,7 @@ def skill_list_to_row(raw: Mapping[str, Any]) -> SkillRow:
         runtime_action=actions.runtime,
         connector=str(raw.get("connector") or ""),
         bundled=bool(raw.get("bundled")),
+        global_decision=bool(raw.get("global_decision")),
     )
 
 
@@ -1187,6 +1292,10 @@ def mcp_list_to_row(raw: Mapping[str, Any]) -> MCPRow:
         status = "disabled"
     elif actions.install == "allow":
         status = "allowed"
+    not_loaded = str(raw.get("not_loaded_repair") or raw.get("not_loaded") or "")
+    if not_loaded and status == "active":
+        # The agent skips it, so it is not live (GAP-2531).
+        status = "not loaded"
     return MCPRow(
         name=str(raw.get("name") or ""),
         connector=str(raw.get("connector") or ""),
@@ -1197,6 +1306,7 @@ def mcp_list_to_row(raw: Mapping[str, Any]) -> MCPRow:
         server_url=str(raw.get("url") or ""),
         severity=str(raw.get("severity") or scan.max_severity if scan else ""),
         verdict=str(raw.get("verdict") or ""),
+        not_loaded=not_loaded,
         total_findings=scan.total_findings if scan is not None else 0,
         scan_clean=scan.clean if scan is not None else True,
         scan_target=scan.target if scan is not None else "",
@@ -1374,9 +1484,18 @@ def format_tool_time(value: object) -> str:
     return ""
 
 
-def skill_actions(status: str, *, bundled: bool = False) -> tuple[CatalogMenuAction, ...]:
+def skill_actions(status: str, *, bundled: bool = False, install: str = "") -> tuple[CatalogMenuAction, ...]:
     if bundled:
         return (CatalogMenuAction("i", "Info", "Show full details"),)
+    if install == "block" and status != "blocked":
+        # A watcher block also disables (and may quarantine) the skill, so its
+        # status reads "disabled"; it still needs Unblock, not Block (GAP-1820).
+        base = [action for action in skill_actions(status) if action.key not in {"b", "a"}]
+        return (
+            *base,
+            CatalogMenuAction("u", "Unblock", "Remove from block list"),
+            CatalogMenuAction("a", "Allow", "Pin as allow-listed"),
+        )
     actions = [
         CatalogMenuAction("s", "Scan", "Run security scan"),
         CatalogMenuAction("i", "Info", "Show full details"),
@@ -1458,7 +1577,7 @@ def plugin_actions(verdict: str, status: str, enabled: bool) -> tuple[CatalogMen
         CatalogMenuAction("i", "Info", "Show full details"),
     ]
     if verdict == "blocked":
-        actions.append(CatalogMenuAction("u", "Unblock", "Remove from block list (runs plugin allow)"))
+        actions.append(CatalogMenuAction("u", "Unblock", "Remove from block list (runs plugin unblock)"))
     elif verdict == "allowed":
         actions.append(CatalogMenuAction("b", "Block", "Add to install block list"))
     else:
@@ -1536,10 +1655,15 @@ def skill_action_intent(key: str, row: SkillRow, *, origin: str, connector: str 
         return None
     verb, label_prefix = verbs[key]
     args = ["skill", verb, row.name]
-    if connector and key in _SKILL_CONNECTOR_VERBS:
+    label = f"{label_prefix} {row.name}"
+    if key == "u" and row.global_decision:
+        # A connector-scoped unblock leaves a global block in force and only
+        # says so, while the TUI reported "Done" (GAP-1820).
+        label += " (every connector)"
+    elif connector and key in _SKILL_CONNECTOR_VERBS:
         args.extend(("--connector", connector))
     return CatalogCommandIntent(
-        label=f"{label_prefix} {row.name}",
+        label=label,
         args=tuple(args),
         origin=origin,
     )
@@ -1582,7 +1706,9 @@ def plugin_action_intent(key: str, row: PluginRow, *, origin: str, connector: st
         "i": ("info", "info plugin"),
         "b": ("block", "block plugin"),
         "a": ("allow", "allow plugin"),
-        "u": ("allow", "unblock plugin"),
+        # ``plugin unblock`` clears enforcement without an allow entry; ``allow``
+        # here allow-listed the plugin over later scan verdicts (GAP-1530).
+        "u": ("unblock", "unblock plugin"),
         "d": ("disable", "disable plugin"),
         "e": ("enable", "enable plugin"),
         "q": ("quarantine", "quarantine plugin"),
@@ -1603,7 +1729,29 @@ def plugin_action_intent(key: str, row: PluginRow, *, origin: str, connector: st
         # N1: plugin remove (``x``) deletes files from disk — flag it so the
         # dispatcher routes it through the destructive/consequence confirm.
         risk="destructive" if key == "x" else "read-only",
+        consequence=_plugin_consequence(key, row),
     )
+
+
+def _plugin_consequence(key: str, row: PluginRow) -> str:
+    if key == "b" and not row.enabled and row.status != "quarantined":
+        # GAP-2313: a disabled copy does not load, so don't say it keeps loading.
+        return f"Block refuses new installs of {row.display_name}; the installed copy is disabled, so it does not load."
+    return _PLUGIN_CONSEQUENCES.get(key, "").format(name=row.display_name)
+
+
+# The confirm said only "This enforce command can change DefenseClaw state."
+# (GAP-2228); block does not stop an installed copy.
+_PLUGIN_CONSEQUENCES: Mapping[str, str] = {
+    "b": (
+        "Block refuses new installs of {name}; the installed copy keeps loading "
+        "until you quarantine or disable it."
+    ),
+    "u": (
+        "Unblock clears DefenseClaw's block, allow, quarantine and disable entries for {name}; "
+        "it keeps the on/off setting from the agent's own config."
+    ),
+}
 
 
 def tool_action_intent(key: str, row: ToolRow, *, origin: str, connector: str = "") -> CatalogCommandIntent | None:
@@ -1717,6 +1865,10 @@ def connector_source_label(connector: str, category: str) -> str:
     claude_config = connector_config_files("claudecode")[0]
     codex_config = connector_config_files("codex")[0]
     devin_root = connector_home("devin")
+    try:
+        hermes_config = hermes_config_path()
+    except ValueError:  # an invalid HERMES_HOME; still name the default file
+        hermes_config = "~/.hermes/config.yaml"
     opencode_plugin = connector_config_files("opencode")[0]
     opencode_mcp_sources = [
         "authenticated remote .well-known/opencode (mcp; provenance unverified locally)",
@@ -1774,12 +1926,23 @@ def connector_source_label(connector: str, category: str) -> str:
         ),
         ("omnigent", "skills"): ("unsupported by the OmniGent connector",),
         ("openclaw", "mcps"): ("openclaw config get mcp.servers", "openclaw.json (mcp.servers)"),
-        ("claudecode", "mcps"): (f"{claude_config} (mcpServers)", "./.mcp.json"),
+        ("claudecode", "mcps"): (
+            f"{claude_mcp_state_path()} (mcpServers)",
+            f"{claude_config} (mcpServers)",
+            "./.mcp.json",
+        ),
         ("codex", "mcps"): (
             f"{codex_config} ([mcp_servers])",
             "./.codex/config.toml ([mcp_servers]; trusted projects only)",
         ),
         ("zeptoclaw", "mcps"): ("~/.zeptoclaw/config.json (mcp.servers)", "./.mcp.json"),
+        # The files the gateway reads (internal/config/claw.go); without an
+        # entry the empty state read "configured in  (active connector:
+        # Hermes)" (GAP-1935).
+        ("hermes", "mcps"): (f"{hermes_config} (mcp_servers)",),
+        ("cursor", "mcps"): ("~/.cursor/mcp.json", "./.cursor/mcp.json"),
+        ("copilot", "mcps"): ("~/.copilot/mcp-config.json", "./.github/mcp.json", "./.mcp.json"),
+        ("openhands", "mcps"): ("~/.openhands/mcp.json",),
         ("devin", "mcps"): (
             os.path.join(devin_root, "mcp_config.json"),
             "./.devin/mcp_config.json",
@@ -1875,6 +2038,24 @@ def load_rows_from_command(
     return parser(result.stdout)
 
 
+def _verdict_before_source(cells: tuple[str, ...]) -> tuple[str, ...]:
+    """Swap the Source and Verdict cells (the 3rd and 2nd from last)."""
+
+    *head, source, verdict, details = cells
+    return (*head, verdict, source, details)
+
+
+def _plugin_status(row: PluginRow) -> str:
+    """The plugin Status shown in the table and the detail (GAP-2369)."""
+
+    status = row.status or ("enabled" if row.enabled else "disabled")
+    if status == "blocked":
+        # A block only refuses new installs; Status shows whether the
+        # installed copy loads, Verdict says it is blocked (GAP-2228).
+        status = "enabled" if row.enabled else "disabled"
+    return status
+
+
 def catalog_row_cells(row: object) -> tuple[str, str, str, str, str]:
     if isinstance(row, SkillRow):
         source = " ".join(part for part in (row.source, row.registry_badge) if part)
@@ -1885,9 +2066,8 @@ def catalog_row_cells(row: object) -> tuple[str, str, str, str, str]:
         detail = row.server_url or row.command or row.verdict or row.severity
         return (row.name, row.status, source, row.actions, _truncate(detail, 72))
     if isinstance(row, PluginRow):
-        status = row.status or ("enabled" if row.enabled else "disabled")
         detail = row.description or row.origin or row.verdict
-        return (row.display_name, status, row.origin, row.verdict or "-", _truncate(detail, 72))
+        return (row.display_name, _plugin_status(row), row.origin, row.verdict or "-", _truncate(detail, 72))
     if isinstance(row, ToolRow):
         return (row.name, row.status, row.display_scope, "-", _truncate(row.reason, 72))
     return ("", "", "", "", "")
@@ -1936,6 +2116,7 @@ _STATUS_COLOR: Mapping[str, str] = {
     "rejected": "#F87171",
     "quarantined": "#F87171",
     "warning": "#FBBF24",
+    "not loaded": "#FBBF24",
     "disabled": "#94A3B8",
     "removed": "#94A3B8",
     "inactive": "#94A3B8",
@@ -2066,7 +2247,7 @@ def _format_skill_detail(row: SkillRow) -> str:
     if row.reason:
         lines.append(f"  Reason     {_esc(row.reason)}")
     lines.append("")
-    lines.append(_skill_action_legend(row.status))
+    lines.append(_action_legend(skill_actions(row.status, bundled=row.bundled, install=row.install_action)))
     return "\n".join(lines)
 
 
@@ -2091,22 +2272,67 @@ def _format_mcp_detail(row: MCPRow) -> str:
         lines.append(f"  Verdict    {_esc(row.verdict)}")
     if row.reason:
         lines.append(f"  Reason     {_esc(row.reason)}")
+    if row.not_loaded:
+        lines.append(f"  Not loaded {_esc(row.not_loaded)}")
     lines.append("")
     lines.append(_mcp_action_legend(row.status))
     return "\n".join(lines)
 
 
-def _format_plugin_detail(row: PluginRow) -> str:
-    status = row.status or ("enabled" if row.enabled else "disabled")
-    enabled_label = "yes" if row.enabled else "no"
-    lines = [
-        f"[bold #22D3EE]Plugin[/] {_esc(row.display_name)}",
-        f"  Status     {_format_status(status)}    Enabled  {enabled_label}",
-    ]
+# A plugin description longer than this ends with "…" in the detail pane,
+# which is only a few rows high (GAP-2048); a line under it points to
+# o, then Info, which prints it in full; A opens that output (GAP-2314, GAP-2370).
+PLUGIN_DESCRIPTION_MAX = 160
+PLUGIN_DESCRIPTION_MORE = "  Full description: press o, then Info, then A for its output"
+
+
+# A plugin scan younger than this is "just scanned": the detail neither
+# offers a rescan nor sends the user to s to see its findings (GAP-2437).
+PLUGIN_RECENT_SCAN_MINUTES = 60
+
+
+def _scan_age_minutes(scanned_at: str, now: datetime | None = None) -> int | None:
+    """Minutes since a plugin scan time, or None when it doesn't parse."""
+
+    try:
+        when = datetime.strptime(scanned_at, "%Y-%m-%d %H:%M:%S UTC").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    return max(0, int(((now or datetime.now(timezone.utc)) - when).total_seconds() // 60))
+
+
+def _scanned_line(scanned_at: str, now: datetime | None = None) -> str:
+    """``2026-10-02 16:53Z (15 h ago)`` for a plugin scan time, or "".
+
+    A verdict from a scan many builds old read as current (GAP-2401).
+    """
+
+    minutes = _scan_age_minutes(scanned_at, now)
+    if minutes is None:
+        return _esc(scanned_at)
+    when = datetime.strptime(scanned_at, "%Y-%m-%d %H:%M:%S UTC").replace(tzinfo=timezone.utc)
+    if minutes < 60:
+        age = f"{minutes} min"
+    elif minutes < 48 * 60:
+        age = f"{minutes // 60} h"
+    else:
+        age = f"{minutes // (24 * 60)} d"
+    return f"{when:%Y-%m-%d %H:%M}Z ({age} ago)"
+
+
+def _format_plugin_detail(row: PluginRow, now: datetime | None = None) -> str:
+    status = _plugin_status(row)
+    status_line = f"  Status     {_format_status(status)}"
+    # "Status enabled  Enabled yes" said the same thing twice (GAP-2048).
+    if status.lower() not in {"enabled", "disabled"}:
+        status_line += f"    Enabled  {'yes' if row.enabled else 'no'}"
+    lines = [f"[bold #22D3EE]Plugin[/] {_esc(row.display_name)}", status_line]
     if row.version:
         lines.append(f"  Version    {_esc(row.version)}")
     if row.origin:
         lines.append(f"  Origin     {_esc(row.origin)}")
+    age = _scan_age_minutes(row.scan.scanned_at, now) if row.scan is not None and row.scan.scanned_at else None
+    recent_scan = age is not None and age < PLUGIN_RECENT_SCAN_MINUTES
     if row.scan is not None:
         # E4i: plugin scans carry the same per-severity breakdown; reuse
         # ``_scan_line`` (no target for plugins) so the rendering matches
@@ -2121,11 +2347,38 @@ def _format_plugin_detail(row: PluginRow) -> str:
                 row.scan.severity_counts,
             )
         )
-    if row.verdict and row.verdict not in {status, row.scan.max_severity if row.scan else ""}:
+        if row.scan.scanned_at:
+            scanned = f"  Scanned    {_scanned_line(row.scan.scanned_at, now)}"
+            if not recent_scan:
+                scanned += " · press s to rescan with this build"
+            lines.append(scanned)
+    if row.verdict == "rejected":
+        # Same meaning as the CLI scan's "policy: rejected" line (GAP-2048). q is not a
+        # row key (GAP-2111): Quarantine lives in the o actions menu.
+        lines.append(
+            "  Verdict    rejected: the policy refuses it at install; this copy still loads until you act (o, then Quarantine)"
+        )
+    elif row.verdict and row.verdict not in {status, row.scan.max_severity if row.scan else ""}:
         lines.append(f"  Verdict    {_esc(row.verdict)}")
+    if row.scan is not None and row.scan.total_findings > 0:
+        # The list payload has only the counts; say where the findings are.
+        flag = f" --connector {row.connector}" if row.connector else ""
+        command = f"defenseclaw plugin scan {_esc(row.id)}{_esc(flag)}"
+        if recent_scan:
+            # A scan run from here prints them in Activity (GAP-2437).
+            lines.append(f"  Findings   listed in the scan output (A), or run: {command}")
+        else:
+            lines.append(f"  Findings   press s to rescan and list them, or run: {command}")
     if row.description:
+        description = " ".join(row.description.split())
+        cut_off = len(description) > PLUGIN_DESCRIPTION_MAX
+        if cut_off:
+            cut = description[: PLUGIN_DESCRIPTION_MAX - 1].rsplit(" ", 1)[0].rstrip(" ,.;:")
+            description = f"{cut}\u2026"
         lines.append("")
-        lines.append(f"  {_esc(row.description)}")
+        lines.append(f"  {_esc(description)}")
+        if cut_off:
+            lines.append(f"[dim]{PLUGIN_DESCRIPTION_MORE}[/]")
     lines.append("")
     lines.append(_plugin_action_legend(row.verdict, status, row.enabled))
     return "\n".join(lines)
@@ -2170,10 +2423,6 @@ def _action_legend(actions: tuple[CatalogMenuAction, ...]) -> str:
     if menu_only:
         chunks.append("\\[o] more: " + _esc(", ".join(menu_only)))
     return "  [dim]Actions:[/] " + "  ·  ".join(chunks)
-
-
-def _skill_action_legend(status: str) -> str:
-    return _action_legend(skill_actions(status))
 
 
 def _mcp_action_legend(status: str) -> str:

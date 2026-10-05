@@ -81,7 +81,15 @@ func applyTrustedActionContextDisposition(
 					trustedActionContextFindingProof(finding.RuleID, enforcementFacts),
 				)
 			case trustedActionSensitivePathRead:
+				// A local read of a credential path is MEDIUM: alert, do not
+				// block. Detection-only would also hide it from alerts
+				// (GAP-1516); never promote a finding that an earlier
+				// boundary already made detection-only.
+				detectionOnly := finding.enforcement == findingEnforcementDetectionOnly
 				finding = trustedActionAdvisoryFinding(finding)
+				if !detectionOnly {
+					finding.enforcement = findingEnforcementAlertOnly
+				}
 			default:
 				// A path-shaped string without a matching, command-owned path
 				// fact is a harmless reference, not a filesystem action.

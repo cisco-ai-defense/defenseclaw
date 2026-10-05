@@ -13,8 +13,10 @@
 package enterpriseunix
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -92,10 +94,23 @@ func (e *Env) validateConfig(raw []byte) (*validatedConfig, error) {
 func (e *Env) validateConfigSource(raw []byte, source string) (*validatedConfig, error) {
 	validated, err := e.checkConfig(raw)
 	if err != nil {
+		if plain, ok := e.plainConfigProblem(err, source, raw); ok {
+			return nil, &plainConfigError{msg: plain, err: err}
+		}
 		return nil, e.explainConfigError(err, source)
 	}
 	return validated, nil
 }
+
+// plainConfigError is a config problem in plain words; it keeps the
+// diagnostic for errors.As.
+type plainConfigError struct {
+	msg string
+	err error
+}
+
+func (e *plainConfigError) Error() string { return e.msg }
+func (e *plainConfigError) Unwrap() error { return e.err }
 
 // explainConfigError rewrites a config error for the managed host: it names
 // the administrator's file, and a config_version problem says how to fix the
@@ -234,7 +249,7 @@ func (e *Env) checkRulePackDirs(cfg *config.Config) error {
 	if err != nil {
 		return fmt.Errorf("embedded vendor policies: %w", err)
 	}
-	for _, label := range sortedKeys(dirs) {
+	for _, label := range rulePackCheckOrder(dirs) {
 		dir := strings.TrimSpace(dirs[label])
 		if dir == "" {
 			continue
@@ -250,10 +265,122 @@ func (e *Env) checkRulePackDirs(cfg *config.Config) error {
 			continue
 		}
 		if info, err := os.Stat(e.P(clean)); err != nil || !info.IsDir() {
-			return fmt.Errorf("config %s %q does not exist; install the rule pack first or use %s", label, dir, filepath.Join(e.Layout.VendorPolicyDir, "guardrail", "default"))
+			// The shipped packs exist under the vendor folder only once a
+			// deployment is installed, so a first install cannot copy from
+			// there (GAP-1429): the source release has the same packs.
+			shipped := filepath.Join(e.Layout.VendorPolicyDir, "guardrail", "default")
+			return fmt.Errorf("config %s %q does not exist; create the pack there before you apply the config, starting from a copy of policies/guardrail/default in the DefenseClaw source release (installed hosts also have it at %s), or set it to %s, which the deployment installs", label, dir, shipped, shipped)
 		}
 	}
 	return nil
+}
+
+// checkRulePacksReadable refuses an administrator rule pack the gateway's
+// service account cannot read. The lifecycle runs as root, which reads any
+// mode, so a pack written under umask 077 passed every other check and
+// failed only when the gateway started; an unset rule_pack_dir resolves to
+// the same <policy_dir>/guardrail/default folder, so the rollback failed too.
+func (e *Env) checkRulePacksReadable(v *validatedConfig, account Account) error {
+	for _, label := range rulePackCheckOrder(v.RulePacks) {
+		dir := v.RulePacks[label]
+		if dir == e.Layout.VendorPolicyDir || strings.HasPrefix(dir, e.Layout.VendorPolicyDir+"/") {
+			continue
+		}
+		if err := e.rulePackReadable(dir, account); err != nil {
+			return fmt.Errorf("config %s %q: %w", label, dir, err)
+		}
+	}
+	return nil
+}
+
+// RulePackServiceReadProblem says why the gateway service account could not
+// read the rule pack at dir. It returns "" when the account can read it or
+// the host has no service account. `rulepack validate` runs as an
+// administrator, who reads any mode, so without this a pack the gateway
+// cannot load still validated.
+func (e *Env) RulePackServiceReadProblem(ctx context.Context, dir string) string {
+	account, ok, err := e.Accounts.Lookup(ctx, e.Layout.ServiceUser)
+	if err != nil || !ok {
+		return ""
+	}
+	if err := e.rulePackReadable(filepath.Clean(dir), account); err != nil {
+		return err.Error()
+	}
+	return ""
+}
+
+func (e *Env) rulePackReadable(dir string, account Account) error {
+	for parent := filepath.Dir(dir); parent != "/" && parent != "."; parent = filepath.Dir(parent) {
+		uid, gid, mode, err := statOwnerMode(e.P(parent))
+		if err == nil && mode.IsDir() && !accountMayAccess(uid, gid, mode, account, 0o1) {
+			return fmt.Errorf("%s is %04o, so the %s service account cannot reach the rule pack below it; make it traversable (for example: chmod o+x %s) and retry", parent, mode.Perm(), e.Layout.ServiceUser, parent)
+		}
+	}
+	root := e.P(dir)
+	return filepath.WalkDir(root, func(full string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		uid, gid, mode, err := statOwnerMode(full)
+		if err != nil {
+			return err
+		}
+		need := os.FileMode(0o4)
+		switch {
+		case mode.IsDir():
+			need = 0o5
+		case !mode.IsRegular():
+			return nil
+		}
+		if accountMayAccess(uid, gid, mode, account, need) {
+			return nil
+		}
+		shown := dir
+		if rel, relErr := filepath.Rel(root, full); relErr == nil && rel != "." {
+			shown = filepath.Join(dir, rel)
+		}
+		return fmt.Errorf("%s is %04o, so the %s service account cannot read the rule pack; make it readable (for example: chmod -R u=rwX,go=rX %s) and retry", shown, mode.Perm(), e.Layout.ServiceUser, dir)
+	})
+}
+
+// accountMayAccess reports whether account has the need bits (4 read,
+// 1 search) on a path with this owner, group and mode. Supplementary
+// groups are not considered: the service account has none.
+func accountMayAccess(uid, gid int, mode os.FileMode, account Account, need os.FileMode) bool {
+	perm := mode.Perm()
+	switch {
+	case uid == account.UID:
+		perm >>= 6
+	case gid == account.GID:
+		perm >>= 3
+	}
+	return perm&need == need
+}
+
+// rulePackCheckOrder orders the rule-pack settings for a check:
+// guardrail.rule_pack_dir first, then each connector setting whose pack
+// differs from it. A connector that only inherits the global pack is not
+// checked again, so a refusal names the key the administrator wrote: it
+// named guardrail.connectors.amp.rule_pack_dir, which sorts first, for a
+// config that set only guardrail.rule_pack_dir (GAP-1193).
+func rulePackCheckOrder(dirs map[string]string) []string {
+	const global = "guardrail.rule_pack_dir"
+	globalDir, hasGlobal := dirs[global]
+	globalDir = strings.TrimSpace(globalDir)
+	order := []string{}
+	if hasGlobal {
+		order = append(order, global)
+	}
+	for _, label := range sortedKeys(dirs) {
+		if label == global {
+			continue
+		}
+		if dir := strings.TrimSpace(dirs[label]); hasGlobal && globalDir != "" && filepath.Clean(dir) == filepath.Clean(globalDir) {
+			continue
+		}
+		order = append(order, label)
+	}
+	return order
 }
 
 // effectiveRulePackDirs maps each rule-pack setting of cfg to the pack the

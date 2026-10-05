@@ -177,6 +177,10 @@ func (a *App) probeDaemon(ctx context.Context) *statusProbe {
 		case !st.Available:
 			p.listening = st.IngressAddr != ""
 			c.Status, c.Detail = openshell.StatusFail, "running, but sandboxes are unavailable: "+firstNonEmpty(st.Reason, "not connected to OpenShell")
+		case st.DockerGroupMissing:
+			p.listening, p.available, p.ingress = true, true, st.IngressAddr
+			c.Status, c.Detail = openshell.StatusFail, "running, but it started before you joined the docker group, so it cannot reach Docker"
+			c.Fix = &openshell.Fix{Summary: "restart it so it picks up the group", Command: "defenseclaw-gateway restart"}
 		default:
 			p.listening, p.available, p.ingress = true, true, st.IngressAddr
 			c.Status = openshell.StatusPass
@@ -486,7 +490,7 @@ func (a *App) printDoctor(rep *openshell.DoctorReport) {
 			if c.Fix.Command != "" {
 				fix += ": " + c.Fix.Command
 			}
-			if c.Fix.Automatic {
+			if c.Fix.Automatic && c.Fix.Command != CommandName+" doctor --fix" {
 				fix += "  (" + CommandName + " doctor --fix)"
 			}
 			a.line("  " + a.dim("→ "+fix))

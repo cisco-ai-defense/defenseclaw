@@ -508,6 +508,11 @@ func TestKiroSetupRewritesRegexToolMatcherFromEarlierReleases(t *testing.T) {
 			t.Fatalf("%s DefenseClaw entries after upgrade = %#v, want one with matcher \"*\"", spec.event, ours)
 		}
 	}
+	// Kiro CLI 2.x wraps even an empty userPromptSubmit result in a context
+	// entry the model reads as instructions, so the upgrade drops it.
+	if prompt, ok := agentHooks["userPromptSubmit"]; ok {
+		t.Fatalf("userPromptSubmit still registered after upgrade: %#v", prompt)
+	}
 	pre, _ := agentHooks["preToolUse"].([]interface{})
 	if len(pre) != 2 {
 		t.Fatalf("preToolUse = %#v, want the operator entry and DefenseClaw's", pre)
@@ -785,6 +790,33 @@ func TestKiroSetupProducesEffectiveHookRegistration(t *testing.T) {
 		t.Fatalf("after the timeout repair: present=%v err=%v", present, err)
 	}
 	assertKiroV2AgentHooks(t, agentPath, conn.hookCommand(opts))
+
+	// Kiro skips a hook with "enabled": false, and the Agent Hooks panel or
+	// the user can set it. A global file whose DefenseClaw entry is turned
+	// off fails the check, so the guardian repairs it.
+	hooksPath := conn.hookConfigPaths(opts)[0]
+	var hooksFile map[string]interface{}
+	if data, err := os.ReadFile(hooksPath); err != nil || json.Unmarshal(data, &hooksFile) != nil {
+		t.Fatalf("read hooks %s: %v", hooksPath, err)
+	}
+	for _, item := range hooksFile["hooks"].([]interface{}) {
+		if entry := item.(map[string]interface{}); entry["trigger"] == "PreToolUse" {
+			entry["enabled"] = false
+		}
+	}
+	disabled, _ := json.Marshal(hooksFile)
+	if err := os.WriteFile(hooksPath, disabled, 0o600); err != nil {
+		t.Fatalf("write disabled hooks: %v", err)
+	}
+	if present, err = OwnedHooksPresent(conn, opts); err != nil || present {
+		t.Fatalf("hooks with PreToolUse turned off: present=%v err=%v, want not present", present, err)
+	}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("repair Setup: %v", err)
+	}
+	if present, err = OwnedHooksPresent(conn, opts); err != nil || !present {
+		t.Fatalf("after the enabled repair: present=%v err=%v", present, err)
+	}
 }
 
 // containsHookScript is shared by every connector that stores hooks under
@@ -807,10 +839,16 @@ func TestContainsHookScriptWalksEventKeyedHookMaps(t *testing.T) {
 	}
 }
 
-// decodeKiroWindowsBridge returns the PowerShell script inside an encoded
-// system PowerShell bridge command.
+// decodeKiroWindowsBridge returns the PowerShell script inside a Kiro
+// Windows command: `<system>\cmd.exe /d /c <encoded system PowerShell
+// bridge>`, a line feed and `exit $LASTEXITCODE`.
 func decodeKiroWindowsBridge(t *testing.T, command string) string {
 	t.Helper()
+	prefix, suffix := windowsSystemCmdExe()+" /d /c ", "\nexit $LASTEXITCODE"
+	if !strings.HasPrefix(command, prefix) || !strings.HasSuffix(command, suffix) {
+		t.Fatalf("%q is not cmd.exe running the bridge, then exit $LASTEXITCODE on its own line", command)
+	}
+	command = strings.TrimSuffix(strings.TrimPrefix(command, prefix), suffix)
 	const flag = " -EncodedCommand "
 	index := strings.LastIndex(command, flag)
 	if index < 0 || !strings.HasPrefix(command, windowsSystemPowerShellExe()+" ") {
@@ -831,8 +869,9 @@ func decodeKiroWindowsBridge(t *testing.T, command string) string {
 // `& '<launcher>' hook --connector kiro ...`: cmd.exe rejects the call
 // operator (exit 1) and PowerShell does not wait for the GUI-subsystem
 // release launcher (exit 0), so Kiro went ahead after a block. Both Kiro
-// commands are now an encoded system PowerShell script, which starts the
-// launcher, waits for it and exits with its status.
+// commands now start cmd.exe with an encoded system PowerShell script, which
+// starts the launcher, waits for it and exits with its status
+// (decodeKiroWindowsBridge checks the cmd.exe wrapper).
 func TestKiroWindowsCommandsUseTheAwaitedPowerShellBridge(t *testing.T) {
 	launcher := `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`
 	t.Cleanup(PinNativeHookExecutableForTest(launcher))
@@ -842,7 +881,7 @@ func TestKiroWindowsCommandsUseTheAwaitedPowerShellBridge(t *testing.T) {
 	} {
 		command := hookInvocationCommandFor("windows", "kiro", "")
 		if surface != "" {
-			command = kiroHookInvocationCommandFor("windows", "", surface)
+			command = kiroHookInvocationCommandFor("windows", "", surface, false)
 		}
 		if strings.HasPrefix(command, "&") {
 			t.Fatalf("surface %q: the call-operator form loses exit 2: %q", surface, command)
@@ -854,9 +893,56 @@ func TestKiroWindowsCommandsUseTheAwaitedPowerShellBridge(t *testing.T) {
 		if runtime.GOOS == "windows" && !kiroCommandOwned(command, hookInvocationCommandFor("windows", "kiro", "")) {
 			t.Fatalf("surface %q: DefenseClaw does not recognize its own command", surface)
 		}
+		// The bare bridge earlier builds wrote stays owned, so Setup replaces it.
+		if runtime.GOOS == "windows" && !kiroCommandOwned(windowsKiroPowerShellBridgeForBinary(launcher, surface, false), hookInvocationCommandFor("windows", "kiro", "")) {
+			t.Fatalf("surface %q: DefenseClaw does not recognize the earlier bare bridge", surface)
+		}
+		// Managed Windows passes --enterprise-managed, and DefenseClaw owns that form too.
+		managed := kiroHookInvocationCommandFor("windows", "", surface, true)
+		if !strings.Contains(decodeKiroWindowsBridge(t, managed), "'hook --connector kiro --enterprise-managed") {
+			t.Fatalf("surface %q: managed command lacks --enterprise-managed", surface)
+		}
+		if runtime.GOOS == "windows" && !kiroCommandOwned(managed, hookInvocationCommandFor("windows", "kiro", "")) {
+			t.Fatalf("surface %q: DefenseClaw does not recognize its managed command", surface)
+		}
 	}
 	// Other connectors keep their commands.
 	if got := hookInvocationCommandFor("windows", "claudecode", ""); !strings.HasPrefix(got, "& '") {
 		t.Fatalf("claudecode command changed: %q", got)
+	}
+}
+
+// RHEL-U3-09: a workspace copy stays owned after the workspace setting is
+// gone, so a rolled-back setup and a later teardown both remove it.
+func TestKiroReclaimsWorkspaceCopyAfterWorkspaceIsUnset(t *testing.T) {
+	home := t.TempDir()
+	workspace := t.TempDir()
+	dataDir := t.TempDir()
+	t.Cleanup(func() { KiroHomeOverride = "" })
+	KiroHomeOverride = home
+	withWorkspace := SetupOpts{DataDir: dataDir, APIAddr: "127.0.0.1:18970", APIToken: "tok-test", WorkspaceDir: workspace, HookFailMode: "open"}
+	without := withWorkspace
+	without.WorkspaceDir = ""
+	copyPath := filepath.Join(workspace, ".kiro", "hooks", kiroManagedHooksName)
+	conn := NewKiroConnector()
+	for _, step := range []string{"setup", "teardown"} {
+		if err := conn.Setup(context.Background(), withWorkspace); err != nil {
+			t.Fatalf("Setup with workspace: %v", err)
+		}
+		if _, err := os.Stat(copyPath); err != nil {
+			t.Fatalf("workspace copy missing after Setup: %v", err)
+		}
+		var err error
+		if step == "setup" {
+			err = conn.Setup(context.Background(), without)
+		} else {
+			err = conn.Teardown(context.Background(), without)
+		}
+		if err != nil {
+			t.Fatalf("%s without workspace: %v", step, err)
+		}
+		if _, err := os.Stat(copyPath); !os.IsNotExist(err) {
+			t.Fatalf("workspace copy survived %s without workspace: %v", step, err)
+		}
 	}
 }

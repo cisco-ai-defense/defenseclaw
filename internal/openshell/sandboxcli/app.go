@@ -354,6 +354,10 @@ func (a *App) api() (API, error) {
 		return nil, errors.New("no DefenseClaw configuration is loaded; run `defenseclaw setup` first")
 	}
 	c, err := sandboxapi.ClientForConfig(a.Cfg)
+	if errors.Is(err, sandboxapi.ErrNoGatewayToken) {
+		// GAP-1918: --json stays machine-readable before the gateway exists.
+		return nil, &DisabledError{Message: err.Error(), Enabled: a.Cfg.OpenShell.Enabled}
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -455,6 +459,18 @@ func (a *App) project() (string, error) {
 	return real, nil
 }
 
+// DisabledError is the daemon's refusal while sandboxes are off, or the
+// refusal before the gateway is set up (Enabled then reports the configured
+// openshell.enabled). With --output json the command prints {"enabled": ...,
+// "available": false, "reason": ...} like `sandbox status --json` (GAP-1817,
+// GAP-1918).
+type DisabledError struct {
+	Message string
+	Enabled bool
+}
+
+func (e *DisabledError) Error() string { return e.Message }
+
 // apiError explains a daemon error for people. Admin refusals start with
 // "blocked by your organization's DefenseClaw policy".
 func apiError(err error) error {
@@ -471,7 +487,7 @@ func apiError(err error) error {
 			return fmt.Errorf("the DefenseClaw daemon is not running (start it with `defenseclaw-gateway start`): %s", e.Detail)
 		}
 	case sandboxapi.CodeDisabled:
-		return fmt.Errorf("%s", e.Message)
+		return &DisabledError{Message: e.Message}
 	case sandboxapi.CodeAdminViolation:
 		return errors.New(violationMessage(e.Violation, e.Message, e.Detail, true))
 	case sandboxapi.CodePolicyViolation:

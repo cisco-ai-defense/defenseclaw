@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1345,5 +1346,36 @@ func TestPublishConnectorRulePackGenerationRetiresOnlyStaleManualEntries(t *test
 	}
 	if !containsRuleID(ruleIDsForConnector("automatic", "dynamic_token"), "DYNAMIC") {
 		t.Error("unrelated automatic connector rule set was removed")
+	}
+}
+
+// GAP-2575: a hook tool call carries the command as a JSON string, so
+// CMD-EVAL never matched eval with a runtime operand. It must alert there
+// (detection only: the operand is unknown until run) and still ignore eval
+// that is only quoted data of another command.
+func TestTrustedToolCallDynamicEvalAlerts(t *testing.T) {
+	for _, command := range []string{
+		`eval \"$(echo true)\"`,
+		`eval \"$PAYLOAD\"`,
+		`cd /tmp && eval \"$(ssh-agent -s)\"`,
+	} {
+		findings := scanTrustedToolArgs(t, "Bash", `{"command":"`+command+`"}`)
+		index := slices.IndexFunc(findings, func(f RuleFinding) bool { return f.RuleID == "CMD-EVAL" })
+		if index < 0 {
+			t.Fatalf("%s: findings=%v, want CMD-EVAL", command, findingIDs(findings))
+		}
+		if f := findings[index]; f.Severity != "HIGH" || f.contributesToEnforcement() || !f.contributesToAlertOnly() {
+			t.Fatalf("%s: CMD-EVAL severity=%s enforcing=%v alertOnly=%v, want HIGH alert only",
+				command, f.Severity, f.contributesToEnforcement(), f.contributesToAlertOnly())
+		}
+	}
+	for _, command := range []string{
+		`echo \"eval $x\"`,
+		`grep -n 'eval \"$' run.sh`,
+	} {
+		findings := scanTrustedToolArgs(t, "Bash", `{"command":"`+command+`"}`)
+		if containsRuleID(findingIDs(findings), "CMD-EVAL") {
+			t.Fatalf("%s: findings=%v, eval as data must not match", command, findingIDs(findings))
+		}
 	}
 }

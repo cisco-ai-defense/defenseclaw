@@ -444,10 +444,11 @@ func TestCodexSetupRollsBackBothConfigLayersAfterCodeGuardFailure(t *testing.T) 
 	t.Cleanup(restoreHome)
 
 	err = NewCodexConnector().Setup(context.Background(), SetupOpts{
-		DataDir:          dataDir,
-		APIAddr:          "127.0.0.1:18970",
-		InstallCodeGuard: true,
-		HookContractID:   "codex-hooks-v3",
+		DataDir:           dataDir,
+		APIAddr:           "127.0.0.1:18970",
+		InstallCodeGuard:  true,
+		HookContractID:    "codex-hooks-v3",
+		ManagedEnterprise: true,
 	})
 	if err == nil || !strings.Contains(err.Error(), "CodeGuard skill install") {
 		t.Fatalf("Setup CodeGuard failure = %v, want post-patch install failure", err)

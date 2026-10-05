@@ -1114,3 +1114,11 @@ func TestStopGracefullyWaitsForAcceptedRequestBeforeClearingPID(t *testing.T) {
 		t.Fatal("helper process was not reaped")
 	}
 }
+
+// GAP-1556: a Windows child registered its PID more than 60 s after launch
+// right after an upgrade, so start killed a gateway that was coming up.
+func TestChildPIDRegistrationWaitsAsLongAsWindowsReadiness(t *testing.T) {
+	if childPIDRegistrationTimeout < 240*time.Second {
+		t.Fatalf("childPIDRegistrationTimeout = %s, want at least the 240s Windows readiness wait", childPIDRegistrationTimeout)
+	}
+}

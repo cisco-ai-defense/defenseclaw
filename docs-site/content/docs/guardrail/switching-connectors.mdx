@@ -1,0 +1,94 @@
+---
+title: Changing connectors
+description: Use defenseclaw setup <connector> to add or reconfigure connector wiring, and setup remove <connector> to retire a connector without deleting audit history.
+keywords:
+  - DefenseClaw connector setup
+  - DefenseClaw multi connector
+  - DefenseClaw replace connector
+  - DefenseClaw audit history preserved
+---
+
+DefenseClaw connector setup is centered on the connector alias:
+
+```bash
+defenseclaw setup codex
+defenseclaw setup hermes --mode action
+defenseclaw setup antigravity --mode observe
+```
+
+On a host that already has connector wiring, the interactive flow asks whether to **Add** the new connector alongside the existing one or **Replace** the old wiring. Add is the default, also when you pass `--yes`. Replace is only for hosts where you intentionally want one connector wired after setup finishes.
+
+<Callout type="info">
+The audit DB is connector-agnostic. Adding, reconfiguring, removing, or replacing connector wiring does not delete history; each audit row keeps its own connector attribution.
+</Callout>
+
+## Add or reconfigure
+
+Run the setup alias for the connector you want:
+
+```bash
+defenseclaw setup codex
+```
+
+Choose **Add** when you want the existing connector(s) and the new connector protected by the same gateway. The new connector gets its own `guardrail.connectors.<name>` policy block, and `defenseclaw status` shows the full active roster.
+
+Use `--mode observe` or `--mode action` to set the connector's enforcement posture during setup:
+
+```bash
+defenseclaw setup codex --mode observe
+defenseclaw setup hermes --mode action
+```
+
+## Remove a connector
+
+When you no longer want a connector wired, remove it explicitly:
+
+```bash
+defenseclaw setup remove codex
+```
+
+The gateway restarts and tears down that connector's hooks. Pass `--no-restart` to restart it later.
+
+DefenseClaw refuses to remove the last connector by default because the gateway would enforce nothing. If that is intentional, pass `--force`. DefenseClaw stays installed; use `defenseclaw uninstall` to remove it:
+
+```bash
+defenseclaw setup remove codex --force
+```
+
+## Replace instead of add
+
+Choose **Replace** in the connector setup prompt when you want setup to tear down the previous connector's agent-side files before wiring the new one. This is useful when a single-user workstation is moving from one agent to another and you do not want both configured at the same time.
+
+Non-interactively, pass `--replace`. Setup asks before it removes the other connectors; `--yes` skips the question:
+
+```bash
+defenseclaw setup claude-code --replace --mode action
+```
+
+OpenClaw and ZeptoClaw are proxy-backed and cannot run next to hook connectors, so their setup refuses while hook connectors are configured. To switch the whole install in one command, pass `--replace`. Setup lists the hook connectors it removes and asks first (`--yes` skips the question); the gateway tears down their hooks when it restarts:
+
+```bash
+defenseclaw setup openclaw --replace --mode action
+```
+
+The reverse works the same way: when the install guards OpenClaw or ZeptoClaw, a hook connector's setup (for example `defenseclaw setup claude-code`) refuses and changes nothing, because it would remove the DefenseClaw plugin from OpenClaw. Pass `--replace` to switch; setup names the proxy connector it removes and asks first unless `--yes` is given:
+
+```bash
+defenseclaw setup claude-code --replace --mode action
+```
+
+## Verify
+
+```bash
+defenseclaw doctor
+defenseclaw status
+```
+
+`doctor` reports residual hook or config issues. `status` shows every active connector, its enforcement mode, and the shared gateway state.
+
+## See also
+
+- [Multi-connector](/docs/guardrail/multi-connector) - one gateway enforcing several hook connectors
+- [Quick aliases](/docs/guardrail/aliases) - connector setup alias reference
+- [Disabling](/docs/guardrail/disabling) - roll back agent-side hook entries
+- [HITL](/docs/hitl) - per-connector approval behavior

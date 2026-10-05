@@ -14,6 +14,7 @@ package hookexec
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"net"
@@ -283,5 +284,41 @@ func TestStandaloneTransportRequiresSocketAndServiceUID(t *testing.T) {
 	}
 	if _, err := managedStandaloneHTTPClient(time.Second, socket, os.Getuid()); err != nil {
 		t.Fatalf("trusted socket refused: %v", err)
+	}
+}
+
+// A waiting hook stops early only when a gateway start that began while it
+// waited fails again; a running or once-restarted gateway keeps the wait.
+func TestWatchGatewayStartsEndsOnlyARealRestartLoop(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		states []gatewayServiceState
+		ended  bool
+	}{
+		{"restart loop", []gatewayServiceState{{"activating", "auto-restart", 4}, {"activating", "start", 5}, {"activating", "auto-restart", 5}}, true},
+		{"one crash then running", []gatewayServiceState{{"activating", "auto-restart", 4}, {"activating", "start", 5}, {"active", "running", 5}}, false},
+		{"start limit reached", []gatewayServiceState{{"failed", "failed", 9}}, true},
+		{"slow inspection", []gatewayServiceState{{"active", "running", 0}}, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			calls := 0
+			probe := func(context.Context) (gatewayServiceState, error) {
+				state := test.states[min(calls, len(test.states)-1)]
+				calls++
+				return state, nil
+			}
+			ctx, cancel := context.WithCancelCause(context.Background())
+			defer cancel(nil)
+			finished := make(chan struct{})
+			go func() { watchGatewayStarts(ctx, nil, cancel, probe, time.Millisecond); close(finished) }()
+			select {
+			case <-finished:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the watch did not end")
+			}
+			if ended := errors.Is(context.Cause(ctx), errGatewayStartFailing); ended != test.ended {
+				t.Fatalf("ended=%t after %d probes, want %t", ended, calls, test.ended)
+			}
+		})
 	}
 }

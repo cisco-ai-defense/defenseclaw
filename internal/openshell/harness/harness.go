@@ -301,9 +301,6 @@ type CredentialProfile struct {
 	// Unverified, when set, says why the endpoint set was not pinned from a
 	// live run (for example a vendor account DefenseClaw could not use).
 	Unverified string
-	// Caveat is a limit of the provider the user should know before the
-	// session starts; the launch banner prints it.
-	Caveat string
 }
 
 // LoginOption is a vendor login run inside the sandbox instead of (or next
@@ -405,16 +402,7 @@ type Spec struct {
 	// directFetches are requests the pinned harness makes around the
 	// egress proxy that it does without (DirectFetch).
 	directFetches []DirectFetch
-	// interactiveCaveat is a limit of the pinned harness in an OpenShell
-	// sandbox that an interactive session should know before it starts,
-	// whatever the credential profile; the launch banner prints it.
-	interactiveCaveat string
 }
-
-// InteractiveCaveat is the harness limit an interactive session should know
-// about before it starts ("" when there is none). A one-prompt run is not
-// shown it.
-func (s *Spec) InteractiveCaveat() string { return s.interactiveCaveat }
 
 // DirectFetch is a request the pinned harness binary makes on its own
 // around the egress proxy (its HTTP client ignores the proxy variables)
@@ -776,7 +764,7 @@ func resolveCredentialProfile(cp CredentialProfile, region string) CredentialPro
 		region = profiles.DefaultBedrockRegion
 	}
 	host := profiles.BedrockMantleHost(region)
-	out := CredentialProfile{ProfileID: cp.ProfileID, Note: cp.Note, Unverified: cp.Unverified, DefaultModel: cp.DefaultModel, Caveat: cp.Caveat,
+	out := CredentialProfile{ProfileID: cp.ProfileID, Note: cp.Note, Unverified: cp.Unverified, DefaultModel: cp.DefaultModel,
 		Env: map[string]string{}}
 	if cp.ModelProvider != nil {
 		p := *cp.ModelProvider

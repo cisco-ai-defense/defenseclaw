@@ -93,12 +93,16 @@ in the config, including which agents to protect, is in
 
    Script-only MDMs that cannot pass arguments set the same values in the
    settings block at the top of `defenseclaw-enterprise.sh`.
-4. **Deliver the optional Cisco AI Defense key** after the deployment is
-   installed, on standard input or from an administrator-only file, never as
-   an argument or in a script body:
+4. **Deliver the optional Cisco AI Defense key** (or an observability
+   credential) on standard input or from an administrator-only file, never as
+   an argument or in a script body. On Linux and macOS the wrapper stores it
+   before it applies the config, so a config that references the credential
+   deploys in the same run:
 
    ```sh
-   sudo ./defenseclaw-enterprise.sh --secret-name ai-defense-api-key --secret-file /secure/key
+   sudo ./defenseclaw-enterprise.sh --source <package> --sha256 <pin> \
+     --config-file /etc/mdm/defenseclaw/config.yaml \
+     --secret-name ai-defense-api-key --secret-file /secure/key
    ```
 
 5. **Detect** with `detect.ps1` / `detect.sh`, or the registry and package

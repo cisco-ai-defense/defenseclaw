@@ -22,6 +22,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // While another process holds the gateway API port (it binds loopback
@@ -55,6 +56,11 @@ func applyWindowsEnterpriseAPIPortHolders(result *enterprisestatus.Result, repor
 	if !inspection && !lifecycleFailed {
 		return
 	}
+	// An installer that refused its own module never started a gateway, so
+	// the port is not why it failed (GAP-1658).
+	if lifecycleFailed && windowsEnterpriseInstallerRefusedModule(report) {
+		return
+	}
 	address := fmt.Sprintf("127.0.0.1:%d", config.DefaultGatewayAPIPort)
 	listeners, err := windowsEnterpriseAPIListeners("127.0.0.1", config.DefaultGatewayAPIPort)
 	if err != nil || len(listeners) == 0 {
@@ -63,14 +69,18 @@ func applyWindowsEnterpriseAPIPortHolders(result *enterprisestatus.Result, repor
 	// Without the running gateway's own process ID a listener cannot be told
 	// apart from the gateway itself. A gateway that is not running holds no
 	// listener.
-	gatewayPID := 0
-	if strings.TrimSpace(report.GatewayService) != "" {
-		gatewayPID = windowsEnterpriseServicePID(report.GatewayService)
+	gatewayService := strings.TrimSpace(report.GatewayService)
+	if gatewayService == "" {
+		// A lifecycle that failed before it read the deployment (an
+		// installer that refused its module, GAP-1658) names no service;
+		// the installed gateway service then still holds its own port.
+		gatewayService = managed.StandaloneWindowsGatewaySvc
 	}
+	gatewayPID := windowsEnterpriseServicePID(gatewayService)
 	if gatewayRunning && gatewayPID == 0 {
 		return
 	}
-	var names []string
+	var names, perUser []string
 	for _, listener := range listeners {
 		if listener.PID == gatewayPID {
 			continue
@@ -86,6 +96,9 @@ func applyWindowsEnterpriseAPIPortHolders(result *enterprisestatus.Result, repor
 			}
 		}
 		names = append(names, fmt.Sprintf("pid %d (%s) listening on %s", holder.PID, who, holder.Address))
+		if windowsEnterprisePerUserGatewayHolder(holder.Image, holder.Account) {
+			perUser = append(perUser, fmt.Sprintf("pid %d", holder.PID))
+		}
 	}
 	if len(names) == 0 {
 		return
@@ -93,6 +106,18 @@ func applyWindowsEnterpriseAPIPortHolders(result *enterprisestatus.Result, repor
 	stop := "Stop that process"
 	if len(names) > 1 {
 		stop = "Stop those processes"
+	}
+	if len(perUser) != 0 {
+		// A per-user install's gateway: stopping it by hand does not keep it
+		// stopped, and its data folder blocks the managed install next.
+		hint := fmt.Sprintf("%s is a per-user DefenseClaw gateway: have that user run "+
+			"`defenseclaw uninstall --all --binaries --yes`, which stops it and removes the per-user install",
+			strings.Join(perUser, ", "))
+		if len(perUser) == len(names) {
+			stop = hint
+		} else {
+			stop = hint + ". " + stop
+		}
 	}
 	if !inspection {
 		result.AddError("api_port_held", fmt.Sprintf(
@@ -105,6 +130,17 @@ func applyWindowsEnterpriseAPIPortHolders(result *enterprisestatus.Result, repor
 		"the gateway API port %s is held by %s, not by the DefenseClaw gateway; hooks fail closed until the port is free. "+
 			"%s: the gateway keeps retrying and takes the port back by itself",
 		address, strings.Join(names, "; "), stop))
+}
+
+// windowsEnterpriseInstallerRefusedModule reports a lifecycle the installer
+// stopped before it imported its module: nothing ran.
+func windowsEnterpriseInstallerRefusedModule(report *windowsEnterpriseInstallerReport) bool {
+	for _, message := range append([]string{report.Error}, report.Errors...) {
+		if strings.Contains(message, "installer rejected its module before import") {
+			return true
+		}
+	}
+	return false
 }
 
 // queryWindowsEnterpriseServicePID returns the process ID of a running

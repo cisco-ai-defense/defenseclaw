@@ -158,13 +158,17 @@ func verifyCodexLive(ctx context.Context, opts Options, lo LiveOptions, result *
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start codex app-server: %w", err)
 	}
+	// The reader waits for the process once its output ends, so a closed
+	// output can report how the app-server exited.
+	exit := &appServerExit{done: make(chan struct{})}
 	defer func() {
 		_ = stdin.Close()
 		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
+		<-exit.done
 	}()
 	responses := make(chan map[string]json.RawMessage, 8)
 	go func() {
+		defer func() { exit.err = cmd.Wait(); close(exit.done) }()
 		defer close(responses)
 		scanner := bufio.NewScanner(io.LimitReader(stdout, 8<<20))
 		scanner.Buffer(make([]byte, 64<<10), 4<<20)
@@ -186,7 +190,7 @@ func verifyCodexLive(ctx context.Context, opts Options, lo LiveOptions, result *
 				return nil, fmt.Errorf("%s: %w", method, ctx.Err())
 			case envelope, ok := <-responses:
 				if !ok {
-					return nil, fmt.Errorf("%s: app-server closed its output (%s)", method, strings.TrimSpace(stderr.String()))
+					return nil, fmt.Errorf("%s: %s", method, codexAppServerEnded(lo, exit, stderr))
 				}
 				var got int
 				if json.Unmarshal(envelope["id"], &got) != nil || got != id {
@@ -200,9 +204,13 @@ func verifyCodexLive(ctx context.Context, opts Options, lo LiveOptions, result *
 		}
 	}
 	if err := encoder.Encode(map[string]any{"method": "initialize", "id": 1, "params": map[string]any{"clientInfo": map[string]string{"name": "defenseclaw", "title": "DefenseClaw", "version": "1"}}}); err != nil {
-		return err
+		// The app-server is gone before it read a request.
+		return fmt.Errorf("initialize: %s", codexAppServerEnded(lo, exit, stderr))
 	}
 	if _, err := waitFor(ctx, responses, 1); err != nil {
+		if errors.Is(err, errAppServerClosed) {
+			return fmt.Errorf("initialize: %s", codexAppServerEnded(lo, exit, stderr))
+		}
 		return err
 	}
 	_ = encoder.Encode(map[string]any{"method": "initialized"})
@@ -259,6 +267,75 @@ func verifyCodexLive(ctx context.Context, opts Options, lo LiveOptions, result *
 	return nil
 }
 
+var errAppServerClosed = errors.New("app-server closed its output")
+
+// appServerExit is the app-server's exit, known once done is closed.
+type appServerExit struct {
+	done chan struct{}
+	err  error
+}
+
+// codexAppServerEnded explains an app-server that closed its output: its
+// exit status, what it printed on stderr and, for a launcher script whose
+// interpreter is not on the probe's PATH, what to pass instead (GAP-1136).
+func codexAppServerEnded(lo LiveOptions, exit *appServerExit, stderr *limitedBuffer) string {
+	status := "still running"
+	select {
+	case <-exit.done:
+		var exitErr *exec.ExitError
+		switch {
+		case errors.As(exit.err, &exitErr):
+			status = exitErr.ProcessState.String()
+		case exit.err != nil:
+			status = exit.err.Error()
+		default:
+			status = "exit status 0"
+		}
+	case <-time.After(2 * time.Second):
+	}
+	message := "the Codex app-server closed its output (" + status + ")"
+	if text := strings.TrimSpace(truncate(stderr.String(), 400)); text != "" {
+		message += "; stderr: " + text
+	} else {
+		message += "; it printed nothing on stderr"
+	}
+	if hint := missingScriptInterpreter(lo); hint != "" {
+		message += "; " + hint
+	}
+	return message
+}
+
+// missingScriptInterpreter names the fix when binary is a "#!/usr/bin/env
+// <interpreter>" launcher (the npm codex.js runs node) and the interpreter
+// is on none of the directories of the probe's minimal PATH.
+func missingScriptInterpreter(lo LiveOptions) string {
+	binary := lo.AgentBinary
+	file, err := os.Open(binary)
+	if err != nil {
+		return ""
+	}
+	defer file.Close()
+	head := make([]byte, 256)
+	n, _ := io.ReadFull(file, head)
+	line, _, _ := strings.Cut(string(head[:n]), "\n")
+	fields := strings.Fields(strings.TrimPrefix(line, "#!"))
+	if !strings.HasPrefix(line, "#!") || len(fields) < 2 || filepath.Base(fields[0]) != "env" {
+		return ""
+	}
+	interpreter := fields[len(fields)-1]
+	for _, entry := range liveEnv(lo) {
+		if value, ok := strings.CutPrefix(entry, "PATH="); ok {
+			for _, dir := range filepath.SplitList(value) {
+				if info, err := os.Stat(filepath.Join(dir, interpreter)); err == nil && !info.IsDir() {
+					return ""
+				}
+			}
+			return fmt.Sprintf("%s is a launcher script that runs %s, which is not on the probe's PATH (%s); pass --agent-binary the native Codex executable (for an npm install, node_modules/@openai/codex-<platform>/vendor/<target>/bin/codex inside the package) or link %s next to %s", binary, interpreter, value, interpreter, binary)
+		}
+	}
+	return ""
+}
+
 func waitFor(ctx context.Context, responses <-chan map[string]json.RawMessage, id int) (map[string]json.RawMessage, error) {
 	for {
 		select {
@@ -266,7 +343,7 @@ func waitFor(ctx context.Context, responses <-chan map[string]json.RawMessage, i
 			return nil, ctx.Err()
 		case envelope, ok := <-responses:
 			if !ok {
-				return nil, errors.New("app-server closed its output")
+				return nil, errAppServerClosed
 			}
 			var got int
 			if json.Unmarshal(envelope["id"], &got) == nil && got == id {
@@ -316,7 +393,8 @@ func verifyClaudeLive(ctx context.Context, opts Options, lo LiveOptions, result 
 		return err
 	}
 	defer stub.Close()
-	cmd := exec.CommandContext(ctx, lo.AgentBinary, "-p", "Run the canary command.", "--output-format", "json", "--max-turns", "2")
+	cmd := exec.CommandContext(ctx, lo.AgentBinary, "-p", "Run the canary command.", "--output-format", "json", "--max-turns", "2",
+		"--settings", claudeLiveProviderSettings(stub.addr))
 	cmd.Dir = lo.Home
 	cmd.Env = liveEnv(lo, "ANTHROPIC_BASE_URL=http://"+stub.addr, "ANTHROPIC_API_KEY=defenseclaw-live-check", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1")
 	if lo.Credential != nil {
@@ -332,6 +410,12 @@ func verifyClaudeLive(ctx context.Context, opts Options, lo LiveOptions, result 
 	cmd.Stderr = output
 	runErr := cmd.Run()
 	if stub.requests() == 0 {
+		if runErr == nil {
+			// It answered from another endpoint; its JSON result says
+			// nothing an administrator can act on.
+			result.problem("Claude Code never reached the local Messages stub: it answered from another model endpoint, so a provider setting the check cannot override (in managed settings, for example CLAUDE_CODE_USE_BEDROCK, CLAUDE_CODE_USE_VERTEX or ANTHROPIC_BASE_URL) routes this user's Claude Code elsewhere")
+			return nil
+		}
 		result.problem("Claude Code never reached the local Messages stub: %v %s", runErr, strings.TrimSpace(truncate(output.String(), 400)))
 		return nil
 	}
@@ -363,6 +447,24 @@ func verifyClaudeLive(ctx context.Context, opts Options, lo LiveOptions, result 
 		result.problem("the gateway did not record the canary tool call %s: Claude Code ran without DefenseClaw's managed hooks (a higher-precedence source such as server-managed settings may be shadowing them), or tool.activity log collection is off", toolCallID)
 	}
 	return nil
+}
+
+// claudeLiveProviderSettings is the --settings document that points Claude
+// Code at the local stub. Settings passed on the command line take
+// precedence over the user's and project settings (managed settings still
+// win), so a user whose settings route Claude Code to Amazon Bedrock,
+// Vertex AI, Foundry or another base URL still reaches the stub instead of
+// making a real model call (GAP-1135). Only the provider is overridden; the
+// hooks come from the managed settings as they do for the user.
+func claudeLiveProviderSettings(stubAddr string) string {
+	data, _ := json.Marshal(map[string]any{"env": map[string]string{
+		"ANTHROPIC_BASE_URL":      "http://" + stubAddr,
+		"ANTHROPIC_API_KEY":       "defenseclaw-live-check",
+		"CLAUDE_CODE_USE_BEDROCK": "0",
+		"CLAUDE_CODE_USE_VERTEX":  "0",
+		"CLAUDE_CODE_USE_FOUNDRY": "0",
+	}})
+	return string(data)
 }
 
 // canaryToolCallID is the tool_use id the stub gives the canary call; Claude
@@ -406,29 +508,73 @@ func startMessagesStub(nonce, toolCallID string) (*messagesStub, error) {
 		body, _ := io.ReadAll(io.LimitReader(r.Body, 4<<20))
 		stub.mu.Lock()
 		stub.count++
-		first := stub.count == 1
 		stub.mu.Unlock()
-		w.Header().Set("Content-Type", "application/json")
-		if first && !bytes.Contains(body, []byte(`"tool_result"`)) {
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"id": "msg_canary_1", "type": "message", "role": "assistant", "model": "claude-canary",
-				"content": []any{map[string]any{
-					"type": "tool_use", "id": toolCallID, "name": "Bash",
-					"input": map[string]any{"command": "echo " + nonce, "description": "DefenseClaw live policy check"},
-				}},
-				"stop_reason": "tool_use",
-				"usage":       map[string]int{"input_tokens": 1, "output_tokens": 1},
-			})
-			return
+		var request struct {
+			Stream bool              `json:"stream"`
+			Tools  []json.RawMessage `json:"tools"`
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{
+		_ = json.Unmarshal(body, &request)
+		// The agent turn is the request that offers tools; it gets the
+		// canary call until the call's result comes back. Claude Code
+		// streams it and falls back to a plain request when the stream
+		// does not parse, so both forms are answered.
+		message := map[string]any{
 			"id": "msg_canary_2", "type": "message", "role": "assistant", "model": "claude-canary",
 			"content":     []any{map[string]any{"type": "text", "text": "done"}},
 			"stop_reason": "end_turn",
 			"usage":       map[string]int{"input_tokens": 1, "output_tokens": 1},
-		})
+		}
+		if len(request.Tools) > 0 && !bytes.Contains(body, []byte(`"tool_result"`)) {
+			message["id"], message["stop_reason"] = "msg_canary_1", "tool_use"
+			message["content"] = []any{map[string]any{
+				"type": "tool_use", "id": toolCallID, "name": "Bash",
+				"input": map[string]any{"command": "echo " + nonce, "description": "DefenseClaw live policy check"},
+			}}
+		}
+		if request.Stream {
+			writeMessageStream(w, message)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(message)
 	})
 	stub.server = &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go func() { _ = stub.server.Serve(listener) }()
 	return stub, nil
+}
+
+// writeMessageStream sends message as a Messages API event stream.
+func writeMessageStream(w http.ResponseWriter, message map[string]any) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	send := func(event string, data map[string]any) {
+		encoded, _ := json.Marshal(data)
+		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, encoded)
+	}
+	start := map[string]any{}
+	for key, value := range message {
+		start[key] = value
+	}
+	start["content"], start["stop_reason"] = []any{}, nil
+	send("message_start", map[string]any{"type": "message_start", "message": start})
+	blocks, _ := message["content"].([]any)
+	for index, raw := range blocks {
+		block, _ := raw.(map[string]any)
+		switch block["type"] {
+		case "tool_use":
+			input, _ := json.Marshal(block["input"])
+			send("content_block_start", map[string]any{"type": "content_block_start", "index": index,
+				"content_block": map[string]any{"type": "tool_use", "id": block["id"], "name": block["name"], "input": map[string]any{}}})
+			send("content_block_delta", map[string]any{"type": "content_block_delta", "index": index,
+				"delta": map[string]any{"type": "input_json_delta", "partial_json": string(input)}})
+		default:
+			send("content_block_start", map[string]any{"type": "content_block_start", "index": index,
+				"content_block": map[string]any{"type": "text", "text": ""}})
+			send("content_block_delta", map[string]any{"type": "content_block_delta", "index": index,
+				"delta": map[string]any{"type": "text_delta", "text": block["text"]}})
+		}
+		send("content_block_stop", map[string]any{"type": "content_block_stop", "index": index})
+	}
+	send("message_delta", map[string]any{"type": "message_delta",
+		"delta": map[string]any{"stop_reason": message["stop_reason"], "stop_sequence": nil}, "usage": map[string]int{"output_tokens": 1}})
+	send("message_stop", map[string]any{"type": "message_stop"})
 }

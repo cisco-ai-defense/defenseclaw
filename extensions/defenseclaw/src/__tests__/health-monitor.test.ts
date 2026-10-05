@@ -34,11 +34,15 @@ function healthyResponse(): Response {
   });
 }
 
-function degradedResponse(): Response {
-  return new Response(JSON.stringify({ health: { gateway: { state: "starting" } } }), {
+function gatewayStateResponse(state: string): Response {
+  return new Response(JSON.stringify({ health: { gateway: { state } } }), {
     status: 200,
     headers: { "Content-Type": "application/json" },
   });
+}
+
+function degradedResponse(): Response {
+  return gatewayStateResponse("error");
 }
 
 describe("HealthMonitor", () => {
@@ -107,12 +111,48 @@ describe("HealthMonitor", () => {
     expect(msg).toContain("DEFENSECLAW WARNING");
   });
 
+  it("says model calls are blocked, not unscanned, when the gateway is down", async () => {
+    // GAP-2428: with the gateway down every call through its proxy is
+    // refused, so "NOT being scanned" was wrong.
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    globalThis.fetch = vi.fn().mockRejectedValue(new Error("down"));
+    const m = new HealthMonitor({ statusUrl });
+    await triggerCheck(m);
+    const warning = String(warnSpy.mock.calls[0]?.[0]);
+    expect(warning).toContain("model calls are blocked (fail-closed)");
+    expect(warning).toContain("defenseclaw-gateway start");
+    expect(warning).not.toContain("NOT being scanned");
+  });
+
   it("marks unprotected when gateway state is not running", async () => {
     vi.spyOn(console, "warn").mockImplementation(() => {});
     globalThis.fetch = vi.fn().mockResolvedValue(degradedResponse());
     const m = new HealthMonitor({ statusUrl });
     await triggerCheck(m);
     expect(m.isUnprotected).toBe(true);
+  });
+
+  it("does not warn while DefenseClaw is connecting to a freshly started OpenClaw gateway", async () => {
+    // GAP-1799: every OpenClaw gateway start printed "The DefenseClaw security
+    // gateway is not running ... Run 'defenseclaw-gateway start'" although
+    // the status call it had just made answered 200.
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValueOnce(gatewayStateResponse("starting"))
+      .mockResolvedValueOnce(gatewayStateResponse("reconnecting"))
+      .mockResolvedValueOnce(healthyResponse());
+    const m = new HealthMonitor({ statusUrl });
+    await triggerCheck(m);
+    await triggerCheck(m);
+    expect(m.isUnprotected).toBe(false);
+    expect(m.getWarningMessage()).toBeNull();
+    await triggerCheck(m);
+    expect(m.isUnprotected).toBe(false);
+    expect(warnSpy).not.toHaveBeenCalled();
+    expect(logSpy).toHaveBeenCalledTimes(1);
+    expect(logSpy).toHaveBeenCalledWith("[defenseclaw] DefenseClaw is connecting to this OpenClaw gateway.");
   });
 
   it("start and stop lifecycle", async () => {

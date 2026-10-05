@@ -12,7 +12,12 @@
 
 package netprobe
 
-import "testing"
+import (
+	"context"
+	"os/exec"
+	"strings"
+	"testing"
+)
 
 // TestParseLsofKeepsListenersAndTheirState is the macOS local-model case.
 //
@@ -220,5 +225,44 @@ func TestSplitHostPort(t *testing.T) {
 				t.Errorf("port = %d, want %d", port, testCase.wantPort)
 			}
 		})
+	}
+}
+
+// exitError runs a shell that writes stderr and exits with code, so the test
+// gets a real *exec.ExitError with Stderr filled in, as cmd.Output gives.
+func exitError(t *testing.T, code string, stderr string) error {
+	t.Helper()
+	_, err := exec.CommandContext(context.Background(), "/bin/sh", "-c",
+		"printf '%s' \"$1\" >&2; exit "+code, "sh", stderr).Output()
+	if err == nil {
+		t.Fatalf("sh exited 0, want exit %s", code)
+	}
+	return err
+}
+
+// TestLsofErrorNoSocketsIsNotAFailure is GAP-2249: lsof exits 1 with no
+// output at all when it finds no TCP socket, which is the normal state of an
+// unprivileged gateway's first poll. That must read as an empty table, not as
+// "connection table unreadable".
+func TestLsofErrorNoSocketsIsNotAFailure(t *testing.T) {
+	if err := lsofError(nil, exitError(t, "1", "")); err != nil {
+		t.Fatalf("lsofError(no sockets) = %v, want nil", err)
+	}
+	if err := lsofError([]byte("p1\n"), exitError(t, "1", "lsof: WARNING: x")); err != nil {
+		t.Fatalf("lsofError(partial output) = %v, want nil", err)
+	}
+}
+
+func TestLsofErrorKeepsRealFailures(t *testing.T) {
+	err := lsofError(nil, exitError(t, "1", "lsof: unsupported option\nusage"))
+	if err == nil || !strings.Contains(err.Error(), "lsof: unsupported option") ||
+		strings.Contains(err.Error(), "usage") {
+		t.Fatalf("lsofError(stderr) = %v, want the first stderr line", err)
+	}
+	if err := lsofError(nil, exitError(t, "2", "")); err == nil {
+		t.Fatal("lsofError(exit 2) = nil, want an error")
+	}
+	if err := lsofError(nil, exec.ErrNotFound); err == nil {
+		t.Fatal("lsofError(not found) = nil, want an error")
 	}
 }

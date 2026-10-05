@@ -16,7 +16,7 @@ DefenseClaw release commit + pinned ai-common/cmid ref
   │
   ├─ make packaging-windows-avc-buildkit
   │    └─ windows-enterprise-buildkit-<version>/
-  │         ├─ payload/ (six unsigned inner files)
+  │         ├─ payload/ (eight unsigned inner files)
   │         ├─ source/ + vendor/ (offline outer build)
   │         ├─ assemble.{sh|ps1} + helpers
   │         └─ payload-metadata.json
@@ -46,20 +46,20 @@ outer EXE bytes, so its hash and size can be finalized only after outer signing.
 | `packaging/scripts/lib/repro-flags.{sh,ps1}` | Pin the assembly toolchain, target, flags, build ID, and source epoch. |
 | `cmd/windows-repro-manifest` | Emit byte-stable manifest, payload metadata, and provenance JSON. |
 | `packaging/scripts/lib/finalize.{sh,ps1}` | Hash the signed outer Setup and update sidecar/provenance. |
-| `cmd/defenseclaw-enterprise-setup` | Validate the embedded six-file manifest and stage the trusted lifecycle payload at runtime. |
+| `cmd/defenseclaw-enterprise-setup` | Validate the embedded eight-file manifest and stage the trusted lifecycle payload at runtime. |
 
 ## Interfaces
 
 The build-kit producer is:
 
 ```bash
-make packaging-windows-avc-buildkit VERSION=0.9.0-rc1
+make packaging-windows-avc-buildkit VERSION=X.Y.Z
 ```
 
 The local unsigned developer path is:
 
 ```bash
-make packaging-windows-enterprise-installer VERSION=0.9.0-rc1
+make packaging-windows-enterprise-installer VERSION=X.Y.Z
 ```
 
 Assembler defaults are `./payload`, `./source`, and `./out`. Both variants
@@ -76,7 +76,7 @@ The exact AVC commands and returned artifacts are defined in
 - **Signing remains outside DefenseClaw.** No signing certificate or secret is
   accepted by the kit producer or public pull-request workflow.
 - **The payload inventory is closed.** The runtime, metadata emitter, and both
-  assemblers all validate the same six filenames.
+  assemblers all validate the same eight filenames.
 - **Outer hash finalization is post-signing.** Preliminary provenance contains
   an empty hash and zero size; the finalizer rewrites only those signed-outer
   facts with the byte-stable serializer shape.

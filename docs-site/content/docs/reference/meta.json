@@ -1,14 +1,13 @@
 {
   "title": "Reference",
   "pages": [
-    "index",
     "cli",
+    "setup-commands",
     "sandbox-cli",
-    "gateway-api",
     "configuration",
+    "env-vars",
     "keys",
-    "redaction",
     "fail-modes",
-    "env-vars"
+    "gateway-api"
   ]
 }

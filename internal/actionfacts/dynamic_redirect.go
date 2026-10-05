@@ -93,7 +93,8 @@ func (c redirectTargetCapture) twin() (string, map[string]bool, bool) {
 // posixFileAnchoredRedirectTarget reports whether a runtime-expanded
 // redirect target can only name a file path: it starts with an unquoted ~
 // (a home directory), or with $HOME or ${HOME} (optionally inside double
-// quotes) followed by "/", or it expands only as a filename pattern. Any
+// quotes) followed by "/", or with a static absolute directory other than
+// /dev ("/tmp/out-$USER.txt"), or it expands only as a filename pattern. Any
 // other parameter could name anything, including the /dev/tcp and /dev/udp
 // paths bash turns into network connections, and a command, process or
 // arithmetic substitution runs or computes something.
@@ -131,6 +132,11 @@ func posixFileAnchoredRedirectTarget(word *syntax.Word) bool {
 			parts = append([]syntax.WordPart{quoted.Parts[0]}, word.Parts[1:]...)
 		}
 	}
+	// /tmp/out-$USER.txt: a static absolute directory comes first, so the
+	// expanded word can only name a file under it.
+	if staticAbsoluteDirectoryPrefix(parts[0]) {
+		return true
+	}
 	if len(parts) < 2 || !plainHomeParameter(parts[0]) {
 		return false
 	}
@@ -147,6 +153,33 @@ func posixFileAnchoredRedirectTarget(word *syntax.Word) bool {
 		return strings.HasPrefix(next.Value, "/")
 	}
 	return false
+}
+
+// staticAbsoluteDirectoryPrefix reports whether part is a literal that starts
+// with "/<dir>/", where <dir> is a plain name other than dev. Bash compares
+// the expanded target text with its special /dev/... names, so a word with
+// that prefix cannot become one, whatever its parameters expand to. A glob
+// or escape character in <dir> could still spell dev and is refused.
+func staticAbsoluteDirectoryPrefix(part syntax.WordPart) bool {
+	var value string
+	switch literal := part.(type) {
+	case *syntax.Lit:
+		value = literal.Value
+	case *syntax.SglQuoted:
+		value = literal.Value
+	default:
+		return false
+	}
+	if !strings.HasPrefix(value, "/") {
+		return false
+	}
+	end := strings.IndexByte(value[1:], '/')
+	if end <= 0 {
+		return false
+	}
+	dir := value[1 : 1+end]
+	return dir != "dev" && dir != "." && dir != ".." &&
+		!strings.ContainsAny(dir, `*?[]\`)
 }
 
 // plainHomeParameter reports whether part is $HOME or ${HOME} with no
@@ -191,8 +224,8 @@ func analyzeWithRedirectTargets(input Input, twinCommand string) (Facts, redirec
 // counts it only when it holds on both the view and twin.
 //
 // The view is unavailable unless every runtime-expanded target is a file
-// path (it starts with ~ or $HOME/, or it expands only as a filename
-// pattern), the twin analysis is complete (so the action's other parse
+// path (it starts with ~, $HOME/ or a static directory such as /tmp/, or it
+// expands only as a filename pattern), the twin analysis is complete (so the action's other parse
 // issues came from those targets alone), every command in it is a plain
 // POSIX process with a static argv and certain control flow, and no other
 // fact of the twin carries a placeholder.

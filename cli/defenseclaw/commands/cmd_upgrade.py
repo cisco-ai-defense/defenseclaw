@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import click
 
+from defenseclaw import ux
+
 
 def _managed_enterprise_profile() -> str | None:
     """The machine-wide managed deployment on this host, or None.
@@ -43,7 +45,7 @@ def _managed_enterprise_profile() -> str | None:
 def _refuse_on_managed_host(command: str) -> None:
     profile = _managed_enterprise_profile()
     if profile:
-        click.echo(
+        ux.echo(
             f"  ✗ A managed DefenseClaw enterprise deployment ({profile}) is installed on this computer; "
             f"'defenseclaw {command}' is disabled. Use the managed deployment channel.",
             err=True,
@@ -55,12 +57,15 @@ def _refuse_on_managed_host(command: str) -> None:
 @click.command("upgrade")
 @click.option("--version", "target_version", default=None, metavar="X.Y.Z", help="Install this release.")
 @click.option("--yes", "-y", is_flag=True, help="Do not prompt.")
-def upgrade(target_version: str | None, yes: bool) -> None:
+# Accepted for 0.8.x muscle memory and scripts: recovery is now automatic.
+@click.option("--recover-corrupt-audit", "recover_corrupt_audit", is_flag=True, hidden=True)
+def upgrade(target_version: str | None, yes: bool, recover_corrupt_audit: bool) -> None:
     """Upgrade to the latest release (or X.Y.Z) using that release's installer."""
     _refuse_on_managed_host("upgrade")
     from defenseclaw.upgrade_shim import run
 
     args = ["upgrade"] + (["--version", target_version] if target_version else []) + (["--yes"] if yes else [])
+    args += ["--recover-corrupt-audit"] if recover_corrupt_audit else []
     raise SystemExit(run(args))
 
 

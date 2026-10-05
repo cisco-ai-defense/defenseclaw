@@ -6,7 +6,10 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
+	"os"
+	"slices"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
@@ -34,9 +37,19 @@ func windowsManagedHooksLifecycleFirstInstall(
 
 // Replaceable in tests.
 var (
-	windowsFirstInstallRollbackUserConfigRestorer = enterprisehooks.RestoreWindowsStandaloneUserAgentConfigs
-	windowsFirstInstallRollbackFootprintRemover   = rollbackWindowsStandaloneFirstInstallFootprint
+	windowsFirstInstallRollbackUserConfigRestorer   = enterprisehooks.RestoreWindowsStandaloneUserAgentConfigs
+	windowsFirstInstallRollbackCopilotVSCodeRemover = enterprisehooks.RemoveWindowsStandaloneCopilotVSCodeUserFiles
+	windowsFirstInstallRollbackFootprintRemover     = rollbackWindowsStandaloneFirstInstallFootprint
+	windowsFirstInstallRollbackHomeGone             = windowsFirstInstallHomeGone
 )
+
+// windowsFirstInstallHomeGone reports whether an enrolled account's home no
+// longer exists, as when the account was deleted with its profile while the
+// install ran (GAP-1618). Its agent files went with it.
+func windowsFirstInstallHomeGone(home string) bool {
+	_, err := os.Lstat(home)
+	return errors.Is(err, os.ErrNotExist)
+}
 
 // rollbackWindowsStandaloneFirstInstallFootprint runs when a rolled-back
 // first standalone install retires its lifecycle journal: the services are
@@ -59,10 +72,21 @@ func rollbackWindowsStandaloneFirstInstallFootprint(ctx windowsManagedHooksLifec
 	if err != nil {
 		note("the agent configurations of the enrolled accounts, which could not be listed: %v", err)
 	}
+	accountKey := func(target enterprisehooks.ManifestTarget) string {
+		return strings.ToUpper(strings.TrimSpace(target.SID)) + "\x00" + strings.ToLower(strings.TrimSpace(target.DataDir))
+	}
+	// Each leftover names the account and the connectors enrolled for it.
+	connectors := map[string][]string{}
+	for _, target := range manifest.Targets {
+		key := accountKey(target)
+		if name := strings.TrimSpace(target.Connector); name != "" && !slices.Contains(connectors[key], name) {
+			connectors[key] = append(connectors[key], name)
+		}
+	}
 	seen := map[string]bool{}
 	for _, target := range manifest.Targets {
 		sid, home := strings.TrimSpace(target.SID), strings.TrimSpace(target.UserHome)
-		key := strings.ToUpper(sid) + "\x00" + strings.ToLower(strings.TrimSpace(target.DataDir))
+		key := accountKey(target)
 		if sid == "" || home == "" || seen[key] {
 			continue
 		}
@@ -71,17 +95,10 @@ func rollbackWindowsStandaloneFirstInstallFootprint(ctx windowsManagedHooksLifec
 		if user := strings.TrimSpace(target.User); user != "" {
 			account = user + " (" + sid + ")"
 		}
-		_, kept, err := windowsFirstInstallRollbackUserConfigRestorer(home, sid, target.DataDir)
-		for _, path := range kept {
-			note("%s: %s, which changed after DefenseClaw wrote it", account, path)
+		if names := connectors[key]; len(names) > 0 {
+			account += " [" + strings.Join(names, ", ") + "]"
 		}
-		switch {
-		case err == nil:
-		case enterprisehooks.IsWindowsTargetSessionUnavailable(err):
-			note("%s: DefenseClaw's agent registrations, because the account is not signed in", account)
-		default:
-			note("%s: DefenseClaw's agent registrations: %s", account, boundedEnterpriseHookUserCleanupText(err.Error()))
-		}
+		leftovers = append(leftovers, rollbackWindowsFirstInstallAccount(account, home, sid, target.DataDir, connectors[key])...)
 	}
 	if err := enterprisehooks.RemoveWindowsPerUserManagedEnrollments(
 		ctx.opts.HookBinary,
@@ -99,6 +116,9 @@ func rollbackWindowsStandaloneFirstInstallFootprint(ctx windowsManagedHooksLifec
 		}
 		if _, err := enterprisepolicy.RemoveWindowsClaudeVersionFloor(opts); err != nil {
 			note("the Claude Code version floor: %v", err)
+		}
+		if _, err := enterprisepolicy.RemoveWindowsWSL(opts); err != nil {
+			note("the WSL agent-session policy: %v", err)
 		}
 	}
 	if err := enterprisehooks.RemoveWindowsStandalonePerUserRuntimeSelectors(); err != nil {
@@ -118,4 +138,50 @@ func rollbackWindowsStandaloneFirstInstallFootprint(ctx windowsManagedHooksLifec
 		note("managed policy locks: %v", err)
 	}
 	return leftovers
+}
+
+// rollbackWindowsFirstInstallAccount puts back one account's agent files and
+// removes DefenseClaw's Copilot VS Code Local hook file and plugin from its
+// home when Copilot is enrolled for it: the guardian writes those without a
+// connector backup, so the restore alone left them pointing at a removed
+// hook (GAP-1287). It returns the account's leftovers.
+func rollbackWindowsFirstInstallAccount(account, home, sid, dataDir string, connectors []string) []string {
+	if windowsFirstInstallRollbackHomeGone(home) {
+		// Nothing of DefenseClaw can be left in a home that is gone, and no
+		// remedy applies to a deleted account.
+		return nil
+	}
+	var leftovers []string
+	_, kept, err := windowsFirstInstallRollbackUserConfigRestorer(home, sid, dataDir)
+	for _, path := range kept {
+		leftovers = append(leftovers, fmt.Sprintf("%s: %s, which changed after DefenseClaw wrote it", account, path))
+	}
+	if leftover := windowsFirstInstallRollbackAccountLeftover(account, err); leftover != "" {
+		leftovers = append(leftovers, leftover)
+	}
+	if slices.Contains(connectors, "copilot") {
+		err := windowsFirstInstallRollbackCopilotVSCodeRemover(home, sid)
+		if leftover := windowsFirstInstallRollbackAccountLeftover(account+" Copilot VS Code hooks", err); leftover != "" {
+			leftovers = append(leftovers, leftover)
+		}
+	}
+	return leftovers
+}
+
+// windowsFirstInstallRollbackAccountLeftover names why the rollback left an
+// account's agent registrations, or "" when it removed them. Only
+// LocalSystem can act as an account: Setup run from an elevated
+// administrator prompt leaves every account's registrations, which the
+// guardian (a LocalSystem service) wrote during the install.
+func windowsFirstInstallRollbackAccountLeftover(account string, err error) string {
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, enterprisehooks.ErrWindowsEnterpriseNotLocalSystem):
+		return fmt.Sprintf("%s: DefenseClaw's agent registrations, because Setup did not run as LocalSystem", account)
+	case enterprisehooks.IsWindowsTargetSessionUnavailable(err):
+		return fmt.Sprintf("%s: DefenseClaw's agent registrations, because the account is not signed in", account)
+	default:
+		return fmt.Sprintf("%s: DefenseClaw's agent registrations: %s", account, boundedEnterpriseHookUserCleanupText(err.Error()))
+	}
 }

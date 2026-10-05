@@ -62,7 +62,7 @@ func TestCodexManagedHooksPreserveUnrelatedConfigWithoutPrivateTrustState(t *tes
 	t.Cleanup(func() { codexPolicyInspector = previousInspector })
 
 	conn := NewCodexConnector()
-	opts := SetupOpts{DataDir: filepath.Join(dir, "defenseclaw"), APIAddr: "127.0.0.1:18970"}
+	opts := SetupOpts{DataDir: filepath.Join(dir, "defenseclaw"), APIAddr: "127.0.0.1:18970", ManagedEnterprise: true}
 	if err := conn.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup under allow_managed_hooks_only: %v", err)
 	}
@@ -140,7 +140,7 @@ func TestCodexManagedHookPatchRollsBackWhenUserConfigRejectsSetup(t *testing.T) 
 	t.Cleanup(func() { CodexConfigPathOverride = previousPath })
 
 	conn := NewCodexConnector()
-	opts := SetupOpts{DataDir: filepath.Join(dir, "defenseclaw"), APIAddr: "127.0.0.1:18970"}
+	opts := SetupOpts{DataDir: filepath.Join(dir, "defenseclaw"), APIAddr: "127.0.0.1:18970", ManagedEnterprise: true}
 	if err := conn.Setup(context.Background(), opts); err == nil {
 		t.Fatal("Setup succeeded despite features.hooks=false")
 	}
@@ -188,7 +188,7 @@ func TestCodexTeardownExactRestoreDoesNotResurrectLegacyUserHooks(t *testing.T) 
 	}
 
 	conn := NewCodexConnector()
-	opts := SetupOpts{DataDir: dataDir, APIAddr: "127.0.0.1:18970"}
+	opts := SetupOpts{DataDir: dataDir, APIAddr: "127.0.0.1:18970", ManagedEnterprise: true}
 	if err := conn.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
@@ -251,7 +251,7 @@ func TestCodexTeardownExactRestoreDoesNotResurrectManagedHooks(t *testing.T) {
 	}
 
 	conn := NewCodexConnector()
-	opts := SetupOpts{DataDir: dataDir, APIAddr: "127.0.0.1:18970"}
+	opts := SetupOpts{DataDir: dataDir, APIAddr: "127.0.0.1:18970", ManagedEnterprise: true}
 	if err := conn.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}

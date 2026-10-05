@@ -223,13 +223,21 @@ func (s *darwinSource) startupRefusal() string {
 	s.refusalMu.Unlock()
 	if refusal == "" {
 		return "eslogger exited immediately without a reason; Endpoint Security " +
-			"needs Full Disk Access for the process that launches the gateway"
+			"needs Full Disk Access -- " + fullDiskAccessHint(currentExecutable())
 	}
 	if strings.Contains(refusal, "TCC") || strings.Contains(refusal, "NOT_PERMITTED") {
-		return refusal + " -- grant Full Disk Access to the process that launches " +
-			"the gateway (System Settings > Privacy & Security > Full Disk Access)"
+		return refusal + " -- " + fullDiskAccessHint(currentExecutable())
 	}
 	return refusal
+}
+
+// currentExecutable is the running binary, or "" when the OS cannot say.
+func currentExecutable() string {
+	executable, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	return executable
 }
 
 func (s *darwinSource) Close() error {

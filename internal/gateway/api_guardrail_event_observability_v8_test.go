@@ -29,7 +29,7 @@ func TestACPEvaluationEmitsGuardrailV8Attributes(t *testing.T) {
 		ClientID: "zed", AgentID: "kiro", Profile: "kiro-only",
 		Method: "session/prompt", Direction: acp.ClientToAgent, Surface: acp.SurfacePrompt,
 	}, acp.Verdict{Action: "allow", RawAction: "block", WouldBlock: true, Severity: "HIGH", Reason: "test policy"},
-		nil, "kiro", "kiro-only", 12*time.Millisecond)
+		nil, nil, "kiro", "kiro-only", 12*time.Millisecond)
 
 	events := readStoredGuardrailEventsV8(t, capture.store.DatabasePath())
 	if len(events) != 1 {
@@ -137,7 +137,7 @@ func TestACPEvaluationPublishesMatchedFindings(t *testing.T) {
 	}, []string{
 		"TRUST-IGNORE-PREVIOUS:Ignore previous instructions",
 		"TRUST-JAILBREAK:Jailbreak attempt",
-	}, "kiro", "kiro-only", 3*time.Millisecond)
+	}, nil, "kiro", "kiro-only", 3*time.Millisecond)
 
 	events := readStoredGuardrailEventsV8(t, capture.store.DatabasePath())
 	if len(events) != 1 {
@@ -169,7 +169,7 @@ func TestACPDeniedMethodPublishesNoFindings(t *testing.T) {
 	}, acp.Verdict{
 		Action: "block", RawAction: "block", Severity: "HIGH",
 		Reason: "method denied by ACP profile",
-	}, nil, "kiro", "kiro-only", time.Millisecond)
+	}, nil, nil, "kiro", "kiro-only", time.Millisecond)
 
 	events := readStoredGuardrailEventsV8(t, capture.store.DatabasePath())
 	if len(events) != 1 {

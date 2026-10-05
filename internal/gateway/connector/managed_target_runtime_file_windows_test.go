@@ -300,3 +300,17 @@ func openManagedTargetRuntimeFileForTest(t *testing.T, path string) *os.File {
 	}
 	return file
 }
+
+// A managed teardown's disabled-hook tombstone carries the managed runtime
+// DACL; the generic private one made a rollback refuse to remove it (WIN-R1-20).
+func TestManagedDisabledHookTombstoneUsesManagedRuntimeDescriptor(t *testing.T) {
+	dir := testenv.PrivateTempDir(t)
+	if err := writeDisabledHookTombstone(SetupOpts{DataDir: dir, ManagedEnterprise: true}, "kiro-hook.sh", "Kiro"); err != nil {
+		t.Fatalf("write managed tombstone: %v", err)
+	}
+	file := openManagedTargetRuntimeFileForTest(t, filepath.Join(dir, "hooks", "kiro-hook.sh"))
+	defer file.Close()
+	if err := validateWindowsManagedTargetRuntimeHandle(file, windowsProcessUserSIDForTest(t), []byte(disabledHookTombstone("Kiro"))); err != nil {
+		t.Fatalf("managed tombstone descriptor: %v", err)
+	}
+}

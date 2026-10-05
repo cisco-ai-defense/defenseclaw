@@ -55,7 +55,7 @@ var enterpriseForeignHookCleanup = func(target enterprisehooks.TargetCredentials
 		AccountHome:   target.UserHome,
 		HookBinary:    opts.HookBinary,
 		Policy:        policy,
-		OwnedCommands: perUserOwnedHookCommands(name, target.UserHome, dataDir),
+		OwnedCommands: perUserOwnedHookCommandsForBinary(name, target.UserHome, dataDir, opts.HookBinary),
 	}
 	return cleanEnterpriseForeignHooksAsTarget(target, request, time.Now())
 }

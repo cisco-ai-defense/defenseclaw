@@ -24,6 +24,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	gatewayconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/netguard"
 )
@@ -65,6 +66,14 @@ const (
 	EnterpriseRootInspect = "inspect"
 	EnterpriseRootDeny    = "deny"
 	EnterpriseRootExempt  = "exempt"
+
+	// enterprise.enrollment.unverified_versions: what enrollment does with
+	// an app or extension surface whose hook delivery has not been
+	// live-verified. report (the default) enrolls it when its engine
+	// version resolves a hook contract and reports it; refuse keeps it
+	// unenrolled and refuses its hook calls where the route allows.
+	EnterpriseUnverifiedReport = "report"
+	EnterpriseUnverifiedRefuse = "refuse"
 )
 
 // EnterpriseEnrollmentConfig controls which local users the enumerator
@@ -93,6 +102,26 @@ type EnterpriseEnrollmentConfig struct {
 	// enumerator and guardian discover agents only in known locations, so
 	// agents installed elsewhere are not enrolled without this.
 	AgentPrefixes []string `mapstructure:"agent_prefixes" yaml:"agent_prefixes,omitempty"`
+	// UnverifiedVersions is report (default) or refuse; see
+	// EnterpriseUnverifiedReport. UnverifiedVersionsByConnector overrides
+	// it per connector.
+	UnverifiedVersions            string            `mapstructure:"unverified_versions"              yaml:"unverified_versions,omitempty"`
+	UnverifiedVersionsByConnector map[string]string `mapstructure:"unverified_versions_by_connector" yaml:"unverified_versions_by_connector,omitempty"`
+}
+
+// UnverifiedVersionsFor is the unverified-version policy for connector:
+// its override, else unverified_versions, else report.
+func (e EnterpriseEnrollmentConfig) UnverifiedVersionsFor(connector string) string {
+	connector = strings.ToLower(strings.TrimSpace(connector))
+	for name, value := range e.UnverifiedVersionsByConnector {
+		if strings.ToLower(strings.TrimSpace(name)) == connector && strings.TrimSpace(value) != "" {
+			return strings.ToLower(strings.TrimSpace(value))
+		}
+	}
+	if value := strings.ToLower(strings.TrimSpace(e.UnverifiedVersions)); value != "" {
+		return value
+	}
+	return EnterpriseUnverifiedReport
 }
 
 // Machine policy knobs.
@@ -116,6 +145,27 @@ const (
 	ClaudeVersionFloorEnforce = "enforce"
 	ClaudeVersionFloorReport  = "report"
 	ClaudeVersionFloorOff     = "off"
+
+	// GitHub Copilot in VS Code harness knobs
+	// (enterprise.machine_policy.connectors.copilot).
+	CopilotHarnessPreferenceSDK       = "sdk"
+	CopilotHarnessPreferenceUnmanaged = "unmanaged"
+	CopilotLocalHarnessGovern         = "govern"
+	CopilotLocalHarnessRetire         = "retire"
+
+	// Windows WSL knobs (enterprise.machine_policy.windows_wsl).
+	WSLAgentSessionsBlock = "block"
+	WSLAgentSessionsAllow = "allow"
+
+	WSLPlatformLeave   = "leave"
+	WSLPlatformDisable = "disable"
+
+	WSLEditorSettingsRepair = "repair"
+	WSLEditorSettingsReport = "report"
+	WSLEditorSettingsAllow  = "allow"
+
+	WSLClaudeDesktopKeyMerge  = "merge"
+	WSLClaudeDesktopKeyCreate = "create"
 )
 
 // EnterpriseConnectorPolicy is one connector's machine policy settings. An
@@ -137,16 +187,94 @@ type EnterpriseConnectorPolicy struct {
 	// sets requiredMinimumVersion; report only reports; off does neither.
 	// It does not inherit from default.
 	VersionFloor string `mapstructure:"version_floor" yaml:"version_floor,omitempty"`
+	// HarnessPreference and LocalHarness are valid only in
+	// connectors.copilot and do not inherit from default. They govern
+	// GitHub Copilot in VS Code. HarnessPreference: sdk (default) sets the
+	// VS Code policy ChatEditorPreferCopilotHarness so new editor chats
+	// open on the Copilot SDK harness, which reads policy.d; unmanaged
+	// leaves the harness choice to VS Code and removes a value DefenseClaw
+	// set. LocalHarness: govern (default) governs the Local harness with
+	// the DefenseClaw plugin and user hook file; retire also sets the
+	// Copilot managed setting sandbox.enabled, which keeps agent sessions
+	// on sandboxed harnesses.
+	HarnessPreference string `mapstructure:"harness_preference" yaml:"harness_preference,omitempty"`
+	LocalHarness      string `mapstructure:"local_harness"      yaml:"local_harness,omitempty"`
 }
 
 // versionFloorConnector is the only connector with a version_floor key.
 const versionFloorConnector = "claudecode"
 
+// copilotHarnessConnector is the only connector with harness_preference and
+// local_harness keys.
+const copilotHarnessConnector = "copilot"
+
+// CopilotHarnessPreference returns the effective harness_preference of
+// connectors.copilot (sdk unless set).
+func (m EnterpriseMachinePolicyConfig) CopilotHarnessPreference() string {
+	if value := strings.ToLower(strings.TrimSpace(m.Connectors[copilotHarnessConnector].HarnessPreference)); value != "" {
+		return value
+	}
+	return CopilotHarnessPreferenceSDK
+}
+
+// CopilotLocalHarness returns the effective local_harness of
+// connectors.copilot (govern unless set).
+func (m EnterpriseMachinePolicyConfig) CopilotLocalHarness() string {
+	if value := strings.ToLower(strings.TrimSpace(m.Connectors[copilotHarnessConnector].LocalHarness)); value != "" {
+		return value
+	}
+	return CopilotLocalHarnessGovern
+}
+
 // EnterpriseMachinePolicyConfig holds the default connector policy and
 // per-connector overrides.
 type EnterpriseMachinePolicyConfig struct {
-	Default    EnterpriseConnectorPolicy            `mapstructure:"default"    yaml:"default,omitempty"`
-	Connectors map[string]EnterpriseConnectorPolicy `mapstructure:"connectors" yaml:"connectors,omitempty"`
+	Default    EnterpriseConnectorPolicy            `mapstructure:"default"     yaml:"default,omitempty"`
+	Connectors map[string]EnterpriseConnectorPolicy `mapstructure:"connectors"  yaml:"connectors,omitempty"`
+	WindowsWSL EnterpriseWindowsWSLPolicy           `mapstructure:"windows_wsl" yaml:"windows_wsl,omitempty"`
+}
+
+// EnterpriseWindowsWSLPolicy governs agent sessions that run inside a WSL 2
+// distribution on a Windows standalone deployment, where Windows machine
+// policy does not reach. Other operating systems ignore it.
+type EnterpriseWindowsWSLPolicy struct {
+	// AgentSessions: block (default) keeps Claude Desktop WSL sessions off
+	// through HKLM\SOFTWARE\Policies\Claude\disableWslSessions; allow
+	// accepts them running without DefenseClaw.
+	AgentSessions string `mapstructure:"agent_sessions" yaml:"agent_sessions,omitempty"`
+	// Platform: leave (default), or disable, which sets
+	// HKLM\SOFTWARE\Policies\WSL\AllowWSL=0 and turns WSL off for every
+	// account (it also stops other WSL tooling, such as Docker Desktop's
+	// WSL backend).
+	Platform string `mapstructure:"platform" yaml:"platform,omitempty"`
+	// EditorSettings: repair (default) resets the Codex IDE extension's
+	// chatgpt.runCodexInWindowsSubsystemForLinux to false in each enrolled
+	// user's VS Code, VS Code Insiders and Cursor user settings; report
+	// only reports it; allow ignores it.
+	EditorSettings string `mapstructure:"editor_settings" yaml:"editor_settings,omitempty"`
+	// ClaudeDesktopKey: merge (default) adds disableWslSessions only when
+	// HKLM\SOFTWARE\Policies\Claude already holds machine policy; create
+	// also writes it into an empty key. Any value there makes Claude Desktop
+	// ignore every user's HKCU policy and local third-party configuration,
+	// so creating it is the administrator's explicit choice.
+	ClaudeDesktopKey string `mapstructure:"claude_desktop_key" yaml:"claude_desktop_key,omitempty"`
+}
+
+// WSL returns the effective Windows WSL policy with the defaults filled in.
+func (m EnterpriseMachinePolicyConfig) WSL() EnterpriseWindowsWSLPolicy {
+	pick := func(value, fallback string) string {
+		if value = strings.ToLower(strings.TrimSpace(value)); value != "" {
+			return value
+		}
+		return fallback
+	}
+	w := m.WindowsWSL
+	return EnterpriseWindowsWSLPolicy{
+		AgentSessions:    pick(w.AgentSessions, WSLAgentSessionsBlock),
+		Platform:         pick(w.Platform, WSLPlatformLeave),
+		EditorSettings:   pick(w.EditorSettings, WSLEditorSettingsRepair),
+		ClaudeDesktopKey: pick(w.ClaudeDesktopKey, WSLClaudeDesktopKeyMerge),
+	}
 }
 
 // ClaudeVersionFloor returns the effective Claude Code version floor mode
@@ -321,6 +449,11 @@ func resolveEnterpriseConfig(cfg *Config, goos, pinnedProfile string) error {
 	}
 	cfg.declaredEnterpriseProfile = declared
 	cfg.Enterprise.Profile = profile
+	if cfg.SecureClientIntegration() {
+		// Secure Client keeps exact-range hook contract gating: an agent
+		// version newer than every tested range stays unknown there.
+		gatewayconnector.SetStrictHookContractResolution(true)
+	}
 	if cfg.StandaloneEnterprise() {
 		standaloneRulePackDefault(cfg, cfg.DataDir, goos)
 	}
@@ -526,17 +659,19 @@ func enrollmentEmpty(e EnterpriseEnrollmentConfig) bool {
 	return strings.TrimSpace(e.Mode) == "" && len(e.IncludeUsers) == 0 && len(e.ExcludeUsers) == 0 &&
 		len(e.IncludeGroups) == 0 && len(e.ExcludeGroups) == 0 && len(e.ExemptUsers) == 0 &&
 		strings.TrimSpace(e.UnenrolledUsers) == "" && strings.TrimSpace(e.Root) == "" &&
-		e.UIDMin == 0 && e.UIDMax == 0 && len(e.HomeRoots) == 0 && len(e.AgentPrefixes) == 0
+		e.UIDMin == 0 && e.UIDMax == 0 && len(e.HomeRoots) == 0 && len(e.AgentPrefixes) == 0 &&
+		strings.TrimSpace(e.UnverifiedVersions) == "" && len(e.UnverifiedVersionsByConnector) == 0
 }
 
 func machinePolicyEmpty(m EnterpriseMachinePolicyConfig) bool {
-	return connectorPolicyEmpty(m.Default) && len(m.Connectors) == 0
+	return connectorPolicyEmpty(m.Default) && len(m.Connectors) == 0 && m.WindowsWSL == (EnterpriseWindowsWSLPolicy{})
 }
 
 func connectorPolicyEmpty(p EnterpriseConnectorPolicy) bool {
 	return strings.TrimSpace(p.Ownership) == "" && strings.TrimSpace(p.ManagedHooksOnly) == "" &&
 		strings.TrimSpace(p.ForeignHooks) == "" && strings.TrimSpace(p.HigherPrecedenceSources) == "" &&
-		len(p.AllowedHooks) == 0 && strings.TrimSpace(p.VersionFloor) == ""
+		len(p.AllowedHooks) == 0 && strings.TrimSpace(p.VersionFloor) == "" &&
+		strings.TrimSpace(p.HarnessPreference) == "" && strings.TrimSpace(p.LocalHarness) == ""
 }
 
 // validateEnterpriseConfig checks a managed deployment's enterprise block.
@@ -575,6 +710,20 @@ func validateEnterpriseConfig(cfg *Config) error {
 	}
 	if err := oneOf("enterprise.enrollment.root", en.Root, EnterpriseRootInspect, EnterpriseRootDeny, EnterpriseRootExempt); err != nil {
 		return err
+	}
+	if err := oneOf("enterprise.enrollment.unverified_versions", en.UnverifiedVersions, EnterpriseUnverifiedReport, EnterpriseUnverifiedRefuse); err != nil {
+		return err
+	}
+	for name, value := range en.UnverifiedVersionsByConnector {
+		if !enterpriseConnectorNamePattern.MatchString(name) {
+			return fmt.Errorf("config: enterprise.enrollment.unverified_versions_by_connector key %q is not a connector name", name)
+		}
+		if strings.TrimSpace(value) == "" {
+			return fmt.Errorf("config: enterprise.enrollment.unverified_versions_by_connector.%s must be report or refuse", name)
+		}
+		if err := oneOf("enterprise.enrollment.unverified_versions_by_connector."+name, value, EnterpriseUnverifiedReport, EnterpriseUnverifiedRefuse); err != nil {
+			return err
+		}
 	}
 	if en.UIDMin < 0 {
 		return fmt.Errorf("config: enterprise.enrollment.uid_min must not be negative")
@@ -617,6 +766,20 @@ func validateEnterpriseConfig(cfg *Config) error {
 			return fmt.Errorf("config: enterprise.machine_policy.connectors key %q is not a connector name", name)
 		}
 		if err := validateConnectorPolicy("enterprise.machine_policy.connectors."+name, policy); err != nil {
+			return err
+		}
+	}
+	wsl := e.MachinePolicy.WindowsWSL
+	for _, knob := range []struct {
+		name, value string
+		allowed     []string
+	}{
+		{"agent_sessions", wsl.AgentSessions, []string{WSLAgentSessionsBlock, WSLAgentSessionsAllow}},
+		{"platform", wsl.Platform, []string{WSLPlatformLeave, WSLPlatformDisable}},
+		{"editor_settings", wsl.EditorSettings, []string{WSLEditorSettingsRepair, WSLEditorSettingsReport, WSLEditorSettingsAllow}},
+		{"claude_desktop_key", wsl.ClaudeDesktopKey, []string{WSLClaudeDesktopKeyMerge, WSLClaudeDesktopKeyCreate}},
+	} {
+		if err := oneOf("enterprise.machine_policy.windows_wsl."+knob.name, knob.value, knob.allowed...); err != nil {
 			return err
 		}
 	}
@@ -679,7 +842,19 @@ func validateConnectorPolicy(prefix string, p EnterpriseConnectorPolicy) error {
 	if prefix != floorPrefix && strings.TrimSpace(p.VersionFloor) != "" {
 		return fmt.Errorf("config: %s.version_floor is not a setting; the Claude Code version floor is %s.version_floor", prefix, floorPrefix)
 	}
-	return oneOf(prefix+".version_floor", p.VersionFloor, ClaudeVersionFloorEnforce, ClaudeVersionFloorReport, ClaudeVersionFloorOff)
+	if err := oneOf(prefix+".version_floor", p.VersionFloor, ClaudeVersionFloorEnforce, ClaudeVersionFloorReport, ClaudeVersionFloorOff); err != nil {
+		return err
+	}
+	harnessPrefix := "enterprise.machine_policy.connectors." + copilotHarnessConnector
+	for _, knob := range [][2]string{{"harness_preference", p.HarnessPreference}, {"local_harness", p.LocalHarness}} {
+		if prefix != harnessPrefix && strings.TrimSpace(knob[1]) != "" {
+			return fmt.Errorf("config: %s.%s is not a setting; the GitHub Copilot in VS Code setting is %s.%s", prefix, knob[0], harnessPrefix, knob[0])
+		}
+	}
+	if err := oneOf(prefix+".harness_preference", p.HarnessPreference, CopilotHarnessPreferenceSDK, CopilotHarnessPreferenceUnmanaged); err != nil {
+		return err
+	}
+	return oneOf(prefix+".local_harness", p.LocalHarness, CopilotLocalHarnessGovern, CopilotLocalHarnessRetire)
 }
 
 // validateEnterpriseAgentPrefix accepts an absolute, administrator-style
@@ -742,6 +917,9 @@ func validateManagedStandalonePolicyInputs(cfg *Config) error {
 		}
 		if err := managed.ValidateTrustedServiceRuntimeDir(dir, label, serviceAccount); err != nil {
 			return fmt.Errorf("config: managed standalone %s is not administrator-controlled: %w", label, err)
+		}
+		if err := managed.ValidateServiceCanReadTree(dir, label, serviceAccount); err != nil {
+			return fmt.Errorf("config: managed standalone %w", err)
 		}
 		return nil
 	}

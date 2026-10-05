@@ -16,7 +16,7 @@ import (
 
 var provenanceCmd = &cobra.Command{
 	Use:   "provenance",
-	Short: "Print binary and config provenance (v7 quartet)",
+	Short: "Print the binary and config provenance (schema, content hash, generation, version)",
 }
 
 var provenanceShowCmd = &cobra.Command{

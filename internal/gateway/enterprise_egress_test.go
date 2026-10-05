@@ -16,6 +16,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"reflect"
 	"strings"
 	"testing"
@@ -42,7 +43,7 @@ func useEnterpriseEgress(t *testing.T, proxy, noProxy string) {
 	if err := SetEnterpriseEgress(standaloneEgressConfig(proxy, noProxy)); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { enterpriseEgress.Store(nil) })
+	t.Cleanup(func() { enterpriseEgress.Store(nil); telemetryEgress.Store(nil) })
 }
 
 // egressNames maps destination names to one address each.
@@ -93,7 +94,7 @@ func readReached(t *testing.T, response *http.Response, err error) string {
 }
 
 func TestSetEnterpriseEgressAppliesOnlyToTheStandaloneProfile(t *testing.T) {
-	t.Cleanup(func() { enterpriseEgress.Store(nil) })
+	t.Cleanup(func() { enterpriseEgress.Store(nil); telemetryEgress.Store(nil) })
 	network := config.EnterpriseNetworkConfig{HTTPSProxy: "http://proxy.corp:3128", NoProxy: "internal.corp"}
 	for _, tc := range []struct {
 		name  string
@@ -289,5 +290,88 @@ func TestBifrostEgressProxySelection(t *testing.T) {
 	}
 	if got, err := bifrostEgressProxy(tlsProxy, "http://127.0.0.1:11434"); got != nil || err != nil {
 		t.Fatalf("an excluded endpoint needs no proxy support: %v, %v", got, err)
+	}
+}
+
+// GAP-1465: without an enterprise proxy, the telemetry exporters (OTLP,
+// Galileo, Splunk HEC, HTTP JSONL) follow HTTPS_PROXY and NO_PROXY from the
+// gateway's environment; the enterprise route still wins when set.
+func TestTelemetryEgressFollowsTheEnvironmentProxy(t *testing.T) {
+	t.Cleanup(func() { enterpriseEgress.Store(nil); telemetryEgress.Store(nil) })
+	collector, port := egressBackend(t, echoHost)
+	proxy := netguardtest.NewRecordingProxy(t, map[string]string{
+		"collector.example.test:" + port: collector.Listener.Addr().String(),
+	})
+	env := map[string]string{"https_proxy": proxy.URL, "no_proxy": "direct.example.test"}
+	getenv := func(key string) string { return env[key] }
+	if err := setGatewayEgress(&config.Config{}, getenv); err != nil {
+		t.Fatal(err)
+	}
+	if currentEnterpriseEgress() != nil {
+		t.Fatal("an environment proxy must not become the enterprise route")
+	}
+	dialer := telemetryEgressDialer{direct: &net.Dialer{Timeout: 5 * time.Second}}
+	ctx := netguard.WithDialTarget(context.Background(), "collector.example.test")
+	conn, err := dialer.DialContext(ctx, "tcp", collector.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.Close()
+	if got, want := proxy.Targets(), []string{"collector.example.test:" + port}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("proxy CONNECT targets = %v, want %v", got, want)
+	}
+	route := telemetryEgress.Load()
+	for host, want := range map[string]bool{"api.example.test": true, "direct.example.test": false, "127.0.0.1": false} {
+		if got, err := route.Proxies(&url.URL{Scheme: "https", Host: host + ":443"}); err != nil || got != want {
+			t.Fatalf("Proxies(%s) = %v, %v; want %v", host, got, err, want)
+		}
+	}
+
+	useEnterpriseEgress(t, "http://proxy.corp:3128", "")
+	if got := telemetryEgress.Load().URL().String(); got != "http://proxy.corp:3128" {
+		t.Fatalf("telemetry route = %s, want the enterprise proxy", got)
+	}
+
+	var warn strings.Builder
+	credentialed := func(key string) string {
+		if key == "HTTPS_PROXY" {
+			return "http://user:s3cr3t@proxy.corp:3128"
+		}
+		return ""
+	}
+	if route := environmentEgressRoute(credentialed, &warn); route != nil {
+		t.Fatalf("route = %s, want none for a credentialed proxy", route.URL())
+	}
+	if text := warn.String(); strings.Contains(text, "s3cr3t") || !strings.Contains(text, "connect directly") {
+		t.Fatalf("warning = %q, want a value-free note that exporters connect directly", text)
+	}
+	if route := environmentEgressRoute(func(string) string { return "" }, &warn); route != nil {
+		t.Fatal("no proxy variable must leave the exporters on direct connections")
+	}
+}
+
+// GAP-2375: the telemetry dialer tells the OTLP exporters whether an
+// endpoint goes through a proxy, so a connection-failure line in gateway.log
+// gives proxy advice only when a proxy is in use.
+func TestTelemetryEgressDialerReportsWhetherItProxies(t *testing.T) {
+	t.Cleanup(func() { enterpriseEgress.Store(nil); telemetryEgress.Store(nil) })
+	var reporter interface {
+		Proxies(*url.URL) (bool, error)
+	} = telemetryEgressDialer{}
+	endpoint := &url.URL{Scheme: "https", Host: "api.example.test:443"}
+	for _, tc := range []struct {
+		env  map[string]string
+		want bool
+	}{
+		{env: map[string]string{}, want: false},
+		{env: map[string]string{"HTTPS_PROXY": "http://proxy.example.test:3128"}, want: true},
+		{env: map[string]string{"HTTPS_PROXY": "http://proxy.example.test:3128", "NO_PROXY": "api.example.test"}, want: false},
+	} {
+		if err := setGatewayEgress(&config.Config{}, func(key string) string { return tc.env[key] }); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := reporter.Proxies(endpoint); err != nil || got != tc.want {
+			t.Fatalf("env %v: Proxies = %v, %v; want %v", tc.env, got, err, tc.want)
+		}
 	}
 }

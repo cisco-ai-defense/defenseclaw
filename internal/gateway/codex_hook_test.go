@@ -1455,7 +1455,7 @@ func TestEvaluateCodexHook_BlocksUnregisteredSkillPermissionRequest(t *testing.T
 	if !ok || decision["behavior"] != "deny" {
 		t.Fatalf("permission decision = %+v, want behavior=deny", hook["decision"])
 	}
-	for _, want := range []string{"reason_code=not-in-approved-registry", "asset_type=skill", "asset_name=rogue-skill", "connector=codex", "source=registry-required", "registry_status=not-registered", "registry_configured=true"} {
+	for _, want := range []string{"DefenseClaw policy blocked this action", "skill rogue-skill is not in the approved registry"} {
 		if !strings.Contains(resp.Reason, want) {
 			t.Fatalf("reason %q missing %q", resp.Reason, want)
 		}
@@ -1489,8 +1489,8 @@ func TestEvaluateCodexHook_RegistryRequiredEmptyDeniesByDefault(t *testing.T) {
 	if !containsString(resp.Findings, "ASSET-POLICY-MCP") {
 		t.Fatalf("findings=%v, want ASSET-POLICY-MCP", resp.Findings)
 	}
-	if !strings.Contains(resp.Reason, "reason_code=registry-required-but-empty") {
-		t.Fatalf("reason %q missing registry-required-but-empty reason_code", resp.Reason)
+	if !strings.Contains(resp.Reason, "needs an approved registry, and none is configured") {
+		t.Fatalf("reason %q missing the empty-registry wording", resp.Reason)
 	}
 }
 
@@ -1539,7 +1539,7 @@ func TestEvaluateCodexHook_SkillDefaultDenyBlocksWithoutRegistry(t *testing.T) {
 	if resp.Action != "block" || resp.RawAction != "block" {
 		t.Fatalf("action=%q raw=%q, want block/block", resp.Action, resp.RawAction)
 	}
-	for _, want := range []string{"reason_code=default-deny", "source=default-deny", "registry_status=unknown", "registry_configured=false"} {
+	for _, want := range []string{"DefenseClaw policy blocked this action", "is denied by the default asset policy"} {
 		if !strings.Contains(resp.Reason, want) {
 			t.Fatalf("reason %q missing %q", resp.Reason, want)
 		}

@@ -52,6 +52,10 @@ const (
 	// that do not produce a filesystem event (notably Windows registry policy)
 	// and retries watches for policy directories created after startup.
 	defaultHookGuardPolicyAuditInterval = 30 * time.Second
+	// hookGuardSupersededGrace is how long a newer setup selection may
+	// supersede this gateway before it is reported as degraded. A setup
+	// command that restarts the gateway hands off well inside it (GAP-1412).
+	hookGuardSupersededGrace = 90 * time.Second
 
 	// hookGuardBusyRearmMaxDelay caps the backoff between repairs re-armed
 	// after another process held a connector file open.
@@ -124,6 +128,8 @@ type HookConfigGuard struct {
 	// lastPolicyFailure suppresses an identical permanent policy diagnostic on
 	// every audit tick while still reporting a changed failure immediately.
 	lastPolicyFailure string
+	// supersededSince is when a newer setup selection was first seen.
+	supersededSince time.Time
 	// busyRepairs counts consecutive repairs that failed on a busy connector
 	// file; it sets the re-arm backoff and resets after any other outcome.
 	busyRepairs int
@@ -844,6 +850,21 @@ func (g *HookConfigGuard) processPolicyAudit() {
 func (g *HookConfigGuard) reportPolicyFailure(conn connector.Connector, err error) {
 	message := err.Error()
 	g.mu.Lock()
+	if errors.Is(err, connector.ErrSetupSelectionSuperseded) {
+		// A setup command recorded a newer selection and is restarting the
+		// gateway: a planned handoff, not a degraded guardrail, unless it
+		// lasts past the grace window (GAP-1412).
+		now := time.Now()
+		if g.supersededSince.IsZero() {
+			g.supersededSince = now
+		}
+		if now.Sub(g.supersededSince) < hookGuardSupersededGrace {
+			g.mu.Unlock()
+			return
+		}
+	} else {
+		g.supersededSince = time.Time{}
+	}
 	if g.lastPolicyFailure == message {
 		g.mu.Unlock()
 		return
@@ -869,6 +890,7 @@ func (g *HookConfigGuard) reportPolicyFailure(conn connector.Connector, err erro
 func (g *HookConfigGuard) clearPolicyFailure() {
 	g.mu.Lock()
 	g.lastPolicyFailure = ""
+	g.supersededSince = time.Time{}
 	g.mu.Unlock()
 }
 
@@ -908,7 +930,7 @@ func (g *HookConfigGuard) healLocked(
 	hctx, cancel := context.WithTimeout(context.WithoutCancel(baseCtx), hookGuardSetupTimeout)
 	defer cancel()
 
-	setupErr := conn.Setup(hctx, opts)
+	setupErr := connector.SetupRecordingCreatedDirs(hctx, conn, opts)
 
 	// Setup may have recreated a deleted parent directory even when a later
 	// verification step fails. Rebind before handling its result so the guard

@@ -59,15 +59,22 @@ func TestAMPEventsEnterCorrectGuardrailLanes(t *testing.T) {
 	); action != "block" || wouldBlock {
 		t.Fatalf("tool.result block verdict=(%q,%v), want enforced block", action, wouldBlock)
 	}
-	// Amp cannot block a prompt: in action mode the agent.start notice is
-	// how DefenseClaw acts on the blocking rule, not observe-mode text.
-	for _, mode := range []string{"action", "observe"} {
-		action, wouldBlock := mapHookActionForProfile("block", mode, "agent.start", profile.Capabilities, profile, nil)
-		notice := agentHookResponseForProfile(profile, agentHookRequest{ConnectorName: "amp", HookEventName: "agent.start"},
-			action, "block", "HIGH", "marker rule", nil, mode, wouldBlock, profile.Capabilities).AdditionalContext
-		enforced := strings.Contains(notice, "must not be carried out") && !strings.Contains(notice, "would block")
-		if action != "allow" || !strings.Contains(notice, "a HIGH amp hook finding") || enforced != (mode == "action") {
-			t.Fatalf("%s-mode agent.start action=%q notice=%q", mode, action, notice)
+	// Amp cannot block a prompt, and neither can Hermes at pre_llm_call: in
+	// action mode the notice is how DefenseClaw acts on the blocking rule,
+	// not observe-mode text.
+	hermes := connector.NewHermesConnector().HookProfile(connector.SetupOpts{})
+	for _, tc := range []struct {
+		name, event string
+		profile     connector.HookProfile
+	}{{"amp", "agent.start", profile}, {"hermes", "pre_llm_call", hermes}} {
+		for _, mode := range []string{"action", "observe"} {
+			action, wouldBlock := mapHookActionForProfile("block", mode, tc.event, tc.profile.Capabilities, tc.profile, nil)
+			notice := agentHookResponseForProfile(tc.profile, agentHookRequest{ConnectorName: tc.name, HookEventName: tc.event},
+				action, "block", "HIGH", "marker rule", nil, mode, wouldBlock, tc.profile.Capabilities).AdditionalContext
+			enforced := strings.Contains(notice, "must not be carried out") && !strings.Contains(notice, "would block")
+			if action == "block" || !strings.Contains(notice, "a HIGH "+tc.name+" hook finding") || enforced != (mode == "action") {
+				t.Fatalf("%s %s-mode %s action=%q notice=%q", tc.name, mode, tc.event, action, notice)
+			}
 		}
 	}
 }

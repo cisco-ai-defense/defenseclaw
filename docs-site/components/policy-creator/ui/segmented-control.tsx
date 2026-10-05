@@ -44,8 +44,8 @@ export function SegmentedControl<T extends string>({
               padX,
               fontSize,
               isActive
-                ? 'bg-[var(--brand-cisco)]/15 text-[var(--brand-cisco-strong)]'
-                : 'text-fd-muted-foreground hover:text-fd-foreground',
+                ? 'border border-[var(--brand-cisco)] bg-[var(--brand-cisco)]/15 text-[var(--brand-cisco-strong)]'
+                : 'border border-transparent text-fd-muted-foreground hover:text-fd-foreground',
               disabled ? 'cursor-not-allowed' : '',
             ].join(' ')}
           >

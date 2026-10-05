@@ -199,6 +199,19 @@ func releaseOpenCodePluginName(_ Options, path string) error {
 	return nil
 }
 
+// openCodePluginReadOnly reports whether a standard account marked the
+// installed plugin read-only with the FILE_WRITE_ATTRIBUTES right Users hold
+// on it. OpenCode still loads it, but no rename replaces it, so the guardian
+// and repair rewrite it (releaseOpenCodePluginName clears the attribute).
+func openCodePluginReadOnly(path string) bool {
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return false
+	}
+	attributes, err := windows.GetFileAttributes(name)
+	return err == nil && attributes&windows.FILE_ATTRIBUTE_READONLY != 0
+}
+
 // openCodePluginLoadable inspects the installed plugin's own descriptor. It
 // is trusted when it is a regular file, not a reparse point, owned by
 // Administrators or LocalSystem, and every other principal holds at most

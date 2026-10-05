@@ -389,3 +389,27 @@ func loadDetectorCorpus(t *testing.T) detectorCorpus {
 	}
 	return corpus
 }
+
+func TestHighEntropySkipsUpperCaseIdentifiers(t *testing.T) {
+	t.Parallel()
+	key := make([]byte, 32)
+	for _, input := range []string{
+		"matched: CERT-S3-MARKER-BLOCK:Certification marker command (block)",
+		"set SERVICE_OTLP_V2_TOKEN first",
+	} {
+		result, err := DetectAndRedact(input, observability.FieldClassContent, []DetectorGroup{DetectorGroupSecrets}, key, NewRecordMatchBudget())
+		if err != nil || result.Value != input {
+			t.Fatalf("identifier redacted: %q -> %q (%v)", input, result.Value, err)
+		}
+	}
+	for _, input := range []string{
+		"see Aa0_Bb1-Cc2_Dd3-Ee4_Ff5-Gg6_Hh7",
+		"see K7QX9-ZP4M2-W8RT6-N3VB5-H2LJ8",
+		"see AB12CD34EF56GH78IJ90-KLMN-WORD",
+	} {
+		result, err := DetectAndRedact(input, observability.FieldClassContent, []DetectorGroup{DetectorGroupSecrets}, key, NewRecordMatchBudget())
+		if err != nil || !strings.Contains(result.Value, "<redacted type=") {
+			t.Fatalf("secret-shaped value kept in clear: %q -> %q (%v)", input, result.Value, err)
+		}
+	}
+}

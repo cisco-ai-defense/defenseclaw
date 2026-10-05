@@ -21,33 +21,32 @@ OpenShell calls the MicroVM driver experimental.
 
 ## How it fits together
 
-<Flow direction="TB" compact caption="A sandbox on a Mac. The project is copied into the MicroVM with secret files held back, and the agent's work comes back only when you pull it. Hooks and web traffic reach DefenseClaw at host.openshell.internal, as on Linux. The daemon drives the gateway over mTLS, and its main API is never reachable from a sandbox. Docker Desktop builds the harness images, but the MicroVMs do not run in it.">
-  <Zone id="mac" label="Your Mac (your user)" tone="trusted">
-    <Node id="dc" kind="gateway">{`DefenseClaw ingress\nand egress proxy`}</Node>
-    <Node id="gw" kind="connector">{`OpenShell gateway\nbrew service, vm`}</Node>
-    <Node id="proj" kind="datastore">{`~/code/myapp\nyour folder`}</Node>
+<Flow direction="TB" caption="A sandbox on a Mac. The agent works on a copy of your project inside the MicroVM; how the copy gets in and out is shown under Run on a copy. Hooks, web traffic and model calls leave as on Linux.">
+  <Zone id="vm" label="MicroVM (your uid, own kernel)" tone="untrusted">
+    <Node id="agent" kind="agent">{`Claude Code or Codex\nskip-permissions on`}</Node>
+    <Node id="copy" kind="datastore">{`Copy of your project\n/sandbox/work/myapp`}</Node>
+    <Node id="sup" kind="policy">{`OpenShell supervisor\nthe only way out`}</Node>
   </Zone>
-  <Zone id="vm" label="MicroVM (own Linux kernel)" tone="untrusted">
-    <Node id="sup" kind="policy">{`OpenShell supervisor\nLandlock · seccomp`}</Node>
-    <Node id="agent" kind="agent">{`Claude Code · Codex\nskip-permissions on`}</Node>
-    <Node id="copy" kind="datastore">{`Copy of the project\n/sandbox/work/myapp`}</Node>
+  <Zone id="mac" label="Your Mac (your user)" tone="trusted">
+    <Node id="dc" kind="gateway">{`DefenseClaw daemon\nchecks hooks, proxies the web`}</Node>
+    <Node id="gw" kind="connector">{`OpenShell gateway\nHomebrew service`}</Node>
   </Zone>
   <Zone id="net" label="Internet" tone="external">
-    <Node id="llm" kind="generic">{`Model provider\napi.anthropic.com`}</Node>
-    <Node id="web" kind="generic">{`Allowed sites\nregistries, docs`}</Node>
+    <Node id="net1" kind="generic">{`The internet\nmodel provider, allowed sites`}</Node>
   </Zone>
-  <Edge from="gw" to="sup" label="boots, sets policy" />
-  <Edge from="proj" to="copy" label="copy in · sandbox pull" variant="bidirectional" />
   <Edge from="agent" to="copy" label="edits" />
-  <Edge from="agent" to="sup" label="every connection" />
-  <Edge from="sup" to="dc" label="hooks and web" />
-  <Edge from="dc" to="web" label="allowed" />
-  <Edge from="sup" to="llm" label="real key added" />
+  <Edge from="agent" to="sup" label="sends everything" />
+  <Edge from="sup" to="dc" label="hooks :18971 · web :18972" />
+  <Edge from="sup" to="net1" label="model calls, real key added" />
+  <Edge from="dc" to="gw" label="creates sandboxes" />
+  <Edge from="dc" to="net1" label="allowed requests" />
 </Flow>
 
 The hooks, policy packs, egress proxy, blocklist, asks, credential
 placeholders, telemetry and tamper detection work as on Linux. What differs
-is where the sandbox runs and how your project gets in and out.
+is where the sandbox runs and how your project gets in and out. Docker Desktop
+builds the harness images, and the MicroVM driver reads them from it, but the
+MicroVMs do not run in Docker Desktop.
 
 ## Before you start
 
@@ -134,11 +133,11 @@ It ends with:
   ✓ Done →  cd <project> && defenseclaw sandbox run claude
 ```
 
-There is no mounts question and no telemetry question on a Mac. The
-Homebrew gateway runs under launchd, which does not read the `gateway.env`
-file setup edits on Linux, so setup leaves OpenShell's anonymous usage
-telemetry as it is. To turn it off, set `OPENSHELL_TELEMETRY_ENABLED=false`
-in `~/.config/openshell/gateway.env` and run
+There is no mounts question and no telemetry question on a Mac. Setup
+changes OpenShell's anonymous usage telemetry on Linux only, so on a Mac it
+stays on and setup says so. The Homebrew service reads
+`~/.config/openshell/gateway.env`, so you can turn the telemetry off
+yourself: set `OPENSHELL_TELEMETRY_ENABLED=false` in that file, then run
 `brew services restart nvidia/openshell/openshell`.
 
 </Tab>
@@ -181,8 +180,6 @@ defenseclaw sandbox setup --install-openshell
 ```bash
 defenseclaw sandbox doctor
 ```
-
-![defenseclaw sandbox doctor on an Apple-silicon Mac with OpenShell's release binaries and a gateway started by hand, ending with ready for sandboxes](/images/sandboxes/screens/terminal-doctor-macos.png)
 
 On a Mac set up through Homebrew, the output looks like this:
 
@@ -272,6 +269,18 @@ does not change while the agent works.
 The first start of each image takes about a minute while the driver prepares
 its MicroVM disk. It keeps that disk, so later starts take a few seconds.
 
+<Flow direction="TB" caption="How your project gets into a MicroVM and back. Nothing comes back until you choose it; skip leaves the work in the sandbox for a later defenseclaw sandbox pull.">
+  <Node id="in" kind="operator">{`Copy your project in\nshallow clone, secrets held back`}</Node>
+  <Node id="edit" kind="agent">{`The agent edits the copy\nyour folder does not change`}</Node>
+  <Node id="out" kind="generic">{`Pull the work out\nas a verified git bundle`}</Node>
+  <Node id="review" kind="decision">{`Review the changes\nscanned for secrets and unsafe code`}</Node>
+  <Node id="back" kind="operator">{`Bring it back, or skip\napply, branch or patch file`}</Node>
+  <Edge from="in" to="edit" />
+  <Edge from="edit" to="out" />
+  <Edge from="out" to="review" />
+  <Edge from="review" to="back" />
+</Flow>
+
 ## Bring the changes back
 
 When the session ends, DefenseClaw pulls the agent's work out of the
@@ -318,7 +327,7 @@ instead. `--rm` does not delete a sandbox whose work was not brought back.
 
 ## MicroVM specifics
 
-| | What to know |
+| Topic | What to know |
 | --- | --- |
 | Resources | Every MicroVM on the gateway gets the same vCPUs, memory and disk, set under `[openshell.drivers.vm]` in `~/.config/openshell/gateway.toml`. The run flags `--cpu` and `--memory` have no effect. The doctor warns when the disk for changes is under 8 GiB. |
 | The sandbox user | Set for the whole gateway: every MicroVM on it runs as your uid and gid. |
@@ -338,7 +347,7 @@ instead. `--rm` does not delete a sandbox whose work was not brought back.
   and the doctor says so on every run.
 - **Not every harness runs.** A harness is used only after its image proves
   that its hooks fire in a MicroVM. See
-  [which harnesses can run](/docs/setup/sandbox#which-harnesses-can-run).
+  [which harnesses can run](/docs/sandboxes/guide#which-harnesses-can-run).
 - **The Docker driver is refused on Docker Desktop.** Docker Desktop's Linux
   VM has no Landlock. A Mac set up by an earlier DefenseClaw whose gateway
   still runs the Docker driver is refused before anything is built, and
@@ -359,5 +368,5 @@ instead. `--rm` does not delete a sandbox whose work was not brought back.
 | The first run seems to hang at `Starting a Claude Code sandbox…` | The first start of an image prepares a MicroVM disk of about 5 GB, which takes about a minute. |
 | **MicroVM resources** warns that an agent that builds code may need more | Raise `vcpus`, `mem_mib` or `overlay_disk_mib` under `[openshell.drivers.vm]` in `~/.config/openshell/gateway.toml`, then restart the gateway (`brew services restart nvidia/openshell/openshell`). |
 
-The [troubleshooting table](/docs/setup/sandbox#troubleshooting) in the full
+The [troubleshooting table](/docs/sandboxes/guide#troubleshooting) in the complete
 guide covers the rest.

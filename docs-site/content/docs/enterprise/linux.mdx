@@ -28,10 +28,11 @@ the same config.
 | Requirement | Detail |
 | --- | --- |
 | systemd | systemd 239 or later running as PID 1. The lifecycle refuses containers and WSL without systemd. Check with `systemctl --version`. |
+| Not WSL | The lifecycle refuses a new install inside a WSL distribution (`wsl_distribution`), even one with systemd: the Windows user can open the distribution as root. A deployment that is already there gets a `wsl_distribution` warning on status, verify and upgrade. Govern WSL from Windows instead. See [Agent sessions in WSL](/docs/enterprise/windows#agent-sessions-in-wsl). |
 | Architecture | x86_64 (`amd64`) or `arm64`. Each release has a package and a tarball for both. |
 | Package format | `.deb` (Debian, Ubuntu) or `.rpm` (RHEL and derivatives). Hosts without a package manager use the payload tarball. |
 | SELinux | Supported. After each change the lifecycle runs `restorecon -R` on `/opt/defenseclaw` and `/etc/defenseclaw`, and reports a `selinux_relabel` warning if that fails. |
-| Privileges | root. Only `enterprise linux status` works without root. |
+| Privileges | root. Every `enterprise linux` action, status included, needs root: a standard user gets `not_root`. Per-user commands such as `defenseclaw-gateway status` and `audit export` answer that the computer is managed and name the administrator command. |
 | Other profiles | No Secure Client DefenseClaw layout at `/opt/cisco/secureclient/defenseclaw`. The lifecycle refuses with `profile_conflict`. |
 
 The systemd version decides how the gateway reads secrets:
@@ -82,36 +83,55 @@ The units:
 | `defenseclaw-hook-guardian-reconcile.service` | root | One immediate reconcile, on demand |
 | `defenseclaw-hook-enumerator.service` | root, homes read-only | Rewrites the target manifest every five minutes (in the default `auto` enrollment mode) |
 | `defenseclaw-sensor-helper.service` | root, acquisition capabilities | Answers the gateway's fixed AI Discovery requests |
-| `defenseclaw-enterprise-apply.path` | PID 1 | Runs `ensure --reason path` when `/etc/defenseclaw/config.yaml`, `/etc/defenseclaw/secrets` or `/etc/defenseclaw/policies` changes |
+| `defenseclaw-enterprise-apply.path` | PID 1 | Runs `ensure --reason path` when `/etc/defenseclaw/config.yaml`, `/etc/defenseclaw/secrets` or `/etc/defenseclaw/policies` changes. `enterprise secret set` and `remove` pause it while they write the credential, because they apply the change themselves |
 | `defenseclaw-enterprise-verify.timer` | PID 1 | Runs `verify` daily, with up to one hour of random delay |
 
 The package installs the units in `/usr/lib/systemd/system`. A tarball install
 writes them to `/etc/systemd/system`. Either way, host-specific drop-ins go
 in `/etc/systemd/system/<unit>.d/`.
 
+How a hook reaches the gateway:
+
 <Flow
   direction="TB"
-  caption="Standalone Linux. PID 1 binds the API and hook sockets before any user process runs and keeps them open while the gateway restarts, so a hook that connects during a restart waits for the real gateway."
+  caption="Linux. systemd opens 127.0.0.1:18970 and /run/defenseclaw-hook/hook.sock at boot and keeps them open while the gateway restarts, so a hook that connects mid-restart waits for the real gateway. The hook sends nothing until it has checked that root or defenseclaw owns the socket, and the gateway learns the caller's uid from the kernel."
 >
-  <Zone id="l0" label="Z0 · Admin and MDM (root)" tone="trusted">
+  <Zone id="l0" label="Z0 · Admin and OS (root)" tone="trusted">
     <Node id="sd" kind="generic">{`systemd\nholds both sockets`}</Node>
   </Zone>
+  <Zone id="l4" label="Z4 · User session (the user)" tone="untrusted">
+    <Node id="agent" kind="agent">{`AI agent\nruns as the user`}</Node>
+    <Node id="hook" kind="connector">{`defenseclaw-hook\nchecks the socket owner`}</Node>
+  </Zone>
   <Zone id="l2" label="Z2 · Gateway (defenseclaw)" tone="restricted">
-    <Node id="gw" kind="gateway">gateway.service</Node>
+    <Node id="gw" kind="gateway">{`Gateway\nallows or blocks`}</Node>
   </Zone>
+  <Edge from="sd" to="gw" label="hands over sockets" />
+  <Edge from="agent" to="hook" label="runs per tool call" />
+  <Edge from="hook" to="gw" label="asks over hook.sock" />
+</Flow>
+
+How the hooks stay in place:
+
+<Flow
+  direction="TB"
+  caption="Linux. The enumerator lists the users to protect in /etc/defenseclaw/hook-guardian/targets.yaml. Every minute the guardian, which runs as root, starts a short-lived worker as each listed user, and the worker puts back DefenseClaw's hooks in that user's agent config. Root never writes a user's files with its own rights."
+>
   <Zone id="l1" label="Z1 · Services (root)" tone="privileged">
-    <Node id="grd" kind="generic">hook-guardian</Node>
-    <Node id="wrk" kind="generic">{`per-user worker\nas the user`}</Node>
+    <Node id="enum" kind="generic">{`Enumerator\nlists the users`}</Node>
+    <Node id="grd" kind="generic">{`Guardian\nchecks every minute`}</Node>
   </Zone>
-  <Zone id="l4" label="Z4 · User session (user)" tone="untrusted">
-    <Node id="agent" kind="agent">AI agent</Node>
-    <Node id="hook" kind="connector">defenseclaw-hook</Node>
+  <Zone id="l3" label="Z3 · Admin-owned files" tone="protected">
+    <Node id="tgt" kind="policy">{`Target manifest\ntargets.yaml`}</Node>
   </Zone>
-  <Edge from="sd" to="gw" label="inherited fds" />
-  <Edge from="grd" to="wrk" label="spawns" />
-  <Edge from="wrk" to="agent" label="user config" />
-  <Edge from="agent" to="hook" />
-  <Edge from="hook" to="gw" label="hook.sock, peer uid" />
+  <Zone id="l4" label="Z4 · User session (the user)" tone="untrusted">
+    <Node id="wrk" kind="generic">{`Per-user worker\nruns as the user`}</Node>
+    <Node id="ucfg" kind="agent">{`Agent config\nin the user's home`}</Node>
+  </Zone>
+  <Edge from="enum" to="tgt" label="writes" />
+  <Edge from="grd" to="tgt" label="reads" />
+  <Edge from="grd" to="wrk" label="starts, as the user" />
+  <Edge from="wrk" to="ucfg" label="repairs hooks" />
 </Flow>
 
 See [Threat model](/docs/enterprise/threat-model#trust-zones) for what each
@@ -179,6 +199,30 @@ Each key under `guardrail.connectors` turns on protection for that agent. See
 [Choose the agents to protect](/docs/enterprise/configuration#choose-the-agents-to-protect)
 and the [settings reference](/docs/enterprise/configuration#settings-reference).
 
+AI Discovery (each enrolled user's inventory scan in `ai-discovery/`, and the
+skill, MCP and AI component records it feeds) is off unless the config sets
+it. A config you write is read as written, so add this block to turn it on:
+
+```yaml
+ai_discovery:
+  enabled: true
+```
+
+See [Per-user scans](/docs/ai-discovery#per-user-scans-in-standalone-enterprise).
+To read the inventory on the host, run the read-only `discovery` view as root:
+
+```bash
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux discovery
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux discovery --user <account> --json
+```
+
+Skills and MCP servers are inventoried, not scanned: a managed deployment
+does not run the skill or MCP scanners. The inventory names each skill and
+MCP server per user, and its `ai_component` and per-entry skill and MCP
+records go to your observability destinations. The gateway's skill, MCP and
+tool-catalog API routes are not available on a managed host (they answer
+`501`); use the `discovery` view above instead.
+
 Put it where the lifecycle reads it. A config staged before the install is
 used as is; it does not count as an unmanaged layout:
 
@@ -192,7 +236,7 @@ The lifecycle re-owns the file to `root:defenseclaw 0640` when it installs.
 ### 3a. Install the package
 
 ```bash
-VERSION=1.4.0  # the release you deploy
+VERSION=1.0.0  # the release you deploy
 ARCH=amd64     # or arm64
 sudo apt install "./defenseclaw-enterprise-${VERSION}-linux-${ARCH}.deb"
 # RHEL and derivatives:
@@ -214,7 +258,7 @@ Use the tarball on hosts without dpkg or rpm. The payload folder and its
 binaries must be owned by root and not writable by group or others:
 
 ```bash
-VERSION=1.4.0  # the release you deploy
+VERSION=1.0.0  # the release you deploy
 ARCH=amd64     # or arm64
 PAYLOAD="/root/defenseclaw-enterprise-${VERSION}"
 sudo install -d -o root -g root -m 0700 "$PAYLOAD"
@@ -261,15 +305,19 @@ enterprise:
       credential: ai-defense-api-key
 ```
 
-Then store the key. The deployment must be installed first, because the
-command needs the service account and runs `ensure` right after it writes
-the key:
+Then store the key, before or after the install. After the install, run:
 
 ```bash
 sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise secret set \
   --name ai-defense-api-key --from-file /root/ai-defense.key --json
 sudo rm /root/ai-defense.key
 ```
+
+Before the install, run the same command with the `defenseclaw-gateway` from
+the extracted tarball (`$PAYLOAD/defenseclaw-gateway`). The key stays
+readable by root only, the command reports `not_installed` as a warning and
+exits 0, and the install gives the gateway its access, so a config that
+references the key installs at once.
 
 See [AI Defense key](/docs/enterprise/ai-defense-key) for rotation and
 removal.
@@ -333,6 +381,35 @@ sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux reconcile --json
 See [Status and verify](/docs/enterprise/operations#status-and-verify) and
 [Health fields](/docs/enterprise/operations#health-fields) for monitoring.
 
+### Gateway sandbox
+
+The gateway unit runs as `defenseclaw` with an empty capability bounding set
+and a strict systemd sandbox: `NoNewPrivileges`, `ProtectSystem=strict`,
+`ProtectHome=true`, private devices and `/tmp`, kernel, clock, hostname and
+control-group protections, `ProtectProc=invisible`, no SUID or namespace
+changes, and the `@system-service` system-call set without the clock, debug,
+module, mount, raw-I/O, reboot and swap calls. Config, binaries and the ledger
+are read-only to it; it can write only its data, log and runtime directories.
+The guardian runs as root bounded to `CAP_CHOWN CAP_DAC_OVERRIDE
+CAP_DAC_READ_SEARCH CAP_KILL CAP_SETGID CAP_SETUID`, and the enumerator to
+`CAP_CHOWN CAP_DAC_READ_SEARCH CAP_KILL CAP_SETGID CAP_SETUID` with homes
+read-only.
+Do not edit the units; `verify` reports local overrides. Put host-specific
+settings in a drop-in, and never widen the gateway sandbox: user discovery and
+hook repair are the guardian's job.
+
+To inspect the sandbox:
+
+```bash
+sudo systemctl show defenseclaw-gateway.service \
+  -p User -p NoNewPrivileges -p CapabilityBoundingSet \
+  -p ProtectSystem -p ProtectHome -p ReadOnlyPaths -p ReadWritePaths
+sudo systemd-analyze security defenseclaw-gateway.service
+```
+
+The `systemd-analyze` exposure score is a comparison aid, not an attestation;
+read the properties themselves.
+
 ### User namespaces
 
 On most distributions as shipped, Ubuntu 24.04 and RHEL 9 included,
@@ -392,19 +469,40 @@ each user remove their per-user install with `defenseclaw uninstall --binaries -
 Add `--all` to also delete `~/.defenseclaw`. See
 [Uninstall](/docs/get-started/install#uninstall).
 
+A per-user gateway that was already running keeps running until it is
+stopped. The install, `status` and `verify` name each such account with the
+`per_user_gateway_running` warning and the `kill` command that stops it.
+
 ## Remove
 
 | Goal | Command |
 | --- | --- |
-| Stop and remove the deployment. Keep the config, secrets, data and logs. | `defenseclaw-gateway enterprise linux uninstall --json` |
-| Also remove the config, secrets, data, logs and lifecycle state | `defenseclaw-gateway enterprise linux uninstall --purge --json` |
-| Also delete the `defenseclaw` account | `defenseclaw-gateway enterprise linux uninstall --purge --remove-service-account --json` |
+| Stop and remove the deployment, its config, secrets, data, logs, lifecycle state and the `defenseclaw` account. Each user keeps `~/.defenseclaw`. | `defenseclaw-gateway enterprise linux uninstall --json` |
+| Also remove each enrolled user's `~/.defenseclaw` and per-user binaries | `defenseclaw-gateway enterprise linux uninstall --purge --json` |
+| Keep the config, secrets, data and logs (and the account) for a reinstall | `defenseclaw-gateway enterprise linux uninstall --keep-state --json` |
+| Keep only the `defenseclaw` account | Add `--keep-service-account` |
 
 Run these as root from `/opt/defenseclaw/bin`. Uninstall removes each user's
 DefenseClaw hook registrations and DefenseClaw's own machine-policy entries
 first. Administrator entries in those files stay as they were.
-With `--purge` it also removes each enrolled user's `~/.defenseclaw`, except
-inert hook stubs. See [Uninstall](/docs/enterprise/lifecycle#uninstall).
+Each user keeps `~/.defenseclaw` unless you purge; the result's `kept:` line
+names the accounts that still have `~/.defenseclaw` or per-user binaries in
+`~/.local/bin`. With `--purge` it also
+stops each enrolled user's per-user gateway and removes all of that user's
+`~/.defenseclaw`, the empty agent folders DefenseClaw created in that home,
+the per-user binaries and launcher links in `~/.local/bin`, and the
+DefenseClaw wheels earlier per-user installs left in `~/.cache/uv`, and the
+result names every user it purged or left alone. To delete the users' data,
+run `--purge` instead of the plain uninstall: the plain uninstall removes the
+enrollment record that a later `--purge` needs to find the enrolled accounts.
+A purge after it warns (`per_user_state_remaining`) and names each account
+whose files stay. To delete them, activate the deployment again with
+`ensure --from-package --config <file>` (or, when the package is gone,
+install it again) and run `uninstall --purge`, or delete those files by
+hand. If uninstall reports an
+error, it keeps the deployment record, the config and the state, so you can
+fix the cause and rerun it.
+See [Uninstall](/docs/enterprise/lifecycle#uninstall).
 
 On a host installed from the package, `uninstall` leaves the package's
 binaries and units in place, so dpkg or rpm still lists
@@ -412,28 +510,26 @@ binaries and units in place, so dpkg or rpm still lists
 
 | Package command | Effect |
 | --- | --- |
-| `apt remove defenseclaw-enterprise` | Runs `uninstall`, then removes the package files. The config and state stay. |
-| `apt purge defenseclaw-enterprise` | Also deletes `/etc/defenseclaw`, `/var/lib/defenseclaw`, `/var/lib/defenseclaw-hook-guardian`, `/var/lib/defenseclaw-enterprise` and `/var/log/defenseclaw`. The `defenseclaw` account stays. |
-| `dnf remove defenseclaw-enterprise` | Runs `uninstall`, then removes the package files. RPM has no purge, so the config and state stay. |
+| `apt remove defenseclaw-enterprise` | Runs `uninstall`, then removes the package files. The config, state and the `defenseclaw` account go; each user keeps `~/.defenseclaw`. |
+| `apt purge defenseclaw-enterprise` | The same, and it also deletes what a failed uninstall left of `/etc/defenseclaw`, `/var/lib/defenseclaw`, `/var/lib/defenseclaw-hook-guardian`, `/var/lib/defenseclaw-enterprise` and `/var/log/defenseclaw`. |
+| `dnf remove defenseclaw-enterprise` | Runs `uninstall`, then removes the package files. The config, state and the `defenseclaw` account go; each user keeps `~/.defenseclaw`. |
 
-To remove everything from a package host, purge with the lifecycle first,
-while the binary still exists, then remove the package:
+If the package's `uninstall` reports a problem, its result stays in
+`/var/lib/defenseclaw-enterprise/last-package-result.json`.
+
+To remove everything from a package host, including each user's data,
+purge with the lifecycle first, while the binary still exists, then remove
+the package:
 
 ```bash
-sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux uninstall \
-  --purge --remove-service-account --json
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux uninstall --purge --json
 sudo apt purge defenseclaw-enterprise
 # RHEL and derivatives:
 # sudo dnf remove defenseclaw-enterprise
-# sudo rm -rf /var/lib/defenseclaw-enterprise
 ```
 
-On RHEL, the package's removal script writes its result to
-`/var/lib/defenseclaw-enterprise` again, and nothing removes it, so delete
-that folder last. On Debian and Ubuntu, `apt purge` removes it.
-
-On a tarball host, `uninstall --purge --remove-service-account` removes
-everything, including `/opt/defenseclaw`.
+On a tarball host, `uninstall --purge` removes everything, including
+`/opt/defenseclaw`.
 
 ## Upgrades and changes
 

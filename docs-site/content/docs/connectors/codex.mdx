@@ -8,6 +8,8 @@ keywords:
   - Codex notify bridge
 ---
 
+import { ConnectorSupport } from '@/components/support-matrix';
+
 The Codex connector wires DefenseClaw into [Codex's documented hooks](https://github.com/openai/codex), [native OpenTelemetry exporter](https://learn.chatgpt.com/docs/config-file/config-advanced#observability-and-telemetry), and the notify bridge for agent-turn-complete events.
 
 <Callout type="info">
@@ -21,10 +23,12 @@ are not proxy-intercepted.
 
 ## Platform support
 
+<ConnectorSupport id="codex" />
+
 | Platform | Status | Connector path |
 | --- | --- | --- |
 | macOS and Linux | **Supported** | Portable command hooks, native OTel, and the notify bridge. |
-| Native Windows x64 | **Supported** | Event- and contract-bound PowerShell `-EncodedCommand` bridge to the protected `defenseclaw-hook.exe`, plus native OTel and notify configuration. Validation version, date, and run metadata remain empty and `live=false`. |
+| Native Windows x64 | **Supported** | A system PowerShell bridge starts the protected `defenseclaw-hook.exe` for each registered event, plus native OTel and the notify bridge. |
 
 ## Setup
 
@@ -48,7 +52,9 @@ defenseclaw setup codex --mode action  # block on policy hits via PreToolUse den
 ```
 
 DefenseClaw writes each selected Codex event and hook contract into
-`%CODEX_HOME%\managed_config.toml`. The registered command invokes system
+`%CODEX_HOME%\config.toml` and marks those hooks trusted there, because Codex
+on Windows does not read hooks from `%CODEX_HOME%\managed_config.toml`. Setup
+moves hooks an earlier release left in that file. The registered command invokes system
 Windows PowerShell with `-EncodedCommand`, synchronously starts the protected
 `defenseclaw-hook.exe` with inherited standard handles, and passes the bound
 `--event` and `--hook-contract` values. This bridge is native Windows plumbing;
@@ -60,7 +66,8 @@ it does not use a POSIX hook shell or WSL.
 `setup codex` is the dedicated Codex setup alias. It uses the same setup
 backend as `setup guardrail`, adds or reconfigures Codex, wires hooks + OTel +
 the notify bridge, and can join an existing hook-connector roster when you
-choose **Add**. No proxy listener binds in either mode.
+choose **Add**. No proxy listener binds in either mode. Fully quit and reopen
+Codex after setup so it loads the new hooks and OTel settings.
 
 Native logs, metrics, and traces use the standard loopback
 `/v1/{logs,metrics,traces}` endpoints with
@@ -77,26 +84,27 @@ health so a stale gateway or configuration drift is visible.
 Redaction is configured through the v8 bucket/profile policy: edit
 `observability.destinations[].routes[].selector.buckets` and
 `observability.redaction_profiles`, then follow
-[Redaction → Verify policy](/docs/reference/redaction#verify-policy).
+[Redaction → Verify policy](/docs/observability/redaction#verify-policy).
 
 The alias defaults to observe mode and accepts the common hook-connector
 options, including `--mode`, `--workspace`, `--rule-pack`,
 `--human-approval`, `--hilt-min-severity`, `--fail-mode`, `--block-message`,
 `--replace`, `--with-local-stack`, and restart controls. Use the
-[quick-alias reference](/docs/setup/guardrail/aliases) for that surface. Use
-the [full guardrail setup](/docs/setup/guardrail) when you also need scanner,
+[quick-alias reference](/docs/guardrail/aliases) for that surface. Use
+the [full guardrail setup](/docs/guardrail) when you also need scanner,
 detection-strategy, or judge-provider configuration. Defaults are documented
-once on the [Defaults page](/docs/defaults).
+once on the [Defaults page](/docs/policies/defaults).
 
 ## Files DefenseClaw will modify
 
 <Tabs items={['Native Windows', 'macOS/Linux']}>
   <Tab value="Native Windows">
 
-`%CODEX_HOME%\managed_config.toml` carries the managed hook matrix.
-`%CODEX_HOME%\config.toml` carries DefenseClaw-marked OTLP and notify fields.
-Generated runtime and protected connector credentials live below
-`%USERPROFILE%\.defenseclaw\hooks`. Use setup/teardown commands; do not edit or
+`%CODEX_HOME%\config.toml` carries the DefenseClaw hook matrix, its hook trust
+entries, and DefenseClaw-marked OTLP and notify fields.
+The hook runtime, `defenseclaw-hook.exe`, lives in
+`%LOCALAPPDATA%\DefenseClaw\HookRuntime`; protected connector credentials
+and adapters live in `%USERPROFILE%\.defenseclaw\hooks`. Use setup/teardown commands; do not edit or
 copy those entries manually. See the
 [Windows path reference](/docs/get-started/windows/paths-troubleshooting#filesystem-reference).
 
@@ -126,20 +134,17 @@ owned entries.
 
 <HookEventsList connector="codex" />
 
-Action-mode responses follow each event's official control or feedback
-contract; the events do not all have the same effect:
-
 Each native hook request must exactly match the registered event and its stdin
 `hook_event_name`. Before policy evaluation, the gateway also compares that
 event and its contract ID with the protected contract lock; mismatches or
 tampering are rejected.
 
-The lifecycle-control rows marked **v3/v4** below are contract-supported only
-for Codex `>=0.133`: v3 covers `0.133` through `0.144`, and v4 covers
-`>=0.145`. This version boundary is not release certification; native Windows
-support does not populate authentic official-client validation metadata.
-DefenseClaw does not infer or backfill these matcher/control semantics onto the
-smaller v1/v2 contracts.
+The rows marked **v3/v4** need Codex `0.133` or later: the v3 contracts cover
+`0.133` through `0.144`, and v4 covers `0.145` and later. DefenseClaw does not
+apply these controls to the older v1/v2 contracts.
+
+In action mode each event answers with its own official control or feedback
+response, so the events do not all have the same effect:
 
 | Event | DefenseClaw-owned action response |
 | --- | --- |
@@ -180,8 +185,7 @@ DefenseClaw follows the current Codex layouts rather than Claude Code's
   transport, or other added field, is not exempt. Codex's generated
   `node_repl` currently has no stable published provenance/schema contract, so
   it intentionally remains scan-eligible even when the observed local runtime
-  binary is OpenAI-signed. MCP manifests shipped inside Amp skills are also
-  user/workspace assets and remain scan-eligible.
+  binary is OpenAI-signed.
 - Custom agents: standalone `.toml` files in candidate project
   `.codex/agents/` layers and `$CODEX_HOME/agents/`. Inventory validates the
   required `name`, `description`, and `developer_instructions` fields without
@@ -209,32 +213,31 @@ trusted projects. Filesystem inventory reports project entries as
 `trust_required`; it does not infer the client's private trust decision from
 the presence of a file.
 
-## Telemetry channels at boot
+## How Codex reaches the gateway
 
 <Flow
-  direction="LR"
-  compact
-  caption="Three independent channels make Codex one of the most thoroughly inspected agents."
+  direction="TB"
+  caption="Codex reaches the gateway's API port three separate ways. Only the hooks can block. They run on up to eleven lifecycle events, depending on the Codex version, and nine of them can block: session start, prompt, before and after each tool, permission request, subagent stop, before and after compaction, and stop. Codex's own OpenTelemetry exporter and the notify bridge, which reports agent-turn-complete to /api/v1/codex/notify, only record."
 >
   <Node id="codex" kind="agent">Codex</Node>
-  <Node id="hooks" kind="connector">{`SessionStart / prompt / tool / permission /\nsubagent / compact / Stop hooks`}</Node>
-  <Node id="otel" kind="connector">Native OTel exporter</Node>
-  <Node id="notify" kind="connector">{`Notify bridge\nagent-turn-complete`}</Node>
-  <Node id="gateway" kind="gateway">defenseclaw-gateway</Node>
-  <Edge from="codex" to="hooks" />
-  <Edge from="hooks" to="gateway" />
-  <Edge from="codex" to="otel" />
-  <Edge from="otel" to="gateway" />
-  <Edge from="codex" to="notify" />
-  <Edge from="notify" to="gateway" />
+  <Node id="hooks" kind="connector">{`DefenseClaw hooks\nup to eleven events`}</Node>
+  <Node id="otel" kind="connector">{`Built-in telemetry\nOpenTelemetry exporter`}</Node>
+  <Node id="notify" kind="connector">{`Notify bridge\nafter each turn`}</Node>
+  <Node id="gateway" kind="gateway">{`DefenseClaw gateway\nAPI port, 18970 by default`}</Node>
+  <Edge from="codex" to="hooks" label="runs" />
+  <Edge from="hooks" to="gateway" label="asks for a verdict" />
+  <Edge from="codex" to="otel" label="exports" />
+  <Edge from="otel" to="gateway" label="logs, traces, metrics" />
+  <Edge from="codex" to="notify" label="runs" />
+  <Edge from="notify" to="gateway" label="reports turn end" />
 </Flow>
 
 ## In an OpenShell sandbox
 
 `defenseclaw sandbox run codex` runs Codex in an NVIDIA OpenShell sandbox on
 Linux, or on a Mac with Apple silicon in a MicroVM of its own that works on a
-copy of your folder ([macOS](/docs/setup/sandbox#macos)): the agent sees only
-your project folder, and DefenseClaw hooks gate every tool call. The [sandbox guide](/docs/setup/sandbox) covers setup,
+copy of your folder ([macOS](/docs/sandboxes/guide#macos)): the agent sees only
+your project folder, and DefenseClaw hooks gate every tool call. The [sandbox guide](/docs/sandboxes/guide) covers setup,
 the session and every flag. The files below exist only in the sandbox image;
 your own Codex configuration does not change.
 
@@ -273,26 +276,21 @@ your own Codex configuration does not change.
   sign-in is not shared. OpenShell holds the secret, and the sandbox gets a
   placeholder that works only at `api.openai.com`. `--llm bedrock`, and `auto`
   when neither is set, shares a short-term Amazon Bedrock API key from
-  `AWS_BEARER_TOKEN_BEDROCK` for a Codex custom provider on the Bedrock Mantle endpoint in `--bedrock-region`
+  `AWS_BEARER_TOKEN_BEDROCK` for a Codex custom provider on the Bedrock Mantle OpenAI route in `--bedrock-region`
   (default `$AWS_REGION`, then `$AWS_DEFAULT_REGION`, then `us-east-1`), with
   Codex's multi-agent and web search tools off. Mantle does not serve Codex's
-  own default model, so a Bedrock run uses `openai.gpt-oss-20b` unless you
-  pick another with `-- -m MODEL` (a `-c model=` override does not change
+  own default model, so a Bedrock run uses `openai.gpt-5.5` unless you
+  pick another the route serves with `-- -m MODEL` (a `-c model=` override does not change
   it); the banner's Model line names the model either way. `openshell.llm`
   sets the choice for runs without `--llm`, such as the `codex` shell
   wrapper's.
-- **Bedrock follow-up turns.** Bedrock Mantle rejects every turn after the
-  first of a Codex conversation, which Codex shows as `stream disconnected
-  before completion`; no provider setting avoids it. Start each task with
-  `/new` in the TUI, or run one `--prompt` per task. The banner of an
-  interactive Codex session on Bedrock says so.
 - **Per-sandbox settings.** Codex reads one `managed_config.toml` and one
   `requirements.toml`, so each sandbox gets both again, read-only, with its
   own settings. `managed_config.toml` pins the model provider the run chose,
   so a `config.toml` the agent writes cannot redirect Codex, and defines the
   MCP servers DefenseClaw brought along from your Codex setup. Unless the
   sandbox pack sets
-  [`mcp.project_servers: allow`](/docs/setup/sandbox-policy#mcp-servers-in-a-sandbox),
+  [`mcp.project_servers: allow`](/docs/sandboxes/policy-packs#mcp-servers-in-a-sandbox),
   `requirements.toml` allows exactly those servers, which disables every
   other one, a repository's included. `--no-mcp` leaves your servers behind.
 - **MCP gap.** Codex matches an allowed server by its command only, and merges
@@ -309,8 +307,61 @@ your own Codex configuration does not change.
   on `PATH` and a forged sandbox token), and a live sandbox run fired the hooks
   and honoured a deny with a Bedrock Mantle model.
 
+## Troubleshooting
+
+- **401 from the model right after you changed its key.** Codex keeps one
+  shared app-server daemon running in the background, and that daemon keeps
+  the environment it started with. After you rotate the provider key (for
+  example a short-term Amazon Bedrock key in `AWS_BEARER_TOKEN_BEDROCK`, or
+  `OPENAI_API_KEY`), run `codex app-server daemon restart` from a shell that
+  has the new key, then open Codex again. The request fails before any tool
+  call, so DefenseClaw's hooks are not involved.
+- **Connections to OpenAI or the model provider when the gateway starts
+  (Windows).** Each gateway start or restart with the Codex connector
+  enabled runs Codex's app-server once to read Codex's effective
+  requirements, so a policy that allows only managed hooks is caught before
+  DefenseClaw writes user hooks. That app-server connects to OpenAI (for
+  example chatgpt.com) and can reach your model provider. No Codex window has
+  to be open; see the CLI reference for the other commands that reach out.
+- **Behind an HTTP proxy.** DefenseClaw's hooks reach the gateway on
+  127.0.0.1 directly and ignore `HTTP_PROXY` and `HTTPS_PROXY`. Codex's own
+  OTel exporter follows those variables and has no proxy option of its own,
+  so without a loopback entry in `NO_PROXY` its telemetry to the gateway, with
+  its OTLP credential, would go to the proxy. On Linux and macOS, setup adds a
+  marked block to `~/.codex/.env` (`$CODEX_HOME/.env`), which Codex loads
+  when it starts. The block appends `127.0.0.1,localhost,::1` and the cloud
+  instance-metadata addresses (`169.254.169.254,169.254.170.2,fd00:ec2::254`)
+  to the `NO_PROXY` and `no_proxy` values you already have, so Codex sends its
+  telemetry straight to the gateway, its AWS credential lookups go straight
+  to the instance metadata service, and everything else still goes through
+  your proxy. Codex sessions started before setup keep the old environment
+  until you restart them. Uninstall and
+  `defenseclaw guardrail disable --connector codex` remove only that block,
+  and the file too if setup created it. If a proxy variable is set and the
+  loopback is not covered, or the block is an older one without the
+  instance-metadata addresses, `defenseclaw doctor` shows a warning on the
+  **Codex telemetry proxy** row, with a one-line fix.
+  On Windows, set it once for your account with
+  `setx NO_PROXY 127.0.0.1,localhost,::1` and open a new terminal, or run
+  `$env:NO_PROXY = "127.0.0.1,localhost,::1"` in the PowerShell session
+  before you start Codex.
+
 ## Disable
+
+If Codex is the only connector DefenseClaw guards, turn the guardrail off:
+
+```bash
+defenseclaw guardrail disable --yes
+```
+
+If other connectors are configured too, turn off Codex alone and keep the
+rest running:
 
 ```bash
 defenseclaw guardrail disable --connector codex --yes
 ```
+
+Both keep Codex's settings, so `defenseclaw guardrail enable` (with the same
+`--connector`) turns it back on. To drop Codex from the configured
+connectors instead, run `defenseclaw setup remove codex --yes`; add `--force`
+when it is the last connector.

@@ -3130,8 +3130,9 @@ function Add-DefenseClawLifecycleFailureEvidence {
     <#
         A failed standalone lifecycle attaches what it knows about recovery to
         its exception: whether the transaction is still pending, each managed-
-        hook lifecycle step recovery ran with the Setup's verified gateway, and
-        why it declined to. Copy exactly those fields onto the failure
+        hook lifecycle step recovery ran with the Setup's verified gateway,
+        why it declined to, and what the rollback of a failed first install
+        could not remove. Copy exactly those fields onto the failure
         document. The Secure Client lifecycle attaches none of them, so its
         failure document is unchanged.
     #>
@@ -3145,7 +3146,8 @@ function Add-DefenseClawLifecycleFailureEvidence {
     foreach ($field in @(
         @('DefenseClaw.TransactionPending', 'transaction_pending'),
         @('DefenseClaw.RecoveryGatewayRuns', 'recovery_gateway_runs'),
-        @('DefenseClaw.RecoveryGatewayRefusal', 'recovery_gateway_refusal')
+        @('DefenseClaw.RecoveryGatewayRefusal', 'recovery_gateway_refusal'),
+        @('DefenseClaw.RollbackLeftovers', 'rollback_leftovers')
     )) {
         if ($Evidence.Contains([string]$field[0])) {
             Microsoft.PowerShell.Utility\Add-Member `
@@ -3373,6 +3375,9 @@ try {
         $arguments['PayloadManifest'] = $PayloadManifest
         $arguments['AllowedSigners'] = [string[]]$bootstrapAllowedSigners
         $arguments['ProductVersion'] = $ProductVersion
+        # The launching CLI's protected temp folder, which the purge's stale
+        # temp sweep must keep (GAP-1853); TEMP now points at the bootstrap.
+        $arguments['LauncherTemp'] = [string]$bootstrapEnvironment.OriginalEnvironment['TEMP']
     }
     $result = DefenseClawEnterprise\Invoke-DefenseClawEnterpriseLifecycle @arguments
     if ($null -ne $result.PSObject.Properties['ok'] -and -not [bool]$result.ok) {

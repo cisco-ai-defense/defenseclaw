@@ -159,6 +159,7 @@ It differs from the Secure Client Setup in these ways:
 | Lifecycle engine | Windows PowerShell 5.1 | PowerShell 7 x64 (see `WINDOWS-MACHINE-INSTALLER-INTERFACE.md`) |
 | Actions | The seven above | The seven above plus `/ensure` |
 | Exit codes | `0`, `1603` | `0`, `1603`, `1618`, `1639`; `3010` is reserved and never returned |
+| `/uninstall` | Keeps the machine state unless `PURGE=1` | Always removes the machine state; `PURGE=1` also removes each enrolled account's per-user data and binaries |
 
 ### Invocation
 
@@ -174,7 +175,7 @@ reboot.
 | `ALLOWEDSIGNERS=` | Comma-separated SHA-256 thumbprints of accepted Authenticode signer certificates. Meaningful only for a signed Setup. |
 | `JSON=1` | Print the lifecycle result document. |
 | `NOSTART=1` | Install, upgrade, repair or ensure without starting the services. |
-| `PURGE=1` | With `/uninstall`, also remove managed state. |
+| `PURGE=1` | With `/uninstall`, also remove each enrolled account's `%USERPROFILE%\.defenseclaw` and per-user binaries. `/uninstall` always removes the machine state under `C:\ProgramData\Cisco\DefenseClaw`. |
 | `TIMEOUTSECONDS=` | The lifecycle time limit, from 60 to 7200 seconds. The default is 1800. |
 
 `CONFIG=` and `MANIFEST=` must be absolute local drive paths to regular,

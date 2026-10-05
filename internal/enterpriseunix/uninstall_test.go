@@ -20,6 +20,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 )
 
@@ -82,7 +83,15 @@ func TestUninstallStopsRepairersBeforeRemovingRegistrations(t *testing.T) {
 				policyRemoved = true
 				check("machine policy removal")
 			}}
+			before := len(h.services.calls)
 			requireOK(t, h.run(Options{Action: ActionUninstall}))
+			// GAP-1443: a macOS disable writes a launchd override that no
+			// command deletes; the definitions are removed instead.
+			for _, call := range h.services.calls[before:] {
+				if goos == "darwin" && strings.HasPrefix(call, "disable ") {
+					t.Fatalf("uninstall ran %q, which leaves a launchd override", call)
+				}
+			}
 			if !removeAll || !policyRemoved {
 				t.Fatalf("uninstall skipped a registration removal: per-user=%v machine-policy=%v", removeAll, policyRemoved)
 			}
@@ -93,8 +102,10 @@ func TestUninstallStopsRepairersBeforeRemovingRegistrations(t *testing.T) {
 				if h.services.isActive(unit.Name) {
 					t.Fatalf("%s still running after uninstall", unit.Name)
 				}
-				if unit.Activate && h.services.enabled[unit.Name] {
-					t.Fatalf("%s still enabled after uninstall", unit.Name)
+				// A removed launchd label goes back to launchd's default,
+				// enabled, instead of staying listed as disabled (MAC-R1-23).
+				if unit.Activate && h.services.enabled[unit.Name] != (goos == "darwin") {
+					t.Fatalf("%s enabled=%v after uninstall", unit.Name, h.services.enabled[unit.Name])
 				}
 			}
 		})
@@ -202,10 +213,140 @@ func TestUninstallKeepsTheBinariesWhilePerUserHooksRemain(t *testing.T) {
 				t.Fatal("the uninstall removed the binaries the registration left still runs")
 			}
 			left = false
-			requireOK(t, h.run(Options{Action: ActionUninstall, Purge: true}))
+			done := h.run(Options{Action: ActionUninstall, Purge: true})
+			requireOK(t, done)
 			if exists(gateway) || exists(h.env.deploymentPath()) {
 				t.Fatal("the rerun did not finish the removal")
 			}
+			// MAC-R1-22: the purge names the accounts whose data it deleted.
+			if !strings.Contains(strings.Join(done.Changes, "\n"), "per-user data of user alice") {
+				t.Fatalf("the purge does not report the per-user data it removed: %v", done.Changes)
+			}
+			// The purge removes everything, the hook scripts included, and
+			// says so (it ran only after every registration went).
+			if changes := strings.Join(done.Changes, "\n"); !strings.Contains(changes, "including its hook scripts") ||
+				!strings.Contains(changes, "per-user binaries") || strings.Contains(changes, "except ~/.defenseclaw/hooks") {
+				t.Fatalf("the purge report does not say it removed everything: %v", done.Changes)
+			}
 		})
+	}
+}
+
+// GAP-1444: uninstall --purge said every enrolled account lost per-user
+// binaries and a per-user gateway, also an account that never had a
+// per-user install. Each account's line now names only what was removed.
+func TestUninstallPurgeNamesOnlyWhatEachAccountHad(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	h.env.Runner = removeAllRunner{Runner: h.runner, answer: func(string) (CommandResult, error) {
+		return CommandResult{Stdout: []byte(`{"ok":true,"purged":["alice","bob"],` +
+			`"purged_detail":{"alice":{"data":true},"bob":{"data":true,"binaries":true,"gateway":true}}}`)}, nil
+	}}
+	done := h.run(Options{Action: ActionUninstall, Purge: true})
+	requireOK(t, done)
+	lines := map[string]string{}
+	for _, change := range done.Changes {
+		for _, user := range []string{"alice", "bob"} {
+			if strings.Contains(change, "of user "+user+" ") {
+				lines[user] = change
+			}
+		}
+	}
+	if alice := lines["alice"]; !strings.Contains(alice, "~/.defenseclaw") ||
+		strings.Contains(alice, "~/.local/bin") || strings.Contains(alice, "gateway") {
+		t.Fatalf("alice had only ~/.defenseclaw: %q", alice)
+	}
+	if bob := lines["bob"]; !strings.Contains(bob, "launcher links in ~/.local/bin") ||
+		!strings.HasSuffix(bob, "after stopping its per-user gateway") {
+		t.Fatalf("bob had a full per-user install: %q", bob)
+	}
+	if got := purgedUserChange("carol", &purgedUserDetail{}); got != "found no DefenseClaw per-user data or binaries of user carol to remove" {
+		t.Fatalf("an account with nothing to remove: %q", got)
+	}
+	// GAP-1947: the uv cache entries the purge removed are named too.
+	if got := purgedUserChange("dave", &purgedUserDetail{Data: true, UVCache: true}); !strings.Contains(got, "~/.defenseclaw") ||
+		!strings.HasSuffix(got, "and DefenseClaw's entries in its uv cache (~/.cache/uv)") {
+		t.Fatalf("an account with uv cache entries: %q", got)
+	}
+	if got := purgedUserChange("erin", &purgedUserDetail{UVCache: true}); got != "removed DefenseClaw's entries in the uv cache (~/.cache/uv) of user erin" {
+		t.Fatalf("an account with only uv cache entries: %q", got)
+	}
+}
+
+// packageOwnedRunner answers the host commands a purge without a deployment
+// record runs: rpm owns the gateway, and getent lists passwd.
+type packageOwnedRunner struct {
+	Runner
+	passwd string
+}
+
+func (r packageOwnedRunner) Run(ctx context.Context, name string, args ...string) (CommandResult, error) {
+	switch {
+	case name == "rpm":
+		return CommandResult{}, nil
+	case name == "getent" && len(args) == 1 && args[0] == "passwd":
+		return CommandResult{Stdout: []byte(r.passwd)}, nil
+	}
+	return r.Runner.Run(ctx, name, args...)
+}
+
+// GAP-2632: after a default uninstall of the rpm, the purge that uninstall
+// named reported done, removed no account's ~/.defenseclaw, named nobody and
+// deleted the rpm's binaries. The default uninstall removes the enrollment
+// record a purge needs, so it now names a step that works, and a purge
+// without the record keeps the package's files and names each account whose
+// files stay.
+func TestPurgeAfterDefaultUninstallNamesTheAccountsItCannotClean(t *testing.T) {
+	h := packageHost(t, "1.0.0")
+	h.env.Runner = packageOwnedRunner{Runner: h.runner, passwd: "root:x:0:0:root:/root:/bin/bash\n" +
+		"alice:x:1001:1001::/home/alice:/bin/bash\nbob:x:1002:1002::/home/bob:/bin/bash\n"}
+	requireOK(t, h.run(Options{Action: ActionInstall, FromPackage: true}))
+	writeHostFile(t, h, enterprisehooks.UnixEligibleAccountsPath(h.env.Layout.ManifestPath),
+		`{"accounts":[{"user":"alice","home":"/home/alice"},{"user":"bob","home":"/home/bob"}]}`)
+	writeHostFile(t, h, "/home/alice/.defenseclaw/hook_contract_lock.json", "{}")
+
+	plain := h.run(Options{Action: ActionUninstall})
+	requireOK(t, plain)
+	kept := strings.Join(plain.Changes, "\n")
+	if !strings.Contains(kept, "kept: the DefenseClaw per-user data (~/.defenseclaw) of alice.") ||
+		!strings.Contains(kept, "activate the deployment again with `"+h.env.lifecycleCommand(ActionEnsure)+" --from-package --config <file>` and run `") ||
+		strings.Contains(kept, "while the defenseclaw-enterprise package is installed") {
+		t.Fatalf("the default uninstall names a purge that cannot find the accounts:\n%s", kept)
+	}
+
+	purge := h.run(Options{Action: ActionUninstall, Purge: true})
+	requireOK(t, purge)
+	got := messagesOf(purge.Warnings, codePerUserState)
+	if !strings.Contains(got, "not removed: the DefenseClaw per-user data (~/.defenseclaw) of alice.") ||
+		strings.Contains(got, "bob") || !strings.Contains(got, "--from-package --config <file>`") {
+		t.Fatalf("the purge does not name the account whose data stays: %q", got)
+	}
+	if !exists(h.env.P(filepath.Join(h.env.Layout.BinDir, binGateway))) {
+		t.Fatal("the purge removed the binaries the rpm still owns")
+	}
+	if !exists(h.env.P("/home/alice/.defenseclaw")) {
+		t.Fatal("the purge deleted a home folder without an enrollment record")
+	}
+}
+
+// A purge after --keep-state still has the enrollment record and the config,
+// so it purges the enrolled accounts, which its kept line said it would.
+func TestPurgeAfterKeepStateUninstallPurgesTheAccounts(t *testing.T) {
+	h := packageHost(t, "1.0.0")
+	requireOK(t, h.run(Options{Action: ActionInstall, FromPackage: true}))
+	writeHostFile(t, h, h.env.Layout.ManifestPath, "version: 1\ntargets: []\n")
+	requireOK(t, h.run(Options{Action: ActionUninstall, KeepState: true}))
+	var calls []string
+	h.env.Runner = removeAllRunner{Runner: h.runner, answer: func(args string) (CommandResult, error) {
+		calls = append(calls, args)
+		return CommandResult{Stdout: []byte(`{"ok":true,"purged":["alice"],"purged_detail":{"alice":{"data":true}}}`)}, nil
+	}}
+	purge := h.run(Options{Action: ActionUninstall, Purge: true})
+	requireOK(t, purge)
+	if len(calls) != 1 || !strings.HasSuffix(calls[0], " --purge") {
+		t.Fatalf("the purge did not purge the enrolled accounts: %v", calls)
+	}
+	if !strings.Contains(strings.Join(purge.Changes, "\n"), "per-user data of user alice") {
+		t.Fatalf("the purge does not name the account it purged: %v", purge.Changes)
 	}
 }

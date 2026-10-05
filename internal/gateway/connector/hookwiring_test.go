@@ -1174,7 +1174,7 @@ func TestWindowsDevinDirectBashHookCommandAwaitsGUIHookWithStdio(t *testing.T) {
 	if got := windowsProcessExitCodeForTest(t, runErr); got != 2 {
 		t.Fatalf("Devin awaited command exit = %d, want fail-closed 2\nstdout: %s\nstderr: %s", got, stdout.String(), stderr.String())
 	}
-	if got := strings.TrimSpace(stdout.String()); got != `{"decision":"block","reason":"DefenseClaw hook failed closed"}` {
+	if got := strings.TrimSpace(stdout.String()); got != "DefenseClaw hook failed closed" {
 		t.Fatalf("Devin awaited command stdout = %q", got)
 	}
 	if !strings.Contains(strings.ToLower(stderr.String()), "missing gateway token") {
@@ -2361,11 +2361,7 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 			if err := tt.conn.Setup(context.Background(), opts); err != nil {
 				t.Fatalf("Setup: %v", err)
 			}
-			generatedConfigPath := configPath
-			if tt.name == "codex" {
-				generatedConfigPath = filepath.Join(filepath.Dir(configPath), codexManagedConfigLogicalName)
-			}
-			data, err := os.ReadFile(generatedConfigPath)
+			data, err := os.ReadFile(configPath)
 			if err != nil {
 				t.Fatalf("read generated config: %v", err)
 			}

@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
@@ -42,9 +43,10 @@ import (
 // attributes the request to the identity the credential is bound to.
 
 const (
-	userScopedTokenKeyFileName        = ".user-scoped-token.key"
-	userScopedTokenPendingKeyFileName = ".user-scoped-token.key.next"
-	userScopedTokenDomain             = "defenseclaw.user-scoped-credential.v1"
+	userScopedTokenKeyFileName         = ".user-scoped-token.key"
+	userScopedTokenPendingKeyFileName  = ".user-scoped-token.key.next"
+	userScopedTokenRetiringKeyFileName = ".user-scoped-token.key.prev"
+	userScopedTokenDomain              = "defenseclaw.user-scoped-credential.v1"
 
 	// UserScopedHookCredential authenticates a connector's hook, notify and
 	// inspect routes.
@@ -75,6 +77,27 @@ func PendingUserScopedTokenKeyPath(dataDir string) (string, error) {
 	}
 	return filepath.Join(dataDir, "hooks", userScopedTokenPendingKeyFileName), nil
 }
+
+// RetiringUserScopedTokenKeyPath is where a credential rotation that is
+// rolling back keeps the key it had staged. The gateway still accepts the
+// credentials derived from it, but the guardian no longer renders from it,
+// so users the rotation had already moved keep authenticating while the
+// guardian moves them back to the committed key; the rollback removes it
+// once they are back.
+func RetiringUserScopedTokenKeyPath(dataDir string) (string, error) {
+	if strings.TrimSpace(dataDir) == "" {
+		return "", fmt.Errorf("RetiringUserScopedTokenKeyPath: empty dataDir")
+	}
+	return filepath.Join(dataDir, "hooks", userScopedTokenRetiringKeyFileName), nil
+}
+
+// RotationKeyMaxAge bounds how long a staged or retiring key is honored
+// after the rotation wrote it. A rotation settles well within it; one that
+// was killed before it could settle (and before any lifecycle run recovered
+// it) stops widening the accepted credentials on its own once the bound
+// passes: the gateway then accepts, and the guardian renders from, the
+// committed key alone.
+const RotationKeyMaxAge = 30 * time.Minute
 
 // UserScopedTokenKeyFingerprint is the non-secret name of one key
 // generation: the lowercase hex SHA-256 of the key, the format rotation
@@ -113,11 +136,35 @@ func LoadUserScopedTokenKey(dataDir string) (string, error) {
 }
 
 // LoadPendingUserScopedTokenKey reads the key a rotation staged, with the
-// same trust checks. No staged key returns "" and no error.
+// same trust checks. No staged key, or one older than RotationKeyMaxAge,
+// returns "" and no error.
 func LoadPendingUserScopedTokenKey(dataDir string) (string, error) {
 	path, err := PendingUserScopedTokenKeyPath(dataDir)
 	if err != nil {
 		return "", err
+	}
+	return loadRotationKeyAt(dataDir, path)
+}
+
+// LoadRetiringUserScopedTokenKey reads the key a rolling-back rotation
+// retires (RetiringUserScopedTokenKeyPath), like LoadPendingUserScopedTokenKey.
+func LoadRetiringUserScopedTokenKey(dataDir string) (string, error) {
+	path, err := RetiringUserScopedTokenKeyPath(dataDir)
+	if err != nil {
+		return "", err
+	}
+	return loadRotationKeyAt(dataDir, path)
+}
+
+func loadRotationKeyAt(dataDir, path string) (string, error) {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	}
+	if err == nil {
+		if age := time.Since(info.ModTime()); age > RotationKeyMaxAge || age < -RotationKeyMaxAge {
+			return "", nil
+		}
 	}
 	return loadUserScopedTokenKeyAt(dataDir, path)
 }

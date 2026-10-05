@@ -221,7 +221,7 @@ class TestMCPScanConnectorMatrix(_MatrixBase):
                 self._force_connector(connector)
                 result = self.runner.invoke(
                     mcp,
-                    ["scan", "http://localhost:3000"],
+                    ["scan", "http://localhost:3000", "--connector", connector],
                     obj=self.app,
                     catch_exceptions=False,
                 )

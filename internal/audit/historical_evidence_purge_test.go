@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -77,6 +78,47 @@ func TestHistoricalEvidencePurgeMigrationDeletesHistoryAndKeepsRuntimeUsable(t *
 
 	assertHistoricalEvidenceCurrentWritesWork(t, fixture.store)
 	assertHistoricalEvidenceForeignKeysClean(t, fixture.store.db)
+}
+
+// GAP-1522: the purge left a 0.x audit.db (no auto_vacuum) at full size
+// holding a few rows, and doctor asked for a manual VACUUM.
+func TestHistoricalEvidencePurgeReclaimsTheFreedSpace(t *testing.T) {
+	fixture := newHistoricalEvidencePurgeFixture(t)
+	if _, err := fixture.store.db.Exec(`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 800)
+		INSERT INTO scan_results (id, scanner, target, timestamp, duration_ms, finding_count, max_severity, raw_json)
+		SELECT 'bulk-' || i, 'legacy-runtime', 'tool-response', '2026-08-11T12:00:00Z', 1, 0, 'LOW', hex(randomblob(8192)) FROM n`); err != nil {
+		t.Fatalf("seed bulk history: %v", err)
+	}
+	if _, err := fixture.store.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+		t.Fatalf("checkpoint seeded history: %v", err)
+	}
+	before := auditFileSize(t, fixture.store.dbPath)
+
+	if err := fixture.store.Init(); err != nil {
+		t.Fatalf("apply historical evidence purge through Init: %v", err)
+	}
+	var freePages, autoVacuum int
+	if err := fixture.store.db.QueryRow(`PRAGMA freelist_count`).Scan(&freePages); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.store.db.QueryRow(`PRAGMA auto_vacuum`).Scan(&autoVacuum); err != nil {
+		t.Fatal(err)
+	}
+	after := auditFileSize(t, fixture.store.dbPath)
+	if freePages != 0 || autoVacuum != 2 || after*4 > before {
+		t.Fatalf("after the purge: freelist=%d auto_vacuum=%d size %d -> %d bytes; want the space reclaimed", freePages, autoVacuum, before, after)
+	}
+	assertHistoricalEvidenceTablesEmpty(t, fixture.store.db)
+	assertHistoricalEvidenceCurrentWritesWork(t, fixture.store)
+}
+
+func auditFileSize(t *testing.T, path string) int64 {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return info.Size()
 }
 
 func TestHistoricalEvidencePurgeMigrationRollsBackAllRowsAndCursor(t *testing.T) {

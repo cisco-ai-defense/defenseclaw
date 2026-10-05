@@ -20,7 +20,7 @@ from defenseclaw.tui.widgets.hint_bar import HintBar, HintEngine
 @pytest.mark.parametrize(
     ("panel", "expected"),
     (
-        ("skills", "R registries"),
+        ("skills", "R registry entry"),
         ("mcps", "n add server"),
         ("plugins", "plugin install"),
         ("inventory", "h/l sub-tab"),
@@ -123,7 +123,7 @@ def test_setup_missing_credentials_hint_uses_status_detail() -> None:
 
     hint = HintEngine().hint_for(HintState(active_panel="setup"), status)
 
-    assert "Required credentials are missing" in hint
+    assert "Required API keys missing" in hint
     assert "press f to fill missing" in hint
 
 

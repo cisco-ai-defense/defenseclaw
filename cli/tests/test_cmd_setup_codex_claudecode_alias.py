@@ -383,6 +383,33 @@ class TestSetupClaudeCodeAlias(unittest.TestCase):
         self.assertIn("defenseclaw setup remove claude-code", result.output)
         self.assertNotIn("defenseclaw setup claudecode", result.output)
 
+    def test_mode_flag_skips_interactive_mode_prompt(self):
+        """GAP-1097: on a TTY, --mode action answers the mode question."""
+        with (
+            patch("defenseclaw.commands.cmd_setup._is_interactive", return_value=True),
+            patch(
+                "defenseclaw.commands.cmd_setup._prompt_connector_mode",
+                side_effect=AssertionError("mode prompt shown although --mode was given"),
+            ),
+            patch("defenseclaw.commands.cmd_setup._prompt_enable_judge", return_value=False),
+            patch("defenseclaw.commands.cmd_setup._restart_services", return_value=None),
+            patch("defenseclaw.commands.cmd_setup._maybe_bring_up_local_stack", return_value=None),
+            patch(
+                "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+                return_value=True,
+            ),
+        ):
+            result = CliRunner().invoke(
+                setup_group,
+                ["claude-code", "--mode", "action", "--no-restart"],
+                obj=self.app,
+                input="y\n" * 10,
+                catch_exceptions=False,
+            )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertNotIn("Select mode", result.output)
+        self.assertEqual(self.app.cfg.guardrail.effective_mode("claudecode"), "action")
+
 
 class TestSetupNewConnectorAliases(unittest.TestCase):
     """The hook-first connectors expose the same observability alias contract."""
@@ -429,6 +456,8 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
             ):
                 self.app.cfg.claw.mode = "openclaw"
                 self.app.cfg.guardrail.connector = "openclaw"
+                # An unguarded OpenClaw default; a guarded one needs --replace (GAP-2426).
+                self.app.cfg.guardrail.enabled = False
                 result = _invoke([connector, "--yes", "--no-restart"], self.app)
 
                 self.assertEqual(result.exit_code, 0, msg=result.output)
@@ -441,7 +470,7 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
                 self.assertEqual(self.app.cfg.guardrail.scanner_mode, "local")
                 self.assertFalse(self.app.cfg.guardrail.judge.enabled)
                 self.assertIn(f"Desired connector {connector!r} staged", result.output)
-                self.assertIn("it is not active until the gateway", result.output)
+                self.assertIn("It takes effect once the gateway restarts", result.output)
                 self.assertNotIn("claw.mode=", result.output)
                 self.assertNotIn("claw.mode:", result.output)
                 self.assertIn(f"{connector} mode=observe", result.output)
@@ -486,6 +515,7 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
             ):
                 self.app.cfg.claw.mode = "openclaw"
                 self.app.cfg.guardrail.connector = "openclaw"
+                self.app.cfg.guardrail.enabled = False
                 self.app.cfg.guardrail.mode = "observe"
                 result = _invoke([connector, "--yes", "--mode", "action", "--no-restart"], self.app)
 
@@ -811,6 +841,7 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
             ):
                 self.app.cfg.claw.mode = "openclaw"
                 self.app.cfg.guardrail.connector = "openclaw"
+                self.app.cfg.guardrail.enabled = False
                 self.app.cfg.guardrail.connectors = {}
                 result = _invoke([connector, "--yes", "--no-restart"], self.app)
 
@@ -838,6 +869,33 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertEqual(self.app.cfg.claw.workspace_dir, os.path.realpath(workspace))
         self.assertIn("Workspace root pinned", result.output)
+
+    def test_workspace_refused_when_it_would_rescope_configured_peers(self):
+        """MAC-U3-08: one connector's --workspace pins the install-wide
+        workspace; with Copilot configured that moved Copilot's user-global
+        hooks into the project and left other folders unguarded."""
+        from defenseclaw.config import PerConnectorGuardrailConfig
+
+        workspace = os.path.join(self.tmp_dir, "repo")
+        os.makedirs(workspace)
+        self.app.cfg.claw.mode = "copilot"
+        self.app.cfg.guardrail.connector = "copilot"
+        self.app.cfg.guardrail.connectors = {
+            "copilot": PerConnectorGuardrailConfig(mode="action"),
+            "devin": PerConnectorGuardrailConfig(mode="action"),
+        }
+        with (
+            patch("defenseclaw.commands.cmd_setup._restart_services", return_value=None) as restart_mock,
+            patch("defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup", return_value=True),
+        ):
+            result = _invoke(["devin", "--yes", "--no-restart", "--workspace", workspace], self.app)
+
+        self.assertNotEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("would also move copilot", result.output)
+        self.assertIn("defenseclaw setup guardrail --workspace", result.output)
+        self.assertEqual(self.app.cfg.claw.workspace_dir, "")
+        self.assertFalse(os.path.exists(self.cfg_path))
+        restart_mock.assert_not_called()
 
     def test_antigravity_alias_rejects_workspace(self):
         """Antigravity is global-only by design: agy merges every hooks
@@ -871,7 +929,12 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
             self.assertIn(connector, result.output)
         self.assertIn("codex, claudecode", result.output)
         self.assertIn("hermes, antigravity", result.output)
-        self.assertIn("OpenClaw/ZeptoClaw use the proxy path", result.output)
+        self.assertIn("OpenClaw and ZeptoClaw use the proxy path", result.output)
+        # GAP-1628: no leftover "Legacy ..." labels or run-together paragraphs.
+        self.assertNotIn("Legacy", result.output)
+        self.assertIn("Multi-connector:\n", result.output)
+        self.assertIn("With no subcommand:\n", result.output)
+        self.assertNotIn("claudecode,   hermes", result.output)
         self.assertNotIn("antigravity, openclaw", result.output)
         self.assertNotIn("openclaw) tracked under guardrail.connectors", result.output)
 

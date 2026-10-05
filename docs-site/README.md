@@ -50,6 +50,36 @@ Authoring contract for new diagrams lives in [`components/diagram/AUTHORING.md`]
 - Frontmatter contract is defined in `source.config.ts` — extends Fumadocs' built-in schema with optional `keywords`, `updatedAt`, and `authors` arrays.
 - The MDX components registry lives in `components/mdx-components.tsx`. Anything you reference unqualified in MDX (`<Tabs>`, `<Steps>`, `<Flow>`, `<Sequence>`, `<CapabilityMatrix>`, ...) must be exported from there.
 
+## Support matrix data
+
+Every "what works where" table on the site renders from one typed file, `data/support-matrix.ts`:
+
+- the connector-by-OS table on `/docs/support-matrix`, the "Platform support" section of the connectors index, and the one-line `<ConnectorSupport id="...">` strip on each connector page;
+- the feature-by-edition table (`/docs/support-matrix#features`);
+- the enterprise route table (`/docs/support-matrix#enterprise`).
+
+The renderers live in `components/support-matrix/`. Edit the data file, never the tables in MDX.
+
+Where the values come from:
+
+| Field | Source |
+| --- | --- |
+| OS allowed at all | `internal/gateway/connector/platform_support.go` |
+| Minimum agent version | `cli/defenseclaw/inventory/hook_contracts.json` (`agent_version`), plus `internal/enterprisehooks/agent_floor_standalone.go` for floors that are not gated per user |
+| Block, native ask, fail closed | imported from `data/capability-matrix.json` (do not edit that file for the matrix; Go tests read it) |
+| Enterprise route | `RouteFor` in `internal/enterprisepolicy/types.go` |
+| Status | the release certification results |
+
+Status rules: a cell is `supported` only when the code allows it **and** a live certification test of that edition, OS and surface passed. If the code allows it but nothing was verified live, it is `preview`. If the code refuses it, it is `unsupported`. If the edition doesn't include the feature, it is `not-offered`. Never mark a cell `supported` by hand without a passing live test.
+
+Regenerating before a release:
+
+1. Run the maintainers' matrix generator against the current certification results. It is kept outside this repository with the rest of the certification tooling. Its preview mode prints the changes, and its write mode rewrites the `BEGIN GENERATED` block in `data/support-matrix.ts` in place.
+2. The generator also sets `asOf` to the date of the snapshot, which the table footers print. Don't edit the generated block by hand.
+3. Run `npm run build` and look over `/docs/support-matrix`. The diff in `support-matrix.ts` should only touch statuses and `asOf`, unless a connector or platform was added in code.
+
+OpenClaw, ZeptoClaw (proxy mode) and the Copilot VS Code extension are left out of these tables on purpose. Their own pages are unchanged.
+
 ## SEO assets
 
 | File | Purpose |

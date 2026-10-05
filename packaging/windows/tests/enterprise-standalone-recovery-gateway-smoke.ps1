@@ -105,6 +105,10 @@ $failures = & $module {
             journal_path = [string]$Layout.ManagedHooksLifecycleJournalPath
             phase = $phase
         }
+        if ($action -ceq 'retire') {
+            # What the rollback of a failed first install could not remove.
+            $report['leftovers'] = @($script:TestLeftover)
+        }
         $exitCode = 0
         if ($script:TestFailing.ContainsKey("${gateway}:$action")) {
             $report.ok = $false
@@ -117,6 +121,8 @@ $failures = & $module {
             output = @(($report | Microsoft.PowerShell.Utility\ConvertTo-Json -Compress))
         }
     }
+
+    $script:TestLeftover = "alice (S-1-5-21-1-2-3-1018) [codex]: DefenseClaw's agent registrations, because the account is not signed in"
 
     function Get-TestSHA256([string]$Path) {
         return (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -313,7 +319,9 @@ $failures = & $module {
         if (-not [bool]$parsed.transaction_pending -or
             @($parsed.recovery_gateway_runs).Count -ne 1 -or
             [string]@($parsed.recovery_gateway_runs)[0].binary -cne $layout.GatewayPath -or
-            [string]@($parsed.recovery_gateway_runs)[0].sha256 -cne $setupSHA256) {
+            [string]@($parsed.recovery_gateway_runs)[0].sha256 -cne $setupSHA256 -or
+            @($parsed.rollback_leftovers).Count -ne 1 -or
+            [string]@($parsed.rollback_leftovers)[0] -cne $script:TestLeftover) {
             $failures.Add("failure document: $($document | Microsoft.PowerShell.Utility\ConvertTo-Json -Depth 6 -Compress)")
         }
         [IO.File]::Delete($layout.PendingPath)

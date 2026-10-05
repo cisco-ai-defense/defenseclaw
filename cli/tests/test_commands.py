@@ -164,7 +164,8 @@ class TestPluginCommands(unittest.TestCase):
             _set_plugin_dir(app, tmpdir)
             result = _invoke(list_plugins, app=app)
             self.assertEqual(result.exit_code, 0)
-            self.assertIn("No plugins", result.output)
+            # GAP-2368: plain per-connector empty state.
+            self.assertIn("has no installed plugins", result.output)
 
     def test_plugin_list_with_plugins(self):
         from defenseclaw.commands.cmd_plugin import list_plugins
@@ -225,7 +226,7 @@ class TestPluginCommands(unittest.TestCase):
             app = _make_app()
             _set_plugin_dir(app, tmpdir)
             result = _invoke(remove, ["nonexistent"], app=app)
-            self.assertEqual(result.exit_code, 0)
+            self.assertEqual(result.exit_code, 1)
             self.assertIn("not found", result.output)
 
     @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")

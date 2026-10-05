@@ -74,6 +74,9 @@ class TestAlertsSubcommands(unittest.TestCase):
                 self.assertEqual(result.exit_code, 0, msg=result.output)
                 self.assertIn(substr, result.output)
                 self.assertIn("Preview: 3 alert(s)", result.output)
+                # GAP-1512: no selection digest or projection versions.
+                self.assertNotIn("digest=", result.output)
+                self.assertNotIn("version=", result.output)
                 self.assertEqual(client.set_alert_disposition.call_count, 2)
                 self.assertEqual(
                     client.set_alert_disposition.call_args_list[1].kwargs["disposition"],

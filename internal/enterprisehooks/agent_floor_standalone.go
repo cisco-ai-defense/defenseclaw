@@ -40,6 +40,19 @@ var standaloneNotGatedAgentFloors = map[string]string{
 	"kiro": "2.24.1",
 }
 
+// Kiro IDE rows. The Kiro IDE reads the global ~/.kiro/hooks file from
+// 1.0.182 (kiro.dev/changelog/ide/1-0-182); older builds read only the
+// project's .kiro/hooks. A user with the IDE and no readable kiro-cli
+// version is enrolled at the IDE's version, recorded with
+// KiroIDEVersionSuffix so the floor below is the IDE's, not kiro-cli's (the
+// two version lines overlap). KiroIDEDiscoveryKey carries the IDE version
+// from the per-user discovery worker next to the kiro-cli one.
+const (
+	KiroIDEGlobalHooksFloor = "1.0.182"
+	KiroIDEVersionSuffix    = connector.KiroIDEVersionSuffix
+	KiroIDEDiscoveryKey     = "kiro-ide"
+)
+
 // standaloneNotGatedAgentFloor returns the connector's standalone floor, or
 // "" when it has none.
 func standaloneNotGatedAgentFloor(connectorName string) string {
@@ -55,12 +68,16 @@ func standaloneNotGatedVersionAdmitted(resolution connector.HookContractResoluti
 	if floor == "" || resolution.Status != connector.HookCompatibilityNotGated {
 		return false, ""
 	}
+	product, subject := resolution.Connector, "version"
+	if product == "kiro" && strings.HasSuffix(strings.TrimSpace(resolution.RawVersion), KiroIDEVersionSuffix) {
+		product, subject, floor = "Kiro IDE", "Kiro IDE version", KiroIDEGlobalHooksFloor
+	}
 	normalized := strings.TrimSpace(resolution.NormalizedVersion)
 	if normalized == "" {
-		return false, fmt.Sprintf("its version could not be read; the standalone profile certifies %s %s and later", resolution.Connector, floor)
+		return false, fmt.Sprintf("its version could not be read; the standalone profile certifies %s %s and later", product, floor)
 	}
 	if compareStandaloneFloorVersion(normalized, floor) < 0 {
-		return false, fmt.Sprintf("version %s is below the certified minimum %s", normalized, floor)
+		return false, fmt.Sprintf("%s %s is below the certified minimum %s", subject, normalized, floor)
 	}
 	return true, ""
 }

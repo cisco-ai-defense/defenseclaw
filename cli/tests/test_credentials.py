@@ -94,6 +94,11 @@ class RequirementPredicateTests(unittest.TestCase):
             cfg = _make_cfg("/tmp/dc-test", claw=ClawConfig(mode="openclaw", home_dir=home, config_file=config_file))
             self.assertEqual(C._openclaw_gateway_token(cfg), C.Requirement.REQUIRED)
 
+    def test_openclaw_token_not_used_with_connector_none(self):
+        # GAP-1385: init --connector none writes claw.mode '' (standalone gateway).
+        cfg = _make_cfg("/tmp/dc-test", claw=ClawConfig(mode=""))
+        self.assertEqual(C._openclaw_gateway_token(cfg), C.Requirement.NOT_USED)
+
     def test_openclaw_token_not_used_for_codex_connector(self):
         cfg = _make_cfg("/tmp/dc-test", claw=ClawConfig(mode="codex"))
         self.assertEqual(C._openclaw_gateway_token(cfg), C.Requirement.NOT_USED)
@@ -401,8 +406,14 @@ class RequirementPredicateTests(unittest.TestCase):
         self.assertEqual(C._defenseclaw_llm_key(cfg), C.Requirement.NOT_USED)
 
     def test_defenseclaw_llm_key_required_when_guardrail_on(self):
-        cfg = _make_cfg("/tmp/dc-test", guardrail=GuardrailConfig(enabled=True))
+        cfg = _make_cfg("/tmp/dc-test", guardrail=GuardrailConfig(enabled=True, model="anthropic/claude-haiku-4-5"))
         self.assertEqual(C._defenseclaw_llm_key(cfg), C.Requirement.REQUIRED)
+
+    def test_defenseclaw_llm_key_optional_for_proxy_without_model(self):
+        # GAP-1453: with no guardrail model the proxy passes the agent's own
+        # provider credentials through.
+        cfg = _make_cfg("/tmp/dc-test", guardrail=GuardrailConfig(enabled=True))
+        self.assertEqual(C._defenseclaw_llm_key(cfg), C.Requirement.OPTIONAL)
 
     def test_defenseclaw_llm_key_optional_for_omnigent_without_judge(self):
         cfg = _make_cfg(
@@ -738,8 +749,8 @@ class MaskTests(unittest.TestCase):
         self.assertEqual(C.mask("abc"), "****")
         self.assertEqual(C.mask("abcdefgh"), "****")
 
-    def test_long_secrets_reveal_edges(self):
-        self.assertEqual(C.mask("abcdefghij"), "abcd…ghij")
+    def test_long_secrets_reveal_only_the_last_four(self):
+        self.assertEqual(C.mask("abcdefghij"), "…ghij")
 
 
 class ClassifyTests(unittest.TestCase):

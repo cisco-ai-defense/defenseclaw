@@ -1,5 +1,6 @@
 import matrix from '@/data/capability-matrix.json';
 import Link from 'next/link';
+import { Fragment } from 'react';
 import { CapabilityMatrixWrapper } from './capability-matrix-wrapper';
 import { ConnectorBrand } from './connector-brand';
 
@@ -49,17 +50,19 @@ interface ConnectorRow {
 
 const data = matrix as { connectors: ConnectorRow[] };
 
+// Yes/No as words, not a tick and a dot: a lone dot read as "unknown" or
+// "not applicable" to reviewers. The colour only reinforces the word.
 function Tick({ on }: { on: boolean }) {
   return (
     <span
-      aria-label={on ? 'yes' : 'no'}
       className={
         on
-          ? 'inline-flex size-5 items-center justify-center rounded-full bg-emerald-500/15 text-emerald-500'
-          : 'inline-flex size-5 items-center justify-center rounded-full bg-fd-muted text-fd-muted-foreground'
+          ? 'inline-flex items-center gap-1 rounded-full bg-emerald-500/15 px-2 py-0.5 text-xs font-medium text-emerald-800 dark:text-emerald-300'
+          : 'inline-flex items-center gap-1 rounded-full border border-fd-border px-2 py-0.5 text-xs font-medium text-fd-muted-foreground'
       }
     >
-      {on ? '✓' : '·'}
+      <span aria-hidden="true">{on ? '✓' : '✕'}</span>
+      {on ? 'Yes' : 'No'}
     </span>
   );
 }
@@ -78,29 +81,39 @@ function Family({ family }: { family: ConnectorRow['family'] }) {
   );
 }
 
+// The main matrix shows only the tier and whether the harness is verified.
+// The image pin and the hook file live in SandboxHarnessTable, so the wide
+// matrix doesn't repeat them.
 function Sandbox({ sandbox }: { sandbox: ConnectorRow['sandbox'] }) {
   if (sandbox.status !== 'artifacts' || !sandbox.tamperTier) {
     return <span className="text-xs text-fd-muted-foreground">pending</span>;
   }
   return (
     <>
-      <span className="rounded-full bg-fd-muted px-2 py-0.5 text-xs font-medium text-fd-foreground">
+      <span className="whitespace-nowrap rounded-full bg-fd-muted px-2 py-0.5 text-xs font-medium text-fd-foreground">
         {sandbox.tamperTier} tier
       </span>
-      {sandbox.hookConfig && (
-        <div className="mt-1 max-w-[220px] break-all font-mono text-[11px] text-fd-muted-foreground">
-          {sandbox.hookConfig}
-        </div>
-      )}
-      {sandbox.harnessPin && (
-        <div className="mt-1 text-xs text-fd-muted-foreground">image pin {sandbox.harnessPin}</div>
-      )}
       {sandbox.verified && (
         <div className="mt-1 text-xs text-fd-muted-foreground">
           {sandbox.verified === 'verified' ? 'verified end to end' : 'unverified: cannot run yet'}
         </div>
       )}
     </>
+  );
+}
+
+// Legend for the Yes/No cells, shown above the matrix.
+function CapabilityMatrixLegend() {
+  return (
+    <p className="not-prose mt-6 flex flex-wrap items-center gap-x-4 gap-y-2 text-sm text-fd-muted-foreground">
+      <span className="inline-flex items-center gap-2">
+        <Tick on /> the connector supports it
+      </span>
+      <span className="inline-flex items-center gap-2">
+        <Tick on={false} /> it doesn&apos;t
+      </span>
+      <span>Scroll the table sideways on a narrow screen.</span>
+    </p>
   );
 }
 
@@ -142,7 +155,7 @@ export function SandboxHarnessTable() {
               <Td className="max-w-[240px] break-all font-mono text-[11px] text-fd-muted-foreground">{c.sandbox.hookConfig}</Td>
               <Td className="max-w-[320px] text-xs leading-relaxed">
                 {c.sandbox.verified === 'verified' ? (
-                  <span className="font-medium text-emerald-600 dark:text-emerald-400">Verified end to end</span>
+                  <span className="font-medium text-emerald-700 dark:text-emerald-400">Verified end to end</span>
                 ) : (
                   <>
                     <span className="font-medium text-[var(--brand-cisco-strong)]">Unverified: cannot run yet.</span>{' '}
@@ -171,8 +184,10 @@ export function SandboxHarnessTable() {
 
 export function CapabilityMatrix() {
   return (
-    <CapabilityMatrixWrapper className="capability-matrix not-prose my-6 overflow-x-auto border border-fd-border">
-      <table className="w-full min-w-[1000px] border-collapse text-sm">
+    <>
+    <CapabilityMatrixLegend />
+    <CapabilityMatrixWrapper className="capability-matrix not-prose mb-6 mt-3 overflow-x-auto border border-fd-border">
+      <table className="w-full min-w-[760px] border-collapse text-sm">
         <thead>
           <tr className="bg-fd-card text-left">
             <Th>Connector</Th>
@@ -183,13 +198,12 @@ export function CapabilityMatrix() {
             <Th>Native ask</Th>
             <Th>Fail-closed</Th>
             <Th>OpenShell sandbox</Th>
-            <Th>HITL behavior</Th>
           </tr>
         </thead>
         <tbody>
           {data.connectors.map((c, i) => (
+            <Fragment key={c.id}>
             <tr
-              key={c.id}
               className="fd-row border-t border-fd-border"
               // Stagger delay matches the eye's reading cadence — fast
               // enough that the whole table settles in <500ms even for
@@ -207,8 +221,8 @@ export function CapabilityMatrix() {
               <Td>
                 <Family family={c.family} />
               </Td>
-              <Td>{c.toolInspection}</Td>
-              <Td>{c.subprocessPolicy}</Td>
+              <Td className="min-w-[104px] text-xs leading-relaxed">{c.toolInspection}</Td>
+              <Td className="text-xs leading-relaxed">{c.subprocessPolicy}</Td>
               <Td>
                 <Tick on={c.hooks.canBlock} />
               </Td>
@@ -226,21 +240,30 @@ export function CapabilityMatrix() {
               <Td>
                 <Sandbox sandbox={c.sandbox} />
               </Td>
-              <Td className="max-w-[280px] text-xs leading-relaxed text-fd-muted-foreground">{c.hilt}</Td>
             </tr>
+            {/* HITL behaviour is prose, so it gets its own full-width line
+                under the connector instead of a ninth, very wide column. */}
+            <tr className="fd-row" style={{ animationDelay: `${i * 35}ms` }}>
+              <td colSpan={8} className="px-2.5 pb-3 pt-0 text-xs leading-relaxed text-fd-muted-foreground">
+                <span className="font-medium text-fd-foreground">HITL: </span>
+                {c.hilt}
+              </td>
+            </tr>
+            </Fragment>
           ))}
         </tbody>
       </table>
     </CapabilityMatrixWrapper>
+    </>
   );
 }
 
 function Th({ children }: { children: React.ReactNode }) {
-  return <th className="px-3 py-2 font-medium text-fd-muted-foreground">{children}</th>;
+  return <th className="px-2.5 py-2 font-medium text-fd-muted-foreground">{children}</th>;
 }
 
 function Td({ children, className }: { children: React.ReactNode; className?: string }) {
-  return <td className={`px-3 py-3 align-top ${className ?? ''}`}>{children}</td>;
+  return <td className={`px-2.5 py-3 align-top ${className ?? ''}`}>{children}</td>;
 }
 
 export function HookEventsList({ connector }: { connector: string }) {
@@ -249,7 +272,7 @@ export function HookEventsList({ connector }: { connector: string }) {
   return (
     <div className="not-prose my-4 grid gap-4 md:grid-cols-2">
       <div className="rounded-lg border border-fd-border p-4">
-        <h4 className="mb-2 text-sm font-semibold">Block events</h4>
+        <p className="mb-2 text-sm font-semibold">Block events</p>
         <ul className="space-y-1 text-sm">
           {row.hooks.blockEvents.map((e) => (
             <li key={e} className="font-mono text-xs">
@@ -259,7 +282,7 @@ export function HookEventsList({ connector }: { connector: string }) {
         </ul>
       </div>
       <div className="rounded-lg border border-fd-border p-4">
-        <h4 className="mb-2 text-sm font-semibold">Native ask events</h4>
+        <p className="mb-2 text-sm font-semibold">Native ask events</p>
         {row.hooks.askEvents.length === 0 ? (
           <p className="text-sm text-fd-muted-foreground">
             None — confirm verdicts are downgraded with the raw action preserved.

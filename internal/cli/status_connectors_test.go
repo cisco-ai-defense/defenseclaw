@@ -524,3 +524,153 @@ func TestPrintConnectorModesMarksADisabledConnectorAsNotEnforced(t *testing.T) {
 		t.Errorf("enabled Codex lost its enforcement lines:\n%s", out)
 	}
 }
+
+// GAP-1386: with no connector configured the Connector Mode block names
+// "none" instead of a blank value and an "unconfigured" data path.
+func TestPrintConnectorModesNoConnectorSaysNone(t *testing.T) {
+	out := captureStdout(t, func() {
+		printConnectorModes([]connectorModeSummary{{Mode: "unconfigured"}})
+	})
+	if !strings.Contains(out, "none (no active connector)") {
+		t.Errorf("missing 'none' connector value:\n%s", out)
+	}
+	if strings.Contains(out, "unconfigured") {
+		t.Errorf("no-connector block still shows the unconfigured data path:\n%s", out)
+	}
+}
+
+// TestPrintSubsystemsHidesUnusedFleetUplink: a hook-only roster never uses the
+// OpenClaw fleet uplink, so status must not lead with its DISABLED state and
+// OpenClaw advice (MAC-U2-02); an OpenClaw roster still sees it.
+func TestPrintSubsystemsHidesUnusedFleetUplink(t *testing.T) {
+	now := time.Now()
+	snap := &gateway.HealthSnapshot{
+		Gateway:    gateway.SubsystemHealth{State: gateway.StateDisabled, Since: now, Details: map[string]interface{}{"hint": "point gateway.host at a real OpenClaw upstream"}},
+		Guardrail:  gateway.SubsystemHealth{State: gateway.StateRunning, Since: now},
+		Connectors: []gateway.ConnectorHealth{{Name: "claudecode", State: gateway.StateRunning, Since: now}},
+	}
+	out := captureStdout(t, func() { printSubsystems(snap) })
+	if strings.Contains(out, "Gateway:") || strings.Contains(out, "OpenClaw") {
+		t.Fatalf("hook-only roster shows the unused fleet uplink:\n%s", out)
+	}
+	if strings.Contains(out, "Guardrail:R") || strings.Contains(out, "Guardrail:\x1b") {
+		t.Fatalf("label runs into the state:\n%s", out)
+	}
+	snap.Connectors = []gateway.ConnectorHealth{{Name: "openclaw", State: gateway.StateRunning, Since: now}}
+	if out := captureStdout(t, func() { printSubsystems(snap) }); !strings.Contains(out, "Gateway:") {
+		t.Fatalf("OpenClaw roster must still show the fleet uplink:\n%s", out)
+	}
+}
+
+// TestPrintSubsystemExplainsAuditWriteFailure: a full disk reads as a plain
+// problem line, not raw event_history_* tokens (GAP-1308).
+func TestPrintSubsystemExplainsAuditWriteFailure(t *testing.T) {
+	h := gateway.SubsystemHealth{State: gateway.StateError, Details: map[string]interface{}{
+		"event_history_failure":                  "sqlite_write_failed",
+		"event_history_last_sqlite_class":        "full",
+		"event_history_last_sqlite_primary_code": float64(13),
+		"generation":                             float64(2),
+	}}
+	out := captureStdout(t, func() { printSubsystem("Telemetry", h) })
+	if !strings.Contains(out, "disk holding the audit database is full") || strings.Contains(out, "event_history_") {
+		t.Fatalf("audit write failure not in plain words:\n%s", out)
+	}
+	if !strings.Contains(out, "generation:") {
+		t.Fatalf("other details dropped:\n%s", out)
+	}
+}
+
+// TestPrintSubsystemExplainsFailingJudge pins GAP-1288: gateway status says
+// in words that the LLM judge is failing.
+func TestPrintSubsystemExplainsFailingJudge(t *testing.T) {
+	h := gateway.SubsystemHealth{State: gateway.StateRunning, Details: map[string]interface{}{
+		"judge_state":        "failing",
+		"judge_recent_calls": float64(10),
+		"judge_failed_calls": float64(10),
+		"judge_last_error":   "failed to retrieve aws credentials",
+		"mode":               "action",
+	}}
+	out := captureStdout(t, func() { printSubsystem("Guardrail", h) })
+	if !strings.Contains(out, "the LLM judge failed all of its last 10 calls") ||
+		!strings.Contains(out, "failed to retrieve aws credentials") || strings.Contains(out, "judge_state") {
+		t.Fatalf("judge failure not in plain words:\n%s", out)
+	}
+	if !strings.Contains(out, "mode:") {
+		t.Fatalf("other details dropped:\n%s", out)
+	}
+}
+
+// TestJudgeProblemNextStepMatchesCause pins GAP-1669: a judge that cannot
+// reach its provider (dead proxy, credential fetch) is told to check the
+// network, not to re-run 'setup llm', which changes nothing; a provider that
+// rejects the configuration still points at 'setup llm'.
+func TestJudgeProblemNextStepMatchesCause(t *testing.T) {
+	for _, tc := range []struct {
+		lastError string
+		network   bool
+	}{
+		{"Bedrock request failed: failed to retrieve aws credentials", true},
+		{`Bedrock request failed: Post "https://bedrock-runtime.us-east-1.amazonaws.com": proxyconnect tcp: dial tcp 127.0.0.1:9: connect: connection refused`, true},
+		{"Bedrock returned 400: The provided model identifier is invalid.", false},
+		{"OpenAI returned 401: Incorrect API key provided", false},
+	} {
+		got := judgeProblem(map[string]interface{}{
+			"judge_state": "failing", "judge_recent_calls": float64(20), "judge_failed_calls": float64(20),
+			"judge_last_error": tc.lastError,
+		})
+		if network := strings.Contains(got, "check the network") && strings.Contains(got, "NO_PROXY"); network != tc.network {
+			t.Errorf("%q: network next step = %v, want %v:\n%s", tc.lastError, network, tc.network, got)
+		}
+		if setup := strings.Contains(got, "setup llm --role judge"); setup == tc.network {
+			t.Errorf("%q: setup llm next step = %v, want %v:\n%s", tc.lastError, setup, !tc.network, got)
+		}
+	}
+}
+
+// GAP-1714: a connector whose setup failed at start is listed as not running
+// and not enforced, from in-process and JSON-decoded details alike.
+func TestPrintConnectorsNamesConnectorsNotStarted(t *testing.T) {
+	for _, notStarted := range []interface{}{[]string{"hermes"}, []interface{}{"hermes"}} {
+		snap := &gateway.HealthSnapshot{
+			Connectors: []gateway.ConnectorHealth{{Name: "codex", State: "running"}},
+			Guardrail:  gateway.SubsystemHealth{Details: map[string]interface{}{"connectors_not_started": notStarted}},
+		}
+		out := captureStdout(t, func() { printConnectors(snap) })
+		// GAP-1937: the count names it, as `defenseclaw status` does.
+		for _, want := range []string{"1 active, 1 not running", "(hermes)", "NOT RUNNING", "not enforced", "defenseclaw setup hermes"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("%T: output %q does not contain %q", notStarted, out, want)
+			}
+		}
+	}
+}
+
+// TestPrintConnectors_OpenCodeMatchesCLIStatus pins GAP-1871: OpenCode
+// without a load heartbeat reads IDLE here as in `defenseclaw status`.
+func TestPrintConnectors_OpenCodeMatchesCLIStatus(t *testing.T) {
+	now := time.Now()
+	stale := now.Add(-time.Hour)
+	fresh := now.Add(-time.Minute)
+	cases := []struct {
+		heartbeat *time.Time
+		want      string
+	}{
+		{nil, "OpenCode (opencode) - IDLE"},
+		{&stale, "OpenCode (opencode) - DEGRADED"},
+		{&fresh, "OpenCode (opencode) - RUNNING"},
+	}
+	for _, tc := range cases {
+		snap := &gateway.HealthSnapshot{Connectors: []gateway.ConnectorHealth{
+			{Name: "opencode", State: gateway.StateRunning, Since: now, LastLoadHeartbeatAt: tc.heartbeat},
+			{Name: "codex", State: gateway.StateRunning, Since: now},
+		}}
+		out := captureStdout(t, func() { printConnectors(snap) })
+		out = strings.ReplaceAll(out, "\u2014", "-")
+		if !strings.Contains(out, tc.want) {
+			t.Errorf("want %q in:\n%s", tc.want, out)
+		}
+		if !strings.Contains(out, "Codex (codex) - RUNNING") {
+			t.Errorf("codex row changed:\n%s", out)
+		}
+	}
+}

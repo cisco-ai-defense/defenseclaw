@@ -342,7 +342,7 @@ function capabilityForRuleId(id: string): Recipe['tool_capability_class'] {
   return undefined;
 }
 
-function buildRecipes(strict: PresetBundle): Recipe[] {
+function buildRecipes(strict: PresetBundle, balanced?: PresetBundle): Recipe[] {
   const recipes: Recipe[] = [];
 
   // Rule recipes: lifted verbatim from policies/guardrail/strict/rules/*.yaml.
@@ -470,26 +470,24 @@ function buildRecipes(strict: PresetBundle): Recipe[] {
       tags: ['finding'],
     });
   }
-  // Tool suppression placeholder so the picker has a "starter" the
-  // operator can clone. We do NOT lift any from the strict pack
-  // (it ships with [] today) — instead we emit a single illustrative
-  // example matching the docstring in policies.mdx.
-  recipes.push({
-    id: 'RECIPE-SUPP-TOOL-COSMETIC-SHELL',
-    title: 'Suppress cosmetic shell commands (git status / log / diff)',
-    kind: 'tool_suppression',
-    body: {
-      tool_pattern: '^(shell|bash|sh)\\.execute$',
-      suppress_findings: ['JUDGE-INJ-DESTRUCTIVE'],
-      reason: 'Cosmetic shell commands (git status, ls, pwd) generate noise without security risk',
-    },
-    why:
-      'Tool suppressions let you silence findings on tools whose name matches a regex. Use this to drop noisy verdicts on read-only commands while keeping write/destructive commands surfaced.',
-    examples: ['shell.execute', 'bash.execute'],
-    counterexamples: ['shell.write', 'fs.unlink'],
-    source: 'docs-site/scripts/build-policy-assets.ts (illustrative)',
-    tags: ['tool', 'shell', 'noise-reduction'],
-    tool_capability_class: ['exec_shell'],
+  // The strict pack ships no tool suppressions, so lift the balanced
+  // (default) pack's entries instead. Tool suppressions only drop the
+  // listed PII-judge findings for matching tool names.
+  const balancedSupp = (balanced?.guardrail.suppressions ?? {}) as Record<string, unknown>;
+  const toolSupps = (balancedSupp.tool_suppressions ?? []) as Array<Record<string, unknown>>;
+  toolSupps.forEach((s, i) => {
+    const findings = (s.suppress_findings as string[] | undefined) ?? [];
+    recipes.push({
+      id: `RECIPE-SUPP-TOOL-${i + 1}`,
+      title: String(s.reason ?? s.tool_pattern ?? `tool suppression ${i + 1}`),
+      kind: 'tool_suppression',
+      body: s,
+      why: `Tool suppression shipped in the bundled default pack. Drops ${findings.join(', ') || 'the listed'} PII-judge findings for matching tool names; regex and CEL rule findings are unaffected.`,
+      examples: [],
+      counterexamples: [],
+      source: 'policies/guardrail/default/suppressions.yaml',
+      tags: ['tool'],
+    });
   });
 
   return recipes;
@@ -751,7 +749,7 @@ function buildAll(): BuildResult {
   if (!strict) {
     throw new Error('strict preset is required to seed the recipe catalog');
   }
-  const recipes = buildRecipes(strict);
+  const recipes = buildRecipes(strict, presets.find((p) => p.name === 'default')?.bundle);
   const scenarios = buildScenarios();
   const useCasePacks = buildUseCasePacks();
 

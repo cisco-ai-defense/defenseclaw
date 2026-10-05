@@ -7,10 +7,12 @@
 package cli
 
 import (
+	"errors"
 	"os"
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -56,5 +58,30 @@ func TestEnterprisePolicyLiveVerifyIsRefusedUpFrontOnAManagedWindowsHost(t *test
 	withAuditExportManagedSeams(t, false, false)
 	if err := enterprisePolicyLiveAvailable(); err != nil {
 		t.Fatalf("an unmanaged Windows host refuses the live check: %v", err)
+	}
+}
+
+// An elevated administrator's `enterprise policy show --user <account>` (the
+// command the standard-account refusal names) reads the account's settings
+// with its own rights instead of failing on the LocalSystem-only
+// impersonation (GAP-2465). Other impersonation errors still fail.
+func TestEnterprisePolicyUserScanRunsAsAnAdministratorWithoutLocalSystem(t *testing.T) {
+	previous := enterprisePolicyRunAsTarget
+	t.Cleanup(func() { enterprisePolicyRunAsTarget = previous })
+	target := enterprisehooks.TargetCredentials{UserHome: `C:\Users\dcw-std1`, SID: "S-1-5-21-1-2-3-1001"}
+
+	enterprisePolicyRunAsTarget = func(enterprisehooks.TargetCredentials, func() error) error {
+		return enterprisehooks.ErrWindowsEnterpriseNotLocalSystem
+	}
+	ran := 0
+	if err := runAsEnterprisePolicyTarget(target, func() error { ran++; return nil }); err != nil || ran != 1 {
+		t.Fatalf("administrator scan: err=%v ran=%d, want nil and 1", err, ran)
+	}
+
+	other := errors.New("enterprise hooks: resolve guardian process SID: access denied")
+	enterprisePolicyRunAsTarget = func(enterprisehooks.TargetCredentials, func() error) error { return other }
+	ran = 0
+	if err := runAsEnterprisePolicyTarget(target, func() error { ran++; return nil }); !errors.Is(err, other) || ran != 0 {
+		t.Fatalf("identity failure: err=%v ran=%d, want the error and no scan", err, ran)
 	}
 }

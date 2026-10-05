@@ -159,16 +159,17 @@ func TestEnumerateUnixFiltersAndAutoEnrolls(t *testing.T) {
 		Resolver:  resolver,
 		HomeRoots: []string{homes},
 		UIDMin:    uid, UIDMax: uid + 1,
-		Discover: func(_ context.Context, account unixidentity.Account, connectors []string) (map[string]string, map[string]string, error) {
+		DiscoverSurfaces: func(_ context.Context, account unixidentity.Account, connectors []string) (UnixDiscovery, error) {
 			discovered[account.Name] = map[string]string{}
-			versions := map[string]string{}
+			// alice has codex and only the Kiro IDE (no kiro-cli).
+			versions := map[string]string{KiroIDEDiscoveryKey: "1.2.4"}
 			for _, conn := range connectors {
 				discovered[account.Name][conn] = "asked"
 				if conn == "codex" {
 					versions[conn] = "0.150.0"
 				}
 			}
-			return versions, map[string]string{"claudecode": "not installed"}, nil
+			return UnixDiscovery{Versions: versions, Reasons: map[string]string{"claudecode": "not installed"}}, nil
 		},
 		MachineVersion: func(conn string) string {
 			if conn == "claudecode" {
@@ -177,7 +178,7 @@ func TestEnumerateUnixFiltersAndAutoEnrolls(t *testing.T) {
 			return ""
 		},
 	}
-	cfg := enumeratorConfig("codex", "claudecode")
+	cfg := enumeratorConfig("codex", "claudecode", "kiro")
 	manifest, report, err := EnumerateUnix(context.Background(), cfg, connector.NewDefaultRegistry(), opts)
 	if err != nil {
 		t.Fatal(err)
@@ -192,7 +193,7 @@ func TestEnumerateUnixFiltersAndAutoEnrolls(t *testing.T) {
 			t.Fatalf("a user whose home does not exist yet must be deferred: %+v", target)
 		}
 	}
-	want := []string{"alice/codex/0.150.0", "newbie/claudecode/2.1.300"}
+	want := []string{"alice/codex/0.150.0", "alice/kiro/1.2.4" + KiroIDEVersionSuffix, "newbie/claudecode/2.1.300"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("rows = %v, want %v (skipped: %v)", got, want, report.Skipped)
 	}
@@ -213,6 +214,53 @@ func TestEnumerateUnixFiltersAndAutoEnrolls(t *testing.T) {
 		if !found {
 			t.Errorf("expected a skip reason starting %q in %v", needle, report.Skipped)
 		}
+	}
+}
+
+// Under unverified_versions: refuse a user whose only Antigravity install
+// is the IDE gets a refusal row at the default contract's version, and the
+// gateway refuses their calls (refused-surfaces entry, reported enforced).
+func TestEnumerateUnixRefusalRowForPerUserSurfaceOnlyUser(t *testing.T) {
+	root := trustedTestDir(t)
+	homes := filepath.Join(root, "home")
+	if err := os.MkdirAll(homes, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	uid, gid := os.Getuid(), os.Getgid()
+	alice := makeHome(t, homes, "alice")
+	resolver := &fakeResolver{
+		accounts: map[string]unixidentity.Account{"alice": {Name: "alice", UID: uid, GID: gid, Home: alice, Shell: "/bin/bash"}},
+		listed:   []string{"alice"},
+	}
+	opts := UnixEnumerateOptions{
+		Resolver: resolver, HomeRoots: []string{homes}, UIDMin: uid, UIDMax: uid + 1,
+		DiscoverSurfaces: func(context.Context, unixidentity.Account, []string) (UnixDiscovery, error) {
+			return UnixDiscovery{Surfaces: map[string][]connector.AgentSurface{
+				"antigravity": {{Surface: connector.HostSurfaceDesktop, Host: "antigravity-ide", HostVersion: "2.0.1"}},
+			}}, nil
+		},
+	}
+	cfg := enumeratorConfig("antigravity")
+	cfg.Enterprise.Enrollment.UnverifiedVersions = config.EnterpriseUnverifiedRefuse
+	manifest, report, err := EnumerateUnix(context.Background(), cfg, connector.NewDefaultRegistry(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := connector.ResolveHookContract("antigravity", "").Contract.MinAgentVersion
+	if len(manifest.Targets) != 1 || manifest.Targets[0].AgentVersion != want || want == "" {
+		t.Fatalf("rows = %+v, want one antigravity refusal row at %q", manifest.Targets, want)
+	}
+	if len(report.RefusedSurfaces) != 1 || report.RefusedSurfaces[0].Connector != "antigravity" ||
+		len(report.Unprotected) != 1 || report.Unprotected[0].Refusal != RefusalEnforced {
+		t.Fatalf("refused = %+v, unprotected = %+v", report.RefusedSurfaces, report.Unprotected)
+	}
+	// A failed discovery keeps the refusal of the kept row.
+	opts.PreviousRefusedSurfaces = report.RefusedSurfaces
+	opts.DiscoverSurfaces = func(context.Context, unixidentity.Account, []string) (UnixDiscovery, error) {
+		return UnixDiscovery{}, errors.New("worker failed")
+	}
+	if _, report, err = EnumerateUnix(context.Background(), cfg, connector.NewDefaultRegistry(), opts); err != nil || len(report.RefusedSurfaces) != 1 {
+		t.Fatalf("after a failed discovery refused = %+v, err = %v", report.RefusedSurfaces, err)
 	}
 }
 
@@ -1207,5 +1255,40 @@ func TestRevokeGoneUnixTargetsKeepsRowsItCannotProveDeleted(t *testing.T) {
 	}
 	if users := manifestUsers(manifest); !users["u1"] || users["u2"] || !users["u3"] {
 		t.Fatalf("only the deleted account may be revoked: %v (report %+v)", users, report)
+	}
+}
+
+// A user whose surface discovery fails keeps the last cycle's refusal, so a
+// failed worker never lifts a surface_unverified refusal.
+func TestEnumerateUnixKeepsRefusedSurfacesWhenDiscoveryFails(t *testing.T) {
+	root := trustedTestDir(t)
+	homes := filepath.Join(root, "home")
+	if err := os.MkdirAll(homes, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	uid, gid := os.Getuid(), os.Getgid()
+	alice := makeHome(t, homes, "alice")
+	opts := UnixEnumerateOptions{
+		Resolver: &fakeResolver{
+			accounts: map[string]unixidentity.Account{"alice": {Name: "alice", UID: uid, GID: gid, Home: alice, Shell: "/bin/bash"}},
+			listed:   []string{"alice"},
+		},
+		HomeRoots:               []string{homes},
+		UIDMin:                  uid,
+		UIDMax:                  uid + 1,
+		MachinePolicyConnectors: []string{"claudecode"},
+		DiscoverSurfaces: func(context.Context, unixidentity.Account, []string) (UnixDiscovery, error) {
+			return UnixDiscovery{}, errors.New("worker failed")
+		},
+		PreviousRefusedSurfaces: []UnixRefusedSurface{{User: "alice", UID: intPointer(uid), Connector: "claudecode"}},
+	}
+	cfg := enumeratorConfig("claudecode")
+	cfg.Enterprise.Enrollment.UnverifiedVersions = config.EnterpriseUnverifiedRefuse
+	_, report, err := EnumerateUnix(context.Background(), cfg, connector.NewDefaultRegistry(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.RefusedSurfaces) != 1 || report.RefusedSurfaces[0].User != "alice" || report.RefusedSurfaces[0].Connector != "claudecode" {
+		t.Fatalf("a failed discovery must keep the previous refusal: %+v", report.RefusedSurfaces)
 	}
 }

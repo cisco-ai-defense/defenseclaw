@@ -136,5 +136,58 @@ class RegistrySyncScanStdioTests(unittest.TestCase):
         )
 
 
+    def test_sync_records_clean_and_failed_mcp_scans(self):
+        """GAP-1881: registry sync scanned MCP entries but recorded no scan."""
+        from unittest.mock import MagicMock
+
+        self.app.logger = MagicMock()
+        result, _ = self._sync(["--scan-stdio"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        recorded = self.app.logger.log_scan.call_args.args[0]
+        self.assertEqual((recorded.scanner, recorded.target), ("mcp-scanner", "some-mcp"))
+
+        manifest = _stdio_mcp_manifest()
+        raw = json.dumps(manifest.to_dict()).encode("utf-8")
+
+        def _failing_scan(_self, target, server_entry=None, *, allow_private=False):
+            raise ConnectionError("server unreachable")
+
+        with patch("defenseclaw.registries.sync.fetch_manifest",
+                   lambda _source, *, allow_private=False: (manifest, raw)):
+            with patch.object(MCPScannerWrapper, "scan", _failing_scan):
+                self.runner.invoke(registry, ["sync", "corp-mcp", "--scan-stdio"], obj=self.app)
+        self.app.logger.log_scan_failed.assert_called_once_with(
+            "mcp-scanner", "some-mcp", "scan failed: server unreachable",
+        )
+
+
+    def test_sync_prints_progress_on_a_tty_but_not_with_json(self):
+        """GAP-2327: a remote MCP scan took ~10 s with no output at all."""
+        manifest = parse_manifest(json.dumps({
+            "schema_version": 1, "publisher": "acme",
+            "entries": [{"name": "remote-mcp", "type": "mcp",
+                         "transport": "streamable-http",
+                         "url": "https://mcp.example.com/mcp"}],
+        }))
+        raw = json.dumps(manifest.to_dict()).encode("utf-8")
+
+        def _fake_scan(_self, target, server_entry=None, *, allow_private=False):
+            return _clean_result(target)
+
+        with patch("defenseclaw.registries.sync.fetch_manifest",
+                   lambda _source, *, allow_private=False: (manifest, raw)), \
+                patch.object(MCPScannerWrapper, "scan", _fake_scan), \
+                patch("defenseclaw.commands.cmd_registry._stderr_is_tty", return_value=True):
+            text = self._invoke(["sync", "corp-mcp", "--allow-private"])
+            js = self._invoke(["sync", "corp-mcp", "--allow-private", "--json"])
+        self.assertEqual(text.exit_code, 0, text.output)
+        self.assertIn("Fetching corp-mcp ...", text.stderr)
+        self.assertIn("scanning mcp:remote-mcp (remote, can take up to a minute) ...", text.stderr)
+        self.assertEqual(js.exit_code, 0, js.output)
+        self.assertNotIn("scanning", js.stderr)
+        self.assertNotIn("Fetching", js.stderr)
+        self.assertEqual(json.loads(js.stdout)[0]["scanned"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()

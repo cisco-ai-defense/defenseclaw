@@ -21,6 +21,8 @@ package inventory
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -231,5 +233,87 @@ func TestParseStandardPSProcessLinePreservesNonDarwinLayout(t *testing.T) {
 	}
 	if want := now.Add(-(2*time.Minute + 3*time.Second)); !info.StartedAt.Equal(want) {
 		t.Fatalf("started at = %s, want %s", info.StartedAt, want)
+	}
+}
+
+func TestProcArgv0KeepsOnlyTheFirstArgumentsBasename(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cmdline")
+	if err := os.WriteFile(path, []byte("/home/u/.local/bin/cursor-agent\x00--use-system-ca\x00/x/index.js\x00"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := procArgv0(path, "mainthread"); got != "cursor-agent" {
+		t.Fatalf("procArgv0 = %q, want cursor-agent", got)
+	}
+	if got, _ := procArgv0(path, "cursor-agent"); got != "" {
+		t.Fatalf("procArgv0 = %q, want empty when it equals comm", got)
+	}
+	if got, _ := procArgv0(filepath.Join(t.TempDir(), "gone"), "x"); got != "" {
+		t.Fatalf("procArgv0 = %q, want empty for an exited process", got)
+	}
+}
+
+func TestProcArgv0ResolvesTheCursorAgentAlias(t *testing.T) {
+	dir := t.TempDir()
+	binPath := filepath.Join(dir, "share", "cursor-agent", "versions", "2026.10.01-e373342", "cursor-agent")
+	if err := os.MkdirAll(filepath.Dir(binPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(binPath, []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(dir, "agent")
+	if err := os.Symlink(binPath, alias); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "cmdline")
+	if err := os.WriteFile(path, []byte(alias+"\x00--use-system-ca\x00/x/index.js\x00"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	name, target := procArgv0(path, "mainthread")
+	if name != "agent" || target != "cursor-agent" {
+		t.Fatalf("procArgv0 = %q, %q; want agent, cursor-agent", name, target)
+	}
+	// A plain file keeps no target.
+	if err := os.WriteFile(path, []byte(binPath+"\x00"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, target := procArgv0(path, "mainthread"); target != "" {
+		t.Fatalf("target = %q, want empty for a non-link argv[0]", target)
+	}
+}
+
+// GAP-2014: the Cursor alias started through a relative path
+// (cd ~/w && ../.local/bin/agent) resolves against the process's cwd.
+func TestProcArgv0ResolvesARelativeCursorAgentAlias(t *testing.T) {
+	dir := t.TempDir()
+	binPath := filepath.Join(dir, "share", "cursor-agent", "versions", "2026.10.01-e373342", "cursor-agent")
+	if err := os.MkdirAll(filepath.Dir(binPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(binPath, []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "bin"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(binPath, filepath.Join(dir, "bin", "agent")); err != nil {
+		t.Fatal(err)
+	}
+	work := filepath.Join(dir, "w")
+	proc := filepath.Join(dir, "proc")
+	for _, d := range []string{work, proc} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(work, filepath.Join(proc, "cwd")); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(proc, "cmdline")
+	if err := os.WriteFile(path, []byte("../bin/agent\x00--use-system-ca\x00/x/index.js\x00"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if name, target := procArgv0(path, "mainthread"); name != "agent" || target != "cursor-agent" {
+		t.Fatalf("procArgv0 = %q, %q; want agent, cursor-agent", name, target)
 	}
 }

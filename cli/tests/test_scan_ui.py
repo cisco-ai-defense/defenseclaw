@@ -366,3 +366,43 @@ def _make_cli(cb):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ScanAllConcurrencyTests(unittest.TestCase):
+    """GAP-2643: LLM-bound 'scan --all' sweeps overlap items, in order."""
+
+    def test_ordered_scans_overlaps_scans_and_keeps_order(self):
+        import threading
+
+        from defenseclaw.commands import _scan_ui
+
+        both_in_flight = threading.Barrier(2, timeout=5)
+
+        def scan_one(item):
+            if item in ("a", "b"):
+                both_in_flight.wait()  # fails unless a and b run at once
+            return item.upper()
+
+        out = [
+            (item, get())
+            for item, get in _scan_ui.ordered_scans(scan_one, ["a", "b", "c"], workers=2)
+        ]
+
+        self.assertEqual(out, [("a", "A"), ("b", "B"), ("c", "C")])
+
+    def test_batch_workers_follow_the_llm_setting(self):
+        from unittest.mock import MagicMock
+
+        from defenseclaw.commands import _scan_ui
+        from defenseclaw.config import LLMConfig, SkillScannerConfig
+        from defenseclaw.scanner.plugin import PluginScannerWrapper
+        from defenseclaw.scanner.skill import SkillScannerWrapper
+
+        llm = LLMConfig(model="bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0")
+        on = _scan_ui.LLM_SCAN_WORKERS
+        self.assertEqual(_scan_ui.scan_batch_workers(SkillScannerWrapper(SkillScannerConfig(use_llm=True))), on)
+        self.assertEqual(_scan_ui.scan_batch_workers(SkillScannerWrapper(SkillScannerConfig())), 1)
+        self.assertEqual(_scan_ui.scan_batch_workers(PluginScannerWrapper(llm=llm), use_llm=None), on)
+        self.assertEqual(_scan_ui.scan_batch_workers(PluginScannerWrapper(llm=llm), use_llm=False), 1)
+        self.assertEqual(_scan_ui.scan_batch_workers(PluginScannerWrapper()), 1)
+        self.assertEqual(_scan_ui.scan_batch_workers(MagicMock()), 1)

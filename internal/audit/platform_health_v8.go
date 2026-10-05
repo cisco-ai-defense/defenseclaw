@@ -295,9 +295,12 @@ func auditPlatformHealthV8Occurrence(event Event) (sinkHealthV8Occurrence, bool)
 		occurrence.outcome, occurrence.severity = observability.OutcomeCompleted, "INFO"
 		occurrence.subsystem, occurrence.healthState = "gateway", "ready"
 	case ActionSidecarDisconnected:
+		// The link to the OpenClaw gateway dropped and is reconnecting; the
+		// DefenseClaw gateway and its guardrails keep running. Each user
+		// restart of OpenClaw left a HIGH alert behind (GAP-1799).
 		occurrence.durableHealthTransition = true
 		occurrence.family, occurrence.phase = sinkHealthV8Degraded, "connection"
-		occurrence.outcome, occurrence.severity = observability.OutcomeFailed, "HIGH"
+		occurrence.outcome, occurrence.severity = observability.OutcomeFailed, "MEDIUM"
 		occurrence.subsystem, occurrence.healthState = "gateway", "degraded"
 		occurrence.errorCode = observability.Present("connection_lost")
 	case ActionGuardrailHealthy:

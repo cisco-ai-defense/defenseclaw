@@ -45,7 +45,7 @@ import {
   normalizeImportedPolicy,
   __TEST_INTERNALS,
 } from '../components/policy-creator/lib/share.js';
-import { emit, __TEST_INTERNALS as EMIT_INTERNALS } from '../components/policy-creator/lib/emit.js';
+import { emit } from '../components/policy-creator/lib/emit.js';
 import { emitInstallScript } from '../components/policy-creator/lib/emit-script.js';
 import { highlightRegoToHtml, tokenizeRego } from '../components/policy-creator/lib/rego-highlight.js';
 import { highlightJsonToHtml, tokenizeJson } from '../components/policy-creator/lib/json-highlight.js';
@@ -696,51 +696,6 @@ test('share: end-to-end round trip of a legacy payload does not crash', async ()
   }
 });
 
-// ── emit: correlator edit detection ─────────────────────────────────
-
-test('emit: canonicalCorrelator is deterministic and identifies identical states', () => {
-  const baseline = policyFromPreset('strict').correlator;
-  const shuffled = [...baseline].reverse();
-  assert.equal(
-    EMIT_INTERNALS.canonicalCorrelator(baseline),
-    EMIT_INTERNALS.canonicalCorrelator(shuffled),
-    'canonical signature must be reorder-stable',
-  );
-});
-
-test('emit: correlatorDiffersFromDefault returns false for an unmodified strict preset', () => {
-  const policy = policyFromPreset('strict');
-  assert.equal(
-    EMIT_INTERNALS.correlatorDiffersFromDefault(policy),
-    false,
-    'untouched preset must NOT trigger a correlation-patterns.yaml emit',
-  );
-});
-
-test('emit: correlatorDiffersFromDefault detects edits to a bundled pattern', () => {
-  const policy = policyFromPreset('strict');
-  if (policy.correlator.length === 0) {
-    // The build script feeds the bundled defaults into every preset;
-    // if this test stops finding any patterns the test itself is
-    // useless. Surface that explicitly rather than passing vacuously.
-    throw new Error('strict preset has no correlator patterns — fixture drift');
-  }
-  // Mutate a single window_events field on the first bundled pattern.
-  // This is precisely the silent-data-loss path the previous heuristic
-  // missed (only disabled patterns + unknown ids tripped the emit).
-  const edited = {
-    ...policy,
-    correlator: policy.correlator.map((p, i): CorrelationPattern =>
-      i === 0 ? { ...p, window_events: p.window_events + 7 } : p,
-    ),
-  };
-  assert.equal(
-    EMIT_INTERNALS.correlatorDiffersFromDefault(edited),
-    true,
-    'editing a bundled pattern must trigger a correlation-patterns.yaml emit',
-  );
-});
-
 // Regression for the Quick Start "Cannot read properties of undefined
 // (reading 'enabled')" crash. A stale localStorage draft from an older
 // build is missing `cisco_ai_defense` and `correlator`. PolicyCreator
@@ -778,21 +733,6 @@ test('emit + normalize: stale policy without correlator/cisco_ai_defense survive
     policyYaml!.contents.includes('cisco_ai_defense'),
     false,
     'AID block must be omitted when the lane is off / missing',
-  );
-});
-
-test('emit: correlatorDiffersFromDefault detects disabled bundled patterns', () => {
-  const policy = policyFromPreset('strict');
-  const disabled = {
-    ...policy,
-    correlator: policy.correlator.map((p, i): CorrelationPattern =>
-      i === 0 ? { ...p, enabled: false } : p,
-    ),
-  };
-  assert.equal(
-    EMIT_INTERNALS.correlatorDiffersFromDefault(disabled),
-    true,
-    'disabling a bundled pattern must trigger an emit',
   );
 });
 
@@ -1059,16 +999,7 @@ test('emit: judge file skipped when system_prompt is empty', () => {
   );
 });
 
-test('emit: correlation-patterns.yaml NOT emitted for untouched default preset', () => {
-  const policy = policyFromPreset('default');
-  assert.equal(
-    emit(policy).find((f) => f.path.endsWith('correlation-patterns.yaml')),
-    undefined,
-    'untouched preset must NOT emit a correlation-patterns override',
-  );
-});
-
-test('emit: correlation-patterns.yaml emitted when the operator edits a pattern', () => {
+test('emit: never writes correlation-patterns.yaml (the rule-pack loader rejects it)', () => {
   const policy = policyFromPreset('default');
   if (policy.correlator.length === 0) {
     throw new Error('default preset has no correlator patterns — fixture drift');
@@ -1076,11 +1007,14 @@ test('emit: correlation-patterns.yaml emitted when the operator edits a pattern'
   const edited = {
     ...policy,
     correlator: policy.correlator.map((p, i): CorrelationPattern =>
-      i === 0 ? { ...p, window_events: p.window_events + 3 } : p,
+      i === 0 ? { ...p, enabled: false } : p,
     ),
   };
-  const f = emit(edited).find((x) => x.path.endsWith('correlation-patterns.yaml'));
-  assert.ok(f, 'edit to a bundled pattern must produce a correlation-patterns.yaml override');
+  assert.equal(
+    emit(edited).find((f) => f.path.endsWith('correlation-patterns.yaml')),
+    undefined,
+    'the gateway only runs its compiled-in correlator patterns; an exported file breaks the pack',
+  );
 });
 
 // ── differential parity (B2) ────────────────────────────────────────

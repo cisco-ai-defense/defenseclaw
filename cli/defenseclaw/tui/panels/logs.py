@@ -469,11 +469,10 @@ class LogsPanelModel:
         return tuple(groups)
 
     def filter_chip_group(self) -> LogChipGroupState:
-        """Return the preset filter row, including number-key shortcuts.
+        """Return the preset filter row.
 
-        Only the first eight presets advertise a number shortcut; key 9
-        is reserved for the global Audit panel hotkey, so the Hooks
-        preset is keyless (reached via click or the f cycle).
+        No preset has a number shortcut: digits are the global panel keys
+        (GAP-2296). Presets are reached with f, e/w or a click.
         """
 
         chips = tuple(
@@ -482,10 +481,10 @@ class LogsPanelModel:
                 value=preset,
                 label=FILTER_LABELS[preset],
                 active=preset == self.filter_mode,
-                shortcut=str(index) if index <= 8 else "",
+                shortcut="",
                 style_key="active-chip" if preset == self.filter_mode else "inactive-chip",
             )
-            for index, preset in enumerate(FILTER_PRESETS, start=1)
+            for preset in FILTER_PRESETS
         )
         return LogChipGroupState(group="preset", label="filter", shortcut="f", chips=chips)
 
@@ -608,14 +607,40 @@ class LogsPanelModel:
         # style; doing that for a cursor-only repaint cost ~25-30 ms at the
         # 5,000-line tail limit even though the table contents were unchanged.
         lines = self.filtered_lines()
-        return tuple(self._table_cells(line) for line in lines)
+        structured = self._structured_rows_for_lines()
+        return tuple(self._table_cells(line, structured.get(index)) for index, line in enumerate(lines))
 
-    def _table_cells(self, line: str) -> tuple[str, ...]:
+    def _structured_rows_for_lines(self) -> dict[int, GatewayLogRow]:
+        """SQLite-backed rows by filtered index (Verdicts/OTEL); {} for raw tails."""
+
+        if not self.show_connector_column:
+            return {}
+        if self.source == "verdicts":
+            return dict(enumerate(self.filtered_verdicts()))
+        if self.source == "otel":
+            return dict(enumerate(self.filtered_otel_rows()))
+        return {}
+
+    def _table_cells(self, line: str, row: GatewayLogRow | None = None) -> tuple[str, ...]:
         """Return the shared row shape for shell and metadata consumers."""
 
         if self.show_connector_column:
-            return (_line_connector(line) or "—", line)
+            # A canonical row knows its connector; only raw text tails need
+            # the ``connector=<name>`` token parsed out of the line.
+            connector = (row.lifecycle_details.get("connector", "") if row is not None else "") or _line_connector(line)
+            return (connector or "—", line)
         return (line,)
+
+    def table_cursor_row(self) -> int:
+        """Row the table cursor sits on: the newest line while the view follows.
+
+        Until the operator moves, LIVE follows the tail. The table used to
+        open on row 0, the oldest line (migration banners), so G was needed to
+        see anything current (GAP-1216).
+        """
+
+        rows = self.filtered_lines()
+        return self._selected_index(rows) if rows else 0
 
     def data_table_row_models(self) -> tuple[LogTableRow, ...]:
         """Return active rows with stable row keys and cursor indexes."""
@@ -632,7 +657,7 @@ class LogsPanelModel:
                 key=_log_row_key(self.source, index, structured.get(index), line),
                 cursor_index=index,
                 source=self.source,
-                cells=self._table_cells(line),
+                cells=self._table_cells(line, structured.get(index)),
                 selected=index == selected,
                 style_key=self.line_style_key(line),
                 detail_title=self._detail_title_for_row(structured.get(index)),
@@ -761,16 +786,24 @@ class LogsPanelModel:
 
     def set_source(self, source: LogSource) -> None:
         self.source = source
-        self._clamp_cursor()
+        self._source_changed()
 
     def next_source(self) -> None:
         index = LOG_SOURCES.index(self.source)
-        self.source = LOG_SOURCES[min(index + 1, len(LOG_SOURCES) - 1)]
-        self._clamp_cursor()
+        self.set_source(LOG_SOURCES[min(index + 1, len(LOG_SOURCES) - 1)])
 
     def previous_source(self) -> None:
         index = LOG_SOURCES.index(self.source)
-        self.source = LOG_SOURCES[max(index - 1, 0)]
+        self.set_source(LOG_SOURCES[max(index - 1, 0)])
+
+    def _source_changed(self) -> None:
+        """A source opens LIVE at its tail unless you moved in it before.
+
+        Switching to Verdicts used to show its oldest rows as PAUSED, and
+        switching back left Gateway PAUSED too (GAP-1216).
+        """
+
+        self.paused = self.cursor_moved.get(self.source, False)
         self._clamp_cursor()
 
     def set_filter(self, preset: str) -> None:
@@ -928,12 +961,17 @@ class LogsPanelModel:
     def handle_key(self, key: str) -> LogPanelAction:
         """Handle panel-local keys without executing returned intents."""
 
+        if self.searching:
+            return self._handle_search_key(key)
         if key == "J" and not self.searching and self.source == "verdicts":
             return LogPanelAction(True, hint="Open the SQLite-backed judge response history.", modal="judge-history")
-        if key == "N" and not self.searching:
+        if key == "b" and not self.searching:
             return LogPanelAction(True, hint="Open notifications toggle confirmation.", modal="notifications")
         if key == "space":
             self.paused = not self.paused
+            if not self.paused:
+                # Resuming LIVE follows the tail again.
+                self.cursor_moved[self.source] = False
             return LogPanelAction(True)
         if key in {"left", "h"} and not self.searching:
             self.previous_source()
@@ -957,7 +995,8 @@ class LogsPanelModel:
             rows = self.filtered_lines()
             if rows:
                 self.cursor[self.source] = len(rows) - 1
-                self.cursor_moved[self.source] = True
+            # G is "follow the tail": LIVE, and new lines keep the cursor there.
+            self.cursor_moved[self.source] = False
             self.paused = False
             self._clamp_scroll_to_cursor()
             return LogPanelAction(True)
@@ -986,14 +1025,8 @@ class LogsPanelModel:
             old = self.verdict_severity
             self.cycle_verdict_severity()
             return LogPanelAction(True, filter_change=_filter_change(FILTER_TYPE_SEVERITY, old, self.verdict_severity))
-        # Filters are bound to number keys 1-8 only. The 9 key is the
-        # global hotkey for the Audit panel, so the Hooks preset (the 9th
-        # entry) is reached via its chip, the f cycle, or the Hook Calls
-        # tile deep-link instead of a conflicting number shortcut.
-        if key in {str(i) for i in range(1, 9)} and not self.searching and int(key) <= len(FILTER_PRESETS):
-            old = self.filter_mode
-            self.set_filter(FILTER_PRESETS[int(key) - 1])
-            return LogPanelAction(True, filter_change=_filter_change(FILTER_TYPE_PRESET, old, self.filter_mode))
+        # Digits stay the global panel keys, so 1 opens Overview from Logs
+        # too; presets are the f cycle, e/w and the chips (GAP-2296).
         if key == "e" and not self.searching:
             old = self.filter_mode
             self.set_filter(FILTER_NONE if self.filter_mode == FILTER_ERRORS else FILTER_ERRORS)
@@ -1006,19 +1039,31 @@ class LogsPanelModel:
             self.searching = True
             self.search_text = ""
             return LogPanelAction(True)
-        if key == "enter" and self.searching:
+        return LogPanelAction(False)
+
+    def _handle_search_key(self, key: str) -> LogPanelAction:
+        """Typing after ``/`` edits the search; letters never run shortcuts.
+
+        ``j``/``k``/``g``/``G`` used to move the cursor and Space paused the
+        stream, so a search for "kiro" lost its "k" (GAP-1214).
+        """
+
+        if key in {"enter", "esc", "escape"}:
             self.searching = False
+            if key != "enter":
+                self.search_text = ""
+                self._clamp_cursor()
             return LogPanelAction(True)
-        if key == "esc" and self.searching:
-            self.searching = False
-            self.search_text = ""
-            self._clamp_cursor()
-            return LogPanelAction(True)
-        if key == "backspace" and self.searching:
+        if key == "backspace":
             self.search_text = self.search_text[:-1]
             self._clamp_cursor()
             return LogPanelAction(True)
-        if self.searching and len(key) == 1:
+        if key in {"up", "down"}:
+            self.move_cursor(-1 if key == "up" else 1)
+            return LogPanelAction(True)
+        if key == "space":
+            key = " "
+        if len(key) == 1 and key.isprintable():
             self.search_text += key
             self._clamp_cursor()
             return LogPanelAction(True)
@@ -1058,7 +1103,7 @@ class LogsPanelModel:
         error = f"\n[#F87171]{self.error_messages[self.source]}[/]" if self.error_messages[self.source] else ""
         return (
             f"{self._header_text()}  {visible} / {total} lines\n"
-            "Keys: h/l source, 1-8 filter, Space pause, / search, e errors, w warnings, Enter detail."
+            "Keys: h/l source, f filter, Space pause, / search, e errors, w warnings, Enter detail."
             f"{error}"
         )
 
@@ -1259,19 +1304,26 @@ def _line_has_actionable_signal(lower_line: str) -> bool:
     return not any(pattern in lower_line for pattern in LOW_SIGNAL_LOG_PATTERNS)
 
 
-_CONNECTOR_LINE_RE = re.compile(r"connector[=:]\s*\"?([A-Za-z0-9._-]+)\"?", re.IGNORECASE)
+# ``connector=foo`` (text logs) or ``"connector":"foo"`` (JSON). The word
+# must stand alone: "multi-connector: add ..." in a migration banner is prose,
+# not a tag, and used to fill the column with "add" (GAP-1216).
+_CONNECTOR_LINE_RE = re.compile(
+    r"(?<![\w-])(?:connector=\"?([A-Za-z0-9._-]+)|\"connector\"\s*:\s*\"([A-Za-z0-9._-]+)\")",
+    re.IGNORECASE,
+)
 
 
 def _line_connector(line: str) -> str:
     """Extract the connector name from a ``connector=<name>`` log line.
 
     Returns "" when the line has no connector tag (rendered as ``—`` in the
-    CONNECTOR column). Handles both ``connector=foo`` (text logs) and
-    ``"connector":"foo"`` style JSON via the ``[=:]`` alternation.
+    CONNECTOR column).
     """
 
     match = _CONNECTOR_LINE_RE.search(line or "")
-    return match.group(1) if match else ""
+    if not match:
+        return ""
+    return match.group(1) or match.group(2) or ""
 
 
 def _log_row_key(source: LogSource, index: int, row: GatewayLogRow | None, line: str) -> str:

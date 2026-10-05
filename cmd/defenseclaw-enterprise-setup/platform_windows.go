@@ -92,6 +92,15 @@ func executeEnterpriseSetup(
 		*input.value = canonical
 	}
 
+	if standalone {
+		// Refuse a too-full volume before anything is staged. The Secure
+		// Client Setup keeps its historical behavior.
+		if programData, err := winpath.TrustedProgramData(); err == nil {
+			if err := requireEnterpriseSetupFreeSpace(programData, payload, opts.Action); err != nil {
+				return 0, err
+			}
+		}
+	}
 	stageRoot, cleanup, err := stageEnterprisePayload(payload)
 	if err != nil {
 		return 0, err

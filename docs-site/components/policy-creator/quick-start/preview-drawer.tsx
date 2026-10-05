@@ -46,7 +46,9 @@ export function PreviewDrawer({ policy, hidden = false }: { policy: Policy; hidd
 
   return (
     <div
-      className="fixed bottom-4 right-4 z-30 print:hidden"
+      // right-16 keeps the pill clear of the creator's round session-debug
+      // button, which is pinned at bottom-4 right-4.
+      className="fixed bottom-4 right-16 z-30 print:hidden"
       // pointer-events: auto on root so the drawer is interactive even
       // when the page underneath has overlays.
       style={{ pointerEvents: 'auto' }}
@@ -63,7 +65,7 @@ export function PreviewDrawer({ policy, hidden = false }: { policy: Policy; hidd
         </button>
       )}
       {open && (
-        <div className="flex max-h-[70vh] w-[380px] flex-col overflow-hidden rounded-xl border border-fd-border bg-fd-card shadow-2xl">
+        <div className="flex max-h-[70vh] w-[min(380px,calc(100vw-5rem))] flex-col overflow-hidden rounded-xl border border-fd-border bg-fd-card shadow-2xl">
           <header className="flex items-center justify-between border-b border-fd-border bg-fd-background px-3 py-2">
             <div className="flex items-center gap-2">
               <span aria-hidden className="size-2 rounded-full bg-[var(--brand-cisco)]" />

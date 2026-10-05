@@ -14,10 +14,11 @@ keywords:
 `defenseclaw sandbox` runs Claude Code, Codex, and other hook-based coding
 agents in NVIDIA OpenShell 0.1 sandboxes on Linux, and on Macs with Apple
 silicon in OpenShell MicroVMs, where every run works on a copy (see
-[macOS](/docs/setup/sandbox#macos)). This page lists every
-`sandbox` command and flag; see also [Sandbox](/docs/setup/sandbox).
+[macOS](/docs/sandboxes/guide#macos)). This page lists every
+`sandbox` command and flag; for the walkthrough, see the
+[complete sandbox guide](/docs/sandboxes/guide).
 Packs and organization limits are covered in
-[Sandbox policy packs and admin controls](/docs/setup/sandbox-policy), and
+[Sandbox policy packs and admin controls](/docs/sandboxes/policy-packs), and
 the `openshell:` keys in
 [Configuration](/docs/reference/configuration#openshell-sandbox-settings).
 
@@ -40,14 +41,15 @@ tree, and a test keeps them in step with it. `defenseclaw sandbox <command>
   MicroVMs, on Apple silicon only: on an Intel Mac every command except
   `teardown` and `legacy-cleanup` stops with exit status 3. A MicroVM mounts
   no host folders, so every run on a Mac works on a copy (see
-  [macOS](/docs/setup/sandbox#macos)).
+  [macOS](/docs/sandboxes/guide#macos)).
 - **The daemon does the work.** Commands that create, change, or read
   sandboxes call the DefenseClaw daemon's
   [sandbox API](/docs/reference/gateway-api#sandbox-api) on the main API
   port, using the gateway token. The daemon runs them only while
   `openshell.enabled` is `true`, which `sandbox setup` turns on. The CLI keeps
   the terminal, the copy-mode workspace, the image builds, and the installer.
-  `pack`, `image`, `enable`, `disable`, and `doctor` work without the daemon.
+  `pack`, `image`, `disable`, and `doctor` work without the daemon. `enable`
+  checks first, as `run` does, that the daemon serves sandboxes.
 - **Harness names.** A harness can be named by the command you type
   (`claude`, `codex`, `opencode`, `copilot`, `kiro-cli-chat`, `hermes`,
   `openhands`, `omnigent`, `agy`, `amp`, `cursor-agent`, `devin`), by its
@@ -57,14 +59,16 @@ tree, and a test keeps them in step with it. `defenseclaw sandbox <command>
   Claude Code and Codex; `image rm` removes only the harnesses you name. Amp, Cursor Agent, and Devin CLI are not verified
   end to end yet: their images build, but they never pass the hook check, so
   no sandbox runs them. The
-  [capability matrix](/docs/capability-matrix) says why for each harness.
+  [capability matrix](/docs/connectors/capability-matrix) says why for each harness.
 - **Sandbox names.** A name is lowercase letters, digits, and `-`, at most
   19 characters: OpenShell 0.1.1 refuses to create a sandbox with a longer
   name. Without `--name`, `run` picks `<folder>-<random>`, the folder name cut
   to fit, for example `myapp-7f3a`. The harness is a label on the sandbox, not
   part of its name, and `sandbox list` shows both.
 - **Output.** Commands with `-o, --output` print `text` (the default) or
-  `json`.
+  `json`. While sandboxes are off, a JSON command that needs them (`list`,
+  `policy show`) prints `{"enabled": false, "available": false, "reason": ...}`,
+  the same fields as `sandbox status --json`, and exits `1`.
 - **Exit status.** `0` on success and `1` on an error. `run` and `connect`
   return the exit status of the harness, and `exec` that of its command
   (`connect --shell` exits `0` when the shell ends). When the harness exits
@@ -241,29 +245,36 @@ defenseclaw sandbox image list --output json
 {/* AUTOGEN-BEGIN: sandbox-flags image list */}
 | Flag | Takes | Default | Description |
 | --- | --- | --- | --- |
+| `--json` | switch |  | Same as --output json. |
 | `-o`, `--output` | text | `text` | Output format: text or json. |
 {/* AUTOGEN-END: sandbox-flags */}
 
 ### `sandbox image prune`
 
-Removes superseded harness images. It keeps the current images and the images
-the daemon's sandboxes run, and leaves images that another DefenseClaw data
-directory recorded, or that nothing recorded. It forgets, and names, the
-records of images Docker no longer has. On a MicroVM (vm) gateway it
-also removes the run images and aliases of superseded harness images, and only
-while the daemon answers: without its list of sandboxes it leaves them alone.
-With that list, a MicroVM gateway's prune also counts every harness image built
-for the docker driver as superseded, however new it is (images recorded before
-DefenseClaw built MicroVM images are such images). Such an image goes with its
-run images and aliases unless a sandbox runs it. A docker gateway's prune, or
-one that cannot tell which driver the gateway runs, keeps the newest image of
-both kinds. With that list it also removes the MicroVM disk OpenShell prepared from each
-image it removed (about 5 GB each, in the `images` folder of the MicroVM
-driver's state directory, `~/.local/state/openshell/vm-driver` by default) and
-says how much it freed. It removes a disk only when Docker no longer has its
-image and no sandbox is recorded with that image, and it never removes the
-driver's other state there. `--dry-run` says which disks it would remove. A
-start of an image whose disk is gone prepares it again (about a minute).
+Removes superseded harness images.
+
+- **What it keeps.** The current images and the images the daemon's
+  sandboxes run. It leaves images that another DefenseClaw data directory
+  recorded, or that nothing recorded.
+- **Stale records.** It forgets, and names, the records of images Docker no
+  longer has.
+- **On a MicroVM (vm) gateway**, and only while the daemon answers (without
+  its list of sandboxes it leaves them alone), it also removes the run
+  images and aliases of superseded harness images. It counts every harness
+  image built for the docker driver as superseded, however new it is (images
+  recorded before DefenseClaw built MicroVM images are such images). Such an
+  image goes with its run images and aliases unless a sandbox runs it.
+- **On a docker gateway**, or one whose driver it cannot tell, it keeps the
+  newest image of both kinds.
+- **MicroVM disks.** With the daemon's list, it also removes the MicroVM
+  disk OpenShell prepared from each image it removed (about 5 GB each, in the
+  `images` folder of the MicroVM driver's state directory,
+  `~/.local/state/openshell/vm-driver` by default) and says how much it
+  freed. It removes a disk only when Docker no longer has its image and no
+  sandbox is recorded with that image, and it never removes the driver's
+  other state there. A start of an image whose disk is gone prepares it
+  again (about a minute).
+- `--dry-run` says what it would remove, disks included.
 
 ```bash
 defenseclaw sandbox image prune --dry-run
@@ -306,7 +317,11 @@ defenseclaw sandbox image rm kiro opencode --yes
 
 ### `sandbox enable`
 
-Makes typing the harness command run it in a sandbox. It writes a marked block
+Makes typing the harness command run it in a sandbox. It refuses, and changes
+nothing, while sandboxes are off or unavailable (the checks `sandbox run`
+makes), since the command would then fail to start in every new shell: run
+`defenseclaw sandbox setup` first, or `defenseclaw sandbox doctor` to see why
+they are unavailable. Otherwise it writes a marked block
 to your shell's rc file (`~/.bashrc`, `~/.zshrc` or `$ZDOTDIR/.zshrc`, or
 `~/.config/fish/config.fish`, which is `$XDG_CONFIG_HOME/fish/config.fish`
 when `XDG_CONFIG_HOME` is set). The block defines a shell function named after
@@ -398,110 +413,157 @@ Skip-permissions mode is on by default, and `--safe` keeps the harness's own
 prompts. The harness gets your terminal. Arguments after `--` go to the
 harness.
 
-While the harness runs, the session announces what can't wait: each ask (a
-port on your machine, a private address, a destination the profile does not
-list) with its destination and the `sandbox approve` command that answers it
-from another terminal (or `defenseclaw tui`, key `7`, then `t` for the Asks
-view); a destination DefenseClaw blocked, with the `sandbox unblock` command
-that lifts the block; a large upload the block did not cut (`⚠ large upload
-to files.example.net (more than 25 MiB)`, with the block off or for a
-destination exempt from it); a finding such as an alert on a tool call or
-hook tamper; a quarantined nested repository; and a DefenseClaw daemon that
-does not answer (the hooks fail closed until it is back). The harness draws
-its own screen, so these notices go to the terminal's title and, where the
-terminal has them, a desktop notification, and ring the bell, instead of
-lines written over it. A harness that sets the title itself (Claude Code
-does) takes it back at once, so the end-of-session summary repeats them.
-Without a terminal (`--prompt`), they are lines on standard error. A
-harness that sends its first hook only with your first prompt is not
-warned about while it waits for one.
+The rest of this section covers what happens during and after a run. For
+the same story told step by step, see
+[your first session](/docs/sandboxes/first-session).
 
-Before the harness runs (while the image, the sandbox and a copy are set
-up), Ctrl-C, a closed terminal window or a `kill` of the CLI end the run and
-delete the sandbox it created. At a question at the end of the session they
-leave the changes where they are (kept in the folder, or in a copy-mode
-sandbox for `pull`) and the session still ends as below; a second Ctrl-C
-ends the CLI at once. `run` then exits with status 130.
+#### Notices during the session
 
-When the harness exits (Ctrl-C, a closed terminal window or a `kill` of the
-CLI end the harness, not the session), the sandbox the session started is
-stopped first, so nothing it left running changes the folder after the
-review. If the sandbox was stopped, undone or deleted from elsewhere (another
-terminal, the TUI), which ends the harness, the summary starts by saying so.
-You then get a summary line: tool calls and blocks (the blocking rule's
-title and ID), new sites contacted and sites blocked (destinations, each
-counted once; the blocked ones are the `✗` lines that follow, invalid
-destinations included), and files changed,
-followed by the session's notices. Changes that can run code on your machine
-are called out, and asks still waiting are named. For a mounted folder you
-then keep the changes, undo them, or see the diff first (a letter, then
-Enter; a long diff opens in `$PAGER`, by default `less`), and a kept change
-is confirmed (`openshell.workdir.on_exit` can decide for you). Ctrl-C at
-that question decides nothing: the changes stay, the undo point is kept for
-`undo`, the sandbox is stopped and kept, and the command exits `130`.
-Otherwise, without a terminal or with `--yes`, a mounted folder keeps them.
-When the review fails, you are still asked, and `--rm` keeps the undo point.
-`--rm` also keeps it when nobody accepted the changes (no terminal and no
-`--yes`), so `sandbox undo` still reverts them; `sandbox delete` drops it.
-In copy mode you apply them (3-way), put them on branch `dc/<name>`, write a
-patch, or skip, which leaves them in the sandbox for `pull`. Without a
-terminal, or with `--yes`, copy mode skips: nothing is applied, and the end
-says how many files changed and names the `sandbox pull` that brings them
-back. The sandbox is then stopped and kept for `connect`, unless you passed
-`--rm`. In copy mode `--rm` is not honored while changes are left in the
-sandbox (you skipped, declined changes that can run code on your machine, or
-the pull or apply failed), so they aren't lost, and the end says so. A pull
-that fails because the disk is full says whose disk: this machine's, or on a
-Mac the MicroVM's own (`overlay_disk_mib`).
+While the harness runs, the session announces what can't wait:
+
+- each ask (a port on your machine, a private address, a destination the
+  profile does not list), with its destination and the `sandbox approve`
+  command that answers it from another terminal (or `defenseclaw tui`, key
+  `7`, then `t` for the Asks view);
+- a destination DefenseClaw blocked, with the `sandbox unblock` command that
+  lifts the block;
+- a large upload the block did not cut (`⚠ large upload to
+  files.example.net (more than 25 MiB)`), because the block is off or the
+  destination is exempt from it;
+- a finding, such as an alert on a tool call or hook tamper;
+- a quarantined nested repository;
+- a DefenseClaw daemon that does not answer (the hooks fail closed until it
+  is back).
+
+Where the notices appear:
+
+- **In a terminal.** The harness draws its own screen, so the notices go to
+  the terminal's title, to a desktop notification where the terminal has
+  them, and to the bell, instead of lines written over the screen. A harness
+  that sets the title itself (Claude Code does) takes it back at once, so
+  the end-of-session summary repeats them.
+- **Without a terminal** (`--prompt`), they are lines on standard error.
+- A harness that sends its first hook only with your first prompt is not
+  warned about while it waits for one.
+
+#### Interrupts
+
+- **Before the harness runs** (while the image, the sandbox and a copy are
+  set up), Ctrl-C, a closed terminal window or a `kill` of the CLI end the
+  run and delete the sandbox it created.
+- **While the harness runs**, they end the harness, not the session: the
+  session then ends as below.
+- **At a question at the end of the session**, they leave the changes where
+  they are (kept in the folder, or in a copy-mode sandbox for `pull`), and
+  the session still ends as below. A second Ctrl-C ends the CLI at once.
+  `run` then exits with status 130.
+
+#### End of the session
+
+- **The sandbox stops first.** When the harness exits, the sandbox the
+  session started is stopped, so nothing it left running changes the folder
+  after the review. If the sandbox was stopped, undone or deleted from
+  elsewhere (another terminal, the TUI), which ends the harness, the summary
+  starts by saying so.
+- **The summary line** counts tool calls and blocks (the blocking rule's
+  title and ID), new sites contacted and sites blocked (destinations, each
+  counted once; the blocked ones are the `✗` lines that follow, invalid
+  destinations included), and files changed. The session's notices follow.
+  Changes that can run code on your machine are called out, and asks still
+  waiting are named.
+- **A mounted folder.** You keep the changes, undo them, or see the diff
+  first (a letter, then Enter; a long diff opens in `$PAGER`, by default
+  `less`), and a kept change is confirmed. `openshell.workdir.on_exit` can
+  decide for you. Without a terminal, or with `--yes`, the changes are kept.
+  Ctrl-C at the question decides nothing: the changes stay, the undo point is
+  kept for `undo`, the sandbox is stopped and kept, and the command exits
+  `130`. When the review fails, you are still asked.
+- **`--rm` on a mounted folder** keeps the undo point when the review failed
+  or when nobody accepted the changes (no terminal and no `--yes`), so
+  `sandbox undo` still reverts them. `sandbox delete` drops it.
+- **Copy mode.** You apply the changes (3-way), put them on branch
+  `dc/<name>`, write a patch, or skip, which leaves them in the sandbox for
+  `pull`. Without a terminal, or with `--yes`, copy mode skips: nothing is
+  applied, and the end says how many files changed and names the
+  `sandbox pull` that brings them back.
+- **`--rm` in copy mode** is not honored while changes are left in the
+  sandbox (you skipped, declined changes that can run code on your machine,
+  or the pull or apply failed), so they aren't lost, and the end says so.
+- **A full disk.** A pull that fails because the disk is full says whose
+  disk: this machine's, or on a Mac the MicroVM's own (`overlay_disk_mib`).
+- **The sandbox is kept.** It is stopped and kept for `connect`, unless you
+  passed `--rm`.
+
+#### Continue a conversation
 
 A kept sandbox's resume line is followed, last, by the command that
 continues the same conversation inside the sandbox, for every harness that
-can continue one: `→ continue this conversation: defenseclaw sandbox connect
-myapp-7f3a -- --continue` for Claude Code, OpenCode, GitHub Copilot CLI,
-Hermes Agent and OmniGent, `-- resume --last` for Codex, `-- --resume` for
-Kiro CLI, `-- --resume --last` for OpenHands and `-- -c` for Antigravity. A
-plain `connect` starts a new conversation. The resume line the harness itself
-prints as it exits (`claude --resume <id>`, `codex resume <id>`,
-`opencode -s <id>`, `copilot --resume=<id>`, `kiro-cli --resume-id <id>`,
-`hermes --resume <id>`,
-`openhands --resume <id>`, `omnigent run … --resume <id>`,
-`agy --conversation=<id>`) works only inside the sandbox, where the
-conversation is: typed on this machine it does not reach it, unless the
-shell wrapper is on
-(`sandbox enable`) for that command, which sends it into the folder's
-sandbox. DefenseClaw cannot keep that line off the screen, so its own line
-says so. After a session with no tool call it does not say the harness
-printed one: GitHub Copilot CLI, for one, prints its line only after a
-prompt. To resume a particular conversation, pass the harness's own flag
-and ID after `--`: `defenseclaw sandbox connect myapp-7f3a -- --resume <id>`.
+can continue one:
 
-When you run interactively without `--name` and this folder already has a
-sandbox of the same harness, `run` offers to resume it; `--new` starts
-another one instead. A resumed sandbox keeps the settings it was created
-with, so when you pass flags only a new sandbox takes (`--safe`, `--pack`,
-`--credential`, `--env` and the like) and the sandbox doesn't already have
-them, the offer names them and defaults to no. It keeps its credential
-bindings and host ports too: the offer names those this run did not ask for
-and defaults to no, and the banner and `sandbox status NAME` show the
-sandbox's own. Typing the run's own command again is a plain resume. A sandbox the current policy would not start (a
-live mount your organization now runs on a copy, a harness it no longer
-allows) is not offered: `run` names it and the `sandbox delete` command,
-and `status` and `connect` say the same. Only one sandbox can mount a
-folder live, so while any sandbox that mounts the folder exists (even
-stopped), a new live run there is refused. In a terminal, `run` names that
-sandbox, its phase and the `sandbox connect` and `sandbox delete` commands,
-then asks whether to work on a copy (the default), delete it first, or quit;
-without a terminal, use `--copy`, or delete the other sandbox first. Inside a sandbox, `sandbox run <harness>` runs the
-harness directly.
+| Harness | Continue with |
+| --- | --- |
+| Claude Code, OpenCode, GitHub Copilot CLI, Hermes Agent, OmniGent | `defenseclaw sandbox connect myapp-7f3a -- --continue` |
+| Codex | `defenseclaw sandbox connect myapp-7f3a -- resume --last` |
+| Kiro CLI | `defenseclaw sandbox connect myapp-7f3a -- --resume` |
+| OpenHands | `defenseclaw sandbox connect myapp-7f3a -- --resume --last` |
+| Antigravity | `defenseclaw sandbox connect myapp-7f3a -- -c` |
 
-`run` remembers, for the sandbox it created, the harness options after
-`--` (not a prompt), the `--credential` names and hosts, the `--env` names
-and the banner's model line; secret values are never kept. The options
-stop at the first word that is not one, except for OmniGent, whose every
-argument is kept in order (the agent path included), an OpenCode project
-path, and Hermes's `chat`. `connect`, and a shell wrapper's resume, pass
-those options again before any new ones, and show the same Model and Secret
-lines as the run.
+A plain `connect` starts a new conversation. To resume a particular
+conversation, pass the harness's own flag and ID after `--`:
+`defenseclaw sandbox connect myapp-7f3a -- --resume <id>`.
+
+The resume line the harness itself prints as it exits (`claude --resume
+<id>`, `codex resume <id>`, `opencode -s <id>`, `copilot --resume=<id>`,
+`kiro-cli --resume-id <id>`, `hermes --resume <id>`, `openhands --resume
+<id>`, `omnigent run … --resume <id>`, `agy --conversation=<id>`) works only
+inside the sandbox, where the conversation is. Typed on this machine it does
+not reach it, unless the shell wrapper is on (`sandbox enable`) for that
+command, which sends it into the folder's sandbox. DefenseClaw cannot keep
+that line off the screen, so its own line says so. After a session with no
+tool call it does not say the harness printed one: GitHub Copilot CLI, for
+one, prints its line only after a prompt.
+
+#### Resuming instead of starting
+
+- **The offer.** When you run interactively without `--name` and this
+  folder already has a sandbox of the same harness, `run` offers to resume
+  it. `--new` starts another one instead. Typing the run's own command again
+  is a plain resume.
+- **Settings stay.** A resumed sandbox keeps the settings it was created
+  with. When you pass flags only a new sandbox takes (`--safe`, `--pack`,
+  `--credential`, `--env` and the like) and the sandbox doesn't already have
+  them, the offer names them and defaults to no. It keeps its credential
+  bindings and host ports too: the offer names those this run did not ask
+  for and defaults to no, and the banner and `sandbox status NAME` show the
+  sandbox's own.
+- **Sandboxes the policy would not start** (a live mount your organization
+  now runs on a copy, a harness it no longer allows) are not offered: `run`
+  names the sandbox and the `sandbox delete` command, and `status` and
+  `connect` say the same.
+- **One live mount per folder.** While any sandbox that mounts the folder
+  exists (even stopped), a new live run there is refused. In a terminal,
+  `run` names that sandbox, its phase and the `sandbox connect` and
+  `sandbox delete` commands, then asks whether to work on a copy (the
+  default), delete it first, or quit. Without a terminal, use `--copy`, or
+  delete the other sandbox first.
+- **Inside a sandbox**, `sandbox run <harness>` runs the harness directly.
+
+#### Remembered options
+
+`run` remembers, for the sandbox it created:
+
+- the harness options after `--` (not a prompt);
+- the `--credential` names and hosts;
+- the `--env` names;
+- the banner's model line.
+
+Secret values are never kept. The options stop at the first word that is
+not one, except for OmniGent, whose every argument is kept in order (the
+agent path included), an OpenCode project path, and Hermes's `chat`.
+`connect`, and a shell wrapper's resume, pass those options again before
+any new ones, and show the same Model and Secret lines as the run.
+
+#### Examples and flag rules
 
 ```bash
 defenseclaw sandbox run claude
@@ -571,7 +633,7 @@ A few rules the flags follow:
   `defenseclaw sandbox run hermes --llm none --credential HERMES_DEFENSECLAW_API_KEY=HOST[:PORT] --env HERMES_DEFENSECLAW_BASE_URL=https://HOST/v1 -- --provider defenseclaw -m MODEL`.
 - `--pack`, `--profile`, `--copy`, `--safe`, `--unmask`, `--host-port`,
   `--no-mcp`, `--cpu`, and `--memory` go through the
-  [sandbox policy](/docs/setup/sandbox-policy). An organization limit can
+  [sandbox policy](/docs/sandboxes/policy-packs). An organization limit can
   refuse them ("blocked by your organization's DefenseClaw policy") or
   lower them ("limited by …; running with X instead of Y"), and
   `sandbox policy explain` shows the outcome before you run. A flag the
@@ -636,21 +698,25 @@ A few rules the flags follow:
 
 Resumes a sandbox: it starts the sandbox if it is stopped, then attaches the
 harness to your terminal, or a login shell in the project folder with
-`--shell`. The harness gets the options its `run` was given after `--`
-first, then the ones you pass now, and the banner shows the run's Model and
-Secret lines. Both kinds of session end the same way as a `run` session,
-with the summary and the keep-or-undo question (a `--shell` session exits
-`0`). Needs a terminal, except with `--prompt TEXT` (or the harness's own
-print flag after `--`), which runs one prompt headless. A session stops the
-sandbox at its end only when it started it, and leaves one whose detached
-run is still going, or that another session is attached to, running. Two
-sessions can share a sandbox (a second `claude` in the folder offers to
-resume it): neither one's end stops it, undoes the folder or deletes it
-(`--rm`) under the other, and the one that ends first names the review and
-undo commands for later. To continue the harness's last conversation,
-pass its own flag: `-- --continue` for Claude Code, OpenCode, GitHub Copilot
-CLI, Hermes Agent and OmniGent, `-- resume --last` for Codex, `-- --resume`
-for Kiro CLI, `-- --resume --last` for OpenHands and `-- -c` for Antigravity.
+`--shell`.
+
+- **Options.** The harness gets the options its `run` was given after `--`
+  first, then the ones you pass now, and the banner shows the run's Model and
+  Secret lines.
+- **The end.** Both kinds of session end the same way as a `run` session,
+  with the summary and the keep-or-undo question (a `--shell` session exits
+  `0`).
+- **A terminal** is needed, except with `--prompt TEXT` (or the harness's
+  own print flag after `--`), which runs one prompt headless.
+- **Stopping.** A session stops the sandbox at its end only when it started
+  it. It leaves a sandbox running whose detached run is still going, or that
+  another session is attached to.
+- **Shared sandboxes.** Two sessions can share a sandbox (a second `claude`
+  in the folder offers to resume it). Neither one's end stops it, undoes the
+  folder or deletes it (`--rm`) under the other, and the one that ends first
+  names the review and undo commands for later.
+- **The last conversation.** Pass the harness's own flag after `--` (see
+  [continue a conversation](#continue-a-conversation)).
 
 ```bash
 defenseclaw sandbox connect myapp-7f3a
@@ -735,6 +801,7 @@ defenseclaw sandbox list
 {/* AUTOGEN-BEGIN: sandbox-flags list */}
 | Flag | Takes | Default | Description |
 | --- | --- | --- | --- |
+| `--json` | switch |  | Same as --output json. |
 | `-o`, `--output` | text | `text` | Output format: text or json. |
 {/* AUTOGEN-END: sandbox-flags */}
 
@@ -761,6 +828,7 @@ defenseclaw sandbox status myapp-7f3a --output json
 {/* AUTOGEN-BEGIN: sandbox-flags status */}
 | Flag | Takes | Default | Description |
 | --- | --- | --- | --- |
+| `--json` | switch |  | Same as --output json. |
 | `-o`, `--output` | text | `text` | Output format: text or json. |
 {/* AUTOGEN-END: sandbox-flags */}
 
@@ -859,7 +927,7 @@ are two different lines. An IPv6 address with its port is bracketed:
 `[fd00:ec2::254]:80`. A blocked destination that can be unblocked shows
 the `unblock` command to run. A large upload is a ⚠ report, made as it crosses the threshold, so it says `more than`
 it (`⚠ large upload to files.example.net (more than 25 MiB)`), or, with
-[the large-upload block](/docs/setup/sandbox-policy#large-upload-alert-threshold)
+[the large-upload block](/docs/sandboxes/policy-packs#large-upload-alert-threshold)
 on, a ✗ that names the threshold, such as `✗ files.example.net (large upload
 blocked: this sandbox tried to send more than 10 MiB to a destination it had
 not contacted before)`, with its `unblock` command. `-f`
@@ -875,6 +943,7 @@ defenseclaw sandbox activity --sandbox myapp-7f3a --output json
 | Flag | Takes | Default | Description |
 | --- | --- | --- | --- |
 | `-f`, `--follow` | switch |  | Keep following the feed. |
+| `--json` | switch |  | Same as --output json. |
 | `-o`, `--output` | text | `text` | Output format: text or json. |
 | `--sandbox` | text |  | Only this sandbox. |
 | `--since` | number | `0` | Start after this event sequence number. |
@@ -895,6 +964,7 @@ defenseclaw sandbox approvals --sandbox myapp-7f3a --watch
 {/* AUTOGEN-BEGIN: sandbox-flags approvals */}
 | Flag | Takes | Default | Description |
 | --- | --- | --- | --- |
+| `--json` | switch |  | Same as --output json. |
 | `-o`, `--output` | text | `text` | Output format: text or json. |
 | `--sandbox` | text |  | Only this sandbox. |
 | `--watch` | switch |  | Keep watching for new asks. |
@@ -915,8 +985,8 @@ destination for every sandbox, add it to `openshell.egress.allow`. For a port th
 or add it to `openshell.mcp.host_ports`.
 
 ```bash
-defenseclaw sandbox approve myapp-7f3a a1b2c3
-defenseclaw sandbox approve myapp-7f3a a1b2c3 --always --reason "team registry"
+defenseclaw sandbox approve myapp-7f3a ap_5f2c9a1e7b3d4c60
+defenseclaw sandbox approve myapp-7f3a ap_5f2c9a1e7b3d4c60 --always --reason "team registry"
 ```
 
 {/* AUTOGEN-BEGIN: sandbox-flags approve */}
@@ -931,7 +1001,7 @@ defenseclaw sandbox approve myapp-7f3a a1b2c3 --always --reason "team registry"
 Rejects an ask. `--always` also adds the hosts to `openshell.egress.block`.
 
 ```bash
-defenseclaw sandbox reject myapp-7f3a a1b2c3 --reason "not needed"
+defenseclaw sandbox reject myapp-7f3a ap_5f2c9a1e7b3d4c60 --reason "not needed"
 ```
 
 {/* AUTOGEN-BEGIN: sandbox-flags reject */}
@@ -951,7 +1021,7 @@ lifted: IP addresses under `open`, and hosts off the allowlist under
 organization's lists can't be unblocked, and neither can anything under
 `strict`, which runs without the egress proxy. With
 `openshell.admin.allow_unblock: false`, nothing can be unblocked. The
-[decision order](/docs/setup/sandbox-policy#how-a-destination-is-decided)
+[decision order](/docs/sandboxes/policy-packs#how-a-destination-is-decided)
 has the details.
 
 An unblock also stops DefenseClaw's destination rules (such as
@@ -966,7 +1036,7 @@ naming a rule), keeps its verdict.
 The agent learns the command from DefenseClaw too. When the proxy refuses an
 HTTPS destination, the hook of the next shell or web-fetch tool call tells
 the agent the destination, why it is blocked, and the `sandbox unblock`
-command for you to run (Claude Code, Codex, Copilot CLI, Cursor and Devin).
+command for you to run (Claude Code, Codex and GitHub Copilot CLI).
 Once you unblock the host, the agent is no longer told of that block.
 
 ```bash
@@ -1011,6 +1081,7 @@ defenseclaw sandbox review myapp-7f3a --diff
 | Flag | Takes | Default | Description |
 | --- | --- | --- | --- |
 | `--diff` | switch |  | Print the unified diff too. |
+| `--json` | switch |  | Same as --output json. |
 | `-o`, `--output` | text | `text` | Output format: text or json. |
 {/* AUTOGEN-END: sandbox-flags */}
 
@@ -1043,6 +1114,7 @@ defenseclaw sandbox undo myapp-7f3a --yes --restart
 {/* AUTOGEN-BEGIN: sandbox-flags undo */}
 | Flag | Takes | Default | Description |
 | --- | --- | --- | --- |
+| `--json` | switch |  | Same as --output json. |
 | `--keep-refs` | switch |  | Leave branches and tags as the session left them. |
 | `-o`, `--output` | text | `text` | Output format: text or json. |
 | `--preview` | switch |  | Only show what undo would change. |
@@ -1053,47 +1125,61 @@ defenseclaw sandbox undo myapp-7f3a --yes --restart
 ### `sandbox pull`
 
 Brings a copy-mode sandbox's work back, starting the sandbox first if it is
-stopped (unless its copy has not changed since its last pull, see below). Without a
-mode it shows the review: the changed files, the ones that
-can run code on your machine, and files held back from the sandbox. Choose
-one mode to bring the work back: `--apply` (a
-3-way merge into your working tree), `--branch` (branch `dc/<name>`) or
-`--branch-name NAME`, or `--patch-out FILE`. A folder that is not a git
-repository has no branch mode. When `--apply` cannot merge in place (a
-conflict, or git older than 2.38), it leaves your working tree alone and
-exits `4`: the changes go to `<name>.patch` in your folder and, in a git
-project, to branch `dc/<name>`. Changes that can run code on your machine
-need your confirmation, or `--accept-sensitive` without a terminal.
+stopped (unless its copy has not changed since its last pull, see below).
 
-Once an `--apply` (or the apply at a session's end) has put the work in your
-folder, the next pull, a session's end included, shows only what changed in
-the sandbox since (`2 files changed (+3 −0) since the last apply`), flags and
-asks about only that, and its apply, patch or 3-way merge starts from that
-point, so a change you took back from your folder since stays taken back.
-With nothing new it says so and asks nothing, and `sandbox delete` of the
-stopped sandbox does not warn about work it holds. `sandbox undo` of the
-apply starts the next pull from the uploaded copy again, so the undone work
-is offered anew. A branch or a patch file does not move that point: your
-folder does not have those changes. A later pull of the same state still
-counts as brought back, so `delete` does not warn about it.
+**Modes.** Without a mode, `pull` shows the review: the changed files, the
+ones that can run code on your machine, and files held back from the
+sandbox. Choose one mode to bring the work back:
 
-`--branch`, `--branch-name` and `--patch-out FILE` are checked before the
-sandbox is started or read: a branch that exists and does not hold the last
-pull's work, a patch file that exists (without `--force`) or whose folder
-does not, and a branch for a folder without git are refused at once. A branch
-that already holds the work is done: `nothing to do: branch dc/<name> already
-has these changes`, with nothing asked (`"up_to_date": true` with `-o json`).
-A branch that holds the last pull's work is refused at once too when the
-stopped sandbox has run since that pull, since only starting it tells whether
-its work changed (`branch dc/<name> already exists: it holds <name>'s pull at
-14:03, and <name> has run since, so its work may have changed`): pass
-`--branch-name NAME`, or `--force` to move the branch to the new work.
-A stopped sandbox whose copy has not changed since its last pull read it (the
-pull, the session's end or the `stop` that stopped it saw its copy in that
-state, and it has not run since) is not started: that pull is made again, its
-changes and review measured anew (`fix-tests's copy has not changed since its
-last pull at 14:03; using that pull instead of starting it`). On a Mac this
-saves booting the MicroVM.
+- `--apply`: a 3-way merge into your working tree. When it cannot merge in
+  place (a conflict, or git older than 2.38), it leaves your working tree
+  alone and exits `4`: the changes go to `<name>.patch` in your folder and,
+  in a git project, to branch `dc/<name>`.
+- `--branch` (branch `dc/<name>`) or `--branch-name NAME`. A folder that is
+  not a git repository has no branch mode.
+- `--patch-out FILE`.
+
+Changes that can run code on your machine need your confirmation, or
+`--accept-sensitive` without a terminal.
+
+**After an apply.** Once an `--apply` (or the apply at a session's end) has
+put the work in your folder:
+
+- The next pull, a session's end included, shows only what changed in the
+  sandbox since (`2 files changed (+3 −0) since the last apply`), and flags
+  and asks about only that. Its apply, patch or 3-way merge starts from that
+  point, so a change you took back from your folder since stays taken back.
+- With nothing new, it says so and asks nothing, and `sandbox delete` of the
+  stopped sandbox does not warn about work it holds.
+- `sandbox undo` of the apply starts the next pull from the uploaded copy
+  again, so the undone work is offered anew.
+- A branch or a patch file does not move that point: your folder does not
+  have those changes. A later pull of the same state still counts as brought
+  back, so `delete` does not warn about it.
+
+**Checks before the start.** `--branch`, `--branch-name` and
+`--patch-out FILE` are checked before the sandbox is started or read:
+
+- Refused at once: a branch that exists and does not hold the last pull's
+  work, a patch file that exists (without `--force`) or whose folder does
+  not, and a branch for a folder without git.
+- A branch that already holds the work is done:
+  `nothing to do: branch dc/<name> already has these changes`, with nothing
+  asked (`"up_to_date": true` with `-o json`).
+- A branch that holds the last pull's work is refused at once too when the
+  stopped sandbox has run since that pull, since only starting it tells
+  whether its work changed (`branch dc/<name> already exists: it holds
+  <name>'s pull at 14:03, and <name> has run since, so its work may have
+  changed`). Pass `--branch-name NAME`, or `--force` to move the branch to
+  the new work.
+
+**No start when nothing changed.** A stopped sandbox whose copy has not
+changed since its last pull read it (the pull, the session's end or the
+`stop` that stopped it saw its copy in that state, and it has not run since)
+is not started. That pull is made again, with its changes and review
+measured anew (`fix-tests's copy has not changed since its last pull at
+14:03; using that pull instead of starting it`). On a Mac this saves booting
+the MicroVM.
 
 ```bash
 defenseclaw sandbox pull fix-tests
@@ -1109,6 +1195,7 @@ defenseclaw sandbox pull fix-tests --patch-out fix-tests.patch
 | `--branch` | switch |  | Put the changes on branch `dc/<name>`. |
 | `--branch-name` | text |  | Put the changes on this branch. |
 | `--force` | switch |  | Override blocking review gates, an existing branch or patch file. |
+| `--json` | switch |  | Same as --output json. |
 | `-o`, `--output` | text | `text` | Output format: text or json. |
 | `--patch-out` | text |  | Write the changes to this patch file. |
 {/* AUTOGEN-END: sandbox-flags */}
@@ -1119,7 +1206,7 @@ defenseclaw sandbox pull fix-tests --patch-out fix-tests.patch
 
 The effective sandbox policy combines the pack, your `openshell` keys, the run
 flags, and the organization's `openshell.admin` limits. See
-[How the effective policy is computed](/docs/setup/sandbox-policy#how-the-effective-policy-is-computed).
+[How the effective policy is computed](/docs/sandboxes/policy-packs#how-the-effective-policy-is-computed).
 
 ```bash
 defenseclaw sandbox policy show
@@ -1152,6 +1239,7 @@ defenseclaw sandbox policy show --harness codex --profile balanced --copy
 | --- | --- | --- | --- |
 | `--copy` | switch |  | Resolve for a copy-mode run. |
 | `--harness` | text |  | Resolve for this harness. |
+| `--json` | switch |  | Same as --output json. |
 | `-o`, `--output` | text | `text` | Output format: text or json. |
 | `--pack` | text |  | Resolve with this pack. |
 | `--profile` | text |  | Resolve with this profile. |
@@ -1177,6 +1265,7 @@ defenseclaw sandbox policy explain --sandbox myapp-7f3a --output json
 | --- | --- | --- | --- |
 | `--copy` | switch |  | Resolve for a copy-mode run. |
 | `--harness` | text |  | Resolve for this harness. |
+| `--json` | switch |  | Same as --output json. |
 | `-o`, `--output` | text | `text` | Output format: text or json. |
 | `--pack` | text |  | Resolve with this pack. |
 | `--profile` | text |  | Resolve with this profile. |
@@ -1200,6 +1289,7 @@ defenseclaw sandbox policy suggest --sandbox myapp-7f3a --output json
 {/* AUTOGEN-BEGIN: sandbox-flags policy suggest */}
 | Flag | Takes | Default | Description |
 | --- | --- | --- | --- |
+| `--json` | switch |  | Same as --output json. |
 | `-o`, `--output` | text | `text` | Output format: text or json. |
 | `--sandbox` | text |  | Only this sandbox's destinations. |
 {/* AUTOGEN-END: sandbox-flags */}
@@ -1245,7 +1335,7 @@ because the administrator owns `config.yaml`.
 ### `sandbox pack`
 
 Policy packs set the whole sandbox posture. See
-[Sandbox policy packs](/docs/setup/sandbox-policy).
+[Sandbox policy packs](/docs/sandboxes/policy-packs).
 
 ```bash
 defenseclaw sandbox pack list
@@ -1271,6 +1361,7 @@ defenseclaw sandbox pack list
 {/* AUTOGEN-BEGIN: sandbox-flags pack list */}
 | Flag | Takes | Default | Description |
 | --- | --- | --- | --- |
+| `--json` | switch |  | Same as --output json. |
 | `-o`, `--output` | text | `text` | Output format: text or json. |
 {/* AUTOGEN-END: sandbox-flags */}
 
@@ -1288,6 +1379,7 @@ defenseclaw sandbox pack show ~/.defenseclaw/policies/sandbox/team-web
 {/* AUTOGEN-BEGIN: sandbox-flags pack show */}
 | Flag | Takes | Default | Description |
 | --- | --- | --- | --- |
+| `--json` | switch |  | Same as --output json. |
 | `-o`, `--output` | text | `text` | Output format: text or json. |
 {/* AUTOGEN-END: sandbox-flags */}
 
@@ -1315,7 +1407,7 @@ the host's OpenClaw networking, ownership, and config. It prints every step
 with its exact commands and asks once, unless you pass `--yes`. Progress is
 recorded in `<data_dir>/legacy-sandbox-cleanup.json`, so running it again only
 does what is left.
-[Detect a legacy install](/docs/setup/sandbox#detect-a-legacy-install) says
+[Detect a legacy install](/docs/sandboxes/legacy-cleanup#detect-a-legacy-install) says
 when you need it.
 
 ```bash

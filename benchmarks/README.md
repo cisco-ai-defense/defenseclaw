@@ -156,7 +156,7 @@ scope.
   [`DETERMINISTIC-DETECTION-BENCHMARKS.md`](DETERMINISTIC-DETECTION-BENCHMARKS.md)
 - Machine-readable scorecard:
   [`results/public-scorecard-v1.json`](results/public-scorecard-v1.json)
-- Public docs page: `docs-site/content/docs/benchmarks.mdx`
+- Public docs page: `docs-site/content/docs/guardrail/benchmarks.mdx`
 
 The report explains the datasets, labeling contract, metrics, profile behavior,
 detector changes, limitations, and complete replication procedure.

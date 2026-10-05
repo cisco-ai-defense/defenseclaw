@@ -32,6 +32,7 @@ from defenseclaw.commands.cmd_setup_observability import (
     _remove_v8_destination,
     _require_v8_operator_status,
     _set_v8_destination_enabled,
+    echo_setup_notes,
 )
 from defenseclaw.config import config_path_for_data_dir
 from defenseclaw.context import AppContext, pass_ctx
@@ -49,6 +50,7 @@ _CLOUD_TRACE_ENDPOINT = "https://api.galileo.ai/otel/traces"
     type=click.Choice(["cloud", "self-hosted"]),
     default="cloud",
     show_default=True,
+    help="Galileo cloud, or your own Galileo deployment (asks for its console URL)",
 )
 @click.option("--project", default=None, help="Galileo project name or ID")
 @click.option("--logstream", default=None, help="Galileo Log stream name or ID")
@@ -140,6 +142,7 @@ def galileo(
         )
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
+    key_saved = bool(api_key or persist_api_key or _dotenv_value(app.cfg.data_dir, _KEY_ENV))
     _print_v8_setup_result(
         result,
         warnings,
@@ -149,6 +152,7 @@ def galileo(
         logstream=logstream,
         dry_run=dry_run,
         existed=existed,
+        key_saved=key_saved,
     )
 
 
@@ -195,7 +199,7 @@ def remove_cmd(app: AppContext, yes: bool) -> None:
 
 
 @galileo.command("test")
-@click.option("--timeout", type=float, default=15.0, show_default=True)
+@click.option("--timeout", type=float, default=15.0, show_default=True, help="Seconds to wait for Galileo.")
 @pass_ctx
 def test_cmd(app: AppContext, timeout: float) -> None:
     """Emit and acknowledge a content-free trace through Galileo."""
@@ -209,10 +213,80 @@ def test_cmd(app: AppContext, timeout: float) -> None:
         raise click.ClickException("Galileo is not configured")
     if not destination.enabled:
         raise click.ClickException("Galileo is disabled; enable it before running the canary")
-    _test_galileo_trace_canary(app.cfg.data_dir, timeout)
+    _test_galileo_trace_canary(app.cfg.data_dir, timeout, store=getattr(app, "store", None))
 
 
-def _test_galileo_trace_canary(data_dir: str, timeout: float) -> None:
+# Hints for the delivery failure the gateway recorded for Galileo, in place of
+# the generic "check the API key" one (GAP-1318).
+_GALILEO_DELIVERY_HINTS = {
+    "http_authentication": "Galileo rejected the credentials (HTTP 401/403): check that the API key and "
+    "project belong to this deployment",
+    "http_rejected": (
+        "Galileo rejected the data (HTTP 4xx): check the project and log stream names; "
+        "gateway.log names the status code and reason"
+    ),
+    "resolution_failed": "the endpoint host name did not resolve: check the endpoint and DNS",
+    "connection_failed": "could not connect to the endpoint: check the endpoint and the network",
+    "request_timeout": "the export to Galileo timed out: check the network, then retry",
+    "endpoint_prohibited": "the endpoint is blocked by the egress policy",
+}
+
+
+def _recent_galileo_delivery_failure(store, since) -> tuple[str, str]:
+    """The code and time of the newest Galileo delivery alert at or after ``since``."""
+    from datetime import timezone
+
+    if store is None:
+        return "", ""
+    try:
+        events = store.list_alerts(50)
+    except Exception:  # noqa: BLE001 - the hint is best effort
+        return "", ""
+    for event in events:
+        details = (getattr(event, "details", "") or "").strip()
+        stamp = getattr(event, "timestamp", None)
+        if not details.startswith("galileo/") or ":" not in details or stamp is None:
+            continue
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=timezone.utc)
+        if stamp < since:
+            break
+        code = details.rsplit(":", 1)[1].strip()
+        if code in _GALILEO_DELIVERY_HINTS:
+            return code, stamp.strftime("%H:%M:%SZ")
+    return "", ""
+
+
+# How long a failed canary waits for the gateway to record this run's
+# delivery alert; it lands a few seconds after the canary returns (GAP-1318).
+_GALILEO_ALERT_WAIT_SECONDS = 6.0
+# Canary failures where the gateway took the request but its export failed.
+# "gateway_rejected" stays here for helpers older than "delivery_failed".
+_GALILEO_DELIVERY_CLASSES = frozenset({"delivery_failed", "gateway_rejected"})
+
+
+def _galileo_alert_floor(data_dir: str):
+    """The oldest alert time that can still describe the current config.
+
+    The gateway records a repeated failure once, so its alert can be older
+    than this run; one from the last few minutes still names the cause. An
+    alert from before the last config.yaml change belongs to the previous
+    endpoint or key, so it is never used (GAP-1318).
+    """
+    from datetime import datetime, timedelta, timezone
+
+    since = datetime.now(timezone.utc) - timedelta(minutes=15)
+    try:
+        changed = datetime.fromtimestamp(os.stat(config_path_for_data_dir(data_dir)).st_mtime, timezone.utc)
+    except (OSError, OverflowError, ValueError):
+        return since
+    return max(since, changed)
+
+
+def _test_galileo_trace_canary(data_dir: str, timeout: float, *, store=None) -> None:
+    import time
+
+    since = _galileo_alert_floor(data_dir)
     try:
         result = run_trace_canary(
             destination=_DESTINATION,
@@ -221,8 +295,29 @@ def _test_galileo_trace_canary(data_dir: str, timeout: float) -> None:
             timeout=timeout,
         )
     except TraceCanaryError as exc:
+        hint = ""
+        delivery, when = "", ""
+        if exc.failure_class in _GALILEO_DELIVERY_CLASSES and store is not None:
+            deadline = time.monotonic() + _GALILEO_ALERT_WAIT_SECONDS
+            while True:
+                delivery, when = _recent_galileo_delivery_failure(store, since)
+                if delivery or time.monotonic() >= deadline:
+                    break
+                time.sleep(0.5)
+        if delivery:
+            hint = (
+                f". The gateway's latest Galileo export failure ({when}) is {delivery}: "
+                f"{_GALILEO_DELIVERY_HINTS[delivery]}. Fix it with 'defenseclaw setup galileo', "
+                "then run this test again"
+            )
+        elif exc.failure_class in _GALILEO_DELIVERY_CLASSES:
+            hint = (
+                ". Galileo did not accept the export: check that the API key and project belong to "
+                "this deployment. For a dedicated or self-hosted deployment, run 'defenseclaw setup "
+                "galileo --deployment self-hosted --trace-endpoint <url>'"
+            )
         raise click.ClickException(
-            f"Galileo runtime canary failed ({exc.failure_class}): {exc.message}"
+            f"Galileo runtime canary failed ({exc.failure_class}): {exc.message}{hint}"
         ) from exc
     click.echo(f"  {result.destination}: runtime canary acknowledged")
     click.echo(f"  trace_id={result.trace_id}; generation={result.generation}")
@@ -239,6 +334,7 @@ def _print_v8_setup_result(
     logstream: str,
     dry_run: bool,
     existed: bool,
+    key_saved: bool = True,
 ) -> None:
     """Render one secret-free result from the canonical v8 writer."""
 
@@ -251,10 +347,18 @@ def _print_v8_setup_result(
     click.echo(f"  Project:     {project}")
     click.echo(f"  Log stream:  {logstream}")
     click.echo("  Signals:     traces")
-    click.echo("  Delivery:    real-time after each completed model/tool operation (≤1s batch delay)")
+    ux.echo("  Delivery:    real-time after each completed model/tool operation (≤1s batch delay)")
     click.echo(f"  Config:      v8 ({'changed' if result.changed else 'already configured'})")
-    for warning in warnings:
-        ux.warn(warning, indent="  ")
+    echo_setup_notes(resolve_preset("galileo"), warnings)
+    if not dry_run and not key_saved:
+        # GAP-1299: the key came from this shell only. A gateway started
+        # anywhere else has no key and every export fails.
+        ux.warn(
+            f"{_KEY_ENV} was read from this shell and not saved. The gateway loses it when it "
+            f"restarts outside this shell. Save it with: defenseclaw keys set {_KEY_ENV} "
+            "(or re-run with --persist-api-key).",
+            indent="  ",
+        )
     if not dry_run:
         ux.subhead("Next: defenseclaw setup galileo test")
 
@@ -314,8 +418,71 @@ def _print_status_payload(payload: dict, *, as_json: bool) -> None:
         click.echo(json.dumps(payload, indent=2, sort_keys=True))
         return
     ux.section("Galileo status")
-    for key, value in payload.items():
-        click.echo(f"  {key.replace('_', ' ').title():<12} {value}")
+    for label, value in _status_rows(payload):
+        click.echo(f"  {label:<15} {value}")
+    hint = _status_next_step(payload)
+    if hint:
+        click.echo()
+        click.echo(f"  Next step: {hint}")
+
+
+def _yes_no(value: object) -> str:
+    return "yes" if value else "no"
+
+
+def _status_rows(payload: dict) -> list[tuple[str, str]]:
+    """Render the status payload as readable label/value rows (no reprs)."""
+
+    signals = payload.get("signals") or {}
+    selected = [name for name, on in signals.items() if on] if isinstance(signals, dict) else []
+    rows = [
+        ("Configured", _yes_no(payload.get("configured"))),
+        ("Name", str(payload.get("name", ""))),
+        ("Enabled", _yes_no(payload.get("enabled"))),
+        ("Endpoint", str(payload.get("endpoint") or "-")),
+        ("Signals", ", ".join(selected) or "none"),
+        ("API key", str(payload.get("api_key", ""))),
+        ("Config version", str(payload.get("config_version", ""))),
+    ]
+    health = payload.get("health")
+    if not isinstance(health, dict):
+        return rows
+    state = str(health.get("state") or "unknown")
+    reason = health.get("reason")
+    rows.append(("Health", f"{state} ({reason})" if reason else state))
+    if "queue_items" in health or "dropped" in health:
+        queue = f"{health.get('queue_items', 0)}"
+        if health.get("queue_max_items"):
+            queue += f" / {health['queue_max_items']}"
+        queue += f" items, {health.get('dropped', 0)} dropped"
+        rows.append(("Queue", queue))
+    if health.get("last_success"):
+        rows.append(("Last success", str(health["last_success"])))
+    if health.get("last_failure"):
+        failure = str(health["last_failure"])
+        if health.get("last_error_class"):
+            failure += f" ({health['last_error_class']})"
+        rows.append(("Last failure", failure))
+    elif health.get("last_error_class"):
+        rows.append(("Last error", str(health["last_error_class"])))
+    return rows
+
+
+def _status_next_step(payload: dict) -> str:
+    if not payload.get("configured"):
+        return "run 'defenseclaw setup galileo' to add the destination."
+    if payload.get("api_key") == "missing":
+        return f"export {_KEY_ENV} or re-run 'defenseclaw setup galileo --persist-api-key'."
+    if not payload.get("enabled"):
+        return "run 'defenseclaw setup galileo enable'."
+    health = payload.get("health")
+    state = str(health.get("state") or "") if isinstance(health, dict) else ""
+    if state in {"failing", "degraded"}:
+        return (
+            "check the API key, endpoint and project, then run "
+            "'defenseclaw setup galileo test'; the gateway retries on its own once the destination answers."
+        )
+    return ""
 
 
 def _gateway_api_base(app: AppContext) -> str:

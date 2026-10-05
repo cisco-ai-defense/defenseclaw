@@ -25,9 +25,13 @@ const connectorAmp = "amp"
 // enterprise hooks, with their own ownership records and transactions; a
 // second writer would race them, so the guardian never reconciles those.
 var windowsGoOwnedTargets = map[string]bool{
-	ConnectorCopilot:  true,
-	ConnectorOpenCode: true,
+	ConnectorCopilot:      true,
+	ConnectorOpenCode:     true,
+	ConnectorDevinCascade: true,
 }
+
+// windowsGoOwnedNames are windowsGoOwnedTargets in retire and remove order.
+var windowsGoOwnedNames = []string{ConnectorCopilot, ConnectorDevinCascade, ConnectorOpenCode}
 
 // IsWindowsGoOwned reports whether the Go guardian owns connector's Windows
 // machine policy.
@@ -66,7 +70,7 @@ func PublishWindowsGoOwned(opts Options, connectors []string) (Result, error) {
 	} else {
 		result.Changed = result.Changed || amp.Changed
 	}
-	for _, name := range connectors {
+	for _, name := range withCompanions(connectors) {
 		if !windowsGoOwnedTargets[name] {
 			continue
 		}
@@ -79,12 +83,12 @@ func PublishWindowsGoOwned(opts Options, connectors []string) (Result, error) {
 	}
 	result.MachinePolicyConnectors = reconciledConnectors(result.States)
 	intended := []string{}
-	for _, name := range MachinePolicyConnectors(opts, connectors) {
+	for _, name := range MachinePolicyConnectors(opts, withCompanions(connectors)) {
 		if windowsGoOwnedTargets[name] {
 			intended = append(intended, name)
 		}
 	}
-	retired, err := retireUnpublished(opts, intended, []string{ConnectorCopilot, ConnectorOpenCode})
+	retired, err := retireUnpublished(opts, intended, windowsGoOwnedNames)
 	if err != nil {
 		errs = append(errs, err)
 	}
@@ -112,7 +116,7 @@ func RemoveWindowsGoOwned(opts Options) (Result, error) {
 	result := Result{}
 	var errs []error
 	openCodeUnpublished := false
-	for _, name := range []string{ConnectorCopilot, ConnectorOpenCode} {
+	for _, name := range windowsGoOwnedNames {
 		target, ok := TargetFor(name)
 		if !ok {
 			continue

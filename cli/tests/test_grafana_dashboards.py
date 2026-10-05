@@ -3192,7 +3192,11 @@ def test_dashboard_queries_preserve_v8_identity_across_other_dashboards() -> Non
         "Signals by detector (selected range)",
     ):
         expression = _panel(discovery, title)["targets"][0]["expr"]
-        assert "increase(defenseclaw_ai_discovery_signals_total" in expression
+        # GAP-2646: each signal series is sparse (one sample per change), and
+        # increase() needs two samples, so a fresh discovery showed No data.
+        assert "last_over_time(defenseclaw_ai_discovery_signals_total" in expression
+        assert "[1d] offset $__range" in expression
+        assert "increase(" not in expression
         assert "max_over_time" not in expression
 
     findings_stream = _panel(_dashboard("defenseclaw-findings.json"), "Finding event stream")

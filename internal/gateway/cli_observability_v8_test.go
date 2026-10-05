@@ -403,3 +403,187 @@ func newCLIObservabilityV8Fixture(
 	api.bindObservabilityV8Runtimes(owner, owner, nil, owner)
 	return fixture, api, capture
 }
+
+// GAP-1504: a scan that could not finish is persisted as a failed scan.
+func TestCLIObservabilityV8RecordsFailedScan(t *testing.T) {
+	fixture, api, _ := newCLIObservabilityV8Fixture(t)
+	const body = `{"kind":"scan","run_id":"failed-mcp-run","scan":{"scanner":"mcp-scanner","target":"deepwiki","timestamp":"2026-10-02T11:26:20Z","findings":[],"duration_ms":5000,"error":"scan failed: Connection to MCP server was cancelled"}}`
+	request := httptest.NewRequest(http.MethodPost, cliObservabilityV8Path, strings.NewReader(body))
+	response := httptest.NewRecorder()
+	api.handleCLIObservabilityV8(response, request)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("failed scan status=%d response=%q", response.Code, response.Body.String())
+	}
+	database, err := sql.Open("sqlite", fixture.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var exitCode int
+	var scanError string
+	if err := database.QueryRow(
+		`SELECT COALESCE(exit_code, 0), COALESCE(error, '') FROM scan_results WHERE run_id = 'failed-mcp-run'`,
+	).Scan(&exitCode, &scanError); err != nil {
+		t.Fatal(err)
+	}
+	if exitCode == 0 || !strings.Contains(scanError, "was cancelled") {
+		t.Fatalf("scan_results exit_code=%d error=%q, want a failed scan", exitCode, scanError)
+	}
+	var audited int
+	if err := database.QueryRow(
+		`SELECT COUNT(*) FROM audit_events WHERE run_id = 'failed-mcp-run' AND action = 'scan'`,
+	).Scan(&audited); err != nil {
+		t.Fatal(err)
+	}
+	if audited != 1 {
+		t.Fatalf("audit scan rows=%d, want 1", audited)
+	}
+}
+
+// GAP-1381: a CLI skill scan names the connector and the skill, not only the
+// scanner, on scan.completed and finding.observed.
+func TestCLIObservabilityV8ScanNamesConnectorAndSkill(t *testing.T) {
+	fixture, api, _ := newCLIObservabilityV8Fixture(t)
+	body := `{"kind":"scan","run_id":"gap-1381","scan":{"scanner":"skill-scanner","target":"/home/dcr-u/.claude/skills/ws1-notes","connector":"claudecode","timestamp":"2026-07-06T00:00:00Z","duration_ms":5,"findings":[{"id":"rule-1","severity":"INFO","title":"No license","description":"no license","location":"SKILL.md","remediation":"add one","scanner":"skill-scanner","tags":[],"rule_id":"skill.rule-1"}]}}`
+	request := httptest.NewRequest(http.MethodPost, cliObservabilityV8Path, bytes.NewBufferString(body))
+	response := httptest.NewRecorder()
+	api.handleCLIObservabilityV8(response, request)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("status=%d response=%q", response.Code, response.Body.String())
+	}
+	database, err := sql.Open("sqlite", fixture.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	rows, err := database.Query(`SELECT event_name, COALESCE(connector,''), payload_json
+		FROM audit_events WHERE run_id = 'gap-1381'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	seen := 0
+	for rows.Next() {
+		var eventName, connector, payload string
+		if err := rows.Scan(&eventName, &connector, &payload); err != nil {
+			t.Fatal(err)
+		}
+		if eventName != "scan.completed" && eventName != "finding.observed" {
+			continue
+		}
+		seen++
+		if connector != "claudecode" || !strings.Contains(payload, `_ref":"ws1-notes"`) ||
+			strings.Contains(payload, "/home/dcr-u") {
+			t.Errorf("%s connector=%q payload does not name the skill: %s", eventName, connector, payload)
+		}
+		if eventName == "scan.completed" && !strings.Contains(payload, `"defenseclaw.scan.verdict":"warn"`) {
+			t.Errorf("scan.completed with a finding is not warn: %s", payload)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if seen != 2 {
+		t.Fatalf("scan records=%d, want scan.completed and finding.observed", seen)
+	}
+}
+
+// GAP-2272: a plugin scan row names the plugin and the connector in the
+// target, connector and details columns, so audit export --connector finds it.
+func TestCLIObservabilityV8PluginScanRowNamesTargetAndConnector(t *testing.T) {
+	fixture, api, _ := newCLIObservabilityV8Fixture(t)
+	body := `{"kind":"scan","run_id":"gap-2272","scan":{"scanner":"plugin-scanner","target":"/home/dcr-u/.hermes/plugins/web/ddgs","connector":"hermes","timestamp":"2026-07-06T00:00:00Z","duration_ms":5,"findings":[{"id":"rule-1","severity":"MEDIUM","title":"Network access","description":"network","location":"plugin.py","remediation":"review","scanner":"plugin-scanner","tags":[],"rule_id":"plugin.rule-1"}]}}`
+	request := httptest.NewRequest(http.MethodPost, cliObservabilityV8Path, bytes.NewBufferString(body))
+	response := httptest.NewRecorder()
+	api.handleCLIObservabilityV8(response, request)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("status=%d response=%q", response.Code, response.Body.String())
+	}
+	database, err := sql.Open("sqlite", fixture.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var target, connector, details string
+	if err := database.QueryRow(`SELECT COALESCE(target,''), COALESCE(connector,''), COALESCE(details,'')
+		FROM audit_events WHERE run_id = 'gap-2272' AND event_name = 'scan.completed'`,
+	).Scan(&target, &connector, &details); err != nil {
+		t.Fatal(err)
+	}
+	// GAP-2440: a plugin in a category folder keeps that folder (web/ddgs).
+	if target != "web/ddgs" || connector != "hermes" {
+		t.Fatalf("scan row target=%q connector=%q, want web/ddgs and hermes", target, connector)
+	}
+	for _, want := range []string{"scanner=plugin-scanner", "target_type=plugin", "findings=1", "verdict=warn"} {
+		if !strings.Contains(details, want) {
+			t.Errorf("scan row details %q lack %q", details, want)
+		}
+	}
+}
+
+// GAP-2381: re-running "defenseclaw init" on a v8 install sent the "init"
+// action, whose registry entry needs caller context, and got a 503.
+func TestCLIObservabilityV8RecordsContextRequiredSetupActions(t *testing.T) {
+	fixture, api, _ := newCLIObservabilityV8Fixture(t)
+	for _, action := range []string{"init", "bootstrap"} {
+		body := `{"kind":"action","run_id":"python-init","action":{"name":"` + action +
+			`","target":"/home/u/.defenseclaw","details":"environment=linux"}}`
+		request := httptest.NewRequest(http.MethodPost, cliObservabilityV8Path, bytes.NewBufferString(body))
+		response := httptest.NewRecorder()
+		api.handleCLIObservabilityV8(response, request)
+		if response.Code != http.StatusNoContent {
+			t.Fatalf("%s: status=%d response=%q", action, response.Code, response.Body.String())
+		}
+	}
+	database, err := sql.Open("sqlite", fixture.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var count int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM audit_events
+		WHERE run_id = 'python-init' AND bucket = 'compliance.activity' AND action IN ('init', 'bootstrap')`,
+	).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("recorded setup actions=%d, want 2", count)
+	}
+}
+
+// GAP-2644: model spans the CLI submits (plugin and skill scans) carry the
+// calling user and the CLI run id, like the gateway's own model and judge
+// spans, so per-user attribution in Tempo and Galileo includes them.
+func TestCLIObservabilityV8ModelSpanCarriesUserAndRunID(t *testing.T) {
+	api, capture := bindHookModelV8Runtime(t, []string{"traces"})
+	body := `{"kind":"llm_bridge","run_id":"python-scan-run","llm_bridge":{"model":"openai/gpt-5","provider":"openai","status":"success","duration_ms":12,"input_tokens":3,"output_tokens":2}}`
+	request := httptest.NewRequest(http.MethodPost, cliObservabilityV8Path, strings.NewReader(body))
+	response := httptest.NewRecorder()
+	api.handleCLIObservabilityV8(response, request)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("status=%d body=%q", response.Code, response.Body.String())
+	}
+	var spans []*tracepb.Span
+	for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline) && len(spans) == 0; {
+		traceRequests, _ := capture.snapshot()
+		spans = hookModelV8CapturedSpans(traceRequests)
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(spans) != 1 {
+		t.Fatalf("spans=%d", len(spans))
+	}
+	wantID, wantName := localProcessUser()
+	if wantName == "" {
+		t.Skip("no local process user to attribute")
+	}
+	attrs := spans[0].Attributes
+	if got := gatewayProtoAttribute(attrs, "defenseclaw.user.name"); got != wantName {
+		t.Errorf("defenseclaw.user.name=%q want %q", got, wantName)
+	}
+	if got := gatewayProtoAttribute(attrs, "user.id"); got != wantID {
+		t.Errorf("user.id=%q want %q", got, wantID)
+	}
+	if got := gatewayProtoAttribute(attrs, "defenseclaw.run.id"); got != "python-scan-run" {
+		t.Errorf("defenseclaw.run.id=%q", got)
+	}
+}

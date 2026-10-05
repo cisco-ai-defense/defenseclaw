@@ -29,6 +29,14 @@ _FAILURE_MESSAGES = {
     "authentication_unavailable": "gateway authentication is unavailable; run defenseclaw setup gateway",
     "gateway_unavailable": "the running gateway API is unavailable",
     "gateway_rejected": "the running gateway did not acknowledge the destination canary",
+    "delivery_failed": (
+        "the running gateway accepted the canary but could not deliver it to the destination "
+        "through its own network path (credentials, endpoint, or the proxy it was started with)"
+    ),
+    "gateway_not_this_account": (
+        "the gateway API port is held by a process that is not this account's gateway; "
+        "the gateway token was not sent (start this account's gateway: defenseclaw-gateway start)"
+    ),
     "invalid_response": "the gateway returned an invalid canary acknowledgement",
 }
 

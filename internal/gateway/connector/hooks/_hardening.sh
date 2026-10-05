@@ -138,8 +138,15 @@ defenseclaw_harden_env() {
   # (gh, gcloud, openssl rand state, etc.) writes to a sandbox the
   # hook tears down on exit. Fall back to the gateway data dir if
   # mktemp is unavailable.
+  _DEFENSECLAW_HOOK_HOME_OWNED=""
+  # The account's real HOME, kept unexported for defenseclaw_gateway_cold_start.
+  unset DEFENSECLAW_AGENT_HOME
+  DEFENSECLAW_AGENT_HOME="${HOME:-}"
   if command -v mktemp >/dev/null 2>&1; then
     DEFENSECLAW_HOOK_HOME="$(mktemp -d -t defenseclaw-hook.XXXXXXXX 2>/dev/null || true)"
+    if [ -n "$DEFENSECLAW_HOOK_HOME" ]; then
+      _DEFENSECLAW_HOOK_HOME_OWNED=1
+    fi
   fi
   if [ -z "${DEFENSECLAW_HOOK_HOME:-}" ]; then
     DEFENSECLAW_HOOK_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}/hook-tmp.$$"
@@ -346,6 +353,13 @@ _defenseclaw_hook_cleanup() {
     case "$DEFENSECLAW_HOOK_HOME" in
       /tmp/*|/var/folders/*|"${DEFENSECLAW_HOME:-/dev/null}"/hook-tmp.*)
         rm -rf -- "$DEFENSECLAW_HOOK_HOME" 2>/dev/null || true
+        ;;
+      */defenseclaw-hook.*)
+        # mktemp -t honours TMPDIR, which some agents (Hermes) point at
+        # their own cache; remove the directory this hook created there.
+        if [ "${_DEFENSECLAW_HOOK_HOME_OWNED:-}" = 1 ]; then
+          rm -rf -- "$DEFENSECLAW_HOOK_HOME" 2>/dev/null || true
+        fi
         ;;
     esac
   fi
@@ -716,17 +730,163 @@ defenseclaw_log_hook_failure() {
   safe_reason="$(defenseclaw_json_escape "$reason")"
   safe_category="$(defenseclaw_json_escape "$category")"
   safe_fail_mode="$(defenseclaw_json_escape "$fail_mode")"
+  # stderr is redirected before the append so a failed open of the log
+  # (full disk, read-only home) cannot print a shell diagnostic naming this
+  # script into the agent-visible block reason (GAP-1974).
   printf '{"ts":"%s","connector":"%s","hook":"%s","reason":"%s","category":"%s","fail_mode":"%s"}\n' \
     "$safe_ts" "$safe_connector" "$safe_hook_name" "$safe_reason" "$safe_category" "$safe_fail_mode" \
-    >> "$log_file" 2>/dev/null || true
+    2>/dev/null >> "$log_file" || true
   chmod 600 "$log_file" 2>/dev/null || true
   return 0
+}
+
+# defenseclaw_gateway_binary DATA_DIR HOME prints the per-user gateway binary
+# a cold start runs: the one that last ran this data directory, then the
+# installer's ~/.local/bin, then the hardened PATH.
+defenseclaw_gateway_binary() {
+  local data="$1" home="$2" record="" candidate=""
+  if [ -f "${data}/gateway.pid" ]; then
+    IFS= read -r -n 4096 record < "${data}/gateway.pid" 2>/dev/null || true
+    if [[ "$record" =~ \"executable\"[[:space:]]*:[[:space:]]*\"(/[^\"]+)\" ]]; then
+      candidate="${BASH_REMATCH[1]}"
+      case "$candidate" in
+        */defenseclaw-gateway)
+          if [ -f "$candidate" ] && [ -x "$candidate" ]; then
+            printf '%s' "$candidate"
+            return 0
+          fi
+          ;;
+      esac
+    fi
+  fi
+  candidate="${home}/.local/bin/defenseclaw-gateway"
+  if [ -f "$candidate" ] && [ -x "$candidate" ]; then
+    printf '%s' "$candidate"
+    return 0
+  fi
+  candidate="$(command -v defenseclaw-gateway 2>/dev/null)" || return 1
+  case "$candidate" in
+    /*) [ -x "$candidate" ] && printf '%s' "$candidate" && return 0 ;;
+  esac
+  return 1
+}
+
+# defenseclaw_gateway_cold_start CURL_STATUS starts this account's per-user
+# gateway when the hook's request was refused (curl exit 7): nothing else
+# starts a per-user gateway after a reboot on Linux or macOS. It returns 0
+# once `defenseclaw-gateway start --hook-cold-start` reports the gateway
+# ready, and the caller retries its request once; any other outcome returns
+# 1 and the caller fails as unreachable. It never starts a gateway that was
+# stopped with `defenseclaw-gateway stop` (gateway.stopped), during an
+# install (.install.lock), for a managed or socket hook, or when
+# DEFENSECLAW_GATEWAY_AUTOSTART is 0. The start command serializes
+# concurrent hooks and backs off after a failure. This is the one helper
+# that calls out to the gateway's own CLI.
+defenseclaw_gateway_cold_start() {
+  [ "${1:-}" = "7" ] || return 1
+  case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
+    1|true|TRUE|yes|YES) return 1 ;;
+  esac
+  case "${DEFENSECLAW_GATEWAY_AUTOSTART:-1}" in
+    0|false|FALSE|no|NO|off|OFF) return 1 ;;
+  esac
+  [ -z "${DEFENSECLAW_HOOK_SOCKET:-}" ] || return 1
+  local home="${DEFENSECLAW_AGENT_HOME:-}" data="" bin=""
+  [ -n "$home" ] && [ -d "$home" ] || return 1
+  data="${DEFENSECLAW_HOME:-${home}/.defenseclaw}"
+  [ -d "$data" ] && [ -f "${data}/config.yaml" ] || return 1
+  [ ! -e "${data}/gateway.stopped" ] || return 1
+  [ ! -e "${data}/.install.lock" ] || return 1
+  [ ! -e "${data}/.disabled" ] || return 1
+  bin="$(defenseclaw_gateway_binary "$data" "$home")" || return 1
+  # The gateway keeps running after the hook exits: give it the account's
+  # HOME and installer bin directory, drop the hook's git and locale pins,
+  # and lift the hook's soft resource limits back to the hard ones.
+  (
+    ulimit -S -t "$(ulimit -H -t)" 2>/dev/null || true
+    ulimit -S -v "$(ulimit -H -v)" 2>/dev/null || true
+    exec env -u GIT_CONFIG_NOSYSTEM -u GIT_CONFIG_GLOBAL -u LC_ALL -u LANG \
+      HOME="$home" PATH="${home}/.local/bin:${PATH}" \
+      "$bin" start --hook-cold-start </dev/null >/dev/null 2>&1
+  )
+}
+
+# defenseclaw_own_gateway_stopped returns 0 when this account's per-user
+# gateway is not running (no gateway.pid, or its process is gone). A 401 then
+# came from another listener on the port, typically another account's gateway
+# on the same default port, so token drift is the wrong diagnosis. Managed
+# hooks and unreadable records keep the token advice.
+defenseclaw_own_gateway_stopped() {
+  case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
+    1|true|TRUE|yes|YES) return 1 ;;
+  esac
+  local pid_file="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}/gateway.pid"
+  local data="" pid=""
+  [ -e "$pid_file" ] || return 0
+  IFS= read -r -n 4096 data < "$pid_file" 2>/dev/null || [ -n "$data" ] || return 1
+  if [[ "$data" =~ \"pid\"[[:space:]]*:[[:space:]]*([0-9]+) ]]; then
+    pid="${BASH_REMATCH[1]}"
+  elif [[ "$data" =~ ^[[:space:]]*([0-9]+)[[:space:]]*$ ]]; then
+    pid="${BASH_REMATCH[1]}"
+  else
+    return 1
+  fi
+  kill -0 "$pid" 2>/dev/null && return 1
+  return 0
+}
+
+# defenseclaw_api_listener_foreign HOST:PORT returns 0 when this account's
+# per-user gateway is not running and the loopback listener on PORT belongs to
+# another account (GAP-1260). The hook then sends it no token or payload: an
+# account that holds this account's port, or its old port after a move, would
+# otherwise collect the connector's credential. A running gateway rendered the
+# current API_ADDR itself, so the check costs only the PID test then. Linux
+# reads the owner from /proc/net/tcp*; macOS lsof lists only this account's
+# sockets, so a listener it does not show that still accepts is another's.
+defenseclaw_api_listener_foreign() {
+  case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
+    1|true|TRUE|yes|YES) return 1 ;;
+  esac
+  [ -z "${DEFENSECLAW_HOOK_SOCKET:-}" ] || return 1
+  defenseclaw_own_gateway_stopped || return 1
+  # The second argument (tests only) replaces /proc/net.
+  local port="${1##*:}" net="${2:-/proc/net}" uid="${EUID:-}" hex="" table="" owner=""
+  local _sl="" addr="" _rem="" st="" _q="" _t="" _r="" u="" _rest=""
+  case "$port" in ''|*[!0-9]*) return 1 ;; esac
+  [ -n "$uid" ] || return 1
+  if [ -r "${net}/tcp" ]; then
+    hex="$(printf '%04X' "$port")"
+    for table in "${net}/tcp" "${net}/tcp6"; do
+      [ -r "$table" ] || continue
+      while read -r _sl addr _rem st _q _t _r u _rest; do
+        [ "$st" = "0A" ] || continue
+        case "$addr" in
+          # 127.0.0.0/8, 0.0.0.0, ::, ::1 and v4-mapped loopback, kernel byte order.
+          ??????7F:"$hex"|00000000:"$hex"|00000000000000000000000000000000:"$hex"|00000000000000000000000001000000:"$hex"|0000000000000000FFFF0000??????7F:"$hex") ;;
+          *) continue ;;
+        esac
+        [ "$u" = "$uid" ] && return 1
+        owner="$u"
+      done < "$table"
+    done
+    [ -n "$owner" ]
+    return
+  fi
+  if [ -x /usr/sbin/lsof ]; then
+    /usr/sbin/lsof -nP -a -u "$uid" -iTCP:"$port" -sTCP:LISTEN -t >/dev/null 2>&1 && return 1
+    (exec 3<>"/dev/tcp/127.0.0.1/${port}") 2>/dev/null && return 0
+  fi
+  return 1
 }
 
 defenseclaw_response_failure_reason() {
   case "$1" in
     *"HTTP 401"*|*"HTTP 403"*)
-      printf '%s (gateway auth failed; possible token drift. Run `defenseclaw doctor --fix` or `defenseclaw-gateway restart`.)' "$1"
+      if defenseclaw_own_gateway_stopped; then
+        printf '%s (this account'"'"'s gateway is not running, so another account or program answered on its port. Run `defenseclaw-gateway start`; if another account holds the port, it names a free one.)' "$1"
+      else
+        printf '%s (gateway auth failed; possible token drift. Run `defenseclaw doctor --fix` or `defenseclaw-gateway restart`.)' "$1"
+      fi
       ;;
     *)
       printf '%s' "$1"
@@ -771,11 +931,79 @@ defenseclaw_should_fail_closed_on_unreachable() {
 defenseclaw_emit_unreachable_stderr() {
   local subject="${1:-tool}"
   local reason="${2:-unknown}"
+  # The lead already says "gateway unreachable": name the cause and the next
+  # step after the colon instead of repeating it (GAP-1204).
+  if [ "$reason" = "gateway unreachable" ]; then
+    local next=""
+    next="$(defenseclaw_unreachable_next_step)"
+    [ -z "$next" ] || reason="$next"
+  fi
   if defenseclaw_should_fail_closed_on_unreachable; then
     echo "defenseclaw: gateway unreachable, blocking ${subject} (fail mode closed): ${reason}" >&2
   else
     echo "defenseclaw: gateway unreachable, allowing ${subject}: ${reason}" >&2
   fi
+}
+
+# defenseclaw_unreachable_notice_json prints a one-line hook result whose
+# systemMessage tells the user that DefenseClaw is not checking this session
+# and how to resume, when this account's own per-user gateway is down. A
+# fail-open hook exits 0, and Claude Code and Codex do not show stderr then:
+# the systemMessage is the only text the user sees. It prints nothing when
+# the gateway is not this account's to start (managed or socket hooks).
+defenseclaw_unreachable_notice_json() {
+  local next="" text=""
+  next="$(defenseclaw_unreachable_next_step)"
+  [ -n "$next" ] || return 0
+  local data="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
+  if [ -e "${data}/gateway.stopped" ]; then
+    text='DefenseClaw is not checking this session: the gateway was stopped with `defenseclaw-gateway stop`. Run `defenseclaw-gateway start` to resume protection.'
+  elif defenseclaw_own_gateway_alive; then
+    text='DefenseClaw is not checking this session: the gateway is running but did not answer. Run `defenseclaw-gateway restart` to resume protection.'
+  else
+    text='DefenseClaw is not checking this session: this account'"'"'s gateway is not running. Run `defenseclaw-gateway start` to resume protection.'
+  fi
+  printf '{"systemMessage":"%s"}\n' "$(defenseclaw_json_escape "$text")"
+}
+
+# defenseclaw_unreachable_next_step prints the next step for a per-user
+# account whose own gateway is down: after `defenseclaw-gateway stop` the
+# hooks deliberately do not start it again, so say how to resume. Managed
+# hooks print nothing (their service is not the user's to start).
+defenseclaw_unreachable_next_step() {
+  case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
+    1|true|TRUE|yes|YES) return 0 ;;
+  esac
+  [ -z "${DEFENSECLAW_HOOK_SOCKET:-}" ] || return 0
+  local data="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
+  if [ -e "${data}/gateway.stopped" ]; then
+    printf '%s' 'the gateway was stopped with `defenseclaw-gateway stop`; run `defenseclaw-gateway start` to resume protection'
+  elif defenseclaw_own_gateway_stopped; then
+    printf '%s' 'this account'"'"'s gateway is not running; run `defenseclaw-gateway start`'
+  elif defenseclaw_own_gateway_alive; then
+    # A frozen or hung gateway keeps its listener: the request timed out.
+    printf '%s' 'the gateway is running but did not answer; check `defenseclaw-gateway status`, or run `defenseclaw-gateway restart`'
+  fi
+}
+
+# defenseclaw_own_gateway_alive returns 0 when this account's per-user
+# gateway.pid names a live process (frozen or hung if it did not answer).
+defenseclaw_own_gateway_alive() {
+  case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
+    1|true|TRUE|yes|YES) return 1 ;;
+  esac
+  local pid_file="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}/gateway.pid"
+  local data="" pid=""
+  [ -e "$pid_file" ] || return 1
+  IFS= read -r -n 4096 data < "$pid_file" 2>/dev/null || [ -n "$data" ] || return 1
+  if [[ "$data" =~ \"pid\"[[:space:]]*:[[:space:]]*([0-9]+) ]]; then
+    pid="${BASH_REMATCH[1]}"
+  elif [[ "$data" =~ ^[[:space:]]*([0-9]+)[[:space:]]*$ ]]; then
+    pid="${BASH_REMATCH[1]}"
+  else
+    return 1
+  fi
+  kill -0 "$pid" 2>/dev/null
 }
 
 # defenseclaw_handle_missing_token is the shared early-exit branch
@@ -791,20 +1019,38 @@ defenseclaw_emit_unreachable_stderr() {
 # missed inspection.
 #
 # Usage:
-#   defenseclaw_handle_missing_token CONNECTOR HOOK_NAME SUBJECT
+#   defenseclaw_handle_missing_token CONNECTOR HOOK_NAME SUBJECT [TOKEN_FILE]
+#
+# TOKEN_FILE is the token file the hook looked for; the message names it so
+# the user can find it (GAP-1425).
 #
 # Exits 0 for fail-open or 2 for fail-closed. Never returns to the caller.
 defenseclaw_handle_missing_token() {
   local connector="${1:-unknown}"
   local hook_name="${2:-unknown}"
   local subject="${3:-tool}"
-  local reason="missing gateway token (.token absent and DEFENSECLAW_GATEWAY_TOKEN unset)"
+  local token_file="${4:-}"
+  local reason="missing gateway token file"
+  [ -z "$token_file" ] || reason="missing gateway token: ${token_file} not found"
   defenseclaw_log_hook_failure "$connector" "$hook_name" "$reason" transport "${FAIL_MODE:-open}"
   if defenseclaw_should_fail_closed_on_unreachable; then
-    echo "defenseclaw: ${reason}, blocking ${subject} (fail mode closed)" >&2
+    echo "defenseclaw: ${reason}, blocking ${subject} (fail mode closed)$(defenseclaw_missing_token_next_step "$connector")" >&2
     exit 2
   fi
   exit 0
+}
+
+# defenseclaw_missing_token_next_step names the per-user repair for a missing
+# hook token (GAP-1138). Managed hooks print nothing: the service restores
+# their token.
+defenseclaw_missing_token_next_step() {
+  case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
+    1|true|TRUE|yes|YES) return 0 ;;
+  esac
+  local setup_name="${1:-}"
+  [ "$setup_name" = "claudecode" ] && setup_name="claude-code"
+  [ -n "$setup_name" ] || return 0
+  printf '%s' "; run \`defenseclaw setup ${setup_name}\` to restore the hook token"
 }
 
 # defenseclaw_read_stdin_capped reads stdin into a shell variable but

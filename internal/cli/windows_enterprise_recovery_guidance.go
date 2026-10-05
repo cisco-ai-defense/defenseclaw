@@ -242,6 +242,83 @@ func windowsEnterpriseStandaloneErrorText(message string) (text string, internal
 	return text, true
 }
 
+// windowsEnterprisePerUserDataDirNextStep names the next step when Setup
+// refused a user's .defenseclaw folder it did not create: the data folder of
+// a per-user install, which `defenseclaw uninstall --binaries` keeps. Setup
+// never adopts it (that user controls it), so the folder has to go first.
+func windowsEnterprisePerUserDataDirNextStep(original, text string) string {
+	if !strings.Contains(original, "reject noncanonical managed runtime baseline") {
+		return ""
+	}
+	folder := `that user's %USERPROFILE%\.defenseclaw`
+	if path := windowsEnterpriseFirstWindowsPath(text); path != "" {
+		if index := strings.Index(strings.ToLower(path), `\.defenseclaw`); index >= 0 {
+			folder = path[:index+len(`\.defenseclaw`)]
+		}
+	}
+	return ". DefenseClaw's managed install did not create " + folder +
+		"; a per-user DefenseClaw install leaves it, also after `defenseclaw uninstall --binaries`." +
+		" Next step: have that user run `defenseclaw uninstall --all --binaries --yes`, or move " + folder +
+		" out of the profile, then run Setup again."
+}
+
+// windowsEnterpriseInvalidRuntimeBundleNextStep names the next step when a
+// lifecycle refused to collect a managed runtime bundle it cannot confirm
+// belongs to this deployment (GAP-1419): the error named no file, no reason
+// and no way forward. DefenseClaw keeps such a file rather than delete what
+// it cannot attribute, so support has to look at it.
+func windowsEnterpriseInvalidRuntimeBundleNextStep(original string) string {
+	if !strings.Contains(original, "refusing to collect") || !strings.Contains(original, "managed runtime bundle") {
+		return ""
+	}
+	file := "the managed runtime bundle named above"
+	if path := windowsEnterpriseFirstWindowsPath(original[strings.Index(original, "refusing to collect"):]); path != "" {
+		file = path
+	}
+	return ". DefenseClaw does not delete a managed runtime bundle it cannot attribute to this deployment, so the lifecycle stopped." +
+		" Next step: leave " + file + " in place and send it with the lifecycle log (" + windowsEnterpriseLifecycleLogPath +
+		") to DefenseClaw support"
+}
+
+// windowsEnterpriseLifecycleLogPath is the lifecycle log Setup and the CLI
+// write, as an administrator finds it.
+const windowsEnterpriseLifecycleLogPath = `C:\Windows\Logs\DefenseClaw\enterprise-lifecycle.log`
+
+// windowsEnterpriseInstallerBuildMismatchText rewrites the installer's
+// refusal of a module whose SHA-256 is not the one the installed deployment
+// recorded: the CLI that ran carries the installer of another DefenseClaw
+// build (GAP-1658). ok is false for any other message.
+func windowsEnterpriseInstallerBuildMismatchText(message, action string, purge bool) (text string, ok bool) {
+	if !strings.Contains(message, "installer module SHA-256 does not match the pinned payload manifest") {
+		return "", false
+	}
+	command := action
+	if action == "uninstall" && purge {
+		command += " --purge"
+	}
+	return "this CLI does not match the installed DefenseClaw: the enterprise installer module it carries is not the one the installed deployment recorded" +
+		" (a CLI from another DefenseClaw build, or a changed module file), so the " + action + " stopped before it changed anything." +
+		" Next step: run the installed CLI, " + windowsEnterpriseAdminCommand(command) +
+		", or the DefenseClaw Setup of the installed release; to move to another release, run that release's Setup", true
+}
+
+// windowsEnterprisePerUserGatewayHolder reports a listener that is a
+// per-user install's DefenseClaw gateway: the gateway binary running as an
+// account. A managed gateway runs as a service identity (NT SERVICE or NT
+// AUTHORITY), for example another deployment's while this one's service
+// process is unknown.
+func windowsEnterprisePerUserGatewayHolder(image, account string) bool {
+	base := image[strings.LastIndexAny(image, `\/`)+1:]
+	if !strings.EqualFold(base, "defenseclaw-gateway.exe") {
+		return false
+	}
+	domain, _, found := strings.Cut(strings.TrimSpace(account), `\`)
+	if !found {
+		return false
+	}
+	return !strings.EqualFold(domain, "NT SERVICE") && !strings.EqualFold(domain, "NT AUTHORITY")
+}
+
 // windowsEnterpriseFirstWindowsPath returns the first drive-letter path in
 // text, ending at the first delimiter that cannot be part of it here.
 func windowsEnterpriseFirstWindowsPath(text string) string {
@@ -260,9 +337,13 @@ func windowsEnterpriseFirstWindowsPath(text string) string {
 }
 
 // windowsEnterpriseStandaloneSetupCommand is the Setup command line that
-// recovers a pending transaction for action.
-func windowsEnterpriseStandaloneSetupCommand(action, configPath string) string {
+// recovers a pending transaction for action. A purge keeps PURGE=1, so the
+// re-run finishes the uninstall the administrator asked for.
+func windowsEnterpriseStandaloneSetupCommand(action, configPath string, purge bool) string {
 	if action == "uninstall" {
+		if purge {
+			return windowsEnterpriseStandaloneSetupName + " /uninstall PURGE=1 JSON=1"
+		}
 		return windowsEnterpriseStandaloneSetupName + " /uninstall JSON=1"
 	}
 	config := strings.TrimSpace(configPath)
@@ -282,7 +363,7 @@ func windowsEnterpriseStandaloneSetupCommand(action, configPath string) string {
 func windowsEnterprisePendingInspectionStep(configPath string) string {
 	return "A lifecycle transaction is pending, so the DefenseClaw services stay stopped until it finishes or is recovered. " +
 		"If no DefenseClaw Setup or lifecycle command is running now, run DefenseClaw Setup (this release or a newer one) as LocalSystem: " +
-		windowsEnterpriseStandaloneSetupCommand("ensure", configPath) + "; as LocalSystem, Setup recovers the transaction with its own verified gateway."
+		windowsEnterpriseStandaloneSetupCommand("ensure", configPath, false) + "; as LocalSystem, Setup recovers the transaction with its own verified gateway."
 }
 
 // windowsEnterpriseStandaloneNextStep names what the administrator runs
@@ -292,6 +373,7 @@ func windowsEnterprisePendingInspectionStep(configPath string) string {
 func windowsEnterpriseStandaloneNextStep(
 	action string,
 	configPath string,
+	purge bool,
 	pending bool,
 	runs []windowsEnterpriseRecoveryGatewayRun,
 	refusal *windowsEnterpriseRecoveryGatewayRefusal,
@@ -299,7 +381,7 @@ func windowsEnterpriseStandaloneNextStep(
 	if !pending {
 		return ""
 	}
-	command := windowsEnterpriseStandaloneSetupCommand(action, configPath)
+	command := windowsEnterpriseStandaloneSetupCommand(action, configPath, purge)
 	const lead = "The transaction is still pending: the DefenseClaw services stay stopped until it is recovered."
 	const recovers = "; as LocalSystem, Setup recovers the transaction with its own verified gateway."
 	if len(runs) != 0 {
@@ -345,6 +427,27 @@ func windowsEnterpriseStandaloneNextStep(
 	}
 }
 
+// windowsEnterpriseStoppedServiceNextStep names what starts the stopped
+// DefenseClaw services again when status or verify fails on them
+// (GAP-1072: verify named the stopped guardian but no next step). It is
+// empty when every required service runs.
+func windowsEnterpriseStoppedServiceNextStep(services []enterprisestatus.Service) string {
+	stopped := windowsEnterpriseStoppedRequiredServices(services)
+	if len(stopped) == 0 {
+		return ""
+	}
+	return ". Next step: from an elevated PowerShell prompt run " + windowsEnterpriseAdminCommand("repair") + ", or " +
+		windowsEnterpriseStandaloneSetupName + " /repair JSON=1, to start " + strings.Join(stopped, ", ") + " again"
+}
+
+// windowsEnterpriseAdminCommand is an `enterprise windows <action>` command
+// for the standalone profile as an administrator types it. Setup puts no
+// DefenseClaw command on PATH, so a bare `defenseclaw ...` hint was "not
+// recognized"; the installed CLI is named by its path (GAP-1183, GAP-1338).
+func windowsEnterpriseAdminCommand(action string) string {
+	return "`& '" + managedWindowsAdminCLI() + "' enterprise windows " + action + " --profile standalone`"
+}
+
 // windowsEnterpriseStandaloneLifecycleAction reports whether a standalone
 // result is a lifecycle mutation whose failure gets administrator guidance.
 // Status and verify report deployment state and keep their full detail.
@@ -354,4 +457,69 @@ func windowsEnterpriseStandaloneLifecycleAction(action string) bool {
 		return true
 	}
 	return false
+}
+
+// windowsEnterpriseStoppedRequiredServices names the required DefenseClaw
+// services that are stopped.
+func windowsEnterpriseStoppedRequiredServices(services []enterprisestatus.Service) []string {
+	var stopped []string
+	for _, service := range services {
+		if service.Required && strings.EqualFold(strings.TrimSpace(service.State), "stopped") {
+			stopped = append(stopped, service.Name)
+		}
+	}
+	return stopped
+}
+
+// windowsEnterpriseNotHealthyMessage says what is unhealthy when the
+// installer reported no error of its own. It said only "not healthy
+// (installer exit 1)" for a stopped gateway service (GAP-1184); the stopped
+// services are named instead, and the next step follows.
+func windowsEnterpriseNotHealthyMessage(services []enterprisestatus.Service, exitCode int) string {
+	stopped := windowsEnterpriseStoppedRequiredServices(services)
+	switch len(stopped) {
+	case 0:
+		return fmt.Sprintf("the standalone deployment is not healthy (its health check exited %d); "+
+			"from an elevated PowerShell prompt run "+windowsEnterpriseAdminCommand("verify")+" for the failing checks", exitCode)
+	case 1:
+		return "the standalone deployment is not healthy: the " + stopped[0] + " service is stopped"
+	default:
+		return "the standalone deployment is not healthy: the " + strings.Join(stopped, ", ") + " services are stopped"
+	}
+}
+
+// windowsEnterpriseEnumeratorFailurePrefix starts the module's report of a
+// failed synchronous `enterprise windows enumerate` run, which carries the
+// enumerator's whole output.
+const windowsEnterpriseEnumeratorFailurePrefix = "synchronous target enumeration failed with exit "
+
+// windowsEnterpriseEnumeratorFailureText returns the enumerator's own error
+// from that report, without its log line and command prefixes, and a
+// dedicated code for a rule pack the gateway service cannot read. The
+// actionable icacls advice was buried after "[hook-enumerator] windows:
+// manifest=... interval=5m0s once=true initial_delay=30s Error: ..."
+// (GAP-1276). ok is false for any other message.
+func windowsEnterpriseEnumeratorFailureText(message string) (text, code string, ok bool) {
+	start := strings.Index(message, windowsEnterpriseEnumeratorFailurePrefix)
+	if start < 0 {
+		return message, "", false
+	}
+	index := strings.LastIndex(message, "Error: ")
+	if index < start {
+		return message, "", false
+	}
+	text = strings.TrimSpace(message[index+len("Error: "):])
+	for _, prefix := range []string{"enterprise windows enumerate: ", "load config: ", "config: "} {
+		text = strings.TrimPrefix(text, prefix)
+	}
+	if rest, found := strings.CutPrefix(text, "managed standalone "); found {
+		text = "the managed config's " + rest
+	}
+	if text == "" {
+		return message, "", false
+	}
+	if strings.Contains(text, "rule_pack_dir") && strings.Contains(text, "cannot read") {
+		code = "rule_pack_unreadable"
+	}
+	return text, code, true
 }
