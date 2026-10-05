@@ -55,11 +55,59 @@ func (r *NSSResolver) query(database string, keys ...string) (commandResult, err
 		}
 	}
 	args := append([]string{database}, keys...)
-	ctx := r.ctx
-	if ctx == nil {
-		ctx = context.Background()
+	return r.runner(r.context(), r.path, args)
+}
+
+func (r *NSSResolver) context() context.Context {
+	if r.ctx == nil {
+		return context.Background()
 	}
-	return r.runner(ctx, r.path, args)
+	return r.ctx
+}
+
+// LookupUIDInService asks one NSS service, and only that one, for uid
+// (getent -s <service> passwd <uid>). It answers ErrNotFound when that
+// service does not own the account, which is how the backend of a directory
+// account is found: sss, winbind or ldap answer for their own users only.
+func (r *NSSResolver) LookupUIDInService(service string, uid int) (Account, error) {
+	if !validServiceName(service) || uid < 0 {
+		return Account{}, fmt.Errorf("unixidentity: invalid service lookup %q %d", service, uid)
+	}
+	result, err := r.runner(r.context(), r.path, []string{"-s", service, "passwd", strconv.Itoa(uid)})
+	if err != nil {
+		return Account{}, err
+	}
+	switch result.exitCode {
+	case getentExitOK:
+	case getentExitNotFound:
+		return Account{}, ErrNotFound
+	default:
+		return Account{}, fmt.Errorf("unixidentity: getent -s %s passwd %d exited %d", service, uid, result.exitCode)
+	}
+	lines := nonEmptyLines(string(result.stdout))
+	if len(lines) != 1 {
+		return Account{}, ErrNotFound
+	}
+	account, err := ParsePasswdLine(lines[0])
+	if err != nil {
+		return Account{}, err
+	}
+	if account.UID != uid {
+		return Account{}, fmt.Errorf("unixidentity: getent -s %s passwd %d answered for uid %d", service, uid, account.UID)
+	}
+	return account, nil
+}
+
+func validServiceName(name string) bool {
+	if name == "" || len(name) > 32 {
+		return false
+	}
+	for _, r := range name {
+		if !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '_') {
+			return false
+		}
+	}
+	return true
 }
 
 func (r *NSSResolver) lookupPasswd(key string) (Account, error) {

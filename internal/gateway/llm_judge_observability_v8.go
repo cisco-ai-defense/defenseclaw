@@ -158,6 +158,7 @@ func (j *LLMJudge) judgeTraceInput(
 	input.UserID = hookV8OptionalIdentifier(caller.ID)
 	input.DefenseClawUserIDKind = v8UserIDKind(caller.IDKind)
 	input.DefenseClawUserName = hookV8OptionalIdentifier(caller.Name)
+	caller.Identity.applyTo(&input)
 	providerName := strings.TrimSpace(j.providerName)
 	if providerName == "" {
 		providerName = judgeGenAISystem(j.model)

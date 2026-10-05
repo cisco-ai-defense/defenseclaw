@@ -32,6 +32,10 @@ type auditCaller struct {
 	ID     string
 	IDKind string
 	Name   string
+	// Identity is the caller's directory and session attribution, verified
+	// facts only for the verified caller (identity_subject.go). It is not
+	// part of the audit row.
+	Identity *llmEventIdentity
 }
 
 // verifiedAuditCaller is the caller a standalone gateway has proven: the
@@ -61,13 +65,16 @@ func verifiedAuditCaller(ctx context.Context) (auditCaller, bool) {
 // hook_decision rows carry.
 func auditCallerIdentity(ctx context.Context) auditCaller {
 	if caller, ok := verifiedAuditCaller(ctx); ok {
+		caller.Identity = requestIdentityFor(ctx, caller.ID)
 		return caller
 	}
 	if ctx == nil || serviceAccountGatewayFromContext(ctx) {
 		return auditCaller{}
 	}
 	agent := AgentIdentityFromContext(ctx)
-	return auditCaller{ID: agent.UserID, IDKind: agent.UserIDKind, Name: agent.UserName}
+	caller := auditCaller{ID: agent.UserID, IDKind: agent.UserIDKind, Name: agent.UserName}
+	caller.Identity = requestIdentityFor(ctx, caller.ID)
+	return caller
 }
 
 // addTo copies the non-empty identity fields into a structured audit

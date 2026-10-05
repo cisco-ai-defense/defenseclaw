@@ -83,6 +83,7 @@ type llmEventMeta struct {
 	UserIDKind        string
 	UserName          string
 	UserEmail         string
+	Identity          *llmEventIdentity
 	PolicyID          string
 	DestinationApp    string
 	ToolName          string
@@ -599,6 +600,7 @@ func proxyLLMEventMeta(p *GuardrailProxy, r *http.Request, req *ChatRequest, pro
 		UserIDKind:     user.IDKind,
 		UserName:       user.Name,
 		UserEmail:      user.Email,
+		Identity:       user.Identity,
 		PolicyID:       firstNonEmpty(env.PolicyID, p.defaultPolicyID),
 		DestinationApp: env.DestinationApp,
 	}
@@ -1064,6 +1066,7 @@ func hookLLMEventMeta(ctx context.Context, source, sessionID, turnID, model, hoo
 		UserName:            user.Name,
 		UserEmail:           user.Email,
 		AgentIdentityID:     agentIdentityIDForTraffic(ctx, AgentIdentityFromContext(ctx)),
+		Identity:            user.Identity,
 	}
 }
 

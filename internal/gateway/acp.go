@@ -418,6 +418,7 @@ func acpAgentInvokeInputV8(
 	input.UserID = hookV8OptionalIdentifier(caller.ID)
 	input.DefenseClawUserIDKind = v8UserIDKind(caller.IDKind)
 	input.DefenseClawUserName = hookV8OptionalIdentifier(caller.Name)
+	caller.Identity.applyTo(&input)
 	return input
 }
 

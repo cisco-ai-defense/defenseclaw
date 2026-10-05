@@ -101,9 +101,11 @@ func TestUserIdentityArgsEmitBothHeadersUnderTheSystemShell(t *testing.T) {
 	shell := systemBashForTest(t)
 	helperPath := materializeHookAssetForTest(t, "hooks/_hardening.sh")
 
-	out, err := exec.Command(
+	command := exec.Command(
 		shell, "-c", `set -e; source "$0"; defenseclaw_user_identity_args`, helperPath,
-	).CombinedOutput()
+	)
+	command.Env = withoutSessionFactsEnv(os.Environ())
+	out, err := command.CombinedOutput()
 	if err != nil {
 		t.Fatalf("helper failed under %s: %v\n%s", shell, err, out)
 	}
@@ -181,7 +183,12 @@ source "$1"
 printf '%s\n' "${#IDENTITY_HEADER_ARGS[@]}"
 printf '%s\n' "${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}"
 `
-			out, err := exec.Command(shell, "-c", program, shell, helperPath).CombinedOutput()
+			command := exec.Command(shell, "-c", program, shell, helperPath)
+			// The session facts header depends on the SSH and logind
+			// variables of whoever runs the test; count only the user
+			// identity arguments.
+			command.Env = withoutSessionFactsEnv(os.Environ())
+			out, err := command.CombinedOutput()
 			if err != nil {
 				t.Fatalf("reader failed under %s: %v\n%s", shell, err, out)
 			}
@@ -273,4 +280,17 @@ func materializeHookAssetForTest(t *testing.T, name string) string {
 		t.Fatalf("write %s: %v", path, err)
 	}
 	return path
+}
+
+func withoutSessionFactsEnv(env []string) []string {
+	out := make([]string, 0, len(env))
+	for _, entry := range env {
+		switch {
+		case strings.HasPrefix(entry, "SSH_CONNECTION="), strings.HasPrefix(entry, "SSH_TTY="),
+			strings.HasPrefix(entry, "XDG_SESSION_ID="):
+			continue
+		}
+		out = append(out, entry)
+	}
+	return out
 }

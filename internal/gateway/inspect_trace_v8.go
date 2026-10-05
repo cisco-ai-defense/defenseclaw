@@ -194,6 +194,7 @@ func (a *APIServer) guardrailApplyTraceV8Input(
 	input.DefenseClawUserIDKind = v8UserIDKind(caller.IDKind)
 	input.DefenseClawUserName = hookV8OptionalIdentifier(caller.Name)
 	input.DefenseClawAgentIdentityID = agentIdentityV8(agentIdentityIDForTraffic(ctx, identity))
+	caller.Identity.applyTo(&input)
 	if outcome, ok := hookGuardrailOutcomeFor(verdict.Action, verdict.Severity, verdict.Reason, evaluation.RuleIDs); ok {
 		applyGuardrailApplyOutcome(&input, outcome, caller, envelopeConnector, finishedAt)
 	}

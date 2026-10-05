@@ -227,6 +227,7 @@ func applyHookToolRequestedLogIdentity(input *observability.LogToolInvocationReq
 	input.DefenseClawUserName = hookModelV8OptionalID(meta.UserName)
 	input.DefenseClawUserEmail = v8UserEmail(meta.UserEmail)
 	input.DefenseClawAgentIdentityID = agentIdentityV8(meta.AgentIdentityID)
+	meta.Identity.applyTo(input)
 	input.DefenseClawPolicyID = hookModelV8OptionalID(meta.PolicyID)
 	input.DefenseClawDestinationApp = hookModelV8OptionalID(meta.DestinationApp)
 	input.GenAIConversationID = hookModelV8OptionalID(meta.SessionID)
@@ -272,6 +273,7 @@ func applyHookToolCompletedLogIdentity(input *observability.LogToolInvocationCom
 	input.DefenseClawUserName = requested.DefenseClawUserName
 	input.DefenseClawUserEmail = requested.DefenseClawUserEmail
 	input.DefenseClawAgentIdentityID = requested.DefenseClawAgentIdentityID
+	meta.Identity.applyTo(input)
 	input.DefenseClawPolicyID = requested.DefenseClawPolicyID
 	input.DefenseClawDestinationApp = requested.DefenseClawDestinationApp
 	input.GenAIConversationID = requested.GenAIConversationID

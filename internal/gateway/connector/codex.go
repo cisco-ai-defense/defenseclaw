@@ -2454,6 +2454,15 @@ func writeCodexNotifyBridge(opts SetupOpts) error {
 		"  USER_NAME=$(/usr/bin/id -un 2>/dev/null || true)\n" +
 		"  case \"${USER_NAME}\" in ''|*[!A-Za-z0-9._-]*) ;; *) IDENTITY_HEADERS+=(--header \"X-DefenseClaw-User-Name: ${USER_NAME}\") ;; esac\n" +
 		"fi\n" +
+		// Claimed session facts (SSH and logind), the same header the hook
+		// runner sends; each value must match the header's charset.
+		"SF_CA=\"${SSH_CONNECTION:-}\"; SF_CA=\"${SF_CA%% *}\"; SF_TTY=\"${SSH_TTY:-}\"; SF_TTY=\"${SF_TTY#/dev/}\"; SF_LS=\"${XDG_SESSION_ID:-}\"; SESSION_FACTS=v1\n" +
+		"if [ -n \"${SF_CA}${SF_TTY}\" ]; then SESSION_FACTS=\"${SESSION_FACTS};k=ssh\"; fi\n" +
+		"case \"${SF_TTY}\" in ''|*[!A-Za-z0-9._/-]*) ;; *) SESSION_FACTS=\"${SESSION_FACTS};tty=${SF_TTY}\" ;; esac\n" +
+		"case \"${SF_LS}\" in ''|*[!A-Za-z0-9._-]*) ;; *) SESSION_FACTS=\"${SESSION_FACTS};ls=${SF_LS}\" ;; esac\n" +
+		"case \"${SF_CA}\" in ''|*[!0-9A-Fa-f.:]*) ;; *) SESSION_FACTS=\"${SESSION_FACTS};ca=${SF_CA}\" ;; esac\n" +
+		"if [ \"${SESSION_FACTS}\" != v1 ]; then IDENTITY_HEADERS+=(--header \"X-DefenseClaw-Session-Facts: ${SESSION_FACTS}\"); fi\n" +
+		"unset SF_CA SF_TTY SF_LS SESSION_FACTS\n" +
 		credentialDescriptor +
 		"exec 9< <(printf '%s' \"${JSON}\")\n" +
 		// Clear every private shell value before curl is spawned. The descriptor

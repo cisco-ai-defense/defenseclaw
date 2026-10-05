@@ -16,10 +16,12 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 // managedHookPeerHomeTTL bounds how long a resolved home is reused, so a
@@ -71,6 +73,11 @@ type managedHookPeerHomeCache struct {
 	// accounts holds one answer per uid. A lookup in flight is shared by
 	// the requests of that uid and never holds up another uid.
 	accounts map[int]*managedHookPeerAccount
+	// directories holds each uid's verified directory facts with their own,
+	// longer lifetime (identity_directory_cache.go): NSS backend, domain
+	// and groups, plus the guardian identity spool's UPN.
+	directoriesOnce sync.Once
+	directories     *identityDirectoryCache
 }
 
 type managedHookPeerAccount struct {
@@ -133,6 +140,33 @@ func (c *managedHookPeerHomeCache) account(uid int) (unixidentity.Account, bool)
 	c.mu.Unlock()
 	close(entry.ready)
 	return account, ok
+}
+
+// directory returns uid's verified directory facts from the cache, waiting
+// for a cold lookup up to its budget only when block is set.
+func (c *managedHookPeerHomeCache) directory(uid int, block bool) (useridentity.DirectoryFacts, bool) {
+	if uid < 0 {
+		return useridentity.DirectoryFacts{}, false
+	}
+	c.directoriesOnce.Do(func() {
+		c.directories = newIdentityDirectoryCache(resolvePeerDirectoryFacts)
+	})
+	return c.directories.get(strconv.Itoa(uid), block)
+}
+
+// managedHookPeerDirectory resolves a verified uid's directory facts.
+var managedHookPeerDirectory = func(uid int, block bool) (useridentity.DirectoryFacts, bool) {
+	return managedHookPeerHomes.directory(uid, block)
+}
+
+// verifiedIdentityDirectory returns the directory facts of a verified uid
+// (a hook-socket peer, a per-user credential's account, the process owner).
+func verifiedIdentityDirectory(identity string, block bool) (useridentity.DirectoryFacts, bool) {
+	uid, err := strconv.Atoi(identity)
+	if err != nil {
+		return useridentity.DirectoryFacts{}, false
+	}
+	return managedHookPeerDirectory(uid, block)
 }
 
 // lookup returns the caller's normalized home, or "".

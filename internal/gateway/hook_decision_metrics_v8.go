@@ -125,7 +125,7 @@ func (a *APIServer) emitHookDecisionLogV8(
 			},
 		}
 		profileTelemetry := guardrailProfileTelemetryFor(ctx)
-		return builder.BuildLogCompatHookDecision(observability.LogCompatHookDecisionInput{
+		identityInput := observability.LogCompatHookDecisionInput{
 			DefenseClawGuardrailProfileName: profileTelemetry.Name, DefenseClawGuardrailProfileDigest: profileTelemetry.Digest,
 			DefenseClawGuardrailProfileMatch: profileTelemetry.Match, DefenseClawGuardrailProfileMatchedGroup: profileTelemetry.MatchedGroup,
 			Envelope: envelope, Severity: observability.Present(severity.Severity),
@@ -176,7 +176,9 @@ func (a *APIServer) emitHookDecisionLogV8(
 			DefenseClawGuardrailRuleIds:         hookDecisionV8RuleIDs(resp.RuleIDs),
 			DefenseClawSandboxID:                sandboxID,
 			DefenseClawSandboxName:              sandboxName,
-		})
+		}
+		meta.Identity.applyTo(&identityInput)
+		return builder.BuildLogCompatHookDecision(identityInput)
 	})
 }
 

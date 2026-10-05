@@ -26,6 +26,9 @@ type llmEventUser struct {
 	IDKind string
 	Name   string
 	Email  string
+	// Identity is the directory and session attribution of the same
+	// account (identity_subject.go); empty under Secure Client.
+	Identity *llmEventIdentity
 }
 
 // userEmailCollectionEnabled mirrors ai_discovery.include_user_email at the
@@ -85,6 +88,7 @@ func resolveHookUserIdentity(ctx context.Context, connector string, payload map[
 		return user
 	}
 	user.Email = hookUserEmail(connector, payload)
+	user.Identity = requestIdentityFor(ctx, user.ID)
 	return user
 }
 
@@ -119,6 +123,12 @@ func resolveHTTPUserIdentity(r *http.Request, rawBody []byte) llmEventUser {
 		userID, _, userName := sandboxBindingUser(binding)
 		return newLLMEventUser(userID, userName, userID != "")
 	}
+	user := resolveHTTPUser(r, rawBody)
+	user.Identity = requestIdentityFor(r.Context(), user.ID)
+	return user
+}
+
+func resolveHTTPUser(r *http.Request, rawBody []byte) llmEventUser {
 	trustedID := r.Header.Get(llmEventUserIDHeader)
 	trustedName := r.Header.Get(llmEventUserNameHeader)
 	if trustedID != "" || trustedName != "" {

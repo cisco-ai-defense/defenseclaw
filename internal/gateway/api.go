@@ -3702,7 +3702,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			}
 			if !userScoped && a.hookAPITokenMatches(hookScope, token) {
 				r = r.WithContext(withAuthenticatedHookConnector(
-					PromoteSessionIfAuthenticated(r.Context()),
+					a.attachProcessOwnerSubject(PromoteSessionIfAuthenticated(r.Context())),
 					hookScope,
 				))
 				next.ServeHTTP(w, r)
@@ -3738,7 +3738,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			}
 			if registered && !userScoped && a.hookAPITokenMatches(hookScope, token) {
 				r = r.WithContext(withAuthenticatedInspectConnector(
-					PromoteSessionIfAuthenticated(r.Context()),
+					a.attachProcessOwnerSubject(PromoteSessionIfAuthenticated(r.Context())),
 					hookScope,
 				))
 				next.ServeHTTP(w, r)
@@ -3761,7 +3761,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 		// succeeded, upgrade the previously peeked agent identity
 		// to a fully minted entry so authenticated traffic still
 		// gets a stable agent_instance_id on its emissions.
-		ctx = PromoteSessionIfAuthenticated(r.Context())
+		ctx = a.attachProcessOwnerSubject(PromoteSessionIfAuthenticated(r.Context()))
 		r = r.WithContext(ctx)
 		next.ServeHTTP(w, r)
 	})
