@@ -1221,6 +1221,17 @@ def test_tree_retirement_recovery_converges_after_crash(
     retired = next(custody.glob("retired-*"))
     assert (retired / "state").read_bytes() == b"attempt-owned\n"
 
+    # A reboot that renumbers the volume leaves the retirement complete.
+    (intent,) = custody.glob("intent-*.json")
+    document = json.loads(intent.read_bytes())
+    recorded = (document["identity"][0] + 1, *document["identity"][1:])
+    moved_intent, moved_retired = install_publish._retirement_names(str(tree), recorded, "tree")
+    (custody / moved_intent).write_bytes(install_publish._retirement_document(str(tree), recorded, "tree"))
+    intent.unlink()
+    retired.rename(custody / moved_retired)
+    install_publish.recover_custody(custody)
+    assert (custody / moved_retired / "state").read_bytes() == b"attempt-owned\n"
+
 
 @pytest.mark.skipif(
     not sys.platform.startswith("linux") or os.environ.get("INSTALL_PUBLISH_BIND_TEST") != "1",
@@ -1382,9 +1393,13 @@ def test_regular_replace_reclaims_retirements_recorded_under_an_earlier_device_n
         (custody / intent).write_bytes(install_publish._retirement_document(str(stage), recorded, "entry"))
         stage.rename(custody / retired)
     assert len(list(custody.iterdir())) == install_publish.MAX_CUSTODY_ENTRIES - 1
-    stale = install_dir / f".defenseclaw-gateway.source-install-{1:032x}"
-    stale.write_bytes(b"partial\n")
-    os.utime(stale, (1_000_000_000, 1_000_000_000))
+    # Day-old stages of this name and of another published name are removed.
+    for stale in (
+        install_dir / f".defenseclaw-gateway.source-install-{1:032x}",
+        install_dir / f"..defenseclaw-source-root.source-install-{2:032x}",
+    ):
+        stale.write_bytes(b"partial\n")
+        os.utime(stale, (1_000_000_000, 1_000_000_000))
 
     destination = install_dir / "defenseclaw-gateway"
     current, replacement = b"gateway-v1\n", b"gateway-v2\n"

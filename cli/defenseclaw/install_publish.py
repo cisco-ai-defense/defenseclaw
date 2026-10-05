@@ -1944,7 +1944,9 @@ def _tree_has_safe_mounts_at(
         budget = {"nodes": 1, "bytes": 0}
         _validate_tree_mounts_fd(
             descriptor,
-            root_device=expected[0],
+            # The claim matched, so the tree root's current device is the
+            # recorded one, possibly renumbered since a reboot.
+            root_device=os.fstat(descriptor).st_dev,
             root_mount=root_mount,
             depth=1,
             budget=budget,
@@ -2458,6 +2460,7 @@ def _prune_stale_stages(
     for name in names:
         path = directory / name
         foreign = False
+        remove = "rm -f"
         try:
             metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
             if metadata.st_mtime > cutoff:
@@ -2466,6 +2469,8 @@ def _prune_stale_stages(
                 foreign, reason = True, "another account owns it"
             elif not stat.S_ISREG(metadata.st_mode):
                 reason = "it is not a regular file"
+                if stat.S_ISDIR(metadata.st_mode):
+                    remove = "rm -rf"
             else:
                 identity = _entry_strong_identity(parent_fd, name)
                 if identity is None or unlink_exact(path, identity, custody_root=custody_root):
@@ -2480,7 +2485,7 @@ def _prune_stale_stages(
         prefix = "sudo " if foreign else ""
         print(
             f"source-install: kept a temporary file from an earlier install because {reason}; "
-            f"remove it with: {prefix}rm -f {shlex.quote(str(path))}",
+            f"remove it with: {prefix}{remove} {shlex.quote(str(path))}",
             file=sys.stderr,
         )
         reported.append(str(path))
