@@ -1328,13 +1328,20 @@ defenseclaw_user_identity_args() {
 }
 
 # defenseclaw_session_facts_value renders the X-DefenseClaw-Session-Facts
-# value from the SSH and logind variables of this session (v1;k=ssh;tty=..;
-# ls=..;ca=..). The Go hook runner also reports the Kerberos default
-# principal; a shell hook does not read credential caches. Every value is
-# claimed attribution and is dropped unless it matches the header's
-# allowlisted charset.
+# value (v1;k=ssh;tty=..;ls=..;ca=..;krb=..;cc=..). The Kerberos default
+# principal needs the credential cache read, which a shell cannot do (KCM is
+# a socket protocol), so defenseclaw_session_facts_full takes the whole
+# value from the gateway binary when it can; otherwise the value comes from
+# the SSH and logind variables of this session alone. Every value is claimed
+# attribution and is dropped unless it matches the header's allowlisted
+# charset.
 defenseclaw_session_facts_value() {
-  local value kind tty ls ca pair v
+  local value kind tty ls ca pair v full
+  full="$(defenseclaw_session_facts_full 2>/dev/null)" || full=""
+  if [ -n "$full" ]; then
+    printf '%s' "$full"
+    return 0
+  fi
   value="v1"
   kind=""
   ca="${SSH_CONNECTION:-}"
@@ -1357,4 +1364,64 @@ defenseclaw_session_facts_value() {
   done
   [ "$value" = "v1" ] || printf '%s' "$value"
   return 0
+}
+
+# defenseclaw_session_facts_full prints the session facts value the gateway
+# binary's `hook session-facts` computed for this session, Kerberos
+# principal included, or nothing. The binary caches its answer in
+# ~/.defenseclaw/session-facts.json for five minutes with the session
+# variables it saw (env_key); a fresh record for the same variables is used
+# as it is, so the binary runs at most once per five minutes per session. It
+# runs only when a credential cache can exist (KRB5CCNAME or
+# /etc/krb5.conf), never for a managed hook (the native hook reads the cache
+# itself), and its answer is used only when it matches the header charset.
+defenseclaw_session_facts_full() {
+  case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
+    1|true|TRUE|yes|YES) return 0 ;;
+  esac
+  local home="${DEFENSECLAW_AGENT_HOME:-${HOME:-}}" env_key cache record="" re out="" bin=""
+  case "$home" in
+    /*) ;;
+    *) return 0 ;;
+  esac
+  env_key="${KRB5CCNAME:-}|${XDG_SESSION_ID:-}|${SSH_CONNECTION:-}|${SSH_TTY:-}"
+  case "$env_key" in
+    *[!A-Za-z0-9._@/:%\ \|-]*) return 0 ;;
+  esac
+  cache="${home}/.defenseclaw/session-facts.json"
+  if [ -f "$cache" ] && [ ! -L "$cache" ] && [ -n "$(find "$cache" -mmin -5 2>/dev/null)" ]; then
+    IFS= read -r -d '' -n 4096 record < "$cache" 2>/dev/null || true
+    re='"env_key":"([^"]*)"'
+    if [[ "$record" =~ $re ]] && [ "${BASH_REMATCH[1]}" = "$env_key" ]; then
+      re='"header":"([^"]*)"'
+      if [[ "$record" =~ $re ]]; then
+        out="${BASH_REMATCH[1]}"
+      fi
+      defenseclaw_session_facts_checked "$out"
+      return 0
+    fi
+  fi
+  [ -n "${KRB5CCNAME:-}" ] || [ -r /etc/krb5.conf ] || return 0
+  bin="$(defenseclaw_gateway_binary "${DEFENSECLAW_HOME:-${home}/.defenseclaw}" "$home")" || return 0
+  # The Go runtime cannot start under the hook's address-space limit.
+  out="$(
+    ulimit -S -v "$(ulimit -H -v)" 2>/dev/null || true
+    HOME="$home" exec "$bin" hook session-facts </dev/null 2>/dev/null
+  )" || return 0
+  defenseclaw_session_facts_checked "$out"
+  return 0
+}
+
+# defenseclaw_session_facts_checked prints a v1 session facts value that
+# fits the header (its charset, at most 1024 bytes) and nothing otherwise.
+defenseclaw_session_facts_checked() {
+  case "$1" in
+    v1\;*) ;;
+    *) return 0 ;;
+  esac
+  case "$1" in
+    *[!A-Za-z0-9._@/:\;=-]*) return 0 ;;
+  esac
+  [ "${#1}" -le 1024 ] || return 0
+  printf '%s' "$1"
 }
