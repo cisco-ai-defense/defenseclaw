@@ -750,7 +750,7 @@ func (s *InventoryStore) RecordScan(ctx context.Context, report AIDiscoveryRepor
 		}
 	}
 
-	if inv := report.IDEInventory; inv != nil && inv.persist {
+	if inv := report.IDEInventory; inv != nil && inv.persist && !inv.Carried {
 		if err := recordIDEInventory(ctx, tx, report.Summary.ScanID, inv); err != nil {
 			return err
 		}

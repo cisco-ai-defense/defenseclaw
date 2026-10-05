@@ -91,9 +91,17 @@ func TestIDEInventoryAttributesPluginsToProfileOwners(t *testing.T) {
 	if got := report.IDEInventory; got == nil || len(got.Removed) != 1 || got.Removed[0].UserName != "bob" || len(got.Plugins) != 2 {
 		t.Fatalf("second scan = %+v", got)
 	}
+	// A process-only scan carries the list without writing it again.
+	if _, err := svc.runScan(context.Background(), false, "test"); err != nil {
+		t.Fatal(err)
+	}
 	stored, err := svc.InventoryStore().LatestIDEPlugins(context.Background())
 	if err != nil || len(stored) != 2 {
 		t.Fatalf("stored = %+v, %v", stored, err)
+	}
+	var rows int
+	if err := svc.InventoryStore().db.QueryRow(`SELECT COUNT(*) FROM ide_plugins`).Scan(&rows); err != nil || rows != 5 {
+		t.Fatalf("ide_plugins rows = %d, %v; want the two full scans only (3 + 2)", rows, err)
 	}
 
 	// ai_only keeps only the AI plugins.

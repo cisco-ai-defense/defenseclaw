@@ -403,7 +403,7 @@ func (s *ContinuousDiscoveryService) finishIDEInventory(inv *IDEInventory, full 
 			return nil
 		}
 		carried := *prev
-		carried.Removed, carried.Carried = nil, true
+		carried.Removed, carried.Carried, carried.persist = nil, true, false
 		return &carried
 	}
 	if inv == nil {
@@ -418,6 +418,9 @@ func (s *ContinuousDiscoveryService) finishIDEInventory(inv *IDEInventory, full 
 		if inst.Partial {
 			partial[inst.InstallID] = true
 		}
+	}
+	for i := range inv.Installations {
+		inv.Installations[i].LastSeen = now
 	}
 	current := make(map[string]IDEPlugin, len(inv.Plugins))
 	for i := range inv.Plugins {
