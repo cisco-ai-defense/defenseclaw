@@ -179,6 +179,26 @@ func TestGuardrailProfileSelectsVerifiedDirectoryGroup(t *testing.T) {
 	t.Run("verified group", func(t *testing.T) {
 		check(t, withVerifiedSubject(context.Background(), alice), "ml", profileMatchGroup, "DC-ML-Team@dclab.test")
 	})
+	t.Run("agent assignment on the hook path", func(t *testing.T) {
+		// The profile is resolved at authentication, before the hook path
+		// derives the agent identity; enrichAgentHookContext must re-resolve.
+		req := agentHookRequest{ConnectorName: "codex", SessionID: "s-agentpin"}
+		agent, verified := agentIdentityFromContext(enrichAgentHookContext(context.Background(), req))
+		if agent == "" || !verified {
+			t.Skip("no verified agent identity on this host (machine id unreadable)")
+		}
+		pinned := &config.Config{}
+		pinned.Guardrail.Profiles = map[string]config.GuardrailProfile{"agentpin": {Mode: "action"}, "ml": {Mode: "action"}}
+		pinned.Guardrail.ProfileAssignments = []config.ProfileAssignment{
+			{Profile: "agentpin", Match: config.ProfileMatch{Agents: []string{agent}}},
+			{Profile: "ml", Match: config.ProfileMatch{Groups: []string{"dc-ml-team@dclab.test"}}},
+		}
+		pinnedAPI := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, pinned)
+		ctx := pinnedAPI.withGuardrailProfileDecision(withVerifiedSubject(context.Background(), alice), "codex")
+		if got := pinnedAPI.resolveProfile(enrichAgentHookContext(ctx, req)); got.Name != "agentpin" || got.Match != profileMatchAgent {
+			t.Fatalf("resolveProfile = %+v, want agentpin by agent", got)
+		}
+	})
 	t.Run("unresolved lookup", func(t *testing.T) {
 		check(t, withVerifiedSubject(context.Background(), unresolved), "watch", profileMatchDefaultLookupFailed, "")
 	})

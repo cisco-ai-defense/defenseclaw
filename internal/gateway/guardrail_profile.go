@@ -302,6 +302,21 @@ func (a *APIServer) withGuardrailProfileDecision(ctx context.Context, routeConne
 	return context.WithValue(ctx, resolvedGuardrailProfileKey{}, resolved)
 }
 
+// refreshGuardrailProfileForAgent re-resolves the request's profile once the
+// hook path has put the verified agent identity on ctx
+// (enrichAgentHookContext). withGuardrailProfileDecision runs before that
+// identity exists, so an agents assignment could never match it.
+func refreshGuardrailProfileForAgent(ctx context.Context) context.Context {
+	resolved := resolvedGuardrailProfileFrom(ctx)
+	if resolved == nil {
+		return ctx
+	}
+	if _, verified := profileAgentSource(ctx); !verified {
+		return ctx
+	}
+	return context.WithValue(ctx, resolvedGuardrailProfileKey{}, resolveGuardrailProfileFor(ctx, resolved.set))
+}
+
 // guardrailProfileInspectMiddleware resolves the profile for the inspect
 // endpoints, whose connector comes from the authenticated hook credential.
 func (a *APIServer) guardrailProfileInspectMiddleware(next http.Handler) http.Handler {
