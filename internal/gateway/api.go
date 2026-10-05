@@ -1058,6 +1058,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/v1/traces", a.handleOTLPTraces)
 	mux.HandleFunc("/otlp/", a.handleOTLPPathToken)
 	mux.HandleFunc("/api/v1/agents/discovery", a.handleAgentDiscovery)
+	mux.HandleFunc("/api/v1/agents/identities", a.handleAgentIdentities)
 	mux.HandleFunc("/api/v1/ai-usage", a.handleAIUsage)
 	mux.HandleFunc("/api/v1/ai-usage/scan", a.handleAIUsageScan)
 	mux.HandleFunc("/api/v1/ai-usage/discovery", a.handleAIUsageDiscovery)

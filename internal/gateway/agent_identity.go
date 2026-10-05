@@ -1,0 +1,294 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+package gateway
+
+import (
+	"context"
+	"os"
+	osuser "os/user"
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+
+	"github.com/defenseclaw/defenseclaw/internal/agentidentity"
+	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
+)
+
+// agentIdentityFromContext returns the agent identity
+// (defenseclaw.agent.identity.id) the hook path resolved for this request.
+// verified is true only when every component of the ID came from a verified
+// source: the platform machine id, a kernel- or credential-verified user (or
+// the user a per-user gateway runs as), the route's connector, and the config
+// root the gateway resolved for that user. Headers and payload fields never
+// contribute. The ID is "" before the hook path runs, on non-hook traffic and
+// under the Secure Client integration.
+func agentIdentityFromContext(ctx context.Context) (id string, verified bool) {
+	identity := AgentIdentityFromContext(ctx)
+	if identity.IdentityID == "" {
+		return "", false
+	}
+	return identity.IdentityID, identity.IdentityVerified
+}
+
+// agentIdentityFacts is everything the hook path knows about one agent
+// identity: the ID, its components, and the claimed install hint.
+type agentIdentityFacts struct {
+	ID          string
+	Verified    bool
+	MachineHash string
+	UserID      string
+	UserName    string
+	Connector   string
+	InstallFP   string
+	// InstallHint is a config root the agent claimed (a CLAUDE_CONFIG_DIR or
+	// CODEX_HOME style override seen in the payload) that differs from
+	// InstallFP. It is recorded for operators and never moves the ID.
+	InstallHint string
+}
+
+// agentIdentityConfig is the config the gateway resolves connector config
+// roots with. Set by NewSidecar and on every reload.
+var agentIdentityConfig atomic.Pointer[config.Config]
+
+// connectorConfigRootRel caches, per connector, its config root relative to
+// a home directory. Cleared when the config changes.
+var connectorConfigRootRel sync.Map
+
+func setAgentIdentityConfig(cfg *config.Config) {
+	agentIdentityConfig.Store(cfg)
+	connectorConfigRootRel.Clear()
+}
+
+// agentIdentityUser is the user an agent identity is derived for.
+type agentIdentityUser struct {
+	ID       string
+	Name     string
+	Home     string
+	Sandbox  string
+	Self     bool // the account this per-user gateway runs as
+	Verified bool
+}
+
+// resolveHookAgentIdentity derives the agent identity of an authenticated
+// hook request. It returns the zero value under the Secure Client
+// integration, which emits no agent identity.
+func resolveHookAgentIdentity(ctx context.Context, req agentHookRequest) agentIdentityFacts {
+	if ManagedEnterpriseActive() {
+		return agentIdentityFacts{}
+	}
+	connectorName := strings.ToLower(strings.TrimSpace(req.ConnectorName))
+	user := hookAgentIdentityUser(ctx)
+	if connectorName == "" || user.ID == "" {
+		return agentIdentityFacts{}
+	}
+	machine, machineVerified := agentidentity.HostMachineHash()
+	facts := agentIdentityFacts{
+		MachineHash: machine,
+		UserID:      agentidentity.NormalizeUserID(user.ID),
+		UserName:    user.Name,
+		Connector:   connectorName,
+		InstallFP:   agentIdentityInstallFP(connectorName, user),
+	}
+	facts.ID = agentidentity.AgentID(agentidentity.Inputs{
+		MachineHash: facts.MachineHash, UserID: facts.UserID, Connector: facts.Connector, InstallFP: facts.InstallFP,
+	})
+	if facts.ID == "" {
+		return agentIdentityFacts{}
+	}
+	facts.Verified = machineVerified && user.Verified
+	if hint := claimedInstallHint(req.Payload); hint != "" &&
+		agentidentity.NormalizeInstallFP(hint) != agentidentity.NormalizeInstallFP(facts.InstallFP) {
+		facts.InstallHint = hint
+	}
+	return facts
+}
+
+// hookAgentIdentityUser picks the user an agent identity belongs to, most
+// trusted source first. Only the last case, a service-account gateway
+// reached without a verified caller, falls back to the claimed identity
+// headers, and it is never marked verified.
+func hookAgentIdentityUser(ctx context.Context) agentIdentityUser {
+	if binding, ok := sandboxauth.FromContext(ctx); ok {
+		uid, _, name := sandboxBindingUser(binding)
+		return agentIdentityUser{
+			ID: uid, Name: name, Sandbox: firstNonEmpty(binding.SandboxID, binding.ID), Verified: uid != "",
+		}
+	}
+	if peer, ok := managedHookPeerFromContext(ctx); ok {
+		return agentIdentityUser{ID: strconv.Itoa(peer.UID), Name: peer.Name, Home: peer.Home, Verified: true}
+	}
+	if identity, _ := ctx.Value(verifiedUserScopedIdentityContextKey{}).(string); identity != "" {
+		user := agentIdentityUser{ID: identity, Home: userScopedIdentityHome(identity), Verified: true}
+		if bound := AgentIdentityFromContext(ctx); bound.UserID == identity {
+			user.Name = bound.UserName
+		}
+		return user
+	}
+	if !gatewayRunsAsServiceAccount() {
+		return gatewaySelfUser()
+	}
+	claimed := AgentIdentityFromContext(ctx)
+	if claimed.UserID == "" {
+		return agentIdentityUser{}
+	}
+	return agentIdentityUser{ID: claimed.UserID, Name: claimed.UserName, Home: userScopedIdentityHome(claimed.UserID)}
+}
+
+var gatewaySelf struct {
+	once sync.Once
+	user agentIdentityUser
+}
+
+// gatewaySelfUser is the account a per-user gateway runs as. Only that
+// account can read the gateway token a hook authenticates with, so it is the
+// verified user of every authenticated hook.
+func gatewaySelfUser() agentIdentityUser {
+	gatewaySelf.once.Do(func() {
+		self := agentIdentityUser{Self: true, Verified: true}
+		if current, err := osuser.Current(); err == nil && current != nil {
+			self.ID, self.Name, self.Home = current.Uid, current.Username, current.HomeDir
+		}
+		if self.ID == "" {
+			if uid := os.Getuid(); uid >= 0 {
+				self.ID = strconv.Itoa(uid)
+			}
+		}
+		if self.Home == "" {
+			self.Home, _ = os.UserHomeDir()
+		}
+		self.Name = sanitizeLLMEventUser(self.Name)
+		gatewaySelf.user = self
+	})
+	return gatewaySelf.user
+}
+
+// agentIdentityInstallFP is the connector's config root for user, as the
+// gateway resolves it. A per-user gateway resolves it exactly as its
+// connector setup does, honouring the overrides in its own environment. A
+// service-account gateway joins the connector's default root to the
+// verified user's home; the service's environment says nothing about the
+// user's. A sandbox's agents live in the sandbox, so the sandbox names the
+// install.
+func agentIdentityInstallFP(connectorName string, user agentIdentityUser) string {
+	if user.Sandbox != "" {
+		return "openshell-sandbox:" + user.Sandbox
+	}
+	cfg := agentIdentityConfig.Load()
+	if user.Self {
+		return filepath.Clean(cfg.ConnectorHomeDir(connectorName))
+	}
+	if user.Home == "" {
+		return ""
+	}
+	return filepath.Join(user.Home, connectorConfigRootRelative(cfg, connectorName))
+}
+
+// connectorConfigRootRelative is the connector's config root relative to a
+// home directory: the default root the connector uses, without any
+// environment override, or "."+connector for a connector whose root lies
+// outside the home.
+func connectorConfigRootRelative(cfg *config.Config, connectorName string) string {
+	if cached, ok := connectorConfigRootRel.Load(connectorName); ok {
+		return cached.(string)
+	}
+	rel := "." + connectorName
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		if candidate, err := filepath.Rel(home, cfg.ConnectorHomeDir(connectorName)); err == nil &&
+			candidate != "." && !filepath.IsAbs(candidate) && candidate != ".." &&
+			!strings.HasPrefix(candidate, ".."+string(filepath.Separator)) {
+			rel = candidate
+		}
+	}
+	connectorConfigRootRel.Store(connectorName, rel)
+	return rel
+}
+
+// maxInstallHintBytes bounds the recorded hint.
+const maxInstallHintBytes = 512
+
+// claimedInstallHint returns the config root the agent's payload implies: an
+// explicit config-dir field, or the root a transcript path lives under
+// (<root>/projects/... for Claude Code, <root>/sessions/... for Codex). It is
+// agent-controlled and only ever recorded as a hint.
+func claimedInstallHint(payload map[string]interface{}) string {
+	if payload == nil {
+		return ""
+	}
+	hint := firstString(payload, "config_dir", "configDir", "claude_config_dir", "codex_home")
+	if hint == "" {
+		transcript := strings.ReplaceAll(firstString(payload, "transcript_path", "transcriptPath"), `\`, "/")
+		for _, marker := range []string{"/projects/", "/sessions/"} {
+			if i := strings.Index(transcript, marker); i > 0 {
+				hint = transcript[:i]
+				break
+			}
+		}
+	}
+	hint = strings.TrimSpace(stripLogInjectionRunes(hint))
+	if hint == "" || len(hint) > maxInstallHintBytes {
+		return ""
+	}
+	return hint
+}
+
+// hookSubagentID is the sub-agent a hook belongs to, or "" for the session's
+// root agent. A sub-agent that runs in a child session already has its own
+// session instance, so only a sub-agent sharing its parent's session needs
+// one derived. Claude Code reports agent_id only inside a sub-agent; other
+// connectors are treated as sub-agent hooks only when they say so.
+func hookSubagentID(req agentHookRequest) string {
+	agentID := strings.TrimSpace(req.AgentID)
+	if agentID == "" || strings.TrimSpace(req.ChildSessionID) != "" {
+		return ""
+	}
+	switch event := canonicalEvent(req.HookEventName); {
+	case event == "subagentstart" || event == "subagentstop":
+		return agentID
+	case req.CorrelationProfileVersion == connector.CorrelationProfileClaudeCodeV1:
+		return agentID
+	case strings.TrimSpace(req.ParentAgentID) != "" && strings.TrimSpace(req.ParentAgentID) != agentID:
+		return agentID
+	}
+	return ""
+}
+
+var agentIdentityIDPattern = regexp.MustCompile(`^agt-[0-9a-f]{16}$`)
+
+// agentIdentityV8 is defenseclaw.agent.identity.id for a generated record,
+// absent unless id has the registered shape.
+func agentIdentityV8(id string) observability.Optional[string] {
+	if !agentIdentityIDPattern.MatchString(id) {
+		return observability.Absent[string]()
+	}
+	return observability.Present(id)
+}
+
+// agentIdentityV8FromContext is agentIdentityV8 of the hook path's identity.
+func agentIdentityV8FromContext(ctx context.Context) observability.Optional[string] {
+	id, _ := agentIdentityFromContext(ctx)
+	return agentIdentityV8(id)
+}
+
+// agentIdentityIDForTraffic is the agent identity of a request outside the
+// hook path (the LLM proxy, guardrail evaluate): the identity on ctx, else
+// the one identity its session was seen under on the hook path. The session
+// link is a join, not a verification, so it never feeds
+// agentIdentityFromContext.
+func agentIdentityIDForTraffic(ctx context.Context, identity AgentIdentity) string {
+	if identity.IdentityID != "" {
+		return identity.IdentityID
+	}
+	reg := SharedAgentRegistry()
+	if reg == nil {
+		return ""
+	}
+	return reg.AgentIdentityForSession(ctx, firstNonEmpty(SessionIDFromContext(ctx), audit.EnvelopeFromContext(ctx).SessionID))
+}

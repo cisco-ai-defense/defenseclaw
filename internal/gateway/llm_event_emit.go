@@ -97,6 +97,10 @@ type llmEventMeta struct {
 	// Guardrail is the block, ask or alert decision a hook imposed on this
 	// tool call; its tool span carries it.
 	Guardrail hookGuardrailOutcome
+
+	// AgentIdentityID is defenseclaw.agent.identity.id; empty off the hook
+	// path and under the Secure Client integration.
+	AgentIdentityID string
 }
 
 func (m llmEventMeta) reportedResponseID() string {
@@ -581,7 +585,7 @@ func proxyLLMEventMeta(p *GuardrailProxy, r *http.Request, req *ChatRequest, pro
 	user := resolveHTTPUserIdentity(r, req.RawBody)
 	sessionID := firstNonEmpty(SessionIDFromContext(r.Context()), r.Header.Get("X-Conversation-ID"), env.SessionID)
 	requestID := firstNonEmpty(RequestIDFromContext(r.Context()), env.RequestID)
-	return llmEventMeta{
+	meta := llmEventMeta{
 		Source:         p.connectorName(),
 		Provider:       provider,
 		Model:          telemetryModelID(req.Model),
@@ -598,6 +602,8 @@ func proxyLLMEventMeta(p *GuardrailProxy, r *http.Request, req *ChatRequest, pro
 		PolicyID:       firstNonEmpty(env.PolicyID, p.defaultPolicyID),
 		DestinationApp: env.DestinationApp,
 	}
+	meta.AgentIdentityID = agentIdentityIDForTraffic(r.Context(), AgentIdentityFromContext(r.Context()))
+	return meta
 }
 
 func streamLLMEventMeta(r *EventRouter, sessionID, runID, provider, model, agentName string) llmEventMeta {
@@ -1057,6 +1063,7 @@ func hookLLMEventMeta(ctx context.Context, source, sessionID, turnID, model, hoo
 		UserIDKind:          user.IDKind,
 		UserName:            user.Name,
 		UserEmail:           user.Email,
+		AgentIdentityID:     agentIdentityIDForTraffic(ctx, AgentIdentityFromContext(ctx)),
 	}
 }
 

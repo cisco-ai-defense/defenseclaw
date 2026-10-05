@@ -508,6 +508,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*
 	setStandaloneEnterpriseActive(cfg.StandaloneEnterprise())
 	setManagedServiceHosted(managed.IsManagedEnterprise(cfg.DeploymentMode))
 	SetUserEmailCollectionEnabled(cfg.AIDiscovery.IncludeUserEmail)
+	setAgentIdentityConfig(cfg)
 	return sidecar, nil
 }
 
@@ -1050,6 +1051,25 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 	go func() {
 		defer wg.Done()
 		s.runCapacityObservabilityV8(runCtx, sidecarCapacityInterval)
+	}()
+
+	// Agent identities seen on the hook path are written to inventory.db in
+	// one batch per flush interval, never per hook.
+	agentIdentityStoreToken := sharedAgentIdentities.setStoreSource(func() *inventory.InventoryStore {
+		if discovery := s.aiDiscoverySnapshot(); discovery != nil {
+			return discovery.InventoryStore()
+		}
+		return nil
+	}, func() string {
+		if cfg := s.currentConfig(); cfg != nil {
+			return cfg.DataDir
+		}
+		return ""
+	})
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		sharedAgentIdentities.runFlusher(runCtx, agentIdentityFlushInterval, agentIdentityStoreToken)
 	}()
 
 	// Goroutine 1: Gateway connection loop. Runs only when an OpenClaw
@@ -1823,6 +1843,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	setStandaloneEnterpriseActive(next.StandaloneEnterprise())
 	setManagedServiceHosted(nextManagedEnterprise)
 	SetUserEmailCollectionEnabled(next.AIDiscovery.IncludeUserEmail)
+	setAgentIdentityConfig(&next)
 
 	appliedCfg := current
 	if !onlyReloadModeChange {

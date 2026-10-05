@@ -167,6 +167,7 @@ func (a *APIServer) emitGuardrailEventV8(ctx context.Context, facts apiGuardrail
 			GenAIAgentName:                      inspectTraceV8AgentName(facts.meta.AgentName),
 			DefenseClawAgentType:                hookV8OptionalText(facts.identity.AgentType, 4096),
 			DefenseClawAgentInstanceID:          optionalJudgeMetricText(facts.identity.AgentInstanceID),
+			DefenseClawAgentIdentityID:          agentIdentityV8(agentIdentityIDForTraffic(ctx, facts.identity)),
 			DefenseClawEvaluationID:             facts.request.EvaluationID,
 			DefenseClawPolicyID:                 optionalJudgeMetricText(facts.meta.PolicyID),
 			DefenseClawGuardrailName:            observability.Present("guardrail-event-api"),
