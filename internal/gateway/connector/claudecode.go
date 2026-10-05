@@ -1292,7 +1292,17 @@ func (c *ClaudeCodeConnector) patchClaudeCodeHooks(opts SetupOpts, hookScript st
 		exactBackupSafe := true
 		if err := atomicTransformFileWithStateDir(settingsPath, opts.DataDir, 0o600, func(data []byte, exists bool) (atomicTransformResult, error) {
 			if !managedFileBackupMatchesSnapshot(managedBackup, data, exists) {
-				exactBackupSafe = false
+				// Claude Code writes its own keys to settings.json (onboarding,
+				// trust, model choice), so the record drifts in normal use.
+				// Re-record the current bytes, as Codex does (GAP-2300): restore
+				// passes even exact bytes through the ownership-aware cleanup, so
+				// the outside edit survives teardown, and one setup leaves a
+				// record doctor can check instead of needing a second run
+				// (GAP-0043).
+				managedBackup = recaptureManagedFileBackup(
+					opts.DataDir, c.Name(), "settings.json", settingsPath, data, exists,
+				)
+				exactBackupSafe = managedBackup != nil
 			}
 			settings := map[string]interface{}{}
 			if len(data) > 0 {
@@ -1652,7 +1662,17 @@ func (c *ClaudeCodeConnector) patchClaudeCodeOtelEnv(opts SetupOpts) error {
 		exactBackupSafe := true
 		if err := atomicTransformFileWithStateDir(settingsPath, opts.DataDir, 0o600, func(data []byte, exists bool) (atomicTransformResult, error) {
 			if !managedFileBackupMatchesSnapshot(managedBackup, data, exists) {
-				exactBackupSafe = false
+				// Claude Code writes its own keys to settings.json (onboarding,
+				// trust, model choice), so the record drifts in normal use.
+				// Re-record the current bytes, as Codex does (GAP-2300): restore
+				// passes even exact bytes through the ownership-aware cleanup, so
+				// the outside edit survives teardown, and one setup leaves a
+				// record doctor can check instead of needing a second run
+				// (GAP-0043).
+				managedBackup = recaptureManagedFileBackup(
+					opts.DataDir, c.Name(), "settings.json", settingsPath, data, exists,
+				)
+				exactBackupSafe = managedBackup != nil
 			}
 			settings := map[string]interface{}{}
 			if len(data) > 0 {

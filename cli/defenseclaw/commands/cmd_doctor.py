@@ -9604,10 +9604,8 @@ def _check_connector_export_custody(report, r: _DoctorResult, *, configured: set
         if item.managed_config_state == "drifted":
             # The file changed after setup: agents such as Codex write their
             # own settings to it. Teardown then removes only DefenseClaw's
-            # entries, so this is not a failure; setup re-applies them. That
-            # run keeps no exact record of a file changed outside DefenseClaw
-            # (it would bless the change for exact restore); the next setup
-            # records one (GAP-1448).
+            # entries, so this is not a failure; setup re-applies them and
+            # records the file again (GAP-1448, GAP-0043).
             tag = "warn"
             conditions.append(
                 "managed-exporter drift detected (the file changed after setup); "
@@ -9621,8 +9619,7 @@ def _check_connector_export_custody(report, r: _DoctorResult, *, configured: set
         elif item.managed_config_state == "untracked":
             conditions.append(
                 "no exporter setup record to compare, so drift is not checked; "
-                f"run 'defenseclaw setup {setup_name}' once more to record one "
-                "(setup keeps none right after the file changed outside DefenseClaw)"
+                f"run 'defenseclaw setup {setup_name}' to record one"
             )
         else:
             conditions.append(f"managed-exporter={item.managed_config_state}")
