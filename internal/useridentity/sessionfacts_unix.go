@@ -25,7 +25,7 @@ const (
 )
 
 func currentSessionFactsHeader(now time.Time) string {
-	ccname := ccacheNameFromEnv(os.Getenv)
+	ccname, platformDefault := ccacheNameFromEnv(os.Getenv)
 	kind, residual := SplitCCacheName(ccname)
 	mtime := ccacheModTime(kind, residual)
 	key := strings.Join([]string{
@@ -40,6 +40,10 @@ func currentSessionFactsHeader(now time.Time) string {
 	}
 	facts := SessionFromSSHEnv(os.Getenv)
 	principal, ccType := readDefaultPrincipal(kind, residual)
+	if principal == "" && ((ccType != CCacheKeyring && ccType != CCacheAPI) || platformDefault) {
+		// No readable cache: report no type rather than the default name's.
+		ccType = ""
+	}
 	facts.KerberosPrincipal, facts.CCacheType = principal, ccType
 	if facts.Kind == "" && !facts.Empty() {
 		facts.Kind = SessionLocal
@@ -53,18 +57,20 @@ func currentSessionFactsHeader(now time.Time) string {
 
 // ccacheNameFromEnv is KRB5CCNAME, else the krb5.conf default_ccache_name,
 // else the platform default (API: on macOS, FILE:/tmp/krb5cc_<uid>
-// elsewhere).
-func ccacheNameFromEnv(getenv func(string) string) string {
+// elsewhere); platformDefault reports the last case. KEYRING: and API:
+// caches cannot be read, so their type is reported only when the user or
+// the administrator named them.
+func ccacheNameFromEnv(getenv func(string) string) (name string, platformDefault bool) {
 	if name := strings.TrimSpace(getenv("KRB5CCNAME")); name != "" {
-		return name
+		return name, false
 	}
 	if name := krb5ConfDefaultCCacheName(krb5ConfPath, 0); name != "" {
-		return expandCCacheName(name)
+		return expandCCacheName(name), false
 	}
 	if runtime.GOOS == "darwin" {
-		return "API:"
+		return "API:", true
 	}
-	return "FILE:/tmp/krb5cc_" + strconv.Itoa(os.Getuid())
+	return "FILE:/tmp/krb5cc_" + strconv.Itoa(os.Getuid()), true
 }
 
 // krb5ConfDefaultCCacheName reads default_ccache_name from the [libdefaults]
