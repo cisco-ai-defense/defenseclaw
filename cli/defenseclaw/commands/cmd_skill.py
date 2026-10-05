@@ -2840,7 +2840,12 @@ def _scan_all(
     started = time.monotonic()
     json_rows: list[dict[str, Any]] = []
 
-    for name, base_dir in targets:
+    # GAP-2643: overlap the LLM-bound scans; JSON mode captures stdout per
+    # skill, so it stays one at a time.
+    workers = 1 if as_json else _scan_ui.scan_batch_workers(scanner)
+    for (name, base_dir), scan_result in _scan_ui.ordered_scans(
+        lambda target: scanner.scan(target[1]), targets, workers=workers,
+    ):
         captured_stdout = None
         try:
             if as_json:
@@ -2849,7 +2854,7 @@ def _scan_all(
                     result = scanner.scan(base_dir)
                 _emit_captured_scan_stdout(captured_stdout.getvalue())
             else:
-                result = scanner.scan(base_dir)
+                result = scan_result()
         except SystemExit as exc:
             # The scanner wrapper uses SystemExit for dependency/bootstrap
             # failures. In the normal JSON batch path that is still a

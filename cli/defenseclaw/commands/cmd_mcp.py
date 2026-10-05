@@ -710,6 +710,11 @@ def _failed_scan_next_step(name: str, connector: str, error: str, url: str = "")
     err = (error or "").lower()
     if "--allow-private" in err:
         return f"refused, the URL is a private or loopback address; to scan it anyway: {cmd} --allow-private"
+    if "allowlisted stdio launcher" in err and "is a path" in err:
+        return (
+            "refused, the scanner starts only the bare launcher names npx or uvx, never a command path; "
+            f"set the command to npx or uvx (or use a URL), then: {cmd}"
+        )
     if "allowlisted stdio launcher" in err:
         return (
             "refused, the command is not an npx or uvx launcher, so the scanner will not start it; "

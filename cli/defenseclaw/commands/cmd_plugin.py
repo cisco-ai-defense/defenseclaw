@@ -1214,9 +1214,14 @@ def _scan_all_plugins(
         # base scanner's durations (GAP-2070).
         sweep_started = time.monotonic()
         group_results: list[dict[str, Any]] = []
-        for pid, scan_dir, scope, project_path in targets:
+        # GAP-2643: overlap the LLM-bound scans; results keep their order.
+        for (pid, scan_dir, scope, project_path), scan_result in _scan_ui.ordered_scans(
+            lambda target: connector_scanner.scan(target[1], **scan_options),
+            targets,
+            workers=_scan_ui.scan_batch_workers(connector_scanner, **scan_options),
+        ):
             try:
-                result = connector_scanner.scan(scan_dir, **scan_options)
+                result = scan_result()
             except Exception as exc:  # noqa: BLE001 — surface, keep sweeping.
                 errored += 1
                 if not as_json:
