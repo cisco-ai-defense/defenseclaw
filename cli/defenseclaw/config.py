@@ -2752,20 +2752,12 @@ class RoutingConfig:
 
 @dataclass
 class PrivacyConfig:
-    """Privacy / redaction toggles. Mirrors internal/config.PrivacyConfig.
+    """Reserved, empty ``privacy:`` section. Mirrors internal/config.PrivacyConfig.
 
-    ``disable_redaction`` is the persistent kill-switch documented in
-    the Go redaction package: when True the sidecar bypasses every
-    ForSink* helper at startup, including persistent sinks (audit DB,
-    OTel logs, Splunk HEC, webhooks). It violates the
-    unconditional-redaction contract documented in OBSERVABILITY.md
-    by design — only enable on single-tenant installs where every
-    downstream sink lives inside the same trust boundary.
-    The CLI emits a warning on flip, and config loaders emit a
-    once-per-process warning when they observe it.
+    Redaction is configured by ``observability.redaction_profiles``; the v7
+    ``disable_redaction`` switch is rejected by the v8 loader and read only by
+    the 0.x migration.
     """
-
-    disable_redaction: bool = False
 
 
 @dataclass

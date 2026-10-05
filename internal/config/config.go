@@ -392,28 +392,11 @@ type RoutingRemoteConfig struct {
 // scope, custom redactor profiles) land here so operators have a
 // single section to audit.
 //
-// Scope: this is a deliberate, persistent operator decision.
-// Defaults match the existing redacting-by-default behavior so a
-// fresh install or a config without a `privacy:` block keeps the
-// historical contract documented in OBSERVABILITY.md.
-type PrivacyConfig struct {
-	// DisableRedaction, when true, instructs the sidecar to bypass
-	// every ForSink* redaction helper at startup — including
-	// persistent sinks (SQLite audit, OTel log exporters, Splunk
-	// HEC, webhooks). Equivalent to setting
-	// DEFENSECLAW_DISABLE_REDACTION=1 but persisted in config so
-	// the choice survives restarts and TUI invocations without
-	// per-shell env-var ceremony.
-	//
-	// WARNING: this violates the unconditional-redaction contract
-	// documented in OBSERVABILITY.md. Only enable on single-tenant
-	// installs where every downstream sink already lives inside
-	// the same trust boundary (e.g. lab / prompt-engineering use).
-	// The CLI emits a loud warning on flip-on, and config loaders emit
-	// a once-per-process warning when they observe the setting so the
-	// runtime state stays auditable without spamming reload loops.
-	DisableRedaction bool `mapstructure:"disable_redaction" yaml:"disable_redaction,omitempty"`
-}
+// PrivacyConfig is the reserved, empty privacy: section. Redaction is
+// controlled by observability.redaction_profiles; the v7 disable_redaction
+// switch is rejected by the v8 entrypoint (yaml_v8.go) and only the 0.x
+// migration reads it.
+type PrivacyConfig struct{}
 
 // AIDiscoveryConfig controls continuous, sidecar-native visibility for
 // supported connectors and broader "shadow AI" usage signals. Outbound

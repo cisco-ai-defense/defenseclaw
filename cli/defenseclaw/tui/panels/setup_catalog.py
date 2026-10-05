@@ -495,8 +495,6 @@ def task_status(
             return TaskStatus("ok", f"{policy} · LLM" if _flag(cfg, "scanners.skill_scanner.use_llm") else policy)
         return TaskStatus("ok", _short(f"{_text(cfg, 'scanners.mcp_scanner.analyzers') or 'auto'} analyzers"))
     if wizard == SetupWizard.REDACTION:
-        if _flag(cfg, "privacy.disable_redaction"):
-            return TaskStatus("attention", "turned off")
         return _redaction_status(cfg, observability)
     if wizard == SetupWizard.TRUSTED_PATHS:
         added = len(_items(cfg, "ai_discovery.trusted_binary_prefixes"))
